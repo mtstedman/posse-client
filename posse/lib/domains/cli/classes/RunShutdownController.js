@@ -88,9 +88,14 @@ export class RunShutdownController {
     try { this.stopDisplaySnapshotCaches?.(); } catch { /* best effort */ }
     try { this.getDisplay()?.stop?.(); } catch { /* best effort */ }
     try { this.scheduler?.requestStop?.(); } catch { /* best effort */ }
+    // Workers never reach their graceful requeue once we exit, so hand this
+    // owner's in-flight jobs and the scheduler lock back synchronously.
+    try { this.scheduler?.releaseForForcedExit?.({ reason: label }); } catch { /* boot recovery remains */ }
     this.observeAtlasCleanup(label);
-    try { this.closeRuntimeState?.(); } catch { /* best effort */ }
+    // The exit code must be set before the runtime state is closed so the
+    // final shutdown record reflects this forced, non-zero exit.
     this.process.exitCode = 1;
+    try { this.closeRuntimeState?.({ forced: true, reason: label }); } catch { /* best effort */ }
     this.exitProcess?.(1);
   }
 

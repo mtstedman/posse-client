@@ -15,7 +15,7 @@ import { readPlannerDispatchPolicy } from "../../../planning/functions/planner-d
 const CODEX_DEVELOPER_INSTRUCTIONS_SOFT_LIMIT = 24000;
 const CODEX_LAZY_MCP_SERVER_SUFFIX = "lazy";
 const CODEX_POSSE_MCP_STARTUP_TIMEOUT_SECONDS = 35;
-const INTENTIONALLY_TOOLLESS_ROLES = new Set(["preflight", "delegator"]);
+const INTENTIONALLY_TOOLLESS_ROLES = new Set(["preflight"]);
 // Remote issuance has already narrowed this surface by role, task mode, and
 // operator policy. Keep that issued surface direct by default: a tool belongs
 // here only when it is intentionally safe to require tool_search before use.

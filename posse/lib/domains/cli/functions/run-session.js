@@ -11,6 +11,7 @@ import {
   RUNTIME_STATUS_KEYS,
   clearRuntimeStatus,
   markCleanShutdown,
+  markForcedShutdown,
   writeRuntimeStatus,
 } from "../../queue/functions/runtime-status.js";
 import { createBootPanel } from "./boot-panel.js";
@@ -222,12 +223,20 @@ export function buildImageInjectionPayload({ prompt = "", outputRoot = "" } = {}
   };
 }
 
-export function closeRuntimeStateForExit() {
-  // Record the clean shutdown FIRST (needs the DB open) so the bridge
-  // derives `offline` instead of `stalled` once the heartbeat ages out.
-  try { markCleanShutdown(); } catch { /* best effort */ }
+export function closeRuntimeStateForExit({ forced = false, reason = null } = {}) {
+  // Record the shutdown FIRST (needs the DB open) so the bridge derives
+  // `offline` instead of `stalled` once the heartbeat ages out. A forced exit
+  // (second signal, shutdown watchdog) abandons in-flight work, so it is
+  // recorded as forced rather than clean.
+  try {
+    if (forced) markForcedShutdown({ reason });
+    else markCleanShutdown();
+  } catch { /* best effort */ }
   // Last line of a run: without it a clean exit and a crash look the same.
-  try { log.info("run", "Clean shutdown recorded", { exitCode: process.exitCode ?? 0 }); } catch { /* best effort */ }
+  try {
+    if (forced) log.warn("run", "Forced shutdown recorded", { exitCode: process.exitCode ?? 1, reason });
+    else log.info("run", "Clean shutdown recorded", { exitCode: process.exitCode ?? 0 });
+  } catch { /* best effort */ }
   try { flushEventsNow(); } catch { /* best effort */ }
   try { closePromptLog(); } catch { /* best effort */ }
   try { closeOutputLog(); } catch { /* best effort */ }

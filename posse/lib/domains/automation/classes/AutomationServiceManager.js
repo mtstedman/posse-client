@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { AutomationOwnerClient } from "./AutomationOwnerClient.js";
+import { AutomationOwnerClient, stopAutomationOwner } from "./AutomationOwnerClient.js";
 import { automationDataDir } from "../functions/paths.js";
 
 const LABEL = "com.posse.automation";
@@ -104,13 +104,7 @@ export class AutomationServiceManager {
   async stopAdHocSupervisor() {
     try {
       const health = await new AutomationOwnerClient({ timeoutMs: 500 }).health();
-      if (health?.supervisor_pid) process.kill(health.supervisor_pid, "SIGTERM");
-      else if (health?.pid) process.kill(health.pid, "SIGTERM");
-      const deadline = Date.now() + 3000;
-      while (Date.now() < deadline) {
-        await new Promise(resolve => setTimeout(resolve, 50));
-        try { await new AutomationOwnerClient({ timeoutMs: 100 }).health(); } catch { return; }
-      }
+      await stopAutomationOwner(health, { timeoutMs: 3000 });
     } catch {}
   }
 }

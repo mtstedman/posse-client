@@ -61,6 +61,7 @@ import {
   isBridgePresenceFresh,
   isPushOfferJob,
   readRuntimeStatus,
+  requeueOwnedJobsForForcedExit,
   writeRuntimeStatus,
   waitForQueueStateChangeAfter,
 } from "../../queue/functions/index.js";
@@ -2800,6 +2801,36 @@ export class Scheduler {
       actor_id: this.ownerId,
       message: "Scheduler stopped",
     });
+  }
+
+  /**
+   * Forced exit (second signal, shutdown watchdog): the process terminates
+   * synchronously right after this returns, so workers never run their
+   * graceful requeue and the run loop never reaches stop(). Requeue the jobs
+   * this owner leased without an attempt penalty (attempts closed as
+   * interrupted) and release this owner's scheduler lock, so a restart
+   * neither waits out lock contention nor books the attempts as crash
+   * orphans. Records no clean-shutdown marker. Synchronous; never throws.
+   */
+  releaseForForcedExit({ reason = "Forced shutdown" } = {}) {
+    const result = { requeued: 0, interruptedAttempts: 0, jobIds: [], lockReleased: false };
+    try {
+      Object.assign(result, requeueOwnedJobsForForcedExit(this.ownerId, { reason }));
+    } catch { /* the next boot's force-requeue remains the fallback */ }
+    try {
+      this.schedulerLock.release();
+      result.lockReleased = true;
+    } catch { /* lock self-heals via expiry and heartbeat-stale takeover */ }
+    try {
+      log.warn("scheduler", "Forced exit released scheduler ownership", {
+        ownerId: this.ownerId,
+        reason,
+        requeued: result.requeued,
+        interruptedAttempts: result.interruptedAttempts,
+        lockReleased: result.lockReleased,
+      });
+    } catch { /* observational */ }
+    return result;
   }
 
   /**

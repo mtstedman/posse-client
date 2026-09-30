@@ -1,6 +1,5 @@
 import { ArtificerRole } from "./roles/artificer.js";
 import { AssessorRole } from "./roles/assessor.js";
-import { DelegateRole } from "./roles/delegate.js";
 import { DeveloperRole } from "./roles/developer.js";
 import { FixRole } from "./roles/fix.js";
 import { PlannerRole } from "./roles/planner.js";
@@ -13,7 +12,6 @@ import { JOB_TYPES, NON_PROVIDER_JOB_TYPES } from "../../../catalog/job.js";
 export const ROLE_CLASSES_BY_JOB_TYPE = Object.freeze({
   research: ResearcherRole,
   preflight: PreflightRole,
-  delegate: DelegateRole,
   summarize: SummaryRole,
   dev: DeveloperRole,
   fix: FixRole,

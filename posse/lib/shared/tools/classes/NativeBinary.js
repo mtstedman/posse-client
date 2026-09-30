@@ -25,6 +25,9 @@ import {
   GIT_MUTATE_ROUTE,
   GIT_READ_ROUTE,
   NATIVE_DAEMON_PROTOCOL,
+  NATIVE_HEARTBEAT_FAILURE_DIAGNOSTIC_KIND,
+  NATIVE_PULSE_COLD_DIAGNOSTIC_KIND,
+  NATIVE_PULSE_COLD_ERROR_CODE,
   NATIVE_WORKER_MAX_REQUEST_BYTES,
   nativeBinaryExactVersion,
   nativeBinaryEntry,
@@ -126,6 +129,16 @@ function isNativeProtocolRequest(request) {
 
 function isNativeHeartbeatAuthFailure(value) {
   return /heartbeat|posse_key|pulse[\s_-]?token|identity[\s_-]?heartbeat/i.test(String(value || ""));
+}
+
+// Cold starts already reported by this module instance (one per process, or
+// per worker thread), keyed by binary and route. A cold start is expected once
+// per route before a prewarm lands, so it is recorded at info level only once.
+const reportedPulseColdRoutes = new Set();
+
+/** Test hook: forget which cold starts this module instance has reported. */
+export function __resetNativePulseColdReportsForTests() {
+  reportedPulseColdRoutes.clear();
 }
 
 function isUnsupportedNativeVersionError(error) {
@@ -1540,8 +1553,37 @@ export class NativeBinary {
           ...this.#versionedPulseOptions(route),
           workItemContext,
         }),
-      ).catch(() => {});
-    } catch { /* fail-closed guard already covers the caller */ }
+      ).then(
+        (pulse) => { if (!isValidPulseEnvelope(pulse)) this.#recordBackgroundMintFailure(route, null); },
+        (error) => this.#recordBackgroundMintFailure(route, error),
+      );
+    } catch (error) {
+      // The fail-closed guard already covers the caller; keep the cause.
+      this.#recordBackgroundMintFailure(route, error);
+    }
+  }
+
+  /**
+   * The cold-start miss itself is info-level `native.pulse.cold`; a mint that
+   * then fails is the real heartbeat failure behind it. Error details never
+   * include token material.
+   */
+  #recordBackgroundMintFailure(route, error) {
+    appendRunTelemetry("diagnostics", {
+      kind: NATIVE_HEARTBEAT_FAILURE_DIAGNOSTIC_KIND,
+      component: "native_pulse_mint",
+      binary: this.name,
+      route,
+      background: true,
+      thread: onMainThread ? "main thread" : "worker",
+      detail: error ? "background pulse mint failed" : "background pulse mint returned no pulse",
+      error: error ? {
+        name: error?.name || null,
+        code: error?.code || null,
+        status: error?.status ?? null,
+        message: String(error?.message || error).slice(0, 900),
+      } : null,
+    });
   }
 
   #runtimePulseFor(route, workItemContext = null) {
@@ -1863,12 +1905,26 @@ export class NativeBinary {
   #nativePulseColdResult(route = null) {
     // Name what was needed and what this process holds: a worker prepared
     // without the call's route fails here on every call, not just the first.
-    const held = [...this._runtimePulseEnvelopes.keys()].join(", ") || "none";
+    const preparedRoutes = [...this._runtimePulseEnvelopes.keys()];
+    const held = preparedRoutes.join(", ") || "none";
     const where = onMainThread ? "main thread" : "worker";
     const error = /** @type {NativeBinaryError} */ (
       new Error(`native pulse token cache cold for ${this.name}${route ? ` (route ${route}; ${where}; prepared routes: ${held})` : ""}; background heartbeat mint requested`)
     );
-    error.code = "POSSE_NATIVE_PULSE_COLD";
+    error.code = NATIVE_PULSE_COLD_ERROR_CODE;
+    const reportKey = `${this.name}\u0000${route || ""}`;
+    if (!reportedPulseColdRoutes.has(reportKey)) {
+      reportedPulseColdRoutes.add(reportKey);
+      appendRunTelemetry("diagnostics", {
+        kind: NATIVE_PULSE_COLD_DIAGNOSTIC_KIND,
+        level: "info",
+        binary: this.name,
+        route: route || null,
+        thread: where,
+        prepared_routes: preparedRoutes,
+        pid: process.pid,
+      });
+    }
     return {
       ok: false,
       code: null,

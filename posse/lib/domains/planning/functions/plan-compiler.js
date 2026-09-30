@@ -66,6 +66,7 @@ import {
   inferPromoteTask as inferPromoteTaskFromModule,
   looksLikeArtifactGenerationTask as looksLikeArtifactGenerationTaskFromModule,
   looksLikeRepoCodeCreationTask as looksLikeRepoCodeCreationTaskFromModule,
+  createsRepoPathFiles as createsRepoPathFilesFromModule,
   looksLikeRepoDesignTask as looksLikeRepoDesignTaskFromModule,
   looksLikeStructuredDataRepoTransformTask as looksLikeStructuredDataRepoTransformTaskFromModule,
   normalizePromoteMappings as normalizePromoteMappingsFromModule,
@@ -81,8 +82,6 @@ import { DEFAULT_DEV_MODE, isValidDevMode, normalizeDevMode } from "../../../sha
 import {
   buildDeterministicDelegations as buildDeterministicDelegationsFromModule,
   delegationRoleForJobType as delegationRoleForJobTypeFromModule,
-  getDelegationMode as getDelegationModeFromModule,
-  jobNeedsMlDelegation as jobNeedsMlDelegationFromModule,
 } from "../../providers/functions/delegation-routing.js";
 import { repairWebAssetCreateScope as repairWebAssetCreateScopeFromModule } from "../../git/functions/commit-scope.js";
 import {
@@ -126,7 +125,7 @@ import { ASSESSABLE_JOB_TYPES, TERMINAL_JOB_STATUSES } from "../../../catalog/jo
 import { normPath } from "../../../shared/scope/functions/path.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { promoteWaitingLaneOnDevDemand } from "../../research/functions/waiting-lane-demand.js";
-import { correctInferredRoutingToRepo } from "../../intake/functions/objective-contract.js";
+import { adoptPlannedRepoRouting, correctInferredRoutingToRepo } from "../../intake/functions/objective-contract.js";
 import { evaluatePlanModality } from "./plan-modality.js";
 import {
   isSensitiveEnvRepoPath,
@@ -482,6 +481,29 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           detail: errorMessage,
         });
         throw new Error(errorMessage);
+      }
+      if (modality.observedOutputs.includes("repo")) {
+        const adopted = adoptPlannedRepoRouting(modalityWorkItem, modalityIntakeHints);
+        if (adopted) {
+          updateWorkItemRouting(planJob.work_item_id, { mode: adopted.mode, metadata: adopted.metadata });
+          worker.emit(
+            planJob.id,
+            `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: plan carries repository tasks; compiling inferred "${adopted.previousMode}" work item as build`,
+          );
+          logEvent({
+            work_item_id: planJob.work_item_id,
+            job_id: planJob.id,
+            event_type: EVENT_TYPES.PLAN_MODALITY_RECOVERY,
+            actor_type: EVENT_ACTORS.SYSTEM,
+            message: "Adopted build routing from repository tasks in the plan",
+            event_json: JSON.stringify({
+              reason: "planned_repo_output",
+              previous_mode: adopted.previousMode,
+              mode: adopted.mode,
+              observed_outputs: modality.observedOutputs,
+            }),
+          });
+        }
       }
       // Planners may emit executable work or deterministic promotion. Human
       // gates and other coordination jobs are runtime-owned.
@@ -1293,7 +1315,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         // ── Infer image generation intent from task spec early ──
         // This must run before WI/build-mode routing and artifact reuse preflight so
         // provider-pinned image jobs can be narrowed or skipped deterministically.
-        if (!t._file_kind_split_done && !t.needs_image_generation && (jobType === "dev" || jobType === "artificer") && (taskMode === "code" || taskMode === "content" || taskMode === "image")) {
+        // An explicit needs_image_generation (true or false) from the planner is
+        // honored; only an unset flag is inferred from the task wording.
+        if (!t._file_kind_split_done && t.needs_image_generation == null && (jobType === "dev" || jobType === "artificer") && (taskMode === "code" || taskMode === "content" || taskMode === "image")) {
           const spec = (t.task_spec || t.instructions || t.title || "").toLowerCase();
           const referencesExistingAsset = /\b(use|reuse|keep|preserve|retain|show|display|place|position|align|style|restyle|resize|move|update|wire up|reference|references)\b[\s\S]{0,60}\b(existing|current|already)\b/.test(spec)
             || /\b(existing|current|already)\b[\s\S]{0,80}\b(logo|icon|image|images|banner|photo|graphic|artwork|illustration|asset|assets)\b/.test(spec);
@@ -1332,7 +1356,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: normalized artifact copy task "${t.title}" → "promote"`);
         }
         let normalizedJobType = PLANNER_ALLOWED_TYPES.has(t.job_type) ? t.job_type : jobType;
-        const fileKindRoute = splitTaskByCreateFileKind(t, i, artifactDirAbs, { taskMode, normalizedJobType });
+        const fileKindRoute = splitTaskByCreateFileKind(t, i, artifactDirAbs, { taskMode, normalizedJobType, wiMode });
         if (fileKindRoute?.replacements?.length > 0) {
           for (let siblingIndex = 0; siblingIndex < tasks.length; siblingIndex += 1) {
             if (siblingIndex === i) continue;
@@ -1402,7 +1426,14 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: preserved image task "${t.title}" as artificer/image`);
         }
         const plannerRepoEditTaskNormalized = normalizedJobType === "dev" && Array.isArray(t.files_to_modify) && t.files_to_modify.length > 0;
-        const plannerRepoCodeCreateTaskNormalized = normalizedJobType === "dev" && looksLikeRepoCodeCreationTaskFromModule(t, artifactDirAbs);
+        // Any dev create at a repo path (directory component, outside the
+        // artifact root) is repository work, whatever its extension: data and
+        // text files (json, txt, md) a task vendors or writes stay in the repo
+        // instead of being coerced into artifacts.
+        const plannerRepoCodeCreateTaskNormalized = normalizedJobType === "dev"
+          && taskMode !== "image"
+          && !t.needs_image_generation
+          && (looksLikeRepoCodeCreationTaskFromModule(t, artifactDirAbs) || createsRepoPathFilesFromModule(t, artifactDirAbs));
         // The hinted-repo-design heuristic is a pattern match (keywords like
         // "admin"/"page" in both designIntent and repoSurface regexes). It
         // should lose to an explicit user binding of output_mode=artifact —
@@ -2308,9 +2339,6 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         }
       }
 
-      // ── Spawn delegator if multi-provider is configured ──
-      // Only include jobs that actually need provider assignment (dev/fix/artificer).
-      // Promote is deterministic and does not need provider assignment.
       // Finish the hard graph before publishing demand, scopes or delegation.
       // A rejected edge invalidates its consumer and every transitive consumer.
       wirePlannerDependencies();
@@ -2389,68 +2417,33 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         droppedTaskIndexes,
       });
 
+      // ── Provider assignment for multi-provider roles ──
+      // Deterministic: only dev/fix/artificer jobs need an assignment; promote
+      // is deterministic and unassigned jobs still rotate at execution time.
       if (needsDelegation()) {
         const delegatableJobs = [...jobMap.values()].map(id => getJob(id)).filter((j) =>
           j && j.status === "queued" && ASSESSABLE_JOB_TYPES.has(j.job_type)
         );
         if (delegatableJobs.length > 0) {
-          const providerMap = getProviderMap();
-          const delegationMode = getDelegationModeFromModule();
-
-          if (delegationMode === "js") {
-            const assignments = buildDeterministicDelegationsFromModule(delegatableJobs.map((j) => ({
-              job_id: j.id,
-              title: j.title,
-              job_type: j.job_type,
-              model_tier: j.model_tier,
-              reasoning_effort: j.reasoning_effort,
-              priority: j.priority,
-              provider: j.provider,
-            })), { providerMap });
-            if (Array.isArray(assignments)) {
-              for (const a of assignments) {
-                applyDelegation(a.job_id, {
-                  provider: a.provider || null,
-                  model: a.model || null,
-                  model_tier: a.model_tier || null,
-                  reasoning_effort: a.reasoning_effort || null,
-                  priority: a.priority || null,
-                });
-                worker.emit(planJob.id, `${C.magenta}[delegator-js]${C.reset} job #${a.job_id}: ${a.provider || "default"}${a.model_tier ? `/${a.model_tier}` : ""} - ${(a.reason || "").slice(0, 60)}`);
-              }
-            }
-          } else {
-            const mlPendingJobs = delegatableJobs.filter((j) => jobNeedsMlDelegationFromModule(j));
-            if (mlPendingJobs.length > 0) {
-              const wi = getWorkItem(planJob.work_item_id);
-              const delegateJob = spawnFromRole(plannerRole, "succeeded", "delegate", {
-                work_item_id: planJob.work_item_id,
-                title: `Delegate: ${(wi?.title || planJob.title).slice(0, 50)}`,
-                parent_job_id: planJob.id,
-                priority: "high",
-                model_tier: "cheap",
-                reasoning_effort: "low",
-                payload_json: JSON.stringify({
-                  provider_map: providerMap,
-                  pending_jobs: mlPendingJobs.map(j => ({
-                    job_id: j.id,
-                    title: j.title,
-                    job_type: j.job_type,
-                    model_tier: j.model_tier,
-                    reasoning_effort: j.reasoning_effort,
-                    priority: j.priority,
-                    provider: j.provider,
-                  })),
-                }),
+          const assignments = buildDeterministicDelegationsFromModule(delegatableJobs.map((j) => ({
+            job_id: j.id,
+            title: j.title,
+            job_type: j.job_type,
+            model_tier: j.model_tier,
+            reasoning_effort: j.reasoning_effort,
+            priority: j.priority,
+            provider: j.provider,
+          })), { providerMap: getProviderMap() });
+          if (Array.isArray(assignments)) {
+            for (const a of assignments) {
+              applyDelegation(a.job_id, {
+                provider: a.provider || null,
+                model: a.model || null,
+                model_tier: a.model_tier || null,
+                reasoning_effort: a.reasoning_effort || null,
+                priority: a.priority || null,
               });
-              allCreatedJobIds.add(delegateJob.id);
-              for (const j of mlPendingJobs) {
-                addDependency(j.id, delegateJob.id, "hard");
-              }
-              // Track the delegate job so the optional approval gate can block
-              // it too (otherwise it would run before the human reviews).
-              jobMap.set(`__delegate__`, delegateJob.id);
-              worker.emit(planJob.id, `${C.magenta}[delegator]${C.reset} spawned delegate job #${delegateJob.id} for ${mlPendingJobs.length} task(s)`);
+              worker.emit(planJob.id, `${C.magenta}[delegation]${C.reset} job #${a.job_id}: ${a.provider || "default"}${a.model_tier ? `/${a.model_tier}` : ""} - ${(a.reason || "").slice(0, 60)}`);
             }
           }
         }

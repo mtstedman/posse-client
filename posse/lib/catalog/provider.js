@@ -35,6 +35,13 @@ export function providerHonorsMcpToolDeadline(providerName) {
   return mode != null && mode !== MCP_TOOL_DEADLINE_MODES.UNKNOWN;
 }
 
+// Provider adapters that size each call's turn budget from the shared turn
+// policy (`maxTurns || getMaxTurnsForProvider(...)`) before launching, so the
+// budget is known when the agent_calls row is created. Copilot carries a
+// turn config its adapter never applies, and posse-local sizes its loop from
+// the local model profile; neither is listed, so no budget is invented.
+export const UP_FRONT_TURN_BUDGET_PROVIDERS = Object.freeze(["claude", "codex", "openai", "grok"]);
+
 export const PROVIDER_USAGE_PROTOCOL = "posse.provider_usage.v1";
 export const PROVIDER_USAGE_MAX_BYTES = 256 * 1024;
 
@@ -54,7 +61,6 @@ export const PROVIDER_ROLE_NAMES = Object.freeze([
   "planner",
   "preflight",
   "assessor",
-  "delegator",
 ]);
 
 export const DELEGATION_PROVIDER_ROLE_NAMES = Object.freeze(
@@ -64,7 +70,10 @@ export const DELEGATION_PROVIDER_ROLE_NAMES = Object.freeze(
 export const JOB_TYPE_ROLE_REGISTRY = Object.freeze({
   research: Object.freeze({ provider: "researcher", delegation: "researcher", worker: "researcher", spawn: "researcher" }),
   plan: Object.freeze({ provider: "planner", delegation: "planner", worker: "planner", spawn: "planner" }),
-  delegate: Object.freeze({ provider: "delegator", delegation: "delegator", worker: "delegator", spawn: "delegator" }),
+  // Legacy: delegation always runs on the deterministic JavaScript path at
+  // plan time. A `delegate` job left in an older database is closed by a
+  // deterministic system runner; it never reaches a provider.
+  delegate: Object.freeze({ provider: "system", delegation: null, worker: "system", spawn: null }),
   dev: Object.freeze({ provider: "dev", delegation: "dev", worker: "dev", spawn: "dev" }),
   fix: Object.freeze({ provider: "dev", delegation: "dev", worker: "dev", spawn: "fix" }),
   artificer: Object.freeze({ provider: "artificer", delegation: "artificer", worker: "artificer", spawn: "artificer" }),

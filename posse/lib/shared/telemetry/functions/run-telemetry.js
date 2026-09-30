@@ -63,9 +63,20 @@ function nowIso() {
 function ensureExitHook() {
   if (!isMainThread || _exitHookInstalled) return;
   _exitHookInstalled = true;
-  process.on("exit", () => {
-    try { closeRunTelemetry({ cleanExit: true }); } catch { /* best effort */ }
+  process.on("exit", (code) => {
+    try { closeRunTelemetryForProcessExit(code); } catch { /* best effort */ }
   });
+}
+
+/**
+ * Close run telemetry from the process `exit` hook. Only a zero exit is
+ * clean: a forced shutdown (second signal, watchdog) exits 1 and a crash
+ * exits non-zero, and neither may be recorded as `clean_exit: true`.
+ */
+export function closeRunTelemetryForProcessExit(code = process.exitCode) {
+  const parsed = Number(code ?? 0);
+  const exitCode = Number.isInteger(parsed) ? parsed : 1;
+  closeRunTelemetry({ cleanExit: exitCode === 0, exitCode });
 }
 
 export function getRunTelemetryId() {
@@ -177,6 +188,7 @@ export function beginRunTelemetryLifecycle({ ownerId = null } = {}) {
     lifecycle_began_at: beganAt,
     ended_at: null,
     clean_exit: false,
+    exit_code: null,
     scheduler_clean_shutdown_at: null,
     scheduler_shutdown_reason: null,
     last_heartbeat_at: null,
@@ -253,7 +265,7 @@ export function appendRunTelemetry(stream, entry = {}) {
   }
 }
 
-export function closeRunTelemetry({ cleanExit = true } = {}) {
+export function closeRunTelemetry({ cleanExit = true, exitCode = undefined } = {}) {
   const dirs = new Set(_manifestDirs);
   for (const stream of _streams.values()) {
     if (stream?.runDir) dirs.add(stream.runDir);
@@ -274,6 +286,7 @@ export function closeRunTelemetry({ cleanExit = true } = {}) {
       updateManifest(runDir, {
         ended_at: nowIso(),
         clean_exit: !!cleanExit,
+        ...(exitCode !== undefined ? { exit_code: exitCode } : {}),
       }, _activeLifecycleOwnerToken
         ? { expectedLifecycleOwnerToken: _activeLifecycleOwnerToken }
         : {});

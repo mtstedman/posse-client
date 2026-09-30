@@ -19,6 +19,7 @@ import { runDaemonThread } from "../../../../../shared/tools/classes/daemon/thre
 import { installNativeThreadBridge } from "../../../../../shared/tools/classes/daemon/native-thread-bridge.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
+import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../../../catalog/binary.js";
 import { createDbWriteSemaphore, createScipStageSemaphore } from "./semaphore.js";
 import { SCIP_INDEXER_COUNT } from "../scip/indexers.js";
 import {
@@ -114,8 +115,10 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       // proof, which normally refreshes native Git authorization. The SCIP
       // sanitizer still needs an exact tracked-file manifest; authorize Git in
       // this conductor before staging so it cannot silently fall back to a
-      // capped filesystem walk on large repositories.
-      await nativeBinaries.binary("git").prewarmNativeAuth();
+      // capped filesystem walk on large repositories. Warm git:mutate too: the
+      // fileset hash lists the staged ref with `git ls-tree`, which the native
+      // encoder classifies as mutate, and a sync call on a cold route fails.
+      await nativeBinaries.binary("git").prewarmNativeAuth([GIT_READ_ROUTE, GIT_MUTATE_ROUTE]);
       const { ensureScipStaged } = await import("../scip/stager.js");
       const lang = String(request.lang || "").trim();
       const config = lang

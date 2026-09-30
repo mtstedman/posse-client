@@ -105,6 +105,11 @@ export function requiresRepositoryExecution(workItem = null, intakeHints = {}) {
   if (intentSource === "explicit" && ["task", "bugfix", "oneshot"].includes(intentType)) return true;
   if (intentType === "bugfix") return true;
   if (hasFunctionalFailureIntent(text) && !hasDirectQuestionIntent(text)) return true;
+  // Wording alone cannot demand repository execution from a work item whose
+  // resolved output contract excludes the repository (an inferred report, or a
+  // legacy inferred image item); completion would otherwise fail it for a
+  // repo job it was never meant to have.
+  if (!requiredWorkItemOutputs(workItem, intakeHints).includes("repo")) return false;
   return hasExplicitRepoWorkIntent(text)
     || hasPassiveRepoRequirementIntent(text)
     || hasRepoMutationIntent(text, { includeCreate: true, includeCompletion: true });
@@ -139,6 +144,32 @@ export function correctInferredRoutingToRepo(workItem = null, intakeHints = {}) 
     changedMode: modeSource === "inferred" && workItem?.mode !== "build",
     previousMode: workItem?.mode || "build",
     modeSource,
+    hints: nextHints,
+  };
+}
+
+/**
+ * An inferred non-build mode is only a guess from the request wording. When
+ * the planner's own plan carries repository output, adopt build routing for
+ * compilation: the mode changes, repo joins the inferred desired outputs, and
+ * explicit choices are left untouched. Returns null when nothing applies.
+ */
+export function adoptPlannedRepoRouting(workItem = null, intakeHints = {}) {
+  const metadata = parseWorkItemMetadata(workItem);
+  const mode = String(workItem?.mode || "build").trim().toLowerCase() || "build";
+  if (mode === "build" || getWorkItemModeSource(workItem, metadata) !== "inferred") return null;
+  const explicitDesired = normalizedSource(intakeHints.desired_outputs_source) === "explicit";
+  const nextHints = explicitDesired
+    ? intakeHints
+    : {
+      ...intakeHints,
+      desired_outputs: [...new Set([...normalizedOutputs(intakeHints.desired_outputs), "repo"])],
+      desired_outputs_source: "inferred",
+    };
+  return {
+    mode: "build",
+    previousMode: mode,
+    metadata: { ...metadata, intake_hints: nextHints },
     hints: nextHints,
   };
 }

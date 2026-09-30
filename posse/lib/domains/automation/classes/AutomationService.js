@@ -29,7 +29,7 @@ export class AutomationService {
       if (!existing) this.store.put("entries", entry.id, entry);
     }
   }
-  health() { return { protocol: "posse.custom_tools.v1", ready: !this.stopping && this.ownsLease(), owner: this.owner, generation: this.lease?.generation || null, pid: process.pid, supervisor_pid: Number(process.env.POSSE_AUTOMATION_SUPERVISOR_PID) || null }; }
+  health() { return { protocol: "posse.custom_tools.v1", ready: !this.stopping && this.ownsLease(), owner: this.owner, generation: this.lease?.generation || null, pid: process.pid, supervisor_pid: Number(process.env.POSSE_AUTOMATION_SUPERVISOR_PID) || null, active_runs: this.active.size }; }
   ownsLease() { return !this.lease || this.store.owns("dispatcher", this.owner, this.lease.generation, this.now()); }
   assertOwner() { demand(!this.stopping && this.ownsLease(), "Automation owner lease changed", "owner_fenced"); }
   registerResource(value) {

@@ -1,97 +1,14 @@
 // Read-only aggregate queries over jobs / work_items / agent_calls.
-// Used by the dashboard, delegator routing decisions, and the
-// `posse health` / `posse status` CLI commands. No mutation, no
-// side effects.
+// Used by the dashboard and the `posse health` / `posse status` CLI
+// commands. No mutation, no side effects.
 
 import { getDb } from "../../../shared/storage/functions/index.js";
 import {
   ACTIVE_LEASE_STATUSES_SQL,
-  COMPLETED_OUTCOME_JOB_STATUSES_SQL,
-  FAILED_JOB_STATUSES_SQL,
   PARKED_JOB_STATUSES_SQL,
-  PROVIDER_QUEUE_JOB_STATUSES_SQL,
   PUSH_OFFER_SUBTYPE,
   now,
 } from "./common.js";
-
-export function getDurationStats() {
-  const db = getDb();
-  return db.prepare(`
-    SELECT
-      role,
-      model_tier,
-      COALESCE(provider, 'claude') as provider,
-      COUNT(*) as sample_count,
-      CAST(AVG(duration_ms) AS INTEGER) as avg_ms,
-      CAST(MIN(duration_ms) AS INTEGER) as min_ms,
-      CAST(MAX(duration_ms) AS INTEGER) as max_ms
-    FROM agent_calls
-    WHERE status = 'succeeded' AND duration_ms IS NOT NULL
-    GROUP BY role, model_tier, provider
-    ORDER BY role, model_tier, provider
-  `).all();
-}
-
-/**
- * Get aggregate provider stats for delegator context.
- * Returns per-provider token usage, call counts, costs, and queue depth.
- */
-export function getProviderStats() {
-  const db = getDb();
-  const callStats = db.prepare(`
-    SELECT
-      provider,
-      COUNT(*) as call_count,
-      SUM(input_tokens) as total_input_tokens,
-      SUM(output_tokens) as total_output_tokens,
-      SUM(duration_ms) as total_duration_ms,
-      AVG(duration_ms) as avg_duration_ms,
-      SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succeeded,
-      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
-    FROM agent_calls
-    GROUP BY provider
-  `).all();
-
-  const queueDepth = db.prepare(`
-    SELECT
-      COALESCE(provider, 'unassigned') as provider,
-      status,
-      COUNT(*) as count
-    FROM jobs
-    WHERE status IN (${PROVIDER_QUEUE_JOB_STATUSES_SQL})
-    GROUP BY provider, status
-  `).all();
-
-  return { callStats, queueDepth };
-}
-
-/**
- * Get failure/retry stats grouped by job_type, model_tier, and provider.
- * Used by the delegator to make data-driven optimization decisions.
- */
-export function getFailureStats() {
-  const db = getDb();
-  return db.prepare(`
-    SELECT
-      job_type,
-      model_tier,
-      COALESCE(provider, 'unassigned') as provider,
-      COUNT(*) as total_jobs,
-      SUM(CASE WHEN status IN (${FAILED_JOB_STATUSES_SQL}) THEN 1 ELSE 0 END) as failed_count,
-      ROUND(
-        CAST(SUM(CASE WHEN status IN (${FAILED_JOB_STATUSES_SQL}) THEN 1 ELSE 0 END) AS REAL)
-        / NULLIF(COUNT(*), 0), 3
-      ) as fail_rate,
-      ROUND(AVG(attempt_count), 1) as avg_attempts,
-      MAX(attempt_count) as max_attempts_seen
-    FROM jobs
-    WHERE status IN (${COMPLETED_OUTCOME_JOB_STATUSES_SQL})
-      AND job_type IN ('dev', 'fix', 'artificer')
-    GROUP BY job_type, model_tier, provider
-    HAVING total_jobs >= 2
-    ORDER BY fail_rate DESC
-  `).all();
-}
 
 export function getPipelineHealth(opts = {}) {
   const db = getDb();

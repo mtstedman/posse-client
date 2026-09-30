@@ -89,7 +89,6 @@ export const SETTING_KEYS = Object.freeze({
   CODEX_USAGE_BACKOFF_MS: "codex_usage_backoff_ms",
   CODEX_USAGE_CACHE_MS: "codex_usage_cache_ms",
   DEFAULT_MAX_ATTEMPTS: "default_max_attempts",
-  DELEGATION_MODE: "delegation_mode",
   DISABLE_SYSTEM_TOOLS: "disable_system_tools",
   FILE_REQUEST_LOW_RISK_EXTENSIONS: "file_request_low_risk_extensions",
   FIX_SCOPE_HANDOFF_GUARD: "fix_scope_handoff_guard",
@@ -220,7 +219,6 @@ export const CLAUDE_EXECUTION_MODE_VALUES = Object.freeze(["print", "interactive
 export const ASSESSMENT_SCOPE_MODE_VALUES = Object.freeze(["off", "shadow"]);
 export const AGENT_COORDINATION_MODE_VALUES = Object.freeze(["off", "handoff", "subagents"]);
 export const CONTEXT_COMPACTION_MODE_VALUES = Object.freeze(["off", "shadow", "inject", "enforce"]);
-export const DELEGATION_MODE_VALUES = Object.freeze(["js", "ml"]);
 export const FIX_SCOPE_HANDOFF_GUARD_VALUES = Object.freeze(["off", "auto", "warn", "enforce"]);
 export const GIT_COMMIT_STYLE_VALUES = Object.freeze(["off", "conventional", "gitmoji"]);
 export const HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES = Object.freeze(["off", "small", "always"]);

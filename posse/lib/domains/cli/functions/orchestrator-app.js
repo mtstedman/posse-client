@@ -159,7 +159,7 @@ import {
 import {
   mergeSuspectedDirsWithInputContexts,
 } from "../../intake/functions/input-contexts.js";
-import { inferWiMode } from "../../intake/functions/mode-inference.js";
+import { inferWiMode, resolveWorkItemMode } from "../../intake/functions/mode-inference.js";
 import { researchBudgetMetadata, researchPayload } from "../../research/functions/payload.js";
 import { atlasV2UsageSummary } from "./atlas-v2-help.js";
 import { buildRuntimeEnv, getRuntimeDbPath } from "../../runtime/functions/paths.js";
@@ -235,7 +235,7 @@ import {
 import { resolveTargetBranch, resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
 import { GIT_OPERATION_TIMEOUT_MS, gitExecAsync, isGitCommandFailure } from "../../git/functions/utils.js";
 import { ensureRestrictivePushRefspecsAsync, remotePushConfigsAreClearlyRestrictive } from "../../git/functions/push-guard.js";
-import { hasExplicitOneshotIntent, normalizeIntakeHints } from "../../intake/functions/hints.js";
+import { hasExplicitOneshotIntent, normalizeIntakeHints, rebaseIntakeHintsForMode } from "../../intake/functions/hints.js";
 import {
   collectHandledSuggestionKeys,
   createApprovedSuggestionFollowUp,
@@ -1282,8 +1282,9 @@ async function cmdAdd() {
   const title = description.split("\n")[0].slice(0, 100);
 
   const explicitMode = parseModeFlagFromArgv();
-  const mode = explicitMode || inferWiMode(description) || "build";
-  const modeSource = explicitMode ? "explicit" : "inferred";
+  // Provisional mode for the guided prompts; the final mode is resolved once
+  // the user's explicit hint choices (artifact output, image intent) are known.
+  const provisionalMode = explicitMode || inferWiMode(description) || "build";
   const tier = parseTierFlagFromArgv() || "mvp";
   const parsedResearchBudget = parseResearchBudgetFromArgv();
   const defaultDeepthink = isResearchBudgetDeep(parsedResearchBudget.budget);
@@ -1291,11 +1292,19 @@ async function cmdAdd() {
   const requestedRedTeamPlan = RED_TEAM_PLAN || (workflowMode ? ITERATE_RED_TEAM_PLAN : false);
   const workflowRedTeamPlan = workflowMode ? requestedRedTeamPlan : false;
   const guidedScope = process.argv.includes("--guided") || (!hasExplicitOneshotIntent(description) && !hasIntakeHintFlags())
-    ? await promptForScopedAdd(description, mode, defaultDeepthink, workflowMode)
-    : { intakeHints: parseIntakeHintsFromArgv(description, mode), deepthink: defaultDeepthink || !!workflowMode };
+    ? await promptForScopedAdd(description, provisionalMode, defaultDeepthink, workflowMode)
+    : { intakeHints: parseIntakeHintsFromArgv(description, provisionalMode), deepthink: defaultDeepthink || !!workflowMode };
+  const resolvedMode = workflowMode
+    ? { mode: provisionalMode, source: explicitMode ? "explicit" : "inferred" }
+    : resolveWorkItemMode({ explicitMode, description, intakeHints: guidedScope.intakeHints });
+  const mode = resolvedMode.mode;
+  const modeSource = resolvedMode.source;
+  const modeHints = mode === provisionalMode
+    ? guidedScope.intakeHints
+    : rebaseIntakeHintsForMode(guidedScope.intakeHints, { requestText: description, fallbackMode: mode });
   const intakeHints = workflowMode
-    ? applyIterativeWorkflowProfile(guidedScope.intakeHints, workflowMode, mode)
-    : guidedScope.intakeHints;
+    ? applyIterativeWorkflowProfile(modeHints, workflowMode, mode)
+    : modeHints;
   const deepthink = workflowMode ? true : !!guidedScope.deepthink;
   const deepthinkBudget = resolveResearchBudgetForDeepthink(deepthink, parsedResearchBudget);
   const sessionRecycle = parseSessionRecycleFlagFromArgv();
@@ -1367,12 +1376,19 @@ async function cmdInject() {
 
   const title = description.split("\n")[0].slice(0, 100);
   const explicitMode = parseModeFlagFromArgv();
-  const mode = explicitMode || inferWiMode(description) || "build";
-  const modeSource = explicitMode ? "explicit" : "inferred";
+  const provisionalMode = explicitMode || inferWiMode(description) || "build";
   const workflowMode = ITERATE_FLAG ? await promptForIterativeWorkflowMode() : null;
   const requestedRedTeamPlan = RED_TEAM_PLAN || (workflowMode ? ITERATE_RED_TEAM_PLAN : false);
   const workflowRedTeamPlan = workflowMode ? requestedRedTeamPlan : false;
-  const intakeHintsBase = parseIntakeHintsFromArgv(description, mode);
+  const flagHints = parseIntakeHintsFromArgv(description, provisionalMode);
+  const resolvedMode = workflowMode
+    ? { mode: provisionalMode, source: explicitMode ? "explicit" : "inferred" }
+    : resolveWorkItemMode({ explicitMode, description, intakeHints: flagHints });
+  const mode = resolvedMode.mode;
+  const modeSource = resolvedMode.source;
+  const intakeHintsBase = mode === provisionalMode
+    ? flagHints
+    : rebaseIntakeHintsForMode(flagHints, { requestText: description, fallbackMode: mode });
   const intakeHints = workflowMode
     ? applyIterativeWorkflowProfile(intakeHintsBase, workflowMode, mode)
     : intakeHintsBase;

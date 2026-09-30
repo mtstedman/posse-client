@@ -19,7 +19,6 @@ import {
   SETTINGS_GROUPS,
   SETTINGS_PANES,
   SKILL_SETTING_PREFIX,
-  SYNTHETIC_SETTING_KEYS,
   getAdminSettingPresentation,
   settingsGroupForKey,
   settingsPaneForKey,
@@ -318,53 +317,8 @@ export function projectAdminDescription({
     for (const key of ungrouped) push(key, paneId, "misc");
   };
 
-  pushCatalogPane("atlas");
-
-  for (const section of ADMIN_AGENT_SETTING_SECTIONS) {
-    const group = `agent_${section.role}`;
-    push(`provider_${section.role}`, "agents", group);
-    if (section.role === "delegator") push("delegation_mode", "agents", group);
-    for (const key of section.keys) {
-      if (key !== "delegation_mode") push(key, "agents", group);
-    }
-  }
-
-  for (const section of ADMIN_PROVIDER_SETTING_SECTIONS) {
-    const group = `provider_${section.provider}`;
-    for (const def of MODEL_SETTING_DEFS) {
-      if ((def.kind || "text") === "text" && def.provider === section.provider) push(def.key, "providers", group);
-    }
-    for (const key of section.settingKeys) push(key, "providers", group);
-  }
-  for (const key of ADMIN_PROVIDER_CATALOG_SETTING_KEYS) push(key, "providers", "provider_catalog");
-
-  for (const definition of ADMIN_CREDENTIAL_SETTING_DEFS) {
-    const present = credentialPresence[definition.env] === true;
-    sectionById.get("providers").settings.push(createRow({
-      key: definition.key,
-      section: "providers",
-      group: "provider_credentials",
-      label: definition.label,
-      description: definition.description,
-      scope: "account",
-      definition: { sensitive: true },
-      sensitive: true,
-      valuePresent: present,
-      editable: false,
-      unavailableReason: "environment_managed",
-      origin: "credential",
-    }));
-  }
-
-  push("artifact_image_provider", "images", "image_routing");
-  for (const section of ADMIN_IMAGE_SETTING_SECTIONS) {
-    const group = `image_${section.provider}`;
-    for (const def of MODEL_SETTING_DEFS) {
-      if (def.kind === "image" && def.provider === section.provider) push(def.key, "images", group);
-    }
-    for (const key of section.settingKeys) push(key, "images", group);
-  }
-
+  // Push order fixes the row order within each section; the section order
+  // itself follows SETTINGS_PANES.
   pushCatalogPane("general");
   for (const skill of skills) {
     const enabled = !disabledSkills.has(String(skill.id));
@@ -388,6 +342,49 @@ export function projectAdminDescription({
       origin: "skill",
     }));
   }
+
+  for (const section of ADMIN_AGENT_SETTING_SECTIONS) {
+    const group = `agent_${section.role}`;
+    push(`provider_${section.role}`, "agents", group);
+    for (const key of section.keys) push(key, "agents", group);
+  }
+
+  for (const section of ADMIN_PROVIDER_SETTING_SECTIONS) {
+    const group = section.provider === "posse-local" ? "provider_local_models" : `provider_${section.provider}`;
+    for (const def of MODEL_SETTING_DEFS) {
+      if ((def.kind || "text") === "text" && def.provider === section.provider) push(def.key, "providers", group);
+    }
+    for (const key of section.settingKeys) push(key, "providers", group);
+  }
+  push("artifact_image_provider", "providers", "image_routing");
+  for (const section of ADMIN_IMAGE_SETTING_SECTIONS) {
+    const group = `image_${section.provider}`;
+    for (const def of MODEL_SETTING_DEFS) {
+      if (def.kind === "image" && def.provider === section.provider) push(def.key, "providers", group);
+    }
+    for (const key of section.settingKeys) push(key, "providers", group);
+  }
+  for (const key of ADMIN_PROVIDER_CATALOG_SETTING_KEYS) push(key, "providers", "provider_catalog");
+
+  for (const definition of ADMIN_CREDENTIAL_SETTING_DEFS) {
+    const present = credentialPresence[definition.env] === true;
+    sectionById.get("providers").settings.push(createRow({
+      key: definition.key,
+      section: "providers",
+      group: "provider_credentials",
+      label: definition.label,
+      description: definition.description,
+      scope: "account",
+      definition: { sensitive: true },
+      sensitive: true,
+      valuePresent: present,
+      editable: false,
+      unavailableReason: "environment_managed",
+      origin: "credential",
+    }));
+  }
+
+  pushCatalogPane("atlas");
 
   pushCatalogPane("repo");
   for (const definition of PROJECT_DB_SETTING_DEFS) {
@@ -470,6 +467,5 @@ export function expectedAdminVisibleCatalogKeys({ selectableProviders = [] } = {
 export function isSpecializedAdminCatalogKey(key) {
   return PROVIDER_SETTING_KEYS.has(key)
     || MODEL_SETTING_KEYS.has(key)
-    || ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS.has(key)
-    || SYNTHETIC_SETTING_KEYS.has(key);
+    || ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS.has(key);
 }

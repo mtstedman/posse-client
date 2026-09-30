@@ -564,7 +564,7 @@ export class Display {
 
   _lifecycleStartEventKey(plainText) {
     const match = String(plainText || "").match(
-      /^\[(?:developer|dev|researcher|research|planner|assessor|delegator|artificer|human|system)\]\s+(?:WI#\d+\s+)?job\s+#(\d+):\s*started\b/i,
+      /^\[(?:developer|dev|researcher|research|planner|assessor|artificer|human|system)\]\s+(?:WI#\d+\s+)?job\s+#(\d+):\s*started\b/i,
     );
     if (!match) return null;
     return `job:${Number(match[1])}`;
@@ -988,7 +988,7 @@ export class Display {
     // Pass through system/structured messages unfiltered (no tag — they already have a prefix)
     const clean = stripAnsi(this._normalizeAtlasEventText(line)).trim();
     if (clean) this._markWorkerProviderActivity(jobId);
-    const isStructured = clean.startsWith("[") && /^\[(git|planner|assessor|researcher|delegator|dev|developer|artificer|human|pre-assess|auto-approve|plan-validate|dry-run|idempotency|skip-assess|stale-lease|stderr|worker|escalation|merge|atlas(?:[^\]]*)?|system|mcp)\]/.test(clean);
+    const isStructured = clean.startsWith("[") && /^\[(git|planner|assessor|researcher|delegation|dev|developer|artificer|human|pre-assess|auto-approve|plan-validate|dry-run|idempotency|skip-assess|stale-lease|stderr|worker|escalation|merge|atlas(?:[^\]]*)?|system|mcp)\]/.test(clean);
     const isStructuredStderr = /^\[stderr\]/.test(clean);
     if (this._isNoisyStructuredWorkerEvent(clean)) {
       return;
@@ -1103,7 +1103,7 @@ export class Display {
     // Strip leading role name to avoid double-naming (e.g., "[researcher] researcher found..." → "[researcher] found...")
     let displayClean = clean;
     if (w) {
-      const roleNames = { researcher: "researcher", planner: "planner", dev: "developer", assessor: "assessor", delegator: "delegator" };
+      const roleNames = { researcher: "researcher", planner: "planner", dev: "developer", assessor: "assessor" };
       const rn = roleNames[w.role];
       if (rn && displayClean.toLowerCase().startsWith(rn)) {
         displayClean = displayClean.slice(rn.length).replace(/^[\s:]+/, "");

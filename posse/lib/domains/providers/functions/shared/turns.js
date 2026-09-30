@@ -1,4 +1,5 @@
 import { getSetting } from "../../../queue/functions/index.js";
+import { UP_FRONT_TURN_BUDGET_PROVIDERS } from "../../../../catalog/provider.js";
 
 const TIER_ORDER = Object.freeze(["cheap", "standard", "strong"]);
 
@@ -11,7 +12,6 @@ const OUTPUT_TOKEN_CONFIGS = Object.freeze({
       artificer: 8000,
       assessor: 2500,
       preflight: 1500,
-      delegator: 1500,
     }),
     fallback: 4000,
   }),
@@ -23,7 +23,6 @@ const OUTPUT_TOKEN_CONFIGS = Object.freeze({
       artificer: 8000,
       assessor: 2500,
       preflight: 1500,
-      delegator: 1500,
     }),
     fallback: 4000,
   }),
@@ -35,7 +34,6 @@ const OUTPUT_TOKEN_CONFIGS = Object.freeze({
       artificer: 8000,
       assessor: 2500,
       preflight: 1500,
-      delegator: 1500,
     }),
     fallback: 4000,
   }),
@@ -47,7 +45,6 @@ const OUTPUT_TOKEN_CONFIGS = Object.freeze({
       artificer: 7000,
       assessor: 2200,
       preflight: 1200,
-      delegator: 1200,
     }),
     fallback: 3500,
   }),
@@ -59,7 +56,6 @@ const OUTPUT_TOKEN_CONFIGS = Object.freeze({
       artificer: 7000,
       assessor: 2200,
       preflight: 1200,
-      delegator: 1200,
     }),
     fallback: 3500,
   }),
@@ -89,7 +85,6 @@ const TURN_CONFIGS = Object.freeze({
       researcher: 30,
       planner: 10,
       preflight: 4,
-      delegator: 3,
       assessor: 12,
     }),
     fallback: 20,
@@ -109,7 +104,6 @@ const TURN_CONFIGS = Object.freeze({
       researcher: 10,
       planner: 4,
       preflight: 2,
-      delegator: 2,
       assessor: 6,
     }),
     fallback: 12,
@@ -169,7 +163,6 @@ const TURN_CONFIGS = Object.freeze({
       researcher: 8,
       planner: 2,
       preflight: 2,
-      delegator: 2,
       assessor: 6,
     }),
     fallback: 12,
@@ -273,6 +266,22 @@ export function getMaxTurnsForProvider(providerName, {
     return modelTier === "cheap" ? 4 : 6;
   }
   return Math.max(1, base);
+}
+
+/**
+ * The turn budget an adapter will apply when it builds its call, resolved
+ * from the same inputs and defaults the adapters use, or null for providers
+ * without an up-front turn budget.
+ */
+export function resolveUpFrontMaxTurns(providerName, {
+  role = "planner",
+  modelTier = "standard",
+  complexity = null,
+  filesToModifyCount = null,
+  deepthink = false,
+} = {}) {
+  if (!UP_FRONT_TURN_BUDGET_PROVIDERS.includes(providerName)) return null;
+  return getMaxTurnsForProvider(providerName, { role, modelTier, complexity, filesToModifyCount, deepthink });
 }
 
 export function getMaxOutputTokensForProvider(providerName, {

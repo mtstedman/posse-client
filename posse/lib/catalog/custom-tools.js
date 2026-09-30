@@ -34,3 +34,20 @@ export const AUTOMATION_BUILTINS = Object.freeze({
     { type: "object", additionalProperties: false, required: ["kind", "min_age_seconds"], properties: { kind: { const: "stability_heuristic" }, min_age_seconds: { type: "integer", minimum: 1, maximum: 86400 } } },
   ] } } } },
 });
+
+// Per-user automation owner process contract. A supervisor started by a
+// client (not a service manager) carries the ad-hoc argument; its owner then
+// reports launch "ad_hoc" in health and may be replaced by a client running
+// different code. Owners without a supervisor report "foreground".
+export const AUTOMATION_OWNER_LAUNCH = Object.freeze({ AD_HOC: "ad_hoc", SERVICE: "service", FOREGROUND: "foreground" });
+export const AUTOMATION_SUPERVISOR_AD_HOC_ARG = "--ad-hoc";
+// Caller environment that belongs to one run, agent, project or shell
+// location and must not follow the caller into the long-lived owner.
+// Credentials, HOME/PATH-type and test-isolation variables are kept.
+export const AUTOMATION_OWNER_ENV_DROP_PREFIXES = Object.freeze([
+  "POSSE_RUN_", "POSSE_DETERMINISTIC_MCP_", "POSSE_MCP_", "POSSE_AB_", "POSSE_MAINTENANCE_", "POSSE_WIN_EVENT_",
+]);
+export const AUTOMATION_OWNER_ENV_DROP_KEYS = Object.freeze([
+  "POSSE_PROJECT_DIR", "POSSE_AUTOMATION_SUPERVISOR_PID", "POSSE_AUTOMATION_LAUNCH",
+  "PWD", "OLDPWD", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX",
+]);

@@ -123,6 +123,7 @@ import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { PulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import { ParentPulseTokenManager } from "../../../shared/native/classes/ParentPulseTokenManager.js";
+import { prewarmNativeGitAuth } from "../../git/functions/native/prewarm.js";
 import {
   DEFAULT_MCP_OAUTH_TTL_SECONDS,
   MCP_OAUTH_AUDIENCE,
@@ -716,8 +717,8 @@ function releaseGatewayScope(scopeKey) {
 // until the agent makes the required real ATLAS retrieval calls after prefetch,
 // or until ATLAS is unavailable. Scoped write, shell, verification, and artifact
 // tools keep their normal scope/security checks but are not ATLAS-gated.
-// Researcher, planner, dev, and assessor are all gated; artificer/delegator
-// are exempt. Both modules live under ./deterministic-mcp/.
+// Researcher, planner, dev, and assessor are all gated; artificer is
+// exempt. Both modules live under ./deterministic-mcp/.
 const initialGateAtlasLabel = atlasBackendLabel(atlasAvailable ? getAtlasIntegrationConfig() : null);
 const initialGateScopeKey = gateScopeKeyForBootConfig(bootConfig);
 assertGatewayScopeCapacity(initialGateScopeKey);
@@ -3887,6 +3888,7 @@ async function handleRequest(msg) {
       }));
       return;
     }
+    await nativeGitAuthReady();
     const requestedToolName = String(params?.name || "");
     const normalizedRequestToolName = _normalizeGatewayToolRequestName(requestedToolName);
     const requestedAtlasTool = normalizedRequestToolName.startsWith("atlas.") || normalizedRequestToolName.startsWith("atlas_");
@@ -4401,6 +4403,23 @@ let inputBuffer = Buffer.alloc(0);
 let requestQueue = Promise.resolve();
 let capabilityBrokerInstalled = false;
 let mcpTrafficStarted = false;
+/** @type {Promise<unknown> | null} */
+let nativeGitAuthPrewarm = null;
+
+/**
+ * Sync native Git (list_files/search_files ignore checks, ...) reads only the
+ * pulse cache, so no tool may run before this process holds both Git route
+ * grants. Owner-hot gateways start the prewarm as soon as the parent's
+ * capability frame installs their pulse broker; direct (compatibility/test)
+ * servers start it at their first tool call. Tool calls await it; handshake
+ * methods never do. Bounded and best-effort: it never rejects, waits at most
+ * NATIVE_GIT_PREWARM_TIMEOUT_MS, and unavailable native auth never fails
+ * serving (the Git call itself then fails closed as before).
+ */
+function nativeGitAuthReady() {
+  nativeGitAuthPrewarm ||= prewarmNativeGitAuth();
+  return nativeGitAuthPrewarm;
+}
 const sharedLiveScopeDecisionWaits = new Map();
 const pendingLiveScopeTasks = new Set();
 
@@ -4566,6 +4585,7 @@ function dispatchParsed(parsed) {
     try {
       nativeBinaries.setPulseManager(new ParentPulseTokenManager(parsed.capability));
       capabilityBrokerInstalled = true;
+      void nativeGitAuthReady();
     } catch {
       scopeParseState.invalid = true;
     }

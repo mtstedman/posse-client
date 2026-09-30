@@ -13,6 +13,8 @@ import {
   GIT_MUTATE_ROUTE,
   GIT_NATIVE_PROTOCOL,
   GIT_READ_ROUTE,
+  NATIVE_HEARTBEAT_FAILURE_DIAGNOSTIC_KIND,
+  NATIVE_PULSE_COLD_ERROR_CODE,
 } from "../../../../catalog/binary.js";
 import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../shared/tools/classes/daemon/native-thread-bridge.js";
 import { isAbortError, signalAbortError } from "../../../runtime/functions/yield.js";
@@ -67,6 +69,21 @@ function errorSummary(err) {
 
 function isHeartbeatFailureText(value) {
   return /heartbeat|posse_key|pulse[\s_-]?token|identity[\s_-]?heartbeat/i.test(String(value || ""));
+}
+
+/**
+ * Whether a native git failure is a cold pulse cache (the sync boundary had no
+ * cached route grant yet and requested a background mint) rather than a
+ * heartbeat/auth failure. Callers that memoize a fail-open result must not
+ * memoize one produced by a cold start: once the background mint lands, the
+ * next call on that route succeeds.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+export function isNativePulseColdError(error) {
+  const err = /** @type {{ code?: unknown, cause?: { code?: unknown } } | null | undefined} */ (error);
+  return err?.code === NATIVE_PULSE_COLD_ERROR_CODE || err?.cause?.code === NATIVE_PULSE_COLD_ERROR_CODE;
 }
 
 // A native heartbeat/identity failure is almost always a transient round-trip
@@ -175,8 +192,12 @@ function nativeAuthTelemetry(manager, auth) {
  * @param {{ method?: string, asyncMode?: boolean, bridge?: boolean, workerRequested?: boolean | null, workerEligible?: boolean | null, manager?: import("../../../../shared/tools/classes/BinaryManager.js").BinaryManager, auth?: Record<string, unknown> | null, detail?: string, error?: any }} [input]
  */
 function logNativeHeartbeatFailure({ method, asyncMode = false, bridge = false, workerRequested = null, workerEligible = null, manager, auth, detail = "", error = null } = {}) {
+  // A cold pulse cache is not a heartbeat failure. NativeBinary records it
+  // once per process and route as info-level `native.pulse.cold`, and records
+  // the background mint it requested here if that mint fails.
+  if (isNativePulseColdError(error)) return;
   appendRunTelemetry("diagnostics", {
-    kind: "native.heartbeat.failure",
+    kind: NATIVE_HEARTBEAT_FAILURE_DIAGNOSTIC_KIND,
     component: "native_git",
     method: method || null,
     async: asyncMode === true,

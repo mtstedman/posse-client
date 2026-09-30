@@ -95,6 +95,17 @@ export function getProviderForRole(role) {
   return "claude";
 }
 
+// A role's provider setting may be a comma-separated pool; the job's provider
+// is chosen within it at run time. Parsed the same way admin stores pools
+// (trimmed, lowercased, deduplicated) without loading the provider registry.
+export function getProviderPoolForRole(role) {
+  const pool = [...new Set(String(getProviderForRole(role) || "")
+    .split(",")
+    .map((provider) => provider.trim().toLowerCase())
+    .filter(Boolean))];
+  return pool.length > 0 ? pool : ["claude"];
+}
+
 export function getDefaultReasoningEffortForRole(roleOrJobType) {
   const role = providerRoleForJobType(roleOrJobType);
   const fallback = defaultReasoningEffortForRole(role);

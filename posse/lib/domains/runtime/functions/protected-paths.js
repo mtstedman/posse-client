@@ -41,7 +41,6 @@ export function isSensitiveEnvRepoPath(value) {
 const POSSE_ROLE_PROMPT_FILES = new Set([
   "artificer.md",
   "assessor.md",
-  "delegator.md",
   "dev.md",
   "planner.md",
   "preflight.md",

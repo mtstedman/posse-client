@@ -12,13 +12,12 @@ function freezePolicy({ succeeds = [], fails = [] } = {}) {
 
 export const ROLE_SPAWN_POLICIES = Object.freeze({
   researcher: freezePolicy({ fails: ["human_input"] }),
-  planner: freezePolicy({ succeeds: ["delegate", "dev", "fix", "artificer", "promote", "human_input"], fails: ["human_input"] }),
+  planner: freezePolicy({ succeeds: ["dev", "fix", "artificer", "promote", "human_input"], fails: ["human_input"] }),
   dev: freezePolicy({ succeeds: ["dev", "human_input"], fails: ["human_input"] }),
   fix: freezePolicy({ succeeds: ["dev", "human_input"], fails: ["human_input"] }),
   assessor: freezePolicy({ succeeds: ["promote"], fails: ["fix", "human_input", "artificer", "promote", "research", "plan"] }),
   artificer: freezePolicy({ fails: ["human_input"] }),
   preflight: EMPTY_POLICY,
-  delegator: EMPTY_POLICY,
   summary: EMPTY_POLICY,
 });
 

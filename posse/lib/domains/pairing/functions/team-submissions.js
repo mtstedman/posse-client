@@ -25,7 +25,7 @@ import {
 } from "../../../catalog/team.js";
 import { TEAM_GRANT_ISSUE_PROTOCOL, TEAM_GRANT_REQUEST_PROTOCOL, TEAM_POLICY_PROTOCOL } from "../../../catalog/bridge.js";
 import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
-import { getProviderForRole } from "../../settings/functions/repository-settings.js";
+import { getProviderPoolForRole } from "../../settings/functions/repository-settings.js";
 import { readPairingPromotionJournal } from "./promotion.js";
 import { getLivePairingState, updatePairingEnrollment } from "./state.js";
 import { teamPolicyRegression } from "./team-policy.js";
@@ -55,8 +55,9 @@ function fail(reason, message = null) {
  * every role, and enabling the policy must say so up front instead of letting
  * each job discover it and burn its retries. */
 export function unmanagedTeamRoleProviders() {
+  // A role may name a provider pool; any member can run that role's jobs.
   return PROVIDER_ROLE_NAMES
-    .map((role) => ({ role, provider: String(getProviderForRole(role) || "").toLowerCase() }))
+    .flatMap((role) => getProviderPoolForRole(role).map((provider) => ({ role, provider })))
     .filter(({ provider }) => !TEAM_MANAGED_PROVIDERS.includes(provider));
 }
 

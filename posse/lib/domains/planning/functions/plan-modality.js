@@ -49,6 +49,14 @@ export function plannerTaskProducesRepoOutput(task = {}) {
     // relevant output contract here.
     return hasRepoFileScope(task, { allowAnyCreatedFile: true });
   }
+  // The file-kind split promotes generated images named at repo paths (with a
+  // directory component; bare names stay artifacts) into the repository.
+  if (taskMode === "image" || task.needs_image_generation === true) {
+    const promotedImage = normalizedPathList(task.files_to_create).some((filePath) => (
+      filePath.includes("/") && !filePath.includes(".posse/resources/artifacts/")
+    ));
+    if (promotedImage) return true;
+  }
   // The main compiler repairs common planner mistakes such as an artificer
   // task carrying concrete PHP/HTML/source scope. Count that repairable raw
   // shape here so the modality guard does not preempt normalization.

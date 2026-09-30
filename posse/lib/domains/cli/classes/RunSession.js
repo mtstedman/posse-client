@@ -2359,12 +2359,14 @@ export class RunSession {
     bootSignalCount++;
     if (bootSignalCount >= 2) {
       try { scheduler.requestStop?.(); } catch { /* best-effort */ }
+      try { scheduler.releaseForForcedExit?.({ reason: "Forced shutdown" }); } catch { /* boot recovery remains */ }
       try {
         const cleanup = cleanupAtlasForSession({ label: "Forced shutdown" });
         if (cleanup && typeof cleanup.then === "function") void Promise.resolve(cleanup).catch(() => {});
       } catch { /* forced shutdown continues */ }
-      try { closeRuntimeStateForExit(); } catch { /* best-effort */ }
+      // Exit code first so the final shutdown record reflects the forced exit.
       process.exitCode = 1;
+      try { closeRuntimeStateForExit({ forced: true, reason: "Forced shutdown" }); } catch { /* best-effort */ }
       exitProcess?.(1);
       return;
     }
@@ -2964,8 +2966,9 @@ export class RunSession {
     const color = completion.failures.length > 0 ? C.red : C.yellow;
     console.error(`\n  ${color}${label}: ${detail}.${C.reset}\n`);
   }
-  closeRuntimeStateForExit();
+  // Set the exit code first so the shutdown record logs the real one.
   process.exitCode = completion.exitCode;
+  closeRuntimeStateForExit();
   exitProcess?.(completion.exitCode);
 
   }

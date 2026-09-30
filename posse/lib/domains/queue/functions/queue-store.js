@@ -14,7 +14,7 @@ import {
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isShadowFanoutJob } from "../../research/functions/fanout-payload.js";
 import { parseJobPayload } from "./payload.js";
-import { hasImplementationAttempts, isLeaseValid, setAssessmentLifecycle } from "./attempts.js";
+import { completeAttempt, hasImplementationAttempts, isLeaseValid, setAssessmentLifecycle } from "./attempts.js";
 import {
   ACTIVE_LEASE_STATUSES,
   ACTIVE_LEASE_STATUSES_SQL,
@@ -1823,7 +1823,7 @@ export function setAssessorVerdict(
 
 /**
  * Set the provider (and optionally model_name) on a job.
- * Used by the delegator to assign provider+model after planning.
+ * Used when routing a job to a specific provider and model.
  */
 export function updateJobProvider(id, provider, modelName = undefined) {
   const db = getDb();
@@ -1839,7 +1839,7 @@ export function updateJobProvider(id, provider, modelName = undefined) {
 /**
  * Apply a full delegation assignment to a job.
  * Updates any non-null fields: provider, model_name, model_tier, reasoning_effort, priority.
- * Used by the delegator to optimize task execution.
+ * Used by plan-time provider assignment for multi-provider roles.
  */
 export function applyDelegation(id, { provider = null, model = undefined, model_tier = null, reasoning_effort = null, priority = null } = {}) {
   const db = getDb();
@@ -1860,15 +1860,7 @@ export function applyDelegation(id, { provider = null, model = undefined, model_
   return result.changes > 0;
 }
 
-/**
- * Get historical average duration per role+tier+provider for completion time estimation.
- */
-export {
-  getDurationStats,
-  getProviderStats,
-  getFailureStats,
-  getPipelineHealth,
-} from "./stats.js";
+export { getPipelineHealth } from "./stats.js";
 
 /**
  * Count failed + dead_letter jobs for a work item.
@@ -2861,7 +2853,7 @@ export function settleJobScopeExpansionAttempt({ jobId, attemptId = null } = {})
  * and undo the attempt_count increment from the interrupted run.
  * Only affects jobs still in a leased/running/assessing state.
  */
-export function requeueForShutdown(jobId) {
+export function requeueForShutdown(jobId, { label = "graceful shutdown" } = {}) {
   const db = getDb();
   const ts = now();
   const requeueOne = db.transaction(() => {
@@ -2916,8 +2908,8 @@ export function requeueForShutdown(jobId) {
       event_type: EVENT_TYPES.JOB_SHUTDOWN_REQUEUE,
       actor_type: EVENT_ACTORS.SCHEDULER,
       message: result.wasAssessing
-        ? "Assessment interrupted by graceful shutdown, requeued as assess-only"
-        : "Requeued for graceful shutdown (attempt not counted)",
+        ? `Assessment interrupted by ${label}, requeued as assess-only`
+        : `Requeued for ${label} (attempt not counted)`,
     });
     notifyQueueStateChanged({
       reason: "job_shutdown_requeue",
@@ -2925,6 +2917,80 @@ export function requeueForShutdown(jobId) {
     });
   }
   return result.changes > 0;
+}
+
+// A forced exit must not stall on a contended writer: the process is leaving
+// either way, and the next boot's force-requeue recovers anything left behind.
+const FORCED_EXIT_REQUEUE_BUSY_MS = 1000;
+
+/**
+ * Requeue the active jobs one scheduler owner leased, for a forced exit
+ * (second signal, shutdown watchdog). The process terminates synchronously, so
+ * interrupted workers never reach their graceful-shutdown requeue. Each job
+ * gets the same no-penalty requeue as graceful shutdown and its running
+ * attempt is closed as interrupted, instead of the next boot recording it as
+ * "Orphaned by scheduler crash". Jobs leased by any other owner are untouched.
+ * Synchronous and best-effort: never throws.
+ */
+export function requeueOwnedJobsForForcedExit(ownerId, {
+  reason = "Forced shutdown",
+  busyTimeoutMs = FORCED_EXIT_REQUEUE_BUSY_MS,
+} = {}) {
+  const empty = () => ({ requeued: 0, interruptedAttempts: 0, jobIds: [] });
+  let summary = empty();
+  if (!ownerId) return summary;
+  let affectedWorkItems = new Set();
+  let db;
+  let prevBusyMs = null;
+  try {
+    db = getDb();
+    prevBusyMs = Number(db.pragma("busy_timeout", { simple: true })) || 10000;
+    db.pragma(`busy_timeout = ${Math.max(0, Math.floor(Number(busyTimeoutMs) || 0))}`);
+    runImmediateTransaction(db, () => {
+      const owned = db.prepare(`
+        SELECT id, work_item_id
+        FROM jobs
+        WHERE lease_owner = ?
+          AND status IN (${ACTIVE_LEASE_STATUSES_SQL})
+        ORDER BY id
+      `).all(String(ownerId));
+      const runningAttempts = db.prepare(`
+        SELECT id, started_at FROM job_attempts WHERE job_id = ? AND status = 'running'
+      `);
+      const nowMs = Date.now();
+      for (const job of owned) {
+        const attempts = runningAttempts.all(job.id);
+        // requeueForShutdown refunds the attempt only while it is still
+        // running, so the attempt is closed after the requeue.
+        if (!requeueForShutdown(job.id, { label: "forced shutdown" })) continue;
+        summary.requeued += 1;
+        summary.jobIds.push(job.id);
+        if (job.work_item_id != null) affectedWorkItems.add(job.work_item_id);
+        for (const attempt of attempts) {
+          const startedMs = Date.parse(attempt.started_at || "");
+          completeAttempt(attempt.id, {
+            status: "interrupted",
+            duration_ms: Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : null,
+            error_text: String(reason || "Forced shutdown"),
+          });
+          summary.interruptedAttempts += 1;
+        }
+      }
+    });
+  } catch {
+    // Rolled back (or never started): the next boot's force-requeue recovers
+    // these jobs, so report nothing requeued.
+    summary = empty();
+    affectedWorkItems = new Set();
+  } finally {
+    if (db && prevBusyMs != null) {
+      try { db.pragma(`busy_timeout = ${prevBusyMs}`); } catch { /* connection is closing */ }
+    }
+  }
+  for (const wiId of affectedWorkItems) {
+    try { refreshWorkItemStatus(wiId); } catch { /* next boot refreshes status */ }
+  }
+  return summary;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

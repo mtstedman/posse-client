@@ -1,10 +1,9 @@
-// lib/admin.js — Admin TUI for stats, work-item logs, and settings management
+// AdminTUI.js — Admin TUI for stats, work-item history, and settings.
 //
 // Standalone TUI that uses alternate screen + raw mode.
-// Tabs: Settings | Overview | Work Items | Logs | ATLAS Report
-// Navigation: 1-6 or Tab to switch, ↑↓ to scroll/select, Enter to drill in,
-// Esc/Bksp to back up, 'e' to edit settings, ←→ to switch settings panes /
-// log sources.
+// Tabs: Settings | Overview | Work Items | Diff Review
+// Navigation: 1-4 or Tab to switch, ↑↓ to scroll/select, Enter to drill in or
+// edit, Esc/Bksp to back up, ←→ to switch settings panes.
 
 import readline from "readline";
 import {
@@ -59,7 +58,6 @@ import {
   renderUsdUsageBar,
   safeGetSetting,
 } from "./admin-tui-helpers.js";
-import { buildAtlasReport, queryAtlasReportRows } from "./admin-atlas-report.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import {
   listWorkItems,
@@ -67,7 +65,6 @@ import {
   findRunnableJobsBatch,
   findWriteLockConflict,
   getAgentCallStats,
-  getScopeContextHealthMetrics,
   listActiveFileLocks,
   listWorkItemsWithCallRollups,
   getAgentCallsWithToolCountsByWorkItem,
@@ -87,11 +84,9 @@ import { getRuntimeDbPath, getRuntimeLogDir, getRuntimeReportsDir } from "../../
 import { jobReportStatus, workItemDisplayStatus } from "../display/Display.js";
 import { FAILED_JOB_STATUSES } from "../../../../catalog/job.js";
 import { getAccountSettingsPathForDisplay } from "../../../settings/functions/account-settings.js";
-import { closePromptLog, promptPreviewText, readRecentPrompts } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
+import { readRecentPrompts } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
 import { PROMPT_BODY_STORAGE_NOTICE } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
-import { closeOutputLog, readRecentOutputs } from "../../../../shared/telemetry/functions/logging/output-log.js";
-import { closeLog } from "../../../../shared/telemetry/functions/logging/logger.js";
-import { buildCurrentRoleContract } from "../../../worker/functions/role-contract-view.js";
+import { readRecentOutputs } from "../../../../shared/telemetry/functions/logging/output-log.js";
 import { isAdminVisibleCatalogKey } from "../../../settings/functions/catalog.js";
 import {
   loadSkillManifests,
@@ -119,42 +114,39 @@ import {
   renderAtlasV2ProcessIndicators,
 } from "../../../atlas/functions/v2/process-indicators.js";
 import {
+  ADMIN_DEFAULT_SETTINGS_PANE,
   ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS,
   BOOLEAN_SETTING_KEYS,
   DEFAULT_ACCOUNT_SETTING_ROWS,
-  DELEGATION_MODE_OPTIONS,
   ENUM_SETTING_OPTIONS,
   HIDDEN_SETTING_KEYS,
   NUMERIC_SETTING_RULES,
   PROVIDER_SETTING_KEYS,
+  SETTINGS_PANES,
+  formatAdminSettingValue,
   getAdminSettingPresentation,
   ATLAS_PHASE_OPTIONS,
   ATLAS_PHASE_SETTING_KEYS,
   ATLAS_PHASE_VALUES,
   SKILL_SETTING_PREFIX,
-  SYNTHETIC_SETTING_KEYS,
   toDisplaySettingKey,
   toStorageSettingKey,
 } from "../../../settings/functions/admin-catalog.js";
 
 // Keep Settings on shortcut 1, but start on Overview so the first screen shows
 // the operational agent/work summary instead of configuration controls.
+// Prompts and outputs are read per call from Work Items; the raw log browser
+// and the ATLAS A/B report were debug-only pages and are gone.
 const ADMIN_TABS = Object.freeze([
   Object.freeze({ id: "settings", name: "Settings" }),
   Object.freeze({ id: "overview", name: "Overview" }),
   Object.freeze({ id: "work_items", name: "Work Items" }),
   Object.freeze({ id: "diff_review", name: "Diff Review" }),
-  Object.freeze({ id: "logs", name: "Logs" }),
-  Object.freeze({ id: "atlas_report", name: "ATLAS Report" }),
 ]);
 const ADMIN_TAB_COUNT = ADMIN_TABS.length;
 const ADMIN_TAB_KEYS = new Set(ADMIN_TABS.map((_, index) => String(index + 1)));
 const ADMIN_TAB_NAV_LABEL = `Tab/1-${ADMIN_TAB_COUNT}`;
 const ADMIN_INITIAL_TAB_INDEX = Math.max(0, ADMIN_TABS.findIndex((tab) => tab.id === "overview"));
-const ADMIN_LOG_SOURCES = Object.freeze([
-  Object.freeze({ id: "prompts", label: "Prompts" }),
-  Object.freeze({ id: "outputs", label: "Outputs" }),
-]);
 const SCIP_DEPENDENCY_SPINNER_FRAMES = ["|", "/", "-", "\\"];
 const SCIP_DEPENDENCY_ALERT_DISMISS_MS = 12_000;
 
@@ -184,11 +176,6 @@ export class AdminTUI {
     this._tab = ADMIN_INITIAL_TAB_INDEX; // index into ADMIN_TABS — starts on Overview
     this._scroll = 0;
     this._tabScrolls = Array.from({ length: ADMIN_TAB_COUNT }, () => 0);
-    this._logSource = "prompts"; // see ADMIN_LOG_SOURCES
-    this._promptExpanded = -1;
-    this._promptSelected = 0;
-    this._promptCount = 0;
-    this._promptRowMap = new Map();
     this._purgeLogsConfirm = false;
     this._purgeLogsMessage = "";
     this._done = null;
@@ -379,7 +366,6 @@ export class AdminTUI {
       "",
       "Settings",
       `- Providers: ${providerSummary || "none"}`,
-      `- Delegation mode: ${safeGetSetting("delegation_mode") || "js"}`,
       `- Auto-merge completed: ${safeGetSetting("auto_merge_completed") || "false"}`,
       `- Image route: ${imageProtocol?.provider || "unknown"}${imageProtocol?.model ? ` (${imageProtocol.model})` : ""}`,
     );
@@ -413,32 +399,37 @@ export class AdminTUI {
   }
 
   renderSettingsSnapshot() {
-    const entries = this._getEditableSettings();
+    const snapshot = this._getSettingsSnapshot({ maxAgeMs: 0 });
     const lines = [
       "POSSE ADMIN SETTINGS",
       `Project: ${this.projectDir}`,
-      "",
     ];
 
-    for (const entry of entries) {
-      const sourceDetail = entry.source === "env"
-        ? `env${entry.db_value ? `, global=${entry.db_value}` : ""}`
-        : entry.source || "default";
-      const presentation = getAdminSettingPresentation(entry.setting_key, entry);
-      lines.push(`${presentation.label} = ${entry.setting_value || ""}`);
-      lines.push(`  Setting ID: ${entry.setting_key}`);
-      if (presentation.description) lines.push(`  ${presentation.description}`);
-      lines.push(`  source: ${sourceDetail}`);
-      lines.push("");
+    for (const pane of SETTINGS_PANES) {
+      for (const section of snapshot.paneSections?.[pane.id] || []) {
+        if (!section.rows?.length) continue;
+        lines.push("", `== ${pane.label} / ${section.title} ==`, "");
+        for (const entry of section.rows) {
+          const presentation = getAdminSettingPresentation(entry.setting_key, entry);
+          const storageKey = entry.storage_key || toStorageSettingKey(entry.setting_key);
+          const blank = String(entry.setting_value ?? "").trim() === "";
+          const isDefault = blank || entry.source === "default";
+          lines.push(`${presentation.label} = ${formatAdminSettingValue(storageKey, entry.setting_value)}${isDefault ? " (default)" : ""}`);
+          lines.push(`  Setting ID: ${storageKey}`);
+          if (presentation.description) lines.push(`  ${presentation.description}`);
+          if (entry.source === "env") lines.push(`  source: env${entry.db_value ? `, global=${entry.db_value}` : ""}`);
+          lines.push("");
+        }
+      }
     }
 
-    return lines.join("\n").trimEnd();
+    return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
   }
 
   run() {
     return new Promise((resolve) => {
       this._done = resolve;
-      if (!this._settingsPane) this._settingsPane = "atlas";
+      if (!this._settingsPane) this._settingsPane = ADMIN_DEFAULT_SETTINGS_PANE;
       this._installConsoleIntercept();
       this._installExitHandlers();
       process.on("exit", this._onProcessExit);
@@ -840,13 +831,11 @@ export class AdminTUI {
       this._resetEditState();
     }
 
-    if (this._tabId() === "logs" && this._purgeLogsConfirm) {
+    if (this._tabId() === "work_items" && this._purgeLogsConfirm) {
       if (matchesHotkey(str, key, "y")) {
         try {
           const result = purgeRuntimeLogs({ projectDir: this.projectDir });
           this._purgeLogsMessage = `Purged ${result.files} file${result.files === 1 ? "" : "s"}${result.dirs ? ` and ${result.dirs} dir${result.dirs === 1 ? "" : "s"}` : ""}; cleared ${result.historyWorkItems || 0} historical WI${result.historyWorkItems === 1 ? "" : "s"}, ${result.dbAgentCalls || 0} call${result.dbAgentCalls === 1 ? "" : "s"}, ${result.dbObservations || 0} observation${result.dbObservations === 1 ? "" : "s"}, and ${result.dbEvents || 0} event${result.dbEvents === 1 ? "" : "s"}.`;
-          this._promptExpanded = -1;
-          this._promptSelected = 0;
           this._wiRowsCache = null;
           this._wiCallsCache = null;
           this._selectedWi = null;
@@ -879,8 +868,6 @@ export class AdminTUI {
       } else if (tabId === "work_items" && this._selectedWi != null) {
         this._selectedWi = null;
         this._scroll = this._tabScrolls[this._tab];
-      } else if (tabId === "logs" && this._promptExpanded >= 0) {
-        this._promptExpanded = -1;
       } else {
         this._exit();
       }
@@ -917,13 +904,6 @@ export class AdminTUI {
       } else if (tabId === "settings") {
         this._startEdit();
         return;
-      } else if (tabId === "logs") {
-        if (this._promptExpanded >= 0) {
-          this._promptExpanded = -1;
-        } else {
-          this._promptExpanded = Math.max(0, this._promptSelected || 0);
-          this._scroll = 0;
-        }
       }
     } else if (tabId === "diff_review" && matchesHotkey(str, key, "r")) {
       this._invalidateGitDiffReview();
@@ -940,24 +920,9 @@ export class AdminTUI {
     )) {
       const forward = matchesHotkey(str, key, "n") || str === "]" || key?.name === "]";
       this._jumpGitDiffHunk(forward ? 1 : -1);
-    } else if (tabId === "logs" && (matchesHotkey(str, key, "j") || matchesHotkey(str, key, "k"))) {
-      const delta = matchesHotkey(str, key, "j") ? 1 : -1;
-      const maxPrompt = Math.max(0, Number(this._promptCount || 0) - 1);
-      this._promptSelected = Math.min(maxPrompt, Math.max(0, (this._promptSelected || 0) + delta));
-      if (this._promptExpanded >= 0) {
-        this._promptExpanded = this._promptSelected;
-        this._scroll = 0;
-      } else {
-        // Keep the > marker on screen — selection and scroll were previously
-        // independent, letting j/k walk the cursor out of the viewport.
-        this._scrollToMappedRow(this._promptRowMap.get(this._promptSelected));
-        this._tabScrolls[this._tab] = this._scroll;
-      }
-    } else if (tabId === "logs" && matchesHotkey(str, key, "x")) {
+    } else if (tabId === "work_items" && this._selectedWi == null && matchesHotkey(str, key, "x")) {
       this._purgeLogsConfirm = true;
       this._purgeLogsMessage = "";
-    } else if (tabId === "logs" && (key?.name === "left" || key?.name === "right")) {
-      this._cycleLogSource(key.name === "right" ? 1 : -1);
     } else if (tabId === "diff_review" && key?.name === "right") {
       this._enterGitDiffPane();
     } else if (tabId === "diff_review" && key?.name === "left") {
@@ -1039,7 +1004,7 @@ export class AdminTUI {
         ? (this._tab + ADMIN_TAB_COUNT - 1) % ADMIN_TAB_COUNT
         : (this._tab + 1) % ADMIN_TAB_COUNT;
       this._scroll = this._tabScrolls[this._tab];
-      if (this._tabId() === "settings" && !this._settingsPane) this._settingsPane = "atlas";
+      if (this._tabId() === "settings" && !this._settingsPane) this._settingsPane = ADMIN_DEFAULT_SETTINGS_PANE;
     } else if (ADMIN_TAB_KEYS.has(String(str))) {
       this._resetEditState();
       this._selectedWi = null;
@@ -1047,7 +1012,7 @@ export class AdminTUI {
       this._purgeLogsConfirm = false;
       this._tab = parseInt(str) - 1;
       this._scroll = this._tabScrolls[this._tab];
-      if (this._tabId() === "settings" && !this._settingsPane) this._settingsPane = "atlas";
+      if (this._tabId() === "settings" && !this._settingsPane) this._settingsPane = ADMIN_DEFAULT_SETTINGS_PANE;
     } else if (matchesHotkey(str, key, "e") && tabId === "settings") {
       this._startEdit();
       return;
@@ -1069,17 +1034,6 @@ export class AdminTUI {
     }
 
     this.requestRender({ force: true });
-  }
-
-  _cycleLogSource(direction) {
-    const sourceIds = ADMIN_LOG_SOURCES.map((source) => source.id);
-    const currentIndex = sourceIds.indexOf(this._logSource);
-    const nextIndex = ((currentIndex >= 0 ? currentIndex : 0) + direction + sourceIds.length) % sourceIds.length;
-    this._logSource = sourceIds[nextIndex];
-    this._promptSelected = 0;
-    this._promptExpanded = -1;
-    this._scroll = 0;
-    this._tabScrolls[this._tab] = 0;
   }
 
   // ── Image Model Cycling ────────────────────────────────────────────────
@@ -1116,10 +1070,6 @@ export class AdminTUI {
     return this._settingsController._getModelSettingEntries.call(this, ...args);
   }
 
-  _getProviderUsageSettingEntries(...args) {
-    return this._settingsController._getProviderUsageSettingEntries.call(this, ...args);
-  }
-
   _getSelectableProviders(...args) {
     return this._settingsController._getSelectableProviders.call(this, ...args);
   }
@@ -1132,8 +1082,12 @@ export class AdminTUI {
     return this._settingsController._getProviderSettingEntries.call(this, ...args);
   }
 
-  _getDelegationSettingEntries(...args) {
-    return this._settingsController._getDelegationSettingEntries.call(this, ...args);
+  _buildSettingsPaneSections(...args) {
+    return this._settingsController._buildSettingsPaneSections.call(this, ...args);
+  }
+
+  _buildSettingsFooterLines(...args) {
+    return this._settingsController._buildSettingsFooterLines.call(this, ...args);
   }
 
   _getProjectDbSettingEntries(...args) {
@@ -1240,8 +1194,6 @@ export class AdminTUI {
       overview: () => this._buildOverview(fullW),
       work_items: () => this._buildWorkItemsTab(fullW),
       diff_review: () => this._buildGitDiffReview(fullW),
-      logs: () => this._buildLogs(fullW),
-      atlas_report: () => this._buildAtlasReport(fullW),
     };
     const tabId = this._tabId();
     const content = builders[tabId]().map(normalizeAdminLine);
@@ -1284,31 +1236,14 @@ export class AdminTUI {
       navLines.push(` ${C.yellow}Editing ${editLabel}:${C.reset} ${toggles}`);
       navLines.push(` ${C.dim}[←→/↑↓] Move  [Space] Toggle  [1-9] Jump  [Enter] Save  [Esc] Cancel${C.reset}`);
       if (this._editError) navLines.push(` ${C.red}${this._editError}${C.reset}`);
-    } else if (this._editing === "editSkills") {
-      // Vertical checkbox list scrolling around the cursor — skills can be many.
-      const choices = this._editSkillChoices || [];
-      const cursor = Math.max(0, Math.min(this._editSkillIndex || 0, choices.length - 1));
-      const visible = Math.min(10, Math.max(3, this.rows - 12));
-      const start = Math.max(0, Math.min(choices.length - visible, cursor - Math.floor(visible / 2)));
-      const disabledCount = choices.filter((c) => c.disabled).length;
-      navLines.push(` ${C.yellow}Disabled skills${C.reset} ${C.dim}(${disabledCount}/${choices.length} disabled)${C.reset}`);
-      for (let i = start; i < Math.min(choices.length, start + visible); i++) {
-        const c = choices[i];
-        const marker = c.disabled ? `${C.red}[x]${C.reset}` : `${C.dim}[ ]${C.reset}`;
-        const pointer = i === cursor ? `${C.yellow}>${C.reset}` : " ";
-        const name = i === cursor ? `${C.bold}${c.name}${C.reset}` : c.name;
-        navLines.push(` ${pointer} ${marker} ${C.dim}${String(i + 1).padStart(2)}${C.reset} ${name}  ${C.dim}${c.id}${C.reset}`);
-      }
-      if (start + visible < choices.length) {
-        navLines.push(` ${C.dim}… ${choices.length - (start + visible)} more below${C.reset}`);
-      }
-      navLines.push(` ${C.dim}[↑↓] Move  [Space] Toggle  [PgUp/PgDn] Page  [Home/End] Jump  [Enter] Save  [Esc] Cancel${C.reset}`);
     } else if (tabId === "work_items" && this._selectedCall != null) {
       navLines.push(` ${C.dim}[Esc/Bksp] Back to WI  [\u2191\u2193] Scroll  [${ADMIN_TAB_NAV_LABEL}] Section${C.reset}`);
     } else if (tabId === "work_items" && this._selectedWi != null) {
       navLines.push(` ${C.dim}[↑↓] Select call  [Enter] Open call  [Esc/Bksp] Back to list  [${ADMIN_TAB_NAV_LABEL}] Section${C.reset}`);
+    } else if (tabId === "work_items" && this._purgeLogsConfirm) {
+      navLines.push(` ${C.red}Purge runtime logs, finished work-item history, and ATLAS telemetry?${C.reset} ${C.dim}[y] Confirm  [n/Esc] Cancel${C.reset}`);
     } else if (tabId === "work_items") {
-      navLines.push(` ${C.dim}[↑↓] Select WI  [Enter] Open WI  [${ADMIN_TAB_NAV_LABEL}] Section  [q/Esc] Exit${C.reset}`);
+      navLines.push(` ${C.dim}[↑↓] Select WI  [Enter] Open WI  [x] Purge history & logs  [${ADMIN_TAB_NAV_LABEL}] Section  [q/Esc] Exit${C.reset}`);
     } else if (tabId === "diff_review") {
       if (this._diffFocus === "diff") {
         navLines.push(` ${C.dim}[↑↓/PgUp/PgDn] Scroll diff  [n/p] Hunk  [←/Esc] Files  [r] Refresh  [${ADMIN_TAB_NAV_LABEL}] Section${C.reset}`);
@@ -1316,21 +1251,7 @@ export class AdminTUI {
         navLines.push(` ${C.dim}[↑↓] Select file  [→/Enter] Diff pane  [PgUp/PgDn] Page files  [r] Refresh  [${ADMIN_TAB_NAV_LABEL}] Section  [q/Esc] Exit${C.reset}`);
       }
     } else if (tabId === "settings") {
-      const selected = this._getSelectedEditableSetting();
-      navLines.push(` ${C.dim}[←→] Pane  [↑↓] Select  [PgUp/PgDn] Jump section  [Enter/e/type] Edit highlighted item  [${ADMIN_TAB_NAV_LABEL}] Section  [Esc] Exit${C.reset}`);
-      if (selected) navLines.push(` ${C.dim}Selected:${C.reset} ${C.bold}${selected.setting_key}${C.reset} ${C.dim}${selected.description || ""}${C.reset}`);
-      if (this._settingsSavedFlash && (Date.now() - (this._settingsSavedFlash.at || 0)) < 3_000) {
-        navLines.push(` ${C.green}✓ ${this._settingsSavedFlash.text}${C.reset}`);
-      }
-    } else if (tabId === "atlas_report") {
-      navLines.push(` ${C.dim}[↑↓] Scroll  [${ADMIN_TAB_NAV_LABEL}] Section  [q/Esc] Exit${C.reset}`);
-    } else if (tabId === "logs") {
-      const expanded = this._promptExpanded >= 0;
-      if (this._purgeLogsConfirm) {
-        navLines.push(` ${C.red}Purge runtime logs, DB history, and ATLAS telemetry?${C.reset} ${C.dim}[y] Confirm  [n/Esc] Cancel${C.reset}`);
-      } else {
-        navLines.push(` ${C.dim}[\u2190\u2192] Log source  [\u2191\u2193] Scroll  [Enter] ${expanded ? "Collapse" : "Expand selected"}  [j/k] Prev/Next  [x] Purge logs+DB history+ATLAS telemetry  [${ADMIN_TAB_NAV_LABEL}] Section  [Esc] ${expanded ? "Collapse" : "Exit"}${C.reset}`);
-      }
+      navLines.push(...this._buildSettingsFooterLines(fullW, ADMIN_TAB_NAV_LABEL));
     } else {
       navLines.push(` ${C.dim}[${ADMIN_TAB_NAV_LABEL}] Section  [\u2191\u2193] Scroll  [q/Esc] Exit${C.reset}`);
     }
@@ -1656,39 +1577,6 @@ export class AdminTUI {
     }
 
     // ── Model Breakdown ──
-    const scopeMetrics = getScopeContextHealthMetrics({ trailingDays: 7 });
-    const allTimeSignals = scopeMetrics.all_time || {};
-    const trailingSignals = scopeMetrics.trailing || {};
-    const trailingDays = Number(scopeMetrics.trailing_days || 7);
-    const dropDenominator = Math.max(1, Number(allTimeSignals.under_scoped_drops || 0));
-    const recoveryRatePct = Math.round((100 * Number(allTimeSignals.recovery_escalations || 0)) / dropDenominator);
-    lines.push(` ${C.bold}Scope/Context Hygiene${C.reset}  ${C.dim}(event-derived)${C.reset}`);
-    lines.push(` ${C.dim}${"\u2500".repeat(Math.min(inner, 60))}${C.reset}`);
-    lines.push(
-      `  ${C.dim}All time:${C.reset} ` +
-      `${C.yellow}${allTimeSignals.under_scoped_drops || 0} under-scoped drops${C.reset}  ` +
-      `${C.cyan}${allTimeSignals.recovery_escalations || 0} recovery escalations${C.reset}  ` +
-      `${C.magenta}${allTimeSignals.scope_cleaned_noops || 0} scope-cleaned noops${C.reset}`
-    );
-    lines.push(
-      `  ${C.dim}Trailing ${trailingDays}d:${C.reset} ` +
-      `${trailingSignals.under_scoped_drops || 0} drops  ` +
-      `${trailingSignals.recovery_escalations || 0} escalations  ` +
-      `${trailingSignals.scope_cleaned_noops || 0} scope-cleaned`
-    );
-    lines.push(
-      `  ${C.dim}Scheduler shadow:${C.reset} ` +
-      `${allTimeSignals.strict_shadow_conflicts || 0} all-time  ` +
-      `${trailingSignals.strict_shadow_conflicts || 0} trailing ${trailingDays}d`
-    );
-    lines.push(
-      `  ${C.dim}Context trimmed packets:${C.reset} ` +
-      `${allTimeSignals.context_trimmed_packets || 0} all-time  ` +
-      `${trailingSignals.context_trimmed_packets || 0} trailing ${trailingDays}d`
-    );
-    lines.push(`  ${C.dim}Recovery ratio (all-time): ${recoveryRatePct}% escalations / under-scoped drops${C.reset}`);
-    lines.push("");
-
     const modelMap = new Map();
     // Query agent_calls directly for model-level breakdown
     try {
@@ -2111,6 +1999,11 @@ export class AdminTUI {
 
     lines.push("");
     lines.push(` ${C.bold}${C.cyan}═══ WORK ITEMS ═══${C.reset}  ${C.dim}(${rows.length} item${rows.length !== 1 ? "s" : ""})${C.reset}`);
+    if (this._purgeLogsConfirm) {
+      lines.push(` ${C.red}${C.bold}Confirm purge:${C.reset} ${C.red}deletes runtime log files, finished work-item history, and ATLAS telemetry. Press y to confirm, n/Esc to cancel.${C.reset}`);
+    } else if (this._purgeLogsMessage) {
+      lines.push(` ${C.green}${this._purgeLogsMessage}${C.reset}`);
+    }
     lines.push("");
 
     if (rows.length === 0) {
@@ -2321,281 +2214,6 @@ export class AdminTUI {
     }
     lines.push("");
     return lines;
-  }
-
-  // ── Tab 3: Settings ───────────────────────────────────────────────────
-
-  _queryAtlasReportRows() {
-    return queryAtlasReportRows();
-  }
-
-  _buildAtlasReport(width) {
-    return buildAtlasReport(width, { projectDir: this.projectDir });
-  }
-
-  _buildLogs(width) {
-    const source = this._logSource === "outputs" ? "outputs" : "prompts";
-    const lines = [];
-    const inner = width - 2;
-    this._promptRowMap = new Map();
-    const sourceBar = ADMIN_LOG_SOURCES.map((entry) => (
-      entry.id === source
-        ? `${C.bold}${C.cyan}[${entry.label}]${C.reset}`
-        : `${C.dim}${entry.label}${C.reset}`
-    )).join(` ${C.dim}|${C.reset} `);
-    lines.push("");
-    lines.push(` ${C.bold}${C.cyan}\u2550\u2550\u2550 LOGS \u2550\u2550\u2550${C.reset}  ${sourceBar}  ${C.dim}(\u2190\u2192 to switch)${C.reset}`);
-    lines.push(` ${C.dim}Last 3 days of provider ${source}. Shown newest first.${C.reset}`);
-    lines.push(` ${C.dim}Press ${C.bold}x${C.reset}${C.dim} to purge disk logs, DB work-item history, and ATLAS report telemetry.${C.reset}`);
-    if (this._purgeLogsConfirm) {
-      lines.push(` ${C.red}${C.bold}Confirm purge:${C.reset} ${C.red}this deletes runtime log files, terminal WI history, DB log rows, and ATLAS report telemetry. Press y to confirm, n/Esc to cancel.${C.reset}`);
-    } else if (this._purgeLogsMessage) {
-      lines.push(` ${C.green}${this._purgeLogsMessage}${C.reset}`);
-    }
-    lines.push("");
-
-    if (source === "outputs") {
-      this._appendOutputLogLines(lines, inner);
-      return lines;
-    }
-
-    let records;
-    try {
-      records = readRecentPrompts({ limit: 200 });
-    } catch (err) {
-      this._promptCount = 0;
-      lines.push(` ${C.red}Failed to read prompt log:${C.reset} ${err?.message || err}`);
-      lines.push("");
-      return lines;
-    }
-    this._promptCount = Array.isArray(records) ? records.length : 0;
-
-    if (!records || records.length === 0) {
-      lines.push(` ${C.dim}No prompts recorded yet. Run a job to populate this log.${C.reset}`);
-      lines.push("");
-      return lines;
-    }
-
-    if (this._promptExpanded >= 0 && this._promptExpanded < records.length) {
-      const rec = records[this._promptExpanded];
-      const ts = String(rec.ts || "").replace("T", " ").replace(/\..*$/, "");
-      const role = String(rec.role || "?");
-      const provider = String(rec.provider || "?");
-      const model = String(rec.model || "?");
-      const tier = String(rec.model_tier || "?");
-      const jobTag = rec.job_id != null ? `job#${rec.job_id}` : "job#?";
-      const wiTag = rec.work_item_id != null ? `wi#${rec.work_item_id}` : "";
-      const activity = rec.activity ? ` activity=${rec.activity}` : "";
-      const attempt = rec.attempt != null ? ` attempt=${rec.attempt}` : "";
-      lines.push(` ${C.bold}${ts}${C.reset}  ${C.cyan}${role}${C.reset} ${C.dim}${provider}/${model} (${tier})${C.reset}`);
-      const systemText = String(rec.system_prompt || "");
-      const userPromptText = String(rec.prompt || "");
-      const inlineSystemDuplicate = !!systemText
-        && userPromptText.trimStart().startsWith(`SYSTEM INSTRUCTIONS:\n${systemText}`);
-      const sysChars = inlineSystemDuplicate ? 0 : Number(rec.system_prompt_chars || 0);
-      const sysFiles = Array.isArray(rec.system_prompt_files) ? rec.system_prompt_files.length : 0;
-      const sysSummary = sysChars > 0 || sysFiles > 0
-        ? `  system=${sysChars || 0} chars${sysFiles ? `/${sysFiles} files` : ""}`
-        : "";
-      lines.push(` ${C.dim}${jobTag} ${wiTag}${activity}${attempt}  chars=${rec.prompt_chars || 0}${sysSummary}${C.reset}`);
-      lines.push(` ${C.dim}${"─".repeat(Math.min(inner, 90))}${C.reset}`);
-      let jobRow = null;
-      if (rec.job_id != null) {
-        try { jobRow = getJob(rec.job_id); } catch { jobRow = null; }
-      }
-      let currentContract = "";
-      let currentContractRole = "";
-      try {
-        const preview = buildCurrentRoleContract({
-          job: jobRow,
-          providerName: provider,
-          projectDir: this.projectDir,
-        });
-        currentContract = preview.contract || "";
-        currentContractRole = preview.role || "";
-      } catch {
-        currentContract = "";
-      }
-      const persistedContext = String(jobRow?.context_text || "");
-      const pushPreviewBlock = (title, text, { maxLines = 80, dim = false } = {}) => {
-        const value = String(text || "");
-        if (!value.trim()) return false;
-        lines.push(` ${C.bold}${title}${C.reset}`);
-        const blockLines = value.split(/\r?\n/);
-        for (const rawLine of blockLines.slice(0, maxLines)) {
-          const color = dim ? C.dim : "";
-          const reset = dim ? C.reset : "";
-          if (!rawLine) { lines.push(""); continue; }
-          let remaining = rawLine;
-          while (remaining.length > inner - 2) {
-            lines.push(` ${color}${remaining.slice(0, inner - 2)}${reset}`);
-            remaining = remaining.slice(inner - 2);
-          }
-          lines.push(` ${color}${remaining}${reset}`);
-        }
-        if (blockLines.length > maxLines) lines.push(` ${C.dim}... (${blockLines.length - maxLines} more lines)${C.reset}`);
-        lines.push("");
-        return true;
-      };
-
-      pushPreviewBlock(
-        `CURRENT ROLE CONTRACT${currentContractRole ? ` (${currentContractRole})` : ""} - reconstructed from current code`,
-        currentContract,
-        { maxLines: 40, dim: true },
-      );
-      if (persistedContext) {
-        pushPreviewBlock("PERSISTED JOB CONTEXT (jobs.context_text)", persistedContext, { maxLines: 80 });
-      } else if (jobRow) {
-        lines.push(` ${C.bold}PERSISTED JOB CONTEXT (jobs.context_text)${C.reset}`);
-        lines.push(` ${C.dim}(none recorded for this job; historical prompt log below is ground truth)${C.reset}`);
-        lines.push("");
-      }
-
-      if (rec.prompt_redacted) {
-        lines.push(` ${C.bold}RECORDED PROMPT METADATA${C.reset}`);
-        lines.push(` ${C.dim}${PROMPT_BODY_STORAGE_NOTICE}${C.reset}`);
-        lines.push(` ${C.dim}Local metadata was recorded successfully; this is not a persistence error.${C.reset}`);
-        lines.push("");
-      } else if (rec.system_prompt && !inlineSystemDuplicate) {
-        lines.push(` ${C.bold}RECORDED SYSTEM PROMPT / ATTACHED ROLE CONTRACTS${C.reset}`);
-        const systemLines = systemText.split(/\r?\n/).slice(0, 40);
-        for (const sl of systemLines) lines.push(` ${C.dim}${sl.slice(0, inner - 2)}${C.reset}`);
-        const systemTotal = systemText.split(/\r?\n/).length;
-        if (systemTotal > 40) lines.push(` ${C.dim}... (${systemTotal - 40} more system prompt lines)${C.reset}`);
-        lines.push("");
-        lines.push(` ${C.bold}RECORDED USER PROMPT / HANDOFF CONTEXT${C.reset}`);
-      } else {
-        lines.push(` ${C.bold}RECORDED PROVIDER PROMPT${C.reset}`);
-      }
-      if (!rec.prompt_redacted) {
-        const text = userPromptText;
-        const paragraphs = text.split(/\r?\n/);
-        for (const line of paragraphs) {
-          if (!line) { lines.push(""); continue; }
-          let remaining = line;
-          while (remaining.length > inner - 2) {
-            lines.push(` ${remaining.slice(0, inner - 2)}`);
-            remaining = remaining.slice(inner - 2);
-          }
-          lines.push(` ${remaining}`);
-        }
-        lines.push("");
-      }
-      return lines;
-    }
-
-    lines.push(` ${C.dim}Showing ${records.length} prompts. Use ↑↓ to scroll, j/k to select, Enter to view full prompt.${C.reset}`);
-    lines.push("");
-    const hdr = `  ${"#".padStart(3)} ${"When".padEnd(19)} ${"Role".padEnd(11)} ${"Provider".padEnd(9)} ${"Model".padEnd(18)} ${"Job".padEnd(9)} ${"WI".padEnd(6)} ${"Chars".padStart(7)}  Preview`;
-    lines.push(` ${C.dim}${hdr}${C.reset}`);
-    lines.push(` ${C.dim}${"─".repeat(Math.min(inner, hdr.length + 2))}${C.reset}`);
-
-    const selected = this._promptSelected ?? 0;
-    for (let i = 0; i < records.length; i++) {
-      const rec = records[i];
-      const ts = String(rec.ts || "").replace("T", " ").replace(/\..*$/, "");
-      const role = String(rec.role || "?").slice(0, 11);
-      const provider = String(rec.provider || "?").slice(0, 9);
-      const model = String(rec.model || "?").slice(0, 18);
-      const jobTag = rec.job_id != null ? `j#${rec.job_id}` : "j#?";
-      const wiTag = rec.work_item_id != null ? `w#${rec.work_item_id}` : "";
-      const chars = String(rec.prompt_chars || 0);
-      const preview = promptPreviewText(rec, { max: Math.max(10, inner - 95) });
-      const marker = i === selected ? `${C.yellow}>${C.reset}` : " ";
-      const numStr = String(i + 1).padStart(3);
-      const rowColor = i === selected ? C.bold : "";
-      this._promptRowMap.set(i, lines.length);
-      lines.push(
-        `${marker} ${rowColor}${numStr} ${ts.padEnd(19)} ${role.padEnd(11)} ${provider.padEnd(9)} ${model.padEnd(18)} ${jobTag.padEnd(9)} ${wiTag.padEnd(6)} ${chars.padStart(7)}  ${preview}${C.reset}`
-      );
-    }
-    lines.push("");
-    return lines;
-  }
-
-  // Output-log view of the Logs tab. Shares selection/expansion state with
-  // the prompts view (_promptSelected/_promptExpanded) so j/k and Enter work
-  // identically across sources.
-  _appendOutputLogLines(lines, inner) {
-    let records;
-    try {
-      records = readRecentOutputs({ limit: 200 });
-    } catch (err) {
-      this._promptCount = 0;
-      lines.push(` ${C.red}Failed to read output log:${C.reset} ${err?.message || err}`);
-      lines.push("");
-      return;
-    }
-    this._promptCount = Array.isArray(records) ? records.length : 0;
-
-    if (!records || records.length === 0) {
-      lines.push(` ${C.dim}No outputs recorded yet. Run a job to populate this log.${C.reset}`);
-      lines.push("");
-      return;
-    }
-
-    if (this._promptExpanded >= 0 && this._promptExpanded < records.length) {
-      const rec = records[this._promptExpanded];
-      const ts = String(rec.ts || "").replace("T", " ").replace(/\..*$/, "");
-      const role = String(rec.role || "?");
-      const provider = String(rec.provider || "?");
-      const model = String(rec.model || "?");
-      const tier = String(rec.model_tier || "?");
-      const jobTag = rec.job_id != null ? `job#${rec.job_id}` : "job#?";
-      const wiTag = rec.work_item_id != null ? `wi#${rec.work_item_id}` : "";
-      const statusColor = rec.status === "succeeded" ? C.green : rec.status === "failed" ? C.red : C.dim;
-      lines.push(` ${C.bold}${ts}${C.reset}  ${C.cyan}${role}${C.reset} ${C.dim}${provider}/${model} (${tier})${C.reset}  ${statusColor}${rec.status || "?"}${C.reset}`);
-      const tokens = `${fmtTokens(Number(rec.input_tokens) || 0)} in + ${fmtTokens(Number(rec.output_tokens) || 0)} out`;
-      const duration = rec.duration_ms != null ? `  ${fmtDuration(Number(rec.duration_ms) || 0)}` : "";
-      const activity = rec.activity ? ` activity=${rec.activity}` : "";
-      const attempt = rec.attempt != null ? ` attempt=${rec.attempt}` : "";
-      lines.push(` ${C.dim}${jobTag} ${wiTag}${activity}${attempt}  chars=${rec.output_chars || 0}  ${tokens}${duration}${C.reset}`);
-      lines.push(` ${C.dim}${"─".repeat(Math.min(inner, 90))}${C.reset}`);
-      if (rec.error_text) {
-        lines.push(` ${C.red}Error:${C.reset} ${String(rec.error_text).replace(/\s+/g, " ").slice(0, Math.max(10, inner - 10))}`);
-        lines.push("");
-      }
-      const text = String(rec.output || "");
-      for (const line of text.split(/\r?\n/)) {
-        if (!line) { lines.push(""); continue; }
-        let remaining = line;
-        while (remaining.length > inner - 2) {
-          lines.push(` ${remaining.slice(0, inner - 2)}`);
-          remaining = remaining.slice(inner - 2);
-        }
-        lines.push(` ${remaining}`);
-      }
-      lines.push("");
-      return;
-    }
-
-    lines.push(` ${C.dim}Showing ${records.length} outputs. Use ↑↓ to scroll, j/k to select, Enter to view full output.${C.reset}`);
-    lines.push("");
-    const hdr = `  ${"#".padStart(3)} ${"When".padEnd(19)} ${"Role".padEnd(11)} ${"Provider".padEnd(9)} ${"Model".padEnd(18)} ${"Job".padEnd(9)} ${"WI".padEnd(6)} ${"Status".padEnd(9)} ${"Chars".padStart(7)}  Preview`;
-    lines.push(` ${C.dim}${hdr}${C.reset}`);
-    lines.push(` ${C.dim}${"─".repeat(Math.min(inner, hdr.length + 2))}${C.reset}`);
-
-    const selected = this._promptSelected ?? 0;
-    for (let i = 0; i < records.length; i++) {
-      const rec = records[i];
-      const ts = String(rec.ts || "").replace("T", " ").replace(/\..*$/, "");
-      const role = String(rec.role || "?").slice(0, 11);
-      const provider = String(rec.provider || "?").slice(0, 9);
-      const model = String(rec.model || "?").slice(0, 18);
-      const jobTag = rec.job_id != null ? `j#${rec.job_id}` : "j#?";
-      const wiTag = rec.work_item_id != null ? `w#${rec.work_item_id}` : "";
-      const status = String(rec.status || "?").slice(0, 9);
-      const chars = String(rec.output_chars || 0);
-      const preview = String(rec.output || "").replace(/\s+/g, " ").trim().slice(0, Math.max(10, inner - 105));
-      const marker = i === selected ? `${C.yellow}>${C.reset}` : " ";
-      const numStr = String(i + 1).padStart(3);
-      const rowColor = i === selected ? C.bold : "";
-      this._promptRowMap.set(i, lines.length);
-      lines.push(
-        `${marker} ${rowColor}${numStr} ${ts.padEnd(19)} ${role.padEnd(11)} ${provider.padEnd(9)} ${model.padEnd(18)} ${jobTag.padEnd(9)} ${wiTag.padEnd(6)} ${status.padEnd(9)} ${chars.padStart(7)}  ${preview}${C.reset}`
-      );
-    }
-    lines.push("");
   }
 
   _buildSettings(...args) {

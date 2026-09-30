@@ -35,7 +35,7 @@ export const SESSION_JOB_CLAIM_TTL_MS = 120_000;
 const REF_KEY_RE = /^[0-9a-f]{64}$/u;
 const OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const ROUTABLE_JOB_TYPES = new Set([
-  "research", "plan", "delegate", "dev", "assess", "fix", "summarize", "artificer",
+  "research", "plan", "dev", "assess", "fix", "summarize", "artificer",
 ]);
 
 function resultValue(result) {

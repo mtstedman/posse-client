@@ -9,7 +9,6 @@ export * from "./role-classes.js";
 export * from "./roles/artificer.js";
 export * from "./roles/assessor.js";
 export * from "./roles/atlas-warm.js";
-export * from "./roles/delegate.js";
 export * from "./roles/developer.js";
 export * from "./roles/fix.js";
 export * from "./roles/planner.js";

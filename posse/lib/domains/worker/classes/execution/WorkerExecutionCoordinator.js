@@ -34,6 +34,7 @@ import {
 import {
   runWaitingLanePreparationJob as runWaitingLanePreparationJobFromModule,
 } from "../../functions/execution/waiting-lane-prepare-job.js";
+import { runLegacyDelegateJob as runLegacyDelegateJobFromModule } from "../../functions/execution/legacy-delegate-job.js";
 import {
   setUpWorktreeForJob as setUpWorktreeForJobFromModule,
   clearActiveWorktreeSentinel as clearActiveWorktreeSentinelFromModule,
@@ -194,6 +195,12 @@ export class WorkerExecutionCoordinator {
           leaseToken,
           abortSignal: executeAbortController?.signal || null,
         });
+        return;
+      }
+
+      // -- Short-circuit: legacy delegate rows are closed deterministically --
+      if (job.job_type === "delegate") {
+        await runLegacyDelegateJobFromModule(worker, job, wrappedJob, { leaseToken });
         return;
       }
 

@@ -438,7 +438,7 @@ export class ToolContract {
         dangerouslySkipPermissions: true,
       };
     }
-    if (role === "researcher" || role === "planner" || role === "delegator") {
+    if (role === "researcher" || role === "planner") {
       if (role === "researcher" && effectiveWebToolsEnabled) {
         return {
           tools: "WebFetch,WebSearch",

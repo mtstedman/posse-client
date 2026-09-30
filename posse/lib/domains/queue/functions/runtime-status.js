@@ -166,10 +166,21 @@ export function clearRuntimeStatus(key) {
   }
 }
 
+function markShutdown(value) {
+  writeRuntimeStatus(RUNTIME_STATUS_KEYS.SHUTDOWN, value);
+  clearRuntimeStatus(RUNTIME_STATUS_KEYS.BOOT);
+  clearRuntimeStatus(RUNTIME_STATUS_KEYS.SCHEDULER);
+}
+
 /** Mark a clean shutdown and drop boot/scheduler rows so the next boot
  *  starts from a blank slate (and stale rows can't masquerade as live). */
 export function markCleanShutdown() {
-  writeRuntimeStatus(RUNTIME_STATUS_KEYS.SHUTDOWN, { clean: true, at: now() });
-  clearRuntimeStatus(RUNTIME_STATUS_KEYS.BOOT);
-  clearRuntimeStatus(RUNTIME_STATUS_KEYS.SCHEDULER);
+  markShutdown({ clean: true, at: now() });
+}
+
+/** A forced exit (second signal, shutdown watchdog) still ends the process,
+ *  so the bridge derives `offline` the same way, but the row must not claim
+ *  a clean shutdown: in-flight work was abandoned rather than drained. */
+export function markForcedShutdown({ reason = null } = {}) {
+  markShutdown({ clean: false, forced: true, reason: reason ? String(reason) : null, at: now() });
 }

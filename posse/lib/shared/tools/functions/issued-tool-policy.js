@@ -18,7 +18,6 @@ const KNOWN_ISSUED_ROLES = new Set([
   "artificer",
   "assessor",
   "preflight",
-  "delegator",
   "summary",
 ]);
 

@@ -18,6 +18,13 @@ function hasImageModeIntent(text) {
   return false;
 }
 
+// Image mode is never inferred from request text alone: a sentence that merely
+// mentions images next to a creation verb ("use the thumbnail images ... and
+// create a breeding tree") is repo work far more often than an image request.
+// Image mode comes from an explicit choice (`--mode image`, `--intent image`,
+// `--deliverable image`, `posse image`, the TUI image action), or from the
+// request text only once the user explicitly asked for artifact output.
+
 export function inferWiMode(text) {
   const lower = String(text || "").toLowerCase();
   // Creation verbs are legitimate report-generation signals, but explicit
@@ -25,11 +32,10 @@ export function inferWiMode(text) {
   // request in build mode.
   const repoMutationIntent = hasRepoMutationIntent(lower, { includeCompletion: true });
   if (repoMutationIntent || hasExplicitRepoWorkIntent(lower)) return null;
-  // Operational failure reports that mention an image-generation control are
-  // build work, not requests for a generated image. Questions remain neutral
-  // here so intake hints can retain their read-only contract.
+  // Operational failure reports ("generate report doesn't work") are build
+  // work, not report requests. Questions remain neutral here so intake hints
+  // can retain their read-only contract.
   if (hasFunctionalFailureIntent(lower)) return null;
-  if (hasImageModeIntent(lower)) return "image";
   const reportAction = "\\b(write|prepare|draft|produce|create|generate|compile|export|deliver|analy[sz](?:e|ed|es|ing)|summari[sz](?:e|ed|es|ing))\\b";
   const reportObject = "\\b(report|summary|write[- ]?up|analysis|brief|csv|spreadsheet|analy[sz](?:e|ed|es|ing))\\b";
   if (!repoMutationIntent && new RegExp(`${reportAction}[\\s\\S]{0,80}${reportObject}`, "i").test(lower)) return "report";
@@ -38,4 +44,30 @@ export function inferWiMode(text) {
     || /\b(analy[sz](?:e|ed|es|ing)|summari[sz](?:e|ed|es|ing))\b/i.test(lower);
   if (directAnalysisIntent && !repoMutationIntent) return "report";
   return null;
+}
+
+function requestsImageExplicitly(hints = {}) {
+  return (hints.intent_type_source === "explicit" && String(hints.intent_type || "").toLowerCase() === "image")
+    || (hints.deliverable_type_source === "explicit" && String(hints.deliverable_type || "").toLowerCase() === "image");
+}
+
+function requestsArtifactOutputExplicitly(hints = {}) {
+  const desired = (Array.isArray(hints.desired_outputs) ? hints.desired_outputs : [hints.desired_outputs])
+    .map((value) => String(value || "").trim().toLowerCase());
+  return hints.desired_outputs_source === "explicit" && desired.includes("artifact") && !desired.includes("repo");
+}
+
+/**
+ * Resolve a new work item's mode once its intake hints are known. Explicit
+ * choices win; an explicit artifact request picks image or report from the
+ * request text; otherwise only report mode is ever inferred.
+ */
+export function resolveWorkItemMode({ explicitMode = null, description = "", intakeHints = null } = {}) {
+  if (explicitMode) return { mode: explicitMode, source: "explicit" };
+  const hints = intakeHints || {};
+  if (requestsImageExplicitly(hints)) return { mode: "image", source: "explicit" };
+  if (requestsArtifactOutputExplicitly(hints)) {
+    return { mode: hasImageModeIntent(String(description || "").toLowerCase()) ? "image" : "report", source: "explicit" };
+  }
+  return { mode: inferWiMode(description) || "build", source: "inferred" };
 }

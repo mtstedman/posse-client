@@ -375,7 +375,7 @@ function validateAgentToolProjection(role, requestedBootPayload = {}, projectedB
   const projectedNames = canonicalProjectionNames(projected);
   const missingRequirements = [];
 
-  // Preflight/delegator gates deliberately request no provider-visible tools.
+  // Preflight gates deliberately request no provider-visible tools.
   // Every other role that requested an operational surface must receive at
   // least one usable projection from the thin per-agent gate.
   if (requestedNames.length > 0 && projectedNames.length === 0) {

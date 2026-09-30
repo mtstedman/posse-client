@@ -6,6 +6,7 @@
 import fs from "fs";
 import path from "path";
 import { gitExec } from "../../../../domains/git/functions/utils.js";
+import { isNativePulseColdError } from "../../../../domains/git/functions/native/invoke.js";
 import { normalizeDisplaySlashes } from "../../../format/functions/display-paths.js";
 
 export const SEARCH_MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -188,20 +189,26 @@ function setCacheEntry(cache, key, entry) {
   }
 }
 
+// Ignore checks fail open (nothing is treated as ignored) on any Git issue, and
+// their results are memoized per process. A failure caused by a cold native
+// pulse cache is transient — the same call succeeds once the background mint
+// lands — so a result it produced is used for this call but never memoized.
+// Otherwise a process whose first Git call is list_files/search_files would
+// leak gitignored paths for its whole life.
 function isWorkspaceRootIgnoredByGitUncached(cwd) {
   try {
     const repoRoot = String(gitExec(["rev-parse", "--show-toplevel"], cwd) || "").trim();
-    if (!repoRoot) return false;
+    if (!repoRoot) return { ignored: false, cacheable: true };
     const rel = normalizeDisplaySlashes(path.relative(repoRoot, path.resolve(cwd)));
-    if (!rel || rel === ".") return false;
+    if (!rel || rel === ".") return { ignored: false, cacheable: true };
     try {
       gitExec(["check-ignore", "-q", "--", rel], repoRoot);
-      return true;
-    } catch {
-      return false;
+      return { ignored: true, cacheable: true };
+    } catch (err) {
+      return { ignored: false, cacheable: !isNativePulseColdError(err) };
     }
-  } catch {
-    return false;
+  } catch (err) {
+    return { ignored: false, cacheable: !isNativePulseColdError(err) };
   }
 }
 
@@ -215,6 +222,7 @@ function normalizeGitIgnoredRel(value) {
 function buildGitIgnoredPathSnapshot(cwd) {
   const ignoredFiles = new Set();
   const ignoredDirs = new Set();
+  let cacheable = true;
   try {
     const stdout = gitExec(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], cwd, {
       timeoutMs: GIT_IGNORE_SNAPSHOT_TIMEOUT_MS,
@@ -229,11 +237,12 @@ function buildGitIgnoredPathSnapshot(cwd) {
       if (isDir) ignoredDirs.add(rel);
       else ignoredFiles.add(rel);
     }
-  } catch {
+  } catch (err) {
     // Ignore checks are advisory for list/search tools. On any Git issue, keep
     // the existing fail-open behavior rather than blocking deterministic reads.
+    cacheable = !isNativePulseColdError(err);
   }
-  return { ignoredFiles, ignoredDirs };
+  return { ignoredFiles, ignoredDirs, cacheable };
 }
 
 function ignoredSnapshotMatches(snapshot, relPath) {
@@ -250,7 +259,8 @@ export function makeGitIgnoreChecker(cwd) {
   const key = normalizeGitCacheKey(cwd);
   const cached = getSessionCacheEntry(_gitIgnoreCheckerCache, key);
   if (cached) return cached.checker;
-  if (isWorkspaceRootIgnoredByGit(cwd)) {
+  const root = workspaceRootIgnoredState(cwd);
+  if (root.ignored) {
     const checker = () => false;
     setCacheEntry(_gitIgnoreCheckerCache, key, { checker });
     return checker;
@@ -261,17 +271,21 @@ export function makeGitIgnoreChecker(cwd) {
     if (!rel || rel === ".") return false;
     return ignoredSnapshotMatches(snapshot, rel);
   };
-  setCacheEntry(_gitIgnoreCheckerCache, key, { checker });
+  if (root.cacheable && snapshot.cacheable) setCacheEntry(_gitIgnoreCheckerCache, key, { checker });
   return checker;
 }
 
-export function isWorkspaceRootIgnoredByGit(cwd) {
+function workspaceRootIgnoredState(cwd) {
   const key = normalizeGitCacheKey(cwd);
   const cached = getSessionCacheEntry(_workspaceRootIgnoredCache, key);
-  if (cached) return cached.ignored;
-  const ignored = isWorkspaceRootIgnoredByGitUncached(cwd);
-  setCacheEntry(_workspaceRootIgnoredCache, key, { ignored });
-  return ignored;
+  if (cached) return { ignored: cached.ignored, cacheable: true };
+  const state = isWorkspaceRootIgnoredByGitUncached(cwd);
+  if (state.cacheable) setCacheEntry(_workspaceRootIgnoredCache, key, { ignored: state.ignored });
+  return state;
+}
+
+export function isWorkspaceRootIgnoredByGit(cwd) {
+  return workspaceRootIgnoredState(cwd).ignored;
 }
 
 export function addRipgrepSkipGlobs(rgArgs, skipDirs) {

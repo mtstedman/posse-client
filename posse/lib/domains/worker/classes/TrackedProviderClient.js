@@ -40,7 +40,7 @@ import {
   resolvePrimaryExecutionModelName,
   sanitizeExecutionHintsForRole,
 } from "../../providers/functions/execution-routing.js";
-import { getMaxOutputTokensForProvider } from "../../providers/functions/shared/turns.js";
+import { getMaxOutputTokensForProvider, resolveUpFrontMaxTurns } from "../../providers/functions/shared/turns.js";
 import { resolveDisableSystemTools } from "../../providers/functions/shared/tool-policy-settings.js";
 import { ProviderTurnBudget } from "../../providers/classes/ProviderTurnBudget.js";
 import { selectFallbackProvider } from "../../providers/functions/delegation-routing.js";
@@ -1332,6 +1332,16 @@ export class TrackedProviderClient {
     const resolvedMaxTurns = positiveIntegerOrNull(opts.maxTurns);
     const resolvedMaxOutputTokens = positiveIntegerOrNull(opts.maxOutputTokens)
       || getMaxOutputTokensForProvider(providerName, { role: opts.role });
+    // Adapters with an up-front turn budget derive it from these same options
+    // when they build their args; record it on the started row (as the output
+    // budget is) instead of leaving it null until completion backfills it.
+    const startedMaxTurns = resolvedMaxTurns ?? positiveIntegerOrNull(resolveUpFrontMaxTurns(providerName, {
+      role: effectiveCapabilityOpts.role,
+      modelTier: effectiveCapabilityOpts.modelTier,
+      complexity: effectiveCapabilityOpts.complexity,
+      filesToModifyCount: effectiveCapabilityOpts.filesToModifyCount,
+      deepthink: effectiveCapabilityOpts.deepthink,
+    }));
     const call = await timeProviderSetupPhase("provider.agent_call_create", {
       role: opts.role,
       provider: providerName,
@@ -1348,7 +1358,7 @@ export class TrackedProviderClient {
       model_name: modelName,
       activity: opts.activity,
       prompt_chars: prompt.length,
-      max_turns_configured: resolvedMaxTurns,
+      max_turns_configured: startedMaxTurns,
       max_output_tokens_configured: resolvedMaxOutputTokens,
       reasoning_effort: opts.reasoningEffort || "medium",
       provider: providerName,
@@ -1423,7 +1433,7 @@ export class TrackedProviderClient {
         model_name: modelName,
         activity: opts.activity,
         prompt_chars: prompt.length,
-        max_turns_configured: resolvedMaxTurns,
+        max_turns_configured: startedMaxTurns,
         max_output_tokens_configured: resolvedMaxOutputTokens,
       },
     });

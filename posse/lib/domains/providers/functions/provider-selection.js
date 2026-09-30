@@ -289,7 +289,7 @@ export function nextProviderSelectionCursor(key) {
 /**
  * Get all available providers for a given role.
  * Returns the full comma-separated list (or global override as a single-element list).
- * Used by the delegator to know which providers it can assign.
+ * Used by plan-time provider assignment to know which providers it can pick.
  */
 export function getAvailableProviders(role = "dev") {
   return getRoleProviderList(role);
@@ -297,7 +297,7 @@ export function getAvailableProviders(role = "dev") {
 
 /**
  * Check whether a role has multiple providers configured.
- * When true, the delegator step should run to assign providers per-job.
+ * When true, plan-time provider assignment runs for that role's jobs.
  */
 export function isMultiProvider(role = "dev") {
   return getAvailableProviders(role).length > 1;
@@ -311,7 +311,7 @@ export function needsDelegation() {
 }
 
 /**
- * Build a summary of available providers per role for the delegator prompt.
+ * Build a summary of available providers per role for plan-time assignment.
  * Returns an object like { dev: ["claude","openai"], assessor: ["claude"] }.
  */
 export function getProviderMap() {

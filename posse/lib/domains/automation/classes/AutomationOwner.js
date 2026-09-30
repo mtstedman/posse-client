@@ -6,21 +6,24 @@ import { AutomationService } from "./AutomationService.js";
 import { SkillRegistry } from "./SkillRegistry.js";
 import { verifyMcpOAuthToken, bootConfigFromMcpOAuthClaims } from "../../integrations/functions/deterministic-mcp/oauth-token.js";
 import { automationDbPath, automationSocketPath, ensureAutomationOperatorToken, repositoryID } from "../functions/paths.js";
+import { automationBuildIdentity, automationOwnerLaunch } from "../functions/owner-identity.js";
 import { definitionDigest, demand } from "../functions/policy.js";
 import { previewOccurrences } from "../functions/triggers.js";
 
 import { AUTOMATION_MAX_REQUEST_BYTES, AUTOMATION_MAX_RESPONSE_BYTES } from "../../../catalog/custom-tools.js";
 
 export class AutomationOwner {
-  constructor({ store = null, service = null, socketPath = automationSocketPath(), operatorToken = null, tickMs = 1000 } = {}) {
+  constructor({ store = null, service = null, socketPath = automationSocketPath(), operatorToken = null, tickMs = 1000, build = null, launch = automationOwnerLaunch() } = {}) {
     this.store = store || new AutomationStore(automationDbPath());
     this.service = service || new AutomationService(this.store);
     this.registry = new SkillRegistry(this.service);
     this.socketPath = socketPath; this.operatorToken = operatorToken || ensureAutomationOperatorToken(); this.tickMs = tickMs;
-    this.server = null; this.timer = null; this.ownsStore = !store;
+    this.build = build; this.launch = launch;
+    this.server = null; this.timer = null; this.ownsStore = !store; this.socketFile = null;
   }
   async start() {
     if (this.server) return this.socketPath;
+    this.build ||= await automationBuildIdentity();
     if (process.platform !== "win32" && fs.existsSync(this.socketPath)) {
       const info = fs.lstatSync(this.socketPath);
       demand(info.isSocket() && !info.isSymbolicLink(), "Automation socket path is occupied by a non-socket");
@@ -28,7 +31,7 @@ export class AutomationOwner {
     }
     this.server = net.createServer(socket => this.accept(socket));
     await new Promise((resolve, reject) => { this.server.once("error", reject); this.server.listen(this.socketPath, () => { this.server.off("error", reject); resolve(); }); });
-    if (process.platform !== "win32") fs.chmodSync(this.socketPath, 0o600);
+    if (process.platform !== "win32") { fs.chmodSync(this.socketPath, 0o600); this.socketFile = fileIdentity(this.socketPath); }
     this.service.recover();
     this.timer = setInterval(() => { try { this.service.tick(); } catch (error) { if (error.code === "owner_fenced") void this.close(); } }, this.tickMs);
     return this.socketPath;
@@ -61,11 +64,12 @@ export class AutomationOwner {
   }
   dispatch(request) {
     demand(request && typeof request === "object" && !Array.isArray(request), "Invalid automation request");
-    if (request.kind === "health") return this.service.health();
+    if (request.kind === "health") return this.health();
     if (request.kind === "agent") return this.dispatchAgent(request);
     demand(request.kind === "operator" && timingSafeEqual(request.token, this.operatorToken), "Operator authentication failed", "unauthorized");
     return this.dispatchOperator(request.operation, request.args || {});
   }
+  health() { return { ...this.service.health(), build: this.build, launch: this.launch }; }
   dispatchAgent(request) {
     const claims = verifyMcpOAuthToken(request.token);
     const config = bootConfigFromMcpOAuthClaims(claims);
@@ -79,7 +83,7 @@ export class AutomationOwner {
   }
   dispatchOperator(operation, args) {
     switch (operation) {
-      case "health": return this.service.health();
+      case "health": return this.health();
       case "tools.available": return { available: this.service.health().ready === true && this.service.discover(args.principal).length > 0 };
       case "entry.list": return this.store.list("entries").map(entry => ({ id: entry.id, source: entry.source, kind: entry.kind, digest: entry.digest, description: entry.description, enabled: entry.enabled }));
       case "draft.save": return this.registry.saveDraft(args.definition);
@@ -129,11 +133,20 @@ export class AutomationOwner {
     const server = this.server; this.server = null;
     if (server) await new Promise(resolve => server.close(resolve));
     await this.service.shutdown(); if (this.ownsStore) this.store.close();
-    if (process.platform !== "win32") { try { fs.unlinkSync(this.socketPath); } catch {} }
+    // A successor may already listen on this path; remove only our own socket.
+    if (process.platform !== "win32") {
+      try { if (!this.socketFile || sameFile(fileIdentity(this.socketPath), this.socketFile)) fs.unlinkSync(this.socketPath); } catch {}
+    }
   }
 }
 
 
+// Inode numbers are reused at once after an unlink, so the change time
+// (nanoseconds) is part of the socket file's identity.
+function fileIdentity(filename) {
+  try { const info = fs.lstatSync(filename, { bigint: true }); return { dev: info.dev, ino: info.ino, ctime: info.ctimeNs }; } catch { return null; }
+}
+function sameFile(left, right) { return Boolean(left && right && left.dev === right.dev && left.ino === right.ino && left.ctime === right.ctime); }
 function timingSafeEqual(left, right) {
   const a = Buffer.from(String(left || "")), b = Buffer.from(String(right || ""));
   return a.length === b.length && crypto.timingSafeEqual(a, b);

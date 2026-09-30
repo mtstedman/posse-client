@@ -38,7 +38,7 @@ export function isImageOnlyModelName(modelName = null) {
 export function resolvePrimaryExecutionModelName(jobModelName, opts, tierConfig) {
   // Image-only model names (e.g. grok-imagine-image, gpt-image-1) can never
   // drive a chat call. If one is present in job.model_name (legacy data, a
-  // delegator hallucination, or a stale row) fall back to the tier text model
+  // model hallucination, or a stale row) fall back to the tier text model
   // for every role — including assessor/fix/summary, which previously crashed
   // with "model not found" because their roles were not in the allowlist.
   if (isImageOnlyModelName(jobModelName)) {

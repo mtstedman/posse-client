@@ -107,7 +107,6 @@ export const ATLAS_ROLE_ORDER = Object.freeze([
   "assessor",
   "dev",
   "artificer",
-  "delegator",
 ]);
 
 export const DEFAULT_HTTP_HOST = "127.0.0.1";

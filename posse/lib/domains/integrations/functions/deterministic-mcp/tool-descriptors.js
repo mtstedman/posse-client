@@ -610,7 +610,6 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     // use, and this empty contract keeps that boundary true at the CLI layer.
     model_pass: Object.freeze({ read: [], write: [] }),
     preflight: Object.freeze({ read: [], write: [] }),
-    delegator: Object.freeze({ read: [], write: [] }),
     default: Object.freeze({
       read: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
       write: ["read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "bash"],
@@ -660,11 +659,6 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       tools: Object.freeze([]),
       internalTools: Object.freeze(["traverse_ref", "fetch_ref"]),
       rationale: "Artificer produces non-code deliverables; ATLAS retrieval is not in scope, but remote policy may issue missing-content traversal.",
-    }),
-    delegator: Object.freeze({
-      phase: null,
-      tools: Object.freeze([]),
-      rationale: "Delegator emits routing JSON only; no tool surface required.",
     }),
   }),
 });
@@ -902,8 +896,7 @@ export function roleUsesDeterministicReadMcp(role) {
     || role === "researcher"
     // Coordination-only agents still receive an MCP gate dependency. Their
     // role contract is intentionally empty; attachment is not authorization.
-    || role === "preflight"
-    || role === "delegator";
+    || role === "preflight";
 }
 
 export function roleUsesDeterministicWriteMcp(role) {
@@ -930,7 +923,7 @@ export function getDeterministicMcpToolNames(role, {
 } = {}) {
   if (role === "subagent") return ["sub_agent_next_input", "agent_handoff"];
   if (!roleUsesDeterministicReadMcp(role)) return [];
-  if (role === "preflight" || role === "delegator") return [];
+  if (role === "preflight") return [];
   const tools = [...DETERMINISTIC_READ_TOOLS];
   if (customTools) tools.unshift("custom_tools");
   if (roleUsesDeterministicWriteMcp(role)) {

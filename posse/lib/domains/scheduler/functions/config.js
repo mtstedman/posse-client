@@ -48,7 +48,6 @@ const DEFAULT_JOB_RUNTIME_MULTIPLIERS = Object.freeze({
   promote: 2,
   artificer: 2,
   assess: 2,
-  delegate: 2,
   summarize: 2,
 });
 

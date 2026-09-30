@@ -150,11 +150,6 @@ function _normalizeHintSource(value, fallback = "inferred") {
 export function inferIntakeHints(text = "", fallbackMode = "build") {
   const lower = String(text || "").toLowerCase();
   const hints = {};
-  const imageNoun = String.raw`(?:image|images|photo|picture|illustration|logo|banner|png|jpg|jpeg|webp|hero image|icon set|icons?)`;
-  const imageVerb = String.raw`(?:generate|create|render|draw|design|produce|make)`;
-  const imageGenerationRe = new RegExp(
-    String.raw`\b${imageVerb}\b[\s\S]{0,80}\b${imageNoun}\b|\b${imageNoun}\b[\s\S]{0,80}\b${imageVerb}\b`,
-  );
   const reportNoun = String.raw`(?:report|summary|write[- ]?up|analysis|brief|export)`;
   const reportVerb = String.raw`(?:write|prepare|draft|produce|create|generate|compile|export|deliver)`;
   const reportGenerationRe = new RegExp(
@@ -190,7 +185,15 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
   // "investigate why this loops and fix it" used to hit the broad question
   // branch first, which selected the report researcher contract and could
   // terminate after discovery/planning without ever reaching development.
-  if (reportGenerationRe.test(lower) && !strongImplementationIntent) {
+  if (fallbackMode === "image") {
+    // Image intent is never read from the request text; it follows only an
+    // explicitly chosen image mode (see resolveWorkItemMode), which outranks
+    // any repo or failure wording in the request.
+    hints.intent_type = "image";
+    hints.deliverable_type = "image";
+    hints.output_mode = "auto";
+    hints.desired_outputs = ["artifact"];
+  } else if (reportGenerationRe.test(lower) && !strongImplementationIntent) {
     hints.intent_type = "report";
     hints.deliverable_type = /\bpdf\b/.test(lower) ? "pdf" : "markdown";
     hints.output_mode = "auto";
@@ -213,11 +216,6 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
     hints.deliverable_type = "code";
     hints.output_mode = "auto";
     hints.desired_outputs = ["repo"];
-  } else if (imageGenerationRe.test(lower) || /\b(dall-?e|midjourney|stable.?diffusion|image.?gen)\b/.test(lower)) {
-    hints.intent_type = "image";
-    hints.deliverable_type = "image";
-    hints.output_mode = "auto";
-    hints.desired_outputs = ["artifact"];
   } else if (implementationIntent) {
     hints.intent_type = "task";
     hints.deliverable_type = "code";
@@ -325,6 +323,32 @@ export function normalizeIntakeHints(input = {}, { requestText = "", fallbackMod
     subtasks: subtasks.slice(0, 12),
     constraints: constraints.slice(0, 12),
   };
+}
+
+/**
+ * Re-derive intake hints for a work item mode resolved after the hints were
+ * first built: explicit fields are kept, inferred ones are inferred again
+ * under the new mode.
+ */
+export function rebaseIntakeHintsForMode(hints = {}, { requestText = "", fallbackMode = "build" } = {}) {
+  const kept = {
+    suspected_files: hints.suspected_files,
+    suspected_dirs: hints.suspected_dirs,
+    subtasks: hints.subtasks,
+    constraints: hints.constraints,
+  };
+  for (const [field, sourceField] of [
+    ["intent_type", "intent_type_source"],
+    ["deliverable_type", "deliverable_type_source"],
+    ["output_mode", "output_mode_source"],
+    ["desired_outputs", "desired_outputs_source"],
+  ]) {
+    if (hints[sourceField] === "explicit") {
+      kept[field] = hints[field];
+      kept[sourceField] = "explicit";
+    }
+  }
+  return normalizeIntakeHints(kept, { requestText, fallbackMode });
 }
 
 export function getWorkItemIntakeHints(workItem, fallbackMode = "build") {

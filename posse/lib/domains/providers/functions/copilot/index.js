@@ -30,7 +30,7 @@
 // Pricing model: subscription quota (premium requests × per-model
 // multiplier), NOT per-token. Cost-tier routing is documented as a
 // Phase 5 follow-up; until then, expect the rate-limiter to trip when
-// the daily/monthly quota is exhausted and the delegator to fall
+// the daily/monthly quota is exhausted and provider selection to fall
 // through to the next provider in the provider_<role> account setting.
 
 import { spawn } from "child_process";

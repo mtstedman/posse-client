@@ -168,7 +168,6 @@ import {
 import {
   buildDeterministicDelegations as buildDeterministicDelegationsFromModule,
   delegationRoleForJobType as delegationRoleForJobTypeFromModule,
-  jobNeedsMlDelegation as jobNeedsMlDelegationFromModule,
   selectFallbackProvider as selectFallbackProviderFromModule,
 } from "../../providers/functions/delegation-routing.js";
 import {
@@ -1174,7 +1173,7 @@ export class Worker {
   // --- JSON Repair (cheap LLM call) -------------------------------------
 
   /**
-   * When extractJson fails on planner/delegator output, make one cheap LLM
+   * When extractJson fails on planner output, make one cheap LLM
    * call asking the model to emit ONLY valid JSON. This avoids burning a
    * full retry (with the entire research context re-sent) on a fixable
    * formatting issue.

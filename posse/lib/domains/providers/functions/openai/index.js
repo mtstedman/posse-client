@@ -304,7 +304,7 @@ export async function callProvider(promptText, {
   stableContext = null,
   remoteSystemPrompt = null,
   modelTier = "standard",
-  modelName = null,     // explicit model override from delegator
+  modelName = null,     // explicit per-job model override
   reasoningEffort = "medium",
   activity = "",
   silent = false,

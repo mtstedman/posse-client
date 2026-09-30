@@ -29,7 +29,7 @@ const PAIRING_PEER_SNAPSHOT_PROTOCOL = "posse.pairing_peers.v1";
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const SESSION_JOB_TYPES = Object.freeze([
-  "research", "plan", "delegate", "dev", "assess", "fix", "summarize", "artificer",
+  "research", "plan", "dev", "assess", "fix", "summarize", "artificer",
 ]);
 
 function configuredSessionProviders() {

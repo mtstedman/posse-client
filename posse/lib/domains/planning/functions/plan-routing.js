@@ -8,6 +8,9 @@ import path from "path";
 import { REPO_CODE_EXTENSIONS } from "../../../catalog/files.js";
 import { isArtifactMode } from "../../artifacts/functions/index.js";
 import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
+import { requiredWorkItemOutputs } from "../../intake/functions/objective-contract.js";
+import { hasExplicitRepoWorkIntent, hasRepoMutationIntent } from "../../intake/functions/implementation-intent.js";
+import { plannerTaskProducesRepoOutput } from "./plan-modality.js";
 import { validateMutableRepoPath } from "../../runtime/functions/protected-paths.js";
 import { validateCreateRootPath, validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
@@ -82,14 +85,16 @@ export function planCoverageGaps(workItem = {}, tasks = []) {
     : ["The request explicitly requires generated visual media, but the plan has no image/artificer deliverable task"];
 
   const intakeHints = getWorkItemIntakeHints(workItem, workItem?.mode || "build");
-  const desiredOutputs = Array.isArray(intakeHints?.desired_outputs)
-    ? intakeHints.desired_outputs.map((value) => String(value || "").trim().toLowerCase())
-    : [];
-  const requiresRepoIntegration = intakeHints?.output_mode === "repo"
-    || desiredOutputs.includes("repo")
-    || ["code", "patch", "mixed"].includes(String(intakeHints?.deliverable_type || "").trim().toLowerCase());
-  if (requiresRepoIntegration) {
+  if (requiredWorkItemOutputs(workItem, intakeHints).includes("repo")) {
+    // A request that asks for the media to be wired into the code ("add them
+    // to the landing page") needs a writable dev/fix task. Otherwise landing
+    // the generated files in the repository (promote, repo-path image outputs)
+    // is the repository delivery, judged the same way as the modality gate.
+    const lowerRequest = requestText.toLowerCase();
+    const integrationRequested = hasExplicitRepoWorkIntent(lowerRequest)
+      || hasRepoMutationIntent(lowerRequest, { includeCompletion: true });
     const hasWritableCodeTask = plannedTasks.some((task) => {
+      if (!integrationRequested && plannerTaskProducesRepoOutput(task)) return true;
       const jobType = String(task?.job_type || "dev").trim().toLowerCase();
       if (!["dev", "fix"].includes(jobType)) return false;
       const modified = Array.isArray(task?.files_to_modify) ? task.files_to_modify.filter(Boolean) : [];
@@ -488,6 +493,13 @@ export function looksLikeRepoCodeCreationTask(task, artifactDirAbs) {
     && !file.startsWith(`${artifactRoot}/`)
     && REPO_CODE_EXTS.has(path.posix.extname(file).toLowerCase())
   );
+}
+
+export function createsRepoPathFiles(task, artifactDirAbs) {
+  const createFiles = Array.isArray(task?.files_to_create)
+    ? task.files_to_create.map(normalizePlannerPath).filter(Boolean)
+    : [];
+  return createFiles.some((file) => file.includes("/") && !isArtifactScopedPath(file, artifactDirAbs));
 }
 
 function uniqueValues(values) {

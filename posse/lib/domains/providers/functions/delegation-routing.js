@@ -1,11 +1,10 @@
 import { IMAGE_TOOL_CHAT_PROVIDERS } from "../../../catalog/provider.js";
 // lib/domains/providers/functions/delegation-routing.js
 //
-// Shared delegation and provider-assignment helpers used by the worker's
-// delegate lane and deterministic provider routing.
+// Deterministic provider assignment for multi-provider roles (run by the plan
+// compiler) and fallback provider selection.
 
-import { SETTING_KEYS } from "../../../catalog/settings.js";
-import { getJob, getSetting } from "../../queue/functions/index.js";
+import { getJob } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { getAvailableProviders, getProviderCapacityState } from "./provider.js";
 import { delegationRoleForJobType as resolveDelegationRoleForJobType } from "./roles.js";
@@ -27,17 +26,6 @@ export function delegationPriorityForJobType(jobType) {
     default:
       return 9;
   }
-}
-
-export function getDelegationMode() {
-  const raw = String(getSetting(SETTING_KEYS.DELEGATION_MODE) || "js").trim().toLowerCase();
-  return raw === "ml" ? "ml" : "js";
-}
-
-export function jobNeedsMlDelegation(job) {
-  if (!job || job.provider) return false;
-  const role = delegationRoleForJobType(job.job_type);
-  return getAvailableProviders(role).length > 1;
 }
 
 export function buildDeterministicDelegations(pendingJobs = [], {

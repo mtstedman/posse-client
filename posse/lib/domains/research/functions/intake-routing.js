@@ -1,6 +1,6 @@
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 import { providerHonorsMcpToolDeadline } from "../../../catalog/provider.js";
-import { getDefaultModelTierForRole, getProviderForRole, roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
+import { getDefaultModelTierForRole, getProviderPoolForRole, roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 // Outer wrapper around the pure routing classifier in ./routing.js.
 // Handles the "live" side effects: caching the project map onto the
 // work item, logging telemetry events, and turning a routing decision
@@ -44,6 +44,7 @@ import {
 } from "./fanout.js";
 import { createRedTeamPlanChain, redTeamPlanningPayload } from "../../planning/functions/red-team-plan.js";
 import { isPlanApprovalEnabled } from "../../planning/functions/plan-approval.js";
+import { classifyCreateFileKind } from "../../planning/functions/plan-routing.js";
 import { researchPayload } from "./payload.js";
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import {
@@ -205,6 +206,11 @@ function validateOneshotGate({ candidateFiles = [], projectDir = null, redTeamPl
 
   if (candidates.length !== 1) {
     return failAll(`candidate_count_${candidates.length}`);
+  }
+  // A one-shot is a single dev/code edit: it cannot generate or rework a
+  // raster image, which needs the planner's image/promote routing.
+  if (classifyCreateFileKind(candidates[0]) === "image") {
+    return failAll("image_file_candidate", { reclassify: "plan" });
   }
   if (!projectDir) return failAll("missing_project_dir");
   if (isPlanApprovalEnabled()) return failAll("plan_approval_enabled");
@@ -737,14 +743,18 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
     baseExplicit: !!deepthinkBudgetExplicit || metadata.research_budget_explicit === true,
   });
   const dispatchPolicy = readPlannerDispatchPolicy({ projectDir });
-  const plannerProvider = String(getProviderForRole("planner") || "").trim().toLowerCase();
-  const dispatchProviderSupported = providerHonorsMcpToolDeadline(plannerProvider);
+  // The planner role may be a provider pool, and the job's provider is picked
+  // (and can fall back) within that pool at run time, so every member must
+  // honor the MCP tool deadline.
+  const plannerProviders = getProviderPoolForRole("planner");
+  const unsupportedPlannerProviders = plannerProviders.filter((provider) => !providerHonorsMcpToolDeadline(provider));
+  const dispatchProviderSupported = plannerProviders.length > 0 && unsupportedPlannerProviders.length === 0;
   if (dispatchPolicy.enabled && !dispatchProviderSupported) {
     // A blocking dispatch call can last the whole child budget. A provider
     // whose MCP client cannot be told to wait that long would abandon it, so
     // the planner keeps router intake instead of a dispatch it cannot use.
     logEvent({ work_item_id: workItem.id, event_type: EVENT_TYPES.PLANNER_DISPATCH_INACTIVE,
-      actor_type: EVENT_ACTORS.SYSTEM, message: `Planner dispatch inactive: provider ${plannerProvider || "unknown"} has no known MCP tool deadline` });
+      actor_type: EVENT_ACTORS.SYSTEM, message: `Planner dispatch inactive: provider ${unsupportedPlannerProviders.join(",") || "unknown"} has no known MCP tool deadline` });
   }
   if (dispatchPolicy.enabled && dispatchProviderSupported && !["oneshot", "oneshot_candidate", "no_research", "web_only_answer"].includes(effectiveRouting.bucket)) {
     // This route replaces a research job plus a plan job, not the cheap

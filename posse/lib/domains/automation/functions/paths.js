@@ -2,7 +2,11 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { getAccountSettingsPathForDisplay } from "../../settings/functions/account-settings.js";
+
+export const AUTOMATION_OWNER_ENTRY = fileURLToPath(new URL("./automation-owner-entry.js", import.meta.url));
+export const AUTOMATION_SUPERVISOR_ENTRY = fileURLToPath(new URL("./automation-supervisor-entry.js", import.meta.url));
 
 export function automationDataDir() {
   const configured = String(process.env.POSSE_AUTOMATION_DATA_DIR || "").trim();

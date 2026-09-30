@@ -1,8 +1,6 @@
-// lib/admin.js — Admin TUI for stats, work-item logs, and settings management
-//
-// Standalone TUI that uses alternate screen + raw mode.
-// Tabs: Overview | Work Items | Settings | ATLAS Report | Prompts
-// Navigation: 1-5 or Tab to switch, ↑↓ to scroll/select, Enter to drill in, Esc/Bksp to back up, 'e' to edit settings.
+// settings-controller.js — Settings tab of the admin TUI: pane layout,
+// rendering, and the inline editors. Methods run with the AdminTUI instance as
+// `this` (AdminTUI delegates to them).
 
 import readline from "readline";
 import {
@@ -83,10 +81,6 @@ import {
 import { PROVIDER_ROLE_NAMES } from "../../../providers/functions/roles.js";
 import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";
 import {
-  foldAtlasTokenSavings,
-  foldAtlasToolReliability,
-} from "./admin-atlas-rollups.js";
-import {
   formatDuration as fmtDuration,
   formatRelativeTime as fmtRelativeTime,
   formatSignedTokens as fmtSignedTokens,
@@ -94,14 +88,15 @@ import {
   formatUsd as fmtUsd,
 } from "../../../../shared/format/functions/units.js";
 import {
+  ADMIN_DEFAULT_SETTINGS_PANE,
   ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS,
   ADMIN_AGENT_SETTING_SECTIONS as AGENT_SETTING_SECTIONS,
+  ADMIN_CREDENTIAL_SETTING_DEFS,
   ADMIN_IMAGE_SETTING_SECTIONS as IMAGE_SETTING_SECTIONS,
   ADMIN_PROVIDER_CATALOG_SETTING_KEYS as PROVIDER_CATALOG_SETTING_KEYS,
   ADMIN_PROVIDER_SETTING_SECTIONS as PROVIDER_SETTING_SECTIONS,
   BOOLEAN_SETTING_KEYS,
   DEFAULT_ACCOUNT_SETTING_ROWS,
-  DELEGATION_MODE_OPTIONS,
   ENUM_SETTING_OPTIONS,
   HIDDEN_SETTING_KEYS,
   MULTI_SETTING_KEYS,
@@ -112,12 +107,14 @@ import {
   PROJECT_DB_SETTING_KEYS,
   PROJECT_DB_TYPE_OPTIONS,
   PROJECT_DB_PERMISSION_OPTIONS,
+  REPO_SCOPED_DISPLAY_KEYS,
   SETTINGS_GROUPS,
   SETTINGS_PANES,
+  adminUnsetValueLabel,
+  formatAdminSettingValue,
   getAdminSettingPresentation,
   settingsPaneForKey,
   SKILL_SETTING_PREFIX,
-  SYNTHETIC_SETTING_KEYS,
   toDisplaySettingKey,
   toStorageSettingKey,
 } from "../../../settings/functions/admin-catalog.js";
@@ -245,16 +242,18 @@ function getSettingsValueColumnWidth(innerWidth, keyColumnWidth = SETTINGS_KEY_C
   return Math.max(16, Math.min(28, innerWidth - reserved));
 }
 
+// Value cell for one setting. Blank values show what they mean at runtime
+// (the default) instead of an empty placeholder, and always use the default
+// color: an empty stored value falls back to the same behavior.
 export function adminSettingValuePresentation(value, source, {
+  settingKey = "",
   defaultColor = C.magenta,
   configuredColor = C.cyan,
 } = {}) {
-  const text = value == null
-    ? "(none)"
-    : (String(value).trim() === "" ? "(empty)" : String(value));
+  const blank = value == null || String(value).trim() === "";
   return {
-    text,
-    color: source === "default" ? defaultColor : configuredColor,
+    text: formatAdminSettingValue(settingKey, value),
+    color: blank || source === "default" ? defaultColor : configuredColor,
   };
 }
 
@@ -386,7 +385,6 @@ export class AdminSettingsController {
         setting_value: providerValue,
         updated_at: null,
         description: `Provider for image artifacts; selectable: ${selectableProviders.map((option) => option.value).join(", ") || "none"}`,
-        label: "Image artifact provider",
         source: savedProvider ? "global" : "config",
         provider: providerValue,
       },
@@ -432,9 +430,14 @@ export class AdminSettingsController {
     return [
       row("project_db_enabled", cfg.enabled ? "true" : "false", "Enable the opt-in project_db_query agent tool for this repo."),
       row("project_db_type", cfg.dbType || "", "Project database engine: sqlite, postgres, or mysql."),
-      row("project_db_permissions", (cfg.permissions || []).join(","), `${(cfg.suspendedLegacyGrants || []).length > 0
-        ? `SUSPENDED: this repo granted ${cfg.suspendedLegacyGrants.join(", ")} under the old per-statement scheme, where write meant UPDATE only. Those grants are withheld until you save this setting again. `
-        : ""}Granted SQL scopes: read (SELECT, inspection) and write (UPDATE, INSERT, DELETE, CREATE, ALTER); DROP/TRUNCATE never allowed. Read-phase roles only ever use the read scope.`),
+      {
+        ...row("project_db_permissions", (cfg.permissions || []).join(","), "Granted SQL scopes: read (SELECT, inspection) and write (UPDATE, INSERT, DELETE, CREATE, ALTER); DROP/TRUNCATE never allowed. Read-phase roles only ever use the read scope."),
+        // Shown in place of the description so a withheld legacy grant is
+        // never hidden behind the standard explanation.
+        warning: (cfg.suspendedLegacyGrants || []).length > 0
+          ? `SUSPENDED: this repo granted ${cfg.suspendedLegacyGrants.join(", ")} under the old per-statement scheme, where write meant UPDATE only. Those grants are withheld until you save this setting again.`
+          : null,
+      },
       row("project_db_database", cfg.database || "", "sqlite: file path (relative to repo). postgres/mysql: database name."),
       row("project_db_host", cfg.host || "", "postgres/mysql host (ignored for sqlite)."),
       row("project_db_port", cfg.port != null ? String(cfg.port) : "", "postgres/mysql port (ignored for sqlite)."),
@@ -466,14 +469,11 @@ export class AdminSettingsController {
       !MODEL_SETTING_KEYS.has(entry.setting_key) &&
       !PROVIDER_USAGE_SETTING_KEYS.has(entry.setting_key) &&
       !PROVIDER_SETTING_KEYS.has(entry.setting_key) &&
-      !ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS.has(entry.setting_key) &&
-      !SYNTHETIC_SETTING_KEYS.has(entry.setting_key)
+      !ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS.has(entry.setting_key)
     ).map((entry) => toDisplaySettingEntry(withCatalogSource(entry)));
 
-    // Sort dbSettings to match the visual order in SETTINGS_GROUPS so that
-    // ↑/↓ navigation walks through the same sequence the user sees, and so
-    // section-jump nav lands on contiguous index ranges. Ungrouped keys sort
-    // to the end (they render in a Misc section).
+    // Group order first, then key name, so ungrouped keys sort to the end of
+    // their pane.
     const groupOrder = new Map();
     let groupOrderCounter = 0;
     for (const group of SETTINGS_GROUPS) {
@@ -490,96 +490,133 @@ export class AdminSettingsController {
       const pane = settingsPaneForKey(entry.setting_key);
       (dbSettingsByPane[pane] || dbSettingsByPane.debug).push(entry);
     }
-    const modelSettings = this._getModelSettingEntries();
-    const artifactSettings = this._getArtifactSettingEntries();
-    const providerUsageSettings = this._getProviderUsageSettingEntries();
-    const providerSettings = this._getProviderSettingEntries();
-    const delegationSettings = this._getDelegationSettingEntries();
-    const skillSettings = this._getSkillSettingEntries();
-    const projectDbSettings = this._getProjectDbSettingEntries();
-    const dbSettingsByKey = new Map(dbSettings.map((entry) => [entry.setting_key, entry]));
-    const providerSettingsByRole = new Map(providerSettings.map((entry) => [entry.role, entry]));
-    const delegationSetting = delegationSettings[0] || null;
-    const dbRowsForKeys = (keys) => keys.map((key) => dbSettingsByKey.get(key)).filter(Boolean);
-    const agentSettings = AGENT_SETTING_SECTIONS.flatMap((section) => {
-      const rows = [];
-      const providerRow = providerSettingsByRole.get(section.role);
-      if (providerRow) rows.push(providerRow);
-      if (section.role === "delegator" && delegationSetting) rows.push(delegationSetting);
-      rows.push(...dbRowsForKeys(section.keys.filter((key) => key !== "delegation_mode")));
-      return rows;
-    });
-    const textModelSettings = modelSettings.filter((entry) => (entry.kind || "text") === "text");
-    const imageModelSettings = modelSettings.filter((entry) => entry.kind === "image");
-    const providerPanelSettings = [
-      ...PROVIDER_SETTING_SECTIONS.flatMap((section) => [
-        ...textModelSettings.filter((entry) => entry.provider === section.provider),
-        ...dbRowsForKeys(section.settingKeys),
-      ]),
-      ...dbRowsForKeys(PROVIDER_CATALOG_SETTING_KEYS),
-    ];
-    const imagePanelSettings = [
-      ...artifactSettings,
-      ...IMAGE_SETTING_SECTIONS.flatMap((section) => [
-        ...imageModelSettings.filter((entry) => entry.provider === section.provider),
-        ...dbRowsForKeys(section.settingKeys),
-      ]),
-    ];
-    // Per-pane editable lists. Order here MUST match the visual row order
-    // _buildSettings renders for that pane — ↑/↓ selection walks this list.
-    const paneEditableSettings = {
-      atlas: [
-        ...dbSettingsByPane.atlas,
-      ],
-      agents: [
-        ...agentSettings,
-      ],
-      providers: [
-        ...providerPanelSettings,
-        ...providerUsageSettings,
-      ],
-      images: [
-        ...imagePanelSettings,
-      ],
-      general: [
-        ...dbSettingsByPane.general,
-        ...skillSettings,
-      ],
-      repo: [
-        ...dbSettingsByPane.repo,
-        ...projectDbSettings,
-      ],
-      debug: [
-        ...dbSettingsByPane.debug,
-      ],
-    };
-    const editableSettings = [
-      ...paneEditableSettings.atlas,
-      ...paneEditableSettings.agents,
-      ...paneEditableSettings.providers,
-      ...paneEditableSettings.images,
-      ...paneEditableSettings.general,
-      ...paneEditableSettings.repo,
-      ...paneEditableSettings.debug,
-    ];
-    this._settingsCache = {
+    const snapshot = {
       dbSettings,
       dbSettingsByPane,
-      modelSettings,
-      artifactSettings,
-      providerUsageSettings,
-      providerSettings,
-      delegationSettings,
-      agentSettings,
-      providerPanelSettings,
-      imagePanelSettings,
-      skillSettings,
-      projectDbSettings,
-      editableSettings,
-      paneEditableSettings,
+      dbSettingsByKey: new Map(dbSettings.map((entry) => [entry.setting_key, entry])),
+      modelSettings: this._getModelSettingEntries(),
+      artifactSettings: this._getArtifactSettingEntries(),
+      providerSettings: this._getProviderSettingEntries(),
+      skillSettings: this._getSkillSettingEntries(),
+      projectDbSettings: this._getProjectDbSettingEntries(),
     };
+    // One layout per pane drives both rendering and ↑/↓ selection, so the
+    // editable order can never drift from the rows on screen.
+    snapshot.paneSections = Object.fromEntries(
+      SETTINGS_PANES.map((pane) => [pane.id, this._buildSettingsPaneSections(pane.id, snapshot)]),
+    );
+    snapshot.paneEditableSettings = Object.fromEntries(
+      SETTINGS_PANES.map((pane) => [
+        pane.id,
+        snapshot.paneSections[pane.id].flatMap((section) => section.rows || []),
+      ]),
+    );
+    snapshot.editableSettings = SETTINGS_PANES.flatMap((pane) => snapshot.paneEditableSettings[pane.id]);
+    this._settingsCache = snapshot;
     this._settingsCacheAt = now;
     return this._settingsCache;
+  }
+
+  // Sections for one settings pane. Each section has a title, an optional
+  // hint, editable `rows` (setting entries), and optional read-only `lines`
+  // or a `note` shown when it has no rows.
+  _buildSettingsPaneSections(paneId, snapshot) {
+    const sections = [];
+    const { dbSettingsByKey } = snapshot;
+    const dbRows = (keys) => keys.map((key) => dbSettingsByKey.get(key)).filter(Boolean);
+    const placed = new Set();
+    const pushGroups = (skip = new Set()) => {
+      for (const group of SETTINGS_GROUPS) {
+        if (group.pane !== paneId) continue;
+        const rows = dbRows(group.keys.filter((key) => !skip.has(key)));
+        for (const row of rows) placed.add(row.setting_key);
+        if (group.id === "skills") {
+          rows.push(...snapshot.skillSettings);
+          sections.push({
+            id: group.id,
+            title: group.label,
+            hint: "new skills are allowed until disabled",
+            rows,
+            note: snapshot.skillSettings.length === 0 ? "No skills found in the remote prompt bundle." : null,
+          });
+          continue;
+        }
+        if (rows.length > 0) sections.push({ id: group.id, title: group.label, hint: group.hint || null, rows });
+      }
+      const other = (snapshot.dbSettingsByPane[paneId] || [])
+        .filter((entry) => !placed.has(entry.setting_key) && !skip.has(entry.setting_key));
+      if (other.length > 0) sections.push({ id: "other", title: "Other", hint: null, rows: other });
+    };
+
+    if (paneId === "general") {
+      // Per-skill toggles are the readable form of the disabled-skill list.
+      pushGroups(new Set([SETTING_KEYS.SKILLS_DISABLED_IDS]));
+    } else if (paneId === "agents") {
+      const providerByRole = new Map(snapshot.providerSettings.map((entry) => [entry.role, entry]));
+      for (const section of AGENT_SETTING_SECTIONS) {
+        const rows = [];
+        const providerRow = providerByRole.get(section.role);
+        if (providerRow) rows.push(providerRow);
+        rows.push(...dbRows(section.keys));
+        if (rows.length > 0) sections.push({ id: `agent_${section.role}`, title: section.label, hint: section.hint || null, rows });
+      }
+    } else if (paneId === "providers") {
+      const textModels = snapshot.modelSettings.filter((entry) => (entry.kind || "text") === "text");
+      const imageModels = snapshot.modelSettings.filter((entry) => entry.kind === "image");
+      for (const section of PROVIDER_SETTING_SECTIONS) {
+        const rows = [
+          ...textModels.filter((entry) => entry.provider === section.provider),
+          ...dbRows(section.settingKeys),
+        ];
+        if (rows.length > 0) sections.push({ id: `provider_${section.provider}`, title: section.label, hint: null, rows });
+      }
+      const imageRows = [
+        ...snapshot.artifactSettings,
+        ...IMAGE_SETTING_SECTIONS.flatMap((section) => [
+          ...imageModels.filter((entry) => entry.provider === section.provider),
+          ...dbRows(section.settingKeys),
+        ]),
+      ];
+      if (imageRows.length > 0) sections.push({ id: "images", title: "Image Generation", hint: null, rows: imageRows });
+      const catalogRows = dbRows(PROVIDER_CATALOG_SETTING_KEYS);
+      if (catalogRows.length > 0) sections.push({ id: "provider_catalog", title: "Model Catalog", hint: null, rows: catalogRows });
+      // Secrets stay env-only; show which ones are present without ever
+      // rendering any part of the value.
+      sections.push({
+        id: "credentials",
+        title: "Credentials",
+        hint: "set in your environment; values are never shown",
+        rows: [],
+        lines: ADMIN_CREDENTIAL_SETTING_DEFS.map((definition) => (
+          process.env[definition.env]
+            ? `  ${C.green}✓${C.reset} ${C.bold}${definition.env.padEnd(26)}${C.reset} ${C.green}configured${C.reset}  ${C.dim}${definition.description}${C.reset}`
+            : `  ${C.dim}· ${definition.env.padEnd(26)} not set     ${definition.description}${C.reset}`
+        )),
+      });
+    } else if (paneId === "repo") {
+      pushGroups();
+      sections.push({
+        id: "project_database",
+        title: "Project Database",
+        hint: "opt-in agent SQL access; stored in this repo's .posse/db",
+        rows: snapshot.projectDbSettings,
+      });
+      const dbPath = getRuntimeDbPath(this.projectDir);
+      sections.push({
+        id: "paths",
+        title: "Paths",
+        hint: null,
+        rows: [],
+        lines: [
+          `  ${C.dim}Project:${C.reset}  ${this.projectDir}`,
+          `  ${C.dim}Database:${C.reset} ${dbPath}`,
+          `  ${C.dim}Reports:${C.reset}  ${path.resolve(path.dirname(dbPath), "reports")}`,
+        ],
+      });
+    } else {
+      pushGroups();
+    }
+    return sections;
   }
 
   _getModelSettingEntries() {
@@ -605,10 +642,6 @@ export class AdminSettingsController {
       });
   }
 
-  _getProviderUsageSettingEntries() {
-    return [];
-  }
-
   _getSelectableProviders() {
     return PROVIDER_OPTIONS.filter((provider) => isAdminProviderOption(provider));
   }
@@ -626,7 +659,7 @@ export class AdminSettingsController {
 
   _getProviderSettingEntries() {
     const selectable = this._getSelectableProviders();
-    return PROVIDER_ROLE_NAMES.map((role) => {
+    return PROVIDER_ROLE_NAMES.filter((role) => isAdminVisibleCatalogKey(`provider_${role}`)).map((role) => {
       const storedVal = safeGetSetting(`provider_${role}`);
       const effective = storedVal || "claude";
       const source = storedVal ? "global" : "default";
@@ -643,20 +676,6 @@ export class AdminSettingsController {
     });
   }
 
-  _getDelegationSettingEntries() {
-    const storedVal = safeGetSetting("delegation_mode");
-    const defaultValue = String(getCatalogEntry("delegation_mode")?.default || "js");
-    return [{
-      setting_key: "delegation_mode",
-      setting_value: storedVal || "js",
-      updated_at: null,
-      description: `Delegation engine mode; options: ${DELEGATION_MODE_OPTIONS.join(", ")}`,
-      label: getAdminSettingPresentation("delegation_mode").label,
-      source: !storedVal || storedVal === defaultValue ? "default" : "global",
-      db_value: storedVal || "",
-    }];
-  }
-
   _getEditableSettings() {
     const snapshot = this._getSettingsSnapshot();
     const paneList = snapshot.paneEditableSettings?.[this._settingsPane];
@@ -665,7 +684,7 @@ export class AdminSettingsController {
 
   _cycleSettingsPane(direction) {
     const paneIds = SETTINGS_PANES.map((pane) => pane.id);
-    const currentIndex = paneIds.indexOf(this._settingsPane);
+    const currentIndex = paneIds.indexOf(this._settingsPane || ADMIN_DEFAULT_SETTINGS_PANE);
     const nextIndex = ((currentIndex >= 0 ? currentIndex : 0) + direction + paneIds.length) % paneIds.length;
     this._settingsPane = paneIds[nextIndex];
     this._settingsIndex = 0;
@@ -775,24 +794,6 @@ export class AdminSettingsController {
       this.requestRender({ force: true });
       return;
     }
-    if (storageKey === SETTING_KEYS.SKILLS_DISABLED_IDS) {
-      let manifests = [];
-      try { manifests = loadSkillManifests(); } catch { manifests = []; }
-      const currentRaw = initialValue == null ? (selected.setting_value || "") : String(initialValue);
-      const disabled = new Set(parseSkillIds(currentRaw));
-      this._editing = "editSkills";
-      this._editKey = selected.setting_key;
-      this._editStorageKey = storageKey;
-      this._editSkillChoices = manifests.map((skill) => ({
-        id: skill.id,
-        name: skill.name || skill.id,
-        disabled: disabled.has(skill.id),
-      }));
-      this._editSkillIndex = 0;
-      process.stdout.write("\x1b[?25l");
-      this.requestRender({ force: true });
-      return;
-    }
     if (MULTI_SETTING_KEYS.has(storageKey)) {
       const allowed = MULTI_SETTING_VALUES[storageKey] || new Set();
       const options = MULTI_SETTING_OPTIONS[storageKey] || [];
@@ -823,6 +824,11 @@ export class AdminSettingsController {
       this._editKey = selected.setting_key;
       this._editStorageKey = storageKey;
       this._editModelChoices = enumChoices.map((choice) => ({ value: choice.value, label: choice.label }));
+      // Blank-default enums (e.g. "use the researcher's provider") need an
+      // explicit choice for the default, which the option list cannot carry.
+      if (String(getCatalogEntry(storageKey)?.default ?? "") === "") {
+        this._editModelChoices.unshift({ value: "", label: `default (${adminUnsetValueLabel(storageKey) || "not set"})` });
+      }
       const requestedValue = initialValue == null ? currentValue : String(initialValue).trim().toLowerCase();
       const pickedIndex = this._editModelChoices.findIndex((choice) => choice.value === requestedValue);
       this._editModelIndex = pickedIndex >= 0 ? pickedIndex : 0;
@@ -923,8 +929,6 @@ export class AdminSettingsController {
     this._editProviderIndex = 0;
     this._editPhaseChoices = [];
     this._editPhaseIndex = 0;
-    this._editSkillChoices = [];
-    this._editSkillIndex = 0;
     this._editModelChoices = [];
     this._editModelIndex = 0;
     this._editBooleanChoices = [];
@@ -937,7 +941,7 @@ export class AdminSettingsController {
     try {
       if (PROJECT_DB_SETTING_KEYS.has(storageKey)) {
         this._saveProjectDbSetting(storageKey, value);
-        this._settingsSavedFlash = { text: `Saved ${storageKey}`, at: Date.now() };
+        this._settingsSavedFlash = { text: `Saved ${getAdminSettingPresentation(storageKey).label}`, at: Date.now() };
         return true;
       }
       if (storageKey.startsWith(SKILL_SETTING_PREFIX)) {
@@ -953,7 +957,7 @@ export class AdminSettingsController {
       // Transient nav-bar confirmation: saves are otherwise only visible as
       // the value changing in the list, which is easy to miss.
       this._settingsSavedFlash = {
-        text: `Saved ${toDisplaySettingKey(storageKey)}`,
+        text: `Saved ${this._editLabel || getAdminSettingPresentation(toDisplaySettingKey(storageKey)).label}`,
         at: Date.now(),
       };
       return true;
@@ -1028,38 +1032,6 @@ export class AdminSettingsController {
           const target = aliases[printable];
           const choice = this._editProviderChoices.find((entry) => entry.provider === target);
           if (choice) choice.enabled = !choice.enabled;
-        }
-      }
-    } else if (this._editing === "editSkills") {
-      const maxIndex = Math.max(this._editSkillChoices.length - 1, 0);
-      if (isEnterKey(str, key)) {
-        const disabledIds = this._editSkillChoices
-          .filter((choice) => choice.disabled)
-          .map((choice) => choice.id);
-        const savedValue = [...disabledIds].sort().join(",");
-        if (!this._saveSettingValue(this._editStorageKey || SETTING_KEYS.SKILLS_DISABLED_IDS, savedValue)) return;
-        this._invalidateSettingsCache();
-        this._resetEditState();
-      } else if (key?.name === "left" || key?.name === "up") {
-        this._editSkillIndex = Math.max(0, this._editSkillIndex - 1);
-      } else if (key?.name === "right" || key?.name === "down") {
-        this._editSkillIndex = Math.min(maxIndex, this._editSkillIndex + 1);
-      } else if (key?.name === "pageup") {
-        this._editSkillIndex = Math.max(0, this._editSkillIndex - 8);
-      } else if (key?.name === "pagedown") {
-        this._editSkillIndex = Math.min(maxIndex, this._editSkillIndex + 8);
-      } else if (key?.name === "home") {
-        this._editSkillIndex = 0;
-      } else if (key?.name === "end") {
-        this._editSkillIndex = maxIndex;
-      } else {
-        const printable = getPrintableInput(str, key);
-        if (key?.name === "space" || printable === " ") {
-          const choice = this._editSkillChoices[this._editSkillIndex];
-          if (choice) choice.disabled = !choice.disabled;
-        } else if (printable && /^[1-9]$/.test(printable)) {
-          const idx = parseInt(printable, 10) - 1;
-          if (idx <= maxIndex) this._editSkillIndex = idx;
         }
       }
     } else if (this._editing === "editPhases") {
@@ -1191,6 +1163,10 @@ export class AdminSettingsController {
     if (clipped) {
       lines.push(` ${C.dim}Input clipped on the left so your latest typing stays visible.${C.reset}`);
     }
+    const unset = this._editStorageKey === "project_db_password" ? null : adminUnsetValueLabel(this._editStorageKey || this._editKey);
+    if (unset) {
+      lines.push(` ${C.dim}Leave blank to use the default: ${unset}${C.reset}`);
+    }
     if (this._editError) {
       lines.push(` ${C.red}${this._editError}${C.reset}`);
     }
@@ -1264,8 +1240,7 @@ export class AdminSettingsController {
     const paneIds = SETTINGS_PANES.map((pane) => pane.id);
     const settingsPane = paneIds.includes(this._settingsPane) ? this._settingsPane : "all";
     this._settingsRowMap = new Map();
-    // List of row indices that hold a section header \u2014 used by PgUp/PgDn
-    // jump nav to step between groups.
+    // Row indices of section headers, used by PgUp/PgDn to step between groups.
     this._settingsSectionRows = [];
     const ruleWidth = Math.max(40, Math.min(inner, 76));
 
@@ -1277,359 +1252,135 @@ export class AdminSettingsController {
           ? `${C.bold}${C.cyan}[${pane.label}]${C.reset}`
           : `${C.dim}${pane.label}${C.reset}`
       )).join(` ${C.dim}|${C.reset} `);
-      lines.push(` ${paneBar}  ${C.dim}press \u2190/\u2192 to switch${C.reset}`);
+      lines.push(` ${paneBar}  ${C.dim}←/→ switch pane${C.reset}`);
     }
-    lines.push(` ${C.magenta}default/inherited${C.reset} ${C.dim}|${C.reset} ${C.cyan}saved/configured${C.reset} ${C.dim}| blank values show as (empty) or (none)${C.reset}`);
-    lines.push("");
+    lines.push(` ${C.magenta}default${C.reset} ${C.dim}·${C.reset} ${C.cyan}changed${C.reset} ${C.dim}· select a row to read its full description below${C.reset}`);
 
     const settingsSnapshot = this._getSettingsSnapshot();
-    const dbSettingsByPane = settingsSnapshot.dbSettingsByPane
-      || Object.fromEntries(SETTINGS_PANES.map((pane) => [pane.id, []]));
-    const providerSettings = settingsSnapshot.providerSettings;
-    const modelSettings = settingsSnapshot.modelSettings;
-    const artifactSettings = settingsSnapshot.artifactSettings || [];
-    const providerUsageSettings = settingsSnapshot.providerUsageSettings || [];
-    const delegationSettings = settingsSnapshot.delegationSettings || [];
-    const skillSettings = settingsSnapshot.skillSettings || [];
-    const projectDbSettings = settingsSnapshot.projectDbSettings || [];
-    const providerUsageWindowMap = providerUsageSettings.length > 0
-      ? buildProviderUsageWindowMap(getConfiguredProviderUsage())
-      : new Map();
-    const delegationMode = delegationSettings[0]?.setting_value || "js";
     const editableSettings = this._getEditableSettings();
     if (editableSettings.length > 0) {
       this._settingsIndex = Math.max(0, Math.min(this._settingsIndex, editableSettings.length - 1));
     }
     const selectedSetting = editableSettings[this._settingsIndex] || null;
     const selectedKey = this._editing ? this._editKey : selectedSetting?.setting_key;
-    const isHighlightedSetting = (settingKey) => selectedKey === settingKey;
-    // Compute the setting column width from the longest human-readable label
-    // across every pane (not the storage keys) so columns stay flush when
-    // switching panes. Clamp into a sane range so explanations still get most
-    // of the row width.
+    // Size the label column from every pane (not just this one) so columns
+    // stay put while switching panes; clamp so explanations keep most of the
+    // row width.
     const longestKeyLen = (settingsSnapshot.editableSettings || []).reduce(
-      (max, s) => Math.max(
-        max,
-        getAdminSettingPresentation(s.setting_key, s).label.length,
-      ),
+      (max, s) => Math.max(max, getAdminSettingPresentation(s.setting_key, s).label.length),
       0,
     );
     const keyWidth = clampSettingsKeyColumnWidth(longestKeyLen);
     const valueWidth = getSettingsValueColumnWidth(inner, keyWidth);
-    // Description column fills the remaining horizontal budget so every row
-    // is exactly `inner` chars wide — values, descriptions, and the right edge
-    // all stay flush in a rectangular block.
     //   2 leading + 2 (#) + 1 + keyWidth + 1 + valueWidth + 1 + descWidth = inner
     const descWidth = Math.max(20, inner - (2 + 2 + 1 + keyWidth + 1 + valueWidth + 1));
     const padKey = (k) => {
-      const s = String(k || "");
-      if (s.length <= keyWidth) return s.padEnd(keyWidth);
-      // Defensive: if a future key exceeds the cap, ellipsis-truncate so the
-      // value column stays aligned rather than shifting right.
-      return `${s.slice(0, keyWidth - 1)}…`;
+      const text = String(k || "");
+      if (text.length <= keyWidth) return text.padEnd(keyWidth);
+      return `${text.slice(0, keyWidth - 1)}…`;
     };
-    const hdr = `  ${"#".padStart(2)} ${"Setting".padEnd(keyWidth)} ${"Value".padEnd(valueWidth)} ${"Explanation".padEnd(descWidth)}`;
-    const sectionDivider = ` ${C.dim}${"-".repeat(Math.max(1, inner))}${C.reset}`;
     let rowIndex = 1;
 
-    const pushSection = (title, subtitle = "") => {
-      this._settingsSectionRows.push(lines.length);
-      const rule = brandRule({ label: String(title).toLowerCase(), color: C.cyan, width: ruleWidth });
-      const tail = subtitle ? `  ${C.dim}${subtitle}${C.reset}` : "";
-      lines.push(`${rule}${tail}`);
+    const settingValueText = (entry) => {
+      if (PROVIDER_SETTING_KEYS.has(entry.storage_key || entry.setting_key)) return formatProviderSettingValue(entry);
+      if (MODEL_SETTING_KEYS.has(entry.setting_key)) return formatModelSettingDisplayValue(entry);
+      return entry.setting_value;
     };
-    const pushTableHeader = () => {
-      lines.push(` ${C.dim}${hdr}${C.reset}`);
-      lines.push(sectionDivider);
-    };
-    const pushEditableRow = (settingKey, value, desc, valueColor = C.cyan, options = {}) => {
-      const isHighlighted = isHighlightedSetting(settingKey);
-      const displayLabel = options.label || getAdminSettingPresentation(settingKey).label;
-      const paddedKey = padKey(displayLabel);
-      const keyBase = options.dimmed && !isHighlighted
-        ? `${C.dim}${paddedKey}${C.reset}`
-        : paddedKey;
-      const keyStr = isHighlighted ? `${C.yellow}${paddedKey}${C.reset}` : keyBase;
-      const descColor = options.dimmed ? C.dim : C.dim;
-      this._settingsRowMap.set(settingKey, lines.length);
-      // Pad/truncate description to `descWidth` so every row ends at the same
-      // column — gives the table a uniform rectangular silhouette.
-      const descCell = fit(`${descColor}${desc || ""}${C.reset}`, descWidth);
-      const valuePresentation = adminSettingValuePresentation(value, options.source, {
-        defaultColor: C.magenta,
-        configuredColor: valueColor,
+    const pushRow = (entry) => {
+      const settingKey = entry.setting_key;
+      const presentation = getAdminSettingPresentation(settingKey, entry);
+      const paddedKey = padKey(presentation.label);
+      const keyStr = selectedKey === settingKey ? `${C.yellow}${paddedKey}${C.reset}` : paddedKey;
+      const value = adminSettingValuePresentation(settingValueText(entry), entry.source, {
+        settingKey: entry.storage_key || settingKey,
       });
-      lines.push(`  ${String(rowIndex).padStart(2)} ${keyStr} ${fit(`${valuePresentation.color}${valuePresentation.text}${C.reset}`, valueWidth)} ${descCell}`);
+      this._settingsRowMap.set(settingKey, lines.length);
+      const description = entry.warning
+        ? `${C.yellow}${entry.warning}${C.reset}`
+        : `${C.dim}${presentation.description}${C.reset}`;
+      lines.push(
+        `  ${String(rowIndex).padStart(2)} ${keyStr} ${fit(`${value.color}${value.text}${C.reset}`, valueWidth)} ${fit(description, descWidth)}`,
+      );
       rowIndex += 1;
     };
-
-    const resolveDesc = (displayKey, entry) => {
-      return getAdminSettingPresentation(displayKey, entry).description;
-    };
-
-    // ── Database settings, split into focused groups per pane ─────────────
-    const settingsByKey = new Map((settingsSnapshot.dbSettings || []).map((s) => [s.setting_key, s]));
-    const providerSettingsByRole = new Map((providerSettings || []).map((s) => [s.role, s]));
-    const textModelSettings = (modelSettings || []).filter((s) => (s.kind || "text") === "text");
-    const imageModelSettings = (modelSettings || []).filter((s) => s.kind === "image");
-    const pushDbSettingRow = (key) => {
-      const s = settingsByKey.get(key);
-      if (!s) return false;
-      pushEditableRow(s.setting_key, s.setting_value, resolveDesc(key, s), C.cyan, {
-        label: s.label,
-        source: s.source,
-      });
-      return true;
-    };
-    const pushModelSettingRow = (s) => {
-      const source = s.source || "default";
-      const providerLabel = PROVIDER_LABELS[s.provider] || s.provider;
-      const desc = `${s.description} (${providerLabel}, ${source}; using ${s.effective_model || "?"})`;
-      const displayValue = formatModelSettingDisplayValue(s);
-      const valueColor = s.setting_value ? C.cyan : C.dim;
-      pushEditableRow(s.setting_key, displayValue, desc, valueColor, {
-        label: s.label,
-        source: s.source,
-      });
-    };
-    const pushProviderSettingRow = (s, { dimWhenDelegatorInactive = true } = {}) => {
-      const envNote = s.source === "global" && s.env_value
-        ? ` overrides env${s.env_value ? `; env=${s.env_value}` : ""}`
-        : s.source === "env" && s.db_value
-          ? ` env fallback${s.db_value ? `; saved global=${s.db_value}` : ""}`
-          : "";
-      const isDelegatorInactive = dimWhenDelegatorInactive && s.setting_key === "provider_delegator" && delegationMode === "js";
-      const desc = `${s.description} (${s.source}${envNote})${isDelegatorInactive ? " - currently handled by system" : ""}`;
-      const valueColor = isDelegatorInactive ? C.dim : C.cyan;
-      pushEditableRow(s.setting_key, formatProviderSettingValue(s), desc, valueColor, {
-        dimmed: isDelegatorInactive,
-        label: s.label,
-        source: s.source,
-      });
-    };
-    const renderDbGroupsForPane = (paneId) => {
-      const placedKeys = new Set();
-      for (const group of SETTINGS_GROUPS) {
-        if (group.pane !== paneId) continue;
-        const present = group.keys.filter((k) => settingsByKey.has(k));
-        if (present.length === 0) continue;
-        pushSection(group.label, "(press 'e' to edit)");
-        pushTableHeader();
-        for (const key of present) {
-          const s = settingsByKey.get(key);
-          pushEditableRow(s.setting_key, s.setting_value, resolveDesc(key, s), C.cyan, {
-            label: s.label,
-            source: s.source,
-          });
-          placedKeys.add(key);
-        }
+    const renderSections = (paneId) => {
+      if (paneId === "repo") {
+        lines.push(`  ${C.dim}Saved only for this repository:${C.reset} ${C.bold}${this.projectDir}${C.reset}`);
+      }
+      for (const section of settingsSnapshot.paneSections?.[paneId] || []) {
         lines.push("");
+        this._settingsSectionRows.push(lines.length);
+        const rule = brandRule({ label: String(section.title).toLowerCase(), color: C.cyan, width: ruleWidth });
+        lines.push(section.hint ? `${rule}  ${C.dim}${section.hint}${C.reset}` : rule);
+        for (const entry of section.rows || []) pushRow(entry);
+        for (const line of section.lines || []) lines.push(line);
+        if (section.note) lines.push(`  ${C.dim}${section.note}${C.reset}`);
       }
-      // Surface any catalog keys routed to this pane but not yet placed in a
-      // group, so new settings remain visible until explicitly slotted into
-      // SETTINGS_GROUPS.
-      const ungrouped = (dbSettingsByPane[paneId] || []).filter((s) => !placedKeys.has(s.setting_key));
-      if (ungrouped.length > 0) {
-        pushSection("misc", "(unmapped — add to SETTINGS_GROUPS)");
-        pushTableHeader();
-        for (const s of ungrouped) {
-          pushEditableRow(s.setting_key, s.setting_value, resolveDesc(s.setting_key, s), C.cyan, {
-            label: s.label,
-            source: s.source,
-          });
-        }
+    };
+
+    lines.push("");
+    lines.push(`${C.dim}  ${"#".padStart(2)} ${"Setting".padEnd(keyWidth)} ${"Value".padEnd(valueWidth)} Explanation${C.reset}`);
+    if (settingsPane === "all") {
+      // Non-interactive snapshots and tests render every pane in the same
+      // order the combined editable list concatenates them.
+      for (const pane of SETTINGS_PANES) {
         lines.push("");
+        lines.push(` ${C.bold}${C.cyan}${pane.label.toUpperCase()}${C.reset}`);
+        renderSections(pane.id);
       }
-    };
-
-    const renderAgentsPane = () => {
-      for (const section of AGENT_SETTING_SECTIONS) {
-        const providerRow = providerSettingsByRole.get(section.role);
-        const hasDbRows = section.keys.some((key) => key !== "delegation_mode" && settingsByKey.has(key));
-        const hasDelegation = section.role === "delegator" && delegationSettings[0];
-        if (!providerRow && !hasDbRows && !hasDelegation) continue;
-        pushSection(section.label, "(enabled; provider, reasoning, turn limit, token cap)");
-        pushTableHeader();
-        if (providerRow) pushProviderSettingRow(providerRow);
-        if (hasDelegation) {
-          const s = delegationSettings[0];
-          pushEditableRow(s.setting_key, s.setting_value, `${s.description} (${s.source})`, C.cyan, {
-            label: s.label,
-            source: s.source,
-          });
-        }
-        for (const key of section.keys) {
-          if (key === "delegation_mode") continue;
-          pushDbSettingRow(key);
-        }
-        lines.push("");
-      }
-    };
-
-    const renderProvidersPane = () => {
-      for (const section of PROVIDER_SETTING_SECTIONS) {
-        const models = textModelSettings.filter((s) => s.provider === section.provider);
-        const settingKeys = section.settingKeys.filter((key) => settingsByKey.has(key));
-        if (models.length === 0 && settingKeys.length === 0) continue;
-        const sectionNote = section.provider === "posse-local"
-          ? "native embedding and text-generation models"
-          : section.provider === "claude" || section.provider === "codex"
-            ? "models and % session run budget"
-            : "models and USD run budget";
-        pushSection(section.label, `(${sectionNote})`);
-        pushTableHeader();
-        for (const s of models) pushModelSettingRow(s);
-        for (const key of settingKeys) pushDbSettingRow(key);
-        lines.push("");
-      }
-
-      const catalogRows = PROVIDER_CATALOG_SETTING_KEYS.filter((key) => settingsByKey.has(key));
-      if (catalogRows.length > 0) {
-        pushSection("Model Catalog", "(validation and provider runtime behavior)");
-        pushTableHeader();
-        for (const key of catalogRows) pushDbSettingRow(key);
-        lines.push("");
-      }
-
-      if (providerUsageSettings.length > 0) {
-        pushSection("Provider Usage Limits", `(${getAccountSettingsPathForDisplay()})`);
-        pushTableHeader();
-        for (const s of providerUsageSettings) {
-          const baseDesc = s.description || "";
-          const liveHint = getProviderUsageSettingHint(s.setting_key, providerUsageWindowMap);
-          const desc = liveHint ? `${baseDesc} (${liveHint})` : baseDesc;
-          pushEditableRow(s.setting_key, s.setting_value, desc, C.cyan, {
-            label: s.label,
-            source: s.source,
-          });
-        }
-        lines.push("");
-      }
-
-      // Secrets stay env-only; show which ones are present without ever
-      // rendering any part of the value.
-      pushSection("Credential Keys", "(env-only; values are never shown)");
-      const envVars = [
-        ["OPENAI_API_KEY", "OpenAI API key (openai)"],
-        ["CODEX_API_KEY", "Optional Codex CLI API key"],
-        ["XAI_API_KEY", "xAI API key (grok)"],
-        ["CLAUDE_CODE_OAUTH_TOKEN", "Claude OAuth token"],
-      ];
-      for (const [key, label] of envVars) {
-        if (process.env[key]) {
-          lines.push(`  ${C.green}✓${C.reset} ${C.bold}${key.padEnd(30)}${C.reset} ${C.green}configured${C.reset}  ${C.dim}${label}${C.reset}`);
-        } else {
-          lines.push(`  ${C.dim}. ${key.padEnd(30)} not set     ${label}${C.reset}`);
-        }
-      }
-      lines.push("");
-    };
-
-    const renderImagesPane = () => {
-      if (artifactSettings.length > 0) {
-        pushSection("Image Routing", "(artifact image provider)");
-        pushTableHeader();
-        for (const s of artifactSettings) {
-          pushEditableRow(s.setting_key, s.setting_value, s.description || "", C.cyan, {
-            label: s.label,
-            source: s.source,
-          });
-        }
-        lines.push("");
-      }
-
-      for (const section of IMAGE_SETTING_SECTIONS) {
-        const models = imageModelSettings.filter((s) => s.provider === section.provider);
-        const settingKeys = section.settingKeys.filter((key) => settingsByKey.has(key));
-        if (models.length === 0 && settingKeys.length === 0) continue;
-        pushSection(section.label, "(image model and USD budget)");
-        pushTableHeader();
-        for (const s of models) pushModelSettingRow(s);
-        for (const key of settingKeys) pushDbSettingRow(key);
-        lines.push("");
-      }
-    };
-
-    const renderAtlasPane = () => {
-      renderDbGroupsForPane("atlas");
-    };
-
-    const renderGeneralPane = () => {
-      renderDbGroupsForPane("general");
-
-      pushSection("Skills", "(planner-selected; new skills default on)");
-      if (skillSettings.length === 0) {
-        lines.push(`  ${C.dim}No skills found in the remote prompt bundle.${C.reset}`);
-      } else {
-        pushTableHeader();
-        for (const s of skillSettings) {
-          pushEditableRow(s.setting_key, s.setting_value, s.description || "", C.cyan, {
-            label: s.label,
-            source: s.source,
-          });
-        }
-      }
-      lines.push("");
-    };
-
-    // Everything on this pane follows the repository, not the account: catalog
-    // rows scoped `repo` persist keyed to this repo, and the project-database
-    // config lives in this repo's .posse/db/orchestrator.db.
-    const renderRepoPane = () => {
-      lines.push(`  ${C.dim}Settings on this pane apply only to:${C.reset} ${C.bold}${this.projectDir}${C.reset}`);
-      lines.push("");
-
-      renderDbGroupsForPane("repo");
-
-      pushSection("Project Database", "(opt-in agent SQL access; stored in this repo's .posse/db)");
-      pushTableHeader();
-      for (const s of projectDbSettings) {
-        pushEditableRow(s.setting_key, s.setting_value, resolveDesc(s.setting_key, s), C.cyan, {
-          label: s.label,
-          source: s.source,
-        });
-      }
-      lines.push("");
-
-      pushSection("Paths");
-      const dbPath = getRuntimeDbPath(this.projectDir);
-      const reportsDir = path.resolve(path.dirname(dbPath), "reports");
-      lines.push(`  ${C.dim}Project:${C.reset}  ${this.projectDir}`);
-      lines.push(`  ${C.dim}Database:${C.reset} ${dbPath}`);
-      lines.push(`  ${C.dim}Reports:${C.reset}  ${reportsDir}`);
-      lines.push("");
-    };
-
-    const renderDebugPane = () => {
-      renderDbGroupsForPane("debug");
-    };
-
-    if (settingsPane === "atlas") {
-      renderAtlasPane();
-    } else if (settingsPane === "agents") {
-      renderAgentsPane();
-    } else if (settingsPane === "providers") {
-      renderProvidersPane();
-    } else if (settingsPane === "images") {
-      renderImagesPane();
-    } else if (settingsPane === "general") {
-      renderGeneralPane();
-    } else if (settingsPane === "repo") {
-      renderRepoPane();
-    } else if (settingsPane === "debug") {
-      renderDebugPane();
     } else {
-      // "all" — non-interactive snapshots and tests render every pane in the
-      // same order paneEditableSettings concatenates them.
-      renderAtlasPane();
-      renderAgentsPane();
-      renderProvidersPane();
-      renderImagesPane();
-      renderGeneralPane();
-      renderRepoPane();
-      renderDebugPane();
+      renderSections(settingsPane);
     }
+    lines.push("");
+    return lines;
+  }
 
+  // Footer for the Settings tab: key help, then the highlighted setting's
+  // full description (the table truncates it), its ID, default, and scope.
+  _buildSettingsFooterLines(fullW, navLabel) {
+    const lines = [
+      ` ${C.dim}[←→] Pane  [↑↓] Select  [PgUp/PgDn] Section  [Enter] Edit  [${navLabel}] Tab  [Esc] Exit${C.reset}`,
+    ];
+    const selected = this._getSelectedEditableSetting();
+    if (selected) {
+      const presentation = getAdminSettingPresentation(selected.setting_key, selected);
+      const width = Math.max(20, fullW - 2);
+      const words = `${presentation.label}: ${presentation.description}`.split(/\s+/);
+      const wrapped = [];
+      let current = "";
+      for (const word of words) {
+        if (current && (current.length + 1 + word.length) > width) {
+          wrapped.push(current);
+          current = word;
+        } else {
+          current = current ? `${current} ${word}` : word;
+        }
+      }
+      if (current) wrapped.push(current);
+      const shown = wrapped.slice(0, 3);
+      if (wrapped.length > 3) shown[2] = `${shown[2].slice(0, Math.max(0, width - 1))}…`;
+      shown.forEach((line, index) => {
+        lines.push(index === 0
+          ? ` ${C.bold}${line.slice(0, presentation.label.length + 1)}${C.reset}${line.slice(presentation.label.length + 1)}`
+          : ` ${line}`);
+      });
+      const storageKey = selected.storage_key || toStorageSettingKey(selected.setting_key);
+      const catalogEntry = getCatalogEntry(storageKey);
+      const details = [];
+      if (catalogEntry) {
+        details.push(`ID: ${storageKey}`);
+        const defaultText = formatAdminSettingValue(storageKey, catalogEntry.default);
+        details.push(`default: ${defaultText}`);
+        details.push(REPO_SCOPED_DISPLAY_KEYS.has(storageKey) ? "saved for this repository" : "applies to every repository");
+      } else if (selected.projectDb) {
+        details.push("saved for this repository");
+      }
+      if (details.length > 0) lines.push(` ${C.dim}${details.join("  ·  ")}${C.reset}`);
+      if (selected.warning) lines.push(` ${C.yellow}${selected.warning}${C.reset}`);
+    }
+    if (this._settingsSavedFlash && (Date.now() - (this._settingsSavedFlash.at || 0)) < 3_000) {
+      lines.push(` ${C.green}✓ ${this._settingsSavedFlash.text}${C.reset}`);
+    }
     return lines;
   }
 

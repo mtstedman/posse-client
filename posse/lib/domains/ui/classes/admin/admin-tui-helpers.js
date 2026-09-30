@@ -4,8 +4,8 @@
 // and its render builders: setting read/write wrappers that degrade gracefully
 // when the runtime DB is busy, model/image-model setting resolution, provider
 // dashboard labels, and the status/line sanitizers. Kept here (a sibling of the
-// stateful AdminTUI class) following the same split the settings-controller and
-// admin-atlas-rollups modules use.
+// stateful AdminTUI class) following the same split the settings-controller
+// module uses.
 
 import { runtimeDbLooksBusyOrCorrupt, getModelProviderDefaults } from "../../functions/admin/shared-helpers.js";
 import { C } from "../../../../shared/format/functions/colors.js";

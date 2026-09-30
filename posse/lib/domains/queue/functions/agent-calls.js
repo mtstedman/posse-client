@@ -6,7 +6,7 @@
 // open with createAgentCall when a worker starts a call, close with
 // completeAgentCall when it finishes (or with cleanupRunningAgentCalls
 // at startup for any rows orphaned by a crash). Everything else here
-// is read-mostly aggregation for dashboards and the delegator.
+// is read-mostly aggregation for dashboards.
 
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { normalizeSkillsColumn, now, LEASE_HOLDING_STATUSES_SQL, runImmediateTransaction } from "./common.js";

@@ -53,6 +53,7 @@ export const JOB_REASONING_EFFORT_LIST_SQL = sqlList(JOB_REASONING_EFFORTS);
 // Worker types persisted on job_attempts.worker_type. These are execution
 // identities, not provider-selectable roles: deterministic/system paths and
 // human gates are intentionally present here but absent from PROVIDER_ROLE_NAMES.
+// "delegator" is retired as a role but stays for rows written before it was.
 export const JOB_ATTEMPT_WORKER_TYPES = Object.freeze([
   "researcher",
   "planner",
@@ -170,6 +171,8 @@ export const NON_PROVIDER_JOB_TYPES = new Set([
   "promote",
   "atlas_warm",
   "waiting_lane_prepare",
+  // Legacy rows only; closed deterministically (see JOB_TYPE_ROLE_REGISTRY).
+  "delegate",
 ]);
 
 // Job types that emit a declared output contract enforced by the worker
@@ -181,7 +184,7 @@ export const DECLARED_OUTPUT_CONTRACT_JOB_TYPES = new Set(["dev", "fix"]);
 // iterative work item has produced progress since the last loopback anchor.
 // Excludes scheduling/coordination types like research/plan/assess.
 export const ITERATIVE_SUBSTANTIVE_JOB_TYPES = new Set([
-  "dev", "fix", "artificer", "delegate", "human_input",
+  "dev", "fix", "artificer", "human_input",
 ]);
 
 // Job types canceled when a replan supersedes the current plan. These are

@@ -34,6 +34,17 @@ export const ATLAS_VECTOR_NATIVE_ROUTE = "atlas:vector";
 export const GIT_NATIVE_PROTOCOL = "posse.git.native.v1";
 export const GIT_READ_ROUTE = "git:read";
 export const GIT_MUTATE_ROUTE = "git:mutate";
+// A synchronous native call whose route has no cached pulse in this process
+// fails closed with this code after requesting a background mint. It is a
+// cold start, not a heartbeat failure: once the mint lands, the next call on
+// that route succeeds.
+export const NATIVE_PULSE_COLD_ERROR_CODE = "POSSE_NATIVE_PULSE_COLD";
+// Info-level diagnostics kind for that cold start, recorded once per process
+// (thread) and route.
+export const NATIVE_PULSE_COLD_DIAGNOSTIC_KIND = "native.pulse.cold";
+// Diagnostics kind for a real heartbeat/pulse-auth failure (a failed mint or a
+// native binary rejecting its heartbeat auth). Never used for a cold start.
+export const NATIVE_HEARTBEAT_FAILURE_DIAGNOSTIC_KIND = "native.heartbeat.failure";
 export const ML_NATIVE_PROTOCOL = "posse.ml.native.v1";
 export const ML_NATIVE_ROUTE = "ml:methods";
 export const ML_CAPABILITIES_METHOD = "ml.capabilities";

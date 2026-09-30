@@ -42,7 +42,6 @@ import {
   CLAUDE_EXECUTION_MODE_VALUES,
   CODEX_AUTH_MODE_OPTIONS,
   CONTEXT_COMPACTION_MODE_VALUES,
-  DELEGATION_MODE_VALUES,
   FIX_SCOPE_HANDOFF_GUARD_VALUES,
   GIT_COMMIT_STYLE_VALUES,
   HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES,
@@ -86,7 +85,6 @@ export {
   CLAUDE_EXECUTION_MODE_VALUES,
   CODEX_AUTH_MODE_OPTIONS,
   CONTEXT_COMPACTION_MODE_VALUES,
-  DELEGATION_MODE_VALUES,
   FIX_SCOPE_HANDOFF_GUARD_VALUES,
   GIT_COMMIT_STYLE_VALUES,
   HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES,
@@ -153,7 +151,6 @@ export const SETTINGS_CATALOG = [
   ...PROVIDER_ROLE_SETTING_DEFS,
   ...ROLE_REASONING_EFFORT_SETTING_DEFS,
   ...ROLE_MODEL_TIER_SETTING_DEFS,
-  { key: "delegation_mode",     default: "js", options: DELEGATION_MODE_VALUES, description: "Delegation engine mode: js or ml" },
 
   // ── Model selection (empty = use provider tier default) ──────────────────
   ...MODEL_SELECTION_SETTINGS,
@@ -199,7 +196,6 @@ export const SETTINGS_CATALOG = [
   { key: "max_output_tokens_artificer", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for artificer provider calls (empty = role/provider default)" },
   { key: "max_output_tokens_assessor", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for assessor provider calls (empty = role/provider default)" },
   { key: "max_output_tokens_preflight", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for preflight provider calls (empty = role/provider default)" },
-  { key: "max_output_tokens_delegator", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for delegator provider calls (empty = role/provider default)" },
 
   // ── Hidden runtime tracking (live usage state, written by providers) ─────
   { key: "claude_session_tokens",        default: "", adminVisible: false, description: "Live Claude session token count (auto-updated)" },
@@ -301,7 +297,7 @@ export const SETTINGS_CATALOG = [
   { key: "pre_assess_cmd",       default: "",      description: "Optional shell command to run before assessment" },
   { key: "pre_push_verify_cmd",  default: "",      description: "Optional shell command to run before pushing" },
   { key: "canonical_verify_cmd", default: "", scope: "repo", description: "Repository-owned canonical verification command run before assessment and push" },
-  { key: "verification_wall_timeout_ms", default: "", scope: "repo", numeric: { integer: true, min: 1000 }, description: "Milliseconds a frozen test or canonical verification command may run before Posse stops it (empty = 120000). Set it to the window the repository's own harness documents." },
+  { key: "verification_wall_timeout_ms", default: "", runtimeFallback: "120000", scope: "repo", numeric: { integer: true, min: 1000 }, description: "Milliseconds a frozen test or canonical verification command may run before Posse stops it (empty = 120000). Set it to the window the repository's own harness documents." },
   { key: "verification_idle_timeout_ms", default: "", scope: "repo", numeric: { integer: true, min: 1000 }, description: "Milliseconds a verification command may stay silent before Posse treats it as hung (empty = disabled). Enable only for harnesses that print progress while healthy." },
   { key: "verification_wall_timeout_max_ms", default: "1800000", numeric: { integer: true, min: 1000 }, description: "Administrator ceiling on any repository verification timeout (default 30 minutes)" },
   { key: "verification_dependency_network_policy", default: DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY, scope: "repo", options: Object.freeze(["cache_only", "allow", "disabled"]), description: "Network policy for lock-backed verification dependency repair: allow (default), cache_only, or disabled" },
@@ -412,7 +408,7 @@ export const SETTINGS_CATALOG = [
   { key: "atlas_survey_brief_edge_count", default: "8", numeric: { integer: true, min: 0, max: 32 }, description: "Number of ranked code.survey relationship edges shown in the initial handoff preview. The default 8 preserves the established preview; values above 8 use a category-balanced expanded preview while the complete survey remains available through its retained cursor." },
   { key: "atlas_survey_edge_cap", default: "0", numeric: { integer: true, min: 0 }, description: "Total code.survey internal/inbound/outbound edge-row cap (TOKEN-LEVERS L4b). 0 (default) preserves current per-category caps." },
   { key: "atlas_ambient_ref_stamping", default: "off",            options: ["off", "on"], description: "Ambient ref stamping experiment: stamp evidence-class tool results at any size and lower the generic stub floor to 500 chars. Off (default) keeps the long-standing 4000-char floor." },
-  { key: "atlas_survey_tail_refs",        default: "off",                options: ["off", "on"], description: "Legacy compatibility setting. code.survey now always stores large snapshots as stable ten-file hash pages with a backed next-page cursor." },
+  { key: "atlas_survey_tail_refs",        default: "off",                options: ["off", "on"], adminVisible: false, description: "Legacy compatibility setting. code.survey now always stores large snapshots as stable ten-file hash pages with a backed next-page cursor." },
   { key: "atlas_answer_contract_tight",   default: "on",                 options: ["off", "on"], description: "Tight researcher answer contract (TOKEN-LEVERS L2): report/question research jobs use the researcher_report_tight remote prompt profile (hard answer budget, citation-dense, no narrative padding). ADOPTED run39 (answer chars -49%, cost -34%, median hits unchanged); flip off to restore the standard researcher_report profile. Requires a posse-remote build that ships the tight profile." },
   { key: "atlas_gateway_dedup_advertise", default: "on",                 options: ["off", "on"], description: "Gateway de-advertisement (TOKEN-LEVERS L5a): on the owner-hot gateway path, drop the four ATLAS gateway wrappers (query/code/repo/agent) from the advertised tools/list since the individual per-action tools are already advertised. ADOPTED after the Stage 5A dispatch smoke and payload gate; flip off to advertise the wrappers again. Dispatch is always retained." },
   { key: "atlas_researcher_schema_diet", default: "on",  options: ["off", "on"], adminVisible: false, description: "Researcher-only provider schema diet (default on since atlas551/552): use concise top-level semantics, description-free input fields, and no advertised fetch_ref compatibility alias while preserving runtime validation, canonical dispatch, and all JSON Schema constraints." },
@@ -425,7 +421,7 @@ export const SETTINGS_CATALOG = [
   { key: "atlas_live_buffers",            default: "true",               valueType: "boolean", description: "Push deterministic write/edit buffers into ATLAS during dev jobs" },
   { key: "atlas_memory_surface",          default: "on",                 options: ATLAS_MEMORY_SURFACE_MODE_VALUES, description: "Probe ATLAS memory anchor presence in handoffs. on/auto = return exact files/symbols with attached memory; off = never probe." },
   { key: "atlas_memory_mode",             default: "on",                 options: ["off", "on"], description: "Master ATLAS memory mode. off removes memory prefetch, tools, prompt contracts, and persistence from agent runs." },
-  { key: "posse_kaizen_to_atlas",         default: "off",                options: KAIZEN_TO_ATLAS_MODE_VALUES, description: "Reserved Kaizen insight promotion setting. Kaizen promotion is currently hardwired off." },
+  { key: "posse_kaizen_to_atlas",         default: "off",                options: KAIZEN_TO_ATLAS_MODE_VALUES, adminVisible: false, description: "Reserved Kaizen insight promotion setting. Kaizen promotion is currently hardwired off." },
   { key: "atlas_view_layer_merge",        default: "on",                 options: ["off", "on"], description: "ATLAS v2 order-independent view build: source view symbols/edges from per-source tree-sitter+SCIP layers (on, default) vs the legacy flat tables (off). Off is a fallback during the layer-merge rollout." },
   { key: "atlas_embedding_model_id",      default: DEFAULT_ATLAS_EMBEDDING_MODEL_ID,       options: ATLAS_EMBEDDING_MODEL_OPTIONS, description: "Native ATLAS embedding model. Jina v2 code currently runs through ONNX; additional qualified native models will appear here." },
   { key: "atlas_tree_compression_mode",   default: "ml",                 options: ATLAS_TREE_COMPRESSION_MODE_VALUES, description: "ATLAS tree compression seed mode: off, deterministic, or ml. ml runs an explicit one-time model enrichment pass over the cached tree seed snapshot." },

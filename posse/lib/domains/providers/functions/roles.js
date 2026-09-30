@@ -58,9 +58,7 @@ export const PROVIDER_ROLE_SETTING_DEFS = Object.freeze(
   PROVIDER_ROLE_NAMES.map((role) => Object.freeze({
     key: providerSettingKeyForRole(role),
     default: "",
-    description: role === "delegator"
-      ? "Provider for the delegator itself (empty = claude)"
-      : `Comma-separated provider list for ${role} role (empty = claude)`,
+    description: `Comma-separated provider list for ${role} role (empty = claude)`,
   }))
 );
 
@@ -75,7 +73,6 @@ const ROLE_BASE_REASONING_EFFORTS = Object.freeze({
   planner: "medium",
   preflight: "low",
   assessor: "medium",
-  delegator: "low",
 });
 
 const ROLE_BASE_MODEL_TIERS = Object.freeze({
@@ -85,7 +82,6 @@ const ROLE_BASE_MODEL_TIERS = Object.freeze({
   planner: "standard",
   preflight: "cheap",
   assessor: "cheap",
-  delegator: "cheap",
 });
 
 export const ROLE_REASONING_EFFORT_SETTING_DEFS = Object.freeze(

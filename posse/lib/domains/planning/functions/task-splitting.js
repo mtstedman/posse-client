@@ -398,7 +398,7 @@ function buildImageSplitPieces(task, imageFiles, artifactDirAbs, sourceTaskIndex
   return { imageTask, promoteTask };
 }
 
-export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMode, normalizedJobType } = {}) {
+export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMode, normalizedJobType, wiMode = "build" } = {}) {
   if (!task || task._file_kind_split_done || task.job_type === "human_input" || task.job_type === "promote") return null;
   const pathOnlyIsIntent = taskMode === "image" || !!task.needs_image_generation;
   const normalizedImageTask = pathOnlyIsIntent
@@ -407,7 +407,18 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
   const routedTask = normalizedImageTask.task;
   const replacements = normalizedImageTask.replacements;
   const summary = getCreateFileKindSummary(routedTask, artifactDirAbs);
-  const requestedImageGenerationOutput = hasRequestedImageGenerationOutput(routedTask, { pathOnlyIsIntent });
+  // A dev task may write a raster it fetches, converts or packs. Only a
+  // structural generation signal (task_mode image / needs_image_generation,
+  // which the compiler's wording inference sets before this split, or an
+  // explicitly image-mode work item) turns its repo-path images into
+  // generate_image outputs; artifact-scoped and bare names keep path-based
+  // routing.
+  const repoRastersAreCode = normalizedJobType === "dev" && !pathOnlyIsIntent && wiMode !== "image";
+  const generatedImageFiles = repoRastersAreCode
+    ? summary.imageFiles.filter((file) => isArtifactScopedPath(file, artifactDirAbs) || !file.includes("/"))
+    : summary.imageFiles;
+  const requestedImageGenerationOutput = !repoRastersAreCode
+    && hasRequestedImageGenerationOutput(routedTask, { pathOnlyIsIntent });
   const requestedImageOutputs = requestedImageGenerationOutput
     ? collectRequestedImageOutputs(routedTask).map(generatedRasterPath)
     : [];
@@ -416,9 +427,9 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
   const filesToModify = Array.isArray(routedTask.files_to_modify) ? routedTask.files_to_modify : [];
   const filesToDelete = Array.isArray(routedTask.files_to_delete) ? routedTask.files_to_delete : [];
   const hasRepoEdits = filesToModify.length > 0 || filesToDelete.length > 0;
-  const nonImageCreateFiles = summary.createFiles.filter((file) => !summary.imageFiles.includes(file));
+  const nonImageCreateFiles = summary.createFiles.filter((file) => !generatedImageFiles.includes(file));
   const hasCodeOutputs = summary.codeFiles.length > 0;
-  const imageFilesForSplit = summary.imageFiles.length > 0 ? summary.imageFiles : requestedImageOutputs;
+  const imageFilesForSplit = generatedImageFiles.length > 0 ? generatedImageFiles : requestedImageOutputs;
   const hasImageOutputs = imageFilesForSplit.length > 0 || requestedImageGenerationOutput;
 
   if (!hasImageOutputs) {
@@ -441,7 +452,7 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
   }
 
   const shouldSplit =
-    summary.repoImageFiles.length > 0
+    summary.repoImageFiles.some((file) => generatedImageFiles.includes(file))
     || hasCodeOutputs
     || hasRepoEdits
     || nonImageCreateFiles.length > 0;
