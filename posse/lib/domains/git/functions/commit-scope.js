@@ -321,6 +321,20 @@ async function withCommitBranchLockAsync(cwd, opts = {}, fn) {
  * own to re-derive it (and, under a runtime path override, would open the
  * wrong one). The flag is trusted only off the main thread, where it can only
  * have come from that caller. */
+// While a session is live, a scoped commit anywhere in this repository (the
+// shared branch, or a work-item branch that merges into it) is bound for the
+// session's shared branch on the session remote. The native session-scope
+// check matches a commit by that destination; left to infer it, it takes the
+// work-item branch and `origin` - which a member who joined from an empty
+// folder does not have, and which for the host is its real repository rather
+// than the session's - and refuses every commit.
+function sessionCommitDestination(opts) {
+  if (!isMainThread) return opts?.sessionCommitDestination || null;
+  const state = getLivePairingState();
+  if (state?.phase !== "active" || !state.shared_branch || !state.remote_name) return null;
+  return { branch: state.shared_branch, remote: state.remote_name };
+}
+
 function teamApprovalGovernsCommit(opts) {
   if (!isMainThread && typeof opts?.teamApprovalEnabled === "boolean") return opts.teamApprovalEnabled;
   return getLivePairingState()?.submission_approval_enabled === 1;
@@ -375,7 +389,11 @@ export async function gitCommitAllAsync(message, cwd, scope = null, opts = {}) {
     }
     opts = { ...opts, verifiedTeamWorkItemContext: verified.workItemContext };
   }
-  opts = { ...opts, teamApprovalEnabled: teamState?.submission_approval_enabled === 1 };
+  opts = {
+    ...opts,
+    teamApprovalEnabled: teamState?.submission_approval_enabled === 1,
+    sessionCommitDestination: sessionCommitDestination(opts),
+  };
   const style = getGitCommitStyle(opts?.projectDir || cwd);
   const runWorker = async (workerOpts) => {
     const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
@@ -1072,11 +1090,13 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     const expectedToCommit = expectedNativeChanges();
 
     const commitTimeoutBudget = gitCommitTimeoutBudget();
+    const destination = sessionCommitDestination(opts);
     const nativeResult = runGitNativeMethod("git.commitScopedTransaction", {
       // The native transaction takes repository-relative paths and stages with
       // pathspecs interpreted relative to its cwd, so those two spaces must
       // coincide: run it from the repository root when cwd is nested inside.
       cwd: nestedRepoPrefix ? nestedRepoRoot : cwd,
+      ...(destination ? { branch: destination.branch, remote: destination.remote } : {}),
       expectedHead: headAtScopeStart,
       message,
       ...(opts?.commitPolicy ? { commitPolicy: opts.commitPolicy } : {}),

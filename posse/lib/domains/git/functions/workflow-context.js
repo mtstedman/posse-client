@@ -11,6 +11,11 @@ const GIT_WORKFLOW_WORKER_URL = new URL("./git-workflow-worker.js", import.meta.
 const GIT_WORKFLOW_THREAD_MANAGER = new ThreadManager();
 export const GIT_WORKFLOW_TASK_TIMEOUT_MS = 15 * 60 * 1000;
 const MUTATING_GIT_WORKFLOW_TASKS = new Set([
+  // The publication gate reads, but through git.exec (a mutate-route method)
+  // and the repository's pre-push hook. With only a read pulse its worker
+  // failed every conflict-marker check, deferring every shared-trunk
+  // publication ("native pulse token cache cold").
+  "validatePushCandidate",
   "gitMergeToTarget",
   "cleanupWiBranch",
   "snapshotAndRemoveWorktreeOnly",
@@ -21,6 +26,13 @@ const MUTATING_GIT_WORKFLOW_TASKS = new Set([
   "discardWorktreeFiles",
   "stashTargetBranchChanges",
 ]);
+
+/** Native routes a git workflow task's worker is prepared with. */
+export function gitWorkflowTaskRoutes(task) {
+  return MUTATING_GIT_WORKFLOW_TASKS.has(task)
+    ? [GIT_READ_ROUTE, GIT_MUTATE_ROUTE]
+    : [GIT_READ_ROUTE];
+}
 
 export function createGitWorkflowContext({
   projectDir,
@@ -68,9 +80,7 @@ export function createGitWorkflowContext({
       : Number.isFinite(parsedTimeoutMs)
         ? parsedTimeoutMs
         : GIT_WORKFLOW_TASK_TIMEOUT_MS;
-    const routes = MUTATING_GIT_WORKFLOW_TASKS.has(task)
-      ? [GIT_READ_ROUTE, GIT_MUTATE_ROUTE]
-      : [GIT_READ_ROUTE];
+    const routes = gitWorkflowTaskRoutes(task);
     const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
       routesByBinary: { git: routes },
     });

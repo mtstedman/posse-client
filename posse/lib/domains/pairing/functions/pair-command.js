@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
@@ -70,10 +71,13 @@ import {
 } from "./session-hold.js";
 import { readSessionLink, recordSessionLinkFailure, recordSessionLinkSuccess } from "./session-link.js";
 import { readSessionSync, sessionFetchOwnerAlive } from "./session-sync.js";
+import { formatSessionLanding, sessionPrompt } from "./session-landing.js";
 import { formatPeerSyncRow, formatSyncAge, sessionSyncFeedLabel } from "./sync-state.js";
 import {
   clearPairingPeerSnapshot,
+  collectPairingJobs,
   collectPairingPresence,
+  collectPairingWorkItems,
   diffPairingPeerActivity,
   pairingPeerTrunkHints,
   readPairingPeerSnapshot,
@@ -176,7 +180,9 @@ async function waitForPairingAdmission(remoteClient, stateId, pendingToken, {
 } = {}) {
   let interrupted = false;
   const stop = () => { interrupted = true; };
-  process.once("SIGINT", stop);
+  // `on`, not `once`: a Ctrl+C that belonged to a foreground command must
+  // leave the handler in place for the next one.
+  process.on("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
     while (!interrupted) {
@@ -628,41 +634,6 @@ function printSessionSyncRows(log, C, derived, { observing = false, listedInstan
   }
 }
 
-// The host sees each admitted member once: the machine label it advertises
-// (when it has heartbeated) with its sync state, else its member id.
-function hostMemberRow(member, peersByInstance) {
-  const peer = peersByInstance.get(String(member.instance_id || ""));
-  if (!peer) return `${memberLabel(member)} · connecting`;
-  return `${formatPeerSyncRow({ ...peer, role: null })} (member ${shortId(member.id)})`;
-}
-
-function printSessionConsoleStatus(log, C, {
-  state, status, members, sessionCode, derived, observing,
-}) {
-  const host = state?.role === "host";
-  log(`  ${C.bold}Session${C.reset} ${sessionCode ? `${C.cyan}${sessionCode}${C.reset} · ` : ""}`
-    + `${host ? "you are hosting" : "you are a member"} · branch ${state?.shared_branch || "?"} · ${status?.status || state?.phase || "starting"}`
-    + `${host && status?.enrollment_open === false ? " · invites closed" : ""}`);
-  const listedInstanceIds = new Set();
-  if (host) {
-    const pending = members.filter((member) => member.state === "pending");
-    const admitted = members.filter((member) => member.state === "admitted");
-    const peersByInstance = new Map((derived?.peers_sync || []).map((peer) => [String(peer.instance_id || ""), peer]));
-    if (admitted.length === 0) log("  Connected: nobody yet");
-    else log(`  Connected (${admitted.length}):`);
-    for (const member of admitted) {
-      listedInstanceIds.add(String(member.instance_id || ""));
-      log(`    ${hostMemberRow(member, peersByInstance)}`);
-    }
-    if (pending.length) {
-      log(`  ${C.yellow}Waiting for admission:${C.reset} ${pending.map(memberLabel).join(", ")} (type their countersign)`);
-    }
-  } else {
-    log(`  You can change: ${describeSessionWriteScope(status?.scope_set || state?.scopeSet)}`);
-  }
-  printSessionSyncRows(log, C, derived, { observing, listedInstanceIds });
-}
-
 function printHostConsoleMembers(log, members) {
   if (members.length === 0) {
     log("  No members yet.");
@@ -780,6 +751,22 @@ function leaseLapsedError(error, leaseSec) {
   });
 }
 
+const ANSI_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]/gu;
+
+function stripAnsi(text) {
+  return String(text ?? "").replace(ANSI_PATTERN, "");
+}
+
+// The session console runs `posse add` / `posse go` in its own terminal: the
+// same entry point this process was started with, in this checkout.
+function spawnPosseInForeground(args, { cwd } = {}) {
+  return spawn(process.execPath, [...process.execArgv, process.argv[1], ...args], {
+    cwd,
+    stdio: "inherit",
+    env: process.env,
+  });
+}
+
 async function monitorPairing(remoteClient, stateId, {
   projectDir = process.cwd(),
   C,
@@ -793,8 +780,12 @@ async function monitorPairing(remoteClient, stateId, {
   nowMs = () => Date.now(),
   kill = process.kill.bind(process),
   trunkPoller = null,
+  spawnPosse = spawnPosseInForeground,
 } = {}) {
   let forceRequested = false;
+  // A posse command (`add`, `go`) this console handed the terminal to. Ctrl+C
+  // then belongs to that command, never to the session.
+  let foreground = null;
   let gracefulRequested = false;
   let lastTeamHandoffPollAt = 0;
   const seenPeerActivity = new Map();
@@ -819,13 +810,18 @@ async function monitorPairing(remoteClient, stateId, {
     sync: (dir, options) => syncSharedTrunkFromOrigin(dir, { ...options, raiseBlockedGate: false }),
   });
   let consolePoll = null;
+  let landingAfterHeartbeat = false;
+  let landingShown = false;
   // Set once the loop has ended: nothing may start another poll while this
   // process closes, leaves or hands over.
   let stopping = false;
   // Monitoring starts right after the Remote accepted this clone, which counts
   // as the first proof that the lease is live.
   let lastHeartbeatOkMs = nowMs();
-  const stop = () => { forceRequested = true; };
+  const stop = () => {
+    if (foreground) return;
+    forceRequested = true;
+  };
   // Closing the terminal must close and integrate like Ctrl+C. Output to the
   // gone terminal is dropped rather than allowed to crash the shutdown.
   const hangup = () => {
@@ -852,12 +848,92 @@ async function monitorPairing(remoteClient, stateId, {
     const sync = latestSync?.sync;
     if (!sync || sync.state === lastSyncState) return;
     // Nothing is known before the first fetch completes; say nothing yet.
+    updatePrompt();
     if (lastSyncState == null && sync.state === SESSION_SYNC_STATES.UNKNOWN) return;
+    const first = lastSyncState == null;
     lastSyncState = sync.state;
+    // The first settled state is the moment the session is ready to use: the
+    // session screen says it (and more) instead of a feed line.
+    if (first && !json && !landingShown) {
+      printLanding(state);
+      return;
+    }
     emit(
       { event: "pairing_sync", state: sync.state, label: sync.label, reasons: sync.reasons },
       `  ${C.cyan}[sync]${C.reset} ${sessionSyncFeedLabel(sync)}`,
     );
+  };
+  const peopleInSession = () => {
+    const peers = readPairingPeerSnapshot()?.peers;
+    const admitted = latestMembers.filter((member) => member?.state === "admitted").length;
+    return 1 + Math.max(Array.isArray(peers) ? peers.length : 0, admitted);
+  };
+  const updatePrompt = () => {
+    try {
+      sessionConsole?.setPrompt(sessionPrompt({ sync: latestSync?.sync, peopleCount: peopleInSession(), observing }));
+    } catch { /* the prompt is advisory */ }
+  };
+  const printLanding = (state = getPairingState(stateId)) => {
+    if (json || !state) return;
+    landingShown = true;
+    latestSync = readSync(state) || latestSync;
+    const snapshot = readPairingPeerSnapshot();
+    const status = (observing ? snapshot : null) || latestStatus;
+    let local = { work_items: [], jobs: [] };
+    try {
+      local = { work_items: collectPairingWorkItems(), jobs: collectPairingJobs() };
+    } catch { /* an unreadable queue shows as idle */ }
+    const lines = formatSessionLanding({
+      role,
+      sessionCode,
+      branch: state.shared_branch,
+      sync: latestSync?.sync,
+      peersSync: latestSync?.peers_sync,
+      peers: snapshot?.peers || status?.peers || [],
+      members: latestMembers,
+      local,
+      scopeLabel: role === "host" ? null : describeSessionWriteScope(status?.scope_set || state.scopeSet),
+      observing,
+    });
+    log("");
+    lines.forEach((line, index) => {
+      const color = index === 0 ? C.bold
+        : /^(Needs you|Waiting to join)/u.test(line) ? C.yellow
+          : line.startsWith("Next:") ? C.cyan : "";
+      log(`  ${color}${line}${color ? C.reset : ""}`);
+    });
+    updatePrompt();
+  };
+  // Run a posse command (`add`, `go`) in this terminal, then come back here.
+  const runForeground = async (args) => {
+    if (!sessionConsole?.interactive) {
+      log(`  ${C.yellow}[session]${C.reset} run \`posse ${args.join(" ")}\` in another terminal in this folder`);
+      return;
+    }
+    sessionConsole.suspend();
+    let outcome = null;
+    try {
+      foreground = spawnPosse(args, { cwd: projectDir });
+      outcome = await new Promise((resolve) => {
+        foreground.once("error", (error) => resolve({ error }));
+        foreground.once("exit", (code, signal) => resolve({ code, signal }));
+      });
+    } catch (error) {
+      outcome = { error };
+    } finally {
+      foreground = null;
+      const held = sessionConsole.resume()
+        .filter((line) => !/posse go (now owns|finished;)/u.test(stripAnsi(line)));
+      if (held.length > 0) {
+        log(`  ${C.dim}While that ran:${C.reset}`);
+        if (held.length > 10) log(`  ${C.dim}(${held.length - 10} earlier lines)${C.reset}`);
+        for (const line of held.slice(-10)) log(line);
+      }
+    }
+    if (outcome?.error) log(`  ${C.yellow}[session]${C.reset} could not run posse ${args[0]}: ${safeError(outcome.error)}`);
+    // A posse go that took the session over hands it back on the next lap,
+    // which shows the screen; one that never took it (nothing to do) ends here.
+    if (!observing) printLanding();
   };
   const pollTrunk = (status = null, { force = false } = {}) => {
     if (consolePoll || stopping || observing) return;
@@ -896,12 +972,17 @@ async function monitorPairing(remoteClient, stateId, {
       } else if (parsed.kind === "help") {
         for (const line of sessionConsoleHelp(role, { observing })) log(`  ${C.dim}${line}${C.reset}`);
       } else if (parsed.kind === "status") {
-        latestSync = readSync(state) || latestSync;
-        // While observing, the scheduler's snapshot is the freshest relay view.
-        const status = (observing ? readPairingPeerSnapshot() : null) || latestStatus;
-        printSessionConsoleStatus(log, C, {
-          state, status, members: latestMembers, sessionCode, derived: latestSync, observing,
-        });
+        printLanding(state);
+      } else if (parsed.kind === "add") {
+        // Word by word, as a shell would pass them, so `add --oneshot fix it`
+        // reaches posse add as a flag and a task.
+        await runForeground(["add", ...(parsed.task ? parsed.task.split(/\s+/u) : [])]);
+      } else if (parsed.kind === "go") {
+        if (observing || schedulerLockHolderLive(kill)) {
+          log(`  ${C.yellow}[session]${C.reset} posse go is already running this session in another terminal; new tasks queued here wait for its next run.`);
+          return;
+        }
+        await runForeground(["go"]);
       } else if (parsed.kind === "members") {
         printHostConsoleMembers(log, latestMembers);
       } else if (parsed.kind === "hold") {
@@ -919,6 +1000,7 @@ async function monitorPairing(remoteClient, stateId, {
         log(`  ${C.green}[session]${C.reset} admitted ${admitted.member ? `${memberLabel(admitted.member)} with ` : ""}`
           + `${admitted.countersign}; they are checking out ${state.shared_branch}`);
         await refreshHostMembers(state);
+        printLanding(state);
       } else if (parsed.kind === "kick") {
         const matches = latestMembers.filter((member) => String(member.id).startsWith(parsed.id));
         if (matches.length !== 1) {
@@ -940,6 +1022,11 @@ async function monitorPairing(remoteClient, stateId, {
         output,
         onLine: (line) => {
           const parsed = parseSessionConsoleLine(line, { role });
+          if (parsed.kind === "leave") {
+            log(`  ${C.cyan}[session]${C.reset} leaving the session…`);
+            gracefulRequested = true;
+            return;
+          }
           if (parsed.kind === "close") {
             if (observing || schedulerLockHolderLive(kill)) {
               log(`  ${C.yellow}[session]${C.reset} posse go owns the session; close from the run screen (u → close), or stop posse go first.`);
@@ -988,8 +1075,11 @@ async function monitorPairing(remoteClient, stateId, {
           lastHeartbeatOkMs = Number.isFinite(lastOkMs) ? lastOkMs : nowMs();
           emit(
             { event: "pairing_owner", owner: "console" },
-            `  ${C.green}[session]${C.reset} posse go stopped heartbeating; this console owns the session again`,
+            `  ${C.green}[session]${C.reset} posse go finished; this console is running the session again`,
           );
+          // Shown after this console's first heartbeat as owner, once the
+          // link, the peer snapshot and the fetch owner are its own again.
+          landingAfterHeartbeat = !foreground;
         }
       }
       if (ownership === "scheduler" || ownership === "closing") {
@@ -1072,6 +1162,10 @@ async function monitorPairing(remoteClient, stateId, {
         latestStatus = status;
         await refreshHostMembers(state);
         if (status.status === "active") pollTrunk(status);
+        if (landingAfterHeartbeat) {
+          landingAfterHeartbeat = false;
+          printLanding(state);
+        }
       } catch (error) {
         recordSessionLinkFailure({ stateId, owner: SESSION_LINK_OWNERS.CONSOLE, leaseSec, error, nowMs: nowMs() });
         if ([401, 403].includes(Number(error?.status))) {
@@ -1104,10 +1198,10 @@ async function monitorPairing(remoteClient, stateId, {
     };
   } finally {
     stopping = true;
-    sessionConsole?.close();
-    // Leaving (and its final sync) must not race this console's last poll or
-    // a command still queued behind a slow admit.
+    // A foreground command (or one queued behind a slow admit) finishes
+    // before the prompt closes and before leaving can race it.
     await commandChain.catch(() => {});
+    sessionConsole?.close();
     if (consolePoll) {
       consolePoller.abortInFlight?.("The session console is exiting");
       await consolePoll;
@@ -1483,8 +1577,7 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       console.log(`  Shared branch: ${sharedBranch}`);
       console.log(`  Others join with: ${C.cyan}posse session join ${started.code}${C.reset}`);
       console.log(`  Join requests appear below. Type a member's countersign and press Enter to admit them.`);
-      console.log(`  ${C.dim}Commands: status · members · kick <id> · hold [reason] · resume · close (graceful close + integrate) · help · [Ctrl+C] force close + integrate${C.reset}`);
-      console.log(`  ${C.dim}This console keeps this folder in sync with the members' work. While \`posse go\` runs it hands the session over and takes it back when posse go exits.${C.reset}\n`);
+      console.log(`  ${C.dim}This screen stays open for the whole session and keeps this folder in sync. Queue work with add, run it with go, type help for more.${C.reset}\n`);
     }
     const outcome = await monitorPairing(remoteClient, state.id, {
       projectDir: root, C, json, sessionCode: started.code,
@@ -1736,9 +1829,8 @@ async function runJoinInCheckout({ root, freshCheckout, remoteClient, code, C, j
       console.log(freshCheckout
         ? `\n  ${C.green}Paired.${C.reset} Checked out ${sharedBranch} from the session repository into ${root}.`
         : `\n  ${C.green}Paired.${C.reset} Switched to ${sharedBranch}.`);
-      console.log(`  ${C.dim}You stay in the session until the host closes it, you press Ctrl+C, or you run \`posse session leave\`.${C.reset}`);
-      console.log(`  ${C.dim}This console keeps the folder in sync with the session. Commands: status · hold [reason] · resume · help.${C.reset}`);
-      console.log(`  ${C.dim}To run queued work, start \`posse go\` in another terminal; this console hands the session to it while it runs.${C.reset}\n`);
+      console.log(`  ${C.dim}This screen stays open for the whole session and keeps this folder in sync. Queue work with add, run it with go,${C.reset}`);
+      console.log(`  ${C.dim}and type leave to disconnect (the host closing the session also ends it). Type help for more.${C.reset}\n`);
     }
     const outcome = await monitorPairing(remoteClient, state.id, {
       projectDir: root, C, json, sessionCode: String(code).trim().toUpperCase(),

@@ -7,24 +7,33 @@ import readline from "node:readline";
 const COUNTERSIGN_PATTERN = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$/u;
 
 const HOST_ONLY_COMMANDS = new Set(["members", "m", "who", "close", "kick"]);
+// Disconnect words. None is four pairing-alphabet symbols (I, L are absent).
+const LEAVE_COMMANDS = new Set(["leave", "quit", "exit", "disconnect"]);
+
+const WORK_HELP = Object.freeze([
+  "add [task]    queue a task here (the same questions as `posse add`)",
+  "go            run your queue here (`posse go`); you come back to this screen after",
+]);
 
 const SHARED_HELP = Object.freeze([
+  "status        the session screen: who is here, what they run, what needs you",
   "hold [reason] keep this checkout where it is (fetches continue) until resume",
-  "resume        lift the hold; posse go fast-forwards on its next poll",
+  "resume        lift the hold; this checkout catches up now",
 ]);
 
 const HOST_HELP = Object.freeze([
   "<CODE>        admit a member: type the 4-character countersign they read to you, then Enter",
-  "status        session code, shared branch, sync state, and who is connected",
+  ...WORK_HELP,
+  ...SHARED_HELP,
   "members       list members and their states",
   "kick <id>     remove a member (id prefix from `members`)",
-  ...SHARED_HELP,
-  "close         graceful close + integrate",
+  "close         end the session for everyone and integrate its work",
 ]);
 
 const MEMBER_HELP = Object.freeze([
-  "status        shared branch, sync state, and peers",
+  ...WORK_HELP,
   ...SHARED_HELP,
+  "leave         disconnect from the session (this folder keeps its work)",
 ]);
 
 /**
@@ -61,6 +70,16 @@ export function parseSessionConsoleLine(line, { role = "host" } = {}) {
     return reason ? { kind: "hold", reason } : { kind: "hold" };
   }
   if (command === "resume") return { kind: "resume" };
+  if (command === "add") {
+    const task = text.slice(word.length).trim();
+    return task ? { kind: "add", task } : { kind: "add" };
+  }
+  if (command === "go" && rest.length === 0) return { kind: "go" };
+  if (LEAVE_COMMANDS.has(command) && rest.length === 0) {
+    return host
+      ? { kind: "invalid", message: "You are hosting: type close to end the session for everyone (its work is integrated), or Ctrl+C to force it." }
+      : { kind: "leave" };
+  }
   if (!host && (HOST_ONLY_COMMANDS.has(command) || (rest.length === 0 && COUNTERSIGN_PATTERN.test(word.toUpperCase())))) {
     return { kind: "invalid", message: "Only the session host can admit, list, remove members or close the session." };
   }
@@ -157,6 +176,9 @@ export function createSessionConsole({
     return {
       interactive: false,
       print: (text = "") => console.log(text),
+      setPrompt: () => {},
+      suspend: () => {},
+      resume: () => {},
       close: () => {},
     };
   }
@@ -176,6 +198,10 @@ export function createSessionConsole({
   }
   let closed = false;
   let hungUp = false;
+  // While another command owns the terminal (`add`, `go`), feed lines wait.
+  let suspended = false;
+  let held = [];
+  const HELD_LINES_MAX = 200;
   const hangup = () => {
     if (hungUp) return;
     hungUp = true;
@@ -194,11 +220,23 @@ export function createSessionConsole({
     rlClosed = true;
     if (!closed) hangup();
   });
+  const write = (text) => {
+    try {
+      // Clear the prompt line, print above it, then redraw what was typed.
+      readline.clearLine(output, 0);
+      readline.cursorTo(output, 0);
+      output.write(`${text}\n`);
+      rl.prompt(true);
+    } catch (error) {
+      if (!terminalGone(error)) throw error;
+      hangup();
+    }
+  };
   rl.on("line", (line) => {
     try {
       onLine(line);
     } finally {
-      if (!closed) rl.prompt();
+      if (!closed && !suspended) rl.prompt();
     }
   });
   rl.on("SIGINT", () => onInterrupt());
@@ -210,16 +248,49 @@ export function createSessionConsole({
         if (!hungUp) console.log(text);
         return;
       }
+      if (suspended) {
+        if (held.length < HELD_LINES_MAX) held.push(String(text));
+        return;
+      }
+      write(text);
+    },
+    /** Show live session state in the prompt itself. */
+    setPrompt(text) {
+      const next = String(text || prompt);
+      if (closed || rl.getPrompt() === next) return;
+      rl.setPrompt(next);
+      if (suspended) return;
       try {
-        // Clear the prompt line, print above it, then redraw what was typed.
-        readline.clearLine(output, 0);
-        readline.cursorTo(output, 0);
-        output.write(`${text}\n`);
         rl.prompt(true);
       } catch (error) {
         if (!terminalGone(error)) throw error;
         hangup();
       }
+    },
+    /**
+     * Hand the terminal to another command: stop reading, leave raw mode (the
+     * command starts in the terminal's normal mode) and hold feed lines.
+     */
+    suspend() {
+      if (closed || suspended) return;
+      suspended = true;
+      rl.pause();
+      try {
+        readline.clearLine(output, 0);
+        readline.cursorTo(output, 0);
+      } catch { /* a vanished terminal is handled by its error events */ }
+      input.setRawMode?.(false);
+    },
+    /** Take the terminal back; returns the feed lines held meanwhile. */
+    resume() {
+      if (closed || !suspended) return [];
+      suspended = false;
+      input.setRawMode?.(true);
+      rl.resume();
+      const lines = held;
+      held = [];
+      rl.prompt();
+      return lines;
     },
     close() {
       closed = true;

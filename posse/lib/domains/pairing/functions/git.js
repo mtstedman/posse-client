@@ -351,6 +351,11 @@ export function createAndPublishPairingBranch(projectDir, { remote, branch, expe
     if (!baseExisting) push(["push", normalizedRemote, `${oid}:${baseRef}`], projectDir, normalizedRemote);
   }
   push(["push", "--set-upstream", normalizedRemote, `${oid}:${remoteRef}`], projectDir, normalizedRemote);
+  // Pushing an object id sets no upstream. The shared branch must track the
+  // session remote (as a member's does): session-scoped commits on it are
+  // matched to the session repository through that remote.
+  git(["config", `branch.${branch}.remote`, normalizedRemote], projectDir, { timeoutMs: 5_000 });
+  git(["config", `branch.${branch}.merge`, remoteRef], projectDir, { timeoutMs: 5_000 });
   return oid;
 }
 

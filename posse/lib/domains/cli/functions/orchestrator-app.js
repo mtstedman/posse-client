@@ -108,7 +108,7 @@ import {
   getLiveSchedulerBlockMessage,
 } from "../../queue/functions/index.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
-import { ACTIVE_LEASE_STATUSES } from "../../queue/functions/common.js";
+import { LOCK_HOLDING_JOB_STATUSES } from "../../queue/functions/common.js";
 import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/reviewable.js";
 import {
   jobIsBackgroundAtlasWarm,
@@ -1347,7 +1347,7 @@ async function cmdAdd() {
 
   const queued = listWorkItems("queued");
   console.log(`\n  Queue: ${queued.length} item(s) waiting to be planned`);
-  console.log(`  ${C.dim}Run 'plan' to research & create jobs, or 'add' more items first${C.reset}\n`);
+  console.log(`  ${C.dim}Run 'go' to plan and run it, or 'add' more items first${C.reset}\n`);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1826,7 +1826,10 @@ async function cmdGo() {
   clearColdIndexFromCliFlagOnce();
   console.log(`\n  ${C.dim}Client: ${formatClientProvenance(resolveClientProvenance())}${C.reset}`);
   const queued = listWorkItems("queued");
-  const activeJobs = operationalRunJobs(listJobs(["queued", ...ACTIVE_LEASE_STATUSES]));
+  // Jobs parked on a person (a question, an approval) are work too: the run
+  // screen is where they are answered, so `go` opens it rather than saying
+  // there is nothing to do.
+  const activeJobs = operationalRunJobs(listJobs(["queued", ...LOCK_HOLDING_JOB_STATUSES]));
 
   if (queued.length === 0 && activeJobs.length === 0) {
     const iterateResult = await processIterativeWrapUp({ reason: "go start" });

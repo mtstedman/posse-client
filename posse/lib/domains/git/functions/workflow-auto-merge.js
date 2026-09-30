@@ -24,6 +24,14 @@ const AUTO_MERGE_STATUS_RECONCILE_STATUSES = [
   "waiting_on_review",
 ];
 
+// Merge results carry a message, or at least a reason code; never print "undefined".
+function mergeResultText(result, fallback) {
+  const message = String(result?.message || "").trim();
+  if (message) return message;
+  const reason = String(result?.reason || "").trim();
+  return reason ? `${fallback} (${reason.replaceAll("_", " ")})` : fallback;
+}
+
 export function createAutoMergeWorkflowHelpers(context, {
   gitMergeToTargetAsync,
   queueAtlasMainRefreshAfterMerge,
@@ -184,23 +192,23 @@ export function createAutoMergeWorkflowHelpers(context, {
             work_item_id: wi.id,
             event_type: EVENT_TYPES.WORK_ITEM_MERGE_DEFERRED,
             actor_type: EVENT_ACTORS.SYSTEM,
-            message: result.message,
+            message: mergeResultText(result, "merge deferred"),
             event_json: JSON.stringify({ branch: branchName, target_branch: targetBranch, reason }),
           });
-          say(`  ${C.yellow}[git]${C.reset} WI#${wi.id}: ${result.message}`);
+          say(`  ${C.yellow}[git]${C.reset} WI#${wi.id}: ${mergeResultText(result, "merge deferred")}`);
         } else {
           markWorkItemMergeFailed(wi.id);
           logEvent({
             work_item_id: wi.id,
             event_type: EVENT_TYPES.WORK_ITEM_MERGE_FAILED,
             actor_type: EVENT_ACTORS.SYSTEM,
-            message: `Auto-merge failed for ${branchName}: ${result.message}`,
+            message: `Auto-merge failed for ${branchName}: ${mergeResultText(result, "merge failed")}`,
             event_json: JSON.stringify({ branch: branchName, target_branch: targetBranch, reason }),
           });
           // Jobs are done; the worktree is no longer useful. Snapshot any dirt and
           // remove the directory, but keep the branch so a manual retry is possible.
           await snapshotAndRemoveWorktreeOnlyAsync(wi, "merge-failed");
-          say(`  ${C.red}[git]${C.reset} WI#${wi.id}: ${result.message}`);
+          say(`  ${C.red}[git]${C.reset} WI#${wi.id}: ${mergeResultText(result, "merge failed")}`);
         }
       }
       if (deferredIds.size === 0 || mergedThisPass === 0) break;

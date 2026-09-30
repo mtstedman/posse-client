@@ -1810,6 +1810,15 @@ export async function mergeToSharedTrunkAsync({
       }
       reusedParkedCandidate = false;
       if (!validation?.ok) {
+        // The gate's own words are the only account of why a candidate never
+        // published; the operation row keeps just a reason code.
+        sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_PUSH_REJECTED, `Publication gate refused ${config.branch}: ${validation?.reason || "unknown"}`, {
+          branch: config.branch,
+          reason: validation?.reason || null,
+          output: String(validation?.output || "").slice(0, 2000),
+          files: Array.isArray(validation?.files) ? validation.files.slice(0, 50) : undefined,
+          gate: true,
+        }, operation.workItemId ?? null);
         const capturedCandidate = operation.candidateSha;
         operation = transition(operation, {
           phase: "candidate",

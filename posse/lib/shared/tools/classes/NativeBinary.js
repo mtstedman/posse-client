@@ -16,6 +16,7 @@
 // Invocation wrapping mirrors lib/shared/tools/classes/McpServer.js: injected spawn
 // impls for testability, windowsHide, and taskkill-based termination on win32.
 
+import { isMainThread as onMainThread } from "node:worker_threads";
 import fs from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 
@@ -986,7 +987,7 @@ export class NativeBinary {
     if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
       this.#retireWorkerAfterAuthFailure();
       return inputWithAuth.pulseCold
-        ? this.#nativePulseColdResult()
+        ? this.#nativePulseColdResult(inputWithAuth.route)
         : this.#nativeAuthUnavailableResult();
     }
     const res = this._spawnSync(bin, fullArgs, {
@@ -1859,9 +1860,13 @@ export class NativeBinary {
   }
 
   /** @returns {RunResult} */
-  #nativePulseColdResult() {
+  #nativePulseColdResult(route = null) {
+    // Name what was needed and what this process holds: a worker prepared
+    // without the call's route fails here on every call, not just the first.
+    const held = [...this._runtimePulseEnvelopes.keys()].join(", ") || "none";
+    const where = onMainThread ? "main thread" : "worker";
     const error = /** @type {NativeBinaryError} */ (
-      new Error(`native pulse token cache cold for ${this.name}; background heartbeat mint requested`)
+      new Error(`native pulse token cache cold for ${this.name}${route ? ` (route ${route}; ${where}; prepared routes: ${held})` : ""}; background heartbeat mint requested`)
     );
     error.code = "POSSE_NATIVE_PULSE_COLD";
     return {
