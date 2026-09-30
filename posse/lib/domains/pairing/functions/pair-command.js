@@ -8,6 +8,7 @@ import {
   SESSION_SYNC_POLICY,
   SESSION_SYNC_STATES,
   sessionLeaseSec,
+  TRUNK_HEAD_PATTERN,
 } from "../../../catalog/session-sync.js";
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { runSharedTrunkAccessPreflight } from "../../integrations/functions/shared-trunk-preflight.js";
@@ -29,6 +30,7 @@ import {
 } from "./remote-client.js";
 import {
   addPairingRemote,
+  assertHostTrunkMatchesRemote,
   assertPairingRemoteTargets,
   assertCleanPairingCheckout,
   createAndPublishPairingBranch,
@@ -95,6 +97,8 @@ import {
   activeSessionCloseClaim,
   claimSessionClose,
   releaseSessionClose,
+  renewSessionClose,
+  SESSION_CLOSE_CLAIM_RENEW_MS,
 } from "./session-close-claim.js";
 import {
   teamPolicyRegression,
@@ -103,6 +107,7 @@ import {
 import {
   addGitHubMemberDeployKey,
   assertGitHubCliReady,
+  assertSessionSshPathSupported,
   cleanupGitHubSessionRepository,
   configureRepositorySessionSsh,
   githubRepositoryName,
@@ -113,6 +118,7 @@ import {
   removeGitHubMemberDeployKeys,
   removeSessionCredentialDirectory,
   restoreRepositorySsh,
+  revokeGitHubMemberDeployKeys,
   setGitHubDefaultBranch,
 } from "./github-session.js";
 import {
@@ -1304,10 +1310,24 @@ async function finishHostShutdown(root, remoteClient, state, options = {}) {
       ? `Another process (pid ${claim.ownerPid}) is already closing this session; let it finish`
       : "Could not claim the session close; try again"), { code: claim.reason });
   }
+  const renewal = setInterval(() => renewSessionClose({ stateId: state.id }), SESSION_CLOSE_CLAIM_RENEW_MS);
+  renewal.unref?.();
   try {
     return await closeClaimedHostSession(root, remoteClient, state, options);
   } finally {
+    clearInterval(renewal);
     releaseSessionClose({ stateId: state.id });
+  }
+}
+
+function revokeSessionMemberKeys(root, state) {
+  try {
+    revokeGitHubMemberDeployKeys(state.temporary_repository, { cwd: root });
+  } catch (error) {
+    throw Object.assign(new Error(
+      `Could not revoke the session members' deploy keys on ${state.temporary_repository}: ${safeError(error)}\n`
+        + "  The close stops before freezing the session's work so no member can still push to it. Fix GitHub CLI access (`gh auth status`), then close again.",
+    ), { code: "pairing_member_keys_not_revoked" });
   }
 }
 
@@ -1368,6 +1388,11 @@ async function closeClaimedHostSession(root, remoteClient, state, {
     if (remote?.error) throw Object.assign(new Error(remote.error), { code: remote.code });
   }
   if (journal) journal = markPairingPromotion(journal, { phase: "clients_drained" });
+  // Member deploy keys end with the session. Revoking them before the final
+  // sync means nothing can reach the source after it is frozen below, and a
+  // kept or undeletable repository is no longer writable by anyone but the
+  // host. A revocation that cannot be proven leaves the close to recovery.
+  if (state.temporary_repository) revokeSessionMemberKeys(root, state);
 
   const peerSnapshot = readPairingPeerSnapshot();
   if (checkoutSharedBranchForClose(root, state.shared_branch) && !json) {
@@ -1391,7 +1416,15 @@ async function closeClaimedHostSession(root, remoteClient, state, {
       result: synced,
     });
   }
-  if (journal) journal = markPairingPromotion(journal, { phase: "trunk_frozen" });
+  // Promotion integrates exactly the object this sync observed, never a tip
+  // the session branch reaches afterwards. A frozen source is never moved.
+  if (journal) {
+    journal = markPairingPromotion(journal, {
+      phase: "trunk_frozen",
+      ...(!journal.source_sha && TRUNK_HEAD_PATTERN.test(String(synced.remoteSha || ""))
+        ? { source_sha: synced.remoteSha } : {}),
+    });
+  }
   if (keepBranch) {
     const restored = await restoreLocalPairing(root, getPairingState(state.id));
     if (!restored.ok) {
@@ -1480,6 +1513,8 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       "Session hosting currently requires a GitHub origin so Posse can isolate members in a private throwaway repository",
     ), { code: "pairing_provider_unsupported" });
   }
+  assertSessionSshPathSupported(root);
+  assertHostTrunkMatchesRemote(root, remote, defaultBranch);
   const { owner: githubOwner } = assertGitHubCliReady(root);
   const state = createPairingState({
     role: "host",
@@ -2018,13 +2053,24 @@ async function admitPairingMember({ state, code, projectDir, remoteClient }) {
   );
   assertPairingStatusMatches(state, admitted);
   if (state.temporary_repository) {
+    const root = repositoryRoot(projectDir);
     try {
-      addGitHubMemberDeployKey(state.temporary_repository, admitted.admitted_member, {
-        cwd: repositoryRoot(projectDir),
-      });
+      addGitHubMemberDeployKey(state.temporary_repository, admitted.admitted_member, { cwd: root });
     } catch (error) {
-      if (admitted.admitted_member?.id) {
-        try { await remoteClient.kick(state.relay_token, admitted.admitted_member.id); } catch { /* revoke pulse best effort */ }
+      const memberId = admitted.admitted_member?.id;
+      if (memberId) {
+        // A failed add can still have created the key (GitHub applied the POST
+        // but its response was lost), so rollback removes any key under the
+        // member's title before it counts as done.
+        try {
+          removeGitHubMemberDeployKeys(state.temporary_repository, memberId, { cwd: root });
+        } catch (cleanupError) {
+          error.message = `${safeError(error)}\n  This member's deploy key may still be active on ${state.temporary_repository} `
+            + `(removing it failed: ${safeError(cleanupError)}). Closing the session revokes every member key; `
+            + `to revoke it now, find the key titled "Posse member ${memberId} ..." with \`gh api repos/${state.temporary_repository}/keys\` `
+            + `and delete it with \`gh api --method DELETE repos/${state.temporary_repository}/keys/<id>\`.`;
+        }
+        try { await remoteClient.kick(state.relay_token, memberId); } catch { /* revoke pulse best effort */ }
       }
       throw error;
     }

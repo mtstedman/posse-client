@@ -113,6 +113,7 @@ export function beginPairingPromotion(state, {
     approval_required: strategy === "fast-forward" || state?.submission_approval_enabled === 1,
     phase: "requested",
     reason,
+    source_sha: null,
     target_base_sha: null,
     candidate_sha: null,
     updated_at: new Date().toISOString(),
@@ -144,10 +145,25 @@ function fetchBranch(projectDir, remote, branch, exec = git) {
   return { remoteRef, sha };
 }
 
+// Close records the exact source object its final sync observed. Promotion
+// integrates that object only: a later push to the session branch is not part
+// of the session, and the object stays usable once the repository is gone.
+function pinnedSource(projectDir, journal, fetchedSha, exec) {
+  const pinned = String(journal.source_sha || "");
+  if (!SHA_RE.test(pinned)) return null;
+  if (refSha(projectDir, `${pinned}^{commit}`, exec) !== pinned) {
+    throw promotionError("pairing_promotion_source_unresolved",
+      `The session source ${pinned.slice(0, 8)} frozen at close is not in this clone`);
+  }
+  return { sha: pinned, moved: Boolean(fetchedSha) && fetchedSha !== pinned };
+}
+
 function fetchSourceBranch(projectDir, journal, exec = git) {
   const branch = validateBranchName(projectDir, journal.source_branch);
   if (!journal.source_url) {
-    return fetchBranch(projectDir, validateRemoteName(journal.remote), branch, exec);
+    const fetched = fetchBranch(projectDir, validateRemoteName(journal.remote), branch, exec);
+    const pinned = pinnedSource(projectDir, journal, fetched.sha, exec);
+    return pinned ? { ...fetched, ...pinned } : fetched;
   }
   const sourceUrl = validatePromotionSource(journal.source_url);
   const suffix = String(journal.session_id || "recovery")
@@ -160,6 +176,9 @@ function fetchSourceBranch(projectDir, journal, exec = git) {
     // A frozen candidate was built from the source already fetched here. Once
     // the session's repository or key is gone (the session ended), that copy
     // is the source; before a freeze, a fresh fetch is required.
+    let pinned = null;
+    try { pinned = pinnedSource(projectDir, journal, null, exec); } catch { /* report the fetch failure */ }
+    if (pinned) return { remoteRef: sourceRef, ...pinned, fetched: false };
     const kept = SHA_RE.test(String(journal.candidate_sha || "")) ? refSha(projectDir, sourceRef, exec) : null;
     if (!kept) throw error;
     return { remoteRef: sourceRef, sha: kept, fetched: false };
@@ -170,7 +189,8 @@ function fetchSourceBranch(projectDir, journal, exec = git) {
       code: "pairing_promotion_source_head_unresolved",
     });
   }
-  return { remoteRef: sourceRef, sha };
+  const pinned = pinnedSource(projectDir, journal, sha, exec);
+  return pinned ? { remoteRef: sourceRef, ...pinned } : { remoteRef: sourceRef, sha };
 }
 
 function targetGitArgs(journal, args) {
@@ -238,6 +258,7 @@ async function promoteFastForwardLocked(projectDir, initialJournal, {
   if (sourceBranch === targetBranch) throw promotionError("pairing_promotion_self_merge", "Pairing side trunk cannot equal its promotion target");
   assertCleanPairingCheckout(projectDir);
   const source = fetchSourceBranch(projectDir, journal, exec);
+  if (source.moved) onProgress(`${sourceBranch} moved after close froze it; integrating the frozen ${source.sha.slice(0, 8)}`);
   let target = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
   const frozen = SHA_RE.test(String(journal.candidate_sha || "")) ? journal.candidate_sha : null;
   if (!frozen && isAncestor(projectDir, source.sha, target.sha, exec)) {
@@ -380,6 +401,7 @@ async function promoteLocked(projectDir, initialJournal, {
   const workflow = workflowFactory(projectDir, targetBranch);
   for (let attempt = 0; attempt < MAX_REBUILDS; attempt += 1) {
     const source = fetchSourceBranch(projectDir, journal, exec);
+    if (source.moved && attempt === 0) onProgress(`${sourceBranch} moved after close froze it; integrating the frozen ${source.sha.slice(0, 8)}`);
     const target = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
     const current = refSha(projectDir, targetBranch, exec);
     const candidate = SHA_RE.test(String(journal.candidate_sha || "")) ? journal.candidate_sha : null;

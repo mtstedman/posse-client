@@ -40,14 +40,14 @@ export function repositoryRoot(projectDir) {
 // logs/ folders, which the broader runtime ignore list also covers.
 const PAIRING_RUNTIME_EXCLUDES = Object.freeze([".posse/", ".posse-worktrees/", ".posse-test-suites/"]);
 
-export function excludePosseRuntimeFolders(projectDir) {
+function appendLocalExcludes(projectDir, entries) {
   try {
     const root = repositoryRoot(projectDir);
     const commonDir = path.resolve(root, git(["rev-parse", "--git-common-dir"], root, { timeoutMs: 5_000 }).trim());
     const file = path.join(commonDir, "info", "exclude");
     const lines = fs.existsSync(file) ? fs.readFileSync(file, "utf8").split(/\r?\n/u) : [];
     const present = new Set(lines.map((line) => line.trim()));
-    const missing = PAIRING_RUNTIME_EXCLUDES.filter((entry) => !present.has(entry) && !present.has(`/${entry}`));
+    const missing = entries.filter((entry) => !present.has(entry) && !present.has(`/${entry}`));
     if (missing.length === 0) return false;
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const separator = lines.length > 0 && lines[lines.length - 1] !== "" ? "\n" : "";
@@ -56,6 +56,10 @@ export function excludePosseRuntimeFolders(projectDir) {
   } catch {
     return false; // the status check still decides
   }
+}
+
+export function excludePosseRuntimeFolders(projectDir) {
+  return appendLocalExcludes(projectDir, PAIRING_RUNTIME_EXCLUDES);
 }
 
 export function assertCleanPairingCheckout(projectDir) {
@@ -87,8 +91,11 @@ export function assertCleanPairingCheckout(projectDir) {
 // commit to return to, so leaving keeps the last shared state instead.
 export const FRESH_CHECKOUT_HEAD = "0".repeat(40);
 // Entries an otherwise empty folder may hold: Posse creates its own state
-// directory before the join command runs.
+// directory before the join command runs, and Finder leaves .DS_Store.
 const FRESH_CHECKOUT_ALLOWED_ENTRIES = new Set([".posse", ".DS_Store"]);
+// Finder litter is not the member's work, so the clean-checkout check that
+// follows must not count it (nor the copies Finder adds once files arrive).
+const FRESH_CHECKOUT_EXCLUDES = Object.freeze([".DS_Store"]);
 
 function headIsUnborn(projectDir) {
   try {
@@ -130,6 +137,7 @@ export function initializeFreshPairingCheckout(projectDir) {
   fs.mkdirSync(root, { recursive: true });
   git(["init", "--quiet"], root, { timeoutMs: 10_000 });
   excludePosseRuntimeFolders(root);
+  appendLocalExcludes(root, FRESH_CHECKOUT_EXCLUDES);
   return root;
 }
 
@@ -240,6 +248,32 @@ export function remoteDefaultBranch(projectDir, remoteName) {
     });
   }
   return validateBranchName(projectDir, match[1]);
+}
+
+// A session's close integrates into <remote>/<branch>, so hosting starts from
+// exactly that tip: a local branch ahead of it or diverged from it seeds work
+// the close cannot publish, and one behind it shares a stale base.
+export function assertHostTrunkMatchesRemote(projectDir, remoteName, branch) {
+  const normalizedRemote = validateRemoteName(remoteName);
+  const localRef = `refs/heads/${branch}`;
+  const remoteRef = `refs/remotes/${normalizedRemote}/${branch}`;
+  git(["fetch", "--no-tags", normalizedRemote, `+${localRef}:${remoteRef}`], projectDir, { timeoutMs: 5 * 60_000 });
+  const local = git(["rev-parse", "--verify", localRef], projectDir, { timeoutMs: 5_000 }).trim();
+  const remote = git(["rev-parse", "--verify", remoteRef], projectDir, { timeoutMs: 5_000 }).trim();
+  if (local === remote) return { local, remote };
+  const [ahead = 0, behind = 0] = git(["rev-list", "--left-right", "--count", `${localRef}...${remoteRef}`], projectDir, {
+    timeoutMs: 10_000,
+  }).trim().split(/\s+/u).map(Number);
+  const tracked = `${normalizedRemote}/${branch}`;
+  const message = ahead > 0 && behind > 0
+    ? `Local ${branch} and ${tracked} have diverged (${ahead} local and ${behind} remote commit(s)). Reconcile them so ${branch} matches ${tracked}, then host again.`
+    : ahead > 0
+      ? `Local ${branch} has ${ahead} commit(s) ${tracked} lacks. Closing a session integrates into ${tracked}, so push them (or move them to another branch) first, then host again.`
+      : `Local ${branch} is ${behind} commit(s) behind ${tracked}. Update it (git pull --ff-only), then host again.`;
+  throw Object.assign(new Error(message), {
+    code: "pairing_host_trunk_not_current",
+    relation: ahead > 0 && behind > 0 ? "diverged" : ahead > 0 ? "ahead" : "behind",
+  });
 }
 
 function remoteAccessUrls(projectDir, remoteName, { push = false } = {}) {

@@ -626,8 +626,12 @@ prove noninteractive fetch and leased dry-run push access. The private key never
 leaves the member clone; the host's origin credentials and all Git credentials
 stay out of the relay. The pending bearer is stored by the relay only as a hash
 and is unusable for session work until the host admits it. A failed Git preflight
-uses that bearer to leave rather than lingering as an active member. Kick and
-close remove the corresponding deploy keys; repository cleanup reports a manual
+uses that bearer to leave rather than lingering as an active member. Kick
+removes that member's deploy keys, and an admission whose key could not be
+installed removes any key GitHub created anyway. Close revokes every member key
+before its final sync, so the frozen work cannot change afterwards and a kept or
+undeleted repository stays writable only by the host; a revocation that cannot
+be proven stops the close for a retry. Repository cleanup reports a manual
 action when the host lacks delete rights.
 
 Hosts can manage the live policy and roster from another terminal:
@@ -669,8 +673,9 @@ crashes, recovery stops at the candidate and requires `posse session integrate`;
 `posse session abandon-integration` preserves the candidate ref and clears the
 journal for manual recovery.
 
-Hosting must start on the remote's advertised default branch so the integration
-target is unambiguous. A hard-killed process leaves a durable local recovery
+Hosting must start on the remote's advertised default branch, at exactly its
+remote tip (hosting fetches it first), so the integration target is unambiguous
+and the close can publish what the session was seeded from. A hard-killed process leaves a durable local recovery
 journal. The next non-help Posse command repairs the session, waits for peers to
 stop, and resumes the exact leased integration before allowing more mutable work.
 Restoration safely pauses if the shared checkout is dirty, so commit or stash the

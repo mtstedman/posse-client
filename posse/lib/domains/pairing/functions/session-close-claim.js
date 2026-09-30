@@ -11,6 +11,16 @@ import {
 // claim is an atomic runtime-status row naming the closing process; a row
 // whose process is gone no longer counts, so a crashed close never wedges the
 // next attempt.
+//
+// A PID alone cannot prove that: once the closer dies, the operating system
+// may hand its PID to an unrelated long-lived process. The closer therefore
+// renews the claim while it runs, and a claim not renewed within the lease
+// counts as abandoned whatever its PID shows. Renewal pauses only while
+// synchronous Git work blocks the closer's event loop, which takes seconds to
+// minutes, so the lease is generous: a live closer keeps it, and a dead one's
+// claim ages out instead of lasting as long as the PID's next owner.
+export const SESSION_CLOSE_CLAIM_LEASE_MS = 30 * 60_000;
+export const SESSION_CLOSE_CLAIM_RENEW_MS = 30_000;
 
 function processAlive(pid, kill = process.kill.bind(process)) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
@@ -23,9 +33,11 @@ function processAlive(pid, kill = process.kill.bind(process)) {
   }
 }
 
-function liveClaim(row, stateId, kill) {
+function liveClaim(row, stateId, kill, nowMs) {
   if (!row || typeof row !== "object") return null;
   if (stateId != null && String(row.state_id) !== String(stateId)) return null;
+  const renewedMs = Date.parse(String(row.renewed_at || row.started_at || ""));
+  if (!Number.isFinite(renewedMs) || nowMs - renewedMs > SESSION_CLOSE_CLAIM_LEASE_MS) return null;
   const pid = Number(row.owner_pid);
   return processAlive(pid, kill) ? row : null;
 }
@@ -43,18 +55,27 @@ export function claimSessionClose({
 } = {}) {
   let refusedBy = null;
   const written = updateRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_CLOSING, (current) => {
-    const held = liveClaim(current, stateId, kill);
+    const held = liveClaim(current, stateId, kill, nowMs);
     if (held && Number(held.owner_pid) !== pid) {
       refusedBy = held;
       return current;
     }
-    return { state_id: String(stateId), owner_pid: pid, started_at: new Date(nowMs).toISOString() };
+    const at = new Date(nowMs).toISOString();
+    return { state_id: String(stateId), owner_pid: pid, started_at: at, renewed_at: at };
   });
   if (refusedBy) {
     return { ok: false, ownerPid: Number(refusedBy.owner_pid) || null, reason: "session_close_in_progress" };
   }
   if (!written.ok) return { ok: false, ownerPid: null, reason: "session_close_claim_failed" };
   return { ok: true, claim: written.value };
+}
+
+/** Extend this process's claim; a claim it no longer holds is left alone. */
+export function renewSessionClose({ stateId, pid = process.pid, nowMs = Date.now() } = {}) {
+  updateRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_CLOSING, (current) => {
+    if (!current || String(current.state_id) !== String(stateId) || Number(current.owner_pid) !== pid) return current;
+    return { ...current, renewed_at: new Date(nowMs).toISOString() };
+  });
 }
 
 /** Release this process's claim; another process's claim is left alone. */
@@ -67,6 +88,10 @@ export function releaseSessionClose({ stateId, pid = process.pid } = {}) {
 }
 
 /** The live close claim for `stateId`, or null. */
-export function activeSessionCloseClaim({ stateId, kill = process.kill.bind(process) } = {}) {
-  return liveClaim(readRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_CLOSING), stateId, kill);
+export function activeSessionCloseClaim({
+  stateId,
+  kill = process.kill.bind(process),
+  nowMs = Date.now(),
+} = {}) {
+  return liveClaim(readRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_CLOSING), stateId, kill, nowMs);
 }

@@ -85,7 +85,7 @@ function applyProvenanceGateDecision() {
     || ""
   ).trim().toLowerCase();
   const accepted = answer.startsWith("accept") || answer === "yes" || answer === "approve";
-  if (accepted && /^[0-9a-f]{40}$/iu.test(String(payload.remote_oid || ""))) {
+  if (accepted && TRUNK_HEAD_PATTERN.test(String(payload.remote_oid || ""))) {
     updatePairingEnrollment(state.id, { baselineOid: payload.remote_oid, phase: "active" });
   } else {
     updateSharedTrunkRuntimeStatus({
@@ -440,7 +440,7 @@ export class SharedTrunkPoller {
         return { ...result, attempted: true, config: effectiveConfig, blocked: true };
       }
       // A held checkout did not move, so its provenance baseline must not.
-      if (result?.ok && result.held !== true && /^[0-9a-f]{40}$/iu.test(String(result.newSha || ""))) {
+      if (result?.ok && result.held !== true && TRUNK_HEAD_PATTERN.test(String(result.newSha || ""))) {
         const live = getLivePairingState();
         if (live?.phase === "active" && live.baseline_oid !== result.newSha) {
           updatePairingEnrollment(live.id, { baselineOid: result.newSha, phase: "active" });

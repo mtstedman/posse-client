@@ -130,11 +130,46 @@ export function readLocalSshCommand(projectDir, options = {}) {
   }
 }
 
+// OpenSSH on every platform accepts forward slashes, which keep a Windows
+// path free of the backslashes both quoting layers below would reinterpret.
+function sshPathText(value, platform) {
+  return platform === "win32" ? String(value).replaceAll("\\", "/") : String(value);
+}
+
+// Git runs core.sshCommand through a shell (Git for Windows through its own
+// sh), so the path is single-quoted: every character inside stays data.
+function shellQuotedPath(value, platform) {
+  return `'${sshPathText(value, platform).replaceAll("'", "'\\''")}'`;
+}
+
+// ssh_config splits values on whitespace, honors double quotes, and expands
+// %-tokens in IdentityFile. A double quote, backslash, or control character
+// has no spelling every OpenSSH version reads back unchanged.
+function sshConfigQuotedPath(value, platform) {
+  return `"${sshPathText(value, platform).replaceAll("%", "%%")}"`;
+}
+
+function assertSshConfigurablePath(value, platform) {
+  if (/["\\\u0000-\u001f\u007f]/u.test(sshPathText(value, platform))) {
+    throw Object.assign(new Error(
+      `Sessions cannot use a checkout whose path contains a double quote, backslash, or control character: ${JSON.stringify(String(value))}. Move the checkout and try again.`,
+    ), { code: "pairing_checkout_path_unsupported" });
+  }
+}
+
+// Checked before hosting creates anything, so an unusable path is refused
+// before a session repository exists rather than rolled back after.
+export function assertSessionSshPathSupported(projectDir, options = {}) {
+  assertSshConfigurablePath(path.join(projectDir, ".posse", "session-credentials"), options.platform || process.platform);
+}
+
 export function prepareSessionSshIdentity(projectDir, sessionId, options = {}) {
+  const platform = options.platform || process.platform;
   const directory = path.join(projectDir, ".posse", "session-credentials", safeSessionPart(sessionId));
   const privateKey = path.join(directory, "id_ed25519");
   const publicKey = `${privateKey}.pub`;
   const configFile = path.join(directory, "ssh_config");
+  assertSshConfigurablePath(privateKey, platform);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (!fs.existsSync(privateKey) || !fs.existsSync(publicKey)) {
     run("ssh-keygen", [
@@ -146,7 +181,7 @@ export function prepareSessionSshIdentity(projectDir, sessionId, options = {}) {
   fs.writeFileSync(configFile, [
     "Host github.com",
     "  HostName github.com",
-    `  IdentityFile ${privateKey}`,
+    `  IdentityFile ${sshConfigQuotedPath(privateKey, platform)}`,
     "  IdentitiesOnly yes",
     "  StrictHostKeyChecking yes",
     "",
@@ -156,7 +191,7 @@ export function prepareSessionSshIdentity(projectDir, sessionId, options = {}) {
     privateKey,
     publicKey,
     publicKeyText: fs.readFileSync(publicKey, "utf8").trim(),
-    sshCommand: `ssh -F ${configFile}`,
+    sshCommand: `ssh -F ${shellQuotedPath(configFile, platform)}`,
   };
 }
 
@@ -226,6 +261,12 @@ export function setGitHubDefaultBranch(repository, branch, options = {}) {
   ], options);
 }
 
+const MEMBER_DEPLOY_KEY_PREFIX = "Posse member ";
+
+function githubNotFound(error) {
+  return /Could not resolve to a Repository|HTTP 404|Not Found/iu.test(`${error?.message || ""} ${error?.stderr || ""}`);
+}
+
 export function addGitHubMemberDeployKey(repository, member, options = {}) {
   const key = String(member?.ssh_public_key || "").trim();
   if (!key) {
@@ -233,7 +274,7 @@ export function addGitHubMemberDeployKey(repository, member, options = {}) {
       code: "pairing_member_ssh_key_required",
     });
   }
-  const title = `Posse member ${safeSessionPart(member.id)} ${safeSessionPart(member.instance_id)}`;
+  const title = `${MEMBER_DEPLOY_KEY_PREFIX}${safeSessionPart(member.id)} ${safeSessionPart(member.instance_id)}`;
   const output = run("gh", [
     "api", "--method", "POST", `repos/${repository}/keys`,
     "-f", `title=${title}`, "-f", `key=${key}`, "-F", "read_only=false",
@@ -243,16 +284,44 @@ export function addGitHubMemberDeployKey(repository, member, options = {}) {
   return { id, title };
 }
 
-export function removeGitHubMemberDeployKeys(repository, memberId, options = {}) {
-  const prefix = `Posse member ${safeSessionPart(memberId)} `;
-  const output = run("gh", ["api", `repos/${repository}/keys`, "--paginate"], options);
-  const keys = JSON.parse(output || "[]");
-  const matches = Array.isArray(keys) ? keys.filter((key) => String(key?.title || "").startsWith(prefix)) : [];
+// --paginate prints each page as its own JSON array; one JSON line per key
+// keeps every page parseable.
+function listGitHubDeployKeys(repository, options) {
+  const output = run("gh", [
+    "api", `repos/${repository}/keys?per_page=100`, "--paginate",
+    "--jq", ".[] | {id, title} | @json",
+  ], options);
+  return output.split(/\r?\n/u).filter((line) => line.trim()).map((line) => JSON.parse(line));
+}
+
+function removeGitHubDeployKeysTitled(repository, prefix, options) {
+  const matches = listGitHubDeployKeys(repository, options)
+    .filter((key) => String(key?.title || "").startsWith(prefix));
   for (const key of matches) {
     if (!Number.isSafeInteger(key?.id) || key.id <= 0) continue;
-    run("gh", ["api", "--method", "DELETE", `repos/${repository}/keys/${key.id}`], options);
+    try {
+      run("gh", ["api", "--method", "DELETE", `repos/${repository}/keys/${key.id}`], options);
+    } catch (error) {
+      if (!githubNotFound(error)) throw error;
+    }
   }
   return matches.length;
+}
+
+export function removeGitHubMemberDeployKeys(repository, memberId, options = {}) {
+  return removeGitHubDeployKeysTitled(repository, `${MEMBER_DEPLOY_KEY_PREFIX}${safeSessionPart(memberId)} `, options);
+}
+
+// Every member key ends with the session, including one left by an admission
+// whose rollback could not prove it was gone. The host key stays: the host
+// still fetches the frozen source for integration.
+export function revokeGitHubMemberDeployKeys(repository, options = {}) {
+  try {
+    return { revoked: removeGitHubDeployKeysTitled(repository, MEMBER_DEPLOY_KEY_PREFIX, options), absent: false };
+  } catch (error) {
+    if (githubNotFound(error)) return { revoked: 0, absent: true };
+    throw error;
+  }
 }
 
 export function cleanupGitHubSessionRepository(repository, options = {}) {
@@ -261,7 +330,7 @@ export function cleanupGitHubSessionRepository(repository, options = {}) {
     return { ok: true, deleted: true, repository };
   } catch (error) {
     // Recorded before it was created: a host that died first never made it.
-    if (/Could not resolve to a Repository|HTTP 404|Not Found/iu.test(`${error?.message || ""} ${error?.stderr || ""}`)) {
+    if (githubNotFound(error)) {
       return { ok: true, deleted: false, absent: true, repository };
     }
     return {
