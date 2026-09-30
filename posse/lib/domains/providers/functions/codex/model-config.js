@@ -34,7 +34,7 @@ export const MODEL_TIERS = {
 const OAUTH_SUPPORTED_MODELS = new Set(CODEX_OAUTH_SUPPORTED_MODELS);
 
 function resolveOauthCompatibleModel(preferredModel) {
-  const standardModel = getProviderTierDefaults("codex")?.standard?.model || "gpt-5.4";
+  const standardModel = getProviderTierDefaults("codex")?.standard?.model || "gpt-6.1-sol";
   const preferred = String(preferredModel || "").trim();
   if (OAUTH_SUPPORTED_MODELS.has(preferred)) return preferred;
 

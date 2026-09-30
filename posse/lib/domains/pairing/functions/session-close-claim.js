@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   readRuntimeStatus,
   RUNTIME_STATUS_KEYS,
@@ -21,6 +23,7 @@ import {
 // claim ages out instead of lasting as long as the PID's next owner.
 export const SESSION_CLOSE_CLAIM_LEASE_MS = 30 * 60_000;
 export const SESSION_CLOSE_CLAIM_RENEW_MS = 30_000;
+export const SESSION_CREDENTIAL_CLAIM_LEASE_MS = 5 * 60_000;
 
 function processAlive(pid, kill = process.kill.bind(process)) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
@@ -94,4 +97,71 @@ export function activeSessionCloseClaim({
   nowMs = Date.now(),
 } = {}) {
   return liveClaim(readRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_CLOSING), stateId, kill, nowMs);
+}
+
+function liveCredentialClaim(row, stateId, kill, nowMs) {
+  if (!row || typeof row !== "object") return null;
+  if (stateId != null && String(row.state_id) !== String(stateId)) return null;
+  const renewedMs = Date.parse(String(row.renewed_at || row.started_at || ""));
+  if (!Number.isFinite(renewedMs) || nowMs - renewedMs > SESSION_CREDENTIAL_CLAIM_LEASE_MS) return null;
+  return processAlive(Number(row.owner_pid), kill) ? row : null;
+}
+
+/** Serialize member-key mutations with close's revoke-and-freeze boundary. */
+export function claimSessionCredentialMutation({
+  stateId,
+  operation,
+  pid = process.pid,
+  ownerId = `${pid}:${randomUUID()}`,
+  nowMs = Date.now(),
+  kill = process.kill.bind(process),
+} = {}) {
+  let refusedBy = null;
+  const written = updateRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_CREDENTIAL_MUTATION, (current) => {
+    const held = liveCredentialClaim(current, stateId, kill, nowMs);
+    if (held && String(held.owner_id) !== String(ownerId)) {
+      refusedBy = held;
+      return current;
+    }
+    const at = new Date(nowMs).toISOString();
+    return {
+      state_id: String(stateId),
+      owner_id: String(ownerId),
+      owner_pid: pid,
+      operation: String(operation || "member-key mutation"),
+      started_at: current?.owner_id === ownerId ? current.started_at : at,
+      renewed_at: at,
+    };
+  });
+  if (refusedBy) {
+    return {
+      ok: false,
+      ownerPid: Number(refusedBy.owner_pid) || null,
+      operation: String(refusedBy.operation || "member-key mutation"),
+      reason: "session_credential_mutation_in_progress",
+    };
+  }
+  if (!written.ok) return { ok: false, ownerPid: null, operation: null, reason: "session_credential_claim_failed" };
+  return { ok: true, claim: written.value };
+}
+
+export function renewSessionCredentialMutation({
+  stateId,
+  ownerId,
+  nowMs = Date.now(),
+} = {}) {
+  return updateRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_CREDENTIAL_MUTATION, (current) => {
+    if (!current || String(current.state_id) !== String(stateId)
+      || String(current.owner_id) !== String(ownerId)) return current;
+    return { ...current, renewed_at: new Date(nowMs).toISOString() };
+  }).ok;
+}
+
+export function releaseSessionCredentialMutation({ stateId, ownerId } = {}) {
+  updateRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_CREDENTIAL_MUTATION, (current) => {
+    if (!current) return null;
+    if (String(current.state_id) === String(stateId)
+      && String(current.owner_id) === String(ownerId)) return null;
+    return current;
+  });
 }

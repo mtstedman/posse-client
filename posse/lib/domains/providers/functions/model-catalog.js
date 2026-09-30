@@ -17,20 +17,18 @@ export { PROVIDER_OPTIONS, PROVIDER_LABELS, MODEL_TIERS };
 const MODEL_TIER_DEFAULTS = Object.freeze({
   claude: Object.freeze({
     cheap: Object.freeze({ model: "haiku" }),
-    standard: Object.freeze({ model: "claude-sonnet-5" }),
-    strong: Object.freeze({ model: "claude-opus-5" }),
+    standard: Object.freeze({ model: "claude-sonnet-5-5" }),
+    strong: Object.freeze({ model: "claude-opus-5-5" }),
   }),
   openai: Object.freeze({
-    cheap: Object.freeze({ model: "gpt-5.4-mini" }),
-    standard: Object.freeze({ model: "gpt-5.4" }),
-    strong: Object.freeze({ model: "gpt-5.6" }),
+    cheap: Object.freeze({ model: "gpt-6-luna" }),
+    standard: Object.freeze({ model: "gpt-6.1-sol" }),
+    strong: Object.freeze({ model: "gpt-6-astra" }),
   }),
   codex: Object.freeze({
-    cheap: Object.freeze({ model: "gpt-5.4-mini" }),
-    standard: Object.freeze({ model: "gpt-5.4" }),
-    // ChatGPT-authenticated Codex CLI rejects gpt-5.6. Keep it known for
-    // API-backed validation, but do not make it the OAuth runtime default.
-    strong: Object.freeze({ model: "gpt-5.5" }),
+    cheap: Object.freeze({ model: "gpt-6-luna" }),
+    standard: Object.freeze({ model: "gpt-6.1-sol" }),
+    strong: Object.freeze({ model: "gpt-6-astra" }),
   }),
   grok: Object.freeze({
     cheap: Object.freeze({ model: "grok-build-0.1" }),
@@ -55,8 +53,8 @@ const MODEL_TIER_DEFAULTS = Object.freeze({
 const DEFAULT_TIER_MODEL_FALLBACK = Object.freeze({
   claude: Object.freeze({
     cheap: "haiku",
-    standard: "claude-sonnet-5",
-    strong: "claude-opus-5",
+    standard: "claude-sonnet-5-5",
+    strong: "claude-opus-5-5",
   }),
 });
 
@@ -98,6 +96,7 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
     "claude-fable-5",
     "claude-opus-5-5",
     "claude-opus-5",
+    "claude-sonnet-5-5",
     "claude-sonnet-5",
     "claude-opus-4-8",
     "claude-opus-4-8[1m]",
@@ -119,6 +118,9 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
   ]),
   openai: Object.freeze([
     "gpt-6-astra",
+    "gpt-6.1-sol",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-4.1-mini",
     "gpt-4.1",
     "gpt-5-mini",
@@ -141,6 +143,9 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
   ]),
   codex: Object.freeze([
     "gpt-6-astra",
+    "gpt-6.1-sol",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6",
     "gpt-5.6-sol",
     "gpt-5.6-terra",
@@ -191,6 +196,10 @@ const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
 
 const IMAGE_MODEL_CHOICES_INTERNAL = Object.freeze({
   openai: Object.freeze([
+    "gpt-image-2.5-sunburst",
+    "gpt-image-2.5-sunburst-2026-09-08",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-flare-2026-09-08",
     "gpt-image-2",
     "gpt-image-2-2026-04-21",
     "gpt-image-1.5",
@@ -323,6 +332,9 @@ export const MODEL_SETTING_DEFS = Object.freeze([
 
 export const CODEX_OAUTH_SUPPORTED_MODELS = Object.freeze([
   "gpt-6-astra",
+  "gpt-6.1-sol",
+  "gpt-6-sol",
+  "gpt-6-luna",
   "gpt-5.6",
   "gpt-5.6-sol",
   "gpt-5.6-terra",

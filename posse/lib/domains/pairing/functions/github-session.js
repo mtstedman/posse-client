@@ -263,10 +263,6 @@ export function setGitHubDefaultBranch(repository, branch, options = {}) {
 
 const MEMBER_DEPLOY_KEY_PREFIX = "Posse member ";
 
-function githubNotFound(error) {
-  return /Could not resolve to a Repository|HTTP 404|Not Found/iu.test(`${error?.message || ""} ${error?.stderr || ""}`);
-}
-
 export function addGitHubMemberDeployKey(repository, member, options = {}) {
   const key = String(member?.ssh_public_key || "").trim();
   if (!key) {
@@ -289,7 +285,7 @@ export function addGitHubMemberDeployKey(repository, member, options = {}) {
 function listGitHubDeployKeys(repository, options) {
   const output = run("gh", [
     "api", `repos/${repository}/keys?per_page=100`, "--paginate",
-    "--jq", ".[] | {id, title} | @json",
+    "--jq", ".[] | {id: (.id | tostring), title} | @json",
   ], options);
   return output.split(/\r?\n/u).filter((line) => line.trim()).map((line) => JSON.parse(line));
 }
@@ -298,12 +294,29 @@ function removeGitHubDeployKeysTitled(repository, prefix, options) {
   const matches = listGitHubDeployKeys(repository, options)
     .filter((key) => String(key?.title || "").startsWith(prefix));
   for (const key of matches) {
-    if (!Number.isSafeInteger(key?.id) || key.id <= 0) continue;
-    try {
-      run("gh", ["api", "--method", "DELETE", `repos/${repository}/keys/${key.id}`], options);
-    } catch (error) {
-      if (!githubNotFound(error)) throw error;
+    const id = String(key?.id ?? "").trim();
+    if (!/^[1-9][0-9]*$/u.test(id)) {
+      throw Object.assign(new Error(
+        `GitHub returned an invalid deploy-key id for ${repository}; refusing to claim the key was revoked`,
+      ), { code: "pairing_deploy_key_id_invalid" });
     }
+    try {
+      run("gh", ["api", "--method", "DELETE", `repos/${repository}/keys/${id}`], options);
+    } catch (error) {
+      // GitHub deliberately returns 404 for private resources the caller is
+      // not authorized to see. A DELETE error therefore proves nothing by
+      // itself: only a successful authenticated re-list can prove this exact
+      // key is gone.
+      const remaining = listGitHubDeployKeys(repository, options);
+      if (remaining.some((candidate) => String(candidate?.id ?? "").trim() === id)) throw error;
+    }
+  }
+  const remaining = listGitHubDeployKeys(repository, options)
+    .filter((key) => String(key?.title || "").startsWith(prefix));
+  if (remaining.length > 0) {
+    throw Object.assign(new Error(
+      `GitHub still lists ${remaining.length} matching deploy key(s) on ${repository} after revocation`,
+    ), { code: "pairing_deploy_keys_still_present" });
   }
   return matches.length;
 }
@@ -316,12 +329,7 @@ export function removeGitHubMemberDeployKeys(repository, memberId, options = {})
 // whose rollback could not prove it was gone. The host key stays: the host
 // still fetches the frozen source for integration.
 export function revokeGitHubMemberDeployKeys(repository, options = {}) {
-  try {
-    return { revoked: removeGitHubDeployKeysTitled(repository, MEMBER_DEPLOY_KEY_PREFIX, options), absent: false };
-  } catch (error) {
-    if (githubNotFound(error)) return { revoked: 0, absent: true };
-    throw error;
-  }
+  return { revoked: removeGitHubDeployKeysTitled(repository, MEMBER_DEPLOY_KEY_PREFIX, options), absent: false };
 }
 
 export function cleanupGitHubSessionRepository(repository, options = {}) {
@@ -329,10 +337,8 @@ export function cleanupGitHubSessionRepository(repository, options = {}) {
     run("gh", ["repo", "delete", repository, "--yes"], options);
     return { ok: true, deleted: true, repository };
   } catch (error) {
-    // Recorded before it was created: a host that died first never made it.
-    if (githubNotFound(error)) {
-      return { ok: true, deleted: false, absent: true, repository };
-    }
+    // A 404 is not proof of absence for a private GitHub repository: GitHub
+    // uses it for resources the current credential cannot access as well.
     return {
       ok: false,
       deleted: false,

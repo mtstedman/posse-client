@@ -34,7 +34,7 @@ const CACHE_WRITE_1H_MULTIPLIER = 2.0;
 const DEFAULT_PRICING = Object.freeze({
   // Anthropic (claude). Bare aliases price the model the Claude Code CLI
   // resolves them to on first-party auth (fable -> claude-fable-5-1, opus ->
-  // claude-opus-5-5, sonnet -> claude-sonnet-5, haiku -> claude-haiku-4-5);
+  // claude-opus-5-5, sonnet -> claude-sonnet-5-5, haiku -> claude-haiku-4-5);
   // older versions keep explicit rows so the family fallback can't reach them.
   "claude:fable":             { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 0.25 },
   "claude:claude-fable-5-1":  { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 0.25 },
@@ -45,6 +45,7 @@ const DEFAULT_PRICING = Object.freeze({
   "claude:opus":              { tier: "strong",   input: 4.00,  output: 20.00, cachedInput: 0.20 },
   "claude:claude-opus-5-5":   { tier: "strong",   input: 4.00,  output: 20.00, cachedInput: 0.20 },
   "claude:claude-opus-5":     { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
+  "claude:claude-sonnet-5-5": { tier: "standard", input: 2.00,  output: 10.00, cachedInput: 0.20 },
   "claude:claude-sonnet-5":   { tier: "standard", input: 2.00,  output: 10.00, cachedInput: 0.20 },
   "claude:claude-sonnet-4-6": { tier: "standard", input: 3.00,  output: 15.00, cachedInput: 0.30 },
   "claude:claude-sonnet-4-5": { tier: "standard", input: 3.00,  output: 15.00, cachedInput: 0.30 },
@@ -58,6 +59,9 @@ const DEFAULT_PRICING = Object.freeze({
 
   // OpenAI
   "openai:gpt-6-astra":  { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 1.00 },
+  "openai:gpt-6.1-sol":  { tier: "standard", input: 2.00,  output: 10.00, cachedInput: 0.10 },
+  "openai:gpt-6-sol":    { tier: "standard", input: 2.00,  output: 10.00, cachedInput: 0.20 },
+  "openai:gpt-6-luna":   { tier: "cheap",    input: 0.10,  output: 0.50, cachedInput: 0.01 },
   "openai:gpt-4.1-mini": { tier: "cheap",    input: 0.40, output: 1.60, cachedInput: 0.10 },
   "openai:gpt-4.1":      { tier: "standard", input: 2.00, output: 8.00, cachedInput: 0.50 },
   "openai:gpt-5-mini":   { tier: "cheap",    input: 0.25, output: 2.00, cachedInput: 0.025 },
@@ -73,6 +77,9 @@ const DEFAULT_PRICING = Object.freeze({
 
   // Codex CLI (OpenAI-backed)
   "codex:gpt-6-astra":   { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 1.00 },
+  "codex:gpt-6.1-sol":   { tier: "standard", input: 2.00,  output: 10.00, cachedInput: 0.10 },
+  "codex:gpt-6-sol":     { tier: "standard", input: 2.00,  output: 10.00, cachedInput: 0.20 },
+  "codex:gpt-6-luna":    { tier: "cheap",    input: 0.10,  output: 0.50, cachedInput: 0.01 },
   "codex:gpt-5.3-codex": { tier: "standard", input: 1.75, output: 14.00, cachedInput: 0.175 },
   "codex:gpt-5.4":       { tier: "strong",   input: 2.50, output: 15.00, cachedInput: 0.25 },
   "codex:gpt-5.4-mini":  { tier: "cheap",    input: 0.75, output: 4.50, cachedInput: 0.075 },
@@ -103,14 +110,14 @@ const DEFAULT_PRICING = Object.freeze({
 // standard-tier rate of each provider family as a conservative midpoint.
 const TIER_DEFAULTS = Object.freeze({
   "claude:cheap":     { input: 1.00,  output: 5.00,  cachedInput: 0.10 },
-  "claude:standard":  { input: 3.00,  output: 15.00, cachedInput: 0.30 },
-  "claude:strong":    { input: 5.00,  output: 25.00, cachedInput: 0.50 },
-  "openai:cheap":     { input: 0.40,  output: 1.60, cachedInput: 0.10 },
-  "openai:standard":  { input: 2.00,  output: 8.00, cachedInput: 0.50 },
-  "openai:strong":    { input: 2.50,  output: 15.00, cachedInput: 0.25 },
-  "codex:cheap":      { input: 1.75,  output: 14.00, cachedInput: 0.175 },
-  "codex:standard":   { input: 2.50,  output: 15.00, cachedInput: 0.25 },
-  "codex:strong":     { input: 2.50,  output: 15.00, cachedInput: 0.25 },
+  "claude:standard":  { input: 2.00,  output: 10.00, cachedInput: 0.20 },
+  "claude:strong":    { input: 4.00,  output: 20.00, cachedInput: 0.20 },
+  "openai:cheap":     { input: 0.10,  output: 0.50, cachedInput: 0.01 },
+  "openai:standard":  { input: 2.00,  output: 10.00, cachedInput: 0.10 },
+  "openai:strong":    { input: 10.00, output: 50.00, cachedInput: 1.00 },
+  "codex:cheap":      { input: 0.10,  output: 0.50, cachedInput: 0.01 },
+  "codex:standard":   { input: 2.00,  output: 10.00, cachedInput: 0.10 },
+  "codex:strong":     { input: 10.00, output: 50.00, cachedInput: 1.00 },
   "grok:cheap":       { input: 1.00,  output: 2.00, cachedInput: 0.20 },
   "grok:standard":    { input: 1.00,  output: 2.00, cachedInput: 0.20 },
   "grok:strong":      { input: 2.00,  output: 6.00, cachedInput: 0.30 },

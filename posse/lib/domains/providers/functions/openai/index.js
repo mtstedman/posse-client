@@ -146,7 +146,7 @@ export function buildImageClient() {
 
 function isReasoningModelName(modelName) {
   const normalized = String(modelName || "").trim().toLowerCase();
-  return /^o\d+(?:-|$)/.test(normalized) || normalized.startsWith("gpt-5");
+  return /^o\d+(?:-|$)/.test(normalized) || /^gpt-(?:5|6)(?:[.-]|$)/u.test(normalized);
 }
 
 export function __testIsReasoningModelName(modelName) {

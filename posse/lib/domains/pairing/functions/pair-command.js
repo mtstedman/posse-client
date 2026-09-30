@@ -95,8 +95,11 @@ import {
 import { waitForPairingSchedulerStop } from "./shutdown.js";
 import {
   activeSessionCloseClaim,
+  claimSessionCredentialMutation,
   claimSessionClose,
+  releaseSessionCredentialMutation,
   releaseSessionClose,
+  renewSessionCredentialMutation,
   renewSessionClose,
   SESSION_CLOSE_CLAIM_RENEW_MS,
 } from "./session-close-claim.js";
@@ -1313,10 +1316,48 @@ async function finishHostShutdown(root, remoteClient, state, options = {}) {
   const renewal = setInterval(() => renewSessionClose({ stateId: state.id }), SESSION_CLOSE_CLAIM_RENEW_MS);
   renewal.unref?.();
   try {
-    return await closeClaimedHostSession(root, remoteClient, state, options);
+    return await withSessionCredentialMutation(state, "session close", () => (
+      closeClaimedHostSession(root, remoteClient, state, options)
+    ), { allowClosing: true });
   } finally {
     clearInterval(renewal);
     releaseSessionClose({ stateId: state.id });
+  }
+}
+
+function sessionClosingError(claim) {
+  return Object.assign(new Error(claim?.owner_pid
+    ? `Another process (pid ${claim.owner_pid}) is closing this session; member access cannot change`
+    : "This session is closing; member access cannot change"), {
+    code: "session_close_in_progress",
+  });
+}
+
+async function withSessionCredentialMutation(state, operation, callback, { allowClosing = false } = {}) {
+  if (!allowClosing) {
+    const closing = activeSessionCloseClaim({ stateId: state.id });
+    if (closing) throw sessionClosingError(closing);
+  }
+  const claimed = claimSessionCredentialMutation({ stateId: state.id, operation });
+  if (!claimed.ok) {
+    throw Object.assign(new Error(claimed.ownerPid
+      ? `Another process (pid ${claimed.ownerPid}) is changing session credentials (${claimed.operation}); try again when it finishes`
+      : "Could not claim the session credential update; try again"), { code: claimed.reason });
+  }
+  const ownerId = claimed.claim.owner_id;
+  const renewal = setInterval(() => renewSessionCredentialMutation({ stateId: state.id, ownerId }), SESSION_CLOSE_CLAIM_RENEW_MS);
+  renewal.unref?.();
+  try {
+    // Close takes its claim before this lock. Rechecking after acquisition
+    // closes the only race between the first close check and our lock write.
+    if (!allowClosing) {
+      const closing = activeSessionCloseClaim({ stateId: state.id });
+      if (closing) throw sessionClosingError(closing);
+    }
+    return await callback();
+  } finally {
+    clearInterval(renewal);
+    releaseSessionCredentialMutation({ stateId: state.id, ownerId });
   }
 }
 
@@ -2040,49 +2081,61 @@ async function runStatus({
 
 // Admit the pending member whose countersign the host typed, then grant its
 // session key write access to the throwaway repository. A member whose key
-// cannot be installed is removed again rather than left admitted without git.
+// cannot be installed is removed again only after key absence is proven; an
+// uncertain credential remains visible in the relay roster for recovery.
 async function admitPairingMember({ state, code, projectDir, remoteClient }) {
   if (!code) {
     throw Object.assign(new Error("A 4-character countersign is required: posse session admit <CODE>"), {
       code: "pairing_countersign_required",
     });
   }
-  const admitted = validatePairingRemoteResponse(
-    "admit",
-    await remoteClient.admit(state.relay_token, code),
-  );
-  assertPairingStatusMatches(state, admitted);
-  if (state.temporary_repository) {
-    const root = repositoryRoot(projectDir);
-    try {
-      addGitHubMemberDeployKey(state.temporary_repository, admitted.admitted_member, { cwd: root });
-    } catch (error) {
-      const memberId = admitted.admitted_member?.id;
-      if (memberId) {
-        // A failed add can still have created the key (GitHub applied the POST
-        // but its response was lost), so rollback removes any key under the
-        // member's title before it counts as done.
-        try {
-          removeGitHubMemberDeployKeys(state.temporary_repository, memberId, { cwd: root });
-        } catch (cleanupError) {
-          error.message = `${safeError(error)}\n  This member's deploy key may still be active on ${state.temporary_repository} `
-            + `(removing it failed: ${safeError(cleanupError)}). Closing the session revokes every member key; `
-            + `to revoke it now, find the key titled "Posse member ${memberId} ..." with \`gh api repos/${state.temporary_repository}/keys\` `
-            + `and delete it with \`gh api --method DELETE repos/${state.temporary_repository}/keys/<id>\`.`;
+  return withSessionCredentialMutation(state, "member admission", async () => {
+    const admitted = validatePairingRemoteResponse(
+      "admit",
+      await remoteClient.admit(state.relay_token, code),
+    );
+    assertPairingStatusMatches(state, admitted);
+    if (state.temporary_repository) {
+      const root = repositoryRoot(projectDir);
+      try {
+        addGitHubMemberDeployKey(state.temporary_repository, admitted.admitted_member, { cwd: root });
+      } catch (error) {
+        const memberId = admitted.admitted_member?.id;
+        if (memberId) {
+          let keyRemovalProven = false;
+          // A failed add can still have created the key (GitHub applied the
+          // POST but its response was lost), so rollback removes any key under
+          // the member's title before it counts as done.
+          try {
+            removeGitHubMemberDeployKeys(state.temporary_repository, memberId, { cwd: root });
+            keyRemovalProven = true;
+          } catch (cleanupError) {
+            error.message = `${safeError(error)}\n  This member remains admitted because their deploy key may still be active on ${state.temporary_repository} `
+              + `(removing it failed: ${safeError(cleanupError)}). Retry \`posse session kick ${memberId}\`, or close the session; `
+              + `to revoke it manually, find the key titled "Posse member ${memberId} ..." with \`gh api repos/${state.temporary_repository}/keys\` `
+              + `and delete it with \`gh api --method DELETE repos/${state.temporary_repository}/keys/<id>\`.`;
+          }
+          // Never hide an unproven credential by removing its durable relay
+          // roster entry. Keeping the member admitted makes the outstanding
+          // access visible and gives kick/close a recoverable cleanup target.
+          if (keyRemovalProven) {
+            try { await remoteClient.kick(state.relay_token, memberId); } catch { /* revoke pulse best effort */ }
+          }
         }
-        try { await remoteClient.kick(state.relay_token, memberId); } catch { /* revoke pulse best effort */ }
+        throw error;
       }
-      throw error;
     }
-  }
-  return { ok: true, admitted: true, countersign: String(code).toUpperCase(), member: admitted.admitted_member || null };
+    return { ok: true, admitted: true, countersign: String(code).toUpperCase(), member: admitted.admitted_member || null };
+  });
 }
 
 async function kickPairingMember({ state, memberId, projectDir, remoteClient }) {
-  if (state.temporary_repository) {
-    removeGitHubMemberDeployKeys(state.temporary_repository, memberId, { cwd: repositoryRoot(projectDir) });
-  }
-  return validatePairingRemoteResponse("status", await remoteClient.kick(state.relay_token, memberId));
+  return withSessionCredentialMutation(state, "member removal", async () => {
+    if (state.temporary_repository) {
+      removeGitHubMemberDeployKeys(state.temporary_repository, memberId, { cwd: repositoryRoot(projectDir) });
+    }
+    return validatePairingRemoteResponse("status", await remoteClient.kick(state.relay_token, memberId));
+  });
 }
 
 async function runAdmit({ projectDir, remoteClient, code, C, json }) {
@@ -2126,10 +2179,7 @@ async function runSessionManagement({ projectDir, remoteClient, action, code, va
   }
   let status;
   if (action === "kick") {
-    if (state.temporary_repository) {
-      removeGitHubMemberDeployKeys(state.temporary_repository, code, { cwd: repositoryRoot(projectDir) });
-    }
-    status = await remoteClient.kick(state.relay_token, code);
+    status = await kickPairingMember({ state, memberId: code, projectDir, remoteClient });
   } else if (action === "invite") {
     if (!["open", "close"].includes(code)) {
       throw Object.assign(new Error("Session invite action must be open or close"), {

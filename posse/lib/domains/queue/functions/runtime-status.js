@@ -36,6 +36,9 @@ export const RUNTIME_STATUS_KEYS = Object.freeze({
   // The one process closing and integrating the session (pairing
   // session-close-claim.js); a claim whose process is gone no longer counts.
   SESSION_CLOSING: "session_closing",
+  // Serializes GitHub member-key creation/removal with session close. Unlike
+  // the close claim, short member-management commands own this row too.
+  SESSION_CREDENTIAL_MUTATION: "session_credential_mutation",
 });
 
 /** How stale the bridge heartbeat may be and still count as "present".
