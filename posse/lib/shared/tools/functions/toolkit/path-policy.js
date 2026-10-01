@@ -60,6 +60,22 @@ export function agentHiddenPathError(cwd, resolvedPath, displayPath) {
  * policy. Callers own text decoding and range selection, but must share this
  * gate so handoff evidence cannot read anything read_file itself would reject.
  */
+const LONG_LINE_PROBE_BYTES = 1024 * 1024;
+
+function startsWithVeryLongLine(filePath) {
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const probe = Buffer.allocUnsafe(LONG_LINE_PROBE_BYTES);
+    const bytesRead = fs.readSync(fd, probe, 0, probe.length, 0);
+    return bytesRead === LONG_LINE_PROBE_BYTES && !probe.subarray(0, bytesRead).includes(10);
+  } catch {
+    return false;
+  } finally {
+    if (fd != null) fs.closeSync(fd);
+  }
+}
+
 export function resolveDeterministicReadableFile(cwd, displayPath, scopePredicates = null, {
   maxSizeBytes = DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
   safePathImpl = safePath,
@@ -95,7 +111,9 @@ export function resolveDeterministicReadableFile(cwd, displayPath, scopePredicat
   if (stat.size > maxSizeBytes) {
     return {
       ok: false,
-      error: `File too large (${(stat.size / 1024 / 1024).toFixed(1)} MB). Use offset/limit to read a portion.`,
+      error: startsWithVeryLongLine(filePath)
+        ? `File too large (${(stat.size / 1024 / 1024).toFixed(1)} MB) and its first line is longer than 1 MB (minified or single-line data), so offset/limit line paging cannot split it. Use jsonPath to extract a JSON value, search to get match snippets with their columns, or maxBytes to read the first bytes.`
+        : `File too large (${(stat.size / 1024 / 1024).toFixed(1)} MB). Use offset/limit to read a portion.`,
     };
   }
   return { ok: true, path: filePath, stat };

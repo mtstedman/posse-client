@@ -3,6 +3,7 @@
 // Embedded ATLAS v2 executor for providers that expose ATLAS as in-process
 // tools.
 
+import { getDb } from "../../../shared/storage/functions/index.js";
 import fs from "fs";
 import crypto from "crypto";
 import { AsyncGateBusyError, AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
@@ -1615,10 +1616,19 @@ const ATLAS_TRANSIENT_ERROR_RE = /view is not current|view is not ready|view is 
 const ATLAS_TRANSIENT_RETRY_DELAYS_MS = [400, 1200];
 const ATLAS_TRANSIENT_INDEXING_WAIT_MS = 15_000;
 
+// A view built in the other layer-merge mode does not heal by waiting; only a
+// rebuild in the configured mode fixes it. Retrying it cost 20-28s per job.
+const ATLAS_VIEW_MODE_MISMATCH_RE = /built (?:without|with) layer-merge symbols/i;
+// Symbols indexed before a merge or commit no longer match the file until the
+// pending reindex lands (planner job 1878 read main 0.06s into a 6.8s reindex).
+const ATLAS_INDEX_DRIFT_RE = /Indexed symbol does not match the current file/i;
+const ATLAS_INDEX_DRIFT_WAIT_MS = 20_000;
+
 export function isTransientAtlasError(text) {
   const value = String(text || "");
   if (!/^Error:/i.test(value)) return false;
   if (/corrupt|disabled by configuration|disabled for this repository/i.test(value)) return false;
+  if (ATLAS_VIEW_MODE_MISMATCH_RE.test(value)) return false;
   return ATLAS_TRANSIENT_ERROR_RE.test(value);
 }
 
@@ -1634,6 +1644,37 @@ async function waitForConductorIndexingToSettle(maxMs = ATLAS_TRANSIENT_INDEXING
   while (Date.now() < deadline && isConductorIndexingInFlight()) {
     await sleepMs(500);
   }
+}
+
+export function atlasReindexPending(workItemId = null, db = null) {
+  try {
+    const wi = Number(workItemId);
+    const scoped = Number.isInteger(wi) && wi > 0;
+    const row = (db || getDb()).prepare(`
+      SELECT 1 FROM jobs
+      WHERE job_type = 'atlas_warm'
+        AND status IN ('queued', 'running')
+        AND (work_item_id IS NULL${scoped ? " OR work_item_id = ?" : ""})
+      LIMIT 1
+    `).get(...(scoped ? [wi] : []));
+    return !!row;
+  } catch {
+    return false;
+  }
+}
+
+export async function waitForAtlasReindex(workItemId = null, {
+  maxMs = ATLAS_INDEX_DRIFT_WAIT_MS,
+  pollMs = 500,
+  pending = atlasReindexPending,
+} = {}) {
+  const deadline = Date.now() + Math.max(0, maxMs);
+  let waited = false;
+  while (Date.now() < deadline && (pending(workItemId) || isConductorIndexingInFlight())) {
+    waited = true;
+    await sleepMs(pollMs);
+  }
+  return waited;
 }
 
 function isRuntimeDisabled(config = {}) {
@@ -1971,6 +2012,11 @@ export async function executeEmbeddedAtlasTool(action, args = {}, {
           attempt: attempt + 1,
           error: String(result).slice(0, 160),
         });
+        result = await runGatedCall();
+      }
+      if (transientRetryable && ATLAS_INDEX_DRIFT_RE.test(String(result || ""))
+        && (atlasReindexPending(workItemId) || isConductorIndexingInFlight())) {
+        await waitForAtlasReindex(workItemId);
         result = await runGatedCall();
       }
       return result;

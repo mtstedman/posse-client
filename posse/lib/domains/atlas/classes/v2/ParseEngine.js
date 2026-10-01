@@ -1447,6 +1447,7 @@ export class ParseEngine {
           meta: existing.meta,
           ledger: this.#ledger,
           branch: targetBranch,
+          layerMerge: this.#viewLayerMerge,
         });
         try { existing.view.close(); } catch { /* ignore */ }
         if (canServe.ok) {

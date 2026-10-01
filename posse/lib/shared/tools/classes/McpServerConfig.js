@@ -800,6 +800,11 @@ function buildDeterministicMcpBootPayload(role, {
         storageRepoPath: resolvedAtlasConfig?.storageRepoPath || "",
         liveBuffers: resolvedAtlasConfig?.liveBuffersEnabled === false ? "off" : "deterministic-writes",
         viewWaitMs: resolvedAtlasConfig?.viewWaitMs ?? null,
+        // Live write refreshes rebuild the WI view from this config; without
+        // the view mode they rebuilt it without layer-merge symbols.
+        viewLayerMerge: resolvedAtlasConfig?.viewLayerMerge === true,
+        treeCompressionMode: resolvedAtlasConfig?.treeCompressionMode || "off",
+        treeCompressionMaxSeeds: resolvedAtlasConfig?.treeCompressionMaxSeeds ?? null,
         jobCacheEnabled: resolvedAtlasConfig?.jobCacheEnabled === true,
         jobCacheTtlMs: resolvedAtlasConfig?.jobCacheTtlMs ?? null,
         autoRefreshStale: resolvedAtlasConfig?.autoRefreshStale ?? null,

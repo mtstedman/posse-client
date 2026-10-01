@@ -8,6 +8,7 @@ import { executeDispatchAgent, submitWebResearchHandoff } from "../../../domains
 // full deterministic MCP runtime out of each provider-launched shim process,
 // and owns session lifecycle for the parent Posse process.
 
+import { getAtlasIntegrationConfig } from "../../../domains/integrations/functions/atlas/config.js";
 import crypto from "node:crypto";
 import { ATLAS_MUTATION_PATH_FIELDS } from "../../../catalog/tools/filesystem-mutations.js";
 import fs from "node:fs";
@@ -3458,6 +3459,25 @@ function ownerResearchPhysicalBudgetRejection({
     },
   });
   return mcpToolResultMessage(message, result);
+}
+
+// A live write refresh rebuilds the WI view through the conductor with only
+// the session's boot config. Sessions whose boot config predates the view-mode
+// fields rebuilt the view without layer-merge symbols, and every later
+// prefetch rejected it (WI 138 job 1779, WI 149 job 1931, 2026-10-01).
+export function atlasWriteRefreshViewMode(session) {
+  const atlas = session?.bootConfig?.atlas;
+  if (typeof atlas?.viewLayerMerge === "boolean") return {};
+  try {
+    const config = getAtlasIntegrationConfig();
+    return {
+      viewLayerMerge: config?.viewLayerMerge === true,
+      ...(config?.treeCompressionMode ? { treeCompressionMode: config.treeCompressionMode } : {}),
+      ...(config?.treeCompressionMaxSeeds != null ? { treeCompressionMaxSeeds: config.treeCompressionMaxSeeds } : {}),
+    };
+  } catch {
+    return {};
+  }
 }
 
 function atlasExecutorSessionContext(session, bootConfig = session?.bootConfig || {}) {
@@ -7758,6 +7778,7 @@ export class PersistentMcpOwner {
     const scheduled = await executor.scheduleDeterministicWriteRefresh({
       toolName: requested.name,
       args: toolArgs && typeof toolArgs === "object" ? toolArgs : {},
+      config: atlasWriteRefreshViewMode(session),
       session: atlasExecutorSessionContext(session),
       source: {
         kind: "mcp_owner_deterministic_write",

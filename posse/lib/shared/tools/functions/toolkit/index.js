@@ -89,6 +89,12 @@ import { normPath, resolvePathWithin } from "../../../scope/functions/path.js";
 const READ_FILE_DEFAULT_LIMIT = 2000;
 const READ_FILE_STREAM_CHUNK_BYTES = 64 * 1024;
 const READ_FILE_LARGE_MAX_SIZE_BYTES = 512 * 1024 * 1024;
+// jsonPath/search/maxBytes reads parse or scan the whole file, so they get a
+// bounded ceiling above the plain-read limit: an 8.9 MB single-line JSON file
+// (2026-10-01) could not be read at all, by line paging or structured modes.
+const READ_FILE_STRUCTURED_MAX_SIZE_BYTES = 64 * 1024 * 1024;
+const READ_FILE_LARGE_STRUCTURED_CONTENT_BYTES = 2 * 1024;
+const LONG_LINE_READ_HINT = "use read_file with jsonPath to extract a JSON value, search to get match snippets with their columns, or maxBytes to read the first bytes";
 const HASH_FILE_MAX_SIZE_BYTES = 512 * 1024 * 1024;
 const EDIT_FILE_MAX_PATTERN_CHARS = 500;
 const EDIT_FILE_REPLACE_PATTERN_TIMEOUT_MS = 2000;
@@ -303,6 +309,7 @@ const SEARCH_DEFAULT_HEAD_LIMIT = 100;
 const SEARCH_MAX_HEAD_LIMIT = 500;
 const SEARCH_RIPGREP_MAX_BUFFER = 32 * 1024 * 1024;
 const SEARCH_RIPGREP_TIMEOUT_MS = 30_000;
+const LONG_LINE_SEARCH_GUIDANCE = "Error: search_files cannot return these matches: the matching lines are too long (minified or single-line data, or a file over 5 MB). For one file, use read_file with search to get match snippets with their columns, or jsonPath to extract a JSON value. Otherwise narrow path/include, or use output_mode files_with_matches or count to find the files first.";
 export {
   buildScopePredicates,
   isSensitiveEnvFileOrTargetPath,
@@ -341,7 +348,9 @@ function readLargeFilePage(filePath, { offset, limit, maxBytes = DETERMINISTIC_R
     if (currentLine < firstLine || currentLine >= endLine || !value) return;
     selectedBytes += Buffer.byteLength(value, "utf8");
     if (selectedBytes > maxBytes) {
-      throw new Error(`Requested line range exceeds the ${maxBytes}-byte read limit.`);
+      throw new Error(selected.length === 0 && currentLine === firstLine
+        ? `Line ${currentLine} alone exceeds the ${maxBytes}-byte read limit (a single very long line, such as minified JSON); ${LONG_LINE_READ_HINT}.`
+        : `Requested line range exceeds the ${maxBytes}-byte read limit; request fewer lines, or ${LONG_LINE_READ_HINT}.`);
     }
     currentText += value;
   };
@@ -416,9 +425,11 @@ export function createDeterministicToolkit({
     const structured = hasStructuredReadOptionsFromModule(args);
     const explicitPage = args.offset != null || args.limit != null;
     const readable = resolveDeterministicReadableFile(cwd, args.path, scopePredicates, {
-      maxSizeBytes: explicitPage && !structured
-        ? READ_FILE_LARGE_MAX_SIZE_BYTES
-        : DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
+      maxSizeBytes: structured
+        ? READ_FILE_STRUCTURED_MAX_SIZE_BYTES
+        : explicitPage
+          ? READ_FILE_LARGE_MAX_SIZE_BYTES
+          : DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
       safePathImpl,
     });
     if (!readable.ok) return `Error: ${readable.error}`;
@@ -427,7 +438,7 @@ export function createDeterministicToolkit({
 
     const offset = Math.max(0, toPositiveInt(args.offset, 1) - 1);
     const limit = toPositiveInt(args.limit, READ_FILE_DEFAULT_LIMIT);
-    if (stat.size > DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES) {
+    if (!structured && stat.size > DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES) {
       try {
         const page = readLargeFilePage(filePath, { offset, limit });
         if (page.selected.length === 0) {
@@ -458,6 +469,11 @@ export function createDeterministicToolkit({
         totalBytes: stat.size,
         totalLines: lines.length,
         truncated: remaining > 0,
+        // Above the plain-read limit the structured result carries a bounded
+        // content excerpt; the jsonPath value or search matches are the answer.
+        defaultMaxBytes: stat.size > DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES
+          ? READ_FILE_LARGE_STRUCTURED_CONTENT_BYTES
+          : null,
       });
     }
     const numbered = formatNumberedLinesFromModule(selected, offset + 1);
@@ -824,6 +840,11 @@ export function createDeterministicToolkit({
       }
       const rootPath = isDir ? searchPath : path.dirname(searchPath);
       const targetPath = isDir ? "." : path.basename(searchPath);
+      // ripgrep's --max-filesize only filters directory walks, and --json
+      // carries every matching line whole: an 8.9 MB single-line JSON file
+      // overflowed the output buffer (ENOBUFS) on 2026-10-01.
+      const oversizedFileTarget = !isDir && fs.statSync(searchPath).size > SEARCH_MAX_FILE_BYTES;
+      if (oversizedFileTarget && outputMode === "content") return LONG_LINE_SEARCH_GUIDANCE;
 
       const rgArgs = [
         "--json",
@@ -848,6 +869,43 @@ export function createDeterministicToolkit({
       rgArgs.push("--regexp", args.pattern);
       rgArgs.push("--", targetPath);
 
+      // File lists and counts do not need line text: ripgrep's own -l and
+      // --count-matches output stays small however long the lines are.
+      const compactRipgrepListing = () => {
+        const listArgs = rgArgs.filter((arg) => arg !== "--json" && arg !== "--line-number");
+        const regexpIndex = listArgs.indexOf("--regexp");
+        listArgs.splice(regexpIndex, 0, "--null", outputMode === "count" ? "--count-matches" : "--files-with-matches");
+        const listed = spawnSyncImpl(ripgrepCommand, listArgs, {
+          cwd: rootPath,
+          encoding: "utf-8",
+          maxBuffer: SEARCH_RIPGREP_MAX_BUFFER,
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: SEARCH_RIPGREP_TIMEOUT_MS,
+          windowsHide: true,
+        });
+        if (listed.error) return `Error: search_files ripgrep failed - ${sanitizeAbsolutePathsInText(listed.error.message, cwd)}`;
+        if (listed.status === 1) return "No matches found.";
+        if (listed.status !== 0) return `Error: search_files ripgrep failed (${listed.status ?? "unknown"}) - ${sanitizeAbsolutePathsInText(compactRipgrepStderr(listed.stderr), cwd) || "unknown error"}`;
+        const rows = [];
+        const text = String(listed.stdout || "");
+        const entries = outputMode === "count"
+          ? text.split(/\r?\n/).filter(Boolean).map((line) => {
+            const [file, count] = line.split("\0");
+            return { file, count };
+          })
+          : text.split("\0").filter(Boolean).map((file) => ({ file: file.trim(), count: null }));
+        for (const entry of entries) {
+          if (!entry.file) continue;
+          const filePath = path.resolve(rootPath, entry.file);
+          if (isSensitiveEnvFileOrTargetPath(filePath) || agentHiddenPathReasonForAbsolute(cwd, filePath)) continue;
+          const display = toDisplayPath(cwd, filePath);
+          rows.push(outputMode === "count" ? `${display}:${entry.count}` : display);
+        }
+        rows.sort((a, b) => a.localeCompare(b));
+        return boundedSearchRows(rows, { offset, headLimit });
+      };
+      if (oversizedFileTarget) return compactRipgrepListing();
+
       const result = spawnSyncImpl(ripgrepCommand, rgArgs, {
         cwd: rootPath,
         encoding: "utf-8",
@@ -857,6 +915,10 @@ export function createDeterministicToolkit({
         windowsHide: true,
       });
 
+      if (result.error?.code === "ENOBUFS") {
+        if (outputMode === "content") return LONG_LINE_SEARCH_GUIDANCE;
+        return compactRipgrepListing();
+      }
       if (result.error) {
         if (result.error.code === "ETIMEDOUT") {
           return `Error: search_files timed out after ${SEARCH_RIPGREP_TIMEOUT_MS / 1000}s. Narrow the path or simplify the pattern.`;

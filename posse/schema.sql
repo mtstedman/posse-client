@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS work_items (
   research_skip_reason TEXT,
   branch_name TEXT,
   merge_base_hash TEXT,
-  merge_state TEXT CHECK (merge_state IN ('pending_review','merged','merge_failed') OR merge_state IS NULL),
+  merge_state TEXT CHECK (merge_state IN ('pending_review','merge_authorized','merged','merge_failed') OR merge_state IS NULL),
   plan_approval_state TEXT NOT NULL DEFAULT 'not_required' CHECK (
     plan_approval_state IN ('not_required','pending','approved','rejected')
   ),
