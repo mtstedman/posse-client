@@ -321,6 +321,20 @@ export function capVerdictForHighRiskVerificationGap(
     };
   }
 
+  // The declared typecheck failed only on errors this task does not own
+  // (pre-existing, or in files unfinished sibling tasks own); its own files
+  // are clean at the assessed commit.
+  if (hasAssessedCommit
+    && testRun?.delta === "out_of_scope_failure"
+    && postChange?.verification_eligible !== false
+    && frozenCommit === requiredCommit) {
+    return {
+      ...verdict,
+      verification_status: "frozen_test_scope_clean",
+      verification_commit_hash: requiredCommit,
+    };
+  }
+
   const operationalOnly = postChange?.status === "passed"
     && postChange?.verification_eligible === false;
   if (operationalOnly) {

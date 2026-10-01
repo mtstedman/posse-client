@@ -99,6 +99,7 @@ export const SETTING_KEYS = Object.freeze({
   CODEX_USAGE_BACKOFF_MS: "codex_usage_backoff_ms",
   CODEX_USAGE_CACHE_MS: "codex_usage_cache_ms",
   DB_TASK_PRE_MERGE_POLICY: "db_task_pre_merge_policy",
+  PRE_DEV_TYPECHECK: "pre_dev_typecheck",
   DEFAULT_MAX_ATTEMPTS: "default_max_attempts",
   DISABLE_SYSTEM_TOOLS: "disable_system_tools",
   FILE_REQUEST_LOW_RISK_EXTENSIONS: "file_request_low_risk_extensions",

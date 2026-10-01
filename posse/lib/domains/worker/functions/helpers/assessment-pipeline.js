@@ -73,6 +73,7 @@ import {
   activeSiblingWriteLocks,
   siblingLockSummary,
 } from "../../../queue/functions/sibling-locks.js";
+import { siblingOwnedWorktreePaths } from "../../../queue/functions/file-locks.js";
 import {
   getAtlasWarmJobCompletion,
   waitForAtlasWarmJobCompletion,
@@ -86,6 +87,7 @@ import {
   shouldDeferAssessmentToFileRequestContinuation,
 } from "./assessment-file-requests.js";
 import {
+  testRunScopeAttribution,
   ensurePostChangeTestReceipt,
   renderTestExecutionEvidence,
   testReceiptObservationDetail,
@@ -2619,6 +2621,7 @@ export async function runPostExecutionAssessment(worker, {
               onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-test] ${message}${C.reset}`),
             })
           : null,
+        siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
         repairDependencies: wtPath
           ? (receipt) => repairTestDependencies(worker, job, wtPath, {
               signal: worker._abortControllers?.get(job.id)?.signal || null,
@@ -2658,7 +2661,7 @@ export async function runPostExecutionAssessment(worker, {
           cwd: wtPath,
         },
       });
-      taskAbAssessmentEvidence = renderTestExecutionEvidence(deterministicTestRun);
+      taskAbAssessmentEvidence = renderTestExecutionEvidence(deterministicTestRun ? { ...deterministicTestRun, scope_attribution: testRunScopeAttribution(job.id, deterministicTestRun) } : {});
       if (isVerificationInfrastructureOutcome(postReceipt)) {
         const testInfraMsg = `Deterministic post-change test execution unavailable: ${postReceipt.reason || postReceipt.status}`;
         completeAttempt(attempt.id, {
@@ -3370,8 +3373,7 @@ export async function runPostExecutionAssessment(worker, {
   }
 
   // Non-assessable job or assessment skipped — mark succeeded
-  log.info("worker", `Job done (no assessment): ${job.job_type} #${job.id}`, { jobId: job.id, wiId: job.work_item_id, type: job.job_type, durationMs: Date.now() - startTime });
-  jobLog("DONE", { wi: job.work_item_id, job: job.id, detail: `${job.job_type} succeeded in ${((Date.now() - startTime) / 1000).toFixed(0)}s (no assessment)` });
+  log.info("worker", `Recorded ${job.job_type} job #${job.id} outcome without assessment`, { jobId: job.id, wiId: job.work_item_id, type: job.job_type, durationMs: Date.now() - startTime });
   recordObservation({
     work_item_id: job.work_item_id,
     job_id: job.id,

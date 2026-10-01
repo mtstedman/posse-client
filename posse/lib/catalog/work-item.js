@@ -30,7 +30,12 @@ export const WORK_ITEM_PRIORITY_LIST_SQL = sqlList(WORK_ITEM_PRIORITIES);
 export const WORK_ITEM_GOVERNANCE_TIERS = Object.freeze(["prototype", "mvp", "production"]);
 export const WORK_ITEM_GOVERNANCE_TIER_LIST_SQL = sqlList(WORK_ITEM_GOVERNANCE_TIERS);
 
-export const WORK_ITEM_MERGE_STATES = Object.freeze(["pending_review", "merged", "merge_failed"]);
+export const WORK_ITEM_MERGE_STATES = Object.freeze([
+  "pending_review",
+  "merge_authorized",
+  "merged",
+  "merge_failed",
+]);
 export const WORK_ITEM_MERGE_STATE_LIST_SQL = sqlList(WORK_ITEM_MERGE_STATES);
 
 export const UNMERGED_WORK_ITEM_MERGE_STATES = Object.freeze(

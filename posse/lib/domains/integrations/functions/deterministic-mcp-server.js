@@ -2282,6 +2282,7 @@ function syncResearchSynthesisStateFromObservations() {
   const observed = researchExplorationObservationStatus({
     jobId: mcpJobId,
     attemptId: mcpAttemptId,
+    agentCallId: mcpAgentCallId,
   });
   const priorExplorationSteps = Number(researchState.explorationSteps || 0);
   const observedExplorationSteps = Number(observed.exploration_steps || 0);
@@ -2395,6 +2396,7 @@ function researchCitationFetchGate(toolName) {
   const observed = researchExplorationObservationStatus({
     jobId: mcpJobId,
     attemptId: mcpAttemptId,
+    agentCallId: mcpAgentCallId,
   });
   if (
     researchState.synthesisRequiredAt
@@ -2433,6 +2435,7 @@ function buildResearchSynthesisRequiredMessage({ includeCurrentCall = false } = 
   const observed = researchExplorationObservationStatus({
     jobId: mcpJobId,
     attemptId: mcpAttemptId,
+    agentCallId: mcpAgentCallId,
   });
   const maxPhysicalCalls = currentResearchSynthesisPolicySnapshot().maxPhysicalCalls;
   const physicalCalls = Math.max(0, Number(observed.call_steps || 0))

@@ -268,6 +268,7 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   verification_wall_timeout_ms: "Verification timeout",
   verification_idle_timeout_ms: "Verification silence timeout",
   verification_dependency_network_policy: "Dependency downloads for verification",
+  pre_dev_typecheck: "Show type errors to developers",
   bridge_port: "Bridge port",
   bridge_label: "Bridge name",
   project_db_enabled: "Agent database access",
@@ -481,6 +482,7 @@ const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   canonical_verify_cmd: "Your repository's own verification command (for example npm test). Posse runs it before assessment and before pushing.",
   verification_wall_timeout_ms: "How long a verification command may run, in milliseconds, before Posse stops it. Match the time your test suite documents; capped by the Debug verification ceiling.",
   verification_idle_timeout_ms: "Stop a verification command that prints nothing for this many milliseconds. Leave it off for test runners that stay silent while healthy.",
+  pre_dev_typecheck: "Before a developer job starts, run your typecheck script and list the existing type errors in the files the job may edit, so the developer fixes them while making its change. Needs a typecheck script in package.json.",
   verification_dependency_network_policy: "Whether Posse may download missing dependencies (from your lockfile) before verification. Allow downloads them; cache only uses what is already cached; disabled never repairs dependencies.",
   bridge_port: "Local port for this repository's phone bridge. When blank, Posse picks a free port starting at 7531 and remembers it.",
   bridge_label: "Name shown for this repository in the phone app.",
@@ -1007,6 +1009,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     "verification_wall_timeout_ms",
     "verification_idle_timeout_ms",
     "verification_dependency_network_policy",
+    "pre_dev_typecheck",
   ]),
   group("bridge", "repo", "Phone Bridge", [
     "bridge_port",

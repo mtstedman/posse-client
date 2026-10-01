@@ -4,7 +4,7 @@ import path from "path";
 import { execSync, spawnSync } from "child_process";
 import { StringDecoder } from "string_decoder";
 
-import { guardToolWriteLock } from "../../../../domains/queue/functions/write-lock-guard.js";
+import { guardToolWriteLock, restoreMissingMaterializedFile } from "../../../../domains/queue/functions/write-lock-guard.js";
 import { createInspectFileExecutor } from "../../../../domains/worker/functions/helpers/file-inspector.js";
 import { createGitHistoryExecutor } from "../../../../domains/git/functions/history.js";
 import { createPullBriefExecutor, createGetBriefExecutor } from "./brief.js";
@@ -499,7 +499,9 @@ export function createDeterministicToolkit({
       return `Error: ${err.message}`;
     }
     const displayPath = toDisplayPath(cwd, filePath);
-    if (!fs.existsSync(filePath)) return `Error: File not found: ${displayPath}`;
+    if (!fs.existsSync(filePath) && !restoreMissingMaterializedFile(filePath, cwd)) {
+      return `Error: File not found: ${displayPath}`;
+    }
     if (isSensitiveEnvFileOrTargetPath(filePath)) {
       return "Error: Editing .env files is blocked. Use documented config examples or code paths instead.";
     }

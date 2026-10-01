@@ -2672,7 +2672,7 @@ export function researcherPacketToStructuredOutput(packet) {
   return researcherPacketToStructuredOutputFromModule(packet);
 }
 
-export { getLatestCommittedAgentHandoffPacket } from "./agent-handoff.js";
+export { getAgentHandoffRecord, getLatestCommittedAgentHandoffPacket } from "./agent-handoff.js";
 
 export {
   bindAutoExpandedDevBriefEvidenceToAgentCall,

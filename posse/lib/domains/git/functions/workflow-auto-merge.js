@@ -2,11 +2,13 @@
 // End-of-run auto-merge orchestration.
 
 import {
+  authorizeWorkItemAutoMerge,
   listCrossWiMergeBlockers,
   listWorkItems,
   logEvent,
   markWorkItemMergeFailed,
   orderWorkItemsByMergeDependencies,
+  releaseWorkItemAutoMergeAuthorization,
   refreshWorkItemStatuses,
   setMergeState,
 } from "../../queue/functions/index.js";
@@ -94,27 +96,45 @@ export function createAutoMergeWorkflowHelpers(context, {
       const deferredIds = new Set();
       for (const wi of pendingMergeable) {
         const targetBranch = currentTargetBranch();
-        const branchName = wi.branch_name;
+        const authorization = authorizeWorkItemAutoMerge(wi.id, { expectedBranch: wi.branch_name });
+        if (!authorization.ok) {
+          logEvent({
+            work_item_id: wi.id,
+            event_type: EVENT_TYPES.WORK_ITEM_MERGE_CANDIDATE_INVALIDATED,
+            actor_type: EVENT_ACTORS.SYSTEM,
+            message: `Skipped stale automatic merge candidate: ${authorization.reason}`,
+            event_json: JSON.stringify({ reason: authorization.reason, expected_branch: wi.branch_name }),
+          });
+          say(`  ${C.yellow}[git]${C.reset} WI#${wi.id}: merge candidate changed (${authorization.reason}); skipped`);
+          continue;
+        }
+        const branchName = authorization.branch;
         if (typeof display?.setRunPhase === "function") {
           display.setRunPhase(`Merging WI#${wi.id} into ${targetBranch}`);
         }
         updateStep("merge", "running", `WI#${wi.id} -> ${targetBranch}`);
-        const result = await gitMergeToTargetAsync(branchName, projectDir, {
-          wiId: wi.id,
-          mergeLockAlreadyHeld,
-          onPhase(event = {}) {
-            if (event.phase === "commit") {
-              if (typeof display?.setRunPhase === "function") display.setRunPhase(`Committing WI#${wi.id} squash merge`);
-            } else if (event.phase === "retry") {
-              updateStep("merge", "running", `retrying WI#${wi.id}`);
-              if (typeof display?.setRunPhase === "function") display.setRunPhase(`Retrying merge for WI#${wi.id}`);
-              say(`  ${C.yellow}[git]${C.reset} WI#${wi.id}: retrying merge`);
-            } else if (event.phase === "merge") {
-              updateStep("merge", "running", `WI#${wi.id} -> ${targetBranch}`);
-              if (typeof display?.setRunPhase === "function") display.setRunPhase(`Merging WI#${wi.id} into ${targetBranch}`);
-            }
-          },
-        });
+        let result;
+        try {
+          result = await gitMergeToTargetAsync(branchName, projectDir, {
+            wiId: wi.id,
+            mergeLockAlreadyHeld,
+            onPhase(event = {}) {
+              if (event.phase === "commit") {
+                if (typeof display?.setRunPhase === "function") display.setRunPhase(`Committing WI#${wi.id} squash merge`);
+              } else if (event.phase === "retry") {
+                updateStep("merge", "running", `retrying WI#${wi.id}`);
+                if (typeof display?.setRunPhase === "function") display.setRunPhase(`Retrying merge for WI#${wi.id}`);
+                say(`  ${C.yellow}[git]${C.reset} WI#${wi.id}: retrying merge`);
+              } else if (event.phase === "merge") {
+                updateStep("merge", "running", `WI#${wi.id} -> ${targetBranch}`);
+                if (typeof display?.setRunPhase === "function") display.setRunPhase(`Merging WI#${wi.id} into ${targetBranch}`);
+              }
+            },
+          });
+        } catch (err) {
+          releaseWorkItemAutoMergeAuthorization(wi.id, authorization.previousMergeState);
+          throw err;
+        }
         if (result.ok) {
           const mergeHash = result.mergeHash || "(unknown)";
           const autoApproveReason = shouldAutoApproveIterativeWorkItem(wi) && !autoMerge ? "iterate_auto_merge" : "auto_merge";
@@ -187,6 +207,7 @@ export function createAutoMergeWorkflowHelpers(context, {
           mergedCount++;
           mergedThisPass++;
         } else if (result.deferred) {
+          releaseWorkItemAutoMergeAuthorization(wi.id, authorization.previousMergeState);
           deferredIds.add(wi.id);
           logEvent({
             work_item_id: wi.id,

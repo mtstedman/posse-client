@@ -18,7 +18,6 @@ import { DisplayBottomInputRenderer } from "./bottom-input-renderer.js";
 import { DisplayLeftPanelRenderer } from "./left-panel-renderer.js";
 import { DisplayRightPanelRenderer } from "./right-panel-renderer.js";
 import { C } from "../../../../shared/format/functions/colors.js";
-import { statusColor } from "../../functions/display/status-palette.js";
 import {
   STALE_CANCELABLE_JOB_STATUSES,
   TERMINAL_WORK_ITEM_STATUSES,
@@ -174,7 +173,6 @@ export class Display {
     this._systemEvents = [];    // { time, text }
     this._maxSystemEvents = 50;
     this._systemLaneRows = 4;
-    this._lifecycleStartedJobs = new Set();
     this.maxEvents = getDisplayMaxEvents();
     this._eventRateLimitPerSec = getDisplayEventRateLimitPerSec();
     this._interval = null;
@@ -435,7 +433,6 @@ export class Display {
       clearTimeout(this._eventRate.flushTimer);
       this._eventRate.flushTimer = null;
     }
-    this._lifecycleStartedJobs.clear();
     for (const timer of this._rawInputFallbackTimers) clearTimeout(timer);
     this._rawInputFallbackTimers.clear();
     this._cancelApprovalMode();
@@ -545,10 +542,8 @@ export class Display {
     if (/^\[scheduler\]\s+(?:Dispatch paused|Resuming dispatch|Dispatch resumed):\s+ATLAS indexing\b/i.test(plainText)) return true;
     if (this._isLowSignalPromoteEvent(plainText)) return true;
     const lifecycleStartKey = this._lifecycleStartEventKey(plainText);
-    if (lifecycleStartKey) {
-      if (this._lifecycleStartedJobs.has(lifecycleStartKey)) return true;
-      this._lifecycleStartedJobs.add(lifecycleStartKey);
-    }
+    if (lifecycleStartKey) return true;
+    if (/^\[(?:developer|dev|researcher|research|planner|assessor|artificer|human|system)\]\s+(?:(?:WI#\d+\s+)?job\s+#\d+:\s*)?(?:succeeded|done|completed|finished)\s*(?:\([\d.]+s\))?$/i.test(plainText)) return true;
     return false;
   }
 
@@ -786,15 +781,9 @@ export class Display {
 
   _emitWorkerStart(jobId, worker) {
     if (!worker || worker.lifecycleStartEmitted) return;
-    const scopedPrefix = worker.workItemId != null
-      ? `${this._roleTagLong(worker.role)} WI#${worker.workItemId} job #${jobId}: `
-      : `${this._roleTagLong(worker.role)} job #${jobId}: `;
-    const activity = this._workerActivityLabel(worker.activity, {
-      jobId,
-      workItemId: worker.workItemId,
-    });
-    const activityTag = activity ? ` ${C.dim}- ${activity.slice(0, 90)}${C.reset}` : "";
-    this.addEvent(`${scopedPrefix}${C.cyan}started${C.reset}${activityTag}`, { reason: "stream" });
+    // The active-worker panel already shows this lifecycle state. Recording a
+    // second "started" line in the event feed creates noise without adding a
+    // diagnostic outcome.
     worker.lifecycleStartEmitted = true;
   }
 
@@ -867,26 +856,12 @@ export class Display {
   removeWorker(jobId, status = "done") {
     const w = this.workers.get(jobId);
     if (w) {
-      // Assessor verdict lines are already the completion message, so avoid
-      // adding a second generic footer for that role.
-      const quietRequeue = String(status || "").toLowerCase() === "queued";
-      const suppressGenericCompletion = w.role === "assessor" || quietRequeue;
-
       this._flushWorkerSuppressed(jobId);
-      if (!suppressGenericCompletion) {
-        const elapsed = ((Date.now() - w.startTime) / 1000).toFixed(1);
-        const color = statusColor(status, C);
-        const scopedPrefix = w.workItemId != null
-          ? `${this._roleTagLong(w.role)} WI#${w.workItemId} job #${jobId}: `
-          : `${this._roleTagLong(w.role)} `;
-        this.addEvent(`${scopedPrefix}${color}${status}${C.reset} ${C.dim}(${elapsed}s)${C.reset}`, { reason: "stream" });
-      }
+      // Outcomes, failures, verdicts, and remediation remain visible through
+      // their structured events. Avoid a generic finish line for every role.
       void this._refreshProviderUsageForDisplay();
     }
     this.workers.delete(jobId);
-    if (String(status || "").toLowerCase() !== "queued") {
-      this._lifecycleStartedJobs.delete(`job:${Number(jobId)}`);
-    }
   }
 
   _flushWorkerSuppressed(jobId) {

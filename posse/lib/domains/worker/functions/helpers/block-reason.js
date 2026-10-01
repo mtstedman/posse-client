@@ -69,6 +69,10 @@ const HUMAN_FILE_AUTHORITY_REQUIRED = /(?:human|operator)\s+(?:permission|approv
 const CODEX_WINDOWS_SANDBOX_HELPER = /\b(?:codex-windows-sandbox-setup|codex(?:-windows)?-command-runner)\.exe\b/i;
 const CODEX_WINDOWS_SANDBOX_HELPER_FAILURE = /(?:orchestrator_helper_launch_failed|not found|program not found|failed to launch|could not (?:be )?launch(?:ed)?|unable to launch)/i;
 const CODEX_NATIVE_PATCH_SANDBOX_REJECTION = /(?:workspace is read-only and sandbox policy rejects file writes|writing is blocked by read-only sandbox|apply_patch.{0,120}read-only sandbox)/i;
+// Codex also blocks by quoting its own sandbox notice as if it covered the
+// issued Posse edit tools ("filesystem sandbox is read-only with approval
+// policy never, so ... edits are prohibited"; WI 149 job 1927, 2026-10-01).
+const CODEX_SANDBOX_NOTICE_MISREAD = /(?:sandbox(?:\s+mode)?\s+(?:is\s+)?read[-\s]?only|read[-\s]?only\s+(?:filesystem\s+)?sandbox|approval\s+policy\s+(?:is\s+)?never).{0,200}(?:prohibit|block|prevent|cannot|can't|not\s+(?:allowed|permitted))/i;
 const ISSUED_FILE_TOOL_INVOCATION_FAILURE = /(?:(?:write|read|file|repository)(?:\s*\/\s*(?:write|read|file|repository))*\s+(?:path|tools?|surface)|(?:scoped|issued|required)\s+(?:repository\s+)?(?:file\s+)?(?:read|write|mutation)\s+(?:path|tools?|surface)).{0,180}(?:not successfully callable|could not (?:successfully )?(?:invoke|call|reach)|failed to (?:invoke|call|reach)|unavailable|not callable)/i;
 const FEEDBACK_TOOL_DISPLACED_FILE_TOOLS = /(?:operator[-\s]?feedback|feedback[-\s]?(?:coordination|poll)|request_user_input).{0,240}(?:could not|unable|failed).{0,120}(?:repository|scoped|issued|required).{0,80}(?:read|write|file|mutation)\s+tools?/i;
 
@@ -142,6 +146,7 @@ export function isTransientMcpInfraBlock(reason) {
   // tool-priority guard instead of asking a human to fix an internal routing
   // mistake.
   if (CODEX_NATIVE_PATCH_SANDBOX_REJECTION.test(text)) return true;
+  if (CODEX_SANDBOX_NOTICE_MISREAD.test(text) && !HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return true;
 
   // Codex occasionally routes toward its native feedback surface while the
   // required Posse file surface is detached. These are the production smoke

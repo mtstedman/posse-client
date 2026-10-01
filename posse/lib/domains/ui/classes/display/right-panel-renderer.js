@@ -154,6 +154,7 @@ function monitorStateMeta(state) {
   if (state === "ask") return { label: "ASK", color: C.yellow, rail: C.yellow };
   if (state === "nudge") return { label: "nudge", color: C.yellow, rail: C.yellow };
   if (state === "done") return { label: "done", color: C.dim, rail: C.dim };
+  if (state === "partial") return { label: "partial", color: C.yellow, rail: C.yellow };
   if (state === "failed") return { label: "failed", color: C.red, rail: C.red };
   if (state === "canceled") return { label: "canceled", color: C.dim, rail: C.dim };
   if (state === "idle") return { label: "idle", color: C.dim, rail: C.dim };

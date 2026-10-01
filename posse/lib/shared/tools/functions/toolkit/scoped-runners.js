@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { spawnSync } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import {
   getPythonToolchainExecutable,
   resolveManagedPythonRuntimeForProject,
@@ -164,7 +164,7 @@ function compact(value, max = MAX_OUTPUT_CHARS) {
   return `${text.slice(0, max)}\n... (truncated ${text.length - max} chars)`;
 }
 
-function runProcess(command, args, cwd, { timeoutMs = 120000 } = {}) {
+function runProcess(command, args, cwd, { timeoutMs = 120000, input = undefined } = {}) {
   const startedAt = Date.now();
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
@@ -178,6 +178,7 @@ function runProcess(command, args, cwd, { timeoutMs = 120000 } = {}) {
     timeout: timeoutMs,
     maxBuffer: 8 * 1024 * 1024,
     windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments === true,
+    ...(input === undefined ? {} : { input }),
   });
   return {
     command: [command, ...args].join(" "),
@@ -311,6 +312,33 @@ function missingToolingReason(result) {
   return match ? `dependency_unavailable: ${compact(match[0].trim(), 200)}` : null;
 }
 
+// Top-level static import/export, or import.meta, outside comments.
+const ESM_SYNTAX_RE = /^[ \t]*(?:import[ \t]*[\w{*'"]|export[ \t]*[\w{*])|\bimport\.meta\b/m;
+
+// `node --check` on an ambiguous `.js` file (no "type" in the nearest
+// package.json) exits 0 without reporting syntax errors once the source uses
+// import/export (Node 22-24 module-syntax detection), so a broken ES module
+// passed lint. Re-check such files explicitly as modules.
+function nodeSyntaxCheck(cwd, file) {
+  const syntax = runProcess(process.execPath, ["--check", file], cwd);
+  if (syntax.exitCode !== 0 || path.extname(file).toLowerCase() !== ".js") return syntax;
+  let source;
+  try {
+    source = fs.readFileSync(path.resolve(cwd, file), "utf8");
+  } catch {
+    return syntax;
+  }
+  if (!ESM_SYNTAX_RE.test(source)) return syntax;
+  const moduleSyntax = runProcess(process.execPath, ["--input-type=module", "--check"], cwd, { input: source });
+  return {
+    ...moduleSyntax,
+    command: `${process.execPath} --input-type=module --check < ${file}`,
+    stdout: moduleSyntax.stdout.replaceAll("[stdin]", file),
+    stderr: moduleSyntax.stderr.replaceAll("[stdin]", file),
+    durationMs: syntax.durationMs + moduleSyntax.durationMs,
+  };
+}
+
 function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
   if (targets.length === 0) {
     return { name: "eslint", status: "skipped", reason: "no JS/TS lintable scoped files", targets: [] };
@@ -339,7 +367,7 @@ function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
     const failures = [];
     let durationMs = 0;
     for (const file of syntaxTargets) {
-      const syntax = runProcess(process.execPath, ["--check", file], cwd);
+      const syntax = nodeSyntaxCheck(cwd, file);
       durationMs += syntax.durationMs;
       if (syntax.exitCode !== 0) {
         failures.push(parseGenericLintFinding({
@@ -860,8 +888,17 @@ function runTypecheck(cwd, {
   packageManager = null,
   packageManagerReady = null,
 } = {}) {
+  // A project with no typecheck configured (no package.json, or no typecheck
+  // script) has nothing to run: that is not a verification gap, so it must not
+  // turn the passing checks that did run into an unavailable result.
   if (!packageScript(cwd, "typecheck")) {
-    return { name: "typecheck", status: "unavailable", reason: "package.json has no typecheck script" };
+    return {
+      name: "typecheck",
+      status: "not_applicable",
+      reason: fs.existsSync(path.join(cwd, "package.json"))
+        ? "package.json has no typecheck script"
+        : "no package.json; not a Node project",
+    };
   }
   if (!packageManager || packageManagerReady === false) {
     return {
@@ -895,6 +932,191 @@ function runTypecheck(cwd, {
   };
 }
 
+const TSC_DIAGNOSTIC_RE = /^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s*(.*)$/u;
+const TSC_PRETTY_DIAGNOSTIC_RE = /^(.+?):(\d+):(\d+)\s+-\s+(error|warning)\s+(TS\d+):\s*(.*)$/u;
+const ANSI_ESCAPE_RE = /\u001b\[[0-9;]*m/gu;
+const MAX_DIAGNOSTIC_MESSAGE_CHARS = 500;
+const MAX_ASYNC_CAPTURE_CHARS = 8 * 1024 * 1024;
+
+// Parse TypeScript compiler diagnostics (`file(line,col): error TS1234: ...`
+// or the --pretty `file:line:col - error TS1234: ...` form). Indented lines
+// directly under a diagnostic are its message chain; anything else (npm
+// banners, code frames, the "Found N errors" summary) is ignored.
+export function parseTypecheckDiagnostics(text) {
+  const diagnostics = [];
+  let current = null;
+  for (const rawLine of String(text || "").replace(ANSI_ESCAPE_RE, "").split(/\r?\n/u)) {
+    const line = rawLine.trimEnd();
+    const match = line.match(TSC_DIAGNOSTIC_RE) || line.match(TSC_PRETTY_DIAGNOSTIC_RE);
+    if (match) {
+      current = {
+        file: match[1].trim(),
+        line: Number(match[2]),
+        column: Number(match[3]),
+        severity: match[4],
+        code: match[5],
+        message: match[6].trim(),
+      };
+      diagnostics.push(current);
+      continue;
+    }
+    if (current && /^\s{2,}\S/u.test(line) && !/^[\s~]+$/u.test(line)) {
+      if (current.message.length < MAX_DIAGNOSTIC_MESSAGE_CHARS) {
+        current.message = compact(`${current.message} ${line.trim()}`, MAX_DIAGNOSTIC_MESSAGE_CHARS);
+      }
+      continue;
+    }
+    current = null;
+  }
+  return diagnostics;
+}
+
+function runProcessAsync(command, args, cwd, { timeoutMs = 120000, signal = null } = {}) {
+  const startedAt = Date.now();
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const spawnSpec = commandSpawnSpec(command, args, { env });
+  const detached = process.platform !== "win32";
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    let timer = null;
+    let child = null;
+    const kill = () => {
+      if (!child?.pid) return;
+      try {
+        // npm runs the checker as a grandchild; stop the whole group.
+        if (detached) process.kill(-child.pid, "SIGTERM");
+        else child.kill("SIGTERM");
+      } catch {
+        // Already exited.
+      }
+    };
+    const onAbort = () => kill();
+    const finish = (exitCode, error = null, signalName = null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve({
+        command: [command, ...args].join(" "),
+        exitCode,
+        signal: signalName,
+        timedOut,
+        stdout,
+        stderr,
+        error,
+        durationMs: Date.now() - startedAt,
+      });
+    };
+    try {
+      child = spawn(spawnSpec.command, spawnSpec.args, {
+        cwd,
+        env,
+        detached,
+        windowsHide: true,
+        shell: false,
+        windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments === true,
+      });
+    } catch (error) {
+      finish(1, error?.message || String(error));
+      return;
+    }
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {
+      if (stdout.length < MAX_ASYNC_CAPTURE_CHARS) stdout += chunk;
+    });
+    child.stderr?.on("data", (chunk) => {
+      if (stderr.length < MAX_ASYNC_CAPTURE_CHARS) stderr += chunk;
+    });
+    child.on("error", (error) => finish(1, error?.message || String(error)));
+    child.on("close", (code, signalName) => finish(code ?? 1, null, signalName || null));
+    timer = setTimeout(() => {
+      timedOut = true;
+      kill();
+    }, timeoutMs);
+    if (signal?.aborted) kill();
+    else signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
+}
+
+// Run each package root's configured typecheck for the given files without
+// blocking the event loop, and return every diagnostic with a repo-relative
+// path. Callers filter to the files they care about.
+export async function collectTypecheckDiagnosticsAsync({
+  cwd,
+  files = [],
+  timeoutMs = 180000,
+  signal = null,
+} = {}) {
+  const groups = groupVerificationFiles(cwd, files);
+  const roots = [];
+  const diagnostics = [];
+  let durationMs = 0;
+  for (const group of groups) {
+    const rootLabel = group.root_relative || ".";
+    if (!packageScript(group.root, "typecheck")) {
+      roots.push({ root: rootLabel, status: "not_applicable" });
+      continue;
+    }
+    if (!group.package_manager || group.package_manager_ready === false) {
+      roots.push({
+        root: rootLabel,
+        status: "unavailable",
+        reason: group.package_manager
+          ? `${group.package_manager} executable is not available`
+          : "package manager could not be resolved",
+      });
+      continue;
+    }
+    const invocation = packageManagerRun(group.package_manager, "typecheck");
+    const result = await runProcessAsync(invocation.command, invocation.args, group.root, { timeoutMs, signal });
+    durationMs += result.durationMs;
+    const missingTooling = result.exitCode !== 0 ? missingToolingReason(result) : null;
+    if (missingTooling || result.timedOut) {
+      roots.push({
+        root: rootLabel,
+        status: "unavailable",
+        reason: missingTooling || `typecheck timed out after ${timeoutMs}ms`,
+        ...(missingTooling ? { dependency_unavailable: true } : {}),
+        command: result.command,
+      });
+      continue;
+    }
+    const parsed = parseTypecheckDiagnostics(`${result.stdout}\n${result.stderr}`)
+      .map((diagnostic) => ({ ...diagnostic, file: projectFailurePath(cwd, group, diagnostic.file) }));
+    diagnostics.push(...parsed);
+    roots.push({
+      root: rootLabel,
+      status: result.exitCode === 0 ? "passed" : "failed",
+      command: result.command,
+      diagnostic_count: parsed.length,
+      ...(result.exitCode !== 0 && parsed.length === 0
+        ? { output: compact(`${result.stdout}\n${result.stderr}`, 1000) }
+        : {}),
+    });
+  }
+  const statuses = new Set(roots.map((root) => root.status));
+  const status = statuses.has("failed")
+    ? "failed"
+    : statuses.has("unavailable")
+      ? "unavailable"
+      : statuses.has("passed") ? "passed" : "not_applicable";
+  const unavailableRoot = roots.find((root) => root.status === "unavailable");
+  return {
+    status,
+    command: roots.find((root) => root.command)?.command || null,
+    ...(unavailableRoot ? { reason: unavailableRoot.reason } : {}),
+    ...(roots.some((root) => root.dependency_unavailable === true) ? { dependency_unavailable: true } : {}),
+    roots,
+    diagnostics,
+    durationMs,
+  };
+}
+
 function projectFailurePath(projectCwd, group, file) {
   if (!file) return file;
   const full = path.resolve(group.root, file);
@@ -915,6 +1137,7 @@ function combineRootChecks(name, projectCwd, entries) {
   const failed = normalized.filter(({ check }) => check.status === "failed");
   const unavailable = normalized.filter(({ check }) => ["unavailable", "skipped"].includes(check.status));
   const passed = normalized.filter(({ check }) => check.status === "passed");
+  const notApplicable = normalized.filter(({ check }) => check.status === "not_applicable");
   const targets = [...new Set(normalized.flatMap(({ group, check }) => (
     (Array.isArray(check.targets) ? check.targets : [])
       .map((file) => projectFailurePath(projectCwd, group, file))
@@ -926,7 +1149,9 @@ function combineRootChecks(name, projectCwd, entries) {
       ? "unavailable"
       : passed.length > 0
         ? "passed"
-        : "unavailable";
+        : notApplicable.length > 0 && notApplicable.length === normalized.length
+          ? "not_applicable"
+          : "unavailable";
   return {
     name,
     coverage: name === "typecheck" ? "project_root" : "file",
@@ -938,7 +1163,9 @@ function combineRootChecks(name, projectCwd, entries) {
       ? unavailable.map(({ group, check }) => (
           `${group.root_relative}: ${check.reason || check.status}`
         )).join("; ") || "no runnable verifier"
-      : null,
+      : status === "not_applicable"
+        ? notApplicable.map(({ group, check }) => `${group.root_relative}: ${check.reason || check.status}`).join("; ")
+        : null,
     targets,
     command: normalized.map(({ check }) => check.command).filter(Boolean).join(" && ") || null,
     durationMs: normalized.reduce((sum, { check }) => sum + (Number(check.durationMs) || 0), 0),
@@ -1032,24 +1259,35 @@ export function runScopedChecks({
   }
   const failed = checks.filter((check) => check.status === "failed");
   const unavailable = checks.filter((check) => check.status === "unavailable");
+  const notApplicable = checks.filter((check) => check.status === "not_applicable");
   const failures = failed.flatMap((check) =>
     (check.failures || []).map((failure) => ({ check: check.name, ...failure }))
   );
   const outputFailures = failed
     .filter((check) => !check.failures?.length && check.output)
     .map((check) => ({ check: check.name, message: check.output }));
-  const ok = failed.length === 0 && unavailable.length === 0;
-  const status = failed.length > 0 ? "failed" : (unavailable.length > 0 ? "unavailable" : "passed");
+  // Checks the project has not configured do not count either way, but at
+  // least one applicable check must have run for the result to pass.
+  const nothingApplicable = notApplicable.length === checks.length;
+  const ok = failed.length === 0 && unavailable.length === 0 && !nothingApplicable;
+  const status = failed.length > 0
+    ? "failed"
+    : (unavailable.length > 0 || nothingApplicable ? "unavailable" : "passed");
   const dependencyUnavailable = status === "unavailable" && unavailable.some((check) => check.dependency_unavailable === true);
+  const notApplicableNote = notApplicable.length > 0
+    ? ` (${notApplicable.map((check) => check.name).join(", ")} not configured)`
+    : "";
   const result = {
     ok,
     status,
     ...(dependencyUnavailable ? { reason: "dependency_unavailable" } : {}),
     executed_commit_hash: executedCommitHash,
     summary: status === "passed"
-      ? "all requested checks passed"
+      ? `all applicable checks passed${notApplicableNote}`
       : (status === "unavailable"
-        ? `${unavailable.map((check) => check.name).join(", ")} unavailable`
+        ? (nothingApplicable
+          ? `no applicable checks for the changed files${notApplicableNote}`
+          : `${unavailable.map((check) => check.name).join(", ")} unavailable`)
         : `${failed.map((check) => check.name).join(", ")} failed`),
     scoped_files: files,
     readiness: verificationReadinessManifest(cwd, files, requested),

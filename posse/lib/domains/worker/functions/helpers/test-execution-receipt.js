@@ -15,6 +15,8 @@ import {
   storeArtifact,
 } from "../../../queue/functions/index.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
+import { parseTypecheckDiagnostics } from "../../../../shared/tools/functions/toolkit/scoped-runners.js";
+import { siblingJobScopePaths } from "../../../queue/functions/file-locks.js";
 import { gitExecAsync } from "../../../git/functions/utils.js";
 import { buildWindowsSpawn } from "../../../providers/functions/shared/windows-spawn.js";
 import { isSafeDirectNodeTestScriptArgs } from "../../../../shared/scope/functions/test-command.js";
@@ -1419,6 +1421,38 @@ async function porcelain(cwd) {
   ) || "");
 }
 
+// Paths named by `git status --porcelain=v1 -z` output (rename/copy sources
+// are reported too, since they changed as well).
+export function porcelainChangedPaths(output) {
+  const entries = String(output || "").split("\0");
+  const paths = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (entry.length < 4) continue;
+    const status = entry.slice(0, 2);
+    paths.push(entry.slice(3));
+    if (/[RC]/u.test(status) && entries[index + 1]) {
+      paths.push(entries[index + 1]);
+      index += 1;
+    }
+  }
+  return [...new Set(paths)];
+}
+
+// Undo a test's own side effects path by path, for a shared worktree where a
+// whole-worktree reset would also erase sibling jobs' files.
+async function restorePathsToHead(cwd, paths = []) {
+  for (const relPath of paths) {
+    const inHead = await gitExecAsync(["cat-file", "-e", `HEAD:${relPath}`], cwd).then(() => true, () => false);
+    if (inHead) {
+      await gitExecAsync(["restore", "--source=HEAD", "--staged", "--worktree", "--", relPath], cwd);
+      continue;
+    }
+    await gitExecAsync(["rm", "--cached", "--quiet", "--ignore-unmatch", "--", relPath], cwd).catch(() => {});
+    await fs.promises.rm(path.join(cwd, relPath), { force: true, recursive: true });
+  }
+}
+
 async function executeReceipt({
   job,
   plan,
@@ -1428,6 +1462,8 @@ async function executeReceipt({
   attemptId = null,
   policy = null,
   cleanupWorktree = null,
+  siblingOwnedPaths = null,
+  cleanupPaths = restorePathsToHead,
   baselineReceipt = null,
   dependencyRepair = null,
 } = {}) {
@@ -1604,16 +1640,37 @@ async function executeReceipt({
   const afterCommit = await currentCommit(cwd);
   const afterHeadRef = await currentHeadRef(cwd);
   const headChanged = afterCommit !== actualCommit || afterHeadRef !== originalHeadRef;
+  // Sibling jobs of the same work item share this worktree. Files they own
+  // (their write locks, or files materialized for them) that changed while
+  // this test ran are their work, not this test's side effects.
+  let siblingPaths = new Set();
+  let ownChangedPaths = null;
+  if (after !== before && typeof siblingOwnedPaths === "function") {
+    const changedPaths = porcelainChangedPaths(after);
+    try {
+      siblingPaths = new Set(await siblingOwnedPaths(changedPaths));
+    } catch {
+      siblingPaths = new Set();
+    }
+    ownChangedPaths = changedPaths.filter((changedPath) => !siblingPaths.has(changedPath));
+  }
+  const ownWorktreeChanges = after !== before && (ownChangedPaths === null || ownChangedPaths.length > 0);
   let cleanupStatus = "not_needed";
   let cleanupError = null;
-  if (after !== before || headChanged) {
+  if (ownWorktreeChanges || headChanged) {
     cleanupStatus = "required";
     try {
-      if (after !== before) {
-        if (typeof cleanupWorktree !== "function") {
-          throw new Error("test changed worktree files but no cleanup implementation is available");
+      if (ownWorktreeChanges) {
+        if (siblingPaths.size > 0) {
+          // A whole-worktree reset would erase the sibling files too; undo
+          // only what this test changed.
+          await cleanupPaths(cwd, ownChangedPaths);
+        } else {
+          if (typeof cleanupWorktree !== "function") {
+            throw new Error("test changed worktree files but no cleanup implementation is available");
+          }
+          await cleanupWorktree();
         }
-        await cleanupWorktree();
       }
       // A WI worktree may host disjoint sibling jobs. If one of those jobs
       // commits while this test is running, resetting to the captured HEAD
@@ -1628,7 +1685,9 @@ async function executeReceipt({
         currentCommit(cwd),
         currentHeadRef(cwd),
       ]);
-      if (cleaned) throw new Error("test cleanup left the worktree dirty");
+      if (porcelainChangedPaths(cleaned).some((cleanedPath) => !siblingPaths.has(cleanedPath))) {
+        throw new Error("test cleanup left the worktree dirty");
+      }
       if (restoredCommit !== actualCommit || restoredHeadRef !== originalHeadRef) {
         throw new Error("test cleanup did not restore the original Git HEAD");
       }
@@ -1674,6 +1733,7 @@ async function executeReceipt({
     reason: cleanupError || (noTestsExecuted ? "no_tests_executed" : result.reason) || null,
     missing_executable: result.missing_executable || null,
     cleanup_status: cleanupStatus,
+    ...(siblingPaths.size > 0 ? { concurrent_sibling_paths: [...siblingPaths].slice(0, 50) } : {}),
     stdout: result.stdout,
     stderr: result.stderr,
     stdout_truncated: result.stdout_truncated,
@@ -1756,6 +1816,7 @@ export async function ensurePreDevelopmentTestBaseline({
   idleTimeoutMs = undefined,
   policy = null,
   cleanupWorktree = null,
+  siblingOwnedPaths = null,
   repairDependencies = null,
 } = {}) {
   if (!cwd) {
@@ -1801,6 +1862,7 @@ export async function ensurePreDevelopmentTestBaseline({
     cwd,
     policy: effectivePolicy,
     cleanupWorktree,
+    siblingOwnedPaths,
   });
   // The first receipt remains an honest record of the unavailable toolchain.
   // Re-run at the same commit after repair so the frozen, reusable baseline is
@@ -1812,6 +1874,7 @@ export async function ensurePreDevelopmentTestBaseline({
     cwd,
     policy: effectivePolicy,
     cleanupWorktree,
+    siblingOwnedPaths,
     dependencyRepair,
   }));
 }
@@ -1826,6 +1889,7 @@ export async function ensurePostChangeTestReceipt({
   idleTimeoutMs = undefined,
   policy = null,
   cleanupWorktree = null,
+  siblingOwnedPaths = null,
   repairDependencies = null,
 } = {}) {
   if (!cwd) return null;
@@ -1856,6 +1920,7 @@ export async function ensurePostChangeTestReceipt({
     attemptId,
     policy: effectivePolicy,
     cleanupWorktree,
+    siblingOwnedPaths,
     baselineReceipt: baseline,
   });
   const postChange = await retryAfterDependencyRepair(
@@ -1870,6 +1935,7 @@ export async function ensurePostChangeTestReceipt({
       attemptId,
       policy: effectivePolicy,
       cleanupWorktree,
+      siblingOwnedPaths,
       baselineReceipt: baseline,
       dependencyRepair,
     }),
@@ -1949,6 +2015,112 @@ export function testExecutionDelta(baseline, postChange) {
   return "indeterminate";
 }
 
+// A project-wide typecheck (tsc, `npm run typecheck`, ...) declared as one
+// parallel task's test command also reports errors in files other tasks of
+// the work item own and have not finished, so it fails every task but the
+// last (WI 149, 2026-10-01). Judge such a failure by attribution instead:
+// errors in the task's own files count; errors elsewhere count only when the
+// baseline did not already have them and no unfinished sibling owns the file.
+const TYPECHECK_COMMAND_RE = /(?:^|[\s/])(?:tsc|vue-tsc|svelte-check)(?:\s|$)|\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:typecheck|type-check|check-types|tsc)\b/i;
+const SCOPE_ATTRIBUTABLE_DELTAS = new Set([
+  "changed_failure",
+  "regression",
+  "post_only",
+  "persistent_failure",
+  "infrastructure_unavailable",
+]);
+
+function receiptTypecheckDiagnostics(receipt) {
+  if (!receipt || receipt.stdout_truncated || receipt.stderr_truncated) return null;
+  const prefix = String(receipt.cwd_relative || "").replace(/\\/g, "/").replace(/^\.\/?/, "").replace(/\/+$/, "");
+  return parseTypecheckDiagnostics(`${receipt.stdout || ""}\n${receipt.stderr || ""}`)
+    .map((diagnostic) => ({
+      ...diagnostic,
+      file: path.posix.normalize(prefix ? `${prefix}/${diagnostic.file}` : diagnostic.file).replace(/^\.\//, ""),
+    }));
+}
+
+function diagnosticIdentity(diagnostic) {
+  return `${diagnostic.file}|${diagnostic.code}|${diagnostic.message}`;
+}
+
+function normalizeAttributionPath(value) {
+  return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\/+/, "");
+}
+
+export function scopedTypecheckAttribution(baseline, postChange, {
+  scopeFiles = [],
+  siblingOwned = () => new Set(),
+} = {}) {
+  if (postChange?.status !== "failed") return null;
+  if (!TYPECHECK_COMMAND_RE.test(String(postChange.execution_command || postChange.command || ""))) return null;
+  const scope = new Set((Array.isArray(scopeFiles) ? scopeFiles : []).map(normalizeAttributionPath).filter(Boolean));
+  if (scope.size === 0) return null;
+  const post = receiptTypecheckDiagnostics(postChange);
+  // Truncated or unparsed output cannot prove the task's files are clean.
+  if (!post || post.length === 0) return null;
+  const baselineUsable = ["passed", "failed"].includes(baseline?.status);
+  const baselineDiagnostics = baselineUsable ? receiptTypecheckDiagnostics(baseline) : [];
+  const remaining = new Map();
+  for (const diagnostic of baselineDiagnostics || []) {
+    const key = diagnosticIdentity(diagnostic);
+    remaining.set(key, (remaining.get(key) || 0) + 1);
+  }
+  const inScope = post.filter((diagnostic) => scope.has(diagnostic.file));
+  const outside = post.filter((diagnostic) => !scope.has(diagnostic.file));
+  // Without a usable baseline nothing outside the scope can be shown to be new.
+  const novelOutside = [];
+  if (baselineDiagnostics) {
+    for (const diagnostic of outside) {
+      const key = diagnosticIdentity(diagnostic);
+      const count = remaining.get(key) || 0;
+      if (count > 0) remaining.set(key, count - 1);
+      else if (baselineUsable) novelOutside.push(diagnostic);
+    }
+  }
+  let owned = new Set();
+  if (novelOutside.length > 0) {
+    try {
+      owned = siblingOwned([...new Set(novelOutside.map((diagnostic) => diagnostic.file))]) || new Set();
+    } catch {
+      owned = new Set();
+    }
+  }
+  const attributableOutside = novelOutside.filter((diagnostic) => !owned.has(diagnostic.file));
+  return {
+    schema_version: 1,
+    total_count: post.length,
+    in_scope_count: inScope.length,
+    attributable_outside_count: attributableOutside.length,
+    sibling_owned_outside_count: novelOutside.length - attributableOutside.length,
+    unattributed_outside_count: outside.length - attributableOutside.length,
+    baseline_usable: baselineUsable && baselineDiagnostics !== null,
+    attributable: inScope.length > 0 || attributableOutside.length > 0,
+    in_scope: inScope.slice(0, 40),
+    attributable_outside: attributableOutside.slice(0, 40),
+  };
+}
+
+function jobScopeFiles(jobId) {
+  try {
+    const row = getDb().prepare("SELECT payload_json FROM jobs WHERE id = ?").get(Number(jobId));
+    const payload = JSON.parse(row?.payload_json || "{}");
+    return [
+      ...(Array.isArray(payload.files_to_modify) ? payload.files_to_modify : []),
+      ...(Array.isArray(payload.files_to_create) ? payload.files_to_create : []),
+    ];
+  } catch {
+    return [];
+  }
+}
+
+export function testRunScopeAttribution(jobId, { baseline = null, post_change: postChange = null, postChange: postChangeAlias = null } = {}) {
+  return scopedTypecheckAttribution(baseline, postChange || postChangeAlias, {
+    scopeFiles: jobScopeFiles(jobId),
+    siblingOwned: (paths) => siblingJobScopePaths(jobId, paths),
+  });
+}
+
 export function latestTestReceiptDelta(jobId, { commitHash = null } = {}) {
   const receipts = storedReceipts(jobId)
     .sort((left, right) => Number(right.artifact_id || 0) - Number(left.artifact_id || 0));
@@ -1968,20 +2140,28 @@ export function latestTestReceiptDelta(jobId, { commitHash = null } = {}) {
     receipt.phase === "baseline"
     && (!postChange?.plan_id || receipt.plan_id === postChange.plan_id)
   )) || null;
+  let delta = baseline || postChange ? testExecutionDelta(baseline, postChange) : null;
+  const scopeAttribution = SCOPE_ATTRIBUTABLE_DELTAS.has(delta)
+    ? testRunScopeAttribution(jobId, { baseline, post_change: postChange })
+    : null;
+  if (scopeAttribution && !scopeAttribution.attributable) delta = "out_of_scope_failure";
   return {
-    delta: baseline || postChange ? testExecutionDelta(baseline, postChange) : null,
+    delta,
     baseline,
     postChange,
+    ...(scopeAttribution ? { scope_attribution: scopeAttribution } : {}),
   };
 }
 
 export function renderTestExecutionEvidence({
   baseline = null,
   post_change: postChange = null,
+  scope_attribution: scopeAttribution = null,
 } = {}) {
   if (!baseline && !postChange) return "";
   const plan = baseline || postChange;
-  const delta = testExecutionDelta(baseline, postChange);
+  const rawDelta = testExecutionDelta(baseline, postChange);
+  const delta = scopeAttribution && !scopeAttribution.attributable ? "out_of_scope_failure" : rawDelta;
   const postOutput = postChange?.status === "passed" ? "" : compactOutput(postChange);
   const baselineOutput = ["failed", "timed_out"].includes(baseline?.status)
     ? compactOutput(baseline)
@@ -2000,6 +2180,9 @@ export function renderTestExecutionEvidence({
     `baseline: ${statusLabel(baseline)} (exit ${baseline?.exit_code ?? "unknown"}, ${baseline?.duration_ms ?? 0}ms)`,
     `post_change: ${statusLabel(postChange)} (exit ${postChange?.exit_code ?? "unknown"}, ${postChange?.duration_ms ?? 0}ms)`,
     `delta: ${delta}`,
+    scopeAttribution
+      ? `scope_attribution: ${scopeAttribution.in_scope_count} error(s) in this task's files, ${scopeAttribution.attributable_outside_count} new error(s) elsewhere attributable to this change, ${scopeAttribution.unattributed_outside_count} error(s) in files this task does not own (pre-existing or owned by unfinished sibling tasks).${scopeAttribution.attributable ? "" : " The typecheck failure is not attributable to this task: judge it by its own files, which are clean."}`
+      : null,
     baselineSummary ? `baseline_failure_summary:\n${baselineSummary}` : null,
     postSummary ? `post_change_failure_summary:\n${postSummary}` : null,
     postChange?.tested_integrated_descendant === true

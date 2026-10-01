@@ -16,7 +16,7 @@ import {
   wiScopeId,
 } from "../../../artifacts/functions/index.js";
 import { C } from "../../../../shared/format/functions/colors.js";
-import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logger.js";
+import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { yieldNow } from "../../../runtime/functions/yield.js";
 import { recordObservation, runWithObservationContext } from "../../../observability/functions/observations.js";
 import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
@@ -35,6 +35,8 @@ import {
   runWaitingLanePreparationJob as runWaitingLanePreparationJobFromModule,
 } from "../../functions/execution/waiting-lane-prepare-job.js";
 import { runLegacyDelegateJob as runLegacyDelegateJobFromModule } from "../../functions/execution/legacy-delegate-job.js";
+import { runPreDevTypecheck } from "../../functions/helpers/pre-dev-typecheck.js";
+import { siblingOwnedWorktreePaths } from "../../../queue/functions/file-locks.js";
 import {
   setUpWorktreeForJob as setUpWorktreeForJobFromModule,
   clearActiveWorktreeSentinel as clearActiveWorktreeSentinelFromModule,
@@ -250,6 +252,7 @@ export class WorkerExecutionCoordinator {
               onMsg: (message) => worker.emit(job.id, `${C.dim}[test-intake] ${message}${C.reset}`),
             })
           : null,
+        siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
         repairDependencies: wtPath
           ? (receipt) => repairTestDependencies(worker, job, wtPath, {
               signal: executeAbortController?.signal || null,
@@ -321,6 +324,25 @@ export class WorkerExecutionCoordinator {
           );
         }
       }
+
+      // Brief DEV/FIX on the type errors already present in the files it may
+      // edit. The job holds its write locks and its worktree is ready here.
+      await runPreDevTypecheck({
+        worker,
+        job,
+        payload: worker.parsePayload(job),
+        wtPath,
+        signal: executeAbortController?.signal || null,
+        cleanupWorktree: wtPath
+          ? async () => snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
+              reason: `pre-dev-typecheck-side-effects-wi-${job.work_item_id}-job-${job.id}`,
+              branchName: branchName || null,
+              wiId: job.work_item_id,
+              signal: executeAbortController?.signal || null,
+              onMsg: (message) => worker.emit(job.id, `${C.dim}[typecheck] ${message}${C.reset}`),
+            })
+          : null,
+      });
 
       // -- Create attempt record --
       const attemptContext = await this.attemptLifecycle.prepare({
@@ -401,8 +423,7 @@ export class WorkerExecutionCoordinator {
         }
 
         // -- Dispatch to handler --
-        log.info("worker", `Job start: ${job.job_type} #${job.id} "${shortJobTitleFromModule(job).slice(0, 60)}"`, { jobId: job.id, wiId: job.work_item_id, type: job.job_type, tier: effectiveTier, attempt: attemptCount, provider: executionProvider || undefined });
-        jobLog("START", { wi: job.work_item_id, job: job.id, detail: `${job.job_type} "${shortJobTitleFromModule(job).slice(0, 60)}" (${modelName}, attempt ${attemptCount}${executionProvider ? `, ${executionProvider}` : ""})` });
+        log.info("worker", `Dispatching ${job.job_type} job #${job.id} "${shortJobTitleFromModule(job).slice(0, 60)}"`, { jobId: job.id, wiId: job.work_item_id, type: job.job_type, tier: effectiveTier, attempt: attemptCount, provider: executionProvider || undefined });
         const observationPayload = worker.parsePayload(job);
         recordObservation({
           work_item_id: job.work_item_id,

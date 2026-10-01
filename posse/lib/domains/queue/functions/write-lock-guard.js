@@ -13,7 +13,9 @@
 // scope is an authorization boundary, however, so an active member fails
 // closed when its durable scope cannot be read or matched.
 
+import fs from "fs";
 import path from "path";
+import { getDb } from "../../../shared/storage/functions/index.js";
 import { getObservationContext } from "../../observability/functions/observations.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { verifyOrAcquireJobWriteLockForPath } from "./file-locks.js";
@@ -47,6 +49,33 @@ function holderLabel(conflict) {
  * repo paths), or the job type takes no write locks (artificer, db-mode,
  * assess-only).
  */
+// Handoff materializes each planned new file as an empty placeholder because
+// code roles get no write_file tool; edit_file fills it in. If the placeholder
+// disappeared (a sibling job's worktree reset removed one in the 2026-10-01
+// wowiekowie run), recreate it for the job it was materialized for instead of
+// leaving the agent with "File not found" and no way to create the file.
+export function restoreMissingMaterializedFile(displayPath, cwd) {
+  try {
+    const ambient = getObservationContext() || {};
+    if (ambient.job_id == null) return false;
+    const rel = repoRelativePath(cwd, displayPath);
+    if (!rel) return false;
+    const row = getDb().prepare(`
+      SELECT 1 FROM file_materializations WHERE job_id = ? AND path = ? LIMIT 1
+    `).get(Number(ambient.job_id), rel);
+    if (!row) return false;
+    const absPath = path.resolve(cwd || process.cwd(), rel);
+    if (fs.existsSync(absPath)) return false;
+    fs.mkdirSync(path.dirname(absPath), { recursive: true });
+    fs.writeFileSync(absPath, "", { flag: "wx", mode: 0o600 });
+    log.warn("write-lock-guard", `restored missing materialized placeholder ${rel} for job #${ambient.job_id}`);
+    return true;
+  } catch (err) {
+    log.warn("write-lock-guard", `could not restore materialized placeholder ${displayPath}: ${err?.message || err}`);
+    return false;
+  }
+}
+
 export function guardToolWriteLock(toolName, displayPath, cwd) {
   const teamErr = teamManagedWriteGuard(toolName, displayPath, cwd);
   if (teamErr) return teamErr;

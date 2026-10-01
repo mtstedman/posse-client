@@ -526,6 +526,15 @@ export function updateWorkItemStatus(id, status, {
     // recovery caller cannot reintroduce a contradictory failed/merged row.
     const hasMergedEvidence = effectiveMergedEvidence(db, current);
     if (hasMergedEvidence && status !== "complete") return false;
+    if (current.merge_state === "merge_authorized" && status !== "complete") {
+      logEvent({
+        work_item_id: id,
+        event_type: EVENT_TYPES.WORK_ITEM_STATUS_TRANSITION_REJECTED,
+        actor_type: EVENT_ACTORS.SYSTEM,
+        message: `Rejected status transition during authorized merge: ${current.status} -> ${status}`,
+      });
+      return false;
+    }
     if (hasMergedEvidence && current.merge_state !== "merged") {
       setMergeState(id, "merged");
     }
@@ -971,6 +980,94 @@ export function setMergeState(id, mergeState) {
   };
   if (db.inTransaction) execute();
   else runImmediateTransaction(db, execute);
+}
+
+/**
+ * Atomically claim a completed work item for automatic publication.
+ *
+ * The claim is the linearization point between a late human decision and Git:
+ * a gate already open/resolving wins and prevents publication; once this claim
+ * lands, gate resolution is rejected until the merge settles or releases it.
+ */
+export function authorizeWorkItemAutoMerge(id, { expectedBranch = null } = {}) {
+  const db = getDb();
+  return runImmediateTransaction(db, () => {
+    const current = getWorkItem(id);
+    if (!current) return { ok: false, reason: "no_such_wi" };
+    if (current.status !== "complete") {
+      return { ok: false, reason: "status_changed", status: current.status };
+    }
+    const branch = String(current.branch_name || "").trim();
+    if (!branch || (expectedBranch && branch !== expectedBranch)) {
+      return { ok: false, reason: "branch_changed", branch: branch || null };
+    }
+    if (current.merge_state === "merged") return { ok: false, reason: "already_merged" };
+    const blockers = completionBlockersForWorkItem(id);
+    if (blockers.length > 0) {
+      return {
+        ok: false,
+        reason: "completion_blocked",
+        blocker_job_ids: blockers.map((job) => Number(job.id)),
+      };
+    }
+    const activeGate = db.prepare(`
+      SELECT hg.gate_job_id, hg.gate_state, hg.resolution_action
+      FROM human_gates hg
+      JOIN jobs gate_job ON gate_job.id = hg.gate_job_id
+      WHERE gate_job.work_item_id = ?
+        AND (
+          hg.gate_state IN ('open', 'resolving')
+          OR (
+            hg.gate_state = 'resolved'
+            AND hg.resolution_action IN (
+              'fail', 'replan', 'retry_assessment', 'retry_with_changes',
+              'reject', 'deny', 'revert', 'extend'
+            )
+          )
+        )
+      ORDER BY hg.gate_job_id
+      LIMIT 1
+    `).get(id);
+    if (activeGate) {
+      return {
+        ok: false,
+        reason: "human_gate_active",
+        gate_job_id: Number(activeGate.gate_job_id),
+        gate_state: activeGate.gate_state,
+      };
+    }
+    const previousMergeState = current.merge_state ?? null;
+    if (current.merge_state !== "merge_authorized") {
+      const updated = db.prepare(`
+        UPDATE work_items
+        SET merge_state = 'merge_authorized', updated_at = ?
+        WHERE id = ?
+          AND status = 'complete'
+          AND branch_name = ?
+          AND merge_state IS NOT 'merged'
+      `).run(now(), id, branch);
+      if (updated.changes !== 1) return { ok: false, reason: "authorization_raced" };
+      logEvent({
+        work_item_id: id,
+        event_type: EVENT_TYPES.WORK_ITEM_MERGE_AUTHORIZED,
+        actor_type: EVENT_ACTORS.SYSTEM,
+        message: `Authorized automatic merge of ${branch}`,
+        event_json: JSON.stringify({ branch, previous_merge_state: previousMergeState }),
+      });
+    }
+    return { ok: true, branch, previousMergeState, workItem: getWorkItem(id) };
+  });
+}
+
+export function releaseWorkItemAutoMergeAuthorization(id, previousMergeState = null) {
+  const db = getDb();
+  const normalized = previousMergeState === "merge_authorized" ? null : previousMergeState;
+  const result = db.prepare(`
+    UPDATE work_items
+    SET merge_state = ?, updated_at = ?
+    WHERE id = ? AND merge_state = 'merge_authorized'
+  `).run(normalized ?? null, now(), id);
+  return result.changes === 1;
 }
 
 export function markWorkItemMergeFailed(id) {

@@ -359,6 +359,7 @@ export class ToolContract {
       if (editFile) {
         lines.push(`- Dev mutation route: use ${editFile} for scoped file changes. Native apply_patch and shell writes are unavailable unless they are explicitly listed in this manifest.`);
         lines.push("- Exact files_to_create are materialized before provider execution; populate those files through the same edit route.");
+        lines.push(`- Provider sandbox: a read-only sandbox or "approval policy never" notice from your provider applies only to native apply_patch and shell writes. It does not restrict ${editFile}; never report BLOCKED because of it.`);
       } else {
         lines.push("- Dev mutation route: unavailable. Do not attempt native apply_patch or shell writes; report the missing issued edit capability.");
       }

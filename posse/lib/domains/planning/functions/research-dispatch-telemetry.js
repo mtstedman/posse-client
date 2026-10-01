@@ -1,6 +1,7 @@
 import { getAgentCalls, logEvent } from "../../queue/functions/index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { getAgentHandoffRecord } from "../../handoff/functions/index.js";
 
 // Dispatch attempts the runtime refused before a child could start. They are
 // recorded as tool error observations on the planner's job; without them the
@@ -26,6 +27,16 @@ export function listRejectedDispatchAttempts(jobId, agentCallId) {
 
 export function recordResearchDispatchAudit({ jobId, workItemId, agentCallId, requests = [] }) {
   const children = getAgentCalls(jobId).filter((call) => Number(call.parent_agent_call_id) === agentCallId && ["research", "web_research"].includes(call.child_kind));
+  const childResults = children.map((call) => {
+    let handoff = null;
+    try { handoff = getAgentHandoffRecord(call.id); } catch { /* compatibility rows may have no packet */ }
+    return {
+      call,
+      outcome: handoff?.outcome || null,
+      evidence_chars: Math.max(0, Number(handoff?.evidence_chars) || 0),
+    };
+  });
+  const partialCount = childResults.filter((entry) => entry.outcome === "partial").length;
   const requested = Math.max(requests.length, children.length);
   const requestRejections = requests.flatMap((entry) => (
     entry?.status === "failed" && !entry?.childAgentCallId && !entry?.usage?.agent_call_id
@@ -49,16 +60,23 @@ export function recordResearchDispatchAudit({ jobId, workItemId, agentCallId, re
   logEvent({
     job_id: jobId, work_item_id: workItemId, event_type: EVENT_TYPES.PLANNER_DISPATCH_COMPLETED,
     actor_type: EVENT_ACTORS.WORKER,
-    message: `Planner call #${agentCallId}: ${requested} research children requested${rejectionNote}`,
+    message: `Planner call #${agentCallId}: ${requested} research children requested${partialCount ? `; ${partialCount} partial` : ""}${rejectionNote}`,
     event_json: { agent_call_id: agentCallId, children_requested: requested, skipped_research: requested === 0,
       dispatch_rejected: rejected.length, dispatch_rejection_codes: rejectionCodes,
       requests: requests.map((entry) => ({ agent_type: entry.agentType, question: entry.intent, status: entry.status, error_code: entry.error?.code || null })),
-      children: children.map((call) => ({ agent_call_id: call.id, agent_type: call.child_kind === "web_research" ? "web" : "code", question: call.activity, status: call.status, effort: call.reasoning_effort, duration_ms: call.duration_ms })) },
+      children: childResults.map(({ call, outcome, evidence_chars }) => ({ agent_call_id: call.id, agent_type: call.child_kind === "web_research" ? "web" : "code", question: call.activity, status: call.status, outcome, evidence_chars, effort: call.reasoning_effort, duration_ms: call.duration_ms })) },
   });
+  if (children.length > 0 && partialCount === children.length) {
+    logEvent({
+      job_id: jobId, work_item_id: workItemId, event_type: EVENT_TYPES.PLANNER_DISPATCH_PARTIAL,
+      actor_type: EVENT_ACTORS.WORKER,
+      message: `Planner call #${agentCallId}: every research child returned a partial handoff`,
+      event_json: { agent_call_id: agentCallId, severity: "warn", children: childResults.map(({ call, outcome, evidence_chars }) => ({ agent_call_id: call.id, outcome, evidence_chars })) },
+    });
+  }
   if (rejected.length > 0 && children.length === 0) {
     // The planner asked for help and got none: say so where the operator
     // looks, because the fallback is the planner reading on itself at full
-    // price.
     logEvent({
       job_id: jobId, work_item_id: workItemId, event_type: EVENT_TYPES.PLANNER_DISPATCH_REJECTED,
       actor_type: EVENT_ACTORS.WORKER,

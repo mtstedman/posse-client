@@ -16,6 +16,8 @@ import {
   updateJobStatus,
 } from "../../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../../queue/functions/payload.js";
+import { siblingJobScopePaths } from "../../../../queue/functions/file-locks.js";
+import { normalizeProjectDir } from "../../../../runtime/functions/paths.js";
 import { isArtifactMode } from "../../../../artifacts/functions/index.js";
 import { C } from "../../../../../shared/format/functions/colors.js";
 import {
@@ -143,6 +145,61 @@ function _canonicalizeInferredFixScope(inferred = {}, inherited = [], instructio
   return {
     files_to_modify: _mergeUniquePaths(modify),
     files_to_create: _mergeUniquePaths(create),
+  };
+}
+
+// Paths inferred from assessor or test output are hints, not a plan. Drop a
+// bare filename that only abbreviates a qualified path in the same text or
+// does not exist at the repository root (it would be materialized there as an
+// empty new file), and drop paths an unfinished sibling job of the work item
+// still owns. Live case 2026-10-01 (WI 149): TypeScript output ("Property 'x'
+// does not exist") turned every listed file into a creation target, including
+// a bare tarot.js that became an empty root file the fix could never commit.
+export function _resolveInferredFixScope(inferred = {}, {
+  jobId = null,
+  inherited = [],
+  projectDir = null,
+  siblingScopePaths = siblingJobScopePaths,
+} = {}) {
+  const inheritedSet = new Set((Array.isArray(inherited) ? inherited : []).map(_normalizeScopePath).filter(Boolean));
+  const modifyIn = (Array.isArray(inferred.files_to_modify) ? inferred.files_to_modify : []).map(_normalizeScopePath).filter(Boolean);
+  const createIn = (Array.isArray(inferred.files_to_create) ? inferred.files_to_create : []).map(_normalizeScopePath).filter(Boolean);
+  // Only a qualified path in the same text proves a bare name abbreviates it.
+  // A bare name matching inherited scope stays for the existing ambiguity
+  // handling (one match canonicalizes, several gate for the operator).
+  const qualifiedBasenames = new Set([...modifyIn, ...createIn]
+    .filter((entry) => entry.includes("/"))
+    .map((entry) => path.posix.basename(entry)));
+  const inheritedBasenames = new Set([...inheritedSet].map((entry) => path.posix.basename(entry)));
+  let root = projectDir;
+  try { root ||= normalizeProjectDir(); } catch { root = null; }
+  const dropped = [];
+  const keep = (entry) => {
+    if (inheritedSet.has(entry) || entry.includes("/") || inheritedBasenames.has(entry)) return true;
+    if (qualifiedBasenames.has(entry)) {
+      dropped.push({ path: entry, reason: "abbreviates_qualified_path" });
+      return false;
+    }
+    if (root && fs.existsSync(path.join(root, entry))) return true;
+    dropped.push({ path: entry, reason: "unresolved_bare_filename" });
+    return false;
+  };
+  let files_to_modify = modifyIn.filter(keep);
+  let files_to_create = createIn.filter(keep);
+  const extras = [...files_to_modify, ...files_to_create].filter((entry) => !inheritedSet.has(entry));
+  let owned = new Set();
+  if (jobId != null && extras.length > 0) {
+    try { owned = siblingScopePaths(jobId, extras) || new Set(); } catch { owned = new Set(); }
+  }
+  if (owned.size > 0) {
+    for (const entry of owned) dropped.push({ path: entry, reason: "owned_by_sibling_job" });
+    files_to_modify = files_to_modify.filter((entry) => !owned.has(entry));
+    files_to_create = files_to_create.filter((entry) => !owned.has(entry));
+  }
+  return {
+    files_to_modify: _mergeUniquePaths(files_to_modify),
+    files_to_create: _mergeUniquePaths(files_to_create),
+    dropped,
   };
 }
 
@@ -778,11 +835,14 @@ function _spawnRecoveryJobsForVerdict({
     const explicitFixCreate = _sanitizeScopedFixPaths(spec.payload?.files_to_create, "spawn_jobs.files_to_create");
     const explicitFixRoots = Array.isArray(spec.payload?.create_roots) ? spec.payload.create_roots : [];
     const inheritedEditableScope = _mergeFixEditableScope(originalFiles, originalCreateFiles);
-    const inferredFixScope = _canonicalizeInferredFixScope(
+    const inferredFixScope = _resolveInferredFixScope(_canonicalizeInferredFixScope(
       _extractScopedPathsFromInstructions(fixInstructions),
       inheritedEditableScope,
       fixInstructions,
-    );
+    ), { jobId: job.id, inherited: inheritedEditableScope });
+    if (inferredFixScope.dropped.length > 0) {
+      log(`${C.yellow}[assessor]${C.reset} WI#${job.work_item_id} job #${job.id}: fix scope ignored ${inferredFixScope.dropped.length} inferred path(s): ${inferredFixScope.dropped.slice(0, 6).map((entry) => `${entry.path} (${entry.reason})`).join(", ")}`);
+    }
     const inferredFixModify = _positiveFixEditTargets(fixInstructions, inferredFixScope.files_to_modify);
     const inferredGeneratedDeletes = _inferGeneratedArtifactDeletionTargets(job, {
       ...currentPayload,

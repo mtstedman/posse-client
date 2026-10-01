@@ -36,6 +36,7 @@ import {
   spawnSuccessForRole,
 } from "../../../../shared/policies/functions/spawn-policy.js";
 import { blockedRetryContext } from "../../functions/helpers/block-reason.js";
+import { renderPreDevTypecheckContext } from "../../functions/helpers/pre-dev-typecheck.js";
 
 const DEFAULT_DEPS = {
   checkpointTokenThreshold: CHECKPOINT_TOKEN_THRESHOLD,
@@ -303,6 +304,7 @@ export class FixRole extends BaseRole {
     const fixTaskMode = payload.task_mode || "code";
     const fixNeedsImageGen = !!payload.needs_image_generation;
     const fixEditableScope = uniqueScopeFiles(fixFiles);
+    const fixTypecheckContext = renderPreDevTypecheckContext(job._preDevTypecheck, uniqueScopeFiles(fixEditableScope, fixCreateFiles));
     const fixDeleteOnlyTask = fixEditableScope.length === 0 && fixCreateFiles.length === 0 && fixCreateRoots.length === 0 && fixDeleteFiles.length > 0;
     if (Array.isArray(packet.materialized_files) && packet.materialized_files.length > 0) {
       worker.emit(job.id, `${C.cyan}[scope]${C.reset} WI#${job.work_item_id} job #${job.id}: materialized ${packet.materialized_files.length} planned file(s) before provider handoff`);
@@ -345,6 +347,7 @@ export class FixRole extends BaseRole {
     return [
       fixContinuation ? fixContinuation + "\n" : null,
       fixDriftContext ? fixDriftContext + "\n" : null,
+      fixTypecheckContext ? fixTypecheckContext + "\n" : null,
       fixNudgeContext || null,
       blockedRetry.block,
       promptLiteral("WORK ITEM", workItem.title),

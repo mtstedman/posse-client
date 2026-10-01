@@ -1,6 +1,67 @@
 import { getAgentCalls, listAgentInteractions } from "../../../../queue/functions/index.js";
+import { getAgentHandoffRecord } from "../../../../handoff/functions/index.js";
+import { researchExplorationObservationStatus } from "../../../../observability/functions/observations.js";
 
-export function appendResearchChildMonitorRows(parents, { callsForJob = getAgentCalls, interactionsForJob = listAgentInteractions, toolRows = [] } = {}) {
+function reportClaims(packet) {
+  const handoffs = Array.isArray(packet?.handoffs) ? packet.handoffs : [];
+  return handoffs.flatMap((handoff) => Array.isArray(handoff?.report?.claims) ? handoff.report.claims : []);
+}
+
+function claimSupport(claim) {
+  const detail = Array.isArray(claim) ? claim[1] : null;
+  return Array.isArray(detail?.evidence) && detail.evidence.length > 0;
+}
+
+function handoffStopReason(packet) {
+  const handoffs = Array.isArray(packet?.handoffs) ? packet.handoffs : [];
+  const summaries = handoffs.map((handoff) => String(handoff?.report?.summary || ""));
+  const match = summaries.join("\n").match(/stop_reason=([a-z0-9_.-]+)/i);
+  return match?.[1] || null;
+}
+
+function childResearchOutcome(call, { handoffForCall, explorationStatus }) {
+  let handoff = null;
+  try { handoff = handoffForCall(call.id); } catch { /* historical calls may have no handoff row */ }
+  let budget = null;
+  try {
+    const status = explorationStatus({
+      jobId: call.job_id,
+      attemptId: call.attempt_id,
+      agentCallId: call.id,
+    });
+    const configuredTurns = Number(call.max_turns_configured);
+    budget = {
+      used: Math.max(0, Number(status?.call_steps) || 0),
+      allocated: Number.isSafeInteger(configuredTurns) && configuredTurns >= 3 ? configuredTurns - 2 : null,
+    };
+  } catch { /* budget display is advisory */ }
+  const claims = reportClaims(handoff?.packet);
+  return {
+    outcome: handoff?.outcome || null,
+    evidenceChars: Math.max(0, Number(handoff?.evidence_chars) || 0),
+    supportedClaims: claims.filter(claimSupport).length,
+    totalClaims: claims.length,
+    stopReason: handoffStopReason(handoff?.packet),
+    budget,
+  };
+}
+
+function researchOutcomeLabel(outcome) {
+  const parts = [];
+  if (outcome.outcome) parts.push(outcome.outcome);
+  if (outcome.budget?.allocated != null) parts.push(`${outcome.budget.used}/${outcome.budget.allocated} calls`);
+  if (outcome.totalClaims > 0) parts.push(`${outcome.supportedClaims}/${outcome.totalClaims} cited`);
+  if (outcome.stopReason) parts.push(outcome.stopReason.replaceAll("_", " "));
+  return parts.join(" · ");
+}
+
+export function appendResearchChildMonitorRows(parents, {
+  callsForJob = getAgentCalls,
+  interactionsForJob = listAgentInteractions,
+  handoffForCall = getAgentHandoffRecord,
+  explorationStatus = researchExplorationObservationStatus,
+  toolRows = [],
+} = {}) {
   return parents.flatMap((parent) => {
     let calls = [];
     try { calls = callsForJob(parent.jobId).filter((call) => call.parent_agent_call_id && ["research", "web_research", "citation"].includes(call.child_kind)); } catch { return [parent]; }
@@ -25,11 +86,15 @@ export function appendResearchChildMonitorRows(parents, { callsForJob = getAgent
       const pending = guidance.filter((row) => row.status === "active" && row.ack_state === "pending");
       const tools = toolRows.filter((row) => Number(row.agent_call_id) === Number(call.id));
       const running = call.status === "running";
+      const researchOutcome = childResearchOutcome(call, { handoffForCall, explorationStatus });
+      const outcomeLabel = researchOutcomeLabel(researchOutcome);
+      const baseActivity = activityRows[0]?.body || call.activity || "Researching";
       return {
         ...parent, agentCallId: Number(call.id), parentAgentCallId: call.parent_agent_call_id,
         role: `↳ ${call.child_kind === "web_research" ? "web researcher" : call.child_kind === "research" ? "code researcher" : "citation child"}`,
-        researchQuestion: call.activity, activity: activityRows[0]?.body || call.activity || "Researching",
-        state: running ? pending.length ? "nudge" : "live" : call.status === "succeeded" ? "done" : call.status === "canceled" ? "canceled" : "failed", status: call.status,
+        researchQuestion: call.activity, activity: outcomeLabel ? `${outcomeLabel} · ${baseActivity}` : baseActivity,
+        state: running ? pending.length ? "nudge" : "live" : call.status === "succeeded" ? researchOutcome.outcome === "partial" ? "partial" : "done" : call.status === "canceled" ? "canceled" : "failed", status: call.status,
+        researchOutcome,
         provider: call.provider, modelName: call.model_name, effort: call.reasoning_effort, tier: call.model_tier,
         elapsed: `${Math.round((call.duration_ms ?? (Date.now() - Date.parse(call.started_at))) / 1000)}s`,
         interactionRows: rows, activityRows, guidance, pendingGuidance: pending,

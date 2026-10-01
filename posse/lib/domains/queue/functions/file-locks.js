@@ -812,6 +812,85 @@ export function jobHoldsWriteLockForPath(jobId, filePath) {
   });
 }
 
+// Paths in a work item's shared worktree that belong to another live job of
+// that work item: covered by its active write locks, or created empty for it
+// by handoff materialization. A test run by one job must not reset them as if
+// they were its own side effects.
+export function siblingOwnedWorktreePaths(jobId, paths = []) {
+  const id = Number(jobId);
+  const owned = new Set();
+  const inputs = (Array.isArray(paths) ? paths : []).filter((value) => normalizeLockPath(value));
+  if (!Number.isFinite(id) || inputs.length === 0) return owned;
+  const db = getDb();
+  const job = db.prepare("SELECT work_item_id FROM jobs WHERE id = ?").get(id);
+  if (!job?.work_item_id) return owned;
+  const locks = db.prepare(`
+    SELECT l.path, l.lock_kind
+    FROM job_file_locks l
+    JOIN jobs j ON j.id = l.job_id
+    WHERE j.work_item_id = ? AND l.job_id != ? AND l.released_at IS NULL
+  `).all(job.work_item_id, id);
+  const placeholders = TERMINAL_JOB_STATUSES.map(() => "?").join(",");
+  const materialized = new Set(db.prepare(`
+    SELECT m.path
+    FROM file_materializations m
+    JOIN jobs j ON j.id = m.job_id
+    WHERE j.work_item_id = ? AND m.job_id != ? AND j.status NOT IN (${placeholders})
+  `).all(job.work_item_id, id, ...TERMINAL_JOB_STATUSES)
+    .map((row) => normalizeLockPath(row.path))
+    .filter(Boolean));
+  for (const input of inputs) {
+    const target = normalizeLockPath(input);
+    if (materialized.has(target)) {
+      owned.add(input);
+      continue;
+    }
+    const covered = locks.some((row) => {
+      const lockPath = normalizeLockPath(row.path);
+      if (!lockPath) return false;
+      if (lockPath === "*") return true;
+      if (row.lock_kind === "file") return lockPath === target;
+      if (row.lock_kind === "root") return target === lockPath || isUnderRoot(target, [lockPath]);
+      return false;
+    });
+    if (covered) owned.add(input);
+  }
+  return owned;
+}
+
+// Paths that belong to another unfinished job of the same work item: its live
+// locks and placeholders, or its declared write scope even before it leases.
+// Recovery jobs inferred from assessor or test output must not take these
+// over (WI 149, 2026-10-01: a trivia fix job inherited the tarot and
+// dongs-search files that sibling tasks still owned).
+export function siblingJobScopePaths(jobId, paths = []) {
+  const owned = siblingOwnedWorktreePaths(jobId, paths);
+  const id = Number(jobId);
+  const inputs = (Array.isArray(paths) ? paths : []).filter((value) => normalizeLockPath(value));
+  if (!Number.isFinite(id) || inputs.length === 0) return owned;
+  const db = getDb();
+  const job = db.prepare("SELECT work_item_id FROM jobs WHERE id = ?").get(id);
+  if (!job?.work_item_id) return owned;
+  const placeholders = TERMINAL_JOB_STATUSES.map(() => "?").join(",");
+  const siblings = db.prepare(`
+    SELECT id, job_type, payload_json
+    FROM jobs
+    WHERE work_item_id = ? AND id != ? AND status NOT IN (${placeholders})
+  `).all(job.work_item_id, id, ...TERMINAL_JOB_STATUSES)
+    .filter((sibling) => MUTATING_JOB_TYPES.has(sibling.job_type));
+  for (const sibling of siblings) {
+    const scope = getJobPathTouchScope(sibling);
+    if (scope.unknown) continue;
+    const files = new Set((scope.files || []).map((value) => normalizeLockPath(value)).filter(Boolean));
+    const roots = (scope.roots || []).map((value) => normalizeLockPath(value)).filter((value) => value && value !== "*");
+    for (const input of inputs) {
+      const target = normalizeLockPath(input);
+      if (files.has(target) || roots.some((root) => target === root || isUnderRoot(target, [root]))) owned.add(input);
+    }
+  }
+  return owned;
+}
+
 /**
  * Verify the job holds a write lock covering `filePath`; acquire it
  * transactionally when the row is missing and no other holder conflicts.

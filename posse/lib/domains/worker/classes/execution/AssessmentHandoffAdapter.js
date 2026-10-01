@@ -39,6 +39,7 @@ import {
   refreshAndExtractInsights as refreshAndExtractInsightsFromModule,
 } from "../../functions/helpers/insights.js";
 import {
+  testRunScopeAttribution,
   ensurePostChangeTestReceipt,
   renderTestExecutionEvidence,
   testReceiptObservationDetail,
@@ -74,6 +75,7 @@ import {
 import {
   siblingLockSummary,
 } from "../../../queue/functions/sibling-locks.js";
+import { siblingOwnedWorktreePaths } from "../../../queue/functions/file-locks.js";
 import { loadAssessmentSource } from "../../functions/execution/assessment-source.js";
 import { ensureAssessmentScopedCheckEvidence } from "../../../assessment/functions/scoped-check-evidence.js";
 import {
@@ -385,6 +387,7 @@ export class AssessmentHandoffAdapter {
               onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-test] ${message}${C.reset}`),
             })
           : null,
+        siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
         repairDependencies: wtPath
           ? (receipt) => repairTestDependencies(worker, job, wtPath, {
               signal: assessAc?.signal || null,
@@ -475,7 +478,7 @@ export class AssessmentHandoffAdapter {
         files_reverted: [],
         files_requested: flattenPendingAssessmentFileRequests(pendingFileRequests),
       }, assessmentCwd);
-      const deterministicTestEvidence = renderTestExecutionEvidence(deterministicTestRun || {});
+      const deterministicTestEvidence = renderTestExecutionEvidence(deterministicTestRun ? { ...deterministicTestRun, scope_attribution: testRunScopeAttribution(job.id, deterministicTestRun) } : {});
       if (deterministicTestEvidence) {
         assessmentContext.task_ab_test_evidence = deterministicTestEvidence;
       }

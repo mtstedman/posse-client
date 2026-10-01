@@ -395,9 +395,15 @@ export function beginHumanGateResolution({
     }
 
     const gateJob = db.prepare(
-      `SELECT status, lease_token, lease_expires_at FROM jobs WHERE id = ?`
+      `SELECT status, lease_token, lease_expires_at, work_item_id FROM jobs WHERE id = ?`
     ).get(gateJobId);
     if (!gateJob) return { ok: false, reason: "gate_job_missing" };
+    if (gateJob.work_item_id != null) {
+      const workItem = db.prepare(`SELECT merge_state FROM work_items WHERE id = ?`).get(gateJob.work_item_id);
+      if (workItem?.merge_state === "merge_authorized") {
+        return { ok: false, reason: "work_item_merge_authorized" };
+      }
+    }
     if (
       requireLease
       && (
