@@ -53,8 +53,10 @@ import {
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_WEB_RESEARCH_HANDOFF,
   TOOL_DOWNLOAD_FILE,
+  TOOL_COMPOSE_SPRITE_SHEET,
 } from "../../../catalog/native-tools.js";
 import { downloadFilesWithinScope } from "../../web-research/functions/download-files.js";
+import { composeSpriteSheetWithinScope } from "../../../shared/tools/functions/toolkit/sprite-sheet.js";
 import { resolveWebToolsEnabled } from "../../providers/functions/shared/tool-policy-settings.js";
 import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS, TOOL_CUSTOM_TOOLS } from "../../../catalog/custom-tools.js";
 import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
@@ -1465,6 +1467,22 @@ async function downloadFilesForCurrentScope(args = {}) {
   });
 }
 
+// The artificer packs scoped images into one sheet. Converter runs are async,
+// so a large sheet does not block other calls on this gateway.
+async function composeSpriteSheetForCurrentScope(args = {}) {
+  if (!writeEnabled) return "Error: Write access is not granted for this role.";
+  return await composeSpriteSheetWithinScope(args, {
+    cwd: workspaceCwd,
+    scopePredicates: effectiveScopePredicates,
+    context: {
+      work_item_id: mcpWorkItemId,
+      job_id: mcpJobId,
+      attempt_id: mcpAttemptId,
+      agent_call_id: mcpAgentCallId,
+    },
+  });
+}
+
 // DEV authors source (including test source) through scoped deterministic file
 // tools. Command execution belongs to the assessor, so DEV must not receive a
 // generic shell escape hatch that can bypass the test/check role boundary.
@@ -1558,6 +1576,7 @@ const ALL_NATIVE_TOOL_NAMES = Object.freeze([
   "read_image_metadata",
   "validate_artifact_output",
   "clean_image",
+  "compose_sprite_sheet",
   "extract_image_text",
   "generate_image",
   "download_file",
@@ -1589,7 +1608,7 @@ function legacyToolNamesForUnscopedRole() {
 function runtimeToolAvailable(toolName) {
   if (toolName === "custom_tools") return ownerHotGateway || bootConfig.customTools === true;
   if (WRITE_TOOL_NAMES.has(toolName)) return writeEnabled;
-  if (toolName === "download_file") return writeEnabled;
+  if (toolName === "download_file" || toolName === "compose_sprite_sheet") return writeEnabled;
   if (TEST_TOOL_NAMES.has(toolName)) {
     const legacyRoleAllowsTests = bootConfig?.mcpOAuth?.verified !== true
       && roleName === "assessor";
@@ -1729,7 +1748,7 @@ addToolSchema(TOOL_GET_BRIEF);
 addToolSchema(projectDbQuerySchemaForCurrentBoot());
 addToolSchema(TOOL_CUSTOM_TOOLS);
 if (writeEnabled) {
-  for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_DOWNLOAD_FILE]) {
+  for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_DOWNLOAD_FILE, TOOL_COMPOSE_SPRITE_SHEET]) {
     addToolSchema(schema);
   }
 }
@@ -2916,12 +2935,13 @@ if (allowImageHelpers) {
   mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
 }
-// clean_image and download_file write artifacts and are artificer-only.
-// Owner-hot attaches every executor (the remote token gates per call); scoped
-// boots attach them only for the artificer role so a read-only assessor cannot
-// reach them in a no-token boot.
+// clean_image, compose_sprite_sheet, and download_file write artifacts and are
+// artificer-only. Owner-hot attaches every executor (the remote token gates per
+// call); scoped boots attach them only for the artificer role so a read-only
+// assessor cannot reach them in a no-token boot.
 if (ownerHotGateway || roleName === "artificer") {
   mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
+  mcpToolRegistry.attach("compose_sprite_sheet", (args) => composeSpriteSheetForCurrentScope(args || {}));
   mcpToolRegistry.attach("download_file", (args) => downloadFilesForCurrentScope(args || {}));
 }
 if (allowImageGeneration) {
@@ -3070,7 +3090,7 @@ function rebuildNativeToolSchemas() {
   addToolSchema(projectDbQuerySchemaForCurrentBoot());
   addToolSchema(TOOL_CUSTOM_TOOLS);
   if (writeEnabled) {
-    for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_DOWNLOAD_FILE]) {
+    for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_DOWNLOAD_FILE, TOOL_COMPOSE_SPRITE_SHEET]) {
       addToolSchema(schema);
     }
   }
@@ -3141,11 +3161,12 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
     mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
     mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
   }
-  // clean_image and download_file are artificer-only mutations; owner-hot
-  // attaches all executors (remote token gates per call), scoped boots only
-  // for the artificer role.
+  // clean_image, compose_sprite_sheet, and download_file are artificer-only
+  // mutations; owner-hot attaches all executors (remote token gates per call),
+  // scoped boots only for the artificer role.
   if (ownerHotGateway || roleName === "artificer") {
     mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
+    mcpToolRegistry.attach("compose_sprite_sheet", (args) => composeSpriteSheetForCurrentScope(args || {}));
     mcpToolRegistry.attach("download_file", (args) => downloadFilesForCurrentScope(args || {}));
   }
   if (allowImageGeneration) {

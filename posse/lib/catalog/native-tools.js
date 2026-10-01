@@ -16,6 +16,7 @@ import {
   AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY,
 } from "./handoff.js";
 import { SUB_AGENT_PROTOCOL } from "./sub-agent.js";
+import { SPRITE_SHEET_FIT_MODES, SPRITE_SHEET_LIMITS } from "./artifact.js";
 import {
   DOWNLOAD_FILE_LIMITS,
   DOWNLOAD_FILE_MEDIA_TYPES,
@@ -2938,6 +2939,67 @@ export const TOOL_DOWNLOAD_FILE = {
       },
     },
     required: ["items"],
+    additionalProperties: false,
+  },
+};
+
+export const TOOL_COMPOSE_SPRITE_SHEET = {
+  type: "function",
+  name: "compose_sprite_sheet",
+  description:
+    "Pack scoped PNG, JPEG, WebP, or GIF images (first frame) into one PNG sprite sheet plus a JSON frame map. "
+    + "Image i fills the cell at column i % columns, row floor(i / columns), with padding pixels around and between "
+    + "cells; downscaling averages pixels and keeps transparency. The map records each frame's index, source path, "
+    + "and x, y, w, h in the sheet. "
+    + `Up to ${SPRITE_SHEET_LIMITS.maxInputs} images of at most ${SPRITE_SHEET_LIMITS.maxInputBytes / MIB} MB, `
+    + `${SPRITE_SHEET_LIMITS.maxInputSide} px per side, and ${SPRITE_SHEET_LIMITS.maxInputPixels / MIB} megapixels; `
+    + `cells up to ${SPRITE_SHEET_LIMITS.maxCellSide} px; a sheet up to `
+    + `${SPRITE_SHEET_LIMITS.maxAtlasSide} px per side and ${SPRITE_SHEET_LIMITS.maxAtlasPixels / MIB} megapixels. `
+    + "Any unreadable input fails the whole call, nothing is written, and every bad input is listed. "
+    + "The result reports both paths, the sheet size, the frame count, and SHA-256 digests.",
+  parameters: {
+    type: "object",
+    properties: {
+      inputs: {
+        type: "array",
+        minItems: 1,
+        maxItems: SPRITE_SHEET_LIMITS.maxInputs,
+        description: "Image paths in frame order, absolute or relative to the working directory.",
+        items: { type: "string", minLength: 1, maxLength: SPRITE_SHEET_LIMITS.maxPathChars },
+      },
+      output_path: {
+        type: "string",
+        minLength: 1,
+        maxLength: SPRITE_SHEET_LIMITS.maxPathChars,
+        description: "Destination .png inside your output root. An existing file there is replaced.",
+      },
+      map_path: {
+        type: "string",
+        minLength: 1,
+        maxLength: SPRITE_SHEET_LIMITS.maxPathChars,
+        description: "Optional destination .json for the frame map. Defaults to output_path with a .json extension.",
+      },
+      cell_width: { type: "integer", minimum: 1, maximum: SPRITE_SHEET_LIMITS.maxCellSide, description: "Cell width in pixels." },
+      cell_height: { type: "integer", minimum: 1, maximum: SPRITE_SHEET_LIMITS.maxCellSide, description: "Cell height in pixels." },
+      columns: { type: "integer", minimum: 1, maximum: SPRITE_SHEET_LIMITS.maxInputs, description: "Cells per row." },
+      padding: {
+        type: "integer",
+        minimum: 0,
+        maximum: SPRITE_SHEET_LIMITS.maxPadding,
+        description: "Optional background pixels around and between cells. Default: 0.",
+      },
+      fit: {
+        type: "string",
+        enum: [...SPRITE_SHEET_FIT_MODES],
+        description: "contain (default) keeps the aspect ratio and centers the image; cover keeps it and crops to fill the cell; stretch fills the cell exactly.",
+      },
+      background: {
+        type: "string",
+        pattern: "^(transparent|#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?)$",
+        description: "Optional sheet background: transparent (default), #RRGGBB, or #RRGGBBAA.",
+      },
+    },
+    required: ["inputs", "output_path", "cell_width", "cell_height", "columns"],
     additionalProperties: false,
   },
 };

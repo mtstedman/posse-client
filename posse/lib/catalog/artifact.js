@@ -15,6 +15,41 @@ export const IMAGE_GENERATION_MAX_CALLS_PER_JOB = 12;
 // may each run this long.
 export const IMAGE_GENERATION_TIMEOUT_MS = 600_000;
 
+// One external image converter run (sharp, ImageMagick, ffmpeg) may take this
+// long before the harness kills it.
+export const IMAGE_CONVERTER_TIMEOUT_MS = 30_000;
+
+// compose_sprite_sheet: the artificer packs scoped images into one PNG atlas
+// plus a JSON frame map. Inputs are bounded before any decode: per-file bytes
+// and header dimensions, and the atlas size before its pixel buffer is
+// allocated. The call deadline stays inside the default MCP request watchdog.
+export const SPRITE_SHEET_LIMITS = Object.freeze({
+  maxInputs: 1024,
+  maxInputBytes: 20 * 1024 * 1024,
+  maxTotalInputBytes: 256 * 1024 * 1024,
+  maxInputSide: 8192,
+  maxInputPixels: 4096 * 4096,
+  maxCellSide: 512,
+  maxPadding: 64,
+  maxAtlasSide: 8192,
+  maxAtlasPixels: 4096 * 4096,
+  maxPathChars: 1_024,
+  converterConcurrency: 4,
+  callTimeoutMs: 150_000,
+});
+
+// How each input fills its cell: contain keeps the aspect ratio and centers it
+// over the background; cover keeps the aspect ratio and crops to fill; stretch
+// scales each axis independently.
+export const SPRITE_SHEET_FIT_MODES = Object.freeze(["contain", "cover", "stretch"]);
+
+// Inputs must carry one of these file signatures before any decoder or
+// converter sees them. No SVG or other scriptable formats.
+export const SPRITE_SHEET_INPUT_FORMATS = Object.freeze(["png", "jpeg", "webp", "gif"]);
+
+export const SPRITE_SHEET_MAP_VERSION = 1;
+export const SPRITE_SHEET_OBSERVATION_TYPE = "artifact.sprite_sheet";
+
 // Operator-provided text files under .posse/resources/inputs/wi-N become
 // work-item hash refs, so dev/planner/assessor jobs read them through
 // traverse_ref instead of a path their tools cannot reach.

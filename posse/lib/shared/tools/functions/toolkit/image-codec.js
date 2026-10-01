@@ -9,11 +9,12 @@
 // range routes through convertImageToPng to one of the system
 // converters.
 
+import { constants as bufferConstants } from "buffer";
 import fs from "fs";
 import zlib from "zlib";
-import { spawnSync } from "child_process";
+import { execFile, spawnSync } from "child_process";
 
-const IMAGE_CONVERTER_TIMEOUT_MS = 30_000;
+import { IMAGE_CONVERTER_TIMEOUT_MS } from "../../../../catalog/artifact.js";
 
 export const PNG_SIGNATURE = Buffer.from("89504e470d0a1a0a", "hex");
 
@@ -103,8 +104,20 @@ export function decodePngToRgba(buffer) {
       : colorType === 2 ? 3
         : 1;
   const stride = width * bytesPerPixel;
-  const inflated = zlib.inflateSync(Buffer.concat(idatChunks));
   const expected = (stride + 1) * height;
+  // Bound the inflate by the size the header implies so a compressed bomb
+  // cannot allocate past it before the length check below.
+  let inflated;
+  try {
+    inflated = zlib.inflateSync(Buffer.concat(idatChunks), {
+      maxOutputLength: Math.min(expected, bufferConstants.MAX_LENGTH),
+    });
+  } catch (err) {
+    if (err?.code === "ERR_BUFFER_TOO_LARGE") {
+      throw new Error("PNG pixel data length did not match image dimensions.");
+    }
+    throw err;
+  }
   if (inflated.length !== expected) {
     throw new Error("PNG pixel data length did not match image dimensions.");
   }
@@ -448,4 +461,271 @@ export function resizeRgbaNearest(srcWidth, srcHeight, srcData, dstWidth, dstHei
   }
 
   return dst;
+}
+
+/**
+ * Read an image's pixel dimensions from its header without decoding pixels,
+ * so callers can refuse oversized inputs before allocating a buffer. Returns
+ * null when the header is missing or unreadable.
+ * @param {Buffer} buffer
+ * @param {string} [format] detectImageFormat(buffer) when already known
+ * @returns {{ width: number, height: number } | null}
+ */
+export function readImageDimensions(buffer, format = detectImageFormat(buffer)) {
+  if (!Buffer.isBuffer(buffer)) return null;
+  let dims = null;
+  if (format === "png") {
+    if (buffer.length >= 24 && buffer.toString("ascii", 12, 16) === "IHDR") {
+      dims = { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+    }
+  } else if (format === "jpeg") {
+    dims = readJpegDimensions(buffer);
+  } else if (format === "gif") {
+    if (buffer.length >= 10) dims = { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) };
+  } else if (format === "webp") {
+    const chunk = buffer.length >= 16 ? buffer.toString("ascii", 12, 16) : "";
+    if (chunk === "VP8 " && buffer.length >= 30 && buffer[23] === 0x9d && buffer[24] === 0x01 && buffer[25] === 0x2a) {
+      dims = { width: buffer.readUInt16LE(26) & 0x3fff, height: buffer.readUInt16LE(28) & 0x3fff };
+    } else if (chunk === "VP8L" && buffer.length >= 25 && buffer[20] === 0x2f) {
+      const bits = buffer.readUInt32LE(21);
+      dims = { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 };
+    } else if (chunk === "VP8X" && buffer.length >= 30) {
+      dims = { width: buffer.readUIntLE(24, 3) + 1, height: buffer.readUIntLE(27, 3) + 1 };
+    }
+  }
+  if (!dims || !Number.isInteger(dims.width) || !Number.isInteger(dims.height) || dims.width <= 0 || dims.height <= 0) {
+    return null;
+  }
+  return { width: dims.width, height: dims.height };
+}
+
+// Per-output-pixel source taps along one axis. Shrinking averages every
+// source pixel under the output pixel's footprint, weighted by coverage (a
+// box filter); enlarging interpolates the two nearest source pixels.
+function resampleAxis(srcSize, start, length, dstSize) {
+  const shrinking = dstSize <= length;
+  const first = new Int32Array(dstSize);
+  const count = new Int32Array(dstSize);
+  const taps = [];
+  for (let o = 0; o < dstSize; o++) {
+    const weights = [];
+    let lo;
+    if (shrinking) {
+      const begin = Math.max(0, start + (o * length) / dstSize);
+      const end = Math.min(srcSize, start + ((o + 1) * length) / dstSize);
+      lo = Math.floor(begin);
+      for (let s = lo; s < end; s++) {
+        const overlap = Math.min(end, s + 1) - Math.max(begin, s);
+        weights.push(overlap > 0 ? overlap : 0);
+      }
+      if (weights.length === 0) {
+        lo = Math.min(srcSize - 1, Math.max(0, lo));
+        weights.push(1);
+      }
+    } else {
+      const center = start + ((o + 0.5) * length) / dstSize - 0.5;
+      const base = Math.floor(center);
+      const t = center - base;
+      const a = Math.min(srcSize - 1, Math.max(0, base));
+      const b = Math.min(srcSize - 1, Math.max(0, base + 1));
+      lo = a;
+      if (a === b) weights.push(1);
+      else weights.push(1 - t, t);
+    }
+    const sum = weights.reduce((total, w) => total + w, 0) || 1;
+    first[o] = lo;
+    count[o] = weights.length;
+    taps.push(Float64Array.from(weights, (w) => w / sum));
+  }
+  return { first, count, taps };
+}
+
+/**
+ * Resample a region of a straight-alpha RGBA image to dstWidth x dstHeight.
+ * Shrinking uses area averaging and enlarging uses bilinear interpolation.
+ * Colour is filtered premultiplied by alpha, so transparent neighbours never
+ * darken or tint an edge. Same input, same output: the arithmetic is fixed.
+ * @param {number} srcWidth
+ * @param {number} srcHeight
+ * @param {Buffer} srcData
+ * @param {number} dstWidth
+ * @param {number} dstHeight
+ * @param {{ x: number, y: number, width: number, height: number } | null} [region]
+ *   source rectangle in pixels (fractional allowed); defaults to the whole image
+ * @returns {Buffer}
+ */
+export function resampleRgba(srcWidth, srcHeight, srcData, dstWidth, dstHeight, region = null) {
+  const rx = region ? region.x : 0;
+  const ry = region ? region.y : 0;
+  const rw = region ? region.width : srcWidth;
+  const rh = region ? region.height : srcHeight;
+  const xs = resampleAxis(srcWidth, rx, rw, dstWidth);
+  const ys = resampleAxis(srcHeight, ry, rh, dstHeight);
+
+  let rowMin = srcHeight;
+  let rowMax = -1;
+  for (let o = 0; o < dstHeight; o++) {
+    rowMin = Math.min(rowMin, ys.first[o]);
+    rowMax = Math.max(rowMax, ys.first[o] + ys.count[o] - 1);
+  }
+  const rows = rowMax - rowMin + 1;
+
+  // Horizontal pass into premultiplied floats, only for the source rows the
+  // vertical pass reads.
+  const mid = new Float32Array(rows * dstWidth * 4);
+  for (let r = 0; r < rows; r++) {
+    const srcRow = (rowMin + r) * srcWidth;
+    const midRow = r * dstWidth * 4;
+    for (let o = 0; o < dstWidth; o++) {
+      const taps = xs.taps[o];
+      const first = xs.first[o];
+      let pr = 0;
+      let pg = 0;
+      let pb = 0;
+      let pa = 0;
+      for (let k = 0; k < taps.length; k++) {
+        const idx = (srcRow + first + k) * 4;
+        const w = taps[k] * srcData[idx + 3];
+        pr += w * srcData[idx];
+        pg += w * srcData[idx + 1];
+        pb += w * srcData[idx + 2];
+        pa += w;
+      }
+      const m = midRow + o * 4;
+      mid[m] = pr;
+      mid[m + 1] = pg;
+      mid[m + 2] = pb;
+      mid[m + 3] = pa;
+    }
+  }
+
+  const out = Buffer.alloc(dstWidth * dstHeight * 4);
+  for (let oy = 0; oy < dstHeight; oy++) {
+    const taps = ys.taps[oy];
+    const firstRow = ys.first[oy] - rowMin;
+    for (let ox = 0; ox < dstWidth; ox++) {
+      let pr = 0;
+      let pg = 0;
+      let pb = 0;
+      let pa = 0;
+      for (let k = 0; k < taps.length; k++) {
+        const m = ((firstRow + k) * dstWidth + ox) * 4;
+        const w = taps[k];
+        pr += w * mid[m];
+        pg += w * mid[m + 1];
+        pb += w * mid[m + 2];
+        pa += w * mid[m + 3];
+      }
+      const d = (oy * dstWidth + ox) * 4;
+      const alpha = Math.round(pa);
+      if (alpha <= 0) continue;
+      out[d] = Math.min(255, Math.max(0, Math.round(pr / pa)));
+      out[d + 1] = Math.min(255, Math.max(0, Math.round(pg / pa)));
+      out[d + 2] = Math.min(255, Math.max(0, Math.round(pb / pa)));
+      out[d + 3] = Math.min(255, alpha);
+    }
+  }
+  return out;
+}
+
+// Explicit decoders for each accepted input format. A converter is always told
+// the format, so it never sniffs the bytes into another coder (SVG, MVG, text,
+// or a URL/pipe pseudo-format).
+const IMAGEMAGICK_INPUT_CODERS = Object.freeze({ png: "png", jpeg: "jpeg", webp: "webp", gif: "gif" });
+const FFMPEG_INPUT_DEMUXERS = Object.freeze({ png: "png_pipe", jpeg: "jpeg_pipe", webp: "webp_pipe", gif: "gif" });
+
+/**
+ * Converters that accept an explicit input format, in preference order. sharp
+ * is not listed: it chooses a loader by sniffing and cannot be pinned to one.
+ * @returns {string[]}
+ */
+export function resolveExplicitImageConverters() {
+  const found = [];
+  if (commandExists("magick")) found.push("magick");
+  if (process.platform !== "win32" && commandExists("convert")) found.push("convert");
+  if (commandExists("ffmpeg")) found.push("ffmpeg");
+  return found;
+}
+
+function explicitConverterArgs(converter, format, srcPath, destPath) {
+  // Both run strict: a truncated or corrupt image fails instead of landing in
+  // the output half grey.
+  if (converter === "magick" || converter === "convert") {
+    // `coder:path[0]` pins the decoder and reads only the first frame.
+    return ["-regard-warnings", `${IMAGEMAGICK_INPUT_CODERS[format]}:${srcPath}[0]`, "-interlace", "none", `PNG32:${destPath}`];
+  }
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file", "-xerror",
+    "-err_detect", "explode", "-f", FFMPEG_INPUT_DEMUXERS[format], "-i", `file:${srcPath}`,
+    "-frames:v", "1", "-an", "-f", "image2", "-update", "1", "-c:v", "png", "-pix_fmt", "rgba",
+    "-y", `file:${destPath}`,
+  ];
+}
+
+function runConverter(command, args, { cwd, timeoutMs }) {
+  return new Promise((resolve) => {
+    execFile(command, args, {
+      cwd,
+      timeout: Math.max(1, timeoutMs),
+      killSignal: "SIGKILL",
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    }, (error, _stdout, stderr) => {
+      resolve({
+        ok: !error,
+        detail: error
+          ? `${error.killed ? "timed out" : `exit ${error.code ?? "?"}`}${stderr ? ` ${String(stderr).trim().slice(0, 200)}` : ""}`
+          : "",
+      });
+    });
+  });
+}
+
+/**
+ * Convert one image file of a known, signature-checked format to an 8-bit
+ * RGBA PNG without blocking the event loop. srcPath and destPath must be
+ * harness-chosen paths (never caller text): ImageMagick reads `[` and a
+ * `coder:` prefix as syntax.
+ * @param {string} srcPath
+ * @param {string} destPath
+ * @param {"png"|"jpeg"|"webp"|"gif"} format
+ * @param {{ converters: string[], cwd: string, timeoutMs?: number }} options
+ *   timeoutMs bounds the whole converter chain; each run also stops at
+ *   IMAGE_CONVERTER_TIMEOUT_MS.
+ * @returns {Promise<{ ok: boolean, converter?: string, error?: string }>}
+ */
+export async function convertImageFileToPngExplicit(srcPath, destPath, format, {
+  converters,
+  cwd,
+  timeoutMs = IMAGE_CONVERTER_TIMEOUT_MS,
+}) {
+  if (!IMAGEMAGICK_INPUT_CODERS[format]) return { ok: false, error: `unsupported input format ${format}` };
+  if (!Array.isArray(converters) || converters.length === 0) {
+    return { ok: false, error: "no image converter (ImageMagick or ffmpeg) is installed" };
+  }
+  const startedAt = Date.now();
+  const attempts = [];
+  for (const converter of converters) {
+    const remaining = timeoutMs - (Date.now() - startedAt);
+    if (remaining <= 0) {
+      attempts.push(`${converter}: not run, time budget exhausted`);
+      break;
+    }
+    try { fs.rmSync(destPath, { force: true }); } catch { /* best effort */ }
+    const result = await runConverter(converter, explicitConverterArgs(converter, format, srcPath, destPath), {
+      cwd,
+      timeoutMs: Math.min(remaining, IMAGE_CONVERTER_TIMEOUT_MS),
+    });
+    let produced = false;
+    try {
+      const head = Buffer.alloc(8);
+      const fd = fs.openSync(destPath, "r");
+      try { produced = fs.readSync(fd, head, 0, 8, 0) === 8 && head.equals(PNG_SIGNATURE); } finally { fs.closeSync(fd); }
+    } catch {
+      produced = false;
+    }
+    if (result.ok && produced) return { ok: true, converter };
+    attempts.push(`${converter}: ${result.ok ? "no PNG output" : result.detail}`);
+  }
+  return { ok: false, error: `could not decode the ${format.toUpperCase()} image (${attempts.join("; ")})` };
 }

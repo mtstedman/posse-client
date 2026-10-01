@@ -31,7 +31,7 @@ agent call. Prefetch support does not remove its callable definition.
 
 ### `artificer`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.clean_image`, `tools.custom_tools`, `tools.download_file`, `tools.edit_file`, `tools.extract_image_text`, `tools.generate_image`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`, `tools.write_file`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.clean_image`, `tools.compose_sprite_sheet`, `tools.custom_tools`, `tools.download_file`, `tools.edit_file`, `tools.extract_image_text`, `tools.generate_image`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`, `tools.write_file`.
 
 Atlas: `atlas.fetch_ref`, `atlas.traverse_ref`.
 
@@ -378,6 +378,34 @@ Use only when exact source is needed for a known symbol or anchored file region.
 | `maxTokens` | `integer` | Optional | min 1; max 200000 | Optional inline token cap for this selection. The effective maximum is configured per repository and reported in the runtime contract; larger values are clamped. |
 | `reason` | `string` | Required | max length 20000 | Why exact source is needed for this known symbol or anchored file region. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
+
+### `tools.compose_sprite_sheet`
+
+Remote roles: `artificer`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `compose_sprite_sheet` |
+| Tool reference token | `tools.compose_sprite_sheet` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `write` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Pack scoped PNG, JPEG, WebP, or GIF images (first frame) into one PNG sprite sheet plus a JSON frame map. Image i fills the cell at column i % columns, row floor(i / columns), with padding pixels around and between cells; downscaling averages pixels and keeps transparency. The map records each frame's index, source path, and x, y, w, h in the sheet. Up to 1024 images of at most 20 MB, 8192 px per side, and 16 megapixels; cells up to 512 px; a sheet up to 8192 px per side and 16 megapixels. Any unreadable input fails the whole call, nothing is written, and every bad input is listed. The result reports both paths, the sheet size, the frame count, and SHA-256 digests.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `background` | `string` | Optional |  | Optional sheet background: transparent (default), #RRGGBB, or #RRGGBBAA. |
+| `cell_height` | `integer` | Required | min 1; max 512 | Cell height in pixels. |
+| `cell_width` | `integer` | Required | min 1; max 512 | Cell width in pixels. |
+| `columns` | `integer` | Required | min 1; max 1024 | Cells per row. |
+| `fit` | `string` | Optional | values "contain", "cover", "stretch" | contain (default) keeps the aspect ratio and centers the image; cover keeps it and crops to fill the cell; stretch fills the cell exactly. |
+| `inputs` | `array<string>` | Required | min items 1; max items 1024 | Image paths in frame order, absolute or relative to the working directory. |
+| `map_path` | `string` | Optional | min length 1; max length 1024 | Optional destination .json for the frame map. Defaults to output_path with a .json extension. |
+| `output_path` | `string` | Required | min length 1; max length 1024 | Destination .png inside your output root. An existing file there is replaced. |
+| `padding` | `integer` | Optional | min 0; max 64 | Optional background pixels around and between cells. Default: 0. |
 
 ### `atlas.create_ref`
 

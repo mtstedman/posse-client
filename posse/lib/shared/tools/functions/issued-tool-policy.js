@@ -36,6 +36,7 @@ const WRITE_TOOL_NAMES = new Set([
   "make_dir",
   "prune_artifact_output",
   "clean_image",
+  "compose_sprite_sheet",
   "generate_image",
   "download_file",
 ]);

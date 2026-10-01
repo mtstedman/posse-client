@@ -58,6 +58,7 @@ import {
   TOOL_GET_BRIEF,
   TOOL_GENERATE_IMAGE,
   TOOL_DOWNLOAD_FILE,
+  TOOL_COMPOSE_SPRITE_SHEET,
   TOOL_PROJECT_DB_QUERY,
   TOOL_AGENT_HANDOFF,
   TOOL_AGENT_HANDOFF_DEV,
@@ -111,6 +112,7 @@ export {
   TOOL_GET_BRIEF,
   TOOL_GENERATE_IMAGE,
   TOOL_DOWNLOAD_FILE,
+  TOOL_COMPOSE_SPRITE_SHEET,
   TOOL_PROJECT_DB_QUERY,
   TOOL_AGENT_HANDOFF,
   TOOL_AGENT_HANDOFF_DEV,
@@ -463,6 +465,12 @@ export const TOOL_CATALOG = {
     summary: "Generate new image artifacts inside allowed output scope.",
     observation: { type: "tool.generate_image", label: "Generate image", format: "generate_image", pathKeys: ["filename"] },
   },
+  compose_sprite_sheet: {
+    schema: TOOL_COMPOSE_SPRITE_SHEET,
+    access: "write",
+    summary: "Pack scoped images into one PNG sprite sheet and a JSON frame map inside the artifact output scope.",
+    observation: { type: "tool.compose_sprite_sheet", label: "SpriteSheet", format: "generic", targetKeys: ["output_path"] },
+  },
   download_file: {
     schema: TOOL_DOWNLOAD_FILE,
     access: "write",
@@ -590,7 +598,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     }),
     artificer: Object.freeze({
       read: ["ack_operator_feedback"],
-      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "download_file", "bash"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "compose_sprite_sheet", "extract_image_text", "download_file", "bash"],
       imageGeneration: ["generate_image"],
     }),
     // Assessor carries project_db_query on the READ lane so it can verify the
@@ -626,10 +634,11 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
   deterministicMcp: Object.freeze({
     read: Object.freeze(["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file"]),
     write: Object.freeze(["request_scope", "write_file", "edit_file", "move_file", "make_dir", "prune_artifact_output"]),
-    // Read-only image inspection (dev/artificer/assessor). clean_image is a
-    // mutation and is gated to artificer separately — keep it out of this set.
+    // Read-only image inspection (dev/artificer/assessor). clean_image and
+    // compose_sprite_sheet are mutations gated to artificer separately — keep
+    // them out of this set.
     imageHelpers: Object.freeze(["read_image_metadata", "validate_artifact_output"]),
-    imageMutation: Object.freeze(["clean_image"]),
+    imageMutation: Object.freeze(["clean_image", "compose_sprite_sheet"]),
     imageGeneration: Object.freeze(["generate_image"]),
     ocr: Object.freeze(["extract_image_text"]),
     // The artificer's only external fetch lane. Remote issuance must also
@@ -952,7 +961,8 @@ export function getDeterministicMcpToolNames(role, {
     )));
   }
   if (roleUsesDeterministicImageHelpers(role)) tools.push(...DETERMINISTIC_IMAGE_HELPER_TOOLS);
-  // clean_image mutates an image within scope; keep it artificer-only.
+  // clean_image and compose_sprite_sheet write images within scope; keep them
+  // artificer-only.
   if (roleUsesDeterministicImageMcp(role)) tools.push(...DETERMINISTIC_IMAGE_MUTATION_TOOLS);
   if (roleUsesDeterministicImageMcp(role) && needsImageGeneration) tools.push(...DETERMINISTIC_IMAGE_TOOLS);
   if (role === "dev" || role === "artificer" || role === "assessor") tools.push(...DETERMINISTIC_OCR_TOOLS);
