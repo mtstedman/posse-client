@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { IMAGE_GENERATION_TIMEOUT_MS } from "../../../../catalog/artifact.js";
 import { getArtifactProtocol, getResolvedImageProtocol } from "../../../artifacts/functions/index.js";
 import { getDefaultImageModel, getDefaultImageProvider, normalizeGrokImageModelName } from "../model-catalog.js";
 import {
@@ -10,7 +11,7 @@ import {
 
 export { TOOL_GENERATE_IMAGE } from "../../../integrations/functions/deterministic-mcp/tool-descriptors.js";
 
-const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = 600_000;
+const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = IMAGE_GENERATION_TIMEOUT_MS;
 const MAX_DOWNLOADED_IMAGE_BYTES = 64 * 1024 * 1024;
 const MAX_IMAGE_DOWNLOAD_REDIRECTS = 3;
 const NO_IMAGE_PROVIDERS_AVAILABLE = "No image providers available";

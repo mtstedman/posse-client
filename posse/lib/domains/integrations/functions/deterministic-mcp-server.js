@@ -3,7 +3,8 @@ import process from "process";
 import fs from "fs";
 import path from "path";
 import { inspect } from "util";
-import { atlasNativeToolIsComplementary } from "../../../catalog/tools/source-navigation.js";
+import { atlasNativeToolIsComplementary, atlasReplacesNativeTool } from "../../../catalog/tools/source-navigation.js";
+import { blameWithoutLineText } from "../../git/functions/history.js";
 import { redactComplementaryReadResult } from "./deterministic-mcp/read-file-redaction.js";
 import { redactComplementarySearchRows } from "./deterministic-mcp/search-file-redaction.js";
 import {
@@ -52,7 +53,7 @@ import {
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_WEB_RESEARCH_HANDOFF,
 } from "../../../catalog/native-tools.js";
-import { TOOL_CUSTOM_TOOLS } from "../../../catalog/custom-tools.js";
+import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS, TOOL_CUSTOM_TOOLS } from "../../../catalog/custom-tools.js";
 import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { IMAGE_GENERATION_MAX_CALLS_PER_JOB } from "../../../catalog/artifact.js";
 import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../catalog/registered-tests.js";
@@ -1244,6 +1245,16 @@ function issuedAtlasActionsForModelText() {
     catalog = _remoteToolCatalogCache.catalog;
   }
   return catalog && Array.isArray(catalog.tools) ? new Set(remoteAtlasRouteTools(catalog)) : null;
+}
+
+// Issuance withdraws read_file from a role once ATLAS is issued; blame would
+// otherwise return the same indexed source line by line.
+async function execGitHistoryForRole(args = {}) {
+  const output = await execGitHistory(args, workspaceCwd, effectiveScopePredicates);
+  if (String(args?.op || "").trim() !== "blame") return output;
+  const issuedAtlasActions = issuedAtlasActionsForModelText();
+  if (!(issuedAtlasActions?.size > 0) || !atlasReplacesNativeTool("read_file", roleName)) return output;
+  return blameWithoutLineText(output);
 }
 
 // Names only the issued members of the indexed-source read redirect.
@@ -2821,7 +2832,7 @@ async function executeCustomToolsTool(args = {}) {
       code: "custom_tools_auth_required",
     });
   }
-  const result = await new AutomationOwnerClient({ token, timeoutMs: 10_000 }).request("tool", args);
+  const result = await new AutomationOwnerClient({ token, timeoutMs: CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS }).request("tool", args);
   return JSON.stringify(result);
 }
 
@@ -2843,7 +2854,7 @@ mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
 mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("search_files", (args) => execSearchFiles(args || {}, workspaceCwd, effectiveScopePredicates));
-mcpToolRegistry.attach("git_history", (args) => execGitHistory(args || {}, workspaceCwd, effectiveScopePredicates));
+mcpToolRegistry.attach("git_history", (args) => execGitHistoryForRole(args || {}));
 mcpToolRegistry.attach("inspect_file", (args) => execInspectFile(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("hash_file", (args) => execHashFile(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("agent_feedback", (args) => agentFeedback(args || {}));
@@ -3066,7 +3077,7 @@ function attachToolExecutorsForCurrentBoot() {
 mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("search_files", (args) => execSearchFiles(args || {}, workspaceCwd, effectiveScopePredicates));
-  mcpToolRegistry.attach("git_history", (args) => execGitHistory(args || {}, workspaceCwd, effectiveScopePredicates));
+  mcpToolRegistry.attach("git_history", (args) => execGitHistoryForRole(args || {}));
   mcpToolRegistry.attach("inspect_file", (args) => execInspectFile(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("hash_file", (args) => execHashFile(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("agent_feedback", (args) => agentFeedback(args || {}));

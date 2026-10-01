@@ -27,13 +27,16 @@ import {
   MCP_SESSION_RELEASED_NOTIFICATION,
   MCP_REQUEST_TIMEOUT_MS,
   MCP_CONCURRENT_ATLAS_ACTIONS,
-  MCP_COMPOSED_CHECK_TIMEOUT_MS,
+  MCP_TOOL_DEADLINE_MS,
   MCP_CONTROL_METHODS,
   MCP_OWNER_PROGRESS_HEADER,
   MCP_OWNER_HEARTBEAT_INTERVAL_MS,
   POSSE_MCP_GATEWAY_SERVER_NAME,
+  mcpToolDeadlineClass,
 } from "../../../catalog/mcp.js";
 import { renderAgentHandoffCallableName } from "../functions/mcp-surface.js";
+import { AutomationOwnerClient } from "../../../domains/automation/classes/AutomationOwnerClient.js";
+import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS } from "../../../catalog/custom-tools.js";
 import { RESPONSE_TRANSFORM_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { roleUsesBoundedRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
 import {
@@ -187,6 +190,7 @@ const MAX_CONSECUTIVE_REQUEST_TIMEOUTS = 2;
 // backoff error as a transient 5xx and retries.
 const GATEWAY_RESTART_BACKOFF_MS = 2000;
 const JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
+const MCP_FRAME_TOO_LARGE_CODE = "POSSE_MCP_FRAME_TOO_LARGE";
 const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
 const OWNER_MODEL_CONTROL_NOTICES = Symbol("ownerModelControlNotices");
 const SOURCE_EVIDENCE_REUSE_NOTICE_KIND = "source_evidence_reuse";
@@ -3444,11 +3448,6 @@ function isAtlasFetchRefTool(toolName, toolArgs) {
   return requested.suite === "atlas" && ["traverse_ref", "fetch_ref"].includes(requested.name);
 }
 
-function isCanonicalAtlasTraversalTool(toolName, toolArgs) {
-  const requested = requestedToolPolicyName(toolName, toolArgs);
-  return requested.suite === "atlas" && requested.name === "traverse_ref";
-}
-
 function isAtlasCreateHashTool(toolName, toolArgs) {
   const requested = requestedToolPolicyName(toolName, toolArgs);
   return requested.suite === "atlas" && requested.name === "create_ref";
@@ -4338,7 +4337,9 @@ function jsonlParseBuffer(buffer, onMessage, { onParseError = null, maxBufferByt
     const lineBytes = next.subarray(0, newlineIdx);
     next = next.subarray(newlineIdx + 1);
     if (lineBytes.length > maxBufferBytes) {
-      const err = new Error(`MCP session stdout JSONL frame exceeded ${maxBufferBytes} bytes`);
+      const err = Object.assign(new Error(`MCP session stdout JSONL frame exceeded ${maxBufferBytes} bytes`), {
+        code: MCP_FRAME_TOO_LARGE_CODE,
+      });
       if (typeof onParseError === "function") onParseError(err, "");
       continue;
     }
@@ -4353,7 +4354,10 @@ function jsonlParseBuffer(buffer, onMessage, { onParseError = null, maxBufferByt
     }
   }
   if (next.length > maxBufferBytes) {
-    const err = new Error(`MCP session stdout JSONL buffer exceeded ${maxBufferBytes} bytes without newline`);
+    const err = Object.assign(new Error(`MCP session stdout JSONL buffer exceeded ${maxBufferBytes} bytes without newline`), {
+      code: MCP_FRAME_TOO_LARGE_CODE,
+      partialFrame: true,
+    });
     if (typeof onParseError === "function") onParseError(err, "");
     return Buffer.alloc(0);
   }
@@ -4392,6 +4396,7 @@ class PersistentMcpSession {
     this._spawn = spawnImpl;
     this._proc = null;
     this._stdoutBuffer = Buffer.alloc(0);
+    this._discardingOversizeFrame = false;
     this._pending = new Map();
     this._activeRequestId = null;
     this._controlSession = null;
@@ -4634,6 +4639,7 @@ class PersistentMcpSession {
     this.lastExit = null;
     this._consecutiveTimeouts = 0;
     this._stdoutBuffer = Buffer.alloc(0);
+    this._discardingOversizeFrame = false;
     let finished = false;
     const finish = ({ code = null, signal = null, error = null } = {}) => {
       if (finished || this._proc !== proc) return;
@@ -4726,8 +4732,12 @@ class PersistentMcpSession {
     const [id, entry] = this._pending.entries().next().value;
     this._activeRequestId = id;
     const tool = stripPosseMcpGatewayPrefix(entry.outbound?.params?.name);
-    const timeoutMs = ["run_scoped_checks", "run_test_suite"].includes(tool)
-      ? MCP_COMPOSED_CHECK_TIMEOUT_MS : DEFAULT_REQUEST_TIMEOUT_MS;
+    // A tool's registered deadline may extend the default watchdog, never
+    // shorten it.
+    const timeoutMs = Math.max(
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      MCP_TOOL_DEADLINE_MS[mcpToolDeadlineClass(tool)] || 0,
+    );
     const onTimeout = () => {
       // Retain the active entry after rejecting its caller: a late response
       // releases the serial child and resets the watchdog. Queued requests
@@ -4805,7 +4815,15 @@ class PersistentMcpSession {
   }
 
   _handleStdout(chunk) {
-    this._stdoutBuffer = Buffer.concat([this._stdoutBuffer, Buffer.from(chunk)]);
+    let incoming = Buffer.from(chunk);
+    if (this._discardingOversizeFrame) {
+      // The rest of a frame already answered as too large.
+      const newlineIdx = incoming.indexOf(0x0a);
+      if (newlineIdx < 0) return;
+      incoming = incoming.subarray(newlineIdx + 1);
+      this._discardingOversizeFrame = false;
+    }
+    this._stdoutBuffer = Buffer.concat([this._stdoutBuffer, incoming]);
     this._stdoutBuffer = jsonlParseBuffer(
       this._stdoutBuffer,
       (message) => this._handleMessage(message),
@@ -4816,9 +4834,25 @@ class PersistentMcpSession {
           } catch {
             // diagnostics only
           }
+          if (err?.code !== MCP_FRAME_TOO_LARGE_CODE) return;
+          if (err.partialFrame) this._discardingOversizeFrame = true;
+          this._answerActiveRequestWithOversizeReply();
         },
       },
     );
+  }
+
+  // The serial child has one request in flight, so an oversized frame is its
+  // reply. Answer it now; waiting for the watchdog would strike the child and
+  // eventually kill it for a request it already finished.
+  _answerActiveRequestWithOversizeReply() {
+    const id = this._activeRequestId;
+    const entry = id ? this._pending.get(id) : null;
+    if (!entry) return;
+    const text = `The tool result exceeded the ${JSONL_STDOUT_BUFFER_MAX_BYTES} byte transport limit and was discarded. Request a narrower range or a smaller file.`;
+    this._handleMessage(entry.outbound?.method === "tools/call"
+      ? { jsonrpc: "2.0", id, result: mcpToolErrorPayload(text, { code: "result_too_large", message: text }) }
+      : { jsonrpc: "2.0", id, error: { code: -32603, message: text } });
   }
 
   _handleMessage(message) {
@@ -5899,6 +5933,24 @@ export class PersistentMcpOwner {
           }
           return;
         }
+        if (requested.suite === "tools" && requested.name === "custom_tools") {
+          // The shared hot gateway never holds agent tokens. The automation
+          // owner authorizes Custom Tools from this session's signed token.
+          let result;
+          try {
+            const payload = await new AutomationOwnerClient({
+              token: session.token,
+              timeoutMs: CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS,
+            }).request("tool", toolArgs);
+            result = { content: [{ type: "text", text: JSON.stringify(payload) }], isError: false };
+          } catch (error) {
+            result = { content: [{ type: "text", text: `Error executing custom_tools: ${String(error?.message || error).slice(0, 500)}` }], isError: true };
+          }
+          sendJson(res, 200, { ok: true, bootId: this.bootId, sessionId: id, message: {
+            jsonrpc: "2.0", id: message?.id ?? null, result,
+          } });
+          return;
+        }
         if (requested.suite === "tools" && requested.name === "web_research_handoff") {
           try {
             const receipt = submitWebResearchHandoff(session?.bootConfig?.agentCallId, toolArgs);
@@ -6686,14 +6738,27 @@ export class PersistentMcpOwner {
     if (researchBatch && isTerminalResearchExplorationAdmission(synthesisAdmission)) {
       researchBatch.terminal = true;
     }
+    // Recoveries (and the symbol.get batch items they fan out to) run inside
+    // the call that triggered them. They carry that call's queue slot so they
+    // execute in it instead of queueing behind it, which would wait on itself.
+    const slotArgs = { ...args, atlasQueueSlot: queueKey };
+    const executeWithRecovery = async () => {
+      const executed = await this._executeAtlasToolCallNow({
+        ...args,
+        binding,
+        synthesisAdmission,
+        enqueuedAt,
+      });
+      const recovered = await this._recoverSameFileAmbiguity(executed, slotArgs, assignedPhysicalCallStep);
+      const widened = await this._recoverEmptyIdentifierFilter(recovered, slotArgs, assignedPhysicalCallStep);
+      return this._resolveExactNameSearch(widened, slotArgs, assignedPhysicalCallStep);
+    };
+    if (args?.atlasQueueSlot === queueKey) return executeWithRecovery();
     const concurrentResearchRead = researchExploration
       && CONCURRENT_RESEARCH_ATLAS_ACTIONS.has(effectiveAction)
       && !this._atlasToolCallQueues.has(queueKey);
     if (concurrentResearchRead) {
-      const current = this._executeAtlasToolCallNow({ ...args, binding, synthesisAdmission, enqueuedAt })
-        .then(message => this._recoverSameFileAmbiguity(message, args, assignedPhysicalCallStep))
-        .then(message => this._recoverEmptyIdentifierFilter(message, args, assignedPhysicalCallStep))
-        .then(message => this._resolveExactNameSearch(message, args, assignedPhysicalCallStep));
+      const current = executeWithRecovery();
       this._trackResearchAtlasBatchRequest(queueKey, researchBatch, current, {
         concurrentRead: true,
       });
@@ -6705,15 +6770,7 @@ export class PersistentMcpOwner {
       .then(async () => {
         const activeReads = [...(this._activeResearchAtlasReads.get(queueKey) || [])];
         if (activeReads.length > 0) await Promise.allSettled(activeReads);
-        const executed = await this._executeAtlasToolCallNow({
-          ...args,
-          binding,
-          synthesisAdmission,
-          enqueuedAt,
-        });
-        const recovered = await this._recoverSameFileAmbiguity(executed, args, assignedPhysicalCallStep);
-        const widened = await this._recoverEmptyIdentifierFilter(recovered, args, assignedPhysicalCallStep);
-        return this._resolveExactNameSearch(widened, args, assignedPhysicalCallStep);
+        return executeWithRecovery();
       });
     this._trackResearchAtlasBatchRequest(queueKey, researchBatch, current);
     const tail = current.catch(() => {});
@@ -7122,8 +7179,9 @@ export class PersistentMcpOwner {
               ...hashContext,
               researchPhase: synthesisAdmission.researchPhase || null,
               enforcePolicy: roleUsesBoundedRefTraversal(session?.bootConfig?.role),
-              requireTraversal: roleUsesBoundedRefTraversal(session?.bootConfig?.role)
-                || isCanonicalAtlasTraversalTool(toolName, toolArgs),
+              // fetch_ref is an alias of traverse_ref: every role, on every
+              // path, follows only refs issued to it as traversals.
+              requireTraversal: true,
             });
         const deliveredRefs = createRef
           ? []

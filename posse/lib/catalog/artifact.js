@@ -11,6 +11,10 @@ const sqlList = (values) => values.map((v) => `'${v}'`).join(", ");
 // by it so a larger set is split across Jobs instead of failing at the cap.
 export const IMAGE_GENERATION_MAX_CALLS_PER_JOB = 12;
 
+// One image generation request, and separately the download of its result,
+// may each run this long.
+export const IMAGE_GENERATION_TIMEOUT_MS = 600_000;
+
 export const ARTIFACT_TYPES = Object.freeze([
   "prompt",
   "response",

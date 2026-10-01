@@ -1,4 +1,5 @@
 // @ts-check
+import { IMAGE_GENERATION_TIMEOUT_MS } from "./artifact.js";
 import { SUB_AGENT_LIMITS } from "./sub-agent.js";
 
 export const MCP_SESSION_RELEASED_NOTIFICATION = "posse/sessionReleased";
@@ -34,6 +35,7 @@ export const MCP_TOOL_DEADLINE_CLASSES = Object.freeze({
   LIVE_WAIT: "live_wait",
   CITATION_CHILD: "citation_child",
   AGENT_DISPATCH: "agent_dispatch",
+  IMAGE_GENERATION: "image_generation",
 });
 
 // A live scope request parks the tool call on a human answer. The queue's
@@ -46,6 +48,9 @@ export const MCP_TOOL_DEADLINE_MS = Object.freeze({
   [MCP_TOOL_DEADLINE_CLASSES.COMPOSED_CHECK]: MCP_COMPOSED_CHECK_TIMEOUT_MS,
   [MCP_TOOL_DEADLINE_CLASSES.LIVE_WAIT]: MCP_LIVE_SCOPE_WAIT_DEADLINE_MS,
   [MCP_TOOL_DEADLINE_CLASSES.CITATION_CHILD]: SUB_AGENT_LIMITS.maxTimeoutMs,
+  // The generation request and the download of its result are bounded
+  // separately.
+  [MCP_TOOL_DEADLINE_CLASSES.IMAGE_GENERATION]: 2 * IMAGE_GENERATION_TIMEOUT_MS,
 });
 
 export const MCP_TOOL_DEADLINE_CLASS_BY_TOOL = Object.freeze({
@@ -54,6 +59,7 @@ export const MCP_TOOL_DEADLINE_CLASS_BY_TOOL = Object.freeze({
   request_scope: MCP_TOOL_DEADLINE_CLASSES.LIVE_WAIT,
   sub_agent: MCP_TOOL_DEADLINE_CLASSES.CITATION_CHILD,
   dispatch_agent: MCP_TOOL_DEADLINE_CLASSES.AGENT_DISPATCH,
+  generate_image: MCP_TOOL_DEADLINE_CLASSES.IMAGE_GENERATION,
 });
 
 // Headroom for owner scheduling and result transfer on top of the owner's own

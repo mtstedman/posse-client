@@ -63,6 +63,46 @@ function normalizeHistoryRef(op, value) {
   return `${parts[0]}..${parts[1]}`;
 }
 
+const BLAME_ROW_RE = /^(\d+)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t/u;
+
+export const BLAME_LINE_TEXT_OMITTED_NOTE =
+  "Line text is omitted from blame for this role; read the source itself through ATLAS.";
+
+// Blame rows carry each line's current text, which is indexed source. Where
+// ATLAS owns source reads, keep the history (commit, author and date per line
+// range) and leave the text to ATLAS.
+export function blameWithoutLineText(output) {
+  if (typeof output !== "string" || !output || output.startsWith("Error:")) return output;
+  const lines = [];
+  let run = null;
+  let omitted = false;
+  const flush = () => {
+    if (!run) return;
+    const range = run.start === run.end ? `${run.start}` : `${run.start}-${run.end}`;
+    lines.push(`${range}\t${run.sha}\t${run.author}\t${run.date}`);
+    run = null;
+  };
+  for (const row of output.split("\n")) {
+    const match = BLAME_ROW_RE.exec(row);
+    if (!match) {
+      flush();
+      lines.push(row);
+      continue;
+    }
+    omitted = true;
+    const lineNumber = Number(match[1]);
+    if (run && run.sha === match[2] && run.end + 1 === lineNumber) {
+      run.end = lineNumber;
+      continue;
+    }
+    flush();
+    run = { start: lineNumber, end: lineNumber, sha: match[2], author: match[3], date: match[4] };
+  }
+  flush();
+  if (omitted) lines.push("", BLAME_LINE_TEXT_OMITTED_NOTE);
+  return lines.join("\n");
+}
+
 export function createGitHistoryExecutor(safePath, { nativeParity = {} } = {}) {
   if (typeof safePath !== "function") {
     throw new Error("createGitHistoryExecutor requires a safePath function");
