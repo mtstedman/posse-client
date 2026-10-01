@@ -28,6 +28,11 @@ const DEFAULT_BREAKER_WINDOW_MS = 60_000;
 const DEFAULT_BREAKER_COOLDOWN_MS = 300_000;
 const DEFAULT_RETIRE_GRACE_MS = 2_000;
 const DEFAULT_PROBE_TIMEOUT_MS = 250;
+
+// Message on the `_transportGone` failure that retire() gives in-flight
+// requests. Callers match it to retry on the replacement host.
+export const DAEMON_HOST_RETIRED_MESSAGE = "daemon host retired";
+
 // Process-local identity, unique even when a Daemon instance is replaced.
 let nextSessionId = 1;
 
@@ -391,7 +396,7 @@ export class Daemon {
     // restart backoff: a retire is deliberate, not a crash.
     this._nextSpawnIsRetireReplacement = true;
     this.#emitLifecycle("retire", { pid: transport.hostPid?.() ?? null });
-    this.#failPending("daemon host retired");
+    this.#failPending(DAEMON_HOST_RETIRED_MESSAGE);
     if (typeof transport.retire === "function") {
       try { transport.retire(opts.graceMs ?? DEFAULT_RETIRE_GRACE_MS); } catch { /* best effort */ }
     } else {

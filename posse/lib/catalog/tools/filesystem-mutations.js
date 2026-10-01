@@ -8,6 +8,15 @@ export const ATLAS_MUTATION_PATH_FIELDS = Object.freeze({
   copy_file: ["destination"],
 });
 
+// A successful call to one of these tools marks the job as actively writing,
+// which lets the runtime watchdog extend its cap (up to a hard ceiling).
+export const RUNTIME_WRITE_ACTIVITY_TOOL_NAMES = Object.freeze([
+  "write_file",
+  "edit_file",
+  "move_file",
+  "copy_file",
+]);
+
 export const TOOL_MOVE_FILE = {
   type: "function",
   name: "move_file",

@@ -7,7 +7,7 @@ import {
   reviewVisibleJobs,
 } from "../../ui/functions/display/helpers/job-status.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
-import { getPipelineHealth, getSetting, listJobStatusRows, listWorkItems } from "../../queue/functions/index.js";
+import { getPipelineHealth, getPublicationTelemetry, getSetting, listJobStatusRows, listWorkItems } from "../../queue/functions/index.js";
 import { C as defaultColors } from "../../../shared/format/functions/colors.js";
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
 import { providerRoleForJobType } from "../../providers/functions/roles.js";
@@ -134,6 +134,7 @@ export function collectStatusData({ targetBranch, args = [] } = {}) {
   return {
     generated_at: new Date().toISOString(),
     target_branch: targetBranch,
+    delivery: getPublicationTelemetry(),
     filter: {
       active: options.active,
       json: options.json,
@@ -164,6 +165,7 @@ function renderJsonStatus(data) {
   return JSON.stringify({
     generated_at: data.generated_at,
     target_branch: data.target_branch,
+    delivery: data.delivery,
     filter: data.filter,
     work_items: {
       total_all: data.work_items.total_all,
@@ -230,6 +232,12 @@ function renderHumanStatus(data, { C }) {
   write(`  ${C.dim}${"---".repeat(17)}${C.reset}`);
   if (data.filter.active) {
     write(`  ${C.dim}Filter: active work items${C.reset}`);
+  }
+
+  const publication = data.delivery || {};
+  write(`  ${C.bold}Delivery:${C.reset} local=${C.green}tracked${C.reset}  remote=${publication.publication_state || "unknown"}  deployed=${publication.deployment_state || "unverified"}`);
+  if (publication.remote || publication.branch) {
+    write(`  ${C.dim}${publication.remote || "remote"}/${publication.branch || data.target_branch}${publication.ahead_count != null ? ` · ${publication.ahead_count} ahead` : ""}${C.reset}`);
   }
 
   write(`\n  ${C.bold}Work Items:${C.reset}`);
@@ -447,6 +455,7 @@ export function createStatusCommands({ targetBranch, C = defaultColors } = {}) {
         const calls = row.total_calls || 0;
         const succeeded = row.succeeded_calls || 0;
         const failed = row.failed_calls || 0;
+        const interrupted = row.interrupted_calls || 0;
         const successRate = calls > 0 ? Math.round((100 * succeeded) / calls) : 0;
         const rateColor = successRate >= 80 ? C.green : (successRate >= 50 ? C.yellow : C.red);
         console.log(
@@ -454,6 +463,7 @@ export function createStatusCommands({ targetBranch, C = defaultColors } = {}) {
           `calls=${String(calls).padStart(4)} ` +
           `ok=${String(succeeded).padStart(4)} ` +
           `fail=${String(failed).padStart(4)} ` +
+          `int=${String(interrupted).padStart(4)} ` +
           `rate=${rateColor}${String(successRate).padStart(3)}%${C.reset} ` +
           `${C.dim}last_success=${lastSuccess} last_failure=${lastFailure}${C.reset}`
         );

@@ -3,6 +3,7 @@
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { orderWorkItemsByMergeDependencies } from "../../queue/functions/cross-wi-deps.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
+import { describePartialWorkJobs, partialWorkToMerge } from "../../queue/functions/partial-work.js";
 import {
   computeJobProgressStats,
   jobIsBackgroundAtlasWarm,
@@ -23,6 +24,35 @@ import {
 export class ReviewSession {
   constructor(deps = {}) {
     Object.assign(this, deps);
+    this.runWorkItemIds = new Set();
+  }
+
+  setRunWorkItemIds(workItemIds = []) {
+    this.runWorkItemIds = new Set((Array.isArray(workItemIds) ? workItemIds : [])
+      .map(Number)
+      .filter((id) => Number.isSafeInteger(id) && id > 0));
+  }
+
+  _consolidateRunReportData(reportData = []) {
+    if (this.runWorkItemIds.size === 0) return reportData;
+    const priorById = new Map((Array.isArray(reportData) ? reportData : [])
+      .filter((item) => item?.wi?.id != null)
+      .map((item) => [Number(item.wi.id), item]));
+    const workItems = [...this.runWorkItemIds]
+      .map((id) => this.getWorkItem?.(id))
+      .filter(Boolean);
+    const fresh = this.buildReviewReportData(workItems);
+    return fresh.map((item) => {
+      const prior = priorById.get(Number(item.wi.id));
+      if (!prior) return item;
+      return {
+        ...item,
+        ...prior,
+        wi: item.wi,
+        jobs: item.jobs,
+        agentCalls: item.agentCalls,
+      };
+    });
   }
 
   targetBranch() {
@@ -223,6 +253,14 @@ export class ReviewSession {
         console.log(`     ${C.red}${completionBlocker}${C.reset}`);
         continue;
       }
+      const partialWork = this._approvalPartialWork({ wi, jobs });
+      if (partialWork.length > 0) {
+        const answer = await ask(`     ${C.yellow}${describePartialWorkJobs(partialWork)}.${C.reset} Merge partial work? Type "partial" to confirm: `);
+        if (String(answer || "").trim().toLowerCase() !== "partial") {
+          console.log(`     ${C.dim}Approval canceled; WI left for review${C.reset}\n`);
+          continue;
+        }
+      }
 
       if (!wi.branch_name) {
         const completionOk = updateWorkItemStatus(wi.id, "complete", {
@@ -251,6 +289,13 @@ export class ReviewSession {
         const lockedWi = getWorkItem(wi.id);
         if (!lockedWi) {
           return { ok: false, reason: "no_such_wi", message: "Work item no longer exists" };
+        }
+        if (lockedWi.status !== "complete") {
+          return {
+            ok: false,
+            reason: "work_item_not_complete",
+            message: `Work item is ${lockedWi.status || "not complete"}; recover it before merging`,
+          };
         }
         if (lockedWi.merge_state === "merged") {
           return {
@@ -566,6 +611,7 @@ export class ReviewSession {
   // ── Review assessor suggestions (always, even if WI review was skipped) ──
   await this.reviewSuggestions();
   await (this.ensureCleanTargetBranchAsync || ensureCleanTargetBranch)("run wrap-up", { logWhenClean: true });
+  this.saveReport([]);
   return iterateResult;
 
   }
@@ -624,7 +670,8 @@ export class ReviewSession {
       stashTargetBranchChangesAsyncFn,
     } = this;
 
-  return saveReportFromModule(reportData, { projectDir: PROJECT_DIR });
+  if (typeof saveReportFromModule !== "function") return false;
+  return saveReportFromModule(this._consolidateRunReportData(reportData), { projectDir: PROJECT_DIR });
 
   }
 
@@ -683,7 +730,7 @@ export class ReviewSession {
   }
   const predicate = typeof isReviewableWorkItem === "function" ? isReviewableWorkItem : () => true;
   const workItems = typeof listWorkItems === "function"
-    ? listWorkItems(["complete", "failed"]).filter(predicate)
+    ? listWorkItems(["complete"]).filter(predicate)
     : [];
   return orderWorkItemsByMergeDependencies(workItems);
 
@@ -942,7 +989,7 @@ export class ReviewSession {
     const item = reportData.find(d => d.wi.id === wiId);
     if (!item) return false;
 
-    if (action === "approve") {
+    if (action === "approve" || action === "approve_partial_work") {
       const freshWi = refreshApprovalItem(item, "approve");
       if (!freshWi) return false;
       const mergeBlocker = this._approvalMergeBlocker(item);
@@ -954,6 +1001,12 @@ export class ReviewSession {
       const completionBlocker = this._approvalCompletionBlocker(wiId);
       if (completionBlocker) {
         item._mergeResult = `${C.red}\u2717 ${completionBlocker}${C.reset}`;
+        display.requestRender({ force: true });
+        return false;
+      }
+      const partialWork = action === "approve" ? this._approvalPartialWork(item) : [];
+      if (partialWork.length > 0) {
+        item._mergeResult = `${C.yellow}! ${describePartialWorkJobs(partialWork)}; press [a] and confirm to merge partial work${C.reset}`;
         display.requestRender({ force: true });
         return false;
       }
@@ -984,6 +1037,13 @@ export class ReviewSession {
           const lockedWi = getWorkItem(wiId);
           if (!lockedWi) {
             return { ok: false, reason: "no_such_wi", message: "Work item no longer exists" };
+          }
+          if (lockedWi.status !== "complete") {
+            return {
+              ok: false,
+              reason: "work_item_not_complete",
+              message: `Work item is ${lockedWi.status || "not complete"}; recover it before merging`,
+            };
           }
           if (lockedWi.merge_state === "merged") {
             return {
@@ -1401,6 +1461,18 @@ export class ReviewSession {
     }
   }
 
+  // Reads live jobs (and refreshes the review item) so a job that failed or
+  // was canceled after the review loaded still needs the confirmation.
+  _approvalPartialWork(item) {
+    const wiId = item?.wi?.id;
+    if (wiId != null && typeof this.listJobsByWorkItem === "function") {
+      try {
+        item.jobs = this.listJobsByWorkItem(wiId);
+      } catch { /* keep the loaded snapshot */ }
+    }
+    return partialWorkToMerge(item?.wi, item?.jobs || []);
+  }
+
   _finalizeApprovedMerge(wiId) {
     if (typeof this.finalizeApprovedWorkItemMerge === "function") {
       return this.finalizeApprovedWorkItemMerge(wiId);
@@ -1446,6 +1518,9 @@ export class ReviewSession {
 
   _approvalMergeBlocker(item) {
     const wi = item?.wi;
+    if (wi?.status !== "complete") {
+      return `Approval blocked: WI#${wi?.id ?? "?"} is ${wi?.status || "not complete"}; recover the work before merging`;
+    }
     if (wi?.branch_name && typeof this.sourceWorktreeDirtyState === "function") {
       let liveDirty = null;
       try {
@@ -1547,7 +1622,7 @@ export class ReviewSession {
   _listMergeFailedAfterAutoMerge() {
     const { listWorkItems } = this;
     try {
-      return listWorkItems(["complete", "failed"]).filter((wi) => wi.merge_state === "merge_failed" && wi.branch_name);
+      return listWorkItems(["complete"]).filter((wi) => wi.merge_state === "merge_failed" && wi.branch_name);
     } catch {
       return [];
     }
@@ -2189,6 +2264,7 @@ export class ReviewSession {
       wrapUp.clear();
       display.stop();
       await notifyDirtyState();
+      this.saveReport([]);
       return iterateResult;
     }
     if (autoMergedNow > 0) {
@@ -2208,6 +2284,7 @@ export class ReviewSession {
       display,
       beforePush: notifyDirtyState,
     });
+    this.saveReport([]);
     return;
   }
 
@@ -2292,6 +2369,9 @@ export class ReviewSession {
   // ── Review assessor suggestions ──
   await this.reviewSuggestions();
   await (this.ensureCleanTargetBranchAsync || ensureCleanTargetBranch)("run wrap-up", { logWhenClean: true });
+  // Refresh the same report after publication prompts so its delivery receipt
+  // reflects the final state rather than the pre-push review closeout.
+  this.saveReport(reportData);
   return iterateResult;
 
   }

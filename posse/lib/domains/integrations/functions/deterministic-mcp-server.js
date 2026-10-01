@@ -54,9 +54,12 @@ import {
   TOOL_WEB_RESEARCH_HANDOFF,
   TOOL_DOWNLOAD_FILE,
   TOOL_COMPOSE_SPRITE_SHEET,
+  TOOL_VIEW_IMAGE,
 } from "../../../catalog/native-tools.js";
 import { downloadFilesWithinScope } from "../../web-research/functions/download-files.js";
 import { composeSpriteSheetWithinScope } from "../../../shared/tools/functions/toolkit/sprite-sheet.js";
+import { viewImageWithinScope } from "../../../shared/tools/functions/toolkit/view-image.js";
+import { asMcpContentResult } from "../../../shared/tools/functions/mcp-content-result.js";
 import { resolveWebToolsEnabled } from "../../providers/functions/shared/tool-policy-settings.js";
 import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS, TOOL_CUSTOM_TOOLS } from "../../../catalog/custom-tools.js";
 import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
@@ -174,6 +177,7 @@ import {
 import {
   DETERMINISTIC_IMAGE_HELPER_TOOLS,
   DETERMINISTIC_IMAGE_TOOLS,
+  DETERMINISTIC_IMAGE_VIEW_TOOLS,
   DETERMINISTIC_OCR_TOOLS,
   DETERMINISTIC_WRITE_TOOLS,
   SURFACED_ATLAS_TOOL_DEFS,
@@ -900,6 +904,15 @@ const RESEARCHER_TYPED_DISPATCHER_QUALIFIED_ZERO_CALL_NATIVE_TOOLS = new Set([
   "hash_file",
   "inspect_file",
 ]);
+// An investigating research child answers one delegated question, often about
+// when or why code changed, and has no shell or parent to ask. It keeps the
+// Remote-issued git_history that the parent researcher's diet drops.
+const RESEARCH_CHILD_RETAINED_NATIVE_TOOLS = new Set(["git_history"]);
+
+function researcherDietDropsNativeTool(toolName) {
+  if (!RESEARCHER_TYPED_DISPATCHER_QUALIFIED_ZERO_CALL_NATIVE_TOOLS.has(toolName)) return false;
+  return !(bootConfig?.researchInvestigation === true && RESEARCH_CHILD_RETAINED_NATIVE_TOOLS.has(toolName));
+}
 
 function _normalizeAtlasActionForAllowlist(name) {
   const value = String(name || "").trim();
@@ -1483,6 +1496,15 @@ async function composeSpriteSheetForCurrentScope(args = {}) {
   });
 }
 
+// The assessor looks at an in-scope image's pixels. Read-only and async: a
+// converter run for a large non-PNG image does not block other calls.
+async function viewImageForCurrentScope(args = {}) {
+  return await viewImageWithinScope(args, {
+    cwd: workspaceCwd,
+    scopePredicates: effectiveScopePredicates,
+  });
+}
+
 // DEV authors source (including test source) through scoped deterministic file
 // tools. Command execution belongs to the assessor, so DEV must not receive a
 // generic shell escape hatch that can bypass the test/check role boundary.
@@ -1523,6 +1545,7 @@ const WRITE_TOOL_NAMES = new Set(DETERMINISTIC_WRITE_TOOLS);
 const IMAGE_HELPER_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_HELPER_TOOLS);
 const IMAGE_GENERATION_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_TOOLS);
 const OCR_TOOL_NAMES = new Set(DETERMINISTIC_OCR_TOOLS);
+const IMAGE_VIEW_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_VIEW_TOOLS);
 const TEST_TOOL_NAMES = new Set([
   "run_scoped_checks",
   "create_test_suite",
@@ -1578,6 +1601,7 @@ const ALL_NATIVE_TOOL_NAMES = Object.freeze([
   "clean_image",
   "compose_sprite_sheet",
   "extract_image_text",
+  "view_image",
   "generate_image",
   "download_file",
   // Opt-in; runtimeToolAvailable() keeps it filtered out unless this repo has
@@ -1618,6 +1642,10 @@ function runtimeToolAvailable(toolName) {
   }
   if (IMAGE_HELPER_TOOL_NAMES.has(toolName)) return allowImageHelpers;
   if (OCR_TOOL_NAMES.has(toolName)) return allowImageHelpers;
+  // Assessor-only even when a token or role list would carry it elsewhere.
+  if (IMAGE_VIEW_TOOL_NAMES.has(toolName)) {
+    return allowImageHelpers && ((ownerHotGateway && !mcpMessageSessionScoped) || roleName === "assessor");
+  }
   if (IMAGE_GENERATION_TOOL_NAMES.has(toolName)) return allowImageGeneration;
   if (toolName === "bash") return allowBash;
   if (toolName === "project_db_query") return projectDbAccessEnabled;
@@ -1779,7 +1807,7 @@ function recordAtlasLiveObservation(entry = {}) {
   } catch { /* best effort */ }
 }
 if (allowImageHelpers) {
-  for (const schema of [TOOL_READ_IMAGE_METADATA, TOOL_VALIDATE_ARTIFACT_OUTPUT, TOOL_CLEAN_IMAGE, TOOL_EXTRACT_IMAGE_TEXT]) {
+  for (const schema of [TOOL_READ_IMAGE_METADATA, TOOL_VALIDATE_ARTIFACT_OUTPUT, TOOL_CLEAN_IMAGE, TOOL_EXTRACT_IMAGE_TEXT, TOOL_VIEW_IMAGE]) {
     addToolSchema(schema);
   }
 }
@@ -2937,6 +2965,11 @@ if (allowImageHelpers) {
   mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
+  // view_image is assessor-only; owner-hot attaches every executor and the
+  // remote token gates each call.
+  if (ownerHotGateway || roleName === "assessor") {
+    mcpToolRegistry.attach("view_image", (args) => viewImageForCurrentScope(args || {}));
+  }
 }
 // clean_image, compose_sprite_sheet, and download_file write artifacts and are
 // artificer-only. Owner-hot attaches every executor (the remote token gates per
@@ -3108,7 +3141,7 @@ function rebuildNativeToolSchemas() {
     }
   }
   if (allowImageHelpers) {
-    for (const schema of [TOOL_READ_IMAGE_METADATA, TOOL_VALIDATE_ARTIFACT_OUTPUT, TOOL_CLEAN_IMAGE, TOOL_EXTRACT_IMAGE_TEXT]) {
+    for (const schema of [TOOL_READ_IMAGE_METADATA, TOOL_VALIDATE_ARTIFACT_OUTPUT, TOOL_CLEAN_IMAGE, TOOL_EXTRACT_IMAGE_TEXT, TOOL_VIEW_IMAGE]) {
       addToolSchema(schema);
     }
   }
@@ -3163,6 +3196,9 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
     mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
     mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
     mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
+    if (ownerHotGateway || roleName === "assessor") {
+      mcpToolRegistry.attach("view_image", (args) => viewImageForCurrentScope(args || {}));
+    }
   }
   // clean_image, compose_sprite_sheet, and download_file are artificer-only
   // mutations; owner-hot attaches all executors (remote token gates per call),
@@ -3653,7 +3689,12 @@ async function completeNativeToolCall({
   result,
   deferred = false,
 }) {
-  const text = typeof result === "string" ? result : inspect(result, { depth: 4, breakLength: 120 });
+  // A content result (view_image) carries extra MCP blocks after its text; the
+  // text alone drives classification, telemetry, and notices.
+  const contentResult = asMcpContentResult(result);
+  const text = contentResult
+    ? contentResult.text
+    : (typeof result === "string" ? result : inspect(result, { depth: 4, breakLength: 120 }));
   const controlNotices = [];
   let feedbackResult;
   try {
@@ -3747,7 +3788,10 @@ async function completeNativeToolCall({
     throw new Error("synthetic deferred scope completion failure");
   }
   sendMessage(jsonRpcSuccess(id, {
-    content: [{ type: "text", text: responseText }],
+    content: [
+      { type: "text", text: responseText },
+      ...(ok && contentResult ? contentResult.content.map((block) => ({ ...block })) : []),
+    ],
     ...(feedbackResult.delivery || controlNotices.length > 0 ? {
       _meta: {
         ...(feedbackResult.delivery ? { posseOperatorFeedback: feedbackResult.delivery } : {}),
@@ -3860,7 +3904,7 @@ async function handleRequest(msg) {
       // surfaces. Non-Atlas sessions retain their ordinary native tool set.
       .filter((schema) => (
         !researcherReadSurface
-        || !RESEARCHER_TYPED_DISPATCHER_QUALIFIED_ZERO_CALL_NATIVE_TOOLS.has(schema.name)
+        || !researcherDietDropsNativeTool(schema.name)
       ));
     const nativeTools = nativeToolSchemas
       .map(buildGatewayNativeToolDescriptor)

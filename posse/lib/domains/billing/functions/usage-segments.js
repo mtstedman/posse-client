@@ -110,6 +110,38 @@ export function recordUsageSegment(segment, { db = getDb() } = {}) {
     row.outputTokens, row.requestContextInputTokens, row.durationMs,
     row.usageSource, row.precision,
   );
+
+  // A provider request can finish long before the enclosing agent call. Keep
+  // the running call's aggregate counters synchronized with its durable
+  // segments so live dashboards and status queries do not report 0/0 until
+  // the entire multi-request call exits. Terminal completion remains
+  // authoritative and overwrites these provisional aggregates.
+  db.prepare(`
+    UPDATE agent_calls
+    SET (
+      input_tokens,
+      cached_input_tokens,
+      cache_creation_input_tokens,
+      output_tokens,
+      provider_request_duration_ms,
+      usage_segment_count
+    ) = (
+      SELECT
+        COALESCE(SUM(input_tokens), 0),
+        COALESCE(SUM(cached_input_tokens), 0),
+        COALESCE(SUM(cache_creation_input_tokens), 0),
+        COALESCE(SUM(output_tokens), 0),
+        CASE WHEN COUNT(duration_ms) = 0 THEN NULL
+          ELSE SUM(COALESCE(duration_ms, 0)) END,
+        COUNT(*)
+      FROM provider_usage_segments
+      WHERE agent_call_id = ?
+    )
+    WHERE id = ? AND status = 'running'
+  `).run(
+    row.agentCallId,
+    row.agentCallId,
+  );
   return db.prepare(`SELECT * FROM provider_usage_segments WHERE agent_call_id = ? AND request_ordinal = ?`)
     .get(row.agentCallId, row.requestOrdinal);
 }
@@ -330,8 +362,12 @@ export function resolveCanonicalCallAccounting(call = {}, {
     // derived pricing quantities (exact price, billable tokens, and the
     // long-context tier split) stay unknown. With no aggregate to prefer the
     // segment sums remain the only known counters and are kept as they are.
+    // While a call is running its aggregate columns are only a live projection
+    // of these same durable segments. They are not an independent provider
+    // aggregate and therefore cannot override an explicitly incomplete stream.
     const aggregateOverridesIncompleteSegments = segments.precision === "incomplete"
-      && aggregateUsageAvailable;
+      && aggregateUsageAvailable
+      && String(call.status || "").trim().toLowerCase() !== "running";
     // The long-context split is only knowable for the counters it was derived
     // from. When the aggregate replaces partial segment sums the split is
     // unknown; otherwise the segment-derived split describes exactly the

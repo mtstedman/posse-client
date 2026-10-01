@@ -1187,7 +1187,73 @@ export function releaseWorkItemLocksForStatus(workItemId, status) {
 
 export function releaseWorkItemLocksForMergeState(workItemId, mergeState) {
   if (mergeState !== "merged") return 0;
-  return releaseWorkItemFileLocks(workItemId, "work_item_merged");
+  const released = releaseWorkItemFileLocks(workItemId, "work_item_merged");
+  restoreExistingOrderClaimLocks(workItemId);
+  return released;
+}
+
+/**
+ * When a work item merges, give back the file locks that were released to it
+ * in "existing order" (see the scheduler's cross-WI handoff): each releasing
+ * work item still has pending edits to those paths and merges later. Without
+ * the lock, another work item could take the path from the merged target and
+ * edit it without those edits, which then conflict at merge. The restored
+ * lock is marked hold-until-merge so it is never handed off by copy.
+ */
+function restoreExistingOrderClaimLocks(mergedWorkItemId) {
+  const db = getDb();
+  const mergedId = Number(mergedWorkItemId);
+  if (!Number.isInteger(mergedId) || mergedId <= 0) return 0;
+  const claims = new Map();
+  for (const row of db.prepare(`SELECT id, payload_json FROM jobs WHERE work_item_id = ?`).all(mergedId)) {
+    const releases = parseJobPayload(row)?._cross_wi_existing_order_releases;
+    for (const entry of Array.isArray(releases) ? releases : []) {
+      const claimantId = Number(entry?.source_work_item_id);
+      const lockPath = normalizeLockPath(entry?.path);
+      const lockKind = entry?.lock_kind === "root" ? "root" : "file";
+      if (!Number.isInteger(claimantId) || claimantId <= 0 || claimantId === mergedId || !lockPath) continue;
+      claims.set(`${claimantId}\0${lockKind}\0${lockPath}`, { claimantId, lockPath, lockKind, jobId: row.id });
+    }
+  }
+  if (claims.size === 0) return 0;
+  const readWorkItem = db.prepare(`SELECT id, status, branch_name, merge_state FROM work_items WHERE id = ?`);
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO work_item_file_locks (work_item_id, path, lock_kind, source_job_id, acquired_at, metadata_json)
+    VALUES (?, ?, ?, NULL, ?, ?)
+  `);
+  const ts = now();
+  const restored = [];
+  for (const claim of claims.values()) {
+    const claimant = readWorkItem.get(claim.claimantId);
+    if (!claimant || claimant.merge_state === "merged") continue;
+    if (WI_LOCK_RELEASE_STATUSES.has(claimant.status)) continue;
+    if (claimant.status === "complete" && !completeWorkItemHoldsFileLocks(claimant)) continue;
+    const metadata = JSON.stringify({
+      source: "existing_order_claim",
+      hold_until_merge: true,
+      restored_from_work_item_id: mergedId,
+      released_via_job_id: claim.jobId,
+    });
+    if (insert.run(claim.claimantId, claim.lockPath, claim.lockKind, ts, metadata).changes > 0) restored.push(claim);
+  }
+  if (restored.length === 0) return 0;
+  for (const claim of restored) {
+    logEvent({
+      work_item_id: claim.claimantId,
+      event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_CLAIM_RESTORED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Restored WI#${claim.claimantId}'s lock on ${claim.lockPath} after WI#${mergedId} merged; it stays until WI#${claim.claimantId} merges`,
+      event_json: JSON.stringify({
+        path: claim.lockPath,
+        lock_kind: claim.lockKind,
+        restored_from_work_item_id: mergedId,
+        released_via_job_id: claim.jobId,
+      }),
+    });
+  }
+  notifyQueueStateChanged({ reason: "work_item_locks_restored:existing_order_claim" });
+  reconcileFileLaneWaits();
+  return restored.length;
 }
 
 export function cleanupStaleFileLocks() {

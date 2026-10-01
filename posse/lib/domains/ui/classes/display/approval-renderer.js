@@ -54,6 +54,7 @@ import {
   roleBrandColor,
 } from "../../functions/display/helpers/brand.js";
 import { getReviewDirtyState } from "../../functions/display/helpers/review-dirty-state.js";
+import { describePartialWorkJobs, partialWorkToMerge } from "../../../queue/functions/partial-work.js";
 import { resolveCanonicalCallAccounting } from "../../../billing/functions/usage-segments.js";
 
 export { jobLabel, jobReportStatus, workItemDisplayStatus };
@@ -311,6 +312,9 @@ export class DisplayApprovalRenderer {
 
     if (this._approvalRequeueConfirm) {
       navLines.push(` ${C.red}${C.bold}Re-queue WI#${current.wi?.id ?? "?"}?${C.reset} ${C.yellow}This restarts its write jobs and cleans its review branch/worktree.${C.reset}  ${C.dim}[Enter/y] Re-queue  [Esc/n] Cancel${C.reset}`);
+    } else if (this._approvalPartialConfirm) {
+      const partialWork = partialWorkToMerge(current.wi, current.jobs);
+      navLines.push(` ${C.red}${C.bold}Merge partial work for WI#${current.wi?.id ?? "?"}?${C.reset} ${C.yellow}${describePartialWorkJobs(partialWork)}; approving merges only what landed.${C.reset}  ${C.dim}[Enter/y] Merge partial work  [Esc/n] Cancel${C.reset}`);
     } else if (this._approvalExitConfirm) {
       const undecided = this._approvalData.filter((d) => !d._decision && !d._isInfo).length;
       navLines.push(` ${C.yellow}${C.bold}Leave review?${C.reset} ${C.yellow}${undecided} undecided item${undecided === 1 ? "" : "s"} will stay pending.${C.reset}  ${C.dim}[Enter/y] Leave  [Esc/n] Keep reviewing${C.reset}`);
@@ -329,7 +333,7 @@ export class DisplayApprovalRenderer {
         navLines.push(` ${C.yellow}${C.bold}Resolve dirty files before approval or re-queue:${C.reset} ${resolutionActions.join("  ")}  ${sharedActions}`);
       }
     }
-    if (!this._approvalRequeueConfirm && !this._approvalExitConfirm) {
+    if (!this._approvalRequeueConfirm && !this._approvalPartialConfirm && !this._approvalExitConfirm) {
       navLines.push(...approvalTabLegendLines(fullW).map((line) => `${C.cyan}${line}${C.reset}`));
     }
 
@@ -869,6 +873,7 @@ export class DisplayApprovalRenderer {
     const succeededCalls = (data.agentCalls || []).filter(c => c.status === "succeeded").length;
     const failedCalls = (data.agentCalls || []).filter(c => c.status === "failed").length;
     const timeoutCalls = (data.agentCalls || []).filter(c => c.status === "timeout").length;
+    const interruptedCalls = (data.agentCalls || []).filter(c => c.status === "interrupted").length;
     const totalToolCalls = Number(
       data.totalToolCalls
       ?? data.totals?.toolCalls
@@ -891,6 +896,7 @@ export class DisplayApprovalRenderer {
       `${callCount} ${C.dim}(${C.reset}${C.green}${succeededCalls} ok${C.reset}` +
       (failedCalls > 0 ? `${C.dim}, ${C.reset}${C.red}${failedCalls} fail${C.reset}` : "") +
       (timeoutCalls > 0 ? `${C.dim}, ${C.reset}${C.yellow}${timeoutCalls} timeout${C.reset}` : "") +
+      (interruptedCalls > 0 ? `${C.dim}, ${C.reset}${C.yellow}${interruptedCalls} interrupted${C.reset}` : "") +
       `${C.dim})${C.reset}`;
     lines.push(`${kv("calls", _callsValue)}`);
     lines.push(`${kv("tools", String(totalToolCalls))}${dot}${C.dim}cost${C.reset} ${C.bold}${costDisplay}${C.reset}`);
@@ -909,7 +915,7 @@ export class DisplayApprovalRenderer {
     for (const call of (data.agentCalls || [])) {
       const key = call.model_name || tierModelName(call.model_tier, { providerName: call.provider }) || "unknown";
       if (!modelMap.has(key)) {
-        modelMap.set(key, { calls: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, billableTokens: 0, billableAvailable: true, duration: 0, costUsd: 0, succeeded: 0, failed: 0 });
+        modelMap.set(key, { calls: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, billableTokens: 0, billableAvailable: true, duration: 0, costUsd: 0, succeeded: 0, failed: 0, interrupted: 0 });
       }
       const m = modelMap.get(key);
       const metrics = callTokenMetrics(call);
@@ -922,6 +928,7 @@ export class DisplayApprovalRenderer {
       m.duration += (call.duration_ms || 0);
       m.costUsd += resolvedCallCostUsd(call);
       if (call.status === "succeeded") m.succeeded++;
+      else if (call.status === "interrupted") m.interrupted++;
       else m.failed++;
     }
 
@@ -931,7 +938,8 @@ export class DisplayApprovalRenderer {
       lines.push(` ${C.dim}${"─".repeat(Math.min(hdr.length + 2, inner))}${C.reset}`);
 
       for (const [model, m] of modelMap) {
-        const rate = m.calls > 0 ? `${Math.round(100 * m.succeeded / m.calls)}%` : "—";
+        const ratedCalls = m.calls - m.interrupted;
+        const rate = ratedCalls > 0 ? `${Math.round(100 * m.succeeded / ratedCalls)}%` : "—";
         const rateColor = m.failed === 0 ? C.green : C.yellow;
         lines.push(
           `  ${C.bold}${model.padEnd(18)}${C.reset} ` +

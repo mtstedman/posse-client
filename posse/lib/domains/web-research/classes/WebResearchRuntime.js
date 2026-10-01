@@ -5,7 +5,7 @@ import {
 } from "../../../catalog/planner-dispatch.js";
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 import { subAgentRuntime } from "../../sub-agent/classes/SubAgentRuntime.js";
-import { RESEARCH_CHILD_PROFILE, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
+import { RESEARCH_CHILD_PROFILE, SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
 // @ts-check
 
 import crypto from "node:crypto";
@@ -698,11 +698,25 @@ export async function executeDispatchAgent(args, options = {}) {
       if (!RESEARCH_AGENT_TYPES.includes(request.agent_type)) {
         throw runtimeError("RESEARCH_AGENT_TYPE_INVALID", "agent_type must be code or web", { stage: "validation" });
       }
+      const id = boundedString(request.id, `requests[${index}].id`, 40);
+      // Name the request and its length so the planner shortens the right
+      // one; a code request's limit is the sub-agent intent limit, not a web
+      // research one (live 2026-10-01: "requests[1].question exceeds 2000
+      // characters" as WEB_RESEARCH_TOO_LARGE for a code question).
+      const questionChars = typeof request.question === "string" ? request.question.trim().length : 0;
+      if (questionChars > SUB_AGENT_LIMITS.maxIntentChars) {
+        throw runtimeError(
+          request.agent_type === "web" ? "WEB_RESEARCH_TOO_LARGE" : "SUB_AGENT_TOO_LARGE",
+          `requests[${index}].question (request "${id}", ${request.agent_type} research) is ${questionChars} characters; `
+            + `the limit is ${SUB_AGENT_LIMITS.maxIntentChars}. Nothing in this batch was dispatched.`,
+          { stage: "validation" },
+        );
+      }
       return {
-        id: boundedString(request.id, `requests[${index}].id`, 40),
+        id,
         profile: RESEARCH_CHILD_PROFILE,
         agent_type: request.agent_type,
-        intent: boundedString(request.question, `requests[${index}].question`, 2000),
+        intent: boundedString(request.question, `requests[${index}].question`, SUB_AGENT_LIMITS.maxIntentChars),
         ...(request.anchors == null ? {} : { anchors: request.anchors }),
         ...(request.budget ? { budget: request.budget } : {}),
       };

@@ -506,7 +506,7 @@ export function agentCallsCreateSql(tableName = "agent_calls") {
           finished_at TEXT,
           duration_ms INTEGER,
           exit_code INTEGER,
-          status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','succeeded','failed','timeout')),
+          status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','succeeded','failed','timeout','interrupted')),
           error_text TEXT,
           provider TEXT DEFAULT 'claude',
           prior_session_handle TEXT,
@@ -1038,6 +1038,28 @@ function repairAgentCallsChildKindsSchema(db) {
   if (!needsAgentCallsChildKindsRepair(db)) return false;
   withForeignKeysDisabled(db, () => db.transaction(() => {
     const tmpName = "_agent_calls_child_kinds_repair";
+    db.exec(`DROP TABLE IF EXISTS ${quoteIdent(tmpName)}`);
+    db.exec(agentCallsCreateSql(tmpName));
+    copyAgentCallsForExtendedThinkingRepair(db, "agent_calls", tmpName);
+    db.exec(`DROP TABLE ${quoteIdent("agent_calls")}`);
+    db.exec(`ALTER TABLE ${quoteIdent(tmpName)} RENAME TO ${quoteIdent("agent_calls")}`);
+    createAgentCallsIndexes(db);
+  })());
+  return true;
+}
+
+function needsAgentCallsInterruptedStatusRepair(db) {
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_calls'`
+  ).get();
+  if (!row?.sql) return false;
+  return !/status\s+TEXT[\s\S]*?CHECK\s*\([\s\S]*?'interrupted'/iu.test(row.sql);
+}
+
+function repairAgentCallsInterruptedStatusSchema(db) {
+  if (!needsAgentCallsInterruptedStatusRepair(db)) return false;
+  withForeignKeysDisabled(db, () => db.transaction(() => {
+    const tmpName = "_agent_calls_interrupted_status_repair";
     db.exec(`DROP TABLE IF EXISTS ${quoteIdent(tmpName)}`);
     db.exec(agentCallsCreateSql(tmpName));
     copyAgentCallsForExtendedThinkingRepair(db, "agent_calls", tmpName);
@@ -2936,6 +2958,12 @@ export function getDb() {
     name: "shared_trunk_abandoned_phase",
     needs: needsSharedTrunkAbandonedPhaseSchema,
     migrate: repairSharedTrunkAbandonedPhaseSchema,
+  });
+  runHostMigration(_db, {
+    version: 22,
+    name: "agent_calls_interrupted_status",
+    needs: needsAgentCallsInterruptedStatusRepair,
+    migrate: repairAgentCallsInterruptedStatusSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);

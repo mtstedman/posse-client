@@ -97,17 +97,48 @@ function prependPathDir(env, dir) {
   return env;
 }
 
+/** Put one managed Python runtime on `env` (mutated and returned). */
+export function applyManagedPythonRuntimeEnv(env, pythonRuntime) {
+  if (!env || !pythonRuntime?.runtimeDir || !pythonRuntime?.binDir) return env;
+  env.POSSE_PYTHON_RUNTIME = pythonRuntime.runtimeDir;
+  env.POSSE_PROJECT_PYTHON = pythonRuntime.python;
+  env.VIRTUAL_ENV = pythonRuntime.runtimeDir;
+  return prependPathDir(env, pythonRuntime.binDir);
+}
+
+export function envPathIncludesDir(env, dir) {
+  if (!dir) return false;
+  const normalized = path.resolve(dir);
+  return String(env?.[pathKey(env)] || "")
+    .split(path.delimiter)
+    .filter(Boolean)
+    .some((entry) => path.resolve(entry) === normalized);
+}
+
 export function buildRuntimeEnv(projectDir = null, cwd = null, baseEnv = process.env) {
   const env = { ...(baseEnv || {}) };
   const projectRoot = normalizeProjectDir(projectDir, cwd);
   const pythonRuntime = resolveManagedPythonRuntimeForProject({ projectDir: projectRoot });
-  if (pythonRuntime?.ready) {
-    env.POSSE_PYTHON_RUNTIME = pythonRuntime.runtimeDir;
-    env.POSSE_PROJECT_PYTHON = pythonRuntime.python;
-    env.VIRTUAL_ENV = pythonRuntime.runtimeDir;
-    prependPathDir(env, pythonRuntime.binDir);
-  }
+  if (pythonRuntime?.ready) applyManagedPythonRuntimeEnv(env, pythonRuntime);
   return env;
+}
+
+/**
+ * Re-apply the runtime env to a live env (this process by default). Startup
+ * builds PATH before the boot dependency step can create or rebuild the
+ * managed venv, and children that inherit process.env (the frozen test
+ * runner) only see that venv after this runs. Pass the primary project dir:
+ * the venv is keyed on that path, so a worktree path names another runtime.
+ */
+export function refreshProcessRuntimeEnv(projectDir, env = process.env) {
+  const next = buildRuntimeEnv(projectDir, projectDir, env);
+  for (const key of ["POSSE_PYTHON_RUNTIME", "POSSE_PROJECT_PYTHON", "VIRTUAL_ENV", pathKey(next)]) {
+    if (next[key] !== undefined && env[key] !== next[key]) env[key] = next[key];
+  }
+  return {
+    python: next.POSSE_PROJECT_PYTHON || null,
+    runtimeDir: next.POSSE_PYTHON_RUNTIME || null,
+  };
 }
 
 export function setRuntimePathOverrides(overrides = null) {

@@ -13,6 +13,7 @@ import { ensureBootDependencyGuard } from "../functions/boot-dependency-guard.js
 import { ensureBootDependenciesInWorker, formatBootDependencySync } from "../../system/functions/dependency-sync.js";
 import { repairMissingProviderDependencies, getProvidersNeedingDependencyRepair } from "../../providers/functions/provider.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
+import { refreshProcessRuntimeEnv } from "../../runtime/functions/paths.js";
 import { verifyFrozenResearchFixture, assertFrozenResearchJob } from "../../runtime/functions/frozen-research-fixture.js";
 import { LOCK_HOLDING_JOB_STATUSES, PARKED_JOB_STATUSES } from "../../../catalog/job.js";
 import { TERMINAL_WORK_ITEM_STATUSES, WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
@@ -172,6 +173,7 @@ export class RunSession {
       formatPosseUpdateAvailableWarning: formatPosseUpdateAvailableWarningForRun = formatPosseUpdateAvailableWarning,
       ensureBootDependenciesInWorker: runBootDependencySync = ensureBootDependenciesInWorker,
       formatBootDependencySync: formatBootDependencySyncForRun = formatBootDependencySync,
+      refreshRuntimeEnv: refreshRuntimeEnvForRun = refreshProcessRuntimeEnv,
       repairMissingProviderDependencies: repairMissingProviderDependenciesForRun = repairMissingProviderDependencies,
       getProvidersNeedingDependencyRepair: getProvidersNeedingDependencyRepairForRun = getProvidersNeedingDependencyRepair,
       NO_TUI,
@@ -251,6 +253,10 @@ export class RunSession {
       wrapUp,
       offerPush,
       refreshPushOfferGate,
+      beginRunCohort,
+      extendRunCohort,
+      completeRunCohort,
+      setRunWorkItemIds,
       exitProcess = process.exit,
     } = this;
 
@@ -473,7 +479,7 @@ export class RunSession {
       await refreshPushOfferGate?.(autoMergedNow, { createdBy: "run_wrapup" });
     } catch { /* the deploy offer is best-effort; never block wrap-up */ }
     // No active jobs — but if there are reviewable work items, go straight to review
-    const reviewable = listWorkItems(["complete", "failed"]).filter(isReviewableWorkItem);
+    const reviewable = listWorkItems(["complete"]).filter(isReviewableWorkItem);
     if (reviewable.length > 0) {
       console.log(`\n  ${C.bold}No runnable jobs — ${reviewable.length} work item(s) ready for review.${C.reset}\n`);
       await cmdReview();
@@ -509,6 +515,11 @@ export class RunSession {
   const resumed   = jobs.filter(j => j.status === "leased" || j.status === "running");
   const stallResume = jobs.filter(j => !!parseJobPayload(j)._stall_resume);
   const wiIds = new Set(jobs.map((j) => j.work_item_id));
+  const runCohort = typeof beginRunCohort === "function"
+    ? beginRunCohort([...wiIds], { resetIfDisjoint: isScopedRun })
+    : { started_at: new Date().toISOString(), work_item_ids: [...wiIds] };
+  const runCohortIds = new Set(runCohort?.work_item_ids || [...wiIds]);
+  setRunWorkItemIds?.([...runCohortIds]);
   const wiWithBranch = [...wiIds].filter(id => { const wi = getWorkItem(id); return wi && wi.branch_name; });
 
   const isResume = resumed.length > 0 || stallResume.length > 0 || wiWithBranch.length > 0;
@@ -870,6 +881,14 @@ export class RunSession {
           section: "workspace", status: "running", detail: "running posse doctor repair; waiting for a healthy environment", showDetail: true, force: true,
         }),
       });
+      // This step can create or rebuild the managed Python venv after startup
+      // built PATH. Re-apply the runtime env from the primary project dir (the
+      // venv is keyed on it) so frozen test runs inheriting process.env see it.
+      try {
+        refreshRuntimeEnvForRun?.(PROJECT_DIR);
+      } catch (err) {
+        log?.warn?.("run", "Runtime env refresh after dependency sync failed", { error: firstLine(err?.message || err) });
+      }
       updateBootStep("dependencies", { section: "workspace", status: "ok", detail: formatBootDependencySyncForRun(result), force: true });
     } catch (err) {
       updateBootStep("dependencies", { section: "workspace", status: "failed", detail: firstLine(err?.message || String(err)), showDetail: true, force: true });
@@ -2645,7 +2664,19 @@ export class RunSession {
   stopBootMonitor({ final: true, preserve: useTui });
   if (useTui) {
     try { recordRunDiagnostic("display.starting", { concurrency: CONCURRENCY }); } catch { /* observational */ }
-    display = new Display({ concurrency: CONCURRENCY, rightMode: "monitor", projectDir: PROJECT_DIR });
+    display = new Display({
+      concurrency: CONCURRENCY,
+      rightMode: "monitor",
+      projectDir: PROJECT_DIR,
+      runStartedAtIso: runCohort?.started_at || null,
+      runWorkItemIds: [...runCohortIds],
+      extendRunCohortFromSnapshots: !isScopedRun,
+      onRunCohortChange: (nextIds) => {
+        for (const id of nextIds || []) runCohortIds.add(Number(id));
+        setRunWorkItemIds?.([...runCohortIds]);
+        extendRunCohort?.([...runCohortIds]);
+      },
+    });
     this._activeDisplay = display;
     // Replay the most recent queue snapshot the scheduler has emitted so
     // the display opens with a fully populated view instead of a blank
@@ -2796,7 +2827,15 @@ export class RunSession {
       }
       // Includes injected work handled after the boot snapshot, while keeping
       // unrelated historical work out of the natural-completion verdict.
-      if (job.work_item_id != null) wiIds.add(job.work_item_id);
+      if (job.work_item_id != null) {
+        const id = Number(job.work_item_id);
+        wiIds.add(id);
+        if (!runCohortIds.has(id)) {
+          runCohortIds.add(id);
+          setRunWorkItemIds?.([...runCohortIds]);
+          extendRunCohort?.([...runCohortIds]);
+        }
+      }
       return worker.execute(job);
     },
     schedulerCallbacks.callbacks(),
@@ -2951,7 +2990,7 @@ export class RunSession {
   // Aggregate work-item state accounts for successful fix-child recovery while
   // still returning a truthful shell status for failed/canceled work.
   const completion = summarizeRunCompletion(
-    [...wiIds].map((id) => getWorkItem(id)).filter(Boolean),
+    [...runCohortIds].map((id) => getWorkItem(id)).filter(Boolean),
   );
   if (!completion.ok) {
     const unsuccessful = completion.failures.length > 0
@@ -2968,6 +3007,7 @@ export class RunSession {
   }
   // Set the exit code first so the shutdown record logs the real one.
   process.exitCode = completion.exitCode;
+  if (completion.incomplete.length === 0) completeRunCohort?.();
   closeRuntimeStateForExit();
   exitProcess?.(completion.exitCode);
 

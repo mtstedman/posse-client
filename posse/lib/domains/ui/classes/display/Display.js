@@ -158,6 +158,9 @@ export class Display {
     runStartedAtIso = null,
     rightMode = "log",
     projectDir = null,
+    runWorkItemIds = null,
+    onRunCohortChange = null,
+    extendRunCohortFromSnapshots = true,
     providerUsageRefresh = _refreshProviderUsageSummaryCacheIfChanged,
   } = {}) {
     this.concurrency = concurrency;
@@ -250,6 +253,16 @@ export class Display {
       ? providerUsageRefresh
       : _refreshProviderUsageSummaryCacheIfChanged;
     this._runStartedAtIso = runStartedAtIso || new Date().toISOString();
+    this._runCohortEnabled = Array.isArray(runWorkItemIds);
+    this._runWorkItemIds = new Set(
+      (Array.isArray(runWorkItemIds) ? runWorkItemIds : [])
+        .map(Number)
+        .filter((id) => Number.isSafeInteger(id) && id > 0),
+    );
+    this._onRunCohortChange = typeof onRunCohortChange === "function"
+      ? onRunCohortChange
+      : null;
+    this._extendRunCohortFromSnapshots = extendRunCohortFromSnapshots !== false;
     this._blockedByLock = 0;
     this._blockedByLockDetails = [];
     this._runPhaseMessage = null;
@@ -277,6 +290,7 @@ export class Display {
     this._approvalMemoryPicker = null; // {itemId, memories, cursor, textEntry} while reviewing surfaced memories
     this._approvalActionBusy = false;
     this._approvalRequeueConfirm = false;
+    this._approvalPartialConfirm = false;
     this._approvalExitConfirm = false;
     this._approvalFlash = null;
 
@@ -1293,6 +1307,7 @@ export class Display {
     this._approvalMemoryPicker = null;
     this._approvalActionBusy = false;
     this._approvalRequeueConfirm = false;
+    this._approvalPartialConfirm = false;
     this._approvalExitConfirm = false;
     this._approvalFlash = null;
     if (mode === "normal" && !this._aborted && !this._inputMode && this._questionQueue.length > 0) {
@@ -1378,6 +1393,7 @@ export class Display {
       this._approvalMemoryPicker = null;
       this._approvalActionBusy = false;
       this._approvalRequeueConfirm = false;
+      this._approvalPartialConfirm = false;
       this._approvalExitConfirm = false;
       this._approvalFlash = null;
       this._approvalDone = resolve;
@@ -1416,6 +1432,20 @@ export class Display {
    */
   acceptQueueSnapshot(snapshot) {
     if (!snapshot || typeof snapshot !== "object") return false;
+    if (this._runCohortEnabled && this._extendRunCohortFromSnapshots) {
+      const terminal = new Set(TERMINAL_WORK_ITEM_STATUSES);
+      let cohortChanged = false;
+      for (const item of Array.isArray(snapshot.workItems) ? snapshot.workItems : []) {
+        const id = Number(item?.id);
+        if (!Number.isSafeInteger(id) || id <= 0 || terminal.has(item?.status)) continue;
+        if (this._runWorkItemIds.has(id)) continue;
+        this._runWorkItemIds.add(id);
+        cohortChanged = true;
+      }
+      if (cohortChanged) {
+        try { this._onRunCohortChange?.([...this._runWorkItemIds]); } catch { /* telemetry only */ }
+      }
+    }
     const generation = Number(snapshot.generation ?? 0);
     if (
       this._queueDataCache.generation != null

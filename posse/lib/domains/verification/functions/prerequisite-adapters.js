@@ -8,6 +8,8 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
 import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
+import { applyManagedPythonRuntimeEnv, envPathIncludesDir } from "../../runtime/functions/paths.js";
+import { resolveManagedPythonRuntimeForProject } from "../../runtime/functions/python-runtime.js";
 import {
   DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY,
   VERIFICATION_DEPENDENCY_LOCK_INVALID,
@@ -92,6 +94,40 @@ function pythonExecutable(projectDir) {
     : path.join(".venv", "bin", "python");
   const command = path.join(projectDir, relative);
   return exists(command) ? command : null;
+}
+
+// The managed venv Posse provisions for the primary checkout (boot dependency
+// sync / doctor). Its directory is keyed on the primary's path and manifest
+// hash, so resolving it from a worktree path names a runtime nobody built.
+function managedPythonRuntime(projectDir, posseRoot = null) {
+  const primary = primaryCheckoutFor(projectDir) || path.resolve(projectDir);
+  try {
+    const runtime = resolveManagedPythonRuntimeForProject({
+      projectDir: primary,
+      ...(posseRoot ? { posseRoot } : {}),
+    });
+    return runtime ? { ...runtime, primary } : null;
+  } catch {
+    return null;
+  }
+}
+
+function managedPythonRuntimeActive(projectDir, { env = process.env, posseRoot = null } = {}) {
+  const runtime = managedPythonRuntime(projectDir, posseRoot);
+  return Boolean(runtime && exists(runtime.python) && envPathIncludesDir(env, runtime.binDir));
+}
+
+/**
+ * Put the primary checkout's ready managed venv on the verifier's PATH. The
+ * frozen test runner inherits process.env, so a venv created after startup
+ * built PATH is invisible to it (spawn pytest ENOENT) until this runs.
+ */
+export function activateManagedPythonRuntimeFromPrimary(root, { env = process.env, posseRoot = null } = {}) {
+  const runtime = managedPythonRuntime(root, posseRoot);
+  if (!runtime) return { ok: false, reason: "managed_python_runtime_missing" };
+  if (!runtime.ready) return { ok: false, reason: "managed_python_runtime_not_ready", runtime_dir: runtime.runtimeDir };
+  applyManagedPythonRuntimeEnv(env, runtime);
+  return { ok: true, primary: runtime.primary, runtime_dir: runtime.runtimeDir, python: runtime.python };
 }
 
 function selectedEcosystems({ projectDir, command, receipt }) {
@@ -229,7 +265,64 @@ export function linkNodeDependenciesFromPrimaryCheckout(root) {
   return { ok: true, primary, linked };
 }
 
-function commandSpec(ecosystem, projectDir, networkPolicy) {
+// Composer's generated autoloader and bin proxies resolve every path from
+// their own __DIR__, and PHP resolves symlinks there. Linked to the primary,
+// they would autoload the project's own classes from the primary checkout and
+// test main instead of this worktree. Copy those small generated files so
+// their __DIR__ stays in the worktree; link only the installed packages
+// (including composer/* packages that share the generated files' directory).
+const COMPOSER_GENERATED_VENDOR_FILES = new Set(["autoload.php"]);
+const COMPOSER_GENERATED_VENDOR_DIRS = new Set(["composer", "bin"]);
+
+function linkComposerVendorEntries(source, target, { depth = 0 } = {}) {
+  fs.mkdirSync(target, { recursive: true });
+  const kind = process.platform === "win32" ? "junction" : "dir";
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(target, entry.name);
+    try { fs.lstatSync(to); continue; } catch { /* absent */ }
+    const isDir = entry.isDirectory() || (entry.isSymbolicLink() && directoryExists(from));
+    if (depth === 0 && isDir && COMPOSER_GENERATED_VENDOR_DIRS.has(entry.name)) {
+      linkComposerVendorEntries(from, to, { depth: 1 });
+    } else if (isDir) {
+      fs.symlinkSync(from, to, kind);
+    } else if (depth === 1 || COMPOSER_GENERATED_VENDOR_FILES.has(entry.name)) {
+      // verbatimSymlinks keeps legacy relative bin links inside this vendor/.
+      fs.cpSync(from, to, { verbatimSymlinks: true });
+    } else {
+      fs.symlinkSync(from, to, "file");
+    }
+  }
+}
+
+/**
+ * A work-item worktree has no vendor/ (it is ignored and never checked out),
+ * so `composer test` fails with `vendor/bin/phpunit: not found`. The primary
+ * checkout holds the install for this composer.lock; reuse it when the locks
+ * match, as node_modules is reused. The repository-state guard still fails
+ * closed if the repository does not ignore vendor/.
+ */
+export function linkComposerVendorFromPrimaryCheckout(root) {
+  const worktreeLock = path.join(root, "composer.lock");
+  if (!exists(worktreeLock)) return { ok: false, reason: "composer_lockfile_missing" };
+  const primary = primaryCheckoutFor(root);
+  if (!primary) return { ok: false, reason: "no_primary_checkout" };
+  const primaryLock = path.join(primary, "composer.lock");
+  if (!exists(primaryLock) || hashFile(primaryLock) !== hashFile(worktreeLock)) {
+    return { ok: false, reason: "primary_lockfile_mismatch", primary };
+  }
+  const source = path.join(primary, "vendor");
+  if (!exists(path.join(source, "autoload.php"))) return { ok: false, reason: "primary_vendor_missing", primary };
+  const target = path.join(root, "vendor");
+  let present = false;
+  try { fs.lstatSync(target); present = true; } catch { present = false; }
+  // Never merge into a partial install the worktree already has.
+  if (present) return { ok: false, reason: "worktree_vendor_present", primary };
+  linkComposerVendorEntries(source, target);
+  return { ok: true, primary, linked: ["vendor"] };
+}
+
+function commandSpec(ecosystem, projectDir, networkPolicy, { posseRoot = null } = {}) {
   const offline = networkPolicy === "cache_only";
   if (ecosystem === "node") {
     const detected = nodeDetection(projectDir);
@@ -282,14 +375,27 @@ function commandSpec(ecosystem, projectDir, networkPolicy) {
   if (ecosystem === "python") {
     const requirements = pythonRequirements(projectDir);
     if (!requirements?.safe) return { ok: false, reason: requirements?.reason || "hash_pinned_requirements_missing" };
+    const args = ["-m", "pip", "install", "--require-hashes", "--only-binary=:all:", ...(offline ? ["--no-index"] : []), "-r", requirements.file];
     const python = pythonExecutable(projectDir);
-    if (!python) return { ok: false, reason: "python_verification_requires_existing_.venv" };
+    if (python) {
+      return { ok: true, command: python, args, lockPath: requirements.file, generated: [".venv"] };
+    }
+    // Without an isolated .venv, install into the primary's managed venv,
+    // but only from the requirements it was provisioned from: one work
+    // item's edits must not change the runtime every other one shares.
+    const runtime = managedPythonRuntime(projectDir, posseRoot);
+    if (!runtime || !exists(runtime.python)) return { ok: false, reason: "python_verification_requires_existing_.venv" };
+    const primaryRequirements = path.join(runtime.primary, "requirements.txt");
+    if (!exists(primaryRequirements) || hashFile(primaryRequirements) !== hashFile(requirements.file)) {
+      return { ok: false, reason: "primary_requirements_mismatch" };
+    }
     return {
       ok: true,
-      command: python,
-      args: ["-m", "pip", "install", "--require-hashes", "--only-binary=:all:", ...(offline ? ["--no-index"] : []), "-r", requirements.file],
+      command: runtime.python,
+      args,
       lockPath: requirements.file,
-      generated: [".venv"],
+      generated: [],
+      activatePythonRuntime: runtime,
     };
   }
   if (ecosystem === "go") {
@@ -478,17 +584,19 @@ export const VERIFICATION_PREREQUISITE_ADAPTERS = Object.freeze(Object.fromEntri
     detect(input) {
       return selectedEcosystems(input).includes(ecosystem);
     },
-    probe({ projectDir }) {
+    probe({ projectDir, env = process.env, posseRoot = null }) {
       if (ecosystem === "node") return directoryExists(path.join(projectDir, "node_modules"));
       if (ecosystem === "composer") return exists(path.join(projectDir, "vendor", "autoload.php"));
-      if (ecosystem === "python") return Boolean(pythonExecutable(projectDir));
+      if (ecosystem === "python") {
+        return Boolean(pythonExecutable(projectDir)) || managedPythonRuntimeActive(projectDir, { env, posseRoot });
+      }
       return exists(path.join(projectDir, ecosystem === "go" ? "go.sum" : "Cargo.lock"));
     },
-    repair({ projectDir, networkPolicy }) {
-      return commandSpec(ecosystem, projectDir, networkPolicy);
+    repair({ projectDir, networkPolicy, posseRoot = null }) {
+      return commandSpec(ecosystem, projectDir, networkPolicy, { posseRoot });
     },
-    verify({ projectDir }) {
-      return this.probe({ projectDir });
+    verify({ projectDir, env = process.env, posseRoot = null }) {
+      return this.probe({ projectDir, env, posseRoot });
     },
     explain(result) {
       return result?.reason || `${ecosystem} verification prerequisite unavailable`;
@@ -507,6 +615,9 @@ export async function repairVerificationPrerequisites({
   runCommand = runVerificationPrerequisiteCommand,
   gitStatus = defaultGitStatus,
   linkFromPrimary = true,
+  // The live env the verifier inherits; a managed venv is activated here.
+  env = process.env,
+  posseRoot = null,
 } = {}) {
   const root = path.resolve(String(projectDir || process.cwd()));
   const policy = normalizedNetworkPolicy(networkPolicy);
@@ -556,7 +667,41 @@ export async function repairVerificationPrerequisites({
         }
         if (link.reason) onProgress?.(`node: primary checkout link unavailable (${link.reason}); installing`);
       }
-      const spec = adapter.repair({ projectDir: root, networkPolicy: policy });
+      if (ecosystem === "composer" && linkFromPrimary) {
+        let link;
+        try { link = linkComposerVendorFromPrimaryCheckout(root); } catch (error) { link = { ok: false, reason: error?.code || error?.message || "link_failed" }; }
+        if (link.ok && adapter.verify({ projectDir: root })) {
+          onProgress?.(`composer: linked vendor from ${link.primary}`);
+          results.push(verificationResult(ecosystem, "passed", {
+            reason: null,
+            command: "link:primary_checkout",
+            linked: link.linked,
+            primary_checkout: link.primary,
+            lockfile: "composer.lock",
+            lockfile_sha256: hashFile(path.join(root, "composer.lock")),
+            network_policy: policy,
+          }));
+          continue;
+        }
+        if (link.reason) onProgress?.(`composer: primary checkout link unavailable (${link.reason}); installing`);
+      }
+      if (ecosystem === "python" && linkFromPrimary && !pythonExecutable(root)) {
+        let activation;
+        try { activation = activateManagedPythonRuntimeFromPrimary(root, { env, posseRoot }); } catch (error) { activation = { ok: false, reason: error?.code || error?.message || "activation_failed" }; }
+        if (activation.ok && adapter.verify({ projectDir: root, env, posseRoot })) {
+          onProgress?.(`python: using managed runtime ${activation.runtime_dir}`);
+          results.push(verificationResult(ecosystem, "passed", {
+            reason: null,
+            command: "env:managed_python_runtime",
+            runtime_dir: activation.runtime_dir,
+            primary_checkout: activation.primary,
+            network_policy: policy,
+          }));
+          continue;
+        }
+        if (activation.reason) onProgress?.(`python: managed runtime unavailable (${activation.reason})`);
+      }
+      const spec = adapter.repair({ projectDir: root, networkPolicy: policy, posseRoot });
       if (!spec.ok) {
         results.push(verificationResult(ecosystem, "blocked", { reason: spec.reason }));
         continue;
@@ -586,7 +731,8 @@ export async function repairVerificationPrerequisites({
         stderr: run.stderr,
       }));
       if (!run.ok) continue;
-      if (!adapter.verify({ projectDir: root })) {
+      if (spec.activatePythonRuntime) applyManagedPythonRuntimeEnv(env, spec.activatePythonRuntime);
+      if (!adapter.verify({ projectDir: root, env, posseRoot })) {
         results[results.length - 1] = verificationResult(ecosystem, "blocked", {
           ...results[results.length - 1],
           reason: "dependency_verification_failed",

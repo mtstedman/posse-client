@@ -289,6 +289,7 @@ export {
   TOOL_RUN_TEST_SUITE,
   TOOL_SEARCH_FILES,
   TOOL_VALIDATE_ARTIFACT_OUTPUT,
+  TOOL_VIEW_IMAGE,
   TOOL_WRITE_FILE,
 } from "../../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 export {

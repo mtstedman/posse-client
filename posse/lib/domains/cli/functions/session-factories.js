@@ -18,6 +18,8 @@ import {
   appendReviewRejectionDescription,
   canCompleteWorkItem,
   cancelWorkItemJobs,
+  beginRunCohort,
+  completeRunCohort,
   claimHumanGatePromptPresentation,
   cleanupRunningAgentCalls,
   createJob,
@@ -49,6 +51,7 @@ import {
   storeArtifact,
   updateJobPayload,
   updateWorkItemStatus,
+  extendRunCohort,
 } from "../../queue/functions/index.js";
 import { contextDir, wiScopeId, artifactsDir, ensureArtifactDirs } from "../../artifacts/functions/index.js";
 import { getRecentToolInvocations, getToolInvocationCountsByJob } from "../../observability/functions/observations.js";
@@ -380,6 +383,10 @@ export async function createRunSessionDeps(bootDeps) {
     describePendingReviewLockBlockers: () => reviewSession.describePendingReviewLockBlockers(),
     wrapUpTui: (display) => reviewSession.wrapUpTui(display),
     wrapUp: () => reviewSession.wrapUp(),
+    setRunWorkItemIds: (ids) => reviewSession.setRunWorkItemIds(ids),
+    beginRunCohort,
+    extendRunCohort,
+    completeRunCohort,
     offerPush: helpers.offerPush,
     refreshPushOfferGate: helpers.refreshPushOfferGate,
   };

@@ -2,11 +2,13 @@
 // Merge workflow helpers for WI branches and target branch advancement.
 
 import fs from "fs";
+import os from "os";
 import path from "path";
 import {
   finalizeApprovedWorkItemMerge,
   getWorkItem,
   getWorkItemMergeDependencies,
+  listJobsByWorkItem,
   listWorkItems,
   listCrossWiMergeBlockers,
   logEvent,
@@ -37,9 +39,15 @@ import {
   DETERMINISTIC_MERGE_FAILURE_KEY,
   mergeFailureHeadsUnchanged,
   mergeConflictSummary,
-  resyncHandoffBranchOntoTarget,
   resolveHandoffSquashConflicts,
 } from "./handoff-conflict-resolution.js";
+import {
+  closeoutTestCommandFromJobs,
+  droppableHandoffSyncJobIds,
+  refreshBranchForCloseout,
+  runCloseoutTestCommandSync,
+} from "./merge-closeout.js";
+import { conflictFilesFromMergeError, parkedMergeGuidance } from "./merge-park-guidance.js";
 import { runRegisteredTestsForMergeCandidate } from "../../../shared/tools/functions/toolkit/registered-tests.js";
 import { mergeToSharedTrunkAsync } from "./shared-trunk.js";
 
@@ -49,6 +57,7 @@ export function createMergeWorkflowHelpers(context, {
   sourceWorktreeDirtyState,
   sweepOrphanedInferTsconfig,
   validatePushCandidateAsync = async () => ({ ok: true }),
+  runCloseoutTestCommand = runCloseoutTestCommandSync,
 }) {
   const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, gitExec, gitExecAsync } = context;
   const withWorktreeLock = context.withWorktreeLock || nativeWithWorktreeLock;
@@ -207,7 +216,7 @@ export function createMergeWorkflowHelpers(context, {
     }
   }
 
-  function recordDeterministicMergeFailure(wiId, branch, targetBranch, heads, error) {
+  function recordDeterministicMergeFailure(wiId, branch, targetBranch, heads, error, files = []) {
     if (wiId == null || !heads?.branchHead || !heads?.targetHead) return;
     const metadata = workItemMetadata(wiId);
     metadata[DETERMINISTIC_MERGE_FAILURE_KEY] = {
@@ -216,6 +225,7 @@ export function createMergeWorkflowHelpers(context, {
       branch_head: heads.branchHead,
       target_head: heads.targetHead,
       error: String(error || "").slice(0, 1000),
+      files: (Array.isArray(files) ? files : []).slice(0, 50),
       recorded_at: new Date().toISOString(),
     };
     updateWorkItemMetadata(wiId, metadata);
@@ -227,6 +237,170 @@ export function createMergeWorkflowHelpers(context, {
     if (!Object.prototype.hasOwnProperty.call(metadata, DETERMINISTIC_MERGE_FAILURE_KEY)) return;
     delete metadata[DETERMINISTIC_MERGE_FAILURE_KEY];
     updateWorkItemMetadata(wiId, metadata);
+  }
+
+  function branchCheckoutPaths(branch, cwd) {
+    try {
+      const listing = gitMergeExec(["worktree", "list", "--porcelain"], cwd, { trim: false });
+      const paths = [];
+      let current = null;
+      for (const line of String(listing || "").split("\n")) {
+        if (line.startsWith("worktree ")) current = line.slice("worktree ".length).trim();
+        else if (current && line.trim() === `branch refs/heads/${branch}`) paths.push(path.resolve(current));
+      }
+      return paths;
+    } catch {
+      return null;
+    }
+  }
+
+  function workItemWorktreeDir(wiId) {
+    const canonical = canonicalWorktreePath(projectDir, wiId);
+    if (fs.existsSync(canonical)) return canonical;
+    const legacy = findLegacyWorktreeForWi(projectDir, wiId);
+    return legacy && fs.existsSync(legacy) ? legacy : null;
+  }
+
+  function parkGuidance(wiId, branch, targetBranch, files) {
+    let worktreePath = null;
+    try {
+      worktreePath = wiId == null ? null : workItemWorktreeDir(wiId);
+    } catch {
+      worktreePath = null;
+    }
+    return parkedMergeGuidance({ wiId, branch, targetBranch, files, worktreePath });
+  }
+
+  // Close-out: before the squash merge, replay the work item's own commits
+  // onto the current target (dropping handoff copies whose source merged) and
+  // resolve only ordering-induced conflicts. Returns { refreshed, reason } to
+  // continue, or { park } with the merge result when the work item must wait
+  // for manual review.
+  function runCloseoutRefresh({ wiId, branch, targetBranch, cwd, sourceDirty, log }) {
+    if (wiId == null) return { refreshed: false, reason: "not_a_work_item_merge" };
+    try {
+      if (gitMergeExec(["merge-base", targetBranch, branch], cwd) === gitMergeExec(["rev-parse", targetBranch], cwd)) {
+        return { refreshed: false, reason: "branch_already_on_target" };
+      }
+    } catch (error) {
+      return { refreshed: false, reason: `closeout_scan_failed: ${firstGitLine(error)}` };
+    }
+    const skip = (reason) => {
+      // A refresh that cannot run safely is not a merge blocker: the plain
+      // squash merge below runs from the target checkout and the handoff
+      // union fallback still applies.
+      log(`Close-out refresh skipped for ${branch} (${reason}); continuing with the plain squash merge`, {
+        json: { branch, target: targetBranch, closeout_skipped: true, reason },
+      });
+      return { refreshed: false, reason };
+    };
+
+    const dependencies = getWorkItemMergeDependencies(wiId)
+      .map((dependency) => ({ ...dependency, source: getWorkItem(dependency.source_work_item_id) }));
+    let testCommand = null;
+    try {
+      testCommand = closeoutTestCommandFromJobs(listJobsByWorkItem(wiId));
+    } catch {
+      testCommand = null;
+    }
+    const checkedOut = branchCheckoutPaths(branch, cwd);
+    if (checkedOut == null) return skip("worktree_listing_failed");
+    const ownWorktree = workItemWorktreeDir(wiId);
+    let worktreePath;
+    let ownsWorktree = false;
+    if (ownWorktree && checkedOut.includes(path.resolve(ownWorktree))) {
+      if (sourceDirty && sourceDirty.untrackedFiles.length > 0) return skip("work_item_worktree_has_untracked_leftovers");
+      worktreePath = ownWorktree;
+    } else if (checkedOut.length > 0) {
+      return skip("branch_checked_out_elsewhere");
+    } else {
+      worktreePath = fs.mkdtempSync(path.join(os.tmpdir(), "posse-closeout-"));
+      try {
+        gitMergeExec(["worktree", "add", "--detach", worktreePath, branch], cwd);
+        ownsWorktree = true;
+      } catch (error) {
+        fs.rmSync(worktreePath, { recursive: true, force: true });
+        return skip(`closeout_worktree_add_failed: ${firstGitLine(error)}`);
+      }
+    }
+
+    let result;
+    try {
+      result = refreshBranchForCloseout({
+        exec: gitMergeExec,
+        cwd,
+        branch,
+        targetBranch,
+        worktreePath,
+        ownsWorktree,
+        droppableSyncJobIds: droppableHandoffSyncJobIds(dependencies),
+        testCommand,
+        runTestCommand: runCloseoutTestCommand,
+        isIgnorableStatusLine: (line) => isRuntimePorcelainLine(line, worktreePath),
+      });
+    } finally {
+      if (ownsWorktree) {
+        try { gitMergeExec(["worktree", "remove", "--force", worktreePath], cwd); } catch { /* pruned below */ }
+        fs.rmSync(worktreePath, { recursive: true, force: true });
+        try { gitMergeExec(["worktree", "prune"], cwd); } catch { /* best effort */ }
+      }
+    }
+
+    const detail = {
+      branch,
+      target: targetBranch,
+      old_head: result.branchHead || null,
+      target_head: result.targetHead || null,
+      private_worktree: ownsWorktree,
+    };
+    if (result.refreshed) {
+      log(`Close-out refreshed ${branch} onto ${targetBranch}${result.resolvedFiles.length > 0 ? `; resolved ordering conflicts in ${result.resolvedFiles.join(", ")}` : ""}`, {
+        json: {
+          ...detail,
+          closeout_refreshed: true,
+          refreshed_head: result.refreshedHead,
+          dropped_handoff_sync_commits: result.dropped,
+          skipped_empty_commits: result.skipped,
+          resolved_files: result.resolvedFiles,
+          resolution_rules: result.rules,
+          test_command: result.testCommand,
+        },
+      });
+      return { refreshed: true };
+    }
+    if (result.testFailed) {
+      const message = `Merge parked for manual review: close-out refresh of ${branch} resolved ordering conflicts in ${result.files.join(", ")}, but its test command failed (${result.testCommand})`;
+      log(message, { json: { ...detail, closeout_test_failed: true, test_command: result.testCommand, test_output: result.testOutput } });
+      recordDeterministicMergeFailure(wiId, branch, targetBranch, {
+        branchHead: result.branchHead,
+        targetHead: result.targetHead,
+      }, message, result.files);
+      return {
+        refreshed: false,
+        reason: "closeout_test_failed",
+        park: {
+          ok: false,
+          deterministicConflict: true,
+          closeoutTestFailed: true,
+          branchHead: result.branchHead,
+          targetHead: result.targetHead,
+          conflictFiles: result.files,
+          message: `${message}. ${parkGuidance(wiId, branch, targetBranch, result.files)}`,
+        },
+      };
+    }
+    if (result.conflict) {
+      // Not ordering-induced. The squash merge below may still apply (its
+      // net diff can differ from the per-commit replay); if it conflicts, it
+      // aborts cleanly and records the deterministic memo as before.
+      const reason = `overlapping edit (${result.error})`;
+      log(`Close-out refresh of ${branch} stopped at an ${reason}; trying the plain squash merge`, {
+        json: { ...detail, closeout_conflict: true, error: result.error, files: result.files, commit: result.commit },
+      });
+      return { refreshed: false, reason };
+    }
+    if (result.attempted === false && !result.infrastructureFailure) return { refreshed: false, reason: result.reason };
+    return skip(result.reason);
   }
 
   function emitMergePhase(onPhase, phase, message, data = {}) {
@@ -743,14 +917,18 @@ export function createMergeWorkflowHelpers(context, {
 
     const initialHeads = mergeHeads(branch, targetBranch, cwd);
     const priorDeterministicFailure = workItemMetadata(wiId)[DETERMINISTIC_MERGE_FAILURE_KEY];
-    if (mergeFailureHeadsUnchanged(priorDeterministicFailure, initialHeads)) {
+    const unchangedConflictResult = (detail = null) => {
       // A content conflict is a pure function of the two tree heads. A manual
       // approval used to bypass this memo and rerun the identical merge, which
       // could only reproduce the conflict and looked like lock contention.
       // Require the source or target to move before spending another attempt.
+      const priorFiles = Array.isArray(priorDeterministicFailure?.files) && priorDeterministicFailure.files.length > 0
+        ? priorDeterministicFailure.files
+        : conflictFilesFromMergeError(priorDeterministicFailure?.error || "");
+      const guidance = parkGuidance(wiId, branch, targetBranch, priorFiles);
       const message = retryDeterministicConflict
-        ? `Merge retry blocked: ${branch} and ${targetBranch} have not moved since the prior deterministic conflict`
-        : `Merge skipped: ${branch} and ${targetBranch} have not moved since the prior deterministic conflict`;
+        ? `Merge retry blocked: ${branch} and ${targetBranch} have not moved since the prior deterministic conflict${detail ? ` (${detail})` : ""}. ${guidance}`
+        : `Merge skipped: ${branch} and ${targetBranch} have not moved since the prior deterministic conflict. ${guidance}`;
       log(message, {
         json: {
           branch,
@@ -759,7 +937,8 @@ export function createMergeWorkflowHelpers(context, {
           retry_requested: retryDeterministicConflict,
           branch_head: initialHeads.branchHead,
           target_head: initialHeads.targetHead,
-          prior_error: priorDeterministicFailure.error || null,
+          prior_error: priorDeterministicFailure?.error || null,
+          closeout: detail,
         },
       });
       return {
@@ -769,9 +948,14 @@ export function createMergeWorkflowHelpers(context, {
         retryRequested: retryDeterministicConflict,
         branchHead: initialHeads.branchHead,
         targetHead: initialHeads.targetHead,
+        conflictFiles: priorFiles,
         message,
       };
-    }
+    };
+    const memoBlocksSquash = mergeFailureHeadsUnchanged(priorDeterministicFailure, initialHeads);
+    // An automatic attempt honours the memo. A re-approval runs the close-out
+    // refresh below instead: it can move the branch, which lifts the memo.
+    if (memoBlocksSquash && !retryDeterministicConflict) return unchangedConflictResult();
 
     const sourceDirty = sourceWorktreeDirtyState(wiId);
     if (sourceDirty?.verificationFailed) {
@@ -862,91 +1046,12 @@ export function createMergeWorkflowHelpers(context, {
       });
     }
 
-    const mergedHandoffDependencies = wiId == null
-      ? []
-      : getWorkItemMergeDependencies(wiId)
-        .map((dependency) => ({ ...dependency, source: getWorkItem(dependency.source_work_item_id) }))
-        .filter((dependency) => dependency.source?.merge_state === "merged");
-    const resyncWorktreeDir = (() => {
-      if (wiId == null || mergedHandoffDependencies.length === 0) return null;
-      const canonical = canonicalWorktreePath(projectDir, wiId);
-      if (fs.existsSync(canonical)) return canonical;
-      const legacy = findLegacyWorktreeForWi(projectDir, wiId);
-      return legacy && fs.existsSync(legacy) ? legacy : null;
-    })();
-    if (
-      (sourceDirty == null || sourceDirty.untrackedFiles.length === 0)
-      && mergedHandoffDependencies.length > 0
-      // A pruned/missing worktree is a normal post-completion state, not an
-      // error: skip the resync and let the plain squash merge (plus the
-      // union fallback) handle the branch from the target checkout.
-      && resyncWorktreeDir != null
-    ) {
-      const resync = resyncHandoffBranchOntoTarget({
-        exec: gitMergeExec,
-        cwd,
-        branch,
-        targetBranch,
-        worktreePath: resyncWorktreeDir,
-        dependencyPaths: mergedHandoffDependencies.filter((dependency) => dependency.path),
-        isIgnorableStatusLine: (line) => isRuntimePorcelainLine(line, resyncWorktreeDir),
-      });
-      if (resync.resynced) {
-        const refreshAction = resync.syncMode === "merge" ? "Refreshed" : "Rebased";
-        log(`${refreshAction} ${branch} onto ${targetBranch} after upstream handoff source merge`, {
-          json: {
-            branch,
-            target: targetBranch,
-            old_base: resync.mergeBase,
-            old_head: resync.branchHead,
-            rebased_head: resync.rebasedHead,
-            refreshed_head: resync.rebasedHead,
-            sync_mode: resync.syncMode,
-            fallback_reason: resync.fallbackReason,
-            dropped_handoff_files: resync.files?.slice(0, 50) || [],
-          },
-        });
-      } else if (resync.infrastructureFailure) {
-        // A resync that cannot run safely (worktree state unverifiable,
-        // branch checked out elsewhere, residual dirt) is not a merge
-        // blocker: the plain squash merge below runs from the target
-        // checkout and never touches the WI worktree, and the union
-        // fallback covers handoff-duplication conflicts. Deferring here
-        // recreated the merge_failed loop for branches that merge cleanly.
-        log(`Handoff resync skipped for ${branch} (${resync.reason}); continuing with the plain squash merge`, {
-          json: {
-            branch,
-            target: targetBranch,
-            handoff_resync_skipped: true,
-            reason: resync.reason,
-          },
-        });
-      } else if (resync.attempted && resync.conflict) {
-        const message = `Merge deferred for manual review: handoff resync of ${branch} onto ${targetBranch} conflicted — ${resync.error}`;
-        log(message, {
-          json: {
-            branch,
-            target: targetBranch,
-            handoff_resync_conflict: true,
-            old_base: resync.mergeBase,
-            branch_head: resync.branchHead,
-            target_head: resync.targetHead,
-            error: resync.error,
-          },
-        });
-        recordDeterministicMergeFailure(wiId, branch, targetBranch, {
-          branchHead: resync.branchHead,
-          targetHead: resync.targetHead,
-        }, resync.error);
-        return {
-          ok: false,
-          deterministicConflict: true,
-          rebaseConflict: true,
-          branchHead: resync.branchHead,
-          targetHead: resync.targetHead,
-          message,
-        };
-      }
+    const closeout = runCloseoutRefresh({ wiId, branch, targetBranch, cwd, sourceDirty, log });
+    if (closeout.park) return closeout.park;
+    // A re-approval whose refresh could not move the branch would only rerun
+    // the identical conflicting squash merge.
+    if (memoBlocksSquash && !closeout.refreshed) {
+      return unchangedConflictResult(closeout.reason || "close-out refresh did not change the branch");
     }
 
     let currentBranch = null;
@@ -1328,10 +1433,12 @@ export function createMergeWorkflowHelpers(context, {
         const conflictError = mergeConflictSummary(finalMergeErr);
         const error = conflictError || firstGitLine(finalMergeErr);
         const timedOut = isGitTimeoutError(finalMergeErr);
-        let hasUnmergedFiles = false;
+        let unmergedFiles = [];
         try {
-          hasUnmergedFiles = gitMergeExec(["diff", "--name-only", "--diff-filter=U"], cwd).trim().length > 0;
+          unmergedFiles = gitMergeExec(["diff", "--name-only", "--diff-filter=U"], cwd)
+            .split("\n").map((line) => line.trim()).filter(Boolean);
         } catch { /* the merge error remains authoritative */ }
+        const hasUnmergedFiles = unmergedFiles.length > 0;
         const deterministicConflict = !timedOut
           && !resolverTransientFailure
           && (!!conflictError || hasUnmergedFiles);
@@ -1381,18 +1488,22 @@ export function createMergeWorkflowHelpers(context, {
           ? restoreAutoStash(cwd, autoStash, log, `failed merge of ${branch}`)
           : null;
         const failureHeads = mergeHeads(branch, targetBranch, cwd);
+        const conflictFiles = !deterministicConflict ? []
+          : unmergedFiles.length > 0 ? unmergedFiles : conflictFilesFromMergeError(error);
         if (deterministicConflict) {
-          recordDeterministicMergeFailure(wiId, branch, targetBranch, failureHeads, error);
+          recordDeterministicMergeFailure(wiId, branch, targetBranch, failureHeads, error, conflictFiles);
         }
+        const guidance = deterministicConflict ? `. ${parkGuidance(wiId, branch, targetBranch, conflictFiles)}` : "";
         return {
           ok: false,
           timedOut,
           integrationGateFailed: finalMergeErr?.code === "POSSE_MERGE_CANDIDATE_TEST_FAILED",
           integrationGate: finalMergeErr?.integrationGate || null,
           deterministicConflict,
+          conflictFiles,
           branchHead: failureHeads.branchHead,
           targetHead: failureHeads.targetHead,
-          message: `${timedOut ? "Merge timed out" : "Merge failed"}: ${error}${restoreWarning ? `; ${restoreWarning}` : ""}`,
+          message: `${timedOut ? "Merge timed out" : "Merge failed"}: ${error}${restoreWarning ? `; ${restoreWarning}` : ""}${guidance}`,
           stashPopWarning: restoreWarning,
         };
         }

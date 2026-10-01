@@ -37,7 +37,7 @@ Atlas: `atlas.fetch_ref`, `atlas.traverse_ref`.
 
 ### `assessor`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.search_files`, `tools.validate_artifact_output`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.search_files`, `tools.validate_artifact_output`, `tools.view_image`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
@@ -1248,6 +1248,26 @@ Validate an artifact output directory against the configured artifact contract a
 | `min_bytes` | `integer` | Optional |  | Optional minimum byte size for non-manifest output files. |
 | `output_root` | `string` | Optional |  | Artifact output directory to validate. Defaults to the working directory. |
 | `task_mode` | `string` | Optional | values "image", "report", "content", "intake_processing" | Artifact task mode. Default: image. |
+
+### `tools.view_image`
+
+Remote roles: `assessor`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `view_image` |
+| Tool reference token | `tools.view_image` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `read` |
+| Batchable input | No |
+| Parallel calls | Yes |
+| System-prefetch capable | No |
+
+Look at one local image: returns the image itself for visual inspection plus its format, dimensions, byte size, and SHA-256. Use it when a criterion depends on what the image shows (scene, composition, style, legibility), which metadata and OCR cannot prove. Accepts PNG, JPEG, WebP, or GIF inside the readable scope; large images are downscaled before delivery.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `path` | `string` | Required |  | Image file path (relative to the working directory or absolute inside the readable scope). |
 
 ### `tools.web_research_handoff`
 

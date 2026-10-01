@@ -34,9 +34,9 @@ export function handle(job, verdict, ctx) {
   const asksForClarification = hasOperatorOnlyQuestion && priorClarifications.length === 0;
   const asksForOperatorReview = visualAcceptanceReview || asksForClarification;
   const retryReason = verdict.reasons?.[0] || "assessment could not reach a confident terminal verdict";
+  const retryEligible = !asksForOperatorReview && !verdict?._disable_internal_retry;
   if (
-    !asksForOperatorReview
-    && !verdict?._disable_internal_retry
+    retryEligible
     && queueInternalAssessmentRetry(job, verdict, retryReason, {
       leaseToken: ctx.leaseToken,
       recordAssessorVerdict: ctx.recordAssessorVerdict,
@@ -47,7 +47,14 @@ export function handle(job, verdict, ctx) {
   }
 
   const confidenceReview = verdict?._assessment_confidence_review === true;
-  if (!asksForOperatorReview && !confidenceReview) {
+  // A retry-eligible review whose stronger-tier retry is no longer available
+  // (assessor already at the top tier, or the retry budget is spent) still
+  // needs a disposition. Failing it closed discarded correct work and
+  // cancelled its dependents (WI 159 job 2084: a high-risk pass capped to
+  // needs_review at the strong tier). Harness-owned reviews keep failing
+  // closed: no operator answer can restore the assessor's evidence.
+  const exhaustedRetryReview = retryEligible && !harnessOwnedReview;
+  if (!asksForOperatorReview && !confidenceReview && !exhaustedRetryReview) {
     const changed = typeof ctx.updateJobStatus === "function"
       ? ctx.updateJobStatus("failed")
       : updateJobStatus(job.id, "failed");
@@ -72,7 +79,12 @@ export function handle(job, verdict, ctx) {
 
   // Always spawn a human_input job. Without one, waiting_on_review is a
   // permanent trap with no mechanism to unblock.
-  const questions = explicitHumanQuestions.length > 0 ? explicitHumanQuestions
+  const assessmentReview = visualAcceptanceReview || confidenceReview || !asksForClarification;
+  // An operator question that was already answered is not asked again; the
+  // gate asks for the assessment disposition instead.
+  const repeatsAnsweredClarification = hasOperatorOnlyQuestion && !asksForClarification;
+  const questions = explicitHumanQuestions.length > 0 && !repeatsAnsweredClarification
+    ? explicitHumanQuestions
     : ["Automatic assessment could not establish sufficient confidence. Should this work pass or fail?"];
   const humanJob = spawnFromAssessor("failed", "human_input", {
     work_item_id: job.work_item_id,
@@ -84,7 +96,7 @@ export function handle(job, verdict, ctx) {
       original_job_id: job.id,
       questions,
       context: verdict.reasons,
-      ...(visualAcceptanceReview || confidenceReview
+      ...(assessmentReview
         ? {
             review_type: "needs_review",
             question_kind: "assessment_review",

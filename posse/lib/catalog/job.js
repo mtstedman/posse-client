@@ -217,6 +217,15 @@ export const PLANNER_ALLOWED_JOB_TYPES = new Set([
 // scheduling job doesn't recur in a tight retry loop.
 export const ROLE_DRIVEN_JOB_TYPES = new Set(["research", "plan", "preflight"]);
 
+// Runnable-selection fairness. Plan jobs order with dev work by created_at, so
+// a queue of older plans took every freed agent slot while a ready dev job
+// waited (live 2026-10-01: 12.5 min). Once plan jobs hold all but the reserved
+// slots (scheduler_implementation_reserved_slots), the scheduler offers the
+// remaining slots to ready implementation work first; plans still take them
+// when no implementation job can start.
+export const SLOT_CAPPED_PLANNING_JOB_TYPES = new Set(["plan"]);
+export const RESERVED_SLOT_IMPLEMENTATION_JOB_TYPES = Object.freeze(["dev", "fix", "artificer", "promote"]);
+
 // Job types that require an isolated git worktree (subset of
 // MUTATING_JOB_TYPES — artificer writes only to artifact dirs and does not
 // need the worktree).

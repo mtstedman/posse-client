@@ -638,7 +638,7 @@ export function narrowBootConfigToRemoteSurface(bootConfig = {}, remoteSurface =
     projectDbCapability,
     projectDbWrite: bootConfig.projectDbWrite === true && projectDbCapability === "write",
     allowImageHelpers: bootConfig.allowImageHelpers === true
-      && toolAllowlist.tools.some((name) => ["read_image_metadata", "validate_artifact_output", "extract_image_text", "clean_image"].includes(name)),
+      && toolAllowlist.tools.some((name) => ["read_image_metadata", "validate_artifact_output", "extract_image_text", "clean_image", "view_image"].includes(name)),
     allowImageGeneration: bootConfig.allowImageGeneration === true && imageIssued,
     atlasAvailable: bootConfig.atlasAvailable === true && toolAllowlist.atlas.length > 0,
     allowTests: bootConfig.allowTests === true && issued.toolPolicy.allow_tests,
@@ -824,6 +824,35 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
   };
 }
 
+// Remote issues view_image to every assessor as a ceiling. Locally it reaches
+// only image assessments (task_mode image, or an artifact job whose effective
+// mode is image, signalled by imageInspection), so code assessors neither carry
+// the schema nor spend image tokens.
+const IMAGE_VIEW_TOOL_REFERENCE = "tools.view_image";
+
+function issuedSurfaceIncludes(issuance, reference) {
+  const source = plainObject(issuance);
+  if (!source) return false;
+  const entries = Array.isArray(source.tool_surface) ? source.tool_surface : source.tools;
+  return Array.isArray(entries)
+    && entries.some((entry) => canonicalToolEntry(entry, "tools")?.canonical === reference);
+}
+
+function withoutIssuedTool(issuance, reference) {
+  const source = plainObject(issuance) || {};
+  const keep = (entry) => canonicalToolEntry(entry, "tools")?.canonical !== reference;
+  return {
+    ...source,
+    ...(Array.isArray(source.tool_surface) ? { tool_surface: source.tool_surface.filter(keep) } : {}),
+    ...(Array.isArray(source.tools) ? { tools: source.tools.filter(keep) } : {}),
+  };
+}
+
+function imageViewIssuedForCall(opts = {}, taskMode = "") {
+  if (String(opts.role || "").trim().toLowerCase() !== "assessor") return true;
+  return opts.imageInspection === true || String(taskMode || "").trim().toLowerCase() === "image";
+}
+
 function packetTaskMode(packet = {}, opts = {}) {
   return String(
     opts.taskMode
@@ -874,6 +903,12 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
         },
       }
     : remoteIssuance);
+  const taskMode = packetTaskMode(packet, opts);
+  if (executionIssuance
+    && !imageViewIssuedForCall(opts, taskMode)
+    && issuedSurfaceIncludes(executionIssuance, IMAGE_VIEW_TOOL_REFERENCE)) {
+    executionIssuance = withoutIssuedTool(executionIssuance, IMAGE_VIEW_TOOL_REFERENCE);
+  }
   if (remoteIssuance && executionIssuance !== remoteIssuance) {
     executionIssuance = deriveRemoteToolSurfaceNarrowing(remoteIssuance, executionIssuance, {
       expectedRole: opts.role,
@@ -882,7 +917,6 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
   const issued = normalizeRemoteIssuedPolicy(executionIssuance, {
     expectedRole: opts.role,
   });
-  const taskMode = packetTaskMode(packet, opts);
   const hasExplicitProjectDbCapability = Object.prototype.hasOwnProperty.call(opts, "projectDbCapability")
     || opts.projectDbWrite === true;
   const requestedDb = normalizeProjectDbCapability(

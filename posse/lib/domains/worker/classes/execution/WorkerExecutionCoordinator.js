@@ -51,6 +51,7 @@ import {
 } from "../../../git/functions/worktree.js";
 import { repairTestDependencies } from "../../functions/helpers/test-dependency-repair.js";
 import { recordBaselineSiblingRegression } from "../../functions/helpers/baseline-attribution.js";
+import { recordBaselineTestDebt } from "../../functions/helpers/baseline-test-debt.js";
 import {
   isVerificationInfrastructureOutcome,
 } from "../../functions/helpers/verification-outcome.js";
@@ -300,6 +301,7 @@ export class WorkerExecutionCoordinator {
         if (baselineReceipt.status === "failed" && wtPath) {
           await recordBaselineSiblingRegression(worker, job, baselineReceipt, wtPath);
         }
+        recordBaselineTestDebt(worker, job, baselineReceipt);
         if (isVerificationInfrastructureOutcome(baselineReceipt)) {
           // The frozen baseline could not run and the one-shot dependency
           // repair did not make it runnable. Failing the job here would
@@ -342,6 +344,7 @@ export class WorkerExecutionCoordinator {
               onMsg: (message) => worker.emit(job.id, `${C.dim}[typecheck] ${message}${C.reset}`),
             })
           : null,
+        siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
       });
 
       // -- Create attempt record --

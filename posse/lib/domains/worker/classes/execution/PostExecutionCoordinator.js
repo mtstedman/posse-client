@@ -549,8 +549,12 @@ export async function handlePostExecutionForWorker({
           // the attempt's real work in the worktree (wowiekowie run 2026-08-13
           // job #194, 2026-08-10 WI#5 jobs #105-#109). A dirty worktree must
           // always reach the scoped-commit machinery instead.
+          // A dev VERIFIED_NO_CHANGE is the agent's own verdict on the task
+          // and routes to the real assessor below; the shortcut must not
+          // preempt it with a synthesized pass (WI 159 job 2084).
           if (
-            requiresGitNoopCheckFromModule(job, preCommitPayload)
+            !agentCompletionLog.verifiedNoChange
+            && requiresGitNoopCheckFromModule(job, preCommitPayload)
             && isDeleteNoopSatisfiedFromModule(job, preCommitPayload, wtPath)
             && !(await gitHasChangesAsync(wtPath).catch(() => true))
           ) {

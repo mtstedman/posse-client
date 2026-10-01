@@ -47,6 +47,7 @@ import {
   normalizeResearcherCitationTriage,
 } from "../../handoff/functions/index.js";
 import { resolveResearchContextForWorkItem } from "../../research/functions/research-context.js";
+import { movedOutputPathReplacements, rewriteTaskTextPaths } from "./task-text-paths.js";
 import { projectDbEffectivePermissions } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { listProjectDbWrites, verifiedProjectDbExecution } from "../../../shared/tools/functions/toolkit/project-db/write-evidence.js";
 import {
@@ -1722,6 +1723,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           const createRoots = Array.isArray(t.create_roots) ? t.create_roots.map((r) => normalizeResolvedRoot(r)) : [];
           const rootLooksShared = !explicitRoot || explicitRoot === defaultRoot;
           const createRootsLookShared = createRoots.length === 0 || (createRoots.length === 1 && createRoots[0] === defaultRoot);
+          const plannedOutputRoot = explicitRoot || defaultRoot;
+          const plannedFilesToCreate = Array.isArray(t.files_to_create) ? [...t.files_to_create] : [];
           if (rootLooksShared && createRootsLookShared) {
             const scopedRoot = artifactTaskOutputRoot(
               planJob.work_item_id,
@@ -1752,6 +1755,26 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             if (JSON.stringify(normalizedFilesToCreate) !== JSON.stringify(t.files_to_create || [])) {
               t.files_to_create = normalizedFilesToCreate;
               worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: rebased artifact files_to_create into output_root for task "${t.title}"`);
+            }
+
+            // The task text still names the planner's output location; point
+            // it at the compiled one so the worker sees a single output path.
+            const movedOutputPaths = movedOutputPathReplacements({
+              projectDir: worker.projectDir,
+              filesToCreate: plannedFilesToCreate,
+              fromRoot: plannedOutputRoot,
+              toRoot: t.output_root || defaultRoot,
+            });
+            const rewrittenTextFields = [];
+            for (const field of ["task_spec", "instructions"]) {
+              const rewritten = rewriteTaskTextPaths(t[field], movedOutputPaths);
+              if (rewritten !== t[field]) {
+                t[field] = rewritten;
+                rewrittenTextFields.push(field);
+              }
+            }
+            if (rewrittenTextFields.length > 0) {
+              worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: rewrote moved output path mention(s) in ${rewrittenTextFields.join(", ")} for task "${t.title}"`);
             }
           }
 

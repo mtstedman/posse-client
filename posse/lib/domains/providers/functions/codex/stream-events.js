@@ -261,12 +261,21 @@ function _extractCodexOutputText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+// Codex announces each web action twice: a begin (item.started with an empty
+// query, or web_search_begin with only a call id), then a completion carrying
+// the query or URL under the same id. Only the completion is the tool use;
+// extracting the begin too logged every search and fetch a second time as a
+// null-query web_search row (live 2026-10-01).
+const CODEX_WEB_EVENT = /^web_/;
+const CODEX_WEB_BEGIN_EVENT = /^web_.*_(?:begin|start)$/;
+
 export function _extractCodexToolUse(msg) {
   const body = _extractCodexEventBody(msg);
   if (!body) return null;
   const type = String(body.type || "").toLowerCase();
   if (["item.started", "item.completed", "item.updated"].includes(type)
     && body.item && typeof body.item === "object") {
+    if (type === "item.started" && CODEX_WEB_EVENT.test(String(body.item.type || "").toLowerCase())) return null;
     return _extractCodexToolUse(body.item);
   }
   if (type === "exec_command_begin" || type === "exec_command_start") {
@@ -289,8 +298,8 @@ export function _extractCodexToolUse(msg) {
     }
     return results.length > 0 ? results : null;
   }
-  if (/^web_.*(?:call|begin|start)?$/.test(type) || type === "web_search" || type === "web_fetch") {
-    return _extractCodexWebToolUse(body, type);
+  if (CODEX_WEB_EVENT.test(type)) {
+    return CODEX_WEB_BEGIN_EVENT.test(type) ? null : _extractCodexWebToolUse(body, type);
   }
   if (type === "function_call" || type === "tool_call") {
     const toolName = body.name || body.tool || body.tool_name || body.toolName;

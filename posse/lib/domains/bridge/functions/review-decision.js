@@ -14,12 +14,14 @@ import {
   updateWorkItemStatus,
 } from "../../queue/functions/index.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
+import { describePartialWorkJobs, partialWorkToMerge } from "../../queue/functions/partial-work.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/reviewable.js";
 import { createGitWorkflowHelpers } from "../../git/functions/workflows.js";
 import { resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
 import { redactBridgeValue } from "./redaction.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
+import { QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
 import {
   isHumanInputCoordinationPayload,
   isHumanInputReviewPayload,
@@ -72,15 +74,33 @@ function requireReviewableWorkItem(wi) {
   if (pendingGate) return { ok: true, jobs, pendingGate };
   if (wi.status === "waiting_on_review") return { ok: true, jobs, pendingGate: null };
   if (shouldIncludeWorkItemInApprovalQueue(wi, jobs)) return { ok: true, jobs, pendingGate: null };
+  // Preserve the explicit bridge recovery waiver for legacy failed write work
+  // that has no branch to merge. This is deliberately command-only: failed
+  // work remains absent from every review/merge discovery surface.
+  if (wi.status === "failed"
+    && !wi.branch_name
+    && jobs.some((job) => QUEUE_LOCKING_JOB_TYPES.has(job?.job_type))) {
+    return { ok: true, jobs, pendingGate: null, recoveryOnly: true };
+  }
   return { ok: false, reason: "no_pending_review" };
 }
 
 export function preflightReviewApproval(workItemId, {
   projectDir = process.cwd(),
   reviewWorkflow = null,
+  mergePartialWork = false,
 } = {}) {
   const wi = getWorkItem(workItemId);
   if (!wi) return { ok: false, reason: "no_such_wi" };
+  if (wi.status === "failed" && wi.branch_name && wi.merge_state !== "merged") {
+    return {
+      ok: false,
+      reason: "work_item_not_complete",
+      message: `Work item ${wi.id} failed; recover it before merging.`,
+      work_item_id: wi.id,
+      review_approved: false,
+    };
+  }
   const completionReady = canCompleteWorkItem(wi.id, {
     allowTerminalFailureBlockers: true,
     resolvePendingReviews: true,
@@ -96,6 +116,19 @@ export function preflightReviewApproval(workItemId, {
   }
   if (!wi.branch_name || wi.merge_state === "merged") {
     return { ok: true, work_item_id: wi.id };
+  }
+  // The TUI asks before merging partial work; a remote approval must say so
+  // explicitly instead of merging it on a plain approve.
+  const partialWork = partialWorkToMerge(wi, listJobsByWorkItem(wi.id));
+  if (partialWork.length > 0 && mergePartialWork !== true) {
+    return {
+      ok: false,
+      reason: "partial_work_unconfirmed",
+      message: `Approval blocked: WI#${wi.id} ${describePartialWorkJobs(partialWork)}. Approving merges partial work; resend review.approve with merge_partial_work: true to confirm.`,
+      work_item_id: wi.id,
+      review_approved: false,
+      partial_work_jobs: partialWork.map((job) => ({ job_id: job.id, job_type: job.job_type, status: job.status })),
+    };
   }
 
   const workflow = reviewWorkflow || createBridgeReviewWorkflow(projectDir);
@@ -152,12 +185,13 @@ export function approveReview(workItemId, {
   actor = "bridge",
   projectDir = process.cwd(),
   reviewWorkflow = null,
+  mergePartialWork = false,
 } = {}) {
   const wi = getWorkItem(workItemId);
   if (!wi) return { ok: false, reason: "no_such_wi" };
   const reviewable = requireReviewableWorkItem(wi);
   if (!reviewable.ok) return reviewable;
-  const preflight = preflightReviewApproval(wi.id, { projectDir, reviewWorkflow });
+  const preflight = preflightReviewApproval(wi.id, { projectDir, reviewWorkflow, mergePartialWork });
   if (!preflight.ok) return preflight;
 
   if (wi.branch_name) {
@@ -279,6 +313,7 @@ export async function finalizeApprovedReview(workItemId, {
   projectDir = process.cwd(),
   approvalLogged = false,
   reviewWorkflow = null,
+  mergePartialWork = false,
 } = {}) {
   const wi = getWorkItem(workItemId);
   if (!wi) return { ok: false, reason: "no_such_wi" };
@@ -288,10 +323,20 @@ export async function finalizeApprovedReview(workItemId, {
   const preflight = preflightReviewApproval(wi.id, {
     projectDir,
     reviewWorkflow: workflow,
+    mergePartialWork,
   });
   if (!preflight.ok) return preflight;
 
   let fresh = getWorkItem(wi.id) || wi;
+  if (fresh.status === "failed" && fresh.branch_name && fresh.merge_state !== "merged") {
+    return {
+      ok: false,
+      reason: "work_item_not_complete",
+      message: `Work item ${wi.id} failed; recover it before merging.`,
+      work_item_id: wi.id,
+      review_approved: false,
+    };
+  }
   if (
     fresh.branch_name
     && fresh.merge_state !== "merged"
@@ -377,6 +422,13 @@ export async function finalizeApprovedReview(workItemId, {
       const lockedWi = getWorkItem(wi.id);
       if (!lockedWi) {
         return { ok: false, reason: "no_such_wi", message: "The work item no longer exists." };
+      }
+      if (lockedWi.status === "failed" && lockedWi.merge_state !== "merged") {
+        return {
+          ok: false,
+          reason: "work_item_not_complete",
+          message: `Work item ${wi.id} failed; recover it before merging.`,
+        };
       }
       if (lockedWi.merge_state === "merged") {
         return {

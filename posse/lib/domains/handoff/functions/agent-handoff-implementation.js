@@ -1295,11 +1295,12 @@ function successfulArtifactInspectionCandidates(context) {
   const database = context?.db || getDb();
   let rows = [];
   try {
+    // view_image inspects the same binary artifact, pixels included.
     rows = database.prepare(`
-      SELECT detail_json
+      SELECT observation_type, detail_json
       FROM job_observations
       WHERE attempt_id = ?
-        AND observation_type = 'tool.read_image_metadata'
+        AND observation_type IN ('tool.read_image_metadata', 'tool.view_image')
       ORDER BY id ASC
     `).all(attemptId);
   } catch {
@@ -1313,7 +1314,8 @@ function successfulArtifactInspectionCandidates(context) {
     if (detail?.phase !== "finish" || detail?.ok === false) continue;
     if (detail?.outcome && detail.outcome !== "succeeded") continue;
     const sourcePath = observedToolReadPath(detail, context);
-    if (sourcePath) candidates.push({ path: sourcePath, artifact_inspection: "read_image_metadata" });
+    const inspection = row.observation_type === "tool.view_image" ? "view_image" : "read_image_metadata";
+    if (sourcePath) candidates.push({ path: sourcePath, artifact_inspection: inspection });
   }
   return candidates;
 }

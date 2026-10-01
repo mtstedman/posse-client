@@ -57,6 +57,9 @@ const TOOLS_SUITE = [
   // Artificer-only sprite-sheet composition into artifact output scope. MCP
   // only: the gateway runs converters asynchronously inside its call budget.
   { name: "compose_sprite_sheet", mutatesWorktree: false, advertise: ["mcp"] },
+  // Assessor-only pixel inspection. MCP only: the result carries an image
+  // content block, which function-calling transports cannot return.
+  { name: "view_image", mutatesWorktree: false, advertise: ["mcp"] },
   // Opt-in project DB access. mutatesWorktree:false — DB writes (when granted)
   // don't touch the git working tree; capability is gated by per-repo config.
   { name: "project_db_query", mutatesWorktree: false, advertise: ["function", "mcp"] },

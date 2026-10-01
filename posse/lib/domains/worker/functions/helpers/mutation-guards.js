@@ -186,9 +186,16 @@ export function parseAgentCompletionLog(output = "") {
 
 export function isDeleteNoopSatisfied(job, payload, cwd) {
   if (!isRemovalTask(job, payload)) return false;
-  const scopedFiles = scopedDeleteTargets(job, payload);
-  if (scopedFiles.length === 0) return false;
-  return scopedFiles.every((file) => !fs.existsSync(path.resolve(cwd, file)));
+  // Only planner-declared deletes can prove a cleanup is already done. Prose-
+  // inferred targets are a scope heuristic: WI 159 job 2084 inferred a bare
+  // basename from "... is absent", found it missing at the repo root and
+  // turned a verify-only task into a deterministic no-op pass.
+  const declaredDeletes = uniqueScopeFiles(
+    (Array.isArray(payload?.files_to_delete) ? payload.files_to_delete : [])
+      .map((file) => String(file || "").replace(/\\/g, "/").trim()),
+  );
+  if (declaredDeletes.length === 0) return false;
+  return declaredDeletes.every((file) => !fs.existsSync(path.resolve(cwd, file)));
 }
 
 export function isFilePlacementNoopSatisfied(job, payload, cwd, output = "") {

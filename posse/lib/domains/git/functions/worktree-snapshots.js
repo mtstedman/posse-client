@@ -791,6 +791,118 @@ export async function preserveDirtyWorktreeSnapshotAsync(
     throw err;
   }
 }
+
+// Pin an existing stash commit under the snapshot namespace so the stash
+// entry can be dropped without losing it. The ref points at the stash commit
+// itself, not at a capture of the current worktree, so the cleanup restore
+// (`git stash apply --index <ref>`) brings back exactly what was stashed.
+function stashSnapshotRefName({ wiId, reason, objectHash }) {
+  const wiPart = wiId != null ? `wi-${wiId}` : "wi-unknown";
+  const capturedAt = new Date().toISOString().replace(/[:.]/g, "-");
+  return `${SNAPSHOT_REF_PREFIX}/${wiPart}-${safeFilenameNode(reason)}-${capturedAt}-${objectHash.slice(0, 16)}`;
+}
+
+function firstLine(raw) {
+  return String(raw || "").split("\n").map((line) => line.trim()).find(Boolean) || null;
+}
+
+function lines(raw) {
+  return String(raw || "").split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+function stashSnapshotNote({ refName, objectHash, projectDir, reason, wiId, branchName, headSha, trackedDirty, untracked }) {
+  return {
+    storage: "git-ref",
+    source: "stash-commit",
+    ref_name: refName,
+    object_hash: objectHash,
+    project_dir: projectDir,
+    branch_name: branchName,
+    work_item_id: wiId,
+    reason,
+    captured_at: new Date().toISOString(),
+    head_sha: headSha,
+    tracked_dirty: trackedDirty,
+    untracked,
+  };
+}
+
+function stashSnapshotResult(refName, { objectHash, projectDir, reason, wiId, branchName, onMsg }) {
+  if (typeof onMsg === "function") onMsg(`preserved stash ${objectHash.slice(0, 12)} at ${refName}`);
+  return SnapshotRef.gitRef(refName, {
+    objectHash,
+    projectDir,
+    metadata: { reason, wiId, branchName, source: "stash-commit" },
+  });
+}
+
+export function preserveStashCommitSnapshot(
+  projectDir,
+  stashHash,
+  { reason = "stash", wiId = null, branchName = null, onMsg = null } = {},
+) {
+  const objectHash = String(stashHash || "").trim();
+  if (!/^[0-9a-f]{40,64}$/u.test(objectHash)) return null;
+  try {
+    const existing = firstLine(gitExec(["for-each-ref", "--points-at", objectHash, "--format=%(refname)", SNAPSHOT_REF_PREFIX], projectDir));
+    const refName = existing || stashSnapshotRefName({ wiId, reason, objectHash });
+    if (!existing) gitExec(["update-ref", refName, objectHash], projectDir);
+    if (firstLine(gitExec(["rev-parse", "--verify", refName], projectDir)) !== objectHash) return null;
+    let headSha = null;
+    let trackedDirty = [];
+    let untracked = [];
+    try {
+      headSha = firstLine(gitExec(["rev-parse", `${objectHash}^1`], projectDir));
+      trackedDirty = lines(gitExec(["diff", "--name-only", `${objectHash}^1`, objectHash], projectDir));
+      untracked = lines(gitExec(["ls-tree", "-r", "--name-only", `${objectHash}^3`], projectDir));
+    } catch { /* metadata is best-effort; a stash without untracked files has no ^3 */ }
+    writeSnapshotNote(projectDir, objectHash, stashSnapshotNote({
+      refName, objectHash, projectDir, reason, wiId, branchName, headSha, trackedDirty, untracked,
+    }));
+    return stashSnapshotResult(refName, { objectHash, projectDir, reason, wiId, branchName, onMsg });
+  } catch (err) {
+    if (typeof onMsg === "function") onMsg(`stash snapshot failed for ${objectHash.slice(0, 12)}: ${err?.message || err}`);
+    return null;
+  }
+}
+
+export async function preserveStashCommitSnapshotAsync(
+  projectDir,
+  stashHash,
+  { reason = "stash", wiId = null, branchName = null, onMsg = null, signal = null } = {},
+) {
+  const objectHash = String(stashHash || "").trim();
+  if (!/^[0-9a-f]{40,64}$/u.test(objectHash)) return null;
+  try {
+    const existing = firstLine(await gitExecAsync(["for-each-ref", "--points-at", objectHash, "--format=%(refname)", SNAPSHOT_REF_PREFIX], projectDir, { signal }));
+    const refName = existing || stashSnapshotRefName({ wiId, reason, objectHash });
+    if (!existing) await gitExecAsync(["update-ref", refName, objectHash], projectDir, { signal });
+    if (firstLine(await gitExecAsync(["rev-parse", "--verify", refName], projectDir, { signal })) !== objectHash) return null;
+    let headSha = null;
+    let trackedDirty = [];
+    let untracked = [];
+    try {
+      headSha = firstLine(await gitExecAsync(["rev-parse", `${objectHash}^1`], projectDir, { signal }));
+      trackedDirty = lines(await gitExecAsync(["diff", "--name-only", `${objectHash}^1`, objectHash], projectDir, { signal }));
+      untracked = lines(await gitExecAsync(["ls-tree", "-r", "--name-only", `${objectHash}^3`], projectDir, { signal }));
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+    }
+    try {
+      await writeSnapshotNoteAsync(projectDir, objectHash, stashSnapshotNote({
+        refName, objectHash, projectDir, reason, wiId, branchName, headSha, trackedDirty, untracked,
+      }), { signal });
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+    }
+    return stashSnapshotResult(refName, { objectHash, projectDir, reason, wiId, branchName, onMsg });
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    if (typeof onMsg === "function") onMsg(`stash snapshot failed for ${objectHash.slice(0, 12)}: ${err?.message || err}`);
+    return null;
+  }
+}
+
 // preserveBranchTipSnapshot / preserveBranchTipSnapshotAsync are intentionally
 // NOT twins of one body: the sync fn builds the tip snapshot in node-git,
 // while the async fn delegates the whole semantics to the native Rust method

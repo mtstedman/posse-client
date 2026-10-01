@@ -2167,6 +2167,23 @@ export const TOOL_READ_IMAGE_METADATA = {
   },
 };
 
+export const TOOL_VIEW_IMAGE = {
+  type: "function",
+  name: "view_image",
+  description:
+    "Look at one local image: returns the image itself for visual inspection plus its format, dimensions, byte size, and SHA-256. " +
+    "Use it when a criterion depends on what the image shows (scene, composition, style, legibility), which metadata and OCR cannot prove. " +
+    "Accepts PNG, JPEG, WebP, or GIF inside the readable scope; large images are downscaled before delivery.",
+  parameters: {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Image file path (relative to the working directory or absolute inside the readable scope)." },
+    },
+    required: ["path"],
+    additionalProperties: false,
+  },
+};
+
 export const TOOL_VALIDATE_ARTIFACT_OUTPUT = {
   type: "function",
   name: "validate_artifact_output",

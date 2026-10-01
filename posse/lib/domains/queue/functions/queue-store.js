@@ -444,6 +444,8 @@ export {
   getWorkItemMergeDependencies,
   orderWorkItemsByMergeDependencies,
   crossWiMergeDependencyWouldCycle,
+  collectCrossWiPathProvenance,
+  workItemWaitsOnWorkItem,
   addCrossWiMergeDependency,
   removeCrossWiMergeDependency,
   clearCrossWiMergeDependenciesForWorkItem,

@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { teamManagedToolAdmitted } from "../../../domains/pairing/functions/team-managed-write.js";
+import { jobWriteActivity } from "../../../domains/scheduler/classes/JobWriteActivity.js";
 
 import { appendResearchWorkBudget, isResearchWorkBudgetBlock, researchWorkBudget } from "../../../domains/research/functions/work-budget.js";
 import { compactResearchSearchResult, compactResearchSearchRows } from "../functions/research-search-presentation.js";
@@ -3234,6 +3235,22 @@ function appendResearchBudgetExhaustedNotice(result, admission, session) {
   return next;
 }
 
+// The gateway and symbol.get batch paths append the budget notice outside the
+// observed-tool path, so they record it here. Record the notice actually
+// appended: within the countdown window that is research_budget_remaining
+// with its live count, not the exhausted notice.
+function appendAndRecordResearchBudgetNotice(result, admission, session, toolName) {
+  const next = appendResearchBudgetExhaustedNotice(result, admission, session);
+  if (next === result) return result;
+  const prior = result?.[OWNER_MODEL_CONTROL_NOTICES]?.length || 0;
+  for (const notice of (next?.[OWNER_MODEL_CONTROL_NOTICES] || []).slice(prior)) {
+    recordOwnerModelControlNotice(session, toolName, { ...notice, text: String(notice.text || "").trim() });
+  }
+  return next;
+}
+
+export const __testAppendAndRecordResearchBudgetNotice = appendAndRecordResearchBudgetNotice;
+
 function agentHandoffCallableName(session) {
   const boot = session?.bootConfig || {};
   return renderAgentHandoffCallableName({
@@ -6275,19 +6292,12 @@ export class PersistentMcpOwner {
         const physicalCallCeiling = researchSynthesisPolicyFor(session).maxPhysicalCalls;
         if (gatewayAdmission.tracked && response?.result && !resolveAtlasResearchRuntimeGuidance()) {
           const priorResult = response.result;
-          const result = appendResearchBudgetExhaustedNotice(priorResult, {
+          const result = appendAndRecordResearchBudgetNotice(priorResult, {
             ...gatewayAdmission,
             maxPhysicalCalls: physicalCallCeiling,
             reservedPhysicalCalls: () => this._researchCallReservations.get(researchBudgetKey(session.bootConfig)),
-          }, session);
-          if (result !== priorResult) {
-            response = { ...response, result };
-            recordOwnerModelControlNotice(session, requested.name, {
-              kind: "research_budget_exhausted",
-              text: researchWorkBudgetExhaustedText(session, researchWorkBudget(gatewayAdmission)?.remaining ?? 0),
-              trigger: "physical_call_ceiling",
-            });
-          }
+          }, session, requested.name);
+          if (result !== priorResult) response = { ...response, result };
         }
         if (mcpToolCallSuccess(response)
           && Number.isSafeInteger(assignedResearchPhysicalCallStep)
@@ -6384,6 +6394,15 @@ export class PersistentMcpOwner {
         }
       }
       if (message.method === "tools/call" && mcpToolCallSuccess(response)) {
+        // A successful write keeps the runtime watchdog from killing a job
+        // that is still producing its change (bounded by a hard ceiling).
+        const writtenTool = requestedToolPolicyName(
+          String(message?.params?.name || ""),
+          message?.params?.arguments || {},
+        );
+        if (writtenTool.suite === "tools") {
+          jobWriteActivity.noteToolCall(session?.bootConfig?.jobId, writtenTool.name);
+        }
         void this._scheduleAtlasWriteRefresh({ message, session, response }).catch((err) => {
           appendRunTelemetry("diagnostics", {
             kind: "mcp.owner.atlas_write_refresh",
@@ -6725,14 +6744,7 @@ export class PersistentMcpOwner {
         ),
         batchAdmission,
       );
-      const noticedBatchResult = appendResearchBudgetExhaustedNotice(batchResult, batchAdmission, args.session);
-      if (noticedBatchResult !== batchResult) {
-        recordOwnerModelControlNotice(args.session, "symbol.get", {
-          kind: "research_budget_exhausted",
-          text: researchWorkBudgetExhaustedText(args.session, researchWorkBudget(batchAdmission)?.remaining ?? 0),
-          trigger: "physical_call_ceiling",
-        });
-      }
+      const noticedBatchResult = appendAndRecordResearchBudgetNotice(batchResult, batchAdmission, args.session, "symbol.get");
       return mcpToolResultMessage(args.message, noticedBatchResult);
     }
     const enqueuedAt = Date.now();

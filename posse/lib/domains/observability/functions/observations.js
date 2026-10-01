@@ -1408,6 +1408,10 @@ function _summarizeAtlasArgs(input = {}) {
     if (typeof value.exportedOnly === "boolean") summarized.exportedOnly = value.exportedOnly;
     return Object.keys(summarized).length > 0 ? summarized : null;
   };
+  const compactItem = (item) => {
+    if (!item || typeof item !== "object") return item;
+    try { return JSON.stringify(item); } catch { return "[object]"; }
+  };
   const keys = Object.keys(redactedInput || {}).slice(0, 8);
   for (const key of keys) {
     const value = redactedInput[key];
@@ -1427,7 +1431,9 @@ function _summarizeAtlasArgs(input = {}) {
           : _truncate(item, 80)
       ));
     }
-    else if (Array.isArray(value)) out[key] = value.slice(0, 8).map((item) => _truncate(item, 80));
+    // Object items (web_research_handoff findings/sources) are serialized;
+    // String() logged them as "[object Object]".
+    else if (Array.isArray(value)) out[key] = value.slice(0, 8).map((item) => _truncate(compactItem(item), 80));
     else if (typeof value === "object" && key === "symbolRef") {
       out[key] = symbolRef(value) || "[object]";
     }

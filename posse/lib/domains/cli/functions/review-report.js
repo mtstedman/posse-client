@@ -12,6 +12,7 @@ import {
   listWorkItems,
   orderWorkItemsByMergeDependencies,
   reconcileMergedWorkItemReviewStates,
+  getPublicationTelemetry,
 } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { workItemCost } from "../../billing/functions/cost.js";
@@ -232,6 +233,7 @@ function summarizeJobStep(job, writeObservationsByJob = new Map()) {
 
 export function saveReport(reportData, { projectDir = process.cwd() } = {}) {
   try {
+    const publication = getPublicationTelemetry();
     const dbPath = getRuntimeDbPath(projectDir);
     const reportsDir = path.resolve(path.dirname(dbPath), "reports");
     if (!fs.existsSync(reportsDir)) fs.mkdirSync(reportsDir, { recursive: true });
@@ -257,6 +259,14 @@ export function saveReport(reportData, { projectDir = process.cwd() } = {}) {
           mergeState: d.wi.merge_state,
           createdAt: d.wi.created_at,
           completedAt: d.wi.completed_at,
+        },
+        delivery: {
+          localState: d.wi.merge_state === "merged"
+            ? "merged"
+            : d.wi.branch_name
+              ? "unmerged_branch"
+              : "no_branch",
+          ...publication,
         },
         decision: d._decision || null,
         mergeResult: d._mergeResult ? stripAnsi(d._mergeResult) : null,
@@ -369,7 +379,7 @@ export function listReviewableWorkItemsForApproval(isReviewableWorkItem) {
   reconcileMergedWorkItemReviewStates();
   const predicate = typeof isReviewableWorkItem === "function" ? isReviewableWorkItem : () => true;
   return orderWorkItemsByMergeDependencies(
-    listWorkItems(["complete", "failed"]).filter(predicate),
+    listWorkItems(["complete"]).filter(predicate),
   );
 }
 

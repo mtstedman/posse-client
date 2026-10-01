@@ -14,6 +14,7 @@ import {
 } from "../../queue/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { gcWorktreesAsync } from "./worktree.js";
+import { sortWorkItemsByCompletion } from "./merge-closeout.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
 const AUTO_MERGE_STATUS_RECONCILE_STATUSES = [
@@ -48,13 +49,16 @@ export function createAutoMergeWorkflowHelpers(context, {
     shouldAutoApproveIterativeWorkItem,
   } = context;
 
+  // Close-out order: cross-WI sources before their dependents, otherwise in
+  // completion order, merged one at a time so each refresh sees the target
+  // its predecessors produced.
   function listEndOfRunMergeableWorkItems() {
-    return orderWorkItemsByMergeDependencies(
+    return orderWorkItemsByMergeDependencies(sortWorkItemsByCompletion(
       listWorkItems(["complete"])
         .filter(wi => wi.branch_name && wi.merge_state !== "merged")
         .filter((wi) => !isIterativeWorkItemActive(wi))
         .filter((wi) => autoMerge || shouldAutoApproveIterativeWorkItem(wi)),
-    );
+    ));
   }
 
   function hasAutoMergeableCompletedWorkItems() {

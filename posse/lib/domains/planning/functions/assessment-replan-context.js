@@ -158,6 +158,12 @@ export function buildPlannerAssessmentReplanContext(payload, { readRoot = "", di
       ? promptLiteral("COMPILER REWRITES (the failed task is the compiled job, not the task as planned)", payload.compiler_rewrites.join("\n"))
       : "",
     payload.test_command ? promptLiteral("EXISTING VERIFICATION COMMAND", payload.test_command) : "",
+    Array.isArray(payload.baseline_test_debt) && payload.baseline_test_debt.length > 0
+      ? [
+        promptLiteral("TEST COMMANDS ALREADY FAILING BEFORE ANY CHANGE (baseline debt)", JSON.stringify(payload.baseline_test_debt)),
+        "Each of these failed at its frozen baseline, before any job changed code, so it cannot verify revised tasks as written. Declare a command that passes on the current branch, or make fixing the pre-existing failure an explicit task.",
+      ].join("\n")
+      : "",
     promptLiteral("RETAINED WORK", JSON.stringify(payload.retained_work || [])),
     Array.isArray(payload.superseded_work) && payload.superseded_work.length > 0
       ? promptLiteral("SUPERSEDED WORK (canceled by this replan, not done; keep its scope and verification covered)", JSON.stringify(payload.superseded_work))

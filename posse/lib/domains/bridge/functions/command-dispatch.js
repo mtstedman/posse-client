@@ -434,12 +434,14 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
 
     case BRIDGE_COMMANDS.REVIEW_APPROVE: {
       const reviewJobId = explicitJobIdArg(args);
+      const mergePartialWork = args.merge_partial_work === true;
       if (reviewJobId) {
         const resolved = resolveReviewGateJob(reviewJobId);
         if (!resolved.ok) return resolved;
         const preflight = preflightReviewApproval(resolved.workItemId, {
           projectDir: context.projectDir || process.cwd(),
           reviewWorkflow: context.reviewWorkflow || null,
+          mergePartialWork,
         });
         if (!preflight.ok) return preflight;
         const note = String(args.note || args.response || "").trim();
@@ -467,6 +469,7 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
           projectDir: context.projectDir || process.cwd(),
           approvalLogged: false,
           reviewWorkflow: context.reviewWorkflow || null,
+          mergePartialWork,
         });
         return finalized.ok
           ? { ...reviewResult, ...finalized, ok: true }
@@ -478,6 +481,7 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
         actor: context.actor || "bridge",
         projectDir: context.projectDir || process.cwd(),
         reviewWorkflow: context.reviewWorkflow || null,
+        mergePartialWork,
       });
       if (!approved.ok) return approved;
       return finalizeApprovedReview(wiId, {
@@ -485,6 +489,7 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
         projectDir: context.projectDir || process.cwd(),
         approvalLogged: approved.approval_logged === true,
         reviewWorkflow: context.reviewWorkflow || null,
+        mergePartialWork,
       });
     }
 

@@ -2476,6 +2476,11 @@ export class TrackedProviderClient {
       const recordedDurationMs = Number.isFinite(Number(stats.durationMs))
         ? Number(stats.durationMs)
         : Math.max(0, Date.now() - agentCallStartedAt);
+      const callInterrupted = abortSignal?.aborted === true
+        || isAbortError(err)
+        || err?._killReason != null
+        || [130, 143].includes(Number(recordedExitCode));
+      const callStatus = callInterrupted ? "interrupted" : "failed";
       recordMemorySample("provider.call.after_error", {
         agent_call_id: agentCallId,
         work_item_id,
@@ -2509,7 +2514,7 @@ export class TrackedProviderClient {
         outputLimitReason: stats.outputLimitReason || err.outputLimitReason || null,
       });
       completeAgentCall(agentCallId, {
-        status: "failed",
+        status: callStatus,
         output_chars: recordedOutputChars,
         ...completionAccountingFields({
           stats,
@@ -2538,7 +2543,7 @@ export class TrackedProviderClient {
         requestContextInputTokens: peakRequestContextTokens,
         // Raw stats for the same reason as the success-path pressure call.
         stats,
-        status: "failed",
+        status: callStatus,
         opts,
       });
 
@@ -2572,7 +2577,7 @@ export class TrackedProviderClient {
       const failureOutput = stats.output || err.output || "";
       retainReplayOutput?.(agentCallId, {
         output: failureOutput,
-        status: "failed",
+        status: callStatus,
         stats: accountingStats,
         errorText: err.message?.slice(0, 2000) || null,
       });
@@ -2586,7 +2591,7 @@ export class TrackedProviderClient {
         attempt: opts.attemptCount || 1,
         activity: opts.activity,
         modelTier: tier,
-        status: "failed",
+        status: callStatus,
         inputTokens: accountingInputTokens,
         outputTokens: accountingOutputTokens,
         providerUsageStatus,
@@ -2629,9 +2634,9 @@ export class TrackedProviderClient {
         job_id,
         attempt_id: observationContext?.attempt_id ?? null,
         agent_call_id: agentCallId,
-        phase: "agent_call_failed",
-        reason: "provider_attempt_failed",
-        status: "failed",
+        phase: callInterrupted ? "agent_call_interrupted" : "agent_call_failed",
+        reason: callInterrupted ? "provider_attempt_interrupted" : "provider_attempt_failed",
+        status: callStatus,
         extra: {
           error_text: err.message?.slice(0, 2000) || null,
           output_chars: recordedOutputChars,

@@ -164,6 +164,144 @@ function findMergeDependencyPath(startWorkItemId, targetWorkItemId) {
   return null;
 }
 
+function repoPathsOverlap(left, right) {
+  const a = normalizeRepoPath(left);
+  const b = normalizeRepoPath(right);
+  if (!a || !b) return false;
+  if (a === "*" || a === "." || b === "*" || b === ".") return true;
+  // Applied-sync records do not keep a lock kind, so a root (directory) entry
+  // and a file entry overlap by prefix in either direction.
+  return a === b || b.startsWith(`${a}/`) || a.startsWith(`${b}/`);
+}
+
+/**
+ * Where a work item's current content of `path` came from, for cross-WI
+ * handoffs of that path out of it:
+ *
+ * - `carried`: work items whose pending edits to the path travel inside its
+ *   content (applied, not skipped, cross-WI syncs and recorded merge
+ *   dependencies on the path, followed transitively). A WI that copies the
+ *   path from it copies their edits too, so it must merge after each of them.
+ * - `outstanding`: work items whose pending edits to the path are NOT in its
+ *   content because they released the path to it without a sync (the
+ *   "existing order" release: they merge after it and rebase onto it). A WI
+ *   that copies the path now would edit without those edits and conflict
+ *   with them at merge, so it must wait until they merge.
+ *
+ * Merged, canceled and failed work items are left out (nothing can or need
+ * wait on their merge); the walk still passes through them.
+ */
+export function collectCrossWiPathProvenance(workItemId, path, { maxWorkItems = 32 } = {}) {
+  const startId = Number(workItemId);
+  const targetPath = normalizeRepoPath(path);
+  if (!Number.isFinite(startId) || startId <= 0 || !targetPath) return { carried: [], outstanding: [] };
+  const readJobPayloads = getDb().prepare(`SELECT payload_json FROM jobs WHERE work_item_id = ?`);
+  const carriedIds = new Set();
+  const outstandingIds = new Set();
+  const visited = new Set([startId]);
+  // Each frontier entry walks one work item's content provenance; `lacking`
+  // marks content this branch does not hold (reached through a bare release),
+  // so everything found beyond it is outstanding rather than carried.
+  const queue = [{ id: startId, lacking: false }];
+  while (queue.length > 0 && visited.size <= maxWorkItems) {
+    const current = queue.shift();
+    const contentSources = new Set();
+    const releasedBy = new Set();
+    for (const row of readJobPayloads.all(current.id)) {
+      const payload = parseJobPayload(row);
+      const applied = Array.isArray(payload?._cross_wi_file_syncs_applied) ? payload._cross_wi_file_syncs_applied : [];
+      for (const entry of applied) {
+        if (entry?.change_kind === "skipped" || !repoPathsOverlap(entry?.path, targetPath)) continue;
+        contentSources.add(Number(entry?.source_work_item_id));
+      }
+      const releases = Array.isArray(payload?._cross_wi_existing_order_releases) ? payload._cross_wi_existing_order_releases : [];
+      for (const entry of releases) {
+        if (repoPathsOverlap(entry?.path, targetPath)) releasedBy.add(Number(entry?.source_work_item_id));
+      }
+    }
+    for (const dep of getWorkItemMergeDependencies(current.id)) {
+      if (dep.path && repoPathsOverlap(dep.path, targetPath)) contentSources.add(Number(dep.source_work_item_id));
+    }
+    const visit = (sourceId, lacking) => {
+      if (!Number.isFinite(sourceId) || sourceId <= 0) return;
+      (lacking ? outstandingIds : carriedIds).add(sourceId);
+      if (visited.has(sourceId)) return;
+      visited.add(sourceId);
+      queue.push({ id: sourceId, lacking });
+    };
+    for (const sourceId of contentSources) visit(sourceId, current.lacking);
+    for (const sourceId of releasedBy) visit(sourceId, true);
+  }
+  const live = (id, { allowFailed }) => {
+    if (id === startId) return null;
+    const wi = readWorkItem(id);
+    if (!wi || wi.merge_state === "merged" || wi.status === "canceled") return null;
+    if (!allowFailed && wi.status === "failed") return null;
+    return wi;
+  };
+  const describe = (wi) => ({
+    source_work_item_id: Number(wi.id),
+    source_branch: String(wi.branch_name || "").trim() || null,
+  });
+  const outstanding = [...outstandingIds]
+    .map((id) => live(id, { allowFailed: false }))
+    .filter(Boolean)
+    .map(describe);
+  const outstandingSet = new Set(outstanding.map((entry) => entry.source_work_item_id));
+  const carried = [...carriedIds]
+    .filter((id) => !outstandingSet.has(id))
+    .map((id) => live(id, { allowFailed: true }))
+    .filter(Boolean)
+    .map(describe);
+  return { carried, outstanding };
+}
+
+/**
+ * True when `fromWorkItemId` cannot finish and merge until `toWorkItemId`
+ * merges: it is ordered after it through merge dependencies, or one of its
+ * queued jobs waits on a work-item lock that the target (transitively) holds.
+ * A work item that holds a lock "until merge" must not make the target wait
+ * on it when this is true, or neither can ever merge.
+ */
+export function workItemWaitsOnWorkItem(fromWorkItemId, toWorkItemId, { maxWorkItems = 64 } = {}) {
+  const startId = Number(fromWorkItemId);
+  const targetId = Number(toWorkItemId);
+  if (!Number.isFinite(startId) || !Number.isFinite(targetId) || startId <= 0 || targetId <= 0) {
+    return { waits: false, path: [] };
+  }
+  if (startId === targetId) return { waits: true, path: [startId] };
+  const db = getDb();
+  const readLaneHolders = db.prepare(`
+    SELECT DISTINCT w.holder_work_item_id
+    FROM file_lane_waits w
+    JOIN jobs j ON j.id = w.waiter_job_id
+    WHERE w.waiter_work_item_id = ?
+      AND w.holder_type = 'work_item'
+      AND w.holder_work_item_id IS NOT NULL
+      AND j.status = 'queued'
+  `);
+  const queue = [{ id: startId, path: [startId] }];
+  const visited = new Set([startId]);
+  while (queue.length > 0 && visited.size <= maxWorkItems) {
+    const current = queue.shift();
+    const next = new Set();
+    const row = readWorkItem(current.id);
+    for (const dep of row ? getWorkItemMergeDependencies(row) : []) {
+      const source = readWorkItem(dep.source_work_item_id);
+      if (source && source.merge_state !== "merged") next.add(Number(dep.source_work_item_id));
+    }
+    for (const lane of readLaneHolders.all(current.id)) next.add(Number(lane.holder_work_item_id));
+    for (const id of next) {
+      if (!Number.isFinite(id) || visited.has(id)) continue;
+      const nextPath = [...current.path, id];
+      if (id === targetId) return { waits: true, path: nextPath };
+      visited.add(id);
+      queue.push({ id, path: nextPath });
+    }
+  }
+  return { waits: false, path: [] };
+}
+
 export function crossWiMergeDependencyWouldCycle(targetWorkItemId, sourceWorkItemId) {
   const targetId = Number(targetWorkItemId);
   const sourceId = Number(sourceWorkItemId);
@@ -371,6 +509,16 @@ export function rollbackPendingCrossWiSyncHandoffsForJob(jobOrId, reason = "job_
         reason,
       });
       if (removed.ok && removed.removed > 0) rolledBack += removed.removed;
+      // Dependencies this handoff added for work items whose edits travel in
+      // the source's content (only the ones it created, never pre-existing).
+      const carriedIds = Array.isArray(sync.carried_dependency_work_item_ids) ? sync.carried_dependency_work_item_ids : [];
+      for (const carriedId of carriedIds) {
+        const carriedRemoved = removeCrossWiMergeDependency(job.work_item_id, carriedId, {
+          path: sync.path,
+          reason,
+        });
+        if (carriedRemoved.ok && carriedRemoved.removed > 0) rolledBack += carriedRemoved.removed;
+      }
     }
     const payload = parseJobPayload(job);
     payload._cross_wi_file_syncs_rolled_back = [

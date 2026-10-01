@@ -13,6 +13,11 @@ import { C } from "../../../../shared/format/functions/colors.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY } from "../../../../catalog/verification.js";
 import { gitExecAsync } from "../../../git/functions/utils.js";
+import {
+  porcelainDeltaPaths,
+  porcelainStatusEntries,
+  restorePathsToTreeAsync,
+} from "../../../git/functions/worktree-recovery.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import { getSetting } from "../../../settings/functions/repository-settings.js";
 import { repairVerificationPrerequisites } from "../../../verification/functions/prerequisite-adapters.js";
@@ -58,6 +63,30 @@ async function porcelain(cwd) {
   }
 }
 
+// Undo what the typecheck changed. Sibling jobs of the work item share this
+// worktree, so when one owns a dirty path, only paths this run changed are
+// put back, never the sibling's (WI 154, 2026-10-01: a sibling's pre-dev
+// cleanup reset the worktree and deleted job 2028's placeholders). Paths that
+// were already dirty before the run are left alone.
+async function cleanupTypecheckSideEffects({ worker, job, wtPath, before, after, cleanupWorktree, siblingOwnedPaths, cleanupPaths }) {
+  let siblingPaths = new Set();
+  if (typeof siblingOwnedPaths === "function") {
+    try {
+      siblingPaths = new Set(await siblingOwnedPaths([...porcelainStatusEntries(after).keys()]));
+    } catch {
+      siblingPaths = new Set();
+    }
+  }
+  if (siblingPaths.size === 0) {
+    if (typeof cleanupWorktree === "function") await cleanupWorktree();
+    return;
+  }
+  const prior = porcelainStatusEntries(before);
+  const own = porcelainDeltaPaths(before, after).filter((file) => !siblingPaths.has(file) && !prior.has(file));
+  if (own.length > 0) await cleanupPaths(wtPath, own);
+  worker?.emit?.(job.id, `${C.dim}[typecheck] WI#${job.work_item_id} job #${job.id}: undid ${own.length} typecheck change(s); kept ${siblingPaths.size} sibling-owned path(s)${C.reset}`);
+}
+
 function countByFile(diagnostics) {
   const counts = {};
   for (const diagnostic of diagnostics) counts[diagnostic.file] = (counts[diagnostic.file] || 0) + 1;
@@ -71,6 +100,8 @@ export async function runPreDevTypecheck({
   wtPath,
   signal = null,
   cleanupWorktree = null,
+  siblingOwnedPaths = null,
+  cleanupPaths = (cwd, paths) => restorePathsToTreeAsync(cwd, paths, "HEAD", { signal }),
   collect = collectTypecheckDiagnosticsAsync,
   repair = repairVerificationPrerequisites,
   gitStatus = porcelain,
@@ -109,8 +140,8 @@ export async function runPreDevTypecheck({
       }
     }
     const after = await gitStatus(wtPath);
-    if (before !== null && after !== null && before !== after && typeof cleanupWorktree === "function") {
-      await cleanupWorktree();
+    if (before !== null && after !== null && before !== after) {
+      await cleanupTypecheckSideEffects({ worker, job, wtPath, before, after, cleanupWorktree, siblingOwnedPaths, cleanupPaths });
     }
     const inScope = new Set(files);
     const projectDiagnostics = Array.isArray(result.diagnostics) ? result.diagnostics : [];

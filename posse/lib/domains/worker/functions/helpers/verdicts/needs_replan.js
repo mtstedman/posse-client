@@ -25,6 +25,7 @@ import { getMaxReplans } from "../../../../settings/functions/tunables.js";
 import { readPlannerDispatchPolicy } from "../../../../planning/functions/planner-dispatch-policy.js";
 import { describeCompilerRewrites } from "../../../../planning/functions/planner-task-provenance.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
+import { collectBaselineTestDebt } from "../baseline-test-debt.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
 
 function isLoopbackReplanJob(job) {
@@ -176,6 +177,8 @@ export function handle(job, verdict, ctx) {
     // dispatch research children, instead of the fixed standard/medium
     // budget the router path uses.
     const dispatchPolicy = readPlannerDispatchPolicy();
+    // Planner test commands this work item already found failing at baseline.
+    const baselineTestDebt = collectBaselineTestDebt([job, ...allJobs.filter((sibling) => sibling.id !== job.id)]);
     const replanJob = spawnFromAssessor("failed", "plan", {
       work_item_id: job.work_item_id,
       title: `Replan: ${wiTitle}`,
@@ -205,6 +208,7 @@ export function handle(job, verdict, ctx) {
         original_success_criteria: Array.isArray(originalPayload.success_criteria) ? originalPayload.success_criteria : [],
         ...(compilerRewrites.length > 0 ? { compiler_rewrites: compilerRewrites } : {}),
         test_command: originalPayload.test_command || null,
+        ...(baselineTestDebt.length > 0 ? { baseline_test_debt: baselineTestDebt } : {}),
         retained_work: allJobs
           .filter((sibling) => sibling.id !== job.id
             && ["dev", "fix", "artificer", "promote"].includes(sibling.job_type)

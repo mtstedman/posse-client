@@ -1,5 +1,9 @@
 const tokenFields = ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
 const token = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+// Only rows that can carry a child's API usage mark child usage. The CLI also
+// stamps parent_tool_use_id on rows without usage: a main-thread tool's 30 s
+// tool_progress heartbeat carries the tool's own id (CLI 2.1.286).
+const childUsageEnvelopes = new Set(["assistant", "stream_event"]);
 
 // Claude may finish a terminal tool handoff without emitting a CLI result.
 // Keep completed API message usage independently of that CLI closeout. Split
@@ -14,7 +18,7 @@ export class ClaudeStreamTelemetry {
 
   observe(envelope) {
     if (!envelope || envelope.isSidechain || envelope.parent_tool_use_id) {
-      if (envelope?.parent_tool_use_id) this.childUsagePossible = true;
+      if (envelope?.parent_tool_use_id && childUsageEnvelopes.has(envelope.type)) this.childUsagePossible = true;
       return [];
     }
     const event = envelope.type === "stream_event" ? envelope.event : envelope;
@@ -89,6 +93,8 @@ export class ClaudeStreamTelemetry {
       finalized,
       usage: finalized ? usage : {},
       numTurns: finalized ? complete.length : null,
+      // Main-thread model rounds seen on the stream, finalized or not.
+      modelRounds: this.messages.size,
       partial: finalized ? null : this.partialUsage(),
       segments,
       thinking: {

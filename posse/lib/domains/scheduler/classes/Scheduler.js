@@ -44,6 +44,8 @@ import {
   resurfaceParkedHumanGates,
   supersedeHumanGate,
   crossWiMergeDependencyWouldCycle,
+  collectCrossWiPathProvenance,
+  workItemWaitsOnWorkItem,
   workItemCanReleaseFileLock,
   getQueueWakeGeneration,
   jobNeedsAssessmentBarrier,
@@ -97,9 +99,12 @@ import {
 import {
   DEADLOCK_TERMINAL_STATUSES,
   LOCK_HOLDING_JOB_STATUSES,
+  RESERVED_SLOT_IMPLEMENTATION_JOB_TYPES,
+  SLOT_CAPPED_PLANNING_JOB_TYPES,
   TERMINAL_JOB_STATUSES,
 } from "../../../catalog/job.js";
 import { WAITING_LANE_JOB_TYPE } from "../../../catalog/waiting-lane.js";
+import { isSequenceAllocationPath } from "../../../catalog/sequence-allocation.js";
 import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atlas.js";
 import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
 import {
@@ -116,12 +121,21 @@ import {
   readBoolSetting,
   readHeadlessHumanTimeoutSec,
   readHumanGateResnoozeSec,
+  readImplementationReservedSlots,
   readPositiveIntSetting,
+  readRuntimeWriteCeilingMultiplier,
+  readRuntimeWriteGraceSec,
 } from "../functions/config.js";
 import {
   collectStrictOnlyRootConflicts,
   findFileConflict,
 } from "../functions/file-scope.js";
+import {
+  RUNTIME_NO_ESCALATION_BACKSTOP_MULTIPLIER,
+  runtimeKillCanEscalate,
+  runtimeWriteExtensionActive,
+} from "../functions/runtime-escalation.js";
+import { jobWriteActivity } from "./JobWriteActivity.js";
 import {
   WORKTREE_TYPES,
   createHeldQueueLockIndex,
@@ -258,6 +272,17 @@ function terminateSchedulerChild(child, { force = false } = {}) {
   }
 }
 
+function parseLockMetadata(value) {
+  if (!value) return null;
+  if (typeof value === "object") return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   if (!job || conflict?.type !== "work_item") return false;
   const lockKind = conflict.lock?.lock_kind;
@@ -325,50 +350,86 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   }
 
   const mergeOrderCheck = crossWiMergeDependencyWouldCycle(job.work_item_id, sourceWiId);
-  if (mergeOrderCheck.wouldCycle) {
-    if (mergeOrderCheck.reason === "merge_order_cycle") {
-      const released = releaseWorkItemFileLockForPath(
-        sourceWiId,
-        path,
-        lockKind,
-        `cross_wi_existing_order_to_wi_${job.work_item_id}_job_${job.id}`,
-      );
-      if (released <= 0) {
-        return recordBlocked(
-          `Cross-WI handoff skipped for ${path}; existing-order lock release found no active lock`,
-          {
-            reason: "lock_release_failed",
-            existing_merge_order: true,
-            merge_order_path: mergeOrderCheck.path,
-          },
-        );
-      }
-      logEvent({
-        work_item_id: job.work_item_id,
-        job_id: job.id,
-        event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_HANDOFF_PREPARED,
-        actor_type: EVENT_ACTORS.SCHEDULER,
-        actor_id: ownerId,
-        message: `Released downstream lock for ${path}; WI#${sourceWiId} is already ordered after WI#${job.work_item_id}`,
-        event_json: JSON.stringify({
-          source_work_item_id: sourceWiId,
-          source_branch: sourceBranch,
-          path,
-          lock_kind: lockKind,
-          released,
-          merge_dependency_added: false,
-          existing_merge_order: true,
-          merge_order_path: mergeOrderCheck.path,
-        }),
-      });
-      return true;
-    }
-
+  // "Existing order": the holder is already ordered to merge after this WI
+  // (it synced something from it). The reverse dependency would cycle, and
+  // keeping the lock until the holder merges would deadlock, so the lock is
+  // released to this WI without a content copy; the holder later rebases its
+  // own commits onto this WI's merge. Copying the holder's content here
+  // instead would make that rebase replay its commits onto their own final
+  // state. The holder's pending edits stay claimed, though: the release is
+  // recorded on this job, a later handoff of the path out of this WI waits
+  // until the holder merges, and when this WI merges the holder gets its lock
+  // back (queue file-locks restoreExistingOrderClaimLocks). Before, the
+  // release was bare and a third WI synced the path from this WI without the
+  // holder's edits (H8).
+  const existingOrder = mergeOrderCheck.wouldCycle && mergeOrderCheck.reason === "merge_order_cycle";
+  if (mergeOrderCheck.wouldCycle && !existingOrder) {
     return recordBlocked(
       `Cross-WI handoff skipped for ${path}; merge order would become cyclic`,
       { reason: mergeOrderCheck.reason, merge_order_path: mergeOrderCheck.path },
     );
   }
+
+  const requesterWiId = Number(job.work_item_id);
+  const provenance = collectCrossWiPathProvenance(sourceWiId, path);
+  // Work items whose pending edits travel inside the holder's content: a copy
+  // carries them too, so this WI must merge after each of them.
+  const carried = provenance.carried
+    .filter((entry) => entry.source_work_item_id !== requesterWiId);
+  // Work items whose pending edits the holder's content lacks (they released
+  // the path to it bare). A copy made now would conflict with them.
+  const outstanding = provenance.outstanding
+    .filter((entry) => entry.source_work_item_id !== requesterWiId);
+
+  // Holds until merge: a sequence-allocation file (version pin, migration
+  // manifest) stays with its holder, since a copy shows the next WI the
+  // claimed number but not the files registered under it, and two WIs that
+  // bump from one base claim the same number (H7); a copy lacking another
+  // WI's pending edits waits for that WI (H8). After the merge, the waiting
+  // dev job merges the target into its worktree before it starts. A hold is
+  // dropped only for a WI that itself waits on this one (it would deadlock).
+  const holds = [
+    ...(lockKind === "file" && isSequenceAllocationPath(path)
+      ? [{ work_item_id: sourceWiId, reason: "sequence_allocation_held_until_merge" }]
+      : []),
+    // A lock given back to an existing-order holder when the WI it released
+    // the path to merged: the holder's edits are still pending.
+    ...(parseLockMetadata(conflict.lock?.metadata_json)?.hold_until_merge === true
+      ? [{ work_item_id: sourceWiId, reason: "existing_order_claim_held_until_merge" }]
+      : []),
+    ...outstanding.map((entry) => ({
+      work_item_id: entry.source_work_item_id,
+      reason: "unsynced_upstream_edits_pending_merge",
+    })),
+  ];
+  const deadlockedHolds = [];
+  const blockingHolds = [];
+  for (const hold of holds) {
+    const waits = workItemWaitsOnWorkItem(hold.work_item_id, requesterWiId);
+    if (waits.waits) deadlockedHolds.push({ ...hold, wait_path: waits.path });
+    else blockingHolds.push(hold);
+  }
+  if (blockingHolds.length > 0) {
+    const pendingIds = [...new Set(blockingHolds.map((hold) => hold.work_item_id))];
+    const reason = blockingHolds[0].reason;
+    const message = reason === "sequence_allocation_held_until_merge"
+      ? `Cross-WI handoff held for ${path}; sequence-allocation file stays with WI#${sourceWiId} until it merges`
+      : reason === "existing_order_claim_held_until_merge"
+        ? `Cross-WI handoff held for ${path}; WI#${sourceWiId} keeps it for its pending edits until it merges`
+        : `Cross-WI handoff held for ${path}; WI#${sourceWiId}'s copy lacks pending edits from ${pendingIds.map((id) => `WI#${id}`).join(", ")} until ${pendingIds.length === 1 ? "it merges" : "they merge"}`;
+    return recordBlocked(message, { reason, pending_work_item_ids: pendingIds });
+  }
+  // Holds dropped to avoid a deadlock still record the merge order they imply.
+  const followIds = existingOrder
+    ? []
+    : [...new Set([
+      ...carried.map((entry) => entry.source_work_item_id),
+      ...deadlockedHolds
+        .filter((hold) => hold.reason === "unsynced_upstream_edits_pending_merge")
+        .map((hold) => hold.work_item_id),
+    ])];
+  const branchByWorkItemId = new Map([...carried, ...outstanding]
+    .map((entry) => [entry.source_work_item_id, entry.source_branch]));
 
   const db = getDb();
   const applyHandoff = () => {
@@ -381,29 +442,51 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
       sourceWiId,
       path,
       lockKind,
-      `cross_wi_sync_to_wi_${job.work_item_id}_job_${job.id}`,
+      existingOrder
+        ? `cross_wi_existing_order_to_wi_${job.work_item_id}_job_${job.id}`
+        : `cross_wi_sync_to_wi_${job.work_item_id}_job_${job.id}`,
     );
     if (released <= 0) return { ok: false, released: 0 };
 
-    const dependency = addCrossWiMergeDependency(job.work_item_id, sourceWiId, {
-      path,
-      lock_kind: lockKind,
-      source_branch: sourceBranch,
-      source_lock_id: conflict.lock?.id ?? null,
-      via_job_id: job.id,
-    });
-    if (!dependency.ok) {
-      throw new Error(`Could not record cross-WI merge dependency: ${dependency.reason}`);
+    let dependency = null;
+    if (!existingOrder) {
+      dependency = addCrossWiMergeDependency(job.work_item_id, sourceWiId, {
+        path,
+        lock_kind: lockKind,
+        source_branch: sourceBranch,
+        source_lock_id: conflict.lock?.id ?? null,
+        via_job_id: job.id,
+      });
+      if (!dependency.ok) {
+        throw new Error(`Could not record cross-WI merge dependency: ${dependency.reason}`);
+      }
+    }
+
+    const followAdded = [];
+    const followSkipped = [];
+    for (const followId of followIds) {
+      // A WI already ordered after this one would cycle; it rebases onto
+      // this WI's merge instead, so skipping it is safe.
+      const followDependency = addCrossWiMergeDependency(job.work_item_id, followId, {
+        path,
+        lock_kind: lockKind,
+        source_branch: branchByWorkItemId.get(followId) || null,
+        via_job_id: job.id,
+      });
+      if (!followDependency.ok) followSkipped.push({ source_work_item_id: followId, reason: followDependency.reason });
+      else if (followDependency.added) followAdded.push(followId);
     }
 
     const freshJob = getJob(job.id) || job;
     const payload = parseJobPayload(freshJob);
-    const existing = Array.isArray(payload._cross_wi_file_syncs) ? payload._cross_wi_file_syncs : [];
-    if (!existing.some((entry) =>
+    const listKey = existingOrder ? "_cross_wi_existing_order_releases" : "_cross_wi_file_syncs";
+    const existing = Array.isArray(payload[listKey]) ? payload[listKey] : [];
+    const existingIndex = existing.findIndex((entry) =>
       normalizeHandoffPath(entry?.path) === path
       && Number(entry?.source_work_item_id) === sourceWiId
-    )) {
-      payload._cross_wi_file_syncs = [
+    );
+    if (existingIndex < 0) {
+      payload[listKey] = [
         ...existing,
         {
           path,
@@ -411,13 +494,21 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
           source_work_item_id: sourceWiId,
           source_branch: sourceBranch,
           source_lock_id: conflict.lock?.id ?? null,
+          ...(followAdded.length > 0 ? { carried_dependency_work_item_ids: followAdded } : {}),
           prepared_at: new Date().toISOString(),
         },
       ];
       updateJobPayload(job.id, JSON.stringify(payload));
+    } else if (followAdded.length > 0) {
+      const entry = existing[existingIndex];
+      const priorFollow = Array.isArray(entry?.carried_dependency_work_item_ids) ? entry.carried_dependency_work_item_ids : [];
+      payload[listKey] = existing.map((candidate, index) => (index === existingIndex
+        ? { ...candidate, carried_dependency_work_item_ids: [...new Set([...priorFollow, ...followAdded])] }
+        : candidate));
+      updateJobPayload(job.id, JSON.stringify(payload));
     }
 
-    return { ok: true, released, dependency };
+    return { ok: true, released, dependency, followAdded, followSkipped };
   };
 
   let handoff;
@@ -437,8 +528,13 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   }
   if (!handoff.ok) {
     return recordBlocked(
-      `Cross-WI handoff skipped for ${path}; ${handoff.reason || "source lock was no longer releasable"}`,
-      { reason: handoff.reason || "lock_release_failed" },
+      existingOrder
+        ? `Cross-WI handoff skipped for ${path}; existing-order lock release found no active lock`
+        : `Cross-WI handoff skipped for ${path}; ${handoff.reason || "source lock was no longer releasable"}`,
+      {
+        reason: handoff.reason || "lock_release_failed",
+        ...(existingOrder ? { existing_merge_order: true, merge_order_path: mergeOrderCheck.path } : {}),
+      },
     );
   }
 
@@ -448,7 +544,9 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
     event_type: EVENT_TYPES.WORK_ITEM_CROSS_WI_FILE_HANDOFF_PREPARED,
     actor_type: EVENT_ACTORS.SCHEDULER,
     actor_id: ownerId,
-    message: `Prepared cross-WI sync for ${path} from WI#${sourceWiId}; released idle WI file lock`,
+    message: existingOrder
+      ? `Released downstream lock for ${path}; WI#${sourceWiId} is already ordered after WI#${job.work_item_id} (its pending edits stay claimed until it merges)`
+      : `Prepared cross-WI sync for ${path} from WI#${sourceWiId}; released idle WI file lock`,
     event_json: JSON.stringify({
       source_work_item_id: sourceWiId,
       source_branch: sourceBranch,
@@ -456,6 +554,18 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
       lock_kind: lockKind,
       released: handoff.released,
       merge_dependency_added: handoff.dependency?.added === true,
+      ...(existingOrder ? { existing_merge_order: true, merge_order_path: mergeOrderCheck.path, pending_claim_recorded: true } : {}),
+      ...(handoff.followAdded.length > 0 ? { carried_dependencies_added: handoff.followAdded } : {}),
+      ...(handoff.followSkipped.length > 0 ? { carried_dependencies_skipped: handoff.followSkipped } : {}),
+      ...(deadlockedHolds.length > 0
+        ? {
+          holds_skipped_to_avoid_deadlock: deadlockedHolds.map((hold) => ({
+            work_item_id: hold.work_item_id,
+            reason: hold.reason,
+            wait_path: hold.wait_path,
+          })),
+        }
+        : {}),
     }),
   });
   return true;
@@ -1965,20 +2075,73 @@ export class Scheduler {
               }
               continue;
             }
-            const runtimeElapsedMs = runtimeWatchdogElapsedMs(entry, getJob(jobId) || entry.job, now);
+            const freshJob = getJob(jobId) || entry.job;
+            const runtimeElapsedMs = runtimeWatchdogElapsedMs(entry, freshJob, now);
             if (runtimeElapsedMs == null) continue;
             const runtimeSec = runtimeElapsedMs / 1000;
             const runtimeLimitSec = maxJobRuntimeSecFor(entry.job);
             if (runtimeSec > runtimeLimitSec) {
+              // No stronger model to escalate to: let the attempt keep its
+              // context up to the backstop instead of restarting it as-is.
+              const canEscalate = runtimeKillCanEscalate(freshJob, { leasedJob: entry.job });
+              const backstopSec = runtimeLimitSec * RUNTIME_NO_ESCALATION_BACKSTOP_MULTIPLIER;
+              if (!canEscalate && runtimeSec <= backstopSec) {
+                if (!entry.runtimeEscalationSkipLogged) {
+                  entry.runtimeEscalationSkipLogged = true;
+                  this._log(`WI#${entry.job.work_item_id} job #${jobId} passed max runtime (${runtimeLimitSec}s) on a model with no escalation left — continuing until ${backstopSec}s`, "yellow");
+                  logEvent({
+                    job_id: jobId,
+                    work_item_id: entry.job.work_item_id,
+                    event_type: EVENT_TYPES.JOB_RUNTIME_ESCALATION_SKIPPED,
+                    actor_type: EVENT_ACTORS.SCHEDULER,
+                    actor_id: this.ownerId,
+                    message: `Job passed max runtime (${Math.ceil(runtimeSec)}s > ${runtimeLimitSec}s) but its next attempt would run the same model — not killing before ${backstopSec}s`,
+                  });
+                }
+                continue;
+              }
+              // A job that is still writing files keeps running while its
+              // last write is recent, up to a hard ceiling, so finished work
+              // is not discarded seconds before handoff.
+              const writeGraceSec = readRuntimeWriteGraceSec();
+              const writeCeilingMultiplier = readRuntimeWriteCeilingMultiplier();
+              const writeCeilingSec = runtimeLimitSec * writeCeilingMultiplier;
+              if (canEscalate && runtimeWriteExtensionActive({
+                runtimeSec,
+                limitSec: runtimeLimitSec,
+                nowMs: now,
+                lastWriteAtMs: jobWriteActivity.lastWriteAt(jobId),
+                graceSec: writeGraceSec,
+                ceilingMultiplier: writeCeilingMultiplier,
+              })) {
+                if (!entry.runtimeWriteExtensionLogged) {
+                  entry.runtimeWriteExtensionLogged = true;
+                  this._log(`WI#${entry.job.work_item_id} job #${jobId} passed max runtime (${runtimeLimitSec}s) while still writing files — extending while writes continue, up to ${writeCeilingSec}s`, "yellow");
+                  logEvent({
+                    job_id: jobId,
+                    work_item_id: entry.job.work_item_id,
+                    event_type: EVENT_TYPES.JOB_RUNTIME_EXTENDED,
+                    actor_type: EVENT_ACTORS.SCHEDULER,
+                    actor_id: this.ownerId,
+                    message: `Job passed max runtime (${Math.ceil(runtimeSec)}s > ${runtimeLimitSec}s) with a file write in the last ${writeGraceSec}s — extending while writes continue, up to ${writeCeilingSec}s`,
+                  });
+                }
+                continue;
+              }
               killedForRuntime.set(jobId, { firstKillAt: now, lastKillAt: now, wedgedLogged: false });
-              this._log(`WI#${entry.job.work_item_id} job #${jobId} exceeded max runtime (${Math.ceil(runtimeSec)}s > ${runtimeLimitSec}s) — killing for escalation`, "red");
+              const killLimitSec = canEscalate ? runtimeLimitSec : backstopSec;
+              const killPurpose = canEscalate ? "model escalation" : "runaway backstop (no escalation left)";
+              const extensionNote = canEscalate && entry.runtimeWriteExtensionLogged
+                ? (runtimeSec > writeCeilingSec ? `; write extension ceiling ${writeCeilingSec}s reached` : `; no file write in the last ${writeGraceSec}s`)
+                : "";
+              this._log(`WI#${entry.job.work_item_id} job #${jobId} exceeded max runtime (${Math.ceil(runtimeSec)}s > ${killLimitSec}s${extensionNote}) — killing for ${killPurpose}`, "red");
               logEvent({
                 job_id: jobId,
                 work_item_id: entry.job.work_item_id,
                 event_type: EVENT_TYPES.JOB_RUNTIME_EXCEEDED,
                 actor_type: EVENT_ACTORS.SCHEDULER,
                 actor_id: this.ownerId,
-                message: `Job exceeded max runtime (${Math.ceil(runtimeSec)}s > ${runtimeLimitSec}s) — killing for model escalation`,
+                message: `Job exceeded max runtime (${Math.ceil(runtimeSec)}s > ${killLimitSec}s${extensionNote}) — killing for ${killPurpose}`,
               });
               this._invokeCallback("onKillJob", onKillJob, jobId, "runtime_exceeded");
             }
@@ -2124,6 +2287,17 @@ export class Scheduler {
           .filter(e => isAtlasBackgroundJob(e.job)).length;
         let preparationWorkerCount = [...activeWorkers.values()]
           .filter(e => isWaitingLanePreparationJob(e.job)).length;
+        // Plan jobs order with dev work by created_at, so a queue of older
+        // plans could take every freed slot while ready dev work waited. Once
+        // plans hold all but the reserved agent slots, a pass restricted to
+        // implementation job types runs first; the normal scan follows, where
+        // a plan still takes the slot if no implementation job could start.
+        const implementationReservedSlots = Math.min(this.concurrency, readImplementationReservedSlots());
+        let planningWorkerCount = [...activeWorkers.values()]
+          .filter(e => SLOT_CAPPED_PLANNING_JOB_TYPES.has(e.job.job_type)).length;
+        let implementationPassDone = implementationReservedSlots <= 0;
+        const planSlotCapReached = () => !implementationPassDone
+          && planningWorkerCount >= this.concurrency - implementationReservedSlots;
 
         // Batched lookahead keeps each query bounded while allowing the
         // scheduler to scan past a blocked head-of-queue batch.
@@ -2160,19 +2334,26 @@ export class Scheduler {
           const atlasBackgroundFull = atlasBackgroundWorkerCount >= ATLAS_BACKGROUND_JOB_CONCURRENCY;
           const preparationConcurrency = readWaitingLanePreparationConcurrency();
           const preparationFull = preparationWorkerCount >= preparationConcurrency;
+          const implementationPass = !computeFull && planSlotCapReached();
           const onlyJobTypes = computeFull
             ? [
                 "human_input",
                 ...(atlasBackgroundFull ? [] : ["atlas_warm"]),
                 ...(preparationFull ? [] : [WAITING_LANE_JOB_TYPE]),
               ]
-            : [];
+            : implementationPass ? [...RESERVED_SLOT_IMPLEMENTATION_JOB_TYPES] : [];
           const candidates = findRunnableJobsBatch(fetchLimit, {
             excludeJobIds: [...scanExcludeJobIds],
             onlyJobTypes,
             onlyWorkItemIds: this.onlyWorkItemIds,
           });
-          if (candidates.length === 0) break;
+          if (candidates.length === 0) {
+            if (implementationPass) {
+              implementationPassDone = true;
+              continue;
+            }
+            break;
+          }
 
           // A scheduler that was idle may have been using the slower cadence.
           // Re-evaluate against the active cadence before the first newly
@@ -2185,7 +2366,17 @@ export class Scheduler {
             }
           }
 
+          let yieldToImplementation = false;
           for (const job of candidates) {
+            // A plan about to take a reserved slot waits (unscanned) until
+            // ready implementation work has had first pick of it.
+            if (!implementationPass
+              && SLOT_CAPPED_PLANNING_JOB_TYPES.has(job.job_type)
+              && computeWorkerCount < this.concurrency
+              && planSlotCapReached()) {
+              yieldToImplementation = true;
+              break;
+            }
             candidateCount++;
             scanExcludeJobIds.add(job.id);
             if (activeWorkers.has(job.id)) {
@@ -2498,6 +2689,7 @@ export class Scheduler {
               if (activeWorkers.get(job.id)?.promise === workerPromise) {
                 activeWorkers.delete(job.id);
                 killedForRuntime.delete(job.id);
+                jobWriteActivity.clear(job.id);
               }
               try {
                 reconcileWaitingLaneJobCompletion(getJob(job.id) || leasedJob);
@@ -2517,15 +2709,25 @@ export class Scheduler {
             // the .catch/.finally above already did the meaningful recovery.
             .catch(() => {});
 
+          // Writes from an earlier attempt must not extend this one.
+          jobWriteActivity.clear(job.id);
           activeWorkers.set(job.id, { promise: workerPromise, job: leasedJob, startTime: Date.now() });
           if (isAtlasBackground) atlasBackgroundWorkerCount++;
           else if (isPreparation) preparationWorkerCount++;
           else if (job.job_type !== "human_input") computeWorkerCount++;
+          if (SLOT_CAPPED_PLANNING_JOB_TYPES.has(job.job_type)) planningWorkerCount++;
           if (computeWorkerCount >= this.concurrency) {
             await yieldNow();
           }
         }
-          if (candidates.length < fetchLimit) break;
+          if (yieldToImplementation) continue;
+          if (candidates.length < fetchLimit) {
+            if (implementationPass) {
+              implementationPassDone = true;
+              continue;
+            }
+            break;
+          }
         }
 
         // Report idle slot breakdown to display. openSlots is agent slots only

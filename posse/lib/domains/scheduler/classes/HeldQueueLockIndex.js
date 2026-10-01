@@ -35,6 +35,9 @@ const FULL_REFRESH_WAKE_REASONS = new Set([
   "job_lease_expired",
   "job_deadlocked_canceled",
   "stale_file_locks_released",
+  // A merge hands existing-order claims back to their work items as new WI
+  // lock rows (queue/functions/file-locks.js).
+  "work_item_locks_restored:existing_order_claim",
 ]);
 
 function jobContributesQueueLock(job = {}) {

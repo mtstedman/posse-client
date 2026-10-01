@@ -85,9 +85,20 @@ export class DisplayStatusRenderer {
       // Only count jobs from visible work items (not complete/canceled)
       const { workItems, jobs } = this._getQueueData();
       const normalJobs = reviewVisibleJobs(jobs);
+      const cohortIds = this._runCohortEnabled ? this._runWorkItemIds : null;
+      const relevantWorkItems = cohortIds
+        ? workItems.filter((wi) => cohortIds.has(Number(wi.id)))
+        : workItems;
+      const relevantNormalJobs = cohortIds
+        ? normalJobs.filter((job) => cohortIds.has(Number(job.work_item_id)))
+        : normalJobs;
       const visibleWiIds = new Set();
-      for (const wi of workItems) {
-        const wiJobs = normalJobs.filter(j => j.work_item_id === wi.id);
+      for (const wi of relevantWorkItems) {
+        if (cohortIds) {
+          visibleWiIds.add(wi.id);
+          continue;
+        }
+        const wiJobs = relevantNormalJobs.filter(j => j.work_item_id === wi.id);
         const displayStatus = workItemDisplayStatus(wi, wiJobs);
         if (displayStatus === "canceled") continue;
         if (displayStatus === "complete") continue;
@@ -95,11 +106,11 @@ export class DisplayStatusRenderer {
       }
 
       const terminal = new Set(TERMINAL_JOB_STATUSES);
-      const allJobs = normalJobs.filter(j => visibleWiIds.has(j.work_item_id));
+      const allJobs = relevantNormalJobs.filter(j => visibleWiIds.has(j.work_item_id));
       const total = allJobs.length;
       if (total === 0) {
-        const openNoJobWorkItems = workItems.filter((wi) => {
-          const wiJobs = normalJobs.filter((job) => job.work_item_id === wi.id);
+        const openNoJobWorkItems = relevantWorkItems.filter((wi) => {
+          const wiJobs = relevantNormalJobs.filter((job) => job.work_item_id === wi.id);
           return wiJobs.length === 0 && !["complete", "canceled"].includes(workItemDisplayStatus(wi, wiJobs));
         });
         if (openNoJobWorkItems.length > 0) {
@@ -118,13 +129,13 @@ export class DisplayStatusRenderer {
           lines.push(` ${C.cyan}${CONTEXT_HEALTH_LABEL}${C.reset}${C.dim} · ${C.reset}${summary}`);
           return lines;
         }
-        if (!Array.isArray(normalJobs) || normalJobs.length === 0) {
+        if (!Array.isArray(relevantNormalJobs) || relevantNormalJobs.length === 0) {
           lines.push(` ${C.dim}No jobs yet${C.reset}`);
           return lines;
         }
-        const resolved = normalJobs.filter((j) => terminal.has(j.status)).length;
-        const completeWIs = workItems.filter((wi) => {
-          const wiJobs = normalJobs.filter((j) => j.work_item_id === wi.id);
+        const resolved = relevantNormalJobs.filter((j) => terminal.has(j.status)).length;
+        const completeWIs = relevantWorkItems.filter((wi) => {
+          const wiJobs = relevantNormalJobs.filter((j) => j.work_item_id === wi.id);
           return workItemDisplayStatus(wi, wiJobs) === "complete";
         });
         const pendingMerges = completeWIs.filter((wi) => wi.branch_name && wi.merge_state !== "merged").length;
@@ -134,7 +145,7 @@ export class DisplayStatusRenderer {
           : "wrap-up");
         const parts = [
           `${C.green}All jobs complete${C.reset}`,
-          `${C.bold}${resolved}${C.reset}${C.dim}/${normalJobs.length} done${C.reset}`,
+          `${C.bold}${resolved}${C.reset}${C.dim}/${relevantNormalJobs.length} done${C.reset}`,
         ];
         if (merged > 0) parts.push(`${C.bold}${merged}${C.reset}${C.dim} merged${C.reset}`);
         parts.push(`${C.dim}${phase}${C.reset}`);
@@ -203,11 +214,16 @@ export class DisplayStatusRenderer {
     let jobsDone = 0;
     try {
       const { workItems, jobs } = this._getQueueData();
-      wiTotal = Array.isArray(workItems) ? workItems.length : 0;
+      const cohortIds = this._runCohortEnabled ? this._runWorkItemIds : null;
+      const relevantWorkItems = Array.isArray(workItems)
+        ? (cohortIds ? workItems.filter((wi) => cohortIds.has(Number(wi.id))) : workItems)
+        : [];
+      const relevantJobs = Array.isArray(jobs)
+        ? (cohortIds ? jobs.filter((job) => cohortIds.has(Number(job.work_item_id))) : jobs)
+        : [];
+      wiTotal = relevantWorkItems.length;
       const TERMINAL = new Set(["succeeded", "recovered"]);
-      jobsDone = Array.isArray(jobs)
-        ? jobs.filter((j) => TERMINAL.has(jobReportStatus(j, jobs))).length
-        : 0;
+      jobsDone = relevantJobs.filter((j) => TERMINAL.has(jobReportStatus(j, relevantJobs))).length;
     } catch { /* best effort */ }
 
     const sep = `${C.dim} · ${C.reset}`;

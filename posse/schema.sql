@@ -20,7 +20,8 @@ PRAGMA foreign_keys = ON;
 --  19 = + investigating research and claim-review agent-call child kinds.
 --  20 = + Team submission approval policy and publication mode state.
 -- 21 = terminal abandoned shared-trunk merge operations
-PRAGMA user_version = 21;
+-- 22 = interrupted agent-call terminal state
+PRAGMA user_version = 22;
 
 CREATE TABLE IF NOT EXISTS bridge_command_results (
   command_id TEXT PRIMARY KEY,
@@ -729,7 +730,7 @@ CREATE TABLE IF NOT EXISTS agent_calls (
   duration_ms INTEGER,
 
   exit_code INTEGER,
-  status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','succeeded','failed','timeout')),
+  status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','succeeded','failed','timeout','interrupted')),
   error_text TEXT,
 
   provider TEXT DEFAULT 'claude',

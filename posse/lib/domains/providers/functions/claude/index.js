@@ -1666,8 +1666,10 @@ export async function callProvider(promptText, {
         totalCostUsd: resultData?.total_cost_usd ?? null,
         // Completed model rounds. The CLI's num_turns also counts native tool
         // results (WebFetch/WebSearch: 48 for 12 rounds against a cap of 20),
-        // which reads as a bypassed cap; it is kept as cliNumTurns.
-        numTurns: captured.numTurns || resultData?.num_turns || partialUsage?.messages || null,
+        // which reads as a bypassed cap; it is kept as cliNumTurns. Rounds the
+        // stream saw count even when usage is not finalized; the CLI count is
+        // used only when the stream showed no model round at all.
+        numTurns: captured.modelRounds || resultData?.num_turns || null,
         cliNumTurns: resultData?.num_turns ?? null,
         durationMs,
         exitCode: code,

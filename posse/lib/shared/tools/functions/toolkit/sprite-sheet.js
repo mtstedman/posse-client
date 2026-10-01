@@ -118,7 +118,7 @@ export function spriteSheetPlacement(srcWidth, srcHeight, cellWidth, cellHeight,
 // ImageMagick and ffmpeg read a leading `@`, `|`, or `-`, a `coder:` or
 // `protocol:` prefix, and `[...]` selectors as syntax. Converters only ever see
 // harness-chosen temp names, but such a path is refused outright as well.
-function converterSyntaxReason(displayPath) {
+export function converterSyntaxReason(displayPath) {
   if (/[\0\r\n]/.test(displayPath)) return "path contains control characters";
   if (/^[@|-]/.test(displayPath)) return "path starts with converter syntax (@, |, or -)";
   if (/[[\]]/.test(displayPath)) return "path contains [ or ], which converters read as a frame selector";
@@ -390,7 +390,7 @@ function failure(message, problems = []) {
 }
 
 // The in-process decoder reads 8-bit, non-interlaced grey/RGB/RGBA PNGs.
-function nativePngDecodable(bytes) {
+export function nativePngDecodable(bytes) {
   return bytes.length >= 29 && bytes[24] === 8 && [0, 2, 4, 6].includes(bytes[25]) && bytes[28] === 0;
 }
 

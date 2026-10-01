@@ -277,6 +277,8 @@ export function completeAgentCall(id, {
     appendRunTelemetry("agent-calls", { phase: "completed", ...row });
     const activityStatus = row.status === "succeeded"
       ? "succeeded"
+      : row.status === "interrupted"
+        ? "interrupted"
       : row.status === "canceled"
         ? "canceled"
         : "failed";
@@ -656,8 +658,8 @@ export function getScopeContextHealthMetrics({ trailingDays = 7 } = {}) {
 }
 
 /**
- * Mark any orphaned 'running' agent calls as 'timeout'.
- * Called at wrap-up time to clean up calls from crashed/killed workers.
+ * Mark any still-running agent calls as interrupted during graceful wrap-up.
+ * Crash-orphan recovery remains a timeout and is handled separately below.
  */
 export function cleanupRunningAgentCalls() {
   const db = getDb();
@@ -669,17 +671,17 @@ export function cleanupRunningAgentCalls() {
   `).all();
   const result = db.prepare(`
     UPDATE agent_calls
-    SET status = 'timeout', finished_at = COALESCE(finished_at, ?),
-        error_text = 'Process terminated before completion'
+    SET status = 'interrupted', finished_at = COALESCE(finished_at, ?),
+        error_text = 'Graceful shutdown interrupted the call'
     WHERE status = 'running'
   `).run(now()).changes;
   if (result > 0) {
     appendRunTelemetry("agent-calls", {
       phase: "cleanup_running",
-      status: "timeout",
+      status: "interrupted",
       count: result,
       finished_at: now(),
-      error_text: "Process terminated before completion",
+      error_text: "Graceful shutdown interrupted the call",
     });
     for (const call of running) {
       logAgentActivity({
@@ -688,8 +690,8 @@ export function cleanupRunningAgentCalls() {
         attempt_id: call.attempt_id,
         role: call.role,
         actor_id: String(call.id),
-        kind: "error",
-        status: "failed",
+        kind: "result",
+        status: "interrupted",
         phase: call.activity || "model_call",
         summary: call.activity || "Model call interrupted",
         agent_call_id: call.id,

@@ -46,6 +46,7 @@ import {
   _buildQueueProviderUsageLines,
 } from "../../functions/display/helpers/provider-usage.js";
 import { getReviewDirtyState } from "../../functions/display/helpers/review-dirty-state.js";
+import { partialWorkToMerge } from "../../../queue/functions/partial-work.js";
 import { resolveCanonicalCallAccounting } from "../../../billing/functions/usage-segments.js";
 
 export { jobLabel, jobReportStatus, workItemDisplayStatus };
@@ -973,6 +974,26 @@ export class DisplayInputController {
       return;
     }
 
+    // Approving a WI whose implementation jobs failed or were canceled merges
+    // only part of the planned change. Same rule as re-queue: a distinct
+    // confirmation key, so a repeated [a] never merges partial work.
+    if (this._approvalPartialConfirm) {
+      const confirmed = isEnterKey(str, key) || matchesHotkey(str, key, "y");
+      if (confirmed || isEscapeKey(str, key) || matchesHotkey(str, key, "n")) {
+        this._approvalPartialConfirm = false;
+        const current = this._approvalData[this._approvalIdx];
+        if (confirmed && !current?._decision && !current?._isInfo) {
+          const applied = this.onApprovalAction ? this.onApprovalAction(current.wi.id, "approve_partial_work") : true;
+          if (applied === false) return;
+          current._decision = "approved";
+          if (applied && typeof applied === "object" && applied.deferAdvance) return;
+          this._advanceApproval();
+        }
+      }
+      this.requestRender({ force: true });
+      return;
+    }
+
     // Exit-confirm prompt is up: only y/Enter (leave) and n/Esc (stay) answer
     // it. Any other key dismisses the prompt and is handled normally below.
     if (this._approvalExitConfirm) {
@@ -1030,6 +1051,11 @@ export class DisplayInputController {
             text: "Resolve dirty files before approval",
             at: Date.now(),
           };
+          this.requestRender({ force: true });
+          return;
+        }
+        if (partialWorkToMerge(current.wi, current.jobs).length > 0) {
+          this._approvalPartialConfirm = true;
           this.requestRender({ force: true });
           return;
         }

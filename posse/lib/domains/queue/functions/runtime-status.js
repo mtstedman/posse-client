@@ -11,6 +11,10 @@ export const RUNTIME_STATUS_KEYS = Object.freeze({
   BOOT: "boot",
   SCHEDULER: "scheduler",
   SHUTDOWN: "shutdown",
+  // Logical work-item cohort for a run. It survives a graceful restart so
+  // progress totals and the eventual report cover the whole run, not only the
+  // subset that happened to be active in the final process.
+  RUN_COHORT: "run_cohort",
   // Written by the bridge (run.stop), consumed by the live scheduler loop.
   STOP_REQUEST: "stop_request",
   // Heartbeat from `posse serve`: a remote operator can reach this repo.

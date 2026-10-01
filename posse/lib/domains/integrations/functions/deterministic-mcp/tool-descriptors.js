@@ -40,6 +40,7 @@ import {
   TOOL_REENCODE_IMAGE,
   TOOL_CLEAN_IMAGE,
   TOOL_EXTRACT_IMAGE_TEXT,
+  TOOL_VIEW_IMAGE,
   TOOL_BASH,
   TOOL_AGENT_FEEDBACK,
   TOOL_GET_OPERATOR_FEEDBACK,
@@ -94,6 +95,7 @@ export {
   TOOL_REENCODE_IMAGE,
   TOOL_CLEAN_IMAGE,
   TOOL_EXTRACT_IMAGE_TEXT,
+  TOOL_VIEW_IMAGE,
   TOOL_BASH,
   TOOL_AGENT_FEEDBACK,
   TOOL_GET_OPERATOR_FEEDBACK,
@@ -483,6 +485,12 @@ export const TOOL_CATALOG = {
     summary: "Run local tesseract OCR to extract text from an image.",
     observation: { type: "tool.extract_image_text", label: "ExtractText", format: "file", pathKeys: ["path", "file_path"], requireTarget: true },
   },
+  view_image: {
+    schema: TOOL_VIEW_IMAGE,
+    access: "read",
+    summary: "Return one in-scope PNG, JPEG, WebP, or GIF image for visual inspection, downscaled when large.",
+    observation: { type: "tool.view_image", label: "ViewImage", format: "file", pathKeys: ["path", "file_path"], requireTarget: true },
+  },
   run_scoped_checks: {
     schema: TOOL_RUN_SCOPED_CHECKS,
     access: "shell",
@@ -606,8 +614,8 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     // execution capability cap keeps it read-only regardless of the operator
     // grant, and the contract gate drops the tool when no read grant exists.
     assessor: Object.freeze({
-      read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", ...(REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["run_test", "run_test_suite"] : []), "bash", "project_db_query"],
-      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_scoped_checks", ...(REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["run_test", "run_test_suite"] : []), "bash", "project_db_query"],
+      read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "view_image", "run_scoped_checks", ...(REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["run_test", "run_test_suite"] : []), "bash", "project_db_query"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "view_image", "run_scoped_checks", ...(REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["run_test", "run_test_suite"] : []), "bash", "project_db_query"],
     }),
     researcher: Object.freeze({
       read: ["ack_operator_feedback", "read_file", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
@@ -641,6 +649,10 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     imageMutation: Object.freeze(["clean_image", "compose_sprite_sheet"]),
     imageGeneration: Object.freeze(["generate_image"]),
     ocr: Object.freeze(["extract_image_text"]),
+    // Pixel-level image inspection for the assessor's visual criteria. The
+    // remote ceiling is assessor-only; the local issuance narrows it further
+    // to image assessments.
+    imageView: Object.freeze(["view_image"]),
     // The artificer's only external fetch lane. Remote issuance must also
     // grant asset fetching; provider-native web tools stay off for the role.
     assetDownload: Object.freeze(["download_file"]),
@@ -692,6 +704,7 @@ export const DETERMINISTIC_IMAGE_HELPER_TOOLS = TOOL_ROLE_LIBRARY.deterministicM
 export const DETERMINISTIC_IMAGE_MUTATION_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.imageMutation;
 export const DETERMINISTIC_IMAGE_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.imageGeneration;
 export const DETERMINISTIC_OCR_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.ocr;
+export const DETERMINISTIC_IMAGE_VIEW_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.imageView;
 export const DETERMINISTIC_ASSET_DOWNLOAD_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.assetDownload;
 
 // Native benchmark teams own the whole workflow in one provider session, so
@@ -966,6 +979,7 @@ export function getDeterministicMcpToolNames(role, {
   if (roleUsesDeterministicImageMcp(role)) tools.push(...DETERMINISTIC_IMAGE_MUTATION_TOOLS);
   if (roleUsesDeterministicImageMcp(role) && needsImageGeneration) tools.push(...DETERMINISTIC_IMAGE_TOOLS);
   if (role === "dev" || role === "artificer" || role === "assessor") tools.push(...DETERMINISTIC_OCR_TOOLS);
+  if (role === "assessor") tools.push(...DETERMINISTIC_IMAGE_VIEW_TOOLS);
   if (roleUsesDeterministicAssetDownload(role)) tools.push(...DETERMINISTIC_ASSET_DOWNLOAD_TOOLS);
   // Scoped lint/typecheck belongs to the assessor. The separate DB-backed
   // registered-test experiment remains deferred and is not issued.

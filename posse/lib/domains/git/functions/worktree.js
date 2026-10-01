@@ -30,6 +30,8 @@ export {
   preserveDirtyWorktreeSnapshotAsync,
   preserveBranchTipSnapshot,
   preserveBranchTipSnapshotAsync,
+  preserveStashCommitSnapshot,
+  preserveStashCommitSnapshotAsync,
 } from "./worktree-snapshots.js";
 
 import { isExpectedGitPredicateMiss } from "./worktree-internal.js";

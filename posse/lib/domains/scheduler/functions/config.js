@@ -1,11 +1,23 @@
 import { getSetting } from "../../queue/functions/index.js";
 import { getCatalogRuntimeFallbackInt } from "../../settings/functions/catalog.js";
+import { SETTING_KEYS } from "../../../catalog/settings.js";
 
 export function readPositiveIntSetting(key, fallback = null) {
   try {
     const raw = getSetting(key);
     const parsed = Number.parseInt(String(raw || ""), 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function readNonNegativeIntSetting(key, fallback = null) {
+  try {
+    const raw = getSetting(key);
+    if (raw == null || String(raw).trim() === "") return fallback;
+    const parsed = Number.parseInt(String(raw), 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
   } catch {
     return fallback;
   }
@@ -33,6 +45,9 @@ export const HEADLESS_HUMAN_TIMEOUT_SEC = getCatalogRuntimeFallbackInt("headless
 export const HUMAN_GATE_RESNOOZE_SEC = getCatalogRuntimeFallbackInt("human_gate_resnooze_sec", 600);
 export const STALL_TIMEOUT_SEC = getCatalogRuntimeFallbackInt("stall_timeout", 600);
 export const MAX_JOB_RUNTIME_SEC_OVERRIDE = null;
+export const IMPLEMENTATION_RESERVED_SLOTS = getCatalogRuntimeFallbackInt(SETTING_KEYS.SCHEDULER_IMPLEMENTATION_RESERVED_SLOTS, 1);
+export const RUNTIME_WRITE_GRACE_SEC = getCatalogRuntimeFallbackInt(SETTING_KEYS.RUNTIME_WRITE_GRACE_SEC, 180);
+export const RUNTIME_WRITE_CEILING_MULTIPLIER = getCatalogRuntimeFallbackInt(SETTING_KEYS.RUNTIME_WRITE_CEILING_MULTIPLIER, 2);
 
 export const ATLAS_DRIFT_CHECK_INTERVAL_MS = Math.max(
   60 * 1000,
@@ -65,6 +80,21 @@ export function readStallTimeoutSec() {
 
 export function readMaxJobRuntimeSecOverride() {
   return readPositiveIntSetting("max_job_runtime_sec", MAX_JOB_RUNTIME_SEC_OVERRIDE);
+}
+
+// Agent slots plan jobs leave for ready implementation work (0 = off).
+export function readImplementationReservedSlots() {
+  return readNonNegativeIntSetting(SETTING_KEYS.SCHEDULER_IMPLEMENTATION_RESERVED_SLOTS, IMPLEMENTATION_RESERVED_SLOTS);
+}
+
+// How recent a successful file write must be to extend a job past its
+// runtime cap (0 = off), and the hard ceiling as a multiple of that cap.
+export function readRuntimeWriteGraceSec() {
+  return readNonNegativeIntSetting(SETTING_KEYS.RUNTIME_WRITE_GRACE_SEC, RUNTIME_WRITE_GRACE_SEC);
+}
+
+export function readRuntimeWriteCeilingMultiplier() {
+  return readPositiveIntSetting(SETTING_KEYS.RUNTIME_WRITE_CEILING_MULTIPLIER, RUNTIME_WRITE_CEILING_MULTIPLIER);
 }
 
 export function readHeadlessHumanTimeoutSec() {

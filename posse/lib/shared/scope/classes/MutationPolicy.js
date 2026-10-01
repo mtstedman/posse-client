@@ -533,13 +533,38 @@ function lineBoundsAt(text, index) {
   return { start, end, line: text.slice(start, end) };
 }
 
+const REMOVAL_VERB_RE = /\b(?:delete|remove|drop|eliminate|clean up|cleanup|prune)\b/g;
+// A removal verb governed by a negation is a constraint, not an instruction:
+// "Do not remove or alter the version-13 entry", "never delete", "must not
+// create, stub or drop". The negation may head a coordinated verb list.
+// WI 159 job 2084 (run 2026-10-01) was classified as a cleanup task from
+// "Do not remove or alter ..." and took the delete-noop shortcut.
+const NEGATED_REMOVAL_PREFIX_RE = /(?:\bnot|\bcannot|n['\u2019]t|\bnever|\bneither|\bnor|\bno need to)\s+(?:(?:[a-z][a-z-]*\s*,\s*)*[a-z][a-z-]*,?\s+(?:or|and|nor)\s+)?$/;
+// SQL referential actions ("REFERENCES t(id) ON DELETE CASCADE") describe a
+// schema, not a removal instruction; the same job 2084 spec carried one.
+const SQL_REFERENTIAL_ACTION_PREFIX_RE = /\bon\s+$/;
+
+function removalVerbMentions(text) {
+  const lower = String(text || "").toLowerCase();
+  const mentions = [];
+  for (const match of lower.matchAll(REMOVAL_VERB_RE)) {
+    const before = lower.slice(Math.max(0, match.index - 160), match.index);
+    if (match[0] === "delete" && SQL_REFERENTIAL_ACTION_PREFIX_RE.test(before)) continue;
+    mentions.push({ index: match.index, negated: NEGATED_REMOVAL_PREFIX_RE.test(before) });
+  }
+  return mentions;
+}
+
 function isDeleteContextForCandidate(text, index, matchText) {
   const { start, end, line } = lineBoundsAt(text, index);
   const before = text.slice(start, index).toLowerCase();
   const after = text.slice(index + String(matchText || "").length, end).toLowerCase();
   const strippedLine = line.trim().replace(/^[-*]\s*/, "").trim();
 
-  if (/\b(?:delete|remove|drop|eliminate|prune|cleanup|clean up)\b/.test(before)) return true;
+  // The nearest preceding removal verb governs the candidate, so "remove
+  // `a.js` but do not remove `b.js`" infers only a.js.
+  const governingVerb = removalVerbMentions(before).at(-1);
+  if (governingVerb && !governingVerb.negated) return true;
   if (/^(?:is|are|should be|must be|needs to be|need to be)\s+(?:deleted|removed|dropped|eliminated|pruned|absent)\b/.test(after.trim())) {
     return true;
   }
@@ -722,9 +747,8 @@ export function isRemovalTask(job, payload) {
     ...(Array.isArray(payload?.assessor_feedback) ? payload.assessor_feedback : []),
   ]
     .filter(Boolean)
-    .join("\n")
-    .toLowerCase();
-  return /\b(delete|remove|drop|eliminate|clean up|cleanup|prune)\b/.test(text);
+    .join("\n");
+  return removalVerbMentions(text).some((mention) => !mention.negated);
 }
 
 export function isFilePlacementTask(job, payload) {

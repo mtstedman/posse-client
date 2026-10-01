@@ -48,6 +48,7 @@ export const AGENT_ACTIVITY_STATUSES = Object.freeze([
   "succeeded",
   "failed",
   "canceled",
+  "interrupted",
 ]);
 export const AGENT_ACTIVITY_LIMITS = Object.freeze({
   PHASE_CHARS: 80,
@@ -281,7 +282,9 @@ export const EVENT_TYPES = Object.freeze({
   JOB_REVIEW_RETRY_ASSESSMENT: "job.review_retry_assessment",
   JOB_REVIEW_RETRY_LIMIT: "job.review_retry_limit",
   JOB_REVIEW_SKIPPED: "job.review_skipped",
+  JOB_RUNTIME_ESCALATION_SKIPPED: "job.runtime_escalation_skipped",
   JOB_RUNTIME_EXCEEDED: "job.runtime_exceeded",
+  JOB_RUNTIME_EXTENDED: "job.runtime_extended",
   JOB_SCOPE_CLEANED_NOOP: "job.scope_cleaned_noop",
   JOB_SCOPE_COMPAT_CREATE_VIA_MODIFY: "job.scope_compat_create_via_modify",
   JOB_SCOPE_COMPAT_UNTRACKED_OUT_OF_SCOPE: "job.scope_compat_untracked_out_of_scope",
@@ -386,6 +389,7 @@ export const EVENT_TYPES = Object.freeze({
   ATLAS_FRESHNESS_GATE_DEFERRED: "atlas.freshness_gate.deferred",
   ATLAS_FRESHNESS_GATE_DEGRADED: "atlas.freshness_gate.degraded",
   ATLAS_WARM_COMPLETED: "atlas.warm_completed",
+  ATLAS_WARM_HOST_RETIRED: "atlas.warm_host_retired",
   ATLAS_SCIP_INGEST_STARTED: "atlas.scip.ingest.started",
   ATLAS_SCIP_INGEST_COMPLETED: "atlas.scip.ingest.completed",
   ATLAS_SCIP_INGEST_FAILED: "atlas.scip.ingest.failed",
@@ -423,6 +427,7 @@ export const EVENT_TYPES = Object.freeze({
   WORK_ITEM_COMPLETION_BLOCKED: "work_item.completion_blocked",
   WORK_ITEM_OUTPUT_CONTRACT_MISMATCH: "work_item.output_contract_mismatch",
   WORK_ITEM_CREATED_FROM_SUGGESTION: "work_item.created_from_suggestion",
+  WORK_ITEM_CROSS_WI_FILE_CLAIM_RESTORED: "work_item.cross_wi_file_claim_restored",
   WORK_ITEM_CROSS_WI_FILE_HANDOFF_BLOCKED: "work_item.cross_wi_file_handoff_blocked",
   WORK_ITEM_CROSS_WI_FILE_HANDOFF_PREPARED: "work_item.cross_wi_file_handoff_prepared",
   WORK_ITEM_CROSS_WI_FILE_HANDOFF_ROLLED_BACK: "work_item.cross_wi_file_handoff_rolled_back",
@@ -449,6 +454,8 @@ export const EVENT_TYPES = Object.freeze({
   WORK_ITEM_REJECTED: "work_item.rejected",
   WORK_ITEM_STATUS_CHANGED: "work_item.status_changed",
   WORK_ITEM_STATUS_TRANSITION_REJECTED: "work_item.status_transition_rejected",
+  // A planner-declared test command already fails at the frozen baseline.
+  WORK_ITEM_TEST_BASELINE_FAILING: "work_item.test_baseline_failing",
 
   // ── worker ──────────────────────────────────────────────────────────────
   WORKER_FINALIZER_FAILED: "worker.finalizer_failed",

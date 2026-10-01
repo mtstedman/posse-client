@@ -36,6 +36,7 @@ import {
   logAtlasError,
 } from "../../../atlas/functions/v2/verbose-errors.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
+import { DAEMON_HOST_RETIRED_MESSAGE } from "../../../../shared/tools/classes/daemon/Daemon.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { WAITING_LANE_ATLAS_PURPOSE_VALUES } from "../../../../catalog/waiting-lane.js";
 import { ATLAS_EVENTS } from "../../../atlas/functions/v2/contracts/events.js";
@@ -87,6 +88,10 @@ function nowMs() {
 // a hot loop for the rest of the disabled run; short enough that the next
 // boot (which clears the in-memory disable) picks it up promptly.
 const ATLAS_WARM_DISABLED_REQUEUE_DELAY_MS = 10 * 60 * 1000;
+
+// A warm whose daemon host was retired mid-request goes back to the queue
+// briefly deferred, so the replacement host (or the next boot) runs it.
+const ATLAS_WARM_HOST_RETIRED_REQUEUE_DELAY_MS = 5_000;
 
 function clampPaths(paths, max = 100) {
   if (!Array.isArray(paths)) return { paths: [], truncated: false };
@@ -506,6 +511,9 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
     if (worker._handleDeterministicInterruption?.(job, attempt.attempt.id, startTime, leaseToken, err)) {
       return;
     }
+    if (requeueAtlasWarmAfterHostRetire(worker, job, attempt.attempt.id, startTime, leaseToken, err)) {
+      return;
+    }
     const msg = err?.message || String(err);
     const verbose = isVerboseAtlasErrors();
     worker.emit(job.id, `${C.yellow}[atlas] warm job #${job.id} failed: ${msg}${C.reset}`);
@@ -521,6 +529,55 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
     // ATLAS_WARM_JOB_POLICY.maxAttempts is 1 — _retryOrFail dead-letters this.
     worker._retryOrFail(job, leaseToken, msg, { attemptId: attempt.attempt.id });
   }
+}
+
+/**
+ * Daemon.retire() fails in-flight requests with DAEMON_TRANSPORT_GONE and
+ * "daemon host retired", and its contract is that callers retry on the
+ * replacement host. Shutdown and wrap-up retire every host, so a warm caught
+ * mid-request must not spend its single attempt (max_attempts 1 dead-letters
+ * it). A crashed host ("daemon transport exited") still fails normally.
+ * @param {any} err
+ */
+export function isAtlasWarmHostRetired(err) {
+  return err?.code === "DAEMON_TRANSPORT_GONE"
+    && String(err?.message || "").includes(DAEMON_HOST_RETIRED_MESSAGE);
+}
+
+/**
+ * Requeue a warm interrupted by a daemon host retire without an attempt
+ * penalty. Returns true when it handled the error.
+ * @param {any} worker
+ * @param {any} job
+ * @param {number} attemptId
+ * @param {number} startTime
+ * @param {string} leaseToken
+ * @param {any} err
+ */
+export function requeueAtlasWarmAfterHostRetire(worker, job, attemptId, startTime, leaseToken, err) {
+  if (!isAtlasWarmHostRetired(err)) return false;
+  completeAttempt(attemptId, {
+    status: "interrupted",
+    duration_ms: nowMs() - startTime,
+    error_text: "ATLAS daemon host retired mid-warm",
+  });
+  logEvent({
+    work_item_id: job.work_item_id,
+    job_id: job.id,
+    attempt_id: attemptId,
+    event_type: EVENT_TYPES.ATLAS_WARM_HOST_RETIRED,
+    actor_type: EVENT_ACTORS.ATLAS,
+    message: "ATLAS daemon host retired mid-warm — requeuing for the replacement host",
+  });
+  const released = worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+    attemptId,
+    readyAt: new Date(Date.now() + ATLAS_WARM_HOST_RETIRED_REQUEUE_DELAY_MS).toISOString(),
+  });
+  if (released && job.work_item_id) refreshWorkItemStatus(job.work_item_id);
+  try {
+    worker.emit(job.id, `${C.dim}[atlas] warm job #${job.id} interrupted: daemon host retired — ${released ? "requeued" : "lease already released"}${C.reset}`);
+  } catch { /* emit is best-effort */ }
+  return true;
 }
 
 /**

@@ -90,14 +90,176 @@ export async function worktreeHasIgnoredChangesNodeAsync(wtPath, { signal = null
     .some((line) => line.startsWith("!! "));
 }
 
+const PORCELAIN_Z_ARGS = ["status", "--porcelain=v1", "-z", "--untracked-files=all"];
+
+// `git status --porcelain=v1 -z` entries as path -> two-letter status. A
+// rename or copy also records its source path, so path-scoped work covers
+// both sides.
+export function porcelainStatusEntries(output) {
+  const entries = new Map();
+  const parts = String(output || "").split("\0");
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part.length < 4) continue;
+    const status = part.slice(0, 2);
+    entries.set(part.slice(3), status);
+    if (/[RC]/u.test(status) && parts[index + 1]) {
+      entries.set(parts[index + 1], status);
+      index += 1;
+    }
+  }
+  return entries;
+}
+
+// Paths whose status entry appeared or changed between two porcelain reads:
+// what an operation run in between touched.
+export function porcelainDeltaPaths(before, after) {
+  const prior = porcelainStatusEntries(before);
+  const delta = [];
+  for (const [file, status] of porcelainStatusEntries(after)) {
+    if (prior.get(file) !== status) delta.push(file);
+  }
+  return delta;
+}
+
+export function worktreePorcelainZ(wtPath) {
+  try {
+    return String(gitExec(PORCELAIN_Z_ARGS, wtPath, { trim: false }) ?? "");
+  } catch {
+    return null;
+  }
+}
+
+export async function worktreePorcelainZAsync(wtPath, { signal = null } = {}) {
+  try {
+    return String(await gitExecAsync(PORCELAIN_Z_ARGS, wtPath, { signal, trim: false }) ?? "");
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    return null;
+  }
+}
+
+function literalPathspec(file) {
+  return `:(literal)${file}`;
+}
+
+// Put each path back to its state in `tree` (index and worktree), or remove
+// it when `tree` does not have it. This undoes one operation path by path in
+// a worktree that sibling jobs share, where a whole-worktree reset would also
+// erase their files. Returns the paths that could not be restored.
+export function restorePathsToTree(wtPath, paths = [], tree = "HEAD") {
+  const failed = [];
+  for (const file of paths) {
+    try {
+      let inTree = true;
+      try { gitExec(["cat-file", "-e", `${tree}:${file}`], wtPath); } catch { inTree = false; }
+      if (inTree) {
+        gitExec(["restore", `--source=${tree}`, "--staged", "--worktree", "--", literalPathspec(file)], wtPath);
+        continue;
+      }
+      gitExec(["rm", "--cached", "--quiet", "--ignore-unmatch", "--", literalPathspec(file)], wtPath);
+      fs.rmSync(path.join(wtPath, file), { force: true, recursive: true });
+    } catch {
+      failed.push(file);
+    }
+  }
+  return failed;
+}
+
+export async function restorePathsToTreeAsync(wtPath, paths = [], tree = "HEAD", { signal = null } = {}) {
+  const failed = [];
+  for (const file of paths) {
+    try {
+      const inTree = await gitExecAsync(["cat-file", "-e", `${tree}:${file}`], wtPath, { signal })
+        .then(() => true, (err) => {
+          if (isAbortError(err)) throw err;
+          return false;
+        });
+      if (inTree) {
+        await gitExecAsync(["restore", `--source=${tree}`, "--staged", "--worktree", "--", literalPathspec(file)], wtPath, { signal });
+        continue;
+      }
+      await gitExecAsync(["rm", "--cached", "--quiet", "--ignore-unmatch", "--", literalPathspec(file)], wtPath, { signal });
+      await fs.promises.rm(path.join(wtPath, file), { force: true, recursive: true });
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      failed.push(file);
+    }
+  }
+  return failed;
+}
+
+// A pathspec-limited `stash push` can only name paths present in the index or
+// the worktree. A staged deletion or a rename source is in neither, and
+// naming it makes git fail after the stash entry is already written; those
+// stay staged in place.
+async function stashablePathsAsync(wtPath, paths, { signal = null } = {}) {
+  if (paths.length === 0) return [];
+  const indexed = new Set(String(await gitExecAsync(
+    ["ls-files", "-z", "--", ...paths.map(literalPathspec)],
+    wtPath,
+    { signal, trim: false },
+  ) || "").split("\0").filter(Boolean));
+  return paths.filter((file) => indexed.has(file) || fs.existsSync(path.join(wtPath, file)));
+}
+
+// A pathspec-limited stash still records the whole index, so another job's
+// staged entries (materialized placeholders) would ride along and collide
+// with that job's files when this stash is applied. They are unstaged for the
+// push and their exact index entries put back afterwards; their worktree
+// files are never touched. Returns null when there is nothing to hide, or
+// when an unmerged entry makes the round trip unsafe.
+async function foreignStagedEntriesAsync(wtPath, entries, ownPaths, { signal = null } = {}) {
+  const files = [...entries]
+    .filter(([file, status]) => !ownPaths.has(file) && !" ?!".includes(status[0]))
+    .map(([file]) => file);
+  if (files.length === 0) return null;
+  const saved = String(await gitExecAsync(
+    ["ls-files", "-s", "-z", "--", ...files.map(literalPathspec)],
+    wtPath,
+    { signal, trim: false },
+  ) || "").split("\0").filter(Boolean).map((line) => {
+    const tab = line.indexOf("\t");
+    const [mode, object, stage] = line.slice(0, tab).split(" ");
+    return { mode, object, stage, file: line.slice(tab + 1) };
+  });
+  if (saved.some((entry) => entry.stage !== "0")) return null;
+  const savedByPath = new Map(saved.map((entry) => [entry.file, entry]));
+  const zeroObject = "0".repeat(
+    saved[0]?.object.length || String(await gitExecAsync(["rev-parse", "--verify", "HEAD"], wtPath, { signal }) || "").trim().length || 40,
+  );
+  // Mode 0 removes the path, so a staged deletion comes back as a deletion.
+  const restoreInput = files.map((file) => {
+    const entry = savedByPath.get(file);
+    return entry ? `${entry.mode} ${entry.object}\t${file}\0` : `0 ${zeroObject}\t${file}\0`;
+  }).join("");
+  return { files, restoreInput };
+}
+
+async function restoreForeignStagedEntriesAsync(wtPath, hidden) {
+  try {
+    await gitExecAsync(["update-index", "-z", "--index-info"], wtPath, { input: hidden.restoreInput });
+  } catch (err) {
+    log.warn("git", "Could not restore sibling index entries after a scoped stash; their files remain in the worktree", {
+      wtPath,
+      paths: hidden.files.slice(0, 20),
+      error: err?.message || String(err),
+    });
+  }
+}
+
 // There is intentionally no raw reset export. Dirty-state preservation and
 // destructive cleanup are one Rust-owned mutation so callers cannot bypass
 // the fail-closed snapshot invariant.
+//
+// `selectPaths(dirtyPaths)` limits the stash to the caller's own paths in a
+// worktree that sibling jobs share. It runs under the worktree lock and
+// returns null to stash everything, or the paths to stash (none: no stash).
 export async function stashDirtyWorktreeAsync(
   wtPath,
   projectDir,
   message,
-  { worktreeLockWaitMs = null, stashLockWaitMs = null, shouldDefer = null, signal = null } = {},
+  { worktreeLockWaitMs = null, stashLockWaitMs = null, shouldDefer = null, selectPaths = null, signal = null } = {},
 ) {
   if (!wtPath) return false;
   const mainCwd = projectDir || wtPath;
@@ -113,6 +275,22 @@ export async function stashDirtyWorktreeAsync(
     }
     if (!(await gitHasChangesAsync(wtPath, { signal }))) return false;
 
+    let pathspec = [];
+    let scopedEntries = null;
+    let ownPaths = null;
+    if (typeof selectPaths === "function") {
+      const porcelain = await worktreePorcelainZAsync(wtPath, { signal });
+      if (porcelain === null) throw new Error(`Could not read worktree status before a scoped stash: ${wtPath}`);
+      const entries = porcelainStatusEntries(porcelain);
+      const selected = await selectPaths([...entries.keys()]);
+      if (Array.isArray(selected)) {
+        ownPaths = new Set(selected.filter((file) => entries.has(file)));
+        pathspec = await stashablePathsAsync(wtPath, [...ownPaths], { signal });
+        if (pathspec.length === 0) return false;
+        scopedEntries = entries;
+      }
+    }
+
     // refs/stash is shared by every worktree in the repository.
     const lockPath = await gitStashLockPathAsync(wtPath, mainCwd, { signal, nativeParity: { disabled: true } });
     const stashLock = await acquireWorktreeLockAsync(lockPath, {
@@ -122,10 +300,17 @@ export async function stashDirtyWorktreeAsync(
     if (!stashLock.acquired) {
       throw new Error(`Timed out waiting for git stash lock: ${lockPath}`);
     }
+    let hidden = null;
     try {
-      await gitExecAsync(["stash", "push", "--include-untracked", "-m", message], wtPath, { signal });
+      if (scopedEntries) hidden = await foreignStagedEntriesAsync(wtPath, scopedEntries, ownPaths, { signal });
+      if (hidden) await gitExecAsync(["restore", "--staged", "--", ...hidden.files.map(literalPathspec)], wtPath, { signal });
+      await gitExecAsync([
+        "stash", "push", "--include-untracked", "-m", message,
+        ...(pathspec.length > 0 ? ["--", ...pathspec.map(literalPathspec)] : []),
+      ], wtPath, { signal });
       return true;
     } finally {
+      if (hidden) await restoreForeignStagedEntriesAsync(wtPath, hidden);
       await stashLock.releaseAsync();
     }
   }, { waitMs: worktreeLockWaitMs, signal });

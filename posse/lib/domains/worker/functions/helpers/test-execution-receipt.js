@@ -19,7 +19,7 @@ import { parseTypecheckDiagnostics } from "../../../../shared/tools/functions/to
 import { siblingJobScopePaths } from "../../../queue/functions/file-locks.js";
 import { gitExecAsync } from "../../../git/functions/utils.js";
 import { buildWindowsSpawn } from "../../../providers/functions/shared/windows-spawn.js";
-import { isSafeDirectNodeTestScriptArgs } from "../../../../shared/scope/functions/test-command.js";
+import { isSafeDirectNodeTestScriptArgs, parseCommandArguments } from "../../../../shared/scope/functions/test-command.js";
 import {
   TEST_SUBPROCESS_ENV_KEYS,
   VERIFICATION_PULSE_CAPABILITY_ENV,
@@ -127,56 +127,6 @@ function killProcessTree(child, {
   } catch {
     return false;
   }
-}
-
-function parseCommandArguments(command) {
-  const tokens = [];
-  let current = "";
-  let quote = null;
-  const value = String(command || "").trim();
-  for (let index = 0; index < value.length; index++) {
-    const char = value[index];
-    if (quote) {
-      if (char === quote) {
-        quote = null;
-      } else if (char === "\\" && quote === "\"" && index + 1 < value.length) {
-        const next = value[index + 1];
-        if (next === "\"" || next === "\\") {
-          current += next;
-          index++;
-        } else {
-          current += char;
-        }
-      } else {
-        current += char;
-      }
-      continue;
-    }
-    if (char === "\"" || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (/\s/.test(char)) {
-      if (current) {
-        tokens.push(current);
-        current = "";
-      }
-      continue;
-    }
-    if (char === "\\" && index + 1 < value.length) {
-      const next = value[index + 1];
-      if (/\s/.test(next) || next === "\"" || next === "'" || next === "\\") {
-        current += next;
-        index++;
-        continue;
-      }
-    }
-    current += char;
-  }
-  if (quote) throw new Error("test command contains an unclosed quote");
-  if (current) tokens.push(current);
-  if (tokens.length === 0) throw new Error("test command is empty");
-  return tokens;
 }
 
 async function runCommand(command, {
@@ -528,6 +478,15 @@ function classifyNestedRunnerInfrastructureFailure(command, result, { projectRoo
     || /(?:^|\n)(?:\/bin\/)?(?:ba)?sh:\s*\d*:\s*[^\n]+:\s*(?:not found|command not found)\b/i.test(output)
     || /is not recognized as an internal or external command/i.test(output)
   );
+  // `composer test` in a worktree without vendor/ ends with
+  // `sh: 1: vendor/bin/phpunit: not found` and exit 127. Composer and PHP
+  // pass a script's 127 through; it means a runner is missing, not a failure.
+  const composerRunnerMissing = ["composer", "composer.bat", "php", "php.exe"].includes(executable) && (
+    Number(result.code) === 127
+    || /(?:^|\n)(?:\/bin\/)?(?:ba)?sh:\s*\d*:\s*[^\n]*vendor[\\/][^\n]*:\s*(?:not found|command not found)\b/i.test(output)
+    || /could not open input file:\s*[^\n]*vendor[\\/]/i.test(output)
+    || /["']?vendor(?:[\\/][^\s"']*)?["']?\s+is not recognized as an internal or external command/i.test(output)
+  );
   const composerSymbolMissing = /(?:Class|Interface|Trait)\s+["'][^"']+["']\s+not found/i.test(output);
   const composerAutoloadMissing = /Failed opening required [^\n]*vendor[\\/]autoload\.php/i.test(output)
     || /failed to open stream[^\n]*vendor[\\/]autoload\.php/i.test(output);
@@ -536,7 +495,7 @@ function classifyNestedRunnerInfrastructureFailure(command, result, { projectRoo
       (composerDependencyInstallMissing(projectRoot) && (composerSymbolMissing || composerAutoloadMissing))
       || (composerSymbolMissing && composerLockedDependencyClassFileMissing(projectRoot, output))
     );
-  if (!nestedExecutableMissing && !composerClassMissing) return result;
+  if (!nestedExecutableMissing && !composerRunnerMissing && !composerClassMissing) return result;
   return {
     ...result,
     status: "infrastructure_error",

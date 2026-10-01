@@ -59,12 +59,28 @@ export function mergeConflictSummary(errOrText) {
  *   { safe: false, reason, hunkCount }  — any hunk fails the shape check or
  *                                         the markers are malformed
  */
-export function unionResolveDiff3(mergedText, {
+export function unionResolveDiff3(mergedText, labels = {}) {
+  return walkDiff3Conflicts(mergedText, labels, ({ ours, base, theirs }) => (
+    ours.length > 0 || base.length > 0
+      ? { ok: false, reason: "conflict_is_not_a_pure_branch_addition" }
+      : { ok: true, lines: theirs, rule: "branch_addition" }
+  ));
+}
+
+/**
+ * Walk diff3/zdiff3 merged content and replace every conflict hunk with the
+ * lines `resolveHunk({ ours, base, theirs })` returns ({ ok: true, lines,
+ * rule }) or stop at the first hunk it declines ({ ok: false, reason }).
+ * A hunk without a base section is declined: the safety rules need it.
+ * Returns { safe: true, content, hunkCount, rules } or
+ * { safe: false, reason, hunkCount }.
+ */
+export function walkDiff3Conflicts(mergedText, {
   oursLabel = "ours",
   baseLabel = "base",
   theirsLabel = "theirs",
   markerSize = 7,
-} = {}) {
+} = {}, resolveHunk) {
   const lines = String(mergedText ?? "").split("\n");
   const normalizedMarkerSize = Math.max(7, Number.parseInt(markerSize, 10) || 7);
   const openMarker = `${"<".repeat(normalizedMarkerSize)} ${oursLabel}`;
@@ -72,6 +88,7 @@ export function unionResolveDiff3(mergedText, {
   const separatorMarker = "=".repeat(normalizedMarkerSize);
   const closeMarker = `${">".repeat(normalizedMarkerSize)} ${theirsLabel}`;
   const out = [];
+  const rules = [];
   let hunkCount = 0;
   let index = 0;
   while (index < lines.length) {
@@ -110,10 +127,12 @@ export function unionResolveDiff3(mergedText, {
         // property cannot be established.
         return { safe: false, reason: "missing_diff3_base_section", hunkCount };
       }
-      if (ours.length > 0 || base.length > 0) {
-        return { safe: false, reason: "conflict_is_not_a_pure_branch_addition", hunkCount };
+      const resolved = resolveHunk({ ours, base, theirs });
+      if (!resolved?.ok || !Array.isArray(resolved.lines)) {
+        return { safe: false, reason: resolved?.reason || "unresolvable_conflict_hunk", hunkCount };
       }
-      out.push(...theirs);
+      out.push(...resolved.lines);
+      if (resolved.rule) rules.push(resolved.rule);
       index += 1; // skip the ">>>>>>>" line
       continue;
     }
@@ -126,7 +145,7 @@ export function unionResolveDiff3(mergedText, {
   }
   // Zero hunks means merge-file's textual 3-way merge succeeded where git's
   // merge strategy reported a conflict; the output is a valid clean merge.
-  return { safe: true, content: out.join("\n"), hunkCount };
+  return { safe: true, content: out.join("\n"), hunkCount, rules };
 }
 
 export function conflictMarkerSizeAbsentFrom(contents = [], { minimum = 32 } = {}) {
@@ -388,7 +407,7 @@ export function resyncHandoffBranchOntoTarget({
   }
 }
 
-function readStageBlob(exec, cwd, stage, relPath) {
+export function readConflictStageBlob(exec, cwd, stage, relPath) {
   try {
     return exec(["show", `:${stage}:${relPath}`], cwd, { trim: false });
   } catch {
@@ -396,7 +415,7 @@ function readStageBlob(exec, cwd, stage, relPath) {
   }
 }
 
-function runMergeFileDiff3(exec, cwd, { oursFile, baseFile, theirsFile }) {
+export function mergeFileZdiff3(exec, cwd, { oursFile, baseFile, theirsFile }) {
   // --zdiff3, not --diff3: plain diff3 suppresses git's zealous conflict
   // minimization, so lines both sides added identically (the handoff copy)
   // stay inside the hunk and the ours-section is never empty. zdiff3
@@ -486,8 +505,8 @@ export function resolveHandoffSquashConflicts({ exec, cwd, branch }) {
   try {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-handoff-merge-"));
     for (const relPath of conflicted) {
-      const ours = readStageBlob(exec, cwd, 2, relPath);
-      const theirs = readStageBlob(exec, cwd, 3, relPath);
+      const ours = readConflictStageBlob(exec, cwd, 2, relPath);
+      const theirs = readConflictStageBlob(exec, cwd, 3, relPath);
       if (ours == null || theirs == null) {
         // Stage content is fixed for the given heads (e.g. a modify/delete
         // conflict): retrying cannot supply the missing stage, so this is a
@@ -496,7 +515,7 @@ export function resolveHandoffSquashConflicts({ exec, cwd, branch }) {
       }
       // Stage 1 is absent for both-added files; that is exactly the empty
       // base the safety rule requires.
-      const base = readStageBlob(exec, cwd, 1, relPath) ?? "";
+      const base = readConflictStageBlob(exec, cwd, 1, relPath) ?? "";
       const safeName = relPath.replace(/[^A-Za-z0-9._-]/g, "_");
       const oursFile = path.join(tempDir, `${safeName}.ours`);
       const baseFile = path.join(tempDir, `${safeName}.base`);
@@ -504,7 +523,7 @@ export function resolveHandoffSquashConflicts({ exec, cwd, branch }) {
       fs.writeFileSync(oursFile, ours);
       fs.writeFileSync(baseFile, base);
       fs.writeFileSync(theirsFile, theirs);
-      const mergeResult = runMergeFileDiff3(exec, cwd, { oursFile, baseFile, theirsFile });
+      const mergeResult = mergeFileZdiff3(exec, cwd, { oursFile, baseFile, theirsFile });
       // merge-file failure is blob-content-determined (e.g. binary files) —
       // exec health was already proven by the listing/scan calls above.
       if (mergeResult == null) return { resolved: false, reason: `merge_file_failed: ${relPath}` };

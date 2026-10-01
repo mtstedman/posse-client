@@ -4,17 +4,16 @@
 // work items that are already merged from reappearing in review when branch
 // cleanup is intentionally preserved.
 
-import { QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
 import { UNMERGED_WORK_ITEM_MERGE_STATES } from "../../../catalog/work-item.js";
 
 const UNMERGED_WORK_ITEM_MERGE_STATE_SET = new Set(UNMERGED_WORK_ITEM_MERGE_STATES);
 
-function hasRepoWriteJob(jobs = []) {
-  return Array.isArray(jobs) && jobs.some((job) => QUEUE_LOCKING_JOB_TYPES.has(job?.job_type));
-}
-
 export function shouldIncludeWorkItemInApprovalQueue(wi, jobs = [], opts = {}) {
   if (!wi) return false;
+  // Approval is a merge/finalization surface, not a recovery surface. Failed
+  // work remains visible in status, reports, and retry flows, but must never
+  // become mergeable merely because it still owns a branch or merge state.
+  if (wi.status !== "complete") return false;
   const iterativeActive = opts?.iterativeActive === true;
   if (iterativeActive) return false;
   const hasMergedEvent = opts?.hasMergedEvent === true;
@@ -22,9 +21,7 @@ export function shouldIncludeWorkItemInApprovalQueue(wi, jobs = [], opts = {}) {
 
   if (wi.branch_name || UNMERGED_WORK_ITEM_MERGE_STATE_SET.has(wi.merge_state)) return true;
 
-  // The approval queue is for repo/file-tree writes. Research, planning,
-  // assessment, and background system jobs stay available in the admin log and
-  // reports, but they do not need operator approval here.
-  if (!hasRepoWriteJob(jobs)) return false;
-  return wi.status === "failed";
+  // A completed item without an unmerged branch has nothing left for the
+  // approval surface to merge. It remains available in reports and admin logs.
+  return false;
 }

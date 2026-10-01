@@ -117,9 +117,10 @@ export function getPipelineHealth(opts = {}) {
   const providerHealth = db.prepare(`
     SELECT
       COALESCE(provider, 'unknown') as provider,
-      COUNT(*) as total_calls,
+      SUM(CASE WHEN status != 'interrupted' THEN 1 ELSE 0 END) as total_calls,
       SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succeeded_calls,
       SUM(CASE WHEN status IN ('failed', 'timeout') THEN 1 ELSE 0 END) as failed_calls,
+      SUM(CASE WHEN status = 'interrupted' THEN 1 ELSE 0 END) as interrupted_calls,
       MAX(CASE WHEN status = 'succeeded' THEN COALESCE(created_at, started_at) END) as last_success_at,
       MAX(CASE WHEN status IN ('failed', 'timeout') THEN COALESCE(created_at, started_at) END) as last_failure_at
     FROM agent_calls

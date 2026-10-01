@@ -77,11 +77,38 @@ function isGitPushArgs(args) {
   return false;
 }
 
+// SSH remotes often name a `Host` alias from ~/.ssh/config rather than the
+// real host (per-repository deploy keys use `git@github-<repo>:owner/repo`).
+// gh only knows real hostnames, so resolve the alias the way ssh would.
+// Returns null when ssh is unavailable or the answer is not a plain hostname.
+export function resolveSshHostname(alias, { execSsh = execFileSync, timeoutMs = 5_000 } = {}) {
+  const host = String(alias || "").trim();
+  if (!/^[A-Za-z0-9_][A-Za-z0-9._-]*$/u.test(host)) return null;
+  try {
+    const output = String(execSsh("ssh", ["-G", host], {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    }) || "");
+    const resolved = output.match(/^hostname\s+(\S+)\s*$/imu)?.[1] || "";
+    return /^[A-Za-z0-9][A-Za-z0-9.-]*$/u.test(resolved) ? resolved : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolvedSshHost(host, resolveSshHost) {
+  if (typeof resolveSshHost !== "function" || host.includes(":")) return host;
+  return resolveSshHost(host) || host;
+}
+
 // Return the gh hostname and, for SSH/plain-git remotes, the exact URL prefix
 // Git should rewrite to HTTPS for the credential-helper retry. HTTPS remotes
 // need only the helper. Local paths and file:// remotes are deliberately not
-// eligible for a GitHub CLI fallback.
-export function gitHubCliAuthTarget(remoteUrl) {
+// eligible for a GitHub CLI fallback. With `resolveSshHost`, an SSH host alias
+// keeps its own insteadOf prefix but targets the host it resolves to.
+export function gitHubCliAuthTarget(remoteUrl, { resolveSshHost = null } = {}) {
   const value = String(remoteUrl || "").trim();
   if (!value || /[\u0000-\u001f\u007f]/u.test(value)) return null;
   if (/^[A-Za-z]:[\\/]/u.test(value) || /^(?:\\\\|\/\/)/u.test(value)) return null;
@@ -91,10 +118,11 @@ export function gitHubCliAuthTarget(remoteUrl) {
     if (!scp || !scp[3]) return null;
     const host = stripIpv6Brackets(scp[2]);
     if (!host) return null;
+    const realHost = resolvedSshHost(host, resolveSshHost);
     return {
-      host,
+      host: realHost,
       insteadOf: `${scp[1] ? `${scp[1]}@` : ""}${scp[2]}:`,
-      httpsBase: `https://${scp[2]}/`,
+      httpsBase: realHost === host ? `https://${scp[2]}/` : `https://${realHost}/`,
     };
   }
 
@@ -110,15 +138,20 @@ export function gitHubCliAuthTarget(remoteUrl) {
   if (!["http:", "ssh:", "git:"].includes(parsed.protocol)) return null;
 
   const username = parsed.username ? `${parsed.username}@` : "";
+  // The SSH port never carries over to HTTPS, so an alias resolves regardless.
+  const resolvedName = parsed.protocol === "ssh:"
+    ? resolvedSshHost(parsed.hostname, resolveSshHost)
+    : parsed.hostname;
+  const realHost = resolvedName !== parsed.hostname ? resolvedName : host;
   return {
-    host,
+    host: realHost,
     insteadOf: `${parsed.protocol}//${username}${parsed.host}/`,
-    httpsBase: `https://${parsed.host}/`,
+    httpsBase: `https://${realHost}/`,
   };
 }
 
-export function gitHubCliAuthCommands(remoteUrl) {
-  const target = gitHubCliAuthTarget(remoteUrl);
+export function gitHubCliAuthCommands(remoteUrl, { resolveSshHost = null } = {}) {
+  const target = gitHubCliAuthTarget(remoteUrl, { resolveSshHost });
   if (!target || !/^[A-Za-z0-9._:-]+$/u.test(target.host)) return null;
   return {
     host: target.host,
@@ -127,8 +160,15 @@ export function gitHubCliAuthCommands(remoteUrl) {
   };
 }
 
-export function gitHubCliAuthRemediation(remoteUrl = null) {
-  const commands = gitHubCliAuthCommands(remoteUrl);
+// Remediation text has no gh probe to choose between hosts, so it resolves only
+// dot-free hosts (per-repo aliases such as `github-<repo>`). A real hostname is
+// kept even when ~/.ssh/config redirects it (github.com -> ssh.github.com).
+function resolveSshAliasOnly(host) {
+  return String(host || "").includes(".") ? null : resolveSshHostname(host);
+}
+
+export function gitHubCliAuthRemediation(remoteUrl = null, { resolveSshHost = resolveSshAliasOnly } = {}) {
+  const commands = gitHubCliAuthCommands(remoteUrl, { resolveSshHost });
   const login = commands?.login || "gh auth login --git-protocol https";
   const setupGit = commands?.setupGit || "gh auth setup-git";
   return {
@@ -180,6 +220,7 @@ export function gitPushWithGitHubCliFallback(args, cwd, {
   gitExecFn = adminGitExec,
   fallbackGitExecFn = adminGitExec,
   execGh = execFileSync,
+  resolveSshHost = resolveSshHostname,
   gitOptions = {},
 } = {}) {
   if (!Array.isArray(args) || !isGitPushArgs(args)) {
@@ -204,9 +245,18 @@ export function gitPushWithGitHubCliFallback(args, cwd, {
     } catch {
       throw initialError;
     }
-    const target = gitHubCliAuthTarget(remoteUrl);
-    if (!target || !ghAuthIsConfigured(target.host, cwd, execGh, fallbackOptions)) {
-      throw initialError;
+    // Ask gh about the host as written first (unchanged behaviour for real
+    // hosts, including github.com redirected to ssh.github.com by ssh config).
+    // Only when gh does not know it, try the host an SSH alias resolves to.
+    let target = gitHubCliAuthTarget(remoteUrl);
+    if (!target) throw initialError;
+    if (!ghAuthIsConfigured(target.host, cwd, execGh, fallbackOptions)) {
+      const resolved = gitHubCliAuthTarget(remoteUrl, { resolveSshHost });
+      if (!resolved || resolved.host === target.host
+        || !ghAuthIsConfigured(resolved.host, cwd, execGh, fallbackOptions)) {
+        throw initialError;
+      }
+      target = resolved;
     }
 
     const retryArgs = [

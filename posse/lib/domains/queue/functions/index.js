@@ -22,6 +22,8 @@ export * from "./cross-instance-claims.js";
 export * from "./shared-trunk-merge-state.js";
 export * from "./session-job-router.js";
 export * from "./post-merge-db-tasks.js";
+export * from "./run-cohort.js";
+export * from "./publication-telemetry.js";
 
 // Existing consumers also use queue's smaller entity/service exports.  They
 // intentionally continue to resolve from the original store during the

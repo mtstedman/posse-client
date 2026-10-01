@@ -220,6 +220,7 @@ export const SETTINGS_CATALOG = [
   // ── Scheduler ────────────────────────────────────────────────────────────
   { key: "scheduler_concurrency", default: "", runtimeFallback: "3", numeric: { integer: true, min: 1 }, description: "Default number of worker slots when --concurrency is not passed (empty = 3)" },
   { key: "scheduler_max_active_worktrees", default: "", numeric: { integer: true, min: 1 }, description: "Maximum number of active work-item worktrees the scheduler may run at once (empty = no cap)" },
+  { key: SETTING_KEYS.SCHEDULER_IMPLEMENTATION_RESERVED_SLOTS, default: "1", numeric: { integer: true, min: 0 }, description: "Agent slots plan jobs leave for ready dev/fix/artificer/promote jobs: once plans hold all but this many slots, the rest go to that work first (0 = off)" },
   { key: SETTING_KEYS.WAITING_LANE_SHADOW_MODE, default: "off", options: WAITING_LANE_SHADOW_MODE_VALUES, description: "Waiting-lane eligibility observation: off records nothing; shadow records decisions without creating a detached worktree or parked view" },
   { key: SETTING_KEYS.WAITING_LANE_GIT_PREPARATION_ENABLED, default: "false", valueType: "boolean", description: "Create guarded detached waiting-lane worktrees after eligible research startup" },
   { key: SETTING_KEYS.WAITING_LANE_ATLAS_SNAPSHOT_ENABLED, default: "false", valueType: "boolean", description: "Create parked ATLAS snapshots for eligible detached waiting lanes" },
@@ -242,6 +243,8 @@ export const SETTINGS_CATALOG = [
   { key: "git_atlas_post_commit_hook_timeout_ms", default: "600000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to wait for the ATLAS post-commit hook during scoped git commits" },
   { key: "stall_timeout",         default: "", runtimeFallback: "600", numeric: { integer: true, min: 1 }, description: "Seconds before a stalled job is killed (empty = 600)" },
   { key: "max_job_runtime_sec",   default: "", numeric: { integer: true, min: 1 }, description: "Maximum seconds a job may run before runtime cancellation (empty = 2x stall_timeout)" },
+  { key: SETTING_KEYS.RUNTIME_WRITE_GRACE_SEC, default: "180", numeric: { integer: true, min: 0 }, description: "A job past its runtime cap keeps running while its last successful file write is at most this many seconds old (0 = off)" },
+  { key: SETTING_KEYS.RUNTIME_WRITE_CEILING_MULTIPLIER, default: "2", numeric: { integer: true, min: 1 }, description: "Hard ceiling, as a multiple of the runtime cap, on how far write activity can extend a job (1 = no extension)" },
   { key: "headless_human_timeout_sec", default: "600", numeric: { integer: true, min: 1 }, description: "Seconds to wait for human input in headless mode" },
   { key: "human_gate_resnooze_sec", default: "600", numeric: { integer: true, min: 30 }, description: "Seconds a parked human gate snoozes before the scheduler re-surfaces its prompt (display sessions only)" },
   { key: SETTING_KEYS.HUMAN_GATE_MAX_RESURFACES, default: "2", numeric: { integer: true, min: 0 }, description: "Maximum automatic reminders for a parked human gate across interactive restarts and scheduler snooze cycles; 0 disables reminders" },

@@ -50,6 +50,33 @@ export const SPRITE_SHEET_INPUT_FORMATS = Object.freeze(["png", "jpeg", "webp", 
 export const SPRITE_SHEET_MAP_VERSION = 1;
 export const SPRITE_SHEET_OBSERVATION_TYPE = "artifact.sprite_sheet";
 
+// view_image: the assessor inspects the pixels of one in-scope image. The
+// image goes back to the model as an MCP image content block, so it is bounded
+// for transport and vision-model input: files over maxInputBytes, or whose
+// header exceeds maxInputSide / maxInputPixels, are refused before any decode.
+// An image whose long edge exceeds maxOutputSide, or whose bytes exceed
+// maxOutputBytes, is downscaled to a PNG that fits (maxOutputBytes keeps the
+// base64 block under common per-image provider limits). Only signature-checked
+// PNG, JPEG, WebP, and GIF files are accepted; no SVG or other scriptable
+// formats.
+export const VIEW_IMAGE_LIMITS = Object.freeze({
+  maxInputBytes: 20 * 1024 * 1024,
+  maxInputSide: 8192,
+  maxInputPixels: 4096 * 4096,
+  maxOutputSide: 1568,
+  maxOutputBytes: 3 * 1024 * 1024,
+  maxPathChars: 1_024,
+  maxDownscaleAttempts: 3,
+  callTimeoutMs: 60_000,
+});
+export const VIEW_IMAGE_INPUT_FORMATS = Object.freeze(["png", "jpeg", "webp", "gif"]);
+export const VIEW_IMAGE_MIME_TYPES = Object.freeze({
+  png: "image/png",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+});
+
 // Operator-provided text files under .posse/resources/inputs/wi-N become
 // work-item hash refs, so dev/planner/assessor jobs read them through
 // traverse_ref instead of a path their tools cannot reach.

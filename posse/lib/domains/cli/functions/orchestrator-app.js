@@ -259,6 +259,7 @@ import {
 } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { ask, askMultiline, askSelectorChoice } from "./input-prompts.js";
+import { confirmManualMerge, parseMergeCommandArgs } from "./merge-command.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { daemonSupervisor } from "../../../shared/tools/classes/daemon/index.js";
 import { persistentMcpOwner } from "../../../shared/tools/classes/PersistentMcpOwner.js";
@@ -1868,7 +1869,7 @@ async function cmdGo() {
       await helpers.refreshPushOfferGate(autoMergedNow, { createdBy: "run_wrapup" });
     } catch { /* the deploy offer is best-effort */ }
     // Nothing to plan/run — but if there are reviewable work items, go to review
-    const reviewable = listWorkItems(["complete", "failed"]).filter(isReviewableWorkItem);
+    const reviewable = listWorkItems(["complete"]).filter(isReviewableWorkItem);
     if (reviewable.length > 0) {
       console.log(`\n  ${C.bold}No active jobs — ${reviewable.length} work item(s) ready for review.${C.reset}\n`);
       await cmdReview();
@@ -2107,7 +2108,7 @@ function refuseIfSchedulerLive(commandName) {
 }
 
 async function cmdMerge() {
-  const rawWiArg = String(process.argv[3] || "").trim();
+  const { wiArg: rawWiArg, assumeYes } = parseMergeCommandArgs(process.argv);
   const targetBranch = getAdminTargetBranch();
   const helpers = await getAdminGitWorkflowHelpers();
 
@@ -2126,7 +2127,7 @@ async function cmdMerge() {
       console.log(`  ${C.green}\u2713${C.reset} ${C.bold}WI#${wi.id}${C.reset} ${wi.title.slice(0, 50)}`);
       console.log(`    ${C.dim}Branch: ${wi.branch_name}  Jobs: ${succeeded}/${jobs.length}${C.reset}`);
     }
-    console.log(`\n  ${C.dim}Usage: merge <wi_id>${C.reset}\n`);
+    console.log(`\n  ${C.dim}Usage: merge <wi_id> [--yes]${C.reset}\n`);
     return;
   }
 
@@ -2162,23 +2163,20 @@ async function cmdMerge() {
     return;
   }
 
-  // Show diff stats before merging
-  if (wi.merge_base_hash) {
-    // `merge` is an operator/admin command (Bossy calls this path directly),
-    // not an agent dispatch. Keep it on the direct Git workflow so MCP/native
-    // daemon heartbeat readiness cannot block approval or merge execution.
-    const diffLines = helpers.gitDiffStat(wi.merge_base_hash, wi.branch_name, PROJECT_DIR);
-    if (diffLines.length > 0) {
-      console.log(`\n  ${C.bold}Changes in ${wi.branch_name}:${C.reset}`);
-      for (const line of diffLines) {
-        console.log(`    ${line}`);
-      }
-    }
-  }
-
-  const confirm = await ask(`\n  Merge ${C.cyan}${wi.branch_name}${C.reset} into ${C.cyan}${targetBranch}${C.reset}? (y/n): `);
-  if (confirm.toLowerCase() !== "y") {
-    console.log(`  ${C.dim}Canceled.${C.reset}\n`);
+  // `merge` is an operator/admin command (Bossy calls this path directly),
+  // not an agent dispatch. Keep it on the direct Git workflow so MCP/native
+  // daemon heartbeat readiness cannot block approval or merge execution.
+  const confirmed = await confirmManualMerge({
+    wi,
+    targetBranch,
+    jobs: listJobsByWorkItem(wi.id),
+    assumeYes,
+    gitDiffStat: (base, branch) => helpers.gitDiffStat(base, branch, PROJECT_DIR),
+    ask,
+    C,
+  });
+  if (!confirmed.ok) {
+    if (confirmed.exitCode) process.exitCode = confirmed.exitCode;
     return;
   }
 
@@ -2242,7 +2240,9 @@ async function cmdMerge() {
     console.log(`  ${C.dim}Merge the upstream work item first, then retry this merge.${C.reset}\n`);
   } else {
     console.log(`\n  ${C.red}\u2717 ${result.message}${C.reset}`);
-    console.log(`  ${C.dim}Resolve conflicts manually, then run: git merge --continue${C.reset}\n`);
+    // A parked conflict's message names the files and the next action.
+    if (!result.deterministicConflict) console.log(`  ${C.dim}Resolve conflicts manually, then run: git merge --continue${C.reset}`);
+    console.log("");
     process.exitCode = 1;
   }
 
@@ -2928,6 +2928,7 @@ ${aliasDiagnostic}
     ${C.cyan}admin${C.reset}      Stats, session history, and settings management
     ${C.dim}             admin init [--provider-clis-only] | admin describe --json | admin set/clear [--json] | admin snapshot | admin worktrees | admin memory <note|suppress|correct> <id> | admin settings${C.reset}
     ${C.cyan}merge${C.reset}      Merge a completed WI branch
+    ${C.dim}             merge <wi_id> [--yes]${C.reset}
     ${C.cyan}prune${C.reset}      Clean up orphaned worktrees
     ${C.dim}             prune [--dry-run]${C.reset}
     ${C.cyan}purge${C.reset}      Delete ALL posse/* branches + worktrees (asks first)

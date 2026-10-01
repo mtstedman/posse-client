@@ -24,6 +24,7 @@ import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { getProviderBackoff, getProviderName } from "../../../providers/functions/provider.js";
 import { providerRoleForJobType } from "../../../providers/functions/roles.js";
+import { runtimeKillCanEscalate } from "../../../scheduler/functions/runtime-escalation.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { isAbortError } from "../../../runtime/functions/yield.js";
 import {
@@ -42,6 +43,7 @@ import {
   activeSiblingWriteLocks,
   siblingLockSummary,
 } from "../../../queue/functions/sibling-locks.js";
+import { siblingJobScopePaths } from "../../../queue/functions/file-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { processVerdict } from "./process-verdict.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
@@ -72,6 +74,16 @@ function deferInterruptedCleanupIfSiblingLocks(job, label) {
   return true;
 }
 
+// Sibling jobs of the work item share this worktree. Their placeholders,
+// locked files and declared scope stay out of this job's stash, so its resume
+// cannot collide with them (WI 154 job 2028, 2026-10-01: a shutdown stash
+// took a sibling's staged placeholders). null stashes everything.
+function ownInterruptedStashPaths(job, dirtyPaths = []) {
+  const siblingPaths = siblingJobScopePaths(job.id, dirtyPaths);
+  if (siblingPaths.size === 0) return null;
+  return dirtyPaths.filter((file) => !siblingPaths.has(file));
+}
+
 async function stashInterruptedWork(job, wtPath, label, projectDir = null) {
   if (!wtPath) return false;
   try {
@@ -81,6 +93,7 @@ async function stashInterruptedWork(job, wtPath, label, projectDir = null) {
     try {
       const stashed = await stashDirtyWorktreeAsync(wtPath, mainCwd, `posse: stash from ${label} job #${job.id}`, {
         shouldDefer: () => deferInterruptedCleanupIfSiblingLocks(job, label),
+        selectPaths: (dirtyPaths) => ownInterruptedStashPaths(job, dirtyPaths),
       });
       if (stashed) flagStallResume(job.id);
       return stashed;
@@ -698,12 +711,17 @@ export async function handleExecuteAttemptError(worker, {
     return;
   }
 
-  // Runtime exceeded: consume attempt so next run escalates tier.
+  // Runtime exceeded: consume attempt so next run escalates tier. When the
+  // next attempt runs the same model, the scheduler only kills at its runaway
+  // backstop, so say that instead of promising an escalation.
   if (err._killReason === "runtime_exceeded") {
+    const escalates = runtimeKillCanEscalate(currentJob || job, { leasedJob: job });
     completeAttempt(attempt.id, {
       status: "interrupted",
       duration_ms: Date.now() - startTime,
-      error_text: `Runtime exceeded — killed by scheduler for model escalation`,
+      error_text: escalates
+        ? `Runtime exceeded — killed by scheduler for model escalation`
+        : `Runtime backstop exceeded — killed by scheduler as a runaway (no stronger model to escalate to)`,
     });
 
     const hasStash = await stashInterruptedWork(job, wtPath, "runtime-exceeded", worker?.projectDir);
@@ -714,7 +732,9 @@ export async function handleExecuteAttemptError(worker, {
       attempt_id: attempt.id,
       event_type: EVENT_TYPES.JOB_RUNTIME_EXCEEDED,
       actor_type: EVENT_ACTORS.SYSTEM,
-      message: `Runtime exceeded — requeuing with escalated model${hasStash ? " (partial work stashed for resume)" : ""}`,
+      message: escalates
+        ? `Runtime exceeded — requeuing with escalated model${hasStash ? " (partial work stashed for resume)" : ""}`
+        : `Runtime backstop exceeded — runaway attempt killed; requeuing on the same model${hasStash ? " (partial work stashed for resume)" : ""}`,
     });
 
     if (job.job_type === "preflight") {
@@ -727,7 +747,9 @@ export async function handleExecuteAttemptError(worker, {
     }
 
     worker._releaseLease(job, leaseToken, "queued", { readyAt: new Date().toISOString() });
-    worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} runtime exceeded — requeuing with model escalation${hasStash ? " (will resume from stash)" : ""}${C.reset}`);
+    worker.emit(job.id, escalates
+      ? `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} runtime exceeded — requeuing with model escalation${hasStash ? " (will resume from stash)" : ""}${C.reset}`
+      : `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} runtime backstop exceeded — runaway attempt killed; requeuing on the same model${hasStash ? " (will resume from stash)" : ""}${C.reset}`);
     return;
   }
 

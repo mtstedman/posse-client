@@ -45,6 +45,7 @@ import {
 } from "../../../handoff/functions/agent-handoff.js";
 import { refreshAndExtractInsights } from "./insights.js";
 import { renderBaselineSiblingRegression } from "./baseline-attribution.js";
+import { renderBaselineTestDebt } from "./baseline-test-debt.js";
 import { gitExec, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
 import {
   snapshotAndResetDirtyWorktreeAsync,
@@ -570,18 +571,61 @@ function imageAssessmentRequiresPixelEvidence(payload = {}) {
   return /\b(?:visual(?:ly)?|artwork|art direction|scene|depict(?:s|ed|ing)?|composition|layout|sty(?:le|led|ling)|theme|recognizable|copied|character|screenshot|readable at|look and feel|original (?:art|artwork|illustration|design|composition|layout|visual|scene))\b/i.test(text);
 }
 
-function imageAssessmentHasPixelEvidence(toolUses = []) {
+function pixelEvidenceToolName(use) {
+  return String(use?.tool || use?.name || use?.tool_name || "")
+    .trim()
+    .toLowerCase()
+    .split("__")
+    .at(-1)
+    .replace(/^tools[._]/, "");
+}
+
+// When the gateway ledger can answer for this agent call, the gateway's own
+// view_image is judged by its recorded outcome there: a provider tool-use
+// stream does not always carry a status (Claude's never does), so a refused
+// view_image call would otherwise count as visual evidence.
+function imageAssessmentHasPixelEvidence(toolUses = [], { ledgerAuthoritative = false } = {}) {
   return (Array.isArray(toolUses) ? toolUses : []).some((use) => {
-    const raw = String(use?.tool || use?.name || use?.tool_name || "")
-      .trim()
-      .toLowerCase();
-    const normalizedName = raw
-      .split("__")
-      .at(-1)
-      .replace(/^tools[._]/, "");
+    const normalizedName = pixelEvidenceToolName(use);
+    if (ledgerAuthoritative && normalizedName === "view_image") return false;
     return PIXEL_VISUAL_EVIDENCE_TOOL_NAMES.has(normalizedName)
       && !UNSUCCESSFUL_VISUAL_TOOL_STATUSES.has(String(use?.status || "").trim().toLowerCase());
   });
+}
+
+// Successful view_image calls this agent call made, from the gateway's tool
+// ledger (one finish row per call, with ok/outcome and the agent call id).
+function viewImageSucceededInLedger({ attemptId, agentCallId, db = null } = {}) {
+  const attempt = Number(attemptId);
+  const agentCall = Number(agentCallId);
+  if (!Number.isInteger(attempt) || attempt <= 0 || !Number.isInteger(agentCall) || agentCall <= 0) return false;
+  let rows = [];
+  try {
+    rows = (db || getDb()).prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE attempt_id = ?
+        AND observation_type = 'tool.view_image'
+      ORDER BY id ASC
+    `).all(attempt);
+  } catch {
+    return false;
+  }
+  return rows.some((row) => {
+    let detail;
+    try { detail = JSON.parse(row.detail_json || "{}"); } catch { return false; }
+    return Number(detail?.agent_call_id) === agentCall
+      && detail?.phase === "finish"
+      && detail?.ok === true
+      && (!detail?.outcome || detail.outcome === "succeeded");
+  });
+}
+
+export function assessorPixelEvidenceObserved({ toolUses = [], attemptId = null, agentCallId = null, db = null } = {}) {
+  const ledgerAuthoritative = Number.isInteger(Number(attemptId)) && Number(attemptId) > 0
+    && Number.isInteger(Number(agentCallId)) && Number(agentCallId) > 0;
+  return imageAssessmentHasPixelEvidence(toolUses, { ledgerAuthoritative })
+    || (ledgerAuthoritative && viewImageSucceededInLedger({ attemptId, agentCallId, db }));
 }
 
 function applyImageVisualEvidencePolicy({
@@ -1394,6 +1438,8 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     }
     const baselineSiblingRegression = renderBaselineSiblingRegression(parsedJobPayload);
     if (baselineSiblingRegression) sections.push(baselineSiblingRegression.trimEnd());
+    const baselineTestDebt = renderBaselineTestDebt(parsedJobPayload);
+    if (baselineTestDebt) sections.push(baselineTestDebt.trimEnd());
 
     // Task mode context
     if (task_mode !== "code") {
@@ -1777,6 +1823,10 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       stableContext: assessorPacket?.stable_context || null,
       remoteSystemPrompt: assessorPacket?.remote_system_prompt || null,
       taskMode: parsedJobPayload.task_mode || "code",
+      // view_image reaches only image assessments, including artifact jobs
+      // whose effective mode is image; the visual-evidence policy below keys
+      // on the same effective mode.
+      imageInspection: effectiveArtifactTaskMode(job, parsedJobPayload) === "image",
       projectDbCapability: parsedJobPayload.task_mode === "db" ? "read" : "none",
       sessionPacket: assessorPacket || null,
       skipRolePrompt: !!assessorPacket?.remote_prompt_composed,
@@ -1811,7 +1861,11 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     });
     response = result.output;
     assessorToolUses = Array.isArray(result?.stats?.toolUses) ? result.stats.toolUses : [];
-    imagePixelEvidenceObserved = imageAssessmentHasPixelEvidence(assessorToolUses);
+    imagePixelEvidenceObserved = assessorPixelEvidenceObserved({
+      toolUses: assessorToolUses,
+      attemptId,
+      agentCallId: result?.agentCallId,
+    });
     if (Number.isInteger(result.agentCallId)) {
       toolBudgetExhaustion = assessorToolBudgetExhaustion(result.agentCallId, job.id);
       if (toolBudgetExhaustion) {
