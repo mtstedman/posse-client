@@ -2,11 +2,19 @@
 //
 // Shared git shell helpers for worker-side operations.
 
-import { Repo, gitGateReleaseKey, gitGateSnapshot, isGitCommandFailure, waitForGitGateRelease } from "../classes/index.js";
+import { GIT_CAPTURE_MAX_BYTES } from "../../../catalog/binary.js";
+import {
+  Repo,
+  gitGateReleaseKey,
+  gitGateSnapshot,
+  isGitCaptureLimitError,
+  isGitCommandFailure,
+  waitForGitGateRelease,
+} from "../classes/index.js";
 import { isAbortError } from "../../runtime/functions/yield.js";
 import { nativeAsyncOptions, runGitNativeMethod, runGitNativeMethodAsync } from "./native/invoke.js";
 
-export { gitGateReleaseKey, gitGateSnapshot, isGitCommandFailure, waitForGitGateRelease };
+export { gitGateReleaseKey, gitGateSnapshot, isGitCaptureLimitError, isGitCommandFailure, waitForGitGateRelease };
 
 // Default subprocess timeout for git operations spawned via execFileSync/
 // execSync. 30 seconds matches the historical inline literals used across
@@ -25,7 +33,7 @@ function bufferExecOptions(options = {}) {
   return {
     encoding: "buffer",
     input: options.input == null ? undefined : String(options.input),
-    maxBuffer: options.maxBuffer ?? 1024 * 1024 * 16,
+    maxBuffer: options.maxBuffer ?? GIT_CAPTURE_MAX_BYTES,
     timeoutMs: options.timeoutMs ?? options.timeout ?? GIT_OPERATION_TIMEOUT_MS,
     gate: options.gate,
     gateMode: options.gateMode,

@@ -8,6 +8,7 @@
 import fs from "fs";
 import path from "path";
 import { randomBytes } from "crypto";
+import { GIT_CAPTURE_MAX_BYTES } from "../../../catalog/binary.js";
 import { slugify } from "../../../shared/format/functions/slug.js";
 import { getSetting } from "../../queue/functions/index.js";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
@@ -185,7 +186,7 @@ async function gitCatFileBatchAsync(projectDir, objectHashes = [], options = {})
   return await gitExecBufferAsync(["cat-file", "--batch"], projectDir, {
     ...options,
     input,
-    maxBuffer: 1024 * 1024 * 16,
+    maxBuffer: GIT_CAPTURE_MAX_BYTES,
   });
 }
 

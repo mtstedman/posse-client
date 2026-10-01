@@ -1147,6 +1147,11 @@ export class NativeBinary {
       const captureMaxChars = Math.max(DEFAULT_MAX_BUFFER, Number(opts.maxBuffer) || 0);
       let stdout = "";
       let stderr = "";
+      // Decode across chunk boundaries: stringifying each raw chunk splits
+      // multi-byte UTF-8 characters at 64 KiB pipe reads and corrupts large
+      // non-ASCII payloads (git diffs/blobs carried in the JSON envelope).
+      child.stdout?.setEncoding?.("utf8");
+      child.stderr?.setEncoding?.("utf8");
       child.stdout?.on("data", (d) => { stdout = appendBoundedText(stdout, d, captureMaxChars); });
       child.stderr?.on("data", (d) => { stderr = appendBoundedText(stderr, d, captureMaxChars); });
       child.stdin?.on?.("error", () => {});

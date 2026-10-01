@@ -3,8 +3,11 @@ import { answerHumanInput } from "../../bridge/functions/human-input-answer.js";
 import { getJob } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 
+// Resolved against the gate's own choices, so an alias only applies where its
+// target is offered ("run" is the post-merge database gate's go-ahead).
 const ACTION_ALIASES = Object.freeze({
-  retry: Object.freeze(["retry", "retry_assessment", "retry_with_changes"]),
+  retry: Object.freeze(["retry", "retry_assessment", "retry_with_changes", "run"]),
+  pass: Object.freeze(["pass", "run"]),
   skip: Object.freeze(["skip", "explicit_waiver"]),
 });
 

@@ -74,7 +74,9 @@ export class DeveloperRole extends BaseRole {
 
     const workItem = getWorkItem(job.work_item_id);
     const payload = worker.parsePayload(job);
-    const devCwd = job._worktreePath || worker.projectDir;
+    // db-mode jobs own no worktree; they read the work-item branch through
+    // the worktree resolved by the execution gate (_dbReadRoot) until merge.
+    const devCwd = job._worktreePath || job._dbReadRoot || worker.projectDir;
     const dbOnlyTask = (payload.task_mode || "code") === "db";
     let dbGrants = [];
     if (dbOnlyTask) {

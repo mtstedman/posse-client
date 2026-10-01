@@ -263,6 +263,7 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   // Repository
   target_branch: "Merge target branch",
   git_commit_style: "Commit message style",
+  db_task_pre_merge_policy: "Database tasks before merge",
   canonical_verify_cmd: "Verification command",
   verification_wall_timeout_ms: "Verification timeout",
   verification_idle_timeout_ms: "Verification silence timeout",
@@ -476,6 +477,7 @@ const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   // Repository
   target_branch: "Branch completed work merges into. When blank, Posse uses the remote's default branch, then main or master.",
   git_commit_style: "Format of the commit subjects Posse writes: off (plain), Conventional Commits, or Conventional Commits with Gitmoji. Styled modes add one standard-tier model pass per commit.",
+  db_task_pre_merge_policy: "Database tasks that depend on file changes not yet merged. Hold waits until the work item merges, then asks you before writing the project database; run writes it right away, reading the work item's branch. Use run only when the project database is not production.",
   canonical_verify_cmd: "Your repository's own verification command (for example npm test). Posse runs it before assessment and before pushing.",
   verification_wall_timeout_ms: "How long a verification command may run, in milliseconds, before Posse stops it. Match the time your test suite documents; capped by the Debug verification ceiling.",
   verification_idle_timeout_ms: "Stop a verification command that prints nothing for this many milliseconds. Leave it off for test runners that stay silent while healthy.",
@@ -998,6 +1000,7 @@ export const SETTINGS_GROUPS = Object.freeze([
   group("repo_git", "repo", "Git", [
     "target_branch",
     "git_commit_style",
+    "db_task_pre_merge_policy",
   ]),
   group("repo_verification", "repo", "Verification", [
     "canonical_verify_cmd",

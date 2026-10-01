@@ -14,7 +14,15 @@ import { execFile, execFileSync } from "child_process";
 import { getSetting } from "../../queue/functions/index.js";
 import { resolveVerificationPolicy } from "../../settings/functions/verification-policy.js";
 import { snapshotPublishingPushConfigs, snapshotPublishingPushConfigsAsync } from "./push-guard.js";
-import { gitExec, gitExecAsync, gitExecBuffer, gitExecBufferAsync, isGitCommandFailure } from "./utils.js";
+import {
+  gitExec,
+  gitExecAsync,
+  gitExecBuffer,
+  gitExecBufferAsync,
+  isGitCaptureLimitError,
+  isGitCommandFailure,
+} from "./utils.js";
+import { GIT_CAPTURE_MAX_BYTES, GIT_NATIVE_MAX_CAPTURE_BYTES } from "../../../catalog/binary.js";
 import { SECRET_PATTERNS } from "../../../shared/telemetry/functions/logging/secret-patterns.js";
 import { resolvePathWithin } from "../../runtime/functions/fs-safety.js";
 
@@ -446,7 +454,7 @@ function gitInfraBlockResult(gateName, err) {
 // One `cat-file --batch` fetches every staged blob in a single native call
 // (each sync git call is a full posse-git spawn, so per-file `git show` made
 // guarded commits pay N spawns).
-const STAGED_BATCH_MAX_BUFFER = 1024 * 1024 * 64;
+const STAGED_BATCH_MAX_BUFFER = GIT_CAPTURE_MAX_BYTES;
 
 function stagedBatchInput(files) {
   return `${files.map((file) => `:${file}`).join("\n")}\n`;
@@ -727,12 +735,127 @@ function envFileBlock(names) {
   ]);
 }
 
-function pushDiffSecretsBlock(diff) {
-  const findings = _scanTextForSecrets(diff);
+function pushDiffSecretsBlock(findings) {
   if (findings.length === 0) return null;
   return prePushBlock([
     "Possible secrets detected in unpushed diff:",
     ...findings.slice(0, 10).map((finding) => `  ${finding}`),
+  ]);
+}
+
+// The unpushed diff is scanned in one capture when it fits. Vendored data can
+// push it past posse-git's per-call capture ceiling, which refuses rather than
+// truncates; the scan then re-reads the diff per path group, halving any group
+// that is still too large, so no single capture exceeds the ceiling and only
+// one group's diff is held at a time. Rename/copy pairs stay in one group so
+// rename detection, and so the added-line set, matches the whole-range diff.
+// Pathspec groups stay well under the Windows command-line limit.
+const PUSH_DIFF_GROUP_PATHSPEC_CHARS = 16 * 1024;
+
+function pushDiffArgs(range, group = null) {
+  const args = ["diff", range, "--unified=0"];
+  return group ? ["--literal-pathspecs", ...args, "--", ...group.flat()] : args;
+}
+
+function pushDiffPathspecGroups(nameStatus) {
+  const fields = String(nameStatus || "").split("\0");
+  const groups = [];
+  let group = [];
+  let chars = 0;
+  for (let i = 0; i < fields.length;) {
+    const status = fields[i++];
+    if (!status) continue;
+    const width = /^[RC]/.test(status) ? 2 : 1;
+    const unit = fields.slice(i, i + width).filter(Boolean);
+    i += width;
+    // A deletion adds no lines to scan.
+    if (status === "D" || unit.length === 0) continue;
+    const size = unit.reduce((sum, file) => sum + file.length + 1, 0);
+    if (group.length > 0 && chars + size > PUSH_DIFF_GROUP_PATHSPEC_CHARS) {
+      groups.push(group);
+      group = [];
+      chars = 0;
+    }
+    group.push(unit);
+    chars += size;
+  }
+  if (group.length > 0) groups.push(group);
+  return groups;
+}
+
+function splitOversizedPushDiffGroup(group, err) {
+  if (!isGitCaptureLimitError(err)) throw err;
+  if (group.length > 1) {
+    const half = Math.ceil(group.length / 2);
+    return [group.slice(0, half), group.slice(half)];
+  }
+  const error = new Error(`unpushed diff of ${group[0].join(" -> ")} exceeds one native git capture`, { cause: err });
+  error.oversizedPushDiffPaths = group[0];
+  throw error;
+}
+
+function pushDiffSecretFindings(cwd, upstream, nativeParity) {
+  const range = `${upstream}..HEAD`;
+  const capture = (group) => gitExec(pushDiffArgs(range, group), cwd, {
+    maxBuffer: GIT_CAPTURE_MAX_BYTES,
+    trim: false,
+    nativeParity,
+  });
+  try {
+    return _scanTextForSecrets(capture(null));
+  } catch (err) {
+    if (!isGitCaptureLimitError(err)) throw err;
+  }
+  const pending = pushDiffPathspecGroups(
+    gitExec(["diff", "--name-status", "-z", range], cwd, { trim: false, nativeParity }),
+  );
+  const findings = [];
+  while (pending.length > 0) {
+    const group = pending.shift();
+    try {
+      findings.push(..._scanTextForSecrets(capture(group)));
+    } catch (err) {
+      pending.unshift(...splitOversizedPushDiffGroup(group, err));
+    }
+  }
+  return findings;
+}
+
+async function pushDiffSecretFindingsAsync(cwd, upstream, nativeParity) {
+  const range = `${upstream}..HEAD`;
+  const capture = (group) => gitExecAsync(pushDiffArgs(range, group), cwd, {
+    maxBuffer: GIT_CAPTURE_MAX_BYTES,
+    trim: false,
+    nativeParity,
+  });
+  try {
+    return _scanTextForSecrets(await capture(null));
+  } catch (err) {
+    if (!isGitCaptureLimitError(err)) throw err;
+  }
+  const pending = pushDiffPathspecGroups(
+    await gitExecAsync(["diff", "--name-status", "-z", range], cwd, { trim: false, nativeParity }),
+  );
+  const findings = [];
+  while (pending.length > 0) {
+    const group = pending.shift();
+    try {
+      findings.push(..._scanTextForSecrets(await capture(group)));
+    } catch (err) {
+      pending.unshift(...splitOversizedPushDiffGroup(group, err));
+    }
+  }
+  return findings;
+}
+
+// One file whose diff alone exceeds the native ceiling cannot be scanned. That
+// is not a clean scan, so the push stays blocked, naming the file.
+function oversizedPushDiffBlock(err) {
+  if (!err?.oversizedPushDiffPaths) return null;
+  const ceilingMiB = Math.round(GIT_NATIVE_MAX_CAPTURE_BYTES / (1024 * 1024));
+  return prePushBlock([
+    `Secrets scan could not read the unpushed diff of ${err.oversizedPushDiffPaths.join(" -> ")}:`,
+    `it is larger than one posse-git capture (${ceilingMiB} MiB). This is not a clean scan.`,
   ]);
 }
 
@@ -777,14 +900,11 @@ function prePushGate({ cwd, nativeParity = {} }) {
       const envBlock = envFileBlock(names);
       if (envBlock) return envBlock;
 
-      const diff = gitExec(["diff", `${upstream}..HEAD`, "--unified=0"], cwd, {
-        maxBuffer: 1024 * 1024 * 4,
-        trim: false,
-        nativeParity,
-      });
-      const secretsBlock = pushDiffSecretsBlock(diff);
+      const secretsBlock = pushDiffSecretsBlock(pushDiffSecretFindings(cwd, upstream, nativeParity));
       if (secretsBlock) return secretsBlock;
     } catch (err) {
+      const oversizedBlock = oversizedPushDiffBlock(err);
+      if (oversizedBlock) return oversizedBlock;
       // best effort for git failures only
       if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
     }
@@ -836,14 +956,11 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
       const envBlock = envFileBlock(names);
       if (envBlock) return envBlock;
 
-      const diff = await gitExecAsync(["diff", `${upstream}..HEAD`, "--unified=0"], cwd, {
-        maxBuffer: 1024 * 1024 * 4,
-        trim: false,
-        nativeParity,
-      });
-      const secretsBlock = pushDiffSecretsBlock(diff);
+      const secretsBlock = pushDiffSecretsBlock(await pushDiffSecretFindingsAsync(cwd, upstream, nativeParity));
       if (secretsBlock) return secretsBlock;
     } catch (err) {
+      const oversizedBlock = oversizedPushDiffBlock(err);
+      if (oversizedBlock) return oversizedBlock;
       // best effort for git failures only
       if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
     }

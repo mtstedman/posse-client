@@ -22,6 +22,7 @@ import {
   extendJobMaxAttempts,
   incrementAndCreateAttempt,
   logEvent,
+  releasedPostMergeDbPayload,
   resolveJobScopeExpansion,
   rewireDependency,
   reopenHumanGateResolution,
@@ -55,6 +56,7 @@ import {
 } from "../../../research/functions/oneshot-scope-selection.js";
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE, REPLAN_TRIGGERS } from "../../../../catalog/job.js";
 import {
+  POST_MERGE_DB_TASK_REVIEW_TYPE,
   exactHumanInputChoiceFromAnswer,
   humanInputChoiceFromAnswer,
   humanInputChoicesForPayload,
@@ -843,6 +845,59 @@ export async function runHumanInputJob(worker, job, {
       } else {
         finalHumanStatus = "failed";
         worker.emit(job.id, `${C.yellow}[human] Artifact-routing review answer was not actionable; expected acknowledge${C.reset}`);
+      }
+    }
+
+    // Post-merge database task: the work item merged while this db job was
+    // held. "run" requeues it (it now reads the merged target checkout);
+    // "skip" drops it without touching the project database.
+    if (payload.original_job_id && payload.review_type === POST_MERGE_DB_TASK_REVIEW_TYPE) {
+      handledReviewDecision = true;
+      const origJob = getJob(payload.original_job_id);
+      if (!origJob) {
+        finalHumanStatus = "failed";
+        worker.emit(job.id, `${C.yellow}[human] Post-merge database gate could not find job #${payload.original_job_id}${C.reset}`);
+      } else if (selectedAction === "run") {
+        const resume = requestParkedJobResumeAfterGate({
+          gateJobId: job.id,
+          originalJobId: origJob.id,
+          operationKey: `${resolutionClaim.idempotency_key}:resume_original`,
+          reason: "post_merge_db_task_run",
+        });
+        if (!resume.ok) throw new Error(`Post-merge database task resume failed: ${resume.reason}`);
+        updateJobPayload(origJob.id, JSON.stringify(releasedPostMergeDbPayload(getJob(origJob.id) || origJob, {
+          gateJobId: job.id,
+        })));
+        worker.emit(job.id, `${C.cyan}[human] Post-merge database task #${origJob.id} released; it runs against the merged checkout${C.reset}`);
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: origJob.id,
+          attempt_id: attempt.attempt.id,
+          event_type: EVENT_TYPES.JOB_POST_MERGE_DB_RELEASED,
+          actor_type: resolutionActorType,
+          message: `${resolutionActorLabel} released post-merge database task via gate #${job.id}`,
+          event_json: JSON.stringify({ gate_job_id: job.id, resume_pending: resume.pending === true }),
+        });
+      } else if (selectedAction === "skip") {
+        const settled = await worker._setJobRowStatus(origJob, "canceled", {
+          expectedStatuses: ["waiting_on_human"],
+          force: true,
+        });
+        if (settled === false) {
+          finalHumanStatus = "failed";
+        } else {
+          worker.emit(job.id, `${C.yellow}[human] Post-merge database task #${origJob.id} skipped; the project database was not changed${C.reset}`);
+          logEvent({
+            work_item_id: job.work_item_id,
+            job_id: origJob.id,
+            attempt_id: attempt.attempt.id,
+            event_type: EVENT_TYPES.JOB_POST_MERGE_DB_SKIPPED,
+            actor_type: resolutionActorType,
+            message: `${resolutionActorLabel} skipped post-merge database task via gate #${job.id}`,
+          });
+        }
+      } else {
+        finalHumanStatus = "failed";
       }
     }
 

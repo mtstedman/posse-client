@@ -4,9 +4,11 @@
 // repair native npm addons before any SQLite-backed application graph loads.
 
 import { execFile, execFileSync } from "node:child_process";
+// Pure data module; importing it keeps this adapter free of the app graph.
+import { GIT_CAPTURE_MAX_BYTES } from "../../../catalog/binary.js";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
-const DEFAULT_MAX_BUFFER = 16 * 1024 * 1024;
+const DEFAULT_MAX_BUFFER = GIT_CAPTURE_MAX_BYTES;
 
 function normalizeArgs(args) {
   if (!Array.isArray(args)) throw new TypeError("admin Git execution requires an argv array");

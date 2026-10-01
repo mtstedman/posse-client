@@ -31,6 +31,13 @@ import {
   runImmediateTransaction,
 } from "./common.js";
 import { flushEventsNow, getEvents, logDurableEvent, logEvent } from "./events.js";
+import {
+  hasActivePostMergeDbGate,
+  isPostMergeDbGateJob,
+  isPostMergeDbTaskJob,
+  isPostMergeHeldDbJob,
+  postMergeDbGateJobSpec,
+} from "./post-merge-db-tasks.js";
 import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole, getIntSetting, getSetting } from "./settings.js";
 import { classifyAutoApprovableScopeRequest } from "../../../shared/policies/functions/scope-auto-approval.js";
 import { invalidateSessionLanesForWorkItem as invalidateSessionLanesForWorkItemInternal } from "./sessions.js";
@@ -818,8 +825,10 @@ function settleMergedWorkItemReviewJobs(id) {
     )),
     // Once the work item is actually merged, every remaining review gate is
     // stale even if its original row was already made terminal elsewhere.
+    // A post-merge database gate is the exception: the merge is what opens it.
     gates: jobs.filter((job) => (
       reviewGateNeedsRetirement(job) && reviewGateOriginalJobId(job) != null
+      && !isPostMergeDbGateJob(job)
     )),
   };
   const result = settleWorkItemReviewPlan(id, plan, { resolution: "work_item_merged" });
@@ -831,11 +840,46 @@ function settleMergedWorkItemReviewJobs(id) {
     if (settledIds.has(Number(job.id))) continue;
     if (TERMINAL_JOB_STATUS_SET.has(job.status)) continue;
     if (NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type) || isPushOfferJob(job)) continue;
+    // A database task held for this merge, its gate, and the task once the
+    // operator releases it are the post-merge step, not stale work.
+    if (isPostMergeDbTaskJob(job)) continue;
     if (forceUpdateJobStatus(job.id, "canceled", { expectedStatuses: [job.status] })) {
       result.canceled += 1;
     }
   }
+  result.postMergeDbGates = openPostMergeDbGates(id, jobs);
   return result;
+}
+
+// Each database task held behind this merge gets an operator gate: Posse
+// cannot know when the merged change is deployed, so the task runs only after
+// the operator answers "run". Startup merge reconciliation calls this again;
+// an already-open gate is left alone.
+function openPostMergeDbGates(workItemId, jobs) {
+  const held = jobs.filter(isPostMergeHeldDbJob);
+  if (held.length === 0) return 0;
+  const workItem = getWorkItem(workItemId);
+  let opened = 0;
+  for (const job of held) {
+    if (hasActivePostMergeDbGate(job.id)) continue;
+    const gate = createJob(postMergeDbGateJobSpec(job, workItem));
+    if (!gate?.id) continue;
+    // Parked like a push offer: answered out of band (CLI, TUI resurface),
+    // never leased into a prompt by the merge that created it.
+    if (gate.status === "queued") {
+      forceUpdateJobStatus(gate.id, "waiting_on_human", { expectedStatuses: ["queued"] });
+    }
+    logEvent({
+      work_item_id: workItemId,
+      job_id: job.id,
+      event_type: EVENT_TYPES.JOB_POST_MERGE_DB_GATE_OPENED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Work item merged; database task #${job.id} waits for operator gate #${gate.id} (run or skip)`,
+      event_json: JSON.stringify({ gate_job_id: gate.id }),
+    });
+    opened += 1;
+  }
+  return opened;
 }
 
 export function cancelPendingReviewGatesForOriginal(originalJobId, { exceptJobId = null } = {}) {
@@ -1312,10 +1356,12 @@ export function refreshWorkItemStatus(workItemId) {
     }
 
     // Push-offer gates are out-of-band deploy prompts — an open one must not
-    // drag a completed work item back to waiting_on_human.
+    // drag a completed work item back to waiting_on_human. A database task
+    // held for the merge must likewise not keep the work item from merging.
     const jobs = listJobsByWorkItem(workItemId)
       .filter((job) => !isShadowFanoutJob(job))
-      .filter((job) => !isPushOfferJob(job));
+      .filter((job) => !isPushOfferJob(job))
+      .filter((job) => !isPostMergeHeldDbJob(job));
     if (jobs.length === 0) return;
     const completionJobs = jobs.filter((job) => !NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type));
     const stateJobs = completionJobs.length > 0 ? completionJobs : jobs;
@@ -1417,6 +1463,7 @@ export function completionBlockersForWorkItem(workItemId) {
   const jobs = listJobsByWorkItem(workItemId)
     .filter((job) => !isShadowFanoutJob(job))
     .filter((job) => !isPushOfferJob(job))
+    .filter((job) => !isPostMergeHeldDbJob(job))
     .filter((job) => !NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type));
   if (jobs.length === 0) return [];
 

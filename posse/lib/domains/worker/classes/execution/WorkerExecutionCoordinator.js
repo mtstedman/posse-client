@@ -39,6 +39,7 @@ import {
   setUpWorktreeForJob as setUpWorktreeForJobFromModule,
   clearActiveWorktreeSentinel as clearActiveWorktreeSentinelFromModule,
 } from "../../functions/helpers/worktree-lifecycle.js";
+import { gateDbTaskBeforeExecution } from "../../functions/helpers/db-task-merge-hold.js";
 import {
   ensurePreDevelopmentTestBaseline,
   testReceiptObservationDetail,
@@ -149,6 +150,14 @@ export class WorkerExecutionCoordinator {
         { signal: executeAbortController?.signal || null },
       );
       if (!waitingLanePlannerGate.ok) return;
+
+      // Database tasks read the work-item branch, and one that depends on
+      // unmerged file changes waits for the merge and an operator instead of
+      // writing the project database early.
+      const dbTaskGate = await gateDbTaskBeforeExecution(worker, job, leaseToken, {
+        signal: executeAbortController?.signal || null,
+      });
+      if (!dbTaskGate.ok) return;
 
       // -- Git worktree setup (mutating code-mode jobs only) --
       let branchName = null;
@@ -408,7 +417,7 @@ export class WorkerExecutionCoordinator {
             provider_source: providerResolution.honoredPinnedProvider ? "job_pin" : "role_config",
             image_provider: imageRoute.provider || null,
             image_model: imageRoute.model || null,
-            cwd: wtPath || worker.projectDir,
+            cwd: wtPath || job._dbReadRoot || worker.projectDir,
             worktree: wtPath || null,
             attempt: attemptCount,
             files_to_modify: observationPayload.files_to_modify || [],

@@ -98,6 +98,7 @@ export const SETTING_KEYS = Object.freeze({
   CODEX_RUN_BUDGET_PCT_SESSION: "codex_run_budget_pct_session",
   CODEX_USAGE_BACKOFF_MS: "codex_usage_backoff_ms",
   CODEX_USAGE_CACHE_MS: "codex_usage_cache_ms",
+  DB_TASK_PRE_MERGE_POLICY: "db_task_pre_merge_policy",
   DEFAULT_MAX_ATTEMPTS: "default_max_attempts",
   DISABLE_SYSTEM_TOOLS: "disable_system_tools",
   FILE_REQUEST_LOW_RISK_EXTENSIONS: "file_request_low_risk_extensions",
@@ -229,6 +230,12 @@ export const CLAUDE_EXECUTION_MODE_VALUES = Object.freeze(["print", "interactive
 export const ASSESSMENT_SCOPE_MODE_VALUES = Object.freeze(["off", "shadow"]);
 export const AGENT_COORDINATION_MODE_VALUES = Object.freeze(["off", "handoff", "subagents"]);
 export const CONTEXT_COMPACTION_MODE_VALUES = Object.freeze(["off", "shadow", "inject", "enforce"]);
+// A database (task_mode "db") task that depends on file changes still only on
+// its work item's branch: hold it until the merge and an operator's go-ahead
+// (the project database may be production), or run it at once against the
+// branch state for repositories whose project database is not production.
+export const DB_TASK_PRE_MERGE_POLICIES = Object.freeze({ HOLD: "hold", RUN: "run" });
+export const DB_TASK_PRE_MERGE_POLICY_VALUES = Object.freeze(Object.values(DB_TASK_PRE_MERGE_POLICIES));
 export const FIX_SCOPE_HANDOFF_GUARD_VALUES = Object.freeze(["off", "auto", "warn", "enforce"]);
 export const GIT_COMMIT_STYLE_VALUES = Object.freeze(["off", "conventional", "gitmoji"]);
 export const HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES = Object.freeze(["off", "small", "always"]);

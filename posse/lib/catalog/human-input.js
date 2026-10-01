@@ -18,6 +18,9 @@ export const HUMAN_GATE_STATES = Object.freeze(["open", "resolving", "resolved",
 export const SCOPE_APPROVAL_MODES = Object.freeze({ DEFAULT: "default", AUTO: "auto" });
 export const SCOPE_APPROVAL_MODE_VALUES = Object.freeze(Object.values(SCOPE_APPROVAL_MODES));
 export const SCOPE_MODE_APPROVAL_SOURCE = "scope_mode_auto";
+// Operator gate opened when a work item merges for each database task held
+// behind that merge. "run" requeues the held task; "skip" cancels it.
+export const POST_MERGE_DB_TASK_REVIEW_TYPE = "post_merge_db_task";
 
 export function humanGateStateAllowsAnswer(gateState) {
   return gateState == null || gateState === "open";
@@ -51,6 +54,7 @@ export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   unexecuted_replan_limit: freezeChoices(["replan", "fail", "explicit_waiver"]),
   artifact_routing_admin: freezeChoices(["acknowledge"]),
   shared_trunk_provenance: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance),
+  [POST_MERGE_DB_TASK_REVIEW_TYPE]: freezeChoices(["run", "skip"]),
 });
 
 export const HUMAN_GATE_RECOVERY_KINDS = Object.freeze([
@@ -179,6 +183,11 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
     allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance],
     allowed_source_states: ["waiting_on_human", "succeeded"],
   },
+  [POST_MERGE_DB_TASK_REVIEW_TYPE]: {
+    gate_kind: POST_MERGE_DB_TASK_REVIEW_TYPE,
+    allowed_actions: ["run", "skip"],
+    allowed_source_states: ["waiting_on_human"],
+  },
   assessment: {
     gate_kind: "assessment_review",
     allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
@@ -270,6 +279,12 @@ const HUMAN_GATE_ACTIONABILITY_PROFILES = Object.freeze({
     headless_behavior: "use_configured_plan_approval_policy",
     diagnostic_insufficient_reason: "Plan approval grants execution authority rather than supplying a discoverable fact.",
   },
+  [POST_MERGE_DB_TASK_REVIEW_TYPE]: {
+    unresolved_fact: "Whether the merged change is deployed, so its deferred task may write the project database.",
+    human_contribution: "authority",
+    headless_behavior: "do_not_run",
+    diagnostic_insufficient_reason: "Posse cannot observe when the operator deploys the merged change.",
+  },
   push_offer: {
     unresolved_fact: "Whether committed work may be pushed to the configured remote.",
     human_contribution: "merge_push_choice",
@@ -301,6 +316,7 @@ function actionTransition(action) {
     explicit_waiver: "record_authority_backed_waiver",
     respond: "resume_with_human_answer",
     plan: "resume_with_selected_scope",
+    run: "queue_post_merge_database_task",
   };
   if (String(action || "").startsWith("retry:")) return "queue_provider_specific_recovery";
   return transitions[canonical] || `resolve_gate_with_${canonical || "response"}`;
@@ -389,6 +405,7 @@ export const HUMAN_INPUT_COORDINATION_REVIEW_TYPES = Object.freeze([
   "stall_exhausted_recovery",
   "artifact_routing_admin",
   "shared_trunk_provenance",
+  POST_MERGE_DB_TASK_REVIEW_TYPE,
 ]);
 
 const COORDINATION_REVIEW_TYPE_SET = new Set(HUMAN_INPUT_COORDINATION_REVIEW_TYPES);

@@ -4,6 +4,7 @@
 // strangler step for moving worker git helpers behind an explicit domain API.
 
 import path from "node:path";
+import { GIT_CAPTURE_MAX_BYTES, GIT_NATIVE_MAX_CAPTURE_BYTES } from "../../../catalog/binary.js";
 import { AsyncGateBusyError, AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
 import { nativeAsyncOptions, runGitNativeMethod, runGitNativeMethodAsync } from "../functions/native/invoke.js";
 
@@ -322,6 +323,17 @@ export function isGitCommandFailure(err) {
   return err?.gitCommandFailed === true;
 }
 
+// posse-git refuses, rather than truncates, output past its per-call ceiling:
+// the raw stream ("exceeded maxCaptureBytes") or the serialized response
+// ("response exceeds N serialized bytes"). Callers that can split the work
+// (per-path diffs) use this to tell "too large for one capture" apart from git
+// being unable to run; everything else still fails closed.
+const GIT_CAPTURE_LIMIT_PATTERN = /exceeded maxCaptureBytes|response exceeds \d+ serialized bytes/;
+
+export function isGitCaptureLimitError(err) {
+  return !isGitCommandFailure(err) && GIT_CAPTURE_LIMIT_PATTERN.test(String(err?.message || ""));
+}
+
 function decodeNativeBase64Stdout(text, command) {
   const compact = String(text || "").replace(/\s+/g, "");
   if (compact.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(compact)) {
@@ -340,6 +352,14 @@ function decodeNativeBase64Stdout(text, command) {
 // spawn boundary (NativeBinary otherwise pins its default cap).
 function envelopeMaxBufferFor(maxCaptureBytes) {
   return Math.ceil(maxCaptureBytes * 4 / 3) + 1024 * 1024;
+}
+
+// Callers ask for up to GIT_CAPTURE_MAX_BYTES; posse-git rejects any request
+// above its own ceiling outright, so clamp instead of failing a command whose
+// output would have fit.
+function nativeCaptureBytesFor(maxBuffer) {
+  const requested = Number(maxBuffer) > 0 ? Number(maxBuffer) : GIT_CAPTURE_MAX_BYTES;
+  return Math.min(requested, GIT_NATIVE_MAX_CAPTURE_BYTES);
 }
 
 function gitNativeRead(cwd, gitArgs, options, run) {
@@ -387,7 +407,7 @@ export class Repo {
     cwd = this.cwd,
     trim = true,
     input = undefined,
-    maxBuffer = 1024 * 1024 * 16,
+    maxBuffer = GIT_CAPTURE_MAX_BYTES,
     gate = true,
     gateMode = "auto",
     timeoutMs = this.timeoutMs,
@@ -396,6 +416,7 @@ export class Repo {
   } = {}) {
     const gitArgs = normalizeGitArgs(cmdOrArgs);
     const wantBuffer = encoding === "buffer";
+    const captureBytes = nativeCaptureBytesFor(maxBuffer);
     if (gate !== false) {
       const mode = gitGateModeForArgs(gitArgs, gateMode);
       assertSyncGitGateAvailable(cwd, mode, gitGateLabel(gitArgs));
@@ -407,11 +428,11 @@ export class Repo {
         args: gitArgs,
         input: input ?? null,
         trim: wantBuffer ? false : trim,
-        maxCaptureBytes: maxBuffer,
+        maxCaptureBytes: captureBytes,
         timeoutMs,
         ...(wantBuffer ? { outputEncoding: "base64" } : {}),
       },
-      { ...nativeParity, timeoutMs, maxBuffer: envelopeMaxBufferFor(maxBuffer) },
+      { ...nativeParity, timeoutMs, maxBuffer: envelopeMaxBufferFor(captureBytes) },
     );
     if (!result?.ok) throw gitExecFailure(gitArgs, result, { base64Stdout: wantBuffer });
     return wantBuffer
@@ -429,11 +450,12 @@ export class Repo {
     gateMode = "auto",
     barrierKey = null,
     nativeParity = {},
-    maxBuffer = 1024 * 1024 * 16,
+    maxBuffer = GIT_CAPTURE_MAX_BYTES,
     encoding = "utf8",
   } = {}) {
     const gitArgs = normalizeGitArgs(cmdOrArgs);
     const wantBuffer = encoding === "buffer";
+    const captureBytes = nativeCaptureBytesFor(maxBuffer);
     const runNativeGit = async () => {
       const result = await runGitNativeMethodAsync(
         "git.exec",
@@ -442,11 +464,11 @@ export class Repo {
           args: gitArgs,
           input: input ?? null,
           trim: wantBuffer ? false : trim,
-          maxCaptureBytes: maxBuffer,
+          maxCaptureBytes: captureBytes,
           timeoutMs,
           ...(wantBuffer ? { outputEncoding: "base64" } : {}),
         },
-        { ...nativeParity, signal, timeoutMs, maxBuffer: envelopeMaxBufferFor(maxBuffer) },
+        { ...nativeParity, signal, timeoutMs, maxBuffer: envelopeMaxBufferFor(captureBytes) },
       );
       if (!result?.ok) throw gitExecFailure(gitArgs, result, { base64Stdout: wantBuffer });
       return wantBuffer

@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import {
+  POST_MERGE_DB_TASK_REVIEW_TYPE,
   canonicalHumanGateAction,
   humanGateContractForPayload,
   validateHumanGateActionabilityContract,
@@ -730,7 +731,8 @@ export function reconcileHumanGates() {
     // A terminal work item has no remaining question to answer. Retire any
     // stale gate before registration/repair can revive it. Push offers are the
     // deliberate exception: they attach to a completed WI only as a durable
-    // publication anchor and remain independently answerable.
+    // publication anchor and remain independently answerable. So are
+    // post-merge database gates, which only a merged (complete) WI opens.
     const terminalWorkItemGates = db.prepare(`
       SELECT j.id, j.work_item_id, j.job_type, j.status, j.payload_json,
              hg.gate_state
@@ -743,7 +745,11 @@ export function reconcileHumanGates() {
           j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
           OR hg.gate_state IN ('open','resolving')
         )
-    `).all().filter((job) => asPayload(job.payload_json).subtype !== "push_offer");
+    `).all().filter((job) => {
+      const payload = asPayload(job.payload_json);
+      return payload.subtype !== "push_offer"
+        && payload.review_type !== POST_MERGE_DB_TASK_REVIEW_TYPE;
+    });
     for (const job of terminalWorkItemGates) {
       if (retireGateJob(job.id, "Owning work item is terminal")) retired += 1;
     }

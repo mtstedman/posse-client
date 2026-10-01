@@ -59,6 +59,9 @@ import {
   clearRuntimeStatus,
   clearPeerClaimDeferralsForJob,
   isBridgePresenceFresh,
+  isPostMergeDbGateJob,
+  isPostMergeDbTaskJob,
+  isPostMergeHeldDbJob,
   isPushOfferJob,
   readRuntimeStatus,
   requeueOwnedJobsForForcedExit,
@@ -1844,6 +1847,7 @@ export class Scheduler {
               hasJobs,
               listJobs,
               isPushOfferJob,
+              isPostMergeDbTaskJob,
               parseJobPayload,
               getJob,
               getHumanGate,
@@ -1910,8 +1914,11 @@ export class Scheduler {
           .filter((job) => this._isJobInRunScope(job))
           // Publication offers survive run closeout for later Bridge/manual
           // action, but they are not executable work and must not keep the
-          // scheduler in an idle/waiting loop.
-          .filter((job) => !isPushOfferJob(job));
+          // scheduler in an idle/waiting loop. Neither may a database task
+          // held for its work item's merge or its post-merge gate: the merge
+          // happens at closeout or a later review, never inside this loop.
+          .filter((job) => !isPushOfferJob(job))
+          .filter((job) => !isPostMergeHeldDbJob(job) && !isPostMergeDbGateJob(job));
         const activeBackgroundJobs = [...activeWorkers.values()]
           .map((entry) => entry.job)
           .filter(isRunBackgroundJob);

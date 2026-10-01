@@ -52,6 +52,7 @@ export function recoverHeadlessHumanTimeouts({
     hasJobs,
     listJobs,
     isPushOfferJob,
+    isPostMergeDbTaskJob = () => false,
     parseJobPayload,
     getJob,
     getHumanGate,
@@ -77,8 +78,10 @@ export function recoverHeadlessHumanTimeouts({
     const stuckHuman = listJobs(["waiting_on_human"]);
     for (const hj of stuckHuman) {
       // Push-offer gates wait indefinitely for the phone/CLI by
-      // design — never time them out, headless or not.
-      if (isPushOfferJob(hj)) continue;
+      // design — never time them out, headless or not. So do database tasks
+      // held for a merge and their post-merge gates: only the operator knows
+      // when the merged change is deployed.
+      if (isPushOfferJob(hj) || isPostMergeDbTaskJob(hj)) continue;
       if (hj.job_type !== "human_input") {
         if (!headlessNonHumanWaitingLogged.has(hj.id)) {
           headlessNonHumanWaitingLogged.add(hj.id);

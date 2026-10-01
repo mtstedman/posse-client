@@ -34,6 +34,18 @@ export const ATLAS_VECTOR_NATIVE_ROUTE = "atlas:vector";
 export const GIT_NATIVE_PROTOCOL = "posse.git.native.v1";
 export const GIT_READ_ROUTE = "git:read";
 export const GIT_MUTATE_ROUTE = "git:mutate";
+// Default output ceiling for one git command across the git layer (Repo.exec /
+// execAsync, the gitExec* helpers, admin system git) and the wrap-up commit
+// and push secrets scans. A ceiling, not an allocation: capture buffers grow
+// only with what git actually prints.
+export const GIT_CAPTURE_MAX_BYTES = 256 * 1024 * 1024;
+// Hard per-call ceiling of the shipped posse-git `git.exec`. Must match
+// posse-git MAX_CAPTURE_BYTES (a larger maxCaptureBytes is rejected before git
+// runs) and posse_protocol MAX_WORKER_RESPONSE_BYTES (a response whose
+// serialized JSON — escaped or base64 stdout plus stderr — is larger is
+// refused, never truncated). Native captures are clamped to it until a
+// posse-git release raises both.
+export const GIT_NATIVE_MAX_CAPTURE_BYTES = 64 * 1024 * 1024;
 // A synchronous native call whose route has no cached pulse in this process
 // fails closed with this code after requesting a background mint. It is a
 // cold start, not a heartbeat failure: once the mint lands, the next call on

@@ -257,6 +257,13 @@ export const EVENT_TYPES = Object.freeze({
   JOB_PARTIAL_WORK_RESUME_REQUESTED: "job.partial_work_resume_requested",
   JOB_PARTIAL_WORK_REVERTED: "job.partial_work_reverted",
   JOB_PLACEHOLDER_QUESTION_IGNORED: "job.placeholder_question_ignored",
+  // A database task held until its work item merges (it depends on file
+  // changes only on the branch), its post-merge operator gate, and the
+  // operator's run/skip decision.
+  JOB_POST_MERGE_DB_HELD: "job.post_merge_db_held",
+  JOB_POST_MERGE_DB_GATE_OPENED: "job.post_merge_db_gate_opened",
+  JOB_POST_MERGE_DB_RELEASED: "job.post_merge_db_released",
+  JOB_POST_MERGE_DB_SKIPPED: "job.post_merge_db_skipped",
   JOB_PROMOTE_COMPLETE: "job.promote_complete",
   JOB_PROMOTE_PARTIAL: "job.promote_partial",
   JOB_PARTIAL_DELIVERABLE_ACCEPTED: "job.partial_deliverable_accepted",
