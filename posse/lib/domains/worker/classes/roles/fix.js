@@ -226,7 +226,7 @@ export class FixRole extends BaseRole {
     const currentFixAttemptNumber = previousFixAttempts.length + 1;
     const blockedRetry = blockedRetryContext(payload, previousFixAttempts.length > 0
       ? (job.last_error || previousFixAttempts[previousFixAttempts.length - 1].error_text || null)
-      : null);
+      : null, { provider: job.provider || job._executionProvider || null });
     const lastError = blockedRetry.lastError;
 
     const packet = buildHandoffPacket(job, {

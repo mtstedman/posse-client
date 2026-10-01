@@ -47,6 +47,7 @@ import {
 import { validateArtifactRootPath } from "../../../planning/functions/plan-routing.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import { blockedRetryContext } from "../../functions/helpers/block-reason.js";
+import { formatToolReference, TOOL_REFS } from "../../../../catalog/tool-references.js";
 
 const DEFAULT_DEPS = {
   currentExecutionProvider: defaultCurrentExecutionProvider,
@@ -148,9 +149,13 @@ export class ArtificerRole extends BaseRole {
     const attempts = getAttempts(job.id);
     const previousAttempts = attempts.filter((attempt) => attempt.status !== "running");
     const currentAttemptNumber = previousAttempts.length + 1;
+    // Artificers write their output roots through the issued write tool.
     const blockedRetry = blockedRetryContext(payload, previousAttempts.length > 0
       ? (job.last_error || previousAttempts[previousAttempts.length - 1].error_text || null)
-      : null);
+      : null, {
+      writeTool: formatToolReference(TOOL_REFS.tools.writeFile),
+      provider: job.provider || job._executionProvider || null,
+    });
     const lastError = blockedRetry.lastError;
 
     if (payload._stall_resume && outputRoot) {

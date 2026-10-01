@@ -10,8 +10,11 @@ import path from "path";
 import { C } from "../../../shared/format/functions/colors.js";
 import {
   getArtifactsByWorkItem,
+  getSetting,
+  normalizeDbTaskPreMergePolicy,
   storeArtifact,
 } from "../../queue/functions/index.js";
+import { DB_TASK_PRE_MERGE_POLICIES, SETTING_KEYS } from "../../../catalog/settings.js";
 import {
   artifactsDir,
   wiScopeId,
@@ -71,10 +74,22 @@ export function buildProjectDbRoutingLines(projectDir, { capability = null, comm
       ]
     : [];
   const label = `${config.dbType}${config.database ? ` "${config.database}"` : ""}`;
+  // Under the default hold policy a db task that depends on this plan's file
+  // changes runs only after the merge (queue/functions/post-merge-db-tasks.js);
+  // the compiler rewires dependents off it, and the planner is told so.
+  let dbTasksWaitForMerge = true;
+  try {
+    dbTasksWaitForMerge = normalizeDbTaskPreMergePolicy(
+      getSetting(SETTING_KEYS.DB_TASK_PRE_MERGE_POLICY, { projectDir }),
+    ) === DB_TASK_PRE_MERGE_POLICIES.HOLD;
+  } catch { /* keep the default hold policy */ }
   const dbTaskLines = config.permissions.includes("write")
     ? [
         "- For database work you do not execute yourself, emit ONE dev task with task_mode \"db\" and EMPTY file scope (no files_to_modify/files_to_create/files_to_delete/create_roots); state the intended statements/outcomes in task_spec and make success_criteria verifiable with SELECT.",
         "- db tasks cannot touch repo files. If work needs both repo edits and database changes, plan separate tasks (code task + db task).",
+        ...(dbTasksWaitForMerge
+          ? ["- A db task that applies a file this plan creates (a migration) runs only after the work item merges, so make it a final task: no task may list it in depends_on_index. Code that needs the new schema depends on the task that writes the migration file and works from that file."]
+          : []),
       ]
     : [];
   if (lane === "write") {

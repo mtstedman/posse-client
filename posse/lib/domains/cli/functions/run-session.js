@@ -20,6 +20,13 @@ import { setConductorKeepWarm, closeSharedConductor } from "../../atlas/function
 import { renderNeuralNetworkBanner } from "../../ui/functions/display/neural-network-banner.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isPushOfferJob } from "../../queue/functions/common.js";
+import { activeWorkItemDispositionGates } from "../../queue/functions/work-item-dispositions.js";
+import { mergeVerificationReviewGateState } from "../../queue/functions/merge-verification-review.js";
+import {
+  CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
+  MERGE_VERIFICATION_REVIEW_TYPE,
+  WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
+} from "../../../catalog/human-input.js";
 import { closeDb } from "../../../shared/storage/functions/index.js";
 import { flushEventsNow } from "../../queue/functions/events.js";
 import { closeLog, log } from "../../../shared/telemetry/functions/logging/logger.js";
@@ -53,15 +60,43 @@ export function firstLine(value, fallback = "unknown") {
 }
 
 /**
+ * The open operator gate that holds a work item, or null: a cross-WI upstream
+ * disposition or failure disposition gate, or a merge verification review
+ * that has not passed. A completed work item held this way does not merge
+ * until the operator answers.
+ *
+ * @param {number} workItemId
+ * @returns {{ gate_job_id: number, review_type: string } | null}
+ */
+export function openParkingGateForWorkItem(workItemId) {
+  for (const reviewType of [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE, WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]) {
+    const [gate] = activeWorkItemDispositionGates(workItemId, reviewType);
+    if (gate) return { gate_job_id: Number(gate.id), review_type: reviewType };
+  }
+  const review = mergeVerificationReviewGateState(workItemId);
+  if (review?.holds) return { gate_job_id: Number(review.gate_job_id), review_type: MERGE_VERIFICATION_REVIEW_TYPE };
+  return null;
+}
+
+/**
  * Derive the shell outcome from the final aggregate state of the work items
  * handled by this run. Individual failed jobs are not sufficient: a failed
  * parent followed by a successful fix child is a recovered work item and must
  * still exit successfully. Failed/canceled work exits 1; operator-gated work
  * exits 2 so headless callers can distinguish "needs action" from failure.
+ * Operator-gated work includes a completed, unmerged work item that an open
+ * gate holds (`parkingGateFor`, e.g. openParkingGateForWorkItem; finding 11,
+ * run 1250b), and work the scheduler left queued behind such work items when
+ * it finished as needs-action (`needsAction`, the scheduler's
+ * needsActionReport).
  *
- * @param {Array<{ id?: number, status?: string }>} [workItems]
+ * @param {Array<{ id?: number, status?: string, merge_state?: string | null }>} [workItems]
+ * @param {{
+ *   parkingGateFor?: ((workItemId: number) => ({ gate_job_id: number, review_type: string } | null)) | null,
+ *   needsAction?: { waiting_work_item_ids?: number[], holders?: Array<{ work_item_id: number }> } | null,
+ * }} [options]
  */
-export function summarizeRunCompletion(workItems = []) {
+export function summarizeRunCompletion(workItems = [], { parkingGateFor = null, needsAction = null } = {}) {
   const failures = workItems
     .filter((item) => item && (item.status === "failed" || item.status === "canceled"))
     .map((item) => ({ id: Number(item.id) || null, status: item.status }));
@@ -72,6 +107,35 @@ export function summarizeRunCompletion(workItems = []) {
       || item.status === "waiting_on_review"
     ))
     .map((item) => ({ id: Number(item.id) || null, status: item.status }));
+  if (typeof parkingGateFor === "function") {
+    for (const item of workItems) {
+      if (!item || item.status !== "complete" || item.merge_state === "merged") continue;
+      let gate = null;
+      try { gate = parkingGateFor(Number(item.id)); } catch { gate = null; }
+      if (gate) {
+        incomplete.push({
+          id: Number(item.id) || null,
+          status: item.status,
+          gate_job_id: gate.gate_job_id,
+          review_type: gate.review_type,
+        });
+      }
+    }
+  }
+  const waitingIds = new Set((needsAction?.waiting_work_item_ids || []).map(Number));
+  if (waitingIds.size > 0) {
+    const holderIds = (needsAction?.holders || []).map((holder) => Number(holder.work_item_id));
+    for (const item of workItems) {
+      if (!item || !waitingIds.has(Number(item.id))) continue;
+      if (["complete", "failed", "canceled"].includes(item.status)) continue;
+      if (incomplete.some((entry) => entry.id === Number(item.id))) continue;
+      incomplete.push({
+        id: Number(item.id) || null,
+        status: item.status,
+        waiting_on_work_item_ids: holderIds.filter((id) => id !== Number(item.id)),
+      });
+    }
+  }
   const exitCode = failures.length > 0 ? 1 : (incomplete.length > 0 ? 2 : 0);
   return {
     ok: exitCode === 0,

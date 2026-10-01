@@ -9,11 +9,12 @@
 // separate, deferred change; this only reports what the baseline showed.
 
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../../catalog/event.js";
+import { BASELINE_TEST_DEBT_PAYLOAD_KEY } from "../../../../catalog/verification.js";
 import { listJobsByWorkItem, logEvent, updateJobPayload } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { verificationOutcome } from "./verification-outcome.js";
 
-export const BASELINE_TEST_DEBT_PAYLOAD_KEY = "_baseline_test_debt";
+export { BASELINE_TEST_DEBT_PAYLOAD_KEY };
 const MAX_REPLAN_DEBTS = 8;
 
 function debtKey(debt = {}) {

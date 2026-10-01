@@ -19,11 +19,18 @@ import {
   settleJobScopeExpansionAttempt,
   storeArtifact,
   updateJobPayload,
+  updateJobProvider,
 } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
-import { getProviderBackoff, getProviderName } from "../../../providers/functions/provider.js";
+import {
+  getProviderBackoff,
+  getProviderName,
+  getProviderRateLimitState,
+  pauseProvider,
+} from "../../../providers/functions/provider.js";
 import { providerRoleForJobType } from "../../../providers/functions/roles.js";
+import { providerErrorSource } from "../../../providers/functions/shared/api-resilience.js";
 import { runtimeKillCanEscalate } from "../../../scheduler/functions/runtime-escalation.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { isAbortError } from "../../../runtime/functions/yield.js";
@@ -47,6 +54,19 @@ import { siblingJobScopePaths } from "../../../queue/functions/file-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { processVerdict } from "./process-verdict.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
+import {
+  isLongProviderPause,
+  isProviderQuotaBackoff,
+  MAX_PROVIDER_ERROR_REQUEUES,
+  MAX_PROVIDER_PAUSED_BOUNCES,
+  MAX_PROVIDER_QUOTA_PAUSES,
+  planProviderPausedRequeue,
+  planProviderQuotaPause,
+  PROVIDER_ERROR_PREFIX,
+  PROVIDER_PAUSED_PREFIX,
+  PROVIDER_QUOTA_PAUSE_PREFIX,
+  providerInterruptionStreak,
+} from "./provider-quota-pause.js";
 
 export const MAX_LIVE_SCOPE_WAIT_INTERRUPTIONS = 3;
 
@@ -767,9 +787,192 @@ export async function handleExecuteAttemptError(worker, {
     const providerRole = typeof worker._roleFor === "function"
       ? worker._roleFor(job.job_type)
       : (providerRoleForJobType(job.job_type) || "dev");
-    const jobProvider = job.provider || getProviderName(providerRole);
-    const providerBackoff = getProviderBackoff(jobProvider, err);
-    if (providerBackoff.source === "usage_limit") {
+    const jobProvider = job.provider || job._executionProvider || getProviderName(providerRole);
+    // The provider that produced the error. A preflight fallback's own quota
+    // must pause that fallback, not the provider the job was assigned.
+    const errorProvider = providerErrorSource(err) || jobProvider;
+    const providerPauseRemainingSec = (name) => {
+      try { return Number(getProviderRateLimitState(name)?.retryInSec) || 0; } catch { return 0; }
+    };
+    const interruptions = providerInterruptionStreak(getAttempts(job.id), { excludeAttemptId: attempt.id });
+
+    // The provider client refused to launch because the provider is paused
+    // (a quota or rate limit tripped by an earlier call) and no unpaused
+    // fallback was available. Wait out that pause. Re-classifying the
+    // synthetic "rate-limited (usage_reset)" text would misread the pause
+    // reason as a fresh quota failure and dead-letter a job that never ran.
+    if (err?._rateLimitPreFlight) {
+      const pausedProvider = err.provider || jobProvider;
+      let retryInSec = Number(err.retryInSec);
+      if (!Number.isFinite(retryInSec)) retryInSec = providerPauseRemainingSec(pausedProvider);
+
+      // A pause longer than any wait worth holding a job (a dated weekly
+      // limit) makes the provider unavailable: move the job to a free
+      // provider in its pool, or stop it now with the durable-capacity
+      // recovery instead of bouncing it every 12h.
+      if (isLongProviderPause(retryInSec)) {
+        const pausedUntil = new Date(Date.now() + retryInSec * 1000).toISOString();
+        const reroute = !job._explicitRecoveryProvider && typeof worker._selectHealthyProviderFromPool === "function"
+          ? worker._selectHealthyProviderFromPool(job._allowedProviders || [], pausedProvider)
+          : null;
+        if (reroute) {
+          completeAttempt(attempt.id, {
+            status: "interrupted",
+            duration_ms: Date.now() - startTime,
+            error_text: `${PROVIDER_PAUSED_PREFIX} ${pausedProvider} paused until ${pausedUntil}; rerouted to ${reroute}`,
+          });
+          updateJobProvider(job.id, reroute, null);
+          job.provider = reroute;
+          job.model_name = null;
+          logEvent({
+            work_item_id: job.work_item_id,
+            job_id: job.id,
+            attempt_id: attempt.id,
+            event_type: EVENT_TYPES.JOB_PROVIDER_REROUTED,
+            actor_type: EVENT_ACTORS.WORKER,
+            message: `${pausedProvider} is paused until ${pausedUntil} (${err.rateLimitReason || "rate limit"}); rerouting to ${reroute}`,
+            event_json: JSON.stringify({
+              reason: "provider_long_pause",
+              from: pausedProvider,
+              to: reroute,
+              paused_until: pausedUntil,
+              pause_reason: err.rateLimitReason || null,
+              provider_pool: job._allowedProviders || [],
+            }),
+          });
+          worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt?.id, readyAt: new Date().toISOString() });
+          worker.emit(job.id, `${C.yellow}[provider] WI#${job.work_item_id} job #${job.id}: ${pausedProvider} paused until ${pausedUntil} — rerouting to ${reroute}${C.reset}`);
+          return;
+        }
+        const unavailable = `Provider unavailable: ${pausedProvider} is paused until ${pausedUntil} (${err.rateLimitReason || "rate limit"}) and no unpaused fallback provider was available`;
+        completeAttempt(attempt.id, {
+          status: "failed",
+          duration_ms: Date.now() - startTime,
+          error_text: unavailable,
+        });
+        setJobError(job.id, unavailable);
+        await stashWorktreeForFailure(job, wtPath, worker?.projectDir);
+        worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: ${pausedProvider} paused until ${pausedUntil} with no fallback provider — stopping automatic retries${C.reset}`);
+        worker._retryOrFail(job, leaseToken, unavailable, {
+          durableProviderCapacity: true,
+          attemptId: attempt.id,
+        });
+        return;
+      }
+
+      // Each bounce waits for the pause to end, but a job that never gets
+      // its turn must still reach the normal fail path.
+      if (interruptions.pausedBounces >= MAX_PROVIDER_PAUSED_BOUNCES) {
+        completeAttempt(attempt.id, {
+          status: "failed",
+          duration_ms: Date.now() - startTime,
+          error_text: `Provider stayed paused through ${interruptions.pausedBounces} penalty-free requeues: ${err.message}`,
+        });
+        setJobError(job.id, `Provider stayed paused through ${interruptions.pausedBounces} requeues`);
+        worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id} ${pausedProvider} stayed paused through ${interruptions.pausedBounces} requeues — failing instead of waiting again${C.reset}`);
+        worker._retryOrFail(job, leaseToken, `Provider stayed paused: ${err.message}`, { providerErrorExhausted: true, attemptId: attempt.id });
+        return;
+      }
+
+      const pausedPlan = planProviderPausedRequeue({
+        providerName: pausedProvider,
+        retryInSec,
+        reason: err.rateLimitReason || "",
+      });
+      completeAttempt(attempt.id, {
+        status: "interrupted",
+        duration_ms: Date.now() - startTime,
+        // "Provider paused:" prefix is load-bearing — the quota pause cap skips these.
+        error_text: `${PROVIDER_PAUSED_PREFIX} ${err.message}`,
+      });
+      const hasStash = await stashInterruptedWork(job, wtPath, "provider-paused", worker?.projectDir);
+      const readyAt = new Date(pausedPlan.readyAtMs).toISOString();
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attempt.id,
+        event_type: EVENT_TYPES.JOB_RATE_LIMITED,
+        actor_type: EVENT_ACTORS.SYSTEM,
+        message: `${pausedPlan.summary} (attempt not consumed)`,
+        event_json: JSON.stringify({
+          provider: pausedProvider,
+          reason: err.rateLimitReason || null,
+          wait_sec: pausedPlan.waitSec,
+          jitter_sec: pausedPlan.jitterSec,
+          ready_at: readyAt,
+        }),
+      });
+      worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt?.id, readyAt });
+      worker.emit(job.id, `${C.yellow}[provider] WI#${job.work_item_id} job #${job.id}: ${pausedPlan.summary} (attempt not consumed)${hasStash ? " (partial work stashed for resume)" : ""}${C.reset}`);
+      return;
+    }
+
+    const providerBackoff = getProviderBackoff(errorProvider, err);
+    if (isProviderQuotaBackoff(providerBackoff)) {
+      // A session/usage limit resets on a clock: pause the job until the
+      // reported reset (or a bounded default) without consuming an attempt.
+      // The runtime fallback already ran inside the provider client, and the
+      // provider-wide pause tripped by getProviderBackoff sends other jobs to
+      // an unpaused fallback or makes them wait instead of failing in turn.
+      const quotaPlan = planProviderQuotaPause({
+        providerName: errorProvider,
+        backoff: providerBackoff,
+        priorPauses: interruptions.quotaPauses,
+        providerPauseSec: providerPauseRemainingSec(errorProvider),
+        homeProviderName: jobProvider,
+        homeProviderPauseSec: errorProvider !== jobProvider ? providerPauseRemainingSec(jobProvider) : 0,
+      });
+      if (quotaPlan.action === "pause") {
+        // Keep the provider-wide pause in step with an escalated default wait.
+        // A zero pause would clear the provider's pause, so skip it.
+        if (quotaPlan.waitSec > 0) {
+          try { pauseProvider(errorProvider, quotaPlan.waitSec, providerBackoff.source); } catch { /* best effort */ }
+        }
+        completeAttempt(attempt.id, {
+          status: "interrupted",
+          duration_ms: Date.now() - startTime,
+          // "Provider quota pause:" prefix is load-bearing — the pause cap counts these.
+          error_text: `${PROVIDER_QUOTA_PAUSE_PREFIX} ${err.message}`,
+        });
+        const hasStash = await stashInterruptedWork(job, wtPath, "provider-quota", worker?.projectDir);
+        const readyAt = new Date(quotaPlan.readyAtMs).toISOString();
+        const resetAt = quotaPlan.resetAtMs != null ? new Date(quotaPlan.resetAtMs).toISOString() : null;
+        log.warn("worker", `Provider quota pause: ${errorProvider} ${quotaPlan.limitName}`, {
+          jobId: job.id,
+          pause: quotaPlan.pauseNumber,
+          provider: errorProvider,
+          readyAt,
+          resetAt,
+          wiId: job.work_item_id,
+        });
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          attempt_id: attempt.id,
+          event_type: EVENT_TYPES.JOB_RATE_LIMITED,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: `${quotaPlan.summary} (attempt not consumed; quota pause ${quotaPlan.pauseNumber}/${MAX_PROVIDER_QUOTA_PAUSES})`,
+          event_json: JSON.stringify({
+            provider: errorProvider,
+            job_provider: jobProvider,
+            limit: quotaPlan.limitName,
+            reset_at: resetAt,
+            reset_label: quotaPlan.resetLabel,
+            reset_zone_source: providerBackoff.quota?.reset?.zoneSource || null,
+            wait_sec: quotaPlan.waitSec,
+            job_wait_sec: quotaPlan.jobWaitSec,
+            jitter_sec: quotaPlan.jitterSec,
+            ready_at: readyAt,
+            pause_number: quotaPlan.pauseNumber,
+            max_pauses: MAX_PROVIDER_QUOTA_PAUSES,
+          }),
+        });
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt?.id, readyAt });
+        worker.emit(job.id, `${C.yellow}[provider] WI#${job.work_item_id} job #${job.id}: ${quotaPlan.summary} (attempt not consumed)${hasStash ? " (partial work stashed for resume)" : ""}${C.reset}`);
+        return;
+      }
+      // Model-scoped or billing quotas, weekly resets beyond the pause
+      // window, and repeated pauses are durable capacity: stop and ask.
       completeAttempt(attempt.id, {
         status: "failed",
         duration_ms: Date.now() - startTime,
@@ -777,7 +980,7 @@ export async function handleExecuteAttemptError(worker, {
       });
       setJobError(job.id, err.message);
       await stashWorktreeForFailure(job, wtPath, worker?.projectDir);
-      worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id} ${jobProvider} subscription capacity exhausted — stopping automatic retries${C.reset}`);
+      worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id} ${errorProvider} subscription capacity exhausted (${quotaPlan.detail}) — stopping automatic retries${C.reset}`);
       worker._retryOrFail(job, leaseToken, err.message, {
         durableProviderCapacity: true,
         attemptId: attempt.id,
@@ -787,14 +990,11 @@ export async function handleExecuteAttemptError(worker, {
     // Cap consecutive penalty-free provider-error requeues. Without an attempt
     // penalty, a persistently failing provider (common with a single configured
     // provider and no working fallback) loops forever — no scheduler/queue-side
-    // bound exists. Past the cap, force the normal fail path. (B7)
-    const MAX_PROVIDER_ERROR_REQUEUES = 8;
-    let priorProviderErrorRequeues = 0;
-    for (const prior of getAttempts(job.id).filter((row) => row.id !== attempt.id)
-      .sort((a, b) => b.attempt_number - a.attempt_number)) {
-      if (prior.status !== "interrupted" || !String(prior.error_text || "").startsWith("Provider error:")) break;
-      priorProviderErrorRequeues += 1;
-    }
+    // bound exists. Past the cap, force the normal fail path. Paused-provider
+    // bounces and quota pauses in between neither count nor reset the streak:
+    // a persistent 429 that pauses the provider for its other jobs would
+    // otherwise alternate errors with bounces and never reach the cap. (B7)
+    const priorProviderErrorRequeues = interruptions.providerErrors;
     if (priorProviderErrorRequeues >= MAX_PROVIDER_ERROR_REQUEUES) {
       completeAttempt(attempt.id, {
         status: "failed",
@@ -811,7 +1011,7 @@ export async function handleExecuteAttemptError(worker, {
       status: "interrupted",
       duration_ms: Date.now() - startTime,
       // "Provider error:" prefix is load-bearing — the cap above counts these. (B7)
-      error_text: `Provider error: ${err.message}`,
+      error_text: `${PROVIDER_ERROR_PREFIX} ${err.message}`,
     });
 
     if (await stashInterruptedWork(job, wtPath, "rate-limited", worker?.projectDir)) {
@@ -829,7 +1029,7 @@ export async function handleExecuteAttemptError(worker, {
       error: transientSummary.slice(0, 200),
       isRateLimit,
       jobId: job.id,
-      provider: jobProvider,
+      provider: errorProvider,
       wiId: job.work_item_id,
     });
 
@@ -839,12 +1039,12 @@ export async function handleExecuteAttemptError(worker, {
       attempt_id: attempt.id,
       event_type: isRateLimit ? EVENT_TYPES.JOB_RATE_LIMITED : EVENT_TYPES.JOB_PROVIDER_ERROR,
       actor_type: EVENT_ACTORS.SYSTEM,
-      message: `${jobProvider} ${source} — requeuing in ${backoffSec}s (attempt not consumed): ${firstErrorLine.slice(0, 200)}`,
+      message: `${errorProvider} ${source} — requeuing in ${backoffSec}s (attempt not consumed): ${firstErrorLine.slice(0, 200)}`,
     });
 
     const readyAt = new Date(Date.now() + backoffSec * 1000).toISOString();
     worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt?.id, readyAt });
-    worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} ${jobProvider} ${source} — requeuing in ${backoffSec}s (attempt not consumed): ${firstErrorLine.slice(0, 160)}${C.reset}`);
+    worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} ${errorProvider} ${source} — requeuing in ${backoffSec}s (attempt not consumed): ${firstErrorLine.slice(0, 160)}${C.reset}`);
     return;
   }
 

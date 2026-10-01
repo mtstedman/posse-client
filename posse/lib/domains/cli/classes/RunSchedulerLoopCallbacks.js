@@ -61,8 +61,8 @@ export class RunSchedulerLoopCallbacks {
     return {
       onJobStart: (job) => this.onJobStart(job),
       onJobEnd: (job) => this.onJobEnd(job),
-      onIdle: (activeJobs) => this.onIdle(activeJobs),
-      onDone: () => this.onDone(),
+      onIdle: (activeJobs, options) => this.onIdle(activeJobs, options),
+      onDone: (report) => this.onDone(report),
       onBackgroundOnly: (state) => this.onBackgroundOnly(state),
       onSlotStatus: (status) => this.onSlotStatus(status),
       onKillJob: (jobId, reason) => this.worker.killJob(jobId, reason),
@@ -219,8 +219,16 @@ export class RunSchedulerLoopCallbacks {
     });
   }
 
-  onIdle(activeJobs) {
+  // `retry`: set when the scheduler fires onIdle again within one idle
+  // stretch because a completed work item it waits on has not merged (a
+  // failed idle auto-merge is otherwise never retried). The per-message
+  // dedupe below is reset so the attempt really runs again.
+  onIdle(activeJobs, { retry = null } = {}) {
     const display = this.getDisplay();
+    if (retry) {
+      this.lastPendingReviewBlockerMsg = null;
+      this.pendingReviewAutoMergeAttempts.clear();
+    }
     try {
       this.surfaceActionableHumanGates(activeJobs);
     } catch (err) {
@@ -269,15 +277,22 @@ export class RunSchedulerLoopCallbacks {
         else console.log(`\n  ${this.C.yellow}${pendingReviewBlocker}${this.C.reset}`);
       }
     } else if (!pendingReviewBlocker) {
-      this.idleAutoMerge.start({
-        reason: "scheduler idle",
-        runGc: false,
-        afterMerged: (mergedCount) => {
-          const mergedMsg = `Auto-merged ${mergedCount} completed work item${mergedCount === 1 ? "" : "s"} during scheduler idle.`;
-          if (display) display.addEvent(`${this.C.green}${mergedMsg}${this.C.reset}`);
-          else console.log(`\n  ${this.C.green}${mergedMsg}${this.C.reset}`);
-        },
-      });
+      let hasMergeable = false;
+      try {
+        hasMergeable = typeof this.hasAutoMergeableCompletedWorkItems === "function"
+          && this.hasAutoMergeableCompletedWorkItems();
+      } catch { /* the guarded wrap-up merge remains the final safety net */ }
+      if (hasMergeable) {
+        this.idleAutoMerge.start({
+          reason: "scheduler idle",
+          runGc: false,
+          afterMerged: (mergedCount) => {
+            const mergedMsg = `Auto-merged ${mergedCount} completed work item${mergedCount === 1 ? "" : "s"} during scheduler idle.`;
+            if (display) display.addEvent(`${this.C.green}${mergedMsg}${this.C.reset}`);
+            else console.log(`\n  ${this.C.green}${mergedMsg}${this.C.reset}`);
+          },
+        });
+      }
     }
     const blocked = activeJobs.filter((j) => j.status === "blocked" || j.status === "waiting_on_human" || j.status === "waiting_on_review");
     if (blocked.length > 0 && blocked.length === activeJobs.length) {
@@ -287,11 +302,18 @@ export class RunSchedulerLoopCallbacks {
     }
   }
 
-  onDone() {
+  // `report`: the scheduler's needsActionReport when it finished because the
+  // remaining jobs wait on work items that cannot progress without an operator.
+  onDone(report = null) {
     const display = this.getDisplay();
     try {
       this.surfaceActionableHumanGates([]);
     } catch { /* display prompt cleanup is best effort during closeout */ }
+    if (report?.message) {
+      if (display) display.addEvent(`${this.C.yellow}${this.C.bold}${report.message}${this.C.reset}`);
+      else console.log(`\n  ${this.C.yellow}${this.C.bold}${report.message}${this.C.reset}`);
+      return;
+    }
     const msg = "All jobs complete.";
     if (display) display.addEvent(`${this.C.green}${this.C.bold}${msg}${this.C.reset}`);
     else console.log(`\n  ${this.C.green}${this.C.bold}${msg}${this.C.reset}`);

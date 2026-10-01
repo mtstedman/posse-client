@@ -13,6 +13,11 @@ import { parseJobPayload } from "./payload.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
 const CROSS_WI_MERGE_DEPENDENCIES_KEY = "cross_wi_merge_dependencies";
+// Work-item metadata key: { at, reason, branch } of the last time the work
+// item's branch was deleted with its content (review rejection, rebuild,
+// abandon). Applied-sync records from before then describe content that is
+// gone (collectCrossWiPathProvenance).
+export const WORK_ITEM_BRANCH_RESET_KEY = "branch_reset";
 
 function readWorkItem(id) {
   return getDb().prepare(`SELECT * FROM work_items WHERE id = ?`).get(id);
@@ -174,6 +179,47 @@ function repoPathsOverlap(left, right) {
   return a === b || b.startsWith(`${a}/`) || a.startsWith(`${b}/`);
 }
 
+function timestampMs(value) {
+  const ms = Date.parse(String(value || ""));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * A predicate for the applied-sync records of work item `workItemId` (on
+ * rows `payloads`) that describe content its branch no longer holds: the
+ * branch was deleted after they were applied, so the copied edits went with
+ * it. Branch deletions record WORK_ITEM_BRANCH_RESET_KEY and drop the records
+ * (queue-store discardCrossWiSyncRecordsForWorkItem); queues from before
+ * that kept them. Live WI 170: review rejection deleted its branch and
+ * requeued 2176, which still lists WI 167's planner.js/index.php syncs. Such
+ * a legacy rejection left two marks: `_review_retry.rejected_at` on the
+ * requeued jobs, and no merge dependency on the record's source (the
+ * requeue cleared them). A rejection that keeps the branch (merge
+ * verification "fail") keeps the dependencies, so its records still count.
+ */
+function staleAppliedSyncPredicate(workItemId, payloads) {
+  const workItem = readWorkItem(workItemId);
+  const resetAtMs = timestampMs(parseWorkItemMetadata(workItem)[WORK_ITEM_BRANCH_RESET_KEY]?.at);
+  let legacyRejectedAtMs = null;
+  for (const payload of payloads) {
+    const rejectedAtMs = timestampMs(payload?._review_retry?.rejected_at);
+    if (rejectedAtMs != null && (legacyRejectedAtMs == null || rejectedAtMs > legacyRejectedAtMs)) {
+      legacyRejectedAtMs = rejectedAtMs;
+    }
+  }
+  if (resetAtMs == null && legacyRejectedAtMs == null) return () => false;
+  const dependencySources = new Set((workItem ? getWorkItemMergeDependencies(workItem) : [])
+    .map((dep) => Number(dep.source_work_item_id)));
+  return (entry) => {
+    const appliedAtMs = timestampMs(entry?.applied_at);
+    if (appliedAtMs == null) return false;
+    if (resetAtMs != null && appliedAtMs <= resetAtMs) return true;
+    return legacyRejectedAtMs != null
+      && appliedAtMs < legacyRejectedAtMs
+      && !dependencySources.has(Number(entry?.source_work_item_id));
+  };
+}
+
 /**
  * Where a work item's current content of `path` came from, for cross-WI
  * handoffs of that path out of it:
@@ -189,7 +235,9 @@ function repoPathsOverlap(left, right) {
  *   with them at merge, so it must wait until they merge.
  *
  * Merged, canceled and failed work items are left out (nothing can or need
- * wait on their merge); the walk still passes through them.
+ * wait on their merge); the walk still passes through them. Applied-sync
+ * records from before a work item's branch was deleted are ignored: that
+ * content is gone (staleAppliedSyncPredicate).
  */
 export function collectCrossWiPathProvenance(workItemId, path, { maxWorkItems = 32 } = {}) {
   const startId = Number(workItemId);
@@ -207,11 +255,13 @@ export function collectCrossWiPathProvenance(workItemId, path, { maxWorkItems = 
     const current = queue.shift();
     const contentSources = new Set();
     const releasedBy = new Set();
-    for (const row of readJobPayloads.all(current.id)) {
-      const payload = parseJobPayload(row);
+    const payloads = readJobPayloads.all(current.id).map(parseJobPayload);
+    const appliedBeforeBranchReset = staleAppliedSyncPredicate(current.id, payloads);
+    for (const payload of payloads) {
       const applied = Array.isArray(payload?._cross_wi_file_syncs_applied) ? payload._cross_wi_file_syncs_applied : [];
       for (const entry of applied) {
         if (entry?.change_kind === "skipped" || !repoPathsOverlap(entry?.path, targetPath)) continue;
+        if (appliedBeforeBranchReset(entry)) continue;
         contentSources.add(Number(entry?.source_work_item_id));
       }
       const releases = Array.isArray(payload?._cross_wi_existing_order_releases) ? payload._cross_wi_existing_order_releases : [];
@@ -262,6 +312,14 @@ export function collectCrossWiPathProvenance(workItemId, path, { maxWorkItems = 
  * queued jobs waits on a work-item lock that the target (transitively) holds.
  * A work item that holds a lock "until merge" must not make the target wait
  * on it when this is true, or neither can ever merge.
+ *
+ * Lane waits include work-item order waits (holder_type 'work_item' with the
+ * work_item_order reason): a work item whose jobs wait in the order on the
+ * target does wait on it, and the scheduler's cross-WI handoff needs that to
+ * break a lock-holding cycle. The answer only ever releases a lock bare (no
+ * content copy, no merge dependency); nothing unmerged is copied between work
+ * items on its strength (run 1250b red team 2, finding 4: per-job order waits
+ * once made an earlier work item copy a later one's file through this check).
  */
 export function workItemWaitsOnWorkItem(fromWorkItemId, toWorkItemId, { maxWorkItems = 64 } = {}) {
   const startId = Number(fromWorkItemId);
@@ -491,14 +549,16 @@ function pendingCrossWiFileSyncsForJob(job = {}) {
     .filter((entry) => entry.path && entry.source_branch && Number.isFinite(entry.source_work_item_id));
 }
 
-export function rollbackPendingCrossWiSyncHandoffsForJob(jobOrId, reason = "job_terminal_before_sync") {
+// `filter` limits the rollback to some pending syncs (the rest stay pending).
+export function rollbackPendingCrossWiSyncHandoffsForJob(jobOrId, reason = "job_terminal_before_sync", { filter = null } = {}) {
   const db = getDb();
   const execute = () => {
     const inputJob = typeof jobOrId === "object" && jobOrId !== null ? jobOrId : null;
     const jobId = Number(inputJob?.id ?? jobOrId);
     const job = Number.isFinite(jobId) ? (readJob(jobId) || inputJob) : inputJob;
     if (!job?.id) return { ok: false, rolled_back: 0, reason: "missing_job" };
-    const syncs = pendingCrossWiFileSyncsForJob(job);
+    const pending = pendingCrossWiFileSyncsForJob(job);
+    const syncs = typeof filter === "function" ? pending.filter(filter) : pending;
     if (syncs.length === 0) return { ok: true, rolled_back: 0, reason: "none" };
     let rolledBack = 0;
     for (const sync of syncs) {
@@ -531,7 +591,12 @@ export function rollbackPendingCrossWiSyncHandoffsForJob(jobOrId, reason = "job_
         rolled_back_at: now(),
       })),
     ];
-    delete payload._cross_wi_file_syncs;
+    const syncKey = (entry) => `${Number(entry?.source_work_item_id)}:${normalizeRepoPath(entry?.path)}`;
+    const rolledBackKeys = new Set(syncs.map(syncKey));
+    const kept = (Array.isArray(payload._cross_wi_file_syncs) ? payload._cross_wi_file_syncs : [])
+      .filter((entry) => !rolledBackKeys.has(syncKey(entry)));
+    if (kept.length > 0) payload._cross_wi_file_syncs = kept;
+    else delete payload._cross_wi_file_syncs;
     db.prepare(`UPDATE jobs SET payload_json = ?, updated_at = ? WHERE id = ?`)
       .run(JSON.stringify(payload), now(), job.id);
     logEvent({
@@ -593,6 +658,32 @@ export function listCrossWiMergeBlockers(workItemOrId) {
     }
   }
   return blockers;
+}
+
+/**
+ * Upstream work items this one must merge after that are still in flight (not
+ * merged, failed or canceled). While any remain, an automatic merge can only
+ * be deferred, so callers skip it quietly instead of authorizing, deferring
+ * and releasing it on every pass (NEW-L1). A failed, canceled or missing
+ * upstream is not in flight: a merge authorization still goes through the
+ * deferral path, which reports the stale dependency.
+ *
+ * `includeStale` also returns failed and canceled upstreams. Such a merge
+ * defers just the same until the operator recovers the upstream or rebuilds
+ * this work item through its cross-WI upstream gate, so the auto-merge pass
+ * skips it quietly too, including after the gate was answered "wait".
+ */
+export function pendingCrossWiMergeUpstreamIds(workItemOrId, { includeStale = false } = {}) {
+  const workItem = resolveWorkItem(workItemOrId);
+  if (!workItem) return [];
+  const ids = new Set();
+  for (const dep of getWorkItemMergeDependencies(workItem)) {
+    const source = readWorkItem(dep.source_work_item_id);
+    if (!source || source.merge_state === "merged") continue;
+    if (!includeStale && (source.status === "failed" || source.status === "canceled")) continue;
+    ids.add(Number(source.id));
+  }
+  return [...ids];
 }
 
 export function getWorkItemRecycleOverride(workItemOrId) {

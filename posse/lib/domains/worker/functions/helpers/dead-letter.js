@@ -273,6 +273,22 @@ function buildPermanentProviderConfigHint(job, errorDetails = null) {
   ].filter(Boolean).join("\n");
 }
 
+// A provider that keeps reading its read-only sandbox notice as covering the
+// issued Posse write tools does not change that reading on another
+// same-provider run; the operator's useful choices are another provider or a
+// replan.
+function buildSandboxMisreadProviderHint(job, freshJob = null) {
+  const provider = freshJob?.provider || job?._executionProvider || job?.provider || "The provider";
+  const reroute = parseJobPayload(freshJob || job)?._sandbox_misread_reroute;
+  return [
+    `${provider} kept reporting its read-only sandbox notice as a block on the issued Posse write tools, through penalty-free retries that each carried a correction.`,
+    reroute
+      ? `The job was already rerouted once (${reroute.from} -> ${reroute.to}).`
+      : "No other ready provider for this role was available to reroute to automatically.",
+    "Retrying on the same provider is unlikely to help: retry on a different provider, or replan.",
+  ].join("\n");
+}
+
 function hasConsecutiveFastFailures(attempts = [], {
   minFailures = 3,
   maxDurationMs = 5000,
@@ -520,6 +536,9 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
   suppressHumanRecovery = false,
   providerErrorExhausted = false,
   durableProviderCapacity = false,
+  // The provider kept misreading its sandbox after the penalty-free routing
+  // retries and no reroute was available: dead-letter now, with recovery.
+  providerSandboxMisread = false,
 } = {}) {
   const freshJob = getJob(job.id);
   const errorDetails = getErrorDetails(errorOrMsg);
@@ -638,14 +657,16 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: repeated transient git/native infrastructure fault — allowing bounded retry${C.reset}`);
   }
 
-  if (durableProviderCapacity || permanentProviderConfigError || sameErrorRepeat || freshJob.attempt_count >= freshJob.max_attempts) {
+  if (providerSandboxMisread || durableProviderCapacity || permanentProviderConfigError || sameErrorRepeat || freshJob.attempt_count >= freshJob.max_attempts) {
     const reason = stallExhausted
       ? "stall retries exhausted"
-      : (durableProviderCapacity
+      : (providerSandboxMisread
+        ? "provider sandbox misread persisted"
+        : (durableProviderCapacity
         ? "provider capacity exhausted"
         : (deterministicPolicyConflict
         ? "deterministic policy conflict"
-        : (permanentProviderConfigError ? "permanent provider configuration/model error" : (sameErrorRepeat ? "same error repeated" : `exceeded max attempts (${freshJob.attempt_count}/${freshJob.max_attempts})`))));
+        : (permanentProviderConfigError ? "permanent provider configuration/model error" : (sameErrorRepeat ? "same error repeated" : `exceeded max attempts (${freshJob.attempt_count}/${freshJob.max_attempts})`)))));
     log.error("worker", `Dead letter: ${job.job_type} #${job.id}`, { jobId: job.id, wiId: job.work_item_id, type: job.job_type, attempts: freshJob.attempt_count, error: errSummary, reason });
     jobLog("DEAD_LETTER", { wi: job.work_item_id, job: job.id, detail: `${job.job_type} "${shortJobTitle(job).slice(0, 50)}" — ${reason}: ${errSummary}` });
     recordObservation({
@@ -701,7 +722,9 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
 
     const providerHint = permanentProviderConfigError
       ? buildPermanentProviderConfigHint(job, errorDetails)
-      : buildFastFailureProviderHint(job, getAttempts(job.id));
+      : (providerSandboxMisread
+        ? buildSandboxMisreadProviderHint(job, freshJob)
+        : buildFastFailureProviderHint(job, getAttempts(job.id)));
     const recovery = spawnDeadLetterRecoveryForDependents(worker, job, freshJob, {
       providerHint,
       suppressHumanRecovery: suppressOperatorRecovery,

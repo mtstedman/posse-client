@@ -14,12 +14,22 @@ import { getReviewDirtyState } from "../../ui/functions/display/helpers/review-d
 import { finalAssessmentFor } from "../functions/review-report.js";
 import { applyMemoryReviewAction } from "../functions/memory-feedback.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { hasUnresolvedSharedTrunkMergeOperation } from "../../queue/functions/index.js";
+import {
+  hasUnresolvedSharedTrunkMergeOperation,
+  workItemFailureRecoveryHint,
+} from "../../queue/functions/index.js";
 import {
   askSingleKeyChoice,
   createRunWrapUpTracker,
   createTuiWrapUpTracker,
 } from "../functions/review-session.js";
+
+// A failed work item is recovered through its recovery gate, not merged.
+function failedRecoveryHint(workItem) {
+  return workItem?.status === "failed" && workItem.id != null
+    ? `: ${workItemFailureRecoveryHint(workItem.id)}`
+    : "";
+}
 
 export class ReviewSession {
   constructor(deps = {}) {
@@ -294,7 +304,7 @@ export class ReviewSession {
           return {
             ok: false,
             reason: "work_item_not_complete",
-            message: `Work item is ${lockedWi.status || "not complete"}; recover it before merging`,
+            message: `Work item is ${lockedWi.status || "not complete"}; recover it before merging${failedRecoveryHint(lockedWi)}`,
           };
         }
         if (lockedWi.merge_state === "merged") {
@@ -398,6 +408,8 @@ export class ReviewSession {
           if (!cleanupOk) return { ok: false, reason: "branch_cleanup_failed" };
         }
         const newDesc = this._rejectionDescription(freshWi, reason);
+        // The branch is gone: the requeue replans the work item instead of
+        // rerunning leaf fixes against code the branch took with it.
         const requeued = requeueWorkItemAfterRejection(wi.id, { description: newDesc, feedback: reason });
         return requeued
           ? { ok: true }
@@ -1042,7 +1054,7 @@ export class ReviewSession {
             return {
               ok: false,
               reason: "work_item_not_complete",
-              message: `Work item is ${lockedWi.status || "not complete"}; recover it before merging`,
+              message: `Work item is ${lockedWi.status || "not complete"}; recover it before merging${failedRecoveryHint(lockedWi)}`,
             };
           }
           if (lockedWi.merge_state === "merged") {
@@ -1166,6 +1178,7 @@ export class ReviewSession {
             });
             if (!cleanupOk) return { ok: false, reason: "branch_cleanup_failed" };
           }
+          // Branch deleted above: the requeue replans (see the text review path).
           return requeueWorkItemAfterRejection(wiId)
             ? { ok: true }
             : { ok: false, reason: "requeue_failed" };
@@ -1519,7 +1532,7 @@ export class ReviewSession {
   _approvalMergeBlocker(item) {
     const wi = item?.wi;
     if (wi?.status !== "complete") {
-      return `Approval blocked: WI#${wi?.id ?? "?"} is ${wi?.status || "not complete"}; recover the work before merging`;
+      return `Approval blocked: WI#${wi?.id ?? "?"} is ${wi?.status || "not complete"}; recover the work before merging${failedRecoveryHint(wi)}`;
     }
     if (wi?.branch_name && typeof this.sourceWorktreeDirtyState === "function") {
       let liveDirty = null;

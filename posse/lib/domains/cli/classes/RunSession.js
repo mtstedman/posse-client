@@ -17,7 +17,10 @@ import { refreshProcessRuntimeEnv } from "../../runtime/functions/paths.js";
 import { verifyFrozenResearchFixture, assertFrozenResearchJob } from "../../runtime/functions/frozen-research-fixture.js";
 import { LOCK_HOLDING_JOB_STATUSES, PARKED_JOB_STATUSES } from "../../../catalog/job.js";
 import { TERMINAL_WORK_ITEM_STATUSES, WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
-import { parseWorkItemMetadata } from "../../planning/functions/state.js";
+import {
+  isIterativeWorkItemActive,
+  parseWorkItemMetadata,
+} from "../../planning/functions/state.js";
 import { getResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { nativeBinaries as defaultNativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { daemonSupervisor as defaultDaemonSupervisor } from "../../../shared/tools/classes/daemon/index.js";
@@ -36,6 +39,7 @@ import {
   closeRuntimeStateForExit,
   firstLine,
   handleWrapUpSignal,
+  openParkingGateForWorkItem,
   operationalRunJobs,
   summarizeRunCompletion,
   bootScipLangPatchFromEvent,
@@ -448,6 +452,7 @@ export class RunSession {
       [...new Set(parkedJobs.map((job) => Number(job.work_item_id)))]
         .map((id) => getWorkItem(id))
         .filter(Boolean),
+      { parkingGateFor: openParkingGateForWorkItem },
     ).exitCode;
     return;
   }
@@ -459,6 +464,7 @@ export class RunSession {
       console.log(`\n  No runnable jobs for scoped work item(s): ${scopedWorkItemIds.join(", ")}${suffix}.\n`);
       process.exitCode = summarizeRunCompletion(
         scopedWorkItemIds.map((id) => getWorkItem(id)).filter(Boolean),
+        { parkingGateFor: openParkingGateForWorkItem },
       ).exitCode;
       return;
     }
@@ -1187,11 +1193,25 @@ export class RunSession {
       try { displayActions?.surfaceActionableHumanGates(snapshot.jobs || []); } catch { /* surfaced again on the next snapshot */ }
     }
   };
+  const idleAutoMerge = new RunIdleAutoMergeController({
+    getDisplay: () => display,
+    useTui,
+    C,
+    autoMergePendingReviewBlockers,
+    autoMergeCompletedWorkItems,
+    isIterativeWorkItemActive,
+  });
   scheduler = new Scheduler({
     concurrency: CONCURRENCY,
     hasDisplay: useTui,
     onQueueSnapshot: handleQueueSnapshot,
     onlyWorkItemIds: scopedWorkItemIds,
+    // A completed work item this run will not merge before the loop ends is
+    // parked: it does not hold overlapping work items in the work-item order.
+    // Only the idle auto-merge merges mid-run, so its policy is the one that
+    // counts (automatic merge off parks every completed work item, including
+    // an auto-approving iterative one, which merges only at wrap-up).
+    autoMergeCompletedWorkItem: (workItem) => idleAutoMerge.mergesDuringRun(workItem),
   });
   this._activeScheduler = scheduler;
 
@@ -1206,14 +1226,6 @@ export class RunSession {
     if (useTui && process.stdout.isTTY) return;
     console.log(`  ${C[color] || ""}[scheduler] ${msg}${C.reset}`);
   };
-  const idleAutoMerge = new RunIdleAutoMergeController({
-    getDisplay: () => display,
-    useTui,
-    C,
-    autoMergePendingReviewBlockers,
-    autoMergeCompletedWorkItems,
-  });
-
   // Pre-loop hook runs during scheduler.boot() — display is still null at that
   // point so all output routes to console.log (plain stdout, pre-TUI). The
   // panel + render helpers live in outer run-session scope (above) so they
@@ -2991,13 +3003,21 @@ export class RunSession {
   // still returning a truthful shell status for failed/canceled work.
   const completion = summarizeRunCompletion(
     [...runCohortIds].map((id) => getWorkItem(id)).filter(Boolean),
+    { parkingGateFor: openParkingGateForWorkItem, needsAction: scheduler?.needsActionReport || null },
   );
   if (!completion.ok) {
     const unsuccessful = completion.failures.length > 0
       ? completion.failures
       : completion.incomplete;
     const detail = unsuccessful
-      .map((item) => `WI#${item.id ?? "?"} ${item.status}`)
+      .map((item) => {
+        const held = item.gate_job_id
+          ? ` (gate #${item.gate_job_id} ${item.review_type})`
+          : item.waiting_on_work_item_ids?.length > 0
+            ? ` (waits on ${item.waiting_on_work_item_ids.map((id) => `WI#${id}`).join(", ")})`
+            : "";
+        return `WI#${item.id ?? "?"} ${item.status}${held}`;
+      })
       .join(", ");
     const label = completion.failures.length > 0
       ? "Run completed with unsuccessful work item(s)"

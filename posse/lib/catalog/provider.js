@@ -42,6 +42,15 @@ export function providerHonorsMcpToolDeadline(providerName) {
 // the local model profile; neither is listed, so no budget is invented.
 export const UP_FRONT_TURN_BUDGET_PROVIDERS = Object.freeze(["claude", "codex", "openai", "grok"]);
 
+// Scope of a provider subscription quota. An account-wide window (session,
+// weekly, usage or rate limit) pauses the whole provider until its reset; a
+// single model's cap or exhausted billing is left to an operator decision.
+export const PROVIDER_QUOTA_SCOPES = Object.freeze({
+  ACCOUNT: "account",
+  MODEL: "model",
+  BILLING: "billing",
+});
+
 export const PROVIDER_USAGE_PROTOCOL = "posse.provider_usage.v1";
 export const PROVIDER_USAGE_MAX_BYTES = 256 * 1024;
 

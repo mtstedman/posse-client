@@ -24,6 +24,7 @@ installCliWarningFilter();
 //   image <prompt>      Generate an image directly (skips research/plan)
 //   admin               Stats, session history, and settings management
 //     admin worktrees   List recovered dirty-worktree snapshots with age
+//     admin provider-pause [list|clear <provider|all>]  View/clear persisted provider pauses
 //   purge               Delete all posse/* branches + worktrees (asks first)
 //   clear               Reset everything
 //   events [jobId]      Show event log
@@ -172,6 +173,7 @@ import {
 } from "./session-factories.js";
 import { drainPostMergeAtlasWarmJobs } from "./post-merge-closeout.js";
 import { operationalRunJobs } from "./run-session.js";
+import { selectQueuedWorkItemsToPlan } from "./queued-work-item-planning.js";
 import {
   classifyResearchForRouting as classifyResearchForRoutingImpl,
   createInitialResearchOrPlanJob as createInitialResearchOrPlanJobImpl,
@@ -573,6 +575,7 @@ let _adminTuiModulePromise = null;
 let _adminSettingsModulePromise = null;
 let _adminCatalogModulePromise = null;
 let _adminContractCommandModulePromise = null;
+let _adminProviderPauseModulePromise = null;
 let _providerCliInitModulePromise = null;
 let _auditCommandModulePromise = null;
 let _reportCommandsModulePromise = null;
@@ -647,6 +650,11 @@ async function loadAdminWorktreesModule() {
 async function loadAdminContractCommandModule() {
   _adminContractCommandModulePromise ||= import("./admin-contract-command.js");
   return _adminContractCommandModulePromise;
+}
+
+async function loadAdminProviderPauseModule() {
+  _adminProviderPauseModulePromise ||= import("./admin-provider-pause.js");
+  return _adminProviderPauseModulePromise;
 }
 
 async function loadServeCommandModule() {
@@ -1706,6 +1714,18 @@ function cmdPlanReject(wiId, rest) {
   console.log();
 }
 
+// A queued work item that already has unfinished work (a review rejection
+// requeued its jobs) is run, not planned again; say so instead of silently
+// leaving it out.
+function reportQueuedWorkItemsWithWork(skipped = []) {
+  for (const { workItem, openJobIds, status } of skipped) {
+    const jobs = openJobIds.slice(0, 5).map((id) => `#${id}`).join(", ");
+    const more = openJobIds.length > 5 ? ` and ${openJobIds.length - 5} more` : "";
+    const now = status && status !== "queued" ? `; now ${status}` : "";
+    console.log(`  ${C.dim}WI#${workItem.id} already has unfinished job(s) ${jobs}${more}; not planning it again${now}.${C.reset}`);
+  }
+}
+
 async function cmdPlan() {
   // Subcommand dispatch: `posse plan review|approve|reject <wi-id> [flags]`.
   // Otherwise, default behavior — queue research jobs for any queued WIs.
@@ -1722,10 +1742,13 @@ async function cmdPlan() {
     if (sub === "reject")  return cmdPlanReject(wiId, process.argv.slice(5));
   }
 
-  const queued = listWorkItems("queued");
+  const { toPlan: queued, skipped: queuedWithWork } = selectQueuedWorkItemsToPlan();
+  reportQueuedWorkItemsWithWork(queuedWithWork);
 
   if (queued.length === 0) {
-    console.log(`\n  No items in queue. Use 'add' first.\n`);
+    console.log(queuedWithWork.length > 0
+      ? `\n  No queued item needs a plan.\n`
+      : `\n  No items in queue. Use 'add' first.\n`);
     return;
   }
 
@@ -1842,7 +1865,10 @@ async function cmdRun() {
 async function cmdGo() {
   clearColdIndexFromCliFlagOnce();
   console.log(`\n  ${C.dim}Client: ${formatClientProvenance(resolveClientProvenance())}${C.reset}`);
-  const queued = listWorkItems("queued");
+  // Only queued work items without unfinished work get a new plan; one that
+  // already has work (WI 170: requeued dev job 2176) is refreshed and run.
+  const { toPlan: queued, skipped: queuedWithWork } = selectQueuedWorkItemsToPlan();
+  reportQueuedWorkItemsWithWork(queuedWithWork);
   // Jobs parked on a person (a question, an approval) are work too: the run
   // screen is where they are answered, so `go` opens it rather than saying
   // there is nothing to do.
@@ -2447,7 +2473,7 @@ async function cmdAdmin() {
     await loadRemotePromptBundle();
   };
   const printAdminUsage = () => {
-    console.log("\n  Usage: posse admin [init|snapshot|worktrees|memory|settings|list|get <key>|set <key> <value>|clear <key>|tui]\n");
+    console.log("\n  Usage: posse admin [init|snapshot|worktrees|memory|provider-pause|settings|list|get <key>|set <key> <value>|clear <key>|tui]\n");
   };
   const setAdminSettingFromArgs = (key, value, usageLabel = "admin set", extraArgs = []) => {
     if (!key || typeof value === "undefined") {
@@ -2587,6 +2613,12 @@ async function cmdAdmin() {
 
   if (adminAction === "worktrees") {
     await cmdAdminWorktrees();
+    return;
+  }
+
+  if (adminAction === "provider-pause" || adminAction === "provider-pauses") {
+    const { runProviderPauseAdminCommand } = await loadAdminProviderPauseModule();
+    if (!runProviderPauseAdminCommand(adminArgs.slice(1), { C })) process.exitCode = 2;
     return;
   }
 
@@ -2926,7 +2958,7 @@ ${aliasDiagnostic}
     ${C.cyan}audit${C.reset}      Provider/handoff audit for jobs or work items
     ${C.dim}             audit | audit <jobId> | audit wi<id> | audit worktrees${C.reset}
     ${C.cyan}admin${C.reset}      Stats, session history, and settings management
-    ${C.dim}             admin init [--provider-clis-only] | admin describe --json | admin set/clear [--json] | admin snapshot | admin worktrees | admin memory <note|suppress|correct> <id> | admin settings${C.reset}
+    ${C.dim}             admin init [--provider-clis-only] | admin describe --json | admin set/clear [--json] | admin snapshot | admin worktrees | admin memory <note|suppress|correct> <id> | admin provider-pause [clear <provider|all>] | admin settings${C.reset}
     ${C.cyan}merge${C.reset}      Merge a completed WI branch
     ${C.dim}             merge <wi_id> [--yes]${C.reset}
     ${C.cyan}prune${C.reset}      Clean up orphaned worktrees

@@ -10,6 +10,8 @@ import { TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { getPipelineHealth, getPublicationTelemetry, getSetting, listJobStatusRows, listWorkItems } from "../../queue/functions/index.js";
 import { C as defaultColors } from "../../../shared/format/functions/colors.js";
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
+import { listPersistedProviderPauses } from "../../providers/functions/provider-pause-state.js";
+import { formatProviderPause } from "./admin-provider-pause.js";
 import { providerRoleForJobType } from "../../providers/functions/roles.js";
 
 const DEFAULT_STATUS_DETAIL_LIMIT = 25;
@@ -130,11 +132,20 @@ export function collectStatusData({ targetBranch, args = [] } = {}) {
   });
 
   const jobSummary = summarizeJobs(filteredJobs);
+  const nowMs = Date.now();
+  let providerPauses = [];
+  try {
+    providerPauses = listPersistedProviderPauses({ nowMs });
+  } catch {
+    // Account settings unavailable: status still renders.
+  }
 
   return {
-    generated_at: new Date().toISOString(),
+    generated_at: new Date(nowMs).toISOString(),
+    generated_at_ms: nowMs,
     target_branch: targetBranch,
     delivery: getPublicationTelemetry(),
+    provider_pauses: providerPauses,
     filter: {
       active: options.active,
       json: options.json,
@@ -166,6 +177,12 @@ function renderJsonStatus(data) {
     generated_at: data.generated_at,
     target_branch: data.target_branch,
     delivery: data.delivery,
+    provider_pauses: data.provider_pauses.map((row) => ({
+      provider: row.provider,
+      until: new Date(row.untilMs).toISOString(),
+      retry_in_sec: row.retryInSec,
+      reason: row.reason,
+    })),
     filter: data.filter,
     work_items: {
       total_all: data.work_items.total_all,
@@ -238,6 +255,13 @@ function renderHumanStatus(data, { C }) {
   write(`  ${C.bold}Delivery:${C.reset} local=${C.green}tracked${C.reset}  remote=${publication.publication_state || "unknown"}  deployed=${publication.deployment_state || "unverified"}`);
   if (publication.remote || publication.branch) {
     write(`  ${C.dim}${publication.remote || "remote"}/${publication.branch || data.target_branch}${publication.ahead_count != null ? ` · ${publication.ahead_count} ahead` : ""}${C.reset}`);
+  }
+  if (data.provider_pauses.length > 0) {
+    write(`  ${C.bold}Provider pauses:${C.reset}`);
+    for (const row of data.provider_pauses) {
+      write(`    ${formatProviderPause(row, { nowMs: data.generated_at_ms, C })}`);
+    }
+    write(`    ${C.dim}Clear with: posse admin provider-pause clear <provider>${C.reset}`);
   }
 
   write(`\n  ${C.bold}Work Items:${C.reset}`);

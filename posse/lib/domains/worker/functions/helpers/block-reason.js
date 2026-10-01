@@ -13,18 +13,78 @@
 // CLI, so we match on the gateway/MCP-unavailable shape rather than any one
 // CLI's wording.
 
+import { formatToolReference, TOOL_REFS } from "../../../../catalog/tool-references.js";
+import { providerInterruptionRetryContext } from "./provider-quota-pause.js";
+
 // Prefix of the job/attempt error recorded for an agent-reported BLOCKED
 // handoff; the retry path reads it back to tell a block from a failure.
 export const AGENT_BLOCKED_ERROR_PREFIX = "Agent BLOCKED:";
+// The legacy no-write completion branch records its blocks under this prefix.
+const LEGACY_DEV_BLOCKED_ERROR_PREFIX = "Dev BLOCKED:";
+
+// The role prompt is composed once and reused when the provider client falls
+// back to another provider, so the retry note names the canonical issued tool;
+// the RUNTIME CAPABILITY MANIFEST maps it to the provider's callable name.
+const ISSUED_EDIT_TOOL = formatToolReference(TOOL_REFS.tools.editFile);
+
+function blockedReasonFromError(text) {
+  for (const prefix of [AGENT_BLOCKED_ERROR_PREFIX, LEGACY_DEV_BLOCKED_ERROR_PREFIX]) {
+    if (text.startsWith(prefix)) return text.slice(prefix.length).trim();
+  }
+  return null;
+}
+
+// A transient routing block is not a constraint the task states, so neither
+// the remote "PREVIOUS ATTEMPT FAILED" section nor the operator-retry note may
+// carry it: a provider whose read-only sandbox is still read-only (by design)
+// re-reads the quoted reason as confirmation and blocks again (WI 164 job 2136,
+// 2026-10-01). Replace the reason with the correction instead.
+function transientBlockRetryNote(reason, recovery, writeTool, provider = null) {
+  const guidance = recovery?.action === "retry" && recovery.bare_retry !== true
+    ? ["  The operator chose retry; their guidance is under BLOCKED RECOVERY GUIDANCE in the task."]
+    : [];
+  if (isProviderSandboxMisreadBlock(reason, { provider })) {
+    return [
+      "PREVIOUS ATTEMPT CORRECTION:",
+      "  The previous attempt misread the provider sandbox notice and reported BLOCKED.",
+      `  The provider's read-only sandbox, "approval policy never", and filesystem-permission notices apply only to native apply_patch and shell writes. They do not restrict ${writeTool}.`,
+      `  ${writeTool} is this job's write path for its assigned files; call it by the exact name the runtime capability manifest lists, and make the edits through it.`,
+      "  Do not report BLOCKED for the sandbox notice or read-only filesystem permissions.",
+      ...guidance,
+      "",
+    ].join("\n");
+  }
+  return [
+    "PREVIOUS ATTEMPT CORRECTION:",
+    "  The previous attempt reported BLOCKED because the issued Posse tools were unavailable. That was a transient tool-routing failure, not a task constraint; this attempt starts a fresh provider session.",
+    "  Use the issued tools for this job. Report BLOCKED only if a tool you need is still unavailable, and name that tool.",
+    ...guidance,
+    "",
+  ].join("\n");
+}
 
 // A blocked job retried by the operator is not a failed attempt. The remote
 // retry section ("PREVIOUS ATTEMPT FAILED ... take a different approach")
 // renders only when last_error is set, and it pushes a dev to work around a
 // constraint its task states. Replace it with a blocked-specific note: re-check
-// the blocker, and report BLOCKED again when it still holds.
-export function blockedRetryContext(payload = {}, lastError = null) {
+// the blocker, and report BLOCKED again when it still holds. Transient routing
+// blocks and provider-sandbox misreads get a correction on every retry path;
+// a misread-shaped block from a provider without that sandbox (recorded under
+// BLOCKED_PROVIDER_PAYLOAD_KEY) keeps the genuine-block note. A payload from
+// before that key was recorded falls back to `provider`, the job's provider,
+// so a legacy Claude block is not corrected as a Codex misread. A previous
+// attempt that a provider pause or transient provider error interrupted is
+// not reported as failed.
+export function blockedRetryContext(payload = {}, lastError = null, { writeTool = ISSUED_EDIT_TOOL, provider = null } = {}) {
+  const providerInterruption = providerInterruptionRetryContext(lastError);
+  if (providerInterruption) return providerInterruption;
   const recovery = payload?._blocked_recovery;
   const text = typeof lastError === "string" ? lastError.trim() : "";
+  const blockedReason = blockedReasonFromError(text);
+  const blockProvider = payload?.[BLOCKED_PROVIDER_PAYLOAD_KEY] || provider || null;
+  if (blockedReason && isTransientMcpInfraBlock(blockedReason, { provider: blockProvider })) {
+    return { lastError: null, block: transientBlockRetryNote(blockedReason, recovery, writeTool, blockProvider) };
+  }
   if (recovery?.action !== "retry" || !text.startsWith(AGENT_BLOCKED_ERROR_PREFIX)) {
     return { lastError, block: null };
   }
@@ -73,6 +133,34 @@ const CODEX_NATIVE_PATCH_SANDBOX_REJECTION = /(?:workspace is read-only and sand
 // issued Posse edit tools ("filesystem sandbox is read-only with approval
 // policy never, so ... edits are prohibited"; WI 149 job 1927, 2026-10-01).
 const CODEX_SANDBOX_NOTICE_MISREAD = /(?:sandbox(?:\s+mode)?\s+(?:is\s+)?read[-\s]?only|read[-\s]?only\s+(?:filesystem\s+)?sandbox|approval\s+policy\s+(?:is\s+)?never).{0,200}(?:prohibit|block|prevent|cannot|can't|not\s+(?:allowed|permitted))/i;
+// The same notice paraphrased without "sandbox" ("The supplied filesystem
+// permissions allow reads only, which conflicts with the required repository
+// edits"; WI 164 job 2136, 2026-10-01). Require the provider-supplied subject
+// ("supplied"/"provided" filesystem permissions, or the filesystem sandbox),
+// a read-only grant, and an edit/write object. A bare "<x> filesystem is
+// read-only" is a genuine environment block (a deploy target, a container
+// root, a mount) and stays with a human, as do database grants and
+// single-file modes.
+const CODEX_FILESYSTEM_PERMISSION_MISREAD = new RegExp([
+  String.raw`(?:(?:supplied|provided)\s+file[-\s]?system(?:\s+sandbox)?|file[-\s]?system\s+sandbox)`,
+  String.raw`(?:\s+(?:permissions?|access|policy|mode))?`,
+  String.raw`\s+(?:(?:is|are|remains?|stays?|was|were)\s+)?`,
+  String.raw`(?:(?:only\s+)?(?:allows?|permits?|grants?)\s+(?:only\s+)?reads?(?:\s+only)?|read[-\s]?only)\b`,
+  String.raw`.{0,200}(?:edit|writ|modif|mutat|creat)`,
+].join(""), "i");
+// Only Codex runs writable jobs under a forced read-only native sandbox
+// (codex/call-provider.js forceReadOnlySandbox) with "approval policy never",
+// so only a Codex attempt can misread that notice. The same words from
+// another provider describe a real environment.
+const SANDBOX_MISREAD_PROVIDERS = new Set(["codex"]);
+// Job payload key recording the provider whose attempt reported the latest
+// BLOCKED, so a later retry note classifies the block the same way.
+export const BLOCKED_PROVIDER_PAYLOAD_KEY = "_blocked_provider";
+// Codex can paraphrase the native sandbox notice without using "sandbox" at
+// all. Keep this tied to provider-supplied filesystem permissions plus an
+// assigned repository-edit consequence so a genuine request for wider scope
+// or credentials still reaches the operator (WI 164 job 2136, 2026-10-01).
+const CODEX_PROVIDED_READ_ONLY_PERMISSIONS = /(?:supplied|provided)\s+filesystem\s+permissions?\s+(?:allow|permit)\s+reads?\s+only.{0,300}(?:required\s+repository\s+edits?|implementation\s+requires\s+writable\s+scope|no\s+files?\s+were\s+changed)/i;
 const ISSUED_FILE_TOOL_INVOCATION_FAILURE = /(?:(?:write|read|file|repository)(?:\s*\/\s*(?:write|read|file|repository))*\s+(?:path|tools?|surface)|(?:scoped|issued|required)\s+(?:repository\s+)?(?:file\s+)?(?:read|write|mutation)\s+(?:path|tools?|surface)).{0,180}(?:not successfully callable|could not (?:successfully )?(?:invoke|call|reach)|failed to (?:invoke|call|reach)|unavailable|not callable)/i;
 const FEEDBACK_TOOL_DISPLACED_FILE_TOOLS = /(?:operator[-\s]?feedback|feedback[-\s]?(?:coordination|poll)|request_user_input).{0,240}(?:could not|unable|failed).{0,120}(?:repository|scoped|issued|required).{0,80}(?:read|write|file|mutation)\s+tools?/i;
 
@@ -90,13 +178,39 @@ export function isPermanentProviderRuntimeBlock(reason) {
 }
 
 /**
- * Returns true when a BLOCKED reason (or attempt error_text) looks like a
- * transient scoped mutation routing failure rather than a genuine
- * human-needed block.
+ * Returns true when a BLOCKED reason says the provider's own read-only
+ * sandbox stopped the edit. Writable Codex jobs intentionally keep the native
+ * apply_patch sandbox read-only because Posse's issued MCP write/edit tools
+ * enforce exact file scope, so the block is a routing or reading mistake, not
+ * a missing permission. When `provider` (the provider whose attempt reported
+ * the block) is known and is not one that runs that sandbox, the block is
+ * genuine.
  * @param {string|null|undefined} reason
+ * @param {{ provider?: string|null }} [options]
  * @returns {boolean}
  */
-export function isTransientMcpInfraBlock(reason) {
+export function isProviderSandboxMisreadBlock(reason, { provider = null } = {}) {
+  const text = String(reason || "").trim();
+  if (!text) return false;
+  if (provider && !SANDBOX_MISREAD_PROVIDERS.has(String(provider).trim().toLowerCase())) return false;
+  if (isPermanentProviderRuntimeBlock(text)) return false;
+  if (CODEX_NATIVE_PATCH_SANDBOX_REJECTION.test(text)) return true;
+  if (HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return false;
+  return CODEX_SANDBOX_NOTICE_MISREAD.test(text)
+    || CODEX_FILESYSTEM_PERMISSION_MISREAD.test(text)
+    || CODEX_PROVIDED_READ_ONLY_PERMISSIONS.test(text);
+}
+
+/**
+ * Returns true when a BLOCKED reason (or attempt error_text) looks like a
+ * transient scoped mutation routing failure rather than a genuine
+ * human-needed block. `provider` scopes the sandbox-misread shapes to the
+ * provider that runs that sandbox (see isProviderSandboxMisreadBlock).
+ * @param {string|null|undefined} reason
+ * @param {{ provider?: string|null }} [options]
+ * @returns {boolean}
+ */
+export function isTransientMcpInfraBlock(reason, { provider = null } = {}) {
   const text = String(reason || "").trim();
   if (!text) return false;
   if (isPermanentProviderRuntimeBlock(text)) return false;
@@ -140,13 +254,10 @@ export function isTransientMcpInfraBlock(reason) {
   if (REQUIRED_EXECUTION_CAPABILITY_FAILURE.test(text) && !HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return true;
   if (SCOPED_EXECUTABLE_ACCESS_FAILURE.test(text) && !HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return true;
 
-  // Writable Codex jobs intentionally keep the native apply_patch sandbox
-  // read-only because Posse's issued MCP write/edit tools enforce exact file
-  // scope. If the model selects apply_patch anyway, retry with the runtime
-  // tool-priority guard instead of asking a human to fix an internal routing
-  // mistake.
-  if (CODEX_NATIVE_PATCH_SANDBOX_REJECTION.test(text)) return true;
-  if (CODEX_SANDBOX_NOTICE_MISREAD.test(text) && !HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return true;
+  // If the model selects apply_patch anyway, or reads the read-only sandbox
+  // notice as covering the issued tools, retry with the runtime tool-priority
+  // guard instead of asking a human to fix an internal routing mistake.
+  if (isProviderSandboxMisreadBlock(text, { provider })) return true;
 
   // Codex occasionally routes toward its native feedback surface while the
   // required Posse file surface is detached. These are the production smoke

@@ -12,6 +12,9 @@ import { getAtlasIntegrationConfig, getAtlasProviderSupport } from "../../integr
 import { getSetting, setSetting } from "../../settings/functions/repository-settings.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { classifyProviderError } from "./shared/api-resilience.js";
+import { PROVIDER_QUOTA_SCOPES } from "../../../catalog/provider.js";
+import { isProviderQuotaBackoff } from "./shared/quota-reset.js";
+import { providerPauseSettingKey, readProviderPauseRecord, writeProviderPause } from "./provider-pause-state.js";
 import { providerRegistry, optionalProvidersMissingModule, reloadOptionalProvider } from "../classes/registry-singleton.js";
 import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
 import { getDefaultTierModel, PROVIDER_OPTIONS } from "./model-catalog.js";
@@ -141,32 +144,36 @@ function readDbSetting(key) {
 }
 
 function persistedRateLimitSettingKey(providerName) {
-  return `${canonicalProviderName(providerName)}_rate_limit_state`;
+  return providerPauseSettingKey(canonicalProviderName(providerName));
 }
 
+// The persisted pause (see provider-pause-state.js). `clearedAtMs` names an
+// operator's clear of an earlier pause.
 function readPersistedRateLimitState(providerName, { nowMs = Date.now() } = {}) {
-  const canonicalName = canonicalProviderName(providerName);
-  let parsed = null;
-  try {
-    const raw = getSetting(persistedRateLimitSettingKey(canonicalName));
-    if (!raw) return null;
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-
-  const untilMs = Number(parsed?.untilMs);
-  if (!Number.isFinite(untilMs) || untilMs <= nowMs) {
-    try { setSetting(persistedRateLimitSettingKey(canonicalName), null); } catch {}
-    return null;
-  }
-
+  const record = readProviderPauseRecord(canonicalProviderName(providerName), { nowMs });
+  if (!record) return null;
+  const clearedAtMs = record.clear?.clearedAtMs ?? null;
+  if (!record.pause) return { blocked: false, retryInSec: 0, reason: "", persisted: true, clearedAtMs };
   return {
     blocked: true,
-    retryInSec: Math.ceil((untilMs - nowMs) / 1000),
-    reason: String(parsed?.reason || "persisted_rate_limit"),
+    retryInSec: Math.ceil((record.pause.untilMs - nowMs) / 1000),
+    reason: record.pause.reason,
     persisted: true,
+    clearedAtMs,
   };
+}
+
+// Operator clears (`posse admin provider-pause clear`) this process has
+// applied, by provider. Each clear releases the in-memory pause once, so a
+// pause tripped after it still holds.
+const appliedProviderPauseClears = new Map();
+
+function applyOperatorPauseClear(mod, providerName, persisted) {
+  if (!Number.isFinite(persisted?.clearedAtMs)) return;
+  const canonicalName = canonicalProviderName(providerName);
+  if (appliedProviderPauseClears.get(canonicalName) === persisted.clearedAtMs) return;
+  appliedProviderPauseClears.set(canonicalName, persisted.clearedAtMs);
+  if (typeof mod.tripRateLimit === "function") mod.tripRateLimit(0);
 }
 
 function persistRateLimitState(providerName, backoffSec, reason = "") {
@@ -185,11 +192,7 @@ function persistRateLimitState(providerName, backoffSec, reason = "") {
   if (current?.blocked && nowMs + current.retryInSec * 1000 >= untilMs) return;
 
   try {
-    setSetting(key, JSON.stringify({
-      untilMs,
-      reason: String(reason || "rate_limit"),
-      updatedAt: new Date(nowMs).toISOString(),
-    }));
+    writeProviderPause(canonicalName, { untilMs, reason, nowMs });
   } catch {
     // Account settings can be unavailable in isolated provider tests.
   }
@@ -631,6 +634,35 @@ export function getProviderBackoff(providerName, err) {
 }
 
 /**
+ * Pause a provider for this process and, for pauses of a minute or more,
+ * across runs (the persisted `<provider>_rate_limit_state` setting). Paused
+ * providers are skipped by fallback selection and preflight-rejected by the
+ * provider client, so other jobs wait or fall back instead of each failing.
+ * A pause only ever extends; a shorter request leaves a longer pause intact.
+ */
+export function pauseProvider(providerName, backoffSec, reason = "") {
+  const mod = resolveProviderModule(providerName);
+  if (typeof mod.tripRateLimit === "function") mod.tripRateLimit(backoffSec, reason);
+  persistRateLimitState(providerName, backoffSec, reason);
+}
+
+/**
+ * Pause a provider as soon as one of its calls reports an account-wide
+ * subscription quota (session/usage/rate limit), before any runtime fallback
+ * runs. Model-scoped and billing quotas are left to attempt failure handling.
+ * @returns {object|null} The quota classification when the provider was paused.
+ */
+export function pauseProviderForQuota(providerName, err) {
+  const mod = resolveProviderModule(providerName);
+  const result = typeof mod.parseErrorBackoff === "function"
+    ? mod.parseErrorBackoff(err)
+    : classifyProviderError(err, { defaultBackoffSec: 15 });
+  if (!isProviderQuotaBackoff(result) || result.quota?.scope !== PROVIDER_QUOTA_SCOPES.ACCOUNT) return null;
+  pauseProvider(providerName, result.backoffSec, result.source);
+  return result;
+}
+
+/**
  * Check if a provider is currently rate-limited (global state).
  * @param {string} providerName
  * @returns {{ blocked: boolean, retryInSec: number, reason: string }}
@@ -638,6 +670,9 @@ export function getProviderBackoff(providerName, err) {
 export function getProviderRateLimitState(providerName) {
   const mod = resolveProviderModule(providerName);
   const persisted = readPersistedRateLimitState(providerName);
+  // An operator cleared the pause, possibly from another process: release
+  // the copy this process holds in memory.
+  applyOperatorPauseClear(mod, providerName, persisted);
   if (mod.getRateLimitState) {
     const runtime = mod.getRateLimitState();
     if (persisted?.blocked && (!runtime?.blocked || persisted.retryInSec > (runtime.retryInSec || 0))) {

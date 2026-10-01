@@ -5,7 +5,11 @@ import { registerAttemptStartHook } from "./attempts.js";
 // Uses better-sqlite3 (synchronous) for simplicity and atomicity.
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
-import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
+import {
+  CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
+  WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
+  humanGateStateAllowsAnswer,
+} from "../../../catalog/human-input.js";
 import {
   MUTATING_JOB_TYPES,
   NON_COMPLETION_BLOCKING_JOB_TYPES,
@@ -32,12 +36,47 @@ import {
 } from "./common.js";
 import { flushEventsNow, getEvents, logDurableEvent, logEvent } from "./events.js";
 import {
+  APPLIED_DB_TASKS_KEY,
+  POST_MERGE_DB_HOLD_KEY,
+  appliedDbTaskEntries,
   hasActivePostMergeDbGate,
+  isDbTaskJob,
   isPostMergeDbGateJob,
   isPostMergeDbTaskJob,
   isPostMergeHeldDbJob,
   postMergeDbGateJobSpec,
+  postMergeDbHoldRecord,
+  supersededPostMergeDbMessage,
+  supersededPostMergeDbPayload,
+  supersedingPostMergeDbTask,
 } from "./post-merge-db-tasks.js";
+import { findMergeHoldingGate } from "./merge-holding-gate.js";
+import {
+  committedJobIdsForWorkItem,
+  isMergeVerificationReviewJob,
+  mergeVerificationReviewGateJobSpec,
+  mergeVerificationReviewGateState,
+  mergeVerificationReviewRequirement,
+} from "./merge-verification-review.js";
+import {
+  activeWorkItemDispositionGates,
+  crossWiUpstreamDispositionGateSpec,
+  crossWiUpstreamEpisode,
+  crossWiUpstreamGateEpisodes,
+  discardedPlanContext,
+  failedLeafJobs,
+  failedWorkItemRestorationPlan,
+  hasWorkItemFailureGateForEpisode,
+  isCrossWiUpstreamDispositionGateJob,
+  isWorkItemDispositionGateJob,
+  operatorCanceledHeldDbTasks,
+  recoverableHeldDbTasks,
+  staleCrossWiUpstreams,
+  supersededFailedGateJobs,
+  unaskedStaleCrossWiUpstreams,
+  workItemFailureDispositionGateSpec,
+  workItemFailureIsRecoverable,
+} from "./work-item-dispositions.js";
 import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole, getIntSetting, getSetting } from "./settings.js";
 import { classifyAutoApprovableScopeRequest } from "../../../shared/policies/functions/scope-auto-approval.js";
 import { invalidateSessionLanesForWorkItem as invalidateSessionLanesForWorkItemInternal } from "./sessions.js";
@@ -54,9 +93,13 @@ import {
   releaseWorkItemLocksForStatus,
 } from "./file-locks.js";
 import {
+  WORK_ITEM_BRANCH_RESET_KEY,
   clearCrossWiMergeDependenciesForWorkItem,
+  getWorkItemMergeDependencies,
+  pendingCrossWiMergeUpstreamIds,
   rollbackPendingCrossWiSyncHandoffsForJob,
 } from "./cross-wi-deps.js";
+import { jobHasLiveLeaseAt } from "./lease-state.js";
 import {
   __registerRequeueExpiredLeases,
   consumePendingHumanGateResume as _consumePendingHumanGateResume,
@@ -282,7 +325,10 @@ export {
   ancestorJobIdsForJob,
   cleanupStaleFileLocks,
   clearFileLaneWaitsForJob,
+  crossWiSyncSourceRejection,
+  describeWorkItemMergeParking,
   fileLaneId,
+  findWorkItemOrderConflict,
   findWriteLockConflict,
   getJobWriteScopeAsync,
   getJobWriteScope,
@@ -292,6 +338,7 @@ export {
   jobNeedsWriteLocks,
   listActiveFileLocks,
   listFileLaneWaits,
+  loadWorkItemOrder,
   queuedCohortJobIdsForJob,
   queuedDependentJobIdsForJob,
   reconcileFileLaneWaits,
@@ -300,8 +347,10 @@ export {
   releaseWorkItemFileLockForPath,
   releaseJobFileLocks,
   releaseWorkItemFileLocks,
+  setCompleteWorkItemAutoMergePolicy,
   verifyOrAcquireJobWriteLockForPath,
   workItemCanReleaseFileLock,
+  workItemMergeParking,
 } from "./file-locks.js";
 
 export {
@@ -451,6 +500,7 @@ export {
   clearCrossWiMergeDependenciesForWorkItem,
   rollbackPendingCrossWiSyncHandoffsForJob,
   listCrossWiMergeBlockers,
+  pendingCrossWiMergeUpstreamIds,
   getWorkItemRecycleOverride,
 } from "./cross-wi-deps.js";
 
@@ -514,6 +564,7 @@ export function canCompleteWorkItem(id, options = {}) {
 export function updateWorkItemStatus(id, status, {
   allowTerminalFailureBlockers = false,
   resolvePendingReviews = false,
+  preserveJobIds = [],
 } = {}) {
   const db = getDb();
   const execute = () => {
@@ -623,7 +674,11 @@ export function updateWorkItemStatus(id, status, {
       settleMergedWorkItemReviewJobs(id);
     }
 
-    if (status === "canceled") cancelInactiveWorkItemJobs(id);
+    // A database task held for this work item's merge would wait forever.
+    if ((status === "failed" || status === "canceled") && current.status !== status) {
+      cancelHeldPostMergeDbTasksForWorkItem(id, status);
+    }
+    if (status === "canceled") cancelInactiveWorkItemJobs(id, { preserveJobIds });
 
     // - started_at: set once on first start, never overwritten (COALESCE(existing, new))
     // - completed_at: set on terminal states, CLEARED on non-terminal states
@@ -662,6 +717,12 @@ export function updateWorkItemStatus(id, status, {
       if (status === "canceled") {
         clearCrossWiMergeDependenciesForWorkItem(id, `work_item_${status}`);
       }
+    }
+    // Leaving a failed work item, or a merge deferred on a failed or
+    // canceled upstream, without a gate is what stranded WIs 164, 167 and
+    // 170 (2026-10-01 18:35: zero open gates).
+    if (current.status !== status && !(status === "complete" && hasMergedEvidence)) {
+      openWorkItemDispositionGatesForTransition(id, status);
     }
     releaseWorkItemLocksForStatus(id, status);
     if (status === "complete" && !current.branch_name) {
@@ -872,6 +933,9 @@ function openPostMergeDbGates(workItemId, jobs) {
   const workItem = getWorkItem(workItemId);
   let opened = 0;
   for (const job of held) {
+    // An older plan's task revived next to the newer plan's task for the
+    // same change: one gate per migration, never two.
+    if (cancelSupersededHeldPostMergeDbTask(job)) continue;
     if (hasActivePostMergeDbGate(job.id)) continue;
     const gate = createJob(postMergeDbGateJobSpec(job, workItem));
     if (!gate?.id) continue;
@@ -891,6 +955,284 @@ function openPostMergeDbGates(workItemId, jobs) {
     opened += 1;
   }
   return opened;
+}
+
+function cancelSupersededHeldPostMergeDbTask(job) {
+  const fresh = getJob(job.id) || job;
+  if (!isPostMergeHeldDbJob(fresh)) return false;
+  const superseding = supersedingPostMergeDbTask(fresh);
+  if (!superseding) return false;
+  if (!forceUpdateJobStatus(fresh.id, "canceled", { expectedStatuses: ["waiting_on_human"] })) return false;
+  updateJobPayload(fresh.id, JSON.stringify(supersededPostMergeDbPayload(getJob(fresh.id) || fresh, superseding)));
+  logEvent({
+    work_item_id: fresh.work_item_id,
+    job_id: fresh.id,
+    event_type: EVENT_TYPES.JOB_CANCELED_BY_SUPERSEDING_PLAN,
+    actor_type: EVENT_ACTORS.SYSTEM,
+    message: supersededPostMergeDbMessage(fresh, superseding),
+    event_json: JSON.stringify({
+      reason: "duplicate_post_merge_db_task",
+      superseded_by_job_id: Number(superseding.id),
+      superseding_plan_id: Number(superseding.parent_job_id) || null,
+      stale_plan_id: Number(fresh.parent_job_id) || null,
+    }),
+  });
+  return true;
+}
+
+// A database task held for its work item's merge waits for a merge that a
+// failed or canceled work item will never make (WI 164 job 2134 sat in
+// waiting_on_human with no gate). Cancel it, and mark the hold so recovering
+// the work item through its failure disposition gate holds it again.
+export function cancelHeldPostMergeDbTasksForWorkItem(workItemId, status) {
+  let canceled = 0;
+  for (const job of listJobsByWorkItem(workItemId).filter(isPostMergeHeldDbJob)) {
+    if (!forceUpdateJobStatus(job.id, "canceled", { expectedStatuses: ["waiting_on_human"] })) continue;
+    const fresh = getJob(job.id) || job;
+    updateJobPayload(job.id, JSON.stringify({
+      ...parseJobPayload(fresh),
+      [POST_MERGE_DB_HOLD_KEY]: {
+        ...(postMergeDbHoldRecord(fresh) || {}),
+        canceled_with_work_item: { status, canceled_at: now() },
+      },
+    }));
+    logEvent({
+      work_item_id: workItemId,
+      job_id: job.id,
+      event_type: EVENT_TYPES.JOB_POST_MERGE_DB_CANCELED_WITH_WORK_ITEM,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Work item ${status}; canceled database task #${job.id} held for its merge`,
+      event_json: JSON.stringify({ work_item_status: status }),
+    });
+    canceled += 1;
+  }
+  return canceled;
+}
+
+/** Hold again the database tasks canceled with the work item's failure. */
+export function reholdPostMergeDbTasksForWorkItem(workItemId) {
+  const reheld = [];
+  for (const job of listJobsByWorkItem(workItemId)) {
+    if (job.status !== "canceled" || !isDbTaskJob(job)) continue;
+    const record = postMergeDbHoldRecord(job);
+    if (!record?.canceled_with_work_item || record.released_at || record.superseded_by_rebuild) continue;
+    if (!forceUpdateJobStatus(job.id, "waiting_on_human", { expectedStatuses: ["canceled"] })) continue;
+    const { canceled_with_work_item: _canceled, ...hold } = record;
+    updateJobPayload(job.id, JSON.stringify({
+      ...parseJobPayload(job),
+      [POST_MERGE_DB_HOLD_KEY]: { ...hold, reheld_at: now() },
+    }));
+    logEvent({
+      work_item_id: workItemId,
+      job_id: job.id,
+      event_type: EVENT_TYPES.JOB_POST_MERGE_DB_REHELD,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Work item recovered; database task #${job.id} is held for its merge again`,
+    });
+    reheld.push(Number(job.id));
+  }
+  return reheld;
+}
+
+// ── Work-item disposition gates (see work-item-dispositions.js) ──────────
+// Opened inside the work-item status transition that creates the stuck
+// state. Parked like a push offer: answered out of band (phone, CLI, TUI
+// resurface), never leased into a prompt by the transition that opened it.
+function parkDispositionGate(gate, workItemId, message, detail) {
+  if (gate.status === "queued") {
+    forceUpdateJobStatus(gate.id, "waiting_on_human", { expectedStatuses: ["queued"] });
+  }
+  logEvent({
+    work_item_id: workItemId,
+    job_id: gate.id,
+    event_type: EVENT_TYPES.WORK_ITEM_DISPOSITION_GATE_OPENED,
+    actor_type: EVENT_ACTORS.SYSTEM,
+    message,
+    event_json: JSON.stringify({ gate_job_id: gate.id, ...detail }),
+  });
+  return gate;
+}
+
+export function openWorkItemFailureDispositionGate(workItemId) {
+  const workItem = getWorkItem(workItemId);
+  const jobs = listJobsByWorkItem(workItemId);
+  if (!workItemFailureIsRecoverable(workItem, jobs)) return null;
+  if (activeWorkItemDispositionGates(workItemId, WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE).length > 0) return null;
+  if (hasWorkItemFailureGateForEpisode(workItem)) return null;
+  const blockers = completionBlockersForWorkItem(workItemId);
+  const leaves = failedLeafJobs(blockers);
+  const supersededGates = supersededFailedGateJobs(blockers);
+  const canceledHeldDbTasks = jobs.filter((job) => (
+    job.status === "canceled"
+    && postMergeDbHoldRecord(job)?.canceled_with_work_item
+    && !postMergeDbHoldRecord(job)?.superseded_by_rebuild
+  ));
+  // What retry and accept would bring back with the failed leaves (a replan
+  // brings back nothing of the old plan).
+  const restoration = leaves.length > 0
+    ? failedWorkItemRestorationPlan(workItemId, leaves.map((job) => Number(job.id)), { supersededGates })
+    : { restored: [], rewires: [] };
+  const gate = createJob(workItemFailureDispositionGateSpec(workItem, {
+    leaves,
+    supersededGates,
+    canceledHeldDbTasks,
+    operatorCanceledDbTasks: operatorCanceledHeldDbTasks(jobs),
+    restoration,
+  }));
+  if (!gate?.id) return null;
+  return parkDispositionGate(
+    gate,
+    workItemId,
+    `Work item failed; recovery gate #${gate.id} waits for the operator (retry, accept or abandon)`,
+    {
+      review_type: WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
+      failed_job_ids: leaves.map((job) => Number(job.id)),
+    },
+  );
+}
+
+/**
+ * Retire open upstream gates whose question no longer matches the stale
+ * upstreams (an upstream failed and was then canceled, or another one
+ * failed), so a gate offering "wait" on an upstream that can never merge is
+ * replaced. Returns null when an open gate still asks the current question
+ * (or an answer is being applied to it), else the retired gate ids.
+ */
+function retireOutdatedCrossWiUpstreamGates(workItemId, upstreams) {
+  const active = activeWorkItemDispositionGates(workItemId, CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE);
+  if (active.length === 0) return [];
+  if (active.some((gate) => jobHasLiveLeaseAt(gate, now()))) return null;
+  const asked = new Set(active.flatMap(crossWiUpstreamGateEpisodes));
+  if (upstreams.every((upstream) => asked.has(crossWiUpstreamEpisode(upstream)))) return null;
+  const retired = [];
+  for (const gate of active) {
+    if (!forceUpdateJobStatus(gate.id, "canceled", { expectedStatuses: [gate.status] })) return null;
+    getDb().prepare(`UPDATE jobs SET last_error = COALESCE(last_error, ?), updated_at = ? WHERE id = ?`)
+      .run("The upstream work items changed; replaced by a new question", now(), gate.id);
+    retired.push(Number(gate.id));
+  }
+  return retired;
+}
+
+// A completed work item without a branch has a merge question only while it
+// still records merge dependencies: a rebuild or abandon answer deleted its
+// branch and the transition that should have followed did not finish, which
+// would otherwise leave it with no gate at all.
+export function openCrossWiUpstreamDispositionGate(workItemId) {
+  const workItem = getWorkItem(workItemId);
+  if (
+    !workItem
+    || workItem.status !== "complete"
+    || workItem.merge_state === "merged"
+  ) return null;
+  const upstreams = staleCrossWiUpstreams(workItem);
+  if (upstreams.length === 0) return null;
+  return runInTransaction(() => {
+    const replaced = retireOutdatedCrossWiUpstreamGates(workItemId, upstreams);
+    if (replaced == null) return null;
+    if (unaskedStaleCrossWiUpstreams(workItem, upstreams).length === 0) return null;
+    const spec = crossWiUpstreamDispositionGateSpec(workItem, upstreams);
+    const gate = createJob(spec);
+    if (!gate?.id) return null;
+    const choices = JSON.parse(spec.payload_json).choices;
+    return parkDispositionGate(
+      gate,
+      workItemId,
+      `Merge deferred on ${upstreams.map((upstream) => `WI#${upstream.source_work_item_id} (${upstream.status})`).join(", ")}; gate #${gate.id} waits for the operator (${choices.join(", ")})${replaced.length > 0 ? `; replaces gate ${replaced.map((id) => `#${id}`).join(", ")}` : ""}`,
+      {
+        review_type: CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
+        upstream_work_item_ids: upstreams.map((upstream) => upstream.source_work_item_id),
+        choices,
+        ...(replaced.length > 0 ? { replaces_gate_job_ids: replaced } : {}),
+      },
+    );
+  });
+}
+
+/** Completed, unmerged work items whose merge waits on `sourceWorkItemId`. */
+function listCrossWiDownstreamWorkItems(sourceWorkItemId) {
+  const sourceId = Number(sourceWorkItemId);
+  return listWorkItems(["complete"]).filter((workItem) => (
+    workItem.merge_state !== "merged"
+    && getWorkItemMergeDependencies(workItem)
+      .some((dep) => Number(dep.source_work_item_id) === sourceId)
+  ));
+}
+
+export function openCrossWiUpstreamDispositionGatesForSource(sourceWorkItemId) {
+  return listCrossWiDownstreamWorkItems(sourceWorkItemId)
+    .map((workItem) => openCrossWiUpstreamDispositionGate(workItem.id))
+    .filter(Boolean);
+}
+
+/**
+ * Resolve an unanswered "wait" question whose answer no longer matters: every
+ * failed or canceled upstream it asked about has merged since. A gate held by
+ * a live prompt or answer is left to that resolver.
+ */
+export function settleCrossWiUpstreamDispositionGate(gateJobId, { reason = "upstream_merged" } = {}) {
+  const db = getDb();
+  return runInTransaction(() => {
+    const gate = getJob(gateJobId);
+    if (!gate || !isCrossWiUpstreamDispositionGateJob(gate) || TERMINAL_JOB_STATUS_SET.has(gate.status)) return false;
+    if (jobHasLiveLeaseAt(gate, now())) return false;
+    const workItem = getWorkItem(gate.work_item_id);
+    if (staleCrossWiUpstreams(workItem).length > 0) return false;
+    const ts = now();
+    const resolved = db.prepare(`
+      UPDATE human_gates
+      SET gate_state = 'resolved', resolution_action = 'wait',
+          resolution_payload_json = ?, resolver_lease_token = NULL,
+          resolved_at = ?, updated_at = ?
+      WHERE gate_job_id = ? AND gate_state = 'open'
+    `).run(JSON.stringify({ action: "wait", source: "system", reason }), ts, ts, gate.id);
+    if (resolved.changes !== 1) return false;
+    forceUpdateJobStatus(gate.id, "succeeded", { expectedStatuses: [gate.status] });
+    logEvent({
+      work_item_id: gate.work_item_id,
+      job_id: gate.id,
+      event_type: EVENT_TYPES.WORK_ITEM_DISPOSITION_RESOLVED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Upstream work item merged; gate #${gate.id} resolved as wait and the merge may proceed`,
+      event_json: JSON.stringify({
+        gate_job_id: gate.id,
+        review_type: CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
+        action: "wait",
+        automatic: true,
+        reason,
+      }),
+    });
+    return true;
+  });
+}
+
+function settleCrossWiUpstreamDispositionGatesForSource(sourceWorkItemId) {
+  let settled = 0;
+  for (const workItem of listCrossWiDownstreamWorkItems(sourceWorkItemId)) {
+    for (const gate of activeWorkItemDispositionGates(workItem.id, CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE)) {
+      if (settleCrossWiUpstreamDispositionGate(gate.id)) settled += 1;
+    }
+  }
+  return settled;
+}
+
+// A disposition gate must never block or roll back the status transition
+// that opened it; gate maintenance (reconcileWorkItemDispositionGates) opens
+// a gate this missed.
+function openWorkItemDispositionGatesForTransition(id, status) {
+  try {
+    if (status === "failed") openWorkItemFailureDispositionGate(id);
+    if (status === "failed" || status === "canceled") openCrossWiUpstreamDispositionGatesForSource(id);
+    if (status === "complete") openCrossWiUpstreamDispositionGate(id);
+  } catch (err) {
+    logEvent({
+      work_item_id: id,
+      event_type: EVENT_TYPES.WORK_ITEM_DISPOSITION_GATE_OPENED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Could not open a disposition gate after status ${status}; gate maintenance will retry: ${err?.message || err}`,
+      event_json: JSON.stringify({ opened: false, status, error: String(err?.message || err).slice(0, 500) }),
+    });
+  }
 }
 
 export function cancelPendingReviewGatesForOriginal(originalJobId, { exceptJobId = null } = {}) {
@@ -977,11 +1319,49 @@ export function setMergeState(id, mergeState) {
       // window must not leave its original job parked or its human gate open.
       settleMergedWorkItemReviewJobs(id);
       clearCrossWiMergeDependenciesForWorkItem(id, "work_item_merged");
+      // A downstream gate asking whether to wait for this upstream is moot.
+      settleCrossWiUpstreamDispositionGatesForSource(id);
     }
     releaseWorkItemLocksForMergeState(id, mergeState);
   };
   if (db.inTransaction) execute();
   else runImmediateTransaction(db, execute);
+}
+
+// Automatic merge stops for operator review when a job's planned
+// verification was waived or replaced because of baseline debt on high-risk or
+// security-sensitive work (merge-verification-review.js). Returns the review
+// gate that holds the merge (opened here when none covers the current
+// waivers), or null when the merge may proceed. Runs inside the authorization
+// transaction.
+function holdForMergeVerificationReview(workItem) {
+  const requirement = mergeVerificationReviewRequirement(listJobsByWorkItem(workItem.id), {
+    committedJobIds: committedJobIdsForWorkItem(workItem.id),
+  });
+  if (!requirement.required) return null;
+  const existing = mergeVerificationReviewGateState(workItem.id, { waivedJobIds: requirement.waivedJobIds });
+  if (existing?.approved) return null;
+  if (existing?.holds) return existing;
+  const gate = createJob(mergeVerificationReviewGateJobSpec(workItem, requirement));
+  if (!gate?.id) return null;
+  // Parked like a push offer: answered out of band (bridge, CLI, review),
+  // never leased into a prompt by the merge pass that opened it.
+  if (gate.status === "queued") {
+    forceUpdateJobStatus(gate.id, "waiting_on_human", { expectedStatuses: ["queued"] });
+  }
+  logEvent({
+    work_item_id: workItem.id,
+    job_id: gate.id,
+    event_type: EVENT_TYPES.WORK_ITEM_MERGE_REVIEW_REQUIRED,
+    actor_type: EVENT_ACTORS.SYSTEM,
+    message: `Automatic merge held for operator review (gate #${gate.id}): ${parseJobPayload(gate).context}`,
+    event_json: JSON.stringify({
+      gate_job_id: gate.id,
+      waived_job_ids: requirement.waivedJobIds,
+      triggers: requirement.triggers,
+    }),
+  });
+  return { gate_job_id: Number(gate.id), opened: true };
 }
 
 /**
@@ -1004,6 +1384,12 @@ export function authorizeWorkItemAutoMerge(id, { expectedBranch = null } = {}) {
       return { ok: false, reason: "branch_changed", branch: branch || null };
     }
     if (current.merge_state === "merged") return { ok: false, reason: "already_merged" };
+    // The merge would only defer behind an upstream work item still in
+    // flight; declining here leaves merge_state and the event log alone.
+    const pendingUpstream = pendingCrossWiMergeUpstreamIds(current);
+    if (pendingUpstream.length > 0) {
+      return { ok: false, reason: "upstream_merge_pending", upstream_work_item_ids: pendingUpstream };
+    }
     const blockers = completionBlockersForWorkItem(id);
     if (blockers.length > 0) {
       return {
@@ -1012,31 +1398,23 @@ export function authorizeWorkItemAutoMerge(id, { expectedBranch = null } = {}) {
         blocker_job_ids: blockers.map((job) => Number(job.id)),
       };
     }
-    const activeGate = db.prepare(`
-      SELECT hg.gate_job_id, hg.gate_state, hg.resolution_action
-      FROM human_gates hg
-      JOIN jobs gate_job ON gate_job.id = hg.gate_job_id
-      WHERE gate_job.work_item_id = ?
-        AND (
-          hg.gate_state IN ('open', 'resolving')
-          OR (
-            hg.gate_state = 'resolved'
-            AND hg.resolution_action IN (
-              'fail', 'replan', 'retry_assessment', 'retry_with_changes',
-              'reject', 'deny', 'revert', 'extend'
-            )
-          )
-        )
-      ORDER BY hg.gate_job_id
-      LIMIT 1
-    `).get(id);
+    // An open gate, or an answer that refuses automatic merge. A merge
+    // review answered fail already sent the work item back for rework: that
+    // answer is spent, like a work-item review rejection, and the reworked
+    // work item is reviewed again by a new gate below instead of being
+    // refused forever. Work-item parking (file-locks.js) reads the same gate.
+    const activeGate = findMergeHoldingGate(id, db);
     if (activeGate) {
       return {
         ok: false,
         reason: "human_gate_active",
-        gate_job_id: Number(activeGate.gate_job_id),
+        gate_job_id: activeGate.gate_job_id,
         gate_state: activeGate.gate_state,
       };
+    }
+    const verificationReview = holdForMergeVerificationReview(current);
+    if (verificationReview) {
+      return { ok: false, reason: "verification_review_required", gate_job_id: verificationReview.gate_job_id };
     }
     const previousMergeState = current.merge_state ?? null;
     if (current.merge_state !== "merge_authorized") {
@@ -1215,31 +1593,224 @@ export function appendReviewRejectionDescription(description, reason) {
   return [base, ...retained].join(REVIEW_REJECTION_SEPARATOR);
 }
 
-export function requeueWorkItemAfterRejection(id, { description = null, feedback = null } = {}) {
+/**
+ * Jobs whose work another job of the work item took over, so a rejection
+ * must not run them again: a succeeded replan planned around them (its parent
+ * or original_job_id), or recovery work names them (a dead-letter retry, a
+ * partial-deliverable repair, a promote follow-up; the links
+ * completionBlockersForWorkItem follows). WI 168: fix 2192 failed and replan
+ * 2197 replaced it; WI 167: replan 2190 replaced 2172.
+ */
+function replacedJobIds(jobs) {
+  const ids = new Set();
+  for (const job of jobs) {
+    if (job.status === "canceled") continue;
+    const payload = parseJobPayload(job);
+    const links = [];
+    if (job.job_type === "plan" && job.status === "succeeded") links.push(job.parent_job_id, payload.original_job_id);
+    if (MUTATING_JOB_TYPES.has(job.job_type)) {
+      links.push(
+        payload._dead_letter_recovery?.original_job_id,
+        payload._promote_followup_of,
+        payload._partial_deliverable_repair_for,
+        payload._promote_missing_repair_for,
+      );
+    }
+    for (const link of links) {
+      const id = Number(link);
+      if (Number.isSafeInteger(id) && id > 0 && id !== Number(job.id)) ids.add(id);
+    }
+  }
+  return ids;
+}
+
+function writeWorkItemMetadataKey(workItemId, key, value) {
+  const current = getWorkItem(workItemId);
+  if (!current) return false;
+  const metadata = parseWorkItemMetadataRecord(current);
+  if (value == null) delete metadata[key];
+  else metadata[key] = value;
+  getDb().prepare(`UPDATE work_items SET metadata_json = ?, updated_at = ? WHERE id = ?`)
+    .run(Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null, now(), workItemId);
+  return true;
+}
+
+/**
+ * Record on the work item that its branch, and the content on it, was
+ * deleted (WORK_ITEM_BRANCH_RESET_KEY): cross-WI provenance ignores sync
+ * records applied before this.
+ */
+export function recordWorkItemBranchReset(workItemId, { reason = "branch_discarded", branch = null } = {}) {
+  return writeWorkItemMetadataKey(workItemId, WORK_ITEM_BRANCH_RESET_KEY, {
+    at: now(),
+    reason: String(reason || "branch_discarded"),
+    branch: branch ? String(branch) : null,
+  });
+}
+
+/**
+ * Forget the cross-WI file syncs of a work item whose branch was deleted:
+ * the applied ones went with the branch (moved to _cross_wi_file_syncs_dropped,
+ * so a later handoff out of the work item no longer claims to carry the
+ * source's edits and make its taker wait on that merge), and a pending one
+ * must not copy the source's edits onto the next branch without the merge
+ * dependency the deletion cleared (rolled back). Returns how many applied
+ * records were dropped.
+ */
+export function discardCrossWiSyncRecordsForWorkItem(workItemId, reason = "branch_discarded") {
+  const ts = now();
+  let dropped = 0;
+  for (const job of listJobsByWorkItem(workItemId)) {
+    const pending = parseJobPayload(job)._cross_wi_file_syncs;
+    if (Array.isArray(pending) && pending.length > 0) rollbackPendingCrossWiSyncHandoffsForJob(job.id, reason);
+    const fresh = getJob(job.id) || job;
+    const payload = parseJobPayload(fresh);
+    const applied = Array.isArray(payload._cross_wi_file_syncs_applied) ? payload._cross_wi_file_syncs_applied : [];
+    if (applied.length === 0) continue;
+    const priorDropped = Array.isArray(payload._cross_wi_file_syncs_dropped) ? payload._cross_wi_file_syncs_dropped : [];
+    payload._cross_wi_file_syncs_dropped = [
+      ...priorDropped,
+      ...applied.map((entry) => ({ ...entry, dropped_at: ts, reason })),
+    ].slice(-100);
+    delete payload._cross_wi_file_syncs_applied;
+    updateJobPayload(fresh.id, JSON.stringify(payload));
+    dropped += applied.length;
+  }
+  return dropped;
+}
+
+/**
+ * The queue side of deleting a work item's branch with its content (review
+ * rejection, rebuild, abandon): the file locks and cross-WI merge
+ * dependencies that guarded its unmerged edits go, its sync records are
+ * forgotten, and the reset is recorded. Returns the dropped sync records.
+ */
+export function forgetDiscardedWorkItemBranch(workItemId, {
+  reason = "branch_discarded",
+  branch = null,
+  lockReason = `work_item_${reason}`,
+  dependencyReason = reason,
+} = {}) {
+  releaseWorkItemFileLocks(workItemId, lockReason);
+  clearCrossWiMergeDependenciesForWorkItem(workItemId, dependencyReason);
+  const dropped = discardCrossWiSyncRecordsForWorkItem(workItemId, reason);
+  recordWorkItemBranchReset(workItemId, { reason, branch });
+  return dropped;
+}
+
+/**
+ * Record on the work item the database tasks of `jobs` that ran against the
+ * project database (APPLIED_DB_TASKS_KEY), before a replan cancels them with
+ * the rest of the old plan. Returns every recorded entry.
+ */
+export function rememberAppliedDbTasks(workItemId, jobs = listJobsByWorkItem(workItemId)) {
+  const workItem = getWorkItem(workItemId);
+  if (!workItem) return [];
+  const entries = appliedDbTaskEntries(workItem, jobs);
+  if (entries.length > 0) writeWorkItemMetadataKey(workItemId, APPLIED_DB_TASKS_KEY, entries);
+  return entries;
+}
+
+// Delivered implementation work of the current plan, whose output lives on
+// the work item's branch: a succeeded job, or one with a committed attempt
+// (an earlier replan's superseded jobs belong to a branch already gone).
+function hasDeliveredBranchWork(workItemId, jobs) {
+  const committed = new Set(committedJobIdsForWorkItem(workItemId));
+  return jobs.some((job) => (
+    MUTATING_JOB_TYPES.has(job.job_type)
+    && (job.status === "succeeded" || committed.has(Number(job.id)))
+    && !parseJobPayload(job)._superseded_by_replan
+  ));
+}
+
+/**
+ * Requeue a work item after its review was rejected (or, with `replan`, to
+ * rebuild it from a fresh plan).
+ *
+ * While the branch is kept (merge verification "fail", a bridge rejection
+ * that keeps the branch), the leaf mutating jobs run again with the
+ * rejection feedback, building on the earlier jobs' work on that branch. A
+ * leaf is the current work: not canceled (a replan or hold already dropped
+ * it), not the parent of other implementation work (a fix recovers it), and
+ * not replaced by a replan or recovery job (replacedJobIds). The branch still
+ * carries every edit it had, including cross-WI edits handed off from
+ * unmerged upstreams, so the work item keeps its file locks, its cross-WI
+ * merge dependencies and its sync records: the reworked branch still merges
+ * only after those upstreams.
+ *
+ * When the branch is gone (the caller deleted it: TUI and bridge review
+ * rejection, rebuild) its content went with it: the locks and merge
+ * dependencies are released, the sync records forgotten
+ * (forgetDiscardedWorkItemBranch). If earlier jobs delivered work (succeeded
+ * or committed), it is gone too, and requeuing only the leaves would re-run
+ * fixes against code that no longer exists while their parents stay failed
+ * or done, so the work item is replanned as with `replan` (run 12:50 red
+ * team round 2, finding 9). A work item without a branch or delivered work
+ * (nothing ran yet, or work that never needed a branch) retries its leaves.
+ *
+ * `replan` ({ title, payload, gateJobId }) replaces the whole job graph:
+ * every pending job and every implementation job of the old plan, whatever
+ * its outcome, is canceled (marked _superseded_by_replan), as is failed work
+ * that would still block completion; database tasks held for the discarded
+ * branch's merge are superseded (no recovery holds them again, no post-merge
+ * gate opens for them); the database tasks that already ran are recorded on
+ * the work item (rememberAppliedDbTasks); and one new plan job is the only
+ * work left. Its task_spec is the work item description followed by the
+ * rejection guidance and the discarded plan's context (discardedPlanContext);
+ * `payload` is merged into its payload_json.
+ *
+ * Afterwards the work item status is refreshed from its jobs (planning or
+ * running), so a run does not plan a queued work item that already has
+ * queued work (live WI 170 was left queued next to dev 2176).
+ *
+ * Returns the new plan job's id when it replanned, otherwise true; false when
+ * it could not requeue.
+ */
+export function requeueWorkItemAfterRejection(id, {
+  description = null,
+  feedback = null,
+  preserveJobIds = [],
+  replan = null,
+} = {}) {
   flushEventsNow();
   return runInTransaction(() => {
     const db = getDb();
-    const readiness = reviewRejectionReadinessInternal(db, id);
+    const readiness = reviewRejectionReadinessInternal(db, id, { ignoreJobIds: preserveJobIds });
     if (!readiness.ok) return false;
-    const { workItem: current, jobs } = readiness;
+    const { workItem: current } = readiness;
+    // A gate answering with this requeue settles itself after it returns.
+    const preserved = new Set(preserveJobIds.map(Number));
+    const jobs = readiness.jobs.filter((job) => !preserved.has(Number(job.id)));
+    const branchDiscarded = !String(current.branch_name || "").trim();
 
     const ts = now();
     const nextDescription = description == null ? current.description : description;
     const guidance = String(feedback || "The previous implementation was rejected during human review. Reinspect the requested behavior and correct the implementation before resubmitting.")
       .trim()
       .slice(0, 2000);
+    const effectiveReplan = replan || (branchDiscarded && hasDeliveredBranchWork(id, jobs)
+      ? {
+        title: `Replan after review rejection: ${(current.title || `WI#${id}`).slice(0, 80)}`,
+        payload: { replan_after_review_rejection: true, branch_discarded: true },
+      }
+      : null);
     const mutatingJobs = jobs.filter((job) => MUTATING_JOB_TYPES.has(job.job_type));
     const mutatingParentIds = new Set(
       mutatingJobs.map((job) => Number(job.parent_job_id)).filter((jobId) => jobId > 0),
     );
-    let retryJobs = mutatingJobs.filter((job) => !mutatingParentIds.has(Number(job.id)));
-    if (retryJobs.length === 0) {
+    const replaced = replacedJobIds(jobs);
+    let retryJobs = effectiveReplan ? [] : mutatingJobs.filter((job) => (
+      job.status !== "canceled"
+      && !mutatingParentIds.has(Number(job.id))
+      && !replaced.has(Number(job.id))
+    ));
+    if (!effectiveReplan && retryJobs.length === 0) {
       const fallback = [...jobs].reverse().find((job) => (
-        job.job_type !== "human_input" && job.job_type !== "atlas_warm"
+        job.job_type !== "human_input" && job.job_type !== "atlas_warm" && job.status !== "canceled"
       ));
       retryJobs = fallback ? [fallback] : [];
     }
-    if (retryJobs.length === 0) {
+    if (!effectiveReplan && retryJobs.length === 0) {
       retryJobs = [createJob({
         work_item_id: id,
         job_type: "plan",
@@ -1251,6 +1822,16 @@ export function requeueWorkItemAfterRejection(id, { description = null, feedback
         }),
       })];
     }
+    // Read before this requeue cancels anything: what the discarded plan
+    // held for the merge and what already changed the project database.
+    const heldDbTasks = effectiveReplan ? recoverableHeldDbTasks(jobs) : [];
+    const appliedDbTasks = effectiveReplan ? rememberAppliedDbTasks(id, jobs) : [];
+    const planContext = effectiveReplan
+      ? discardedPlanContext(jobs, {
+        heldDbTaskIds: heldDbTasks.map((job) => Number(job.id)),
+        appliedDbTasks,
+      })
+      : "";
 
     for (const job of jobs) {
       if (job.job_type === "atlas_warm" || TERMINAL_JOB_STATUS_SET.has(job.status)) continue;
@@ -1259,6 +1840,78 @@ export function requeueWorkItemAfterRejection(id, { description = null, feedback
     for (const job of jobs) {
       if (reviewGateOriginalJobId(job) == null || !reviewGateNeedsRetirement(job)) continue;
       forceUpdateJobStatus(job.id, "canceled", { expectedStatuses: [job.status] });
+    }
+
+    let replanJob = null;
+    if (effectiveReplan) {
+      const { task_spec: replanSpec, ...replanPayload } = effectiveReplan.payload && typeof effectiveReplan.payload === "object"
+        ? effectiveReplan.payload
+        : {};
+      const baseSpec = String(replanSpec || nextDescription || current.title || `Replan WI#${id}`);
+      replanJob = createJob({
+        work_item_id: id,
+        job_type: "plan",
+        title: String(effectiveReplan.title || `Replan: ${(current.title || `WI#${id}`).slice(0, 80)}`).slice(0, 160),
+        priority: current.priority || "normal",
+        payload_json: JSON.stringify({
+          task_spec: [
+            baseSpec,
+            baseSpec.includes(guidance) ? null : `HUMAN REVIEW REJECTION:\n${guidance}`,
+            planContext,
+          ].filter(Boolean).join("\n\n"),
+          ...replanPayload,
+        }),
+      });
+      if (!replanJob?.id) throw new Error(`Could not create the replan job for WI#${id}`);
+      // The old plan's implementation jobs are superseded whatever their
+      // outcome: their commits went with the branch, so a later replan must
+      // not count a succeeded one as retained work, and a failed one must not
+      // keep the rebuilt work item from completing. So must any other failed
+      // completion blocker (a gate that timed out with its job).
+      const supersede = (job) => {
+        const fresh = getJob(job.id) || job;
+        if (fresh.status !== "canceled"
+          && !forceUpdateJobStatus(fresh.id, "canceled", { expectedStatuses: [fresh.status] })) return;
+        updateJobPayload(fresh.id, JSON.stringify({
+          ...parseJobPayload(getJob(fresh.id) || fresh),
+          _superseded_by_replan: { at: ts, plan_job_id: Number(replanJob.id) },
+        }));
+      };
+      // `jobs` holds the statuses from before this requeue canceled the
+      // pending ones; a job canceled earlier stays as it was.
+      for (const job of jobs) {
+        if (job.status !== "canceled" && MUTATING_JOB_TYPES.has(job.job_type)) supersede(job);
+      }
+      for (const job of completionBlockersForWorkItem(id)) {
+        if (preserved.has(Number(job.id)) || Number(job.id) === Number(replanJob.id)) continue;
+        if (FAILED_JOB_STATUS_SET.has(job.status)) supersede(job);
+      }
+      // A database task held for the discarded branch's merge (or canceled
+      // while held) belongs to the discarded plan: no recovery holds it
+      // again and no post-merge gate opens for it; the replan plans its own.
+      const gateJobId = effectiveReplan.gateJobId == null ? null : Number(effectiveReplan.gateJobId);
+      for (const held of heldDbTasks) {
+        const task = getJob(held.id) || held;
+        if (!TERMINAL_JOB_STATUS_SET.has(task.status)) {
+          forceUpdateJobStatus(task.id, "canceled", { expectedStatuses: [task.status] });
+        }
+        const fresh = getJob(task.id) || task;
+        updateJobPayload(task.id, JSON.stringify({
+          ...parseJobPayload(fresh),
+          [POST_MERGE_DB_HOLD_KEY]: {
+            ...(postMergeDbHoldRecord(fresh) || {}),
+            superseded_by_rebuild: { at: ts, gate_job_id: gateJobId, plan_job_id: Number(replanJob.id) },
+          },
+        }));
+        logEvent({
+          work_item_id: id,
+          job_id: task.id,
+          event_type: EVENT_TYPES.JOB_CANCELED_BY_REPLAN,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: `Database task #${task.id} was held for the merge of a deleted branch; replan #${replanJob.id} replaces it`,
+          event_json: JSON.stringify({ plan_job_id: Number(replanJob.id), gate_job_id: gateJobId, superseded_by_rebuild: true }),
+        });
+      }
     }
 
     for (const job of retryJobs) {
@@ -1302,10 +1955,18 @@ export function requeueWorkItemAfterRejection(id, { description = null, feedback
     `).run(nextDescription, ts, id);
     if (result.changes === 0) return false;
 
-    releaseWorkItemFileLocks(id, "work_item_rejected");
-    clearCrossWiMergeDependenciesForWorkItem(id, "work_item_requeued");
+    // Locks, merge dependencies and sync records guard the branch's unmerged
+    // edits: they go with the branch and stay with a kept one.
+    if (branchDiscarded) {
+      forgetDiscardedWorkItemBranch(id, {
+        reason: effectiveReplan ? "replan_after_branch_discarded" : "review_rejection",
+        lockReason: "work_item_rejected",
+        dependencyReason: "work_item_requeued",
+      });
+    }
     invalidateSessionLanesForWorkItemInternal(id, "work_item_requeued");
-    return true;
+    refreshWorkItemStatus(id);
+    return replanJob ? Number(replanJob.id) : true;
   });
 }
 
@@ -1345,7 +2006,13 @@ export function reopenWorkItemForFollowUp(id, { status = "planning", reason = "f
 
     const releaseReason = `work_item_${String(reason || "follow_up").replace(/[^a-z0-9_]+/gi, "_").toLowerCase()}`;
     releaseWorkItemFileLocks(id, releaseReason);
-    clearCrossWiMergeDependenciesForWorkItem(id, releaseReason);
+    // An unmerged branch that the follow-up keeps working on (an iterative
+    // pass) still carries cross-WI edits handed off from unmerged upstreams:
+    // its merge dependencies stay, as for a review rejection that keeps the
+    // branch, so it still merges only after those upstreams (or gets their
+    // gate). The pass releases its old file locks by design.
+    const keepsUnmergedBranch = !!String(current.branch_name || "").trim() && current.merge_state !== "merged";
+    if (!keepsUnmergedBranch) clearCrossWiMergeDependenciesForWorkItem(id, releaseReason);
     invalidateSessionLanesForWorkItemInternal(id, releaseReason);
     // Startup reconciliation treats this event as queue state, not optional
     // telemetry. Persist it in the same transaction that clears merge_state
@@ -1455,12 +2122,16 @@ export function refreshWorkItemStatus(workItemId) {
     }
 
     // Push-offer gates are out-of-band deploy prompts — an open one must not
-    // drag a completed work item back to waiting_on_human. A database task
-    // held for the merge must likewise not keep the work item from merging.
+    // drag a completed work item back to waiting_on_human. Neither may a merge
+    // verification review, which only a completed work item opens. A database
+    // task held for the merge must likewise not keep the work item from merging.
+    // Work-item disposition gates decide a failed or merge-deferred item;
+    // they must not turn it into a waiting one either.
     const jobs = listJobsByWorkItem(workItemId)
       .filter((job) => !isShadowFanoutJob(job))
-      .filter((job) => !isPushOfferJob(job))
-      .filter((job) => !isPostMergeHeldDbJob(job));
+      .filter((job) => !isPushOfferJob(job) && !isMergeVerificationReviewJob(job))
+      .filter((job) => !isPostMergeHeldDbJob(job))
+      .filter((job) => !isWorkItemDispositionGateJob(job));
     if (jobs.length === 0) return;
     const completionJobs = jobs.filter((job) => !NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type));
     const stateJobs = completionJobs.length > 0 ? completionJobs : jobs;
@@ -1561,8 +2232,9 @@ export function refreshWorkItemStatuses(statusFilter = null) {
 export function completionBlockersForWorkItem(workItemId) {
   const jobs = listJobsByWorkItem(workItemId)
     .filter((job) => !isShadowFanoutJob(job))
-    .filter((job) => !isPushOfferJob(job))
+    .filter((job) => !isPushOfferJob(job) && !isMergeVerificationReviewJob(job))
     .filter((job) => !isPostMergeHeldDbJob(job))
+    .filter((job) => !isWorkItemDispositionGateJob(job))
     .filter((job) => !NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type));
   if (jobs.length === 0) return [];
 
@@ -2044,10 +2716,13 @@ export function cancelWorkItemJobs(workItemId) {
 // leases visible until their owner exits so worktree cleanup cannot race a
 // process that may still be writing. RunDisplayActions kills workers first and
 // then uses cancelWorkItemJobs() for the stronger interactive cancellation.
-function cancelInactiveWorkItemJobs(workItemId) {
+function cancelInactiveWorkItemJobs(workItemId, { preserveJobIds = [] } = {}) {
   const canceled = [];
+  const preserved = new Set(preserveJobIds.map(Number));
   for (const job of listJobsByWorkItem(workItemId)) {
     if (TERMINAL_JOB_STATUS_SET.has(job.status) || ACTIVE_LEASE_STATUS_SET.has(job.status)) continue;
+    // The gate whose answer is canceling the work item settles itself.
+    if (preserved.has(Number(job.id))) continue;
     if (forceUpdateJobStatus(job.id, "canceled", { expectedStatuses: [job.status] })) {
       canceled.push(job.id);
     }

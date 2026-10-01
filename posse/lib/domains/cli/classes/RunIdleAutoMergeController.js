@@ -5,13 +5,31 @@ export class RunIdleAutoMergeController {
     C,
     autoMergePendingReviewBlockers = false,
     autoMergeCompletedWorkItems = null,
+    isIterativeWorkItemActive = () => false,
   } = {}) {
     this.getDisplay = getDisplay;
     this.useTui = useTui;
     this.C = C;
     this.autoMergePendingReviewBlockers = autoMergePendingReviewBlockers;
     this.autoMergeCompletedWorkItems = autoMergeCompletedWorkItems;
+    this.isIterativeWorkItemActive = isIterativeWorkItemActive;
     this.promise = null;
+  }
+
+  /**
+   * Whether this run merges `workItem`, once complete, before the run loop
+   * ends: only this controller merges mid-run, and only with automatic merge
+   * on (`start` refuses otherwise); its candidates then skip an iterative
+   * work item that is still looping. A finalized iterative work item that
+   * auto-approves merges only at wrap-up when automatic merge is off, which
+   * is after the loop, so a work item waiting on it mid-run would wait
+   * forever (run 1250b red team 2, finding 7). The scheduler's work-item
+   * order uses this as its merge policy: a completed work item it returns
+   * false for is parked.
+   */
+  mergesDuringRun(workItem) {
+    if (!this.autoMergePendingReviewBlockers || typeof this.autoMergeCompletedWorkItems !== "function") return false;
+    return !this.isIterativeWorkItemActive(workItem);
   }
 
   start({

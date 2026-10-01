@@ -17,6 +17,18 @@ function isAssessmentDispositionQuestion(question) {
     || /\bindicate pass(?:\s+or\s+|\s*\/\s*)fail\b/.test(text);
 }
 
+function operatorDispositionReviewQuestion(verdict) {
+  if (verdict?._assessment_infrastructure_review !== true) {
+    if (verdict?._assessment_unsupported_fail_review === true) {
+      return "The assessor failed this work without an evidence-backed defect claim, so no automatic repair was dispatched. Should this work pass or fail?";
+    }
+    if (verdict?._assessment_sibling_boundary_review === true) {
+      return "The assessor failed this work only for paths owned by pending sibling tasks, so no automatic repair was dispatched. Should this work pass or fail?";
+    }
+  }
+  return "Automatic assessment could not establish sufficient confidence. Should this work pass or fail?";
+}
+
 export function handle(job, verdict, ctx) {
   const { emitLog: log, spawnedJobs, spawnFromAssessor, reasonBrief } = ctx;
 
@@ -31,8 +43,9 @@ export function handle(job, verdict, ctx) {
     ? jobPayload._human_clarifications
     : [];
   const visualAcceptanceReview = verdict?._assessment_visual_review === true;
+  const unsupportedClaimReview = verdict?._assessment_unsupported_claim_review === true;
   const asksForClarification = hasOperatorOnlyQuestion && priorClarifications.length === 0;
-  const asksForOperatorReview = visualAcceptanceReview || asksForClarification;
+  const asksForOperatorReview = visualAcceptanceReview || unsupportedClaimReview || asksForClarification;
   const retryReason = verdict.reasons?.[0] || "assessment could not reach a confident terminal verdict";
   const retryEligible = !asksForOperatorReview && !verdict?._disable_internal_retry;
   if (
@@ -47,13 +60,19 @@ export function handle(job, verdict, ctx) {
   }
 
   const confidenceReview = verdict?._assessment_confidence_review === true;
+  // An evidence-free assessor fail and a repeated sibling-boundary fail
+  // suppress automatic repair and retry, but the claim itself is a defect
+  // question the operator can answer. Failing them closed killed WI 167
+  // (job 2209) with intact commits and no gate.
+  const operatorDispositionReview = verdict?._assessment_unsupported_fail_review === true
+    || verdict?._assessment_sibling_boundary_review === true;
   // A retry-eligible review whose stronger-tier retry is no longer available
   // (assessor already at the top tier, or the retry budget is spent) still
   // needs a disposition. Failing it closed discarded correct work and
   // cancelled its dependents (WI 159 job 2084: a high-risk pass capped to
   // needs_review at the strong tier). Harness-owned reviews keep failing
   // closed: no operator answer can restore the assessor's evidence.
-  const exhaustedRetryReview = retryEligible && !harnessOwnedReview;
+  const exhaustedRetryReview = (retryEligible || operatorDispositionReview) && !harnessOwnedReview;
   if (!asksForOperatorReview && !confidenceReview && !exhaustedRetryReview) {
     const changed = typeof ctx.updateJobStatus === "function"
       ? ctx.updateJobStatus("failed")
@@ -85,7 +104,7 @@ export function handle(job, verdict, ctx) {
   const repeatsAnsweredClarification = hasOperatorOnlyQuestion && !asksForClarification;
   const questions = explicitHumanQuestions.length > 0 && !repeatsAnsweredClarification
     ? explicitHumanQuestions
-    : ["Automatic assessment could not establish sufficient confidence. Should this work pass or fail?"];
+    : [operatorDispositionReviewQuestion(verdict)];
   const humanJob = spawnFromAssessor("failed", "human_input", {
     work_item_id: job.work_item_id,
     title: `Review needed: ${job.title}`,

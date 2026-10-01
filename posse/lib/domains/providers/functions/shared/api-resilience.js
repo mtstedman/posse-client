@@ -3,6 +3,15 @@
 // Shared retry and circuit-breaker factories for API-backed providers.
 // Each provider keeps its own breaker state while reusing the same logic.
 
+import { PROVIDER_QUOTA_SCOPES } from "../../../../catalog/provider.js";
+import {
+  describeProviderQuota,
+  parseProviderQuotaReset,
+  PROVIDER_QUOTA_MAX_LONG_PAUSE_SEC,
+  PROVIDER_WINDOW_LIMIT_REACHED_RE,
+  providerQuotaResetWaitSec,
+} from "./quota-reset.js";
+
 export const MAX_RETRY_AFTER_SECONDS = 12 * 60 * 60;
 export const MAX_RETRY_AFTER_COOLDOWN_MS = MAX_RETRY_AFTER_SECONDS * 1000;
 export const LONG_RETRY_AFTER_WARNING_SECONDS = 10 * 60;
@@ -17,13 +26,70 @@ function errorMessage(err) {
   return String(err?.message || err || "");
 }
 
+// Facts carried on a provider error from the moment it is first observed.
+// Attempt handling can classify the same error long afterwards (a runtime
+// fallback runs in between), so the provider that produced it and its parsed
+// quota reset travel with it instead of being re-derived from the provider
+// the job was assigned and the wall clock at handling time. The properties
+// are non-enumerable so they stay out of serialized error payloads.
+const ERROR_PROVIDER_KEY = "posseErrorProvider";
+const ERROR_OBSERVED_AT_KEY = "posseErrorObservedAtMs";
+const ERROR_QUOTA_RESET_KEY = "posseErrorQuotaReset";
+
+function setHiddenErrorFact(err, key, value) {
+  try {
+    Object.defineProperty(err, key, { value, configurable: true, enumerable: false, writable: true });
+  } catch {
+    // A frozen or exotic error keeps working without the carried fact.
+  }
+}
+
+/**
+ * Stamp a provider error with the provider that produced it and when it was
+ * first observed. The first stamp wins, so a rethrown error keeps its origin.
+ * @returns {*} the same error.
+ */
+export function markProviderErrorObserved(err, providerName = null, nowMs = Date.now()) {
+  if (!err || typeof err !== "object") return err;
+  if (providerName && !err[ERROR_PROVIDER_KEY]) setHiddenErrorFact(err, ERROR_PROVIDER_KEY, String(providerName));
+  if (!Number.isFinite(err[ERROR_OBSERVED_AT_KEY])) setHiddenErrorFact(err, ERROR_OBSERVED_AT_KEY, nowMs);
+  return err;
+}
+
+/** The provider that produced a stamped error, or null when unknown. */
+export function providerErrorSource(err) {
+  const value = err && typeof err === "object" ? err[ERROR_PROVIDER_KEY] : null;
+  return value ? String(value) : null;
+}
+
+// Parse a quota reset once, as of the error's first observation, and reuse
+// it: re-reading "resets 5:40pm" at 17:46 would otherwise land on tomorrow.
+function observedProviderQuotaReset(err, msg, nowMs) {
+  const carried = err && typeof err === "object" ? err[ERROR_QUOTA_RESET_KEY] : null;
+  if (carried && carried.text === msg) return carried.reset;
+  markProviderErrorObserved(err, null, nowMs);
+  const observedAtMs = Number.isFinite(err?.[ERROR_OBSERVED_AT_KEY]) ? err[ERROR_OBSERVED_AT_KEY] : nowMs;
+  const reset = parseProviderQuotaReset(msg, { nowMs: observedAtMs });
+  if (err && typeof err === "object") setHiddenErrorFact(err, ERROR_QUOTA_RESET_KEY, { text: msg, reset });
+  return reset;
+}
+
 function errorStatus(err) {
   return Number(err?.status || err?.statusCode || err?.response?.status || 0) || null;
 }
 
+// Subscription-quota wordings: Codex/Claude "usage limit", Claude "session
+// limit", "You've hit your weekly limit", and Claude's newer "5-hour limit
+// reached" / "Weekly limit reached".
+const USAGE_QUOTA_TEXT_RE = /usage limit|usage cap|out of usage|out of.*usage|over usage|usage exhausted|usage.*reset|quota exceeded|credit balance is too low|session limit|(?:hit|reached) your.*limit/i;
+
+function isUsageQuotaText(msg) {
+  return USAGE_QUOTA_TEXT_RE.test(msg) || PROVIDER_WINDOW_LIMIT_REACHED_RE.test(msg);
+}
+
 function hasRateLimitTextSignal(msg, status = null) {
   if (status === 429) return true;
-  return /rate.?limit|429|too many requests|usage limit|usage cap|out of usage|out of.*usage|over usage|usage exhausted|usage.*reset|quota exceeded|credit balance is too low|session limit|(?:hit|reached) your.*limit/i.test(msg);
+  return /rate.?limit|429|too many requests/i.test(msg) || isUsageQuotaText(msg);
 }
 
 export function retryAfterHeader(err) {
@@ -64,42 +130,6 @@ function parseRetryDurationSec(msg, { allowBroad = false } = {}) {
   return parseDurationPartsSec(durationMatch[1]);
 }
 
-function parseRetryClockSec(msg, now = new Date(Date.now())) {
-  if (!msg) return null;
-  const clockMatch = msg.match(
-    /(?:try again|retry|available again|reset(?:s)?(?: your usage)?|usage(?: limit)? reset(?:s)?)\D+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(utc|gmt|z|est|edt|cst|cdt|mst|mdt|pst|pdt)?\b/i
-  );
-  if (!clockMatch) return null;
-  let hour = parseInt(clockMatch[1], 10);
-  const minute = parseInt(clockMatch[2] || "0", 10);
-  const meridiem = clockMatch[3] ? clockMatch[3].toLowerCase() : null;
-  const zone = clockMatch[4] ? clockMatch[4].toLowerCase() : null;
-  if (!zone) return null;
-  if (meridiem === "pm" && hour < 12) hour += 12;
-  if (meridiem === "am" && hour === 12) hour = 0;
-  if (hour > 23 || minute > 59) return null;
-  const zoneOffsets = {
-    utc: 0, gmt: 0, z: 0,
-    est: -5 * 60, edt: -4 * 60,
-    cst: -6 * 60, cdt: -5 * 60,
-    mst: -7 * 60, mdt: -6 * 60,
-    pst: -8 * 60, pdt: -7 * 60,
-  };
-  const offsetMin = zoneOffsets[zone];
-  if (!Number.isFinite(offsetMin)) return null;
-  let targetMs = Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate(),
-    hour,
-    minute,
-    0,
-    0,
-  ) - (offsetMin * 60 * 1000);
-  if (targetMs <= now.getTime()) targetMs += 24 * 60 * 60 * 1000;
-  return clampRetryAfterSeconds((targetMs - now.getTime()) / 1000, 30);
-}
-
 export function classifyProviderError(err, {
   defaultBackoffSec = 15,
   rateLimitBackoffSec = 30,
@@ -137,13 +167,36 @@ export function classifyProviderError(err, {
     return { backoffSec: retryDurationSec, isRateLimit: true, source: "retry-after" };
   }
 
-  const retryClockSec = rateLimitTextSignal ? parseRetryClockSec(msg) : null;
-  if (retryClockSec) {
-    return { backoffSec: retryClockSec, isRateLimit: true, source: "usage_reset" };
+  // Subscription quotas name a wall-clock reset ("resets 5:40pm (UTC)",
+  // "try again at 3:45 PM"). The `quota` descriptor carries its scope and
+  // parsed reset so callers can pause until then instead of failing.
+  const nowMs = Date.now();
+  const quotaReset = rateLimitTextSignal ? observedProviderQuotaReset(err, msg, nowMs) : null;
+  if (quotaReset) {
+    const quota = describeProviderQuota(msg, { reset: quotaReset });
+    // Only an account-wide window blocks the whole provider until its reset;
+    // a single model's cap keeps the short usage cooldown so other models on
+    // the provider stay routable. A reset that already fired gets a short
+    // cooldown, a dateless one is clamped to the session maximum, and a dated
+    // weekly reset pauses the provider until then (bounded), not for 12h at
+    // a time.
+    return {
+      backoffSec: quota.scope === PROVIDER_QUOTA_SCOPES.ACCOUNT
+        ? clampRetryAfterSeconds(providerQuotaResetWaitSec(quota, nowMs), 30, PROVIDER_QUOTA_MAX_LONG_PAUSE_SEC)
+        : 15 * 60,
+      isRateLimit: true,
+      source: "usage_reset",
+      quota,
+    };
   }
 
-  if (/usage limit|usage cap|out of usage|out of.*usage|over usage|usage exhausted|usage.*reset|quota exceeded|credit balance is too low|session limit|(?:hit|reached) your.*limit/i.test(msg)) {
-    return { backoffSec: 15 * 60, isRateLimit: true, source: "usage_limit" };
+  if (isUsageQuotaText(msg)) {
+    return {
+      backoffSec: 15 * 60,
+      isRateLimit: true,
+      source: "usage_limit",
+      quota: describeProviderQuota(msg, { reset: null }),
+    };
   }
 
   if (status === 429 || /rate.?limit|429|too many requests/i.test(msg)) {

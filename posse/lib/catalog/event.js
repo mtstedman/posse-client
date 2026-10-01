@@ -266,12 +266,18 @@ export const EVENT_TYPES = Object.freeze({
   JOB_POST_MERGE_DB_GATE_OPENED: "job.post_merge_db_gate_opened",
   JOB_POST_MERGE_DB_RELEASED: "job.post_merge_db_released",
   JOB_POST_MERGE_DB_SKIPPED: "job.post_merge_db_skipped",
+  // A held database task is canceled with its failed or canceled work item
+  // (nothing will merge to release it) and held again when the work item is
+  // recovered through its failure disposition gate.
+  JOB_POST_MERGE_DB_CANCELED_WITH_WORK_ITEM: "job.post_merge_db_canceled_with_work_item",
+  JOB_POST_MERGE_DB_REHELD: "job.post_merge_db_reheld",
   JOB_PROMOTE_COMPLETE: "job.promote_complete",
   JOB_PROMOTE_PARTIAL: "job.promote_partial",
   JOB_PARTIAL_DELIVERABLE_ACCEPTED: "job.partial_deliverable_accepted",
   JOB_PROMOTE_CONFLICT_PREVIEW: "job.promote_conflict_preview",
   JOB_PROMOTE_CROSS_WI_SOURCE: "job.promote_cross_wi_source",
   JOB_PROVIDER_CIRCUIT_OPEN: "job.provider_circuit_open",
+  JOB_PROVIDER_REROUTED: "job.provider_rerouted",
   JOB_RECOVERY_CAP_REACHED: "job.recovery_cap_reached",
   JOB_PROVIDER_ERROR: "job.provider_error",
   JOB_RATE_LIMITED: "job.rate_limited",
@@ -370,6 +376,7 @@ export const EVENT_TYPES = Object.freeze({
   SCHEDULER_LOOP_ERROR: "scheduler.loop_error",
   SCHEDULER_NO_PROGRESS: "scheduler.no_progress",
   SCHEDULER_RUN_LOOP_NOT_BOOTED: "scheduler.run_loop_not_booted",
+  SCHEDULER_RUN_NEEDS_ACTION: "scheduler.run_needs_action",
   SCHEDULER_SCOPE_WOULD_HAVE_CONFLICTED: "scheduler.scope_would_have_conflicted",
   SCHEDULER_STARTED: "scheduler.started",
   SCHEDULER_STOP_REQUESTED: "scheduler.stop_requested",
@@ -437,6 +444,10 @@ export const EVENT_TYPES = Object.freeze({
   WORK_ITEM_CROSS_WI_MERGE_DEPENDENCY_REMOVED: "work_item.cross_wi_merge_dependency_removed",
   WORK_ITEM_CROSS_WI_MERGE_DEPENDENCY_STALE: "work_item.cross_wi_merge_dependency_stale",
   WORK_ITEM_DELETED: "work_item.deleted",
+  // Work-item gates for a failed work item (retry/accept/abandon) and for a
+  // merge deferred on a failed or canceled upstream (wait/rebuild/abandon).
+  WORK_ITEM_DISPOSITION_GATE_OPENED: "work_item.disposition_gate_opened",
+  WORK_ITEM_DISPOSITION_RESOLVED: "work_item.disposition_resolved",
   WORK_ITEM_ESCALATION: "work_item.escalation",
   WORK_ITEM_ITERATION_FINISHED: "work_item.iteration_finished",
   WORK_ITEM_ITERATION_PASS_MERGED: "work_item.iteration_pass_merged",
@@ -445,6 +456,7 @@ export const EVENT_TYPES = Object.freeze({
   WORK_ITEM_ITERATION_SPAWNED: "work_item.iteration_spawned",
   WORK_ITEM_MERGE_DEFERRED: "work_item.merge_deferred",
   WORK_ITEM_MERGE_AUTHORIZED: "work_item.merge_authorized",
+  WORK_ITEM_MERGE_REVIEW_REQUIRED: "work_item.merge_review_required",
   WORK_ITEM_MERGE_CANDIDATE_INVALIDATED: "work_item.merge_candidate_invalidated",
   WORK_ITEM_MERGE_FAILED: "work_item.merge_failed",
   WORK_ITEM_MERGED: "work_item.merged",

@@ -2127,6 +2127,10 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       suggestions: [],
       raw: normalizedVerdict.raw,
       _disable_internal_retry: true,
+      // Another assessment cannot fix the boundary, but whether this task's
+      // own work passes is a question the operator can answer: it opens the
+      // assessment review gate instead of failing the work item closed.
+      _assessment_sibling_boundary_review: true,
     };
   }
   if (normalizedVerdict.verdict === "fail" && trustedAssessorEvidenceChars === 0) {
@@ -2151,6 +2155,11 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       ],
       spawn_jobs: [],
       _disable_internal_retry: true,
+      // The unevidenced defect claim is a question the operator can answer
+      // (WI 167 job 2209): route it to the assessment review gate. Failing it
+      // closed killed the work item with three intact commits and no gate.
+      _assessment_unsupported_fail_review: true,
+      _assessment_unsupported_claim_review: true,
     };
   }
   return normalizedVerdict;

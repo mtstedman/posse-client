@@ -116,6 +116,17 @@ import {
   providerForAffinityRoute,
 } from "../../../../shared/policies/functions/provider-affinity.js";
 import { loadAssessmentSource } from "./assessment-source.js";
+import {
+  applyWorkItemDispositionAnswer,
+  emitWorkItemDispositionResult,
+  prepareWorkItemDispositionAnswer,
+} from "./work-item-disposition.js";
+import { isWorkItemDispositionPayload } from "../../../queue/functions/work-item-dispositions.js";
+import {
+  applyMergeVerificationReviewAnswer,
+  isMergeVerificationReviewPayload,
+  prepareMergeVerificationReviewAnswer,
+} from "./merge-verification-answer.js";
 
 // A blocked-recovery gate's context carries the block reason and the agent's
 // completion notes. A replan chosen from the gate must see them, not only the
@@ -470,6 +481,42 @@ export async function runHumanInputJob(worker, job, {
           assessmentSource.reason,
           "Restore the matching response/source before retrying assessment; this gate remains open.",
         ].join(" ");
+        completeAttempt(attempt.attempt.id, {
+          status: "interrupted",
+          duration_ms: Date.now() - startTime,
+          error_text: message,
+        });
+        worker.emit(job.id, `${C.yellow}[human] ${message}${C.reset}`);
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
+        refreshAndExtractInsights(job.work_item_id);
+        worker._cleanupWorktreeIfDone(job.work_item_id);
+        return;
+      }
+    }
+    if (isWorkItemDispositionPayload(payload)) {
+      // Validation and branch deletion precede the claim, so an answer that
+      // cannot apply yet leaves the gate open with the reason.
+      const prepared = await prepareWorkItemDispositionAnswer(worker, activeJob, payload, selectedAction);
+      if (!prepared.ok) {
+        const message = `${String(prepared.message).replace(/[.\s]+$/, "")}; this gate remains open.`;
+        completeAttempt(attempt.attempt.id, {
+          status: "interrupted",
+          duration_ms: Date.now() - startTime,
+          error_text: message,
+        });
+        worker.emit(job.id, `${C.yellow}[human] ${message}${C.reset}`);
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
+        refreshAndExtractInsights(job.work_item_id);
+        worker._cleanupWorktreeIfDone(job.work_item_id);
+        return;
+      }
+    }
+    if (isMergeVerificationReviewPayload(payload)) {
+      // A fail sends the work item back; one that cannot apply yet (active
+      // work, a merge in progress) leaves the gate open with the reason.
+      const prepared = prepareMergeVerificationReviewAnswer(activeJob, payload, selectedAction);
+      if (!prepared.ok) {
+        const message = `${String(prepared.message).replace(/[.\s]+$/, "")}; this gate remains open.`;
         completeAttempt(attempt.attempt.id, {
           status: "interrupted",
           duration_ms: Date.now() - startTime,
@@ -846,6 +893,56 @@ export async function runHumanInputJob(worker, job, {
         finalHumanStatus = "failed";
         worker.emit(job.id, `${C.yellow}[human] Artifact-routing review answer was not actionable; expected acknowledge${C.reset}`);
       }
+    }
+
+    // Work-item disposition gates have no original job: the answer acts on
+    // the failed or merge-deferred work item itself.
+    if (isWorkItemDispositionPayload(payload)) {
+      handledReviewDecision = true;
+      const applied = applyWorkItemDispositionAnswer({
+        job,
+        payload,
+        action: selectedAction,
+        answer: resolutionAnswer,
+        actorType: resolutionActorType,
+        actorLabel: resolutionActorLabel,
+      });
+      if (!applied.ok && applied.keepGateOpen) {
+        // The work item still waits on this decision, and prepare may have
+        // deleted its branch already: retiring the gate would leave it with
+        // no gate at all. Reopen it for another answer.
+        const message = `${String(applied.message).replace(/[.\s]+$/, "")}; this gate remains open.`;
+        worker.emit(job.id, `${C.yellow}[human] ${message}${C.reset}`);
+        completeAttempt(attempt.attempt.id, {
+          status: "interrupted",
+          duration_ms: Date.now() - startTime,
+          error_text: message,
+        });
+        reopenHumanGateResolution({ gateJobId: job.id, leaseToken, error: message });
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
+        leaseReleased = true;
+        refreshAndExtractInsights(job.work_item_id);
+        return;
+      }
+      emitWorkItemDispositionResult(worker, job, applied);
+      if (!applied.ok) finalHumanStatus = "failed";
+    }
+
+    // Merge verification review: pass approves the next automatic merge;
+    // fail sends the work item back with the operator's feedback.
+    if (isMergeVerificationReviewPayload(payload)) {
+      handledReviewDecision = true;
+      const applied = applyMergeVerificationReviewAnswer({
+        job,
+        payload,
+        action: selectedAction,
+        answer: resolutionAnswer,
+        metadata: resolutionMetadata,
+        actorType: resolutionActorType,
+        actorLabel: resolutionActorLabel,
+      });
+      worker.emit(job.id, `${applied.ok ? C.cyan : C.yellow}[human] ${applied.message}${C.reset}`);
+      if (!applied.ok) finalHumanStatus = "failed";
     }
 
     // Post-merge database task: the work item merged while this db job was

@@ -109,7 +109,7 @@ export class DeveloperRole extends BaseRole {
     const currentAttemptNumber = previousAttempts.length + 1;
     const blockedRetry = blockedRetryContext(payload, previousAttempts.length > 0
       ? (job.last_error || previousAttempts[previousAttempts.length - 1].error_text || null)
-      : null);
+      : null, { provider: job.provider || job._executionProvider || null });
     const lastError = blockedRetry.lastError;
 
     const packet = buildHandoffPacket(job, {

@@ -1,6 +1,9 @@
 import { createHash } from "crypto";
 import {
+  MERGE_VERIFICATION_REVIEW_TYPE,
+  CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
   POST_MERGE_DB_TASK_REVIEW_TYPE,
+  WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
   canonicalHumanGateAction,
   humanGateContractForPayload,
   validateHumanGateActionabilityContract,
@@ -14,7 +17,11 @@ import { flushEventsNow } from "./events.js";
 import { jobHasLiveLeaseAt } from "./lease-state.js";
 
 const ACTIVE_GATE_STATES = Object.freeze(["open", "resolving"]);
-const WORK_ITEM_SINGLETON_GATE_KINDS = new Set(["oneshot_scope_selection"]);
+const WORK_ITEM_SINGLETON_GATE_KINDS = new Set([
+  "oneshot_scope_selection",
+  WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
+  CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
+]);
 let _humanGateReconcileHook = null;
 let _gateCanceledHook = null;
 export function registerGateCanceledHook(fn) { _gateCanceledHook = fn; }
@@ -738,10 +745,15 @@ export function reconcileHumanGates() {
     // stale gate before registration/repair can revive it. Push offers are the
     // deliberate exception: they attach to a completed WI only as a durable
     // publication anchor and remain independently answerable. So are
-    // post-merge database gates, which only a merged (complete) WI opens.
+    // post-merge database gates, which only a merged (complete) WI opens,
+    // merge verification reviews, which hold a complete WI's automatic merge,
+    // and the work-item disposition gates while their WI is still in the
+    // state they decide: a failed WI's recovery gate, and an unmerged
+    // complete WI's gate for a merge deferred on a failed upstream.
     const terminalWorkItemGates = db.prepare(`
       SELECT j.id, j.work_item_id, j.job_type, j.status, j.payload_json,
-             hg.gate_state
+             hg.gate_state, wi.status AS work_item_status,
+             wi.merge_state AS work_item_merge_state
       FROM jobs j
       JOIN work_items wi ON wi.id = j.work_item_id
       LEFT JOIN human_gates hg ON hg.gate_job_id = j.id
@@ -753,8 +765,18 @@ export function reconcileHumanGates() {
         )
     `).all().filter((job) => {
       const payload = asPayload(job.payload_json);
+      if (
+        payload.review_type === WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE
+        && job.work_item_status === "failed"
+      ) return false;
+      if (
+        payload.review_type === CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE
+        && job.work_item_status === "complete"
+        && job.work_item_merge_state !== "merged"
+      ) return false;
       return payload.subtype !== "push_offer"
-        && payload.review_type !== POST_MERGE_DB_TASK_REVIEW_TYPE;
+        && payload.review_type !== POST_MERGE_DB_TASK_REVIEW_TYPE
+        && payload.review_type !== MERGE_VERIFICATION_REVIEW_TYPE;
     });
     for (const job of terminalWorkItemGates) {
       if (retireGateJob(job.id, "Owning work item is terminal")) retired += 1;

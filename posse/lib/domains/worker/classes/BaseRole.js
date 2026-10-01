@@ -123,10 +123,20 @@ export class BaseRole {
         const { output = "", stats = {} } = ctx.providerResult;
         return await this.processOutput(output, stats, job, ctx);
       }
+      const providerContexts = new Map();
       const buildPromptForProvider = async (providerName) => {
         const providerCtx = providerPromptContext(ctx, providerName, modelProviderName);
         const contract = await timeRolePhase(role, "buildContract", job, () => this.buildContract({ providerName, job, ctx: providerCtx }));
-        return await timeRolePhase(role, "composePrompt", job, () => this.composePrompt({ contextText, contract, job, ctx: providerCtx }));
+        const prompt = await timeRolePhase(role, "composePrompt", job, () => this.composePrompt({ contextText, contract, job, ctx: providerCtx }));
+        providerContexts.set(normalizedProviderName(providerName), providerCtx);
+        return prompt;
+      };
+      const buildFallbackOptionsForProvider = ({ providerName }) => {
+        const providerCtx = providerContexts.get(normalizedProviderName(providerName));
+        if (!providerCtx) {
+          throw new Error(`Fallback prompt options requested before composing the ${providerName || "unknown"} provider prompt`);
+        }
+        return this.buildOpts(job, providerCtx);
       };
       let prompt = null;
       const dispatcher = this.context?.agentDispatcher;
@@ -183,6 +193,12 @@ export class BaseRole {
           {
             ...providerOpts,
             buildFallbackPrompt: ({ providerName }) => buildPromptForProvider(providerName),
+            // Prompt composition may replace the packet's provider-bound
+            // remote issuance (notably when a pinned-model packet is projected
+            // for another provider). Carry the options derived from that exact
+            // composed packet into the fallback attempt so the Job attachment
+            // and rebound MCP gate share one provider identity.
+            buildFallbackOptions: buildFallbackOptionsForProvider,
           },
           {
             ...this.buildMeta(job, ctx),

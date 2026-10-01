@@ -6,17 +6,20 @@ import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole } from "..
 import fs from "fs";
 import path from "path";
 import { PLANNER_ALLOWED_JOB_TYPES } from "../../../catalog/job.js";
-import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { DB_TASK_PRE_MERGE_POLICIES, SETTING_KEYS } from "../../../catalog/settings.js";
 import { getIntSetting } from "../../queue/functions/index.js";
 import {
   addDependency,
   applyDelegation,
+  compiledRewiresPayload,
   completeJobExecutedByPlanner,
   getDependents,
   getJob,
   getSetting,
   getWorkItem,
+  isDbTaskJob,
   logEvent,
+  normalizeDbTaskPreMergePolicy,
   rewireDependency,
   retireWaitingLanePlanning,
   setJobError,
@@ -115,7 +118,7 @@ import {
   parseUnderScopedBroadGateMode,
 } from "./scope-gates.js";
 import { reconcilePlannerFileKinds } from "./scope-reconciliation.js";
-import { rewriteDependenciesAfterSplit } from "./dependency-rewrite.js";
+import { rewriteDependenciesAfterSplit, rewriteDependenciesAroundPostMergeDbTasks } from "./dependency-rewrite.js";
 import { cancelSupersededPlanChildren } from "./plan-cleanup.js";
 import { deriveAndRecordAssessmentScopes } from "./assessment-scopes.js";
 import {
@@ -125,7 +128,7 @@ import {
   routePromoteTaskByOutputDir,
   splitTaskByCreateFileKind,
 } from "./task-splitting.js";
-import { ASSESSABLE_JOB_TYPES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { ASSESSABLE_JOB_TYPES, TERMINAL_JOB_STATUSES, WORKTREE_JOB_TYPES } from "../../../catalog/job.js";
 import { normPath } from "../../../shared/scope/functions/path.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { promoteWaitingLaneOnDevDemand } from "../../research/functions/waiting-lane-demand.js";
@@ -824,6 +827,83 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             if (depIdx > splitIndex) return [depIdx + offset];
             return [depIdx];
           }))];
+        }
+      };
+      // A database task that applies files this plan commits is held until
+      // the work item merges, and the hold cancels whatever waits on it (live
+      // 2026-10-01, WI 164: the lobby API and its UI waited on "apply
+      // migration 015" and the invite feature was dropped). Keep such a task
+      // terminal: other tasks wait on its upstream (the migration-file job)
+      // and work from the committed file. Skipped when the repository runs
+      // database tasks before the merge (db_task_pre_merge_policy=run).
+      // Each database task records the dependents moved off it: the hold
+      // carries them to the post-merge gate (merged code that expects the
+      // change), and a task that runs before the merge after all gives the
+      // ones not yet started their wait on it back (db-task-merge-hold.js).
+      const routeDependentsAroundPostMergeDbTasks = () => {
+        const policy = normalizeDbTaskPreMergePolicy(
+          getSetting(SETTING_KEYS.DB_TASK_PRE_MERGE_POLICY, { projectDir: worker.projectDir }),
+        );
+        if (policy === DB_TASK_PRE_MERGE_POLICIES.RUN) return;
+        const compiledJob = (index) => {
+          if (droppedTaskIndexes.has(index) || !jobMap.has(index)) return null;
+          const job = getJob(jobMap.get(index));
+          return job && allCreatedJobIds.has(job.id) ? job : null;
+        };
+        const rewrites = rewriteDependenciesAroundPostMergeDbTasks(
+          pendingDependencyLinks.filter((link) => allCreatedJobIds.has(link.jobId)),
+          {
+            isDbTaskIndex: (index) => isDbTaskJob(compiledJob(index)),
+            writesRepoFilesIndex: (index) => {
+              const job = compiledJob(index);
+              return !!job && WORKTREE_JOB_TYPES.has(job.job_type) && !isDbTaskJob(job);
+            },
+          },
+        );
+        const rewiresByDbJob = new Map();
+        for (const rewrite of rewrites) {
+          const dependent = getJob(rewrite.jobId);
+          const finalDependsOn = pendingDependencyLinks.find((link) => link.jobId === rewrite.jobId)?.dependsOnIndexes || [];
+          const toJobIds = finalDependsOn.map((depIdx) => jobMap.get(depIdx)).filter((jobId) => jobId != null).map(Number);
+          for (const depIdx of rewrite.removed) {
+            const dbJobId = jobMap.get(depIdx);
+            if (dbJobId == null) continue;
+            if (!rewiresByDbJob.has(dbJobId)) rewiresByDbJob.set(dbJobId, []);
+            rewiresByDbJob.get(dbJobId).push({
+              job_id: Number(rewrite.jobId),
+              title: String(dependent?.title || "").slice(0, 200),
+              job_type: dependent?.job_type || null,
+              from_job_id: Number(dbJobId),
+              to_job_ids: toJobIds,
+            });
+          }
+        }
+        for (const [dbJobId, entries] of rewiresByDbJob) {
+          const dbJob = getJob(dbJobId);
+          if (dbJob) updateJobPayload(dbJob.id, JSON.stringify(compiledRewiresPayload(dbJob, entries)));
+        }
+        for (const rewrite of rewrites) {
+          const dbJobIds = rewrite.removed.map((depIdx) => jobMap.get(depIdx));
+          const upstreamLabel = rewrite.added.length > 0 ? plannerTaskLabels(rewrite.added) : "its other dependencies";
+          const message = `Task ${plannerTaskLabel(rewrite.taskIndex)} no longer waits on post-merge database task(s) ${plannerTaskLabels(rewrite.removed)}; it depends on ${upstreamLabel} and works from the committed files, because the database task runs only after the work item merges`;
+          worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: ${message}`);
+          logEvent({
+            work_item_id: planJob.work_item_id,
+            job_id: rewrite.jobId,
+            event_type: EVENT_TYPES.JOB_DEPENDENCY_REWIRED,
+            actor_type: EVENT_ACTORS.SYSTEM,
+            message,
+            event_json: JSON.stringify({
+              reason: "post_merge_db_task",
+              source: "plan_compile",
+              plan_job_id: planJob.id,
+              task_index: rewrite.taskIndex,
+              db_job_ids: dbJobIds,
+              removed_dependency_indexes: rewrite.removed,
+              added_dependency_indexes: rewrite.added,
+              replacement_job_ids: rewrite.added.map((depIdx) => jobMap.get(depIdx) ?? null),
+            }),
+          });
         }
       };
       const wirePlannerDependencies = () => {
@@ -2415,6 +2495,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
 
       // Finish the hard graph before publishing demand, scopes or delegation.
       // A rejected edge invalidates its consumer and every transitive consumer.
+      routeDependentsAroundPostMergeDbTasks();
       wirePlannerDependencies();
       propagateDroppedPlannerDependencies();
 

@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { Worker } from "../../worker/classes/Worker.js";
 import { runHumanInputJob } from "../../worker/functions/execution/human-input-job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { getHumanGate, getJob } from "../../queue/functions/index.js";
+import { getHumanGate, getJob, getLatestAttempt } from "../../queue/functions/index.js";
 import { now } from "../../queue/functions/common.js";
 import { jobHasLiveLeaseAt } from "../../queue/functions/lease-state.js";
 import {
@@ -297,9 +297,16 @@ export async function answerHumanInput(jobId, args = {}, {
       : status === "failed" || status === "dead_letter"
         ? "resolution_failed"
         : "answer_not_applied";
+    // A gate that kept itself open records why on the interrupted attempt
+    // (e.g. a recovery gate refusing "accept" for an execution failure).
+    const latestAttempt = reason === "answer_not_applied" ? getLatestAttempt(id) : null;
+    const message = latestAttempt?.status === "interrupted" && latestAttempt.error_text
+      ? String(latestAttempt.error_text).slice(0, 1000)
+      : null;
     return {
       ok: false,
       reason,
+      ...(message ? { message } : {}),
       job_id: id,
       status,
       gate_state: freshContract?.gate_state || "unknown",

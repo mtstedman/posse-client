@@ -50,7 +50,7 @@ import {
   sessionLeaseTtlSec,
 } from "../../queue/functions/index.js";
 
-import { getProvider, getProviderName, getAvailableProviders, isProviderReady, selectProviderName, tierModelName } from "../../providers/functions/provider.js";
+import { getProvider, getProviderName, getAvailableProviders, getProviderRateLimitState, isProviderReady, selectProviderName, tierModelName } from "../../providers/functions/provider.js";
 import { workerRoleForJobType } from "../../providers/functions/roles.js";
 import { Job } from "../../queue/classes/job/Job.js";
 import { AssessmentSession } from "../../assessment/classes/AssessmentSession.js";
@@ -92,6 +92,7 @@ import {
 } from "../functions/helpers/assessment-shared.js";
 import { refreshAndExtractInsights as refreshAndExtractInsightsFromModule } from "../functions/helpers/insights.js";
 import { isTransientMcpInfraBlock, MAX_MCP_INFRA_BLOCK_RETRIES, MCP_INFRA_BLOCK_BACKOFF_MS } from "../functions/helpers/block-reason.js";
+import { isLongProviderPause } from "../functions/helpers/provider-quota-pause.js";
 import {
   gitCommitAll as gitCommitAllFromModule,
   gitCommitAllAsync as gitCommitAllAsyncFromModule,
@@ -609,10 +610,41 @@ export class Worker {
     for (const candidate of pool) {
       if (!candidate || candidate === currentProvider) continue;
       if (this._isProviderCircuitOpen(candidate)) continue;
+      // A provider paused for a quota or rate limit is not a healthy reroute.
+      try {
+        if (getProviderRateLimitState(candidate)?.blocked) continue;
+      } catch {
+        // Providers without pause state stay eligible.
+      }
       if (!isProviderReady(candidate).ready) continue;
       return candidate;
     }
     return null;
+  }
+
+  // The pool provider (other than the current one) that is healthy apart
+  // from a quota or rate-limit pause, choosing the soonest to resume. Pauses
+  // longer than a quota wait (a weekly limit) do not qualify.
+  // @returns {{ provider: string, retryInSec: number } | null}
+  _selectPausedProviderFromPool(pool = [], currentProvider = null) {
+    if (!Array.isArray(pool) || pool.length === 0) return null;
+    let soonest = null;
+    for (const candidate of pool) {
+      if (!candidate || candidate === currentProvider) continue;
+      if (this._isProviderCircuitOpen(candidate)) continue;
+      let retryInSec;
+      try {
+        const state = getProviderRateLimitState(candidate);
+        if (!state?.blocked) continue;
+        retryInSec = Math.max(0, Number(state.retryInSec) || 0);
+      } catch {
+        continue;
+      }
+      if (isLongProviderPause(retryInSec)) continue;
+      if (!isProviderReady(candidate).ready) continue;
+      if (!soonest || retryInSec < soonest.retryInSec) soonest = { provider: candidate, retryInSec };
+    }
+    return soonest;
   }
 
   _registerSessionRecycleResult(result = {}) {

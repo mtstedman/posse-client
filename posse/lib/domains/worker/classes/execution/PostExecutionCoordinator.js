@@ -17,6 +17,7 @@ import {
   setJobResult,
   storeArtifact,
   updateJobPayload,
+  updateJobProvider,
 } from "../../../queue/functions/index.js";
 import { parseFileRequest, splitFileRequestsByRisk } from "../../../handoff/functions/index.js";
 import { materializedPathsForJob } from "../../../handoff/functions/helpers/file-materialization.js";
@@ -69,11 +70,14 @@ import {
 } from "../../functions/helpers/no-write-retry.js";
 import {
   AGENT_BLOCKED_ERROR_PREFIX,
+  BLOCKED_PROVIDER_PAYLOAD_KEY,
   isPermanentProviderRuntimeBlock,
+  isProviderSandboxMisreadBlock,
   isTransientMcpInfraBlock,
   MAX_MCP_INFRA_BLOCK_RETRIES,
   MCP_INFRA_BLOCK_BACKOFF_MS,
 } from "../../functions/helpers/block-reason.js";
+import { providerQuotaResumeJitterSec } from "../../functions/helpers/provider-quota-pause.js";
 import {
   spawnDeadLetterRecoveryForDependents as spawnDeadLetterRecoveryForDependentsFromModule,
 } from "../../functions/helpers/dead-letter.js";
@@ -175,6 +179,148 @@ function parkBlockedRecoveryGate(worker, job, leaseToken, attempt, {
     }
     return true;
   });
+}
+
+// Pick another ready provider from the attempt's role pool for a provider that
+// keeps misreading its own sandbox notice. An operator's retry:<provider>
+// choice pins the pool to one provider, so it never reroutes. When the only
+// alternatives are paused for a quota or rate limit that resets within the
+// pause window, move to the soonest one and wait for its reset instead of
+// dead-lettering.
+// @returns {{ provider: string, waitSec: number } | null}
+function sandboxMisreadFallbackProvider(worker, job, fromProvider) {
+  if (job._explicitRecoveryProvider) return null;
+  const pool = Array.isArray(job._allowedProviders)
+    ? [...new Set(job._allowedProviders.filter(Boolean))]
+    : [];
+  if (!fromProvider || pool.length < 2) return null;
+  const healthy = worker._selectHealthyProviderFromPool(pool, fromProvider);
+  if (healthy) return { provider: healthy, waitSec: 0 };
+  const paused = typeof worker._selectPausedProviderFromPool === "function"
+    ? worker._selectPausedProviderFromPool(pool, fromProvider)
+    : null;
+  return paused ? { provider: paused.provider, waitSec: paused.retryInSec } : null;
+}
+
+// The provider whose attempt reported this block. A preflight or runtime
+// fallback records itself on the job row, so the row wins over the provider
+// the attempt was dispatched to. It is kept on the payload so a later retry
+// note classifies the block the same way (blockedRetryContext).
+function recordBlockedAttemptProvider(worker, job, executionProvider) {
+  const freshJob = getJob(job.id) || job;
+  const provider = freshJob.provider || job._executionProvider || executionProvider || null;
+  if (!provider) return null;
+  const payload = worker.parsePayload(freshJob);
+  if (payload[BLOCKED_PROVIDER_PAYLOAD_KEY] !== provider) {
+    payload[BLOCKED_PROVIDER_PAYLOAD_KEY] = provider;
+    const payloadJson = JSON.stringify(payload);
+    updateJobPayload(job.id, payloadJson);
+    job.payload_json = payloadJson;
+  }
+  return provider;
+}
+
+// An operator recovery that requeued the job in place (work-item failure
+// recovery) starts a fresh routing budget: attempts before it do not count.
+function operatorRecoveryRequeuedAtMs(payload = {}) {
+  const times = [payload._failure_recovery_retry?.at, payload._failure_recovery_restored?.at]
+    .map((value) => Date.parse(String(value || "")))
+    .filter(Number.isFinite);
+  return times.length > 0 ? Math.max(...times) : null;
+}
+
+// Scoped mutation routing failures are infrastructure, not a real block:
+// either the gateway failed to attach or Codex selected its native
+// feedback/read-only path instead of an issued MCP write tool. Retry them
+// internally without an attempt penalty. Once that budget is spent, a provider
+// that still misreads its read-only sandbox moves once to another provider in
+// the role pool, then to operator recovery: the edit tool works, so the work
+// item must not fail silently. Other routing failures terminate as
+// infrastructure; human guidance cannot repair the provider surface.
+async function settleTransientMcpInfraBlock(worker, job, leaseToken, attempt, {
+  allAttempts,
+  blockReason,
+  blockMsg,
+  blockProvider = null,
+  executionProvider,
+}) {
+  worker._invalidatePendingSessionRecycleForMcpInfra(job, "mcp_infra_block");
+  const freshJob = getJob(job.id) || job;
+  const payload = worker.parsePayload(freshJob);
+  const priorReroute = payload._sandbox_misread_reroute || null;
+  // A provider reroute starts a fresh routing budget for the new provider,
+  // and an operator recovery that requeued the job in place starts one too.
+  const budgetFloorAttemptId = Number(priorReroute?.attempt_id) || 0;
+  const recoveredAtMs = operatorRecoveryRequeuedAtMs(payload);
+  const infraRetries = allAttempts.filter(
+    (a) => a.id > budgetFloorAttemptId
+      && !(recoveredAtMs != null && Date.parse(String(a.started_at || "")) < recoveredAtMs)
+      && a.status === "blocked"
+      && isTransientMcpInfraBlock(a.error_text),
+  ).length;
+  if (infraRetries < MAX_MCP_INFRA_BLOCK_RETRIES) {
+    const delayMs = MCP_INFRA_BLOCK_BACKOFF_MS[
+      Math.min(infraRetries, MCP_INFRA_BLOCK_BACKOFF_MS.length - 1)
+    ];
+    const readyAt = new Date(Date.now() + delayMs).toISOString();
+    worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failure — auto-requeueing (retry ${infraRetries + 1}/${MAX_MCP_INFRA_BLOCK_RETRIES}) in ${Math.round(delayMs / 1000)}s${C.reset}`);
+    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt.id, readyAt });
+    refreshAndExtractInsightsFromModule(job.work_item_id);
+    worker._cleanupWorktreeIfDone(job.work_item_id);
+    return;
+  }
+
+  if (isProviderSandboxMisreadBlock(blockReason, { provider: blockProvider })) {
+    const fromProvider = blockProvider || freshJob.provider || job._executionProvider || executionProvider || null;
+    const reroute = priorReroute ? null : sandboxMisreadFallbackProvider(worker, job, fromProvider);
+    const toProvider = reroute?.provider || null;
+    if (toProvider) {
+      const waitSec = Math.max(0, Math.ceil(Number(reroute.waitSec) || 0));
+      const readyAtMs = waitSec > 0 ? Date.now() + (waitSec + providerQuotaResumeJitterSec()) * 1000 : Date.now();
+      payload._sandbox_misread_reroute = {
+        from: fromProvider,
+        to: toProvider,
+        attempt_id: attempt.id,
+        rerouted_at: new Date().toISOString(),
+        ...(waitSec > 0 ? { waits_for_pause_sec: waitSec } : {}),
+      };
+      const payloadJson = JSON.stringify(payload);
+      updateJobPayload(job.id, payloadJson);
+      updateJobProvider(job.id, toProvider, null);
+      job.payload_json = payloadJson;
+      job.provider = toProvider;
+      job.model_name = null;
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attempt.id,
+        event_type: EVENT_TYPES.JOB_PROVIDER_REROUTED,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `${fromProvider} kept misreading its read-only sandbox notice after ${infraRetries} routing retries; rerouting to ${toProvider}${waitSec > 0 ? ` once its pause ends (${waitSec}s)` : ""}`,
+        event_json: JSON.stringify({
+          reason: "provider_sandbox_misread",
+          from: fromProvider,
+          to: toProvider,
+          routing_retries: infraRetries,
+          provider_pool: job._allowedProviders || [],
+          wait_for_pause_sec: waitSec,
+        }),
+      });
+      worker.emit(job.id, `${C.yellow}[provider]${C.reset} WI#${job.work_item_id} job #${job.id}: ${fromProvider} kept misreading its read-only sandbox notice — rerouting to ${toProvider}${waitSec > 0 ? ` after its pause (${Math.ceil(waitSec / 60)}m)` : ""}`);
+      worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt.id, readyAt: new Date(readyAtMs).toISOString() });
+      refreshAndExtractInsightsFromModule(job.work_item_id);
+      worker._cleanupWorktreeIfDone(job.work_item_id);
+      return;
+    }
+    worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: provider sandbox misread persisted after ${infraRetries} routing retries with no fallback provider — opening operator recovery${C.reset}`);
+    worker._retryOrFail(job, leaseToken, blockMsg, { providerSandboxMisread: true, attemptId: attempt.id });
+    await worker._cleanupWorktreeIfDone(job.work_item_id);
+    return;
+  }
+
+  worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failed ${infraRetries} time(s) — terminating without a human recovery gate${C.reset}`);
+  worker._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true, attemptId: attempt.id });
+  await worker._cleanupWorktreeIfDone(job.work_item_id);
 }
 
 export function scopedCommitCreated(commitResult, headBefore) {
@@ -441,30 +587,15 @@ export async function handlePostExecutionForWorker({
             return;
           }
 
-          // Scoped mutation routing failures are infrastructure, not a real
-          // block: either the gateway failed to attach or Codex selected its
-          // native feedback/read-only path instead of an issued MCP write
-          // tool. Retry them internally, then terminate as an infrastructure
-          // failure. Human guidance cannot repair the provider surface.
-          if (isTransientMcpInfraBlock(blockReason)) {
-            this._invalidatePendingSessionRecycleForMcpInfra(job, "mcp_infra_block");
-            const infraRetries = allAttempts.filter(
-              (a) => a.status === "blocked" && isTransientMcpInfraBlock(a.error_text),
-            ).length;
-            if (infraRetries < MAX_MCP_INFRA_BLOCK_RETRIES) {
-              const delayMs = MCP_INFRA_BLOCK_BACKOFF_MS[
-                Math.min(infraRetries, MCP_INFRA_BLOCK_BACKOFF_MS.length - 1)
-              ];
-              const readyAt = new Date(Date.now() + delayMs).toISOString();
-              this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failure — auto-requeueing (retry ${infraRetries + 1}/${MAX_MCP_INFRA_BLOCK_RETRIES}) in ${Math.round(delayMs / 1000)}s${C.reset}`);
-              this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt.id, readyAt });
-              refreshAndExtractInsightsFromModule(job.work_item_id);
-              this._cleanupWorktreeIfDone(job.work_item_id);
-              return;
-            }
-            this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failed ${infraRetries} time(s) — terminating without a human recovery gate${C.reset}`);
-            this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true, attemptId: attempt.id });
-            await this._cleanupWorktreeIfDone(job.work_item_id);
+          const blockProvider = recordBlockedAttemptProvider(this, job, executionProvider);
+          if (isTransientMcpInfraBlock(blockReason, { provider: blockProvider })) {
+            await settleTransientMcpInfraBlock(this, job, leaseToken, attempt, {
+              allAttempts,
+              blockReason,
+              blockMsg,
+              blockProvider,
+              executionProvider,
+            });
             return;
           }
 
@@ -1578,27 +1709,16 @@ export async function handlePostExecutionForWorker({
             }
 
             // This legacy no-write branch is retained for older completion
-            // shapes. Apply the same policy as the primary BLOCKED path:
-            // provider routing failures never become operator questions.
-            if (isTransientMcpInfraBlock(blockReason)) {
-              this._invalidatePendingSessionRecycleForMcpInfra(job, "mcp_infra_block");
-              const infraRetries = allAttempts.filter(
-                (a) => a.status === "blocked" && isTransientMcpInfraBlock(a.error_text),
-              ).length;
-              if (infraRetries < MAX_MCP_INFRA_BLOCK_RETRIES) {
-                const delayMs = MCP_INFRA_BLOCK_BACKOFF_MS[
-                  Math.min(infraRetries, MCP_INFRA_BLOCK_BACKOFF_MS.length - 1)
-                ];
-                const readyAt = new Date(Date.now() + delayMs).toISOString();
-                this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failure — auto-requeueing (retry ${infraRetries + 1}/${MAX_MCP_INFRA_BLOCK_RETRIES}) in ${Math.round(delayMs / 1000)}s${C.reset}`);
-                this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt.id, readyAt });
-                refreshAndExtractInsightsFromModule(job.work_item_id);
-                this._cleanupWorktreeIfDone(job.work_item_id);
-                return;
-              }
-              this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: scoped mutation routing failed ${infraRetries} time(s) — terminating without a human recovery gate${C.reset}`);
-              this._retryOrFail(job, leaseToken, blockMsg, { suppressHumanRecovery: true, attemptId: attempt.id });
-              await this._cleanupWorktreeIfDone(job.work_item_id);
+            // shapes. Apply the same policy as the primary BLOCKED path.
+            const blockProvider = recordBlockedAttemptProvider(this, job, executionProvider);
+            if (isTransientMcpInfraBlock(blockReason, { provider: blockProvider })) {
+              await settleTransientMcpInfraBlock(this, job, leaseToken, attempt, {
+                allAttempts,
+                blockReason,
+                blockMsg,
+                blockProvider,
+                executionProvider,
+              });
               return;
             }
 

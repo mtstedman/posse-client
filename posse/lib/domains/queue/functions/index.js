@@ -22,6 +22,10 @@ export * from "./cross-instance-claims.js";
 export * from "./shared-trunk-merge-state.js";
 export * from "./session-job-router.js";
 export * from "./post-merge-db-tasks.js";
+export * from "./merge-verification-review.js";
+export * from "./merge-holding-gate.js";
+export * from "./work-item-dispositions.js";
+export * from "./work-item-recovery.js";
 export * from "./run-cohort.js";
 export * from "./publication-telemetry.js";
 

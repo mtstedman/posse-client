@@ -21,6 +21,24 @@ export const SCOPE_MODE_APPROVAL_SOURCE = "scope_mode_auto";
 // Operator gate opened when a work item merges for each database task held
 // behind that merge. "run" requeues the held task; "skip" cancels it.
 export const POST_MERGE_DB_TASK_REVIEW_TYPE = "post_merge_db_task";
+// Work-item review gate opened instead of an automatic merge when a job's
+// planned verification was replaced or waived because it already failed
+// before the change (baseline debt) and the work is high-risk or touches
+// auth/session/security code. "pass" lets the merge proceed; "fail" sends the
+// work item back for rework with the operator's feedback (review rejection).
+export const MERGE_VERIFICATION_REVIEW_TYPE = "merge_verification_review";
+// Work-item gates (no original job) for states no job gate covers. A failed
+// work item that still owns a branch or implementation work asks whether to
+// retry its failed jobs on that branch, accept assessment-only failures, or
+// abandon it. A completed work item whose cross-WI merge dependency points at
+// a failed or canceled upstream asks whether to keep waiting for it, rebuild
+// on the target branch without the inherited edits, or abandon.
+export const WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE = "work_item_failure_disposition";
+export const CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE = "cross_wi_upstream_disposition";
+export const WORK_ITEM_DISPOSITION_REVIEW_TYPES = Object.freeze([
+  WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
+  CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
+]);
 
 export function humanGateStateAllowsAnswer(gateState) {
   return gateState == null || gateState === "open";
@@ -55,6 +73,9 @@ export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   artifact_routing_admin: freezeChoices(["acknowledge"]),
   shared_trunk_provenance: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance),
   [POST_MERGE_DB_TASK_REVIEW_TYPE]: freezeChoices(["run", "skip"]),
+  [MERGE_VERIFICATION_REVIEW_TYPE]: freezeChoices(["pass", "fail"]),
+  [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: freezeChoices(["retry", "accept", "abandon"]),
+  [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: freezeChoices(["wait", "rebuild", "abandon"]),
 });
 
 export const HUMAN_GATE_RECOVERY_KINDS = Object.freeze([
@@ -188,6 +209,21 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
     allowed_actions: ["run", "skip"],
     allowed_source_states: ["waiting_on_human"],
   },
+  [MERGE_VERIFICATION_REVIEW_TYPE]: {
+    gate_kind: MERGE_VERIFICATION_REVIEW_TYPE,
+    allowed_actions: ["pass", "fail"],
+    allowed_source_states: ["succeeded"],
+  },
+  [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: {
+    gate_kind: WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
+    allowed_actions: ["retry", "accept", "abandon"],
+    allowed_source_states: ["waiting_on_human"],
+  },
+  [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: {
+    gate_kind: CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
+    allowed_actions: ["wait", "rebuild", "abandon"],
+    allowed_source_states: ["waiting_on_human"],
+  },
   assessment: {
     gate_kind: "assessment_review",
     allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
@@ -285,6 +321,24 @@ const HUMAN_GATE_ACTIONABILITY_PROFILES = Object.freeze({
     headless_behavior: "do_not_run",
     diagnostic_insufficient_reason: "Posse cannot observe when the operator deploys the merged change.",
   },
+  [MERGE_VERIFICATION_REVIEW_TYPE]: {
+    unresolved_fact: "Whether work whose planned verification could not run may merge on review alone.",
+    human_contribution: "authority",
+    headless_behavior: "do_not_merge",
+    diagnostic_insufficient_reason: "The planned test already failed before the change, so no executed check shows the risky change works.",
+  },
+  [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: {
+    unresolved_fact: "Whether a failed work item's branch should be retried, accepted despite assessment-only failures, or abandoned.",
+    human_contribution: "recovery_choice",
+    headless_behavior: "leave_parked",
+    diagnostic_insufficient_reason: "Each choice spends execution budget, overrides an assessor verdict, or discards committed work.",
+  },
+  [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: {
+    unresolved_fact: "Whether a completed work item should wait for its failed upstream, be rebuilt without the inherited edits, or be abandoned.",
+    human_contribution: "recovery_choice",
+    headless_behavior: "leave_parked",
+    diagnostic_insufficient_reason: "Only the operator knows whether the failed upstream work item will be recovered.",
+  },
   push_offer: {
     unresolved_fact: "Whether committed work may be pushed to the configured remote.",
     human_contribution: "merge_push_choice",
@@ -317,6 +371,10 @@ function actionTransition(action) {
     respond: "resume_with_human_answer",
     plan: "resume_with_selected_scope",
     run: "queue_post_merge_database_task",
+    accept: "accept_assessment_only_failures_and_complete",
+    abandon: "cancel_work_item_and_delete_branch",
+    wait: "keep_merge_deferred_until_upstream_merges",
+    rebuild: "requeue_on_target_branch_without_inherited_edits",
   };
   if (String(action || "").startsWith("retry:")) return "queue_provider_specific_recovery";
   return transitions[canonical] || `resolve_gate_with_${canonical || "response"}`;
@@ -376,7 +434,10 @@ export function humanGateContractForPayload(payload = {}, {
   // generic developer block and could reuse an unrelated open prompt.
   const explicitGateKind = String(payload?.gate_kind || "").trim();
   const gateKind = explicitGateKind || registered?.gate_kind || source;
-  const allowedActions = [...new Set(registered?.allowed_actions || fallbackActions)];
+  const registeredActions = registered?.allowed_actions
+    ? narrowedReviewChoices(payload, [...registered.allowed_actions])
+    : null;
+  const allowedActions = [...new Set(registeredActions || fallbackActions)];
   const profile = HUMAN_GATE_ACTIONABILITY_PROFILES[gateKind]
     || HUMAN_GATE_ACTIONABILITY_PROFILES[source]
     || HUMAN_GATE_ACTIONABILITY_PROFILES.clarification;
@@ -406,6 +467,7 @@ export const HUMAN_INPUT_COORDINATION_REVIEW_TYPES = Object.freeze([
   "artifact_routing_admin",
   "shared_trunk_provenance",
   POST_MERGE_DB_TASK_REVIEW_TYPE,
+  ...WORK_ITEM_DISPOSITION_REVIEW_TYPES,
 ]);
 
 const COORDINATION_REVIEW_TYPE_SET = new Set(HUMAN_INPUT_COORDINATION_REVIEW_TYPES);
@@ -443,11 +505,21 @@ export function humanInputChoicesForReviewType(reviewType) {
   return choices ? [...choices] : [];
 }
 
+// A work-item disposition gate may offer fewer than its review type's
+// actions (a merge deferred on a canceled upstream cannot "wait"). Its
+// persisted choices narrow that closed contract; they never widen it.
+function narrowedReviewChoices(payload, reviewChoices) {
+  if (!WORK_ITEM_DISPOSITION_REVIEW_TYPES.includes(String(payload?.review_type || "").trim())) return reviewChoices;
+  const offered = normalizeHumanInputChoices(payload?.choices);
+  const narrowed = reviewChoices.filter((choice) => offered.includes(choice));
+  return narrowed.length > 0 ? narrowed : reviewChoices;
+}
+
 export function humanInputChoicesForPayload(payload = {}) {
   // Known review types are closed contracts. Persisted `choices` from older
   // jobs must not reintroduce an action that the resolver does not handle.
   const reviewChoices = humanInputChoicesForReviewType(payload.review_type);
-  if (reviewChoices.length > 0) return reviewChoices;
+  if (reviewChoices.length > 0) return narrowedReviewChoices(payload, reviewChoices);
 
   const explicit = normalizeHumanInputChoices(payload.choices);
   if (explicit.length > 0) return explicit;

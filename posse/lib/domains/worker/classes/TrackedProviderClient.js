@@ -25,9 +25,11 @@ import {
   getAvailableProviders,
   getProvider,
   getProviderRateLimitState,
+  pauseProviderForQuota,
   selectProviderName,
 } from "../../providers/functions/provider.js";
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
+import { markProviderErrorObserved, providerErrorSource } from "../../providers/functions/shared/api-resilience.js";
 import { resolveEffectiveTierModel } from "../../providers/functions/model-catalog-validate.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { beginToolInvocation, filterProviderToolUseReplay, finishToolInvocation, getObservationContext, isWebToolName, reconcileProviderToolUseReplay, recordObservation, recordProviderToolBatchObservations, recordToolUseObservations, runWithObservationContext } from "../../observability/functions/observations.js";
@@ -420,6 +422,7 @@ const DEFAULT_DEPS = {
   getAvailableProviders,
   getProvider,
   getProviderRateLimitState,
+  pauseProviderForQuota,
   selectProviderName,
   filterProviderToolUseReplay,
   reconcileProviderToolUseReplay,
@@ -1019,6 +1022,28 @@ export class TrackedProviderClient {
 
   _isProviderCircuitOpen(providerName) {
     return this.isProviderCircuitOpen(providerName);
+  }
+
+  // Pause a provider the moment a call reports an account-wide subscription
+  // quota, before the runtime fallback runs. Concurrent and later calls then
+  // preflight-route to an unpaused fallback (or wait) instead of each
+  // relaunching into the same limit; attempt failure handling only sees the
+  // error when no fallback rescued the call.
+  _noteProviderQuotaFailure(callProviderName, err, jobId) {
+    if (!callProviderName || !err) return null;
+    // An error stamped by a nested call names the provider that hit the quota.
+    const providerName = providerErrorSource(err) || callProviderName;
+    let quota = null;
+    try {
+      quota = this.deps.pauseProviderForQuota?.(providerName, err) || null;
+    } catch {
+      return null;
+    }
+    if (!quota) return null;
+    const resetLabel = quota.quota?.reset?.label || null;
+    const limitName = quota.quota?.limitName || "usage limit";
+    this.emitStatus(jobId, `${C.yellow}[provider] ${providerName} ${limitName} — pausing ${providerName} ${resetLabel ? `until ${resetLabel}` : `for ${Math.ceil((quota.backoffSec || 0) / 60)}m (reset time not reported)`}${C.reset}`);
+    return quota;
   }
 
   emitStatus(jobId, message) {
@@ -2728,9 +2753,13 @@ export class TrackedProviderClient {
     const buildFallbackPrompt = typeof opts.buildFallbackPrompt === "function"
       ? opts.buildFallbackPrompt
       : null;
-    if (buildFallbackPrompt) {
+    const buildFallbackOptions = typeof opts.buildFallbackOptions === "function"
+      ? opts.buildFallbackOptions
+      : null;
+    if (buildFallbackPrompt || buildFallbackOptions) {
       opts = { ...opts };
       delete opts.buildFallbackPrompt;
+      delete opts.buildFallbackOptions;
     }
     opts = await timeProviderSetupPhase("provider.opts_sanitize", {
       role: opts.role,
@@ -2810,6 +2839,27 @@ export class TrackedProviderClient {
               role: opts.role,
             }));
           }
+          if (buildFallbackOptions) {
+            const fallbackOptions = await timeProviderSetupPhase("provider.fallback_options", {
+              role: opts.role,
+              provider: fallbackName,
+              job_id,
+              work_item_id,
+            }, () => buildFallbackOptions({
+              providerName: fallbackName,
+              previousProviderName,
+              role: opts.role,
+            }));
+            opts = await timeProviderSetupPhase("provider.fallback_opts_sanitize", {
+              role: opts.role,
+              provider: fallbackName,
+              job_id,
+              work_item_id,
+            }, () => sanitizeExecutionHintsForRole(opts.role, {
+              ...opts,
+              ...(fallbackOptions && typeof fallbackOptions === "object" ? fallbackOptions : {}),
+            }));
+          }
           providerName = fallbackName;
           preflightFallback = { from: previousProviderName, to: fallbackName };
           opts = {
@@ -2838,6 +2888,11 @@ export class TrackedProviderClient {
       if (!preflightFallback) {
         const err = new Error(`${providerName} rate-limited (${rlState.reason}) - retry in ${rlState.retryInSec}s`);
         err._rateLimitPreFlight = true;
+        // Structured pause facts: attempt handling waits out this pause
+        // rather than re-parsing the message above.
+        err.provider = providerName;
+        err.retryInSec = Number(rlState.retryInSec) || 0;
+        err.rateLimitReason = rlState.reason || "";
         throw err;
       }
     }
@@ -3022,6 +3077,10 @@ export class TrackedProviderClient {
       }
       return result;
     } catch (err) {
+      // Stamp the provider that produced the error and when it surfaced:
+      // attempt handling may see it only after a runtime fallback ran, and
+      // must pause this provider as of now, not the job's or a later reading.
+      markProviderErrorObserved(err, providerName);
       let activeErr = err;
       if (isAbortError(activeErr) || activeErr?._killReason) throw activeErr;
       if (opts.abortSignal?.aborted || this.worker?._killReasons?.has?.(job_id)) {
@@ -3096,6 +3155,7 @@ export class TrackedProviderClient {
           this.emitStatus(job_id, `${C.green}[model-fallback] ${providerName} succeeded on ${retry.stats?.modelName || runtimeFallbackModel}${C.reset}`);
           return retry;
         } catch (modelErr) {
+          markProviderErrorObserved(modelErr, providerName);
           if (isAbortError(modelErr) || modelErr?._killReason) throw modelErr;
           activeErr = modelErr;
           this.emitStatus(job_id, `${C.red}[model-fallback] ${providerName} fallback model also failed: ${modelErr.message?.split("\n")[0]?.slice(0, 100)}${C.reset}`);
@@ -3111,6 +3171,7 @@ export class TrackedProviderClient {
       }
       if (this.isProviderError(activeErr) || isRuntimeModelError(activeErr)) {
         recordAttemptedProvider(attemptedProviders, providerName);
+        if (this.isProviderError(activeErr)) this._noteProviderQuotaFailure(providerName, activeErr, job_id);
         const fallbackName = this._selectFallbackCandidate({
           configuredPool,
           currentProvider: providerName,
@@ -3135,6 +3196,27 @@ export class TrackedProviderClient {
                   : null,
               });
             }
+            const fallbackPrompt = preparedAgent
+              ? preparedAgent.handoff
+              : buildFallbackPrompt
+                ? await buildFallbackPrompt({
+                    providerName: fallbackName,
+                    previousProviderName: providerName,
+                    role: opts.role,
+                  })
+                : preReusePrompt;
+            const fallbackOptions = buildFallbackOptions
+              ? await timeProviderSetupPhase("provider.fallback_options", {
+                  role: opts.role,
+                  provider: fallbackName,
+                  job_id,
+                  work_item_id,
+                }, () => buildFallbackOptions({
+                  providerName: fallbackName,
+                  previousProviderName: providerName,
+                  role: opts.role,
+                }))
+              : null;
             let fbProvider = preparedAgent?.providerName === fallbackName
               ? preparedAgent?.provider
               : null;
@@ -3205,8 +3287,19 @@ export class TrackedProviderClient {
               recyclingMode: _discardRecyclingMode,
               ...sessionlessOpts
             } = preReuseOpts;
+            const fallbackBaseOpts = fallbackOptions && typeof fallbackOptions === "object"
+              ? await timeProviderSetupPhase("provider.fallback_opts_sanitize", {
+                  role: opts.role,
+                  provider: fallbackName,
+                  job_id,
+                  work_item_id,
+                }, () => sanitizeExecutionHintsForRole(opts.role, {
+                  ...sessionlessOpts,
+                  ...fallbackOptions,
+                }))
+              : sessionlessOpts;
             const fbOpts = {
-              ...sessionlessOpts,
+              ...fallbackBaseOpts,
               ...(opts.loaderCwd ? { loaderCwd: opts.loaderCwd, mcpCwd: opts.mcpCwd } : {}),
               abortSignal: opts.abortSignal,
               modelName: fbModelName || undefined,
@@ -3215,15 +3308,6 @@ export class TrackedProviderClient {
               allowedProviders: configuredPool,
               atlasMethod: fbAtlasMethod,
             };
-            const fallbackPrompt = preparedAgent
-              ? preparedAgent.handoff
-              : buildFallbackPrompt
-                ? await buildFallbackPrompt({
-                    providerName: fallbackName,
-                    previousProviderName: providerName,
-                    role: opts.role,
-                  })
-                : preReusePrompt;
             const fallbackResult = await this._executeOneAttempt(fallbackPrompt, fbOpts, {
               providerName: fallbackName,
               provider: fbProvider,
@@ -3252,8 +3336,12 @@ export class TrackedProviderClient {
             // otherwise the outer throw replaces the abort with the primary
             // provider's earlier error and the job looks retryable instead of
             // killed.
+            markProviderErrorObserved(fbErr, fallbackName);
             if (isAbortError(fbErr) || fbErr?._killReason) throw fbErr;
             this.emitStatus(job_id, `${C.red}[fallback] ${fallbackName} also failed: ${fbErr.message?.split("\n")[0]?.slice(0, 100)}${C.reset}`);
+            // The primary error is what propagates, so a fallback's own quota
+            // must pause that provider here or the next job would retry it.
+            if (this.isProviderError(fbErr)) this._noteProviderQuotaFailure(fallbackName, fbErr, job_id);
           }
         }
       }

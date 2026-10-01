@@ -10,6 +10,7 @@ import {
   respawnAfterRejection,
 } from "../../planning/functions/plan-approval.js";
 import {
+  MERGE_VERIFICATION_REJECTION_KEY,
   getHumanGate,
   getJob,
   getLiveSchedulerBlockMessage,
@@ -54,7 +55,10 @@ import {
   approveTeamPromotion,
 } from "./team.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
+import {
+  MERGE_VERIFICATION_REVIEW_TYPE,
+  humanGateStateAllowsAnswer,
+} from "../../../catalog/human-input.js";
 import {
   addBridgeWorkItem,
   nudgeBridgeJob,
@@ -262,6 +266,40 @@ function reviewPassAlreadyApplied(resolved) {
     && gate?.resolution_action === "pass";
 }
 
+/**
+ * A merge verification review answer acts on the work item: report what it
+ * became. "fail" must have sent the work item back (requeued with the
+ * operator's feedback); a gate resolved without that is reported as not
+ * applied instead of as success. A pending answer (reserved for the run that
+ * owns the gate) has no outcome yet and is returned as is.
+ */
+function withMergeVerificationOutcome(result, gateJobId) {
+  if (!result || result.ok === false || result.pending) return result;
+  const gate = getJob(gateJobId);
+  const payload = parseJobPayload(gate);
+  if (payload?.review_type !== MERGE_VERIFICATION_REVIEW_TYPE) return result;
+  const contract = getHumanGate(gateJobId);
+  const workItem = getWorkItem(Number(gate?.work_item_id));
+  const outcome = {
+    ...result,
+    action: contract?.resolution_action || null,
+    work_item_id: workItem?.id ?? result.work_item_id ?? null,
+    work_item_status: workItem?.status ?? null,
+    merge_state: workItem?.merge_state ?? null,
+  };
+  if (contract?.resolution_action !== "fail") return outcome;
+  const rejection = payload[MERGE_VERIFICATION_REJECTION_KEY];
+  if (!rejection) {
+    return {
+      ...outcome,
+      ok: false,
+      reason: "rejection_not_applied",
+      message: `Gate #${gateJobId} resolved, but WI#${outcome.work_item_id} was not sent back for rework.`,
+    };
+  }
+  return { ...outcome, requeued: true, feedback: rejection.feedback ?? null };
+}
+
 async function executeAllowedCommand(name, args = {}, context = {}) {
   switch (name) {
     case BRIDGE_COMMANDS.COMMAND_STATUS:
@@ -378,7 +416,7 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
 
     case BRIDGE_COMMANDS.ASK: {
       const jobId = jobIdArg(args);
-      return answerHumanInput(jobId, args, context);
+      return withMergeVerificationOutcome(await answerHumanInput(jobId, args, context), jobId);
     }
 
     case BRIDGE_COMMANDS.GIT_PUSH: {
@@ -513,7 +551,7 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
           }, { ...context, allowReviewGateAnswer: true });
         });
         if (!outcome.acquired) return { ok: false, reason: "merge_in_progress" };
-        return outcome.result;
+        return withMergeVerificationOutcome(outcome.result, reviewJobId);
       }
       const wiId = workItemIdArg(args);
       if (!wiId) return { ok: false, reason: "invalid_work_item_id" };

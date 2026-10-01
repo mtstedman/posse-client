@@ -1,12 +1,16 @@
 // Shared provider-failure classification for fallback and attempt recovery.
 // Prefer structured adapter errors; message patterns cover older CLI/API errors.
 
+import { PROVIDER_WINDOW_LIMIT_REACHED_RE } from "../../../providers/functions/shared/quota-reset.js";
+
 const PROVIDER_ERROR_PATTERNS = [
   /overloaded_error/i,
   /API Error:\s*5\d\d/i,
   /api_error.*internal server error/i,
   /rate.?limit|429|too many requests/i,
   /out of.*usage|usage.*reset|usage limit|usage cap|usage exhausted|over usage|quota exceeded|credit balance is too low|session limit|(?:hit|reached) your.*limit/i,
+  // Claude's "5-hour limit reached" / "Weekly limit reached" quota wordings.
+  PROVIDER_WINDOW_LIMIT_REACHED_RE,
   /configuration.*corrupted/i,
   /Failed to spawn claude/i,
   /claude exited null/i,

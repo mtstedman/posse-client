@@ -12,6 +12,7 @@ import {
   requeueWorkItemAfterRejection,
   reviewRejectionReadiness,
   updateWorkItemStatus,
+  workItemFailureRecoveryHint,
 } from "../../queue/functions/index.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
 import { describePartialWorkJobs, partialWorkToMerge } from "../../queue/functions/partial-work.js";
@@ -96,7 +97,7 @@ export function preflightReviewApproval(workItemId, {
     return {
       ok: false,
       reason: "work_item_not_complete",
-      message: `Work item ${wi.id} failed; recover it before merging.`,
+      message: `Work item ${wi.id} failed; recover it before merging: ${workItemFailureRecoveryHint(wi.id)}.`,
       work_item_id: wi.id,
       review_approved: false,
     };
@@ -332,7 +333,7 @@ export async function finalizeApprovedReview(workItemId, {
     return {
       ok: false,
       reason: "work_item_not_complete",
-      message: `Work item ${wi.id} failed; recover it before merging.`,
+      message: `Work item ${wi.id} failed; recover it before merging: ${workItemFailureRecoveryHint(wi.id)}.`,
       work_item_id: wi.id,
       review_approved: false,
     };
@@ -427,7 +428,7 @@ export async function finalizeApprovedReview(workItemId, {
         return {
           ok: false,
           reason: "work_item_not_complete",
-          message: `Work item ${wi.id} failed; recover it before merging.`,
+          message: `Work item ${wi.id} failed; recover it before merging: ${workItemFailureRecoveryHint(wi.id)}.`,
         };
       }
       if (lockedWi.merge_state === "merged") {
@@ -644,6 +645,10 @@ export async function rejectReview(workItemId, { actor = "bridge", reason = null
       };
     }
 
+    // Without a branch (deleted before this call) the requeue replans the
+    // work item: the earlier jobs' commits went with the branch. A kept
+    // branch (allow_branch_without_cleanup) reruns the leaf jobs on it and
+    // keeps its locks and cross-WI merge dependencies.
     const updated = requeueWorkItemAfterRejection(wi.id, {
       description: rejectionDescription(wi, reason),
       feedback: reason,
@@ -662,7 +667,8 @@ export async function rejectReview(workItemId, { actor = "bridge", reason = null
     return {
       ok: true,
       work_item_id: wi.id,
-      status: "queued",
+      status: getWorkItem(wi.id)?.status || "queued",
+      ...(typeof updated === "number" ? { replan_job_id: updated } : {}),
     };
   });
   if (!outcome.acquired) return { ok: false, reason: "merge_in_progress" };

@@ -13,7 +13,6 @@ import crypto from "crypto";
 import { spawn } from "child_process";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import {
-  addCrossWiMergeDependency,
   ancestorJobIdsForJob,
   queuedCohortJobIdsForJob,
   queuedDependentJobIdsForJob,
@@ -41,13 +40,21 @@ import {
   expireStaleSessionLeases,
   findPeerClaimConflict,
   reconcileHumanGates,
+  reconcileWorkItemDispositionGates,
   resurfaceParkedHumanGates,
   supersedeHumanGate,
   crossWiMergeDependencyWouldCycle,
+  crossWiSyncSourceRejection,
   collectCrossWiPathProvenance,
+  describeWorkItemMergeParking,
+  findWorkItemOrderConflict,
+  loadWorkItemOrder,
+  setCompleteWorkItemAutoMergePolicy,
+  workItemMergeParking,
   workItemWaitsOnWorkItem,
   workItemCanReleaseFileLock,
   getQueueWakeGeneration,
+  getSchedulerLockInfo,
   jobNeedsAssessmentBarrier,
   jobNeedsWriteLocks,
   jobHasLivePendingScopeRequest,
@@ -61,15 +68,18 @@ import {
   clearRuntimeStatus,
   clearPeerClaimDeferralsForJob,
   isBridgePresenceFresh,
+  isMergeVerificationReviewJob,
   isPostMergeDbGateJob,
   isPostMergeDbTaskJob,
   isPostMergeHeldDbJob,
   isPushOfferJob,
+  isWorkItemDispositionGateJob,
   readRuntimeStatus,
   requeueOwnedJobsForForcedExit,
   writeRuntimeStatus,
   waitForQueueStateChangeAfter,
 } from "../../queue/functions/index.js";
+import { WORK_ITEM_ORDER_WAIT_REASON } from "../../queue/functions/work-item-order.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { reapOrphanedDaemons } from "../../../shared/tools/classes/daemon/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
@@ -219,6 +229,24 @@ const RUN_LOOP_KEEPALIVE_INTERVAL_MS = 30_000;
 const RUNTIME_KILL_RETRY_MS = 60_000;
 const RUNTIME_KILL_WEDGED_MS = 5 * 60_000;
 
+// When nothing runs and every job that could start waits on a work item that
+// cannot progress without an operator, the run finishes as needs-action after
+// this long instead of idling forever (finding 1, run 1250b). The grace spans
+// a human-gate maintenance sweep, so a disposition gate the stall depends on
+// is open (and named) by then.
+const PARKED_UPSTREAM_STALL_GRACE_MS = 90_000;
+
+// A completed work item that this run merges on its own (not parked) but that
+// stays unmerged with no merge in flight for this long while the run idles
+// counts as parked for the needs-action finish (run 1250b red team 2, finding
+// 7): the idle auto-merge fires once per idle stretch, and a merge that throws
+// releases its authorization without marking merge_failed, so nothing else
+// would end the downstream's wait.
+const AUTO_MERGE_STALL_GRACE_MS = 90_000;
+// A merge authorization older than the merge lock lease was left behind by a
+// process that died mid-merge; it no longer means a merge is in flight.
+const STALE_MERGE_AUTHORIZATION_MS = 60 * 60_000;
+
 // Holder types that represent SYSTEM holds, not agent-vs-agent contention.
 // They must never be counted as the agent pipeline being "on lock".
 const SYSTEM_HOLD_HOLDER_TYPES = new Set([
@@ -272,6 +300,28 @@ function terminateSchedulerChild(child, { force = false } = {}) {
   }
 }
 
+// Whether a merge holds the merge lock now. A lock whose recorded local owner
+// process is gone is reclaimed by the next merge (queue locks
+// acquireMergeLock), so it is not a merge in flight.
+function mergeLockHeld(nowMs = Date.now()) {
+  let lock = null;
+  try {
+    lock = getSchedulerLockInfo("merge");
+  } catch {
+    return false;
+  }
+  if (!lock || !(Date.parse(lock.expires_at || "") > nowMs)) return false;
+  const pid = Number(/^merge-(\d+)(?:$|[-:])/.exec(String(lock.owner_id || ""))?.[1]);
+  if (Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid) {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if (err?.code === "ESRCH") return false;
+    }
+  }
+  return true;
+}
+
 function parseLockMetadata(value) {
   if (!value) return null;
   if (typeof value === "object") return value;
@@ -300,6 +350,9 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   const sourceWi = getWorkItem(sourceWiId);
   const sourceBranch = String(sourceWi?.branch_name || "").trim();
   if (!sourceWi || !sourceBranch) return false;
+  // A failed or canceled work item's content is abandoned (its locks are
+  // released with it); never hand anything out of it.
+  if (sourceWi.status === "failed" || sourceWi.status === "canceled") return false;
 
   const recordBlocked = (message, eventDetail) => {
     const normalizedBlockers = Array.isArray(eventDetail?.blockers)
@@ -371,23 +424,18 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   }
 
   const requesterWiId = Number(job.work_item_id);
-  const provenance = collectCrossWiPathProvenance(sourceWiId, path);
-  // Work items whose pending edits travel inside the holder's content: a copy
-  // carries them too, so this WI must merge after each of them.
-  const carried = provenance.carried
-    .filter((entry) => entry.source_work_item_id !== requesterWiId);
-  // Work items whose pending edits the holder's content lacks (they released
-  // the path to it bare). A copy made now would conflict with them.
-  const outstanding = provenance.outstanding
+  // Work items whose pending edits to the path the holder's content lacks
+  // (they released the path to it bare). Taking the path now would edit it
+  // without those edits, which then conflict with them at merge.
+  const outstanding = collectCrossWiPathProvenance(sourceWiId, path).outstanding
     .filter((entry) => entry.source_work_item_id !== requesterWiId);
 
   // Holds until merge: a sequence-allocation file (version pin, migration
-  // manifest) stays with its holder, since a copy shows the next WI the
-  // claimed number but not the files registered under it, and two WIs that
-  // bump from one base claim the same number (H7); a copy lacking another
-  // WI's pending edits waits for that WI (H8). After the merge, the waiting
-  // dev job merges the target into its worktree before it starts. A hold is
-  // dropped only for a WI that itself waits on this one (it would deadlock).
+  // manifest) stays with its holder, since two WIs that bump from one base
+  // claim the same number (H7); a path whose holder lacks another WI's
+  // pending edits waits for that WI (H8). After the merge, the waiting dev job
+  // merges the target into its worktree before it starts. A hold is dropped
+  // only for a WI that itself waits on this one (it would deadlock).
   const holds = [
     ...(lockKind === "file" && isSequenceAllocationPath(path)
       ? [{ work_item_id: sourceWiId, reason: "sequence_allocation_held_until_merge" }]
@@ -419,17 +467,63 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
         : `Cross-WI handoff held for ${path}; WI#${sourceWiId}'s copy lacks pending edits from ${pendingIds.map((id) => `WI#${id}`).join(", ")} until ${pendingIds.length === 1 ? "it merges" : "they merge"}`;
     return recordBlocked(message, { reason, pending_work_item_ids: pendingIds });
   }
-  // Holds dropped to avoid a deadlock still record the merge order they imply.
-  const followIds = existingOrder
-    ? []
-    : [...new Set([
-      ...carried.map((entry) => entry.source_work_item_id),
-      ...deadlockedHolds
-        .filter((hold) => hold.reason === "unsynced_upstream_edits_pending_merge")
-        .map((hold) => hold.work_item_id),
-    ])];
-  const branchByWorkItemId = new Map([...carried, ...outstanding]
-    .map((entry) => [entry.source_work_item_id, entry.source_branch]));
+  // Nothing unmerged is ever copied between work items (NEW-H5). Overlapping
+  // work items are ordered per work item before any lock is taken (queue
+  // work-item-order.js), so a requester reaches another work item's idle lock
+  // here only when:
+  //   - the holder itself waits on the requester: a lock-holding cycle the
+  //     order had to break (two started work items each later planned files
+  //     the other holds), or a chain left by earlier syncs. Holding the lock
+  //     would deadlock, so it is released bare, like an existing-order
+  //     release: the requester edits the path from its own base, the
+  //     holder's edits stay claimed (the release is recorded on this job, a
+  //     later handoff out of this work item waits for them, and the holder
+  //     gets its lock back when this work item merges), and the holder's
+  //     waiting job starts after this one merges, from the target. This used
+  //     to copy the holder's content and record a merge dependency unless its
+  //     writer had been rejected; a later review rejection, rebuild or merge
+  //     review "fail" of the holder then left the requester carrying
+  //     discarded hunks with no gate (run 1250b red team 2, finding 1);
+  //   - or the holder is a completed work item parked until an operator acts
+  //     (an open gate, a failed merge, a failed upstream, automatic merge off;
+  //     queue workItemMergeParking), which is not in the work-item order. The
+  //     job waits: the scheduler finishes the run as needs-action naming the
+  //     parked work item and its gate, and once the operator settles it (it
+  //     merges, or fails or is canceled and its locks release) this work item
+  //     builds on the target. Copying its content instead (the handoff from
+  //     before work items were ordered) shipped its discarded hunks when the
+  //     operator then rejected or rebuilt it (finding 1).
+  // Anything else waits for the holder to merge and then builds on the
+  // target.
+  //
+  // A bare release records no merge dependency, yet both work items end up
+  // with edits to the path. The holder only gets here while it waits on this
+  // work item, so its waiting job starts after this one merges, and dev/fix
+  // setup merges that target in first (conflicts are handed to the dev). If
+  // that job goes away and the holder finishes first, whichever merges second
+  // is refreshed onto the target at close-out, and a true overlap fails that
+  // merge for review rather than landing silently.
+  let sourceRejection = null;
+  let holderWaitPath = null;
+  if (!existingOrder) {
+    const holderWaits = workItemWaitsOnWorkItem(sourceWiId, requesterWiId);
+    if (!holderWaits.waits) {
+      const holderParking = workItemMergeParking(sourceWi);
+      if (holderParking) {
+        return recordBlocked(
+          `Cross-WI handoff held for ${path}; ${describeWorkItemMergeParking(holderParking)}, so this work item waits until it merges and then builds on the target`,
+          { reason: "upstream_parked", holder_parking: holderParking },
+        );
+      }
+      return recordBlocked(
+        `Cross-WI handoff declined for ${path}; WI#${sourceWiId} keeps it until it merges, then this work item builds on the target`,
+        { reason: "upstream_merge_pending" },
+      );
+    }
+    holderWaitPath = holderWaits.path;
+    // Recorded for the operator; nothing is copied either way.
+    sourceRejection = crossWiSyncSourceRejection(sourceWiId, path, lockKind);
+  }
 
   const db = getDb();
   const applyHandoff = () => {
@@ -444,42 +538,17 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
       lockKind,
       existingOrder
         ? `cross_wi_existing_order_to_wi_${job.work_item_id}_job_${job.id}`
-        : `cross_wi_sync_to_wi_${job.work_item_id}_job_${job.id}`,
+        : `cross_wi_order_release_to_wi_${job.work_item_id}_job_${job.id}`,
     );
     if (released <= 0) return { ok: false, released: 0 };
 
-    let dependency = null;
-    if (!existingOrder) {
-      dependency = addCrossWiMergeDependency(job.work_item_id, sourceWiId, {
-        path,
-        lock_kind: lockKind,
-        source_branch: sourceBranch,
-        source_lock_id: conflict.lock?.id ?? null,
-        via_job_id: job.id,
-      });
-      if (!dependency.ok) {
-        throw new Error(`Could not record cross-WI merge dependency: ${dependency.reason}`);
-      }
-    }
-
-    const followAdded = [];
-    const followSkipped = [];
-    for (const followId of followIds) {
-      // A WI already ordered after this one would cycle; it rebases onto
-      // this WI's merge instead, so skipping it is safe.
-      const followDependency = addCrossWiMergeDependency(job.work_item_id, followId, {
-        path,
-        lock_kind: lockKind,
-        source_branch: branchByWorkItemId.get(followId) || null,
-        via_job_id: job.id,
-      });
-      if (!followDependency.ok) followSkipped.push({ source_work_item_id: followId, reason: followDependency.reason });
-      else if (followDependency.added) followAdded.push(followId);
-    }
-
+    // The holder's pending edits stay claimed: recorded on this job, they
+    // hold later handoffs out of this work item and give the holder its lock
+    // back when this work item merges (queue file-locks
+    // restoreExistingOrderClaimLocks).
     const freshJob = getJob(job.id) || job;
     const payload = parseJobPayload(freshJob);
-    const listKey = existingOrder ? "_cross_wi_existing_order_releases" : "_cross_wi_file_syncs";
+    const listKey = "_cross_wi_existing_order_releases";
     const existing = Array.isArray(payload[listKey]) ? payload[listKey] : [];
     const existingIndex = existing.findIndex((entry) =>
       normalizeHandoffPath(entry?.path) === path
@@ -494,21 +563,15 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
           source_work_item_id: sourceWiId,
           source_branch: sourceBranch,
           source_lock_id: conflict.lock?.id ?? null,
-          ...(followAdded.length > 0 ? { carried_dependency_work_item_ids: followAdded } : {}),
+          ...(sourceRejection ? { source_rejection: sourceRejection } : {}),
+          ...(holderWaitPath ? { holder_wait_path: holderWaitPath } : {}),
           prepared_at: new Date().toISOString(),
         },
       ];
       updateJobPayload(job.id, JSON.stringify(payload));
-    } else if (followAdded.length > 0) {
-      const entry = existing[existingIndex];
-      const priorFollow = Array.isArray(entry?.carried_dependency_work_item_ids) ? entry.carried_dependency_work_item_ids : [];
-      payload[listKey] = existing.map((candidate, index) => (index === existingIndex
-        ? { ...candidate, carried_dependency_work_item_ids: [...new Set([...priorFollow, ...followAdded])] }
-        : candidate));
-      updateJobPayload(job.id, JSON.stringify(payload));
     }
 
-    return { ok: true, released, dependency, followAdded, followSkipped };
+    return { ok: true, released };
   };
 
   let handoff;
@@ -546,17 +609,17 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
     actor_id: ownerId,
     message: existingOrder
       ? `Released downstream lock for ${path}; WI#${sourceWiId} is already ordered after WI#${job.work_item_id} (its pending edits stay claimed until it merges)`
-      : `Prepared cross-WI sync for ${path} from WI#${sourceWiId}; released idle WI file lock`,
+      : `Released WI#${sourceWiId}'s idle lock on ${path} without its content${sourceRejection ? ` (${sourceRejection})` : ""}; WI#${sourceWiId} waits on WI#${job.work_item_id}, so holding it would deadlock, and its pending edits stay claimed until it merges`,
     event_json: JSON.stringify({
       source_work_item_id: sourceWiId,
       source_branch: sourceBranch,
       path,
       lock_kind: lockKind,
       released: handoff.released,
-      merge_dependency_added: handoff.dependency?.added === true,
-      ...(existingOrder ? { existing_merge_order: true, merge_order_path: mergeOrderCheck.path, pending_claim_recorded: true } : {}),
-      ...(handoff.followAdded.length > 0 ? { carried_dependencies_added: handoff.followAdded } : {}),
-      ...(handoff.followSkipped.length > 0 ? { carried_dependencies_skipped: handoff.followSkipped } : {}),
+      merge_dependency_added: false,
+      pending_claim_recorded: true,
+      ...(existingOrder ? { existing_merge_order: true, merge_order_path: mergeOrderCheck.path } : { holder_wait_path: holderWaitPath }),
+      ...(sourceRejection ? { source_rejection: sourceRejection } : {}),
       ...(deadlockedHolds.length > 0
         ? {
           holds_skipped_to_avoid_deadlock: deadlockedHolds.map((hold) => ({
@@ -608,6 +671,29 @@ export class Scheduler {
     this.onlyWorkItemIds = Array.isArray(opts.onlyWorkItemIds)
       ? opts.onlyWorkItemIds.map((id) => Number(id)).filter((id) => Number.isSafeInteger(id) && id > 0)
       : [];
+    // Whether this run merges a completed work item without an operator
+    // (`(workItem) => boolean` or a boolean). The work-item order leaves out
+    // completed work items that will not merge on their own (queue
+    // workItemMergeParking); undefined keeps the queue default, which assumes
+    // every completed work item merges.
+    this._completeWorkItemAutoMergePolicy = typeof opts.autoMergeCompletedWorkItem === "function"
+      || typeof opts.autoMergeCompletedWorkItem === "boolean"
+      ? opts.autoMergeCompletedWorkItem
+      : undefined;
+    // How long the only queued work may wait on work items that cannot
+    // progress without an operator before the run finishes as needs-action.
+    this._parkedStallGraceMs = Number.isFinite(Number(opts.parkedStallGraceMs)) && Number(opts.parkedStallGraceMs) >= 0
+      ? Number(opts.parkedStallGraceMs)
+      : PARKED_UPSTREAM_STALL_GRACE_MS;
+    // How long a completed work item this run should merge on its own may
+    // stay unmerged, with no merge in flight, while the run idles behind it
+    // before it counts as parked (see _stalledAutoMergeParking).
+    this._autoMergeStallGraceMs = Number.isFinite(Number(opts.autoMergeStallGraceMs)) && Number(opts.autoMergeStallGraceMs) >= 0
+      ? Number(opts.autoMergeStallGraceMs)
+      : AUTO_MERGE_STALL_GRACE_MS;
+    // Set when the run loop finished because every remaining job waits on a
+    // work item that cannot progress without an operator.
+    this.needsActionReport = null;
     this.createSchedulerLockLease = typeof opts.createSchedulerLockLease === "function"
       ? opts.createSchedulerLockLease
       : (lockOptions) => new SchedulerLockLease({
@@ -692,6 +778,148 @@ export class Scheduler {
   _isJobInRunScope(job) {
     return this.onlyWorkItemIds.length === 0
       || this.onlyWorkItemIds.includes(Number(job?.work_item_id));
+  }
+
+  /**
+   * The run's remaining work, when none of it can move without an operator:
+   * nothing is active, no queued job waits out a ready_at, and every job this
+   * pass could have started waits on another work item (a work-item order
+   * wait, or one of its locks) that is either completed but parked until an
+   * operator acts (queue workItemMergeParking) or unfinished with nothing of
+   * it running. A completed holder that this run merges on its own means the
+   * run can still progress while a merge is in flight or until it has gone
+   * `autoMergeStallGraceMs` without merging (_stalledAutoMergeParking); one
+   * that failed, was canceled or merged (its locks release next pass) means
+   * it can progress too. Null when it can. `autoMergeAwaitedSince` maps such
+   * a holder to when this idle stretch first saw it waiting for its merge.
+   */
+  _describeParkedUpstreamStall({
+    scannedJobIds = new Set(),
+    scanCapped = false,
+    blockedLockDetails = [],
+    trackedJobs = [],
+    autoMergeAwaitedSince = new Map(),
+  } = {}) {
+    if (scanCapped || scannedJobIds.size === 0) return null;
+    const queued = trackedJobs.filter((job) => job.status === "queued");
+    if (queued.length === 0) return null;
+    // A job backing off or waiting out a quota pause starts on its own later.
+    const nowMs = Date.now();
+    if (queued.some((job) => Date.parse(job.ready_at || "") > nowMs)) return null;
+    const waitByJob = new Map();
+    for (const detail of blockedLockDetails) {
+      if (detail?.holder_type !== "work_item" && detail?.holder_type !== "active_worker") continue;
+      const holderId = Number(detail.holder_work_item_id);
+      const jobId = Number(detail.job_id);
+      if (!Number.isSafeInteger(holderId) || holderId <= 0 || waitByJob.has(jobId)) continue;
+      waitByJob.set(jobId, detail);
+    }
+    for (const jobId of scannedJobIds) {
+      if (!waitByJob.has(Number(jobId))) return null;
+    }
+    const holders = new Map();
+    // Completed holders still expected to merge on their own. All of them are
+    // visited, so each one's grace starts this pass; the run can progress.
+    const awaitingMerge = new Set();
+    for (const detail of waitByJob.values()) {
+      const holderId = Number(detail.holder_work_item_id);
+      if (holders.has(holderId) || awaitingMerge.has(holderId)) continue;
+      const holder = getWorkItem(holderId);
+      if (!holder || holder.merge_state === "merged" || holder.status === "failed" || holder.status === "canceled") return null;
+      if (holder.status === "complete") {
+        const parking = workItemMergeParking(holder)
+          || this._stalledAutoMergeParking(holder, { autoMergeAwaitedSince, nowMs });
+        if (!parking) {
+          awaitingMerge.add(holderId);
+          continue;
+        }
+        holders.set(holderId, { work_item_id: holderId, status: holder.status, parking });
+        continue;
+      }
+      // An unfinished holder with no open job is about to settle its status.
+      const open = listJobsByWorkItem(holderId).filter((job) => !TERMINAL_JOB_STATUSES.includes(job.status));
+      if (open.length === 0) return null;
+      holders.set(holderId, { work_item_id: holderId, status: holder.status, parking: null });
+    }
+    if (awaitingMerge.size > 0) return null;
+    const waits = [...waitByJob.values()].map((detail) => ({
+      job_id: Number(detail.job_id),
+      work_item_id: Number(detail.work_item_id),
+      holder_work_item_id: Number(detail.holder_work_item_id),
+      path: detail.path || null,
+      order_wait: detail.wait_state?.reason === WORK_ITEM_ORDER_WAIT_REASON,
+    }));
+    return {
+      reason: "parked_upstreams",
+      waiting_work_item_ids: [...new Set(queued.map((job) => Number(job.work_item_id)))].sort((a, b) => a - b),
+      queued_job_count: queued.length,
+      waits,
+      holders: [...holders.values()],
+    };
+  }
+
+  /**
+   * A completed, unparked work item (this run merges it on its own) that has
+   * not merged: parked, for the needs-action finish, once it has waited
+   * `autoMergeStallGraceMs` since this idle stretch first saw it, with no
+   * merge in flight now. Nothing else would end a downstream's wait on it:
+   * the idle auto-merge fires once per idle stretch (the scheduler retries it
+   * once more when this first trips), a merge that throws releases its
+   * authorization without marking merge_failed, a deferred merge leaves it
+   * pending, and a run whose merge policy disagrees with what actually merges
+   * mid-run never merges it (run 1250b red team 2, finding 7). Null while a
+   * merge is in flight (its authorization, or the merge lock) or the grace
+   * has not run out.
+   */
+  _stalledAutoMergeParking(holder, { autoMergeAwaitedSince = new Map(), nowMs = Date.now() } = {}) {
+    const id = Number(holder?.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    if (!autoMergeAwaitedSince.has(id)) autoMergeAwaitedSince.set(id, nowMs);
+    if (holder.merge_state === "merge_authorized") {
+      const authorizedAt = Date.parse(holder.updated_at || "");
+      if (!Number.isFinite(authorizedAt) || nowMs - authorizedAt < STALE_MERGE_AUTHORIZATION_MS) return null;
+    }
+    if (mergeLockHeld(nowMs)) return null;
+    const waitedMs = nowMs - autoMergeAwaitedSince.get(id);
+    if (waitedMs < this._autoMergeStallGraceMs) return null;
+    return {
+      work_item_id: id,
+      reason: "auto_merge_stalled",
+      waited_ms: waitedMs,
+      merge_state: holder.merge_state ?? null,
+    };
+  }
+
+  /** Record the needs-action finish for a stall from _describeParkedUpstreamStall. */
+  _finishNeedsAction(stall) {
+    const holderText = stall.holders.map((holder) => {
+      if (holder.parking) return describeWorkItemMergeParking(holder.parking);
+      const upstreamIds = [...new Set(stall.waits
+        .filter((wait) => wait.work_item_id === holder.work_item_id)
+        .map((wait) => `WI#${wait.holder_work_item_id}`))];
+      return upstreamIds.length > 0
+        ? `WI#${holder.work_item_id} (${holder.status}) waits on ${upstreamIds.join(", ")}`
+        : `WI#${holder.work_item_id} (${holder.status}) has no job this run can start`;
+    });
+    const waitingText = stall.waiting_work_item_ids.map((id) => `WI#${id}`).join(", ");
+    const message = `Run needs action: ${stall.queued_job_count} queued job(s) in ${waitingText} wait on work that cannot progress without an operator: ${holderText.join("; ")}`;
+    this.needsActionReport = { ...stall, message };
+    this._log(message, "yellow");
+    for (const workItemId of stall.waiting_work_item_ids) {
+      logEvent({
+        work_item_id: workItemId,
+        event_type: EVENT_TYPES.SCHEDULER_RUN_NEEDS_ACTION,
+        actor_type: EVENT_ACTORS.SCHEDULER,
+        actor_id: this.ownerId,
+        message,
+        event_json: JSON.stringify({
+          reason: stall.reason,
+          waits: stall.waits.filter((wait) => wait.work_item_id === workItemId),
+          holders: stall.holders,
+        }),
+      });
+    }
+    return this.needsActionReport;
   }
 
   _reconcileFileLaneWaits() {
@@ -1665,6 +1893,13 @@ export class Scheduler {
 
     const activeWorkers = new Map(); // jobId -> { promise, job, startTime }
     const queueLockIndex = createHeldQueueLockIndex();
+    // The work-item order, the lease check and lane-wait reconciliation all
+    // consult this run's merge policy for completed work items; restored when
+    // the loop exits.
+    const previousAutoMergePolicy = this._completeWorkItemAutoMergePolicy === undefined
+      ? undefined
+      : setCompleteWorkItemAutoMergePolicy(this._completeWorkItemAutoMergePolicy);
+    this.needsActionReport = null;
     // Durable current waiter truth is rebuilt before the first published
     // scheduler snapshot so restart never loses file-lane contention.
     this._reconcileFileLaneWaits();
@@ -1748,6 +1983,14 @@ export class Scheduler {
     try {
       let idleCount = 0;
       let lastProgressTime = Date.now(); // progress watchdog
+      // Since when every remaining job waits on work items that cannot
+      // progress without an operator (null while anything else can move).
+      let parkedStallSince = null;
+      // Per idle stretch: when each completed holder this run should merge
+      // was first seen waiting for its merge, and whether the idle
+      // auto-merge was retried for one that stalled.
+      const autoMergeAwaitedSince = new Map();
+      let autoMergeRetried = false;
       const headlessNonHumanWaitingLogged = new Set();
       const headlessOrphanedReviewParkedLogged = new Set();
 
@@ -1958,6 +2201,8 @@ export class Scheduler {
               listJobs,
               isPushOfferJob,
               isPostMergeDbTaskJob,
+              isMergeVerificationReviewJob,
+              isWorkItemDispositionGateJob,
               parseJobPayload,
               getJob,
               getHumanGate,
@@ -2005,6 +2250,17 @@ export class Scheduler {
           } catch (reconcileErr) {
             this._log(`Human-gate reconcile failed: ${reconcileErr.message}`, "yellow");
           }
+          // Failed and merge-deferred work items own a disposition gate; open
+          // one a transition missed and settle the ones whose question went away.
+          try {
+            const dispositions = reconcileWorkItemDispositionGates();
+            const opened = dispositions.failure_gates_opened + dispositions.upstream_gates_opened;
+            if (opened > 0 || dispositions.held_db_tasks_canceled > 0 || dispositions.gates_settled > 0 || dispositions.gates_retired > 0) {
+              this._log(`Work-item disposition gates: ${opened} opened, ${dispositions.gates_settled} settled, ${dispositions.gates_retired} retired, ${dispositions.held_db_tasks_canceled} orphaned database task(s) canceled`, "yellow");
+            }
+          } catch (dispositionErr) {
+            this._log(`Work-item disposition gate reconcile failed: ${dispositionErr.message}`, "yellow");
+          }
           if (this._hasDisplay) {
             try {
               const resurfaced = resurfaceParkedHumanGates({ snoozeSec: readHumanGateResnoozeSec() });
@@ -2025,10 +2281,14 @@ export class Scheduler {
           // Publication offers survive run closeout for later Bridge/manual
           // action, but they are not executable work and must not keep the
           // scheduler in an idle/waiting loop. Neither may a database task
-          // held for its work item's merge or its post-merge gate: the merge
-          // happens at closeout or a later review, never inside this loop.
-          .filter((job) => !isPushOfferJob(job))
-          .filter((job) => !isPostMergeHeldDbJob(job) && !isPostMergeDbGateJob(job));
+          // held for its work item's merge, its post-merge gate, or a merge
+          // verification review: the merge happens at closeout or a later
+          // review, never inside this loop. Nor a work-item disposition gate:
+          // its work item is already failed or complete, and the gate stays
+          // parked for the phone or CLI.
+          .filter((job) => !isPushOfferJob(job) && !isMergeVerificationReviewJob(job))
+          .filter((job) => !isPostMergeHeldDbJob(job) && !isPostMergeDbGateJob(job))
+          .filter((job) => !isWorkItemDispositionGateJob(job));
         const activeBackgroundJobs = [...activeWorkers.values()]
           .map((entry) => entry.job)
           .filter(isRunBackgroundJob);
@@ -2305,6 +2565,8 @@ export class Scheduler {
         const maxCandidateScan = MAX_RUNNABLE_SCAN_PER_TICK * 4;
         let candidateCount = 0;
         let stopCandidateScan = false;
+        // Loaded lazily by the first repo-writing candidate of this pass.
+        let workItemOrder = null;
         const blockedLockDetails = [];
         const rememberBlockedLock = (detail) => {
           if (!detail) return;
@@ -2472,6 +2734,30 @@ export class Scheduler {
                 skipJobIds.add(job.id);
                 continue;
               }
+              // Work-item order (NEW-H5): a work item that plans edits to
+              // files an earlier unmerged work item plans or holds waits
+              // until that one merges, fails or is canceled, then starts
+              // from the target branch. This runs before the lock check so
+              // overlapping work items are ordered instead of handing locks
+              // (and unmerged commits) between them. The order is one total
+              // order rebuilt per pass, so these waits cannot cycle.
+              workItemOrder ??= loadWorkItemOrder(undefined, { runnableWorkItemIds: this.onlyWorkItemIds });
+              const orderConflict = findWorkItemOrderConflict(job, workItemOrder);
+              if (orderConflict) {
+                rememberBlockedLock({
+                  job_id: job.id,
+                  work_item_id: job.work_item_id,
+                  holder_type: "work_item",
+                  holder_id: null,
+                  holder_work_item_id: orderConflict.lock.work_item_id,
+                  path: orderConflict.candidate.path,
+                  lock_kind: orderConflict.candidate.lock_kind,
+                  wait_state: orderConflict.wait_state,
+                  message: `#${job.id} waits for WI#${orderConflict.lock.work_item_id} to merge; both plan edits to ${orderConflict.candidate.path}`,
+                });
+                skipJobIds.add(job.id);
+                continue;
+              }
               // Cross-WI conflict check: file scope overlap. Write paths are
               // cached in queueLockIndex and updated by queue-state wakeups.
               const jobScope = queueLockIndex.scopeForJob(job);
@@ -2600,7 +2886,10 @@ export class Scheduler {
           const leaseScope = jobNeedsWriteLocks(job)
             ? queueLockIndex.scopeForJob(job)
             : null;
-          let lease = this.leaseManager.acquireWithLocks(job, this.ownerId, leaseScope, this.leaseSec, { skipConflictCheck: true });
+          let lease = this.leaseManager.acquireWithLocks(job, this.ownerId, leaseScope, this.leaseSec, {
+            skipConflictCheck: true,
+            runnableWorkItemIds: this.onlyWorkItemIds,
+          });
           if (!lease) {
             skipJobIds.add(job.id);
             continue;
@@ -2746,6 +3035,11 @@ export class Scheduler {
           blockedLockDetails: agentLockDetails.slice(0, 5),
         });
 
+        if (launched || activeWorkers.size > 0) {
+          parkedStallSince = null;
+          autoMergeAwaitedSince.clear();
+          autoMergeRetried = false;
+        }
         if (!launched && activeWorkers.size === 0) {
           // Nothing running and nothing to start. Reuse the tracked rows from
           // this tick so scoped runs ignore unrelated queued/active jobs when
@@ -2766,6 +3060,39 @@ export class Scheduler {
           if (!canProgress) {
             this._invokeCallback("onDone", onDone);
             break;
+          }
+
+          // Queued work alone keeps the loop alive, so a run whose remaining
+          // jobs all wait on work items that cannot progress without an
+          // operator would idle forever (finding 1, run 1250b: an order wait
+          // on WI 169, parked behind its upstream gate). After a grace period
+          // the run finishes as needs-action, naming those work items.
+          const stall = hasActive
+            ? null
+            : this._describeParkedUpstreamStall({
+              scannedJobIds: scanExcludeJobIds,
+              scanCapped: candidateCount >= maxCandidateScan,
+              blockedLockDetails,
+              trackedJobs: trackedJobsForCloseout,
+              autoMergeAwaitedSince,
+            });
+          if (stall) {
+            parkedStallSince ??= Date.now();
+            // onIdle (which starts the idle auto-merge) fires once per idle
+            // stretch; give a holder whose merge stalled one more attempt
+            // before the run gives up on it.
+            if (onIdle && !autoMergeRetried
+              && stall.holders.some((holder) => holder.parking?.reason === "auto_merge_stalled")) {
+              autoMergeRetried = true;
+              this._invokeCallback("onIdle", onIdle, trackedJobsForCloseout, { retry: "auto_merge_stalled" });
+            }
+            if (Date.now() - parkedStallSince >= this._parkedStallGraceMs) {
+              this._finishNeedsAction(stall);
+              this._invokeCallback("onDone", onDone, this.needsActionReport);
+              break;
+            }
+          } else {
+            parkedStallSince = null;
           }
 
           idleCount++;
@@ -2917,6 +3244,7 @@ export class Scheduler {
       }
 
     } finally {
+      if (previousAutoMergePolicy !== undefined) setCompleteWorkItemAutoMergePolicy(previousAutoMergePolicy);
       this._stopRunLoopKeepAlive();
       unsubscribeQueueWake();
       const shutdownReason = this._lockLost ? "lock_lost" : (this._stopRequested ? "stop_requested" : "run_loop_exit");

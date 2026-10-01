@@ -5,7 +5,7 @@ import {
   UNMERGED_WORK_ITEM_MERGE_STATES_SQL,
 } from "../../../catalog/work-item.js";
 import { Scope } from "../../../shared/scope/classes/Scope.js";
-import { MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
+import { DEADLOCK_TERMINAL_STATUSES, MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
 import { isUnderRoot, rootsOverlap } from "../../../shared/scope/functions/path.js";
 import { parseJobPayload } from "./payload.js";
 import {
@@ -25,6 +25,13 @@ import {
   sharedTrunkClaimsEnabled,
   warnForPeerClaimAtToolWrite,
 } from "./cross-instance-claims.js";
+import { getWorkItemMergeDependencies } from "./cross-wi-deps.js";
+import { findMergeHoldingGate } from "./merge-holding-gate.js";
+import {
+  buildWorkItemOrder,
+  findWorkItemOrderUpstream,
+  WORK_ITEM_ORDER_WAIT_REASON,
+} from "./work-item-order.js";
 
 const JOB_LOCK_RELEASE_STATUSES = new Set(["queued", ...TERMINAL_JOB_STATUSES]);
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
@@ -212,7 +219,7 @@ function waitDescriptorForConflict(job, conflict) {
   if (!job || !conflict) return null;
   const pathValue = conflict.candidate?.path || conflict.lock?.path;
   const lockKind = conflict.candidate?.lock_kind || conflict.lock?.lock_kind || "file";
-  return normalizedWaitDescriptor({
+  const descriptor = normalizedWaitDescriptor({
     waiter_job_id: job.id,
     waiter_work_item_id: job.work_item_id,
     holder_type: conflict.type === "work_item" ? "work_item" : "job",
@@ -221,6 +228,7 @@ function waitDescriptorForConflict(job, conflict) {
     path: pathValue,
     lock_kind: lockKind,
   });
+  return descriptor && conflict.wait_state ? { ...descriptor, wait_state: conflict.wait_state } : descriptor;
 }
 
 function canonicalWaitState(value) {
@@ -313,20 +321,27 @@ export function recordFileLaneWait(detail = {}) {
     ts,
   );
   if (!existing) {
+    const orderWait = descriptor.holder_type === "work_item"
+      && detail.wait_state?.reason === WORK_ITEM_ORDER_WAIT_REASON;
     logEvent({
       work_item_id: descriptor.waiter_work_item_id,
       job_id: descriptor.waiter_job_id,
       event_type: EVENT_TYPES.FILE_LANE_WAITING,
       actor_type: EVENT_ACTORS.SCHEDULER,
-      message: "Job is waiting for a file lane",
+      message: orderWait
+        ? `Job is waiting for WI#${descriptor.holder_work_item_id} to merge, fail or be canceled; both plan edits to ${descriptor.path}`
+        : "Job is waiting for a file lane",
       event_json: JSON.stringify({
         event_kind: "lane_state",
         state: "waiting",
-        summary: `Waiting for file lane ${fileLaneLabel(descriptor.path)}`,
+        summary: orderWait
+          ? `Waiting for WI#${descriptor.holder_work_item_id} to merge (${fileLaneLabel(descriptor.path)})`
+          : `Waiting for file lane ${fileLaneLabel(descriptor.path)}`,
         lane_id: descriptor.lane_id,
         waiter_job_id: descriptor.waiter_job_id,
         holder_job_id: descriptor.holder_job_id,
         holder_work_item_id: descriptor.holder_work_item_id,
+        ...(orderWait ? { reason: WORK_ITEM_ORDER_WAIT_REASON, upstream_work_item_id: descriptor.holder_work_item_id } : {}),
       }),
     });
   }
@@ -387,7 +402,8 @@ export function listFileLaneWaits({ workItemId = null } = {}) {
 export function reconcileFileLaneWaits() {
   const db = getDb();
   if (!db.inTransaction) return runImmediateTransaction(db, () => reconcileFileLaneWaits());
-  const snapshot = listActiveFileLocks();
+  const locks = listActiveFileLocks();
+  const snapshot = { ...locks, work_item_order: loadWorkItemOrder(db, { workItemLocks: locks.work_items }) };
   const desired = new Map();
   let lastId = 0;
   for (;;) {
@@ -538,6 +554,154 @@ export function workItemCanReleaseFileLock(workItemId, path, lockKind = "file") 
   return { ok: true, blockers: [], reason: "idle_path" };
 }
 
+const REJECTED_WRITER_VERDICTS = new Set(["fail", "needs_replan", "needs_review"]);
+// Terminal without success: a writer that ended this way left nothing to sync.
+const FAILED_WRITER_STATUSES = new Set(DEADLOCK_TERMINAL_STATUSES);
+
+/**
+ * Why a work item's current content of `path` must not be copied into another
+ * work item, or null. Content from a failed or canceled work item is
+ * abandoned, and content whose latest writer (the last job of the work item
+ * that ran with the path in scope) was rejected by its assessor or did not
+ * succeed is not reviewed work (NEW-H5: WI 170 synced WI 167's planner.js the
+ * second its writer was assessed needs_replan).
+ */
+export function crossWiSyncSourceRejection(workItemId, path, lockKind = "file") {
+  const db = getDb();
+  const source = db.prepare(`SELECT id, status FROM work_items WHERE id = ?`).get(Number(workItemId));
+  if (!source) return null;
+  if (WI_LOCK_RELEASE_STATUSES.has(source.status)) return `upstream_${source.status}`;
+  const normalizedPath = normalizeLockPath(path);
+  if (!normalizedPath) return null;
+  // Jobs that ran (or were assessed); one canceled before it ran wrote nothing.
+  const writers = db.prepare(`
+    SELECT *
+    FROM jobs
+    WHERE work_item_id = ?
+      AND job_type IN (${QUEUE_LOCKING_JOB_TYPES_SQL})
+      AND (attempt_count > 0 OR status = 'succeeded' OR assessor_verdict != 'not_assessed')
+    ORDER BY id DESC
+  `).all(source.id, ...QUEUE_LOCKING_JOB_TYPES_LIST);
+  const latest = writers.find((job) => jobScopeTouchesPath(job, normalizedPath, lockKind === "root" ? "root" : "file"));
+  if (!latest) return null;
+  if (REJECTED_WRITER_VERDICTS.has(latest.assessor_verdict)) return `writer_${latest.assessor_verdict}`;
+  if (FAILED_WRITER_STATUSES.has(latest.status)) return `writer_${latest.status}`;
+  return null;
+}
+
+// `(workItem) => boolean`: whether this process merges a completed work item
+// without an operator before its run loop ends (RunSession passes what its
+// idle auto-merge merges: automatic merge on, iterative work item not still
+// looping). Unset, every completed work item is assumed to merge.
+let completeWorkItemAutoMergePolicy = null;
+
+/**
+ * Set how this process merges completed work items (see
+ * workItemMergeParking). Accepts a predicate, a boolean, or null to reset.
+ * Returns the previous policy so a caller can restore it.
+ */
+export function setCompleteWorkItemAutoMergePolicy(policy = null) {
+  const previous = completeWorkItemAutoMergePolicy;
+  if (typeof policy === "function") completeWorkItemAutoMergePolicy = policy;
+  else if (typeof policy === "boolean") completeWorkItemAutoMergePolicy = () => policy;
+  else completeWorkItemAutoMergePolicy = null;
+  return previous;
+}
+
+function completeWorkItemAutoMerges(workItem) {
+  if (!completeWorkItemAutoMergePolicy) return true;
+  try {
+    return completeWorkItemAutoMergePolicy(workItem) !== false;
+  } catch {
+    return true;
+  }
+}
+
+function readWorkItemRow(db, id) {
+  return db.prepare(`SELECT * FROM work_items WHERE id = ?`).get(Number(id)) || null;
+}
+
+/**
+ * Why a completed, unmerged work item will not merge until an operator acts,
+ * or null when it merges on its own during this run (finding 1, run 1250b).
+ * Such a "parked" work item is not progressing toward merge, so it must not
+ * hold other work items in the work-item order: an open gate on it (a
+ * cross-WI upstream disposition, a merge verification review, or any gate
+ * whose answer refuses automatic merge), a failed merge, a merge dependency
+ * on a failed or canceled upstream, automatic merge being off for it, or a
+ * merge dependency on an upstream that is itself parked. Returns
+ * `{ work_item_id, reason, ... }`; see describeWorkItemMergeParking.
+ */
+export function workItemMergeParking(workItemOrId, { db = getDb(), visited = null } = {}) {
+  const workItem = workItemOrId && typeof workItemOrId === "object"
+    ? workItemOrId
+    : readWorkItemRow(db, workItemOrId);
+  if (!workItem || !completeWorkItemHoldsFileLocks(workItem)) return null;
+  const id = Number(workItem.id);
+  // The same gate authorizeWorkItemAutoMerge refuses on (merge-holding-gate.js).
+  const gate = findMergeHoldingGate(id, db);
+  if (gate) {
+    return {
+      work_item_id: id,
+      reason: "human_gate",
+      gate_job_id: gate.gate_job_id,
+      gate_state: gate.gate_state,
+      review_type: gate.review_type,
+      resolution_action: gate.resolution_action,
+    };
+  }
+  if (workItem.merge_state === "merge_failed") return { work_item_id: id, reason: "merge_failed" };
+  const seen = visited || new Set([id]);
+  const liveUpstreams = [];
+  for (const dep of getWorkItemMergeDependencies(workItem)) {
+    const sourceId = Number(dep.source_work_item_id);
+    if (!Number.isSafeInteger(sourceId) || sourceId <= 0 || sourceId === id) continue;
+    const source = readWorkItemRow(db, sourceId);
+    if (!source || source.merge_state === "merged") continue;
+    if (WI_LOCK_RELEASE_STATUSES.has(source.status)) {
+      return { work_item_id: id, reason: "upstream_failed", upstream_work_item_id: sourceId, upstream_status: source.status };
+    }
+    liveUpstreams.push(source);
+  }
+  if (!completeWorkItemAutoMerges(workItem)) return { work_item_id: id, reason: "not_auto_merged" };
+  for (const source of liveUpstreams) {
+    const sourceId = Number(source.id);
+    if (seen.has(sourceId)) continue;
+    seen.add(sourceId);
+    const upstream = workItemMergeParking(source, { db, visited: seen });
+    if (upstream) return { work_item_id: id, reason: "upstream_parked", upstream_work_item_id: sourceId, upstream };
+  }
+  return null;
+}
+
+/** Operator-facing text for a workItemMergeParking result. */
+export function describeWorkItemMergeParking(parking) {
+  if (!parking) return "";
+  const label = `WI#${parking.work_item_id}`;
+  switch (parking.reason) {
+    case "human_gate": {
+      const kind = parking.review_type ? ` ${parking.review_type}` : "";
+      return parking.gate_state === "resolved"
+        ? `${label} is held out of automatic merge by gate #${parking.gate_job_id}${kind} (answered ${parking.resolution_action})`
+        : `${label} waits on operator gate #${parking.gate_job_id}${kind}`;
+    }
+    case "merge_failed":
+      return `${label} failed to merge and waits for an operator`;
+    case "upstream_failed":
+      return `${label} must merge after WI#${parking.upstream_work_item_id}, which ${parking.upstream_status}`;
+    case "not_auto_merged":
+      return `${label} is not merged automatically by this run (it waits for merge review)`;
+    case "upstream_parked":
+      return `${label} must merge after WI#${parking.upstream_work_item_id}; ${describeWorkItemMergeParking(parking.upstream)}`;
+    case "auto_merge_stalled": {
+      const waited = Number.isFinite(Number(parking.waited_ms)) ? ` for ${Math.round(Number(parking.waited_ms) / 1000)}s` : "";
+      return `${label} completed but has not merged automatically (no merge in flight${waited}); merge or review it`;
+    }
+    default:
+      return `${label} cannot merge without an operator`;
+  }
+}
+
 function activeJobLocks(db, {
   workItemId = null,
   usePathTouchScope = false,
@@ -592,10 +756,169 @@ function activeJobLocks(db, {
   return rows;
 }
 
-export function findWriteLockConflict(job, scope = getJobWriteScope(job), snapshot = null) {
+/**
+ * Load the work-item order (see work-item-order.js) from queue state. A
+ * work item's planned scope is the path-touch scope of its non-terminal
+ * repo-writing jobs; jobs with no declared scope are left to the lock layer,
+ * which already serializes them against everything. A scheduler scoped to
+ * some work items passes them as `runnableWorkItemIds`: an unstarted work item
+ * it will not run cannot start now, so it does not hold the scoped ones back.
+ *
+ * Only work items that progress toward merge on their own are ordered: active
+ * ones, and completed ones this run merges. A completed work item parked
+ * until an operator acts (workItemMergeParking) is left out, so it never holds
+ * another work item in the order (finding 1, run 1250b: an order wait on WI
+ * 169, parked behind its upstream gate, never released and the headless run
+ * never finished). The lock layer still sees its held locks: a job that
+ * needs one of them waits until the operator settles the parked work item
+ * (the scheduler finishes the run as needs-action naming it and its gate),
+ * and nothing is copied out of it (run 1250b red team 2, finding 1). The
+ * parked work items are listed in `order.parked`.
+ *
+ * A job counts toward its work item's "can start now" tier only once its
+ * ready_at has passed: a work item whose only startable job is backing off or
+ * waiting out a provider quota pause does not go ahead of one that can start
+ * now. (A work item that already ran a job holds its locks and keeps its place
+ * by first lock time; this only reorders work items that have not started.)
+ */
+export function loadWorkItemOrder(db = getDb(), { workItemLocks = null, runnableWorkItemIds = null } = {}) {
+  const runnable = Array.isArray(runnableWorkItemIds) && runnableWorkItemIds.length > 0
+    ? new Set(runnableWorkItemIds.map(Number))
+    : null;
+  const activeWorkItemSql = `
+    wi.status NOT IN ('failed','canceled')
+    AND COALESCE(wi.merge_state, '') != 'merged'
+    AND (
+      wi.status != 'complete'
+      OR (
+        COALESCE(TRIM(wi.branch_name), '') != ''
+        AND COALESCE(wi.merge_state, '') IN ${COMPLETE_WI_LOCK_HOLDING_MERGE_STATES_SQL}
+      )
+    )
+  `;
+  const candidates = db.prepare(`
+    SELECT
+      wi.id,
+      wi.status,
+      wi.merge_state,
+      wi.branch_name,
+      wi.metadata_json,
+      (
+        SELECT MIN(first_lock.acquired_at)
+        FROM work_item_file_locks first_lock
+        WHERE first_lock.work_item_id = wi.id
+      ) AS first_lock_at
+    FROM work_items wi
+    WHERE ${activeWorkItemSql}
+  `).all();
+  const parked = new Map();
+  for (const wi of candidates) {
+    if (wi.status !== "complete") continue;
+    const parking = workItemMergeParking(wi, { db });
+    if (parking) parked.set(Number(wi.id), parking);
+  }
+  const withParked = (order) => Object.assign(order, { parked });
+  const workItems = candidates.filter((wi) => !parked.has(Number(wi.id)));
+  if (workItems.length === 0) return withParked(buildWorkItemOrder([]));
+  const entries = new Map(workItems.map((wi) => [Number(wi.id), {
+    id: Number(wi.id),
+    status: wi.status,
+    merge_state: wi.merge_state ?? null,
+    started: wi.first_lock_at != null,
+    first_lock_at: wi.first_lock_at ?? null,
+    ready: false,
+    planned: [],
+    held: [],
+    merge_after: getWorkItemMergeDependencies(wi).map((dep) => Number(dep.source_work_item_id)),
+  }]));
+  // `dispatchable`: queued, past its ready_at, with every hard dependency
+  // met, so it could start now (as opposed to waiting on a plan approval
+  // gate, earlier jobs, a retry backoff or a provider quota pause).
+  const jobs = db.prepare(`
+    SELECT
+      j.*,
+      CASE WHEN j.status = 'queued' AND COALESCE(j.ready_at, '') <= ? AND NOT EXISTS (
+        SELECT 1
+        FROM job_dependencies jd
+        JOIN jobs dep ON dep.id = jd.depends_on_job_id
+        WHERE jd.job_id = j.id
+          AND jd.dependency_kind = 'hard'
+          AND dep.status != 'succeeded'
+      ) THEN 1 ELSE 0 END AS dispatchable
+    FROM jobs j
+    JOIN work_items wi ON wi.id = j.work_item_id
+    WHERE j.job_type IN (${QUEUE_LOCKING_JOB_TYPES_SQL})
+      AND j.status NOT IN (${TERMINAL_JOB_STATUSES.map(() => "?").join(",")})
+      AND ${activeWorkItemSql}
+    ORDER BY j.id
+  `).all(now(), ...QUEUE_LOCKING_JOB_TYPES_LIST, ...TERMINAL_JOB_STATUSES);
+  for (const job of jobs) {
+    const entry = entries.get(Number(job.work_item_id));
+    if (!entry || !jobNeedsWriteLocks(job)) continue;
+    if (job.dispatchable === 1 && (!runnable || runnable.has(entry.id))) entry.ready = true;
+    const scope = getJobPathTouchScope(job);
+    if (scope.unknown) continue;
+    entry.planned.push(...scopeToLockRows(scope));
+  }
+  for (const lock of workItemLocks || activeWiLocks(db)) {
+    entries.get(Number(lock.work_item_id))?.held.push({ path: lock.path, lock_kind: lock.lock_kind });
+  }
+  return withParked(buildWorkItemOrder([...entries.values()]));
+}
+
+/**
+ * Work-item order gate for a repo-writing job: the earliest unmerged work
+ * item ordered before this job's work item whose planned scope or held locks
+ * overlap this work item's planned scope (this job's own scope included).
+ * The job waits until that work item merges, fails or is canceled, then
+ * starts from the target branch (dev and fix setup merges it in), so no
+ * unmerged commits are synced across work items. The gate is per work item:
+ * a sibling job with a disjoint scope waits too, so the work item takes no
+ * work-item lock an earlier one may need later (run 1250b red team 2,
+ * finding 4). Assessment barriers only re-check finished work and never wait.
+ */
+export function findWorkItemOrderConflict(job, order = null) {
+  if (!jobNeedsWriteLocks(job) || jobNeedsAssessmentBarrier(job)) return null;
+  const resolved = order || loadWorkItemOrder();
+  const ownScope = getJobPathTouchScope(job);
+  const hit = findWorkItemOrderUpstream(
+    resolved,
+    job.work_item_id,
+    ownScope.unknown ? [] : scopeToLockRows(ownScope),
+  );
+  if (!hit) return null;
+  return {
+    type: "work_item",
+    work_item_order: true,
+    lock: {
+      id: null,
+      lock_tier: "work_item_order",
+      job_id: null,
+      work_item_id: hit.upstream.id,
+      work_item_status: hit.upstream.status ?? null,
+      merge_state: hit.upstream.merge_state ?? null,
+      path: hit.holder.path,
+      lock_kind: hit.holder.lock_kind,
+    },
+    candidate: { path: hit.candidate.path, lock_kind: hit.candidate.lock_kind },
+    wait_state: { reason: WORK_ITEM_ORDER_WAIT_REASON, upstream_work_item_id: hit.upstream.id },
+  };
+}
+
+export function findWriteLockConflict(job, scope = getJobWriteScope(job), snapshot = null, {
+  workItemOrder = true,
+  runnableWorkItemIds = null,
+} = {}) {
   if (!jobNeedsWriteLocks(job) || !hasWriteScope(scope)) return null;
   const db = getDb();
   if (!jobNeedsAssessmentBarrier(job)) {
+    if (workItemOrder) {
+      const orderConflict = findWorkItemOrderConflict(
+        job,
+        snapshot?.work_item_order || loadWorkItemOrder(db, { runnableWorkItemIds }),
+      );
+      if (orderConflict) return orderConflict;
+    }
     const wiConflict = locksConflict(scope, snapshot?.work_items || activeWiLocks(db), {
       allowWorkItemId: job.work_item_id,
       ignoreSameWorkItemLocks: true,
@@ -913,13 +1236,16 @@ export function verifyOrAcquireJobWriteLockForPath(jobId, filePath, { source = "
   if (jobHoldsWriteLockForPath(job.id, target)) return { ok: true, held: true };
 
   const scope = { files: [target], roots: [] };
+  // The work-item order gates when a job starts; once running, it is only
+  // refused paths that another work item or job actually holds.
+  const toolTimeConflict = () => findWriteLockConflict(job, scope, null, { workItemOrder: false });
   return runImmediateTransaction(db, () => {
     if (jobHoldsWriteLockForPath(job.id, target)) return { ok: true, held: true };
-    let conflict = findWriteLockConflict(job, scope);
+    let conflict = toolTimeConflict();
     if (conflict) {
       const cleaned = cleanupStaleFileLocks();
       if (cleaned.job_locks_released > 0 || cleaned.wi_locks_released > 0) {
-        conflict = findWriteLockConflict(job, scope);
+        conflict = toolTimeConflict();
       }
     }
     if (conflict) {
@@ -960,6 +1286,9 @@ export function verifyOrAcquireJobWriteLockForPath(jobId, filePath, { source = "
 function lockConflictMessage(job, conflict) {
   if (!conflict) return null;
   const path = conflict.candidate?.path || conflict.lock?.path || "unknown";
+  if (conflict.work_item_order) {
+    return `Write scope blocked: WI#${conflict.lock.work_item_id} also plans edits to ${path} and is ordered first; waiting for it to merge`;
+  }
   if (conflict.type === "work_item") {
     return `Write scope blocked: ${path} is held by WI#${conflict.lock.work_item_id}`;
   }
@@ -1019,11 +1348,12 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
     // when it passes skipConflictCheck so a same-WI assessment barrier cannot
     // race with a disjoint writer between the scan and lease mutation.
     if (needsWriteLocks && hasScope) {
-      let conflict = findWriteLockConflict(fresh, scope);
+      const conflictOpts = { runnableWorkItemIds: opts?.runnableWorkItemIds ?? null };
+      let conflict = findWriteLockConflict(fresh, scope, null, conflictOpts);
       if (conflict) {
         const cleaned = cleanupStaleFileLocks();
         if (cleaned.job_locks_released > 0 || cleaned.wi_locks_released > 0) {
-          conflict = findWriteLockConflict(fresh, scope);
+          conflict = findWriteLockConflict(fresh, scope, null, conflictOpts);
         }
       }
       if (conflict) {

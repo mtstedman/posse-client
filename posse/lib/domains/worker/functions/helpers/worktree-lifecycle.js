@@ -13,6 +13,7 @@ import { TERMINAL_WORK_ITEM_STATUSES } from "../../../queue/functions/common.js"
 import {
   clearWaitingLanePreparedAssetProof,
   completeAttempt,
+  crossWiSyncSourceRejection,
   getJob,
   getWaitingLanePreparation,
   getWorkItem,
@@ -22,6 +23,7 @@ import {
   setWorkItemBranch,
   poisonWaitingLanePreparation,
   retireWaitingLanePreparation,
+  rollbackPendingCrossWiSyncHandoffsForJob,
   storeArtifact,
   updateJobPayload,
 } from "../../../queue/functions/index.js";
@@ -452,8 +454,40 @@ async function rollbackCrossWiSyncPathsAsync(wtPath, paths = [], { signal = null
   }
 }
 
+// A sync prepared before work items were ordered (NEW-H5) must not copy
+// content whose source failed or was rejected since: drop it with the merge
+// dependency it recorded, so this work item neither carries the edits nor
+// waits on their merge. For dev and fix jobs, a source that merged meanwhile
+// (the job waited for it in the work-item order) is already on the target
+// this setup merged in, and its branch may be gone.
+function dropRejectedCrossWiFileSyncs(worker, job) {
+  const fresh = getJob(job.id) || job;
+  const mergesTarget = job.job_type === "dev" || job.job_type === "fix";
+  const syncSourceReason = (sync) => {
+    if (mergesTarget && getWorkItem(sync.source_work_item_id)?.merge_state === "merged") return "upstream_merged";
+    return crossWiSyncSourceRejection(sync.source_work_item_id, sync.path, sync.lock_kind);
+  };
+  const rejected = pendingCrossWiFileSyncs(worker.parsePayload(fresh))
+    .map((sync) => ({ sync, reason: syncSourceReason(sync) }))
+    .filter((entry) => entry.reason);
+  if (rejected.length === 0) return;
+  for (const reason of new Set(rejected.map((entry) => entry.reason))) {
+    const keys = new Set(rejected
+      .filter((entry) => entry.reason === reason)
+      .map(({ sync }) => `${sync.source_work_item_id}:${sync.path}`));
+    rollbackPendingCrossWiSyncHandoffsForJob(job.id, `cross_wi_sync_dropped_${reason}`, {
+      filter: (sync) => keys.has(`${sync.source_work_item_id}:${normalizeRepoPath(sync.path)}`),
+    });
+  }
+  job.payload_json = (getJob(job.id) || fresh).payload_json;
+  for (const { sync, reason } of rejected) {
+    worker.emit(job.id, `${C.yellow}[system] WI#${job.work_item_id} dropped cross-WI sync of ${sync.path} from WI#${sync.source_work_item_id} (${reason}); it edits the path from its own branch${C.reset}`);
+  }
+}
+
 export async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal = null } = {}) {
   if (!wtPath) return;
+  dropRejectedCrossWiFileSyncs(worker, job);
   const payload = worker.parsePayload(job);
   const syncs = pendingCrossWiFileSyncs(payload);
   if (syncs.length === 0) return;
