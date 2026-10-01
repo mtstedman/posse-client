@@ -554,8 +554,13 @@ function completionAccountingFields({
   };
 }
 
+// The live-channel contract asks agents to open with a START line and close
+// with a FINISH line. The marker only tells the agent when to speak; the
+// operator log shows the sentence without it.
+const AGENT_COMMENTARY_MARKER_RE = /^(?:START|FINISH)\b\s*(?:[:\-–—]\s*)?/;
+
 function agentCommentaryFields(value) {
-  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  const text = String(value ?? "").replace(/\s+/g, " ").trim().replace(AGENT_COMMENTARY_MARKER_RE, "").trim();
   if (!text) return null;
   const summary = text.slice(0, AGENT_ACTIVITY_LIMITS.SUMMARY_CHARS).trim();
   const detail = text.length > summary.length
