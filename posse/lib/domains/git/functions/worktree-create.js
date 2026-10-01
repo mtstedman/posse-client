@@ -81,6 +81,25 @@ export async function ensureDetachedReadOnlyWorktreeAsync(projectDir, {
   return targetDir;
 }
 
+// Counterpart of ensureDetachedReadOnlyWorktreeAsync. These checkouts live
+// outside the managed worktree root, so plain `git worktree remove --force`
+// unregisters and deletes them; when git cannot (e.g. a lost gitfile), delete
+// the directory and prune its registration — but never a directory holding a
+// .git directory, which would be a primary checkout rather than a worktree.
+export async function removeDetachedReadOnlyWorktreeAsync(projectDir, worktreeDir, { signal = null } = {}) {
+  const target = path.resolve(worktreeDir);
+  try {
+    await gitExecAsync(["worktree", "remove", "--force", target], projectDir, { signal });
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    const gitEntry = await fs.promises.lstat(path.join(target, ".git")).catch(() => null);
+    if (gitEntry?.isDirectory()) throw err;
+    await fs.promises.rm(target, { recursive: true, force: true });
+    await gitExecAsync(["worktree", "prune"], projectDir, { signal });
+  }
+  return !fs.existsSync(target);
+}
+
 function worktreeReuseDeferredError(message) {
   const err = new Error(message);
   err.code = "WORKTREE_ACTIVE_SIBLING_LOCKS";

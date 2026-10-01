@@ -1,7 +1,8 @@
-import { SETTING_KEYS } from "../../../../catalog/settings.js";
+import { RUNTIME_DB_COMPACTION_POLICY, SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
+import { getLiveSchedulerBlockMessage } from "../../../queue/functions/locks.js";
 import { getSetting } from "../../../queue/functions/settings.js";
 
 export const DEFAULT_RUNTIME_RETENTION_DAYS = 90;
@@ -216,6 +217,51 @@ export function maybeRunRuntimeRetention({
     log.warn("admin", "Runtime DB retention failed", { error: message });
     return { attempted: true, ok: false, error: message };
   }
+}
+
+function runtimeDbPageStats(db) {
+  const pageSize = Number(db.pragma("page_size", { simple: true })) || 0;
+  const pageCount = Number(db.pragma("page_count", { simple: true })) || 0;
+  const freelistCount = Number(db.pragma("freelist_count", { simple: true })) || 0;
+  return {
+    pageCount,
+    freelistCount,
+    bytes: pageSize * pageCount,
+    freelistRatio: pageCount > 0 ? freelistCount / pageCount : 0,
+  };
+}
+
+// Retention's chunked deletes leave free pages behind and orchestrator.db has
+// auto_vacuum off, so the file never shrinks on its own. VACUUM rewrites the
+// whole database under an exclusive lock, so it runs only once no run holds
+// the scheduler lock (the scheduler calls this after releasing its lock at
+// shutdown) and only when enough of a large file is free pages to be worth it.
+export function maybeCompactRuntimeDb({
+  db = getDb(),
+  lockName = "main",
+  readRunBlock = () => getLiveSchedulerBlockMessage(lockName),
+  policy = RUNTIME_DB_COMPACTION_POLICY,
+} = {}) {
+  if (readRunBlock()) return { attempted: false, skipped: "run_active" };
+  const before = runtimeDbPageStats(db);
+  if (before.bytes <= policy.minFileBytes) return { attempted: false, skipped: "below_size", before };
+  if (before.freelistRatio <= policy.minFreelistRatio) {
+    return { attempted: false, skipped: "below_freelist_ratio", before };
+  }
+  const startedAt = Date.now();
+  const prevBusyMs = Number(db.pragma("busy_timeout", { simple: true })) || 0;
+  try {
+    db.pragma(`busy_timeout = ${policy.busyTimeoutMs}`);
+    db.exec("VACUUM");
+    db.pragma("wal_checkpoint(TRUNCATE)");
+  } catch (err) {
+    return { attempted: true, ok: false, error: String(err?.message || err || "vacuum failed"), before };
+  } finally {
+    db.pragma(`busy_timeout = ${prevBusyMs}`);
+  }
+  const result = { attempted: true, ok: true, before, after: runtimeDbPageStats(db), durationMs: Date.now() - startedAt };
+  log.info("admin", "Runtime DB compacted", result);
+  return result;
 }
 
 export function __resetRuntimeRetentionForTests() {

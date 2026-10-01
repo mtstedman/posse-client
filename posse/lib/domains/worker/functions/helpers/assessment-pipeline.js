@@ -44,6 +44,7 @@ import {
   isRetryableTerminalHandoffError,
 } from "../../../handoff/functions/agent-handoff.js";
 import { refreshAndExtractInsights } from "./insights.js";
+import { renderBaselineSiblingRegression } from "./baseline-attribution.js";
 import { gitExec, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
 import {
   snapshotAndResetDirtyWorktreeAsync,
@@ -123,6 +124,7 @@ export {
   classifySiblingOnlyAssessmentFailure,
   renderAssessmentTaskBoundary,
 } from "./assessment-task-boundary.js";
+import { workItemResearchRefsBlock } from "../../../research/functions/work-item-research-refs.js";
 
 export function taskAbAssessorTier(workItem) {
   let metadata = workItem?.metadata_json;
@@ -745,11 +747,13 @@ function _buildRemoteAssessmentInstructions({
   atlasBlock = "",
   priorAssessmentFindings = "",
   fallbackReads = null,
+  researchRefsBlock = null,
 } = {}) {
   return [
     Number.isFinite(Number(fallbackReads)) ? `Fallback read budget for this assessment attempt: ${Math.max(0, Number(fallbackReads))}.` : null,
     workflowModeBlock,
     verificationCapabilityBlock,
+    researchRefsBlock || null,
     `If the bounded role result marks VERIFICATION_UNAVAILABLE, keep the completion status tied to product work. Treat the unavailable method as NOT_APPLICABLE when attached evidence or one obvious equivalent invocation establishes the criterion; it is not, by itself, a reason to block.`,
     atlasBlock || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
@@ -1386,6 +1390,8 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     if (assessmentContext.task_ab_test_evidence) {
       sections.push(String(assessmentContext.task_ab_test_evidence));
     }
+    const baselineSiblingRegression = renderBaselineSiblingRegression(parsedJobPayload);
+    if (baselineSiblingRegression) sections.push(baselineSiblingRegression.trimEnd());
 
     // Task mode context
     if (task_mode !== "code") {
@@ -1630,6 +1636,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     atlasBlock,
     priorAssessmentFindings,
     fallbackReads: effectiveFallbackReads,
+    researchRefsBlock: workItemResearchRefsBlock({ workItemId: job?.work_item_id, jobId: job?.id, packet: assessorPacket, projectDir }),
   });
   let providerPrompt = prompt;
   if (assessorPacket) {

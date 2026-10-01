@@ -1,4 +1,6 @@
+import crypto from "crypto";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getAccountSetting, setAccountSettings } from "../../../settings/functions/account-settings.js";
@@ -9,6 +11,7 @@ import {
   onClaudeConfigDirChanged,
   readClaudeCredentials,
 } from "./auth-state.js";
+import { ClaudeUsageLogScanner } from "../../classes/claude/ClaudeUsageLogScanner.js";
 
 const CLAUDE_USAGE_WINDOW_DEFS = [
   { key: "session", label: "Session", durationMs: 5 * 60 * 60 * 1000 },
@@ -30,15 +33,16 @@ const CLAUDE_USAGE_SETTING_KEYS = {
 };
 const CLAUDE_USAGE_DISK_CACHE_DIR = path.join("cache", "posse");
 const CLAUDE_USAGE_DISK_CACHE_FILE = "claude-oauth-usage.json";
+const CLAUDE_USAGE_LOG_SCAN_CACHE_FILE = "claude-usage-log-scan.jsonl";
 
 let usageSummaryCache = null;
 let usageApiCache = null;
-const usageFileCache = new Map();
+let usageLogScanner = null;
 
 export function resetClaudeUsageSummaryCache() {
   usageSummaryCache = null;
   usageApiCache = null;
-  usageFileCache.clear();
+  usageLogScanner = null;
 }
 
 onClaudeConfigDirChanged(resetClaudeUsageSummaryCache);
@@ -237,30 +241,40 @@ function getClaudeUsageLimits() {
   };
 }
 
-function listClaudeUsageFiles(dir) {
-  const files = [];
-  const stack = [dir];
-
-  while (stack.length) {
-    const current = stack.pop();
-    let entries;
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    for (const entry of entries) {
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
-        continue;
-      }
-      if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(fullPath);
-    }
+// Test processes must never persist scan cursors under a Claude config dir: a
+// refresh that escapes a test's config-dir override would otherwise write
+// cursors over the operator's real ~/.claude logs. Same isolation contract as
+// the update-check cache: a per-process temp path under test context.
+export function claudeUsageLogScanCachePath(configDir = getClaudeConfigDir()) {
+  if (process.env.NODE_TEST_CONTEXT || process.env.POSSE_TEST_RUN) {
+    const key = crypto.createHash("sha256").update(path.resolve(configDir)).digest("hex").slice(0, 16);
+    return path.join(os.tmpdir(), `posse-test-${process.pid}`, `claude-usage-log-scan-${key}.jsonl`);
   }
+  return path.join(configDir, CLAUDE_USAGE_DISK_CACHE_DIR, CLAUDE_USAGE_LOG_SCAN_CACHE_FILE);
+}
 
-  return files;
+function getClaudeUsageLogScanner(configDir) {
+  if (!usageLogScanner || usageLogScanner.configDir !== configDir) {
+    const weekWindow = CLAUDE_USAGE_WINDOW_DEFS.find((def) => def.key === "week")?.durationMs || (7 * 24 * 60 * 60 * 1000);
+    usageLogScanner = new ClaudeUsageLogScanner({
+      configDir,
+      cachePath: claudeUsageLogScanCachePath(configDir),
+      windowMs: weekWindow,
+    });
+  }
+  return usageLogScanner;
+}
+
+// Async refreshes advance the incremental log scan (bounded and yielding);
+// sync reads only see entries a completed scan already holds in memory.
+async function loadClaudeUsageEntriesAsync(configDir, nowMs) {
+  const scanner = getClaudeUsageLogScanner(configDir);
+  await scanner.refresh(nowMs);
+  return scanner.snapshot(nowMs);
+}
+
+function loadClaudeUsageEntries(configDir, nowMs) {
+  return getClaudeUsageLogScanner(configDir).snapshot(nowMs);
 }
 
 function summarizeClaudeUsageEntries(entries, nowMs, limits) {
@@ -314,21 +328,40 @@ function buildUsageWindowFromUtilization({
   };
 }
 
-function enrichClaudeOauthSummaryWithLocalTokens(summary, configDir, nowMs) {
-  if (!summary || !Array.isArray(summary.windows) || summary.windows.length === 0) return summary;
-  const targets = summary.windows.filter((w) =>
+function claudeOauthEnrichmentTargets(summary) {
+  if (!summary || !Array.isArray(summary.windows) || summary.windows.length === 0) return [];
+  return summary.windows.filter((w) =>
     (w?.key === "session" || w?.key === "week") &&
     Number.isFinite(w.utilizationPct) &&
     (w.usedTokens == null || w.limitTokens == null)
   );
-  if (targets.length === 0) return summary;
+}
 
+async function enrichClaudeOauthSummaryWithLocalTokensAsync(summary, configDir, nowMs) {
+  const targets = claudeOauthEnrichmentTargets(summary);
+  if (targets.length === 0) return summary;
+  let entries;
+  try {
+    entries = await loadClaudeUsageEntriesAsync(configDir, nowMs);
+  } catch {
+    return summary;
+  }
+  return applyClaudeLocalTokensToTargets(summary, targets, entries, nowMs);
+}
+
+function enrichClaudeOauthSummaryWithLocalTokens(summary, configDir, nowMs) {
+  const targets = claudeOauthEnrichmentTargets(summary);
+  if (targets.length === 0) return summary;
   let entries;
   try {
     entries = loadClaudeUsageEntries(configDir, nowMs);
   } catch {
     return summary;
   }
+  return applyClaudeLocalTokensToTargets(summary, targets, entries, nowMs);
+}
+
+function applyClaudeLocalTokensToTargets(summary, targets, entries, nowMs) {
   if (!Array.isArray(entries) || entries.length === 0) return summary;
 
   const localByKey = new Map(
@@ -506,7 +539,7 @@ export async function refreshUsageSummary({ nowMs = Date.now(), forceRefresh = f
       const payload = await fetchImpl({ credentials, nowMs, timeoutMs });
       if (payload) {
         const summary = normalizeClaudeOauthUsageResponse(payload, nowMs, limits);
-        enrichClaudeOauthSummaryWithLocalTokens(summary, configDir, nowMs);
+        await enrichClaudeOauthSummaryWithLocalTokensAsync(summary, configDir, nowMs);
         if (!summary.subscriptionType) summary.subscriptionType = credentials.subscriptionType;
         if (!summary.rateLimitTier) summary.rateLimitTier = credentials.rateLimitTier;
         usageApiCache = {
@@ -523,7 +556,7 @@ export async function refreshUsageSummary({ nowMs = Date.now(), forceRefresh = f
       const message = String(err?.message || err || "");
       const rateLimited = /\b429\b|rate.?limit/i.test(message);
       const fallbackSummary = buildUsageFallbackSummary({ configDir, credentials, nowMs, rateLimited, message });
-      enrichClaudeOauthSummaryWithLocalTokens(fallbackSummary, configDir, nowMs);
+      await enrichClaudeOauthSummaryWithLocalTokensAsync(fallbackSummary, configDir, nowMs);
 
       usageApiCache = {
         cachedAt: nowMs,
@@ -544,7 +577,7 @@ export async function refreshUsageSummary({ nowMs = Date.now(), forceRefresh = f
   const cachedDeprecated = getCachedDeprecatedClaudeUsageSummary(configDir, nowMs, limits, forceRefresh);
   if (cachedDeprecated) return cachedDeprecated;
 
-  const entries = loadClaudeUsageEntries(configDir, nowMs);
+  const entries = (await loadClaudeUsageEntriesAsync(configDir, nowMs)) || [];
   const summary = {
     provider: "claude",
     source: "claude-local-project-logs-deprecated",
@@ -618,100 +651,6 @@ function buildClaudeOauthUnavailableSummary(credentials, nowMs, source = null, d
   };
 }
 
-function loadClaudeUsageEntries(configDir, nowMs) {
-  const projectsDir = path.join(configDir, "projects");
-  if (!fs.existsSync(projectsDir)) return [];
-
-  const weekWindow = CLAUDE_USAGE_WINDOW_DEFS.find((def) => def.key === "week")?.durationMs || (7 * 24 * 60 * 60 * 1000);
-  const oldestRelevantMs = nowMs - weekWindow;
-  const entryMap = new Map();
-  const seenFiles = new Set();
-
-  for (const projectEntry of fs.readdirSync(projectsDir, { withFileTypes: true })) {
-    if (!projectEntry.isDirectory()) continue;
-    const projectPath = path.join(projectsDir, projectEntry.name);
-
-    for (const filePath of listClaudeUsageFiles(projectPath)) {
-      let stat;
-      try {
-        stat = fs.statSync(filePath);
-      } catch {
-        continue;
-      }
-      seenFiles.add(filePath);
-      if (stat.mtimeMs < oldestRelevantMs) continue;
-
-      const cached = usageFileCache.get(filePath);
-      let fileEntries = null;
-      if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-        fileEntries = cached.entries;
-      } else {
-        let raw;
-        try {
-          raw = fs.readFileSync(filePath, "utf8");
-        } catch {
-          continue;
-        }
-
-        const fileEntryMap = new Map();
-        for (const line of raw.split(/\r?\n/)) {
-          if (!line.trim()) continue;
-          let parsed;
-          try {
-            parsed = JSON.parse(line);
-          } catch {
-            continue;
-          }
-
-          const usage = parsed?.message?.usage;
-          const timestamp = parsed?.timestamp;
-          if (!usage || !timestamp) continue;
-
-          const timestampMs = Date.parse(timestamp);
-          if (!Number.isFinite(timestampMs) || timestampMs < oldestRelevantMs) continue;
-
-          const totalTokens =
-            (usage.input_tokens || 0) +
-            (usage.cache_creation_input_tokens || 0) +
-            (usage.cache_read_input_tokens || 0) +
-            (usage.output_tokens || 0);
-
-          if (totalTokens <= 0) continue;
-
-          const messageId = parsed?.message?.id || parsed?.requestId || parsed?.uuid || `${filePath}:${timestamp}`;
-          const existing = fileEntryMap.get(messageId);
-          if (!existing) {
-            fileEntryMap.set(messageId, { messageId, timestampMs, totalTokens });
-            continue;
-          }
-
-          if (totalTokens > existing.totalTokens) existing.totalTokens = totalTokens;
-          if (timestampMs > existing.timestampMs) existing.timestampMs = timestampMs;
-        }
-
-        fileEntries = Array.from(fileEntryMap.values());
-        usageFileCache.set(filePath, {
-          mtimeMs: stat.mtimeMs,
-          size: stat.size,
-          entries: fileEntries,
-        });
-      }
-
-      for (const entry of fileEntries) {
-        if (!entry || entry.timestampMs < oldestRelevantMs) continue;
-        const entryKey = `${filePath}:${entry.messageId || `${entry.timestampMs}:${entry.totalTokens}`}`;
-        entryMap.set(entryKey, entry);
-      }
-    }
-  }
-
-  for (const filePath of Array.from(usageFileCache.keys())) {
-    if (!seenFiles.has(filePath)) usageFileCache.delete(filePath);
-  }
-
-  return Array.from(entryMap.values());
-}
-
 export function getUsageSummary({ nowMs = Date.now(), forceRefresh = false, ignoreBackoff = false } = {}) {
   const configDir = getClaudeConfigDir();
   const limits = getClaudeUsageLimits();
@@ -769,7 +708,7 @@ export function getUsageSummary({ nowMs = Date.now(), forceRefresh = false, igno
   const cachedDeprecated = getCachedDeprecatedClaudeUsageSummary(configDir, nowMs, limits, forceRefresh);
   if (cachedDeprecated) return cachedDeprecated;
 
-  const entries = loadClaudeUsageEntries(configDir, nowMs);
+  const entries = loadClaudeUsageEntries(configDir, nowMs) || [];
   const summary = {
     provider: "claude",
     source: "claude-local-project-logs-deprecated",

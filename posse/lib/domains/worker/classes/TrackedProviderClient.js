@@ -30,7 +30,7 @@ import {
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
 import { resolveEffectiveTierModel } from "../../providers/functions/model-catalog-validate.js";
 import { C } from "../../../shared/format/functions/colors.js";
-import { filterProviderToolUseReplay, getObservationContext, reconcileProviderToolUseReplay, recordObservation, recordProviderToolBatchObservations, recordToolUseObservations, runWithObservationContext } from "../../observability/functions/observations.js";
+import { beginToolInvocation, filterProviderToolUseReplay, finishToolInvocation, getObservationContext, isWebToolName, reconcileProviderToolUseReplay, recordObservation, recordProviderToolBatchObservations, recordToolUseObservations, runWithObservationContext } from "../../observability/functions/observations.js";
 import { recordPrompt } from "../../../shared/telemetry/functions/logging/prompt-log.js";
 import { recordOutput } from "../../../shared/telemetry/functions/logging/output-log.js";
 import { resolveAtlasExecutionAttachment, withAtlasExecutionPolicySnapshot } from "../../integrations/functions/atlas.js";
@@ -78,6 +78,8 @@ import {
   resolveAtlasResearcherSchemaDiet,
 } from "../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { AGENT_ACTIVITY_LIMITS } from "../../../catalog/event.js";
+import { AGENT_CALL_ROLE_LABELS } from "../../../catalog/agent-call.js";
+import { RESEARCH_CHILD_FALLBACK_MODEL_TIER } from "../../../catalog/planner-dispatch.js";
 import {
   buildCitationChildPrompt,
   subAgentRuntime,
@@ -425,6 +427,8 @@ const DEFAULT_DEPS = {
   recordObservation,
   recordProviderToolBatchObservations,
   recordToolUseObservations,
+  beginToolInvocation,
+  finishToolInvocation,
   runWithObservationContext,
   recordPrompt,
   recordOutput,
@@ -461,6 +465,7 @@ function nonNegativeTokenCount(value) {
 
 function providerUsageStatus(stats, { measured, unavailable } = {}) {
   if (unavailable) return "unavailable_after_terminal_stop";
+  if (measured && stats.usagePartialAfterStop === true) return "measured_partial_after_terminal_stop";
   if (stats.usageEstimated === true || stats.usageCapturePrecision === "unknown") return "estimated";
   if (!measured) return "unavailable";
   return stats.tokenUsageSource === "codex_rollout"
@@ -562,24 +567,36 @@ function agentCommentaryFields(value) {
   return { text, summary, detail: detail || null };
 }
 
-function contextPressureMetrics({ stats = {}, promptChars = 0 } = {}) {
+function contextPressureMetrics({ stats = {}, promptChars = 0, requestContextInputTokens = null } = {}) {
   const inputTokens = nonNegativeTokenCount(stats.inputTokens);
   const outputTokens = nonNegativeTokenCount(stats.outputTokens);
   const cachedInputTokens = nonNegativeTokenCount(stats.cachedInputTokens) || 0;
   const cacheCreationInputTokens = nonNegativeTokenCount(stats.cacheCreationInputTokens) || 0;
   const promptEstimateTokens = estimateTokensFromChars(promptChars);
-  const observedInputTokens = inputTokens ?? promptEstimateTokens;
-  const uncachedInputTokensApprox = Math.max(0, observedInputTokens - cachedInputTokens);
+  // Pressure is a property of one request's context window. stats.inputTokens
+  // is billed input summed over every request of the call (1.1M over 21 Codex
+  // requests in the 2026-10-01 run), so the largest single request is used
+  // whenever it is known; the cumulative figure stays for the cache ratios.
+  const peakRequestTokens = [requestContextInputTokens, stats.longContextInputTokens]
+    .map((value) => (value == null ? null : nonNegativeTokenCount(value)))
+    .find((value) => value != null && value > 0) ?? null;
+  const billedInputTokens = inputTokens ?? promptEstimateTokens;
+  const observedInputTokens = peakRequestTokens ?? billedInputTokens;
+  const uncachedInputTokensApprox = Math.max(0, billedInputTokens - cachedInputTokens);
   return {
     inputTokens,
     outputTokens,
     cachedInputTokens,
     cacheCreationInputTokens,
     promptEstimateTokens,
+    requestContextInputTokens: peakRequestTokens,
     observedInputTokens,
-    observedInputTokensEstimated: inputTokens == null,
+    observedInputBasis: peakRequestTokens != null
+      ? "request_peak"
+      : inputTokens != null ? "cumulative_input" : "prompt_estimate",
+    observedInputTokensEstimated: peakRequestTokens == null && inputTokens == null,
     uncachedInputTokensApprox,
-    cachedInputRatio: observedInputTokens > 0 ? cachedInputTokens / observedInputTokens : null,
+    cachedInputRatio: billedInputTokens > 0 ? cachedInputTokens / billedInputTokens : null,
   };
 }
 
@@ -1093,6 +1110,7 @@ export class TrackedProviderClient {
     modelTier,
     modelName,
     promptChars,
+    requestContextInputTokens = null,
     stats,
     status,
     opts,
@@ -1104,7 +1122,7 @@ export class TrackedProviderClient {
         workItemId: work_item_id,
       });
       if (config.mode === "off") return;
-      const metrics = contextPressureMetrics({ stats, promptChars });
+      const metrics = contextPressureMetrics({ stats, promptChars, requestContextInputTokens });
       const meterSnapshot = ContextMeter.forContext(
         { agent_call_id: agentCallId },
         { promptChars },
@@ -1126,6 +1144,8 @@ export class TrackedProviderClient {
         cached_input_tokens: metrics.cachedInputTokens,
         cache_creation_input_tokens: metrics.cacheCreationInputTokens,
         observed_input_tokens: metrics.observedInputTokens,
+        observed_input_basis: metrics.observedInputBasis,
+        request_context_input_tokens: metrics.requestContextInputTokens,
         observed_input_tokens_estimated: metrics.observedInputTokensEstimated,
         uncached_input_tokens_approx: metrics.uncachedInputTokensApprox,
         cached_input_ratio: metrics.cachedInputRatio,
@@ -1303,6 +1323,8 @@ export class TrackedProviderClient {
       recordProviderToolBatchObservations,
       recordObservation,
       recordToolUseObservations,
+      beginToolInvocation,
+      finishToolInvocation,
       retainReplayOutput,
       retainReplayPrompt,
       retainReplayToolUses,
@@ -1372,6 +1394,14 @@ export class TrackedProviderClient {
       throw new Error("createAgentCall must return an object with an id");
     }
     ContextMeter.forContext({ agent_call_id: agentCallId }, { promptChars: prompt.length });
+    // What the provider actually sends, once it reports it (recordFinalPrompt).
+    let finalPromptChars = null;
+    // The largest single-request context seen in this call's usage reports.
+    let peakRequestContextTokens = null;
+    const notePeakRequestContext = (value) => {
+      const tokens = value == null ? null : nonNegativeTokenCount(value);
+      if (tokens != null && tokens > (peakRequestContextTokens ?? -1)) peakRequestContextTokens = tokens;
+    };
     const callObservationContext = {
       ...(observationContext || {}),
       work_item_id: work_item_id ?? observationContext?.work_item_id ?? null,
@@ -1476,6 +1506,36 @@ export class TrackedProviderClient {
     const upstreamAgentCommentary = typeof effectiveCapabilityOpts.onAgentCommentary === "function"
       ? effectiveCapabilityOpts.onAgentCommentary
       : null;
+    // Provider-native web tools run inside the CLI, never through the Posse
+    // gateway, so the only other record is the end-of-call replay. Record
+    // them live under this call (begin at tool_use, finish at tool_result) so
+    // a running child shows its searches and fetches, and let the replay skip
+    // the ones already recorded.
+    const liveNativeToolUses = new Map();
+    const liveToolCwd = cwd || this.worker.projectDir;
+    const finishLiveNativeToolUse = (id, { ok, error = null } = {}) => {
+      const live = liveNativeToolUses.get(id);
+      if (!live || live.finished) return;
+      live.finished = true;
+      try {
+        runWithObservationContext(callObservationContext, () => finishToolInvocation(live.invocation, {
+          tool: live.tool,
+          input: live.input,
+          cwd: liveToolCwd,
+          ok,
+          ...(error ? { error } : {}),
+        }));
+      } catch {
+        // Live telemetry must not affect the provider call.
+      }
+    };
+    const withoutLiveNativeToolUses = (toolUses = []) => {
+      if (liveNativeToolUses.size === 0) return toolUses;
+      for (const id of liveNativeToolUses.keys()) {
+        finishLiveNativeToolUse(id, { ok: false, error: "no tool result before the provider call ended" });
+      }
+      return toolUses.filter((toolUse) => !(toolUse?.id && liveNativeToolUses.has(toolUse.id)));
+    };
     const upstreamUsageProgress = typeof effectiveCapabilityOpts.onUsageProgress === "function"
       ? effectiveCapabilityOpts.onUsageProgress
       : null;
@@ -1494,6 +1554,8 @@ export class TrackedProviderClient {
           provider: segment?.provider || providerName,
           modelName: segment?.modelName || modelName,
         });
+        notePeakRequestContext(persisted?.request_context_input_tokens
+          ?? segment?.requestContextInputTokens ?? segment?.request_context_input_tokens);
         const attemptId = observationContext?.attempt_id ?? opts.attemptId ?? null;
         if (attemptId != null && persisted?.request_ordinal != null) {
           this.deps.publishContextBudgetCheckpoint({
@@ -1528,6 +1590,7 @@ export class TrackedProviderClient {
           }
           return;
         }
+        notePeakRequestContext(requestContextInputTokens);
         try {
           if (process.env.POSSE_DEBUG_CTX_CHECKPOINT) {
             console.error(`[ctx-debug] publish checkpoint call=${agentCallId} seq=${sequenceId} reqCtx=${requestContextInputTokens}`);
@@ -1552,6 +1615,25 @@ export class TrackedProviderClient {
           }
         }
       },
+      onProviderToolUse: (toolUse) => {
+        const id = typeof toolUse?.id === "string" && toolUse.id ? toolUse.id : null;
+        if (!id || liveNativeToolUses.has(id) || !isWebToolName(toolUse.tool)) return;
+        try {
+          // Capture through the closure: an injected context runner need not
+          // return the callback's value.
+          let invocation = null;
+          runWithObservationContext(callObservationContext, () => {
+            invocation = beginToolInvocation({ tool: toolUse.tool, input: toolUse.input || {}, cwd: liveToolCwd });
+          });
+          if (invocation) liveNativeToolUses.set(id, { invocation, tool: toolUse.tool, input: toolUse.input || {}, finished: false });
+        } catch {
+          // Live telemetry must not affect the provider call.
+        }
+      },
+      onProviderToolResult: ({ id, isError } = {}) => finishLiveNativeToolUse(id, {
+        ok: isError !== true,
+        ...(isError === true ? { error: "tool returned an error" } : {}),
+      }),
       onAgentCommentary: (value) => {
         try { upstreamAgentCommentary?.(value); } catch { /* caller telemetry is best effort */ }
         const commentary = agentCommentaryFields(value);
@@ -1579,6 +1661,11 @@ export class TrackedProviderClient {
       },
       recordFinalPrompt: (finalPrompt, { systemPrompt = null, systemPromptFiles = null } = {}) => {
         const promptText = typeof finalPrompt === "string" ? finalPrompt : String(finalPrompt ?? "");
+        // Providers may inline instructions ahead of the caller's prompt
+        // (Codex ROLE INSTRUCTIONS, about 23K chars), so the context meter is
+        // reseeded from the prompt the model actually receives.
+        finalPromptChars = promptText.length;
+        ContextMeter.forContext({ agent_call_id: agentCallId }, { promptChars: finalPromptChars });
         bindAttachedSourceEvidence(promptText);
         retainReplayPrompt?.(agentCallId, {
           prompt: promptText,
@@ -1740,6 +1827,7 @@ export class TrackedProviderClient {
       if (subAgentEnabled || researchEnabled) {
         unregisterSubAgentParent = subAgentRuntime.registerParent({
           agentCallId,
+          projectDir: cwd || this.worker?.projectDir || null,
           researchPolicy: researchEnabled ? researchPolicy : null,
           runResearchChild: (request) => runResearchChild(this, {
             agentCallId, jobId: job_id, workItemId: work_item_id, attemptId: observationContext?.attempt_id,
@@ -1835,6 +1923,7 @@ export class TrackedProviderClient {
       if (webResearchEnabled) {
         unregisterWebResearchParent = webResearchRuntime.registerParent({
           agentCallId,
+          projectDir: cwd || this.worker?.projectDir || null,
           runChild: async ({ dispatchId, question, signal, budget }) => {
             const childSessionPacket = {
               recipient: "researcher",
@@ -1886,8 +1975,10 @@ export class TrackedProviderClient {
               {
                 role: "researcher",
                 roleMode: "web",
-                modelTier: budget?.modelTier || tier,
-                modelName: budget?.modelTier ? null : modelName,
+                // Never the planner's model or tier: the web child's tier is
+                // resolved by WebResearchRuntime (cheap or standard).
+                modelTier: budget?.modelTier || RESEARCH_CHILD_FALLBACK_MODEL_TIER,
+                modelName: null,
                 reasoningEffort: budget?.reasoningEffort || "low",
                 activity: question,
                 allowWrite: false,
@@ -1911,7 +2002,7 @@ export class TrackedProviderClient {
                 _webResearchChild: true,
                 _parentAgentCallId: agentCallId,
                 _childKind: "web_research",
-                _agentCallRole: "web_researcher",
+                _agentCallRole: AGENT_CALL_ROLE_LABELS.WEB_RESEARCHER,
                 _webResearchDispatch: { dispatchId },
               },
               {
@@ -1920,7 +2011,9 @@ export class TrackedProviderClient {
                 attempt_id: observationContext?.attempt_id ?? null,
                 cwd,
                 jobProvider: providerName,
-                jobModelName: modelName,
+                // Model selection prefers the job-level model over the tier's
+                // model; passing the planner's here ran web children on Fable.
+                jobModelName: null,
                 complexity: "low",
               },
             );
@@ -2026,13 +2119,33 @@ export class TrackedProviderClient {
         };
         throw error;
       }
+      if (unregisterWebResearchChild && webResearchRuntime.childHandoffMissing(agentCallId)) {
+        // Like a required agent_handoff: a web child that never submitted
+        // web_research_handoff failed its contract, so its row must not read
+        // succeeded. Output, stats, and the call id ride on the error so the
+        // dispatch can still salvage the final text and attribute the usage.
+        const error = /** @type {Error & Record<string, any>} */ (new Error(
+          "WEB_RESEARCH_HANDOFF_MISSING: web research child did not submit web_research_handoff",
+        ));
+        error.code = "WEB_RESEARCH_HANDOFF_MISSING";
+        error.stage = "terminal";
+        error.agentCallId = agentCallId;
+        error.output = providerOutput;
+        error.stats = {
+          ...stats,
+          output: stats.output ?? providerOutput,
+          outputChars: stats.outputChars ?? providerOutput.length,
+        };
+        throw error;
+      }
       const output = handoffFinalization.output;
       // Usage survives a terminal stop only when the provider confirmed its
       // accounting was complete: codex via the terminal usage flush, claude via
       // the parsed final result message (stats.usageFinalized).
       const terminalUsageUnavailable = terminalProviderError != null
         && stats.terminalUsageFlushCompleted !== true
-        && stats.usageFinalized !== true;
+        && stats.usageFinalized !== true
+        && stats.usagePartialAfterStop !== true;
       const {
         providerUsageMeasured,
         providerUsageStatus,
@@ -2203,7 +2316,8 @@ export class TrackedProviderClient {
         role: opts.role,
         modelTier: tier,
         modelName: stats.modelName || modelName,
-        promptChars: prompt.length,
+        promptChars: finalPromptChars ?? prompt.length,
+        requestContextInputTokens: peakRequestContextTokens,
         // Raw stats, not accountingStats: the pressure lane detects context
         // overflow and self-labels estimated vs measured. Nulling partially
         // reported tokens here would blind it on exactly the overflow-shaped
@@ -2275,7 +2389,7 @@ export class TrackedProviderClient {
         work_item_id,
         job_id,
         attempt_id: null,
-        tool_uses: toolUsesForReplay,
+        tool_uses: withoutLiveNativeToolUses(toolUsesForReplay),
         cwd: cwd || this.worker.projectDir,
         agent_call_id: agentCallId,
       });
@@ -2293,6 +2407,7 @@ export class TrackedProviderClient {
           output_tokens: accountingOutputTokens,
           provider_usage_status: providerUsageStatus,
           turns_used: stats.numTurns ?? null,
+          ...(stats.cliNumTurns != null ? { cli_num_turns: stats.cliNumTurns } : {}),
           max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
           output_truncated: stats.outputTruncated === true,
           duration_ms: stats.durationMs ?? null,
@@ -2322,7 +2437,8 @@ export class TrackedProviderClient {
         || (terminalHandoffStop != null && abortSignal?.aborted !== true);
       const terminalUsageUnavailable = terminalStopOwnsFailure
         && stats.terminalUsageFlushCompleted !== true
-        && stats.usageFinalized !== true;
+        && stats.usageFinalized !== true
+        && stats.usagePartialAfterStop !== true;
       const {
         providerUsageMeasured,
         providerUsageStatus,
@@ -2410,7 +2526,8 @@ export class TrackedProviderClient {
         role: opts.role,
         modelTier: tier,
         modelName: stats.modelName || modelName,
-        promptChars: prompt.length,
+        promptChars: finalPromptChars ?? prompt.length,
+        requestContextInputTokens: peakRequestContextTokens,
         // Raw stats for the same reason as the success-path pressure call.
         stats,
         status: "failed",
@@ -2495,7 +2612,7 @@ export class TrackedProviderClient {
         work_item_id,
         job_id,
         attempt_id: null,
-        tool_uses: failureToolUsesForReplay,
+        tool_uses: withoutLiveNativeToolUses(failureToolUsesForReplay),
         cwd: cwd || this.worker.projectDir,
         agent_call_id: agentCallId,
       });
@@ -2514,6 +2631,7 @@ export class TrackedProviderClient {
           output_tokens: accountingOutputTokens,
           provider_usage_status: providerUsageStatus,
           turns_used: stats.numTurns ?? null,
+          ...(stats.cliNumTurns != null ? { cli_num_turns: stats.cliNumTurns } : {}),
           max_output_tokens_configured: stats.maxOutputTokens ?? resolvedMaxOutputTokens,
           output_truncated: stats.outputTruncated === true || err.outputTruncated === true,
           duration_ms: recordedDurationMs,

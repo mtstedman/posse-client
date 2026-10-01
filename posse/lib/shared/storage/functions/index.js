@@ -1738,6 +1738,10 @@ export function getDb() {
   //   'measured'                        — provider reported complete usage
   //   'unavailable_after_terminal_stop' — terminal handoff stop before the
   //                                       provider confirmed final accounting
+  //   'measured_partial_after_terminal_stop' — terminal stop without final
+  //                                       accounting; tokens are the stream's
+  //                                       per-message lower bound (precision
+  //                                       incomplete, no cost estimate)
   //   'unavailable'                     — provider reported no usage
   //   NULL                              — legacy rows / failed calls
   const hasAgentCallUsageStatus = _db.prepare(

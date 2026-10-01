@@ -1,10 +1,18 @@
 import { RESEARCH_CHILD_PROFILE, RESEARCH_REPORT_OBJECT_TYPE, SUB_AGENT_OBSERVATION_TYPES } from "../../../catalog/sub-agent.js";
-import { PLANNER_RESEARCH_EFFORT_VALUES, RESEARCH_AGENT_TYPES } from "../../../catalog/planner-dispatch.js";
+import {
+  PLANNER_DISPATCH_RETURN_MARGIN_MS,
+  PLANNER_RESEARCH_EFFORT_VALUES,
+  RESEARCH_AGENT_TYPES,
+  RESEARCH_CHILD_DEFAULT_MODEL_TIERS,
+  RESEARCH_CHILD_FALLBACK_MODEL_TIER,
+  RESEARCH_CHILD_REQUEST_MODEL_TIERS,
+} from "../../../catalog/planner-dispatch.js";
 // @ts-check
 
 import crypto from "node:crypto";
 
 import { AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
+import { mcpClientToolDeadlineMs } from "../../../catalog/mcp.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import {
   SUB_AGENT_EVIDENCE_OUTCOMES,
@@ -429,6 +437,38 @@ function delay(ms) {
   });
 }
 
+// The model sees only this message, so it names the code and says when a
+// retry can help.
+function capacityError({ requested, active, limit, waitedMs }) {
+  if (requested > limit) {
+    return runtimeError(
+      "SUB_AGENT_CAPACITY",
+      `SUB_AGENT_CAPACITY: a batch of ${requested} children can never fit the ${limit}-child inline lane; retrying it unchanged cannot succeed. Send at most ${limit} requests.`,
+      { stage: "admission" },
+    );
+  }
+  return runtimeError(
+    "SUB_AGENT_CAPACITY",
+    `SUB_AGENT_CAPACITY: the inline child lane shared with other running agents stayed full (${active} of ${limit} slots busy, ${requested} requested) after waiting ${Math.round(waitedMs / 1000)}s. An immediate retry will fail the same way. If the research is still needed, do other work first and retry once later; a batch with fewer requests is admitted sooner. Otherwise continue without it.`,
+    { retryable: true, stage: "admission" },
+  );
+}
+
+// How long a batch may wait for lane capacity: the catalog bound, further
+// limited so the batch still finishes inside its MCP tool deadline when its
+// children use their whole timeout.
+function admissionWaitBudgetMs(entries, mode, registration, ceilingMs) {
+  const research = entries.every((entry) => entry.profile === RESEARCH_CHILD_PROFILE);
+  const toolDeadlineMs = research
+    ? Number(registration?.researchPolicy?.toolTimeoutSec) * 1000
+    : mcpClientToolDeadlineMs(["sub_agent"]);
+  const runMs = mode === "wait_all" ? Math.max(0, ...entries.map((entry) => Number(entry.timeoutMs) || 0)) : 0;
+  const slackMs = Number.isFinite(toolDeadlineMs) && toolDeadlineMs > 0
+    ? toolDeadlineMs - PLANNER_DISPATCH_RETURN_MARGIN_MS - runMs
+    : Infinity;
+  return Math.max(0, Math.min(ceilingMs, slackMs));
+}
+
 function requestDigest(value) {
   return crypto.createHash("sha256").update(stableJson(value)).digest("hex");
 }
@@ -715,13 +755,13 @@ function materializeDelegatedRef(selectorValue, context) {
   }
 }
 
-const RESEARCH_BUDGET_KEYS = Object.freeze(["timeout_ms", "max_turns", "reasoning_effort"]);
+const RESEARCH_BUDGET_KEYS = Object.freeze(["timeout_ms", "max_turns", "reasoning_effort", "model_tier"]);
 
 // A research budget arrives from a model. A stray key, a numeric string, or an
 // unknown effort is repaired and noted instead of rejected: a rejection costs
 // the planner a whole turn, and every repaired value falls back to (or stays
 // clamped by) the planner's research policy.
-function normalizeResearchBudget(value, policy, requestId, repairs) {
+function normalizeResearchBudget(value, policy, requestId, repairs, { agentType = null } = {}) {
   if (value == null) return {};
   const note = (field, action, detail = {}) => repairs.push({ request_id: requestId, field, action, ...detail });
   const prototype = value && typeof value === "object" ? Object.getPrototypeOf(value) : null;
@@ -763,55 +803,99 @@ function normalizeResearchBudget(value, policy, requestId, repairs) {
       });
     }
   }
+  // The planner may ask for a stronger tier for a code child that needs deep
+  // multi-file reasoning. Web children fetch and summarize: they stay on the
+  // cheaper tiers whatever is requested.
+  const tier = value.model_tier;
+  if (tier != null) {
+    const normalized = typeof tier === "string" ? tier.trim().toLowerCase() : "";
+    const fallback = policy?.childModelTier || RESEARCH_CHILD_FALLBACK_MODEL_TIER;
+    if (!RESEARCH_CHILD_REQUEST_MODEL_TIERS.includes(normalized)) {
+      note("budget.model_tier", "defaulted", { reason: "invalid_model_tier", to: fallback });
+    } else if (agentType === "web" && !RESEARCH_CHILD_DEFAULT_MODEL_TIERS.includes(normalized)) {
+      note("budget.model_tier", "defaulted", { reason: "web_children_use_cheaper_tiers", to: fallback });
+    } else {
+      budget.model_tier = normalized;
+      if (normalized !== tier) note("budget.model_tier", "coerced", { to: normalized });
+    }
+  }
   return budget;
 }
 
-function normalizeResearchAnchors(value, context, label) {
+// Anchors arrive from a model. One unusable anchor is dropped and noted
+// instead of rejecting the whole batch: a rejection costs the planner a turn
+// and, in practice, the planner then resends without any anchors at all.
+function normalizeResearchAnchors(value, context, label, { requestId = null, repairs = [] } = {}) {
   if (value == null) return [];
-  if (!Array.isArray(value) || value.length > 8) {
-    throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label} must contain at most eight anchors`, { stage: "validation" });
+  const note = (field, action, detail = {}) => repairs.push({ request_id: requestId, field, action, ...detail });
+  if (!Array.isArray(value)) {
+    note(label, "ignored", { reason: "not_an_array" });
+    return [];
   }
-  return value.map((raw, index) => {
-    const anchor = exactObject(raw, ["path", "symbol", "ref", "lines"], `${label}[${index}]`);
-    const hasPath = anchor.path != null;
-    const hasRef = anchor.ref != null;
-    if (hasPath === hasRef) {
-      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}[${index}] must contain exactly one of path or ref`, { stage: "validation" });
+  let entries = value;
+  if (entries.length > 8) {
+    note(label, "truncated", { reason: "at_most_eight_anchors", dropped: entries.length - 8 });
+    entries = entries.slice(0, 8);
+  }
+  const anchors = [];
+  entries.forEach((raw, index) => {
+    try {
+      anchors.push(normalizeResearchAnchor(raw, context, `${label}[${index}]`));
+    } catch (error) {
+      // Any sub-agent validation or ref-materialization error here belongs
+      // to this one anchor; anything else is a runtime fault and propagates.
+      if (!String(error?.code || "").startsWith("SUB_AGENT_")) throw error;
+      note(`${label}[${index}]`, "dropped", { reason: String(error.message || error.code).slice(0, 240) });
     }
-    const lines = anchor.lines == null ? null : exactObject(anchor.lines, ["start", "end"], `${label}[${index}].lines`);
-    if (lines && (!Number.isSafeInteger(lines.start) || !Number.isSafeInteger(lines.end)
-      || lines.start < 1 || lines.end < lines.start
-      || lines.end - lines.start + 1 > SUB_AGENT_LIMITS.maxEvidenceLines)) {
-      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}[${index}].lines must select one to ${SUB_AGENT_LIMITS.maxEvidenceLines} lines`, { stage: "validation" });
-    }
-    if (hasPath) {
-      const sanitized = sanitizeResearcherFileList(
-        [anchor.path],
-        context.projectDir || context.cwd,
-        `${label}[${index}].path`,
-      );
-      if (sanitized.files.length !== 1) {
-        throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}[${index}].path is not an allowed repo-relative path`, { stage: "validation" });
-      }
-      const symbol = anchor.symbol == null ? null : boundedString(anchor.symbol, `${label}[${index}].symbol`, 200);
-      return {
-        path: sanitized.files[0],
-        ...(symbol ? { symbol } : {}),
-        ...(lines ? { lines: { start: lines.start, end: lines.end } } : {}),
-      };
-    }
-    if (anchor.symbol != null) {
-      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}[${index}].symbol requires a path anchor`, { stage: "validation" });
-    }
-    if (lines) {
-      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}[${index}].lines is valid only for a path anchor`, { stage: "validation" });
-    }
-    const evidence = validateMaterializedCursorEvidence(
-      materializeDelegatedRef({ ref: anchor.ref }, context),
-      `${label}[${index}].ref`,
-    );
-    return { ref: evidence.ref, evidence };
   });
+  return anchors;
+}
+
+function normalizeResearchAnchor(raw, context, label) {
+  const anchor = exactObject(raw, ["path", "symbol", "ref", "lines"], label);
+  const hasPath = anchor.path != null;
+  const hasRef = anchor.ref != null;
+  if (hasPath === hasRef) {
+    throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label} must contain exactly one of path or ref`, { stage: "validation" });
+  }
+  const lines = anchor.lines == null ? null : exactObject(anchor.lines, ["start", "end"], `${label}.lines`);
+  if (lines && (!Number.isSafeInteger(lines.start) || !Number.isSafeInteger(lines.end)
+    || lines.start < 1 || lines.end < lines.start
+    || lines.end - lines.start + 1 > SUB_AGENT_LIMITS.maxEvidenceLines)) {
+    throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}.lines must select one to ${SUB_AGENT_LIMITS.maxEvidenceLines} lines`, { stage: "validation" });
+  }
+  if (hasPath) {
+    const sanitized = sanitizeResearcherFileList(
+      [anchor.path],
+      context.projectDir || context.cwd,
+      `${label}.path`,
+    );
+    if (sanitized.files.length !== 1) {
+      const reason = sanitized.dropped?.[0]?.reason;
+      throw runtimeError(
+        "SUB_AGENT_SCHEMA_INVALID",
+        `${label}.path is not an allowed repo-relative path${reason ? ` (${reason})` : ""}`,
+        { stage: "validation" },
+      );
+    }
+    const symbol = anchor.symbol == null ? null : boundedString(anchor.symbol, `${label}.symbol`, 200);
+    return {
+      path: sanitized.files[0],
+      ...(symbol ? { symbol } : {}),
+      ...(lines ? { lines: { start: lines.start, end: lines.end } } : {}),
+    };
+  }
+  if (anchor.symbol != null) {
+    throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}.symbol requires a path anchor`, { stage: "validation" });
+  }
+  if (lines) {
+    throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label}.lines is valid only for a path anchor`, { stage: "validation" });
+  }
+  const evidence = validateMaterializedCursorEvidence(
+    materializeDelegatedRef({ ref: anchor.ref }, context),
+    `${label}.ref`,
+  );
+  return { ref: evidence.ref, evidence };
 }
 
 function materializeResearchAnchorsForChild(entry, childContext) {
@@ -1133,11 +1217,16 @@ export class SubAgentRuntime {
   constructor({
     readSetting = getSetting,
     maxActiveChildren = SUB_AGENT_LIMITS.maxActiveChildren,
+    admissionWaitMs = SUB_AGENT_LIMITS.admissionWaitMs,
     registryTtlMs = DEFAULT_REGISTRY_TTL_MS,
     settledBatchRetentionMs = DEFAULT_SETTLED_BATCH_RETENTION_MS,
   } = {}) {
     this.readSetting = readSetting;
     this.maxActiveChildren = maxActiveChildren;
+    const configuredAdmissionWaitMs = Number(admissionWaitMs);
+    this.admissionWaitMs = Number.isFinite(configuredAdmissionWaitMs) && configuredAdmissionWaitMs >= 0
+      ? configuredAdmissionWaitMs
+      : SUB_AGENT_LIMITS.admissionWaitMs;
     const configuredRegistryTtlMs = Number(registryTtlMs);
     const configuredBatchRetentionMs = Number(settledBatchRetentionMs);
     this.registryTtlMs = Number.isFinite(configuredRegistryTtlMs) && configuredRegistryTtlMs > 0
@@ -1152,9 +1241,11 @@ export class SubAgentRuntime {
     this.batchByParent = new Map();
     this.childBindings = new Map();
     this.activeChildren = 0;
+    // Batches waiting for lane capacity, oldest first, across all parents.
+    this.admissionQueue = [];
   }
 
-  registerParent({ agentCallId, runChild, runResearchChild = null, researchPolicy = null, executeInput = null, authorizedToolSurface = [] }) {
+  registerParent({ agentCallId, runChild, runResearchChild = null, researchPolicy = null, executeInput = null, authorizedToolSurface = [], projectDir = null }) {
     const id = positiveId(agentCallId);
     if (!id || typeof runChild !== "function") return () => {};
     const previous = this.parents.get(id);
@@ -1163,6 +1254,7 @@ export class SubAgentRuntime {
       runChild,
       runResearchChild,
       researchPolicy,
+      projectDir: typeof projectDir === "string" && projectDir.trim() ? projectDir : null,
       executeInput: typeof executeInput === "function" ? executeInput : null,
       authorizedTools: normalizedToolEntries(authorizedToolSurface),
       accepting: true,
@@ -1175,6 +1267,13 @@ export class SubAgentRuntime {
       deregistered = true;
       if (expiryTimer) clearTimeout(expiryTimer);
       registration.accepting = false;
+      for (const waiter of this.admissionQueue.filter((item) => item.registration === registration)) {
+        waiter.cancel(runtimeError(
+          "SUB_AGENT_PARENT_CLOSED",
+          "Parent closed while its batch waited for lane capacity",
+          { stage: "control" },
+        ));
+      }
       if (this.parents.get(id) !== registration) return;
       this.parents.delete(id);
       for (const batch of [...this.batches.values()].filter((item) => item.parentCallId === id)) {
@@ -1204,6 +1303,8 @@ export class SubAgentRuntime {
   hasRunningBatchForParent(agentCallId) {
     const id = positiveId(agentCallId);
     if (!id) return false;
+    // Waiting for lane capacity is the same blocked silence.
+    if (this.admissionQueue.some((waiter) => waiter.parentCallId === id)) return true;
     for (const batch of this.batches.values()) {
       if (batch.parentCallId !== id || batch.parentClosed) continue;
       if (batch.entries.some((entry) => ["admitted", "running"].includes(entry.status))) return true;
@@ -1553,9 +1654,10 @@ export class SubAgentRuntime {
 
   /**
    * @param {any} args
-   * @param {{ context?: Record<string, any> }} options
+   * @param {{ context?: Record<string, any>, admissionSignal?: AbortSignal | null }} options
+   *   `admissionSignal` cancels a dispatch that is still waiting for lane capacity.
    */
-  async execute(args, { context = {} } = {}) {
+  async execute(args, { context = {}, admissionSignal = null } = {}) {
     const parentCallId = positiveId(context.agentCallId ?? context.agent_call_id);
     if (!parentCallId) throw runtimeError("SUB_AGENT_CONTEXT_INVALID", "sub_agent requires an active parent agent call", { stage: "admission" });
     if (Buffer.byteLength(JSON.stringify(args ?? null), "utf8") > SUB_AGENT_LIMITS.maxRequestBytes) {
@@ -1578,14 +1680,115 @@ export class SubAgentRuntime {
       if (coordinationMode !== "subagents" && !plannerResearchBatch) {
         throw runtimeError("SUB_AGENT_ADMIN_DISABLED", "sub_agent is disabled by the repository administrator", { stage: "admission" });
       }
-      return await this.#dispatch(input, parentCallId, context);
+      return await this.#dispatch(input, parentCallId, context, admissionSignal);
     }
     if (input.op === "status") return await this.#status(input, parentCallId);
     if (input.op === "cancel") return await this.#cancel(input, parentCallId);
     throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "op must be dispatch, status, or cancel", { stage: "validation" });
   }
 
-  async #dispatch(input, parentCallId, context) {
+  // The batch this dispatch replays, or null when it is new. Throws when the
+  // parent may not start another batch.
+  #priorBatch(parentCallId, registration, digest, researchRequest, requestCount) {
+    const priorBatches = [...this.batches.values()].filter((batch) => batch.parentCallId === parentCallId);
+    const existingBatchId = this.batchByParent.get(parentCallId);
+    const existingBatch = researchRequest
+      ? priorBatches.find((batch) => batch.requestDigest === digest)
+      : existingBatchId ? this.batches.get(existingBatchId) : null;
+    if (researchRequest && !existingBatch && priorBatches.reduce((sum, batch) => sum + batch.entries.filter(entryCountsTowardResearchLimit).length, 0) + requestCount > (registration.researchPolicy?.maxChildren || 0)) {
+      throw runtimeError("SUB_AGENT_BATCH_LIMIT", "Planner research child limit reached", { stage: "admission" });
+    }
+    if (existingBatch && existingBatch.requestDigest !== digest) {
+      throw runtimeError("SUB_AGENT_BATCH_LIMIT", "Only one sub_agent batch is allowed per parent agent call", { stage: "admission" });
+    }
+    return existingBatch || null;
+  }
+
+  async #replayBatch(existingBatch) {
+    if (existingBatch.mode === "wait_all") {
+      await existingBatch.settledPromise;
+      existingBatch.acknowledged = true;
+      return publicBatch(existingBatch, { includeResults: true });
+    }
+    const includeResults = existingBatch.status !== "running";
+    if (includeResults) existingBatch.acknowledged = true;
+    return publicBatch(existingBatch, { includeResults });
+  }
+
+  // Reserves `count` lane slots. Returns null when they were reserved at once,
+  // otherwise a promise that settles once they are reserved (FIFO across all
+  // parents) or rejects on expiry, abort, or parent close.
+  #reserveCapacity(count, { registration, parentCallId, waitMs, signal }) {
+    if (count > this.maxActiveChildren) {
+      throw capacityError({ requested: count, active: this.activeChildren, limit: this.maxActiveChildren, waitedMs: 0 });
+    }
+    if (this.admissionQueue.length === 0 && this.activeChildren + count <= this.maxActiveChildren) {
+      this.activeChildren += count;
+      return null;
+    }
+    if (signal?.aborted) {
+      throw signal.reason || runtimeError("SUB_AGENT_CANCELLED", "Dispatch was cancelled while waiting for lane capacity", { stage: "control" });
+    }
+    if (!(waitMs > 0)) {
+      throw capacityError({ requested: count, active: this.activeChildren, limit: this.maxActiveChildren, waitedMs: 0 });
+    }
+    return new Promise((resolve, reject) => {
+      const startedAt = Date.now();
+      let settled = false;
+      let timer = null;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        const index = this.admissionQueue.indexOf(waiter);
+        if (index >= 0) this.admissionQueue.splice(index, 1);
+        if (!error) {
+          resolve(undefined);
+          return;
+        }
+        reject(error);
+        // A departing head may have been blocking smaller batches behind it.
+        this.#pumpAdmissions();
+      };
+      const onAbort = () => finish(signal.reason
+        || runtimeError("SUB_AGENT_CANCELLED", "Dispatch was cancelled while waiting for lane capacity", { stage: "control" }));
+      const waiter = {
+        registration,
+        parentCallId,
+        count,
+        admit: () => finish(null),
+        cancel: (error) => finish(error),
+      };
+      timer = setTimeout(() => finish(capacityError({
+        requested: count,
+        active: this.activeChildren,
+        limit: this.maxActiveChildren,
+        waitedMs: Date.now() - startedAt,
+      })), waitMs);
+      timer.unref?.();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.admissionQueue.push(waiter);
+    });
+  }
+
+  #releaseCapacity(count) {
+    this.activeChildren = Math.max(0, this.activeChildren - count);
+    this.#pumpAdmissions();
+  }
+
+  // Strict FIFO: a large batch at the head is not overtaken by smaller ones.
+  #pumpAdmissions() {
+    while (this.admissionQueue.length > 0) {
+      const head = this.admissionQueue[0];
+      if (this.activeChildren + head.count > this.maxActiveChildren) return;
+      this.admissionQueue.shift();
+      this.activeChildren += head.count;
+      head.admit();
+    }
+  }
+
+  async #dispatch(input, parentCallId, context, admissionSignal = null) {
     exactObject(input, ["op", "protocol", "requests", "completion"], "sub_agent.dispatch");
     const registration = this.parents.get(parentCallId);
     if (!registration?.accepting) {
@@ -1600,30 +1803,8 @@ export class SubAgentRuntime {
     }
     const digest = requestDigest(input);
     const researchRequest = input.requests.every((item) => item.profile === RESEARCH_CHILD_PROFILE);
-    const priorBatches = [...this.batches.values()].filter((batch) => batch.parentCallId === parentCallId);
-    const existingBatchId = this.batchByParent.get(parentCallId);
-    const existingBatch = researchRequest
-      ? priorBatches.find((batch) => batch.requestDigest === digest)
-      : existingBatchId ? this.batches.get(existingBatchId) : null;
-    if (researchRequest && !existingBatch && priorBatches.reduce((sum, batch) => sum + batch.entries.filter(entryCountsTowardResearchLimit).length, 0) + input.requests.length > (registration.researchPolicy?.maxChildren || 0)) {
-      throw runtimeError("SUB_AGENT_BATCH_LIMIT", "Planner research child limit reached", { stage: "admission" });
-    }
-    if (existingBatch) {
-      if (existingBatch.requestDigest !== digest) {
-        throw runtimeError("SUB_AGENT_BATCH_LIMIT", "Only one sub_agent batch is allowed per parent agent call", { stage: "admission" });
-      }
-      if (existingBatch.mode === "wait_all") {
-        await existingBatch.settledPromise;
-        existingBatch.acknowledged = true;
-        return publicBatch(existingBatch, { includeResults: true });
-      }
-      const includeResults = existingBatch.status !== "running";
-      if (includeResults) existingBatch.acknowledged = true;
-      return publicBatch(existingBatch, { includeResults });
-    }
-    if (this.activeChildren + input.requests.length > this.maxActiveChildren) {
-      throw runtimeError("SUB_AGENT_CAPACITY", "The inline child lane has insufficient capacity for the complete batch", { retryable: true, stage: "admission" });
-    }
+    const existingBatch = this.#priorBatch(parentCallId, registration, digest, researchRequest, input.requests.length);
+    if (existingBatch) return await this.#replayBatch(existingBatch);
 
     const seenRequests = new Set();
     const repairs = [];
@@ -1643,11 +1824,24 @@ export class SubAgentRuntime {
           throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Research requires one bounded wait_all batch of research requests", { stage: "validation" });
         }
         exactObject(request, ["id", "profile", "intent", "anchors", "budget", "agent_type"], `requests[${requestIndex}]`);
+        // The model-facing context carries identities only; the project root
+        // comes from the parent's trusted registration.
+        const anchorContext = {
+          ...context,
+          projectDir: context.projectDir || context.cwd || registration.projectDir || null,
+        };
+        let anchors = [];
         if (request.agent_type === "web" && request.anchors != null) {
-          throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Repository anchors are supported only for code research children", { stage: "validation" });
+          repairs.push({
+            request_id: id,
+            field: `requests[${requestIndex}].anchors`,
+            action: "ignored",
+            reason: "repository anchors are supported only for code research children",
+          });
+        } else {
+          anchors = normalizeResearchAnchors(request.anchors, anchorContext, `requests[${requestIndex}].anchors`, { requestId: id, repairs });
         }
-        const anchors = normalizeResearchAnchors(request.anchors, context, `requests[${requestIndex}].anchors`);
-        const budget = normalizeResearchBudget(request.budget, policy, id, repairs);
+        const budget = normalizeResearchBudget(request.budget, policy, id, repairs, { agentType: request.agent_type });
         const effort = [budget.reasoning_effort, policy.childReasoningEffort]
           .find((value) => PLANNER_RESEARCH_EFFORT_VALUES.includes(value)) || "medium";
         return {
@@ -1661,8 +1855,10 @@ export class SubAgentRuntime {
           // Expansion later annotates this child's cited evidence in place, so
           // the report fit reserves room for it.
           expandEvidence: request.agent_type === "code" && (Number(policy.expandChars) || 0) > 0,
-          modelTier: policy.childModelTier || null,
-          anchors, inputs: [], maxInputs: 0, parentContext: { ...context },
+          // Never the planner's model: the requested tier, else the
+          // configured child tier.
+          modelTier: budget.model_tier || policy.childModelTier || RESEARCH_CHILD_FALLBACK_MODEL_TIER,
+          anchors, inputs: [], maxInputs: 0, parentContext: { ...anchorContext },
         };
       }
       if (request.profile !== "citation_synthesis.v1") {
@@ -1715,6 +1911,33 @@ export class SubAgentRuntime {
       };
     });
 
+    // Requests are validated before any wait, so a malformed batch fails fast.
+    const waiting = this.#reserveCapacity(normalized.length, {
+      registration,
+      parentCallId,
+      waitMs: admissionWaitBudgetMs(normalized, completion.mode, registration, this.admissionWaitMs),
+      signal: admissionSignal,
+    });
+    if (waiting) {
+      await waiting;
+      // The world moved while this batch waited: the parent may have closed,
+      // or a concurrent dispatch from it may have created the batch.
+      let replay = null;
+      try {
+        if (!registration.accepting) {
+          throw runtimeError("SUB_AGENT_PARENT_UNAVAILABLE", "The parent provider call cannot dispatch citation children", { stage: "admission" });
+        }
+        replay = this.#priorBatch(parentCallId, registration, digest, researchRequest, input.requests.length);
+      } catch (error) {
+        this.#releaseCapacity(normalized.length);
+        throw error;
+      }
+      if (replay) {
+        this.#releaseCapacity(normalized.length);
+        return await this.#replayBatch(replay);
+      }
+    }
+
     const batch = {
       id: `sab_${crypto.randomUUID().replaceAll("-", "")}`,
       op: "dispatch",
@@ -1749,7 +1972,6 @@ export class SubAgentRuntime {
     };
     this.batches.set(batch.id, batch);
     this.batchByParent.set(parentCallId, batch.id);
-    this.activeChildren += batch.entries.length;
 
     const tasks = batch.entries.map((entry) => this.#runEntry(batch, entry, entry.profile === RESEARCH_CHILD_PROFILE ? registration.runResearchChild : registration.runChild));
     batch.settledPromise = Promise.allSettled(tasks).then(() => {
@@ -1844,12 +2066,14 @@ export class SubAgentRuntime {
           : "failed";
       entry.error = safeError(failure);
       entry.coverage = coverageForEntry(entry);
-      if (error?.stats) entry.usage = usageFromChild({ stats: error.stats, agentCallId: error.agentCallId });
+      // A child that ran keeps its call id and usage even when it failed, so
+      // the audit does not count it as rejected before it started.
+      if (error?.stats || positiveId(error?.agentCallId)) entry.usage = usageFromChild({ stats: error.stats, agentCallId: error.agentCallId });
       else if (result) entry.usage = usageFromChild(result);
     } finally {
       clearTimeout(timeout);
       entry.hardSettle = null;
-      this.activeChildren = Math.max(0, this.activeChildren - 1);
+      this.#releaseCapacity(1);
     }
   }
 

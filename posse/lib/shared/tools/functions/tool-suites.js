@@ -51,6 +51,9 @@ const TOOLS_SUITE = [
   { name: "extract_image_text", mutatesWorktree: false, advertise: ["function", "mcp"] },
   { name: "bash", mutatesWorktree: true, advertise: ["function", "mcp"] },
   { name: "generate_image", mutatesWorktree: false, advertise: ["function", "mcp"] },
+  // Artificer-only external downloads into artifact output scope. MCP only:
+  // the gateway owns the per-job byte budget and the operator web kill switch.
+  { name: "download_file", mutatesWorktree: false, advertise: ["mcp"] },
   // Opt-in project DB access. mutatesWorktree:false — DB writes (when granted)
   // don't touch the git working tree; capability is gated by per-repo config.
   { name: "project_db_query", mutatesWorktree: false, advertise: ["function", "mcp"] },

@@ -23,6 +23,10 @@ export const SUB_AGENT_LIMITS = Object.freeze({
   maxBatch: 3,
   maxInputs: 3,
   maxActiveChildren: 3,
+  // The child lane is shared by every concurrent parent. A batch that does not
+  // fit waits in FIFO order for this long (further bounded by what its tool
+  // deadline leaves after the children's own timeout) before it is refused.
+  admissionWaitMs: 180_000,
   defaultTimeoutMs: 60_000,
   maxTimeoutMs: 60_000,
   maxStatusWaitMs: 5_000,

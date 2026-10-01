@@ -37,6 +37,7 @@ export function processVerdict(job, verdict, {
   autoApprove = false,
   leaseToken = null,
   humanApprovedReplan = false,
+  replanTrigger = null,
   assessedCommitHash = undefined,
 } = {}) {
   const emitLog = emit || ((msg) => console.log(`  ${msg}`));
@@ -98,6 +99,7 @@ export function processVerdict(job, verdict, {
     emitLog,
     isFromSuggestion,
     humanApprovedReplan,
+    replanTrigger,
     reasonBrief,
     leaseToken,
     recordAssessorVerdict,

@@ -24,7 +24,7 @@ const PARALLEL_WRITE_TOOLS = new Set([
 ]);
 
 const NATIVE_BATCH_TOOLS = new Set([
-  "sub_agent", "inspect_file", "create_test", "run_test", "fetch_ref", "traverse_ref", "create_ref", "symbol.card", "symbol.get",
+  "sub_agent", "inspect_file", "download_file", "create_test", "run_test", "fetch_ref", "traverse_ref", "create_ref", "symbol.card", "symbol.get",
   "code.survey", "memory.surface", "memory.get",
 ]);
 

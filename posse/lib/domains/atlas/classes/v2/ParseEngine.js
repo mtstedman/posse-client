@@ -20,6 +20,7 @@
 // as informational, not authoritative.
 
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
 import { ViewBuilder, viewFingerprintForOptions } from "./ViewBuilder.js";
@@ -84,7 +85,13 @@ import {
   shouldInspectSourceForMinification,
 } from "../../functions/v2/parser/index-filters.js";
 import { sha256Hex } from "../../functions/v2/hash.js";
-import { verifyWiSource, wiTrackedPaths } from "../../functions/v2/wi-source-proof.js";
+import {
+  materializeWiCommitPaths,
+  verifyWiSource,
+  wiCommitTree,
+  wiPathsDifferingFromCommit,
+} from "../../functions/v2/wi-source-proof.js";
+import { ATLAS_WI_REFRESH_MAX_SOURCE_PASSES } from "../../../../catalog/atlas.js";
 import { ATLAS_EVENTS } from "../../functions/v2/contracts/events.js";
 import { ingestScipFile, listScipFiles } from "../../functions/v2/scip/ingester.js";
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
@@ -1225,17 +1232,21 @@ export class ParseEngine {
             if (payload.work_item_id == null || payload.branch !== branch || !this.#ledger.getBranch(branch)) {
               throw new Error("Post-commit WI refresh requires its existing WI ledger branch");
             }
-            const sourceRoot = await verifyWiSource({ repoRoot: this.#repoRoot,
+            // HEAD is commit_sha or a sibling's later commit on top of it;
+            // index HEAD so a late refresh never rolls the ledger back.
+            const { sourceRoot, head: indexedCommit } = await verifyWiSource({ repoRoot: this.#repoRoot,
               worktreePath: payload.worktree_path, commitSha: payload.commit_sha });
+            const tree = await wiCommitTree(sourceRoot, indexedCommit);
             const snapshot = this.#ledger.pathSnapshotAt(branch, this.#ledger.headSeq(branch));
-            const paths = [...new Set([...await wiTrackedPaths(sourceRoot), ...snapshot.keys()])];
+            const paths = [...new Set([...tree.keys(), ...snapshot.keys()])];
             base.paths_considered = paths.length;
-            await this.#indexPaths({ paths, branch, base, sourceRoot });
+            await this.#indexWiCommitPaths({ paths, tree, branch, base, sourceRoot, commitSha: indexedCommit });
             if (base.skipped.some((skip) => !ACCOUNTED_EXCLUSION_REASONS.has(skip.reason))) {
               throw new Error("WI source refresh did not index every eligible path");
             }
             await verifyWiSource({ repoRoot: this.#repoRoot,
-              worktreePath: sourceRoot, commitSha: payload.commit_sha });
+              worktreePath: sourceRoot, commitSha: indexedCommit });
+            base.wi_source_commit = indexedCommit;
             await this.#warmWi(payload, base);
             const mounted = await this.mountForWorktreeAsync({ workItemId: payload.work_item_id, ledgerBranch: branch, worktreePath: sourceRoot });
             base.view_written = mounted.viewPath;
@@ -1814,6 +1825,37 @@ export class ParseEngine {
       return false;
     } finally {
       try { view?.close?.(); } catch { /* stale/corrupt views take the full path */ }
+    }
+  }
+
+  /**
+   * Index a post-commit WI refresh from the commit rather than the working
+   * tree. Jobs sharing a WI worktree leave each other's staged and unstaged
+   * edits in it, so every path whose working-tree bytes differ from the
+   * commit (or that the commit lacks) is read from the object store. Paths a
+   * sibling dirties while the checkout is being read are re-read from the
+   * commit in a bounded follow-up pass.
+   *
+   * @param {{ paths: string[], tree: Map<string, { mode: string, type: string, oid: string }>, branch: string, base: AtlasWarmJobResult, sourceRoot: string, commitSha: string }} args
+   */
+  async #indexWiCommitPaths({ paths, tree, branch, base, sourceRoot, commitSha }) {
+    const overlayRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "posse-wi-commit-"));
+    const commitSource = { root: overlayRoot, paths: /** @type {Map<string, string | null>} */ (new Map()) };
+    try {
+      for (let pass = 0; ; pass += 1) {
+        const differing = await wiPathsDifferingFromCommit(sourceRoot, commitSha);
+        const unread = paths.filter((repoRelPath) => !commitSource.paths.has(repoRelPath)
+          && (differing.has(repoRelPath) || !tree.has(repoRelPath)));
+        if (pass > 0 && unread.length === 0) return;
+        if (pass >= ATLAS_WI_REFRESH_MAX_SOURCE_PASSES) {
+          throw new Error("WI refresh source kept changing while it was indexed");
+        }
+        const materialized = await materializeWiCommitPaths({ worktreePath: sourceRoot, tree, paths: unread, overlayRoot });
+        for (const [repoRelPath, sourcePath] of materialized) commitSource.paths.set(repoRelPath, sourcePath);
+        await this.#indexPaths({ paths: pass === 0 ? paths : unread, branch, base, sourceRoot, commitSource });
+      }
+    } finally {
+      await fs.promises.rm(overlayRoot, { recursive: true, force: true });
     }
   }
 
@@ -2821,9 +2863,12 @@ export class ParseEngine {
    * Errors per-file do not abort the batch — failures are surfaced in
    * `base.skipped` so operators can see which files couldn't be indexed.
    *
-   * @param {{ paths: string[], branch: string, base: AtlasWarmJobResult, sourceRoot?: string, documentIntake?: OrderedDocumentIntake | null, stageScipPaths?: ((paths: string[]) => Promise<unknown>) | null }} args
+   * `commitSource` maps paths to committed copies under `commitSource.root`
+   * (null: absent from the commit); those are read instead of `sourceRoot`.
+   *
+   * @param {{ paths: string[], branch: string, base: AtlasWarmJobResult, sourceRoot?: string, documentIntake?: OrderedDocumentIntake | null, stageScipPaths?: ((paths: string[]) => Promise<unknown>) | null, commitSource?: { root: string, paths: Map<string, string | null> } | null }} args
    */
-  async #indexPaths({ paths, branch, base, sourceRoot = this.#repoRoot, documentIntake = null, stageScipPaths = null }) {
+  async #indexPaths({ paths, branch, base, sourceRoot = this.#repoRoot, documentIntake = null, stageScipPaths = null, commitSource = null }) {
     if (!this.#parser) return;
     await this.#emitStage("snapshot", `loading ${branch} path snapshot`);
     const headSeq = this.#ledger.headSeq(branch);
@@ -2894,6 +2939,8 @@ export class ParseEngine {
     await reportIndexProgress("", { force: true });
     const recordPathSourceStat = async (repoRelPath, contentHash, stat) => {
       if (!stat || typeof /** @type {any} */ (this.#ledger).recordSourceStatAsync !== "function") return;
+      // A committed copy's stat says nothing about the checkout's file.
+      if (commitSource?.paths.has(repoRelPath)) return;
       await /** @type {any} */ (this.#ledger).recordSourceStatAsync(sourceStatRecord({
         branch,
         repo_rel_path: repoRelPath,
@@ -3010,12 +3057,16 @@ export class ParseEngine {
           continue;
         }
 
-        const absPath = path.join(sourceRoot, repo_rel_path);
+        const fromCommit = commitSource?.paths.has(repo_rel_path) === true;
+        const absPath = fromCommit
+          ? commitSource?.paths.get(repo_rel_path) ?? null
+          : path.join(sourceRoot, repo_rel_path);
+        const parseRoot = fromCommit ? commitSource?.root ?? sourceRoot : sourceRoot;
         let onDiskExists = false;
-        try { onDiskExists = fs.existsSync(absPath); }
+        try { onDiskExists = absPath != null && fs.existsSync(absPath); }
         catch { onDiskExists = false; }
 
-        if (!onDiskExists) {
+        if (absPath == null || !onDiskExists) {
           await reportIndexProgress(repo_rel_path, {
             force: true,
             stage: "recording delta",
@@ -3158,7 +3209,7 @@ export class ParseEngine {
           });
           parsed = fileBytes && typeof /** @type {any} */ (this.#parser).parseBuffer === "function"
             ? await /** @type {any} */ (this.#parser).parseBuffer({ bytes: fileBytes, repo_rel_path })
-            : await this.#parser.parseFile({ absPath, repoRoot: sourceRoot });
+            : await this.#parser.parseFile({ absPath, repoRoot: parseRoot });
         } catch (err) {
           logAtlasError(`[Warmer.#indexPaths] parse failed for ${repo_rel_path}:`, err);
           base.skipped.push({

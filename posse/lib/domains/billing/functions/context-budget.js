@@ -46,7 +46,12 @@ export function publishContextBudgetCheckpoint(checkpoint = {}, { db = getDb() }
   );
   const stored = db.prepare(`SELECT * FROM context_budget_checkpoints WHERE agent_call_id = ?`).get(agentCallId);
   try {
-    const decision = db.prepare(`
+    // Every decision made against the previous checkpoint forecast this same
+    // request, so one actual pairs them all. Their predictions are deliberate
+    // upper bounds that stack sibling reservations; the most stacked one stays
+    // the reported prediction, and the estimator's own error is reported
+    // against the decisions' shared base forecast.
+    const decisions = db.prepare(`
       SELECT id, work_item_id, job_id, attempt_id, detail_json
       FROM job_observations
       WHERE attempt_id = ? AND observation_type = 'context.headroom_decision'
@@ -55,27 +60,41 @@ export function publishContextBudgetCheckpoint(checkpoint = {}, { db = getDb() }
         AND NOT EXISTS (
           SELECT 1 FROM job_observations actual
           WHERE actual.observation_type = 'context.headroom_actual'
-            AND json_extract(actual.detail_json, '$.decision_observation_id') = job_observations.id
+            AND (json_extract(actual.detail_json, '$.decision_observation_id') = job_observations.id
+              OR EXISTS (
+                SELECT 1 FROM json_each(actual.detail_json, '$.decision_observation_ids') paired
+                WHERE paired.value = job_observations.id
+              ))
         )
-      ORDER BY id DESC LIMIT 1
-    `).get(attemptId, agentCallId, sequenceId);
-    if (decision) {
+      ORDER BY id
+    `).all(attemptId, agentCallId, sequenceId);
+    if (decisions.length > 0) {
+      const decision = decisions[decisions.length - 1];
       const detail = JSON.parse(String(decision.detail_json || "{}"));
       const predicted = Number(detail.predicted_next_request_tokens);
+      const rawBase = detail.base_next_request_tokens;
+      const base = rawBase == null ? NaN : Number(rawBase);
       const actual = integer(checkpoint.requestContextInputTokens ?? checkpoint.request_context_input_tokens) ?? 0;
+      const estimatorError = Number.isFinite(base) ? actual - base : null;
       recordObservation({
         work_item_id: decision.work_item_id,
         job_id: decision.job_id,
         attempt_id: decision.attempt_id,
         observation_type: "context.headroom_actual",
-        summary: `Context prediction error ${Number.isFinite(predicted) ? actual - predicted : "unavailable"} tokens`,
+        summary: estimatorError != null
+          ? `Context estimator error ${estimatorError} tokens; reservation slack ${Number.isFinite(predicted) ? predicted - actual : "unavailable"} tokens`
+          : `Context prediction error ${Number.isFinite(predicted) ? actual - predicted : "unavailable"} tokens`,
         detail: {
           decision_observation_id: decision.id,
+          decision_observation_ids: decisions.map((row) => row.id),
           agent_call_id: agentCallId,
           sequence_id: sequenceId,
           predicted_next_request_tokens: Number.isFinite(predicted) ? predicted : null,
           actual_request_context_tokens: actual,
           prediction_error_tokens: Number.isFinite(predicted) ? actual - predicted : null,
+          base_next_request_tokens: Number.isFinite(base) ? base : null,
+          estimator_error_tokens: estimatorError,
+          reservation_slack_tokens: Number.isFinite(predicted) ? predicted - actual : null,
         },
       });
     }

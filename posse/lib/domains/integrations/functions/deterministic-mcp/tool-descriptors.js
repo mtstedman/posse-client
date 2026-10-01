@@ -57,6 +57,7 @@ import {
   TOOL_PULL_BRIEF,
   TOOL_GET_BRIEF,
   TOOL_GENERATE_IMAGE,
+  TOOL_DOWNLOAD_FILE,
   TOOL_PROJECT_DB_QUERY,
   TOOL_AGENT_HANDOFF,
   TOOL_AGENT_HANDOFF_DEV,
@@ -109,6 +110,7 @@ export {
   TOOL_PULL_BRIEF,
   TOOL_GET_BRIEF,
   TOOL_GENERATE_IMAGE,
+  TOOL_DOWNLOAD_FILE,
   TOOL_PROJECT_DB_QUERY,
   TOOL_AGENT_HANDOFF,
   TOOL_AGENT_HANDOFF_DEV,
@@ -461,6 +463,12 @@ export const TOOL_CATALOG = {
     summary: "Generate new image artifacts inside allowed output scope.",
     observation: { type: "tool.generate_image", label: "Generate image", format: "generate_image", pathKeys: ["filename"] },
   },
+  download_file: {
+    schema: TOOL_DOWNLOAD_FILE,
+    access: "write",
+    summary: "Download public HTTPS files byte-exact into the artifact output scope, with per-hop address checks and size and type limits.",
+    observation: { type: "tool.download_file", label: "Download", format: "generic", targetKeys: [] },
+  },
   extract_image_text: {
     schema: TOOL_EXTRACT_IMAGE_TEXT,
     access: "read",
@@ -582,7 +590,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     }),
     artificer: Object.freeze({
       read: ["ack_operator_feedback"],
-      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "bash"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "write_file", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "clean_image", "extract_image_text", "download_file", "bash"],
       imageGeneration: ["generate_image"],
     }),
     // Assessor carries project_db_query on the READ lane so it can verify the
@@ -624,10 +632,14 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     imageMutation: Object.freeze(["clean_image"]),
     imageGeneration: Object.freeze(["generate_image"]),
     ocr: Object.freeze(["extract_image_text"]),
+    // The artificer's only external fetch lane. Remote issuance must also
+    // grant asset fetching; provider-native web tools stay off for the role.
+    assetDownload: Object.freeze(["download_file"]),
     shellRoles: Object.freeze(["artificer", "assessor"]),
     writeRoles: Object.freeze(["dev", "artificer"]),
     imageHelperRoles: Object.freeze(["dev", "artificer", "assessor"]),
     imageGenerationRoles: Object.freeze(["artificer"]),
+    assetDownloadRoles: Object.freeze(["artificer"]),
   }),
   atlasRoutes: Object.freeze({
     researcher: Object.freeze({
@@ -671,12 +683,15 @@ export const DETERMINISTIC_IMAGE_HELPER_TOOLS = TOOL_ROLE_LIBRARY.deterministicM
 export const DETERMINISTIC_IMAGE_MUTATION_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.imageMutation;
 export const DETERMINISTIC_IMAGE_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.imageGeneration;
 export const DETERMINISTIC_OCR_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.ocr;
+export const DETERMINISTIC_ASSET_DOWNLOAD_TOOLS = TOOL_ROLE_LIBRARY.deterministicMcp.assetDownload;
 
 // Native benchmark teams own the whole workflow in one provider session, so
 // they need the same opt-in web lane that Posse splits across researcher,
-// assessor, and artificer roles. The account toggle and provider policy still
-// fail closed.
-export const WEB_TOOL_ROLES = new Set(["researcher", "assessor", "native"]);
+// assessor, and dev roles. Dev (and fix, which runs as dev) holds web access
+// as a fallback for external facts or source files that research did not
+// deliver, so a missing input does not strand the job behind an operator gate.
+// The account toggle and the remote-issued web policy still fail closed.
+export const WEB_TOOL_ROLES = new Set(["researcher", "assessor", "dev", "native"]);
 export const GATED_ROLES = new Set(["researcher", "planner", "dev", "assessor"]);
 
 export const MEANINGFUL_ATLAS_ACTIONS = new Set([
@@ -911,6 +926,10 @@ export function roleUsesDeterministicImageHelpers(role) {
   return TOOL_ROLE_LIBRARY.deterministicMcp.imageHelperRoles.includes(role);
 }
 
+export function roleUsesDeterministicAssetDownload(role) {
+  return TOOL_ROLE_LIBRARY.deterministicMcp.assetDownloadRoles.includes(role);
+}
+
 export function getDeterministicMcpToolNames(role, {
   needsImageGeneration = false,
   agentHandoff = false,
@@ -937,6 +956,7 @@ export function getDeterministicMcpToolNames(role, {
   if (roleUsesDeterministicImageMcp(role)) tools.push(...DETERMINISTIC_IMAGE_MUTATION_TOOLS);
   if (roleUsesDeterministicImageMcp(role) && needsImageGeneration) tools.push(...DETERMINISTIC_IMAGE_TOOLS);
   if (role === "dev" || role === "artificer" || role === "assessor") tools.push(...DETERMINISTIC_OCR_TOOLS);
+  if (roleUsesDeterministicAssetDownload(role)) tools.push(...DETERMINISTIC_ASSET_DOWNLOAD_TOOLS);
   // Scoped lint/typecheck belongs to the assessor. The separate DB-backed
   // registered-test experiment remains deferred and is not issued.
   if (role === "assessor") {

@@ -417,7 +417,7 @@ const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   scheduler_max_active_worktrees: "How many work items may have jobs running at once, each in its own worktree. Use it to cap disk and CPU use separately from the job limit.",
   startup_dirty_tree_policy: "What happens when the repository has uncommitted changes at startup. Block stops and asks you to clean up; commit saves your changes in a commit before work begins.",
   session_recycle_mode: "Let follow-up jobs resume an earlier compatible agent session instead of starting fresh, which saves tokens. Dev/fix reuses sessions for developer fixes only; full reuses them wherever supported; off always starts fresh.",
-  web_tools_enabled: "Let researcher, assessor, artificer, and native-team agents search the web and read web pages.",
+  web_tools_enabled: "Let researcher, assessor, and native-team agents search the web and read web pages, let developers do so as a fallback for missing external facts, and let the artificer download files into its output folder.",
   // General · Approvals & safety
   scope_auto_approval: "Approve routine file requests without asking you: new files under an already-approved folder, test files for developer and fix jobs, and generated lockfiles.",
   fix_scope_handoff_guard: "Controls fixes that name existing files outside their approved scope. Auto/warn adds those files; enforce blocks the handoff; off ignores them.",

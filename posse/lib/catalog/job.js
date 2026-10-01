@@ -160,6 +160,16 @@ export const DEADLOCK_TERMINAL_STATUSES_SQL = sqlList(DEADLOCK_TERMINAL_STATUSES
 // below; repository preparation receives its narrower locks separately.
 
 export const MUTATING_JOB_TYPES = new Set(["dev", "fix", "artificer", "promote"]);
+
+// What asked for a loopback replan. The replan planner's framing depends on
+// it: an operator replan after a blocked job carries no assessor findings.
+export const REPLAN_TRIGGERS = Object.freeze({
+  ASSESSOR: "assessor",
+  OPERATOR_BLOCKED_RECOVERY: "operator_blocked_recovery",
+  OPERATOR_REVIEW: "operator_review",
+  FIX_CHAIN_EXHAUSTED: "fix_chain_exhausted",
+  BLOCKED_RECOVERY_RETRY_FAILED: "blocked_recovery_retry_failed",
+});
 export const ASSESSABLE_JOB_TYPES = new Set(["dev", "fix", "artificer"]);
 export const QUEUE_LOCKING_JOB_TYPES = new Set(["dev", "fix", "promote"]);
 

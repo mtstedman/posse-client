@@ -16,6 +16,8 @@
 
 import path from "node:path";
 
+import { AGENT_HANDOFF_PROFILE_POLICY } from "../../../../catalog/handoff.js";
+
 export const AGENT_HANDOFF_COMPLETION_PROSE_MAX_CHARS = 1000;
 
 const COMPLETION_PROSE_FIELDS = Object.freeze([
@@ -292,6 +294,44 @@ function normalizeReport(report, label, roots, note) {
   return out;
 }
 
+// A child profile whose only target is its parent (research_investigation.v1,
+// citation_synthesis.v1) leaves the agent nothing to choose, so a missing
+// target is a spelling slip, not an intent. Targetless researcher
+// pipeline/report packets are left alone: the legacy researcher normalizer
+// keys on that shape and owns their repair. The admitted target, or null.
+function soleParentTarget(profile) {
+  const policy = AGENT_HANDOFF_PROFILE_POLICY[String(profile || "")];
+  if (!policy || policy.maxHandoffs !== 1) return null;
+  if (policy.targetKinds.length !== 1 || policy.targetKinds[0] !== "parent") return null;
+  return { ...TARGET_BY_NAME.$parent };
+}
+
+function isSoleTarget(value, sole) {
+  const target = coerceTarget(value)?.value;
+  if (!plain(target) || target.kind !== sole.kind) return false;
+  return target.role == null || target.role === sole.role;
+}
+
+// Fill handoffs[0].target when the profile admits only the parent: move a legal
+// top-level target the agent put beside handoffs, or use the profile's target
+// when none was given. A top-level target that is not legal is left for the
+// validator to reject, since the agent asked for something else.
+function fillSoleParentTarget(out, note) {
+  const sole = soleParentTarget(out.profile);
+  if (!sole || !Array.isArray(out.handoffs) || out.handoffs.length !== 1) return out;
+  const entry = plain(out.handoffs[0]);
+  if (!entry || entry.target != null) return out;
+  if (Object.hasOwn(out, "target")) {
+    if (!isSoleTarget(out.target, sole)) return out;
+    const rest = { ...out };
+    delete rest.target;
+    note("handoffs[0].target", "target_moved_from_top_level");
+    return { ...rest, handoffs: [{ ...entry, target: sole }] };
+  }
+  note("handoffs[0].target", "target_filled_from_profile");
+  return { ...out, handoffs: [{ ...entry, target: sole }] };
+}
+
 function normalizeEnvelope(source, roots, note) {
   let out = { ...source };
   const confidence = coerceEnumCase(out.confidence, ["low", "medium", "high"]);
@@ -324,6 +364,7 @@ function normalizeEnvelope(source, roots, note) {
       if (entry.report != null) entry = { ...entry, report: normalizeReport(entry.report, `${label}.report`, roots, note) };
       return entry;
     });
+    out = fillSoleParentTarget(out, note);
   }
   // Assessor compact form carries evidence at the top level.
   for (const lane of ["evidence", "proof", "support"]) {

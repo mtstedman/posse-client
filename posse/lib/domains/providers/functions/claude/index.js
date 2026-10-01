@@ -85,6 +85,9 @@ import {
   parseTokenUsage,
 } from "./stream-usage.js";
 
+// Same cap as the Codex agent-message forwarding (codex/stream-events.js).
+const AGENT_COMMENTARY_MAX_CHARS = 2048;
+
 export { __testBuildClaudeAtlasMcpConfigPayload, __testBuildClaudeDeterministicReadMcpConfigPayload, __testClassifyClaudeCliFailure, __testExtractClaudeToolUsesFromStreamMessage, __testRunClaudeWarmupViaInteractiveCli, getClaudeInfo, getClaudeReadiness, getUsageSummary, isReady, refreshUsageSummary, warmOauthSession, warmOauthSessionAsync, warmOauthSessionInteractive };
 
 export function scrubClaudeChildEnv(childEnv = {}) {
@@ -140,7 +143,7 @@ export function applyClaudeMcpLoadingPolicy(mcpServers = {}) {
 // toClaudeCliFlags expresses the MCP-active branches as a blocklist
 // (tools === null = "all built-ins minus disallowedTools"). The only built-ins
 // meant to survive that blocklist are the web tools, and only for web-enabled
-// roles (researcher/artificer) — where toClaudeCliFlags strips WebFetch/WebSearch
+// roles (researcher, assessor, dev) — where toClaudeCliFlags strips WebFetch/WebSearch
 // out of disallowedTools. For an explicit positive built-in list, derive its
 // complement from the known native catalog so switching to a denylist for MCP
 // does not widen the built-in surface.
@@ -359,6 +362,9 @@ export async function callProvider(promptText, {
   disableAgentTools = false,
   nativeColdBoot = false,
   captureNativeSubagents = false,
+  onAgentCommentary = null, // (text: string) => void — visible assistant text, like Codex agent messages
+  onProviderToolUse = null, // (toolUse) => void — each completed tool_use block as it streams
+  onProviderToolResult = null, // ({ id, isError }) => void — each tool_result block as it streams
 } = {}) {
   const resolvedClaude = await getClaudeCommandAsync();
   const providerPathsForAtlas = normalizeProviderPaths({ cwd, projectDir });
@@ -1088,7 +1094,38 @@ export async function callProvider(promptText, {
       }
     }
 
+    // Visible assistant text is the agent's own commentary (START:/FINISH:
+    // and status lines). Thinking blocks and native sub-agent sidechains are
+    // not commentary. Mirrors the Codex agent_message forwarding.
+    function emitAgentCommentary(message) {
+      if (typeof onAgentCommentary !== "function") return;
+      if (message?.type !== "assistant" || message.parent_tool_use_id || message.isSidechain === true) return;
+      const content = message?.message?.content;
+      if (!Array.isArray(content)) return;
+      for (const block of content) {
+        if (block?.type !== "text") continue;
+        const text = typeof block.text === "string" ? block.text.trim() : "";
+        if (!text) continue;
+        try { onAgentCommentary(text.slice(0, AGENT_COMMENTARY_MAX_CHARS)); } catch { /* live telemetry must not break the provider */ }
+      }
+    }
+
+    function emitProviderToolResults(message) {
+      if (typeof onProviderToolResult !== "function") return;
+      if (message?.type !== "user" || message.parent_tool_use_id) return;
+      const content = message?.message?.content;
+      if (!Array.isArray(content)) return;
+      for (const block of content) {
+        if (block?.type !== "tool_result") continue;
+        const id = typeof block.tool_use_id === "string" && block.tool_use_id.trim() ? block.tool_use_id.trim() : null;
+        if (!id) continue;
+        try { onProviderToolResult({ id, isError: block.is_error === true }); } catch { /* live telemetry must not break the provider */ }
+      }
+    }
+
     function observeStreamTelemetry(message) {
+      emitAgentCommentary(message);
+      emitProviderToolResults(message);
       warnOnUnknownNativeTools(message);
       observeUnknownToolNames(message);
       for (const summary of streamTelemetry.observe(message)) {
@@ -1233,6 +1270,9 @@ export async function callProvider(promptText, {
       seenToolUseKeys.add(key);
       toolUses.push(normalized);
       updateProviderBatch(normalized);
+      if (typeof onProviderToolUse === "function") {
+        try { onProviderToolUse(normalized); } catch { /* live telemetry must not break the provider */ }
+      }
 
       // A terminal handoff is the job's exit, not activity worth a live line;
       // a rejected one still surfaces through its error.
@@ -1577,7 +1617,11 @@ export async function callProvider(promptText, {
 
       // Extract token usage from stream-json result, fallback to stderr parsing
       const captured = streamTelemetry.snapshot();
-      const usage = resultData != null ? _extractStreamUsage(resultData) : captured.usage;
+      // Without the CLI result and without a finalized stream, fall back to
+      // the per-message usage the stream did carry: a lower bound, recorded
+      // as incomplete rather than as missing.
+      const partialUsage = resultData == null && !captured.finalized ? captured.partial : null;
+      const usage = resultData != null ? _extractStreamUsage(resultData) : (partialUsage?.usage || captured.usage);
       // Some CLI result versions omit thinking details even though every
       // completed message reported them. Supplement only matching totals.
       if (resultData != null && captured.finalized && !usage.output_tokens_details
@@ -1610,14 +1654,21 @@ export async function callProvider(promptText, {
         cachedInputTokens: normalizedUsage.cachedInputTokens,
         reasoningOutputTokens: normalizedUsage.reasoningOutputTokens,
         usageFinalized: resultData != null || captured.finalized,
-        usageCapturePrecision: resultData != null ? "aggregate_only" : captured.finalized ? "exact" : "unknown",
+        usageCapturePrecision: resultData != null
+          ? "aggregate_only"
+          : captured.finalized ? "exact" : partialUsage ? "incomplete" : "unknown",
+        ...(partialUsage ? { usagePartialAfterStop: true } : {}),
         thinkingTelemetry: captured.thinking,
         longContextInputTokens: captured.finalized ? Math.max(...captured.segments.map(segment => (
           segment.usage.input_tokens + segment.usage.cache_read_input_tokens + segment.usage.cache_creation_input_tokens
         ))) : null,
         costUsd: apiEquivalentCostUsd ?? resultData?.cost_usd ?? null,
         totalCostUsd: resultData?.total_cost_usd ?? null,
-        numTurns: resultData?.num_turns || captured.numTurns,
+        // Completed model rounds. The CLI's num_turns also counts native tool
+        // results (WebFetch/WebSearch: 48 for 12 rounds against a cap of 20),
+        // which reads as a bypassed cap; it is kept as cliNumTurns.
+        numTurns: captured.numTurns || resultData?.num_turns || partialUsage?.messages || null,
+        cliNumTurns: resultData?.num_turns ?? null,
         durationMs,
         exitCode: code,
         maxTurns: turns,

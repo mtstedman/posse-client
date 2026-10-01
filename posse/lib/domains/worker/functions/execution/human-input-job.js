@@ -1,5 +1,6 @@
 import { processVerdict } from "../helpers/process-verdict.js";
 import { C } from "../../../../shared/format/functions/colors.js";
+import { retainBoundedText } from "../../../../shared/format/functions/bounded-text.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
 import {
   addDependency,
@@ -52,8 +53,9 @@ import {
   parseOneshotScopeSelection,
   resolveOneshotScopeCandidates,
 } from "../../../research/functions/oneshot-scope-selection.js";
-import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../../catalog/job.js";
+import { ONESHOT_SCOPE_SELECTION_SUBTYPE, REPLAN_TRIGGERS } from "../../../../catalog/job.js";
 import {
+  exactHumanInputChoiceFromAnswer,
   humanInputChoiceFromAnswer,
   humanInputChoicesForPayload,
   isHumanInputReviewPayload,
@@ -112,6 +114,20 @@ import {
   providerForAffinityRoute,
 } from "../../../../shared/policies/functions/provider-affinity.js";
 import { loadAssessmentSource } from "./assessment-source.js";
+
+// A blocked-recovery gate's context carries the block reason and the agent's
+// completion notes. A replan chosen from the gate must see them, not only the
+// operator's one-word answer.
+const BLOCKED_RECOVERY_REPLAN_CONTEXT_MAX_CHARS = 4000;
+
+function blockedRecoveryReplanContext(payload) {
+  const context = typeof payload?.context === "string" ? payload.context.trim() : "";
+  if (!context) return null;
+  const bounded = retainBoundedText(context, BLOCKED_RECOVERY_REPLAN_CONTEXT_MAX_CHARS);
+  return bounded.retained
+    ? bounded.text
+    : `${bounded.text}\n[truncated from ${bounded.originalChars} chars]`;
+}
 
 function isOneshotScopeSelectionPayload(payload) {
   return payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
@@ -856,9 +872,14 @@ export async function runHumanInputJob(worker, job, {
       } else if (decision === "retry") {
         const restoredDependents = restoreGateDependentsToOriginal();
         const origPayload = worker.parsePayload(origJob);
+        // A bare choice ("retry") is a decision, not guidance: say so instead
+        // of pasting the word into the task as if it were instructions.
+        const answerText = String(lastAnswer || "").trim();
+        const bareRetry = !answerText
+          || exactHumanInputChoiceFromAnswer(answerText.toLowerCase().replace(/[.!\s]+$/, ""), actionChoices) != null;
         const recoveryNote = [
           `Blocked recovery from human_input job #${job.id}:`,
-          String(lastAnswer || "").trim() || "(no additional instructions)",
+          bareRetry ? "The operator chose retry without new instructions." : answerText,
         ].join("\n");
         if (typeof origPayload.task_spec === "string" && origPayload.task_spec.trim()) {
           origPayload.task_spec = `${origPayload.task_spec.trim()}\n\nBLOCKED RECOVERY GUIDANCE:\n${recoveryNote}`;
@@ -870,6 +891,7 @@ export async function runHumanInputJob(worker, job, {
           recovery_job_id: job.id,
           action: "retry",
           human_answer: String(lastAnswer || ""),
+          bare_retry: bareRetry,
         };
         updateJobPayload(origJob.id, JSON.stringify(origPayload));
         extendJobMaxAttempts(origJob.id, Number(origJob.attempt_count || 0) + 1);
@@ -887,13 +909,20 @@ export async function runHumanInputJob(worker, job, {
       } else if (decision === "replan") {
         restoreGateDependentsToOriginal();
         const emitFn = (msg) => worker.emit(job.id, msg);
+        const blockContext = blockedRecoveryReplanContext(payload);
         processVerdict(origJob, {
           verdict: "needs_replan",
           confidence: "high",
           reasons: [`Human requested replan for blocked job via recovery job #${job.id}: ${lastAnswer || "(no details)"}`],
           spawn_jobs: [],
           human_questions: [],
-        }, { emit: emitFn, autoApprove: worker.autoApprove, humanApprovedReplan: true });
+          ...(blockContext ? { _replan_block_context: blockContext } : {}),
+        }, {
+          emit: emitFn,
+          autoApprove: worker.autoApprove,
+          humanApprovedReplan: true,
+          replanTrigger: REPLAN_TRIGGERS.OPERATOR_BLOCKED_RECOVERY,
+        });
         worker.emit(job.id, `${C.cyan}[human] Blocked job #${origJob.id} routed to replan${C.reset}`);
       } else if (decision === "skip") {
         await worker._setJobRowStatus(origJob, "canceled");
@@ -1202,6 +1231,7 @@ export async function runHumanInputJob(worker, job, {
             emit: emitFn,
             autoApprove: worker.autoApprove,
             humanApprovedReplan: true,
+            replanTrigger: REPLAN_TRIGGERS.OPERATOR_REVIEW,
           });
         } else if (reviewDecision === "skip") {
           handledReviewDecision = true;

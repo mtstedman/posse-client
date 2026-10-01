@@ -15,6 +15,21 @@ export const IMAGE_GENERATION_MAX_CALLS_PER_JOB = 12;
 // may each run this long.
 export const IMAGE_GENERATION_TIMEOUT_MS = 600_000;
 
+// Operator-provided text files under .posse/resources/inputs/wi-N become
+// work-item hash refs, so dev/planner/assessor jobs read them through
+// traverse_ref instead of a path their tools cannot reach.
+export const WORK_ITEM_INPUT_OBJECT_TYPE = "work_item.input";
+export const WORK_ITEM_INPUT_LIMITS = Object.freeze({
+  maxFiles: 20,
+  maxBytesPerFile: 1_000_000,
+  maxDepth: 3,
+});
+
+// Replan planners/researchers read the WI branch from a per-job detached
+// checkout at .posse/resources/context/wi-N/<this dir>/job-<id>. Their role
+// teardown removes it; worktree GC sweeps ones left by finished jobs.
+export const REPLAN_READONLY_WORKTREE_DIR = "replan-readonly";
+
 export const ARTIFACT_TYPES = Object.freeze([
   "prompt",
   "response",

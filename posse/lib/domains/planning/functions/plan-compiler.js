@@ -67,6 +67,7 @@ import {
   looksLikeArtifactGenerationTask as looksLikeArtifactGenerationTaskFromModule,
   looksLikeRepoCodeCreationTask as looksLikeRepoCodeCreationTaskFromModule,
   createsRepoPathFiles as createsRepoPathFilesFromModule,
+  declaresOnlyArtifactScope as declaresOnlyArtifactScopeFromModule,
   looksLikeRepoDesignTask as looksLikeRepoDesignTaskFromModule,
   looksLikeStructuredDataRepoTransformTask as looksLikeStructuredDataRepoTransformTaskFromModule,
   normalizePromoteMappings as normalizePromoteMappingsFromModule,
@@ -99,9 +100,11 @@ import {
 import { spawnFromRole as defaultSpawnFromRole } from "../../queue/functions/spawn-guard.js";
 import {
   collectRequestedImageOutputs,
+  disclaimsImageGeneration,
   hasRequestedImageGenerationOutput,
 } from "./image-outputs.js";
 import { sanitizePlannerDevBrief } from "./planner-helpers.js";
+import { compilerRewriteRecord, plannerTaskSnapshot } from "./planner-task-provenance.js";
 import {
   normalizeHashRefHandoffPacket,
   reissueHashRefHandoffPacket,
@@ -388,6 +391,17 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           message: `Planner emitted ${tasks.length} tasks; capped to ${maxTasks}`,
         });
         tasks = tasks.slice(0, maxTasks);
+      }
+      // Compilation splits and renumbers tasks. Remember each task's
+      // 0-based position in the planner's list so messages can name it the
+      // way the planner wrote it, and its planner-authored shape so a replan
+      // can see what the compiler changed; split pieces inherit both.
+      if (Array.isArray(tasks)) {
+        tasks.forEach((task, index) => {
+          if (!task || typeof task !== "object") return;
+          task._planner_index = index;
+          task._planner_task = plannerTaskSnapshot(task);
+        });
       }
       const modalityWorkItem = getWorkItem(planJob.work_item_id);
       const modalityIntakeHints = getWorkItemIntakeHints(
@@ -708,7 +722,18 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       const droppedTaskIndexes = new Set();
       let expansionCapLogged = false;
 
-      const plannerDependencyLabel = (depIdx) => Number.isInteger(depIdx) ? `task ${depIdx + 1}` : String(depIdx);
+      // Name a task by title and the planner's 0-based index (depends_on_index
+      // and event_json use the same numbering).
+      const plannerTaskLabel = (taskIndex) => {
+        const task = Number.isInteger(taskIndex) ? tasks[taskIndex] : null;
+        if (!task) return `task index ${taskIndex}`;
+        const plannerIndex = Number.isInteger(task._planner_index) ? task._planner_index : taskIndex;
+        return `"${taskTitleForLog(task, taskIndex)}" (planner task index ${plannerIndex})`;
+      };
+      const plannerTaskLabels = (taskIndexes) => taskIndexes.map(plannerTaskLabel).join(", ");
+      const plannerDependencyLabel = (depIdx) => Number.isInteger(depIdx) && depIdx >= 0 && depIdx < tasks.length
+        ? `task ${plannerTaskLabel(depIdx)}`
+        : `task index ${depIdx}`;
       const dependencyMissingReason = (depIdx, taskIndex) => {
         if (!Number.isInteger(depIdx) || depIdx < 0 || depIdx >= tasks.length) return "invalid_dependency_index";
         if (depIdx === taskIndex) return "self_dependency";
@@ -915,7 +940,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       const cancelCompiledTaskForDroppedDependency = (taskIndex, blockedDeps) => {
         if (droppedTaskIndexes.has(taskIndex)) return false;
         const title = taskTitleForLog(tasks[taskIndex], taskIndex);
-        const blockedLabels = blockedDeps.map((idx) => idx + 1).join(", ");
+        const blockedLabels = plannerTaskLabels(blockedDeps);
         const droppedIndexes = new Set([taskIndex]);
         const jobIds = new Set(compiledTaskJobIds.get(taskIndex));
         const targetJobId = jobMap.get(taskIndex);
@@ -1129,13 +1154,13 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         if (blockedDeps.length > 0) {
           const title = typeof t.title === "string" && t.title.trim() ? t.title.trim() : `task ${i}`;
           droppedTaskIndexes.add(i);
-          worker.emit(planJob.id, `${C.red}[plan-validate]${C.reset} WI#${planJob.work_item_id}: dropped dependent task "${title}" — prerequisite task(s) ${blockedDeps.map((idx) => idx + 1).join(", ")} were dropped`);
+          worker.emit(planJob.id, `${C.red}[plan-validate]${C.reset} WI#${planJob.work_item_id}: dropped dependent task "${title}" — prerequisite task(s) ${plannerTaskLabels(blockedDeps)} were dropped`);
           logEvent({
             work_item_id: planJob.work_item_id,
             job_id: planJob.id,
             event_type: EVENT_TYPES.PLAN_TASK_INVALID,
             actor_type: EVENT_ACTORS.SYSTEM,
-            message: `Dropped dependent planned task "${title}": prerequisite task(s) ${blockedDeps.map((idx) => idx + 1).join(", ")} were dropped`,
+            message: `Dropped dependent planned task "${title}": prerequisite task(s) ${plannerTaskLabels(blockedDeps)} were dropped`,
             event_json: JSON.stringify({
               reason: "dropped_dependency",
               dropped_dependencies: blockedDeps,
@@ -1297,10 +1322,16 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             || (intakeDesiredOutputs.includes("artifact") && !intakeDesiredOutputs.includes("repo"))
           );
         const hintedRepoDesignTask = !artifactOnlyOutputHint && looksLikeRepoDesignTaskFromModule(t, intakeHints);
+        // Repo-output hints describe where the work item's deliverable lands.
+        // An artificer task scoped wholly under the artifact root produces an
+        // intermediate input that later promote/consumer tasks take into the
+        // repo; it is not repo work, and a dev job cannot own its create_roots.
+        const isArtifactProducer = (currentJobType) => currentJobType === "artificer"
+          && declaresOnlyArtifactScopeFromModule(t, artifactDirAbs);
 
         // Repo-output bindings can rescue artifact-looking work, but not tasks
         // that are explicitly marked as image generation.
-        if (forceRepoOutput && jobType === "artificer" && wiMode === "build" && !t.needs_image_generation && taskMode !== "image") {
+        if (forceRepoOutput && jobType === "artificer" && !isArtifactProducer(jobType) && wiMode === "build" && !t.needs_image_generation && taskMode !== "image") {
           t.job_type = "dev";
           if (taskMode !== "code") taskMode = "code";
           t.task_mode = "code";
@@ -1333,6 +1364,10 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             && !hintedRepoDesignTask
             && !referencesExistingAsset
             && !documentationArtifactIntent
+            // Sourced rasters (downloaded, fetched, copied from ...) or a
+            // disclaimer of generation outrank image wording; only a
+            // structural image signal still requests generation.
+            && (taskMode === "image" || wiMode === "image" || !disclaimsImageGeneration(t))
             && (explicitImageGeneration || (!plannerRepoWritableScope && explicitImageAsset));
           if (shouldInferImageGeneration) {
             t.needs_image_generation = true;
@@ -1379,6 +1414,10 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           }
           rewriteDependenciesAfterSplit(tasks, i, fileKindRoute.splitTasks.length, fileKindRoute.finalIndex);
           rewritePendingDependenciesAfterSplit(i, fileKindRoute.splitTasks.length, fileKindRoute.finalIndex);
+          for (const piece of fileKindRoute.splitTasks) {
+            if (!Number.isInteger(piece._planner_index)) piece._planner_index = t._planner_index;
+            if (!piece._planner_task) piece._planner_task = t._planner_task;
+          }
           tasks.splice(i, 1, ...fileKindRoute.splitTasks);
           capExpandedTasks("file_kind_split");
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: ${fileKindRoute.reason} in task "${t.title}"`);
@@ -1439,11 +1478,11 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         // should lose to an explicit user binding of output_mode=artifact —
         // otherwise a plan artifact whose spec mentions the feature area
         // gets force-routed to repo code by downstream blocks via this flag.
+        const artifactProducerTask = isArtifactProducer(normalizedJobType);
         const plannerRepoCodeTaskNormalized =
           plannerRepoEditTaskNormalized
           || plannerRepoCodeCreateTaskNormalized
-          || (hintedRepoDesignTask && !forceArtifactOutput)
-          || forceRepoOutput;
+          || (!artifactProducerTask && ((hintedRepoDesignTask && !forceArtifactOutput) || forceRepoOutput));
 
         // Downgrade artificer → dev only when the hinted-repo-design heuristic
         // fires AND the user hasn't explicitly bound the WI to artifact output.
@@ -1454,6 +1493,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           (hintedRepoDesignTask || forceRepoOutput)
           && !forceArtifactOutput
           && normalizedJobType === "artificer"
+          && !artifactProducerTask
           && !t.needs_image_generation
           && taskMode !== "image"
         ) {
@@ -2003,10 +2043,20 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           activeHashRefPacket = researchMaterialFallbackPacket;
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: filled missing ATLAS hash_ref_packet for task "${t.title}" from the researcher's highest-priority material ref`);
         }
+        const compiledTaskSpec = t.task_spec || t.instructions || "";
+        const plannerTaskRewrite = finalJobType === "promote"
+          ? null
+          : compilerRewriteRecord(t._planner_task, {
+              jobType: finalJobType,
+              taskMode,
+              title: t.title,
+              needsImageGeneration: !!t.needs_image_generation,
+              taskSpec: compiledTaskSpec,
+            });
         const payloadJson = finalJobType === "promote"
           ? JSON.stringify(normalizedPromotePayload)
           : JSON.stringify({
-              task_spec: t.task_spec || t.instructions || "",
+              task_spec: compiledTaskSpec,
               deepthink_budget: deepthinkBudget,
               deepthink,
               task_mode: taskMode,
@@ -2056,6 +2106,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               ...(executionPolicy?.assessor?.pass_confidence_floor ? { _assess_pass_confidence_floor: executionPolicy.assessor.pass_confidence_floor } : {}),
               ...(executionPolicy ? { _execution_policy: executionPolicy } : {}),
               ...(taskSkillIds.length > 0 ? { skills: taskSkillIds } : {}),
+              ...(plannerTaskRewrite ? { _planner_task: plannerTaskRewrite } : {}),
             });
 
         const taskDedupeKey = plannedTaskDedupeKey(t, {

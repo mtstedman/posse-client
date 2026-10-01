@@ -17,7 +17,12 @@ const BLOCKED_MUTATING_COMMAND = new RegExp(
   "i",
 );
 const BLOCKED_INLINE_SCRIPT_WRITE = /\b(?:node\s+-e|python3?\s+-c)\b[\s\S]*(?:writeFile|appendFile|createWriteStream|fs\.(?:rm|unlink|mkdir|rename|copyFile)|open\s*\(|Path\s*\([^)]*\)\.write|shutil\.|os\.(?:remove|unlink|mkdir|rmdir|rename))/i;
-const READONLY_BASH_ALLOWLIST = /^\s*(cat(?:\s|$)|head(?:\s|$)|tail(?:\s|$)|ls(?:\s|$)|find(?:\s|$)|wc(?:\s|$)|file(?:\s|$)|du(?:\s|$)|diff(?:\s|$)|grep(?:\s|$)|rg(?:\s|$)|echo(?:\s|$)|pwd\s*$|whoami\s*$)/i;
+// cut and tr only read stdin/named inputs and write stdout. uniq is admitted
+// only with at most one operand (its second operand is an output file; see
+// uniqOutputOperandReason). sort stays out: GNU getopt accepts abbreviated long
+// options (`--out=x`, `--compress-prog=sh`) and clustered short options
+// (`-uo x`) that its output/command flag guards below do not catch.
+const READONLY_BASH_ALLOWLIST = /^\s*(cat(?:\s|$)|head(?:\s|$)|tail(?:\s|$)|ls(?:\s|$)|find(?:\s|$)|wc(?:\s|$)|file(?:\s|$)|du(?:\s|$)|diff(?:\s|$)|grep(?:\s|$)|rg(?:\s|$)|cut(?:\s|$)|tr(?:\s|$)|uniq(?:\s|$)|echo(?:\s|$)|pwd\s*$|whoami\s*$)/i;
 const FIND_MUTATING_FLAGS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"]);
 const GO_OUTPUT_FLAGS = new Set(["-o", "-coverprofile", "-cpuprofile", "-memprofile", "-mutexprofile", "-blockprofile", "-trace", "-outputdir"]);
 const CARGO_OUTPUT_FLAGS = new Set(["--target-dir", "--out-dir"]);
@@ -28,6 +33,8 @@ const NODE_TEST_MUTATING_FLAGS = new Set(["--test-reporter-destination", "--test
 const PYTHON_BUILD_OUTPUT_FLAGS = new Set(["--outdir"]);
 const SORT_OUTPUT_FLAGS = new Set(["-o", "--output", "-t", "--temporary-directory"]);
 const SORT_COMMAND_FLAGS = new Set(["--compress-program"]);
+// uniq options whose value is the NEXT word when written standalone.
+const UNIQ_VALUE_FLAGS = new Set(["-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"]);
 // Flags that make a search tool run another program: ripgrep's preprocessor and
 // hostname helper, and the `--filter` hooks of a ugrep installed as `grep`.
 const RIPGREP_COMMAND_FLAGS = new Set(["--pre", "--hostname-bin"]);
@@ -116,6 +123,28 @@ function hasFlag(tokens, flags) {
   return tokens.some((token) => flags.has(tokenFlagName(token)) || flags.has(String(token || "").toLowerCase()));
 }
 
+// `uniq [OPTION]... [INPUT [OUTPUT]]` writes OUTPUT. Count operands the way
+// the strictest parser would: `--`, a lone `-`, and every word after the first
+// operand are operands (POSIX ordering), so `uniq in -c` and `uniq -- -w out`
+// count two. Input redirects and fd duplications are not operands.
+function uniqOutputOperandReason(args) {
+  let operands = 0;
+  let optionsEnded = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = String(args[index] || "");
+    if (/^\d*<$/.test(token)) { index += 1; continue; }
+    if (/^\d*</.test(token) || /^\d*>&\d+$/.test(token)) continue;
+    if (!optionsEnded && token === "--") { optionsEnded = true; continue; }
+    if (!optionsEnded && token.length > 1 && token.startsWith("-")) {
+      if (UNIQ_VALUE_FLAGS.has(token)) index += 1;
+      continue;
+    }
+    operands += 1;
+    optionsEnded = true;
+  }
+  return operands > 1 ? "uniq output operand" : null;
+}
+
 function blockedBashArgumentReason(command) {
   const tokens = shellWords(command);
   if (tokens.length === 0) return null;
@@ -166,6 +195,10 @@ function blockedBashArgumentReason(command) {
   }
   if (commandName === "sort" && hasFlag(lower.slice(1), SORT_COMMAND_FLAGS)) {
     return "sort external command";
+  }
+  if (commandName === "uniq") {
+    const uniqReason = uniqOutputOperandReason(tokens.slice(1));
+    if (uniqReason) return uniqReason;
   }
   if (commandName === "rg" && hasFlag(lower.slice(1), RIPGREP_COMMAND_FLAGS)) {
     return "ripgrep external preprocessor";

@@ -68,6 +68,7 @@ import {
   shouldShortCircuitNoWriteAssessment as shouldShortCircuitNoWriteAssessmentFromModule,
 } from "../../functions/helpers/no-write-retry.js";
 import {
+  AGENT_BLOCKED_ERROR_PREFIX,
   isPermanentProviderRuntimeBlock,
   isTransientMcpInfraBlock,
   MAX_MCP_INFRA_BLOCK_RETRIES,
@@ -76,6 +77,10 @@ import {
 import {
   spawnDeadLetterRecoveryForDependents as spawnDeadLetterRecoveryForDependentsFromModule,
 } from "../../functions/helpers/dead-letter.js";
+import {
+  committedCompletionForAttempt,
+  selfDeclaredUnwrittenPaths,
+} from "../../functions/helpers/committed-completion.js";
 import {
   parseAgentCompletionLog as parseAgentCompletionLogFromModule,
   scopedDeleteTargets as scopedDeleteTargetsFromModule,
@@ -114,6 +119,61 @@ function _syncAssessorWorkerDisplay(display, job, {
     tier,
     effort,
     attempt,
+  });
+}
+
+// Park a blocked mutating job behind a blocked_recovery human_input gate. The
+// third block dead-letters the job and rewires its dependents to the gate.
+function parkBlockedRecoveryGate(worker, job, leaseToken, attempt, {
+  blockedCount,
+  blockReason,
+  detail,
+  fileRequests = [],
+}) {
+  const blockedPayload = {
+    original_job_id: job.id,
+    review_type: "blocked_recovery",
+    question_kind: "blocked_recovery",
+    choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
+    questions: [`Agent was blocked on job #${job.id}. What should be done?`],
+    context: [
+      `Task: ${job.title}`,
+      `Block reason: ${blockReason}`,
+      "",
+      "Retry reruns the same task. Add instructions, provide the missing input, or choose replan; a retry with nothing changed will likely block again.",
+      "",
+      detail,
+    ].join("\n"),
+  };
+  if (fileRequests.length > 0) {
+    blockedPayload.file_requests = fileRequests;
+    blockedPayload.context = [
+      blockedPayload.context,
+      "",
+      `The agent also requested creation of ${fileRequests.length} file(s):`,
+      ...fileRequests.map(r => `  - ${r.path} (${r.risk}) — ${r.reason || "no reason given"}`),
+    ].join("\n");
+  }
+
+  if (blockedCount >= 2) {
+    worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: blocked ${blockedCount + 1} times — dead-lettering${C.reset}`);
+  }
+  return runInTransaction(() => {
+    if (!worker._releaseWithoutAttemptPenalty(job, leaseToken, blockedCount >= 2 ? "dead_letter" : "waiting_on_human", { attemptId: attempt.id })) return false;
+    const blockedGate = createJob({
+        work_item_id: job.work_item_id,
+        job_type: "human_input",
+        title: `Blocked: ${job.title.slice(0, 80)}`,
+        parent_job_id: job.id,
+        priority: "high",
+        payload_json: JSON.stringify(blockedPayload),
+    });
+    if (blockedCount >= 2) {
+      for (const dependent of getDependents(job.id)) {
+        rewireDependency(dependent.job_id, job.id, blockedGate.id);
+      }
+    }
+    return true;
   });
 }
 
@@ -264,6 +324,13 @@ export async function handlePostExecutionForWorker({
         const agentCompletionLog = MUTATING_JOB_TYPES.has(job.job_type)
           ? parseAgentCompletionLogFromModule(output)
           : { found: false, status: null, body: "", blockReason: null, verifiedNoChange: false };
+        // The rendered block cuts notes to 30 words; the committed packet keeps
+        // the agent's full blocker and remaining_work.
+        const committedCompletion = MUTATING_JOB_TYPES.has(job.job_type)
+          && ["BLOCKED", "PARTIAL"].includes(agentCompletionLog.status)
+          ? committedCompletionForAttempt({ jobId: job.id, attemptId: attempt.id, status: agentCompletionLog.status })
+          : null;
+        const partialRemainingWork = committedCompletion?.status === "PARTIAL" ? committedCompletion.remainingWork : [];
 
         if (
           MUTATING_JOB_TYPES.has(job.job_type)
@@ -297,7 +364,11 @@ export async function handlePostExecutionForWorker({
 
         if (agentCompletionLog.status === "BLOCKED" && MUTATING_JOB_TYPES.has(job.job_type)) {
           const blockReason = agentCompletionLog.blockReason || "Agent reported BLOCKED";
-          const blockMsg = `Agent BLOCKED: ${blockReason}`;
+          // Routing below still classifies the rendered reason. The recorded
+          // error (which a blocked retry shows the agent) and the operator's
+          // gate carry the full committed blocker.
+          const fullBlockReason = committedCompletion?.blocker || blockReason;
+          const blockMsg = `${AGENT_BLOCKED_ERROR_PREFIX} ${fullBlockReason}`;
           this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: ${blockMsg}${C.reset}`);
 
           if (wtPath) {
@@ -397,52 +468,13 @@ export async function handlePostExecutionForWorker({
             return;
           }
 
-          const blockedPayload = {
-            original_job_id: job.id,
-            review_type: "blocked_recovery",
-            question_kind: "blocked_recovery",
-            choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
-            questions: [`Agent was blocked on job #${job.id}. What should be done?`],
-            context: [
-              `Task: ${job.title}`,
-              `Block reason: ${blockReason}`,
-              "",
-              agentCompletionLog.body || output,
-            ].join("\n"),
-          };
-          if (hasPendingFileRequests()) {
-            const allRequested = [
-              ...(pendingFileRequests.autoApproved || []),
-              ...(pendingFileRequests.needsApproval || []),
-            ];
-            blockedPayload.file_requests = allRequested;
-            blockedPayload.context = [
-              blockedPayload.context,
-              "",
-              `The agent also requested creation of ${allRequested.length} file(s):`,
-              ...allRequested.map(r => `  - ${r.path} (${r.risk}) — ${r.reason || "no reason given"}`),
-            ].join("\n");
-          }
-
-          if (blockedCount >= 2) {
-            this.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: blocked ${blockedCount + 1} times — dead-lettering${C.reset}`);
-          }
-          const parked = runInTransaction(() => {
-            if (!this._releaseWithoutAttemptPenalty(job, leaseToken, blockedCount >= 2 ? "dead_letter" : "waiting_on_human", { attemptId: attempt.id })) return false;
-            const blockedGate = createJob({
-                work_item_id: job.work_item_id,
-                job_type: "human_input",
-                title: `Blocked: ${job.title.slice(0, 80)}`,
-                parent_job_id: job.id,
-                priority: "high",
-                payload_json: JSON.stringify(blockedPayload),
-            });
-            if (blockedCount >= 2) {
-              for (const dependent of getDependents(job.id)) {
-                rewireDependency(dependent.job_id, job.id, blockedGate.id);
-              }
-            }
-            return true;
+          const parked = parkBlockedRecoveryGate(this, job, leaseToken, attempt, {
+            blockedCount,
+            blockReason: fullBlockReason,
+            detail: agentCompletionLog.body || output,
+            fileRequests: hasPendingFileRequests()
+              ? [...(pendingFileRequests.autoApproved || []), ...(pendingFileRequests.needsApproval || [])]
+              : [],
           });
           if (!parked) return;
           refreshAndExtractInsightsFromModule(job.work_item_id);
@@ -1285,7 +1317,53 @@ export async function handlePostExecutionForWorker({
               attemptId: attempt.id,
               output,
               failureNote: `Git commit failed: ${gitFailureSummary}`,
+              remainingWork: partialRemainingWork,
             });
+            // A PARTIAL agent that named the still-empty materialized file as
+            // work it could not do has already said a retry of the same call
+            // will not produce it. Ask the operator instead of requeueing.
+            const selfDeclaredUnwritten = lockTimeout.timeout
+              ? []
+              : selfDeclaredUnwrittenPaths(gitErr, partialRemainingWork);
+            if (selfDeclaredUnwritten.length > 0) {
+              const blockReason = `Agent reported PARTIAL and did not write ${selfDeclaredUnwritten.join(", ")}. Remaining work: ${partialRemainingWork.join("; ")}`;
+              const blockMsg = `${AGENT_BLOCKED_ERROR_PREFIX} ${blockReason}`;
+              const blockedCount = getAttempts(job.id).filter((a) => a.status === "blocked").length;
+              this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: PARTIAL left ${selfDeclaredUnwritten.join(", ")} unwritten as reported — asking the operator instead of retrying${C.reset}`);
+              completeAttempt(attempt.id, {
+                status: "blocked",
+                duration_ms: Date.now() - startTime,
+                error_text: blockMsg,
+              });
+              logEvent({
+                work_item_id: job.work_item_id,
+                job_id: job.id,
+                attempt_id: attempt.id,
+                event_type: EVENT_TYPES.JOB_BLOCKED,
+                actor_type: EVENT_ACTORS.WORKER,
+                message: blockMsg,
+                event_json: JSON.stringify({
+                  cause: "partial_self_declared_unwritten",
+                  paths: selfDeclaredUnwritten,
+                  commit_error_code: gitErr?.code || null,
+                }),
+              });
+              await wrappedJob.setError(blockMsg);
+              const parked = parkBlockedRecoveryGate(this, job, leaseToken, attempt, {
+                blockedCount,
+                blockReason,
+                detail: [
+                  "Remaining work reported by the agent:",
+                  ...partialRemainingWork.map((entry) => `- ${entry}`),
+                  "",
+                  `Commit refused: ${gitFailureSummary}`,
+                ].join("\n"),
+              });
+              if (!parked) return;
+              refreshAndExtractInsightsFromModule(job.work_item_id);
+              this._cleanupWorktreeIfDone(job.work_item_id);
+              return;
+            }
             completeAttempt(attempt.id, {
               status: lockTimeout.timeout ? "interrupted" : "failed",
               duration_ms: Date.now() - startTime,

@@ -1,7 +1,7 @@
 // lib/domains/worker/functions/helpers/verdicts/needs_replan.js
 
 import { roleExecutionForBudget } from "../../../../settings/functions/repository-settings.js";
-import { REPLAN_CANCELABLE_JOB_TYPES, STALE_CANCELABLE_JOB_STATUSES } from "../../../../../catalog/job.js";
+import { REPLAN_CANCELABLE_JOB_TYPES, REPLAN_TRIGGERS, STALE_CANCELABLE_JOB_STATUSES } from "../../../../../catalog/job.js";
 import {
   isDeferredImplementationAssessmentJob,
   TERMINAL_JOB_STATUSES,
@@ -23,6 +23,7 @@ import { cleanupArtifactDirs, wiScopeId } from "../../../../artifacts/functions/
 import { C } from "../../../../../shared/format/functions/colors.js";
 import { getMaxReplans } from "../../../../settings/functions/tunables.js";
 import { readPlannerDispatchPolicy } from "../../../../planning/functions/planner-dispatch-policy.js";
+import { describeCompilerRewrites } from "../../../../planning/functions/planner-task-provenance.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
 
@@ -162,6 +163,14 @@ export function handle(job, verdict, ctx) {
     const originalPayload = parseJobPayload(job);
     const originalScopedFiles = collectScopedFiles(originalPayload);
     const originalCommitHash = latestCommitHashForJob(job.id);
+    // The failed job is the compiled task; name what the compiler changed
+    // from the planned one so the replan does not re-emit that shape.
+    const compilerRewrites = describeCompilerRewrites(originalPayload._planner_task, {
+      job_type: job.job_type,
+      task_mode: originalPayload.task_mode || "code",
+      title: job.title,
+      needs_image_generation: originalPayload.needs_image_generation === true,
+    });
     // An automatic replan is planner-led intake again: under planner
     // dispatch it runs at the configured planner tier and effort and may
     // dispatch research children, instead of the fixed standard/medium
@@ -178,8 +187,12 @@ export function handle(job, verdict, ctx) {
       payload_json: JSON.stringify({
         _is_loopback: true,
         _assessment_replan: true,
+        replan_trigger: ctx.replanTrigger || verdict._automatic_replan_reason || REPLAN_TRIGGERS.ASSESSOR,
         ...(dispatchPolicy.enabled ? { planner_dispatch: true } : {}),
         replan_reason: verdict.reasons.join("\n"),
+        ...(typeof verdict._replan_block_context === "string" && verdict._replan_block_context.trim()
+          ? { block_context: verdict._replan_block_context }
+          : {}),
         // The assessor's cited selectors sit in this job's ancestry; naming
         // them lets the replan planner open the defect lines instead of
         // rediscovering them from prose.
@@ -190,6 +203,7 @@ export function handle(job, verdict, ctx) {
         original_title: job.title,
         original_task_spec: originalPayload.task_spec || originalPayload.instructions || "",
         original_success_criteria: Array.isArray(originalPayload.success_criteria) ? originalPayload.success_criteria : [],
+        ...(compilerRewrites.length > 0 ? { compiler_rewrites: compilerRewrites } : {}),
         test_command: originalPayload.test_command || null,
         retained_work: allJobs
           .filter((sibling) => sibling.id !== job.id
@@ -203,6 +217,21 @@ export function handle(job, verdict, ctx) {
             assessment_state: sibling.assessment_state,
             scoped_files: collectScopedFiles(parseJobPayload(sibling)),
           })),
+        // Sibling work this replan canceled is not done. Its scope and
+        // verification command are what the replacement must still cover.
+        superseded_work: allJobs
+          .filter((sibling) => staleJobIds.has(sibling.id)
+            && ["dev", "fix", "artificer", "promote"].includes(sibling.job_type))
+          .map((sibling) => {
+            const siblingPayload = parseJobPayload(sibling);
+            return {
+              job_id: sibling.id,
+              job_type: sibling.job_type,
+              title: sibling.title,
+              scoped_files: collectScopedFiles(siblingPayload),
+              ...(siblingPayload.test_command ? { test_command: siblingPayload.test_command } : {}),
+            };
+          }),
         original_commit_hash: originalCommitHash,
         original_scoped_files: originalScopedFiles,
         wi_branch_name: wi?.branch_name || null,

@@ -7,6 +7,12 @@
 // Preserve the established bound on qualified-identifier ambiguity details.
 export const ATLAS_IDENTIFIER_BEARER_LIMIT = 12;
 
+// A post-commit WI refresh indexes the commit's bytes; paths a sibling job
+// sharing the WI worktree dirties during the refresh are re-read from the
+// commit in a follow-up pass. Bound those passes so a checkout that keeps
+// changing still fails instead of looping.
+export const ATLAS_WI_REFRESH_MAX_SOURCE_PASSES = 3;
+
 export const ATLAS_PATH_RECOVERY_POLICY = Object.freeze({
   indexedPathLimit: 5000,
   candidateLimit: 3,

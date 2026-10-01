@@ -91,6 +91,7 @@
  * @property {string | null} view_written     Absolute path of the produced view file, or null if no view was materialized.
  * @property {string | null} view_etag        ViewMeta.built_at or a derived ETag.
  * @property {boolean} [wi_source_verified]  Post-commit WI source and mounted view were refreshed successfully.
+ * @property {string} [wi_source_commit]      Commit a verified WI refresh indexed: its commit_sha or a later commit on top of it.
  * @property {boolean} [view_reused]          True when an idempotent main merge proved the existing destination view current and reused it.
  * @property {string[]} [redundant_phases_skipped] Expensive phases omitted after a current-view proof.
  * @property {string} [embeddings_provider]   Encoder/index provider used for best-effort vector ingest.

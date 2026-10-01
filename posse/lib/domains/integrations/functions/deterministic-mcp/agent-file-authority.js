@@ -1,6 +1,7 @@
 // @ts-check
 
 import path from "node:path";
+import { runtimeRoleForAgentCallRole } from "../../../../catalog/agent-call.js";
 import { ACTIVE_LEASE_STATUSES } from "../../../../catalog/job.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../../catalog/work-item.js";
 import { isInsideRoot } from "../../../runtime/functions/fs-safety.js";
@@ -41,7 +42,7 @@ function idsMatch(expected, actual, label) {
 }
 
 function normalizedRole(value) {
-  const role = String(value || "").trim().toLowerCase();
+  const role = runtimeRoleForAgentCallRole(value);
   return role === "developer" || role === "development" || role === "fix" ? "dev" : role;
 }
 

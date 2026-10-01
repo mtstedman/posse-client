@@ -31,7 +31,7 @@ agent call. Prefetch support does not remove its callable definition.
 
 ### `artificer`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.clean_image`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.generate_image`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`, `tools.write_file`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.clean_image`, `tools.custom_tools`, `tools.download_file`, `tools.edit_file`, `tools.extract_image_text`, `tools.generate_image`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`, `tools.write_file`.
 
 Atlas: `atlas.fetch_ref`, `atlas.traverse_ref`.
 
@@ -455,6 +455,26 @@ Dispatch an isolated researcher and wait for its evidence-backed result. Select 
 | `anchors` | `array<any>` | Optional | max items 8 |  |
 | `budget` | `object` | Optional |  |  |
 | `question` | `string` | Required | min length 1; max length 2000 |  |
+
+### `tools.download_file`
+
+Remote roles: `artificer`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `download_file` |
+| Tool reference token | `tools.download_file` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `write` |
+| Batchable input | Yes |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Download external files byte-exact into your writable output scope: PNG, JPEG, WebP, or GIF images, JSON, plain text, CSV, or an HTML page to read for links. Public HTTPS URLs only; redirects are followed and re-checked, and no headers or body can be sent. Up to 100 files per call, 20 MB per file, 100 MB per call, and 500 MB per job. Each destination extension must match the type the server returns. Items succeed or fail independently; each result reports the final URL, status, type, size, SHA-256, and path, or the reason it failed.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `items` | `array<object>` | Required | min items 1; max items 100 | Files to download. Batch many files in one call. |
 
 ### `tools.edit_file`
 
@@ -1215,13 +1235,14 @@ Remote roles: `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Submit the web specialty agent's sole final result. Every finding must name an exact HTTP(S) source URL. The runtime validates and materializes accepted findings into evidence refs visible to the calling agent.
+Submit the web specialty agent's sole final result. Every finding must name an exact HTTP(S) source URL. The runtime validates and materializes accepted findings into evidence refs visible to the calling agent. For bulk data (a dataset, table, or list), nominate the exact raw source URL in sources: the runtime stores a byte-exact durable copy that later agents read, and findings stay short claims about it.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `findings` | `array<object>` | Required | min items 1; max items 12 |  |
 | `gaps` | `array<string>` | Optional | max items 6 |  |
 | `protocol` | `string` | Required | values "posse.web_research.v1" |  |
+| `sources` | `array<object>` | Optional | max items 4 | Raw text or data files (JSON, CSV, XML, YAML, plain text) to snapshot byte-exact, such as a raw.githubusercontent.com dataset file. Name the data file itself. |
 | `summary` | `string` | Required | min length 1; max length 2000 |  |
 
 ### `tools.write_file`

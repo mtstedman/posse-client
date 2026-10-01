@@ -13,6 +13,37 @@
 // CLI, so we match on the gateway/MCP-unavailable shape rather than any one
 // CLI's wording.
 
+// Prefix of the job/attempt error recorded for an agent-reported BLOCKED
+// handoff; the retry path reads it back to tell a block from a failure.
+export const AGENT_BLOCKED_ERROR_PREFIX = "Agent BLOCKED:";
+
+// A blocked job retried by the operator is not a failed attempt. The remote
+// retry section ("PREVIOUS ATTEMPT FAILED ... take a different approach")
+// renders only when last_error is set, and it pushes a dev to work around a
+// constraint its task states. Replace it with a blocked-specific note: re-check
+// the blocker, and report BLOCKED again when it still holds.
+export function blockedRetryContext(payload = {}, lastError = null) {
+  const recovery = payload?._blocked_recovery;
+  const text = typeof lastError === "string" ? lastError.trim() : "";
+  if (recovery?.action !== "retry" || !text.startsWith(AGENT_BLOCKED_ERROR_PREFIX)) {
+    return { lastError, block: null };
+  }
+  const reason = text.slice(AGENT_BLOCKED_ERROR_PREFIX.length).trim();
+  return {
+    lastError: null,
+    block: [
+      "PREVIOUS ATTEMPT BLOCKED:",
+      `  ${reason || "(no reason recorded)"}`,
+      recovery.bare_retry === true
+        ? "  The operator chose retry without new instructions."
+        : "  The operator chose retry; their guidance is under BLOCKED RECOVERY GUIDANCE in the task.",
+      "  First re-check whether the blocker still holds: inputs, WORK ITEM RESEARCH REFS, and your issued tools (including any web fallback) may have changed since the last attempt.",
+      "  If it still holds, report BLOCKED again with the same reason rather than working around a constraint the task states.",
+      "",
+    ].join("\n"),
+  };
+}
+
 // How many automatic requeues before we terminate a persistent gateway-attach
 // failure as infrastructure. Operator task guidance cannot repair this surface.
 export const MAX_MCP_INFRA_BLOCK_RETRIES = 3;

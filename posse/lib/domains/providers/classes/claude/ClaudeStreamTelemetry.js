@@ -49,6 +49,25 @@ export class ClaudeStreamTelemetry {
     return summaries;
   }
 
+  // A stop right after a terminal tool call can land before the last
+  // message's message_delta, so that message never gets a stop_reason and the
+  // snapshot is not finalized. Every message that reported all four counters
+  // still measured its request; sum them as a lower bound instead of losing
+  // the whole call's usage. Child usage makes even a lower bound unreliable.
+  partialUsage() {
+    if (this.childUsagePossible) return null;
+    const measured = [...this.messages.values()].filter((message) => tokenFields.every((field) => token(message.usage?.[field]) != null));
+    if (measured.length === 0) return null;
+    const usage = Object.fromEntries(tokenFields.map((field) => [field, 0]));
+    for (const message of measured) for (const field of tokenFields) usage[field] += message.usage[field];
+    return {
+      usage,
+      messages: measured.length,
+      unmeasuredMessages: this.messages.size - measured.length,
+      unfinishedMessages: measured.filter((message) => !message.stop_reason).length,
+    };
+  }
+
   snapshot() {
     const complete = [...this.messages.values()].filter((message) => message.stop_reason
       && tokenFields.every((field) => token(message.usage?.[field]) != null));
@@ -70,6 +89,7 @@ export class ClaudeStreamTelemetry {
       finalized,
       usage: finalized ? usage : {},
       numTurns: finalized ? complete.length : null,
+      partial: finalized ? null : this.partialUsage(),
       segments,
       thinking: {
         blocks: this.thinkingBlocks.size,

@@ -5,10 +5,20 @@ import { extractCheckpointFromOutput } from "../helpers/mutation-guards.js";
 // contract, hooks), the agent's reasoning is done and correct work may
 // already sit in the tree. Persist a checkpoint unconditionally so the retry
 // prompt inherits the prior approach instead of re-deriving it blind.
-export function storePostAgentFailureCheckpoint({ job, attemptId, output, failureNote }) {
+// remainingWork is a PARTIAL agent's full remaining_work list; the rendered
+// result block in `output` keeps only its first 30 words.
+export function storePostAgentFailureCheckpoint({ job, attemptId, output, failureNote, remainingWork = [] }) {
   try {
     const text = String(output || "");
-    const distilled = extractCheckpointFromOutput(text) || text.slice(-2000).trim();
+    const remaining = (Array.isArray(remainingWork) ? remainingWork : [])
+      .map((entry) => String(entry || "").trim())
+      .filter(Boolean);
+    const distilled = [
+      extractCheckpointFromOutput(text) || text.slice(-2000).trim(),
+      remaining.length > 0
+        ? `REMAINING WORK REPORTED BY THE PREVIOUS ATTEMPT (status PARTIAL):\n${remaining.map((entry) => `  - ${entry}`).join("\n")}`
+        : "",
+    ].filter(Boolean).join("\n\n");
     if (!distilled) return;
     storeArtifact({
       work_item_id: job.work_item_id,

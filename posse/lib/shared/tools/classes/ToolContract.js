@@ -531,7 +531,6 @@ export class ToolContract {
         "Bash(ls:*)", "Bash(find:*)", "Bash(wc:*)", "Bash(file:*)", "Bash(du:*)",
         "Bash(convert:*)", "Bash(ffmpeg:*)", "Bash(magick:*)", "Bash(jq:*)",
         "Bash(sort:*)", "Bash(uniq:*)", "Bash(grep:*)", "Bash(rg:*)",
-        "Bash(curl:*)", "Bash(wget:*)",
       );
       appendWebAllowed(allowed);
       return {

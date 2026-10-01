@@ -2565,7 +2565,8 @@ function expectedTargetShapes(policy, profile) {
   if (profile === "planner.plan.v1") {
     return '{"kind":"agent","role":"dev"|"artificer"} or {"kind":"system","role":"human_input"|"promote"}';
   }
-  return (policy.targetKinds || []).map((kind) => `{"kind":"${kind}"}`).join(" or ");
+  // Non-planner kinds are fixed sinks whose schema requires role "$<kind>".
+  return (policy.targetKinds || []).map((kind) => `{"kind":"${kind}","role":"$${kind}"}`).join(" or ");
 }
 
 function validateTarget(target, policy, profile, label) {
@@ -4839,6 +4840,33 @@ export function getAgentHandoffRecord(agentCallId, { db = getDb() } = {}) {
   const row = handoffRow(agentCallId, db);
   if (!row) return null;
   return { ...row, packet: parseStoredAgentHandoffPacket(row.materialized_packet_json) };
+}
+
+/**
+ * The structured completion (status, blocker, remaining_work) an attempt's
+ * dev/fix/artificer call committed. Post-execution otherwise sees only the
+ * compatibility DEV/ARTIFICER RESULT block, whose notes are cut to 30 words.
+ * Null when the attempt committed no compact completion packet.
+ */
+export function getCommittedAttemptCompletion({ jobId, attemptId } = {}, { db = getDb() } = {}) {
+  const expectedJobId = positiveInt(jobId);
+  const expectedAttemptId = positiveInt(attemptId);
+  if (!expectedJobId || !expectedAttemptId) return null;
+  const row = ensureSchema(db).prepare(`
+    SELECT materialized_packet_json
+    FROM ${TABLE}
+    WHERE job_id = ? AND attempt_id = ? AND status = 'committed'
+      AND profile IN ('dev.result.v1', 'artificer.result.v1')
+    ORDER BY agent_call_id DESC
+    LIMIT 1
+  `).get(expectedJobId, expectedAttemptId);
+  if (!row) return null;
+  try {
+    const completion = JSON.parse(row.materialized_packet_json)?.completion;
+    return plainObject(completion) ? completion : null;
+  } catch {
+    return null;
+  }
 }
 
 function handoffCustodyFailure(message) {

@@ -45,6 +45,18 @@ export const UP_FRONT_TURN_BUDGET_PROVIDERS = Object.freeze(["claude", "codex", 
 export const PROVIDER_USAGE_PROTOCOL = "posse.provider_usage.v1";
 export const PROVIDER_USAGE_MAX_BYTES = 256 * 1024;
 
+// Bounds for one incremental scan of Claude's local project logs (the token
+// counts that enrich percent-only OAuth usage windows). A refresh stops at
+// whichever budget it hits first and resumes from its persisted per-file
+// cursors on the next refresh; parsing yields to the event loop after each
+// slice so a multi-gigabyte ~/.claude/projects tree cannot stall the process.
+export const CLAUDE_USAGE_LOG_SCAN_LIMITS = Object.freeze({
+  refreshByteBudget: 256 * 1024 * 1024,
+  refreshTimeBudgetMs: 2_000,
+  yieldSliceMs: 8,
+  readChunkBytes: 1024 * 1024,
+});
+
 export const PROVIDER_LABELS = Object.freeze({
   claude: "Claude",
   openai: "OpenAI",

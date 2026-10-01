@@ -41,6 +41,7 @@ export {
   __testQueueInternalAssessmentRetry,
   _extractScopedPathsFromInstructions,
 } from "../../functions/helpers/verdict-shared.js";
+import { workItemResearchRefsBlock } from "../../../research/functions/work-item-research-refs.js";
 
 export function __testGetAssessmentInternalRetryLimit() {
   return getAssessmentInternalRetryLimit();
@@ -107,8 +108,10 @@ export class AssessorRole extends BaseRole {
       hasWorktree: !!job._worktreePath,
     });
 
+    const researchRefsBlock = workItemResearchRefsBlock({ workItemId: job.work_item_id, jobId: job.id, packet, projectDir: worker.projectDir });
     return [
       atlasBlock ? `${atlasBlock}\n` : "",
+      researchRefsBlock || "",
       intakeHintsBlock ? `${intakeHintsBlock}\n` : "",
       loadNudges(job.id, { attemptId: ctx.attemptId }),
       promptLiteral("ASSESSMENT REQUEST", payload.task_spec || payload.instructions || job.title),

@@ -1834,6 +1834,42 @@ function filterToolsListMessage(message, policy) {
   };
 }
 
+// A tools/list that answers with a JSON-RPC error leaves the provider with
+// no tools at all. Keep the error on the attach proof and surface it on the
+// job, so an empty surface is never mistaken for an empty allowlist.
+function toolsListError(message) {
+  const error = message?.error;
+  if (!error || typeof error !== "object") return null;
+  const dataCode = error.data && typeof error.data === "object" ? error.data.code : null;
+  return {
+    code: error.code ?? null,
+    data_code: dataCode ? capString(String(dataCode), 120) : null,
+    message: capString(String(error.message || ""), 300),
+  };
+}
+
+function recordToolsListFailure(session, listError) {
+  const boot = session?.bootConfig || {};
+  try {
+    recordObservation({
+      work_item_id: boot.workItemId ?? null,
+      job_id: boot.jobId ?? null,
+      attempt_id: boot.attemptId ?? null,
+      observation_type: "tool.surface.list_failed",
+      summary: `Provider tools/list failed (${listError.data_code || listError.code || "error"}): ${listError.message || "no message"}`,
+      detail: {
+        ...listError,
+        role: boot.role || null,
+        provider: boot.providerName || null,
+        agent_call_id: boot.agentCallId ?? null,
+        session_id: session?.id || null,
+      },
+    });
+  } catch {
+    // Telemetry must not change the provider's tools/list response.
+  }
+}
+
 function toolsListCount(message) {
   const tools = message?.result?.tools;
   return Array.isArray(tools) ? tools.length : null;
@@ -5977,6 +6013,9 @@ export class PersistentMcpOwner {
                 attemptId: session?.bootConfig?.attemptId,
                 agentCallId: session?.bootConfig?.agentCallId,
               },
+              // Only a dispatch still waiting for lane capacity stops when the
+              // client goes away; admitted children keep their own lifecycle.
+              admissionSignal: requestAbort.signal,
             });
             recordObservation({
               work_item_id: session?.bootConfig?.workItemId ?? null,
@@ -6058,6 +6097,10 @@ export class PersistentMcpOwner {
                 retryable: error?.retryable === true,
                 ...(errorCode === "SUB_AGENT_INPUT_TOOL_FORBIDDEN" && error?.inputTool
                   ? { input_tool: String(error.inputTool).slice(0, 160) }
+                  : {}),
+                // A child that ran before the dispatch failed has its own row.
+                ...(Number.isSafeInteger(Number(error?.agentCallId)) && Number(error.agentCallId) > 0
+                  ? { child_agent_call_id: Number(error.agentCallId) }
                   : {}),
                 parent_agent_call_id: session?.bootConfig?.agentCallId ?? null,
                 duration_ms: Date.now() - startedAt,
@@ -6335,6 +6378,7 @@ export class PersistentMcpOwner {
         response = filterToolsListMessage(response, policy);
         recordProviderIssuedToolSurface(session, response);
         const count = preflight ? toolsListCount(response) : session.noteToolsList(response);
+        const listError = toolsListError(response);
         if (!preflight) {
         this._logAttachProof(session, "mcp.attach.tools_list_seen", {
           method,
@@ -6345,8 +6389,10 @@ export class PersistentMcpOwner {
           agent_handoff_schema_sha256: session.attachProof.agentHandoffToolSchemaSha256,
           agent_handoff_schema_chars: session.attachProof.agentHandoffToolSchemaChars,
           request_count: session.attachProof.requestCount,
+          ...(listError ? { error: listError } : {}),
         });
         }
+        if (listError) recordToolsListFailure(session, listError);
       }
       const completedTool = message.method === "tools/call"
         ? requestedToolPolicyName(

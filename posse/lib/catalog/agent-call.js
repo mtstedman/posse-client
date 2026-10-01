@@ -23,3 +23,19 @@ const AGENT_CALL_CHILD_KIND_SET = new Set(AGENT_CALL_CHILD_KIND_VALUES);
 export function isAgentCallChildKind(value) {
   return AGENT_CALL_CHILD_KIND_SET.has(String(value || ""));
 }
+
+// Persisted agent-call role labels that name a child variant of a runtime
+// role. The child still attaches and executes as the runtime role; the label
+// only distinguishes it in accounting and display.
+export const AGENT_CALL_ROLE_LABELS = Object.freeze({
+  WEB_RESEARCHER: "web_researcher",
+});
+
+export const AGENT_CALL_ROLE_LABEL_RUNTIME_ROLES = Object.freeze({
+  [AGENT_CALL_ROLE_LABELS.WEB_RESEARCHER]: "researcher",
+});
+
+export function runtimeRoleForAgentCallRole(value) {
+  const role = String(value || "").trim().toLowerCase();
+  return AGENT_CALL_ROLE_LABEL_RUNTIME_ROLES[role] || role;
+}

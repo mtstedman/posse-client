@@ -1,6 +1,8 @@
 import { RESEARCH_CHILD_PROFILE, RESEARCH_CHILD_PROMPT_PROFILE } from "../../../catalog/sub-agent.js";
+import { RESEARCH_CHILD_FALLBACK_MODEL_TIER } from "../../../catalog/planner-dispatch.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import { AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
+import { WEB_SOURCE_SNAPSHOT_STATUSES } from "../../../catalog/web-research.js";
 import { webResearchRuntime } from "../../web-research/classes/WebResearchRuntime.js";
 
 // The child receives only its question, so it needs its own budget line to
@@ -39,6 +41,39 @@ export function researchChildInstructions(parent, request) {
   ].join("\n");
 }
 
+// Every web result reaches the planner as cited claims over durable
+// work-item refs: findings, byte-exact source snapshots, and (for a salvaged
+// answer) the report itself. The planner cites these refs in its tasks rather
+// than restating web content, and downstream agents read them on request.
+export function webResearchParentReport(web = {}) {
+  const findings = Array.isArray(web.findings) ? web.findings : [];
+  const sources = Array.isArray(web.sources) ? web.sources : [];
+  const captured = sources.filter((source) => source?.status === WEB_SOURCE_SNAPSHOT_STATUSES.CAPTURED && source.ref);
+  const missed = sources.filter((source) => source?.status !== WEB_SOURCE_SNAPSHOT_STATUSES.CAPTURED);
+  const claims = [
+    ...findings.map((finding) => ({ claim: finding.claim, evidence: [finding.evidence], summary: finding.url })),
+    ...captured.map((source) => ({
+      claim: `Byte-exact snapshot of ${source.label}: ${source.final_url || source.url} (${source.content_type}, ${source.bytes} bytes, sha256 ${String(source.sha256 || "").slice(0, 12)}). Cite this ref for the data instead of restating it; readers fetch it on request.`,
+      evidence: [{ ref: source.ref }],
+      summary: source.url,
+    })),
+    ...(web.report_ref ? [{
+      claim: web.salvaged === true
+        ? "Salvaged web research answer (uncited final text; verify a claim against its URL before relying on it)."
+        : "Full web research report: every finding, source snapshot status, and gap in one durable ref.",
+      evidence: [{ ref: web.report_ref }],
+      summary: web.salvaged === true ? "salvaged web report" : "web research report",
+    }] : []),
+  ];
+  const summary = [
+    web.summary,
+    ...(Array.isArray(web.gaps) ? web.gaps : []),
+    ...missed.map((source) => `Source not snapshotted: ${source.url} (${source.status}: ${source.reason})`),
+  ].filter(Boolean).join("\n");
+  const partial = web.salvaged === true || missed.length > 0 || (Array.isArray(web.gaps) && web.gaps.length > 0);
+  return { summary, claims, partial };
+}
+
 export async function runResearchChild(client, parent, request) {
   const { agentType, intent, maxTurns, reasoningEffort, timeoutMs, signal, parentContext } = request;
   if (agentType === "web") {
@@ -46,15 +81,14 @@ export async function runResearchChild(client, parent, request) {
       context: parentContext, signal, dispatchId: request.dispatchId,
       budget: { maxTurns, reasoningEffort, timeoutMs, resultChars: request.resultChars, modelTier: request.modelTier || null },
     });
+    const web = result.result;
+    const report = webResearchParentReport(web);
     return {
       agentCallId: result.usage.agent_call_id,
       stats: { inputTokens: result.usage.input_tokens, outputTokens: result.usage.output_tokens, durationMs: result.usage.duration_ms },
       webPacket: {
-        protocol: AGENT_HANDOFF_PROTOCOL, profile: RESEARCH_CHILD_PROFILE, outcome: result.result.gaps?.length ? "partial" : "complete",
-        handoffs: [{ target: { kind: "parent", role: "$parent" }, report: {
-          summary: [result.result.summary, ...(result.result.gaps || [])].join("\n"),
-          claims: result.result.findings.map((finding) => ({ claim: finding.claim, evidence: [finding.evidence], summary: finding.url })),
-        } }],
+        protocol: AGENT_HANDOFF_PROTOCOL, profile: RESEARCH_CHILD_PROFILE, outcome: report.partial ? "partial" : "complete",
+        handoffs: [{ target: { kind: "parent", role: "$parent" }, report: { summary: report.summary, claims: report.claims } }],
       },
     };
   }
@@ -82,14 +116,14 @@ export async function runResearchChild(client, parent, request) {
   if (packet.remote_issuance?.coordination?.research_investigation_v1 !== true) {
     throw new Error("Remote does not support investigating research children; use the matching remote workbranch");
   }
-  // Children run on the configured (cheaper) tier and let the provider pick
-  // that tier's model; the parent's exact model is only inherited when no
-  // child tier is configured. The job-level model name must follow the same
-  // rule: model selection prefers it over the tier's model, so passing the
-  // parent's model there ran every "standard" child on the planner's model
-  // at the planner's price (live 2026-09-18: a Fable child on tier standard).
-  const childTier = request.modelTier || parent.tier;
-  const inheritedModel = request.modelTier ? null : parent.model;
+  // Children run on the requested or configured child tier and let the
+  // provider pick that tier's model; they never inherit the planner's model.
+  // The job-level model name follows the same rule: model selection prefers
+  // it over the tier's model, so passing the parent's model there ran
+  // "standard" children on the planner's model at the planner's price
+  // (live 2026-09-18 and, on the web path, 2026-09-30: Fable children).
+  const childTier = request.modelTier || RESEARCH_CHILD_FALLBACK_MODEL_TIER;
+  const inheritedModel = null;
   // The child's budget is a retrieval-call count enforced by the researcher
   // physical-call rail (researchWorkBudgetCalls). The provider's own turn
   // limit sits two turns above it so the rail's closing notice and the

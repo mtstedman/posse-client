@@ -2,6 +2,7 @@ import path from "path";
 import {
   artifactBasenameForRepoImage,
   collectRequestedImageOutputs,
+  disclaimsImageGeneration,
   hasRequestedImageGenerationOutput,
   resolveRepoImageDestination,
   uniqueNormalizedPlannerPaths,
@@ -407,17 +408,28 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
   const routedTask = normalizedImageTask.task;
   const replacements = normalizedImageTask.replacements;
   const summary = getCreateFileKindSummary(routedTask, artifactDirAbs);
+  // A structural generation signal is task_mode image / needs_image_generation
+  // (the compiler's guarded wording inference sets it before this split) or
+  // an explicitly image-mode work item.
+  const structuralImageIntent = pathOnlyIsIntent || wiMode === "image";
   // A dev task may write a raster it fetches, converts or packs. Only a
-  // structural generation signal (task_mode image / needs_image_generation,
-  // which the compiler's wording inference sets before this split, or an
-  // explicitly image-mode work item) turns its repo-path images into
-  // generate_image outputs; artifact-scoped and bare names keep path-based
-  // routing.
-  const repoRastersAreCode = normalizedJobType === "dev" && !pathOnlyIsIntent && wiMode !== "image";
-  const generatedImageFiles = repoRastersAreCode
-    ? summary.imageFiles.filter((file) => isArtifactScopedPath(file, artifactDirAbs) || !file.includes("/"))
-    : summary.imageFiles;
-  const requestedImageGenerationOutput = !repoRastersAreCode
+  // structural signal turns its repo-path images into generate_image
+  // outputs; artifact-scoped and bare names keep path-based routing.
+  const repoRastersAreCode = normalizedJobType === "dev" && !structuralImageIntent;
+  // Without a structural signal, a task whose text sources its rasters
+  // (download, fetch, copy from ...) or disclaims generating them produces
+  // no generate_image output, whatever its job type or raster paths.
+  const rastersAreSourced = !structuralImageIntent && disclaimsImageGeneration(routedTask);
+  const generatedImageFiles = rastersAreSourced
+    ? []
+    : repoRastersAreCode
+      ? summary.imageFiles.filter((file) => isArtifactScopedPath(file, artifactDirAbs) || !file.includes("/"))
+      : summary.imageFiles;
+  // Prose alone adds no image output here. The compiler's inference already
+  // read the wording under its guards (repo bindings, existing-asset and
+  // documentation references, sourced rasters); re-reading it here would
+  // bypass them, e.g. "create the dataset keyed to the icon manifest".
+  const requestedImageGenerationOutput = structuralImageIntent
     && hasRequestedImageGenerationOutput(routedTask, { pathOnlyIsIntent });
   const requestedImageOutputs = requestedImageGenerationOutput
     ? collectRequestedImageOutputs(routedTask).map(generatedRasterPath)

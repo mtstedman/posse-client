@@ -78,7 +78,7 @@ import {
   recordSchedulerShutdownMarker,
   startRunHeartbeat,
 } from "../../../shared/telemetry/functions/run-diagnostics.js";
-import { maybeRunRuntimeRetention } from "../../ui/functions/admin/retention.js";
+import { maybeCompactRuntimeDb, maybeRunRuntimeRetention } from "../../ui/functions/admin/retention.js";
 import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
 import { describeModelCatalogWarning } from "../../providers/functions/model-catalog-validate.js";
 import { maybeExpireStuckFanoutChildren } from "../../research/functions/fanout.js";
@@ -2794,6 +2794,16 @@ export class Scheduler {
     // the loop's real error and skipping the SCHEDULER_STOPPED event. A stale
     // lock row is self-healing (heartbeat-stale force-steal on next boot).
     try { this.schedulerLock.release(); } catch { /* best-effort; lock self-heals via expiry */ }
+    // The run is over and its lock released; compaction re-checks that no
+    // other scheduler holds the lock before it VACUUMs.
+    try {
+      const compaction = maybeCompactRuntimeDb({ lockName: this.schedulerLock?.lockName || "main" });
+      if (compaction.attempted) {
+        this._log(compaction.ok
+          ? `Runtime DB compacted: ${compaction.before.bytes} -> ${compaction.after.bytes} bytes`
+          : `Runtime DB compaction failed: ${compaction.error}`, compaction.ok ? "cyan" : "yellow");
+      }
+    } catch { /* best-effort maintenance */ }
 
     logEvent({
       event_type: EVENT_TYPES.SCHEDULER_STOPPED,

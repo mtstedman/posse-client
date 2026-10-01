@@ -8,9 +8,15 @@
 
 import fs from "fs";
 import path from "path";
-import { ACTIVE_LEASE_STATUSES, LOCK_HOLDING_JOB_STATUSES, TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
+import {
+  ACTIVE_LEASE_STATUSES,
+  LOCK_HOLDING_JOB_STATUSES,
+  TERMINAL_JOB_STATUSES,
+  TERMINAL_WORK_ITEM_STATUSES,
+} from "../../queue/functions/common.js";
 import {
   clearWaitingLanePreparedAssetProof,
+  getJob,
   getWaitingLanePreparation,
   getWorkItem,
   listJobsByWorkItem,
@@ -22,7 +28,8 @@ import {
 } from "../../queue/functions/index.js";
 import { throwIfAborted, isAbortError } from "../../runtime/functions/yield.js";
 import { jobNeedsGitWorktree } from "./policy.js";
-import { contextDir, wiScopeId } from "../../artifacts/functions/index.js";
+import { contextDir, getResourcesDir, wiScopeId } from "../../artifacts/functions/index.js";
+import { REPLAN_READONLY_WORKTREE_DIR } from "../../../catalog/artifact.js";
 import {
   disposeWorkItemAtlasGraph,
   resolveWorkItemAtlasContext,
@@ -36,6 +43,7 @@ import {
   snapshotAndResetDirtyWorktreeAsync,
 } from "./worktree-recovery.js";
 import { safeSnapshotAndRemoveWorktreeAsync } from "./worktree-safe-remove.js";
+import { removeDetachedReadOnlyWorktreeAsync } from "./worktree-create.js";
 import { deleteBranchPreservingTipAsync } from "./worktree-branch-ops.js";
 import { pruneRecoveredWorktreeSnapshotsAsync } from "./worktree-snapshots.js";
 import { removePreparedWorktreeIfSafeAsync } from "./prepared-worktree-recovery.js";
@@ -45,6 +53,8 @@ import { tombstoneWaitingLanePreparationForCleanup } from "./waiting-lane-cleanu
 const HOLDING_STATUSES = new Set(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
 const ACTIVE_LEASE_STATUS_SET = new Set(ACTIVE_LEASE_STATUSES);
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
+const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
+const REPLAN_READONLY_JOB_DIR_RE = /^job-(\d+)(?:-|$)/;
 
 function workItemHoldsBench(workItemId) {
   const jobs = listJobsByWorkItem(workItemId);
@@ -372,6 +382,54 @@ export async function evictWaitingLanePreparationsAsync(projectDir, onMsg = () =
   return { removed, preserved, selectedPreparationIds };
 }
 
+// Replan planners/researchers read from per-job detached worktrees under each
+// WI's context dir; their role teardown removes them. A crashed or killed job
+// leaves the checkout registered, and `git worktree prune` cannot reclaim a
+// directory that still exists, so unregister and delete the ones whose job is
+// terminal or gone. These live under .posse, so this runs even when the
+// worktree root does not exist.
+export async function gcReplanReadonlyWorktreesAsync(projectDir, onMsg = () => {}, { signal = null } = {}) {
+  const contextRoot = path.join(getResourcesDir(projectDir), "context");
+  let scopes;
+  try {
+    scopes = await fs.promises.readdir(contextRoot, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const scope of scopes) {
+    if (!scope.isDirectory() || !/^wi-\d+$/.test(scope.name)) continue;
+    const readonlyRoot = path.join(contextRoot, scope.name, REPLAN_READONLY_WORKTREE_DIR);
+    let entries;
+    try {
+      entries = await fs.promises.readdir(readonlyRoot, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      throwIfAborted(signal);
+      const match = entry.isDirectory() ? entry.name.match(REPLAN_READONLY_JOB_DIR_RE) : null;
+      if (!match) continue;
+      let job;
+      try {
+        job = getJob(Number(match[1]));
+      } catch {
+        continue;
+      }
+      if (job && !TERMINAL_JOB_STATUS_SET.has(job.status)) continue;
+      const wtDir = path.join(readonlyRoot, entry.name);
+      try {
+        if (await removeDetachedReadOnlyWorktreeAsync(projectDir, wtDir, { signal })) removed++;
+      } catch (err) {
+        if (isAbortError(err)) throw err;
+        onMsg(`GC: failed to remove replan read-only worktree ${wtDir}: ${err?.message || err}`);
+      }
+    }
+  }
+  if (removed > 0) onMsg(`GC: removed ${removed} replan read-only worktree(s) left by finished jobs`);
+  return removed;
+}
+
 export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
   signal = null,
   timingSlowMs = null,
@@ -400,6 +458,8 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
     removed += eviction.removed;
     preserved += eviction.preserved;
     const selectedPreparationIds = eviction.selectedPreparationIds;
+
+    await timing.step("replan read-only worktree sweep", () => gcReplanReadonlyWorktreesAsync(projectDir, onMsg, { signal }), { gitCwd: projectDir });
 
     const root = worktreeRoot(projectDir, { disabled: true });
     if (!fs.existsSync(root)) {

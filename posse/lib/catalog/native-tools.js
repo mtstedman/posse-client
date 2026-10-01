@@ -1,4 +1,4 @@
-import { RESEARCH_AGENT_TYPES } from "./planner-dispatch.js";
+import { RESEARCH_AGENT_TYPES, RESEARCH_CHILD_REQUEST_MODEL_TIERS } from "./planner-dispatch.js";
 // Native deterministic-MCP tool schema definitions (pure data).
 //
 // Canonical JSON Schemas for the in-tree deterministic tools. Per the catalog
@@ -16,7 +16,12 @@ import {
   AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY,
 } from "./handoff.js";
 import { SUB_AGENT_PROTOCOL } from "./sub-agent.js";
-import { WEB_RESEARCH_PROTOCOL } from "./web-research.js";
+import {
+  DOWNLOAD_FILE_LIMITS,
+  DOWNLOAD_FILE_MEDIA_TYPES,
+  WEB_RESEARCH_LIMITS,
+  WEB_RESEARCH_PROTOCOL,
+} from "./web-research.js";
 
 // Compatibility facade. Existing consumers retain this path while catalog
 // families can be imported directly by new, bounded owners.
@@ -1947,6 +1952,11 @@ export const TOOL_DISPATCH_AGENT = {
           timeout_ms: { type: "integer", minimum: 5000 },
           max_turns: { type: "integer", minimum: 1, maximum: 64 },
           reasoning_effort: { type: "string", enum: ["low", "medium", "high", "xhigh"] },
+          model_tier: {
+            type: "string",
+            enum: [...RESEARCH_CHILD_REQUEST_MODEL_TIERS],
+            description: "Omit for the configured child tier, which is cheaper than the planner. A code child may request strong for a question that needs deep reasoning across many files; web children run on cheap or standard only.",
+          },
         },
         additionalProperties: false,
       },
@@ -1958,7 +1968,7 @@ export const TOOL_DISPATCH_AGENT = {
 
 export const TOOL_DISPATCH_AGENT_PLANNER = {
   ...TOOL_DISPATCH_AGENT,
-  description: "Dispatch one focused researcher or a batch of two to three independent researchers. Batch children run concurrently; the call returns after every child settles. Give each child a self-contained question; code requests may add bounded repository anchors. The administrator bounds child count, effort, turns, and duration.",
+  description: "Dispatch one focused researcher or a batch of two to three independent researchers. Batch children run concurrently; the call returns after every child settles. Give each child a self-contained question; code requests may add bounded repository anchors. For bulk external data, ask a web child to nominate the raw source file; findings, source snapshots, and reports return as durable refs that tasks cite directly. The administrator bounds child count, effort, turns, and duration.",
   parameters: {
     type: "object",
     oneOf: [
@@ -1996,7 +2006,9 @@ export const TOOL_WEB_RESEARCH_HANDOFF = {
   name: "web_research_handoff",
   description:
     "Submit the web specialty agent's sole final result. Every finding must name an exact HTTP(S) source URL. " +
-    "The runtime validates and materializes accepted findings into evidence refs visible to the calling agent.",
+    "The runtime validates and materializes accepted findings into evidence refs visible to the calling agent. " +
+    "For bulk data (a dataset, table, or list), nominate the exact raw source URL in sources: the runtime stores " +
+    "a byte-exact durable copy that later agents read, and findings stay short claims about it.",
   parameters: {
     type: "object",
     properties: {
@@ -2023,6 +2035,22 @@ export const TOOL_WEB_RESEARCH_HANDOFF = {
         type: "array",
         maxItems: 6,
         items: { type: "string", minLength: 1, maxLength: 500 },
+      },
+      sources: {
+        type: "array",
+        maxItems: WEB_RESEARCH_LIMITS.maxSources,
+        description:
+          "Raw text or data files (JSON, CSV, XML, YAML, plain text) to snapshot byte-exact, such as a raw.githubusercontent.com dataset file. " +
+          "Name the data file itself.",
+        items: {
+          type: "object",
+          properties: {
+            url: { type: "string", minLength: 1, maxLength: 2000 },
+            label: { type: "string", minLength: 1, maxLength: WEB_RESEARCH_LIMITS.maxSourceLabelChars },
+          },
+          required: ["url", "label"],
+          additionalProperties: false,
+        },
       },
     },
     required: ["protocol", "summary", "findings"],
@@ -2853,6 +2881,63 @@ export const TOOL_GENERATE_IMAGE = {
       },
     },
     required: ["prompt", "filename"],
+    additionalProperties: false,
+  },
+};
+
+const MIB = 1024 * 1024;
+
+export const TOOL_DOWNLOAD_FILE = {
+  type: "function",
+  name: "download_file",
+  description:
+    "Download external files byte-exact into your writable output scope: PNG, JPEG, WebP, or GIF images, JSON, "
+    + "plain text, CSV, or an HTML page to read for links. Public HTTPS URLs only; redirects are followed and "
+    + "re-checked, and no headers or body can be sent. "
+    + `Up to ${DOWNLOAD_FILE_LIMITS.maxItemsPerCall} files per call, ${DOWNLOAD_FILE_LIMITS.maxBytesPerItem / MIB} MB per file, `
+    + `${DOWNLOAD_FILE_LIMITS.maxBytesPerCall / MIB} MB per call, and ${DOWNLOAD_FILE_LIMITS.maxBytesPerJob / MIB} MB per job. `
+    + "Each destination extension must match the type the server returns. Items succeed or fail independently; "
+    + "each result reports the final URL, status, type, size, SHA-256, and path, or the reason it failed.",
+  parameters: {
+    type: "object",
+    properties: {
+      items: {
+        type: "array",
+        minItems: 1,
+        maxItems: DOWNLOAD_FILE_LIMITS.maxItemsPerCall,
+        description: "Files to download. Batch many files in one call.",
+        items: {
+          type: "object",
+          properties: {
+            url: {
+              type: "string",
+              minLength: 1,
+              maxLength: DOWNLOAD_FILE_LIMITS.maxUrlChars,
+              description: "Absolute https:// URL of the file.",
+            },
+            path: {
+              type: "string",
+              minLength: 1,
+              maxLength: DOWNLOAD_FILE_LIMITS.maxPathChars,
+              description: "Destination file path inside your output root, absolute or relative to the working directory. An existing file there is replaced.",
+            },
+            expected_media_type: {
+              type: "string",
+              enum: Object.keys(DOWNLOAD_FILE_MEDIA_TYPES),
+              description: "Optional. Fail this item unless the server returns this media type.",
+            },
+            sha256: {
+              type: "string",
+              pattern: "^[0-9a-fA-F]{64}$",
+              description: "Optional. Fail this item unless the downloaded bytes have this SHA-256 hex digest.",
+            },
+          },
+          required: ["url", "path"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["items"],
     additionalProperties: false,
   },
 };

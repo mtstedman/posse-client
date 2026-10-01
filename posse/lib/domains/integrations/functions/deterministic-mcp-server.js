@@ -52,7 +52,10 @@ import {
   TOOL_SUB_AGENT,
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_WEB_RESEARCH_HANDOFF,
+  TOOL_DOWNLOAD_FILE,
 } from "../../../catalog/native-tools.js";
+import { downloadFilesWithinScope } from "../../web-research/functions/download-files.js";
+import { resolveWebToolsEnabled } from "../../providers/functions/shared/tool-policy-settings.js";
 import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS, TOOL_CUSTOM_TOOLS } from "../../../catalog/custom-tools.js";
 import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { IMAGE_GENERATION_MAX_CALLS_PER_JOB } from "../../../catalog/artifact.js";
@@ -623,6 +626,7 @@ function gatewayScopeState(scopeKey = gateScopeKey, { gateConfiguration = null }
       gateBootedAtMs: Date.now(),
       gateConfiguration,
       imageGenerationCallCount: 0,
+      downloadBytes: 0,
       assessorToolCallCount: 0,
       assessorFallbackReadCount: 0,
       lastReadMeta: null,
@@ -1441,6 +1445,26 @@ async function generateImageWithinScope(args = {}) {
   return result;
 }
 
+// The artificer's external download lane. The operator web-tools switch is a
+// global kill switch for it, read per call so a change applies immediately.
+async function downloadFilesForCurrentScope(args = {}) {
+  if (!writeEnabled) return "Error: Write access is not granted for this role.";
+  if (!resolveWebToolsEnabled()) {
+    return "Error: download_file is disabled by the operator web tools setting.";
+  }
+  return await downloadFilesWithinScope(args, {
+    cwd: workspaceCwd,
+    scopePredicates: effectiveScopePredicates,
+    jobState: gatewayScopeState(gateScopeKey),
+    context: {
+      work_item_id: mcpWorkItemId,
+      job_id: mcpJobId,
+      attempt_id: mcpAttemptId,
+      agent_call_id: mcpAgentCallId,
+    },
+  });
+}
+
 // DEV authors source (including test source) through scoped deterministic file
 // tools. Command execution belongs to the assessor, so DEV must not receive a
 // generic shell escape hatch that can bypass the test/check role boundary.
@@ -1495,6 +1519,9 @@ const ALL_NATIVE_TOOL_NAMES = Object.freeze([
   "sub_agent_next_input",
   "dispatch_agent",
   "agent_handoff",
+  // Web research children's sole terminal action. The owner serves the call;
+  // the gateway must still declare it or tools/list omits it for the child.
+  "web_research_handoff",
   "agent_claim",
   "report_claims",
   "read_file",
@@ -1533,6 +1560,7 @@ const ALL_NATIVE_TOOL_NAMES = Object.freeze([
   "clean_image",
   "extract_image_text",
   "generate_image",
+  "download_file",
   // Opt-in; runtimeToolAvailable() keeps it filtered out unless this repo has
   // project DB access configured.
   "project_db_query",
@@ -1561,6 +1589,7 @@ function legacyToolNamesForUnscopedRole() {
 function runtimeToolAvailable(toolName) {
   if (toolName === "custom_tools") return ownerHotGateway || bootConfig.customTools === true;
   if (WRITE_TOOL_NAMES.has(toolName)) return writeEnabled;
+  if (toolName === "download_file") return writeEnabled;
   if (TEST_TOOL_NAMES.has(toolName)) {
     const legacyRoleAllowsTests = bootConfig?.mcpOAuth?.verified !== true
       && roleName === "assessor";
@@ -1700,7 +1729,7 @@ addToolSchema(TOOL_GET_BRIEF);
 addToolSchema(projectDbQuerySchemaForCurrentBoot());
 addToolSchema(TOOL_CUSTOM_TOOLS);
 if (writeEnabled) {
-  for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
+  for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_DOWNLOAD_FILE]) {
     addToolSchema(schema);
   }
 }
@@ -2887,11 +2916,13 @@ if (allowImageHelpers) {
   mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
 }
-// clean_image mutates images and is artificer-only. Owner-hot attaches every
-// executor (the remote token gates per call); scoped boots attach it only for
-// the artificer role so a read-only assessor cannot reach it in a no-token boot.
+// clean_image and download_file write artifacts and are artificer-only.
+// Owner-hot attaches every executor (the remote token gates per call); scoped
+// boots attach them only for the artificer role so a read-only assessor cannot
+// reach them in a no-token boot.
 if (ownerHotGateway || roleName === "artificer") {
   mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
+  mcpToolRegistry.attach("download_file", (args) => downloadFilesForCurrentScope(args || {}));
 }
 if (allowImageGeneration) {
   mcpToolRegistry.attach("generate_image", (args) => generateImageWithinScope(args || {}));
@@ -3039,7 +3070,7 @@ function rebuildNativeToolSchemas() {
   addToolSchema(projectDbQuerySchemaForCurrentBoot());
   addToolSchema(TOOL_CUSTOM_TOOLS);
   if (writeEnabled) {
-    for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR]) {
+    for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_DOWNLOAD_FILE]) {
       addToolSchema(schema);
     }
   }
@@ -3110,10 +3141,12 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
     mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
     mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
   }
-  // clean_image is artificer-only mutation; owner-hot attaches all executors
-  // (remote token gates per call), scoped boots only for the artificer role.
+  // clean_image and download_file are artificer-only mutations; owner-hot
+  // attaches all executors (remote token gates per call), scoped boots only
+  // for the artificer role.
   if (ownerHotGateway || roleName === "artificer") {
     mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
+    mcpToolRegistry.attach("download_file", (args) => downloadFilesForCurrentScope(args || {}));
   }
   if (allowImageGeneration) {
     mcpToolRegistry.attach("generate_image", (args) => generateImageWithinScope(args || {}));

@@ -312,7 +312,7 @@ export const SETTINGS_CATALOG = [
   { key: "snapshot_max_bytes", default: "2147483648", numeric: { integer: true, min: 0 }, description: "Maximum recovered snapshot storage bytes" },
   { key: "snapshot_max_refs", default: "500", numeric: { integer: true, min: 0 }, description: "Maximum recovered snapshot refs to retain" },
   { key: "snapshot_dedup", default: "true", valueType: "boolean", description: "Reuse duplicate recovered dirty-worktree snapshots" },
-  { key: "web_tools_enabled",    default: "true", valueType: "boolean", description: "Allow web research tools (Claude WebSearch/WebFetch, Codex web_search) for researcher, assessor, artificer, and native-team roles" },
+  { key: "web_tools_enabled",    default: "true", valueType: "boolean", description: "Allow web research tools (Claude WebSearch/WebFetch, Codex web_search) for researcher, assessor, dev (fallback for missing external facts), and native-team roles, and the artificer's download_file tool" },
   { key: "research_fanout",      default: "off", options: RESEARCH_FANOUT_MODE_VALUES, description: "Research fanout mode for preflight fanout-clear decisions (off, shadow, on)" },
   { key: SETTING_KEYS.RESEARCH_CLAIM_REVIEW, default: "off", scope: "repo", options: RESEARCH_CLAIM_REVIEW.modes, description: "Bounded source-backed review of committed research claims; shadow records findings and usage without changing the report" },
   { key: SETTING_KEYS.RESEARCH_EVIDENCE_REUSE, default: "shadow", scope: "repo", options: RESEARCH_EVIDENCE_REUSE_MODE_VALUES, description: "Research evidence reuse accounting: off records nothing; shadow measures strict source and Atlas duplicate candidates without changing retrieval routing" },

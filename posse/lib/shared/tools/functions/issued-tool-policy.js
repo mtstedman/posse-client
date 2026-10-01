@@ -37,7 +37,11 @@ const WRITE_TOOL_NAMES = new Set([
   "prune_artifact_output",
   "clean_image",
   "generate_image",
+  "download_file",
 ]);
+// Tools that fetch external content need the remote web policy's asset
+// fetching grant in addition to their tool-surface issuance.
+const ASSET_FETCH_TOOL_NAMES = new Set(["download_file"]);
 const INTERNAL_DETERMINISTIC_TOOL_NAMES = new Set(["copy_file"]);
 const RESEARCHER_ATLAS_LOCKED_GENERIC_TOOLS = new Set([
   "chain_read",
@@ -453,10 +457,11 @@ export function normalizeRemoteIssuedPolicy(value, {
     && toolSurface.includes("tools.dispatch_agent");
   const webResearchHandoffEnabled = coordination.webResearchHandoffV1
     && toolSurface.includes("tools.web_research_handoff");
-  const effectiveToolSurface = subAgentEnabled
-    ? toolSurface
-    : toolSurface.filter((name) => name !== "tools.sub_agent");
   const webAccess = normalizeWebAccess(source.web_access || source.webAccess, role);
+  const effectiveToolSurface = toolSurface.filter((name) => (
+    (subAgentEnabled || name !== "tools.sub_agent")
+    && (webAccess.asset_sourcing_or_fetching || !ASSET_FETCH_TOOL_NAMES.has(name.replace(/^tools\./, "")))
+  ));
   const issued = {
     valid: true,
     role,

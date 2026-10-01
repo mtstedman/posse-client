@@ -1338,6 +1338,28 @@ function repositoryReceiptCandidates(jobId, limit = 512) {
     .filter(Boolean);
 }
 
+// Receipts other jobs of the same work item recorded for this exact command,
+// newest first. Baseline attribution reads them to find the last known pass.
+export function workItemCommandReceipts(workItemId, {
+  excludeJobId = null,
+  command,
+  cwdRelative = null,
+  limit = 256,
+} = {}) {
+  if (!workItemId || !command) return [];
+  return getDb().prepare(`
+    SELECT id
+    FROM artifacts
+    WHERE work_item_id = ? AND mime_type = ? AND job_id IS NOT NULL AND job_id <> ?
+    ORDER BY id DESC
+    LIMIT ?
+  `).all(workItemId, RECEIPT_MIME_TYPE, excludeJobId ?? -1, limit)
+    .map((row) => parseReceiptArtifact(getArtifact(row.id)))
+    .filter((receipt) => receipt
+      && receipt.command === command
+      && (receipt.cwd_relative || null) === (cwdRelative || null));
+}
+
 async function findRepositoryFrozenTestBaseline({
   jobId,
   planId,

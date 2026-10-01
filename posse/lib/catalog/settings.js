@@ -42,6 +42,16 @@ export const SHARED_TRUNK_LIMITS = Object.freeze({
   claimDeferMaxMin: Object.freeze({ min: 0, max: 1_440 }),
 });
 
+// Gates for compacting the project's orchestrator.db (VACUUM) once no run
+// holds the scheduler lock. Retention deletes leave free pages behind and
+// auto_vacuum is off, so the file otherwise never shrinks. The busy budget
+// keeps a VACUUM that meets another process's reader from stalling shutdown.
+export const RUNTIME_DB_COMPACTION_POLICY = Object.freeze({
+  minFreelistRatio: 0.5,
+  minFileBytes: 32 * 1024 * 1024,
+  busyTimeoutMs: 2_000,
+});
+
 export const SETTING_KEYS = Object.freeze({
   ASSESSMENT_SCOPE_MODE: "assessment_scope_mode",
   ASSESSMENT_SCOPE_MAX_GROUP_JOBS: "assessment_scope_max_group_jobs",

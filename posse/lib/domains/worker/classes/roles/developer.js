@@ -37,6 +37,8 @@ import {
   spawnSuccessForRole,
 } from "../../../../shared/policies/functions/spawn-policy.js";
 import { projectDbEffectivePermissions } from "../../../../shared/tools/functions/toolkit/project-db/config.js";
+import { workItemResearchRefsBlock } from "../../../research/functions/work-item-research-refs.js";
+import { blockedRetryContext } from "../../functions/helpers/block-reason.js";
 
 const DEFAULT_DEPS = {
   checkpointTokenThreshold: CHECKPOINT_TOKEN_THRESHOLD,
@@ -102,9 +104,10 @@ export class DeveloperRole extends BaseRole {
     const attempts = getAttempts(job.id);
     const previousAttempts = attempts.filter((attempt) => attempt.status !== "running");
     const currentAttemptNumber = previousAttempts.length + 1;
-    const lastError = previousAttempts.length > 0
+    const blockedRetry = blockedRetryContext(payload, previousAttempts.length > 0
       ? (job.last_error || previousAttempts[previousAttempts.length - 1].error_text || null)
-      : null;
+      : null);
+    const lastError = blockedRetry.lastError;
 
     const packet = buildHandoffPacket(job, {
       workItem,
@@ -232,12 +235,15 @@ export class DeveloperRole extends BaseRole {
         "",
       ].join("\n")
       : null;
+    const researchRefsBlock = workItemResearchRefsBlock({ workItemId: job.work_item_id, jobId: job.id, packet, projectDir: worker.projectDir });
     return [
       continuationContext ? continuationContext + "\n" : null,
       driftContext ? driftContext + "\n" : null,
       nudgeContext || null,
       atlasHandoffBlock || null,
       withheldEvidenceNotice,
+      researchRefsBlock,
+      blockedRetry.block,
       promptLiteral("WORK ITEM", workItem.title),
       promptLiteral("TASK", job.title),
       "",

@@ -56,6 +56,7 @@ import {
 import { BaseRole } from "../BaseRole.js";
 import {
   resolveAssessmentReplanCwd,
+  releaseAssessmentReplanCwd,
   buildAssessmentReplanDiffBlock,
   buildPlannerAssessmentReplanContext,
 } from "../../../planning/functions/assessment-replan-context.js";
@@ -96,6 +97,7 @@ import {
   validatePlannerContextPreflight,
 } from "../../../planning/functions/planner-helpers.js";
 import { listProjectDbWrites } from "../../../../shared/tools/functions/toolkit/project-db/write-evidence.js";
+import { workItemResearchRefsBlock } from "../../../research/functions/work-item-research-refs.js";
 
 // A dispatch planner investigates the repository itself before it plans, so
 // it runs on the researcher's claude turn base rather than the plan-only one.
@@ -115,6 +117,7 @@ const DEFAULT_DEPS = {
   ensureAtlasReadRootMounted,
   resolvePlannerReadRoot,
   resolveAssessmentReplanCwd,
+  releaseAssessmentReplanCwd,
   buildAssessmentReplanDiffBlock,
   shortJobTitle: defaultShortJobTitle,
   unwrapTaskArray: defaultUnwrapTaskArray,
@@ -158,6 +161,13 @@ export class PlannerRole extends BaseRole {
 
   roleDeps() {
     return { ...DEFAULT_DEPS, ...this.deps };
+  }
+
+  // The replan read root is a per-job detached worktree; remove it with the job.
+  async teardown(_job, ctx = {}) {
+    if (!ctx.assessmentReplanCwd) return;
+    const { releaseAssessmentReplanCwd: releaseReplanCwd } = this.roleDeps();
+    await releaseReplanCwd(this.context?.projectDir, ctx.assessmentReplanCwd);
   }
 
   buildContract({ job, ctx } = {}) {
@@ -299,7 +309,10 @@ export class PlannerRole extends BaseRole {
     const replanCwd = assessmentReplan
       ? await resolveReplanCwd(worker.projectDir, job, payload, { signal: ctx.abortSignal || null })
       : null;
-    if (replanCwd) plannerReadRoot = replanCwd.cwd;
+    if (replanCwd) {
+      plannerReadRoot = replanCwd.cwd;
+      ctx.assessmentReplanCwd = replanCwd;
+    }
     const assessmentReplanContext = assessmentReplan
       ? buildPlannerAssessmentReplanContext(payload, {
           readRoot: plannerReadRoot,
@@ -683,6 +696,7 @@ export class PlannerRole extends BaseRole {
       research_brief_available: !researchSkipped,
     });
     const atlasHandoffBlock = renderAtlasHandoffSections(plannerPacket);
+    const researchRefsBlock = workItemResearchRefsBlock({ workItemId: job.work_item_id, jobId: job.id, packet: plannerPacket, projectDir: worker.projectDir });
 
     const contextDirsBlock = assessmentReplan
       ? assessmentReplanContext
@@ -737,12 +751,14 @@ export class PlannerRole extends BaseRole {
       "ARTIFACT DIRECTORIES (absolute paths - use these for non-code tasks):",
       `  artifacts: ${artifactDir}`,
       `  workspace: ${workspaceDir(wiScopeId(job.work_item_id), worker.projectDir).replace(/\\/g, "/")}`,
-      `  inputs: ${inputsDir(wiScopeId(job.work_item_id), worker.projectDir).replace(/\\/g, "/")}`,
+      `  inputs: ${inputsDir(wiScopeId(job.work_item_id), worker.projectDir).replace(/\\/g, "/")} (operator-provided files; text files here reach later jobs as refs under WORK ITEM RESEARCH REFS, not by path)`,
       "",
       contextDirsBlock,
+      researchRefsBlock,
       atlasHandoffBlock || null,
     ].filter(Boolean).join("\n");
     Object.assign(ctx, {
+      researchRefsBlock,
       contextDirsBlock,
       desiredOutputsBlock,
       explicitBindings,
@@ -780,7 +796,7 @@ export class PlannerRole extends BaseRole {
   async composePrompt({ contextText, contract, job, ctx } = {}) {
     const researchPolicy = ctx.plannerPacket?.planner_dispatch_policy;
     const researchBudget = researchPolicy ? [
-      `Research budgets: your triage budget is about ${researchPolicy.triageMaxTurns} turns (roughly ${researchPolicy.triageMaxTurns * 2} tool calls) of your own orientation reads to confirm the entry points and the shape of the change; within it, decide which open questions need research children, and dispatch them instead of reading beyond it yourself, especially for reads across several files or subsystems. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, result ${researchPolicy.resultChars} characters. Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier: delegate bounded reads to them and keep judgment here.`,
+      `Research budgets: your triage budget is about ${researchPolicy.triageMaxTurns} turns (roughly ${researchPolicy.triageMaxTurns * 2} tool calls) of your own orientation reads to confirm the entry points and the shape of the change; within it, decide which open questions need research children, and dispatch them instead of reading beyond it yourself, especially for reads across several files or subsystems. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, result ${researchPolicy.resultChars} characters. Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier; a code child may request model_tier strong for deep multi-file reasoning, and web children stay on cheap or standard. Delegate bounded reads to them and keep judgment here.`,
       "For code research, prefer a one-sentence question plus up to eight anchors (repo-relative paths, optional symbols or line ranges, or a parent-held #ref) over repeating context in prose. Anchors are starting points, not conclusions.",
       "Completed entries contain a compact packet. When the tool result includes research_expansion.files and research_expansion.brief, that brief is already visible: cite research_expansion.files[].ref and do not fetch it again; traverse the evidence ref only to read beyond the shown hunks. Timed-out and failed entries contain error instead of packet. An identical retry replays the settled digest, including a timeout, so narrow or reword a retry.",
     ].join("\n") : null;
@@ -836,7 +852,7 @@ export class PlannerRole extends BaseRole {
       remoteSystemPrompt: ctx.plannerPacket?.remote_system_prompt || null,
       atlasPrefetchStatus: ctx.plannerPacket?.atlas?.prefetchStatus || null,
       sessionPacket: ctx.plannerPacket || null,
-      sessionInstructions: [ctx.plannerRoutingContext, ctx.contextDirsBlock].filter(Boolean).join("\n\n") || null,
+      sessionInstructions: [ctx.plannerRoutingContext, ctx.contextDirsBlock, ctx.researchRefsBlock].filter(Boolean).join("\n\n") || null,
       skipRolePrompt: !!ctx.plannerPacket?.remote_prompt_composed,
     };
   }

@@ -15,6 +15,8 @@ export function listRejectedDispatchAttempts(jobId, agentCallId) {
       let detail = {};
       try { detail = JSON.parse(row.detail_json || "{}"); } catch { return []; }
       if (Number(detail.parent_agent_call_id) !== Number(agentCallId)) return [];
+      // The dispatch failed after its child ran; that is not a rejection.
+      if (detail.child_agent_call_id != null) return [];
       return [{ code: String(detail.code || "SUB_AGENT_ERROR"), stage: detail.stage || null, at: row.created_at }];
     });
   } catch {

@@ -35,6 +35,7 @@ import {
   spawnFailureForRole,
   spawnSuccessForRole,
 } from "../../../../shared/policies/functions/spawn-policy.js";
+import { blockedRetryContext } from "../../functions/helpers/block-reason.js";
 
 const DEFAULT_DEPS = {
   checkpointTokenThreshold: CHECKPOINT_TOKEN_THRESHOLD,
@@ -222,9 +223,10 @@ export class FixRole extends BaseRole {
     const fixAttempts = getAttempts(job.id);
     const previousFixAttempts = fixAttempts.filter((attempt) => attempt.status !== "running");
     const currentFixAttemptNumber = previousFixAttempts.length + 1;
-    const lastError = previousFixAttempts.length > 0
+    const blockedRetry = blockedRetryContext(payload, previousFixAttempts.length > 0
       ? (job.last_error || previousFixAttempts[previousFixAttempts.length - 1].error_text || null)
-      : null;
+      : null);
+    const lastError = blockedRetry.lastError;
 
     const packet = buildHandoffPacket(job, {
       workItem,
@@ -344,6 +346,7 @@ export class FixRole extends BaseRole {
       fixContinuation ? fixContinuation + "\n" : null,
       fixDriftContext ? fixDriftContext + "\n" : null,
       fixNudgeContext || null,
+      blockedRetry.block,
       promptLiteral("WORK ITEM", workItem.title),
       promptLiteral("TASK", job.title),
       "",

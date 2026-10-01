@@ -73,14 +73,16 @@ export function admitSourceContextHeadroom({ boot = {}, args = {} } = {}) {
   contextHeadroomReservationOwner.supersede(key, checkpointSequenceId);
   const existing = contextHeadroomReservationOwner.reservedTokens(key);
   const reservationTokens = resultCap(args);
+  // The estimator's own forecast of the next request, before any reservation
+  // or error headroom. Telemetry pairs the actual request against it so
+  // estimator error is reported apart from deliberate reservation slack.
+  const baseTokens = Math.ceil(
+    Number(checkpoint.checkpoint.request_context_input_tokens || 0)
+    + Number(checkpoint.checkpoint.output_tokens_since_request || 0),
+  );
   // Everything in the next request that is not this call's own result payload,
   // including every concurrently pending scalar-result reservation.
-  const committed = Math.ceil(
-    Number(checkpoint.checkpoint.request_context_input_tokens || 0)
-    + Number(checkpoint.checkpoint.output_tokens_since_request || 0)
-    + existing
-    + ESTIMATOR_ERROR_HEADROOM_TOKENS,
-  );
+  const committed = Math.ceil(baseTokens + existing + ESTIMATOR_ERROR_HEADROOM_TOKENS);
   const predicted = committed + reservationTokens;
   const nearTier = predicted >= boundary;
   // D-3: the public contract is scalar-only, so "batch it into items" was never
@@ -108,6 +110,8 @@ export function admitSourceContextHeadroom({ boot = {}, args = {} } = {}) {
     decision: allowed ? "allowed" : "blocked",
     reason,
     predicted_next_request_tokens: predicted,
+    base_next_request_tokens: baseTokens,
+    estimator_headroom_tokens: ESTIMATOR_ERROR_HEADROOM_TOKENS,
     threshold_tokens: threshold,
     admission_boundary_tokens: boundary,
     previous_pending_reservation_tokens: existing,

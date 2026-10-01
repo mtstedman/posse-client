@@ -108,6 +108,15 @@ if (!payload.command) {
   });
   child.stdout && child.stdout.setEncoding && child.stdout.setEncoding("utf8");
   child.stderr && child.stderr.setEncoding && child.stderr.setEncoding("utf8");
+  // The command runs in its own process group, so it outlives this helper
+  // when the helper is signalled (caller timeout, interrupted run). Take the
+  // group down first, then die by the same signal as before.
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.once(signal, () => {
+      killTree(child, true);
+      process.kill(process.pid, signal);
+    });
+  }
   const terminate = (kind) => {
     if (timedOut) return;
     timedOut = true;
@@ -356,6 +365,10 @@ async function runHookShellCommandAsync(command, {
     throw helperDeathError(command, err, timeoutMs, idleTimeoutMs);
   }
   return finishHookShellCommand(command, raw, timeoutMs, idleTimeoutMs);
+}
+
+export function __testHookCommandHelperScript() {
+  return VERIFY_COMMAND_HELPER_SCRIPT;
 }
 
 export function __testRunHookShellCommand(command, opts = {}) {

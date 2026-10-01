@@ -46,6 +46,7 @@ import {
 } from "../../../../shared/policies/functions/spawn-policy.js";
 import { validateArtifactRootPath } from "../../../planning/functions/plan-routing.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
+import { blockedRetryContext } from "../../functions/helpers/block-reason.js";
 
 const DEFAULT_DEPS = {
   currentExecutionProvider: defaultCurrentExecutionProvider,
@@ -147,9 +148,10 @@ export class ArtificerRole extends BaseRole {
     const attempts = getAttempts(job.id);
     const previousAttempts = attempts.filter((attempt) => attempt.status !== "running");
     const currentAttemptNumber = previousAttempts.length + 1;
-    const lastError = previousAttempts.length > 0
+    const blockedRetry = blockedRetryContext(payload, previousAttempts.length > 0
       ? (job.last_error || previousAttempts[previousAttempts.length - 1].error_text || null)
-      : null;
+      : null);
+    const lastError = blockedRetry.lastError;
 
     if (payload._stall_resume && outputRoot) {
       emit(worker, job.id, `${C.green}[resume]${C.reset} WI#${job.work_item_id} job #${job.id}: continuing from previous attempt`);
@@ -192,6 +194,7 @@ export class ArtificerRole extends BaseRole {
         ? "REAL IMAGE GENERATION REQUIRED: Call generate_image for the requested visual output. Do not hand-author SVG or substitute text/vector markup."
         : null,
       inputRoots.length > 0 ? `INPUT ROOTS (read-only): ${inputRoots.join(", ")}` : null,
+      blockedRetry.block,
       "",
       promptLiteral("INSTRUCTIONS", payload.task_spec || job.title),
       "",

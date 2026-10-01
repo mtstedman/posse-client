@@ -47,6 +47,7 @@ import {
   snapshotAndResetDirtyWorktreeAsync,
 } from "../../../git/functions/worktree.js";
 import { repairTestDependencies } from "../../functions/helpers/test-dependency-repair.js";
+import { recordBaselineSiblingRegression } from "../../functions/helpers/baseline-attribution.js";
 import {
   isVerificationInfrastructureOutcome,
 } from "../../functions/helpers/verification-outcome.js";
@@ -283,6 +284,9 @@ export class WorkerExecutionCoordinator {
             job.id,
             `${C.yellow}[test-intake] WI#${job.work_item_id} job #${job.id}: planner verification recipe is invalid (${invalidPayload._verification_plan_invalid.reason}); continuing without treating it as a product failure${C.reset}`,
           );
+        }
+        if (baselineReceipt.status === "failed" && wtPath) {
+          await recordBaselineSiblingRegression(worker, job, baselineReceipt, wtPath);
         }
         if (isVerificationInfrastructureOutcome(baselineReceipt)) {
           // The frozen baseline could not run and the one-shot dependency

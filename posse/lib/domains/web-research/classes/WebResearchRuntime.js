@@ -1,4 +1,8 @@
-import { RESEARCH_AGENT_TYPES } from "../../../catalog/planner-dispatch.js";
+import {
+  RESEARCH_AGENT_TYPES,
+  RESEARCH_CHILD_DEFAULT_MODEL_TIERS,
+  RESEARCH_CHILD_FALLBACK_MODEL_TIER,
+} from "../../../catalog/planner-dispatch.js";
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 import { subAgentRuntime } from "../../sub-agent/classes/SubAgentRuntime.js";
 import { RESEARCH_CHILD_PROFILE, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
@@ -8,6 +12,7 @@ import crypto from "node:crypto";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import {
+  WEB_RESEARCH_FINDING_OBJECT_TYPE,
   WEB_RESEARCH_HANDOFF_OVERSIZED_OBSERVATION_TYPE,
   WEB_RESEARCH_LIMITS,
   WEB_RESEARCH_PROTOCOL,
@@ -17,6 +22,13 @@ import { surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { agentHandoffTerminator } from "../../handoff/classes/AgentHandoffTerminator.js";
 import { hashRefModelVisibility } from "../../../shared/tools/functions/fetch-ref-policy.js";
 import { recordObservation } from "../../observability/functions/observations.js";
+import { captureWebSources, normalizeNominatedSources } from "../functions/source-snapshots.js";
+import {
+  extractUrls,
+  recordReportSalvaged,
+  salvageableWebReportText,
+  surfaceWebResearchReport,
+} from "../functions/research-report.js";
 
 function runtimeError(code, message, { retryable = false, stage = "runtime" } = {}) {
   const error = /** @type {Error & {code: string, retryable: boolean, stage: string}} */ (new Error(message));
@@ -101,7 +113,7 @@ function normalizeHandoff(args) {
       { stage: "validation" },
     );
   }
-  const input = exactObject(args, ["protocol", "summary", "findings", "gaps"], "web_research_handoff");
+  const input = exactObject(args, ["protocol", "summary", "findings", "gaps", "sources"], "web_research_handoff");
   if (input.protocol !== WEB_RESEARCH_PROTOCOL) {
     throw runtimeError(
       "WEB_RESEARCH_PROTOCOL_INVALID",
@@ -155,6 +167,9 @@ function normalizeHandoff(args) {
       { stage: "validation" },
     );
   }
+  // A bad source nomination is dropped and noted, never a reason to reject
+  // the child's findings.
+  const nominated = normalizeNominatedSources(input.sources);
   return {
     protocol: WEB_RESEARCH_PROTOCOL,
     summary,
@@ -164,6 +179,8 @@ function normalizeHandoff(args) {
       `web_research_handoff.gaps[${index}]`,
       WEB_RESEARCH_LIMITS.maxGapChars,
     )),
+    sources: nominated.sources,
+    ...(nominated.dropped.length > 0 ? { dropped_sources: nominated.dropped } : {}),
   };
 }
 
@@ -199,7 +216,7 @@ function surfaceFindingForParent(finding, context) {
       tool: "dispatch_agent",
       url: finding.url,
     },
-    objectType: "web.research.finding",
+    objectType: WEB_RESEARCH_FINDING_OBJECT_TYPE,
     source: "tool:dispatch_agent.web",
     note: finding.title || finding.url,
     sizeChars: payloadText.length,
@@ -238,6 +255,8 @@ export class WebResearchRuntime {
     maxActiveChildren = WEB_RESEARCH_LIMITS.maxActiveChildren,
     timeoutMs = WEB_RESEARCH_LIMITS.timeoutMs,
     surfaceFinding = surfaceFindingForParent,
+    captureSources = captureWebSources,
+    surfaceReport = surfaceWebResearchReport,
   } = {}) {
     this.readSetting = readSetting;
     this.maxActiveChildren = maxActiveChildren;
@@ -245,16 +264,22 @@ export class WebResearchRuntime {
       ? Number(timeoutMs)
       : WEB_RESEARCH_LIMITS.timeoutMs;
     this.surfaceFinding = surfaceFinding;
+    this.captureSources = captureSources;
+    this.surfaceReport = surfaceReport;
     this.parents = new Map();
     this.dispatches = new Map();
     this.childBindings = new Map();
     this.activeChildren = 0;
   }
 
-  registerParent({ agentCallId, runChild }) {
+  registerParent({ agentCallId, runChild, projectDir = null }) {
     const id = positiveId(agentCallId);
     if (!id || typeof runChild !== "function") return () => {};
-    const registration = { runChild, accepting: true };
+    const registration = {
+      runChild,
+      projectDir: typeof projectDir === "string" && projectDir.trim() ? projectDir : null,
+      accepting: true,
+    };
     const previous = this.parents.get(id);
     if (previous) previous.accepting = false;
     this.parents.set(id, registration);
@@ -348,6 +373,13 @@ export class WebResearchRuntime {
     };
   }
 
+  // True when this child is bound to a running dispatch that has no accepted
+  // web_research_handoff: the child's call ended without its terminal report.
+  childHandoffMissing(agentCallId) {
+    const dispatch = this.childBindings.get(positiveId(agentCallId));
+    return !!dispatch && dispatch.status === "running" && !dispatch.packet;
+  }
+
   // True while a research-batch web child of this parent call is running.
   hasRunningDispatchForParent(agentCallId) {
     const parentId = positiveId(agentCallId);
@@ -368,6 +400,45 @@ export class WebResearchRuntime {
       dispatchId: dispatch.id,
     });
     return true;
+  }
+
+  // A child that answered in prose instead of calling web_research_handoff
+  // (for example because the tool was missing from its surface) still paid
+  // for the research. Keep the answer as an uncited report ref instead of
+  // failing the dispatch, so the planner and later agents can read it.
+  #salvage(result, context, reportMeta) {
+    const text = salvageableWebReportText(result?.output);
+    if (!text) return null;
+    const urls = extractUrls(text);
+    const ref = this.surfaceReport(context, {
+      summary: "The web child did not submit web_research_handoff; its final answer is preserved uncited.",
+      salvaged: true,
+      text,
+      urls,
+      findings: [],
+      sources: [],
+      gaps: ["Findings are uncited: verify a claim against its URL before relying on it."],
+    }, reportMeta);
+    recordReportSalvaged(context, {
+      chars: text.length,
+      urls: urls.length,
+      ref,
+      web_research_dispatch_id: reportMeta.dispatchId,
+      child_agent_call_id: reportMeta.childAgentCallId || null,
+    });
+    if (!ref) return null;
+    return {
+      protocol: WEB_RESEARCH_PROTOCOL,
+      salvaged: true,
+      summary: [
+        `SALVAGED (uncited): the web child did not submit web_research_handoff. Its full answer is report ${ref}; traverse it before relying on any part.`,
+        text.slice(0, 1_200),
+      ].join("\n"),
+      findings: [],
+      sources: [],
+      gaps: ["The web child's answer was salvaged from final text; its claims are uncited."],
+      report_ref: ref,
+    };
   }
 
   async execute(args, { context = {}, budget = null, signal = null, dispatchId = null } = {}) {
@@ -391,8 +462,14 @@ export class WebResearchRuntime {
     }
     const question = boundedString(input.question, "dispatch_agent.question", WEB_RESEARCH_LIMITS.maxQuestionChars);
     const coordinationMode = String(this.readSetting(SETTING_KEYS.AGENT_COORDINATION_MODE) || "off").trim().toLowerCase();
-    const dispatchEnabled = coordinationMode !== "subagents"
-      && readPlannerDispatchPolicy({ readSetting: (key, options) => this.readSetting(key, options) }).enabled;
+    const dispatchPolicy = readPlannerDispatchPolicy({ readSetting: (key, options) => this.readSetting(key, options) });
+    const dispatchEnabled = coordinationMode !== "subagents" && dispatchPolicy.enabled;
+    // A web child fetches and summarizes: it runs on a cheaper tier than the
+    // planner, whatever was requested and whichever path dispatched it.
+    const childModelTier = RESEARCH_CHILD_DEFAULT_MODEL_TIERS.includes(budget?.modelTier)
+      ? budget.modelTier
+      : (dispatchPolicy.childModelTier || RESEARCH_CHILD_FALLBACK_MODEL_TIER);
+    budget = { ...(budget || {}), modelTier: childModelTier };
     if (coordinationMode !== "subagents" && !dispatchEnabled) {
       throw runtimeError(
         "WEB_RESEARCH_ADMIN_DISABLED",
@@ -476,26 +553,76 @@ export class WebResearchRuntime {
       dispatch.controller.signal.addEventListener("abort", handleAbort, { once: true });
     });
     try {
-      const result = await Promise.race([
-        registration.runChild({
-          dispatchId: dispatch.id,
-          question,
-          budget,
-          signal: dispatch.controller.signal,
-        }),
-        abortPromise,
-      ]);
-      if (dispatch.controller.signal.aborted) throw dispatch.controller.signal.reason;
-      if (!dispatch.packet) {
-        throw runtimeError(
-          "WEB_RESEARCH_HANDOFF_MISSING",
-          "Web research child did not submit web_research_handoff",
-          { stage: "terminal" },
-        );
+      let result;
+      try {
+        result = await Promise.race([
+          registration.runChild({
+            dispatchId: dispatch.id,
+            question,
+            budget,
+            signal: dispatch.controller.signal,
+          }),
+          abortPromise,
+        ]);
+      } catch (error) {
+        // The child's call already failed its row for the missing handoff;
+        // its final text may still be salvageable below.
+        if (error?.code !== "WEB_RESEARCH_HANDOFF_MISSING" || dispatch.packet || dispatch.controller.signal.aborted) throw error;
+        result = { agentCallId: error.agentCallId, output: error.output, stats: error.stats };
       }
+      if (dispatch.controller.signal.aborted) throw dispatch.controller.signal.reason;
+      const reportMeta = {
+        dispatchId: dispatch.id,
+        childAgentCallId: dispatch.childAgentCallId || positiveId(result?.agentCallId),
+        question,
+      };
+      if (!dispatch.packet) {
+        const salvaged = this.#salvage(result, context, reportMeta);
+        if (!salvaged) {
+          const error = /** @type {Error & Record<string, any>} */ (runtimeError(
+            "WEB_RESEARCH_HANDOFF_MISSING",
+            "Web research child did not submit web_research_handoff",
+            { stage: "terminal" },
+          ));
+          // The child ran and has its own call row: keep its identity and
+          // usage so callers do not report this as a pre-start rejection.
+          error.agentCallId = reportMeta.childAgentCallId;
+          error.stats = result?.stats || {};
+          throw error;
+        }
+        dispatch.status = "completed";
+        return { ok: true, protocol: WEB_RESEARCH_PROTOCOL, route: "web", result: salvaged, usage: childUsage(result) };
+      }
+      const { sources: nominatedSources, dropped_sources: droppedSources, ...handoff } = dispatch.packet;
+      const sources = nominatedSources.length > 0
+        ? await this.captureSources(nominatedSources, {
+          context,
+          projectDir: registration.projectDir || runtimeContext.projectDir || null,
+          signal: dispatch.controller.signal,
+          dispatchId: dispatch.id,
+        })
+        : [];
+      if (dispatch.controller.signal.aborted) throw dispatch.controller.signal.reason;
+      const findings = handoff.findings.map((finding) => this.surfaceFinding(finding, context));
+      const reportRef = this.surfaceReport(context, {
+        summary: handoff.summary,
+        findings: findings.map((finding) => ({
+          claim: finding.claim,
+          url: finding.url,
+          confidence: finding.confidence,
+          ref: finding.evidence?.ref || null,
+        })),
+        sources: sources.map(({ file: _file, ...source }) => source),
+        gaps: handoff.gaps,
+        ...(droppedSources ? { dropped_sources: droppedSources } : {}),
+        salvaged: false,
+      }, reportMeta);
       const surfacedPacket = {
-        ...dispatch.packet,
-        findings: dispatch.packet.findings.map((finding) => this.surfaceFinding(finding, context)),
+        ...handoff,
+        findings,
+        sources,
+        ...(droppedSources ? { dropped_sources: droppedSources } : {}),
+        ...(reportRef ? { report_ref: reportRef } : {}),
       };
       dispatch.status = "completed";
       return {

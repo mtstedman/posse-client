@@ -28,6 +28,7 @@ import {
 import {
   buildAssessmentReplanEvidenceBlock,
   resolveAssessmentReplanCwd,
+  releaseAssessmentReplanCwd,
   buildAssessmentReplanDiffBlock,
 } from "../../../planning/functions/assessment-replan-context.js";
 import {
@@ -437,6 +438,12 @@ export class ResearcherRole extends BaseRole {
     return { ...DEFAULT_DEPS, ...this.deps };
   }
 
+  // A legacy replan loopback reads from a per-job detached worktree; remove it with the job.
+  async teardown(_job, ctx = {}) {
+    if (!ctx.assessmentReplanCwd?.readonlyWorktree) return;
+    await releaseAssessmentReplanCwd(this.context?.projectDir || process.cwd(), ctx.assessmentReplanCwd);
+  }
+
   async assembleContext(job, ctx) {
     const worker = this.context;
     const baseProjectDir = worker?.projectDir || process.cwd();
@@ -454,6 +461,7 @@ export class ResearcherRole extends BaseRole {
     const payload = parsePayload(worker, job);
     const replanCwd = await resolveAssessmentReplanCwd(baseProjectDir, job, payload, { signal: ctx.abortSignal || null });
     projectDir = replanCwd.cwd;
+    ctx.assessmentReplanCwd = replanCwd;
     const atlasReadMount = await ensureReadRootMounted({
       projectDir: baseProjectDir,
       readRoot: projectDir,

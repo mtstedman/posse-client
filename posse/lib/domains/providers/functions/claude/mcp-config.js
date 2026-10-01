@@ -66,6 +66,22 @@ export function __testBuildClaudeAtlasMcpConfigPayload(role, cwd, options = {}) 
   return buildClaudeAtlasMcpConfigPayloadAsync(role, cwd, options);
 }
 
+// The gateway is the only tool authority for a gateway role. Claude's native
+// fallback surface grants shell and file writes (artificer Bash, dev
+// Bash/Edit) that no remote issuance authorized, so a write-capable call
+// without a ready gateway fails closed. Calls that deliberately mount no
+// agent tools are read-only one-turn passes and keep the inactive result.
+function inactiveDeterministicMcpPayload(role, allowWrite, server) {
+  if (allowWrite === true) {
+    const error = new Error(
+      `Agent role ${role || "unknown"} has write access but no ready MCP gateway (${server?.reason || "unavailable"}); refusing the native tool fallback.`,
+    );
+    error.code = "POSSE_AGENT_MCP_GATE_REQUIRED";
+    throw error;
+  }
+  return { active: false, tools: [], payload: null };
+}
+
 export function buildClaudeDeterministicReadMcpConfigPayload(role, cwd, {
   scopedFiles = [],
   createFiles = [],
@@ -123,7 +139,7 @@ export function buildClaudeDeterministicReadMcpConfigPayload(role, cwd, {
     disableAgentTools,
   });
   if (!server?.ready) {
-    return { active: false, tools: [], payload: null };
+    return inactiveDeterministicMcpPayload(role, allowWrite, server);
   }
   const serverName = server.name || POSSE_MCP_GATEWAY_SERVER_NAME;
   const toolNames = Array.isArray(server.tools) ? server.tools : [];
@@ -216,7 +232,7 @@ export async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cw
     disableAgentTools,
   });
   if (!server?.ready) {
-    return { active: false, tools: [], payload: null };
+    return inactiveDeterministicMcpPayload(role, allowWrite, server);
   }
   const serverName = server.name || POSSE_MCP_GATEWAY_SERVER_NAME;
   const toolNames = Array.isArray(server.tools) ? server.tools : [];

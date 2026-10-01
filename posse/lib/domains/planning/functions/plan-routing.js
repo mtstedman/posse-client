@@ -502,6 +502,21 @@ export function createsRepoPathFiles(task, artifactDirAbs) {
   return createFiles.some((file) => file.includes("/") && !isArtifactScopedPath(file, artifactDirAbs));
 }
 
+// An artifact producer declares write scope only under the artifact root and
+// edits no repository file: later promote or consumer tasks take its output
+// into the repo, so it is intermediate work, not the repo deliverable itself.
+export function declaresOnlyArtifactScope(task, artifactDirAbs) {
+  const repoEdits = (Array.isArray(task?.files_to_modify) && task.files_to_modify.length > 0)
+    || (Array.isArray(task?.files_to_delete) && task.files_to_delete.length > 0);
+  if (repoEdits) return false;
+  const declared = [
+    task?.output_root,
+    ...(Array.isArray(task?.create_roots) ? task.create_roots : []),
+    ...(Array.isArray(task?.files_to_create) ? task.files_to_create : []),
+  ].filter((value) => typeof value === "string" && value.trim());
+  return declared.length > 0 && declared.every((value) => isArtifactScopedPath(value, artifactDirAbs));
+}
+
 function uniqueValues(values) {
   return [...new Set(values.filter(Boolean))];
 }

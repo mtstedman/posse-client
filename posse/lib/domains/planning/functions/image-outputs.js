@@ -5,24 +5,47 @@ const REQUESTED_IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif|avif|svg|ico)\b/i;
 const REQUESTED_IMAGE_PATH_RE = /(?:^|[\s"'`(])([A-Za-z0-9._@:/\\-]+?\.(?:png|jpe?g|webp|gif|avif|svg|ico))(?=$|[\s"'`),.;:])/gi;
 const STRONG_IMAGE_OUTPUT_NOUN_RE = /\b(?:pngs?|jpe?gs?|webps?|image assets?|visual assets?|icons?|logos?|illustrations?|graphics?|artwork|decor(?:\s+figures?)?|figures?|hero images?|hero art|thumbnails?|banners?|sprites?|mockups?)\b/i;
 const IMAGE_GENERATION_VERB_RE = /\b(?:generate|create|render|produce|regenerate|draw|make)\b/i;
-const NEGATED_IMAGE_GENERATION_RE = /\b(?:do not|don't|without|no need to)\s+(?:generate|create|render|produce|regenerate|draw|make)\b[\s\S]{0,50}\b(?:images?|assets?|icons?|logos?|illustrations?|graphics?|artwork|decor|figures?|thumbnails?|banners?)\b|\bno\s+(?:new\s+)?(?:images?|assets?|icons?|logos?|illustrations?|graphics?)\b/i;
+const NEGATED_IMAGE_GENERATION_RE = /\b(?:do not|don't|without|no need to)\s+(?:generate|create|render|produce|regenerate|draw|make)\b[\s\S]{0,50}\b(?:images?|assets?|icons?|logos?|illustrations?|graphics?|artwork|decor|figures?|thumbnails?|banners?|sprites?|substitutes?)\b|\bno\s+(?:new\s+)?(?:images?|assets?|icons?|logos?|illustrations?|graphics?)\b|\b(?:not|no)\s+(?:ai[-\s]?)?generated\b|\b(?:do not|don't)\s+(?:route\b[\s\S]{0,40}\bthrough\s+)?image[-\s]generation\b/i;
 const IMAGE_SLOT_ONLY_RE = /\bimage[-\s]?slots?\b/i;
+// A sentence ends at ! or ?, a line break, or a period that is not inside a
+// file name such as hero-bg.png or breeding.json.
+const CLAUSE_BOUNDARY_RE = /[!?]+|\.(?=\s|$)|[\r\n]+/;
+// Verbs that obtain an existing raster rather than create one. "copy" counts
+// only when the clause names where the copy comes from.
+const IMAGE_ACQUISITION_VERB_RE = /\b(?:download(?:s|ed|ing)?|fetch(?:es|ed|ing)?|scrap(?:e|es|ed|ing)|crawl(?:s|ed|ing)?|vendor(?:s|ed|ing)?|mirror(?:s|ed|ing)?|cop(?:y|ies|ied|ying)(?=(?:[^.!?\r\n]|\.(?!\s|$)){0,120}\bfrom\b))\b/i;
 
 const WEB_ASSET_ANCHOR_EXTS = new Set([".css", ".scss", ".sass", ".less", ".html", ".htm", ".php"]);
 const STYLE_ASSET_ANCHOR_EXTS = new Set([".css", ".scss", ".sass", ".less"]);
 const PAGE_ASSET_ANCHOR_EXTS = new Set([".html", ".htm", ".php"]);
 const RELATIVE_WEB_ASSET_RE = /^(?:\.\.?\/|assets\/|img\/)/i;
 
-function hasNearbyImageGenerationIntent(text) {
+// True when a clause led by one of the verbs names an image. stopRe ends the
+// clause early, so "fetch the data and generate hero.png" does not read as
+// fetching the image.
+function hasVerbClauseNamingImage(text, verbRe, { stopRe = null } = {}) {
   const compact = String(text || "");
-  const verbRe = new RegExp(IMAGE_GENERATION_VERB_RE.source, "gi");
-  for (const match of compact.matchAll(verbRe)) {
+  for (const match of compact.matchAll(new RegExp(verbRe.source, "gi"))) {
     const tail = compact.slice(match.index, match.index + 160);
-    const boundaryMatch = /[.!?\r\n]+/.exec(tail);
-    const localClause = boundaryMatch ? tail.slice(0, boundaryMatch.index) : tail;
+    const boundaryMatch = CLAUSE_BOUNDARY_RE.exec(tail);
+    let localClause = boundaryMatch ? tail.slice(0, boundaryMatch.index) : tail;
+    const stopMatch = stopRe ? stopRe.exec(localClause) : null;
+    if (stopMatch) localClause = localClause.slice(0, stopMatch.index);
     if (STRONG_IMAGE_OUTPUT_NOUN_RE.test(localClause) || REQUESTED_IMAGE_EXT_RE.test(localClause)) return true;
   }
   return false;
+}
+
+function hasNearbyImageGenerationIntent(text) {
+  return hasVerbClauseNamingImage(text, IMAGE_GENERATION_VERB_RE);
+}
+
+function taskImageText(task = {}) {
+  return [
+    task.title || "",
+    task.task_spec || "",
+    task.instructions || "",
+    ...(Array.isArray(task.success_criteria) ? task.success_criteria : [task.success_criteria || ""]),
+  ].join("\n");
 }
 
 export function normalizePlannerPath(value) {
@@ -161,15 +184,20 @@ export function collectRequestedImageOutputs(task = {}, { includeText = true } =
   return outputs;
 }
 
+// Wording that sources the task's rasters from somewhere else (downloaded,
+// fetched, scraped, vendored, copied from a source) or disclaims generating
+// them. Absent a structural generation signal, such a task acquires or
+// processes images; its raster outputs are not generate_image requests.
+export function disclaimsImageGeneration(task = {}) {
+  const text = taskImageText(task);
+  if (!text.trim()) return false;
+  return NEGATED_IMAGE_GENERATION_RE.test(text)
+    || hasVerbClauseNamingImage(text, IMAGE_ACQUISITION_VERB_RE, { stopRe: IMAGE_GENERATION_VERB_RE });
+}
+
 export function hasRequestedImageGenerationOutput(task = {}, { pathOnlyIsIntent = true } = {}) {
   if (pathOnlyIsIntent && collectRequestedImageOutputs(task).length > 0) return true;
-  const text = [
-    task.title || "",
-    task.task_spec || "",
-    task.instructions || "",
-    ...(Array.isArray(task.success_criteria) ? task.success_criteria : [task.success_criteria || ""]),
-  ].join("\n");
-  const compact = String(text || "");
+  const compact = taskImageText(task);
   if (!compact.trim()) return false;
   if (NEGATED_IMAGE_GENERATION_RE.test(compact)) return false;
   if (IMAGE_SLOT_ONLY_RE.test(compact) && !STRONG_IMAGE_OUTPUT_NOUN_RE.test(compact.replace(IMAGE_SLOT_ONLY_RE, ""))) {
