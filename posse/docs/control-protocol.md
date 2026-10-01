@@ -509,12 +509,19 @@ client rendered it. Commands carrying an older generation fail closed.
 // args
 {
   "job_id": 9821,
-  "note": "looks good"                          // optional
+  "note": "looks good",                         // optional
+  "merge_partial_work": true                    // optional; see below
 }
 
 // result
 {}
 ```
+
+If approving would merge a work item whose failed or canceled implementation
+jobs left work undone, the bridge refuses with `error.code:
+"partial_work_unconfirmed"` and a message naming those jobs; nothing is
+merged. Clients show that message and resend with `merge_partial_work: true`
+only after the operator explicitly confirms merging partial work.
 
 ### `review.reject`
 
