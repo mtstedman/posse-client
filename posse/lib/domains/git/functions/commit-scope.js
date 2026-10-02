@@ -663,7 +663,7 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   let mergeAuditError = null;
 
   const stageScopedMergeResolution = () => {
-    const { rawPaths: mergeRawPaths, normalized: mergeBroughtIn } = collectMergeBroughtInPaths();
+    const { normalized: mergeBroughtIn } = collectMergeBroughtInPaths();
     const deletedTracked = collectDeletedTracked();
     const quarantined = new Set();
     const stageCandidates = new Set();
@@ -724,9 +724,25 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
         rememberQuarantined(u);
       }
     }
-    for (const f of [...mergeRawPaths, ...unmergedPaths, ...modifyFilesRaw, ...createFilesRaw, ...deleteFilesRaw]) {
+    // Merge-brought-in paths are an allowlist, not stage candidates: the merge
+    // already staged them, and re-adding a deletion it applied (a target-side
+    // rename leaves the old path in neither the index nor the worktree) fails.
+    // Later edits to those paths are dirty and staged above.
+    for (const f of [...unmergedPaths, ...modifyFilesRaw, ...createFilesRaw, ...deleteFilesRaw]) {
       if (f) stageCandidates.add(f);
     }
+    let indexedByFold = null;
+    const absentFromIndexAndWorktree = (file) => {
+      if (fs.lstatSync(path.resolve(cwd, file), { throwIfNoEntry: false }) || resolveCaseInsensitivePath(cwd, file)) return false;
+      indexedByFold ??= firstValueByFold(
+        gitNameList("ls-files")
+          .split("\n")
+          .map(scopeCompatiblePath)
+          .filter(Boolean),
+        norm
+      );
+      return !indexedByFold.has(norm(file));
+    };
     if (createRoots.length > 0) {
       for (const f of [...dirtyFiles, ...untrackedFiles]) {
         const normalized = norm(f);
@@ -741,6 +757,8 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
         rememberQuarantined(f);
         continue;
       }
+      // A declared path the merge already deleted has nothing left to stage.
+      if (absentFromIndexAndWorktree(f)) continue;
       safeGitAdd(f, cwd, "mergeResolution", gitAddWarnings);
     }
 

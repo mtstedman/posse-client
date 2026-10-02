@@ -163,12 +163,24 @@ export function assertSessionSshPathSupported(projectDir, options = {}) {
   assertSshConfigurablePath(path.join(projectDir, ".posse", "session-credentials"), options.platform || process.platform);
 }
 
+// GitHub's published SSH host keys (api.github.com/meta `ssh_keys`; the
+// fingerprints are listed under "GitHub's SSH key fingerprints" in its docs).
+// Session SSH checks host keys strictly, so the session pins these rather than
+// relying on ~/.ssh/known_hosts: a member who has only used GitHub over HTTPS
+// has no github.com entry there, and every session fetch failed verification.
+const GITHUB_SSH_HOST_KEYS = Object.freeze([
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl",
+  "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=",
+  "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=",
+]);
+
 export function prepareSessionSshIdentity(projectDir, sessionId, options = {}) {
   const platform = options.platform || process.platform;
   const directory = path.join(projectDir, ".posse", "session-credentials", safeSessionPart(sessionId));
   const privateKey = path.join(directory, "id_ed25519");
   const publicKey = `${privateKey}.pub`;
   const configFile = path.join(directory, "ssh_config");
+  const knownHostsFile = path.join(directory, "known_hosts");
   assertSshConfigurablePath(privateKey, platform);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (!fs.existsSync(privateKey) || !fs.existsSync(publicKey)) {
@@ -178,11 +190,15 @@ export function prepareSessionSshIdentity(projectDir, sessionId, options = {}) {
     ], { cwd: projectDir, ...options });
   }
   fs.chmodSync(privateKey, 0o600);
+  fs.writeFileSync(knownHostsFile, GITHUB_SSH_HOST_KEYS.map((key) => `github.com ${key}\n`).join(""), { mode: 0o600 });
   fs.writeFileSync(configFile, [
     "Host github.com",
     "  HostName github.com",
     `  IdentityFile ${sshConfigQuotedPath(privateKey, platform)}`,
     "  IdentitiesOnly yes",
+    // The pinned keys come first. The user's own file stays a fallback, so a
+    // GitHub key rotation they have already accepted keeps working.
+    `  UserKnownHostsFile ${sshConfigQuotedPath(knownHostsFile, platform)} ~/.ssh/known_hosts`,
     "  StrictHostKeyChecking yes",
     "",
   ].join("\n"), { mode: 0o600 });
