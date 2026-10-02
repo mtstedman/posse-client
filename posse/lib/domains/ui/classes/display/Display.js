@@ -80,12 +80,76 @@ function rawInputKey(name, sequence, patch = {}) {
   };
 }
 
+// Key names follow readline's (the keypress path this fallback stands in for).
+// CSI "~" keys by their first parameter; CSI and SS3 letter keys by final byte.
+const CSI_TILDE_KEYS = Object.freeze({
+  1: "home", 2: "insert", 3: "delete", 4: "end", 5: "pageup", 6: "pagedown", 7: "home", 8: "end",
+  11: "f1", 12: "f2", 13: "f3", 14: "f4", 15: "f5", 17: "f6", 18: "f7", 19: "f8", 20: "f9", 21: "f10", 23: "f11", 24: "f12",
+});
+const ESCAPE_LETTER_KEYS = Object.freeze({
+  A: "up", B: "down", C: "right", D: "left", E: "clear", F: "end", H: "home",
+  P: "f1", Q: "f2", R: "f3", S: "f4",
+});
+
+// xterm modifier parameter: 1 + shift(1) + alt(2) + ctrl(4).
+function escapeModifiers(param) {
+  const bits = Number(param) - 1;
+  if (!Number.isInteger(bits) || bits <= 0) return {};
+  return { shift: Boolean(bits & 1), meta: Boolean(bits & 2), ctrl: Boolean(bits & 4) };
+}
+
+function namedEscapeEvent(sequence, name, patch = {}) {
+  return name ? { str: sequence, key: rawInputKey(name, sequence, patch) } : null;
+}
+
+// One escape sequence at the start of `text` (which begins with ESC):
+// { length, event }, event null for a sequence with no key (dropped). A CSI or
+// SS3 sequence is always consumed whole, known or not, even when the chunk cut
+// it short: read as Esc followed by text, PgDn ("\x1b[6~") skipped a
+// free-text question.
+function decodeEscapeSequence(text) {
+  const escape = { length: 1, event: { str: "\x1b", key: rawInputKey("escape", "\x1b") } };
+  const next = text[1];
+  if (next === "\x1b" && (text[2] === "[" || text[2] === "O")) {
+    // ESC + a sequence: the sequence with Alt held.
+    const inner = decodeEscapeSequence(text.slice(1));
+    const event = inner.event ? { ...inner.event, key: { ...inner.event.key, meta: true } } : null;
+    return { length: inner.length + 1, event };
+  }
+  if (next === "[") {
+    const linuxFunctionKey = text.match(/^\x1b\[\[([A-E])/);
+    if (linuxFunctionKey) {
+      return { length: 4, event: namedEscapeEvent(linuxFunctionKey[0], `f${"ABCDE".indexOf(linuxFunctionKey[1]) + 1}`) };
+    }
+    const csi = text.match(/^\x1b\[([0-?]*)[ -/]*([@-~])/);
+    if (!csi) return { length: text.length, event: null };
+    const [sequence, params, final] = csi;
+    const [first, modifier] = params.split(";");
+    if (final === "~") return { length: sequence.length, event: namedEscapeEvent(sequence, CSI_TILDE_KEYS[Number(first)], escapeModifiers(modifier)) };
+    if (final === "Z") return { length: sequence.length, event: namedEscapeEvent(sequence, "tab", { shift: true }) };
+    return { length: sequence.length, event: namedEscapeEvent(sequence, ESCAPE_LETTER_KEYS[final], escapeModifiers(modifier)) };
+  }
+  if (next === "O") {
+    if (text.length < 3) return { length: text.length, event: null };
+    const sequence = text.slice(0, 3);
+    return { length: 3, event: namedEscapeEvent(sequence, ESCAPE_LETTER_KEYS[text[2]]) };
+  }
+  // Alt + a key, readline's escaped-character form.
+  const sequence = text.slice(0, 2);
+  if (next === "\r" || next === "\n") return { length: 2, event: namedEscapeEvent(sequence, "return", { meta: true }) };
+  if (next === "\b" || next === "\x7f") return { length: 2, event: namedEscapeEvent(sequence, "backspace", { meta: true }) };
+  if (next >= " " && next <= "~") {
+    const lower = next.toLowerCase();
+    return { length: 2, event: namedEscapeEvent(sequence, next === " " ? "space" : lower, { meta: true, shift: next !== lower }) };
+  }
+  return escape;
+}
+
 function decodeRawInputChunk(raw) {
   const text = String(raw || "");
   const events = [];
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i];
-    const rest = text.slice(i);
     if (ch === "\u0003") {
       events.push({ str: ch, key: rawInputKey("c", ch, { ctrl: true }) });
       continue;
@@ -103,25 +167,9 @@ function decodeRawInputChunk(raw) {
       continue;
     }
     if (ch === "\x1b") {
-      const known = [
-        ["\x1b[A", "up", {}],
-        ["\x1b[B", "down", {}],
-        ["\x1b[C", "right", {}],
-        ["\x1b[D", "left", {}],
-        ["\x1bOA", "up", {}],
-        ["\x1bOB", "down", {}],
-        ["\x1bOC", "right", {}],
-        ["\x1bOD", "left", {}],
-        ["\x1b[Z", "tab", { shift: true }],
-      ];
-      const match = known.find(([seq]) => rest.startsWith(seq));
-      if (match) {
-        const [seq, name, patch] = match;
-        events.push({ str: seq, key: rawInputKey(name, seq, patch) });
-        i += seq.length - 1;
-      } else {
-        events.push({ str: ch, key: rawInputKey("escape", ch) });
-      }
+      const { length, event } = decodeEscapeSequence(text.slice(i));
+      if (event) events.push(event);
+      i += length - 1;
       continue;
     }
     if (ch >= " " && ch <= "~") {
@@ -216,6 +264,9 @@ export class Display {
     this._inputMode = false;    // "question" | "inject" | "kill" | false
     this._activeQ = null;       // the question-set currently being answered
     this._inputBuf = "";        // what the user has typed so far
+    this._gateReviewDiffView = null; // { questionId, scroll } while [d] shows a verdict prompt's diff
+    this._questionClip = null;  // { questionId, idx, pageSize } when the input area clipped the question
+    this._questionPage = null;  // { questionId, idx, offset } while [PgUp/PgDn] pages it
     this._aborted = false;
 
     // ── Callbacks (set by orchestrator) ──
@@ -1116,12 +1167,23 @@ export class Display {
 
   // ── Question API ──────────────────────────────────────────────────────
 
+  /**
+   * A live operator answers this display's prompts, so a gate answer the
+   * worker could not apply is asked again here instead of being parked
+   * (human-input-job.js). Bridge and headless stand-ins replay one fixed
+   * answer and do not set this.
+   */
+  get asksLiveOperator() {
+    return true;
+  }
+
   askQuestions(jobId, questions, context, workItemId = null, {
     choices = [],
     escapeAnswer = null,
     escapeLabel = null,
     promptIdentity = null,
     ownerLeaseToken = null,
+    reviewDiff = null,
   } = {}) {
     return new Promise((resolve, reject) => {
       if (this._aborted) {
@@ -1142,6 +1204,9 @@ export class Display {
         _ownerLeaseToken: typeof ownerLeaseToken === "string" && ownerLeaseToken
           ? ownerLeaseToken
           : null,
+        // The change a verdict gate judges (gate-review-target.js); [d]
+        // opens its diff while this prompt is active.
+        reviewDiff: reviewDiff && typeof reviewDiff === "object" ? reviewDiff : null,
         escapeAnswer: typeof escapeAnswer === "string" && escapeAnswer.trim() ? escapeAnswer.trim() : null,
         escapeLabel: typeof escapeLabel === "string" && escapeLabel.trim() ? escapeLabel.trim() : null,
         answers: [],
@@ -1195,7 +1260,14 @@ export class Display {
     if (!q) return { delivered: false, reason: "prompt_not_ready" };
     if (!q._ownerLeaseToken) return { delivered: false, reason: "prompt_has_no_owner_lease" };
     const choices = Array.isArray(q.choices) ? q.choices : [];
-    if (!choices.includes(choiceId)) return { delivered: false, reason: "choice_not_allowed" };
+    // A choice-less prompt takes the free-text answer a reservation carries
+    // (answerWorkItemQuestionText); a closed-choice prompt only its choices.
+    const freeText = choices.length === 0 && typeof delivery.answer_text === "string"
+      ? delivery.answer_text.trim()
+      : "";
+    if (choices.length > 0 ? !choices.includes(choiceId) : !freeText) {
+      return { delivered: false, reason: "choice_not_allowed" };
+    }
 
     let matched = { ok: true };
     try {
@@ -1212,16 +1284,17 @@ export class Display {
       return { delivered: false, reason: matched?.reason || "delivery_mark_failed" };
     }
 
-    q.answers.push({
-      question: q.questions[q.currentIdx],
-      answer: choiceId,
-      metadata: {
-        idempotency_key: String(delivery.action_id || ""),
-        reservation_id: Number(delivery.reservation_id),
-        source: "reserved_owner_delivery",
-      },
-    });
-    q.currentIdx += 1;
+    const metadata = {
+      idempotency_key: String(delivery.action_id || ""),
+      reservation_id: Number(delivery.reservation_id),
+      source: "reserved_owner_delivery",
+    };
+    // Free text answers every remaining question, as it does for a parked
+    // gate (answerHumanInput gives each question the same answer).
+    do {
+      q.answers.push({ question: q.questions[q.currentIdx], answer: freeText || choiceId, metadata });
+      q.currentIdx += 1;
+    } while (freeText && q.currentIdx < q.questions.length);
     if (q.currentIdx < q.questions.length) {
       if (q === this._activeQ) this._inputBuf = "";
       this.requestRender({ force: true });
@@ -1282,7 +1355,14 @@ export class Display {
     this._cancelApprovalMode();
 
     for (const q of this._questionQueue) {
-      q.reject(new Error("Shutdown \u2014 questions canceled"));
+      // Graceful shutdown cancels prompts before it kills workers. Tag the
+      // rejection like that kill so a waiting human_input worker settles it
+      // as a shutdown interruption (requeued, attempt not failed) and the
+      // next run asks again at once instead of after the parked-gate snooze
+      // (fiscal-wizard 2026-10-01 17:36, gates #24/#30).
+      const shutdown = new Error("Shutdown \u2014 questions canceled");
+      shutdown._killReason = "shutdown";
+      q.reject(shutdown);
     }
     this._questionQueue = [];
   }
@@ -1810,6 +1890,9 @@ export class Display {
   }
   _buildMonitorFocusLines(...args) {
     return this._rightPanelRenderer._buildMonitorFocusLines.call(this, ...args);
+  }
+  _buildGateReviewDiffPane(...args) {
+    return this._rightPanelRenderer._buildGateReviewDiffPane.call(this, ...args);
   }
   _monitorRecentEventsForJob(...args) {
     return this._rightPanelRenderer._monitorRecentEventsForJob.call(this, ...args);

@@ -11,7 +11,11 @@
 // 2, finding 10).
 
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { MERGE_VERIFICATION_REVIEW_TYPE } from "../../../catalog/human-input.js";
+import {
+  MERGE_RELEASING_RETRY_REVIEW_TYPES,
+  MERGE_VERIFICATION_REVIEW_TYPE,
+  canonicalHumanGateAction,
+} from "../../../catalog/human-input.js";
 import { MERGE_VERIFICATION_REJECTION_KEY } from "./merge-verification-review.js";
 
 // Gate answers after which automatic merge stays refused.
@@ -19,6 +23,7 @@ export const MERGE_HOLDING_GATE_ACTIONS = Object.freeze([
   "fail", "replan", "retry_assessment", "retry_with_changes",
   "reject", "deny", "revert", "extend",
 ]);
+const RECOVERY_RETRY_ACTION = canonicalHumanGateAction("retry");
 
 /**
  * The gate that holds `workItemId` out of automatic merge, or null: an open
@@ -27,6 +32,8 @@ export const MERGE_HOLDING_GATE_ACTIONS = Object.freeze([
  * "fail" whose rejection requeue already ran (MERGE_VERIFICATION_REJECTION_KEY
  * on the gate) is spent, like a work-item review rejection: the reworked work
  * item is reviewed again by a new gate, so the old answer no longer holds it.
+ * A retry answered on a recovery gate (MERGE_RELEASING_RETRY_REVIEW_TYPES)
+ * never holds: the retried work is assessed like any other.
  * Open gates come first, then the newest.
  *
  * @returns {{ gate_job_id: number, gate_state: string, resolution_action: string|null, review_type: string|null } | null}
@@ -52,11 +59,21 @@ export function findMergeHoldingGate(workItemId, db = getDb()) {
             THEN json_extract(gate_job.payload_json, '$.review_type') = ?
               AND json_extract(gate_job.payload_json, '$.${MERGE_VERIFICATION_REJECTION_KEY}') IS NOT NULL
             ELSE 0 END)
+          AND NOT (hg.resolution_action = ? AND (CASE WHEN json_valid(gate_job.payload_json)
+            THEN json_extract(gate_job.payload_json, '$.review_type')
+              IN (${MERGE_RELEASING_RETRY_REVIEW_TYPES.map(() => "?").join(",")})
+            ELSE 0 END))
         )
       )
     ORDER BY CASE WHEN hg.gate_state IN ('open', 'resolving') THEN 0 ELSE 1 END, hg.gate_job_id DESC
     LIMIT 1
-  `).get(Number(workItemId), ...MERGE_HOLDING_GATE_ACTIONS, MERGE_VERIFICATION_REVIEW_TYPE);
+  `).get(
+    Number(workItemId),
+    ...MERGE_HOLDING_GATE_ACTIONS,
+    MERGE_VERIFICATION_REVIEW_TYPE,
+    RECOVERY_RETRY_ACTION,
+    ...MERGE_RELEASING_RETRY_REVIEW_TYPES,
+  );
   if (!row) return null;
   return {
     gate_job_id: Number(row.gate_job_id),

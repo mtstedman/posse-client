@@ -54,6 +54,8 @@ import { findMergeHoldingGate } from "./merge-holding-gate.js";
 import {
   committedJobIdsForWorkItem,
   isMergeVerificationReviewJob,
+  MERGE_FAILURE_RECOVERY_KEY,
+  mergeFailureRecoveryGateJobSpec,
   mergeVerificationReviewGateJobSpec,
   mergeVerificationReviewGateState,
   mergeVerificationReviewRequirement,
@@ -64,6 +66,7 @@ import {
   crossWiUpstreamEpisode,
   crossWiUpstreamGateEpisodes,
   discardedPlanContext,
+  dispositionGateChoicesText,
   failedLeafJobs,
   failedWorkItemRestorationPlan,
   hasWorkItemFailureGateForEpisode,
@@ -300,6 +303,7 @@ export {
   enqueueHumanGateEffect,
   getHumanGate,
   humanGateIdempotencyKey,
+  noteHumanGateAnswerNotApplied,
   reconcileHumanGates,
   reopenHumanGateResolution,
   supersedeHumanGate,
@@ -1083,7 +1087,7 @@ export function openWorkItemFailureDispositionGate(workItemId) {
   return parkDispositionGate(
     gate,
     workItemId,
-    `Work item failed; recovery gate #${gate.id} waits for the operator (retry, accept or abandon)`,
+    `Work item failed; recovery gate #${gate.id} waits for the operator (${dispositionGateChoicesText(gate)})`,
     {
       review_type: WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
       failed_job_ids: leaves.map((job) => Number(job.id)),
@@ -1183,6 +1187,7 @@ export function settleCrossWiUpstreamDispositionGate(gateJobId, { reason = "upst
       UPDATE human_gates
       SET gate_state = 'resolved', resolution_action = 'wait',
           resolution_payload_json = ?, resolver_lease_token = NULL,
+          resolution_error = NULL,
           resolved_at = ?, updated_at = ?
       WHERE gate_job_id = ? AND gate_state = 'open'
     `).run(JSON.stringify({ action: "wait", source: "system", reason }), ts, ts, gate.id);
@@ -1450,7 +1455,7 @@ export function releaseWorkItemAutoMergeAuthorization(id, previousMergeState = n
   return result.changes === 1;
 }
 
-export function markWorkItemMergeFailed(id) {
+export function markWorkItemMergeFailed(id, { message = null, targetBranch = null } = {}) {
   const db = getDb();
   const execute = () => {
     const result = db.prepare(`
@@ -1460,6 +1465,41 @@ export function markWorkItemMergeFailed(id) {
     `).run(now(), id);
     if (result.changes === 0) return false;
     releaseWorkItemLocksForMergeState(id, "merge_failed");
+    const workItem = getWorkItem(id);
+    if (!workItem) return true;
+    const existing = db.prepare(`
+      SELECT j.id
+      FROM jobs j
+      JOIN human_gates hg ON hg.gate_job_id = j.id
+      WHERE j.work_item_id = ?
+        AND j.job_type = 'human_input'
+        AND hg.gate_state IN ('open', 'resolving')
+        AND CASE WHEN json_valid(j.payload_json)
+          THEN json_extract(j.payload_json, '$.${MERGE_FAILURE_RECOVERY_KEY}') IS NOT NULL
+          ELSE 0 END
+      ORDER BY j.id DESC
+      LIMIT 1
+    `).get(id);
+    if (existing) return true;
+    const gate = createJob(mergeFailureRecoveryGateJobSpec(workItem, { message, targetBranch }));
+    if (gate?.status === "queued") {
+      forceUpdateJobStatus(gate.id, "waiting_on_human", { expectedStatuses: ["queued"] });
+    }
+    if (gate?.id) {
+      logEvent({
+        work_item_id: id,
+        job_id: gate.id,
+        event_type: EVENT_TYPES.WORK_ITEM_MERGE_REVIEW_REQUIRED,
+        actor_type: EVENT_ACTORS.SYSTEM,
+        message: `Merge failure requires operator recovery (gate #${gate.id})`,
+        event_json: JSON.stringify({
+          gate_job_id: gate.id,
+          merge_failure: true,
+          target_branch: targetBranch || null,
+          message: message || null,
+        }),
+      });
+    }
     return true;
   };
   return db.inTransaction ? execute() : runImmediateTransaction(db, execute);
@@ -2500,15 +2540,19 @@ export function updateJobStatus(id, status, { expectedStatuses = null, leaseToke
         UPDATE human_gates
         SET gate_state = 'resolved',
             resolver_lease_token = NULL,
+            resolution_error = NULL,
             resolved_at = COALESCE(resolved_at, ?),
             updated_at = ?
         WHERE gate_job_id = ? AND gate_state IN ('open','resolving')
       `).run(now(), now(), id);
     } else if (job?.job_type === "human_input" && status === "canceled") {
+      // An open gate's resolution_error is only a note about its last answer
+      // (noteHumanGateAnswerNotApplied), not why it was canceled.
       db.prepare(`
         UPDATE human_gates
         SET gate_state = 'superseded',
             resolver_lease_token = NULL,
+            resolution_error = NULL,
             resolved_at = COALESCE(resolved_at, ?),
             updated_at = ?
         WHERE gate_job_id = ? AND gate_state IN ('open','resolving')

@@ -144,6 +144,7 @@ export const EVENT_TYPES = Object.freeze({
   GIT_REVIEW_COMMIT_DIRTY: "git.review_commit_dirty",
   GIT_REVIEW_DISCARD_FILES: "git.review_discard_files",
   GIT_REVIEW_STASH_TARGET: "git.review_stash_target",
+  GIT_STARTUP_DIRTY_TREE_BLOCKED: "git.startup_dirty_tree_blocked",
   GIT_TARGET_BRANCH_CLEARED: "git.target_branch_cleared",
   GIT_TARGET_BRANCH_SNAPSHOTTED: "git.target_branch_snapshotted",
 
@@ -233,6 +234,7 @@ export const EVENT_TYPES = Object.freeze({
   JOB_HEADLESS_RECOVERY: "job.headless_recovery",
   JOB_HEADLESS_TIMEOUT: "job.headless_timeout",
   JOB_HOOK_VERIFY_FAILED: "job.hook_verify_failed",
+  JOB_HUMAN_ANSWER_NOT_APPLIED: "job.human_answer_not_applied",
   JOB_HUMAN_RESOLUTION_FAILED: "job.human_resolution_failed",
   JOB_HUMAN_PROMPT_REQUEUED: "job.human_prompt_requeued",
   JOB_LEASE_EXPIRED: "job.lease_expired",

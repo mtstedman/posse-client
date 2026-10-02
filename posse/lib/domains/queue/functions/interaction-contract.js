@@ -7,6 +7,8 @@ import {
 } from "../../../catalog/job.js";
 import {
   canonicalHumanGateAction,
+  HUMAN_INPUT_FREE_TEXT_CHOICE_ID,
+  HUMAN_INPUT_FREE_TEXT_MAX_CHARS,
   humanInputChoiceFromAnswer,
   humanInputChoicesForPayload,
 } from "../../../catalog/human-input.js";
@@ -1206,6 +1208,101 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
   return result;
 }
 
+function freeTextAnswer(value) {
+  return String(value ?? "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").trim();
+}
+
+/**
+ * Reserve a free-text answer to a choice-less gate (a clarification) that a
+ * live run's worker holds, for that run's prompt: the owner-delivery path a
+ * choice takes (answerWorkItemQuestionChoice), with the answer text in the
+ * descriptor. A parked gate is answered by its claimant instead
+ * (bridge/functions/human-input-answer.js), and a gate with choices must be
+ * answered with one of them.
+ */
+export function answerWorkItemQuestionText(args = {}) {
+  const actionId = String(args.action_id ?? "").trim();
+  const workItemId = positiveId(args.work_item_id);
+  const jobId = positiveId(args.job_id);
+  const questionId = String(args.question_id ?? "").trim();
+  const generation = String(args.question_generation ?? "").trim();
+  const text = freeTextAnswer(args.answer_text);
+  const target = actionTarget({
+    workItemId: workItemId || args.work_item_id,
+    jobId: jobId || args.job_id,
+    questionId,
+    choiceId: HUMAN_INPUT_FREE_TEXT_CHOICE_ID,
+  });
+  const result = (outcome, safeReasonCode, questionState) => ({
+    ...baseActionResult({ actionId, actionKind: "question.answer", target, outcome, safeReasonCode }),
+    question_state: questionState,
+    result_event_id: null,
+  });
+  if (!validActionId(actionId)) return result("rejected", "invalid_action_id", "open");
+  if (!workItemId || !jobId || !/^gate:[1-9]\d*:(0|[1-9]\d*)$/.test(questionId) || !generation) {
+    return result("target_not_found", "invalid_target", "closed");
+  }
+  if (!text) return result("rejected", "empty_answer", "open");
+  if (text.length > HUMAN_INPUT_FREE_TEXT_MAX_CHARS) return result("rejected", "answer_too_long", "open");
+
+  const db = getDb();
+  reconcileAbandonedHumanAnswerDeliveries();
+  const reserved = runImmediateTransaction(db, () => {
+    const existing = findActionById(db, actionId);
+    if (existing) return reconcileReservedQuestionAction(db, existing, target, { actionId });
+    const question = locateQuestion(db, { workItemId, jobId, questionId });
+    if (!question) return { result: result("target_not_found", "question_not_found", "closed") };
+    if (question.generation !== generation) {
+      return { result: result("stale_generation", "question_generation_changed", question.state) };
+    }
+    if (
+      question.choices.length > 0
+      || humanInputChoicesForPayload(question.payload).length > 0
+      || ["plan_approval", "push_offer"].includes(question.payload?.subtype)
+    ) {
+      return { result: result("invalid_choice", "choice_required", question.state) };
+    }
+    // A choice-less gate has no owner-delivery handler, so its observed
+    // state reads pending while the owner holds it; the gate itself is what
+    // must still be open.
+    const gateState = question.state === "expired" ? "expired" : gateQuestionState(question.job);
+    if (gateState !== "open") {
+      const pending = gateState === "pending";
+      return { result: result(pending ? "pending" : "gate_closed", pending ? "question_resolution_in_progress" : "question_closed", gateState) };
+    }
+    if (!question.live_owner) return { result: { ...result("rejected", "owner_unavailable", "open"), retryable: true } };
+    if (pendingQuestionAction(db, questionId, generation)) {
+      return { result: result("pending", "question_resolution_in_progress", "pending") };
+    }
+    const descriptor = {
+      handler: "human_input",
+      work_item_id: String(workItemId),
+      job_id: String(jobId),
+      question_id: questionId,
+      question_generation: generation,
+      choice_id: HUMAN_INPUT_FREE_TEXT_CHOICE_ID,
+      answer_text: text,
+      owner_action: "respond",
+    };
+    insertActionReservation(db, {
+      actionId,
+      actionKind: "question.answer",
+      target,
+      handler: descriptor.handler,
+      descriptor,
+      workItemId,
+      jobId,
+      source: args.source,
+      author: args.author,
+      observedAt: now(),
+    });
+    return { reservedFreeText: true };
+  });
+  if (reserved.replay) return reserved.replay;
+  if (reserved.result) return reserved.result;
+  return { ...result("pending", "owner_delivery_pending", "pending"), retryable: true };
+}
+
 function ownerDeliveryDescriptor(row) {
   const action = parseStoredAction(row);
   const descriptor = action?.descriptor;
@@ -1248,13 +1345,17 @@ function ownerDeliveryDescriptor(row) {
     question_index: Number(questionMatch[2]),
     question_generation: questionGeneration,
     choice_id: choiceId,
+    ...(choiceId === HUMAN_INPUT_FREE_TEXT_CHOICE_ID && typeof descriptor.answer_text === "string"
+      ? { answer_text: descriptor.answer_text }
+      : {}),
   };
 }
 
 /**
  * Narrow owner-side read for the attended-run relay. This intentionally omits
- * lease tokens and free-form answer text; the Display contributes its private
- * in-memory lease token only after an exact prompt match.
+ * lease tokens and any feedback text; only a free-text reservation for a
+ * choice-less gate carries its answer text. The Display contributes its
+ * private in-memory lease token only after an exact prompt match.
  */
 export function listReservedHumanAnswerDeliveries({ limit = 32 } = {}) {
   const db = getDb();

@@ -2730,6 +2730,7 @@ export class TrackedProviderClient {
     jobModelName = null,
     complexity = null,
     atlasConfig = null,
+    persistJobProvider = true,
   } = {}) {
     const {
       assertLoaderClean: assertLoaderCleanSync,
@@ -2750,6 +2751,11 @@ export class TrackedProviderClient {
       selectProviderName,
       updateJobProvider,
     } = this.deps;
+    // Only the job's own execution may move the job row to the provider/model
+    // that served it. Calls made for a job by another role (the assessor of a
+    // dev job) or by a child of the job's agent pass through its job_id for
+    // accounting but never own the job's provider pin.
+    const ownsJobProvider = persistJobProvider !== false && opts?._parentAgentCallId == null;
     const buildFallbackPrompt = typeof opts.buildFallbackPrompt === "function"
       ? opts.buildFallbackPrompt
       : null;
@@ -3070,7 +3076,7 @@ export class TrackedProviderClient {
         abortSignal: opts.abortSignal,
       });
       if (preflightFallback) {
-        if (job_id) {
+        if (job_id && ownsJobProvider) {
           updateJobProvider(job_id, preflightFallback.to, result.stats?.modelName || executionModelName || null);
         }
         this.emitStatus(job_id, `${C.green}[fallback] ${preflightFallback.to} succeeded${C.reset}`);
@@ -3149,7 +3155,7 @@ export class TrackedProviderClient {
             },
             abortSignal: opts.abortSignal,
           });
-          if (job_id) {
+          if (job_id && ownsJobProvider) {
             updateJobProvider(job_id, providerName, retry.stats?.modelName || runtimeFallbackModel || null);
           }
           this.emitStatus(job_id, `${C.green}[model-fallback] ${providerName} succeeded on ${retry.stats?.modelName || runtimeFallbackModel}${C.reset}`);
@@ -3326,7 +3332,7 @@ export class TrackedProviderClient {
             });
             const { stats: fbStats } = fallbackResult;
 
-            if (job_id) {
+            if (job_id && ownsJobProvider) {
               updateJobProvider(job_id, fallbackName, fbStats.modelName || fbModelName || null);
             }
             this.emitStatus(job_id, `${C.green}[fallback] ${fallbackName} succeeded${C.reset}`);

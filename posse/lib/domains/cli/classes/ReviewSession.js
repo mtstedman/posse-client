@@ -453,6 +453,10 @@ export class ReviewSession {
           });
           if (!cleanupOk) return { ok: false, reason: "branch_cleanup_failed" };
         }
+        this.forgetDiscardedWorkItemBranch?.(wi.id, {
+          reason: "review_delete",
+          branch: freshWi.branch_name || null,
+        });
         return { ok: updateWorkItemStatus(wi.id, "canceled") !== false };
       });
       if (!deleteOutcome.acquired || !deleteOutcome.result?.ok) {
@@ -1224,6 +1228,10 @@ export class ReviewSession {
             });
             if (!cleanupOk) return { ok: false, reason: "branch_cleanup_failed" };
           }
+          this.forgetDiscardedWorkItemBranch?.(wiId, {
+            reason: "review_delete",
+            branch: lockedWi.branch_name || null,
+          });
           return { ok: updateWorkItemStatus(wiId, "canceled") !== false };
         });
         if (!deleteOutcome.acquired) {

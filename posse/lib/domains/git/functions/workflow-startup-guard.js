@@ -30,6 +30,7 @@ import { gitTopLevelAsync } from "./worktree-path.js";
 import { reconcileSharedTrunkOperations } from "./shared-trunk.js";
 
 const LIVE_PREPARATION_JOB_STATUS_SET = new Set(["queued", ...LOCK_HOLDING_JOB_STATUSES]);
+const STARTUP_DIRTY_LINES_RECORD_LIMIT = 20;
 
 export function waitingLaneStartupInspectionAction(preparation, value, {
   pathExists = false,
@@ -481,19 +482,18 @@ export function createStartupDirtyGuardHelpers(context) {
     }
   }
 
-  // scip-typescript's `--infer-tsconfig` writes a placeholder tsconfig.json
-  // into the indexed project root to drive the index, then removes it when the
-  // run finishes. A hard interruption mid-index (SIGINT/kill/crash) skips that
-  // cleanup and orphans the placeholder — and because it isn't a `.posse/`
-  // runtime path, the next boot's dirty-tree guard trips on the untracked
-  // `{}` file. Sweep it here, but ONLY when it's both untracked AND its
-  // content matches the exact generated signature, so a real (even minimal)
-  // user tsconfig is never deleted. Mirrors isGeneratedInferTsconfig in
-  // lib/domains/atlas/functions/v2/scip/stager.js — keep the two in sync.
-  // Mirror isGeneratedInferTsconfig in atlas/v2/scip/stager.js — recognize the
-  // tsconfig the SCIP stager generates (so the dirty-guard only sweeps our own,
-  // never a real user config). Accepts {} (legacy), {compilerOptions:{allowJs:
-  // true}} (legacy), and {compilerOptions:{allowJs:true}, exclude:[...]}.
+  // Older Posse SCIP staging (and scip-typescript's own `--infer-tsconfig`)
+  // wrote a placeholder tsconfig.json into the indexed project root for the
+  // length of the index. A stage that outlived its owner (SIGINT/kill/crash, a
+  // detached indexer) orphaned it — and because it isn't a `.posse/` runtime
+  // path, the next boot's dirty-tree guard trips on the untracked file. The
+  // stager now keeps its generated project outside the tree; this sweep stays
+  // as the fallback for an orphan an older or concurrent process left. It runs
+  // ONLY when the file is both untracked AND matches the exact generated
+  // signature, so a real (even minimal) user tsconfig is never deleted.
+  // Accepts {} (legacy), {compilerOptions:{allowJs:true}} (legacy), and
+  // {compilerOptions:{allowJs:true}, exclude:[...]} (GENERATED_INFER_TSCONFIG
+  // in atlas/v2/scip/stager.js).
   function isGeneratedInferTsconfigContent(raw) {
     try {
       const parsed = JSON.parse(String(raw || ""));
@@ -620,6 +620,9 @@ export function createStartupDirtyGuardHelpers(context) {
       action: "blocked",
       blockReason: hasConflicts ? "unmerged_paths" : "uncommitted_changes",
       dirtyCount: dirtyLines.length,
+      // The porcelain lines that blocked boot, bounded, for the durable block
+      // record (recordStartupDirtyTreeBlock).
+      dirtyLines: dirtyLines.slice(0, STARTUP_DIRTY_LINES_RECORD_LIMIT),
       message: dirtyTreeGuardMessage({ reason, dirtyLines, policy }),
     };
   }
@@ -818,6 +821,30 @@ export function createStartupDirtyGuardHelpers(context) {
     };
   }
 
+  // The guard's block decision without its commit, for callers that must not
+  // change the queue for a run the guard will refuse: `posse go` plans queued
+  // work items before the run boots, and the blocked run then exited 2 with
+  // the items already moved to planning (fiscal-wizard run
+  // 2026-10-01T16-54-02, WI 2 / plan job 16). Returns the guard's blocked
+  // result, or ok when the run's guard would pass (clean, or the commit
+  // policy would commit the changes). Like the guard, it first sweeps an
+  // orphaned SCIP infer-tsconfig placeholder so that file cannot block here.
+  async function checkStartupDirtyTreeAsync({
+    reason = "startup",
+    policy = null,
+    signal = null,
+  } = {}) {
+    throwIfAborted(signal);
+    const mode = normalizeStartupDirtyTreePolicy(policy || startupDirtyTreePolicy());
+    await sweepOrphanedInferTsconfigAsync(projectDir, { signal });
+    const dirtyLines = await startupDirtyLinesAsync({ signal });
+    if (!dirtyLines.length) return { ok: true, dirty: false, policy: mode, action: "clean" };
+    if (dirtyLines.some(isUnmergedPorcelainLine) || mode !== "commit") {
+      return dirtyTreeBlockedResult({ reason, dirtyLines, policy: mode });
+    }
+    return { ok: true, dirty: true, policy: mode, action: "commit_pending", dirtyCount: dirtyLines.length };
+  }
+
   async function guardStartupDirtyTreeInWorker({
     reason = "startup",
     policy = null,
@@ -918,6 +945,7 @@ export function createStartupDirtyGuardHelpers(context) {
    */
 
   return {
+    checkStartupDirtyTreeAsync,
     ensureCleanTargetBranch,
     ensureCleanTargetBranchAsync,
     guardStartupDirtyTree,

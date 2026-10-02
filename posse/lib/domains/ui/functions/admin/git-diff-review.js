@@ -11,6 +11,7 @@ import {
   findAdminLegacyWorktree,
 } from "../../../git/functions/admin-git.js";
 import { resolveTargetBranchForAdmin } from "../../../git/functions/target-branch.js";
+import { listAttemptCommittedFilesAsync } from "../../../git/functions/attempt-committed-files.js";
 
 const GIT_TIMEOUT_MS = 10000;
 const MAX_BUFFER = 1024 * 1024 * 8;
@@ -129,10 +130,10 @@ function parseUntracked(raw = "") {
   return rows;
 }
 
-async function collectDiffRows(cwd, diffSpec) {
+async function collectDiffRows(cwd, diffSpec, { renames = "--find-renames" } = {}) {
   const [nameStatusRaw, numstatRaw] = await Promise.all([
-    safeGit(cwd, ["diff", "--relative", "--find-renames", "--name-status", ...diffSpec, "--"]),
-    safeGit(cwd, ["diff", "--relative", "--find-renames", "--numstat", ...diffSpec, "--"]),
+    safeGit(cwd, ["diff", "--relative", renames, "--name-status", ...diffSpec, "--"]),
+    safeGit(cwd, ["diff", "--relative", renames, "--numstat", ...diffSpec, "--"]),
   ]);
   const nameStatus = parseNameStatus(nameStatusRaw);
   const numstat = parseNumstat(numstatRaw);
@@ -304,6 +305,79 @@ export async function buildAdminGitDiffSnapshot({ projectDir, workItems = [], li
   };
 }
 
+function commitDiffRange(file) {
+  const head = String(file?.commitHead || "").trim();
+  const base = String(file?.commitBase || "").trim();
+  return base ? [base, head] : [`${head}^!`];
+}
+
+function shortHash(hash) {
+  return String(hash || "").trim().slice(0, 12);
+}
+
+function firstErrorLine(err) {
+  return err?.message?.split(/\r?\n/)[0] || String(err);
+}
+
+/**
+ * Snapshot of one job attempt's committed change (commit_base_hash..
+ * commit_hash, or the head commit alone without a base) in the file-row shape
+ * buildAdminGitDiffFileDetail reads. When the range completes the harness's
+ * merge of the target branch, only the job's own files are listed
+ * (listAttemptCommittedFilesAsync): the target's content is not the job's.
+ */
+export async function buildAttemptGitDiffSnapshot({
+  projectDir,
+  workItemId = null,
+  jobId = null,
+  commitHash,
+  baseHash = null,
+} = {}) {
+  const root = path.resolve(projectDir || process.cwd());
+  const head = String(commitHash || "").trim();
+  const base = String(baseHash || "").trim() || null;
+  const errors = [];
+  let own = { files: [], targetMergeFiles: [] };
+  let rows = [];
+  try {
+    own = await listAttemptCommittedFilesAsync({ cwd: root, commitHash: head, baseHash: base, projectDir: root });
+    // Without rename pairing, like the committed-file list: a rename is its
+    // deleted and its added path.
+    rows = await collectDiffRows(root, commitDiffRange({ commitHead: head, commitBase: base }), { renames: "--no-renames" });
+  } catch (err) {
+    errors.push(`commit diff failed: ${firstErrorLine(err)}`);
+  }
+  const ownFiles = new Set(own.files);
+  const byPath = new Map(rows.filter((row) => ownFiles.has(row.path)).map((row) => [row.path, row]));
+  const files = [...ownFiles]
+    .filter((filePath) => !isRuntimePath(filePath))
+    .sort((a, b) => a.localeCompare(b))
+    .map((filePath) => ({
+      // A path the job changed against the target's side of a merge but not
+      // against its own base has no first-parent row; it is still the job's.
+      ...(byPath.get(filePath) || { statusCode: "M", status: "M", additions: null, deletions: null, binary: false }),
+      key: `job:${jobId ?? "?"}:${filePath}`,
+      wiId: workItemId,
+      jobId,
+      path: filePath,
+      commitBase: base,
+      commitHead: head,
+      hasCommitDiff: true,
+      hasBranchDiff: false,
+      hasWorktreeDiff: false,
+      untracked: false,
+    }));
+  return {
+    generatedAt: Date.now(),
+    files,
+    errors,
+    targetMergeFiles: own.targetMergeFiles || [],
+    fileCount: files.length,
+    additions: sumFinite(files, "additions"),
+    deletions: sumFinite(files, "deletions"),
+  };
+}
+
 function resolvePathUnder(root, filePath) {
   const base = path.resolve(root);
   const resolved = path.resolve(base, normalizePath(filePath));
@@ -375,6 +449,25 @@ export async function buildAdminGitDiffFileDetail({ projectDir, file } = {}) {
   const root = path.resolve(projectDir || process.cwd());
   const lines = [];
   const errors = [];
+
+  if (file.hasCommitDiff) {
+    try {
+      const raw = await safeGit(root, [
+        "diff",
+        "--relative",
+        "--no-renames",
+        "--no-ext-diff",
+        "--color=never",
+        `--unified=${DIFF_CONTEXT_LINES}`,
+        ...commitDiffRange(file),
+        "--",
+        file.path,
+      ]);
+      lines.push(...section(`COMMIT ${shortHash(file.commitBase) || "parent"}..${shortHash(file.commitHead)}`, raw));
+    } catch (err) {
+      errors.push(`commit diff failed: ${firstErrorLine(err)}`);
+    }
+  }
 
   if (file.hasBranchDiff) {
     try {

@@ -30,6 +30,7 @@ import {
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
   WORK_ITEM_DISPOSITION_REVIEW_TYPES,
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
+  humanInputChoicesForPayload,
   humanInputChoicesForReviewType,
 } from "../../../catalog/human-input.js";
 import {
@@ -601,7 +602,10 @@ export function workItemFailureDispositionGateSpec(workItem, {
     priority: "high",
     payload_json: JSON.stringify({
       review_type: WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
-      choices: humanInputChoicesForReviewType(WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE),
+      // An unavailable accept is not offered: answering it could only be
+      // refused (wowiekowie 2026-10-01 22:32, gate #2252).
+      choices: humanInputChoicesForReviewType(WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE)
+        .filter((choice) => acceptance.ok || choice !== "accept"),
       questions: [question],
       prompt: question,
       context: [failedLine, acceptLine, gatesLine, ...restoredLines, heldLine, operatorCanceledLine].filter(Boolean),
@@ -675,6 +679,14 @@ export function crossWiUpstreamDispositionGateSpec(workItem, upstreams = []) {
   };
 }
 
+/** "retry or abandon": the answers a disposition gate actually offers. */
+export function dispositionGateChoicesText(gate) {
+  const choices = humanInputChoicesForPayload(parseJobPayload(gate));
+  return choices.length > 1
+    ? `${choices.slice(0, -1).join(", ")} or ${choices.at(-1)}`
+    : choices.join("");
+}
+
 /**
  * Operator-facing pointer for surfaces that refuse to merge a failed work
  * item: name its recovery gate when one is open.
@@ -687,6 +699,6 @@ export function workItemFailureRecoveryHint(workItemId) {
     gate = null;
   }
   return gate
-    ? `answer its recovery gate #${gate.id} (retry, accept or abandon): posse gate answer ${gate.id} <choice>`
+    ? `answer its recovery gate #${gate.id} (${dispositionGateChoicesText(gate)}): posse gate answer ${gate.id} <choice>`
     : `no recovery gate is open for it (the next run's gate maintenance opens one for failures from the last ${Math.round(WORK_ITEM_DISPOSITION_BACKFILL_WINDOW_MS / 86_400_000)} days)`;
 }

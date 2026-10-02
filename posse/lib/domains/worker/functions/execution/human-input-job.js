@@ -22,11 +22,13 @@ import {
   extendJobMaxAttempts,
   incrementAndCreateAttempt,
   logEvent,
+  noteHumanGateAnswerNotApplied,
   releasedPostMergeDbPayload,
   resolveJobScopeExpansion,
   rewireDependency,
   reopenHumanGateResolution,
   requestParkedJobResumeAfterGate,
+  runInTransaction,
   supersedeHumanGate,
   setJobResult,
   setAssessmentLifecycle,
@@ -172,35 +174,47 @@ function createHumanGateEffectJob({
   resolutionClaim,
   operationType,
   job,
+  configure = null,
 }) {
-  const operationKey = `${resolutionClaim.idempotency_key}:${operationType}`;
-  enqueueHumanGateEffect({
-    gateJobId,
-    operationKey,
-    operationType,
-    payload: { gate_job_id: gateJobId },
+  return runInTransaction(() => {
+    const operationKey = `${resolutionClaim.idempotency_key}:${operationType}`;
+    enqueueHumanGateEffect({
+      gateJobId,
+      operationKey,
+      operationType,
+      payload: { gate_job_id: gateJobId },
+    });
+    let effectJob = existingHumanGateEffectJob(operationKey);
+    let reused = true;
+    if (!effectJob) {
+      reused = false;
+      const effectPayload = payloadObject(job.payload_json);
+      effectPayload._human_gate_effect = {
+        operation_key: operationKey,
+        operation_type: operationType,
+        gate_job_id: gateJobId,
+        gate_generation: resolutionClaim.gate?.generation || 1,
+      };
+      effectJob = createJob({ ...job, payload_json: effectPayload });
+    }
+    if (typeof configure === "function") configure(effectJob, { reused, operationKey });
+    completeHumanGateEffect({
+      operationKey,
+      payload: { gate_job_id: gateJobId, effect_job_id: effectJob.id, reused },
+    });
+    return { job: effectJob, reused };
   });
-  let effectJob = existingHumanGateEffectJob(operationKey);
-  let reused = true;
-  if (!effectJob) {
-    reused = false;
-    const effectPayload = payloadObject(job.payload_json);
-    effectPayload._human_gate_effect = {
-      operation_key: operationKey,
-      operation_type: operationType,
-      gate_job_id: gateJobId,
-      gate_generation: resolutionClaim.gate?.generation || 1,
-    };
-    effectJob = createJob({ ...job, payload_json: effectPayload });
-  }
-  completeHumanGateEffect({
-    operationKey,
-    payload: { gate_job_id: gateJobId, effect_job_id: effectJob.id, reused },
-  });
-  return { job: effectJob, reused };
 }
 
 export const __testCreateHumanGateEffectJob = createHumanGateEffectJob;
+
+function reopenUnappliedHumanGate({ gateJobId, leaseToken, error }) {
+  const gate = getHumanGate(gateJobId);
+  if (gate?.gate_state !== "resolving" || !gate.original_job_id) return false;
+  const original = getJob(gate.original_job_id);
+  if (!original || !gate.allowed_source_states.includes(original.status)) return false;
+  return reopenHumanGateResolution({ gateJobId, leaseToken, error });
+}
 
 async function dropPartialWorkStashAsync(worker, origJob, wtPath) {
   return await withWorktreeLockAsync(wtPath, worker.projectDir, async () => {
@@ -421,6 +435,45 @@ export async function runHumanInputJob(worker, job, {
       worker._cleanupWorktreeIfDone(job.work_item_id);
       return;
     }
+    // An answer that cannot apply (a refused choice, or one that cannot apply
+    // yet) keeps the gate open. It used to park the gate silently behind the
+    // snooze after the TUI had already said "Answered" (wowiekowie
+    // 2026-10-01 22:32, gate #2252): record why on the gate and in an event,
+    // and requeue the gate so a live operator is asked again at once, with
+    // the reason (human-input.js). Fixed-answer surfaces (bridge, headless,
+    // unattended policy) keep it parked and report the reason themselves, and
+    // a prompt the operator skipped parks as before.
+    const liveOperator = !unattendedResolution
+      && worker.display?.asksLiveOperator === true
+      && !!extractLatestActionableHumanAnswerText(extractHumanAnswers(output));
+    const keepGateOpenForUnappliedAnswer = (message, emitted = message) => {
+      completeAttempt(attempt.attempt.id, {
+        status: "interrupted",
+        duration_ms: Date.now() - startTime,
+        error_text: message,
+      });
+      // Only a gate that is still open is asked again; one another resolver
+      // holds (resolving) parks as before.
+      const reaskLiveOperator = noteHumanGateAnswerNotApplied(job.id, message) && liveOperator;
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        attempt_id: attempt.attempt.id,
+        event_type: EVENT_TYPES.JOB_HUMAN_ANSWER_NOT_APPLIED,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `Answer to gate #${job.id} was not applied: ${message}`,
+        event_json: JSON.stringify({ asked_again: reaskLiveOperator }),
+      });
+      worker.emit(job.id, `${C.yellow}[human] ${emitted}${reaskLiveOperator ? " Asking again." : ""}${C.reset}`);
+      worker._releaseWithoutAttemptPenalty(
+        job,
+        leaseToken,
+        reaskLiveOperator ? "queued" : "waiting_on_human",
+        { attemptId: attempt.attempt.id },
+      );
+      refreshAndExtractInsights(job.work_item_id);
+      worker._cleanupWorktreeIfDone(job.work_item_id);
+    };
     const actionChoices = humanInputChoicesForPayload(payload);
     const uncataloguedReview = isHumanInputReviewPayload(payload) && actionChoices.length === 0;
     if (actionChoices.length > 0 || uncataloguedReview) {
@@ -441,15 +494,7 @@ export async function runHumanInputJob(worker, job, {
         const choiceMessage = actionChoices.length > 0
           ? `Human input did not select one of: ${actionChoices.join(", ")}`
           : `Human input did not provide a recognized action for review type ${payload.review_type}`;
-        completeAttempt(attempt.attempt.id, {
-          status: "interrupted",
-          duration_ms: Date.now() - startTime,
-          error_text: choiceMessage,
-        });
-        worker.emit(job.id, `${C.yellow}[human] ${choiceMessage}; keeping the gate open${C.reset}`);
-        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
-        refreshAndExtractInsights(job.work_item_id);
-        worker._cleanupWorktreeIfDone(job.work_item_id);
+        keepGateOpenForUnappliedAnswer(choiceMessage, `${choiceMessage}; keeping the gate open.`);
         return;
       }
     }
@@ -481,15 +526,7 @@ export async function runHumanInputJob(worker, job, {
           assessmentSource.reason,
           "Restore the matching response/source before retrying assessment; this gate remains open.",
         ].join(" ");
-        completeAttempt(attempt.attempt.id, {
-          status: "interrupted",
-          duration_ms: Date.now() - startTime,
-          error_text: message,
-        });
-        worker.emit(job.id, `${C.yellow}[human] ${message}${C.reset}`);
-        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
-        refreshAndExtractInsights(job.work_item_id);
-        worker._cleanupWorktreeIfDone(job.work_item_id);
+        keepGateOpenForUnappliedAnswer(message);
         return;
       }
     }
@@ -498,16 +535,7 @@ export async function runHumanInputJob(worker, job, {
       // cannot apply yet leaves the gate open with the reason.
       const prepared = await prepareWorkItemDispositionAnswer(worker, activeJob, payload, selectedAction);
       if (!prepared.ok) {
-        const message = `${String(prepared.message).replace(/[.\s]+$/, "")}; this gate remains open.`;
-        completeAttempt(attempt.attempt.id, {
-          status: "interrupted",
-          duration_ms: Date.now() - startTime,
-          error_text: message,
-        });
-        worker.emit(job.id, `${C.yellow}[human] ${message}${C.reset}`);
-        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
-        refreshAndExtractInsights(job.work_item_id);
-        worker._cleanupWorktreeIfDone(job.work_item_id);
+        keepGateOpenForUnappliedAnswer(`${String(prepared.message).replace(/[.\s]+$/, "")}; this gate remains open.`);
         return;
       }
     }
@@ -516,16 +544,7 @@ export async function runHumanInputJob(worker, job, {
       // work, a merge in progress) leaves the gate open with the reason.
       const prepared = prepareMergeVerificationReviewAnswer(activeJob, payload, selectedAction);
       if (!prepared.ok) {
-        const message = `${String(prepared.message).replace(/[.\s]+$/, "")}; this gate remains open.`;
-        completeAttempt(attempt.attempt.id, {
-          status: "interrupted",
-          duration_ms: Date.now() - startTime,
-          error_text: message,
-        });
-        worker.emit(job.id, `${C.yellow}[human] ${message}${C.reset}`);
-        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
-        refreshAndExtractInsights(job.work_item_id);
-        worker._cleanupWorktreeIfDone(job.work_item_id);
+        keepGateOpenForUnappliedAnswer(`${String(prepared.message).replace(/[.\s]+$/, "")}; this gate remains open.`);
         return;
       }
     }
@@ -536,21 +555,23 @@ export async function runHumanInputJob(worker, job, {
       idempotencyKey: resolutionMetadata?.idempotency_key || null,
     });
     if (!resolutionClaim.ok) {
-      completeAttempt(attempt.attempt.id, {
-        status: "interrupted",
-        duration_ms: Date.now() - startTime,
-        error_text: `Human gate resolution rejected: ${resolutionClaim.reason}`,
-      });
       if (TERMINAL_HUMAN_GATE_CLAIM_FAILURES.has(resolutionClaim.reason)) {
+        completeAttempt(attempt.attempt.id, {
+          status: "interrupted",
+          duration_ms: Date.now() - startTime,
+          error_text: `Human gate resolution rejected: ${resolutionClaim.reason}`,
+        });
         const reason = `Human gate is no longer applicable: ${resolutionClaim.reason}`;
         supersedeHumanGate(job.id, reason);
         worker.emit(job.id, `${C.yellow}[human] Answer was not applied (${resolutionClaim.reason}); retired the stale gate${C.reset}`);
         worker._releaseLease(job, leaseToken, "canceled");
-      } else {
-        worker.emit(job.id, `${C.yellow}[human] Answer was not applied (${resolutionClaim.reason}); keeping the gate open${C.reset}`);
-        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
+        refreshAndExtractInsights(job.work_item_id);
+        return;
       }
-      refreshAndExtractInsights(job.work_item_id);
+      keepGateOpenForUnappliedAnswer(
+        `Human gate resolution rejected: ${resolutionClaim.reason}`,
+        `Answer was not applied (${resolutionClaim.reason}); keeping the gate open.`,
+      );
       return;
     }
 
@@ -738,16 +759,18 @@ export async function runHumanInputJob(worker, job, {
               skills: proposed.skills || null,
               payload_json: proposed.payload_json || {},
             },
+            configure(createdFixJob) {
+              for (const dependency of Array.isArray(proposed.dependencies) ? proposed.dependencies : []) {
+                const dependencyId = Number(dependency?.job_id);
+                if (Number.isInteger(dependencyId) && dependencyId > 0) {
+                  addDependency(createdFixJob.id, dependencyId, dependency?.dependency_kind || "hard");
+                }
+              }
+              for (const dependent of dependents) {
+                rewireDependency(dependent.job_id, job.id, createdFixJob.id, dependent.dependency_kind);
+              }
+            },
           });
-          for (const dependency of Array.isArray(proposed.dependencies) ? proposed.dependencies : []) {
-            const dependencyId = Number(dependency?.job_id);
-            if (Number.isInteger(dependencyId) && dependencyId > 0) {
-              addDependency(fixJob.id, dependencyId, dependency?.dependency_kind || "hard");
-            }
-          }
-          for (const dependent of dependents) {
-            rewireDependency(dependent.job_id, job.id, fixJob.id, dependent.dependency_kind);
-          }
           worker.emit(job.id, `${C.cyan}[human] Approved scope expansion and ${reusedFixJob ? "reused" : "created"} fix job #${fixJob.id}${C.reset}`);
         }
         worker.emit(job.id, `${C.green}[human] Scope request approved - ${dependents.length} gated dependent(s) can proceed${C.reset}`);
@@ -1185,14 +1208,16 @@ export async function runHumanInputJob(worker, job, {
             planner_context_score: origJob.planner_context_score ?? null,
             planner_failure_cost_score: origJob.planner_failure_cost_score ?? null,
           },
+          configure(createdRetryJob) {
+            for (const dep of incomingDependenciesForRecoveryRetry(origJob, origPayload)) {
+              addDependency(createdRetryJob.id, dep.depends_on_job_id, dep.dependency_kind || "hard");
+            }
+            for (const dep of getDependents(job.id)) {
+              rewireDependency(dep.job_id, job.id, createdRetryJob.id, dep.dependency_kind);
+            }
+          },
         });
-        for (const dep of incomingDependenciesForRecoveryRetry(origJob, origPayload)) {
-          addDependency(retryJob.id, dep.depends_on_job_id, dep.dependency_kind || "hard");
-        }
-        const dependents = getDependents(job.id);
-        for (const dep of dependents) {
-          rewireDependency(dep.job_id, job.id, retryJob.id, dep.dependency_kind);
-        }
+        const dependents = getDependents(retryJob.id);
         worker.emit(job.id, `${C.cyan}[human] Dead-letter recovery ${reusedRetryJob ? "reused" : "spawned"} retry job #${retryJob.id}${decision.provider ? ` on ${decision.provider}` : ""}; rewired ${dependents.length} dependent(s)${C.reset}`);
         logEvent({
           work_item_id: job.work_item_id,
@@ -1479,23 +1504,40 @@ export async function runHumanInputJob(worker, job, {
       cancelPendingReviewGatesForOriginal(payload.original_job_id, { exceptJobId: job.id });
     }
     if (finalHumanStatus === "failed") {
-      const failureMessage = "The selected action could not be applied; the human gate was retired.";
-      supersedeHumanGate(job.id, failureMessage);
+      const failureMessage = "The selected action could not be applied.";
       completeAttempt(attempt.attempt.id, {
         status: "failed",
         duration_ms: Date.now() - startTime,
         output_chars: (output || "").length,
-        error_text: "Human action could not be applied; gate retired",
+        error_text: failureMessage,
       });
+      const reopened = handledReviewDecision && reopenUnappliedHumanGate({
+        gateJobId: job.id,
+        leaseToken,
+        error: failureMessage,
+      });
+      // A reopened gate is asked again at once when a live operator answered
+      // it, its reason leading the prompt, like any answer that could not
+      // apply (keepGateOpenForUnappliedAnswer); otherwise it parks.
+      const askedAgain = Boolean(reopened && liveOperator);
+      if (reopened) {
+        worker.emit(job.id, `${C.yellow}[human] ${failureMessage} The original work is still parked, so the gate remains open.${askedAgain ? " Asking again." : ""}${C.reset}`);
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, askedAgain ? "queued" : "waiting_on_human", { attemptId: attempt.attempt.id });
+        leaseReleased = true;
+      } else {
+        supersedeHumanGate(job.id, `${failureMessage} The gate no longer applies safely.`);
+        worker._releaseLease(job, leaseToken, "failed");
+        leaseReleased = true;
+      }
       logEvent({
         work_item_id: job.work_item_id,
         job_id: job.id,
         attempt_id: attempt.attempt.id,
         event_type: EVENT_TYPES.JOB_HUMAN_RESOLUTION_FAILED,
         actor_type: EVENT_ACTORS.WORKER,
-        message: failureMessage,
+        message: `${failureMessage} ${reopened ? "Gate reopened for retry." : "Gate retired because replay was not safe."}`,
+        event_json: JSON.stringify({ gate_reopened: Boolean(reopened), asked_again: askedAgain }),
       });
-      worker._releaseLease(job, leaseToken, "failed");
       refreshAndExtractInsights(job.work_item_id);
       return;
     }
@@ -1552,14 +1594,24 @@ export async function runHumanInputJob(worker, job, {
     } catch (postErr) {
       const message = postErr instanceof Error ? postErr.message : String(postErr);
       deliveredAnswerFailure = message;
-      worker.emit(job.id, `${C.yellow}[human] Post-answer resolution failed after human input was recorded; retired the gate instead of asking again: ${message}${C.reset}`);
       completeAttempt(attempt.attempt.id, {
         status: "failed",
         duration_ms: Date.now() - startTime,
         output_chars: (output || "").length,
         error_text: `Post-answer resolution failed: ${message}`,
       });
-      supersedeHumanGate(job.id, `Post-answer resolution failed: ${message}`);
+      const reopened = reopenUnappliedHumanGate({
+        gateJobId: job.id,
+        leaseToken,
+        error: `Post-answer resolution failed: ${message}`,
+      });
+      const askedAgain = Boolean(reopened && liveOperator);
+      if (reopened) {
+        worker.emit(job.id, `${C.yellow}[human] Post-answer resolution failed before the original work changed; the gate remains open for retry: ${message}${askedAgain ? " Asking again." : ""}${C.reset}`);
+      } else {
+        worker.emit(job.id, `${C.yellow}[human] Post-answer resolution failed after the original work changed; retired the gate to avoid replaying a possibly applied action: ${message}${C.reset}`);
+        supersedeHumanGate(job.id, `Post-answer resolution failed after state change: ${message}`);
+      }
       try {
         logEvent({
           work_item_id: job.work_item_id,
@@ -1567,14 +1619,19 @@ export async function runHumanInputJob(worker, job, {
           attempt_id: attempt.attempt.id,
           event_type: EVENT_TYPES.JOB_HUMAN_RESOLUTION_FAILED,
           actor_type: EVENT_ACTORS.WORKER,
-          message: `Post-answer human-input resolution failed after attempt success: ${message}`,
+          message: `Post-answer human-input resolution failed after attempt success; ${reopened ? "gate reopened" : "gate retired after original state changed"}: ${message}`,
+          event_json: JSON.stringify({ gate_reopened: Boolean(reopened), asked_again: askedAgain }),
         });
       } catch {
         // The original answer is already recorded; audit logging is best-effort.
       }
       if (!leaseReleased) {
         try {
-          worker._releaseLease(job, leaseToken, "failed");
+          if (reopened) {
+            worker._releaseWithoutAttemptPenalty(job, leaseToken, askedAgain ? "queued" : "waiting_on_human", { attemptId: attempt.attempt.id });
+          } else {
+            worker._releaseLease(job, leaseToken, "failed");
+          }
         } catch { /* best-effort terminal settlement */ }
       }
       try { refreshAndExtractInsights(job.work_item_id); } catch { /* best effort */ }

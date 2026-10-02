@@ -17,7 +17,7 @@ import {
   parseMissingContext,
   renderAtlasHandoffSections,
 } from "../../../handoff/functions/index.js";
-import { BaseRole } from "../BaseRole.js";
+import { BaseRole, projectPromptPacketForProvider } from "../BaseRole.js";
 import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import {
   extractCheckpointFromOutput as defaultExtractCheckpointFromOutput,
@@ -361,11 +361,20 @@ export class DeveloperRole extends BaseRole {
     const {
       checkpointTokenThreshold,
       extractCheckpointFromOutput,
-      currentExecutionProvider,
       parseAgentCompletionLog,
       shortJobTitle,
     } = this.roleDeps();
     let remainingExpandFileBudget = ctx.remainingExpandFileBudget;
+    const providerKey = (providerName) => String(providerName || "").trim().toLowerCase();
+    // The provider that produced the output being expanded is the one
+    // TrackedProviderClient stamped on that call's stats (the agent_calls
+    // provider). It differs from ctx.providerName after a fallback, and the
+    // in-memory job row is not updated by one.
+    let expansionProvider = devStats?.provider || ctx.providerName;
+    // ctx.packet and promptState.initialPrompt are composed for
+    // ctx.providerName only when the main call ran there; after a main-call
+    // fallback the retry composes for the provider that ran instead.
+    const ctxComposedForProvider = providerKey(expansionProvider) === providerKey(ctx.providerName);
 
     if (devStats?.outputTokens >= checkpointTokenThreshold) {
       const checkpoint = extractCheckpointFromOutput(output);
@@ -416,18 +425,55 @@ export class DeveloperRole extends BaseRole {
       ctx.packet.related_files = [...new Set([...(ctx.packet.related_files || []), ...filesForStep])];
       const delta = attachRequestedContext(ctx.packet, filesForStep);
       ctx.promptState.requestedContext = `${ctx.promptState.requestedContext || ""}\n${delta}`;
-      const expandedPrompt = ctx.promptState.initialPrompt
-        + `\n\nADDITIONAL CONTEXT (requested by previous attempt):\n${ctx.promptState.requestedContext}\n\nYou now have additional context. Continue implementation.`;
+      const expansionSuffix = `\n\nADDITIONAL CONTEXT (requested by previous attempt):\n${ctx.promptState.requestedContext}\n\nYou now have additional context. Continue implementation.`;
+      const retryActivity = `executing job #${job.id} (expanded ${expandStep + 1}): ${shortJobTitle(job).slice(0, 28)}`;
+      // Composing for another provider recomposes the same task instructions
+      // on a copy of the packet and re-applies this step's requested-context
+      // append, so the requested files are attached once and the Job issuance
+      // matches that provider's Agent. ctx.packet stays bound to
+      // ctx.providerName for later expansion steps.
+      const composedContexts = new Map();
+      const composeExpansionForProvider = async (providerName) => {
+        const providerCtx = {
+          ...ctx,
+          providerName,
+          packet: { ...projectPromptPacketForProvider(ctx.packet, providerName, ctx.providerName) },
+        };
+        const prompt = await buildPromptAsync(providerCtx.packet, ctx.promptState.taskInstructions, {
+          providerName,
+          projectDir: worker?.projectDir || null,
+        });
+        composedContexts.set(providerKey(providerName), providerCtx);
+        return prompt + expansionSuffix;
+      };
+      const reuseCtxComposition = ctxComposedForProvider
+        && providerKey(expansionProvider) === providerKey(ctx.providerName);
+      const expandedPrompt = reuseCtxComposition
+        ? ctx.promptState.initialPrompt + expansionSuffix
+        : await composeExpansionForProvider(expansionProvider);
+      const retryCtx = reuseCtxComposition ? ctx : composedContexts.get(providerKey(expansionProvider));
+      const jobMeta = this.buildMeta(job, ctx);
 
       const retry = await this.providerClient.call(expandedPrompt, {
-        ...this.buildOpts(job, ctx),
-        activity: `executing job #${job.id} (expanded ${expandStep + 1}): ${shortJobTitle(job).slice(0, 28)}`,
+        ...this.buildOpts(job, retryCtx),
+        activity: retryActivity,
+        buildFallbackPrompt: ({ providerName }) => composeExpansionForProvider(providerName),
+        buildFallbackOptions: ({ providerName }) => {
+          const providerCtx = composedContexts.get(providerKey(providerName));
+          if (!providerCtx) {
+            throw new Error(`Context-expansion fallback options requested before composing the ${providerName || "unknown"} provider prompt`);
+          }
+          return { ...this.buildOpts(job, providerCtx), activity: retryActivity };
+        },
       }, {
-        ...this.buildMeta(job, ctx),
-        jobProvider: currentExecutionProvider(job),
+        ...jobMeta,
+        jobProvider: expansionProvider || jobMeta.jobProvider,
+        // The job's model pin belongs to ctx.providerName.
+        jobModelName: providerKey(expansionProvider) === providerKey(ctx.providerName) ? jobMeta.jobModelName : null,
       });
 
       output = retry.output;
+      expansionProvider = retry.stats?.provider || expansionProvider;
       if (remainingExpandFileBudget <= 0) {
         const stillMissing = parseMissingContext(output, { maxFiles: 1 });
         if (stillMissing && stillMissing.length > 0) {

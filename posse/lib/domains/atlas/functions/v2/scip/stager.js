@@ -5,6 +5,7 @@
 // the staging directory is empty.
 
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { spawn, spawnSync } from "child_process";
 import { VALID_ATLAS_SCIP_RESTAGE_POLICIES, ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT } from "../../../../../catalog/atlas.js";
@@ -1952,27 +1953,22 @@ async function runScipIndexerAtomic(plan, {
   allowedPaths = null,
   onProgress = null,
 }) {
-  const tempPath = tempOutputPath(plan.outputPath);
-  const rewritten = planWithOutputPath(plan, tempPath);
-  const inferredTsconfig = inferredTsconfigCleanupTarget(plan, cwd);
-  const hadTsconfig = inferredTsconfig ? await fileExists(inferredTsconfig) : true;
-  // When the typescript indexer would infer a tsconfig (none exists), write our
-  // own minimal one with allowJs so scip-typescript actually indexes .js/.jsx —
-  // bare `--infer-tsconfig` generates a tsconfig WITHOUT allowJs, so .js files
-  // are silently skipped and the js SCIP layer is never produced. Only written
-  // when the repo has no tsconfig of its own (never clobber a user config).
-  // cleanupGeneratedTsconfig removes it after the run (it recognizes this exact
-  // {compilerOptions:{allowJs:true}} signature) and the startup dirty-tree guard
-  // sweeps it if an interrupted run orphans it.
-  if (inferredTsconfig && !hadTsconfig) {
-    try {
-      await fs.promises.writeFile(
-        inferredTsconfig,
-        JSON.stringify(GENERATED_INFER_TSCONFIG),
-        "utf8",
-      );
-    } catch { /* best effort — fall back to scip-typescript's own --infer-tsconfig */ }
+  // The TypeScript indexer's project never lives in the indexed tree. Its
+  // `--infer-tsconfig` writes tsconfig.json into cwd and never removes it, and
+  // cwd is the primary checkout for main/merge/restage stages, so a stage that
+  // outlives its owner (a detached indexer after Ctrl-C at wrap-up, a killed
+  // closeout job, a terminated conductor thread) left the project dirty. A
+  // generated project outside the tree is removed with this stage.
+  /** @type {{ plan: ScipStagePlan, dir: string | null }} */
+  let generated;
+  try {
+    generated = await planWithGeneratedTsconfigProject(plan, cwd);
+  } catch (err) {
+    return { ok: false, error: `could not write a generated TypeScript project for ${plan.indexerId || plan.label}: ${formatAtlasError(err)}` };
   }
+  const spawnPlan = generated.plan;
+  const tempPath = tempOutputPath(plan.outputPath);
+  const rewritten = planWithOutputPath(spawnPlan, tempPath);
   if (!rewritten.replaced) {
     emit(onProgress, `SCIP indexer args do not reference ${plan.outputPath}; running without temp-path swap`, {
       kind: "atlas.scip.restage_warning",
@@ -1982,7 +1978,7 @@ async function runScipIndexerAtomic(plan, {
       source_languages: sourceLanguagesForPlan(plan),
     });
     try {
-      const run = await runScipIndexer(plan, { cwd, onProgress });
+      const run = await runScipIndexer(spawnPlan, { cwd, onProgress });
       if (!run.ok) return run;
       if (!(await fileExists(plan.outputPath))) {
         return { ok: false, error: `indexer completed but did not produce ${path.basename(plan.outputPath)}` };
@@ -2005,7 +2001,7 @@ async function runScipIndexerAtomic(plan, {
         try { await fs.promises.rm(sanitizedPath, { force: true }); } catch { /* best effort */ }
       }
     } finally {
-      await cleanupGeneratedTsconfig(inferredTsconfig, hadTsconfig);
+      await removeGeneratedProjectDir(generated.dir);
     }
   }
   try {
@@ -2034,7 +2030,7 @@ async function runScipIndexerAtomic(plan, {
     }
   } finally {
     try { await fs.promises.rm(tempPath, { force: true }); } catch { /* best effort */ }
-    await cleanupGeneratedTsconfig(inferredTsconfig, hadTsconfig);
+    await removeGeneratedProjectDir(generated.dir);
   }
 }
 
@@ -2332,56 +2328,79 @@ function tempOutputPath(outputPath) {
   return path.join(dir, `.${base}.${suffix}.staging`);
 }
 
-function inferredTsconfigCleanupTarget(plan, cwd) {
-  if ((plan.indexerId || "") !== "typescript") return null;
-  const args = Array.isArray(plan.args) ? plan.args.map((arg) => String(arg)) : [];
-  if (!args.includes("--infer-tsconfig")) return null;
-  return path.join(cwd, "tsconfig.json");
-}
-
-// The tsconfig we generate for scip-typescript when the repo has none of its
-// own. allowJs makes it index .js/.jsx (bare --infer-tsconfig skips them), but
-// WITHOUT excludes TypeScript pulls in all of node_modules + build output —
+// The project scip-typescript indexes when the root has no tsconfig.json of
+// its own. allowJs makes it index .js/.jsx (bare --infer-tsconfig skips them),
+// but WITHOUT excludes TypeScript pulls in all of node_modules + build output —
 // producing a 20MB+ .scip that jams ingest. exclude keeps it to repo source.
-// Keep isGeneratedInferTsconfig (here) and isGeneratedInferTsconfigContent (in
-// git/functions/workflows.js) in lockstep with this shape so cleanup still removes it.
+// Older Posse wrote this shape into the indexed root itself; the startup
+// dirty-tree guard (isGeneratedInferTsconfigContent in
+// git/functions/workflow-startup-guard.js) still sweeps such an orphan, so keep
+// that recognizer accepting this shape.
 const GENERATED_INFER_TSCONFIG = {
   compilerOptions: { allowJs: true },
   exclude: ["node_modules", "dist", "build", "out", "vendor", ".posse", "**/*.min.js"],
 };
 
-async function cleanupGeneratedTsconfig(filePath, existedBefore) {
-  if (!filePath || existedBefore) return;
-  let raw = "";
-  try {
-    raw = await fs.promises.readFile(filePath, "utf8");
-  } catch {
-    return;
+const SCIP_TYPESCRIPT_VALUE_FLAGS = new Set(["--output", "--max-file-byte-size"]);
+
+// True when `--infer-tsconfig` would infer the project of the indexer's cwd:
+// no positional project, workspace discovery or --cwd redirects it elsewhere.
+function infersCwdProject(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (index === 0 && arg === "index") continue;
+    if (SCIP_TYPESCRIPT_VALUE_FLAGS.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (/^--(?:cwd|pnpm-workspaces|yarn-workspaces|yarn-berry-workspaces)(?:=|$)/u.test(arg)) return false;
+    if (!arg.startsWith("--")) return false;
   }
-  if (!isGeneratedInferTsconfig(raw)) return;
-  try { await fs.promises.rm(filePath, { force: true }); } catch { /* best effort */ }
+  return true;
 }
 
-// Recognize a tsconfig WE generated (so cleanup only ever deletes our own, not
-// a real user config). Accepts: {} (legacy bare infer), {compilerOptions:
-// {allowJs:true}} (legacy), and our current shape {compilerOptions:{allowJs:
-// true}, exclude:[...]}. The only keys allowed are compilerOptions (just
-// allowJs:true) and an optional exclude array.
-function isGeneratedInferTsconfig(raw) {
+/**
+ * When the TypeScript indexer would infer a project for a root without a
+ * tsconfig.json, write that project to a private temporary directory and name
+ * it in place of `--infer-tsconfig`. Its include/exclude address the root
+ * absolutely and the indexer still runs in `cwd`, so document paths stay
+ * root-relative. A root with its own tsconfig.json and the portable adapter
+ * (which builds its own isolated project) keep their arguments.
+ *
+ * @param {ScipStagePlan} plan
+ * @param {string} cwd
+ * @returns {Promise<{ plan: ScipStagePlan, dir: string | null }>}
+ */
+async function planWithGeneratedTsconfigProject(plan, cwd) {
+  if ((plan.indexerId || "") !== "typescript") return { plan, dir: null };
+  const args = Array.isArray(plan.args) ? plan.args.map((arg) => String(arg)) : [];
+  if (!args.includes("--infer-tsconfig") || !infersCwdProject(args)) return { plan, dir: null };
+  if (path.basename(String(plan.command || "")).startsWith("scip-typescript-portable")) return { plan, dir: null };
+  const root = path.resolve(cwd);
+  if (await fileExists(path.join(root, "tsconfig.json"))) return { plan, dir: null };
+  const pattern = (/** @type {string} */ relative) => path.join(root, relative).split(path.sep).join("/");
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "posse-scip-tsconfig-"));
+  const projectPath = path.join(dir, "tsconfig.json");
   try {
-    const parsed = JSON.parse(String(raw || ""));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-    const keys = Object.keys(parsed);
-    if (keys.length === 0) return true;
-    if (!keys.every((k) => k === "compilerOptions" || k === "exclude")) return false;
-    if ("exclude" in parsed && !Array.isArray(parsed.exclude)) return false;
-    const compilerOptions = parsed?.compilerOptions;
-    return !!compilerOptions
-      && Object.keys(compilerOptions).length === 1
-      && compilerOptions.allowJs === true;
-  } catch {
-    return false;
+    await fs.promises.writeFile(projectPath, JSON.stringify({
+      compilerOptions: GENERATED_INFER_TSCONFIG.compilerOptions,
+      include: [pattern("**/*")],
+      exclude: GENERATED_INFER_TSCONFIG.exclude.map(pattern),
+    }), "utf8");
+  } catch (err) {
+    await removeGeneratedProjectDir(dir);
+    throw err;
   }
+  return {
+    plan: { ...plan, args: [...args.filter((arg) => arg !== "--infer-tsconfig"), projectPath] },
+    dir,
+  };
+}
+
+/** @param {string | null} dir */
+async function removeGeneratedProjectDir(dir) {
+  if (!dir) return;
+  try { await fs.promises.rm(dir, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
 function planWithOutputPath(plan, outputPath) {

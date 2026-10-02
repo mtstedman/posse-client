@@ -1,6 +1,9 @@
 import { C } from "../../../../shared/format/functions/colors.js";
 import { fit } from "../../functions/display/helpers/formatters.js";
 
+// The middle panes never shrink below this; the input area gets the rest.
+const MIN_MIDDLE_ROWS = 5;
+
 export class DisplayFrameRenderer {
 
 
@@ -34,19 +37,28 @@ export class DisplayFrameRenderer {
     // Context-health is now shown by the dedicated ATLAS/ONNX readiness bars in
     // the left panel, so the old bottom status bar is retired (no placeholder row).
     const contextBarLines = [];
-    const inputLines = this._buildBottomInput(fullW);
 
     // Layout rows:  top border(1) + progress + divider(1) + middle + divider(1)
     //               + context bar + input + bottom border(1)
-    const overhead = 2 + progressLines.length + 1 + 1 + contextBarLines.length + inputLines.length;
-    const middleRows = Math.max(this.rows - overhead, 5);
+    // The input area is bounded by what the terminal leaves after that chrome
+    // and a minimum middle, so its input and hint lines stay on screen. It
+    // ends with them: an area that still overflows keeps its end.
+    const chromeRows = 2 + progressLines.length + 1 + 1 + contextBarLines.length;
+    const inputRows = Math.max(1, this.rows - chromeRows - MIN_MIDDLE_ROWS);
+    const inputLines = this._buildBottomInput(fullW, { maxRows: inputRows });
+    if (inputLines.length > inputRows) inputLines.splice(0, inputLines.length - inputRows);
+    const overhead = chromeRows + inputLines.length;
+    const middleRows = Math.max(this.rows - overhead, MIN_MIDDLE_ROWS);
 
-    const monitorMode = this._rightMode === "monitor";
+    // An open verdict-gate diff takes the whole middle, like Agent View, while
+    // the prompt it belongs to stays in the input area below.
+    const gateDiff = this._buildGateReviewDiffPane(fullW, middleRows);
+    const fullWidthMiddle = this._rightMode === "monitor" || !!gateDiff;
     let middleFull = null;
     let left = [];
     let right = [];
-    if (monitorMode) {
-      middleFull = this._buildMonitor(fullW, middleRows);
+    if (fullWidthMiddle) {
+      middleFull = gateDiff || this._buildMonitor(fullW, middleRows);
       if (middleFull.length > middleRows) middleFull.length = middleRows;
       while (middleFull.length < middleRows) middleFull.push("");
     } else {
@@ -74,13 +86,13 @@ export class DisplayFrameRenderer {
     }
 
     // Divider: progress → middle
-    buf += monitorMode
+    buf += fullWidthMiddle
       ? `\x1b[${row};1H${C.dim}\u251c${"\u2500".repeat(fullW)}\u2524${C.reset}\x1b[K`
       : `\x1b[${row};1H${C.dim}\u251c${"\u2500".repeat(leftW)}\u252c${"\u2500".repeat(rightW)}\u2524${C.reset}\x1b[K`;
     row++;
 
     // Middle
-    if (monitorMode) {
+    if (fullWidthMiddle) {
       for (let i = 0; i < middleRows; i++) {
         buf += `\x1b[${row};1H${C.dim}\u2502${C.reset}${fit(middleFull[i], fullW)}${C.dim}\u2502${C.reset}\x1b[K`;
         row++;
@@ -93,7 +105,7 @@ export class DisplayFrameRenderer {
     }
 
     // Divider: split panels → bottom input
-    buf += monitorMode
+    buf += fullWidthMiddle
       ? `\x1b[${row};1H${C.dim}\u251c${"\u2500".repeat(fullW)}\u2524${C.reset}\x1b[K`
       : `\x1b[${row};1H${C.dim}\u251c${"\u2500".repeat(leftW)}\u2534${"\u2500".repeat(rightW)}\u2524${C.reset}\x1b[K`;
     row++;

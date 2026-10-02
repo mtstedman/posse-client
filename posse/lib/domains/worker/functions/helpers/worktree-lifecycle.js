@@ -86,6 +86,7 @@ import {
   clearActiveWorktreeSentinel,
   isSentinelProcessAlive,
   readActiveWorktreeSentinel,
+  sentinelHasOtherLiveJob,
   sentinelJobStillActive,
   writeActiveWorktreeSentinel,
 } from "./worktree-sentinel.js";
@@ -1124,6 +1125,10 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
             }
           } catch (rebaseErr) {
             if (isAbortError(rebaseErr)) throw rebaseErr;
+            // A live same-WI sibling deferral must reach the setup handler,
+            // which requeues without an attempt penalty; swallowing it here
+            // ran the job on the stale branch instead.
+            if (rebaseErr?.code === "WORKTREE_ACTIVE_SIBLING_LOCKS") throw rebaseErr;
             worker.emit(job.id, `${C.dim}[system] WI#${job.work_item_id} rebase-on-lease skipped: ${rebaseErr.message.split("\n")[0]}${C.reset}`);
           }
         }, { signal });
@@ -1309,9 +1314,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       if (!reusedWorktree && !pendingTargetMerge && fs.existsSync(wtDir)) {
         const siblingLocks = activeLiveSiblingWriteLocks(job);
         const sentinel = readActiveWorktreeSentinel(wtDir);
-        const sentinelBlocks = sentinel?.payload?.jobId != null
-          && Number(sentinel.payload.jobId) !== Number(job.id)
-          && isSentinelProcessAlive(sentinel.payload) === true;
+        const sentinelBlocks = sentinelHasOtherLiveJob(sentinel?.payload, job.id) === true;
         if (siblingLocks.length > 0 || sentinelBlocks) {
           cleanupOk = false;
           logEvent({

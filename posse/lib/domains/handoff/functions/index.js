@@ -45,6 +45,7 @@ import {
 } from "../../../shared/skills/functions/registry.js";
 import { ASSESSABLE_JOB_TYPES, MUTATING_JOB_TYPES } from "../../../catalog/job.js";
 import { attachDiffNarrative, attachDiffNarrativeAsync } from "../../git/functions/diff-narrator.js";
+import { buildMergeResolutionEvidenceAsync } from "../../git/functions/attempt-committed-files.js";
 import { gitExec, gitExecAsync } from "../../git/functions/utils.js";
 import { validateMutableRepoPath } from "../../runtime/functions/protected-paths.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
@@ -2367,7 +2368,7 @@ export function attachAssessmentDiffContext(assessmentContext = null, cwd = null
   return assessmentContext;
 }
 
-export async function attachAssessmentDiffContextAsync(assessmentContext = null, cwd = null) {
+export async function attachAssessmentDiffContextAsync(assessmentContext = null, cwd = null, { projectDir = null } = {}) {
   if (!assessmentContext || typeof assessmentContext !== "object" || !cwd) return assessmentContext;
   const branchNetDiff = String(assessmentContext.branch_net_diff || "").trim();
   if (branchNetDiff || assessmentContext.branch_net_diff_truncated === true) {
@@ -2401,7 +2402,34 @@ export async function attachAssessmentDiffContextAsync(assessmentContext = null,
   }
   await attachAssessmentDependencyDiffsAsync(assessmentContext, cwd);
   await attachDiffNarrativeAsync(assessmentContext, cwd);
+  await attachMergeResolutionEvidenceAsync(assessmentContext, cwd, projectDir);
   return assessmentContext;
+}
+
+// The primary diff and narrative are against the work-item side of a target
+// merge; show the committed files the target also changed against the target
+// side too, so a resolution that drops the target's hunk is visible to the
+// assessor. Ranges without a target merge return no evidence.
+async function attachMergeResolutionEvidenceAsync(assessmentContext, cwd, projectDir = null) {
+  const files = Array.isArray(assessmentContext.files_committed) ? assessmentContext.files_committed : [];
+  if (files.length === 0 || !assessmentContext.commit_base_hash) return;
+  try {
+    const evidence = await buildMergeResolutionEvidenceAsync({
+      cwd,
+      commitHash: assessmentContext.commit_hash,
+      baseHash: assessmentContext.commit_base_hash,
+      files,
+      projectDir,
+    });
+    if (!evidence) return;
+    assessmentContext.merge_resolution_evidence = evidence.text;
+    assessmentContext.merge_resolution_missing_target_lines = evidence.missingLineCount;
+  } catch {
+    const resolutionFiles = Array.isArray(assessmentContext.merge_resolution_files) ? assessmentContext.merge_resolution_files : [];
+    if (resolutionFiles.length > 0) {
+      assessmentContext.merge_resolution_evidence = `TARGET MERGE RESOLUTION evidence unavailable (git failed) for ${JSON.stringify(resolutionFiles)}; verify these files against the target branch's version before passing.`;
+    }
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

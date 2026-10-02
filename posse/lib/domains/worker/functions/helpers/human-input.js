@@ -6,6 +6,7 @@
 import { C } from "../../../../shared/format/functions/colors.js";
 import {
   HUMAN_INPUT_BEST_JUDGMENT_ANSWER,
+  humanGateStateAllowsAnswer,
   humanInputChoicesForPayload,
   nonInteractiveHumanInputAnswerForPayload,
   scopeModeHumanInputAnswerForPayload,
@@ -16,6 +17,7 @@ import {
   getJob,
   updateJobStatus,
 } from "../../../queue/functions/index.js";
+import { resolveGateReviewDiffTarget } from "../../../queue/functions/gate-review-target.js";
 
 export { HUMAN_INPUT_BEST_JUDGMENT_ANSWER };
 
@@ -155,9 +157,34 @@ export function buildHumanPromptIdentity(job, payload = {}, {
   };
 }
 
+/**
+ * Prompt context for an open gate, led by why its last answer was not
+ * applied (noteHumanGateAnswerNotApplied) so the re-asked operator sees it.
+ */
+export function humanInputPromptContext(context, gate = null) {
+  const unapplied = gate && humanGateStateAllowsAnswer(gate.gate_state)
+    ? String(gate.resolution_error || "").trim()
+    : "";
+  if (!unapplied) return context;
+  const status = `Status: previous answer not applied: ${unapplied}`;
+  if (Array.isArray(context)) return [status, ...context];
+  return context ? `${status}\n${context}` : status;
+}
+
+// The change a verdict gate judges, for the prompt's diff view. A failed
+// lookup costs only that view, never the prompt.
+function gateReviewDiffTarget(job, payload) {
+  try {
+    return resolveGateReviewDiffTarget(job, { payload });
+  } catch {
+    return null;
+  }
+}
+
 export async function runHumanInputHandler(worker, job, abortSignal = null, { leaseToken = null } = {}) {
   const payload = worker.parsePayload(job);
-  const { questions, context, promptOptions } = resolveHumanInputPrompt(job, payload);
+  const { questions, context: payloadContext, promptOptions } = resolveHumanInputPrompt(job, payload);
+  const context = humanInputPromptContext(payloadContext, getHumanGate(job.id));
   const promptIdentity = buildHumanPromptIdentity(job, payload);
   promptOptions.promptIdentity = promptIdentity;
 
@@ -203,6 +230,7 @@ export async function runHumanInputHandler(worker, job, abortSignal = null, { le
     // remains stable across lease renewal/recovery, unlike bridge_change_seq.
     promptIdentity.question_generation = String(getHumanGate(job.id)?.generation || 1);
     promptOptions.ownerLeaseToken = leaseToken;
+    promptOptions.reviewDiff = gateReviewDiffTarget(job, payload);
     const DISPLAY_TIMEOUT_MS = 3600 * 1000;
     let timer;
     const timeout = new Promise((_, reject) => {

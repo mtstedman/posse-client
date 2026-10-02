@@ -163,10 +163,7 @@ export function registerHumanGate({
         UPDATE human_gates
         SET gate_state = 'superseded',
             resolver_lease_token = NULL,
-            resolution_error = COALESCE(
-              resolution_error,
-              'Superseded by a new gate after the prior gate job became terminal or disappeared'
-            ),
+            resolution_error = 'Superseded by a new gate after the prior gate job became terminal or disappeared',
             resolved_at = COALESCE(resolved_at, ?),
             updated_at = ?
         WHERE original_job_id = ?
@@ -185,10 +182,7 @@ export function registerHumanGate({
         UPDATE human_gates
         SET gate_state = 'superseded',
             resolver_lease_token = NULL,
-            resolution_error = COALESCE(
-              resolution_error,
-              'Superseded by a new gate after the prior gate job became terminal or disappeared'
-            ),
+            resolution_error = 'Superseded by a new gate after the prior gate job became terminal or disappeared',
             resolved_at = COALESCE(resolved_at, ?),
             updated_at = ?
         WHERE original_job_id IS NULL
@@ -541,6 +535,23 @@ export function reopenHumanGateResolution({
   });
 }
 
+/**
+ * Record why an answer to a still-open gate was not applied (a refused
+ * choice, or one that cannot apply yet). The gate stays open and answerable;
+ * the next claim clears the reason (beginHumanGateResolution). An open or
+ * resolving gate's resolution_error is only ever such a note about its last
+ * answer, so every transition that resolves, supersedes or reopens the gate
+ * writes its own reason (or none) over it instead of keeping it.
+ */
+export function noteHumanGateAnswerNotApplied(gateJobId, reason) {
+  const result = getDb().prepare(`
+    UPDATE human_gates
+    SET resolution_error = ?, updated_at = ?
+    WHERE gate_job_id = ? AND gate_state = 'open'
+  `).run(String(reason || "answer not applied").slice(0, 2000), now(), gateJobId);
+  return result.changes === 1;
+}
+
 export function supersedeHumanGate(gateJobId, reason = "superseded") {
   const db = getDb();
   return executeTransaction(db, () => {
@@ -677,7 +688,7 @@ export function reconcileHumanGates() {
       const superseded = db.prepare(`
         UPDATE human_gates
         SET gate_state='superseded', resolver_lease_token=NULL,
-            resolution_error=COALESCE(resolution_error, ?),
+            resolution_error=?,
             resolved_at=COALESCE(resolved_at, ?), updated_at=?
         WHERE gate_job_id=? AND gate_state IN ('open','resolving')
       `).run(normalizedReason, ts, ts, gateJobId);
@@ -915,7 +926,7 @@ export function reconcileHumanGates() {
         UPDATE human_gates
         SET gate_state='superseded', resolved_at=COALESCE(resolved_at, ?), updated_at=?,
             resolver_lease_token=NULL,
-            resolution_error=COALESCE(resolution_error, 'Gate job or work item no longer exists')
+            resolution_error='Gate job or work item no longer exists'
         WHERE gate_job_id=? AND gate_state IN ('open','resolving')
       `).run(now(), now(), row.gate_job_id);
       retired += 1;
@@ -926,7 +937,10 @@ export function reconcileHumanGates() {
     // the selected action failed. That converts an internal/stale-target
     // failure into an endless human prompt. The durable failure event proves
     // the human already answered; retire those legacy rows instead of
-    // resurfacing them again after upgrade.
+    // resurfacing them again after upgrade. A worker that reopens the gate on
+    // purpose (the original work is still parked, human-input-job.js
+    // reopenUnappliedHumanGate) marks its event gate_reopened; that gate stays
+    // open instead of being retired at the next sweep, under a live re-prompt.
     const failedResolutions = db.prepare(`
       SELECT DISTINCT hg.gate_job_id, j.work_item_id
       FROM human_gates hg
@@ -935,6 +949,9 @@ export function reconcileHumanGates() {
       WHERE hg.gate_state IN ('open','resolving')
         AND j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
         AND e.event_type = ?
+        AND NOT (CASE WHEN json_valid(e.event_json)
+          THEN COALESCE(json_extract(e.event_json, '$.gate_reopened'), 0) = 1
+          ELSE 0 END)
     `).all(EVENT_TYPES.JOB_HUMAN_RESOLUTION_FAILED);
     for (const row of failedResolutions) {
       db.prepare(`
@@ -948,10 +965,7 @@ export function reconcileHumanGates() {
       db.prepare(`
         UPDATE human_gates
         SET gate_state='superseded', resolver_lease_token=NULL,
-            resolution_error=COALESCE(
-              resolution_error,
-              'Human answer was accepted but its action could not be applied'
-            ),
+            resolution_error='Human answer was accepted but its action could not be applied',
             resolved_at=COALESCE(resolved_at, ?), updated_at=?
         WHERE gate_job_id=? AND gate_state IN ('open','resolving')
       `).run(now(), now(), row.gate_job_id);
@@ -1035,7 +1049,7 @@ export function reconcileHumanGates() {
         db.prepare(`
           UPDATE human_gates
           SET gate_state='resolved', resolved_at=?, updated_at=?,
-              resolver_lease_token=NULL
+              resolver_lease_token=NULL, resolution_error=NULL
           WHERE gate_job_id=?
         `).run(now(), now(), row.gate_job_id);
         retired += 1;
@@ -1045,10 +1059,7 @@ export function reconcileHumanGates() {
           UPDATE human_gates
           SET gate_state='superseded', resolved_at=?, updated_at=?,
               resolver_lease_token=NULL,
-              resolution_error=COALESCE(
-                resolution_error,
-                CASE WHEN ? THEN 'Human gate timed out in headless mode' ELSE 'Human gate was canceled' END
-              )
+              resolution_error=CASE WHEN ? THEN 'Human gate timed out in headless mode' ELSE 'Human gate was canceled' END
           WHERE gate_job_id=?
         `).run(now(), now(), row.headless_timed_out ? 1 : 0, row.gate_job_id);
         retired += 1;

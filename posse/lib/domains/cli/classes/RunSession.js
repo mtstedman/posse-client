@@ -37,8 +37,10 @@ import {
   PROVIDER_AUTH_WARMUP_TIMEOUT_MS,
   PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS,
   closeRuntimeStateForExit,
+  describeOpenGatesAtExit,
   firstLine,
   handleWrapUpSignal,
+  listOpenHumanGatesAtExit,
   openParkingGateForWorkItem,
   operationalRunJobs,
   summarizeRunCompletion,
@@ -52,6 +54,7 @@ import {
 import { createRunWrapUpTracker } from "../functions/review-session.js";
 import { BossyLocalStream } from "../../bridge/classes/BossyLocalStream.js";
 import { readHumanGateResnoozeSec } from "../../scheduler/functions/config.js";
+import { recordStartupDirtyTreeBlock } from "../../git/functions/startup-dirty-tree-block.js";
 
 const OPEN_WORK_ITEM_STATUSES = Object.freeze(
   WORK_ITEM_STATUSES.filter((status) => !TERMINAL_WORK_ITEM_STATUSES.includes(status)),
@@ -173,6 +176,7 @@ export class RunSession {
       ensureRepoSetupConfirmed,
       ensureGitReady,
       guardStartupDirtyTree,
+      checkStartupDirtyTree,
       checkPosseUpdateAvailability: checkPosseUpdateAvailabilityForRun = checkPosseUpdateAvailabilityCached,
       formatPosseUpdateAvailableWarning: formatPosseUpdateAvailableWarningForRun = formatPosseUpdateAvailableWarning,
       ensureBootDependenciesInWorker: runBootDependencySync = ensureBootDependenciesInWorker,
@@ -383,6 +387,20 @@ export class RunSession {
     }
     return created;
   };
+  // The startup dirty-tree guard runs later in boot. A run it will block must
+  // not seed plan jobs or resolve gates first: the same read-only check `go`
+  // makes before planning (planQueuedWorkItemsUnlessStartupBlocked). A check
+  // that fails to run does not block here; the boot guard reports it.
+  if (typeof checkStartupDirtyTree === "function") {
+    let startupCheck = null;
+    try { startupCheck = await checkStartupDirtyTree({ reason: "run start" }); } catch { /* the boot guard reports it */ }
+    if (startupCheck?.ok === false && startupCheck?.blocked === true) {
+      recordStartupDirtyTreeBlock(startupCheck, { reason: "run start", logEvent, log });
+      console.log(`\n  ${C.yellow}Run blocked: ${startupCheck.message || "the target work tree has uncommitted changes."}${C.reset}\n`);
+      process.exitCode = 2;
+      return startupCheck;
+    }
+  }
   if (nonInteractive && typeof prepareNonInteractiveHumanInputGates === "function") {
     const prepared = prepareNonInteractiveHumanInputGates({ workItemIds: scopedWorkItemIds });
     const approvedPlans = prepared?.approvedPlanGateIds?.length || 0;
@@ -1104,6 +1122,7 @@ export class RunSession {
           force: true,
         });
         try { stopBootMonitor({ final: true }); } catch { /* observational */ }
+        recordStartupDirtyTreeBlock(guardResult, { reason: "run start", logEvent, log });
         console.log(`\n  ${C.yellow}Run blocked: ${message}${C.reset}\n`);
         process.exitCode = 2;
         return guardResult;
@@ -2829,7 +2848,7 @@ export class RunSession {
     hasAutoMergeableCompletedWorkItems,
     autoMergePendingReviewBlockers,
     describePendingReviewLockBlockers,
-    surfaceActionableHumanGates: (activeJobs) => displayActions.surfaceActionableHumanGates(activeJobs),
+    surfaceActionableHumanGates: (activeJobs, options) => displayActions.surfaceActionableHumanGates(activeJobs, options),
   });
   await scheduler.runLoop(
     (job) => {
@@ -3025,6 +3044,19 @@ export class RunSession {
     const color = completion.failures.length > 0 ? C.red : C.yellow;
     console.error(`\n  ${color}${label}: ${detail}.${C.reset}\n`);
   }
+  // Every other open gate this run leaves parked (push offers, gates past
+  // their reminders, gates on work items outside this run): nothing asks
+  // them again until the next run or the phone.
+  try {
+    const openGateLines = describeOpenGatesAtExit(listOpenHumanGatesAtExit(), {
+      excludeGateIds: [...completion.failures, ...completion.incomplete]
+        .map((item) => item.gate_job_id)
+        .filter(Boolean),
+    });
+    if (openGateLines.length > 0) {
+      console.error(`  ${C.yellow}Open gate(s) left waiting for you:${C.reset}\n${openGateLines.map((line) => `    ${line}`).join("\n")}\n`);
+    }
+  } catch { /* the exit summary is advisory; never block exit */ }
   // Set the exit code first so the shutdown record logs the real one.
   process.exitCode = completion.exitCode;
   if (completion.incomplete.length === 0) completeRunCohort?.();

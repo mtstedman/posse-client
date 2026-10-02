@@ -12,6 +12,7 @@ export const SUB_AGENT_PROTOCOL = "posse.sub_agent.v1";
 export const SUB_AGENT_OBSERVATION_TYPES = Object.freeze({
   RESULT_TRIMMED: "sub_agent.result_trimmed",
   RESEARCH_UNCITED_REPORT: "sub_agent.research_uncited_report",
+  INTENT_OVERSIZED: "sub_agent.intent_oversized",
 });
 export const SUB_AGENT_EVIDENCE_OUTCOMES = Object.freeze({
   DELIVERED: "evidence_delivered",
@@ -35,6 +36,8 @@ export const SUB_AGENT_LIMITS = Object.freeze({
   maxInputDepth: 6,
   maxInputArrayItems: 32,
   maxInputStringChars: 4000,
+  // Soft cap: a longer child question is dispatched as written and recorded
+  // (INTENT_OVERSIZED). Rejecting it makes the parent regenerate the call.
   maxIntentChars: 2000,
   maxEvidenceLines: 80,
   maxEvidenceChars: 4000,

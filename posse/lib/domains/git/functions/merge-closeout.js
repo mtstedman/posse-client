@@ -285,6 +285,125 @@ function resolveConflictedFiles(exec, cwd, files) {
   }
 }
 
+function namesFrom(exec, cwd, args) {
+  return String(exec(args, cwd) || "").split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+// A 3-way result as content: an existing blob (`oid`), merged text, or a
+// deletion. `clean: false` means git could not merge it without conflict.
+function mergeBlobsThreeWay(exec, cwd, tempDir, file, { ours, base, theirs }) {
+  if (ours === theirs) return { clean: true, oid: ours };
+  if (base === ours) return { clean: true, oid: theirs };
+  if (base === theirs) return { clean: true, oid: ours };
+  if (ours == null || theirs == null) return { clean: false, reason: "modify_delete" };
+  const safeName = file.replace(/[^A-Za-z0-9._-]/g, "_");
+  const inputs = { ours, base, theirs };
+  const paths = {};
+  for (const [side, oid] of Object.entries(inputs)) {
+    paths[side] = path.join(tempDir, `${safeName}.${side}`);
+    fs.writeFileSync(paths[side], oid == null ? "" : exec(["cat-file", "blob", oid], cwd, { trim: false }));
+  }
+  try {
+    return { clean: true, text: exec(["merge-file", "-p", paths.ours, paths.base, paths.theirs], cwd, { trim: false }) };
+  } catch {
+    // merge-file exits with the conflict count, or fails on binary input.
+    return { clean: false, reason: "conflict" };
+  }
+}
+
+function sameAsBlob(exec, cwd, result, oid) {
+  if (result.oid !== undefined) return result.oid === oid;
+  if (oid == null) return false;
+  return exec(["cat-file", "blob", oid], cwd, { trim: false }) === result.text;
+}
+
+/**
+ * Paths the work item's merges carried content for: a merge's result for the
+ * path differs from git's own merge of that merge's parents (a conflict
+ * resolution, task edits made while completing the merge, or a dropped side).
+ * The no-merges replay cannot reproduce that content.
+ */
+function mergeCarriedPaths(exec, cwd, tempDir, { mergeBase, branchHead, candidates }) {
+  const carried = new Set();
+  if (candidates.size === 0) return carried;
+  const merges = namesFrom(exec, cwd, ["rev-list", "--first-parent", "--merges", "--parents", `${mergeBase}..${branchHead}`])
+    .map((line) => line.split(/\s+/).filter(Boolean));
+  for (const [merge, ours, theirs, ...extraParents] of merges) {
+    if (!ours || !theirs || extraParents.length > 0) {
+      for (const file of namesFrom(exec, cwd, ["diff", "--no-renames", "--name-only", ours || merge, merge])) {
+        if (candidates.has(file)) carried.add(file);
+      }
+      continue;
+    }
+    const base = exec(["merge-base", ours, theirs], cwd);
+    const touched = new Set([
+      ...namesFrom(exec, cwd, ["diff", "--no-renames", "--name-only", ours, merge]),
+      ...namesFrom(exec, cwd, ["diff", "--no-renames", "--name-only", base, theirs]),
+    ]);
+    for (const file of touched) {
+      if (!candidates.has(file) || carried.has(file)) continue;
+      const auto = mergeBlobsThreeWay(exec, cwd, tempDir, file, {
+        ours: blobAt(exec, cwd, ours, file),
+        base: blobAt(exec, cwd, base, file),
+        theirs: blobAt(exec, cwd, theirs, file),
+      });
+      if (!auto.clean || !sameAsBlob(exec, cwd, auto, blobAt(exec, cwd, merge, file))) carried.add(file);
+    }
+  }
+  return carried;
+}
+
+/**
+ * Commit `restoredFiles` at the branch head's content and `mergedFiles` at
+ * their 3-way result on top of the replay in `worktreePath`, then prove the
+ * committed tree holds exactly that content.
+ */
+function applyMergeCarriedContent(exec, worktreePath, { cwd, branch, branchHead, targetHead, restoredFiles, mergedFiles }) {
+  try {
+    const present = restoredFiles.length > 0
+      ? new Set(namesFrom(exec, cwd, ["ls-tree", "-r", "--name-only", branchHead, "--", ...restoredFiles]))
+      : new Set();
+    const checkoutFiles = restoredFiles.filter((file) => present.has(file));
+    const removeFiles = restoredFiles.filter((file) => !present.has(file));
+    for (const { file, result } of mergedFiles) {
+      if (result.text !== undefined) {
+        fs.mkdirSync(path.dirname(path.join(worktreePath, file)), { recursive: true });
+        fs.writeFileSync(path.join(worktreePath, file), result.text);
+        exec(["add", "--", file], worktreePath);
+      } else if (result.oid == null) {
+        removeFiles.push(file);
+      } else {
+        // An unchanged side wins: check it out from its commit so the mode
+        // (executable bit, symlink) comes along with the content.
+        const sourceRev = [branchHead, targetHead].find((rev) => blobAt(exec, cwd, rev, file) === result.oid);
+        if (!sourceRev) throw new Error(`no source commit for the 3-way result of ${file}`);
+        exec(["checkout", sourceRev, "--", file], worktreePath);
+      }
+    }
+    if (checkoutFiles.length > 0) exec(["checkout", branchHead, "--", ...checkoutFiles], worktreePath);
+    if (removeFiles.length > 0) exec(["rm", "-q", "--ignore-unmatch", "--", ...removeFiles], worktreePath);
+    exec([
+      "commit", "--no-verify", "-m",
+      `posse: close-out restore ${branch} content committed inside merges`,
+      "-m", [
+        ...restoredFiles.map((file) => `- ${file} (branch head)`),
+        ...mergedFiles.map(({ file }) => `- ${file} (3-way with the target)`),
+      ].join("\n"),
+    ], worktreePath);
+    const head = exec(["rev-parse", "HEAD"], worktreePath);
+    const stillDiffer = restoredFiles.length > 0
+      ? namesFrom(exec, cwd, ["diff", "--no-renames", "--name-only", branchHead, head, "--", ...restoredFiles])
+      : [];
+    for (const { file, result } of mergedFiles) {
+      if (!sameAsBlob(exec, cwd, result, blobAt(exec, cwd, head, file))) stillDiffer.push(file);
+    }
+    if (stillDiffer.length > 0) return { ok: false, error: `restore left differences: ${stillDiffer.join(", ")}` };
+    return { ok: true, head };
+  } catch (error) {
+    return { ok: false, error: `restore_failed: ${String(error?.stderr || error?.message || error).split("\n")[0]}` };
+  }
+}
+
 /**
  * Replay a work item's own commits onto the current target in `worktreePath`
  * and move the branch to the result. With `ownsWorktree` the worktree is a
@@ -439,6 +558,80 @@ export function refreshBranchForCloseout({
     return { attempted: true, refreshed: false, infrastructureFailure: true, reason: `closeout_head_failed: ${error?.message || error}`, ...heads };
   }
 
+  // The replay skips merge commits, so content a commit carried inside a
+  // merge (a dev's conflict resolution plus task edits made while completing
+  // the harness's target merge) is not replayed (live WI 167: job #2209's
+  // optimizer.js edit in merge 045565d never reached main). Put it back on
+  // top of the replay so the ordering resolution and the work both survive:
+  // - a path the target has not changed since the merge base takes the
+  //   branch head's content, the correct result since only the branch moved;
+  // - a path the target changed again, whose content a branch merge carried,
+  //   takes a clean 3-way merge of (merge base, target, branch head), the
+  //   result a plain squash would produce. If that merge conflicts or cannot
+  //   be computed, the refresh declines and the plain squash path runs, so
+  //   nothing is dropped silently.
+  let restoredFiles = [];
+  const mergedFiles = [];
+  let tempDir = null;
+  try {
+    const droppedPaths = new Set(dropped.flatMap((commit) => (
+      namesFrom(exec, cwd, ["diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", commit.hash])
+    )));
+    const targetChanged = namesFrom(exec, cwd, ["diff", "--no-renames", "--name-only", mergeBase, targetHead]);
+    const expectedChanges = new Set([...targetChanged, ...droppedPaths]);
+    restoredFiles = namesFrom(exec, cwd, ["diff", "--no-renames", "--name-only", branchHead, refreshedHead])
+      .filter((file) => !expectedChanges.has(file));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-closeout-3way-"));
+    const carried = mergeCarriedPaths(exec, cwd, tempDir, {
+      mergeBase,
+      branchHead,
+      candidates: new Set(targetChanged.filter((file) => !droppedPaths.has(file))),
+    });
+    const conflicts = [];
+    for (const file of carried) {
+      const result = mergeBlobsThreeWay(exec, cwd, tempDir, file, {
+        ours: blobAt(exec, cwd, targetHead, file),
+        base: blobAt(exec, cwd, mergeBase, file),
+        theirs: blobAt(exec, cwd, branchHead, file),
+      });
+      if (!result.clean) {
+        conflicts.push(`${file} (${result.reason})`);
+      } else if (!sameAsBlob(exec, cwd, result, blobAt(exec, cwd, refreshedHead, file))) {
+        mergedFiles.push({ file, result });
+      }
+    }
+    if (conflicts.length > 0) {
+      restore();
+      return {
+        attempted: true,
+        refreshed: false,
+        reason: `merge_carried_content_conflicts_with_target: ${conflicts.slice(0, 10).join(", ")}`,
+        lostFiles: [...carried],
+        ...heads,
+      };
+    }
+  } catch (error) {
+    restore();
+    return { attempted: true, refreshed: false, infrastructureFailure: true, reason: `closeout_content_check_failed: ${error?.message || error}`, ...heads };
+  } finally {
+    if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+  if (restoredFiles.length > 0 || mergedFiles.length > 0) {
+    const reapplied = applyMergeCarriedContent(exec, worktreePath, { cwd, branch, branchHead, targetHead, restoredFiles, mergedFiles });
+    if (!reapplied.ok) {
+      const lostFiles = [...restoredFiles, ...mergedFiles.map(({ file }) => file)];
+      restore();
+      return {
+        attempted: true,
+        refreshed: false,
+        reason: `replay_would_drop_branch_content: ${lostFiles.slice(0, 10).join(", ")} (${reapplied.error})`,
+        lostFiles,
+        ...heads,
+      };
+    }
+    refreshedHead = reapplied.head;
+  }
+
   const resolverUsed = resolvedFiles.length > 0;
   let testResult = null;
   if (resolverUsed && testCommand) {
@@ -481,6 +674,8 @@ export function refreshBranchForCloseout({
     dropped: dropped.map((commit) => ({ hash: commit.hash, reason: commit.reason })),
     skipped: skipped.map((commit) => commit.hash),
     resolvedFiles: [...new Set(resolvedFiles)],
+    restoredFiles,
+    threeWayMergedFiles: mergedFiles.map(({ file }) => file),
     rules: [...new Set(rules)],
     testCommand: resolverUsed ? testCommand : null,
     testRan: testResult != null,

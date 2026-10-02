@@ -414,7 +414,12 @@ function _buildCommittedScopeViolationVerdict(assessmentContext = null, cwd = nu
   if (filesCommitted.length === 0) return null;
 
   const outOfScope = _findOutOfScopeCommittedFiles(filesCommitted, {
-    allowedFiles: assessmentContext.allowed_files || [],
+    // The harness hands the job the paths both sides of its target merge
+    // changed; resolving them is required, so they are in scope.
+    allowedFiles: _mergeUniquePaths(
+      assessmentContext.allowed_files || [],
+      assessmentContext.merge_resolution_files || [],
+    ),
     allowedCreateFiles: assessmentContext.allowed_create_files || [],
     allowedDeleteFiles: assessmentContext.allowed_delete_files || [],
     allowedCreateRoots: assessmentContext.allowed_create_roots || [],
@@ -1048,6 +1053,7 @@ function _buildLocalAssessmentEvidence({
   assessmentDiffNarrative = "",
   assessmentScopedDiff = "",
   assessmentDependencyDiffs = "",
+  mergeResolutionEvidence = "",
   assessmentFileSnapshots = "",
   registeredTestRunEvidence = "",
   workerStatusOutput = "",
@@ -1084,6 +1090,7 @@ function _buildLocalAssessmentEvidence({
   // particular, never turn a complete diff into a misleading partial diff at
   // this final assembly boundary.
   const primaryChangeEvidenceAttached = appendWhole(primaryChangeEvidence, "primary change evidence");
+  appendWhole(mergeResolutionEvidence, "target merge resolution evidence");
   appendWhole(scopedCheckEvidence, "deterministic changed-file check evidence");
   appendWhole(registeredTestRunEvidence, "registered test evidence");
   const dependencyChangeEvidenceAttached = appendWhole(assessmentDependencyDiffs, "dependency change evidence");
@@ -1428,6 +1435,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       files_committed = [],
       files_committed_unknown = false,
       files_committed_error = null,
+      merge_resolution_files = [],
       files_reverted = [],
       files_requested = [],
     } = assessmentContext;
@@ -1503,9 +1511,12 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
 
     if (files_committed.length > 0) {
       sections.push(`files_actually_committed: ${JSON.stringify(files_committed)}`);
+      if (merge_resolution_files.length > 0) {
+        sections.push(`target_merge_resolution_files (changed on both sides of the harness's target-branch merge; resolving them was required, so they are in scope): ${JSON.stringify(merge_resolution_files)}`);
+      }
       // Check for scope violations deterministically
       const outOfScope = _findOutOfScopeCommittedFiles(files_committed, {
-        allowedFiles: allowed_files,
+        allowedFiles: _mergeUniquePaths(allowed_files, merge_resolution_files),
         allowedCreateFiles: allowed_create_files,
         allowedDeleteFiles: allowed_delete_files,
         allowedCreateRoots: allowed_create_roots,
@@ -1641,6 +1652,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     assessmentDiffNarrative,
     assessmentScopedDiff,
     assessmentDependencyDiffs,
+    mergeResolutionEvidence: assessmentContext?.merge_resolution_evidence || "",
     assessmentFileSnapshots,
     registeredTestRunEvidence,
     workerStatusOutput,
@@ -1686,20 +1698,46 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     fallbackReads: effectiveFallbackReads,
     researchRefsBlock: workItemResearchRefsBlock({ workItemId: job?.work_item_id, jobId: job?.id, packet: assessorPacket, projectDir }),
   });
-  let providerPrompt = prompt;
-  if (assessorPacket) {
-    providerPrompt = await composePromptRemoteAware(
+  // Remote composition binds the packet's issued tool surface, system prompt,
+  // and stable context to one provider. A provider fallback recomposes the
+  // packet for the fallback provider and takes its options from that exact
+  // composition, so the fallback Job issuance matches its Agent identity.
+  let composedAssessorProvider = null;
+  const composeAssessorPromptForProvider = async (providerName) => {
+    const composedPrompt = await composePromptRemoteAware(
       assessorPacket,
       remoteAssessmentInstructions,
       {
         ...(remoteComposer ? { composer: remoteComposer } : {}),
-        providerName: assessorProvider,
+        providerName,
         projectDir,
       },
     );
-    if (assessorPacket.remote_prompt_composed) {
-      providerPrompt = [providerPrompt, localAssessmentEvidence].filter(Boolean).join("\n\n");
-    }
+    composedAssessorProvider = String(providerName || "").trim().toLowerCase();
+    return assessorPacket.remote_prompt_composed
+      ? [composedPrompt, localAssessmentEvidence].filter(Boolean).join("\n\n")
+      : composedPrompt;
+  };
+  const assessorPacketProviderOptions = () => ({
+    stableContext: assessorPacket?.stable_context || null,
+    remoteSystemPrompt: assessorPacket?.remote_system_prompt || null,
+    sessionPacket: assessorPacket || null,
+    skipRolePrompt: !!assessorPacket?.remote_prompt_composed,
+  });
+  const assessorFallbackOptions = assessorPacket
+    ? {
+        buildFallbackPrompt: ({ providerName }) => composeAssessorPromptForProvider(providerName),
+        buildFallbackOptions: ({ providerName }) => {
+          if (String(providerName || "").trim().toLowerCase() !== composedAssessorProvider) {
+            throw new Error(`Assessor fallback options requested before composing the ${providerName || "unknown"} provider prompt`);
+          }
+          return assessorPacketProviderOptions();
+        },
+      }
+    : {};
+  let providerPrompt = prompt;
+  if (assessorPacket) {
+    providerPrompt = await composeAssessorPromptForProvider(assessorProvider);
   }
 
   let response;
@@ -1820,16 +1858,14 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       abortSignal,
       atlasPrefetchStatus: assessorPacket?.atlas?.prefetchStatus || assessorAtlasPrefetchStatus,
       disableAtlas: artifactAssessmentRoute,
-      stableContext: assessorPacket?.stable_context || null,
-      remoteSystemPrompt: assessorPacket?.remote_system_prompt || null,
+      ...assessorPacketProviderOptions(),
       taskMode: parsedJobPayload.task_mode || "code",
       // view_image reaches only image assessments, including artifact jobs
       // whose effective mode is image; the visual-evidence policy below keys
       // on the same effective mode.
       imageInspection: effectiveArtifactTaskMode(job, parsedJobPayload) === "image",
       projectDbCapability: parsedJobPayload.task_mode === "db" ? "read" : "none",
-      sessionPacket: assessorPacket || null,
-      skipRolePrompt: !!assessorPacket?.remote_prompt_composed,
+      ...assessorFallbackOptions,
       deepthink: assessorDeepthink,
       _attachedSourceEvidence: [
             localAssessmentEvidencePacket.primaryChangeEvidenceAttached
@@ -1858,6 +1894,9 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       cwd,
       jobProvider: assessorProvider,
       jobModelName: null,
+      // job_id is the assessed job; an assessor fallback must not move that
+      // job's provider/model pin to the assessor's provider.
+      persistJobProvider: false,
     });
     response = result.output;
     assessorToolUses = Array.isArray(result?.stats?.toolUses) ? result.stats.toolUses : [];
@@ -2425,6 +2464,7 @@ export async function runPostExecutionAssessment(worker, {
   filesCommitted,
   filesCommittedUnknown = false,
   filesCommittedError = null,
+  mergeResolutionFiles = [],
   filesReverted,
   hasFileChanges,
   job,
@@ -2989,13 +3029,14 @@ export async function runPostExecutionAssessment(worker, {
         files_committed: filesCommitted,
         files_committed_unknown: filesCommittedUnknown,
         files_committed_error: filesCommittedError,
+        merge_resolution_files: mergeResolutionFiles,
         files_reverted: filesReverted,
         files_requested: pendingFileRequests
           ? [...(pendingFileRequests.autoApproved || []), ...(pendingFileRequests.needsApproval || [])]
           : [],
       }, (isArtifactMode(taskMode) && jobPayloadForAssess.output_root)
         ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
-        : (wtPath || worker.projectDir));
+        : (wtPath || worker.projectDir), { projectDir: worker.projectDir });
       if (taskAbAssessmentEvidence) {
         assessmentContext.task_ab_test_evidence = taskAbAssessmentEvidence;
       }

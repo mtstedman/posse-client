@@ -482,7 +482,7 @@ Dispatch an isolated researcher and wait for its evidence-backed result. Select 
 | `agent_type` | `string` | Required | values "code", "web" |  |
 | `anchors` | `array<any>` | Optional | max items 8 |  |
 | `budget` | `object` | Optional |  |  |
-| `question` | `string` | Required | min length 1; max length 2000 |  |
+| `question` | `string` | Required | min length 1 | Self-contained question; aim for under 2000 characters. |
 
 ### `tools.download_file`
 
@@ -1287,11 +1287,11 @@ Submit the web specialty agent's sole final result. Every finding must name an e
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `findings` | `array<object>` | Required | min items 1; max items 12 |  |
-| `gaps` | `array<string>` | Optional | max items 6 |  |
+| `findings` | `array<object>` | Required | min items 1 | Aim for at most 12 findings. |
+| `gaps` | `array<string>` | Optional |  | Material unresolved gaps; aim for at most 6. |
 | `protocol` | `string` | Required | values "posse.web_research.v1" |  |
-| `sources` | `array<object>` | Optional | max items 4 | Raw text or data files (JSON, CSV, XML, YAML, plain text) to snapshot byte-exact, such as a raw.githubusercontent.com dataset file. Name the data file itself. |
-| `summary` | `string` | Required | min length 1; max length 2000 |  |
+| `sources` | `array<object>` | Optional |  | Raw text or data files (JSON, CSV, XML, YAML, plain text) to snapshot byte-exact, such as a raw.githubusercontent.com dataset file. Name the data file itself. At most 4 are snapshotted. |
+| `summary` | `string` | Required | min length 1 | Concise synthesis; aim for under 2000 characters. |
 
 ### `tools.write_file`
 

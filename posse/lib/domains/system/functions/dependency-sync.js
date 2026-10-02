@@ -528,6 +528,15 @@ function gitPathStatus(repoRoot, args) {
   }
 }
 
+function gitInfoExcludePath(repoRoot) {
+  try {
+    const text = String(gitExec(["rev-parse", "--git-path", "info/exclude"], repoRoot, { timeoutMs: 5000 }) || "").trim();
+    return text ? path.resolve(repoRoot, text) : null;
+  } catch {
+    return null;
+  }
+}
+
 function gitignoreAlreadyHas(ignorePath, pattern) {
   let lines = [];
   try {
@@ -563,11 +572,19 @@ export function ensureGeneratedDirectoryIgnored(root, dirName, opts = {}) {
 
   const rel = path.relative(ignoreRoot, absDir).replace(/\\/g, "/");
   const pattern = `${rel.replace(/\/+$/u, "")}/`;
-  const ignorePath = path.join(ignoreRoot, ".gitignore");
+  let ignorePath = path.join(ignoreRoot, ".gitignore");
 
   if (repoRoot) {
     if (gitPathStatus(repoRoot, ["ls-files", "--error-unmatch", "--", rel])) return null;
     if (gitPathStatus(repoRoot, ["check-ignore", "-q", "--", rel])) return null;
+    // Once the repository has a HEAD its .gitignore is a project file: an
+    // install run against the primary checkout appending to it left the tree
+    // dirty after the run (pulltabs `node_modules/`). Ignore through the
+    // repository-local exclude file, as the Posse runtime entries do.
+    const excludePath = gitPathStatus(repoRoot, ["rev-parse", "--verify", "--quiet", "HEAD"])
+      ? gitInfoExcludePath(repoRoot)
+      : null;
+    if (excludePath) ignorePath = excludePath;
   } else if (gitignoreAlreadyHas(ignorePath, pattern)) {
     return null;
   }

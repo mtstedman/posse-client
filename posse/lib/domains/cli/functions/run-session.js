@@ -22,11 +22,15 @@ import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isPushOfferJob } from "../../queue/functions/common.js";
 import { activeWorkItemDispositionGates } from "../../queue/functions/work-item-dispositions.js";
 import { mergeVerificationReviewGateState } from "../../queue/functions/merge-verification-review.js";
+import { resolveGateReviewDiffTarget } from "../../queue/functions/gate-review-target.js";
 import {
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
   MERGE_VERIFICATION_REVIEW_TYPE,
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
+  humanGateStateAllowsAnswer,
+  humanInputChoicesForPayload,
 } from "../../../catalog/human-input.js";
+import { getHumanGate, listJobs } from "../../queue/functions/index.js";
 import { closeDb } from "../../../shared/storage/functions/index.js";
 import { flushEventsNow } from "../../queue/functions/events.js";
 import { closeLog, log } from "../../../shared/telemetry/functions/logging/logger.js";
@@ -79,6 +83,51 @@ export function openParkingGateForWorkItem(workItemId) {
 }
 
 /**
+ * Open human gates a finished run leaves behind. Nothing asks them again
+ * until the next run, the phone or `posse gate answer`; a push offer is never
+ * re-prompted on its own (fiscal-wizard 2026-10-01: push offer #15 sat open
+ * for 9 hours without being asked).
+ */
+export function listOpenHumanGatesAtExit({ listJobsFn = listJobs, getHumanGateFn = getHumanGate } = {}) {
+  return listJobsFn(["queued", "waiting_on_human"])
+    .filter((job) => job?.job_type === "human_input")
+    .filter((job) => humanGateStateAllowsAnswer(getHumanGateFn(job.id)?.gate_state));
+}
+
+/**
+ * Exit-summary lines naming each open gate and how to answer it, leaving out
+ * gates the completion summary already names (excludeGateIds). A verdict on
+ * code also names `posse gate show`, which prints the diff it judges.
+ */
+export function describeOpenGatesAtExit(gates = [], {
+  excludeGateIds = [],
+  getHumanGateFn = getHumanGate,
+  reviewDiffTargetFn = resolveGateReviewDiffTarget,
+  limit = 8,
+} = {}) {
+  const excluded = new Set(excludeGateIds.map(Number));
+  const open = gates.filter((gate) => gate && !excluded.has(Number(gate.id)));
+  const lines = open.slice(0, limit).map((gate) => {
+    const payload = parseJobPayload(gate);
+    const wi = gate.work_item_id == null ? "" : ` for WI#${gate.work_item_id}`;
+    if (payload.subtype === "push_offer") {
+      return `#${gate.id} push offer (${firstLine(gate.title, "push to remote")}): push or decline it from the phone or at the next run's wrap-up`;
+    }
+    if (payload.subtype === "plan_approval") {
+      return `#${gate.id} plan approval${wi}: posse plan approve|reject ${gate.work_item_id ?? "<wiId>"}`;
+    }
+    let kind = null;
+    try { kind = getHumanGateFn(gate.id)?.gate_kind || null; } catch { kind = null; }
+    const choices = humanInputChoicesForPayload(payload);
+    let reviewsCode = false;
+    try { reviewsCode = Boolean(reviewDiffTargetFn(gate, { payload })); } catch { reviewsCode = false; }
+    return `#${gate.id} ${kind || payload.review_type || "question"}${wi}: posse gate answer ${gate.id} ${choices.length > 0 ? choices.join("|") : "<answer>"}${reviewsCode ? ` (diff: posse gate show ${gate.id})` : ""}`;
+  });
+  if (open.length > lines.length) lines.push(`+${open.length - lines.length} more open gate(s)`);
+  return lines;
+}
+
+/**
  * Derive the shell outcome from the final aggregate state of the work items
  * handled by this run. Individual failed jobs are not sufficient: a failed
  * parent followed by a successful fix child is a recovered work item and must
@@ -97,9 +146,23 @@ export function openParkingGateForWorkItem(workItemId) {
  * }} [options]
  */
 export function summarizeRunCompletion(workItems = [], { parkingGateFor = null, needsAction = null } = {}) {
+  const openGateFor = (item) => {
+    if (typeof parkingGateFor !== "function") return null;
+    try { return parkingGateFor(Number(item.id)); } catch { return null; }
+  };
   const failures = workItems
     .filter((item) => item && (item.status === "failed" || item.status === "canceled"))
-    .map((item) => ({ id: Number(item.id) || null, status: item.status }));
+    .map((item) => {
+      // A failed work item's open recovery gate is named at exit: the run
+      // ends while it waits parked (wowiekowie 2026-10-01: gate #2252 was
+      // never mentioned when the run exited).
+      const gate = item.status === "failed" ? openGateFor(item) : null;
+      return {
+        id: Number(item.id) || null,
+        status: item.status,
+        ...(gate ? { gate_job_id: gate.gate_job_id, review_type: gate.review_type } : {}),
+      };
+    });
   const incomplete = workItems
     .filter((item) => item && (
       item.status === "blocked"
@@ -107,19 +170,24 @@ export function summarizeRunCompletion(workItems = [], { parkingGateFor = null, 
       || item.status === "waiting_on_review"
     ))
     .map((item) => ({ id: Number(item.id) || null, status: item.status }));
-  if (typeof parkingGateFor === "function") {
-    for (const item of workItems) {
-      if (!item || item.status !== "complete" || item.merge_state === "merged") continue;
-      let gate = null;
-      try { gate = parkingGateFor(Number(item.id)); } catch { gate = null; }
-      if (gate) {
-        incomplete.push({
-          id: Number(item.id) || null,
-          status: item.status,
-          gate_job_id: gate.gate_job_id,
-          review_type: gate.review_type,
-        });
-      }
+  for (const item of workItems) {
+    if (!item || item.status !== "complete" || item.merge_state === "merged") continue;
+    const gate = openGateFor(item);
+    if (gate) {
+      incomplete.push({
+        id: Number(item.id) || null,
+        status: item.status,
+        gate_job_id: gate.gate_job_id,
+        review_type: gate.review_type,
+      });
+    } else if (item.merge_state === "merge_failed") {
+      // A merge failure is unresolved work even if gate lookup is unavailable
+      // (for example during late shutdown after the DB has closed).
+      incomplete.push({
+        id: Number(item.id) || null,
+        status: item.status,
+        merge_state: item.merge_state,
+      });
     }
   }
   const waitingIds = new Set((needsAction?.waiting_work_item_ids || []).map(Number));

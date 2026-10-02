@@ -159,7 +159,9 @@ export async function handlePartialWorkFailureForWorker({
         await runPostExecutionAssessmentFromModule(this, {
           attempt,
           committedHash: partialCommit.committedHash,
+          commitBaseHash: partialCommit.commitBaseHash || null,
           filesCommitted: partialCommit.filesCommitted || [],
+          mergeResolutionFiles: partialCommit.mergeResolutionFiles || [],
           filesReverted: partialCommit.filesReverted || [],
           hasFileChanges: true,
           job,

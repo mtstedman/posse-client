@@ -15,7 +15,7 @@ import {
   AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY,
   AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY,
 } from "./handoff.js";
-import { SUB_AGENT_PROTOCOL } from "./sub-agent.js";
+import { SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "./sub-agent.js";
 import { SPRITE_SHEET_FIT_MODES, SPRITE_SHEET_LIMITS } from "./artifact.js";
 import {
   DOWNLOAD_FILE_LIMITS,
@@ -1915,6 +1915,11 @@ export const TOOL_SUB_AGENT = {
   },
 };
 
+// Research sizes are soft caps (WEB_RESEARCH_LIMITS, SUB_AGENT_LIMITS): the
+// schemas state the target in prose instead of maxLength/maxItems, because a
+// schema bound is enforced as a rejection by validating providers.
+const RESEARCH_QUESTION_DESCRIPTION = `Self-contained question; aim for under ${SUB_AGENT_LIMITS.maxIntentChars} characters.`;
+
 export const TOOL_DISPATCH_AGENT = {
   type: "function",
   name: "dispatch_agent",
@@ -1923,7 +1928,7 @@ export const TOOL_DISPATCH_AGENT = {
     type: "object",
     properties: {
       agent_type: { type: "string", enum: RESEARCH_AGENT_TYPES },
-      question: { type: "string", minLength: 1, maxLength: 2000 },
+      question: { type: "string", minLength: 1, description: RESEARCH_QUESTION_DESCRIPTION },
       anchors: {
         type: "array",
         maxItems: 8,
@@ -1986,7 +1991,7 @@ export const TOOL_DISPATCH_AGENT_PLANNER = {
               properties: {
                 id: { type: "string", minLength: 1, maxLength: 40 },
                 agent_type: { type: "string", enum: RESEARCH_AGENT_TYPES },
-                question: { type: "string", minLength: 1, maxLength: 2000 },
+                question: { type: "string", minLength: 1, description: RESEARCH_QUESTION_DESCRIPTION },
                 anchors: TOOL_DISPATCH_AGENT.parameters.properties.anchors,
                 budget: TOOL_DISPATCH_AGENT.parameters.properties.budget,
               },
@@ -2014,18 +2019,26 @@ export const TOOL_WEB_RESEARCH_HANDOFF = {
     type: "object",
     properties: {
       protocol: { type: "string", enum: [WEB_RESEARCH_PROTOCOL] },
-      summary: { type: "string", minLength: 1, maxLength: 2000 },
+      summary: {
+        type: "string",
+        minLength: 1,
+        description: `Concise synthesis; aim for under ${WEB_RESEARCH_LIMITS.maxSummaryChars} characters.`,
+      },
       findings: {
         type: "array",
         minItems: 1,
-        maxItems: 12,
+        description: `Aim for at most ${WEB_RESEARCH_LIMITS.maxFindings} findings.`,
         items: {
           type: "object",
           properties: {
-            claim: { type: "string", minLength: 1, maxLength: 800 },
+            claim: {
+              type: "string",
+              minLength: 1,
+              description: `One supported claim; aim for under ${WEB_RESEARCH_LIMITS.maxClaimChars} characters.`,
+            },
             url: { type: "string", minLength: 1, maxLength: 2000 },
-            title: { type: "string", minLength: 1, maxLength: 300 },
-            published_at: { type: "string", minLength: 1, maxLength: 80 },
+            title: { type: "string", minLength: 1 },
+            published_at: { type: "string", minLength: 1 },
             confidence: { type: "string", enum: ["low", "medium", "high"] },
           },
           required: ["claim", "url", "confidence"],
@@ -2034,20 +2047,21 @@ export const TOOL_WEB_RESEARCH_HANDOFF = {
       },
       gaps: {
         type: "array",
-        maxItems: 6,
-        items: { type: "string", minLength: 1, maxLength: 500 },
+        description: `Material unresolved gaps; aim for at most ${WEB_RESEARCH_LIMITS.maxGaps}.`,
+        items: { type: "string", minLength: 1 },
       },
       sources: {
         type: "array",
-        maxItems: WEB_RESEARCH_LIMITS.maxSources,
+        // The runtime keeps the first maxSources nominations and drops the
+        // rest with a note (normalizeNominatedSources), so this is prose too.
         description:
           "Raw text or data files (JSON, CSV, XML, YAML, plain text) to snapshot byte-exact, such as a raw.githubusercontent.com dataset file. " +
-          "Name the data file itself.",
+          `Name the data file itself. At most ${WEB_RESEARCH_LIMITS.maxSources} are snapshotted.`,
         items: {
           type: "object",
           properties: {
             url: { type: "string", minLength: 1, maxLength: 2000 },
-            label: { type: "string", minLength: 1, maxLength: WEB_RESEARCH_LIMITS.maxSourceLabelChars },
+            label: { type: "string", minLength: 1 },
           },
           required: ["url", "label"],
           additionalProperties: false,

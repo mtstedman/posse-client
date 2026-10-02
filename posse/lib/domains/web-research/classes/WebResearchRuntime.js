@@ -5,7 +5,7 @@ import {
 } from "../../../catalog/planner-dispatch.js";
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 import { subAgentRuntime } from "../../sub-agent/classes/SubAgentRuntime.js";
-import { RESEARCH_CHILD_PROFILE, SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
+import { RESEARCH_CHILD_PROFILE, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
 // @ts-check
 
 import crypto from "node:crypto";
@@ -16,6 +16,7 @@ import {
   WEB_RESEARCH_HANDOFF_OVERSIZED_OBSERVATION_TYPE,
   WEB_RESEARCH_LIMITS,
   WEB_RESEARCH_PROTOCOL,
+  WEB_RESEARCH_QUESTION_OVERSIZED_OBSERVATION_TYPE,
 } from "../../../catalog/web-research.js";
 import { getSetting } from "../../queue/functions/index.js";
 import { surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
@@ -91,6 +92,20 @@ function boundedString(value, label, max, { optional = false } = {}) {
   return text;
 }
 
+// Research content sizes are soft caps (WEB_RESEARCH_LIMITS): the text is
+// kept as written and the overage recorded. A rejection would make the model
+// regenerate its whole call to save a few hundred input tokens.
+function softBoundedString(value, label, softMax, overages) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", `${label} is required`, { stage: "validation" });
+  if (text.length > softMax) overages.push({ field: label, chars: text.length, soft_cap: softMax });
+  return text;
+}
+
+function softCappedCount(items, label, softMax, overages) {
+  if (items.length > softMax) overages.push({ field: label, count: items.length, soft_cap: softMax });
+}
+
 function normalizedUrl(value, label) {
   const text = boundedString(value, label, 2_000);
   let parsed;
@@ -105,13 +120,10 @@ function normalizedUrl(value, label) {
   return parsed.toString();
 }
 
-function normalizeHandoff(args) {
-  if (Buffer.byteLength(JSON.stringify(args ?? null), "utf8") > WEB_RESEARCH_LIMITS.maxPacketBytes) {
-    throw runtimeError(
-      "WEB_RESEARCH_TOO_LARGE",
-      `web_research_handoff exceeds ${WEB_RESEARCH_LIMITS.maxPacketBytes} bytes`,
-      { stage: "validation" },
-    );
+function normalizeHandoff(args, overages = []) {
+  const packetBytes = Buffer.byteLength(JSON.stringify(args ?? null), "utf8");
+  if (packetBytes > WEB_RESEARCH_LIMITS.maxPacketBytes) {
+    overages.push({ field: "web_research_handoff", bytes: packetBytes, soft_cap: WEB_RESEARCH_LIMITS.maxPacketBytes });
   }
   const input = exactObject(args, ["protocol", "summary", "findings", "gaps", "sources"], "web_research_handoff");
   if (input.protocol !== WEB_RESEARCH_PROTOCOL) {
@@ -121,14 +133,15 @@ function normalizeHandoff(args) {
       { stage: "validation" },
     );
   }
-  const summary = boundedString(input.summary, "web_research_handoff.summary", WEB_RESEARCH_LIMITS.maxSummaryChars);
-  if (!Array.isArray(input.findings) || input.findings.length < 1 || input.findings.length > WEB_RESEARCH_LIMITS.maxFindings) {
+  const summary = softBoundedString(input.summary, "web_research_handoff.summary", WEB_RESEARCH_LIMITS.maxSummaryChars, overages);
+  if (!Array.isArray(input.findings) || input.findings.length < 1) {
     throw runtimeError(
       "WEB_RESEARCH_SCHEMA_INVALID",
-      `web_research_handoff.findings must contain one to ${WEB_RESEARCH_LIMITS.maxFindings} entries`,
+      "web_research_handoff.findings must contain at least one entry",
       { stage: "validation" },
     );
   }
+  softCappedCount(input.findings, "web_research_handoff.findings", WEB_RESEARCH_LIMITS.maxFindings, overages);
   const findings = input.findings.map((raw, index) => {
     const finding = exactObject(
       raw,
@@ -144,29 +157,31 @@ function normalizeHandoff(args) {
       );
     }
     return {
-      claim: boundedString(finding.claim, `web_research_handoff.findings[${index}].claim`, WEB_RESEARCH_LIMITS.maxClaimChars),
+      claim: softBoundedString(finding.claim, `web_research_handoff.findings[${index}].claim`, WEB_RESEARCH_LIMITS.maxClaimChars, overages),
       url: normalizedUrl(finding.url, `web_research_handoff.findings[${index}].url`),
       ...(finding.title == null ? {} : {
-        title: boundedString(finding.title, `web_research_handoff.findings[${index}].title`, WEB_RESEARCH_LIMITS.maxTitleChars),
+        title: softBoundedString(finding.title, `web_research_handoff.findings[${index}].title`, WEB_RESEARCH_LIMITS.maxTitleChars, overages),
       }),
       ...(finding.published_at == null ? {} : {
-        published_at: boundedString(
+        published_at: softBoundedString(
           finding.published_at,
           `web_research_handoff.findings[${index}].published_at`,
           WEB_RESEARCH_LIMITS.maxPublishedAtChars,
+          overages,
         ),
       }),
       confidence,
     };
   });
   const gaps = input.gaps == null ? [] : input.gaps;
-  if (!Array.isArray(gaps) || gaps.length > WEB_RESEARCH_LIMITS.maxGaps) {
+  if (!Array.isArray(gaps)) {
     throw runtimeError(
       "WEB_RESEARCH_SCHEMA_INVALID",
-      `web_research_handoff.gaps must contain at most ${WEB_RESEARCH_LIMITS.maxGaps} entries`,
+      "web_research_handoff.gaps must be an array",
       { stage: "validation" },
     );
   }
+  softCappedCount(gaps, "web_research_handoff.gaps", WEB_RESEARCH_LIMITS.maxGaps, overages);
   // A bad source nomination is dropped and noted, never a reason to reject
   // the child's findings.
   const nominated = normalizeNominatedSources(input.sources);
@@ -174,10 +189,11 @@ function normalizeHandoff(args) {
     protocol: WEB_RESEARCH_PROTOCOL,
     summary,
     findings,
-    gaps: gaps.map((gap, index) => boundedString(
+    gaps: gaps.map((gap, index) => softBoundedString(
       gap,
       `web_research_handoff.gaps[${index}]`,
       WEB_RESEARCH_LIMITS.maxGapChars,
+      overages,
     )),
     sources: nominated.sources,
     ...(nominated.dropped.length > 0 ? { dropped_sources: nominated.dropped } : {}),
@@ -339,29 +355,33 @@ export class WebResearchRuntime {
         { stage: "terminal" },
       );
     }
-    const packet = normalizeHandoff(args);
-    if (dispatch.resultChars != null) {
-      // The parent receives a compact report bounded by its research policy.
-      // An oversized handoff is accepted and noted: the sub-agent runtime trims
-      // the delivered report deterministically, whereas a rejection here would
-      // cost the child another full-context turn.
-      const compactChars = JSON.stringify(packet).length;
-      if (compactChars > dispatch.resultChars) {
-        try {
-          recordObservation({
-            ...dispatch.observationContext,
-            observation_type: WEB_RESEARCH_HANDOFF_OVERSIZED_OBSERVATION_TYPE,
-            summary: `Accepted a ${compactChars}-character web_research_handoff over the ${dispatch.resultChars}-character report limit`,
-            detail: {
-              child_agent_call_id: childId,
-              chars: compactChars,
-              result_chars: dispatch.resultChars,
-              findings: packet.findings.length,
-            },
-          });
-        } catch {
-          // Telemetry must not reject an accepted handoff.
-        }
+    const overages = [];
+    const packet = normalizeHandoff(args, overages);
+    // The parent receives a compact report bounded by its research policy.
+    // An oversized handoff, or one over a per-field soft cap, is accepted and
+    // noted: the sub-agent runtime trims the delivered report
+    // deterministically, whereas a rejection here would cost the child
+    // another full-context turn and a regenerated report.
+    const compactChars = JSON.stringify(packet).length;
+    const overReport = dispatch.resultChars != null && compactChars > dispatch.resultChars;
+    if (overReport || overages.length > 0) {
+      try {
+        recordObservation({
+          ...dispatch.observationContext,
+          observation_type: WEB_RESEARCH_HANDOFF_OVERSIZED_OBSERVATION_TYPE,
+          summary: overReport
+            ? `Accepted a ${compactChars}-character web_research_handoff over the ${dispatch.resultChars}-character report limit`
+            : `Accepted a web_research_handoff over ${overages.length} soft cap(s)`,
+          detail: {
+            child_agent_call_id: childId,
+            chars: compactChars,
+            result_chars: dispatch.resultChars,
+            findings: packet.findings.length,
+            ...(overages.length > 0 ? { overages } : {}),
+          },
+        });
+      } catch {
+        // Telemetry must not reject an accepted handoff.
       }
     }
     dispatch.packet = packet;
@@ -460,7 +480,8 @@ export class WebResearchRuntime {
         { stage: "validation" },
       );
     }
-    const question = boundedString(input.question, "dispatch_agent.question", WEB_RESEARCH_LIMITS.maxQuestionChars);
+    const questionOverages = [];
+    const question = softBoundedString(input.question, "dispatch_agent.question", WEB_RESEARCH_LIMITS.maxQuestionChars, questionOverages);
     const coordinationMode = String(this.readSetting(SETTING_KEYS.AGENT_COORDINATION_MODE) || "off").trim().toLowerCase();
     const dispatchPolicy = readPlannerDispatchPolicy({ readSetting: (key, options) => this.readSetting(key, options) });
     const dispatchEnabled = coordinationMode !== "subagents" && dispatchPolicy.enabled;
@@ -526,6 +547,20 @@ export class WebResearchRuntime {
         attempt_id: runtimeContext.attempt_id ?? runtimeContext.attemptId ?? null,
       },
     };
+    // A coordinated child's question was already recorded by the sub-agent
+    // runtime that dispatched it.
+    if (questionOverages.length > 0 && !coordinatedDispatchId) {
+      try {
+        recordObservation({
+          ...dispatch.observationContext,
+          observation_type: WEB_RESEARCH_QUESTION_OVERSIZED_OBSERVATION_TYPE,
+          summary: `Dispatched a ${question.length}-character web research question over the ${WEB_RESEARCH_LIMITS.maxQuestionChars}-character soft cap`,
+          detail: { parent_agent_call_id: parentAgentCallId, overages: questionOverages },
+        });
+      } catch {
+        // Telemetry must not refuse an admitted dispatch.
+      }
+    }
     const forwardAbort = () => dispatch.controller.abort(signal.reason);
     signal?.addEventListener("abort", forwardAbort, { once: true });
     if (signal?.aborted) forwardAbort();
@@ -699,24 +734,19 @@ export async function executeDispatchAgent(args, options = {}) {
         throw runtimeError("RESEARCH_AGENT_TYPE_INVALID", "agent_type must be code or web", { stage: "validation" });
       }
       const id = boundedString(request.id, `requests[${index}].id`, 40);
-      // Name the request and its length so the planner shortens the right
-      // one; a code request's limit is the sub-agent intent limit, not a web
-      // research one (live 2026-10-01: "requests[1].question exceeds 2000
-      // characters" as WEB_RESEARCH_TOO_LARGE for a code question).
-      const questionChars = typeof request.question === "string" ? request.question.trim().length : 0;
-      if (questionChars > SUB_AGENT_LIMITS.maxIntentChars) {
-        throw runtimeError(
-          request.agent_type === "web" ? "WEB_RESEARCH_TOO_LARGE" : "SUB_AGENT_TOO_LARGE",
-          `requests[${index}].question (request "${id}", ${request.agent_type} research) is ${questionChars} characters; `
-            + `the limit is ${SUB_AGENT_LIMITS.maxIntentChars}. Nothing in this batch was dispatched.`,
-          { stage: "validation" },
-        );
+      // A question over the sub-agent intent size is a soft cap: the
+      // sub-agent runtime dispatches it as written and records the overage.
+      // Refusing the batch (live 2026-10-01: a 2042-character web question)
+      // made the planner regenerate the whole call to save ~40 input tokens.
+      const question = typeof request.question === "string" ? request.question.trim() : "";
+      if (!question) {
+        throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", `requests[${index}].question is required`, { stage: "validation" });
       }
       return {
         id,
         profile: RESEARCH_CHILD_PROFILE,
         agent_type: request.agent_type,
-        intent: boundedString(request.question, `requests[${index}].question`, SUB_AGENT_LIMITS.maxIntentChars),
+        intent: question,
         ...(request.anchors == null ? {} : { anchors: request.anchors }),
         ...(request.budget ? { budget: request.budget } : {}),
       };

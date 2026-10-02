@@ -106,6 +106,52 @@ function isSpaceKey(str, key) {
   return str === " " || keyName(key) === "space";
 }
 
+// [d] on a closed-choice verdict prompt opens the diff that verdict judges
+// (entry.reviewDiff, rendered by _buildGateReviewDiffPane). While it is open
+// the scroll keys page it and [d]/Esc close it, back to the same unanswered
+// prompt; the option digits still answer. Returns true when it used the key.
+function handleGateReviewDiffKeypress(display, str, key, fixedChoices) {
+  const q = display._activeQ;
+  if (!q?.reviewDiff || fixedChoices.length === 0) return false;
+  const view = display._gateReviewDiffView?.questionId === q.id ? display._gateReviewDiffView : null;
+  if (!view) {
+    if (!matchesHotkey(str, key, "d")) return false;
+    display._gateReviewDiffView = { questionId: q.id, scroll: 0 };
+    return true;
+  }
+  if (matchesHotkey(str, key, "d") || isEscapeKey(str, key)) {
+    display._gateReviewDiffView = null;
+    return true;
+  }
+  const name = keyName(key);
+  if (name === "up" || matchesHotkey(str, key, "k")) view.scroll = Math.max(0, view.scroll - 1);
+  else if (name === "down" || matchesHotkey(str, key, "j")) view.scroll += 1;
+  else if (name === "pageup") view.scroll = Math.max(0, view.scroll - 10);
+  else if (name === "pagedown" || isSpaceKey(str, key)) view.scroll += 10;
+  else return false;
+  return true;
+}
+
+// [PgUp/PgDn] pages a question the input area had to clip (the renderer
+// records the clip in _questionClip). The first PgDn continues right after
+// the beginning the clipped view shows (its first half); the first PgUp starts
+// at the top. Returns true when it used the key.
+function handleQuestionPageKeypress(display, key) {
+  const name = keyName(key);
+  if (name !== "pageup" && name !== "pagedown") return false;
+  const q = display._activeQ;
+  const clip = display._questionClip;
+  if (!q || !clip || clip.questionId !== q.id || clip.idx !== q.currentIdx) return false;
+  const pageState = display._questionPage;
+  const page = pageState && pageState.questionId === q.id && pageState.idx === q.currentIdx ? pageState : null;
+  const step = Math.max(1, clip.pageSize);
+  const offset = page
+    ? page.offset + (name === "pagedown" ? step : -step)
+    : (name === "pagedown" ? Math.ceil(step / 2) : 0);
+  display._questionPage = { questionId: q.id, idx: q.currentIdx, offset: Math.max(0, offset) };
+  return true;
+}
+
 // ─── Display ────────────────────────────────────────────────────────────────
 
 
@@ -243,7 +289,13 @@ export class DisplayInputController {
       q.resolve(answers);
       this._removeQuestionSet(q);
       const wiTag2 = q.workItemId ? `WI#${q.workItemId} ` : "";
-      this.addEvent(`${C.green}\u2713 ${wiTag2}Answered ${answers.length} question(s) for job #${q.jobId}${C.reset}`);
+      // A closed-choice gate answer is only a request until its gate applies
+      // it, and it can be refused (wowiekowie 2026-10-01 22:32: "Answered"
+      // was shown for an accept the gate then refused). The applier reports
+      // the outcome.
+      this.addEvent(Array.isArray(q.choices) && q.choices.length > 0
+        ? `${C.cyan}${wiTag2}Sent "${answers.at(-1)?.answer}" for job #${q.jobId}; waiting for the gate to apply it${C.reset}`
+        : `${C.green}\u2713 ${wiTag2}Answered ${answers.length} question(s) for job #${q.jobId}${C.reset}`);
       this._startAnswering();
     }
   }
@@ -502,6 +554,10 @@ export class DisplayInputController {
       // handling consumes the key as unsupported free-form input.
       if (fixedChoices.length > 0 && this._rightMode === "monitor" && matchesHotkey(str, key, "a")) {
         this._startAnsweringForJob(this._monitorSelectedJobId);
+        this.requestRender({ force: true });
+        return;
+      }
+      if (handleGateReviewDiffKeypress(this, str, key, fixedChoices) || handleQuestionPageKeypress(this, key)) {
         this.requestRender({ force: true });
         return;
       }

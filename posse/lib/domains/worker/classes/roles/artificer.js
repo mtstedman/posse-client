@@ -206,11 +206,28 @@ export class ArtificerRole extends BaseRole {
       ...extraSections,
     ].filter(Boolean).join("\n");
     const modelProviderName = ctx.providerName;
-    const buildArtificerPrompt = async (extraSections = [], providerName = modelProviderName) => buildPromptAsync(
-      projectPromptPacketForProvider(packet, providerName, modelProviderName),
-      buildArtificerInstructions(extraSections),
-      { providerName, projectDir: this.context?.projectDir || null },
-    );
+    // Composition binds the composed packet's remote issuance to its provider,
+    // and a pinned-model packet is composed as a projected copy for any other
+    // provider. Keep the packet each provider was composed from so options for
+    // that provider carry the same issuance as its prompt.
+    const providerPackets = new Map();
+    const buildArtificerPrompt = async (extraSections = [], providerName = modelProviderName) => {
+      const providerPacket = projectPromptPacketForProvider(packet, providerName, modelProviderName);
+      const prompt = await buildPromptAsync(
+        providerPacket,
+        buildArtificerInstructions(extraSections),
+        { providerName, projectDir: this.context?.projectDir || null },
+      );
+      providerPackets.set(String(providerName || "").trim().toLowerCase(), providerPacket);
+      return prompt;
+    };
+    const packetForProvider = (providerName) => {
+      const providerPacket = providerPackets.get(String(providerName || "").trim().toLowerCase());
+      if (!providerPacket) {
+        throw new Error(`Artificer provider options requested before composing the ${providerName || "unknown"} provider prompt`);
+      }
+      return providerPacket;
+    };
     const promptInstructions = buildArtificerInstructions();
 
     const rawExpandSteps = getIntSetting(SETTING_KEYS.CONTEXT_EXPAND_MAX_STEPS, 2);
@@ -231,6 +248,7 @@ export class ArtificerRole extends BaseRole {
       needsImageGeneration,
       outputRoot,
       packet,
+      packetForProvider,
       payload,
       prompt: null,
       promptArtifact: { stored: false },
@@ -317,6 +335,10 @@ export class ArtificerRole extends BaseRole {
     } = this.roleDeps();
     let promptSections = [];
     let remainingExpandFileBudget = ctx.remainingExpandFileBudget;
+    const providerOpts = (providerName, overrides) => ({
+      ...this.buildOpts(job, { ...ctx, packet: ctx.packetForProvider(providerName) }),
+      ...overrides,
+    });
 
     if (looksLikePermissionRequest(output)) {
       emit(worker, job.id, `${C.yellow}[artificer]${C.reset} WI#${job.work_item_id} job #${job.id}: permission-style response detected - retrying with explicit write instruction`);
@@ -335,10 +357,12 @@ export class ArtificerRole extends BaseRole {
         artifact_type: "prompt",
         content_long: promptPersistenceSummary({ prompt: permissionRetryPrompt, packet: ctx.packet, role: this.getRole(), provider: ctx.providerName }),
       });
+      const retryActivity = `producing job #${job.id} (permission retry): ${shortJobTitle(job).slice(0, 30)}`;
       const retry = await this.providerClient.call(permissionRetryPrompt, {
         ...this.buildOpts(job, ctx),
-        activity: `producing job #${job.id} (permission retry): ${shortJobTitle(job).slice(0, 30)}`,
+        activity: retryActivity,
         buildFallbackPrompt: ({ providerName }) => ctx.buildArtificerPrompt(permissionSections, providerName),
+        buildFallbackOptions: ({ providerName }) => providerOpts(providerName, { activity: retryActivity }),
       }, this.buildMeta(job, ctx));
       output = retry.output;
     }
@@ -395,10 +419,12 @@ export class ArtificerRole extends BaseRole {
         content_long: promptPersistenceSummary({ prompt: expandedPrompt, packet: ctx.packet, role: this.getRole(), provider: ctx.providerName }),
       });
 
+      const retryActivity = `producing job #${job.id} (context retry ${expandStep + 1}): ${shortJobTitle(job).slice(0, 24)}`;
       const retry = await this.providerClient.call(expandedPrompt, {
         ...this.buildOpts(job, ctx),
-        activity: `producing job #${job.id} (context retry ${expandStep + 1}): ${shortJobTitle(job).slice(0, 24)}`,
+        activity: retryActivity,
         buildFallbackPrompt: ({ providerName }) => ctx.buildArtificerPrompt(expandedSections, providerName),
+        buildFallbackOptions: ({ providerName }) => providerOpts(providerName, { activity: retryActivity }),
       }, this.buildMeta(job, ctx));
       output = retry.output;
       if (remainingExpandFileBudget <= 0) {
@@ -440,11 +466,10 @@ export class ArtificerRole extends BaseRole {
           detail: { role: "artificer", from: activeProvider, to: fallbackName, provider_pool: fallbackPool, reason: "malformed_artifact_output" },
         });
         const fallbackPrompt = await ctx.buildArtificerPrompt(promptSections, fallbackName);
-        const fallback = await this.providerClient.call(fallbackPrompt, {
-          ...this.buildOpts(job, ctx),
+        const fallback = await this.providerClient.call(fallbackPrompt, providerOpts(fallbackName, {
           activity: `producing job #${job.id} (fallback): ${shortJobTitle(job).slice(0, 32)}`,
           allowedProviders: fallbackPool,
-        }, {
+        }), {
           ...this.buildMeta(job, ctx),
           jobProvider: fallbackName,
           jobModelName: null,

@@ -14,6 +14,7 @@ import { formatPeerSyncRow } from "../../../pairing/functions/sync-state.js";
 import { getAgentActivityEvents, getHumanGate, listActiveAgentGuidanceForJob, listAgentInteractions, listWorkItems } from "../../../queue/functions/index.js";
 import { _buildQueueProviderUsageLines, getProviderUsageSummaryCache } from "../../functions/display/helpers/provider-usage.js";
 import { buildAdminGitDiffSnapshot, buildAdminGitDiffFileDetail } from "../../functions/admin/git-diff-review.js";
+import { buildGateReviewDiff } from "../../functions/admin/gate-review-diff.js";
 
 const POSSE_HEADER_WIDTH = 25;
 const POSSE_HEADER_MASCOT_GAP = 2;
@@ -103,6 +104,74 @@ function clamp(value, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return min;
   return Math.max(min, Math.min(max, n));
+}
+
+// ── Verdict-gate diff helpers (for _buildGateReviewDiffPane) ──
+// The change a gate judges does not move while it waits (a committed attempt,
+// a parked work-item branch), so it is built once per prompt, like the
+// approval Changes tab, and paged as one scrolling document; a failed build is
+// retried after a few seconds.
+function gateReviewDiffLines(display, q, inner) {
+  const cache = display._gateReviewDiffCache;
+  const cached = cache?.questionId === q.id ? cache : null;
+  const stale = !cached || (cached.failed && Date.now() - cached.at > 5000);
+  if (stale && display._gateReviewDiffBuilding !== q.id) {
+    display._gateReviewDiffBuilding = q.id;
+    const projectDir = display.projectDir || process.cwd();
+    Promise.resolve()
+      .then(() => buildGateReviewDiff({ projectDir, target: q.reviewDiff }))
+      .then((diff) => { display._gateReviewDiffCache = { questionId: q.id, diff, failed: false, at: Date.now() }; })
+      .catch((err) => {
+        display._gateReviewDiffCache = {
+          questionId: q.id,
+          diff: { title: "", unavailable: `diff load failed: ${err?.message || err}`, errors: [], files: [] },
+          failed: true,
+          at: Date.now(),
+        };
+      })
+      .finally(() => {
+        if (display._gateReviewDiffBuilding === q.id) display._gateReviewDiffBuilding = null;
+        try { display.requestRender?.({ force: true }); } catch { /* best effort */ }
+      });
+  }
+  if (!cached) return [` ${C.dim}Loading the change under review\u2026${C.reset}`];
+  if (cached.formattedWidth !== inner) {
+    cached.formatted = formatGateReviewDiffLines(cached.diff, inner, (lines) => display._monitorDiffBodyLines(lines, inner));
+    cached.formattedWidth = inner;
+  }
+  return cached.formatted;
+}
+
+// The diff text is file content an agent wrote: sanitize it like any other
+// role output before it reaches the terminal.
+function formatGateReviewDiffLines(diff, inner, bodyLines) {
+  const textW = Math.max(8, inner - 2);
+  const out = [` ${C.bold}${fit(_sanitizeDisplayLine(diff.title || "change under review"), textW)}${C.reset}`];
+  if (diff.unavailable) {
+    out.push("", ` ${C.yellow}${fit(`Diff unavailable: ${_sanitizeDisplayLine(diff.unavailable)}`, textW)}${C.reset}`);
+    return out;
+  }
+  for (const error of diff.errors || []) out.push(` ${C.red}${fit(_sanitizeDisplayLine(error), textW)}${C.reset}`);
+  const files = diff.files || [];
+  if (files.length === 0) {
+    out.push("", ` ${C.dim}No file changes.${C.reset}`);
+    return out;
+  }
+  const add = files.reduce((sum, file) => sum + (file.additions || 0), 0);
+  const del = files.reduce((sum, file) => sum + (file.deletions || 0), 0);
+  const fileCount = files.length + (diff.omittedFiles || 0);
+  out.push(` ${C.bold}${fileCount} file${fileCount === 1 ? "" : "s"} changed${C.reset}  ${C.green}+${add}${C.reset} ${C.red}-${del}${C.reset}`);
+  if (diff.omittedFiles > 0) out.push(` ${C.dim}${diff.omittedFiles} more file(s) not shown${C.reset}`);
+  if ((diff.excludedTargetMergeFiles || []).length > 0) {
+    out.push(` ${C.dim}${fit(`${diff.excludedTargetMergeFiles.length} file(s) the target-branch merge brought in are not the job's and are not shown`, textW)}${C.reset}`);
+  }
+  for (const file of files) {
+    out.push("", ` ${C.dim}${"\u2500".repeat(textW)}${C.reset}`);
+    out.push(` ${C.cyan}${C.bold}${fit(_sanitizeDisplayLine(file.path || "?"), Math.max(8, inner - 16))}${C.reset}  ${C.green}+${file.additions || 0}${C.reset} ${C.red}-${file.deletions || 0}${C.reset}`);
+    if (!file.lines) out.push(` ${C.dim}patch omitted: the diff line limit was reached${C.reset}`);
+    else out.push(...bodyLines(file.lines.map((line) => _sanitizeDisplayLine(line))));
+  }
+  return out;
 }
 
 // Greedy word-wrap with a hanging indent: the first line may use a different
@@ -1687,6 +1756,30 @@ export class DisplayRightPanelRenderer {
       width,
       rows: view,
       emptyText: "empty diff",
+      fixedRows: content,
+    });
+  }
+
+  // ── Verdict-gate diff ([d] on a prompt that judges code) ──
+  // The full-width middle pane while the active prompt's diff is open, or null.
+  _buildGateReviewDiffPane(width, height) {
+    const q = this._activeQ;
+    const view = this._gateReviewDiffView;
+    if (this._inputMode !== "question" || !q?.reviewDiff || view?.questionId !== q.id) return null;
+    const content = Math.max(1, (height | 0) - 4);
+    const lines = gateReviewDiffLines(this, q, Math.max(8, width - 4));
+    const maxScroll = Math.max(0, lines.length - content);
+    view.scroll = clamp(view.scroll, 0, maxScroll);
+    const span = maxScroll > 0
+      ? ` ${view.scroll + 1}-${Math.min(lines.length, view.scroll + content)}/${lines.length}`
+      : "";
+    return this._monitorBoxedLane({
+      title: `gate #${q.jobId} change under review${span}  [↑↓ PgUp/Dn scroll · d/esc back to the question]`,
+      count: null,
+      color: C.magenta,
+      width,
+      rows: lines.slice(view.scroll, view.scroll + content),
+      emptyText: "no diff",
       fixedRows: content,
     });
   }

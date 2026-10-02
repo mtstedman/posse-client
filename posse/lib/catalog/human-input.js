@@ -14,6 +14,11 @@ import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./native-tools.js";
 
 const freezeChoices = (choices) => Object.freeze([...choices]);
 export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment using the available evidence and explicit assumptions.";
+// A gate without choices (a clarification) takes a free-text answer. One
+// answered from outside the run that holds it is reserved for that run's
+// prompt under this choice id, with the text alongside; the text is bounded.
+export const HUMAN_INPUT_FREE_TEXT_CHOICE_ID = "free_text";
+export const HUMAN_INPUT_FREE_TEXT_MAX_CHARS = 8000;
 export const HUMAN_GATE_STATES = Object.freeze(["open", "resolving", "resolved", "superseded"]);
 export const SCOPE_APPROVAL_MODES = Object.freeze({ DEFAULT: "default", AUTO: "auto" });
 export const SCOPE_APPROVAL_MODE_VALUES = Object.freeze(Object.values(SCOPE_APPROVAL_MODES));
@@ -39,6 +44,70 @@ export const WORK_ITEM_DISPOSITION_REVIEW_TYPES = Object.freeze([
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
 ]);
+
+// Recovery gates whose "retry" (canonical retry_with_changes, with or
+// without operator guidance) re-runs the failed or blocked work through the
+// ordinary assessed pipeline. The answer requeues or creates the retried jobs
+// while the gate is still resolving, and they block completion until they
+// pass, so once resolved the retry leaves nothing for an operator to decide
+// before merge: it must not hold the work item out of automatic merge
+// (merge-holding-gate.js). A dead-letter retry routed to a provider
+// ("retry:claude") never held; a plain "retry" held the work item forever
+// (wowiekowie 2026-10-01: WI 167 recovered at 22:36 but was refused
+// automatic merge as human_gate_active until a manual approval; WI 164's
+// blocked-recovery retry #2205 would have held it the same way).
+// Assessment-review answers (retry_assessment, replan, fail) still hold.
+export const MERGE_RELEASING_RETRY_REVIEW_TYPES = Object.freeze([
+  WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
+  "blocked_recovery",
+  "dead_letter_recovery",
+  "research_dead_letter_recovery",
+  "oneshot_dead_letter_recovery",
+  "stall_exhausted_recovery",
+]);
+
+// Gates whose answer is a verdict on code, and which change that verdict
+// judges. An attempt-scoped verdict (an assessment review, a blocked-recovery
+// waiver, a dead letter that left a commit) judges the original job's latest
+// committed attempt; a work-item verdict (merge verification, accepting a
+// failed work item, keeping partial work) judges the work-item branch against
+// its merge base plus any uncommitted worktree change. The TUI prompt offers
+// that diff and `posse gate show` prints it. Plan, push, scope, clarification
+// and coordination prompts judge no code and are absent, as is an
+// unexecuted-replan limit (its job never ran) and a research dead letter.
+export const HUMAN_INPUT_REVIEW_DIFF_SCOPES = Object.freeze({
+  ATTEMPT: "attempt",
+  WORK_ITEM: "work_item",
+});
+const ATTEMPT_REVIEW_DIFF = Object.freeze({ scope: HUMAN_INPUT_REVIEW_DIFF_SCOPES.ATTEMPT });
+// A dead letter is a recovery choice; it judges code only when the job
+// committed some before it died.
+const COMMITTED_ATTEMPT_REVIEW_DIFF = Object.freeze({
+  scope: HUMAN_INPUT_REVIEW_DIFF_SCOPES.ATTEMPT,
+  requires_commit: true,
+});
+const WORK_ITEM_REVIEW_DIFF = Object.freeze({ scope: HUMAN_INPUT_REVIEW_DIFF_SCOPES.WORK_ITEM });
+const HUMAN_INPUT_REVIEW_DIFF_POLICIES = Object.freeze({
+  assessment: ATTEMPT_REVIEW_DIFF,
+  needs_review: ATTEMPT_REVIEW_DIFF,
+  assessment_parse_error: ATTEMPT_REVIEW_DIFF,
+  assessment_evidence_missing: ATTEMPT_REVIEW_DIFF,
+  unknown_verdict: ATTEMPT_REVIEW_DIFF,
+  assessment_transport_error: ATTEMPT_REVIEW_DIFF,
+  assessment_retry_limit: ATTEMPT_REVIEW_DIFF,
+  replan_limit: ATTEMPT_REVIEW_DIFF,
+  blocked_recovery: ATTEMPT_REVIEW_DIFF,
+  dead_letter_recovery: COMMITTED_ATTEMPT_REVIEW_DIFF,
+  oneshot_dead_letter_recovery: COMMITTED_ATTEMPT_REVIEW_DIFF,
+  stall_exhausted_recovery: COMMITTED_ATTEMPT_REVIEW_DIFF,
+  partial_work_recovery: WORK_ITEM_REVIEW_DIFF,
+  [MERGE_VERIFICATION_REVIEW_TYPE]: WORK_ITEM_REVIEW_DIFF,
+  // Only "accept" (pass the failed jobs as an operator review) judges code.
+  [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: Object.freeze({
+    scope: HUMAN_INPUT_REVIEW_DIFF_SCOPES.WORK_ITEM,
+    requires_choice: "accept",
+  }),
+});
 
 export function humanGateStateAllowsAnswer(gateState) {
   return gateState == null || gateState === "open";
@@ -507,12 +576,22 @@ export function humanInputChoicesForReviewType(reviewType) {
 
 // A work-item disposition gate may offer fewer than its review type's
 // actions (a merge deferred on a canceled upstream cannot "wait"). Its
-// persisted choices narrow that closed contract; they never widen it.
+// persisted choices narrow that closed contract; they never widen it. A
+// failure gate that recorded no acceptable job told the operator accept is
+// unavailable; gates persisted before their choices said so too (wowiekowie
+// 2026-10-01, gate #2252) still offered it, so the record narrows it as well.
 function narrowedReviewChoices(payload, reviewChoices) {
-  if (!WORK_ITEM_DISPOSITION_REVIEW_TYPES.includes(String(payload?.review_type || "").trim())) return reviewChoices;
+  const reviewType = String(payload?.review_type || "").trim();
+  if (!WORK_ITEM_DISPOSITION_REVIEW_TYPES.includes(reviewType)) return reviewChoices;
   const offered = normalizeHumanInputChoices(payload?.choices);
-  const narrowed = reviewChoices.filter((choice) => offered.includes(choice));
-  return narrowed.length > 0 ? narrowed : reviewChoices;
+  const acceptUnavailable = reviewType === WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE
+    && Array.isArray(payload?.acceptable_job_ids)
+    && payload.acceptable_job_ids.length === 0;
+  const narrowed = reviewChoices.filter((choice) => (
+    offered.includes(choice) && !(acceptUnavailable && choice === "accept")
+  ));
+  if (narrowed.length > 0) return narrowed;
+  return acceptUnavailable ? reviewChoices.filter((choice) => choice !== "accept") : reviewChoices;
 }
 
 export function humanInputChoicesForPayload(payload = {}) {
@@ -527,6 +606,17 @@ export function humanInputChoicesForPayload(payload = {}) {
     return ["approve", "reject"];
   }
   return [];
+}
+
+/**
+ * The review-diff policy of a gate whose answer is a verdict on code
+ * ({ scope, requires_commit? }), or null for a prompt that judges no code.
+ */
+export function humanInputReviewDiffPolicyForPayload(payload = {}) {
+  const policy = HUMAN_INPUT_REVIEW_DIFF_POLICIES[String(payload?.review_type || "").trim()];
+  if (!policy) return null;
+  if (policy.requires_choice && !humanInputChoicesForPayload(payload).includes(policy.requires_choice)) return null;
+  return policy;
 }
 
 const NON_INTERACTIVE_REVIEW_ACTIONS = Object.freeze({

@@ -113,7 +113,8 @@ export class DisplayBottomInputRenderer {
 
   // ── Bottom Input (full width) ─────────────────────────────────────────
 
-  _buildBottomInput(width) {
+  // maxRows: the rows the frame can give the input area (frame-renderer.js).
+  _buildBottomInput(width, { maxRows = Infinity } = {}) {
     const lines = [];
 
     // ── Ask mode ──
@@ -283,6 +284,7 @@ export class DisplayBottomInputRenderer {
     // ── Question answering mode ──
     if (this._inputMode === "question" && this._activeQ) {
       const q = this._activeQ;
+      const hasChoices = Array.isArray(q.choices) && q.choices.length > 0;
       const qNum = q.currentIdx + 1;
       const qTotal = q.questions.length;
       // q.questions[i] and q.context originate from worker role output
@@ -292,7 +294,13 @@ export class DisplayBottomInputRenderer {
       const qText = _sanitizeDisplayLine(q.questions[q.currentIdx] || "");
       const bodyLines = [];
       const qLineW = width - 5;
-      const maxQuestionBodyLines = Math.max(6, Math.min(14, this.rows - 10));
+      // The body (context, header, question, options) gets what the input
+      // area has left after a blank line above it and the prompt below it: a
+      // blank and either the closed-choice line or the input line, a blank and
+      // the hint. Sized from the terminal height alone, a long question pushed
+      // the input line below a short terminal (gate #230: row 28 of 24).
+      const bodyBudget = Math.max(1, maxRows - 2 - (hasChoices ? 1 : 3));
+      const maxQuestionBodyLines = Math.min(Math.max(6, Math.min(14, this.rows - 10)), bodyBudget);
       const choiceLine = buildQuestionChoiceDisplayLine(q.choices, qLineW);
       const choiceLines = choiceLine ? [choiceLine] : [];
 
@@ -306,27 +314,48 @@ export class DisplayBottomInputRenderer {
       const wrappedQuestionLines = _wrapQuestionBodyLines(qText, qLineW);
       bodyLines.push(...wrappedQuestionLines);
 
+      this._questionClip = null;
       if (bodyLines.length + choiceLines.length > maxQuestionBodyLines) {
         const reservedPrefix = contextLines.length + 1;
         const availableQuestionSlots = Math.max(2, maxQuestionBodyLines - reservedPrefix - choiceLines.length);
         const visibleQuestionSlots = Math.max(1, availableQuestionSlots - 1);
-        const headCount = Math.max(1, Math.ceil(visibleQuestionSlots / 2));
-        const tailCount = Math.max(0, visibleQuestionSlots - headCount);
         const preservedPrefix = bodyLines.slice(0, reservedPrefix);
-        const questionHead = wrappedQuestionLines.slice(0, headCount);
-        const questionTail = tailCount > 0 ? wrappedQuestionLines.slice(-tailCount) : [];
         bodyLines.length = 0;
         bodyLines.push(...preservedPrefix);
-        bodyLines.push(...questionHead);
-        bodyLines.push(` ${C.dim}... question clipped; showing beginning and end${C.reset}`);
-        bodyLines.push(...questionTail);
+        // A clipped question shows its beginning and end; [PgUp/PgDn] pages
+        // through all of it (input-controller.js).
+        this._questionClip = { questionId: q.id, idx: q.currentIdx, pageSize: visibleQuestionSlots };
+        const pageState = this._questionPage;
+        const page = pageState && pageState.questionId === q.id && pageState.idx === q.currentIdx ? pageState : null;
+        if (page) {
+          page.offset = Math.max(0, Math.min(page.offset, wrappedQuestionLines.length - visibleQuestionSlots));
+          const last = Math.min(wrappedQuestionLines.length, page.offset + visibleQuestionSlots);
+          bodyLines.push(...wrappedQuestionLines.slice(page.offset, last));
+          bodyLines.push(` ${C.dim}... question lines ${page.offset + 1}-${last} of ${wrappedQuestionLines.length}; [PgUp/PgDn] page${C.reset}`);
+        } else {
+          const headCount = Math.max(1, Math.ceil(visibleQuestionSlots / 2));
+          const tailCount = Math.max(0, visibleQuestionSlots - headCount);
+          bodyLines.push(...wrappedQuestionLines.slice(0, headCount));
+          bodyLines.push(` ${C.dim}... question clipped; showing beginning and end; [PgDn] read it all${C.reset}`);
+          bodyLines.push(...(tailCount > 0 ? wrappedQuestionLines.slice(-tailCount) : []));
+        }
       }
       bodyLines.push(...choiceLines);
+      // A body that still overflows a very short terminal keeps its start and
+      // the options line.
+      if (bodyLines.length > bodyBudget) {
+        bodyLines.splice(Math.max(0, bodyBudget - choiceLines.length), bodyLines.length - bodyBudget);
+      }
       lines.push(...bodyLines);
 
       lines.push("");
-      if (Array.isArray(q.choices) && q.choices.length > 0) {
-        lines.push(` ${C.green}${C.bold}Choose one option with [1-${Math.min(q.choices.length, 9)}].${C.reset} ${C.dim}Free-form text is not accepted.${C.reset}`);
+      if (hasChoices) {
+        // A verdict on code advertises the diff it judges (input-controller.js).
+        const diffOpen = this._gateReviewDiffView?.questionId === q.id;
+        const diffHint = q.reviewDiff
+          ? `  ${C.magenta}${C.bold}[d]${C.reset} ${C.dim}${diffOpen ? "close the diff (Esc)" : "view the diff under review"}${C.reset}`
+          : "";
+        lines.push(` ${C.green}${C.bold}Choose one option with [1-${Math.min(q.choices.length, 9)}].${C.reset} ${C.dim}Free-form text is not accepted.${C.reset}${diffHint}`);
         return lines;
       }
       const cursor = this._spinIdx % 2 === 0 ? "\u2588" : "\u258c";

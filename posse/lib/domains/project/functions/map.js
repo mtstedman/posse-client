@@ -326,6 +326,47 @@ async function resolveGitHooksDirAsync(cwd) {
   }
 }
 
+// core.hooksPath may name a directory inside the work tree (wowiekowie.com:
+// a tracked `.githooks`). A managed block written there changes a project
+// file at command bootstrap, so the run's startup dirty-tree guard then blocks
+// on Posse's own write (and its commit policy would commit machine-local
+// paths into the project). As with the runtime .gitignore once HEAD exists,
+// project-owned hooks are left alone. A hooks directory outside the work tree
+// (the default .git/hooks, or an operator's external hooksPath) is unchanged.
+function isWorkTreeHooksDir(hooksDir, topLevel) {
+  if (!hooksDir || !topLevel) return false;
+  const rel = path.relative(path.resolve(topLevel), path.resolve(hooksDir));
+  if (rel === "") return true;
+  if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return false;
+  return rel.split(path.sep)[0] !== ".git";
+}
+
+function gitTopLevel(cwd, execImpl = null) {
+  try {
+    if (typeof execImpl === "function") {
+      const out = execImpl(["rev-parse", "--show-toplevel"], {
+        cwd,
+        encoding: "utf8",
+        timeout: 10000,
+        windowsHide: true,
+      }) || {};
+      if (Number.isInteger(out.status) && out.status !== 0) return null;
+      return String(out.stdout || out || "").trim() || null;
+    }
+    return String(gitExec(["rev-parse", "--show-toplevel"], cwd, { timeoutMs: 10000 }) || "").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function gitTopLevelAsync(cwd) {
+  try {
+    return String(await gitExecAsync(["rev-parse", "--show-toplevel"], cwd, { timeoutMs: 10000 }) || "").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 function stripManagedHookBlock(content = "", beginMarker = HOOK_BEGIN, endMarker = HOOK_END) {
   const begin = content.indexOf(beginMarker);
   if (begin === -1) return content;
@@ -408,6 +449,9 @@ export function ensureProjectMapRebuildHook({
   if (!hooksDir) return { attempted: false, skipped: "not_git_repo" };
 
   const hookPath = path.join(hooksDir, "post-commit");
+  if (hooksDir !== fastDir && isWorkTreeHooksDir(hooksDir, gitTopLevel(repoCwd, execImpl))) {
+    return { attempted: false, ok: true, skipped: "hooks_dir_in_work_tree", hookPath, changed: false };
+  }
   const block = buildHookBlock(repoCwd);
 
   try {
@@ -456,6 +500,9 @@ export async function ensureProjectMapRebuildHookAsync({
   if (!hooksDir) return { attempted: false, skipped: "not_git_repo" };
 
   const hookPath = path.join(hooksDir, "post-commit");
+  if (hooksDir !== fastDir && isWorkTreeHooksDir(hooksDir, await gitTopLevelAsync(repoCwd))) {
+    return { attempted: false, ok: true, skipped: "hooks_dir_in_work_tree", hookPath, changed: false };
+  }
   const block = buildHookBlock(repoCwd);
 
   try {

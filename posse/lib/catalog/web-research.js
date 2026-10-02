@@ -2,7 +2,13 @@
 
 export const WEB_RESEARCH_PROTOCOL = "posse.web_research.v1";
 export const WEB_RESEARCH_HANDOFF_OVERSIZED_OBSERVATION_TYPE = "web_research.handoff_oversized";
+export const WEB_RESEARCH_QUESTION_OVERSIZED_OBSERVATION_TYPE = "web_research.question_oversized";
 
+// The question, summary, finding, gap and packet sizes below are soft caps:
+// a model that exceeds one is accepted and the overage is recorded, never
+// rejected. A rejection saves a few hundred input tokens at the tail of the
+// conversation by making the model regenerate its whole call — the expensive
+// output tokens — plus another turn of cached input.
 export const WEB_RESEARCH_LIMITS = Object.freeze({
   maxQuestionChars: 2_000,
   maxFindings: 12,

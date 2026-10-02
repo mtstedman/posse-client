@@ -173,7 +173,8 @@ import {
 } from "./session-factories.js";
 import { drainPostMergeAtlasWarmJobs } from "./post-merge-closeout.js";
 import { operationalRunJobs } from "./run-session.js";
-import { selectQueuedWorkItemsToPlan } from "./queued-work-item-planning.js";
+import { planQueuedWorkItemsUnlessStartupBlocked, selectQueuedWorkItemsToPlan } from "./queued-work-item-planning.js";
+import { recordStartupDirtyTreeBlock } from "../../git/functions/startup-dirty-tree-block.js";
 import {
   classifyResearchForRouting as classifyResearchForRoutingImpl,
   createInitialResearchOrPlanJob as createInitialResearchOrPlanJobImpl,
@@ -1910,26 +1911,37 @@ async function cmdGo() {
     return;
   }
 
-  // If queued items exist, create research+plan jobs
-  if (queued.length > 0) {
-    console.log(`\n${C.bold}  Pipeline — ${queued.length} work item(s)${C.reset}\n`);
-    for (const wi of queued) {
-      console.log(`    ${C.bold}[WI#${wi.id}]${C.reset} ${wi.title.slice(0, 60)}`);
-    }
+  // If queued items exist, create research+plan jobs — but only when the
+  // run's startup dirty-tree guard will let it boot, so a blocked run leaves
+  // the queue untouched.
+  const planning = await planQueuedWorkItemsUnlessStartupBlocked(queued, {
+    checkStartupDirtyTree: async () => (await getGitWorkflowHelpers()).checkStartupDirtyTreeAsync({ reason: "run start" }),
+    plan: (toPlan) => {
+      console.log(`\n${C.bold}  Pipeline — ${toPlan.length} work item(s)${C.reset}\n`);
+      for (const wi of toPlan) {
+        console.log(`    ${C.bold}[WI#${wi.id}]${C.reset} ${wi.title.slice(0, 60)}`);
+      }
 
-    for (const wi of queued) {
-      const effectiveWi = persistIterativeRedTeamPlanIfRequested(wi);
-      updateWorkItemStatus(effectiveWi.id, "planning");
-      const deepthinkBudget = getResearchBudget(effectiveWi);
-      const metadata = parseWorkItemMetadata(effectiveWi);
-      createInitialResearchOrPlanJob(effectiveWi, {
-        deepthinkBudget,
-        deepthinkBudgetExplicit: metadata.research_budget_explicit === true,
-        source: "go",
-        redTeamPlan: shouldUseRedTeamPlanForWorkItem(effectiveWi),
-        routing: classifyResearchForRouting({ workItem: effectiveWi, source: "go", live: true }),
-      });
-    }
+      for (const wi of toPlan) {
+        const effectiveWi = persistIterativeRedTeamPlanIfRequested(wi);
+        updateWorkItemStatus(effectiveWi.id, "planning");
+        const deepthinkBudget = getResearchBudget(effectiveWi);
+        const metadata = parseWorkItemMetadata(effectiveWi);
+        createInitialResearchOrPlanJob(effectiveWi, {
+          deepthinkBudget,
+          deepthinkBudgetExplicit: metadata.research_budget_explicit === true,
+          source: "go",
+          redTeamPlan: shouldUseRedTeamPlanForWorkItem(effectiveWi),
+          routing: classifyResearchForRouting({ workItem: effectiveWi, source: "go", live: true }),
+        });
+      }
+    },
+  });
+  if (planning.blocked) {
+    recordStartupDirtyTreeBlock(planning.blocked, { reason: "run start", logEvent, log });
+    console.log(`\n  ${C.yellow}Run blocked: ${planning.blocked.message}${C.reset}\n`);
+    process.exitCode = 2;
+    return;
   }
 
   // Now run everything
@@ -2658,14 +2670,26 @@ async function cmdServe() {
 async function cmdGate() {
   const { runGateCommand } = await loadGateCommandModule();
   const result = await runGateCommand(process.argv.slice(3), { projectDir: PROJECT_DIR });
+  if (result.ok && result.subcommand === "show") {
+    console.log(`\n${result.lines.join("\n")}\n`);
+    return result;
+  }
   if (result.ok) {
     const wiLabel = result.work_item_id ? ` for WI#${result.work_item_id}` : "";
+    if (result.pending) {
+      console.log(`\n  ${C.cyan}Gate job #${result.job_id}${wiLabel}: ${result.message || "answer reserved for the active run."}${C.reset}\n`);
+      return result;
+    }
     const feedbackLabel = result.feedback ? " with feedback" : "";
-    console.log(`\n  ${C.green}Resolved gate job #${result.job_id}${wiLabel} with ${result.action}${feedbackLabel}.${C.reset}\n`);
+    const answerLabel = result.answer_text != null ? "your answer" : result.action;
+    console.log(`\n  ${C.green}Resolved gate job #${result.job_id}${wiLabel} with ${answerLabel}${feedbackLabel}.${C.reset}\n`);
     return result;
   }
   if (result.reason === "usage") {
     COMMAND_USAGE.gate();
+  } else if (result.reason === "answer_required") {
+    console.error(`\n  ${C.red}Gate job #${result.job_id} has no choices; it takes a free-text answer.${C.reset}`);
+    console.error(`  ${C.dim}posse gate answer ${result.job_id} --text "your answer"   (posse gate show ${result.job_id} prints the question)${C.reset}\n`);
   } else if (result.reason === "invalid_action") {
     const choices = result.choices?.length ? result.choices.join(", ") : "none";
     console.error(`\n  ${C.red}Action is not valid for gate job #${result.job_id}.${C.reset}`);
@@ -2711,7 +2735,10 @@ const COMMAND_USAGE = {
   },
   gate: () => {
     console.log(`\n  Usage: posse gate answer <gate-job-id> <action> [--feedback "details"]`);
-    console.log(`  Resolve a parked human gate without starting the scheduler.`);
+    console.log(`         posse gate answer <gate-job-id> --text "answer"   (a gate without choices)`);
+    console.log(`         posse gate show <gate-job-id>   (alias: gate diff)`);
+    console.log(`  Resolve a parked human gate without starting the scheduler, or show its question,`);
+    console.log(`  choices and, for a verdict on code, the diff it judges.`);
     console.log(`  ${C.dim}Common actions: pass, fail, retry, replan, skip. The gate's catalogued choices remain authoritative.${C.reset}\n`);
   },
   serve: () => {
@@ -2907,6 +2934,8 @@ ${aliasDiagnostic}
     ${C.cyan}review${C.reset}     Approve/reject completed work items
     ${C.cyan}gate answer${C.reset} Resolve a parked human gate by job ID
     ${C.dim}             gate answer <gate-job-id> pass|fail|retry|replan|skip [--feedback "…"]${C.reset}
+    ${C.dim}             gate answer <gate-job-id> --text "…"  (a gate without choices)${C.reset}
+    ${C.dim}             gate show <gate-job-id>  (question, choices and the diff a verdict judges)${C.reset}
     ${C.cyan}events${C.reset}     Show event log (audit trail)
     ${C.dim}             events [jobId] [--session]${C.reset}
     ${C.cyan}timeline${C.reset}   Full execution chain for a work item

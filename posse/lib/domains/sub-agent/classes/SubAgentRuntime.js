@@ -103,6 +103,18 @@ function boundedString(value, label, max) {
   return text;
 }
 
+// A child question over the intent size is a soft cap: the question is
+// dispatched as written and the overage recorded. Refusing it saves a few
+// hundred input tokens by making the parent regenerate its whole call.
+function softCappedIntent(value, label, overages) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `${label} is required`, { stage: "validation" });
+  if (text.length > SUB_AGENT_LIMITS.maxIntentChars) {
+    overages.push({ field: label, chars: text.length, soft_cap: SUB_AGENT_LIMITS.maxIntentChars });
+  }
+  return text;
+}
+
 function positiveId(value) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : null;
@@ -1660,7 +1672,12 @@ export class SubAgentRuntime {
   async execute(args, { context = {}, admissionSignal = null } = {}) {
     const parentCallId = positiveId(context.agentCallId ?? context.agent_call_id);
     if (!parentCallId) throw runtimeError("SUB_AGENT_CONTEXT_INVALID", "sub_agent requires an active parent agent call", { stage: "admission" });
-    if (Buffer.byteLength(JSON.stringify(args ?? null), "utf8") > SUB_AGENT_LIMITS.maxRequestBytes) {
+    // Research questions are soft-capped (softCappedIntent), so a research
+    // batch is not refused for its total size either.
+    const requestBytes = Buffer.byteLength(JSON.stringify(args ?? null), "utf8");
+    const researchOnly = Array.isArray(args?.requests) && args.requests.length > 0
+      && args.requests.every((item) => item?.profile === RESEARCH_CHILD_PROFILE);
+    if (requestBytes > SUB_AGENT_LIMITS.maxRequestBytes && !researchOnly) {
       throw runtimeError("SUB_AGENT_TOO_LARGE", `sub_agent exceeds ${SUB_AGENT_LIMITS.maxRequestBytes} bytes`, { stage: "validation" });
     }
     const input = exactObject(args, ["op", "protocol", "requests", "completion", "batch_id", "wait_ms"], "sub_agent");
@@ -1808,6 +1825,7 @@ export class SubAgentRuntime {
 
     const seenRequests = new Set();
     const repairs = [];
+    const intentOverages = [];
     const normalized = input.requests.map((raw, requestIndex) => {
       const request = exactObject(raw, ["id", "profile", "intent", "inputs", "anchors", "budget", "agent_type"], `requests[${requestIndex}]`);
       const id = boundedString(request.id, `requests[${requestIndex}].id`, 40);
@@ -1847,7 +1865,7 @@ export class SubAgentRuntime {
         return {
           id, profile: RESEARCH_CHILD_PROFILE, agentType: request.agent_type,
 
-          intent: boundedString(request.intent, "research intent", SUB_AGENT_LIMITS.maxIntentChars),
+          intent: softCappedIntent(request.intent, `requests[${requestIndex}].intent`, intentOverages),
           timeoutMs: Math.max(5000, Math.min(policy.childTimeoutMs, budget.timeout_ms || policy.childTimeoutMs)),
           maxTurns: Math.min(policy.childMaxTurns, budget.max_turns || policy.childMaxTurns),
           reasoningEffort: PLANNER_RESEARCH_EFFORT_VALUES[Math.min(PLANNER_RESEARCH_EFFORT_VALUES.indexOf(effort), PLANNER_RESEARCH_EFFORT_VALUES.indexOf(policy.effortCeiling))],
@@ -1864,11 +1882,7 @@ export class SubAgentRuntime {
       if (request.profile !== "citation_synthesis.v1") {
         throw runtimeError("SUB_AGENT_PROFILE_INVALID", "Only citation_synthesis.v1 is supported", { stage: "validation" });
       }
-      const intent = boundedString(
-        request.intent,
-        `requests[${requestIndex}].intent`,
-        SUB_AGENT_LIMITS.maxIntentChars,
-      );
+      const intent = softCappedIntent(request.intent, `requests[${requestIndex}].intent`, intentOverages);
       if (!Array.isArray(request.inputs) || request.inputs.length < 1 || request.inputs.length > SUB_AGENT_LIMITS.maxInputs) {
         throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `requests[${requestIndex}].inputs must contain one to three entries`, { stage: "validation" });
       }
@@ -1910,6 +1924,15 @@ export class SubAgentRuntime {
         executeInput: registration.executeInput,
       };
     });
+
+    if (intentOverages.length > 0) {
+      recordResearchChildObservation(
+        context,
+        SUB_AGENT_OBSERVATION_TYPES.INTENT_OVERSIZED,
+        `Dispatched ${intentOverages.length} child question(s) over the ${SUB_AGENT_LIMITS.maxIntentChars}-character soft cap`,
+        { parent_agent_call_id: parentCallId, overages: intentOverages },
+      );
+    }
 
     // Requests are validated before any wait, so a malformed batch fails fast.
     const waiting = this.#reserveCapacity(normalized.length, {

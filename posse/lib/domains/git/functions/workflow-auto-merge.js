@@ -273,7 +273,10 @@ export function createAutoMergeWorkflowHelpers(context, {
           }
         } else {
           failedWorkItemIds.add(wi.id);
-          markWorkItemMergeFailed(wi.id);
+          markWorkItemMergeFailed(wi.id, {
+            message: mergeResultText(result, "merge failed"),
+            targetBranch,
+          });
           logEvent({
             work_item_id: wi.id,
             event_type: EVENT_TYPES.WORK_ITEM_MERGE_FAILED,

@@ -131,6 +131,7 @@ import {
   readActiveWorktreeSentinel as readActiveWorktreeSentinelFromModule,
   setUpWorktreeForJob as setUpWorktreeForJobFromModule,
 } from "../functions/helpers/worktree-lifecycle.js";
+import { isSentinelProcessAlive } from "../functions/helpers/worktree-sentinel.js";
 import {
   gateWaitingLanePlannerReadiness as gateWaitingLanePlannerReadinessFromModule,
 } from "../functions/helpers/waiting-lane-planner-readiness.js";
@@ -260,7 +261,6 @@ import {
   artifactTaskSlug as _artifactTaskSlug,
   buildIntermediateReportTask as _buildIntermediateReportTask,
   isBogusResearchPlaceholderPayload as _isBogusResearchPlaceholderPayload,
-  isProcessAlive as _isProcessAlive,
   isProviderError as _isProviderError,
   latestArtifactText as _latestArtifactText,
   loadNudges as _loadNudges,
@@ -1030,8 +1030,7 @@ export class Worker {
       }
       try {
         const sentinel = readActiveWorktreeSentinelFromModule(ctx.wtPath);
-        const sentinelPid = sentinel?.payload?.pid;
-        const sentinelLive = sentinelPid != null ? _isProcessAlive(sentinelPid) : null;
+        const sentinelLive = sentinel ? isSentinelProcessAlive(sentinel.payload) : null;
         if (sentinel && sentinelLive !== false) {
           skippedActive++;
           continue;
@@ -1120,8 +1119,7 @@ export class Worker {
       }
       try {
         const sentinel = await this._readActiveWorktreeSentinelAtRootAsync(ctx.wtPath);
-        const sentinelPid = sentinel?.payload?.pid;
-        const sentinelLive = sentinelPid != null ? _isProcessAlive(sentinelPid) : null;
+        const sentinelLive = sentinel ? isSentinelProcessAlive(sentinel.payload) : null;
         if (sentinel && sentinelLive !== false) {
           skippedActive++;
           continue;
@@ -1278,7 +1276,14 @@ export class Worker {
         reasoningEffort: "low",
         maxTurns: 1,
         activity: `json-repair: ${shortJobTitleFromModule(job).slice(0, 30)}`,
-      }, { job_id: job.id, work_item_id: job.work_item_id, cwd: this.projectDir });
+      }, {
+        job_id: job.id,
+        work_item_id: job.work_item_id,
+        cwd: this.projectDir,
+        // A repair call is not the job's execution: its fallback provider and
+        // cheap repair model must not become the job's provider/model pin.
+        persistJobProvider: false,
+      });
 
       const result = extractJson(output);
       // Reject empty arrays — the caller always needs a non-empty array,

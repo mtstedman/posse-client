@@ -27,12 +27,12 @@ import { runHookAsync } from "../../../git/functions/hooks.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import {
   gitCurrentHashAsync,
-  gitExecAsync,
   gitHasChangesAsync,
 } from "../../../git/functions/utils.js";
 import {
   gitCommitAllAsync as gitCommitAllAsyncFromModule,
 } from "../../../git/functions/commit-scope.js";
+import { listAttemptCommittedFilesAsync } from "../../../git/functions/attempt-committed-files.js";
 import {
   snapshotAndResetDirtyWorktreeAsync as snapshotAndResetDirtyWorktreeAsyncFromModule,
 } from "../../../git/functions/worktree.js";
@@ -620,6 +620,7 @@ export async function handlePostExecutionForWorker({
         let filesCommitted = [];
         let filesCommittedUnknown = false;
         let filesCommittedError = null;
+        let mergeResolutionFiles = [];
         let committedHash = null;
         let commitBaseHash = null;
         let branchNetDiff = null;
@@ -1034,16 +1035,26 @@ export async function handlePostExecutionForWorker({
               hasFileChanges = !(mergeCompleted && mergeTreeChanged === false);
               committedHash = commitHash;
               setAttemptCommitHash(attempt.id, commitHash, headBefore);
-              // Capture what was actually committed (ground truth for assessor)
+              // Capture what was actually committed (ground truth for assessor).
+              // A completed target merge contributes target-branch content
+              // that is not this job's output; attribute it to the merge.
+              let targetMergeFiles = [];
               try {
-                filesCommitted = (await gitExecAsync(["diff", "--no-renames", "--name-only", "--relative", headBefore, commitHash], wtPath))
-                  .split("\n")
-                  .map((line) => String(line || "").replace(/\\/g, "/").trim())
-                  .filter(Boolean);
+                ({
+                  files: filesCommitted,
+                  mergeResolutionFiles,
+                  targetMergeFiles,
+                } = await listAttemptCommittedFilesAsync({
+                  cwd: wtPath,
+                  commitHash,
+                  baseHash: headBefore,
+                  projectDir: this.projectDir,
+                }));
                 filesCommittedUnknown = false;
                 filesCommittedError = null;
               } catch (err) {
                 filesCommitted = [];
+                mergeResolutionFiles = [];
                 filesCommittedUnknown = true;
                 filesCommittedError = err?.message || String(err);
               }
@@ -1061,6 +1072,9 @@ export async function handlePostExecutionForWorker({
                   files_committed: filesCommitted,
                   files_committed_unknown: filesCommittedUnknown,
                   files_committed_error: filesCommittedError,
+                  merge_resolution_files: mergeResolutionFiles,
+                  target_merge_files: targetMergeFiles.slice(0, 50),
+                  target_merge_file_count: targetMergeFiles.length,
                   files_reverted: filesReverted,
                   created_via_modify_scope: createdViaModifyScope,
                   skipped_ignored_modify_files: skippedIgnoredModifyFiles || [],
@@ -1144,6 +1158,7 @@ export async function handlePostExecutionForWorker({
                       filesCommitted,
                       filesCommittedUnknown,
                       filesCommittedError,
+                      mergeResolutionFiles,
                       filesReverted,
                       hasFileChanges: true,
                       job,
@@ -1257,6 +1272,7 @@ export async function handlePostExecutionForWorker({
                       filesCommitted,
                       filesCommittedUnknown,
                       filesCommittedError,
+                      mergeResolutionFiles,
                       filesReverted,
                       hasFileChanges: true,
                       job,
@@ -1530,7 +1546,12 @@ export async function handlePostExecutionForWorker({
           hasFileChanges = true;
           preAssessAlreadyVerified = false;
           setAttemptCommitHash(attempt.id, committedHash, commitBaseHash);
-          filesCommitted = (await gitExecAsync(["diff", "--name-only", "--relative", commitBaseHash, committedHash], wtPath)).split("\n").filter(Boolean);
+          ({ files: filesCommitted, mergeResolutionFiles } = await listAttemptCommittedFilesAsync({
+            cwd: wtPath,
+            commitHash: committedHash,
+            baseHash: commitBaseHash,
+            projectDir: this.projectDir,
+          }));
           const refresh = await this._kickAtlasReindex(job, committedHash);
           if (refresh?.emission) {
             const payload = this.parsePayload(job);
@@ -1955,6 +1976,7 @@ export async function handlePostExecutionForWorker({
           filesCommitted,
           filesCommittedUnknown,
           filesCommittedError,
+          mergeResolutionFiles,
           filesReverted,
           hasFileChanges,
           job,

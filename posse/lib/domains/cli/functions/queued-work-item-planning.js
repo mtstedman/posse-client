@@ -73,3 +73,27 @@ export function selectQueuedWorkItemsToPlan() {
   }
   return { toPlan, skipped };
 }
+
+/**
+ * `posse go`'s planning step: plan the queued work items only when the run's
+ * startup dirty-tree guard will let the run boot. Planning moves each work
+ * item to "planning" and creates its plan job; it ran before the guard, so a
+ * blocked run exited 2 with the queue already changed (fiscal-wizard run
+ * 2026-10-01T16-54-02: WI 2 -> planning, plan job 16, then "Run blocked").
+ * A check that fails to run does not block here; the run's own guard reports
+ * it.
+ *
+ * @param {object[]} queued work items selected by selectQueuedWorkItemsToPlan
+ * @param {{ checkStartupDirtyTree: () => Promise<object>, plan: (queued: object[]) => (void|Promise<void>) }} steps
+ * @returns {Promise<{ blocked: object|null }>} the guard's blocked result when planning was skipped
+ */
+export async function planQueuedWorkItemsUnlessStartupBlocked(queued, { checkStartupDirtyTree, plan }) {
+  if (!Array.isArray(queued) || queued.length === 0) return { blocked: null };
+  let check = null;
+  try {
+    check = await checkStartupDirtyTree();
+  } catch { /* infrastructure failure: the run's startup guard reports it */ }
+  if (check?.ok === false && check?.blocked === true) return { blocked: check };
+  await plan(queued);
+  return { blocked: null };
+}

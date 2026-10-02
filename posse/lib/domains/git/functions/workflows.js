@@ -41,6 +41,7 @@ export function createGitWorkflowHelpers(options = {}) {
 
   return {
     auditWorktreeState: review.auditWorktreeState,
+    checkStartupDirtyTreeAsync: startup.checkStartupDirtyTreeAsync,
     collectDirtyState: review.collectDirtyState,
     collectDirtyStateAsync: review.collectDirtyStateAsync,
     ensureCleanTargetBranch: startup.ensureCleanTargetBranch,

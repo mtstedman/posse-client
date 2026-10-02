@@ -23,6 +23,7 @@ import {
 } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { gitCommitAll, gitCommitAllAsync } from "../../../git/functions/commit-scope.js";
+import { listAttemptCommittedFilesAsync } from "../../../git/functions/attempt-committed-files.js";
 import { gitCurrentHash, gitCurrentHashAsync, gitExec, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
 import {
   snapshotAndResetDirtyWorktree,
@@ -487,13 +488,19 @@ export async function commitScopedPartialWorkAsync(worker, job, attempt, wtPath,
   }
 
   let filesCommitted = [];
+  let mergeResolutionFiles = [];
   try {
-    filesCommitted = (await gitExecAsync(["diff", "--name-only", "--relative", headBefore, commitHash], wtPath))
-      .split("\n")
-      .map((line) => String(line || "").replace(/\\/g, "/").trim())
-      .filter(Boolean);
+    // A partial commit can complete a pending target merge; that merge's
+    // target content is not this job's output.
+    ({ files: filesCommitted, mergeResolutionFiles } = await listAttemptCommittedFilesAsync({
+      cwd: wtPath,
+      commitHash,
+      baseHash: headBefore,
+      projectDir: worker?.projectDir || null,
+    }));
   } catch {
     filesCommitted = state.inScopePaths;
+    mergeResolutionFiles = [];
   }
 
   if (attempt?.id) setAttemptCommitHash(attempt.id, commitHash, headBefore);
@@ -539,7 +546,9 @@ export async function commitScopedPartialWorkAsync(worker, job, attempt, wtPath,
   return {
     committed: true,
     committedHash: commitHash,
+    commitBaseHash: headBefore,
     filesCommitted,
+    mergeResolutionFiles,
     filesReverted: result.reverted || [],
     state,
     result,

@@ -8,6 +8,7 @@ import { now } from "../../queue/functions/common.js";
 import { jobHasLiveLeaseAt } from "../../queue/functions/lease-state.js";
 import {
   answerWorkItemQuestionChoice,
+  answerWorkItemQuestionText,
   projectWorkItemInteractions,
 } from "../../queue/functions/interaction-contract.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
@@ -200,32 +201,43 @@ export async function answerHumanInput(jobId, args = {}, {
     const freshContract = getHumanGate(id);
     if (fresh?.status === "waiting_on_human" && jobHasLiveLeaseAt(fresh, now())) {
       const generation = String(freshContract?.generation || 1);
-      const projected = projectWorkItemInteractions({ work_item_id: fresh.work_item_id || current.work_item_id });
-      const question = projected.questions.find((entry) => entry.question_id === `gate:${id}:0`);
-      const structuredChoices = new Set((question?.choices || []).map((choice) => choice.choice_id));
-      const requestedChoice = selectedChoice || latestAnswerText(answers);
-      const choiceId = structuredChoices.has(requestedChoice)
-        ? requestedChoice
-        : (STRUCTURED_CHOICE_ALIASES[requestedChoice] || []).find((choice) => structuredChoices.has(choice))
-          || requestedChoice;
-      const actionId = String(args.action_id || `gate-answer:${crypto.createHash("sha256")
-        .update(`${id}:${generation}:${choiceId}`)
-        .digest("hex")}`);
-      const reserved = await answerWorkItemQuestionChoice({
-        action_id: actionId,
+      const target = {
         work_item_id: String(fresh.work_item_id || current.work_item_id),
         job_id: String(id),
         question_id: `gate:${id}:0`,
         question_generation: generation,
-        choice_id: choiceId,
         source: args.source || "terminal",
         author: args.author || "operator",
-      }, {
-        // The live-owner branch returns before executing this callback. If the
-        // lease disappears during validation, fail closed instead of claiming
-        // or resolving from the secondary process.
-        executeTransition: async () => ({ ok: false, reason: "owner_lease_changed" }),
-      });
+      };
+      let actionId;
+      let reserved;
+      if (choices.length === 0) {
+        // A choice-less gate (a clarification) takes the text itself, reserved
+        // for the owning run's prompt like a choice.
+        const text = latestAnswerText(answers);
+        actionId = String(args.action_id || `gate-answer:${crypto.createHash("sha256")
+          .update(`${id}:${generation}:text:${text}`)
+          .digest("hex")}`);
+        reserved = answerWorkItemQuestionText({ ...target, action_id: actionId, answer_text: text });
+      } else {
+        const projected = projectWorkItemInteractions({ work_item_id: fresh.work_item_id || current.work_item_id });
+        const question = projected.questions.find((entry) => entry.question_id === `gate:${id}:0`);
+        const structuredChoices = new Set((question?.choices || []).map((choice) => choice.choice_id));
+        const requestedChoice = selectedChoice || latestAnswerText(answers);
+        const choiceId = structuredChoices.has(requestedChoice)
+          ? requestedChoice
+          : (STRUCTURED_CHOICE_ALIASES[requestedChoice] || []).find((choice) => structuredChoices.has(choice))
+            || requestedChoice;
+        actionId = String(args.action_id || `gate-answer:${crypto.createHash("sha256")
+          .update(`${id}:${generation}:${choiceId}`)
+          .digest("hex")}`);
+        reserved = await answerWorkItemQuestionChoice({ ...target, action_id: actionId, choice_id: choiceId }, {
+          // The live-owner branch returns before executing this callback. If the
+          // lease disappears during validation, fail closed instead of claiming
+          // or resolving from the secondary process.
+          executeTransition: async () => ({ ok: false, reason: "owner_lease_changed" }),
+        });
+      }
       if (reserved.outcome === "pending" || reserved.outcome === "accepted") {
         return {
           ok: true,

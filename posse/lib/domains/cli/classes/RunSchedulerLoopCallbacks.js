@@ -230,7 +230,11 @@ export class RunSchedulerLoopCallbacks {
       this.pendingReviewAutoMergeAttempts.clear();
     }
     try {
-      this.surfaceActionableHumanGates(activeJobs);
+      // activeJobs is the scheduler's closeout set, which leaves out push
+      // offers and other parked gates: it is not the list of open gates, so
+      // it must not withdraw a prompt the operator opened explicitly. Queue
+      // snapshots carry every job and withdraw prompts of closed gates.
+      this.surfaceActionableHumanGates(activeJobs, { authoritative: false });
     } catch (err) {
       const msg = `Could not surface pending human gate: ${err?.message || err}`;
       if (display) display.addEvent(`${this.C.red}${msg}${this.C.reset}`);

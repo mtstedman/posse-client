@@ -45,9 +45,15 @@ function activeWorktreeSentinelPath(wtPath, { ensureDir = false } = {}) {
 export function writeActiveWorktreeSentinel(wtPath, payload = {}) {
   const sentinelPath = activeWorktreeSentinelPath(wtPath, { ensureDir: true });
   if (!sentinelPath) return null;
+  const writtenAt = new Date().toISOString();
+  const current = readActiveWorktreeSentinel(wtPath);
+  const jobs = sentinelEntries(current?.payload)
+    .filter((entry) => Number(entry?.jobId) !== Number(payload?.jobId));
+  jobs.push({ ...payload, written_at: writtenAt });
   fs.writeFileSync(sentinelPath, `${JSON.stringify({
     ...payload,
-    written_at: new Date().toISOString(),
+    written_at: writtenAt,
+    jobs,
   })}\n`, "utf-8");
   return sentinelPath;
 }
@@ -65,21 +71,46 @@ export function readActiveWorktreeSentinel(wtPath) {
 }
 
 export function isSentinelProcessAlive(payload = {}) {
-  const pid = Number(payload?.pid);
-  if (!Number.isInteger(pid) || pid <= 0) return null;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    if (err?.code === "ESRCH") return false;
-    return null;
+  let unknown = false;
+  for (const entry of sentinelEntries(payload)) {
+    const pid = Number(entry?.pid);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      unknown = true;
+      continue;
+    }
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      if (err?.code !== "ESRCH") unknown = true;
+    }
   }
+  return unknown ? null : false;
 }
 
 export function clearActiveWorktreeSentinel(wtPath, { jobId = null } = {}) {
   const current = readActiveWorktreeSentinel(wtPath);
   if (!current?.sentinelPath) return false;
-  if (jobId != null && current?.payload?.jobId != null && Number(current.payload.jobId) !== Number(jobId)) {
+  const entries = sentinelEntries(current.payload);
+  if (jobId != null) {
+    const remaining = entries.filter((entry) => Number(entry?.jobId) !== Number(jobId));
+    if (remaining.length < entries.length) {
+      if (remaining.length === 0) {
+        try {
+          fs.rmSync(current.sentinelPath, { force: true });
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      const latest = remaining[remaining.length - 1];
+      try {
+        fs.writeFileSync(current.sentinelPath, `${JSON.stringify({ ...latest, jobs: remaining })}\n`, "utf-8");
+        return true;
+      } catch {
+        return false;
+      }
+    }
     const alive = isSentinelProcessAlive(current.payload);
     if (alive === true) return false;
   }
@@ -91,14 +122,34 @@ export function clearActiveWorktreeSentinel(wtPath, { jobId = null } = {}) {
   }
 }
 
-export function sentinelJobStillActive(payload = {}) {
-  const jobId = Number(payload?.jobId);
-  if (!Number.isInteger(jobId) || jobId <= 0) return true;
-  try {
-    const job = getJob(jobId);
-    if (!job) return false;
-    return !TERMINAL_JOB_STATUS_SET.has(job.status);
-  } catch {
-    return true;
+export function sentinelEntries(payload) {
+  if (Array.isArray(payload?.jobs)) {
+    return payload.jobs.filter((entry) => entry && typeof entry === "object");
   }
+  return payload && typeof payload === "object" ? [payload] : [];
+}
+
+export function sentinelHasOtherLiveJob(payload = {}, jobId = null) {
+  let unknown = false;
+  for (const entry of sentinelEntries(payload)) {
+    if (jobId != null && Number(entry?.jobId) === Number(jobId)) continue;
+    const alive = isSentinelProcessAlive(entry);
+    if (alive === true) return true;
+    if (alive == null) unknown = true;
+  }
+  return unknown ? null : false;
+}
+
+export function sentinelJobStillActive(payload = {}) {
+  for (const entry of sentinelEntries(payload)) {
+    const jobId = Number(entry?.jobId);
+    if (!Number.isInteger(jobId) || jobId <= 0) return true;
+    try {
+      const job = getJob(jobId);
+      if (job && !TERMINAL_JOB_STATUS_SET.has(job.status)) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
 }

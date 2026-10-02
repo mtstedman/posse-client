@@ -52,6 +52,7 @@ export const MERGE_REVIEW_MIN_RISK = 4;
 // Gate payload key set when "fail" requeued the work item: that answer was
 // spent on the rejection and no longer holds the reworked work item.
 export const MERGE_VERIFICATION_REJECTION_KEY = "rejection_requeue";
+export const MERGE_FAILURE_RECOVERY_KEY = "merge_failure_recovery";
 
 const IMPLEMENTATION_JOB_TYPES = new Set(["dev", "fix"]);
 const SCOPE_FIELDS = Object.freeze(["files_to_modify", "files_to_create", "files_to_delete", "create_roots"]);
@@ -325,6 +326,40 @@ export function mergeVerificationReviewGateJobSpec(workItem, requirement) {
       waived_verifications: requirement.waivers,
       replaced_verifications: requirement.replacements,
       review_triggers: requirement.triggers,
+    }),
+  };
+}
+
+/** A durable operator decision after Git rejected an automatic/manual merge. */
+export function mergeFailureRecoveryGateJobSpec(workItem, {
+  message = null,
+  targetBranch = null,
+} = {}) {
+  const label = `WI#${workItem.id}${workItem.title ? ` "${String(workItem.title).slice(0, 80)}"` : ""}`;
+  const detail = String(message || "Git could not merge the work-item branch").trim().slice(0, 1000);
+  const question = [
+    `Merge of ${label}${targetBranch ? ` into ${targetBranch}` : ""} failed: ${detail}.`,
+    "Answer pass to retry the merge after resolving the repository condition, or fail with feedback to send the work item back for rework.",
+  ].join(" ");
+  return {
+    work_item_id: workItem.id,
+    job_type: "human_input",
+    title: `Recover failed merge: WI#${workItem.id}`.slice(0, 160),
+    priority: "high",
+    max_attempts: 1,
+    payload_json: JSON.stringify({
+      review_type: MERGE_VERIFICATION_REVIEW_TYPE,
+      choices: humanInputChoicesForReviewType(MERGE_VERIFICATION_REVIEW_TYPE),
+      questions: [question],
+      prompt: question,
+      context: detail,
+      branch_name: workItem.branch_name || null,
+      waived_job_ids: [],
+      [MERGE_FAILURE_RECOVERY_KEY]: {
+        failed_at: new Date().toISOString(),
+        target_branch: targetBranch || null,
+        message: detail,
+      },
     }),
   };
 }

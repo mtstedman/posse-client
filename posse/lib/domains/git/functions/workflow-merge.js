@@ -354,7 +354,15 @@ export function createMergeWorkflowHelpers(context, {
       private_worktree: ownsWorktree,
     };
     if (result.refreshed) {
-      log(`Close-out refreshed ${branch} onto ${targetBranch}${result.resolvedFiles.length > 0 ? `; resolved ordering conflicts in ${result.resolvedFiles.join(", ")}` : ""}`, {
+      const restoredNote = [
+        result.restoredFiles?.length > 0
+          ? `; restored work committed inside merges in ${result.restoredFiles.join(", ")}`
+          : "",
+        result.threeWayMergedFiles?.length > 0
+          ? `; 3-way merged work committed inside merges with later target changes in ${result.threeWayMergedFiles.join(", ")}`
+          : "",
+      ].join("");
+      log(`Close-out refreshed ${branch} onto ${targetBranch}${result.resolvedFiles.length > 0 ? `; resolved ordering conflicts in ${result.resolvedFiles.join(", ")}` : ""}${restoredNote}`, {
         json: {
           ...detail,
           closeout_refreshed: true,
@@ -362,6 +370,8 @@ export function createMergeWorkflowHelpers(context, {
           dropped_handoff_sync_commits: result.dropped,
           skipped_empty_commits: result.skipped,
           resolved_files: result.resolvedFiles,
+          restored_files: result.restoredFiles || [],
+          three_way_merged_files: result.threeWayMergedFiles || [],
           resolution_rules: result.rules,
           test_command: result.testCommand,
         },

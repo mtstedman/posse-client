@@ -50,6 +50,7 @@ import {
 import {
   gitExecAsync,
 } from "../../../git/functions/utils.js";
+import { listAttemptCommittedFilesAsync } from "../../../git/functions/attempt-committed-files.js";
 import {
   recordObservation,
 } from "../../../observability/functions/observations.js";
@@ -431,32 +432,27 @@ export class AssessmentHandoffAdapter {
           || new Error(configuredVerification.message || "Pre-assessment hook failed");
       }
       let filesCommitted = [];
+      let mergeResolutionFiles = [];
       let filesCommittedUnknown = false;
       let filesCommittedError = null;
       // Attempts persist the pre-commit HEAD, so multi-commit attempts diff
       // base..head; older rows without a base fall back to the final commit.
+      // Content a completed target merge brought in is not the job's output.
       const commitBaseHash = assessmentSource.commitBaseHash;
-      const commitDiffRevs = assessmentSource.commitHash
-        ? (commitBaseHash
-          ? [commitBaseHash, assessmentSource.commitHash]
-          : [`${assessmentSource.commitHash}^!`])
-        : null;
       // File names must be worktree-root-relative to match the scope contract
       // (the live path computes them in wtPath), not artifact output_root.
       const commitListCwd = wtPath || worker.projectDir;
-      if (commitDiffRevs) {
+      if (assessmentSource.commitHash) {
         try {
-          filesCommitted = (await gitExecAsync([
-            "diff",
-            "--no-renames",
-            "--name-only",
-            "--relative",
-            ...commitDiffRevs,
-          ], commitListCwd))
-            .split("\n")
-            .map((line) => String(line || "").replace(/\\/g, "/").trim())
-            .filter(Boolean);
+          ({ files: filesCommitted, mergeResolutionFiles } = await listAttemptCommittedFilesAsync({
+            cwd: commitListCwd,
+            commitHash: assessmentSource.commitHash,
+            baseHash: commitBaseHash,
+            projectDir: worker.projectDir,
+          }));
         } catch (error) {
+          filesCommitted = [];
+          mergeResolutionFiles = [];
           filesCommittedUnknown = true;
           filesCommittedError = error?.message || String(error);
         }
@@ -475,9 +471,10 @@ export class AssessmentHandoffAdapter {
         files_committed: filesCommitted,
         files_committed_unknown: filesCommittedUnknown,
         files_committed_error: filesCommittedError,
+        merge_resolution_files: mergeResolutionFiles,
         files_reverted: [],
         files_requested: flattenPendingAssessmentFileRequests(pendingFileRequests),
-      }, assessmentCwd);
+      }, assessmentCwd, { projectDir: worker.projectDir });
       const deterministicTestEvidence = renderTestExecutionEvidence(deterministicTestRun ? { ...deterministicTestRun, scope_attribution: testRunScopeAttribution(job.id, deterministicTestRun) } : {});
       if (deterministicTestEvidence) {
         assessmentContext.task_ab_test_evidence = deterministicTestEvidence;
