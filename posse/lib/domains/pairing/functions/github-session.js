@@ -200,6 +200,8 @@ export function prepareSessionSshIdentity(projectDir, sessionId, options = {}) {
     // GitHub key rotation they have already accepted keeps working.
     `  UserKnownHostsFile ${sshConfigQuotedPath(knownHostsFile, platform)} ~/.ssh/known_hosts`,
     "  StrictHostKeyChecking yes",
+    // A network that drops port 22 then fails in seconds, not the OS TCP timeout.
+    "  ConnectTimeout 15",
     "",
   ].join("\n"), { mode: 0o600 });
   return {

@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { adminGitExec } from "../../git/functions/admin-git.js";
 import { gitPushWithGitHubCliFallback } from "../../git/functions/git-push-auth.js";
+import { EMPTY_JOIN_FOLDER_ENTRIES } from "./join-folder.js";
 
 const NETWORK_SCHEMES = new Set(["https:", "http:", "ssh:", "git:"]);
 const NONINTERACTIVE_GIT_ENV = Object.freeze({
@@ -91,8 +92,9 @@ export function assertCleanPairingCheckout(projectDir) {
 // commit to return to, so leaving keeps the last shared state instead.
 export const FRESH_CHECKOUT_HEAD = "0".repeat(40);
 // Entries an otherwise empty folder may hold: Posse creates its own state
-// directory before the join command runs, and Finder leaves .DS_Store.
-const FRESH_CHECKOUT_ALLOWED_ENTRIES = new Set([".posse", ".DS_Store"]);
+// directory before the join command runs, and Finder leaves .DS_Store. The
+// entry script's join-folder choice uses the same set.
+const FRESH_CHECKOUT_ALLOWED_ENTRIES = EMPTY_JOIN_FOLDER_ENTRIES;
 // Finder litter is not the member's work, so the clean-checkout check that
 // follows must not count it (nor the copies Finder adds once files arrive).
 const FRESH_CHECKOUT_EXCLUDES = Object.freeze([".DS_Store"]);
@@ -491,13 +493,16 @@ export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, 
     `+refs/heads/${branch}:${remoteRef}`,
   ], projectDir);
   const remoteOid = git(["rev-parse", "--verify", remoteRef], projectDir, { timeoutMs: 5_000 }).trim();
-  push([
+  // Only a member's join runs this, and the session deploy key is its only
+  // credential: the gh fallback in push() would read the member's own GitHub
+  // token for a repository that account can never reach.
+  git([
     "push",
     "--dry-run",
     `--force-with-lease=refs/heads/${branch}:${remoteOid}`,
     normalizedRemote,
     `${remoteOid}:refs/heads/${branch}`,
-  ], projectDir, normalizedRemote);
+  ], projectDir);
   // A checkout created empty for this join has no history yet; it takes the
   // session's history as its own.
   if (!headIsUnborn(projectDir)) {

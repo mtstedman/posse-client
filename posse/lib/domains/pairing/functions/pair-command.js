@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { createInterface } from "node:readline/promises";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import {
@@ -88,6 +89,7 @@ import {
 import {
   beginPairingPromotion,
   clearPairingPromotionJournal,
+  describePairingPromotion,
   markPairingPromotion,
   promotePairingTrunk,
   readPairingPromotionJournal,
@@ -259,6 +261,9 @@ export function parsePairArgs(argv = []) {
   let historyPreserving = false;
   let approvedSourceOid = null;
   let approvedOriginOid = null;
+  // Join in this clone. The entry script reads it before any folder move
+  // (join-folder.js); here it only has to be valid.
+  let here = false;
   const positional = [];
   const assignFlag = (name, value) => {
     const normalized = String(value || "").trim();
@@ -289,6 +294,10 @@ export function parsePairArgs(argv = []) {
         });
       }
       json = true;
+      continue;
+    }
+    if (arg === "--here") {
+      here = true;
       continue;
     }
     if (arg === "--keep-branch") {
@@ -392,6 +401,11 @@ export function parsePairArgs(argv = []) {
   if (parsed.action !== "host" && (hasRemoteFlag || hasBranchFlag)) {
     const option = hasRemoteFlag ? "--remote" : "--branch";
     throw Object.assign(new Error(`${option} is only valid when hosting a pairing`), {
+      code: "pairing_option_not_allowed",
+    });
+  }
+  if (here && parsed.action !== "join") {
+    throw Object.assign(new Error("--here is only valid with session join"), {
       code: "pairing_option_not_allowed",
     });
   }
@@ -735,6 +749,40 @@ function sessionKeyNotYetAccepted(error) {
     .test(String(error?.message || ""));
 }
 
+// A connection that never reached GitHub (a blocked port, no route, no DNS)
+// also ends with "Could not read from remote repository", but no wait for the
+// session key fixes it, and each retry is one more port-22 connection for the
+// network's scan detector to count. A connection GitHub opened and then
+// dropped or reset ("kex_exchange_identification", "Connection closed by") is
+// left out: GitHub drops connections briefly, and the retry rides that out.
+const SSH_CONNECTION_BLOCKED_PATTERNS = Object.freeze([
+  /ssh: connect to host \S+ port \d+: (?:Connection timed out|Connection refused|No route to host|Network is unreachable)/iu,
+  /ssh: Could not resolve hostname/iu,
+  /Connection timed out during banner exchange/iu,
+]);
+
+/** The ssh line that shows the connection to GitHub never opened, or null. */
+function sshConnectionBlockedLine(error) {
+  const message = String(error?.message || "");
+  if (/Permission denied \(publickey\)/iu.test(message)) return null;
+  return message.split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find((line) => SSH_CONNECTION_BLOCKED_PATTERNS.some((pattern) => pattern.test(line))) || null;
+}
+
+function sshBlockedError(line, cause) {
+  // A failed name lookup is more often a dropped connection (a laptop waking
+  // up) than a firewall, so it gets its own advice.
+  const advice = /Could not resolve hostname/iu.test(line)
+    ? "This computer could not look up github.com; check its internet connection and try again. "
+      + "If it keeps failing, the network may be blocking GitHub."
+    : "A firewall or security tool on this network blocked the SSH connection to GitHub; this is not "
+      + "a problem with the session key. Join from another network.";
+  return Object.assign(new Error(`Could not connect to GitHub over SSH (${line}). ${advice}`), {
+    code: "pairing_github_ssh_blocked", cause,
+  });
+}
+
 async function retryWhileSessionKeyPropagates(operation, {
   delays = SESSION_KEY_RETRY_DELAYS_MS,
   onWait = () => {},
@@ -744,6 +792,8 @@ async function retryWhileSessionKeyPropagates(operation, {
     try {
       return await operation();
     } catch (error) {
+      const blockedLine = sshConnectionBlockedLine(error);
+      if (blockedLine) throw sshBlockedError(blockedLine, error);
       if (attempt >= delays.length || !sessionKeyNotYetAccepted(error)) throw error;
       onWait(attempt + 1, delays[attempt]);
       await wait(delays[attempt]);
@@ -1306,6 +1356,69 @@ async function waitForRemoteMembersToLeave(remoteClient, state, {
 // Every close path (console, `u → close`, `posse session close`, crash
 // recovery) funnels here; the claim keeps two of them from integrating the
 // same session at once.
+function describePromotionBestEffort(root) {
+  try {
+    return describePairingPromotion(root);
+  } catch {
+    // The summary is advisory; approval still checks the exact frozen OIDs.
+    return null;
+  }
+}
+
+// What the host is asked to approve: where it goes, the session's commits and
+// who wrote them, and the files it changes.
+function printPromotionForApproval(C, summary, print = console.log) {
+  if (!summary) return;
+  const kind = summary.strategy === "fast-forward" ? "history-preserving" : "squash";
+  print(`\n  ${C.bold}Ready to publish to ${summary.target}${C.reset} (${kind})`);
+  if (summary.commitCount > 0) {
+    const authors = summary.authors.map((author) => `${author.name} (${author.count})`).join(", ");
+    print(`  ${summary.commitCount} session commit${summary.commitCount === 1 ? "" : "s"} by ${authors}:`);
+    for (const commit of summary.commits) print(`    ${commit.sha} ${commit.author}: ${commit.subject}`);
+    if (summary.commitCount > summary.commits.length) {
+      print(`    ... and ${summary.commitCount - summary.commits.length} more`);
+    }
+  }
+  if (summary.files.length > 0) {
+    print("  Changes:");
+    for (const line of summary.files) print(`    ${line}`);
+    if (summary.moreFiles > 0) print(`    ... and ${summary.moreFiles} more file(s)`);
+  }
+  if (summary.changeSummary) print(`  ${summary.changeSummary}`);
+}
+
+function printPendingApprovalGuidance(C, candidateOid, originOid) {
+  console.log(`  ${C.yellow}Not published.${C.reset} Review and publish it with \`posse session integrate\`, or drop it with \`posse session abandon-integration\`.`);
+  console.log(`  ${C.dim}Scripted approval: posse session integrate --approve-source-oid ${candidateOid} --approve-origin-oid ${originOid}${C.reset}\n`);
+}
+
+// Asks on the terminal only. Returns true or false for the host's answer, and
+// null when there is no one to ask (a closed terminal, piped input): the
+// candidate then stays frozen and only exact OIDs can approve it.
+async function askToPublishPromotion(C, summary, { input = process.stdin, output = process.stdout } = {}) {
+  if (!summary || !input?.isTTY || !output?.isTTY || input.readableEnded) return null;
+  if (input.isRaw) input.setRawMode(false);
+  const prompt = createInterface({ input, output });
+  // Input that ends at the prompt (Ctrl+D, a closed stream) closes readline
+  // without settling the question, so the close itself answers it.
+  const closed = new Promise((resolve) => prompt.once("close", () => resolve(null)));
+  // Publishing takes the whole word: a stray "y" and Enter typed while the
+  // close drained sit in the terminal's buffer and would otherwise answer a
+  // question the host has not read yet.
+  const asked = prompt.question(`\n  Type ${C.bold}yes${C.reset} to publish to ${C.cyan}${summary.target}${C.reset} (anything else keeps it frozen): `);
+  asked.catch(() => {});
+  try {
+    const answer = await Promise.race([asked, closed]);
+    return answer !== null && String(answer).trim().toLowerCase() === "yes";
+  } catch (error) {
+    // Ctrl+C or Ctrl+D at the prompt is a no: the candidate stays frozen.
+    if (error?.name === "AbortError") return false;
+    throw error;
+  } finally {
+    prompt.close();
+  }
+}
+
 async function finishHostShutdown(root, remoteClient, state, options = {}) {
   const claim = claimSessionClose({ stateId: state.id });
   if (!claim.ok) {
@@ -1380,6 +1493,7 @@ async function closeClaimedHostSession(root, remoteClient, state, {
   publish = true,
   keepBranch = false,
   historyPreserving = false,
+  approvalPromptFollows = false,
 } = {}) {
   // A hold stops applying once the close claim exists; clearing it here makes
   // the release visible, since held merges must reach the final sync.
@@ -1493,7 +1607,12 @@ async function closeClaimedHostSession(root, remoteClient, state, {
   if ((!publish || journal?.approval_required === true) && promoted.pending) {
     if (!json) {
       if (journal?.approval_required === true) {
-        console.log(`  ${C.yellow}${promoted.strategy === "fast-forward" ? "History-preserving" : "Squash"} candidate frozen${C.reset}\n  Candidate OID: ${promoted.mergeHash}\n  Origin base OID: ${promoted.targetBaseOid}\n  Approve with: posse session integrate --approve-source-oid ${promoted.mergeHash} --approve-origin-oid ${promoted.targetBaseOid}\n`);
+        // A typed close asks right after this returns and prints the summary
+        // there; otherwise say how to review it later.
+        if (!approvalPromptFollows) {
+          printPromotionForApproval(C, describePromotionBestEffort(root));
+          printPendingApprovalGuidance(C, promoted.mergeHash, promoted.targetBaseOid);
+        }
       } else {
         console.log(`  ${C.yellow}The session's work is committed on local ${promoted.targetBranch} (${String(promoted.mergeHash || "").slice(0, 8)}) but not published.${C.reset}\n`
           + `  Run \`posse session integrate\` to publish it to ${promoted.remote || "origin"}/${promoted.targetBranch}, `
@@ -1667,7 +1786,26 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
         reason: outcome.reason,
         keepBranch: liveState.close_action === "keep-branch",
         historyPreserving: liveState.close_action === "integrate-fast-forward",
+        approvalPromptFollows: outcome.reason === "graceful_close" && !json,
       });
+      // A typed close is the host at the terminal: ask right here. Ctrl+C, a
+      // closed terminal, or a close from elsewhere leave the candidate frozen
+      // for `posse session integrate`.
+      if (outcome.reason === "graceful_close" && !json && promotion?.pending) {
+        const journal = readPairingPromotionJournal();
+        if (journal?.approval_required === true) {
+          const summary = describePromotionBestEffort(root);
+          printPromotionForApproval(C, summary);
+          if (await askToPublishPromotion(C, summary) === true) {
+            const published = await runPendingIntegration({
+              projectDir: root, action: "integrate", C, json,
+              approval: { sourceOid: journal.candidate_sha, originOid: journal.target_base_sha },
+            });
+            return { ok: true, role: "host", outcome: outcome.reason, promotion: published };
+          }
+          printPendingApprovalGuidance(C, journal.candidate_sha, journal.target_base_sha);
+        }
+      }
       return { ok: true, role: "host", outcome: outcome.reason, promotion };
     }
     if (outcome.reason === "scheduler_handoff") {
@@ -2194,7 +2332,9 @@ async function runSessionManagement({ projectDir, remoteClient, action, code, va
     } catch {
       throw Object.assign(new Error("Session scope must be valid JSON"), { code: "pairing_scope_invalid" });
     }
-    const role = String(parsed?.role || "operator");
+    // Narrowing paths keeps the member's role unless the JSON names one; this
+    // used to send "operator" and quietly promote a viewer.
+    const role = parsed?.role == null ? null : String(parsed.role);
     const scopeSet = parsed?.write || parsed;
     status = await remoteClient.setScope(state.relay_token, code, scopeSet, role);
   } else if (action === "policy") {
@@ -2232,9 +2372,12 @@ function runSessionHoldCommand({ action, reason = null, C, json }) {
   return result;
 }
 
-async function runPendingIntegration({ projectDir, action, C, json, approval = null, silent = false }) {
+async function runPendingIntegration({
+  projectDir, action, C, json, approval = null, silent = false, ask = askToPublishPromotion,
+  workflowFactory = undefined,
+}) {
   const root = repositoryRoot(projectDir);
-  const journal = readPairingPromotionJournal();
+  let journal = readPairingPromotionJournal();
   if (!journal) {
     if (approval) throw Object.assign(new Error("There is no frozen promotion to approve"), {
       code: "pairing_promotion_approval_stale",
@@ -2261,21 +2404,53 @@ async function runPendingIntegration({ projectDir, action, C, json, approval = n
     else if (!silent) console.log(`\n  Session integration abandoned${result.candidateRef ? `; candidate preserved at ${result.candidateRef}` : ""}.\n`);
     return result;
   }
-  if (journal.approval_required === true
-    && (approval?.sourceOid !== journal.candidate_sha || approval?.originOid !== journal.target_base_sha)) {
-    throw Object.assign(new Error(
-      `Integration requires --approve-source-oid ${journal.candidate_sha} --approve-origin-oid ${journal.target_base_sha}`,
-    ), { code: "pairing_promotion_approval_required" });
+  let promoted = null;
+  if (journal.approval_required === true && !approval) {
+    // Build the candidate for review: a recovered close may not have built it
+    // yet, and one frozen before origin moved is rebuilt on the new origin.
+    // Nothing is published here.
+    const previousCandidate = journal.candidate_sha || null;
+    const frozen = await retryWhileMergeLockBusy(() => promotePairingTrunk(root, { journal, publish: false, workflowFactory }));
+    if (!frozen.ok) return frozen;
+    if (frozen.pending) {
+      journal = readPairingPromotionJournal();
+      if (previousCandidate && journal.candidate_sha !== previousCandidate && !json && !silent) {
+        console.log(`  ${C.yellow}${frozen.remote || "origin"}/${frozen.targetBranch} moved since the candidate was frozen; rebuilt it on the new origin.${C.reset}`);
+      }
+    } else {
+      // Origin already has the session's work: finish the cleanup below.
+      promoted = frozen;
+    }
+    if (!promoted && !json && !silent) {
+      const summary = describePromotionBestEffort(root);
+      printPromotionForApproval(C, summary);
+      const answer = await ask(C, summary);
+      if (answer === true) {
+        approval = { sourceOid: journal.candidate_sha, originOid: journal.target_base_sha };
+      } else if (answer === false) {
+        console.log(`  ${C.dim}Not published. It stays frozen for \`posse session integrate\` or \`posse session abandon-integration\`.${C.reset}\n`);
+        return { ok: true, published: false, pending: true };
+      }
+    }
   }
-  const promoted = await retryWhileMergeLockBusy(() => promotePairingTrunk(root, {
-    journal,
-    publish: true,
-    approval,
-    onProgress: (message) => {
-      if (!json && !silent) console.log(`  ${C.cyan}[session integrate]${C.reset} ${message}`);
-    },
-  }));
-  if (!promoted.ok) return promoted;
+  if (!promoted) {
+    if (journal.approval_required === true
+      && (approval?.sourceOid !== journal.candidate_sha || approval?.originOid !== journal.target_base_sha)) {
+      throw Object.assign(new Error(
+        `Integration requires --approve-source-oid ${journal.candidate_sha} --approve-origin-oid ${journal.target_base_sha}`,
+      ), { code: "pairing_promotion_approval_required" });
+    }
+    promoted = await retryWhileMergeLockBusy(() => promotePairingTrunk(root, {
+      journal,
+      publish: true,
+      approval,
+      workflowFactory,
+      onProgress: (message) => {
+        if (!json && !silent) console.log(`  ${C.cyan}[session integrate]${C.reset} ${message}`);
+      },
+    }));
+    if (!promoted.ok) return promoted;
+  }
   const state = getLivePairingState();
   const restored = state ? await restoreLocalPairing(root, state) : { ok: true, alreadyLeft: true };
   const cleanup = journal.temporary_repository
@@ -2543,5 +2718,6 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
 
 export const __testPairingCommandInternals = Object.freeze({
   monitorPairing, printMemberChanges, finishHostShutdown, retryWhileSessionKeyPropagates,
-  retireEndedSessionQueueRows, retryWhileMergeLockBusy,
+  retireEndedSessionQueueRows, retryWhileMergeLockBusy, runPendingIntegration, printPromotionForApproval,
+  askToPublishPromotion,
 });

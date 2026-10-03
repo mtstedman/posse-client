@@ -139,6 +139,13 @@ if (process.argv[2] === "automation") {
   }
 }
 
+// A session join typed in any folder runs in a folder of its own. This runs
+// before the application import below, which writes Posse state (run logs,
+// the database) into the current folder.
+const { relocateSessionJoinIfNeeded } = await import("./lib/domains/pairing/functions/join-folder.js");
+const relocatedJoin = await relocateSessionJoinIfNeeded();
+if (relocatedJoin) process.exit(relocatedJoin.exitCode);
+
 // Doctor and update may have to replace Posse's own native Node dependencies.
 // Handle them before the main application imports/opens better-sqlite3; Windows
 // will not unlink a loaded .node module from the live process.

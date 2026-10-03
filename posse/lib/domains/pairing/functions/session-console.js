@@ -27,7 +27,7 @@ const HOST_HELP = Object.freeze([
   ...SHARED_HELP,
   "members       list members and their states",
   "kick <id>     remove a member (id prefix from `members`)",
-  "close         end the session for everyone and integrate its work",
+  "close         end the session for everyone; you approve its work before it is published",
 ]);
 
 const MEMBER_HELP = Object.freeze([
@@ -46,7 +46,7 @@ export function sessionConsoleHelp(role, { observing = false } = {}) {
     lines.push("Ctrl+C        detach this console; posse go keeps the session");
   } else {
     lines.push(role === "host"
-      ? "Ctrl+C        force close + integrate"
+      ? "Ctrl+C        force close (its work waits for your approval)"
       : "Ctrl+C        leave the session and switch back");
   }
   return lines;
@@ -77,7 +77,7 @@ export function parseSessionConsoleLine(line, { role = "host" } = {}) {
   if (command === "go" && rest.length === 0) return { kind: "go" };
   if (LEAVE_COMMANDS.has(command) && rest.length === 0) {
     return host
-      ? { kind: "invalid", message: "You are hosting: type close to end the session for everyone (its work is integrated), or Ctrl+C to force it." }
+      ? { kind: "invalid", message: "You are hosting: type close to end the session for everyone (you approve its work before it is published), or Ctrl+C to force it." }
       : { kind: "leave" };
   }
   if (!host && (HOST_ONLY_COMMANDS.has(command) || (rest.length === 0 && COUNTERSIGN_PATTERN.test(word.toUpperCase())))) {

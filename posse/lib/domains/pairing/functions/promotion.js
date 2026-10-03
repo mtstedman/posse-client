@@ -110,7 +110,10 @@ export function beginPairingPromotion(state, {
     target_ssh_command: state?.original_ssh_command || null,
     temporary_repository: state?.temporary_repository || null,
     strategy,
-    approval_required: strategy === "fast-forward" || state?.submission_approval_enabled === 1,
+    // Everything that leaves the session for the host's real branch waits for
+    // the host, whatever the strategy or who wrote it: a close (or Ctrl+C, or
+    // a closed terminal) only freezes the candidate.
+    approval_required: true,
     phase: "requested",
     reason,
     source_sha: null,
@@ -129,6 +132,50 @@ export function markPairingPromotion(journal, values = {}) {
     ...values,
     updated_at: new Date().toISOString(),
   });
+}
+
+const SUMMARY_MAX_COMMITS = 20;
+const SUMMARY_MAX_FILES = 25;
+// Author names and subjects come from members' commits and reach the host's
+// terminal as they decide; control characters could hide or rewrite lines, and
+// bidirectional overrides could reorder what a line appears to say.
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu;
+const STALE_APPROVAL_MESSAGE = "Origin moved after this candidate was frozen; run `posse session integrate` "
+  + "to rebuild it on the new origin and approve that instead";
+
+/**
+ * What a frozen promotion would publish, for the host to approve: the session
+ * commits it carries and who wrote them, and the change it makes to the
+ * target. Read-only; null until a candidate is frozen.
+ */
+export function describePairingPromotion(projectDir, journal = readPairingPromotionJournal(), { exec = git } = {}) {
+  if (!journal || !SHA_RE.test(String(journal.candidate_sha || ""))
+    || !SHA_RE.test(String(journal.target_base_sha || ""))) return null;
+  const base = journal.target_base_sha;
+  const source = SHA_RE.test(String(journal.source_sha || "")) ? journal.source_sha : null;
+  const lines = (args) => exec(args, projectDir, { timeoutMs: 30_000 }).split(/\r?\n/u).filter((line) => line.trim());
+  const log = source ? lines(["log", "--no-merges", "--format=%h%x1f%an%x1f%s", `${base}..${source}`]) : [];
+  const commits = log.map((line) => {
+    const [sha = "", author = "", subject = ""] = line.split("\x1f");
+    return { sha, author: author.replace(CONTROL_CHARACTERS, ""), subject: subject.replace(CONTROL_CHARACTERS, "") };
+  });
+  const authorCounts = new Map();
+  for (const commit of commits) authorCounts.set(commit.author, (authorCounts.get(commit.author) || 0) + 1);
+  const stat = lines(["diff", "--stat=120", base, journal.candidate_sha]);
+  const changeSummary = stat.length > 0 ? stat.pop().trim() : "";
+  return {
+    target: `${journal.target_remote || journal.remote}/${journal.target_branch}`,
+    strategy: journal.strategy || "squash",
+    sourceOid: source,
+    candidateOid: journal.candidate_sha,
+    baseOid: base,
+    commitCount: commits.length,
+    commits: commits.slice(0, SUMMARY_MAX_COMMITS),
+    authors: [...authorCounts].map(([name, count]) => ({ name, count })),
+    files: stat.slice(0, SUMMARY_MAX_FILES).map((line) => line.trim()),
+    moreFiles: Math.max(0, stat.length - SUMMARY_MAX_FILES),
+    changeSummary,
+  };
 }
 
 export function clearPairingPromotionJournal() {
@@ -413,11 +460,19 @@ async function promoteLocked(projectDir, initialJournal, {
       return { ok: true, sourceBranch, targetBranch, remote,
         strategy: "squash", mergeHash: candidate, recovered: true };
     }
-    if (approvalRequired && candidate && target.sha !== journal.target_base_sha) {
-      throw promotionError("pairing_promotion_approval_stale", "Origin moved after the squash candidate was frozen");
+    // An approval names exact OIDs, so publishing never rebuilds under it. A
+    // build for review (publish: false) rebuilds a candidate whose origin has
+    // moved, so the host is shown and asked about what would really land; the
+    // session's commits stay on its branch, so nothing is lost.
+    if (approvalRequired && candidate && target.sha !== journal.target_base_sha && publish) {
+      throw promotionError("pairing_promotion_approval_stale", STALE_APPROVAL_MESSAGE);
     }
     if (approvalRequired && candidate && current !== candidate) {
-      throw promotionError("pairing_promotion_candidate_moved", "Local target moved after the squash candidate was frozen");
+      throw promotionError("pairing_promotion_candidate_moved",
+        `Local ${targetBranch} moved after the squash candidate ${candidate.slice(0, 8)} was frozen. Keep your new commits `
+          + `on another branch (git branch my-work ${targetBranch}), put ${targetBranch} back on the candidate `
+          + `(git switch ${targetBranch} && git reset --hard ${candidate}), then run \`posse session integrate\` again, `
+          + "or drop it with `posse session abandon-integration`");
     }
 
     // A session that added nothing origin lacks has nothing to integrate.
@@ -504,7 +559,7 @@ async function promoteLocked(projectDir, initialJournal, {
     const refreshed = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
     if (refreshed.sha !== journal.target_base_sha) {
       if (approvalRequired) {
-        throw promotionError("pairing_promotion_approval_stale", "Origin moved after the approved squash candidate was validated");
+        throw promotionError("pairing_promotion_approval_stale", STALE_APPROVAL_MESSAGE);
       }
       onProgress(`${remote}/${targetBranch} advanced; rebuilding the promotion`);
       preserveCandidate(projectDir, journal.session_id, journal.candidate_sha, exec);

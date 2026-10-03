@@ -1694,6 +1694,14 @@ export class Display {
     return this._inputController._startAsk.call(this, ...args);
   }
 
+  _startSessionCommand(...args) {
+    return this._inputController._startSessionCommand.call(this, ...args);
+  }
+
+  _submitSessionCommand(...args) {
+    return this._inputController._submitSessionCommand.call(this, ...args);
+  }
+
   _submitAsk(...args) {
     return this._inputController._submitAsk.call(this, ...args);
   }
@@ -1734,6 +1742,14 @@ export class Display {
 
   _startDiscardPicker(...args) {
     return this._inputController._startDiscardPicker.call(this, ...args);
+  }
+
+  _startMemoryPicker(...args) {
+    return this._inputController._startMemoryPicker.call(this, ...args);
+  }
+
+  _onApprovalMemoryPickerKeypress(...args) {
+    return this._inputController._onApprovalMemoryPickerKeypress.call(this, ...args);
   }
 
   _advanceApproval(...args) {
@@ -1971,6 +1987,10 @@ export class Display {
   }
 
   // ── Discard-files picker overlay ────────────────────────────────────
+
+  _renderMemoryPickerOverlay(...args) {
+    return this._approvalRenderer._renderMemoryPickerOverlay.call(this, ...args);
+  }
 
   _renderDiscardPickerOverlay(...args) {
     return this._approvalRenderer._renderDiscardPickerOverlay.call(this, ...args);

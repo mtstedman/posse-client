@@ -2762,7 +2762,7 @@ const COMMAND_USAGE = {
   session: () => {
     console.log(`\n  Usage:`);
     console.log(`    posse session host [--remote origin] [--branch posse/pair-name]`);
-    console.log(`    posse session join <CODE|posse://session?...>`);
+    console.log(`    posse session join <CODE|posse://session?...> [--here]`);
     console.log(`    posse session admit <COUNTERSIGN>`);
     console.log(`    posse session members|pending`);
     console.log(`    posse session kick <MEMBER-ID>`);
@@ -2778,6 +2778,7 @@ const COMMAND_USAGE = {
     console.log(`    posse session abandon-integration`);
     console.log(`\n  Opens or joins a shared Posse collaboration session.`);
     console.log(`  Joiners wait for the host to confirm their four-character countersign.`);
+    console.log(`  A join typed outside an empty folder runs in ~/posse-sessions/<CODE>; --here joins in this clone instead.`);
     console.log(`  hold keeps this checkout where it is (fetches continue) until resume or 30 minutes pass.\n`);
   },
   unpair: () => {

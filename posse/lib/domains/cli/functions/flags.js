@@ -261,6 +261,8 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "--window-minutes", takesValue: true, category: "filter-value" },
   { name: "--confirmation-code", takesValue: true, category: "filter-value" },
   { name: "--pair-code", takesValue: true, category: "filter-value" },
+  { name: "--approve-source-oid", takesValue: true, category: "filter-value" },
+  { name: "--approve-origin-oid", takesValue: true, category: "filter-value" },
 
   // Boolean flags.
   { name: "--all", takesValue: false, category: "boolean" },
@@ -284,6 +286,8 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "--red-team-iterate", takesValue: false, category: "boolean" },
   { name: "--redteam-iterate", takesValue: false, category: "boolean" },
   { name: "--json", takesValue: false, category: "boolean" },
+  { name: "--keep-branch", takesValue: false, category: "boolean" },
+  { name: "--history-preserving", takesValue: false, category: "boolean" },
   { name: "--stdin-value", takesValue: false, category: "boolean" },
   { name: "--non-interactive", takesValue: false, category: "boolean" },
   { name: "--no-tui", takesValue: false, category: "boolean" },
@@ -303,6 +307,7 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "--no-session-recycle", takesValue: false, category: "boolean" },
   { name: "--oneshot", takesValue: false, category: "boolean" },
   { name: "--pair", takesValue: false, category: "boolean" },
+  { name: "--here", takesValue: false, category: "boolean" },
   { name: "--verbose", takesValue: false, category: "boolean" },
   { name: "-v", takesValue: false, category: "boolean" },
   { name: "--auto", takesValue: false, category: "boolean" },

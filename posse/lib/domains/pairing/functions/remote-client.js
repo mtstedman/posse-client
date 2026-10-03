@@ -479,9 +479,10 @@ export function createPairingRemoteClient({
       token,
       path: `invite/${open ? "open" : "close"}`,
     }),
-    setScope: (token, memberId, scopeSet, role = "operator") => validatedRequest("status", {
+    // A null role keeps the member's current one on the Remote.
+    setScope: (token, memberId, scopeSet, role = null) => validatedRequest("status", {
       token,
-      body: { member_id: memberId, role, scope_set: scopeSet },
+      body: { member_id: memberId, ...(role ? { role } : {}), scope_set: scopeSet },
       path: "members/scope",
     }),
     setPolicy: (token, compute) => validatedRequest("status", {
