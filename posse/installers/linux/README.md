@@ -17,8 +17,9 @@ terminal. Pass options after `bash -s --`, for example
 The script runs only after it has downloaded completely, so a dropped
 connection cannot leave a half-run install.
 
-Each selected indexing language gets its toolchain: Go from your distribution
-(1.21+ needed; older versions are flagged), Rust through rustup with
+Each selected indexing language gets its toolchain: Go 1.21+ (your
+distribution's, or the official go.dev release checked against its published
+SHA-256 and installed per user when the distribution's is older), Rust through rustup with
 rust-analyzer (checked against its published SHA-256, installed per user
 without sudo), PHP with Composer, and Python with pip and venv. TypeScript
 uses the Node the installer always provides; C/C++ needs nothing extra.

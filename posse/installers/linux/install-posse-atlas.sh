@@ -1015,15 +1015,85 @@ install_rust_toolchain() {
   rust_toolchain_present
 }
 
-# scip-go@latest needs a modern Go; older distro releases ship one that lags.
-warn_if_old_go() {
-  scip_language_selected go || return 0
-  command -v go >/dev/null 2>&1 || return 0
+# scip-go needs Go 1.21+, which some distros lag behind (Debian 12 ships
+# 1.19). The official go.dev archive installs per user (no root), checked
+# against its published SHA-256, and goes first on PATH.
+GO_RUNTIME_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/posse/runtimes/go"
+
+go_version_ok() {
   local version
-  version="$(go version 2>/dev/null)" || return 0
-  if [[ "$version" =~ go([0-9]+)\.([0-9]+) ]] && ((BASH_REMATCH[1] == 1 && BASH_REMATCH[2] < 21)); then
-    warn "Go ${BASH_REMATCH[1]}.${BASH_REMATCH[2]} is older than 1.21, so scip-go may fail to install; install a newer Go from https://go.dev/dl"
+  version="$(go version 2>/dev/null)" || return 1
+  [[ "$version" =~ go([0-9]+)\.([0-9]+) ]] || return 1
+  ((BASH_REMATCH[1] > 1 || BASH_REMATCH[2] >= 21))
+}
+
+install_portable_go() {
+  local arch
+  case "$(uname -m)" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) warn "go.dev has no Linux build for $(uname -m); install Go 1.21+ manually to index Go"; return 1 ;;
+  esac
+  if [[ "$DRY_RUN" == "true" ]]; then
+    run_logged "install Go from go.dev (linux-${arch})" true
+    return 0
   fi
+  local work version file expected
+  work="$(mktemp -d)" || return 1
+  if ! run_logged "look up the current Go release" fetch_to "https://go.dev/VERSION?m=text" "$work/VERSION"; then
+    rm -rf "$work"
+    return 1
+  fi
+  version="$(head -n 1 "$work/VERSION" | tr -d '\r')"
+  if [[ ! "$version" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+    rm -rf "$work"
+    warn "go.dev returned an unexpected Go version; install Go 1.21+ manually to index Go"
+    return 1
+  fi
+  file="${version}.linux-${arch}.tar.gz"
+  if ! run_logged "download Go ${version#go}" fetch_to "https://dl.google.com/go/${file}" "$work/$file" \
+    || ! run_logged "download Go checksum" fetch_to "https://dl.google.com/go/${file}.sha256" "$work/$file.sha256"; then
+    rm -rf "$work"
+    return 1
+  fi
+  expected="$(tr -d ' \r\n' <"$work/$file.sha256")"
+  if [[ ! "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || ! run_logged "verify Go checksum" verify_sha256 "$work/$file" "$expected"; then
+    rm -rf "$work"
+    warn "the Go archive did not match its published SHA-256; refusing to install it"
+    return 1
+  fi
+  mkdir -p "$work/unpacked" "$(dirname "$GO_RUNTIME_DIR")" || { rm -rf "$work"; return 1; }
+  if ! run_logged "unpack Go ${version#go}" tar -xzf "$work/$file" -C "$work/unpacked" \
+    || [[ ! -x "$work/unpacked/go/bin/go" ]]; then
+    rm -rf "$work"
+    return 1
+  fi
+  rm -rf "${GO_RUNTIME_DIR}.old"
+  [[ -e "$GO_RUNTIME_DIR" ]] && mv "$GO_RUNTIME_DIR" "${GO_RUNTIME_DIR}.old"
+  if ! mv "$work/unpacked/go" "$GO_RUNTIME_DIR"; then
+    [[ -e "${GO_RUNTIME_DIR}.old" ]] && mv "${GO_RUNTIME_DIR}.old" "$GO_RUNTIME_DIR"
+    rm -rf "$work"
+    return 1
+  fi
+  rm -rf "$work" "${GO_RUNTIME_DIR}.old"
+  export PATH="$GO_RUNTIME_DIR/bin:$PATH"
+  go_version_ok
+}
+
+# Use a Go 1.21+ already here (a previous go.dev install included), else
+# install one. Returns non-zero only when Go is selected and none could be set up.
+ensure_modern_go() {
+  scip_language_selected go || return 0
+  if [[ -x "$GO_RUNTIME_DIR/bin/go" && ":$PATH:" != *":$GO_RUNTIME_DIR/bin:"* ]]; then
+    export PATH="$GO_RUNTIME_DIR/bin:$PATH"
+  fi
+  go_version_ok && return 0
+  if command -v go >/dev/null 2>&1; then
+    info "$(go version 2>/dev/null | awk '{print $3}' | sed 's/^go/Go /') is older than 1.21; installing Go from go.dev"
+  fi
+  install_portable_go && return 0
+  warn "could not set up Go 1.21+, so scip-go may fail to install; install Go from https://go.dev/dl and re-run"
+  return 1
 }
 
 # =============================================================================
@@ -1064,7 +1134,10 @@ step_packages() {
   fi
 
   if [[ "$missing_system" == "false" && "$missing_rust" == "false" ]]; then
-    warn_if_old_go
+    if ! ensure_modern_go; then
+      step_end partial "Go 1.21+ could not be installed"
+      return 0
+    fi
     step_end ok "git, curl, build toolchain, and helper CLIs all present"
     return 0
   fi
@@ -1129,7 +1202,7 @@ step_packages() {
   if [[ "$missing_rust" == "true" ]] && ! install_rust_toolchain; then
     failures+=("rust")
   fi
-  [[ "$DRY_RUN" == "true" ]] || warn_if_old_go
+  ensure_modern_go || failures+=("go")
 
   if [[ -n "$system_gap" ]]; then
     if [[ ${#failures[@]} -gt 0 ]]; then
@@ -1431,6 +1504,10 @@ step_shell_wiring() {
     printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$(dirname "$NODE_BIN")")"
     if [[ -d "$HOME/.cargo/bin" ]]; then
       printf 'export PATH="$PATH":%s\n' "$(shell_quote "$HOME/.cargo/bin")"
+    fi
+    # Ahead of any older distro Go.
+    if [[ -x "$GO_RUNTIME_DIR/bin/go" ]]; then
+      printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$GO_RUNTIME_DIR/bin")"
     fi
     # shellcheck disable=SC2016
     echo 'case ":$PATH:" in *":$POSSE_BIN_DIR:"*) ;; *) export PATH="$POSSE_BIN_DIR:$PATH";; esac'
