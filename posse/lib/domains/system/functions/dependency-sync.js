@@ -1649,9 +1649,9 @@ export async function ensureBootDependencies(input = {}) {
   if (includePython) {
     // A repo qualifies when it carries any Python project manifest, or when
     // the enabled SCIP environments detected python sources at all (so a
-    // marker-less python repo still gets an interpreter + pytest).
+    // marker-less python repo still gets an interpreter + pytest). Posse
+    // itself needs no Python environment.
     const pythonRoots = uniqueByPath([
-      ...(includePosseRoot ? [{ root: posseRoot, label: "posse python" }] : []),
       { root: projectDir, label: "repo python", assumePython: pythonLanguageEnabled },
     ]).filter((entry) => entry.assumePython || listPythonProjectManifests(entry.root).length > 0);
     for (const entry of pythonRoots) python.push(await ensureDependencyEntry(entry, ensurePythonProject, opts));
