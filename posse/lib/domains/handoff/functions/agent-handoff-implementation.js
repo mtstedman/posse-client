@@ -212,6 +212,16 @@ const LENIENT_HANDOFF_PROSE_PROFILES = new Set([
   "assessor.verdict.v1",
 ]);
 
+// Prose explaining code that parses credentials quotes URL userinfo
+// (`s3://user:pass@host`). Rejecting it cost a full-context turn and the
+// resubmitted claim dropped the detail, so every profile redacts the userinfo
+// and commits, provided nothing else in the text is still detected.
+const URL_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:`'"]+:[^\s/@`'"]+@/giu;
+
+function redactUrlUserinfo(text) {
+  return text.replace(URL_USERINFO_RE, "$1[REDACTED]@");
+}
+
 function isLenientHandoffProseProfile(profile) {
   return LENIENT_HANDOFF_PROSE_PROFILES.has(String(profile || ""));
 }
@@ -370,6 +380,17 @@ function boundedString(value, label, max, { required = true, lenient = false, co
         });
         return redacted;
       }
+    }
+    const userinfoRedacted = redactUrlUserinfo(text);
+    if (userinfoRedacted !== text && !detectSensitiveAgentHandoffText(userinfoRedacted)) {
+      recordEvidenceCleanup(context, {
+        outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
+        action: "redact_url_userinfo",
+        selector: label,
+        code: "AGENT_HANDOFF_SENSITIVE_CONTENT",
+        message: `${label} quoted URL userinfo; committed with it redacted`,
+      });
+      return userinfoRedacted;
     }
     fail("AGENT_HANDOFF_SENSITIVE_CONTENT", `${label} contains sensitive content (${sensitiveLabel})`);
   }

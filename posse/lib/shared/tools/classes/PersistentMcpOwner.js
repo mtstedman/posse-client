@@ -708,6 +708,17 @@ function clampAtlasArgumentCeilings(action, toolArgs) {
     clamped[field] = ceiling;
     clamps.push({ field, requested: value, applied: ceiling });
   }
+  // A blank identifier ("" beside real names) failed the whole call as
+  // invalid_params; it names nothing, so it is dropped instead.
+  for (const field of IDENTIFIER_FILTER_FIELDS) {
+    const value = clamped[field];
+    if (!Array.isArray(value)) continue;
+    const kept = value.filter((entry) => typeof entry !== "string" || entry.trim() !== "");
+    if (kept.length === value.length) continue;
+    if (kept.length > 0) clamped[field] = kept;
+    else delete clamped[field];
+    clamps.push({ field, dropped: value.length - kept.length });
+  }
   if (clamps.length === 0) return { args: toolArgs, clamps };
   return { args: nested ? { ...toolArgs, args: clamped } : clamped, clamps };
 }
@@ -851,6 +862,20 @@ function exactNameSearchTarget(result, toolArgs) {
   }
   return { symbolId, ...(file ? { file } : {}) };
 }
+
+/** The directory a code.lens call named when it failed as not_a_file, else null. */
+function lensDirectoryTarget(result, toolArgs) {
+  if (!result || result.isError !== true) return null;
+  const file = String(toolArgs?.file || toolArgs?.path || "").trim().replace(/\/+$/u, "");
+  if (!file) return null;
+  const text = (Array.isArray(result.content) ? result.content : [])
+    .map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n");
+  // Native lens words it "the path is not a regular file"; in a repository that
+  // is a directory, and a survey that fails keeps the original error anyway.
+  return /"code"\s*:\s*"not_a_file"|\bnot_a_file\b/u.test(text) ? file : null;
+}
+
+export const __testLensDirectoryTarget = lensDirectoryTarget;
 
 /** Arguments for a near-name search after an exact name matched nothing. */
 function nearestNameSearchArgs(result, toolArgs) {
@@ -6830,7 +6855,8 @@ export class PersistentMcpOwner {
       });
       const recovered = await this._recoverSameFileAmbiguity(executed, slotArgs, assignedPhysicalCallStep);
       const widened = await this._recoverEmptyIdentifierFilter(recovered, slotArgs, assignedPhysicalCallStep);
-      return this._resolveExactNameSearch(widened, slotArgs, assignedPhysicalCallStep);
+      const surveyed = await this._recoverLensDirectory(widened, slotArgs, assignedPhysicalCallStep);
+      return this._resolveExactNameSearch(surveyed, slotArgs, assignedPhysicalCallStep);
     };
     if (args?.atlasQueueSlot === queueKey) return executeWithRecovery();
     const concurrentResearchRead = researchExploration
@@ -6933,6 +6959,47 @@ export class PersistentMcpOwner {
           + "identifiers_to_find selects indexed declaration names, not usages, phrases or qualified spellings, "
           + "so the unnarrowed result is returned instead.",
         { kind: "atlas_identifier_filter_widened", trigger: action },
+      ),
+    };
+  }
+
+  /**
+   * code.lens reads one file. Handed a directory it answered not_a_file and
+   * the caller had to spend another call on code.survey; survey over that
+   * directory with the same identifiers is what was asked, so it runs on the
+   * same physical step.
+   *
+   * @param {any} message
+   * @param {any} args
+   * @param {number|null} assignedPhysicalCallStep
+   */
+  async _recoverLensDirectory(message, args, assignedPhysicalCallStep) {
+    if (args?.lensDirectoryRecovery || args?.identifierFilterRecovery || args?.ambiguityRecovery) return message;
+    const requested = requestedToolPolicyName(args?.toolName, args?.toolArgs);
+    if (effectiveAtlasResearchAction(requested) !== "code.lens") return message;
+    const nested = args?.toolArgs?.args && typeof args.toolArgs.args === "object" && !Array.isArray(args.toolArgs.args);
+    const toolArgs = nested ? args.toolArgs.args : (args?.toolArgs || {});
+    const directory = lensDirectoryTarget(message?.result, toolArgs);
+    if (!directory) return message;
+    const surveyArgs = { paths: [directory] };
+    for (const field of IDENTIFIER_FILTER_FIELDS) {
+      if (toolArgs[field] != null) surveyArgs[field] = toolArgs[field];
+    }
+    const recovered = await this._executeAtlasToolCall({
+      ...args,
+      lensDirectoryRecovery: true,
+      assignedPhysicalCallStep,
+      toolName: String(args?.toolName || "").replace(/code[._]lens/u, (match) => match.replace("lens", "survey")),
+      toolArgs: nested ? { ...withNestedAtlasAction(args.toolArgs, "code.survey"), args: surveyArgs } : surveyArgs,
+    });
+    const result = recovered?.result;
+    if (!result || result.isError === true) return message;
+    return {
+      ...recovered,
+      result: appendOwnerModelControlNotice(
+        result,
+        `\n\n${directory} is not a file; code.lens reads one file, so code.survey over it is returned instead.`,
+        { kind: "atlas_lens_directory_survey", trigger: "code.lens" },
       ),
     };
   }

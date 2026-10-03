@@ -1069,16 +1069,33 @@ detect_rpm_repo_family() {
   return 0
 }
 
+# EL 9's default php module stream (8.0) is older than scip-php supports (8.1
+# for the legacy track, 8.3 for current upstream). True when PHP indexing is
+# selected on an EL host and php is missing or older than 8.3, so the newest
+# AppStream php stream gets enabled before php installs or upgrades.
+el_php_too_old() {
+  scip_language_selected php || return 1
+  [[ "$PKG_MGR" == "dnf" || "$PKG_MGR" == "yum" ]] || return 1
+  detect_rpm_repo_family
+  [[ "$RPM_REPO_FAMILY" == "el" ]] || return 1
+  command -v php >/dev/null 2>&1 || return 0
+  ! php -r 'exit(version_compare(PHP_VERSION, "8.3.0", ">=") ? 0 : 1);' >/dev/null 2>&1
+}
+
 # rpm_repo_plan <missing helper names...>: the repository actions those helpers
 # need on this host (after detect_rpm_repo_family), one per line, in order.
 rpm_repo_plan() {
-  local name need_epel="false" need_gh="false"
+  local name need_epel="false" need_gh="false" need_php_stream="false"
   for name in "$@"; do
     case "$name" in
       ripgrep|imagemagick|ffmpeg|composer) need_epel="true" ;;
       github-cli) need_gh="true" ;;
+      php) need_php_stream="true" ;;
     esac
   done
+  if [[ "$RPM_REPO_FAMILY" == "el" && "$need_php_stream" == "true" ]]; then
+    printf '%s\n' php-stream
+  fi
   if [[ "$RPM_REPO_FAMILY" == "el" && "$need_epel" == "true" ]]; then
     printf '%s\n' crb epel
   fi
@@ -1109,6 +1126,20 @@ rpm_enable_epel() {
   fi
 }
 
+# Enable the newest php module stream AppStream offers (8.3 on EL 9.4+); an
+# already installed php moves to it with `module switch-to`.
+rpm_enable_php_stream() {
+  local stream
+  stream="$(LC_ALL=C as_root "$PKG_MGR" -q module list php 2>/dev/null \
+    | awk '$1 == "php" && $2 ~ /^[0-9]+\.[0-9]+$/ {print $2}' | sort -V | tail -n 1)"
+  [[ -n "$stream" ]] || return 1
+  if command -v php >/dev/null 2>&1; then
+    as_root "$PKG_MGR" -y -q module switch-to "php:$stream"
+  else
+    as_root "$PKG_MGR" -y -q module reset php && as_root "$PKG_MGR" -y -q module enable "php:$stream"
+  fi
+}
+
 rpm_add_gh_cli_repo() {
   pkg_install dnf-plugins-core || return 1
   as_root "$PKG_MGR" config-manager --add-repo "$GH_CLI_REPO_URL"
@@ -1136,6 +1167,9 @@ prepare_rpm_repos() {
       epel)
         if run_logged "enable EPEL (ripgrep, ImageMagick, ffmpeg-free)" rpm_enable_epel; then changed="true"
         else warn "could not enable EPEL; to add it yourself: $(epel_enable_command)"; fi ;;
+      php-stream)
+        if run_logged "enable the newest PHP module stream (scip-php needs PHP 8.1+, current upstream 8.3+)" rpm_enable_php_stream; then changed="true"
+        else warn "could not enable a newer PHP module stream; PHP indexing needs PHP 8.1+ (sudo dnf module switch-to php:8.3)"; fi ;;
       gh-cli)
         if run_logged "add the GitHub CLI package repository" rpm_add_gh_cli_repo; then changed="true"
         else warn "could not add the GitHub CLI repository (${GH_CLI_REPO_URL}); gh installs only if another enabled repository has it"; fi ;;
@@ -1360,7 +1394,9 @@ step_packages() {
   local line name check pkgs
   while IFS='|' read -r name check pkgs; do
     [[ -z "$name" ]] && continue
-    tool_available "$check" || missing_tools+=("${name}|${check}|${pkgs}")
+    if ! tool_available "$check" || { [[ "$name" == php ]] && el_php_too_old; }; then
+      missing_tools+=("${name}|${check}|${pkgs}")
+    fi
   done < <(host_tools_table)
 
   # Rust's toolchain comes from rustup, not the package manager.

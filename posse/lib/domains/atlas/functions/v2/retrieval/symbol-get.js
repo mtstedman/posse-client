@@ -288,6 +288,42 @@ function annotateSymbolBody(body, resolution, identifiersToFind = []) {
   };
 }
 
+// Qualified-name segments with language punctuation removed: generic
+// arguments, Go receiver syntax and Rust `impl` blocks do not name an owner.
+function selectorSegments(value) {
+  return String(value || "")
+    .replace(/<[^<>]*>/gu, "")
+    .replace(/[()*&]/gu, "")
+    .split(/::|->|[./#\\]+/u)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment && segment !== "impl");
+}
+
+function endsWithSegments(have, want) {
+  return want.length > 0 && want.length <= have.length
+    && want.every((segment, index) => have[have.length - want.length + index] === segment);
+}
+
+/**
+ * The one indexed declaration a missed name lookup can only have meant: its
+ * repository-wide exact recovery has exactly one bearer whose qualified name
+ * ends with every requested segment (an inherited member, a sibling-file
+ * guess). Serving it saves the call the error would cost. Only the file guess
+ * is relaxed: a requested kind stays binding, and several or no exact bearers
+ * keep the error with its candidate list.
+ */
+function uniqueRecoveryTarget(selection, params) {
+  if (selection?.status !== "symbol_ref_not_found" || params.symbolRef?.kind) return null;
+  const want = selectorSegments(params.symbolRef?.name);
+  const targets = Array.isArray(selection.targets) ? selection.targets : [];
+  const rows = new Map();
+  for (const target of targets) {
+    if (!endsWithSegments(selectorSegments(target.qualified_name || target.name), want)) continue;
+    rows.set(`${symbolIdOf(target)}@${target.repo_rel_path}`, target);
+  }
+  return rows.size === 1 ? [...rows.values()][0] : null;
+}
+
 /**
  * Exact symbol body retrieval for the compact Atlas surface.
  *
@@ -327,7 +363,7 @@ export async function symbolGet({
         hashRefContext, readSymbolBody, storeSourceTraversalRef})));
     return {ok: true, action: "symbol.get", versionId, data: {items, ...plan.overflow}};
   }
-  const selection = params.symbolId
+  let selection = params.symbolId
     ? await selectSymbolTarget({
       view,
       symbolId: params.symbolId,
@@ -339,8 +375,14 @@ export async function symbolGet({
       file: params.file,
     });
   const selector = params.symbolId || params.symbolRef?.name || "";
+  let recoveryNote = null;
   if (selection.status !== "selected" && selection.status !== "ambiguous") {
-    return targetSelectionError(selection, selector, versionId);
+    const recovered = uniqueRecoveryTarget(selection, params);
+    if (!recovered) return targetSelectionError(selection, selector, versionId);
+    const requestedAt = selection.requestedFile ? ` at ${selection.requestedFile}` : "";
+    recoveryNote = `${selector} is not declared${requestedAt}; served its only indexed match `
+      + `${recovered.qualified_name || recovered.name} at ${recovered.repo_rel_path}.`;
+    selection = { status: "selected", target: recovered };
   }
 
   if (selection.status === "selected") {
@@ -361,7 +403,8 @@ export async function symbolGet({
       maxTokens: params.maxTokens,
       identifiersToFind: params.identifiersToFind,
     });
-    return { ...annotateSymbolBody(body, resolution, params.identifiersToFind), action: "symbol.get" };
+    const annotated = { ...annotateSymbolBody(body, resolution, params.identifiersToFind), action: "symbol.get" };
+    return recoveryNote && annotated.data ? { ...annotated, data: { ...annotated.data, note: recoveryNote } } : annotated;
   }
 
   const ambiguityPathChars = selection.targets.reduce((total, target) => (
