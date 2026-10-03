@@ -2936,6 +2936,8 @@ ${aliasDiagnostic}
     ${C.dim}             doctor [--dry-run] [--json]${C.reset}
     ${C.cyan}update${C.reset}     Update Posse + dependencies, binaries, and Jina
     ${C.dim}             update [--dry-run] [--json] [--branch main]${C.reset}
+    ${C.cyan}tools${C.reset}      Script tools for agents: create, test, secrets, grants
+    ${C.dim}             tools [list|new|show|test|secret|grant|revoke] (posse tools help)${C.reset}
     ${C.cyan}review${C.reset}     Approve/reject completed work items
     ${C.cyan}gate answer${C.reset} Resolve a parked human gate by job ID
     ${C.dim}             gate answer <gate-job-id> pass|fail|retry|replan|skip [--feedback "…"]${C.reset}

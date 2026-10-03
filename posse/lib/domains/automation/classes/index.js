@@ -5,4 +5,5 @@ export * from "./AutomationServiceManager.js";
 export * from "./AutomationStore.js";
 export * from "./AutomationSupervisor.js";
 export * from "./ResourceSandbox.js";
+export * from "./ScriptToolRegistry.js";
 export * from "./SkillRegistry.js";

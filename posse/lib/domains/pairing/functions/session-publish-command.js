@@ -35,7 +35,7 @@ import {
   validateSessionPushCandidate,
 } from "./session-publish.js";
 import { getLivePairingState, getPairingState, updateSessionPublishSettings } from "./state.js";
-import { readPairingPeerSnapshot } from "./work-items.js";
+import { sessionProvenanceIdentities } from "./work-items.js";
 
 const LOCK_RETRY_DELAYS_MS = Object.freeze([500, 1_000, 2_000, 3_000, 5_000]);
 // Failures that can clear up by themselves; they back off and retry, up to
@@ -117,16 +117,12 @@ async function withPublishLock(callback, { delays = LOCK_RETRY_DELAYS_MS, wait =
  * mid-edit) and without raising a gate for it.
  */
 async function takeVerifiedTrunk(root, state, { sync, delays = LOCK_RETRY_DELAYS_MS, wait = sleep }) {
-  const peerSnapshot = readPairingPeerSnapshot();
+  const gitIdentities = sessionProvenanceIdentities(state.remote_session_id);
   for (let attempt = 0; ; attempt += 1) {
     const synced = await sync(root, {
       holdFastForward: true,
       raiseBlockedGate: false,
-      provenance: state.baseline_oid ? {
-        baselineOid: state.baseline_oid,
-        gitIdentities: (peerSnapshot?.peers || [])
-          .flatMap((peer) => Array.isArray(peer.git_identities) ? peer.git_identities : []),
-      } : null,
+      provenance: state.baseline_oid ? { baselineOid: state.baseline_oid, gitIdentities } : null,
     });
     if (synced?.ok && /^[0-9a-f]{40,64}$/u.test(String(synced.remoteSha || ""))) return synced.remoteSha;
     if (synced?.reason === "merge_in_progress" && attempt < delays.length) {

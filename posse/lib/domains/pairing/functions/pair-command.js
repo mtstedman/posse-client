@@ -94,6 +94,7 @@ import {
   diffPairingPeerActivity,
   pairingPeerTrunkHints,
   readPairingPeerSnapshot,
+  sessionProvenanceIdentities,
   writePairingPeerSnapshot,
 } from "./work-items.js";
 import {
@@ -1603,16 +1604,15 @@ async function closeClaimedHostSession(root, remoteClient, state, {
   // host. A revocation that cannot be proven leaves the close to recovery.
   if (state.temporary_repository) revokeSessionMemberKeys(root, state);
 
-  const peerSnapshot = readPairingPeerSnapshot();
+  // Members are gone by now and the console cleared the live snapshot as it
+  // stopped; the session's recorded identities still attribute a member's
+  // last commit that no poll verified before the close.
+  const gitIdentities = sessionProvenanceIdentities(state.remote_session_id);
   if (checkoutSharedBranchForClose(root, state.shared_branch) && !json) {
     console.log(`  ${C.dim}[pair close] switched back to ${state.shared_branch} to take the final sync${C.reset}`);
   }
   const synced = await retryWhileMergeLockBusy(() => syncSharedTrunkFromOrigin(root, {
-    provenance: state.baseline_oid ? {
-      baselineOid: state.baseline_oid,
-      gitIdentities: (peerSnapshot?.peers || [])
-        .flatMap((peer) => Array.isArray(peer.git_identities) ? peer.git_identities : []),
-    } : null,
+    provenance: state.baseline_oid ? { baselineOid: state.baseline_oid, gitIdentities } : null,
   }));
   if (!synced.ok) {
     const blocked = synced.reason === "fast_forward_blocked"

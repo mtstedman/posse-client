@@ -10,7 +10,8 @@ import { nextOccurrence, previewOccurrences, validateTrigger } from "../function
 const defaultLimits = { wall_time_seconds: 120, calls: 16, turns: 8, spend_cap_usd: 1 };
 export class AutomationService {
   constructor(store, { agent = null, connectors = null, now = () => Date.now(), claimOwner = true, leaseTTLms = 15000 } = {}) {
-    this.store = store; this.agent = agent; this.connectors = connectors; this.now = now;
+    // `scripts` is attached by ScriptToolRegistry, which needs this service.
+    this.store = store; this.agent = agent; this.connectors = connectors; this.now = now; this.scripts = null;
     this.active = new Map(); this.owner = randomUUID(); this.stopping = false;
     this.leaseTTLms = leaseTTLms; this.lease = null; this.leaseTimer = null;
     if (claimOwner) {
@@ -96,6 +97,7 @@ export class AutomationService {
     if (!entry?.enabled) return false;
     if (entry.kind === "builtin") return true;
     if (entry.kind === "mcp") return this.connectors?.has?.(entry.id) === true;
+    if (entry.kind === "script") return this.scripts?.available(entry) === true;
     if (!entry.definition) return false;
     if (entry.definition.runtime?.mode === "bounded-agent") return typeof this.agent === "function";
     if (entry.definition.runtime?.mode !== "recipe") return false;
@@ -136,6 +138,10 @@ export class AutomationService {
     this.assertOwner();
     const { entry, grant } = this.resolve(principal, args.tool, "invoke", args.grant_id);
     demand(!schedule || grant.unattended && grant.revision === schedule.grant_revision, "Schedule grant changed or is not unattended", "grant_changed");
+    // Write script tools confirm by default. No caller can ask a person yet,
+    // so only a grant the operator marked unattended lets an agent run one.
+    demand(entry.kind !== "script" || entry.effect !== "external_write" || grant.unattended,
+      `${entry.script} is a write tool: agents can run it only under a grant made with \`posse tools grant ${entry.script} --unattended\``, "forbidden");
     schemaCheck(entry.input_schema, args.input);
     const key = args.idempotency_key || randomUUID();
     demand(typeof key === "string" && key.length > 0 && key.length <= 120, "Invalid idempotency key");
@@ -150,7 +156,7 @@ export class AutomationService {
     return run;
   }
   newRun(principal, entry, grant, input, fingerprint, schedule = null) {
-    const measuredZero = entry.kind === "builtin" || entry.definition?.runtime?.mode === "recipe";
+    const measuredZero = entry.kind === "builtin" || entry.kind === "script" || entry.definition?.runtime?.mode === "recipe";
     return { id: randomUUID(), tool: entry.id, skill_id: entry.definition ? `${entry.definition.name}@${entry.definition.version}` : entry.id, principal: structuredClone(principal), grant_id: grant.id, grant_revision: grant.revision, resource_revisions: grant.resources.map(item => ({ id: item.id, revision: this.store.get("resources", item.id)?.revision })), digest: entry.digest, fingerprint, input: structuredClone(input), status: "queued", created_at: new Date(this.now()).toISOString(), started_at: null, calls: 0, turns: 0, spend_usd: measuredZero ? 0 : null, schedule_id: schedule?.id || null, schedule_revision: schedule?.revision || null, owner_generation: this.lease?.generation || null, attempt: 1, retry: structuredClone(schedule?.retry || { max_attempts: 1 }) };
   }
   start(run, entry, grant) {
@@ -195,6 +201,9 @@ export class AutomationService {
       else if (entry.kind === "mcp") {
         demand(this.connectors, "Connector adapter unavailable");
         run.calls++; output = await this.connectors.call(entry.id, run.input, { signal: controller.signal, effect: entry.effect, grant, check });
+      } else if (entry.kind === "script") {
+        demand(this.scripts, "Script tools are unavailable in this owner", "capability_unavailable");
+        run.calls++; output = await this.scripts.run(entry, run.input, { signal: controller.signal });
       } else if (entry.definition.runtime.mode === "recipe") {
         const previous = {};
         for (const step of entry.definition.runtime.recipe) {
@@ -233,7 +242,7 @@ export class AutomationService {
       const uncertain = ["rollback_failed", "rollback_conflict", "usage_unknown", "external_outcome_unknown", "owner_fenced"].includes(error.code);
       run.error_code = error.code || "execution_failed";
       // Avoid reflecting arbitrary provider/connector errors or secrets into history.
-      run.error = ["forbidden", "grant_changed", "schema_mismatch", "capability_unavailable", "wall_time_limit", "call_limit", "budget_limit", "usage_unknown", "owner_fenced", "output_conflict"].includes(run.error_code) ? error.message : "Execution failed; inspect the operator's local diagnostics";
+      run.error = ["forbidden", "grant_changed", "schema_mismatch", "capability_unavailable", "wall_time_limit", "call_limit", "budget_limit", "usage_unknown", "owner_fenced", "output_conflict", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable"].includes(run.error_code) ? error.message : "Execution failed; inspect the operator's local diagnostics";
       if (!uncertain) this.store.transaction(() => { this.store.remove("commits", run.id); this.store.releaseOutputs(run.id); });
       if (!uncertain && retryEligible(error, run)) {
         run.status = "retry_wait";

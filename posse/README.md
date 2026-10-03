@@ -276,6 +276,40 @@ Use `posse help` for the full CLI reference.
 - `admin`: open stats and settings tooling.
 - `merge`: merge approved work.
 - `prune`, `purge`, `cleanup`, `clear`: maintenance and reset commands.
+- `tools [list|new|show|test|secret|grant|revoke]`: author script tools that
+  granted agents can call (see below).
+
+### Script tools
+
+`posse tools` manages operator-authored tools in the machine automation owner.
+Each tool is a folder under the automation data directory
+(`~/.posse/tools/<name>/`): a `tool.json` (`posse.script_tool.v1`) declaring
+params, env defaults, secrets, effect (`read` or `write`), timeout, and an
+output cap, plus the script itself. `posse tools new <name> --template
+bash|python|node|http --param id:string:required --secret DB_PASSWORD` writes
+a starter that fails until you edit it.
+
+- Arguments arrive only as data: JSON on stdin and `PARAM_<NAME>` variables,
+  never argv. The process gets a built environment — the test-subprocess
+  allowlist, a per-call temp dir, declared env, and its own secrets — and none
+  of the owner's credentials. It runs in its own folder and process group;
+  timeouts and cancellation kill the whole tree.
+- Secrets are write-only: `posse tools secret set <tool> <NAME>` reads a hidden
+  prompt or piped stdin and stores the value in the owner database. Listings
+  show only a fingerprint. Only the declaring tool's process receives it, and
+  output is redacted for the raw, base64, URL, and JSON-escaped forms of every
+  injected secret before credential-pattern scrubbing.
+- A tool becomes callable only after `posse tools test <name>` passes; the
+  pass publishes an entry pinned to the digest of `tool.json` plus the script.
+  Editing either makes the entry unavailable until a new test passes, and that
+  test revokes grants that pinned the old version.
+- `posse tools grant <name> --repo <path> --roles dev` (or `--standalone`)
+  exposes it through `custom_tools`. Write tools confirm by default: no agent
+  surface can ask a person yet, so a `write` tool runs for agents only under a
+  grant made with `--unattended`.
+
+Bossy's Automation Studio Tools tab drives the same owner operations
+(`script.*`); it stores and runs nothing itself.
 
 ### Native provider and admin JSON
 

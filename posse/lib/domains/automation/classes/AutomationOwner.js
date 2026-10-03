@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { AutomationStore } from "./AutomationStore.js";
 import { AutomationService } from "./AutomationService.js";
 import { SkillRegistry } from "./SkillRegistry.js";
+import { ScriptToolRegistry } from "./ScriptToolRegistry.js";
 import { verifyMcpOAuthToken, bootConfigFromMcpOAuthClaims } from "../../integrations/functions/deterministic-mcp/oauth-token.js";
 import { automationDbPath, automationSocketPath, ensureAutomationOperatorToken, repositoryID } from "../functions/paths.js";
 import { automationBuildIdentity, automationOwnerLaunch } from "../functions/owner-identity.js";
@@ -13,10 +14,11 @@ import { previewOccurrences } from "../functions/triggers.js";
 import { AUTOMATION_MAX_REQUEST_BYTES, AUTOMATION_MAX_RESPONSE_BYTES } from "../../../catalog/custom-tools.js";
 
 export class AutomationOwner {
-  constructor({ store = null, service = null, socketPath = automationSocketPath(), operatorToken = null, tickMs = 1000, build = null, launch = automationOwnerLaunch() } = {}) {
+  constructor({ store = null, service = null, socketPath = automationSocketPath(), operatorToken = null, tickMs = 1000, build = null, launch = automationOwnerLaunch(), scriptsDir = undefined } = {}) {
     this.store = store || new AutomationStore(automationDbPath());
     this.service = service || new AutomationService(this.store);
     this.registry = new SkillRegistry(this.service);
+    this.scripts = new ScriptToolRegistry(this.service, scriptsDir ? { dir: scriptsDir } : {});
     this.socketPath = socketPath; this.operatorToken = operatorToken || ensureAutomationOperatorToken(); this.tickMs = tickMs;
     this.build = build; this.launch = launch;
     this.server = null; this.timer = null; this.ownsStore = !store; this.socketFile = null;
@@ -108,6 +110,14 @@ export class AutomationOwner {
       case "schedule.resume": return this.service.setScheduleEnabled(args.id, true);
       case "schedule.remove": return this.service.removeSchedule(args.id);
       case "schedule.run_now": return this.service.runScheduleNow(args.id, args.idempotency_key);
+      case "script.list": return this.scripts.list();
+      case "script.show": return this.scripts.show(args.name, { repoPath: args.repo_path });
+      case "script.create": return this.scripts.create(args.spec);
+      case "script.test": return this.scripts.test(args.name, args.input || {});
+      case "script.grant": return this.scripts.grant(args.name, { repoPath: args.repo_path, standalone: args.standalone === true, roles: args.roles, unattended: args.unattended === true });
+      case "script.secret.set": return this.scripts.setSecret(args.tool, args.name, args.value);
+      case "script.secret.unset": return this.scripts.unsetSecret(args.tool, args.name);
+      case "script.secret.status": return this.scripts.secretStatus(this.scripts.load(args.tool).manifest);
       case "run.list": return this.store.runs(args.limit || 100);
       case "run.cancel": this.service.cancel(args.id); return this.store.run(args.id);
       default: demand(false, "Unknown operator automation operation");
@@ -152,6 +162,6 @@ function timingSafeEqual(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function safeError(error) {
-  const allowed = new Set(["response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed"]);
+  const allowed = new Set(["response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed", "script_invalid", "script_not_found", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable"]);
   return { code: allowed.has(error?.code) ? error.code : "automation_error", message: allowed.has(error?.code) ? error.message : "Automation request failed; inspect local diagnostics" };
 }

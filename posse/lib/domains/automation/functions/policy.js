@@ -22,6 +22,10 @@ export function schemaCheck(schema, value) {
   const validate = ajv.compile(schema);
   demand(validate(value), `Schema validation failed: ${ajv.errorsText(validate.errors)}`, "schema_mismatch");
 }
+// Compiles a JSON schema under the same strict Ajv settings as schemaCheck.
+export function assertValidSchema(schema, label = "Schema") {
+  try { ajv.compile(schema); } catch (error) { demand(false, `${label} is not a valid JSON schema: ${error.message}`); }
+}
 export function object(value, allowed, required = []) {
   demand(value && typeof value === "object" && !Array.isArray(value), "Expected an object");
   demand(Object.keys(value).every(key => allowed.includes(key)), "Unknown contract field");

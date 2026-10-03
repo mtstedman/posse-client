@@ -43,11 +43,11 @@ function processAlive(pid) {
  * store. `record` is this session's runtime-status row.
  */
 export function autoPublishDecision({
-  mergeAuto, deployAuto, trunkSha, baselineSha = null, localAhead = false, signature, record = {}, nowMs,
+  mergeAuto, deployAuto, trunkSha, startSha = null, localAhead = false, signature, record = {}, nowMs,
   policy = SESSION_AUTO_PUBLISH_POLICY,
 }) {
   const mergePending = mergeAuto && SHA_RE.test(String(trunkSha || ""))
-    && trunkSha !== baselineSha && trunkSha !== record.evaluated_trunk;
+    && trunkSha !== startSha && trunkSha !== record.evaluated_trunk;
   // Deploy never merges unless merge is auto too; with merge on ask it pushes
   // only what the host already merged.
   const deployPending = deployAuto && (mergePending || localAhead);
@@ -181,7 +181,9 @@ async function tickOnce({
     } catch { /* no local or remote-tracking target yet */ }
   }
   const decision = autoPublishDecision({
-    mergeAuto, deployAuto, trunkSha, baselineSha: state.baseline_oid, localAhead,
+    // The trunk the session was published from, not baseline_oid: that is the
+    // provenance baseline, which follows every verified trunk tip.
+    mergeAuto, deployAuto, trunkSha, startSha: state.original_head, localAhead,
     signature: `${trunkSha || ""}:${localSha}`, record, nowMs, policy,
   });
   if (!decision.action) {

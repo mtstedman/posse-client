@@ -139,6 +139,19 @@ if (process.argv[2] === "automation") {
   }
 }
 
+// Script tools live with the machine automation owner too: authoring, tests,
+// secrets and grants go through its operator protocol, never a repository
+// queue, so `posse tools` works from any directory.
+if (process.argv[2] === "tools") {
+  const { runToolsCli } = await import("./lib/domains/automation/functions/tools-cli.js");
+  try {
+    process.exit(await runToolsCli(process.argv.slice(3)));
+  } catch (error) {
+    process.stderr.write(`${error?.code || "tools_error"}: ${error?.message || error}\n`);
+    process.exit(1);
+  }
+}
+
 // A session join typed in any folder runs in a folder of its own. This runs
 // before the application import below, which writes Posse state (run logs,
 // the database) into the current folder.

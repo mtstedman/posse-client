@@ -224,7 +224,42 @@ export function writePairingPeerSnapshot(status, { at = new Date().toISOString()
       .filter((peer) => peer.instance_id),
   };
   writeRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_PEERS, snapshot);
+  recordSessionIdentities(snapshot);
   return snapshot;
+}
+
+const SESSION_IDENTITIES_MAX = 256;
+
+function recordSessionIdentities(snapshot) {
+  const sessionId = snapshot.session_id;
+  if (!sessionId) return;
+  const seen = snapshot.peers.flatMap((peer) => peer.git_identities || []);
+  if (seen.length === 0) return;
+  const stored = readRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_SESSION_IDENTITIES);
+  const known = stored?.session_id === sessionId && Array.isArray(stored.identities) ? stored.identities : [];
+  const merged = [...new Set([...known, ...seen])].slice(0, SESSION_IDENTITIES_MAX);
+  if (merged.length === known.length) return;
+  writeRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_SESSION_IDENTITIES, { session_id: sessionId, identities: merged });
+}
+
+/**
+ * Git identities that may author this session's trunk commits: those the
+ * live peers advertise now, plus every one a member advertised earlier in the
+ * session. The console clears the peer snapshot as it stops, and a close
+ * drains members before its final sync, so without the record a member's
+ * last unverified commit could never be attributed and the close would fail.
+ * A member who left or was removed cannot push any more: close revokes the
+ * session keys before its final sync.
+ */
+export function sessionProvenanceIdentities(sessionId, { snapshot = readPairingPeerSnapshot() } = {}) {
+  // A snapshot written for another session never vouches for this one.
+  const otherSession = sessionId && snapshot?.session_id && snapshot.session_id !== String(sessionId);
+  const live = otherSession ? [] : (snapshot?.peers || [])
+    .flatMap((peer) => (Array.isArray(peer.git_identities) ? peer.git_identities : []));
+  const stored = readRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_SESSION_IDENTITIES);
+  const recorded = sessionId && stored?.session_id === String(sessionId) && Array.isArray(stored.identities)
+    ? stored.identities : [];
+  return [...new Set([...live, ...recorded])];
 }
 
 export function readPairingPeerSnapshot({
