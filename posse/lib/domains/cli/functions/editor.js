@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
+import { findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 
 function shellWords(value) {
   const input = String(value || "");
@@ -149,12 +150,7 @@ export function resolveEditorCommand({
     return "notepad";
   }
 
-  try {
-    execFileSyncFn("which", ["code"], { stdio: "ignore" });
-    return "code --wait";
-  } catch {
-    return "nano";
-  }
+  return findCommandOnPath("code", { platform, env }) ? "code --wait" : "nano";
 }
 
 export function editorCommandLabel(commandValue) {

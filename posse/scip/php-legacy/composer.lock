@@ -4,21 +4,21 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "dfe1bfb128fba36a5a7852005f1c5980",
+    "content-hash": "97e1455c5bf5c3ba5f77bb6111547ba0",
     "packages": [],
     "packages-dev": [
         {
             "name": "composer/class-map-generator",
-            "version": "1.8.0",
+            "version": "1.7.3",
             "source": {
                 "type": "git",
                 "url": "https://github.com/composer/class-map-generator.git",
-                "reference": "c0efbeb2f3fd7e23c7f180a59765c0b48a31fbc4"
+                "reference": "86d8208fc3c649a3a999daf1a63c25201be2990f"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/composer/class-map-generator/zipball/c0efbeb2f3fd7e23c7f180a59765c0b48a31fbc4",
-                "reference": "c0efbeb2f3fd7e23c7f180a59765c0b48a31fbc4",
+                "url": "https://api.github.com/repos/composer/class-map-generator/zipball/86d8208fc3c649a3a999daf1a63c25201be2990f",
+                "reference": "86d8208fc3c649a3a999daf1a63c25201be2990f",
                 "shasum": ""
             },
             "require": {
@@ -62,7 +62,7 @@
             ],
             "support": {
                 "issues": "https://github.com/composer/class-map-generator/issues",
-                "source": "https://github.com/composer/class-map-generator/tree/1.8.0"
+                "source": "https://github.com/composer/class-map-generator/tree/1.7.3"
             },
             "funding": [
                 {
@@ -74,7 +74,7 @@
                     "type": "github"
                 }
             ],
-            "time": "2026-09-25T15:24:19+00:00"
+            "time": "2026-05-05T09:17:07+00:00"
         },
         {
             "name": "composer/pcre",
@@ -154,39 +154,37 @@
         },
         {
             "name": "davidrjenni/scip-php",
-            "version": "dev-main",
+            "version": "v0.0.2",
             "source": {
                 "type": "git",
                 "url": "https://github.com/davidrjenni/scip-php.git",
-                "reference": "71a5b117ec4c5dd2af302e363410e604e5df309e"
+                "reference": "b12e0593cfb72e703fdd71f4ad91869502eeb566"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/davidrjenni/scip-php/zipball/71a5b117ec4c5dd2af302e363410e604e5df309e",
-                "reference": "71a5b117ec4c5dd2af302e363410e604e5df309e",
+                "url": "https://api.github.com/repos/davidrjenni/scip-php/zipball/b12e0593cfb72e703fdd71f4ad91869502eeb566",
+                "reference": "b12e0593cfb72e703fdd71f4ad91869502eeb566",
                 "shasum": ""
             },
             "require": {
                 "composer-runtime-api": "^2.2",
                 "composer/class-map-generator": "^1.0",
                 "ext-json": "*",
-                "google/protobuf": "^5.34",
-                "jetbrains/phpstorm-stubs": "^2026.1",
-                "nikic/php-parser": "^5.0",
-                "php": "^8.3",
-                "phpstan/phpdoc-parser": "^2.3"
+                "google/protobuf": "^3.22",
+                "jetbrains/phpstorm-stubs": "^2022.3",
+                "nikic/php-parser": "^4.15",
+                "php": "^8.2"
             },
             "require-dev": {
                 "phpstan/extension-installer": "^1.2",
-                "phpstan/phpstan": "^2.1",
-                "phpstan/phpstan-deprecation-rules": "^2.0",
-                "phpstan/phpstan-phpunit": "^2.0",
-                "phpstan/phpstan-strict-rules": "^2.0",
-                "phpunit/phpunit": "^12.0",
-                "slevomat/coding-standard": "^8.28",
-                "squizlabs/php_codesniffer": "^4.0"
+                "phpstan/phpstan": "^1.10",
+                "phpstan/phpstan-deprecation-rules": "^1.1",
+                "phpstan/phpstan-php-parser": "^1.1",
+                "phpstan/phpstan-phpunit": "^1.3",
+                "phpstan/phpstan-strict-rules": "^1.5",
+                "phpunit/phpunit": "^10.0",
+                "squizlabs/php_codesniffer": "^3.7"
             },
-            "default-branch": true,
             "bin": [
                 "bin/scip-php"
             ],
@@ -211,27 +209,27 @@
                 "issues": "https://github.com/davidrjenni/scip-php/issues",
                 "source": "https://github.com/davidrjenni/scip-php"
             },
-            "time": "2026-05-02T19:41:57+00:00"
+            "time": "2023-04-23T18:03:18+00:00"
         },
         {
             "name": "google/protobuf",
-            "version": "v5.36.2",
+            "version": "v3.25.9",
             "source": {
                 "type": "git",
                 "url": "https://github.com/protocolbuffers/protobuf-php.git",
-                "reference": "020bc8e831611869ac387ddd38fbbadd78d15195"
+                "reference": "7430ad4744937be8ffcc0259a8e921bcf26589f3"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/protocolbuffers/protobuf-php/zipball/020bc8e831611869ac387ddd38fbbadd78d15195",
-                "reference": "020bc8e831611869ac387ddd38fbbadd78d15195",
+                "url": "https://api.github.com/repos/protocolbuffers/protobuf-php/zipball/7430ad4744937be8ffcc0259a8e921bcf26589f3",
+                "reference": "7430ad4744937be8ffcc0259a8e921bcf26589f3",
                 "shasum": ""
             },
             "require": {
-                "php": ">=8.2.0"
+                "php": ">=7.0.0"
             },
             "require-dev": {
-                "phpunit/phpunit": ">=11.5.50 <12.0.0"
+                "phpunit/phpunit": ">=5.0.0"
             },
             "suggest": {
                 "ext-bcmath": "Need to support JSON deserialization"
@@ -253,29 +251,30 @@
                 "proto"
             ],
             "support": {
-                "source": "https://github.com/protocolbuffers/protobuf-php/tree/v5.36.2"
+                "source": "https://github.com/protocolbuffers/protobuf-php/tree/v3.25.9"
             },
-            "time": "2026-09-17T15:56:42+00:00"
+            "time": "2026-03-25T20:44:55+00:00"
         },
         {
             "name": "jetbrains/phpstorm-stubs",
-            "version": "v2026.2",
+            "version": "v2022.3",
             "source": {
                 "type": "git",
-                "url": "https://github.com/JetBrains/phpstorm-stubs",
-                "reference": "709e512210784a7c0a677b3a89d35def844a59b9"
+                "url": "https://github.com/JetBrains/phpstorm-stubs.git",
+                "reference": "6b568c153cea002dc6fad96285c3063d07cab18d"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/JetBrains/phpstorm-stubs/zipball/709e512210784a7c0a677b3a89d35def844a59b9",
-                "reference": "709e512210784a7c0a677b3a89d35def844a59b9",
+                "url": "https://api.github.com/repos/JetBrains/phpstorm-stubs/zipball/6b568c153cea002dc6fad96285c3063d07cab18d",
+                "reference": "6b568c153cea002dc6fad96285c3063d07cab18d",
                 "shasum": ""
             },
             "require-dev": {
-                "friendsofphp/php-cs-fixer": "^v3.86",
-                "nikic/php-parser": "^v5.6",
-                "phpdocumentor/reflection-docblock": "^5.6",
-                "phpunit/phpunit": "^12.3"
+                "friendsofphp/php-cs-fixer": "@stable",
+                "nikic/php-parser": "@stable",
+                "php": "^8.0",
+                "phpdocumentor/reflection-docblock": "@stable",
+                "phpunit/phpunit": "@stable"
             },
             "type": "library",
             "autoload": {
@@ -299,40 +298,37 @@
                 "stubs",
                 "type"
             ],
-            "time": "2026-06-12T13:19:10+00:00"
+            "support": {
+                "source": "https://github.com/JetBrains/phpstorm-stubs/tree/v2022.3"
+            },
+            "time": "2022-10-17T09:21:37+00:00"
         },
         {
             "name": "nikic/php-parser",
-            "version": "v5.9.0",
+            "version": "v4.19.5",
             "source": {
                 "type": "git",
                 "url": "https://github.com/nikic/PHP-Parser.git",
-                "reference": "9e33da9553fe7786f0962b35f4e4ecf01be89def"
+                "reference": "51bd93cc741b7fc3d63d20b6bdcd99fdaa359837"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/nikic/PHP-Parser/zipball/9e33da9553fe7786f0962b35f4e4ecf01be89def",
-                "reference": "9e33da9553fe7786f0962b35f4e4ecf01be89def",
+                "url": "https://api.github.com/repos/nikic/PHP-Parser/zipball/51bd93cc741b7fc3d63d20b6bdcd99fdaa359837",
+                "reference": "51bd93cc741b7fc3d63d20b6bdcd99fdaa359837",
                 "shasum": ""
             },
             "require": {
-                "ext-json": "*",
                 "ext-tokenizer": "*",
-                "php": ">=7.4"
+                "php": ">=7.1"
             },
             "require-dev": {
                 "ircmaxell/php-yacc": "^0.0.7",
-                "phpunit/phpunit": "^9.0"
+                "phpunit/phpunit": "^7.0 || ^8.0 || ^9.0"
             },
             "bin": [
                 "bin/php-parse"
             ],
             "type": "library",
-            "extra": {
-                "branch-alias": {
-                    "dev-master": "5.x-dev"
-                }
-            },
             "autoload": {
                 "psr-4": {
                     "PhpParser\\": "lib/PhpParser"
@@ -354,69 +350,22 @@
             ],
             "support": {
                 "issues": "https://github.com/nikic/PHP-Parser/issues",
-                "source": "https://github.com/nikic/PHP-Parser/tree/v5.9.0"
+                "source": "https://github.com/nikic/PHP-Parser/tree/v4.19.5"
             },
-            "time": "2026-09-13T18:51:52+00:00"
-        },
-        {
-            "name": "phpstan/phpdoc-parser",
-            "version": "2.3.6",
-            "source": {
-                "type": "git",
-                "url": "https://github.com/phpstan/phpdoc-parser.git",
-                "reference": "1427af4647235b4a73b13940b1f1258d3584f36e"
-            },
-            "dist": {
-                "type": "zip",
-                "url": "https://api.github.com/repos/phpstan/phpdoc-parser/zipball/1427af4647235b4a73b13940b1f1258d3584f36e",
-                "reference": "1427af4647235b4a73b13940b1f1258d3584f36e",
-                "shasum": ""
-            },
-            "require": {
-                "php": "^7.4 || ^8.0"
-            },
-            "require-dev": {
-                "doctrine/annotations": "^2.0",
-                "nikic/php-parser": "^5.3.0",
-                "php-parallel-lint/php-parallel-lint": "^1.2",
-                "phpstan/extension-installer": "^1.0",
-                "phpstan/phpstan": "^2.0",
-                "phpstan/phpstan-phpunit": "^2.0",
-                "phpstan/phpstan-strict-rules": "^2.0",
-                "phpunit/phpunit": "^9.6",
-                "symfony/process": "^5.2"
-            },
-            "type": "library",
-            "autoload": {
-                "psr-4": {
-                    "PHPStan\\PhpDocParser\\": [
-                        "src/"
-                    ]
-                }
-            },
-            "notification-url": "https://packagist.org/downloads/",
-            "license": [
-                "MIT"
-            ],
-            "description": "PHPDoc parser with support for nullable, intersection and generic types",
-            "support": {
-                "issues": "https://github.com/phpstan/phpdoc-parser/issues",
-                "source": "https://github.com/phpstan/phpdoc-parser/tree/2.3.6"
-            },
-            "time": "2026-09-27T20:07:45+00:00"
+            "time": "2025-12-06T11:45:25+00:00"
         },
         {
             "name": "symfony/finder",
-            "version": "v7.4.20",
+            "version": "v7.4.14",
             "source": {
                 "type": "git",
                 "url": "https://github.com/symfony/finder.git",
-                "reference": "2dd31e5208db7a0fda7bfc998ad727b79c2e4d1e"
+                "reference": "13b38720174286f55d1761152b575a8d1436fc25"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/symfony/finder/zipball/2dd31e5208db7a0fda7bfc998ad727b79c2e4d1e",
-                "reference": "2dd31e5208db7a0fda7bfc998ad727b79c2e4d1e",
+                "url": "https://api.github.com/repos/symfony/finder/zipball/13b38720174286f55d1761152b575a8d1436fc25",
+                "reference": "13b38720174286f55d1761152b575a8d1436fc25",
                 "shasum": ""
             },
             "require": {
@@ -451,7 +400,7 @@
             "description": "Finds files and directories via an intuitive fluent interface",
             "homepage": "https://symfony.com",
             "support": {
-                "source": "https://github.com/symfony/finder/tree/v7.4.20"
+                "source": "https://github.com/symfony/finder/tree/v7.4.14"
             },
             "funding": [
                 {
@@ -471,14 +420,12 @@
                     "type": "tidelift"
                 }
             ],
-            "time": "2026-09-26T06:31:10+00:00"
+            "time": "2026-06-27T08:31:18+00:00"
         }
     ],
     "aliases": [],
     "minimum-stability": "stable",
-    "stability-flags": {
-        "davidrjenni/scip-php": 20
-    },
+    "stability-flags": {},
     "prefer-stable": false,
     "prefer-lowest": false,
     "platform": {},

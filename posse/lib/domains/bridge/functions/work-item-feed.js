@@ -104,6 +104,10 @@ const QUESTION_CHOICE_COPY = Object.freeze({
   cancel: ["Cancel request", "Stop without creating a continuation job."],
   push: ["Push", "Run the repository-aware canonical push gate."],
   decline: ["Decline", "Close this push offer without pushing."],
+  accept: ["Accept", "Accept the work item outcome and continue."],
+  abandon: ["Abandon", "Stop the affected work item without retrying it."],
+  wait: ["Wait", "Keep the dependent work item waiting for its upstream work."],
+  rebuild: ["Rebuild", "Rebuild the dependent work from the updated upstream state."],
 });
 
 export function normalizeRepositoryPath(value = process.cwd(), platform = process.platform) {
@@ -192,7 +196,7 @@ function validStoredChoiceEntries(kind, entries) {
     return ids.slice(0, -2).every((id) => /^candidate:sha256:[0-9a-f]{64}$/.test(id));
   }
   const allowed = QUESTION_CHOICE_IDS[kind] || [];
-  if (kind === "dead_letter_recovery") {
+  if (["dead_letter_recovery", "work_item_failure_disposition", "cross_wi_upstream_disposition"].includes(kind)) {
     let previous = -1;
     return ids.every((id) => {
       const index = allowed.indexOf(id);

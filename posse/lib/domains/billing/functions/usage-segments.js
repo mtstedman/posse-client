@@ -212,12 +212,16 @@ export function summarizeUsageSegments(agentCallId, {
     costUsd: exact ? 0 : null,
   };
   let exactCostAvailable = exact;
+  let durationObserved = false;
   for (const segment of segments) {
     totals.inputTokens += count(segment.input_tokens);
     totals.cachedInputTokens += count(segment.cached_input_tokens);
     totals.cacheCreationInputTokens += count(segment.cache_creation_input_tokens);
     totals.outputTokens += count(segment.output_tokens);
-    totals.durationMs += count(segment.duration_ms);
+    if (segment.duration_ms != null) {
+      durationObserved = true;
+      totals.durationMs += count(segment.duration_ms);
+    }
     const pricingInput = count(segment.request_context_input_tokens);
     if (providerLongContextRateMultipliers(
       segment.provider,
@@ -255,6 +259,7 @@ export function summarizeUsageSegments(agentCallId, {
       totals.billableTokens += billable.billableTokens;
     }
   }
+  if (!durationObserved) totals.durationMs = null;
   if (!exactCostAvailable) totals.costUsd = null;
   let aggregate = expectedTotals;
   if (!aggregate && queryExpectedTotals) {

@@ -133,7 +133,8 @@ import { normPath } from "../../../shared/scope/functions/path.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { promoteWaitingLaneOnDevDemand } from "../../research/functions/waiting-lane-demand.js";
 import { adoptPlannedRepoRouting, correctInferredRoutingToRepo } from "../../intake/functions/objective-contract.js";
-import { evaluatePlanModality } from "./plan-modality.js";
+import { MAX_CONSECUTIVE_HUMAN_INPUT_DEFERRALS, evaluatePlanModality } from "./plan-modality.js";
+import { spawnPlanAfterHumanInputDeferral } from "../../worker/functions/helpers/pipeline-continuation.js";
 import {
   isSensitiveEnvRepoPath,
   normalizeRepoRelativePath,
@@ -378,6 +379,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       const pendingDependencyLinks = [];
       const wiredPlannerDependencyEdges = [];
       const duplicateTaskClaims = new Map(); // semantic planner task -> first job created for it
+      const humanInputGateIds = []; // planner human_input gates, in creation order
       const allCreatedJobIds = new Set(); // every job spawned by this compilation
       const compiledTaskJobIds = new Map(); // planner task index -> spawned job ids
       const promoteDestinationClaims = new Map(); // repo file -> promote claim record
@@ -412,10 +414,15 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         modalityWorkItem,
         modalityWorkItem?.mode || "build",
       );
+      const humanInputDeferrals = Math.max(
+        0,
+        Number.parseInt(planJobPayload._planner_human_input_deferral_round || 0, 10) || 0,
+      );
       const modality = evaluatePlanModality({
         workItem: modalityWorkItem,
         intakeHints: modalityIntakeHints,
         tasks,
+        humanInputDeferrals,
       });
       if (!modality.ok) {
         const recoveryRound = Math.max(
@@ -435,6 +442,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             observed_outputs: modality.observedOutputs,
             missing_outputs: modality.missingOutputs,
             task_shapes: modality.taskShapes,
+            human_input_deferrals: humanInputDeferrals,
+            human_input_deferral_exhausted: modality.humanInputDeferralExhausted,
           }),
         });
 
@@ -1285,6 +1294,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             }),
           });
           allCreatedJobIds.add(gate.id);
+          humanInputGateIds.push(gate.id);
           recordCompiledTaskJob(i, gate.id);
           jobMap.set(i, gate.id);
           recordPlannerDependencies(gate, t, i);
@@ -2109,6 +2119,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               taskMode,
               currentModelTier: modelTier,
               currentReasoningEffort: reasoningEffort,
+              plannerModelTierExplicit: VALID_TIERS.has(rawTier),
+              plannerReasoningEffortExplicit: VALID_EFFORTS.has(rawEffort),
               taskAbPinnedTestCommand: Boolean(pinnedTestCommand),
               plannerTestCommandValid,
             })
@@ -2679,5 +2691,32 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         );
         gateError.code = "PLAN_APPROVAL_GATE_FAILED";
         throw gateError;
+      }
+
+      // A plan accepted only because it stops at human input still owes the
+      // repository work. Without a dependent, the answered gate would leave
+      // every job terminal and the work item would fail at reconciliation.
+      if (modality.acceptedByHumanInputDeferral && humanInputGateIds.length > 0) {
+        const deferralRound = humanInputDeferrals + 1;
+        const followUpPlan = spawnPlanAfterHumanInputDeferral(worker, planJob, humanInputGateIds, { deferralRound });
+        worker.emit(
+          planJob.id,
+          `${C.yellow}[plan-recovery]${C.reset} WI#${planJob.work_item_id}: planner stopped at human input; follow-up plan #${followUpPlan.id} waits for gate(s) ${humanInputGateIds.map((id) => `#${id}`).join(", ")} (deferral ${deferralRound}/${MAX_CONSECUTIVE_HUMAN_INPUT_DEFERRALS})`,
+        );
+        logEvent({
+          work_item_id: planJob.work_item_id,
+          job_id: planJob.id,
+          event_type: EVENT_TYPES.PLAN_MODALITY_RECOVERY,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: `Queued follow-up plan #${followUpPlan.id} behind the planner's human input gate(s)`,
+          event_json: JSON.stringify({
+            reason: "human_input_deferral",
+            deferral_round: deferralRound,
+            gate_job_ids: humanInputGateIds,
+            follow_up_plan_job_id: followUpPlan.id,
+            required_outputs: modality.requiredOutputs,
+            missing_outputs: modality.missingOutputs,
+          }),
+        });
       }
 }

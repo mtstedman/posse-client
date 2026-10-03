@@ -16,7 +16,9 @@ your own account. The wizard:
    system environment variables, `.config\posse\.env`, or an older installer's
    `providers.env.ps1`,
 2. asks which languages your projects use and installs each one's toolchain
-   (see [Language toolchains](#language-toolchains)),
+   (see [Language toolchains](#language-toolchains)), and whether to add the
+   optional media tools (Tesseract OCR, ImageMagick, FFmpeg) that Posse's OCR
+   and image/video conversion use,
 3. installs Git, Node.js, and Posse into `%LOCALAPPDATA%\Programs\Posse`,
    wires the `posse` command, and runs `posse doctor`. One bar shows overall
    progress and a second shows the item being installed right now (real
@@ -38,7 +40,7 @@ the publisher, then **Run anyway**. (Maintainers: build signed packages with
 `node scripts/package-windows-installer.mjs --sign`; settings live in
 `~/.config/posse/signing.env`, see `scripts/sign-windows-artifact.mjs`.)
 
-Unattended installs: `PosseSetup.exe /S [/LANGUAGES=typescript,python,go] [/DESKTOPSHORTCUT]`
+Unattended installs: `PosseSetup.exe /S [/LANGUAGES=typescript,python,go] [/MEDIATOOLS] [/DESKTOPSHORTCUT]`
 with `POSSE_KEY` in the environment or already saved. Unattended uninstall:
 `"%LOCALAPPDATA%\Programs\Posse\uninstall.exe" /S [/REMOVEDATA]`.
 
@@ -157,8 +159,14 @@ published SHA-256 checksum before extraction and use. The fallback does not
 require administrator privileges and is reused on later installer runs.
 The generated launcher puts its Node directory on PATH for subprocesses.
 
-Git, Python, GitHub CLI, ripgrep, Tesseract, ImageMagick, and FFmpeg still use
-winget when missing. GitHub CLI is optional unless you use GitHub-backed push
+Git, Python, GitHub CLI, and ripgrep still use winget when missing, and so do
+Tesseract, ImageMagick, and FFmpeg when you ask for media tools
+(`-WithMediaTools`). winget installs only for your account (`--scope user`),
+so setup never waits on an administrator prompt. A package with no per-user
+installer is reported as needing an administrator; today that includes
+Tesseract. Each package install is limited to `-PackageTimeoutSeconds`
+(default 10 minutes), and a download or package-source failure gets one more
+try. GitHub CLI is optional unless you use GitHub-backed push
 authentication or Session provisioning. Install **App Installer** to provide
 winget, or provision these tools manually if your Windows edition/environment does not include it. Node
 fallback alone does not install Git or Python. PHP/Composer are opt-in through
@@ -197,6 +205,7 @@ they also need compatible Windows images and host prerequisites.
 | `-InstallRoot <path>` | Fallback clone base; default `%USERPROFILE%\claude-tools` |
 | `-PosseRepoUrl <url>` | Override fallback public Git URL |
 | `-SkipHostTools` | Skip missing host-tool installation; still provision Node |
+| `-WithMediaTools` | Also install Tesseract OCR, ImageMagick, and FFmpeg (OCR and image/video conversion) |
 | `-NoInstallNode` | Require working Node 24+ with npm |
 | `-NoPersistEnv` | Skip persistent PATH/profile edits; still write the command shim |
 | `-SkipSettings` | Skip seeding account settings |
@@ -207,6 +216,7 @@ they also need compatible Windows images and host prerequisites.
 | `-SmokeProvider <name>` | Smoke provider; default `openai` |
 | `-NoSmoke` | Skip smoke testing |
 | `-CommandTimeoutSeconds <seconds>` | Command limit, default 1800; range 60–86400 |
+| `-PackageTimeoutSeconds <seconds>` | Limit for each winget package install, default 600; range 60–86400 |
 | `-DoctorTimeoutSeconds <seconds>` | Doctor limit, default 7500; range 60–86400 |
 | `-DryRun` | Preview without installing; a diagnostic log is still written |
 | `-Plain` | Disable colors and spinners |
@@ -217,7 +227,10 @@ they also need compatible Windows images and host prerequisites.
 ## Troubleshooting
 
 Logs: `%USERPROFILE%\.posse\logs\install-<timestamp>.log`. Failed commands
-print their last output and the full log path. Rerun after correcting the
+print their last output and the full log path. The log records each command's
+exit code and duration and ends with a `steps:` line of step durations.
+Before installing anything, setup stops if less than 1 GB is free and warns
+about less than 3 GB or about hosts it cannot reach. Rerun after correcting the
 reported issue; existing usable installations are reused.
 
 | Symptom | Action |
@@ -228,7 +241,8 @@ reported issue; existing usable installations are reused.
 | PowerShell blocks the script | Use the invocation above; organization-enforced policies may require your administrator's help |
 | SQLite `.node` sharing violation | Close other Posse processes using this installation, then rerun installer or doctor |
 | Known valid key reports `invalid posse_key` | Check key status and synchronize Windows time; native heartbeat tokens tolerate only a small clock difference |
-| Missing native binaries/model | Confirm POSSE_KEY/network/disk access and run `posse doctor` |
+| Missing native binaries/model | Confirm POSSE_KEY/network/disk access and run `posse doctor`. A model that did not download leaves an install with a warning and lexical-only code search until doctor completes it |
+| "needs an administrator" for a tool | winget has no per-user installer for it; install it yourself (as an administrator), then rerun setup |
 | Dependency boot guard fails | Doctor attempted repair; resolve its reported requirement and retry before running jobs |
 
 Keys are plaintext with restricted access, not encrypted. Keep `.env` and the

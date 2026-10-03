@@ -11,6 +11,7 @@ import {
   filterProcessEnv,
   isUnboundedCommandTimeout,
 } from "../../../shared/platform/functions/process-env.js";
+import { findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
 
 export { DEFAULT_POSSE_ROOT };
@@ -19,7 +20,7 @@ export const DEFAULT_SCIP_COMMAND_TIMEOUT_MS = 600_000;
 
 /**
  * Narrow process-local cache: command PATH probes are stable within one
- * installer pass and otherwise spawn many duplicate `where`/`which` probes.
+ * installer pass, which repeats the same lookups many times.
  */
 const commandOnPathCache = new Map();
 
@@ -205,8 +206,13 @@ export async function resolveWindowsCommand(command, env) {
   if (!raw || raw.includes("/") || raw.includes("\\") || path.isAbsolute(raw)) return raw;
   try {
     const result = await collectProbe("where", [raw], { env });
-    const first = String(result.stdout || "").split(/\r?\n/u).map((line) => line.trim()).find(Boolean);
-    return first || raw;
+    const candidates = String(result.stdout || "").split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+    // `where composer` lists the extensionless shell script Composer ships
+    // for Git Bash before composer.bat; spawning that fails with ENOENT. Take
+    // the first launchable candidate, as shared/platform command-launch does.
+    return candidates.find((candidate) => /\.(?:cmd|bat|exe|com)$/iu.test(candidate))
+      || candidates[0]
+      || raw;
   } catch {
     return raw;
   }
@@ -222,9 +228,7 @@ export async function commandOnPath(command, env = scipDependencyInstallEnv()) {
   if (commandOnPathCache.has(cacheKey)) {
     return commandOnPathCache.get(cacheKey);
   }
-  const probe = process.platform === "win32" ? "where" : "which";
-  const result = await collectProbe(probe, [command], { env, stdio: "ignore" });
-  const ok = result.status === 0;
+  const ok = findCommandOnPath(command, { env }) !== null;
   commandOnPathCache.set(cacheKey, ok);
   return ok;
 }
@@ -239,9 +243,7 @@ export function commandOnPathSync(command, env = scipDependencyInstallEnv()) {
   if (commandOnPathCache.has(cacheKey)) {
     return commandOnPathCache.get(cacheKey);
   }
-  const probe = process.platform === "win32" ? "where" : "which";
-  const result = spawnSync(probe, [command], { env, stdio: "ignore", windowsHide: true });
-  const ok = result.status === 0;
+  const ok = findCommandOnPath(command, { env }) !== null;
   commandOnPathCache.set(cacheKey, ok);
   return ok;
 }

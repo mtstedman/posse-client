@@ -37,7 +37,7 @@ const RISK_TAG_ALIASES = Object.freeze({
 // floor — for tasks that carry none of the tagged risk. Critical tags
 // especially must come from compound phrases, not single common words.
 const RISK_PATTERNS = Object.freeze([
-  ["auth", /\b(auth|authn|authz|authenticat\w*|authoriz\w*|oauth|login|sign[- ]?in|acl|access[- ]control|role[- ]based|session (?:token|cookie|hijack\w*|fixation)|permission (?:check\w*|model|boundar\w*))\b/i],
+  ["auth", /\b(auth|authn|authz|authenticat(?:e[ds]?|ing|ion|ions)|authoriz(?:e[ds]?|ing|ation|ations)|oauth|login|sign[- ]?in|acl|access[- ]control|role[- ]based|session (?:token|cookie|hijack\w*|fixation)|permission (?:check\w*|model|boundar\w*))\b/i],
   ["security", /\b(secret\w*|credential\w*|password\w*|encrypt\w*|decrypt\w*|csrf|xss|security|vulnerab\w*|(?:api|private|signing|ssh|encryption) key\w*|(?:access|auth|bearer|refresh|session) token\w*)\b/i],
   ["schema", /\b(schema|ddl|(?:alter|create|drop) table|(?:add|drop|rename) column|foreign key|unique constraint)\b/i],
   ["migration", /\b(migration|migrate|backfill|rollout)\b/i],
@@ -107,12 +107,19 @@ export function normalizeRiskTags(values = []) {
 // key-codes.ts, ...) that say nothing about what the task actually does;
 // matching them tagged nearly every task in path-heavy repositories.
 function collectText(task = {}) {
-  return [
+  const prose = [
     task.title,
     task.task_spec,
     task.instructions,
     ...(Array.isArray(task.success_criteria) ? task.success_criteria : [task.success_criteria]),
   ].filter(Boolean).join("\n");
+  // Risk inference is about prose intent, not incidental identifiers. Inline
+  // code, dotted names, and camel/PascalCase symbols routinely contain words
+  // such as Authenticated without making the task an authentication change.
+  return prose
+    .replace(/`[^`\r\n]*`/g, " ")
+    .replace(/\b(?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*\b/g, " ")
+    .replace(/\b[A-Za-z_$]*[a-z][A-Z][A-Za-z0-9_$]*\b/g, " ");
 }
 
 export function inferRiskTagsFromTask(task = {}) {
@@ -147,6 +154,10 @@ export function buildTaskStructuralFacts(task = {}, { jobType = "dev", taskMode 
     const normalized = root.replace(/\/+$/, "");
     return !normalized || normalized === "." || normalized === "/" || normalized === "src" || normalized === "lib";
   });
+  const modifiesTestFiles = uniqueScopeFiles.some((filePath) => (
+    /(?:^|\/)(?:test|tests|__tests__)(?:\/|$)/i.test(filePath)
+    || /(?:^|\/)[^/]+\.(?:test|spec)\.[^/]+$/i.test(filePath)
+  ));
 
   return {
     job_type: jobType,
@@ -160,6 +171,7 @@ export function buildTaskStructuralFacts(task = {}, { jobType = "dev", taskMode 
     scope_file_count: uniqueScopeFiles.length,
     has_writable_scope: uniqueScopeFiles.length > 0 || createRoots.length > 0,
     has_test_command: !!String(task.test_command || "").trim(),
+    modifies_test_files: modifiesTestFiles,
   };
 }
 
@@ -197,13 +209,19 @@ function resolveDevPolicy({
   riskScore,
   scopeConfidence,
   riskTags,
+  allowPolicyDownshift = true,
 }) {
   const bucket = scopeBucket(facts);
   let modelTier = normalizeRanked(currentModelTier, TIER_RANK, "standard");
   let reasoningEffort = normalizeRanked(currentReasoningEffort, EFFORT_RANK, "medium");
   const reasons = [];
 
-  if (riskScore <= 2 && bucket === "small" && facts.has_test_command && scopeConfidence !== "low") {
+  if (allowPolicyDownshift
+    && riskScore <= 2
+    && bucket === "small"
+    && facts.has_test_command
+    && !facts.modifies_test_files
+    && scopeConfidence !== "low") {
     modelTier = "cheap";
     reasoningEffort = "low";
     reasons.push("small low-risk tested scope");
@@ -254,6 +272,7 @@ function resolveAssessorPolicy({
   facts,
   riskScore,
   riskTags,
+  tagFloorSoftened = false,
   taskAbPinnedTestCommand = false,
   testCommandRejected = false,
 }) {
@@ -262,7 +281,7 @@ function resolveAssessorPolicy({
   let passConfidenceFloor = null;
   const reasons = [];
 
-  if (riskScore >= 5 || riskTags.some((tag) => CRITICAL_RISK_TAGS.has(tag))) {
+  if (riskScore >= 5 || (!tagFloorSoftened && riskTags.some((tag) => CRITICAL_RISK_TAGS.has(tag)))) {
     modelTier = "standard";
     reasoningEffort = "high";
     passConfidenceFloor = "high";
@@ -319,6 +338,8 @@ export function resolveTaskExecutionPolicy({
   taskMode = "code",
   currentModelTier = "standard",
   currentReasoningEffort = "medium",
+  plannerModelTierExplicit = false,
+  plannerReasoningEffortExplicit = false,
   taskAbPinnedTestCommand = false,
   plannerTestCommandValid = null,
 } = {}) {
@@ -362,11 +383,13 @@ export function resolveTaskExecutionPolicy({
     riskScore,
     scopeConfidence,
     riskTags,
+    allowPolicyDownshift: !plannerModelTierExplicit && !plannerReasoningEffortExplicit,
   });
   const assessor = resolveAssessorPolicy({
     facts,
     riskScore,
     riskTags,
+    tagFloorSoftened,
     taskAbPinnedTestCommand,
     testCommandRejected,
   });

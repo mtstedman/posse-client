@@ -57,8 +57,14 @@
   Don't seed ~/.posse/account.db.
 
 .PARAMETER SkipHostTools
-  Don't install helper CLI tools (gh, rg, tesseract, ImageMagick, ffmpeg) or the
-  selected languages' toolchains. Missing tools are still reported.
+  Don't install helper CLI tools (gh, rg, and with -WithMediaTools tesseract,
+  ImageMagick, ffmpeg) or the selected languages' toolchains. Missing tools
+  are still reported.
+
+.PARAMETER WithMediaTools
+  Also install the media helpers Posse's OCR and image/video conversion tools
+  use: Tesseract OCR, ImageMagick, and FFmpeg. Off by default; they install
+  after everything else in the tools step.
 
 .PARAMETER NoInstallNode
   Don't auto-install Node through winget or the verified ZIP fallback.
@@ -100,6 +106,9 @@
 .PARAMETER CommandTimeoutSeconds
   Maximum runtime for ordinary non-interactive commands. Default: 1800.
 
+.PARAMETER PackageTimeoutSeconds
+  Maximum runtime for each winget package install. Default: 600.
+
 .PARAMETER DoctorTimeoutSeconds
   Maximum runtime for doctor, including first-time Jina deployment. Default: 7500.
 
@@ -130,6 +139,7 @@ param(
   [switch]$NoPersistEnv,
   [switch]$SkipSettings,
   [switch]$SkipHostTools,
+  [switch]$WithMediaTools,
   [switch]$NoInstallNode,
   [switch]$ConfigureKeys,
   [switch]$NonInteractive,
@@ -140,6 +150,7 @@ param(
   [switch]$RemoveUserData,
   [switch]$Force,
   [ValidateRange(60, 86400)][int]$CommandTimeoutSeconds = 1800,
+  [ValidateRange(60, 86400)][int]$PackageTimeoutSeconds = 600,
   [ValidateRange(60, 86400)][int]$DoctorTimeoutSeconds = 7500,
   [switch]$DryRun,
   [switch]$Plain
@@ -510,24 +521,69 @@ function Get-SetupPercent {
   return [int][math]::Floor(100 * $before / $total)
 }
 
+# PowerShell wraps .NET exceptions; find the WebException underneath, if any.
+function Get-WebException {
+  param($Exception)
+  $current = $Exception
+  while ($current -and -not ($current -is [System.Net.WebException])) { $current = $current.InnerException }
+  return $current
+}
+
 # Downloads a file and reports its percentage to the setup page, which
-# Invoke-WebRequest cannot do. Callers still verify the checksum afterwards.
+# Invoke-WebRequest cannot do. A dropped connection is retried, resuming from
+# the bytes already received when the server supports ranges. Callers still
+# verify the checksum afterwards.
 function Save-Download {
-  param([string]$Uri, [string]$OutFile, [string]$Activity, [int]$TimeoutSec = 600)
+  param([string]$Uri, [string]$OutFile, [string]$Activity, [int]$TimeoutSec = 600, [int]$Attempts = 3)
   Write-SetupProgress @("act", $Activity, "0")
   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force }
+  for ($attempt = 1; ; $attempt++) {
+    try {
+      Receive-DownloadAttempt -Uri $Uri -OutFile $OutFile -TimeoutSec $TimeoutSec
+      break
+    }
+    catch {
+      if ($attempt -ge $Attempts) { throw }
+      # An HTTP error answer (not a dropped connection) restarts from zero.
+      $web = Get-WebException $_.Exception
+      if ($web -and $web.Response) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
+      $wait = if ($attempt -eq 1) { 3 } else { 10 }
+      Write-LogOnly ("[download] {0}: attempt {1} of {2} failed ({3}); retrying in {4}s" -f $Uri, $attempt, $Attempts, $_.Exception.Message, $wait)
+      Start-Sleep -Seconds $wait
+    }
+  }
+  Write-SetupProgress @("actpct", "100")
+}
+
+function Receive-DownloadAttempt {
+  param([string]$Uri, [string]$OutFile, [int]$TimeoutSec)
+  $offset = if (Test-Path -LiteralPath $OutFile) { [long](Get-Item -LiteralPath $OutFile).Length } else { [long]0 }
   $request = [System.Net.HttpWebRequest]::Create($Uri)
   $request.Timeout = $TimeoutSec * 1000
   $request.ReadWriteTimeout = 120000
   $request.UserAgent = "PosseSetup"
+  if ($offset -gt 0) { $request.AddRange($offset) }
   $response = $request.GetResponse()
   try {
-    $total = $response.ContentLength
+    # 206 resumes only when the range starts where this file ends; any other
+    # answer is the whole file again.
+    $resume = $false
+    if ($offset -gt 0 -and [int]$response.StatusCode -eq 206) {
+      $range = [regex]::Match([string]$response.Headers["Content-Range"], '^bytes (\d+)-')
+      $resume = $range.Success -and ([long]$range.Groups[1].Value -eq $offset)
+      if (-not $resume) {
+        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+        throw "the server resumed at the wrong byte"
+      }
+    }
+    $received = if ($resume) { $offset } else { [long]0 }
+    $total = if ($response.ContentLength -gt 0) { $response.ContentLength + $received } else { [long]-1 }
     $source = $response.GetResponseStream()
-    $target = [System.IO.File]::Create($OutFile)
+    $mode = if ($resume) { [System.IO.FileMode]::Append } else { [System.IO.FileMode]::Create }
+    $target = [System.IO.File]::Open($OutFile, $mode, [System.IO.FileAccess]::Write)
     try {
       $buffer = New-Object byte[] 262144
-      $received = [long]0
       $reported = -1
       $reportedAt = [DateTime]::UtcNow
       while (($read = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
@@ -547,9 +603,9 @@ function Save-Download {
       $target.Dispose()
       $source.Dispose()
     }
+    if ($total -gt 0 -and $received -ne $total) { throw ("download ended after {0} of {1} bytes" -f $received, $total) }
   }
   finally { $response.Dispose() }
-  Write-SetupProgress @("actpct", "100")
 }
 
 # "install ImageMagick (ImageMagick.Q16)" -> "Install ImageMagick"
@@ -562,10 +618,23 @@ function Format-SetupActivity {
 $script:CriticalFailed = $false
 $script:InstallFailed = $false
 $script:SummaryPrinted = $false
+$script:LastCommandStdout = ""
+
+# Seconds each step took, for the log's closing "steps:" line.
+$script:StepStartedAt = @{}
+$script:StepSeconds = [ordered]@{}
+$script:RunStartedAt = Get-Date
+
+function Format-StepTimings {
+  $parts = @($script:StepSeconds.Keys | ForEach-Object { "{0}={1}s" -f $_, $script:StepSeconds[$_] })
+  $parts += ("total={0}s" -f [int]((Get-Date) - $script:RunStartedAt).TotalSeconds)
+  return "steps: " + ($parts -join " ")
+}
 
 function Step-Begin {
   param([string]$Key)
   $script:CurrentStep = $Key
+  $script:StepStartedAt[$Key] = Get-Date
   $script:StepIndex++
   Write-Host ""
   Write-Host ("{0}[{1,2}/{2}]{3} {4}{5}{6}" -f $script:DIM, $script:StepIndex, $script:StepKeys.Count, $script:R, $script:BOLD, $script:StepTitles[$Key], $script:R)
@@ -580,7 +649,13 @@ function Step-End {
   $script:StepStatus[$script:CurrentStep] = $Status
   $script:StepNote[$script:CurrentStep] = $Note
   if ($Status -eq "failed") { $script:InstallFailed = $true }
-  Write-LogOnly ("----- {0}: {1}{2}" -f $script:CurrentStep, $Status, $(if ($Note) { " ($Note)" } else { "" }))
+  $took = ""
+  if ($script:StepStartedAt.ContainsKey($script:CurrentStep)) {
+    $seconds = [int]((Get-Date) - $script:StepStartedAt[$script:CurrentStep]).TotalSeconds
+    $script:StepSeconds[$script:CurrentStep] = $seconds
+    $took = " [{0}s]" -f $seconds
+  }
+  Write-LogOnly ("----- {0}: {1}{2}{3}" -f $script:CurrentStep, $Status, $(if ($Note) { " ($Note)" } else { "" }), $took)
   $text = $script:SetupStepText[$script:CurrentStep]
   if ($text) { Write-SetupProgress @("end", $Status, $text[1], $text[0], $Note) }
   switch -Regex ($Status) {
@@ -776,6 +851,9 @@ function Invoke-Logged {
   }
   if ($timedOut) { $chunkContent = ($chunkContent + "`r`ntimed out after ${TimeoutSeconds}s").Trim() }
   if ($chunkContent) { Write-LogOnly $chunkContent.TrimEnd() }
+  Write-LogOnly ("<<< exit {0} after {1}s" -f $rc, $elapsedTotal)
+  # Callers that read a command's report (doctor --json) take it from here.
+  $script:LastCommandStdout = if ($processExited) { [string]$stdoutTask.Result } else { "" }
 
   if ($rc -eq 0) {
     Write-Host ("    {0}{1}{2} {3} {4}({5}){6}" -f $script:GREEN, $script:GlyphOk, $script:R, $Description, $script:DIM, (Format-Duration $elapsedTotal), $script:R)
@@ -820,6 +898,11 @@ function Print-Summary {
     foreach ($w in $script:Warnings) { Write-Host ("    {0}{1}{2} {3}" -f $script:YELLOW, $script:GlyphWarn, $script:R, $w) }
   }
   Write-Host ""
+  if (-not $Uninstall) {
+    $timings = Format-StepTimings
+    Write-LogOnly $timings
+    Write-Host ("  {0}{1}{2}" -f $script:DIM, $timings, $script:R)
+  }
   Write-Host ("  {0}Log:{1} {2}" -f $script:DIM, $script:R, $script:LogFile)
   Write-Host ""
   if ($Uninstall) {
@@ -1393,6 +1476,47 @@ function Get-ImageMagickDirs {
   return $dirs
 }
 
+# winget answers worth a second try: a failed download or package source, no
+# network, or another installation holding the Windows Installer lock.
+$script:WingetTransientExitCodes = @(
+  -1978335224, # 0x8A150008 DOWNLOAD_FAILED
+  -1978335217, # 0x8A15000F SOURCE_DATA_MISSING
+  -1978335169, # 0x8A15003F SOURCE_DATA_INTEGRITY_FAILURE
+  -1978335163, # 0x8A150045 SOURCE_OPEN_FAILED
+  -1978334974, # 0x8A150102 INSTALL_INSTALL_IN_PROGRESS
+  -1978334969  # 0x8A150107 INSTALL_NO_NETWORK
+)
+# With --scope user winget keeps only per-user, portable, and MSIX installers.
+# A package that has none answers this at once instead of asking for
+# administrator approval in a prompt setup's hidden engine cannot show.
+$script:WingetNoApplicableInstaller = -1978335216 # 0x8A150010
+
+function Format-WingetFailure {
+  param([int]$ExitCode)
+  if ($ExitCode -eq 124) { return ("timed out after {0} min" -f [int][math]::Ceiling($PackageTimeoutSeconds / 60)) }
+  if ($ExitCode -eq $script:WingetNoApplicableInstaller) { return "no per-user installer; needs an administrator" }
+  return ("winget exit 0x{0:X8}" -f $ExitCode)
+}
+
+# Installs one winget package for this user only, within -PackageTimeoutSeconds.
+# A transient failure gets one more try; a timeout does not.
+function Invoke-WingetInstall {
+  param([string]$Label, [string]$Id, [string]$Activity, [switch]$QuietFailure)
+  $command = @(
+    "winget", "install", "--id", $Id, "--exact", "--source", "winget", "--silent", "--scope", "user",
+    "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"
+  )
+  $rc = 0
+  for ($attempt = 1; $attempt -le 2; $attempt++) {
+    $retryNote = if ($attempt -gt 1) { ", retry" } else { "" }
+    $rc = Invoke-Logged -Description ("install {0} ({1}{2})" -f $Label, $Id, $retryNote) -Activity $Activity -Command $command -TimeoutSeconds $PackageTimeoutSeconds -QuietFailure:$QuietFailure
+    if ($rc -eq 0 -or $script:WingetTransientExitCodes -notcontains $rc -or $attempt -eq 2) { break }
+    Write-LogOnly ("[winget] {0}: {1}; trying once more" -f $Id, (Format-WingetFailure $rc))
+    Start-Sleep -Seconds 5
+  }
+  return $rc
+}
+
 function Get-MissingPhpComposerExtensions {
   param([string]$PhpPath)
   # One probe through redirected streams: a PHP that prints startup warnings
@@ -1514,12 +1638,7 @@ function Step-Packages {
   $tools = @(
     [PSCustomObject]@{ Label = "Git"; Exe = "git.exe"; VersionPattern = 'git version (\d+)\.(\d+)'; AppNames = @("Git", "Git version *"); Locate = { Get-GitRegistryDirs }; KnownDirs = @("%ProgramFiles%\Git\cmd", "%LOCALAPPDATA%\Programs\Git\cmd"); WingetIds = @("Git.Git"); Reason = "required Posse checkout and worktree lifecycle" },
     [PSCustomObject]@{ Label = "GitHub CLI"; Exe = "gh.exe"; AppNames = @("GitHub CLI*"); KnownDirs = @("%ProgramFiles%\GitHub CLI"); WingetIds = @("GitHub.cli"); Reason = "optional GitHub authentication and Session provisioning" },
-    [PSCustomObject]@{ Label = "ripgrep"; Exe = "rg.exe"; WingetIds = @("BurntSushi.ripgrep.MSVC"); Reason = "deterministic search" },
-    [PSCustomObject]@{ Label = "Tesseract OCR"; Exe = "tesseract.exe"; AppNames = @("Tesseract-OCR*"); KnownDirs = @("%ProgramFiles%\Tesseract-OCR", "%ProgramFiles(x86)%\Tesseract-OCR", "%LOCALAPPDATA%\Programs\Tesseract-OCR"); WingetIds = @("UB-Mannheim.TesseractOCR"); Reason = "image OCR extraction" },
-    # The Store (MSIX) builds install without administrator rights; the classic
-    # ImageMagick.ImageMagick installer is machine-wide only, so it goes last.
-    [PSCustomObject]@{ Label = "ImageMagick"; Exe = "magick.exe"; MinVersion = "7.0"; VersionArgs = @("-version"); VersionPattern = 'ImageMagick (\d+)\.(\d+)'; AppNames = @("ImageMagick*"); Locate = { Get-ImageMagickDirs }; WingetIds = @("ImageMagick.Q16-HDRI", "ImageMagick.Q16", "ImageMagick.ImageMagick"); Scope = "any"; Reason = "image conversion" },
-    [PSCustomObject]@{ Label = "FFmpeg"; Exe = "ffmpeg.exe"; VersionArgs = @("-version"); WingetIds = @("Gyan.FFmpeg"); Reason = "media conversion" }
+    [PSCustomObject]@{ Label = "ripgrep"; Exe = "rg.exe"; WingetIds = @("BurntSushi.ripgrep.MSVC"); Reason = "deterministic search" }
   )
   if (Test-ScipLanguageSelected "python") {
     # Posse itself needs no Python; Python projects do. The py launcher also
@@ -1527,7 +1646,8 @@ function Step-Packages {
     $tools += [PSCustomObject]@{ Label = "Python 3"; Exe = "python.exe"; MinVersion = "3.9"; VersionPattern = 'Python (\d+)\.(\d+)'; AppNames = @("Python 3*"); Locate = { Get-PythonRegistryDirs }; Fallback = { $null -ne (Get-PythonRunner) }; WingetIds = @("Python.Python.3.13", "Python.Python.3.12"); Reason = "explicitly selected SCIP Python indexing" }
   }
   if (Test-ScipLanguageSelected "php") {
-    # Posse's pinned scip-php dependencies need PHP 8.2+. PHP reads php.ini and
+    # Posse's scip-php needs PHP 8.2+: 8.3+ runs current upstream scip-php and
+    # 8.2 the pinned v0.0.2 track (posse doctor picks it). PHP reads php.ini and
     # ext\ beside the binary it was launched as, so its real folder must come
     # before winget's Links alias on PATH.
     $tools += [PSCustomObject]@{ Label = "PHP"; Exe = "php.exe"; MinVersion = "8.2"; VersionPattern = 'PHP (\d+)\.(\d+)'; RealDirFirst = $true; AppNames = @("PHP*"); KnownDirs = @("C:\xampp\php", "C:\laragon\bin\php\php-*", "C:\tools\php*", "%USERPROFILE%\scoop\apps\php\current"); WingetIds = @("PHP.PHP.8.4", "PHP.PHP.8.3"); Reason = "explicitly selected SCIP PHP indexing" }
@@ -1539,6 +1659,18 @@ function Step-Packages {
   if (Test-ScipLanguageSelected "rust") {
     $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
     $tools += [PSCustomObject]@{ Label = "Rust"; Exe = "cargo.exe"; Companions = @("rustc.exe"); KnownDirs = @((Join-Path $cargoHome "bin")); Install = { Install-Rustup }; InstallLabel = "rustup (GNU toolchain + rust-analyzer)"; Reason = "explicitly selected SCIP Rust indexing" }
+  }
+  # Media helpers are opt-in and go last: they are the largest downloads, and
+  # Posse runs without them (OCR is unavailable and image conversion falls
+  # back to sharp or System.Drawing).
+  if ($WithMediaTools) {
+    $tools += [PSCustomObject]@{ Label = "Tesseract OCR"; Exe = "tesseract.exe"; AppNames = @("Tesseract-OCR*"); KnownDirs = @("%ProgramFiles%\Tesseract-OCR", "%ProgramFiles(x86)%\Tesseract-OCR", "%LOCALAPPDATA%\Programs\Tesseract-OCR"); WingetIds = @("UB-Mannheim.TesseractOCR"); Reason = "image OCR extraction (-WithMediaTools)" }
+    # The Store (MSIX) builds install per user without administrator rights.
+    $tools += [PSCustomObject]@{ Label = "ImageMagick"; Exe = "magick.exe"; MinVersion = "7.0"; VersionArgs = @("-version"); VersionPattern = 'ImageMagick (\d+)\.(\d+)'; AppNames = @("ImageMagick*"); Locate = { Get-ImageMagickDirs }; WingetIds = @("ImageMagick.Q16-HDRI", "ImageMagick.Q16"); Reason = "image conversion (-WithMediaTools)" }
+    $tools += [PSCustomObject]@{ Label = "FFmpeg"; Exe = "ffmpeg.exe"; VersionArgs = @("-version"); WingetIds = @("Gyan.FFmpeg"); Reason = "media conversion (-WithMediaTools)" }
+  }
+  else {
+    Write-Info "media tools (Tesseract OCR, ImageMagick, FFmpeg) not requested; -WithMediaTools adds them"
   }
 
   # Find before installing: anything already here and new enough is used as-is.
@@ -1582,6 +1714,7 @@ function Step-Packages {
       $counter = if ($missing.Count -gt 1) { " ({0} of {1})" -f $toolNumber, $missing.Count } else { "" }
       Write-SetupProgress @("act", ("Installing {0}{1}" -f $tool.Label, $counter))
       $installed = $false
+      $reason = ""
       if ($tool.Install) {
         try {
           if ((& $tool.Install) -eq 0) {
@@ -1593,20 +1726,17 @@ function Step-Packages {
       }
       elseif ($hasWinget) {
         foreach ($id in $tool.WingetIds) {
-          $wingetArgs = @("winget", "install", "--id", $id, "--exact", "--source", "winget", "--silent")
-          # "any" lets winget pick a machine-wide installer (Windows asks to approve it).
-          if ($tool.Scope -ne "any") { $wingetArgs += @("--scope", "user") }
-          $wingetArgs += @("--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
-          $rc = Invoke-Logged -Description ("install {0} ({1})" -f $tool.Label, $id) -Activity ("Installing {0}{1}" -f $tool.Label, $counter) -Command $wingetArgs -QuietFailure
-          if ($rc -ne 0) { continue }
+          $rc = Invoke-WingetInstall -Label $tool.Label -Id $id -Activity ("Installing {0}{1}" -f $tool.Label, $counter) -QuietFailure
+          if ($rc -ne 0) { $reason = Format-WingetFailure $rc; continue }
           # An installed package only counts once a new-enough copy actually runs.
           Update-SessionPath
           if ((Resolve-ToolRequirement $tool).Satisfied) { $installed = $true; break }
+          $reason = "installed but not usable"
           Write-LogOnly ("[packages] {0} installed but {1} is not usable; trying the next package" -f $id, $tool.Label)
         }
       }
       if ($installed) { $satisfied[$tool.Label] = $true }
-      else { $failed += $tool.Label }
+      else { $failed += $(if ($reason) { "{0} ({1})" -f $tool.Label, $reason } else { $tool.Label }) }
     }
   }
 
@@ -1690,10 +1820,7 @@ function Step-Node {
   if ($DryRun) { Step-End "dry-run" "would install Node + npm via winget or verified per-user ZIP"; return }
   if (Test-Cmd "winget") {
     foreach ($id in @("OpenJS.NodeJS.LTS", "OpenJS.NodeJS")) {
-      [void](Invoke-Logged -Description "install Node.js ($id)" -Activity "Installing Node.js" -Command @(
-        "winget", "install", "--id", $id, "--exact", "--source", "winget", "--silent",
-        "--scope", "user", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"
-      ))
+      [void](Invoke-WingetInstall -Label "Node.js" -Id $id -Activity "Installing Node.js")
       Update-SessionPath
       if (Test-NodeRuntime) { break }
     }
@@ -1857,19 +1984,37 @@ function Step-Npm {
     Step-End "skipped" "node_modules is fresh (pass -Force to reinstall)"
     return
   }
+  $npm = Get-NpmInstallCommand $script:PosseDirResolved
   if ($DryRun) {
-    Step-End "dry-run" ("would run npm install --include=optional in {0}" -f $script:PosseDirResolved)
+    Step-End "dry-run" ("would run {0} in {1}" -f $npm.Label, $script:PosseDirResolved)
     return
   }
-  $npmArgs = @("npm", "install", "--include=dev", "--include=optional", "--no-fund", "--no-audit")
-  $rc = Invoke-Logged -Description "npm install" -Activity "Installing Posse's npm packages" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
+  $rc = Invoke-Logged -Description $npm.Label -Activity "Installing Posse's npm packages" -Command $npm.Command -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) { Complete-NodeInstall; return }
 
   Write-Info "retrying once (transient network/registry failures are common)"
-  $rc = Invoke-Logged -Description "npm install (retry)" -Activity "Retrying Posse's npm packages" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
+  $rc = Invoke-Logged -Description ("{0} (retry)" -f $npm.Label) -Activity "Retrying Posse's npm packages" -Command $npm.Command -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) { Complete-NodeInstall; return }
 
-  Step-FailCritical "npm install failed twice; see the installer log for details"
+  Step-FailCritical ("{0} failed twice; see the installer log for details" -f $npm.Label)
+}
+
+# The checkout's lockfile pins every version. `npm ci` installs exactly that
+# into a fresh tree. An existing tree is updated in place instead, because ci
+# deletes node_modules first, which fails while a running Posse (the
+# automation owner) holds its SQLite addon open. Neither writes the lockfile,
+# so `posse update` never finds it modified. Older checkouts without a
+# lockfile keep a plain npm install.
+function Get-NpmInstallCommand {
+  param([string]$Dir)
+  $common = @("--include=dev", "--include=optional", "--no-fund", "--no-audit")
+  if (-not (Test-Path -LiteralPath (Join-Path $Dir "package-lock.json"))) {
+    return [PSCustomObject]@{ Label = "npm install"; Command = @("npm", "install") + $common }
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $Dir "node_modules"))) {
+    return [PSCustomObject]@{ Label = "npm ci"; Command = @("npm", "ci") + $common }
+  }
+  return [PSCustomObject]@{ Label = "npm install (locked versions)"; Command = @("npm", "install", "--no-save", "--prefer-offline") + $common }
 }
 
 function Complete-NodeInstall {
@@ -2098,11 +2243,43 @@ function Step-Doctor {
   }
   Write-Info "delegating to Posse's own dependency engine (SCIP indexer environments)"
   $rc = Invoke-Logged -Description "posse doctor (first run builds SCIP envs and deploys Jina)" -Activity "Building code indexers and the search model (the longest step)" -Command @($script:NodeBin, "orchestrator.js", "doctor", "--adopt-node-install") -WorkingDirectory $script:PosseDirResolved -TimeoutSeconds $DoctorTimeoutSeconds
-  if ($rc -eq 0) { Step-End "ok" "runtime dependencies, binaries, and Jina ready" }
-  else {
-    Write-Warn2 "posse doctor reported unresolved dependencies - run 'posse doctor' after fixing the tools it names (log has details)"
-    Step-End "failed" "runtime dependencies, native binaries, or Jina unresolved"
+  if ($rc -eq 0) { Step-End "ok" "runtime dependencies, binaries, and Jina ready"; return }
+  if ($rc -eq 124) {
+    Write-Warn2 "posse doctor did not finish in time - run 'posse doctor' to complete it (log has details)"
+    Step-End "failed" ("posse doctor timed out after {0} min" -f [int]($DoctorTimeoutSeconds / 60))
+    return
   }
+
+  # Most first-run failures are downloads, so try once more. The retry reports
+  # as JSON, which says exactly what is still missing.
+  Write-Info "retrying posse doctor once"
+  $rc = Invoke-Logged -Description "posse doctor (retry)" -Activity "Retrying the code indexers and search model" -Command @($script:NodeBin, "orchestrator.js", "doctor", "--adopt-node-install", "--json") -WorkingDirectory $script:PosseDirResolved -TimeoutSeconds $DoctorTimeoutSeconds
+  if ($rc -eq 0) { Step-End "ok" "runtime dependencies, binaries, and Jina ready (second attempt)"; return }
+  $failedLabels = @(Get-DoctorFailedLabels $script:LastCommandStdout)
+  # Without the search model Posse still runs, with lexical search only; only
+  # doctor (or posse update) downloads it later, so say so.
+  if ($rc -ne 124 -and $failedLabels.Count -gt 0 -and @($failedLabels | Where-Object { $_ -notmatch '^model ' }).Count -eq 0) {
+    Write-Warn2 "the code search model did not download; semantic search stays off until 'posse doctor' completes it"
+    Step-End "partial" "search model not downloaded; run 'posse doctor' later to add semantic search"
+    return
+  }
+  $what = if ($failedLabels.Count -gt 0) { (@($failedLabels | Select-Object -First 4) -join ", ") } else { "see log" }
+  Write-Warn2 "posse doctor reported unresolved dependencies - run 'posse doctor' after fixing the tools it names (log has details)"
+  Step-End "failed" ("still unresolved after a retry: {0}" -f $what)
+}
+
+# Labels of the entries `posse doctor --json` reports as failed ("model jina",
+# "scip python", "native posse-ml", ...); empty when the output holds no report.
+function Get-DoctorFailedLabels {
+  param([string]$Output)
+  $match = [regex]::Match([string]$Output, '(?ms)^\{\r?\n\s*"ok":.*?^\}')
+  if (-not $match.Success) { return @() }
+  try { $report = ConvertFrom-Json -InputObject $match.Value }
+  catch { return @() }
+  if (-not $report.doctor) { return @() }
+  return @(@($report.doctor.failed) | Where-Object { $_ } | ForEach-Object {
+    if ($_.label) { [string]$_.label } elseif ($_.language) { [string]$_.language } else { "dependency" }
+  })
 }
 
 function Step-AdminInit {
@@ -2548,6 +2725,11 @@ function Step-NativeBinaries {
   }
 
   $rc = Invoke-Logged -Description "download current native binaries" -Activity "Downloading Posse's native tools" -Command @($script:NodeBin, "scripts/pull-native-artifacts.mjs") -WorkingDirectory $script:PosseDirResolved
+  # Binaries already current are only checked again, so one retry is cheap.
+  if ($rc -ne 0 -and $rc -ne 124) {
+    Write-Info "retrying once (transient network failures are common)"
+    $rc = Invoke-Logged -Description "download current native binaries (retry)" -Activity "Retrying Posse's native tools" -Command @($script:NodeBin, "scripts/pull-native-artifacts.mjs") -WorkingDirectory $script:PosseDirResolved
+  }
   if ($rc -eq 0) {
     Step-End "ok" "native binaries downloaded or already current"
   }
@@ -2611,6 +2793,59 @@ function Test-GitConfig {
   if (-not $email) { Write-Warn2 'git user.email is not set globally (git config --global user.email "you@example.com")' }
 }
 
+# Free bytes on the fullest drive among these paths (existing parents count).
+function Get-LowestFreeDisk {
+  param([string[]]$Paths)
+  $lowest = $null
+  foreach ($pathValue in @($Paths | Where-Object { $_ })) {
+    try {
+      $root = [System.IO.Path]::GetPathRoot((Resolve-FullPath $pathValue))
+      if (-not $root) { continue }
+      $free = (New-Object System.IO.DriveInfo($root)).AvailableFreeSpace
+      if ($null -eq $lowest -or $free -lt $lowest.Free) { $lowest = [PSCustomObject]@{ Root = $root; Free = [long]$free } }
+    }
+    catch { Write-LogOnly ("[preflight] free space of {0}: {1}" -f $pathValue, $_.Exception.Message) }
+  }
+  return $lowest
+}
+
+# Hosts setup downloads from that this PC cannot reach, as "host (why)". Any
+# HTTP answer counts as reachable; only a failed connection does not.
+function Get-UnreachableHosts {
+  param([string[]]$Hosts, [int]$TimeoutMs = 8000)
+  $why = @{
+    NameResolutionFailure = "name lookup failed"; ConnectFailure = "connection refused or blocked"; Timeout = "timed out"
+    TrustFailure = "certificate not trusted; a proxy may be inspecting traffic"; SecureChannelFailure = "secure connection failed"
+    ProxyNameResolutionFailure = "proxy not found"
+  }
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  $missing = @()
+  foreach ($hostName in $Hosts) {
+    try {
+      $request = [System.Net.HttpWebRequest]::Create("https://$hostName/")
+      $request.Method = "HEAD"
+      $request.Timeout = $TimeoutMs
+      $request.AllowAutoRedirect = $false
+      $request.UserAgent = "PosseSetup"
+      $request.GetResponse().Dispose()
+    }
+    catch {
+      $web = Get-WebException $_.Exception
+      if ($web -and $web.Response) { $web.Response.Dispose(); continue }
+      $status = if ($web) { [string]$web.Status } else { "" }
+      $reason = if ($why.ContainsKey($status)) { $why[$status] } elseif ($status) { $status } else { $_.Exception.Message }
+      $missing += ("{0} ({1})" -f $hostName, $reason)
+    }
+  }
+  return $missing
+}
+
+# A proxy URL can carry a password; never log it.
+function Format-ProxyForLog {
+  param([string]$Url)
+  return ([string]$Url -replace '//[^/@]*@', '//***@')
+}
+
 function Test-IsElevated {
   try {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -2654,9 +2889,49 @@ function Step-Preflight {
     }
     Write-Info ("managed Windows runtimes: {0}" -f $script:ManagedStateRoot)
   }
+  $notes = @()
+  if (-not $DryRun) {
+    # Disk: Git, Node, node_modules, indexers, and the search model need about
+    # 3 GB (more with Rust); under 1 GB the install cannot finish.
+    $target = if ($PosseDir) { $PosseDir } else { $InstallRoot }
+    $disk = Get-LowestFreeDisk @($env:USERPROFILE, $localAppDataRoot, $target)
+    if ($disk) {
+      $freeGb = [math]::Round($disk.Free / 1GB, 1)
+      if ($disk.Free -lt 1GB) {
+        $script:CriticalFailed = $true
+        Step-End "failed" ("only {0} GB free on {1}; Posse needs about 3 GB. Free some space, then run setup again." -f $freeGb, $disk.Root)
+        return $false
+      }
+      if ($disk.Free -lt 3GB) {
+        Write-Warn2 ("only {0} GB free on {1}; a full install needs about 3 GB" -f $freeGb, $disk.Root)
+        $notes += ("low disk space ({0} GB free)" -f $freeGb)
+      }
+    }
+
+    # Network: a blocked host is a warning, not a stop, because proxies can
+    # make a probe fail where the real download works.
+    $hosts = @("github.com", "registry.npmjs.org", "api.yourposseai.com")
+    if (-not $SkipHostTools -and (Test-Cmd "winget")) { $hosts += "cdn.winget.microsoft.com" }
+    $unreachable = @(Get-UnreachableHosts $hosts)
+    if ($unreachable.Count -gt 0) {
+      Write-Warn2 ("cannot reach {0}; steps that download from there will fail" -f ($unreachable -join ", "))
+      $notes += ("cannot reach " + ($unreachable -join ", "))
+    }
+    try {
+      $probe = [Uri]"https://github.com/"
+      $systemProxy = [System.Net.WebRequest]::GetSystemWebProxy().GetProxy($probe)
+      if ($systemProxy -and $systemProxy -ne $probe) { Write-Info ("downloads go through the proxy {0}" -f (Format-ProxyForLog $systemProxy.AbsoluteUri)) }
+    }
+    catch {}
+    foreach ($name in @("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")) {
+      $value = [Environment]::GetEnvironmentVariable($name)
+      if ($value) { Write-Info ("{0} is set: {1}" -f $name, (Format-ProxyForLog $value)); break }
+    }
+  }
   Test-GitConfig
   if (-not $SetupOnly) { Test-ProviderCredentials }
-  Step-End "ok" "preflight complete"
+  if ($notes.Count -gt 0) { Step-End "partial" ($notes -join "; ") }
+  else { Step-End "ok" "preflight complete" }
   return $true
 }
 
@@ -2894,7 +3169,7 @@ try {
 
   Write-LogOnly ("install-posse-atlas started {0}" -f (Get-Date -Format "o"))
   Write-SetupProgress @("log", $script:LogFile)
-  Write-LogOnly ("dry_run={0} force={1} host_tools={2} install_node={3}" -f $DryRun, $Force, (-not $SkipHostTools), (-not $NoInstallNode))
+  Write-LogOnly ("dry_run={0} force={1} host_tools={2} media_tools={3} install_node={4}" -f $DryRun, $Force, (-not $SkipHostTools), [bool]$WithMediaTools, (-not $NoInstallNode))
 
   if ($DryRun) {
     Write-Host ("  {0}{1}DRY RUN{2} {3}- no changes will be made{2}" -f $script:BOLD, $script:YELLOW, $script:R, $script:DIM)

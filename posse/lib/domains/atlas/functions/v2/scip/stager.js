@@ -123,6 +123,7 @@ const SCIP_INDEXER_SENSITIVE_ENV_KEY_RE = /api[_-]?key|token|secret|credential|p
  *   sourceExtensions?: string[],
  *   commandArgsHashTimeoutMs?: number,
  *   runtimeColdTimeout?: boolean,
+ *   indexerIdentity?: string | null,
  * }} ScipStagePlan
  */
 
@@ -691,6 +692,10 @@ async function findReusableScipBatchOutputs({ scipDir, manifest }) {
         || recovered.has(batchOrdinal)) continue;
       const batch = manifest.batches[batchOrdinal];
       if (!batch) continue;
+      // An artifact from a different indexer environment (e.g. the legacy
+      // scip-php before an upgrade) is restaged, not reused.
+      if (String(candidate.state.batches?.[batchOrdinal]?.indexerIdentity || "")
+        !== String(batch.plan.indexerIdentity || "")) continue;
       const outputPath = path.join(
         candidate.sessionDir,
         `batch-${String(batchOrdinal).padStart(5, "0")}`,
@@ -799,9 +804,26 @@ export async function stageScipBatches({
     : { files: [], results: [] };
   const fallbackOutputKeys = new Set(fallbackPlans.map((plan) => normalizedFileKey(plan.outputPath)));
   const fallbackFiles = (fallback.files || []).filter((file) => fallbackOutputKeys.has(normalizedFileKey(file)));
+  // A changed indexer environment invalidates every document the previous
+  // receipt credits to it, not just the paths this warm was asked about.
+  const indexerIdentities = scipPlanIndexerIdentities(batchPlans);
+  const identityStalePaths = await scipCoveragePathsWithStaleIdentity({
+    repoRoot: root,
+    scipDir: dir,
+    plans: batchPlans,
+  });
+  const stagedPaths = identityStalePaths.length > 0
+    ? uniqueBytewiseRepoPaths([...paths, ...identityStalePaths])
+    : paths;
+  if (identityStalePaths.length > 0) {
+    emit(onProgress, `restaging ${identityStalePaths.length} SCIP document${identityStalePaths.length === 1 ? "" : "s"} indexed by a replaced indexer`, {
+      kind: "atlas.scip.indexer_changed",
+      documents: identityStalePaths.length,
+    });
+  }
   const manifest = await buildScipBatchManifest({
     repoRoot: root,
-    paths,
+    paths: stagedPaths,
     plans: batchPlans,
     maxFiles: config?.atlasScipBatchMaxFiles ?? config?.atlas_scip_batch_max_files,
     maxSourceBytes: config?.atlasScipBatchMaxSourceBytes ?? config?.atlas_scip_batch_max_source_bytes,
@@ -850,6 +872,7 @@ export async function stageScipBatches({
       sourceBytes: batch.sourceBytes,
       batchHash: batch.batchHash,
       language: batch.plan.indexerId,
+      ...(batch.plan.indexerIdentity ? { indexerIdentity: batch.plan.indexerIdentity } : {}),
       paths: batch.paths,
     })),
   };
@@ -1145,7 +1168,7 @@ export async function stageScipBatches({
         const documents = await mergeScipBatchCoverageDocuments({
           repoRoot: root,
           scipDir: dir,
-          replacedPaths: paths,
+          replacedPaths: stagedPaths,
           documents: [...acknowledgedDocuments.values()].map((document) => ({
             repo_rel_path: document.repoRelPath,
             content_hash: document.contentHash,
@@ -1159,7 +1182,7 @@ export async function stageScipBatches({
         const unavailable = await mergeScipBatchUnavailableDocuments({
           repoRoot: root,
           scipDir: dir,
-          replacedPaths: paths,
+          replacedPaths: stagedPaths,
           acknowledgedPaths: documents.map((document) => document.repo_rel_path),
           documents: [...unavailableDocuments.values()].map((document) => ({
             repo_rel_path: document.repoRelPath,
@@ -1168,12 +1191,14 @@ export async function stageScipBatches({
             source_languages: sourceLanguagesForPlan(document.plan),
           })),
         });
+        const previousCoverage = await readScipBatchCoverage(dir);
         batchCoverage = await writeScipBatchCoverage({
           scipDir: dir,
           head,
           filesetHash: sha256Hex(Buffer.from(JSON.stringify({ documents, unavailable }))),
           documents,
           unavailableDocuments: unavailable,
+          indexerIdentities: { ...(previousCoverage?.indexer_identities || {}), ...indexerIdentities },
         });
       }
     }
@@ -1437,6 +1462,55 @@ async function batchPlanEligible(root, plan) {
   if (!SCIP_BATCH_STAGE_INDEXERS.has(indexer)) return false;
   if (indexer === "php" && !await fileExists(path.join(root, "vendor", "autoload.php"))) return false;
   return true;
+}
+
+/**
+ * @param {ScipStagePlan[]} plans
+ * @returns {Record<string, string>} indexer id -> identity, for plans that carry one
+ */
+function scipPlanIndexerIdentities(plans) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const plan of plans || []) {
+    const identity = String(plan?.indexerIdentity || "");
+    if (identity && plan?.indexerId) out[String(plan.indexerId)] = identity;
+  }
+  return out;
+}
+
+/**
+ * Paths the current coverage receipt credits to a plan whose indexer identity
+ * differs from the one recorded when the receipt was written (a receipt from
+ * before identities were recorded counts as different). Deleted files drop
+ * out; they have nothing to restage.
+ *
+ * @param {{ repoRoot: string, scipDir: string, plans: ScipStagePlan[] }} input
+ * @returns {Promise<string[]>}
+ */
+export async function scipCoveragePathsWithStaleIdentity({ repoRoot, scipDir, plans }) {
+  const receipt = await readScipBatchCoverage(scipDir);
+  if (!receipt) return [];
+  const recorded = receipt.indexer_identities && typeof receipt.indexer_identities === "object"
+    ? receipt.indexer_identities
+    : {};
+  const staleLanguages = new Set();
+  for (const plan of plans || []) {
+    const identity = String(plan?.indexerIdentity || "");
+    if (!identity || String(recorded[String(plan.indexerId)] || "") === identity) continue;
+    for (const language of sourceLanguagesForPlan(plan)) staleLanguages.add(language);
+  }
+  if (staleLanguages.size === 0) return [];
+  const root = path.resolve(String(repoRoot || process.cwd()));
+  const out = [];
+  for (const document of [...(receipt.documents || []), ...(receipt.unavailable_documents || [])]) {
+    const repoRelPath = String(document?.repo_rel_path || "");
+    if (!isCanonicalRepoPath(repoRelPath)) continue;
+    const languages = Array.isArray(document?.source_languages) ? document.source_languages : [];
+    if (!languages.some((language) => staleLanguages.has(String(language || "").toLowerCase()))) continue;
+    if (!await fileExists(path.join(root, repoRelPath))) continue;
+    out.push(repoRelPath);
+  }
+  return uniqueBytewiseRepoPaths(out);
 }
 
 function pathsForPlan(paths, plan) {
@@ -1715,6 +1789,7 @@ export async function describeScipStagingState({
     rows.push({
       language: plan.indexerId || "configured",
       source_languages: sourceLanguagesForPlan(plan),
+      ...(plan.indexerIdentity ? { indexer_identity: plan.indexerIdentity } : {}),
       label: plan.label,
       output: plan.outputPath,
       exists,

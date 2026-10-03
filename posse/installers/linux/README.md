@@ -23,6 +23,9 @@ SHA-256 and installed per user when the distribution's is older), Rust through r
 rust-analyzer (checked against its published SHA-256, installed per user
 without sudo), PHP with Composer, and Python with pip and venv. TypeScript
 uses the Node the installer always provides; C/C++ needs nothing extra.
+PHP 8.3+ indexes with current scip-php; the distribution PHP of Debian 12
+(8.2) and Ubuntu 22.04 (8.1) gets the pinned scip-php v0.0.2 instead, which
+cannot read PHP 8.4+ syntax. The Composer step names the track it chose.
 Posse itself needs no Python.
 
 If you already have the public client checkout:
@@ -84,7 +87,8 @@ a service before relying on unattended schedules.
 
 ## Containers and unattended installs
 
-Use a glibc image such as `debian:bookworm-slim`. Alpine is unsupported. You
+Use a glibc 2.34+ image such as `debian:bookworm-slim`, `ubuntu:22.04` or
+`almalinux:9`; the preflight stops on older glibc. Alpine is unsupported. You
 need a writable home and checkout; use a writable volume or a user-owned clone
 instead of installing into a read-only source mount. No systemd is required by
 the installer. Privileged Docker mode is not required.
@@ -136,17 +140,31 @@ your deployment and Posse settings if indexing exhausts the container's limits.
 ## What setup handles
 
 - Missing Git, CA certificates, download/extraction tools, process tools,
-  C++/make/pkg-config, Python/pip/venv, and helper CLIs (including the optional
-  GitHub CLI) through apt/dnf/yum/pacman/zypper.
+  C++/make/pkg-config, Python/pip/venv, and helper CLIs (ripgrep and the
+  optional GitHub CLI) through apt/dnf/yum/pacman/zypper, in one package
+  transaction. If that transaction fails (for example, a name your repositories
+  lack), the installer falls back to installing core, toolchain, and each
+  helper separately.
+- With `--with-media-tools`, also tesseract, ImageMagick, and ffmpeg (in the
+  same transaction, listed last). Without them, Posse's OCR tool is unavailable
+  and image conversion uses sharp.
+- A preflight check: it stops below 1 GB free disk, and warns (it does not
+  stop) about less than 3 GB free or hosts it cannot reach (GitHub, the npm
+  registry, Posse's service).
 - Node 24 through pinned nvm when the current Node/npm pair is unusable. The
   nvm installer script is verified against a SHA-256 embedded in this script
   before it runs, and all downloads are HTTPS-only across redirects. nvm's
   binary-only installation avoids accidentally compiling Node in a slim image.
 - A writable existing checkout, or a staged clone of the public client. Failed
   clones are removed without leaving the final destination half-installed.
-- npm dependencies, including a SQLite ABI probe before reusing an old install.
+- npm dependencies from the checkout's lockfile (`npm ci` for a new tree,
+  a lock-respecting update for an existing one; the lockfile is never
+  rewritten), including a SQLite ABI probe before reusing an old install.
 - A `~/.local/bin/posse` launcher and optional shell profile wiring.
-- Hidden key entry into a private `.env`, then native downloads and runtime doctor.
+- Hidden key entry into a private `.env`, then native downloads and runtime
+  doctor. Native downloads and doctor each get one retry; an embedding-model
+  download that still fails ends the install with a warning instead of a
+  failure.
 
 ## Options
 
@@ -160,6 +178,7 @@ your deployment and Posse settings if indexing exhausts the container's limits.
 | `--install-root <path>` | Fallback clone base; default `~/claude-tools` |
 | `--posse-repo-url <url>` | Override fallback public Git URL |
 | `--skip-host-tools` | Skip all OS package installation; still provision Node |
+| `--with-media-tools` | Also install tesseract, ImageMagick, and ffmpeg (OCR and image/video conversion) |
 | `--no-install-node` | Require an existing working Node 24+ and npm |
 | `--no-persist-env` | Skip shell profile edits; still write launcher/PATH file |
 | `--skip-settings` | Preserve account settings without seeding defaults |
@@ -178,7 +197,8 @@ your deployment and Posse settings if indexing exhausts the container's limits.
 ## Troubleshooting
 
 Logs: `~/.posse/logs/install-<timestamp>.log`. The summary reports `ok`,
-`skipped`, `partial`, `failed`, or `blocked`. Setup-only success means core
+`skipped`, `partial`, `failed`, or `blocked`, and the log records each
+command's exit code and duration plus a closing `steps:` line. Setup-only success means core
 installation completed; it does not mean the runtime is ready.
 
 | Symptom | Action |

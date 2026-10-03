@@ -119,6 +119,11 @@ function commandArgsHashPayload(plan, {
     command_source: String(plan?.commandSource || ""),
   };
   if (includeTimeout) payload.timeout_ms = Number(timeoutMs) || 0;
+  // Which installed indexer environment produced the artifact (PHP: current
+  // vs legacy scip-php plus its Composer input hash). Absent for plans without
+  // one, so their existing hashes are unchanged.
+  const identity = String(plan?.indexerIdentity || "");
+  if (identity) payload.indexer_identity = identity;
   return payload;
 }
 
@@ -127,7 +132,7 @@ function sha256Json(payload) {
 }
 
 /**
- * @param {{ command?: string, args?: string[], label?: string, indexerId?: string, commandSource?: string }} plan
+ * @param {{ command?: string, args?: string[], label?: string, indexerId?: string, commandSource?: string, indexerIdentity?: string | null }} plan
  * @returns {string}
  */
 export function computeCommandArgsHash(plan) {

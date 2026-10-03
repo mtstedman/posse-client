@@ -392,6 +392,38 @@ export class ToolContract {
     return lines.join("\n");
   }
 
+  // The facts toClaudeCliFlags decides on, as posse-remote's
+  // engagement.launchPlan input. Path normalization stays here: it is platform
+  // plumbing, not policy.
+  toClaudeLaunchInput({
+    autoApprove = false,
+    scopedFiles = [],
+    createFiles = [],
+    createRoots = [],
+    scopeCwd = process.cwd(),
+    deterministicReadMcpActive = false,
+    disableSystemTools = false,
+    webToolsEnabled = false,
+  } = {}) {
+    const contract = this.contract;
+    return {
+      role: contract.role || null,
+      roleMode: contract.roleMode || null,
+      allowWrite: !!contract.allowWrite,
+      allowTests: !!contract.allowTests,
+      hasAtlasTools: Array.isArray(contract.tools)
+        && contract.tools.some((tool) => (tool?.access || "") === "atlas"),
+      autoApprove: !!autoApprove,
+      scopedFiles: Array.isArray(scopedFiles) ? scopedFiles.map(String) : [],
+      createFiles: Array.isArray(createFiles) ? createFiles.map(String) : [],
+      createRootCount: Array.isArray(createRoots) ? createRoots.length : 0,
+      createRootGlobs: Array.isArray(createRoots) ? normalizeCreateRootGlobs(createRoots, scopeCwd) : [],
+      deterministicReadMcpActive: !!deterministicReadMcpActive,
+      disableSystemTools: !!disableSystemTools,
+      webToolsEnabled: !!webToolsEnabled,
+    };
+  }
+
   toClaudeCliFlags({
     autoApprove = false,
     scopedFiles = [],

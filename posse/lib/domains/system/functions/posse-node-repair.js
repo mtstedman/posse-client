@@ -16,6 +16,7 @@ import { withDependencyInstallLock } from "../../../shared/concurrency/functions
 import { commandSpawnSpec } from "../../../shared/platform/functions/command-launch.js";
 import { managedInstallStateRoot } from "../../../shared/platform/functions/managed-install-state.js";
 import { filterProcessEnv } from "../../../shared/platform/functions/process-env.js";
+import { missingRuntimeSymbol, nativeLoadFailureRemedy } from "../../../shared/platform/functions/native-runtime-floor.js";
 import { npmInstalledPackageDirs } from "./node-lock-validation.js";
 
 const NODE_MANIFEST_STAMP_NAME = ".posse-manifest.sha256";
@@ -218,14 +219,22 @@ export async function ensurePosseSqlite({ root, dryRun = false, timeoutMs = DEFA
   const probe = () => spawnSync(process.execPath, ["--input-type=commonjs", "-e",
     'const D = require("better-sqlite3"); const db = new D(":memory:"); db.close();'], {
     cwd: root, env: installEnvironment(), encoding: "utf8", timeout: 15000, windowsHide: true,
-  }).status === 0;
-  if (probe()) return { ok: true };
+  });
+  const first = probe();
+  if (first.status === 0) return { ok: true };
+  // A missing GLIBC/GLIBCXX symbol is an operating-system floor; rebuilding
+  // cannot fix it (the prebuilt addon never compiles locally).
+  if (missingRuntimeSymbol(first.stderr)) return {
+    ok: false, status: "failed", action: "check",
+    message: `SQLite addon cannot load on this system: ${nativeLoadFailureRemedy(first.stderr)}`,
+  };
   if (dryRun) return { ok: true, status: "dry-run", action: "rebuild", message: "would rebuild incompatible SQLite addon" };
   onProgress?.("posse npm: rebuilding incompatible SQLite addon");
   const rebuilt = await runNpmImpl(["rebuild", "better-sqlite3", "--no-fund", "--no-audit"], { cwd: root, timeoutMs, onProgress });
-  if (!rebuilt.ok || !probe()) return {
+  const after = rebuilt.ok ? probe() : first;
+  if (!rebuilt.ok || after.status !== 0) return {
     ok: false, status: "failed", action: "rebuild",
-    message: "SQLite addon remains unusable after npm rebuild; check the build toolchain, Node version, and other running Posse processes",
+    message: `SQLite addon remains unusable after npm rebuild; check the Node version and other running Posse processes (${failureSummary(after.stderr)})`,
   };
   return { ok: true, status: "installed", action: "rebuild", message: "rebuilt SQLite addon for this Node runtime" };
 }

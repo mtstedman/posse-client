@@ -34,7 +34,8 @@ import { buildCodexWindowsLaunchEnv, formatSpawnLaunchForError, getCodexLaunchSt
 import { buildCodexExecArgs, cleanupTempDir, collectCodexExtraDirs, makeTempOutputFile, prepareCodexConfigForSpawn } from "./cli-spawn.js";
 import { isCodexResumeHandleExpiredError } from "./errors.js";
 import { getMaxTurns, getModelOverride, getModelTierConfig, normalizeModelForAuthMode } from "./model-config.js";
-import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRoute, buildCodexDeterministicMcpAttachment, buildCodexDeterministicReadConfigOverridesAsync, buildCodexResearchBootOverrides, buildCodexSystemToolLockdownOverrides } from "./request-builders.js";
+import { buildCodexAtlasConfigOverridesAsync, buildCodexDeveloperInstructionRoute, buildCodexDeterministicMcpAttachment, buildCodexDeterministicReadConfigOverridesAsync, buildCodexResearchBootOverrides, buildCodexSystemToolLockdownOverrides, CODEX_RESEARCH_BASE_INSTRUCTIONS_PATH } from "./request-builders.js";
+import { buildCodexLaunchInput, codexLaunchOverridesFromPlan, normalizeCodexLaunchOverrides, reconcileLaunchPolicy } from "../shared/engagement-launch.js";
 import { prepareCodexResearchMcpSurface } from "./research-mcp-surface.js";
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
 import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractLiveRequestUsageFromEvent, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
@@ -327,7 +328,7 @@ export async function callProvider(promptText, {
       roleMode,
       webToolsEnabled: resolveWebToolsEnabled() && issuedWebAccessEnabled(_remoteIssuedPolicy),
     });
-    const systemToolLockdownOverrides = buildCodexSystemToolLockdownOverrides({
+    const lockdownInput = {
       role,
       disableSystemTools,
       disableNativeImageGeneration: deterministicReadMcp.tools.includes("generate_image"),
@@ -335,6 +336,16 @@ export async function callProvider(promptText, {
       codexCodeMode: deterministicReadMcp.codexCodeMode === true,
       codexNativeBatching: deterministicReadMcp.codexNativeBatching === true,
       webToolsActive: webTools.active,
+    };
+    const codexLaunch = await reconcileLaunchPolicy({
+      provider: "codex",
+      role,
+      request: () => buildCodexLaunchInput(lockdownInput, CODEX_RESEARCH_BASE_INSTRUCTIONS_PATH),
+      jsValue: normalizeCodexLaunchOverrides({
+        lockdownOverrides: buildCodexSystemToolLockdownOverrides(lockdownInput),
+        researchBootOverrides: buildCodexResearchBootOverrides({ role }),
+      }),
+      nativeValue: codexLaunchOverridesFromPlan,
     });
     // The Posse MCP gateway exposes deterministic and atlas.* suites from a
     // single process, so do not attach a second ATLAS MCP server when the
@@ -342,8 +353,8 @@ export async function callProvider(promptText, {
     const atlasServedByGateway = !!deterministicReadMcp.active;
     const combinedConfigOverrides = [
       ...memorySuppressionOverrides,
-      ...systemToolLockdownOverrides,
-      ...buildCodexResearchBootOverrides({ role }),
+      ...codexLaunch.lockdownOverrides,
+      ...codexLaunch.researchBootOverrides,
       ...deterministicReadMcp.configOverrides,
       ...(atlasServedByGateway || !atlasReadyForMcp ? [] : atlasConfigOverrides),
       ...webTools.configOverrides,

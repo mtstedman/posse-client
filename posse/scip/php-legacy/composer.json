@@ -3,7 +3,7 @@
   "description": "Posse-managed SCIP CLI indexers for local ATLAS warmup.",
   "type": "project",
   "require-dev": {
-    "davidrjenni/scip-php": "dev-main#71a5b117ec4c5dd2af302e363410e604e5df309e"
+    "davidrjenni/scip-php": "v0.0.2"
   },
   "scripts": {
     "post-install-cmd": "node patch-scip-php.mjs",
@@ -12,6 +12,9 @@
   "config": {
     "platform": {
       "php": "8.3.0"
+    },
+    "audit": {
+      "block-insecure": false
     }
   }
 }

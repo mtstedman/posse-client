@@ -11,11 +11,20 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolvePhpScipRuntime } from "../../lib/domains/environments/functions/php-scip-tracks.js";
+import { managedToolRoot } from "../../lib/shared/platform/functions/managed-install-state.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const scipRoot = path.resolve(here, "..");
-const upstream = path.join(scipRoot, "php", "vendor", "bin", "scip-php");
-const composerPhar = path.join(here, "composer.phar");
+// scip/php (current upstream, PHP 8.3+) or scip/php-legacy (v0.0.2, PHP
+// 8.1/8.2): run the environment the installer stamped for this host.
+// Windows production installs keep these in the per-user tool root
+// (%LOCALAPPDATA%\Posse\scip) rather than beside this wrapper.
+const managedScipRoot = path.join(managedToolRoot(), "scip");
+const runtime = resolvePhpScipRuntime({ scipRoots: [managedScipRoot, scipRoot] });
+const upstream = runtime?.upstream || path.join(scipRoot, "php", "vendor", "bin", "scip-php");
+const composerPharCandidates = [path.join(managedScipRoot, "bin", "composer.phar"), path.join(here, "composer.phar")];
+const composerPhar = composerPharCandidates.find((file) => fs.existsSync(file)) || composerPharCandidates.at(-1);
 const FALLBACK_IGNORED_DIRS = new Set([
   ".git",
   ".hg",
@@ -35,8 +44,8 @@ if (!parsed.output) {
   console.error("scip-php wrapper requires --output <path>");
   process.exit(2);
 }
-if (!fs.existsSync(upstream)) {
-  console.error(`Posse scip-php runtime is not installed: ${upstream}`);
+if (!runtime) {
+  console.error(`Posse scip-php runtime is not installed: ${upstream} (run posse doctor)`);
   process.exit(127);
 }
 
@@ -55,7 +64,11 @@ if (!useTargetVendor && !fs.existsSync(stagedVendor)) {
 const fallbackProject = fs.existsSync(targetComposerJson)
   ? null
   : prepareFallbackPhpProject({ cwd, parentDir: path.dirname(output) });
-const indexCwd = fallbackProject?.dir || cwd;
+// Run upstream from the canonical path. It strips getcwd() from realpath'd
+// file names to form relative paths, so a cwd spelled differently (a Windows
+// 8.3 short name such as C:\Users\RUNNER~1, a junction, a symlink) would
+// leave every document path absolute.
+const indexCwd = canonicalDirectory(fallbackProject?.dir || cwd);
 const localOutput = path.join(indexCwd, "index.scip");
 try {
   fs.rmSync(localOutput, { force: true });
@@ -272,6 +285,14 @@ function parseArgs(argv) {
     }
   }
   return out;
+}
+
+function canonicalDirectory(dir) {
+  try {
+    return fs.realpathSync.native(dir);
+  } catch {
+    return dir;
+  }
 }
 
 function truthyEnv(value) {

@@ -16,6 +16,7 @@ import { normalizeScipLanguages } from "./languages.js";
 import { getPythonToolchainSearchDirs } from "../../../../runtime/functions/python-runtime.js";
 import { atlasWarmWalkEntryDisposition } from "../warm-walk.js";
 import { managedToolRoot } from "../../../../../shared/platform/functions/managed-install-state.js";
+import { resolvePhpScipRuntime } from "../../../../environments/functions/php-scip-tracks.js";
 
 export const DEFAULT_SCIP_INDEX_TIMEOUT_MS = 120_000;
 
@@ -37,6 +38,7 @@ const DEFAULT_POSSE_ROOT = path.resolve(THIS_DIR, "..", "..", "..", "..", "..", 
  *   sourceLanguages: string[],
  *   sourceExtensions: string[],
  *   markers: string[],
+ *   indexerIdentity?: string | null,
  * }} ScipStagePlan
  *
  * @typedef {{
@@ -143,7 +145,12 @@ export const SCIP_INDEXER_COUNT = SCIP_INDEXERS.length;
  *   timeoutMs?: number | null,
  *   posseRoot?: string | null,
  *   languages?: string[] | string | null,
- * }} input
+ *   platform?: NodeJS.Platform,
+ *   toolRoot?: string | null,
+ *   env?: NodeJS.ProcessEnv,
+ * }} input  `platform`, `toolRoot` (the managed per-user tool root, default
+ *   managedToolRoot(posseRoot)) and `env` (for PATH) default to the host;
+ *   they exist so another platform's install layout can be resolved in tests.
  * @returns {ScipIndexerLookup}
  */
 export function resolveScipStagePlans(input) {
@@ -151,12 +158,14 @@ export function resolveScipStagePlans(input) {
   const scipDir = path.resolve(input.scipDir || path.join(repoRoot, ".posse", "atlas", "scip"));
   const posseRoot = path.resolve(String(input.posseRoot || DEFAULT_POSSE_ROOT));
   const timeout = positiveInt(input.timeoutMs) || DEFAULT_SCIP_INDEX_TIMEOUT_MS;
-  const searchRoots = commandSearchRoots({ posseRoot, repoRoot });
+  const platform = input.platform || process.platform;
+  const toolRoot = path.resolve(String(input.toolRoot || managedToolRoot(posseRoot, { platform })));
+  const searchRoots = commandSearchRoots({ posseRoot, repoRoot, toolRoot, platform, env: input.env || process.env });
   const configuredCommand = String(input.command || "").trim() || null;
   const enabledLanguages = new Set(normalizeScipLanguages(input.languages));
 
   if (configuredCommand) {
-    const resolution = resolveCommand(configuredCommand, searchRoots);
+    const resolution = resolveCommand(configuredCommand, searchRoots, platform);
     const commandPath = resolution?.path || configuredCommand;
     const outputPath = path.join(scipDir, "configured.scip");
     const rawArgs = normalizeArgs(input.args);
@@ -194,7 +203,7 @@ export function resolveScipStagePlans(input) {
   for (const candidate of autoCandidates(repoRoot, enabledLanguages)) {
     projectKinds.add(candidate.id);
     const outputPath = path.join(scipDir, candidate.outputName);
-    const resolution = resolveCommand(candidate.command, searchRoots);
+    const resolution = resolveCommand(candidate.command, searchRoots, platform);
     candidates.push({
       ...candidate,
       resolved: Boolean(resolution?.path),
@@ -202,6 +211,7 @@ export function resolveScipStagePlans(input) {
       commandSource: resolution?.source || null,
     });
     if (!resolution?.path) continue;
+    const indexerIdentity = posseIndexerIdentity(candidate.id, resolution.source, { posseRoot, toolRoot });
     plans.push({
       command: resolution.path,
       args: expandArgs(candidate.args, { outputPath, repoRoot, scipDir }),
@@ -216,6 +226,7 @@ export function resolveScipStagePlans(input) {
       sourceLanguages: candidate.sourceLanguages || [],
       sourceExtensions: candidate.sourceExtensions || [],
       markers: candidate.markers || [],
+      ...(indexerIdentity ? { indexerIdentity } : {}),
     });
   }
   return {
@@ -225,6 +236,25 @@ export function resolveScipStagePlans(input) {
     projectKinds: Array.from(projectKinds),
     configuredCommand,
   };
+}
+
+/**
+ * Identity of the Posse-managed indexer environment behind a plan, folded into
+ * the stager's reuse keys so artifacts from a replaced indexer are restaged.
+ * Only PHP has more than one managed environment (current vs legacy
+ * scip-php), and only Posse's own wrapper/bins carry its stamp.
+ *
+ * @param {string} indexerId
+ * @param {string} commandSource
+ * @param {{ posseRoot: string, toolRoot: string }} roots
+ * @returns {string | null}
+ */
+function posseIndexerIdentity(indexerId, commandSource, { posseRoot, toolRoot }) {
+  if (indexerId !== "php" || !/^(?:managed )?posse scip\//u.test(String(commandSource || ""))) return null;
+  const runtime = resolvePhpScipRuntime({
+    scipRoots: [path.join(toolRoot, "scip"), path.join(posseRoot, "scip")],
+  });
+  return runtime?.identity || null;
 }
 
 /**
@@ -297,24 +327,32 @@ export function normalizeArgs(value) {
 }
 
 /**
- * @param {{ repoRoot: string, posseRoot: string }} input
+ * @param {{ repoRoot: string, posseRoot: string, toolRoot: string, platform: NodeJS.Platform, env: NodeJS.ProcessEnv }} input
  * @returns {Array<{ dir: string, source: string }>}
  */
-function commandSearchRoots({ repoRoot, posseRoot }) {
-  const toolRoot = managedToolRoot(posseRoot);
+function commandSearchRoots({ repoRoot, posseRoot, toolRoot, platform, env }) {
   const managedScipRoot = path.join(toolRoot, "scip");
   const legacyScipRoot = path.join(posseRoot, "scip");
+  const separateToolRoot = path.resolve(toolRoot) !== path.resolve(posseRoot);
+  // Wrapper directories come before package-manager bins on every platform:
+  // installer-written tools (managed scip/bin), then Posse's tracked wrappers
+  // (scip/bin in the code checkout). Composer's vendor/bin/scip-php is the raw
+  // upstream CLI, which rejects --output and ignores the stamped track; the
+  // scip-php wrapper must always win over it. On Linux/macOS the tool root is
+  // the checkout, so this is the order it always had.
   /** @type {Array<{ dir: string, source: string }>} */
   const roots = [];
-  if (path.resolve(toolRoot) !== path.resolve(posseRoot)) {
+  if (separateToolRoot) {
+    roots.push({ dir: path.join(managedScipRoot, "bin"), source: "managed posse scip/bin" });
+  }
+  roots.push({ dir: path.join(legacyScipRoot, "bin"), source: "posse scip/bin" });
+  if (separateToolRoot) {
     roots.push(
-      { dir: path.join(managedScipRoot, "bin"), source: "managed posse scip/bin" },
       { dir: path.join(managedScipRoot, "node", "node_modules", ".bin"), source: "managed posse scip/node" },
       { dir: path.join(managedScipRoot, "php", "vendor", "bin"), source: "managed posse scip/php" },
     );
   }
   roots.push(
-    { dir: path.join(legacyScipRoot, "bin"), source: "posse scip/bin" },
     { dir: path.join(legacyScipRoot, "node", "node_modules", ".bin"), source: "posse scip/node" },
     { dir: path.join(legacyScipRoot, "php", "vendor", "bin"), source: "posse scip/php" },
     { dir: path.join(posseRoot, "node_modules", ".bin"), source: "posse node_modules/.bin" },
@@ -332,8 +370,9 @@ function commandSearchRoots({ repoRoot, posseRoot }) {
     { dir: path.join(repoRoot, "venv", "bin"), source: "repo venv/bin" },
     ...getPythonToolchainSearchDirs(posseRoot).map((dir) => ({ dir, source: "posse python toolchain" })),
   );
-  const pathEnv = String(process.env.PATH || "");
-  for (const dir of pathEnv.split(path.delimiter).filter(Boolean)) {
+  const pathKey = Object.keys(env || {}).find((name) => name.toLowerCase() === "path") || "PATH";
+  const pathEnv = String(env?.[pathKey] || "");
+  for (const dir of pathEnv.split(platform === "win32" ? ";" : ":").filter(Boolean)) {
     roots.push({ dir, source: "PATH" });
   }
   return uniqueRoots(roots);
@@ -933,9 +972,10 @@ function sortLanguageTags(values) {
 /**
  * @param {string} command
  * @param {Array<{ dir: string, source: string }>} searchRoots
+ * @param {NodeJS.Platform} [platform]
  * @returns {{ path: string, source: string } | null}
  */
-function resolveCommand(command, searchRoots) {
+function resolveCommand(command, searchRoots, platform = process.platform) {
   const raw = String(command || "").trim();
   if (!raw) return null;
   const hasPath = raw.includes("/") || raw.includes("\\") || path.isAbsolute(raw);
@@ -943,7 +983,7 @@ function resolveCommand(command, searchRoots) {
     ? [{ file: raw, source: "path" }]
     : searchRoots.map((root) => ({ file: path.join(root.dir, raw), source: root.source }));
   for (const base of bases) {
-    for (const ext of commandExts()) {
+    for (const ext of commandExts(platform)) {
       const candidate = ext && base.file.toLowerCase().endsWith(ext)
         ? base.file
         : `${base.file}${ext}`;
@@ -972,10 +1012,11 @@ function expandArgs(args, { outputPath, repoRoot, scipDir }) {
 }
 
 /**
+ * @param {NodeJS.Platform} [platform]
  * @returns {string[]}
  */
-function commandExts() {
-  return process.platform === "win32" ? [".cmd", ".bat", ".exe", ""] : [""];
+function commandExts(platform = process.platform) {
+  return platform === "win32" ? [".cmd", ".bat", ".exe", ""] : [""];
 }
 
 /**

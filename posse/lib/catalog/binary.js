@@ -68,6 +68,19 @@ export const REMOTE_PROMPTS_COMPILE_ROUTE = "prompts:compile";
 export const REMOTE_PROMPTS_BUNDLE_ROUTE = "prompts:bundle";
 export const REMOTE_CATALOG_READ_ROUTE = "catalog:read";
 export const REMOTE_ARTIFACTS_READ_ROUTE = "artifacts:read";
+// Engagement launch policy, answered locally by posse-remote (no network).
+// Must equal posse-bin's ENGAGEMENT_CONTRACT_VERSION; requests carry it and
+// the binary refuses any other.
+export const ENGAGEMENT_CONTRACT_VERSION = 2;
+// SHA-256 (hex) of test/fixtures/engagement/launch-plan.json with CRLF read as
+// LF. engagement.capabilities reports the digest of the fixture the binary was
+// verified against; a mismatch means the two policies may differ, so the
+// client keeps its JS policy. Updated with the fixture (the engagement test
+// fails until it matches).
+export const ENGAGEMENT_POLICY_DIGEST = "d7605331132a30968d40ea6059f83bc8d9d06915954ff33b6e8a2c0fa3e48cfe";
+export const ENGAGEMENT_CAPABILITIES_METHOD = "engagement.capabilities";
+export const ENGAGEMENT_LAUNCH_PLAN_METHOD = "engagement.launchPlan";
+export const ENGAGEMENT_LAUNCH_PLAN_BATCH_METHOD = "engagement.launchPlanBatch";
 export const REMOTE_ARTIFACT_CATALOG_METHOD = "remote.artifactCatalog";
 export const REMOTE_ARTIFACT_DOWNLOAD_METHOD = "remote.artifactDownload";
 export const REMOTE_ARTIFACT_STATUS_METHOD = "remote.artifactStatus";
@@ -93,6 +106,13 @@ export const ARCH_BY_NODE_ARCH = Object.freeze({
   x64: "x64",
   arm64: "arm64",
 });
+
+// Linux C runtime floor. The native binaries build on an AlmaLinux 9 (glibc
+// 2.34) baseline and the better-sqlite3 prebuilds need GLIBC_2.34 and
+// GLIBCXX_3.4.29; an older userspace cannot load either. The Linux installer
+// preflight mirrors this floor.
+export const LINUX_GLIBC_FLOOR = Object.freeze({ major: 2, minor: 34 });
+export const LINUX_GLIBC_SUPPORTED_SYSTEMS = "RHEL/Alma/Rocky 9+, Amazon Linux 2023, Ubuntu 22.04+, Debian 12+";
 
 /**
  * @param {string} pkg
@@ -148,6 +168,8 @@ function defineBinary(pkg, files, {
   });
 }
 
+// @catalog-sync id=posse.native.artifact_packages role=mirror relation=strict compare=names extract=js-native-packages symbol=NATIVE_BINARIES synced_from=posse-remote@34b3c283a31327b57f907d93a435fb153cba6e28 projection_source=posse
+// @linked_repos posse-remote:rust/catalog/native_artifact.rs#NATIVE_ARTIFACT_PACKAGES
 export const NATIVE_BINARIES = Object.freeze({
   atlas: defineBinary("posse-atlas", { windows: "posse-atlas.exe", posix: "posse-atlas" }, { workerCapable: true, issuedVersionRequired: true }),
   git: defineBinary("posse-git", { windows: "posse-git.exe", posix: "posse-git" }, { workerCapable: true }),
@@ -171,6 +193,7 @@ export const NATIVE_BINARIES = Object.freeze({
     keyGated: false,
   }),
 });
+// @catalog-sync end
 
 export function nativeWorkerMaxRequestBytes(name) {
   return name === "atlas" || name === "vector"
@@ -239,6 +262,30 @@ export function nativeBinaryIsUniversal(name, os) {
  */
 export function nativeBinaryIsKeyGated(name) {
   return nativeBinaryEntry(name)?.keyGated === true;
+}
+
+// Methods a key-gated binary answers before any authenticated route: pure
+// functions of their payload that touch no network, credentials, or files.
+// Callers opt in per call (`localPolicy: true`); NativeBinary then spawns
+// without minting a pulse, and refuses the opt-in for any method not listed
+// here. Every other method of these binaries stays pulse-gated.
+export const NATIVE_LOCAL_POLICY_METHODS = Object.freeze({
+  remote: Object.freeze([
+    ENGAGEMENT_CAPABILITIES_METHOD,
+    ENGAGEMENT_LAUNCH_PLAN_METHOD,
+    ENGAGEMENT_LAUNCH_PLAN_BATCH_METHOD,
+  ]),
+});
+
+/**
+ * @param {string} name
+ * @param {string} method
+ * @returns {boolean}
+ */
+export function nativeMethodIsLocalPolicy(name, method) {
+  if (!Object.prototype.hasOwnProperty.call(NATIVE_LOCAL_POLICY_METHODS, name)) return false;
+  const methods = /** @type {Record<string, readonly string[]>} */ (NATIVE_LOCAL_POLICY_METHODS)[name];
+  return methods.includes(String(method || ""));
 }
 
 export function nativeBinaryIsWorkerCapable(name) {

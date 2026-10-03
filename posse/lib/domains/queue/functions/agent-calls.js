@@ -274,7 +274,7 @@ export function completeAgentCall(id, {
     // cursor that was actually used has already moved to durable evidence;
     // the remainder must not leak into the next agent call.
     discardHashRefTraversalsForAgentCall(row.id, { db });
-    appendRunTelemetry("agent-calls", { phase: "completed", ...row });
+    appendRunTelemetry("agent-calls", { phase: "completed", ...row, t: row.finished_at });
     const activityStatus = row.status === "succeeded"
       ? "succeeded"
       : row.status === "interrupted"

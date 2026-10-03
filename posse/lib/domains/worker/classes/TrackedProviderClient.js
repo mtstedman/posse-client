@@ -550,7 +550,10 @@ function completionAccountingFields({
     billing_precision: segmentSummary.precision,
     exact_billable_input_tokens: segmentSummary.exact ? segmentSummary.billableInputTokens : null,
     long_context_tier_input_tokens: segmentSummary.longContextTierInputTokens,
-    provider_request_duration_ms: segmentSummary.durationMs,
+    // Provider time measured by the usage segments only. The call's wall time
+    // is already duration_ms; copying it here would hide that no segment
+    // measured its request.
+    provider_request_duration_ms: segmentSummary.durationMs ?? null,
     usage_segment_count: segmentSummary.requestCount,
     skills: opts.skillsAttached || null,
     session_handle: stats.sessionHandle || stats.responseId || null,

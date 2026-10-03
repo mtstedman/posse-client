@@ -1270,6 +1270,15 @@ async function inspectExactScipBatchCoverage({ targetBranch, gitOid, scipDir, ro
   if (!receipt || String(receipt.head || "").toLowerCase() !== String(gitOid || "").toLowerCase()) {
     return { ok: false };
   }
+  // Coverage produced by a different indexer environment (e.g. the legacy
+  // scip-php before an upgrade) is not coverage by the current one.
+  const recordedIdentities = receipt.indexer_identities && typeof receipt.indexer_identities === "object"
+    ? receipt.indexer_identities
+    : {};
+  for (const row of rows) {
+    const identity = String(row?.indexer_identity || "");
+    if (identity && String(recordedIdentities[String(row?.language || "")] || "") !== identity) return { ok: false };
+  }
   const languages = new Set(uniqueSourceLanguages(rows.flatMap((row) => (
     Array.isArray(row?.source_languages) ? row.source_languages : []
   ))));

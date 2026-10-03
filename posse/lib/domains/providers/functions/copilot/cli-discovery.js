@@ -1,5 +1,6 @@
-import { execFileSync, spawnSync } from "child_process";
+import { spawnSync } from "child_process";
 import fs from "fs";
+import { listCommandsOnPath } from "../../../../shared/platform/functions/command-launch.js";
 import { readModelSetting } from "./model-config.js";
 import { buildCopilotSpawn } from "./launch.js";
 
@@ -33,23 +34,12 @@ function resolveCopilot() {
     return;
   }
 
-  const locator = process.platform === "win32" ? "where" : "which";
-  try {
-    const raw = execFileSync(locator, ["copilot"], {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    if (raw) {
-      const lines = raw.split(/\r?\n/).filter(Boolean);
-      const preferred = lines.find((line) => /\.(exe|cmd)$/i.test(line)) || lines[0];
-      if (preferred && probeCopilotVersion(preferred)) {
-        COPILOT_RESOLVE_ERROR = null;
-        COPILOT_CMD = preferred;
-        return;
-      }
-    }
-  } catch {
-    // Fall through.
+  const lines = listCommandsOnPath("copilot");
+  const preferred = lines.find((line) => /\.(exe|cmd)$/i.test(line)) || lines[0];
+  if (preferred && probeCopilotVersion(preferred)) {
+    COPILOT_RESOLVE_ERROR = null;
+    COPILOT_CMD = preferred;
+    return;
   }
 
   if (probeCopilotVersion("copilot")) {

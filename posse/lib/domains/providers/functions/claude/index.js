@@ -10,7 +10,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { getSetting } from "../../../queue/functions/index.js";
-import { appendExecutionTools, buildClaudeCliToolConfig, buildExecutionContract, CLAUDE_NATIVE_TOOL_NAMES, renderExecutionContractBlock, unknownClaudeNativeTools } from "../../../../shared/tools/functions/contract.js";
+import { appendExecutionTools, buildClaudeCliToolConfig, buildClaudeLaunchInput, buildExecutionContract, CLAUDE_NATIVE_TOOL_NAMES, renderExecutionContractBlock, unknownClaudeNativeTools } from "../../../../shared/tools/functions/contract.js";
+import { claudeLaunchPolicyFromPlan, normalizeClaudeCliToolConfig, normalizeClaudePermissionArgs, reconcileLaunchPolicy } from "../shared/engagement-launch.js";
 import { issuedToolSurfaceForProviderPolicy, issuedWebAccessEnabled } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap, formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { buildRuntimeEnv, normalizeProviderPaths } from "../../../runtime/functions/paths.js";
@@ -583,7 +584,7 @@ export async function callProvider(promptText, {
     });
     executionContract = appendExecutionTools(executionContract, deterministicReadMcp.contractTools || deterministicReadMcp.tools);
     executionContract = appendExecutionTools(executionContract, atlasContractTools);
-    const cliToolConfig = buildClaudeCliToolConfig(executionContract, {
+    const cliToolOptions = {
       autoApprove,
       scopedFiles,
       createFiles,
@@ -593,7 +594,7 @@ export async function callProvider(promptText, {
       deterministicReadMcpActive: deterministicReadMcp.active,
       disableSystemTools: disableSystemToolsResolved,
       webToolsEnabled: resolveWebToolsEnabled() && issuedWebAccessEnabled(_remoteIssuedPolicy),
-    });
+    };
     // MCP servers are resolved here so their names can drive the permission
     // allowlist below. The Posse MCP gateway exposes the deterministic and
     // atlas.* suites from a single process, so do not attach a second ATLAS
@@ -607,7 +608,18 @@ export async function callProvider(promptText, {
 
     // Permission route — single, platform-uniform path (never
     // --dangerously-skip-permissions; see buildClaudeToolPermissionArgs).
-    const { toolsArg, disallowedToolsArg, allowedToolsArg } = buildClaudeToolPermissionArgs(cliToolConfig, mcpServerNames);
+    const jsCliToolConfig = buildClaudeCliToolConfig(executionContract, cliToolOptions);
+    const { cliToolConfig, permissionArgs } = await reconcileLaunchPolicy({
+      provider: "claude",
+      role,
+      request: () => ({ ...buildClaudeLaunchInput(executionContract, cliToolOptions), mcpServerNames }),
+      jsValue: {
+        cliToolConfig: normalizeClaudeCliToolConfig(jsCliToolConfig),
+        permissionArgs: normalizeClaudePermissionArgs(buildClaudeToolPermissionArgs(jsCliToolConfig, mcpServerNames)),
+      },
+      nativeValue: claudeLaunchPolicyFromPlan,
+    });
+    const { toolsArg, disallowedToolsArg, allowedToolsArg } = permissionArgs;
     if (toolsArg != null) {
       args.push("--tools", toolsArg);
     }

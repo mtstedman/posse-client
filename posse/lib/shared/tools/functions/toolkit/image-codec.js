@@ -15,6 +15,7 @@ import zlib from "zlib";
 import { execFile, spawnSync } from "child_process";
 
 import { IMAGE_CONVERTER_TIMEOUT_MS } from "../../../../catalog/artifact.js";
+import { findCommandOnPath } from "../../../platform/functions/command-launch.js";
 
 export const PNG_SIGNATURE = Buffer.from("89504e470d0a1a0a", "hex");
 
@@ -287,10 +288,7 @@ process.stdout.write(JSON.stringify({
 }
 
 function commandExists(command) {
-  const probe = process.platform === "win32"
-    ? spawnSync("where.exe", [command], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: IMAGE_CONVERTER_TIMEOUT_MS })
-    : spawnSync("sh", ["-c", `command -v ${JSON.stringify(command)}`], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: IMAGE_CONVERTER_TIMEOUT_MS });
-  return probe.status === 0;
+  return findCommandOnPath(command) !== null;
 }
 
 export function convertImageToPng(_inputBuffer, srcPath, destPath) {

@@ -188,6 +188,7 @@ export const SETTING_KEYS = Object.freeze({
   TARGET_BRANCH: "target_branch",
   WEB_TOOLS_ENABLED: "web_tools_enabled",
   WAITING_LANE_SHADOW_MODE: "waiting_lane_shadow_mode",
+  ENGAGEMENT_ENGINE: "engagement_engine",
   WAITING_LANE_GIT_PREPARATION_ENABLED: "waiting_lane_git_preparation_enabled",
   WAITING_LANE_ATLAS_SNAPSHOT_ENABLED: "waiting_lane_atlas_snapshot_enabled",
   WAITING_LANE_ATLAS_CATCHUP_ENABLED: "waiting_lane_atlas_catchup_enabled",
@@ -263,3 +264,6 @@ export const ATLAS_MEMORY_SURFACE_MODE_VALUES = Object.freeze(["auto", "off", "o
 export const SESSION_RECYCLE_MODE_VALUES = Object.freeze(["off", "dev-fix", "full"]);
 export const STARTUP_DIRTY_TREE_POLICY_VALUES = Object.freeze(["block", "commit"]);
 export const WAITING_LANE_SHADOW_MODE_VALUES = Object.freeze(["off", "shadow"]);
+// Where provider launch policy is computed: the JS client (js), both with the
+// JS answer used and differences logged (shadow), or posse-remote (native).
+export const ENGAGEMENT_ENGINE_VALUES = Object.freeze(["js", "shadow", "native"]);

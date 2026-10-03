@@ -146,7 +146,8 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
       },
     };
   }
-  if (verdict?.verdict !== "pass" || !["regression", "changed_failure", "post_only"].includes(testRun?.delta)
+  if (["fail", "needs_replan"].includes(verdict?.verdict)
+    || !["regression", "changed_failure", "post_only"].includes(testRun?.delta)
     || !["failed", "timed_out"].includes(postChange?.status)) return verdict;
   const outputTail = [postChange?.stdout, postChange?.stderr]
     .map((value) => String(value || "").trim())
@@ -157,6 +158,7 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
   return {
     ...verdict,
     verdict: "fail",
+    human_questions: [],
     _disable_internal_retry: true,
     verification_status: "frozen_test_failed",
     _deterministic_failure_identity: postChange?.failure_fingerprint || failureSummary || null,
@@ -854,8 +856,19 @@ export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: cu
     ]);
     if (mediumConfidenceDeltas.has(assessedReceipt.delta)) {
       passConfidenceFloor = "medium";
+      // `confidence` is the assessor's self-rating, not the policy floor:
+      // cap a high rating this receipt cannot support, but never raise a
+      // rating below the floor, or the floor check below would pass it.
+      const assessorConfidence = normalizeAssessorConfidence(prepared.confidence, {
+        fallback: "medium",
+        allowNone: true,
+      }) || "none";
+      const confidenceCap = ASSESSOR_CONFIDENCE_RANK[assessorConfidence] > ASSESSOR_CONFIDENCE_RANK[passConfidenceFloor]
+        ? { confidence: passConfidenceFloor, assessor_reported_confidence: prepared.confidence }
+        : {};
       prepared = {
         ...prepared,
+        ...confidenceCap,
         reasons: [
           `Deterministic test receipt delta ${assessedReceipt.delta} cannot support high confidence; the pass confidence floor is capped at medium.`,
           ...(prepared.reasons || []),

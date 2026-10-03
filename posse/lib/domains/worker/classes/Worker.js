@@ -156,6 +156,7 @@ import {
   ASSESSABLE_JOB_TYPES,
   FAILED_JOB_STATUSES,
   MUTATING_JOB_TYPES,
+  TERMINAL_JOB_STATUSES,
 } from "../../../catalog/job.js";
 import {
   effectiveArtifactTaskMode as effectiveArtifactTaskModeFromModule,
@@ -856,9 +857,10 @@ export class Worker {
     }
   }
 
-  // One line per execution with the status the queue actually holds. The
-  // verdict line alone misleads: an assessed pass can still end failed, and
-  // that ending otherwise reaches no log at all.
+  // One line per execution with the status the queue actually holds. An
+  // execution may yield for a later assessment invocation; reserve "Job end"
+  // for terminal queue states so the two phases do not look like duplicate
+  // endings for one job.
   _logJobOutcome(job) {
     try {
       const current = getJob(job.id);
@@ -874,9 +876,11 @@ export class Worker {
         error: current?.last_error ? String(current.last_error).slice(0, 200) : null,
       };
       const failed = FAILED_JOB_STATUSES.includes(status) || status === "canceled";
+      const terminal = TERMINAL_JOB_STATUSES.includes(status);
       // ATLAS warms run several per work item; only a bad ending is worth a line.
       if (!failed && job.job_type === "atlas_warm") return;
-      log[failed ? "warn" : "info"]("worker", `Job end: ${job.job_type} #${job.id} -> ${status}`, detail);
+      const label = terminal ? "Job end" : "Job yield";
+      log[failed ? "warn" : "info"]("worker", `${label}: ${job.job_type} #${job.id} -> ${status}`, detail);
       if (failed) {
         jobLog(status === "canceled" ? "CANCELED" : "FAILED", {
           wi: job.work_item_id,

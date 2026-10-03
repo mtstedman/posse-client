@@ -63,6 +63,7 @@ import {
   SESSION_RECYCLE_MODE_VALUES,
   STARTUP_DIRTY_TREE_POLICY_VALUES,
   WAITING_LANE_SHADOW_MODE_VALUES,
+  ENGAGEMENT_ENGINE_VALUES,
 } from "../../../catalog/settings.js";
 import {
   ATLAS_AUTO_FEEDBACK_VALUES,
@@ -153,6 +154,7 @@ export const SETTINGS_CATALOG = [
   ...PROVIDER_ROLE_SETTING_DEFS,
   ...ROLE_REASONING_EFFORT_SETTING_DEFS,
   ...ROLE_MODEL_TIER_SETTING_DEFS,
+  { key: SETTING_KEYS.ENGAGEMENT_ENGINE, default: "js", options: ENGAGEMENT_ENGINE_VALUES, adminVisible: false, description: "Provider launch policy engine: js computes it in this client, shadow also asks posse-remote and logs any difference while using the JS answer, native uses posse-remote's answer (falling back to JS on error)" },
 
   // ── Model selection (empty = use provider tier default) ──────────────────
   ...MODEL_SELECTION_SETTINGS,

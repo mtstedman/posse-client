@@ -33,7 +33,8 @@ import {
   resolveManagedPythonRuntimeForProject,
 } from "../../runtime/functions/python-runtime.js";
 import { ensureManagedPythonToolchain } from "../../environments/functions/python-toolchain-install.js";
-import { commandSpawnSpec } from "../../../shared/platform/functions/command-launch.js";
+import { commandSpawnSpec, findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
+import { glibcFloorProblem, runtimeGlibcVersion } from "../../../shared/platform/functions/native-runtime-floor.js";
 import {
   filterProcessEnv,
   isUnboundedCommandTimeout,
@@ -381,13 +382,7 @@ function installArgsForPeerConflictRetry(manager, args, run) {
 }
 
 function commandOnPath(command) {
-  const probe = process.platform === "win32" ? "where" : "which";
-  const result = spawnSync(probe, [command.replace(/\.(cmd|bat)$/iu, "")], {
-    env: dependencyInstallEnv(),
-    stdio: "ignore",
-    windowsHide: true,
-  });
-  return result.status === 0;
+  return findCommandOnPath(command.replace(/\.(cmd|bat)$/iu, ""), { env: dependencyInstallEnv() }) !== null;
 }
 
 function terminateDependencyCommand(child, { force = false } = {}) {
@@ -1578,6 +1573,7 @@ function buildDependencyDoctorReport(result, mode) {
  *   onProgress?: ((message: string) => void) | null,
  *   onEvent?: ((event: Record<string, any>) => void) | null,
  *   nativeBinaryManager?: any,
+ *   glibcVersion?: string | null,
  *   jinaModelManager?: any,
  *   inspectJinaModel?: typeof inspectJinaModelDefault,
  *   pullJinaModel?: typeof pullJinaModelDefault,
@@ -1689,6 +1685,10 @@ export async function ensureBootDependencies(input = {}) {
   }
 
   if (includeNativeBinaries) {
+    // The same floor the Linux installer preflight enforces: the binaries
+    // below and the SQLite driver cannot load on an older glibc.
+    const glibcProblem = glibcFloorProblem(Object.hasOwn(input, "glibcVersion") ? input.glibcVersion : runtimeGlibcVersion());
+    if (glibcProblem) native.push({ label: "host glibc", present: true, ok: false, status: "failed", action: "check", message: glibcProblem });
     native.push(...await reconcileNativeBinaries({
       manager: input.nativeBinaryManager || nativeBinaries,
       refresh: true,

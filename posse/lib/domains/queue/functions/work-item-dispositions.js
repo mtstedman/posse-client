@@ -170,6 +170,46 @@ export function isAssessmentOnlyFailedJob(job) {
   return latestAttemptFailedAtAssessment(job.id);
 }
 
+// An operator review may override an assessment judgment, but it must not
+// relabel a deterministic product failure as passing. Prefer the configured
+// pre-assessment command; scoped lint/type checks are only the fallback when
+// no configured verification result exists for the latest committed attempt.
+export function latestDeterministicVerificationState(jobId) {
+  const db = getDb();
+  const attempt = db.prepare(`
+    SELECT commit_hash FROM job_attempts
+    WHERE job_id = ? AND commit_hash IS NOT NULL AND commit_hash != ''
+    ORDER BY attempt_number DESC, id DESC LIMIT 1
+  `).get(jobId);
+  const commitHash = String(attempt?.commit_hash || "").trim().toLowerCase();
+  const rows = db.prepare(`
+    SELECT observation_type, detail_json
+    FROM job_observations
+    WHERE job_id = ?
+      AND observation_type IN ('command.pre_assess', 'assessment.scoped_checks')
+    ORDER BY CASE observation_type WHEN 'command.pre_assess' THEN 0 ELSE 1 END, id DESC
+  `).all(jobId);
+  for (const row of rows) {
+    let detail;
+    try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
+    const result = row.observation_type === "assessment.scoped_checks"
+      ? detail?.scoped_check_result || detail
+      : detail;
+    const resultCommit = String(
+      result?.assessed_commit_hash || result?.executed_commit_hash || result?.commit_hash || "",
+    ).trim().toLowerCase();
+    if (commitHash && resultCommit !== commitHash) continue;
+    const outcome = result?.verification_outcome || detail?.verification_outcome || {};
+    if (outcome.type === "product_failed") return "failed";
+    if (outcome.type === "passed") return "passed";
+    if (outcome.type) return "unavailable";
+    if (result?.status === "failed") return "failed";
+    if (result?.status === "passed") return "passed";
+    return "unavailable";
+  }
+  return "unavailable";
+}
+
 /**
  * Database tasks of a work item whose merge hold is still open: held for its
  * merge, or canceled while held and never released. A task canceled with the
@@ -362,7 +402,8 @@ function describeFailedJob(job) {
   const where = isAssessmentOnlyFailedJob(job)
     ? `failed at assessment: ${job.assessor_verdict || job.assessment_state}`
     : `${job.status} during execution`;
-  return `#${job.id} "${String(job.title || "").slice(0, 80)}" (${job.job_type}, ${where})`;
+  const reason = String(job.last_error || "").trim();
+  return `#${job.id} "${String(job.title || "").slice(0, 80)}" (${job.job_type}, ${where})${reason ? ` — ${reason.slice(0, 400)}` : ""}`;
 }
 
 function listed(entries, formatter) {
@@ -378,20 +419,34 @@ function listed(entries, formatter) {
  * the work item again.
  */
 export function failedWorkItemAcceptance(leaves = []) {
-  const acceptable = leaves.filter(isAssessmentOnlyFailedJob);
-  const notAcceptable = leaves.filter((job) => !isAssessmentOnlyFailedJob(job));
+  const verificationFailed = leaves.filter((job) => (
+    isAssessmentOnlyFailedJob(job) && latestDeterministicVerificationState(job.id) === "failed"
+  ));
+  const acceptable = leaves.filter((job) => (
+    isAssessmentOnlyFailedJob(job) && !verificationFailed.includes(job)
+  ));
+  const notAcceptable = leaves.filter((job) => !acceptable.includes(job));
   if (leaves.length === 0) {
-    return { ok: false, reason: "no_failed_jobs", acceptable, notAcceptable };
+    return { ok: false, reason: "no_failed_jobs", acceptable, notAcceptable, verificationFailed };
   }
   if (notAcceptable.length > 0) {
-    return { ok: false, reason: "execution_failures", acceptable, notAcceptable };
+    return {
+      ok: false,
+      reason: verificationFailed.length > 0 ? "verification_failed" : "execution_failures",
+      acceptable,
+      notAcceptable,
+      verificationFailed,
+    };
   }
-  return { ok: true, reason: null, acceptable, notAcceptable };
+  return { ok: true, reason: null, acceptable, notAcceptable, verificationFailed };
 }
 
 export function acceptanceRefusalMessage(workItemId, acceptance) {
   if (acceptance.reason === "no_failed_jobs") {
     return `Cannot accept WI#${workItemId}: no failed job remains to accept. Answer retry or abandon.`;
+  }
+  if (acceptance.reason === "verification_failed") {
+    return `Cannot accept WI#${workItemId}: ${listed(acceptance.verificationFailed, describeFailedJob)} has failed deterministic verification. Answer retry or abandon.`;
   }
   return `Cannot accept WI#${workItemId}: ${listed(acceptance.notAcceptable, describeFailedJob)} did not fail at assessment, so there is no committed result to accept. Answer retry or abandon.`;
 }
@@ -571,7 +626,9 @@ export function workItemFailureDispositionGateSpec(workItem, {
     ? `accept: pass ${listed(acceptance.acceptable, (job) => `#${job.id}`)} as an operator review (the failure was assessment-only) and send the work item to review and merge.`
     : `accept: unavailable, ${acceptance.reason === "no_failed_jobs"
       ? "no failed job remains to accept"
-      : `${listed(acceptance.notAcceptable, (job) => `#${job.id}`)} did not fail at assessment`}.`;
+      : acceptance.reason === "verification_failed"
+        ? `${listed(acceptance.verificationFailed, (job) => `#${job.id}`)} failed deterministic verification`
+        : `${listed(acceptance.notAcceptable, (job) => `#${job.id}`)} did not fail at assessment`}.`;
   const abandonLine = `abandon: cancel the work item${branch ? " and delete its branch" : ""}.`;
   const gatesLine = leaves.length > 0 && timedOutGates.length > 0
     ? `Gate${timedOutGates.length === 1 ? "" : "s"} ${timedOutGates.join(", ")} timed out with the failed job${timedOutGates.length === 1 ? "" : "s"}; retry or accept retires ${timedOutGates.length === 1 ? "it" : "them"}.`

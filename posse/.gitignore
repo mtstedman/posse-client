@@ -22,11 +22,14 @@ test/runtime-db-*/
 test-output.txt
 node_modules/
 package-lock.json
+# The package's own lockfile ships, so installs get the tested versions.
+!/package-lock.json
 
 # Posse-managed SCIP toolchain runtimes live under scip/. Keep manifests and
 # wrappers tracked, but not downloaded package trees or binary payloads.
 scip/node/node_modules/
 scip/php/vendor/
+scip/php-legacy/vendor/
 scip/bin/*
 !scip/bin/scip-php
 !scip/bin/*.cmd

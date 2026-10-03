@@ -90,11 +90,14 @@ Var LangPy
 Var LangPhp
 Var LangGo
 Var LangRust
+Var LangMedia
 Var SelTs
 Var SelPy
 Var SelPhp
 Var SelGo
 Var SelRust
+Var SelMedia
+Var MediaArg
 Var EngineStarted
 Var EngineRunning
 Var EngineFailed
@@ -211,13 +214,15 @@ Function .onInit
   StrCpy $SelPhp ${BST_UNCHECKED}
   StrCpy $SelGo ${BST_UNCHECKED}
   StrCpy $SelRust ${BST_UNCHECKED}
+  StrCpy $SelMedia ${BST_UNCHECKED}
+  StrCpy $MediaArg ""
   StrCpy $Languages "${DEFAULT_LANGUAGES}"
   StrCpy $DesktopShortcut 0
   StrCpy $EngineStarted 0
   StrCpy $EngineRunning 0
   StrCpy $EngineFailed 0
 
-  ; Unattended installs: PosseSetup.exe /S [/LANGUAGES=typescript,go] [/DESKTOPSHORTCUT]
+  ; Unattended installs: PosseSetup.exe /S [/LANGUAGES=typescript,go] [/MEDIATOOLS] [/DESKTOPSHORTCUT]
   ; The key comes from the saved .env or a POSSE_KEY environment variable.
   ${GetParameters} $R0
   ClearErrors
@@ -225,6 +230,12 @@ Function .onInit
   ${IfNot} ${Errors}
   ${AndIf} $R1 != ""
     StrCpy $Languages $R1
+  ${EndIf}
+  ClearErrors
+  ${GetOptions} $R0 "/MEDIATOOLS" $R1
+  ${IfNot} ${Errors}
+    StrCpy $SelMedia ${BST_CHECKED}
+    StrCpy $MediaArg "-WithMediaTools"
   ${EndIf}
   ClearErrors
   ${GetOptions} $R0 "/DESKTOPSHORTCUT" $R1
@@ -395,7 +406,11 @@ Function LanguagesPageShow
   ${NSD_CreateCheckbox} 0 82u 100% 12u "Rust  (installs Rust and rust-analyzer with rustup)"
   Pop $LangRust
   ${NSD_SetState} $LangRust $SelRust
-  ${NSD_CreateLabel} 0 102u 100% 30u "C and C++ indexing is not available on Windows. To add a language later, turn it on in posse admin, then run this setup again to install its tools."
+  ; Media helpers are the largest, slowest downloads, so they are opt-in.
+  ${NSD_CreateCheckbox} 0 102u 100% 12u "Also install media tools (Tesseract OCR, ImageMagick, FFmpeg)"
+  Pop $LangMedia
+  ${NSD_SetState} $LangMedia $SelMedia
+  ${NSD_CreateLabel} 0 118u 100% 22u "C and C++ indexing is not available on Windows. To add a language later, turn it on in posse admin, then run this setup again."
   Pop $0
   nsDialogs::Show
 FunctionEnd
@@ -406,6 +421,12 @@ Function LanguagesPageLeave
   ${NSD_GetState} $LangPhp $SelPhp
   ${NSD_GetState} $LangGo $SelGo
   ${NSD_GetState} $LangRust $SelRust
+  ${NSD_GetState} $LangMedia $SelMedia
+  ${If} $SelMedia == ${BST_CHECKED}
+    StrCpy $MediaArg "-WithMediaTools"
+  ${Else}
+    StrCpy $MediaArg ""
+  ${EndIf}
   StrCpy $Languages ""
   ${If} $SelTs == ${BST_CHECKED}
     StrCpy $Languages "$Languages,typescript"
@@ -472,7 +493,7 @@ Function WriteKeyFile
 FunctionEnd
 
 !macro EngineCommand OUT
-  StrCpy ${OUT} '"$PowerShellExe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\setup\${ENGINE}" -NonInteractive -Plain -PosseDir "$INSTDIR\posse-client" -ScipLanguages "$Languages" -ProgressFile "$ProgressFile" $KeyArg'
+  StrCpy ${OUT} '"$PowerShellExe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\setup\${ENGINE}" -NonInteractive -Plain -PosseDir "$INSTDIR\posse-client" -ScipLanguages "$Languages" -ProgressFile "$ProgressFile" $KeyArg $MediaArg'
 !ifdef TEST_ENGINE_CMDLINE
   StrCpy ${OUT} '${TEST_ENGINE_CMDLINE} "$ProgressFile"'
 !endif

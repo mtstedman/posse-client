@@ -29,6 +29,99 @@ function quoteCmdToken(value) {
   return `"${String(value ?? "").replace(/"/gu, '""')}"`;
 }
 
+const DEFAULT_WINDOWS_PATHEXT = ".COM;.EXE;.BAT;.CMD";
+
+function isRunnableFile(filePath, platform) {
+  try {
+    if (!fs.statSync(filePath).isFile()) return false;
+    // Windows has no execute bit; PATHEXT decides what runs.
+    if (platform !== "win32") fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The file names Windows tries for a command: the name as given when it already
+ * ends in a PATHEXT extension, otherwise the name with each PATHEXT extension.
+ *
+ * @param {string} command
+ * @param {string} pathext
+ * @returns {string[]}
+ */
+function windowsCommandNames(command, pathext) {
+  const parse = (value) => [...new Set(String(value || "")
+    .split(";")
+    .map((ext) => ext.trim().toLowerCase())
+    .filter((ext) => ext.startsWith(".") && ext.length > 1))];
+  const configured = parse(pathext);
+  const exts = configured.length > 0 ? configured : parse(DEFAULT_WINDOWS_PATHEXT);
+  if (exts.includes(path.win32.extname(command).toLowerCase())) return [command];
+  return exts.map((ext) => `${command}${ext}`);
+}
+
+/**
+ * @param {string} command
+ * @param {{ platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv }} opts
+ * @returns {Generator<string>}
+ */
+function* commandPathMatches(command, { platform = process.platform, env = process.env } = {}) {
+  const raw = String(command || "").trim();
+  if (!raw) return;
+  const windows = platform === "win32";
+  const names = windows ? windowsCommandNames(raw, envValue(env, "PATHEXT")) : [raw];
+  if (windows ? /[\\/]/u.test(raw) : raw.includes("/")) {
+    for (const name of names) {
+      if (isRunnableFile(name, platform)) yield name;
+    }
+    return;
+  }
+  // POSIX environment names are case-sensitive; Windows looks PATH up in any case.
+  const pathValue = windows ? envValue(env, "PATH") : String(env?.PATH ?? "");
+  const seen = new Set();
+  for (const entry of pathValue.split(windows ? ";" : ":")) {
+    const dir = windows ? entry.trim().replace(/^"(.*)"$/u, "$1") : entry;
+    // An empty entry would mean the current directory, which is never where a
+    // dependency probe should find a toolchain.
+    if (!dir) continue;
+    for (const name of names) {
+      const candidate = path.join(dir, name);
+      const key = windows ? candidate.toLowerCase() : candidate;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (isRunnableFile(candidate, platform)) yield candidate;
+    }
+  }
+}
+
+/**
+ * Locate a command on PATH without spawning `which` or `where`: minimal
+ * RHEL-family images (AlmaLinux, Rocky, Fedora, Amazon Linux containers) ship
+ * no `which`, so a spawned probe reports present tools as missing. POSIX
+ * accepts regular files the process may execute; Windows tries PATH x PATHEXT.
+ * A name containing a path separator is checked as given.
+ *
+ * @param {string} command
+ * @param {{ platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv }} [opts]
+ * @returns {string | null} the first match, in PATH order
+ */
+export function findCommandOnPath(command, opts = {}) {
+  for (const match of commandPathMatches(command, opts)) return match;
+  return null;
+}
+
+/**
+ * Every PATH match for a command, in lookup order (`which -a` semantics).
+ *
+ * @param {string} command
+ * @param {{ platform?: NodeJS.Platform, env?: NodeJS.ProcessEnv }} [opts]
+ * @returns {string[]}
+ */
+export function listCommandsOnPath(command, opts = {}) {
+  return [...commandPathMatches(command, opts)];
+}
+
 /**
  * Resolve a bare Windows command through the same PATH/PATHEXT lookup a user
  * gets from `where.exe`. The first executable candidate keeps Windows lookup

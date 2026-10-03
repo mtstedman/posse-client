@@ -2,12 +2,14 @@
 
 import fs from "fs";
 import path from "path";
+import { findCommandOnPath } from "../../../../shared/platform/functions/command-launch.js";
 import { ScipLanguageEnvironmentInstaller } from "../ScipLanguageEnvironmentInstaller.js";
 import {
   clearCommandOnPathCache,
   commandOnPath,
   fileExists,
   runCommand,
+  scipDependencyInstallEnv,
 } from "../../functions/scip-install-runtime.js";
 
 export class RustScipEnvironmentInstaller extends ScipLanguageEnvironmentInstaller {
@@ -111,11 +113,8 @@ export class RustScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
   }
 
   async resolveRustAnalyzerPath() {
-    const locator = this.platform === "win32" ? "where" : "which";
-    const located = await runCommand(locator, ["rust-analyzer"], { timeoutMs: 30_000 });
-    if (!located.ok) return null;
-    const first = String(located.message || "").split(/\r?\n/u).map((line) => line.trim()).find(Boolean);
-    return first ? path.resolve(first) : null;
+    const located = findCommandOnPath("rust-analyzer", { platform: this.platform, env: scipDependencyInstallEnv() });
+    return located ? path.resolve(located) : null;
   }
 
   async writeRustWrapper(analyzerPath) {

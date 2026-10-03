@@ -61,10 +61,8 @@ import os from "os";
 import path from "path";
 import { getDb, closeDb } from "../../../shared/storage/functions/index.js";
 import { flushEventsNow } from "../../queue/functions/events.js";
-import { execFile, spawnSync } from "child_process";
-import { promisify } from "util";
-
-const execFileAsync = promisify(execFile);
+import { spawnSync } from "child_process";
+import { findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 import { editorCommandLabel, parseEditorCommand, resolveEditorCommand } from "./editor.js";
 import { initArtifactRootsAsync, ensureArtifactDirs, wiScopeId, contextDir, isArtifactMode, getArtifactProtocol, getResolvedImageProtocol, artifactsDir, pruneEmptyArtifactDirsAsync } from "../../artifacts/functions/index.js";
 import {
@@ -311,25 +309,14 @@ function maybeAnnounceAutoMergeSetting() {
   console.log(`  ${C.dim}Completed WI branches will be merged during wrap-up unless that setting is disabled.${C.reset}\n`);
 }
 
-// Per-process cache: a command's PATH location does not change mid-run,
-// so we only need to spawn the probe once per name. spawnSync above was
-// blocking the main thread for 1500ms per missing binary at boot.
+// Per-process cache: a command's PATH location does not change mid-run.
 const _commandOnPathCache = new Map();
 
 async function commandOnPath(commandName) {
   if (_commandOnPathCache.has(commandName)) {
     return _commandOnPathCache.get(commandName);
   }
-  const args = process.platform === "win32"
-    ? { file: "where.exe", argv: [commandName] }
-    : { file: "sh", argv: ["-c", `command -v ${commandName} >/dev/null 2>&1`] };
-  let ok = false;
-  try {
-    await execFileAsync(args.file, args.argv, { timeout: 1500 });
-    ok = true;
-  } catch {
-    ok = false;
-  }
+  const ok = findCommandOnPath(commandName) !== null;
   _commandOnPathCache.set(commandName, ok);
   return ok;
 }

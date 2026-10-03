@@ -77,6 +77,10 @@ export function buildClaudeCliToolConfig(contract = {}, opts = {}) {
   return new ToolContract(contract).toClaudeCliFlags(opts);
 }
 
+export function buildClaudeLaunchInput(contract = {}, opts = {}) {
+  return new ToolContract(contract).toClaudeLaunchInput(opts);
+}
+
 export function buildProviderToolDefinitions(toolMap = {}, contract = {}) {
   return new ToolContract(contract).toProviderToolDefinitions(toolMap);
 }

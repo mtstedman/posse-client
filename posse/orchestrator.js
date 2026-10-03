@@ -6,6 +6,7 @@ import path from "node:path";
 import { loadUserProviderEnv, userProviderEnvPath } from "./lib/shared/platform/functions/user-provider-env.js";
 import { installCliWarningFilter } from "./lib/domains/cli/functions/warnings.js";
 import { scrubSecretText as scrubSecrets } from "./lib/shared/telemetry/functions/logging/scrub-secret-text.js";
+import { nativeLoadFailureRemedy } from "./lib/shared/platform/functions/native-runtime-floor.js";
 
 installCliWarningFilter();
 
@@ -76,10 +77,8 @@ const recordFatalCrash = (kind, err) => {
   if (isBrokenPipe(err)) { noteBrokenPipeOnce(kind); return; } // consumer gone — keep running, don't abort
   const stack = err && err.stack ? err.stack : String(err);
   const code = err && err.code ? ` code=${err.code}` : "";
-  const text = `${err?.code || ""} ${err?.message || ""} ${stack}`;
-  const remedy = (err?.code === "ERR_DLOPEN_FAILED" || /NODE_MODULE_VERSION|ERR_DLOPEN_FAILED/u.test(text))
-    ? "\nRemedy: Node changed under this install (native addon ABI mismatch). Run `posse doctor` to rebuild dependencies, or re-run the installer.\n"
-    : "";
+  const remedyText = nativeLoadFailureRemedy(`${err?.code || ""} ${err?.message || ""} ${stack}`);
+  const remedy = remedyText ? `\nRemedy: ${remedyText}\n` : "";
   const line = scrubSecrets(`\n[${new Date().toISOString()}] FATAL ${kind}${code}\n${stack}\n${remedy}`);
   try { process.stderr.write(`\x1b[?25h\x1b[0m${line}`); } catch { /* best effort */ }
   try {

@@ -48,6 +48,7 @@ RUN_SMOKE="true"
 PERSIST_ENV="true"
 SEED_SETTINGS="true"
 INSTALL_HOST_TOOLS="true"
+WITH_MEDIA_TOOLS="false"
 INSTALL_NODE="true"
 FORCE_REINSTALL="false"
 DRY_RUN="false"
@@ -61,9 +62,14 @@ POSSE_REPO_URL="https://github.com/mtstedman/posse-client.git"
 REPO_ID=""
 REPO_PATH=""
 NODE_MIN_MAJOR="24"
-NVM_VERSION="v0.40.3"
+# Posse's native binaries and its SQLite driver (better-sqlite3 prebuilds) are
+# built against glibc 2.34; an older userspace cannot load them at all.
+GLIBC_MIN_MAJOR="2"
+GLIBC_MIN_MINOR="34"
+GLIBC_SUPPORTED_SYSTEMS="RHEL/Alma/Rocky 9+, Amazon Linux 2023, Ubuntu 22.04+, Debian 12+"
+NVM_VERSION="v0.40.8"
 # SHA-256 of nvm's install.sh at that tag. Tags can move; the hash cannot.
-NVM_INSTALL_SHA256="2d8359a64a3cb07c02389ad88ceecd43f2fa469c06104f92f98df5b6f315275f"
+NVM_INSTALL_SHA256="48a0eee9a60e07422dce0eb5774754c83889570ca1ee2566c516acbe8af03a9e"
 COMMAND_TIMEOUT_SECONDS="1800"
 DOCTOR_TIMEOUT_SECONDS="7500"
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
@@ -93,10 +99,13 @@ Options:
   --no-smoke              Skip smoke test
   --no-persist-env        Do not append env sourcing to shell rc files
   --skip-settings         Do not seed ~/.posse/account.db
-  --skip-host-tools       Do not install system packages (build toolchain and
-                          helper CLIs: gh, rg, tesseract, ImageMagick, ffmpeg,
+  --skip-host-tools       Do not install system packages (build toolchain,
+                          helper CLIs gh and rg, media tools when requested,
                           and the selected languages' toolchains).
                           Missing tools are still reported.
+  --with-media-tools      Also install the media tools Posse's OCR and
+                          image/video conversion use: tesseract, ImageMagick,
+                          ffmpeg (off by default)
   --no-install-node       Do not auto-install Node via nvm when Node 24+ is missing
   --non-interactive       Never prompt (use environment variables for keys)
   --setup-only            Install core files; defer account/runtime setup to first run
@@ -114,6 +123,10 @@ Notes:
     is only a fallback. ATLAS is built into Posse (no separate checkout).
   - Installs the C/C++ build toolchain needed by Posse's native npm modules
     (node-pty and friends) and auto-installs Node 24 via nvm when missing.
+  - On RHEL 9+ and its rebuilds (AlmaLinux, Rocky, CentOS Stream), enables
+    EPEL + CRB and the GitHub CLI repository only when a missing helper needs
+    them. RPM Fusion is never added; helpers no enabled repository offers are
+    reported with the command to get them.
   - SCIP language environments are installed through `posse doctor`, the
     same self-repair engine Posse uses at boot. Posse itself needs no Python;
     pip and venv come only when Python indexing is selected.
@@ -138,6 +151,7 @@ while [[ $# -gt 0 ]]; do
     --no-persist-env) PERSIST_ENV="false"; shift ;;
     --skip-settings) SEED_SETTINGS="false"; shift ;;
     --skip-host-tools) INSTALL_HOST_TOOLS="false"; shift ;;
+    --with-media-tools) WITH_MEDIA_TOOLS="true"; shift ;;
     --no-install-node) INSTALL_NODE="false"; shift ;;
     --configure-keys) CONFIGURE_KEYS="true"; shift ;;
     --non-interactive) NON_INTERACTIVE="true"; shift ;;
@@ -494,12 +508,15 @@ for k in "${STEP_KEYS[@]}"; do STEP_STATUS[$k]="pending"; STEP_NOTE[$k]=""; done
 STEP_TOTAL=${#STEP_KEYS[@]}
 STEP_INDEX=0
 CURRENT_STEP=""
+# Seconds each step took, for the log's closing "steps:" line.
+declare -A STEP_STARTED=() STEP_SECONDS=()
 CRITICAL_FAILED="false"
 INSTALL_FAILED="false"
 
 step_begin() {
   local key="$1"
   CURRENT_STEP="$key"
+  STEP_STARTED[$key]=$SECONDS
   STEP_INDEX=$((STEP_INDEX + 1))
   printf "\n%s[%2d/%d]%s %s%s%s\n" "$DIM" "$STEP_INDEX" "$STEP_TOTAL" "$R" "$BOLD" "${STEP_TITLES[$key]}" "$R"
   log_only ""
@@ -511,7 +528,12 @@ step_end() {
   STEP_STATUS[$CURRENT_STEP]="$status"
   STEP_NOTE[$CURRENT_STEP]="$note"
   [[ "$status" == "failed" ]] && INSTALL_FAILED="true"
-  log_only "----- ${CURRENT_STEP}: ${status}${note:+ (${note})}"
+  local took=""
+  if [[ -n "${STEP_STARTED[$CURRENT_STEP]:-}" ]]; then
+    STEP_SECONDS[$CURRENT_STEP]=$((SECONDS - STEP_STARTED[$CURRENT_STEP]))
+    took=" [${STEP_SECONDS[$CURRENT_STEP]}s]"
+  fi
+  log_only "----- ${CURRENT_STEP}: ${status}${note:+ (${note})}${took}"
   case "$status" in
     ok|done) printf "    %s%s%s %s\n" "$GREEN" "$GLYPH_OK" "$R" "${note:-done}" ;;
     skipped|dry-run) printf "    %s%s %s%s\n" "$DIM" "$GLYPH_DOT" "${note:-$status}" "$R" ;;
@@ -605,6 +627,7 @@ run_logged() {
     printf 'timed out after %ss\n' "$timeout_seconds" >>"$chunk"
     printf 'timed out after %ss\n' "$timeout_seconds" >>"$LOG_FILE"
   fi
+  log_only "<<< exit ${rc} after ${elapsed}s"
 
   if [[ $rc -eq 0 ]]; then
     printf "    %s%s%s %s %s(%s)%s\n" "$GREEN" "$GLYPH_OK" "$R" "$desc" "$DIM" "$(fmt_duration $elapsed)" "$R"
@@ -631,6 +654,14 @@ run_logged_in_dir_timeout() {
 run_in_dir_helper() { local dir="$1"; shift; cd "$dir" && "$@"; }
 
 # --- summary + traps -----------------------------------------------------------
+format_step_timings() {
+  local key out="steps:"
+  for key in "${STEP_KEYS[@]}"; do
+    [[ -n "${STEP_SECONDS[$key]:-}" ]] && out+=" ${key}=${STEP_SECONDS[$key]}s"
+  done
+  printf '%s total=%ss' "$out" "$SECONDS"
+}
+
 SUMMARY_PRINTED="false"
 print_summary() {
   [[ "$SUMMARY_PRINTED" == "true" ]] && return 0
@@ -656,6 +687,10 @@ print_summary() {
     local w
     for w in "${WARNINGS[@]}"; do printf "    %s%s%s %s\n" "$YELLOW" "$GLYPH_WARN" "$R" "$w"; done
   fi
+  local timings
+  timings="$(format_step_timings)"
+  log_only "$timings"
+  printf "\n  %s%s%s" "$DIM" "$timings" "$R"
   printf "\n  %sLog:%s %s\n" "$DIM" "$R" "$LOG_FILE"
   echo
   if [[ "$INSTALL_FAILED" == "true" ]]; then
@@ -849,10 +884,11 @@ pkg_install() {
   esac
 }
 
-# Package names per manager. Toolchain packages are what native npm modules
-# (node-pty, tree-sitter, better-sqlite3 fallback builds) need to compile;
-# node-gyp needs python3 for that. pip and venv are only for Python projects,
-# so they come only when Python indexing is selected.
+# Package names per manager. Toolchain packages are what a native npm module
+# without a matching prebuild (node-pty) needs to compile; node-gyp needs
+# python3 for that. better-sqlite3 ships prebuilt binaries and never compiles.
+# pip and venv are only for Python projects, so they come only when Python
+# indexing is selected.
 core_packages() {
   local package
   for package in "$@"; do
@@ -884,14 +920,30 @@ toolchain_packages() {
 
 # name|check-kind|packages(comma-separated candidates, tried in order)
 host_tools_table() {
+  base_tools_table
+  [[ "$WITH_MEDIA_TOOLS" == "true" ]] && media_tools_table
+  return 0
+}
+
+# Media tools are opt-in (--with-media-tools) and listed last: they are the
+# largest packages, and Posse runs without them (OCR is unavailable and image
+# conversion falls back to sharp).
+media_tools_table() {
+  case "$PKG_MGR" in
+    apt-get) printf '%s\n' "tesseract|tesseract|tesseract-ocr" "imagemagick|magick_or_convert|imagemagick" "ffmpeg|ffmpeg|ffmpeg" ;;
+    # Fedora and EPEL ship ffmpeg as ffmpeg-free; plain ffmpeg is RPM Fusion's.
+    dnf|yum) printf '%s\n' "tesseract|tesseract|tesseract" "imagemagick|magick_or_convert|ImageMagick" "ffmpeg|ffmpeg|ffmpeg-free,ffmpeg" ;;
+    pacman) printf '%s\n' "tesseract|tesseract|tesseract" "imagemagick|magick_or_convert|imagemagick" "ffmpeg|ffmpeg|ffmpeg" ;;
+    zypper) printf '%s\n' "tesseract|tesseract|tesseract-ocr" "imagemagick|magick_or_convert|ImageMagick" "ffmpeg|ffmpeg|ffmpeg" ;;
+  esac
+}
+
+base_tools_table() {
   case "$PKG_MGR" in
     apt-get)
       cat <<'EOT'
 ripgrep|rg|ripgrep
 github-cli|gh|gh
-tesseract|tesseract|tesseract-ocr
-imagemagick|magick_or_convert|imagemagick
-ffmpeg|ffmpeg|ffmpeg
 EOT
       if scip_language_selected php; then cat <<'EOT'
 php|php|php-cli,php
@@ -904,12 +956,10 @@ EOT
       fi
       ;;
     dnf|yum)
+      # Fedora and EPEL ship ffmpeg as ffmpeg-free; plain ffmpeg is RPM Fusion's.
       cat <<'EOT'
 ripgrep|rg|ripgrep
 github-cli|gh|gh
-tesseract|tesseract|tesseract
-imagemagick|magick_or_convert|ImageMagick
-ffmpeg|ffmpeg|ffmpeg
 EOT
       if scip_language_selected php; then cat <<'EOT'
 php|php|php-cli,php
@@ -925,9 +975,6 @@ EOT
       cat <<'EOT'
 ripgrep|rg|ripgrep
 github-cli|gh|github-cli
-tesseract|tesseract|tesseract
-imagemagick|magick_or_convert|imagemagick
-ffmpeg|ffmpeg|ffmpeg
 EOT
       if scip_language_selected php; then cat <<'EOT'
 php|php|php
@@ -943,9 +990,6 @@ EOT
       cat <<'EOT'
 ripgrep|rg|ripgrep
 github-cli|gh|gh
-tesseract|tesseract|tesseract-ocr
-imagemagick|magick_or_convert|ImageMagick
-ffmpeg|ffmpeg|ffmpeg
 EOT
       if scip_language_selected php; then cat <<'EOT'
 php|php|php8-cli,php-cli,php8,php7
@@ -965,6 +1009,198 @@ tool_available() {
     magick_or_convert) command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1 ;;
     *) command -v "$1" >/dev/null 2>&1 ;;
   esac
+}
+
+# Whether the enabled repositories offer a package (or it is installed), so a
+# name a repository lacks is skipped instead of failing loudly. Only dnf/yum
+# answer this cheaply; other managers just attempt the install.
+pkg_available() {
+  [[ "$DRY_RUN" == "true" ]] && return 0
+  case "$PKG_MGR" in
+    dnf|yum) as_root "$PKG_MGR" -q list "$1" >>"$LOG_FILE" 2>&1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# --- RPM-family extra repositories ---------------------------------------------
+# RHEL 9+ and its rebuilds (AlmaLinux, Rocky, CentOS Stream) keep ripgrep,
+# ImageMagick, ffmpeg-free and composer in EPEL, whose packages may need CRB;
+# gh comes from the GitHub CLI's own repository. Amazon Linux 2023 has no EPEL.
+# Repositories are enabled only when a missing helper needs one, and a failure
+# only leaves that optional helper uninstalled. RPM Fusion is never added.
+OS_RELEASE_FILE="/etc/os-release"
+YUM_REPOS_DIR="/etc/yum.repos.d"
+GH_CLI_REPO_URL="https://cli.github.com/packages/rpm/gh-cli.repo"
+OS_ID=""
+OS_ID_LIKE=""
+OS_VERSION_MAJOR=""
+RPM_REPO_FAMILY=""
+
+read_os_release() {
+  OS_ID=""; OS_ID_LIKE=""; OS_VERSION_MAJOR=""
+  [[ -r "$OS_RELEASE_FILE" ]] || return 1
+  local key value
+  while IFS='=' read -r key value || [[ -n "$key" ]]; do
+    value="${value%$'\r'}"
+    value="${value#\"}"; value="${value%\"}"
+    value="${value#\'}"; value="${value%\'}"
+    case "$key" in
+      ID) OS_ID="${value,,}" ;;
+      ID_LIKE) OS_ID_LIKE="${value,,}" ;;
+      VERSION_ID) OS_VERSION_MAJOR="${value%%.*}" ;;
+    esac
+  done <"$OS_RELEASE_FILE"
+  return 0
+}
+
+# Sets RPM_REPO_FAMILY: "el" for RHEL and its rebuilds 9+, "amzn" for Amazon
+# Linux 2023+, empty elsewhere (Fedora's own repositories carry every helper).
+detect_rpm_repo_family() {
+  RPM_REPO_FAMILY=""
+  read_os_release || return 0
+  [[ "$OS_VERSION_MAJOR" =~ ^[0-9]+$ ]] || return 0
+  case "$OS_ID" in
+    amzn) ((OS_VERSION_MAJOR >= 2023)) && RPM_REPO_FAMILY="amzn"; return 0 ;;
+    fedora) return 0 ;;
+  esac
+  case " $OS_ID $OS_ID_LIKE " in
+    *" rhel "*|*" centos "*) ((OS_VERSION_MAJOR >= 9)) && RPM_REPO_FAMILY="el" ;;
+  esac
+  return 0
+}
+
+# rpm_repo_plan <missing helper names...>: the repository actions those helpers
+# need on this host (after detect_rpm_repo_family), one per line, in order.
+rpm_repo_plan() {
+  local name need_epel="false" need_gh="false"
+  for name in "$@"; do
+    case "$name" in
+      ripgrep|imagemagick|ffmpeg|composer) need_epel="true" ;;
+      github-cli) need_gh="true" ;;
+    esac
+  done
+  if [[ "$RPM_REPO_FAMILY" == "el" && "$need_epel" == "true" ]]; then
+    printf '%s\n' crb epel
+  fi
+  if [[ -n "$RPM_REPO_FAMILY" && "$need_gh" == "true" && ! -f "$YUM_REPOS_DIR/gh-cli.repo" ]]; then
+    printf '%s\n' gh-cli
+  fi
+  return 0
+}
+
+# RHEL proper manages CRB through subscription-manager; the rebuilds ship it
+# disabled behind dnf config-manager.
+rpm_enable_crb() {
+  if [[ "$OS_ID" == "rhel" ]]; then
+    command -v subscription-manager >/dev/null 2>&1 || return 1
+    as_root subscription-manager repos --enable "codeready-builder-for-rhel-${OS_VERSION_MAJOR}-$(uname -m)-rpms"
+    return
+  fi
+  pkg_install dnf-plugins-core || return 1
+  as_root "$PKG_MGR" config-manager --set-enabled crb
+}
+
+# RHEL proper has no epel-release package; the rebuilds carry it in extras.
+rpm_enable_epel() {
+  if [[ "$OS_ID" == "rhel" ]]; then
+    pkg_install "https://dl.fedoraproject.org/pub/epel/epel-release-latest-${OS_VERSION_MAJOR}.noarch.rpm"
+  else
+    pkg_install epel-release
+  fi
+}
+
+rpm_add_gh_cli_repo() {
+  pkg_install dnf-plugins-core || return 1
+  as_root "$PKG_MGR" config-manager --add-repo "$GH_CLI_REPO_URL"
+}
+
+epel_enable_command() {
+  if [[ "$OS_ID" == "rhel" ]]; then
+    printf '%s' "sudo subscription-manager repos --enable codeready-builder-for-rhel-${OS_VERSION_MAJOR}-\$(uname -m)-rpms && sudo dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-${OS_VERSION_MAJOR}.noarch.rpm"
+  else
+    printf '%s' "sudo dnf install dnf-plugins-core && sudo dnf config-manager --set-enabled crb && sudo dnf install epel-release"
+  fi
+}
+
+# Enables what the missing helpers need, in the parent shell before they
+# install. Every failure is a warning: the helpers are optional.
+prepare_rpm_repos() {
+  [[ "$PKG_MGR" == "dnf" || "$PKG_MGR" == "yum" ]] || return 0
+  detect_rpm_repo_family
+  local action changed="false"
+  while read -r action; do
+    case "$action" in
+      crb)
+        if run_logged "enable the CRB repository (EPEL dependencies)" rpm_enable_crb; then changed="true"
+        else warn "could not enable the CRB repository; some EPEL packages may not install"; fi ;;
+      epel)
+        if run_logged "enable EPEL (ripgrep, ImageMagick, ffmpeg-free)" rpm_enable_epel; then changed="true"
+        else warn "could not enable EPEL; to add it yourself: $(epel_enable_command)"; fi ;;
+      gh-cli)
+        if run_logged "add the GitHub CLI package repository" rpm_add_gh_cli_repo; then changed="true"
+        else warn "could not add the GitHub CLI repository (${GH_CLI_REPO_URL}); gh installs only if another enabled repository has it"; fi ;;
+    esac
+  done < <(rpm_repo_plan "$@")
+  if [[ "$changed" == "true" ]]; then
+    run_logged "refresh package metadata" as_root "$PKG_MGR" -q makecache || true
+  fi
+  return 0
+}
+
+# Why a helper's package is missing from this host's enabled repositories, and
+# how to add it, for the summary warnings.
+helper_unavailable_hint() {
+  local name="$1" packages="$2"
+  case "${RPM_REPO_FAMILY}:${name}" in
+    el:ffmpeg)
+      printf '%s' "EPEL's ffmpeg-free is not installable here; the full build is in RPM Fusion (third-party, not added automatically): sudo dnf install --nogpgcheck https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-${OS_VERSION_MAJOR}.noarch.rpm && sudo dnf install ffmpeg" ;;
+    el:ripgrep|el:imagemagick|el:composer)
+      printf '%s' "it comes from EPEL; enable it and re-run: $(epel_enable_command)" ;;
+    el:github-cli|amzn:github-cli)
+      printf '%s' "add the GitHub CLI repository and re-run: sudo dnf install dnf-plugins-core && sudo dnf config-manager --add-repo ${GH_CLI_REPO_URL}" ;;
+    amzn:ripgrep)
+      printf '%s' "Amazon Linux has neither a ripgrep package nor EPEL; install a release binary from https://github.com/BurntSushi/ripgrep/releases" ;;
+    amzn:ffmpeg)
+      printf '%s' "Amazon Linux has no ffmpeg package and RPM Fusion does not support it; install a static build from https://ffmpeg.org/download.html if you want the ffmpeg image fallback" ;;
+    amzn:tesseract)
+      printf '%s' "Amazon Linux 2023 does not package tesseract, so OCR stays off unless you build it from https://github.com/tesseract-ocr/tesseract" ;;
+    *)
+      printf '%s' "no enabled repository offers ${packages//,/ or }" ;;
+  esac
+}
+
+# Installs each missing helper (name|check|candidates) from the first candidate
+# an enabled repository offers. Sets HELPER_FAILED (an install ran but the tool
+# is still missing) and HELPER_UNAVAILABLE (no repository offers a candidate).
+HELPER_FAILED=()
+HELPER_UNAVAILABLE=()
+install_missing_helpers() {
+  HELPER_FAILED=()
+  HELPER_UNAVAILABLE=()
+  local entry name check pkgs pkg installed offered
+  local -a candidates
+  for entry in "$@"; do
+    IFS='|' read -r name check pkgs <<<"$entry"
+    installed="false"
+    offered="false"
+    IFS=',' read -ra candidates <<<"$pkgs"
+    for pkg in "${candidates[@]}"; do
+      pkg_available "$pkg" || continue
+      offered="true"
+      if run_logged "install ${name} (${pkg})" pkg_install "$pkg"; then
+        installed="true"
+        break
+      fi
+    done
+    [[ "$DRY_RUN" == "true" ]] && continue
+    if [[ "$offered" != "true" ]]; then
+      HELPER_UNAVAILABLE+=("$name")
+      warn "optional ${name} not installed: $(helper_unavailable_hint "$name" "$pkgs")"
+    elif [[ "$installed" != "true" ]] || ! tool_available "$check"; then
+      HELPER_FAILED+=("$name")
+    fi
+  done
+  return 0
 }
 
 # rustup puts cargo in ~/.cargo/bin, which non-login shells may not have on
@@ -1103,6 +1339,7 @@ ensure_modern_go() {
 step_packages() {
   step_begin packages
   detect_pkg_manager
+  [[ "$WITH_MEDIA_TOOLS" == "true" ]] || info "media tools (tesseract, ImageMagick, ffmpeg) not requested; --with-media-tools adds them"
 
   # What's missing? Core + toolchain checked by representative commands.
   local missing_core=() missing_toolchain="false" missing_tools=() missing_rust="false"
@@ -1153,7 +1390,7 @@ step_packages() {
     return 0
   fi
 
-  local failures=() system_gap=""
+  local failures=() unavailable=() system_gap=""
   if [[ "$missing_system" == "true" ]]; then
     if [[ "$PKG_MGR" == "none" ]]; then
       warn "no supported package manager found (apt/dnf/yum/pacman/zypper); install missing packages manually"
@@ -1165,35 +1402,56 @@ step_packages() {
         system_gap="no root access; packages not installed"
       else
         pkg_refresh_index
+        # EPEL, CRB and the GitHub CLI repository must be enabled before the
+        # transaction below, or RHEL-family hosts can't resolve those helpers.
+        if [[ ${#missing_tools[@]} -gt 0 ]]; then
+          local helper_names=() entry
+          for entry in "${missing_tools[@]}"; do helper_names+=("${entry%%|*}"); done
+          prepare_rpm_repos "${helper_names[@]}"
+        fi
 
-        # Core (git/curl) and toolchain go in one shot each — these are standard
-        # package names that exist everywhere; helper CLIs install per-package so a
-        # missing name in one repo can't sink the rest.
+        # Everything missing goes in one transaction: one resolver run and one
+        # round of package triggers. One name this repository lacks fails the
+        # whole transaction (dnf/pacman/zypper refuse it; EPEL-less RHEL lacks
+        # several helpers), so then fall back to core and toolchain in one shot
+        # each and every helper through its candidate names.
+        local all_pkgs=() toolchain_list=() pending_tools=() entry pkg
         if [[ ${#missing_core[@]} -gt 0 ]]; then
-          # shellcheck disable=SC2046,SC2086
-          run_logged "install core packages (${missing_core[*]})" pkg_install $(core_packages "${missing_core[@]}") || failures+=("core")
+          while IFS= read -r pkg; do all_pkgs+=("$pkg"); done < <(core_packages "${missing_core[@]}")
         fi
         if [[ "$missing_toolchain" == "true" ]]; then
-          # shellcheck disable=SC2046,SC2086
-          run_logged "install build toolchain ($(toolchain_packages | cut -c1-48)…)" pkg_install $(toolchain_packages) || failures+=("toolchain")
+          read -ra toolchain_list <<<"$(toolchain_packages)"
+          all_pkgs+=("${toolchain_list[@]}")
         fi
-
-        local entry pkg installed
         for entry in "${missing_tools[@]}"; do
           IFS='|' read -r name check pkgs <<<"$entry"
-          installed="false"
-          IFS=',' read -ra candidates <<<"$pkgs"
-          for pkg in "${candidates[@]}"; do
-            if run_logged "install ${name} (${pkg})" pkg_install "$pkg"; then
-              installed="true"
-              break
-            fi
-          done
-          if [[ "$DRY_RUN" == "true" ]]; then continue; fi
-          if [[ "$installed" != "true" ]] || ! tool_available "$check"; then
-            failures+=("$name")
-          fi
+          all_pkgs+=("${pkgs%%,*}")
         done
+        if run_logged "install ${#all_pkgs[@]} system packages in one transaction" pkg_install "${all_pkgs[@]}"; then
+          # A package can install without providing the command; retry those.
+          if [[ "$DRY_RUN" != "true" ]]; then
+            for entry in "${missing_tools[@]}"; do
+              IFS='|' read -r name check pkgs <<<"$entry"
+              tool_available "$check" || pending_tools+=("$entry")
+            done
+          fi
+        else
+          info "one-transaction install failed; installing in groups instead"
+          if [[ ${#missing_core[@]} -gt 0 ]]; then
+            # shellcheck disable=SC2046,SC2086
+            run_logged "install core packages (${missing_core[*]})" pkg_install $(core_packages "${missing_core[@]}") || failures+=("core")
+          fi
+          if [[ "$missing_toolchain" == "true" ]]; then
+            run_logged "install build toolchain ($(toolchain_packages | cut -c1-48)…)" pkg_install "${toolchain_list[@]}" || failures+=("toolchain")
+          fi
+          pending_tools=("${missing_tools[@]}")
+        fi
+
+        if [[ ${#pending_tools[@]} -gt 0 ]]; then
+          install_missing_helpers "${pending_tools[@]}"
+          [[ ${#HELPER_FAILED[@]} -gt 0 ]] && failures+=("${HELPER_FAILED[@]}")
+          [[ ${#HELPER_UNAVAILABLE[@]} -gt 0 ]] && unavailable+=("${HELPER_UNAVAILABLE[@]}")
+        fi
       fi
     fi
   fi
@@ -1212,12 +1470,19 @@ step_packages() {
     fi
   elif [[ "$DRY_RUN" == "true" ]]; then
     step_end dry-run "would install missing system packages"
-  elif [[ ${#failures[@]} -eq 0 ]]; then
+  elif [[ ${#failures[@]} -eq 0 && ${#unavailable[@]} -eq 0 ]]; then
     step_end ok "system packages installed"
   else
-    # Composer failure here is fine — the composer step has a phar fallback.
-    warn "could not install: ${failures[*]} (Posse degrades gracefully; related helpers are disabled until installed)"
-    step_end partial "installed with gaps: ${failures[*]}"
+    local note="installed"
+    if [[ ${#failures[@]} -gt 0 ]]; then
+      # Composer failure here is fine — the composer step has a phar fallback.
+      warn "could not install: ${failures[*]} (Posse degrades gracefully; related helpers are disabled until installed)"
+      note="installed with gaps: ${failures[*]}"
+    fi
+    if [[ ${#unavailable[@]} -gt 0 ]]; then
+      note+="; optional, not in this host's repositories: ${unavailable[*]} (see warnings)"
+    fi
+    step_end partial "$note"
   fi
 }
 
@@ -1377,6 +1642,23 @@ do_install_composer_phar() {
   [[ $rc -eq 0 && -f "$phar" ]]
 }
 
+# Which scip-php environment `posse doctor` installs for the PHP on PATH:
+# PHP 8.3+ gets current upstream scip-php (scip/php), PHP 8.1/8.2 (Debian 12,
+# Ubuntu 22.04) the pinned v0.0.2 track (scip/php-legacy). Mirrors
+# selectPhpScipTrack in lib/domains/environments/functions/php-scip-tracks.js.
+scip_php_track_note() {
+  local version
+  version="$(php -r 'echo PHP_VERSION;' 2>/dev/null)" || return 1
+  [[ -n "$version" ]] || return 1
+  if php -r 'exit(version_compare(PHP_VERSION, "8.3.0", ">=") ? 0 : 1);' >/dev/null 2>&1; then
+    printf 'scip-php track: modern, current upstream (PHP %s)' "$version"
+  elif php -r 'exit(version_compare(PHP_VERSION, "8.1.0", ">=") ? 0 : 1);' >/dev/null 2>&1; then
+    printf 'scip-php track: legacy v0.0.2 (PHP %s < 8.3)' "$version"
+  else
+    printf 'scip-php unsupported: PHP %s is older than 8.1' "$version"
+  fi
+}
+
 step_composer() {
   step_begin composer
   if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
@@ -1384,12 +1666,22 @@ step_composer() {
     step_end skipped "PHP SCIP not selected"
     return 0
   fi
+  local track_note=""
+  if command -v php >/dev/null 2>&1; then
+    track_note="$(scip_php_track_note)" || track_note=""
+    if [[ "$track_note" == "scip-php unsupported"* ]]; then
+      warn "${track_note}; SCIP PHP indexing stays disabled until PHP 8.1+ is installed"
+    elif [[ -n "$track_note" ]]; then
+      info "$track_note"
+    fi
+  fi
+  local suffix="${track_note:+; $track_note}"
   if command -v composer >/dev/null 2>&1; then
-    step_end ok "composer on PATH"
+    step_end ok "composer on PATH${suffix}"
     return 0
   fi
   if [[ -f "$POSSE_DIR/scip/bin/composer.phar" ]]; then
-    step_end ok "composer.phar already present in scip/bin"
+    step_end ok "composer.phar already present in scip/bin${suffix}"
     return 0
   fi
   if ! command -v php >/dev/null 2>&1; then
@@ -1398,11 +1690,11 @@ step_composer() {
     return 0
   fi
   if [[ "$DRY_RUN" == "true" ]]; then
-    step_end dry-run "would download signature-verified composer.phar into scip/bin"
+    step_end dry-run "would download signature-verified composer.phar into scip/bin${suffix}"
     return 0
   fi
   if run_logged "download verified composer.phar" do_install_composer_phar; then
-    step_end ok "composer.phar installed into scip/bin"
+    step_end ok "composer.phar installed into scip/bin${suffix}"
   else
     warn "Composer could not be installed (package + phar both failed); SCIP PHP dependency installs will be skipped"
     step_end partial "composer unavailable"
@@ -1427,26 +1719,42 @@ step_npm() {
     step_end skipped "node_modules is fresh (pass --force to reinstall)"
     return 0
   fi
+  local npm_args=()
+  npm_install_command "$POSSE_DIR"
   if [[ "$DRY_RUN" == "true" ]]; then
-    step_end dry-run "would run npm install --include=optional in ${POSSE_DIR}"
+    step_end dry-run "would run npm ${npm_args[*]} in ${POSSE_DIR}"
     return 0
   fi
 
-  if run_logged_in_dir "$POSSE_DIR" "npm install (includes native module builds)" \
-    npm install --include=dev --include=optional --no-fund --no-audit; then
+  if run_logged_in_dir "$POSSE_DIR" "npm ${npm_args[0]} (includes native module builds)" npm "${npm_args[@]}"; then
     finish_node_install
     return $?
   fi
 
   info "retrying once (transient network/registry failures are common)"
-  if run_logged_in_dir "$POSSE_DIR" "npm install (retry)" \
-    npm install --include=dev --include=optional --no-fund --no-audit; then
+  if run_logged_in_dir "$POSSE_DIR" "npm ${npm_args[0]} (retry)" npm "${npm_args[@]}"; then
     finish_node_install
     return $?
   fi
 
-  step_fail_critical "npm install failed twice — the log usually names the missing system dependency (see above)"
+  step_fail_critical "npm ${npm_args[0]} failed twice — the log usually names the missing system dependency (see above)"
   return 1
+}
+
+# Sets npm_args for the checkout. Its lockfile pins every version: `npm ci`
+# installs exactly that into a fresh tree; an existing tree is updated in place
+# (ci deletes node_modules first, under a running Posse). Neither writes the
+# lockfile, so `posse update` never finds it modified. Older checkouts without
+# a lockfile keep a plain npm install.
+npm_install_command() {
+  local dir="$1" common=(--include=dev --include=optional --no-fund --no-audit)
+  if [[ ! -f "$dir/package-lock.json" ]]; then
+    npm_args=(install "${common[@]}")
+  elif [[ ! -d "$dir/node_modules" ]]; then
+    npm_args=(ci "${common[@]}")
+  else
+    npm_args=(install --no-save --prefer-offline "${common[@]}")
+  fi
 }
 
 finish_node_install() {
@@ -1657,13 +1965,68 @@ step_doctor() {
     return 0
   fi
   info "delegating to Posse's own dependency engine (SCIP indexer environments)"
-  if run_logged_in_dir_timeout "$DOCTOR_TIMEOUT_SECONDS" "$POSSE_DIR" "posse doctor (first run builds SCIP envs and deploys Jina)" \
-    "$NODE_BIN" orchestrator.js doctor --adopt-node-install; then
+  local rc=0
+  run_logged_in_dir_timeout "$DOCTOR_TIMEOUT_SECONDS" "$POSSE_DIR" "posse doctor (first run builds SCIP envs and deploys Jina)" \
+    "$NODE_BIN" orchestrator.js doctor --adopt-node-install || rc=$?
+  if [[ $rc -eq 0 ]]; then
     step_end ok "runtime dependencies, binaries, and Jina ready"
-  else
-    warn "posse doctor reported unresolved dependencies — run 'posse doctor' after fixing the tools it names (log has details)"
-    step_end failed "runtime dependencies, native binaries, or Jina unresolved"
+    return 0
   fi
+  if [[ $rc -eq 124 ]]; then
+    warn "posse doctor did not finish in time — run 'posse doctor' to complete it (log has details)"
+    step_end failed "posse doctor timed out after $((DOCTOR_TIMEOUT_SECONDS / 60)) min"
+    return 0
+  fi
+
+  # Most first-run failures are downloads, so try once more. The retry reports
+  # as JSON, which says exactly what is still missing.
+  info "retrying posse doctor once"
+  local report labels=() label others=0
+  report="$(mktemp)"
+  rc=0
+  run_logged_in_dir_timeout "$DOCTOR_TIMEOUT_SECONDS" "$POSSE_DIR" "posse doctor (retry)" \
+    stdout_to_file "$report" "$NODE_BIN" orchestrator.js doctor --adopt-node-install --json || rc=$?
+  cat "$report" >>"$LOG_FILE"
+  if [[ $rc -eq 0 ]]; then
+    rm -f "$report"
+    step_end ok "runtime dependencies, binaries, and Jina ready (second attempt)"
+    return 0
+  fi
+  mapfile -t labels < <(doctor_failed_labels "$report" 2>/dev/null)
+  rm -f "$report"
+  for label in "${labels[@]}"; do [[ "$label" == "model "* ]] || others=$((others + 1)); done
+  # Without the search model Posse still runs, with lexical search only; only
+  # doctor (or posse update) downloads it later, so say so.
+  if [[ $rc -ne 124 && ${#labels[@]} -gt 0 && $others -eq 0 ]]; then
+    warn "the code search model did not download; semantic search stays off until 'posse doctor' completes it"
+    step_end partial "search model not downloaded; run 'posse doctor' later to add semantic search"
+    return 0
+  fi
+  local what="see log"
+  if [[ ${#labels[@]} -gt 0 ]]; then
+    what="$(printf '%s, ' "${labels[@]:0:4}")"
+    what="${what%, }"
+  fi
+  warn "posse doctor reported unresolved dependencies — run 'posse doctor' after fixing the tools it names (log has details)"
+  step_end failed "still unresolved after a retry: ${what}"
+}
+
+# run_logged captures a command's output into the log; this keeps stdout
+# (a JSON report) apart in a file of its own.
+stdout_to_file() { local file="$1"; shift; "$@" >"$file"; }
+
+# Prints the labels `posse doctor --json` reports as failed ("model jina",
+# "scip python", ...), one per line; fails when the file holds no report.
+doctor_failed_labels() {
+  "$NODE_BIN" -e '
+const text = require("fs").readFileSync(process.argv[1], "utf8");
+const match = /^\{\r?\n\s*"ok":[\s\S]*?^\}/m.exec(text);
+if (!match) process.exit(2);
+let report;
+try { report = JSON.parse(match[0]); } catch { process.exit(2); }
+const failed = report.doctor && Array.isArray(report.doctor.failed) ? report.doctor.failed : [];
+for (const entry of failed) console.log(String(entry.label || entry.language || "dependency"));
+' "$1"
 }
 
 step_admin_init() {
@@ -1836,8 +2199,18 @@ step_native_binaries() {
     return 0
   fi
 
-  if run_logged_in_dir "$POSSE_DIR" "download current native binaries" \
-    "$NODE_BIN" scripts/pull-native-artifacts.mjs; then
+  # Binaries already current are only checked again, so one retry is cheap;
+  # a timeout is not retried.
+  local rc=0
+  run_logged_in_dir "$POSSE_DIR" "download current native binaries" \
+    "$NODE_BIN" scripts/pull-native-artifacts.mjs || rc=$?
+  if [[ $rc -ne 0 && $rc -ne 124 ]]; then
+    info "retrying once (transient network failures are common)"
+    rc=0
+    run_logged_in_dir "$POSSE_DIR" "download current native binaries (retry)" \
+      "$NODE_BIN" scripts/pull-native-artifacts.mjs || rc=$?
+  fi
+  if [[ $rc -eq 0 ]]; then
     step_end ok "native binaries downloaded or already current"
   else
     warn "native binary download failed; boot readiness will retry, or run 'npm run pull:native' in ${POSSE_DIR}"
@@ -1914,10 +2287,40 @@ linux_distribution_id() {
   done </etc/os-release
 }
 
+# The running glibc version (for example 2.36), or nothing when it is unknown.
+glibc_version() {
+  local text
+  text="$(getconf GNU_LIBC_VERSION 2>/dev/null)" || text=""
+  if [[ "$text" =~ ^glibc[[:space:]]+([0-9]+\.[0-9]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  # `ldd (GNU libc) 2.34` / `ldd (Ubuntu GLIBC 2.35-0ubuntu3) 2.35`
+  text="$(ldd --version 2>/dev/null)" || text=""
+  text="${text%%$'\n'*}"
+  if [[ "$text" =~ (GLIBC|GNU[[:space:]]libc).*[[:space:]]([0-9]+\.[0-9]+)$ ]]; then
+    printf '%s' "${BASH_REMATCH[2]}"
+  fi
+}
+
+glibc_version_ok() {
+  [[ "$1" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+  local major=$((10#${BASH_REMATCH[1]})) minor=$((10#${BASH_REMATCH[2]}))
+  ((major > GLIBC_MIN_MAJOR || (major == GLIBC_MIN_MAJOR && minor >= GLIBC_MIN_MINOR)))
+}
+
 step_preflight() {
   step_begin preflight
   if [[ "$(linux_distribution_id)" == "alpine" ]]; then
     step_fail_critical "Alpine Linux is not supported (its musl userspace is incompatible with the installer's Node/nvm path); use Debian, Ubuntu, Fedora, RHEL, Arch, or openSUSE"
+    return 1
+  fi
+  local glibc
+  glibc="$(glibc_version)"
+  if [[ -z "$glibc" ]]; then
+    warn "could not determine the glibc version; Posse's native binaries and SQLite need glibc ${GLIBC_MIN_MAJOR}.${GLIBC_MIN_MINOR}+ (${GLIBC_SUPPORTED_SYSTEMS})"
+  elif ! glibc_version_ok "$glibc"; then
+    step_fail_critical "glibc ${glibc} is too old: Posse's native binaries and its SQLite driver need glibc ${GLIBC_MIN_MAJOR}.${GLIBC_MIN_MINOR}+. Supported: ${GLIBC_SUPPORTED_SYSTEMS}"
     return 1
   fi
   if [[ -n "$REPO_PATH" ]]; then
@@ -1932,11 +2335,83 @@ step_preflight() {
   else
     info "no --repo-path provided; smoke test will be skipped"
   fi
+  local notes=()
+  if [[ "$DRY_RUN" != "true" ]]; then
+    # Disk: node_modules, indexers, toolchains, and the search model need about
+    # 3 GB (more with Rust); under 1 GB the install cannot finish.
+    local free_kb free_gb
+    free_kb="$(free_disk_kb "$HOME")"
+    if [[ "$free_kb" =~ ^[0-9]+$ ]]; then
+      free_gb="$(awk -v kb="$free_kb" 'BEGIN { printf "%.1f", kb / 1048576 }')"
+      if ((free_kb < 1048576)); then
+        step_fail_critical "only ${free_gb} GB free for ${HOME}; Posse needs about 3 GB. Free some space, then re-run."
+        return 1
+      fi
+      if ((free_kb < 3145728)); then
+        warn "only ${free_gb} GB free for ${HOME}; a full install needs about 3 GB"
+        notes+=("low disk space (${free_gb} GB free)")
+      fi
+    fi
+
+    # Network: a blocked host is a warning, not a stop, because proxies can
+    # make a probe fail where the real download works.
+    local hosts=(github.com registry.npmjs.org api.yourposseai.com) unreachable=()
+    if [[ "$INSTALL_NODE" == "true" ]] && { ! command -v node >/dev/null 2>&1 || [[ "$(node_major)" -lt "$NODE_MIN_MAJOR" ]]; }; then
+      hosts+=(raw.githubusercontent.com)
+    fi
+    if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+      mapfile -t unreachable < <(unreachable_hosts "${hosts[@]}")
+      if [[ ${#unreachable[@]} -gt 0 ]]; then
+        warn "cannot reach ${unreachable[*]}; steps that download from there will fail"
+        notes+=("cannot reach ${unreachable[*]}")
+      fi
+    else
+      info "no curl or wget yet; network check skipped (the packages step installs curl)"
+    fi
+    local proxy="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
+    [[ -n "$proxy" ]] && info "downloads go through the proxy $(redact_url_credentials "$proxy")"
+  fi
   check_git_config
   [[ "$SETUP_ONLY" == "true" ]] || check_provider_credentials
-  step_end ok "preflight complete"
+  if [[ ${#notes[@]} -gt 0 ]]; then
+    local joined
+    joined="$(printf '%s; ' "${notes[@]}")"
+    step_end partial "${joined%; }"
+  else
+    step_end ok "preflight complete"
+  fi
   return 0
 }
+
+# Free kilobytes on the filesystem holding $1.
+free_disk_kb() { df -Pk -- "$1" 2>/dev/null | awk 'NR == 2 { print $4 }'; }
+
+# Hosts the installer downloads from that this machine cannot reach, one
+# "host (why)" per line. Any HTTP answer counts as reachable.
+unreachable_hosts() {
+  local host rc
+  for host in "$@"; do
+    rc=0
+    if command -v curl >/dev/null 2>&1; then
+      curl -sS -o /dev/null --proto '=https' --connect-timeout 6 --max-time 10 -I "https://${host}/" 2>/dev/null || rc=$?
+      case "$rc" in
+        0) ;;
+        5|6) printf '%s (name lookup failed)\n' "$host" ;;
+        7) printf '%s (connection refused or blocked)\n' "$host" ;;
+        28) printf '%s (timed out)\n' "$host" ;;
+        35|51|58|60) printf '%s (TLS failed; a proxy may be inspecting traffic)\n' "$host" ;;
+        *) printf '%s (curl exit %s)\n' "$host" "$rc" ;;
+      esac
+    else
+      # wget exits 8 for an HTTP error answer, which still means reachable.
+      wget -q --spider --https-only --timeout=8 --tries=1 "https://${host}/" >/dev/null 2>&1 || rc=$?
+      [[ $rc -eq 0 || $rc -eq 8 ]] || printf '%s (wget exit %s)\n' "$host" "$rc"
+    fi
+  done
+}
+
+# A proxy URL can carry a password; never print it.
+redact_url_credentials() { printf '%s' "$1" | sed -E 's#//[^/@]*@#//***@#'; }
 
 run_installer_step() {
   local key="$1" critical="$2" fn="$3" rc

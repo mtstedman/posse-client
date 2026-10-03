@@ -34,6 +34,7 @@ import {
   nativeBinaryIsKeyGated,
   nativeBinaryIsWorkerCapable,
   nativeBinaryPlatform,
+  nativeMethodIsLocalPolicy,
   nativeWorkerMaxRequestBytes,
 } from "../../../catalog/binary.js";
 import { osKey, archKey } from "../../platform/functions/native-platform.js";
@@ -173,6 +174,9 @@ function isUnsupportedNativeVersionError(error) {
  * @property {{workItemId:string,grantRevision:number,grantJti:string}} [workItemContext]
  * @property {(event: unknown) => void} [onProgress]
  * @property {boolean} [retireWorkerOnAbort]
+ * @property {boolean} [localPolicy] Run a catalog local-policy method
+ *   (NATIVE_LOCAL_POLICY_METHODS) per call without minting a pulse. Async
+ *   `run` only; any other method asking for it is refused without a spawn.
  */
 
 /**
@@ -1032,6 +1036,7 @@ export class NativeBinary {
    * @returns {Promise<RunResult>}
    */
   run(subcommand, args = [], opts = {}) {
+    if (opts.localPolicy === true) return this.#runLocalPolicyCall(subcommand, args, opts);
     // WI-scoped mutation must use its own per-call pulse. A persistent worker
     // keeps route grants by route name and cannot safely distinguish two WIs.
     if (opts.workItemContext && opts.requiredRoute === GIT_MUTATE_ROUTE) {
@@ -1126,6 +1131,60 @@ export class NativeBinary {
   }
 
   /**
+   * Per-call spawn for a catalog local-policy method: a pure function the
+   * binary answers before any authenticated route. No pulse is minted or
+   * attached, caller-supplied auth fields are stripped, and the child gets no
+   * key or heartbeat URL. Anything that is not a native envelope for an
+   * allowlisted method of this binary is refused without spawning, so the
+   * opt-in cannot unlock a pulse-gated method.
+   *
+   * @param {string | null} subcommand
+   * @param {string[]} args
+   * @param {NativeRunOptions} opts
+   * @returns {Promise<RunResult>}
+   */
+  #runLocalPolicyCall(subcommand, args, opts) {
+    const method = String(subcommand || "");
+    if (!nativeMethodIsLocalPolicy(this.name, method) || (Array.isArray(args) && args.length > 0)) {
+      return Promise.resolve(this.#localPolicyRefusedResult(`${method || "<none>"} is not a local-policy method of ${this.name}`));
+    }
+    const parsed = this.#parseNativeProtocolInput(opts.input);
+    if (!parsed.protocol || parsed.request?.method !== method) {
+      return Promise.resolve(this.#localPolicyRefusedResult(`${method} needs a native envelope for that method`));
+    }
+    const bin = this.resolvePath();
+    if (!bin) return Promise.resolve(this.#unavailableResult());
+    if (opts.signal?.aborted) {
+      return Promise.resolve(this.#finishResult({
+        stdout: "",
+        stderr: "",
+        code: null,
+        signal: null,
+        error: signalAbortError(opts.signal),
+      }, opts.json === true));
+    }
+    const env = { ...(opts.env || buildRuntimeEnv()) };
+    delete env.POSSE_KEY;
+    delete env.POSSE_HEARTBEAT_URL;
+    const input = this.#encodeNativeRequest(/** @type {Record<string, unknown>} */ (parsed.request), parsed.wasBuffer);
+    return this.#spawnPerCall(bin, [method], opts, input, env);
+  }
+
+  /** @param {string} detail @returns {RunResult} */
+  #localPolicyRefusedResult(detail) {
+    const error = /** @type {NativeBinaryError} */ (new Error(`native local-policy call refused: ${detail}`));
+    error.code = "POSSE_NATIVE_LOCAL_POLICY_REFUSED";
+    return {
+      ok: false,
+      code: null,
+      signal: null,
+      stdout: "",
+      stderr: error.message,
+      error,
+    };
+  }
+
+  /**
    * The raw per-call spawn: pipe `input`, capture stdout/stderr, honor
    * timeout/abort. Auth decisions happen before this point.
    *
@@ -1133,14 +1192,15 @@ export class NativeBinary {
    * @param {string[]} fullArgs
    * @param {{ input?: Buffer | string, json?: boolean, cwd?: string, env?: NodeJS.ProcessEnv, timeoutMs?: number, signal?: AbortSignal, maxBuffer?: number }} opts
    * @param {Buffer | string | undefined} input
+   * @param {NodeJS.ProcessEnv | null} [childEnv] Prepared child env (local-policy calls); default derives it from `opts.env`.
    * @returns {Promise<RunResult>}
    */
-  #spawnPerCall(bin, fullArgs, opts, input) {
+  #spawnPerCall(bin, fullArgs, opts, input, childEnv = null) {
     return new Promise((resolve) => {
       let settled = false;
       const child = this._spawn(bin, fullArgs, {
         cwd: opts.cwd || process.cwd(),
-        env: this.#childEnv(opts.env),
+        env: childEnv || this.#childEnv(opts.env),
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
       });

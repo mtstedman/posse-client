@@ -1075,6 +1075,44 @@ function spawnPlanAfterResearchInternal(worker, researchJob, output, _options = 
 }
 
 /**
+ * Continue a plan that stopped at human_input gates while repository work is
+ * still owed: queue the next plan behind every gate, as research does after a
+ * clarification. The planner reads the answers from the gates' response
+ * artifacts (HUMAN ANSWERS) once the gates succeed.
+ */
+export function spawnPlanAfterHumanInputDeferral(worker, planJob, gateJobIds, { deferralRound = 1 } = {}) {
+  const gateIds = [...new Set((Array.isArray(gateJobIds) ? gateJobIds : [])
+    .map(Number)
+    .filter((id) => Number.isSafeInteger(id) && id > 0))];
+  if (gateIds.length === 0) return null;
+  const wi = getWorkItem(planJob.work_item_id);
+  const planPayload = parsePayload(worker, planJob);
+  const budget = getResearchBudget(wi, planPayload);
+  const wiTitle = String(wi?.title || planJob.title || "").slice(0, 60);
+  const dispatchPolicy = readPlannerDispatchPolicy();
+  return runInTransaction(() => {
+    const followUp = createContinuationJob({
+      work_item_id: planJob.work_item_id,
+      job_type: "plan",
+      title: planPayload.replan_reason ? `Replan: ${wiTitle}` : `Plan: ${wiTitle}`,
+      parent_job_id: gateIds[gateIds.length - 1],
+      priority: planJob.priority,
+      ...(dispatchPolicy.enabled
+        ? { model_tier: dispatchPolicy.plannerModelTier, reasoning_effort: dispatchPolicy.plannerReasoningEffort }
+        : roleExecutionForBudget("plan", budget)),
+      payload_json: JSON.stringify({
+        ...replanPayloadFields(planPayload),
+        deepthink_budget: budget,
+        deepthink: isResearchBudgetDeep(budget),
+        _planner_human_input_deferral_round: deferralRound,
+      }),
+    });
+    for (const gateId of gateIds) addDependency(followUp.id, gateId, "hard");
+    return followUp;
+  });
+}
+
+/**
  * Extract individual questions from researcher output containing QUESTIONS_FOR_HUMAN.
  * Parses the numbered question format: "1. [QUESTION_ID: Q1] ... Question: ..."
  */

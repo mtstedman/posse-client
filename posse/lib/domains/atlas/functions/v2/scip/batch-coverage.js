@@ -22,7 +22,12 @@ export function scipBatchCoveragePath(scipDir) {
  * receipt costs one re-derivation, while trusting one would let a document
  * that failed staging or intake pass as examined.
  *
- * @param {{ scipDir: string, head: string, filesetHash: string, documents: Array<{ repo_rel_path: string, content_hash: string, source_languages?: string[] }>, unavailableDocuments?: Array<{ repo_rel_path: string, content_hash?: string, reason?: string, source_languages?: string[] }> }} input
+ * `indexer_identities` names the indexer environment (by indexer id) whose
+ * output the documents came from. A receipt without one, or naming a
+ * different environment than the current plan's, does not prove coverage
+ * for that indexer's languages.
+ *
+ * @param {{ scipDir: string, head: string, filesetHash: string, documents: Array<{ repo_rel_path: string, content_hash: string, source_languages?: string[] }>, unavailableDocuments?: Array<{ repo_rel_path: string, content_hash?: string, reason?: string, source_languages?: string[] }>, indexerIdentities?: Record<string, string> | null }} input
  */
 export async function writeScipBatchCoverage(input) {
   const outputPath = scipBatchCoveragePath(input.scipDir);
@@ -41,6 +46,7 @@ export async function writeScipBatchCoverage(input) {
     status: "complete",
     head: String(input.head || "").trim().toLowerCase(),
     fileset_hash: String(input.filesetHash || ""),
+    indexer_identities: normalizedIndexerIdentities(input.indexerIdentities),
     completed_at: new Date().toISOString(),
     documents,
     // A path can never be both. An acknowledged row is the stronger claim and
@@ -85,6 +91,21 @@ export async function readScipBatchCoverage(scipDir) {
   } catch {
     return null;
   }
+}
+
+/**
+ * @param {unknown} value
+ * @returns {Record<string, string>}
+ */
+function normalizedIndexerIdentities(value) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  if (!value || typeof value !== "object") return out;
+  for (const key of Object.keys(value).sort()) {
+    const identity = String(/** @type {Record<string, unknown>} */ (value)[key] || "").trim();
+    if (key && identity) out[key] = identity;
+  }
+  return out;
 }
 
 function normalizedSourceLanguages(values) {

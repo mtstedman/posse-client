@@ -6403,10 +6403,11 @@ export class PersistentMcpOwner {
         if (writtenTool.suite === "tools") {
           jobWriteActivity.noteToolCall(session?.bootConfig?.jobId, writtenTool.name);
         }
-        void this._scheduleAtlasWriteRefresh({ message, session, response }).catch((err) => {
+        const refreshTelemetryContext = attachTelemetryContext(session, this.bootId);
+        void this._scheduleAtlasWriteRefresh({ message, session, response, telemetryContext: refreshTelemetryContext }).catch((err) => {
           appendRunTelemetry("diagnostics", {
             kind: "mcp.owner.atlas_write_refresh",
-            ...attachTelemetryContext(session, this.bootId),
+            ...refreshTelemetryContext,
             outcome: "error",
             duration_ms: 0,
             error: ownerErrorSummary(err),
@@ -7779,13 +7780,14 @@ export class PersistentMcpOwner {
     }
   }
 
-  async _scheduleAtlasWriteRefresh({ message, session, response }) {
+  async _scheduleAtlasWriteRefresh({ message, session, response, telemetryContext = null }) {
     const toolName = String(message?.params?.name || "");
     const toolArgs = message?.params?.arguments || {};
     const requested = requestedToolPolicyName(toolName, toolArgs);
     if (requested.suite !== "tools") return null;
     if (!ATLAS_MUTATION_PATH_FIELDS[requested.name]) return null;
     const startedAt = Date.now();
+    const refreshTelemetryContext = telemetryContext || attachTelemetryContext(session, this.bootId);
     const executor = getSharedAtlasToolExecutor();
     const scheduled = await executor.scheduleDeterministicWriteRefresh({
       toolName: requested.name,
@@ -7802,7 +7804,7 @@ export class PersistentMcpOwner {
     });
     appendRunTelemetry("diagnostics", {
       kind: "mcp.owner.atlas_write_refresh",
-      ...attachTelemetryContext(session, this.bootId),
+      ...refreshTelemetryContext,
       outcome: scheduled ? (scheduled.ok === false ? "tool_error" : "ok") : "skipped",
       tool_name: requested.name,
       path: typeof toolArgs?.path === "string" ? capString(toolArgs.path, 240) : null,

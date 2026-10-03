@@ -45,11 +45,12 @@ full install fails clearly if no Posse key is available; `--setup-only` /
 
 | Requirement | Details |
 |---|---|
-| Operating system | Windows with PowerShell 5.1/7+, or glibc Linux with Bash 4.4+. Start with Debian/Ubuntu for containers. Alpine/musl is unsupported. |
+| Operating system | Windows with PowerShell 5.1/7+, or Linux with glibc 2.34+ and Bash 4.4+ (RHEL/Alma/Rocky 9+, Amazon Linux 2023, Ubuntu 22.04+, Debian 12+); Posse's native binaries and SQLite driver cannot load on older glibc. Start with Debian/Ubuntu for containers. Alpine/musl is unsupported. |
 | Node.js | Node **24+ and npm**. Both installers automatically provision them when missing or unusable. |
 | Writable storage | A writable home directory, Posse checkout, and target Git repository. Runtime tools and model downloads need additional disk space. |
 | Network | HTTPS access to GitHub, Node/npm registries, your distro repositories, Python/indexer sources, Posse services, and your chosen provider. Model downloads can take much longer than the core install. |
-| System tools | Git, Python 3.9+, optional GitHub CLI, and language/build tools. Linux installs missing packages using root or sudo; Windows uses winget for host tools. |
+| System tools | Git, Python 3.9+, optional GitHub CLI, and language/build tools. Linux installs missing packages using root or sudo; Windows uses winget for host tools, per user only. Media tools (Tesseract OCR, ImageMagick, FFmpeg) are opt-in: `--with-media-tools` / `-WithMediaTools`, or the setup wizard's checkbox. |
+| Disk | About 3 GB free for a full install (more with Rust). The installer stops before installing anything below 1 GB and warns below 3 GB. |
 | Git identity | Configure `git config --global user.name "Your Name"` and `git config --global user.email "you@example.com"` before running jobs that commit. |
 
 Node provisioning is separate from helper-tool installation. `--skip-host-tools`
@@ -75,6 +76,11 @@ The installer installs dependencies, wires the `posse` command, captures keys,
 and runs `posse doctor` to provision Python/SCIP environments, authenticated
 native binaries, and the embedding model. It then checks that Posse boots.
 A failed required step produces a nonzero exit code and a log location.
+If only the embedding model fails to download (after one retry), the install
+finishes with a warning: Posse works with lexical code search until
+`posse doctor` downloads the model. npm dependencies install from the
+checkout's `package-lock.json`, so every install gets the tested versions.
+The log ends with a `steps:` line giving each step's duration.
 
 A setup-only image build installs the core files and command but does **not**
 claim that the authenticated runtime is ready. Complete installation under the

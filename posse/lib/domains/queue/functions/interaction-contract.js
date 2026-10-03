@@ -70,6 +70,8 @@ const REVIEW_KIND_BY_TYPE = new Map([
   ["oneshot_dead_letter_recovery", "dead_letter_recovery"],
   ["artifact_routing_admin", "artifact_routing_admin"],
   ["shared_trunk_provenance", "shared_trunk_provenance"],
+  ["work_item_failure_disposition", "work_item_failure_disposition"],
+  ["cross_wi_upstream_disposition", "cross_wi_upstream_disposition"],
   ["scope_expansion_request", "file_scope_approval"],
 ]);
 const LEGACY_PIPELINE_HEAD_REVIEW_TYPES = new Set([
@@ -92,6 +94,8 @@ const HANDLER_BY_KIND = new Map([
   ["one_shot_file_scope", "one_shot"],
   ["push_offer", "git_push"],
   ["shared_trunk_provenance", "human_input"],
+  ["work_item_failure_disposition", "human_input"],
+  ["cross_wi_upstream_disposition", "human_input"],
 ]);
 
 const CHOICE_COPY = Object.freeze({
@@ -114,6 +118,10 @@ const CHOICE_COPY = Object.freeze({
   cancel: ["Cancel request", "Stop without creating a continuation job."],
   push: ["Push", "Run the repository-aware canonical push gate."],
   decline: ["Decline", "Close this push offer without pushing."],
+  accept: ["Accept", "Accept the assessed implementation under operator review."],
+  abandon: ["Abandon", "Cancel the work item and discard its branch."],
+  wait: ["Wait", "Keep the merge deferred until its upstream work is recovered."],
+  rebuild: ["Rebuild", "Discard inherited edits and rerun the work item from the target branch."],
 });
 
 function parseJsonObject(value) {
@@ -348,8 +356,8 @@ function nudgeActionResult(baseArgs, {
 }
 
 function choiceDanger(choiceId) {
-  if (["fail", "revert"].includes(choiceId)) return "destructive";
-  if (["reject", "skip", "replan", "cancel", "decline"].includes(choiceId)) return "caution";
+  if (["fail", "revert", "abandon"].includes(choiceId)) return "destructive";
+  if (["reject", "skip", "replan", "cancel", "decline", "rebuild"].includes(choiceId)) return "caution";
   return "normal";
 }
 
@@ -402,7 +410,7 @@ function validChoiceEntries(kind, entries) {
     return ids.slice(0, -2).every((id) => normalizedCandidateId(id));
   }
   const allowed = WORK_ITEM_QUESTION_CHOICE_IDS[kind] || [];
-  if (kind === "dead_letter_recovery") {
+  if (["dead_letter_recovery", "work_item_failure_disposition", "cross_wi_upstream_disposition"].includes(kind)) {
     let previous = -1;
     return ids.every((id) => {
       const index = allowed.indexOf(id);
