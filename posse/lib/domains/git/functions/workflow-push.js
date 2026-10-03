@@ -230,6 +230,9 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       const markerCheck = gitExec([
         "grep",
         "-l",
+        // grep.patternType=fixed in the user's config would otherwise make
+        // these anchored patterns literal strings that never match.
+        "--basic-regexp",
         "-e",
         "^<<<<<<<",
         "-e",

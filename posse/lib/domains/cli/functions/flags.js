@@ -262,6 +262,8 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "--confirmation-code", takesValue: true, category: "filter-value" },
   { name: "--pair-code", takesValue: true, category: "filter-value" },
   { name: "--approve-source-oid", takesValue: true, category: "filter-value" },
+  { name: "--merge-mode", takesValue: true, category: "filter-value" },
+  { name: "--deploy-mode", takesValue: true, category: "filter-value" },
   { name: "--approve-origin-oid", takesValue: true, category: "filter-value" },
 
   // Boolean flags.
@@ -288,6 +290,7 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "--json", takesValue: false, category: "boolean" },
   { name: "--keep-branch", takesValue: false, category: "boolean" },
   { name: "--history-preserving", takesValue: false, category: "boolean" },
+  { name: "--unattended", takesValue: false, category: "boolean" },
   { name: "--stdin-value", takesValue: false, category: "boolean" },
   { name: "--non-interactive", takesValue: false, category: "boolean" },
   { name: "--no-tui", takesValue: false, category: "boolean" },

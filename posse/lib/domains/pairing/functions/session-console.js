@@ -6,7 +6,7 @@ import readline from "node:readline";
 // countersign can never be read as a command (or the reverse).
 const COUNTERSIGN_PATTERN = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$/u;
 
-const HOST_ONLY_COMMANDS = new Set(["members", "m", "who", "close", "kick"]);
+const HOST_ONLY_COMMANDS = new Set(["members", "m", "who", "close", "kick", "merge", "deploy", "auto"]);
 // Disconnect words. None is four pairing-alphabet symbols (I, L are absent).
 const LEAVE_COMMANDS = new Set(["leave", "quit", "exit", "disconnect"]);
 
@@ -27,6 +27,9 @@ const HOST_HELP = Object.freeze([
   ...SHARED_HELP,
   "members       list members and their states",
   "kick <id>     remove a member (id prefix from `members`)",
+  "merge         squash the team's work into your branch; the session keeps running",
+  "deploy        push your branch to origin (merging first); the session keeps running",
+  "auto merge|deploy on|off   trusted teams: run it as work lands, without asking",
   "close         end the session for everyone; you approve its work before it is published",
 ]);
 
@@ -81,10 +84,18 @@ export function parseSessionConsoleLine(line, { role = "host" } = {}) {
       : { kind: "leave" };
   }
   if (!host && (HOST_ONLY_COMMANDS.has(command) || (rest.length === 0 && COUNTERSIGN_PATTERN.test(word.toUpperCase())))) {
-    return { kind: "invalid", message: "Only the session host can admit, list, remove members or close the session." };
+    return { kind: "invalid", message: "Only the session host can admit, list or remove members, merge, deploy or close the session." };
   }
   if (["members", "m", "who"].includes(command)) return { kind: "members" };
   if (command === "close") return { kind: "close" };
+  if ((command === "merge" || command === "deploy") && rest.length === 0) return { kind: command };
+  if (command === "auto") {
+    if (rest.length === 0) return { kind: "auto" };
+    const [which, value] = rest.map((word) => word.toLowerCase());
+    return rest.length === 2 && ["merge", "deploy"].includes(which) && ["on", "off"].includes(value)
+      ? { kind: "auto", which, value }
+      : { kind: "invalid", message: "Usage: auto <merge|deploy> <on|off>" };
+  }
   if (command === "kick") {
     return rest[0] ? { kind: "kick", id: rest[0] } : { kind: "invalid", message: "Usage: kick <member id>" };
   }

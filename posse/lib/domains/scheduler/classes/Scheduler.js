@@ -168,6 +168,7 @@ import {
   createSessionJobRouter,
   sessionOriginatorConcurrencyBlocked,
 } from "../../queue/functions/session-job-router.js";
+import { tickSessionAutoPublish } from "../../pairing/functions/session-auto-publish.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { pairingPeerTrunkHints } from "../../pairing/functions/work-items.js";
 import {
@@ -2036,6 +2037,15 @@ export class Scheduler {
         if (trunkPoll?.advanced && onTeamSubmissionChange) {
           this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, { workItemIds: [] });
         }
+        // Trusted-team auto merge/deploy runs from whichever process owns the
+        // session; while posse go owns it, that is this loop. The tick starts
+        // a child and returns, so a long push never holds up dispatch.
+        void tickSessionAutoPublish({
+          projectDir: this.projectDir,
+          sessionActive: sessionPoll?.status?.status === "active" && !sessionPoll?.unavailable
+            && !sessionPoll?.requestsDrain && !sessionPoll?.fatal,
+          report: (text, { ok, action }) => this._log(`[auto ${action}] ${text}`, ok ? "green" : "yellow"),
+        });
         // Member joins/leaves and sync-state transitions for the run feed,
         // read after this lap's heartbeat and fetch.
         for (const event of sessionEventFeed?.collect({ sessionPoll }) || []) {

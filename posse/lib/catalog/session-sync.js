@@ -106,6 +106,45 @@ export const SESSION_SYNC_POLICY = Object.freeze({
 
 // Full SHA-1 or SHA-256 object names, lowercase: the only trunk-head spelling
 // that crosses the relay in either direction.
+// In-session merge and deploy (`posse session merge|deploy`): by default the
+// host approves each run; a trusted team can let Posse run either one when
+// team work lands on the trunk.
+export const SESSION_PUBLISH_MODES = Object.freeze({
+  ASK: "ask",
+  AUTO: "auto",
+});
+
+export const SESSION_PUBLISH_ACTIONS = Object.freeze({
+  MERGE: "merge",
+  DEPLOY: "deploy",
+});
+
+// Set on every posse child the live session owner starts (the console's
+// add/go/merge/deploy, auto runs) to the owner's pid. Such a child never runs
+// crash recovery on its own parent's session: during a relay outage the
+// owner's heartbeat goes stale while the owner is plainly still running.
+export const SESSION_OWNER_CHILD_ENV = "POSSE_SESSION_OWNER_PID";
+
+export const SESSION_AUTO_PUBLISH_POLICY = Object.freeze({
+  // A burst of work-item merges becomes one run: act once the trunk has been
+  // quiet this long, but never wait longer than MAX_WAIT_MS behind a steady
+  // stream of merges.
+  QUIET_MS: 30_000,
+  MAX_WAIT_MS: 5 * 60_000,
+  // How long one unattended run may take before the owner stops waiting.
+  RUN_TIMEOUT_MS: 20 * 60_000,
+  // Auto runs start only while the owner's own heartbeat is this fresh: a
+  // session whose relay link is down is not one to publish from.
+  OWNER_FRESH_MS: 60_000,
+  // Failures that may clear by themselves back off (doubling from the base);
+  // this many in a row pause the step until the host turns it back on.
+  RETRY_BASE_MS: 60_000,
+  RETRY_MAX_MS: 30 * 60_000,
+  MAX_CONSECUTIVE_FAILURES: 6,
+  // The owner looks for due work at most this often.
+  TICK_MIN_INTERVAL_MS: 5_000,
+});
+
 export const TRUNK_HEAD_PATTERN = /^[0-9a-f]{40}([0-9a-f]{24})?$/u;
 
 export const SESSION_SYNC_TEXT_LIMITS = Object.freeze({

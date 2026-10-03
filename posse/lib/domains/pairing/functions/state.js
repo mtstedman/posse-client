@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { getDb } from "../../../shared/storage/functions/index.js";
+import { SESSION_PUBLISH_MODES } from "../../../catalog/session-sync.js";
 import { runImmediateTransaction } from "../../queue/functions/common.js";
 
 const LIVE_PHASES_SQL = "'enrolling','pending','active','leaving','restore_blocked'";
@@ -176,6 +177,45 @@ export function markPairingPhase(id, phase, lastError = null, db = getDb()) {
     `).run(phase, lastError, phase, phase, String(id));
     return getPairingState(id, db);
   });
+}
+
+const SESSION_PUBLISH_MODE_VALUES = new Set(Object.values(SESSION_PUBLISH_MODES));
+const UNSET = Symbol("unset");
+
+/**
+ * In-session merge/deploy settings and results. Touches only those columns:
+ * `updated_at` is the session owner's heartbeat, so a setting changed from
+ * another terminal must not make a dead owner look alive. A value left
+ * undefined keeps the column; null clears it.
+ */
+export function updateSessionPublishSettings(id, {
+  mergeMode = UNSET,
+  deployMode = UNSET,
+  autoPausedReason = UNSET,
+  lastMergeOid = UNSET,
+  lastDeployOid = UNSET,
+} = {}, db = getDb()) {
+  const updates = [];
+  const values = [];
+  for (const [column, value] of [["merge_mode", mergeMode], ["deploy_mode", deployMode]]) {
+    if (value === UNSET || value === undefined) continue;
+    if (!SESSION_PUBLISH_MODE_VALUES.has(value)) {
+      throw Object.assign(new Error(`Unknown session ${column.replace("_", " ")}: ${value}`), { code: "session_publish_mode_invalid" });
+    }
+    updates.push(`${column} = ?`);
+    values.push(value);
+  }
+  for (const [column, value] of [
+    ["auto_paused_reason", autoPausedReason], ["last_merge_oid", lastMergeOid], ["last_deploy_oid", lastDeployOid],
+  ]) {
+    if (value === UNSET || value === undefined) continue;
+    updates.push(`${column} = ?`);
+    values.push(value === null ? null : String(value));
+  }
+  if (updates.length > 0) {
+    db.prepare(`UPDATE pairing_sessions SET ${updates.join(", ")} WHERE id = ?`).run(...values, String(id));
+  }
+  return getPairingState(id, db);
 }
 
 export function pairingProcessShouldStop(id, db = getDb()) {

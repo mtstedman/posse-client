@@ -2761,7 +2761,7 @@ const COMMAND_USAGE = {
   },
   session: () => {
     console.log(`\n  Usage:`);
-    console.log(`    posse session host [--remote origin] [--branch posse/pair-name]`);
+    console.log(`    posse session host [--remote origin] [--branch posse/pair-name] [--merge-mode ask|auto] [--deploy-mode ask|auto]`);
     console.log(`    posse session join <CODE|posse://session?...> [--here]`);
     console.log(`    posse session admit <COUNTERSIGN>`);
     console.log(`    posse session members|pending`);
@@ -2773,13 +2773,17 @@ const COMMAND_USAGE = {
     console.log(`    posse session status`);
     console.log(`    posse session hold [reason]`);
     console.log(`    posse session resume`);
+    console.log(`    posse session merge|deploy`);
+    console.log(`    posse session auto [merge|deploy on|off]`);
     console.log(`    posse session leave|close [--keep-branch|--history-preserving]`);
     console.log(`    posse session integrate [--approve-source-oid SHA --approve-origin-oid SHA]`);
     console.log(`    posse session abandon-integration`);
     console.log(`\n  Opens or joins a shared Posse collaboration session.`);
     console.log(`  Joiners wait for the host to confirm their four-character countersign.`);
     console.log(`  A join typed outside an empty folder runs in ~/posse-sessions/<CODE>; --here joins in this clone instead.`);
-    console.log(`  hold keeps this checkout where it is (fetches continue) until resume or 30 minutes pass.\n`);
+    console.log(`  hold keeps this checkout where it is (fetches continue) until resume or 30 minutes pass.`);
+    console.log(`  merge squashes the team's work into your branch and deploy pushes it to origin; the session keeps running.`);
+    console.log(`  Each asks for your approval unless you turn it on with auto (trusted teams).\n`);
   },
   unpair: () => {
     console.log(`\n  Usage: posse unpair [--json]`);
@@ -2831,7 +2835,7 @@ export async function main() {
     const pairArgs = process.argv.slice(3);
     for (let index = 0; index < pairArgs.length; index += 1) {
       const arg = String(pairArgs[index] || "");
-      if (arg === "--remote" || arg === "--branch") {
+      if (["--remote", "--branch", "--merge-mode", "--deploy-mode"].includes(arg)) {
         index += 1;
         continue;
       }
@@ -2841,7 +2845,7 @@ export async function main() {
     }
   }
   const commandPolicy = ["pair", "session"].includes(command)
-      && ["leave", "close", "status", "admit", "members", "pending", "kick", "invite", "scope", "policy", "hold", "resume"].includes(pairSubcommand)
+      && ["leave", "close", "status", "admit", "members", "pending", "kick", "invite", "scope", "policy", "hold", "resume", "auto"].includes(pairSubcommand)
     ? { ...baseCommandPolicy, requiresNativeGit: false }
     : baseCommandPolicy;
   const informationalOnly = commandPolicy.readOnly === true || helpFlagRequested();

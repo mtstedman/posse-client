@@ -871,7 +871,10 @@ function prePushVerifyFailure(verifyCmd, err) {
   };
 }
 
-function prePushGate({ cwd, nativeParity = {} }) {
+// `upstream` names the commit the push starts from when HEAD tracks nothing
+// (a detached candidate): the .env and secret scans then cover upstream..HEAD
+// exactly as they would for a tracked branch, instead of being skipped.
+function prePushGate({ cwd, nativeParity = {}, upstream: explicitUpstream = null }) {
   const riskyBlock = riskyPushConfigBlock(snapshotPublishingPushConfigs(cwd, nativeParity));
   if (riskyBlock) return riskyBlock;
 
@@ -886,12 +889,14 @@ function prePushGate({ cwd, nativeParity = {} }) {
   const dirtyBlock = dirtyStatusBlock(status);
   if (dirtyBlock) return dirtyBlock;
 
-  let upstream = "";
-  try {
-    upstream = gitExec(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd, { nativeParity }).trim();
-  } catch (err) {
-    // no upstream is allowed; infra failures are not
-    if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
+  let upstream = explicitUpstream ? String(explicitUpstream) : "";
+  if (!upstream) {
+    try {
+      upstream = gitExec(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd, { nativeParity }).trim();
+    } catch (err) {
+      // no upstream is allowed; infra failures are not
+      if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
+    }
   }
 
   if (upstream) {
@@ -927,7 +932,7 @@ function prePushGate({ cwd, nativeParity = {} }) {
   return { ok: true, output: "" };
 }
 
-async function prePushGateAsync({ cwd, nativeParity = {} }) {
+async function prePushGateAsync({ cwd, nativeParity = {}, upstream: explicitUpstream = null }) {
   const riskyBlock = riskyPushConfigBlock(await snapshotPublishingPushConfigsAsync(cwd, nativeParity));
   if (riskyBlock) return riskyBlock;
 
@@ -942,12 +947,14 @@ async function prePushGateAsync({ cwd, nativeParity = {} }) {
   const dirtyBlock = dirtyStatusBlock(status);
   if (dirtyBlock) return dirtyBlock;
 
-  let upstream = "";
-  try {
-    upstream = (await gitExecAsync(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd, { nativeParity })).trim();
-  } catch (err) {
-    // no upstream is allowed; infra failures are not
-    if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
+  let upstream = explicitUpstream ? String(explicitUpstream) : "";
+  if (!upstream) {
+    try {
+      upstream = (await gitExecAsync(["rev-parse", "--abbrev-ref", "@{upstream}"], cwd, { nativeParity })).trim();
+    } catch (err) {
+      // no upstream is allowed; infra failures are not
+      if (!isGitCommandFailure(err)) return gitInfraBlockResult("Pre-push gate", err);
+    }
   }
 
   if (upstream) {

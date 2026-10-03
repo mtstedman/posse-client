@@ -16,6 +16,12 @@ import {
   validateBranchName,
   validateRemoteName,
 } from "./git.js";
+import {
+  buildSessionSquash,
+  findSessionSquash,
+  planSessionOnto,
+  resolveSessionSquashBase,
+} from "./session-publish.js";
 
 const PROTOCOL = "posse.pairing_promotion.v2";
 const LEGACY_PROTOCOL = "posse.pairing_promotion.v1";
@@ -109,6 +115,11 @@ export function beginPairingPromotion(state, {
     target_branch: validateBranchName(projectDir, state?.original_branch),
     target_ssh_command: state?.original_ssh_command || null,
     temporary_repository: state?.temporary_repository || null,
+    // In-session merges (posse session merge|deploy): close squashes only what
+    // the trunk gained since the last one, from the session's starting point
+    // when none reached the target.
+    original_head: state?.original_head || null,
+    last_deploy_oid: state?.last_deploy_oid || null,
     strategy,
     // Everything that leaves the session for the host's real branch waits for
     // the host, whatever the strategy or who wrote it: a close (or Ctrl+C, or
@@ -153,8 +164,11 @@ export function describePairingPromotion(projectDir, journal = readPairingPromot
     || !SHA_RE.test(String(journal.target_base_sha || ""))) return null;
   const base = journal.target_base_sha;
   const source = SHA_RE.test(String(journal.source_sha || "")) ? journal.source_sha : null;
+  // After in-session merges the trunk is not part of origin's history; its
+  // commits since the last deploy (or the session's start) are what leave.
+  const from = SHA_RE.test(String(journal.summary_from_sha || "")) ? journal.summary_from_sha : base;
   const lines = (args) => exec(args, projectDir, { timeoutMs: 30_000 }).split(/\r?\n/u).filter((line) => line.trim());
-  const log = source ? lines(["log", "--no-merges", "--format=%h%x1f%an%x1f%s", `${base}..${source}`]) : [];
+  const log = source ? lines(["log", "--no-merges", "--format=%h%x1f%an%x1f%s", `${from}..${source}`]) : [];
   const commits = log.map((line) => {
     const [sha = "", author = "", subject = ""] = line.split("\x1f");
     return { sha, author: author.replace(CONTROL_CHARACTERS, ""), subject: subject.replace(CONTROL_CHARACTERS, "") };
@@ -175,6 +189,7 @@ export function describePairingPromotion(projectDir, journal = readPairingPromot
     files: stat.slice(0, SUMMARY_MAX_FILES).map((line) => line.trim()),
     moreFiles: Math.max(0, stat.length - SUMMARY_MAX_FILES),
     changeSummary,
+    ridingMerges: Number(journal.riding_merges) || 0,
   };
 }
 
@@ -308,6 +323,12 @@ async function promoteFastForwardLocked(projectDir, initialJournal, {
   if (source.moved) onProgress(`${sourceBranch} moved after close froze it; integrating the frozen ${source.sha.slice(0, 8)}`);
   let target = fetchTargetBranch(projectDir, journal, remote, targetBranch, exec);
   const frozen = SHA_RE.test(String(journal.candidate_sha || "")) ? journal.candidate_sha : null;
+  if (!frozen && await sessionMergedMidSession(projectDir, journal, {
+    current: refSha(projectDir, targetBranch, exec), origin: target.sha, exec,
+  })) {
+    throw promotionError("pairing_promotion_history_after_merges",
+      "This session merged its work mid-session, so its history cannot be published as is; integrate it as a squash instead");
+  }
   if (!frozen && isAncestor(projectDir, source.sha, target.sha, exec)) {
     clearPairingPromotionJournal();
     return { ok: true, skipped: "already_up_to_date", sourceBranch, targetBranch,
@@ -420,6 +441,87 @@ async function promoteFastForwardLocked(projectDir, initialJournal, {
   return publishedFastForward(projectDir, journal, remote, targetBranch, target, { exec, onProgress });
 }
 
+function asyncGit(exec) {
+  return async (args, cwd, options) => exec(args, cwd, options);
+}
+
+/** True when this session merged into the local target or origin mid-session. */
+async function sessionMergedMidSession(projectDir, journal, { current, origin, exec }) {
+  if (journal.last_deploy_oid) return true;
+  const sessionId = String(journal.session_id || "");
+  if (!/^[A-Za-z0-9-]{1,64}$/u.test(sessionId)) return false;
+  const run = asyncGit(exec);
+  for (const ref of [current, origin]) {
+    if (ref && await findSessionSquash(projectDir, ref, sessionId, { exec: run, since: journal.original_head })) return true;
+  }
+  return false;
+}
+
+/**
+ * Close's candidate after in-session merges: the trunk's work since the last
+ * merge (by the trailer rule merge and deploy use), on top of whatever of the
+ * session's merges origin lacks, so one publication carries all of it. The
+ * checkout is switched to the target and reset to the candidate, as today, so
+ * the push gate checks exactly what is pushed.
+ */
+async function buildCloseAfterSessionMerges(projectDir, journal, {
+  current, target, source, candidate, targetBranch, exec,
+}) {
+  const run = asyncGit(exec);
+  const sessionId = String(journal.session_id || "");
+  let plan;
+  try {
+    plan = await planSessionOnto(projectDir, {
+      localSha: current, originSha: target.sha, sessionId, targetBranch, exec: run,
+    });
+  } catch (error) {
+    if (error?.code !== "session_publish_target_foreign") throw error;
+    throw promotionError("pairing_promotion_target_diverged", error.message);
+  }
+  const since = journal.original_head;
+  if (journal.last_deploy_oid && !(await findSessionSquash(projectDir, target.sha, sessionId, { exec: run, since }))) {
+    throw promotionError("pairing_promotion_deploy_vanished",
+      `Origin no longer holds this session's deploy ${String(journal.last_deploy_oid).slice(0, 8)} (history was rewritten); `
+        + "integrate the session branch by hand");
+  }
+  const { base } = await resolveSessionSquashBase(projectDir, {
+    onto: plan.onto, trunk: source.sha, sessionId, originalHead: journal.original_head, exec: run,
+  });
+  let built;
+  try {
+    built = await buildSessionSquash(projectDir, { onto: plan.onto, trunk: source.sha, base, sessionId, exec: run });
+  } catch (error) {
+    if (error?.code !== "session_publish_conflict") throw error;
+    throw Object.assign(promotionError("pairing_promotion_conflict", error.message), { paths: error.paths });
+  }
+  const next = built.empty ? plan.onto : built.commit;
+  if (current && current !== next && !isAncestor(projectDir, current, next, exec)) {
+    // Undeployed merges origin moved under are replaced; keep the old tip
+    // apart from the candidate ref, which is written next.
+    exec(["update-ref", `refs/posse/session-merges/${sessionId}`, current], projectDir, { timeoutMs: 5_000 });
+  }
+  if (next === target.sha) {
+    // Nothing beyond origin. A local target left on merges whose content
+    // reached origin another way follows origin, so the next `session host`
+    // does not refuse it.
+    if (current && current !== target.sha && plan.relation === "diverged") {
+      exec(["switch", targetBranch], projectDir);
+      exec(["reset", "--hard", target.sha], projectDir);
+    }
+    return { skipped: true };
+  }
+  exec(["switch", targetBranch], projectDir);
+  exec(["reset", "--hard", next], projectDir);
+  const deployed = await findSessionSquash(projectDir, target.sha, sessionId, { exec: run, since });
+  const squashes = Number(exec(["rev-list", "--count", `${target.sha}..${next}`], projectDir).trim()) || 0;
+  return {
+    candidate: next,
+    summaryFrom: deployed?.trunk || journal.original_head || null,
+    ridingMerges: Math.max(0, squashes - (built.empty ? 0 : 1)),
+    rebuiltFrozen: Boolean(candidate),
+  };
+}
+
 async function promoteLocked(projectDir, initialJournal, {
   exec = git,
   workflowFactory = createPromotionWorkflow,
@@ -483,6 +585,25 @@ async function promoteLocked(projectDir, initialJournal, {
     }
     if (candidate && current === candidate && journal.target_base_sha === target.sha) {
       onProgress(`Retrying preserved pairing promotion ${candidate.slice(0, 8)}`);
+    } else if (await sessionMergedMidSession(projectDir, journal, { current, origin: target.sha, exec })) {
+      onProgress(`Integrating ${sourceBranch} into ${targetBranch} after the session's earlier merges`);
+      const built = await buildCloseAfterSessionMerges(projectDir, journal, {
+        current, target, source, candidate, targetBranch, exec,
+      });
+      if (built.skipped) {
+        clearPairingPromotionJournal();
+        return { ok: true, skipped: "already_up_to_date", sourceBranch, targetBranch,
+          remote, strategy: "squash", mergeHash: target.sha, sourceOid: source.sha };
+      }
+      preserveCandidate(projectDir, journal.session_id, built.candidate, exec);
+      journal = markPairingPromotion(journal, {
+        phase: "candidate",
+        target_base_sha: target.sha,
+        candidate_sha: built.candidate,
+        summary_from_sha: built.summaryFrom,
+        riding_merges: built.ridingMerges,
+        last_error: null,
+      });
     } else {
       if (current !== target.sha) {
         if (current && isAncestor(projectDir, current, target.sha, exec)) {
@@ -523,6 +644,8 @@ async function promoteLocked(projectDir, initialJournal, {
         phase: "candidate",
         target_base_sha: target.sha,
         candidate_sha: nextCandidate,
+        summary_from_sha: null,
+        riding_merges: 0,
         last_error: null,
       });
     }
@@ -573,6 +696,12 @@ async function promoteLocked(projectDir, initialJournal, {
       continue;
     }
 
+    // The lease alone would let a non-fast-forward through; a candidate always
+    // extends the origin it was built on, and anything else drops commits.
+    if (!isAncestor(projectDir, journal.target_base_sha, journal.candidate_sha, exec)) {
+      throw promotionError("pairing_promotion_not_fast_forward",
+        `The candidate ${journal.candidate_sha.slice(0, 8)} does not extend ${remote}/${targetBranch}; publication refused`);
+    }
     onProgress(`Publishing ${targetBranch} with an exact remote lease`);
     if (approvalRequired) journal = markPairingPromotion(journal, {
       phase: "publishing", approved_source_sha: journal.candidate_sha,

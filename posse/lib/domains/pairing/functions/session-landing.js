@@ -123,6 +123,10 @@ export function formatSessionLanding({
   local = { work_items: [], jobs: [] },
   scopeLabel = null,
   observing = false,
+  // Host only: how merge/deploy run ("merge: you approve · deploy: auto"),
+  // and why auto mode paused, if it did.
+  publishLabel = null,
+  publishPaused = null,
 } = {}) {
   const host = role === "host";
   const lines = [];
@@ -146,6 +150,8 @@ export function formatSessionLanding({
     if (pending.length > 0) {
       lines.push(`Waiting to join: ${pending.map(sessionMemberLabel).join(", ")} · type the countersign they read to you`);
     }
+    if (publishLabel) lines.push(`Publishing: ${publishLabel}`);
+    if (publishPaused) lines.push(`Needs you: auto paused (${publishPaused}) · fix it, then auto merge on / auto deploy on`);
   } else if (scopeLabel) {
     lines.push(`You can change: ${scopeLabel}`);
   }
@@ -157,6 +163,6 @@ export function formatSessionLanding({
   const start = queued > 0 ? `go (run your ${plural(queued, "task")})` : "go";
   lines.push(observing
     ? "Next: add <task> · status · Ctrl+C detaches this console (posse go keeps the session)"
-    : `Next: add <task> · ${start} · hold · ${host ? "close (end the session for everyone, integrate its work)" : "leave (disconnect)"} · help`);
+    : `Next: add <task> · ${start} · hold · ${host ? "merge · deploy · close (end the session for everyone, integrate its work)" : "leave (disconnect)"} · help`);
   return lines;
 }

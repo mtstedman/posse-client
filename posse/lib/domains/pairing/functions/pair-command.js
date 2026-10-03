@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { createInterface } from "node:readline/promises";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import {
   SESSION_LINK_OWNERS,
+  SESSION_OWNER_CHILD_ENV,
   SESSION_SYNC_GLYPHS,
   SESSION_SYNC_POLICY,
   SESSION_SYNC_STATES,
@@ -64,6 +64,7 @@ import {
   readoptPairingProcess,
   touchPairingState,
   updatePairingEnrollment,
+  updateSessionPublishSettings,
 } from "./state.js";
 import {
   clearSessionHold,
@@ -72,6 +73,15 @@ import {
   setSessionHold,
   SESSION_HOLD_STATES,
 } from "./session-hold.js";
+import { askToPublishPromotion, printPromotionForApproval } from "./approval-prompt.js";
+import {
+  describeSessionPublishModes,
+  recordUnattendedFailure,
+  runSessionPublish,
+  sessionClosePreflight,
+  setSessionAutoPublish,
+} from "./session-publish-command.js";
+import { tickSessionAutoPublish } from "./session-auto-publish.js";
 import { readSessionLink, recordSessionLinkFailure, recordSessionLinkSuccess } from "./session-link.js";
 import { readSessionSync, sessionFetchOwnerAlive } from "./session-sync.js";
 import { formatSessionLanding, sessionPrompt } from "./session-landing.js";
@@ -261,6 +271,9 @@ export function parsePairArgs(argv = []) {
   let historyPreserving = false;
   let approvedSourceOid = null;
   let approvedOriginOid = null;
+  let mergeMode = null;
+  let deployMode = null;
+  let unattended = false;
   // Join in this clone. The entry script reads it before any folder move
   // (join-folder.js); here it only has to be valid.
   let here = false;
@@ -307,6 +320,25 @@ export function parsePairArgs(argv = []) {
         });
       }
       keepBranch = true;
+      continue;
+    }
+    // Trusted teams: merge/deploy the session's work without asking each time.
+    if (["--merge-mode", "--deploy-mode"].some((name) => arg === name || arg.startsWith(`${name}=`))) {
+      const name = arg.startsWith("--merge-mode") ? "--merge-mode" : "--deploy-mode";
+      const value = String((arg === name ? args[++index] : arg.slice(name.length + 1)) || "").trim().toLowerCase();
+      if (!["ask", "auto"].includes(value)) {
+        throw Object.assign(new Error(`${name} requires ask or auto`), { code: "pairing_option_invalid" });
+      }
+      if ((name === "--merge-mode" ? mergeMode : deployMode) !== null) {
+        throw Object.assign(new Error(`${name} may only be specified once`), { code: "pairing_option_duplicate" });
+      }
+      if (name === "--merge-mode") mergeMode = value;
+      else deployMode = value;
+      continue;
+    }
+    if (arg === "--unattended") {
+      if (unattended) throw Object.assign(new Error("--unattended may only be specified once"), { code: "pairing_option_duplicate" });
+      unattended = true;
       continue;
     }
     if (arg === "--history-preserving") {
@@ -360,6 +392,7 @@ export function parsePairArgs(argv = []) {
     ["integrate", [1, 1]], ["abandon-integration", [1, 1]],
     // A hold reason is free text: every word after `hold` belongs to it.
     ["hold", [1, Number.MAX_SAFE_INTEGER]], ["resume", [1, 1]],
+    ["merge", [1, 1]], ["deploy", [1, 1]], ["auto", [1, 3]],
   ]);
   if (actionLengths.has(first)) {
     const [minimumLength, maximumLength] = actionLengths.get(first);
@@ -376,7 +409,7 @@ export function parsePairArgs(argv = []) {
     }
     parsed = {
       action: first === "close" ? "leave" : first,
-      code: positional[1] && first !== "hold" ? inviteToken(positional[1]) : null,
+      code: positional[1] && !["hold", "auto"].includes(first) ? inviteToken(positional[1]) : null,
       json,
       remote,
       branch,
@@ -389,7 +422,16 @@ export function parsePairArgs(argv = []) {
     if (first === "hold") {
       const reason = positional.slice(1).join(" ").trim();
       if (reason) parsed.reason = reason;
+    } else if (first === "auto") {
+      if (positional.length === 2) {
+        throw Object.assign(new Error("Usage: posse session auto <merge|deploy> <on|off>"), { code: "pairing_argument_required" });
+      }
+      if (positional[1]) parsed.which = positional[1];
+      if (positional[2]) parsed.value = positional[2];
     } else if (positional[2]) parsed.value = positional[2];
+    if (mergeMode) parsed.mergeMode = mergeMode;
+    if (deployMode) parsed.deployMode = deployMode;
+    if (unattended) parsed.unattended = true;
   } else {
     if (positional.length > 1) {
       throw Object.assign(new Error(`Unexpected pairing argument: ${positional[1]}`), {
@@ -416,6 +458,15 @@ export function parsePairArgs(argv = []) {
   }
   if (historyPreserving && first !== "close") {
     throw Object.assign(new Error("--history-preserving is only valid with session close"), {
+      code: "pairing_option_not_allowed",
+    });
+  }
+  if ((mergeMode || deployMode) && first !== "host") {
+    throw Object.assign(new Error(`${mergeMode ? "--merge-mode" : "--deploy-mode"} is only valid with session host; `
+      + "change it in a session with `posse session auto`"), { code: "pairing_option_not_allowed" });
+  }
+  if (unattended && !["merge", "deploy"].includes(first)) {
+    throw Object.assign(new Error("--unattended is only valid with session merge or deploy"), {
       code: "pairing_option_not_allowed",
     });
   }
@@ -822,8 +873,26 @@ function spawnPosseInForeground(args, { cwd } = {}) {
   return spawn(process.execPath, [...process.execArgv, process.argv[1], ...args], {
     cwd,
     stdio: "inherit",
-    env: process.env,
+    env: { ...process.env, [SESSION_OWNER_CHILD_ENV]: String(process.pid) },
   });
+}
+
+/**
+ * True for a posse process the live session owner started itself: it names
+ * the owner as its parent, and the owner still runs. Recovery would otherwise
+ * read a heartbeat gone stale in a relay outage as a crash and close the
+ * session out from under its running owner.
+ */
+function spawnedByLiveSessionOwner(state, { env = process.env, parentPid = process.ppid, kill = process.kill.bind(process) } = {}) {
+  const ownerPid = Number(env?.[SESSION_OWNER_CHILD_ENV]);
+  if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) return false;
+  if (ownerPid !== Number(parentPid) || ownerPid !== Number(state?.process_pid)) return false;
+  try {
+    kill(ownerPid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
 }
 
 async function monitorPairing(remoteClient, stateId, {
@@ -953,6 +1022,8 @@ async function monitorPairing(remoteClient, stateId, {
       local,
       scopeLabel: role === "host" ? null : describeSessionWriteScope(status?.scope_set || state.scopeSet),
       observing,
+      publishLabel: describeSessionPublishModes(state),
+      publishPaused: role === "host" ? state.auto_paused_reason || null : null,
     });
     log("");
     lines.forEach((line, index) => {
@@ -1010,6 +1081,14 @@ async function monitorPairing(remoteClient, stateId, {
           const current = getPairingState(stateId);
           if (current && !observing && !stopping) reportSyncTransition(current);
         } catch { /* the feed line is advisory */ }
+        if (role === "host" && !observing && !stopping) {
+          void tickSessionAutoPublish({
+            projectDir,
+            // Only after a heartbeat that found the session active.
+            sessionActive: status?.status === "active",
+            report: (text, { ok, action }) => log(`  ${ok ? C.green : C.yellow}[auto ${action}]${C.reset} ${text}`),
+          });
+        }
       });
   };
   const refreshHostMembers = async (state) => {
@@ -1044,6 +1123,18 @@ async function monitorPairing(remoteClient, stateId, {
         await runForeground(["go"]);
       } else if (parsed.kind === "members") {
         printHostConsoleMembers(log, latestMembers);
+      } else if (parsed.kind === "merge" || parsed.kind === "deploy") {
+        // A child owns the terminal while the host reads and approves, so
+        // Ctrl+C there cancels the merge instead of force-closing the session.
+        await runForeground(["session", parsed.kind]);
+      } else if (parsed.kind === "auto") {
+        if (parsed.which) {
+          const result = setSessionAutoPublish({ which: parsed.which, value: parsed.value, stateId });
+          log(`  ${C.cyan}[session]${C.reset} auto ${parsed.which} ${result.mode === "auto" ? "on: it runs as work lands, without asking" : "off: it waits for your approval"}`);
+        }
+        const current = getPairingState(stateId);
+        log(`  ${C.cyan}[session]${C.reset} ${describeSessionPublishModes(current)}`);
+        if (current?.auto_paused_reason) log(`  ${C.yellow}[session]${C.reset} auto paused: ${current.auto_paused_reason}`);
       } else if (parsed.kind === "hold") {
         const held = setSessionHold({ stateId, reason: parsed.reason || null });
         log(held.ok
@@ -1089,9 +1180,15 @@ async function monitorPairing(remoteClient, stateId, {
           if (parsed.kind === "close") {
             if (observing || schedulerLockHolderLive(kill)) {
               log(`  ${C.yellow}[session]${C.reset} posse go owns the session; close from the run screen (u → close), or stop posse go first.`);
-            } else {
-              gracefulRequested = true;
+              return;
             }
+            // A close that would fail after mid-session merges is refused
+            // while the session can still carry on.
+            commandChain = commandChain.then(async () => {
+              const blocked = await sessionClosePreflight(projectDir, getPairingState(stateId));
+              if (blocked) log(`  ${C.yellow}[session]${C.reset} Not closing: ${blocked}`);
+              else gracefulRequested = true;
+            });
             return;
           }
           // One command at a time; a slow admit must not interleave with a kick.
@@ -1102,7 +1199,10 @@ async function monitorPairing(remoteClient, stateId, {
       })
     : null;
   if (sessionConsole) log = sessionConsole.print;
-  process.once("SIGINT", stop);
+  // on, not once: a Ctrl+C while a foreground child (add, go, merge, deploy)
+  // owns the terminal must not use up the handler, or the next one would hit
+  // Node's default and kill the console without a close.
+  process.on("SIGINT", stop);
   process.once("SIGTERM", stop);
   process.once("SIGHUP", hangup);
   const waitForNextLap = async (ms) => {
@@ -1290,6 +1390,9 @@ function printActive(C, state, status = null, derived = null) {
   if (status && Number.isFinite(status.active_members)) {
     console.log(`  Connected members: ${status.active_members}`);
   }
+  const publishing = describeSessionPublishModes(state);
+  if (publishing) console.log(`  Publishing: ${publishing}`);
+  if (publishing && state.auto_paused_reason) console.log(`  ${C.yellow}Auto paused:${C.reset} ${state.auto_paused_reason}`);
   if (derived) printSessionSyncRows((text) => console.log(text), C, derived);
   const peers = status?.peers || [];
   const peerItems = peers.flatMap((peer) => (
@@ -1365,58 +1468,9 @@ function describePromotionBestEffort(root) {
   }
 }
 
-// What the host is asked to approve: where it goes, the session's commits and
-// who wrote them, and the files it changes.
-function printPromotionForApproval(C, summary, print = console.log) {
-  if (!summary) return;
-  const kind = summary.strategy === "fast-forward" ? "history-preserving" : "squash";
-  print(`\n  ${C.bold}Ready to publish to ${summary.target}${C.reset} (${kind})`);
-  if (summary.commitCount > 0) {
-    const authors = summary.authors.map((author) => `${author.name} (${author.count})`).join(", ");
-    print(`  ${summary.commitCount} session commit${summary.commitCount === 1 ? "" : "s"} by ${authors}:`);
-    for (const commit of summary.commits) print(`    ${commit.sha} ${commit.author}: ${commit.subject}`);
-    if (summary.commitCount > summary.commits.length) {
-      print(`    ... and ${summary.commitCount - summary.commits.length} more`);
-    }
-  }
-  if (summary.files.length > 0) {
-    print("  Changes:");
-    for (const line of summary.files) print(`    ${line}`);
-    if (summary.moreFiles > 0) print(`    ... and ${summary.moreFiles} more file(s)`);
-  }
-  if (summary.changeSummary) print(`  ${summary.changeSummary}`);
-}
-
 function printPendingApprovalGuidance(C, candidateOid, originOid) {
   console.log(`  ${C.yellow}Not published.${C.reset} Review and publish it with \`posse session integrate\`, or drop it with \`posse session abandon-integration\`.`);
   console.log(`  ${C.dim}Scripted approval: posse session integrate --approve-source-oid ${candidateOid} --approve-origin-oid ${originOid}${C.reset}\n`);
-}
-
-// Asks on the terminal only. Returns true or false for the host's answer, and
-// null when there is no one to ask (a closed terminal, piped input): the
-// candidate then stays frozen and only exact OIDs can approve it.
-async function askToPublishPromotion(C, summary, { input = process.stdin, output = process.stdout } = {}) {
-  if (!summary || !input?.isTTY || !output?.isTTY || input.readableEnded) return null;
-  if (input.isRaw) input.setRawMode(false);
-  const prompt = createInterface({ input, output });
-  // Input that ends at the prompt (Ctrl+D, a closed stream) closes readline
-  // without settling the question, so the close itself answers it.
-  const closed = new Promise((resolve) => prompt.once("close", () => resolve(null)));
-  // Publishing takes the whole word: a stray "y" and Enter typed while the
-  // close drained sit in the terminal's buffer and would otherwise answer a
-  // question the host has not read yet.
-  const asked = prompt.question(`\n  Type ${C.bold}yes${C.reset} to publish to ${C.cyan}${summary.target}${C.reset} (anything else keeps it frozen): `);
-  asked.catch(() => {});
-  try {
-    const answer = await Promise.race([asked, closed]);
-    return answer !== null && String(answer).trim().toLowerCase() === "yes";
-  } catch (error) {
-    // Ctrl+C or Ctrl+D at the prompt is a no: the candidate stays frozen.
-    if (error?.name === "AbortError") return false;
-    throw error;
-  } finally {
-    prompt.close();
-  }
 }
 
 async function finishHostShutdown(root, remoteClient, state, options = {}) {
@@ -1637,7 +1691,9 @@ async function closeClaimedHostSession(root, remoteClient, state, {
   return { ...promoted, cleanup };
 }
 
-async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
+async function runHost({ projectDir, remoteClient, remote, branch, C, json, mergeMode = null, deployMode = null }) {
+  const autoMerge = mergeMode === "auto";
+  const autoDeploy = deployMode === "auto";
   const root = repositoryRoot(projectDir);
   assertPairingSchedulerStopped();
   assertCleanPairingCheckout(root);
@@ -1755,6 +1811,12 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       relayToken: started.host_token,
       baselineOid: publishedOid,
     });
+    if (autoMerge || autoDeploy) {
+      updateSessionPublishSettings(state.id, {
+        ...(autoMerge ? { mergeMode: "auto" } : {}),
+        ...(autoDeploy ? { deployMode: "auto" } : {}),
+      });
+    }
 
     if (json) {
       console.log(JSON.stringify({
@@ -1764,6 +1826,8 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
         branch: sharedBranch,
         remote: sessionRemote,
         session_id: started.session_id,
+        merge_mode: autoMerge ? "auto" : "ask",
+        deploy_mode: autoDeploy ? "auto" : "ask",
       }));
     } else {
       console.log(`\n  ${C.bold}Session is open${C.reset}`);
@@ -1772,6 +1836,9 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json }) {
       console.log(`  Shared branch: ${sharedBranch}`);
       console.log(`  Others join with: ${C.cyan}posse session join ${started.code}${C.reset}`);
       console.log(`  Join requests appear below. Type a member's countersign and press Enter to admit them.`);
+      if (autoMerge || autoDeploy) {
+        console.log(`  ${C.yellow}Trusted team:${C.reset} Posse ${[autoMerge && "merges the team's work into your branch", autoDeploy && `deploys it to ${remote || "origin"}`].filter(Boolean).join(" and ")} as it lands, without asking (\`auto merge off\` / \`auto deploy off\` to stop).`);
+      }
       console.log(`  ${C.dim}This screen stays open for the whole session and keeps this folder in sync. Queue work with add, run it with go, type help for more.${C.reset}\n`);
     }
     const outcome = await monitorPairing(remoteClient, state.id, {
@@ -2211,6 +2278,15 @@ async function runStatus({
     status,
     sync: derived?.sync || null,
     peers_sync: derived?.peers_sync || [],
+    ...(state.role === "host" ? {
+      publishing: {
+        merge_mode: state.merge_mode,
+        deploy_mode: state.deploy_mode,
+        auto_paused_reason: state.auto_paused_reason || null,
+        last_merge_oid: state.last_merge_oid || null,
+        last_deploy_oid: state.last_deploy_oid || null,
+      },
+    } : {}),
   };
   if (json) console.log(JSON.stringify(result));
   else printActive(C, state, status, derived);
@@ -2372,6 +2448,53 @@ function runSessionHoldCommand({ action, reason = null, C, json }) {
   return result;
 }
 
+async function runSessionPublishCommand({ action, projectDir, C, json, unattended = false }) {
+  let result;
+  try {
+    result = await runSessionPublish({ action, projectDir, unattended, C, json });
+  } catch (error) {
+    // An unattended run reports to the session owner through its output and
+    // exit code; a failure that will not clear by itself pauses auto mode.
+    const handled = unattended ? recordUnattendedFailure(action, error) : null;
+    if (json) {
+      console.log(JSON.stringify({ ok: false, action, reason: error?.code || "session_publish_failed",
+        message: safeError(error), paused: handled?.paused === true }));
+    } else {
+      console.error(`  ${C.yellow}[session ${action}]${C.reset} ${safeError(error)}`);
+      if (handled?.paused) console.error(`  ${C.yellow}[session ${action}]${C.reset} auto ${action} is paused; it asks you again until you turn it back on with \`auto ${action} on\``);
+    }
+    process.exitCode = 1;
+    return { ok: false, action, reason: error?.code || "session_publish_failed", paused: handled?.paused === true };
+  }
+  if (json) console.log(JSON.stringify(result));
+  if (!result.ok) process.exitCode = 1;
+  return result;
+}
+
+function runSessionAutoCommand({ which = null, value = null, C, json }) {
+  if (which || value) {
+    const result = setSessionAutoPublish({ which, value });
+    if (json) console.log(JSON.stringify({ ok: true, which: result.which, mode: result.mode }));
+    else {
+      console.log(`  ${C.green}[session]${C.reset} ${result.mode === "auto"
+        ? `auto ${which} is on: Posse ${which === "merge" ? "merges the team's work into your branch" : "deploys merged work to origin"} as it lands, without asking`
+        : `auto ${which} is off: ${which} waits for your approval`}`);
+    }
+    return { ok: true, which: result.which, mode: result.mode };
+  }
+  const state = getLivePairingState();
+  if (!state || state.role !== "host") {
+    throw Object.assign(new Error("This clone is not hosting a live session"), { code: "pairing_host_session_required" });
+  }
+  const summary = { merge_mode: state.merge_mode, deploy_mode: state.deploy_mode, auto_paused_reason: state.auto_paused_reason || null };
+  if (json) console.log(JSON.stringify({ ok: true, ...summary }));
+  else {
+    console.log(`  ${C.cyan}[session]${C.reset} ${describeSessionPublishModes(state)}`);
+    if (state.auto_paused_reason) console.log(`  ${C.yellow}[session]${C.reset} auto paused: ${state.auto_paused_reason}`);
+  }
+  return { ok: true, ...summary };
+}
+
 async function runPendingIntegration({
   projectDir, action, C, json, approval = null, silent = false, ask = askToPublishPromotion,
   workflowFactory = undefined,
@@ -2502,7 +2625,8 @@ export async function runPairingCommand(argv = [], {
 } = {}) {
   const args = parsePairArgs(argv);
   let client = remoteClient;
-  if (!client && !["status", "integrate", "abandon-integration", "hold", "resume"].includes(args.action)) {
+  if (!client && !["status", "integrate", "abandon-integration", "hold", "resume", "merge", "deploy", "auto"]
+    .includes(args.action)) {
     try {
       client = remoteClientFactory();
     } catch (error) {
@@ -2514,6 +2638,8 @@ export async function runPairingCommand(argv = [], {
   if (args.action === "join") return runJoin({ ...args, projectDir, remoteClient: client, C });
   if (args.action === "admit") return runAdmit({ ...args, projectDir, remoteClient: client, C });
   if (["hold", "resume"].includes(args.action)) return runSessionHoldCommand({ ...args, C });
+  if (["merge", "deploy"].includes(args.action)) return runSessionPublishCommand({ ...args, projectDir, C });
+  if (args.action === "auto") return runSessionAutoCommand({ ...args, C });
   if (["integrate", "abandon-integration"].includes(args.action)) {
     return runPendingIntegration({ ...args, projectDir, C });
   }
@@ -2544,6 +2670,10 @@ export async function runPairingCommand(argv = [], {
   const state = getLivePairingState();
   const root = repositoryRoot(projectDir);
   let result;
+  if (state?.role === "host" && !args.keepBranch && state.close_action !== "keep-branch") {
+    const blocked = await sessionClosePreflight(root, state, { historyPreserving: args.historyPreserving });
+    if (blocked) throw Object.assign(new Error(`Not closing: ${blocked}`), { code: "pairing_close_refused" });
+  }
   if (state?.role === "host" && pairingProcessIsAlive(state) && state.process_pid !== process.pid) {
     if (args.keepBranch || args.historyPreserving) updatePairingEnrollment(state.id, {
       closeAction: args.keepBranch ? "keep-branch" : "integrate-fast-forward",
@@ -2607,6 +2737,7 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
 } = {}) {
   const state = getLivePairingState();
   const journal = readPairingPromotionJournal();
+  if (state && spawnedByLiveSessionOwner(state)) return { ok: true, attempted: false };
   if (state && pairingProcessIsAlive(state)) {
     if (journal) {
       return {

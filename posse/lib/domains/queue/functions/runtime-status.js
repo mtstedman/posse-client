@@ -43,6 +43,10 @@ export const RUNTIME_STATUS_KEYS = Object.freeze({
   // Serializes GitHub member-key creation/removal with session close. Unlike
   // the close claim, short member-management commands own this row too.
   SESSION_CREDENTIAL_MUTATION: "session_credential_mutation",
+  // Auto merge/deploy for the live session: the debounce, the trunk tip last
+  // evaluated, and the unattended run in flight. It lives here, not in a
+  // process, so the console and `posse go` hand it over between them.
+  SESSION_AUTO_PUBLISH: "session_auto_publish",
 });
 
 /** How stale the bridge heartbeat may be and still count as "present".

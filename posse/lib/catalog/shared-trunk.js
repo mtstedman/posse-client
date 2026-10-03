@@ -62,9 +62,12 @@ export const SHARED_TRUNK_MERGE_LOCK_OWNERS = Object.freeze({
   RECONCILE: "shared-trunk-reconcile",
   MERGE: "shared-trunk-merge",
   ABANDON: "shared-trunk-abandon",
+  // In-session merge/deploy moves the host's target branch, never the trunk.
+  SESSION_PUBLISH: "session-publish",
 });
 
 export const SHARED_TRUNK_NON_PUBLISHING_LOCK_OWNERS = Object.freeze([
   SHARED_TRUNK_MERGE_LOCK_OWNERS.SYNC,
   SHARED_TRUNK_MERGE_LOCK_OWNERS.RECONCILE,
+  SHARED_TRUNK_MERGE_LOCK_OWNERS.SESSION_PUBLISH,
 ]);
