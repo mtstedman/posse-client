@@ -80,3 +80,6 @@ CLAUDE.md
 
 # Internal working plan — keep local, never commit
 posse/MIGRATION-CUTOVER-PLAN.md
+
+# Built installer packages (scripts/package-*-installer.*)
+posse/dist/

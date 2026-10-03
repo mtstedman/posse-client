@@ -5,7 +5,48 @@ Use a normal, **non-Administrator** PowerShell window. PowerShell 5.1 and 7+
 are supported. Node.js 24+ and npm are installed automatically when missing or
 unusable; winget is no longer required for Node installation.
 
-## Install
+## Install with Posse Setup (recommended)
+
+Download **PosseSetup.exe** from the
+[latest Posse release](https://github.com/mtstedman/posse-client/releases/latest)
+and double-click it. Do not use "Run as administrator"; Posse installs into
+your own account. The wizard:
+
+1. asks for your **POSSE_KEY**, unless one is already saved: in your user or
+   system environment variables, `.config\posse\.env`, or an older installer's
+   `providers.env.ps1`,
+2. asks which languages your projects use and installs each one's toolchain
+   (see [Language toolchains](#language-toolchains)),
+3. installs Git, Node.js, and Posse into `%LOCALAPPDATA%\Programs\Posse`,
+   wires the `posse` command, and runs `posse doctor`. One bar shows overall
+   progress and a second shows the item being installed right now (real
+   percentages for downloads); full detail goes to the log, and **Open log**
+   appears when something needs a look,
+4. offers a desktop shortcut. The **Posse** shortcuts open Bossy, the fleet
+   view (`posse --bossy`); **Posse Terminal** in the Start menu opens
+   PowerShell ready for `posse` commands.
+
+Posse appears in **Settings > Apps > Installed apps**. Uninstall it there; the
+uninstaller removes the `posse` command, its PATH entry, profile lines,
+shortcuts, and the automation startup task, and optionally your settings, saved
+keys, and downloaded runtimes. Your projects are never touched.
+
+Release builds are code-signed through Azure Artifact Signing, so Windows names
+the verified publisher. A brand-new release can still get a SmartScreen "protected
+your PC" notice until it builds download reputation; choose **More info**, check
+the publisher, then **Run anyway**. (Maintainers: build signed packages with
+`node scripts/package-windows-installer.mjs --sign`; settings live in
+`~/.config/posse/signing.env`, see `scripts/sign-windows-artifact.mjs`.)
+
+Unattended installs: `PosseSetup.exe /S [/LANGUAGES=typescript,python,go] [/DESKTOPSHORTCUT]`
+with `POSSE_KEY` in the environment or already saved. Unattended uninstall:
+`"%LOCALAPPDATA%\Programs\Posse\uninstall.exe" /S [/REMOVEDATA]`.
+
+Run Posse Setup again to repair an install. To add a language later, turn it
+on in `posse admin`, then run setup again to install its tools.
+`posse update` keeps Posse itself current.
+
+## Install from a script
 
 From an existing public client checkout:
 
@@ -82,6 +123,31 @@ approved schedules resume after sign-in. Check it with
 If PATH has not refreshed, invoke
 `& "$env:USERPROFILE\.local\bin\posse.cmd" help` directly.
 
+## Language toolchains
+
+Each selected indexing language gets the toolchain `posse doctor` needs:
+
+| Language | Installed when missing |
+|---|---|
+| TypeScript / JavaScript | Node.js (always installed) |
+| Python | Python 3 (winget) |
+| PHP | PHP (winget) and Composer; enables PHP's OpenSSL, cURL, and ZIP extensions |
+| Go | Go from the official go.dev zip, checked against its published SHA-256 and installed per user (no approval prompt). An existing Go must be 1.21+ |
+| Rust | Rust via rustup with the GNU toolchain and rust-analyzer; the download is checked against its published SHA-256 before it runs |
+| C / C++ | Not available on Windows (no Windows build of scip-clang) |
+
+Before installing anything, the installer looks for an existing copy: on PATH,
+in Windows' installed-apps list and App Paths, in Python's and Git's registry
+entries, in Scoop, Chocolatey, and winget folders, and in each tool's usual
+install folder (for PHP also XAMPP and Laragon). A copy that runs and meets
+Posse's minimum version (PHP 8.2, Go 1.21, Python 3.9, ImageMagick 7) counts
+as installed; if it is missing from PATH it is added to your user PATH instead
+of being reinstalled. Only missing or too-old tools are installed. After installing, every tool is checked
+against the **saved** user/machine PATH that a new terminal uses, not just the
+installer's own session, and repaired there when needed. PHP's real folder is
+placed ahead of winget's `Links` alias, because PHP looks for `php.ini` and its
+extensions beside the file it was started from.
+
 ## Node and other prerequisites
 
 The installer first accepts a working Node 24+ installation with npm. If
@@ -144,6 +210,9 @@ they also need compatible Windows images and host prerequisites.
 | `-DoctorTimeoutSeconds <seconds>` | Doctor limit, default 7500; range 60–86400 |
 | `-DryRun` | Preview without installing; a diagnostic log is still written |
 | `-Plain` | Disable colors and spinners |
+| `-KeyFile <path>` | Read keys from a `NAME=value` file, save them like typed keys, and delete the file (used by Posse Setup) |
+| `-Uninstall` | Remove this checkout's `posse` command, PATH entry, profile lines, and automation task; delete the checkout folder yourself afterwards |
+| `-RemoveUserData` | With `-Uninstall`, also delete settings, saved keys, logs, and managed runtimes |
 
 ## Troubleshooting
 

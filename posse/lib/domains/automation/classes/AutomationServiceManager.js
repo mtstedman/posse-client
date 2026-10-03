@@ -29,7 +29,7 @@ export class AutomationServiceManager {
   async install() {
     const definition = this.definition();
     fs.mkdirSync(path.dirname(definition.path), { recursive: true, mode: 0o700 });
-    writePrivateFile(definition.path, definition.content);
+    writePrivateFile(definition.path, definition.content, definition.encoding);
     await this.stopAdHocSupervisor();
     for (const command of definition.install) this.command(command);
     return { installed: true, manager: definition.manager, definition: definition.path, ...await this.status() };
@@ -84,9 +84,11 @@ export class AutomationServiceManager {
   windowsDefinition() {
     const target = path.join(this.dataDir, "automation-task.xml");
     const user = process.env.USERDOMAIN && process.env.USERNAME ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}` : process.env.USERNAME || os.userInfo().username;
-    const content = `<?xml version="1.0" encoding="UTF-8"?>\n<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>Posse automation owner</Description></RegistrationInfo><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(user)}</UserId></LogonTrigger></Triggers><Principals><Principal id="Author"><UserId>${xml(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority><RestartOnFailure><Interval>PT2S</Interval><Count>999</Count></RestartOnFailure></Settings><Actions Context="Author"><Exec><Command>${xml(this.nodePath)}</Command><Arguments>${xml(`\"${this.entryPath}\"`)}</Arguments><WorkingDirectory>${xml(path.dirname(this.entryPath))}</WorkingDirectory></Exec></Actions></Task>\n`;
+    // schtasks /XML reads task files as UTF-16; a UTF-8 file fails with
+    // "The task XML is malformed ... unable to switch the encoding".
+    const content = `<?xml version="1.0" encoding="UTF-16"?>\n<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>Posse automation owner</Description></RegistrationInfo><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(user)}</UserId></LogonTrigger></Triggers><Principals><Principal id="Author"><UserId>${xml(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>7</Priority><RestartOnFailure><Interval>PT2S</Interval><Count>999</Count></RestartOnFailure></Settings><Actions Context="Author"><Exec><Command>${xml(this.nodePath)}</Command><Arguments>${xml(`\"${this.entryPath}\"`)}</Arguments><WorkingDirectory>${xml(path.dirname(this.entryPath))}</WorkingDirectory></Exec></Actions></Task>\n`;
     return {
-      manager: "windows-task-scheduler", path: target, content,
+      manager: "windows-task-scheduler", path: target, content, encoding: "utf16le",
       install: [cmd("schtasks.exe", "/Create", "/TN", WINDOWS_TASK, "/XML", target, "/F"), cmd("schtasks.exe", "/Run", "/TN", WINDOWS_TASK)],
       remove: [cmd("schtasks.exe", "/Delete", "/TN", WINDOWS_TASK, "/F")],
       status: cmd("schtasks.exe", "/Query", "/TN", WINDOWS_TASK),
@@ -116,9 +118,11 @@ function cmd(command, ...args) {
 
 function runCommand(command, args, options) { return spawnSync(command, args, options); }
 
-function writePrivateFile(filename, content) {
+function writePrivateFile(filename, content, encoding = "utf8") {
   const temporary = `${filename}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, content, { mode: 0o600 });
+  // UTF-16 files carry a byte-order mark so readers detect the encoding.
+  const data = encoding === "utf16le" ? Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(content, "utf16le")]) : content;
+  fs.writeFileSync(temporary, data, { mode: 0o600 });
   fs.renameSync(temporary, filename);
   if (process.platform !== "win32") fs.chmodSync(filename, 0o600);
 }

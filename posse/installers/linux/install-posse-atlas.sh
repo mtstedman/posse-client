@@ -4,7 +4,7 @@
 #
 # Bootstraps a host from scratch: system packages (build toolchain + helper
 # CLIs), Node.js 24+ (via nvm when missing), the Posse checkout, npm deps,
-# Python venv + SCIP language environments (delegated to `posse doctor`, the
+# SCIP language environments (delegated to `posse doctor`, the
 # same engine boot uses), authenticated native binaries, account settings, and
 # shell wiring.
 #
@@ -95,7 +95,7 @@ Options:
   --skip-settings         Do not seed ~/.posse/account.db
   --skip-host-tools       Do not install system packages (build toolchain and
                           helper CLIs: gh, rg, tesseract, ImageMagick, ffmpeg,
-                          Python, and PHP only when PHP SCIP is selected).
+                          and the selected languages' toolchains).
                           Missing tools are still reported.
   --no-install-node       Do not auto-install Node via nvm when Node 24+ is missing
   --non-interactive       Never prompt (use environment variables for keys)
@@ -114,9 +114,9 @@ Notes:
     is only a fallback. ATLAS is built into Posse (no separate checkout).
   - Installs the C/C++ build toolchain needed by Posse's native npm modules
     (node-pty and friends) and auto-installs Node 24 via nvm when missing.
-  - Python helper deps and SCIP language environments are installed through
-    `posse doctor` — the same self-repair engine Posse uses at boot — so the
-    installer never fights Posse over how Python environments are managed.
+  - SCIP language environments are installed through `posse doctor`, the
+    same self-repair engine Posse uses at boot. Posse itself needs no Python;
+    pip and venv come only when Python indexing is selected.
   - Re-runs are safe: unchanged steps are skipped. All output is captured to a
     log file whose path is printed in the summary.
 USAGE
@@ -296,6 +296,9 @@ SCIP_LANGUAGE_VALUES=(typescript python php go rust clang)
 SCIP_LANGUAGE_LABELS=("TypeScript / JavaScript" "Python" "PHP" "Go" "Rust" "C / C++ (clang)")
 SCIP_LANGUAGE_STEP_STATUS="ok"
 SCIP_LANGUAGE_STEP_NOTE=""
+# True when the user picked languages (--scip-languages or the prompt); that
+# choice then replaces the saved account setting.
+SCIP_LANGUAGES_CHOSEN="false"
 
 scip_allowed_languages_text() {
   local joined="${SCIP_LANGUAGE_VALUES[*]}"
@@ -367,6 +370,7 @@ prompt_scip_languages_if_needed() {
     fi
     POSSE_SCIP_LANGUAGES="$normalized"
     SCIP_LANGUAGE_STEP_NOTE="selected ${POSSE_SCIP_LANGUAGES} (--scip-languages)"
+    SCIP_LANGUAGES_CHOSEN="true"
     info "using --scip-languages: ${POSSE_SCIP_LANGUAGES}"
     return 0
   fi
@@ -435,6 +439,7 @@ prompt_scip_languages_if_needed() {
     if normalized="$(normalize_scip_languages "$selection")"; then
       POSSE_SCIP_LANGUAGES="$normalized"
       SCIP_LANGUAGE_STEP_NOTE="selected ${POSSE_SCIP_LANGUAGES} (interactive)"
+      SCIP_LANGUAGES_CHOSEN="true"
       info "initial SCIP languages: ${POSSE_SCIP_LANGUAGES}"
       return 0
     fi
@@ -477,7 +482,7 @@ declare -A STEP_TITLES=(
   [automation]="Automation owner startup"
   [shell]="Shell wiring"
   [seed]="Account settings"
-  [doctor]="Runtime doctor (Python + SCIP + Jina)"
+  [doctor]="Runtime doctor (SCIP + Jina)"
   [admin]="Provider CLI detection"
   [keys]="Provider API keys"
   [native]="Native binaries"
@@ -845,8 +850,9 @@ pkg_install() {
 }
 
 # Package names per manager. Toolchain packages are what native npm modules
-# (node-pty, tree-sitter, better-sqlite3 fallback builds) need to compile, plus
-# python3-venv/pip which Posse's managed Python runtimes require.
+# (node-pty, tree-sitter, better-sqlite3 fallback builds) need to compile;
+# node-gyp needs python3 for that. pip and venv are only for Python projects,
+# so they come only when Python indexing is selected.
 core_packages() {
   local package
   for package in "$@"; do
@@ -859,11 +865,20 @@ core_packages() {
 }
 
 toolchain_packages() {
+  local python_extras=""
   case "$PKG_MGR" in
-    apt-get) echo "build-essential pkg-config python3 python3-pip python3-venv unzip" ;;
-    dnf|yum) echo "gcc gcc-c++ make pkgconf-pkg-config python3 python3-pip unzip" ;;
-    pacman) echo "base-devel python python-pip unzip" ;;
-    zypper) echo "gcc gcc-c++ make pkg-config python3 python3-pip unzip" ;;
+    apt-get)
+      scip_language_selected python && python_extras=" python3-pip python3-venv"
+      echo "build-essential pkg-config python3 unzip${python_extras}" ;;
+    dnf|yum)
+      scip_language_selected python && python_extras=" python3-pip"
+      echo "gcc gcc-c++ make pkgconf-pkg-config python3 unzip${python_extras}" ;;
+    pacman)
+      scip_language_selected python && python_extras=" python-pip"
+      echo "base-devel python unzip${python_extras}" ;;
+    zypper)
+      scip_language_selected python && python_extras=" python3-pip"
+      echo "gcc gcc-c++ make pkg-config python3 unzip${python_extras}" ;;
   esac
 }
 
@@ -883,6 +898,10 @@ php|php|php-cli,php
 composer|composer|composer
 EOT
       fi
+      if scip_language_selected go; then cat <<'EOT'
+go|go|golang-go
+EOT
+      fi
       ;;
     dnf|yum)
       cat <<'EOT'
@@ -895,6 +914,10 @@ EOT
       if scip_language_selected php; then cat <<'EOT'
 php|php|php-cli,php
 composer|composer|composer,php-composer
+EOT
+      fi
+      if scip_language_selected go; then cat <<'EOT'
+go|go|golang
 EOT
       fi
       ;;
@@ -911,6 +934,10 @@ php|php|php
 composer|composer|composer
 EOT
       fi
+      if scip_language_selected go; then cat <<'EOT'
+go|go|go
+EOT
+      fi
       ;;
     zypper)
       cat <<'EOT'
@@ -925,6 +952,10 @@ php|php|php8-cli,php-cli,php8,php7
 composer|composer|php-composer,composer
 EOT
       fi
+      if scip_language_selected go; then cat <<'EOT'
+go|go|go
+EOT
+      fi
       ;;
   esac
 }
@@ -936,6 +967,65 @@ tool_available() {
   esac
 }
 
+# rustup puts cargo in ~/.cargo/bin, which non-login shells may not have on
+# PATH; adopt it before deciding Rust is missing.
+rust_toolchain_present() {
+  if [[ -x "$HOME/.cargo/bin/cargo" && ":$PATH:" != *":$HOME/.cargo/bin:"* ]]; then
+    export PATH="$HOME/.cargo/bin:$PATH"
+  fi
+  command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1
+}
+
+# Rust indexing needs cargo/rustc plus rust-analyzer, which distro packages
+# often lack. rustup installs per user (no root) and is verified against its
+# published SHA-256 before it runs.
+install_rust_toolchain() {
+  local triple
+  case "$(uname -m)" in
+    x86_64|amd64) triple="x86_64-unknown-linux-gnu" ;;
+    aarch64|arm64) triple="aarch64-unknown-linux-gnu" ;;
+    *) warn "rustup has no build for $(uname -m); install Rust manually to index Rust"; return 1 ;;
+  esac
+  local url="https://static.rust-lang.org/rustup/dist/${triple}/rustup-init"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    run_logged "install Rust + rust-analyzer via rustup (${triple})" true
+    return 0
+  fi
+  local work expected
+  work="$(mktemp -d)" || return 1
+  if ! run_logged "download rustup-init (${triple})" fetch_to "$url" "$work/rustup-init" \
+    || ! run_logged "download rustup-init checksum" fetch_to "${url}.sha256" "$work/rustup-init.sha256"; then
+    rm -rf "$work"
+    warn "could not download rustup-init; install Rust manually to index Rust"
+    return 1
+  fi
+  expected="$(cut -d' ' -f1 <"$work/rustup-init.sha256")"
+  if [[ ! "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || ! run_logged "verify rustup-init checksum" verify_sha256 "$work/rustup-init" "$expected"; then
+    rm -rf "$work"
+    warn "rustup-init did not match its published SHA-256; refusing to run it"
+    return 1
+  fi
+  chmod 700 "$work/rustup-init"
+  if ! run_logged "install Rust + rust-analyzer (rustup)" "$work/rustup-init" -y --profile minimal --component rust-analyzer; then
+    rm -rf "$work"
+    return 1
+  fi
+  rm -rf "$work"
+  export PATH="$HOME/.cargo/bin:$PATH"
+  rust_toolchain_present
+}
+
+# scip-go@latest needs a modern Go; older distro releases ship one that lags.
+warn_if_old_go() {
+  scip_language_selected go || return 0
+  command -v go >/dev/null 2>&1 || return 0
+  local version
+  version="$(go version 2>/dev/null)" || return 0
+  if [[ "$version" =~ go([0-9]+)\.([0-9]+) ]] && ((BASH_REMATCH[1] == 1 && BASH_REMATCH[2] < 21)); then
+    warn "Go ${BASH_REMATCH[1]}.${BASH_REMATCH[2]} is older than 1.21, so scip-go may fail to install; install a newer Go from https://go.dev/dl"
+  fi
+}
+
 # =============================================================================
 # steps
 # =============================================================================
@@ -945,13 +1035,13 @@ step_packages() {
   detect_pkg_manager
 
   # What's missing? Core + toolchain checked by representative commands.
-  local missing_core=() missing_toolchain="false" missing_tools=()
+  local missing_core=() missing_toolchain="false" missing_tools=() missing_rust="false"
   command -v git >/dev/null 2>&1 || missing_core+=("git")
   command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing_core+=("curl")
   { command -v c++ >/dev/null 2>&1 || command -v g++ >/dev/null 2>&1; } && command -v make >/dev/null 2>&1 && command -v pkg-config >/dev/null 2>&1 || missing_toolchain="true"
   find_python >/dev/null 2>&1 || missing_toolchain="true"
-  # Debian/Ubuntu split venv out of python3 — Posse's managed venvs need it.
-  if [[ "$PKG_MGR" == "apt-get" ]] && find_python >/dev/null 2>&1; then
+  # Debian/Ubuntu split venv out of python3; Python projects' managed venvs need it.
+  if [[ "$PKG_MGR" == "apt-get" ]] && scip_language_selected python && find_python >/dev/null 2>&1; then
     "$(find_python)" -c 'import venv, ensurepip' >/dev/null 2>&1 || missing_toolchain="true"
   fi
 
@@ -966,7 +1056,15 @@ step_packages() {
     tool_available "$check" || missing_tools+=("${name}|${check}|${pkgs}")
   done < <(host_tools_table)
 
-  if [[ ${#missing_core[@]} -eq 0 && "$missing_toolchain" == "false" && ${#missing_tools[@]} -eq 0 ]]; then
+  # Rust's toolchain comes from rustup, not the package manager.
+  if scip_language_selected rust && ! rust_toolchain_present; then missing_rust="true"; fi
+  local missing_system="false"
+  if [[ ${#missing_core[@]} -gt 0 || "$missing_toolchain" == "true" || ${#missing_tools[@]} -gt 0 ]]; then
+    missing_system="true"
+  fi
+
+  if [[ "$missing_system" == "false" && "$missing_rust" == "false" ]]; then
+    warn_if_old_go
     step_end ok "git, curl, build toolchain, and helper CLIs all present"
     return 0
   fi
@@ -976,57 +1074,70 @@ step_packages() {
     [[ ${#missing_core[@]} -gt 0 ]] && names+=("${missing_core[@]}")
     [[ "$missing_toolchain" == "true" ]] && names+=("build-toolchain")
     local t; for t in "${missing_tools[@]}"; do names+=("${t%%|*}"); done
+    [[ "$missing_rust" == "true" ]] && names+=("rust-toolchain")
     warn "missing (not installed due to --skip-host-tools): ${names[*]}"
     step_end skipped "--skip-host-tools; missing: ${names[*]}"
     return 0
   fi
 
-  if [[ "$PKG_MGR" == "none" ]]; then
-    warn "no supported package manager found (apt/dnf/yum/pacman/zypper); install missing packages manually"
-    step_end partial "no package manager; some tools missing"
-    return 0
-  fi
+  local failures=() system_gap=""
+  if [[ "$missing_system" == "true" ]]; then
+    if [[ "$PKG_MGR" == "none" ]]; then
+      warn "no supported package manager found (apt/dnf/yum/pacman/zypper); install missing packages manually"
+      system_gap="no package manager; some tools missing"
+    else
+      ensure_root_access
+      if [[ "$SUDO_STATE" == "none" && "$DRY_RUN" != "true" ]]; then
+        warn "cannot install system packages: not root and sudo unavailable/declined"
+        system_gap="no root access; packages not installed"
+      else
+        pkg_refresh_index
 
-  ensure_root_access
-  if [[ "$SUDO_STATE" == "none" && "$DRY_RUN" != "true" ]]; then
-    warn "cannot install system packages: not root and sudo unavailable/declined"
-    step_end partial "no root access; packages not installed"
-    return 0
-  fi
+        # Core (git/curl) and toolchain go in one shot each — these are standard
+        # package names that exist everywhere; helper CLIs install per-package so a
+        # missing name in one repo can't sink the rest.
+        if [[ ${#missing_core[@]} -gt 0 ]]; then
+          # shellcheck disable=SC2046,SC2086
+          run_logged "install core packages (${missing_core[*]})" pkg_install $(core_packages "${missing_core[@]}") || failures+=("core")
+        fi
+        if [[ "$missing_toolchain" == "true" ]]; then
+          # shellcheck disable=SC2046,SC2086
+          run_logged "install build toolchain ($(toolchain_packages | cut -c1-48)…)" pkg_install $(toolchain_packages) || failures+=("toolchain")
+        fi
 
-  pkg_refresh_index
-  local failures=()
-
-  # Core (git/curl) and toolchain go in one shot each — these are standard
-  # package names that exist everywhere; helper CLIs install per-package so a
-  # missing name in one repo can't sink the rest.
-  if [[ ${#missing_core[@]} -gt 0 ]]; then
-    # shellcheck disable=SC2046,SC2086
-    run_logged "install core packages (${missing_core[*]})" pkg_install $(core_packages "${missing_core[@]}") || failures+=("core")
-  fi
-  if [[ "$missing_toolchain" == "true" ]]; then
-    # shellcheck disable=SC2046,SC2086
-    run_logged "install build toolchain ($(toolchain_packages | cut -c1-48)…)" pkg_install $(toolchain_packages) || failures+=("toolchain")
-  fi
-
-  local entry pkg installed
-  for entry in "${missing_tools[@]}"; do
-    IFS='|' read -r name check pkgs <<<"$entry"
-    installed="false"
-    IFS=',' read -ra candidates <<<"$pkgs"
-    for pkg in "${candidates[@]}"; do
-      if run_logged "install ${name} (${pkg})" pkg_install "$pkg"; then
-        installed="true"
-        break
+        local entry pkg installed
+        for entry in "${missing_tools[@]}"; do
+          IFS='|' read -r name check pkgs <<<"$entry"
+          installed="false"
+          IFS=',' read -ra candidates <<<"$pkgs"
+          for pkg in "${candidates[@]}"; do
+            if run_logged "install ${name} (${pkg})" pkg_install "$pkg"; then
+              installed="true"
+              break
+            fi
+          done
+          if [[ "$DRY_RUN" == "true" ]]; then continue; fi
+          if [[ "$installed" != "true" ]] || ! tool_available "$check"; then
+            failures+=("$name")
+          fi
+        done
       fi
-    done
-    if [[ "$DRY_RUN" == "true" ]]; then continue; fi
-    if [[ "$installed" != "true" ]] || ! tool_available "$check"; then
-      failures+=("$name")
     fi
-  done
+  fi
 
-  if [[ "$DRY_RUN" == "true" ]]; then
+  # rustup installs per user, so it runs even without root access.
+  if [[ "$missing_rust" == "true" ]] && ! install_rust_toolchain; then
+    failures+=("rust")
+  fi
+  [[ "$DRY_RUN" == "true" ]] || warn_if_old_go
+
+  if [[ -n "$system_gap" ]]; then
+    if [[ ${#failures[@]} -gt 0 ]]; then
+      step_end partial "${system_gap}; could not install: ${failures[*]}"
+    else
+      step_end partial "$system_gap"
+    fi
+  elif [[ "$DRY_RUN" == "true" ]]; then
     step_end dry-run "would install missing system packages"
   elif [[ ${#failures[@]} -eq 0 ]]; then
     step_end ok "system packages installed"
@@ -1318,6 +1429,9 @@ step_shell_wiring() {
     echo "# not environment variables."
     printf 'export POSSE_BIN_DIR=%s\n' "$(shell_quote "$bin_dir")"
     printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$(dirname "$NODE_BIN")")"
+    if [[ -d "$HOME/.cargo/bin" ]]; then
+      printf 'export PATH="$PATH":%s\n' "$(shell_quote "$HOME/.cargo/bin")"
+    fi
     # shellcheck disable=SC2016
     echo 'case ":$PATH:" in *":$POSSE_BIN_DIR:"*) ;; *) export PATH="$POSSE_BIN_DIR:$PATH";; esac'
   } >"$ENV_FILE"; then
@@ -1383,7 +1497,10 @@ const seed = {
   atlas_scip_mode: process.env.POSSE_SEED_SCIP_MODE,
   atlas_scip_languages: process.env.POSSE_SEED_SCIP_LANGUAGES,
 };
-let added = 0, kept = 0, skipped = 0;
+// Keys named in POSSE_SEED_REPLACE (a language choice the user just made)
+// overwrite a saved value; every other key only fills a missing one.
+const replace = new Set(String(process.env.POSSE_SEED_REPLACE || "").split(",").map((key) => key.trim()).filter(Boolean));
+let added = 0, kept = 0, skipped = 0, replaced = 0;
 fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
 const db = new Database(settingsPath);
 db.pragma("journal_mode = WAL");
@@ -1410,6 +1527,9 @@ const tx = db.transaction((entries) => {
     if (!current || current.setting_value == null || String(current.setting_value).trim() === "") {
       upsert.run(k, String(v));
       added++;
+    } else if (replace.has(k) && String(current.setting_value) !== String(v)) {
+      upsert.run(k, String(v));
+      replaced++;
     } else {
       kept++;
     }
@@ -1417,7 +1537,7 @@ const tx = db.transaction((entries) => {
 });
 tx(Object.entries(seed));
 db.close();
-console.log(`[seed-settings] wrote ${settingsPath} -- added ${added}, kept ${kept} existing, skipped ${skipped} empty`);
+console.log(`[seed-settings] wrote ${settingsPath} -- added ${added}, replaced ${replaced}, kept ${kept} existing, skipped ${skipped} empty`);
 '
 
 step_seed_settings() {
@@ -1441,25 +1561,26 @@ step_seed_settings() {
   export POSSE_SEED_MODE="$POSSE_MODE" POSSE_SEED_PHASES="$POSSE_PHASES" \
     POSSE_SEED_FUNNEL="$POSSE_LIVE_FUNNEL" POSSE_SEED_SCIP_MODE="$POSSE_SCIP_MODE" \
     POSSE_SEED_SCIP_LANGUAGES="$POSSE_SCIP_LANGUAGES"
-  if run_logged_in_dir "$POSSE_DIR" "seed ~/.posse/account.db (merge-only, existing values kept)" "$NODE_BIN" "$seed_file"; then
+  if [[ "$SCIP_LANGUAGES_CHOSEN" == "true" ]]; then export POSSE_SEED_REPLACE="atlas_scip_languages"; else export POSSE_SEED_REPLACE=""; fi
+  if run_logged_in_dir "$POSSE_DIR" "seed ~/.posse/account.db (missing values filled; a language choice replaces the saved one)" "$NODE_BIN" "$seed_file"; then
     step_end ok "account settings seeded"
   else
     warn "settings seed failed; run 'posse admin' to configure ATLAS settings manually"
     step_end failed "seed script failed; see log"
   fi
   rm -f "$seed_file"
-  unset POSSE_SEED_MODE POSSE_SEED_PHASES POSSE_SEED_FUNNEL POSSE_SEED_SCIP_MODE POSSE_SEED_SCIP_LANGUAGES
+  unset POSSE_SEED_MODE POSSE_SEED_PHASES POSSE_SEED_FUNNEL POSSE_SEED_SCIP_MODE POSSE_SEED_SCIP_LANGUAGES POSSE_SEED_REPLACE
 }
 
 step_doctor() {
   step_begin doctor
   if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
   if [[ "$DRY_RUN" == "true" ]]; then
-    step_end dry-run "would run 'posse doctor' (Python + SCIP + current native binaries + Jina)"
+    step_end dry-run "would run 'posse doctor' (SCIP + current native binaries + Jina)"
     return 0
   fi
-  info "delegating to Posse's own dependency engine (managed Python venv, SCIP indexer environments)"
-  if run_logged_in_dir_timeout "$DOCTOR_TIMEOUT_SECONDS" "$POSSE_DIR" "posse doctor (first run builds Python/SCIP envs and deploys Jina)" \
+  info "delegating to Posse's own dependency engine (SCIP indexer environments)"
+  if run_logged_in_dir_timeout "$DOCTOR_TIMEOUT_SECONDS" "$POSSE_DIR" "posse doctor (first run builds SCIP envs and deploys Jina)" \
     "$NODE_BIN" orchestrator.js doctor --adopt-node-install; then
     step_end ok "runtime dependencies, binaries, and Jina ready"
   else
@@ -1764,50 +1885,57 @@ run_installer_step() {
 # main
 # =============================================================================
 
-NODE_BIN=""
-ENV_DIR="${HOME}/.config/posse"
-ENV_FILE="${ENV_DIR}/atlas.env"
+# The whole run lives in main(), called on the final line. Piped from curl,
+# bash executes nothing here until the complete file has arrived, so a
+# truncated download cannot run half an install.
+main() {
+  NODE_BIN=""
+  ENV_DIR="${HOME}/.config/posse"
+  ENV_FILE="${ENV_DIR}/atlas.env"
 
-init_ui
-print_splash
+  init_ui
+  print_splash
 
-log_only "${INSTALLER_NAME} started $(date -Iseconds 2>/dev/null || date)"
-log_only "argv: $0 dry_run=${DRY_RUN} force=${FORCE_REINSTALL} host_tools=${INSTALL_HOST_TOOLS} install_node=${INSTALL_NODE}"
+  log_only "${INSTALLER_NAME} started $(date -Iseconds 2>/dev/null || date)"
+  log_only "argv: $0 dry_run=${DRY_RUN} force=${FORCE_REINSTALL} host_tools=${INSTALL_HOST_TOOLS} install_node=${INSTALL_NODE}"
 
-if [[ "$DRY_RUN" == "true" ]]; then
-  printf "  %s%sDRY RUN%s %s— no changes will be made%s\n" "$BOLD" "$YELLOW" "$R" "$DIM" "$R"
-fi
-printf "  %sLog: %s%s\n" "$DIM" "$LOG_FILE" "$R"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    printf "  %s%sDRY RUN%s %s— no changes will be made%s\n" "$BOLD" "$YELLOW" "$R" "$DIM" "$R"
+  fi
+  printf "  %sLog: %s%s\n" "$DIM" "$LOG_FILE" "$R"
 
-if ! step_scip_languages; then
-  block_pending_steps "language selection failed"
+  if ! step_scip_languages; then
+    block_pending_steps "language selection failed"
+    print_summary
+    exit 1
+  fi
+
+  if ! step_preflight; then
+    block_pending_steps "preflight failed"
+    print_summary
+    exit 1
+  fi
+
+  run_installer_step packages false step_packages
+  run_installer_step node true step_node
+  run_installer_step checkout true step_checkout
+  run_installer_step composer false step_composer
+  run_installer_step npm true step_npm
+  run_installer_step automation false step_automation
+  run_installer_step shell true step_shell_wiring
+  run_installer_step seed false step_seed_settings
+  run_installer_step admin false step_admin_init
+  run_installer_step keys false step_keys
+  run_installer_step native false step_native_binaries
+  run_installer_step doctor false step_doctor
+  run_installer_step validate false step_validate
+  run_installer_step smoke false step_smoke
+
   print_summary
-  exit 1
-fi
+  if [[ "$INSTALL_FAILED" == "true" ]]; then
+    exit 1
+  fi
+  exit 0
+}
 
-if ! step_preflight; then
-  block_pending_steps "preflight failed"
-  print_summary
-  exit 1
-fi
-
-run_installer_step packages false step_packages
-run_installer_step node true step_node
-run_installer_step checkout true step_checkout
-run_installer_step composer false step_composer
-run_installer_step npm true step_npm
-run_installer_step automation false step_automation
-run_installer_step shell true step_shell_wiring
-run_installer_step seed false step_seed_settings
-run_installer_step admin false step_admin_init
-run_installer_step keys false step_keys
-run_installer_step native false step_native_binaries
-run_installer_step doctor false step_doctor
-run_installer_step validate false step_validate
-run_installer_step smoke false step_smoke
-
-print_summary
-if [[ "$INSTALL_FAILED" == "true" ]]; then
-  exit 1
-fi
-exit 0
+main "$@"

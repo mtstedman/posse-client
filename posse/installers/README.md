@@ -58,7 +58,15 @@ Use `--no-install-node` / `-NoInstallNode` only when managing Node yourself.
 
 ## 3. Install
 
-Follow the commands for your platform:
+- **Windows:** download and run **PosseSetup.exe** from the
+  [latest Posse release](https://github.com/mtstedman/posse-client/releases/latest).
+  It is a standard setup wizard; Posse then appears in Installed apps.
+- **Linux:** run
+  `curl -fsSL https://raw.githubusercontent.com/mtstedman/posse-client/main/posse/installers/linux/install-posse-atlas.sh | bash`
+  in a normal user terminal.
+
+Both ask which languages your projects use and install each language's
+indexing toolchain. Details, options, and troubleshooting:
 
 - [Linux installation, containers, and troubleshooting](linux/README.md)
 - [Windows installation and troubleshooting](windows/README.md)

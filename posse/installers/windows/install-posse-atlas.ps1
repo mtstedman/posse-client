@@ -5,7 +5,7 @@
 .DESCRIPTION
   Bootstraps a Windows host: helper CLI tools (via winget), SCIP language
   selection, Node.js 24+ (via winget when missing), the Posse
-  checkout, npm deps, Python venv + SCIP language environments (delegated to
+  checkout, npm deps, SCIP language environments (delegated to
   `posse doctor` — the same engine Posse uses at boot), account settings, and
   PATH/profile wiring.
 
@@ -57,8 +57,8 @@
   Don't seed ~/.posse/account.db.
 
 .PARAMETER SkipHostTools
-  Don't install helper CLI tools (gh, rg, tesseract, ImageMagick, ffmpeg, Python,
-  PHP when PHP SCIP is selected). Missing tools are still reported.
+  Don't install helper CLI tools (gh, rg, tesseract, ImageMagick, ffmpeg) or the
+  selected languages' toolchains. Missing tools are still reported.
 
 .PARAMETER NoInstallNode
   Don't auto-install Node through winget or the verified ZIP fallback.
@@ -75,6 +75,24 @@
   SYSTEM, and local Administrators). Legacy providers.env.ps1 files and
   user-environment entries left by older installers are kept in sync only
   when they already exist; new installs write only .env.
+
+.PARAMETER KeyFile
+  Read keys from this file (NAME=value lines, known key names only) instead of
+  prompting, save them like typed keys, and delete the file. Used by the
+  Windows setup package so keys never appear on a command line.
+
+.PARAMETER ProgressFile
+  Append plain-language progress events (TAB-separated lines) to this file.
+  Posse Setup reads it to drive its progress page; full detail stays in the log.
+
+.PARAMETER Uninstall
+  Undo this checkout's wiring: the automation owner task, the posse command
+  and its PATH entry, and PowerShell profile lines. The checkout itself is
+  left for the caller (the setup package's uninstaller) to delete.
+
+.PARAMETER RemoveUserData
+  With -Uninstall, also delete account settings, saved keys, logs, and
+  managed runtimes (~\.posse, ~\.config\posse, %LOCALAPPDATA%\Posse).
 
 .PARAMETER Force
   Re-run npm install even when node_modules looks fresh.
@@ -116,6 +134,10 @@ param(
   [switch]$ConfigureKeys,
   [switch]$NonInteractive,
   [switch]$SetupOnly,
+  [string]$KeyFile = "",
+  [string]$ProgressFile = "",
+  [switch]$Uninstall,
+  [switch]$RemoveUserData,
   [switch]$Force,
   [ValidateRange(60, 86400)][int]$CommandTimeoutSeconds = 1800,
   [ValidateRange(60, 86400)][int]$DoctorTimeoutSeconds = 7500,
@@ -224,10 +246,11 @@ function Format-Duration {
 }
 
 # --- log file ------------------------------------------------------------------
-$script:LogDir = Join-Path $env:USERPROFILE ".posse\logs"
+# Uninstall logs to TEMP: ~\.posse may be the very directory being removed.
+$script:LogDir = if ($Uninstall) { $env:TEMP } else { Join-Path $env:USERPROFILE ".posse\logs" }
 try { New-Item -ItemType Directory -Force -Path $script:LogDir | Out-Null }
 catch { $script:LogDir = $env:TEMP }
-$script:LogFile = Join-Path $script:LogDir ("install-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+$script:LogFile = Join-Path $script:LogDir ("{0}-{1}.log" -f $(if ($Uninstall) { "posse-uninstall" } else { "install" }), (Get-Date -Format "yyyyMMdd-HHmmss"))
 try { Set-Content -Path $script:LogFile -Value "" -Encoding UTF8 } catch { $script:LogFile = Join-Path $env:TEMP "posse-install.log" }
 
 function Write-LogOnly { param([string]$Message) try { Add-Content -Path $script:LogFile -Value $Message -Encoding UTF8 } catch {} }
@@ -255,6 +278,9 @@ $script:ScipLanguageOptions = @(
   [PSCustomObject]@{ Value = "clang"; Label = "C / C++ (clang)"; Aliases = @("c", "c++", "cpp", "cxx", "cc") }
 )
 $script:ScipLanguageStepStatus = "ok"
+# True when the user picked languages (-ScipLanguages or the prompt); that
+# choice then replaces the saved account setting.
+$script:ScipLanguagesChosen = $false
 $script:ScipLanguageStepNote = ""
 
 function Get-ScipLanguagesAllowedText {
@@ -302,6 +328,7 @@ function Resolve-ScipLanguageSelection {
     try {
       $script:PosseScipLanguages = Normalize-ScipLanguages $script:PosseScipLanguages
       $script:ScipLanguageStepNote = "selected $script:PosseScipLanguages (-ScipLanguages)"
+      $script:ScipLanguagesChosen = $true
       Write-Info "using -ScipLanguages: $script:PosseScipLanguages"
       return $true
     }
@@ -376,6 +403,7 @@ function Resolve-ScipLanguageSelection {
     try {
       $script:PosseScipLanguages = Normalize-ScipLanguages ($selection -join ",")
       $script:ScipLanguageStepNote = "selected $script:PosseScipLanguages (interactive)"
+      $script:ScipLanguagesChosen = $true
       Write-Info "initial SCIP languages: $script:PosseScipLanguages"
       return $true
     }
@@ -410,7 +438,7 @@ $script:StepTitles = @{
   automation = "Automation owner startup"
   shell    = "Shell wiring"
   seed     = "Account settings"
-  doctor   = "Runtime doctor (Python + SCIP + Jina)"
+  doctor   = "Runtime doctor (SCIP + Jina)"
   admin    = "Provider CLI detection"
   keys     = "Provider API keys"
   native   = "Native binaries"
@@ -422,6 +450,115 @@ $script:StepNote = @{}
 foreach ($k in $script:StepKeys) { $script:StepStatus[$k] = "pending"; $script:StepNote[$k] = "" }
 $script:StepIndex = 0
 $script:CurrentStep = ""
+
+# --- setup-package progress ---------------------------------------------------------
+# Posse Setup draws its own progress page. With -ProgressFile the engine reports
+# each step there in plain words while the full detail stays in the log.
+$script:SetupStepText = @{
+  languages  = @("Choosing indexing languages", "Indexing languages chosen")
+  preflight  = @("Checking your system", "System checked")
+  packages   = @("Installing tools", "Tools installed")
+  node       = @("Installing Node.js", "Node.js ready")
+  checkout   = @("Downloading Posse", "Posse downloaded")
+  composer   = @("Setting up Composer for PHP", "Composer ready")
+  npm        = @("Installing Posse's components", "Components installed")
+  automation = @("Setting up background automation", "Background automation ready")
+  shell      = @("Adding the posse command", "posse command added")
+  seed       = @("Saving your settings", "Settings saved")
+  admin      = @("Looking for AI provider apps", "AI provider apps checked")
+  keys       = @("Saving your Posse key", "Posse key saved")
+  native     = @("Downloading Posse's native tools", "Native tools downloaded")
+  doctor     = @("Setting up code indexing", "Code indexing ready")
+  validate   = @("Checking the install", "Install checked")
+  smoke      = @("Testing code search", "Code search tested")
+}
+# Rough share of total setup time per step, so the bar moves at an honest pace.
+$script:SetupStepWeight = @{
+  languages = 1; preflight = 1; packages = 18; node = 7; checkout = 5; composer = 3; npm = 14; automation = 2
+  shell = 1; seed = 1; admin = 2; keys = 1; native = 8; doctor = 32; validate = 3; smoke = 1
+}
+
+function Write-SetupProgress {
+  param([string[]]$Fields)
+  if (-not $ProgressFile) { return }
+  # Setup reads lines of up to ~1000 characters and treats "-" as an empty field.
+  $clean = @($Fields | ForEach-Object {
+    $field = (([string]$_) -replace '[\t\r\n]+', ' ' -replace '[^\x20-\x7E]', '').Trim()
+    if ($field.Length -gt 180) { $field = $field.Substring(0, 177) + "..." }
+    if ($field) { $field } else { "-" }
+  })
+  $line = ($clean -join "`t") + "`r`n"
+  # Setup reads this file while it grows; a brief sharing clash just retries.
+  for ($attempt = 0; $attempt -lt 20; $attempt++) {
+    try { [System.IO.File]::AppendAllText($ProgressFile, $line, [System.Text.Encoding]::ASCII); return }
+    catch { Start-Sleep -Milliseconds 50 }
+  }
+}
+
+function Get-SetupPercent {
+  param([string]$Key, [switch]$Including)
+  $total = 0
+  $before = 0
+  $seen = $false
+  foreach ($k in $script:StepKeys) {
+    $weight = [int]$script:SetupStepWeight[$k]
+    $total += $weight
+    if ($k -eq $Key) { $seen = $true; if ($Including) { $before += $weight } }
+    elseif (-not $seen) { $before += $weight }
+  }
+  if ($total -le 0) { return 0 }
+  return [int][math]::Floor(100 * $before / $total)
+}
+
+# Downloads a file and reports its percentage to the setup page, which
+# Invoke-WebRequest cannot do. Callers still verify the checksum afterwards.
+function Save-Download {
+  param([string]$Uri, [string]$OutFile, [string]$Activity, [int]$TimeoutSec = 600)
+  Write-SetupProgress @("act", $Activity, "0")
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  $request = [System.Net.HttpWebRequest]::Create($Uri)
+  $request.Timeout = $TimeoutSec * 1000
+  $request.ReadWriteTimeout = 120000
+  $request.UserAgent = "PosseSetup"
+  $response = $request.GetResponse()
+  try {
+    $total = $response.ContentLength
+    $source = $response.GetResponseStream()
+    $target = [System.IO.File]::Create($OutFile)
+    try {
+      $buffer = New-Object byte[] 262144
+      $received = [long]0
+      $reported = -1
+      $reportedAt = [DateTime]::UtcNow
+      while (($read = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        $target.Write($buffer, 0, $read)
+        $received += $read
+        if ($total -gt 0) {
+          $percent = [int][math]::Floor(100 * $received / $total)
+          if ($percent -ne $reported -and ([DateTime]::UtcNow - $reportedAt).TotalMilliseconds -ge 250) {
+            Write-SetupProgress @("actpct", $percent)
+            $reported = $percent
+            $reportedAt = [DateTime]::UtcNow
+          }
+        }
+      }
+    }
+    finally {
+      $target.Dispose()
+      $source.Dispose()
+    }
+  }
+  finally { $response.Dispose() }
+  Write-SetupProgress @("actpct", "100")
+}
+
+# "install ImageMagick (ImageMagick.Q16)" -> "Install ImageMagick"
+function Format-SetupActivity {
+  param([string]$Text)
+  $plain = ($Text -replace '\s*\([^)]*\)\s*$', '').Trim()
+  if (-not $plain) { return "" }
+  return $plain.Substring(0, 1).ToUpperInvariant() + $plain.Substring(1)
+}
 $script:CriticalFailed = $false
 $script:InstallFailed = $false
 $script:SummaryPrinted = $false
@@ -434,6 +571,8 @@ function Step-Begin {
   Write-Host ("{0}[{1,2}/{2}]{3} {4}{5}{6}" -f $script:DIM, $script:StepIndex, $script:StepKeys.Count, $script:R, $script:BOLD, $script:StepTitles[$Key], $script:R)
   Write-LogOnly ""
   Write-LogOnly ("===== [{0}/{1}] {2} =====" -f $script:StepIndex, $script:StepKeys.Count, $script:StepTitles[$Key])
+  $text = $script:SetupStepText[$Key]
+  if ($text) { Write-SetupProgress @("step", (Get-SetupPercent $Key), (Get-SetupPercent $Key -Including), $text[0]) }
 }
 
 function Step-End {
@@ -442,6 +581,8 @@ function Step-End {
   $script:StepNote[$script:CurrentStep] = $Note
   if ($Status -eq "failed") { $script:InstallFailed = $true }
   Write-LogOnly ("----- {0}: {1}{2}" -f $script:CurrentStep, $Status, $(if ($Note) { " ($Note)" } else { "" }))
+  $text = $script:SetupStepText[$script:CurrentStep]
+  if ($text) { Write-SetupProgress @("end", $Status, $text[1], $text[0], $Note) }
   switch -Regex ($Status) {
     "^(ok|done)$"        { Write-Host ("    {0}{1}{2} {3}" -f $script:GREEN, $script:GlyphOk, $script:R, $(if ($Note) { $Note } else { "done" })) }
     "^(skipped|dry-run)$" { Write-Host ("    {0}{1} {2}{3}" -f $script:DIM, $script:GlyphDot, $(if ($Note) { $Note } else { $Status }), $script:R) }
@@ -534,9 +675,14 @@ function Invoke-Logged {
     [string]$Description,
     [string[]]$Command,
     [string]$WorkingDirectory = "",
-    [int]$TimeoutSeconds = $CommandTimeoutSeconds
+    [int]$TimeoutSeconds = $CommandTimeoutSeconds,
+    [string]$Activity = "",
+    # The caller tries alternatives and reports the outcome; keep a failed
+    # attempt to one line here (the full output still goes to the log).
+    [switch]$QuietFailure
   )
   $cmdLine = Format-CommandLine $Command
+  Write-SetupProgress @("act", $(if ($Activity) { $Activity } else { Format-SetupActivity $Description }))
   Write-LogOnly ""
   Write-LogOnly (">>> {0}" -f $Description)
   Write-LogOnly (">>> `$ {0}" -f $cmdLine)
@@ -634,6 +780,9 @@ function Invoke-Logged {
   if ($rc -eq 0) {
     Write-Host ("    {0}{1}{2} {3} {4}({5}){6}" -f $script:GREEN, $script:GlyphOk, $script:R, $Description, $script:DIM, (Format-Duration $elapsedTotal), $script:R)
   }
+  elseif ($QuietFailure) {
+    Write-Host ("    {0}{1} {2}: not available here{3}" -f $script:DIM, $script:GlyphDot, $Description, $script:R)
+  }
   else {
     Write-Host ("    {0}{1}{2} {3} {4}(exit {5} after {6}){7}" -f $script:RED, $script:GlyphFail, $script:R, $Description, $script:DIM, $rc, (Format-Duration $elapsedTotal), $script:R)
     if ($chunkContent) {
@@ -651,7 +800,7 @@ function Print-Summary {
   $script:SummaryPrinted = $true
   Write-Host ""
   Write-Host ("  {0}{1}{2}" -f $script:DIM, ("-" * 58), $script:R)
-  Write-Host ("  {0}Install summary{1}" -f $script:BOLD, $script:R)
+  Write-Host ("  {0}{1} summary{2}" -f $script:BOLD, $(if ($Uninstall) { "Uninstall" } else { "Install" }), $script:R)
   foreach ($key in $script:StepKeys) {
     $status = $script:StepStatus[$key]
     $note = $script:StepNote[$key]
@@ -673,6 +822,11 @@ function Print-Summary {
   Write-Host ""
   Write-Host ("  {0}Log:{1} {2}" -f $script:DIM, $script:R, $script:LogFile)
   Write-Host ""
+  if ($Uninstall) {
+    if ($script:InstallFailed) { Write-Host ("  {0}{1}Uninstall left items behind.{2} See the failed step above." -f $script:RED, $script:BOLD, $script:R) }
+    Write-Host ""
+    return
+  }
   if ($script:InstallFailed) {
     Write-Host ("  {0}{1}Install did not complete.{2} Fix the failed step above and re-run - completed steps are skipped on re-runs." -f $script:RED, $script:BOLD, $script:R)
   }
@@ -830,6 +984,343 @@ function Update-SessionPath {
   $env:Path = $merged -join ";"
 }
 
+# A fresh terminal sees only the saved Machine + User PATH. A tool visible only
+# to this session, or only through a winget alias, breaks the next shell, so
+# tools are located and verified against the saved PATH.
+function Get-SavedPathDirs {
+  $dirs = @()
+  foreach ($raw in @([Environment]::GetEnvironmentVariable("Path", "Machine"), (Get-UserPathRaw))) {
+    foreach ($entry in ([string]$raw -split ";")) {
+      $expanded = Expand-PathEntry $entry
+      if ($expanded) { $dirs += $expanded.TrimEnd("\") }
+    }
+  }
+  return $dirs
+}
+
+# winget exposes portable packages through symlinks in WinGet\Links. Tools that
+# find their own files beside the launched binary (PHP's php.ini and ext\)
+# break through those links, so resolve to the real file.
+function Resolve-RealExecutable {
+  param([string]$PathValue)
+  $current = $PathValue
+  for ($hop = 0; $hop -lt 8; $hop++) {
+    $item = Get-Item -LiteralPath $current -Force -ErrorAction SilentlyContinue
+    if (-not $item -or -not $item.LinkType -or -not $item.Target) { break }
+    $target = [string]@($item.Target)[0]
+    if (-not [System.IO.Path]::IsPathRooted($target)) { $target = Join-Path (Split-Path $current -Parent) $target }
+    $current = Resolve-FullPath $target
+  }
+  return $current
+}
+
+function Test-ExecutableLink {
+  param([string]$PathValue)
+  $item = Get-Item -LiteralPath $PathValue -Force -ErrorAction SilentlyContinue
+  return [bool]($item -and $item.LinkType)
+}
+
+function Find-ExeOnSavedPath {
+  param([string]$Exe)
+  foreach ($dir in (Get-SavedPathDirs)) {
+    $candidate = Join-Path $dir $Exe
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+  }
+  return ""
+}
+
+function Add-UserPathEntry {
+  param([string]$Dir, [switch]$Prepend)
+  $Dir = $Dir.TrimEnd("\")
+  $sessionParts = @($env:Path -split ";" | Where-Object { $_ -and ($_.TrimEnd("\") -ine $Dir) })
+  $env:Path = $(if ($Prepend) { @($Dir) + $sessionParts } else { $sessionParts + @($Dir) }) -join ";"
+  if ($NoPersistEnv -or $DryRun) { return $false }
+  $userPath = Get-UserPathRaw
+  $parts = @($userPath -split ";" | Where-Object { $_ -and ((Expand-PathEntry $_).TrimEnd("\") -ine $Dir) })
+  $newUserPath = $(if ($Prepend) { @($Dir) + $parts } else { $parts + @($Dir) }) -join ";"
+  if ($newUserPath -ieq $userPath) { return $false }
+  Set-UserPathRaw $newUserPath
+  Send-EnvironmentChangeBroadcast
+  return $true
+}
+
+# --- find before installing ------------------------------------------------------
+# A tool that is already on this PC and new enough counts as installed, wherever
+# it came from. Candidates come from PATH, Windows' installed-app registry and
+# App Paths, package-manager folders, each tool's usual folders, and winget's
+# package folders; the first copy whose version probe passes is used.
+
+# Installed apps as Apps & features lists them, read once per run.
+$script:InstalledApps = @()
+$script:InstalledAppsRead = $false
+function Get-InstalledApps {
+  if ($script:InstalledAppsRead) { return $script:InstalledApps }
+  $apps = @()
+  foreach ($root in @(
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+  )) {
+    foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
+      try {
+        $entry = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+        if ($entry.DisplayName) {
+          $apps += [PSCustomObject]@{ Name = [string]$entry.DisplayName; Location = [string]$entry.InstallLocation; Icon = [string]$entry.DisplayIcon }
+        }
+      }
+      catch {}
+    }
+  }
+  $script:InstalledApps = $apps
+  $script:InstalledAppsRead = $true
+  return $apps
+}
+
+function Get-RegisteredAppDirs {
+  param($Tool)
+  $dirs = @()
+  # App Paths is Windows' own "where is this program" registry.
+  foreach ($hive in @("HKCU:", "HKLM:")) {
+    try {
+      $entry = Get-ItemProperty -LiteralPath ("{0}\Software\Microsoft\Windows\CurrentVersion\App Paths\{1}" -f $hive, $Tool.Exe) -ErrorAction Stop
+      $default = ([string]$entry.'(default)').Trim('"')
+      if ($default) { $dirs += (Split-Path $default -Parent) }
+      if ($entry.Path) { $dirs += [string]$entry.Path }
+    }
+    catch {}
+  }
+  foreach ($pattern in @($Tool.AppNames | Where-Object { $_ })) {
+    foreach ($app in @(Get-InstalledApps | Where-Object { $_.Name -like $pattern })) {
+      $bases = @($app.Location)
+      if ($app.Icon) { $bases += (Split-Path (($app.Icon -split ",")[0].Trim().Trim('"')) -Parent) }
+      foreach ($base in @($bases | Where-Object { $_ })) {
+        $dirs += @($base, (Join-Path $base "bin"), (Join-Path $base "cmd"))
+      }
+    }
+  }
+  return $dirs
+}
+
+function Get-PackageManagerDirs {
+  $dirs = @((Join-Path $localAppDataRoot "Microsoft\WinGet\Links"))
+  if ($env:ProgramFiles) { $dirs += (Join-Path $env:ProgramFiles "WinGet\Links") }
+  $scoop = if ($env:SCOOP) { $env:SCOOP } else { Join-Path $env:USERPROFILE "scoop" }
+  $dirs += (Join-Path $scoop "shims")
+  $choco = if ($env:ChocolateyInstall) { $env:ChocolateyInstall } elseif ($env:ProgramData) { Join-Path $env:ProgramData "chocolatey" } else { "" }
+  if ($choco) { $dirs += (Join-Path $choco "bin") }
+  return $dirs
+}
+
+# Expands %VARS% and wildcards (newest-looking folder first).
+function Expand-KnownDirs {
+  param([string[]]$Patterns)
+  $dirs = @()
+  foreach ($pattern in @($Patterns | Where-Object { $_ })) {
+    $expanded = Expand-PathEntry $pattern
+    if ($expanded -match '[*?]') {
+      $dirs += @(Get-Item -Path $expanded -ErrorAction SilentlyContinue | Where-Object { $_.PSIsContainer } | Sort-Object Name -Descending | ForEach-Object { $_.FullName })
+    }
+    elseif ($expanded) { $dirs += $expanded }
+  }
+  return $dirs
+}
+
+function Get-ToolCandidates {
+  param($Tool)
+  $found = New-Object System.Collections.Generic.List[string]
+  foreach ($command in @(Get-Command $Tool.Exe -CommandType Application -All -ErrorAction SilentlyContinue)) {
+    if ($command.Source -and -not $found.Contains($command.Source)) { $found.Add($command.Source) }
+  }
+  $dirs = @(Get-SavedPathDirs) + @(Get-RegisteredAppDirs $Tool) + @(Get-PackageManagerDirs) + @(Expand-KnownDirs $Tool.KnownDirs)
+  if ($Tool.Locate) { $dirs += @(& $Tool.Locate) }
+  foreach ($dir in @($dirs | Where-Object { $_ })) {
+    $candidate = Join-Path $dir $Tool.Exe
+    if (-not $found.Contains($candidate) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { $found.Add($candidate) }
+  }
+  $wingetRoots = @((Join-Path $localAppDataRoot "Microsoft\WinGet"))
+  if ($env:ProgramFiles) { $wingetRoots += (Join-Path $env:ProgramFiles "WinGet") }
+  foreach ($root in $wingetRoots) {
+    foreach ($id in @($Tool.WingetIds | Where-Object { $_ })) {
+      foreach ($package in @(Get-ChildItem -LiteralPath (Join-Path $root "Packages") -Directory -Filter ($id + "_*") -ErrorAction SilentlyContinue)) {
+        foreach ($hit in @(Get-ChildItem -LiteralPath $package.FullName -Filter $Tool.Exe -File -Recurse -Depth 3 -ErrorAction SilentlyContinue)) {
+          if (-not $found.Contains($hit.FullName)) { $found.Add($hit.FullName) }
+        }
+      }
+    }
+  }
+  return ,$found.ToArray()
+}
+
+# Runs the tool's version command. A copy that does not run (a Store
+# placeholder, a broken install) is not a candidate at all.
+function Get-ToolVersion {
+  param($Tool, [string]$Path)
+  $arguments = if ($Tool.VersionArgs) { $Tool.VersionArgs } else { @("--version") }
+  $probe = Get-NativeOutput $Path $arguments
+  if (-not $probe -or $probe.ExitCode -ne 0) { return [PSCustomObject]@{ Runs = $false; Version = $null } }
+  $pattern = if ($Tool.VersionPattern) { $Tool.VersionPattern } else { '(\d+)\.(\d+)' }
+  $match = [regex]::Match([string]$probe.Output, $pattern)
+  $version = if ($match.Success) { [version]("{0}.{1}" -f $match.Groups[1].Value, $match.Groups[2].Value) } else { $null }
+  return [PSCustomObject]@{ Runs = $true; Version = $version }
+}
+
+function Find-CompliantTool {
+  param($Tool)
+  $tooOld = $null
+  foreach ($path in (Get-ToolCandidates $Tool)) {
+    $real = if ($Tool.RealDirFirst) { Resolve-RealExecutable $path } else { $path }
+    $dir = Split-Path $real -Parent
+    if (@($Tool.Companions | Where-Object { $_ -and -not (Test-Path -LiteralPath (Join-Path $dir $_)) }).Count -gt 0) { continue }
+    $probe = Get-ToolVersion $Tool $real
+    if (-not $probe.Runs) { continue }
+    if ($Tool.MinVersion -and (-not $probe.Version -or $probe.Version -lt [version]$Tool.MinVersion)) {
+      if (-not $tooOld) { $tooOld = [PSCustomObject]@{ Path = $real; Version = $probe.Version } }
+      continue
+    }
+    return [PSCustomObject]@{ Path = $real; Version = $probe.Version; TooOld = $null }
+  }
+  return [PSCustomObject]@{ Path = ""; Version = $null; TooOld = $tooOld }
+}
+
+# Puts a found copy where a new terminal will use it: on the saved PATH, ahead
+# of any other copy of the same command. Returns a note when PATH changed.
+function Use-ToolPath {
+  param($Tool, [string]$Path)
+  $dir = (Split-Path $Path -Parent).TrimEnd("\")
+  $first = Find-ExeOnSavedPath $Tool.Exe
+  $isFirst = $first -and ((Resolve-RealExecutable $first) -ieq (Resolve-RealExecutable $Path)) -and -not ($Tool.RealDirFirst -and (Test-ExecutableLink $first))
+  if ($isFirst) {
+    if (-not (@($env:Path -split ";") | Where-Object { $_ -and $_.TrimEnd("\") -ieq (Split-Path $first -Parent).TrimEnd("\") })) {
+      $env:Path = (Split-Path $first -Parent) + ";" + $env:Path
+    }
+    return ""
+  }
+  # The system PATH always comes before the user PATH, so a different copy
+  # there still wins in new terminals; say so instead of pretending otherwise.
+  $machineDirs = @(([string][Environment]::GetEnvironmentVariable("Path", "Machine")) -split ";" | ForEach-Object { (Expand-PathEntry $_).TrimEnd("\") })
+  if ($first -and ($machineDirs -icontains (Split-Path $first -Parent).TrimEnd("\"))) {
+    Write-Warn2 ("{0} at {1} comes first on the system PATH; Posse needs the copy in {2}" -f $Tool.Label, $first, $dir)
+  }
+  try {
+    if (Add-UserPathEntry $dir -Prepend:([bool]$first -or [bool]$Tool.RealDirFirst)) { return ("added {0} to your PATH" -f $dir) }
+  }
+  catch { Write-Warn2 ("could not save {0} to your PATH: {1}" -f $dir, $_.Exception.Message) }
+  return ("using {0}" -f $dir)
+}
+
+# Is this requirement met, and if so by which copy? Tools without an
+# executable to look for (none today) fall back to their Test.
+function Resolve-ToolRequirement {
+  param($Tool)
+  if (-not $Tool.Exe) {
+    return [PSCustomObject]@{ Satisfied = [bool](& $Tool.Test); Path = ""; Version = $null; Note = ""; TooOld = $null }
+  }
+  $found = Find-CompliantTool $Tool
+  if ($found.Path) {
+    $note = Use-ToolPath $Tool $found.Path
+    return [PSCustomObject]@{ Satisfied = $true; Path = $found.Path; Version = $found.Version; Note = $note; TooOld = $null }
+  }
+  if ($Tool.Fallback -and (& $Tool.Fallback)) {
+    return [PSCustomObject]@{ Satisfied = $true; Path = ""; Version = $null; Note = ""; TooOld = $null }
+  }
+  return [PSCustomObject]@{ Satisfied = $false; Path = ""; Version = $null; Note = ""; TooOld = $found.TooOld }
+}
+
+# Python's installer records each version under PEP 514 keys, PATH or not.
+function Get-PythonRegistryDirs {
+  $dirs = @()
+  foreach ($root in @("HKCU:\Software\Python\PythonCore", "HKLM:\Software\Python\PythonCore", "HKLM:\Software\WOW6432Node\Python\PythonCore")) {
+    foreach ($version in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | Sort-Object PSChildName -Descending)) {
+      try {
+        $installPath = [string](Get-ItemProperty -LiteralPath (Join-Path $version.PSPath "InstallPath") -ErrorAction Stop).'(default)'
+        if ($installPath) { $dirs += $installPath }
+      }
+      catch {}
+    }
+  }
+  return $dirs
+}
+
+# Git for Windows records where it lives.
+function Get-GitRegistryDirs {
+  $dirs = @()
+  foreach ($key in @("HKLM:\Software\GitForWindows", "HKCU:\Software\GitForWindows")) {
+    try {
+      $installPath = [string](Get-ItemProperty -LiteralPath $key -ErrorAction Stop).InstallPath
+      if ($installPath) { $dirs += (Join-Path $installPath "cmd") }
+    }
+    catch {}
+  }
+  return $dirs
+}
+
+function Install-PortableGo {
+  # Not winget: GoLang.Go is a machine-scope MSI, and a silent MSI started
+  # without elevation can fail instead of asking for approval. The official zip
+  # needs no administrator rights and is checked against go.dev's SHA-256.
+  $archName = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+  $arch = switch ($archName) { "ARM64" { "arm64" } "AMD64" { "amd64" } default { throw "Go indexing needs x64 or ARM64 Windows" } }
+  $runtimeRoot = Join-Path $script:ManagedStateRoot "runtimes"
+  New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+  $stage = Join-Path $runtimeRoot (".go-" + [Guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Path $stage | Out-Null
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $releases = Invoke-RestMethod -Uri "https://go.dev/dl/?mode=json" -TimeoutSec 60
+    $release = @($releases | Where-Object { $_.stable }) | Select-Object -First 1
+    $file = @($release.files | Where-Object { $_.os -eq "windows" -and $_.arch -eq $arch -and $_.kind -eq "archive" }) | Select-Object -First 1
+    if (-not $file -or $file.sha256 -notmatch '^[0-9a-fA-F]{64}$') { throw "no Go $arch archive in go.dev's release list" }
+    $archive = Join-Path $stage $file.filename
+    Write-Info ("downloading {0}" -f $file.filename)
+    Save-Download -Uri ("https://go.dev/dl/" + $file.filename) -OutFile $archive -Activity "Downloading Go" 
+    if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $file.sha256) { throw "Go archive checksum mismatch; refusing to install it" }
+    # ZipFile is far faster than Expand-Archive on Go's ~12k files.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, (Join-Path $stage "x"))
+    $goExe = Join-Path $stage "x\go\bin\go.exe"
+    & $goExe version *> $null
+    if ($LASTEXITCODE -ne 0) { throw "downloaded Go cannot run on this Windows host" }
+    $destination = Join-Path $runtimeRoot "go"
+    if (Test-Path -LiteralPath $destination) { Remove-Item -LiteralPath $destination -Recurse -Force }
+    Move-Item -LiteralPath (Join-Path $stage "x\go") -Destination $destination
+    [void](Add-UserPathEntry (Join-Path $destination "bin"))
+    return 0
+  }
+  finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Install-Rustup {
+  # Not winget: its Rustup package defaults to the MSVC toolchain, which needs
+  # Visual Studio Build Tools. The GNU host ships its own linker, which is all
+  # rust-analyzer needs to run build scripts while indexing.
+  $archName = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+  switch ($archName) {
+    "AMD64" { $initTriple = "x86_64-pc-windows-msvc"; $defaultHost = "x86_64-pc-windows-gnu" }
+    "ARM64" { $initTriple = "aarch64-pc-windows-msvc"; $defaultHost = "aarch64-pc-windows-msvc" }
+    default { throw "Rust indexing needs x64 or ARM64 Windows" }
+  }
+  if ($archName -eq "ARM64") { Write-Warn2 "ARM64 Rust uses the MSVC toolchain; crates with build scripts need Visual Studio Build Tools to index fully" }
+  $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("posse-rustup-" + [Guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Path $stage | Out-Null
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $url = "https://static.rust-lang.org/rustup/dist/$initTriple/rustup-init.exe"
+    $init = Join-Path $stage "rustup-init.exe"
+    $shaFile = Join-Path $stage "rustup-init.exe.sha256"
+    Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256" -OutFile $shaFile -TimeoutSec 60
+    $expected = @(([string](Get-Content -LiteralPath $shaFile -Raw)).Trim() -split '\s+')[0]
+    if ($expected -notmatch '^[0-9a-fA-F]{64}$') { throw "rustup-init checksum file is malformed" }
+    Save-Download -Uri $url -OutFile $init -Activity "Downloading the Rust installer" -TimeoutSec 300
+    if ((Get-FileHash -LiteralPath $init -Algorithm SHA256).Hash -ine $expected) { throw "rustup-init checksum mismatch; refusing to run it" }
+    $rc = Invoke-Logged -Description ("install Rust ({0}) with rust-analyzer" -f $defaultHost) -Activity "Installing Rust and rust-analyzer" -Command @(
+      $init, "-y", "--profile", "minimal", "--default-host", $defaultHost, "--component", "rust-analyzer"
+    )
+    Update-SessionPath
+    return $rc
+  }
+  finally { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 function Get-PythonRunner {
   $candidates = @(
     [PSCustomObject]@{ Name = "python"; Args = @() },
@@ -862,28 +1353,54 @@ function Test-DepsFresh {
   } catch { return $false } finally { Pop-Location }
 }
 
-function Test-ImageMagick {
-  $command = Get-Command magick -ErrorAction SilentlyContinue
-  if (-not $command) { return $false }
+# Runs a native probe through redirected streams, so a tool that writes to
+# stderr cannot become a terminating error under Windows PowerShell 5.1.
+function Get-NativeOutput {
+  param([string]$FileName, [string[]]$Arguments, [int]$TimeoutMs = 15000)
   try {
-    $version = [string](& $command.Source -version 2>$null)
-    return $LASTEXITCODE -eq 0 -and $version -match "ImageMagick"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FileName
+    $psi.Arguments = ($Arguments | ForEach-Object { Quote-NativeArg $_ }) -join " "
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $proc.StandardOutput.ReadToEndAsync()
+    $stderr = $proc.StandardError.ReadToEndAsync()
+    if (-not $proc.WaitForExit($TimeoutMs)) { Stop-InstallerProcessTree $proc; return $null }
+    $proc.WaitForExit()
+    return [PSCustomObject]@{ ExitCode = $proc.ExitCode; StdOut = [string]$stdout.Result; Output = [string]$stdout.Result + [string]$stderr.Result }
   }
-  catch { return $false }
+  catch { return $null }
+}
+
+# ImageMagick installs into a versioned folder and records it in the registry;
+# the Store package exposes an app alias instead.
+function Get-ImageMagickDirs {
+  $dirs = @()
+  foreach ($key in @("HKLM:\SOFTWARE\ImageMagick\Current", "HKLM:\SOFTWARE\WOW6432Node\ImageMagick\Current", "HKCU:\SOFTWARE\ImageMagick\Current")) {
+    try {
+      $bin = [string](Get-ItemProperty -LiteralPath $key -ErrorAction Stop).BinPath
+      if ($bin) { $dirs += $bin }
+    }
+    catch {}
+  }
+  foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }) {
+    $dirs += @(Get-ChildItem -LiteralPath $root -Directory -Filter "ImageMagick-*" -ErrorAction SilentlyContinue | Sort-Object Name -Descending | ForEach-Object { $_.FullName })
+  }
+  $dirs += (Join-Path $localAppDataRoot "Microsoft\WindowsApps")
+  return $dirs
 }
 
 function Get-MissingPhpComposerExtensions {
   param([string]$PhpPath)
-  $missing = @()
-  foreach ($extension in @("openssl", "curl", "zip")) {
-    $probe = 'exit(extension_loaded("{0}") ? 0 : 1);' -f $extension
-    try {
-      & $PhpPath -r $probe *> $null
-      if ($LASTEXITCODE -ne 0) { $missing += $extension }
-    }
-    catch { $missing += $extension }
-  }
-  return $missing
+  # One probe through redirected streams: a PHP that prints startup warnings
+  # (common with dev setups) must not read as "extension missing".
+  $code = 'foreach (["openssl", "curl", "zip"] as $e) { if (!extension_loaded($e)) { echo $e, PHP_EOL; } }'
+  $probe = Get-NativeOutput $PhpPath @("-r", $code)
+  if (-not $probe -or $probe.ExitCode -ne 0) { return @("openssl", "curl", "zip") }
+  return @(([string]$probe.StdOut -split "\r?\n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -in @("openssl", "curl", "zip") })
 }
 
 function Enable-PhpComposerExtensions {
@@ -895,11 +1412,15 @@ function Enable-PhpComposerExtensions {
   }
 
   $phpBinary = ""
-  try { $phpBinary = [string](& $PhpPath -r 'echo PHP_BINARY;' 2>$null) } catch {}
+  $binaryProbe = Get-NativeOutput $PhpPath @("-r", "echo PHP_BINARY;")
+  if ($binaryProbe -and $binaryProbe.ExitCode -eq 0) { $phpBinary = ([string]$binaryProbe.StdOut).Trim() }
   if ([string]::IsNullOrWhiteSpace($phpBinary) -or -not (Test-Path -LiteralPath $phpBinary)) {
     $phpBinary = $PhpPath
   }
   try { $phpBinary = (Resolve-Path -LiteralPath $phpBinary -ErrorAction Stop).Path } catch {}
+  # Through winget's Links alias, PHP_BINARY names the link, not the folder
+  # that holds ext\ and php.ini.
+  $phpBinary = Resolve-RealExecutable $phpBinary
   $phpDir = Split-Path $phpBinary -Parent
   if (-not (Test-DirectoryWriteAccess $phpDir)) {
     return [PSCustomObject]@{
@@ -917,7 +1438,8 @@ function Enable-PhpComposerExtensions {
   }
 
   $loadedIni = ""
-  try { $loadedIni = ([string](& $phpBinary -r 'echo php_ini_loaded_file() ?: "";' 2>$null)).Trim() } catch {}
+  $iniProbe = Get-NativeOutput $phpBinary @("-r", 'echo php_ini_loaded_file() ?: "";')
+  if ($iniProbe -and $iniProbe.ExitCode -eq 0) { $loadedIni = ([string]$iniProbe.StdOut).Trim() }
   $iniPath = if ($loadedIni) { $loadedIni } else { Join-Path $phpDir "php.ini" }
   $created = $false
   try {
@@ -986,90 +1508,116 @@ function Enable-PhpComposerExtensions {
 function Step-Packages {
   Step-Begin "packages"
 
+  # Each tool says what counts as "already installed": its executable, the
+  # oldest version Posse works with (when it matters), how to ask for that
+  # version, and where its installers usually register or unpack it.
   $tools = @(
-    [PSCustomObject]@{ Label = "Git";             Test = { Test-Cmd "git" };       WingetIds = @("Git.Git"); Reason = "required Posse checkout and worktree lifecycle" },
-    [PSCustomObject]@{ Label = "GitHub CLI";      Test = { Test-Cmd "gh" };        WingetIds = @("GitHub.cli"); Reason = "optional GitHub authentication and Session provisioning" },
-    [PSCustomObject]@{ Label = "ripgrep";       Test = { Test-Cmd "rg" };        WingetIds = @("BurntSushi.ripgrep.MSVC"); Reason = "deterministic search" },
-    [PSCustomObject]@{ Label = "Tesseract OCR"; Test = { Test-Cmd "tesseract" }; WingetIds = @("UB-Mannheim.TesseractOCR"); Reason = "image OCR extraction" },
-    [PSCustomObject]@{ Label = "ImageMagick";   Test = { Test-ImageMagick };     WingetIds = @("ImageMagick.ImageMagick", "ImageMagick.Q16-HDRI", "ImageMagick.Q16"); Reason = "image conversion" },
-    [PSCustomObject]@{ Label = "FFmpeg";        Test = { Test-Cmd "ffmpeg" };    WingetIds = @("Gyan.FFmpeg"); Reason = "media conversion" },
-    [PSCustomObject]@{ Label = "Python 3";      Test = { $null -ne (Get-PythonRunner) }; WingetIds = @("Python.Python.3.13", "Python.Python.3.12"); Reason = "Python helpers + managed venvs" }
+    [PSCustomObject]@{ Label = "Git"; Exe = "git.exe"; VersionPattern = 'git version (\d+)\.(\d+)'; AppNames = @("Git", "Git version *"); Locate = { Get-GitRegistryDirs }; KnownDirs = @("%ProgramFiles%\Git\cmd", "%LOCALAPPDATA%\Programs\Git\cmd"); WingetIds = @("Git.Git"); Reason = "required Posse checkout and worktree lifecycle" },
+    [PSCustomObject]@{ Label = "GitHub CLI"; Exe = "gh.exe"; AppNames = @("GitHub CLI*"); KnownDirs = @("%ProgramFiles%\GitHub CLI"); WingetIds = @("GitHub.cli"); Reason = "optional GitHub authentication and Session provisioning" },
+    [PSCustomObject]@{ Label = "ripgrep"; Exe = "rg.exe"; WingetIds = @("BurntSushi.ripgrep.MSVC"); Reason = "deterministic search" },
+    [PSCustomObject]@{ Label = "Tesseract OCR"; Exe = "tesseract.exe"; AppNames = @("Tesseract-OCR*"); KnownDirs = @("%ProgramFiles%\Tesseract-OCR", "%ProgramFiles(x86)%\Tesseract-OCR", "%LOCALAPPDATA%\Programs\Tesseract-OCR"); WingetIds = @("UB-Mannheim.TesseractOCR"); Reason = "image OCR extraction" },
+    # The Store (MSIX) builds install without administrator rights; the classic
+    # ImageMagick.ImageMagick installer is machine-wide only, so it goes last.
+    [PSCustomObject]@{ Label = "ImageMagick"; Exe = "magick.exe"; MinVersion = "7.0"; VersionArgs = @("-version"); VersionPattern = 'ImageMagick (\d+)\.(\d+)'; AppNames = @("ImageMagick*"); Locate = { Get-ImageMagickDirs }; WingetIds = @("ImageMagick.Q16-HDRI", "ImageMagick.Q16", "ImageMagick.ImageMagick"); Scope = "any"; Reason = "image conversion" },
+    [PSCustomObject]@{ Label = "FFmpeg"; Exe = "ffmpeg.exe"; VersionArgs = @("-version"); WingetIds = @("Gyan.FFmpeg"); Reason = "media conversion" }
   )
+  if (Test-ScipLanguageSelected "python") {
+    # Posse itself needs no Python; Python projects do. The py launcher also
+    # satisfies this when python.exe is not on PATH.
+    $tools += [PSCustomObject]@{ Label = "Python 3"; Exe = "python.exe"; MinVersion = "3.9"; VersionPattern = 'Python (\d+)\.(\d+)'; AppNames = @("Python 3*"); Locate = { Get-PythonRegistryDirs }; Fallback = { $null -ne (Get-PythonRunner) }; WingetIds = @("Python.Python.3.13", "Python.Python.3.12"); Reason = "explicitly selected SCIP Python indexing" }
+  }
   if (Test-ScipLanguageSelected "php") {
-    $tools += [PSCustomObject]@{ Label = "PHP"; Test = { Test-Cmd "php" }; WingetIds = @("PHP.PHP.8.4", "PHP.PHP.8.3"); Reason = "explicitly selected SCIP PHP indexing" }
+    # Posse's pinned scip-php dependencies need PHP 8.2+. PHP reads php.ini and
+    # ext\ beside the binary it was launched as, so its real folder must come
+    # before winget's Links alias on PATH.
+    $tools += [PSCustomObject]@{ Label = "PHP"; Exe = "php.exe"; MinVersion = "8.2"; VersionPattern = 'PHP (\d+)\.(\d+)'; RealDirFirst = $true; AppNames = @("PHP*"); KnownDirs = @("C:\xampp\php", "C:\laragon\bin\php\php-*", "C:\tools\php*", "%USERPROFILE%\scoop\apps\php\current"); WingetIds = @("PHP.PHP.8.4", "PHP.PHP.8.3"); Reason = "explicitly selected SCIP PHP indexing" }
+  }
+  if (Test-ScipLanguageSelected "go") {
+    # Go 1.21+ fetches the newer toolchain scip-go declares by itself.
+    $tools += [PSCustomObject]@{ Label = "Go"; Exe = "go.exe"; MinVersion = "1.21"; VersionArgs = @("version"); VersionPattern = 'go(\d+)\.(\d+)'; AppNames = @("Go Programming Language*"); KnownDirs = @("%ProgramFiles%\Go\bin", (Join-Path $script:ManagedStateRoot "runtimes\go\bin")); WingetIds = @("GoLang.Go"); Install = { Install-PortableGo }; InstallLabel = "the official go.dev zip"; Reason = "explicitly selected SCIP Go indexing" }
+  }
+  if (Test-ScipLanguageSelected "rust") {
+    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
+    $tools += [PSCustomObject]@{ Label = "Rust"; Exe = "cargo.exe"; Companions = @("rustc.exe"); KnownDirs = @((Join-Path $cargoHome "bin")); Install = { Install-Rustup }; InstallLabel = "rustup (GNU toolchain + rust-analyzer)"; Reason = "explicitly selected SCIP Rust indexing" }
   }
 
-  $missing = @($tools | Where-Object { -not (& $_.Test) })
-  if ($missing.Count -eq 0) {
-    Step-End "ok" "all selected helper CLIs present"
-    return
-  }
-
-  foreach ($tool in $missing) { Write-Info ("missing: {0} ({1})" -f $tool.Label, $tool.Reason) }
-
-  if ($SkipHostTools) {
-    Step-End "skipped" ("-SkipHostTools; missing: " + (($missing | ForEach-Object { $_.Label }) -join ", "))
-    return
-  }
-  if (-not (Test-Cmd "winget")) {
-    Write-Warn2 "winget is not available; install the missing tools manually (App Installer from the Microsoft Store provides winget)"
-    Step-End "partial" "winget unavailable; tools not installed"
-    return
-  }
-  if ($DryRun) {
-    foreach ($tool in $missing) {
-      Write-Host ("    {0}{1} (dry-run) would winget install {2}{3}" -f $script:DIM, $script:GlyphDot, ($tool.WingetIds[0]), $script:R)
+  # Find before installing: anything already here and new enough is used as-is.
+  Write-SetupProgress @("act", "Looking for tools already on this PC")
+  $satisfied = @{}
+  $pathNotes = @()
+  foreach ($tool in $tools) {
+    $result = Resolve-ToolRequirement $tool
+    if ($result.Satisfied) {
+      $satisfied[$tool.Label] = $true
+      if ($result.Note) { $pathNotes += $tool.Label; Write-Info ("{0}: {1}" -f $tool.Label, $result.Note) }
     }
-    Step-End "dry-run" "would install missing tools via winget"
-    return
+    elseif ($result.TooOld) {
+      Write-Info ("found {0} {1} at {2}, but Posse needs {3} or newer" -f $tool.Label, $result.TooOld.Version, $result.TooOld.Path, $tool.MinVersion)
+    }
   }
 
+  $missing = @($tools | Where-Object { -not $satisfied[$_.Label] })
   $failed = @()
-  foreach ($tool in $missing) {
-    $installed = $false
-    foreach ($id in $tool.WingetIds) {
-      $rc = Invoke-Logged -Description ("install {0} ({1})" -f $tool.Label, $id) -Command @(
-        "winget", "install", "--id", $id, "--exact", "--source", "winget", "--silent",
-        "--scope", "user", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"
-      )
-      if ($rc -eq 0) { $installed = $true; break }
+  foreach ($tool in $missing) { Write-Info ("missing: {0} ({1})" -f $tool.Label, $tool.Reason) }
+  if ($missing.Count -gt 0) {
+    if ($SkipHostTools) {
+      Step-End "skipped" ("-SkipHostTools; missing: " + (($missing | ForEach-Object { $_.Label }) -join ", "))
+      return
     }
-    if (-not $installed) { $failed += $tool.Label }
-  }
-
-  Update-SessionPath
-
-  # Tesseract's installer does not reliably add itself to PATH.
-  if (-not (Test-Cmd "tesseract")) {
-    foreach ($dir in @("$env:ProgramFiles\Tesseract-OCR", "${env:ProgramFiles(x86)}\Tesseract-OCR", "$env:LOCALAPPDATA\Programs\Tesseract-OCR")) {
-      if ($dir -and (Test-Path (Join-Path $dir "tesseract.exe"))) {
-        $env:Path = "$dir;$env:Path"
-        if (-not $NoPersistEnv) {
-          $userPath = Get-UserPathRaw
-          $alreadyPresent = @($userPath -split ";" | Where-Object { (Expand-PathEntry $_) -ieq $dir }).Count -gt 0
-          if (-not $alreadyPresent) {
-            $newUserPath = if ($userPath) { $userPath.TrimEnd(";") + ";" + $dir } else { $dir }
-            try { Set-UserPathRaw $newUserPath; Send-EnvironmentChangeBroadcast }
-            catch { Write-Warn2 ("could not persist Tesseract PATH entry; current session still works: {0}" -f $_.Exception.Message) }
+    if ($DryRun) {
+      foreach ($tool in $missing) {
+        $how = if ($tool.Install) { $tool.InstallLabel } else { "winget install " + $tool.WingetIds[0] }
+        Write-Host ("    {0}{1} (dry-run) would install {2} via {3}{4}" -f $script:DIM, $script:GlyphDot, $tool.Label, $how, $script:R)
+      }
+      Step-End "dry-run" "would install missing tools"
+      return
+    }
+    $hasWinget = Test-Cmd "winget"
+    if (-not $hasWinget -and @($missing | Where-Object { -not $_.Install }).Count -gt 0) {
+      Write-Warn2 "winget is not available; install the missing tools manually (App Installer from the Microsoft Store provides winget)"
+    }
+    $toolNumber = 0
+    foreach ($tool in $missing) {
+      $toolNumber++
+      $counter = if ($missing.Count -gt 1) { " ({0} of {1})" -f $toolNumber, $missing.Count } else { "" }
+      Write-SetupProgress @("act", ("Installing {0}{1}" -f $tool.Label, $counter))
+      $installed = $false
+      if ($tool.Install) {
+        try {
+          if ((& $tool.Install) -eq 0) {
+            Update-SessionPath
+            $installed = (Resolve-ToolRequirement $tool).Satisfied
           }
         }
-        Write-Info "added Tesseract to PATH: $dir"
-        break
+        catch { Write-Warn2 ("{0} install failed: {1}" -f $tool.Label, $_.Exception.Message) }
       }
+      elseif ($hasWinget) {
+        foreach ($id in $tool.WingetIds) {
+          $wingetArgs = @("winget", "install", "--id", $id, "--exact", "--source", "winget", "--silent")
+          # "any" lets winget pick a machine-wide installer (Windows asks to approve it).
+          if ($tool.Scope -ne "any") { $wingetArgs += @("--scope", "user") }
+          $wingetArgs += @("--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
+          $rc = Invoke-Logged -Description ("install {0} ({1})" -f $tool.Label, $id) -Activity ("Installing {0}{1}" -f $tool.Label, $counter) -Command $wingetArgs -QuietFailure
+          if ($rc -ne 0) { continue }
+          # An installed package only counts once a new-enough copy actually runs.
+          Update-SessionPath
+          if ((Resolve-ToolRequirement $tool).Satisfied) { $installed = $true; break }
+          Write-LogOnly ("[packages] {0} installed but {1} is not usable; trying the next package" -f $id, $tool.Label)
+        }
+      }
+      if ($installed) { $satisfied[$tool.Label] = $true }
+      else { $failed += $tool.Label }
     }
   }
 
-  $stillMissing = @($tools | Where-Object { -not (& $_.Test) } | ForEach-Object { $_.Label })
-  if ($failed.Count -eq 0 -and $stillMissing.Count -eq 0) {
-    Step-End "ok" "helper CLIs installed"
-  }
-  elseif ($stillMissing.Count -gt 0 -and $failed.Count -eq 0) {
-    Write-Warn2 ("installed, but not visible on PATH yet (a new terminal may be needed): " + ($stillMissing -join ", "))
-    Step-End "partial" ("PATH not refreshed for: " + ($stillMissing -join ", "))
+  $pathNote = if ($pathNotes.Count -gt 0) { "; PATH set for " + ($pathNotes -join ", ") } else { "" }
+  if ($failed.Count -eq 0) {
+    $message = if ($missing.Count -eq 0) { "all selected tools already present" } else { "missing tools installed" }
+    Step-End "ok" ($message + $pathNote)
   }
   else {
     Write-Warn2 ("could not install: " + ($failed -join ", ") + " (Posse degrades gracefully; related helpers stay disabled)")
-    Step-End "partial" ("installed with gaps: " + ($failed -join ", "))
+    Step-End "partial" ("could not install " + ($failed -join ", ") + $pathNote)
   }
 }
 
@@ -1101,7 +1649,7 @@ function Install-PortableNode {
     $archive = Join-Path $stage $filename
     # Use the immutable version URL after resolving latest, avoiding release races.
     $version = ($filename -split '-')[1]
-    Invoke-WebRequest -UseBasicParsing -Uri "https://nodejs.org/dist/$version/$filename" -OutFile $archive -TimeoutSec 300
+    Save-Download -Uri "https://nodejs.org/dist/$version/$filename" -OutFile $archive -Activity "Downloading Node.js" -TimeoutSec 300
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $match.Groups[1].Value) { throw "Node archive checksum mismatch" }
     Expand-Archive -LiteralPath $archive -DestinationPath $stage
     $directoryName = [IO.Path]::GetFileNameWithoutExtension($filename)
@@ -1142,7 +1690,7 @@ function Step-Node {
   if ($DryRun) { Step-End "dry-run" "would install Node + npm via winget or verified per-user ZIP"; return }
   if (Test-Cmd "winget") {
     foreach ($id in @("OpenJS.NodeJS.LTS", "OpenJS.NodeJS")) {
-      [void](Invoke-Logged -Description "install Node.js ($id)" -Command @(
+      [void](Invoke-Logged -Description "install Node.js ($id)" -Activity "Installing Node.js" -Command @(
         "winget", "install", "--id", $id, "--exact", "--source", "winget", "--silent",
         "--scope", "user", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"
       ))
@@ -1210,7 +1758,7 @@ function Step-Checkout {
   if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
   $cloneDir = $checkoutDir + ".installing-" + [Guid]::NewGuid().ToString("N")
   try {
-    $rc = Invoke-Logged -Description ("clone {0}" -f $PosseRepoUrl) -Command @("git", "-c", "core.longpaths=true", "clone", "--depth", "1", $PosseRepoUrl, $cloneDir)
+    $rc = Invoke-Logged -Description ("clone {0}" -f $PosseRepoUrl) -Activity "Downloading Posse from GitHub" -Command @("git", "-c", "core.longpaths=true", "clone", "--depth", "1", $PosseRepoUrl, $cloneDir)
     $clonedRoot = if ($rc -eq 0) { Resolve-PosseRootFromCheckout $cloneDir } else { "" }
     if ($clonedRoot) {
       $nested = $clonedRoot -ne (Resolve-FullPath $cloneDir)
@@ -1235,17 +1783,27 @@ function Step-Composer {
     return
   }
   $pharPath = Join-Path $script:ManagedStateRoot "scip\bin\composer.phar"
+  # A Composer 2 you already have is used as-is: nothing to install, and no
+  # changes to your php.ini.
+  $existing = Get-Command composer -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($existing -and $existing.Source) {
+    $version = Get-NativeOutput $existing.Source @("--version", "--no-ansi") 60000
+    if ($version -and $version.ExitCode -eq 0 -and $version.Output -match 'Composer (?:version )?(\d+)\.(\d+)') {
+      if ([int]$Matches[1] -ge 2) { Step-End "ok" ("using your Composer {0}.{1} at {2}" -f $Matches[1], $Matches[2], $existing.Source); return }
+      Write-Info ("found Composer {0}.{1} at {2}; Posse needs Composer 2, so setup adds its own" -f $Matches[1], $Matches[2], $existing.Source)
+    }
+    else { Write-Info ("found {0}, but it did not run; setup adds its own Composer" -f $existing.Source) }
+  }
   $php = Get-Command php -ErrorAction SilentlyContinue
   if ($php -and -not $DryRun) {
     $phpExtensions = Enable-PhpComposerExtensions $php.Source
     if (-not $phpExtensions.Ok) {
       Write-Warn2 ("PHP Composer extension setup failed: {0}" -f $phpExtensions.Message)
-      Step-End "partial" "PHP Composer extensions unavailable; Composer skipped"
+      Step-End "partial" ("Composer skipped: {0}" -f $phpExtensions.Message)
       return
     }
     if ($phpExtensions.Changed) { Write-Info $phpExtensions.Message }
   }
-  if (Test-Cmd "composer") { Step-End "ok" "composer on PATH"; return }
   if (Test-Path $pharPath) { Step-End "ok" ("composer.phar already present in {0}" -f $pharPath); return }
   if (-not $php) {
     Write-Warn2 "PHP is not installed, so Composer was skipped - SCIP PHP indexing stays disabled until both exist"
@@ -1273,7 +1831,7 @@ function Step-Composer {
       Step-End "partial" "composer unavailable (signature mismatch)"
       return
     }
-    $rc = Invoke-Logged -Description "run Composer installer" -Command @($php.Source, $setupPath, "--install-dir=$binDir", "--filename=composer.phar", "--quiet")
+    $rc = Invoke-Logged -Description "run Composer installer" -Activity "Installing Composer" -Command @($php.Source, $setupPath, "--install-dir=$binDir", "--filename=composer.phar", "--quiet")
     if ($rc -eq 0 -and (Test-Path $pharPath)) {
       Step-End "ok" ("composer.phar installed into {0}" -f $pharPath)
     }
@@ -1304,11 +1862,11 @@ function Step-Npm {
     return
   }
   $npmArgs = @("npm", "install", "--include=dev", "--include=optional", "--no-fund", "--no-audit")
-  $rc = Invoke-Logged -Description "npm install" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
+  $rc = Invoke-Logged -Description "npm install" -Activity "Installing Posse's npm packages" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) { Complete-NodeInstall; return }
 
   Write-Info "retrying once (transient network/registry failures are common)"
-  $rc = Invoke-Logged -Description "npm install (retry)" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
+  $rc = Invoke-Logged -Description "npm install (retry)" -Activity "Retrying Posse's npm packages" -Command $npmArgs -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) { Complete-NodeInstall; return }
 
   Step-FailCritical "npm install failed twice; see the installer log for details"
@@ -1318,7 +1876,7 @@ function Complete-NodeInstall {
   $previousAdopt = $env:POSSE_MAINTENANCE_ADOPT_NODE
   try {
     $env:POSSE_MAINTENANCE_ADOPT_NODE = "1"
-    $rc = Invoke-Logged -Description "verify and repair Node native addons" -WorkingDirectory $script:PosseDirResolved -Command @(
+    $rc = Invoke-Logged -Description "verify and repair Node native addons" -Activity "Checking Posse's native add-ons" -WorkingDirectory $script:PosseDirResolved -Command @(
       $script:NodeBin, "lib/domains/cli/functions/maintenance-node-repair.js"
     )
     if ($rc -eq 0) { Step-End "ok" "npm dependencies and SQLite runtime verified" }
@@ -1334,7 +1892,7 @@ function Step-Automation {
     Step-End "dry-run" "would install the per-user Posse automation scheduled task"
     return
   }
-  $rc = Invoke-Logged -Description "install supervised automation owner" -WorkingDirectory $script:PosseDirResolved -Command @(
+  $rc = Invoke-Logged -Description "install supervised automation owner" -Activity "Registering the background task" -WorkingDirectory $script:PosseDirResolved -Command @(
     $script:NodeBin, "orchestrator.js", "automation", "service", "install"
   )
   if ($rc -eq 0) {
@@ -1451,7 +2009,10 @@ const seed = {
   atlas_scip_mode: process.env.POSSE_SEED_SCIP_MODE,
   atlas_scip_languages: process.env.POSSE_SEED_SCIP_LANGUAGES,
 };
-let added = 0, kept = 0, skipped = 0;
+// Keys named in POSSE_SEED_REPLACE (a language choice the user just made)
+// overwrite a saved value; every other key only fills a missing one.
+const replace = new Set(String(process.env.POSSE_SEED_REPLACE || "").split(",").map((key) => key.trim()).filter(Boolean));
+let added = 0, kept = 0, skipped = 0, replaced = 0;
 fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
 const db = new Database(settingsPath);
 db.pragma("journal_mode = WAL");
@@ -1478,6 +2039,9 @@ const tx = db.transaction((entries) => {
     if (!current || current.setting_value == null || String(current.setting_value).trim() === "") {
       upsert.run(k, String(v));
       added++;
+    } else if (replace.has(k) && String(current.setting_value) !== String(v)) {
+      upsert.run(k, String(v));
+      replaced++;
     } else {
       kept++;
     }
@@ -1485,7 +2049,7 @@ const tx = db.transaction((entries) => {
 });
 tx(Object.entries(seed));
 db.close();
-console.log(`[seed-settings] wrote ${settingsPath} -- added ${added}, kept ${kept} existing, skipped ${skipped} empty`);
+console.log(`[seed-settings] wrote ${settingsPath} -- added ${added}, replaced ${replaced}, kept ${kept} existing, skipped ${skipped} empty`);
 '@
 
 function Step-SeedSettings {
@@ -1510,8 +2074,9 @@ function Step-SeedSettings {
   $env:POSSE_SEED_FUNNEL = $PosseLiveFunnel
   $env:POSSE_SEED_SCIP_MODE = $PosseScipMode
   $env:POSSE_SEED_SCIP_LANGUAGES = $PosseScipLanguages
+  $env:POSSE_SEED_REPLACE = if ($script:ScipLanguagesChosen) { "atlas_scip_languages" } else { "" }
   try {
-    $rc = Invoke-Logged -Description "seed ~/.posse/account.db (merge-only, existing values kept)" -Command @($script:NodeBin, $seedFile) -WorkingDirectory $script:PosseDirResolved
+    $rc = Invoke-Logged -Description "seed ~/.posse/account.db (missing values filled; a language choice replaces the saved one)" -Activity "Saving account settings" -Command @($script:NodeBin, $seedFile) -WorkingDirectory $script:PosseDirResolved
     if ($rc -eq 0) { Step-End "ok" "account settings seeded" }
     else {
       Write-Warn2 "settings seed failed; run 'posse admin' to configure ATLAS settings manually"
@@ -1520,7 +2085,7 @@ function Step-SeedSettings {
   }
   finally {
     Remove-Item $seedFile -Force -ErrorAction SilentlyContinue
-    Remove-Item Env:\POSSE_SEED_MODE, Env:\POSSE_SEED_PHASES, Env:\POSSE_SEED_FUNNEL, Env:\POSSE_SEED_SCIP_MODE, Env:\POSSE_SEED_SCIP_LANGUAGES -ErrorAction SilentlyContinue
+    Remove-Item Env:\POSSE_SEED_MODE, Env:\POSSE_SEED_PHASES, Env:\POSSE_SEED_FUNNEL, Env:\POSSE_SEED_SCIP_MODE, Env:\POSSE_SEED_SCIP_LANGUAGES, Env:\POSSE_SEED_REPLACE -ErrorAction SilentlyContinue
   }
 }
 
@@ -1528,11 +2093,11 @@ function Step-Doctor {
   Step-Begin "doctor"
   if ($script:CriticalFailed) { Step-End "blocked"; return }
   if ($DryRun) {
-    Step-End "dry-run" "would run 'posse doctor' (Python + SCIP + current native binaries + Jina)"
+    Step-End "dry-run" "would run 'posse doctor' (SCIP + current native binaries + Jina)"
     return
   }
-  Write-Info "delegating to Posse's own dependency engine (managed Python venv, SCIP indexer environments)"
-  $rc = Invoke-Logged -Description "posse doctor (first run builds Python/SCIP envs and deploys Jina)" -Command @($script:NodeBin, "orchestrator.js", "doctor", "--adopt-node-install") -WorkingDirectory $script:PosseDirResolved -TimeoutSeconds $DoctorTimeoutSeconds
+  Write-Info "delegating to Posse's own dependency engine (SCIP indexer environments)"
+  $rc = Invoke-Logged -Description "posse doctor (first run builds SCIP envs and deploys Jina)" -Activity "Building code indexers and the search model (the longest step)" -Command @($script:NodeBin, "orchestrator.js", "doctor", "--adopt-node-install") -WorkingDirectory $script:PosseDirResolved -TimeoutSeconds $DoctorTimeoutSeconds
   if ($rc -eq 0) { Step-End "ok" "runtime dependencies, binaries, and Jina ready" }
   else {
     Write-Warn2 "posse doctor reported unresolved dependencies - run 'posse doctor' after fixing the tools it names (log has details)"
@@ -1547,7 +2112,7 @@ function Step-AdminInit {
     Step-End "dry-run" "would run posse admin init --non-interactive --provider-clis-only"
     return
   }
-  $rc = Invoke-Logged -Description "detect provider CLIs (admin init)" -Command @($script:NodeBin, "orchestrator.js", "admin", "init", "--non-interactive", "--provider-clis-only") -WorkingDirectory $script:PosseDirResolved
+  $rc = Invoke-Logged -Description "detect provider CLIs (admin init)" -Activity "Looking for Claude, Codex, and other provider apps" -Command @($script:NodeBin, "orchestrator.js", "admin", "init", "--non-interactive", "--provider-clis-only") -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) { Step-End "ok" "provider CLI detection complete" }
   else {
     Write-Warn2 "posse admin init failed - run 'posse admin init' manually to see provider CLI detection details"
@@ -1562,7 +2127,7 @@ function Step-Validate {
     Step-End "dry-run" "would run posse status"
     return
   }
-  $rc = Invoke-Logged -Description "boot posse (posse status)" -Command @($script:NodeBin, "orchestrator.js", "status") -WorkingDirectory $script:PosseDirResolved -TimeoutSeconds 300
+  $rc = Invoke-Logged -Description "boot posse (posse status)" -Activity "Starting Posse to check it works" -Command @($script:NodeBin, "orchestrator.js", "status") -WorkingDirectory $script:PosseDirResolved -TimeoutSeconds 300
   if ($rc -eq 0) { Step-End "ok" "posse boots cleanly" }
   else {
     Write-Warn2 ("posse failed to boot - run 'posse status' in {0} to see the error" -f $script:PosseDirResolved)
@@ -1600,10 +2165,11 @@ function Import-ProviderKeysFile {
   return ,$values
 }
 
+# Only the file's access list changes: you, SYSTEM, and Administrators, nothing
+# inherited. The owner is left alone (you already own files you create).
 function New-ProviderFileSecurity {
   $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
   $security = New-Object System.Security.AccessControl.FileSecurity
-  $security.SetOwner($currentUser)
   $security.SetAccessRuleProtection($true, $false)
   foreach ($sidValue in @($currentUser.Value, "S-1-5-18", "S-1-5-32-544")) {
     $sid = New-Object System.Security.Principal.SecurityIdentifier($sidValue)
@@ -1617,10 +2183,21 @@ function New-ProviderFileSecurity {
   return $security
 }
 
+# Writes only the access list. Set-Acl also tries to rewrite the audit list,
+# which needs SeSecurityPrivilege and fails for a normal user.
+function Set-FileAccessList {
+  param([string]$PathValue, $Security)
+  if ($PSVersionTable.PSEdition -eq "Core") {
+    [System.IO.FileSystemAclExtensions]::SetAccessControl([System.IO.FileInfo]::new($PathValue), $Security)
+  }
+  else {
+    [System.IO.File]::SetAccessControl($PathValue, $Security)
+  }
+}
+
 function Set-ProviderFileAcl {
   param([string]$PathValue)
-  $security = New-ProviderFileSecurity
-  Set-Acl -LiteralPath $PathValue -AclObject $security -ErrorAction Stop
+  Set-FileAccessList $PathValue (New-ProviderFileSecurity)
 }
 
 function Write-RestrictedProviderFile {
@@ -1644,7 +2221,7 @@ function Write-RestrictedProviderFile {
     )
     $stream.Dispose()
     $stream = $null
-    Set-Acl -LiteralPath $temporary -AclObject $security -ErrorAction Stop
+    Set-FileAccessList $temporary $security
     $stream = [System.IO.File]::Open(
       $temporary,
       [System.IO.FileMode]::Open,
@@ -1719,6 +2296,39 @@ function Prompt-ForKey {
   return $true
 }
 
+function Get-SavedEnvironmentKey {
+  foreach ($scope in @("User", "Machine")) {
+    $value = [Environment]::GetEnvironmentVariable("POSSE_KEY", $scope)
+    if ($value) { return [PSCustomObject]@{ Scope = $scope.ToLowerInvariant(); Value = $value } }
+  }
+  return $null
+}
+
+# Keys collected by the setup wizard arrive in a file, never on the command
+# line. The file is data: only known NAME=value lines are read, and it is
+# deleted whether or not it parses.
+function Read-InstallerKeyFile {
+  param([string]$PathValue)
+  $values = @{}
+  try {
+    foreach ($line in Get-Content -LiteralPath $PathValue -ErrorAction Stop) {
+      $match = [regex]::Match([string]$line, '^\s*(POSSE_KEY|OPENAI_API_KEY|XAI_API_KEY|CODEX_API_KEY)=(.*)$')
+      if (-not $match.Success) { continue }
+      $value = $match.Groups[2].Value.Trim()
+      if (-not $value) { continue }
+      if ($value -match '\s') {
+        Write-Warn2 ("{0} from setup contained interior whitespace and was not saved" -f $match.Groups[1].Value)
+        continue
+      }
+      $values[$match.Groups[1].Value] = $value
+    }
+  }
+  finally {
+    Remove-Item -LiteralPath $PathValue -Force -ErrorAction SilentlyContinue
+  }
+  return ,$values
+}
+
 function Step-Keys {
   Step-Begin "keys"
   $providersFile = Join-Path (Join-Path $env:USERPROFILE ".config\posse") "providers.env.ps1"
@@ -1749,7 +2359,12 @@ function Step-Keys {
         [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, "Process")
       }
     }
-    if (Test-Path -LiteralPath $privateEnvFile) { Set-ProviderFileAcl $privateEnvFile }
+    # Tightening an existing file's permissions is hardening, not a reason to
+    # fail setup when the saved keys themselves are fine.
+    if (Test-Path -LiteralPath $privateEnvFile) {
+      try { Set-ProviderFileAcl $privateEnvFile }
+      catch { Write-Warn2 ("could not restrict permissions on {0}: {1}" -f $privateEnvFile, $_.Exception.Message) }
+    }
   }
   $storedKeys = $dotenvKeys.Clone()
   $aclReady = $true
@@ -1790,8 +2405,26 @@ function Step-Keys {
       Write-Warn2 ("could not validate or restrict provider key file {0}: {1}" -f $providersFile, $_.Exception.Message)
     }
   }
+  if ($KeyFile -and -not $DryRun) {
+    try { $handedKeys = Read-InstallerKeyFile $KeyFile }
+    catch { Step-FailCritical ("could not read the keys handed over by setup: {0}" -f $_.Exception.Message); return }
+    foreach ($name in $script:ProviderKeyNames) {
+      if (-not $handedKeys.ContainsKey($name)) { continue }
+      [Environment]::SetEnvironmentVariable($name, [string]$handedKeys[$name], "Process")
+      $script:ConfiguredKeys += [PSCustomObject]@{ Name = $name; Value = [string]$handedKeys[$name] }
+    }
+  }
+  # A key saved as a Windows environment variable after this shell started is
+  # not inherited; use it rather than asking for it again.
+  if (-not $env:POSSE_KEY) {
+    $savedKey = Get-SavedEnvironmentKey
+    if ($savedKey) {
+      [Environment]::SetEnvironmentVariable("POSSE_KEY", $savedKey.Value, "Process")
+      Write-Info ("using the POSSE_KEY saved in your {0} environment variables" -f $savedKey.Scope)
+    }
+  }
   $promptPosseKey = -not $env:POSSE_KEY -and (Test-InteractiveInput)
-  if (-not $ConfigureKeys -and -not $promptPosseKey) {
+  if (-not $ConfigureKeys -and -not $promptPosseKey -and $script:ConfiguredKeys.Count -eq 0) {
     if (-not $DryRun -and -not $env:POSSE_KEY) {
       Step-FailCritical "POSSE_KEY is required; re-run interactively, inject it into the environment, or use -SetupOnly for an image build"
       return
@@ -1808,34 +2441,37 @@ function Step-Keys {
     Step-End "dry-run" "would prompt for POSSE_KEY / OPENAI_API_KEY / XAI_API_KEY / CODEX_API_KEY"
     return
   }
-  if (-not (Test-InteractiveInput)) {
-    Write-Warn2 "-ConfigureKeys needs an interactive terminal; skipped"
-    Step-End "skipped" "no interactive terminal"
-    return
-  }
-
-  Write-Info "input is hidden; press Enter to skip any key"
-  foreach ($prompt in @(
-    @{ Label = "Posse remote key"; Name = "POSSE_KEY" },
-    @{ Label = "OpenAI API key"; Name = "OPENAI_API_KEY" },
-    @{ Label = "xAI (Grok) key"; Name = "XAI_API_KEY" },
-    @{ Label = "Codex API key (optional - skip if you prefer 'codex login')"; Name = "CODEX_API_KEY" }
-  )) {
-    if (-not $ConfigureKeys -and $prompt.Name -ne "POSSE_KEY") { continue }
-    $stored = if ($storedKeys.ContainsKey($prompt.Name)) { [string]$storedKeys[$prompt.Name] } else { "" }
-    [void](Prompt-ForKey $prompt.Label $prompt.Name -FromParentEnv:($parentEnvKeys.ContainsKey($prompt.Name)) -StoredValue $stored)
-  }
-
-  if ($ConfigureKeys -and (Test-Cmd "claude")) {
-    $ans = Read-Host "      Run 'claude' now to log in to Claude? [y/N]"
-    if ($ans -match '^[Yy]$') {
-      try { & claude } catch { Write-Warn2 "claude login command did not exit cleanly: $_" }
+  # Keys handed over by setup need no terminal; prompt only when asked to.
+  if ($ConfigureKeys -or $promptPosseKey) {
+    if (-not (Test-InteractiveInput)) {
+      Write-Warn2 "-ConfigureKeys needs an interactive terminal; skipped"
+      Step-End "skipped" "no interactive terminal"
+      return
     }
-  }
-  if ($ConfigureKeys -and (Test-Cmd "codex") -and -not $env:CODEX_API_KEY) {
-    $ans = Read-Host "      Run 'codex login' now? [y/N]"
-    if ($ans -match '^[Yy]$') {
-      try { & codex login } catch { Write-Warn2 "codex login command did not exit cleanly: $_" }
+
+    Write-Info "input is hidden; press Enter to skip any key"
+    foreach ($prompt in @(
+      @{ Label = "Posse remote key"; Name = "POSSE_KEY" },
+      @{ Label = "OpenAI API key"; Name = "OPENAI_API_KEY" },
+      @{ Label = "xAI (Grok) key"; Name = "XAI_API_KEY" },
+      @{ Label = "Codex API key (optional - skip if you prefer 'codex login')"; Name = "CODEX_API_KEY" }
+    )) {
+      if (-not $ConfigureKeys -and $prompt.Name -ne "POSSE_KEY") { continue }
+      $stored = if ($storedKeys.ContainsKey($prompt.Name)) { [string]$storedKeys[$prompt.Name] } else { "" }
+      [void](Prompt-ForKey $prompt.Label $prompt.Name -FromParentEnv:($parentEnvKeys.ContainsKey($prompt.Name)) -StoredValue $stored)
+    }
+
+    if ($ConfigureKeys -and (Test-Cmd "claude")) {
+      $ans = Read-Host "      Run 'claude' now to log in to Claude? [y/N]"
+      if ($ans -match '^[Yy]$') {
+        try { & claude } catch { Write-Warn2 "claude login command did not exit cleanly: $_" }
+      }
+    }
+    if ($ConfigureKeys -and (Test-Cmd "codex") -and -not $env:CODEX_API_KEY) {
+      $ans = Read-Host "      Run 'codex login' now? [y/N]"
+      if ($ans -match '^[Yy]$') {
+        try { & codex login } catch { Write-Warn2 "codex login command did not exit cleanly: $_" }
+      }
     }
   }
 
@@ -1911,7 +2547,7 @@ function Step-NativeBinaries {
     return
   }
 
-  $rc = Invoke-Logged -Description "download current native binaries" -Command @($script:NodeBin, "scripts/pull-native-artifacts.mjs") -WorkingDirectory $script:PosseDirResolved
+  $rc = Invoke-Logged -Description "download current native binaries" -Activity "Downloading Posse's native tools" -Command @($script:NodeBin, "scripts/pull-native-artifacts.mjs") -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) {
     Step-End "ok" "native binaries downloaded or already current"
   }
@@ -1931,7 +2567,7 @@ function Step-Smoke {
     return
   }
   $repoLabel = if ($RepoId) { $RepoId } else { Split-Path $RepoPath -Leaf }
-  $rc = Invoke-Logged -Description ("atlas-smoke {0} (query: {1})" -f $repoLabel, $SmokeQuery) -Command @($script:NodeBin, "orchestrator.js", "atlas-smoke", $RepoPath, $SmokeQuery, $SmokeProvider) -WorkingDirectory $script:PosseDirResolved
+  $rc = Invoke-Logged -Description ("atlas-smoke {0} (query: {1})" -f $repoLabel, $SmokeQuery) -Activity "Testing code search" -Command @($script:NodeBin, "orchestrator.js", "atlas-smoke", $RepoPath, $SmokeQuery, $SmokeProvider) -WorkingDirectory $script:PosseDirResolved
   if ($rc -eq 0) { Step-End "ok" "smoke test passed" }
   else {
     Write-Warn2 ("atlas-smoke failed - run it manually: posse atlas-smoke {0} {1} {2}" -f $RepoPath, $SmokeQuery, $SmokeProvider)
@@ -1961,7 +2597,7 @@ function Test-ProviderCredentials {
   else {
     Write-Info ("provider credentials detected: " + ($found -join ", "))
   }
-  if (-not $env:POSSE_KEY -and -not $ConfigureKeys) {
+  if (-not $env:POSSE_KEY -and -not $ConfigureKeys -and -not $KeyFile) {
     Write-Warn2 "POSSE_KEY is not set - Posse remote prompt/tool catalog requests need it (-ConfigureKeys can capture it)"
   }
 }
@@ -2025,6 +2661,206 @@ function Step-Preflight {
 }
 
 # =============================================================================
+# uninstall (driven by the Windows setup package's uninstaller)
+# =============================================================================
+
+$script:AutomationTaskName = "Posse Automation Owner"
+$script:KeepSharedWiring = $false
+
+function Test-PathUnder {
+  param([string]$PathValue, [string]$Root)
+  if ([string]::IsNullOrWhiteSpace($PathValue) -or [string]::IsNullOrWhiteSpace($Root)) { return $false }
+  $full = (Resolve-FullPath $PathValue).TrimEnd("\")
+  $base = (Resolve-FullPath $Root).TrimEnd("\")
+  return ($full -ieq $base) -or $full.StartsWith($base + "\", [StringComparison]::OrdinalIgnoreCase)
+}
+
+# posse.cmd (Step-ShellWiring) ends with: "<node>" "<orchestrator.js>" %*
+function Read-PosseShim {
+  param([string]$ShimPath)
+  if (-not (Test-Path -LiteralPath $ShimPath)) { return $null }
+  foreach ($line in Get-Content -LiteralPath $ShimPath -ErrorAction SilentlyContinue) {
+    $match = [regex]::Match([string]$line, '^"([^"]+)" "([^"]+)" %\*$')
+    if ($match.Success) {
+      return [PSCustomObject]@{ Node = $match.Groups[1].Value.Replace("%%", "%"); Orchestrator = $match.Groups[2].Value.Replace("%%", "%") }
+    }
+  }
+  return $null
+}
+
+function Get-AutomationTask {
+  return Get-ScheduledTask -TaskName $script:AutomationTaskName -ErrorAction SilentlyContinue | Select-Object -First 1
+}
+
+function Step-UninstallService {
+  Step-Begin "service"
+  $task = Get-AutomationTask
+  if (-not $task) { Step-End "ok" "no automation owner task registered"; return }
+  # One task name serves every Posse install for this user; leave a task that
+  # runs another live checkout alone.
+  $entry = [string](@($task.Actions | ForEach-Object { $_.Arguments }) | Select-Object -First 1)
+  $entry = $entry.Trim().Trim('"')
+  $ours = (-not $entry) -or (Test-PathUnder $entry $script:PosseDirResolved) -or -not (Test-Path -LiteralPath $entry)
+  if (-not $ours) {
+    $script:KeepSharedWiring = $true
+    Step-End "skipped" ("the automation task runs another Posse install ({0})" -f $entry)
+    return
+  }
+  if ($DryRun) { Step-End "dry-run" "would stop and remove the automation owner task"; return }
+  $shim = Read-PosseShim (Join-Path $env:USERPROFILE ".local\bin\posse.cmd")
+  $node = if ($shim -and (Test-Path -LiteralPath $shim.Node)) { $shim.Node } else { (Get-Command node -ErrorAction SilentlyContinue).Source }
+  if ($node -and (Test-Path -LiteralPath (Join-Path $script:PosseDirResolved "orchestrator.js"))) {
+    $rc = Invoke-Logged -Description "stop and remove the automation owner" -WorkingDirectory $script:PosseDirResolved -Command @($node, "orchestrator.js", "automation", "service", "remove")
+    if ($rc -eq 0) { Step-End "ok" "automation owner stopped and removed"; return }
+  }
+  # Fallback when the checkout or Node is unusable: stop the task, then delete it.
+  try {
+    $task | Stop-ScheduledTask -ErrorAction SilentlyContinue
+    $task | Unregister-ScheduledTask -Confirm:$false -ErrorAction Stop
+    Step-End "ok" "automation owner task stopped and deleted"
+  }
+  catch {
+    Step-End "failed" ("could not delete the '{0}' scheduled task; remove it in Task Scheduler" -f $script:AutomationTaskName)
+  }
+}
+
+function Step-UninstallCommand {
+  Step-Begin "command"
+  $binDir = Join-Path $env:USERPROFILE ".local\bin"
+  $cmdShim = Join-Path $binDir "posse.cmd"
+  $notes = @()
+  $shim = Read-PosseShim $cmdShim
+  if (Test-Path -LiteralPath $cmdShim) {
+    if ($shim -and -not (Test-PathUnder $shim.Orchestrator $script:PosseDirResolved) -and (Test-Path -LiteralPath $shim.Orchestrator)) {
+      $script:KeepSharedWiring = $true
+      $notes += ("kept the posse command; it runs another install ({0})" -f $shim.Orchestrator)
+    }
+    elseif ($DryRun) { $notes += "would remove posse.cmd" }
+    else {
+      Remove-Item -LiteralPath $cmdShim -Force
+      $notes += "removed posse.cmd"
+    }
+  }
+  $psShim = Join-Path $binDir "posse.ps1"
+  if ((Test-Path -LiteralPath $psShim) -and -not $DryRun -and -not $script:KeepSharedWiring) { Remove-Item -LiteralPath $psShim -Force }
+
+  # ~\.local\bin is shared with other tools: drop it from PATH only once empty.
+  if (-not $script:KeepSharedWiring -and (Test-Path -LiteralPath $binDir) -and -not (Get-ChildItem -LiteralPath $binDir -Force | Select-Object -First 1)) {
+    if ($DryRun) { $notes += "would remove the empty ~\.local\bin PATH entry" }
+    else {
+      Remove-Item -LiteralPath $binDir -Force -ErrorAction SilentlyContinue
+      $userPath = Get-UserPathRaw
+      $newUserPath = @($userPath -split ";" | Where-Object { $_ -and ((Expand-PathEntry $_).TrimEnd("\") -ine $binDir) }) -join ";"
+      if ($newUserPath -ine $userPath) {
+        Set-UserPathRaw $newUserPath
+        Send-EnvironmentChangeBroadcast
+        $notes += "removed ~\.local\bin from PATH"
+      }
+    }
+  }
+  if (-not $script:KeepSharedWiring -and (Test-Path -LiteralPath $script:EnvFile) -and -not $DryRun) {
+    Remove-Item -LiteralPath $script:EnvFile -Force
+  }
+  if ($notes.Count -eq 0) { $notes += "no posse command found" }
+  Step-End "ok" ($notes -join "; ")
+}
+
+# Older installers could also persist keys in the user environment.
+function Clear-LegacyUserEnvironmentKeys {
+  foreach ($name in $script:ProviderKeyNames) {
+    if ([Environment]::GetEnvironmentVariable($name, "User")) { [Environment]::SetEnvironmentVariable($name, $null, "User") }
+  }
+}
+
+function Step-UninstallData {
+  Step-Begin "data"
+  if (-not $RemoveUserData) { Step-End "skipped" "kept settings, saved keys, and runtimes (-RemoveUserData deletes them)"; return }
+  if ($script:KeepSharedWiring) { Step-End "skipped" "another Posse install still uses your settings and keys"; return }
+  $dirs = @((Join-Path $env:USERPROFILE ".config\posse"), (Join-Path $env:USERPROFILE ".posse"), $script:ManagedStateRoot)
+  if ($DryRun) { Step-End "dry-run" ("would delete " + ($dirs -join ", ")); return }
+  $left = @()
+  foreach ($dir in $dirs) {
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+    try { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop }
+    catch {
+      Write-LogOnly ("[data] {0}: {1}" -f $dir, $_.Exception.Message)
+      $left += $dir
+    }
+  }
+  Clear-LegacyUserEnvironmentKeys
+  if ($left.Count -gt 0) { Step-End "failed" ("could not fully delete (close running Posse processes, then delete): " + ($left -join ", ")) }
+  else { Step-End "ok" "deleted settings, saved keys, logs, and runtimes" }
+}
+
+function Test-ProfileTargetRemoved {
+  param([string]$Target)
+  if (-not $DryRun) { return -not (Test-Path -LiteralPath $Target) }
+  # Dry run: predict what the command and data steps would have deleted.
+  if ($script:KeepSharedWiring) { return $false }
+  return $RemoveUserData -or ($Target -ieq $script:EnvFile)
+}
+
+# Drop profile lines that dot-source a Posse config file that no longer exists,
+# so a new PowerShell window cannot fail on a removed file.
+function Step-UninstallProfile {
+  Step-Begin "profile"
+  $configDir = Join-Path $env:USERPROFILE ".config\posse"
+  $documents = [Environment]::GetFolderPath("MyDocuments")
+  $profiles = @(
+    (Join-Path $documents "WindowsPowerShell\Microsoft.PowerShell_profile.ps1"),
+    (Join-Path $documents "PowerShell\Microsoft.PowerShell_profile.ps1"),
+    $PROFILE
+  ) | Where-Object { $_ } | Select-Object -Unique
+  $edited = @()
+  foreach ($profilePath in $profiles) {
+    if (-not (Test-Path -LiteralPath $profilePath)) { continue }
+    $kept = New-Object System.Collections.Generic.List[string]
+    $changed = $false
+    foreach ($line in @(Get-Content -LiteralPath $profilePath -ErrorAction Stop)) {
+      $match = [regex]::Match([string]$line, "^\s*\.\s+'((?:[^']|'')+)'\s*$")
+      if ($match.Success) {
+        $target = $match.Groups[1].Value.Replace("''", "'")
+        $gone = (Test-PathUnder $target $configDir) -and (Test-ProfileTargetRemoved $target)
+        if ($gone) {
+          if ($kept.Count -gt 0 -and $kept[$kept.Count - 1].Trim() -eq "# Posse ATLAS integration") { $kept.RemoveAt($kept.Count - 1) }
+          $changed = $true
+          continue
+        }
+      }
+      $kept.Add([string]$line)
+    }
+    if ($changed) {
+      if (-not $DryRun) { Set-Content -LiteralPath $profilePath -Value $kept -Encoding UTF8 }
+      $edited += $profilePath
+    }
+  }
+  if ($edited.Count -eq 0) { Step-End "ok" "no Posse profile lines to remove" }
+  elseif ($DryRun) { Step-End "dry-run" ("would edit " + ($edited -join ", ")) }
+  else { Step-End "ok" ("removed Posse lines from " + ($edited -join ", ")) }
+}
+
+function Invoke-Uninstall {
+  $script:StepKeys = @("service", "command", "data", "profile")
+  $script:StepTitles = @{
+    service = "Automation owner task"
+    command = "posse command and PATH"
+    data    = "Settings, keys, and runtimes"
+    profile = "PowerShell profile"
+  }
+  foreach ($k in $script:StepKeys) { $script:StepStatus[$k] = "pending"; $script:StepNote[$k] = "" }
+  $root = if ($PosseDir) { Resolve-FullPath $PosseDir } else { Get-InstallerPosseDir }
+  if (-not $root) { throw "-Uninstall needs -PosseDir (the checkout being removed)" }
+  # The checkout may already be partly gone; wiring that points into it still goes.
+  $resolved = Resolve-PosseRootFromCheckout $root
+  $script:PosseDirResolved = if ($resolved) { $resolved } else { $root }
+  Write-Info ("removing Posse wiring for {0}" -f $script:PosseDirResolved)
+  Invoke-InstallerStep "service" { Step-UninstallService }
+  Invoke-InstallerStep "command" { Step-UninstallCommand }
+  Invoke-InstallerStep "data" { Step-UninstallData }
+  Invoke-InstallerStep "profile" { Step-UninstallProfile }
+}
+
+# =============================================================================
 # main
 # =============================================================================
 
@@ -2032,11 +2868,32 @@ $script:NodeBin = ""
 $script:EnvFile = Join-Path (Join-Path $env:USERPROFILE ".config\posse") "atlas.env.ps1"
 $script:PosseDirResolved = $PosseDir
 
+if ($Uninstall) {
+  try {
+    Initialize-Ui
+    Write-LogOnly ("posse uninstall started {0}" -f (Get-Date -Format "o"))
+    Write-Host ("  {0}Log: {1}{2}" -f $script:DIM, $script:LogFile, $script:R)
+    Invoke-Uninstall
+  }
+  catch {
+    $script:InstallFailed = $true
+    Write-LogOnly ("[fatal] " + $_.Exception.ToString())
+    Write-Warn2 ("uninstall failed: " + $_.Exception.Message)
+    Block-PendingSteps "uninstall aborted after an unexpected error"
+  }
+  finally {
+    Print-Summary
+  }
+  if ($script:InstallFailed) { exit 1 }
+  exit 0
+}
+
 try {
   Initialize-Ui
   Write-Splash
 
   Write-LogOnly ("install-posse-atlas started {0}" -f (Get-Date -Format "o"))
+  Write-SetupProgress @("log", $script:LogFile)
   Write-LogOnly ("dry_run={0} force={1} host_tools={2} install_node={3}" -f $DryRun, $Force, (-not $SkipHostTools), (-not $NoInstallNode))
 
   if ($DryRun) {

@@ -5,6 +5,25 @@ Node.js 24+ and npm are installed automatically when missing or unusable.
 
 ## Install in a normal terminal
 
+On a new machine, run this one line as your normal user (not with sudo):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mtstedman/posse-client/main/posse/installers/linux/install-posse-atlas.sh | bash
+```
+
+Prompts (languages, Posse key, sudo for system packages) still read from your
+terminal. Pass options after `bash -s --`, for example
+`curl -fsSL <url> | bash -s -- --configure-keys --scip-languages typescript,go`.
+The script runs only after it has downloaded completely, so a dropped
+connection cannot leave a half-run install.
+
+Each selected indexing language gets its toolchain: Go from your distribution
+(1.21+ needed; older versions are flagged), Rust through rustup with
+rust-analyzer (checked against its published SHA-256, installed per user
+without sudo), PHP with Composer, and Python with pip and venv. TypeScript
+uses the Node the installer always provides; C/C++ needs nothing extra.
+Posse itself needs no Python.
+
 If you already have the public client checkout:
 
 ```bash
