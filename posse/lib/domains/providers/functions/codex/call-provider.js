@@ -341,7 +341,7 @@ export async function callProvider(promptText, {
       provider: "codex",
       role,
       request: () => buildCodexLaunchInput(lockdownInput, CODEX_RESEARCH_BASE_INSTRUCTIONS_PATH),
-      jsValue: normalizeCodexLaunchOverrides({
+      jsPolicy: () => normalizeCodexLaunchOverrides({
         lockdownOverrides: buildCodexSystemToolLockdownOverrides(lockdownInput),
         researchBootOverrides: buildCodexResearchBootOverrides({ role }),
       }),

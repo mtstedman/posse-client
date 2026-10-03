@@ -264,6 +264,6 @@ export const ATLAS_MEMORY_SURFACE_MODE_VALUES = Object.freeze(["auto", "off", "o
 export const SESSION_RECYCLE_MODE_VALUES = Object.freeze(["off", "dev-fix", "full"]);
 export const STARTUP_DIRTY_TREE_POLICY_VALUES = Object.freeze(["block", "commit"]);
 export const WAITING_LANE_SHADOW_MODE_VALUES = Object.freeze(["off", "shadow"]);
-// Where provider launch policy is computed: the JS client (js), both with the
-// JS answer used and differences logged (shadow), or posse-remote (native).
-export const ENGAGEMENT_ENGINE_VALUES = Object.freeze(["js", "shadow", "native"]);
+// Where provider launch policy is computed: posse-remote (native, default; the
+// JS policy remains its fallback) or the JS client only (js, a kill switch).
+export const ENGAGEMENT_ENGINE_VALUES = Object.freeze(["native", "js"]);

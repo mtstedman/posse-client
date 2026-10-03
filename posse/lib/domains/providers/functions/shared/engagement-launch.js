@@ -1,10 +1,11 @@
 // lib/domains/providers/functions/shared/engagement-launch.js
 //
 // Provider launch policy computed by posse-remote's engagement.launchPlan.
-// The engagement_engine setting picks who decides: "js" keeps this client's
-// own policy, "shadow" asks posse-remote too and logs any difference while
-// still using the JS answer, and "native" uses posse-remote's answer. Native
-// failures fall back to the JS answer while both implementations exist.
+// posse-remote decides ("native", the default). The JS policy runs only as the
+// fallback when the binary cannot answer (missing, old, mismatched, or a
+// failed call), or when engagement_engine is set to "js" as a kill switch. The
+// Rust port matches the JS policy on every generator input (golden parity), so
+// there is no comparison mode.
 //
 // Engagement methods are pure local policy, so they run without a heartbeat
 // pulse (NativeBinary `localPolicy`). posse-remote is probed once per process
@@ -12,14 +13,13 @@
 // or mismatched binary keeps the JS policy and is reported once per reason.
 // Differences are logged as hashes and key names only, never as values.
 
-import crypto from "node:crypto";
 import {
   ENGAGEMENT_CAPABILITIES_METHOD,
   ENGAGEMENT_CONTRACT_VERSION,
   ENGAGEMENT_LAUNCH_PLAN_METHOD,
   ENGAGEMENT_POLICY_DIGEST,
 } from "../../../../catalog/binary.js";
-import { ENGAGEMENT_ENGINE_VALUES, SETTING_KEYS } from "../../../../catalog/settings.js";
+import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { getSetting } from "../../../queue/functions/index.js";
@@ -47,15 +47,15 @@ function isPlainObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-/** @returns {"js" | "shadow" | "native"} */
+/** @returns {"native" | "js"} */
 export function resolveEngagementEngine() {
   try {
     const stored = String(getSetting(SETTING_KEYS.ENGAGEMENT_ENGINE) ?? "").trim().toLowerCase();
-    if (ENGAGEMENT_ENGINE_VALUES.includes(stored)) return /** @type {"js" | "shadow" | "native"} */ (stored);
+    if (stored === "js") return "js";
   } catch {
-    // Settings unavailable (tests, early boot): keep the JS policy.
+    // Settings unavailable (tests, early boot): posse-remote still decides.
   }
-  return "js";
+  return "native";
 }
 
 /**
@@ -167,77 +167,43 @@ export function __resetEngagementLaunchStateForTests() {
   engagementCapabilityCache.reset();
 }
 
-function digest(value) {
-  return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
-}
-
 /**
- * Dotted paths of the leaves where `a` and `b` differ (names only, never
- * values). Arrays compare as a whole.
- *
- * @param {unknown} a
- * @param {unknown} b
- * @param {string} [prefix]
- * @returns {string[]}
- */
-export function differingKeyPaths(a, b, prefix = "") {
-  if (isPlainObject(a) && isPlainObject(b)) {
-    const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])].sort();
-    return keys.flatMap((key) => differingKeyPaths(a[key], b[key], prefix ? `${prefix}.${key}` : key));
-  }
-  return JSON.stringify(a) === JSON.stringify(b) ? [] : [prefix || "<root>"];
-}
-
-/**
- * Pick the launch policy for one provider section.
+ * Pick the launch policy for one provider section: posse-remote's answer, or
+ * the JS policy when the engine is "js" or posse-remote cannot answer. The JS
+ * policy is computed only in those cases.
  *
  * @template T
  * @param {{
  *   provider: "claude" | "codex",
  *   role?: string | null,
  *   request: () => Record<string, unknown>,
- *   jsValue: T,
+ *   jsPolicy: () => T,
  *   nativeValue: (plan: Record<string, any>) => T,
- *   engine?: "js" | "shadow" | "native",
+ *   engine?: "native" | "js",
  *   manager?: BinaryManager,
  * }} args
  * @returns {Promise<T>}
  */
-export async function reconcileLaunchPolicy({ provider, role = null, request, jsValue, nativeValue, engine = resolveEngagementEngine(), manager = nativeBinaries }) {
-  if (engine === "js") return jsValue;
+export async function reconcileLaunchPolicy({ provider, role = null, request, jsPolicy, nativeValue, engine = resolveEngagementEngine(), manager = nativeBinaries }) {
+  if (engine === "js") return jsPolicy();
   const capability = await probeEngagementCapabilities({ manager });
   if (!capability.ok) {
-    warnOncePerReason(capability.reason, { provider, role, engine, error: capability.message });
-    return jsValue;
+    warnOncePerReason(capability.reason, { provider, role, error: capability.message });
+    return jsPolicy();
   }
-  let nativeResult;
   try {
     const plan = await requestEngagementLaunchPlan({ contract: ENGAGEMENT_CONTRACT_VERSION, [provider]: request() }, { manager });
-    nativeResult = nativeValue(plan);
+    return nativeValue(plan);
   } catch (error) {
     engagementCapabilityCache.markFailed(manager, remoteBinaryKey(manager), error);
     const reason = /** @type {any} */ (error)?.reason || "call-failed";
     warnOncePerReason(reason, {
       provider,
       role,
-      engine,
       error: error instanceof Error ? error.message : String(error),
     });
-    return jsValue;
+    return jsPolicy();
   }
-  const jsDigest = digest(jsValue);
-  const nativeDigest = digest(nativeResult);
-  if (jsDigest !== nativeDigest && engagementCapabilityCache.firstTime(`mismatch:${provider}:${role}:${jsDigest}:${nativeDigest}`)) {
-    log.warn("engagement", "posse-remote launch plan differs from the JS policy", {
-      provider,
-      role,
-      engine,
-      jsDigest,
-      nativeDigest,
-      fields: differingKeyPaths(jsValue, nativeResult),
-    });
-  }
-  return engine === "native" ? nativeResult : jsValue;
 }
 
 /**

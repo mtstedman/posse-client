@@ -38,5 +38,7 @@ export const ATLAS_PARSER_VERSION = "atlas-v2-parser-call-ownership-v2";
 // decoding.
 // edge-coverage-v6: module-level and anonymous JS callback source ownership.
 // edge-coverage-v7: public named re-export provenance edges.
+// edge-coverage-v8: tree-sitter-c 0.24.2, tree-sitter-c-sharp 0.23.5 and
+// tree-sitter-rust 0.24.2 recover declarations older grammars truncated.
 // Schema generation 4 changes persisted edge meaning and forces a cold rebuild.
-export const ATLAS_PARSER_SPEC_VERSION = "edge-coverage-v7";
+export const ATLAS_PARSER_SPEC_VERSION = "edge-coverage-v8";

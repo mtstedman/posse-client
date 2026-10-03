@@ -608,14 +608,16 @@ export async function callProvider(promptText, {
 
     // Permission route — single, platform-uniform path (never
     // --dangerously-skip-permissions; see buildClaudeToolPermissionArgs).
-    const jsCliToolConfig = buildClaudeCliToolConfig(executionContract, cliToolOptions);
     const { cliToolConfig, permissionArgs } = await reconcileLaunchPolicy({
       provider: "claude",
       role,
       request: () => ({ ...buildClaudeLaunchInput(executionContract, cliToolOptions), mcpServerNames }),
-      jsValue: {
-        cliToolConfig: normalizeClaudeCliToolConfig(jsCliToolConfig),
-        permissionArgs: normalizeClaudePermissionArgs(buildClaudeToolPermissionArgs(jsCliToolConfig, mcpServerNames)),
+      jsPolicy: () => {
+        const jsCliToolConfig = buildClaudeCliToolConfig(executionContract, cliToolOptions);
+        return {
+          cliToolConfig: normalizeClaudeCliToolConfig(jsCliToolConfig),
+          permissionArgs: normalizeClaudePermissionArgs(buildClaudeToolPermissionArgs(jsCliToolConfig, mcpServerNames)),
+        };
       },
       nativeValue: claudeLaunchPolicyFromPlan,
     });
