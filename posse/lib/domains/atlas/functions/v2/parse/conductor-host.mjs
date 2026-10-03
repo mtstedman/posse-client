@@ -49,6 +49,8 @@ const dbWrite = createDbWriteSemaphore();
 // repo could otherwise save/rename index.usearch at once. Serialize embedding
 // flushes per repo so there is a single in-host ANN writer.
 const embeddingWriteChains = new Map();
+const pendingEmbeddingFlushes = new Map();
+let embeddingFlushSeq = 0;
 function runEmbeddingWriteExclusive(key, fn) {
   const k = String(key || "");
   const prev = embeddingWriteChains.get(k) || Promise.resolve();
@@ -174,26 +176,30 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       const purpose = String(request.job?.purpose || "");
       const targetLocal = purpose === "wi-snapshot"
         || purpose === "wi-catchup"
-        || purpose === "wi-prefetch";
-      try {
-        const result = await dbWrite.run(() => engine.handleWarmJob(request.job ?? { paths: request.paths ?? [] }));
-        // Outside dbWrite.run, still inside this request: progress events keep
-        // streaming and the response carries the embeddings result fields the
-        // flush writes into `result` (captured by reference at defer time).
-        // Serialized per repo so this index's ANN save/rename can't race a
-        // concurrent warm's in this host (single in-host embedding writer).
-        if (!targetLocal) {
-          await runEmbeddingWriteExclusive(request.repoRoot || request.ledgerPath, () => engine.flushDeferredEmbeddings());
-        }
-        return result;
-      } finally {
-        // The warm may have rewritten the on-disk ANN; cached retrieval-side
-        // embedding handles hold the old index in memory.
-        if (!targetLocal) {
-          const { invalidateConductorRetrieveResources } = await import("./retrieve-runner.js");
-          await invalidateConductorRetrieveResources();
-        }
+        || purpose === "wi-prefetch"
+        || purpose === "wi-live";
+      const result = await dbWrite.run(() => engine.handleWarmJob(request.job ?? { paths: request.paths ?? [] }));
+      if (!targetLocal && result?.embeddings_deferred === true) {
+        const flushKey = `embedding-flush-${++embeddingFlushSeq}`;
+        pendingEmbeddingFlushes.set(flushKey, {
+          engine,
+          result,
+          repoRoot: request.repoRoot || request.ledgerPath,
+        });
+        return { ...result, embedding_flush_key: flushKey };
       }
+      return result;
+    }
+
+    case "flushEmbeddings": {
+      const flushKey = String(request.flushKey || "");
+      const pending = pendingEmbeddingFlushes.get(flushKey);
+      if (!pending) throw Object.assign(new Error("embedding flush is no longer pending"), { code: "unknown_embedding_flush" });
+      pendingEmbeddingFlushes.delete(flushKey);
+      await runEmbeddingWriteExclusive(pending.repoRoot, () => pending.engine.flushDeferredEmbeddings());
+      const { invalidateConductorRetrieveResources } = await import("./retrieve-runner.js");
+      await invalidateConductorRetrieveResources();
+      return pending.result;
     }
 
     case "publishGeneration": {
@@ -210,19 +216,30 @@ runDaemonThread(async (payload, _message, emitProgress) => {
         try {
           const meta = view.metaLocal();
           if (meta.branch !== targetBranch) {
-            throw new Error(`publishGeneration branch mismatch (${meta.branch} != ${targetBranch})`);
+            throw Object.assign(new Error(`publishGeneration branch mismatch (${meta.branch} != ${targetBranch})`), {
+              code: "ATLAS_MAIN_GENERATION_BRANCH_MISMATCH",
+            });
           }
           if (ledger.headSeq(targetBranch) !== meta.ledger_seq) {
-            throw new Error("publishGeneration ledger sequence is not current");
+            throw Object.assign(new Error(`publishGeneration ledger sequence is not current (${meta.ledger_seq} != ${ledger.headSeq(targetBranch)})`), {
+              code: "ATLAS_MAIN_GENERATION_LEDGER_STALE",
+            });
           }
-          if (ledger.layerRevision() !== meta.layer_revision) {
-            throw new Error("publishGeneration layer revision is not current");
+          const layerToken = typeof ledger.layerScopeToken === "function"
+            ? ledger.layerScopeToken(targetBranch, meta.ledger_seq)
+            : { revision: ledger.layerRevision(), row_count: meta.layer_row_count || 0 };
+          if (layerToken.revision !== meta.layer_revision
+            || (meta.layer_row_count != null && layerToken.row_count !== meta.layer_row_count)) {
+            throw Object.assign(new Error(`publishGeneration layer revision is not current (${meta.layer_revision}/${meta.layer_row_count ?? "legacy"} != ${layerToken.revision}/${layerToken.row_count})`), {
+              code: "ATLAS_MAIN_GENERATION_LAYER_STALE",
+            });
           }
           return view.publishGeneration({
             target_branch: targetBranch,
             git_oid: gitOid,
             atlas_ledger_seq: meta.ledger_seq,
             atlas_layer_revision: meta.layer_revision,
+            atlas_layer_row_count: meta.layer_row_count,
             view_fingerprint: meta.view_fingerprint,
           });
         } finally {

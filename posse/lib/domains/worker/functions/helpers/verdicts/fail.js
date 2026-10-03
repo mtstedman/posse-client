@@ -18,6 +18,7 @@ import {
 import { parseJobPayload } from "../../../../queue/functions/payload.js";
 import { siblingJobScopePaths } from "../../../../queue/functions/file-locks.js";
 import { normalizeProjectDir } from "../../../../runtime/functions/paths.js";
+import { getDb } from "../../../../../shared/storage/functions/index.js";
 import { isArtifactMode } from "../../../../artifacts/functions/index.js";
 import { C } from "../../../../../shared/format/functions/colors.js";
 import {
@@ -161,6 +162,14 @@ export function _resolveInferredFixScope(inferred = {}, {
   projectDir = null,
   siblingScopePaths = siblingJobScopePaths,
 } = {}) {
+  const isInternalPath = (value) => {
+    const normalized = String(value || "").replace(/\\/g, "/").replace(/^\.\//, "");
+    const first = normalized.split("/", 1)[0]?.toLowerCase();
+    return first === ".posse"
+      || first === ".posse-worktrees"
+      || first === "posse-worktrees"
+      || first?.startsWith(".posse-");
+  };
   const inheritedSet = new Set((Array.isArray(inherited) ? inherited : []).map(_normalizeScopePath).filter(Boolean));
   const modifyIn = (Array.isArray(inferred.files_to_modify) ? inferred.files_to_modify : []).map(_normalizeScopePath).filter(Boolean);
   const createIn = (Array.isArray(inferred.files_to_create) ? inferred.files_to_create : []).map(_normalizeScopePath).filter(Boolean);
@@ -175,6 +184,10 @@ export function _resolveInferredFixScope(inferred = {}, {
   try { root ||= normalizeProjectDir(); } catch { root = null; }
   const dropped = [];
   const keep = (entry) => {
+    if (isInternalPath(entry)) {
+      dropped.push({ path: entry, reason: "internal_runtime_path" });
+      return false;
+    }
     if (inheritedSet.has(entry) || entry.includes("/") || inheritedBasenames.has(entry)) return true;
     if (qualifiedBasenames.has(entry)) {
       dropped.push({ path: entry, reason: "abbreviates_qualified_path" });
@@ -186,6 +199,15 @@ export function _resolveInferredFixScope(inferred = {}, {
   };
   let files_to_modify = modifyIn.filter(keep);
   let files_to_create = createIn.filter(keep);
+  if (root) {
+    const existingCreates = new Set(files_to_create.filter((entry) => {
+      try { return fs.existsSync(path.resolve(root, entry)); } catch { return false; }
+    }));
+    if (existingCreates.size > 0) {
+      files_to_modify = _mergeUniquePaths(files_to_modify, [...existingCreates]);
+      files_to_create = files_to_create.filter((entry) => !existingCreates.has(entry));
+    }
+  }
   const extras = [...files_to_modify, ...files_to_create].filter((entry) => !inheritedSet.has(entry));
   let owned = new Set();
   if (jobId != null && extras.length > 0) {
@@ -233,12 +255,16 @@ function _fixSatisfiabilityFingerprint({
 // same failure whatever the assessor wrote after it. Its fingerprint uses the
 // deterministic summary alone, so a fix chain that reproduces the identical
 // failure is recognized as repeated instead of re-spawned on new prose.
-const DETERMINISTIC_VERIFICATION_STATUSES = new Set(["scoped_checks_failed"]);
+const DETERMINISTIC_VERIFICATION_STATUSES = new Set(["scoped_checks_failed", "frozen_test_failed"]);
 
 export function fixSatisfiabilityReasons(verdict = {}) {
   const reasons = Array.isArray(verdict?.reasons) ? verdict.reasons : [];
   const status = String(verdict?.verification_status || "").toLowerCase();
-  if (DETERMINISTIC_VERIFICATION_STATUSES.has(status) && reasons.length > 0) return [reasons[0]];
+  if (DETERMINISTIC_VERIFICATION_STATUSES.has(status)) {
+    const identity = String(verdict?._deterministic_failure_identity || "").trim();
+    if (identity) return [`${status}:${identity}`];
+    if (reasons.length > 0) return [reasons[0]];
+  }
   return reasons;
 }
 
@@ -644,7 +670,20 @@ function _extractOriginalPayloadContext(job) {
     || origPayload.instructions
     || "",
   );
-  const rootBaseCommit = String(origPayload.root_base_commit || origPayload.commit_base_hash || "").trim() || null;
+  let rootBaseCommit = String(origPayload.root_base_commit || origPayload.commit_base_hash || "").trim() || null;
+  if (!rootBaseCommit && Number.isSafeInteger(rootJobId) && rootJobId > 0) {
+    try {
+      rootBaseCommit = String(getDb().prepare(`
+        SELECT commit_base_hash
+        FROM job_attempts
+        WHERE job_id = ? AND commit_base_hash IS NOT NULL AND TRIM(commit_base_hash) != ''
+        ORDER BY attempt_number, id
+        LIMIT 1
+      `).get(rootJobId)?.commit_base_hash || "").trim() || null;
+    } catch {
+      rootBaseCommit = null;
+    }
+  }
   const origTaskMode = origPayload.task_mode || "code";
   const origOutputRoot = origPayload.output_root || null;
   const origNeedsImageGen = !!origPayload.needs_image_generation;
@@ -1045,6 +1084,9 @@ function _spawnRecoveryJobsForVerdict({
       ...(fixHashRefPacket ? { hash_ref_packet: fixHashRefPacket } : {}),
       files_to_modify: mergedFixModify,
       files_to_create: mergedFixCreate,
+      ...(inferredFixScope.files_to_create.length > 0
+        ? { _inferred_fix_files_to_create: inferredFixScope.files_to_create }
+        : {}),
       files_to_delete: mergedFixDelete,
       create_roots: mergedFixRoots,
       task_mode: origTaskMode,
@@ -1080,7 +1122,7 @@ function _spawnRecoveryJobsForVerdict({
         "fix",
         PROVIDER_AFFINITY_ROUTES.REPAIR_CONTINUATION,
       ),
-      model_tier: job.model_tier,
+      model_tier: "standard",
       reasoning_effort: job.reasoning_effort,
       skills: job.skills || null,
       payload_json: fixPayload,
@@ -1162,7 +1204,7 @@ function _spawnRecoveryJobsForVerdict({
         "fix",
         PROVIDER_AFFINITY_ROUTES.REPAIR_CONTINUATION,
       ),
-      model_tier: job.model_tier,
+      model_tier: "standard",
       reasoning_effort: job.reasoning_effort,
       skills: job.skills || null,
       payload_json: JSON.stringify(fixPayload),

@@ -456,8 +456,13 @@ export class ParseEngine {
   }
 
   #viewMetaMatchesBuildMode(meta) {
+    const layerToken = meta?.branch && Number.isInteger(meta?.ledger_seq)
+      && typeof this.#ledger.layerScopeToken === "function"
+      ? this.#ledger.layerScopeToken(meta.branch, meta.ledger_seq)
+      : { revision: this.#ledger.layerRevision(), row_count: meta?.layer_row_count || 0 };
     return viewFreshness(meta, null, { layerMerge: this.#viewLayerMerge }).current === true
-      && meta?.layer_revision === this.#ledger.layerRevision()
+      && meta?.layer_revision === layerToken.revision
+      && (meta?.layer_row_count == null || meta.layer_row_count === layerToken.row_count)
       && meta?.view_fingerprint === this.#viewFingerprint();
   }
 
@@ -1258,6 +1263,20 @@ export class ParseEngine {
         }
         case "wi-cleanup":
           return finalize(await this.#cleanupFromJob(payload, base), start);
+        case "wi-live": {
+          // Deterministic edits need only reconcile the WI ledger partition
+          // and its mounted branch view. They deliberately do not enter the
+          // main intake lifecycle, stage SCIP, or eagerly encode embeddings.
+          const branch = String(payload.branch || "");
+          const expected = ledgerBranchForWi(payload.work_item_id);
+          if (payload.work_item_id == null || branch !== expected || !this.#ledger.getBranch(branch)) {
+            throw new Error("Live WI refresh requires its existing WI ledger branch");
+          }
+          if (!payload.out_view_path) {
+            throw new Error("Live WI refresh requires its mounted WI view path");
+          }
+          return finalize(await this.#warmIncremental(payload, base), start);
+        }
         case "main-merge":
           return finalize(await this.#mergeToMain(payload, base), start);
         case "main-incremental": {
@@ -1807,7 +1826,6 @@ export class ParseEngine {
       const meta = view.metaLocal();
       const current = meta.branch === branch
         && meta.ledger_seq === this.#ledger.headSeq(branch)
-        && meta.layer_revision === this.#ledger.layerRevision()
         && this.#viewMetaMatchesBuildMode(meta)
         && inspectViewMaterialization(view._unsafeDb(), {
           treeCompressionMode: this.#treeCompressionMode,
@@ -2515,11 +2533,15 @@ export class ParseEngine {
    * @param {import("../../../../catalog/waiting-lane.js").WaitingLaneGeneration} desired
    */
   #publishedSourceMatches(source, desired) {
+    const layerToken = typeof this.#ledger.layerScopeToken === "function"
+      ? this.#ledger.layerScopeToken(desired.target_branch, desired.atlas_ledger_seq)
+      : { revision: this.#ledger.layerRevision(), row_count: desired.atlas_layer_row_count || 0 };
     return !!source.generation
       && waitingLaneGenerationsEqual(source.generation, desired)
       && source.meta.branch === desired.target_branch
       && this.#ledger.headSeq(desired.target_branch) === desired.atlas_ledger_seq
-      && this.#ledger.layerRevision() === desired.atlas_layer_revision
+      && layerToken.revision === desired.atlas_layer_revision
+      && (desired.atlas_layer_row_count == null || layerToken.row_count === desired.atlas_layer_row_count)
       && source.meta.view_fingerprint === this.#viewFingerprint();
   }
 
@@ -2611,9 +2633,16 @@ export class ParseEngine {
         return this.#waitingLaneMiss(base, "superseded", "parked_view_overshot_request");
       }
 
+      const targetLayerToken = target && typeof this.#ledger.layerScopeToken === "function"
+        ? this.#ledger.layerScopeToken(desired.target_branch, target.meta.ledger_seq)
+        : null;
+      const compatibleLayer = targetLayerToken
+        ? target.meta.layer_revision === targetLayerToken.revision
+          && target.meta.layer_row_count === targetLayerToken.row_count
+        : target?.meta?.layer_revision === desired.atlas_layer_revision;
       const compatibleTail = !!target
         && target.meta.branch === desired.target_branch
-        && target.meta.layer_revision === desired.atlas_layer_revision
+        && compatibleLayer
         && target.meta.view_fingerprint === desired.view_fingerprint
         && target.meta.ledger_seq <= desired.atlas_ledger_seq;
       const tailLimit = Number(payload?.tail_entry_limit);
@@ -3181,7 +3210,6 @@ export class ParseEngine {
 
         const beforeHash = snapshot.get(repo_rel_path) || null;
         const currentParsedBlob = contentHash
-          && beforeHash === contentHash
           && ledgerHasCurrentParsedBlob(this.#ledger, contentHash, { layerMerge: this.#viewLayerMerge });
         const mergeExistingScipRows = !this.#viewLayerMerge
           && contentHash
@@ -3190,9 +3218,31 @@ export class ParseEngine {
             contentHash,
             repoRelPath: repo_rel_path,
           });
-        if (currentParsedBlob && !mergeExistingScipRows) {
+        if (currentParsedBlob && !mergeExistingScipRows && beforeHash === contentHash) {
           // Same bytes and current parsed rows already on this branch.
           await recordPathSourceStat(repo_rel_path, contentHash, fileStat);
+          await documentIntake?.markTreeSitter({ repo_rel_path, content_hash: contentHash });
+          documentPublished = true;
+          continue;
+        }
+        if (currentParsedBlob && this.#viewLayerMerge && !mergeExistingScipRows) {
+          // Content-addressed layers are shared across branches. A WI joining
+          // a blob already indexed by main needs only its branch-local path
+          // delta; reparsing and reingesting the identical layer would advance
+          // the global materialization epoch for no semantic change.
+          base.blobs_reused++;
+          if (beforeHash) recordStaleEmbeddingHash(base, beforeHash);
+          await this.#ledger.append({
+            branch,
+            op: beforeHash ? "modify" : "add",
+            repo_rel_path,
+            before_content_hash: beforeHash,
+            after_content_hash: contentHash,
+          });
+          await recordPathSourceStat(repo_rel_path, contentHash, fileStat);
+          base.ledger_entries_appended++;
+          base.paths_indexed++;
+          snapshot.set(repo_rel_path, contentHash);
           await documentIntake?.markTreeSitter({ repo_rel_path, content_hash: contentHash });
           documentPublished = true;
           continue;

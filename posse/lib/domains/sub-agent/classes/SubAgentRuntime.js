@@ -61,6 +61,9 @@ export { researchFindingHasEvidence } from "../functions/research-report.js";
 const DEFAULT_REGISTRY_TTL_MS = 8 * 60 * 60 * 1000;
 const DEFAULT_SETTLED_BATCH_RETENTION_MS = 60_000;
 const MAX_CURSOR_RETRIES_PER_POSITION = 1;
+// Codex middle-clips tool results at roughly 48k characters. Leave room for
+// the MCP envelope and move only whole reports when a batch approaches it.
+export const SUB_AGENT_TRANSPORT_RESULT_TARGET_CHARS = 46_000;
 
 const FORBIDDEN_CURSOR_TOOLS = new Set([
   "tools.agent_handoff",
@@ -358,37 +361,9 @@ function recordResearchChildObservation(context, observationType, summary, detai
   }
 }
 
-// The planner has no tool to read another call's handoff row, so a trimmed
-// report's full copy is surfaced to the parent as its own ref: hidden until
-// the parent traverses it, like the child evidence it cites.
-function surfaceResearchReportToParent(parentContext, compact, { requestId, childAgentCallId }) {
-  const payloadText = JSON.stringify(compact, null, 2);
-  const surfaced = surfaceHashRefForContext(parentContext, {
-    payloadText,
-    objectType: RESEARCH_REPORT_OBJECT_TYPE,
-    source: "tool:dispatch_agent.report",
-    note: `Full research report for child ${requestId}`,
-    metadata: {
-      line_semantics: "materialized",
-      research_request_id: requestId,
-      child_agent_call_id: positiveId(childAgentCallId),
-      ...hashRefModelVisibility(parentContext, { visibility: "hidden", ranges: [] }),
-    },
-  }, { ownerScope: "work_item" });
-  if (!surfaced?.ok || !surfaced.entry?.ref) return null;
-  const traversal = issueHashRefTraversalForContext(parentContext, {
-    ref: surfaced.entry.ref,
-    sourceRef: surfaced.entry.ref,
-    selector: { mode: "full" },
-    sourceContentHash: surfaced.entry.content_hash || null,
-  });
-  return traversal?.ok ? surfaced.entry.ref : null;
-}
-
 // The committed report already cost a full child run, so it is delivered
-// rather than discarded: uncited findings are marked unverified, and a report
-// over the planner's cap is trimmed deterministically with the full copy kept
-// behind a traversable ref.
+// rather than discarded. Uncited findings are marked unverified, lossless
+// selector duplication is removed, and reports over the target remain whole.
 function deliverableResearchPacket(entry, compact, childAgentCallId) {
   const context = entry.parentContext || {};
   const marking = markUncitedResearchClaims(compact);
@@ -411,21 +386,17 @@ function deliverableResearchPacket(entry, compact, childAgentCallId) {
   const fit = fitResearchReport(marking.packet, {
     maxChars: entry.resultChars,
     evidenceAllowance: entry.expandEvidence ? researchExpansionAnnotationChars() : 0,
-    resolveFullReportRef: () => surfaceResearchReportToParent(context, marking.packet, {
-      requestId: entry.id,
-      childAgentCallId,
-    }),
   });
-  if (fit.trimmed) {
+  if (fit.overTarget) {
     recordResearchChildObservation(
       context,
-      SUB_AGENT_OBSERVATION_TYPES.RESULT_TRIMMED,
-      `Trimmed research child ${entry.id} report from ${fit.trimmed.chars_before} to ${fit.trimmed.chars_after} characters`,
+      SUB_AGENT_OBSERVATION_TYPES.RESULT_OVER_TARGET,
+      `Research child ${entry.id} report exceeded the ${fit.overTarget.target_chars}-character target and was delivered in full`,
       {
         request_id: entry.id,
         child_agent_call_id: positiveId(childAgentCallId),
         result_chars: entry.resultChars,
-        ...fit.trimmed,
+        ...fit.overTarget,
         steps: fit.steps,
         fits: fit.fits,
       },
@@ -1188,8 +1159,63 @@ function publicEntry(entry) {
   return { id: entry.id, handle: entry.handle, status: entry.status };
 }
 
+function surfaceResearchPacketForTransport(entry) {
+  if (entry.transportGuard) return entry.transportGuard;
+  const packetText = JSON.stringify(entry.packet, null, 2);
+  const surfaced = surfaceHashRefForContext(entry.parentContext || {}, {
+    payloadText: packetText,
+    objectType: RESEARCH_REPORT_OBJECT_TYPE,
+    source: "tool:dispatch_agent.transport_guard",
+    note: `Full research report for child ${entry.id}`,
+    metadata: {
+      line_semantics: "materialized",
+      research_request_id: entry.id,
+      ...hashRefModelVisibility(entry.parentContext || {}, { visibility: "hidden", ranges: [] }),
+    },
+  }, { ownerScope: "work_item" });
+  if (!surfaced?.ok || !surfaced.entry?.ref) return null;
+  const traversal = issueHashRefTraversalForContext(entry.parentContext || {}, {
+    ref: surfaced.entry.ref,
+    sourceRef: surfaced.entry.ref,
+    selector: { mode: "full" },
+    sourceContentHash: surfaced.entry.content_hash || null,
+  });
+  if (!traversal?.ok) return null;
+  entry.transportGuard = {
+    report_ref: surfaced.entry.ref,
+    pointer: `Full child report moved intact to ${surfaced.entry.ref} to avoid transport clipping. Retrieve that ref with fetch_ref before planning.`,
+    original_chars: packetText.length,
+  };
+  return entry.transportGuard;
+}
+
+function transportSafePublicBatch(batch, response) {
+  if (!Array.isArray(response?.results)) return response;
+  const resultChars = () => JSON.stringify(response).length;
+  if (resultChars() <= SUB_AGENT_TRANSPORT_RESULT_TARGET_CHARS) return response;
+  const candidates = batch.entries
+    .filter((entry) => entry.status === "completed"
+      && entry.profile === RESEARCH_CHILD_PROFILE
+      && entry.packet)
+    .sort((left, right) => JSON.stringify(right.packet).length - JSON.stringify(left.packet).length);
+  for (const entry of candidates) {
+    const guard = surfaceResearchPacketForTransport(entry);
+    if (!guard) continue;
+    const publicResult = response.results.find((result) => result.id === entry.id);
+    if (!publicResult) continue;
+    publicResult.packet = {
+      protocol: entry.packet.protocol,
+      profile: entry.packet.profile,
+      outcome: entry.packet.outcome,
+      transport_guard: guard,
+    };
+    if (resultChars() <= SUB_AGENT_TRANSPORT_RESULT_TARGET_CHARS) break;
+  }
+  return response;
+}
+
 function publicBatch(batch, { includeResults = false } = {}) {
-  return {
+  const response = {
     ok: true,
     protocol: SUB_AGENT_PROTOCOL,
     op: batch.op,
@@ -1204,6 +1230,7 @@ function publicBatch(batch, { includeResults = false } = {}) {
       next_action: { tool: "sub_agent", op: "status", default_wait_ms: 1000 },
     } : {}),
   };
+  return includeResults ? transportSafePublicBatch(batch, response) : response;
 }
 
 /**

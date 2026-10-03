@@ -76,7 +76,7 @@ import {
 import {
   siblingLockSummary,
 } from "../../../queue/functions/sibling-locks.js";
-import { siblingOwnedWorktreePaths } from "../../../queue/functions/file-locks.js";
+import { siblingJobScopeOwners, siblingOwnedWorktreePaths } from "../../../queue/functions/file-locks.js";
 import { loadAssessmentSource } from "../../functions/execution/assessment-source.js";
 import { ensureAssessmentScopedCheckEvidence } from "../../../assessment/functions/scoped-check-evidence.js";
 import {
@@ -329,11 +329,12 @@ export class AssessmentHandoffAdapter {
     const { role, provider, providerName } = await resolveAssessmentOnlyProvider(worker.agentDispatcher);
     const assessAttemptCount = assessAttempt.attemptCount || (Number(assessmentSource.attempt?.attempt_number || 0) + 1);
     const resolveAssessModel = (tier) => tierModelName(tier, { role, providerName });
-    const effectiveTier = provider.escalateTier(
+    const escalatedTier = provider.escalateTier(
       assessModelTierOverride || getDefaultModelTierForRole("assessor"),
       assessAttemptCount,
       { resolveModel: resolveAssessModel },
     );
+    const effectiveTier = escalatedTier === "strong" ? "standard" : escalatedTier;
     const internalAssessRetries = countInternalAssessmentRetries(job.id);
     // Tool/transport failures requeue assessment without producing the
     // `job.assessment_internal_retry` event used by verdict escalation. Count
@@ -491,6 +492,7 @@ export class AssessmentHandoffAdapter {
         attemptId: assessAttempt.attempt.id,
         cwd: assessmentCwd,
         assessmentContext,
+        siblingScopeOwners: (paths) => siblingJobScopeOwners(job.id, paths),
         cleanupWorktree: async () => snapshotAndResetDirtyWorktreeAsync(
           assessmentCwd,
           worker.projectDir,

@@ -36,6 +36,7 @@ import {
   verificationOutcome,
 } from "./verification-outcome.js";
 import { resolveRepositoryVerificationPlan } from "../../../verification/functions/verification-plan.js";
+import { withLineagePathsRestored } from "../../../verification/functions/lineage-tree.js";
 import {
   TEST_SCRIPT_NO_VERIFICATION_REASON,
   VERIFICATION_DEPENDENCY_LOCK_INVALID,
@@ -1299,6 +1300,52 @@ function repositoryReceiptCandidates(jobId, limit = 512) {
     .filter(Boolean);
 }
 
+/**
+ * Historical planner commands whose latest repository baseline is red.
+ * This is planning input, not a waiver: it steers new plans toward a passing
+ * check or an explicit task that repairs the pre-existing failure.
+ */
+export async function knownRedTestCommandsForRepository(projectDir, { limit = 12 } = {}) {
+  const repositoryFingerprintValue = await repositoryFingerprint(projectDir);
+  if (!repositoryFingerprintValue) return [];
+  const rows = getDb().prepare(`
+    SELECT id
+    FROM artifacts
+    WHERE mime_type = ?
+    ORDER BY id DESC
+    LIMIT 2048
+  `).all(RECEIPT_MIME_TYPE);
+  const receipts = rows
+    .map((row) => parseReceiptArtifact(getArtifact(row.id)))
+    .filter((receipt) => receipt
+      && receipt.phase === "baseline"
+      && receipt.source === "planner"
+      && receipt.repository_fingerprint === repositoryFingerprintValue);
+  const latestByCommand = new Map();
+  const failedIdentities = new Map();
+  for (const receipt of receipts) {
+    const key = [receipt.command || "", receipt.cwd_relative || ""].join("\0");
+    if (!receipt.command) continue;
+    if (!latestByCommand.has(key)) latestByCommand.set(key, receipt);
+    if (receipt.status !== "failed") continue;
+    const identity = comparableTestFailureFingerprint(receipt);
+    if (!identity) continue;
+    const identities = failedIdentities.get(key) || new Set();
+    identities.add(identity);
+    failedIdentities.set(key, identities);
+  }
+  return [...latestByCommand.entries()]
+    .filter(([, receipt]) => receipt.status === "failed")
+    .slice(0, Math.max(1, Number(limit) || 12))
+    .map(([key, receipt]) => ({
+      command: receipt.command,
+      cwd_relative: receipt.cwd_relative || null,
+      failure_identities: [...(failedIdentities.get(key) || [])].sort(),
+      last_failed_commit: receipt.commit_hash || null,
+      last_failed_at: receipt.created_at || null,
+    }));
+}
+
 // Receipts other jobs of the same work item recorded for this exact command,
 // newest first. Baseline attribution reads them to find the last known pass.
 export function workItemCommandReceipts(workItemId, {
@@ -1343,7 +1390,7 @@ async function findRepositoryFrozenTestBaseline({
   )) || null;
 }
 
-function storeRepositoryBaselineReference(job, receipt) {
+function storeRepositoryBaselineReference(job, receipt, { reuseScope = "repository_commit" } = {}) {
   const {
     artifact_id: sourceArtifactId,
     artifact_job_id: sourceJobId,
@@ -1353,7 +1400,7 @@ function storeRepositoryBaselineReference(job, receipt) {
   } = receipt;
   return storeReceipt(job, null, {
     ...sourceReceipt,
-    reuse_scope: "repository_commit",
+    reuse_scope: reuseScope,
     reuse_source_artifact_id: sourceArtifactId || null,
     reuse_source_job_id: sourceJobId || null,
     reuse_source_created_at: sourceCreatedAt || null,
@@ -1425,6 +1472,7 @@ async function executeReceipt({
   cleanupPaths = restorePathsToHead,
   baselineReceipt = null,
   dependencyRepair = null,
+  allowProjectedBaseline = false,
 } = {}) {
   const effectivePolicy = policy || effectiveVerificationPolicy({ cwd });
   const toolchain = describeToolchain({ projectDir: cwd });
@@ -1552,7 +1600,7 @@ async function executeReceipt({
     });
   }
   const before = initialPorcelain;
-  if (before) {
+  if (before && !allowProjectedBaseline) {
     return storeReceipt(job, attemptId, {
       kind: RECEIPT_KIND,
       schema_version: RECEIPT_SCHEMA_VERSION,
@@ -1620,7 +1668,7 @@ async function executeReceipt({
     cleanupStatus = "required";
     try {
       if (ownWorktreeChanges) {
-        if (siblingPaths.size > 0) {
+        if (siblingPaths.size > 0 || allowProjectedBaseline) {
           // A whole-worktree reset would erase the sibling files too; undo
           // only what this test changed.
           await cleanupPaths(cwd, ownChangedPaths);
@@ -1791,6 +1839,13 @@ export async function ensurePreDevelopmentTestBaseline({
   // migration, build, generator, or server-start command against the baseline
   // can mutate state before implementation and still is not test evidence.
   if (plan.source === "operator_approved_operation") return null;
+  const rootJobId = Number(payload?.root_job_id || payload?.original_job_id || 0);
+  if (Number.isSafeInteger(rootJobId) && rootJobId > 0 && rootJobId !== Number(job?.id)) {
+    const rootBaseline = findFrozenTestBaseline(rootJobId, { policy: effectivePolicy, projectDir: cwd });
+    if (rootBaseline?.plan_id === plan.plan_id) {
+      return storeRepositoryBaselineReference(job, rootBaseline, { reuseScope: "lineage_root" });
+    }
+  }
   const headCommit = await currentCommit(cwd);
   const headPorcelain = await porcelain(cwd);
   const repositoryBaseline = headPorcelain === ""
@@ -1811,31 +1866,52 @@ export async function ensurePreDevelopmentTestBaseline({
     // recording a new "baseline" would test the changed tree and can disguise
     // a regression as a persistent pre-existing failure.
     if (!prior.commit_hash || !headCommit || prior.commit_hash !== headCommit) {
-      return null;
+      const ownAttemptCommits = getDb().prepare(`
+        SELECT commit_hash FROM job_attempts
+        WHERE job_id = ? AND commit_hash IS NOT NULL AND TRIM(commit_hash) != ''
+      `).all(Number(job?.id)).map((row) => String(row.commit_hash || "").trim()).filter(Boolean);
+      let ownCommitReachable = false;
+      for (const commit of ownAttemptCommits) {
+        if (await isAncestorCommit(cwd, commit, headCommit)) {
+          ownCommitReachable = true;
+          break;
+        }
+      }
+      if (ownCommitReachable) return null;
     }
   }
-  const receipt = await executeReceipt({
+  const rootBaseCommit = String(payload?.root_base_commit || "").trim();
+  const lineagePaths = [...new Set([
+    ...(Array.isArray(payload?.files_to_modify) ? payload.files_to_modify : []),
+    ...(Array.isArray(payload?.files_to_create) ? payload.files_to_create : []),
+    ...(Array.isArray(payload?.files_to_delete) ? payload.files_to_delete : []),
+  ])];
+  const useLineageProjection = !!(rootBaseCommit && lineagePaths.length > 0);
+  const executeBaseline = (dependencyRepair = null) => executeReceipt({
     job,
     plan,
     phase: "baseline",
     cwd,
-    policy: effectivePolicy,
-    cleanupWorktree,
-    siblingOwnedPaths,
-  });
-  // The first receipt remains an honest record of the unavailable toolchain.
-  // Re-run at the same commit after repair so the frozen, reusable baseline is
-  // the actual repository result rather than an infrastructure failure.
-  return retryAfterDependencyRepair(receipt, repairDependencies, (dependencyRepair) => executeReceipt({
-    job,
-    plan,
-    phase: "baseline",
-    cwd,
+    commitHash: rootBaseCommit || null,
     policy: effectivePolicy,
     cleanupWorktree,
     siblingOwnedPaths,
     dependencyRepair,
-  }));
+    allowProjectedBaseline: useLineageProjection,
+  });
+  const runBaseline = (dependencyRepair = null) => useLineageProjection
+    ? withLineagePathsRestored({
+        cwd,
+        baseCommit: rootBaseCommit,
+        paths: lineagePaths,
+        run: () => executeBaseline(dependencyRepair),
+      })
+    : executeBaseline(dependencyRepair);
+  const receipt = await runBaseline();
+  // The first receipt remains an honest record of the unavailable toolchain.
+  // Re-run at the same commit after repair so the frozen, reusable baseline is
+  // the actual repository result rather than an infrastructure failure.
+  return retryAfterDependencyRepair(receipt, repairDependencies, (dependencyRepair) => runBaseline(dependencyRepair));
 }
 
 export async function ensurePostChangeTestReceipt({
@@ -1859,15 +1935,50 @@ export async function ensurePostChangeTestReceipt({
     : resolveFrozenTestPlan(job, payload, { cwd });
   if (!plan) return null;
   const assessedCommit = commitHash || await currentCommit(cwd);
+  const debtIdentitiesFor = async (postChange) => {
+    const identities = new Set();
+    const add = (receipt) => {
+      const identity = comparableTestFailureFingerprint(receipt);
+      if (receipt?.status === "failed" && identity) identities.add(identity);
+    };
+    add(baseline);
+    let lineageBase = String(payload?.root_base_commit || "").trim();
+    if (!lineageBase) {
+      const rootJobId = Number(payload?.root_job_id || payload?.original_job_id || job?.id);
+      lineageBase = String(getDb().prepare(`
+        SELECT commit_base_hash FROM job_attempts
+        WHERE job_id = ? AND commit_base_hash IS NOT NULL AND TRIM(commit_base_hash) != ''
+        ORDER BY attempt_number, id LIMIT 1
+      `).get(rootJobId)?.commit_base_hash || "").trim();
+    }
+    if (lineageBase) {
+      const candidates = repositoryReceiptCandidates(job.id)
+        .filter((receipt) => receipt.status === "failed"
+          && receipt.command === plan.command
+          && (receipt.cwd_relative || null) === (plan.cwd_relative || null)
+          && receipt.commit_hash)
+        .slice(0, 64);
+      for (const receipt of candidates) {
+        if (receipt.commit_hash === lineageBase || await isAncestorCommit(cwd, receipt.commit_hash, lineageBase)) add(receipt);
+      }
+    }
+    const postIdentity = comparableTestFailureFingerprint(postChange);
+    return {
+      debt_failure_identities: [...identities].sort(),
+      debt_only: postChange?.status === "failed" && !!postIdentity && identities.has(postIdentity),
+    };
+  };
   const existing = findPostChangeReceipt(job.id, plan.plan_id, assessedCommit, {
     policy: effectivePolicy,
     projectDir: cwd,
   });
   if (existing) {
+    const debt = await debtIdentitiesFor(existing);
     return {
       baseline,
       post_change: { ...existing, reused: true },
       reused: true,
+      ...debt,
     };
   }
   const firstPostChange = await executeReceipt({
@@ -1899,10 +2010,12 @@ export async function ensurePostChangeTestReceipt({
       dependencyRepair,
     }),
   );
+  const debt = await debtIdentitiesFor(postChange);
   return {
     baseline,
     post_change: postChange,
     reused: false,
+    ...debt,
   };
 }
 

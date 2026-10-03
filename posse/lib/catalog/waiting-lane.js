@@ -72,6 +72,7 @@ export const WAITING_LANE_GENERATION_FIELDS = Object.freeze([
   "git_oid",
   "atlas_ledger_seq",
   "atlas_layer_revision",
+  "atlas_layer_row_count",
   "view_fingerprint",
 ]);
 
@@ -81,6 +82,7 @@ export const WAITING_LANE_GENERATION_FIELDS = Object.freeze([
  * @property {string} git_oid
  * @property {number} atlas_ledger_seq
  * @property {number} atlas_layer_revision
+ * @property {number} [atlas_layer_row_count]
  * @property {string} view_fingerprint
  */
 
@@ -124,6 +126,9 @@ export function isWaitingLaneGeneration(value) {
     && value.atlas_ledger_seq >= 0
     && Number.isSafeInteger(value.atlas_layer_revision)
     && value.atlas_layer_revision >= 0
+    && (value.atlas_layer_row_count == null || (
+      Number.isSafeInteger(value.atlas_layer_row_count) && value.atlas_layer_row_count >= 0
+    ))
     && typeof value.view_fingerprint === "string"
     && value.view_fingerprint.trim().length > 0
   );
@@ -136,6 +141,7 @@ export function normalizeWaitingLaneGeneration(value) {
     git_oid: value.git_oid.trim().toLowerCase(),
     atlas_ledger_seq: value.atlas_ledger_seq,
     atlas_layer_revision: value.atlas_layer_revision,
+    ...(value.atlas_layer_row_count == null ? {} : { atlas_layer_row_count: value.atlas_layer_row_count }),
     view_fingerprint: value.view_fingerprint.trim(),
   });
 }

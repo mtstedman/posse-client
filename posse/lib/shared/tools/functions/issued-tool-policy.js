@@ -245,8 +245,11 @@ export function normalizeIssuedToolSurface(value, {
   const out = [];
   for (const entry of entries) {
     const tool = canonicalToolEntry(entry);
+    const normalizedRole = normalizeIssuedRole(role);
     if (hasAtlasSurface
-      && tool?.suite === "tools" && atlasReplacesNativeTool(tool.name, normalizeIssuedRole(role))) continue;
+      && tool?.suite === "tools"
+      && !(normalizedRole === "planner" && tool.name === "read_file")
+      && atlasReplacesNativeTool(tool.name, normalizedRole)) continue;
     if (!toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable, {
       agentHandoff: coordinationAvailable,
       subAgent: subAgentAvailable,

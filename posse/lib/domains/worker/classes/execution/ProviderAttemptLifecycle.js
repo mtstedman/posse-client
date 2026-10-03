@@ -1,6 +1,7 @@
 import fs from "fs";
 import {
   completeAttempt,
+  getAttempts,
   getJob,
   incrementAndCreateAttempt,
   setAttemptModelName,
@@ -154,11 +155,20 @@ export class ProviderAttemptLifecycle {
       && !preserveExecutionProfile
       ? "cheap"
       : null;
+    const cappedExecutionRole = role === "dev" || role === "assessor";
+    const baseModelTier = cappedExecutionRole && job.model_tier === "strong"
+      ? "standard"
+      : job.model_tier;
 
-    const prelimCount = (job.attempt_count || 0) + 1;
+    const retryGeneration = Math.max(0, Number(executionPayload?._retry_generation) || 0);
+    const generationAttempts = () => getAttempts(job.id).filter((entry) => (
+      ["implementation", "human"].includes(String(entry.attempt_kind || "implementation"))
+      && Number(entry.attempt_number || 0) > retryGeneration
+    )).length;
+    const prelimCount = generationAttempts() + 1;
     let effectiveTier = preserveExecutionProfile
-      ? job.model_tier
-      : (researchRetrySynthesisTier || provider.escalateTier(job.model_tier, prelimCount, { resolveModel: resolveTierModel }));
+      ? baseModelTier
+      : (researchRetrySynthesisTier || provider.escalateTier(baseModelTier, prelimCount, { resolveModel: resolveTierModel }));
     let modelName = provider.resolveExecutionModelName(
       job.model_name || tierModelName(effectiveTier, { role, providerName: executionProvider || undefined }),
       { role, modelTier: effectiveTier },
@@ -172,10 +182,11 @@ export class ProviderAttemptLifecycle {
     }
 
     const { attemptCount, attempt } = result;
+    const effectiveAttemptCount = generationAttempts();
 
     // Recalculate tier if attempt drifted (provider already resolved above with job.provider).
-    if (attemptCount > prelimCount && !researchRetrySynthesisTier && !preserveExecutionProfile) {
-      effectiveTier = provider.escalateTier(job.model_tier, attemptCount, { resolveModel: resolveTierModel });
+    if (effectiveAttemptCount !== prelimCount && !researchRetrySynthesisTier && !preserveExecutionProfile) {
+      effectiveTier = provider.escalateTier(baseModelTier, effectiveAttemptCount, { resolveModel: resolveTierModel });
       const driftedModelName = provider.resolveExecutionModelName(
         job.model_name || resolveTierModel(effectiveTier),
         { role, modelTier: effectiveTier },
@@ -188,13 +199,15 @@ export class ProviderAttemptLifecycle {
     }
     job._executionModelName = modelName;
 
-    if (researchRetrySynthesisTier && effectiveTier !== job.model_tier) {
-      worker.emit(job.id, `${C.yellow}[research-retry] WI#${job.work_item_id} job #${job.id}: pinned retry synthesis to ${effectiveTier} tier (attempt ${attemptCount})${C.reset}`);
+    if (baseModelTier !== job.model_tier) {
+      worker.emit(job.id, `${C.yellow}[tier-policy] WI#${job.work_item_id} job #${job.id}: ${role} tier capped ${job.model_tier} -> ${baseModelTier}${C.reset}`);
+    } else if (researchRetrySynthesisTier && effectiveTier !== job.model_tier) {
+      worker.emit(job.id, `${C.yellow}[research-retry] WI#${job.work_item_id} job #${job.id}: pinned retry synthesis to ${effectiveTier} tier (generation attempt ${effectiveAttemptCount})${C.reset}`);
     } else if (effectiveTier !== job.model_tier) {
-      worker.emit(job.id, `${C.yellow}[escalation] WI#${job.work_item_id} job #${job.id}: ${job.model_tier} -> ${effectiveTier} (attempt ${attemptCount})${C.reset}`);
+      worker.emit(job.id, `${C.yellow}[escalation] WI#${job.work_item_id} job #${job.id}: ${job.model_tier} -> ${effectiveTier} (generation attempt ${effectiveAttemptCount})${C.reset}`);
     }
     if (worker.display) {
-      worker.display.updateWorkerTier(job.id, effectiveTier, attemptCount, executionProvider || null, modelName);
+      worker.display.updateWorkerTier(job.id, effectiveTier, effectiveAttemptCount, executionProvider || null, modelName);
     }
 
     // Per-job scratch directory.

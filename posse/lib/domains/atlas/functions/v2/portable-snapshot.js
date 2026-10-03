@@ -82,7 +82,11 @@ function inspectStoredGeneration({ ledgerPath, viewPath, targetBranch, expectedG
     if (ledger.headSeq(targetBranch) !== generation.atlas_ledger_seq) {
       throw new Error("ATLAS portable snapshot ledger head does not match the main view");
     }
-    if (ledger.layerRevision() !== generation.atlas_layer_revision) {
+    const layerToken = typeof ledger.layerScopeToken === "function"
+      ? ledger.layerScopeToken(targetBranch, generation.atlas_ledger_seq)
+      : { revision: ledger.layerRevision(), row_count: generation.atlas_layer_row_count || 0 };
+    if (layerToken.revision !== generation.atlas_layer_revision
+      || (generation.atlas_layer_row_count != null && layerToken.row_count !== generation.atlas_layer_row_count)) {
       throw new Error("ATLAS portable snapshot layer revision does not match the main view");
     }
     if (expectedGeneration && !waitingLaneGenerationsEqual(generation, expectedGeneration)) {

@@ -210,6 +210,8 @@ CREATE TABLE IF NOT EXISTS blob_layers (
   status               TEXT NOT NULL DEFAULT 'indexed'
                          CHECK (status IN ('indexed','failed','stale')),
   metadata_json        TEXT,
+  rows_digest          TEXT NOT NULL DEFAULT '',
+  layer_rev            INTEGER NOT NULL DEFAULT 0,
   UNIQUE (
     content_hash, source, tool_version, parser_spec_version,
     config_hash, deps_hash, fileset_hash
@@ -262,13 +264,20 @@ AFTER INSERT ON blob_layers
 BEGIN
   INSERT INTO meta(key, value) VALUES('layer_revision', '1')
   ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+  UPDATE blob_layers
+  SET layer_rev = CAST((SELECT value FROM meta WHERE key = 'layer_revision') AS INTEGER)
+  WHERE id = NEW.id;
 END;
 
 CREATE TRIGGER IF NOT EXISTS atlas_blob_layers_revision_update
 AFTER UPDATE ON blob_layers
+WHEN NEW.layer_rev = OLD.layer_rev
 BEGIN
   INSERT INTO meta(key, value) VALUES('layer_revision', '1')
   ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+  UPDATE blob_layers
+  SET layer_rev = CAST((SELECT value FROM meta WHERE key = 'layer_revision') AS INTEGER)
+  WHERE id = NEW.id;
 END;
 
 CREATE TRIGGER IF NOT EXISTS atlas_blob_layers_revision_delete

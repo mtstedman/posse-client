@@ -83,6 +83,7 @@ export class View {
       ...local,
       ...response.value,
       layer_revision: local.layer_revision,
+      layer_row_count: local.layer_row_count,
       view_fingerprint: local.view_fingerprint,
       git_oid: local.git_oid,
     });
@@ -126,6 +127,7 @@ export class View {
       git_oid: meta.git_oid,
       atlas_ledger_seq: meta.ledger_seq,
       atlas_layer_revision: meta.layer_revision,
+      atlas_layer_row_count: meta.layer_row_count,
       view_fingerprint: meta.view_fingerprint,
     });
   }
@@ -151,6 +153,7 @@ export class View {
       git_oid: expected.git_oid,
       atlas_ledger_seq: meta.ledger_seq,
       atlas_layer_revision: meta.layer_revision,
+      atlas_layer_row_count: meta.layer_row_count,
       view_fingerprint: meta.view_fingerprint,
     };
     if (!waitingLaneGenerationsEqual(materialization, expected)) {
@@ -613,6 +616,12 @@ export function normalizeViewMeta(values) {
   const viewFingerprint = typeof values.view_fingerprint === "string"
     ? values.view_fingerprint.trim()
     : "";
+  const layerRowCount = values.layer_row_count == null || values.layer_row_count === ""
+    ? null
+    : Number(values.layer_row_count);
+  if (layerRowCount != null && (!Number.isSafeInteger(layerRowCount) || layerRowCount < 0)) {
+    throw new Error("ATLAS view meta has an invalid layer_row_count");
+  }
 
   let warmedForFiles = values.warmed_for_files ?? null;
   if (typeof warmedForFiles === "string") {
@@ -633,6 +642,7 @@ export function normalizeViewMeta(values) {
     parent_seq: optionalIntegerMeta(values.parent_seq),
     ledger_seq: ledgerSeq,
     layer_revision: layerRevision,
+    layer_row_count: layerRowCount,
     view_fingerprint: viewFingerprint,
     git_oid: typeof values.git_oid === "string" && values.git_oid.trim()
       ? values.git_oid.trim().toLowerCase()

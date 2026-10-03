@@ -236,6 +236,7 @@ const RUNTIME_KILL_WEDGED_MS = 5 * 60_000;
 // a human-gate maintenance sweep, so a disposition gate the stall depends on
 // is open (and named) by then.
 const PARKED_UPSTREAM_STALL_GRACE_MS = 90_000;
+const OPERATOR_PARKED_REJECTED_LOCK_RELEASE_MS = 15 * 60_000;
 
 // A completed work item that this run merges on its own (not parked) but that
 // stays unmerged with no merge in flight for this long while the run idles
@@ -354,6 +355,13 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   // A failed or canceled work item's content is abandoned (its locks are
   // released with it); never hand anything out of it.
   if (sourceWi.status === "failed" || sourceWi.status === "canceled") return false;
+  const holderParking = workItemMergeParking(sourceWi);
+  const sourceRejection = crossWiSyncSourceRejection(sourceWiId, path, lockKind);
+  const parkedAtMs = Date.parse(holderParking?.parked_at || "");
+  const releaseRejectedParkedLock = holderParking?.reason === "operator_gate"
+    && sourceRejection != null
+    && Number.isFinite(parkedAtMs)
+    && Date.now() - parkedAtMs >= OPERATOR_PARKED_REJECTED_LOCK_RELEASE_MS;
 
   const recordBlocked = (message, eventDetail) => {
     const normalizedBlockers = Array.isArray(eventDetail?.blockers)
@@ -395,7 +403,9 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
     return false;
   };
 
-  const releaseCheck = workItemCanReleaseFileLock(sourceWiId, path, lockKind);
+  const releaseCheck = workItemCanReleaseFileLock(sourceWiId, path, lockKind, {
+    allowOperatorParked: releaseRejectedParkedLock,
+  });
   if (!releaseCheck.ok) {
     return recordBlocked(
       `Cross-WI handoff skipped for ${path}; WI#${sourceWiId} still has ${releaseCheck.blockers.length} unresolved writer(s)`,
@@ -504,31 +514,33 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   // that job goes away and the holder finishes first, whichever merges second
   // is refreshed onto the target at close-out, and a true overlap fails that
   // merge for review rather than landing silently.
-  let sourceRejection = null;
   let holderWaitPath = null;
   if (!existingOrder) {
     const holderWaits = workItemWaitsOnWorkItem(sourceWiId, requesterWiId);
     if (!holderWaits.waits) {
-      const holderParking = workItemMergeParking(sourceWi);
-      if (holderParking) {
+      if (holderParking && !releaseRejectedParkedLock) {
         return recordBlocked(
           `Cross-WI handoff held for ${path}; ${describeWorkItemMergeParking(holderParking)}, so this work item waits until it merges and then builds on the target`,
           { reason: "upstream_parked", holder_parking: holderParking },
         );
       }
-      return recordBlocked(
-        `Cross-WI handoff declined for ${path}; WI#${sourceWiId} keeps it until it merges, then this work item builds on the target`,
-        { reason: "upstream_merge_pending" },
-      );
+      if (!releaseRejectedParkedLock) {
+        return recordBlocked(
+          `Cross-WI handoff declined for ${path}; WI#${sourceWiId} keeps it until it merges, then this work item builds on the target`,
+          { reason: "upstream_merge_pending" },
+        );
+      }
+      holderWaitPath = `operator_gate:${holderParking.gate_job_id}`;
+    } else {
+      holderWaitPath = holderWaits.path;
     }
-    holderWaitPath = holderWaits.path;
-    // Recorded for the operator; nothing is copied either way.
-    sourceRejection = crossWiSyncSourceRejection(sourceWiId, path, lockKind);
   }
 
   const db = getDb();
   const applyHandoff = () => {
-    const currentReleaseCheck = workItemCanReleaseFileLock(sourceWiId, path, lockKind);
+    const currentReleaseCheck = workItemCanReleaseFileLock(sourceWiId, path, lockKind, {
+      allowOperatorParked: releaseRejectedParkedLock,
+    });
     if (!currentReleaseCheck.ok) {
       return { ok: false, released: 0, reason: currentReleaseCheck.reason };
     }
@@ -610,6 +622,8 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
     actor_id: ownerId,
     message: existingOrder
       ? `Released downstream lock for ${path}; WI#${sourceWiId} is already ordered after WI#${job.work_item_id} (its pending edits stay claimed until it merges)`
+      : releaseRejectedParkedLock
+        ? `Released WI#${sourceWiId}'s unreviewed lock on ${path} after 15 minutes parked on gate #${holderParking.gate_job_id}; no content was copied and its pending edits stay claimed until it resumes and merges`
       : `Released WI#${sourceWiId}'s idle lock on ${path} without its content${sourceRejection ? ` (${sourceRejection})` : ""}; WI#${sourceWiId} waits on WI#${job.work_item_id}, so holding it would deadlock, and its pending edits stay claimed until it merges`,
     event_json: JSON.stringify({
       source_work_item_id: sourceWiId,
@@ -619,6 +633,7 @@ function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
       released: handoff.released,
       merge_dependency_added: false,
       pending_claim_recorded: true,
+      ...(releaseRejectedParkedLock ? { operator_parked_release: true, gate_job_id: holderParking.gate_job_id } : {}),
       ...(existingOrder ? { existing_merge_order: true, merge_order_path: mergeOrderCheck.path } : { holder_wait_path: holderWaitPath }),
       ...(sourceRejection ? { source_rejection: sourceRejection } : {}),
       ...(deadlockedHolds.length > 0
@@ -856,6 +871,27 @@ export class Scheduler {
       queued_job_count: queued.length,
       waits,
       holders: [...holders.values()],
+    };
+  }
+
+  _describeDirectOperatorParking({ trackedJobs = [] } = {}) {
+    const live = trackedJobs.filter((job) => !TERMINAL_JOB_STATUSES.includes(job.status));
+    if (live.length === 0) return null;
+    const workItemIds = [...new Set(live.map((job) => Number(job.work_item_id)).filter((id) => id > 0))];
+    const holders = [];
+    for (const workItemId of workItemIds) {
+      const parking = workItemMergeParking(workItemId);
+      if (parking?.reason !== "operator_gate") return null;
+      holders.push({ work_item_id: workItemId, status: getWorkItem(workItemId)?.status || null, parking });
+    }
+    if (holders.length === 0) return null;
+    const queued = live.filter((job) => job.status === "queued");
+    return {
+      reason: "operator_parked_work_items",
+      waiting_work_item_ids: workItemIds.sort((a, b) => a - b),
+      queued_job_count: queued.length,
+      waits: [],
+      holders,
     };
   }
 
@@ -3045,12 +3081,14 @@ export class Scheduler {
           blockedLockDetails: agentLockDetails.slice(0, 5),
         });
 
-        if (launched || activeWorkers.size > 0) {
+        const executableActiveWorkerCount = [...activeWorkers.values()]
+          .filter((entry) => entry.job?.job_type !== "human_input").length;
+        if (launched || executableActiveWorkerCount > 0) {
           parkedStallSince = null;
           autoMergeAwaitedSince.clear();
           autoMergeRetried = false;
         }
-        if (!launched && activeWorkers.size === 0) {
+        if (!launched && executableActiveWorkerCount === 0) {
           // Nothing running and nothing to start. Reuse the tracked rows from
           // this tick so scoped runs ignore unrelated queued/active jobs when
           // deciding whether their own work is complete.
@@ -3064,7 +3102,9 @@ export class Scheduler {
           // + hard deps met). Non-zero here means we saw eligible jobs, but
           // all were blocked by concurrency or file-scope conflict.
           const runnableNow = candidateCount > 0;
-          const hasActive = trackedJobsForCloseout.some((job) => LOCK_HOLDING_JOB_STATUSES.includes(job.status));
+          const hasActive = trackedJobsForCloseout.some((job) => (
+            job.job_type !== "human_input" && LOCK_HOLDING_JOB_STATUSES.includes(job.status)
+          ));
           const hasQueued = trackedJobsForCloseout.some((job) => job.status === "queued");
           const canProgress = runnableNow || hasActive || hasQueued;
           if (!canProgress) {
@@ -3079,13 +3119,13 @@ export class Scheduler {
           // the run finishes as needs-action, naming those work items.
           const stall = hasActive
             ? null
-            : this._describeParkedUpstreamStall({
+            : (this._describeParkedUpstreamStall({
               scannedJobIds: scanExcludeJobIds,
               scanCapped: candidateCount >= maxCandidateScan,
               blockedLockDetails,
               trackedJobs: trackedJobsForCloseout,
               autoMergeAwaitedSince,
-            });
+            }) || this._describeDirectOperatorParking({ trackedJobs: trackedJobsForCloseout }));
           if (stall) {
             parkedStallSince ??= Date.now();
             // onIdle (which starts the idle auto-merge) fires once per idle
@@ -3097,9 +3137,14 @@ export class Scheduler {
               this._invokeCallback("onIdle", onIdle, trackedJobsForCloseout, { retry: "auto_merge_stalled" });
             }
             if (Date.now() - parkedStallSince >= this._parkedStallGraceMs) {
-              this._finishNeedsAction(stall);
-              this._invokeCallback("onDone", onDone, this.needsActionReport);
-              break;
+              if (!this.needsActionReport) this._finishNeedsAction(stall);
+              // Headless runs return exit 2. Interactive runs keep the TUI and
+              // bridge alive with the durable needs-action banner so the
+              // operator can answer the named gate in-place.
+              if (!this._hasDisplay) {
+                this._invokeCallback("onDone", onDone, this.needsActionReport);
+                break;
+              }
             }
           } else {
             parkedStallSince = null;
@@ -3115,7 +3160,7 @@ export class Scheduler {
         // Workers completing jobs also counts as progress (they remove from activeWorkers,
         // allowing the next tick to dispatch and reset lastProgressTime).
         const progressAge = (Date.now() - lastProgressTime) / 1000;
-        if (progressAge > PROGRESS_TIMEOUT_SEC && !launched && activeWorkers.size === 0) {
+        if (progressAge > PROGRESS_TIMEOUT_SEC && !launched && executableActiveWorkerCount === 0) {
           const queuedJobs = listJobs(["queued"]);
           if (queuedJobs.length > 0) {
             this._log(`No progress in ${Math.ceil(progressAge)}s with ${queuedJobs.length} queued job(s) — running extended deadlock detection`, "red");

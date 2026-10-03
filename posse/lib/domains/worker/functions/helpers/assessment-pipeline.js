@@ -74,7 +74,7 @@ import {
   activeSiblingWriteLocks,
   siblingLockSummary,
 } from "../../../queue/functions/sibling-locks.js";
-import { siblingOwnedWorktreePaths } from "../../../queue/functions/file-locks.js";
+import { siblingJobScopeOwners, siblingOwnedWorktreePaths } from "../../../queue/functions/file-locks.js";
 import {
   getAtlasWarmJobCompletion,
   waitForAtlasWarmJobCompletion,
@@ -3048,6 +3048,7 @@ export async function runPostExecutionAssessment(worker, {
         attemptId: attempt.id,
         cwd: assessmentCwd,
         assessmentContext,
+        siblingScopeOwners: (paths) => siblingJobScopeOwners(job.id, paths),
         cleanupWorktree: async () => snapshotAndResetDirtyWorktreeAsync(
           assessmentCwd,
           worker.projectDir,
@@ -3090,9 +3091,10 @@ export async function runPostExecutionAssessment(worker, {
             emit: (message) => worker.emit(job.id, message),
           })
         : rawTrackedCall;
-      const assessmentTierOrder = ["cheap", "standard", "strong"];
+      const assessmentTierOrder = ["cheap", "standard"];
       const normalizeAssessmentTier = (value, fallback = "cheap") => {
         const raw = String(value || "").trim().toLowerCase();
+        if (raw === "strong") return "standard";
         return assessmentTierOrder.includes(raw) ? raw : fallback;
       };
       const nextAssessmentTier = (value) => {
@@ -3113,12 +3115,7 @@ export async function runPostExecutionAssessment(worker, {
         harnessAssessmentTier || jobPayloadForAssess._assess_model_tier,
         "cheap",
       );
-      const initialAssessmentTier = harnessAssessmentTier || jobPayloadForAssess.deepthink === true
-        ? requestedAssessmentTier
-        : requestedAssessmentTier === "strong" ? "standard" : requestedAssessmentTier;
-      if (requestedAssessmentTier === "strong" && initialAssessmentTier === "standard") {
-        worker.emit(job.id, `${C.yellow}[assessor] planner requested strong initial assessment; capped at standard and reserved strong for escalation${C.reset}`);
-      }
+      const initialAssessmentTier = requestedAssessmentTier;
       let lastAssessmentTier = initialAssessmentTier;
       let verdict = await assessResult(job, output, {
         ...assessOpts,

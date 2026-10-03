@@ -20,6 +20,7 @@
 //     view.db                                    -- the view the worker mounts
 
 import path from "path";
+import crypto from "node:crypto";
 
 const ATLAS_DIR = ".posse/atlas";
 
@@ -90,6 +91,14 @@ export function viewsDir(repoRoot) {
  */
 export function mainViewPath(repoRoot) {
   return path.join(viewsDir(repoRoot), "main.view.db");
+}
+
+/** Pairing side trunks must never overwrite the durable repository-main view. */
+export function branchViewPath(repoRoot, branch) {
+  const name = String(branch || "").trim();
+  if (!/^posse\/pair-/u.test(name)) return mainViewPath(repoRoot);
+  const suffix = crypto.createHash("sha256").update(name).digest("hex").slice(0, 16);
+  return path.join(viewsDir(repoRoot), `session-${suffix}.view.db`);
 }
 
 /**

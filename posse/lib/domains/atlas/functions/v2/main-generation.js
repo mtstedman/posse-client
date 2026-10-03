@@ -193,12 +193,22 @@ export async function publishAtlasMainGenerationIfProven({
     result.generation = await publishGeneration(sourceProof);
     result.generation_proof_reason = "clean_exact_oid_before_after";
   } catch (err) {
+    let publishError = err;
+    const stale = new Set([
+      "ATLAS_MAIN_GENERATION_LEDGER_STALE",
+      "ATLAS_MAIN_GENERATION_LAYER_STALE",
+    ]).has(String(err?.code || ""));
+    if (stale) {
+      try {
+        result.generation = await publishGeneration(sourceProof);
+        result.generation_proof_reason = "clean_exact_oid_before_after_retry";
+        return result;
+      } catch (retryError) {
+        publishError = retryError;
+      }
+    }
     result.generation_proof_reason = "durable_generation_publication_failed";
-    Object.defineProperty(result, "_generation_publish_error", {
-      value: err,
-      enumerable: false,
-      configurable: true,
-    });
+    result.generation_publish_error = proofError(publishError);
   }
   return result;
 }
@@ -226,13 +236,23 @@ export function publishAtlasMainGenerationToView({
   try {
     const meta = view.metaLocal();
     if (meta.branch !== branch) {
-      throw new Error(`main generation branch mismatch (${meta.branch} != ${branch})`);
+      throw Object.assign(new Error(`main generation branch mismatch (${meta.branch} != ${branch})`), {
+        code: "ATLAS_MAIN_GENERATION_BRANCH_MISMATCH",
+      });
     }
     if (ledger.headSeq(branch) !== meta.ledger_seq) {
-      throw new Error("main generation ledger sequence is not current");
+      throw Object.assign(new Error(`main generation ledger sequence is not current (${meta.ledger_seq} != ${ledger.headSeq(branch)})`), {
+        code: "ATLAS_MAIN_GENERATION_LEDGER_STALE",
+      });
     }
-    if (ledger.layerRevision() !== meta.layer_revision) {
-      throw new Error("main generation layer revision is not current");
+    const layerToken = typeof ledger.layerScopeToken === "function"
+      ? ledger.layerScopeToken(branch, meta.ledger_seq)
+      : { revision: ledger.layerRevision(), row_count: meta.layer_row_count || 0 };
+    if (layerToken.revision !== meta.layer_revision
+      || (meta.layer_row_count != null && layerToken.row_count !== meta.layer_row_count)) {
+      throw Object.assign(new Error(`main generation layer revision is not current (${meta.layer_revision}/${meta.layer_row_count ?? "legacy"} != ${layerToken.revision}/${layerToken.row_count})`), {
+        code: "ATLAS_MAIN_GENERATION_LAYER_STALE",
+      });
     }
     const materialization = inspectViewMaterialization(view._unsafeDb(), {
       treeCompressionMode: normalizeTreeCompressionMode(treeCompressionMode),
@@ -245,6 +265,7 @@ export function publishAtlasMainGenerationToView({
       git_oid: oid,
       atlas_ledger_seq: meta.ledger_seq,
       atlas_layer_revision: meta.layer_revision,
+      atlas_layer_row_count: meta.layer_row_count,
       view_fingerprint: meta.view_fingerprint,
     }, { intake });
   } finally {
@@ -332,7 +353,13 @@ export async function runAtlasMainIntake({
       throw err;
     }
     const status = intakeTerminalStatus(result);
-    const finished = finishAtlasMainIntake({ repoRoot, intake, status, result });
+    const finished = finishAtlasMainIntake({
+      repoRoot,
+      intake,
+      status,
+      result,
+      error: result?.generation_publish_error || null,
+    });
     result.intake = {
       attempt_id: finished.attempt_id,
       status: finished.status,

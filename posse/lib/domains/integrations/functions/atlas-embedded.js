@@ -98,8 +98,15 @@ const ATLAS_EMBEDDED_RESOURCE_CACHE_TTL_MS = 5 * 60 * 1000;
  */
 
 /** Void the shared tree.overview/repo.status cache (post-reindex, tests). */
-export function invalidateAtlasSharedReadCache() {
+export function invalidateAtlasSharedReadCache(assetKey = null) {
   _sharedReadCacheEpoch++;
+  if (assetKey) {
+    const prefix = `${String(assetKey)}|`;
+    for (const key of [...ATLAS_SHARED_READ_CACHE.keys()]) {
+      if (String(key).startsWith(prefix)) ATLAS_SHARED_READ_CACHE.delete(key);
+    }
+    return;
+  }
   ATLAS_SHARED_READ_CACHE.clear();
 }
 
@@ -122,7 +129,13 @@ export async function invalidateAtlasEmbeddedResourceCache() {
   try { await retirePooledEmbeddingResourcesAndWait(); } catch { /* best effort */ }
 }
 
-onConductorIndexingSuccess(() => {
+onConductorIndexingSuccess((event) => {
+  if (event?.purpose === "wi-live" && event.viewPath) {
+    const assetKey = `atlas:${String(event.viewPath).replace(/\\/g, "/").toLowerCase()}`;
+    invalidateAtlasSharedReadCache(assetKey);
+    invalidateSharedAtlasToolExecutorReadCaches({ workItemId: event.workItemId });
+    return;
+  }
   invalidateAtlasSharedReadCache();
   // Read contexts contain stable view/ledger paths, not open handles. Dropping
   // every WI context after any repository finishes indexing strands active
@@ -1612,7 +1625,7 @@ export function buildEmbeddedAtlasInvocation(action, { cwd = null, config = getA
 // A single occurrence must not fail the tool call — and absolutely must not
 // flip the role into deterministic fallback. Corruption/disabled states are
 // deliberately NOT transient.
-const ATLAS_TRANSIENT_ERROR_RE = /view is not current|view is not ready|view is stale|database is locked|SQLITE_BUSY|DAEMON_TIMEOUT|DAEMON_OVERLOADED|DAEMON_TRANSPORT_GONE/i;
+const ATLAS_TRANSIENT_ERROR_RE = /view is not current|view is not ready|view is stale|database is locked|SQLITE_BUSY|resource_busy|DAEMON_TIMEOUT|DAEMON_OVERLOADED|DAEMON_TRANSPORT_GONE/i;
 const ATLAS_TRANSIENT_RETRY_DELAYS_MS = [400, 1200];
 const ATLAS_TRANSIENT_INDEXING_WAIT_MS = 15_000;
 

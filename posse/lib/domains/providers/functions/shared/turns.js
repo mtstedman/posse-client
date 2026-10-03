@@ -299,9 +299,13 @@ export function escalateModelTier(currentTier, attemptCount, { resolveModel } = 
   if (attemptCount <= 1) return currentTier;
   const index = TIER_ORDER.indexOf(currentTier);
   if (index === -1) return currentTier;
+  const standardIndex = TIER_ORDER.indexOf("standard");
+  // Preserve a deliberately planned strong tier, but never promote a cheaper
+  // job past standard merely because it is retrying.
+  if (index >= standardIndex) return currentTier;
   const baseTarget = attemptCount === 2
-    ? Math.min(index + 1, TIER_ORDER.length - 1)
-    : TIER_ORDER.length - 1;
+    ? Math.min(index + 1, standardIndex)
+    : standardIndex;
   if (typeof resolveModel !== "function") return TIER_ORDER[baseTarget];
 
   // Model-aware: when consecutive tiers resolve to the same concrete model
@@ -317,7 +321,7 @@ export function escalateModelTier(currentTier, attemptCount, { resolveModel } = 
     return TIER_ORDER[baseTarget];
   }
   const currentKey = currentModel ?? "";
-  for (let i = baseTarget; i < TIER_ORDER.length; i++) {
+  for (let i = baseTarget; i <= standardIndex; i++) {
     let candidateModel;
     try {
       candidateModel = resolveModel(TIER_ORDER[i]);
@@ -327,5 +331,5 @@ export function escalateModelTier(currentTier, attemptCount, { resolveModel } = 
     const candidateKey = candidateModel ?? "";
     if (candidateKey !== currentKey) return TIER_ORDER[i];
   }
-  return TIER_ORDER[TIER_ORDER.length - 1];
+  return "standard";
 }

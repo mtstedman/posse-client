@@ -26,8 +26,8 @@ export function clearSharedAtlasToolExecutorReadContexts(scope = null) {
   else sharedExecutor.clearReadContext(scope);
 }
 
-export function invalidateSharedAtlasToolExecutorReadCaches() {
-  sharedExecutor?.invalidateReadCaches?.();
+export function invalidateSharedAtlasToolExecutorReadCaches(scope = null) {
+  sharedExecutor?.invalidateReadCaches?.(scope);
 }
 
 export function __testSetSharedAtlasToolExecutor(executor) {

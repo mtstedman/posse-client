@@ -373,11 +373,17 @@ export function waitingLanePreparationsCreateSql(tableName = "waiting_lane_prepa
           desired_atlas_layer_revision INTEGER CHECK (
             desired_atlas_layer_revision IS NULL OR desired_atlas_layer_revision >= 0
           ),
+          desired_atlas_layer_row_count INTEGER CHECK (
+            desired_atlas_layer_row_count IS NULL OR desired_atlas_layer_row_count >= 0
+          ),
           desired_view_fingerprint TEXT,
           applied_git_oid TEXT,
           applied_atlas_seq INTEGER CHECK (applied_atlas_seq IS NULL OR applied_atlas_seq >= 0),
           applied_atlas_layer_revision INTEGER CHECK (
             applied_atlas_layer_revision IS NULL OR applied_atlas_layer_revision >= 0
+          ),
+          applied_atlas_layer_row_count INTEGER CHECK (
+            applied_atlas_layer_row_count IS NULL OR applied_atlas_layer_row_count >= 0
           ),
           applied_view_fingerprint TEXT,
           git_job_id INTEGER,
@@ -2964,6 +2970,12 @@ export function getDb() {
     name: "agent_calls_interrupted_status",
     needs: needsAgentCallsInterruptedStatusRepair,
     migrate: repairAgentCallsInterruptedStatusSchema,
+  });
+  runHostMigration(_db, {
+    version: 23,
+    name: "waiting_lane_scoped_layer_token",
+    needs: needsWaitingLanePreparationSchema,
+    migrate: repairWaitingLanePreparationSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);

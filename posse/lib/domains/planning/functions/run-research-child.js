@@ -34,7 +34,7 @@ export function researchChildInstructions(parent, request) {
     ] : []),
     `RESEARCH QUESTION:\n${request.intent}`,
     `Budget: at most ${request.maxTurns} retrieval calls (reads beyond ${request.maxTurns} are blocked; agent_handoff is always available) and ${Math.round(request.timeoutMs / 1000)} seconds; if either runs low, submit partial findings and name the gap instead of continuing.`,
-    `Compact report character limit: ${request.resultChars} (a longer report is trimmed from the end before the planner sees it).`,
+    `Compact report character target: ${request.resultChars} (longer reports are delivered in full and consume more planner context).`,
     ...(uniqueSeeds.length ? [`Starting points (planner seed files, verify before relying on them): ${uniqueSeeds.join(", ")}`] : []),
     ...(uniqueSymbols.length ? [`Seed symbols: ${uniqueSymbols.join(", ")}`] : []),
     ...(anchorLines.length ? ["Anchors from the planner (verify before relying on them):", ...anchorLines] : []),

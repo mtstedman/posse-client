@@ -121,6 +121,11 @@ export function embeddedAdvertisedToolNames() {
   return getToolMetadataRegistry().advertisedNames("function");
 }
 
+/** Every canonical tools-suite name, including compatibility-only executors. */
+export function registeredToolNames() {
+  return getToolMetadataRegistry().all().map((entry) => entry.name);
+}
+
 /**
  * The live operator channel (budget-exempt tools). Single source of truth for
  * every consumer — turn-budget exemption in the provider loops and

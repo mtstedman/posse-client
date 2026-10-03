@@ -10,11 +10,13 @@ import { gitExecAsync } from "../../git/functions/utils.js";
 import { recordObservation } from "../../observability/functions/observations.js";
 import {
   declaredScopeFiles,
+  parseTypecheckDiagnostics,
   runScopedChecks,
 } from "../../../shared/tools/functions/toolkit/scoped-runners.js";
 import { verificationOutcome } from "../../worker/functions/helpers/verification-outcome.js";
 import { repairVerificationPrerequisites } from "../../verification/functions/prerequisite-adapters.js";
 import { getSetting } from "../../settings/functions/repository-settings.js";
+import { withLineagePathsRestored } from "../../verification/functions/lineage-tree.js";
 import {
   DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY,
   VERIFICATION_DEPENDENCY_LOCK_INVALID,
@@ -66,16 +68,6 @@ async function porcelain(cwd) {
   } catch {
     return null;
   }
-}
-
-async function restoreGitHead(cwd, { commit, headRef } = {}) {
-  if (!commit) throw new Error("cannot restore scoped-check Git HEAD without the original commit");
-  if (headRef) {
-    await gitExecAsync(["checkout", "--force", headRef], cwd);
-  } else {
-    await gitExecAsync(["checkout", "--detach", "--force", commit], cwd);
-  }
-  await gitExecAsync(["reset", "--hard", commit], cwd);
 }
 
 function unavailableResult({ commit, assessedCommit = null, files, reason }) {
@@ -200,21 +192,23 @@ async function attributeFailuresToBaseline({
   result,
   baselineCommit,
   files,
-  headRef,
-  actualCommit,
   runChecks,
 }) {
   const failedChecks = (result.checks || []).filter((check) => check.status === "failed");
   if (failedChecks.length === 0) return result;
   let baseline;
   try {
-    await gitExecAsync(["checkout", "--detach", "--force", baselineCommit], cwd);
-    const baselineFiles = files.filter((file) => fs.existsSync(path.join(cwd, file)));
-    baseline = baselineFiles.length > 0 ? runChecks(baselineFiles) : null;
+    baseline = await withLineagePathsRestored({
+      cwd,
+      baseCommit: baselineCommit,
+      paths: files,
+      run: () => {
+        const baselineFiles = files.filter((file) => fs.existsSync(path.join(cwd, file)));
+        return baselineFiles.length > 0 ? runChecks(baselineFiles) : null;
+      },
+    });
   } catch (error) {
     baseline = { error: error?.message || String(error) };
-  } finally {
-    await restoreGitHead(cwd, { commit: actualCommit, headRef });
   }
   const baselineChecks = new Map((baseline?.checks || []).map((check) => [check.name, check]));
   const baselineIdentities = new Set(
@@ -286,6 +280,53 @@ async function attributeFailuresToBaseline({
   };
 }
 
+async function attributeFailuresToSiblingOwners({ result, files, siblingScopeOwners }) {
+  if (typeof siblingScopeOwners !== "function" || result?.status !== "failed") return result;
+  const failedChecks = (result.checks || []).filter((check) => check.status === "failed");
+  if (failedChecks.length === 0 || failedChecks.some((check) => check.name !== "typecheck" || check.coverage !== "project_root")) {
+    return result;
+  }
+  const diagnostics = (result.failures || []).flatMap((failure) => {
+    if (failure.file) return [{ file: String(failure.file).replace(/\\/g, "/"), identity: failureIdentities(failure)[0]?.identity }];
+    return parseTypecheckDiagnostics(String(failure.message || "")).map((entry) => ({
+      file: String(entry.file || "").replace(/\\/g, "/").replace(/^\.\//, ""),
+      identity: `${failure.check || "typecheck"}|${entry.file}|${entry.code}|${entry.message}`,
+    }));
+  }).filter((entry) => entry.file);
+  if (diagnostics.length === 0) return result;
+  const own = new Set(files.map((file) => String(file).replace(/\\/g, "/")));
+  if (diagnostics.some((entry) => own.has(entry.file))) return result;
+  let owners;
+  try { owners = await siblingScopeOwners([...new Set(diagnostics.map((entry) => entry.file))]); }
+  catch { return result; }
+  const ownerIds = new Set();
+  for (const diagnostic of diagnostics) {
+    const matches = owners instanceof Map ? owners.get(diagnostic.file) : null;
+    if (!(matches instanceof Set) || matches.size === 0) return result;
+    for (const ownerId of matches) ownerIds.add(Number(ownerId));
+  }
+  return {
+    ...result,
+    ok: null,
+    status: "sibling_owned",
+    reason: "project_root_failures_owned_by_unfinished_siblings",
+    summary: `Project-root typecheck failed only in files owned by unfinished sibling job(s) ${[...ownerIds].sort((a, b) => a - b).map((id) => `#${id}`).join(", ")}; re-assess after those lineages settle`,
+    checks: (result.checks || []).map((check) => check.status === "failed"
+      ? { ...check, status: "sibling_owned", reason: "failure paths belong to unfinished sibling jobs" }
+      : check),
+    failures: [],
+    _sibling_owned_failure: {
+      owner_job_ids: [...ownerIds].sort((a, b) => a - b),
+      identities: diagnostics.map((entry) => entry.identity).filter(Boolean).sort(),
+      paths: [...new Set(diagnostics.map((entry) => entry.file))].sort(),
+    },
+  };
+}
+
+export async function __testAttributeFailuresToSiblingOwners(input) {
+  return attributeFailuresToSiblingOwners(input);
+}
+
 function checkStatusForFile(check, file) {
   const targets = Array.isArray(check?.targets) ? check.targets : [];
   if (!targets.includes(file)) return "not_applicable";
@@ -351,6 +392,7 @@ export async function ensureAssessmentScopedCheckEvidence({
   runScopedChecksImpl = runScopedChecks,
   repairPrerequisitesImpl = repairVerificationPrerequisites,
   readSettingImpl = getSetting,
+  siblingScopeOwners = null,
 } = {}) {
   if (!job?.id || !cwd || assessmentContext?.task_mode !== "code") return null;
   const expectedCommit = normalizedCommit(
@@ -489,8 +531,6 @@ export async function ensureAssessmentScopedCheckEvidence({
           result,
           baselineCommit,
           files,
-          headRef,
-          actualCommit,
           runChecks: (baselineFiles) => runScopedChecksImpl({
             cwd,
             args: { checks: [...REQUESTED_CHECKS], scope: { files: baselineFiles } },
@@ -508,6 +548,13 @@ export async function ensureAssessmentScopedCheckEvidence({
             detail: result.baseline_attribution,
           });
         }
+      }
+      if (result?.status === "failed") {
+        result = await attributeFailuresToSiblingOwners({
+          result,
+          files,
+          siblingScopeOwners,
+        });
       }
       result = {
         ...result,
@@ -538,9 +585,7 @@ export async function ensureAssessmentScopedCheckEvidence({
           }
           await cleanupWorktree();
         }
-        if (headChanged) {
-          await restoreGitHead(cwd, { commit: actualCommit, headRef });
-        }
+        if (headChanged) throw new Error("worktree HEAD changed during deterministic checks; refusing to reset possible concurrent sibling progress");
         const [cleaned, restoredCommit, restoredHeadRef] = await Promise.all([
           porcelain(cwd),
           currentCommit(cwd),

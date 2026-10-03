@@ -98,6 +98,7 @@ import {
 } from "../../../planning/functions/planner-helpers.js";
 import { listProjectDbWrites } from "../../../../shared/tools/functions/toolkit/project-db/write-evidence.js";
 import { workItemResearchRefsBlock } from "../../../research/functions/work-item-research-refs.js";
+import { knownRedTestCommandsForRepository } from "../../functions/helpers/test-execution-receipt.js";
 
 // A dispatch planner investigates the repository itself before it plans, so
 // it runs on the researcher's claude turn base rather than the plan-only one.
@@ -119,6 +120,7 @@ const DEFAULT_DEPS = {
   resolveAssessmentReplanCwd,
   releaseAssessmentReplanCwd,
   buildAssessmentReplanDiffBlock,
+  knownRedTestCommandsForRepository,
   shortJobTitle: defaultShortJobTitle,
   unwrapTaskArray: defaultUnwrapTaskArray,
 };
@@ -291,6 +293,7 @@ export class PlannerRole extends BaseRole {
       resolvePlannerReadRoot: resolveReadRoot,
       resolveAssessmentReplanCwd: resolveReplanCwd,
       buildAssessmentReplanDiffBlock: buildReplanDiff,
+      knownRedTestCommandsForRepository: loadKnownRedTests,
     } = this.roleDeps();
 
     const workItem = getWorkItem(job.work_item_id);
@@ -347,6 +350,16 @@ export class PlannerRole extends BaseRole {
     const intakeHints = getWorkItemIntakeHints(workItem, workItem?.mode || "build");
     const intakeHintsBlock = buildIntakeHintsBlock(intakeHints);
     const workflowModeBlock = buildWorkflowModeBlock(getWorkItemWorkflowConfig(workItem), "planner");
+    const knownRedTests = assessmentReplan
+      ? []
+      : await loadKnownRedTests(plannerReadRoot).catch(() => []);
+    const knownRedTestsBlock = knownRedTests.length > 0
+      ? [
+          promptLiteral("KNOWN-RED TEST COMMANDS FROM THIS REPOSITORY", JSON.stringify(knownRedTests)),
+          "These commands most recently failed on an unchanged baseline. Do not use one as this work item's verification unless the plan explicitly repairs that debt; prefer an applicable command known to pass. Failure identities are historical evidence, never permission to ignore a new identity.",
+          "",
+        ].join("\n")
+      : "";
 
     const ctxDir = contextDir(wiScopeId(job.work_item_id), worker.projectDir);
     const fastDir = path.join(ctxDir, "planner", "fast");
@@ -736,6 +749,7 @@ export class PlannerRole extends BaseRole {
       promptLiteral("DESCRIPTION", workItem.description || "(none)"),
       intakeHintsBlock ? `${intakeHintsBlock}\n` : "",
       humanAnswers ? `HUMAN ANSWERS (from researcher clarification questions):\n${humanAnswers}\n` : "",
+      knownRedTestsBlock,
       payload.replan_reason && !assessmentReplan ? `REPLAN REASON (previous approach failed - you MUST take a different approach):\n${payload.replan_reason}\n` : "",
       planningMode === RED_TEAM_PLANNING_MODE && plannerRoleMode === "redteam"
         ? `PRIMARY PLANNER OUTPUT (candidate plan to critique):\n${primaryPlanText || "(missing primary planner output)"}\n`
@@ -796,7 +810,7 @@ export class PlannerRole extends BaseRole {
   async composePrompt({ contextText, contract, job, ctx } = {}) {
     const researchPolicy = ctx.plannerPacket?.planner_dispatch_policy;
     const researchBudget = researchPolicy ? [
-      `Research budgets: your triage budget is about ${researchPolicy.triageMaxTurns} turns (roughly ${researchPolicy.triageMaxTurns * 2} tool calls) of your own orientation reads to confirm the entry points and the shape of the change; within it, decide which open questions need research children, and dispatch them instead of reading beyond it yourself, especially for reads across several files or subsystems. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, result ${researchPolicy.resultChars} characters. Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier; a code child may request model_tier strong for deep multi-file reasoning, and web children stay on cheap or standard. Delegate bounded reads to them and keep judgment here.`,
+      `Research budgets: your triage budget is about ${researchPolicy.triageMaxTurns} turns (roughly ${researchPolicy.triageMaxTurns * 2} tool calls) of your own orientation reads to confirm the entry points and the shape of the change; within it, decide which open questions need research children, and dispatch them instead of reading beyond it yourself, especially for reads across several files or subsystems. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, with a ${researchPolicy.resultChars}-character result target (longer reports are delivered in full and consume more planner context). Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier; a code child may request model_tier strong for deep multi-file reasoning, and web children stay on cheap or standard. Delegate bounded reads to them and keep judgment here.`,
       "For code research, prefer a one-sentence question plus up to eight anchors (repo-relative paths, optional symbols or line ranges, or a parent-held #ref) over repeating context in prose. Anchors are starting points, not conclusions.",
       "Completed entries contain a compact packet. When the tool result includes research_expansion.files and research_expansion.brief, that brief is already visible: cite research_expansion.files[].ref and do not fetch it again; traverse the evidence ref only to read beyond the shown hunks. Timed-out and failed entries contain error instead of packet. An identical retry replays the settled digest, including a timeout, so narrow or reword a retry.",
     ].join("\n") : null;

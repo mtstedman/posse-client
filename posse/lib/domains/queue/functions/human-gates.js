@@ -146,6 +146,8 @@ export function registerHumanGate({
       throw new Error(`Human gate actionability contract invalid: ${actionability.reason}`);
     }
     const gateJob = db.prepare(`SELECT work_item_id FROM jobs WHERE id = ?`).get(gateJobId);
+    const persistedActions = [...new Set(contract.allowed_actions
+      .map((action) => canonicalHumanGateAction(action) || action))];
     const singletonWorkItemIdCandidate = !contract.original_job_id
       && WORK_ITEM_SINGLETON_GATE_KINDS.has(contract.gate_kind)
       ? Number(gateJob?.work_item_id)
@@ -262,7 +264,7 @@ export function registerHumanGate({
       generation,
       original?.status || null,
       JSON.stringify(contract.allowed_source_states),
-      JSON.stringify(contract.allowed_actions),
+      JSON.stringify(persistedActions),
       now(),
       now(),
     );

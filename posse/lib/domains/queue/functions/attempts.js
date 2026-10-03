@@ -195,6 +195,41 @@ export function extendAssessmentMaxAttempts(jobId, minMaxAttempts) {
   return result.changes === 1;
 }
 
+/** Start a fresh operator-authorized implementation retry budget. */
+export function beginJobRetryGeneration(jobId, {
+  payload = null,
+  attemptBudget = 3,
+} = {}) {
+  const db = getDb();
+  const row = db.prepare(`SELECT payload_json, attempt_count, model_tier FROM jobs WHERE id = ?`).get(jobId);
+  if (!row) return null;
+  let nextPayload;
+  try {
+    nextPayload = payload && typeof payload === "object"
+      ? { ...payload }
+      : JSON.parse(String(row.payload_json || "{}"));
+  } catch {
+    nextPayload = {};
+  }
+  const marker = Number(db.prepare(`
+    SELECT MAX(attempt_number) AS mx FROM job_attempts WHERE job_id = ?
+  `).get(jobId)?.mx || 0);
+  nextPayload._retry_generation = marker;
+  delete nextPayload._pre_attempt_repeat_key;
+  const budget = Math.max(1, Math.floor(Number(attemptBudget) || 3));
+  const plannedTier = String(row.model_tier || "standard") === "cheap" ? "cheap" : "standard";
+  db.prepare(`
+    UPDATE jobs
+    SET payload_json = ?,
+        max_attempts = attempt_count + ?,
+        model_tier = ?,
+        model_name = NULL,
+        updated_at = ?
+    WHERE id = ?
+  `).run(JSON.stringify(nextPayload), budget, plannedTier, now(), jobId);
+  return { marker, attemptBudget: budget, modelTier: plannedTier, payload: nextPayload };
+}
+
 export function completeAttempt(attemptId, {
   status,
   duration_ms = null,

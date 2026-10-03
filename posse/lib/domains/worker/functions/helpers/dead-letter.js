@@ -571,15 +571,22 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     return;
   }
 
+  const retryGeneration = Math.max(0, Number(parseJobPayload(freshJob)?._retry_generation) || 0);
+  const generationAttempts = getAttempts(job.id).filter((entry) => (
+    ["implementation", "human"].includes(String(entry.attempt_kind || "implementation"))
+    && Number(entry.attempt_number || 0) > retryGeneration
+  ));
+  const generationAttemptCount = generationAttempts.length;
+  const stashedPreAttemptRepeatKey = parseJobPayload(freshJob)?._pre_attempt_repeat_key;
+
   let sameErrorRepeat = false;
   let failedAttempts = [];
   if (deterministicPolicyConflict) {
     worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: deterministic policy conflict — retrying cannot change the outcome, dead-lettering for operator recovery${C.reset}`);
   } else if (permanentProviderConfigError) {
     worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: permanent provider configuration/model error — dead-lettering without retry${C.reset}`);
-  } else if (!turnBudgetExhausted && freshJob.attempt_count >= 2) {
-    const prevAttempts = getAttempts(job.id);
-    failedAttempts = prevAttempts.filter((attempt) => attempt.status === "failed");
+  } else if (!turnBudgetExhausted && generationAttemptCount >= 2) {
+    failedAttempts = generationAttempts.filter((attempt) => attempt.status === "failed");
     if (failedAttempts.length >= 2) {
       const prev = failedAttempts[failedAttempts.length - 2];
       if (prev.error_text) {
@@ -601,23 +608,23 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
           worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: cycling between ${uniqueErrors.size} error(s) across ${failedAttempts.length + 1} attempts — dead-lettering${C.reset}`);
         }
       }
-    } else if (failedAttempts.length === 0) {
-      // Pre-attempt catastrophic failures (worktree or frozen-baseline setup)
-      // never create job_attempts rows, so the row-based repeat guards above
-      // are blind to them: a deterministic setup failure would burn every
-      // attempt on a byte-identical error. Compare against the repeat key
-      // stashed by the previous pre-attempt retry pass instead. Stable
-      // network-transient errors repeat byte-identically without being
-      // structural, so they keep their bounded max-attempts retries (the
-      // shared git/db transient guard below covers the rest).
-      const stashedRepeatKey = parseJobPayload(freshJob)?._pre_attempt_repeat_key;
-      const preAttemptTransient = PRE_ATTEMPT_TRANSIENT_ERROR_RE.test(
-        errorDetails.fullText || errSummary || "",
-      );
-      if (stashedRepeatKey && stashedRepeatKey === errRepeatKey && !preAttemptTransient) {
-        sameErrorRepeat = true;
-        worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: same pre-attempt error on consecutive attempts — dead-lettering (retry cannot change the outcome)${C.reset}`);
-      }
+    }
+  }
+
+  // Pre-attempt catastrophic failures never create job_attempts rows, so the
+  // generation's row count cannot reach the guard above. The repeat key is
+  // cleared at every operator retry boundary; its presence therefore proves
+  // this is a consecutive failure in the current generation.
+  if (!deterministicPolicyConflict && !permanentProviderConfigError && !turnBudgetExhausted && !sameErrorRepeat) {
+    const preAttemptTransient = PRE_ATTEMPT_TRANSIENT_ERROR_RE.test(
+      errorDetails.fullText || errSummary || "",
+    );
+    if (generationAttempts.length === 0
+      && stashedPreAttemptRepeatKey
+      && stashedPreAttemptRepeatKey === errRepeatKey
+      && !preAttemptTransient) {
+      sameErrorRepeat = true;
+      worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: same pre-attempt error on consecutive attempts — dead-lettering (retry cannot change the outcome)${C.reset}`);
     }
   }
 
@@ -636,7 +643,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
       try {
         const nextTier = escalateModelTier(
           freshJob.model_tier || "standard",
-          freshJob.attempt_count + 1,
+          generationAttemptCount + 1,
           { resolveModel },
         );
         const nextModel = freshJob.model_name || resolveModel(nextTier);

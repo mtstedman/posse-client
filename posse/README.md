@@ -134,7 +134,7 @@ behavior remains available to its existing callers; gated planners receive only
 
 Account settings bound total children per planner call (default 2), child turns
 (24), timeout (1200 seconds), effort (medium by default with a high ceiling),
-and returned report size (12000 characters). The triage turn setting is prompt
+and returned report-size target (12000 characters; longer reports remain intact). The triage turn setting is prompt
 guidance; child limits are runtime-enforced. The separate dispatch MCP timeout
 (1500 seconds) reserves time to return results. Existing child cancellation and
 stall handling are reused.

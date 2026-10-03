@@ -752,8 +752,6 @@ export const GATED_NATIVE_TOOLS = new Set([
   "chain_read",
   "chain_verdict",
   "search_files",
-  "inspect_file",
-  "hash_file",
   "read_file",
 ]);
 
@@ -1003,6 +1001,11 @@ export function getDeterministicMcpToolNames(role, {
     // Remove redundant source tools from every role's issued surface. Keep
     // directory browsing available without an ATLAS-first round trip.
     for (const toolName of ATLAS_REPLACED_NATIVE_TOOLS) {
+      // Planners still need exact access to manifests and other files Atlas
+      // does not index. The source-file gate below rejects indexed reads and
+      // points them back to Atlas, so retaining read_file does not create a
+      // second indexed-source route.
+      if (role === "planner" && toolName === "read_file") continue;
       if (!atlasReplacesNativeTool(toolName, role)) continue;
       const index = tools.indexOf(toolName);
       if (index !== -1) tools.splice(index, 1);

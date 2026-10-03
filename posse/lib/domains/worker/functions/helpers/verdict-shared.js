@@ -38,7 +38,7 @@ import { verificationOutcome } from "./verification-outcome.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { getMaxFixChainDepth, getWiFailureThreshold } from "../../../settings/functions/tunables.js";
 
-const ASSESSMENT_RETRY_TIER_ORDER = ["cheap", "standard", "strong"];
+const ASSESSMENT_RETRY_TIER_ORDER = ["cheap", "standard"];
 const ASSESSOR_CONFIDENCE_VALUES = new Set(["low", "medium", "high"]);
 const ASSESSOR_CONFIDENCE_RANK = Object.freeze({ none: -1, low: 0, medium: 1, high: 2 });
 const OUTPUT_CONTRACT_WI_MODES = new Set(["image", "report", "question"]);
@@ -133,6 +133,19 @@ export function normalizeAssessorConfidence(value, { fallback = "medium", allowN
 
 export function capVerdictForDeterministicTestRegression(verdict, testRun = null) {
   const postChange = testRun?.postChange || testRun?.post_change || null;
+  if (testRun?.debt_only === true && postChange?.status === "failed") {
+    return {
+      ...verdict,
+      verification_status: "frozen_test_debt_only",
+      _deterministic_failure_identity: postChange?.failure_fingerprint || null,
+      _deterministic_evidence: {
+        kind: "frozen_test_debt_only",
+        status: postChange.status,
+        delta: testRun.delta || null,
+        debt_failure_identities: testRun.debt_failure_identities || [],
+      },
+    };
+  }
   if (verdict?.verdict !== "pass" || !["regression", "changed_failure", "post_only"].includes(testRun?.delta)
     || !["failed", "timed_out"].includes(postChange?.status)) return verdict;
   const outputTail = [postChange?.stdout, postChange?.stderr]
@@ -145,8 +158,17 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
     ...verdict,
     verdict: "fail",
     _disable_internal_retry: true,
+    verification_status: "frozen_test_failed",
+    _deterministic_failure_identity: postChange?.failure_fingerprint || failureSummary || null,
+    _deterministic_evidence: {
+      kind: "frozen_test_failure",
+      status: postChange.status,
+      delta: testRun.delta,
+      failure_summary: failureSummary || null,
+      output_tail: outputTail || null,
+    },
     reasons: [
-      `The automatic post-change test ${testRun.delta === "regression" ? "regressed from passing at baseline" : "has an unverified failure"} (${postChange.status}); the change must be repaired before it can pass.${failureSummary ? `\nTest failure summary:\n${failureSummary}` : ""}${outputTail ? `\nTest output tail:\n${outputTail}` : ""}`,
+      `The automatic post-change test ${testRun.delta === "regression" ? "regressed from passing at baseline" : "has an unverified failure"} (${postChange.status}); the change must be repaired before it can pass.`,
       ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
     ],
   };
@@ -266,15 +288,32 @@ export function capVerdictForHighRiskVerificationGap(
     && canonicalVerification?.status === "passed"
     && canonicalVerification?.verification_eligible === true
     && canonicalCommit === requiredCommit;
+  if (scopedStatus === "sibling_owned" && scopedVerification?._sibling_owned_failure) {
+    return {
+      ...verdict,
+      verification_status: "scoped_checks_scope_clean",
+      _sibling_owned_failure: scopedVerification._sibling_owned_failure,
+      verification_commit_hash: requiredCommit || null,
+    };
+  }
   if (scopedOutcome?.type === "product_failed") {
+    const failureIdentities = Array.isArray(scopedVerification?.failure_identities)
+      ? [...new Set(scopedVerification.failure_identities.map(String).filter(Boolean))].sort()
+      : [];
     return {
       ...verdict,
       verdict: "fail",
       confidence: "high",
       verification_status: "scoped_checks_failed",
+      _deterministic_failure_identity: failureIdentities.join("\n") || scopedCheckFailureSummary(scopedVerification),
+      _deterministic_evidence: {
+        kind: "scoped_check_failure",
+        summary: scopedCheckFailureSummary(scopedVerification),
+        failure_identities: failureIdentities,
+      },
       _verification_failure_class: "product_regression",
       reasons: [
-        `Deterministic changed-file checks failed for the assessed commit:\n${scopedCheckFailureSummary(scopedVerification)}`,
+        "Deterministic changed-file checks failed for the assessed commit.",
         ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
       ],
     };
@@ -349,7 +388,9 @@ export function capVerdictForHighRiskVerificationGap(
     };
   }
 
-  if (command && postChange && postChange.status !== "passed") {
+  if (command && postChange && postChange.status !== "passed"
+    && testRun?.debt_only !== true
+    && testRun?.delta !== "persistent_failure") {
     const status = postChange.status || "not_run";
     const detail = postChange.validation_error || postChange.reason || null;
     const testDelta = testRun?.delta || null;
@@ -444,7 +485,8 @@ export function capVerdictForHighRiskVerificationGap(
 }
 
 function _nextAssessmentRetryTier(currentTier) {
-  const current = String(currentTier || "standard");
+  const requested = String(currentTier || "standard");
+  const current = requested === "strong" ? "standard" : requested;
   const idx = ASSESSMENT_RETRY_TIER_ORDER.indexOf(current);
   if (idx < 0) return current;
   return ASSESSMENT_RETRY_TIER_ORDER[Math.min(idx + 1, ASSESSMENT_RETRY_TIER_ORDER.length - 1)];
@@ -1034,7 +1076,11 @@ function _queueInternalAssessmentRetry(
     });
     return false;
   }
-  const previousTier = payload._assess_model_tier || "cheap";
+  const requestedPreviousTier = payload._assess_model_tier || "cheap";
+  // Strong is a legacy/planner-only value for assessment. Normalize it before
+  // deciding whether another tier exists; otherwise the standard cap looks
+  // like a bogus strong -> standard "retry" and can loop old queued jobs.
+  const previousTier = requestedPreviousTier === "strong" ? "standard" : requestedPreviousTier;
   const retryTier = _nextAssessmentRetryTier(previousTier);
   if (retryTier === previousTier) return false;
   payload._assess_only = true;
@@ -1150,7 +1196,10 @@ function _looksLikeScopedFilePath(value = "") {
 }
 
 function _normalizeInferredScopeCandidate(value = "") {
-  const normalized = String(value || "").trim().replace(/\\/g, "/");
+  const normalized = String(value || "")
+    .trim()
+    .replace(/^\[REDACTED:[^\]]+\]\//i, "")
+    .replace(/\\/g, "/");
   // Assessor evidence often links to an absolute file inside a Posse
   // worktree. The generic token regex cannot retain the leading slash, so the
   // link target otherwise looks like a new repo-relative `tmp/...` path and
@@ -1167,11 +1216,15 @@ export function _extractScopedPathsFromInstructions(text = "") {
   }
 
   const candidates = new Set();
+  for (const match of source.matchAll(/(?:\[REDACTED:[^\]]+\]\/|(?:[A-Za-z]:)?[^\s"'`]*\/)?\.posse-worktrees\/[^/\s"'`]+\/([^\s"'`)\]}]+)/gi)) {
+    const value = _normalizeInferredScopeCandidate(match[0]);
+    if (_looksLikeScopedFilePath(value)) candidates.add(value);
+  }
   for (const match of source.matchAll(/`([^`\r\n]+)`/g)) {
     const value = _normalizeInferredScopeCandidate(match[1]);
     if (_looksLikeScopedFilePath(value)) candidates.add(value);
   }
-  for (const match of source.matchAll(/\b([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+|[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)\b/g)) {
+  for (const match of source.matchAll(/(?<![\w./-])([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+|[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)\b/g)) {
     const value = _normalizeInferredScopeCandidate(match[1]);
     if (_looksLikeScopedFilePath(value)) candidates.add(value);
   }
@@ -1181,7 +1234,7 @@ export function _extractScopedPathsFromInstructions(text = "") {
 
   for (const candidate of candidates) {
     const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const optionalWrappedPath = `[\\s"'\\x60]*${escaped}[\\s"'\\x60]*`;
+    const optionalWrappedPath = `[ \\t"'\\x60]*${escaped}[ \\t"'\\x60]*`;
     const createRe = new RegExp(`(?:create|write|generate)(?:\\s+(?:a\\s+new\\s+file|the\\s+file|file))?\\s+${optionalWrappedPath}`, "i");
     const createAfterRe = new RegExp(`${optionalWrappedPath}.*(?:must\\s+be\\s+created|should\\s+be\\s+created|does\\s+not\\s+exist|missing)`, "i");
     const modifyRe = new RegExp(`(?:add|remove|delete|revert|rollback|undo|update|modify|edit|resize|cleanup|clean\\s+up)(?:\\s+(?:any\\s+changes\\s+made\\s+to|the\\s+file|file|tests?\\s+in))?\\s+${optionalWrappedPath}`, "i");
@@ -1195,8 +1248,11 @@ export function _extractScopedPathsFromInstructions(text = "") {
       const lowerCandidate = candidate.toLowerCase();
       const idx = lowerSource.indexOf(lowerCandidate);
       if (idx >= 0) {
-        const windowStart = Math.max(0, idx - 80);
-        const windowEnd = Math.min(lowerSource.length, idx + lowerCandidate.length + 80);
+        const lineStart = lowerSource.lastIndexOf("\n", idx) + 1;
+        const nextLine = lowerSource.indexOf("\n", idx + lowerCandidate.length);
+        const lineEnd = nextLine < 0 ? lowerSource.length : nextLine;
+        const windowStart = Math.max(lineStart, idx - 80);
+        const windowEnd = Math.min(lineEnd, idx + lowerCandidate.length + 80);
         const context = lowerSource.slice(windowStart, windowEnd);
         inferredCreate = /\b(create|new file|write|generate|missing|does not exist)\b/.test(context);
         inferredModify = /\b(add|remove|delete|revert|rollback|undo|update|modify|edit|resize|cleanup|clean up|deleted|removed)\b/.test(context);

@@ -18,7 +18,7 @@ import {
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isShadowFanoutJob } from "../../research/functions/fanout-payload.js";
 import { parseJobPayload } from "./payload.js";
-import { completeAttempt, hasImplementationAttempts, isLeaseValid, setAssessmentLifecycle } from "./attempts.js";
+import { beginJobRetryGeneration, completeAttempt, hasImplementationAttempts, isLeaseValid, setAssessmentLifecycle } from "./attempts.js";
 import {
   ACTIVE_LEASE_STATUSES,
   ACTIVE_LEASE_STATUSES_SQL,
@@ -200,6 +200,7 @@ function isActiveIterativeWorkItemRecord(wi) {
 
 export {
   beginAttachedAssessmentAttempt,
+  beginJobRetryGeneration,
   completeAttempt,
   extendAssessmentMaxAttempts,
   getAttempts,
@@ -355,6 +356,8 @@ export {
   verifyOrAcquireJobWriteLockForPath,
   workItemCanReleaseFileLock,
   workItemMergeParking,
+  workItemOperatorParking,
+  siblingJobScopeOwners,
 } from "./file-locks.js";
 
 export {
@@ -1969,7 +1972,10 @@ export function requeueWorkItemAfterRejection(id, {
         rejected_at: ts,
         feedback: guidance,
       };
-      updateJobPayload(fresh.id, JSON.stringify(payload));
+      beginJobRetryGeneration(fresh.id, {
+        payload,
+        attemptBudget: getIntSetting(SETTING_KEYS.DEFAULT_MAX_ATTEMPTS, 3),
+      });
       if (!forceUpdateJobStatus(fresh.id, "queued", { expectedStatuses: [fresh.status] })) continue;
       db.prepare(`
         UPDATE jobs
@@ -1978,7 +1984,6 @@ export function requeueWorkItemAfterRejection(id, {
             result_json = NULL,
             last_error = NULL,
             ready_at = ?,
-            max_attempts = MAX(COALESCE(max_attempts, 0), attempt_count + 1, 1),
             updated_at = ?
         WHERE id = ?
       `).run(ts, ts, fresh.id);

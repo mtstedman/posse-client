@@ -4,6 +4,7 @@ import { retainBoundedText } from "../../../../shared/format/functions/bounded-t
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
 import {
   addDependency,
+  beginJobRetryGeneration,
   beginHumanGateResolution,
   cancelPendingReviewGatesForOriginal,
   clearStallResume,
@@ -16,6 +17,7 @@ import {
   getDependents,
   getHumanGate,
   getJob,
+  getIntSetting,
   getWorkItem,
   getAttempts,
   hasImplementationAttempts,
@@ -57,6 +59,7 @@ import {
   resolveOneshotScopeCandidates,
 } from "../../../research/functions/oneshot-scope-selection.js";
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE, REPLAN_TRIGGERS } from "../../../../catalog/job.js";
+import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import {
   POST_MERGE_DB_TASK_REVIEW_TYPE,
   exactHumanInputChoiceFromAnswer,
@@ -1068,8 +1071,10 @@ export async function runHumanInputJob(worker, job, {
           human_answer: String(lastAnswer || ""),
           bare_retry: bareRetry,
         };
-        updateJobPayload(origJob.id, JSON.stringify(origPayload));
-        extendJobMaxAttempts(origJob.id, Number(origJob.attempt_count || 0) + 1);
+        beginJobRetryGeneration(origJob.id, {
+          payload: origPayload,
+          attemptBudget: getIntSetting(SETTING_KEYS.DEFAULT_MAX_ATTEMPTS, 3),
+        });
         await worker._setJobRowStatus(origJob, "queued");
         worker.emit(job.id, `${C.cyan}[human] Blocked job #${origJob.id} queued for retry with human guidance${restoredDependents ? `; restored ${restoredDependents} dependent(s) to the retried job` : ""}${C.reset}`);
         logEvent({
@@ -1478,8 +1483,10 @@ export async function runHumanInputJob(worker, job, {
           ].join("\n\n");
         }
         delete origPayload._assess_only;
-        updateJobPayload(origJob.id, JSON.stringify(origPayload));
-        extendJobMaxAttempts(origJob.id, Number(origJob.attempt_count || 0) + 1);
+        beginJobRetryGeneration(origJob.id, {
+          payload: origPayload,
+          attemptBudget: getIntSetting(SETTING_KEYS.DEFAULT_MAX_ATTEMPTS, 3),
+        });
         const resume = requestParkedJobResumeAfterGate({
           gateJobId: job.id,
           originalJobId: origJob.id,

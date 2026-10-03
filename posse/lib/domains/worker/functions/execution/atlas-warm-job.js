@@ -25,7 +25,7 @@ import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-
 import { appendRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
 import { recordWaitingLaneTelemetry } from "../../../observability/functions/waiting-lane-telemetry.js";
 import { resolveTargetBranchAsync } from "../../../git/functions/target-branch.js";
-import { ledgerDbPath, mainViewPath } from "../../../atlas/functions/v2/runtime-paths.js";
+import { branchViewPath, ledgerDbPath } from "../../../atlas/functions/v2/runtime-paths.js";
 import { getSharedConductor } from "../../../atlas/functions/v2/parse/conductor.js";
 import { emitEmbeddingsResume, emitScipStaged } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { warmReadinessStarted, warmReadinessProgress, warmReadinessDone } from "../../../atlas/functions/v2/warm-progress.js";
@@ -642,8 +642,15 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
     // The conductor caches DB handles per (ledgerPath|dbPath) target. `warm` is
     // ledger-only — ParseEngine resolves and writes its own view from the job's
     // out_view_path — so dbPath here is just a stable per-repo handle-cache key.
-    const viewKeyPath = mainViewPath(repoRoot);
-    const job = { ...payload, purpose, branch: branch || payload?.branch || undefined, paths };
+    const viewKeyPath = branchViewPath(repoRoot, baselineBranch);
+    const mainPurpose = purpose === "main-incremental" || purpose === "main-full" || purpose === "main-merge";
+    const job = {
+      ...payload,
+      purpose,
+      branch: branch || payload?.branch || undefined,
+      paths,
+      ...(mainPurpose && !payload?.out_view_path ? { out_view_path: viewKeyPath } : {}),
+    };
     logAtlasWarmTelemetry("atlas.warm.conductor_dispatch", {
       ...warmTelemetry,
       outcome: "started",
@@ -695,7 +702,7 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
               logAtlasWarmTelemetry("atlas.main_generation.not_published", {
                 ...warmTelemetry,
                 reason: result.generation_proof_reason,
-                error: errorSummary(result._generation_publish_error),
+                error: result.generation_publish_error || null,
               });
             }
             logAtlasWarmTelemetry("atlas.warm.conductor_result", {

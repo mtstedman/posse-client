@@ -229,7 +229,10 @@ function resolveDevPolicy({
     reasoningEffort = maxEffort(reasoningEffort, "high");
     reasons.push("low scope confidence");
   }
-  if (currentModelTier === "strong") modelTier = "strong";
+  // Execution roles are deliberately capped at standard. Strong remains a
+  // planner-only routing choice; a planner hint must not promote development
+  // onto the premium tier.
+  if (modelTier === "strong") modelTier = "standard";
   if (currentReasoningEffort === "high") reasoningEffort = "high";
 
   let maxTurnsOverride = null;
@@ -260,10 +263,10 @@ function resolveAssessorPolicy({
   const reasons = [];
 
   if (riskScore >= 5 || riskTags.some((tag) => CRITICAL_RISK_TAGS.has(tag))) {
-    modelTier = "strong";
+    modelTier = "standard";
     reasoningEffort = "high";
     passConfidenceFloor = "high";
-    reasons.push("critical risk requires strong assessment and high-confidence pass");
+    reasons.push("critical risk requires standard assessment with high reasoning and a high-confidence pass");
   } else if (riskScore >= 4) {
     modelTier = "standard";
     reasoningEffort = "high";

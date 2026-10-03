@@ -28,7 +28,8 @@ import {
   NON_COMPLETION_BLOCKING_JOB_TYPES,
   TERMINAL_JOB_STATUSES_SQL,
 } from "../../../catalog/job.js";
-import { setAssessmentLifecycle } from "./attempts.js";
+import { beginJobRetryGeneration, setAssessmentLifecycle } from "./attempts.js";
+import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { now } from "./common.js";
 import { rewireDependency } from "./dependencies.js";
 import { flushEventsNow, logEvent } from "./events.js";
@@ -47,6 +48,7 @@ import {
   createJob,
   forceUpdateJobStatus,
   getJob,
+  getIntSetting,
   getWorkItem,
   listJobsByWorkItem,
   listWorkItems,
@@ -186,7 +188,10 @@ function requeueForRecovery(job, { ts, gateJobId, note, key }) {
     ].filter(Boolean).join("\n\n");
   }
   payload[key] = { at: ts, gate_job_id: gateJobId, prior_status: fresh.status };
-  updateJobPayload(fresh.id, JSON.stringify(payload));
+  beginJobRetryGeneration(fresh.id, {
+    payload,
+    attemptBudget: getIntSetting(SETTING_KEYS.DEFAULT_MAX_ATTEMPTS, 3),
+  });
   if (!forceUpdateJobStatus(fresh.id, "queued", { expectedStatuses: [fresh.status] })) return false;
   getDb().prepare(`
     UPDATE jobs
@@ -195,7 +200,6 @@ function requeueForRecovery(job, { ts, gateJobId, note, key }) {
         result_json = NULL,
         last_error = NULL,
         ready_at = ?,
-        max_attempts = MAX(COALESCE(max_attempts, 0), attempt_count + 1, 1),
         updated_at = ?
     WHERE id = ?
   `).run(ts, ts, fresh.id);

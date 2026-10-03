@@ -5,12 +5,12 @@
 
 export const RESEARCH_CHILD_PROFILE = "research_investigation.v1";
 export const RESEARCH_CHILD_PROMPT_PROFILE = "researcher_code_child";
-// A research child's full compact report, surfaced to the parent when the
-// delivered copy had to be trimmed to the planner's result cap.
+// A research child's full compact report, surfaced to the parent only when a
+// multi-child tool result would otherwise cross the physical client limit.
 export const RESEARCH_REPORT_OBJECT_TYPE = "research_report";
 export const SUB_AGENT_PROTOCOL = "posse.sub_agent.v1";
 export const SUB_AGENT_OBSERVATION_TYPES = Object.freeze({
-  RESULT_TRIMMED: "sub_agent.result_trimmed",
+  RESULT_OVER_TARGET: "sub_agent.result_over_target",
   RESEARCH_UNCITED_REPORT: "sub_agent.research_uncited_report",
   INTENT_OVERSIZED: "sub_agent.intent_oversized",
 });

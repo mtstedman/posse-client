@@ -4,14 +4,6 @@
 // discarded (caps are soft; a rejection costs a whole producer turn).
 
 import { parseAgentHandoffEvidenceSelector } from "../../handoff/functions/agent-handoff.js";
-import { truncateCompletionProse } from "../../handoff/functions/helpers/shape-normalizer.js";
-
-const CLAIM_PROSE_TRIM_CHARS = 120;
-const CLAIM_TEXT_TRIM_CHARS = 500;
-// Floors used only when nothing else is left to trim.
-const SUMMARY_FLOOR_CHARS = 160;
-const LAST_RESORT_TEXT_CHARS = 200;
-const PROSE_KEYS = ["prose", "summary"];
 const CITED_LANES = ["evidence", "proof", "support"];
 
 function plainObject(value) {
@@ -61,12 +53,6 @@ function eachClaim(packet, visit) {
     if (!Array.isArray(claims)) continue;
     for (let index = 0; index < claims.length; index++) visit(claims, index, handoff);
   }
-}
-
-function claimCount(packet) {
-  let count = 0;
-  eachClaim(packet, () => { count += 1; });
-  return count;
 }
 
 /**
@@ -153,191 +139,35 @@ function evidenceOccurrences(packet) {
   return count;
 }
 
-function claimText(claim) {
-  if (Array.isArray(claim)) return claim[0];
-  return plainObject(claim) ? claim.claim : null;
-}
-
-function setClaimText(claims, index, text) {
-  const claim = claims[index];
-  if (Array.isArray(claim)) claim[0] = text;
-  else if (plainObject(claim)) claim.claim = text;
-}
-
-function headTail(text, max) {
-  if (typeof text !== "string" || text.length <= max) return text;
-  const marker = ` … [trimmed from ${text.length} chars] … `;
-  const keep = Math.max(0, max - marker.length);
-  const head = Math.ceil(keep * 0.6);
-  const tail = keep - head;
-  return `${text.slice(0, head).trimEnd()}${marker}${tail > 0 ? text.slice(text.length - tail).trimStart() : ""}`;
-}
-
 /**
- * Fit a sanitized research report to the planner's result cap without losing
- * the child's run. `evidenceAllowance` reserves room, per cited evidence
- * occurrence, for the annotations expansion adds after the fit. Trim order:
- * lossless selector de-duplication, per-claim prose, claim text, trailing
- * claims (at least one stays, with all its evidence), the report summary (head
- * and tail kept), and last the remaining claim's evidence list. A kept claim's
- * selectors are never altered.
+ * Apply lossless selector de-duplication and measure the report against the
+ * planner's target. The target is accounting guidance, not a content cap: an
+ * over-target report is returned in full.
  *
  * @param {Record<string, any>} compact
- * @param {{ maxChars: number, evidenceAllowance?: number, resolveFullReportRef?: () => string | null }} options
+ * @param {{ maxChars: number, evidenceAllowance?: number }} options
  */
 export function fitResearchReport(compact, {
   maxChars,
   evidenceAllowance = 0,
-  resolveFullReportRef = () => null,
 } = /** @type {any} */ ({})) {
   const cap = Math.max(0, Number(maxChars) || 0);
   const allowance = Math.max(0, Number(evidenceAllowance) || 0);
   const charsBefore = jsonChars(compact);
-  const reserve = (packet) => allowance * evidenceOccurrences(packet);
-  if (charsBefore + reserve(compact) <= cap) {
-    return { packet: compact, trimmed: null, steps: [], fits: true };
-  }
-
   const packet = structuredClone(compact);
-  const claimsBefore = claimCount(packet);
-  const fullReportRef = (() => {
-    try {
-      return resolveFullReportRef() || null;
-    } catch {
-      return null;
-    }
-  })();
-  // Measure with the annotation in place; its numbers never gain digits.
-  const placeholder = {
-    claims_dropped: claimsBefore,
-    chars_before: charsBefore,
-    chars_after: charsBefore,
-    full_report_ref: fullReportRef,
-  };
-  const size = () => jsonChars({ ...packet, trimmed: placeholder }) + reserve(packet);
-  const fits = () => size() <= cap;
-  const steps = [];
-  const step = (name, apply) => {
-    if (fits()) return true;
-    if (apply() !== false) steps.push(name);
-    return fits();
-  };
-  const claimSlots = () => {
-    const slots = [];
-    eachClaim(packet, (claims, index) => slots.push({ claims, index }));
-    return slots.reverse();
-  };
-
-  step("lossless_selectors", () => applyLossless(packet));
-
-  for (const [name, transform] of [
-    ["claim_prose_truncated", (text) => truncateCompletionProse(text, CLAIM_PROSE_TRIM_CHARS)],
-    ["claim_prose_dropped", () => null],
-  ]) {
-    let changed = false;
-    for (const { claims, index } of claimSlots()) {
-      if (fits()) break;
-      const detail = claimDetail(claims[index]);
-      for (const key of PROSE_KEYS) {
-        if (typeof detail?.[key] !== "string") continue;
-        const next = transform(detail[key]);
-        if (next === undefined) continue;
-        if (next === null) delete detail[key];
-        else detail[key] = next;
-        changed = true;
-      }
-    }
-    if (changed) steps.push(name);
-  }
-
-  let textChanged = false;
-  for (const { claims, index } of claimSlots()) {
-    if (fits()) break;
-    const next = truncateCompletionProse(claimText(claims[index]), CLAIM_TEXT_TRIM_CHARS);
-    if (next === undefined) continue;
-    setClaimText(claims, index, next);
-    textChanged = true;
-  }
-  if (textChanged) steps.push("claim_text_truncated");
-
-  let dropped = 0;
-  while (!fits() && claimCount(packet) > 1) {
-    const [last] = claimSlots();
-    last.claims.splice(last.index, 1);
-    dropped += 1;
-  }
-  if (dropped > 0) steps.push("trailing_claims_dropped");
-
-  // Gaps and limitations close a summary, so both ends are kept; every cut
-  // is taken from the original text so markers never nest.
-  const summaries = () => (packet.handoffs || [])
-    .filter((handoff) => typeof handoff?.report?.summary === "string")
-    .reverse();
-  const originalSummaries = new Map(summaries().map((handoff) => [handoff, handoff.report.summary]));
-  let summaryChanged = false;
-  for (const handoff of summaries()) {
-    const original = originalSummaries.get(handoff);
-    for (let guard = 0; guard < 4 && !fits(); guard++) {
-      const current = handoff.report.summary.length;
-      const target = Math.max(SUMMARY_FLOOR_CHARS, current - (size() - cap));
-      if (target >= current) break;
-      handoff.report.summary = headTail(original, target);
-      summaryChanged = true;
-    }
-  }
-  if (summaryChanged) steps.push("summary_trimmed");
-
-  let evidenceCut = false;
-  if (!fits() && claimCount(packet) === 1) {
-    const [only] = claimSlots();
-    const detail = claimDetail(only.claims[only.index]);
-    while (!fits() && Array.isArray(detail?.decoy) && detail.decoy.length > 0) {
-      detail.decoy.pop();
-      if (detail.decoy.length === 0) delete detail.decoy;
-      evidenceCut = true;
-    }
-    for (const lane of [...CITED_LANES].reverse()) {
-      while (!fits() && Array.isArray(detail?.[lane]) && detail[lane].length > 1) {
-        detail[lane].pop();
-        evidenceCut = true;
-      }
-    }
-  }
-  if (evidenceCut) steps.push("evidence_list_cut");
-
-  // Nothing else is optional: floor the remaining prose so delivery still
-  // happens; `fits` records whether the cap was reached.
-  if (!fits()) {
-    for (const handoff of summaries()) {
-      handoff.report.summary = headTail(originalSummaries.get(handoff) ?? handoff.report.summary, SUMMARY_FLOOR_CHARS);
-    }
-    for (const { claims, index } of claimSlots()) {
-      const next = truncateCompletionProse(claimText(claims[index]), LAST_RESORT_TEXT_CHARS);
-      if (next !== undefined) setClaimText(claims, index, next);
-    }
-    for (const handoff of packet.handoffs || []) {
-      const next = truncateCompletionProse(handoff?.intent, LAST_RESORT_TEXT_CHARS);
-      if (next !== undefined) handoff.intent = next;
-    }
-    steps.push("floor");
-  }
-
-  const trimmed = {
-    claims_dropped: claimsBefore - claimCount(packet),
-    chars_before: charsBefore,
-    chars_after: 0,
-    full_report_ref: fullReportRef,
-  };
-  packet.trimmed = trimmed;
-  for (let guard = 0; guard < 3; guard++) {
-    const measured = jsonChars(packet);
-    if (trimmed.chars_after === measured) break;
-    trimmed.chars_after = measured;
-  }
+  applyLossless(packet);
+  const charsAfter = jsonChars(packet);
+  const measuredChars = charsAfter + (allowance * evidenceOccurrences(packet));
+  const fits = measuredChars <= cap;
   return {
     packet,
-    trimmed,
-    steps,
-    fits: trimmed.chars_after + reserve(packet) <= cap,
+    overTarget: fits ? null : {
+      chars_before: charsBefore,
+      chars_after: charsAfter,
+      measured_chars: measuredChars,
+      target_chars: cap,
+    },
+    steps: charsAfter < charsBefore ? ["lossless_selectors"] : [],
+    fits,
   };
 }

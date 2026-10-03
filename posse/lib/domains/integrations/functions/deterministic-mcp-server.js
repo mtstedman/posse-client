@@ -98,7 +98,7 @@ import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/to
 import { projectDbQuerySchemaForPermissions } from "../../../shared/tools/functions/toolkit/project-db/schema.js";
 import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
 import { AutomationOwnerClient } from "../../automation/classes/AutomationOwnerClient.js";
-import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES } from "../../../shared/tools/functions/tool-suites.js";
+import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES, registeredToolNames } from "../../../shared/tools/functions/tool-suites.js";
 import { appendHashRefIfMajor } from "../../../shared/tools/functions/hash-adder.js";
 import { createChainLedger } from "../../../shared/tools/functions/chain-ledger.js";
 import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
@@ -152,6 +152,8 @@ import {
   checkNativeToolAllowed,
   applyNativeReadLineLimit,
   ATLAS_CHAIN_READ_MAX_LINES,
+  ATLAS_RESEARCHER_READ_MAX_LINES,
+  isIndexableSourcePath,
   buildLockedToolError,
   noteAtlasCall,
   releaseGate,
@@ -1270,7 +1272,12 @@ function issuedAtlasActionsForModelText() {
 // otherwise return the same indexed source line by line.
 async function execGitHistoryForRole(args = {}) {
   const output = await execGitHistory(args, workspaceCwd, effectiveScopePredicates);
-  if (String(args?.op || "").trim() !== "blame") return output;
+  const op = String(args?.op || "").trim();
+  if (op === "show" && args?.path && roleName === "planner" && !String(output).startsWith("Error:")) {
+    const issuedAtlasActions = issuedAtlasActionsForModelText();
+    return `${output}\n\nContent note: git_history show does not return current worktree file content. Use read_file for a non-indexed file, or ${issuedIndexedSourceReadPhrase(issuedAtlasActions)} for indexed source.`;
+  }
+  if (op !== "blame") return output;
   const issuedAtlasActions = issuedAtlasActionsForModelText();
   if (!(issuedAtlasActions?.size > 0) || !atlasReplacesNativeTool("read_file", roleName)) return output;
   return blameWithoutLineText(output);
@@ -1397,7 +1404,7 @@ async function dedupeReadFile(args = {}) {
       result,
       args: normalizedArgs,
       stat,
-      defaultLimit: ATLAS_CHAIN_READ_MAX_LINES,
+      defaultLimit: nativeReadMaxLines(normalizedArgs),
       onFallback: (error) => appendToolLog({ event: "read_file_redaction_fallback", error }),
     });
   }
@@ -1554,60 +1561,10 @@ const TEST_TOOL_NAMES = new Set([
   "run_test_suite",
 ]);
 
-const ALL_NATIVE_TOOL_NAMES = Object.freeze([
-  "custom_tools",
-  "sub_agent",
-  "sub_agent_next_input",
-  "dispatch_agent",
-  "agent_handoff",
-  // Web research children's sole terminal action. The owner serves the call;
-  // the gateway must still declare it or tools/list omits it for the child.
-  "web_research_handoff",
-  "agent_claim",
-  "report_claims",
-  "read_file",
-  "chain_read",
-  "chain_verdict",
-  "list_files",
-  "search_files",
-  "git_history",
-  "inspect_file",
-  "hash_file",
-  // Planner-only pre-staged research brief bundle. Has an executor attached
-  // below; without it here the owner-hot gateway never declares it and a
-  // planner issued get_brief by the remote surface gets "No such tool".
-  "get_brief",
-  // Monitor Agents live-channel coordination tools. These are always-present,
-  // budget-exempt tools the owner-hot gateway must advertise so every role can
-  // actually CALL them — without this they are attached as executors but never
-  // declared, so tools/list omits them and the agent gets "No such tool available".
-  "agent_feedback",
-  "get_operator_feedback",
-  "ack_operator_feedback",
-  "write_file",
-  "edit_file",
-  "prune_artifact_output",
-  "move_file",
-  "copy_file",
-  "make_dir",
-  "bash",
-  "run_scoped_checks",
-  "create_test_suite",
-  "create_test",
-  "run_test",
-  "run_test_suite",
-  "read_image_metadata",
-  "validate_artifact_output",
-  "clean_image",
-  "compose_sprite_sheet",
-  "extract_image_text",
-  "view_image",
-  "generate_image",
-  "download_file",
-  // Opt-in; runtimeToolAvailable() keeps it filtered out unless this repo has
-  // project DB access configured.
-  "project_db_query",
-]);
+// Owner-hot declaration must follow the canonical registry. A hand-maintained
+// copy silently dropped request_scope (and previously get_brief and
+// web_research_handoff) even though executors and remote issuance were valid.
+const ALL_NATIVE_TOOL_NAMES = Object.freeze(registeredToolNames());
 
 function legacyToolNamesForUnscopedRole() {
   return [
@@ -1678,16 +1635,24 @@ function addToolSchema(schema) {
 function readFileSchemaForCurrentBoot() {
   if (!atlasAvailable) return TOOL_READ_FILE;
   if (atlasNativeToolIsComplementary("read_file", roleName)) {
+    const maxLines = roleName === "researcher"
+      ? ATLAS_RESEARCHER_READ_MAX_LINES
+      : ATLAS_CHAIN_READ_MAX_LINES;
+    const limitDescription = roleName === "researcher"
+      ? `Maximum lines to return; indexed source defaults to ${ATLAS_RESEARCHER_READ_MAX_LINES}, while non-indexed files remain capped at ${ATLAS_CHAIN_READ_MAX_LINES}.`
+      : `Maximum lines to return; defaults to ${maxLines}.`;
     return {
       ...TOOL_READ_FILE,
-      description: `Read source or text from a known file as numbered lines. Use offset and limit for a precise range; returns at most ${ATLAS_CHAIN_READ_MAX_LINES} lines per call.`,
+      description: roleName === "researcher"
+        ? `Read source or text from a known file as numbered lines. Use offset and limit for a precise range; indexed source returns at most ${ATLAS_RESEARCHER_READ_MAX_LINES} lines per call and non-indexed files at most ${ATLAS_CHAIN_READ_MAX_LINES}.`
+        : `Read source or text from a known file as numbered lines. Use offset and limit for a precise range; returns at most ${maxLines} lines per call.`,
       parameters: {
         ...TOOL_READ_FILE.parameters,
         properties: {
           path: TOOL_READ_FILE.parameters.properties.path,
           offset: TOOL_READ_FILE.parameters.properties.offset,
-          limit: { type: "integer", minimum: 1, maximum: ATLAS_CHAIN_READ_MAX_LINES,
-            description: `Maximum lines to return; defaults to ${ATLAS_CHAIN_READ_MAX_LINES}.` },
+          limit: { type: "integer", minimum: 1, maximum: maxLines,
+            description: limitDescription },
         },
       },
     };
@@ -1871,9 +1836,10 @@ function isPendingLiveScopeResult(result) {
 }
 
 async function requestScopeExpansionWithinJob(args = {}) {
-  const entries = Array.isArray(args?.requests) && args.requests.length > 0
-    ? args.requests.slice(0, 24)
+  const requestedEntries = Array.isArray(args?.requests) && args.requests.length > 0
+    ? args.requests
     : [args || {}];
+  const entries = requestedEntries.slice(0, 24);
   let pendingResult = null;
   let lastResult = null;
   for (const entry of entries) {
@@ -1886,7 +1852,9 @@ async function requestScopeExpansionWithinJob(args = {}) {
       access: entry.access,
       operation: entry.operation,
       reason: entry.reason,
-      source: entries.length > 1 ? "deterministic_mcp_scope_batch_tool" : "deterministic_mcp_internal_tool",
+      source: String(entry.source || (entries.length > 1
+        ? "deterministic_mcp_scope_batch_tool"
+        : "deterministic_mcp_internal_tool")),
       liveWait: true,
     });
     lastResult = result;
@@ -1897,7 +1865,16 @@ async function requestScopeExpansionWithinJob(args = {}) {
     }
     if (isPendingLiveScopeResult(result)) pendingResult = result;
   }
-  return pendingResult || lastResult;
+  const result = pendingResult || lastResult;
+  if (requestedEntries.length > entries.length && result && typeof result === "object") {
+    return {
+      ...result,
+      repair_note: `Only the first ${entries.length} scope requests were processed; submit the remaining ${requestedEntries.length - entries.length} exact path(s) in another request_scope call.`,
+      requests_processed: entries.length,
+      requests_remaining: requestedEntries.length - entries.length,
+    };
+  }
+  return result;
 }
 
 async function requestScopeWithinJob(args = {}) {
@@ -1927,6 +1904,7 @@ async function writeFileWithinScope(args = {}) {
       access: exists ? "modify" : "create",
       operation: "write_file",
       reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
+      source: "deterministic_mcp_write_boundary",
     });
     if (isPendingLiveScopeResult(scopeResult)) {
       return { [LIVE_SCOPE_WAIT]: true, request: scopeResult, operation: "write_file", args };
@@ -1954,6 +1932,7 @@ async function editFileWithinScope(args = {}) {
       access: "modify",
       operation: "edit_file",
       reason: "edit_file requires this existing file to complete the active job",
+      source: "deterministic_mcp_write_boundary",
     });
     if (isPendingLiveScopeResult(scopeResult)) {
       return { [LIVE_SCOPE_WAIT]: true, request: scopeResult, operation: "edit_file", args };
@@ -3517,13 +3496,21 @@ async function runNativeToolThroughGate(toolName, args, handler) {
 
 function boundForwardedReadArgs(toolName, args = {}) {
   if (toolName !== "read_file") return args;
+  const maxLines = nativeReadMaxLines(args);
   const requested = Number(args?.limit);
   return {
     ...args,
     limit: Number.isInteger(requested) && requested > 0
-      ? Math.min(requested, ATLAS_CHAIN_READ_MAX_LINES)
-      : ATLAS_CHAIN_READ_MAX_LINES,
+      ? Math.min(requested, maxLines)
+      : maxLines,
   };
+}
+
+function nativeReadMaxLines(args = {}) {
+  return roleName === "researcher"
+    && isIndexableSourcePath(args?.path, { cwd: workspaceCwd })
+    ? ATLAS_RESEARCHER_READ_MAX_LINES
+    : ATLAS_CHAIN_READ_MAX_LINES;
 }
 
 function atlasLiveBufferMode() {

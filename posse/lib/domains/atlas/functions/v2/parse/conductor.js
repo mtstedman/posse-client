@@ -63,6 +63,7 @@ function atlasThreadTransport(moduleUrl, { nativeAuth, retirePayload }) {
 /** @returns {{ stage, ingest, warm, publishGeneration, merge, retrieve, executeTool, reindex, reindexLanguage, info, readerInfo, close, daemon: Daemon }} */
 export function createConductorDaemon(opts = {}) {
   const nativeAuth = heartbeatAuthManager.getCapability();
+  const hostUrl = opts.hostUrl || HOST_URL;
   const readerHostUrl = opts.readerHostUrl || READER_HOST_URL;
   const readerOpTimeoutMs = Number.isFinite(Number(opts.readerOpTimeoutMs))
     ? Math.max(1, Number(opts.readerOpTimeoutMs))
@@ -71,7 +72,7 @@ export function createConductorDaemon(opts = {}) {
     ? Math.max(1, Number(opts.readerWriteOpTimeoutMs))
     : READER_WRITE_OP_TIMEOUT_MS;
   const daemon = registerAtlasThreadDaemon("atlas-conductor", new Daemon({
-    transportFactory: () => atlasThreadTransport(HOST_URL, { nativeAuth, retirePayload: { op: "close" } }),
+    transportFactory: () => atlasThreadTransport(hostUrl, { nativeAuth, retirePayload: { op: "close" } }),
     timeoutMs: STAGE_TIMEOUT_MS,
     label: "atlas-conductor",
   }), "atlas-conductor");
@@ -79,14 +80,89 @@ export function createConductorDaemon(opts = {}) {
   /** @type {Array<{ slot: number, daemon: Daemon, inFlight: number } | null>} */
   const readerEntries = Array.from({ length: READER_POOL_SIZE }, () => null);
   let readerCursor = 0;
-  let readerWriteDepth = 0;
-  /** @type {null | (() => void)} */
-  let readerWriteIdleResolve = null;
-  let readerWriteIdle = Promise.resolve();
-  let readerInFlight = 0;
-  /** @type {null | (() => void)} */
-  let readerReadIdleResolve = null;
-  let readerReadIdle = Promise.resolve();
+  /** @type {Map<string, { depth: number, idle: Promise<void>, resolve: () => void }>} */
+  const readerWriteAdmissions = new Map();
+  /** @type {Map<string, { count: number, idle: Promise<void>, resolve: () => void }>} */
+  const readerActiveReads = new Map();
+
+  const normalizedTargetKey = (viewPath, ledgerPath) =>
+    `db:${String(viewPath || "")}\0${String(ledgerPath || "")}`.replace(/\\/g, "/").toLowerCase();
+  const normalizedEmbeddingKey = (readRoot) =>
+    `emb:${String(readRoot || "")}`.replace(/\\/g, "/").toLowerCase();
+
+  const beginAdmissions = (keys) => {
+    const unique = [...new Set(keys.filter(Boolean))];
+    for (const key of unique) {
+      const current = readerWriteAdmissions.get(key);
+      if (current) {
+        current.depth += 1;
+        continue;
+      }
+      let resolve = () => {};
+      const idle = new Promise((done) => { resolve = () => done(); });
+      readerWriteAdmissions.set(key, { depth: 1, idle, resolve });
+    }
+    return unique;
+  };
+
+  const endAdmissions = (keys) => {
+    for (const key of keys || []) {
+      const current = readerWriteAdmissions.get(key);
+      if (!current) continue;
+      current.depth -= 1;
+      if (current.depth > 0) continue;
+      readerWriteAdmissions.delete(key);
+      current.resolve();
+    }
+  };
+
+  const readerAdmissionKeys = (payload = {}) => {
+    const viewPath = payload?.viewPath || payload?.dbPath || "";
+    const ledgerPath = payload?.ledgerPath || "";
+    const keys = viewPath || ledgerPath
+      ? [normalizedTargetKey(viewPath, ledgerPath)]
+      : [];
+    if (payload?.readRoot) keys.push(normalizedEmbeddingKey(payload.readRoot));
+    return [...new Set(keys)];
+  };
+
+  const beginReaderAdmission = async (keys) => {
+    while (true) {
+      const waits = keys.map((key) => readerWriteAdmissions.get(key)?.idle).filter(Boolean);
+      // Claim the read synchronously with the no-writer observation. Awaiting
+      // an already-resolved admission check leaves a microtask gap in which a
+      // writer can start before this read is visible and miss its drain.
+      if (waits.length === 0) {
+        noteReaderStart(keys);
+        return;
+      }
+      await Promise.all(waits);
+    }
+  };
+
+  const noteReaderStart = (keys) => {
+    for (const key of keys) {
+      const current = readerActiveReads.get(key);
+      if (current) {
+        current.count += 1;
+        continue;
+      }
+      let resolve = () => {};
+      const idle = new Promise((done) => { resolve = () => done(); });
+      readerActiveReads.set(key, { count: 1, idle, resolve });
+    }
+  };
+
+  const noteReaderEnd = (keys) => {
+    for (const key of keys) {
+      const current = readerActiveReads.get(key);
+      if (!current) continue;
+      current.count -= 1;
+      if (current.count > 0) continue;
+      readerActiveReads.delete(key);
+      current.resolve();
+    }
+  };
 
   const createReaderEntry = (slot) => ({
     slot,
@@ -113,38 +189,6 @@ export function createConductorDaemon(opts = {}) {
   const aliveReaderEntries = () => readerEntries
     .filter((entry) => entry?.daemon?.isHostAlive());
 
-  const noteReaderWriteStart = () => {
-    if (readerWriteDepth === 0) {
-      readerWriteIdle = new Promise((resolve) => { readerWriteIdleResolve = resolve; });
-    }
-    readerWriteDepth++;
-  };
-
-  const noteReaderWriteEnd = () => {
-    readerWriteDepth = Math.max(0, readerWriteDepth - 1);
-    if (readerWriteDepth !== 0) return;
-    const resolve = readerWriteIdleResolve;
-    readerWriteIdleResolve = null;
-    readerWriteIdle = Promise.resolve();
-    try { resolve?.(); } catch { /* observational */ }
-  };
-
-  const noteReaderReadStart = () => {
-    if (readerInFlight === 0) {
-      readerReadIdle = new Promise((resolve) => { readerReadIdleResolve = resolve; });
-    }
-    readerInFlight++;
-  };
-
-  const noteReaderReadEnd = () => {
-    readerInFlight = Math.max(0, readerInFlight - 1);
-    if (readerInFlight !== 0) return;
-    const resolve = readerReadIdleResolve;
-    readerReadIdleResolve = null;
-    readerReadIdle = Promise.resolve();
-    try { resolve?.(); } catch { /* observational */ }
-  };
-
   const disposeReaderEntry = async (entry) => {
     if (!entry) return;
     if (readerEntries[entry.slot] === entry) readerEntries[entry.slot] = null;
@@ -153,16 +197,14 @@ export function createConductorDaemon(opts = {}) {
 
   const pickReaderEntry = () => {
     const alive = aliveReaderEntries();
-    if (readerWriteDepth === 0) {
-      const allAliveBusy = alive.length === 0 || alive.every((entry) => entry.inFlight > 0);
-      if (allAliveBusy && alive.length < READER_POOL_SIZE) {
-        for (let i = 0; i < READER_POOL_SIZE; i += 1) {
-          const slot = (readerCursor + i) % READER_POOL_SIZE;
-          const entry = readerEntries[slot];
-          if (!entry || !entry.daemon.isHostAlive()) {
-            readerCursor = (slot + 1) % READER_POOL_SIZE;
-            return getReaderEntry(slot);
-          }
+    const allAliveBusy = alive.length === 0 || alive.every((entry) => entry.inFlight > 0);
+    if (allAliveBusy && alive.length < READER_POOL_SIZE) {
+      for (let i = 0; i < READER_POOL_SIZE; i += 1) {
+        const slot = (readerCursor + i) % READER_POOL_SIZE;
+        const entry = readerEntries[slot];
+        if (!entry || !entry.daemon.isHostAlive()) {
+          readerCursor = (slot + 1) % READER_POOL_SIZE;
+          return getReaderEntry(slot);
         }
       }
     }
@@ -176,14 +218,12 @@ export function createConductorDaemon(opts = {}) {
   };
 
   const callReader = async (payload, reqOpts) => {
-    // A queued writer closes reader admission at this boundary. Do not rely on
-    // daemon liveness here: an allocated lane may still be spawning, and that
-    // already-admitted request must drain before the writer can bind.
-    while (readerWriteDepth > 0) {
-      await readerWriteIdle;
-    }
+    // The reader host owns a writer-priority gate per view/ledger target.
+    // Admission stays open for unrelated targets, so a slow WI-A write never
+    // serializes reads against WI-B.
+    const admissionKeys = readerAdmissionKeys(payload);
+    await beginReaderAdmission(admissionKeys);
     const entry = pickReaderEntry();
-    noteReaderReadStart();
     entry.inFlight++;
     try {
       return await call(entry.daemon, payload, reqOpts);
@@ -192,7 +232,7 @@ export function createConductorDaemon(opts = {}) {
       throw err;
     } finally {
       entry.inFlight = Math.max(0, entry.inFlight - 1);
-      noteReaderReadEnd();
+      noteReaderEnd(admissionKeys);
     }
   };
 
@@ -210,6 +250,7 @@ export function createConductorDaemon(opts = {}) {
     else if (r?._timedOut) /** @type {any} */ (err).code = "DAEMON_TIMEOUT";
     else if (r?._overloaded) /** @type {any} */ (err).code = "DAEMON_OVERLOADED";
     else if (r?._transportGone) /** @type {any} */ (err).code = "DAEMON_TRANSPORT_GONE";
+    else if (r?.error?.code) /** @type {any} */ (err).code = String(r.error.code);
     throw err;
   };
 
@@ -235,7 +276,9 @@ export function createConductorDaemon(opts = {}) {
   const readerWriteTargets = (opts = {}) => {
     const ledgerPath = opts?.ledgerPath ? String(opts.ledgerPath) : "";
     const waitingLanePurpose = String(opts?.job?.purpose || "");
-    const targetLocal = waitingLanePurpose === "wi-snapshot" || waitingLanePurpose === "wi-catchup";
+    const targetLocal = waitingLanePurpose === "wi-snapshot"
+      || waitingLanePurpose === "wi-catchup"
+      || waitingLanePurpose === "wi-live";
     const candidates = targetLocal
       ? [opts?.job?.out_view_path, opts?.viewPath]
       : [opts?.job?.out_view_path, opts?.viewPath, opts?.dbPath];
@@ -247,10 +290,17 @@ export function createConductorDaemon(opts = {}) {
     for (const candidate of candidates) {
       if (!candidate) continue;
       const viewPath = String(candidate);
-      const key = `${viewPath}\0${ledgerPath}`.replace(/\\/g, "/").toLowerCase();
+      const key = normalizedTargetKey(viewPath, ledgerPath);
       if (seen.has(key)) continue;
       seen.add(key);
       targets.push({ viewPath, ...(ledgerPath ? { ledgerPath } : {}) });
+    }
+    // Viewless policy/memory reads cache a ledger-only handle under this key.
+    // Drain that exact target without turning the hold back into a global
+    // barrier for view-bound reads on unrelated WIs.
+    if (ledgerPath) {
+      const key = normalizedTargetKey("", ledgerPath);
+      if (!seen.has(key)) targets.push({ ledgerPath });
     }
     return targets;
   };
@@ -287,18 +337,22 @@ export function createConductorDaemon(opts = {}) {
    * @param {Record<string, any>} [opts]
    */
   const beginReaderWrite = async (opts = {}, { holdEmbeddings = false } = {}) => {
-    noteReaderWriteStart();
     const heldReaders = [];
+    const targets = readerWriteTargets(opts);
+    const embRoot = holdEmbeddings && opts?.repoRoot ? String(opts.repoRoot) : null;
+    const admissionKeys = beginAdmissions([
+      ...targets.map((target) => normalizedTargetKey(target.viewPath, target.ledgerPath)),
+      ...(embRoot ? [normalizedEmbeddingKey(embRoot)] : []),
+    ]);
     try {
-      // Drain every request admitted before the writer latch, including a
-      // reader whose daemon transport is still spawning. Only after this
-      // resolves may the writer acquire the host-side holds and bind.
-      await readerReadIdle;
+      const activeReads = admissionKeys
+        .map((key) => readerActiveReads.get(key)?.idle)
+        .filter(Boolean);
+      if (activeReads.length > 0) await Promise.all(activeReads);
       const readers = aliveReaderEntries();
-      if (readers.length === 0) return { readers: [] };
-      const targets = readerWriteTargets(opts);
-      const embRoot = holdEmbeddings && opts?.repoRoot ? String(opts.repoRoot) : null;
-      if (targets.length === 0 && !embRoot) return { readers: [] };
+      if (readers.length === 0 || (targets.length === 0 && !embRoot)) {
+        return { readers: [], admissionKeys };
+      }
       for (const entry of readers) {
         const held = [];
         let heldEmb = null;
@@ -332,16 +386,16 @@ export function createConductorDaemon(opts = {}) {
           }
         }
       }
-      return { readers: heldReaders };
+      return { readers: heldReaders, admissionKeys };
     } catch (err) {
       await releaseHeldReaders(heldReaders);
-      noteReaderWriteEnd();
+      endAdmissions(admissionKeys);
       throw err;
     }
   };
 
   /**
-   * @param {{ readers?: Array<{ entry: { slot: number, daemon: Daemon, inFlight: number }, dbTargets?: Array<{ viewPath?: string, ledgerPath?: string }>, embRoot?: string | null }> }} held
+   * @param {{ readers?: Array<{ entry: { slot: number, daemon: Daemon, inFlight: number }, dbTargets?: Array<{ viewPath?: string, ledgerPath?: string }>, embRoot?: string | null }>, admissionKeys?: string[] }} held
    */
   const endReaderWrite = async (held) => {
     try {
@@ -350,7 +404,7 @@ export function createConductorDaemon(opts = {}) {
         await releaseHeldReader(heldReader);
       }
     } finally {
-      noteReaderWriteEnd();
+      endAdmissions(held?.admissionKeys || []);
     }
   };
 
@@ -359,25 +413,41 @@ export function createConductorDaemon(opts = {}) {
     try {
       return await fn(...args);
     } finally {
-      await invalidateReaders();
+      if (holdOpts.invalidateReaders !== false) await invalidateReaders();
       await endReaderWrite(held);
     }
   };
 
   const stage = (opts, reqOpts) => call(daemon, { op: "stage", ...opts }, reqOpts);
   const ingest = writesWithReaderHold((opts, reqOpts) => call(daemon, { op: "ingest", ...opts }, reqOpts));
-  const waitingLanePurposes = new Set(["wi-snapshot", "wi-catchup", "wi-prefetch"]);
-  const regularWarm = writesWithReaderHold(
-    (opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts),
-    { holdEmbeddings: true },
-  );
+  const waitingLanePurposes = new Set(["wi-snapshot", "wi-catchup", "wi-prefetch", "wi-live"]);
   const targetLocalWarm = writesWithReaderHold(
     (opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts),
     { holdEmbeddings: false },
   );
+  const wiLiveWarm = writesWithReaderHold(
+    (opts, reqOpts) => call(daemon, { op: "warm", ...opts }, reqOpts),
+    // beginWrite already retires this view/ledger key. wi-live never rewrites
+    // ANN state, so globally invalidating every reader would evict other WIs.
+    { holdEmbeddings: false, invalidateReaders: false },
+  );
+  const flushEmbeddings = writesWithReaderHold(
+    (opts, reqOpts) => call(daemon, { op: "flushEmbeddings", ...opts }, reqOpts),
+    { holdEmbeddings: true },
+  );
+  const regularWarm = async (opts, reqOpts) => {
+    // DB/view mutation and ANN flush are separate target-scoped holds. This
+    // releases the reader latch between them and lets unrelated WI reads run
+    // throughout the long encode/save phase.
+    const result = await targetLocalWarm(opts, reqOpts);
+    const flushKey = String(result?.embedding_flush_key || "");
+    if (!flushKey) return result;
+    return flushEmbeddings({ repoRoot: opts?.repoRoot, flushKey }, reqOpts);
+  };
   const warm = (opts, reqOpts) => {
     const purpose = String(opts?.job?.purpose || "");
     if (purpose === "wi-prefetch") return call(daemon, { op: "warm", ...opts }, reqOpts);
+    if (purpose === "wi-live") return wiLiveWarm(opts, reqOpts);
     return waitingLanePurposes.has(purpose)
       ? targetLocalWarm(opts, reqOpts)
       : regularWarm(opts, reqOpts);
@@ -638,7 +708,7 @@ const _indexingSuccessListeners = new Set();
  * Subscribe to "an indexing op (warm/merge/ingest/stage/reindex) completed
  * successfully". Listeners must not throw; failures are swallowed so a bad
  * subscriber cannot break the indexing pipeline. Returns an unsubscribe fn.
- * @param {() => void} listener
+ * @param {(event?: { purpose: string, viewPath: string | null, repoRoot: string | null, workItemId: string | number | null }) => void} listener
  */
 export function onConductorIndexingSuccess(listener) {
   if (typeof listener !== "function") return () => {};
@@ -646,10 +716,19 @@ export function onConductorIndexingSuccess(listener) {
   return () => _indexingSuccessListeners.delete(listener);
 }
 
-function _notifyIndexingSuccess() {
+function _notifyIndexingSuccess(event = undefined) {
   for (const listener of _indexingSuccessListeners) {
-    try { listener(); } catch { /* subscriber errors must not break indexing */ }
+    try { listener(event); } catch { /* subscriber errors must not break indexing */ }
   }
+}
+
+function indexingSuccessEvent(opts = {}) {
+  return {
+    purpose: String(opts?.job?.purpose || ""),
+    viewPath: opts?.job?.out_view_path || opts?.viewPath || opts?.dbPath || null,
+    repoRoot: opts?.repoRoot || null,
+    workItemId: opts?.job?.work_item_id ?? null,
+  };
 }
 
 function _indexTracked(fn) {
@@ -658,7 +737,7 @@ function _indexTracked(fn) {
     _indexingInflight++;
     try {
       const result = await tracked(...args);
-      _notifyIndexingSuccess();
+      _notifyIndexingSuccess(indexingSuccessEvent(args[0]));
       return result;
     } finally {
       _indexingInflight--;
@@ -673,10 +752,15 @@ function _warmTracked(fn) {
     if (purpose === "wi-snapshot" || purpose === "wi-catchup" || purpose === "wi-prefetch") {
       return tracked(opts, ...rest);
     }
+    if (purpose === "wi-live") {
+      const result = await tracked(opts, ...rest);
+      _notifyIndexingSuccess(indexingSuccessEvent(opts));
+      return result;
+    }
     _indexingInflight++;
     try {
       const result = await tracked(opts, ...rest);
-      _notifyIndexingSuccess();
+      _notifyIndexingSuccess(indexingSuccessEvent(opts));
       return result;
     } finally {
       _indexingInflight--;

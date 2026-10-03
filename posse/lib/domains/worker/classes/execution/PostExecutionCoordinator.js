@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import fs from "node:fs";
 import {
   completeAttempt,
   createJob,
@@ -27,6 +28,7 @@ import { runHookAsync } from "../../../git/functions/hooks.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import {
   gitCurrentHashAsync,
+  gitExecAsync,
   gitHasChangesAsync,
 } from "../../../git/functions/utils.js";
 import {
@@ -84,6 +86,7 @@ import {
 import {
   committedCompletionForAttempt,
   selfDeclaredUnwrittenPaths,
+  unwrittenMaterializedPaths,
 } from "../../functions/helpers/committed-completion.js";
 import {
   parseAgentCompletionLog as parseAgentCompletionLogFromModule,
@@ -124,6 +127,32 @@ function _syncAssessorWorkerDisplay(display, job, {
     effort,
     attempt,
   });
+}
+
+export async function dropEmptyInferredMaterializations(gitErr, jobPayload, wtPath) {
+  const unwritten = unwrittenMaterializedPaths(gitErr);
+  if (unwritten.length === 0 || !wtPath) return [];
+  const inferred = new Set((Array.isArray(jobPayload?._inferred_fix_files_to_create)
+    ? jobPayload._inferred_fix_files_to_create
+    : []).map((entry) => String(entry || "").replace(/\\/g, "/")));
+  if (!unwritten.every((entry) => inferred.has(entry))) return [];
+  try {
+    await gitExecAsync(["rm", "--cached", "--force", "--ignore-unmatch", "--", ...unwritten], wtPath, { timeoutMs: 10_000 });
+  } catch {
+    // The placeholder may be untracked; unlinking it is sufficient then.
+  }
+  for (const relPath of unwritten) {
+    try { await fs.promises.unlink(`${wtPath}/${relPath}`); } catch (error) {
+      if (error?.code !== "ENOENT") return [];
+    }
+  }
+  const dropped = new Set(unwritten);
+  for (const key of ["files_to_create", "files_to_modify", "_inferred_fix_files_to_create"]) {
+    if (Array.isArray(jobPayload?.[key])) {
+      jobPayload[key] = jobPayload[key].filter((entry) => !dropped.has(String(entry || "").replace(/\\/g, "/")));
+    }
+  }
+  return unwritten;
 }
 
 // Park a blocked mutating job behind a blocked_recovery human_input gate. The
@@ -739,7 +768,7 @@ export async function handlePostExecutionForWorker({
               && rawMaterializationGeneration >= 1
               ? Math.floor(rawMaterializationGeneration)
               : 1;
-            const materializedCreatePaths = materializedPathsForJob(
+            let materializedCreatePaths = materializedPathsForJob(
               job.id,
               materializationGeneration,
             );
@@ -752,6 +781,7 @@ export async function handlePostExecutionForWorker({
             // failing the whole attempt would discard it and re-run the
             // provider call just to reproduce the same tree.
             let commitResult = null;
+            let inferredMaterializationRepairApplied = false;
             for (let commitInfraRetries = 0; ; commitInfraRetries += 1) {
               try {
                 commitResult = await gitCommitAllAsyncFromModule(commitMsg, wtPath, {
@@ -777,6 +807,31 @@ export async function handlePostExecutionForWorker({
                 });
                 break;
               } catch (commitErr) {
+                if (!inferredMaterializationRepairApplied) {
+                  const dropped = await dropEmptyInferredMaterializations(commitErr, jobPayload, wtPath);
+                  if (dropped.length > 0) {
+                    inferredMaterializationRepairApplied = true;
+                    materializedCreatePaths = materializedCreatePaths.filter((entry) => !dropped.includes(entry));
+                    job.payload_json = JSON.stringify(jobPayload);
+                    updateJobPayload(job.id, job.payload_json);
+                    const repairMsg = `Dropped empty inferred materialization(s) ${dropped.join(", ")} and retrying the scoped commit`;
+                    this.emit(job.id, `${C.yellow}[scope] WI#${job.work_item_id} job #${job.id}: ${repairMsg}${C.reset}`);
+                    logEvent({
+                      work_item_id: job.work_item_id,
+                      job_id: job.id,
+                      attempt_id: attempt.id,
+                      event_type: EVENT_TYPES.JOB_COMMIT_INFRA_RETRY,
+                      actor_type: EVENT_ACTORS.SYSTEM,
+                      message: repairMsg,
+                      event_json: JSON.stringify({
+                        repair: "drop_empty_inferred_materialization",
+                        paths: dropped,
+                      }),
+                    });
+                    commitInfraRetries -= 1;
+                    continue;
+                  }
+                }
                 if (commitInfraRetries >= 2 || !isTransientCommitInfraFailure(commitErr)) throw commitErr;
                 const retryMsg = `Commit hit transient infra fault (${formatCommitFailureSummary(commitErr)}) — retrying commit in place (${commitInfraRetries + 1}/2)`;
                 this.emit(job.id, `${C.yellow}[git] WI#${job.work_item_id} job #${job.id}: ${retryMsg}${C.reset}`);
@@ -1344,6 +1399,12 @@ export async function handlePostExecutionForWorker({
             const gitFailureDetail = formatCommitFailureDetail(gitErr);
             const gitFailureSummary = formatCommitFailureSummary(gitErr);
             const lockTimeout = await worktreeLockTimeoutInfoAsync(gitErr, gitFailureDetail);
+            const harnessFaultCode = gitErr?.harnessFault === true
+              ? String(gitErr.harnessFaultCode || gitErr.code || "commit_harness_fault")
+              : null;
+            const harnessFaultKey = harnessFaultCode
+              ? `${harnessFaultCode}:${String(gitErr?.gitAddWarning?.file || "")}`
+              : null;
             this.emit(job.id, `${C.dim}[system] WI#${job.work_item_id} ${branchName}: commit failed — ${gitFailureSummary}${C.reset}`);
             if (hookOutput) {
               this.emit(job.id, `${C.red}[hook] WI#${job.work_item_id} job #${job.id}: ${hookOutput.split("\n").slice(0, 8).join(" | ")}${C.reset}`);
@@ -1363,6 +1424,7 @@ export async function handlePostExecutionForWorker({
                 ...(gitErr.stderr ? { stderr: String(gitErr.stderr).slice(0, 4000) } : {}),
                 ...(gitErr.stdout ? { stdout: String(gitErr.stdout).slice(0, 4000) } : {}),
                 ...(gitErr.code ? { code: gitErr.code } : {}),
+                ...(harnessFaultCode ? { harness_fault: true, harness_fault_code: harnessFaultCode } : {}),
                 ...(gitErr.signal ? { signal: gitErr.signal } : {}),
                 ...(gitErr.gitCommitTimedOut ? {
                   git_commit_timed_out: true,
@@ -1511,6 +1573,45 @@ export async function handlePostExecutionForWorker({
                 ].join("\n"),
               });
               if (!parked) return;
+              refreshAndExtractInsightsFromModule(job.work_item_id);
+              this._cleanupWorktreeIfDone(job.work_item_id);
+              return;
+            }
+            if (harnessFaultCode) {
+              const repeated = getAttempts(job.id).some((priorAttempt) => {
+                if (Number(priorAttempt.id) === Number(attempt.id) || !priorAttempt.notes) return false;
+                try {
+                  const notes = JSON.parse(priorAttempt.notes);
+                  return notes?.harness_fault_key === harnessFaultKey;
+                } catch {
+                  return false;
+                }
+              });
+              const harnessMessage = repeated
+                ? `Harness fault (not charged) repeated: ${harnessFaultCode}`
+                : `Harness fault (not charged): ${harnessFaultCode}`;
+              completeAttempt(attempt.id, {
+                status: "interrupted",
+                duration_ms: Date.now() - startTime,
+                error_text: harnessMessage,
+                notes: JSON.stringify({
+                  harness_fault: true,
+                  harness_fault_code: harnessFaultCode,
+                  harness_fault_key: harnessFaultKey,
+                }),
+              });
+              const readyAt = new Date(Date.now() + 5000).toISOString();
+              if (repeated) {
+                spawnDeadLetterRecoveryForDependentsFromModule(this, job, getJob(job.id) || job, {
+                  reasonText: "hit the same harness fault twice (the attempts were not charged) and was dead-lettered",
+                  context: `The harness failed twice with ${harnessFaultCode}. The model attempts were refunded; retry only after the harness fault is repaired.`,
+                  failureRepeatKey: harnessFaultKey,
+                });
+              }
+              this._releaseWithoutAttemptPenalty(job, leaseToken, repeated ? "dead_letter" : "queued", {
+                attemptId: attempt.id,
+                readyAt: repeated ? null : readyAt,
+              });
               refreshAndExtractInsightsFromModule(job.work_item_id);
               this._cleanupWorktreeIfDone(job.work_item_id);
               return;

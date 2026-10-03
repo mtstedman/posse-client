@@ -21,7 +21,7 @@ PRAGMA foreign_keys = ON;
 --  20 = + Team submission approval policy and publication mode state.
 -- 21 = terminal abandoned shared-trunk merge operations
 -- 22 = interrupted agent-call terminal state
-PRAGMA user_version = 22;
+PRAGMA user_version = 23;
 
 CREATE TABLE IF NOT EXISTS bridge_command_results (
   command_id TEXT PRIMARY KEY,
@@ -244,11 +244,17 @@ CREATE TABLE IF NOT EXISTS waiting_lane_preparations (
   desired_atlas_layer_revision INTEGER CHECK (
     desired_atlas_layer_revision IS NULL OR desired_atlas_layer_revision >= 0
   ),
+  desired_atlas_layer_row_count INTEGER CHECK (
+    desired_atlas_layer_row_count IS NULL OR desired_atlas_layer_row_count >= 0
+  ),
   desired_view_fingerprint TEXT,
   applied_git_oid TEXT,
   applied_atlas_seq INTEGER CHECK (applied_atlas_seq IS NULL OR applied_atlas_seq >= 0),
   applied_atlas_layer_revision INTEGER CHECK (
     applied_atlas_layer_revision IS NULL OR applied_atlas_layer_revision >= 0
+  ),
+  applied_atlas_layer_row_count INTEGER CHECK (
+    applied_atlas_layer_row_count IS NULL OR applied_atlas_layer_row_count >= 0
   ),
   applied_view_fingerprint TEXT,
   git_job_id INTEGER,

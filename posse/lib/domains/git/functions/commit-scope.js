@@ -200,6 +200,10 @@ function safeGitAdd(file, cwd, context, warnings = null) {
     if (strictContext) {
       const addErr = new Error(`Failed to stage ${context} path "${file}": ${warning.error}`);
       addErr.gitAddWarning = warning;
+      if (context === "mergeResolution") {
+        addErr.harnessFault = true;
+        addErr.harnessFaultCode = "merge_resolution_staging_failed";
+      }
       throw addErr;
     }
     if (Array.isArray(warnings)) warnings.push(warning);

@@ -34,7 +34,7 @@ import {
 } from "./index.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 22;
+export const HOST_SCHEMA_VERSION = 23;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);
@@ -401,7 +401,9 @@ export function needsWaitingLanePreparationSchema(db) {
   ).get()?.sql || "";
   return {
     jobs: !!jobsTableSql && !jobsTableSql.includes("'waiting_lane_prepare'"),
-    preparations: !tableExists(db, "waiting_lane_preparations"),
+    preparations: !tableExists(db, "waiting_lane_preparations")
+      || !getTableColumnNames(db, "waiting_lane_preparations").includes("desired_atlas_layer_row_count")
+      || !getTableColumnNames(db, "waiting_lane_preparations").includes("applied_atlas_layer_row_count"),
   };
 }
 
@@ -419,7 +421,16 @@ export function repairWaitingLanePreparationSchema(db) {
       q.run(`ALTER TABLE ${quoteIdent(tmpName)} RENAME TO ${quoteIdent("jobs")}`);
       createJobsIndexes(db);
     }
-    q.run(waitingLanePreparationsCreateSql());
+    if (tableExists(db, "waiting_lane_preparations") && needs.preparations) {
+      const tmpName = "_waiting_lane_scope_token_mig";
+      q.run(`DROP TABLE IF EXISTS ${quoteIdent(tmpName)}`);
+      q.run(waitingLanePreparationsCreateSql(tmpName));
+      copyCompatibleColumns(db, "waiting_lane_preparations", tmpName);
+      q.run(`DROP TABLE ${quoteIdent("waiting_lane_preparations")}`);
+      q.run(`ALTER TABLE ${quoteIdent(tmpName)} RENAME TO ${quoteIdent("waiting_lane_preparations")}`);
+    } else {
+      q.run(waitingLanePreparationsCreateSql());
+    }
     createWaitingLanePreparationIndexes(db);
   })());
   return true;

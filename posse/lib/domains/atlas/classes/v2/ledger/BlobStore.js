@@ -10,6 +10,7 @@
 // contract — including thrown-message text — is unchanged.
 
 import { nowIso } from "../../../functions/v2/ledger/normalize.js";
+import crypto from "node:crypto";
 import { isContentHash } from "../../../functions/v2/hash.js";
 import { isCanonicalRepoPath } from "../../../functions/v2/paths.js";
 import { ATLAS_PARSER_SPEC_VERSION, ATLAS_PARSER_VERSION } from "../../../functions/v2/parser/version.js";
@@ -69,7 +70,43 @@ function inferLayerSource(symbols, edges) {
  * @returns {string}
  */
 function stableJson(value) {
-  return JSON.stringify(value ?? null);
+  if (value == null) return "null";
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (typeof value === "object") {
+    const record = /** @type {Record<string, unknown>} */ (value);
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function layerRowsDigest(symbols, edges, source, layerLang) {
+  const symbolRows = [...(symbols || [])]
+    .sort((a, b) => Number(a.local_id) - Number(b.local_id))
+    .map((row) => [
+      row.local_id, row.lang || layerLang, row.kind, row.name,
+      row.signature_text ?? null, row.signature_hash,
+      row.qualified_name ?? null, row.parent_local_id ?? null, row.repo_rel_path,
+      row.range_start, row.range_end,
+      Number.isInteger(row.range_start_line) ? row.range_start_line : 1,
+      Number.isInteger(row.range_end_line) ? row.range_end_line : 1,
+      typeof row.body_identifiers === "string" ? row.body_identifiers : null,
+      row.visibility ?? null, row.doc ?? null, normalizeRowSource(row.source || source),
+    ]);
+  const edgeRows = [...(edges || [])]
+    .sort((a, b) => Number(a.edge_id) - Number(b.edge_id))
+    .map((row) => [
+      row.edge_id, row.kind, row.from_content_hash, row.from_local_id,
+      row.to_content_hash ?? null, row.to_local_id ?? null, row.to_external_id ?? null,
+      row.to_name, row.to_module ?? null, row.range_start, row.range_end,
+      Number.isInteger(row.range_start_line) ? row.range_start_line : 1,
+      Number.isInteger(row.range_end_line) ? row.range_end_line : 1,
+      row.confidence, normalizeRowSource(row.source || source),
+    ]);
+  return crypto.createHash("sha256").update(JSON.stringify([symbolRows, edgeRows])).digest("hex");
+}
+
+export function __testLayerRowsDigest(symbols, edges, source = "treesitter", layerLang = "ts") {
+  return layerRowsDigest(symbols, edges, normalizeLayerSource(source), layerLang);
 }
 
 /**
@@ -214,14 +251,19 @@ export class BlobStore {
         this.#hasBlobLayerMetadata
           ? `INSERT INTO blob_layers
                (content_hash, lang, source, tool_version, parser_spec_version,
-                config_hash, deps_hash, fileset_hash, indexed_at, status, metadata_json)
-             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                config_hash, deps_hash, fileset_hash, indexed_at, status, metadata_json, rows_digest)
+             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(content_hash, source, tool_version, parser_spec_version, config_hash, deps_hash, fileset_hash)
                DO UPDATE SET
                  lang = excluded.lang,
                  indexed_at = excluded.indexed_at,
                  status = excluded.status,
-                 metadata_json = excluded.metadata_json
+                 metadata_json = excluded.metadata_json,
+                 rows_digest = excluded.rows_digest
+               WHERE blob_layers.lang <> excluded.lang
+                  OR blob_layers.status <> excluded.status
+                  OR COALESCE(blob_layers.metadata_json, '') <> COALESCE(excluded.metadata_json, '')
+                  OR blob_layers.rows_digest <> excluded.rows_digest
              RETURNING id`
           : `INSERT INTO blob_layers
                (content_hash, lang, source, tool_version, parser_spec_version,
@@ -233,6 +275,12 @@ export class BlobStore {
                  indexed_at = excluded.indexed_at,
                  status = excluded.status
              RETURNING id`,
+      ),
+      blobLayerByIdentity: db.prepare(
+        `SELECT id FROM blob_layers
+         WHERE content_hash = ? AND source = ? AND tool_version = ? AND parser_spec_version = ?
+           AND config_hash = ? AND deps_hash = ? AND fileset_hash = ?
+         LIMIT 1`,
       ),
       blobLayerMarkStale: db.prepare(
         `UPDATE blob_layers
@@ -917,6 +965,7 @@ export class BlobStore {
     const metadataJson = stableJson(normalizeLayerMetadata(
       layer.metadata ?? /** @type {any} */ (layer).metadata_json ?? /** @type {any} */ (layer).metadataJson,
     ));
+    const rowsDigest = layerRowsDigest(symbols, edges, source, lang);
 
     this.#stmt.blobInsertIfMissing.run(
       content_hash,
@@ -939,11 +988,20 @@ export class BlobStore {
       indexedAt,
       status,
     ];
-    if (this.#hasBlobLayerMetadata) layerArgs.push(metadataJson);
-    const row = /** @type {{ id: number } | undefined} */ (this.#stmt.blobLayerUpsert.get(...layerArgs));
+    if (this.#hasBlobLayerMetadata) layerArgs.push(metadataJson, rowsDigest);
+    let row = /** @type {{ id: number } | undefined} */ (this.#stmt.blobLayerUpsert.get(...layerArgs));
+    const unchanged = !row;
+    if (unchanged) {
+      row = /** @type {{ id: number } | undefined} */ (this.#stmt.blobLayerByIdentity.get(
+        content_hash, source, toolVersion, parserSpecVersion, configHash, depsHash, filesetHash,
+      ));
+    }
     const layerId = Number(row?.id);
     if (!Number.isInteger(layerId) || layerId <= 0) {
       throw new Error("Ledger.ingestBlobLayer: failed to resolve layer id");
+    }
+    if (unchanged) {
+      return { layer_id: layerId, source, symbols: (symbols || []).length, edges: (edges || []).length };
     }
     if (status === "indexed") {
       this.#stmt.blobLayerMarkStale.run(content_hash, source, layerId);

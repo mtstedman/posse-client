@@ -4,9 +4,16 @@ import { ToolGate } from "../../../../shared/tools/classes/ToolGate.js";
 import {
   applyNativeReadLineLimit,
   ATLAS_CHAIN_READ_MAX_LINES,
+  ATLAS_RESEARCHER_READ_MAX_LINES,
+  isIndexableSourcePath,
 } from "./source-file-gate.js";
 
-export { applyNativeReadLineLimit, ATLAS_CHAIN_READ_MAX_LINES };
+export {
+  applyNativeReadLineLimit,
+  ATLAS_CHAIN_READ_MAX_LINES,
+  ATLAS_RESEARCHER_READ_MAX_LINES,
+  isIndexableSourcePath,
+};
 import {
   GATED_NATIVE_TOOLS,
   GATED_ROLES,

@@ -50,10 +50,12 @@ const MUTABLE_COLUMNS = new Set([
   "desired_git_oid",
   "desired_atlas_seq",
   "desired_atlas_layer_revision",
+  "desired_atlas_layer_row_count",
   "desired_view_fingerprint",
   "applied_git_oid",
   "applied_atlas_seq",
   "applied_atlas_layer_revision",
+  "applied_atlas_layer_row_count",
   "applied_view_fingerprint",
   "git_job_id",
   "atlas_job_id",
@@ -96,6 +98,7 @@ function generationFromPreparation(row, prefix) {
     git_oid: row[`${prefix}_git_oid`],
     atlas_ledger_seq: row[`${prefix}_atlas_seq`],
     atlas_layer_revision: row[`${prefix}_atlas_layer_revision`],
+    atlas_layer_row_count: row[`${prefix}_atlas_layer_row_count`] ?? undefined,
     view_fingerprint: row[`${prefix}_view_fingerprint`],
   });
 }
@@ -146,6 +149,7 @@ function generationChanges(generation, prefix = "desired") {
     [`${prefix}_git_oid`]: generation.git_oid,
     [`${prefix}_atlas_seq`]: generation.atlas_ledger_seq,
     [`${prefix}_atlas_layer_revision`]: generation.atlas_layer_revision,
+    [`${prefix}_atlas_layer_row_count`]: generation.atlas_layer_row_count ?? null,
     [`${prefix}_view_fingerprint`]: generation.view_fingerprint,
   };
 }
@@ -404,9 +408,9 @@ export function ensureWaitingLanePreparation({
           work_item_id, state, version, demand_reason, target_branch,
           worktree_root, project_cwd, ownership_record_id,
           desired_git_oid, desired_atlas_seq,
-          desired_atlas_layer_revision, desired_view_fingerprint,
+          desired_atlas_layer_revision, desired_atlas_layer_row_count, desired_view_fingerprint,
           hot_paths_json, requested_at, updated_at
-        ) VALUES (?, 'requested', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 'requested', 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         workItemId,
         demandReason,
@@ -417,6 +421,7 @@ export function ensureWaitingLanePreparation({
         normalizedGeneration?.git_oid || null,
         normalizedGeneration?.atlas_ledger_seq ?? null,
         normalizedGeneration?.atlas_layer_revision ?? null,
+        normalizedGeneration?.atlas_layer_row_count ?? null,
         normalizedGeneration?.view_fingerprint || null,
         JSON.stringify(normalizedHotPaths || []),
         now(),
@@ -554,6 +559,7 @@ export function recordWaitingLaneGitPrepared({
       // joint applied generation until exact Atlas settlement succeeds.
       applied_atlas_seq: null,
       applied_atlas_layer_revision: null,
+      applied_atlas_layer_row_count: null,
       applied_view_fingerprint: null,
       atlas_job_id: hasAtlasJob ? atlasJobId : null,
     });
@@ -917,6 +923,7 @@ export function clearWaitingLanePreparedAssetProof({ workItemId, expectedVersion
       && row.applied_git_oid == null
       && row.applied_atlas_seq == null
       && row.applied_atlas_layer_revision == null
+      && row.applied_atlas_layer_row_count == null
       && row.applied_view_fingerprint == null
     ) {
       return transitionResult("already_current", decodePreparation(row));
@@ -928,6 +935,7 @@ export function clearWaitingLanePreparedAssetProof({ workItemId, expectedVersion
       applied_git_oid: null,
       applied_atlas_seq: null,
       applied_atlas_layer_revision: null,
+      applied_atlas_layer_row_count: null,
       applied_view_fingerprint: null,
     });
     return updated

@@ -7,6 +7,7 @@ export { ATLAS_INDEXABLE_SOURCE_EXTENSIONS };
 
 const NATIVE_EXACT_READ_TOOLS = new Set(["read_file", "chain_read"]);
 export const ATLAS_CHAIN_READ_MAX_LINES = 250;
+export const ATLAS_RESEARCHER_READ_MAX_LINES = 800;
 const DIRECT_FILE_KEYS = ["file", "filePath", "path"];
 const ARRAY_FILE_KEYS = [
   "files",

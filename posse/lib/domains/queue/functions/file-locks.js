@@ -47,6 +47,11 @@ const ACTIVE_ASSESSMENT_BARRIER_STATUSES = new Set(ACTIVE_LEASE_STATUSES);
 const PARKED_JOB_STATUS_SET = new Set(PARKED_JOB_STATUSES);
 const ACTIVE_INNER_LOCK_STATUSES_SQL = ACTIVE_INNER_LOCK_STATUSES_LIST.map(() => "?").join(",");
 const QUEUED_REPAIR_LOCK_JOB_TYPES = new Set(["fix", "promote"]);
+const OPERATOR_PARKING_GATE_KINDS = new Set([
+  "dead_letter_recovery",
+  "fix_chain_exhausted",
+  "developer_blocked",
+]);
 const UNRESOLVED_SCOPE_STATUSES = new Set([
   "queued",
   ...ACTIVE_INNER_LOCK_STATUSES_LIST,
@@ -169,6 +174,14 @@ function scopeToLockRows(scope = {}) {
 
 function normalizeLockPath(value) {
   const normalized = String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "").trim();
+  if (!normalized) return "";
+  if (normalized !== "*" && (
+    normalized.startsWith("/")
+    || /^[A-Za-z]:\//.test(normalized)
+    || normalized.split("/").some((part) => part === ".." || part === ".")
+  )) return "";
+  const first = normalized.split("/", 1)[0].toLowerCase();
+  if (first === ".posse" || first === ".posse-worktrees" || first === "posse-worktrees" || first.startsWith(".posse-")) return "";
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
@@ -516,7 +529,9 @@ function activeWiLocks(db) {
   `).all(...QUEUE_LOCKING_JOB_TYPES_LIST);
 }
 
-export function workItemCanReleaseFileLock(workItemId, path, lockKind = "file") {
+export function workItemCanReleaseFileLock(workItemId, path, lockKind = "file", {
+  allowOperatorParked = false,
+} = {}) {
   const db = getDb();
   const wiId = Number(workItemId);
   const normalizedPath = normalizeLockPath(path);
@@ -547,7 +562,7 @@ export function workItemCanReleaseFileLock(workItemId, path, lockKind = "file") 
     ORDER BY id
   `).all(wiId, ...UNRESOLVED_SCOPE_STATUSES, ...QUEUE_LOCKING_JOB_TYPES_LIST);
   const scopeBlockers = unresolvedJobs.filter((job) => jobScopeTouchesPath(job, normalizedPath, lockKind));
-  if (scopeBlockers.length > 0) {
+  if (scopeBlockers.length > 0 && !(allowOperatorParked && workItemOperatorParking(wiId, { db }))) {
     return { ok: false, blockers: scopeBlockers, reason: "unresolved_job_scope" };
   }
 
@@ -622,6 +637,67 @@ function readWorkItemRow(db, id) {
 }
 
 /**
+ * Return the recovery gate that parks an unfinished work item, or null while
+ * any non-terminal job can still make progress without that gate. Recovery
+ * gates themselves may be leased by the interactive waiter; they remain
+ * operator-owned, not executable work for scheduling purposes.
+ */
+export function workItemOperatorParking(workItemOrId, { db = getDb() } = {}) {
+  const workItem = workItemOrId && typeof workItemOrId === "object"
+    ? workItemOrId
+    : readWorkItemRow(db, workItemOrId);
+  if (!workItem || workItem.status === "complete" || WI_LOCK_RELEASE_STATUSES.has(workItem.status)) return null;
+  const jobs = db.prepare(`
+    SELECT * FROM jobs
+    WHERE work_item_id = ?
+      AND status NOT IN (${TERMINAL_JOB_STATUSES.map(() => "?").join(",")})
+    ORDER BY id
+  `).all(Number(workItem.id), ...TERMINAL_JOB_STATUSES);
+  if (jobs.length === 0) return null;
+  const gates = db.prepare(`
+    SELECT hg.*, j.status AS job_status, j.payload_json
+    FROM human_gates hg
+    JOIN jobs j ON j.id = hg.gate_job_id
+    WHERE j.work_item_id = ?
+      AND hg.gate_state IN ('open','resolving')
+    ORDER BY hg.gate_job_id
+  `).all(Number(workItem.id)).filter((gate) => OPERATOR_PARKING_GATE_KINDS.has(String(gate.gate_kind || "")));
+  if (gates.length === 0) return null;
+  const gateIds = new Set(gates.map((gate) => Number(gate.gate_job_id)));
+  const dependencies = db.prepare(`
+    SELECT jd.job_id, jd.depends_on_job_id
+    FROM job_dependencies jd
+    JOIN jobs j ON j.id = jd.job_id
+    WHERE j.work_item_id = ? AND jd.dependency_kind = 'hard'
+  `).all(Number(workItem.id));
+  const byJob = new Map();
+  for (const dep of dependencies) {
+    const list = byJob.get(Number(dep.job_id)) || [];
+    list.push(Number(dep.depends_on_job_id));
+    byJob.set(Number(dep.job_id), list);
+  }
+  const reachesGate = (jobId, seen = new Set()) => {
+    const id = Number(jobId);
+    if (gateIds.has(id)) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return (byJob.get(id) || []).some((depId) => reachesGate(depId, seen));
+  };
+  if (!jobs.every((job) => reachesGate(job.id))) return null;
+  const gate = gates[0];
+  return {
+    work_item_id: Number(workItem.id),
+    reason: "operator_gate",
+    gate_job_id: Number(gate.gate_job_id),
+    gate_job_ids: gates.map((entry) => Number(entry.gate_job_id)),
+    gate_state: gate.gate_state,
+    review_type: parseJobPayload(gate)?.review_type || null,
+    gate_kind: gate.gate_kind,
+    parked_at: gate.created_at || null,
+  };
+}
+
+/**
  * Why a completed, unmerged work item will not merge until an operator acts,
  * or null when it merges on its own during this run (finding 1, run 1250b).
  * Such a "parked" work item is not progressing toward merge, so it must not
@@ -636,7 +712,9 @@ export function workItemMergeParking(workItemOrId, { db = getDb(), visited = nul
   const workItem = workItemOrId && typeof workItemOrId === "object"
     ? workItemOrId
     : readWorkItemRow(db, workItemOrId);
-  if (!workItem || !completeWorkItemHoldsFileLocks(workItem)) return null;
+  if (!workItem) return null;
+  if (workItem.status !== "complete") return workItemOperatorParking(workItem, { db });
+  if (!completeWorkItemHoldsFileLocks(workItem)) return null;
   const id = Number(workItem.id);
   // The same gate authorizeWorkItemAutoMerge refuses on (merge-holding-gate.js).
   const gate = findMergeHoldingGate(id, db);
@@ -684,6 +762,14 @@ export function describeWorkItemMergeParking(parking) {
       return parking.gate_state === "resolved"
         ? `${label} is held out of automatic merge by gate #${parking.gate_job_id}${kind} (answered ${parking.resolution_action})`
         : `${label} waits on operator gate #${parking.gate_job_id}${kind}`;
+    }
+    case "operator_gate": {
+      const kind = parking.review_type || parking.gate_kind;
+      const suffix = kind ? ` ${kind}` : "";
+      const also = Array.isArray(parking.gate_job_ids) && parking.gate_job_ids.length > 1
+        ? ` (also gates ${parking.gate_job_ids.slice(1).map((id) => `#${id}`).join(", ")})`
+        : "";
+      return `${label} is parked on operator gate #${parking.gate_job_id}${suffix}${also}`;
     }
     case "merge_failed":
       return `${label} failed to merge and waits for an operator`;
@@ -813,7 +899,6 @@ export function loadWorkItemOrder(db = getDb(), { workItemLocks = null, runnable
   `).all();
   const parked = new Map();
   for (const wi of candidates) {
-    if (wi.status !== "complete") continue;
     const parking = workItemMergeParking(wi, { db });
     if (parking) parked.set(Number(wi.id), parking);
   }
@@ -1212,6 +1297,37 @@ export function siblingJobScopePaths(jobId, paths = []) {
     }
   }
   return owned;
+}
+
+/** Map each requested path to unfinished sibling jobs whose declared/live scope covers it. */
+export function siblingJobScopeOwners(jobId, paths = []) {
+  const id = Number(jobId);
+  const inputs = (Array.isArray(paths) ? paths : []).filter((value) => normalizeLockPath(value));
+  const owners = new Map(inputs.map((input) => [input, new Set()]));
+  if (!Number.isFinite(id) || inputs.length === 0) return owners;
+  const db = getDb();
+  const job = db.prepare("SELECT work_item_id FROM jobs WHERE id = ?").get(id);
+  if (!job?.work_item_id) return owners;
+  const placeholders = TERMINAL_JOB_STATUSES.map(() => "?").join(",");
+  const siblings = db.prepare(`
+    SELECT id, job_type, payload_json
+    FROM jobs
+    WHERE work_item_id = ? AND id != ? AND status NOT IN (${placeholders})
+  `).all(job.work_item_id, id, ...TERMINAL_JOB_STATUSES)
+    .filter((sibling) => MUTATING_JOB_TYPES.has(sibling.job_type));
+  for (const sibling of siblings) {
+    const scope = getJobPathTouchScope(sibling);
+    if (scope.unknown) continue;
+    const files = new Set((scope.files || []).map((value) => normalizeLockPath(value)).filter(Boolean));
+    const roots = (scope.roots || []).map((value) => normalizeLockPath(value)).filter((value) => value && value !== "*");
+    for (const input of inputs) {
+      const target = normalizeLockPath(input);
+      if (files.has(target) || roots.some((root) => target === root || isUnderRoot(target, [root]))) {
+        owners.get(input)?.add(Number(sibling.id));
+      }
+    }
+  }
+  return owners;
 }
 
 /**

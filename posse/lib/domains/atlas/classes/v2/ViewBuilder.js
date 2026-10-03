@@ -145,9 +145,10 @@ export class ViewBuilder {
 
     const lineage = buildLineage(ledger, branch, atSeq);
     const pathToBlob = assemblePathToBlob(ledger, lineage);
-    const consumedLayerRevision = typeof ledger.layerRevision === "function"
-      ? ledger.layerRevision()
-      : 0;
+    const consumedLayerToken = typeof ledger.layerScopeToken === "function"
+      ? ledger.layerScopeToken(branch, atSeq)
+      : { revision: typeof ledger.layerRevision === "function" ? ledger.layerRevision() : 0, row_count: 0 };
+    const consumedLayerRevision = consumedLayerToken.revision;
     const viewFingerprint = viewFingerprintForOptions(options);
 
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
@@ -216,8 +217,11 @@ export class ViewBuilder {
       // Final phase — the meta row is the "view is valid" commit marker. Written
       // last and on its own so a partial build never looks complete.
       db.transaction(() => {
-        if (typeof ledger.layerRevision === "function"
-          && ledger.layerRevision() !== consumedLayerRevision) {
+        const finalLayerToken = typeof ledger.layerScopeToken === "function"
+          ? ledger.layerScopeToken(branch, atSeq)
+          : { revision: ledger.layerRevision(), row_count: consumedLayerToken.row_count };
+        if (finalLayerToken.revision !== consumedLayerRevision
+          || finalLayerToken.row_count !== consumedLayerToken.row_count) {
           throw new Error("ViewBuilder.buildFrom: ledger layer revision changed during materialization");
         }
         writeMeta(db, {
@@ -227,6 +231,7 @@ export class ViewBuilder {
           parent_seq: branchRec.parent_seq ?? null,
           ledger_seq: atSeq,
           layer_revision: consumedLayerRevision,
+          layer_row_count: consumedLayerToken.row_count,
           view_fingerprint: viewFingerprint,
           git_oid: null,
           built_at: new Date().toISOString(),
@@ -335,9 +340,11 @@ export class ViewBuilder {
     }
 
     const db = view._unsafeDb();
-    const consumedLayerRevision = typeof ledger.layerRevision === "function"
-      ? ledger.layerRevision()
-      : current.layer_revision;
+    const targetSeq = entries.length > 0 ? entries[entries.length - 1].seq : current.ledger_seq;
+    const consumedLayerToken = typeof ledger.layerScopeToken === "function"
+      ? ledger.layerScopeToken(current.branch, targetSeq)
+      : { revision: typeof ledger.layerRevision === "function" ? ledger.layerRevision() : current.layer_revision, row_count: current.layer_row_count || 0 };
+    const consumedLayerRevision = consumedLayerToken.revision;
     const viewFingerprint = viewFingerprintForOptions(options);
     // Track the last successfully-applied seq. If an entry skips (missing
     // blob in the ledger), ledger_seq must NOT advance past it — otherwise
@@ -423,14 +430,18 @@ export class ViewBuilder {
     });
     emitPhase("resolve", 1, 1);
     db.transaction(() => {
-      if (typeof ledger.layerRevision === "function"
-        && ledger.layerRevision() !== consumedLayerRevision) {
+      const finalLayerToken = typeof ledger.layerScopeToken === "function"
+        ? ledger.layerScopeToken(current.branch, lastAppliedSeq)
+        : { revision: ledger.layerRevision(), row_count: consumedLayerToken.row_count };
+      if (finalLayerToken.revision !== consumedLayerRevision
+        || finalLayerToken.row_count !== consumedLayerToken.row_count) {
         throw new Error("ViewBuilder.incrementalApply: ledger layer revision changed during materialization");
       }
       writeMeta(db, {
         ...current,
         ledger_seq: lastAppliedSeq,
         layer_revision: consumedLayerRevision,
+        layer_row_count: consumedLayerToken.row_count,
         view_fingerprint: viewFingerprint,
         git_oid: null,
         built_at: new Date().toISOString(),
@@ -1203,6 +1214,7 @@ function writeMeta(viewDb, meta) {
   put("parent_seq", meta.parent_seq != null ? String(meta.parent_seq) : null);
   put("ledger_seq", String(meta.ledger_seq));
   put("layer_revision", String(meta.layer_revision));
+  put("layer_row_count", meta.layer_row_count != null ? String(meta.layer_row_count) : null);
   put("view_fingerprint", meta.view_fingerprint);
   put("git_oid", meta.git_oid ?? null);
   put("built_at", meta.built_at);

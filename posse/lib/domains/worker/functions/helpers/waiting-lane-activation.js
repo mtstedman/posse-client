@@ -165,6 +165,8 @@ export function isExactMountedWaitingLaneView(viewPath, ledgerBranch, generation
       && meta.parent_seq === generation.atlas_ledger_seq
       && meta.ledger_seq === generation.atlas_ledger_seq
       && meta.layer_revision === generation.atlas_layer_revision
+      && (generation.atlas_layer_row_count == null
+        || meta.layer_row_count === generation.atlas_layer_row_count)
       && meta.view_fingerprint === generation.view_fingerprint
       && meta.git_oid === generation.git_oid;
   } catch {
@@ -213,9 +215,14 @@ async function reconcileAndMountAtlas({
     try {
       ledger = await Ledger.open({ dbPath: ctx.ledgerDbPath });
       const target = ledger.getBranch(generation.target_branch);
+      const layerToken = typeof ledger.layerScopeToken === "function"
+        ? ledger.layerScopeToken(generation.target_branch, generation.atlas_ledger_seq)
+        : { revision: ledger.layerRevision(), row_count: generation.atlas_layer_row_count || 0 };
       const ledgerCurrent = !!target
         && ledger.headSeq(generation.target_branch) === generation.atlas_ledger_seq
-        && ledger.layerRevision() === generation.atlas_layer_revision;
+        && layerToken.revision === generation.atlas_layer_revision
+        && (generation.atlas_layer_row_count == null
+          || layerToken.row_count === generation.atlas_layer_row_count);
       if (allowCatchup && !ledgerCurrent) {
         return { attached: false, atlas_ready: false, reason: "atlas_generation_not_current" };
       }

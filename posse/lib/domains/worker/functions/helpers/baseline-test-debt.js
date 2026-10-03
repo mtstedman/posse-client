@@ -5,8 +5,8 @@
 // comparison can only report "persistent" or "fixed". Say so once per work
 // item with a warning event, keep the facts on the job payload for the
 // assessor, and carry them into any replan so the planner does not keep
-// relying on that command. Executing declared commands at plan time is a
-// separate, deferred change; this only reports what the baseline showed.
+// relying on that command. Planning also receives repository-scoped historical
+// failure identities; commands are still executed only at the worker boundary.
 
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../../catalog/event.js";
 import { BASELINE_TEST_DEBT_PAYLOAD_KEY } from "../../../../catalog/verification.js";

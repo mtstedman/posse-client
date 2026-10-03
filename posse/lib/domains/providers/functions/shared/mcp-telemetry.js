@@ -212,6 +212,7 @@ export function logProviderMcpAttachProofTelemetry({
   const expectedToolSet = new Set(expectedToolNames);
   const actualToolSet = new Set(actualToolNames);
   const missingRequiredToolNames = requiredToolNames.filter((name) => !actualToolSet.has(name));
+  const missingExpectedToolNames = expectedToolNames.filter((name) => !actualToolSet.has(name));
   const unexpectedToolNames = actualToolNames.filter((name) => !expectedToolSet.has(name));
   const emptyOperationalProjection = deterministicActive
     && toolsListSeen
@@ -250,6 +251,7 @@ export function logProviderMcpAttachProofTelemetry({
     expected_tool_names: expectedToolNames,
     required_tool_names: requiredToolNames,
     missing_required_tool_names: missingRequiredToolNames,
+    missing_expected_tool_names: missingExpectedToolNames,
     unexpected_tool_names: unexpectedToolNames,
     empty_operational_projection: emptyOperationalProjection,
     projection_mismatch: projectionMismatch,

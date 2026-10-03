@@ -1998,7 +1998,7 @@ export class TrackedProviderClient {
               [
                 `WEB RESEARCH QUESTION:\n${question}`,
                 ...(budgetLine ? [`Budget: ${budgetLine}; if it runs low, submit partial findings and name the gap.`] : []),
-                ...(Number.isSafeInteger(budget?.resultChars) ? [`Compact report character limit: ${budget.resultChars} (a longer report is trimmed from the end before the planner sees it).`] : []),
+                ...(Number.isSafeInteger(budget?.resultChars) ? [`Compact report character target: ${budget.resultChars} (longer reports are delivered in full and consume more planner context).`] : []),
               ].join("\n"),
               { providerName },
             );

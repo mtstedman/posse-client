@@ -398,6 +398,25 @@ export class Ledger {
   }
 
   /**
+   * Materialization token scoped to the content hashes visible in one branch
+   * snapshot. Unrelated WI-only layer writes therefore cannot invalidate a
+   * main view, while any write/stale/delete affecting a referenced hash does.
+   */
+  layerScopeToken(branch, atSeq = this.headSeq(branch)) {
+    const hashes = [...new Set(this.pathSnapshotAt(branch, atSeq).values())].sort();
+    if (hashes.length === 0) return { revision: 0, row_count: 0 };
+    const row = /** @type {{ revision?: number, row_count?: number } | undefined} */ (this.#db.prepare(
+      `SELECT COALESCE(MAX(layer_rev), 0) AS revision, COUNT(*) AS row_count
+       FROM blob_layers
+       WHERE content_hash IN (SELECT value FROM json_each(?))`,
+    ).get(JSON.stringify(hashes)));
+    return {
+      revision: Number(row?.revision || 0),
+      row_count: Number(row?.row_count || 0),
+    };
+  }
+
+  /**
    * @param {string} name
    * @param {string} parentBranch
    * @param {number} atSeq

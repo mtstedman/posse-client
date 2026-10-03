@@ -29,6 +29,7 @@ import {
   repairNativeViewMigration,
 } from "../../functions/v2/native/view-read.js";
 import { buildNativeVectorBridge } from "../../functions/v2/embeddings/native-vector-bridge.js";
+import { seedWorkItemEmbeddingStore } from "../../functions/v2/embeddings/wi-seed.js";
 import { grepIndexedSource } from "../../functions/v2/retrieval/nonindexed-grep.js";
 import {
   applyPathQualityPriors,
@@ -620,6 +621,16 @@ function normalizeRepoKey(value) {
   return text || "global";
 }
 
+function repoRootFromLedgerPath(ledgerPath, fallback) {
+  const resolved = path.resolve(String(ledgerPath || ""));
+  if (path.basename(resolved) === "ledger.db"
+    && path.basename(path.dirname(resolved)) === "atlas"
+    && path.basename(path.dirname(path.dirname(resolved))) === ".posse") {
+    return path.dirname(path.dirname(path.dirname(resolved)));
+  }
+  return String(fallback || "");
+}
+
 function requestRepoPathRoots(request = {}) {
   const config = request.config && typeof request.config === "object" ? request.config : {};
   const session = request.session && typeof request.session === "object" ? request.session : {};
@@ -826,6 +837,8 @@ export class AtlasToolExecutor {
   #writeEpochs = new Map();
   /** @type {Map<string, { paths: string[], retry: () => Promise<any> }>} */
   #failedRefreshes = new Map();
+  /** @type {Map<string, { paths: Set<string>, waiters: Array<{ resolve: (value: any) => void, reject: (error: any) => void }>, run: ((paths: string[]) => Promise<any>) | null, draining: Promise<void> | null }>} */
+  #pendingRefreshes = new Map();
   #now;
 
   constructor({
@@ -889,6 +902,18 @@ export class AtlasToolExecutor {
       });
     }
     const repoKey = this.#repoKeyFor(request);
+    // A source read is a consistency barrier for deterministic writes in the
+    // same WI. Flush the coalesced pending batch before resolving its view.
+    const refreshWasPending = !!this.#pendingRefreshes.get(repoKey)?.draining;
+    await this.#flushPendingRefresh(repoKey);
+    // A read which was queued behind a refresh must observe that refresh's
+    // failure, not silently turn itself into the retry. A subsequent read is
+    // the explicit one-shot repair attempt below.
+    if (refreshWasPending && this.#failedRefreshes.has(repoKey)) {
+      throw Object.assign(new Error("ATLAS refresh failed while this read was queued; retry the read to reconcile the edited paths"), {
+        code: "ATLAS_REFRESH_FAILED",
+      });
+    }
     // A previous write succeeded on disk but its index refresh failed. Retry
     // that exact dirty path set once before admitting another source read.
     const failedRefresh = this.#failedRefreshes.get(repoKey);
@@ -1037,22 +1062,27 @@ export class AtlasToolExecutor {
     const branch = workItemId != null
       ? ledgerBranchForWi(workItemId)
       : await this.#branchForRepo(repoRoot);
-    let failureRecorded = false;
-    const recordFailure = () => {
-      failureRecorded = true;
+    const recordFailure = (dirtyPaths = paths) => {
       this.#failedRefreshes.set(gateKey, {
-        paths: [...new Set([...paths, ...(this.#failedRefreshes.get(gateKey)?.paths || [])])],
+        paths: [...new Set([...dirtyPaths, ...(this.#failedRefreshes.get(gateKey)?.paths || [])])],
         retry: () => this.scheduleDeterministicWriteRefresh(request),
       });
     };
-    try {
-      return await this.#gate.write(
+    return this.#enqueuePendingRefresh(gateKey, paths, async (batchPaths) => {
+      try {
+        return await this.#gate.write(
         gateKey,
         async (queueInfo) => {
           try {
             // A later edit must also repair paths left stale by an earlier edit.
             for (const dirtyPath of this.#failedRefreshes.get(gateKey)?.paths || []) {
-              if (!paths.includes(dirtyPath)) paths.push(dirtyPath);
+              if (!batchPaths.includes(dirtyPath)) batchPaths.push(dirtyPath);
+            }
+            if (workItemId != null) {
+              seedWorkItemEmbeddingStore({
+                mainRepoRoot: repoRootFromLedgerPath(refreshLedgerPath, repoRoot),
+                worktreeRoot: refreshRoot,
+              });
             }
             const conductor = this.#conductorFactory();
             const result = await conductor.warm({
@@ -1062,9 +1092,10 @@ export class AtlasToolExecutor {
               branch,
               config,
               job: {
-                purpose: "main-incremental",
+                purpose: workItemId != null ? "wi-live" : "main-incremental",
+                ...(workItemId == null ? {} : { work_item_id: Number(workItemId) }),
                 branch,
-                paths,
+                paths: batchPaths,
                 trigger_event: "atlas.executor.deterministic_write",
                 out_view_path: refreshViewPath,
               },
@@ -1084,8 +1115,8 @@ export class AtlasToolExecutor {
             return {
               ok: true,
               action: "index.refresh",
-              path: paths[0],
-              paths,
+              path: batchPaths[0],
+              paths: batchPaths,
               via: "AtlasToolExecutor",
               branch,
               queue: {
@@ -1098,16 +1129,53 @@ export class AtlasToolExecutor {
             };
           } catch (error) {
             // Publish failure before releasing the writer gate to queued reads.
-            recordFailure();
+            recordFailure(batchPaths);
             throw error;
           }
         },
         { label: "atlas.deterministic_write.refresh", waitMs: request.waitMs || this.#waitMs },
-      );
-    } catch (error) {
-      if (!failureRecorded) recordFailure();
-      throw error;
+        );
+      } catch (error) {
+        recordFailure(batchPaths);
+        throw error;
+      }
+    });
+  }
+
+  #enqueuePendingRefresh(key, paths, run) {
+    let entry = this.#pendingRefreshes.get(key);
+    if (!entry) {
+      entry = { paths: new Set(), waiters: [], run: null, draining: null };
+      this.#pendingRefreshes.set(key, entry);
     }
+    for (const repoPath of paths) entry.paths.add(repoPath);
+    entry.run = run;
+    const result = new Promise((resolve, reject) => entry.waiters.push({ resolve, reject }));
+    if (!entry.draining) {
+      entry.draining = Promise.resolve().then(async () => {
+        while (entry.paths.size > 0) {
+          const batchPaths = [...entry.paths];
+          const batchWaiters = entry.waiters.splice(0);
+          const batchRun = entry.run;
+          entry.paths.clear();
+          try {
+            const value = await batchRun(batchPaths);
+            for (const waiter of batchWaiters) waiter.resolve(value);
+          } catch (error) {
+            for (const waiter of batchWaiters) waiter.reject(error);
+          }
+        }
+      }).finally(() => {
+        entry.draining = null;
+        if (entry.paths.size === 0 && entry.waiters.length === 0) this.#pendingRefreshes.delete(key);
+      });
+    }
+    return result;
+  }
+
+  async #flushPendingRefresh(key) {
+    const entry = this.#pendingRefreshes.get(key);
+    if (entry?.draining) await entry.draining;
   }
 
   /** Only call after a full, source-verified reconciliation of this scope. */
@@ -1149,7 +1217,11 @@ export class AtlasToolExecutor {
     this.invalidateReadCaches();
   }
 
-  invalidateReadCaches() {
+  invalidateReadCaches(scope = null) {
+    if (scope != null) {
+      this.#clearRecentDedupeForRepo(readContextKeyFor(scope));
+      return;
+    }
     this.#recentDedupe.clear();
     this.#semanticRepeats.clear();
     this.#dispatchCache?.clear?.();
@@ -1169,6 +1241,8 @@ export class AtlasToolExecutor {
   }
 
   async close() {
+    await Promise.allSettled([...this.#pendingRefreshes.values()].map((entry) => entry.draining).filter(Boolean));
+    this.#pendingRefreshes.clear();
     this.#failedRefreshes.clear();
     this.#writeEpochs.clear();
     this.#inflightDedupe.clear();

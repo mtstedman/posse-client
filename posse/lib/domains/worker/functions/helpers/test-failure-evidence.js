@@ -4,6 +4,8 @@ export function normalizeFailureFingerprintText(value) {
   return String(value || "")
     .replace(/\x1b\[[0-9;]*m/g, "")
     .replace(/\r\n?/g, "\n")
+    .replace(/\[REDACTED:[^\]]+\][\\/]/gi, "")
+    .replace(/(?:[A-Za-z]:)?[^\s"'`()\[\]{}]*\.?posse-worktrees[\\/]wi-\d+[\\/]/gi, "")
     .replace(/(\.(?:[cm]?[jt]sx?|php|py|rb|go|rs|java|cs|cpp|c|h)):\d+(?::\d+)?/gi, "$1:<line>")
     .replace(/(\.(?:[cm]?[jt]sx?|php|py|rb|go|rs|java|cs|cpp|c|h))\(\d+(?::\d+)?\)/gi, "$1(<line>)")
     .replace(/\bon line \d+\b/gi, "on line <line>")
@@ -140,6 +142,7 @@ export function testFailureFingerprint(result = {}) {
 }
 
 export function comparableTestFailureFingerprint(receipt) {
+  if (!receipt || typeof receipt !== "object") return null;
   if (receipt.stdout_truncated || receipt.stderr_truncated) return null;
   // Recompute old receipts from immutable evidence; do not rewrite artifacts
   // or compare an old raw-output hash against a new structured hash.

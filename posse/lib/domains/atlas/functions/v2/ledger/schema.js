@@ -316,27 +316,40 @@ export function ensureLegacyScipColumnsBeforeDdl(db) {
  */
 export function ensureLayerRevisionTracking(db) {
   if (!tableExists(db, "meta") || !tableExists(db, "blob_layers")) return;
+  ensureColumn(db, "blob_layers", "rows_digest", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "blob_layers", "layer_rev", "INTEGER NOT NULL DEFAULT 0");
   const install = db.transaction(() => {
     db.prepare(
       `INSERT INTO meta(key, value) VALUES('layer_revision', '0')
        ON CONFLICT(key) DO NOTHING`,
     ).run();
     runDdl(db, `
-      CREATE TRIGGER IF NOT EXISTS atlas_blob_layers_revision_insert
+      DROP TRIGGER IF EXISTS atlas_blob_layers_revision_insert;
+      DROP TRIGGER IF EXISTS atlas_blob_layers_revision_update;
+      DROP TRIGGER IF EXISTS atlas_blob_layers_revision_delete;
+
+      CREATE TRIGGER atlas_blob_layers_revision_insert
       AFTER INSERT ON blob_layers
       BEGIN
         INSERT INTO meta(key, value) VALUES('layer_revision', '1')
         ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+        UPDATE blob_layers
+        SET layer_rev = CAST((SELECT value FROM meta WHERE key = 'layer_revision') AS INTEGER)
+        WHERE id = NEW.id;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS atlas_blob_layers_revision_update
+      CREATE TRIGGER atlas_blob_layers_revision_update
       AFTER UPDATE ON blob_layers
+      WHEN NEW.layer_rev = OLD.layer_rev
       BEGIN
         INSERT INTO meta(key, value) VALUES('layer_revision', '1')
         ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT);
+        UPDATE blob_layers
+        SET layer_rev = CAST((SELECT value FROM meta WHERE key = 'layer_revision') AS INTEGER)
+        WHERE id = NEW.id;
       END;
 
-      CREATE TRIGGER IF NOT EXISTS atlas_blob_layers_revision_delete
+      CREATE TRIGGER atlas_blob_layers_revision_delete
       AFTER DELETE ON blob_layers
       BEGIN
         INSERT INTO meta(key, value) VALUES('layer_revision', '1')

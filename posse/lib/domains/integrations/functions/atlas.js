@@ -26,7 +26,7 @@ import { reconcileWiSource } from "../../atlas/functions/v2/wi-source-proof.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import { gitCurrentHashAsync, gitExec, gitExecAsync } from "../../git/functions/utils.js";
 import { withWorktreeLockAsync } from "../../git/functions/worktree-locks.js";
-import { ledgerBranchForWi } from "../../atlas/functions/v2/runtime-paths.js";
+import { branchViewPath, ledgerBranchForWi } from "../../atlas/functions/v2/runtime-paths.js";
 import { sha256Hex } from "../../atlas/functions/v2/hash.js";
 import { describeScipStagingState, ensureScipStaged } from "../../atlas/functions/v2/scip/stager.js";
 import { readScipBatchCoverage } from "../../atlas/functions/v2/scip/batch-coverage.js";
@@ -1164,6 +1164,7 @@ async function inspectAtlasBootMaterialization({
     git_oid: viewStatus?.meta?.git_oid,
     atlas_ledger_seq: viewStatus?.meta?.ledger_seq,
     atlas_layer_revision: viewStatus?.meta?.layer_revision,
+    atlas_layer_row_count: viewStatus?.meta?.layer_row_count,
     view_fingerprint: viewStatus?.meta?.view_fingerprint,
   });
   if (!generation) return { ok: false, reason: "joint_generation_unpublished" };
@@ -1188,7 +1189,11 @@ async function inspectAtlasBootMaterialization({
     if (ledger.headSeq(targetBranch) !== generation.atlas_ledger_seq) {
       return { ok: false, reason: "ledger_head_mismatch" };
     }
-    if (ledger.layerRevision() !== generation.atlas_layer_revision) {
+    const layerToken = typeof ledger.layerScopeToken === "function"
+      ? ledger.layerScopeToken(targetBranch, generation.atlas_ledger_seq)
+      : { revision: ledger.layerRevision(), row_count: generation.atlas_layer_row_count || 0 };
+    if (layerToken.revision !== generation.atlas_layer_revision
+      || (generation.atlas_layer_row_count != null && layerToken.row_count !== generation.atlas_layer_row_count)) {
       return { ok: false, reason: "layer_revision_mismatch" };
     }
     if (!viewStatus?.current) return { ok: false, reason: "view_not_current" };
@@ -2175,6 +2180,8 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
   }
   const storage = repoStorageFor({ cwd: opts?.cwd, config });
   await asyncBoundary();
+  const baselineBranch = await resolveAtlasBaselineBranchAsync(storage.repoRoot);
+  storage.mainViewDbPath = branchViewPath(storage.repoRoot, baselineBranch);
   const bootReindexPolicy = normalizeAtlasBootReindexPolicy(config?.bootReindexPolicy);
   const proofTimeoutMs = resolveAtlasV2BootTimeoutMs(opts?.timeoutMs, config);
   const bootSourceWalk = await inspectAtlasBootSourceWalkSkip({
@@ -2220,7 +2227,6 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
       boot_source_walk: bootSourceWalk,
     };
   }
-  const baselineBranch = await resolveAtlasBaselineBranchAsync(storage.repoRoot);
   ensureParentDir(storage.ledgerDbPath);
   const [ledgerPresent, mainViewPresent] = await Promise.all([
     fs.promises.access(storage.ledgerDbPath).then(() => true, () => false),
@@ -2358,6 +2364,7 @@ export async function startAtlasPreflightIndex(opts = {}) {
   }
   const storage = repoStorageFor({ cwd: opts?.cwd, config });
   const baselineBranch = await resolveAtlasBaselineBranchAsync(storage.repoRoot);
+  storage.mainViewDbPath = branchViewPath(storage.repoRoot, baselineBranch);
   const [ledgerPresent, mainViewPresent] = await Promise.all([
     fs.promises.access(storage.ledgerDbPath).then(() => true, () => false),
     fs.promises.access(storage.mainViewDbPath).then(() => true, () => false),
@@ -2493,6 +2500,7 @@ export async function warmAtlasMergedToMainNow(opts = {}) {
 
   const storage = repoStorageFor({ cwd: opts?.cwd, config });
   const targetBranch = String(opts?.targetBranch || await resolveAtlasBaselineBranchAsync(storage.repoRoot) || "main").trim() || "main";
+  storage.mainViewDbPath = branchViewPath(storage.repoRoot, targetBranch);
   const sourceBranch = String(opts?.sourceBranch || ledgerBranchForWi(workItemId)).trim();
   ensureParentDir(storage.ledgerDbPath);
 

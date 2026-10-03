@@ -35,6 +35,7 @@
 /**
  * @typedef {(
  *   "wi"                  // Warm a view for a specific WI from researcher hint.
+ *   | "wi-live"           // Reconcile deterministic WI edits into that WI's mounted view only.
  *   | "wi-cleanup"        // Tear down a terminal WI's warmed + worktree views.
  *   | "wi-snapshot"       // Clone one exact published main generation into a WI-keyed parked slot.
  *   | "wi-catchup"        // View-only bounded tail/clone to an exact published generation.
