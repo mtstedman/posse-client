@@ -23,6 +23,7 @@ import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { adminGitExec } from "../../git/functions/admin-git-exec.js";
 import { installScipLanguageDependencies } from "../../atlas/functions/v2/scip/dependencies.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
+import { normalizeScipLanguages } from "../../atlas/functions/v2/scip/languages.js";
 import {
   DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS,
   inspectJinaModel as inspectJinaModelDefault,
@@ -1654,10 +1655,15 @@ export async function ensureBootDependencies(input = {}) {
     // A repo qualifies when it carries any Python project manifest, or when
     // the enabled SCIP environments detected python sources at all (so a
     // marker-less python repo still gets an interpreter + pytest). Posse
-    // itself needs no Python environment.
+    // itself needs no Python environment. Either way only while Python is
+    // one of the chosen languages: a deselected Python must never download
+    // CPython because some tool config (a linter's pyproject.toml) sits in
+    // the repo. No saved choice means the defaults, which include Python.
+    const pythonChosen = normalizeScipLanguages(input.scipLanguages).includes("python");
     const pythonRoots = uniqueByPath([
       { root: projectDir, label: "repo python", assumePython: pythonLanguageEnabled },
-    ]).filter((entry) => entry.assumePython || listPythonProjectManifests(entry.root).length > 0);
+    ]).filter((entry) => entry.assumePython
+      || (pythonChosen && listPythonProjectManifests(entry.root).length > 0));
     for (const entry of pythonRoots) python.push(await ensureDependencyEntry(entry, ensurePythonProject, opts));
   }
 

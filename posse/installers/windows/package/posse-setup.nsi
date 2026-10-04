@@ -196,6 +196,24 @@ UninstPage custom un.DataPageShow un.DataPageLeave
 ; install
 ; ---------------------------------------------------------------------------
 
+; Sets one language checkbox from a comma-separated /LANGUAGES list (any
+; case; "all" checks every box). The list is wrapped in commas so a single
+; language still has a delimiter for WordFind.
+!macro LanguageFromList LIST WORD VAR
+  StrCpy ${VAR} ${BST_UNCHECKED}
+  ClearErrors
+  ${WordFind} ",${LIST}," "," "E/${WORD}" $R2
+  ${IfNot} ${Errors}
+    StrCpy ${VAR} ${BST_CHECKED}
+  ${EndIf}
+  ClearErrors
+  ${WordFind} ",${LIST}," "," "E/all" $R2
+  ${IfNot} ${Errors}
+    StrCpy ${VAR} ${BST_CHECKED}
+  ${EndIf}
+  ClearErrors
+!macroend
+
 Function .onInit
   !insertmacro ResolvePowerShell
 !ifndef TEST_ENGINE_CMDLINE
@@ -230,6 +248,13 @@ Function .onInit
   ${IfNot} ${Errors}
   ${AndIf} $R1 != ""
     StrCpy $Languages $R1
+    ; The list also sets the language page's boxes: a non-silent run rebuilds
+    ; $Languages from them, which used to put the default Python back.
+    !insertmacro LanguageFromList $R1 "typescript" $SelTs
+    !insertmacro LanguageFromList $R1 "python" $SelPy
+    !insertmacro LanguageFromList $R1 "php" $SelPhp
+    !insertmacro LanguageFromList $R1 "go" $SelGo
+    !insertmacro LanguageFromList $R1 "rust" $SelRust
   ${EndIf}
   ClearErrors
   ${GetOptions} $R0 "/MEDIATOOLS" $R1

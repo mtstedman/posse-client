@@ -73,9 +73,14 @@ indexing toolchain. Details, options, and troubleshooting:
 - [Linux installation, containers, and troubleshooting](linux/README.md)
 - [Windows installation and troubleshooting](windows/README.md)
 
-The installer installs dependencies, wires the `posse` command, captures keys,
+The installer captures keys, installs dependencies, wires the `posse` command,
 and runs `posse doctor` to provision Python/SCIP environments, authenticated
 native binaries, and the embedding model. It then checks that Posse boots.
+Your Posse key is asked for early: the native binaries start downloading in
+the background as soon as Posse's npm packages are in, while the remaining
+tools install. npm runs with install scripts off, then runs them only for the
+packages that have them, so no C++ toolchain is needed (better-sqlite3 ships
+its own prebuilt addon).
 A failed required step produces a nonzero exit code and a log location.
 If only the embedding model fails to download (after one retry), the install
 finishes with a warning: Posse works with lexical code search until

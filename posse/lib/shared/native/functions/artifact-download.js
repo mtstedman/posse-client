@@ -12,6 +12,11 @@ import {
 } from "../../../catalog/binary.js";
 import { PulseTokenManager } from "../classes/PulseTokenManager.js";
 import {
+  extractNativeArtifactTarball,
+  isNativeArtifactTarballResponse,
+  NATIVE_ARTIFACT_TARBALL_FORMAT,
+} from "./artifact-tarball.js";
+import {
   isRetryableWindowsFileError,
   renameWithWindowsRetry,
   unlinkWithWindowsRetry,
@@ -159,7 +164,9 @@ export async function ensureNativeBinaryArtifact({
     response = await fetchImpl(url, {
       method: "GET",
       headers: {
-        accept: "application/octet-stream",
+        // The gzip tarball is about a third of the binary's size; servers
+        // and versions without one send the bare binary.
+        accept: "application/gzip, application/octet-stream;q=0.5",
         authorization: `Bearer ${pulse.token}`,
       },
       redirect: "error",
@@ -210,8 +217,10 @@ export async function ensureNativeBinaryArtifact({
       totalBytes,
     });
 
+    const tarball = isNativeArtifactTarballResponse(response.headers);
     await fsp.mkdir(path.dirname(selected.binaryPath), { recursive: true });
     const partPath = `${selected.binaryPath}.part-${process.pid}-${randomUUID()}`;
+    const binaryPartPath = tarball ? `${partPath}-bin` : partPath;
     const filePlatform = osToken === "windows" ? "win32" : process.platform;
     try {
       const actual = await writeResponseToPart(response, partPath, limit, ac.signal, (loadedBytes) => {
@@ -235,6 +244,17 @@ export async function ensureNativeBinaryArtifact({
       if (actual.sha256 !== expectedSha) {
         throw artifactError("POSSE_ARTIFACT_CHECKSUM_MISMATCH", "native artifact checksum verification failed");
       }
+      // A tarball's digest covered the archive; its binary is verified again
+      // against the archive's own .sha256 before anything is cached.
+      const binary = tarball
+        ? await extractNativeArtifactTarball({
+          tarballPath: partPath,
+          outPath: binaryPartPath,
+          filename: selected.filename,
+          maxBytes: limit,
+          artifactError,
+        })
+        : actual;
 
       const committed = await withArtifactCommitLock(selected.binaryPath, async () => {
         const concurrentSha = await verifiedCachedArtifact(selected.binaryPath, selected.checksumPath);
@@ -242,14 +262,21 @@ export async function ensureNativeBinaryArtifact({
           return { sha256: concurrentSha, source: "cache", downloaded: false };
         }
         await deleteInvalidCache(selected.binaryPath, selected.checksumPath, filePlatform);
-        await renameWithWindowsRetry(partPath, selected.binaryPath, {
+        await renameWithWindowsRetry(binaryPartPath, selected.binaryPath, {
           rename: fsp.rename,
           platform: filePlatform,
         });
         if (osToken !== "windows") await fsp.chmod(selected.binaryPath, 0o755);
-        await writeChecksumSidecar(selected.checksumPath, actual.sha256, filePlatform);
+        await writeChecksumSidecar(selected.checksumPath, binary.sha256, filePlatform);
         await syncDirectory(path.dirname(selected.binaryPath));
-        return { sha256: actual.sha256, size: actual.size, source: "remote", downloaded: true };
+        return {
+          sha256: binary.sha256,
+          size: binary.size,
+          source: "remote",
+          downloaded: true,
+          format: tarball ? NATIVE_ARTIFACT_TARBALL_FORMAT : "raw",
+          transferBytes: actual.size,
+        };
       }, { platform: filePlatform });
       reportArtifactProgress(onProgress, {
         type: "native-artifact-download",
@@ -262,6 +289,7 @@ export async function ensureNativeBinaryArtifact({
       return { ...selected, ...committed };
     } finally {
       await safeUnlink(partPath, filePlatform);
+      if (binaryPartPath !== partPath) await safeUnlink(binaryPartPath, filePlatform);
     }
   } catch (err) {
     if (!responseComplete && (ac.signal.aborted || err?.name === "AbortError")) {

@@ -152,9 +152,13 @@ extensions beside the file it was started from.
 
 ## Node and other prerequisites
 
-The installer first accepts a working Node 24+ installation with npm. If
-needed, it tries winget's Node distributions, then falls back to an official
-Node ZIP in `%LOCALAPPDATA%\Posse\runtimes`. The ZIP is checked against Node's
+The installer first accepts a working Node 24+ installation with npm, including
+one behind a version manager (nvm, Volta, scoop): it asks Node for its real
+executable and finds npm beside it. An older or npm-less Node is left exactly
+as it is and named in the log; Posse then gets its own Node ZIP in
+`%LOCALAPPDATA%\Posse\runtimes` beside it, which only the `posse` launcher
+uses. With no Node at all, it tries winget's Node distributions, then falls
+back to that official Node ZIP. The ZIP is checked against Node's
 published SHA-256 checksum before extraction and use. The fallback does not
 require administrator privileges and is reused on later installer runs.
 The generated launcher puts its Node directory on PATH for subprocesses.

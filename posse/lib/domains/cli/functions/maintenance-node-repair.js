@@ -17,6 +17,8 @@ try {
     posseRoot: POSSE_ROOT,
     dryRun: process.env.POSSE_MAINTENANCE_DRY_RUN === "1",
     adoptNodeInstall: process.env.POSSE_MAINTENANCE_ADOPT_NODE === "1",
+    // The installers set this right after their own --ignore-scripts npm step.
+    runInstallScripts: process.env.POSSE_MAINTENANCE_INSTALL_SCRIPTS === "1",
     timeoutMs: 30 * 60 * 1000,
     onProgress: jsonMode
       ? null
@@ -32,3 +34,7 @@ try {
 }
 
 process.stdout.write(`${JSON.stringify(result)}\n`);
+// The installers gate on the exit status alone: a failed repair must not read
+// as success (setup reported a verified SQLite runtime with better-sqlite3
+// missing). The maintenance parent parses the JSON either way.
+if (result?.ok === false) process.exitCode = 1;

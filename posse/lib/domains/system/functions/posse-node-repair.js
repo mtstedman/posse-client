@@ -17,7 +17,7 @@ import { commandSpawnSpec } from "../../../shared/platform/functions/command-lau
 import { managedInstallStateRoot } from "../../../shared/platform/functions/managed-install-state.js";
 import { filterProcessEnv } from "../../../shared/platform/functions/process-env.js";
 import { missingRuntimeSymbol, nativeLoadFailureRemedy } from "../../../shared/platform/functions/native-runtime-floor.js";
-import { npmInstalledPackageDirs } from "./node-lock-validation.js";
+import { npmInstalledPackageDirs, npmInstallScriptPackages } from "./node-lock-validation.js";
 
 const NODE_MANIFEST_STAMP_NAME = ".posse-manifest.sha256";
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -239,13 +239,31 @@ export async function ensurePosseSqlite({ root, dryRun = false, timeoutMs = DEFA
   return { ok: true, status: "installed", action: "rebuild", message: "rebuilt SQLite addon for this Node runtime" };
 }
 
+// Posse's npm installs run with --ignore-scripts (see npmInstallScriptPackages);
+// this then runs install scripts for just the packages that have them. They
+// are optional or development packages, so a failure is reported, not fatal.
+export async function runDeclaredInstallScripts({ root, timeoutMs = DEFAULT_TIMEOUT_MS, onProgress = null, runNpmImpl = runNpm }) {
+  const names = npmInstallScriptPackages(root);
+  if (names.length === 0) return { ok: true, names, note: "" };
+  onProgress?.(`posse npm: install scripts for ${names.join(", ")}`);
+  const run = await runNpmImpl(["rebuild", ...names, "--no-fund", "--no-audit"], { cwd: root, timeoutMs, onProgress });
+  return {
+    ok: run.ok,
+    names,
+    note: run.ok ? "" : `; install scripts failed for ${names.join(", ")} (${failureSummary(run.message)})`,
+  };
+}
+
 /**
- * @param {{ posseRoot: string, dryRun?: boolean, adoptNodeInstall?: boolean, timeoutMs?: number, onProgress?: ((message: string) => void) | null }} input
+ * `runInstallScripts` is set by the installers right after their own
+ * (--ignore-scripts) npm step; an npm install made here runs them regardless.
+ * @param {{ posseRoot: string, dryRun?: boolean, adoptNodeInstall?: boolean, runInstallScripts?: boolean, timeoutMs?: number, onProgress?: ((message: string) => void) | null }} input
  */
 export async function repairPosseNodeTree({
   posseRoot,
   dryRun = false,
   adoptNodeInstall = false,
+  runInstallScripts = false,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   onProgress = null,
 }) {
@@ -253,9 +271,13 @@ export async function repairPosseNodeTree({
   return await withDependencyInstallLock(root, async () => {
     const before = inspectPosseNodeTree(root);
     if (!before.present) return { ...before, label: "posse npm" };
+    const requestedScripts = () => (runInstallScripts && !dryRun
+      ? runDeclaredInstallScripts({ root, timeoutMs, onProgress })
+      : { ok: true, names: [], note: "" });
     if (!before.needsInstall) {
+      const scripts = await requestedScripts();
       const native = await ensurePosseSqlite({ root, dryRun, timeoutMs, onProgress });
-      return { ...before, label: "posse npm", action: "none", message: "node packages ready", ...native };
+      return { ...before, label: "posse npm", action: "none", message: `node packages ready${scripts.note}`, ...native };
     }
     const canAdopt = adoptNodeInstall
       && before.needsStamp
@@ -264,6 +286,7 @@ export async function repairPosseNodeTree({
       && before.missingLocked.length === 0
       && !before.stale;
     if (canAdopt && !dryRun) {
+      const scripts = await requestedScripts();
       const native = await ensurePosseSqlite({ root, dryRun, timeoutMs, onProgress });
       if (!native.ok) return { ...before, label: "posse npm", ...native };
       try {
@@ -271,13 +294,13 @@ export async function repairPosseNodeTree({
       } catch (error) {
         return { ...before, label: "posse npm", ok: false, status: "failed", action: "stamp", message: `existing npm install looks healthy, but the dependency stamp could not be written: ${error?.code || error?.message || error}` };
       }
-      return { ...before, label: "posse npm", ok: true, status: "installed", action: "stamp", message: "verified existing npm install" };
+      return { ...before, label: "posse npm", ok: true, status: "installed", action: "stamp", message: `verified existing npm install${scripts.note}` };
     }
     if (dryRun) return { ...before, label: "posse npm", ok: true, status: "dry-run", action: "install", message: "would run npm install" };
 
     const cacheKeySource = process.platform === "win32" ? root.toLowerCase() : root;
     const cacheDir = path.join(managedInstallStateRoot(root), "deps", "npm-cache", hashText(cacheKeySource).slice(0, 12));
-    const args = ["install", "--include=dev", "--include=optional", "--no-save", "--cache", cacheDir, "--no-fund", "--no-audit"];
+    const args = ["install", "--include=dev", "--include=optional", "--no-save", "--ignore-scripts", "--cache", cacheDir, "--no-fund", "--no-audit"];
     onProgress?.("posse npm: npm install");
     let run = await runNpm(args, { cwd: root, timeoutMs, onProgress });
     if (!run.ok && /\bERESOLVE\b|unable to resolve dependency tree|conflicting peer dependency/iu.test(run.message)) {
@@ -285,6 +308,7 @@ export async function repairPosseNodeTree({
       run = await runNpm([...args.slice(0, 2), "--legacy-peer-deps", ...args.slice(2)], { cwd: root, timeoutMs, onProgress });
     }
     if (!run.ok) return { ...before, label: "posse npm", ok: false, status: "failed", action: "install", message: `npm install failed: ${failureSummary(run.message)}` };
+    const scripts = await runDeclaredInstallScripts({ root, timeoutMs, onProgress });
 
     const native = await ensurePosseSqlite({ root, dryRun, timeoutMs, onProgress });
     if (!native.ok) return { ...before, label: "posse npm", ...native };
@@ -297,6 +321,6 @@ export async function repairPosseNodeTree({
     } catch (error) {
       return { ...after, label: "posse npm", ok: false, status: "failed", action: "stamp", message: `npm installed, but dependency stamp could not be written: ${error?.code || error?.message || error}` };
     }
-    return { ...after, label: "posse npm", ok: true, status: "installed", action: "install", message: "npm install completed" };
+    return { ...after, label: "posse npm", ok: true, status: "installed", action: "install", message: `npm install completed${scripts.note}` };
   }, { dryRun, waitMs: timeoutMs, onProgress });
 }

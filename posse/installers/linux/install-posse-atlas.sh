@@ -484,7 +484,11 @@ format_command() {
 # --- step engine ---------------------------------------------------------------
 # Steps are declared up-front so numbering and the summary are stable no matter
 # where the run stops. Each step records ok/skipped/partial/failed/blocked.
-STEP_KEYS=(languages preflight packages node checkout composer npm automation shell seed admin keys native doctor validate smoke)
+# Order: the native download starts in the background right after npm (it
+# needs Node, the checkout, its packages, and the Posse key, so keys are asked
+# for first), and the remaining host tools install while it runs. The core
+# system tools Node and the checkout need install at the start of the node step.
+STEP_KEYS=(languages preflight node checkout keys npm packages composer automation shell seed admin native doctor validate smoke)
 declare -A STEP_TITLES=(
   [languages]="SCIP language selection"
   [preflight]="Preflight checks"
@@ -900,21 +904,23 @@ core_packages() {
   done
 }
 
+# Python joins the toolchain only when Python is a chosen language: Posse
+# itself needs none, and its npm install compiles nothing (see step_npm).
 toolchain_packages() {
   local python_extras=""
   case "$PKG_MGR" in
     apt-get)
-      scip_language_selected python && python_extras=" python3-pip python3-venv"
-      echo "build-essential pkg-config python3 unzip${python_extras}" ;;
+      scip_language_selected python && python_extras=" python3 python3-pip python3-venv"
+      echo "build-essential pkg-config unzip${python_extras}" ;;
     dnf|yum)
-      scip_language_selected python && python_extras=" python3-pip"
-      echo "gcc gcc-c++ make pkgconf-pkg-config python3 unzip${python_extras}" ;;
+      scip_language_selected python && python_extras=" python3 python3-pip"
+      echo "gcc gcc-c++ make pkgconf-pkg-config unzip${python_extras}" ;;
     pacman)
-      scip_language_selected python && python_extras=" python-pip"
-      echo "base-devel python unzip${python_extras}" ;;
+      scip_language_selected python && python_extras=" python python-pip"
+      echo "base-devel unzip${python_extras}" ;;
     zypper)
-      scip_language_selected python && python_extras=" python3-pip"
-      echo "gcc gcc-c++ make pkg-config python3 unzip${python_extras}" ;;
+      scip_language_selected python && python_extras=" python3 python3-pip"
+      echo "gcc gcc-c++ make pkg-config unzip${python_extras}" ;;
   esac
 }
 
@@ -1370,27 +1376,59 @@ ensure_modern_go() {
 # steps
 # =============================================================================
 
+# Core system packages this host lacks: git, curl (or wget), CA roots, tar,
+# xz, and ps.
+missing_core_packages() {
+  command -v git >/dev/null 2>&1 || echo git
+  command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || echo curl
+  [[ -s /etc/ssl/certs/ca-certificates.crt || -s /etc/pki/tls/certs/ca-bundle.crt ]] || echo ca-certificates
+  command -v tar >/dev/null 2>&1 || echo tar
+  command -v xz >/dev/null 2>&1 || echo xz
+  command -v ps >/dev/null 2>&1 || echo procps
+}
+
+# Node's install downloads and unpacks, and the checkout clones, before the
+# packages step runs; install just the core packages they need, in one
+# transaction. step_packages finds them present and adds the rest after npm.
+ensure_core_packages() {
+  local missing_core=() name pkg pkgs=()
+  while IFS= read -r name; do missing_core+=("$name"); done < <(missing_core_packages)
+  [[ ${#missing_core[@]} -eq 0 ]] && return 0
+  if [[ "$INSTALL_HOST_TOOLS" != "true" ]]; then
+    warn "missing (not installed due to --skip-host-tools): ${missing_core[*]}"
+    return 0
+  fi
+  detect_pkg_manager
+  if [[ "$PKG_MGR" == "none" ]]; then
+    warn "no supported package manager found; install ${missing_core[*]} manually"
+    return 0
+  fi
+  ensure_root_access
+  if [[ "$SUDO_STATE" == "none" && "$DRY_RUN" != "true" ]]; then
+    warn "cannot install ${missing_core[*]}: not root and sudo unavailable/declined"
+    return 0
+  fi
+  pkg_refresh_index
+  while IFS= read -r pkg; do pkgs+=("$pkg"); done < <(core_packages "${missing_core[@]}")
+  run_logged "install core system packages (${missing_core[*]})" pkg_install "${pkgs[@]}" \
+    || warn "could not install ${missing_core[*]}; the packages step tries again"
+}
+
 step_packages() {
   step_begin packages
   detect_pkg_manager
   [[ "$WITH_MEDIA_TOOLS" == "true" ]] || info "media tools (tesseract, ImageMagick, ffmpeg) not requested; --with-media-tools adds them"
 
   # What's missing? Core + toolchain checked by representative commands.
-  local missing_core=() missing_toolchain="false" missing_tools=() missing_rust="false"
-  command -v git >/dev/null 2>&1 || missing_core+=("git")
-  command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing_core+=("curl")
+  local missing_core=() missing_toolchain="false" missing_tools=() missing_rust="false" core_name
+  while IFS= read -r core_name; do missing_core+=("$core_name"); done < <(missing_core_packages)
   { command -v c++ >/dev/null 2>&1 || command -v g++ >/dev/null 2>&1; } && command -v make >/dev/null 2>&1 && command -v pkg-config >/dev/null 2>&1 || missing_toolchain="true"
-  find_python >/dev/null 2>&1 || missing_toolchain="true"
+  if scip_language_selected python; then find_python >/dev/null 2>&1 || missing_toolchain="true"; fi
   # Debian/Ubuntu split venv out of python3; Python projects' managed venvs need it.
   if [[ "$PKG_MGR" == "apt-get" ]] && scip_language_selected python && find_python >/dev/null 2>&1; then
     "$(find_python)" -c 'import venv, ensurepip' >/dev/null 2>&1 || missing_toolchain="true"
   fi
 
-  # Slim images can have curl but lack CA roots, tar/xz, or process tools.
-  [[ -s /etc/ssl/certs/ca-certificates.crt || -s /etc/pki/tls/certs/ca-bundle.crt ]] || missing_core+=("ca-certificates")
-  command -v tar >/dev/null 2>&1 || missing_core+=("tar")
-  command -v xz >/dev/null 2>&1 || missing_core+=("xz")
-  command -v ps >/dev/null 2>&1 || missing_core+=("procps")
   local line name check pkgs
   while IFS='|' read -r name check pkgs; do
     [[ -z "$name" ]] && continue
@@ -1524,6 +1562,8 @@ step_packages() {
 
 step_node() {
   step_begin node
+  # Slim images can have curl but lack CA roots, tar/xz, or git.
+  ensure_core_packages
   local major
   if command -v node >/dev/null 2>&1; then
     major="$(node_major)"
@@ -1532,7 +1572,11 @@ step_node() {
       step_end ok "node $(node -v) at ${NODE_BIN}"
       return 0
     fi
-    info "found node $(node -v), but ${NODE_MIN_MAJOR}+ is required"
+    if [[ "$major" -ge "$NODE_MIN_MAJOR" ]]; then
+      info "found node $(node -v) at $(command -v node), but npm does not run"
+    else
+      info "found node $(node -v), but ${NODE_MIN_MAJOR}+ is required"
+    fi
   else
     info "node is not installed"
   fi
@@ -1762,7 +1806,7 @@ step_npm() {
     return 0
   fi
 
-  if run_logged_in_dir "$POSSE_DIR" "npm ${npm_args[0]} (includes native module builds)" npm "${npm_args[@]}"; then
+  if run_logged_in_dir "$POSSE_DIR" "npm ${npm_args[0]}" npm "${npm_args[@]}"; then
     finish_node_install
     return $?
   fi
@@ -1783,7 +1827,12 @@ step_npm() {
 # lockfile, so `posse update` never finds it modified. Older checkouts without
 # a lockfile keep a plain npm install.
 npm_install_command() {
-  local dir="$1" common=(--include=dev --include=optional --no-fund --no-audit)
+  # Scripts are off: npm installing from a lockfile misses better-sqlite3's
+  # "gypfile": false and compiles it from source (needing Python and a C++
+  # toolchain, which install later); its bundled prebuilt addon needs no
+  # build. finish_node_install runs the install scripts of the packages that
+  # really have them.
+  local dir="$1" common=(--include=dev --include=optional --ignore-scripts --no-fund --no-audit)
   if [[ ! -f "$dir/package-lock.json" ]]; then
     npm_args=(install "${common[@]}")
   elif [[ ! -d "$dir/node_modules" ]]; then
@@ -1795,7 +1844,7 @@ npm_install_command() {
 
 finish_node_install() {
   if run_logged_in_dir "$POSSE_DIR" "verify and repair Node native addons" \
-    env POSSE_MAINTENANCE_ADOPT_NODE=1 "$NODE_BIN" lib/domains/cli/functions/maintenance-node-repair.js; then
+    env POSSE_MAINTENANCE_ADOPT_NODE=1 POSSE_MAINTENANCE_INSTALL_SCRIPTS=1 "$NODE_BIN" lib/domains/cli/functions/maintenance-node-repair.js; then
     step_end ok "npm dependencies and SQLite runtime verified"
     return 0
   fi
@@ -2221,12 +2270,87 @@ step_keys() {
   fi
 }
 
+# The native binaries are setup's largest downloads and need only Node, the
+# checkout's npm packages, and the Posse key. start_native_download runs them in
+# the background as soon as npm finishes, while host tools and the rest of setup
+# install; step_native_binaries collects the result before doctor, which uses
+# them, and downloads in the foreground if the background run failed.
+NATIVE_PID=""
+NATIVE_OUT=""
+NATIVE_STARTED=0
+NATIVE_RC=""
+
+start_native_download() {
+  [[ "$CRITICAL_FAILED" == "true" || "$DRY_RUN" == "true" || "$SETUP_ONLY" == "true" || -n "$NATIVE_PID" ]] && return 0
+  [[ -n "${POSSE_KEY:-}" ]] || return 0
+  NATIVE_OUT="${LOG_DIR}/native-download-$(date +%Y%m%d-%H%M%S).log"
+  (cd "$POSSE_DIR" && exec "$NODE_BIN" scripts/pull-native-artifacts.mjs) >"$NATIVE_OUT" 2>&1 </dev/null &
+  NATIVE_PID=$!
+  NATIVE_STARTED=$SECONDS
+  log_only ">>> native binaries downloading in the background (pid ${NATIVE_PID})"
+  info "native tools are downloading in the background while setup continues"
+}
+
+# collect_native_download [abandon] — waits for the background download within
+# the command timeout and sets NATIVE_RC: its exit code, 124 on timeout, 130
+# when abandoned (setup ended early), empty when none was started. Never call
+# it in a subshell: only this shell can wait for its own job.
+collect_native_download() {
+  NATIVE_RC=""
+  [[ -n "$NATIVE_PID" ]] || return 0
+  local pid="$NATIVE_PID" rc=""
+  NATIVE_PID=""
+  if [[ "${1:-}" == "abandon" ]]; then
+    kill_process_tree "$pid" TERM
+    rc=130
+  else
+    while kill -0 "$pid" 2>/dev/null; do
+      if (( SECONDS - NATIVE_STARTED >= COMMAND_TIMEOUT_SECONDS )); then
+        kill_process_tree "$pid" TERM
+        sleep 2
+        kill_process_tree "$pid" KILL
+        rc=124
+        break
+      fi
+      sleep 1
+    done
+  fi
+  if [[ -z "$rc" ]]; then
+    rc=0
+    wait "$pid" || rc=$?
+  else
+    wait "$pid" 2>/dev/null || true
+  fi
+  if [[ -f "$NATIVE_OUT" ]]; then
+    sed 's/^/[native] /' "$NATIVE_OUT" >>"$LOG_FILE"
+    rm -f "$NATIVE_OUT"
+  fi
+  log_only "[native] background download exited ${rc} after $((SECONDS - NATIVE_STARTED))s"
+  NATIVE_RC="$rc"
+}
+
 step_native_binaries() {
   step_begin native
-  if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
+  if [[ "$CRITICAL_FAILED" == "true" ]]; then
+    collect_native_download abandon
+    step_end blocked
+    return 1
+  fi
   if [[ "$DRY_RUN" == "true" ]]; then
-    step_end dry-run "would download current native binaries for this platform"
+    step_end dry-run "would download current native binaries for this platform (in the background, from right after npm)"
     return 0
+  fi
+
+  local background=""
+  if [[ -n "$NATIVE_PID" ]]; then
+    kill -0 "$NATIVE_PID" 2>/dev/null && info "waiting for the background native download to finish"
+    collect_native_download
+    background="$NATIVE_RC"
+    if [[ "$background" == "0" ]]; then
+      step_end ok "native binaries downloaded while setup ran"
+      return 0
+    fi
+    info "the background native download did not finish; downloading in the foreground"
   fi
 
   if [[ -z "${POSSE_KEY:-}" ]]; then
@@ -2236,11 +2360,12 @@ step_native_binaries() {
   fi
 
   # Binaries already current are only checked again, so one retry is cheap;
-  # a timeout is not retried.
+  # a timeout is not retried, and a failed background run counts as the first
+  # attempt.
   local rc=0
   run_logged_in_dir "$POSSE_DIR" "download current native binaries" \
     "$NODE_BIN" scripts/pull-native-artifacts.mjs || rc=$?
-  if [[ $rc -ne 0 && $rc -ne 124 ]]; then
+  if [[ $rc -ne 0 && $rc -ne 124 && -z "$background" ]]; then
     info "retrying once (transient network failures are common)"
     rc=0
     run_logged_in_dir "$POSSE_DIR" "download current native binaries (retry)" \
@@ -2505,21 +2630,24 @@ main() {
     exit 1
   fi
 
-  run_installer_step packages false step_packages
   run_installer_step node true step_node
   run_installer_step checkout true step_checkout
-  run_installer_step composer false step_composer
+  run_installer_step keys false step_keys
   run_installer_step npm true step_npm
+  start_native_download
+  run_installer_step packages false step_packages
+  run_installer_step composer false step_composer
   run_installer_step automation false step_automation
   run_installer_step shell true step_shell_wiring
   run_installer_step seed false step_seed_settings
   run_installer_step admin false step_admin_init
-  run_installer_step keys false step_keys
   run_installer_step native false step_native_binaries
   run_installer_step doctor false step_doctor
   run_installer_step validate false step_validate
   run_installer_step smoke false step_smoke
 
+  # Setup that ended early must not leave a download running behind it.
+  collect_native_download abandon
   print_summary
   if [[ "$INSTALL_FAILED" == "true" ]]; then
     exit 1

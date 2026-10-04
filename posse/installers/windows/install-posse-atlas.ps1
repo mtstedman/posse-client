@@ -437,7 +437,11 @@ function Step-ScipLanguages {
 }
 
 # --- step engine -----------------------------------------------------------------
-$script:StepKeys = @("languages", "preflight", "packages", "node", "checkout", "composer", "npm", "automation", "shell", "seed", "admin", "keys", "native", "doctor", "validate", "smoke")
+# Order: the native download starts in the background right after npm (it
+# needs Node, the checkout, its packages, and the Posse key, so keys are asked
+# for first), and host tools install while it runs. Git, the one tool the
+# checkout needs, is installed by the checkout step.
+$script:StepKeys = @("languages", "preflight", "node", "checkout", "keys", "npm", "packages", "composer", "automation", "shell", "seed", "admin", "native", "doctor", "validate", "smoke")
 $script:StepTitles = @{
   languages = "SCIP language selection"
   preflight = "Preflight checks"
@@ -486,7 +490,7 @@ $script:SetupStepText = @{
 # Rough share of total setup time per step, so the bar moves at an honest pace.
 $script:SetupStepWeight = @{
   languages = 1; preflight = 1; packages = 18; node = 7; checkout = 5; composer = 3; npm = 14; automation = 2
-  shell = 1; seed = 1; admin = 2; keys = 1; native = 8; doctor = 32; validate = 3; smoke = 1
+  shell = 1; seed = 1; admin = 2; keys = 1; native = 3; doctor = 32; validate = 3; smoke = 1
 }
 
 function Write-SetupProgress {
@@ -776,12 +780,24 @@ function Invoke-Logged {
   # PowerShell resolves bare `npm` to npm.ps1 before npm.cmd on a standard
   # Node install. Launch npm's JS entrypoint with its adjacent node.exe so
   # execution policy and cmd.exe argument parsing cannot break fresh installs.
-  $npmCli = if ($executable -match '(?i)\\npm\.(cmd|ps1)$') {
-    Join-Path (Split-Path $executable -Parent) "node_modules\npm\bin\npm-cli.js"
-  } else { "" }
-  if ($npmCli -and (Test-Path $npmCli)) {
-    $adjacentNode = Join-Path (Split-Path $executable -Parent) "node.exe"
-    $psi.FileName = if (Test-Path $adjacentNode) { $adjacentNode } else { $script:NodeBin }
+  # Bare `npm` uses the entrypoint Step-Node verified for the chosen Node, so
+  # a version manager's shim (Volta, scoop) cannot pick a different runtime.
+  $npmCli = ""
+  $npmNode = ""
+  if ($Command[0] -eq "npm" -and $script:NpmCli -and $script:NodeBin) {
+    $npmCli = $script:NpmCli
+    $npmNode = $script:NodeBin
+  }
+  elseif ($executable -match '(?i)\\npm\.(cmd|ps1)$') {
+    $candidate = Join-Path (Split-Path $executable -Parent) "node_modules\npm\bin\npm-cli.js"
+    if (Test-Path $candidate) {
+      $npmCli = $candidate
+      $adjacentNode = Join-Path (Split-Path $executable -Parent) "node.exe"
+      $npmNode = if (Test-Path $adjacentNode) { $adjacentNode } else { $script:NodeBin }
+    }
+  }
+  if ($npmCli) {
+    $psi.FileName = $npmNode
     $psi.Arguments = ((@($npmCli) + $arguments) | ForEach-Object { Quote-NativeArg $_ }) -join " "
   }
   elseif ($executable -match '\.(cmd|bat)$') {
@@ -1019,15 +1035,33 @@ function Test-DirectoryWriteAccess {
   }
 }
 
-function Get-NodeMajor {
-  $node = Get-Command node -ErrorAction SilentlyContinue
-  if (-not $node) { return 0 }
-  try {
-    $v = (& $node.Source --version) 2>$null
-    if ($v -match "^v(\d+)\.") { return [int]$Matches[1] }
+# What `node` on PATH really is. Version managers (Volta, scoop, nvm) put a
+# shim first on PATH, so ask Node for its own executable, and look for npm's
+# entrypoint beside it, then beside the `npm` on PATH. Invoke-Logged launches
+# npm through that entrypoint (see there), so a Node whose npm cannot be found
+# this way is not usable even when `npm` runs.
+function Get-NodeRuntimeInfo {
+  $node = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $node) { return $null }
+  $info = [PSCustomObject]@{ Path = $node.Source; NodeBin = ""; Version = ""; Major = 0; NpmCli = "" }
+  try { $reported = [string]((& $node.Source -p "[process.execPath, process.versions.node].join('|')") 2>$null | Select-Object -First 1) }
+  catch { $reported = "" }
+  if ($LASTEXITCODE -ne 0 -or $reported -notmatch '^(.+)\|((\d+)\.\d+\.\d+)$') { return $info }
+  $info.NodeBin = $Matches[1]
+  $info.Version = $Matches[2]
+  $info.Major = [int]$Matches[3]
+  $candidates = @(Join-Path (Split-Path $info.NodeBin -Parent) "node_modules\npm\bin\npm-cli.js")
+  $npm = Get-Command npm -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($npm -and $npm.Source) { $candidates += Join-Path (Split-Path $npm.Source -Parent) "node_modules\npm\bin\npm-cli.js" }
+  foreach ($candidate in $candidates) {
+    if (-not (Test-Path -LiteralPath $candidate)) { continue }
+    try {
+      & $info.NodeBin $candidate --version *> $null
+      if ($LASTEXITCODE -eq 0) { $info.NpmCli = $candidate; break }
+    }
+    catch {}
   }
-  catch {}
-  return 0
+  return $info
 }
 
 function Resolve-FullPath {
@@ -1675,6 +1709,42 @@ function Enable-PhpComposerExtensions {
 # steps
 # =============================================================================
 
+# Git is the one host tool needed before the checkout; Step-Checkout installs
+# it early when it must clone, and Step-Packages finds it already present.
+function Get-GitToolSpec {
+  [PSCustomObject]@{ Label = "Git"; Exe = "git.exe"; VersionPattern = 'git version (\d+)\.(\d+)'; AppNames = @("Git", "Git version *"); Locate = { Get-GitRegistryDirs }; KnownDirs = @("%ProgramFiles%\Git\cmd", "%LOCALAPPDATA%\Programs\Git\cmd"); WingetIds = @("Git.Git"); Reason = "required Posse checkout and worktree lifecycle" }
+}
+
+# Installs one host tool (its own installer, else winget) and reports whether
+# a usable copy now runs.
+function Install-HostTool {
+  param($Tool, [string]$Counter = "", [bool]$HasWinget = $true)
+  Write-SetupProgress @("act", ("Installing {0}{1}" -f $Tool.Label, $Counter))
+  $installed = $false
+  $reason = ""
+  if ($Tool.Install) {
+    try {
+      if ((& $Tool.Install) -eq 0) {
+        Update-SessionPath
+        $installed = (Resolve-ToolRequirement $Tool).Satisfied
+      }
+    }
+    catch { Write-Warn2 ("{0} install failed: {1}" -f $Tool.Label, $_.Exception.Message) }
+  }
+  elseif ($HasWinget) {
+    foreach ($id in $Tool.WingetIds) {
+      $rc = Invoke-WingetInstall -Label $Tool.Label -Id $id -Activity ("Installing {0}{1}" -f $Tool.Label, $Counter) -QuietFailure
+      if ($rc -ne 0) { $reason = Format-WingetFailure $rc; continue }
+      # An installed package only counts once a new-enough copy actually runs.
+      Update-SessionPath
+      if ((Resolve-ToolRequirement $Tool).Satisfied) { $installed = $true; break }
+      $reason = "installed but not usable"
+      Write-LogOnly ("[packages] {0} installed but {1} is not usable; trying the next package" -f $id, $Tool.Label)
+    }
+  }
+  return [PSCustomObject]@{ Installed = $installed; Reason = $reason }
+}
+
 function Step-Packages {
   Step-Begin "packages"
 
@@ -1682,7 +1752,7 @@ function Step-Packages {
   # oldest version Posse works with (when it matters), how to ask for that
   # version, and where its installers usually register or unpack it.
   $tools = @(
-    [PSCustomObject]@{ Label = "Git"; Exe = "git.exe"; VersionPattern = 'git version (\d+)\.(\d+)'; AppNames = @("Git", "Git version *"); Locate = { Get-GitRegistryDirs }; KnownDirs = @("%ProgramFiles%\Git\cmd", "%LOCALAPPDATA%\Programs\Git\cmd"); WingetIds = @("Git.Git"); Reason = "required Posse checkout and worktree lifecycle" },
+    (Get-GitToolSpec),
     [PSCustomObject]@{ Label = "GitHub CLI"; Exe = "gh.exe"; AppNames = @("GitHub CLI*"); KnownDirs = @("%ProgramFiles%\GitHub CLI"); WingetIds = @("GitHub.cli"); Reason = "optional GitHub authentication and Session provisioning" },
     [PSCustomObject]@{ Label = "ripgrep"; Exe = "rg.exe"; WingetIds = @("BurntSushi.ripgrep.MSVC"); Reason = "deterministic search" }
   )
@@ -1758,31 +1828,9 @@ function Step-Packages {
     foreach ($tool in $missing) {
       $toolNumber++
       $counter = if ($missing.Count -gt 1) { " ({0} of {1})" -f $toolNumber, $missing.Count } else { "" }
-      Write-SetupProgress @("act", ("Installing {0}{1}" -f $tool.Label, $counter))
-      $installed = $false
-      $reason = ""
-      if ($tool.Install) {
-        try {
-          if ((& $tool.Install) -eq 0) {
-            Update-SessionPath
-            $installed = (Resolve-ToolRequirement $tool).Satisfied
-          }
-        }
-        catch { Write-Warn2 ("{0} install failed: {1}" -f $tool.Label, $_.Exception.Message) }
-      }
-      elseif ($hasWinget) {
-        foreach ($id in $tool.WingetIds) {
-          $rc = Invoke-WingetInstall -Label $tool.Label -Id $id -Activity ("Installing {0}{1}" -f $tool.Label, $counter) -QuietFailure
-          if ($rc -ne 0) { $reason = Format-WingetFailure $rc; continue }
-          # An installed package only counts once a new-enough copy actually runs.
-          Update-SessionPath
-          if ((Resolve-ToolRequirement $tool).Satisfied) { $installed = $true; break }
-          $reason = "installed but not usable"
-          Write-LogOnly ("[packages] {0} installed but {1} is not usable; trying the next package" -f $id, $tool.Label)
-        }
-      }
-      if ($installed) { $satisfied[$tool.Label] = $true }
-      else { $failed += $(if ($reason) { "{0} ({1})" -f $tool.Label, $reason } else { $tool.Label }) }
+      $result = Install-HostTool -Tool $tool -Counter $counter -HasWinget $hasWinget
+      if ($result.Installed) { $satisfied[$tool.Label] = $true }
+      else { $failed += $(if ($result.Reason) { "{0} ({1})" -f $tool.Label, $result.Reason } else { $tool.Label }) }
     }
   }
 
@@ -1797,12 +1845,14 @@ function Step-Packages {
   }
 }
 
+# True when the Node on PATH is new enough and has a working npm; it then
+# becomes the Node this installer and the posse launcher run.
 function Test-NodeRuntime {
-  if ((Get-NodeMajor) -lt $NodeMinMajor) { return $false }
-  $nodePath = (Get-Command node).Source
-  $npmCli = Join-Path (Split-Path $nodePath -Parent) "node_modules\npm\bin\npm-cli.js"
-  if (-not (Test-Path -LiteralPath $npmCli)) { return $false }
-  try { & $nodePath $npmCli --version *> $null; return $LASTEXITCODE -eq 0 } catch { return $false }
+  $info = Get-NodeRuntimeInfo
+  if (-not $info -or $info.Major -lt $NodeMinMajor -or -not $info.NpmCli) { return $false }
+  $script:NodeBin = $info.NodeBin
+  $script:NpmCli = $info.NpmCli
+  return $true
 }
 
 function Install-PortableNode {
@@ -1844,9 +1894,21 @@ function Install-PortableNode {
 function Step-Node {
   Step-Begin "node"
   if (Test-NodeRuntime) {
-    $script:NodeBin = (Get-Command node).Source
     Step-End "ok" ("Node + npm ready at {0}" -f $script:NodeBin)
     return
+  }
+  # Say why an existing Node is not used. It is left exactly as it is: Posse
+  # gets its own per-user Node beside it (the posse launcher names that Node
+  # explicitly), never a winget upgrade of the one already installed.
+  $existing = Get-NodeRuntimeInfo
+  if ($existing -and $existing.Major -gt 0 -and $existing.Major -lt $NodeMinMajor) {
+    Write-Info ("found Node {0} at {1}; Posse needs Node {2}+, so it gets its own copy and yours stays as it is" -f $existing.Version, $existing.NodeBin, $NodeMinMajor)
+  }
+  elseif ($existing -and $existing.Major -gt 0) {
+    Write-Info ("found Node {0} at {1}, but no working npm beside it; Posse gets its own Node and yours stays as it is" -f $existing.Version, $existing.NodeBin)
+  }
+  elseif ($existing) {
+    Write-Info ("found node at {0}, but it did not run; Posse gets its own Node" -f $existing.Path)
   }
   # Reuse a previously installed portable runtime in shells without its PATH.
   $runtimeRoot = Join-Path $script:ManagedStateRoot "runtimes"
@@ -1855,7 +1917,6 @@ function Step-Node {
       $previousPath = $env:Path
       $env:Path = "$($directory.FullName);$env:Path"
       if (Test-NodeRuntime) {
-        $script:NodeBin = (Get-Command node).Source
         Step-End "ok" "reused managed Node + npm"
         return
       }
@@ -1864,7 +1925,7 @@ function Step-Node {
   }
   if ($NoInstallNode) { Step-FailCritical "Node $NodeMinMajor+ with npm required (-NoInstallNode was passed)."; return }
   if ($DryRun) { Step-End "dry-run" "would install Node + npm via winget or verified per-user ZIP"; return }
-  if (Test-Cmd "winget") {
+  if (-not $existing -and (Test-Cmd "winget")) {
     foreach ($id in @("OpenJS.NodeJS.LTS", "OpenJS.NodeJS")) {
       [void](Invoke-WingetInstall -Label "Node.js" -Id $id -Activity "Installing Node.js")
       Update-SessionPath
@@ -1872,10 +1933,11 @@ function Step-Node {
     }
   }
   if (-not (Test-NodeRuntime)) {
-    Write-Info "installing official Node ZIP in user-owned storage (winget unavailable or unsuccessful)"
+    $why = if ($existing) { "keeping the Node already installed" } else { "winget unavailable or unsuccessful" }
+    Write-Info ("installing official Node ZIP in user-owned storage ({0})" -f $why)
     Install-PortableNode
   }
-  $script:NodeBin = (Get-Command node).Source
+  if (-not (Test-NodeRuntime)) { Step-FailCritical "Node $NodeMinMajor+ with npm could not be set up; see log"; return }
   Step-End "ok" ("Node + npm ready at {0}" -f $script:NodeBin)
 }
 
@@ -1928,6 +1990,12 @@ function Step-Checkout {
     return
   }
 
+  # Host tools install after npm, so the native downloads can start sooner;
+  # cloning needs Git now. A Git installed off PATH is found and used.
+  $gitSpec = Get-GitToolSpec
+  if (-not (Test-Cmd "git") -and -not (Resolve-ToolRequirement $gitSpec).Satisfied -and -not $DryRun -and -not $SkipHostTools) {
+    [void](Install-HostTool -Tool $gitSpec -HasWinget (Test-Cmd "winget"))
+  }
   if (-not (Test-Cmd "git")) {
     Step-FailCritical "git is required to clone Posse but is not installed (winget install Git.Git)"
     return
@@ -2059,10 +2127,14 @@ function Step-Npm {
 # deletes node_modules first, which fails while a running Posse (the
 # automation owner) holds its SQLite addon open. Neither writes the lockfile,
 # so `posse update` never finds it modified. Older checkouts without a
-# lockfile keep a plain npm install.
+# lockfile keep a plain npm install. Scripts are off: npm installing from a
+# lockfile misses better-sqlite3's "gypfile": false and compiles it from
+# source, which fails without Visual Studio's C++ tools; its bundled prebuilt
+# addon needs no build. Complete-NodeInstall then runs the install scripts of
+# the packages that really have them.
 function Get-NpmInstallCommand {
   param([string]$Dir)
-  $common = @("--include=dev", "--include=optional", "--no-fund", "--no-audit")
+  $common = @("--include=dev", "--include=optional", "--ignore-scripts", "--no-fund", "--no-audit")
   if (-not (Test-Path -LiteralPath (Join-Path $Dir "package-lock.json"))) {
     return [PSCustomObject]@{ Label = "npm install"; Command = @("npm", "install") + $common }
   }
@@ -2074,15 +2146,20 @@ function Get-NpmInstallCommand {
 
 function Complete-NodeInstall {
   $previousAdopt = $env:POSSE_MAINTENANCE_ADOPT_NODE
+  $previousScripts = $env:POSSE_MAINTENANCE_INSTALL_SCRIPTS
   try {
     $env:POSSE_MAINTENANCE_ADOPT_NODE = "1"
+    $env:POSSE_MAINTENANCE_INSTALL_SCRIPTS = "1"
     $rc = Invoke-Logged -Description "verify and repair Node native addons" -Activity "Checking Posse's native add-ons" -WorkingDirectory $script:PosseDirResolved -Command @(
       $script:NodeBin, "lib/domains/cli/functions/maintenance-node-repair.js"
     )
     if ($rc -eq 0) { Step-End "ok" "npm dependencies and SQLite runtime verified" }
     else { Step-FailCritical "Node dependencies remain unusable after repair; check the build toolchain and log" }
   }
-  finally { $env:POSSE_MAINTENANCE_ADOPT_NODE = $previousAdopt }
+  finally {
+    $env:POSSE_MAINTENANCE_ADOPT_NODE = $previousAdopt
+    $env:POSSE_MAINTENANCE_INSTALL_SCRIPTS = $previousScripts
+  }
 }
 
 function Step-Automation {
@@ -2877,14 +2954,9 @@ function Step-Keys {
   Step-End "ok" $note
 }
 
-function Step-NativeBinaries {
-  Step-Begin "native"
-  if ($script:CriticalFailed) { Step-End "blocked"; return }
-  if ($DryRun) {
-    Step-End "dry-run" "would download current native binaries for this platform"
-    return
-  }
-
+# POSSE_KEY for the native download: the process environment, else the older
+# provider file, else the user/machine environment. False when there is none.
+function Import-NativeDownloadKey {
   $providersFile = Join-Path (Join-Path $env:USERPROFILE ".config\posse") "providers.env.ps1"
   if (-not $env:POSSE_KEY -and (Test-Path $providersFile)) {
     try { [void](Import-ProviderKeysFile $providersFile) }
@@ -2895,7 +2967,84 @@ function Step-NativeBinaries {
     if (-not $persistedKey) { $persistedKey = [Environment]::GetEnvironmentVariable("POSSE_KEY", "Machine") }
     if ($persistedKey) { $env:POSSE_KEY = $persistedKey }
   }
-  if (-not $env:POSSE_KEY) {
+  return [bool]$env:POSSE_KEY
+}
+
+# The native binaries are setup's largest downloads and need only Node, the
+# checkout's npm packages, and the Posse key. Start-NativeDownload runs them in
+# the background as soon as npm finishes, while host tools and the rest of
+# setup install; Step-NativeBinaries collects the result before doctor, which
+# uses them, and downloads in the foreground if the background run failed.
+function Start-NativeDownload {
+  if ($script:CriticalFailed -or $DryRun -or $script:NativeDownload) { return }
+  if (-not (Import-NativeDownloadKey)) { return }
+  $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+  $out = Join-Path $script:LogDir ("native-download-{0}.out.log" -f $stamp)
+  $err = Join-Path $script:LogDir ("native-download-{0}.err.log" -f $stamp)
+  try {
+    $process = Start-Process -FilePath $script:NodeBin -ArgumentList "scripts/pull-native-artifacts.mjs" -WorkingDirectory $script:PosseDirResolved -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru
+    # Holding the handle keeps ExitCode readable after the process exits.
+    $null = $process.Handle
+    $script:NativeDownload = [PSCustomObject]@{ Process = $process; Out = $out; Err = $err; Started = Get-Date }
+    Write-LogOnly (">>> native binaries downloading in the background (pid {0})" -f $process.Id)
+    Write-Info "native tools are downloading in the background while setup continues"
+  }
+  catch { Write-LogOnly ("[native] could not start the background download: {0}" -f $_.Exception.Message) }
+}
+
+# Waits for the background download (within the command timeout) and returns
+# its exit code: 124 on timeout, $null when none was started. -Abandon stops
+# one still running because setup ended early.
+function Receive-NativeDownload {
+  param([switch]$Abandon)
+  $job = $script:NativeDownload
+  if (-not $job) { return $null }
+  $script:NativeDownload = $null
+  $process = $job.Process
+  $rc = $null
+  if ($Abandon) {
+    Stop-InstallerProcessTree $process
+    $rc = 130
+  }
+  elseif (-not $process.HasExited) {
+    Write-SetupProgress @("act", "Finishing the native tool downloads")
+    $elapsed = [int]((Get-Date) - $job.Started).TotalSeconds
+    if (-not $process.WaitForExit([Math]::Max(1, $CommandTimeoutSeconds - $elapsed) * 1000)) {
+      Stop-InstallerProcessTree $process
+      $rc = 124
+    }
+  }
+  if ($null -eq $rc) {
+    $process.WaitForExit()
+    $rc = $process.ExitCode
+  }
+  foreach ($file in @($job.Out, $job.Err)) {
+    try { Get-Content -LiteralPath $file -ErrorAction Stop | ForEach-Object { Write-LogOnly ("[native] {0}" -f $_) } } catch {}
+    Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+  }
+  Write-LogOnly ("[native] background download exited {0} after {1}s" -f $rc, [int]((Get-Date) - $job.Started).TotalSeconds)
+  return $rc
+}
+
+function Step-NativeBinaries {
+  Step-Begin "native"
+  if ($script:CriticalFailed) {
+    [void](Receive-NativeDownload -Abandon)
+    Step-End "blocked"
+    return
+  }
+  if ($DryRun) {
+    Step-End "dry-run" "would download current native binaries for this platform (in the background, from right after npm)"
+    return
+  }
+
+  $background = Receive-NativeDownload
+  if ($background -eq 0) {
+    Step-End "ok" "native binaries downloaded while setup ran"
+    return
+  }
+  if ($null -ne $background) { Write-Info "the background native download did not finish; downloading in the foreground" }
+  if (-not (Import-NativeDownloadKey)) {
     Write-Warn2 "native binaries need POSSE_KEY; set it or re-run with -ConfigureKeys, then run 'npm run pull:native'"
     Step-End "partial" "POSSE_KEY unavailable; boot readiness will retry the download"
     return
@@ -2906,7 +3055,7 @@ function Step-NativeBinaries {
   try {
     $rc = Invoke-Logged -Description "download current native binaries" -Activity "Downloading Posse's native tools" -Command @($script:NodeBin, "scripts/pull-native-artifacts.mjs") -WorkingDirectory $script:PosseDirResolved
     # Binaries already current are only checked again, so one retry is cheap.
-    if ($rc -ne 0 -and $rc -ne 124) {
+    if ($rc -ne 0 -and $rc -ne 124 -and $null -eq $background) {
       Write-Info "retrying once (transient network failures are common)"
       $rc = Invoke-Logged -Description "download current native binaries (retry)" -Activity "Retrying Posse's native tools" -Command @($script:NodeBin, "scripts/pull-native-artifacts.mjs") -WorkingDirectory $script:PosseDirResolved
     }
@@ -3323,6 +3472,8 @@ function Invoke-Uninstall {
 # =============================================================================
 
 $script:NodeBin = ""
+$script:NpmCli = ""
+$script:NativeDownload = $null
 $script:EnvFile = Join-Path (Join-Path $env:USERPROFILE ".config\posse") "atlas.env.ps1"
 $script:PosseDirResolved = $PosseDir
 
@@ -3370,15 +3521,23 @@ try {
   }
 
   if (-not $script:CriticalFailed) {
-    Invoke-InstallerStep "packages" { Step-Packages }
     Invoke-InstallerStep "node" { Step-Node } -Critical
     Invoke-InstallerStep "checkout" { Step-Checkout } -Critical
-    Invoke-InstallerStep "composer" { Step-Composer }
+    if ($SetupOnly) {
+      Step-Begin "keys"
+      Step-End "skipped" "-SetupOnly; complete setup at runtime"
+    }
+    else {
+      Invoke-InstallerStep "keys" { Step-Keys }
+    }
     Invoke-InstallerStep "npm" { Step-Npm } -Critical
+    if (-not $SetupOnly) { Start-NativeDownload }
+    Invoke-InstallerStep "packages" { Step-Packages }
+    Invoke-InstallerStep "composer" { Step-Composer }
     Invoke-InstallerStep "automation" { Step-Automation }
     Invoke-InstallerStep "shell" { Step-ShellWiring } -Critical
     if ($SetupOnly) {
-      foreach ($key in @("seed", "admin", "keys", "native", "doctor", "validate", "smoke")) {
+      foreach ($key in @("seed", "admin", "native", "doctor", "validate", "smoke")) {
         Step-Begin $key
         Step-End "skipped" "-SetupOnly; complete setup at runtime"
       }
@@ -3386,7 +3545,6 @@ try {
     else {
       Invoke-InstallerStep "seed" { Step-SeedSettings }
       Invoke-InstallerStep "admin" { Step-AdminInit }
-      Invoke-InstallerStep "keys" { Step-Keys }
       Invoke-InstallerStep "native" { Step-NativeBinaries }
       Invoke-InstallerStep "doctor" { Step-Doctor }
       Invoke-InstallerStep "validate" { Step-Validate }
@@ -3402,6 +3560,8 @@ catch {
   Block-PendingSteps "installer aborted after an unexpected error"
 }
 finally {
+  # Setup that ended early must not leave a download running behind it.
+  [void](Receive-NativeDownload -Abandon)
   Print-Summary
 }
 
