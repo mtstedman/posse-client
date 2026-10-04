@@ -616,6 +616,7 @@ function Format-SetupActivity {
   return $plain.Substring(0, 1).ToUpperInvariant() + $plain.Substring(1)
 }
 $script:CriticalFailed = $false
+$script:CheckoutIsInstallerSource = $false
 $script:InstallFailed = $false
 $script:SummaryPrinted = $false
 $script:LastCommandStdout = ""
@@ -1051,6 +1052,51 @@ function Resolve-PosseRootFromCheckout {
   $nested = Join-Path $root "posse"
   if (Test-Path (Join-Path $nested "orchestrator.js")) { return $nested }
   return ""
+}
+
+# Trimmed stdout of a git probe in $Repo, or $null when git fails or is missing.
+function Get-GitOutput {
+  param([string]$Repo, [string[]]$GitArgs, [int]$TimeoutMs = 30000)
+  $git = Get-Command git -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $git -or -not $git.Source) { return $null }
+  $result = Get-NativeOutput $git.Source (@("-C", $Repo) + $GitArgs) $TimeoutMs
+  if (-not $result -or $result.ExitCode -ne 0) { return $null }
+  return ([string]$result.StdOut).Trim()
+}
+
+# A checkout left by an earlier install is brought up to date the way `posse
+# update` does it: only a tree without local changes moves, and only forward,
+# so local work is never lost. A copy this installer manages may instead be
+# reset onto the current release when its history cannot fast-forward.
+function Update-PosseCheckout {
+  param([string]$Root, [switch]$Managed)
+  $top = Get-GitOutput $Root @("rev-parse", "--show-toplevel")
+  if (-not $top) { return [PSCustomObject]@{ Ok = $false; Note = "not a git checkout, so setup cannot update it" } }
+  $branch = Get-GitOutput $top @("rev-parse", "--abbrev-ref", "HEAD")
+  if (-not $branch -or $branch -eq "HEAD") { return [PSCustomObject]@{ Ok = $false; Note = "no branch is checked out, so setup cannot update it" } }
+  $dirty = Get-GitOutput $top @("status", "--porcelain", "--untracked-files=no")
+  if ($null -eq $dirty) { return [PSCustomObject]@{ Ok = $false; Note = "git could not read it, so setup did not update it" } }
+  if ($dirty) { return [PSCustomObject]@{ Ok = $false; Note = "it has local changes, so setup did not update it" } }
+  if ($DryRun) { return [PSCustomObject]@{ Ok = $true; Note = ("would update it from origin/{0}" -f $branch) } }
+
+  $rc = Invoke-Logged -Description ("fetch origin/{0} for the existing checkout" -f $branch) -Activity "Checking for a newer Posse" -Command @("git", "-C", $top, "fetch", "origin", $branch) -QuietFailure
+  $before = Get-GitOutput $top @("rev-parse", "HEAD")
+  $after = if ($rc -eq 0) { Get-GitOutput $top @("rev-parse", "FETCH_HEAD") } else { $null }
+  if (-not $before -or -not $after) { return [PSCustomObject]@{ Ok = $false; Note = ("could not fetch origin/{0}; see log" -f $branch) } }
+  if ($before -eq $after) { return [PSCustomObject]@{ Ok = $true; Note = ("already current at {0}" -f $before.Substring(0, 9)) } }
+
+  if ($null -ne (Get-GitOutput $top @("merge-base", "--is-ancestor", $before, $after))) {
+    $command = @("git", "-C", $top, "merge", "--ff-only", $after)
+  }
+  elseif ($Managed) {
+    $command = @("git", "-C", $top, "reset", "--hard", $after)
+  }
+  else {
+    return [PSCustomObject]@{ Ok = $false; Note = ("it cannot fast-forward to origin/{0}, so setup did not update it" -f $branch) }
+  }
+  $rc = Invoke-Logged -Description ("update the existing checkout to origin/{0}" -f $branch) -Activity "Updating Posse" -Command $command
+  if ($rc -ne 0) { return [PSCustomObject]@{ Ok = $false; Note = "updating it failed; see log" } }
+  return [PSCustomObject]@{ Ok = $true; Note = ("updated {0} -> {1}" -f $before.Substring(0, 9), $after.Substring(0, 9)) }
 }
 
 # Winget installs land on Machine/User PATH, which this process doesn't see.
@@ -1842,6 +1888,7 @@ function Step-Checkout {
     if ($detected) {
       if ($DryRun -or (Test-DirectoryWriteAccess $detected)) {
         $script:PosseDirResolved = $detected
+        $script:CheckoutIsInstallerSource = $true
         Write-Info "using the writable Posse checkout containing this installer"
       }
       else {
@@ -1862,8 +1909,17 @@ function Step-Checkout {
       if (-not $DryRun -and -not (Test-DirectoryWriteAccess $resolvedRoot)) {
         Step-FailCritical ("Posse checkout is not writable by the current user: {0}. Move/reclone it into a user-owned directory or omit -PosseDir." -f $resolvedRoot)
       }
+      elseif ($script:CheckoutIsInstallerSource) {
+        # A developer running setup from their own clone keeps it as it is.
+        Step-End "ok" ("using the checkout this installer runs from: {0}" -f $resolvedRoot)
+      }
       else {
-        Step-End "ok" ("existing writable checkout: {0}" -f $resolvedRoot)
+        $update = Update-PosseCheckout $resolvedRoot -Managed:(Test-PathUnder $resolvedRoot $InstallRoot)
+        if ($update.Ok) { Step-End "ok" ("existing checkout {0}: {1}" -f $resolvedRoot, $update.Note) }
+        else {
+          Write-Warn2 ("kept the existing checkout {0} as it is: {1}" -f $resolvedRoot, $update.Note)
+          Step-End "partial" ("existing Posse kept as it is: {0}" -f $update.Note)
+        }
       }
     }
     else {
@@ -2048,6 +2104,125 @@ function Step-Automation {
   }
 }
 
+# The checkout a Posse launcher (posse.cmd, npm's shims) runs, or "" when the
+# file is not a Posse launcher. npm shims name their package folder, which an
+# `npm link` turns into a junction to a checkout elsewhere.
+function Get-PosseLauncherRoot {
+  param([string]$ShimPath)
+  $text = try { [System.IO.File]::ReadAllText($ShimPath) } catch { "" }
+  $match = [regex]::Match($text, '"?([^"\r\n]*?)[\\/]orchestrator\.js"?', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  if (-not $match.Success) { return "" }
+  $dir = $match.Groups[1].Value -replace '(?i)^%~?dp0%?\\?', ((Split-Path $ShimPath -Parent) + "\") -replace '(?i)^\$basedir/', ((Split-Path $ShimPath -Parent) + "\")
+  $dir = $dir.Replace("/", "\").Replace("%%", "%")
+  try {
+    $item = Get-Item -LiteralPath $dir -Force -ErrorAction Stop
+    if ($item.LinkType -and $item.Target) { $dir = @($item.Target)[0] }
+    return (Resolve-FullPath $dir).TrimEnd("\")
+  }
+  catch { return (Resolve-FullPath $dir).TrimEnd("\") }
+}
+
+# Deletes a directory without following junctions or symlinks inside it (cmd's
+# rmdir removes a link itself; PowerShell 5.1 can recurse into its target).
+# The rename first fails cleanly while any file in it is in use.
+function Remove-DirectoryTree {
+  param([string]$Path)
+  $staging = $Path.TrimEnd("\") + ".removing-" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
+  Rename-Item -LiteralPath $Path -NewName (Split-Path $staging -Leaf) -ErrorAction Stop
+  $rc = Invoke-Logged -Description ("delete {0}" -f $Path) -Activity "Removing an old Posse copy" -Command @($env:ComSpec, "/d", "/c", "rmdir", "/s", "/q", $staging) -QuietFailure
+  if ($rc -ne 0 -or (Test-Path -LiteralPath $staging)) { throw ("could not finish deleting {0}" -f $staging) }
+}
+
+# Earlier installs leave their own `posse` commands, checkouts, and native
+# binaries behind: the pre-July <InstallRoot>\posse layout, npm global or
+# linked copies, and launchers in other PATH folders. Retire them so only this
+# checkout answers `posse`. Old copies this installer created are deleted when
+# they hold no local changes; anything else is only unlinked and named.
+function Remove-StalePosseInstalls {
+  param([string]$CurrentRoot, [string]$ManagedBinDir)
+  $notes = @()
+  $current = (Resolve-FullPath $CurrentRoot).TrimEnd("\")
+  $isCurrent = { param([string]$Root) $Root -and ((Test-PathUnder $Root $current) -or (Test-PathUnder $current $Root)) }
+  $oldRoots = @()
+
+  # npm's global copy, or an `npm link` to another checkout.
+  $npmPackage = if ($env:APPDATA) { Join-Path $env:APPDATA "npm\node_modules\claude-org" } else { "" }
+  if ($npmPackage -and (Test-Path -LiteralPath $npmPackage)) {
+    $item = Get-Item -LiteralPath $npmPackage -Force
+    $target = if ($item.LinkType -and $item.Target) { Resolve-FullPath (@($item.Target)[0]) } else { $npmPackage }
+    if (-not (& $isCurrent $target)) {
+      if ($DryRun) { $notes += ("would uninstall the npm global Posse ({0})" -f $target) }
+      else {
+        $npm = Get-Command npm -ErrorAction SilentlyContinue | Select-Object -First 1
+        $rc = if ($npm) { Invoke-Logged -Description "uninstall the npm global Posse (claude-org)" -Activity "Removing an old Posse copy" -Command @($npm.Source, "rm", "-g", "claude-org") -QuietFailure } else { 1 }
+        if ($rc -eq 0) { $notes += ("uninstalled the npm global Posse ({0})" -f $target) }
+        else { $notes += ("could not uninstall the npm global Posse; run: npm rm -g claude-org") }
+      }
+      if ($item.LinkType) { $oldRoots += $target }
+    }
+  }
+
+  # Launchers in other PATH folders (and npm's folder) that run another copy.
+  $dirs = @(Get-SavedPathDirs)
+  if ($env:APPDATA) { $dirs += (Join-Path $env:APPDATA "npm") }
+  $seen = @{}
+  foreach ($dir in $dirs) {
+    $full = try { (Resolve-FullPath $dir).TrimEnd("\") } catch { "" }
+    if (-not $full -or $seen.ContainsKey($full.ToLowerInvariant()) -or $full -ieq $ManagedBinDir.TrimEnd("\")) { continue }
+    $seen[$full.ToLowerInvariant()] = $true
+    foreach ($name in @("posse", "posse.cmd", "posse.ps1", "claude-org", "claude-org.cmd", "claude-org.ps1")) {
+      $launcher = Join-Path $full $name
+      if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { continue }
+      $root = Get-PosseLauncherRoot $launcher
+      if (-not $root -or (& $isCurrent $root)) { continue }
+      $oldRoots += $root
+      if ($DryRun) { $notes += ("would remove the old posse command {0}" -f $launcher); continue }
+      try { Remove-Item -LiteralPath $launcher -Force -ErrorAction Stop; $notes += ("removed the old posse command {0}" -f $launcher) }
+      catch { $notes += ("could not remove the old posse command {0}: {1}" -f $launcher, $_.Exception.Message) }
+    }
+  }
+
+  # Copies this installer created under InstallRoot, including abandoned clones.
+  $installDirs = if ($InstallRoot -and (Test-Path -LiteralPath $InstallRoot)) { @(Get-ChildItem -LiteralPath $InstallRoot -Directory -Force -ErrorAction SilentlyContinue) } else { @() }
+  foreach ($dir in $installDirs) {
+    $root = Resolve-PosseRootFromCheckout $dir.FullName
+    $abandoned = $dir.Name -match '^posse(-client)?\.(installing|removing)-[0-9a-f]+$'
+    if (-not $abandoned -and ($dir.Name -notin @("posse", "posse-client") -or -not $root -or (& $isCurrent $root))) { continue }
+    if (-not $abandoned) {
+      $dirty = Get-GitOutput $dir.FullName @("status", "--porcelain", "--untracked-files=no")
+      if ($null -eq $dirty -or $dirty) {
+        $notes += ("kept the old Posse copy {0}: it has local changes or is not a git checkout; delete it yourself if unused" -f $dir.FullName)
+        continue
+      }
+    }
+    if ($DryRun) { $notes += ("would delete the old Posse copy {0}" -f $dir.FullName); continue }
+    try { Remove-DirectoryTree $dir.FullName; $notes += ("deleted the old Posse copy {0}" -f $dir.FullName) }
+    catch { $notes += ("could not delete the old Posse copy {0} (close any Posse windows, then delete it): {1}" -f $dir.FullName, $_.Exception.Message) }
+  }
+
+  # Other checkouts the old commands ran are the user's own; name, never delete.
+  foreach ($root in @($oldRoots | Where-Object { $_ -and (Test-Path -LiteralPath $_) -and -not ($InstallRoot -and (Test-PathUnder $_ $InstallRoot)) } | Sort-Object -Unique)) {
+    $notes += ("an older Posse checkout at {0} no longer answers the posse command; delete it if unused" -f $root)
+  }
+
+  # Bossy falls back to this cache to find Posse; an old root there would send
+  # it to the retired copy. Posse rewrites it on the next update check.
+  $updateCheck = Join-Path $env:USERPROFILE ".posse\update-check.json"
+  if (Test-Path -LiteralPath $updateCheck) {
+    $cached = try { Get-Content -LiteralPath $updateCheck -Raw | ConvertFrom-Json } catch { $null }
+    $cachedRoot = if ($cached -and $cached.check) { [string]$(if ($cached.check.posse_root) { $cached.check.posse_root } else { $cached.check.repo_root }) } else { "" }
+    if ($cachedRoot -and -not (& $isCurrent (Resolve-FullPath $cachedRoot))) {
+      if ($DryRun) { $notes += "would clear the update-check cache that names another Posse copy" }
+      else { Remove-Item -LiteralPath $updateCheck -Force -ErrorAction SilentlyContinue; $notes += "cleared the update-check cache that named another Posse copy" }
+    }
+  }
+
+  foreach ($note in $notes) {
+    if ($note -match '^(could not|kept)') { Write-Warn2 $note } else { Write-Info $note }
+  }
+  return $notes
+}
+
 function Step-ShellWiring {
   Step-Begin "shell"
   $envDir = Join-Path $env:USERPROFILE ".config\posse"
@@ -2133,6 +2308,8 @@ function Step-ShellWiring {
   }
 
   $note = "env file + UTF-8 posse.cmd shim installed for $script:PosseDirResolved"
+  $retired = @(Remove-StalePosseInstalls $script:PosseDirResolved $binDir)
+  if ($retired.Count -gt 0) { $note += ("; cleaned up {0} item(s) from older Posse installs (see log)" -f $retired.Count) }
   # Test-Cmd runs against this process's freshly seeded PATH, so it cannot
   # detect the case that matters; base the reminder on the persisted change.
   if ($script:UserPathChangedThisRun) { $note += " (open a new terminal to pick up PATH)" }
