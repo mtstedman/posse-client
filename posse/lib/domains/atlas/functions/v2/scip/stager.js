@@ -739,6 +739,21 @@ function scipBatchSessionMatchesManifest(state, manifest) {
 }
 
 /**
+ * Operator-facing message for one failed `stageScipBatches` result row. Rows
+ * from plans that are not batch-eligible come from whole-project fallback
+ * staging and carry `fallbackWholeProject` instead of a `batchOrdinal`.
+ *
+ * @param {{ batchOrdinal?: number, fallbackWholeProject?: boolean, language?: string | null, error?: string | null }} row
+ * @returns {string}
+ */
+export function formatScipStageFailure(row) {
+  const label = row?.fallbackWholeProject === true
+    ? "SCIP whole-project fallback"
+    : `SCIP batch ${Number(row?.batchOrdinal) + 1}`;
+  return `${label} failed (${row?.language || "unknown"}): ${row?.error || "unknown error"}`;
+}
+
+/**
  * Stage ordered, path-preserving SCIP batches and hand each completed artifact
  * to a bounded downstream lane. The callback's returned promise is the batch
  * acknowledgement; at most `maxInFlight` unacknowledged batches are retained.

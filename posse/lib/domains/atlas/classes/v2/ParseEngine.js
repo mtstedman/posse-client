@@ -97,7 +97,7 @@ import { ingestScipFile, listScipFiles } from "../../functions/v2/scip/ingester.
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
 import { startOnnxRefresh } from "../../functions/v2/parse/onnx-index-runner.js";
 import { hasLanguageSemantics } from "../../functions/v2/resolver/adapters/registry.js";
-import { ensureScipStaged, stageScipBatches } from "../../functions/v2/scip/stager.js";
+import { ensureScipStaged, formatScipStageFailure, stageScipBatches } from "../../functions/v2/scip/stager.js";
 import { reclaimSupersededScipState } from "../../functions/v2/scip/session-reclaim.js";
 import {
   scipCoverageForIntake,
@@ -718,7 +718,7 @@ export class ParseEngine {
         base.skipped.push({
           repo_rel_path: ".",
           reason: "parse_error",
-          message: `SCIP batch ${Number(row.batchOrdinal) + 1} failed (${row.language || "unknown"}): ${row.error || "unknown error"}`,
+          message: formatScipStageFailure(row),
         });
       }
       // A bisected batch that recovers at least one document is `ok: true`, so

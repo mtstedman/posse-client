@@ -156,6 +156,7 @@ import {
   normalizeIterativeWorkflowModeChoice,
 } from "../../intake/functions/choices.js";
 import {
+  assertInputContextSelection,
   mergeSuspectedDirsWithInputContexts,
 } from "../../intake/functions/input-contexts.js";
 import { inferWiMode, resolveWorkItemMode } from "../../intake/functions/mode-inference.js";
@@ -337,17 +338,20 @@ function firstGitErrorLine(err) {
 }
 
 async function ensureGitRepositoryInitialized({ verbose = false } = {}) {
+  // Repository bootstrap runs for intake/admin commands that do not own native
+  // Git readiness, so it uses the direct system-Git adapter: a fresh or
+  // unauthenticated checkout must still be able to create its repository.
   try {
-    await gitExecAsync(["rev-parse", "--git-dir"], PROJECT_DIR, {
+    await adminGitExecAsync(["rev-parse", "--git-dir"], PROJECT_DIR, {
       timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
       maxBuffer: 1024 * 128,
     });
     return { initialized: false };
   } catch (err) {
     // Only git itself saying "not a repository" may trigger init. A probe
-    // that could not run (native git layer down, gate busy, timeout) must
-    // not re-initialize an existing repo.
-    if (!isGitCommandFailure(err)) {
+    // that could not run (git missing, timeout) must not re-initialize an
+    // existing repo; the admin adapter marks those as command failures too.
+    if (!isGitCommandFailure(err) || err?.killed === true || typeof err?.syscall === "string") {
       throw new Error(`git availability probe failed (not a missing repo): ${firstGitErrorLine(err)}`);
     }
     // First run in a fresh directory: create the local repository before
@@ -358,7 +362,7 @@ async function ensureGitRepositoryInitialized({ verbose = false } = {}) {
     console.log(`\n  ${C.yellow}${PROJECT_DIR} is not a git repository — initializing one.${C.reset}`);
   }
   try {
-    await gitExecAsync(["init"], PROJECT_DIR, {
+    await adminGitExecAsync(["init"], PROJECT_DIR, {
       timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
       maxBuffer: 1024 * 1024,
     });
@@ -374,6 +378,7 @@ async function ensureGitRepositoryInitialized({ verbose = false } = {}) {
 async function ensureSnapshotPushRefsGuarded({ verbose = false, timeoutMs = BOOT_PUSH_GUARD_TIMEOUT_MS } = {}) {
   if (await remotePushConfigsAreClearlyRestrictive(PROJECT_DIR, {
     timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
+    gitExecAsyncFn: adminGitExecAsync,
   })) {
     return;
   }
@@ -468,7 +473,7 @@ async function ensureGitReady() {
 async function ensureRepoSetupConfirmed() {
   // Async so the boot event loop isn't blocked on git between the interactive
   // prompts (the broader boot orchestration requires every task be off-loop).
-  const runGit = async (args) => await gitExecAsync(args, PROJECT_DIR, {
+  const runGit = async (args) => await adminGitExecAsync(args, PROJECT_DIR, {
     timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
     maxBuffer: 1024 * 1024,
   });
@@ -476,7 +481,7 @@ async function ensureRepoSetupConfirmed() {
   try {
     await ensureGitRepositoryInitialized({ verbose: true });
     await ensurePosseRuntimeIgnoresAsync(PROJECT_DIR);
-    await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR);
+    await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR, { git: runGit });
   } catch (err) {
     console.error(`  ${C.red}${firstGitErrorLine(err)}${C.reset}\n`);
     return false;
@@ -535,7 +540,7 @@ async function ensureRepoSetupConfirmed() {
     // instead of prompting.
     console.log(`\n  ${C.yellow}Repo has no commits yet — creating an initial commit so worktrees can branch from HEAD.${C.reset}`);
     try {
-      await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR);
+      await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR, { git: runGit });
       await runGit(["commit", "--allow-empty", "-m", "chore: initial commit (posse bootstrap)"]);
       console.log(`  ${C.green}Initial commit created.${C.reset}\n`);
     } catch (err) {
@@ -966,11 +971,21 @@ async function init({ requireWritableArtifacts = true, refreshStartupContext = f
         readiness.step("Artifact cleanup", () => pruneEmptyArtifactDirsAsync(PROJECT_DIR)),
         readiness.step("Runtime ignores", async () => {
           const result = await ensurePosseRuntimeIgnoresAsync(PROJECT_DIR);
-          result.gitignoreInitialCommit = await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR);
+          result.gitignoreInitialCommit = await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR, {
+            git: (args, cwd) => adminGitExecAsync(args, cwd, {
+              timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
+              maxBuffer: 1024 * 1024,
+            }),
+          });
           return result;
         }),
-        readiness.step("Project map", () => ensureProjectMapAsync(PROJECT_DIR)),
-        readiness.step("Project map hook", () => ensureProjectMapRebuildHookAsync({ cwd: PROJECT_DIR })),
+        readiness.step("Project map", () => ensureProjectMapAsync(PROJECT_DIR, {
+          gitExecAsyncFn: adminGitExecAsync,
+        })),
+        readiness.step("Project map hook", () => ensureProjectMapRebuildHookAsync({
+          cwd: PROJECT_DIR,
+          gitExecAsyncFn: adminGitExecAsync,
+        })),
       ];
       // The startup-context digest is only consumed at the start of long-running
       // commands (run/go/review/merge). Skipping it for cheap intake commands
@@ -1466,6 +1481,7 @@ function cmdAsk() {
     inputSelection,
     PROJECT_DIR,
   );
+  assertInputContextSelection(mergedDirs, inputSelection);
   const intakeHints = normalizeIntakeHints({
     intent_type: "question",
     intent_type_source: "explicit",

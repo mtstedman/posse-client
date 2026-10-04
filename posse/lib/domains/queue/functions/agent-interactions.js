@@ -958,9 +958,11 @@ export function acknowledgeOperatorFeedback({
 
 /**
  * Job-end reconciliation: any user_to_agent guidance still unacked when a job
- * reaches a terminal status can never be delivered — mark it expired and say
- * so, instead of leaving `ack_state='pending'` rows that render on no surface
- * while the operator believes the nudge landed.
+ * reaches a terminal status can never be acknowledged — mark it expired and
+ * say so, instead of leaving `ack_state='pending'` rows that render on no
+ * surface while the operator believes the nudge landed. The event names
+ * whether the agent was ever shown the guidance (`first_applied_at`), so a
+ * delivered-but-unacknowledged item is not reported as undelivered.
  *
  * @param {{ job_id: number, reason?: string, agent_call_id?: number }} args
  * @returns {number} rows expired
@@ -972,7 +974,7 @@ export function expireUnackedOperatorFeedbackForJob({ job_id, reason = "job_fina
   const nowIso = now();
   const expired = runImmediateTransaction(db, () => {
     const rows = db.prepare(`
-      SELECT id, work_item_id, job_id, kind
+      SELECT id, work_item_id, job_id, kind, first_applied_at
       FROM agent_interactions
       WHERE job_id = ? AND (? IS NULL OR agent_call_id = ?)
         AND direction = 'user_to_agent'
@@ -990,17 +992,19 @@ export function expireUnackedOperatorFeedbackForJob({ job_id, reason = "job_fina
     return rows;
   });
   for (const row of expired) {
+    const delivered = !!row.first_applied_at;
     logEvent({
       work_item_id: row.work_item_id,
       job_id: row.job_id,
       event_type: applicationEventType(row.kind),
       actor_type: EVENT_ACTORS.WORKER,
-      message: `Undelivered ${interactionLabel(row)} #${row.id} expired: ${reason}`,
+      message: `${delivered ? "Delivered but unacknowledged" : "Undelivered"} ${interactionLabel(row)} #${row.id} expired: ${reason}`,
       event_json: {
         interaction_id: row.id,
         kind: row.kind,
         reason,
         expired: true,
+        delivery_state: delivered ? "delivered_unacknowledged" : "undelivered",
         live_channel: true,
       },
     });

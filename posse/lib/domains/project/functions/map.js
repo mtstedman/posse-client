@@ -46,9 +46,13 @@ function currentGitHead(projectDir, execImpl = null) {
   return null;
 }
 
-async function currentGitHeadAsync(projectDir) {
+async function currentGitHeadAsync(projectDir, gitExecAsyncFn = null) {
   const cwd = normalizeProjectDir(projectDir);
   try {
+    if (typeof gitExecAsyncFn === "function") {
+      const sha = String(await gitExecAsyncFn(["rev-parse", "HEAD"], cwd, { timeoutMs: 5000 }) || "").trim();
+      return sha || null;
+    }
     const sha = String(await gitCurrentHashAsync(cwd, { timeoutMs: 5000 }) || "").trim();
     return sha || null;
   } catch {
@@ -239,7 +243,7 @@ export function generateProjectMap(projectDir, { execImpl = null } = {}) {
   };
 }
 
-export async function generateProjectMapAsync(projectDir) {
+export async function generateProjectMapAsync(projectDir, { gitExecAsyncFn = null } = {}) {
   const root = normalizeProjectDir(projectDir);
   const scanned = {};
   await Promise.all(SCAN_ROOTS.map(async (relRoot) => {
@@ -249,7 +253,7 @@ export async function generateProjectMapAsync(projectDir) {
   const { modules, module_aliases } = buildModules(scanned.lib || []);
   return {
     generated_at: new Date().toISOString(),
-    head_sha: await currentGitHeadAsync(root),
+    head_sha: await currentGitHeadAsync(root, gitExecAsyncFn),
     top_level: await readTopLevelAsync(root),
     modules,
     module_aliases,
@@ -276,14 +280,14 @@ export function ensureProjectMap(projectDir, { force = false, execImpl = null } 
   return map;
 }
 
-export async function ensureProjectMapAsync(projectDir, { force = false } = {}) {
+export async function ensureProjectMapAsync(projectDir, { force = false, gitExecAsyncFn = null } = {}) {
   const root = normalizeProjectDir(projectDir);
-  const currentHead = await currentGitHeadAsync(root);
+  const currentHead = await currentGitHeadAsync(root, gitExecAsyncFn);
   const cached = force ? null : await readCacheAsync(root);
   if (cached && (currentHead == null || cached.head_sha === currentHead)) {
     return cached;
   }
-  const map = await generateProjectMapAsync(root);
+  const map = await generateProjectMapAsync(root, { gitExecAsyncFn });
   await writeJsonAtomicAsync(projectMapPath(root), map);
   return map;
 }
@@ -313,10 +317,11 @@ function resolveGitHooksDir(cwd, execImpl = null) {
   }
 }
 
-async function resolveGitHooksDirAsync(cwd) {
+async function resolveGitHooksDirAsync(cwd, gitExecAsyncFn = null) {
   const resolvedCwd = normalizeProjectDir(cwd);
   try {
-    const raw = String(await gitExecAsync(["rev-parse", "--git-path", "hooks"], resolvedCwd, {
+    const execGit = gitExecAsyncFn || gitExecAsync;
+    const raw = String(await execGit(["rev-parse", "--git-path", "hooks"], resolvedCwd, {
       timeoutMs: 10000,
       maxBuffer: 1024 * 128,
     }) || "").trim();
@@ -359,9 +364,10 @@ function gitTopLevel(cwd, execImpl = null) {
   }
 }
 
-async function gitTopLevelAsync(cwd) {
+async function gitTopLevelAsync(cwd, gitExecAsyncFn = null) {
   try {
-    return String(await gitExecAsync(["rev-parse", "--show-toplevel"], cwd, { timeoutMs: 10000 }) || "").trim() || null;
+    const execGit = gitExecAsyncFn || gitExecAsync;
+    return String(await execGit(["rev-parse", "--show-toplevel"], cwd, { timeoutMs: 10000 }) || "").trim() || null;
   } catch {
     return null;
   }
@@ -482,6 +488,7 @@ export function ensureProjectMapRebuildHook({
 
 export async function ensureProjectMapRebuildHookAsync({
   cwd = null,
+  gitExecAsyncFn = null,
 } = {}) {
   const repoCwd = normalizeProjectDir(cwd);
 
@@ -496,11 +503,11 @@ export async function ensureProjectMapRebuildHookAsync({
     } catch { /* fall through to slow path */ }
   }
 
-  const hooksDir = await resolveGitHooksDirAsync(repoCwd);
+  const hooksDir = await resolveGitHooksDirAsync(repoCwd, gitExecAsyncFn);
   if (!hooksDir) return { attempted: false, skipped: "not_git_repo" };
 
   const hookPath = path.join(hooksDir, "post-commit");
-  if (hooksDir !== fastDir && isWorkTreeHooksDir(hooksDir, await gitTopLevelAsync(repoCwd))) {
+  if (hooksDir !== fastDir && isWorkTreeHooksDir(hooksDir, await gitTopLevelAsync(repoCwd, gitExecAsyncFn))) {
     return { attempted: false, ok: true, skipped: "hooks_dir_in_work_tree", hookPath, changed: false };
   }
   const block = buildHookBlock(repoCwd);

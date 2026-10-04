@@ -1950,10 +1950,10 @@ function Step-Composer {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $expected = (Invoke-RestMethod -Uri "https://composer.github.io/installer.sig" -TimeoutSec 30).Trim()
     Invoke-WebRequest -Uri "https://getcomposer.org/installer" -OutFile $setupPath -UseBasicParsing -TimeoutSec 120
-    $env:POSSE_COMPOSER_SETUP = $setupPath
-    $actual = ""
-    try { $actual = (& $php.Source -r 'echo hash_file("sha384", getenv("POSSE_COMPOSER_SETUP"));') } catch {}
-    if ([string]::IsNullOrWhiteSpace($actual) -or ($actual.Trim().ToLowerInvariant() -ne $expected.ToLowerInvariant())) {
+    # Hash here, not with `php -r`: Windows PowerShell 5.1 drops the inner
+    # double quotes of native arguments, so PHP would get broken code.
+    $actual = (Get-FileHash -LiteralPath $setupPath -Algorithm SHA384).Hash
+    if ([string]::IsNullOrWhiteSpace($expected) -or ($actual -ine $expected)) {
       Write-Warn2 "Composer installer signature verification failed"
       Step-End "partial" "composer unavailable (signature mismatch)"
       return
@@ -1973,7 +1973,6 @@ function Step-Composer {
   }
   finally {
     Remove-Item $setupPath -Force -ErrorAction SilentlyContinue
-    Remove-Item Env:\POSSE_COMPOSER_SETUP -ErrorAction SilentlyContinue
   }
 }
 
@@ -2724,12 +2723,17 @@ function Step-NativeBinaries {
     return
   }
 
-  $rc = Invoke-Logged -Description "download current native binaries" -Activity "Downloading Posse's native tools" -Command @($script:NodeBin, "scripts/pull-native-artifacts.mjs") -WorkingDirectory $script:PosseDirResolved
-  # Binaries already current are only checked again, so one retry is cheap.
-  if ($rc -ne 0 -and $rc -ne 124) {
-    Write-Info "retrying once (transient network failures are common)"
-    $rc = Invoke-Logged -Description "download current native binaries (retry)" -Activity "Retrying Posse's native tools" -Command @($script:NodeBin, "scripts/pull-native-artifacts.mjs") -WorkingDirectory $script:PosseDirResolved
+  # The download reports its combined percentage straight to the setup page.
+  if ($ProgressFile) { $env:POSSE_SETUP_PROGRESS_FILE = $ProgressFile }
+  try {
+    $rc = Invoke-Logged -Description "download current native binaries" -Activity "Downloading Posse's native tools" -Command @($script:NodeBin, "scripts/pull-native-artifacts.mjs") -WorkingDirectory $script:PosseDirResolved
+    # Binaries already current are only checked again, so one retry is cheap.
+    if ($rc -ne 0 -and $rc -ne 124) {
+      Write-Info "retrying once (transient network failures are common)"
+      $rc = Invoke-Logged -Description "download current native binaries (retry)" -Activity "Retrying Posse's native tools" -Command @($script:NodeBin, "scripts/pull-native-artifacts.mjs") -WorkingDirectory $script:PosseDirResolved
+    }
   }
+  finally { Remove-Item Env:\POSSE_SETUP_PROGRESS_FILE -ErrorAction SilentlyContinue }
   if ($rc -eq 0) {
     Step-End "ok" "native binaries downloaded or already current"
   }

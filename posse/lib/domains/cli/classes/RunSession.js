@@ -2990,6 +2990,11 @@ export class RunSession {
     // Natural-completion exit: release + dispose the conductor so its worker
     // thread doesn't pin the loop (shutdown paths already do this via 3133).
     await cleanupAtlasForSession({ label: "Run wrap-up", announce: false });
+    // Residual worktree cleanup still needs the native Git worker. Finish it
+    // before retiring daemon hosts (as the signal-shutdown path already does)
+    // so closeout never cold-spawns a replacement Git host after the ledger
+    // sweep below.
+    await cleanupResidualWorktreesAfterAtlas({ label: "Run wrap-up" });
     // Retire every supervised daemon host (EOF + drain grace, no mid-call
     // kills), then sweep this process's daemon ledger so thread-minted strays
     // can't outlive the run. A clean exit leaves zero hosts and no ledger.
@@ -3006,7 +3011,6 @@ export class RunSession {
     try {
       await persistentMcpOwnerForRun.close({ force: true });
     } catch { /* MCP owner shutdown is best-effort */ }
-    await cleanupResidualWorktreesAfterAtlas({ label: "Run wrap-up" });
   }
 
   // Natural-completion exit. The finally above disposes the conductor, ONNX

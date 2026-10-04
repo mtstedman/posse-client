@@ -10,14 +10,24 @@ catch (error) { console.error(`[pull-native] could not read private .env (${erro
 
 const { BINARY_NAMES } = await import("../lib/catalog/binary.js");
 const { nativeBinaries } = await import("../lib/shared/tools/classes/BinaryManager.js");
+const { createCollectiveDownloadProgress, setupProgressWriter } = await import("../lib/shared/native/functions/setup-download-progress.js");
 
 const requested = parseArgs(process.argv.slice(2));
 let failed = false;
 
-const results = await Promise.all(requested.map(async (name) => ({
-  name,
-  result: await nativeBinaries.ensureAvailable(name, { refresh: true }),
-})));
+// Posse Setup passes its progress file so its item bar can show the combined
+// download instead of an animated "busy" bar.
+const progress = createCollectiveDownloadProgress({
+  names: requested,
+  write: setupProgressWriter(process.env.POSSE_SETUP_PROGRESS_FILE),
+});
+const results = await Promise.all(requested.map(async (name) => {
+  try {
+    return { name, result: await nativeBinaries.ensureAvailable(name, { refresh: true, onProgress: progress.onProgress }) };
+  } finally {
+    progress.settle(name);
+  }
+}));
 for (const { name, result } of results) {
   if (!result.available) {
     failed = true;

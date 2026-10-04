@@ -23,16 +23,22 @@ function isTrueConfigValue(value) {
 
 export async function remotePushConfigsAreClearlyRestrictive(cwd, options = {}) {
   let stdout = "";
+  // Read-only probe. Operator bootstrap may inject the direct system-Git
+  // adapter so a repository without risky push config never needs native
+  // auth; any rewrite still goes through posse-git.
+  const execGit = typeof options.gitExecAsyncFn === "function" ? options.gitExecAsyncFn : gitExecAsync;
   try {
-    stdout = await gitExecAsync(["config", "--get-regexp", REMOTE_PUSH_CONFIG_RE], cwd, {
+    stdout = await execGit(["config", "--get-regexp", REMOTE_PUSH_CONFIG_RE], cwd, {
       timeoutMs: options.timeoutMs ?? 5_000,
       nativeParity: gitNativeOptions(options),
     });
   } catch (err) {
     // `git config --get-regexp` exits 1 when nothing matches — that means
     // "no push configs", which is restrictive. Anything else (git error,
-    // gate busy, native unavailable) must not report restrictive-by-default.
+    // gate busy, native unavailable, an admin-adapter timeout or spawn
+    // failure) must not report restrictive-by-default.
     if (!isGitCommandFailure(err) || err.status !== 1) return false;
+    if (err.killed === true || typeof err.syscall === "string") return false;
     stdout = String(err?.stdout || "");
   }
 
