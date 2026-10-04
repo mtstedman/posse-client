@@ -25,6 +25,7 @@ import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 import { runGitNativeMethod } from "./native/invoke.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { getRuntimeDbPath, getRuntimeResourcesDir, getRuntimeRoot, normalizeProjectDir } from "../../runtime/functions/paths.js";
+import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
 import {
   classifyScopedCommit,
   collectScopedCommitDiff,
@@ -504,6 +505,18 @@ function outOfScopeDirtyError({
   return err;
 }
 
+function reservedRuntimePathError(paths = [], operation = "commit") {
+  const blocked = filterPosseRuntimePaths(paths);
+  const err = new Error(
+    `Posse refused to ${operation} reserved runtime path(s): ${blocked.slice(0, 10).join(", ")}. Remove them from Git tracking before retrying.`,
+  );
+  err.code = "GIT_RESERVED_RUNTIME_PATH";
+  err.retryable = false;
+  err.assessmentRetryable = false;
+  err.runtimePaths = blocked;
+  return err;
+}
+
 function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   const reverted = [];
   const createdViaModifyScope = [];
@@ -573,6 +586,25 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   const modifyFilesRaw = (scope?.modifyFiles || []).map(scopeCompatiblePath).filter(Boolean);
   const createFilesRaw = (scope?.createFiles || []).map(scopeCompatiblePath).filter(Boolean);
   const deleteFilesRaw = (scope?.deleteFiles || []).map(scopeCompatiblePath).filter(Boolean);
+  const reservedScopePaths = filterPosseRuntimePaths([
+    ...modifyFilesRaw,
+    ...createFilesRaw,
+    ...deleteFilesRaw,
+    ...(scope?.createRoots || []).map(scopeCompatiblePath).filter(Boolean),
+  ]);
+  if (reservedScopePaths.length > 0) {
+    throw reservedRuntimePathError(reservedScopePaths, "admit a scoped commit containing");
+  }
+  const splitNulPaths = (value) => String(value || "").split("\0").map(scopeCompatiblePath).filter(Boolean);
+  const reservedWorkingPaths = filterPosseRuntimePaths([
+    ...splitNulPaths(gitForCommit(headAtScopeStart
+      ? ["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", "HEAD", "--"]
+      : ["-c", "core.quotePath=false", "ls-files", "-z"], { trim: false })),
+    ...splitNulPaths(gitForCommit(["-c", "core.quotePath=false", "ls-files", "-z", "--others", "--exclude-standard"], { trim: false })),
+  ]);
+  if (reservedWorkingPaths.length > 0) {
+    throw reservedRuntimePathError(reservedWorkingPaths, "commit");
+  }
   const modifyFiles = modifyFilesRaw.map(caseFold);
   const createFiles = createFilesRaw.map(caseFold);
   const deleteFiles = deleteFilesRaw.map(caseFold);
@@ -1258,6 +1290,14 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   }
 
   const staged = gitExec(["-c", "core.quotePath=false", "diff", "--no-renames", "--cached", "--name-only"], cwd);
+  const reservedStagedPaths = filterPosseRuntimePaths(
+    String(gitExec(["-c", "core.quotePath=false", "diff", "--no-renames", "--cached", "--name-only", "-z"], cwd, { trim: false }) || "")
+      .split("\0")
+      .filter(Boolean),
+  );
+  if (reservedStagedPaths.length > 0) {
+    throw reservedRuntimePathError(reservedStagedPaths, "commit");
+  }
   // An empty staged diff normally means nothing to commit — except mid-merge,
   // where a resolution that took "ours" everywhere still must commit so
   // MERGE_HEAD is cleared and the merge is recorded instead of dangling into

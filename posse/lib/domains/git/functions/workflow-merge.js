@@ -50,6 +50,17 @@ import {
 import { conflictFilesFromMergeError, parkedMergeGuidance } from "./merge-park-guidance.js";
 import { runRegisteredTestsForMergeCandidate } from "../../../shared/tools/functions/toolkit/registered-tests.js";
 import { mergeToSharedTrunkAsync } from "./shared-trunk.js";
+import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
+
+function reservedRuntimeMergeError(paths = []) {
+  const blocked = filterPosseRuntimePaths(paths);
+  const error = new Error(
+    `Merge candidate contains reserved Posse runtime path(s): ${blocked.slice(0, 10).join(", ")}. Remove them from the source branch before retrying.`,
+  );
+  error.code = "GIT_RESERVED_RUNTIME_PATH";
+  error.runtimePaths = blocked;
+  return error;
+}
 
 export function createMergeWorkflowHelpers(context, {
   ensureCleanTargetBranch,
@@ -679,6 +690,11 @@ export function createMergeWorkflowHelpers(context, {
     }
   }
 
+  function candidateIndexRuntimePaths(cwd) {
+    const indexed = gitMergeExec(["-c", "core.quotePath=false", "ls-files", "-z"], cwd, { trim: false });
+    return filterPosseRuntimePaths(String(indexed || "").split("\0").filter(Boolean));
+  }
+
   function recoverTimedOutMerge(branch, cwd, log, onPhase = null, {
     step = "unknown",
     targetBranch = currentTargetBranch(),
@@ -732,6 +748,8 @@ export function createMergeWorkflowHelpers(context, {
     }
 
     if (unmergedFiles.length === 0 && stagedFiles.length > 0) {
+      const runtimePaths = candidateIndexRuntimePaths(cwd);
+      if (runtimePaths.length > 0) throw reservedRuntimeMergeError(runtimePaths);
       emitMergePhase(onPhase, "retry", `Retrying merge commit for ${branch}`, { branch, target: targetBranch });
       log(`Merge timed out with staged changes; retrying squash merge commit for ${branch}`, {
         json: {
@@ -1295,12 +1313,21 @@ export function createMergeWorkflowHelpers(context, {
       // HEAD. Extracted so the untracked-overwrite recovery path can re-run
       // the same body after snapshotting and cleaning blockers.
       const attemptSquashMerge = (label = "merge") => {
+        mergeStep = "runtime-path-preflight";
+        const branchPaths = String(gitMergeExec([
+          "-c", "core.quotePath=false", "ls-tree", "-rz", "--name-only", branch,
+        ], cwd, { trim: false }) || "").split("\0").filter(Boolean);
+        const branchRuntimePaths = filterPosseRuntimePaths(branchPaths);
+        if (branchRuntimePaths.length > 0) throw reservedRuntimeMergeError(branchRuntimePaths);
+
         mergeStep = "merge";
         emitMergePhase(onPhase, "merge", `${label === "merge" ? "Merging" : "Retrying merge of"} ${branch} into ${targetBranch}`, { branch, target: targetBranch });
         gitMergeExec(["merge", "--squash", branch], cwd);
         mergeStep = "diff";
         const staged = gitMergeExec(["diff", "--cached", "--name-only"], cwd);
         const stagedFiles = staged.split("\n").map((line) => line.trim()).filter(Boolean);
+        const candidateRuntimePaths = candidateIndexRuntimePaths(cwd);
+        if (candidateRuntimePaths.length > 0) throw reservedRuntimeMergeError(candidateRuntimePaths);
         if (stagedFiles.length > 0) {
           runProjectedCandidateGate(stagedFiles);
           log(`Creating squash merge commit for ${branch} into ${targetBranch}`, {
@@ -1412,6 +1439,8 @@ export function createMergeWorkflowHelpers(context, {
               });
               const staged = gitMergeExec(["diff", "--cached", "--name-only"], cwd);
               const stagedFiles = staged.split("\n").map((line) => line.trim()).filter(Boolean);
+              const candidateRuntimePaths = candidateIndexRuntimePaths(cwd);
+              if (candidateRuntimePaths.length > 0) throw reservedRuntimeMergeError(candidateRuntimePaths);
               if (stagedFiles.length > 0) runProjectedCandidateGate(stagedFiles);
               emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch });
               mergeStep = "commit";
@@ -1507,6 +1536,8 @@ export function createMergeWorkflowHelpers(context, {
         return {
           ok: false,
           timedOut,
+          runtimePathBlocked: finalMergeErr?.code === "GIT_RESERVED_RUNTIME_PATH",
+          runtimePaths: finalMergeErr?.runtimePaths || [],
           integrationGateFailed: finalMergeErr?.code === "POSSE_MERGE_CANDIDATE_TEST_FAILED",
           integrationGate: finalMergeErr?.integrationGate || null,
           deterministicConflict,

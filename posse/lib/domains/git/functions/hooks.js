@@ -25,6 +25,7 @@ import {
 import { GIT_CAPTURE_MAX_BYTES, GIT_NATIVE_MAX_CAPTURE_BYTES } from "../../../catalog/binary.js";
 import { SECRET_PATTERNS } from "../../../shared/telemetry/functions/logging/secret-patterns.js";
 import { resolvePathWithin } from "../../runtime/functions/fs-safety.js";
+import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
 
 const VERIFY_COMMAND_TIMEOUT_MS = 120_000;
 
@@ -871,6 +872,18 @@ function prePushVerifyFailure(verifyCmd, err) {
   };
 }
 
+function reservedRuntimePathPushBlock(names) {
+  const paths = Array.isArray(names)
+    ? names
+    : String(names || "").split(names?.includes?.("\0") ? "\0" : "\n").filter(Boolean);
+  const blocked = filterPosseRuntimePaths(paths);
+  if (blocked.length === 0) return null;
+  return prePushBlock([
+    `Push blocked: HEAD tracks reserved Posse runtime path(s): ${blocked.slice(0, 10).join(", ")}.`,
+    "Remove them from Git tracking before pushing.",
+  ]);
+}
+
 // `upstream` names the commit the push starts from when HEAD tracks nothing
 // (a detached candidate): the .env and secret scans then cover upstream..HEAD
 // exactly as they would for a tracked branch, instead of being skipped.
@@ -888,6 +901,14 @@ function prePushGate({ cwd, nativeParity = {}, upstream: explicitUpstream = null
 
   const dirtyBlock = dirtyStatusBlock(status);
   if (dirtyBlock) return dirtyBlock;
+
+  try {
+    const tracked = gitExec(["ls-tree", "-rz", "--name-only", "HEAD"], cwd, { nativeParity, trim: false });
+    const runtimeBlock = reservedRuntimePathPushBlock(tracked);
+    if (runtimeBlock) return runtimeBlock;
+  } catch (err) {
+    return gitInfraBlockResult("Reserved runtime path check", err);
+  }
 
   let upstream = explicitUpstream ? String(explicitUpstream) : "";
   if (!upstream) {
@@ -946,6 +967,14 @@ async function prePushGateAsync({ cwd, nativeParity = {}, upstream: explicitUpst
 
   const dirtyBlock = dirtyStatusBlock(status);
   if (dirtyBlock) return dirtyBlock;
+
+  try {
+    const tracked = await gitExecAsync(["ls-tree", "-rz", "--name-only", "HEAD"], cwd, { nativeParity, trim: false });
+    const runtimeBlock = reservedRuntimePathPushBlock(tracked);
+    if (runtimeBlock) return runtimeBlock;
+  } catch (err) {
+    return gitInfraBlockResult("Reserved runtime path check", err);
+  }
 
   let upstream = explicitUpstream ? String(explicitUpstream) : "";
   if (!upstream) {

@@ -6,6 +6,17 @@ import { gitExec, gitExecAsync } from "../../git/functions/utils.js";
 
 export const POSSE_RUNTIME_IGNORE_HEADER = "# Posse runtime (auto-added)";
 
+const POSSE_RUNTIME_PATH_SEGMENTS = new Set([
+  ".posse",
+  ".posse-worktrees",
+  ".posse-test-suites",
+]);
+
+// Bossy owns these deliberately versioned repository configuration surfaces.
+// Everything else below a .posse directory is runtime state by default, so a
+// newly-added cache/database/control path fails closed without catalog churn.
+const POSSE_VERSIONED_CONFIG_NAMESPACES = new Set(["skills", "deploy"]);
+
 const RUNTIME_DB_GLOBS = [
   "*.db",
   "*.db-shm",
@@ -36,6 +47,34 @@ const GENERATED_CACHE_GLOBS = [
 
 function toPosix(value) {
   return String(value || "").replace(/\\/g, "/");
+}
+
+/**
+ * Runtime control paths are reserved at every repository depth. Treat the
+ * names case-insensitively so a branch authored on Linux cannot poison a
+ * Windows checkout with a differently-cased variant.
+ */
+export function isPosseRuntimePath(value) {
+  const normalized = toPosix(value)
+    .replace(/^\.\/+/, "")
+    .replace(/\/+$/, "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return false;
+  const segments = normalized.split("/");
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    if (!POSSE_RUNTIME_PATH_SEGMENTS.has(segment)) continue;
+    if (segment === ".posse" && POSSE_VERSIONED_CONFIG_NAMESPACES.has(segments[index + 1])) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+export function filterPosseRuntimePaths(values = []) {
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(isPosseRuntimePath))];
 }
 
 function asDirectoryPattern(value) {

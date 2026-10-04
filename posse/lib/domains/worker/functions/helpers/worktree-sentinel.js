@@ -7,9 +7,10 @@
 
 import fs from "fs";
 import path from "path";
-import { gitExec } from "../../../git/functions/utils.js";
+import { gitExec, isGitCommandFailure } from "../../../git/functions/utils.js";
 import { getJob } from "../../../queue/functions/index.js";
 import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
+import { ensurePosseGitInfoExclude } from "../../../runtime/functions/ignore.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 
@@ -37,9 +38,37 @@ function resolveWorktreeRoot(wtPath) {
 function activeWorktreeSentinelPath(wtPath, { ensureDir = false } = {}) {
   const root = resolveWorktreeRoot(wtPath);
   if (!root) return null;
-  const posseDir = path.join(root, ".posse");
-  if (ensureDir) fs.mkdirSync(posseDir, { recursive: true });
-  return path.join(posseDir, "active-job");
+  // Defense one: make a newly-created runtime sentinel invisible to every
+  // worktree's broad `git add`. This is repository-local and never changes a
+  // project-owned .gitignore.
+  if (ensureDir) ensurePosseGitInfoExclude(root);
+
+  let sentinelPath = path.join(root, ".posse", "active-job");
+  let tracked = false;
+  try {
+    // Legacy repositories can already have the sentinel tracked. Never mutate
+    // that project file: doing so makes every scoped job dirty before it can
+    // commit. Keep the live sentinel in this worktree's private Git directory
+    // until the repository removes the historical path from its index.
+    gitExec(["ls-files", "--error-unmatch", "--", ".posse/active-job"], root);
+    tracked = true;
+  } catch (error) {
+    // `ls-files --error-unmatch` exits 1 for an untracked path. Any other
+    // failure leaves ownership unknown, so fail closed instead of risking a
+    // write through a tracked project file. Lifecycle unit helpers also use
+    // this sentinel in plain temporary directories; those have no index to
+    // contaminate, so preserve the filesystem-only behavior there.
+    const notARepository = isGitCommandFailure(error)
+      && Number(error?.status) === 128
+      && /not a git repository/i.test(`${error?.stderr || ""}\n${error?.message || ""}`);
+    if (!notARepository && (!isGitCommandFailure(error) || Number(error?.status) !== 1)) throw error;
+  }
+  if (tracked) {
+    const gitPath = gitExec(["rev-parse", "--git-path", "posse/active-job"], root).trim();
+    sentinelPath = path.isAbsolute(gitPath) ? gitPath : path.resolve(root, gitPath);
+  }
+  if (ensureDir) fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
+  return sentinelPath;
 }
 
 export function writeActiveWorktreeSentinel(wtPath, payload = {}) {

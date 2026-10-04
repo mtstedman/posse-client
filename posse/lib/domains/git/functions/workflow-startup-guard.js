@@ -19,6 +19,8 @@ import { WAITING_LANE_NONTERMINAL_STATES } from "../../../catalog/waiting-lane.j
 import { isAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
 import {
   buildPosseRuntimeIgnoreEntries,
+  filterPosseRuntimePaths,
+  isPosseRuntimePath,
   isPosseRuntimeOnlyGitignoreContent,
 } from "../../runtime/functions/ignore.js";
 import { GIT_OPERATION_TIMEOUT_MS, isGitCommandFailure } from "./utils.js";
@@ -297,11 +299,13 @@ export function createStartupDirtyGuardHelpers(context) {
 
   function isRuntimePorcelainLine(line, cwd = projectDir) {
     const filePath = projectRelativePorcelainPath(porcelainPath(line));
-    if (filePath === ".posse" || filePath.startsWith(".posse/")) return true;
-    // Admin merge may run before bootstrap writes the managed .gitignore.
-    // A linked worktree under Posse's canonical root is runtime state, not a
-    // user edit in the target checkout.
-    if (filePath === ".posse-worktrees" || filePath.startsWith(".posse-worktrees/")) return true;
+    if (isPosseRuntimePath(filePath)) {
+      const code = String(line || "").trimStart().slice(0, 2);
+      // Only untracked/ignored runtime files are harmless. A tracked,
+      // modified, or staged runtime path is repository contamination and must
+      // reach the startup/merge blocker instead of being hidden by pathname.
+      return code === "??" || code === "!!";
+    }
     if (filePath !== ".gitignore") return false;
     const code = String(line || "").trim();
     // Untracked .gitignore that posse just created — already handled.
@@ -327,8 +331,10 @@ export function createStartupDirtyGuardHelpers(context) {
   async function isRuntimePorcelainLineAsync(line, cwd = projectDir, { signal = null } = {}) {
     throwIfAborted(signal);
     const filePath = projectRelativePorcelainPath(porcelainPath(line));
-    if (filePath === ".posse" || filePath.startsWith(".posse/")) return true;
-    if (filePath === ".posse-worktrees" || filePath.startsWith(".posse-worktrees/")) return true;
+    if (isPosseRuntimePath(filePath)) {
+      const code = String(line || "").trimStart().slice(0, 2);
+      return code === "??" || code === "!!";
+    }
     if (filePath !== ".gitignore") return false;
     const code = String(line || "").trim();
     if (code.startsWith("??")) {
@@ -594,10 +600,49 @@ export function createStartupDirtyGuardHelpers(context) {
     return out;
   }
 
+  function trackedRuntimePaths() {
+    const tracked = gitExec(["-c", "core.quotePath=false", "ls-files", "-z"], projectDir, {
+      timeoutMs: 5000,
+      trim: false,
+    });
+    return filterPosseRuntimePaths(String(tracked || "").split("\0").filter(Boolean));
+  }
+
+  async function trackedRuntimePathsAsync({ signal = null } = {}) {
+    throwIfAborted(signal);
+    const tracked = await gitExecAsync(["-c", "core.quotePath=false", "ls-files", "-z"], projectDir, {
+      timeoutMs: 5000,
+      signal,
+      trim: false,
+    });
+    return filterPosseRuntimePaths(String(tracked || "").split("\0").filter(Boolean));
+  }
+
+  function trackedRuntimeBlockedResult({ reason, paths, policy }) {
+    const preview = paths.slice(0, 12).join(", ");
+    return {
+      ok: false,
+      blocked: true,
+      dirty: false,
+      policy,
+      action: "blocked",
+      blockReason: "tracked_runtime_path",
+      dirtyCount: 0,
+      dirtyLines: [],
+      runtimePaths: paths.slice(0, STARTUP_DIRTY_LINES_RECORD_LIMIT),
+      message: `Startup repository invariant blocked ${reason}: Git tracks reserved Posse runtime path(s): ${preview}. Remove them from Git tracking, then restart Posse.`,
+    };
+  }
+
   function dirtyTreeGuardMessage({ reason, dirtyLines, policy }) {
     const preview = dirtyLines.slice(0, 12).join("\n");
     const more = dirtyLines.length > 12 ? `... and ${dirtyLines.length - 12} more` : "";
-    const action = dirtyLines.some(isUnmergedPorcelainLine)
+    const hasTrackedRuntimePath = dirtyLines.some((line) =>
+      isPosseRuntimePath(projectRelativePorcelainPath(porcelainPath(line)))
+    );
+    const action = hasTrackedRuntimePath
+      ? "Remove the reserved Posse runtime path(s) from Git tracking, then restart Posse."
+      : dirtyLines.some(isUnmergedPorcelainLine)
       ? "Resolve the conflicted paths, then restart Posse."
       : policy === "commit"
         ? "Commit or stash the remaining changes, then restart Posse."
@@ -612,13 +657,16 @@ export function createStartupDirtyGuardHelpers(context) {
 
   function dirtyTreeBlockedResult({ reason, dirtyLines, policy }) {
     const hasConflicts = dirtyLines.some(isUnmergedPorcelainLine);
+    const hasTrackedRuntimePath = dirtyLines.some((line) =>
+      isPosseRuntimePath(projectRelativePorcelainPath(porcelainPath(line)))
+    );
     return {
       ok: false,
       blocked: true,
       dirty: true,
       policy,
       action: "blocked",
-      blockReason: hasConflicts ? "unmerged_paths" : "uncommitted_changes",
+      blockReason: hasTrackedRuntimePath ? "tracked_runtime_path" : hasConflicts ? "unmerged_paths" : "uncommitted_changes",
       dirtyCount: dirtyLines.length,
       // The porcelain lines that blocked boot, bounded, for the durable block
       // record (recordStartupDirtyTreeBlock).
@@ -673,6 +721,11 @@ export function createStartupDirtyGuardHelpers(context) {
     };
     const mode = normalizeStartupDirtyTreePolicy(policy || startupDirtyTreePolicy());
     emitPhase("checking target tree");
+    const trackedRuntime = trackedRuntimePaths();
+    if (trackedRuntime.length > 0) {
+      emitPhase("target tree tracks reserved runtime paths");
+      return trackedRuntimeBlockedResult({ reason, paths: trackedRuntime, policy: mode });
+    }
     // Sweep a SCIP infer-tsconfig placeholder orphaned by an interrupted index
     // before measuring dirtiness, so it can't trip the guard.
     sweepOrphanedInferTsconfig(projectDir);
@@ -681,7 +734,10 @@ export function createStartupDirtyGuardHelpers(context) {
       emitPhase("target tree clean");
       return { ok: true, dirty: false, policy: mode, action: "clean" };
     }
-    if (dirtyLines.some(isUnmergedPorcelainLine) || mode !== "commit") {
+    const hasTrackedRuntimePath = dirtyLines.some((line) =>
+      isPosseRuntimePath(projectRelativePorcelainPath(porcelainPath(line)))
+    );
+    if (hasTrackedRuntimePath || dirtyLines.some(isUnmergedPorcelainLine) || mode !== "commit") {
       emitPhase("target tree has uncommitted changes");
       return dirtyTreeBlockedResult({ reason, dirtyLines, policy: mode });
     }
@@ -751,6 +807,15 @@ export function createStartupDirtyGuardHelpers(context) {
     throwIfAborted(signal);
     const mode = normalizeStartupDirtyTreePolicy(policy || startupDirtyTreePolicy());
     emitPhase("checking target tree");
+    const trackedRuntime = await trackedRuntimePathsAsync({ signal });
+    if (trackedRuntime.length > 0) {
+      emitPhase("target tree tracks reserved runtime paths");
+      return {
+        ...trackedRuntimeBlockedResult({ reason, paths: trackedRuntime, policy: mode }),
+        waitingLaneFilesystemRecovery,
+        sharedTrunkRecovery,
+      };
+    }
     // Sweep a SCIP infer-tsconfig placeholder orphaned by an interrupted index
     // before measuring dirtiness, so it can't trip the guard.
     await sweepOrphanedInferTsconfigAsync(projectDir, { signal });
@@ -761,7 +826,10 @@ export function createStartupDirtyGuardHelpers(context) {
       emitPhase("target tree clean");
       return { ok: true, dirty: false, policy: mode, action: "clean", waitingLaneFilesystemRecovery, sharedTrunkRecovery };
     }
-    if (dirtyLines.some(isUnmergedPorcelainLine) || mode !== "commit") {
+    const hasTrackedRuntimePath = dirtyLines.some((line) =>
+      isPosseRuntimePath(projectRelativePorcelainPath(porcelainPath(line)))
+    );
+    if (hasTrackedRuntimePath || dirtyLines.some(isUnmergedPorcelainLine) || mode !== "commit") {
       emitPhase("target tree has uncommitted changes");
       return {
         ...dirtyTreeBlockedResult({ reason, dirtyLines, policy: mode }),
@@ -837,6 +905,10 @@ export function createStartupDirtyGuardHelpers(context) {
     throwIfAborted(signal);
     const mode = normalizeStartupDirtyTreePolicy(policy || startupDirtyTreePolicy());
     await sweepOrphanedInferTsconfigAsync(projectDir, { signal });
+    const trackedRuntime = await trackedRuntimePathsAsync({ signal });
+    if (trackedRuntime.length > 0) {
+      return trackedRuntimeBlockedResult({ reason, paths: trackedRuntime, policy: mode });
+    }
     const dirtyLines = await startupDirtyLinesAsync({ signal });
     if (!dirtyLines.length) return { ok: true, dirty: false, policy: mode, action: "clean" };
     if (dirtyLines.some(isUnmergedPorcelainLine) || mode !== "commit") {
