@@ -14,6 +14,11 @@
 // CLI's wording.
 
 import { formatToolReference, TOOL_REFS } from "../../../../catalog/tool-references.js";
+import {
+  engagementBinaryIdentity,
+  requestEngagementRecoveryHintSync,
+  verifyEngagementRecoveryCapabilitiesSync,
+} from "../../../../shared/native/functions/engagement-client.js";
 import { providerInterruptionRetryContext } from "./provider-quota-pause.js";
 
 // Prefix of the job/attempt error recorded for an agent-reported BLOCKED
@@ -43,7 +48,7 @@ function transientBlockRetryNote(reason, recovery, writeTool, provider = null) {
   const guidance = recovery?.action === "retry" && recovery.bare_retry !== true
     ? ["  The operator chose retry; their guidance is under BLOCKED RECOVERY GUIDANCE in the task."]
     : [];
-  if (isProviderSandboxMisreadBlock(reason, { provider })) {
+  if (isProviderSandboxMisreadBlockJs(reason, { provider })) {
     return [
       "PREVIOUS ATTEMPT CORRECTION:",
       "  The previous attempt misread the provider sandbox notice and reported BLOCKED.",
@@ -75,14 +80,14 @@ function transientBlockRetryNote(reason, recovery, writeTool, provider = null) {
 // so a legacy Claude block is not corrected as a Codex misread. A previous
 // attempt that a provider pause or transient provider error interrupted is
 // not reported as failed.
-export function blockedRetryContext(payload = {}, lastError = null, { writeTool = ISSUED_EDIT_TOOL, provider = null } = {}) {
+export function blockedRetryContextJs(payload = {}, lastError = null, { writeTool = ISSUED_EDIT_TOOL, provider = null } = {}) {
   const providerInterruption = providerInterruptionRetryContext(lastError);
   if (providerInterruption) return providerInterruption;
   const recovery = payload?._blocked_recovery;
   const text = typeof lastError === "string" ? lastError.trim() : "";
   const blockedReason = blockedReasonFromError(text);
   const blockProvider = payload?.[BLOCKED_PROVIDER_PAYLOAD_KEY] || provider || null;
-  if (blockedReason && isTransientMcpInfraBlock(blockedReason, { provider: blockProvider })) {
+  if (blockedReason && isTransientMcpInfraBlockJs(blockedReason, { provider: blockProvider })) {
     return { lastError: null, block: transientBlockRetryNote(blockedReason, recovery, writeTool, blockProvider) };
   }
   if (recovery?.action !== "retry" || !text.startsWith(AGENT_BLOCKED_ERROR_PREFIX)) {
@@ -170,7 +175,7 @@ const FEEDBACK_TOOL_DISPLACED_FILE_TOOLS = /(?:operator[-\s]?feedback|feedback[-
  * so headless runs terminate and clean their WI worktrees instead of parking a
  * synthetic human_input gate.
  */
-export function isPermanentProviderRuntimeBlock(reason) {
+export function isPermanentProviderRuntimeBlockJs(reason) {
   const text = String(reason || "").trim();
   if (!text) return false;
   return CODEX_WINDOWS_SANDBOX_HELPER.test(text)
@@ -189,11 +194,11 @@ export function isPermanentProviderRuntimeBlock(reason) {
  * @param {{ provider?: string|null }} [options]
  * @returns {boolean}
  */
-export function isProviderSandboxMisreadBlock(reason, { provider = null } = {}) {
+export function isProviderSandboxMisreadBlockJs(reason, { provider = null } = {}) {
   const text = String(reason || "").trim();
   if (!text) return false;
   if (provider && !SANDBOX_MISREAD_PROVIDERS.has(String(provider).trim().toLowerCase())) return false;
-  if (isPermanentProviderRuntimeBlock(text)) return false;
+  if (isPermanentProviderRuntimeBlockJs(text)) return false;
   if (CODEX_NATIVE_PATCH_SANDBOX_REJECTION.test(text)) return true;
   if (HUMAN_FILE_AUTHORITY_REQUIRED.test(text)) return false;
   return CODEX_SANDBOX_NOTICE_MISREAD.test(text)
@@ -210,10 +215,10 @@ export function isProviderSandboxMisreadBlock(reason, { provider = null } = {}) 
  * @param {{ provider?: string|null }} [options]
  * @returns {boolean}
  */
-export function isTransientMcpInfraBlock(reason, { provider = null } = {}) {
+export function isTransientMcpInfraBlockJs(reason, { provider = null } = {}) {
   const text = String(reason || "").trim();
   if (!text) return false;
-  if (isPermanentProviderRuntimeBlock(text)) return false;
+  if (isPermanentProviderRuntimeBlockJs(text)) return false;
 
   // Direct gateway identity + an unavailability signal.
   if (GATEWAY_IDENTITY.test(text) && UNAVAILABLE.test(text)) return true;
@@ -257,7 +262,7 @@ export function isTransientMcpInfraBlock(reason, { provider = null } = {}) {
   // If the model selects apply_patch anyway, or reads the read-only sandbox
   // notice as covering the issued tools, retry with the runtime tool-priority
   // guard instead of asking a human to fix an internal routing mistake.
-  if (isProviderSandboxMisreadBlock(text, { provider })) return true;
+  if (isProviderSandboxMisreadBlockJs(text, { provider })) return true;
 
   // Codex occasionally routes toward its native feedback surface while the
   // required Posse file surface is detached. These are the production smoke
@@ -271,4 +276,107 @@ export function isTransientMcpInfraBlock(reason, { provider = null } = {}) {
   if (/no such tool available/i.test(text)) return true;
 
   return false;
+}
+
+const RECOVERY_NATIVE_RETRY_MS = 30_000;
+const recoveryClassificationCache = new Map();
+let recoveryCapabilityKey = null;
+let recoveryCapabilityOk = false;
+let recoveryRetryAt = 0;
+
+function nativeRecoveryAvailable() {
+  const now = Date.now();
+  const key = engagementBinaryIdentity();
+  if (key !== recoveryCapabilityKey) {
+    recoveryCapabilityKey = key;
+    recoveryCapabilityOk = false;
+    recoveryRetryAt = 0;
+    recoveryClassificationCache.clear();
+  }
+  if (recoveryCapabilityOk) return true;
+  if (now < recoveryRetryAt) return false;
+  try {
+    verifyEngagementRecoveryCapabilitiesSync();
+    recoveryCapabilityOk = true;
+    recoveryRetryAt = 0;
+    return true;
+  } catch {
+    recoveryCapabilityOk = false;
+    recoveryRetryAt = now + RECOVERY_NATIVE_RETRY_MS;
+    return false;
+  }
+}
+
+function nativeClassification(reason, provider) {
+  const normalizedReason = String(reason || "").trim();
+  const normalizedProvider = provider == null ? null : String(provider);
+  const key = `${normalizedProvider || ""}\0${normalizedReason}`;
+  if (recoveryClassificationCache.has(key)) return recoveryClassificationCache.get(key);
+  if (!nativeRecoveryAvailable()) return null;
+  try {
+    const response = requestEngagementRecoveryHintSync({
+      classifications: [{ reason: normalizedReason, provider: normalizedProvider }],
+    });
+    const value = Array.isArray(response.classifications) ? response.classifications[0] : null;
+    if (!value || typeof value !== "object"
+      || typeof value.permanentProviderRuntimeBlock !== "boolean"
+      || typeof value.providerSandboxMisreadBlock !== "boolean"
+      || typeof value.transientMcpInfraBlock !== "boolean") {
+      throw new Error("invalid recovery classification");
+    }
+    recoveryClassificationCache.set(key, value);
+    return value;
+  } catch {
+    recoveryCapabilityOk = false;
+    recoveryRetryAt = Date.now() + RECOVERY_NATIVE_RETRY_MS;
+    return null;
+  }
+}
+
+export function isPermanentProviderRuntimeBlock(reason) {
+  return nativeClassification(reason, null)?.permanentProviderRuntimeBlock
+    ?? isPermanentProviderRuntimeBlockJs(reason);
+}
+
+export function isProviderSandboxMisreadBlock(reason, { provider = null } = {}) {
+  return nativeClassification(reason, provider)?.providerSandboxMisreadBlock
+    ?? isProviderSandboxMisreadBlockJs(reason, { provider });
+}
+
+export function isTransientMcpInfraBlock(reason, { provider = null } = {}) {
+  return nativeClassification(reason, provider)?.transientMcpInfraBlock
+    ?? isTransientMcpInfraBlockJs(reason, { provider });
+}
+
+export function blockedRetryContext(payload = {}, lastError = null, { writeTool = ISSUED_EDIT_TOOL, provider = null } = {}) {
+  const providerInterruption = providerInterruptionRetryContext(lastError);
+  if (providerInterruption) return providerInterruption;
+  if (nativeRecoveryAvailable()) {
+    try {
+      const recovery = payload?._blocked_recovery;
+      const response = requestEngagementRecoveryHintSync({
+        retryContext: {
+          lastError: typeof lastError === "string" ? lastError : null,
+          provider: provider == null ? null : String(provider),
+          blockedProvider: payload?.[BLOCKED_PROVIDER_PAYLOAD_KEY] == null
+            ? null
+            : String(payload[BLOCKED_PROVIDER_PAYLOAD_KEY]),
+          recoveryAction: recovery?.action == null ? null : String(recovery.action),
+          bareRetry: recovery?.bare_retry === true,
+          writeTool: String(writeTool),
+        },
+      });
+      const value = response.retryContext;
+      if (value && typeof value === "object"
+        && (value.lastError === null || typeof value.lastError === "string")
+        && (value.block === null || typeof value.block === "string")) {
+        return { lastError: value.lastError, block: value.block };
+      }
+      throw new Error("invalid recovery context");
+    } catch {
+      recoveryCapabilityOk = false;
+      recoveryRetryAt = Date.now() + RECOVERY_NATIVE_RETRY_MS;
+    }
+  }
+  return blockedRetryContextJs(payload, lastError, { writeTool, provider });
 }

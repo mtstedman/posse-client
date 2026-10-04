@@ -78,9 +78,11 @@ export const ENGAGEMENT_CONTRACT_VERSION = 2;
 // client keeps its JS policy. Updated with the fixture (the engagement test
 // fails until it matches).
 export const ENGAGEMENT_POLICY_DIGEST = "d7605331132a30968d40ea6059f83bc8d9d06915954ff33b6e8a2c0fa3e48cfe";
+export const ENGAGEMENT_RECOVERY_POLICY_DIGEST = "88b40cdc7bf34db84352e50c803b1eb157d01559edbb8f425c0b823e3134b54c";
 export const ENGAGEMENT_CAPABILITIES_METHOD = "engagement.capabilities";
 export const ENGAGEMENT_LAUNCH_PLAN_METHOD = "engagement.launchPlan";
 export const ENGAGEMENT_LAUNCH_PLAN_BATCH_METHOD = "engagement.launchPlanBatch";
+export const ENGAGEMENT_RECOVERY_HINT_METHOD = "engagement.recoveryHint";
 export const REMOTE_ARTIFACT_CATALOG_METHOD = "remote.artifactCatalog";
 export const REMOTE_ARTIFACT_DOWNLOAD_METHOD = "remote.artifactDownload";
 export const REMOTE_ARTIFACT_STATUS_METHOD = "remote.artifactStatus";
@@ -274,6 +276,7 @@ export const NATIVE_LOCAL_POLICY_METHODS = Object.freeze({
     ENGAGEMENT_CAPABILITIES_METHOD,
     ENGAGEMENT_LAUNCH_PLAN_METHOD,
     ENGAGEMENT_LAUNCH_PLAN_BATCH_METHOD,
+    ENGAGEMENT_RECOVERY_HINT_METHOD,
   ]),
 });
 

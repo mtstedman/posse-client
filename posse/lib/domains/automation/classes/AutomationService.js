@@ -134,13 +134,13 @@ export class AutomationService {
     demand(run && digest(run.principal) === digest(principal), "Run is outside this caller's scope", "forbidden");
     return run;
   }
-  invoke(principal, args, schedule = null) {
+  invoke(principal, args, schedule = null, { allowExternalWrite = false } = {}) {
     this.assertOwner();
     const { entry, grant } = this.resolve(principal, args.tool, "invoke", args.grant_id);
     demand(!schedule || grant.unattended && grant.revision === schedule.grant_revision, "Schedule grant changed or is not unattended", "grant_changed");
     // Write script tools confirm by default. No caller can ask a person yet,
     // so only a grant the operator marked unattended lets an agent run one.
-    demand(entry.kind !== "script" || entry.effect !== "external_write" || grant.unattended,
+    demand(entry.kind !== "script" || entry.effect !== "external_write" || grant.unattended || allowExternalWrite,
       `${entry.script} is a write tool: agents can run it only under a grant made with \`posse tools grant ${entry.script} --unattended\``, "forbidden");
     schemaCheck(entry.input_schema, args.input);
     const key = args.idempotency_key || randomUUID();

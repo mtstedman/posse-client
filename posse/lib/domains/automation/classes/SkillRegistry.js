@@ -47,6 +47,13 @@ export class SkillRegistry {
     const definitions = this.list({ repo_id: repoID }).filter(item => this.identity(item) === identity);
     demand(definitions.length === 1, "Published skill is missing or ambiguous", "skill_unavailable"); return definitions[0];
   }
+  resolveReference(reference, repoID = "") {
+    if (String(reference).includes("@")) return this.resolve(reference, repoID);
+    const definitions = this.list({ repo_id: repoID }).filter(item => item.name === reference);
+    demand(definitions.length > 0, `Published skill ${reference} is missing`, "skill_unavailable");
+    definitions.sort((left, right) => compareSemver(right.version, left.version));
+    return definitions[0];
+  }
   assertAdapters(definition) {
     for (const capability of definition.capabilities) {
       demand(capability.kind === "tool", "This capability needs an installed bounded adapter", "capability_unavailable");
@@ -118,6 +125,20 @@ export class SkillRegistry {
     } catch (error) { checks.push({ name: "Skill contract and adapters", passed: false, detail: error.message }); }
     this.store.put("tests", hash, result); return result;
   }
+}
+
+function compareSemver(left, right) {
+  const parse = value => {
+    const [core, prerelease = ""] = String(value).split("-", 2);
+    return { core: core.split(".").map(Number), prerelease: prerelease.split("+")[0] };
+  };
+  const a = parse(left), b = parse(right);
+  for (let index = 0; index < 3; index++) {
+    if (a.core[index] !== b.core[index]) return a.core[index] - b.core[index];
+  }
+  if (!a.prerelease && b.prerelease) return 1;
+  if (a.prerelease && !b.prerelease) return -1;
+  return a.prerelease.localeCompare(b.prerelease, "en", { numeric: true });
 }
 
 export function csvTemplate(name, binding) {

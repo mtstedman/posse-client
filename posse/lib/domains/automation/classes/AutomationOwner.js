@@ -3,6 +3,7 @@ import net from "node:net";
 import crypto from "node:crypto";
 import { AutomationStore } from "./AutomationStore.js";
 import { AutomationService } from "./AutomationService.js";
+import { AgentSessionRegistry } from "./AgentSessionRegistry.js";
 import { SkillRegistry } from "./SkillRegistry.js";
 import { ScriptToolRegistry } from "./ScriptToolRegistry.js";
 import { verifyMcpOAuthToken, bootConfigFromMcpOAuthClaims } from "../../integrations/functions/deterministic-mcp/oauth-token.js";
@@ -19,6 +20,7 @@ export class AutomationOwner {
     this.service = service || new AutomationService(this.store);
     this.registry = new SkillRegistry(this.service);
     this.scripts = new ScriptToolRegistry(this.service, scriptsDir ? { dir: scriptsDir } : {});
+    this.agents = new AgentSessionRegistry(this.service, this.registry, this.scripts);
     this.socketPath = socketPath; this.operatorToken = operatorToken || ensureAutomationOperatorToken(); this.tickMs = tickMs;
     this.build = build; this.launch = launch;
     this.server = null; this.timer = null; this.ownsStore = !store; this.socketFile = null;
@@ -118,6 +120,14 @@ export class AutomationOwner {
       case "script.secret.set": return this.scripts.setSecret(args.tool, args.name, args.value);
       case "script.secret.unset": return this.scripts.unsetSecret(args.tool, args.name);
       case "script.secret.status": return this.scripts.secretStatus(this.scripts.load(args.tool).manifest);
+      case "agent.turn.begin": return this.agents.begin(args);
+      case "agent.turn.invoke": return this.agents.invoke(args);
+      case "agent.turn.pause": return this.agents.pause(args);
+      case "agent.turn.resume": return this.agents.resume(args);
+      case "agent.turn.complete": return this.agents.complete(args);
+      case "agent.turn.abort": return this.agents.abort(args);
+      case "agent.session.get": return this.agents.get(args.id);
+      case "agent.session.list": return this.agents.list(args.agent || "");
       case "run.list": return this.store.runs(args.limit || 100);
       case "run.cancel": this.service.cancel(args.id); return this.store.run(args.id);
       default: demand(false, "Unknown operator automation operation");
@@ -162,6 +172,6 @@ function timingSafeEqual(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function safeError(error) {
-  const allowed = new Set(["response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed", "script_invalid", "script_not_found", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable"]);
+  const allowed = new Set(["response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed", "script_invalid", "script_not_found", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable", "agent_invalid", "agent_not_found", "agent_session_invalid", "agent_session_not_found", "agent_session_mismatch", "agent_session_busy", "agent_turn_changed", "agent_confirmation_required", "agent_confirmation_missing", "agent_tool_failed"]);
   return { code: allowed.has(error?.code) ? error.code : "automation_error", message: allowed.has(error?.code) ? error.message : "Automation request failed; inspect local diagnostics" };
 }

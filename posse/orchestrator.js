@@ -170,5 +170,18 @@ if (await runMaintenanceCliIfRequested()) {
 
 await guardRunNodeDependencies();
 
+// User-defined agents use the provider runtime but not a repository queue.
+// Keep this after the native dependency guard and before the main app opens
+// repository state, so `posse agent` works from any directory.
+if (process.argv[2] === "agent") {
+  const { runAgentCli } = await import("./lib/domains/agents/functions/agent-cli.js");
+  try {
+    process.exit(await runAgentCli(process.argv.slice(3)));
+  } catch (error) {
+    process.stderr.write(`${error?.code || "agent_error"}: ${error?.message || error}\n`);
+    process.exit(1);
+  }
+}
+
 const { runOrchestratorCli } = await import("./lib/domains/cli/functions/orchestrator-app.js");
 await runOrchestratorCli();

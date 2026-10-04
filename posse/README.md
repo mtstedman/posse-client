@@ -279,6 +279,8 @@ Use `posse help` for the full CLI reference.
 - `prune`, `purge`, `cleanup`, `clear`: maintenance and reset commands.
 - `tools [list|new|show|test|secret|grant|revoke]`: author script tools that
   granted agents can call (see below).
+- `agent [<name>|list|show|new|chat|run|confirm|conversations|export]`: run and
+  inspect durable user-defined agents (see below).
 
 ### Script tools
 
@@ -306,11 +308,50 @@ a starter that fails until you edit it.
   test revokes grants that pinned the old version.
 - `posse tools grant <name> --repo <path> --roles dev` (or `--standalone`)
   exposes it through `custom_tools`. Write tools confirm by default: no agent
-  surface can ask a person yet, so a `write` tool runs for agents only under a
-  grant made with `--unattended`.
+  surface except `posse agent` can ask a person, so other agent callers run a
+  `write` tool only under a grant made with `--unattended`.
 
 Bossy's Automation Studio Tools tab drives the same owner operations
 (`script.*`); it stores and runs nothing itself.
+
+### User-defined agents
+
+Bossy's Automation Studio Agents tab edits strict `bossy.agent.v1` files in
+`~/.posse/agents/`; Posse owns their execution. A direct invocation can keep a
+named conversation across processes:
+
+```bash
+posse agent kairos --session asdfe -m "What should we do next?"
+posse agent chat seedance-stage --session episode-12
+posse agent kairos --session asdfe -m "Return JSON" --json
+```
+
+The definition pins the private standing prompt, provider/model, ordered script
+tools and published skills, repository or standalone scope, write policy, and
+turn/call/spend/wall-time limits. `sonnet`/`standard` and `opus`/`strong` are
+portable tier labels; use `provider:model` to pin an exact provider model.
+An unversioned skill name from Bossy resolves to the newest published version
+when the conversation is created; `name@version` pins a version explicitly.
+
+The first turn resolves exact tested tool and skill digests plus their grants.
+Later turns on the same session retain that definition and capability set even
+if the editable files change. A new session receives the new definition.
+Read tools execute through the automation owner. Write tools follow the
+definition's `confirm`, `allow`, or `deny` policy; `confirm` returns exit code 2
+and a `proposal_id`, which can be resumed with:
+
+```bash
+posse agent confirm asdfe proposal_ID
+posse agent confirm asdfe proposal_ID --deny
+```
+
+`--json` emits exactly one `bossy.agent_turn.v1` envelope on stdout for harness
+integration. Use `posse agent conversations [name]` and `posse agent export
+<session-id>` for durable history. Posse compiles the generic `agent` safety
+role from posse-remote, then appends the private prompt and exact capability
+contract locally; the editable persona prompt is not sent to the prompt
+service. Bossy fleet tools (`bossy.*`) are not yet bridged into this runtime and
+are rejected explicitly rather than silently widened.
 
 ### Native provider and admin JSON
 

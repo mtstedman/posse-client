@@ -961,6 +961,7 @@ export class NativeBinary {
    * @returns {RunResult}
    */
   runSync(subcommand, args = [], opts = {}) {
+    if (opts.localPolicy === true) return this.#runSyncLocalPolicyCall(subcommand, args, opts);
     // Sync invocations are always per-call spawns. The Atomics SyncBridge that
     // used to serve `worker: true` here was removed because it both wedged for
     // the full wait timeout when its broker failed to boot and stranded its
@@ -972,6 +973,50 @@ export class NativeBinary {
     // daemon variants. `opts.worker` is accepted and ignored so shared call
     // sites (invoke.js) need no sync/async forks.
     return this.#runSyncPerCall(subcommand, args, opts);
+  }
+
+  /**
+   * Synchronous counterpart to #runLocalPolicyCall for low-frequency policy
+   * decisions used by synchronous orchestration boundaries. It preserves the
+   * same strict allowlist/envelope checks and credential-free child process.
+   * Hot per-tool policy must use the persistent async worker instead.
+   *
+   * @param {string | null} subcommand
+   * @param {string[]} args
+   * @param {NativeRunOptions} opts
+   * @returns {RunResult}
+   */
+  #runSyncLocalPolicyCall(subcommand, args, opts) {
+    const method = String(subcommand || "");
+    if (!nativeMethodIsLocalPolicy(this.name, method) || (Array.isArray(args) && args.length > 0)) {
+      return this.#localPolicyRefusedResult(`${method || "<none>"} is not a local-policy method of ${this.name}`);
+    }
+    const parsed = this.#parseNativeProtocolInput(opts.input);
+    if (!parsed.protocol || parsed.request?.method !== method) {
+      return this.#localPolicyRefusedResult(`${method} needs a native envelope for that method`);
+    }
+    const bin = this.resolvePath();
+    if (!bin) return this.#unavailableResult();
+    const env = { ...(opts.env || buildRuntimeEnv()) };
+    delete env.POSSE_KEY;
+    delete env.POSSE_HEARTBEAT_URL;
+    const input = this.#encodeNativeRequest(/** @type {Record<string, unknown>} */ (parsed.request), parsed.wasBuffer);
+    const res = this._spawnSync(bin, [method], {
+      cwd: opts.cwd || process.cwd(),
+      env,
+      input,
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      maxBuffer: Math.max(DEFAULT_MAX_BUFFER, Number(opts.maxBuffer) || 0),
+    });
+    return this.#finishResult({
+      stdout: typeof res.stdout === "string" ? res.stdout : "",
+      stderr: typeof res.stderr === "string" ? res.stderr : "",
+      code: typeof res.status === "number" ? res.status : null,
+      signal: res.signal ?? null,
+      error: res.error || null,
+    }, opts.json === true);
   }
 
   /** Prime the exact versioned WI pulse before a synchronous commit worker
