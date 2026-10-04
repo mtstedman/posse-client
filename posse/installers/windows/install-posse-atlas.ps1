@@ -2490,7 +2490,7 @@ function Step-Validate {
 
 # --- provider keys (interactive; no spinner) --------------------------------------
 $script:ConfiguredKeys = @()
-$script:ProviderKeyNames = @("POSSE_KEY", "OPENAI_API_KEY", "XAI_API_KEY", "CODEX_API_KEY")
+$script:ProviderKeyNames = @("POSSE_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY", "CODEX_API_KEY")
 
 function Read-ProviderKeysFile {
   param([string]$PathValue)
@@ -2498,7 +2498,7 @@ function Read-ProviderKeysFile {
   if (-not (Test-Path -LiteralPath $PathValue)) { return ,$values }
   # This file is data, not trusted code. Accept only the exact single-quoted
   # assignments emitted by this installer; ignore comments or arbitrary PS.
-  $assignment = '^\s*\$env:(POSSE_KEY|OPENAI_API_KEY|XAI_API_KEY|CODEX_API_KEY)\s*=\s*''((?:[^'']|'''')*)''\s*$'
+  $assignment = '^\s*\$env:(POSSE_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY|XAI_API_KEY|CODEX_API_KEY)\s*=\s*''((?:[^'']|'''')*)''\s*$'
   foreach ($line in Get-Content -LiteralPath $PathValue -ErrorAction Stop) {
     $match = [regex]::Match([string]$line, $assignment)
     if (-not $match.Success) { continue }
@@ -2665,7 +2665,7 @@ function Read-InstallerKeyFile {
   $values = @{}
   try {
     foreach ($line in Get-Content -LiteralPath $PathValue -ErrorAction Stop) {
-      $match = [regex]::Match([string]$line, '^\s*(POSSE_KEY|OPENAI_API_KEY|XAI_API_KEY|CODEX_API_KEY)=(.*)$')
+      $match = [regex]::Match([string]$line, '^\s*(POSSE_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY|XAI_API_KEY|CODEX_API_KEY)=(.*)$')
       if (-not $match.Success) { continue }
       $value = $match.Groups[2].Value.Trim()
       if (-not $value) { continue }
@@ -2731,7 +2731,7 @@ function Step-Keys {
         # The file is dot-sourced by $PROFILE, so it must only ever contain the
         # known assignments -- but never destroy user content silently: keep a
         # one-time .bak beside it when unrecognized lines are dropped.
-        $assignmentPattern = '^\s*\$env:(POSSE_KEY|OPENAI_API_KEY|XAI_API_KEY|CODEX_API_KEY)\s*=\s*''(?:[^'']|'''')*''\s*$'
+        $assignmentPattern = '^\s*\$env:(POSSE_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY|XAI_API_KEY|CODEX_API_KEY)\s*=\s*''(?:[^'']|'''')*''\s*$'
         $rawLines = @(Get-Content -LiteralPath $providersFile -ErrorAction Stop)
         $droppedLines = @($rawLines | Where-Object { $_ -and $_.Trim() -and $_ -notmatch $assignmentPattern -and $_.Trim() -notmatch '^#' })
         if ($droppedLines.Count -gt 0) {
@@ -2791,7 +2791,7 @@ function Step-Keys {
     return
   }
   if ($DryRun) {
-    Step-End "dry-run" "would prompt for POSSE_KEY / OPENAI_API_KEY / XAI_API_KEY / CODEX_API_KEY"
+    Step-End "dry-run" "would prompt for POSSE_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY / XAI_API_KEY / CODEX_API_KEY"
     return
   }
   # Keys handed over by setup need no terminal; prompt only when asked to.
@@ -2805,6 +2805,7 @@ function Step-Keys {
     Write-Info "input is hidden; press Enter to skip any key"
     foreach ($prompt in @(
       @{ Label = "Posse remote key"; Name = "POSSE_KEY" },
+      @{ Label = "Anthropic API key"; Name = "ANTHROPIC_API_KEY" },
       @{ Label = "OpenAI API key"; Name = "OPENAI_API_KEY" },
       @{ Label = "xAI (Grok) key"; Name = "XAI_API_KEY" },
       @{ Label = "Codex API key (optional - skip if you prefer 'codex login')"; Name = "CODEX_API_KEY" }
@@ -2949,13 +2950,14 @@ function Test-ProviderCredentials {
   }
   $found = @()
   if (Test-Cmd "claude") { $found += "claude-cli" }
+  if ($env:ANTHROPIC_API_KEY) { $found += "ANTHROPIC_API_KEY" }
   if ($env:OPENAI_API_KEY) { $found += "OPENAI_API_KEY" }
   if ($env:XAI_API_KEY) { $found += "XAI_API_KEY" }
   $codexAuth = Join-Path $env:USERPROFILE ".codex\auth.json"
   if ($env:CODEX_API_KEY -or (Test-Path $codexAuth)) { $found += "codex" }
   if ($found.Count -eq 0) {
     if ($ConfigureKeys) { Write-Info "no provider credentials detected yet - the keys step below will prompt for them" }
-    else { Write-Warn2 "no provider credentials detected (claude CLI / OPENAI_API_KEY / XAI_API_KEY / codex). Re-run with -ConfigureKeys, or set one before dispatching jobs." }
+    else { Write-Warn2 "no provider credentials detected (claude CLI / ANTHROPIC_API_KEY / OPENAI_API_KEY / XAI_API_KEY / codex). Re-run with -ConfigureKeys, or set one before dispatching jobs." }
   }
   else {
     Write-Info ("provider credentials detected: " + ($found -join ", "))

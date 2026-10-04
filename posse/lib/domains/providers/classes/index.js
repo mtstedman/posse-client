@@ -4,6 +4,7 @@ export * from "./claude/ClaudeCliNotFoundError.js";
 export * from "./codex/CodexExitCleanupRegistry.js";
 export * from "./codex/CodexUsageState.js";
 export * from "./claude/ClaudeProvider.js";
+export * from "./anthropic/AnthropicProvider.js";
 export * from "./codex/CodexProvider.js";
 export * from "./copilot/CopilotProvider.js";
 export * from "./grok/GrokProvider.js";

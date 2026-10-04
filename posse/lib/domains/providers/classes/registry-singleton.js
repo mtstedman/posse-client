@@ -24,6 +24,7 @@ providerRegistry.register("posse-local", posseLocal);
 // loader table is the single source of truth for re-loading a provider after a
 // missing dependency has been repaired (see reloadOptionalProvider).
 const OPTIONAL_PROVIDER_LOADERS = Object.freeze({
+  anthropic: () => import("../functions/anthropic/index.js"),
   openai: () => import("../functions/openai/index.js"),
   codex: () => import("../functions/codex/index.js"),
   grok: () => import("../functions/grok/index.js"),

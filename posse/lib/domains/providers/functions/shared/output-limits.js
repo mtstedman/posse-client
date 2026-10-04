@@ -36,6 +36,8 @@ export function responseOutputLimitReason(response = {}) {
     response?.incompleteDetails?.reason,
     response?.finish_reason,
     response?.finishReason,
+    response?.stop_reason,
+    response?.stopReason,
     ...outputItemReasons(response),
   ].map(compactReason).filter(Boolean);
 

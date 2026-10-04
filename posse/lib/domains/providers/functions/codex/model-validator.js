@@ -55,6 +55,9 @@ export function getCurrentCodexModels({ includeKnown = true } = {}) {
 
 function buildValidationEnv(authMode = "oauth", env = process.env) {
   const next = { ...env };
+  delete next.ANTHROPIC_API_KEY;
+  delete next.XAI_API_KEY;
+  delete next.GITHUB_TOKEN;
   const normalized = String(authMode || "oauth").trim().toLowerCase();
   if (normalized === "oauth") {
     delete next.CODEX_API_KEY;

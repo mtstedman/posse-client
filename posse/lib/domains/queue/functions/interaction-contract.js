@@ -108,6 +108,7 @@ const CHOICE_COPY = Object.freeze({
   retry: ["Retry", "Retry through the canonical owner transition."],
   explicit_waiver: ["Explicit waiver", "Accept the current work while recording that deterministic verification did not pass."],
   "retry:claude": ["Retry with Claude", "Retry through the Claude provider path."],
+  "retry:anthropic": ["Retry with Anthropic API", "Retry through the direct Anthropic API provider path."],
   "retry:openai": ["Retry with OpenAI", "Retry through the OpenAI provider path."],
   "retry:codex": ["Retry with Codex", "Retry through the Codex provider path."],
   "retry:grok": ["Retry with Grok", "Retry through the Grok provider path."],

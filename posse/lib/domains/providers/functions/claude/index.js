@@ -92,6 +92,7 @@ const AGENT_COMMENTARY_MAX_CHARS = 2048;
 export { __testBuildClaudeAtlasMcpConfigPayload, __testBuildClaudeDeterministicReadMcpConfigPayload, __testClassifyClaudeCliFailure, __testExtractClaudeToolUsesFromStreamMessage, __testRunClaudeWarmupViaInteractiveCli, getClaudeInfo, getClaudeReadiness, getUsageSummary, isReady, refreshUsageSummary, warmOauthSession, warmOauthSessionAsync, warmOauthSessionInteractive };
 
 export function scrubClaudeChildEnv(childEnv = {}) {
+  delete childEnv.ANTHROPIC_API_KEY;
   delete childEnv.CODEX_API_KEY;
   delete childEnv.OPENAI_API_KEY;
   delete childEnv.XAI_API_KEY;
@@ -103,8 +104,8 @@ export function scrubClaudeChildEnv(childEnv = {}) {
   // that surfaces as MCP_ATTACH_PROOF_MISSING / "No such tool available".
   // MCP_CONNECTION_NONBLOCKING=0 makes the connection blocking. Respect an
   // explicit operator override if one is already present.
-  // NOTE: we deliberately do NOT set ANTHROPIC_API_KEY here — the child must
-  // keep using the inherited OAuth credentials, not an API key.
+  // ANTHROPIC_API_KEY is deliberately stripped above: the child must keep
+  // using its OAuth credentials, not the direct API provider's key.
   if (childEnv.MCP_CONNECTION_NONBLOCKING === undefined) {
     childEnv.MCP_CONNECTION_NONBLOCKING = "0";
   }

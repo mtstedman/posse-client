@@ -275,4 +275,4 @@ export const TEAM_GRANT_GIT_EXEC_BUILTIN_COMMANDS = Object.freeze([
 // and Codex adapters can expose native shell/patch/file writes that no grant
 // check can follow, so approval mode refuses them for every role: the check
 // is about what the adapter *can* do, not what the role is expected to do.
-export const TEAM_MANAGED_PROVIDERS = Object.freeze(["openai", "grok"]);
+export const TEAM_MANAGED_PROVIDERS = Object.freeze(["anthropic", "openai", "grok"]);

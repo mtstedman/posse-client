@@ -68,6 +68,7 @@ export const ADMIN_AGENT_SETTING_SECTIONS = Object.freeze([
 
 export const ADMIN_PROVIDER_SETTING_SECTIONS = Object.freeze([
   Object.freeze({ provider: "claude", label: "Claude", settingKeys: Object.freeze(["claude_execution_mode", "claude_run_budget_pct_session"]) }),
+  Object.freeze({ provider: "anthropic", label: "Anthropic API", settingKeys: Object.freeze([]) }),
   Object.freeze({ provider: "codex", label: "Codex", settingKeys: Object.freeze(["codex_auth_mode", "codex_run_budget_pct_session"]) }),
   Object.freeze({ provider: "openai", label: "OpenAI", settingKeys: Object.freeze(["openai_run_budget_usd", "openai_daily_budget_usd", "openai_account_limit_tokens_session", "openai_account_limit_tokens_week"]) }),
   Object.freeze({ provider: "grok", label: "Grok", settingKeys: Object.freeze(["grok_run_budget_usd", "grok_daily_budget_usd"]) }),
@@ -86,6 +87,7 @@ export const ADMIN_IMAGE_SETTING_SECTIONS = Object.freeze([
 ]);
 
 export const ADMIN_CREDENTIAL_SETTING_DEFS = Object.freeze([
+  Object.freeze({ key: "ANTHROPIC_API_KEY", label: "Anthropic API key", description: "Used by the direct Anthropic Messages API provider. Set it in your environment; Posse never stores or shows it.", env: "ANTHROPIC_API_KEY" }),
   Object.freeze({ key: "OPENAI_API_KEY", label: "OpenAI API key", description: "Used by the OpenAI provider and, in API mode, by Codex. Set it in your environment; Posse never stores or shows it.", env: "OPENAI_API_KEY" }),
   Object.freeze({ key: "CODEX_API_KEY", label: "Codex API key", description: "Optional key for Codex API mode. Set it in your environment; Posse never stores or shows it.", env: "CODEX_API_KEY" }),
   Object.freeze({ key: "XAI_API_KEY", label: "xAI API key", description: "Used by the Grok provider. Set it in your environment; Posse never stores or shows it.", env: "XAI_API_KEY" }),

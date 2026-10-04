@@ -30,7 +30,8 @@ Key behavior:
 - Dependency-aware execution and deadlock cancellation.
 - Per-work-item git worktrees for mutating jobs.
 - File-scope locking so non-overlapping mutating jobs can run in parallel.
-- Provider routing across Claude, OpenAI, Codex, Grok, and Copilot.
+- Provider routing across Claude Code, the Anthropic API, OpenAI, Codex, Grok,
+  and Copilot.
 - ATLAS semantic search with optional local ONNX embeddings:
   [setup](docs/atlas/embeddings-local-setup.md).
 - Artifact workflows for reports, content, images, and intake processing.

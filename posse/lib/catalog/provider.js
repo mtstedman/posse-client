@@ -3,7 +3,7 @@
 // Provider identifiers, labels, and the role registry that maps job types to
 // the role responsible for spawning, executing, and assessing them.
 
-export const PROVIDER_OPTIONS = Object.freeze(["claude", "openai", "codex", "grok", "copilot", "posse-local"]);
+export const PROVIDER_OPTIONS = Object.freeze(["claude", "anthropic", "openai", "codex", "grok", "copilot", "posse-local"]);
 
 // Artificer chat runtimes can invoke the issued image-generation tool. Codex
 // has no such execution route; image model ownership is a separate catalog.
@@ -24,6 +24,7 @@ export const MCP_TOOL_DEADLINE_MODES = Object.freeze({
 });
 export const PROVIDER_MCP_TOOL_DEADLINE_MODE = Object.freeze({
   claude: MCP_TOOL_DEADLINE_MODES.SERVER_CONFIG,
+  anthropic: MCP_TOOL_DEADLINE_MODES.IN_PROCESS,
   codex: MCP_TOOL_DEADLINE_MODES.SERVER_CONFIG,
   openai: MCP_TOOL_DEADLINE_MODES.IN_PROCESS,
   grok: MCP_TOOL_DEADLINE_MODES.IN_PROCESS,
@@ -40,7 +41,7 @@ export function providerHonorsMcpToolDeadline(providerName) {
 // budget is known when the agent_calls row is created. Copilot carries a
 // turn config its adapter never applies, and posse-local sizes its loop from
 // the local model profile; neither is listed, so no budget is invented.
-export const UP_FRONT_TURN_BUDGET_PROVIDERS = Object.freeze(["claude", "codex", "openai", "grok"]);
+export const UP_FRONT_TURN_BUDGET_PROVIDERS = Object.freeze(["claude", "anthropic", "codex", "openai", "grok"]);
 
 // Scope of a provider subscription quota. An account-wide window (session,
 // weekly, usage or rate limit) pauses the whole provider until its reset; a
@@ -68,6 +69,7 @@ export const CLAUDE_USAGE_LOG_SCAN_LIMITS = Object.freeze({
 
 export const PROVIDER_LABELS = Object.freeze({
   claude: "Claude",
+  anthropic: "Anthropic API",
   openai: "OpenAI",
   codex: "Codex",
   grok: "Grok",

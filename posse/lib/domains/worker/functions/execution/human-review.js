@@ -77,7 +77,7 @@ export function classifyBlockedRecoveryAnswer(answer) {
 
 function providerFromRecoveryAnswer(answer) {
   const text = String(answer || "").toLowerCase();
-  const match = text.match(/\b(claude|openai|codex|grok)\b/);
+  const match = text.match(/\b(claude|anthropic|openai|codex|grok)\b/);
   return match ? match[1] : null;
 }
 

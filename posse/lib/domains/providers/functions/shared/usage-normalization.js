@@ -17,7 +17,7 @@ export function normalizeProviderUsage(providerName, usage = {}, { stderrTokens 
   const inputDetails = usage?.input_tokens_details || usage?.prompt_tokens_details || {};
   const outputDetails = usage?.output_tokens_details || usage?.completion_tokens_details || {};
 
-  if (provider === "claude") {
+  if (provider === "claude" || provider === "anthropic") {
     const regularInput = usageNumber(usage?.input_tokens) ?? null;
     const cacheCreationInput = usageNumber(usage?.cache_creation_input_tokens) ?? 0;
     const cacheReadInput = usageNumber(usage?.cache_read_input_tokens) ?? 0;

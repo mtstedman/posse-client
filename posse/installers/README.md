@@ -27,8 +27,9 @@ Keys entered into the installer are saved to:
   file. A `providers.env.ps1` or user-environment entry left by an older
   installer is kept in sync when you rotate a key, but is never created.
 
-Posse loads the four supported credential names from this file on launch:
-`POSSE_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, and `CODEX_API_KEY`. Existing
+Posse loads the five supported credential names from this file on launch:
+`POSSE_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, and
+`CODEX_API_KEY`. Existing
 process environment values take precedence. This is an account-wide file
 outside your projects, so you do not need to put credentials in each repo's
 `.env`. Do not commit or share it. Older installer provider files are read as

@@ -4,6 +4,7 @@
 
 import { BaseProvider } from "./BaseProvider.js";
 import { ClaudeProvider } from "./claude/ClaudeProvider.js";
+import { AnthropicProvider } from "./anthropic/AnthropicProvider.js";
 import { CodexProvider } from "./codex/CodexProvider.js";
 import { OpenAIProvider } from "./openai/OpenAIProvider.js";
 import { GrokProvider } from "./grok/GrokProvider.js";
@@ -12,6 +13,7 @@ import { PosseLocalProvider } from "./posse-local/PosseLocalProvider.js";
 
 const PROVIDER_CLASS_BY_NAME = Object.freeze({
   claude: ClaudeProvider,
+  anthropic: AnthropicProvider,
   codex: CodexProvider,
   openai: OpenAIProvider,
   grok: GrokProvider,

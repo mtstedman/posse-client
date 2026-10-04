@@ -192,6 +192,10 @@ export const PROVIDER_ATLAS_SUPPORT = Object.freeze({
     transport: "mcp",
     rationale: "Claude consumes ATLAS through the Posse MCP gateway.",
   }),
+  anthropic: Object.freeze({
+    transport: "embedded",
+    rationale: "The Anthropic API uses in-process function tools, so ATLAS is exposed through embedded tool wrappers.",
+  }),
   openai: Object.freeze({
     transport: "embedded",
     rationale: "OpenAI uses in-process function tools, so ATLAS should be exposed through embedded tool wrappers.",

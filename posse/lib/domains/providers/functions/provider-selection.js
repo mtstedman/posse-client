@@ -1,6 +1,6 @@
 // lib/provider/provider.js — Provider router
 //
-// Selects the right LLM provider (claude, openai, codex, grok, copilot) per role based on
+// Selects the right LLM provider (claude, anthropic, openai, codex, grok, copilot) per role based on
 // global account settings. Re-exports the unified interface so callers
 // don't need to know which backend is active.
 //
@@ -238,7 +238,9 @@ export function getProvider(role = "dev", providerName = null) {
   if (canonicalName !== "claude" && !providerRegistry.has(canonicalName)) {
     throw new Error(
       `Provider "${name}" selected for role "${role}" but not loaded. ` +
-      (canonicalName === "openai"
+      (canonicalName === "anthropic"
+        ? "Ensure the '@anthropic-ai/sdk' package is installed and ANTHROPIC_API_KEY is configured."
+        : canonicalName === "openai"
         ? "Ensure the 'openai' package is installed: npm install openai"
         : canonicalName === "codex"
           ? "Ensure the Codex CLI is installed and accessible."
@@ -462,7 +464,7 @@ export async function repairMissingProviderDependencies({
  * Check whether a provider is operationally ready (module loaded + credentials present).
  * Use this during plan validation to reject jobs early rather than failing at execution time.
  *
- * @param {string} providerName - "claude" | "openai" | "codex" | "grok"
+ * @param {string} providerName - "claude" | "anthropic" | "openai" | "codex" | "grok"
  * @param {string} [capability] - Optional capability check: "images" to verify image generation readiness
  * @returns {{ ready: boolean, reason: string|null }}
  */
@@ -581,7 +583,7 @@ export function getProviderHealth() {
     const loaded = providerRegistry.has(canonical);
     const status = ready.ready
       ? "available"
-      : (!capability && canonical === "openai" && loaded ? "loaded (no credentials)" : "unavailable");
+      : (!capability && (canonical === "openai" || canonical === "anthropic") && loaded ? "loaded (no credentials)" : "unavailable");
     return {
       provider: suffix ? `${canonical}-${suffix}` : canonical,
       status,

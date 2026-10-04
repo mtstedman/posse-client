@@ -1027,8 +1027,8 @@ export class AdminSettingsController {
         if (key?.name === "space" || printable === " ") {
           const choice = this._editProviderChoices[this._editProviderIndex];
           if (choice) choice.enabled = !choice.enabled;
-        } else if (["c", "o", "g", "x"].includes(printable)) {
-          const aliases = { c: "claude", o: "openai", g: "grok", x: "codex" };
+        } else if (["c", "a", "o", "g", "x"].includes(printable)) {
+          const aliases = { c: "claude", a: "anthropic", o: "openai", g: "grok", x: "codex" };
           const target = aliases[printable];
           const choice = this._editProviderChoices.find((entry) => entry.provider === target);
           if (choice) choice.enabled = !choice.enabled;

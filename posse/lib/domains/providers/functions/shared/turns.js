@@ -15,6 +15,17 @@ const OUTPUT_TOKEN_CONFIGS = Object.freeze({
     }),
     fallback: 4000,
   }),
+  anthropic: Object.freeze({
+    defaults: Object.freeze({
+      researcher: 6000,
+      planner: 4000,
+      dev: 8000,
+      artificer: 8000,
+      assessor: 2500,
+      preflight: 1500,
+    }),
+    fallback: 4000,
+  }),
   codex: Object.freeze({
     defaults: Object.freeze({
       researcher: 6000,
@@ -109,6 +120,24 @@ const TURN_CONFIGS = Object.freeze({
     fallback: 12,
   }),
   openai: Object.freeze({
+    configured: "override",
+    requirePositiveConfigured: false,
+    dev: Object.freeze({
+      defaultBase: { dev: 4, artificer: 4 },
+      perLevel: { dev: 2, artificer: 2 },
+      strongBonus: 5,
+      deepthinkBonus: 3,
+      fileScopeBonusCap: 4,
+      formula: "linear",
+    }),
+    defaults: Object.freeze({
+      researcher: 1,
+      planner: 1,
+      preflight: 1,
+    }),
+    fallback: 20,
+  }),
+  anthropic: Object.freeze({
     configured: "override",
     requirePositiveConfigured: false,
     dev: Object.freeze({
@@ -262,7 +291,7 @@ export function getMaxTurnsForProvider(providerName, {
     if (role === "planner") return Math.max(1, base + (modelTier === "strong" ? 4 : 0) + (deepthink ? 8 : 0));
     if (role === "assessor") return Math.max(1, base + (modelTier === "cheap" ? -4 : 0));
   }
-  if ((providerName === "openai" || providerName === "grok") && role === "assessor") {
+  if ((providerName === "anthropic" || providerName === "openai" || providerName === "grok") && role === "assessor") {
     return modelTier === "cheap" ? 4 : 6;
   }
   return Math.max(1, base);

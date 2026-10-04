@@ -4,6 +4,7 @@
 // would introduce an ESM initialization cycle.
 export const TOOL_ATTACHMENT_BY_PROVIDER = Object.freeze({
   claude: "mcp",
+  anthropic: "function",
   openai: "function",
   grok: "function",
   codex: "deterministic-bridge",

@@ -12,7 +12,7 @@ export const WORK_ITEM_QUESTION_CHOICE_IDS = Object.freeze({
   blocked_recovery: Object.freeze(["retry", "skip", "replan", "explicit_waiver", "fail"]),
   partial_work_recovery: Object.freeze(["extend", "commit", "revert"]),
   dead_letter_recovery: Object.freeze([
-    "retry", "retry:claude", "retry:openai", "retry:codex", "retry:grok", "skip", "fail",
+    "retry", "retry:claude", "retry:anthropic", "retry:openai", "retry:codex", "retry:grok", "skip", "fail",
   ]),
   pipeline_head_recovery: Object.freeze(["pass", "fail", "skip", "replan"]),
   artifact_routing_admin: Object.freeze(["acknowledge"]),

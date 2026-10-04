@@ -3043,6 +3043,7 @@ ${aliasDiagnostic}
 
   ${C.bold}Provider / Remote Secrets:${C.reset}
     ${C.cyan}POSSE_KEY${C.reset}                  Posse remote API key ${C.dim}(required for remote prompt/tool catalog)${C.reset}
+    ${C.cyan}ANTHROPIC_API_KEY${C.reset}          Anthropic API key ${C.dim}(required if using anthropic provider)${C.reset}
     ${C.cyan}OPENAI_API_KEY${C.reset}             OpenAI API key ${C.dim}(required if using openai provider)${C.reset}
     ${C.cyan}CODEX_API_KEY${C.reset}              Optional Codex CLI API key ${C.dim}(or cached ~/.codex/auth.json login)${C.reset}
     ${C.cyan}XAI_API_KEY${C.reset}                xAI API key ${C.dim}(required if using grok provider)${C.reset}

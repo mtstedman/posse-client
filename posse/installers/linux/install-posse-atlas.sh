@@ -2099,7 +2099,7 @@ step_validate() {
 
 # --- provider keys (interactive; no spinner) ------------------------------------
 CONFIGURED_KEYS=()
-PROVIDER_KEY_NAMES=(POSSE_KEY OPENAI_API_KEY XAI_API_KEY CODEX_API_KEY)
+PROVIDER_KEY_NAMES=(POSSE_KEY ANTHROPIC_API_KEY OPENAI_API_KEY XAI_API_KEY CODEX_API_KEY)
 # Keys the parent shell/container already carried, snapshotted before the
 # saved .env is imported: those are never prompted for, even with
 # --configure-keys (parity with the Windows installer).
@@ -2279,6 +2279,7 @@ step_smoke() {
 check_provider_credentials() {
   local have=0 candidates=() saved_env="${HOME}/.config/posse/.env"
   command -v claude >/dev/null 2>&1 && { candidates+=("claude-cli"); have=1; }
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] && { candidates+=("ANTHROPIC_API_KEY"); have=1; }
   [[ -n "${OPENAI_API_KEY:-}" ]] && { candidates+=("OPENAI_API_KEY"); have=1; }
   [[ -n "${XAI_API_KEY:-}" ]] && { candidates+=("XAI_API_KEY"); have=1; }
   { [[ -n "${CODEX_API_KEY:-}" || -f "${HOME}/.codex/auth.json" ]]; } && { candidates+=("codex"); have=1; }
@@ -2292,7 +2293,7 @@ check_provider_credentials() {
     if [[ "$CONFIGURE_KEYS" == "true" ]]; then
       info "no provider credentials detected yet — the keys step below will prompt for them"
     else
-      warn "no provider credentials detected (claude CLI / OPENAI_API_KEY / XAI_API_KEY / codex). Re-run with --configure-keys, or set one before dispatching jobs."
+      warn "no provider credentials detected (claude CLI / ANTHROPIC_API_KEY / OPENAI_API_KEY / XAI_API_KEY / codex). Re-run with --configure-keys, or set one before dispatching jobs."
     fi
   else
     info "provider credentials detected: ${candidates[*]}"

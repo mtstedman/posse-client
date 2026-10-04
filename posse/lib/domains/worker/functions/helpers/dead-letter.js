@@ -59,7 +59,7 @@ function deadLetterRecoveryProviders(job = null) {
   // providers. Do not offer a choice whose only effect is to obscure the same
   // setup/worktree failure behind a different label.
   if (job && getAttempts(job.id).length === 0) return [];
-  return ["claude", "openai", "codex", "grok"]
+  return ["claude", "anthropic", "openai", "codex", "grok"]
     .filter((provider) => isProviderSelectable(provider) && isProviderReady(provider).ready);
 }
 

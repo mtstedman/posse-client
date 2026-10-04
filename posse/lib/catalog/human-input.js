@@ -547,7 +547,7 @@ const HUMAN_INPUT_CHOICE_ALIASES = Object.freeze({
   retry: /\b(retry|rertry|re-try|rerun|re-run|reassess|re-assess|try again|run again|replan|re-plan|simplify|split|narrow)\b/i,
   skip: /\b(skip|skipped|unblock|ignore|bypass|cancel|canceled|cancelled)\b/i,
   retry_assessment: /\b(retry|rertry|re-try|rerun|re-run|reassess|re-assess|try again|run again)\b/i,
-  retry_with_changes: /\b(retry|rertry|re-try|rerun|re-run|try again|run again|simplify|split|narrow|claude|openai|codex|grok)\b/i,
+  retry_with_changes: /\b(retry|rertry|re-try|rerun|re-run|try again|run again|simplify|split|narrow|claude|anthropic|openai|codex|grok)\b/i,
   explicit_waiver: /\b(skip|skipped|waive|waiver|unblock|ignore|bypass|cancel|canceled|cancelled)\b/i,
   replan: /\b(replan|re-plan|split|narrow|change plan)\b/i,
   pass: /\b(pass|passed|approve|approved|accept|accepted|mark done|succeed|succeeded)\b/i,

@@ -361,7 +361,7 @@ Function KeyPageShow
   Pop $0
   ${NSD_CreatePassword} 0 34u 100% 13u "$PosseKey"
   Pop $KeyInput
-  ${NSD_CreateLabel} 0 58u 100% 40u "No key yet? Ask the administrator who gave you access to Posse.$\r$\n$\r$\nModel providers (OpenAI, Claude, Codex) are set up after install with: posse admin"
+  ${NSD_CreateLabel} 0 58u 100% 40u "No key yet? Ask the administrator who gave you access to Posse.$\r$\n$\r$\nModel providers (Anthropic API, Claude, OpenAI, Codex) are set up after install with: posse admin"
   Pop $0
   ${NSD_SetFocus} $KeyInput
   nsDialogs::Show

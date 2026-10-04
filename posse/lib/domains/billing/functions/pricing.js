@@ -57,6 +57,24 @@ const DEFAULT_PRICING = Object.freeze({
   "claude:claude-opus-4-1":   { tier: "strong",   input: 15.00, output: 75.00, cachedInput: 1.50 },
   "claude:claude-opus-4":     { tier: "strong",   input: 15.00, output: 75.00, cachedInput: 1.50 },
 
+  // Direct Anthropic Messages API. Kept distinct from the Claude Code CLI so
+  // operator overrides and cost reports retain the actual billing route.
+  "anthropic:claude-fable-5-1":  { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 0.25 },
+  "anthropic:claude-fable-5":    { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 1.00 },
+  "anthropic:claude-haiku-4-5":  { tier: "cheap",    input: 1.00,  output: 5.00,  cachedInput: 0.10 },
+  "anthropic:claude-opus-5-5":   { tier: "strong",   input: 4.00,  output: 20.00, cachedInput: 0.20 },
+  "anthropic:claude-opus-5":     { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
+  "anthropic:claude-sonnet-5-5": { tier: "standard", input: 2.00,  output: 10.00, cachedInput: 0.20 },
+  "anthropic:claude-sonnet-5":   { tier: "standard", input: 2.00,  output: 10.00, cachedInput: 0.20 },
+  "anthropic:claude-sonnet-4-6": { tier: "standard", input: 3.00,  output: 15.00, cachedInput: 0.30 },
+  "anthropic:claude-sonnet-4-5": { tier: "standard", input: 3.00,  output: 15.00, cachedInput: 0.30 },
+  "anthropic:claude-opus-4-8":   { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
+  "anthropic:claude-opus-4-7":   { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
+  "anthropic:claude-opus-4-6":   { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
+  "anthropic:claude-opus-4-5":   { tier: "strong",   input: 5.00,  output: 25.00, cachedInput: 0.50 },
+  "anthropic:claude-opus-4-1":   { tier: "strong",   input: 15.00, output: 75.00, cachedInput: 1.50 },
+  "anthropic:claude-opus-4":     { tier: "strong",   input: 15.00, output: 75.00, cachedInput: 1.50 },
+
   // OpenAI
   "openai:gpt-6-astra":  { tier: "strong",   input: 10.00, output: 50.00, cachedInput: 1.00 },
   "openai:gpt-6.1-sol":  { tier: "standard", input: 2.00,  output: 10.00, cachedInput: 0.10 },
@@ -112,6 +130,9 @@ const TIER_DEFAULTS = Object.freeze({
   "claude:cheap":     { input: 1.00,  output: 5.00,  cachedInput: 0.10 },
   "claude:standard":  { input: 2.00,  output: 10.00, cachedInput: 0.20 },
   "claude:strong":    { input: 4.00,  output: 20.00, cachedInput: 0.20 },
+  "anthropic:cheap":    { input: 1.00, output: 5.00, cachedInput: 0.10 },
+  "anthropic:standard": { input: 2.00, output: 10.00, cachedInput: 0.20 },
+  "anthropic:strong":   { input: 4.00, output: 20.00, cachedInput: 0.20 },
   "openai:cheap":     { input: 0.10,  output: 0.50, cachedInput: 0.01 },
   "openai:standard":  { input: 2.00,  output: 10.00, cachedInput: 0.10 },
   "openai:strong":    { input: 10.00, output: 50.00, cachedInput: 1.00 },
@@ -328,7 +349,7 @@ function cacheWriteInputUnits({ provider, cacheCreationInput, cacheCreation5mTok
   const writes1h = Math.min(cacheCreationInput, Math.max(0, Number(cacheCreation1hTokens) || 0));
   const writes5m = Math.min(cacheCreationInput - writes1h, Math.max(0, Number(cacheCreation5mTokens) || 0));
   const unsplit = cacheCreationInput - writes1h - writes5m;
-  const defaultMultiplier = normalizeProvider(provider) === "claude"
+  const defaultMultiplier = ["claude", "anthropic"].includes(normalizeProvider(provider))
     ? CACHE_WRITE_1H_MULTIPLIER
     : CACHE_WRITE_5M_MULTIPLIER;
   return (writes1h * CACHE_WRITE_1H_MULTIPLIER)
