@@ -5,6 +5,7 @@
 // live under the providers class/function split.
 
 import { execFile, spawn } from "child_process";
+import crypto from "node:crypto";
 import { MCP_TOOL_DEADLINE_MODES } from "../../../../catalog/provider.js";
 import fs from "fs";
 import os from "os";
@@ -54,6 +55,7 @@ import {
 import { escalateModelTier, getMaxOutputTokensForProvider, getMaxTurnsForProvider } from "../shared/turns.js";
 import { normalizeMaxOutputTokens } from "../shared/output-limits.js";
 import { providerStallPaused, resolveProviderStallTimeout } from "../shared/stall-timeout.js";
+import { providerDispatchSupportedSync } from "../../../../shared/native/functions/engagement-client.js";
 import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/helpers/brand.js";
 import { classifyProviderError } from "../shared/api-resilience.js";
 import {
@@ -85,6 +87,7 @@ import {
   estimateTokensFromText,
   parseTokenUsage,
 } from "./stream-usage.js";
+import { buildClaudeNativeDispatchRequest, runClaudeNativeDispatch } from "./native-dispatch.js";
 
 // Same cap as the Codex agent-message forwarding (codex/stream-events.js).
 const AGENT_COMMENTARY_MAX_CHARS = 2048;
@@ -309,6 +312,7 @@ export function __testGetMaxTurns(role, modelTier = "standard", complexity = nul
 export async function callProvider(promptText, {
   role = "planner",
   roleMode = null,
+  taskMode = null,
   allowWrite = false,
   allowTests = true,
   projectDbWrite = false, // db-mode dev: project_db_query gets the write lane while file tools stay read-only
@@ -364,11 +368,13 @@ export async function callProvider(promptText, {
   disableAgentTools = false,
   nativeColdBoot = false,
   captureNativeSubagents = false,
+  skillsAttached = null,
   onAgentCommentary = null, // (text: string) => void — visible assistant text, like Codex agent messages
   onProviderToolUse = null, // (toolUse) => void — each completed tool_use block as it streams
   onProviderToolResult = null, // ({ id, isError }) => void — each tool_result block as it streams
 } = {}) {
-  const resolvedClaude = await getClaudeCommandAsync();
+  const nativeDispatchEnabled = providerDispatchSupportedSync("claude");
+  const resolvedClaude = nativeDispatchEnabled ? null : await getClaudeCommandAsync();
   const providerPathsForAtlas = normalizeProviderPaths({ cwd, projectDir });
   const mcpWorkspaceCwdForAtlas = mcpCwd ? path.resolve(mcpCwd) : providerPathsForAtlas.cwd;
   const assignmentUnitForAtlas = resolveAtlasAssignmentUnit({
@@ -705,6 +711,7 @@ export async function callProvider(promptText, {
         throw setupErr;
       }
     }
+    let systemPromptInline = null;
     try {
       // Normal Posse calls receive provider-independent isolation and
       // discipline from the Remote rule catalog. Native controls deliberately
@@ -721,7 +728,8 @@ export async function callProvider(promptText, {
       }
       const systemPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-claude-system-"));
       const systemPromptPath = path.join(systemPromptDir, "system.md");
-      fs.writeFileSync(systemPromptPath, systemPromptParts.join("\n\n"), "utf8");
+      systemPromptInline = systemPromptParts.join("\n\n");
+      fs.writeFileSync(systemPromptPath, systemPromptInline, "utf8");
       cleanupSystemPromptFile = () => {
         try { fs.rmSync(systemPromptDir, { recursive: true, force: true }); } catch { /* no-op */ }
       };
@@ -743,17 +751,8 @@ export async function callProvider(promptText, {
     // portion was dropped" even though the files are folded into a
     // Posse-owned --system-prompt-file at runtime.
     if (typeof recordFinalPrompt === "function") {
-      let systemPromptInline = null;
-      try {
-        const parts = nativeColdBoot ? [NATIVE_COLD_BOOT_SYSTEM_PROMPT] : [];
-        for (const filePath of attachedSystemPromptFiles) {
-          try { parts.push(fs.readFileSync(filePath, "utf-8").trim()); }
-          catch { /* best effort — skip missing/unreadable files */ }
-        }
-        if (parts.length > 0) systemPromptInline = parts.join("\n\n");
-      } catch { /* recording must never break the call */ }
       recordFinalPrompt(finalPrompt, {
-        systemPrompt: systemPromptInline,
+        systemPrompt: systemPromptInline || null,
         systemPromptFiles: attachedSystemPromptFiles,
       });
     }
@@ -761,6 +760,66 @@ export async function callProvider(promptText, {
     // When onLine is set, suppress direct stdout (display handles output)
     const directOutput = !onLine && !silent;
     const selectedExecutionMode = resolveClaudeExecutionMode({ requested: executionMode, interactiveBackend });
+
+    if (nativeDispatchEnabled) {
+      if (nativeColdBoot || selectedExecutionMode !== CLAUDE_EXECUTION_MODE_PRINT) {
+        const error = new Error("The native Claude adapter does not support cold-boot or interactive execution modes");
+        error.code = "CLAUDE_NATIVE_DISPATCH_UNSUPPORTED_MODE";
+        throw error;
+      }
+      const issuedToolIds = [...(deterministicReadMcp.contractTools || []), ...atlasContractTools]
+        .map((descriptor) => String(descriptor?.mcpName || ""))
+        .filter(Boolean);
+      const stallRoleMultiplier = { researcher: 2, planner: 2 };
+      const stallTimeoutMs = resolveProviderStallTimeout(stallTimeout)
+        * (stallRoleMultiplier[role] || 1)
+        * 1_000;
+      const request = buildClaudeNativeDispatchRequest(finalPrompt, {
+        dispatchId: `claude-${agentCallId || crypto.randomUUID()}`,
+        jobId,
+        workItemId,
+        attemptId,
+        agentCallId,
+        systemPrompt: systemPromptInline || null,
+        modelTier,
+        modelName: modelToUse,
+        reasoningEffort,
+        role,
+        roleMode,
+        taskMode,
+        allowWrite,
+        allowTests,
+        projectDbCapability,
+        issuedToolIds,
+        resolvedSkillIds: skillsAttached,
+        cwd: providerPaths.cwd,
+        readRoots,
+        createRoots,
+        scopedFiles,
+        createFiles,
+        deleteFiles,
+        maxTurns: turns,
+        maxOutputTokens: outputTokenLimit,
+        stallTimeoutMs,
+        priorSessionHandle,
+        recyclingMode,
+      });
+      cleanupSetupFiles();
+      const nativeResult = await runClaudeNativeDispatch(request, {
+        abortSignal,
+        mcpGate,
+        projectDir: providerPaths.projectDir,
+        silent,
+        onLine,
+        onAgentCommentary,
+        onProviderToolUse,
+        onProviderToolResult,
+        onUsageSegment,
+      });
+      nativeResult.stats.atlasMethod = atlasMethodForStats;
+      resolve(nativeResult);
+      return;
+    }
 
     // Visual framing
     const color = roleBrandColor(role, C.cyan);

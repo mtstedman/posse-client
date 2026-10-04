@@ -253,5 +253,10 @@ export function normalizePlannerReportMetadata(report, label, profile) {
     out.executed_by_planner = report.executed_by_planner;
   }
   if (report.test_command != null) out.test_command = boundedString(report.test_command, `${label}.test_command`, 1000);
+  if (report.tests_to_run != null) out.tests_to_run = stringArray(report.tests_to_run, `${label}.tests_to_run`, 24, 500);
+  if (report.write_tests != null) {
+    if (typeof report.write_tests !== "boolean") fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.write_tests must be a boolean`);
+    out.write_tests = report.write_tests;
+  }
   return out;
 }

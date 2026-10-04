@@ -23,10 +23,7 @@ const KNOWN_ISSUED_ROLES = new Set([
 
 const TEST_TOOL_NAMES = new Set([
   "run_scoped_checks",
-  "create_test_suite",
-  "create_test",
-  "run_test",
-  "run_test_suite",
+  "run_unit_test",
 ]);
 const WRITE_TOOL_NAMES = new Set([
   "write_file",

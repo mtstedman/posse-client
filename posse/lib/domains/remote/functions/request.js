@@ -641,6 +641,8 @@ export function buildRemoteCompileRequest(packet, instructions, {
       create_roots: uniqueStrings(packet?.create_roots || []),
       success_criteria: Array.isArray(packet?.success_criteria) ? packet.success_criteria.map(String) : [],
       test_command: packet?.test_command || null,
+      tests_to_run: Array.isArray(packet?.tests_to_run) ? packet.tests_to_run : [],
+      write_tests: packet?.write_tests === true,
     },
     context: {
       // Researcher instructions already carry the work-item description. Do

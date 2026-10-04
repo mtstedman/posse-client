@@ -62,6 +62,7 @@ const {
   execCleanImage: deterministicCleanImage,
   execExtractImageText: deterministicExtractImageText,
   execRunScopedChecks: deterministicRunScopedChecks,
+  execRunUnitTest: deterministicRunUnitTest,
   execGetBrief: deterministicGetBrief,
 } = createDeterministicToolkit({ safePath: sharedSafePath });
 
@@ -84,6 +85,7 @@ const standardToolHandlers = createStandardToolHandlerMap({
   deterministicCleanImage,
   deterministicExtractImageText,
   deterministicRunScopedChecks,
+  deterministicRunUnitTest,
   deterministicBash,
   deterministicGetBrief,
   execGenerateImage,

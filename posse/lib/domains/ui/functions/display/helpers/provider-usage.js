@@ -306,9 +306,12 @@ function _normalizeRunUsage(value) {
         usedCachedInputTokens: Number(entry?.usedCachedInputTokens ?? entry?.cachedInputTokens ?? 0) || 0,
         usedBillableInputTokens,
         usedOutputTokens,
-        usedBillableTokens: usedBillableTokens ?? (usedBillableInputTokens == null
-          ? null
-          : usedBillableInputTokens + usedOutputTokens),
+        // Billable totals are input-price-equivalent units. Output must be
+        // weighted by the resolved output/input price ratio, so a caller that
+        // only supplied billable input did not supply enough information to
+        // reconstruct this value. Keep it unknown instead of adding output
+        // 1:1 and presenting a plausible but under-counted total.
+        usedBillableTokens,
         costUsd: rawCost == null ? null : Math.max(0, Number(rawCost) || 0),
         knownCostUsd: Number.isFinite(Number(knownCost)) ? Math.max(0, Number(knownCost)) : 0,
         costPrecision: entry?.costPrecision ?? entry?.cost_precision ?? (rawCost == null ? "unknown" : "estimated"),

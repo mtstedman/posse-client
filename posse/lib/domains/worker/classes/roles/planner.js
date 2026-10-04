@@ -703,6 +703,8 @@ export class PlannerRole extends BaseRole {
       },
       success_criteria: Array.isArray(payload.success_criteria) ? payload.success_criteria : [],
       test_command: payload.test_command || null,
+      tests_to_run: Array.isArray(payload.tests_to_run) ? payload.tests_to_run : [],
+      write_tests: payload.write_tests === true,
       // Remote renders its brief-dependent planner lines only when an upstream
       // researcher brief exists; skipped research (planner-first dispatch and
       // the no-research route) has none.

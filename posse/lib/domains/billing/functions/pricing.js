@@ -19,12 +19,9 @@ import { providerLongContextRateMultipliers } from "../../../catalog/provider-ec
 // Anthropic prompt-caching: a cache write costs a TTL-dependent premium over
 // the base input rate — 1.25x for a 5-minute entry, 2.0x for a 1-hour entry.
 // Callers holding the raw split (usage.cache_creation.ephemeral_{5m,1h}_input_tokens)
-// pass it and each lane is priced exactly. Unsplit Claude writes default to
-// the 1-hour rate: Posse reaches Claude only through the Claude Code CLI on
-// subscription OAuth, and every observed call wrote 1-hour entries (29.4M
-// write tokens over 4,662 messages, zero at 5m), so the 5-minute rate would
-// under-report. Other providers report no cache writes, so their 1.25x
-// default is a no-op.
+// pass it and each lane is priced exactly. Unsplit Claude CLI writes use the
+// 1-hour fallback established from current CLI telemetry. Direct Anthropic API
+// writes retain the provider's documented 5-minute default.
 const CACHE_WRITE_5M_MULTIPLIER = 1.25;
 const CACHE_WRITE_1H_MULTIPLIER = 2.0;
 
@@ -349,7 +346,7 @@ function cacheWriteInputUnits({ provider, cacheCreationInput, cacheCreation5mTok
   const writes1h = Math.min(cacheCreationInput, Math.max(0, Number(cacheCreation1hTokens) || 0));
   const writes5m = Math.min(cacheCreationInput - writes1h, Math.max(0, Number(cacheCreation5mTokens) || 0));
   const unsplit = cacheCreationInput - writes1h - writes5m;
-  const defaultMultiplier = ["claude", "anthropic"].includes(normalizeProvider(provider))
+  const defaultMultiplier = normalizeProvider(provider) === "claude"
     ? CACHE_WRITE_1H_MULTIPLIER
     : CACHE_WRITE_5M_MULTIPLIER;
   return (writes1h * CACHE_WRITE_1H_MULTIPLIER)

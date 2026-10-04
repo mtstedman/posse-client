@@ -372,6 +372,16 @@ const AGENT_HANDOFF_PLANNER_REPORT_FIELDS = {
       "Set true only on a db task that is the plan's only task, whose statements you already executed successfully yourself in this attempt and then confirmed with a read; Posse then records the task as complete without dispatching it.",
   },
   test_command: { type: "string", minLength: 1, maxLength: 1000 },
+  tests_to_run: {
+    type: "array",
+    maxItems: 24,
+    items: { type: "string", minLength: 1, maxLength: 500 },
+    description: "Narrow repo-relative unit-test files under test* directories for the harness to run before and after DEV.",
+  },
+  write_tests: {
+    type: "boolean",
+    description: "Default false. Set true only when DEV must add or update focused unit tests.",
+  },
 };
 
 function forbidAgentHandoffScopeFields(fields) {
@@ -2551,196 +2561,17 @@ export const TOOL_RUN_SCOPED_CHECKS = {
   },
 };
 
-export const TOOL_CREATE_TEST_SUITE = {
+export const TOOL_RUN_UNIT_TEST = {
   type: "function",
-  name: "create_test_suite",
+  name: "run_unit_test",
   description:
-    "Create or update one registered Posse test suite. Suites are stored in the runtime DB and mirrored under private .posse-test-suites metadata. " +
-    "This does not list the full catalog; use a suite id/name returned by this tool for later calls.",
+    "Run one unit-test file using Posse's fixed adapter for its language. The path must resolve to a discovered file under a test* directory; commands, arguments, working directories, and environment variables are not accepted. Returns a normalized pass/fail result.",
   parameters: {
     type: "object",
     properties: {
-      name: { type: "string", description: "Human-readable suite name, e.g. 'queue lease safety'." },
-      slug: { type: "string", description: "Optional stable suite slug. Defaults from name." },
-      explanation: { type: "string", description: "What this suite covers and when it should be run." },
+      path: { type: "string", minLength: 1, maxLength: 500, description: "Repository-relative unit-test file under a test* directory." },
     },
-    required: ["name", "explanation"],
-    additionalProperties: false,
-  },
-};
-
-export const TOOL_CREATE_TEST = {
-  type: "function",
-  name: "create_test",
-  description:
-    "Register or update one or many tests inside an existing suite. For a batch, provide shared suite_id/suite plus tests (max 24); each result is reported independently. " +
-    "Every candidate is executed before it can be inserted or updated and must return/resolve exactly true. A failing candidate is never added, and a failing update never replaces the last passing definition. " +
-    "Declare the production files/functions each test covers so Posse can scope future runs. " +
-    "The harness runs from a temp directory and deletes it after the run; put all scratch files in the provided tmp path.",
-  parameters: {
-    type: "object",
-    properties: {
-      suite_id: { type: "integer", description: "Target suite id. Prefer this when available." },
-      suite: { type: "string", description: "Target suite name or slug when suite_id is not available." },
-      name: { type: "string", description: "Human-readable test name." },
-      slug: { type: "string", description: "Optional stable test slug. Defaults from name." },
-      explanation: { type: "string", description: "What this test checks and why it belongs in the suite." },
-      language: {
-        type: "string",
-        enum: ["javascript", "python"],
-        description: "Runtime language for the test function.",
-      },
-      function_name: {
-        type: "string",
-        description: "Optional test function/export name. This is the test entrypoint, not the production function being covered.",
-      },
-      target_files: {
-        type: "array",
-        items: { type: "string" },
-        description: "Workspace-relative production file paths covered by this test. Required so future runs can be scoped to edited files.",
-      },
-      target_symbols: {
-        type: "array",
-        items: { type: "string" },
-        description: "Optional production functions/classes/symbols covered by this test, e.g. ['parseLeaseToken', 'Scheduler.acquire'].",
-      },
-      target_imports: {
-        type: "array",
-        description:
-          "Optional import hints for covered files. The runner also passes targetFiles/targetSymbols/targetImports and helpers importTarget/requireTarget (JS) or import_target (Python).",
-        items: {
-          type: "object",
-          properties: {
-            path: { type: "string", description: "Workspace-relative file to import." },
-            symbols: { type: "array", items: { type: "string" }, description: "Named exports/symbols to import or inspect." },
-            default: { type: "string", description: "Default export/local binding hint." },
-            namespace: { type: "string", description: "Namespace import/local binding hint." },
-          },
-          required: ["path"],
-          additionalProperties: false,
-        },
-      },
-      test: {
-        type: "string",
-        description:
-          "Test source. JavaScript can be an async function/lambda, default export, or named export. Python should define function_name, test, run, or main. Return true to pass.",
-      },
-      timeout_ms: { type: "integer", description: "Per-test timeout in milliseconds. Default: 30000, max: 120000." },
-      tests: {
-        type: "array",
-        minItems: 1,
-        maxItems: 24,
-        description:
-          "Batch form (max 24). Each candidate is run before registration; failed candidates remain unregistered while valid candidates continue. Uses the outer suite_id/suite and optional timeout_ms by default.",
-        items: {
-          type: "object",
-          properties: {
-            name: { type: "string", description: "Human-readable test name." },
-            slug: { type: "string", description: "Optional stable test slug. Defaults from name." },
-            explanation: { type: "string", description: "What this test checks and why it belongs in the suite." },
-            language: { type: "string", enum: ["javascript", "python"], description: "Runtime language for the test function." },
-            function_name: { type: "string", description: "Optional test function/export name." },
-            target_files: {
-              type: "array",
-              items: { type: "string" },
-              description: "Workspace-relative production file paths covered by this test.",
-            },
-            target_symbols: {
-              type: "array",
-              items: { type: "string" },
-              description: "Optional production functions/classes/symbols covered by this test.",
-            },
-            target_imports: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  path: { type: "string", description: "Workspace-relative file to import." },
-                  symbols: { type: "array", items: { type: "string" } },
-                  default: { type: "string" },
-                  namespace: { type: "string" },
-                },
-                required: ["path"],
-                additionalProperties: false,
-              },
-            },
-            test: { type: "string", description: "Test source. It must return/resolve exactly true to be registered." },
-            timeout_ms: { type: "integer", description: "Optional per-test timeout override in milliseconds." },
-          },
-          required: ["name", "explanation", "language", "target_files", "test"],
-          additionalProperties: false,
-        },
-      },
-    },
-    allOf: [
-      {
-        anyOf: [
-          { required: ["suite_id"] },
-          { required: ["suite"] },
-        ],
-      },
-      {
-        anyOf: [
-          { required: ["tests"] },
-          { required: ["name", "explanation", "language", "target_files", "test"] },
-        ],
-      },
-    ],
-    required: [],
-    additionalProperties: false,
-  },
-};
-
-export const TOOL_RUN_TEST = {
-  type: "function",
-  name: "run_test",
-  description:
-    "Run one or many registered Posse tests. Select one by id or by suite plus test name/slug; for a batch, provide tests (max 24). " +
-    "Only tests whose registered target files overlap the current job file scope run; others return skipped_out_of_scope. Returns per-test suite/name identity, pass/fail, and compact failure feedback without stopping the batch after one failure.",
-  parameters: {
-    type: "object",
-    properties: {
-      test_id: { type: "integer", description: "Registered test id." },
-      suite_id: { type: "integer", description: "Suite id when selecting by test name." },
-      suite: { type: "string", description: "Suite name or slug when selecting by test name." },
-      test: { type: "string", description: "Test name or slug when test_id is omitted." },
-      timeout_ms: { type: "integer", description: "Per-test timeout in milliseconds. Default: 30000, max: 120000." },
-      tests: {
-        type: "array",
-        minItems: 1,
-        maxItems: 24,
-        description:
-          "Batch form (max 24). Each item selects a test by test_id or by test name/slug using the outer suite_id/suite. Results preserve input order.",
-        items: {
-          type: "object",
-          properties: {
-            test_id: { type: "integer", description: "Registered test id." },
-            test: { type: "string", description: "Test name or slug when test_id is omitted." },
-            timeout_ms: { type: "integer", description: "Optional per-test timeout override in milliseconds." },
-          },
-          required: [],
-          additionalProperties: false,
-        },
-      },
-    },
-    required: [],
-    additionalProperties: false,
-  },
-};
-
-export const TOOL_RUN_TEST_SUITE = {
-  type: "function",
-  name: "run_test_suite",
-  description:
-    "Run active tests in one registered suite whose target files overlap the current job file scope. Out-of-scope tests return skipped_out_of_scope. Requires a suite id/name and intentionally does not expose the full suite catalog.",
-  parameters: {
-    type: "object",
-    properties: {
-      suite_id: { type: "integer", description: "Registered suite id." },
-      suite: { type: "string", description: "Suite name or slug." },
-      timeout_ms: { type: "integer", description: "Per-test timeout in milliseconds. Default: 30000, max: 120000." },
-    },
-    required: [],
+    required: ["path"],
     additionalProperties: false,
   },
 };

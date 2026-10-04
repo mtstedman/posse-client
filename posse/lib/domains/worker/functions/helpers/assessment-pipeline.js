@@ -82,7 +82,6 @@ import {
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { ensureRegisteredTestTables, runRegisteredTest } from "../../../../shared/tools/functions/toolkit/registered-tests.js";
-import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../../catalog/registered-tests.js";
 import {
   persistPendingAssessmentFileRequests,
   shouldDeferAssessmentToFileRequestContinuation,
@@ -1574,28 +1573,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   }
 
   const providerScope = buildAssessmentProviderScope({ cwd, assessmentContext });
-  const registeredTestScopeFiles = _mergeUniquePaths(
-    providerScope.scopedFiles,
-    providerScope.createFiles,
-    providerScope.deleteFiles,
-  );
-
-  let registeredTestRunEvidence = "";
-  if (REGISTERED_TEST_AGENT_SURFACE_ENABLED) {
-    try {
-      const assessmentDb = getDb();
-      if (allowMutatingRunners) {
-        _rerunFailedRegisteredTestsForAssessment({ job, cwd, scopeFiles: registeredTestScopeFiles, db: assessmentDb });
-      }
-      registeredTestRunEvidence = __testBuildRegisteredTestRunEvidence({
-        jobId: job.id,
-        scopeFiles: registeredTestScopeFiles,
-        db: assessmentDb,
-      });
-    } catch {
-      registeredTestRunEvidence = "";
-    }
-  }
+  const registeredTestRunEvidence = "";
 
   // Resolve the assessor handoff packet before prompt composition. The packet
   // carries remote-prompt identity, stable scope/tool metadata, and ATLAS status.

@@ -115,10 +115,7 @@ const CLAUDE_NATIVE_TEAM_DISALLOW = CLAUDE_AMBIENT_TOOLS
   .join(",");
 const TEST_CAPABILITY_TOOL_NAMES = new Set([
   "run_scoped_checks",
-  "create_test_suite",
-  "create_test",
-  "run_test",
-  "run_test_suite",
+  "run_unit_test",
 ]);
 
 function stripWebToolsFromList(listStr) {

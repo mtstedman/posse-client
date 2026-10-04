@@ -37,19 +37,19 @@ Atlas: `atlas.fetch_ref`, `atlas.traverse_ref`.
 
 ### `assessor`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.search_files`, `tools.validate_artifact_output`, `tools.view_image`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.run_unit_test`, `tools.search_files`, `tools.validate_artifact_output`, `tools.view_image`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `dev`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.run_unit_test`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `planner`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.search_files`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.run_unit_test`, `tools.search_files`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
@@ -1050,6 +1050,26 @@ Run the canonical deterministic lint/typecheck checks for the declared job scope
 |---|---|---|---|---|
 | `checks` | `array<string>` | Optional |  | Checks to run. Default: ['lint']. |
 | `scope` | `object` | Optional |  | Optional explicit scope override. Omit to use the declared job scope. |
+
+### `tools.run_unit_test`
+
+Remote roles: `assessor`, `dev`, `planner`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `run_unit_test` |
+| Tool reference token | `tools.run_unit_test` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `shell` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Run one unit-test file using Posse's fixed adapter for its language. The path must resolve to a discovered file under a test* directory; commands, arguments, working directories, and environment variables are not accepted. Returns a normalized pass/fail result.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `path` | `string` | Required | min length 1; max length 500 | Repository-relative unit-test file under a test* directory. |
 
 ### `tools.search_files`
 

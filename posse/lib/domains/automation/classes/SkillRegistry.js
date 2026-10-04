@@ -8,17 +8,21 @@ import { definitionDigest, demand, digest, validateDefinition } from "../functio
 export class SkillRegistry {
   constructor(service) { this.service = service; this.store = service.store; }
   identity(definition) { return `${definition.name}@${definition.version}`; }
-  entryID(definition) { return `skill:${definition.binding.kind === "repository" ? encodeURIComponent(definition.binding.repo_id) + "/" : ""}${this.identity(definition)}`; }
-  draftKey(definition) { return JSON.stringify([definition.name, definition.binding.kind, definition.binding.repo_id || ""]); }
+  entryID(definition) { const scope = definition.binding.kind === "repository" ? definition.binding.repo_id : definition.binding.kind === "folder" ? definition.binding.folder_path : ""; return `skill:${scope ? encodeURIComponent(scope) + "/" : ""}${this.identity(definition)}`; }
+  draftKey(definition) { return JSON.stringify([definition.name, definition.binding.kind, definition.binding.repo_id || definition.binding.folder_path || ""]); }
   saveDraft(definition) {
-    demand(definition && /^[a-z][a-z0-9-]*$/.test(definition.name) && ["repository", "global", "run-only"].includes(definition.binding?.kind), "Invalid draft identity");
+    demand(definition && /^[a-z][a-z0-9-]*$/.test(definition.name) && ["repository", "folder", "global", "run-only"].includes(definition.binding?.kind), "Invalid draft identity");
     demand(definition.binding.kind !== "repository" || definition.binding.repo_id, "Draft repository is required");
+    demand(definition.binding.kind !== "folder" || typeof definition.binding.folder_path === "string" && path.isAbsolute(definition.binding.folder_path) && path.normalize(definition.binding.folder_path) === definition.binding.folder_path, "Draft folder root must be a clean absolute path");
+    // A run-only draft may stay scoped to the repository it was written in.
+    demand(["repository", "run-only"].includes(definition.binding.kind) || !definition.binding.repo_id, "Only repository and run-only drafts can bind a repository");
+    demand(definition.binding.kind === "folder" || !definition.binding.folder_path, "Only folder drafts can bind a folder root");
     demand(Buffer.byteLength(JSON.stringify(definition)) <= 256 * 1024, "Draft too large");
     const now = new Date().toISOString(), key = this.draftKey(definition), old = this.store.get("drafts", key);
     return this.store.put("drafts", key, { ...definition, state: "draft", created_at: old?.created_at || now, updated_at: now });
   }
-  newest(name, repoID) {
-    const drafts = this.store.list("drafts").filter(item => item.name === name && (item.binding.kind === "global" || (item.binding.repo_id || "") === (repoID || ""))).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  newest(name, repoID, repoPath = "") {
+    const drafts = this.store.list("drafts").filter(item => item.name === name && bindingMatches(item.binding, repoID, repoPath)).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
     demand(drafts.length, "Skill draft not found", "draft_not_found"); return drafts[0];
   }
   reset(name, binding) { return this.saveDraft(csvTemplate(name || "process-csv-folder", binding)); }
@@ -34,22 +38,24 @@ export class SkillRegistry {
         "Imported skill conflicts with an existing immutable version", "schema_mismatch");
       return existing.definition;
     }
+    demand(!this.store.list("entries").some(other => other.kind === "skill" && this.identity(other.definition) === this.identity(definition)),
+      "Imported skill identity already exists in another scope or binding", "schema_mismatch");
     entry.source_digest = sourceDigest;
     this.store.put("entries", entry.id, entry);
     return definition;
   }
-  list({ repo_id = "", include_drafts = false, include_deprecated = false } = {}) {
+  list({ repo_id = "", repo_path = "", include_drafts = false, include_deprecated = false } = {}) {
     const definitions = this.store.list("entries").filter(entry => entry.kind === "skill" && (entry.enabled || include_deprecated)).map(entry => entry.definition)
-      .filter(definition => definition.binding.kind === "global" || definition.binding.repo_id === repo_id);
-    return include_drafts ? [...definitions, ...this.store.list("drafts").filter(item => item.binding.kind === "global" || (item.binding.repo_id || "") === repo_id)] : definitions;
+      .filter(definition => bindingMatches(definition.binding, repo_id, repo_path));
+    return include_drafts ? [...definitions, ...this.store.list("drafts").filter(item => bindingMatches(item.binding, repo_id, repo_path))] : definitions;
   }
-  resolve(identity, repoID = "") {
-    const definitions = this.list({ repo_id: repoID }).filter(item => this.identity(item) === identity);
+  resolve(identity, repoID = "", repoPath = "") {
+    const definitions = this.list({ repo_id: repoID, repo_path: repoPath }).filter(item => this.identity(item) === identity);
     demand(definitions.length === 1, "Published skill is missing or ambiguous", "skill_unavailable"); return definitions[0];
   }
-  resolveReference(reference, repoID = "") {
-    if (String(reference).includes("@")) return this.resolve(reference, repoID);
-    const definitions = this.list({ repo_id: repoID }).filter(item => item.name === reference);
+  resolveReference(reference, repoID = "", repoPath = "") {
+    if (String(reference).includes("@")) return this.resolve(reference, repoID, repoPath);
+    const definitions = this.list({ repo_id: repoID, repo_path: repoPath }).filter(item => item.name === reference);
     demand(definitions.length > 0, `Published skill ${reference} is missing`, "skill_unavailable");
     definitions.sort((left, right) => compareSemver(right.version, left.version));
     return definitions[0];
@@ -73,13 +79,13 @@ export class SkillRegistry {
     const entry = this.entry(published);
     this.store.transaction(() => {
       demand(!this.store.get("entries", entry.id), "Skill version is already published and immutable");
-      demand(!this.store.list("entries").some(other => other.kind === "skill" && this.identity(other.definition) === this.identity(definition) && other.definition.binding.kind !== definition.binding.kind), "Skill identity already exists in another scope");
+      demand(!this.store.list("entries").some(other => other.kind === "skill" && this.identity(other.definition) === this.identity(definition)), "Skill identity already exists in another scope or binding");
       this.store.put("entries", entry.id, entry); this.store.remove("drafts", this.draftKey(definition));
     });
     return published;
   }
-  deprecate(identity, repoID) {
-    const definition = this.resolve(identity, repoID), entry = this.store.get("entries", this.entryID(definition));
+  deprecate(identity, repoID, repoPath = "") {
+    const definition = this.resolve(identity, repoID, repoPath), entry = this.store.get("entries", this.entryID(definition));
     entry.enabled = false; entry.definition.state = "deprecated"; entry.definition.deprecated_at = new Date().toISOString();
     this.store.put("entries", entry.id, entry);
     for (const grant of this.store.list("grants")) if (grant.tool === entry.id) this.service.revoke(grant.id);
@@ -112,8 +118,8 @@ export class SkillRegistry {
           testService.registerResource({ id: requirement.id, root, operations: requirement.operations }); resources.push(requirement);
         }
         testStore.put("entries", entry.id, entry);
-        const principal = definition.binding.kind === "repository" ? { scope: "repository", repo_id: definition.binding.repo_id, role: "dev" } : { scope: "standalone", role: "dev" };
-        testService.grant({ id, tool: entry.id, digest: entry.digest, scope: principal.scope, repo_id: principal.repo_id, roles: ["dev"], operations: ["describe", "invoke"], resources });
+        const principal = ["repository", "folder"].includes(definition.binding.kind) ? { scope: "repository", repo_id: definition.binding.repo_id || "skill-test", repo_path: definition.binding.folder_path, role: "dev" } : { scope: "standalone", role: "dev" };
+        testService.grant({ id, tool: entry.id, digest: entry.digest, scope: principal.scope, repo_id: principal.repo_id, repo_path: principal.repo_path, roles: ["dev"], operations: ["describe", "invoke"], resources });
         run = testService.invoke(principal, { tool: entry.id, grant_id: id, input: definition.contract.tests.valid_input });
         await testService.active.get(run.id)?.promise;
         run = testStore.run(run.id);
@@ -125,6 +131,16 @@ export class SkillRegistry {
     } catch (error) { checks.push({ name: "Skill contract and adapters", passed: false, detail: error.message }); }
     this.store.put("tests", hash, result); return result;
   }
+}
+
+function bindingMatches(binding, repoID, repoPath) {
+  if (binding.kind === "global") return true;
+  if (binding.kind === "repository") return binding.repo_id === repoID;
+  // Run-only drafts never publish; they stay visible where they were written.
+  if (binding.kind === "run-only") return (binding.repo_id || "") === (repoID || "");
+  if (binding.kind !== "folder" || !repoPath) return false;
+  const relative = path.relative(binding.folder_path, path.resolve(repoPath));
+  return relative === "" || relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 function compareSemver(left, right) {

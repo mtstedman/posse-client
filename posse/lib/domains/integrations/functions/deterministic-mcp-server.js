@@ -14,16 +14,13 @@ import {
   TOOL_WRITE_FILE,
   TOOL_EDIT_FILE,
   TOOL_REQUEST_SCOPE,
-  TOOL_CREATE_TEST_SUITE,
-  TOOL_CREATE_TEST,
   TOOL_READ_IMAGE_METADATA,
   TOOL_VALIDATE_ARTIFACT_OUTPUT,
   TOOL_PRUNE_ARTIFACT_OUTPUT,
   TOOL_CLEAN_IMAGE,
   TOOL_EXTRACT_IMAGE_TEXT,
   TOOL_RUN_SCOPED_CHECKS,
-  TOOL_RUN_TEST,
-  TOOL_RUN_TEST_SUITE,
+  TOOL_RUN_UNIT_TEST,
   TOOL_SEARCH_FILES,
   TOOL_GIT_HISTORY,
   TOOL_INSPECT_FILE,
@@ -64,7 +61,7 @@ import { resolveWebToolsEnabled } from "../../providers/functions/shared/tool-po
 import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS, TOOL_CUSTOM_TOOLS } from "../../../catalog/custom-tools.js";
 import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { IMAGE_GENERATION_MAX_CALLS_PER_JOB } from "../../../catalog/artifact.js";
-import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../catalog/registered-tests.js";
+import { discoverUnitTestCapability } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { roleUsesCanonicalRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
 import {
   assessorFallbackReadCallKey,
@@ -109,7 +106,6 @@ import {
   operatorFeedbackDeliveryText,
 } from "../../providers/functions/shared/tool-runtime.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, researchExplorationObservationStatus, runWithObservationContext } from "../../observability/functions/observations.js";
-import { registeredTestToolResultObservation } from "../../observability/functions/registered-test-tool-result.js";
 import { scopedCheckToolResultObservation } from "../../observability/functions/scoped-check-tool-result.js";
 import {
   acknowledgeOperatorFeedback,
@@ -1326,10 +1322,7 @@ const {
   execCleanImage,
   execExtractImageText,
   execRunScopedChecks,
-  execCreateTestSuite,
-  execCreateTest,
-  execRunTest,
-  execRunTestSuite,
+  execRunUnitTest,
   execGetBrief,
 } = createDeterministicToolkit({
   safePath,
@@ -1555,11 +1548,15 @@ const OCR_TOOL_NAMES = new Set(DETERMINISTIC_OCR_TOOLS);
 const IMAGE_VIEW_TOOL_NAMES = new Set(DETERMINISTIC_IMAGE_VIEW_TOOLS);
 const TEST_TOOL_NAMES = new Set([
   "run_scoped_checks",
-  "create_test_suite",
-  "create_test",
-  "run_test",
-  "run_test_suite",
+  "run_unit_test",
 ]);
+
+// Freeze adapter discovery for the life of this MCP process. A runner cannot
+// appear or disappear halfway through an agent turn.
+const unitTestCapability = discoverUnitTestCapability({
+  projectDir: workspaceCwd,
+  scipAvailable: atlasAvailable,
+});
 
 // Owner-hot declaration must follow the canonical registry. A hand-maintained
 // copy silently dropped request_scope (and previously get_brief and
@@ -1593,9 +1590,10 @@ function runtimeToolAvailable(toolName) {
   if (TEST_TOOL_NAMES.has(toolName)) {
     const legacyRoleAllowsTests = bootConfig?.mcpOAuth?.verified !== true
       && roleName === "assessor";
-    return (ownerHotGateway && !mcpMessageSessionScoped)
+    const permitted = (ownerHotGateway && !mcpMessageSessionScoped)
       || bootConfig.allowTests === true
       || legacyRoleAllowsTests;
+    return toolName === "run_scoped_checks" ? permitted : permitted && unitTestCapability.available;
   }
   if (IMAGE_HELPER_TOOL_NAMES.has(toolName)) return allowImageHelpers;
   if (OCR_TOOL_NAMES.has(toolName)) return allowImageHelpers;
@@ -1750,13 +1748,8 @@ if (allowBash) {
 }
 if (ownerHotGateway || roleName === "assessor") {
   addToolSchema(TOOL_RUN_SCOPED_CHECKS);
-  if (REGISTERED_TEST_AGENT_SURFACE_ENABLED) {
-    addToolSchema(TOOL_CREATE_TEST_SUITE);
-    addToolSchema(TOOL_CREATE_TEST);
-    addToolSchema(TOOL_RUN_TEST);
-    addToolSchema(TOOL_RUN_TEST_SUITE);
-  }
 }
+if (unitTestCapability.available && (ownerHotGateway || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
 
 function recordAtlasLiveObservation(entry = {}) {
   const observationType = String(entry.observation_type || "").trim();
@@ -2930,15 +2923,9 @@ if (writeEnabled) {
 if (allowBash && execBash) {
   mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd, effectiveScopePredicates));
 }
-if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
-  const actor = { role: roleName, jobId: mcpJobId, workItemId: mcpWorkItemId };
+if (ownerHotGateway || roleName === "dev" || roleName === "assessor" || roleName === "planner") {
   mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
-  mcpToolRegistry.attach("run_test", (args) => execRunTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
-  mcpToolRegistry.attach("run_test_suite", (args) => execRunTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
-  if (ownerHotGateway) {
-    mcpToolRegistry.attach("create_test_suite", (args) => execCreateTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
-    mcpToolRegistry.attach("create_test", (args) => execCreateTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
-  }
+  mcpToolRegistry.attach("run_unit_test", (args) => execRunUnitTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, { unitTestCapability, scipAvailable: atlasAvailable }));
 }
 if (allowImageHelpers) {
   mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -3112,13 +3099,8 @@ function rebuildNativeToolSchemas() {
   if (allowBash) addToolSchema(TOOL_BASH);
   if (ownerHotGateway || roleName === "assessor") {
     addToolSchema(TOOL_RUN_SCOPED_CHECKS);
-    if (REGISTERED_TEST_AGENT_SURFACE_ENABLED) {
-      addToolSchema(TOOL_CREATE_TEST_SUITE);
-      addToolSchema(TOOL_CREATE_TEST);
-      addToolSchema(TOOL_RUN_TEST);
-      addToolSchema(TOOL_RUN_TEST_SUITE);
-    }
   }
+  if (unitTestCapability.available && (ownerHotGateway || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
   if (allowImageHelpers) {
     for (const schema of [TOOL_READ_IMAGE_METADATA, TOOL_VALIDATE_ARTIFACT_OUTPUT, TOOL_CLEAN_IMAGE, TOOL_EXTRACT_IMAGE_TEXT, TOOL_VIEW_IMAGE]) {
       addToolSchema(schema);
@@ -3161,15 +3143,9 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
   if (allowBash && execBash) {
     mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd, effectiveScopePredicates));
   }
-  if (ownerHotGateway || roleName === "dev" || roleName === "assessor") {
-    const actor = { role: roleName, jobId: mcpJobId, workItemId: mcpWorkItemId };
+  if (ownerHotGateway || roleName === "dev" || roleName === "assessor" || roleName === "planner") {
     mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
-    mcpToolRegistry.attach("run_test", (args) => execRunTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
-    mcpToolRegistry.attach("run_test_suite", (args) => execRunTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
-    if (ownerHotGateway) {
-      mcpToolRegistry.attach("create_test_suite", (args) => execCreateTestSuite(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
-      mcpToolRegistry.attach("create_test", (args) => execCreateTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, actor));
-    }
+    mcpToolRegistry.attach("run_unit_test", (args) => execRunUnitTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, { unitTestCapability, scipAvailable: atlasAvailable }));
   }
   if (allowImageHelpers) {
     mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -3456,10 +3432,7 @@ const BLOCKING_NATIVE_TOOL_NAMES = new Set([
   "reencode_image",
   "resize_image",
   "run_scoped_checks",
-  "create_test_suite",
-  "create_test",
-  "run_test",
-  "run_test_suite",
+  "run_unit_test",
   "write_file",
 ]);
 
@@ -3728,32 +3701,26 @@ async function completeNativeToolCall({
   }
   const atlasLiveBuffer = ok ? await maybePushAtlasLiveBufferForToolObservation({ toolName, args }) : null;
   const readStats = ok ? nativeReadResultStats(toolName, text) : null;
-  const registeredTestResult = registeredTestToolResultObservation({
-    tool: toolName,
-    input: recordInput,
-    resultText: text,
-  });
   const scopedCheckResult = scopedCheckToolResultObservation({
     tool: toolName,
     resultText: text,
   });
-  const resultDiagnostic = registeredTestResult?.error || capString(text, 300);
+  const resultDiagnostic = scopedCheckResult?.error || capString(text, 300);
   finishToolInvocation(toolInvocation, {
     tool: toolName,
     input: recordInput,
     cwd: workspaceCwd,
     ok,
     outcome,
-    ...((registeredTestResult?.summary || scopedCheckResult?.summary)
-      ? { resultSummary: registeredTestResult?.summary || scopedCheckResult.summary }
+    ...(scopedCheckResult?.summary
+      ? { resultSummary: scopedCheckResult.summary }
       : {}),
     ...(outcome === "failed" ? { error: resultDiagnostic } : {}),
     ...(outcome === "rejected" ? { rejection: resultDiagnostic } : {}),
-    ...(atlasLiveBuffer || readStats || registeredTestResult?.detail || scopedCheckResult?.detail ? {
+    ...(atlasLiveBuffer || readStats || scopedCheckResult?.detail ? {
       extraDetail: {
         ...(atlasLiveBuffer ? { atlas_live_buffer: atlasLiveBuffer } : {}),
         ...(readStats || {}),
-        ...(registeredTestResult?.detail ? { registered_test_result: registeredTestResult.detail } : {}),
         ...(scopedCheckResult?.detail ? { scoped_check_result: scopedCheckResult.detail } : {}),
       },
     } : {}),

@@ -10,6 +10,12 @@ function count(value) {
   return Number.isFinite(numeric) && numeric >= 0 ? Math.floor(numeric) : 0;
 }
 
+function optionalNonNegative(value) {
+  if (value == null || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+}
+
 function positiveOrdinal(value) {
   const numeric = Number(value);
   return Number.isInteger(numeric) && numeric > 0 ? numeric : null;
@@ -350,6 +356,10 @@ export function resolveCanonicalCallAccounting(call = {}, {
   const persistedLongContextTierInputTokens = call.long_context_tier_input_tokens
     ?? call.longContextTierInputTokens
     ?? null;
+  const persistedBillableInputTokens = optionalNonNegative(
+    call.exact_billable_input_tokens ?? call.exactBillableInputTokens,
+  );
+  const persistedCostUsd = optionalNonNegative(call.cost_estimate_usd ?? call.costEstimateUsd);
   const agentCallId = Number(call.id ?? call.agent_call_id ?? call.agentCallId) || null;
   const aggregateUsageAvailable = hasAggregateUsage(call);
   const segments = agentCallId
@@ -389,7 +399,20 @@ export function resolveCanonicalCallAccounting(call = {}, {
         cacheCreationInputTokens,
       }, longContextTierInputTokens)
       : null;
-    const costUsd = segments.exact ? segments.costUsd : aggregateCost?.costUsd ?? null;
+    // Completion persists the exact cost and billable-input result calculated
+    // with the rate table and cache-write TTL evidence available at that time.
+    // Prefer those snapshots when reading the call later: recomputing old rows
+    // with today's defaults can retroactively change both figures (notably
+    // after the Claude CLI cache-write fallback changed from 5m to 1h).
+    const billableInputTokens = segments.exact
+      ? persistedBillableInputTokens ?? segments.billableInputTokens
+      : segments.billableInputTokens;
+    const billableTokens = segments.exact && billableInputTokens != null && segments.billableTokens != null
+      ? billableInputTokens + (segments.billableTokens - segments.billableInputTokens)
+      : null;
+    const costUsd = segments.exact
+      ? persistedCostUsd ?? segments.costUsd
+      : aggregateCost?.costUsd ?? null;
     return {
       inputTokens: aggregateOverridesIncompleteSegments ? inputTokens : segments.inputTokens,
       outputTokens: aggregateOverridesIncompleteSegments ? outputTokens : segments.outputTokens,
@@ -399,11 +422,11 @@ export function resolveCanonicalCallAccounting(call = {}, {
       cacheCreationInputTokens: aggregateOverridesIncompleteSegments
         ? cacheCreationInputTokens
         : segments.cacheCreationInputTokens,
-      billableInputTokens: segments.billableInputTokens,
-      billableTokens: segments.exact ? segments.billableTokens : null,
+      billableInputTokens,
+      billableTokens,
       costUsd,
       costSource: segments.exact
-        ? `segments:${segments.precision}`
+        ? (persistedCostUsd == null ? `segments:${segments.precision}` : "persisted:exact")
         : aggregateCost?.costSource ?? `segments:${segments.precision}`,
       costPrecision: segments.exact && costUsd != null
         ? "exact"

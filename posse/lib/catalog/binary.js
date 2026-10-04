@@ -83,6 +83,44 @@ export const ENGAGEMENT_CAPABILITIES_METHOD = "engagement.capabilities";
 export const ENGAGEMENT_LAUNCH_PLAN_METHOD = "engagement.launchPlan";
 export const ENGAGEMENT_LAUNCH_PLAN_BATCH_METHOD = "engagement.launchPlanBatch";
 export const ENGAGEMENT_RECOVERY_HINT_METHOD = "engagement.recoveryHint";
+// One-turn provider execution protocol served by
+// `posse-remote engagement dispatch --stdio`. It is versioned independently
+// from the pure engagement launch-policy contract.
+export const PROVIDER_DISPATCH_PROTOCOL = "posse.provider-dispatch.v1";
+export const PROVIDER_DISPATCH_COMMAND = "engagement.dispatch";
+export const PROVIDER_DISPATCH_MAX_START_BYTES = 8 * 1024 * 1024;
+export const PROVIDER_DISPATCH_MAX_EVENT_BYTES = 2 * 1024 * 1024;
+export const PROVIDER_TOOL_GATEWAY_PROTOCOL = "posse.provider-tool-gateway.v1";
+export const PROVIDER_TOOL_GATEWAY_PATH = "/v1/provider-tools/call";
+export const PROVIDER_TOOL_GATEWAY_MAX_REQUEST_BYTES = 2 * 1024 * 1024;
+export const PROVIDER_TOOL_GATEWAY_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+export const PROVIDER_BREAKER_STORE_VERSION = 1;
+export const PROVIDER_DISPATCH_EVENTS = Object.freeze([
+  "dispatch.started",
+  "surface.attested",
+  "status",
+  "output.delta",
+  "commentary",
+  "tool.requested",
+  "tool.completed",
+  "retry.scheduled",
+  "breaker.changed",
+  "usage.segment",
+  "usage.progress",
+  "prompt.finalized",
+  "dispatch.completed",
+  "dispatch.failed",
+  "dispatch.cancelled",
+]);
+export const PROVIDER_DISPATCH_PROVIDERS = Object.freeze([
+  "claude",
+  "codex",
+  "copilot",
+  "anthropic",
+  "openai",
+  "grok",
+  "posse-local",
+]);
 export const REMOTE_ARTIFACT_CATALOG_METHOD = "remote.artifactCatalog";
 export const REMOTE_ARTIFACT_DOWNLOAD_METHOD = "remote.artifactDownload";
 export const REMOTE_ARTIFACT_STATUS_METHOD = "remote.artifactStatus";

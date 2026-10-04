@@ -1070,6 +1070,8 @@ export function buildHandoffPacket(job, opts) {
     related_files: relatedFiles,
     success_criteria: Array.isArray(sanitizedPayload.success_criteria) ? sanitizedPayload.success_criteria : sanitizedPayload.success_criteria ? [sanitizedPayload.success_criteria] : [],
     test_command: sanitizedPayload.test_command || null,
+    tests_to_run: Array.isArray(sanitizedPayload.tests_to_run) ? sanitizedPayload.tests_to_run : [],
+    write_tests: sanitizedPayload.write_tests === true,
     skills: parseSkillIds(job.skills || sanitizedPayload.skills),
     requested_skills: parseSkillIds(job.skills || sanitizedPayload.skills),
     dev_brief: sanitizedPayload.dev_brief && typeof sanitizedPayload.dev_brief === "object"
@@ -1450,6 +1452,8 @@ export async function handoff(input, { providerName = null } = {}) {
       related_files: input.data.related_files || [],
       success_criteria: Array.isArray(input.data.success_criteria) ? input.data.success_criteria : input.data.success_criteria ? [input.data.success_criteria] : [],
       test_command: input.data.test_command || null,
+      tests_to_run: Array.isArray(input.data.tests_to_run) ? input.data.tests_to_run : [],
+      write_tests: input.data.write_tests === true,
       skills: parseSkillIds(input.data.skills || input.data.requested_skills),
       requested_skills: parseSkillIds(input.data.skills || input.data.requested_skills),
       dev_brief: input.data.dev_brief && typeof input.data.dev_brief === "object"

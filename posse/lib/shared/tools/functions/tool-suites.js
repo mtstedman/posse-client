@@ -16,7 +16,6 @@
 // catalog; `advertise` replaces the per-provider hand-lists entirely.
 
 import { ToolCatalog } from "../classes/ToolCatalog.js";
-import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../catalog/registered-tests.js";
 import { ToolRegistry } from "../classes/ToolRegistry.js";
 import { assertMutationRoleSafety } from "./tool-parity.js";
 
@@ -73,12 +72,9 @@ const TOOLS_SUITE = [
   { name: "copy_file", mutatesWorktree: true, advertise: [] },
   { name: "make_dir", mutatesWorktree: true, advertise: ["mcp"] },
   { name: "run_scoped_checks", mutatesWorktree: false, advertise: ["function", "mcp"] },
-  // Deferred/unfinished DB-backed registered-test experiment. Keep schemas and
-  // executors registered internally, but advertise them on no agent transport.
-  { name: "create_test", mutatesWorktree: true, advertise: REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["mcp"] : [] },
-  { name: "create_test_suite", mutatesWorktree: true, advertise: REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["mcp"] : [] },
-  { name: "run_test", mutatesWorktree: false, advertise: REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["mcp"] : [] },
-  { name: "run_test_suite", mutatesWorktree: false, advertise: REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["mcp"] : [] },
+  // One path-only unit-test runner. Runtime discovery hides it unless SCIP and
+  // every language adapter required by test* directories are available.
+  { name: "run_unit_test", mutatesWorktree: false, advertise: ["mcp"] },
   // Dev/fix agents may proactively consolidate exact scope requests. The
   // ordinary write/edit boundary still invokes the same executor internally.
   { name: "request_scope", mutatesWorktree: false, advertise: ["function", "mcp"] },

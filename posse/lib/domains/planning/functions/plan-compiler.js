@@ -63,6 +63,7 @@ import {
   validatePlannerTestCommandForRepository,
 } from "../../worker/functions/helpers/test-execution-receipt.js";
 import { validateSkillIds } from "../../../shared/skills/functions/registry.js";
+import { discoverUnitTestCapability } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import {
   buildStructuredDataPromotePlan as buildStructuredDataPromotePlanFromModule,
   getExplicitIntakeBindings as getExplicitIntakeBindingsFromModule,
@@ -2068,6 +2069,15 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         let operationalCommandApproval = null;
         let rejectedPlannerTestCommand = null;
         const declaredTestCommand = typeof t.test_command === "string" ? t.test_command.trim() : "";
+        const requestedTestsToRun = Array.isArray(t.tests_to_run) ? t.tests_to_run : [];
+        const unitTestCapability = requestedTestsToRun.length > 0
+          ? discoverUnitTestCapability({ projectDir: worker.projectDir })
+          : null;
+        const compiledTestsToRun = [...new Set(requestedTestsToRun
+          .map((value) => String(value || "").trim().replace(/\\/g, "/"))
+          .filter((value) => unitTestCapability?.available && unitTestCapability.files.includes(value)))]
+          .slice(0, 24);
+        const writeTests = t.write_tests === true;
         if (shouldApplyExecutionPolicy && !pinnedTestCommand) {
           if (declaredTestCommand) {
             const testCommandValidation = validatePlannerTestCommand(declaredTestCommand);
@@ -2191,6 +2201,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               ...(protectedScopeOmissions.length > 0 ? { protected_scope_omissions: protectedScopeOmissions } : {}),
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
               test_command: compiledTestCommand,
+              tests_to_run: compiledTestsToRun,
+              write_tests: writeTests,
               ...(pinnedTestCommand ? { _task_ab_test_command: true } : {}),
               ...(rejectedPlannerTestCommand ? { _verification_plan_invalid: rejectedPlannerTestCommand } : {}),
               ...(operationalCommandApproval ? {
@@ -2472,6 +2484,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               create_roots: t.create_roots || [],
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
               test_command: compiledTestCommand,
+              tests_to_run: compiledTestsToRun,
+              write_tests: writeTests,
               ...(pinnedTestCommand ? { _task_ab_test_command: true } : {}),
               ...(rejectedPlannerTestCommand ? { _verification_plan_invalid: rejectedPlannerTestCommand } : {}),
               ...(devBriefResult.brief ? { dev_brief: devBriefResult.brief } : {}),

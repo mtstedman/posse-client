@@ -46,6 +46,10 @@ import {
   renderTestFailureSummary,
   testFailureFingerprint,
 } from "./test-failure-evidence.js";
+import {
+  discoverUnitTestCapability,
+  runUnitTestFiles,
+} from "../../../../shared/tools/functions/toolkit/unit-test-runner.js";
 export { normalizeFailureFingerprintText } from "./test-failure-evidence.js";
 
 const RECEIPT_KIND = "deterministic_test_execution";
@@ -1071,6 +1075,33 @@ export function operationalCommandApprovalRequest(command) {
 export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
   if (!["dev", "fix"].includes(String(job?.job_type || ""))) return null;
   if (String(payload?.task_mode || "code") !== "code") return null;
+  if (Array.isArray(payload?.tests_to_run)) {
+    if (!cwd) return null;
+    const capability = discoverUnitTestCapability({ projectDir: cwd });
+    const unitTestPaths = [...new Set(payload.tests_to_run
+      .map((value) => String(value || "").trim().replace(/\\/g, "/"))
+      .filter((value) => capability.available && capability.files.includes(value)))]
+      .slice(0, 24);
+    // Invalid or unresolved candidates are intentionally dropped. An explicit
+    // planner list that resolves empty means "no runnable unit test", not
+    // permission to substitute a broad repository/deployment gate.
+    if (unitTestPaths.length === 0) return null;
+    const command = unitTestPaths.join(", ");
+    return {
+      schema_version: RECEIPT_SCHEMA_VERSION,
+      command,
+      execution_command: command,
+      cwd_relative: null,
+      source: "planner_unit_tests",
+      plan_id: sha256(`planner_unit_tests\0${unitTestPaths.join("\0")}`),
+      check_id: `unit_tests:${sha256(unitTestPaths.join("\0")).slice(0, 16)}`,
+      intent: "test",
+      verification_plan: null,
+      validation_error: null,
+      verification_eligible: true,
+      unit_test_paths: unitTestPaths,
+    };
+  }
   const command = typeof payload?.test_command === "string"
     ? payload.test_command.trim()
     : "";
@@ -1185,6 +1216,7 @@ function frozenTestPlanFromReceipt(receipt = {}) {
     verification_plan: receipt.verification_plan || null,
     validation_error: receipt.validation_error || null,
     verification_eligible: receipt.verification_eligible !== false,
+    ...(Array.isArray(receipt.unit_test_paths) ? { unit_test_paths: receipt.unit_test_paths } : {}),
   };
 }
 
@@ -1543,7 +1575,7 @@ async function executeReceipt({
       created_at: new Date().toISOString(),
     });
   }
-  if (!["task_ab_acceptance", "operator_approved_operation"].includes(plan.source) && phase === "baseline") {
+  if (!["task_ab_acceptance", "operator_approved_operation", "planner_unit_tests"].includes(plan.source) && phase === "baseline") {
     const repositoryValidation = validatePlannerTestCommandForRepository(plan.command, cwd);
     if (!repositoryValidation.ok) {
       return storeReceipt(job, attemptId, {
@@ -1629,12 +1661,31 @@ async function executeReceipt({
   const executionCwd = plan.cwd_relative
     ? path.resolve(cwd, plan.cwd_relative)
     : cwd;
-  const rawResult = await runCommand(executionCommand, {
-    cwd: executionCwd,
-    timeoutMs: effectivePolicy.wall_timeout_ms,
-    idleTimeoutMs: effectivePolicy.idle_timeout_ms,
-    trustedShell: plan.source === "task_ab_acceptance",
-  });
+  const rawResult = Array.isArray(plan.unit_test_paths)
+    ? await runUnitTestFiles({
+        projectDir: cwd,
+        paths: plan.unit_test_paths,
+        capability: discoverUnitTestCapability({ projectDir: cwd }),
+        timeoutMs: effectivePolicy.wall_timeout_ms,
+      }).then((aggregate) => ({
+        status: aggregate.status,
+        ok: aggregate.ok,
+        code: aggregate.ok === true ? 0 : aggregate.ok === false ? 1 : null,
+        signal: null,
+        timed_out: aggregate.status === "timed_out",
+        duration_ms: aggregate.results.reduce((sum, result) => sum + Number(result.duration_ms || 0), 0),
+        stdout: aggregate.results.map((result) => `[${result.path}] ${String(result.status || "unknown")}\n${String(result.stdout || "")}`.trim()).join("\n\n"),
+        stderr: aggregate.results.map((result) => String(result.stderr || "")).filter(Boolean).join("\n\n"),
+        stdout_truncated: false,
+        stderr_truncated: false,
+        reason: aggregate.ok == null ? aggregate.results.find((result) => result.ok == null)?.reason || "unit_test_unavailable" : null,
+      }))
+    : await runCommand(executionCommand, {
+        cwd: executionCwd,
+        timeoutMs: effectivePolicy.wall_timeout_ms,
+        idleTimeoutMs: effectivePolicy.idle_timeout_ms,
+        trustedShell: plan.source === "task_ab_acceptance",
+      });
   const plannerClassifiedResult = !["task_ab_acceptance", "operator_approved_operation"].includes(plan.source) && phase === "baseline"
     ? classifyPackageManagerTestPlanFailure(executionCommand, rawResult)
     : rawResult;
@@ -1719,6 +1770,7 @@ async function executeReceipt({
     execution_command: executionCommand,
     cwd_relative: plan.cwd_relative || null,
     source: plan.source,
+    ...(Array.isArray(plan.unit_test_paths) ? { unit_test_paths: plan.unit_test_paths } : {}),
     verification_eligible: plan.verification_eligible !== false,
     commit_hash: commitHash || actualCommit,
     executed_commit_hash: actualCommit,
@@ -1930,11 +1982,42 @@ export async function ensurePostChangeTestReceipt({
   if (!cwd) return null;
   const effectivePolicy = effectiveVerificationPolicy({ cwd, policy, timeoutMs, idleTimeoutMs });
   const baseline = findFrozenTestBaseline(job?.id, { policy: effectivePolicy, projectDir: cwd });
-  const plan = baseline
+  const assessedCommit = commitHash || await currentCommit(cwd);
+  let plan = baseline
     ? frozenTestPlanFromReceipt(baseline)
     : resolveFrozenTestPlan(job, payload, { cwd });
+  if (payload?.write_tests === true && assessedCommit) {
+    const baseCommit = String(baseline?.commit_hash || payload?.root_base_commit || "").trim();
+    if (baseCommit) {
+      const capability = discoverUnitTestCapability({ projectDir: cwd });
+      let changedPaths = [];
+      try {
+        const output = await gitExecAsync(["diff", "--name-only", "-z", `${baseCommit}..${assessedCommit}`], cwd, { trim: false });
+        changedPaths = String(output || "").split("\0").filter((candidate) => capability.files.includes(candidate));
+      } catch {
+        changedPaths = [];
+      }
+      const unitTestPaths = [...new Set([...(plan?.unit_test_paths || []), ...changedPaths])].slice(0, 24);
+      if (unitTestPaths.length > 0) {
+        plan = {
+          ...(plan || {}),
+          schema_version: RECEIPT_SCHEMA_VERSION,
+          command: unitTestPaths.join(", "),
+          execution_command: unitTestPaths.join(", "),
+          cwd_relative: null,
+          source: plan?.source || "planner_written_unit_tests",
+          plan_id: plan?.plan_id || sha256(`planner_written_unit_tests\0${unitTestPaths.join("\0")}`),
+          check_id: plan?.check_id || `unit_tests:${sha256(unitTestPaths.join("\0")).slice(0, 16)}`,
+          intent: "test",
+          verification_plan: null,
+          validation_error: null,
+          verification_eligible: true,
+          unit_test_paths: unitTestPaths,
+        };
+      }
+    }
+  }
   if (!plan) return null;
-  const assessedCommit = commitHash || await currentCommit(cwd);
   const debtIdentitiesFor = async (postChange) => {
     const identities = new Set();
     const add = (receipt) => {

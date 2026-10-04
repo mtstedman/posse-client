@@ -4,7 +4,6 @@ import { TOOL_GIT_HISTORY } from "../../../git/functions/history.js";
 import { resolveAtlasToolGateEnabled } from "./gate-settings.js";
 import { atlasBackendLabel } from "../atlas-label.js";
 import { atlasDescriptorSchemaForAction } from "../../../atlas/functions/v2/contracts/tool-schemas.js";
-import { REGISTERED_TEST_AGENT_SURFACE_ENABLED } from "../../../../catalog/registered-tests.js";
 import { TOOL_CUSTOM_TOOLS } from "../../../../catalog/custom-tools.js";
 import { TOOL_ATTACHMENT_BY_PROVIDER } from "../../../../catalog/tool-surface/provider-attachments.js";
 import {
@@ -46,10 +45,7 @@ import {
   TOOL_GET_OPERATOR_FEEDBACK,
   TOOL_ACK_OPERATOR_FEEDBACK,
   TOOL_RUN_SCOPED_CHECKS,
-  TOOL_CREATE_TEST_SUITE,
-  TOOL_CREATE_TEST,
-  TOOL_RUN_TEST,
-  TOOL_RUN_TEST_SUITE,
+  TOOL_RUN_UNIT_TEST,
   TOOL_MOVE_FILE,
   TOOL_COPY_FILE,
   TOOL_MAKE_DIR,
@@ -101,10 +97,7 @@ export {
   TOOL_GET_OPERATOR_FEEDBACK,
   TOOL_ACK_OPERATOR_FEEDBACK,
   TOOL_RUN_SCOPED_CHECKS,
-  TOOL_CREATE_TEST_SUITE,
-  TOOL_CREATE_TEST,
-  TOOL_RUN_TEST,
-  TOOL_RUN_TEST_SUITE,
+  TOOL_RUN_UNIT_TEST,
   TOOL_MOVE_FILE,
   TOOL_COPY_FILE,
   TOOL_MAKE_DIR,
@@ -497,29 +490,11 @@ export const TOOL_CATALOG = {
     summary: "Canonical lint/typecheck route for the declared job scope, including scoped PHP syntax lint when applicable.",
     observation: { type: "tool.run_scoped_checks", label: "ScopedChecks", format: "generic", targetKeys: ["checks", "scope"] },
   },
-  create_test_suite: {
-    schema: TOOL_CREATE_TEST_SUITE,
+  run_unit_test: {
+    schema: TOOL_RUN_UNIT_TEST,
     access: "shell",
-    summary: "Create or update one DB-backed registered test suite without exposing the suite catalog.",
-    observation: { type: "tool.create_test_suite", label: "CreateSuite", format: "generic", targetKeys: ["name", "suite"] },
-  },
-  create_test: {
-    schema: TOOL_CREATE_TEST,
-    access: "shell",
-    summary: "Register or update one or many tests in a suite; every candidate runs first and a failing candidate is never persisted.",
-    observation: { type: "tool.create_test", label: "CreateTest", format: "generic", targetKeys: ["suite_id", "suite", "name", "target_files", "target_symbols"] },
-  },
-  run_test: {
-    schema: TOOL_RUN_TEST,
-    access: "shell",
-    summary: "Run one or many DB-backed registered tests and return per-test suite/name and pass/fail feedback.",
-    observation: { type: "tool.run_test", label: "RunTest", format: "generic", targetKeys: ["test_id", "suite_id", "suite", "test"] },
-  },
-  run_test_suite: {
-    schema: TOOL_RUN_TEST_SUITE,
-    access: "shell",
-    summary: "Run all active tests in one named/id suite without listing the full catalog.",
-    observation: { type: "tool.run_test_suite", label: "RunSuite", format: "generic", targetKeys: ["suite_id", "suite"] },
+    summary: "Run one discovered unit-test file with a fixed language adapter and normalized pass/fail output.",
+    observation: { type: "tool.run_unit_test", label: "UnitTest", format: "file", pathKeys: ["path"], requireTarget: true },
   },
   bash: {
     schema: TOOL_BASH,
@@ -602,7 +577,7 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       // dev/fix provider starts, then moved into files_to_modify. write_file
       // remains registered for compatibility/artificer output but must not be
       // issued on this surface; edit_file can populate the empty file.
-      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "request_scope", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "project_db_query"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "request_scope", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_unit_test", "project_db_query"],
     }),
     artificer: Object.freeze({
       read: ["ack_operator_feedback"],
@@ -614,8 +589,8 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     // execution capability cap keeps it read-only regardless of the operator
     // grant, and the contract gate drops the tool when no read grant exists.
     assessor: Object.freeze({
-      read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "view_image", "run_scoped_checks", ...(REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["run_test", "run_test_suite"] : []), "bash", "project_db_query"],
-      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "view_image", "run_scoped_checks", ...(REGISTERED_TEST_AGENT_SURFACE_ENABLED ? ["run_test", "run_test_suite"] : []), "bash", "project_db_query"],
+      read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "view_image", "run_scoped_checks", "run_unit_test", "bash", "project_db_query"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "view_image", "run_scoped_checks", "run_unit_test", "bash", "project_db_query"],
     }),
     researcher: Object.freeze({
       read: ["ack_operator_feedback", "read_file", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
@@ -626,8 +601,8 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     // item itself; the issued capability and operator grant decide whether
     // that is read-only or read/write.
     planner: Object.freeze({
-      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
-      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
+      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "run_unit_test", "project_db_query"],
+      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "run_unit_test", "project_db_query"],
     }),
     // Internal one-turn JSON model passes are not Jobs and therefore cannot
     // possess an Agent-bound MCP gate. Their prompts explicitly prohibit tool
@@ -979,11 +954,10 @@ export function getDeterministicMcpToolNames(role, {
   if (role === "dev" || role === "artificer" || role === "assessor") tools.push(...DETERMINISTIC_OCR_TOOLS);
   if (role === "assessor") tools.push(...DETERMINISTIC_IMAGE_VIEW_TOOLS);
   if (roleUsesDeterministicAssetDownload(role)) tools.push(...DETERMINISTIC_ASSET_DOWNLOAD_TOOLS);
-  // Scoped lint/typecheck belongs to the assessor. The separate DB-backed
-  // registered-test experiment remains deferred and is not issued.
+  if (["planner", "dev", "assessor"].includes(role)) tools.push("run_unit_test");
+  // Scoped lint/typecheck belongs to the assessor.
   if (role === "assessor") {
     tools.push("run_scoped_checks");
-    if (REGISTERED_TEST_AGENT_SURFACE_ENABLED) tools.push("run_test", "run_test_suite");
   }
   if (TOOL_ROLE_LIBRARY.deterministicMcp.shellRoles.includes(role)) tools.push("bash");
   if (role === "planner") tools.push("get_brief");

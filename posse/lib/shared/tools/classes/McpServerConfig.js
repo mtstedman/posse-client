@@ -730,10 +730,7 @@ function buildDeterministicMcpBootPayload(role, {
   const agentLifetimeContract = scopeBindingMode === "dispatcher";
   const allowTests = (agentLifetimeContract || requestedProjectDbCapability !== "write") && expectedTools.some((name) => [
     "run_scoped_checks",
-    "create_test_suite",
-    "create_test",
-    "run_test",
-    "run_test_suite",
+    "run_unit_test",
   ].includes(name));
   const remoteCatalogMode = getPosseRemoteMode();
   const remoteCatalogEnabled = remoteCatalogMode !== "off";

@@ -4,6 +4,7 @@ export * from "./McpServerConfig.js";
 export * from "./McpGate.js";
 export * from "./NativeBinary.js";
 export * from "./PersistentMcpOwner.js";
+export * from "./ProviderDispatchGateway.js";
 export * from "./ToolCatalog.js";
 export * from "./ToolContract.js";
 export * from "./ProviderToolRenderer.js";

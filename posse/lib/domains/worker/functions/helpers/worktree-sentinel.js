@@ -88,6 +88,10 @@ export function writeActiveWorktreeSentinel(wtPath, payload = {}) {
 }
 
 export function readActiveWorktreeSentinel(wtPath) {
+  // Terminal cleanup commonly runs after a worktree has already disappeared.
+  // There cannot be a live sentinel in that case, and asking native Git to
+  // inspect the missing directory turns the harmless absence into ENOENT.
+  if (!wtPath || !fs.existsSync(wtPath)) return null;
   const sentinelPath = activeWorktreeSentinelPath(wtPath, { ensureDir: false });
   if (!sentinelPath || !fs.existsSync(sentinelPath)) return null;
   try {

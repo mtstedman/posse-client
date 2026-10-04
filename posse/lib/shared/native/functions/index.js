@@ -4,3 +4,4 @@ export * from "./artifact-layout.js";
 export * from "./binary-reconciliation.js";
 export * from "./key.js";
 export * from "./ml-invoke.js";
+export * from "./provider-dispatch-client.js";

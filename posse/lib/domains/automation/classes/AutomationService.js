@@ -59,6 +59,10 @@ export class AutomationService {
     const grant = validateGrant(value), entry = this.store.get("entries", grant.tool);
     demand(entry?.enabled && entry.digest === grant.digest, "Grant must pin an enabled tool's exact digest");
     if (entry.definition?.binding.kind === "repository") demand(grant.scope === "repository" && grant.repo_id === entry.definition.binding.repo_id, "Skill repository binding mismatch");
+    if (entry.definition?.binding.kind === "folder") {
+      const relative = grant.repo_path && path.relative(entry.definition.binding.folder_path, path.resolve(grant.repo_path));
+      demand(grant.scope === "repository" && (relative === "" || relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)), "Skill folder binding mismatch");
+    }
     for (const item of grant.resources) {
       const resource = this.store.get("resources", item.id);
       demand(resource?.enabled && item.operations.every(op => resource.operations.includes(op)), "Grant exceeds resource permissions");

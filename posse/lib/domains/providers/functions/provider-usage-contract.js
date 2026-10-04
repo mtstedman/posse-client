@@ -79,6 +79,9 @@ function normalizeUsageRecords(records = []) {
     if (!id) continue;
     const current = byProvider.get(id) || {
       calls: 0,
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
       rawTokens: 0,
       billableTokens: 0,
       billingUsageUnknownCalls: 0,
@@ -86,6 +89,9 @@ function normalizeUsageRecords(records = []) {
     };
     const calls = finiteNonNegative(record?.callCount ?? record?.call_count) || 0;
     current.calls += calls;
+    current.inputTokens += finiteNonNegative(record?.usedInputTokens ?? record?.input_tokens) || 0;
+    current.cachedInputTokens += finiteNonNegative(record?.usedCachedInputTokens ?? record?.cached_input_tokens) || 0;
+    current.outputTokens += finiteNonNegative(record?.usedOutputTokens ?? record?.output_tokens) || 0;
     current.rawTokens += finiteNonNegative(record?.usedTokens ?? record?.raw_tokens ?? record?.tokens) || 0;
     const billable = finiteNonNegative(record?.usedBillableTokens ?? record?.billable_tokens);
     if (billable == null) current.billableTokens = null;
@@ -244,6 +250,9 @@ export function buildProviderUsageDocument({
       detail: safeProviderDetail(summary),
       current_run: {
         calls: normalizedRunStartedAt ? currentRun?.calls || 0 : null,
+        input_tokens: normalizedRunStartedAt ? currentRun?.inputTokens || 0 : null,
+        cached_input_tokens: normalizedRunStartedAt ? currentRun?.cachedInputTokens || 0 : null,
+        output_tokens: normalizedRunStartedAt ? currentRun?.outputTokens || 0 : null,
         raw_tokens: normalizedRunStartedAt ? currentRun?.rawTokens || 0 : null,
         billable_tokens: normalizedRunStartedAt ? (currentRun ? currentRun.billableTokens : 0) : null,
         billing_usage_unknown_calls: normalizedRunStartedAt ? currentRun?.billingUsageUnknownCalls || 0 : null,

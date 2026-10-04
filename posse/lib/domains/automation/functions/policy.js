@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import path from "node:path";
 import Ajv from "ajv";
 import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
 import { AUTOMATION_RESOURCE_OPERATIONS } from "../../../catalog/custom-tools.js";
@@ -33,14 +34,14 @@ export function object(value, allowed, required = []) {
   return value;
 }
 export function subject(value) {
-  object(value, ["scope", "repo_id", "role", "job_id", "work_item_id"], ["scope", "role"]);
+  object(value, ["scope", "repo_id", "repo_path", "role", "job_id", "work_item_id"], ["scope", "role"]);
   demand(["repository", "standalone"].includes(value.scope), "Invalid subject scope");
   demand(PROVIDER_ROLE_NAMES.includes(value.role), "Unknown role");
   demand(value.scope === "repository" ? typeof value.repo_id === "string" && value.repo_id.length > 0 : !value.repo_id, "Scope/repository mismatch");
   return structuredClone(value);
 }
 export function validateGrant(value) {
-  object(value, ["id", "tool", "digest", "scope", "repo_id", "roles", "operations", "resources", "unattended", "enabled", "revision", "limits"], ["id", "tool", "digest", "scope", "roles", "operations"]);
+  object(value, ["id", "tool", "digest", "scope", "repo_id", "repo_path", "roles", "operations", "resources", "unattended", "enabled", "revision", "limits"], ["id", "tool", "digest", "scope", "roles", "operations"]);
   demand(typeof value.id === "string" && /^[a-zA-Z0-9._-]{1,120}$/.test(value.id), "Invalid grant ID");
   demand(["repository", "standalone"].includes(value.scope), "Invalid grant scope");
   demand(value.scope === "repository" ? !!value.repo_id : !value.repo_id, "Grant repository mismatch");
@@ -78,10 +79,12 @@ export function validateDefinition(definition) {
   demand(/^(?:draft|(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/.test(definition.version), "Invalid skill version");
   demand(typeof definition.intent === "string" && definition.intent.trim().length > 0 && definition.intent.length <= 20000, "Invalid skill intent");
   const binding = definition.binding;
-  object(binding, ["kind", "repo_id"], ["kind"]);
-  demand(["repository", "global", "run-only"].includes(binding.kind), "Invalid skill binding");
+  object(binding, ["kind", "repo_id", "folder_path"], ["kind"]);
+  demand(["repository", "folder", "global", "run-only"].includes(binding.kind), "Invalid skill binding");
   demand(binding.kind !== "repository" || !!binding.repo_id, "Repository required");
-  demand(binding.kind !== "global" || !binding.repo_id, "Global skill cannot bind a repository");
+  demand(binding.kind !== "folder" || typeof binding.folder_path === "string" && path.isAbsolute(binding.folder_path) && path.normalize(binding.folder_path) === binding.folder_path, "Folder skill requires a clean absolute root");
+  demand(["repository", "run-only"].includes(binding.kind) || !binding.repo_id, "Only repository and run-only skills can bind a repository");
+  demand(binding.kind === "folder" || !binding.folder_path, "Only folder skills can bind a folder root");
   for (const root of definition.output_roots || []) demand(typeof root === "string" && root.length > 0 && !root.startsWith("/") && !root.includes("\\") && !root.includes(":") && root.split("/").every(part => part && ![".", "..", ".git", ".posse"].includes(part)), "Invalid skill output root");
   const resources = new Set();
   for (const resource of definition.resource_requirements || []) {

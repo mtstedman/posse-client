@@ -385,6 +385,7 @@ export function createStandardToolHandlerMap({
   deterministicCleanImage,
   deterministicExtractImageText,
   deterministicRunScopedChecks,
+  deterministicRunUnitTest,
   deterministicBash,
   execGenerateImage,
   safePath,
@@ -713,6 +714,16 @@ export function createStandardToolHandlerMap({
         return "Error: run_scoped_checks is not wired into this provider runtime.";
       }
       return deterministicRunScopedChecks(args, ctx.cwd, ctx.scopePredicates, ctx.declaredScope || {});
+    },
+    run_unit_test(args, ctx) {
+      if (typeof deterministicRunUnitTest !== "function") {
+        return "Error: run_unit_test is not wired into this provider runtime.";
+      }
+      return deterministicRunUnitTest(args, ctx.cwd, ctx.scopePredicates, ctx.declaredScope || {}, {
+        // Remote issuance already proved the SCIP capability for this run;
+        // local discovery still enforces every language adapter.
+        scipAvailable: true,
+      });
     },
     bash(args, ctx) {
       return deterministicBash(args, ctx.cwd, ctx.allowWrite, ctx.scopePredicates.hasScope ? true : null);

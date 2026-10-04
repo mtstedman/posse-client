@@ -81,7 +81,7 @@ export class AutomationOwner {
     demand(config.customTools === true
       && config.toolAllowlist?.tools?.includes("custom_tools"),
     "Agent automation credential was not issued Custom Tools", "unauthorized");
-    const principal = { scope: "repository", repo_id: repositoryID(config.projectRoot || config.cwd), role: config.role, job_id: String(config.jobId) };
+    const principal = { scope: "repository", repo_id: repositoryID(config.projectRoot || config.cwd), repo_path: fs.realpathSync(config.projectRoot || config.cwd), role: config.role, job_id: String(config.jobId) };
     if (config.workItemId != null) principal.work_item_id = String(config.workItemId);
     return this.service.tool(principal, request.args || {});
   }
@@ -91,14 +91,14 @@ export class AutomationOwner {
       case "tools.available": return { available: this.service.health().ready === true && this.service.discover(args.principal).length > 0 };
       case "entry.list": return this.store.list("entries").map(entry => ({ id: entry.id, source: entry.source, kind: entry.kind, digest: entry.digest, description: entry.description, enabled: entry.enabled }));
       case "draft.save": return this.registry.saveDraft(args.definition);
-      case "draft.load": return this.registry.newest(args.name, args.repo_id || "");
+      case "draft.load": return this.registry.newest(args.name, args.repo_id || "", args.repo_path || "");
       case "draft.reset": return this.registry.reset(args.name, args.binding);
       case "skill.list": return this.registry.list(args.query || {});
       case "skill.test": return this.registry.test(args.definition);
       case "skill.publish": return this.registry.publish(args.definition, args.actor || "local-operator");
       case "skill.import": return this.registry.importPublished(args.definition, args.definition_digest);
       case "skill.run": return this.runSkill(args);
-      case "skill.deprecate": return this.registry.deprecate(args.identity, args.repo_id || "");
+      case "skill.deprecate": return this.registry.deprecate(args.identity, args.repo_id || "", args.repo_path || "");
       case "resource.save": return this.service.registerResource(args.resource);
       case "resource.list": return this.store.list("resources");
       case "resource.disable": return this.service.disableResource(args.id);
@@ -135,11 +135,12 @@ export class AutomationOwner {
   }
   async runSkill(args) {
     const repoID = String(args.repo_id || "");
-    const definition = this.registry.resolve(args.definition?.name + "@" + args.definition?.version, repoID);
+    const repoPath = String(args.repo_path || "");
+    const definition = this.registry.resolve(args.definition?.name + "@" + args.definition?.version, repoID, repoPath);
     demand(definitionDigest(definition) === definitionDigest(args.definition),
       "Run definition does not match the immutable published skill", "schema_mismatch");
     const principal = repoID
-      ? { scope: "repository", repo_id: repoID, role: "dev" }
+      ? { scope: "repository", repo_id: repoID, ...(repoPath ? { repo_path: fs.realpathSync(repoPath) } : {}), role: "dev" }
       : { scope: "standalone", role: "dev" };
     const run = this.service.invoke(principal, {
       operation: "invoke", tool: this.registry.entryID(definition), grant_id: args.grant_id,
