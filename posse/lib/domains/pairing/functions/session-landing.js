@@ -132,6 +132,9 @@ export function formatSessionLanding({
   const lines = [];
   lines.push(`── Session ${sessionCode ? `${sessionCode} · ` : ""}${host ? "you are hosting" : "you are a member"}`
     + `${branch ? ` · branch ${branch}` : ""} ──`);
+  // The host hands this out for as long as the session runs, so it stays on
+  // the screen the host returns to, not only in the opening lines.
+  if (host && sessionCode) lines.push(`Others join with: posse session join ${sessionCode}`);
   const disconnected = sync?.state === SESSION_SYNC_STATES.DISCONNECTED;
   // The derived label already leads with its state glyph.
   const syncText = sync?.label ? `this folder ${sync.label}` : "this folder: first sync in progress";

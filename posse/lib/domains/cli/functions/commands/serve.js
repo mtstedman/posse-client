@@ -551,8 +551,12 @@ export async function runServeCommand(argv = [], {
   C = new Proxy({}, { get: () => "" }),
   wait = true,
   BridgeClass = Bridge,
+  // Someone at a terminal can scan the QR and type the phone's code. Bossy
+  // runs serve as a service with no terminal, and pairs through its own flow.
+  interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  pair = runPairCommand,
 } = {}) {
-  const config = getBridgeConfig(projectDir);
+  let config = getBridgeConfig(projectDir);
 
   if (hasFlag(argv, "--pair")) {
     const result = await runPairCommand(config, { C, argv, projectDir });
@@ -580,24 +584,56 @@ export async function runServeCommand(argv = [], {
     return { ok: true, token: config.token, instanceId: config.instanceId };
   }
 
-  const bridge = new BridgeClass({ projectDir, config });
-  const info = await bridge.start();
-  console.log(`\n  ${C.green}Posse bridge listening${C.reset}: ${C.cyan}${info.url}${C.reset}`);
-  console.log(`  ${C.dim}Instance:${C.reset} ${info.instanceId}`);
-  console.log(`  ${C.dim}Label:${C.reset} ${info.label}`);
-  console.log(`  ${C.dim}Bearer token:${C.reset} hidden (use --show-token or --show-lan-token)`);
-  console.log(`  ${C.dim}WebSocket:${C.reset} ${info.url}/v1/stream`);
-  if (info.relayEnabled) console.log(`  ${C.dim}Relay:${C.reset} ${info.relayUrl}`);
-  console.log(`  ${C.dim}Commands:${C.reset} ${listAllowedBridgeCommands().join(", ")}`);
-  console.log(`  ${C.dim}Press Ctrl-C to stop.${C.reset}\n`);
+  // Linking a phone is what serve is for: an unpaired repo shows the pairing
+  // QR right here instead of sending the operator to another command.
+  const linkPhone = async (why) => {
+    console.log(`\n  ${C.yellow}${why}${C.reset} Scan the QR below to link your phone; press Enter at the code prompt to skip and serve LAN clients only.`);
+    let paired = null;
+    try {
+      paired = await pair(config, { C, argv, projectDir });
+    } catch (err) {
+      // Pairing is optional for serve: LAN clients still need the bridge.
+      console.log(`\n  ${C.red}Pairing failed:${C.reset} ${err?.message || err}\n`);
+    }
+    if (paired?.ok) config = getBridgeConfig(projectDir);
+    return paired?.ok === true;
+  };
+  if (interactive && !config.relayToken) {
+    await linkPhone("This repo is not linked to the relay yet.");
+  }
+
+  const startBridge = async () => {
+    const started = new BridgeClass({ projectDir, config });
+    const startedInfo = await started.start();
+    console.log(`\n  ${C.green}Posse bridge listening${C.reset}: ${C.cyan}${startedInfo.url}${C.reset}`);
+    console.log(`  ${C.dim}Instance:${C.reset} ${startedInfo.instanceId}`);
+    console.log(`  ${C.dim}Label:${C.reset} ${startedInfo.label}`);
+    console.log(`  ${C.dim}Bearer token:${C.reset} hidden (use --show-token or --show-lan-token)`);
+    console.log(`  ${C.dim}WebSocket:${C.reset} ${startedInfo.url}/v1/stream`);
+    if (startedInfo.relayEnabled) console.log(`  ${C.dim}Relay:${C.reset} ${startedInfo.relayUrl}`);
+    console.log(`  ${C.dim}Commands:${C.reset} ${listAllowedBridgeCommands().join(", ")}`);
+    console.log(`  ${C.dim}Press Ctrl-C to stop.${C.reset}\n`);
+    return { bridge: started, info: startedInfo };
+  };
+  let { bridge, info } = await startBridge();
 
   // Remote reachability is the whole point of serve — never go quiet while
   // the relay link is missing or rejected.
   if (!info.relayEnabled) {
     console.log(`  ${C.yellow}NOT PAIRED with the relay.${C.reset} Phones and the web portal cannot see this repo.`);
-    console.log(`  ${C.dim}Run \`posse serve --pair\` to pair it, then start serve again. LAN-only clients still work.${C.reset}\n`);
+    console.log(interactive
+      ? `  ${C.dim}Start \`posse serve\` again to scan a fresh QR. LAN-only clients still work.${C.reset}\n`
+      : `  ${C.dim}Run \`posse serve --pair\` to pair it, then start serve again. LAN-only clients still work.${C.reset}\n`);
   } else if (wait) {
-    const relay = await waitForRelayOutcome(bridge);
+    let relay = await waitForRelayOutcome(bridge);
+    // A revoked or stale pairing needs a fresh QR, not another command. The
+    // bridge keeps serving LAN clients until the new identity replaces it.
+    if (relay.state === "unauthorized" && interactive
+      && await linkPhone(`Relay REJECTED this bridge credential${relay.last_error ? ` (${relay.last_error})` : ""}.`)) {
+      await bridge.stop();
+      ({ bridge, info } = await startBridge());
+      relay = await waitForRelayOutcome(bridge);
+    }
     if (relay.state === "online") {
       console.log(`  ${C.green}Relay connected${C.reset} — this repo is ONLINE for phones and the web portal.\n`);
     } else if (relay.state === "unauthorized") {
