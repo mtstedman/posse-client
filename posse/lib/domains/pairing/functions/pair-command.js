@@ -2,9 +2,11 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { PAIRING_ACTION_ARITY } from "../../../catalog/pairing-command.js";
 import {
   SESSION_LINK_OWNERS,
   SESSION_OWNER_CHILD_ENV,
+  SESSION_OWNER_LAUNCH_ENV,
   SESSION_SYNC_GLYPHS,
   SESSION_SYNC_POLICY,
   SESSION_SYNC_STATES,
@@ -17,7 +19,7 @@ import {
   getLiveSchedulerBlockMessage,
   getSchedulerLockInfo,
 } from "../../queue/functions/locks.js";
-import { readRuntimeStatus, RUNTIME_STATUS_KEYS } from "../../queue/functions/runtime-status.js";
+import { readRuntimeStatus, RUNTIME_STATUS_KEYS, writeRuntimeStatus } from "../../queue/functions/runtime-status.js";
 import { listUnresolvedSharedTrunkMergeOperations } from "../../queue/functions/shared-trunk-merge-state.js";
 import { getSetting, setSetting } from "../../settings/functions/repository-settings.js";
 import { withWorktreeLockAsync } from "../../git/functions/worktree-locks.js";
@@ -37,6 +39,8 @@ import {
   createAndPublishPairingBranch,
   checkoutSharedBranchForClose,
   currentCheckout,
+  excludeGeneratedPairingPaths,
+  listUntrackedPairingPaths,
   deletePublishedPairingBranch,
   discardFreshPairingCheckout,
   findPairingRemote,
@@ -146,6 +150,9 @@ import {
   sessionMemberLabel,
   shortId,
 } from "./session-console.js";
+import { ensurePairingEnvironmentReady, pairingEnvironmentWarning } from "./environment-preflight.js";
+
+const PAIRING_ENVIRONMENT = Object.freeze({ prepare: ensurePairingEnvironmentReady });
 
 // This is both the lease heartbeat and the peer-work sync cadence. Five
 // seconds keeps the terminal feed live without turning queue changes into one
@@ -385,18 +392,8 @@ export function parsePairArgs(argv = []) {
   const remote = validateRemoteName(remoteValue || "origin");
   const first = positional[0] || "host";
   let parsed;
-  const actionLengths = new Map([
-    ["host", [1, 1]], ["join", [2, 2]], ["leave", [1, 1]], ["close", [1, 1]],
-    ["status", [1, 1]], ["admit", [2, 2]], ["members", [1, 1]], ["pending", [1, 1]],
-    ["kick", [2, 2]], ["invite", [2, 2]], ["scope", [3, 3]], ["policy", [2, 2]],
-    ["publication", [2, 2]],
-    ["integrate", [1, 1]], ["abandon-integration", [1, 1]],
-    // A hold reason is free text: every word after `hold` belongs to it.
-    ["hold", [1, Number.MAX_SAFE_INTEGER]], ["resume", [1, 1]],
-    ["merge", [1, 1]], ["deploy", [1, 1]], ["auto", [1, 3]],
-  ]);
-  if (actionLengths.has(first)) {
-    const [minimumLength, maximumLength] = actionLengths.get(first);
+  if (PAIRING_ACTION_ARITY.has(first)) {
+    const [minimumLength, maximumLength] = PAIRING_ACTION_ARITY.get(first);
     const actionArgumentLength = positional.length || (first === "host" ? 1 : 0);
     if (actionArgumentLength < minimumLength) {
       throw Object.assign(new Error(`Missing argument for session ${first}`), {
@@ -878,16 +875,103 @@ function spawnPosseInForeground(args, { cwd } = {}) {
   });
 }
 
+// A token is good for go's boot, which checks it within seconds of launch.
+const SESSION_OWNER_LAUNCH_TTL_MS = 10 * 60_000;
+
+// PowerShell ends a single-quoted string at ' and at the typographic quotes
+// U+2018-U+201B (a path like C:\Users\O’Brien); doubling escapes each.
+const powershellQuoted = (value) => `'${String(value).replace(/['\u2018\u2019\u201A\u201B]/gu, "$&$&")}'`;
+
+// The PowerShell the new window runs: the command with the owner pid and
+// launch token set for that one command only, not for whatever the user types
+// in the window afterwards (-NoExit keeps it open to read the wrap-up).
+function posseWindowScript(command, { ownerPid, token }) {
+  return [
+    `$env:${SESSION_OWNER_CHILD_ENV} = '${Number(ownerPid)}'`,
+    `$env:${SESSION_OWNER_LAUNCH_ENV} = ${powershellQuoted(token)}`,
+    `try { & ${command.map(powershellQuoted).join(" ")} } finally { Remove-Item Env:${SESSION_OWNER_CHILD_ENV}, Env:${SESSION_OWNER_LAUNCH_ENV} -ErrorAction SilentlyContinue }`,
+  ].join("; ");
+}
+
+/**
+ * On Windows the session console opens `posse go` in a new PowerShell window
+ * instead of taking over its own terminal, so the host keeps the session
+ * screen. The window carries a one-time token the console records first: its
+ * shell, not the console, is go's parent, so the parent check alone would
+ * read a live console as crashed.
+ */
+async function openPosseInNewWindow(args, { cwd } = {}) {
+  const token = randomUUID();
+  const recorded = writeRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_OWNER_LAUNCH, {
+    owner_pid: process.pid,
+    token,
+    created_at: new Date().toISOString(),
+  });
+  // Without the token, go's recovery could not tell this console is alive.
+  if (!recorded) throw new Error("could not record the launch token");
+  const script = posseWindowScript([process.execPath, ...process.execArgv, process.argv[1], ...args], {
+    ownerPid: process.pid,
+    token,
+  });
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  // `start` needs a non-empty title: older libuv Node builds crash in a
+  // console whose title is empty.
+  const child = spawn(process.env.ComSpec || "cmd.exe", [
+    "/d", "/s", "/c",
+    `start "Posse go" powershell.exe -NoLogo -NoExit -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`,
+  ], { cwd, stdio: "ignore", windowsHide: true, windowsVerbatimArguments: true });
+  // `start` returns as soon as the window exists; a non-zero exit or a spawn
+  // error means no window, and the console runs go in place instead.
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, 15_000);
+    child.once("error", (error) => { clearTimeout(timer); reject(error); });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`start exited with code ${code}`));
+    });
+  });
+  child.unref?.();
+  return { token };
+}
+
+/**
+ * A windowed go records its own pid against the launch token as soon as its
+ * recovery check accepts the token, so the console can tell a go that is
+ * still starting (before it takes the scheduler lock) from one that died.
+ */
+function acknowledgeOwnerLaunch({ env = process.env, pid = process.pid } = {}) {
+  const token = String(env?.[SESSION_OWNER_LAUNCH_ENV] || "");
+  if (!token) return;
+  const launch = readRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_OWNER_LAUNCH);
+  if (launch?.token !== token) return;
+  writeRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_OWNER_LAUNCH, { ...launch, child_pid: pid, acknowledged_at: new Date().toISOString() });
+}
+
 /**
  * True for a posse process the live session owner started itself: it names
- * the owner as its parent, and the owner still runs. Recovery would otherwise
- * read a heartbeat gone stale in a relay outage as a crash and close the
- * session out from under its running owner.
+ * the owner as its parent, or carries the token of a window the owner opened,
+ * and the owner still runs. Recovery would otherwise read a heartbeat gone
+ * stale in a relay outage as a crash and close the session out from under
+ * its running owner.
  */
-function spawnedByLiveSessionOwner(state, { env = process.env, parentPid = process.ppid, kill = process.kill.bind(process) } = {}) {
+function spawnedByLiveSessionOwner(state, {
+  env = process.env,
+  parentPid = process.ppid,
+  kill = process.kill.bind(process),
+  readLaunch = () => readRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_OWNER_LAUNCH),
+  nowMs = Date.now(),
+} = {}) {
   const ownerPid = Number(env?.[SESSION_OWNER_CHILD_ENV]);
   if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) return false;
-  if (ownerPid !== Number(parentPid) || ownerPid !== Number(state?.process_pid)) return false;
+  if (ownerPid !== Number(state?.process_pid)) return false;
+  if (ownerPid !== Number(parentPid)) {
+    const token = String(env?.[SESSION_OWNER_LAUNCH_ENV] || "");
+    const launch = token ? readLaunch() : null;
+    const age = nowMs - Date.parse(launch?.created_at || "");
+    if (!token || launch?.token !== token || Number(launch?.owner_pid) !== ownerPid
+      || !(age >= 0 && age < SESSION_OWNER_LAUNCH_TTL_MS)) return false;
+  }
   try {
     kill(ownerPid, 0);
     return true;
@@ -910,8 +994,29 @@ async function monitorPairing(remoteClient, stateId, {
   kill = process.kill.bind(process),
   trunkPoller = null,
   spawnPosse = spawnPosseInForeground,
+  openPosseWindow = openPosseInNewWindow,
+  platform = process.platform,
 } = {}) {
   let forceRequested = false;
+  // A go opened in a new window boots (recovery, dependency repair) before it
+  // takes the scheduler lock, possibly for minutes. Until then it still owns
+  // the session: a second `go`, `close`, or Ctrl+C must not act as if no
+  // run existed. Its process acknowledges the launch token with its pid at
+  // boot; before that, a short grace covers the window starting.
+  let goWindowOpenedAt = 0;
+  let goWindowToken = null;
+  const goWindowStarting = () => {
+    if (!goWindowToken) return false;
+    const launch = readRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_OWNER_LAUNCH);
+    if (launch?.token !== goWindowToken) return false;
+    const childPid = Number(launch.child_pid);
+    if (Number.isSafeInteger(childPid) && childPid > 0) return !pidProvablyDead(childPid, kill);
+    // The add-on-free npm repair runs before the child can record its pid and
+    // has no useful short upper bound. Keep the same bounded ownership window
+    // the child token itself accepts, rather than allowing a duplicate go or a
+    // session close while that repair is still running.
+    return nowMs() - goWindowOpenedAt < SESSION_OWNER_LAUNCH_TTL_MS;
+  };
   // A posse command (`add`, `go`) this console handed the terminal to. Ctrl+C
   // then belongs to that command, never to the session.
   let foreground = null;
@@ -1117,9 +1222,23 @@ async function monitorPairing(remoteClient, stateId, {
         // reaches posse add as a flag and a task.
         await runForeground(["add", ...(parsed.task ? parsed.task.split(/\s+/u) : [])]);
       } else if (parsed.kind === "go") {
-        if (observing || schedulerLockHolderLive(kill)) {
+        if (observing || schedulerLockHolderLive(kill) || goWindowStarting()) {
           log(`  ${C.yellow}[session]${C.reset} posse go is already running this session in another terminal; new tasks queued here wait for its next run.`);
           return;
+        }
+        // On Windows the run gets its own PowerShell window and this screen
+        // stays: the host keeps watching members, admissions, and sync, and
+        // takes the session back when that run ends. Elsewhere it runs here.
+        if (platform === "win32" && sessionConsole?.interactive) {
+          try {
+            const opened = await openPosseWindow(["go"], { cwd: projectDir });
+            goWindowToken = opened?.token || null;
+            goWindowOpenedAt = nowMs();
+            log(`  ${C.cyan}[session]${C.reset} posse go opened in a new PowerShell window; this screen stays here.`);
+            return;
+          } catch (error) {
+            log(`  ${C.yellow}[session]${C.reset} could not open a new window (${safeError(error)}); running posse go here instead.`);
+          }
         }
         await runForeground(["go"]);
       } else if (parsed.kind === "members") {
@@ -1179,7 +1298,7 @@ async function monitorPairing(remoteClient, stateId, {
             return;
           }
           if (parsed.kind === "close") {
-            if (observing || schedulerLockHolderLive(kill)) {
+            if (observing || schedulerLockHolderLive(kill) || goWindowStarting()) {
               log(`  ${C.yellow}[session]${C.reset} posse go owns the session; close from the run screen (u → close), or stop posse go first.`);
               return;
             }
@@ -1348,7 +1467,7 @@ async function monitorPairing(remoteClient, stateId, {
     // Ctrl+C or a closed terminal detaches a console while posse go owns the
     // session, including while it is still starting and has not adopted yet;
     // it never force-closes a session posse go is running.
-    if ((forceRequested || gracefulRequested) && (observing || schedulerLockHolderLive(kill))) {
+    if ((forceRequested || gracefulRequested) && (observing || schedulerLockHolderLive(kill) || goWindowStarting())) {
       detached = true;
       if (!json) log(`  ${C.dim}[session] console detached; posse go keeps the session${C.reset}`);
       return { reason: "scheduler_handoff", detached: true };
@@ -1691,7 +1810,48 @@ async function closeClaimedHostSession(root, remoteClient, state, {
   return { ...promoted, cleanup };
 }
 
-async function runHost({ projectDir, remoteClient, remote, branch, C, json, mergeMode = null, deployMode = null }) {
+// The run gate's dependency repair, before a session opens or a member goes
+// active. Quiet while the check passes; a repair streams its progress, since
+// it can take minutes.
+async function preparePairingEnvironment(root, environment, { C, json, before }) {
+  if (!json) console.log(`  ${C.dim}Checking runtime dependencies before ${before}...${C.reset}`);
+  let repairing = false;
+  let lastProgress = "";
+  const untrackedBefore = listUntrackedPairingPaths(root);
+  let result;
+  try {
+    result = await environment.prepare(root, {
+      onRepair: () => {
+        repairing = true;
+        if (!json) console.log(`  ${C.dim}Installing what is missing (the same repair posse go runs)...${C.reset}`);
+      },
+      onProgress: json ? null : (event = {}) => {
+        const text = String(event?.message || "").split(/\r?\n/u)[0].trim();
+        if (!repairing || !text || text === lastProgress) return;
+        lastProgress = text;
+        console.log(`  ${C.dim}[deps] ${text}${C.reset}`);
+      },
+    });
+  } finally {
+    // Also when it throws: the restore that follows needs a clean checkout.
+    excludeGeneratedPairingPaths(root, untrackedBefore);
+  }
+  const warning = pairingEnvironmentWarning(result);
+  if (warning && !json) console.log(`  ${C.yellow}${warning}${C.reset}`);
+  return result;
+}
+
+async function runHost({
+  projectDir,
+  remoteClient,
+  remote,
+  branch,
+  C,
+  json,
+  mergeMode = null,
+  deployMode = null,
+  environment,
+}) {
   const autoMerge = mergeMode === "auto";
   const autoDeploy = deployMode === "auto";
   const root = repositoryRoot(projectDir);
@@ -1732,6 +1892,8 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json, merg
   assertSessionSshPathSupported(root);
   assertHostTrunkMatchesRemote(root, remote, defaultBranch);
   const { owner: githubOwner } = assertGitHubCliReady(root);
+  // Last, because a repair can take minutes: every cheaper refusal comes first.
+  await preparePairingEnvironment(root, environment, { C, json, before: "opening the session" });
   const state = createPairingState({
     role: "host",
     remoteName: remote,
@@ -1919,7 +2081,7 @@ async function runHost({ projectDir, remoteClient, remote, branch, C, json, merg
   }
 }
 
-async function runJoin({ projectDir, remoteClient, code, C, json }) {
+async function runJoin({ projectDir, remoteClient, code, C, json, environment }) {
   if (!code) {
     throw Object.assign(new Error("A pairing code is required: posse pair <CODE>"), {
       code: "pairing_code_required",
@@ -1936,14 +2098,18 @@ async function runJoin({ projectDir, remoteClient, code, C, json }) {
     freshCheckout = true;
   }
   try {
-    return await runJoinInCheckout({ root, freshCheckout, remoteClient, code, C, json });
+    return await runJoinInCheckout({
+      root, freshCheckout, remoteClient, code, C, json, environment,
+    });
   } catch (error) {
     if (freshCheckout) discardFreshPairingCheckout(root);
     throw error;
   }
 }
 
-async function runJoinInCheckout({ root, freshCheckout, remoteClient, code, C, json }) {
+async function runJoinInCheckout({
+  root, freshCheckout, remoteClient, code, C, json, environment,
+}) {
   assertPairingSchedulerStopped();
   assertCleanPairingCheckout(root);
   retireEndedSessionQueueRows();
@@ -2092,6 +2258,7 @@ async function runJoinInCheckout({ root, freshCheckout, remoteClient, code, C, j
         }
       }, { onWait: onKeyWait });
     });
+    await preparePairingEnvironment(root, environment, { C, json, before: "activating the session" });
     updatePairingEnrollment(state.id, {
       remoteSessionId: joined.session_id,
       relayToken: memberToken,
@@ -2622,6 +2789,7 @@ export async function runPairingCommand(argv = [], {
   remoteClient = null,
   remoteClientFactory = createPairingRemoteClient,
   pairingProcessIsAlive = pairingOwnerProcessIsAlive,
+  pairingEnvironment = PAIRING_ENVIRONMENT,
 } = {}) {
   const args = parsePairArgs(argv);
   let client = remoteClient;
@@ -2634,8 +2802,12 @@ export async function runPairingCommand(argv = [], {
       client = null;
     }
   }
-  if (args.action === "host") return runHost({ ...args, projectDir, remoteClient: client, C });
-  if (args.action === "join") return runJoin({ ...args, projectDir, remoteClient: client, C });
+  if (args.action === "host") return runHost({
+    ...args, projectDir, remoteClient: client, C, environment: pairingEnvironment,
+  });
+  if (args.action === "join") return runJoin({
+    ...args, projectDir, remoteClient: client, C, environment: pairingEnvironment,
+  });
   if (args.action === "admit") return runAdmit({ ...args, projectDir, remoteClient: client, C });
   if (["hold", "resume"].includes(args.action)) return runSessionHoldCommand({ ...args, C });
   if (["merge", "deploy"].includes(args.action)) return runSessionPublishCommand({ ...args, projectDir, C });
@@ -2737,7 +2909,10 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
 } = {}) {
   const state = getLivePairingState();
   const journal = readPairingPromotionJournal();
-  if (state && spawnedByLiveSessionOwner(state)) return { ok: true, attempted: false };
+  if (state && spawnedByLiveSessionOwner(state)) {
+    acknowledgeOwnerLaunch();
+    return { ok: true, attempted: false };
+  }
   if (state && pairingProcessIsAlive(state)) {
     if (journal) {
       return {
@@ -2850,5 +3025,5 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
 export const __testPairingCommandInternals = Object.freeze({
   monitorPairing, printMemberChanges, finishHostShutdown, retryWhileSessionKeyPropagates,
   retireEndedSessionQueueRows, retryWhileMergeLockBusy, runPendingIntegration, printPromotionForApproval,
-  askToPublishPromotion,
+  askToPublishPromotion, spawnedByLiveSessionOwner, posseWindowScript, acknowledgeOwnerLaunch,
 });

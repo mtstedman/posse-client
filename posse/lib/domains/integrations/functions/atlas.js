@@ -26,7 +26,7 @@ import { reconcileWiSource } from "../../atlas/functions/v2/wi-source-proof.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import { gitCurrentHashAsync, gitExec, gitExecAsync } from "../../git/functions/utils.js";
 import { withWorktreeLockAsync } from "../../git/functions/worktree-locks.js";
-import { branchViewPath, ledgerBranchForWi } from "../../atlas/functions/v2/runtime-paths.js";
+import { branchViewPath, ledgerBranchForWi, mainViewPath } from "../../atlas/functions/v2/runtime-paths.js";
 import { sha256Hex } from "../../atlas/functions/v2/hash.js";
 import { describeScipStagingState, ensureScipStaged } from "../../atlas/functions/v2/scip/stager.js";
 import { readScipBatchCoverage } from "../../atlas/functions/v2/scip/batch-coverage.js";
@@ -649,7 +649,7 @@ export async function checkAtlasMainFreshnessGate({
   // runtime with nothing pending degrades: enqueueing a no-op refresh and
   // holding plan/dev jobs behind it would stall real work for nothing.
   if (!runtimeExists && pending.length === 0) {
-    const readiness = await probeAtlasGraphReadiness({ cwd: storage.repoRoot, config });
+    const readiness = await probeAtlasGraphReadiness({ cwd: storage.repoRoot, config, viewDbPath: branchViewPath(storage.repoRoot, branch) });
     return {
       ready: false,
       attempted: true,
@@ -673,7 +673,8 @@ export async function checkAtlasMainFreshnessGate({
     };
   }
 
-  const readiness = await probeAtlasGraphReadiness({ cwd: storage.repoRoot, config });
+  // A session trunk is served by its own view, never the repository main view.
+  const readiness = await probeAtlasGraphReadiness({ cwd: storage.repoRoot, config, viewDbPath: branchViewPath(storage.repoRoot, branch) });
   if (readiness.usable) {
     return {
       ready: true,
@@ -2174,6 +2175,40 @@ function seedAtlasBootReadiness({ ok, result = null, config = null }) {
   warmReadinessSeed(seed);
 }
 
+/**
+ * A pairing session's trunk starts at the repository's main commit, so its
+ * baseline starts the way a WI worktree's does: a ledger fork of main plus a
+ * clone of main's view (Warmer.seedForkedBaseline). Without it every session
+ * cold-indexed an empty root branch and rebuilt its view. Anything unproven
+ * (no main index, main view not current, branch already present) seeds
+ * nothing and boot indexes as before.
+ */
+async function seedSessionBaselineFromMain(storage, baselineBranch, config) {
+  const parentViewPath = mainViewPath(storage.repoRoot);
+  if (storage.mainViewDbPath === parentViewPath) return { seeded: false, reason: "not_a_session_branch" };
+  const [ledgerPresent, parentViewPresent] = await Promise.all([
+    fs.promises.access(storage.ledgerDbPath).then(() => true, () => false),
+    fs.promises.access(parentViewPath).then(() => true, () => false),
+  ]);
+  if (!ledgerPresent || !parentViewPresent) return { seeded: false, reason: "no_main_index" };
+  let ledger = null;
+  try {
+    ledger = await Ledger.open({ dbPath: storage.ledgerDbPath });
+    if (ledger.getBranch(baselineBranch)) return { seeded: false, reason: "branch_exists" };
+    const warmer = new Warmer({ ledger, repoRoot: storage.repoRoot, defaultBranch: baselineBranch, config });
+    return await warmer.seedForkedBaselineAsync({
+      branch: baselineBranch,
+      parentViewPath,
+      outViewPath: storage.mainViewDbPath,
+    });
+  } catch (err) {
+    logAtlasError(`[atlas] seedSessionBaselineFromMain (repoRoot=${storage.repoRoot}, branch=${baselineBranch}):`, err);
+    return { seeded: false, reason: "seed_failed" };
+  } finally {
+    try { ledger?.close?.(); } catch { /* ignore */ }
+  }
+}
+
 export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
   const config = opts?.config || getAtlasIntegrationConfig();
   const frozen = verifyFrozenResearchFixture({ cwd: opts?.cwd });
@@ -2193,6 +2228,33 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
   storage.mainViewDbPath = branchViewPath(storage.repoRoot, baselineBranch);
   const bootReindexPolicy = normalizeAtlasBootReindexPolicy(config?.bootReindexPolicy);
   const proofTimeoutMs = resolveAtlasV2BootTimeoutMs(opts?.timeoutMs, config);
+  const writeRunTelemetry = typeof opts?.__testRunTelemetryWriter === "function"
+    ? opts.__testRunTelemetryWriter
+    : appendRunTelemetry;
+  if (bootReindexPolicy !== "always") {
+    const seed = await seedSessionBaselineFromMain(storage, baselineBranch, config);
+    if (seed.reason !== "not_a_session_branch") {
+      try {
+        writeRunTelemetry("runtime", {
+          event: "atlas.session_baseline.seed",
+          component: "atlas",
+          branch: baselineBranch,
+          seeded: seed.seeded,
+          reason: seed.reason || null,
+          parent_branch: seed.parent_branch || null,
+          parent_seq: seed.parent_seq ?? null,
+        });
+      } catch { /* startup telemetry is observational */ }
+    }
+    if (seed.seeded) {
+      emitBootProgress(opts?.onProgress, {
+        kind: "line",
+        stream: "system",
+        stage: "index",
+        text: `ATLAS session trunk seeded from ${seed.parent_branch} at seq ${seed.parent_seq}`,
+      });
+    }
+  }
   const bootSourceWalk = await inspectAtlasBootSourceWalkSkip({
     repoRoot: storage.repoRoot,
     ledgerDbPath: storage.ledgerDbPath,
@@ -2202,9 +2264,6 @@ export async function ensureAtlasRepoIndexedOnBoot(opts = {}) {
     signal: opts?.signal || null,
     lockWaitMs: Math.min(30_000, proofTimeoutMs),
   });
-  const writeRunTelemetry = typeof opts?.__testRunTelemetryWriter === "function"
-    ? opts.__testRunTelemetryWriter
-    : appendRunTelemetry;
   try {
     writeRunTelemetry("runtime", {
       event: "atlas.boot_source_walk.decision",

@@ -716,7 +716,7 @@ Restoration safely pauses if the shared checkout is dirty, so commit or stash th
 work and run Posse again.
 
 While the session monitor is connected, bridge snapshots, `posse dashboard`, and the live TUI's
-default log view show each peer's active work with a `read-only` label. Press
+monitor view (the default) and log view show each peer's active work with a `read-only` label. Press
 `p` for the detailed Pipeline pane. Peer work is held in a short-lived local
 status snapshot; it never enters the local queue and cannot be scheduled,
 claimed, or changed by this Posse instance. Background preparation jobs such as
@@ -774,6 +774,14 @@ are enabled, it also creates and CAS-deletes a unique probe claim ref. The
 probe does not distribute credentials and cannot certify hosting-provider
 branch-protection rules without a real branch update; normal publication keeps
 the authoritative exact-OID lease and fast-forward checks.
+
+Hosting or joining a session runs the same dependency gate as
+`posse run`/`posse go`: Posse's own packages are repaired first, then the
+repository's dependencies are checked and repaired, a host before opening the
+session and a member on the checked-out session branch before Posse marks the
+clone active. If Posse can run, it can pair: anything still missing after the
+repair leaves the session running without it, with the same warning a run
+shows, and pairing stops only where `posse run` would stop.
 
 Successful WI and iterative merges are published automatically to the exact
 side branch. Posse still runs committed-conflict checks and `pre_push_gate`, but

@@ -1,5 +1,7 @@
 import { renderDoctorHelp, renderUpdateHelp } from "./maintenance-help.js";
 import { C } from "../../../shared/format/functions/colors.js";
+// Pure data module: keeps this bootstrap free of the SQLite-backed graph.
+import { pairingCommandOpensSession } from "../../../catalog/pairing-command.js";
 // doctor/update bootstrap that runs before orchestrator-app opens SQLite.
 // Windows cannot replace a loaded native addon, so Posse's own npm repair must
 // happen in a process that has never constructed a better-sqlite3 Database.
@@ -241,10 +243,18 @@ export async function runMaintenanceCliIfRequested(argv = process.argv.slice(2))
   return false;
 }
 
+function needsRunnablePosse(argv) {
+  if (["run", "go"].includes(argv[0])) return true;
+  // Hosting or joining a session runs the same work: if Posse can run, it can
+  // pair, and only what stops run/go stops pairing.
+  return ["pair", "session"].includes(argv[0]) && pairingCommandOpensSession(argv.slice(1));
+}
+
 // Called while the parent is still addon-free. The repair worker probes the
-// installed ABI and repairs missing/stale npm dependencies before run/go boot.
+// installed ABI and repairs missing/stale npm dependencies before run/go boot
+// and before a session is hosted or joined.
 export async function guardRunNodeDependencies({ argv = process.argv.slice(2), repair = repairOwnNodeTree } = {}) {
-  if (!["run", "go"].includes(argv[0]) || argv.includes("--help") || argv.includes("-h")) return;
+  if (!needsRunnablePosse(argv) || argv.includes("--help") || argv.includes("-h")) return;
   const result = await repair({ argv: ["--adopt-node-install"], dryRun: false, json: false });
   if (!result?.ok) throw new Error(`Boot blocked: ${result?.message || "Posse npm dependencies could not be repaired"}. Run posse doctor or re-run the installer.`);
 }

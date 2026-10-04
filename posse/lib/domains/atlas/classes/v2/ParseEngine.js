@@ -33,6 +33,7 @@ import {
 import { isCanonicalRepoPath } from "../../functions/v2/paths.js";
 import { iterateViewSymbolPages } from "../../functions/v2/view-symbol-pages.js";
 import {
+  branchViewPath,
   ledgerBranchForWi,
   mainViewPath,
   warmedViewPath,
@@ -345,6 +346,76 @@ function publishClonedView(builder, sourcePath, destPath, meta = null) {
   } catch (error) {
     try { removeSqliteFile(stagedPath); } catch { /* preserve clone failure */ }
     throw error;
+  }
+}
+
+/**
+ * Clone the parent first, then derive the fork point from that transactionally
+ * consistent snapshot. The parent ledger and published pathname may advance
+ * while a session starts; neither may relabel older clone contents as newer.
+ *
+ * @param {ViewBuilder} builder
+ * @param {Ledger} ledger
+ * @param {{ branch: string, parentViewPath: string, outViewPath: string, layerMerge: boolean }} args
+ */
+async function publishForkedBaselineView(builder, ledger, {
+  branch,
+  parentViewPath,
+  outViewPath,
+  layerMerge,
+}) {
+  fs.mkdirSync(path.dirname(outViewPath), { recursive: true });
+  const stagedPath = path.join(
+    path.dirname(outViewPath),
+    `.${path.basename(outViewPath)}.${process.pid}.${randomUUID()}.cloning`,
+  );
+  let published = false;
+  try {
+    builder.cloneView({ sourcePath: parentViewPath, destPath: stagedPath });
+    const probe = openViewWithMeta(stagedPath, View);
+    if (!probe.ok) return { seeded: false, reason: "parent_view_unreadable" };
+    const parentBranch = String(probe.meta?.branch || "");
+    let canServe;
+    try {
+      if (!parentBranch || /^posse\/pair-/u.test(parentBranch) || !ledger.getBranch(parentBranch)) {
+        return { seeded: false, reason: "parent_branch_unusable" };
+      }
+      canServe = viewCanServeBranch({
+        meta: probe.meta,
+        ledger,
+        branch: parentBranch,
+        layerMerge,
+      });
+    } finally {
+      try { probe.view.close(); } catch { /* ignore */ }
+    }
+    if (!canServe.ok) {
+      return { seeded: false, reason: `parent_view_not_current: ${canServe.reason || "stale"}` };
+    }
+    const parentSeq = Number(probe.meta?.ledger_seq);
+    if (!Number.isSafeInteger(parentSeq) || parentSeq < 0) {
+      return { seeded: false, reason: "parent_view_unreadable" };
+    }
+    await ledger.forkBranch(branch, parentBranch, parentSeq, { label: "Warmer.seedForkedBaseline" });
+    patchViewBranchMeta(stagedPath, {
+      branch,
+      parent_branch: parentBranch,
+      parent_seq: parentSeq,
+      ledger_seq: ledger.headSeq(branch),
+    });
+    const sidecars = ["-wal", "-shm", "-journal"]
+      .map((suffix) => stagedPath + suffix)
+      .filter((candidate) => fs.existsSync(candidate));
+    if (sidecars.length > 0) {
+      throw new Error(`staged view clone retained SQLite sidecars: ${sidecars.join(", ")}`);
+    }
+    fs.renameSync(stagedPath, outViewPath);
+    published = true;
+    return { seeded: true, parent_branch: parentBranch, parent_seq: parentSeq };
+  } finally {
+    if (!published) {
+      try { removeSqliteFile(stagedPath); } catch { /* preserve the original outcome */ }
+    }
   }
 }
 
@@ -1508,7 +1579,9 @@ export class ParseEngine {
       removeSqliteFile(warmed);
     }
 
-    const main = mainViewPath(this.#repoRoot);
+    // Clone the view of the branch this one forked from: the repository main
+    // view for an ordinary WI, the session trunk view for a WI in a session.
+    const main = branchViewPath(this.#repoRoot, branchRec?.parent_branch || this.#defaultBranch);
     if (fs.existsSync(main)) {
       const mainProbe = openViewWithMeta(main, View);
       const canCloneMain = mainProbe.ok
@@ -1573,6 +1646,45 @@ export class ParseEngine {
     const key = args?.worktreePath ? worktreeViewPath(args.worktreePath) : this.#repoRoot;
     return runSqliteWrite(key, () => withAtlasViewWriteLock(key, () => this.mountForWorktree(args)), {
       label: opts.label || "Warmer.mountForWorktree",
+      waitMs: opts.waitMs,
+    });
+  }
+
+  /**
+   * Start a new branch the way a WI worktree starts: a ledger fork of the
+   * branch `parentViewPath` serves, at the head that view is current for,
+   * plus a clone of that view rebranded to the fork. A pairing session's
+   * trunk begins at the repository's main commit, so this replaces a cold
+   * root-branch index; the boot freshness scan then picks up wherever the
+   * checkout differs. Nothing is seeded unless the branch is new and the
+   * parent view is current, so the fork point and the clone always describe
+   * the same ledger state.
+   *
+   * @param {{ branch: string, parentViewPath: string, outViewPath: string }} args
+   * @returns {Promise<{ seeded: boolean, reason?: string, parent_branch?: string, parent_seq?: number }>}
+   */
+  async seedForkedBaseline({ branch, parentViewPath, outViewPath }) {
+    if (!branch || !parentViewPath || !outViewPath) throw new TypeError("seedForkedBaseline: branch, parentViewPath and outViewPath are required");
+    if (this.#ledger.getBranch(branch)) return { seeded: false, reason: "branch_exists" };
+    if (!fs.existsSync(parentViewPath)) return { seeded: false, reason: "parent_view_missing" };
+    return publishForkedBaselineView(this.#builder, this.#ledger, {
+      branch,
+      parentViewPath,
+      outViewPath,
+      layerMerge: this.#viewLayerMerge,
+    });
+  }
+
+  /**
+   * Gate wrapper for seedForkedBaseline, serialized on the view it writes.
+   *
+   * @param {{ branch: string, parentViewPath: string, outViewPath: string }} args
+   * @param {{ waitMs?: number, label?: string }} [opts]
+   */
+  seedForkedBaselineAsync(args, opts = {}) {
+    const key = args?.outViewPath || this.#repoRoot;
+    return runSqliteWrite(key, () => withAtlasViewWriteLock(key, () => this.seedForkedBaseline(args)), {
+      label: opts.label || "Warmer.seedForkedBaseline",
       waitMs: opts.waitMs,
     });
   }
@@ -1955,7 +2067,7 @@ export class ParseEngine {
       const parentCloneSeq = branchRec && branchLocalHeadSeq === 0
         ? branchRec.parent_seq
         : null;
-      const main = mainViewPath(this.#repoRoot);
+      const main = branchViewPath(this.#repoRoot, branchRec?.parent_branch || this.#defaultBranch);
       if (fs.existsSync(main)) {
         const mainProbe = openViewWithMeta(main, View);
         const canCloneMain = mainProbe.ok
@@ -2135,7 +2247,11 @@ export class ParseEngine {
   async #discoverBootFreshnessPaths({ branch, base }) {
     if (!this.#parser || !this.#ledger.getBranch(branch)) return [];
     const headSeq = this.#ledger.headSeq(branch);
-    const snapshot = headSeq > 0 ? this.#ledger.pathSnapshotAt(branch, headSeq) : new Map();
+    // A fork with no entries of its own (local seq 0) still inherits its
+    // parent's tree, so a session trunk seeded from main scans as unchanged.
+    const snapshot = headSeq > 0 || this.#ledger.getBranch(branch)?.parent_branch
+      ? this.#ledger.pathSnapshotAt(branch, headSeq)
+      : new Map();
     const sourceStats = typeof /** @type {any} */ (this.#ledger).sourceStatsForBranch === "function"
       ? /** @type {any} */ (this.#ledger).sourceStatsForBranch(branch)
       : new Map();
@@ -2810,7 +2926,11 @@ export class ParseEngine {
       base.truncation_reason = `Full warm stopped at MAX_FULL_WARM_PATHS=${MAX_FULL_WARM_PATHS}`;
     } else {
       const headSeq = this.#ledger.headSeq(branch);
-      const snapshot = headSeq > 0 ? this.#ledger.pathSnapshotAt(branch, headSeq) : new Map();
+      // A fork at local seq 0 inherits its parent's tree, including paths
+      // the checkout has since removed.
+      const snapshot = headSeq > 0 || this.#ledger.getBranch(branch)?.parent_branch
+        ? this.#ledger.pathSnapshotAt(branch, headSeq)
+        : new Map();
       const walkedSet = new Set(walkedPaths);
       removedSnapshotPaths = [...snapshot.keys()]
         .filter((repoRelPath) => !walkedSet.has(repoRelPath))

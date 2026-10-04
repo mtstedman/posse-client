@@ -12,7 +12,7 @@ const LEAVE_COMMANDS = new Set(["leave", "quit", "exit", "disconnect"]);
 
 const WORK_HELP = Object.freeze([
   "add [task]    queue a task here (the same questions as `posse add`)",
-  "go            run your queue here (`posse go`); you come back to this screen after",
+  "go            run your queue (`posse go`): a new window on Windows, here elsewhere",
 ]);
 
 const SHARED_HELP = Object.freeze([

@@ -124,6 +124,8 @@ export const SESSION_PUBLISH_ACTIONS = Object.freeze({
 // crash recovery on its own parent's session: during a relay outage the
 // owner's heartbeat goes stale while the owner is plainly still running.
 export const SESSION_OWNER_CHILD_ENV = "POSSE_SESSION_OWNER_PID";
+// The one-time token of a posse go the console opened in a new window.
+export const SESSION_OWNER_LAUNCH_ENV = "POSSE_SESSION_OWNER_LAUNCH";
 
 export const SESSION_AUTO_PUBLISH_POLICY = Object.freeze({
   // A burst of work-item merges becomes one run: act once the trunk has been

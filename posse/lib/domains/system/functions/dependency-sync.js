@@ -18,7 +18,9 @@ import { withDependencyInstallLock } from "../../../shared/concurrency/functions
 import { resolvePosseKey } from "../../../shared/native/functions/key.js";
 import { reconcileNativeBinaries } from "../../../shared/native/functions/binary-reconciliation.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
-import { gitExec } from "../../git/functions/utils.js";
+// Ignore-file housekeeping runs inside the dependency worker, which holds no
+// native pulse grant: these local reads use the direct system-Git adapter.
+import { adminGitExec } from "../../git/functions/admin-git-exec.js";
 import { installScipLanguageDependencies } from "../../atlas/functions/v2/scip/dependencies.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
 import {
@@ -33,6 +35,7 @@ import {
   resolveManagedPythonRuntimeForProject,
 } from "../../runtime/functions/python-runtime.js";
 import { ensureManagedPythonToolchain } from "../../environments/functions/python-toolchain-install.js";
+import { ensureComposer } from "../../environments/functions/composer-bootstrap.js";
 import { commandSpawnSpec, findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 import { glibcFloorProblem, runtimeGlibcVersion } from "../../../shared/platform/functions/native-runtime-floor.js";
 import {
@@ -502,7 +505,7 @@ function prefixScipDependencyProgress(message) {
 
 function gitRootForPath(root) {
   try {
-    const text = String(gitExec(["rev-parse", "--show-toplevel"], root, { timeoutMs: 5000 }) || "").trim();
+    const text = String(adminGitExec(["rev-parse", "--show-toplevel"], root, { timeoutMs: 5000 }) || "").trim();
     return text ? path.resolve(text) : null;
   } catch {
     return null;
@@ -516,7 +519,7 @@ function isInsideRoot(root, target) {
 
 function gitPathStatus(repoRoot, args) {
   try {
-    gitExec(args, repoRoot, { timeoutMs: 5000 });
+    adminGitExec(args, repoRoot, { timeoutMs: 5000 });
     return true;
   } catch {
     return false;
@@ -525,7 +528,7 @@ function gitPathStatus(repoRoot, args) {
 
 function gitInfoExcludePath(repoRoot) {
   try {
-    const text = String(gitExec(["rev-parse", "--git-path", "info/exclude"], repoRoot, { timeoutMs: 5000 }) || "").trim();
+    const text = String(adminGitExec(["rev-parse", "--git-path", "info/exclude"], repoRoot, { timeoutMs: 5000 }) || "").trim();
     return text ? path.resolve(repoRoot, text) : null;
   } catch {
     return null;
@@ -1092,13 +1095,6 @@ async function ensurePythonProject(entry, opts) {
   return { ...after, label: entry.label, ok: after.status === "ok", status: after.status === "ok" ? "installed" : "failed", action: "install", message: `python environment installed (${dependencyInstall ? `${dependencyInstall.detail} + ` : ""}pytest)` };
 }
 
-function composerCommand(posseRoot) {
-  const composer = "composer";
-  if (commandOnPath(composer)) return { command: composer, args: [] };
-  const phar = path.join(managedToolRoot(posseRoot), "scip", "bin", "composer.phar");
-  if (commandOnPath("php") && fileExists(phar)) return { command: "php", args: [phar] };
-  return null;
-}
 
 function inspectComposerProject(root) {
   const composerJson = path.join(root, "composer.json");
@@ -1137,12 +1133,24 @@ async function ensureComposerProject(entry, opts) {
   if (before.status === "ok") {
     return { ...before, label: entry.label, action: "none", message: "composer dependencies ready" };
   }
-  const composer = composerCommand(opts.posseRoot);
-  if (!composer) {
+  // Posse installs Composer itself when PHP is present; only a missing PHP
+  // leaves the repo's Composer packages uninstalled.
+  // Only a repo with PHP indexing selected gets Composer installed for it;
+  // otherwise an existing Composer is used, as before.
+  const composer = await ensureComposer({
+    installRoot: managedToolRoot(opts.posseRoot),
+    dryRun: opts.dryRun,
+    install: toolchainLanguageNeeded("php", opts),
+    onProgress: (message) => opts.onProgress?.(`${entry.label}: ${message}`),
+  });
+  if ("error" in composer) {
     if (!toolchainLanguageNeeded("php", opts)) {
-      return { ...before, label: entry.label, ok: true, status: "skipped", action: "none", reason: "composer not on PATH", message: "Composer/PHP is not on PATH; skipped because php indexing is not selected" };
+      return { ...before, label: entry.label, ok: true, status: "skipped", action: "none", reason: "composer unavailable", message: `${composer.error}; skipped because php indexing is not selected` };
     }
-    return { ...before, label: entry.label, ok: false, status: "failed", action: "install", message: "Composer/PHP is not available on PATH" };
+    return { ...before, label: entry.label, ok: false, status: "failed", action: "install", message: composer.error };
+  }
+  if ("pending" in composer) {
+    return { ...before, label: entry.label, ok: true, status: "dry-run", action: "install", message: `${composer.pending}, then run composer install` };
   }
   if (opts.dryRun) {
     return { ...before, label: entry.label, ok: true, status: "dry-run", action: "install", message: "would run composer install" };

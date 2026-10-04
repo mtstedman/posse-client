@@ -63,6 +63,33 @@ export function excludePosseRuntimeFolders(projectDir) {
   return appendLocalExcludes(projectDir, PAIRING_RUNTIME_EXCLUDES);
 }
 
+/** Untracked paths Git does not already ignore; directories end with "/". */
+export function listUntrackedPairingPaths(projectDir) {
+  try {
+    return git(["ls-files", "--others", "--exclude-standard", "--directory", "-z"], projectDir, {
+      timeoutMs: 10_000,
+    }).split("\0").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A dependency repair can leave files behind: a lock file Composer or Cargo
+ * wrote because the repository has none, Python build metadata. They belong
+ * to this clone's environment, not the session's work, so ignore them locally
+ * the way the installs' own directories are; otherwise they would block the
+ * clean switch back when the session ends, or ride along in a commit.
+ */
+export function excludeGeneratedPairingPaths(projectDir, untrackedBefore) {
+  const known = new Set(untrackedBefore);
+  const created = listUntrackedPairingPaths(projectDir).filter((entry) => !known.has(entry));
+  // Anchored literal patterns: escape gitignore's glob and trailing-space syntax.
+  const patterns = created.map((entry) => `/${entry.replace(/[\\*?[\]]/gu, "\\$&").replace(/ $/u, "\\ ")}`);
+  if (patterns.length > 0) appendLocalExcludes(projectDir, patterns);
+  return created;
+}
+
 export function assertCleanPairingCheckout(projectDir) {
   excludePosseRuntimeFolders(projectDir);
   // Porcelain v2 lines never start with whitespace, so the trimmed output

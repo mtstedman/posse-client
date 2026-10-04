@@ -195,13 +195,28 @@ export async function ensureScipStaged({
       languages: config?.scipLanguages ?? config?.atlas_scip_languages ?? null,
     });
     const unavailableCandidates = lookup.candidates.filter((candidate) => !candidate.resolved);
+    // One language's missing indexer (PHP without Composer, say) must not stop
+    // the others: stage every available language and report the rest as
+    // failed languages. Only when nothing is available does staging stop here.
+    const unavailableResults = unavailableCandidates.map((candidate) => ({
+      language: candidate.id,
+      indexer: candidate.command,
+      ok: false,
+      status: "failed",
+      reason: "indexer_unavailable",
+      error: `${candidate.command} is unavailable`,
+      source_languages: candidate.sourceLanguages || [],
+    }));
+    const unavailableLanguages = unavailableCandidates.map((candidate) => candidate.id);
     if (unavailableCandidates.length > 0) {
-      const failedLanguages = unavailableCandidates.map((candidate) => candidate.id);
-      const error = describeScipIndexerLookup(lookup);
-      emit(onProgress, error, {
+      emit(onProgress, describeScipIndexerLookup(lookup), {
         kind: "atlas.scip.indexer_unavailable",
-        failed_languages: failedLanguages,
+        failed_languages: unavailableLanguages,
       });
+    }
+    if (unavailableCandidates.length > 0 && lookup.plans.length === 0) {
+      const failedLanguages = unavailableLanguages;
+      const error = describeScipIndexerLookup(lookup);
       return {
         enabled: true,
         dir,
@@ -209,11 +224,7 @@ export async function ensureScipStaged({
         staged: false,
         reason: "indexer_unavailable",
         error,
-        results: unavailableCandidates.map((candidate) => ({
-          language: candidate.id,
-          status: "failed",
-          error: `${candidate.command} is unavailable`,
-        })),
+        results: unavailableResults,
         failedLanguages,
         orphanStagingRemoved,
       };
@@ -301,11 +312,21 @@ export async function ensureScipStaged({
         current: files.length,
         total: files.length,
       });
-      return { enabled: true, dir, files, staged: false, reason: "already_staged", results: skippedResults, orphanStagingRemoved };
+      return {
+        enabled: true, dir, files, staged: false, reason: "already_staged",
+        results: [...skippedResults, ...unavailableResults],
+        ...(unavailableLanguages.length > 0 ? { failedLanguages: unavailableLanguages } : {}),
+        orphanStagingRemoved,
+      };
     }
     if (pendingPlans.length === 0 && files.length === 0 && policy === "never") {
       emit(onProgress, "SCIP staging skipped because atlas_scip_restage_policy=never");
-      return { enabled: true, dir, files: [], staged: false, reason: "policy_never", results: skippedResults, orphanStagingRemoved };
+      return {
+        enabled: true, dir, files: [], staged: false, reason: "policy_never",
+        results: [...skippedResults, ...unavailableResults],
+        ...(unavailableLanguages.length > 0 ? { failedLanguages: unavailableLanguages } : {}),
+        orphanStagingRemoved,
+      };
     }
     if (files.length > 0) {
       emit(onProgress, `found ${files.length} staged SCIP file${files.length === 1 ? "" : "s"}; staging ${pendingPlans.length} missing SCIP index${pendingPlans.length === 1 ? "" : "es"}`, {
@@ -318,8 +339,8 @@ export async function ensureScipStaged({
     // Run pending per-language stagings in parallel. The gate key is per
     // (cwd, outputPath) so same-language concurrent runs still serialize, but
     // python/php/go/rust/ts can all index concurrently.
-    const failures = [];
-    const results = [...skippedResults];
+    const failures = unavailableResults.map((row) => `${row.indexer}: ${row.error}`);
+    const results = [...skippedResults, ...unavailableResults];
     let stagedCount = 0;
     const stageResults = await Promise.all(pendingRows.map(async (row) => {
       const plan = row.plan;

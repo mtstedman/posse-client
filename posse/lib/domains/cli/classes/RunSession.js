@@ -899,6 +899,7 @@ export class RunSession {
         },
       };
       const result = await ensureBootDependencyGuard({
+        signal: bootAbortController.signal,
         check: () => runBootDependencySync({ ...input, dryRun: true }, workerOptions),
         repair: () => runBootDependencySync({ ...input, doctor: true, dryRun: false }, workerOptions),
         onRepair: () => updateBootStep("dependencies", {
@@ -913,7 +914,17 @@ export class RunSession {
       } catch (err) {
         log?.warn?.("run", "Runtime env refresh after dependency sync failed", { error: firstLine(err?.message || err) });
       }
-      updateBootStep("dependencies", { section: "workspace", status: "ok", detail: formatBootDependencySyncForRun(result), force: true });
+      // A degraded result means something optional (a language indexer, the
+      // repo's own packages) is still missing after repair: run without it.
+      updateBootStep("dependencies", {
+        section: "workspace",
+        status: result?.degraded ? "warning" : "ok",
+        detail: result?.degraded
+          ? `running without: ${result.degraded_reason || formatBootDependencySyncForRun(result)}; the next boot retries the repair`
+          : formatBootDependencySyncForRun(result),
+        showDetail: Boolean(result?.degraded),
+        force: true,
+      });
     } catch (err) {
       updateBootStep("dependencies", { section: "workspace", status: "failed", detail: firstLine(err?.message || String(err)), showDetail: true, force: true });
       bootAbortController.abort();

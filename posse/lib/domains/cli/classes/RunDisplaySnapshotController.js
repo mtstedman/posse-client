@@ -4,6 +4,7 @@ import {
   createAsyncSnapshotCache,
   runTuiSnapshotTask,
 } from "../functions/run-session.js";
+import { pipelineHasSession } from "../functions/run-display-pipeline.js";
 
 export class RunDisplaySnapshotController {
   constructor({
@@ -51,7 +52,7 @@ export class RunDisplaySnapshotController {
       initialValue: [],
       minIntervalMs: 750,
       load: () => runTuiSnapshotTask("pipeline", snapshotArgs),
-      onUpdate: () => requestPaneRender("pipeline"),
+      onUpdate: () => requestPaneRender("pipeline", "log", "monitor"),
       onError: (err) => {
         this.log?.debug?.("display", "Pipeline snapshot refresh failed", { error: String(err?.message || err) });
       },
@@ -75,10 +76,10 @@ export class RunDisplaySnapshotController {
     this.trackTimer(setInterval(() => void dirty.refresh(), 5000));
     this.trackTimer(setInterval(() => {
       const currentDisplay = this.getDisplay();
-      // The default log view includes a compact paired-work lane. Refresh its
-      // source there too; otherwise peer work is captured only at setup and
-      // stays invisible until the operator manually opens the Pipeline pane.
-      if (["log", "pipeline"].includes(currentDisplay?._rightMode)) void pipeline.refresh();
+      // The log and monitor views include a compact paired-work lane. Refresh
+      // its source there too; otherwise peer work is captured only at setup
+      // and stays invisible until the operator opens the Pipeline pane.
+      if (this.pipelineVisible(currentDisplay?._rightMode, pipeline)) void pipeline.refresh();
       if (currentDisplay?._rightMode === "tools" || currentDisplay?._rightMode === "monitor") void tools.refresh();
     }, 1000));
   }
@@ -87,8 +88,20 @@ export class RunDisplaySnapshotController {
     if (!this.caches) return;
     const display = this.getDisplay();
     void this.caches.dirty.refresh();
-    if (display?._rightMode === "pipeline") void this.caches.pipeline.refresh();
+    if (display?._rightMode === "pipeline" || (display?._rightMode === "monitor" && pipelineHasSession(this.caches.pipeline.get()))) {
+      void this.caches.pipeline.refresh();
+    }
     if (display?._rightMode === "tools" || display?._rightMode === "monitor") void this.caches.tools.refresh();
+  }
+
+  // Monitor shows the paired-work lane only while a session is live: refresh
+  // every tick then, and every 10th tick otherwise so a session that starts
+  // mid-run appears without loading the pipeline every second for nothing.
+  pipelineVisible(mode, pipeline) {
+    if (mode === "log" || mode === "pipeline") return true;
+    if (mode !== "monitor") return false;
+    this.monitorPipelineTicks = (this.monitorPipelineTicks || 0) + 1;
+    return pipelineHasSession(pipeline.get()) || this.monitorPipelineTicks % 10 === 0;
   }
 
   stop() {

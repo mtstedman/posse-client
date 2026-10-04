@@ -23,6 +23,7 @@ import {
   selectPhpScipTrack,
   writePhpScipEnvStamp,
 } from "../../functions/php-scip-tracks.js";
+import { ensureComposer } from "../../functions/composer-bootstrap.js";
 
 /** @typedef {import("../../functions/php-scip-tracks.js").PhpScipTrackId} PhpScipTrackId */
 
@@ -128,7 +129,8 @@ export class PhpScipEnvironmentInstaller extends ScipLanguageEnvironmentInstalle
 
     const composer = await this.runStep(3, "resolve Composer", async () => {
       const resolved = await this.composerCommand();
-      if (!resolved) return this.failed("PHP/Composer not found; install PHP CLI or composer, then retry");
+      if ("error" in resolved) return this.failed(resolved.error);
+      if ("pending" in resolved) return this.ok("dry-run", resolved.pending);
       return resolved;
     }, { totalSteps });
     if (!composer || !("command" in composer)) {
@@ -219,11 +221,9 @@ export class PhpScipEnvironmentInstaller extends ScipLanguageEnvironmentInstalle
     return this.ok("ok", `scip-php ${runtime.track} track installed${php}`);
   }
 
+  // Composer on PATH, else Posse's managed composer.phar, which Posse
+  // installs itself when PHP is present.
   async composerCommand() {
-    if (await commandOnPath("composer")) return { command: composerBin(this.platform), args: [] };
-    if (!(await commandOnPath("php"))) return null;
-    const phar = path.join(this.installRoot, "scip", "bin", "composer.phar");
-    if (!fileExists(phar)) return null;
-    return { command: "php", args: [phar] };
+    return ensureComposer({ installRoot: this.installRoot, dryRun: this.dryRun, platform: this.platform });
   }
 }

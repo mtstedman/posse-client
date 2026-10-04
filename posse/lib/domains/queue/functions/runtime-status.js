@@ -51,6 +51,10 @@ export const RUNTIME_STATUS_KEYS = Object.freeze({
   // evaluated, and the unattended run in flight. It lives here, not in a
   // process, so the console and `posse go` hand it over between them.
   SESSION_AUTO_PUBLISH: "session_auto_publish",
+  // A posse go the session console opened in a new window: the one-time
+  // token that window carries, so go's crash recovery recognizes the live
+  // console as its owner although the window's shell is its parent.
+  SESSION_OWNER_LAUNCH: "session_owner_launch",
 });
 
 /** How stale the bridge heartbeat may be and still count as "present".

@@ -33,7 +33,7 @@ import {
 } from "../../atlas/functions/v2/embeddings/resources.js";
 import { fallbackQueryPlan, planQuery } from "../../atlas/functions/v2/retrieval/orchestrator/query-planner.js";
 import { extractAtlasResponseTelemetry, extractAtlasResultArtifacts } from "../../atlas/functions/v2/signal-extraction.js";
-import { ledgerDbPath, mainViewPath, worktreeViewPath } from "../../atlas/functions/v2/runtime-paths.js";
+import { branchViewPath, ledgerDbPath, worktreeViewPath } from "../../atlas/functions/v2/runtime-paths.js";
 import { viewFreshness, waitForCurrentView } from "../../atlas/functions/v2/view-health.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
@@ -935,11 +935,11 @@ function existingFilePath(value) {
   try { return fs.existsSync(value) ? value : null; } catch { return null; }
 }
 
-function candidateEmbeddedV2ViewPaths({ cwd, repoRoot, includeMissing = false }) {
+function candidateEmbeddedV2ViewPaths({ cwd, repoRoot, baselineBranch = "main", includeMissing = false }) {
   const candidates = [
     cwd ? worktreeViewPath(cwd) : null,
     repoRoot ? worktreeViewPath(repoRoot) : null,
-    repoRoot ? mainViewPath(repoRoot) : null,
+    repoRoot ? branchViewPath(repoRoot, baselineBranch) : null,
   ];
   const paths = [];
   const seen = new Set();
@@ -1128,9 +1128,15 @@ async function resolveEmbeddedAtlasV2ReadContext({
   const optionalView = ATLAS_V2_VIEW_OPTIONAL_ACTIONS.has(action);
   const freshnessExempt = ATLAS_V2_VIEW_FRESHNESS_EXEMPT_ACTIONS.has(action);
   const preferredViewPath = preferredEmbeddedV2ViewPath({ cwd: cwd || repoRoot });
+  const baselineBranch = preferredViewPath ? null : await baselineBranchForRepo(repoRoot);
   const viewCandidates = preferredViewPath
     ? [preferredViewPath]
-    : candidateEmbeddedV2ViewPaths({ cwd: cwd || repoRoot, repoRoot, includeMissing: !optionalView });
+    : candidateEmbeddedV2ViewPaths({
+        cwd: cwd || repoRoot,
+        repoRoot,
+        baselineBranch,
+        includeMissing: !optionalView,
+      });
   if (viewCandidates.length === 0 && !optionalView) return null;
 
   let view = null;
@@ -1354,9 +1360,15 @@ async function executeEmbeddedAtlasV2Tool({
   const optionalView = ATLAS_V2_VIEW_OPTIONAL_ACTIONS.has(action);
   const freshnessExempt = ATLAS_V2_VIEW_FRESHNESS_EXEMPT_ACTIONS.has(action);
   const preferredViewPath = preferredEmbeddedV2ViewPath({ cwd: cwd || repoRoot });
+  const baselineBranch = preferredViewPath ? null : await baselineBranchForRepo(repoRoot);
   const viewCandidates = preferredViewPath
     ? [preferredViewPath]
-    : candidateEmbeddedV2ViewPaths({ cwd: cwd || repoRoot, repoRoot, includeMissing: !optionalView });
+    : candidateEmbeddedV2ViewPaths({
+        cwd: cwd || repoRoot,
+        repoRoot,
+        baselineBranch,
+        includeMissing: !optionalView,
+      });
   if (viewCandidates.length === 0 && !optionalView) {
     const message = "ATLAS v2 view is not available";
     recordAtlasToolObservation({

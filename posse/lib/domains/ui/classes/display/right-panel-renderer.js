@@ -691,6 +691,17 @@ export class DisplayRightPanelRenderer {
     lines.push(`${visiblePad(mastheadLeft, Math.max(20, width - stripAnsi(status).length - 1))}${status}`);
     lines.push(` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`);
 
+    // Paired members' work runs on their machines, so it is never one of this
+    // clone's agents. Show it here as well as in the log view: the run screen
+    // opens in this view, and a host often has no local agents at all.
+    // Local agents keep room for their two header rows, the controls row, and
+    // at least four agent rows; the lane gets what is left (up to five rows).
+    const reserved = agents.length > 0 ? 3 + 4 : 1;
+    const peerLane = this._buildPeerWorkLane(width, Math.min(5, Math.max(0, maxLines - lines.length - reserved - 1)));
+    if (peerLane.length > 0) {
+      lines.push(...peerLane, ` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`);
+    }
+
     if (agents.length === 0) {
       lines.push(...this._buildMonitorEmptyLines(width, Math.max(0, maxLines - lines.length)));
       return lines.slice(0, maxLines);
