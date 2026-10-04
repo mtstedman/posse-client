@@ -4,6 +4,9 @@ import crypto from "node:crypto";
 import { AutomationStore } from "./AutomationStore.js";
 import { AutomationService } from "./AutomationService.js";
 import { AgentSessionRegistry } from "./AgentSessionRegistry.js";
+import { AgentScheduleRegistry } from "./AgentScheduleRegistry.js";
+import { AgentDefinitionStore } from "../../agents/classes/AgentDefinitionStore.js";
+import { AgentRuntime } from "../../agents/classes/AgentRuntime.js";
 import { SkillRegistry } from "./SkillRegistry.js";
 import { ScriptToolRegistry } from "./ScriptToolRegistry.js";
 import { verifyMcpOAuthToken, bootConfigFromMcpOAuthClaims } from "../../integrations/functions/deterministic-mcp/oauth-token.js";
@@ -21,6 +24,9 @@ export class AutomationOwner {
     this.registry = new SkillRegistry(this.service);
     this.scripts = new ScriptToolRegistry(this.service, scriptsDir ? { dir: scriptsDir } : {});
     this.agents = new AgentSessionRegistry(this.service, this.registry, this.scripts);
+    this.agentDefinitions = new AgentDefinitionStore();
+    this.agentRuntime = new AgentRuntime({ definitions: this.agentDefinitions, client: { request: async (operation, args) => this.dispatchOperator(operation, args) } });
+    this.agentSchedules = new AgentScheduleRegistry(this.store, this.agentRuntime, this.agentDefinitions);
     this.socketPath = socketPath; this.operatorToken = operatorToken || ensureAutomationOperatorToken(); this.tickMs = tickMs;
     this.build = build; this.launch = launch;
     this.server = null; this.timer = null; this.ownsStore = !store; this.socketFile = null;
@@ -37,7 +43,8 @@ export class AutomationOwner {
     await new Promise((resolve, reject) => { this.server.once("error", reject); this.server.listen(this.socketPath, () => { this.server.off("error", reject); resolve(); }); });
     if (process.platform !== "win32") { fs.chmodSync(this.socketPath, 0o600); this.socketFile = fileIdentity(this.socketPath); }
     this.service.recover();
-    this.timer = setInterval(() => { try { this.service.tick(); } catch (error) { if (error.code === "owner_fenced") void this.close(); } }, this.tickMs);
+    this.agentSchedules.recover();
+    this.timer = setInterval(() => { try { this.service.tick(); this.agentSchedules.tick(); } catch (error) { if (error.code === "owner_fenced") void this.close(); } }, this.tickMs);
     return this.socketPath;
   }
   accept(socket) {
@@ -112,6 +119,12 @@ export class AutomationOwner {
       case "schedule.resume": return this.service.setScheduleEnabled(args.id, true);
       case "schedule.remove": return this.service.removeSchedule(args.id);
       case "schedule.run_now": return this.service.runScheduleNow(args.id, args.idempotency_key);
+      case "agent_schedule.save": return this.agentSchedules.save(args.schedule);
+      case "agent_schedule.list": return this.agentSchedules.list();
+      case "agent_schedule.pause": return this.agentSchedules.setEnabled(args.id, false);
+      case "agent_schedule.resume": return this.agentSchedules.setEnabled(args.id, true);
+      case "agent_schedule.remove": return this.agentSchedules.remove(args.id);
+      case "agent_schedule.run_now": return this.agentSchedules.runNow(args.id);
       case "script.list": return this.scripts.list();
       case "script.show": return this.scripts.show(args.name, { repoPath: args.repo_path });
       case "script.create": return this.scripts.create(args.spec);
@@ -153,7 +166,7 @@ export class AutomationOwner {
     if (this.timer) clearInterval(this.timer); this.timer = null;
     const server = this.server; this.server = null;
     if (server) await new Promise(resolve => server.close(resolve));
-    await this.service.shutdown(); if (this.ownsStore) this.store.close();
+    await this.agentSchedules.shutdown(); await this.service.shutdown(); if (this.ownsStore) this.store.close();
     // A successor may already listen on this path; remove only our own socket.
     if (process.platform !== "win32") {
       try { if (!this.socketFile || sameFile(fileIdentity(this.socketPath), this.socketFile)) fs.unlinkSync(this.socketPath); } catch {}
@@ -173,6 +186,6 @@ function timingSafeEqual(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function safeError(error) {
-  const allowed = new Set(["response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed", "script_invalid", "script_not_found", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable", "agent_invalid", "agent_not_found", "agent_session_invalid", "agent_session_not_found", "agent_session_mismatch", "agent_session_busy", "agent_turn_changed", "agent_confirmation_required", "agent_confirmation_missing", "agent_tool_failed"]);
+  const allowed = new Set(["response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed", "script_invalid", "script_not_found", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable", "agent_invalid", "agent_not_found", "agent_scope_mismatch", "agent_session_invalid", "agent_session_not_found", "agent_session_mismatch", "agent_session_busy", "agent_turn_changed", "agent_confirmation_required", "agent_confirmation_missing", "agent_tool_failed"]);
   return { code: allowed.has(error?.code) ? error.code : "automation_error", message: allowed.has(error?.code) ? error.message : "Automation request failed; inspect local diagnostics" };
 }

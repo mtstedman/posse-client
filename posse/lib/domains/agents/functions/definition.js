@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import path from "node:path";
 
 import {
   AGENT_DEFINITION_FIELDS,
@@ -45,10 +46,12 @@ export function validateAgentDefinition(value, { filename = "" } = {}) {
   if (typeof definition.prompt !== "string" || !definition.prompt.trim()) errors.push("prompt is required");
   if (typeof definition.model !== "string" || !definition.model.trim()) errors.push("model is required");
 
-  const scope = exactFields(definition.scope, ["kind", "repo_id"], ["kind"], "scope", errors);
-  if (scope && !AGENT_SCOPE_KINDS.includes(scope.kind)) errors.push("scope.kind must be general or repository");
+  const scope = exactFields(definition.scope, ["kind", "repo_id", "folder_path"], ["kind"], "scope", errors);
+  if (scope && !AGENT_SCOPE_KINDS.includes(scope.kind)) errors.push("scope.kind must be sandbox, folder, repository, or global");
   if (scope?.kind === "repository" && (typeof scope.repo_id !== "string" || !scope.repo_id.trim())) errors.push("repository scope requires repo_id");
-  if (scope?.kind === "general" && Object.hasOwn(scope, "repo_id") && scope.repo_id) errors.push("general scope cannot set repo_id");
+  if (scope?.kind === "folder" && (typeof scope.folder_path !== "string" || !path.isAbsolute(scope.folder_path) || path.normalize(scope.folder_path) !== scope.folder_path)) errors.push("folder scope requires a clean absolute folder_path");
+  if (scope && scope.kind !== "repository" && Object.hasOwn(scope, "repo_id") && scope.repo_id) errors.push(`${scope.kind} scope cannot set repo_id`);
+  if (scope && scope.kind !== "folder" && Object.hasOwn(scope, "folder_path") && scope.folder_path) errors.push(`${scope.kind} scope cannot set folder_path`);
 
   const autonomy = exactFields(definition.autonomy ?? { write_tools: "confirm" }, ["write_tools"], ["write_tools"], "autonomy", errors);
   if (autonomy && !AGENT_WRITE_MODES.includes(autonomy.write_tools)) errors.push("autonomy.write_tools must be confirm, allow, or deny");
@@ -72,7 +75,9 @@ export function validateAgentDefinition(value, { filename = "" } = {}) {
       description: definition.description,
       prompt: definition.prompt,
       model: definition.model,
-      scope: scope.kind === "repository" ? { kind: "repository", repo_id: scope.repo_id.trim() } : { kind: "general" },
+      scope: scope.kind === "repository" ? { kind: "repository", repo_id: scope.repo_id.trim() }
+        : scope.kind === "folder" ? { kind: "folder", folder_path: scope.folder_path }
+          : { kind: scope.kind },
       tools,
       skills,
       autonomy: { write_tools: autonomy.write_tools },
@@ -103,7 +108,7 @@ export function scaffoldAgentDefinition(name) {
     description: `Describe what ${name} does.`,
     prompt: `You are ${name}. Replace this with the agent's standing instructions.`,
     model: "sonnet",
-    scope: { kind: "general" },
+    scope: { kind: "sandbox" },
     tools: [],
     skills: [],
     autonomy: { write_tools: "confirm" },

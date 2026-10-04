@@ -63,12 +63,24 @@ export class SkillRegistry {
   assertAdapters(definition) {
     for (const capability of definition.capabilities) {
       demand(capability.kind === "tool", "This capability needs an installed bounded adapter", "capability_unavailable");
+      if (capability.id.startsWith("script:")) {
+        const issued = this.store.get("entries", capability.id);
+        demand(issued?.kind === "script" && issued.enabled && this.service.entryAvailable(issued), `Issued tool ${capability.id.slice(7)} must have a passing test for its current version`, "capability_unavailable");
+        continue;
+      }
       demand(AUTOMATION_BUILTINS[capability.id] || this.service.connectors?.has(capability.id), `Capability ${capability.id} has no installed adapter`, "capability_unavailable");
     }
     if (definition.runtime.mode === "bounded-agent") demand(this.service.agent, "Agent provider unavailable", "capability_unavailable");
   }
+  issuedTools(definition) {
+    return (definition.capabilities || []).filter(capability => capability.id.startsWith("script:")).map(capability => {
+      const entry = this.store.get("entries", capability.id);
+      demand(entry?.kind === "script" && entry.enabled && this.service.entryAvailable(entry), `Issued tool ${capability.id.slice(7)} is unavailable`, "capability_unavailable");
+      return { id: entry.id, digest: entry.digest, effect: entry.effect, input_schema: structuredClone(entry.input_schema) };
+    });
+  }
   entry(definition) {
-    return { id: this.entryID(definition), source: "bossy", kind: "skill", digest: definitionDigest(definition), description: definition.intent, input_schema: definition.contract.input_schema, output_schema: definition.contract.output_schema, limits: definition.contract.limits, effect: definition.contract.effect, enabled: definition.state === "published", definition: structuredClone(definition) };
+    return { id: this.entryID(definition), source: "bossy", kind: "skill", digest: definitionDigest(definition), description: definition.intent, input_schema: definition.contract.input_schema, output_schema: definition.contract.output_schema, limits: definition.contract.limits, effect: definition.contract.effect, enabled: definition.state === "published", definition: structuredClone(definition), issued_tools: this.issuedTools(definition) };
   }
   publish(definition, actor = "local-operator") {
     validateDefinition(definition); this.assertAdapters(definition);
@@ -110,6 +122,10 @@ export class SkillRegistry {
       const { AutomationService } = await import("./AutomationService.js");
       const testStore = new AutomationStore(":memory:");
       const testService = new AutomationService(testStore, { agent: this.service.agent });
+      // The isolated test owner receives only the exact script entries pinned
+      // by this definition. It reuses the operator's script loader so secrets
+      // remain owner-held and are never copied into the scratch store.
+      testService.scripts = this.service.scripts;
       let run;
       try {
         for (const requirement of requirements) {
@@ -117,6 +133,7 @@ export class SkillRegistry {
           if (requirement.operations.includes("read")) { const filename = path.join(root, "fixture.ready.csv"); fs.writeFileSync(filename, "name,value\nexample,1\n"); fs.utimesSync(filename, new Date(0), new Date(0)); }
           testService.registerResource({ id: requirement.id, root, operations: requirement.operations }); resources.push(requirement);
         }
+        for (const issued of entry.issued_tools || []) testStore.put("entries", issued.id, structuredClone(this.store.get("entries", issued.id)));
         testStore.put("entries", entry.id, entry);
         const principal = ["repository", "folder"].includes(definition.binding.kind) ? { scope: "repository", repo_id: definition.binding.repo_id || "skill-test", repo_path: definition.binding.folder_path, role: "dev" } : { scope: "standalone", role: "dev" };
         testService.grant({ id, tool: entry.id, digest: entry.digest, scope: principal.scope, repo_id: principal.repo_id, repo_path: principal.repo_path, roles: ["dev"], operations: ["describe", "invoke"], resources });

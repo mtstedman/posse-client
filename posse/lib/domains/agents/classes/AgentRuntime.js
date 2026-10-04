@@ -8,6 +8,7 @@ import { validateToolArguments } from "../../../shared/tools/functions/schema-va
 import { AgentDefinitionStore } from "./AgentDefinitionStore.js";
 import { callAgentProvider, resolveAgentProvider } from "../functions/provider-route.js";
 import { compileAgentPolicy } from "../functions/remote-policy.js";
+import { resolveAgentWorkingDirectory } from "../functions/scope.js";
 
 function digest(value) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 function isoAfter(seconds) { return new Date(Date.now() + Math.max(60, Number(seconds) || 600) * 1000).toISOString(); }
@@ -80,6 +81,7 @@ export class AgentRuntime {
       loaded ||= this.definitions.load(agent);
       fallback.agent = loaded.definition.name;
       fallback.agent_digest = loaded.digest;
+      cwd = resolveAgentWorkingDirectory(loaded.definition, cwd);
       client ||= await this.owner();
       started = await client.request("agent.turn.begin", { session_id: session, definition: loaded.definition, digest: loaded.digest, message });
       const definition = started.definition;

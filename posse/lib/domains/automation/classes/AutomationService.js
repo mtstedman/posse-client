@@ -103,9 +103,18 @@ export class AutomationService {
     if (entry.kind === "mcp") return this.connectors?.has?.(entry.id) === true;
     if (entry.kind === "script") return this.scripts?.available(entry) === true;
     if (!entry.definition) return false;
+    const adaptersAvailable = entry.definition.capabilities.every(capability => {
+      if (capability.id.startsWith("script:")) {
+        const pin = entry.issued_tools?.find(item => item.id === capability.id);
+        const issued = this.store.get("entries", capability.id);
+        return Boolean(pin && issued?.kind === "script" && issued.enabled && issued.digest === pin.digest && this.scripts?.available(issued));
+      }
+      return Boolean(AUTOMATION_BUILTINS[capability.id] || this.connectors?.has?.(capability.id) === true);
+    });
+    if (!adaptersAvailable) return false;
     if (entry.definition.runtime?.mode === "bounded-agent") return typeof this.agent === "function";
     if (entry.definition.runtime?.mode !== "recipe") return false;
-    return entry.definition.capabilities.every(capability => AUTOMATION_BUILTINS[capability.id] || this.connectors?.has?.(capability.id) === true);
+    return true;
   }
   discover(principal, query = "") {
     subject(principal); const grants = this.store.list("grants");
@@ -194,6 +203,14 @@ export class AutomationService {
         if (id === "files.read") return sandbox.read(input.resource, input.path);
         if (id === "files.write") return sandbox.write(input.resource, input.path, input.content);
         if (id === "csv.process") return sandbox.processCSV(input);
+      }
+      if (id.startsWith("script:")) {
+        const pin = entry.issued_tools?.find(item => item.id === id);
+        const issued = this.store.get("entries", id);
+        demand(pin && issued?.kind === "script" && issued.enabled && issued.digest === pin.digest && this.scripts?.available(issued), `Issued tool ${id.slice(7)} changed or is unavailable`, "script_changed");
+        schemaCheck(issued.input_schema, input);
+        demand(entry.effect !== "read_only" || issued.effect === "read_only", "Read-only skill cannot issue a write tool", "forbidden");
+        return this.scripts.run(issued, input, { signal: controller.signal });
       }
       demand(this.connectors, `Capability ${id} has no installed adapter`, "capability_unavailable");
       return this.connectors.call(id, input, { signal: controller.signal, effect: entry.effect, grant, check });

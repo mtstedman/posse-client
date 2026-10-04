@@ -506,6 +506,7 @@ export class AssessmentHandoffAdapter {
       });
       if (scopedCheckReceipt) {
         assessmentContext.scoped_check_evidence = scopedCheckReceipt.evidence;
+        assessmentContext.scoped_check_result = scopedCheckReceipt.result;
         worker.emit(
           job.id,
           `${C.dim}[assessor-checks] ${scopedCheckReceipt.reused ? "Reused" : "Ran"} changed-file lint/typecheck: ${scopedCheckReceipt.result.status}${C.reset}`,

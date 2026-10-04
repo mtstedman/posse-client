@@ -69,7 +69,7 @@ export class ScriptToolRegistry {
     };
   }
   create(spec) {
-    const { name, template = "bash", description, effect = "read", params = [], env = [], secrets = [] } = spec || {};
+    const { name, template = "bash", description, effect = "read", params = [], input_schema = null, env = [], secrets = [] } = spec || {};
     demand(validScriptToolName(name), "Tool name must be lower-case like orders.lookup", "script_invalid");
     const variables = [
       ...env.map(item => typeof item === "string" ? { name: item.split("=")[0], ...(item.includes("=") ? { default: item.slice(item.indexOf("=") + 1) } : {}) } : item),
@@ -79,6 +79,7 @@ export class ScriptToolRegistry {
       name, template, effect, env: variables,
       description: String(description || "").trim() || `TODO: describe what ${name} does and when to use it`,
       params: params.map(param => typeof param === "string" ? parseParamSpec(param) : param),
+      inputSchema: input_schema,
     });
     const dir = path.join(this.dir, name);
     demand(!fs.existsSync(dir), `${dir} already exists; edit it or pick another name`, "script_invalid");

@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
 
 import { AGENT_SESSION_PATTERN } from "../../../catalog/agent.js";
 import { agentDefinitionDigest, validateAgentDefinition } from "../../agents/functions/definition.js";
 import { demand, matchesGrant } from "../functions/policy.js";
+import { repositoryID } from "../functions/paths.js";
 
 const SESSION_KIND = "agent_sessions";
 const ACTIVE_TTL_MS = 15 * 60 * 1000;
@@ -10,9 +12,13 @@ const MAX_MESSAGES = 256;
 
 function nowIso(now) { return new Date(now()).toISOString(); }
 function principalFor(definition) {
-  return definition.scope.kind === "repository"
-    ? { scope: "repository", repo_id: definition.scope.repo_id, role: "dev" }
-    : { scope: "standalone", role: "dev" };
+  if (definition.scope.kind === "repository") return { scope: "repository", repo_id: definition.scope.repo_id, role: "dev" };
+  if (definition.scope.kind === "folder") {
+    let repoPath = definition.scope.folder_path;
+    try { repoPath = fs.realpathSync(repoPath); } catch {}
+    return { scope: "repository", repo_id: repositoryID(repoPath), repo_path: repoPath, role: "dev" };
+  }
+  return { scope: "standalone", role: "dev" };
 }
 function publicCapability(capability) {
   return {
@@ -173,7 +179,9 @@ export class AgentSessionRegistry {
     }
     for (const identity of definition.skills) {
       demand(/^[a-z][a-z0-9-]*(?:@[^@]+)?$/.test(identity), `Skill ${identity} is not a valid published skill reference`, "skill_unavailable");
-      const skill = this.skills.resolveReference(identity, definition.scope.kind === "repository" ? definition.scope.repo_id : "");
+      const skill = this.skills.resolveReference(identity,
+        definition.scope.kind === "repository" ? definition.scope.repo_id : definition.scope.kind === "folder" ? repositoryID(definition.scope.folder_path) : "",
+        definition.scope.kind === "folder" ? definition.scope.folder_path : "");
       const entry = this.store.get("entries", this.skills.entryID(skill));
       capabilities.push(this.capability(entry, principal, {
         name: `skill.${skill.name}`, kind: "skill", description: skill.intent,

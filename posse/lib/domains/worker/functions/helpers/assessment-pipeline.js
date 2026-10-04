@@ -718,6 +718,32 @@ function _normalizeAssessmentTextList(value) {
     .filter(Boolean);
 }
 
+function _hasTrustedScopedCheckFailure(assessmentContext) {
+  const result = assessmentContext?.scoped_check_result;
+  if (!result || result.status !== "failed") return false;
+  if (result.verification_eligible !== true
+    || result.coverage_complete !== true
+    || result.verification_commit_relation !== "exact") {
+    return false;
+  }
+  if (result.verification_outcome?.type !== "product_failed"
+    || result.verification_outcome?.actionability !== "implementation") {
+    return false;
+  }
+  const failures = Array.isArray(result.failures) ? result.failures : [];
+  if (!failures.some((failure) => failure && (
+    String(failure.message || "").trim()
+    || String(failure.file || "").trim()
+    || String(failure.check || "").trim()
+  ))) {
+    return false;
+  }
+  const baselineChecks = Object.values(result.baseline_attribution?.checks || {});
+  return baselineChecks.some((check) => (
+    check?.attributable === true && Number(check?.novel_failure_count) > 0
+  ));
+}
+
 function _normalizeAssessmentScopePath(value, cwd = null, nestedRepoPrefix = null) {
   if (!value) return null;
   const raw = String(value).trim();
@@ -2150,7 +2176,10 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       _assessment_sibling_boundary_review: true,
     };
   }
-  if (normalizedVerdict.verdict === "fail" && trustedAssessorEvidenceChars === 0) {
+  const trustedScopedCheckFailure = _hasTrustedScopedCheckFailure(assessmentContext);
+  if (normalizedVerdict.verdict === "fail"
+    && trustedAssessorEvidenceChars === 0
+    && !trustedScopedCheckFailure) {
     recordObservation({
       work_item_id: job.work_item_id,
       job_id: job.id,
@@ -2178,6 +2207,23 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       _assessment_unsupported_fail_review: true,
       _assessment_unsupported_claim_review: true,
     };
+  }
+  if (normalizedVerdict.verdict === "fail"
+    && trustedAssessorEvidenceChars === 0
+    && trustedScopedCheckFailure) {
+    recordObservation({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      attempt_id: attemptId ?? null,
+      observation_type: "assessment.deterministic_fix_evidence_used",
+      summary: "Accepted automatic fix from an attributable deterministic scoped-check failure",
+      detail: {
+        verdict: "fail",
+        assessor_handoff_evidence_chars: 0,
+        verification_commit_relation: assessmentContext.scoped_check_result.verification_commit_relation,
+        baseline_attribution: assessmentContext.scoped_check_result.baseline_attribution,
+      },
+    });
   }
   return normalizedVerdict;
 }
@@ -3040,6 +3086,7 @@ export async function runPostExecutionAssessment(worker, {
       });
       if (scopedCheckReceipt) {
         assessmentContext.scoped_check_evidence = scopedCheckReceipt.evidence;
+        assessmentContext.scoped_check_result = scopedCheckReceipt.result;
         worker.emit(
           job.id,
           `${C.dim}[assessor-checks] ${scopedCheckReceipt.reused ? "Reused" : "Ran"} changed-file lint/typecheck: ${scopedCheckReceipt.result.status}${C.reset}`,

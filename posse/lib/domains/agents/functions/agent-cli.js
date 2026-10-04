@@ -72,7 +72,8 @@ export async function runAgentCli(argv = process.argv.slice(3), io = {}) {
     if (args.json) print(JSON.stringify({ ...loaded.definition, digest: loaded.digest, path: loaded.path }));
     else {
       const d = loaded.definition;
-      print(`${d.name} — ${d.description}\n  model       ${d.model}\n  scope       ${d.scope.kind}${d.scope.repo_id ? ` ${d.scope.repo_id}` : ""}\n  tools       ${d.tools.join(", ") || "none"}\n  skills      ${d.skills.join(", ") || "none"}\n  writes      ${d.autonomy.write_tools}${d.autonomy.write_tools === "allow" ? " (UNATTENDED)" : ""}\n  limits      ${d.limits.turns} turns · ${d.limits.calls} calls · $${d.limits.spend_usd} · ${d.limits.wall_seconds}s\n  digest      ${loaded.digest}\n  path        ${loaded.path}`);
+      const scopeBinding = d.scope.repo_id || d.scope.folder_path || "";
+      print(`${d.name} — ${d.description}\n  model       ${d.model}\n  scope       ${d.scope.kind}${scopeBinding ? ` ${scopeBinding}` : ""}\n  tools       ${d.tools.join(", ") || "none"}\n  skills      ${d.skills.join(", ") || "none"}\n  writes      ${d.autonomy.write_tools}${d.autonomy.write_tools === "allow" ? " (UNATTENDED)" : ""}\n  limits      ${d.limits.turns} turns · ${d.limits.calls} calls · $${d.limits.spend_usd} · ${d.limits.wall_seconds}s\n  digest      ${loaded.digest}\n  path        ${loaded.path}`);
     }
     return 0;
   }

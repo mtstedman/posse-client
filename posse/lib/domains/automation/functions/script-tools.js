@@ -105,14 +105,25 @@ export function parseParamSpec(spec) {
 
 // Renders a manifest and a commented starter script that already reads the
 // declared params and env, so the operator fills in only the work itself.
-export function renderScriptTemplate({ name, description, template = "bash", effect = "read", params = [], env = [] }) {
+export function renderScriptTemplate({ name, description, template = "bash", effect = "read", params = [], inputSchema = null, env = [] }) {
   demand(SCRIPT_TOOL_TEMPLATES.includes(template), `template must be one of ${SCRIPT_TOOL_TEMPLATES.join(", ")}`);
   const properties = {}, required = [];
   for (const param of params) {
     properties[param.name] = { type: param.type, description: `TODO: describe ${param.name}` };
     if (param.required) required.push(param.name);
   }
-  const schema = { type: "object", additionalProperties: false, properties, ...(required.length ? { required } : {}) };
+  const schema = inputSchema == null
+    ? { type: "object", additionalProperties: false, properties, ...(required.length ? { required } : {}) }
+    : structuredClone(inputSchema);
+  assertValidSchema(schema, "Tool input schema");
+  demand(schema && typeof schema === "object" && !Array.isArray(schema) && schema.type === "object", "Tool input schema must have top-level type object");
+  const schemaRequired = new Set(Array.isArray(schema.required) ? schema.required : []);
+  // Starter comments expose scalar convenience variables. The complete,
+  // exact object (including nested objects and arrays) always arrives on
+  // stdin, so accepting an authored JSON Schema never flattens its contract.
+  const scriptParams = inputSchema == null ? params : Object.entries(schema.properties || {})
+    .filter(([, value]) => value && typeof value === "object" && ["string", "integer", "number", "boolean"].includes(value.type))
+    .map(([paramName, value]) => ({ name: paramName, type: value.type, required: schemaRequired.has(paramName) }));
   let variables = env.map(item => ({ ...item }));
   if (template === "http" && !variables.length) variables = [
     { name: "API_BASE_URL", default: "https://api.example.com", description: "service base URL" },
@@ -122,7 +133,7 @@ export function renderScriptTemplate({ name, description, template = "bash", eff
     bash: ["bash", "run.sh", bashScript], http: ["bash", "run.sh", (spec, vars) => bashScript(spec, vars, true)],
     python: ["python", "run.py", pythonScript], node: ["node", "run.mjs", nodeScript],
   }[template];
-  const spec = { name, description, params };
+  const spec = { name, description, params: scriptParams };
   const manifest = normalizeScriptManifest({ schema: SCRIPT_TOOL_SCHEMA, name, description, entry: files[1], interpreter: files[0], params: schema, env: variables, effect });
   return { manifest, entry: files[1], script: files[2](spec, variables) };
 }

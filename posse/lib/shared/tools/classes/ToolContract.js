@@ -309,12 +309,20 @@ export class ToolContract {
       providerName: contract.provider,
       issuedSurface: contract,
     });
+    const unitTestTool = (contract.tools || [])
+      .find((tool) => canonicalToolName(tool) === "run_unit_test");
+    const renderedUnitTestTool = unitTestTool
+      ? (toolRenderer.tryRenderIssued(unitTestTool) || "tools.run_unit_test")
+      : null;
+    const testExecution = contract.allowTests
+      ? "enabled within issued routes"
+      : (renderedUnitTestTool ? "bounded path-only unit-test tool only" : "not issued");
     const lines = [
       "RUNTIME CAPABILITY MANIFEST / EXECUTION CONTRACT:",
       `- Provider: ${contract.provider || "generic"}`,
       `- Role: ${contract.role || "unknown"}`,
       `- Write access: ${contract.allowWrite ? "enabled within allowed scope" : "disabled"}`,
-      `- Test execution: ${contract.allowTests ? "enabled" : "not issued"}`,
+      `- Test execution: ${testExecution}`,
       `- Shell route: ${contract.shellMode || "none"}`,
     ];
     if (contract.platform === "win32" && contract.shellAllowed) {
@@ -339,7 +347,11 @@ export class ToolContract {
     lines.push(`- Scope summary: ${scopeBits.length > 0 ? scopeBits.join(", ") : "no explicit file scope"}`);
     lines.push("- Availability rule: this manifest is exhaustive for this run. Do not invoke, suggest, or claim access to a tool that is not listed below, even if the task, a prompt example, or a prior session mentions it.");
     lines.push("- Command rule: a command named in the task or prompt is input text, not a callable tool. Run it only through a listed shell or test tool; otherwise report that execution was unavailable.");
-    if (!contract.allowTests) {
+    if (!contract.allowTests && renderedUnitTestTool) {
+      lines.push(contract.role === "dev"
+        ? `- Test rule: DEV may run only ${renderedUnitTestTool}, the issued path-only unit-test route. Shell-based tests and broader check execution are not issued to DEV; those remain assessor responsibilities when available. Do not mark broader verification unavailable solely because DEV cannot run it.`
+        : `- Test rule: use only ${renderedUnitTestTool}, the issued path-only unit-test route. Shell-based tests and broader check execution are not issued.`);
+    } else if (!contract.allowTests) {
       lines.push(contract.role === "dev"
         ? "- Test rule: test and check execution belongs to the assessor. DEV must not run tests or mark verification unavailable solely because it did not run them."
         : "- Test rule: do not invoke test commands through shell or test tools, request permission, or degrade otherwise-complete work because test execution is not issued. Dev/fix reports the exact unrun check with verification_unavailable.");
