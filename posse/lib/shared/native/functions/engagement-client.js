@@ -18,11 +18,25 @@ import {
   PROVIDER_TOOL_GATEWAY_PROTOCOL,
 } from "../../../catalog/binary.js";
 import { buildRemoteNativeRequest } from "../../../domains/remote/functions/native-client.js";
+import { assertTestContext } from "../../../domains/runtime/functions/test-context.js";
 import { nativeBinaries } from "../../tools/classes/BinaryManager.js";
 
 const ENGAGEMENT_SYNC_TIMEOUT_MS = 10_000;
 const PROVIDER_DISPATCH_NEGATIVE_CACHE_MS = 60_000;
 const providerDispatchSupportCache = new Map();
+const providerDispatchSupportOverridesForTests = new Map();
+
+export function __testSetProviderDispatchSupport(provider, supported = null) {
+  assertTestContext("__testSetProviderDispatchSupport");
+  const key = String(provider || "").trim();
+  if (!key) throw new TypeError("provider is required");
+  if (supported == null) {
+    providerDispatchSupportOverridesForTests.delete(key);
+    return;
+  }
+  if (typeof supported !== "boolean") throw new TypeError("supported must be a boolean or null");
+  providerDispatchSupportOverridesForTests.set(key, supported);
+}
 
 export function engagementBinaryIdentity(manager = nativeBinaries) {
   try {
@@ -128,15 +142,19 @@ export function verifyProviderDispatchCapabilitiesSync(provider, opts = {}) {
  * the native route and let later compatibility/runtime failures fail closed.
  */
 export function providerDispatchSupportedSync(provider, opts = {}) {
+  const providerName = String(provider || "").trim();
+  if (providerDispatchSupportOverridesForTests.has(providerName)) {
+    return providerDispatchSupportOverridesForTests.get(providerName);
+  }
   const manager = opts.manager || nativeBinaries;
-  const cacheKey = `${engagementBinaryIdentity(manager)}:${String(provider || "")}`;
+  const cacheKey = `${engagementBinaryIdentity(manager)}:${providerName}`;
   const cached = providerDispatchSupportCache.get(cacheKey);
   if (cached && (cached.supported || cached.expiresAt > Date.now())) {
     return cached.supported;
   }
   let supported = false;
   try {
-    verifyProviderDispatchCapabilitiesSync(provider, { ...opts, manager });
+    verifyProviderDispatchCapabilitiesSync(providerName, { ...opts, manager });
     supported = true;
   } catch {
     supported = false;

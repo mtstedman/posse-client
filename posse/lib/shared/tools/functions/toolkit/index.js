@@ -655,7 +655,7 @@ export function createDeterministicToolkit({
       return `Error: old_string found ${exactCount} times in ${displayPath}. It must be unique - provide more surrounding context.`;
     }
     if (exactCount === 1) {
-      content = content.replace(args.old_string, args.new_string);
+      content = content.replace(args.old_string, () => args.new_string);
       if (content === originalContent) {
         return `Error: edit_file made no changes in ${displayPath}. old_string/new_string resolved to identical content.`;
       }
@@ -675,7 +675,7 @@ export function createDeterministicToolkit({
       return `Error: old_string found ${normalizedCount} times in ${displayPath} after normalizing line endings. It must be unique - provide more surrounding context.`;
     }
 
-    content = content.replace(oldWithFileEol, newWithFileEol);
+    content = content.replace(oldWithFileEol, () => newWithFileEol);
     if (content === originalContent) {
       return `Error: edit_file made no changes in ${displayPath}. old_string/new_string resolved to identical content after line-ending normalization.`;
     }

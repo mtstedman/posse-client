@@ -257,70 +257,86 @@ export async function runDeclaredInstallScripts({ root, timeoutMs = DEFAULT_TIME
 /**
  * `runInstallScripts` is set by the installers right after their own
  * (--ignore-scripts) npm step; an npm install made here runs them regardless.
- * @param {{ posseRoot: string, dryRun?: boolean, adoptNodeInstall?: boolean, runInstallScripts?: boolean, timeoutMs?: number, onProgress?: ((message: string) => void) | null }} input
+ * `forceInstall` reinstalls even when the tree looks complete.
+ * @param {{ posseRoot: string, dryRun?: boolean, adoptNodeInstall?: boolean, runInstallScripts?: boolean, forceInstall?: boolean, timeoutMs?: number, onProgress?: ((message: string) => void) | null }} input
  */
-export async function repairPosseNodeTree({
+export async function repairPosseNodeTree(input) {
+  const root = path.resolve(input.posseRoot);
+  return await withDependencyInstallLock(root, () => repairPosseNodeTreeUnlocked(input), {
+    dryRun: input.dryRun === true,
+    waitMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    onProgress: input.onProgress ?? null,
+  });
+}
+
+/**
+ * repairPosseNodeTree for a caller that already holds the dependency install
+ * lock for this Posse root (the lock is not re-entrant), such as the boot
+ * dependency sync.
+ * @param {Parameters<typeof repairPosseNodeTree>[0]} input
+ */
+export async function repairPosseNodeTreeUnlocked({
   posseRoot,
   dryRun = false,
   adoptNodeInstall = false,
   runInstallScripts = false,
+  forceInstall = false,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   onProgress = null,
 }) {
   const root = path.resolve(posseRoot);
-  return await withDependencyInstallLock(root, async () => {
-    const before = inspectPosseNodeTree(root);
-    if (!before.present) return { ...before, label: "posse npm" };
-    const requestedScripts = () => (runInstallScripts && !dryRun
-      ? runDeclaredInstallScripts({ root, timeoutMs, onProgress })
-      : { ok: true, names: [], note: "" });
-    if (!before.needsInstall) {
-      const scripts = await requestedScripts();
-      const native = await ensurePosseSqlite({ root, dryRun, timeoutMs, onProgress });
-      return { ...before, label: "posse npm", action: "none", message: `node packages ready${scripts.note}`, ...native };
-    }
-    const canAdopt = adoptNodeInstall
-      && before.needsStamp
-      && !before.missingNodeModules
-      && before.missingRequired.length === 0
-      && before.missingLocked.length === 0
-      && !before.stale;
-    if (canAdopt && !dryRun) {
-      const scripts = await requestedScripts();
-      const native = await ensurePosseSqlite({ root, dryRun, timeoutMs, onProgress });
-      if (!native.ok) return { ...before, label: "posse npm", ...native };
-      try {
-        fs.writeFileSync(path.join(root, "node_modules", NODE_MANIFEST_STAMP_NAME), `${before.manifestHash}\n`, "utf8");
-      } catch (error) {
-        return { ...before, label: "posse npm", ok: false, status: "failed", action: "stamp", message: `existing npm install looks healthy, but the dependency stamp could not be written: ${error?.code || error?.message || error}` };
-      }
-      return { ...before, label: "posse npm", ok: true, status: "installed", action: "stamp", message: `verified existing npm install${scripts.note}` };
-    }
-    if (dryRun) return { ...before, label: "posse npm", ok: true, status: "dry-run", action: "install", message: "would run npm install" };
-
-    const cacheKeySource = process.platform === "win32" ? root.toLowerCase() : root;
-    const cacheDir = path.join(managedInstallStateRoot(root), "deps", "npm-cache", hashText(cacheKeySource).slice(0, 12));
-    const args = ["install", "--include=dev", "--include=optional", "--no-save", "--ignore-scripts", "--cache", cacheDir, "--no-fund", "--no-audit"];
-    onProgress?.("posse npm: npm install");
-    let run = await runNpm(args, { cwd: root, timeoutMs, onProgress });
-    if (!run.ok && /\bERESOLVE\b|unable to resolve dependency tree|conflicting peer dependency/iu.test(run.message)) {
-      onProgress?.("posse npm: retrying with legacy peer dependencies");
-      run = await runNpm([...args.slice(0, 2), "--legacy-peer-deps", ...args.slice(2)], { cwd: root, timeoutMs, onProgress });
-    }
-    if (!run.ok) return { ...before, label: "posse npm", ok: false, status: "failed", action: "install", message: `npm install failed: ${failureSummary(run.message)}` };
-    const scripts = await runDeclaredInstallScripts({ root, timeoutMs, onProgress });
-
+  const before = inspectPosseNodeTree(root);
+  if (!before.present) return { ...before, label: "posse npm" };
+  const requestedScripts = () => (runInstallScripts && !dryRun
+    ? runDeclaredInstallScripts({ root, timeoutMs, onProgress })
+    : { ok: true, names: [], note: "" });
+  if (!before.needsInstall && !forceInstall) {
+    const scripts = await requestedScripts();
+    const native = await ensurePosseSqlite({ root, dryRun, timeoutMs, onProgress });
+    return { ...before, label: "posse npm", action: "none", message: `node packages ready${scripts.note}`, ...native };
+  }
+  const canAdopt = adoptNodeInstall
+    && !forceInstall
+    && before.needsStamp
+    && !before.missingNodeModules
+    && before.missingRequired.length === 0
+    && before.missingLocked.length === 0
+    && !before.stale;
+  if (canAdopt && !dryRun) {
+    const scripts = await requestedScripts();
     const native = await ensurePosseSqlite({ root, dryRun, timeoutMs, onProgress });
     if (!native.ok) return { ...before, label: "posse npm", ...native };
-    const after = inspectPosseNodeTree(root);
-    if (!after.ok) {
-      return { ...after, label: "posse npm", ok: false, status: "failed", action: "install", message: `missing packages after npm install: ${[...after.missingRequired, ...after.missingLocked].join(", ")}` };
-    }
     try {
-      fs.writeFileSync(path.join(root, "node_modules", NODE_MANIFEST_STAMP_NAME), `${after.manifestHash || before.manifestHash}\n`, "utf8");
+      fs.writeFileSync(path.join(root, "node_modules", NODE_MANIFEST_STAMP_NAME), `${before.manifestHash}\n`, "utf8");
     } catch (error) {
-      return { ...after, label: "posse npm", ok: false, status: "failed", action: "stamp", message: `npm installed, but dependency stamp could not be written: ${error?.code || error?.message || error}` };
+      return { ...before, label: "posse npm", ok: false, status: "failed", action: "stamp", message: `existing npm install looks healthy, but the dependency stamp could not be written: ${error?.code || error?.message || error}` };
     }
-    return { ...after, label: "posse npm", ok: true, status: "installed", action: "install", message: `npm install completed${scripts.note}` };
-  }, { dryRun, waitMs: timeoutMs, onProgress });
+    return { ...before, label: "posse npm", ok: true, status: "installed", action: "stamp", message: `verified existing npm install${scripts.note}` };
+  }
+  if (dryRun) return { ...before, label: "posse npm", ok: true, status: "dry-run", action: "install", message: "would run npm install" };
+
+  const cacheKeySource = process.platform === "win32" ? root.toLowerCase() : root;
+  const cacheDir = path.join(managedInstallStateRoot(root), "deps", "npm-cache", hashText(cacheKeySource).slice(0, 12));
+  const args = ["install", "--include=dev", "--include=optional", "--no-save", "--ignore-scripts", "--cache", cacheDir, "--no-fund", "--no-audit"];
+  onProgress?.("posse npm: npm install");
+  let run = await runNpm(args, { cwd: root, timeoutMs, onProgress });
+  if (!run.ok && /\bERESOLVE\b|unable to resolve dependency tree|conflicting peer dependency/iu.test(run.message)) {
+    onProgress?.("posse npm: retrying with legacy peer dependencies");
+    run = await runNpm([...args.slice(0, 2), "--legacy-peer-deps", ...args.slice(2)], { cwd: root, timeoutMs, onProgress });
+  }
+  if (!run.ok) return { ...before, label: "posse npm", ok: false, status: "failed", action: "install", message: `npm install failed: ${failureSummary(run.message)}` };
+  const scripts = await runDeclaredInstallScripts({ root, timeoutMs, onProgress });
+
+  const native = await ensurePosseSqlite({ root, dryRun, timeoutMs, onProgress });
+  if (!native.ok) return { ...before, label: "posse npm", ...native };
+  const after = inspectPosseNodeTree(root);
+  if (!after.ok) {
+    return { ...after, label: "posse npm", ok: false, status: "failed", action: "install", message: `missing packages after npm install: ${[...after.missingRequired, ...after.missingLocked].join(", ")}` };
+  }
+  try {
+    fs.writeFileSync(path.join(root, "node_modules", NODE_MANIFEST_STAMP_NAME), `${after.manifestHash || before.manifestHash}\n`, "utf8");
+  } catch (error) {
+    return { ...after, label: "posse npm", ok: false, status: "failed", action: "stamp", message: `npm installed, but dependency stamp could not be written: ${error?.code || error?.message || error}` };
+  }
+  return { ...after, label: "posse npm", ok: true, status: "installed", action: "install", message: `npm install completed${scripts.note}` };
 }

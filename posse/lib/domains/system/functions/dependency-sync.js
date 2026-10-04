@@ -48,6 +48,7 @@ import {
   managedToolRoot,
 } from "../../../shared/platform/functions/managed-install-state.js";
 import { npmInstalledPackageDirs } from "./node-lock-validation.js";
+import { repairPosseNodeTreeUnlocked } from "./posse-node-repair.js";
 
 const DEPENDENCY_SYNC_WORKER_URL = new URL("./dependency-sync-worker.js", import.meta.url);
 const DEPENDENCY_SYNC_THREAD_MANAGER = new ThreadManager();
@@ -767,6 +768,47 @@ async function runCommand(command, args, {
   });
 }
 
+// Posse's own tree takes the installers' path: npm with --ignore-scripts, then
+// only the declared install scripts. A plain npm install from the lockfile runs
+// better-sqlite3's node-gyp build (lockfile metadata lacks its "gypfile":
+// false) and, on a PC without a C++ toolchain, leaves Posse unable to start
+// (ERR_MODULE_NOT_FOUND better-sqlite3). Runs under ensureDependencyEntry's lock.
+async function ensurePosseNodeTree(entry, opts) {
+  const input = {
+    posseRoot: entry.root,
+    dryRun: opts.dryRun === true,
+    adoptNodeInstall: opts.adoptNodeInstall === true,
+    forceInstall: opts.forceNodeInstall === true,
+    timeoutMs: opts.timeoutMs,
+    onProgress: opts.onProgress ? (message) => opts.onProgress(message) : null,
+  };
+  let result;
+  if (!commandOnPath("npm")) {
+    // Without npm only an already-complete tree can be accepted (stamped).
+    const plan = await repairPosseNodeTreeUnlocked({ ...input, dryRun: true });
+    const stampOnly = input.adoptNodeInstall && !input.forceInstall && plan.needsStamp && !plan.missingNodeModules
+      && !(plan.missingRequired || []).length && !(plan.missingLocked || []).length && !plan.stale;
+    if (plan.action === "install" && !stampOnly) {
+      result = { ...plan, ok: false, status: "failed", action: "install", message: "npm is not available on PATH" };
+    } else if (input.dryRun) {
+      result = plan;
+    }
+  }
+  result ??= await repairPosseNodeTreeUnlocked(input);
+  // The doctor and boot reports read the snake_case fields ensureNodeProject reports.
+  return {
+    root: entry.root,
+    ...result,
+    missing_required: result.missingRequired ?? [],
+    missing_optional: result.missingOptional ?? [],
+    missing_locked: result.missingLocked ?? [],
+    missing_node_modules: result.missingNodeModules === true,
+    needs_stamp: result.needsStamp === true,
+    manifest_hash: result.manifestHash ?? null,
+    label: entry.label,
+  };
+}
+
 async function ensureNodeProject(entry, opts) {
   const before = inspectNodeProject(entry.root);
   if (!before.present) return before;
@@ -1343,7 +1385,7 @@ export async function ensurePosseNodeDependencies(input = {}) {
   };
   return await ensureDependencyEntry(
     { root: posseRoot, label: "posse npm" },
-    ensureNodeProject,
+    ensurePosseNodeTree,
     opts,
   );
 }
@@ -1644,11 +1686,11 @@ export async function ensureBootDependencies(input = {}) {
 
   if (includeNode) {
     const nodeRoots = uniqueByPath([
-      ...(includePosseRoot && input.includePosseNode !== false ? [{ root: posseRoot, label: "posse npm" }] : []),
+      ...(includePosseRoot && input.includePosseNode !== false ? [{ root: posseRoot, label: "posse npm", posseTree: true }] : []),
       { root: projectDir, label: "repo npm" },
       ...discoverLockBackedNodeRoots(projectDir),
     ]).filter((entry) => fileExists(path.join(entry.root, "package.json")));
-    for (const entry of nodeRoots) node.push(await ensureDependencyEntry(entry, ensureNodeProject, opts));
+    for (const entry of nodeRoots) node.push(await ensureDependencyEntry(entry, entry.posseTree ? ensurePosseNodeTree : ensureNodeProject, opts));
   }
 
   if (includePython) {
