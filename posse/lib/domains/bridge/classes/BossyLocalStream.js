@@ -55,6 +55,7 @@ export class BossyLocalStream {
     this.projectDir = path.resolve(projectDir);
     this.socketPath = socketPath;
     this.changeStream = changeStream;
+    this.ownsChangeStream = changeStream == null;
     this.pollMs = pollMs;
     this.server = null;
     this.socketPathPrepared = false;
@@ -73,7 +74,7 @@ export class BossyLocalStream {
       }
       this.changeStream.start();
       this.changeStream.on("frame", this.onFrame);
-      this.prepareSocketPath();
+      await this.prepareSocketPath();
 
       const server = net.createServer((socket) => this.accept(socket));
       this.server = server;
@@ -93,6 +94,10 @@ export class BossyLocalStream {
       server.on("error", () => {}); // lifecycle errors degrade to SQLite in Bossy
       server.unref?.();
       if (process.platform !== "win32") {
+        // Mark the endpoint as ours only after listen succeeds. A competing
+        // producer may win the race between the stale-path probe and bind;
+        // failed startup must never unlink that producer's live socket.
+        this.socketPathPrepared = true;
         try { fs.chmodSync(this.socketPath, 0o600); } catch { /* best effort */ }
       }
       return { path: this.socketPath };
@@ -102,7 +107,7 @@ export class BossyLocalStream {
     }
   }
 
-  prepareSocketPath() {
+  async prepareSocketPath() {
     if (process.platform === "win32") return;
     const socketDir = path.dirname(this.socketPath);
     fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 });
@@ -112,8 +117,43 @@ export class BossyLocalStream {
         throw new Error(`Bossy socket directory is not private to the current user: ${socketDir}`);
       }
     }
+    let stat;
+    try {
+      stat = fs.lstatSync(this.socketPath);
+    } catch (err) {
+      if (err?.code === "ENOENT") return;
+      throw err;
+    }
+    if (!stat.isSocket()) {
+      const err = new Error(`Bossy local stream endpoint is occupied by a non-socket: ${this.socketPath}`);
+      err.code = "EADDRINUSE";
+      throw err;
+    }
+
+    // Runs and `posse serve` intentionally share this well-known endpoint.
+    // Never unlink a live producer: doing so leaves its existing clients on
+    // an unreachable inode and lets the second producer steal the path. Only
+    // ECONNREFUSED proves the filesystem entry is stale enough to remove.
+    const probe = await new Promise((resolve) => {
+      const socket = net.createConnection(this.socketPath);
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(result);
+      };
+      const timer = setTimeout(() => finish({ live: true }), 250);
+      socket.once("connect", () => finish({ live: true }));
+      socket.once("error", (err) => finish({ live: false, err }));
+    });
+    if (probe.live || !["ECONNREFUSED", "ENOENT"].includes(probe.err?.code)) {
+      const err = new Error(`Bossy local stream endpoint is already served: ${this.socketPath}`);
+      err.code = "EADDRINUSE";
+      throw err;
+    }
     try { fs.rmSync(this.socketPath, { force: true }); } catch { /* listen reports residual failures */ }
-    this.socketPathPrepared = true;
   }
 
   accept(socket) {
@@ -190,7 +230,9 @@ export class BossyLocalStream {
         try { server.close(() => resolve()); } catch { resolve(); }
       });
     }
-    try { this.changeStream?.close?.(); } catch { /* best effort */ }
+    if (this.ownsChangeStream) {
+      try { this.changeStream?.close?.(); } catch { /* best effort */ }
+    }
     this.changeStream = null;
     if (process.platform !== "win32" && this.socketPathPrepared) {
       try { fs.rmSync(this.socketPath, { force: true }); } catch { /* best effort */ }

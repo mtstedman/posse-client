@@ -1,5 +1,6 @@
 import { readBridgeProviderUsage } from "../functions/provider-usage.js";
 import { ChangeStream } from "./ChangeStream.js";
+import { BossyLocalStream } from "./BossyLocalStream.js";
 import { LocalServer } from "./LocalServer.js";
 import { PosseRunLauncher } from "./PosseRunLauncher.js";
 import { RelayClient } from "./RelayClient.js";
@@ -18,6 +19,7 @@ import {
 
 const BRIDGE_PRESENCE_HEARTBEAT_MS = 30_000;
 const OPERATOR_ACTIVITY_FRESH_MS = 120_000;
+const BOSSY_LOCAL_STREAM_RETRY_MS = 500;
 
 export class Bridge {
   constructor({
@@ -29,11 +31,53 @@ export class Bridge {
     this.config = config;
     this.pollMs = pollMs;
     this.localServer = null;
+    this.bossyLocalStream = null;
+    this.bossyLocalStreamStart = null;
+    this.bossyLocalStreamRetryTimer = null;
+    this.bossyLocalStreamLastError = "";
     this.changeStream = null;
     this.relayClient = null;
     this.runLauncher = new PosseRunLauncher({ projectDir: this.projectDir });
     this.presenceTimer = null;
     this.lastOperatorActivityAt = 0;
+    this.stopping = false;
+  }
+
+  startBossyLocalFeed() {
+    if (this.bossyLocalStream || this.stopping || !this.changeStream) return Promise.resolve();
+    if (this.bossyLocalStreamStart) return this.bossyLocalStreamStart;
+    const changeStream = this.changeStream;
+    const pending = (async () => {
+      const candidate = new BossyLocalStream({ projectDir: this.projectDir, changeStream });
+      try {
+        await candidate.start();
+        if (this.stopping || this.changeStream !== changeStream) {
+          await candidate.close();
+          return;
+        }
+        this.bossyLocalStream = candidate;
+        this.bossyLocalStreamLastError = "";
+      } catch (err) {
+        try { await candidate.close(); } catch { /* best effort */ }
+        if (this.stopping || this.changeStream !== changeStream) return;
+        const detail = String(err?.message || err);
+        if (err?.code !== "EADDRINUSE" && detail !== this.bossyLocalStreamLastError) {
+          this.bossyLocalStreamLastError = detail;
+          try { console.warn(`[posse][bridge] Bossy local feed unavailable: ${detail}`); } catch { /* best effort */ }
+        }
+        if (!this.bossyLocalStreamRetryTimer) {
+          this.bossyLocalStreamRetryTimer = setTimeout(() => {
+            this.bossyLocalStreamRetryTimer = null;
+            void this.startBossyLocalFeed();
+          }, BOSSY_LOCAL_STREAM_RETRY_MS);
+          this.bossyLocalStreamRetryTimer.unref?.();
+        }
+      }
+    })();
+    this.bossyLocalStreamStart = pending;
+    return pending.finally(() => {
+      if (this.bossyLocalStreamStart === pending) this.bossyLocalStreamStart = null;
+    });
   }
 
   noteOperatorActivity() {
@@ -86,6 +130,7 @@ export class Bridge {
 
   async start() {
     if (this.localServer) return this.info();
+    this.stopping = false;
     try {
       this.changeStream = new ChangeStream({
         dbPath: getRuntimeDbPath(this.projectDir),
@@ -94,6 +139,12 @@ export class Bridge {
         instanceId: this.config.instanceId,
       });
       this.changeStream.start();
+      // `serve` is long-lived even when no scheduler run exists. Publish its
+      // ChangeStream on Bossy's read-only local feed so pairing immediately
+      // exposes replay and live activity instead of waiting for a run to boot.
+      // A concurrently running scheduler may already own the endpoint; that
+      // producer remains authoritative until its normal teardown.
+      await this.startBossyLocalFeed();
       const address = await this.startLocalServer();
       if (this.config.relayToken) {
         this.relayClient = new RelayClient({
@@ -226,14 +277,24 @@ export class Bridge {
    * a later restart would then return early against a half-dead bridge.
    */
   async stop() {
+    this.stopping = true;
+    if (this.bossyLocalStreamRetryTimer) {
+      clearTimeout(this.bossyLocalStreamRetryTimer);
+      this.bossyLocalStreamRetryTimer = null;
+    }
+    try { await this.bossyLocalStreamStart; } catch { /* startup already degraded */ }
     const relayClient = this.relayClient;
+    const bossyLocalStream = this.bossyLocalStream;
     const changeStream = this.changeStream;
     const localServer = this.localServer;
     this.relayClient = null;
+    this.bossyLocalStream = null;
+    this.bossyLocalStreamStart = null;
     this.changeStream = null;
     this.localServer = null;
     this.stopPresenceHeartbeat();
     try { relayClient?.stop(); } catch { /* already torn down */ }
+    try { await bossyLocalStream?.close(); } catch { /* already torn down */ }
     try { changeStream?.close(); } catch { /* already torn down */ }
     try { await localServer?.close(); } catch { /* already torn down */ }
   }

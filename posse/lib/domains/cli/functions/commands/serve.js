@@ -44,16 +44,31 @@ async function readJsonResponse(res) {
   }
 }
 
-function promptForConfirmationCode(prompt = "  Enter the 4-character code shown on your phone: ") {
+function promptForConfirmationCode(
+  prompt = "  Enter the 4-character code shown on your phone: ",
+  { signal } = {},
+) {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
   return new Promise((resolve) => {
-    rl.question(prompt, (answer) => {
-      rl.close();
+    let settled = false;
+    const finish = (answer = "") => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      if (!rl.closed) rl.close();
       resolve(String(answer || "").trim());
-    });
+    };
+    const abort = () => finish();
+    signal?.addEventListener("abort", abort, { once: true });
+    rl.once("close", () => finish());
+    if (signal?.aborted) {
+      finish();
+      return;
+    }
+    rl.question(prompt, (answer) => finish(answer));
   });
 }
 
@@ -91,6 +106,7 @@ const PAIR_CONFIRM_FRIENDLY = Object.freeze({
   confirmation_pending: "The phone has not finished scanning the QR yet. Waiting, then retrying with the same code.",
   confirmation_mismatch: "Confirmation code doesn't match what the phone committed. Try again with the exact code shown on the phone.",
   already_consumed: "This pair was already completed. Run `posse serve --pair` again if you need to pair another instance.",
+  pairing_canceled: "This pairing was canceled. Run `posse serve --pair` again to mint a fresh QR.",
 });
 
 /**
@@ -121,6 +137,8 @@ export async function runPairCommand(
     pulseTokens = null,
     fetchImpl = globalThis.fetch,
     projectDir = process.cwd(),
+    processRef = process,
+    cancelTimeoutMs = 2_000,
   } = {},
 ) {
   const resolvedPosseKey = posseKey === undefined ? resolvePosseKey() : String(posseKey || "").trim();
@@ -185,6 +203,45 @@ export async function runPairCommand(
     return { ok: false, reason: "missing_qr_token", body: startBody };
   }
 
+  const cancelUrl = bridgePairUrl(pairHttpBase, "cancel");
+  let relayConsumed = false;
+  let cancelRequested = false;
+  const ceremonyAbort = new AbortController();
+  const cancellationSignals = processRef.platform === "win32"
+    ? ["SIGINT", "SIGTERM", "SIGBREAK"]
+    : ["SIGINT", "SIGTERM"];
+  const cancelFromSignal = () => {
+    cancelRequested = true;
+    ceremonyAbort.abort();
+  };
+  for (const signal of cancellationSignals) processRef.once?.(signal, cancelFromSignal);
+
+  const cancelRelayPair = async () => {
+    const timeout = new AbortController();
+    const timeoutId = setTimeout(() => timeout.abort(), Math.max(1, Number(cancelTimeoutMs) || 2_000));
+    try {
+      pairPulseTokens.assertTrustedResourceUrl(cancelUrl, "bridge pair cancel");
+      const cancelRes = await fetchImpl(cancelUrl, {
+        method: "POST",
+        headers: await pairAuthHeaders(),
+        body: JSON.stringify({ qr_token: qrToken }),
+        redirect: "error",
+        signal: timeout.signal,
+      });
+      if (cancelRes.ok) return;
+      const cancelBody = await readJsonResponse(cancelRes);
+      if (cancelBody?.error?.code === "already_consumed") return;
+      const message = cancelBody?.error?.message || cancelBody?.message || `HTTP ${cancelRes.status}`;
+      console.log(`  ${C.yellow}Pair cleanup did not complete:${C.reset} ${message}. The QR will expire automatically.\n`);
+    } catch (err) {
+      console.log(`  ${C.yellow}Pair cleanup did not complete:${C.reset} ${err?.message || err}. The QR will expire automatically.\n`);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
+  try {
+
   // Step 2: render the QR for the phone to scan.
   const payloadUrl = `posse://pair?token=${encodeURIComponent(qrToken)}`;
   const qrArt = await renderTerminalQr(payloadUrl);
@@ -210,10 +267,15 @@ export async function runPairCommand(
   let transientConfirmFailures = 0;
 
   while (Date.now() < expiresAt) {
-    if (!confirmationCode) confirmationCode = normalizeConfirmationCode(await promptCode());
+    if (!confirmationCode) {
+      confirmationCode = normalizeConfirmationCode(await promptCode(
+        "  Enter the 4-character code shown on your phone: ",
+        { signal: ceremonyAbort.signal },
+      ));
+    }
     if (!confirmationCode) {
       console.log(`\n  ${C.red}Pairing cancelled (no confirmation code).${C.reset}\n`);
-      return { ok: false, reason: "no_confirmation_code" };
+      return { ok: false, reason: cancelRequested ? "canceled" : "no_confirmation_code" };
     }
     if (!isValidConfirmationCode(confirmationCode)) {
       console.log(`\n  ${C.red}Invalid confirmation code.${C.reset} Use 4 characters A-Z or 2-9, without 0/O/1/I/L.\n`);
@@ -234,8 +296,13 @@ export async function runPairCommand(
           confirmation_code: confirmationCode,
         }),
         redirect: "error",
+        signal: ceremonyAbort.signal,
       });
     } catch (err) {
+      if (cancelRequested) {
+        console.log(`\n  ${C.red}Pairing cancelled.${C.reset}\n`);
+        return { ok: false, reason: "canceled" };
+      }
       transientConfirmFailures += 1;
       if (transientConfirmFailures < Math.max(1, Number(confirmRetryLimit) || 1)) {
         console.log(`\n  ${C.yellow}Relay confirmation response was interrupted; retrying the same pair safely.${C.reset}\n`);
@@ -247,6 +314,9 @@ export async function runPairCommand(
       return { ok: false, reason: "network_error" };
     }
 
+    if (confirmRes.ok) {
+      relayConsumed = true;
+    }
     body = await readJsonResponse(confirmRes);
     if (confirmRes.ok) {
       confirmed = true;
@@ -328,6 +398,10 @@ export async function runPairCommand(
   console.log(`  ${C.dim}Relay identity stored for this repo.${C.reset}`);
   console.log(`  ${C.dim}Next:${C.reset} run \`posse serve\`, or enable the bridge from Bossy's Remote tab.\n`);
   return { ok: true, paired: true, instance: body.instance };
+  } finally {
+    for (const signal of cancellationSignals) processRef.off?.(signal, cancelFromSignal);
+    if (!relayConsumed) await cancelRelayPair();
+  }
 }
 
 /**

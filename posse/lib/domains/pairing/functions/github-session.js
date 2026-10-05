@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { resolveSshHostname } from "../../git/functions/git-push-auth.js";
 import { canonicalRepositoryLocator } from "./git.js";
 
 function run(command, args, { cwd, exec = execFileSync } = {}) {
@@ -22,10 +23,29 @@ export function githubSessionRepositoryName(owner, sessionId) {
   return `${owner}/posse-session-${safeSessionPart(sessionId).toLowerCase()}`;
 }
 
-export function githubRepositoryName(remoteUrl) {
+function sshRemoteHostname(remoteUrl) {
+  const value = String(remoteUrl || "").trim();
+  if (!value.includes("://")) {
+    return value.match(/^(?:[^@/:]+@)?([^/:]+):.+$/u)?.[1] || null;
+  }
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "ssh:" ? parsed.hostname : null;
+  } catch {
+    return null;
+  }
+}
+
+export function githubRepositoryName(remoteUrl, { resolveSshHost = resolveSshHostname } = {}) {
   const locator = canonicalRepositoryLocator(remoteUrl);
   const [host, ...parts] = locator.split("/");
-  if (host !== "github.com" || parts.length !== 2 || parts.some((part) => !part)) return null;
+  if (parts.length !== 2 || parts.some((part) => !part)) return null;
+  if (host !== "github.com") {
+    const sshHost = sshRemoteHostname(remoteUrl);
+    let resolvedHost = null;
+    try { resolvedHost = sshHost ? resolveSshHost(sshHost) : null; } catch { resolvedHost = null; }
+    if (String(resolvedHost || "").toLowerCase() !== "github.com") return null;
+  }
   return parts.join("/");
 }
 
@@ -240,7 +260,7 @@ export function provisionGitHubSessionRepository({
   defaultBranch,
   owner: verifiedOwner = null,
 }, options = {}) {
-  if (!githubRepositoryName(originRemoteUrl)) {
+  if (!githubRepositoryName(originRemoteUrl, options)) {
     throw Object.assign(new Error("Automatic session provisioning currently supports GitHub remotes only"), {
       code: "pairing_provisioning_provider_unsupported",
     });
