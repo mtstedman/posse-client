@@ -49,6 +49,7 @@ import {
 } from "./merge-closeout.js";
 import { conflictFilesFromMergeError, parkedMergeGuidance } from "./merge-park-guidance.js";
 import { runRegisteredTestsForMergeCandidate } from "../../../shared/tools/functions/toolkit/registered-tests.js";
+import { postChangeReceiptsAtCommit } from "../../queue/functions/verification-receipts.js";
 import { mergeToSharedTrunkAsync } from "./shared-trunk.js";
 import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
 
@@ -1274,17 +1275,27 @@ export function createMergeWorkflowHelpers(context, {
             workItemId: wiId,
           },
         });
+        // Registered tests are one source of evidence; the jobs' own focused
+        // receipts on the branch head are another. Report both, so an empty
+        // registry never reads as "nothing was tested".
+        const branchHead = mergeHeads(branch, targetBranch, cwd).branchHead;
+        let focusedChecks = [];
+        try { focusedChecks = postChangeReceiptsAtCommit(wiId, branchHead); } catch { focusedChecks = []; }
+        const focusedSummary = focusedChecks.length === 0
+          ? "no focused check ran on the branch head"
+          : `focused checks on the branch head: ${focusedChecks.slice(0, 4).map((check) => `${check.command || "check"} ${check.status}`).join("; ")}`;
         logEvent({
           work_item_id: wiId,
           event_type: EVENT_TYPES.GIT_MERGE_CANDIDATE_TESTS,
           actor_type: EVENT_ACTORS.SYSTEM,
-          message: `Projected merge candidate tests: ${candidateTests.summary}`,
+          message: `Projected merge candidate tests: ${candidateTests.summary}; ${focusedSummary}`,
           event_json: JSON.stringify({
             branch,
             target_branch: targetBranch,
-            branch_head: mergeHeads(branch, targetBranch, cwd).branchHead,
+            branch_head: branchHead,
             target_head: preMergeHead,
             staged_files: stagedFiles.slice(0, 100),
+            focused_checks: focusedChecks.slice(0, 10),
             matched: candidateTests.matched,
             passed: candidateTests.passed,
             failed: candidateTests.failed,

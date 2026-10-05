@@ -28,6 +28,12 @@ PHP 8.3+ indexes with current scip-php; the distribution PHP of Debian 12
 cannot read PHP 8.4+ syntax. The Composer step names the track it chose.
 Posse itself needs no Python.
 
+Selected languages also get one installation-level test runtime for Posse's
+deterministic test tool. In particular, Python selection provisions one shared
+Python + pytest environment under Posse's managed runtime. Merely discovering
+a `.py` file does not create a repository-specific virtual environment;
+repository environments are reserved for repositories with Python manifests.
+
 If you already have the public client checkout:
 
 ```bash

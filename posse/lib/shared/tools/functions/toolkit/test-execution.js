@@ -1,8 +1,21 @@
+import { gitCurrentHashAsync, gitHasChangesAsync } from "../../../../domains/git/functions/utils.js";
 import { runScopedChecks } from "./scoped-runners.js";
 import { discoverUnitTestCapability, runUnitTestFile } from "./unit-test-runner.js";
 
 function jsonResult(label, action) {
   try { return JSON.stringify(action(), null, 2); } catch (err) { return `Error: ${label} failed - ${err?.message || String(err)}`; }
+}
+
+// The commit a run proves something about: HEAD, and only when the worktree
+// holds no uncommitted edits that the run also exercised.
+async function cleanExecutedCommit(cwd) {
+  try {
+    const [commit, dirty] = await Promise.all([gitCurrentHashAsync(cwd), gitHasChangesAsync(cwd)]);
+    const hash = String(commit || "").trim().toLowerCase();
+    return dirty === false && /^[0-9a-f]{40,64}$/.test(hash) ? hash : null;
+  } catch {
+    return null;
+  }
 }
 
 export function createTestExecutionExecutors() {
@@ -16,7 +29,9 @@ export function createTestExecutionExecutors() {
         scipAvailable: options.scipAvailable !== false,
       });
       try {
-        return JSON.stringify(await runUnitTestFile({ projectDir: cwd, path: args?.path, capability }), null, 2);
+        const executedCommitHash = await cleanExecutedCommit(cwd);
+        const result = await runUnitTestFile({ projectDir: cwd, path: args?.path, capability });
+        return JSON.stringify({ ...result, executed_commit_hash: executedCommitHash }, null, 2);
       } catch (err) {
         return `Error: run_unit_test failed - ${err?.message || String(err)}`;
       }

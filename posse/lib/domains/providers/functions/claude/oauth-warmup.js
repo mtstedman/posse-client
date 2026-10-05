@@ -7,6 +7,7 @@ import { getDefaultInteractiveCliBackend, stripTerminalControls } from "../share
 import { getClaudeConfigDir, hasUsableClaudeOauthToken, readClaudeCredentials } from "./auth-state.js";
 import { getClaudeCommand, getClaudeCommandAsync } from "./cli-discovery.js";
 import { classifyClaudeCliFailure } from "./failure-classification.js";
+import { scrubClaudeChildEnv } from "./child-env.js";
 
 function normalizeClaudeOauthWarmupResult(result = {}) {
   const status = Number.isFinite(result.status) ? result.status : null;
@@ -53,6 +54,7 @@ async function runClaudeWarmupViaInteractiveCli({
   cwd = null,
   timeoutMs = 20_000,
   backend = null,
+  env = process.env,
 } = {}) {
   const resolvedBackend = backend || getDefaultInteractiveCliBackend();
   if (!resolvedBackend) throw new InteractiveCliUnavailableError();
@@ -61,7 +63,7 @@ async function runClaudeWarmupViaInteractiveCli({
     command: resolvedClaude.command,
     args: resolvedClaude.args,
     cwd: cwd || process.cwd(),
-    env: process.env,
+    env: scrubClaudeChildEnv({ ...env }),
     backend: resolvedBackend,
     timeoutMs,
     quietMs: 500,
@@ -91,7 +93,7 @@ async function runClaudeWarmupViaInteractiveCli({
   }
 }
 
-export function warmOauthSession({ cwd = null, timeoutMs = 20_000 } = {}) {
+export function warmOauthSession({ cwd = null, timeoutMs = 20_000, env = process.env } = {}) {
   const configDir = getClaudeConfigDir();
   const credentials = readClaudeCredentials(configDir);
   if (!hasUsableClaudeOauthToken(credentials)) {
@@ -119,7 +121,7 @@ export function warmOauthSession({ cwd = null, timeoutMs = 20_000 } = {}) {
   const prompt = "Reply with OK.";
   const invoke = typeof globalThis.__posseWarmClaudeOauthSession === "function"
     ? globalThis.__posseWarmClaudeOauthSession
-    : ({ resolvedCwd, resolvedTimeoutMs }) => {
+    : ({ resolvedCwd, resolvedTimeoutMs, childEnv }) => {
       const launch = buildWindowsSpawn(resolvedClaude.command, [...resolvedClaude.args, "-p", "--max-turns", "1", "--output-format", "text"]);
       return spawnSync(
         launch.command,
@@ -133,6 +135,7 @@ export function warmOauthSession({ cwd = null, timeoutMs = 20_000 } = {}) {
           shell: false,
           windowsVerbatimArguments: launch.windowsVerbatimArguments,
           timeout: resolvedTimeoutMs,
+          env: childEnv,
         }
       );
     };
@@ -141,6 +144,7 @@ export function warmOauthSession({ cwd = null, timeoutMs = 20_000 } = {}) {
     const result = invoke({
       resolvedCwd: cwd || process.cwd(),
       resolvedTimeoutMs: Number.isFinite(timeoutMs) ? Math.max(1_000, timeoutMs) : 20_000,
+      childEnv: scrubClaudeChildEnv({ ...env }),
     }) || {};
     return normalizeClaudeOauthWarmupResult(result);
   } catch (err) {
@@ -150,7 +154,7 @@ export function warmOauthSession({ cwd = null, timeoutMs = 20_000 } = {}) {
 
 let activeClaudeWarmup = null;
 
-function spawnClaudeWarmupAsync({ resolvedCwd, resolvedTimeoutMs, prompt }) {
+function spawnClaudeWarmupAsync({ resolvedCwd, resolvedTimeoutMs, prompt, childEnv }) {
   if (activeClaudeWarmup) return activeClaudeWarmup.promise;
 
   const active = { child: null, promise: null };
@@ -174,6 +178,7 @@ function spawnClaudeWarmupAsync({ resolvedCwd, resolvedTimeoutMs, prompt }) {
         shell: false,
         windowsVerbatimArguments: launch.windowsVerbatimArguments,
         detached: processGroup,
+        env: childEnv,
       });
     } catch (error) {
       if (activeClaudeWarmup === active) activeClaudeWarmup = null;
@@ -234,7 +239,7 @@ function spawnClaudeWarmupAsync({ resolvedCwd, resolvedTimeoutMs, prompt }) {
   return active.promise;
 }
 
-export async function warmOauthSessionInteractive({ cwd = null, timeoutMs = 20_000, interactiveBackend = null } = {}) {
+export async function warmOauthSessionInteractive({ cwd = null, timeoutMs = 20_000, interactiveBackend = null, env = process.env } = {}) {
   const configDir = getClaudeConfigDir();
   const credentials = readClaudeCredentials(configDir);
   if (!hasUsableClaudeOauthToken(credentials)) {
@@ -250,6 +255,7 @@ export async function warmOauthSessionInteractive({ cwd = null, timeoutMs = 20_0
       cwd,
       timeoutMs: Number.isFinite(timeoutMs) ? Math.max(1_000, timeoutMs) : 20_000,
       backend: interactiveBackend,
+      env,
     });
     return normalizeClaudeOauthWarmupResult(result);
   } catch (err) {
@@ -265,9 +271,10 @@ export async function warmOauthSessionAsync({
   timeoutMs = 20_000,
   preferInteractive = false,
   interactiveBackend = null,
+  env = process.env,
 } = {}) {
   if (preferInteractive || interactiveBackend) {
-    const interactive = await warmOauthSessionInteractive({ cwd, timeoutMs, interactiveBackend });
+    const interactive = await warmOauthSessionInteractive({ cwd, timeoutMs, interactiveBackend, env });
     if (interactive.attempted || interactiveBackend || interactive.skipped !== "interactive-cli-unavailable") {
       return interactive;
     }
@@ -301,11 +308,13 @@ export async function warmOauthSessionAsync({
       ? await globalThis.__posseWarmClaudeOauthSessionAsync({
         resolvedCwd: cwd || process.cwd(),
         resolvedTimeoutMs: Number.isFinite(timeoutMs) ? Math.max(1_000, timeoutMs) : 20_000,
+        childEnv: scrubClaudeChildEnv({ ...env }),
       })
       : await spawnClaudeWarmupAsync({
         resolvedCwd: cwd || process.cwd(),
         resolvedTimeoutMs: Number.isFinite(timeoutMs) ? Math.max(1_000, timeoutMs) : 20_000,
         prompt,
+        childEnv: scrubClaudeChildEnv({ ...env }),
       });
     return normalizeClaudeOauthWarmupResult(result || {});
   } catch (err) {

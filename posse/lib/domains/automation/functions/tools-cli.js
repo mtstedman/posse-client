@@ -18,7 +18,16 @@ export const TOOLS_USAGE = `Usage:
   posse tools secret unset <tool> <NAME>
   posse tools secret list [<tool>]                     names and fingerprints, never values
   posse tools grant <name> [--repo PATH | --standalone] [--roles dev,researcher|*] [--unattended]
-  posse tools revoke <grant-id>`;
+  posse tools revoke <grant-id>
+  posse tools sql list
+  posse tools sql show <name>
+  posse tools sql save <definition.json|->              save to the central Posse database
+  posse tools sql test <name> [--input JSON | --input-file PATH]
+  posse tools sql grant <name> [--roles dev,researcher|*]
+  posse tools prompt list
+  posse tools prompt show <name>
+  posse tools prompt save <definition.json|->              pre-run context declaration, stored centrally
+  posse tools prompt remove <name>`;
 
 function parse(argv) {
   const positional = [], flags = {};
@@ -53,6 +62,8 @@ export async function runToolsCli(argv = process.argv.slice(3), io = {}) {
     }
   };
   switch (command) {
+    case "sql": return await runSqlCommand(args, request, io, print);
+    case "prompt": return await runPromptCommand(args, request, io, print);
     case "list": {
       const tools = await request("script.list", {});
       if (args.has("--json")) { print(JSON.stringify(tools)); return 0; }
@@ -151,6 +162,87 @@ export async function runToolsCli(argv = process.argv.slice(3), io = {}) {
   return 2;
 }
 
+async function runPromptCommand(args, request, io, print) {
+  const action = args.positional.shift() || "list";
+  if (action === "list") {
+    const tools = await request("prompt_tool.list", {});
+    if (args.has("--json")) print(JSON.stringify(tools));
+    else if (!tools.length) print("No prompt tools yet.");
+    else for (const tool of tools) print(`  ${tool.name.padEnd(32)} global · ${tool.description}`);
+    return 0;
+  }
+  if (action === "show") {
+    if (args.positional.length !== 1) throw Object.assign(new Error("usage: posse tools prompt show <name>"), { code: "invalid_request" });
+    const tool = await request("prompt_tool.show", { name: args.positional[0] });
+    print(args.has("--json") ? JSON.stringify(tool) : `${tool.name} — ${tool.description}\n  scope        global\n  storage      central Posse database`);
+    return 0;
+  }
+  if (action === "save") {
+    if (args.positional.length !== 1) throw Object.assign(new Error("usage: posse tools prompt save <definition.json|->"), { code: "invalid_request" });
+    const source = args.positional[0];
+    const raw = source === "-" ? await readBoundedInput(io.stdin || process.stdin, 1024 * 1024) : readBoundedText(source, 1024 * 1024);
+    let definition;
+    try { definition = JSON.parse(raw); } catch { throw Object.assign(new Error("Prompt tool definition must be one JSON object"), { code: "invalid_request" }); }
+    const saved = await request("prompt_tool.save", { definition });
+    print(args.has("--json") ? JSON.stringify(saved) : `saved ${saved.name} as a global pre-run input in the central Posse database at ${saved.digest.slice(0, 12)}`);
+    return 0;
+  }
+  if (action === "remove") {
+    if (args.positional.length !== 1) throw Object.assign(new Error("usage: posse tools prompt remove <name>"), { code: "invalid_request" });
+    const removed = await request("prompt_tool.remove", { name: args.positional[0] });
+    print(args.has("--json") ? JSON.stringify(removed) : `removed ${removed.name} from the central Posse database`);
+    return 0;
+  }
+  throw Object.assign(new Error(`Unknown prompt tools command: ${action}`), { code: "invalid_request" });
+}
+
+async function runSqlCommand(args, request, io, print) {
+  const action = args.positional.shift() || "list";
+  if (action === "list") {
+    if (args.positional.length) throw Object.assign(new Error("usage: posse tools sql list"), { code: "invalid_request" });
+    const capabilities = await request("sql_capability.list", {});
+    if (args.has("--json")) { print(JSON.stringify(capabilities)); return 0; }
+    if (!capabilities.length) { print("No SQL capabilities yet."); return 0; }
+    for (const capability of capabilities) print(`  ${capability.name.padEnd(32)} ${capability.tested ? "tested" : "needs test"} · ${capability.binding.folder_path}`);
+    return 0;
+  }
+  if (action === "show") {
+    if (args.positional.length !== 1) throw Object.assign(new Error("usage: posse tools sql show <name>"), { code: "invalid_request" });
+    const capability = await request("sql_capability.show", { name: args.positional[0] });
+    if (args.has("--json")) { print(JSON.stringify(capability)); return 0; }
+    print(`${capability.name} — ${capability.description}\n  binding      ${capability.binding.folder_path}\n  parameters   ${capability.parameter_order.join(", ") || "none"}\n  rows         ${capability.max_rows}\n  test         ${capability.tested ? `passed at ${capability.digest.slice(0, 12)}` : "required"}\n  storage      central Posse database`);
+    return 0;
+  }
+  if (action === "save") {
+    if (args.positional.length !== 1) throw Object.assign(new Error("usage: posse tools sql save <definition.json|->"), { code: "invalid_request" });
+    const source = args.positional[0];
+    const raw = source === "-" ? await readBoundedInput(io.stdin || process.stdin, 1024 * 1024) : readBoundedText(source, 1024 * 1024);
+    let definition;
+    try { definition = JSON.parse(raw); } catch { throw Object.assign(new Error("SQL capability definition must be one JSON object"), { code: "invalid_request" }); }
+    const saved = await request("sql_capability.save", { definition });
+    print(args.has("--json") ? JSON.stringify(saved) : `saved ${saved.name} in the central Posse database at ${saved.digest.slice(0, 12)}; run posse tools sql test ${saved.name}`);
+    return 0;
+  }
+  if (action === "test") {
+    if (args.positional.length !== 1) throw Object.assign(new Error("usage: posse tools sql test <name> [--input JSON | --input-file PATH]"), { code: "invalid_request" });
+    const source = args.one("--input-file");
+    const raw = source ? readBoundedText(source, 1024 * 1024) : args.one("--input") || "{}";
+    let input;
+    try { input = JSON.parse(raw); } catch { throw Object.assign(new Error("--input must be one JSON object"), { code: "invalid_request" }); }
+    const tested = await request("sql_capability.test", { name: args.positional[0], input });
+    if (args.has("--json")) print(JSON.stringify(tested));
+    else print(`${tested.name} ${tested.passed ? "passed and published" : "failed"}\n${tested.output}`);
+    return tested.passed ? 0 : 1;
+  }
+  if (action === "grant") {
+    if (args.positional.length !== 1) throw Object.assign(new Error("usage: posse tools sql grant <name> [--roles dev,researcher|*]"), { code: "invalid_request" });
+    const grant = await request("sql_capability.grant", { name: args.positional[0], roles: (args.one("--roles") || "dev").split(",") });
+    print(args.has("--json") ? JSON.stringify(grant) : `granted ${args.positional[0]} to ${grant.roles.join(",")} in ${grant.repo_id} as ${grant.id}`);
+    return 0;
+  }
+  throw Object.assign(new Error(`Unknown SQL tools command: ${action}`), { code: "invalid_request" });
+}
+
 async function runSecretCommand(args, request, io, print) {
   const action = args.positional.shift();
   if (action === "list") {
@@ -219,4 +311,16 @@ function readBoundedText(file, limit) {
   const info = fs.statSync(file);
   if (info.size > limit) throw Object.assign(new Error(`${file} is larger than ${limit} bytes`), { code: "invalid_request" });
   return fs.readFileSync(file, "utf8");
+}
+
+async function readBoundedInput(stdin, limit) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of stdin) {
+    const bytes = Buffer.from(chunk);
+    size += bytes.length;
+    if (size > limit) throw Object.assign(new Error(`Input is larger than ${limit} bytes`), { code: "invalid_request" });
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }

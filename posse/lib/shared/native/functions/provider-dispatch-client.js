@@ -8,6 +8,7 @@ import {
   PROVIDER_DISPATCH_PROVIDERS,
 } from "../../../catalog/binary.js";
 import { buildRuntimeEnv } from "../../../domains/runtime/functions/paths.js";
+import { scrubClaudeChildEnv } from "../../../domains/providers/functions/claude/child-env.js";
 import {
   terminateSpawnedProcessTree,
   trackSpawnedProcess,
@@ -113,6 +114,7 @@ export async function dispatchProvider(request, {
   forceKillGraceMs = FORCE_KILL_GRACE_MS,
   allowTestAdapter = false,
   mcpGate = null,
+  baseEnv = process.env,
 } = {}) {
   validateStart(request, allowTestAdapter);
   if (signal?.aborted) throw cancellationError();
@@ -183,11 +185,13 @@ export async function dispatchProvider(request, {
   }
 
   const processGroup = process.platform !== "win32";
+  const childEnv = buildRuntimeEnv(projectDir || request.scope?.cwd, request.scope?.cwd, baseEnv);
+  if (request.provider === "claude") scrubClaudeChildEnv(childEnv);
   let proc;
   try {
     proc = spawnImpl(binaryPath, ["engagement", "dispatch", "--stdio"], {
       cwd: request.scope?.cwd,
-      env: buildRuntimeEnv(projectDir || request.scope?.cwd, request.scope?.cwd, process.env),
+      env: childEnv,
       detached: processGroup,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],

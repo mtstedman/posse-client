@@ -4,6 +4,7 @@
 import {
   activeWorkItemDispositionGates,
   authorizeWorkItemAutoMerge,
+  findMergeHoldingGate,
   listCrossWiMergeBlockers,
   listWorkItems,
   logEvent,
@@ -57,7 +58,11 @@ export function createAutoMergeWorkflowHelpers(context, {
   // Close-out order: cross-WI sources before their dependents, otherwise in
   // completion order, merged one at a time so each refresh sees the target
   // its predecessors produced. A work item whose merge waits on an operator
-  // verification review stays out until that review passes. A dependent whose
+  // verification review stays out until that review passes, and so does one
+  // held by any other operator gate (findMergeHoldingGate, the gate
+  // authorization refuses as human_gate_active): listed, it re-ran auto-merge
+  // and logged a merge_candidate_invalidated event on every job end until an
+  // operator acted (WI 3: 52 times in 35 minutes). A dependent whose
   // upstream is still in flight and not merging ahead of it in this pass is
   // left out: it could only be authorized, deferred and released again on
   // every pass (NEW-L1). So is one whose operator is deciding what to do about
@@ -71,6 +76,7 @@ export function createAutoMergeWorkflowHelpers(context, {
         .filter((wi) => !isIterativeWorkItemActive(wi))
         .filter((wi) => autoMerge || shouldAutoApproveIterativeWorkItem(wi))
         .filter((wi) => !mergeVerificationReviewHoldsAutoMerge(wi.id))
+        .filter((wi) => !findMergeHoldingGate(wi.id))
         .filter((wi) => activeWorkItemDispositionGates(wi.id, CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE).length === 0),
     ));
     const listedIds = new Set();

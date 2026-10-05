@@ -85,7 +85,9 @@ function validateTransitionDescriptor(descriptor) {
   if (Object.values(normalized).some((value) => !value)) return null;
   if (descriptor.handler === "git_push") {
     if (descriptor.choice_id === "decline" && descriptor.decline !== true) return null;
-    if (descriptor.choice_id !== "decline" && descriptor.decline != null) return null;
+    // Reservations stored before Push stopped carrying the flag hold
+    // `decline: false`; that agrees with the choice, so it still replays.
+    if (descriptor.choice_id !== "decline" && descriptor.decline != null && descriptor.decline !== false) return null;
     if (descriptor.decline === true) normalized.decline = true;
   } else if (descriptor.decline != null) {
     return null;

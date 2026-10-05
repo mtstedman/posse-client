@@ -4,7 +4,9 @@ import { spawn, spawnSync } from "child_process";
 import {
   getPythonToolchainExecutable,
   resolveManagedPythonRuntimeForProject,
+  resolveManagedPythonTestToolchain,
 } from "../../../../domains/runtime/functions/python-runtime.js";
+import { inspectManagedPythonTestToolchain } from "../../../../domains/environments/functions/python-test-toolchain.js";
 import { gitCurrentHash } from "../../../../domains/git/functions/utils.js";
 import {
   groupVerificationFiles,
@@ -223,6 +225,11 @@ function pythonCommandCandidates(cwd) {
   const managedRuntime = resolveManagedPythonRuntimeForProject({ projectDir: cwd });
   if (managedRuntime?.ready && managedRuntime.python) {
     candidates.push({ command: managedRuntime.python, args: [], display: managedRuntime.python });
+  }
+  const sharedRuntime = inspectManagedPythonTestToolchain();
+  if (sharedRuntime.ready) {
+    const python = resolveManagedPythonTestToolchain().python;
+    candidates.push({ command: python, args: [], display: python });
   }
 
   const localVenvs = process.platform === "win32"

@@ -6,7 +6,10 @@ import { automationDataDir } from "../../automation/functions/paths.js";
 import { agentDefinitionDigest, scaffoldAgentDefinition, validateAgentDefinition } from "../functions/definition.js";
 
 export class AgentDefinitionStore {
-  constructor({ dir = path.join(automationDataDir(), "agents") } = {}) { this.dir = dir; }
+  constructor({ store = null, dir = store ? null : path.join(automationDataDir(), "agents") } = {}) {
+    this.store = store;
+    this.dir = dir;
+  }
 
   path(name) {
     if (!AGENT_NAME_PATTERN.test(String(name || ""))) throw Object.assign(new Error("Agent name must be lower-case and file-safe"), { code: "agent_invalid" });
@@ -14,6 +17,16 @@ export class AgentDefinitionStore {
   }
 
   load(name) {
+    if (this.store) {
+      if (!AGENT_NAME_PATTERN.test(String(name || ""))) throw Object.assign(new Error("Agent name must be lower-case and file-safe"), { code: "agent_invalid" });
+      const record = this.store.get("agent_definitions", name);
+      if (!record) throw Object.assign(new Error(`No agent named ${name}`), { code: "agent_not_found" });
+      const checked = validateAgentDefinition(record.definition, { filename: name });
+      if (!checked.ok) throw Object.assign(new Error(checked.errors.join("; ")), { code: "agent_invalid", errors: checked.errors });
+      const exactDigest = agentDefinitionDigest(checked.definition);
+      if (record.digest !== exactDigest) throw Object.assign(new Error(`Agent ${name} digest does not match its definition`), { code: "schema_mismatch" });
+      return { definition: checked.definition, digest: exactDigest, storage: "central_db" };
+    }
     const filename = this.path(name);
     let before;
     try { before = fs.lstatSync(filename); } catch (error) {
@@ -50,6 +63,13 @@ export class AgentDefinitionStore {
   }
 
   list() {
+    if (this.store) {
+      return this.store.list("agent_definitions").map(record => {
+        const name = String(record?.definition?.name || "");
+        try { return { name, ...this.load(name), errors: [] }; }
+        catch (error) { return { name, definition: null, digest: null, storage: "central_db", errors: error.errors || [error.message] }; }
+      }).sort((left, right) => left.name.localeCompare(right.name));
+    }
     if (!fs.existsSync(this.dir)) return [];
     return fs.readdirSync(this.dir, { withFileTypes: true })
       .filter(item => item.isFile() && item.name.endsWith(".json") && !item.name.startsWith("."))
@@ -61,6 +81,11 @@ export class AgentDefinitionStore {
   }
 
   create(name) {
+    if (this.store) {
+      if (!AGENT_NAME_PATTERN.test(String(name || ""))) throw Object.assign(new Error("Agent name must be lower-case and file-safe"), { code: "agent_invalid" });
+      if (this.store.get("agent_definitions", name)) throw Object.assign(new Error(`Agent ${name} already exists`), { code: "agent_invalid" });
+      return this.save(scaffoldAgentDefinition(name), { create: true });
+    }
     const filename = this.path(name);
     fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     const definition = scaffoldAgentDefinition(name);
@@ -70,5 +95,29 @@ export class AgentDefinitionStore {
       throw error;
     }
     return { definition, digest: agentDefinitionDigest(definition), path: filename };
+  }
+
+  save(definition, { create = false } = {}) {
+    if (!this.store) throw Object.assign(new Error("File-backed agent definitions must be edited through their files"), { code: "agent_invalid" });
+    const checked = validateAgentDefinition(definition, { filename: definition?.name || "" });
+    if (!checked.ok) throw Object.assign(new Error(checked.errors.join("; ")), { code: "agent_invalid", errors: checked.errors });
+    const existing = this.store.get("agent_definitions", checked.definition.name);
+    if (create && existing) throw Object.assign(new Error(`Agent ${checked.definition.name} already exists`), { code: "agent_invalid" });
+    if (!create && !existing) throw Object.assign(new Error(`No agent named ${checked.definition.name}`), { code: "agent_not_found" });
+    const saved = {
+      definition: checked.definition,
+      digest: agentDefinitionDigest(checked.definition),
+      created_at: existing?.created_at || new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    this.store.put("agent_definitions", checked.definition.name, saved);
+    return { definition: checked.definition, digest: saved.digest, storage: "central_db" };
+  }
+
+  remove(name) {
+    if (!this.store) throw Object.assign(new Error("File-backed agent definitions must be removed through their files"), { code: "agent_invalid" });
+    this.load(name);
+    this.store.remove("agent_definitions", name);
+    return { name, removed: true };
   }
 }

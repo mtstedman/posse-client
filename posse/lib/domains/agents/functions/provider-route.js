@@ -33,6 +33,7 @@ export async function callAgentProvider(providerName, prompt, options = {}) {
     cwd: options.cwd || process.cwd(),
     maxTurns: 1,
     maxOutputTokens: options.maxOutputTokens || 8000,
+    promptCache: options.promptCache === true,
     disableAtlas: true,
     disableSystemTools: true,
     disableAgentTools: true,

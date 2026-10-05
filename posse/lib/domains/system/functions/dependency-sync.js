@@ -10,6 +10,9 @@ import path from "path";
 import { spawn, spawnSync } from "child_process";
 
 import {
+  ATLAS_LANGUAGE_TEST_TOOLCHAINS,
+} from "../../../catalog/atlas.js";
+import {
   DEPENDENCY_INSTALL_ENV_PREFIXES,
   DEPENDENCY_SYNC_INSTALL_ENV_KEYS,
 } from "../../../catalog/process.js";
@@ -36,6 +39,10 @@ import {
   resolveManagedPythonRuntimeForProject,
 } from "../../runtime/functions/python-runtime.js";
 import { ensureManagedPythonToolchain } from "../../environments/functions/python-toolchain-install.js";
+import {
+  ensureManagedPythonTestToolchain,
+  inspectManagedPythonTestToolchain,
+} from "../../environments/functions/python-test-toolchain.js";
 import { ensureComposer } from "../../environments/functions/composer-bootstrap.js";
 import { commandSpawnSpec, findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 import { glibcFloorProblem, runtimeGlibcVersion } from "../../../shared/platform/functions/native-runtime-floor.js";
@@ -1000,7 +1007,6 @@ function inspectPythonProject(root, opts = {}) {
   const runtime = resolveManagedPythonRuntimeForProject({
     projectDir: root,
     posseRoot: opts.posseRoot || DEFAULT_POSSE_ROOT,
-    assumePython: opts.assumePython === true,
   });
   if (!runtime) {
     return { present: false, root, ok: true, status: "skipped", reason: "no Python project manifests" };
@@ -1039,7 +1045,7 @@ function samePath(a, b) {
 }
 
 async function ensurePythonProject(entry, opts) {
-  const inspectOpts = { ...opts, assumePython: entry.assumePython === true };
+  const inspectOpts = { ...opts };
   const before = inspectPythonProject(entry.root, inspectOpts);
   if (!before.present) return before;
   // The project repo's runtime must carry the approved test runner even when
@@ -1390,27 +1396,6 @@ export async function ensurePosseNodeDependencies(input = {}) {
   );
 }
 
-// Registered/approved test runners for the toolchain languages doctor cannot
-// install itself. Detection of these languages without a working runner is a
-// hard doctor failure — otherwise agents spin out trying to run tests.
-const LANGUAGE_TEST_TOOLCHAINS = Object.freeze({
-  go: Object.freeze({
-    probe: ["go", "version"],
-    runner: "go test",
-    hint: "install Go (https://go.dev/dl) so `go test` can run",
-  }),
-  rust: Object.freeze({
-    probe: ["cargo", "--version"],
-    runner: "cargo test",
-    hint: "install Rust via rustup (https://rustup.rs) so `cargo test` can run",
-  }),
-  php: Object.freeze({
-    probe: ["php", "--version"],
-    runner: "php tests",
-    hint: "install PHP so repository tests (phpunit/composer test) can run",
-  }),
-});
-
 function probeCommandOk(command, args) {
   try {
     const spec = commandSpawnSpec(command, args, { env: process.env });
@@ -1426,11 +1411,11 @@ function probeCommandOk(command, args) {
   }
 }
 
-function languageTestToolchainEntries(detectedLanguages) {
+function languageTestToolchainEntries(selectedLanguages) {
   const out = [];
-  for (const language of detectedLanguages || []) {
-    const spec = LANGUAGE_TEST_TOOLCHAINS[language];
-    if (!spec) continue;
+  for (const language of selectedLanguages || []) {
+    const spec = ATLAS_LANGUAGE_TEST_TOOLCHAINS[language];
+    if (!spec || spec.managed) continue;
     const ok = probeCommandOk(spec.probe[0], spec.probe.slice(1));
     out.push({
       language,
@@ -1444,52 +1429,45 @@ function languageTestToolchainEntries(detectedLanguages) {
 }
 
 function testToolRuntime(projectRoot, posseRoot, {
-  requirePython = false,
-  assumeRepoPython = false,
-  detectedLanguages = null,
-  dryRun = false,
+  selectedLanguages = null,
+  pythonTestToolInstall = null,
 } = {}) {
-  const requirePythonRuntime = requirePython || assumeRepoPython;
-  const managedPython = requirePythonRuntime
-    ? inspectPythonProject(projectRoot, { posseRoot, assumePython: assumeRepoPython })
-    : null;
-  const python = !requirePythonRuntime
+  const pythonSelected = (selectedLanguages || []).includes("python");
+  const managedPython = pythonSelected ? inspectPythonProject(projectRoot, { posseRoot }) : null;
+  const sharedPython = pythonSelected ? inspectManagedPythonTestToolchain(posseRoot) : null;
+  const python = !pythonSelected
     ? null
-    : (managedPython.present && managedPython.ok
+    : (managedPython?.present && managedPython.ok
       ? { command: managedPython.python, args: [] }
-      : resolvePythonCommand(posseRoot || projectRoot));
-  // Plan mode: the pending python-environment install repairs both a missing
-  // interpreter (managed CPython download) and missing pytest, so neither
-  // should fail the plan.
-  const pendingPythonRepair = dryRun && managedPython?.present && !managedPython.ok;
-  // pytest is only a requirement when the project repo itself is a python
-  // project. requirePython alone can be true just because the posse root
-  // ships helper requirements — a JS-only repo must not fail on system
-  // python lacking pytest (nothing ever installs it there).
-  const repoNeedsPytest = managedPython?.present === true;
+      : (sharedPython?.ready ? { command: sharedPython.python, args: [] } : null));
+  // The selected-language install owns the shared runner. Project manifests
+  // may add a project venv, which retains pytest so it can execute against its
+  // isolated dependencies.
+  const pendingPythonRepair = pythonTestToolInstall?.status === "dry-run";
   let pytest = null;
-  if (repoNeedsPytest) {
+  if (pythonSelected) {
     if (python && probeCommandOk(python.command, [...python.args, "-m", "pytest", "--version"])) {
       pytest = { ok: true, message: "python -m pytest available" };
     } else if (pendingPythonRepair) {
-      pytest = { ok: true, message: "pytest will be installed into the managed Python runtime" };
+      pytest = { ok: true, message: "pytest will be installed by the selected Python language toolchain" };
     } else {
-      pytest = { ok: false, message: "python -m pytest is not runnable; posse doctor installs it into the managed Python runtime" };
+      pytest = { ok: false, message: "python -m pytest is not runnable; posse doctor installs the shared selected-language test toolchain" };
     }
   }
-  const languages = languageTestToolchainEntries(detectedLanguages);
-  const pythonOk = !requirePythonRuntime
+  const languages = languageTestToolchainEntries(selectedLanguages);
+  const pythonOk = !pythonSelected
     || pendingPythonRepair
-    || Boolean(python && (!repoNeedsPytest || pytest?.ok));
+    || Boolean(python && pytest?.ok);
   return {
     ok: Boolean(process.execPath) && pythonOk && languages.every((entry) => entry.ok),
     javascript: { ok: Boolean(process.execPath), command: process.execPath },
     python: {
       ok: pythonOk,
-      required: requirePythonRuntime,
+      required: pythonSelected,
       command: python?.command || null,
       args: python?.args || [],
       pytest,
+      install: pythonTestToolInstall,
     },
     languages,
   };
@@ -1509,7 +1487,9 @@ function testToolEntries(test_tools) {
       present: true,
       label: "test python",
       ok: test_tools.python.ok,
-      status: test_tools.python.ok ? "ok" : "failed",
+      status: test_tools.python.ok
+        ? (test_tools.python.install?.status || "ok")
+        : "failed",
       message: [
         test_tools.python.command || "python unavailable",
         test_tools.python.pytest?.message || "",
@@ -1675,13 +1655,13 @@ export async function ensureBootDependencies(input = {}) {
   // verdict: the caller only cares whether the TARGET project became runnable.
   const includePosseRoot = input.includePosseRoot !== false;
 
-  // Detect the repo's enabled SCIP/source languages once: the SCIP installer,
-  // the python-environment step, and the test-toolchain checks all key off it.
+  // Selection owns installation-level indexers and test runners. Repository
+  // source detection only identifies which project toolchains are needed.
   const scipEnabled = scipModeEnabled(input.scipMode);
-  const neededLanguages = scipEnabled && (includeScip || includeTestTools || includePython)
+  const selectedLanguages = normalizeScipLanguages(input.scipLanguages);
+  const neededLanguages = scipEnabled && (includeScip || includePython)
     ? neededScipLanguages({ projectDir, posseRoot, languages: input.scipLanguages })
     : null;
-  const pythonLanguageEnabled = Boolean(neededLanguages?.includes("python"));
   opts.neededLanguages = neededLanguages;
 
   if (includeNode) {
@@ -1694,18 +1674,12 @@ export async function ensureBootDependencies(input = {}) {
   }
 
   if (includePython) {
-    // A repo qualifies when it carries any Python project manifest, or when
-    // the enabled SCIP environments detected python sources at all (so a
-    // marker-less python repo still gets an interpreter + pytest). Posse
-    // itself needs no Python environment. Either way only while Python is
-    // one of the chosen languages: a deselected Python must never download
-    // CPython because some tool config (a linter's pyproject.toml) sits in
-    // the repo. No saved choice means the defaults, which include Python.
-    const pythonChosen = normalizeScipLanguages(input.scipLanguages).includes("python");
+    // Project environments are only for project manifests and dependencies.
+    // A bare .py file uses the installation-level selected-language runtime.
+    const pythonChosen = selectedLanguages.includes("python");
     const pythonRoots = uniqueByPath([
-      { root: projectDir, label: "repo python", assumePython: pythonLanguageEnabled },
-    ]).filter((entry) => entry.assumePython
-      || (pythonChosen && listPythonProjectManifests(entry.root).length > 0));
+      { root: projectDir, label: "repo python" },
+    ]).filter((entry) => pythonChosen && listPythonProjectManifests(entry.root).length > 0);
     for (const entry of pythonRoots) python.push(await ensureDependencyEntry(entry, ensurePythonProject, opts));
   }
 
@@ -1762,7 +1736,7 @@ export async function ensureBootDependencies(input = {}) {
 
   if (includeScip) {
     if (scipEnabled) {
-      const scipLanguages = neededLanguages;
+      const scipLanguages = selectedLanguages;
       if (scipLanguages && scipLanguages.length === 0) {
         scip = { ok: true, skipped: "no SCIP source languages detected", results: [] };
       } else {
@@ -1770,7 +1744,7 @@ export async function ensureBootDependencies(input = {}) {
         try {
           scip = await installScipLanguageDependencies({
             posseRoot,
-            languages: scipLanguages || input.scipLanguages,
+            languages: scipLanguages,
             dryRun,
             timeoutMs: opts.timeoutMs,
             onProgress: (message) => opts.onProgress?.(prefixScipDependencyProgress(message)),
@@ -1788,12 +1762,24 @@ export async function ensureBootDependencies(input = {}) {
     }
   }
 
+  let pythonTestToolInstall = null;
+  if (includeTestTools && selectedLanguages.includes("python")) {
+    pythonTestToolInstall = await withDependencyInstallLock(posseRoot, () => ensureManagedPythonTestToolchain({
+      posseRoot,
+      dryRun,
+      timeoutMs: opts.timeoutMs,
+      onProgress: (message) => opts.onProgress?.(`test python: ${message}`),
+    }), {
+      dryRun,
+      waitMs: opts.timeoutMs,
+      onProgress: (message) => opts.onProgress?.(`test python: ${message}`),
+    });
+  }
+
   const test_tools = includeTestTools
     ? testToolRuntime(projectDir, posseRoot, {
-      requirePython: python.some((entry) => entry?.present !== false),
-      assumeRepoPython: pythonLanguageEnabled,
-      detectedLanguages: neededLanguages,
-      dryRun,
+      selectedLanguages,
+      pythonTestToolInstall,
     })
     : { ok: true, skipped: "disabled" };
   const allResults = [

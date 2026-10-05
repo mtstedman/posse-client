@@ -38,6 +38,8 @@ import {
 import { resolveRepositoryVerificationPlan } from "../../../verification/functions/verification-plan.js";
 import { withLineagePathsRestored } from "../../../verification/functions/lineage-tree.js";
 import {
+  TEST_EXECUTION_RECEIPT_KIND,
+  TEST_EXECUTION_RECEIPT_MIME_TYPE,
   TEST_SCRIPT_NO_VERIFICATION_REASON,
   VERIFICATION_DEPENDENCY_LOCK_INVALID,
 } from "../../../../catalog/verification.js";
@@ -50,10 +52,12 @@ import {
   discoverUnitTestCapability,
   runUnitTestFiles,
 } from "../../../../shared/tools/functions/toolkit/unit-test-runner.js";
+import { testExecutionCounts } from "../../../../shared/tools/functions/toolkit/test-output-counts.js";
 export { normalizeFailureFingerprintText } from "./test-failure-evidence.js";
+export { testExecutionCounts };
 
-const RECEIPT_KIND = "deterministic_test_execution";
-const RECEIPT_MIME_TYPE = "application/vnd.posse.test-execution+json";
+const RECEIPT_KIND = TEST_EXECUTION_RECEIPT_KIND;
+const RECEIPT_MIME_TYPE = TEST_EXECUTION_RECEIPT_MIME_TYPE;
 const RECEIPT_SCHEMA_VERSION = 1;
 const MAX_STREAM_CHARS = 256 * 1024;
 const MAX_EVIDENCE_OUTPUT_CHARS = 1600;
@@ -1075,17 +1079,25 @@ export function operationalCommandApprovalRequest(command) {
 export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
   if (!["dev", "fix"].includes(String(job?.job_type || ""))) return null;
   if (String(payload?.task_mode || "code") !== "code") return null;
-  if (Array.isArray(payload?.tests_to_run)) {
-    if (!cwd) return null;
-    const capability = discoverUnitTestCapability({ projectDir: cwd });
-    const unitTestPaths = [...new Set(payload.tests_to_run
+  const declaredCommand = typeof payload?.test_command === "string"
+    ? payload.test_command.trim()
+    : "";
+  const capability = Array.isArray(payload?.tests_to_run) && cwd
+    ? discoverUnitTestCapability({ projectDir: cwd })
+    : null;
+  const unitTestPaths = Array.isArray(payload?.tests_to_run)
+    ? [...new Set(payload.tests_to_run
       .map((value) => String(value || "").trim().replace(/\\/g, "/"))
-      .filter((value) => capability.available && capability.files.includes(value)))]
-      .slice(0, 24);
-    // Invalid or unresolved candidates are intentionally dropped. An explicit
-    // planner list that resolves empty means "no runnable unit test", not
-    // permission to substitute a broad repository/deployment gate.
-    if (unitTestPaths.length === 0) return null;
+      .filter((value) => capability?.available && capability.files.includes(value)))]
+      .slice(0, 24)
+    : [];
+  // Invalid or unresolved candidates are intentionally dropped. An explicit
+  // planner list that resolves empty means "no runnable unit test", not
+  // permission to substitute a broad repository/deployment gate. The plan
+  // compiler writes the list on every task, so an empty one must still leave
+  // the planner's own test_command in force.
+  if (Array.isArray(payload?.tests_to_run) && unitTestPaths.length === 0 && !declaredCommand) return null;
+  if (unitTestPaths.length > 0) {
     const command = unitTestPaths.join(", ");
     return {
       schema_version: RECEIPT_SCHEMA_VERSION,
@@ -1102,9 +1114,7 @@ export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {
       unit_test_paths: unitTestPaths,
     };
   }
-  const command = typeof payload?.test_command === "string"
-    ? payload.test_command.trim()
-    : "";
+  const command = declaredCommand;
   if (!command && cwd) {
     const verificationPlan = resolveRepositoryVerificationPlan({
       projectDir: cwd,
@@ -2114,40 +2124,6 @@ function compactOutput(receipt) {
     .filter(Boolean)
     .join("\n")
     .slice(-MAX_EVIDENCE_OUTPUT_CHARS);
-}
-
-// Parse runner summaries, never assertions about success in arbitrary prose.
-// Unknown formats retain their exit-code result with explicitly unknown counts.
-export function testExecutionCounts(output = "") {
-  const text = String(output).replace(/\x1b\[[0-9;]*m/g, "");
-  const node = [...text.matchAll(/^\s*(?:#|ℹ) tests\s+(\d+)\s*$/gm)];
-  if (node.length) {
-    return {
-      total: node.reduce((sum, match) => sum + Number(match[1]), 0),
-      skipped: [...text.matchAll(/^\s*(?:#|ℹ) (?:skipped|todo)\s+(\d+)\s*$/gm)]
-        .reduce((sum, match) => sum + Number(match[1]), 0),
-    };
-  }
-  const jest = [...text.matchAll(/^\s*Tests:\s*(.*?)(\d+) total\s*$/gm)];
-  if (jest.length) return {
-    total: jest.reduce((sum, match) => sum + Number(match[2]), 0),
-    skipped: jest.reduce((sum, match) => sum + [...match[1].matchAll(/(\d+) (?:skipped|todo)/g)]
-      .reduce((count, skip) => count + Number(skip[1]), 0), 0),
-  };
-  const cargo = [...text.matchAll(/^\s*test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;/gm)];
-  if (cargo.length) return {
-    total: cargo.reduce((sum, match) => sum + Number(match[1]) + Number(match[2]) + Number(match[3]), 0),
-    skipped: cargo.reduce((sum, match) => sum + Number(match[3]), 0),
-  };
-  const php = /\bTests:\s*(\d+),\s*Assertions:\s*\d+/.exec(text);
-  if (php) return { total: Number(php[1]), skipped: Number(/Skipped:\s*(\d+)/.exec(text)?.[1] || 0) };
-  // Go's package summaries do not report case counts. A testless package
-  // cannot erase evidence from another package in the same `go test ./...`.
-  if (/^\s*(?:ok|FAIL)\s+\S+|^\s*--- (?:PASS|FAIL|SKIP):/m.test(text)) return null;
-  if (/^\s*(?:No tests (?:executed|found|collected)[.!]?|No tests found, exiting with code 0|no tests ran in .+|\?\s+\S+\s+\[no test files\])\s*$/mi.test(text)) {
-    return { total: 0, skipped: 0 };
-  }
-  return null;
 }
 
 export function testExecutionDelta(baseline, postChange) {

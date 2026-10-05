@@ -398,6 +398,7 @@ export const EVENT_TYPES = Object.freeze({
   ATLAS_FRESHNESS_GATE_DEFERRED: "atlas.freshness_gate.deferred",
   ATLAS_FRESHNESS_GATE_DEGRADED: "atlas.freshness_gate.degraded",
   ATLAS_WARM_COMPLETED: "atlas.warm_completed",
+  ATLAS_WARM_DEFERRED: "atlas.warm_deferred",
   ATLAS_WARM_HOST_RETIRED: "atlas.warm_host_retired",
   ATLAS_SCIP_INGEST_STARTED: "atlas.scip.ingest.started",
   ATLAS_SCIP_INGEST_COMPLETED: "atlas.scip.ingest.completed",

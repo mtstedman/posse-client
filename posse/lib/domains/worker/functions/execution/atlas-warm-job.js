@@ -16,8 +16,10 @@ import {
   logEvent,
   refreshWorkItemStatus,
   settleWaitingLaneAtlas,
+  setJobError,
   setJobResult,
   storeArtifact,
+  updateJobPayload,
 } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { ATLAS_WARM_JOB_POLICY } from "../../../atlas/functions/v2/contracts/jobs.js";
@@ -92,6 +94,13 @@ const ATLAS_WARM_DISABLED_REQUEUE_DELAY_MS = 10 * 60 * 1000;
 // A warm whose daemon host was retired mid-request goes back to the queue
 // briefly deferred, so the replacement host (or the next boot) runs it.
 const ATLAS_WARM_HOST_RETIRED_REQUEUE_DELAY_MS = 5_000;
+
+// A warm that timed out waiting for the ledger SQLite gate did no work. It goes
+// back to the queue as the same row (later warm events for its target coalesce
+// into it) after this backoff, and fails once it has been deferred this many
+// times, so a starved gate surfaces instead of looping or reading as success.
+const ATLAS_WARM_GATE_BUSY_REQUEUE_DELAY_MS = 60_000;
+const ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS = 3;
 
 function clampPaths(paths, max = 100) {
   if (!Array.isArray(paths)) return { paths: [], truncated: false };
@@ -211,8 +220,11 @@ export function __testAtlasWarmRuntimeBudgetMs(purpose, config = {}, runtimeBudg
 // another (~2x wall-clock) and keep a worker occupied long enough to recreate
 // the starvation this is meant to reduce.
 //   - wi / wi-cleanup: give up fast so cheap views never queue behind bulk work.
-//   - main-* / embeddings / scip-*: a bounded fair-share wait; on timeout the
-//     warm skips and the scheduler re-enqueues it, rather than holding a worker.
+//   - main-* / embeddings / scip-*: a bounded fair-share wait.
+// On timeout the warm releases its worker and goes back to the queue as the
+// same job, deferred and without an attempt penalty, until it has been deferred
+// ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS times; then it fails (see
+// deferAtlasWarmAfterGateBusy).
 const ATLAS_WARM_SHORT_GATE_WAIT_MS = 30_000;
 const ATLAS_WARM_BULK_GATE_WAIT_MS = 3 * 60_000;
 export function atlasWarmGateWaitMs(purpose) {
@@ -514,6 +526,9 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
     if (requeueAtlasWarmAfterHostRetire(worker, job, attempt.attempt.id, startTime, leaseToken, err)) {
       return;
     }
+    if (deferAtlasWarmAfterGateBusy(worker, job, attempt.attempt.id, startTime, leaseToken, err)) {
+      return;
+    }
     const msg = err?.message || String(err);
     const verbose = isVerboseAtlasErrors();
     worker.emit(job.id, `${C.yellow}[atlas] warm job #${job.id} failed: ${msg}${C.reset}`);
@@ -576,6 +591,81 @@ export function requeueAtlasWarmAfterHostRetire(worker, job, attemptId, startTim
   if (released && job.work_item_id) refreshWorkItemStatus(job.work_item_id);
   try {
     worker.emit(job.id, `${C.dim}[atlas] warm job #${job.id} interrupted: daemon host retired — ${released ? "requeued" : "lease already released"}${C.reset}`);
+  } catch { /* emit is best-effort */ }
+  return true;
+}
+
+function atlasWarmGateBusyDeferralCount(payload = {}) {
+  const value = Number(payload?._atlas_warm_gate_deferrals || 0);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/**
+ * A warm that timed out waiting for the ledger SQLite gate did no work, so it
+ * must not be recorded as succeeded. Requeue the same job (later warm events for
+ * its target coalesce into it) behind a backoff without an attempt penalty; once
+ * it has been deferred ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS times, fail it with
+ * reason sqlite_gate_busy. Returns true when it handled the error.
+ * @param {any} worker
+ * @param {any} job
+ * @param {number} attemptId
+ * @param {number} startTime
+ * @param {string} leaseToken
+ * @param {any} err
+ */
+export function deferAtlasWarmAfterGateBusy(worker, job, attemptId, startTime, leaseToken, err) {
+  if (!isAtlasWarmGateBusy(err)) return false;
+  const payload = parseJobPayload(job) || {};
+  const purpose = String(payload.purpose || "wi");
+  const priorDeferrals = atlasWarmGateBusyDeferralCount(payload);
+  const gateWaitMs = atlasWarmGateWaitMs(purpose);
+
+  if (priorDeferrals >= ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS) {
+    const errorText = `sqlite_gate_busy: ATLAS ledger write gate still busy after ${priorDeferrals} deferrals (${err?.message || String(err)})`;
+    completeAttempt(attemptId, {
+      status: "failed",
+      duration_ms: nowMs() - startTime,
+      error_text: errorText,
+    });
+    setJobError(job.id, errorText);
+    const released = worker._releaseLease(job, leaseToken, "failed");
+    if (released && job.work_item_id) refreshWorkItemStatus(job.work_item_id);
+    try {
+      worker.emit(job.id, `${C.yellow}[atlas] warm #${job.id} (${purpose}) failed — ledger write gate still busy after ${priorDeferrals} deferrals; view left STALE until the next warm${C.reset}`);
+    } catch { /* emit is best-effort */ }
+    return true;
+  }
+
+  const deferrals = priorDeferrals + 1;
+  const readyAt = new Date(Date.now() + ATLAS_WARM_GATE_BUSY_REQUEUE_DELAY_MS).toISOString();
+  job.payload_json = JSON.stringify({ ...payload, _atlas_warm_gate_deferrals: deferrals });
+  updateJobPayload(job.id, job.payload_json);
+  completeAttempt(attemptId, {
+    status: "interrupted",
+    duration_ms: nowMs() - startTime,
+    error_text: `ATLAS ledger write gate busy after ${gateWaitMs}ms — warm deferred`,
+  });
+  logEvent({
+    work_item_id: job.work_item_id,
+    job_id: job.id,
+    attempt_id: attemptId,
+    event_type: EVENT_TYPES.ATLAS_WARM_DEFERRED,
+    actor_type: EVENT_ACTORS.ATLAS,
+    message: `ATLAS warm (${purpose}) deferred: ledger write gate busy after ${gateWaitMs}ms (${deferrals}/${ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS})`,
+    event_json: JSON.stringify({
+      purpose,
+      reason: "sqlite_gate_busy",
+      gate_wait_ms: gateWaitMs,
+      deferrals,
+      max_deferrals: ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS,
+      ready_at: readyAt,
+      delay_ms: ATLAS_WARM_GATE_BUSY_REQUEUE_DELAY_MS,
+    }),
+  });
+  const released = worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId, readyAt });
+  if (released && job.work_item_id) refreshWorkItemStatus(job.work_item_id);
+  try {
+    worker.emit(job.id, `${C.yellow}[atlas] warm #${job.id} (${purpose}) deferred — ledger write gate busy after ${gateWaitMs}ms; ${released ? `requeued (${deferrals}/${ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS})` : "lease already released"}; view left STALE until it runs${C.reset}`);
   } catch { /* emit is best-effort */ }
   return true;
 }
@@ -798,18 +888,10 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
         outcome: "sqlite_gate_busy",
         error: errorSummary(err),
       });
-      // A gate-busy deferral is NOT a no-op: the warm did no work, so the view
-      // is now STALE (retrieval keeps serving the last-built view, but new
-      // commits are not reflected). This was previously silent — the job
-      // reported "succeeded" with 0 updates and nothing surfaced — which let a
-      // starved warm gate hide for dozens of jobs. Surface it on the job log
-      // like the hard-failure path below, without failing the job (maxAttempts
-      // is 1; failing would just dead-letter a transient contention).
-      try {
-        const gateWaitMs = atlasWarmGateWaitMs(purpose);
-        worker.emit(jobId, `${C.yellow}[atlas] warm #${jobId} (${purpose}) deferred — ledger write gate busy after ${gateWaitMs}ms; view left STALE until the next warm acquires the gate${C.reset}`);
-      } catch { /* emit is best-effort */ }
-      return atlasWarmSkippedResult({ payload, purpose, paths, reason: "busy", message });
+      // The warm did no work, so the view is STALE. Rethrow so the executor
+      // defers the job (deferAtlasWarmAfterGateBusy) instead of recording a
+      // no-op result as succeeded.
+      throw err;
     }
     if (err?._killReason || err?.code === "THREAD_ABORTED" || err?.name === "AbortError"
       || err?.code === "DAEMON_ABORTED" || err?.code === "DAEMON_TRANSPORT_GONE") {

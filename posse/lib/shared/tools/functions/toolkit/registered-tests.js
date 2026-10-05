@@ -9,7 +9,9 @@ import { getDb } from "../../../storage/functions/index.js";
 import {
   getPythonToolchainExecutable,
   resolveManagedPythonRuntimeForProject,
+  resolveManagedPythonTestToolchain,
 } from "../../../../domains/runtime/functions/python-runtime.js";
+import { inspectManagedPythonTestToolchain } from "../../../../domains/environments/functions/python-test-toolchain.js";
 import { createWorkspaceSkipDirs } from "../../../../domains/runtime/functions/workspace-skip.js";
 import { TEST_SUBPROCESS_ENV_KEYS } from "../../../../catalog/process.js";
 import { filterProcessEnv } from "../../../platform/functions/process-env.js";
@@ -710,8 +712,10 @@ except Exception as exc:
 function resolvePythonCommand(cwd = process.cwd()) {
   const workspace = path.resolve(cwd || process.cwd());
   const managedRuntime = resolveManagedPythonRuntimeForProject({ projectDir: workspace });
+  const sharedRuntime = inspectManagedPythonTestToolchain();
   const candidates = [
     ...(managedRuntime?.ready ? [{ command: managedRuntime.python, args: [] }] : []),
+    ...(sharedRuntime.ready ? [{ command: resolveManagedPythonTestToolchain().python, args: [] }] : []),
     ...(process.platform === "win32"
       ? [
         { command: path.join(workspace, ".venv", "Scripts", "python.exe"), args: [] },

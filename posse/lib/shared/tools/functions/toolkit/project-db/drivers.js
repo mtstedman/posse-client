@@ -42,7 +42,7 @@ function resolveSqlitePath(database, projectDir) {
   return path.isAbsolute(raw) ? raw : path.resolve(projectDir || process.cwd(), raw);
 }
 
-async function executeSqlite({ connection, statement, isRead, readOnly, maxRows, projectDir }) {
+async function executeSqlite({ connection, statement, parameters, isRead, readOnly, maxRows, projectDir }) {
   const file = resolveSqlitePath(connection.database, projectDir);
   const db = new Database(file, { readonly: readOnly, fileMustExist: true });
   try {
@@ -51,14 +51,14 @@ async function executeSqlite({ connection, statement, isRead, readOnly, maxRows,
     if (isRead && stmt.reader) {
       const rows = [];
       let truncated = false;
-      for (const row of stmt.iterate()) {
+      for (const row of stmt.iterate(...parameters)) {
         if (rows.length >= maxRows) { truncated = true; break; }
         rows.push(row);
       }
       const columns = stmt.columns().map((c) => c.name);
       return { columns, rows, rowCount: rows.length, truncated };
     }
-    const info = stmt.run();
+    const info = stmt.run(...parameters);
     return {
       columns: [],
       rows: [],
@@ -72,7 +72,7 @@ async function executeSqlite({ connection, statement, isRead, readOnly, maxRows,
   }
 }
 
-async function executePostgres({ connection, statement, isRead, readOnly, maxRows, loadDriver }) {
+async function executePostgres({ connection, statement, parameters, isRead, readOnly, maxRows, loadDriver }) {
   const pg = await loadDriver("pg");
   const Client = pg.Client || pg.default?.Client;
   const client = new Client({
@@ -94,7 +94,7 @@ async function executePostgres({ connection, statement, isRead, readOnly, maxRow
     // protocol PostgreSQL rejects "multiple commands in a prepared statement",
     // making single-statement enforcement authoritative at the wire level.
     const queryText = isRead ? boundedRemoteReadStatement(statement, maxRows) : statement;
-    const result = await client.query({ text: queryText, queryMode: "extended" });
+    const result = await client.query({ text: queryText, values: parameters, queryMode: "extended" });
     if (isRead) {
       const allRows = Array.isArray(result.rows) ? result.rows : [];
       const rows = allRows.slice(0, maxRows);
@@ -107,7 +107,7 @@ async function executePostgres({ connection, statement, isRead, readOnly, maxRow
   }
 }
 
-async function executeMysql({ connection, statement, isRead, readOnly, maxRows, loadDriver }) {
+async function executeMysql({ connection, statement, parameters, isRead, readOnly, maxRows, loadDriver }) {
   const mysql = await loadDriver("mysql2/promise");
   const create = mysql.createConnection || mysql.default?.createConnection;
   const conn = await create({
@@ -122,7 +122,9 @@ async function executeMysql({ connection, statement, isRead, readOnly, maxRows, 
       await conn.query("SET SESSION TRANSACTION READ ONLY");
     }
     const queryText = isRead ? boundedRemoteReadStatement(statement, maxRows) : statement;
-    const [result, fields] = await conn.query(queryText);
+    const [result, fields] = parameters.length
+      ? await conn.execute(queryText, parameters)
+      : await conn.query(queryText);
     if (isRead && Array.isArray(result)) {
       const rows = result.slice(0, maxRows);
       const columns = (fields || []).map((f) => f.name);
@@ -150,6 +152,7 @@ async function executeMysql({ connection, statement, isRead, readOnly, maxRows, 
 export async function executeProjectDbStatement({
   connection,
   statement,
+  parameters = [],
   isRead,
   readOnly,
   maxRows = DEFAULT_MAX_ROWS,
@@ -157,7 +160,7 @@ export async function executeProjectDbStatement({
   loadDriver = loadOptionalDriver,
 }) {
   const dbType = connection?.dbType;
-  const args = { connection, statement, isRead, readOnly, maxRows, projectDir, loadDriver };
+  const args = { connection, statement, parameters, isRead, readOnly, maxRows, projectDir, loadDriver };
   switch (dbType) {
     case "sqlite": return await executeSqlite(args);
     case "postgres": return await executePostgres(args);

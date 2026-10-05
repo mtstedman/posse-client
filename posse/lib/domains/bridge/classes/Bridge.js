@@ -1,4 +1,5 @@
 import { readBridgeProviderUsage } from "../functions/provider-usage.js";
+import { formatRelayErrorLog } from "../functions/relay-error-diagnostics.js";
 import { ChangeStream } from "./ChangeStream.js";
 import { BossyLocalStream } from "./BossyLocalStream.js";
 import { LocalServer } from "./LocalServer.js";
@@ -162,7 +163,11 @@ export class Bridge {
         this.relayClient.on("operator_activity", () => this.noteOperatorActivity());
         this.relayClient.on("error", (err) => {
           try {
-            console.warn(`[posse][bridge] relay error: ${err?.message || err}`);
+            console.warn(`[posse][bridge] relay error: ${formatRelayErrorLog(err, {
+              state: this.relayClient?.status().state,
+              reconnectAttempt: this.relayClient?.reconnectAttempt,
+              reconnectScheduled: Boolean(this.relayClient?.reconnectTimer),
+            })}`);
           } catch {
             // Best-effort observability only.
           }

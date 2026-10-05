@@ -71,6 +71,7 @@ import {
   resolveClaudeExecutionMode,
 } from "./execution-mode.js";
 import { classifyClaudeCliFailure, __testClassifyClaudeCliFailure } from "./failure-classification.js";
+import { scrubClaudeChildEnv } from "./child-env.js";
 import {
   __testRunClaudeWarmupViaInteractiveCli,
   warmOauthSession,
@@ -92,35 +93,7 @@ import { buildClaudeNativeDispatchRequest, runClaudeNativeDispatch } from "./nat
 // Same cap as the Codex agent-message forwarding (codex/stream-events.js).
 const AGENT_COMMENTARY_MAX_CHARS = 2048;
 
-export { __testBuildClaudeAtlasMcpConfigPayload, __testBuildClaudeDeterministicReadMcpConfigPayload, __testClassifyClaudeCliFailure, __testExtractClaudeToolUsesFromStreamMessage, __testRunClaudeWarmupViaInteractiveCli, getClaudeInfo, getClaudeReadiness, getUsageSummary, isReady, refreshUsageSummary, warmOauthSession, warmOauthSessionAsync, warmOauthSessionInteractive };
-
-export function scrubClaudeChildEnv(childEnv = {}) {
-  delete childEnv.ANTHROPIC_API_KEY;
-  delete childEnv.CODEX_API_KEY;
-  delete childEnv.OPENAI_API_KEY;
-  delete childEnv.XAI_API_KEY;
-  delete childEnv.GITHUB_TOKEN;
-  // Force a blocking MCP attach so the gateway's tools are registered before
-  // the first inference turn. Claude 2.x connects --mcp-config servers async
-  // ("running fully async (nonblocking)") by default, so a fast first turn can
-  // be dispatched before tools/list completes — the attach-under-load race
-  // that surfaces as MCP_ATTACH_PROOF_MISSING / "No such tool available".
-  // MCP_CONNECTION_NONBLOCKING=0 makes the connection blocking. Respect an
-  // explicit operator override if one is already present.
-  // ANTHROPIC_API_KEY is deliberately stripped above: the child must keep
-  // using its OAuth credentials, not the direct API provider's key.
-  if (childEnv.MCP_CONNECTION_NONBLOCKING === undefined) {
-    childEnv.MCP_CONNECTION_NONBLOCKING = "0";
-  }
-  // Posse's current Claude surface is deliberately upfront-loaded. In print
-  // mode Claude 2.1 can still defer --mcp-config tools despite alwaysLoad, so
-  // disable tool-search deferral at the child boundary as the authoritative
-  // fallback. A future lazy database surface can opt back in explicitly.
-  if (childEnv.ENABLE_TOOL_SEARCH === undefined) {
-    childEnv.ENABLE_TOOL_SEARCH = "false";
-  }
-  return childEnv;
-}
+export { __testBuildClaudeAtlasMcpConfigPayload, __testBuildClaudeDeterministicReadMcpConfigPayload, __testClassifyClaudeCliFailure, __testExtractClaudeToolUsesFromStreamMessage, __testRunClaudeWarmupViaInteractiveCli, getClaudeInfo, getClaudeReadiness, getUsageSummary, isReady, refreshUsageSummary, scrubClaudeChildEnv, warmOauthSession, warmOauthSessionAsync, warmOauthSessionInteractive };
 
 // Claude Code defers MCP schemas behind ToolSearch by default. Posse's isolated
 // workers intentionally do not expose that ambient discovery surface, so every
@@ -855,6 +828,9 @@ export async function callProvider(promptText, {
     if (providerHomeEnv?.isolated && providerHomeEnv.envVar) {
       childEnv[providerHomeEnv.envVar] = providerHomeEnv.home;
     }
+    // Re-scrub after composing helper-provided environment fragments so no
+    // later layer can accidentally switch Claude Code from OAuth to API-key auth.
+    scrubClaudeChildEnv(childEnv);
 
     if (selectedExecutionMode === CLAUDE_EXECUTION_MODE_INTERACTIVE) {
       void (async () => {

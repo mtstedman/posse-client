@@ -9,6 +9,8 @@ import { AgentDefinitionStore } from "../../agents/classes/AgentDefinitionStore.
 import { AgentRuntime } from "../../agents/classes/AgentRuntime.js";
 import { SkillRegistry } from "./SkillRegistry.js";
 import { ScriptToolRegistry } from "./ScriptToolRegistry.js";
+import { SqlCapabilityRegistry } from "./SqlCapabilityRegistry.js";
+import { PromptToolRegistry } from "./PromptToolRegistry.js";
 import { verifyMcpOAuthToken, bootConfigFromMcpOAuthClaims } from "../../integrations/functions/deterministic-mcp/oauth-token.js";
 import { automationDbPath, automationSocketPath, ensureAutomationOperatorToken, repositoryID } from "../functions/paths.js";
 import { automationBuildIdentity, automationOwnerLaunch } from "../functions/owner-identity.js";
@@ -23,8 +25,10 @@ export class AutomationOwner {
     this.service = service || new AutomationService(this.store);
     this.registry = new SkillRegistry(this.service);
     this.scripts = new ScriptToolRegistry(this.service, scriptsDir ? { dir: scriptsDir } : {});
-    this.agents = new AgentSessionRegistry(this.service, this.registry, this.scripts);
-    this.agentDefinitions = new AgentDefinitionStore();
+    this.sqlCapabilities = new SqlCapabilityRegistry(this.service);
+    this.promptTools = new PromptToolRegistry(this.store);
+    this.agents = new AgentSessionRegistry(this.service, this.registry, this.scripts, this.sqlCapabilities, this.promptTools);
+    this.agentDefinitions = new AgentDefinitionStore({ store: this.store });
     this.agentRuntime = new AgentRuntime({ definitions: this.agentDefinitions, client: { request: async (operation, args) => this.dispatchOperator(operation, args) } });
     this.agentSchedules = new AgentScheduleRegistry(this.store, this.agentRuntime, this.agentDefinitions);
     this.socketPath = socketPath; this.operatorToken = operatorToken || ensureAutomationOperatorToken(); this.tickMs = tickMs;
@@ -125,6 +129,11 @@ export class AutomationOwner {
       case "agent_schedule.resume": return this.agentSchedules.setEnabled(args.id, true);
       case "agent_schedule.remove": return this.agentSchedules.remove(args.id);
       case "agent_schedule.run_now": return this.agentSchedules.runNow(args.id);
+      case "agent.definition.list": return this.agentDefinitions.list();
+      case "agent.definition.get": return this.agentDefinitions.load(args.name);
+      case "agent.definition.create": return this.agentDefinitions.create(args.name);
+      case "agent.definition.save": return this.agentDefinitions.save(args.definition, { create: args.create === true });
+      case "agent.definition.remove": return this.agentDefinitions.remove(args.name);
       case "script.list": return this.scripts.list();
       case "script.show": return this.scripts.show(args.name, { repoPath: args.repo_path });
       case "script.create": return this.scripts.create(args.spec);
@@ -132,6 +141,15 @@ export class AutomationOwner {
       case "script.grant": return this.scripts.grant(args.name, { repoPath: args.repo_path, standalone: args.standalone === true, roles: args.roles, unattended: args.unattended === true });
       case "script.secret.set": return this.scripts.setSecret(args.tool, args.name, args.value);
       case "script.secret.unset": return this.scripts.unsetSecret(args.tool, args.name);
+      case "sql_capability.list": return this.sqlCapabilities.list();
+      case "sql_capability.show": return this.sqlCapabilities.status(args.name);
+      case "sql_capability.save": return this.sqlCapabilities.save(args.definition);
+      case "sql_capability.test": return this.sqlCapabilities.test(args.name, args.input || {});
+      case "sql_capability.grant": return this.sqlCapabilities.grant(args.name, { roles: args.roles });
+      case "prompt_tool.list": return this.promptTools.list();
+      case "prompt_tool.show": return this.promptTools.status(args.name);
+      case "prompt_tool.save": return this.promptTools.save(args.definition);
+      case "prompt_tool.remove": return this.promptTools.remove(args.name);
       case "script.secret.status": return this.scripts.secretStatus(this.scripts.load(args.tool).manifest);
       case "agent.turn.begin": return this.agents.begin(args);
       case "agent.turn.invoke": return this.agents.invoke(args);
@@ -186,6 +204,6 @@ function timingSafeEqual(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function safeError(error) {
-  const allowed = new Set(["response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed", "script_invalid", "script_not_found", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable", "agent_invalid", "agent_not_found", "agent_scope_mismatch", "agent_session_invalid", "agent_session_not_found", "agent_session_mismatch", "agent_session_busy", "agent_turn_changed", "agent_confirmation_required", "agent_confirmation_missing", "agent_tool_failed"]);
+  const allowed = new Set(["response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed", "script_invalid", "script_not_found", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable", "sql_capability_invalid", "sql_capability_not_found", "sql_capability_unavailable", "prompt_tool_invalid", "prompt_tool_not_found", "prompt_tool_result_missing", "prompt_tool_result_unknown", "agent_invalid", "agent_not_found", "agent_scope_mismatch", "agent_session_invalid", "agent_session_not_found", "agent_session_mismatch", "agent_session_busy", "agent_turn_changed", "agent_confirmation_required", "agent_confirmation_missing", "agent_tool_failed"]);
   return { code: allowed.has(error?.code) ? error.code : "automation_error", message: allowed.has(error?.code) ? error.message : "Automation request failed; inspect local diagnostics" };
 }

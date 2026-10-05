@@ -1138,7 +1138,9 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
       question_id: questionId,
       question_generation: generation,
       choice_id: choiceId,
-      ...(question.handler === "git_push" ? { decline: choiceId === "decline" } : {}),
+      // Only Decline carries the flag; Push omits it (the transition
+      // validator rejects a decline key on any other choice).
+      ...(question.handler === "git_push" && choiceId === "decline" ? { decline: true } : {}),
       ...(question.owner_delivery ? {
         owner_action: canonicalHumanGateAction(
           humanInputChoiceFromAnswer(choiceId, humanInputChoicesForPayload(question.payload)) || choiceId,

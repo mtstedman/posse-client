@@ -60,6 +60,7 @@ import {
   mergeVerificationReviewGateState,
   mergeVerificationReviewRequirement,
 } from "./merge-verification-review.js";
+import { latestImplementationCommit, postChangeReceiptsAtCommit } from "./verification-receipts.js";
 import {
   activeWorkItemDispositionGates,
   crossWiUpstreamDispositionGateSpec,
@@ -1350,7 +1351,9 @@ function holdForMergeVerificationReview(workItem) {
   const existing = mergeVerificationReviewGateState(workItem.id, { waivedJobIds: requirement.waivedJobIds });
   if (existing?.approved) return null;
   if (existing?.holds) return existing;
-  const gate = createJob(mergeVerificationReviewGateJobSpec(workItem, requirement));
+  const passedChecks = postChangeReceiptsAtCommit(workItem.id, latestImplementationCommit(workItem.id))
+    .filter((receipt) => receipt.status === "passed");
+  const gate = createJob(mergeVerificationReviewGateJobSpec(workItem, requirement, { passedChecks }));
   if (!gate?.id) return null;
   // Parked like a push offer: answered out of band (bridge, CLI, review),
   // never leased into a prompt by the merge pass that opened it.

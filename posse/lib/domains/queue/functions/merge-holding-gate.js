@@ -1,9 +1,12 @@
 // The gate that holds a completed work item out of automatic merge.
 //
-// Two callers must agree on it: authorizeWorkItemAutoMerge (queue-store.js)
-// refuses the merge, and workItemMergeParking (file-locks.js) takes the work
-// item out of the work-item order as "parked until an operator acts". Each
-// used to carry its own copy of the query, and only the authorize copy knew
+// Its callers must agree on it: authorizeWorkItemAutoMerge (queue-store.js)
+// refuses the merge, workItemMergeParking (file-locks.js) takes the work
+// item out of the work-item order as "parked until an operator acts", and
+// listEndOfRunMergeableWorkItems (workflow-auto-merge.js) leaves it out of
+// the auto-merge candidates (a candidate authorize always refuses re-ran
+// auto-merge and logged an invalidation on every job end). The first two
+// used to carry their own copies of the query, and only the authorize copy knew
 // that a merge verification review answered "fail" is spent once its
 // rejection requeue ran: a work item reworked after that answer was
 // authorized and merged automatically, yet reported as parked, so it left the

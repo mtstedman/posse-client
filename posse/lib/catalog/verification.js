@@ -8,3 +8,10 @@ export const DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY = "allow";
 // by worker/functions/helpers/baseline-test-debt.js; auto-merge reads it to
 // decide when a work item needs operator review (merge-verification-review.js).
 export const BASELINE_TEST_DEBT_PAYLOAD_KEY = "_baseline_test_debt";
+
+// Deterministic test-execution receipts: `log` artifacts with this media type
+// whose content carries this kind. Written by
+// worker/functions/helpers/test-execution-receipt.js; merge verification and
+// its review gate read them (queue/functions/verification-receipts.js).
+export const TEST_EXECUTION_RECEIPT_MIME_TYPE = "application/vnd.posse.test-execution+json";
+export const TEST_EXECUTION_RECEIPT_KIND = "deterministic_test_execution";

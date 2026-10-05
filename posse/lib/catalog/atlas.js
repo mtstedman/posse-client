@@ -91,6 +91,45 @@ export const ATLAS_SCIP_LANGUAGE_VALUES = Object.freeze(ATLAS_SCIP_LANGUAGE_OPTI
 export const ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES = Object.freeze(["typescript", "python", "php"]);
 export const VALID_ATLAS_SCIP_LANGUAGES = new Set(ATLAS_SCIP_LANGUAGE_VALUES);
 
+// Installation-level runners made available to the deterministic test tool
+// for every selected language. Python is provisioned by Posse because pytest
+// is not part of CPython; the other runners ship with their selected host
+// language toolchains. Repository manifests may add isolated dependencies,
+// but source detection must never create another copy of these base runners.
+export const ATLAS_LANGUAGE_TEST_TOOLCHAINS = Object.freeze({
+  typescript: Object.freeze({
+    probe: Object.freeze(["node", "--version"]),
+    runner: "node --test",
+    hint: "install Node.js so `node --test` can run",
+  }),
+  python: Object.freeze({
+    probe: Object.freeze(["python", "-m", "pytest", "--version"]),
+    runner: "python -m pytest",
+    managed: true,
+    hint: "run `posse doctor` to install the shared Python + pytest test toolchain",
+  }),
+  php: Object.freeze({
+    probe: Object.freeze(["php", "--version"]),
+    runner: "php tests",
+    hint: "install PHP so repository tests (phpunit/composer test) can run",
+  }),
+  go: Object.freeze({
+    probe: Object.freeze(["go", "version"]),
+    runner: "go test",
+    hint: "install Go (https://go.dev/dl) so `go test` can run",
+  }),
+  rust: Object.freeze({
+    probe: Object.freeze(["cargo", "--version"]),
+    runner: "cargo test",
+    hint: "install Rust via rustup (https://rustup.rs) so `cargo test` can run",
+  }),
+  clang: Object.freeze({
+    probe: Object.freeze(["c++", "--version"]),
+    runner: "C/C++ repository tests",
+    hint: "install a C++ compiler so C/C++ repository tests can run",
+  }),
+});
+
 export const ATLAS_SOURCE_LANGUAGE_ORDER = Object.freeze([
   "ts", "js", "py", "php", "go", "rs", "java", "kt", "cs", "c", "cpp", "sh",
 ]);

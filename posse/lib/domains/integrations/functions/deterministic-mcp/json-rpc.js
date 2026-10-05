@@ -41,8 +41,23 @@ const STRUCTURED_TOOL_FAILURE_RE = /\b(?:failed|failure|timed out|assertion|expe
 const MCP_TOOL_REJECTION_CODE_RE = /^(?:invalid(?:_|$)|missing(?:_|$)|unknown_(?:action|tool)$|gateway_action_not_allowed$|runtime_disabled$|policy(?:_|$)|not_(?:allowed|permitted|indexed|found)$|unresolved(?:_|$)|.*_conflict$|.*_limit_(?:reached|exceeded)$)/i;
 const MCP_TOOL_REJECTION_TEXT_RE = /\b(?:not allowed|not permitted|denied|rejected|blocked|invalid|required|unsupported|not indexed|unresolved|limit (?:reached|exceeded))\b/i;
 
+// run_unit_test reports what actually happened. A test that never ran is not
+// a successful call, even though it is not a product failure either.
+const UNIT_TEST_TOOL_OUTCOMES = Object.freeze({
+  passed: "succeeded",
+  product_failed: "failed",
+  timed_out: "failed",
+  infrastructure_error: "failed",
+  unavailable: "rejected",
+});
+
 function structuredToolOutcome(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.ok !== "boolean") return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (typeof value.outcome === "string" && Object.hasOwn(UNIT_TEST_TOOL_OUTCOMES, value.outcome)
+    && Object.hasOwn(value, "passed")) {
+    return UNIT_TEST_TOOL_OUTCOMES[value.outcome];
+  }
+  if (typeof value.ok !== "boolean") return null;
   if (value.ok) return "succeeded";
   const status = String(value.status || "").trim().toLowerCase();
   if (["unavailable", "skipped"].includes(status)) return "succeeded";

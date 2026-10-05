@@ -147,7 +147,7 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
     };
   }
   if (["fail", "needs_replan"].includes(verdict?.verdict)
-    || !["regression", "changed_failure", "post_only"].includes(testRun?.delta)
+    || !["regression", "changed_failure", "post_only", "infrastructure_unavailable"].includes(testRun?.delta)
     || !["failed", "timed_out"].includes(postChange?.status)) return verdict;
   const outputTail = [postChange?.stdout, postChange?.stderr]
     .map((value) => String(value || "").trim())
@@ -171,6 +171,89 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
     },
     reasons: [
       `The automatic post-change test ${testRun.delta === "regression" ? "regressed from passing at baseline" : "has an unverified failure"} (${postChange.status}); the change must be repaired before it can pass.`,
+      ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+    ],
+  };
+}
+
+// A declared test that fails after the change against a baseline that ran
+// nothing comparable cannot discriminate the change. That is a verification
+// plan problem at every risk level, not a pass.
+export function capVerdictForNonDiscriminatingTestFailure(verdict, testRun = null) {
+  const postChange = testRun?.postChange || testRun?.post_change || null;
+  if (verdict?.verdict !== "pass"
+    || testRun?.delta !== "indeterminate"
+    || testRun?.debt_only === true
+    || !["failed", "timed_out"].includes(postChange?.status)) return verdict;
+  const detail = postChange.validation_error || postChange.reason || null;
+  return {
+    ...verdict,
+    verdict: "needs_replan",
+    verification_status: "verification_plan_non_discriminating",
+    _verification_failure_class: "verification_plan_invalid",
+    _disable_internal_retry: true,
+    reasons: [
+      `The declared verification failed after the change (${postChange.status}${detail ? `: ${detail}` : ""}) and its baseline ran nothing comparable; replan verification instead of passing on prose.`,
+      ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+    ],
+  };
+}
+
+// Latest run_unit_test result per path that ran on exactly the assessed
+// commit with a clean worktree, kept only where the test failed.
+function failedUnitTestRunsAtCommit(jobId, assessedCommitHash) {
+  const requiredCommit = String(assessedCommitHash || "").trim().toLowerCase();
+  if (!/^[0-9a-f]{40,64}$/i.test(requiredCommit)) return [];
+  try {
+    const rows = getDb().prepare(`
+      SELECT detail_json
+      FROM job_observations
+      WHERE job_id = ?
+        AND observation_type = 'tool.run_unit_test'
+      ORDER BY id DESC
+      LIMIT 100
+    `).all(jobId);
+    const latestByPath = new Map();
+    for (const row of rows) {
+      let detail;
+      try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
+      const result = detail?.unit_test_result;
+      if (!result || result.executed_commit_hash !== requiredCommit || !result.path) continue;
+      if (!latestByPath.has(result.path)) latestByPath.set(result.path, result);
+    }
+    return [...latestByPath.values()].filter((result) => ["product_failed", "timed_out"].includes(result.outcome));
+  } catch {
+    return [];
+  }
+}
+
+// A unit test that an agent ran on the assessed commit and saw fail is
+// deterministic evidence that prose cannot override. It may be debt the change
+// did not cause, which only an operator can tell without a baseline, so this
+// asks instead of dispatching a repair.
+export function capVerdictForFailedUnitTestRuns(verdict, failures = []) {
+  if (verdict?.verdict !== "pass" || !Array.isArray(failures) || failures.length === 0) return verdict;
+  const rendered = failures.slice(0, 6).map((failure) => (
+    `${failure.path} (${failure.outcome}${failure.reason ? `: ${failure.reason}` : ""}${failure.exit_code != null ? `, exit ${failure.exit_code}` : ""})`
+  ));
+  return {
+    ...verdict,
+    verdict: "needs_review",
+    verification_status: "unit_test_failed",
+    _disable_internal_retry: true,
+    _assessment_confidence_review: true,
+    _deterministic_evidence: {
+      kind: "unit_test_run_failure",
+      failures: failures.slice(0, 6).map((failure) => ({
+        path: failure.path,
+        outcome: failure.outcome,
+        reason: failure.reason || null,
+        exit_code: failure.exit_code ?? null,
+        output_excerpt: failure.output_excerpt ? String(failure.output_excerpt).slice(-1600) : null,
+      })),
+    },
+    reasons: [
+      `run_unit_test failed on the assessed commit for ${rendered.join("; ")}. A pass cannot override a failing test run; pass only if the failure predates this change.`,
       ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
     ],
   };
@@ -440,10 +523,13 @@ export function capVerdictForHighRiskVerificationGap(
         && scopedVerification?.verification_commit_relation === "descendant_unchanged_scope"
       )
     );
+  // Changed-file lint may substitute for a missing recipe, never for a
+  // declared test command that produced no receipt for this commit.
   if (
     hasAssessedCommit
     && scopedOutcome?.type === "passed"
     && scopedCommitEligible
+    && !(command && !postChange)
   ) {
     return {
       ...verdict,
@@ -797,6 +883,7 @@ export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: cu
   const scopedVerification = latestScopedCheckVerification(job.id, assessedCommitHash);
   const canonicalVerification = latestCanonicalVerification(job.id, assessedCommitHash);
   prepared = capVerdictForDeterministicTestRegression(prepared, assessedReceipt);
+  prepared = capVerdictForNonDiscriminatingTestFailure(prepared, assessedReceipt);
   const canonicalOutcome = canonicalVerification?.verification_outcome
     || (canonicalVerification ? verificationOutcome({ ...canonicalVerification, phase: "post_change" }) : null);
   if (prepared.verdict === "pass" && canonicalOutcome?.type === "product_failed") {
@@ -817,6 +904,7 @@ export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: cu
     assessedCommitHash,
     canonicalVerification,
   );
+  prepared = capVerdictForFailedUnitTestRuns(prepared, failedUnitTestRunsAtCommit(job.id, assessedCommitHash));
   prepared = replanFailedBlockedRecoveryRetry(job, prepared, payload);
   prepared = replanExhaustedFixChain(job, prepared, payload);
 

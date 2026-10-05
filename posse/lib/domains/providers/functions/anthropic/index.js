@@ -284,6 +284,7 @@ export async function callProvider(promptText, {
   silent = false,
   maxTurns = null,
   maxOutputTokens = null,
+  promptCache = false,
   complexity = null,
   filesToModifyCount = null,
   deepthink = false,
@@ -563,6 +564,7 @@ export async function callProvider(promptText, {
     max_tokens: outputTokenLimit,
     messages: conversation,
     ...(systemPrompt ? { system: systemPrompt } : {}),
+    ...(promptCache ? { cache_control: { type: "ephemeral" } } : {}),
     ...(includeTools && tools.length > 0 ? { tools } : {}),
     ...(supportsEffort(modelToUse) ? { output_config: { effort } } : {}),
   });

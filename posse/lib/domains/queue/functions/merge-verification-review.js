@@ -228,8 +228,12 @@ function commandList(commands) {
   return commands.map((command) => `\`${command}\``).join(", ");
 }
 
-/** Operator-facing note: which verification was replaced or waived, and why review is needed. */
-export function mergeVerificationReviewNote(requirement) {
+/**
+ * Operator-facing note: which verification was replaced or waived, what did
+ * pass on the commit being merged, and why review is needed. `passedChecks`
+ * are passing post-change receipts on that commit (verification-receipts.js).
+ */
+export function mergeVerificationReviewNote(requirement, { passedChecks = [] } = {}) {
   const lines = [];
   const byCommand = new Map();
   for (const waiver of requirement.waivers || []) {
@@ -250,7 +254,18 @@ export function mergeVerificationReviewNote(requirement) {
   const reasons = (requirement.triggers || []).map((trigger) => (trigger.kind === "risk"
     ? `risk ${trigger.risk} on job #${trigger.job_id} (review at ${MERGE_REVIEW_MIN_RISK}+)`
     : `auth/session/security-sensitive scope (${trigger.terms.join(", ")})`));
-  if (reasons.length > 0) lines.push(`No executed check covers the change, and it needs review: ${reasons.join("; ")}.`);
+  if (reasons.length > 0) {
+    const passed = (passedChecks || []).filter((check) => check?.status === "passed" && check.command);
+    if (passed.length > 0) {
+      const commit = String(passed[0].commit_hash || "").slice(0, 12);
+      const rendered = passed.slice(0, 4)
+        .map((check) => `\`${check.command}\`${check.job_id ? ` (#${check.job_id})` : ""}`)
+        .join(", ");
+      lines.push(`Passed on the commit being merged${commit ? ` (${commit})` : ""}: ${rendered}. It still needs review: ${reasons.join("; ")}.`);
+    } else {
+      lines.push(`No executed check covers the change, and it needs review: ${reasons.join("; ")}.`);
+    }
+  }
   return lines.join(" ");
 }
 
@@ -301,8 +316,8 @@ export function mergeVerificationReviewHoldsAutoMerge(workItemId) {
 }
 
 /** createJob() arguments for the review gate of a work item. */
-export function mergeVerificationReviewGateJobSpec(workItem, requirement) {
-  const note = mergeVerificationReviewNote(requirement);
+export function mergeVerificationReviewGateJobSpec(workItem, requirement, { passedChecks = [] } = {}) {
+  const note = mergeVerificationReviewNote(requirement, { passedChecks });
   const label = `WI#${workItem.id}${workItem.title ? ` "${String(workItem.title).slice(0, 80)}"` : ""}`;
   const question = [
     `Automatic merge of ${label} stopped for review.`,
@@ -326,6 +341,7 @@ export function mergeVerificationReviewGateJobSpec(workItem, requirement) {
       waived_verifications: requirement.waivers,
       replaced_verifications: requirement.replacements,
       review_triggers: requirement.triggers,
+      ...(passedChecks.length > 0 ? { passed_checks: passedChecks.slice(0, 10) } : {}),
     }),
   };
 }

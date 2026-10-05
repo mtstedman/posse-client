@@ -6,7 +6,7 @@ export const AUTOMATION_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 export const CUSTOM_TOOLS_NAME = "custom_tools";
 // One agent custom_tools call waits this long for the automation owner.
 export const CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS = 10_000;
-export const CUSTOM_TOOLS_SOURCE_KINDS = Object.freeze(["skill", "builtin", "mcp", "script"]);
+export const CUSTOM_TOOLS_SOURCE_KINDS = Object.freeze(["skill", "builtin", "mcp", "script", "sql"]);
 export const CUSTOM_TOOLS_OPERATIONS = Object.freeze(["search", "describe", "invoke", "status", "cancel"]);
 export const CUSTOM_TOOLS_TERMINAL = Object.freeze(["succeeded", "failed", "canceled", "interrupted"]);
 export const TOOL_CUSTOM_TOOLS = Object.freeze({

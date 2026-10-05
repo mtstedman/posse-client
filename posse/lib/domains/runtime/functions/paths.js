@@ -1,7 +1,11 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { resolveManagedPythonRuntimeForProject } from "./python-runtime.js";
+import {
+  resolveManagedPythonRuntimeForProject,
+  resolveManagedPythonTestToolchain,
+} from "./python-runtime.js";
+import { inspectManagedPythonTestToolchain } from "../../environments/functions/python-test-toolchain.js";
 
 let runtimePathOverrides = {};
 let testRuntimeRoot = null;
@@ -118,7 +122,12 @@ export function envPathIncludesDir(env, dir) {
 export function buildRuntimeEnv(projectDir = null, cwd = null, baseEnv = process.env) {
   const env = { ...(baseEnv || {}) };
   const projectRoot = normalizeProjectDir(projectDir, cwd);
-  const pythonRuntime = resolveManagedPythonRuntimeForProject({ projectDir: projectRoot });
+  const projectRuntime = resolveManagedPythonRuntimeForProject({ projectDir: projectRoot });
+  const inspectedSharedRuntime = inspectManagedPythonTestToolchain();
+  const sharedRuntime = inspectedSharedRuntime.ready
+    ? { ...resolveManagedPythonTestToolchain(), ready: true }
+    : null;
+  const pythonRuntime = projectRuntime?.ready ? projectRuntime : sharedRuntime;
   if (pythonRuntime?.ready) applyManagedPythonRuntimeEnv(env, pythonRuntime);
   return env;
 }
@@ -126,9 +135,8 @@ export function buildRuntimeEnv(projectDir = null, cwd = null, baseEnv = process
 /**
  * Re-apply the runtime env to a live env (this process by default). Startup
  * builds PATH before the boot dependency step can create or rebuild the
- * managed venv, and children that inherit process.env (the frozen test
- * runner) only see that venv after this runs. Pass the primary project dir:
- * the venv is keyed on that path, so a worktree path names another runtime.
+ * managed project venv or shared selected-language test toolchain, and
+ * children that inherit process.env only see it after this runs.
  */
 export function refreshProcessRuntimeEnv(projectDir, env = process.env) {
   const next = buildRuntimeEnv(projectDir, projectDir, env);

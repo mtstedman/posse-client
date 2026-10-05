@@ -9,7 +9,11 @@ import { spawn, spawnSync } from "node:child_process";
 
 import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
 import { applyManagedPythonRuntimeEnv, envPathIncludesDir } from "../../runtime/functions/paths.js";
-import { resolveManagedPythonRuntimeForProject } from "../../runtime/functions/python-runtime.js";
+import {
+  resolveManagedPythonRuntimeForProject,
+  resolveManagedPythonTestToolchain,
+} from "../../runtime/functions/python-runtime.js";
+import { inspectManagedPythonTestToolchain } from "../../environments/functions/python-test-toolchain.js";
 import {
   DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY,
   VERIFICATION_DEPENDENCY_LOCK_INVALID,
@@ -106,7 +110,11 @@ function managedPythonRuntime(projectDir, posseRoot = null) {
       projectDir: primary,
       ...(posseRoot ? { posseRoot } : {}),
     });
-    return runtime ? { ...runtime, primary } : null;
+    if (runtime) return { ...runtime, primary };
+    const shared = inspectManagedPythonTestToolchain(posseRoot || undefined);
+    return shared.ready
+      ? { ...resolveManagedPythonTestToolchain(posseRoot || undefined), ready: true, primary }
+      : null;
   } catch {
     return null;
   }
@@ -118,9 +126,10 @@ function managedPythonRuntimeActive(projectDir, { env = process.env, posseRoot =
 }
 
 /**
- * Put the primary checkout's ready managed venv on the verifier's PATH. The
- * frozen test runner inherits process.env, so a venv created after startup
- * built PATH is invisible to it (spawn pytest ENOENT) until this runs.
+ * Put the primary checkout's ready managed venv, or the installation-level
+ * selected-language test toolchain for a marker-less repo, on the verifier's
+ * PATH. The frozen test runner inherits process.env, so a runtime created
+ * after startup is invisible to it until this runs.
  */
 export function activateManagedPythonRuntimeFromPrimary(root, { env = process.env, posseRoot = null } = {}) {
   const runtime = managedPythonRuntime(root, posseRoot);

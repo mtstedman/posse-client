@@ -59,7 +59,7 @@ export class AutomationService {
     const grant = validateGrant(value), entry = this.store.get("entries", grant.tool);
     demand(entry?.enabled && entry.digest === grant.digest, "Grant must pin an enabled tool's exact digest");
     if (entry.definition?.binding.kind === "repository") demand(grant.scope === "repository" && grant.repo_id === entry.definition.binding.repo_id, "Skill repository binding mismatch");
-    if (entry.definition?.binding.kind === "folder") {
+    if (entry.definition?.binding.kind === "folder" && entry.definition?.scope?.kind !== "global") {
       const relative = grant.repo_path && path.relative(entry.definition.binding.folder_path, path.resolve(grant.repo_path));
       demand(grant.scope === "repository" && (relative === "" || relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)), "Skill folder binding mismatch");
     }
@@ -102,6 +102,7 @@ export class AutomationService {
     if (entry.kind === "builtin") return true;
     if (entry.kind === "mcp") return this.connectors?.has?.(entry.id) === true;
     if (entry.kind === "script") return this.scripts?.available(entry) === true;
+    if (entry.kind === "sql") return this.sqlCapabilities?.available(entry) === true;
     if (!entry.definition) return false;
     const adaptersAvailable = entry.definition.capabilities.every(capability => {
       if (capability.id.startsWith("script:")) {
@@ -169,7 +170,7 @@ export class AutomationService {
     return run;
   }
   newRun(principal, entry, grant, input, fingerprint, schedule = null) {
-    const measuredZero = entry.kind === "builtin" || entry.kind === "script" || entry.definition?.runtime?.mode === "recipe";
+    const measuredZero = entry.kind === "builtin" || entry.kind === "script" || entry.kind === "sql" || entry.definition?.runtime?.mode === "recipe";
     return { id: randomUUID(), tool: entry.id, skill_id: entry.definition ? `${entry.definition.name}@${entry.definition.version}` : entry.id, principal: structuredClone(principal), grant_id: grant.id, grant_revision: grant.revision, resource_revisions: grant.resources.map(item => ({ id: item.id, revision: this.store.get("resources", item.id)?.revision })), digest: entry.digest, fingerprint, input: structuredClone(input), status: "queued", created_at: new Date(this.now()).toISOString(), started_at: null, calls: 0, turns: 0, spend_usd: measuredZero ? 0 : null, schedule_id: schedule?.id || null, schedule_revision: schedule?.revision || null, owner_generation: this.lease?.generation || null, attempt: 1, retry: structuredClone(schedule?.retry || { max_attempts: 1 }) };
   }
   start(run, entry, grant) {
@@ -225,6 +226,9 @@ export class AutomationService {
       } else if (entry.kind === "script") {
         demand(this.scripts, "Script tools are unavailable in this owner", "capability_unavailable");
         run.calls++; output = await this.scripts.run(entry, run.input, { signal: controller.signal });
+      } else if (entry.kind === "sql") {
+        demand(this.sqlCapabilities, "SQL capabilities are unavailable in this owner", "capability_unavailable");
+        run.calls++; output = await this.sqlCapabilities.execute(entry.capability, run.input);
       } else if (entry.definition.runtime.mode === "recipe") {
         const previous = {};
         for (const step of entry.definition.runtime.recipe) {

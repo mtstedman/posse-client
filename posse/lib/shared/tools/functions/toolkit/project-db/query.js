@@ -210,6 +210,7 @@ export async function execProjectDbQuery(args = {}, { projectDir = null, capabil
 
   const sql = String(args.query ?? "").trim();
   if (!sql) return "Error: No SQL query provided (pass `query`).";
+  const parameters = Array.isArray(args.parameters) ? args.parameters : [];
 
   const auth = authorizeProjectDbStatement(sql, permissions);
   if (!auth.ok) return `Error: ${auth.error}`;
@@ -228,6 +229,7 @@ export async function execProjectDbQuery(args = {}, { projectDir = null, capabil
     result = await executeProjectDbStatement({
       connection: conn,
       statement: auth.statement,
+      parameters,
       isRead: runAsRead,
       ...(loadDriver ? { loadDriver } : {}),
       readOnly,

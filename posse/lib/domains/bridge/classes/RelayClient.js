@@ -155,8 +155,8 @@ export class RelayClient extends EventEmitter {
         authenticated: false,
         last_error: err?.message || String(err),
       });
-      this.emitError(err);
       this.scheduleReconnect();
+      this.emitError(err);
       return;
     }
     this.socket = ws;
@@ -280,7 +280,19 @@ export class RelayClient extends EventEmitter {
 
   handleError(event, ws = this.socket, generation = this.connectionGeneration) {
     if (!this.ownsSocket(ws, generation)) return;
-    const err = event?.error || event;
+    let err = event?.error || event;
+    // Node's bundled undici reports a close without a close frame (1006,
+    // including a refused connection) as `new TypeError("")`, and failSocket
+    // drops the close event that follows. Say what happened so last_error is
+    // useful, keeping the original as the cause.
+    if (err && typeof err === "object" && !String(err.message ?? "").trim()) {
+      err = new Error(
+        this.connectionStatus.connected_at
+          ? "relay websocket closed abnormally without a close frame"
+          : "relay websocket could not connect (closed without a close frame)",
+        { cause: err },
+      );
+    }
     this.failSocket(ws, generation, err || new Error("relay websocket error"));
   }
 
@@ -294,9 +306,10 @@ export class RelayClient extends EventEmitter {
       connected_at: null,
       last_error: err?.message || String(err),
     });
-    this.emitError(err);
     try { ws?.close?.(); } catch {}
     this.scheduleReconnect();
+    // Emit after scheduling so listeners can report the reconnect outcome.
+    this.emitError(err);
   }
 
   emitError(err) {

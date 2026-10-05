@@ -30,10 +30,9 @@ function publicCapability(capability) {
     digest: capability.digest,
   };
 }
-
 export class AgentSessionRegistry {
-  constructor(service, skills, scripts, { now = () => Date.now() } = {}) {
-    this.service = service; this.skills = skills; this.scripts = scripts; this.store = service.store; this.now = now;
+  constructor(service, skills, scripts, sqlCapabilities = null, promptTools = null, { now = () => Date.now() } = {}) {
+    this.service = service; this.skills = skills; this.scripts = scripts; this.sqlCapabilities = sqlCapabilities; this.promptTools = promptTools; this.store = service.store; this.now = now;
   }
 
   session(id) {
@@ -43,38 +42,53 @@ export class AgentSessionRegistry {
     return session;
   }
 
-  begin({ session_id = "", definition, digest, message }) {
+  begin({ session_id = "", definition, digest, message, idempotency_key = "", prompt_tool_results = [] }) {
     const checked = validateAgentDefinition(definition);
     demand(checked.ok, checked.errors.join("; "), "agent_invalid");
     const exactDigest = agentDefinitionDigest(checked.definition);
     demand(exactDigest === digest, "Agent definition digest mismatch", "schema_mismatch");
     demand(typeof message === "string" && message.trim(), "Agent turn message is required", "invalid_request");
+    demand(typeof idempotency_key === "string" && idempotency_key.length <= 120, "Invalid agent turn idempotency key", "invalid_request");
     const id = session_id || `conv_${randomUUID()}`;
     demand(AGENT_SESSION_PATTERN.test(id), "Invalid agent session ID", "agent_session_invalid");
     const existing = this.store.get(SESSION_KIND, id);
-    let session;
+    let session, preRunContext = [];
     if (existing) {
       demand(existing.agent === checked.definition.name, `Session ${id} belongs to agent ${existing.agent}`, "agent_session_mismatch");
+      if (idempotency_key) {
+        const prior = existing.turns.find(turn => turn.idempotency_key === idempotency_key);
+        if (prior) {
+          demand((prior.source_message || prior.message) === message.trim(), "Agent turn idempotency key was reused with a different message", "idempotency_conflict");
+          return {
+            session: this.publicSession(existing), definition: structuredClone(existing.definition),
+            replay: { turn_id: prior.id, reply: prior.reply, tool_calls: structuredClone(prior.tool_calls || []), usage: structuredClone(prior.usage) },
+          };
+        }
+      }
       demand(existing.status !== "pending_confirmation", `Session ${id} is waiting for confirmation`, "agent_confirmation_required");
       demand(!this.active(existing), `Session ${id} already has an active turn`, "agent_session_busy");
       session = existing;
+      preRunContext = structuredClone(existing.pre_run_context || existing.prompt_tool_results || []);
     } else {
-      const capabilities = this.resolveCapabilities(checked.definition);
+      const resolved = this.resolveCapabilities(checked.definition, prompt_tool_results);
+      const capabilities = resolved.capabilities;
+      preRunContext = resolved.injected;
       session = {
         id, agent: checked.definition.name, agent_digest: exactDigest,
-        definition: checked.definition, capabilities, messages: [], turns: [],
+        definition: checked.definition, capabilities, pre_run_context: structuredClone(preRunContext), messages: [], turns: [],
         status: "idle", created_at: nowIso(this.now), updated_at: nowIso(this.now), active: null, pending: null,
       };
     }
+    const sourceMessage = message.trim();
     const token = randomUUID(), turnID = `turn_${randomUUID()}`;
     session.status = "active";
     session.active = {
-      token, turn_id: turnID, message: message.trim(), started_at: nowIso(this.now),
+      token, turn_id: turnID, message: sourceMessage, source_message: sourceMessage, idempotency_key, started_at: nowIso(this.now),
       expires_at_ms: this.now() + Math.max(ACTIVE_TTL_MS, checked.definition.limits.wall_seconds * 1000 + 60_000),
     };
     session.pending = null; session.updated_at = nowIso(this.now);
     this.store.put(SESSION_KIND, id, session);
-    return { session: this.publicSession(session), definition: structuredClone(session.definition), token, turn_id: turnID, messages: session.messages, capabilities: session.capabilities.map(publicCapability) };
+    return { session: this.publicSession(session), definition: structuredClone(session.definition), token, turn_id: turnID, messages: session.messages, capabilities: session.capabilities.map(publicCapability), pre_run_context: preRunContext, turn_message: sourceMessage };
   }
 
   active(session) {
@@ -127,7 +141,7 @@ export class AgentSessionRegistry {
     const token = randomUUID();
     session.status = "active";
     session.active = {
-      token, turn_id: pending.turn_id, message: pending.message, started_at: pending.started_at,
+      token, turn_id: pending.turn_id, message: pending.message, source_message: pending.source_message || pending.message, started_at: pending.started_at,
       expires_at_ms: this.now() + Math.max(ACTIVE_TTL_MS, session.definition.limits.wall_seconds * 1000 + 60_000),
     };
     session.pending = null; session.updated_at = nowIso(this.now);
@@ -139,7 +153,7 @@ export class AgentSessionRegistry {
     const session = this.assertTurn(session_id, token);
     const active = session.active;
     const turn = {
-      id: active.turn_id, message: active.message, reply: String(reply || ""), tool_calls: structuredClone(tool_calls),
+      id: active.turn_id, message: active.message, source_message: active.source_message || active.message, idempotency_key: active.idempotency_key || "", reply: String(reply || ""), tool_calls: structuredClone(tool_calls),
       usage: usage ? structuredClone(usage) : null, started_at: active.started_at, completed_at: nowIso(this.now),
     };
     session.messages.push({ role: "user", content: active.message }, { role: "assistant", content: turn.reply });
@@ -168,15 +182,30 @@ export class AgentSessionRegistry {
     };
   }
 
-  resolveCapabilities(definition) {
+  resolveCapabilities(definition, suppliedPromptResults = []) {
     const principal = principalFor(definition);
-    const capabilities = [];
+    const capabilities = [], injected = [];
+    const supplied = new Map((Array.isArray(suppliedPromptResults) ? suppliedPromptResults : []).map(item => [String(item?.name || ""), item?.result]));
     for (const name of definition.tools) {
       demand(!name.startsWith("bossy."), `${name} is a Bossy fleet tool and is not yet available in Posse agent sessions`, "capability_unavailable");
+      if (this.promptTools && this.store.get("prompt_tools", name)) {
+        const promptTool = this.promptTools.load(name);
+        demand(supplied.has(name), `The first turn requires caller-supplied result ${name}`, "prompt_tool_result_missing");
+        injected.push({ name, description: promptTool.definition.description, digest: promptTool.digest, result: structuredClone(supplied.get(name)) });
+        supplied.delete(name);
+        continue;
+      }
+      if (this.sqlCapabilities && this.store.get("sql_capabilities", name)) {
+        const sql = this.sqlCapabilities.load(name), entry = this.store.get("entries", this.sqlCapabilities.entryID(name));
+        demand(entry?.enabled && entry.digest === sql.digest, `${name} has no passing test for its current definition`, "sql_capability_unavailable");
+        capabilities.push(this.capability(entry, principal, { name, kind: "sql", description: sql.definition.description, parameters: sql.definition.input_schema, effect: "read" }));
+        continue;
+      }
       const tool = this.scripts.load(name), entry = this.store.get("entries", this.scripts.entryID(name));
       demand(entry?.enabled && entry.digest === tool.digest, `${name} has no passing test for its current version`, "script_unavailable");
       capabilities.push(this.capability(entry, principal, { name, kind: "script", description: tool.manifest.description, parameters: tool.manifest.params, effect: tool.manifest.effect }));
     }
+    demand(supplied.size === 0, `Unknown prompt tool result ${[...supplied.keys()][0]}`, "prompt_tool_result_unknown");
     for (const identity of definition.skills) {
       demand(/^[a-z][a-z0-9-]*(?:@[^@]+)?$/.test(identity), `Skill ${identity} is not a valid published skill reference`, "skill_unavailable");
       const skill = this.skills.resolveReference(identity,
@@ -190,7 +219,7 @@ export class AgentSessionRegistry {
     }
     const names = new Set();
     for (const item of capabilities) { demand(!names.has(item.name), `Agent capability name ${item.name} is ambiguous`, "agent_invalid"); names.add(item.name); }
-    return capabilities;
+    return { capabilities, injected };
   }
 
   capability(entry, principal, surface) {

@@ -138,6 +138,12 @@ Each selected indexing language gets the toolchain `posse doctor` needs:
 | Rust | Rust via rustup with the GNU toolchain and rust-analyzer; the download is checked against its published SHA-256 before it runs |
 | C / C++ | Not available on Windows (no Windows build of scip-clang) |
 
+The selected-language installation also owns the approved deterministic test
+runner. Python therefore has one shared Posse-managed Python + pytest runtime;
+finding a `.py` file does not create another repository-specific virtual
+environment. Repositories with dependency manifests still receive isolated
+environments for those declared dependencies.
+
 Before installing anything, the installer looks for an existing copy: on PATH,
 in Windows' installed-apps list and App Paths, in Python's and Git's registry
 entries, in Scoop, Chocolatey, and winget folders, and in each tool's usual

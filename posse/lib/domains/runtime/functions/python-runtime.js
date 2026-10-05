@@ -9,6 +9,7 @@ import {
 
 export const DEFAULT_POSSE_ROOT = DEFAULT_INSTALLED_POSSE_ROOT;
 export const PYTHON_RUNTIME_STAMP_NAME = ".posse-requirements.sha256";
+export const PYTHON_TEST_TOOLCHAIN_STAMP_NAME = ".posse-test-toolchain";
 
 // A repo counts as a Python project for managed-runtime provisioning when any
 // of these exist at its root. Keep this aligned with the SCIP python fileset
@@ -66,6 +67,10 @@ export function getPythonToolchainRoot(posseRoot = DEFAULT_POSSE_ROOT) {
   return path.join(managedInstallStateRoot(posseRoot || DEFAULT_POSSE_ROOT), "runtime", "python-toolchain");
 }
 
+export function getPythonTestToolchainRoot(posseRoot = DEFAULT_POSSE_ROOT) {
+  return path.join(managedInstallStateRoot(posseRoot || DEFAULT_POSSE_ROOT), "runtime", "test-tools", "python");
+}
+
 export function getPythonToolchainExecutable(posseRoot = DEFAULT_POSSE_ROOT) {
   const root = getPythonToolchainRoot(posseRoot);
   return process.platform === "win32"
@@ -99,6 +104,16 @@ export function getPythonVenvExecutable(runtimeDir) {
   return process.platform === "win32"
     ? path.join(getPythonVenvBinDir(runtimeDir), "python.exe")
     : path.join(getPythonVenvBinDir(runtimeDir), "python");
+}
+
+export function resolveManagedPythonTestToolchain(posseRoot = DEFAULT_POSSE_ROOT) {
+  const runtimeDir = getPythonTestToolchainRoot(posseRoot);
+  return {
+    runtimeDir,
+    binDir: getPythonVenvBinDir(runtimeDir),
+    python: getPythonVenvExecutable(runtimeDir),
+    stampPath: path.join(runtimeDir, PYTHON_TEST_TOOLCHAIN_STAMP_NAME),
+  };
 }
 
 function pythonExecutableWorks(python) {
@@ -145,34 +160,16 @@ export function resolveManagedPythonRuntime({
 export function resolveManagedPythonRuntimeForProject({
   projectDir = process.cwd(),
   posseRoot = DEFAULT_POSSE_ROOT,
-  assumePython = false,
 } = {}) {
   const root = path.resolve(projectDir || process.cwd());
   const manifests = listPythonProjectManifests(root);
-  if (manifests.length === 0 && !assumePython) {
-    // Marker-less repos can still own a managed runtime: doctor provisions one
-    // when the enabled SCIP environments detect python sources. Consumers that
-    // cannot re-run that detection (buildRuntimeEnv, test resolvers) find it
-    // through its stamp instead of returning null.
-    const provisioned = resolveManagedPythonRuntime({ projectDir: root, posseRoot, requirementsHash: hashText("no-manifest") });
-    if (!fileExists(provisioned.stampPath)) return null;
-    return {
-      ...provisioned,
-      projectDir: root,
-      manifests: [],
-      requirements: null,
-      requirementsHash: hashText("no-manifest"),
-      ready: pythonExecutableWorks(provisioned.python),
-    };
-  }
+  if (manifests.length === 0) return null;
   const requirements = manifests.find((entry) => entry.name === "requirements.txt")?.path || null;
   // Requirements-only projects keep the legacy requirements-file hash so their
   // existing managed venvs and stamps survive the manifest-detection widening.
-  const manifestHash = manifests.length === 0
-    ? hashText("no-manifest")
-    : (manifests.length === 1 && requirements
-      ? hashFile(requirements)
-      : hashText(manifests.map((entry) => `${entry.name}:${hashFile(entry.path)}`).join("\n")));
+  const manifestHash = manifests.length === 1 && requirements
+    ? hashFile(requirements)
+    : hashText(manifests.map((entry) => `${entry.name}:${hashFile(entry.path)}`).join("\n"));
   if (!manifestHash) return null;
   const runtime = resolveManagedPythonRuntime({ projectDir: root, posseRoot, requirementsHash: manifestHash });
   let installedHash = "";

@@ -107,6 +107,7 @@ import {
 } from "../../providers/functions/shared/tool-runtime.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, researchExplorationObservationStatus, runWithObservationContext } from "../../observability/functions/observations.js";
 import { scopedCheckToolResultObservation } from "../../observability/functions/scoped-check-tool-result.js";
+import { unitTestToolResultObservation } from "../../observability/functions/unit-test-tool-result.js";
 import {
   acknowledgeOperatorFeedback,
   awaitJobScopeExpansionDecision,
@@ -1551,12 +1552,14 @@ const TEST_TOOL_NAMES = new Set([
   "run_unit_test",
 ]);
 
-// Freeze adapter discovery for the life of this MCP process. A runner cannot
-// appear or disappear halfway through an agent turn.
-const unitTestCapability = discoverUnitTestCapability({
+// Freeze adapter discovery for each runtime session. A runner cannot appear or
+// disappear halfway through an agent turn, but a persistent owner serves later
+// sessions in other worktrees, where tests merged since boot must resolve.
+let unitTestCapability = discoverUnitTestCapability({
   projectDir: workspaceCwd,
   scipAvailable: atlasAvailable,
 });
+let unitTestCapabilityKey = `${workspaceCwd}\0${atlasAvailable}`;
 
 // Owner-hot declaration must follow the canonical registry. A hand-maintained
 // copy silently dropped request_scope (and previously get_brief and
@@ -3409,6 +3412,11 @@ function applyRuntimeBootConfig(nextConfig = {}, {
     attempt_id: mcpAttemptId,
     agent_call_id: mcpAgentCallId,
   }, { promptChars: mcpPromptChars });
+  const nextUnitTestCapabilityKey = `${workspaceCwd}\0${atlasAvailable}`;
+  if (sessionChanged || nextUnitTestCapabilityKey !== unitTestCapabilityKey) {
+    unitTestCapability = discoverUnitTestCapability({ projectDir: workspaceCwd, scipAvailable: atlasAvailable });
+    unitTestCapabilityKey = nextUnitTestCapabilityKey;
+  }
   rebuildNativeToolSchemas();
   rebuildToolExecutors();
   selectResearchStateForCurrentBoot(nextSessionKey);
@@ -3705,23 +3713,27 @@ async function completeNativeToolCall({
     tool: toolName,
     resultText: text,
   });
-  const resultDiagnostic = scopedCheckResult?.error || capString(text, 300);
+  const unitTestResult = unitTestToolResultObservation({
+    tool: toolName,
+    resultText: text,
+  });
+  const resultDiagnostic = scopedCheckResult?.error || unitTestResult?.error || capString(text, 300);
+  const resultSummary = scopedCheckResult?.summary || unitTestResult?.summary || null;
   finishToolInvocation(toolInvocation, {
     tool: toolName,
     input: recordInput,
     cwd: workspaceCwd,
     ok,
     outcome,
-    ...(scopedCheckResult?.summary
-      ? { resultSummary: scopedCheckResult.summary }
-      : {}),
+    ...(resultSummary ? { resultSummary } : {}),
     ...(outcome === "failed" ? { error: resultDiagnostic } : {}),
     ...(outcome === "rejected" ? { rejection: resultDiagnostic } : {}),
-    ...(atlasLiveBuffer || readStats || scopedCheckResult?.detail ? {
+    ...(atlasLiveBuffer || readStats || scopedCheckResult?.detail || unitTestResult?.detail ? {
       extraDetail: {
         ...(atlasLiveBuffer ? { atlas_live_buffer: atlasLiveBuffer } : {}),
         ...(readStats || {}),
         ...(scopedCheckResult?.detail ? { scoped_check_result: scopedCheckResult.detail } : {}),
+        ...(unitTestResult?.detail ? { unit_test_result: unitTestResult.detail } : {}),
       },
     } : {}),
   });
