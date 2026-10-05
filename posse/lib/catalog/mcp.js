@@ -1,6 +1,7 @@
 // @ts-check
 import { IMAGE_GENERATION_TIMEOUT_MS } from "./artifact.js";
 import { SUB_AGENT_LIMITS } from "./sub-agent.js";
+import { FINAL_REVIEW_TIMEOUT_MS } from "./final-review.js";
 
 export const MCP_SESSION_RELEASED_NOTIFICATION = "posse/sessionReleased";
 
@@ -36,6 +37,8 @@ export const MCP_TOOL_DEADLINE_CLASSES = Object.freeze({
   CITATION_CHILD: "citation_child",
   AGENT_DISPATCH: "agent_dispatch",
   IMAGE_GENERATION: "image_generation",
+  // Declared tests plus a reviewer agent call, run before the result returns.
+  FINAL_REVIEW: "final_review",
 });
 
 // A live scope request parks the tool call on a human answer. The queue's
@@ -51,6 +54,7 @@ export const MCP_TOOL_DEADLINE_MS = Object.freeze({
   // The generation request and the download of its result are bounded
   // separately.
   [MCP_TOOL_DEADLINE_CLASSES.IMAGE_GENERATION]: 2 * IMAGE_GENERATION_TIMEOUT_MS,
+  [MCP_TOOL_DEADLINE_CLASSES.FINAL_REVIEW]: FINAL_REVIEW_TIMEOUT_MS,
 });
 
 export const MCP_TOOL_DEADLINE_CLASS_BY_TOOL = Object.freeze({
@@ -60,6 +64,7 @@ export const MCP_TOOL_DEADLINE_CLASS_BY_TOOL = Object.freeze({
   sub_agent: MCP_TOOL_DEADLINE_CLASSES.CITATION_CHILD,
   dispatch_agent: MCP_TOOL_DEADLINE_CLASSES.AGENT_DISPATCH,
   generate_image: MCP_TOOL_DEADLINE_CLASSES.IMAGE_GENERATION,
+  final_review: MCP_TOOL_DEADLINE_CLASSES.FINAL_REVIEW,
 });
 
 // Headroom for owner scheduling and result transfer on top of the owner's own

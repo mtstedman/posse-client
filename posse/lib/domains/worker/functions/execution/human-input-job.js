@@ -955,10 +955,11 @@ export async function runHumanInputJob(worker, job, {
     }
 
     // Merge verification review: pass approves the next automatic merge;
-    // fail sends the work item back with the operator's feedback.
+    // fail sends the work item back with the operator's feedback. A merge
+    // recovery gate's merge merges now; send_back is its fail.
     if (isMergeVerificationReviewPayload(payload)) {
       handledReviewDecision = true;
-      const applied = applyMergeVerificationReviewAnswer({
+      const applied = await applyMergeVerificationReviewAnswer({
         job,
         payload,
         action: selectedAction,
@@ -966,7 +967,23 @@ export async function runHumanInputJob(worker, job, {
         metadata: resolutionMetadata,
         actorType: resolutionActorType,
         actorLabel: resolutionActorLabel,
+        projectDir: worker.projectDir,
       });
+      if (!applied.ok && applied.keepGateOpen) {
+        // The merge failed again: the work item still needs this decision.
+        const message = `${String(applied.message).replace(/[.\s]+$/, "")}; this gate remains open.`;
+        worker.emit(job.id, `${C.yellow}[human] ${message}${C.reset}`);
+        completeAttempt(attempt.attempt.id, {
+          status: "interrupted",
+          duration_ms: Date.now() - startTime,
+          error_text: message,
+        });
+        reopenHumanGateResolution({ gateJobId: job.id, leaseToken, error: message });
+        worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
+        leaseReleased = true;
+        refreshAndExtractInsights(job.work_item_id);
+        return;
+      }
       worker.emit(job.id, `${applied.ok ? C.cyan : C.yellow}[human] ${applied.message}${C.reset}`);
       if (!applied.ok) finalHumanStatus = "failed";
     }

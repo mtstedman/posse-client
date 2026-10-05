@@ -710,7 +710,7 @@ CREATE TABLE IF NOT EXISTS agent_calls (
   job_id INTEGER,
   attempt_id INTEGER,
   parent_agent_call_id INTEGER,
-  child_kind TEXT CHECK (child_kind IS NULL OR child_kind IN ('citation','research','web_research','research_claim_review')),
+  child_kind TEXT CHECK (child_kind IS NULL OR child_kind IN ('citation','research','web_research','research_claim_review','final_review')),
 
   role TEXT NOT NULL,
   model_tier TEXT NOT NULL,

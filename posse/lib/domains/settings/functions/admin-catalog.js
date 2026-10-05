@@ -327,6 +327,7 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   research_fanout: "Parallel research",
   research_evidence_reuse: "Research evidence reuse",
   research_claim_review: "Research claim review",
+  final_review_mode: "Developer final review",
   research_traversal_completion_check: "Traversal completion check",
   research_traversal_completion_max_chars: "Traversal check text limit",
   research_synthesis_max_physical_calls: "Researcher tool-call ceiling",
@@ -545,6 +546,7 @@ const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   research_fanout: "Split research across parallel helpers. Shadow records what would happen without changing anything; on runs it.",
   research_evidence_reuse: "Measure how much planner evidence repeats what research already found. Shadow only records; retrieval is unchanged.",
   research_claim_review: "Check research claims against their cited sources after the report is written. Shadow records findings and cost; the report is never edited.",
+  final_review_mode: "Before a developer hands off finished work, run its planned tests and an independent review, and return the findings so it can fix them first.",
   research_traversal_completion_check: "Check whether a researcher or developer skipped part of the code it was tracing before it hands off. Shadow records; on adds guidance to the handoff.",
   research_traversal_completion_max_chars: "Maximum characters of traversal-check guidance added to one handoff.",
   research_synthesis_max_physical_calls: "Ceiling on tool calls a researcher may make in one attempt. Other research limits are unchanged; each session reads it once at start.",
@@ -1021,6 +1023,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     "verification_idle_timeout_ms",
     "verification_dependency_network_policy",
     "pre_dev_typecheck",
+    "final_review_mode",
   ]),
   group("bridge", "repo", "Phone Bridge", [
     "bridge_port",

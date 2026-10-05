@@ -52,9 +52,9 @@ import {
 } from "./post-merge-db-tasks.js";
 import { findMergeHoldingGate } from "./merge-holding-gate.js";
 import {
+  activeMergeFailureRecoveryGateId,
   committedJobIdsForWorkItem,
   isMergeVerificationReviewJob,
-  MERGE_FAILURE_RECOVERY_KEY,
   mergeFailureRecoveryGateJobSpec,
   mergeVerificationReviewGateJobSpec,
   mergeVerificationReviewGateState,
@@ -117,6 +117,7 @@ import {
   __registerHumanGateReconcileHook,
   registerGateCanceledHook,
   findActiveHumanGateForPayload,
+  getHumanGate,
   registerHumanGate,
 } from "./human-gates.js";
 import {
@@ -923,6 +924,10 @@ function settleMergedWorkItemReviewJobs(id) {
     // A database task held for this merge, its gate, and the task once the
     // operator releases it are the post-merge step, not stale work.
     if (isPostMergeDbTaskJob(job)) continue;
+    // A gate whose answer is being applied finishes itself (a merge recovery
+    // answer is what performed this merge); canceling it mid-resolution
+    // fails that answer.
+    if (job.job_type === "human_input" && getHumanGate(job.id)?.gate_state === "resolving") continue;
     if (forceUpdateJobStatus(job.id, "canceled", { expectedStatuses: [job.status] })) {
       result.canceled += 1;
     }
@@ -1473,20 +1478,7 @@ export function markWorkItemMergeFailed(id, { message = null, targetBranch = nul
     releaseWorkItemLocksForMergeState(id, "merge_failed");
     const workItem = getWorkItem(id);
     if (!workItem) return true;
-    const existing = db.prepare(`
-      SELECT j.id
-      FROM jobs j
-      JOIN human_gates hg ON hg.gate_job_id = j.id
-      WHERE j.work_item_id = ?
-        AND j.job_type = 'human_input'
-        AND hg.gate_state IN ('open', 'resolving')
-        AND CASE WHEN json_valid(j.payload_json)
-          THEN json_extract(j.payload_json, '$.${MERGE_FAILURE_RECOVERY_KEY}') IS NOT NULL
-          ELSE 0 END
-      ORDER BY j.id DESC
-      LIMIT 1
-    `).get(id);
-    if (existing) return true;
+    if (activeMergeFailureRecoveryGateId(id, db)) return true;
     const gate = createJob(mergeFailureRecoveryGateJobSpec(workItem, { message, targetBranch }));
     if (gate?.status === "queued") {
       forceUpdateJobStatus(gate.id, "waiting_on_human", { expectedStatuses: ["queued"] });

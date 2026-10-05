@@ -29,6 +29,8 @@ const TOOLS_SUITE = [
   { name: "sub_agent_next_input", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
   { name: "dispatch_agent", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
   { name: "web_research_handoff", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
+  // Dev/fix close-out: the owner runs the declared tests and a reviewer agent.
+  { name: "final_review", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },
   { name: "read_file", mutatesWorktree: false, advertise: ["function", "mcp"] },
   { name: "get_brief", mutatesWorktree: false, advertise: ["function", "mcp"] },
   { name: "agent_feedback", mutatesWorktree: false, budgetExempt: true, advertise: ["function", "mcp"] },

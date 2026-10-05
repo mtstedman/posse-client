@@ -201,6 +201,7 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
   if (tool.suite === "tools" && tool.name === "sub_agent_next_input") return coordination.subAgentNextInput === true;
   if (tool.suite === "tools" && tool.name === "dispatch_agent") return coordination.dispatchAgent === true;
   if (tool.suite === "tools" && tool.name === "web_research_handoff") return coordination.webResearchHandoff === true;
+  if (tool.suite === "tools" && tool.name === "final_review") return coordination.finalReview === true && policy.allow_write === true;
   if (tool.suite === "tools" && tool.name === "ack_operator_feedback" && coordination.webResearchHandoff === true) return true;
   if (!policy.allow_read) return false;
   if (tool.suite === "atlas") return atlasAvailable !== false;
@@ -223,6 +224,7 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
  *   subAgentNextInputAvailable?: boolean,
  *   dispatchAgentAvailable?: boolean,
  *   webResearchHandoffAvailable?: boolean,
+ *   finalReviewAvailable?: boolean,
  * }} [options]
  */
 export function normalizeIssuedToolSurface(value, {
@@ -235,6 +237,7 @@ export function normalizeIssuedToolSurface(value, {
   subAgentNextInputAvailable = false,
   dispatchAgentAvailable = false,
   webResearchHandoffAvailable = false,
+  finalReviewAvailable = false,
 } = {}) {
   const entries = Array.isArray(value) ? value : [];
   const hasAtlasSurface = atlasAvailable === true
@@ -253,6 +256,7 @@ export function normalizeIssuedToolSurface(value, {
       subAgentNextInput: subAgentNextInputAvailable,
       dispatchAgent: dispatchAgentAvailable,
       webResearchHandoff: webResearchHandoffAvailable,
+      finalReview: finalReviewAvailable,
     })) continue;
     if (!out.includes(tool.canonical)) out.push(tool.canonical);
   }
@@ -378,6 +382,7 @@ function failClosedIssuedPolicy() {
       dispatchAgentV1: false,
       researchInvestigationV1: false,
       webResearchHandoffV1: false,
+      finalReviewV1: false,
     },
   };
   TRUSTED_REMOTE_POLICY_OBJECTS.add(policy);
@@ -422,6 +427,7 @@ export function normalizeRemoteIssuedPolicy(value, {
     dispatchAgentV1: coordinationSource?.dispatch_agent_v1 === true,
     researchInvestigationV1: coordinationSource?.research_investigation_v1 === true,
     webResearchHandoffV1: coordinationSource?.web_research_handoff_v1 === true,
+    finalReviewV1: coordinationSource?.final_review_v1 === true,
   };
   const toolSurface = normalizeIssuedToolSurface(
     Array.isArray(source.tool_surface) ? source.tool_surface : source.tools,
@@ -435,6 +441,7 @@ export function normalizeRemoteIssuedPolicy(value, {
       subAgentNextInputAvailable: coordination.subAgentNextInputV1,
       dispatchAgentAvailable: coordination.dispatchAgentV1,
       webResearchHandoffAvailable: coordination.webResearchHandoffV1,
+      finalReviewAvailable: coordination.finalReviewV1,
     },
   );
   const childToolSurface = normalizeIssuedToolSurface(source.child_tools, {
@@ -458,6 +465,8 @@ export function normalizeRemoteIssuedPolicy(value, {
     && toolSurface.includes("tools.dispatch_agent");
   const webResearchHandoffEnabled = coordination.webResearchHandoffV1
     && toolSurface.includes("tools.web_research_handoff");
+  const finalReviewEnabled = coordination.finalReviewV1
+    && toolSurface.includes("tools.final_review");
   const webAccess = normalizeWebAccess(source.web_access || source.webAccess, role);
   const effectiveToolSurface = toolSurface.filter((name) => (
     (subAgentEnabled || name !== "tools.sub_agent")
@@ -487,6 +496,7 @@ export function normalizeRemoteIssuedPolicy(value, {
       dispatchAgentV1: dispatchAgentEnabled,
       researchInvestigationV1: coordination.researchInvestigationV1,
       webResearchHandoffV1: webResearchHandoffEnabled,
+      finalReviewV1: finalReviewEnabled,
       ...(coordination.subAgentNextInputV1 && childCursorIssued
         ? { subAgentNextInputV1: true }
         : {}),
@@ -541,6 +551,7 @@ export function sanitizeRemoteToolSurfaceResponse(value, opts = {}) {
       dispatch_agent_v1: issued.coordination.dispatchAgentV1 === true,
       research_investigation_v1: issued.coordination.researchInvestigationV1 === true,
       web_research_handoff_v1: issued.coordination.webResearchHandoffV1 === true,
+      final_review_v1: issued.coordination.finalReviewV1 === true,
     },
   };
   if (!isRegisteredRemoteToolSurface(source)) return sanitized;
@@ -598,6 +609,7 @@ export function deriveRemoteToolSurfaceNarrowing(authorityValue, candidateValue,
     || candidate.coordination.subAgentV1 && !authority.coordination.subAgentV1
     || candidate.coordination.dispatchAgentV1 && !authority.coordination.dispatchAgentV1
     || candidate.coordination.webResearchHandoffV1 && !authority.coordination.webResearchHandoffV1
+    || candidate.coordination.finalReviewV1 && !authority.coordination.finalReviewV1
     || candidateNextInput && !authorityNextInput) {
     return null;
   }
@@ -883,9 +895,10 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
   const localSubAgent = packet?.agent_coordination?.sub_agent_v1 === true;
   const localDispatchAgent = packet?.agent_coordination?.dispatch_agent_v1 === true;
   const localWebResearchHandoff = packet?.agent_coordination?.web_research_handoff_v1 === true;
+  const localFinalReview = packet?.agent_coordination?.final_review_v1 === true;
   let executionIssuance = opts._subAgentChild === true || opts._webResearchChild === true
     ? remoteIssuance
-    : (remoteIssuance && (!localAgentHandoff || !localSubAgent || !localDispatchAgent || !localWebResearchHandoff)
+    : (remoteIssuance && (!localAgentHandoff || !localSubAgent || !localDispatchAgent || !localWebResearchHandoff || !localFinalReview)
     ? {
         ...remoteIssuance,
         coordination: {
@@ -900,6 +913,7 @@ export function narrowProviderOptionsToRemoteIssuance(options = {}) {
           sub_agent_v1: localSubAgent,
           dispatch_agent_v1: localDispatchAgent,
           web_research_handoff_v1: localWebResearchHandoff,
+          final_review_v1: localFinalReview,
         },
       }
     : remoteIssuance);

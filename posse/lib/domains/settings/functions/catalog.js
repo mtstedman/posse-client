@@ -14,6 +14,7 @@
 //   provider/model/internal rows into their own renderers.
 
 import { RESEARCH_CLAIM_REVIEW } from "../../../catalog/research-claim-review.js";
+import { FINAL_REVIEW_DEFAULT_MODE, FINAL_REVIEW_MODES } from "../../../catalog/final-review.js";
 import { PLANNER_DISPATCH_SETTINGS } from "../../../catalog/planner-dispatch.js";
 import { DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY } from "../../../catalog/verification.js";
 import {
@@ -323,6 +324,7 @@ export const SETTINGS_CATALOG = [
   { key: "snapshot_dedup", default: "true", valueType: "boolean", description: "Reuse duplicate recovered dirty-worktree snapshots" },
   { key: "web_tools_enabled",    default: "true", valueType: "boolean", description: "Allow web research tools (Claude WebSearch/WebFetch, Codex web_search) for researcher, assessor, dev (fallback for missing external facts), and native-team roles, and the artificer's download_file tool" },
   { key: "research_fanout",      default: "off", options: RESEARCH_FANOUT_MODE_VALUES, description: "Research fanout mode for preflight fanout-clear decisions (off, shadow, on)" },
+  { key: SETTING_KEYS.FINAL_REVIEW_MODE, default: FINAL_REVIEW_DEFAULT_MODE, scope: "repo", options: FINAL_REVIEW_MODES, description: "Dev/fix close-out: before a COMPLETE handoff the agent calls final_review, which runs the declared tests and an independent read-only review and returns findings to fix" },
   { key: SETTING_KEYS.RESEARCH_CLAIM_REVIEW, default: "off", scope: "repo", options: RESEARCH_CLAIM_REVIEW.modes, description: "Bounded source-backed review of committed research claims; shadow records findings and usage without changing the report" },
   { key: SETTING_KEYS.RESEARCH_EVIDENCE_REUSE, default: "shadow", scope: "repo", options: RESEARCH_EVIDENCE_REUSE_MODE_VALUES, description: "Research evidence reuse accounting: off records nothing; shadow measures strict source and Atlas duplicate candidates without changing retrieval routing" },
   { key: "research_traversal_completion_check", default: "off", options: RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES, description: "Traversal completion check mode for researcher/dev handoffs: off, shadow, or on" },

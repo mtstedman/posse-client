@@ -106,6 +106,7 @@ function capabilitiesFromPacket(packet = {}, providerName = null, customToolsAva
       dispatch_agent_v1: packet?.agent_coordination?.dispatch_agent_v1 === true,
       research_investigation_v1: packet?.agent_coordination?.research_investigation_v1 === true,
       web_research_handoff_v1: packet?.agent_coordination?.web_research_handoff_v1 === true,
+      final_review_v1: packet?.agent_coordination?.final_review_v1 === true,
     },
   };
   const provider = String(providerName || "")

@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import {
+  MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
   MERGE_VERIFICATION_REVIEW_TYPE,
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
   POST_MERGE_DB_TASK_REVIEW_TYPE,
@@ -789,7 +790,8 @@ export function reconcileHumanGates() {
       ) return false;
       return payload.subtype !== "push_offer"
         && payload.review_type !== POST_MERGE_DB_TASK_REVIEW_TYPE
-        && payload.review_type !== MERGE_VERIFICATION_REVIEW_TYPE;
+        && payload.review_type !== MERGE_VERIFICATION_REVIEW_TYPE
+        && payload.review_type !== MERGE_FAILURE_RECOVERY_REVIEW_TYPE;
     });
     for (const job of terminalWorkItemGates) {
       if (retireGateJob(job.id, "Owning work item is terminal")) retired += 1;

@@ -43,7 +43,7 @@ Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.
 
 ### `dev`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.run_unit_test`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.final_review`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.run_unit_test`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
@@ -579,6 +579,24 @@ Compatibility traversal for unseen stored #ref content. Batch every independentl
 | `ref` | `string | array` | Optional | max length 512; max items 100 | One hash ref alias such as #a3f9, or every independently needed alias as one array batch. |
 | `search` | `string` | Optional | max length 512 | Optional case-insensitive search within materialized ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. The result contains matching numbered lines. |
 | `search_mode` | `string` | Optional | values "auto", "literal", "regex" | Search interpretation. Default: auto (literal first, then regex when the query contains regex syntax). |
+
+### `tools.final_review`
+
+Remote roles: `dev`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `final_review` |
+| Tool reference token | `tools.final_review` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `coordination` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Close out the finished change: runs the task's declared tests on the current workspace, then an independent reviewer checks the change against the task contract. Returns pass, or findings to fix before calling it again. Takes several minutes; the result arrives when the review completes.
+
+This definition has no public parameters.
 
 ### `tools.generate_image`
 

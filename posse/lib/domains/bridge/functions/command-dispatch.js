@@ -56,6 +56,7 @@ import {
 } from "./team.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import {
+  MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
   MERGE_VERIFICATION_REVIEW_TYPE,
   humanGateStateAllowsAnswer,
 } from "../../../catalog/human-input.js";
@@ -277,7 +278,7 @@ function withMergeVerificationOutcome(result, gateJobId) {
   if (!result || result.ok === false || result.pending) return result;
   const gate = getJob(gateJobId);
   const payload = parseJobPayload(gate);
-  if (payload?.review_type !== MERGE_VERIFICATION_REVIEW_TYPE) return result;
+  if (![MERGE_VERIFICATION_REVIEW_TYPE, MERGE_FAILURE_RECOVERY_REVIEW_TYPE].includes(payload?.review_type)) return result;
   const contract = getHumanGate(gateJobId);
   const workItem = getWorkItem(Number(gate?.work_item_id));
   const outcome = {
@@ -287,7 +288,8 @@ function withMergeVerificationOutcome(result, gateJobId) {
     work_item_status: workItem?.status ?? null,
     merge_state: workItem?.merge_state ?? null,
   };
-  if (contract?.resolution_action !== "fail") return outcome;
+  // send_back is a merge recovery gate's fail.
+  if (!["fail", "send_back"].includes(contract?.resolution_action)) return outcome;
   const rejection = payload[MERGE_VERIFICATION_REJECTION_KEY];
   if (!rejection) {
     return {

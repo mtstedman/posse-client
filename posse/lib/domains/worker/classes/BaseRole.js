@@ -158,6 +158,7 @@ export class BaseRole {
           dispatchAgent: packet?.agent_coordination?.dispatch_agent_v1 === true,
           researchInvestigation: packet?.agent_coordination?.research_investigation_v1 === true,
           webResearchHandoff: packet?.agent_coordination?.web_research_handoff_v1 === true,
+          finalReview: packet?.agent_coordination?.final_review_v1 === true,
           ...(atlasAvailable != null ? { atlasAvailable } : {}),
           handoffRequest: packet || {
             job_id: job?.id ?? null,

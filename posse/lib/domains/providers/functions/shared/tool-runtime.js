@@ -32,6 +32,7 @@ import {
   executeDispatchAgent,
   submitWebResearchHandoff,
 } from "../../../web-research/classes/WebResearchRuntime.js";
+import { executeFinalReview } from "../../../assessment/classes/FinalReviewRuntime.js";
 import { execProjectDbQuery } from "../../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   acknowledgeOperatorFeedback,
@@ -504,6 +505,14 @@ export function createStandardToolHandlerMap({
     web_research_handoff(args) {
       const ambient = getObservationContext() || {};
       return JSON.stringify(submitWebResearchHandoff(ambient.agent_call_id, args || {}));
+    },
+    async final_review(args) {
+      const ambient = getObservationContext() || {};
+      try {
+        return JSON.stringify(await executeFinalReview(args || {}, { context: { agentCallId: ambient.agent_call_id } }));
+      } catch (error) {
+        return `Error: final_review failed - ${String(error?.message || error).slice(0, 500)}`;
+      }
     },
     request_scope(args, ctx) {
       const result = beginLiveScopeRequest(args, ctx);

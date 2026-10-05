@@ -21,6 +21,15 @@
 // an answer that cannot apply yet (an active job, a merge or shared-trunk
 // publication in progress) keeps the gate open with the reason. A work item
 // that already left the reviewed state retires the gate as not applicable.
+//
+// A merge-failure recovery gate (Git refused the merge) answers with the
+// same machinery: "merge" merges the work item now, as `posse merge` would,
+// and a merge that fails again keeps the gate open with the reason;
+// "send_back" is the fail requeue. The approval preflight (dirty worktree,
+// unfinished jobs, partial work) still applies; the merge does not settle
+// review rows, since that would retire this gate mid-answer
+// (operator-merge.js). A recovery gate opened before its own type existed
+// answers pass/fail for merge/send_back.
 
 import {
   MERGE_VERIFICATION_REJECTION_KEY,
@@ -28,6 +37,7 @@ import {
   getJob,
   getWorkItem,
   hasUnresolvedSharedTrunkMergeOperation,
+  isMergeFailureRecoveryPayload,
   logEvent,
   requeueWorkItemAfterRejection,
   reviewRejectionReadiness,
@@ -36,12 +46,28 @@ import {
 } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../../catalog/event.js";
-import { MERGE_VERIFICATION_REVIEW_TYPE } from "../../../../catalog/human-input.js";
+import {
+  MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
+  MERGE_VERIFICATION_REVIEW_TYPE,
+} from "../../../../catalog/human-input.js";
+import { preflightReviewApproval } from "../../../bridge/functions/review-decision.js";
+import { mergeWorkItemNow } from "../../../git/functions/operator-merge.js";
 
 const MAX_FEEDBACK_CHARS = 2000;
 
 export function isMergeVerificationReviewPayload(payload) {
-  return payload?.review_type === MERGE_VERIFICATION_REVIEW_TYPE;
+  return payload?.review_type === MERGE_VERIFICATION_REVIEW_TYPE
+    || payload?.review_type === MERGE_FAILURE_RECOVERY_REVIEW_TYPE;
+}
+
+// What an answer does: a legacy recovery gate's pass/fail mean merge/send_back,
+// and send_back is the review gate's fail.
+function effectiveMergeGateAction(payload, action) {
+  if (isMergeFailureRecoveryPayload(payload)) {
+    if (action === "pass" || action === "merge") return "merge";
+    if (action === "fail" || action === "send_back") return "fail";
+  }
+  return action;
 }
 
 /**
@@ -51,7 +77,7 @@ export function isMergeVerificationReviewPayload(payload) {
 export function mergeVerificationFeedback(answer, metadata = null) {
   const fromMetadata = String(metadata?.operator_feedback ?? metadata?.feedback ?? "").trim();
   if (fromMetadata) return fromMetadata.slice(0, MAX_FEEDBACK_CHARS);
-  const match = /^fail\s*[:\-]\s*([\s\S]+)$/i.exec(String(answer || "").trim());
+  const match = /^(?:fail|send[ _-]?back)\s*[:\-]\s*([\s\S]+)$/i.exec(String(answer || "").trim());
   return match ? match[1].trim().slice(0, MAX_FEEDBACK_CHARS) : "";
 }
 
@@ -81,7 +107,7 @@ function sendBackRefusal(workItem, gateJobId) {
  * { ok: false, message } to keep the gate open.
  */
 export function prepareMergeVerificationReviewAnswer(job, payload, action) {
-  if (action !== "fail") return { ok: true };
+  if (effectiveMergeGateAction(payload, action) !== "fail") return { ok: true };
   const workItem = getWorkItem(Number(job.work_item_id));
   // A stale gate is retired by the claimed answer's own state check.
   if (!stillUnderReview(workItem)) return { ok: true };
@@ -90,6 +116,14 @@ export function prepareMergeVerificationReviewAnswer(job, payload, action) {
 }
 
 export function mergeVerificationRejectionGuidance(gateJob, payload = {}, feedback = "") {
+  if (isMergeFailureRecoveryPayload(payload)) {
+    return [
+      `Merge recovery gate #${gateJob.id} sent this change back after its merge into the target branch failed.`,
+      payload.context ? `Why the merge failed: ${payload.context}` : null,
+      feedback ? `Operator feedback: ${feedback}` : "The operator gave no further feedback.",
+      "Rework the branch so it merges cleanly onto the current target branch.",
+    ].filter(Boolean).join("\n");
+  }
   return [
     `Merge review gate #${gateJob.id} rejected this change before merge.`,
     feedback ? `Operator feedback: ${feedback}` : "The operator gave no further feedback.",
@@ -98,11 +132,48 @@ export function mergeVerificationRejectionGuidance(gateJob, payload = {}, feedba
   ].filter(Boolean).join("\n");
 }
 
+async function mergeRecoveredWorkItem(workItemId, { actor, projectDir }) {
+  const preflight = preflightReviewApproval(workItemId, { projectDir });
+  if (!preflight.ok) return { ok: false, reason: preflight.reason, message: preflight.message || preflight.reason };
+  return mergeWorkItemNow(workItemId, { projectDir, actor });
+}
+
+async function mergeAfterRecovery({ workItemId, actorLabel, projectDir, mergeWorkItem }) {
+  const workItem = getWorkItem(workItemId);
+  if (workItem?.merge_state === "merged") {
+    return { ok: true, merged: true, message: `WI#${workItemId} is already merged` };
+  }
+  if (!stillUnderReview(workItem)) {
+    return {
+      ok: false,
+      message: `WI#${workItemId} is ${workItem ? workItem.status : "gone"}; the merge recovery no longer applies`,
+    };
+  }
+  let result;
+  try {
+    result = await mergeWorkItem(workItemId, { actor: String(actorLabel || "operator").toLowerCase(), projectDir });
+  } catch (error) {
+    result = { ok: false, message: error?.message || String(error) };
+  }
+  if (result?.ok) {
+    const hash = String(result.merge_hash || "").slice(0, 8);
+    return { ok: true, merged: true, message: `Merged WI#${workItemId}${hash ? ` at ${hash}` : ""}` };
+  }
+  // The gate stays the work item's recovery decision: a merge that failed
+  // again reopens it with the new reason instead of retiring it.
+  return {
+    ok: false,
+    keepGateOpen: true,
+    message: `The merge of WI#${workItemId} failed again: ${result?.message || result?.reason || "unknown error"}`,
+  };
+}
+
 /**
- * Apply a claimed answer. Returns { ok, message, requeued? }; ok false
- * retires the gate as not applicable.
+ * Apply a claimed answer. Returns { ok, message, requeued?, merged? }; ok
+ * false retires the gate as not applicable, unless keepGateOpen asks to
+ * reopen it for another answer.
  */
-export function applyMergeVerificationReviewAnswer({
+export async function applyMergeVerificationReviewAnswer({
   job,
   payload = {},
   action,
@@ -110,12 +181,18 @@ export function applyMergeVerificationReviewAnswer({
   metadata = null,
   actorType = EVENT_ACTORS.HUMAN,
   actorLabel = "Human",
+  projectDir = process.cwd(),
+  mergeWorkItem = mergeRecoveredWorkItem,
 } = {}) {
   const workItemId = Number(job.work_item_id);
-  if (action === "pass") {
+  const effectiveAction = effectiveMergeGateAction(payload, action);
+  if (effectiveAction === "merge") {
+    return mergeAfterRecovery({ workItemId, actorLabel, projectDir, mergeWorkItem });
+  }
+  if (effectiveAction === "pass") {
     return { ok: true, message: `WI#${workItemId} may merge: ${actorLabel.toLowerCase()} reviewed the change` };
   }
-  if (action !== "fail") return { ok: false, message: `Unknown merge review answer ${action}` };
+  if (effectiveAction !== "fail") return { ok: false, message: `Unknown merge review answer ${action}` };
   const workItem = getWorkItem(workItemId);
   if (!stillUnderReview(workItem)) {
     return {
@@ -153,7 +230,7 @@ export function applyMergeVerificationReviewAnswer({
     actor_type: actorType,
     message: `${actorLabel} rejected WI#${workItemId} at merge review gate #${job.id}${feedback ? `: ${feedback}` : ""}`,
     event_json: JSON.stringify({
-      approval_type: MERGE_VERIFICATION_REVIEW_TYPE,
+      approval_type: payload.review_type || MERGE_VERIFICATION_REVIEW_TYPE,
       gate_job_id: Number(job.id),
       feedback: feedback || null,
       waived_job_ids: Array.isArray(payload.waived_job_ids) ? payload.waived_job_ids : [],

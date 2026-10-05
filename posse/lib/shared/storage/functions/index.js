@@ -1037,6 +1037,7 @@ function needsAgentCallsChildKindsRepair(db) {
   return needsAgentCallsParentageRepair(db)
     || !/child_kind\s+TEXT\s+CHECK[\s\S]*?'web_research'/iu.test(row.sql)
     || !/child_kind\s+TEXT\s+CHECK[\s\S]*?'research_claim_review'/iu.test(row.sql)
+    || !/child_kind\s+TEXT\s+CHECK[\s\S]*?'final_review'/iu.test(row.sql)
     || !/child_kind\s+TEXT\s+CHECK[\s\S]*?'research'/iu.test(row.sql);
 }
 

@@ -21,9 +21,13 @@ import {
 } from "../../../catalog/human-input.js";
 import { MERGE_VERIFICATION_REJECTION_KEY } from "./merge-verification-review.js";
 
-// Gate answers after which automatic merge stays refused.
+// Gate answers after which automatic merge stays refused. retry_assessment
+// is not one: the retried assessment either passes, completing the work item
+// with nothing left for an operator to decide, or fails into the ordinary
+// repair flow. It used to hold forever (fiscal-wizard WI 3, gate #77: refused
+// automatic merge 52 times in one run after its retry had passed).
 export const MERGE_HOLDING_GATE_ACTIONS = Object.freeze([
-  "fail", "replan", "retry_assessment", "retry_with_changes",
+  "fail", "replan", "retry_with_changes",
   "reject", "deny", "revert", "extend",
 ]);
 const RECOVERY_RETRY_ACTION = canonicalHumanGateAction("retry");

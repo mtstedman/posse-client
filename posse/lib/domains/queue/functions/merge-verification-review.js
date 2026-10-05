@@ -42,6 +42,7 @@
 
 import { getDb } from "../../../shared/storage/functions/index.js";
 import {
+  MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
   MERGE_VERIFICATION_REVIEW_TYPE,
   humanInputChoicesForReviewType,
 } from "../../../catalog/human-input.js";
@@ -70,6 +71,30 @@ const SENSITIVE_SCOPE_TERM_SET = new Set(SENSITIVE_SCOPE_TERMS);
 export function isMergeVerificationReviewJob(job) {
   return job?.job_type === "human_input"
     && parseJobPayload(job).review_type === MERGE_VERIFICATION_REVIEW_TYPE;
+}
+
+/** A merge-failure recovery gate: the dedicated type, or one opened before it existed. */
+export function isMergeFailureRecoveryPayload(payload = {}) {
+  return payload?.review_type === MERGE_FAILURE_RECOVERY_REVIEW_TYPE
+    || (payload?.review_type === MERGE_VERIFICATION_REVIEW_TYPE && !!payload?.[MERGE_FAILURE_RECOVERY_KEY]);
+}
+
+/** The open or resolving merge-failure recovery gate of a work item, or null. */
+export function activeMergeFailureRecoveryGateId(workItemId, db = getDb()) {
+  const row = db.prepare(`
+    SELECT j.id
+    FROM jobs j
+    JOIN human_gates hg ON hg.gate_job_id = j.id
+    WHERE j.work_item_id = ?
+      AND j.job_type = 'human_input'
+      AND hg.gate_state IN ('open', 'resolving')
+      AND CASE WHEN json_valid(j.payload_json)
+        THEN json_extract(j.payload_json, '$.${MERGE_FAILURE_RECOVERY_KEY}') IS NOT NULL
+        ELSE 0 END
+    ORDER BY j.id DESC
+    LIMIT 1
+  `).get(workItemId);
+  return row ? Number(row.id) : null;
 }
 
 /** The higher of the planner's risk and the execution policy's risk score. */
@@ -355,7 +380,7 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
   const detail = String(message || "Git could not merge the work-item branch").trim().slice(0, 1000);
   const question = [
     `Merge of ${label}${targetBranch ? ` into ${targetBranch}` : ""} failed: ${detail}.`,
-    "Answer pass to retry the merge after resolving the repository condition, or fail with feedback to send the work item back for rework.",
+    "merge: merge it now (resolve the repository condition first). send_back: return the work item for rework on its branch.",
   ].join(" ");
   return {
     work_item_id: workItem.id,
@@ -364,8 +389,8 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
     priority: "high",
     max_attempts: 1,
     payload_json: JSON.stringify({
-      review_type: MERGE_VERIFICATION_REVIEW_TYPE,
-      choices: humanInputChoicesForReviewType(MERGE_VERIFICATION_REVIEW_TYPE),
+      review_type: MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
+      choices: humanInputChoicesForReviewType(MERGE_FAILURE_RECOVERY_REVIEW_TYPE),
       questions: [question],
       prompt: question,
       context: detail,

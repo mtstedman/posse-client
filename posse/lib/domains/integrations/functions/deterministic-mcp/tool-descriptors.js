@@ -53,6 +53,7 @@ import {
   TOOL_CHAIN_VERDICT,
   TOOL_PULL_BRIEF,
   TOOL_GET_BRIEF,
+  TOOL_FINAL_REVIEW,
   TOOL_GENERATE_IMAGE,
   TOOL_DOWNLOAD_FILE,
   TOOL_COMPOSE_SPRITE_SHEET,
@@ -105,6 +106,7 @@ export {
   TOOL_CHAIN_VERDICT,
   TOOL_PULL_BRIEF,
   TOOL_GET_BRIEF,
+  TOOL_FINAL_REVIEW,
   TOOL_GENERATE_IMAGE,
   TOOL_DOWNLOAD_FILE,
   TOOL_COMPOSE_SPRITE_SHEET,
@@ -330,6 +332,13 @@ export const TOOL_CATALOG = {
     access: "read",
     summary: "Build a bounded deterministic file brief for targeted context retrieval.",
     observation: { type: "tool.pull_brief", label: "PullBrief", format: "generic", targetKeys: ["query", "mode"] },
+  },
+  final_review: {
+    schema: TOOL_FINAL_REVIEW,
+    access: "coordination",
+    summary: "Run the task's declared tests and an independent review of the finished change before its COMPLETE handoff.",
+    budgetExempt: true,
+    observation: { type: "tool.final_review", label: "FinalReview", format: "generic", targetKeys: [] },
   },
   get_brief: {
     schema: TOOL_GET_BRIEF,
@@ -747,6 +756,7 @@ function roleAllowlistForTool(toolName) {
   if (toolName === "web_research_handoff") return new Set(["researcher"]);
   if (toolName === "agent_claim" || toolName === "report_claims") return new Set(["researcher"]);
   if (toolName === "dispatch_agent") return new Set(["researcher", "planner"]);
+  if (toolName === "final_review") return new Set(["dev"]);
   if (toolName === "agent_handoff") {
     return new Set(["researcher", "planner", "dev", "artificer", "assessor", "subagent"]);
   }
@@ -878,7 +888,7 @@ function executionSpecForEntry(entry) {
   };
 }
 
-export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration = false, agentHandoff = false, subAgent = false, dispatchAgent = false, webResearchHandoff = false } = {}) {
+export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration = false, agentHandoff = false, subAgent = false, dispatchAgent = false, webResearchHandoff = false, finalReview = false } = {}) {
   if (role === "subagent") return ["sub_agent_next_input", "agent_handoff"];
   const config = ROLE_TOOL_ALLOWLISTS[role] || ROLE_TOOL_ALLOWLISTS.default;
   const key = allowWrite ? "write" : "read";
@@ -895,6 +905,7 @@ export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration
   }
   if (dispatchAgent && ["researcher", "planner"].includes(role)) names.unshift("dispatch_agent");
   if (webResearchHandoff && role === "researcher") names.unshift("web_research_handoff");
+  if (finalReview && role === "dev" && allowWrite) names.unshift("final_review");
   return names;
 }
 
@@ -931,6 +942,7 @@ export function getDeterministicMcpToolNames(role, {
   subAgent = false,
   dispatchAgent = false,
   webResearchHandoff = false,
+  finalReview = false,
   atlasAvailable = false,
   disableSystemTools = false,
   customTools = false,
@@ -1000,6 +1012,7 @@ export function getDeterministicMcpToolNames(role, {
   }
   if (dispatchAgent && ["researcher", "planner"].includes(role)) tools.unshift("dispatch_agent");
   if (webResearchHandoff && role === "researcher") tools.unshift("web_research_handoff");
+  if (finalReview && role === "dev") tools.unshift("final_review");
   return tools;
 }
 

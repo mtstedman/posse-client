@@ -77,6 +77,7 @@ import { claimEvidenceReferences } from "./helpers/evidence-references.js";
 import { missingReportClaimsMessage } from "./helpers/missing-report-claims.js";
 import { sharedPlanContractAdditions } from "./helpers/shared-plan-contracts.js";
 import { mergeResearchReportDraftClaims } from "./research-report-claim-drafts.js";
+import { finalReviewHandoffHold } from "../../assessment/functions/final-review-result.js";
 
 export { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 
@@ -4765,6 +4766,23 @@ function enforceArtificerImageGeneration(packet, call, context) {
   );
 }
 
+// A developer issued final_review hands off COMPLETE work only after a
+// review passed on the change as it is (domains/assessment, final review). A review that
+// could not run, or an attempt's spent reviews, never hold it.
+function enforceDevFinalReview(packet, call, context) {
+  const role = String(call?.role || packet?.role || "").trim().toLowerCase();
+  const complete = packet?.profile === "dev.result.v1"
+    && (packet?.completion?.status === "COMPLETE" || packet?.outcome === "complete");
+  if (role !== "dev" || !complete) return;
+  const hold = finalReviewHandoffHold({
+    jobId: context?.jobId,
+    attemptId: context?.attemptId,
+    agentCallId: context?.agentCallId,
+    db: context?.db || getDb(),
+  });
+  if (hold) fail("AGENT_HANDOFF_FINAL_REVIEW_REQUIRED", hold);
+}
+
 function handoffRow(agentCallId, db = getDb()) {
   const id = positiveInt(agentCallId);
   if (!id) return null;
@@ -5555,6 +5573,7 @@ export function stageAgentHandoff(args, {
     );
   }
   enforceArtificerImageGeneration(packet, call, resolvedContext);
+  enforceDevFinalReview(packet, call, resolvedContext);
   const diagnostics = {
     ...(packet.ignored_field_count > 0 ? {
       ignored_field_count: packet.ignored_field_count,

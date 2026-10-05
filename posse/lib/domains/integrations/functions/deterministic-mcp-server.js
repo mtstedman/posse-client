@@ -49,6 +49,7 @@ import {
   TOOL_SUB_AGENT,
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_WEB_RESEARCH_HANDOFF,
+  TOOL_FINAL_REVIEW,
   TOOL_DOWNLOAD_FILE,
   TOOL_COMPOSE_SPRITE_SHEET,
   TOOL_VIEW_IMAGE,
@@ -1717,6 +1718,7 @@ addToolSchema(getToolSchemaForRole("dispatch_agent", roleName, {
   researchInvestigation: bootConfig.researchInvestigation === true,
 }));
 addToolSchema(TOOL_WEB_RESEARCH_HANDOFF);
+addToolSchema(TOOL_FINAL_REVIEW);
 
 // Atlas-active researchers use the ordinary bounded read_file fallback. The
 // chain ledger remains available only when Atlas is absent.
@@ -2869,6 +2871,12 @@ async function executeDispatchAgentTool(args = {}) {
   return JSON.stringify(result);
 }
 
+// The owner runs final_review (it needs the agent call's registration in the
+// Posse process); a call that reaches this child process has no reviewer.
+function executeFinalReviewTool() {
+  return "Error: final_review is unavailable on this connection; hand off when the change is complete.";
+}
+
 function executeWebResearchHandoffTool(args = {}) {
   return JSON.stringify(submitWebResearchHandoff(mcpAgentCallId, args));
 }
@@ -2904,6 +2912,7 @@ mcpToolRegistry.attach("sub_agent", (args) => executeSubAgentTool(args || {}));
 mcpToolRegistry.attach("sub_agent_next_input", (args) => executeSubAgentNextInputTool(args || {}));
 mcpToolRegistry.attach("dispatch_agent", (args) => executeDispatchAgentTool(args || {}));
 mcpToolRegistry.attach("web_research_handoff", (args) => executeWebResearchHandoffTool(args || {}));
+mcpToolRegistry.attach("final_review", () => executeFinalReviewTool());
 mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
 mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
 mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -3075,6 +3084,7 @@ function rebuildNativeToolSchemas() {
     researchInvestigation: bootConfig.researchInvestigation === true,
   }));
   addToolSchema(TOOL_WEB_RESEARCH_HANDOFF);
+  addToolSchema(TOOL_FINAL_REVIEW);
   if (ownerHotGateway) {
     addToolSchema(readFileSchemaForCurrentBoot());
     addToolSchema(TOOL_CHAIN_READ);
@@ -3124,6 +3134,7 @@ function attachToolExecutorsForCurrentBoot() {
   mcpToolRegistry.attach("sub_agent_next_input", (args) => executeSubAgentNextInputTool(args || {}));
   mcpToolRegistry.attach("dispatch_agent", (args) => executeDispatchAgentTool(args || {}));
   mcpToolRegistry.attach("web_research_handoff", (args) => executeWebResearchHandoffTool(args || {}));
+  mcpToolRegistry.attach("final_review", () => executeFinalReviewTool());
   mcpToolRegistry.attach("read_file", (args) => dedupeReadFile(args || {}));
 mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("list_files", (args) => execListFiles(args || {}, workspaceCwd, effectiveScopePredicates));

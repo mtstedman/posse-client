@@ -21,10 +21,14 @@ import { renderNeuralNetworkBanner } from "../../ui/functions/display/neural-net
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isPushOfferJob } from "../../queue/functions/common.js";
 import { activeWorkItemDispositionGates } from "../../queue/functions/work-item-dispositions.js";
-import { mergeVerificationReviewGateState } from "../../queue/functions/merge-verification-review.js";
+import {
+  activeMergeFailureRecoveryGateId,
+  mergeVerificationReviewGateState,
+} from "../../queue/functions/merge-verification-review.js";
 import { resolveGateReviewDiffTarget } from "../../queue/functions/gate-review-target.js";
 import {
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
+  MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
   MERGE_VERIFICATION_REVIEW_TYPE,
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
   humanGateStateAllowsAnswer,
@@ -65,9 +69,9 @@ export function firstLine(value, fallback = "unknown") {
 
 /**
  * The open operator gate that holds a work item, or null: a cross-WI upstream
- * disposition or failure disposition gate, or a merge verification review
- * that has not passed. A completed work item held this way does not merge
- * until the operator answers.
+ * disposition or failure disposition gate, a merge verification review
+ * that has not passed, or a merge-failure recovery gate. A completed work
+ * item held this way does not merge until the operator answers.
  *
  * @param {number} workItemId
  * @returns {{ gate_job_id: number, review_type: string } | null}
@@ -79,6 +83,8 @@ export function openParkingGateForWorkItem(workItemId) {
   }
   const review = mergeVerificationReviewGateState(workItemId);
   if (review?.holds) return { gate_job_id: Number(review.gate_job_id), review_type: MERGE_VERIFICATION_REVIEW_TYPE };
+  const recoveryGateId = activeMergeFailureRecoveryGateId(workItemId);
+  if (recoveryGateId) return { gate_job_id: recoveryGateId, review_type: MERGE_FAILURE_RECOVERY_REVIEW_TYPE };
   return null;
 }
 

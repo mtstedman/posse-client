@@ -2374,6 +2374,47 @@ export function testReceiptObservationDetail(receipt = {}) {
   };
 }
 
+/**
+ * Run a resolved frozen test plan once on the workspace as it is now, for a
+ * developer's final review before its change is committed. Nothing is stored:
+ * a receipt is keyed to a commit, and this workspace is not one yet. Returns
+ * the classified run, or a not-run result when the plan cannot execute.
+ */
+export async function runFrozenTestPlanOnce(plan, { cwd, timeoutMs = null } = {}) {
+  if (!plan) return { status: "skipped", ok: null, reason: "no_declared_tests" };
+  if (plan.validation_error || plan.verification_eligible === false) {
+    return { status: "invalid_test_plan", ok: null, reason: plan.validation_error || "not_a_verification_command", command: plan.command };
+  }
+  const policy = effectiveVerificationPolicy({ cwd, timeoutMs });
+  const raw = Array.isArray(plan.unit_test_paths)
+    ? await runUnitTestFiles({
+        projectDir: cwd,
+        paths: plan.unit_test_paths,
+        capability: discoverUnitTestCapability({ projectDir: cwd }),
+        timeoutMs: policy.wall_timeout_ms,
+      }).then((aggregate) => ({
+        status: aggregate.status,
+        ok: aggregate.ok,
+        code: aggregate.ok === true ? 0 : aggregate.ok === false ? 1 : null,
+        timed_out: aggregate.status === "timed_out",
+        duration_ms: aggregate.results.reduce((sum, result) => sum + Number(result.duration_ms || 0), 0),
+        stdout: aggregate.results.map((result) => `[${result.path}] ${String(result.outcome || result.status || "unknown")}\n${String(result.stdout || "")}`.trim()).join("\n\n"),
+        stderr: aggregate.results.map((result) => String(result.stderr || "")).filter(Boolean).join("\n\n"),
+        reason: aggregate.reason || null,
+      }))
+    : await runCommand(plan.execution_command || plan.command, {
+        cwd: plan.cwd_relative ? path.resolve(cwd, plan.cwd_relative) : cwd,
+        timeoutMs: policy.wall_timeout_ms,
+        idleTimeoutMs: policy.idle_timeout_ms,
+      });
+  const result = classifyNestedRunnerInfrastructureFailure(plan.execution_command || plan.command, raw, { projectRoot: cwd });
+  return {
+    ...result,
+    command: plan.command,
+    test_counts: testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`),
+  };
+}
+
 export function __testRunDeterministicTestCommand(command, options = {}) {
   return runCommand(command, options);
 }

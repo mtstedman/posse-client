@@ -21,6 +21,7 @@
 //   6. applyToolPolicy     — per-recipient permissions + budgets
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { FINAL_REVIEW_DEFAULT_MODE } from "../../../catalog/final-review.js";
 import { HANDOFF_SOURCE_EXTENSIONS } from "../../../catalog/files.js";
 
 import fs from "fs";
@@ -900,6 +901,12 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
     && packet.job_type !== "fix";
   const dispatchAgentEnabled = coordinationMode === "subagents"
     && ["researcher", "planner"].includes(recipient);
+  // The dev/fix close-out review gates the terminal handoff, so it needs the
+  // handoff protocol and a writing developer.
+  const finalReviewEnabled = handoffEnabled
+    && recipient === "dev"
+    && base.allow_write === true
+    && String(readSetting(SETTING_KEYS.FINAL_REVIEW_MODE) || FINAL_REVIEW_DEFAULT_MODE).trim().toLowerCase() !== "off";
   packet.agent_coordination = {
     mode: ["off", "handoff", "subagents"].includes(coordinationMode) ? coordinationMode : "off",
     agent_handoff_v1: handoffEnabled,
@@ -909,6 +916,7 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
     sub_agent_v1: subAgentEnabled,
     dispatch_agent_v1: dispatchAgentEnabled,
     web_research_handoff_v1: false,
+    final_review_v1: finalReviewEnabled,
     status: "experimental",
     source: "repo_setting_snapshot",
   };

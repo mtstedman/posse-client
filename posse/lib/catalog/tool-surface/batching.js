@@ -30,7 +30,7 @@ const NATIVE_BATCH_TOOLS = new Set([
 
 const SERIAL_PROTOCOL_TOOLS = new Set([
   "agent_handoff", "sub_agent_next_input", "chain_read", "chain_verdict", "get_operator_feedback",
-  "ack_operator_feedback", "agent.feedback", "memory.store", "memory.feedback",
+  "ack_operator_feedback", "agent.feedback", "memory.store", "memory.feedback", "final_review",
 ]);
 
 export function canonicalToolNameForBatching(name) {

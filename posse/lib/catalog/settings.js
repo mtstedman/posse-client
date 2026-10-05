@@ -122,6 +122,7 @@ export const SETTING_KEYS = Object.freeze({
   ATLAS_RESEARCH_RUNTIME_GUIDANCE: "atlas_research_runtime_guidance",
   RESEARCH_EVIDENCE_REUSE: "research_evidence_reuse",
   RESEARCH_CLAIM_REVIEW: "research_claim_review",
+  FINAL_REVIEW_MODE: "final_review_mode",
   POSSE_REMOTE_RESPONSE_SIGNING_SECRET: "posse_remote_response_signing_secret",
   POSSE_REMOTE_TIMEOUT_MS: "posse_remote_timeout_ms",
   POSSE_LOCAL_GENERATION_ENABLED: "posse_local_generation_enabled",

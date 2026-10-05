@@ -87,6 +87,8 @@ import {
   subAgentRuntime,
 } from "../../sub-agent/classes/SubAgentRuntime.js";
 import { webResearchRuntime } from "../../web-research/classes/WebResearchRuntime.js";
+import { finalReviewRuntime } from "../../assessment/classes/FinalReviewRuntime.js";
+import { runFinalReviewer } from "../../assessment/functions/final-review-reviewer.js";
 import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 import { publishContextBudgetCheckpoint } from "../../billing/functions/context-budget.js";
 import { isProviderInfrastructureError } from "../functions/execution/provider-error.js";
@@ -145,6 +147,7 @@ function agentGateSurfaceFingerprint(options = {}, providerName = "") {
       dispatchAgentV1: issued.coordination?.dispatchAgentV1 === true,
       researchInvestigationV1: issued.coordination?.researchInvestigationV1 === true,
       webResearchHandoffV1: issued.coordination?.webResearchHandoffV1 === true,
+      finalReviewV1: issued.coordination?.finalReviewV1 === true,
     },
     researcherSchemaDiet: String(options?.role || "").trim().toLowerCase() === "researcher"
       && resolveAtlasResearcherSchemaDiet(),
@@ -684,6 +687,8 @@ function providerAgentIdentity(opts = {}, {
     .includes("tools.dispatch_agent");
   const webResearchHandoff = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
     .includes("tools.web_research_handoff");
+  const finalReview = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
+    .includes("tools.final_review");
   const coordinationChild = opts._subAgentChild === true;
   const coordinationKey = coordinationChild ? "child" : (subAgent ? "subagents" : (agentHandoff ? "handoff" : "off"));
   const surfaceFingerprint = agentGateSurfaceFingerprint(opts);
@@ -704,6 +709,7 @@ function providerAgentIdentity(opts = {}, {
       subAgent,
       dispatchAgent,
       webResearchHandoff,
+      finalReview,
       researchInvestigation: opts._remoteIssuedPolicy?.coordination?.researchInvestigationV1 === true,
       coordinationChild,
       atlasAvailable,
@@ -724,6 +730,7 @@ function providerAgentIdentity(opts = {}, {
     subAgent,
     dispatchAgent,
     webResearchHandoff,
+    finalReview,
     researchInvestigation: opts._remoteIssuedPolicy?.coordination?.researchInvestigationV1 === true,
     coordinationChild,
     atlasAvailable,
@@ -749,6 +756,8 @@ function agentJobAttachment(opts = {}, context = {}) {
     .includes("tools.dispatch_agent");
   const webResearchHandoff = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
     .includes("tools.web_research_handoff");
+  const finalReview = (issuedToolSurfaceForProviderPolicy(opts._remoteIssuedPolicy) || [])
+    .includes("tools.final_review");
   const issuedToolAllowlist = opts?._remoteIssuedPolicy?.valid === true
     && opts._remoteIssuedPolicy?.toolAllowlist
     && typeof opts._remoteIssuedPolicy.toolAllowlist === "object"
@@ -780,6 +789,7 @@ function agentJobAttachment(opts = {}, context = {}) {
     subAgent,
     dispatchAgent,
     webResearchHandoff,
+    finalReview,
     researchInvestigation: opts._remoteIssuedPolicy?.coordination?.researchInvestigationV1 === true,
     ...(issuedToolAllowlist ? { toolAllowlist: issuedToolAllowlist } : {}),
     coordinationChild: opts._subAgentChild === true,
@@ -1773,6 +1783,7 @@ export class TrackedProviderClient {
           subAgent: preparedAgent.mcpGate?.contractBootConfig?.subAgent === true,
           dispatchAgent: preparedAgent.mcpGate?.contractBootConfig?.dispatchAgent === true,
           webResearchHandoff: preparedAgent.mcpGate?.contractBootConfig?.webResearchHandoff === true,
+          finalReview: preparedAgent.mcpGate?.contractBootConfig?.finalReview === true,
           coordinationChild: false,
         }
       : providerAgentIdentity(effectiveCapabilityOpts, {
@@ -1789,6 +1800,7 @@ export class TrackedProviderClient {
     let unregisterSubAgentChild = null;
     let unregisterWebResearchParent = null;
     let unregisterWebResearchChild = null;
+    let unregisterFinalReviewParent = null;
     const agentCallStartedAt = Date.now();
 
     try {
@@ -2054,6 +2066,35 @@ export class TrackedProviderClient {
               },
             );
           },
+        });
+      }
+      // A dev/fix agent issued final_review: its call runs the declared tests
+      // and a reviewer child of this agent call (domains/assessment, final review).
+      const finalReviewEnabled = String(opts.role || "").trim().toLowerCase() === "dev"
+        && !opts._parentAgentCallId
+        && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.finalReviewV1 === true
+        && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.final_review_v1 === true;
+      if (finalReviewEnabled) {
+        const reviewCwd = cwd || this.worker?.projectDir || null;
+        unregisterFinalReviewParent = finalReviewRuntime.registerParent({
+          agentCallId,
+          jobId: job_id,
+          workItemId: work_item_id,
+          attemptId: observationContext?.attempt_id ?? null,
+          cwd: reviewCwd,
+          runReview: ({ instructions, evidence }) => runFinalReviewer({
+            call: (prompt, callOpts, context) => this.call(prompt, callOpts, context),
+            composePrompt: (packet, text, composeOpts) => this.deps.composePromptRemoteAware(packet, text, composeOpts),
+            jobId: job_id,
+            workItemId: work_item_id,
+            attemptId: observationContext?.attempt_id ?? null,
+            cwd: reviewCwd,
+            providerName,
+            parentAgentCallId: agentCallId,
+            abortSignal,
+            instructions,
+            evidence,
+          }),
         });
       }
       this.worker._startSessionRecycleLeaseRenewal?.(opts._sessionRecycle);
@@ -2701,6 +2742,7 @@ export class TrackedProviderClient {
         unregisterSubAgentChild?.();
         unregisterWebResearchParent?.();
         unregisterWebResearchChild?.();
+        unregisterFinalReviewParent?.();
         try {
           if (agent && agentLease) await dispatcher.release({
             agent,

@@ -65,7 +65,7 @@ export const TEAM_READ_TOOLS = Object.freeze([
   "read_file", "list_files", "search_files", "git_history", "inspect_file",
   "hash_file", "get_brief", "pull_brief", "read_image_metadata",
   "validate_artifact_output", "agent_feedback", "get_operator_feedback",
-  "ack_operator_feedback", "agent_handoff", "request_scope",
+  "ack_operator_feedback", "agent_handoff", "request_scope", "final_review",
 ]);
 
 // A file write is admitted only where a fresh per-call grant can be bound to

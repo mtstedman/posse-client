@@ -32,6 +32,13 @@ export const POST_MERGE_DB_TASK_REVIEW_TYPE = "post_merge_db_task";
 // auth/session/security code. "pass" lets the merge proceed; "fail" sends the
 // work item back for rework with the operator's feedback (review rejection).
 export const MERGE_VERIFICATION_REVIEW_TYPE = "merge_verification_review";
+// Operator gate opened when Git refused a completed work item's merge (a
+// conflict, a dirty target, a failed close-out refresh). "merge" merges it
+// now, as `posse merge` would, once the operator resolved the repository
+// condition; "send_back" returns the work item for rework on its branch.
+// Gates opened before this type existed carry MERGE_VERIFICATION_REVIEW_TYPE
+// with the merge-failure payload key; their pass/fail mean merge/send_back.
+export const MERGE_FAILURE_RECOVERY_REVIEW_TYPE = "merge_failure_recovery";
 // Work-item gates (no original job) for states no job gate covers. A failed
 // work item that still owns a branch or implementation work asks whether to
 // retry its failed jobs on that branch, accept assessment-only failures, or
@@ -56,7 +63,8 @@ export const WORK_ITEM_DISPOSITION_REVIEW_TYPES = Object.freeze([
 // (wowiekowie 2026-10-01: WI 167 recovered at 22:36 but was refused
 // automatic merge as human_gate_active until a manual approval; WI 164's
 // blocked-recovery retry #2205 would have held it the same way).
-// Assessment-review answers (retry_assessment, replan, fail) still hold.
+// Assessment-review answers replan and fail still hold; retry_assessment
+// does not (merge-holding-gate.js).
 export const MERGE_RELEASING_RETRY_REVIEW_TYPES = Object.freeze([
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
   "blocked_recovery",
@@ -102,6 +110,7 @@ const HUMAN_INPUT_REVIEW_DIFF_POLICIES = Object.freeze({
   stall_exhausted_recovery: COMMITTED_ATTEMPT_REVIEW_DIFF,
   partial_work_recovery: WORK_ITEM_REVIEW_DIFF,
   [MERGE_VERIFICATION_REVIEW_TYPE]: WORK_ITEM_REVIEW_DIFF,
+  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: WORK_ITEM_REVIEW_DIFF,
   // Only "accept" (pass the failed jobs as an operator review) judges code.
   [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: Object.freeze({
     scope: HUMAN_INPUT_REVIEW_DIFF_SCOPES.WORK_ITEM,
@@ -143,6 +152,7 @@ export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   shared_trunk_provenance: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance),
   [POST_MERGE_DB_TASK_REVIEW_TYPE]: freezeChoices(["run", "skip"]),
   [MERGE_VERIFICATION_REVIEW_TYPE]: freezeChoices(["pass", "fail"]),
+  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: freezeChoices(["merge", "send_back"]),
   [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: freezeChoices(["retry", "accept", "abandon"]),
   [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: freezeChoices(["wait", "rebuild", "abandon"]),
 });
@@ -283,6 +293,11 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
     allowed_actions: ["pass", "fail"],
     allowed_source_states: ["succeeded"],
   },
+  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: {
+    gate_kind: MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
+    allowed_actions: ["merge", "send_back"],
+    allowed_source_states: ["succeeded"],
+  },
   [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: {
     gate_kind: WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
     allowed_actions: ["retry", "accept", "abandon"],
@@ -390,6 +405,12 @@ const HUMAN_GATE_ACTIONABILITY_PROFILES = Object.freeze({
     headless_behavior: "do_not_run",
     diagnostic_insufficient_reason: "Posse cannot observe when the operator deploys the merged change.",
   },
+  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: {
+    unresolved_fact: "Whether the repository condition that stopped the merge is resolved, so the work item can merge now, or the work must go back for rework.",
+    human_contribution: "recovery_choice",
+    headless_behavior: "do_not_merge",
+    diagnostic_insufficient_reason: "Git refused the merge; only the operator can resolve the conflict or repository condition behind it.",
+  },
   [MERGE_VERIFICATION_REVIEW_TYPE]: {
     unresolved_fact: "Whether work whose planned verification could not run may merge on review alone.",
     human_contribution: "authority",
@@ -444,6 +465,8 @@ function actionTransition(action) {
     abandon: "cancel_work_item_and_delete_branch",
     wait: "keep_merge_deferred_until_upstream_merges",
     rebuild: "requeue_on_target_branch_without_inherited_edits",
+    merge: "merge_work_item_into_target",
+    send_back: "requeue_work_item_for_rework",
   };
   if (String(action || "").startsWith("retry:")) return "queue_provider_specific_recovery";
   return transitions[canonical] || `resolve_gate_with_${canonical || "response"}`;
@@ -536,6 +559,7 @@ export const HUMAN_INPUT_COORDINATION_REVIEW_TYPES = Object.freeze([
   "artifact_routing_admin",
   "shared_trunk_provenance",
   POST_MERGE_DB_TASK_REVIEW_TYPE,
+  MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
   ...WORK_ITEM_DISPOSITION_REVIEW_TYPES,
 ]);
 
@@ -556,6 +580,8 @@ const HUMAN_INPUT_CHOICE_ALIASES = Object.freeze({
   commit: /\b(commit|assess|assessment|keep|preserve|save)\b/i,
   revert: /\b(revert|discard|drop|dead[- ]?letter|deadletter|abandon|kill)\b/i,
   acknowledge: /\b(acknowledge|acknowledged|understood|noted|ok|okay)\b/i,
+  merge: /\b(merge|merge now|retry merge|retry the merge)\b/i,
+  send_back: /\b(send[ _-]?back|rework|return it)\b/i,
 });
 
 export function normalizeHumanInputChoices(choices, { limit = 9 } = {}) {

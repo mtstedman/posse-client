@@ -207,6 +207,7 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
         dispatch_agent_v1: bootConfig.dispatchAgent === true,
         research_investigation_v1: bootConfig.researchInvestigation === true,
         web_research_handoff_v1: bootConfig.webResearchHandoff === true,
+        final_review_v1: bootConfig.finalReview === true,
       },
     },
     mcp_oauth: {

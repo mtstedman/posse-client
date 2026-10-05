@@ -429,11 +429,17 @@ function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = nul
   const webResearchHandoffEnabled = issued.valid
     && localWebResearchHandoffEnabled
     && issued.coordination?.webResearchHandoffV1 === true;
+  const localFinalReviewEnabled = packet?.agent_coordination?.final_review_v1 === true;
+  const finalReviewEnabled = issued.valid
+    && handoffEnabled
+    && localFinalReviewEnabled
+    && issued.coordination?.finalReviewV1 === true;
   const effectiveToolSurface = issued.toolSurface.filter(
     (name) => (name !== "tools.agent_handoff" || handoffEnabled)
       && (name !== "tools.sub_agent" || subAgentEnabled)
       && (name !== "tools.dispatch_agent" || dispatchAgentEnabled)
-      && (name !== "tools.web_research_handoff" || webResearchHandoffEnabled),
+      && (name !== "tools.web_research_handoff" || webResearchHandoffEnabled)
+      && (name !== "tools.final_review" || finalReviewEnabled),
   );
   const projectedIssuance = {
     ...(issuance && typeof issuance === "object" ? issuance : {}),
@@ -460,6 +466,7 @@ function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = nul
       dispatch_agent_v1: dispatchAgentEnabled,
       research_investigation_v1: packet?.agent_coordination?.research_investigation_v1 === true && issued.coordination?.researchInvestigationV1 === true,
       web_research_handoff_v1: webResearchHandoffEnabled,
+      final_review_v1: finalReviewEnabled,
       status: "experimental",
     },
   };
@@ -479,6 +486,7 @@ function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = nul
     sub_agent_next_input_v1: subAgentNextInputEnabled,
     dispatch_agent_v1: dispatchAgentEnabled,
     web_research_handoff_v1: webResearchHandoffEnabled,
+    final_review_v1: finalReviewEnabled,
     remote_acknowledged: issued.coordination?.agentHandoffV1 === true,
     compact_remote_acknowledged: issued.coordination?.agentHandoffCompactV1 === true,
     compact_v2_remote_acknowledged: issued.coordination?.agentHandoffCompactV2 === true,
@@ -487,6 +495,7 @@ function applyRemoteIssuanceToPacket(packet, response, { authorityIssuance = nul
     sub_agent_next_input_remote_acknowledged: issued.coordination?.subAgentNextInputV1 === true,
     dispatch_agent_remote_acknowledged: issued.coordination?.dispatchAgentV1 === true,
     web_research_handoff_remote_acknowledged: issued.coordination?.webResearchHandoffV1 === true,
+    final_review_remote_acknowledged: issued.coordination?.finalReviewV1 === true,
   };
   const policy = issued.toolPolicy;
   packet.tool_policy = {

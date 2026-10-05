@@ -2711,6 +2711,20 @@ export const TOOL_GET_BRIEF = {
   },
 };
 
+export const TOOL_FINAL_REVIEW = {
+  type: "function",
+  name: "final_review",
+  description:
+    "Close out the finished change: runs the task's declared tests on the current workspace, then an " +
+    "independent reviewer checks the change against the task contract. Returns pass, or findings to fix " +
+    "before calling it again. Takes several minutes; the result arrives when the review completes.",
+  parameters: {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  },
+};
+
 export const TOOL_GENERATE_IMAGE = {
   type: "function",
   name: "generate_image",

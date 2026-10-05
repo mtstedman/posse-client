@@ -1,4 +1,5 @@
 import { executeDispatchAgent, submitWebResearchHandoff } from "../../../domains/web-research/classes/WebResearchRuntime.js";
+import { executeFinalReview } from "../../../domains/assessment/classes/FinalReviewRuntime.js";
 // @ts-check
 //
 // Persistent MCP owner for provider-launched stdio shims.
@@ -6065,6 +6066,32 @@ export class PersistentMcpOwner {
               result: { content: [{ type: "text", text: String(error?.message || error) }], isError: true },
             } });
           }
+          return;
+        }
+        if (requested.suite === "tools" && requested.name === "final_review") {
+          // Runs the declared tests and a reviewer child of this agent call;
+          // the owner's progress heartbeat holds the transport open meanwhile.
+          let text;
+          let isError = false;
+          try {
+            const result = await executeFinalReview(toolArgs, {
+              context: { agentCallId: session?.bootConfig?.agentCallId },
+            });
+            text = JSON.stringify(result);
+          } catch (error) {
+            isError = true;
+            text = `Error executing final_review: ${String(error?.message || error).slice(0, 500)}`;
+          }
+          sendJson(res, 200, {
+            ok: true,
+            bootId: this.bootId,
+            sessionId: id,
+            message: {
+              jsonrpc: "2.0",
+              id: message?.id ?? null,
+              result: { content: [{ type: "text", text }], isError },
+            },
+          });
           return;
         }
         if (requested.suite === "tools" && ["sub_agent", "dispatch_agent"].includes(requested.name)) {
