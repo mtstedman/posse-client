@@ -26,6 +26,19 @@ export function clearSharedAtlasToolExecutorReadContexts(scope = null) {
   else sharedExecutor.clearReadContext(scope);
 }
 
+/**
+ * Refresh the files a finished session edited last (see
+ * AtlasToolExecutor#deferRefresh). Best effort: callers fire it from session
+ * teardown and handoff, which it must never fail.
+ */
+export function flushSharedAtlasToolExecutorDeferredRefreshes({ sessionId = null } = {}) {
+  const executor = sharedExecutor;
+  if (typeof executor?.flushDeferredRefreshes !== "function") return Promise.resolve([]);
+  return Promise.resolve()
+    .then(() => executor.flushDeferredRefreshes({ sessionId }))
+    .catch(() => []);
+}
+
 export function invalidateSharedAtlasToolExecutorReadCaches(scope = null) {
   sharedExecutor?.invalidateReadCaches?.(scope);
 }

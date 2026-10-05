@@ -69,7 +69,7 @@ import {
   COMPACT_STRUCTURE_DEFAULT_MAX_FILES,
   COMPACT_STRUCTURE_PROJECTION,
 } from "../../../domains/atlas/functions/v2/retrieval/compact-presentation.js";
-import { getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
+import { flushSharedAtlasToolExecutorDeferredRefreshes, getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
 import {
   resolveAtlasResearchRuntimeGuidance,
   resolveResearchSynthesisPolicySnapshot,
@@ -5324,6 +5324,9 @@ export class PersistentMcpOwner {
     const attachProof = session.snapshotAttachProof();
     this._sessions.delete(id);
     this._sessionIdsByTokenHash.delete(tokenHash(session.token));
+    // The file this session edited last waits for the agent to move on; the
+    // session ending is the last such signal.
+    void flushSharedAtlasToolExecutorDeferredRefreshes({ sessionId: id });
     // Reservations are keyed per job/attempt (the exploration budget is an
     // attempt-level invariant); drop the entry only when no other live session
     // still shares that attempt, or a reconnect could re-race the ceiling.
@@ -6468,6 +6471,11 @@ export class PersistentMcpOwner {
       const terminalHandoffReceipt = completedTool?.suite === "tools"
         && ["agent_handoff", "web_research_handoff"].includes(completedTool.name)
         && mcpToolCallSuccess(response);
+      // Handing off is the agent moving on from the file it edited last:
+      // refresh it now so the assessor's ATLAS reads start from a current view.
+      if (terminalHandoffReceipt && completedTool.name === "agent_handoff") {
+        void flushSharedAtlasToolExecutorDeferredRefreshes({ sessionId: session?.id || id });
+      }
       sendJson(res, 200, {
         ok: true,
         bootId: this.bootId,
@@ -7879,6 +7887,7 @@ export class PersistentMcpOwner {
       scheduled: !!scheduled,
       detail: scheduled ? {
         action: scheduled.action || null,
+        deferred: scheduled.deferred === true,
         via: scheduled.via || null,
         branch: scheduled.branch || null,
         paths: scheduled.paths || null,

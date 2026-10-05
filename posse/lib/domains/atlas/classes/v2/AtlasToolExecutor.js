@@ -839,6 +839,8 @@ export class AtlasToolExecutor {
   #failedRefreshes = new Map();
   /** @type {Map<string, { paths: Set<string>, waiters: Array<{ resolve: (value: any) => void, reject: (error: any) => void }>, run: ((paths: string[]) => Promise<any>) | null, draining: Promise<void> | null }>} */
   #pendingRefreshes = new Map();
+  /** @type {Map<string, { paths: Set<string>, run: (paths: string[]) => Promise<any>, sessionId: string | null }>} */
+  #deferredRefreshes = new Map();
   #now;
 
   constructor({
@@ -903,7 +905,10 @@ export class AtlasToolExecutor {
     }
     const repoKey = this.#repoKeyFor(request);
     // A source read is a consistency barrier for deterministic writes in the
-    // same WI. Flush the coalesced pending batch before resolving its view.
+    // same WI. Release the file refresh held back for this scope, then flush
+    // the coalesced pending batch before resolving its view. A failure is
+    // reported through #failedRefreshes below, not through this promise.
+    this.#releaseDeferredRefresh(repoKey)?.catch(() => {});
     const refreshWasPending = !!this.#pendingRefreshes.get(repoKey)?.draining;
     await this.#flushPendingRefresh(repoKey);
     // A read which was queued behind a refresh must observe that refresh's
@@ -1065,10 +1070,12 @@ export class AtlasToolExecutor {
     const recordFailure = (dirtyPaths = paths) => {
       this.#failedRefreshes.set(gateKey, {
         paths: [...new Set([...dirtyPaths, ...(this.#failedRefreshes.get(gateKey)?.paths || [])])],
-        retry: () => this.scheduleDeterministicWriteRefresh(request),
+        // A read retries now, not after the agent moves on: run the refresh
+        // directly (it folds in every failed path) instead of deferring it.
+        retry: () => this.#enqueuePendingRefresh(gateKey, paths, refresh),
       });
     };
-    return this.#enqueuePendingRefresh(gateKey, paths, async (batchPaths) => {
+    const refresh = async (batchPaths) => {
       try {
         return await this.#gate.write(
         gateKey,
@@ -1139,7 +1146,50 @@ export class AtlasToolExecutor {
         recordFailure(batchPaths);
         throw error;
       }
+    };
+    return this.#deferRefresh(gateKey, paths, refresh, {
+      branch,
+      sessionId: request.source && typeof request.source === "object" ? request.source.sessionId ?? null : null,
     });
+  }
+
+  // Edits are refreshed per file, once the agent moves on: repeated writes to
+  // the same file only re-arm its pending refresh, and it runs when a write
+  // touches another file, an ATLAS read of this scope needs a current view, or
+  // the writing session ends. Live case 2026-10-05: fiscal-wizard job 57
+  // edited htdocs/scans.php 26 times in a row and queued 26 incremental warms;
+  // 113 of the run's 172 refreshes repeated the file just refreshed.
+  #deferRefresh(key, paths, run, { branch = null, sessionId = null } = {}) {
+    const held = this.#deferredRefreshes.get(key);
+    const deferred = { ok: true, deferred: true, action: "index.refresh", path: paths[0], paths, via: "AtlasToolExecutor", branch };
+    if (held && paths.every((repoPath) => held.paths.has(repoPath))) {
+      held.run = run;
+      held.sessionId = sessionId ?? held.sessionId;
+      return deferred;
+    }
+    const released = held ? this.#releaseDeferredRefresh(key) : null;
+    this.#deferredRefreshes.set(key, { paths: new Set(paths), run, sessionId });
+    return released || deferred;
+  }
+
+  #releaseDeferredRefresh(key) {
+    const held = this.#deferredRefreshes.get(key);
+    if (!held) return null;
+    this.#deferredRefreshes.delete(key);
+    return this.#enqueuePendingRefresh(key, [...held.paths], held.run);
+  }
+
+  /**
+   * Run the refreshes held back for files a session edited last. With a
+   * sessionId, only that session's; without, every scope's.
+   *
+   * @param {{ sessionId?: string | null }} [options]
+   */
+  async flushDeferredRefreshes({ sessionId = null } = {}) {
+    const keys = [...this.#deferredRefreshes.entries()]
+      .filter(([, held]) => sessionId == null || held.sessionId === sessionId)
+      .map(([key]) => key);
+    return Promise.allSettled(keys.map((key) => this.#releaseDeferredRefresh(key)));
   }
 
   #enqueuePendingRefresh(key, paths, run) {
@@ -1151,31 +1201,32 @@ export class AtlasToolExecutor {
     for (const repoPath of paths) entry.paths.add(repoPath);
     entry.run = run;
     const result = new Promise((resolve, reject) => entry.waiters.push({ resolve, reject }));
-    if (!entry.draining) {
-      entry.draining = Promise.resolve().then(async () => {
-        while (entry.paths.size > 0) {
-          const batchPaths = [...entry.paths];
-          const batchWaiters = entry.waiters.splice(0);
-          const batchRun = entry.run;
-          entry.paths.clear();
-          try {
-            const value = await batchRun(batchPaths);
-            for (const waiter of batchWaiters) waiter.resolve(value);
-          } catch (error) {
-            for (const waiter of batchWaiters) waiter.reject(error);
-          }
+    const drain = () => Promise.resolve().then(async () => {
+      while (entry.paths.size > 0) {
+        const batchPaths = [...entry.paths];
+        const batchWaiters = entry.waiters.splice(0);
+        const batchRun = entry.run;
+        entry.paths.clear();
+        try {
+          const value = await batchRun(batchPaths);
+          for (const waiter of batchWaiters) waiter.resolve(value);
+        } catch (error) {
+          for (const waiter of batchWaiters) waiter.reject(error);
         }
-      }).finally(() => {
-        entry.draining = null;
-        if (entry.paths.size === 0 && entry.waiters.length === 0) this.#pendingRefreshes.delete(key);
-      });
-    }
+      }
+    }).finally(() => {
+      // A path enqueued after the loop's last check but before this ran saw
+      // `draining` still set and started nothing; drain it now.
+      entry.draining = entry.paths.size > 0 ? drain() : null;
+      if (!entry.draining && entry.waiters.length === 0) this.#pendingRefreshes.delete(key);
+    });
+    if (!entry.draining) entry.draining = drain();
     return result;
   }
 
   async #flushPendingRefresh(key) {
     const entry = this.#pendingRefreshes.get(key);
-    if (entry?.draining) await entry.draining;
+    while (entry?.draining) await entry.draining;
   }
 
   /** Only call after a full, source-verified reconciliation of this scope. */
@@ -1241,6 +1292,9 @@ export class AtlasToolExecutor {
   }
 
   async close() {
+    // A held-back refresh is not started at shutdown: the work item's next
+    // mount reconciles its source against the checkout anyway.
+    this.#deferredRefreshes.clear();
     await Promise.allSettled([...this.#pendingRefreshes.values()].map((entry) => entry.draining).filter(Boolean));
     this.#pendingRefreshes.clear();
     this.#failedRefreshes.clear();
