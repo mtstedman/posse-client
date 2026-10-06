@@ -13,8 +13,10 @@ import { ScriptToolRegistry } from "./ScriptToolRegistry.js";
 import { SqlCapabilityRegistry } from "./SqlCapabilityRegistry.js";
 import { PromptToolRegistry } from "./PromptToolRegistry.js";
 import { RegisteredAgentBridge } from "./RegisteredAgentBridge.js";
+import { AgentExposureRegistry } from "./AgentExposureRegistry.js";
 import { verifyMcpOAuthToken, bootConfigFromMcpOAuthClaims } from "../../integrations/functions/deterministic-mcp/oauth-token.js";
-import { automationDbPath, automationSocketPath, registeredAgentSocketPath, ensureAutomationOperatorToken, repositoryID } from "../functions/paths.js";
+import { automationDbPath, automationSocketPath, registeredAgentSocketPath, registeredAgentGatewayBackendPath, registeredAgentGatewayKeyPath, ensureAutomationOperatorToken, repositoryID } from "../functions/paths.js";
+import { gatewayKey, verifyGatewayFrame } from "../functions/gateway-auth.js";
 import { automationBuildIdentity, automationOwnerLaunch } from "../functions/owner-identity.js";
 import { definitionDigest, demand } from "../functions/policy.js";
 import { previewOccurrences } from "../functions/triggers.js";
@@ -34,9 +36,10 @@ export class AutomationOwner {
     this.agentRuntime = new AgentRuntime({ definitions: this.agentDefinitions, client: { request: async (operation, args) => this.dispatchOperator(operation, args) } });
     this.agentSchedules = new AgentScheduleRegistry(this.store, this.agentRuntime, this.agentDefinitions);
     this.registered = new RegisteredAgentBridge(this);
+    this.exposures = new AgentExposureRegistry(this);
     this.socketPath = socketPath; this.operatorToken = operatorToken || ensureAutomationOperatorToken(); this.tickMs = tickMs;
     this.build = build; this.launch = launch;
-    this.server = null; this.registeredServer = null; this.registeredConnections = new Set(); this.timer = null; this.ownsStore = !store; this.socketFile = null; this.registeredSocketFile = null;
+    this.server = null; this.registeredServer = null; this.gatewayServer = null; this.registeredConnections = new Set(); this.timer = null; this.ownsStore = !store; this.socketFile = null; this.registeredSocketFile = null; this.gatewaySocketFile = null; this.gatewayNonces = new Set(); this.gatewayKey = null;
   }
   async start() {
     if (this.server) return this.socketPath;
@@ -73,10 +76,28 @@ export class AutomationOwner {
       fs.chmodSync(registeredPath, process.env.POSSE_REGISTERED_AGENT_SOCKET_MODE === "0660" ? 0o660 : 0o600);
       this.registeredSocketFile = fileIdentity(registeredPath);
     }
+    const gatewayPath = registeredAgentGatewayBackendPath();
+    if (gatewayPath) {
+      demand(process.platform === "linux" && gatewayPath !== registeredPath && gatewayPath !== this.socketPath,
+        "Gateway backend needs a distinct Linux socket", "invalid_request");
+      const parent = path.dirname(gatewayPath);
+      fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+      fs.chmodSync(parent, 0o700);
+      if (fs.existsSync(gatewayPath)) {
+        const info = fs.lstatSync(gatewayPath);
+        demand(info.isSocket() && !info.isSymbolicLink(), "Gateway backend path is occupied", "forbidden");
+        fs.unlinkSync(gatewayPath);
+      }
+      this.gatewayKey = gatewayKey(registeredAgentGatewayKeyPath());
+      this.gatewayServer = net.createServer(socket => this.accept(socket, false, true));
+      await new Promise((resolve, reject) => { this.gatewayServer.once("error", reject); this.gatewayServer.listen(gatewayPath, () => { this.gatewayServer.off("error", reject); resolve(); }); });
+      fs.chmodSync(gatewayPath, 0o600);
+      this.gatewaySocketFile = fileIdentity(gatewayPath);
+    }
     this.timer = setInterval(() => { try { this.service.tick(); this.agentSchedules.tick(); this.registered.maintain(); } catch (error) { if (error.code === "owner_fenced") void this.close(); } }, this.tickMs);
     return this.socketPath;
   }
-  accept(socket, registered = false) {
+  accept(socket, registered = false, gateway = false) {
     let buffer = Buffer.alloc(0), done = false, framed = false;
     socket.setTimeout(5000, () => socket.destroy());
     const fail = error => {
@@ -87,14 +108,14 @@ export class AutomationOwner {
     socket.on("data", chunk => {
       if (done || framed) return;
       buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length > AUTOMATION_MAX_REQUEST_BYTES) return fail(Object.assign(new Error("Automation request is too large"), { code: "request_too_large" }));
+      if (buffer.length > (gateway ? AUTOMATION_MAX_REQUEST_BYTES * 2 + 4096 : AUTOMATION_MAX_REQUEST_BYTES)) return fail(Object.assign(new Error("Automation request is too large"), { code: "request_too_large" }));
       const newline = buffer.indexOf(10);
       if (newline < 0) return;
       framed = true;
       socket.setTimeout(0);
       try {
         const request = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
-        Promise.resolve(registered ? this.dispatchRegistered(request) : this.dispatch(request)).then(result => {
+        Promise.resolve(gateway ? this.dispatchGateway(request) : registered ? this.dispatchRegistered(request) : this.dispatch(request)).then(result => {
           const response = JSON.stringify({ ok: true, result }) + "\n";
           demand(Buffer.byteLength(response) <= AUTOMATION_MAX_RESPONSE_BYTES,
             "Automation result exceeds the response limit; narrow the tool output or inspect the run locally", "response_too_large");
@@ -115,6 +136,14 @@ export class AutomationOwner {
     demand(request && typeof request === "object" && !Array.isArray(request), "Invalid registered request", "invalid_request");
     if (request.kind === "health" && Object.keys(request).length === 1) return { protocol: "posse.registered_agent_request.v1", ready: !this.service.stopping && this.service.ownsLease() };
     return this.registered.execute(request);
+  }
+  dispatchGateway(envelope) {
+    demand(this.gatewayKey, "Gateway is unavailable", "unauthorized");
+    const { request, identity } = verifyGatewayFrame(envelope, this.gatewayKey, this.gatewayNonces);
+    if (request.kind === "health" && Object.keys(request).length === 1) return this.dispatchRegistered(request);
+    if (request.kind === "probe" && typeof request.agent === "string" && Object.keys(request).length === 2)
+      return this.exposures.probe(request.agent, identity);
+    return this.registered.execute(request, { identity, transport: "local_gateway" });
   }
   health() { return { ...this.service.health(), build: this.build, launch: this.launch }; }
   dispatchAgent(request) {
@@ -168,8 +197,15 @@ export class AutomationOwner {
       case "agent.definition.remove": return this.agentDefinitions.remove(args.name);
       case "agent.client.create": return this.registered.create(args);
       case "agent.client.rotate": return this.registered.rotate(args.id);
+      case "agent.client.extend_exposure": return this.registered.extendForExposure(args.id, args.agent, args.operations, args.context_names);
       case "agent.client.revoke": return this.registered.revoke(args.id);
       case "agent.client.list": return this.store.list("registered_clients").map(item => this.registered.publicRegistration(item));
+      case "agent.exposure.stage": return this.exposures.stage(args);
+      case "agent.exposure.activate": return this.exposures.activate(args.id, args.revision);
+      case "agent.exposure.revoke": return this.exposures.revoke(args.id);
+      case "agent.exposure.restore": return this.exposures.restore(args.id);
+      case "agent.exposure.list": return this.exposures.list();
+      case "agent.exposure.retire_user": return this.exposures.retireUser(args.uid);
       case "agent.trust.approve": return this.registered.approve(args);
       case "agent.trust.list": return this.store.list("registered_trust");
       case "agent.repository.save": {
@@ -227,7 +263,9 @@ export class AutomationOwner {
     if (this.timer) clearInterval(this.timer); this.timer = null;
     const server = this.server; this.server = null;
     const registeredServer = this.registeredServer; this.registeredServer = null;
+    const gatewayServer = this.gatewayServer; this.gatewayServer = null;
     if (registeredServer) registeredServer.close();
+    if (gatewayServer) gatewayServer.close();
     for (const socket of this.registeredConnections) socket.destroy();
     if (server) server.close();
     await this.registered.shutdown(); await this.agentSchedules.shutdown(); await this.service.shutdown(); if (this.ownsStore) this.store.close();
@@ -236,6 +274,8 @@ export class AutomationOwner {
       try { if (!this.socketFile || sameFile(fileIdentity(this.socketPath), this.socketFile)) fs.unlinkSync(this.socketPath); } catch {}
       const registeredPath = registeredAgentSocketPath();
       try { if (!this.registeredSocketFile || sameFile(fileIdentity(registeredPath), this.registeredSocketFile)) fs.unlinkSync(registeredPath); } catch {}
+      const gatewayPath = registeredAgentGatewayBackendPath();
+      if (gatewayPath) try { if (!this.gatewaySocketFile || sameFile(fileIdentity(gatewayPath), this.gatewaySocketFile)) fs.unlinkSync(gatewayPath); } catch {}
     }
   }
 }

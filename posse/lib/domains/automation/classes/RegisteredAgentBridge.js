@@ -87,6 +87,22 @@ export class RegisteredAgentBridge {
     return { registration: this.publicRegistration(registration), credential };
   }
 
+  extendForExposure(id, agent, operations, contextNames) {
+    const registration = this.store.get(REGISTRATIONS, id);
+    demand(registration?.enabled && !registration.local_only && registration.agents.length === 1
+      && registration.agents[0] === agent && this.owner.exposures.list().some(item => item.id === `${agent}:${id}`),
+    "Named client can only be extended after its single-agent exposure is staged", "forbidden");
+    demand(Array.isArray(operations) && operations.every(op => REGISTERED_AGENT_OPERATIONS.includes(op))
+      && Array.isArray(contextNames) && contextNames.every(name => ID.test(name)),
+    "Invalid client extension", "invalid_request");
+    registration.operations = [...new Set([...registration.operations, ...operations])];
+    registration.context_names = [...new Set([...registration.context_names, ...contextNames])];
+    registration.revision++;
+    this.store.put(REGISTRATIONS, id, registration);
+    this.cancel(registration.identity);
+    return this.publicRegistration(registration);
+  }
+
   revoke(id) {
     const registration = this.store.get(REGISTRATIONS, id);
     demand(registration, "Registration unavailable", "forbidden");
@@ -123,6 +139,8 @@ export class RegisteredAgentBridge {
         this.store.remove("agent_sessions", session.id);
       });
     }
+    for (const access of this.store.list("registered_access_audit"))
+      if (Date.parse(access.last_at) < now - CHAT_CONTENT_MS) this.store.remove("registered_access_audit", access.id);
   }
 
   publicRegistration(value) { return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "credential_hash")); }
@@ -134,7 +152,7 @@ export class RegisteredAgentBridge {
     this.failedAuth = this.failedAuth.filter(time => time > now - 60_000);
     demand(this.failedAuth.length < 100, "Registration authentication is throttled", "unauthorized");
     const registration = this.store.get(REGISTRATIONS, request.client_id);
-    if (!registration?.enabled || !same(registration.credential_hash, verifier(String(request.credential || "")))) {
+    if (!registration?.enabled || registration.local_only || !same(registration.credential_hash, verifier(String(request.credential || "")))) {
       this.failedAuth.push(now);
       demand(false, "Registration authentication failed", "unauthorized");
     }
@@ -169,12 +187,16 @@ export class RegisteredAgentBridge {
     return fs.realpathSync(root);
   }
 
-  validateRequest(request) {
+  validateRequest(request, local = false) {
     object(request, ["protocol", "client_id", "credential", "request_id", "operation", "agent", "session", "idempotency_key", "request"],
-      ["protocol", "client_id", "credential", "operation", "agent", "idempotency_key", "request"]);
+      local ? ["protocol", "operation", "agent", "idempotency_key", "request"]
+        : ["protocol", "client_id", "credential", "operation", "agent", "idempotency_key", "request"]);
     demand(request.protocol === REGISTERED_AGENT_PROTOCOL && REGISTERED_AGENT_OPERATIONS.includes(request.operation), "Unsupported registered agent protocol", "invalid_request");
     demand(request.request_id === undefined || typeof request.request_id === "string" && request.request_id.length <= 120, "Invalid request ID", "invalid_request");
-    demand(typeof request.client_id === "string" && ID.test(request.client_id)
+    demand((local && request.client_id === undefined && request.credential === undefined
+      || local && typeof request.client_id === "string" && ID.test(request.client_id)
+        && (request.credential === undefined || typeof request.credential === "string")
+      || !local && typeof request.client_id === "string" && ID.test(request.client_id) && typeof request.credential === "string")
       && typeof request.agent === "string" && AGENT_NAME_PATTERN.test(request.agent), "Invalid registration or agent", "invalid_request");
     demand(typeof request.idempotency_key === "string" && KEY.test(request.idempotency_key), "Idempotency key is required", "invalid_request");
     demand(request.operation === "chat" || !Object.hasOwn(request, "session"), "One-shot runs cannot resume a session", "invalid_request");
@@ -197,11 +219,14 @@ export class RegisteredAgentBridge {
     return context;
   }
 
-  async execute(request) {
+  async execute(request, transport = null) {
     demand(!this.stopping, "Registered owner is stopping", "owner_unavailable");
     this.owner.service.assertOwner();
-    const context = this.validateRequest(request);
-    const registration = this.authenticate(request);
+    const local = transport?.transport === "local_gateway";
+    const context = this.validateRequest(request, local);
+    const authority = local ? this.owner.exposures.authorize(request, transport.identity) : null;
+    const registration = authority?.registration || this.authenticate(request);
+    if (!local) this.owner.exposures.legacyAllowed(registration.id, request.agent);
     const loaded = this.validateAgent(request.agent);
     demand(context.every(item => registration.context_names.includes(item.name)), "Context name is not registered", "forbidden");
     const selector = request.session || "";
@@ -240,13 +265,35 @@ export class RegisteredAgentBridge {
       const spent = history.filter(item => item.client_id === registration.identity)
         .reduce((sum, item) => sum + (Number.isFinite(item.spend_usd) ? item.spend_usd : Number(item.spend_reserved_usd) || 0), 0);
       demand(spent + loaded.definition.limits.spend_usd <= registration.max_spend_usd, "Registration spend limit reached", "forbidden");
+      if (authority) {
+        demand(history.filter(item => item.exposure_id === authority.exposure.id
+          && Date.parse(item.created_at) >= minuteAgo).length < 60,
+        "Exposure rate limit reached", "agent_request_busy");
+        const exposureSpent = history.filter(item => item.exposure_id === authority.exposure.id)
+          .reduce((sum, item) => sum + (Number.isFinite(item.spend_usd) ? item.spend_usd : Number(item.spend_reserved_usd) || 0), 0);
+        const budgets = [authority.exposure.policy.max_spend_usd,
+          ...(authority.exposure.pending_policy ? [authority.exposure.pending_policy.max_spend_usd] : [])];
+        demand(exposureSpent + loaded.definition.limits.spend_usd <= Math.min(...budgets),
+          "Exposure spend limit reached", "forbidden");
+      }
       const created = { key: receiptKey, fingerprint, client_id: registration.identity, agent: request.agent,
         agent_digest: loaded.digest, operation: request.operation, session_id: sessionID, status: "active",
+        ...(authority ? { exposure_id: authority.exposure.id, caller_uid: authority.caller.uid,
+          caller_user: authority.caller.user } : {}),
         request_id: String(request.request_id || crypto.randomUUID()).slice(0, 120), spend_reserved_usd: loaded.definition.limits.spend_usd,
         created_at: new Date().toISOString() };
       fresh = true;
       return this.store.putRegisteredReceipt(receiptKey, created);
     });
+    if (authority) {
+      const auditKey = digest([receiptKey, authority.caller.uid]);
+      const previous = this.store.get("registered_access_audit", auditKey);
+      this.store.put("registered_access_audit", auditKey, { id: auditKey, client_id: registration.id,
+        client_identity: registration.identity, exposure_id: authority.exposure.id,
+        caller_uid: authority.caller.uid, caller_user: authority.caller.user,
+        receipt_key: receiptKey, first_at: previous?.first_at || new Date().toISOString(),
+        last_at: new Date().toISOString(), count: (previous?.count || 0) + 1 });
+    }
     if (receipt.status !== "active") {
       if (!receipt.response) return failure("receipt_expired", "Idempotency receipt content expired; the key remains reserved");
       demand(receipt.agent_digest === loaded.digest, "Agent definition changed since this receipt", "capability_unavailable");
@@ -276,6 +323,7 @@ export class RegisteredAgentBridge {
       state: executionState,
       check: () => {
         demand(!controller.signal.aborted, "Registered execution timed out", "agent_budget_exceeded");
+        if (local) this.owner.exposures.authorize(request, transport.identity);
         const live = this.store.get(REGISTRATIONS, registration.id);
         demand(live?.enabled && live.identity === registration.identity && live.agents.includes(request.agent)
           && live.operations.includes(request.operation), "Registration authority changed", "forbidden");

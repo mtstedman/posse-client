@@ -2,13 +2,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 import { AGENT_TURN_PROTOCOL } from "../../../catalog/agent.js";
 import { REGISTERED_AGENT_PROTOCOL } from "../../../catalog/registered-agent.js";
-import { registeredAgentSocketPath } from "../../automation/functions/paths.js";
+import { registeredAgentSocketPath, registeredAgentGatewaySocketPath } from "../../automation/functions/paths.js";
 
 const MAX_BYTES = 1024 * 1024;
-const USAGE = "Usage: posse-agent chat <agent> [--session ID] --idempotency-key KEY --request-json --json | posse-agent run <agent> --idempotency-key KEY --request-json --json | posse-agent health --json | posse-agent version --json";
+const USAGE = "Usage: posse-agent chat <agent> [--client ID] [--session ID] --idempotency-key KEY --request-json --json | posse-agent run <agent> [--client ID] --idempotency-key KEY --request-json --json | posse-agent probe <agent> --json | posse-agent health --json | posse-agent version --json";
 
 function fault(code, message) { return Object.assign(new Error(message), { code }); }
 
@@ -23,16 +24,20 @@ function parse(argv) {
     if (agent !== "--json" || rest.length) throw new Error(USAGE);
     return { operation };
   }
+  if (operation === "probe") {
+    if (!agent || agent.startsWith("-") || rest.length !== 1 || rest[0] !== "--json") throw new Error(USAGE);
+    return { operation, agent };
+  }
   if (!["chat", "run"].includes(operation) || !agent || agent.startsWith("-")) throw new Error(USAGE);
   const flags = {};
   for (let i = 0; i < rest.length; i++) {
     const flag = rest[i];
     if (["--json", "--request-json"].includes(flag)) { if (flags[flag]) throw new Error(USAGE); flags[flag] = true; continue; }
-    if (!["--session", "--idempotency-key"].includes(flag) || flags[flag] || !rest[i + 1]) throw new Error(USAGE);
+    if (!["--session", "--idempotency-key", "--client"].includes(flag) || flags[flag] || !rest[i + 1]) throw new Error(USAGE);
     flags[flag] = rest[++i];
   }
   if (!flags["--json"] || !flags["--request-json"] || !flags["--idempotency-key"] || operation === "run" && flags["--session"]) throw new Error(USAGE);
-  return { operation, agent, session: flags["--session"], idempotencyKey: flags["--idempotency-key"] };
+  return { operation, agent, session: flags["--session"], idempotencyKey: flags["--idempotency-key"], clientID: flags["--client"] };
 }
 
 async function readStdin(input) {
@@ -67,12 +72,17 @@ function registration() {
   return { client_id: process.env.POSSE_AGENT_CLIENT_ID, credential: fs.readFileSync(credentialFile, "utf8").trim() };
 }
 
-function endpoint() {
-  const socketPath = registeredAgentSocketPath();
+function endpoint(local = false) {
+  const gateway = registeredAgentGatewaySocketPath();
+  if (local && process.platform !== "linux") throw fault("owner_unavailable", "Local registration requires Linux");
+  const socketPath = local ? gateway : registeredAgentSocketPath();
   if (process.platform !== "win32") {
-    const expected = Number(process.env.POSSE_AGENT_EXPECTED_UID || process.getuid());
+    const account = local ? spawnSync("id", ["-u", "posse-agent"], { encoding: "utf8", timeout: 3000 }) : null;
+    if (local && account.status !== 0) throw fault("unauthorized", "Registered owner account is missing");
+    const expected = local ? Number(account.stdout.trim()) : Number(process.env.POSSE_AGENT_EXPECTED_UID || process.getuid());
     const socket = fs.lstatSync(socketPath), parent = fs.statSync(path.dirname(socketPath));
-    if (!socket.isSocket() || socket.isSymbolicLink() || socket.uid !== expected || parent.mode & 0o022)
+    if (!Number.isSafeInteger(expected) || !socket.isSocket() || socket.isSymbolicLink()
+      || socket.uid !== expected || parent.mode & 0o022 || local && parent.uid !== expected)
       throw fault("unauthorized", "Registered owner endpoint identity is invalid");
   }
   return socketPath;
@@ -108,11 +118,18 @@ export async function runRegisteredAgentCli(argv = process.argv.slice(2), io = {
   catch (error) { stdout.write(JSON.stringify(fail("invalid_request", error.message)) + "\n"); return 64; }
   if (parsed.operation === "version") { stdout.write(JSON.stringify({ protocol: REGISTERED_AGENT_PROTOCOL }) + "\n"); return 0; }
   try {
-    const socketPath = endpoint();
+    const explicit = Boolean(process.env.POSSE_AGENT_REGISTRATION_FILE || process.env.POSSE_AGENT_CREDENTIAL_FILE);
+    const local = !explicit || process.env.POSSE_AGENT_USE_GATEWAY === "1";
+    const socketPath = endpoint(local);
     if (parsed.operation === "health") { stdout.write(JSON.stringify(await requestFrame(socketPath, { kind: "health" }, 5000)) + "\n"); return 0; }
-    const credential = registration();
+    if (parsed.operation === "probe") { stdout.write(JSON.stringify(await requestFrame(socketPath, { kind: "probe", agent: parsed.agent }, 5000)) + "\n"); return 0; }
+    const credential = explicit ? registration() : null;
+    if (credential && parsed.clientID && parsed.clientID !== credential.client_id)
+      throw fault("invalid_request", "Selected client differs from credential");
     const content = await readStdin(io.stdin || process.stdin);
-    const request = { protocol: REGISTERED_AGENT_PROTOCOL, client_id: credential.client_id, credential: credential.credential,
+    const clientID = parsed.clientID || credential?.client_id || (local ? process.env.POSSE_AGENT_CLIENT_ID : "");
+    const request = { protocol: REGISTERED_AGENT_PROTOCOL,
+      ...(clientID ? { client_id: clientID } : {}), ...(credential ? { credential: credential.credential } : {}),
       request_id: crypto.randomUUID(), operation: parsed.operation, agent: parsed.agent, idempotency_key: parsed.idempotencyKey,
       ...(parsed.session ? { session: parsed.session } : {}), request: content };
     const result = await requestFrame(socketPath, request);

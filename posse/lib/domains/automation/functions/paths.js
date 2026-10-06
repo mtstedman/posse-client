@@ -38,6 +38,18 @@ export function registeredAgentSocketPath() {
   return path.join(automationDataDir(), "registered-agent.sock");
 }
 
+export function registeredAgentGatewaySocketPath() {
+  return String(process.env.POSSE_AGENT_GATEWAY_SOCKET || "/run/posse-agent/public.sock");
+}
+
+export function registeredAgentGatewayBackendPath() {
+  return String(process.env.POSSE_AGENT_GATEWAY_BACKEND || "");
+}
+
+export function registeredAgentGatewayKeyPath() {
+  return String(process.env.POSSE_AGENT_GATEWAY_KEY || path.join(automationDataDir(), "gateway.key"));
+}
+
 export function automationOperatorTokenPath() {
   return path.join(automationDataDir(), "automation.operator-token");
 }

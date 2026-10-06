@@ -24,15 +24,29 @@ Exit codes: 0 for `done`, 1 for terminal failure or retryable busy, 2 for
 77 for registration denial. Read the JSON status and safe error code on every
 exit. `needs_confirmation` carries no application-resumable authority.
 
-Provision a 256-bit credential with `posse agent clients create` and place its
-one-time value in a private file readable by the application identity. The
-file may contain `{"client_id":"kairos","credential":"..."}` and be selected
-with `POSSE_AGENT_REGISTRATION_FILE`, or the credential alone may be selected
-with `POSSE_AGENT_CREDENTIAL_FILE` plus `POSSE_AGENT_CLIENT_ID`. Set
-`POSSE_REGISTERED_AGENT_SOCKET` to the system socket and
-`POSSE_AGENT_EXPECTED_UID` to the numeric owner UID. The CLI checks the Unix
-socket owner and its parent before sending the credential. The development
-default is the current user's private automation data directory.
+On Linux, `posse-agent` discovers the system gateway at
+`/run/posse-agent/public.sock` when no credential file is configured. The
+gateway reads kernel peer credentials, resolves the account's current groups,
+and forwards a signed request through a private owner socket. The owner checks
+the selected exposure on every invocation and before returning a stored
+receipt. Neither a caller-supplied UID nor a copied credential expands the
+exposure's audience. Applications do not need socket group membership or
+bridge-specific environment settings.
+If more than one named exposure for an agent matches the caller, select one
+with `posse-agent chat NAME --client CLIENT_ID ...`.
+
+The legacy bearer path remains available for unmigrated clients. Provision a
+256-bit credential with `posse agent clients create` and place its one-time
+value in a private file readable by the application identity. The file may
+contain `{"client_id":"kairos","credential":"..."}` and be selected with
+`POSSE_AGENT_REGISTRATION_FILE`, or the credential alone may be selected with
+`POSSE_AGENT_CREDENTIAL_FILE` plus `POSSE_AGENT_CLIENT_ID`. Set
+`POSSE_REGISTERED_AGENT_SOCKET` to the private system socket and
+`POSSE_AGENT_EXPECTED_UID` to the numeric owner UID. Once a named client is
+registered as an exposure, its bearer-only path is denied. During migration,
+`POSSE_AGENT_USE_GATEWAY=1` sends an explicitly configured credential through
+the gateway, where the OS audience still applies. Remove the credential file
+after that path is verified.
 
 Operator examples:
 
@@ -43,6 +57,11 @@ posse agent clients create kairos --agent kairos-angel --operation chat \
 posse agent clients rotate kairos
 posse agent clients revoke kairos
 posse agent repository save REPO_ID /srv/approved-repository
+sudo posse agent register kairos-angel --client kairos --user www-data \
+  --operation chat --context get_angel_personality --context get_user_brief
+sudo posse agent registrations list kairos-angel
+sudo posse agent registrations show kairos-angel --client kairos
+sudo posse agent registrations revoke kairos-angel --client kairos
 ```
 
 An executable needs an exact-digest `application_safe` approval and an
@@ -55,22 +74,44 @@ executable approval. Global and legacy general agents cannot be exposed.
 
 For an opt-in Linux machine owner, first install the tested Posse package in a
 root-owned, non-writable system path (for example
-`/opt/posse-agent/current/posse`). Then run as root:
+`/opt/posse-agent/current/posse`) and configure the owner's provider secrets
+in `/etc/posse-agent/owner.env`. Then run as root:
 
 ```sh
 posse agent service install --system --package-root /opt/posse-agent/current/posse
 ```
 
-The unit uses the dedicated `posse-agent` user, a private state directory under
-`/var/lib/posse-agent`, and `/run/posse-agent/agent.sock` with group
-`posse-agent-clients`. Add only the intended application identity to that
-group. The application must still present its own credential. Application
-accounts sharing one Unix identity or one readable credential directory share
-that OS trust domain. Keep operator tokens, provider secrets, and tool code
-outside application-readable paths. `posse agent service status --system` and
-`posse agent service remove --system` inspect or remove the unit; removal keeps
-state and receipts. Windows per-user hosting remains available; Windows machine
-hosting needs the separate native service host before deployment.
+`posse agent register NAME` also installs and verifies this service and its
+gateway, stages an audience, probes each audience class as an OS user, then
+activates it. `--user` and `--group` are repeatable; without them, local OS
+users are admitted globally with separate client identities. A named client
+requires an explicit audience and shares its existing conversations with every
+member of that audience. If the agent was created in the operator's per-user
+automation database, registration imports its definition and prompt contexts
+from `~/.posse/automation.db` (or `--source-data-dir DIR`). Executable approvals
+and grants are never copied silently; missing dependencies fail registration
+without activating the audience. The command never prints a credential.
+Revoked exposures are terminal for ordinary retries. To restore one, repeat
+`posse agent register` with `--restore-preserving-conversations`; this explicit
+choice keeps the named or local client identities and their existing receipts,
+stages a new policy, and requires the usual probes before activation. Use a
+new named client ID when the prior conversation namespace must not be shared.
+
+The owner keeps its private state under `/var/lib/posse-agent`. The gateway's
+public socket is `/run/posse-agent/public.sock`; its private backend socket and
+key are inaccessible to application accounts. The legacy socket remains
+`/run/posse-agent/agent.sock` for unmigrated bearer clients. Every process
+running under an authorized OS account shares that account's authority.
+Linux peer credentials are captured when a connection is established, so an
+authorized process can deliberately proxy or transfer its connection; separate
+OS accounts are needed for application isolation. Before deleting, reassigning,
+or removing and later readding an authorized OS account, run
+`posse agent registrations retire-user UID` as root. This rotates its local
+identity generation so a reused UID cannot recover its old local sessions.
+`posse agent service status --system` and `posse agent service remove --system`
+inspect or remove the units; removal keeps state and receipts. Windows per-user
+hosting remains available; Windows machine hosting needs the separate native
+service host before deployment.
 
 Chat content is kept for 90 days after the last turn, then the session ID is
 tombstoned. Public receipt content is kept for 30 days. Idempotency keys and

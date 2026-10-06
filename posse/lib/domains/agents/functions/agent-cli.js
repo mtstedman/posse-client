@@ -7,7 +7,7 @@ import { runRegisteredAdminCli } from "./registered-agent-admin-cli.js";
 
 const VALUE_FLAGS = new Set(["--session", "--conversation", "--resume", "--message", "-m", "--provider", "--idempotency-key"]);
 const BOOLEAN_FLAGS = new Set(["--json", "--request-json", "--deny", "--help"]);
-const COMMANDS = new Set(["list", "show", "new", "save", "run", "chat", "confirm", "conversations", "export", "help"]);
+const COMMANDS = new Set(["list", "show", "new", "create", "save", "run", "chat", "confirm", "conversations", "export", "help"]);
 
 export const AGENT_USAGE = `Usage:
   posse agent <name> [--session ID] [--idempotency-key KEY] [-m MESSAGE | stdin] [--json]
@@ -17,6 +17,8 @@ export const AGENT_USAGE = `Usage:
   posse agent list [--json]
   posse agent show <name> [--json]
   posse agent new <name>
+  posse agent create <name>
+  posse agent register <name> [--user USER | --group GROUP] [--client ID]
   posse agent save <definition.json|->
   posse agent conversations [<name>] [--json]
   posse agent export <session-id> [--json]
@@ -47,7 +49,7 @@ function parse(argv) {
 }
 
 export async function runAgentCli(argv = process.argv.slice(3), io = {}) {
-  if (["clients", "trust", "repository", "service"].includes(argv[0])) return runRegisteredAdminCli(argv, io);
+  if (["clients", "trust", "repository", "service", "register", "registrations"].includes(argv[0])) return runRegisteredAdminCli(argv, io);
   const stdout = io.stdout || process.stdout, stderr = io.stderr || process.stderr, stdin = io.stdin || process.stdin;
   const print = value => stdout.write(`${value}\n`);
   const args = parse(argv);
@@ -74,7 +76,7 @@ export async function runAgentCli(argv = process.argv.slice(3), io = {}) {
     else for (const row of rows) print(`${row.valid ? " " : "!"} ${row.name.padEnd(24)} ${row.valid ? `${row.model.padEnd(18)} ${row.description}` : row.errors.join("; ")}`.trimEnd());
     return 0;
   }
-  if (command === "new") {
+  if (command === "new" || command === "create") {
     requireCount(args.positional, 1, "posse agent new <name>");
     const created = await definitionRequest("agent.definition.create", { name: args.positional[0] });
     print(args.json ? JSON.stringify({ name: created.definition.name, storage: created.storage, digest: created.digest }) : `created ${created.definition.name} in the central Posse database\nEdit it in Bossy Automation Studio → Agents.`);
