@@ -304,6 +304,11 @@ a starter that fails until you edit it.
   values and fills them into the tool invocation; the model sees only `params`.
   The caller supplies the same inputs on each chat turn. Use `--inputs-file`
   when testing such a tool.
+- A tool may declare `output_schema` as a JSON object schema. Posse checks the
+  script's parsed JSON output against it before a passing test publishes the
+  tool and again on each run. Bossy can create this schema from typed output
+  fields and edit the script through the automation owner; saving code changes
+  the digest and requires a new passing test.
 - Secrets are write-only: `posse tools secret set <tool> <NAME>` reads a hidden
   prompt or piped stdin and stores the value in the owner database. Listings
   show only a fingerprint. Only the declaring tool's process receives it, and

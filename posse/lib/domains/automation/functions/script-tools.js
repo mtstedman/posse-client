@@ -7,7 +7,7 @@ import { assertValidSchema, demand, object } from "./policy.js";
 export const EMPTY_SCRIPT_PARAMS = Object.freeze({ type: "object", additionalProperties: false, properties: {} });
 const NAME_RE = /^[a-z][a-z0-9-]{0,39}(\.[a-z][a-z0-9_-]{0,39})?$/;
 const ENV_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
-const MANIFEST_KEYS = ["schema", "name", "description", "entry", "interpreter", "params", "inputs", "env", "effect", "timeout_seconds", "max_output_bytes"];
+const MANIFEST_KEYS = ["schema", "name", "description", "entry", "interpreter", "params", "inputs", "output_schema", "env", "effect", "timeout_seconds", "max_output_bytes"];
 
 // `lookup` or a qualified `orders.lookup`; posse.* belongs to built-in tools.
 export function validScriptToolName(name) {
@@ -65,8 +65,15 @@ export function normalizeScriptManifest(raw) {
       if (Object.hasOwn(params.properties || {}, key)) fail(`input ${key} is also an agent-facing parameter`);
     }
   }
+  const outputSchema = raw.output_schema;
+  if (outputSchema !== undefined) {
+    if (!outputSchema || typeof outputSchema !== "object" || Array.isArray(outputSchema) || outputSchema.type !== "object")
+      fail("output_schema must be a JSON object schema; the script must print one JSON object");
+    assertValidSchema(outputSchema, `Script tool ${raw.name} output_schema`);
+  }
   return { schema: raw.schema, name: raw.name, description, entry, interpreter, params,
-    ...(inputs === undefined ? {} : { inputs }), env: normalizedEnv, effect: raw.effect, timeout_seconds: timeout, max_output_bytes: output };
+    ...(inputs === undefined ? {} : { inputs }), ...(outputSchema === undefined ? {} : { output_schema: outputSchema }),
+    env: normalizedEnv, effect: raw.effect, timeout_seconds: timeout, max_output_bytes: output };
 }
 
 // The PARAM_* variable a scalar argument arrives in.
@@ -119,7 +126,7 @@ export function parseParamSpec(spec) {
 
 // Renders a manifest and a commented starter script that already reads the
 // declared params and env, so the operator fills in only the work itself.
-export function renderScriptTemplate({ name, description, template = "bash", effect = "read", params = [], inputSchema = null, env = [] }) {
+export function renderScriptTemplate({ name, description, template = "bash", effect = "read", params = [], inputSchema = null, userInputSchema = null, outputSchema = null, env = [] }) {
   demand(SCRIPT_TOOL_TEMPLATES.includes(template), `template must be one of ${SCRIPT_TOOL_TEMPLATES.join(", ")}`);
   const properties = {}, required = [];
   for (const param of params) {
@@ -148,7 +155,8 @@ export function renderScriptTemplate({ name, description, template = "bash", eff
     python: ["python", "run.py", pythonScript], node: ["node", "run.mjs", nodeScript],
   }[template];
   const spec = { name, description, params: scriptParams };
-  const manifest = normalizeScriptManifest({ schema: SCRIPT_TOOL_SCHEMA, name, description, entry: files[1], interpreter: files[0], params: schema, env: variables, effect });
+  const manifest = normalizeScriptManifest({ schema: SCRIPT_TOOL_SCHEMA, name, description, entry: files[1], interpreter: files[0], params: schema,
+    ...(userInputSchema == null ? {} : { inputs: userInputSchema }), ...(outputSchema == null ? {} : { output_schema: outputSchema }), env: variables, effect });
   return { manifest, entry: files[1], script: files[2](spec, variables) };
 }
 

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { SCRIPT_TOOL_ENTRY_EFFECTS, SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_MANIFEST_FILE } from "../../../catalog/custom-tools.js";
 import { automationDataDir, repositoryID } from "../functions/paths.js";
 import { demand, digest, schemaCheck } from "../functions/policy.js";
@@ -69,7 +69,8 @@ export class ScriptToolRegistry {
     };
   }
   create(spec) {
-    const { name, template = "bash", description, effect = "read", params = [], input_schema = null, env = [], secrets = [] } = spec || {};
+    const { name, template = "bash", description, effect = "read", params = [], input_schema = null,
+      inputs = null, output_schema = null, env = [], secrets = [] } = spec || {};
     demand(validScriptToolName(name), "Tool name must be lower-case like orders.lookup", "script_invalid");
     const variables = [
       ...env.map(item => typeof item === "string" ? { name: item.split("=")[0], ...(item.includes("=") ? { default: item.slice(item.indexOf("=") + 1) } : {}) } : item),
@@ -79,7 +80,7 @@ export class ScriptToolRegistry {
       name, template, effect, env: variables,
       description: String(description || "").trim() || `TODO: describe what ${name} does and when to use it`,
       params: params.map(param => typeof param === "string" ? parseParamSpec(param) : param),
-      inputSchema: input_schema,
+      inputSchema: input_schema, userInputSchema: inputs, outputSchema: output_schema,
     });
     const dir = path.join(this.dir, name);
     demand(!fs.existsSync(dir), `${dir} already exists; edit it or pick another name`, "script_invalid");
@@ -87,6 +88,28 @@ export class ScriptToolRegistry {
     fs.writeFileSync(path.join(dir, SCRIPT_TOOL_MANIFEST_FILE), `${JSON.stringify(rendered.manifest, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     fs.writeFileSync(path.join(dir, rendered.entry), rendered.script, { mode: 0o700, flag: "wx" });
     return { name, dir, entry: rendered.entry, manifest: rendered.manifest };
+  }
+  code(name) {
+    const tool = this.load(name);
+    return { name, code: new TextDecoder("utf-8", { fatal: true }).decode(readBounded(tool.entryPath, SCRIPT_TOOL_LIMITS.MAX_ENTRY_BYTES)), digest: tool.digest };
+  }
+  saveCode(name, code, expectedDigest) {
+    const tool = this.load(name);
+    demand(typeof expectedDigest === "string" && expectedDigest === tool.digest, "Tool changed since its code was opened; reload before saving", "script_changed");
+    demand(typeof code === "string" && !code.includes("\0") && Buffer.byteLength(code) <= SCRIPT_TOOL_LIMITS.MAX_ENTRY_BYTES,
+      `Tool code must be UTF-8 text of at most ${SCRIPT_TOOL_LIMITS.MAX_ENTRY_BYTES} bytes`, "script_invalid");
+    const temporary = path.join(tool.dir, `.code-${randomUUID()}`);
+    try {
+      fs.writeFileSync(temporary, code, { mode: fs.statSync(tool.entryPath).mode & 0o777, flag: "wx" });
+      fs.renameSync(temporary, tool.entryPath);
+    } finally { try { fs.unlinkSync(temporary); } catch {} }
+    return this.show(name);
+  }
+  validateOutput(tool, result) {
+    if (result.ok && tool.manifest.output_schema) {
+      demand(result.output_json !== undefined, `Script tool ${tool.manifest.name} must print one JSON object matching output_schema`, "script_output_invalid");
+      schemaCheck(tool.manifest.output_schema, result.output_json);
+    }
   }
   entryFor(tool) {
     return {
@@ -109,6 +132,7 @@ export class ScriptToolRegistry {
     const selected = this.selectInputs(tool, privateInputs);
     const result = await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected });
     if (!result.ok) return { tool: name, digest: tool.digest, result, published: null, revoked_grants: [] };
+    this.validateOutput(tool, result);
     const entry = this.entryFor(tool);
     this.store.put("entries", entry.id, entry);
     this.store.put("tests", tool.digest, { passed: true, tool: entry.id, tested_at: new Date(this.now()).toISOString() });
@@ -140,6 +164,7 @@ export class ScriptToolRegistry {
     const selected = this.selectInputs(tool, privateInputs);
     const result = await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected, signal });
     demand(!result.timed_out, `Script tool ${entry.script} timed out after ${tool.manifest.timeout_seconds}s`, "script_timeout");
+    this.validateOutput(tool, result);
     return result;
   }
   selectInputs(tool, supplied) {
