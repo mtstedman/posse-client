@@ -45,11 +45,25 @@ function safeResult(result, receipt) {
     })) : [],
     pending: status === "needs_confirmation" ? [{ summary: "Operator confirmation is required" }] : [],
     usage: result?.usage && typeof result.usage === "object" ? Object.fromEntries(
-      ["turns", "calls", "cost_usd", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"]
+      ["turns", "calls", "cost_usd", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+        "uncached_input_tokens", "billable_input_tokens", "billable_output_tokens", "billable_tokens"]
         .map(key => [key, Number.isFinite(result.usage[key]) ? result.usage[key] : null])) : null,
     error: status === "failed" ? { code: allowedErrors.has(result?.error?.code) ? result.error.code : "agent_error",
       message: allowedErrors.has(result?.error?.code) ? String(result.error.message || "Agent request failed").slice(0, 240) : "Agent request failed" } : null,
   };
+  if (Array.isArray(result?.tool_summary)) {
+    projected.tool_summary = result.tool_summary.slice(0, 64).map(item => ({
+      tool: String(item.tool || "").slice(0, 120), status: String(item.status || "").slice(0, 32),
+      effect: String(item.effect || "").slice(0, 32), duration_ms: Number(item.duration_ms) || 0,
+      result: item.result ?? null, result_truncated: item.result_truncated === true,
+      ...(item.error_code ? { error_code: String(item.error_code).slice(0, 64) } : {}),
+    }));
+    projected.tool_summary_omitted = result.tool_summary.length - projected.tool_summary.length;
+    while (projected.tool_summary.length && Buffer.byteLength(JSON.stringify(projected)) > REGISTERED_AGENT_MAX_REPLY_BYTES) {
+      projected.tool_summary.pop();
+      projected.tool_summary_omitted++;
+    }
+  }
   if (Buffer.byteLength(JSON.stringify(projected)) > REGISTERED_AGENT_MAX_REPLY_BYTES) return failure("response_too_large", "Agent response exceeded the public limit");
   return projected;
 }
@@ -203,11 +217,13 @@ export class RegisteredAgentBridge {
     demand(request.operation === "chat" || !Object.hasOwn(request, "session"), "One-shot runs cannot resume a session", "invalid_request");
     demand(!Object.hasOwn(request, "session") || typeof request.session === "string" && AGENT_SESSION_PATTERN.test(request.session),
       "Invalid session selector", "agent_session_invalid");
-    object(request.request, ["message", "bootstrap_message", "pre_run_context", "inputs"], ["message"]);
+    object(request.request, ["message", "bootstrap_message", "pre_run_context", "inputs", "include_tool_summary"], ["message"]);
     demand(typeof request.request.message === "string" && request.request.message.trim() && request.request.message.length <= 200000,
       "Message is required", "invalid_request");
     demand(request.request.bootstrap_message === undefined || typeof request.request.bootstrap_message === "string"
       && request.request.bootstrap_message.length <= 200000, "Invalid bootstrap message", "invalid_request");
+    demand(request.request.include_tool_summary === undefined || typeof request.request.include_tool_summary === "boolean",
+      "Invalid tool summary selector", "invalid_request");
     const context = request.request.pre_run_context || [];
     demand(Array.isArray(context) && Buffer.byteLength(JSON.stringify(context)) <= REGISTERED_AGENT_MAX_CONTEXT_BYTES,
       "Invalid context size", "invalid_request");
@@ -383,7 +399,8 @@ export class RegisteredAgentBridge {
       }
       result = await this.owner.agentRuntime.run({ agent: request.agent, message: request.request.message,
         bootstrapMessage: request.request.bootstrap_message || "", preRunContext: context, session: receipt.session_id,
-        idempotencyKey: request.idempotency_key, client, execution });
+        idempotencyKey: request.idempotency_key, client, execution,
+        includeToolSummary: request.request.include_tool_summary === true });
     } catch (error) {
       result = failure(["forbidden", "idempotency_conflict", "agent_session_busy", "capability_unavailable"].includes(error.code) ? error.code : "agent_error");
     } finally { clearTimeout(timeout); }

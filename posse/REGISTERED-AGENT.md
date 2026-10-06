@@ -37,6 +37,24 @@ keep the private file out of source control and remove it after testing.
 The key never grants access to another client's conversation. A one-shot
 `run` returns an audit ID that cannot be resumed.
 
+Each completed invocation returns `usage` for that invocation, not the whole
+conversation: `input_tokens` (including cached input), `cache_read_tokens`,
+`cache_write_tokens`, `uncached_input_tokens`, and `output_tokens`. It also
+returns `billable_input_tokens`, `billable_output_tokens`, and `billable_tokens`
+as input-rate-equivalent units calculated from Posse's current pricing data,
+plus `cost_usd`. Billable fields are `null` when Posse has no applicable rate.
+If an outcome is unknown after a service interruption, `usage` can be `null`
+because reporting zero would conceal a possible provider call.
+
+Set `"include_tool_summary":true` in the request JSON to receive a
+`tool_summary` array alongside the always available `tool_calls` statuses.
+Each item contains the tool name, status, effect, duration, and a bounded
+structured result when the tool returned JSON. Posse redacts declared secrets
+and private inputs before recording or returning a script result; a result over
+8 KiB is marked `result_truncated` and omitted. The response reports
+`tool_summary_omitted` if the reply limit forces Posse to drop summary items.
+Without this opt-in, no tool results are returned to the calling application.
+
 Exit codes: 0 for `done`, 1 for terminal failure or retryable busy, 2 for
 `needs_confirmation`, 64 for invalid input, 69 for owner unavailability, and
 77 for registration denial. Read the JSON status and safe error code on every

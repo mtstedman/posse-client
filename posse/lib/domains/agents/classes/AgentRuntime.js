@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { AGENT_TURN_PROTOCOL } from "../../../catalog/agent.js";
 import { AutomationOwnerClient, ensureAutomationOwner } from "../../automation/classes/AutomationOwnerClient.js";
-import { estimateCallCost } from "../../billing/functions/pricing.js";
+import { estimateBillableTokens, estimateCallCost } from "../../billing/functions/pricing.js";
 import { formatLocalToolResult, parseLocalToolCall } from "../../providers/functions/posse-local/tool-protocol.js";
 import { validateToolArguments } from "../../../shared/tools/functions/schema-validation.js";
 import { callAgentProvider, resolveAgentProvider } from "../functions/provider-route.js";
@@ -59,10 +59,31 @@ function buildAgentToolInstructions(tools, definition) {
   ].join("\n");
 }
 function usageTotals(value = null) {
-  return value || {
-    turns: 0, calls: 0, cost_usd: 0, input_tokens: 0, output_tokens: 0,
-    cache_read_tokens: 0, cache_write_tokens: 0,
+  if (value) return {
+    ...value,
+    uncached_input_tokens: value.uncached_input_tokens ?? Math.max(0,
+      (Number(value.input_tokens) || 0) - (Number(value.cache_read_tokens) || 0) - (Number(value.cache_write_tokens) || 0)),
+    billable_input_tokens: value.billable_input_tokens ?? null,
+    billable_output_tokens: value.billable_output_tokens ?? null,
+    billable_tokens: value.billable_tokens ?? null,
   };
+  return {
+    turns: 0, calls: 0, cost_usd: 0, input_tokens: 0, output_tokens: 0,
+    cache_read_tokens: 0, cache_write_tokens: 0, uncached_input_tokens: 0,
+    billable_input_tokens: 0, billable_output_tokens: 0, billable_tokens: 0,
+  };
+}
+function toolResultSummary(output) {
+  if (output && typeof output === "object" && Object.hasOwn(output, "exit_code") && !Object.hasOwn(output, "output_json"))
+    return { result: null, result_truncated: false };
+  const result = output && typeof output === "object" && Object.hasOwn(output, "output_json")
+    ? output.output_json : output;
+  try {
+    const serialized = JSON.stringify(result);
+    if (serialized === undefined) return { result: null, result_truncated: false };
+    if (Buffer.byteLength(serialized) > 8 * 1024) return { result: null, result_truncated: true };
+    return { result: JSON.parse(serialized), result_truncated: false };
+  } catch { return { result: null, result_truncated: true }; }
 }
 
 export class AgentRuntime {
@@ -77,8 +98,8 @@ export class AgentRuntime {
     return this.client;
   }
 
-  async run({ agent, message, bootstrapMessage = "", preRunContext = [], session = "", provider = "", idempotencyKey = "", cwd = process.cwd(), client: suppliedClient = null, execution = null }) {
-    let client = null, started = null;
+  async run({ agent, message, bootstrapMessage = "", preRunContext = [], session = "", provider = "", idempotencyKey = "", cwd = process.cwd(), client: suppliedClient = null, execution = null, includeToolSummary = false }) {
+    let client = null, started = null, turnUsage = usageTotals(), turnToolCalls = [], turnToolSummary = includeToolSummary ? [] : null;
     const fallback = { id: session, agent: String(agent || ""), agent_digest: "" };
     try {
       let loaded = null;
@@ -113,7 +134,7 @@ export class AgentRuntime {
         idempotency_key: idempotencyKey, prompt_tool_results: existingSession ? [] : preRunContext,
       });
       if (started.replay) {
-        return this.envelope(started.session, started.replay.turn_id, "done", started.replay.reply, started.replay.tool_calls || [], [], started.replay.usage || usageTotals(), null);
+        return this.envelope(started.session, started.replay.turn_id, "done", started.replay.reply, started.replay.tool_calls || [], [], usageTotals(started.replay.usage), null);
       }
       const definition = started.definition;
       const route = resolveAgentProvider(definition.model, provider);
@@ -124,14 +145,14 @@ export class AgentRuntime {
         client, definition, session: started.session, token: started.token, turnID: started.turn_id,
         messages: [...started.messages, { role: "user", content: effectiveMessage }], tools: started.capabilities,
         systemPrompt: systemPrompt(compiled.systemPrompt, definition, started.capabilities, resolvedContext), route, cwd,
-        usage: usageTotals(), toolCalls: [], startedAt: this.now(), prompt: effectiveMessage,
+        usage: turnUsage, toolCalls: turnToolCalls, toolSummary: turnToolSummary, startedAt: this.now(), prompt: effectiveMessage,
         execution,
       });
     } catch (error) {
       if (client && started) {
         try { await client.request("agent.turn.abort", { session_id: started.session.id, token: started.token, error: error?.message || String(error) }); } catch {}
       }
-      return this.failedEnvelope(started?.session || fallback, started?.turn_id || "", error);
+      return this.failedEnvelope(started?.session || fallback, started?.turn_id || "", error, turnUsage, turnToolCalls, turnToolSummary);
     }
   }
 
@@ -159,14 +180,14 @@ export class AgentRuntime {
       return await this.continueTurn({
         client, definition: resumed.session.definition || pending.definition, session: resumed.session, token: resumed.token,
         turnID: pending.turn_id, messages, tools: pending.tools, systemPrompt: pending.system_prompt,
-        route: pending.route, cwd, usage: pending.usage, toolCalls, startedAt: pending.started_at_ms,
+        route: pending.route, cwd, usage: usageTotals(pending.usage), toolCalls, toolSummary: null, startedAt: pending.started_at_ms,
         prompt: pending.message,
       });
     } catch (error) {
       if (client && resumed) {
         try { await client.request("agent.turn.abort", { session_id: session, token: resumed.token, error: error?.message || String(error) }); } catch {}
       }
-      return this.failedEnvelope(resumed?.session || { id: session, agent: "", agent_digest: "" }, pending?.turn_id || "", error);
+      return this.failedEnvelope(resumed?.session || { id: session, agent: "", agent_digest: "" }, pending?.turn_id || "", error, usageTotals(pending?.usage));
     }
   }
 
@@ -197,10 +218,30 @@ export class AgentRuntime {
       state.execution?.check();
       if (this.now() >= deadline) throw Object.assign(new Error("Agent turn exceeded its wall-time limit"), { code: "agent_budget_exceeded" });
       state.usage.turns += 1;
-      state.usage.input_tokens += Number(generated?.stats?.inputTokens) || 0;
-      state.usage.output_tokens += Number(generated?.stats?.outputTokens) || 0;
-      state.usage.cache_read_tokens += Number(generated?.stats?.cachedInputTokens) || 0;
-      state.usage.cache_write_tokens += Number(generated?.stats?.cacheCreationInputTokens) || 0;
+      const billed = estimateBillableTokens({
+        provider: state.route.provider,
+        modelName: generated?.stats?.modelName || state.route.modelName,
+        modelTier: "standard",
+        inputTokens: generated?.stats?.inputTokens,
+        outputTokens: generated?.stats?.outputTokens,
+        cachedInputTokens: generated?.stats?.cachedInputTokens,
+        cacheCreationInputTokens: generated?.stats?.cacheCreationInputTokens,
+        longContextInputTokens: generated?.stats?.longContextInputTokens,
+      });
+      state.usage.input_tokens += billed.uncachedInputTokens + billed.cachedInputTokens + billed.cacheCreationInputTokens;
+      state.usage.output_tokens += billed.outputTokens;
+      state.usage.cache_read_tokens += billed.cachedInputTokens;
+      state.usage.cache_write_tokens += billed.cacheCreationInputTokens;
+      state.usage.uncached_input_tokens += billed.uncachedInputTokens;
+      if (billed.source === "none") {
+        state.usage.billable_input_tokens = null;
+        state.usage.billable_output_tokens = null;
+        state.usage.billable_tokens = null;
+      } else if (state.usage.billable_tokens !== null) {
+        state.usage.billable_input_tokens += billed.billableInputTokens;
+        state.usage.billable_output_tokens += billed.billableOutputTokens;
+        state.usage.billable_tokens += billed.billableTokens;
+      }
       const priced = estimateCallCost({
         provider: state.route.provider,
         modelName: generated?.stats?.modelName || state.route.modelName,
@@ -222,7 +263,7 @@ export class AgentRuntime {
       const call = parseLocalToolCall(content);
       if (!call) {
         const completed = await state.client.request("agent.turn.complete", { session_id: state.session.id, token: state.token, reply: content, tool_calls: state.toolCalls, usage: state.usage });
-        return this.envelope(completed.session, state.turnID, "done", content, state.toolCalls, [], state.usage, null);
+        return this.envelope(completed.session, state.turnID, "done", content, state.toolCalls, [], state.usage, null, state.toolSummary);
       }
       const tool = state.tools.find(item => item.name === call.name);
       let error = null;
@@ -249,26 +290,33 @@ export class AgentRuntime {
           definition: state.definition,
         };
         const paused = await state.client.request("agent.turn.pause", { session_id: state.session.id, token: state.token, proposal });
-        return this.envelope(paused.session, state.turnID, "needs_confirmation", "", state.toolCalls, [paused.pending], state.usage, null);
+        return this.envelope(paused.session, state.turnID, "needs_confirmation", "", state.toolCalls, [paused.pending], state.usage, null, state.toolSummary);
       }
       state.messages.push({ role: "assistant", content: call.raw });
       try {
         const result = await state.client.request("agent.turn.invoke", { session_id: state.session.id, token: state.token, tool: call.name, input: call.arguments });
-        state.toolCalls.push({ tool: call.name, status: "ok", duration_ms: result.duration_ms, effect: tool.effect });
+        const status = tool.kind === "script" && result.output?.ok === false ? "failed" : "ok";
+        state.toolCalls.push({ tool: call.name, status, duration_ms: result.duration_ms, effect: tool.effect });
+        state.toolSummary?.push({ tool: call.name, status, duration_ms: result.duration_ms, effect: tool.effect,
+          ...toolResultSummary(result.output) });
         state.messages.push({ role: "user", content: formatLocalToolResult(call.name, result.output) });
       } catch (toolError) {
         state.toolCalls.push({ tool: call.name, status: "failed", duration_ms: 0, effect: tool.effect, error: toolError.code || "tool_error" });
+        state.toolSummary?.push({ tool: call.name, status: "failed", duration_ms: 0, effect: tool.effect,
+          error_code: toolError.code || "tool_error", result: null, result_truncated: false });
         state.messages.push({ role: "user", content: formatLocalToolResult(call.name, `Error: ${toolError.message || toolError}`) });
       }
     }
     throw Object.assign(new Error("Agent turn exceeded its provider-turn limit"), { code: "agent_budget_exceeded" });
   }
 
-  envelope(session, turnID, status, reply, toolCalls, pending, usage, error) {
-    return { protocol: AGENT_TURN_PROTOCOL, agent: session.agent, agent_digest: session.agent_digest, conversation_id: session.id, turn_id: turnID, status, reply, tool_calls: toolCalls, pending, usage, error };
+  envelope(session, turnID, status, reply, toolCalls, pending, usage, error, toolSummary = null) {
+    return { protocol: AGENT_TURN_PROTOCOL, agent: session.agent, agent_digest: session.agent_digest, conversation_id: session.id, turn_id: turnID,
+      status, reply, tool_calls: toolCalls, ...(toolSummary ? { tool_summary: toolSummary } : {}), pending, usage, error };
   }
-  failedEnvelope(session, turnID, error) {
-    return this.envelope(session, turnID, "failed", "", [], [], usageTotals(), { code: error?.code || "agent_error", message: error?.message || String(error) });
+  failedEnvelope(session, turnID, error, usage = usageTotals(), toolCalls = [], toolSummary = null) {
+    return this.envelope(session, turnID, "failed", "", toolCalls, [], usage,
+      { code: error?.code || "agent_error", message: error?.message || String(error) }, toolSummary);
   }
 }
 
