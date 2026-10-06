@@ -7,7 +7,7 @@ import { assertValidSchema, demand, object } from "./policy.js";
 export const EMPTY_SCRIPT_PARAMS = Object.freeze({ type: "object", additionalProperties: false, properties: {} });
 const NAME_RE = /^[a-z][a-z0-9-]{0,39}(\.[a-z][a-z0-9_-]{0,39})?$/;
 const ENV_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
-const MANIFEST_KEYS = ["schema", "name", "description", "entry", "interpreter", "params", "env", "effect", "timeout_seconds", "max_output_bytes"];
+const MANIFEST_KEYS = ["schema", "name", "description", "entry", "interpreter", "params", "inputs", "env", "effect", "timeout_seconds", "max_output_bytes"];
 
 // `lookup` or a qualified `orders.lookup`; posse.* belongs to built-in tools.
 export function validScriptToolName(name) {
@@ -52,7 +52,21 @@ export function normalizeScriptManifest(raw) {
   const params = raw.params ?? EMPTY_SCRIPT_PARAMS;
   demand(params && typeof params === "object" && !Array.isArray(params) && params.type === "object", `Script tool ${raw.name}: params must be a JSON schema with type object`, "script_invalid");
   assertValidSchema(params, `Script tool ${raw.name} params`);
-  return { schema: raw.schema, name: raw.name, description, entry, interpreter, params, env: normalizedEnv, effect: raw.effect, timeout_seconds: timeout, max_output_bytes: output };
+  const inputs = raw.inputs;
+  if (inputs !== undefined) {
+    if (!inputs || typeof inputs !== "object" || Array.isArray(inputs) || inputs.type !== "object"
+      || !inputs.properties || typeof inputs.properties !== "object" || Array.isArray(inputs.properties)
+      || inputs.additionalProperties !== false) fail("inputs must be a closed JSON object schema with properties");
+    if (Object.keys(inputs).some(key => !["type", "properties", "required", "additionalProperties", "description"].includes(key)))
+      fail("inputs may only declare properties, required fields, and a description");
+    if (params.additionalProperties !== false) fail("agent-facing params must be closed when inputs are declared");
+    assertValidSchema(inputs, `Script tool ${raw.name} inputs`);
+    for (const key of Object.keys(inputs.properties)) {
+      if (Object.hasOwn(params.properties || {}, key)) fail(`input ${key} is also an agent-facing parameter`);
+    }
+  }
+  return { schema: raw.schema, name: raw.name, description, entry, interpreter, params,
+    ...(inputs === undefined ? {} : { inputs }), env: normalizedEnv, effect: raw.effect, timeout_seconds: timeout, max_output_bytes: output };
 }
 
 // The PARAM_* variable a scalar argument arrives in.

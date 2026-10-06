@@ -27,7 +27,7 @@ export function scriptToolEnv(tool, input, secrets, tempDir, sourceEnv = process
 // Runs one script tool. Arguments arrive only as data — JSON on stdin and
 // PARAM_* variables — never on a command line. Returns a redacted result; an
 // abort of `signal` rejects with the signal's reason after the tree is killed.
-export async function runScriptTool(tool, input, { secrets = {}, signal = null, sourceEnv = process.env } = {}) {
+export async function runScriptTool(tool, input, { secrets = {}, privateInputs = {}, signal = null, sourceEnv = process.env } = {}) {
   signal?.throwIfAborted();
   const interpreter = SCRIPT_TOOL_INTERPRETERS[tool.manifest.interpreter];
   const [program, args] = interpreter ? [interpreter, [tool.entryPath]] : [tool.entryPath, []];
@@ -68,7 +68,8 @@ export async function runScriptTool(tool, input, { secrets = {}, signal = null, 
         clearTimeout(timer); signal?.removeEventListener("abort", onAbort);
         if (aborted) { reject(signal.reason ?? Object.assign(new Error("Run canceled"), { code: "canceled" })); return; }
         if (failure) { reject(Object.assign(new Error(`Could not start ${tool.manifest.name}: ${failure.message}`), { code: failure.code === "ENOENT" ? "script_unavailable" : "script_invalid" })); return; }
-        const out = redactSecretValues(stdout.toString("utf8"), secrets), err = redactSecretValues(stderr.toString("utf8"), secrets);
+        const redactions = { ...secrets, ...Object.fromEntries(Object.entries(privateInputs).map(([key, value]) => [`input_${key}`, typeof value === "string" ? value : JSON.stringify(value)])) };
+        const out = redactSecretValues(stdout.toString("utf8"), redactions), err = redactSecretValues(stderr.toString("utf8"), redactions);
         // JSON output is redacted structurally (sensitive keys, token-shaped
         // strings); pattern scrubbing raw JSON text would corrupt it.
         let output, outputJson;

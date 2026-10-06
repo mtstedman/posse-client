@@ -3,7 +3,7 @@ import fs from "node:fs";
 
 import { AGENT_SESSION_PATTERN } from "../../../catalog/agent.js";
 import { agentDefinitionDigest, validateAgentDefinition } from "../../agents/functions/definition.js";
-import { demand, matchesGrant } from "../functions/policy.js";
+import { demand, digest, matchesGrant } from "../functions/policy.js";
 import { repositoryID } from "../functions/paths.js";
 import { assertRegisteredCapability } from "../functions/registered-trust.js";
 
@@ -42,6 +42,25 @@ export class AgentSessionRegistry {
   }
   principalFor(definition) { return principalFor(definition); }
 
+  // The application-facing contract is derived from the exact script tools in
+  // the definition. Their agent-facing params remain the only model surface.
+  privateInputSchema(definition) {
+    const properties = {}, required = new Set();
+    for (const name of definition.tools) {
+      if (this.store.get("prompt_tools", name) || this.store.get("sql_capabilities", name)) continue;
+      const schema = this.scripts.load(name).manifest.inputs;
+      if (!schema) continue;
+      for (const [key, value] of Object.entries(schema.properties)) {
+        if (Object.hasOwn(properties, key)) demand(digest(properties[key]) === digest(value),
+          `Private input ${key} has conflicting tool schemas`, "agent_invalid");
+        else properties[key] = structuredClone(value);
+      }
+      for (const key of schema.required || []) required.add(key);
+    }
+    return { type: "object", additionalProperties: false, properties,
+      ...(required.size ? { required: [...required].sort() } : {}) };
+  }
+
   session(id) {
     demand(AGENT_SESSION_PATTERN.test(String(id || "")), "Invalid agent session ID", "agent_session_invalid");
     const session = this.store.get(SESSION_KIND, id);
@@ -62,6 +81,8 @@ export class AgentSessionRegistry {
     let session, preRunContext = [];
     if (existing) {
       this.assertOwnership(existing, execution);
+      if (execution) demand((existing.private_inputs_digest || digest({})) === execution.inputsDigest,
+        "Private inputs cannot change within a conversation", "idempotency_conflict");
       demand(existing.agent === checked.definition.name, `Session ${id} belongs to agent ${existing.agent}`, "agent_session_mismatch");
       if (idempotency_key) {
         const prior = existing.turns.find(turn => turn.idempotency_key === idempotency_key);
@@ -86,6 +107,7 @@ export class AgentSessionRegistry {
         definition: checked.definition, capabilities, pre_run_context: structuredClone(preRunContext), messages: [], turns: [],
         status: "idle", created_at: nowIso(this.now), updated_at: nowIso(this.now), active: null, pending: null,
         ownership: execution ? { kind: execution.kind, client_id: execution.clientID, agent: checked.definition.name } : { kind: "operator" },
+        ...(execution ? { private_inputs_digest: execution.inputsDigest } : {}),
       };
     }
     const sourceMessage = message.trim();

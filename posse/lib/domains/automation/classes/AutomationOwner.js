@@ -216,7 +216,7 @@ export class AutomationOwner {
       case "script.list": return this.scripts.list();
       case "script.show": return this.scripts.show(args.name, { repoPath: args.repo_path });
       case "script.create": return this.scripts.create(args.spec);
-      case "script.test": return this.scripts.test(args.name, args.input || {});
+      case "script.test": return this.scripts.test(args.name, args.input || {}, args.inputs || {});
       case "script.grant": return this.scripts.grant(args.name, { repoPath: args.repo_path, standalone: args.standalone === true, roles: args.roles, unattended: args.unattended === true });
       case "script.secret.set": return this.scripts.setSecret(args.tool, args.name, args.value);
       case "script.secret.unset": return this.scripts.unsetSecret(args.tool, args.name);

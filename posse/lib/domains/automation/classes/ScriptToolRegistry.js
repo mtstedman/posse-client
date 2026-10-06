@@ -103,10 +103,11 @@ export class ScriptToolRegistry {
   }
   // Runs the tool against operator input; a pass publishes this exact digest
   // as the tool's entry and revokes grants that pinned an older version.
-  async test(name, input = {}) {
+  async test(name, input = {}, privateInputs = {}) {
     const tool = this.load(name);
     schemaCheck(tool.manifest.params, input);
-    const result = await runScriptTool(tool, input, { secrets: this.secretValues(tool.manifest) });
+    const selected = this.selectInputs(tool, privateInputs);
+    const result = await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected });
     if (!result.ok) return { tool: name, digest: tool.digest, result, published: null, revoked_grants: [] };
     const entry = this.entryFor(tool);
     this.store.put("entries", entry.id, entry);
@@ -132,12 +133,21 @@ export class ScriptToolRegistry {
     });
   }
   // AutomationService execute() hook for kind "script".
-  async run(entry, input, { signal } = {}) {
+  async run(entry, input, { signal, privateInputs = {} } = {}) {
     const tool = this.load(entry.script);
     demand(tool.digest === entry.digest, `Script tool ${entry.script} changed since it was tested; run \`posse tools test ${entry.script}\``, "script_changed");
-    const result = await runScriptTool(tool, input, { secrets: this.secretValues(tool.manifest), signal });
+    schemaCheck(tool.manifest.params, input);
+    const selected = this.selectInputs(tool, privateInputs);
+    const result = await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected, signal });
     demand(!result.timed_out, `Script tool ${entry.script} timed out after ${tool.manifest.timeout_seconds}s`, "script_timeout");
     return result;
+  }
+  selectInputs(tool, supplied) {
+    if (!tool.manifest.inputs) return {};
+    const selected = Object.fromEntries(Object.keys(tool.manifest.inputs.properties)
+      .filter(key => Object.hasOwn(supplied, key)).map(key => [key, supplied[key]]));
+    schemaCheck(tool.manifest.inputs, selected);
+    return selected;
   }
   declaredSecret(tool, name) {
     const manifest = this.load(tool).manifest;

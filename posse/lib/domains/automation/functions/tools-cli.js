@@ -4,7 +4,7 @@ import { SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_TEMPLATES } from "../../../catalog/cust
 import { AutomationOwnerClient, ensureAutomationOwner } from "../classes/AutomationOwnerClient.js";
 
 export const SCRIPT_TOOL_TEST_PROTOCOL = "posse.script_tool_test.v1";
-const VALUE_FLAGS = new Set(["--template", "--description", "--effect", "--param", "--env", "--secret", "--input", "--input-file", "--repo", "--roles"]);
+const VALUE_FLAGS = new Set(["--template", "--description", "--effect", "--param", "--env", "--secret", "--input", "--input-file", "--inputs-file", "--repo", "--roles"]);
 const BOOLEAN_FLAGS = new Set(["--json", "--standalone", "--unattended", "--help"]);
 
 export const TOOLS_USAGE = `Usage:
@@ -12,7 +12,7 @@ export const TOOLS_USAGE = `Usage:
   posse tools new <name> [--template ${SCRIPT_TOOL_TEMPLATES.join("|")}] [--effect read|write]
         [--description TEXT] [--param name:type[:required]]... [--env NAME[=default]]... [--secret NAME]...
   posse tools show <name>                              params, env, secrets, test state, grants
-  posse tools test <name> [--input JSON | --input-file PATH] [--json]
+  posse tools test <name> [--input JSON | --input-file PATH] [--inputs-file PATH] [--json]
                                                        run it; a pass publishes this exact version
   posse tools secret set <tool> <NAME>                 write-only; hidden prompt or piped stdin
   posse tools secret unset <tool> <NAME>
@@ -103,6 +103,7 @@ export async function runToolsCli(argv = process.argv.slice(3), io = {}) {
       const properties = Object.entries(manifest.params.properties || {});
       if (!properties.length) print("  params       none");
       for (const [name, schema] of properties) print(`  param        ${name} (${schema.type || "any"}${required.has(name) ? ", required" : ""}) → PARAM_${name.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}`);
+      for (const [name, schema] of Object.entries(manifest.inputs?.properties || {})) print(`  caller input ${name} (${schema.type || "any"}) → PARAM_${name.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}`);
       const secretState = new Map(tool.secrets.map(item => [item.name, item]));
       for (const item of manifest.env) {
         if (!item.secret) { print(`  env          ${item.name} = ${JSON.stringify(item.default ?? "")}`); continue; }
@@ -118,12 +119,22 @@ export async function runToolsCli(argv = process.argv.slice(3), io = {}) {
       return 0;
     }
     case "test": {
-      if (args.positional.length !== 1) throw Object.assign(new Error("usage: posse tools test <name> [--input JSON | --input-file PATH] [--json]"), { code: "invalid_request" });
+      if (args.positional.length !== 1) throw Object.assign(new Error("usage: posse tools test <name> [--input JSON | --input-file PATH] [--inputs-file PATH] [--json]"), { code: "invalid_request" });
       const source = args.one("--input-file");
       const raw = source ? readBoundedText(source, 1024 * 1024) : args.one("--input") || "{}";
       let input;
       try { input = JSON.parse(raw); } catch { throw Object.assign(new Error("--input must be one JSON object"), { code: "invalid_request" }); }
-      const tested = await request("script.test", { name: args.positional[0], input });
+      let inputs = {};
+      const privateFile = args.one("--inputs-file");
+      if (privateFile) {
+        const info = fs.lstatSync(privateFile);
+        if (!info.isFile() || info.isSymbolicLink() || process.platform !== "win32" && (info.mode & 0o077))
+          throw Object.assign(new Error("--inputs-file must be a private regular file"), { code: "invalid_request" });
+        try { inputs = JSON.parse(readBoundedText(privateFile, 32 * 1024)); }
+        catch { throw Object.assign(new Error("--inputs-file must contain one JSON object"), { code: "invalid_request" }); }
+        if (!inputs || typeof inputs !== "object" || Array.isArray(inputs)) throw Object.assign(new Error("--inputs-file must contain one JSON object"), { code: "invalid_request" });
+      }
+      const tested = await request("script.test", { name: args.positional[0], input, inputs });
       const result = tested.result;
       if (args.has("--json")) {
         print(JSON.stringify({ protocol: SCRIPT_TOOL_TEST_PROTOCOL, tool: tested.tool, digest: tested.digest, ...result, published: tested.published, revoked_grants: tested.revoked_grants }));

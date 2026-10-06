@@ -6,7 +6,7 @@ import { AGENT_NAME_PATTERN, AGENT_SESSION_PATTERN, AGENT_TURN_PROTOCOL } from "
 import { REGISTERED_AGENT_MAX_CONTEXT_BYTES, REGISTERED_AGENT_MAX_REPLY_BYTES, REGISTERED_AGENT_OPERATIONS, REGISTERED_AGENT_PROTOCOL } from "../../../catalog/registered-agent.js";
 import { automationDataDir } from "../functions/paths.js";
 import { approveEntry, assertRegisteredCapability } from "../functions/registered-trust.js";
-import { demand, digest, object } from "../functions/policy.js";
+import { demand, digest, object, schemaCheck } from "../functions/policy.js";
 
 const REGISTRATIONS = "registered_clients";
 const ID = /^[a-z][a-z0-9._-]{0,63}$/;
@@ -170,6 +170,7 @@ export class RegisteredAgentBridge {
     const supplied = promptNames.map(name => ({ name, result: {} }));
     const execution = { definition, check() {} };
     const resolved = this.owner.agents.resolveCapabilities(definition, supplied, execution);
+    this.owner.agents.privateInputSchema(definition);
     demand(definition.autonomy.write_tools !== "confirm" || !resolved.capabilities.some(cap => cap.effect === "write"),
       "Write tools under confirmation cannot be exposed", "forbidden");
     return loaded;
@@ -202,7 +203,7 @@ export class RegisteredAgentBridge {
     demand(request.operation === "chat" || !Object.hasOwn(request, "session"), "One-shot runs cannot resume a session", "invalid_request");
     demand(!Object.hasOwn(request, "session") || typeof request.session === "string" && AGENT_SESSION_PATTERN.test(request.session),
       "Invalid session selector", "agent_session_invalid");
-    object(request.request, ["message", "bootstrap_message", "pre_run_context"], ["message"]);
+    object(request.request, ["message", "bootstrap_message", "pre_run_context", "inputs"], ["message"]);
     demand(typeof request.request.message === "string" && request.request.message.trim() && request.request.message.length <= 200000,
       "Message is required", "invalid_request");
     demand(request.request.bootstrap_message === undefined || typeof request.request.bootstrap_message === "string"
@@ -216,6 +217,10 @@ export class RegisteredAgentBridge {
       demand(ID.test(String(item.name || "")) && !names.has(item.name), "Invalid or duplicate context name", "invalid_request");
       names.add(item.name);
     }
+    const inputs = request.request.inputs === undefined ? {} : request.request.inputs;
+    demand(inputs && typeof inputs === "object" && !Array.isArray(inputs)
+      && Object.keys(inputs).length <= 32 && Object.keys(inputs).every(name => /^[a-z][a-z0-9_]{0,63}$/.test(name))
+      && Buffer.byteLength(JSON.stringify(inputs)) <= 32 * 1024, "Invalid private inputs", "invalid_request");
     return context;
   }
 
@@ -229,6 +234,11 @@ export class RegisteredAgentBridge {
     if (!local) this.owner.exposures.legacyAllowed(registration.id, request.agent);
     const loaded = this.validateAgent(request.agent);
     demand(context.every(item => registration.context_names.includes(item.name)), "Context name is not registered", "forbidden");
+    try { schemaCheck(this.owner.agents.privateInputSchema(loaded.definition), request.request.inputs || {}); }
+    catch (error) {
+      if (error.code !== "schema_mismatch") throw error;
+      demand(false, "Private inputs do not match the agent call contract", "invalid_request");
+    }
     const selector = request.session || "";
     const fingerprint = digest([request.operation, request.agent, selector, request.request]);
     const receiptKey = digest([registration.identity, request.agent, request.operation, request.idempotency_key]);
@@ -319,6 +329,8 @@ export class RegisteredAgentBridge {
     const execution = Object.freeze({
       kind: request.operation === "chat" ? "registered_chat" : "registered_run",
       clientID: registration.identity, registrationRevision: registration.revision, agent: request.agent, definition: loaded.definition,
+      inputs: Object.freeze(structuredClone(request.request.inputs || {})),
+      inputsDigest: digest(request.request.inputs || {}),
       requestID: receipt.request_id, cwd, signal: controller.signal,
       state: executionState,
       check: () => {
@@ -360,6 +372,8 @@ export class RegisteredAgentBridge {
       const existing = this.store.get("agent_sessions", receipt.session_id);
       if (existing) {
         this.owner.agents.assertOwnership(existing, execution);
+        demand((existing.private_inputs_digest || digest({})) === execution.inputsDigest,
+          "Private inputs cannot change within a conversation", "idempotency_conflict");
         demand(existing.agent_digest === loaded.digest, "Agent definition changed; start a new conversation", "capability_unavailable");
         demand(request.request.bootstrap_message === undefined && context.length === 0, "Pinned context cannot change", "idempotency_conflict");
         for (const capability of existing.capabilities || []) {

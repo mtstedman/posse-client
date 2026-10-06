@@ -6,7 +6,7 @@ automation owner executes the turn. The CLI sends one newline-framed
 prints one `bossy.agent_turn.v1` envelope. It never starts or replaces the owner.
 
 ```sh
-printf '%s' '{"message":"What should I focus on?","pre_run_context":[]}' |
+printf '%s' '{"message":"What should I focus on?","pre_run_context":[],"inputs":{"account_ref":"opaque-account-123"}}' |
   posse-agent chat kairos-angel --session kairos-angel-chat-123 \
     --idempotency-key kairos-ai-job-456 --request-json --json
 ```
@@ -16,6 +16,24 @@ operation, and semantic request. An identical retry returns the terminal
 receipt. Changing the message, bootstrap, context, or session selector under
 the same key returns `idempotency_conflict`. Busy retries use
 `agent_request_busy` or `agent_session_busy`; retry those with the same key.
+`inputs` is an optional JSON object of private, fixed values supplied by the
+application. Each script tool declares its caller-facing values in an `inputs`
+JSON object schema beside its agent-facing `params` schema in `tool.json`.
+Posse derives the registered agent call contract from those schemas, validates
+the supplied values, and fills each tool's declared inputs when it runs. The
+model sees only `params` and cannot supply or override `inputs`. Both kinds of
+values reach the script as JSON on stdin and scalar `PARAM_*` variables.
+For example, a tool can declare `"inputs":{"type":"object",
+"additionalProperties":false,"properties":{"account_id":{"type":"string"}},
+"required":["account_id"]}` while its `params` declares the scene ID the
+model chooses. The registered request supplies `account_id` once per call in `inputs`;
+the tool receives both values.
+Supply the same `inputs` on every turn of a chat: a conversation pins their
+digest and rejects a change. Posse stores the digest, not the values, with the
+conversation. Tool scripts must treat the values as private and avoid echoing
+them in results. To publish a tool that declares caller inputs, use
+`posse tools test NAME --input-file args.json --inputs-file private.json`;
+keep the private file out of source control and remove it after testing.
 The key never grants access to another client's conversation. A one-shot
 `run` returns an audit ID that cannot be resumed.
 

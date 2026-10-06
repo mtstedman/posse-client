@@ -298,6 +298,12 @@ a starter that fails until you edit it.
   allowlist, a per-call temp dir, declared env, and its own secrets — and none
   of the owner's credentials. It runs in its own folder and process group;
   timeouts and cancellation kill the whole tree.
+- Registered agent calls may include private `inputs` in their request JSON.
+  A tool declares caller-facing fields in an `inputs` JSON object schema beside
+  its agent-facing `params` schema in `tool.json`. Posse validates the caller
+  values and fills them into the tool invocation; the model sees only `params`.
+  The caller supplies the same inputs on each chat turn. Use `--inputs-file`
+  when testing such a tool.
 - Secrets are write-only: `posse tools secret set <tool> <NAME>` reads a hidden
   prompt or piped stdin and stores the value in the owner database. Listings
   show only a fingerprint. Only the declaring tool's process receives it, and

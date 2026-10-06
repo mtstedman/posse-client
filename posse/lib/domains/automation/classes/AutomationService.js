@@ -217,7 +217,7 @@ export class AutomationService {
         schemaCheck(issued.input_schema, input);
         demand(entry.effect !== "read_only" || issued.effect === "read_only", "Read-only skill cannot issue a write tool", "forbidden");
         if (execution) execution.checkCapability(id, issued.digest, run.principal);
-        return this.scripts.run(issued, input, { signal: controller.signal });
+        return this.scripts.run(issued, input, { signal: controller.signal, privateInputs: execution?.inputs || {} });
       }
       demand(this.connectors, `Capability ${id} has no installed adapter`, "capability_unavailable");
       return this.connectors.call(id, input, { signal: controller.signal, effect: entry.effect, grant, check });
@@ -231,7 +231,7 @@ export class AutomationService {
         run.calls++; output = await this.connectors.call(entry.id, run.input, { signal: controller.signal, effect: entry.effect, grant, check });
       } else if (entry.kind === "script") {
         demand(this.scripts, "Script tools are unavailable in this owner", "capability_unavailable");
-        run.calls++; output = await this.scripts.run(entry, run.input, { signal: controller.signal });
+        run.calls++; output = await this.scripts.run(entry, run.input, { signal: controller.signal, privateInputs: execution?.inputs || {} });
       } else if (entry.kind === "sql") {
         demand(this.sqlCapabilities, "SQL capabilities are unavailable in this owner", "capability_unavailable");
         run.calls++; output = await this.sqlCapabilities.execute(entry.capability, run.input);
