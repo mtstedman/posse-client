@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "claude-org": "./orchestrator.js",
-    "posse": "./orchestrator.js"
+    "posse": "./orchestrator.js",
+    "posse-agent": "./registered-agent.js"
   },
   "scripts": {
     "add": "node orchestrator.js add",

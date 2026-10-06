@@ -20,7 +20,9 @@ export class AutomationStore {
       CREATE TABLE IF NOT EXISTS automation_checkpoints(id TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS automation_output_reservations(
         run_id TEXT NOT NULL,resource_identity TEXT NOT NULL,relative_path TEXT NOT NULL,state TEXT NOT NULL,
-        PRIMARY KEY(run_id,resource_identity,relative_path));`);
+        PRIMARY KEY(run_id,resource_identity,relative_path));
+      CREATE TABLE IF NOT EXISTS registered_agent_receipts(
+        key TEXT PRIMARY KEY,session_id TEXT NOT NULL,value TEXT NOT NULL);`);
     const leaseColumns = this.db.prepare("PRAGMA table_info(automation_leases)").all();
     if (!leaseColumns.some(column => column.name === "generation")) {
       this.db.exec("ALTER TABLE automation_leases ADD COLUMN generation INTEGER NOT NULL DEFAULT 1");
@@ -30,6 +32,18 @@ export class AutomationStore {
   list(kind) { return this.db.prepare("SELECT value FROM automation_objects WHERE kind=? ORDER BY id").all(kind).map(row => JSON.parse(row.value)); }
   put(kind, id, value) { this.db.prepare("INSERT INTO automation_objects VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET value=excluded.value").run(kind, id, JSON.stringify(value)); return value; }
   remove(kind, id) { this.db.prepare("DELETE FROM automation_objects WHERE kind=? AND id=?").run(kind, id); }
+  registeredReceipt(key) { const row = this.db.prepare("SELECT value FROM registered_agent_receipts WHERE key=?").get(key); return row ? JSON.parse(row.value) : null; }
+  putRegisteredReceipt(key, receipt) {
+    this.db.prepare("INSERT INTO registered_agent_receipts(key,session_id,value) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,session_id=excluded.session_id")
+      .run(key, receipt.session_id, JSON.stringify(receipt));
+    return receipt;
+  }
+  removeRegisteredReceipt(key) { this.db.prepare("DELETE FROM registered_agent_receipts WHERE key=?").run(key); }
+  activeRegisteredSession(sessionID) {
+    const row = this.db.prepare("SELECT value FROM registered_agent_receipts WHERE session_id=? AND json_extract(value,'$.status')='active' LIMIT 1").get(sessionID);
+    return row ? JSON.parse(row.value) : null;
+  }
+  registeredReceipts() { return this.db.prepare("SELECT value FROM registered_agent_receipts").all().map(row => JSON.parse(row.value)); }
   transaction(fn) { this.db.exec("BEGIN IMMEDIATE"); try { const value = fn(); this.db.exec("COMMIT"); return value; } catch (error) { this.db.exec("ROLLBACK"); throw error; } }
   insertRun(run, idem) { this.db.prepare("INSERT INTO automation_runs VALUES(?,?,?)").run(run.id, idem, JSON.stringify(run)); return run; }
   updateRun(run) { this.db.prepare("UPDATE automation_runs SET value=? WHERE id=?").run(JSON.stringify(run), run.id); return run; }

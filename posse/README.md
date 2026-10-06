@@ -10,6 +10,7 @@ The npm package name is still `claude-org`, but the current system name is
 names.
 
 For first-time setup, start with the [installation walkthrough](installers/README.md).
+Application integrations use the [registered agent bridge](REGISTERED-AGENT.md).
 
 ## Architecture
 

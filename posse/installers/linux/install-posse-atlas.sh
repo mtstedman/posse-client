@@ -1878,10 +1878,11 @@ step_shell_wiring() {
   ENV_FILE="${ENV_DIR}/atlas.env"
   local bin_dir="${HOME}/.local/bin"
   local shim="${bin_dir}/posse"
+  local agent_shim="${bin_dir}/posse-agent"
 
   if [[ "$CRITICAL_FAILED" == "true" ]]; then step_end blocked; return 1; fi
   if [[ "$DRY_RUN" == "true" ]]; then
-    step_end dry-run "would write ${ENV_FILE}, install ${shim}, and wire shell rc files"
+    step_end dry-run "would write ${ENV_FILE}, install ${shim} and ${agent_shim}, and wire shell rc files"
     return 0
   fi
 
@@ -1926,6 +1927,14 @@ step_shell_wiring() {
     step_fail_critical "could not make ${shim} executable"
     return 1
   fi
+  if ! {
+    printf '#!/usr/bin/env bash\n'
+    printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$(dirname "$NODE_BIN")")"
+    printf 'exec %s %s "$@"\n' "$(shell_quote "$NODE_BIN")" "$(shell_quote "$POSSE_DIR/registered-agent.js")"
+  } >"$agent_shim" || ! chmod 755 "$agent_shim"; then
+    step_fail_critical "could not install ${agent_shim}"
+    return 1
+  fi
 
   if [[ "$PERSIST_ENV" == "true" ]]; then
     if ! append_source_if_missing "${HOME}/.bashrc" "$ENV_FILE"; then
@@ -1936,7 +1945,7 @@ step_shell_wiring() {
     fi
   fi
 
-  local note="env file + posse shim installed"
+  local note="env file + posse and posse-agent shims installed"
   if ! command -v posse >/dev/null 2>&1; then
     note+=" (open a new shell to pick up PATH)"
   fi

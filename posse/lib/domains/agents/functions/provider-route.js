@@ -38,5 +38,6 @@ export async function callAgentProvider(providerName, prompt, options = {}) {
     disableSystemTools: true,
     disableAgentTools: true,
     nativeColdBoot: true,
+    signal: options.signal,
   });
 }

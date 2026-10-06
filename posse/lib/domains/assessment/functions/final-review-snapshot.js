@@ -50,21 +50,32 @@ export function parsePorcelainZ(output) {
     const token = tokens[index];
     const code = token.slice(0, 2);
     const entryPath = normalizeRepoPath(token.slice(3));
-    if (code[0] === "R" || code[0] === "C") index += 1;
-    if (entryPath) entries.push({ code, path: entryPath, untracked: code === "??" });
+    const moved = code.includes("R") || code.includes("C");
+    const previousPath = moved ? normalizeRepoPath(tokens[++index]) : null;
+    if (entryPath) entries.push({ code, path: entryPath, previousPath, untracked: code === "??" });
   }
   return entries;
 }
 
 function readUntrackedFile(cwd, repoPath) {
+  let fd = null;
   try {
     const absolute = path.resolve(cwd, repoPath);
-    const stat = fs.statSync(absolute);
+    const stat = fs.lstatSync(absolute);
+    if (stat.isSymbolicLink()) return { text: fs.readlinkSync(absolute), mode: "120000", stat: "new symlink" };
     if (!stat.isFile()) return null;
-    const text = fs.readFileSync(absolute, "utf8");
-    return text.includes("\0") ? "(binary file)" : text.slice(0, MAX_UNTRACKED_FILE_CHARS);
+    const relative = path.relative(fs.realpathSync(cwd), fs.realpathSync(absolute));
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
+    // The file can change after lstat. O_NOFOLLOW prevents a last-component
+    // symlink swap from redirecting this read outside the repository.
+    fd = fs.openSync(absolute, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    if (!fs.fstatSync(fd).isFile()) return null;
+    const text = fs.readFileSync(fd, "utf8");
+    return { text: text.includes("\0") ? "(binary file)" : text.slice(0, MAX_UNTRACKED_FILE_CHARS), mode: null, stat: null };
   } catch {
     return null;
+  } finally {
+    if (fd != null) fs.closeSync(fd);
   }
 }
 
@@ -72,8 +83,14 @@ function readUntrackedFile(cwd, repoPath) {
 export async function collectScopedChange(cwd, payload = {}, { git = gitExecAsync } = {}) {
   const scope = finalReviewScope(payload);
   const status = await git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd, { trim: false });
-  const entries = parsePorcelainZ(status).filter((entry) => inScope(entry.path, scope));
-  const tracked = entries.filter((entry) => !entry.untracked).map((entry) => entry.path);
+  const entries = parsePorcelainZ(status).filter((entry) => inScope(entry.path, scope)
+    || (entry.code.includes("R") && entry.previousPath && inScope(entry.previousPath, scope)));
+  const renames = entries.filter((entry) => entry.code.includes("R") && entry.previousPath)
+    .map((entry) => ({ from: entry.previousPath, to: entry.path,
+      outsideScope: scope.declared && (!inScope(entry.previousPath, scope) || !inScope(entry.path, scope)) }));
+  const tracked = [...new Set(entries.filter((entry) => !entry.untracked)
+    .flatMap((entry) => [entry.path, ...(entry.code.includes("R") && entry.previousPath ? [entry.previousPath] : [])])
+    .filter((file) => inScope(file, scope)))];
   const untracked = entries.filter((entry) => entry.untracked).map((entry) => entry.path);
   let diff = "";
   const stats = new Map();
@@ -89,13 +106,14 @@ export async function collectScopedChange(cwd, payload = {}, { git = gitExecAsyn
   for (const file of untracked) {
     const content = readUntrackedFile(cwd, file);
     if (content == null) continue;
-    const lines = content.split("\n");
-    stats.set(file, `new, ${lines.length} lines`);
-    diff += `${diff ? "\n" : ""}diff --git a/${file} b/${file}\nnew file\n--- /dev/null\n+++ b/${file}\n${lines.map((line) => `+${line}`).join("\n")}\n`;
+    const lines = content.text.split("\n");
+    stats.set(file, content.stat || `new, ${lines.length} lines`);
+    diff += `${diff ? "\n" : ""}diff --git a/${file} b/${file}\n${content.mode ? `new file mode ${content.mode}` : "new file"}\n--- /dev/null\n+++ b/${file}\n${lines.map((line) => `+${line}`).join("\n")}\n`;
   }
   const files = [...new Set([...tracked, ...untracked])].sort();
   return {
     files: files.map((file) => ({ path: file, stat: stats.get(file) || (untracked.includes(file) ? "new" : "changed") })),
+    renames,
     diff,
     digest: createHash("sha256").update(diff).digest("hex"),
     scopeDeclared: scope.declared,
@@ -139,6 +157,7 @@ export function renderFinalReviewEvidence({ job, workItem, payload = {}, change,
     ? diff
     : diff.slice(0, FINAL_REVIEW_DIFF_INLINE_MAX_CHARS);
   const files = Array.isArray(change?.files) ? change.files : [];
+  const renames = Array.isArray(change?.renames) ? change.renames : [];
   return [
     "═══ FINAL REVIEW SNAPSHOT ═══",
     "TASK CONTRACT:",
@@ -154,6 +173,7 @@ export function renderFinalReviewEvidence({ job, workItem, payload = {}, change,
     files.length === 0
       ? "CHANGED FILES: none in the declared scope."
       : `CHANGED FILES (${files.length}, complete list):\n${files.map((file) => `- ${file.path} (${file.stat})`).join("\n")}`,
+    renames.length === 0 ? null : `RENAMES TOUCHING DECLARED SCOPE:\n${renames.map((entry) => `- ${entry.from} -> ${entry.to}${entry.outsideScope ? " (one path outside declared scope)" : ""}`).join("\n")}`,
     files.length === 0 ? null : (diff.length <= FINAL_REVIEW_DIFF_INLINE_MAX_CHARS
       ? "DIFF (complete):"
       : `DIFF (first ${FINAL_REVIEW_DIFF_INLINE_MAX_CHARS} of ${diff.length} characters; read the remaining changed files with your read tools):`),

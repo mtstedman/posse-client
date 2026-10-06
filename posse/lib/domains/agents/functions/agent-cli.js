@@ -3,6 +3,7 @@ import fs from "node:fs";
 
 import { AgentDefinitionStore } from "../classes/AgentDefinitionStore.js";
 import { AgentRuntime } from "../classes/AgentRuntime.js";
+import { runRegisteredAdminCli } from "./registered-agent-admin-cli.js";
 
 const VALUE_FLAGS = new Set(["--session", "--conversation", "--resume", "--message", "-m", "--provider", "--idempotency-key"]);
 const BOOLEAN_FLAGS = new Set(["--json", "--request-json", "--deny", "--help"]);
@@ -46,6 +47,7 @@ function parse(argv) {
 }
 
 export async function runAgentCli(argv = process.argv.slice(3), io = {}) {
+  if (["clients", "trust", "repository", "service"].includes(argv[0])) return runRegisteredAdminCli(argv, io);
   const stdout = io.stdout || process.stdout, stderr = io.stderr || process.stderr, stdin = io.stdin || process.stdin;
   const print = value => stdout.write(`${value}\n`);
   const args = parse(argv);

@@ -52,6 +52,7 @@ import {
 } from "../../../../catalog/human-input.js";
 import { preflightReviewApproval } from "../../../bridge/functions/review-decision.js";
 import { mergeWorkItemNow } from "../../../git/functions/operator-merge.js";
+import { prewarmNativeGitAuth } from "../../../git/functions/native/prewarm.js";
 
 const MAX_FEEDBACK_CHARS = 2000;
 
@@ -133,6 +134,9 @@ export function mergeVerificationRejectionGuidance(gateJob, payload = {}, feedba
 }
 
 async function mergeRecoveredWorkItem(workItemId, { actor, projectDir }) {
+  // Standalone gate answers do not run scheduler boot. Warm the synchronous
+  // preflight's native Git grant before checking the live worktree.
+  await prewarmNativeGitAuth();
   const preflight = preflightReviewApproval(workItemId, { projectDir });
   if (!preflight.ok) return { ok: false, reason: preflight.reason, message: preflight.message || preflight.reason };
   return mergeWorkItemNow(workItemId, { projectDir, actor });

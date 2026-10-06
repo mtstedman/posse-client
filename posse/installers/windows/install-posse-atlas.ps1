@@ -2325,6 +2325,7 @@ function Step-ShellWiring {
 
   New-Item -ItemType Directory -Path $binDir -Force | Out-Null
   $cmdShim = Join-Path $binDir "posse.cmd"
+  $agentCmdShim = Join-Path $binDir "posse-agent.cmd"
   $psShim = Join-Path $binDir "posse.ps1"
   $orchestrator = Join-Path $script:PosseDirResolved "orchestrator.js"
   # cmd.exe expands %NAME% even inside quotes; double every literal percent so
@@ -2334,6 +2335,9 @@ function Step-ShellWiring {
   $cmdNodeDir = (Split-Path $script:NodeBin -Parent) -replace "%", "%%"
   $cmdContents = ("@echo off`r`nset ""PATH={2};%PATH%""`r`n""{0}"" ""{1}"" %*`r`n" -f $cmdNodeBin, $cmdOrchestrator, $cmdNodeDir)
   [System.IO.File]::WriteAllText($cmdShim, $cmdContents, (New-Object System.Text.UTF8Encoding($false)))
+  $agentEntry = (Join-Path $script:PosseDirResolved "registered-agent.js") -replace "%", "%%"
+  $agentCmdContents = ("@echo off`r`nset ""PATH={2};%PATH%""`r`n""{0}"" ""{1}"" %*`r`n" -f $cmdNodeBin, $agentEntry, $cmdNodeDir)
+  [System.IO.File]::WriteAllText($agentCmdShim, $agentCmdContents, (New-Object System.Text.UTF8Encoding($false)))
   # A same-name .ps1 takes precedence over posse.cmd in PowerShell and is
   # unusable under the default Restricted execution policy. Remove the old
   # installer-generated shim; the UTF-8 posse.cmd is policy-independent.
@@ -3335,6 +3339,7 @@ function Step-UninstallCommand {
   Step-Begin "command"
   $binDir = Join-Path $env:USERPROFILE ".local\bin"
   $cmdShim = Join-Path $binDir "posse.cmd"
+  $agentCmdShim = Join-Path $binDir "posse-agent.cmd"
   $notes = @()
   $shim = Read-PosseShim $cmdShim
   if (Test-Path -LiteralPath $cmdShim) {
@@ -3349,6 +3354,7 @@ function Step-UninstallCommand {
     }
   }
   $psShim = Join-Path $binDir "posse.ps1"
+  if ((Test-Path -LiteralPath $agentCmdShim) -and -not $DryRun -and -not $script:KeepSharedWiring) { Remove-Item -LiteralPath $agentCmdShim -Force }
   if ((Test-Path -LiteralPath $psShim) -and -not $DryRun -and -not $script:KeepSharedWiring) { Remove-Item -LiteralPath $psShim -Force }
 
   # ~\.local\bin is shared with other tools: drop it from PATH only once empty.

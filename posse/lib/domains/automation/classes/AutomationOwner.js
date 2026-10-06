@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import crypto from "node:crypto";
+import path from "node:path";
 import { AutomationStore } from "./AutomationStore.js";
 import { AutomationService } from "./AutomationService.js";
 import { AgentSessionRegistry } from "./AgentSessionRegistry.js";
@@ -11,8 +12,9 @@ import { SkillRegistry } from "./SkillRegistry.js";
 import { ScriptToolRegistry } from "./ScriptToolRegistry.js";
 import { SqlCapabilityRegistry } from "./SqlCapabilityRegistry.js";
 import { PromptToolRegistry } from "./PromptToolRegistry.js";
+import { RegisteredAgentBridge } from "./RegisteredAgentBridge.js";
 import { verifyMcpOAuthToken, bootConfigFromMcpOAuthClaims } from "../../integrations/functions/deterministic-mcp/oauth-token.js";
-import { automationDbPath, automationSocketPath, ensureAutomationOperatorToken, repositoryID } from "../functions/paths.js";
+import { automationDbPath, automationSocketPath, registeredAgentSocketPath, ensureAutomationOperatorToken, repositoryID } from "../functions/paths.js";
 import { automationBuildIdentity, automationOwnerLaunch } from "../functions/owner-identity.js";
 import { definitionDigest, demand } from "../functions/policy.js";
 import { previewOccurrences } from "../functions/triggers.js";
@@ -31,9 +33,10 @@ export class AutomationOwner {
     this.agentDefinitions = new AgentDefinitionStore({ store: this.store });
     this.agentRuntime = new AgentRuntime({ definitions: this.agentDefinitions, client: { request: async (operation, args) => this.dispatchOperator(operation, args) } });
     this.agentSchedules = new AgentScheduleRegistry(this.store, this.agentRuntime, this.agentDefinitions);
+    this.registered = new RegisteredAgentBridge(this);
     this.socketPath = socketPath; this.operatorToken = operatorToken || ensureAutomationOperatorToken(); this.tickMs = tickMs;
     this.build = build; this.launch = launch;
-    this.server = null; this.timer = null; this.ownsStore = !store; this.socketFile = null;
+    this.server = null; this.registeredServer = null; this.registeredConnections = new Set(); this.timer = null; this.ownsStore = !store; this.socketFile = null; this.registeredSocketFile = null;
   }
   async start() {
     if (this.server) return this.socketPath;
@@ -46,13 +49,36 @@ export class AutomationOwner {
     this.server = net.createServer(socket => this.accept(socket));
     await new Promise((resolve, reject) => { this.server.once("error", reject); this.server.listen(this.socketPath, () => { this.server.off("error", reject); resolve(); }); });
     if (process.platform !== "win32") { fs.chmodSync(this.socketPath, 0o600); this.socketFile = fileIdentity(this.socketPath); }
+    const registeredPath = registeredAgentSocketPath();
+    demand(registeredPath !== this.socketPath, "Registered endpoint must be separate from operator endpoint");
+    if (process.platform !== "win32") {
+      fs.mkdirSync(path.dirname(registeredPath), { recursive: true, mode: 0o700 });
+      if (fs.existsSync(registeredPath)) {
+        const info = fs.lstatSync(registeredPath);
+        demand(info.isSocket() && !info.isSymbolicLink(), "Registered socket path is occupied by a non-socket");
+        fs.unlinkSync(registeredPath);
+      }
+    }
     this.service.recover();
     this.agentSchedules.recover();
-    this.timer = setInterval(() => { try { this.service.tick(); this.agentSchedules.tick(); } catch (error) { if (error.code === "owner_fenced") void this.close(); } }, this.tickMs);
+    this.registered.recover();
+    this.registeredServer = net.createServer(socket => {
+      if (this.registeredConnections.size >= 64) { socket.destroy(); return; }
+      this.registeredConnections.add(socket);
+      socket.once("close", () => this.registeredConnections.delete(socket));
+      this.accept(socket, true);
+    });
+    await new Promise((resolve, reject) => { this.registeredServer.once("error", reject); this.registeredServer.listen(registeredPath, () => { this.registeredServer.off("error", reject); resolve(); }); });
+    if (process.platform !== "win32") {
+      fs.chmodSync(registeredPath, process.env.POSSE_REGISTERED_AGENT_SOCKET_MODE === "0660" ? 0o660 : 0o600);
+      this.registeredSocketFile = fileIdentity(registeredPath);
+    }
+    this.timer = setInterval(() => { try { this.service.tick(); this.agentSchedules.tick(); this.registered.maintain(); } catch (error) { if (error.code === "owner_fenced") void this.close(); } }, this.tickMs);
     return this.socketPath;
   }
-  accept(socket) {
+  accept(socket, registered = false) {
     let buffer = Buffer.alloc(0), done = false, framed = false;
+    socket.setTimeout(5000, () => socket.destroy());
     const fail = error => {
       if (done) return; done = true;
       const message = safeError(error);
@@ -65,9 +91,10 @@ export class AutomationOwner {
       const newline = buffer.indexOf(10);
       if (newline < 0) return;
       framed = true;
+      socket.setTimeout(0);
       try {
         const request = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
-        Promise.resolve(this.dispatch(request)).then(result => {
+        Promise.resolve(registered ? this.dispatchRegistered(request) : this.dispatch(request)).then(result => {
           const response = JSON.stringify({ ok: true, result }) + "\n";
           demand(Buffer.byteLength(response) <= AUTOMATION_MAX_RESPONSE_BYTES,
             "Automation result exceeds the response limit; narrow the tool output or inspect the run locally", "response_too_large");
@@ -83,6 +110,11 @@ export class AutomationOwner {
     if (request.kind === "agent") return this.dispatchAgent(request);
     demand(request.kind === "operator" && timingSafeEqual(request.token, this.operatorToken), "Operator authentication failed", "unauthorized");
     return this.dispatchOperator(request.operation, request.args || {});
+  }
+  dispatchRegistered(request) {
+    demand(request && typeof request === "object" && !Array.isArray(request), "Invalid registered request", "invalid_request");
+    if (request.kind === "health" && Object.keys(request).length === 1) return { protocol: "posse.registered_agent_request.v1", ready: !this.service.stopping && this.service.ownsLease() };
+    return this.registered.execute(request);
   }
   health() { return { ...this.service.health(), build: this.build, launch: this.launch }; }
   dispatchAgent(request) {
@@ -134,6 +166,17 @@ export class AutomationOwner {
       case "agent.definition.create": return this.agentDefinitions.create(args.name);
       case "agent.definition.save": return this.agentDefinitions.save(args.definition, { create: args.create === true });
       case "agent.definition.remove": return this.agentDefinitions.remove(args.name);
+      case "agent.client.create": return this.registered.create(args);
+      case "agent.client.rotate": return this.registered.rotate(args.id);
+      case "agent.client.revoke": return this.registered.revoke(args.id);
+      case "agent.client.list": return this.store.list("registered_clients").map(item => this.registered.publicRegistration(item));
+      case "agent.trust.approve": return this.registered.approve(args);
+      case "agent.trust.list": return this.store.list("registered_trust");
+      case "agent.repository.save": {
+        const root = fs.realpathSync(args.root);
+        demand(repositoryID(root) === args.id, "Repository ID/root mismatch", "invalid_request");
+        return this.store.put("repositories", args.id, { id: args.id, root });
+      }
       case "script.list": return this.scripts.list();
       case "script.show": return this.scripts.show(args.name, { repoPath: args.repo_path });
       case "script.create": return this.scripts.create(args.spec);
@@ -183,11 +226,16 @@ export class AutomationOwner {
   async close() {
     if (this.timer) clearInterval(this.timer); this.timer = null;
     const server = this.server; this.server = null;
-    if (server) await new Promise(resolve => server.close(resolve));
-    await this.agentSchedules.shutdown(); await this.service.shutdown(); if (this.ownsStore) this.store.close();
+    const registeredServer = this.registeredServer; this.registeredServer = null;
+    if (registeredServer) registeredServer.close();
+    for (const socket of this.registeredConnections) socket.destroy();
+    if (server) server.close();
+    await this.registered.shutdown(); await this.agentSchedules.shutdown(); await this.service.shutdown(); if (this.ownsStore) this.store.close();
     // A successor may already listen on this path; remove only our own socket.
     if (process.platform !== "win32") {
       try { if (!this.socketFile || sameFile(fileIdentity(this.socketPath), this.socketFile)) fs.unlinkSync(this.socketPath); } catch {}
+      const registeredPath = registeredAgentSocketPath();
+      try { if (!this.registeredSocketFile || sameFile(fileIdentity(registeredPath), this.registeredSocketFile)) fs.unlinkSync(registeredPath); } catch {}
     }
   }
 }
@@ -204,6 +252,6 @@ function timingSafeEqual(left, right) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function safeError(error) {
-  const allowed = new Set(["response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed", "script_invalid", "script_not_found", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable", "sql_capability_invalid", "sql_capability_not_found", "sql_capability_unavailable", "prompt_tool_invalid", "prompt_tool_not_found", "prompt_tool_result_missing", "prompt_tool_result_unknown", "agent_invalid", "agent_not_found", "agent_scope_mismatch", "agent_session_invalid", "agent_session_not_found", "agent_session_mismatch", "agent_session_busy", "agent_turn_changed", "agent_confirmation_required", "agent_confirmation_missing", "agent_tool_failed"]);
+  const allowed = new Set(["request_too_large", "response_too_large", "invalid_request", "invalid_trigger", "forbidden", "unauthorized", "ambiguous_grant", "schema_mismatch", "grant_changed", "idempotency_conflict", "agent_request_busy", "agent_session_expired", "receipt_expired", "agent_budget_exceeded", "usage_unknown", "external_outcome_unknown", "draft_not_found", "skill_unavailable", "capability_unavailable", "owner_fenced", "owner_unavailable", "output_conflict", "schedule_attention", "resource_changed", "script_invalid", "script_not_found", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable", "sql_capability_invalid", "sql_capability_not_found", "sql_capability_unavailable", "prompt_tool_invalid", "prompt_tool_not_found", "prompt_tool_result_missing", "prompt_tool_result_unknown", "agent_invalid", "agent_not_found", "agent_scope_mismatch", "agent_session_invalid", "agent_session_not_found", "agent_session_mismatch", "agent_session_busy", "agent_turn_changed", "agent_confirmation_required", "agent_confirmation_missing", "agent_tool_failed"]);
   return { code: allowed.has(error?.code) ? error.code : "automation_error", message: allowed.has(error?.code) ? error.message : "Automation request failed; inspect local diagnostics" };
 }

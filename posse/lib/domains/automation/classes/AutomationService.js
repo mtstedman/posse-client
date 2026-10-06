@@ -145,11 +145,12 @@ export class AutomationService {
   }
   ownedRun(principal, id) {
     subject(principal); const run = this.store.run(id);
-    demand(run && digest(run.principal) === digest(principal), "Run is outside this caller's scope", "forbidden");
+    demand(run && !run.execution_context && digest(run.principal) === digest(principal), "Run is outside this caller's scope", "forbidden");
     return run;
   }
-  invoke(principal, args, schedule = null, { allowExternalWrite = false } = {}) {
+  invoke(principal, args, schedule = null, { allowExternalWrite = false, execution = null } = {}) {
     this.assertOwner();
+    execution?.check();
     const { entry, grant } = this.resolve(principal, args.tool, "invoke", args.grant_id);
     demand(!schedule || grant.unattended && grant.revision === schedule.grant_revision, "Schedule grant changed or is not unattended", "grant_changed");
     // Write script tools confirm by default. No caller can ask a person yet,
@@ -159,32 +160,36 @@ export class AutomationService {
     schemaCheck(entry.input_schema, args.input);
     const key = args.idempotency_key || randomUUID();
     demand(typeof key === "string" && key.length > 0 && key.length <= 120, "Invalid idempotency key");
-    const idem = digest([principal, grant.id, key]);
+    const idem = execution ? digest([principal, execution.clientID, grant.id, key]) : digest([principal, grant.id, key]);
     const fingerprint = digest([entry.id, entry.digest, grant.revision, args.input]);
     const run = this.store.transaction(() => {
       const existing = this.store.byIdempotency(idem);
       if (existing) { demand(existing.fingerprint === fingerprint, "Idempotency key reused with different input or authority", "idempotency_conflict"); return existing; }
-      return this.store.insertRun(this.newRun(principal, entry, grant, args.input, fingerprint, schedule), idem);
+      const created = this.newRun(principal, entry, grant, args.input, fingerprint, schedule);
+      if (execution) created.execution_context = { origin: "registered", client_id: execution.clientID, agent: execution.agent, request_id: execution.requestID };
+      return this.store.insertRun(created, idem);
     });
-    if (run.status === "queued" && !this.active.has(run.id)) this.start(run, entry, grant);
+    if (run.status === "queued" && !this.active.has(run.id)) this.start(run, entry, grant, execution);
     return run;
   }
   newRun(principal, entry, grant, input, fingerprint, schedule = null) {
     const measuredZero = entry.kind === "builtin" || entry.kind === "script" || entry.kind === "sql" || entry.definition?.runtime?.mode === "recipe";
     return { id: randomUUID(), tool: entry.id, skill_id: entry.definition ? `${entry.definition.name}@${entry.definition.version}` : entry.id, principal: structuredClone(principal), grant_id: grant.id, grant_revision: grant.revision, resource_revisions: grant.resources.map(item => ({ id: item.id, revision: this.store.get("resources", item.id)?.revision })), digest: entry.digest, fingerprint, input: structuredClone(input), status: "queued", created_at: new Date(this.now()).toISOString(), started_at: null, calls: 0, turns: 0, spend_usd: measuredZero ? 0 : null, schedule_id: schedule?.id || null, schedule_revision: schedule?.revision || null, owner_generation: this.lease?.generation || null, attempt: 1, retry: structuredClone(schedule?.retry || { max_attempts: 1 }) };
   }
-  start(run, entry, grant) {
+  start(run, entry, grant, execution = null) {
     const controller = new AbortController();
+    if (execution?.signal) execution.signal.addEventListener("abort", () => controller.abort(), { once: true });
     const state = { run, controller, promise: null };
     this.active.set(run.id, state);
-    state.promise = this.execute(run, entry, grant, controller).finally(() => this.active.delete(run.id));
+    state.promise = this.execute(run, entry, grant, controller, execution).finally(() => this.active.delete(run.id));
   }
-  async execute(run, entry, grant, controller) {
+  async execute(run, entry, grant, controller, execution = null) {
     const limits = narrowLimits(entry.limits, grant.limits || entry.limits);
     const deadline = performance.now() + limits.wall_time_seconds * 1000;
     const timer = setTimeout(() => controller.abort(Object.assign(new Error("Wall time limit exceeded"), { code: "wall_time_limit" })), limits.wall_time_seconds * 1000);
     const check = () => {
       controller.signal.throwIfAborted();
+      execution?.check();
       this.assertOwner();
       demand(performance.now() < deadline, "Wall time limit exceeded", "wall_time_limit");
       const current = this.store.get("grants", grant.id), currentEntry = this.store.get("entries", entry.id);
@@ -211,6 +216,7 @@ export class AutomationService {
         demand(pin && issued?.kind === "script" && issued.enabled && issued.digest === pin.digest && this.scripts?.available(issued), `Issued tool ${id.slice(7)} changed or is unavailable`, "script_changed");
         schemaCheck(issued.input_schema, input);
         demand(entry.effect !== "read_only" || issued.effect === "read_only", "Read-only skill cannot issue a write tool", "forbidden");
+        if (execution) execution.checkCapability(id, issued.digest, run.principal);
         return this.scripts.run(issued, input, { signal: controller.signal });
       }
       demand(this.connectors, `Capability ${id} has no installed adapter`, "capability_unavailable");
@@ -264,8 +270,10 @@ export class AutomationService {
         this.store.updateRun(run); this.store.remove("commits", run.id); this.store.releaseOutputs(run.id);
       });
     } catch (error) {
-      const uncertain = ["rollback_failed", "rollback_conflict", "usage_unknown", "external_outcome_unknown", "owner_fenced"].includes(error.code);
-      run.error_code = error.code || "execution_failed";
+      const uncertain = ["rollback_failed", "rollback_conflict", "usage_unknown", "external_outcome_unknown", "owner_fenced"].includes(error.code)
+        || Boolean(execution && run.calls > 0 && ["external_write", "artifact_write"].includes(entry.effect) && controller.signal.aborted);
+      if (uncertain && execution) execution.state.uncertain = true;
+      run.error_code = uncertain && execution ? "external_outcome_unknown" : error.code || "execution_failed";
       // Avoid reflecting arbitrary provider/connector errors or secrets into history.
       run.error = ["forbidden", "grant_changed", "schema_mismatch", "capability_unavailable", "wall_time_limit", "call_limit", "budget_limit", "usage_unknown", "owner_fenced", "output_conflict", "script_changed", "script_timeout", "script_secret_missing", "script_unavailable"].includes(run.error_code) ? error.message : "Execution failed; inspect the operator's local diagnostics";
       if (!uncertain) this.store.transaction(() => { this.store.remove("commits", run.id); this.store.releaseOutputs(run.id); });
@@ -438,6 +446,12 @@ export class AutomationService {
         if (schedule.overlap.mode === "allow" && active >= schedule.overlap.max_concurrency) continue;
       }
       try {
+        if (queued.execution_context?.origin === "registered") {
+          queued.status = "interrupted"; queued.error_code = "owner_restarted";
+          queued.error = "Registered execution requires receipt reconciliation";
+          queued.completed_at = new Date(this.now()).toISOString(); this.store.updateRun(queued);
+          continue;
+        }
         const { entry, grant } = this.resolve(queued.principal, queued.tool, "invoke", queued.grant_id);
         demand(entry.digest === queued.digest && grant.revision === queued.grant_revision, "Queued run authority changed", "grant_changed");
         this.start(queued, entry, grant);

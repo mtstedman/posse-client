@@ -28,6 +28,16 @@ export function automationSocketPath() {
   return path.join(automationDataDir(), "automation.sock");
 }
 
+export function registeredAgentSocketPath() {
+  const configured = String(process.env.POSSE_REGISTERED_AGENT_SOCKET || "").trim();
+  if (configured) return configured;
+  if (process.platform === "win32") {
+    const identity = crypto.createHash("sha256").update(automationDataDir()).digest("hex").slice(0, 16);
+    return `\\\\.\\pipe\\posse-registered-agent-${identity}`;
+  }
+  return path.join(automationDataDir(), "registered-agent.sock");
+}
+
 export function automationOperatorTokenPath() {
   return path.join(automationDataDir(), "automation.operator-token");
 }
