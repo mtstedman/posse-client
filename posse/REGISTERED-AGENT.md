@@ -91,6 +91,13 @@ automation database, registration imports its definition and prompt contexts
 from `~/.posse/automation.db` (or `--source-data-dir DIR`). Executable approvals
 and grants are never copied silently; missing dependencies fail registration
 without activating the audience. The command never prints a credential.
+When the operator edits an already registered definition, repeat registration
+with the same audience, operations, contexts, and budget plus
+`--source-data-dir DIR --update-definition`. This explicitly replaces the
+system owner's copy before reactivating the exposure; failed staging or probes
+restore the prior definition if no other operator has changed it. Existing
+conversations remain pinned to their
+original definition and must be restarted after an update.
 Revoked exposures are terminal for ordinary retries. To restore one, repeat
 `posse agent register` with `--restore-preserving-conversations`; this explicit
 choice keeps the named or local client identities and their existing receipts,

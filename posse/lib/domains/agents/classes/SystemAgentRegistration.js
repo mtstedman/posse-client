@@ -40,9 +40,10 @@ export class SystemAgentRegistration {
 
   async register({ agent, clientID = "", users = [], groups = [], operations = ["chat"], contextNames = [],
     packageRoot = "/opt/posse-agent/current/posse", sourceDataDir = "", maxSpendUsd = 100,
-    restorePreservingConversations = false }) {
+    restorePreservingConversations = false, updateDefinition = false }) {
     demand(process.platform === "linux" && process.getuid() === 0, "Registration requires Linux root", "forbidden");
     demand(!clientID || users.length + groups.length > 0, "Named clients require --user or --group", "invalid_request");
+    demand(!updateDefinition || sourceDataDir, "Updating a system definition requires --source-data-dir", "invalid_request");
     demand(fs.existsSync("/etc/posse-agent/owner.env"),
       "System owner environment file is missing", "capability_unavailable");
     const manager = new this.managerClass({ packageRoot });
@@ -51,67 +52,89 @@ export class SystemAgentRegistration {
     const tokenPath = path.join(DATA, "automation.operator-token");
     const client = new this.clientClass({ operator: true, token: fs.readFileSync(tokenPath, "utf8").trim(),
       socketPath: path.join(DATA, "automation.sock"), timeoutMs: 5000 });
-    const loaded = await this.ensureDefinition(client, agent, sourceDataDir);
-    demand(loaded.definition?.limits?.spend_usd <= maxSpendUsd,
-      "Exposure spend budget is below one agent turn", "agent_budget_exceeded");
-    const model = String(loaded.definition?.model || "").split(":")[0].toUpperCase();
-    const ownerEnv = fs.readFileSync("/etc/posse-agent/owner.env", "utf8");
-    const envValues = new Map(ownerEnv.split("\n").filter(line => line.trim() && !line.trimStart().startsWith("#"))
-      .map(line => { const separator = line.indexOf("="); return separator < 0 ? ["", ""]
-        : [line.slice(0, separator).trim(), line.slice(separator + 1).trim().replace(/^['"]|['"]$/g, "")]; }));
-    demand(envValues.get("POSSE_KEY"), "System owner POSSE_KEY is not configured", "capability_unavailable");
-    demand(!envValues.has("POSSE_NATIVE_BIN_ROOT"), "System owner native bin root must be the verified release", "forbidden");
-    if (["ANTHROPIC", "OPENAI"].includes(model)) demand(envValues.get(`${model}_API_KEY`),
-      `System owner ${model} provider credential is not configured`, "capability_unavailable");
-    const nativeModule = pathToFileURL(path.join(fs.realpathSync(packageRoot), "lib/shared/tools/classes/BinaryManager.js"));
-    const { BinaryManager } = await import(nativeModule.href);
-    const nativeBinaries = new BinaryManager({ env: { ...process.env, ...Object.fromEntries(envValues) } });
-    demand(nativeBinaries.shouldUse("remote"), "System owner native remote client is unavailable", "capability_unavailable");
-    const nativePath = fs.realpathSync(nativeBinaries.binary("remote").resolvePath());
-    demand(nativePath.startsWith(fs.realpathSync(packageRoot) + path.sep),
-      "Native remote client is outside the verified release", "forbidden");
-    let existing = null;
-    if (clientID) {
-      const clients = await client.request("agent.client.list");
-      existing = clients.find(item => item.id === clientID);
-      if (existing) demand(existing.enabled && existing.agents.includes(agent)
-        && existing.max_spend_usd >= loaded.definition.limits.spend_usd,
-        "Existing named client does not authorize this agent", "forbidden");
-    }
-    if (restorePreservingConversations) {
-      const rows = await client.request("agent.exposure.list");
-      const id = `${agent}:${clientID || "@local"}`;
-      demand(rows.some(item => item.id === id && item.status === "revoked"),
-        "Only a revoked exposure can be restored", "forbidden");
-      await client.request("agent.exposure.restore", { id });
-    }
-    const exposure = await client.request("agent.exposure.stage", { agent, client_id: clientID,
-      users, groups, operations, context_names: contextNames, max_spend_usd: maxSpendUsd });
-    if (clientID && !existing) await client.request("agent.client.create", { id: clientID, agents: [agent],
-      operations, context_names: contextNames, max_spend_usd: maxSpendUsd });
-    else if (existing && (operations.some(op => !existing.operations.includes(op))
-      || contextNames.some(name => !existing.context_names.includes(name))))
-      await client.request("agent.client.extend_exposure", { id: clientID, agent,
-        operations, context_names: contextNames });
-    if (exposure.status !== "active") {
-      const audience = new Set([...users, ...groups.map(osUserForGroup)]);
-      if (!audience.size) audience.add("nobody");
-      for (const user of audience) {
-        const probe = spawnSync("runuser", ["-u", user, "--", "env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin",
-          service.launcher, "probe", agent, "--json"], { encoding: "utf8", timeout: 10_000 });
-        let result = null;
-        try { result = JSON.parse(probe.stdout); } catch {}
-        demand(probe.status === 0 && result?.ready === true && result.exposure_id === exposure.id,
-          `Registration probe failed for OS user ${user}`, "forbidden");
+    const previous = updateDefinition ? await client.request("agent.definition.get", { name: agent }).catch(error => {
+      if (error.code === "agent_not_found") return null;
+      throw error;
+    }) : null;
+    let importedDigest = null;
+    try {
+      const loaded = await this.ensureDefinition(client, agent, sourceDataDir, updateDefinition);
+      importedDigest = loaded.digest;
+      demand(loaded.definition?.limits?.spend_usd <= maxSpendUsd,
+        "Exposure spend budget is below one agent turn", "agent_budget_exceeded");
+      const model = String(loaded.definition?.model || "").split(":")[0].toUpperCase();
+      const ownerEnv = fs.readFileSync("/etc/posse-agent/owner.env", "utf8");
+      const envValues = new Map(ownerEnv.split("\n").filter(line => line.trim() && !line.trimStart().startsWith("#"))
+        .map(line => { const separator = line.indexOf("="); return separator < 0 ? ["", ""]
+          : [line.slice(0, separator).trim(), line.slice(separator + 1).trim().replace(/^['"]|['"]$/g, "")]; }));
+      demand(envValues.get("POSSE_KEY"), "System owner POSSE_KEY is not configured", "capability_unavailable");
+      demand(!envValues.has("POSSE_NATIVE_BIN_ROOT"), "System owner native bin root must be the verified release", "forbidden");
+      if (["ANTHROPIC", "OPENAI"].includes(model)) demand(envValues.get(`${model}_API_KEY`),
+        `System owner ${model} provider credential is not configured`, "capability_unavailable");
+      const nativeModule = pathToFileURL(path.join(fs.realpathSync(packageRoot), "lib/shared/tools/classes/BinaryManager.js"));
+      const { BinaryManager } = await import(nativeModule.href);
+      const nativeBinaries = new BinaryManager({ env: { ...process.env, ...Object.fromEntries(envValues) } });
+      demand(nativeBinaries.shouldUse("remote"), "System owner native remote client is unavailable", "capability_unavailable");
+      const nativePath = fs.realpathSync(nativeBinaries.binary("remote").resolvePath());
+      demand(nativePath.startsWith(fs.realpathSync(packageRoot) + path.sep),
+        "Native remote client is outside the verified release", "forbidden");
+      let existing = null;
+      if (clientID) {
+        const clients = await client.request("agent.client.list");
+        existing = clients.find(item => item.id === clientID);
+        if (existing) demand(existing.enabled && existing.agents.includes(agent)
+          && existing.max_spend_usd >= loaded.definition.limits.spend_usd,
+          "Existing named client does not authorize this agent", "forbidden");
       }
-      await client.request("agent.exposure.activate", { id: exposure.id, revision: exposure.revision });
+      if (restorePreservingConversations) {
+        const rows = await client.request("agent.exposure.list");
+        const id = `${agent}:${clientID || "@local"}`;
+        demand(rows.some(item => item.id === id && item.status === "revoked"),
+          "Only a revoked exposure can be restored", "forbidden");
+        await client.request("agent.exposure.restore", { id });
+      }
+      const exposure = await client.request("agent.exposure.stage", { agent, client_id: clientID,
+        users, groups, operations, context_names: contextNames, max_spend_usd: maxSpendUsd });
+      if (clientID && !existing) await client.request("agent.client.create", { id: clientID, agents: [agent],
+        operations, context_names: contextNames, max_spend_usd: maxSpendUsd });
+      else if (existing && (operations.some(op => !existing.operations.includes(op))
+        || contextNames.some(name => !existing.context_names.includes(name))))
+        await client.request("agent.client.extend_exposure", { id: clientID, agent,
+          operations, context_names: contextNames });
+      const serviceStatus = manager.status();
+      if (exposure.status !== "active") {
+        const audience = new Set([...users, ...groups.map(osUserForGroup)]);
+        if (!audience.size) audience.add("nobody");
+        for (const user of audience) {
+          const probe = spawnSync("runuser", ["-u", user, "--", "env", "-i", "PATH=/usr/local/bin:/usr/bin:/bin",
+            service.launcher, "probe", agent, "--json"], { encoding: "utf8", timeout: 10_000 });
+          let result = null;
+          try { result = JSON.parse(probe.stdout); } catch {}
+          demand(probe.status === 0 && result?.ready === true && result.exposure_id === exposure.id,
+            `Registration probe failed for OS user ${user}`, "forbidden");
+        }
+        await client.request("agent.exposure.activate", { id: exposure.id, revision: exposure.revision });
+      }
+      return { agent, client_id: clientID || null, audience: users.length || groups.length ? { users, groups } : "global",
+        operations, status: "active", invocation: `${service.launcher} chat ${agent} --idempotency-key KEY --request-json --json`,
+        service: serviceStatus };
+    } catch (error) {
+      // Keep the prior live definition when staging or probing fails. Never
+      // overwrite a subsequent edit from another operator.
+      try { await this.restorePreviousDefinition(client, agent, previous, importedDigest); }
+      catch (rollbackError) { throw new AggregateError([error, rollbackError], "Registration failed and the prior system definition could not be restored"); }
+      throw error;
     }
-    return { agent, client_id: clientID || null, audience: users.length || groups.length ? { users, groups } : "global",
-      operations, status: "active", invocation: `${service.launcher} chat ${agent} --idempotency-key KEY --request-json --json`,
-      service: manager.status() };
   }
 
-  async ensureDefinition(client, agent, sourceDataDir = "") {
+  async restorePreviousDefinition(client, agent, previous, importedDigest) {
+    if (!previous || !importedDigest || previous.digest === importedDigest) return;
+    const current = await client.request("agent.definition.get", { name: agent });
+    if (current.digest === importedDigest)
+      await client.request("agent.definition.save", { definition: previous.definition, create: false });
+  }
+
+  async ensureDefinition(client, agent, sourceDataDir = "", updateDefinition = false) {
     const get = () => client.request("agent.definition.get", { name: agent }).catch(error => {
       if (error.code === "agent_not_found") return null;
       throw error;
@@ -119,7 +142,7 @@ export class SystemAgentRegistration {
     let loaded = await get();
     if (!loaded || sourceDataDir) {
       const source = sourceDataDir || defaultSourceDir();
-      if (fs.existsSync(path.join(source, "automation.db"))) await this.transferDefinition(client, source, agent);
+      if (fs.existsSync(path.join(source, "automation.db"))) await this.transferDefinition(client, source, agent, updateDefinition);
       loaded = await get();
     }
     if (!loaded) throw Object.assign(new Error(`Agent ${agent} is absent from system owner; use --source-data-dir`),
@@ -127,7 +150,7 @@ export class SystemAgentRegistration {
     return loaded;
   }
 
-  async transferDefinition(client, sourceDataDir, agent) {
+  async transferDefinition(client, sourceDataDir, agent, updateDefinition = false) {
     const filename = path.join(fs.realpathSync(sourceDataDir), "automation.db");
     demand(fs.statSync(filename).isFile(), "Source automation database is missing", "invalid_request");
     const source = new DatabaseSync(filename, { readOnly: true });
@@ -157,7 +180,10 @@ export class SystemAgentRegistration {
         throw error;
       });
       if (!target) await client.request("agent.definition.save", { definition: record.definition, create: true });
-      else demand(target.digest === record.digest, "System agent definition digest differs from source", "schema_mismatch");
+      else if (target.digest !== record.digest) {
+        demand(updateDefinition, "System agent definition digest differs from source; use --update-definition to refresh it", "schema_mismatch");
+        await client.request("agent.definition.save", { definition: record.definition, create: false });
+      }
     } finally { source.close(); }
   }
 }

@@ -12,7 +12,7 @@ const USAGE = `Usage:
   posse agent trust approve ENTRY_ID --level application_safe|operator_only --reviewed-by ID
   posse agent trust list
   posse agent repository save REPO_ID ROOT
-  posse agent register NAME [--client ID] [--user USER] [--group GROUP] [--operation chat|run] [--context NAME] [--max-spend-usd USD] [--source-data-dir DIR] [--package-root DIR] [--restore-preserving-conversations]
+  posse agent register NAME [--client ID] [--user USER] [--group GROUP] [--operation chat|run] [--context NAME] [--max-spend-usd USD] [--source-data-dir DIR] [--update-definition] [--package-root DIR] [--restore-preserving-conversations]
   posse agent registrations list [NAME]
   posse agent registrations show NAME [--client ID]
   posse agent registrations revoke NAME [--client ID]
@@ -44,6 +44,9 @@ export async function runRegisteredAdminCli(argv, io = {}) {
       const flag = argv[index], value = argv[index + 1];
       if (flag === "--restore-preserving-conversations") {
         values.restorePreservingConversations = true; index--; continue;
+      }
+      if (flag === "--update-definition") {
+        values.updateDefinition = true; index--; continue;
       }
       if (!value || (!map[flag] && !singles[flag])) throw Object.assign(new Error(USAGE), { code: "invalid_request" });
       if (map[flag]) values[map[flag]].push(value);
