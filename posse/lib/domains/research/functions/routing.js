@@ -550,10 +550,17 @@ export function buildSyntheticResearchBrief(routingOrReason = null, { plannerDis
   const structured = {
     research_skipped: true,
     reason,
+    ...(plannerDispatch && typeof routingOrReason === "object" && routingOrReason ? {
+      intake_route: {
+        bucket: routingOrReason.bucket || null,
+        budget: routingOrReason.budget || null,
+        reason: routingOrReason.intake_reason || null,
+      },
+    } : {}),
     key_files: keyFiles,
     related_files: [],
     constraints: [plannerDispatch
-      ? "No upfront researcher ran; the planner should use the original work item and intake hints for triage, then dispatch bounded research children for unresolved questions."
+      ? "No upfront researcher ran. Before repository or source reads, the planner must choose from the work item and intake route: dispatch one bounded research batch immediately for nontrivial unknowns, or use zero children and plan a simple, clearly scoped job directly."
       : "Researcher was skipped by deterministic routing; planner should rely on the original work item and intake hints."],
     questions_for_human: false,
     questions: [],

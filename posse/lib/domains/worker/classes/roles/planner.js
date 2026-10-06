@@ -719,11 +719,13 @@ export class PlannerRole extends BaseRole {
       ? [
         "PLANNER-LED INTAKE:",
         "  No upfront research ran. The routing record below is a starting point, not the complete input.",
-        "  Spend the triage budget stated under Research budgets on orientation reads, then dispatch bounded",
-        "  research children for the questions still open; give each child one self-contained question and",
-        "  the paths you already know.",
-        "  Zero children is right only when the triage reads already settle every open question. Produce",
-        "  one terminal plan grounded in evidence you or your children read.",
+        "  Make the research decision now, from the work item and intake record, before repository/source reads.",
+        "  For nontrivial unknowns, dispatch one bounded batch immediately; give each child one self-contained",
+        "  question and only the paths or refs already supplied. Do not collect orientation context first.",
+        "  For a simple, clearly scoped job, use zero children and plan directly. A planner-owned read starts",
+        "  that direct path; do not dispatch researchers later after accumulating planner context.",
+        "  After dispatched findings return, use planner reads only for narrow, plan-blocking verification.",
+        "  Produce one terminal plan grounded in evidence you or your children read.",
         "  Do not call get_brief solely to reload the synthetic routing record.",
         promptLiteral("SYNTHETIC ROUTING RECORD", researchBrief || "(none)"),
         "",
@@ -812,7 +814,7 @@ export class PlannerRole extends BaseRole {
   async composePrompt({ contextText, contract, job, ctx } = {}) {
     const researchPolicy = ctx.plannerPacket?.planner_dispatch_policy;
     const researchBudget = researchPolicy ? [
-      `Research budgets: your triage budget is about ${researchPolicy.triageMaxTurns} turns (roughly ${researchPolicy.triageMaxTurns * 2} tool calls) of your own orientation reads to confirm the entry points and the shape of the change; within it, decide which open questions need research children, and dispatch them instead of reading beyond it yourself, especially for reads across several files or subsystems. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, with a ${researchPolicy.resultChars}-character result target (longer reports are delivered in full and consume more planner context). Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier; a code child may request model_tier strong for deep multi-file reasoning, and web children stay on cheap or standard. Delegate bounded reads to them and keep judgment here.`,
+      `Research decision and budgets: decide before your first repository/source tool call. If the work is simple and clearly scoped, use zero children and plan directly; your direct-path read budget is about ${researchPolicy.triageMaxTurns} turns (roughly ${researchPolicy.triageMaxTurns * 2} tool calls). Otherwise dispatch one batch immediately, before collecting orientation context. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, with a ${researchPolicy.resultChars}-character result target. Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier; a code child may request model_tier strong for deep multi-file reasoning, and web children stay on cheap or standard. Keep investigation in the children and planning judgment here.`,
       "For code research, prefer a one-sentence question plus up to eight anchors (repo-relative paths, optional symbols or line ranges, or a parent-held #ref) over repeating context in prose. Anchors are starting points, not conclusions.",
       "Completed entries contain a compact packet. When the tool result includes research_expansion.files and research_expansion.brief, that brief is already visible: cite research_expansion.files[].ref and do not fetch it again; traverse the evidence ref only to read beyond the shown hunks. Timed-out and failed entries contain error instead of packet. An identical retry replays the settled digest, including a timeout, so narrow or reword a retry.",
     ].join("\n") : null;

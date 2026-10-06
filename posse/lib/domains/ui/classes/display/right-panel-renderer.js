@@ -2,7 +2,7 @@ import { appendResearchChildMonitorRows } from "../../functions/display/helpers/
 import { C } from "../../../../shared/format/functions/colors.js";
 import { statusIcon as paletteStatusIcon } from "../../functions/display/status-palette.js";
 import { fit, stripAnsi, _sanitizeDisplayLine } from "../../functions/display/helpers/formatters.js";
-import { roleBrandColor, roleBrandIcon } from "../../functions/display/helpers/brand.js";
+import { brandRule, roleBrandColor, roleBrandIcon } from "../../functions/display/helpers/brand.js";
 import { jobLabel, jobDisplayStatus, jobIsBackgroundAtlasWarm } from "../../functions/display/helpers/job-status.js";
 import { renderPosseMascotFrame } from "../../functions/display/helpers/mascot.js";
 import { canonicalAtlasActionName } from "../../../../shared/tools/functions/mcp-surface.js";
@@ -61,6 +61,12 @@ const LIVE_CHANNEL_TOOL_TYPES = new Set([
 const MONITOR_ACTIVE_JOB_STATUSES = new Set(["leased", "running", "awaiting_assessment"]);
 const MONITOR_HUMAN_GATE_STATUSES = new Set(BRIDGE_OPEN_GATE_STATUSES);
 const MONITOR_TERMINAL_JOB_STATUSES = new Set(TERMINAL_JOB_STATUSES);
+const RUN_VIEW_TABS = Object.freeze([
+  Object.freeze({ mode: "log", key: "L", label: "Activity" }),
+  Object.freeze({ mode: "monitor", key: "M", label: "Agents" }),
+  Object.freeze({ mode: "pipeline", key: "P", label: "Pipeline" }),
+  Object.freeze({ mode: "tools", key: "T", label: "Tools" }),
+]);
 
 function monitorHumanGateIsOpen(job) {
   if (job?.job_type !== "human_input") return false;
@@ -521,7 +527,132 @@ function sessionSyncLabel(session) {
   return label ? _sanitizeDisplayLine(label) : `trunk ${session?.trunk_health?.status || "pending"}`;
 }
 
+
+
+function sessionPairingStatusColor(session) {
+  const state = String(session?.sync?.state || session?.trunk_health?.status || "").toLowerCase();
+  if (["disconnected", "blocked", "failed"].includes(state)) return C.red;
+  if (["behind", "held", "stale", "not_syncing", "not-syncing"].includes(state)) return C.yellow;
+  if (["synced", "healthy"].includes(state)) return C.green;
+  return C.cyan;
+}
+
+
+
+function sessionPairingDashboardLines(session, peerRows, width) {
+  const lines = [brandRule({ label: "session pairing", color: C.magenta, width })];
+  const role = session?.role === "host" ? "HOSTING" : "MEMBER";
+  const phase = String(session?.phase || "connecting").toUpperCase();
+  const sync = sessionSyncLabel(session);
+  const statusColor = sessionPairingStatusColor(session);
+  const peers = Math.max(0, Number(session?.peer_count) || 0);
+  const pending = Math.max(0, Number(session?.pending_count) || 0);
+  const delegated = Array.isArray(session?.delegations) ? session.delegations.length : 0;
+  const sharedWork = Array.isArray(peerRows) ? peerRows.length : 0;
+
+  lines.push(fit(
+    ` ${statusColor}${C.bold}\u25cf ${phase}${C.reset}  ${C.brightWhite}YOU: ${role}${C.reset} ${C.dim}\u00b7${C.reset} ${statusColor}${sync}${C.reset}`,
+    width,
+  ));
+  lines.push(fit(` ${C.dim}BRANCH${C.reset} ${_sanitizeDisplayLine(session?.branch || "session branch pending")}`, width));
+  lines.push(fit(
+    ` ${C.dim}TEAM${C.reset} ${peers} connected ${C.dim}\u00b7${C.reset} ${sharedWork} active work ${C.dim}\u00b7${C.reset} ${pending} waiting ${C.dim}\u00b7${C.reset} ${delegated} delegated`,
+    width,
+  ));
+
+  if (pending > 0 && session?.role === "host") {
+    lines.push(fit(` ${C.yellow}${C.bold}! ${pending} join request${pending === 1 ? "" : "s"} waiting${C.reset}  ${C.dim}\u00b7 [U] SESSION \u2192 ADMIT <CODE>${C.reset}`, width));
+  }
+
+  const peersSync = Array.isArray(session?.peers_sync) ? session.peers_sync : [];
+  for (const peer of peersSync.slice(0, SESSION_PEER_SYNC_ROWS)) {
+    lines.push(fit(` ${C.magenta}\u2502${C.reset} ${_sanitizeDisplayLine(formatPeerSyncRow(peer))}`, width));
+  }
+  if (peersSync.length > SESSION_PEER_SYNC_ROWS) {
+    lines.push(fit(` ${C.magenta}\u2502${C.reset} ${C.dim}+${peersSync.length - SESSION_PEER_SYNC_ROWS} more teammate(s)${C.reset}`, width));
+  }
+
+  if (peers === 0 && pending === 0) {
+    const invitation = session?.enrollment_open ? "Invites are open" : "Invites are closed";
+    lines.push(` ${C.dim}\u25cb Waiting for teammates \u00b7 ${invitation}${C.reset}`);
+  } else if (peers > 0 && sharedWork === 0) {
+    lines.push(` ${C.green}\u2713 Team connected${C.reset}${C.dim} \u00b7 peer work will appear here when it starts${C.reset}`);
+  }
+
+  const controls = session?.role === "host"
+    ? "STATUS  ADMIT  INVITE  POLICY  CLOSE"
+    : "STATUS  HOLD  RESUME";
+  lines.push(fit(` ${C.cyan}${C.bold}[U] SESSION${C.reset}  ${C.dim}${controls}${C.reset}`, width));
+  return lines;
+}
+
+
+
+function unpairedPipelineLines(width) {
+  return [
+    brandRule({ label: "work queue", color: C.blue, width }),
+    ` ${C.dim}\u25cb No active work items${C.reset}`,
+    "",
+    brandRule({ label: "session pairing", color: C.magenta, width }),
+    ` ${C.brightWhite}${C.bold}Work together from separate clones${C.reset}`,
+    ` ${C.dim}Shared branch, live teammate presence, and read-only peer work.${C.reset}`,
+    ` ${C.magenta}${C.bold}HOST${C.reset}  ${C.brightWhite}posse session host${C.reset}`,
+    ` ${C.magenta}${C.bold}JOIN${C.reset}  ${C.brightWhite}posse session join <code>${C.reset}`,
+  ].map((line) => fit(line, width));
+}
+
 export class DisplayRightPanelRenderer {
+
+
+  _buildRightModeTabs(width) {
+    const tabs = RUN_VIEW_TABS.map((tab) => {
+      const available = tab.mode === "pipeline"
+        ? typeof this.getPipelineData === "function"
+        : tab.mode === "tools"
+          ? typeof this.getToolData === "function"
+          : true;
+      const body = `${tab.key} ${tab.label}`.padEnd(10);
+      if (tab.mode === this._rightMode) return `${C.cyan}${C.bold}▌${body}▐${C.reset}`;
+      return available
+        ? `${C.dim} ${body} ${C.reset}`
+        : `${C.dim} ${body.slice(0, -1)}· ${C.reset}`;
+    });
+    return fit(` ${tabs.join(" ")}`, Math.max(1, width));
+  }
+
+
+  _buildRunAccountingWidget(width, maxLines = 9) {
+    const limit = Math.max(0, maxLines | 0);
+    if (limit === 0) return [];
+    const lines = [fit(brandRule({ label: "run accounting", color: C.green, width }), Math.max(1, width))];
+    if (limit === 1) return lines;
+
+    if (this._providerUsageRefreshError) {
+      lines.push(` ${C.yellow}! Current-run accounting unavailable${C.reset}`);
+      if (limit > 2) {
+        lines.push(`   ${C.dim}${fit(_sanitizeDisplayLine(this._providerUsageRefreshError), Math.max(8, width - 4))}${C.reset}`);
+      }
+      return lines.slice(0, limit);
+    }
+
+    try {
+      const cache = getProviderUsageSummaryCache();
+      const activeProviders = new Set(
+        [...this.workers.values()]
+          .map((worker) => String(worker?.provider || "").trim().toLowerCase())
+          .filter(Boolean),
+      );
+      const usage = _buildQueueProviderUsageLines(width, limit - 1, cache.summaries || [], {
+        activeProviders,
+        currentRunProviderUsage: cache.currentRunProviderUsage || [],
+        runStartedAtIso: this._runStartedAtIso,
+      });
+      if (usage.length > 0) return [...lines, ...usage].slice(0, limit);
+    } catch { /* keep the dashboard usable while accounting storage is unavailable */ }
+
+    lines.push(` ${C.dim}· No provider usage reported for this run yet${C.reset}`);
+    return lines.slice(0, limit);
+  }
 
 
   _buildPeerWorkLane(width, maxRows = 4) {
@@ -534,7 +665,7 @@ export class DisplayRightPanelRenderer {
 
     const lines = [
       session
-        ? ` ${C.magenta}${C.bold}\u2197 Session${C.reset} ${C.dim}\u00b7 ${session.role} \u00b7 ${session.phase} \u00b7 ${session.compute_policy} \u00b7 ${sessionSyncLabel(session)} \u00b7 ${session.peer_count} peer${session.peer_count === 1 ? "" : "s"}${session.pending_count ? ` \u00b7 ${session.pending_count} pending` : ""}${C.reset}`
+        ? ` ${C.magenta}${C.bold}\u2197 Session pairing${C.reset} ${C.dim}\u00b7 ${session.role} \u00b7 ${session.phase} \u00b7 ${sessionSyncLabel(session)} \u00b7 ${session.peer_count} peer${session.peer_count === 1 ? "" : "s"}${session.pending_count ? ` \u00b7 ${session.pending_count} pending` : ""}${C.reset}`
         : ` ${C.magenta}${C.bold}\u2197 Paired work${C.reset} ${C.dim}\u00b7 ${peerRows.length} WI \u00b7 read-only${C.reset}`,
     ];
     const detailCapacity = Math.max(1, maxRows - 1);
@@ -550,6 +681,15 @@ export class DisplayRightPanelRenderer {
     }
     if (showOverflow) {
       lines.push(` ${C.magenta}\u2502${C.reset} ${C.dim}+${peerRows.length - visible.length} more paired work item(s) [p] details${C.reset}`);
+    }
+    if (session && peerRows.length === 0) {
+      if (session.role === "host" && session.pending_count > 0) {
+        lines.push(` ${C.yellow}\u2502 ${session.pending_count} join request${session.pending_count === 1 ? "" : "s"} waiting \u00b7 [u] session to admit${C.reset}`);
+      } else if (session.peer_count > 0) {
+        lines.push(` ${C.green}\u2502 Team connected${C.reset}${C.dim} \u00b7 no peer work active right now${C.reset}`);
+      } else {
+        lines.push(` ${C.magenta}\u2502${C.reset} ${C.dim}Waiting for teammates \u00b7 [u] session controls${C.reset}`);
+      }
     }
     return lines;
   }
@@ -593,6 +733,8 @@ export class DisplayRightPanelRenderer {
       lines.push(` ${posseWordmark()}`);
     }
 
+    lines.push(this._buildRightModeTabs(width));
+
     if (this._rightMode === "pipeline" && this.getPipelineData) {
       return this._buildPipeline(lines, width, maxLines);
     }
@@ -609,18 +751,28 @@ export class DisplayRightPanelRenderer {
       Math.min(4, Math.max(0, maxLines - lines.length - 2)),
     ));
 
-    // ── Event log fills the rest, minus a pinned "system" tail ──
+    // ── Event log fills the rest, minus the pinned system and accounting tails ──
+    // Run accounting is an operational widget, not masthead status. Reserve its
+    // lower-right home before sizing either scrolling lane so it cannot vanish
+    // as activity grows.
+    const remainingRows = Math.max(0, maxLines - lines.length);
+    const accountingBudget = remainingRows >= 2
+      ? Math.min(9, Math.max(2, Math.floor(remainingRows * 0.38)))
+      : 0;
+    const accountingLines = this._buildRunAccountingWidget(width, accountingBudget);
+    const contentEnd = Math.max(lines.length, maxLines - accountingLines.length);
+
     // Reserve the bottom rows for git / ATLAS chatter so it can never scroll
     // the job/work log off-screen. The tail is hidden when there's no recent
     // system activity, and capped so it can't crowd the log on a short pane.
     const sysCount = Math.min(
       this._systemEvents.length,
       this._systemLaneRows,
-      Math.max(0, maxLines - lines.length - 2),
+      Math.max(0, contentEnd - lines.length - 2),
     );
     const sysBlock = sysCount > 0 ? sysCount + 1 : 0; // +1 for the rule
 
-    const available = Math.max(0, maxLines - lines.length - sysBlock);
+    const available = Math.max(0, contentEnd - lines.length - sysBlock);
     const start = Math.max(0, this.events.length - available);
     const visible = this.events.slice(start);
 
@@ -631,7 +783,7 @@ export class DisplayRightPanelRenderer {
 
     if (sysBlock > 0) {
       // Pin the tail to the bottom of the pane.
-      while (lines.length < maxLines - sysBlock) lines.push("");
+      while (lines.length < contentEnd - sysBlock) lines.push("");
       const tail = "╌".repeat(Math.max(3, Math.min(width - 12, 40)));
       lines.push(` ${C.dim}╌╌╌ system ${tail}${C.reset}`);
       for (const ev of this._systemEvents.slice(-sysCount)) {
@@ -639,7 +791,10 @@ export class DisplayRightPanelRenderer {
       }
     }
 
-    return lines;
+    while (lines.length < contentEnd) lines.push("");
+    lines.push(...accountingLines);
+
+    return lines.slice(0, maxLines);
   }
 
 
@@ -689,6 +844,7 @@ export class DisplayRightPanelRenderer {
 
     const mastheadLeft = ` ${posseWordmark()} ${C.dim}/${C.reset} ${C.brightWhite}${C.bold}monitor agents${C.reset} ${C.dim}[operator console]${C.reset}`;
     lines.push(`${visiblePad(mastheadLeft, Math.max(20, width - stripAnsi(status).length - 1))}${status}`);
+    lines.push(this._buildRightModeTabs(width));
     lines.push(` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`);
 
     // Paired members' work runs on their machines, so it is never one of this
@@ -703,78 +859,103 @@ export class DisplayRightPanelRenderer {
     }
 
     if (agents.length === 0) {
-      lines.push(...this._buildMonitorEmptyLines(width, Math.max(0, maxLines - lines.length)));
+      const remaining = Math.max(0, maxLines - lines.length);
+      const accountingLines = this._buildRunAccountingWidget(width, Math.min(5, remaining));
+      const emptyRows = Math.max(0, remaining - accountingLines.length);
+      lines.push(...this._buildMonitorEmptyLines(width, emptyRows).slice(0, emptyRows));
+      while (lines.length < maxLines - accountingLines.length) lines.push("");
+      lines.push(...accountingLines);
       return lines.slice(0, maxLines);
     }
 
     // Narrow panes go single-column: the fleet rail gets the full width and the
     // focus pane sits out \u2014 a sub-20-col detail column was unreadable anyway.
     // Selection, jumping, and the state-aware controls all keep working.
-    if (width < 60) {
-      const bodyRows = Math.max(0, maxLines - lines.length - 1);
+    if (width < 76) {
+      lines.push(fit(` ${this._monitorAgentActionsLine(selected)}`, width));
+      lines.push(fit(` ${this._monitorAgentNavigationLine(waiting)}  ${C.dim}[↑↓] HISTORY${C.reset}`, width));
+      const remaining = Math.max(0, maxLines - lines.length);
+      const accountingLines = this._buildRunAccountingWidget(width, Math.min(5, remaining));
+      const bodyRows = Math.max(0, remaining - accountingLines.length);
       const railW = Math.max(20, width - 1);
       const fleetLines = this._buildMonitorFleetLines(agents, selected, railW, bodyRows);
       for (let idx = 0; idx < bodyRows; idx++) {
         lines.push(visiblePad(fleetLines[idx] || "", railW));
       }
-      lines.push(fit(` ${this._monitorControlsLine(agents, selected, waiting)}`, width));
+      lines.push(...accountingLines);
       return lines.slice(0, maxLines);
     }
 
     const leftW = clamp(Math.floor(width * 0.34), 28, Math.min(42, width - 32));
     const rightW = Math.max(20, width - leftW - 1);
     const divider = `${C.dim}\u2502${C.reset}`;
-    const leftHead = ` ${C.dim}FLEET${C.reset}${" ".repeat(Math.max(1, leftW - 19))}${C.dim}< > cycle${C.reset}`;
+    const leftHead = ` ${C.dim}FLEET${C.reset}`;
     const rightHead = selected
       ? ` ${C.brightWhite}${C.bold}[${selected.index}] ${selected.role} #${selected.agentCallId ? `call ${selected.agentCallId}` : selected.jobId}${C.reset}${C.dim} \u00b7 ${selected.wiLabel}${selected.attempt > 1 ? ` \u00b7 attempt ${selected.attempt}` : ""}${C.reset}`
       : "";
     lines.push(`${visiblePad(leftHead, leftW)}${divider}${fit(rightHead, rightW)}`);
+    lines.push(`${visiblePad(` ${this._monitorAgentNavigationLine(waiting)}`, leftW)}${divider}${fit(` ${this._monitorAgentActionsLine(selected)}`, rightW)}`);
     lines.push(`${C.dim}${"\u2500".repeat(leftW)}\u253c${"\u2500".repeat(rightW)}${C.reset}`);
 
-    const bodyRows = Math.max(0, maxLines - lines.length - 1);
+    const bodyRows = Math.max(0, maxLines - lines.length);
+    const accountingBudget = bodyRows >= 2
+      ? Math.min(9, Math.max(2, Math.floor(bodyRows * 0.34)))
+      : 0;
+    const accountingLines = this._buildRunAccountingWidget(rightW, accountingBudget);
+    const focusRows = Math.max(0, bodyRows - accountingLines.length);
     // Both columns fill the whole body height (the fleet rail tails into a live
     // event feed, the focus pane pads its own boxes), so neither side leaves a
     // trailing whitespace gap below its content.
     const fleetLines = this._buildMonitorFleetLines(agents, selected, leftW, bodyRows);
-    const focusLines = selected ? this._buildMonitorFocusLines(selected, rightW, bodyRows) : [];
+    const focusLines = selected ? this._buildMonitorFocusLines(selected, rightW, focusRows) : [];
+    while (focusLines.length < focusRows) focusLines.push("");
+    focusLines.push(...accountingLines);
     const rows = Math.min(bodyRows, Math.max(fleetLines.length, focusLines.length));
     for (let idx = 0; idx < rows; idx++) {
       lines.push(`${visiblePad(fleetLines[idx] || "", leftW)}${divider}${fit(focusLines[idx] || "", rightW)}`);
     }
 
-    while (lines.length < maxLines - 1) {
+    while (lines.length < maxLines) {
       lines.push(`${" ".repeat(leftW)}${divider}`);
     }
-    // The single agent-controls bar lives UNDER the focus pane (right column):
-    // every control here acts on the selected agent shown to the right, so the
-    // fleet rail + usage column on the left stays uncluttered. The column divider
-    // runs straight down into the bar. (state-aware actions · fleet navigation)
-    lines.push(`${" ".repeat(leftW)}${divider}${fit(` ${this._monitorControlsLine(agents, selected, waiting)}`, rightW)}`);
     return lines.slice(0, maxLines);
   }
 
 
 
-  // One state-aware controls line shared by the two-column and narrow layouts.
-  // Actions on the selected agent lead; navigation trails so a cramped pane
-  // clips the least important hints first. "[!] kill" matches the main queue
-  // bar's vocabulary ([k] kill) and only shows when the selection is actually a
-  // killable live worker.
+  // Agent actions occupy fixed slots directly below the selected-agent title.
+  // Disabled actions stay visible but dim, so selection changes alter state,
+  // not geometry. This prevents the control bar from jumping under the cursor.
+  _monitorAgentActionsLine(selected) {
+    const action = (key, label, enabled, color) => enabled
+      ? `${color}[${key}] ${label}${C.reset}`
+      : `${C.dim}[${key}] ${label}${C.reset}`;
+    const killable = Boolean(
+      selected
+      && !selected.agentCallId
+      && this.onKill
+      && this.workers?.has?.(selected.jobId),
+    );
+    return [
+      action("a", "answer", selected?.state === "ask", C.green),
+      action("n", "nudge", Boolean(selected && this.onNudge), C.yellow),
+      action("d", "changes", Boolean(selected), C.magenta),
+      action("!", "kill", killable, C.red),
+    ].join(" ");
+  }
+
+
+  _monitorAgentNavigationLine(waiting) {
+    const waitingControl = waiting > 0
+      ? `${C.yellow}[w] waiting${C.reset}`
+      : `${C.dim}[w] waiting${C.reset}`;
+    return `${C.dim}[1-9] select  [←→] cycle${C.reset}  ${waitingControl}`;
+  }
+
+
   _monitorControlsLine(agents, selected, waiting) {
-    const actions = [];
-    if (selected?.state === "ask") actions.push(`${C.green}[a] answer${C.reset}`);
-    if (selected && this.onNudge) actions.push(`${C.yellow}[n] nudge${C.reset}`);
-    if (selected) actions.push(`${C.magenta}[d] changes${C.reset}`);
-    if (selected && !selected.agentCallId && this.onKill && this.workers?.has?.(selected.jobId)) actions.push(`${C.red}[!] kill${C.reset}`);
-    if (actions.length === 0) actions.push(`${C.dim}no agent selected${C.reset}`);
-    const nav = [
-      `[1-${Math.min(agents.length, 9)}] jump`,
-      "[< >] cycle",
-      ...(waiting > 0 ? ["[w] next waiting"] : []),
-      "[↑↓] history",
-      "[q] close",
-    ];
-    return `${actions.join("  ")}  ${C.dim}·  ${nav.join("  ")}${C.reset}`;
+    void agents;
+    return `${this._monitorAgentActionsLine(selected)}  ${C.dim}·${C.reset}  ${this._monitorAgentNavigationLine(waiting)}`;
   }
 
 
@@ -1016,6 +1197,10 @@ export class DisplayRightPanelRenderer {
       this._monitorSelectedJobId = selected.jobId;
       this._monitorSelectedAgentCallId = selected.agentCallId || null;
       this._monitorFeedbackScroll = 0;
+      this._monitorChangesMode = false;
+      this._monitorDiffOpen = false;
+      this._monitorDiffFileIndex = 0;
+      this._monitorDiffScroll = 0;
     }
     return selected;
   }
@@ -1124,32 +1309,6 @@ export class DisplayRightPanelRenderer {
       for (const block of blocks) lines.push(...block.lines);
     }
     lines.push(...slotLines);
-    // Provider usage widget tucked against the bottom of the rail — the same
-    // widget the main queue page shows (run tokens/cost + session/week pressure
-    // gauges). The fleet rail intentionally does NOT mirror the event log here.
-    let usageLines = [];
-    try {
-      const cache = getProviderUsageSummaryCache();
-      const activeProviders = new Set(
-        [...this.workers.values()].map((w) => String(w?.provider || "").trim().toLowerCase()).filter(Boolean),
-      );
-      const usageBudget = Math.max(0, (height || 0) - lines.length);
-      if (usageBudget >= 4) {
-        usageLines = _buildQueueProviderUsageLines(width, usageBudget, cache.summaries || [], {
-          activeProviders,
-          currentRunProviderUsage: cache.currentRunProviderUsage || [],
-          runStartedAtIso: this._runStartedAtIso,
-        });
-      }
-    } catch { usageLines = []; }
-
-    // Usage pinned FLUSH to the bottom of the rail: pad with blank lines above so
-    // the block rests at the foot of the pane instead of floating mid-rail.
-    if (usageLines.length > 0) {
-      const pad = Math.max(0, (height || 0) - lines.length - usageLines.length);
-      for (let i = 0; i < pad; i++) lines.push("");
-      lines.push(...usageLines);
-    }
     while (lines.length < (height || 0)) lines.push("");
     return lines;
   }
@@ -1495,8 +1654,8 @@ export class DisplayRightPanelRenderer {
   // at render time: the WI title/state ride the cached queue snapshot, the
   // +/\u2212 counts come from the same git-diff snapshot the [d] changes view
   // already builds, and the tool tally is the per-job observation count. No
-  // per-agent token plumbing \u2014 run-level token/cost already shows on the left
-  // fleet rail, so repeating it here would just duplicate.
+  // per-agent token plumbing \u2014 run-level token/cost already has a dedicated
+  // lower-right accounting card, so repeating it here would just duplicate.
   _buildMonitorAgentCard(agent, width, height) {
     const content = Math.max(1, (height | 0) - 4);
     const boxInner = Math.max(8, width - 2); // content width between the box borders
@@ -1797,18 +1956,15 @@ export class DisplayRightPanelRenderer {
 
   _buildMonitorFocusLines(agent, width, height = 18) {
     // The status/phase header folded into the agent card (row 2), so the focus
-    // pane hands its full height to the stacked boxes and just caps the column
-    // with a thin rule above the controls bar. (The single agent-controls bar
-    // lives at the foot of the monitor view, state-aware.)
-    const footer = [` ${C.dim}${"\u2500".repeat(Math.max(8, width - 2))}${C.reset}`];
-
-    const bodyH = Math.max(0, height - footer.length);
+    // pane can devote its remaining rows to the selected agent. Actions live in
+    // the stable header above; accounting owns the reserved lower-right rows.
+    const bodyH = Math.max(0, height);
     const body = [];
     if (bodyH >= 5) {
       body.push(...this._buildMonitorFeedbackToolLanes(agent, width, bodyH));
     }
 
-    const out = [...body.slice(0, bodyH), ...footer];
+    const out = body.slice(0, bodyH);
     while (out.length < height) out.push("");
     return out.slice(0, height);
   }
@@ -1869,7 +2025,7 @@ export class DisplayRightPanelRenderer {
     let data;
     try { data = this.getPipelineData(); } catch { data = []; }
     if (!data || data.length === 0) {
-      lines.push(` ${C.dim}No active work items${C.reset}`);
+      lines.push(...unpairedPipelineLines(width));
       return lines;
     }
 
@@ -1878,18 +2034,10 @@ export class DisplayRightPanelRenderer {
 
     const session = data.find((row) => row?.session_summary);
     if (session) {
-      const enrollment = session.enrollment_open ? "invite open" : "invite closed";
-      contentLines.push(` ${C.magenta}${C.bold}Session${C.reset} ${session.role}/${session.phase} \u00b7 ${session.compute_policy} \u00b7 ${enrollment}`);
-      contentLines.push(` ${C.dim}${_sanitizeDisplayLine(session.branch)} \u00b7 ${sessionSyncLabel(session)} \u00b7 ${session.peer_count} peer(s) \u00b7 ${session.pending_count} pending \u00b7 ${session.delegations?.length || 0} delegated${C.reset}`);
+      const peerRows = data.filter((row) => row?.peer_read_only);
+      contentLines.push(...sessionPairingDashboardLines(session, peerRows, width));
       if (session.trunk_health?.provenance_gate_job_id) {
         contentLines.push(` ${C.yellow}Provenance review: gate #${session.trunk_health.provenance_gate_job_id}${C.reset}`);
-      }
-      const peersSync = Array.isArray(session.peers_sync) ? session.peers_sync : [];
-      for (const peer of peersSync.slice(0, SESSION_PEER_SYNC_ROWS)) {
-        contentLines.push(`   ${C.magenta}\u2502${C.reset} ${C.dim}${fit(_sanitizeDisplayLine(formatPeerSyncRow(peer)), Math.max(8, width - 6))}${C.reset}`);
-      }
-      if (peersSync.length > SESSION_PEER_SYNC_ROWS) {
-        contentLines.push(`   ${C.magenta}\u2502${C.reset} ${C.dim}+${peersSync.length - SESSION_PEER_SYNC_ROWS} more peer(s)${C.reset}`);
       }
       contentLines.push("");
     }
@@ -1950,11 +2098,12 @@ export class DisplayRightPanelRenderer {
 
   _buildTools(headerLines, width, maxLines) {
     const lines = [...headerLines];
-    lines.push(` ${C.bold}${C.cyan}\u2502 Tools${C.reset}  ${C.dim}[t] back to log  [Tab/1-3] pane  [\u2191\u2193] scroll${C.reset}`);
+    lines.push(` ${C.bold}${C.cyan}\u2502 Agent tools${C.reset}  ${C.dim}[Tab/1-4] section  [\u2191\u2193] scroll${C.reset}`);
     const tabBar = [
-      this._toolsTab === 0 ? `${C.bold}${C.cyan}[1:Tools]${C.reset}` : `${C.dim} 1:Tools ${C.reset}`,
-      this._toolsTab === 1 ? `${C.bold}${C.cyan}[2:Roles]${C.reset}` : `${C.dim} 2:Roles ${C.reset}`,
-      this._toolsTab === 2 ? `${C.bold}${C.cyan}[3:Locks]${C.reset}` : `${C.dim} 3:Locks ${C.reset}`,
+      this._toolsTab === 0 ? `${C.cyan}${C.bold}\u258c1 Activity\u2590${C.reset}` : `${C.dim} 1 Activity ${C.reset}`,
+      this._toolsTab === 1 ? `${C.cyan}${C.bold}\u258c2 Catalog \u2590${C.reset}` : `${C.dim} 2 Catalog  ${C.reset}`,
+      this._toolsTab === 2 ? `${C.cyan}${C.bold}\u258c3 Roles   \u2590${C.reset}` : `${C.dim} 3 Roles    ${C.reset}`,
+      this._toolsTab === 3 ? `${C.cyan}${C.bold}\u258c4 Locks   \u2590${C.reset}` : `${C.dim} 4 Locks    ${C.reset}`,
     ].join(" ");
     lines.push(` ${tabBar}`);
     lines.push(` ${C.dim}${"\u2500".repeat(Math.min(width - 2, 50))}${C.reset}`);
@@ -1963,26 +2112,11 @@ export class DisplayRightPanelRenderer {
     try { data = this.getToolData(); } catch { data = null; }
     const jobs = (data && Array.isArray(data.jobs)) ? data.jobs : [];
     const recent = (data && Array.isArray(data.recent)) ? data.recent : [];
+    const catalog = (data && Array.isArray(data.catalog)) ? data.catalog : [];
     const activeLockLines = this._buildActiveLockLines(width, data?.activeLocks);
 
-    if (jobs.length === 0 && recent.length === 0 && activeLockLines.length === 0) {
-      const emptyLines = this._toolsTab === 2
-        ? [
-            ` ${C.dim}No active file locks right now${C.reset}`,
-            "",
-            ` ${C.dim}Held file locks appear here, grouped by work item, while dev/fix/promote jobs run.${C.reset}`,
-          ]
-        : [
-            ` ${C.dim}No tool invocations recorded yet${C.reset}`,
-            "",
-            ` ${C.dim}Tools appear here when agents invoke MCP or web tools${C.reset}`,
-            ` ${C.dim}(read_file, list_files, WebSearch, WebFetch, etc.).${C.reset}`,
-          ];
-      lines.push(...emptyLines);
-      return lines;
-    }
-
     const toolLines = [];
+    const catalogLines = [];
     const roleLines = [];
     const lockLines = [];
 
@@ -2027,7 +2161,33 @@ export class DisplayRightPanelRenderer {
         toolLines.push(...this._formatToolDetailRows(r, width));
       }
     } else {
-      toolLines.push(` ${C.dim}No recent tool invocations${C.reset}`);
+      toolLines.push(` ${C.dim}\u25cb No tool invocations in this run yet${C.reset}`);
+      toolLines.push("");
+      toolLines.push(` ${C.dim}Registered tools remain visible in [2] CATALOG.${C.reset}`);
+    }
+
+    if (catalog.length > 0) {
+      catalogLines.push(` ${C.bold}Registered catalog${C.reset} ${C.dim}\u00b7 ${catalog.length} agent-facing tools${C.reset}`);
+      catalogLines.push(` ${C.dim}Each agent receives a role-, capability-, and scope-filtered subset.${C.reset}`);
+      let previousGroup = null;
+      for (const entry of catalog) {
+        const group = entry.access === "atlas" ? "ATLAS" : "POSSE";
+        if (group !== previousGroup) {
+          if (previousGroup != null) catalogLines.push("");
+          catalogLines.push(` ${group === "ATLAS" ? C.magenta : C.cyan}${C.bold}${group}${C.reset}`);
+          previousGroup = group;
+        }
+        const namespace = group === "ATLAS" ? "atlas" : "tools";
+        const name = `${namespace}.${String(entry.name || "unknown")}`;
+        const roles = Array.isArray(entry.roles) && entry.roles.length > 0
+          ? entry.roles.join(", ")
+          : "conditional";
+        catalogLines.push(fit(`  ${C.brightWhite}${name}${C.reset}  ${C.dim}${entry.access || "unknown"} \u00b7 ${roles}${C.reset}`, width));
+        if (entry.summary) catalogLines.push(fit(`    ${C.dim}${_sanitizeDisplayLine(entry.summary)}${C.reset}`, width));
+      }
+    } else {
+      catalogLines.push(` ${C.yellow}\u25cb Registered tool catalog unavailable${C.reset}`);
+      catalogLines.push(` ${C.dim}Invocation activity can still appear in [1] ACTIVITY.${C.reset}`);
     }
 
     if (jobs.length > 0) {
@@ -2081,7 +2241,7 @@ export class DisplayRightPanelRenderer {
       lockLines.push(` ${C.dim}No active file locks right now${C.reset}`);
     }
 
-    const panes = [toolLines, roleLines, lockLines];
+    const panes = [toolLines, catalogLines, roleLines, lockLines];
     const contentLines = panes[this._toolsTab] || toolLines;
     const available = Math.max(0, maxLines - lines.length);
     const maxScroll = Math.max(0, contentLines.length - available);

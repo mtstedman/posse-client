@@ -538,9 +538,13 @@ export function __testSubAgentRoutingEnabled(toolNames = []) {
   });
 }
 
-// Planner triage budget. The setting is stated in turns; the owner sees calls,
-// and planners measured ~1.81 calls per turn (median 2), so the call threshold
-// is two per budgeted turn. The notice is advisory: no call is ever refused.
+// Planner-owned direct-path read budget. The research decision belongs before
+// these calls. The owner applies prompt pressure at the first read and at the
+// configured budget, but never refuses a call or removes a tool.
+//
+// The setting is stated in turns; the owner sees calls, and planners measured
+// ~1.81 calls per turn (median 2), so the call threshold is two per budgeted
+// turn.
 const PLANNER_TRIAGE_CALLS_PER_TURN = 2;
 const PLANNER_TRIAGE_DEFAULT_TURNS = Number(PLANNER_DISPATCH_SETTINGS
   .find((entry) => entry.key === SETTING_KEYS.PLANNER_DISPATCH_TRIAGE_MAX_TURNS)?.default) || 6;
@@ -551,7 +555,7 @@ const PLANNER_TRIAGE_UNCOUNTED_TOOLS = new Set([
 ]);
 
 function createPlannerTriageState() {
-  return { calls: 0, dispatched: false, noticeIssued: false };
+  return { calls: 0, dispatched: false, pathNoticeIssued: false, budgetNoticeIssued: false };
 }
 
 function plannerTriageEnabled(session, policy) {
@@ -561,8 +565,8 @@ function plannerTriageEnabled(session, policy) {
     && policy?.suites?.tools?.has("dispatch_agent") === true;
 }
 
-// Read the triage budget from the policy frozen for this planner call (the one
-// its prompt rendered), falling back to the catalog default.
+// Read the direct-path budget from the policy frozen for this planner call
+// (the one its prompt rendered), falling back to the catalog default.
 function plannerTriageThresholdCalls(agentCallId) {
   const configured = Number(subAgentRuntime.parents.get(Number(agentCallId))?.researchPolicy?.triageMaxTurns);
   const turns = Number.isSafeInteger(configured) && configured > 0 ? configured : PLANNER_TRIAGE_DEFAULT_TURNS;
@@ -570,9 +574,19 @@ function plannerTriageThresholdCalls(agentCallId) {
 }
 
 function plannerTriageNoticeText(turns) {
-  return `\n\nTriage budget reached (~${turns} turn${turns === 1 ? "" : "s"} of orientation reads). `
-    + "Dispatch research children for the open questions or hand off the plan now; "
-    + "further reads here are at planner cost.";
+  return `\n\nDirect-path read budget reached (~${turns} turn${turns === 1 ? "" : "s"} of planner-owned reads). `
+    + "Finish or hand off the plan now; do not start research after accumulating this context.";
+}
+
+function plannerPathNoticeText(turns) {
+  return "\n\nResearch decision checkpoint: this planner-owned read began the direct/simple path. "
+    + "If the work needs nontrivial research, dispatch it now before making another read; otherwise continue directly "
+    + `and do not dispatch later after accumulating planner context. Direct-path budget: ~${turns} turn${turns === 1 ? "" : "s"}.`;
+}
+
+function plannerLateDispatchNoticeText(calls) {
+  return `\n\nLate-dispatch checkpoint: research was dispatched after ${calls} planner-owned tool call${calls === 1 ? "" : "s"}. `
+    + "Use the returned findings now and limit further planner reads to narrow, plan-blocking verification.";
 }
 
 function plannerTriageSessionState(session, policy) {
@@ -588,24 +602,64 @@ function plannerTriageSessionState(session, policy) {
 function notePlannerTriageCall(session, policy, requested, { record = recordObservation } = {}) {
   const state = plannerTriageSessionState(session, policy);
   if (!state) return "";
+  const boot = session.bootConfig || {};
   if (`${requested?.suite}.${requested?.name}` === "tools.dispatch_agent") {
     state.dispatched = true;
+    if (state.calls > 0) {
+      try {
+        record({
+          work_item_id: boot.workItemId ?? null,
+          job_id: boot.jobId ?? null,
+          attempt_id: boot.attemptId ?? null,
+          observation_type: "planner.dispatch_after_own_reads",
+          summary: `Planner dispatched research after ${state.calls} own tool call(s)`,
+          detail: {
+            calls_before_dispatch: state.calls,
+            agent_call_id: boot.agentCallId ?? null,
+          },
+        });
+      } catch {
+        // Prompt pressure and telemetry must not break a successful dispatch.
+      }
+      return plannerLateDispatchNoticeText(state.calls);
+    }
     return "";
   }
-  if (state.dispatched || state.noticeIssued) return "";
+  if (state.dispatched) return "";
   if (PLANNER_TRIAGE_UNCOUNTED_TOOLS.has(`${requested?.suite}.${requested?.name}`)) return "";
   state.calls += 1;
-  const boot = session.bootConfig || {};
   const threshold = plannerTriageThresholdCalls(boot.agentCallId);
-  if (state.calls < threshold.calls) return "";
-  state.noticeIssued = true;
+  if (!state.pathNoticeIssued) {
+    state.pathNoticeIssued = true;
+    try {
+      record({
+        work_item_id: boot.workItemId ?? null,
+        job_id: boot.jobId ?? null,
+        attempt_id: boot.attemptId ?? null,
+        observation_type: "planner.direct_path_started",
+        summary: "Planner made an own tool call before dispatching research",
+        detail: {
+          calls: state.calls,
+          direct_read_budget_calls: threshold.calls,
+          direct_read_budget_turns: threshold.turns,
+          tool: `${requested?.suite}.${requested?.name}`,
+          agent_call_id: boot.agentCallId ?? null,
+        },
+      });
+    } catch {
+      // The notice is advisory; telemetry must not break the tool result.
+    }
+    return plannerPathNoticeText(threshold.turns);
+  }
+  if (state.budgetNoticeIssued || state.calls < threshold.calls) return "";
+  state.budgetNoticeIssued = true;
   try {
     record({
       work_item_id: boot.workItemId ?? null,
       job_id: boot.jobId ?? null,
       attempt_id: boot.attemptId ?? null,
       observation_type: "planner.triage_budget_exceeded",
-      summary: `Planner triage budget reached after ${state.calls} call(s) without dispatching research`,
+      summary: `Planner direct-path read budget reached after ${state.calls} call(s)`,
       detail: {
         calls: state.calls,
         threshold: threshold.calls,
@@ -623,15 +677,16 @@ function notePlannerTriageCall(session, policy, requested, { record = recordObse
 function appendPlannerTriageNotice(response, session, policy, requested, toolName) {
   if (!mcpToolCallSuccess(response)) return response;
   const notice = notePlannerTriageCall(session, policy, requested);
+  const budgetNotice = notice.includes("Direct-path read budget reached");
   const finalized = appendToolResultText(response, notice, {
-    kind: "planner_triage_budget",
-    trigger: "planner_triage_threshold",
+    kind: budgetNotice ? "planner_triage_budget" : "planner_research_decision",
+    trigger: budgetNotice ? "planner_triage_threshold" : "planner_research_decision_checkpoint",
   });
   if (finalized !== response) {
     recordOwnerModelControlNotice(session, toolName, {
-      kind: "planner_triage_budget",
+      kind: budgetNotice ? "planner_triage_budget" : "planner_research_decision",
       text: notice,
-      trigger: "planner_triage_threshold",
+      trigger: budgetNotice ? "planner_triage_threshold" : "planner_research_decision_checkpoint",
     });
   }
   return finalized;

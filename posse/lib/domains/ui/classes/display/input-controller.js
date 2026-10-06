@@ -106,6 +106,18 @@ function isSpaceKey(str, key) {
   return str === " " || keyName(key) === "space";
 }
 
+function applyMonitorSelection(display, agent) {
+  if (!agent) return false;
+  display._monitorSelectedJobId = agent.jobId;
+  display._monitorSelectedAgentCallId = agent.agentCallId || null;
+  display._monitorFeedbackScroll = 0;
+  display._monitorChangesMode = false;
+  display._monitorDiffOpen = false;
+  display._monitorDiffFileIndex = 0;
+  display._monitorDiffScroll = 0;
+  return true;
+}
+
 // [d] on a closed-choice verdict prompt opens the diff that verdict judges
 // (entry.reviewDiff, rendered by _buildGateReviewDiffPane). While it is open
 // the scroll keys page it and [d]/Esc close it, back to the same unanswered
@@ -237,10 +249,7 @@ export class DisplayInputController {
     const agents = this._getMonitorAgents();
     if (agents.length === 0) return false;
     const idx = Math.max(0, Math.min(agents.length - 1, Number(index) || 0));
-    this._monitorSelectedJobId = agents[idx].jobId;
-    this._monitorSelectedAgentCallId = agents[idx].agentCallId || null;
-    this._monitorFeedbackScroll = 0;
-    return true;
+    return applyMonitorSelection(this, agents[idx]);
   }
 
   _cycleMonitorSelection(delta) {
@@ -249,10 +258,7 @@ export class DisplayInputController {
     const current = agents.findIndex((agent) => agent.jobId === this._monitorSelectedJobId && (agent.agentCallId || null) === (this._monitorSelectedAgentCallId || null));
     const base = current >= 0 ? current : 0;
     const next = (base + delta + agents.length) % agents.length;
-    this._monitorSelectedJobId = agents[next].jobId;
-    this._monitorSelectedAgentCallId = agents[next].agentCallId || null;
-    this._monitorFeedbackScroll = 0;
-    return true;
+    return applyMonitorSelection(this, agents[next]);
   }
 
   // [w]: hop between the agents that are blocked on the operator, in roster
@@ -260,10 +266,9 @@ export class DisplayInputController {
   _jumpToWaitingMonitorAgent() {
     const waiting = this._getMonitorAgents().filter((agent) => agent.state === "ask");
     if (waiting.length === 0) return false;
-    const current = waiting.findIndex((agent) => agent.jobId === this._monitorSelectedJobId);
-    this._monitorSelectedJobId = waiting[(current + 1) % waiting.length].jobId;
-    this._monitorFeedbackScroll = 0;
-    return true;
+    const current = waiting.findIndex((agent) => agent.jobId === this._monitorSelectedJobId
+      && (agent.agentCallId || null) === (this._monitorSelectedAgentCallId || null));
+    return applyMonitorSelection(this, waiting[(current + 1) % waiting.length]);
   }
 
   _removeQuestionSet(q) {
@@ -690,8 +695,11 @@ export class DisplayInputController {
     } else {
       // Not in input mode
       const digit = digitInput(str, key);
-      if (matchesHotkey(str, key, "m")) {
-        this._rightMode = this._rightMode === "monitor" ? "log" : "monitor";
+      if (matchesHotkey(str, key, "l")) {
+        this._rightMode = "log";
+        this.requestRender({ force: true });
+      } else if (matchesHotkey(str, key, "m")) {
+        this._rightMode = "monitor";
         if (this._rightMode === "monitor" && !this._monitorSelectedJobId) {
           this._setMonitorSelectionByIndex(0);
         }
@@ -726,7 +734,7 @@ export class DisplayInputController {
         this._inputMode = "kill";
         this._killJobIds = [this._monitorSelectedJobId];
         this.requestRender({ force: true });
-      } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "d")) {
+      } else if (this._rightMode === "monitor" && matchesHotkey(str, key, "d") && this._monitorSelectedJobId) {
         // Toggle the CHANGES (git-diff) view for the selected agent.
         if (this._monitorChangesMode) {
           this._monitorChangesMode = false;
@@ -772,6 +780,20 @@ export class DisplayInputController {
         && (keyName(key) === "down" || keyName(key) === "pagedown")) {
         this._monitorFeedbackScroll = Math.max(0, (this._monitorFeedbackScroll || 0) - (keyName(key) === "pagedown" ? 5 : 1));
         this.requestRender({ force: true });
+      } else if (key && key.name === "tab" && this._rightMode === "tools") {
+        this._toolsTab = (this._toolsTab + 1) % 4;
+        this.requestRender({ force: true });
+      } else if (digit != null && digit >= 1 && digit <= 4 && this._rightMode === "tools") {
+        this._toolsTab = digit - 1;
+        this.requestRender({ force: true });
+      } else if (key && key.name === "up" && this._rightMode === "tools") {
+        if (this._toolsTabScrolls[this._toolsTab] > 0) this._toolsTabScrolls[this._toolsTab]--;
+        this._toolScroll = this._toolsTabScrolls[this._toolsTab];
+        this.requestRender({ force: true });
+      } else if (key && key.name === "down" && this._rightMode === "tools") {
+        this._toolsTabScrolls[this._toolsTab]++;
+        this._toolScroll = this._toolsTabScrolls[this._toolsTab];
+        this.requestRender({ force: true });
       } else if (isEnterKey(str, key) && this._questionQueue.length > 0) {
         this._startAnswering();
         this.requestRender({ force: true });
@@ -800,7 +822,7 @@ export class DisplayInputController {
         this._skipJobList = this._getSkippableJobs();
         this.requestRender({ force: true });
       } else if (matchesHotkey(str, key, "p") && this.getPipelineData) {
-        this._rightMode = this._rightMode === "pipeline" ? "log" : "pipeline";
+        this._rightMode = "pipeline";
         this._pipelineScroll = 0;
         this.requestRender({ force: true });
       } else if (matchesHotkey(str, key, "r") && this.onReviewPending) {
@@ -808,27 +830,14 @@ export class DisplayInputController {
         catch (err) { this.addEvent(`${C.red}Review failed: ${err.message}${C.reset}`); }
         this.requestRender({ force: true });
       } else if (matchesHotkey(str, key, "t") && this.getToolData) {
-        this._rightMode = this._rightMode === "tools" ? "log" : "tools";
+        if (this._rightMode !== "tools") this._toolsTab = 1;
+        this._rightMode = "tools";
         this.requestRender({ force: true });
       } else if (key && key.name === "up" && this._rightMode === "pipeline") {
         if (this._pipelineScroll > 0) this._pipelineScroll--;
         this.requestRender({ force: true });
       } else if (key && key.name === "down" && this._rightMode === "pipeline") {
         this._pipelineScroll++;
-        this.requestRender({ force: true });
-      } else if (key && key.name === "tab" && this._rightMode === "tools") {
-        this._toolsTab = (this._toolsTab + 1) % 3;
-        this.requestRender({ force: true });
-      } else if (digit != null && digit >= 1 && digit <= 3 && this._rightMode === "tools") {
-        this._toolsTab = digit - 1;
-        this.requestRender({ force: true });
-      } else if (key && key.name === "up" && this._rightMode === "tools") {
-        if (this._toolsTabScrolls[this._toolsTab] > 0) this._toolsTabScrolls[this._toolsTab]--;
-        this._toolScroll = this._toolsTabScrolls[this._toolsTab];
-        this.requestRender({ force: true });
-      } else if (key && key.name === "down" && this._rightMode === "tools") {
-        this._toolsTabScrolls[this._toolsTab]++;
-        this._toolScroll = this._toolsTabScrolls[this._toolsTab];
         this.requestRender({ force: true });
       } else if (matchesHotkey(str, key, "n") && this.onNudge && this._getNudgeWorkers().length > 0) {
         this._inputMode = "nudge_select";

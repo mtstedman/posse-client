@@ -81,6 +81,7 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
 async function buildToolData({ projectDir = null, dbPath = null } = {}) {
   const { setRuntimePathOverrides } = await import("../../runtime/functions/paths.js");
   setRuntimePathOverrides({ projectDir, dbPath });
+  const { registeredToolCatalogSnapshot } = await import("./run-display-tools.js");
   const { listActiveFileLocks } = await import("../../queue/functions/index.js");
   const {
     getRecentToolInvocations,
@@ -88,6 +89,7 @@ async function buildToolData({ projectDir = null, dbPath = null } = {}) {
   } = await import("../../observability/functions/observations.js");
 
   return {
+    catalog: registeredToolCatalogSnapshot(),
     jobs: getToolInvocationCountsByJob({ limit: 20 }),
     recent: getRecentToolInvocations({ limit: 40, includeUnscoped: false, currentRunOnly: true }),
     activeLocks: listActiveFileLocks(),

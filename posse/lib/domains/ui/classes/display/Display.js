@@ -290,8 +290,8 @@ export class Display {
     this._rightMode = RIGHT_PANEL_MODES.has(rightMode) ? rightMode : "log"; // "log" | "pipeline" | "tools" | "monitor"
     this._pipelineScroll = 0;
     this._toolScroll = 0;
-    this._toolsTab = 0;         // 0=tools, 1=roles, 2=locks
-    this._toolsTabScrolls = [0, 0, 0];
+    this._toolsTab = 0;         // 0=activity, 1=catalog, 2=roles, 3=locks
+    this._toolsTabScrolls = [0, 0, 0, 0];
     this._monitorSelectedJobId = null;
     this._monitorFeedbackScroll = 0;   // lines back from the feedback floor (0 = live)
     this._monitorAgentsCache = null;   // built roster, ~750ms TTL (see _collectMonitorAgents)
@@ -300,6 +300,7 @@ export class Display {
     this._monitorToolRatchetH = 0;
     this._providerUsageRefreshTimer = null;
     this._lastProviderUsageRefreshErrorAt = 0;
+    this._providerUsageRefreshError = null;
     this._providerUsageRefresh = typeof providerUsageRefresh === "function"
       ? providerUsageRefresh
       : _refreshProviderUsageSummaryCacheIfChanged;
@@ -466,7 +467,9 @@ export class Display {
         this._providerUsageRefresh({ runStartedAtIso: this._runStartedAtIso }),
         timeoutPromise,
       ]);
-      if (changed && this._started) this.requestRender({ reason: "event" });
+      const recovered = this._providerUsageRefreshError != null;
+      this._providerUsageRefreshError = null;
+      if ((changed || recovered) && this._started) this.requestRender({ reason: "event" });
     } catch (err) {
       this._recordProviderUsageRefreshError(err);
     } finally {
@@ -476,10 +479,12 @@ export class Display {
 
   _recordProviderUsageRefreshError(err) {
     const now = Date.now();
-    if (now - this._lastProviderUsageRefreshErrorAt < PROVIDER_USAGE_REFRESH_ERROR_MIN_MS) return;
+    if (now - this._lastProviderUsageRefreshErrorAt < PROVIDER_USAGE_REFRESH_ERROR_MIN_MS
+      && this._providerUsageRefreshError != null) return;
     this._lastProviderUsageRefreshErrorAt = now;
     const message = String(err?.message || err || "unknown provider usage refresh error").split("\n")[0].slice(0, 140);
-    this.addEvent(`${C.dim}provider usage refresh unavailable: ${message}${C.reset}`, { reason: "event" });
+    this._providerUsageRefreshError = message;
+    if (this._started) this.requestRender({ reason: "event" });
   }
 
   stop() {
@@ -1824,6 +1829,12 @@ export class Display {
   _buildPeerWorkLane(...args) {
     return this._rightPanelRenderer._buildPeerWorkLane.call(this, ...args);
   }
+  _buildRightModeTabs(...args) {
+    return this._rightPanelRenderer._buildRightModeTabs.call(this, ...args);
+  }
+  _buildRunAccountingWidget(...args) {
+    return this._rightPanelRenderer._buildRunAccountingWidget.call(this, ...args);
+  }
   _dirtyReviewIssuesByWi(...args) {
     return this._leftPanelRenderer._dirtyReviewIssuesByWi.call(this, ...args);
   }
@@ -1836,6 +1847,12 @@ export class Display {
 
   _monitorControlsLine(...args) {
     return this._rightPanelRenderer._monitorControlsLine.call(this, ...args);
+  }
+  _monitorAgentActionsLine(...args) {
+    return this._rightPanelRenderer._monitorAgentActionsLine.call(this, ...args);
+  }
+  _monitorAgentNavigationLine(...args) {
+    return this._rightPanelRenderer._monitorAgentNavigationLine.call(this, ...args);
   }
 
   _buildMonitorEmptyLines(...args) {

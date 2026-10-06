@@ -78,6 +78,7 @@ import { missingReportClaimsMessage } from "./helpers/missing-report-claims.js";
 import { sharedPlanContractAdditions } from "./helpers/shared-plan-contracts.js";
 import { mergeResearchReportDraftClaims } from "./research-report-claim-drafts.js";
 import { finalReviewHandoffHold } from "../../assessment/functions/final-review-result.js";
+import { runtimeRoleForAgentCallRole } from "../../../catalog/agent-call.js";
 
 export { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 
@@ -5552,7 +5553,9 @@ export function stageAgentHandoff(args, {
     scopePredicates,
     db: database,
   };
-  const effectiveRole = String(call.role || role || "");
+  // A persisted child label (final_reviewer) hands off as the runtime role it
+  // executes as.
+  const effectiveRole = runtimeRoleForAgentCallRole(call.role || role || "");
   const mergedArgs = effectiveRole === "researcher"
     ? mergeResearchReportDraftClaims(args, agentCallId, database)
     : args;

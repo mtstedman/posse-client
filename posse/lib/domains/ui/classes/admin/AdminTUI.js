@@ -1,8 +1,8 @@
 // AdminTUI.js — Admin TUI for stats, work-item history, and settings.
 //
 // Standalone TUI that uses alternate screen + raw mode.
-// Tabs: Settings | Overview | Work Items | Diff Review
-// Navigation: 1-4 or Tab to switch, ↑↓ to scroll/select, Enter to drill in or
+// Tabs: Settings | Dashboard | Work | Changes | Reports
+// Navigation: 1-5 or Tab to switch, ↑↓ to scroll/select, Enter to drill in or
 // edit, Esc/Bksp to back up, ←→ to switch settings panes.
 
 import readline from "readline";
@@ -47,6 +47,10 @@ import { purgeRuntimeLogs } from "../../functions/admin/purge-runtime-logs.js";
 import { sanitizeWorkerExecArgv } from "../../../runtime/functions/worker-exec-argv.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { AdminSettingsController } from "./settings-controller.js";
+import {
+  renderAdminReportDashboardSummary,
+  renderAdminReports,
+} from "./admin-report-renderer.js";
 import {
   normalizeAdminLine,
   sanitizeAdminStatusText,
@@ -103,6 +107,10 @@ import { statusColor as paletteStatusColor } from "../../functions/display/statu
 import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";
 import { formatConsoleArg } from "../../functions/display/helpers/formatters.js";
 import {
+  POSSE_MASCOT_CELL_WIDTH,
+  renderPosseMascotFrame,
+} from "../../functions/display/helpers/mascot.js";
+import {
   formatDuration as fmtDuration,
   formatRelativeTime as fmtRelativeTime,
   formatSignedTokens as fmtSignedTokens,
@@ -133,15 +141,16 @@ import {
   toStorageSettingKey,
 } from "../../../settings/functions/admin-catalog.js";
 
-// Keep Settings on shortcut 1, but start on Overview so the first screen shows
+// Keep Settings on shortcut 1, but start on Dashboard so the first screen shows
 // the operational agent/work summary instead of configuration controls.
 // Prompts and outputs are read per call from Work Items; the raw log browser
 // and the ATLAS A/B report were debug-only pages and are gone.
 const ADMIN_TABS = Object.freeze([
   Object.freeze({ id: "settings", name: "Settings" }),
-  Object.freeze({ id: "overview", name: "Overview" }),
-  Object.freeze({ id: "work_items", name: "Work Items" }),
-  Object.freeze({ id: "diff_review", name: "Diff Review" }),
+  Object.freeze({ id: "overview", name: "Dashboard" }),
+  Object.freeze({ id: "work_items", name: "Work" }),
+  Object.freeze({ id: "diff_review", name: "Changes" }),
+  Object.freeze({ id: "reports", name: "Reports" }),
 ]);
 const ADMIN_TAB_COUNT = ADMIN_TABS.length;
 const ADMIN_TAB_KEYS = new Set(ADMIN_TABS.map((_, index) => String(index + 1)));
@@ -173,7 +182,7 @@ export { purgeRuntimeLogs };
 export class AdminTUI {
   constructor({ projectDir }) {
     this.projectDir = projectDir;
-    this._tab = ADMIN_INITIAL_TAB_INDEX; // index into ADMIN_TABS — starts on Overview
+    this._tab = ADMIN_INITIAL_TAB_INDEX; // index into ADMIN_TABS — starts on Dashboard
     this._scroll = 0;
     this._tabScrolls = Array.from({ length: ADMIN_TAB_COUNT }, () => 0);
     this._purgeLogsConfirm = false;
@@ -232,6 +241,8 @@ export class AdminTUI {
     this._stdoutBackedUp = false;
     this._settingsCache = null;
     this._settingsCacheAt = 0;
+    this._reportsCache = null;
+    this._reportsCacheAt = 0;
     this._settingsController = new AdminSettingsController();
     this._lastExitAt = 0;
     this._consoleMessages = [];
@@ -351,7 +362,7 @@ export class AdminTUI {
 
     lines.push(
       "",
-      "Overview",
+      "Dashboard",
       `- Work items: ${allWIs.length}`,
       `- Jobs: ${allJobs.length}`,
       `- Reports: ${reports.length}`,
@@ -1194,17 +1205,17 @@ export class AdminTUI {
       overview: () => this._buildOverview(fullW),
       work_items: () => this._buildWorkItemsTab(fullW),
       diff_review: () => this._buildGitDiffReview(fullW),
+      reports: () => this._buildReports(fullW),
     };
     const tabId = this._tabId();
     const content = builders[tabId]().map(normalizeAdminLine);
 
     // Tab bar
     const tabBar = ADMIN_TABS.map((tab, i) => {
-      const num = `${i + 1}`;
-      if (i === this._tab) {
-        return `${C.bold}${C.cyan}[${num}:${tab.name}]${C.reset}`;
-      }
-      return `${C.dim} ${num}:${tab.name} ${C.reset}`;
+      const body = `${i + 1} ${tab.name}`.padEnd(10);
+      return i === this._tab
+        ? `${C.bold}${C.cyan}▌${body}▐${C.reset}`
+        : `${C.dim} ${body} ${C.reset}`;
     }).join(" ");
 
     // Nav bar
@@ -1431,7 +1442,21 @@ export class AdminTUI {
     };
   }
 
-  // ── Tab 1: Overview ───────────────────────────────────────────────────
+  _getReports({ maxAgeMs = 2000 } = {}) {
+    if (this._reportsCache && (Date.now() - this._reportsCacheAt) < maxAgeMs) return this._reportsCache;
+    try { this._reportsCache = loadReports(this.projectDir); }
+    catch { this._reportsCache = []; }
+    this._reportsCacheAt = Date.now();
+    return this._reportsCache;
+  }
+
+
+  _buildReports(width) {
+    return renderAdminReports(this._getReports(), width);
+  }
+
+
+  // ── Dashboard ─────────────────────────────────────────────────────────
 
   _buildOverview(width) {
     const lines = [];
@@ -1439,7 +1464,25 @@ export class AdminTUI {
     const db = getDb();
 
     lines.push("");
-    lines.push(` ${C.bold}${C.cyan}\u2550\u2550\u2550 ALL-TIME STATISTICS \u2550\u2550\u2550${C.reset}`);
+    const horse = renderPosseMascotFrame({ tick: 8, laneWidth: POSSE_MASCOT_CELL_WIDTH + 4, colors: C }) || [];
+    if (horse.length > 0 && width >= 72) {
+      const headings = [
+        `${C.bold}${C.cyan}POSSE DASHBOARD${C.reset}`,
+        `${C.dim}Operations at a glance${C.reset}`,
+        `${C.dim}Detailed history lives in Work, Changes, and Reports.${C.reset}`,
+      ];
+      for (let index = 0; index < horse.length; index++) {
+        const heading = String(headings[index] || "");
+        const gap = " ".repeat(Math.max(1, 54 - stripAnsi(heading).length));
+        lines.push(fit(` ${heading}${gap}${horse[index]}`, width));
+      }
+    } else {
+      lines.push(` ${C.bold}${C.cyan}POSSE DASHBOARD${C.reset}`);
+    }
+    lines.push("");
+    lines.push(...renderAdminReportDashboardSummary(this._getReports(), width));
+    lines.push(` ${C.bold}${C.cyan}OPERATIONS${C.reset}  ${C.dim}all-time runtime state${C.reset}`);
+    lines.push(` ${C.dim}${"─".repeat(Math.min(inner, 72))}${C.reset}`);
     lines.push("");
 
     // ── Work Items Summary ──

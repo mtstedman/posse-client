@@ -408,14 +408,15 @@ export class DisplayBottomInputRenderer {
     if (this.onAsk) input.push(hint("?", "ask", C.cyan));
     if (this.onImage) input.push(hint("g", "image", C.magenta));
 
-    if (this.getPipelineData) inspect.push(hint("p", this._rightMode === "pipeline" ? "log" : "pipeline", C.blue));
     if (this.onReviewPending) inspect.push(hint("r", "review", C.magenta));
-    if (this.getToolData) inspect.push(hint("t", this._rightMode === "tools" ? "log" : "tools", C.blue));
-    inspect.push(hint("m", this._rightMode === "monitor" ? "log" : "monitor", C.blue));
 
-    if (this.onNudge && this.workers.size > 0) control.push(hint("n", "nudge", C.yellow));
+    // View switching has a persistent tab row in the content pane. Selected-
+    // agent actions also have stable slots in Agent View, so do not duplicate
+    // either set in this global footer where conditional entries make every
+    // neighboring control jump as state changes.
+    if (this._rightMode !== "monitor" && this.onNudge && this.workers.size > 0) control.push(hint("n", "nudge", C.yellow));
     if (this.onSkipJob) control.push(hint("s", "skip task", C.yellow));
-    if (this.onKill && this.workers.size > 0) control.push(hint("k", "kill", C.red));
+    if (this._rightMode !== "monitor" && this.onKill && this.workers.size > 0) control.push(hint("k", "kill", C.red));
     if (this.onKillWI) control.push(hint("x", "cancel WI", C.red));
     control.push(hint("Ctrl+C", "quit", C.red));
 

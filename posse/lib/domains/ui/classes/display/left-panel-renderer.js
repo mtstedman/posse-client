@@ -15,10 +15,6 @@ import {
   reviewVisibleJobs,
   workItemDisplayStatus,
 } from "../../functions/display/helpers/job-status.js";
-import {
-  getProviderUsageSummaryCache,
-  _buildQueueProviderUsageLines,
-} from "../../functions/display/helpers/provider-usage.js";
 import { atlasWarmStatusWords } from "../../functions/display/helpers/atlas-warm-rendering.js";
 
 
@@ -269,29 +265,15 @@ export class DisplayLeftPanelRenderer {
     // code-intelligence picture reads in one place.
 
     // ── Queue (fills remaining space) ──
-    const footerLineBudget = Math.min(Math.max(0, maxLines - workers.length - 3), 9);
-    const activeProviders = new Set(
-      [...this.workers.values()]
-        .map((worker) => String(worker?.provider || "").trim().toLowerCase())
-        .filter(Boolean)
-    );
-    const providerUsageCache = getProviderUsageSummaryCache();
-    const footerLines = footerLineBudget >= 4
-      ? _buildQueueProviderUsageLines(width, footerLineBudget, providerUsageCache.summaries || [], {
-        activeProviders,
-        currentRunProviderUsage: providerUsageCache.currentRunProviderUsage || [],
-        runStartedAtIso: this._runStartedAtIso,
-      })
-      : [];
     // ── Code-intelligence readiness bars (ATLAS + ONNX), above the queue ──
-    const readinessLines = (maxLines - workers.length - footerLines.length) >= 6
+    const readinessLines = (maxLines - workers.length) >= 6
       ? this._buildAtlasReadinessLines()
       : [];
     // Brand-rule headers bracket the two sections: "context health" over the
     // readiness bars, "queue" over the work-item list (the rule replaces the old
     // plain divider AND the inline bold "Queue" header).
     const readinessHeader = readinessLines.length > 0 ? 1 : 0;
-    const queueBudget = Math.max(maxLines - workers.length - 1 - readinessHeader - footerLines.length - readinessLines.length, 2); // -1 for the queue rule
+    const queueBudget = Math.max(maxLines - workers.length - 1 - readinessHeader - readinessLines.length, 2); // -1 for the queue rule
     const queue = this._buildQueue(width, queueBudget);
 
     // ── Assemble ──
@@ -303,11 +285,6 @@ export class DisplayLeftPanelRenderer {
     }
     lines.push(brandRule({ label: "queue", color: C.cyan, width })); // header + separator above queue
     lines.push(...queue);
-    if (footerLines.length > 0) {
-      const paddingLines = Math.max(0, maxLines - lines.length - footerLines.length);
-      for (let i = 0; i < paddingLines; i++) lines.push("");
-      lines.push(...footerLines);
-    }
 
     return lines;
   }
@@ -499,7 +476,7 @@ export class DisplayLeftPanelRenderer {
           // A prior work-item block can push us to (or past) the budget, so drop
           // any trailing detail rows before appending the tally. Otherwise the
           // "... N more" line overruns maxLines and the panel assembler clips a
-          // line off the bottom — which is the pinned provider/codex usage footer.
+          // line off the bottom of the queue panel.
           while (lines.length > maxLines - 1) lines.pop();
           lines.push(` ${C.dim}... ${remaining} more${C.reset}`);
           break;
@@ -590,8 +567,8 @@ export class DisplayLeftPanelRenderer {
 
     // Honor the budget unconditionally: the per-work-item body pushes a few rows
     // ("+N hidden", done summaries) without re-checking, so the last block can
-    // overshoot. Returning more than maxLines lets the assembler clip the pinned
-    // footer off the bottom of the panel.
+    // overshoot. Returning more than maxLines lets the assembler clip the last
+    // queue row off the bottom of the panel.
     if (lines.length > maxLines) lines.length = maxLines;
 
     return lines;

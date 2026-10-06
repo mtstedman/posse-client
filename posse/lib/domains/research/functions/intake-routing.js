@@ -769,6 +769,7 @@ export function createInitialResearchOrPlanJob(workItem, { deepthinkBudget, deep
     ].map(normalizeCandidatePath).filter(Boolean))].slice(0, 12);
     const dispatchRouting = {
       ...effectiveRouting,
+      intake_reason: effectiveRouting.reason || null,
       reason: "Planner decides whether research is needed",
       ...(dispatchSeedFiles.length ? { key_files: dispatchSeedFiles } : {}),
     };

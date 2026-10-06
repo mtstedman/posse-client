@@ -5,6 +5,7 @@ import {
   runTuiSnapshotTask,
 } from "../functions/run-session.js";
 import { pipelineHasSession } from "../functions/run-display-pipeline.js";
+import { registeredToolCatalogSnapshot } from "../functions/run-display-tools.js";
 
 export class RunDisplaySnapshotController {
   constructor({
@@ -122,7 +123,12 @@ export class RunDisplaySnapshotController {
 
   buildLocalToolSnapshot() {
     const fallback = EMPTY_TOOL_SNAPSHOT;
-    const snapshot = { jobs: [], recent: [], activeLocks: fallback.activeLocks };
+    const snapshot = {
+      catalog: registeredToolCatalogSnapshot(),
+      jobs: [],
+      recent: [],
+      activeLocks: fallback.activeLocks,
+    };
     if (typeof this.getToolInvocationCountsByJob === "function") {
       try { snapshot.jobs = this.getToolInvocationCountsByJob({ limit: 20 }); }
       catch (err) { this.log?.debug?.("display", "Local tool job-count fallback failed", { error: String(err?.message || err) }); }
