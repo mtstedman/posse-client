@@ -352,6 +352,13 @@ posse agent confirm asdfe proposal_ID
 posse agent confirm asdfe proposal_ID --deny
 ```
 
+An agent may request up to eight independent tool calls in one provider
+response, including calls to different tools. Posse validates, authorizes,
+executes, and records each call separately, then returns all results before the
+agent continues. Calls that depend on earlier results still need another
+provider response. When the agent has a write tool requiring confirmation,
+Posse accepts one tool call per response so confirmation can pause safely.
+
 `--json` emits exactly one `bossy.agent_turn.v1` envelope on stdout for harness
 integration. Use `posse agent conversations [name]` and `posse agent export
 <session-id>` for durable history. Posse compiles the generic `agent` safety

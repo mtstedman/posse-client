@@ -32,6 +32,7 @@ export async function callAgentProvider(providerName, prompt, options = {}) {
       systemPrompt: options.systemPrompt || null,
       tools: options.tools,
       promptCache: options.promptCache === true,
+      allowToolBatching: options.allowToolBatching === true,
       maxOutputTokens: options.maxOutputTokens || 2048,
       signal: options.signal,
     });

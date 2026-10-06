@@ -289,10 +289,10 @@ function replaceAgentToolNames(value, names) {
   return String(value || "").replace(pattern, name => names.get(name));
 }
 
-/** One native tool decision for a Posse user agent; the agent runtime executes it. */
+/** Native tool decisions for a Posse user agent; the agent runtime executes them. */
 export async function callAgentTurn(promptText, {
   modelName = null, systemPrompt = null, tools = [], promptCache = false,
-  maxOutputTokens = 2048, signal = null,
+  allowToolBatching = false, maxOutputTokens = 2048, signal = null,
 } = {}) {
   const client = getClient();
   const modelToUse = selectExecutionModel({
@@ -316,7 +316,7 @@ export async function callAgentTurn(promptText, {
     ...(promptCache ? { cache_control: { type: "ephemeral" } } : {}),
     ...(issuedTools.length ? {
       tools: issuedTools,
-      tool_choice: { type: "auto", disable_parallel_tool_use: true },
+      tool_choice: { type: "auto", disable_parallel_tool_use: !allowToolBatching },
     } : {}),
     ...(supportsEffort(modelToUse) ? { output_config: { effort: "medium" } } : {}),
   };
@@ -328,14 +328,13 @@ export async function callAgentTurn(promptText, {
   const limitReason = responseOutputLimitReason(response);
   if (limitReason) throw buildOutputLimitError(PROVIDER_LABEL, "agent turn", limitReason, outputTokenLimit);
   const uses = responseToolUses(response);
-  if (uses.length > 1) {
+  if (uses.length > 1 && !allowToolBatching) {
     throw Object.assign(new Error("Anthropic returned more than one agent tool call"), { code: "agent_protocol_error" });
   }
   const normalized = normalizeProviderUsage(PROVIDER_NAME, response?.usage);
-  const use = uses[0];
   return {
     output: responseText(response),
-    ...(use ? { toolCall: { name: originals.get(use.name) || use.name, arguments: use.input } } : {}),
+    ...(uses.length ? { toolCalls: uses.map(use => ({ name: originals.get(use.name) || use.name, arguments: use.input })) } : {}),
     stats: {
       modelName: response?.model || modelToUse,
       durationMs: Date.now() - startedAt,
