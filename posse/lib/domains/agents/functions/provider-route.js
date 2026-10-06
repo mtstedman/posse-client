@@ -20,8 +20,22 @@ export function resolveAgentProvider(model, override = "") {
   return { provider, modelName: !modelName || modelName === "auto" ? null : modelName };
 }
 
+export function agentProviderUsesNativeTools(providerName) {
+  return typeof getProvider("dev", providerName).callAgentTurn === "function";
+}
+
 export async function callAgentProvider(providerName, prompt, options = {}) {
   const provider = getProvider("dev", providerName);
+  if (options.tools?.length && typeof provider.callAgentTurn === "function") {
+    return await provider.callAgentTurn(prompt, {
+      modelName: options.modelName || null,
+      systemPrompt: options.systemPrompt || null,
+      tools: options.tools,
+      promptCache: options.promptCache === true,
+      maxOutputTokens: options.maxOutputTokens || 2048,
+      signal: options.signal,
+    });
+  }
   return await provider.callProvider(prompt, {
     role: "preflight",
     modelName: options.modelName || null,
