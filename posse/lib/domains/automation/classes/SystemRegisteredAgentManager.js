@@ -56,9 +56,21 @@ function processMatches(service, executable, entry) {
   } catch { return false; }
 }
 
+function waitForOwner(release) {
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (processMatches(SERVICE, release.node, release.entry)
+      && fs.existsSync("/run/posse-agent/agent.sock")
+      && fs.existsSync("/var/lib/posse-agent/gateway.key")) return true;
+    Atomics.wait(pause, 0, 0, 100);
+  }
+  return false;
+}
+
 function waitForServices(release, python) {
   const pause = new Int32Array(new SharedArrayBuffer(4));
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     if (processMatches(SERVICE, release.node, release.entry)
       && processMatches(GATEWAY_SERVICE, python, release.gateway)
@@ -100,8 +112,8 @@ export class SystemRegisteredAgentManager {
         demand(!key || !reserved.has(key), `System owner environment cannot override ${key}`, "forbidden");
       }
     }
-    const owner = `[Unit]\nDescription=Posse registered agent owner\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=${ACCOUNT}\nGroup=${CLIENT_GROUP}\nWorkingDirectory=/var/lib/posse-agent\nStateDirectory=posse-agent\nStateDirectoryMode=0700\nRuntimeDirectory=posse-agent\nRuntimeDirectoryMode=0755\nEnvironment=POSSE_AUTOMATION_DATA_DIR=/var/lib/posse-agent\nEnvironment=POSSE_REGISTERED_AGENT_SOCKET=/run/posse-agent/agent.sock\nEnvironment=POSSE_REGISTERED_AGENT_SOCKET_MODE=0660\nEnvironment=POSSE_AGENT_GATEWAY_BACKEND=/run/posse-agent/private/registered.sock\nEnvironment=POSSE_AGENT_GATEWAY_KEY=/var/lib/posse-agent/gateway.key\nEnvironmentFile=-/etc/posse-agent/owner.env\nExecStart=${release.node} ${release.entry}\nRestart=on-failure\nRestartSec=2\nTimeoutStopSec=30\nNoNewPrivileges=true\nPrivateTmp=true\nLimitNOFILE=4096\nMemoryMax=2G\n\n[Install]\nWantedBy=multi-user.target\n`;
-    const gateway = `[Unit]\nDescription=Posse registered agent local identity gateway\nRequires=${SERVICE}\nAfter=${SERVICE}\n\n[Service]\nType=simple\nUser=${ACCOUNT}\nGroup=${CLIENT_GROUP}\nWorkingDirectory=/var/lib/posse-agent\nRuntimeDirectory=posse-agent\nRuntimeDirectoryMode=0755\nEnvironment=POSSE_AGENT_GATEWAY_SOCKET=/run/posse-agent/public.sock\nEnvironment=POSSE_AGENT_GATEWAY_BACKEND=/run/posse-agent/private/registered.sock\nEnvironment=POSSE_AGENT_GATEWAY_KEY=/var/lib/posse-agent/gateway.key\nExecStart=${python} ${release.gateway}\nRestart=on-failure\nRestartSec=2\nNoNewPrivileges=true\nPrivateTmp=true\nLimitNOFILE=4096\nMemoryMax=512M\n\n[Install]\nWantedBy=multi-user.target\n`;
+    const owner = `[Unit]\nDescription=Posse registered agent owner\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nUser=${ACCOUNT}\nGroup=${CLIENT_GROUP}\nWorkingDirectory=/var/lib/posse-agent\nStateDirectory=posse-agent\nStateDirectoryMode=0700\nRuntimeDirectory=posse-agent\nRuntimeDirectoryMode=0755\nEnvironment=POSSE_AUTOMATION_DATA_DIR=/var/lib/posse-agent\nEnvironment=POSSE_REGISTERED_AGENT_SOCKET=/run/posse-agent/agent.sock\nEnvironment=POSSE_REGISTERED_AGENT_SOCKET_MODE=0660\nEnvironment=POSSE_AGENT_GATEWAY_BACKEND=/run/posse-agent/private/registered.sock\nEnvironment=POSSE_AGENT_GATEWAY_KEY=/var/lib/posse-agent/gateway.key\nEnvironmentFile=-/etc/posse-agent/owner.env\nExecStart=${release.node} ${release.entry}\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=30\nNoNewPrivileges=true\nPrivateTmp=true\nLimitNOFILE=4096\nMemoryMax=2G\n\n[Install]\nWantedBy=multi-user.target\n`;
+    const gateway = `[Unit]\nDescription=Posse registered agent local identity gateway\nRequires=${SERVICE}\nAfter=${SERVICE}\nStartLimitIntervalSec=0\n\n[Service]\nType=simple\nUser=${ACCOUNT}\nGroup=${CLIENT_GROUP}\nWorkingDirectory=/var/lib/posse-agent\nRuntimeDirectory=posse-agent\nRuntimeDirectoryMode=0755\nEnvironment=POSSE_AGENT_GATEWAY_SOCKET=/run/posse-agent/public.sock\nEnvironment=POSSE_AGENT_GATEWAY_BACKEND=/run/posse-agent/private/registered.sock\nEnvironment=POSSE_AGENT_GATEWAY_KEY=/var/lib/posse-agent/gateway.key\nExecStart=${python} ${release.gateway}\nRestart=on-failure\nRestartSec=3\nNoNewPrivileges=true\nPrivateTmp=true\nLimitNOFILE=4096\nMemoryMax=512M\n\n[Install]\nWantedBy=multi-user.target\n`;
     const launcher = `#!/bin/sh\n# posse-registered-agent-managed\nexec '${release.node}' '${path.join(release.root, "registered-agent.js")}' "$@"\n`;
     const ownerChanged = installFile(UNIT, owner, 0o644);
     const gatewayChanged = installFile(GATEWAY_UNIT, gateway, 0o644);
@@ -109,6 +121,7 @@ export class SystemRegisteredAgentManager {
     run("systemctl", ["daemon-reload"]);
     run("systemctl", ["enable", "--now", SERVICE]);
     if (ownerChanged || !processMatches(SERVICE, release.node, release.entry)) run("systemctl", ["restart", SERVICE]);
+    demand(waitForOwner(release), "Registered owner did not adopt verified release", "service_manager_failed");
     run("systemctl", ["enable", "--now", GATEWAY_SERVICE]);
     if (gatewayChanged || !processMatches(GATEWAY_SERVICE, python, release.gateway)) run("systemctl", ["restart", GATEWAY_SERVICE]);
     const ready = waitForServices(release, python);
