@@ -223,6 +223,7 @@ export class AutomationOwner {
       case "script.list": return this.scripts.list();
       case "script.show": return this.scripts.show(args.name, { repoPath: args.repo_path });
       case "script.create": return this.scripts.create(args.spec);
+      case "script.manifest.save": return this.scripts.saveManifest(args.name, args.spec, args.expected_digest);
       case "script.code.get": return this.scripts.code(args.name);
       case "script.code.save": return this.scripts.saveCode(args.name, args.code, args.expected_digest);
       case "script.test": return this.scripts.test(args.name, args.input || {}, args.inputs || {});

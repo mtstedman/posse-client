@@ -89,6 +89,35 @@ export class ScriptToolRegistry {
     fs.writeFileSync(path.join(dir, rendered.entry), rendered.script, { mode: 0o700, flag: "wx" });
     return { name, dir, entry: rendered.entry, manifest: rendered.manifest };
   }
+  saveManifest(name, spec, expectedDigest) {
+    const tool = this.load(name);
+    demand(typeof expectedDigest === "string" && expectedDigest === tool.digest, "Tool changed since it was opened; reload before saving", "script_changed");
+    const existing = tool.manifest;
+    const { description, effect = existing.effect, input_schema = null, inputs = null, output_schema = null, env = [], secrets = [] } = spec || {};
+    const variables = [
+      ...env.map(item => typeof item === "string" ? { name: item.split("=")[0], ...(item.includes("=") ? { default: item.slice(item.indexOf("=") + 1) } : {}) } : item),
+      ...secrets.map(secret => ({ name: secret, secret: true })),
+    ];
+    // Re-render to normalize the edited schemas, then keep the tool's own
+    // entry/interpreter so its existing script stays valid. The manifest is
+    // part of the tool digest, so this write makes its test and grants stale.
+    const rendered = renderScriptTemplate({
+      name, template: "bash", effect,
+      description: String(description || "").trim() || existing.description,
+      params: [], inputSchema: input_schema, userInputSchema: inputs, outputSchema: output_schema, env: variables,
+    });
+    const manifest = normalizeScriptManifest({
+      ...rendered.manifest, name, entry: existing.entry, interpreter: existing.interpreter,
+      timeout_seconds: existing.timeout_seconds, max_output_bytes: existing.max_output_bytes,
+    });
+    const manifestPath = path.join(tool.dir, SCRIPT_TOOL_MANIFEST_FILE);
+    const temporary = path.join(tool.dir, `.manifest-${randomUUID()}`);
+    try {
+      fs.writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      fs.renameSync(temporary, manifestPath);
+    } finally { try { fs.unlinkSync(temporary); } catch {} }
+    return this.show(name);
+  }
   code(name) {
     const tool = this.load(name);
     return { name, code: new TextDecoder("utf-8", { fatal: true }).decode(readBounded(tool.entryPath, SCRIPT_TOOL_LIMITS.MAX_ENTRY_BYTES)), digest: tool.digest };
