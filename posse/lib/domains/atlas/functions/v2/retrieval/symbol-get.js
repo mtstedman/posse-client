@@ -8,7 +8,7 @@ import { buildCodeWindowMap, codeNeedWindow } from "./code.js";
 import { errorEnvelope } from "./envelope.js";
 import { presentSymbolGetAmbiguityChoices } from "./compact-presentation.js";
 import { symbolIdOf } from "./cards.js";
-import { resolveSymbolBodyTarget, symbolSourceText } from "./symbol-body-resolution.js";
+import { resolveSymbolBodyTarget, selectOverloadImplementation, symbolSourceText } from "./symbol-body-resolution.js";
 import { selectSymbolRefTarget, selectSymbolTarget } from "./symbol-target.js";
 import { resolveRequestedIdentifierSymbols } from "./identifier-resolution.js";
 import { isSymbolGetBatch, planSymbolGetBatch } from "./symbol-get-batch.js";
@@ -187,6 +187,29 @@ function targetSelectionError(selection, selector, versionId) {
   });
 }
 
+/**
+ * Same-file overload signatures and their one implementation are a single
+ * answer; see selectOverloadImplementation. Any other ambiguity is unchanged.
+ */
+async function overloadGroupSelection(selection, { view, readFile }) {
+  const targets = Array.isArray(selection?.targets) ? selection.targets : [];
+  const file = targets[0]?.repo_rel_path;
+  if (targets.length < 2 || !file || typeof readFile !== "function") return selection;
+  try {
+    const source = readFile(file);
+    if (source == null) return selection;
+    const fileSymbols = typeof view?.query?.symbolsInFile === "function"
+      ? await view.query.symbolsInFile(file)
+      : [];
+    const overload = selectOverloadImplementation(targets, fileSymbols, source);
+    return overload
+      ? { status: "selected", target: overload.target, implementationResolution: overload.implementationResolution }
+      : selection;
+  } catch {
+    return selection;
+  }
+}
+
 async function selectedBodyResolution({ view, target, readFile }) {
   if (typeof view?.query?.symbolsInFile !== "function" || typeof readFile !== "function") {
     return { target, bodyKind: null, implementationCandidates: [], source: null, symbols: [] };
@@ -360,6 +383,9 @@ async function readSymbolGet({
   if (selection.status === "ambiguous_symbol_ref") {
     selection = await context.measure("declaration_proof", () => proveDeclarationIdentity(selection, params, readFile));
   }
+  if (selection.status === "ambiguous_symbol_ref") {
+    selection = await context.measure("declaration_proof", () => overloadGroupSelection(selection, { view, readFile }));
+  }
   const selector = params.symbolId || params.symbolRef?.name || "";
   if (selection.status !== "selected" && selection.status !== "ambiguous") {
     return targetSelectionError(selection, selector, versionId);
@@ -383,7 +409,9 @@ async function readSymbolGet({
       maxTokens: params.maxTokens,
       identifiersToFind: params.identifiersToFind,
     }));
-    const annotated = { ...annotateSymbolBody(body, resolution, params.identifiersToFind), action: "symbol.get" };
+    const annotated = { ...annotateSymbolBody(body, selection.implementationResolution
+      ? { ...resolution, implementationResolution: selection.implementationResolution }
+      : resolution, params.identifiersToFind), action: "symbol.get" };
     return annotated;
   }
 

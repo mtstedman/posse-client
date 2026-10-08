@@ -194,7 +194,7 @@ async function visibleFileDeclarations(view, file, exportedOnly) {
 // File-local fallback uses the same qualified-name proof as indexed lookup.
 // A sole member in another owner does not establish inheritance or aliasing.
 function sameFileMemberTarget(fileSymbols, name) {
-  const resolution = resolveRequestedIdentifierSymbols(fileSymbols, name, { caseSensitive: true });
+  const resolution = resolveRequestedIdentifierSymbols(fileSymbols, name, { caseSensitive: true, traitImplAlias: true });
   const candidates = new Map(dedupeDeclarationSpans(resolution.matches).map(symbol => [symbolTargetIdentity(symbol), symbol]));
   return candidates.size === 1 ? [...candidates.values()][0] : null;
 }
@@ -276,7 +276,7 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
     ? eligible.filter((symbol) => symbol.repo_rel_path === requestedFile)
     : eligible;
   const exported = pathExact;
-  const resolution = resolveRequestedIdentifierSymbols(uniqueResolutionSymbols(exported), name, { caseSensitive: true });
+  const resolution = resolveRequestedIdentifierSymbols(uniqueResolutionSymbols(exported), name, { caseSensitive: true, traitImplAlias: true });
   if (resolution.ambiguousBearers.length > 0) {
     const names = new Set(resolution.ambiguousBearers.map(exactIdentifier));
     return { status: "ambiguous_symbol_ref", bearers: resolution.ambiguousBearers,

@@ -75,18 +75,29 @@ export function uniqueResolutionSymbols(symbols) {
   });
 }
 
-function strictIdentifierMatches(symbol, requested, normalize = normalizedQualifiedIdentifier) {
+// Rust trait implementations are indexed as `<module>.impl.<Type>.<Trait>.<member>`.
+// Callers name such a method by its type (`Files::update`), and the trait
+// segment between them kept it from matching its own row, so the lookup fell
+// through to every `update` in the file (Atlas594 RUST_RIPGREP_3, ripgrep's
+// flags/defs.rs). The alias drops only that trait segment; the full name still
+// matches, and `Trait::member` stays ambiguous across implementing types. Only
+// symbol.get target selection opts in: a window anchor for a type with two
+// trait impls of one member must stay ambiguous rather than span both.
+function traitImplOwnerAlias(qualifiedName) {
+  const segments = qualifiedName.split(".");
+  const impl = segments.lastIndexOf("impl");
+  if (impl < 0 || segments.length - impl !== 4) return "";
+  return [...segments.slice(0, impl + 2), segments.at(-1)].join(".");
+}
+
+function strictIdentifierMatches(symbol, requested, normalize = normalizedQualifiedIdentifier, traitImplAlias = false) {
   const name = normalize(symbol?.name);
   const qualifiedName = normalize(symbol?.qualified_name);
-  const qualifiedRequest = requested.includes(".");
-  if (!qualifiedRequest) {
-    return name === requested
-      || qualifiedName === requested
-      || Boolean(qualifiedName && qualifiedName.endsWith(`.${requested}`));
-  }
+  const ownerAlias = traitImplAlias && qualifiedName ? traitImplOwnerAlias(qualifiedName) : "";
   return name === requested
     || qualifiedName === requested
-    || Boolean(qualifiedName && qualifiedName.endsWith(`.${requested}`));
+    || Boolean(qualifiedName && qualifiedName.endsWith(`.${requested}`))
+    || Boolean(ownerAlias && requested.includes(".") && ownerAlias.endsWith(`.${requested}`));
 }
 
 /**
@@ -94,12 +105,12 @@ function strictIdentifierMatches(symbol, requested, normalize = normalizedQualif
  * tail to an unrelated bearer. Tail candidates provide ambiguity diagnostics
  * only; a sole different owner is still not the requested declaration.
  */
-export function resolveRequestedIdentifierSymbols(symbols, identifier, { allowNamespacePrefix = true, caseSensitive = false } = {}) {
+export function resolveRequestedIdentifierSymbols(symbols, identifier, { allowNamespacePrefix = true, caseSensitive = false, traitImplAlias = false } = {}) {
   const normalize = value => normalizedQualifiedIdentifier(value, { caseSensitive });
   const requested = normalize(identifier);
   if (!requested) return { matches: [], ambiguousBearers: [], matchKind: "none" };
   const candidates = uniqueResolutionSymbols(symbols);
-  const exact = candidates.filter((symbol) => strictIdentifierMatches(symbol, requested, normalize));
+  const exact = candidates.filter((symbol) => strictIdentifierMatches(symbol, requested, normalize, traitImplAlias));
   if (exact.length > 0) {
     return { matches: exact, ambiguousBearers: [], matchKind: "qualified" };
   }
@@ -150,10 +161,10 @@ export function resolveRequestedIdentifierSymbols(symbols, identifier, { allowNa
   };
 }
 
-export function symbolMatchesRequestedIdentifier(symbol, identifier) {
+export function symbolMatchesRequestedIdentifier(symbol, identifier, { traitImplAlias = false } = {}) {
   const requested = normalizedQualifiedIdentifier(identifier);
   if (!requested) return false;
-  return strictIdentifierMatches(symbol, requested);
+  return strictIdentifierMatches(symbol, requested, normalizedQualifiedIdentifier, traitImplAlias);
 }
 
 /**

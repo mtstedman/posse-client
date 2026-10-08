@@ -113,6 +113,7 @@ import { SYMBOL_GET_BATCH_POLICY } from "../../../catalog/symbol-get-batch.js";
 import { PLANNER_DISPATCH_SETTINGS } from "../../../catalog/planner-dispatch.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { isSymbolGetBatch, planSymbolGetBatch, combineSymbolGetBatchResults } from "../../../domains/atlas/functions/v2/retrieval/symbol-get-batch.js";
+import { symbolMatchesRequestedIdentifier } from "../../../domains/atlas/functions/v2/retrieval/identifier-resolution.js";
 import { refreshSourceDecisionNavigation } from "../functions/source-decision-points.js";
 import {
   subAgentDispatchIdentities,
@@ -856,6 +857,13 @@ function sameFileAmbiguityBatchItems(result, toolArgs) {
   const candidates = error?.details?.candidates;
   if (!Array.isArray(candidates) || candidates.length < 2) return null;
   if (candidates.length > SYMBOL_GET_BATCH_POLICY.maxItems) return null;
+  // An owner-qualified name whose owner matched nothing falls back to every
+  // bearer of its bare member. Those are other owners' declarations, not the
+  // one requested, so they stay a candidate list instead of returned bodies.
+  const requestedName = String(toolArgs?.symbolRef?.name || toolArgs?.symbol_ref?.name || "").trim();
+  if (/::|[.#]/u.test(requestedName) && candidates.some((candidate) => !symbolMatchesRequestedIdentifier(
+    { name: candidate?.name, qualified_name: candidate?.name }, requestedName, { traitImplAlias: true },
+  ))) return null;
   const items = [];
   const candidateFile = requestedFile || String(candidates[0]?.file || "").trim();
   if (!candidateFile) return null;
@@ -3061,9 +3069,16 @@ function ownerResearchSynthesisAdmission(session, requestedAction, {
   explorationUnitWeight = 1,
   symbolFollowupDiscounted = false,
   physicalCeilingGrace = false,
+  sameStepRecovery = false,
 } = {}) {
   const boot = session?.bootConfig || {};
   const policy = researchSynthesisPolicyFor(session);
+  // A recovery re-read runs inside a call that was already admitted on this
+  // step. That call recorded the step, so a closeout derived from the recorded
+  // count would block the re-read of the very content the call asked for
+  // (Atlas594 TS_TYPEORM_1: every recovered body on step 26 came back blocked).
+  // The physical ceiling still applies to the step itself.
+  const recoveryOnAdmittedStep = sameStepRecovery === true && Number.isSafeInteger(assignedPhysicalCallStep);
   const citationFetch = RESEARCH_CITATION_FETCH_GATE_ENABLED
     && isResearchAtlasCitationFetchAction(requestedAction);
   const exploration = isResearchAtlasExplorationAction(requestedAction);
@@ -3105,7 +3120,7 @@ function ownerResearchSynthesisAdmission(session, requestedAction, {
       ? assignedPhysicalCallStep
       : Math.max(0, Number(status.call_steps || 0)) + 1;
     const assignedPhysicalCeiling = physicalCeilingGrace !== true && assignedCallStep > policy.maxPhysicalCalls;
-    const finalFetchAlreadyUsed = synthesisRequired && citationFetchBatches >= 1;
+    const finalFetchAlreadyUsed = !recoveryOnAdmittedStep && synthesisRequired && citationFetchBatches >= 1;
     return {
       tracked: true,
       maxPhysicalCalls: policy.maxPhysicalCalls,
@@ -3156,8 +3171,8 @@ function ownerResearchSynthesisAdmission(session, requestedAction, {
     tracked: true,
     maxPhysicalCalls: policy.maxPhysicalCalls,
     physicalCeilingGrace: physicalCeilingGrace === true,
-    blocked: progressDecision.required || assignedAbsoluteCeiling,
-    blockReason: progressDecision.reason || (assignedPhysicalCeiling
+    blocked: (!recoveryOnAdmittedStep && progressDecision.required) || assignedAbsoluteCeiling,
+    blockReason: (!recoveryOnAdmittedStep && progressDecision.reason) || (assignedPhysicalCeiling
       ? "physical_call_ceiling"
       : (assignedUnitCeiling ? "exploration_ceiling" : null)),
     citationFetch: false,
@@ -6935,6 +6950,7 @@ export class PersistentMcpOwner {
         : this._executeAtlasToolCall({ ...args, binding, toolName: "atlas.symbol.get", toolArgs: item,
           assignedPhysicalCallStep: physicalStep,
           physicalCeilingGrace: args.physicalCeilingGrace === true,
+          sameStepRecovery: args.sameStepRecovery === true,
           physicalBatchId,
           message: { ...args.message, id: `${args.message?.id ?? "symbols"}:${index}` },
         }).catch((error) => ({result: mcpToolErrorPayload("symbol.get batch item execution failed", {
@@ -7013,6 +7029,7 @@ export class PersistentMcpOwner {
             explorationUnitWeight: researchBatch.admission.explorationUnitWeight,
             symbolFollowupDiscounted,
             physicalCeilingGrace: args?.physicalCeilingGrace === true,
+            sameStepRecovery: args?.sameStepRecovery === true,
           }),
           explorationUnitId: researchBatch.admission.explorationUnitId,
           explorationUnitKind: researchBatch.admission.explorationUnitKind,
@@ -7023,6 +7040,7 @@ export class PersistentMcpOwner {
           ? ownerResearchSynthesisAdmission(args?.session, effectiveAction, {
               assignedPhysicalCallStep,
               physicalCeilingGrace: args?.physicalCeilingGrace === true,
+              sameStepRecovery: args?.sameStepRecovery === true,
             })
           : null);
     if (synthesisAdmission) Object.assign(synthesisAdmission, {
@@ -7103,12 +7121,36 @@ export class PersistentMcpOwner {
       ...args,
       ambiguityRecovery: true,
       assignedPhysicalCallStep,
+      sameStepRecovery: true,
       toolArgs: {
         items,
         ...(toolArgs.maxTokens == null ? {} : { maxTokens: toolArgs.maxTokens }),
       },
     });
-    return recovered?.result?.isError === true ? message : (recovered || message);
+    if (recovered?.result?.isError === true) return message;
+    // The triggering read was already recorded as a failed tool.atlas row.
+    // Record that the caller received the bodies, so a failure count can tell
+    // an answered ambiguity from one the agent actually saw (Atlas594: 78
+    // logged, 8 seen).
+    const boot = args?.session?.bootConfig;
+    if (boot?.attemptId != null) {
+      recordObservation({
+        work_item_id: boot.workItemId ?? null,
+        job_id: boot.jobId ?? null,
+        attempt_id: boot.attemptId,
+        observation_type: "atlas.ambiguity_recovered",
+        summary: `symbol.get ambiguity answered with ${items.length} same-file bearers`,
+        detail: {
+          action: "symbol.get",
+          recovered_error: "ambiguous_symbol",
+          bearers: items.length,
+          physical_call_step: Number.isSafeInteger(assignedPhysicalCallStep) ? assignedPhysicalCallStep : null,
+          physical_request_id: args?.physicalRequest?.id ?? null,
+          mcp_request_id: args?.message?.id ?? null,
+        },
+      });
+    }
+    return recovered || message;
   }
 
   /**
@@ -7138,6 +7180,7 @@ export class PersistentMcpOwner {
       ...args,
       identifierFilterRecovery: true,
       assignedPhysicalCallStep,
+      sameStepRecovery: true,
       toolArgs: nested ? { ...args.toolArgs, args: widened } : widened,
     });
     const result = recovered?.result;
@@ -7180,6 +7223,7 @@ export class PersistentMcpOwner {
       ...args,
       lensDirectoryRecovery: true,
       assignedPhysicalCallStep,
+      sameStepRecovery: true,
       toolName: String(args?.toolName || "").replace(/code[._]lens/u, (match) => match.replace("lens", "survey")),
       toolArgs: nested ? { ...withNestedAtlasAction(args.toolArgs, "code.survey"), args: surveyArgs } : surveyArgs,
     });
@@ -7231,6 +7275,7 @@ export class PersistentMcpOwner {
         ...args,
         exactNameRecovery: true,
         assignedPhysicalCallStep,
+        sameStepRecovery: true,
         toolName: String(args?.toolName || "").replace(/symbol[._]search/u, (match) => match.replace("search", "get")),
         toolArgs: nested
           ? { ...withNestedAtlasAction(args.toolArgs, "symbol.get"), args: { items: [target] } }
@@ -7253,6 +7298,7 @@ export class PersistentMcpOwner {
       ...args,
       exactNameRecovery: true,
       assignedPhysicalCallStep,
+      sameStepRecovery: true,
       toolArgs: nested ? { ...args.toolArgs, args: nearest } : nearest,
     });
     const items = searchResultItems(widened?.result);

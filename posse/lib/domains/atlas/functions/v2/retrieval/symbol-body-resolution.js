@@ -229,3 +229,57 @@ export function resolveSymbolBodyTarget(target, symbols, source) {
     },
   };
 }
+
+const OVERLOAD_LANG_BY_EXTENSION = new Map([
+  [".ts", "ts"], [".mts", "ts"], [".cts", "ts"], [".tsx", "tsx"], [".py", "python"], [".pyi", "python"],
+]);
+
+function withSourceLang(symbol) {
+  if (!symbol || symbol.lang) return symbol;
+  const file = String(symbol.repo_rel_path || "");
+  const lang = OVERLOAD_LANG_BY_EXTENSION.get(file.slice(file.lastIndexOf(".")).toLowerCase());
+  return lang ? { ...symbol, lang } : symbol;
+}
+
+/**
+ * Several same-file bearers of one callable name can be one overload group:
+ * syntax-proven signatures (TypeScript overloads, Python @overload stubs) that
+ * all resolve to a single implementation. That group answers the request with
+ * the implementation instead of an ambiguity the caller must re-request
+ * (Atlas594 TS_TYPEORM_1: `Column` had 13 bearers, above the batch recovery
+ * cap). Two real bodies, such as a getter and its setter, stay ambiguous.
+ *
+ * @param {ViewSymbol[]} targets
+ * @param {ViewSymbol[]} fileSymbols
+ * @param {string | null} source
+ */
+export function selectOverloadImplementation(targets, fileSymbols, source) {
+  const rows = (Array.isArray(targets) ? targets : []).map(withSourceLang);
+  if (rows.length < 2 || source == null) return null;
+  const file = rows[0].repo_rel_path;
+  if (rows.some((row) => row.repo_rel_path !== file
+    || !CALLABLE_KINDS.has(String(row.kind || "").toLowerCase()))) return null;
+  const implementations = rows.filter((row) => symbolBodyKind(row, source) === "implementation");
+  if (implementations.length !== 1) return null;
+  const implementation = implementations[0];
+  // One logical bearer only: an indexer may qualify one row of the group and
+  // not its siblings (`src.flask.helpers.stream_with_context` beside
+  // `stream_with_context`), but a different owner never joins the group.
+  const logicalName = (row) => normalizedQualifiedIdentifier(row?.qualified_name || row?.name);
+  const implementationName = logicalName(implementation);
+  if (!implementationName || rows.some((row) => {
+    const name = logicalName(row);
+    return !name || (name !== implementationName
+      && !name.endsWith(`.${implementationName}`) && !implementationName.endsWith(`.${name}`));
+  })) return null;
+  const implementationId = symbolIdOf(implementation);
+  const siblings = (Array.isArray(fileSymbols) && fileSymbols.length > 0 ? fileSymbols : rows).map(withSourceLang);
+  let resolution = null;
+  for (const row of rows) {
+    if (row === implementation) continue;
+    const resolved = resolveSymbolBodyTarget(row, siblings, source);
+    if (resolved.implementationResolution?.implementationSymbolId !== implementationId) return null;
+    resolution ??= resolved.implementationResolution;
+  }
+  return resolution ? { target: implementation, implementationResolution: resolution } : null;
+}
