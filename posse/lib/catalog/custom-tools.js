@@ -62,8 +62,10 @@ export const SCRIPT_TOOL_MANIFEST_FILE = "tool.json";
 export const SCRIPT_TOOL_EFFECTS = Object.freeze(["read", "write"]);
 // Entry effect stored on the automation entry for each manifest effect.
 export const SCRIPT_TOOL_ENTRY_EFFECTS = Object.freeze({ read: "read_only", write: "external_write" });
-// Interpreter name -> program; "exec" runs the entry itself (must be executable).
-export const SCRIPT_TOOL_INTERPRETERS = Object.freeze({ bash: "bash", sh: "sh", python: "python3", node: "node", exec: "" });
+// Interpreter name -> program. Tools run only through these in-house
+// runtimes; an arbitrary executable entry ("exec") is deliberately not
+// accepted so every tool stays inside a known interpreter boundary.
+export const SCRIPT_TOOL_INTERPRETERS = Object.freeze({ bash: "bash", sh: "sh", python: "python3", node: "node" });
 export const SCRIPT_TOOL_TEMPLATES = Object.freeze(["bash", "python", "node", "http"]);
 export const SCRIPT_TOOL_LIMITS = Object.freeze({
   DEFAULT_TIMEOUT_SECONDS: 30, MAX_TIMEOUT_SECONDS: 600,

@@ -37,7 +37,6 @@ export class ScriptToolRegistry {
     demand(relative && !relative.startsWith("..") && !path.isAbsolute(relative), `Script tool ${name}: entry must stay inside the tool folder`, "script_invalid");
     const info = fs.statSync(entryPath);
     demand(info.isFile(), `Script tool ${name}: entry ${manifest.entry} must be a regular file`, "script_invalid");
-    if (manifest.interpreter === "exec" && process.platform !== "win32") demand((info.mode & 0o111) !== 0, `Script tool ${name}: interpreter exec needs an executable entry (chmod +x ${entryPath})`, "script_invalid");
     const script = readBounded(entryPath, SCRIPT_TOOL_LIMITS.MAX_ENTRY_BYTES);
     const scriptDigest = createHash("sha256").update(script).digest("hex");
     return { manifest, dir: realDir, entryPath, digest: digest({ manifest, script_sha256: scriptDigest }) };
