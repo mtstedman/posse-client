@@ -254,20 +254,20 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "traverse_ref": {
     type: "function",
     name: "atlas_traverse_ref",
-    description: "Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty offset page promotes that same identity to evidence_ref; search pages are explicitly inspect-only and non-citable because their numbered rows are navigation, not source coordinates. A different opaque traversal_ref is returned only when more content remains.",
+    description: "Read omitted stored content using issued traversal_ref values. Returns visible evidence or inspect-only search matches, plus an opaque continuation when content remains.",
     parameters: {
       type: "object",
       properties: {
-        traversal_ref: { type: ["string", "array"], items: { type: "string" }, description: "One explicitly issued traversal ref such as #a3f9, or every independently needed traversal ref as one array batch." },
+        traversal_ref: { type: ["string", "array"], items: { type: "string" }, description: "One issued opaque capability or independently needed capabilities together. Copy exactly." },
         traversal_refs: { type: "array", items: { type: "string" }, description: "Compatibility batch spelling for traversal_ref.", internalOnly: true },
         ref: { type: ["string", "array"], items: { type: "string" }, description: "Legacy fetch_ref input alias.", internalOnly: true },
         refs: { type: "array", items: { type: "string" }, description: "Legacy fetch_ref batch alias.", internalOnly: true },
         hashes: { type: "array", items: { type: "string" }, description: "Legacy hash alias.", internalOnly: true },
-        offset: { type: "integer", description: "Compatibility selector for an initial or legacy traversal. Opaque traversal_ref identities already own their exact offset and ignore pagination mechanics supplied by the agent." },
-        limit: { type: "integer", description: "Maximum characters to return from each materialized ref page. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs." },
+        offset: { type: "integer", description: "Leave unset: the capability already owns its offset." },
+        limit: { type: "integer", description: "Characters per ref, not source lines. Omit for normal traversal; response budgets still apply." },
         search: { type: "string", description: "Optional case-insensitive search within missing stored-ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists." },
         search_mode: { type: "string", enum: ["auto", "literal", "regex"], description: "Search interpretation. Default: auto." },
-        reaccessAuthorization: { type: "string", description: "One-use attempt-scoped authorization returned with a covered source response. Valid only when traversal_ref is one scalar string; arrays require separate calls because the authorization applies to exactly one ref. This exceptional recovery does not turn evidence_ref into ordinary traversal." },
+        reaccessAuthorization: { type: "string", description: "One-use recovery token from a covered-source response. Requires one scalar string traversal_ref." },
       },
       required: ["traversal_ref"],
       additionalProperties: false,
@@ -284,7 +284,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         refs: { type: "array", items: { type: "string" }, description: "Compatibility alias for a batch of hash refs.", internalOnly: true },
         hashes: { type: "array", items: { type: "string" }, description: "Alias for refs.", internalOnly: true },
         offset: { type: "integer", description: "Character offset for paged materialized refs; for search mode, matched-row offset. Default: 0." },
-        limit: { type: "integer", description: "Maximum characters to return from each materialized ref page. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs." },
+        limit: { type: "integer", description: "Characters per ref, not source lines. Omit for normal traversal. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs." },
         search: { type: "string", description: "Optional case-insensitive search within materialized ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. The result contains matching numbered lines." },
         search_mode: { type: "string", enum: ["auto", "literal", "regex"], description: "Search interpretation. Default: auto (literal first, then regex when the query contains regex syntax)." },
         reaccessAuthorization: { type: "string", description: "One-use attempt-scoped authorization returned with a covered source response. Valid only when ref is one scalar string; arrays require separate calls because the authorization permits exactly one stored ref to be delivered once more." },
@@ -497,7 +497,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.search": {
     type: "function",
     name: "atlas_symbol_search",
-    description: "Repository discovery when the target or its location is unknown. Returns bounded symbol addresses. exportedFrom names the file that publicly re-exports the symbol when one is indexed. Multiword concepts and code-fragment queries can also return bounded, redacted sourceTextMatches from indexed files after an empty symbol-name lookup. Reuse returned IDs and evidence refs exactly as issued.",
+    description: "Locate unknown declarations. Returns ranked symbol names, file locations, and handles for focused reads, without implementation bodies.",
     parameters: {
       type: "object",
       properties: {
@@ -651,7 +651,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.callers": {
     type: "function",
     name: "atlas_symbol_callers",
-    description: "List incoming resolved callers, references, or both for one exact symbol ID as compact file-to-symbol maps with IDs suitable for exact body retrieval.",
+    description: "Find who calls or references a known symbol. Returns incoming relationships grouped by file with symbol handles. Select the needed relationship with mode.",
     parameters: {
       type: "object",
       properties: {
@@ -670,14 +670,14 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.get": {
     type: "function",
     name: "atlas_symbol_get",
-    description: "Read exact symbol bodies with file and symbols (an array of exact names or qualified names sharing that file), a single ID/name, or independent selectors in items. Each symbol receives its own maxTokens allowance (default and maximum 8000); oversized bodies return a bounded first page with a traversal continuation. Errors remain per item.",
+    description: "Read exact symbol bodies by file+symbols, symbolRef, symbolId, or independent items. Names resolve directly without a prior ID lookup. Oversized bodies return a bounded page and traversal_ref; errors remain per item.",
     parameters: {
       type: "object",
       properties: {
         symbols: {
           type: "array", minItems: 1, maxItems: SYMBOL_GET_BATCH_POLICY.maxItems,
           items: { type: "string", minLength: 1 },
-          description: "Exact names or qualified names in the shared file. Use file+symbols to share one path across the requested symbols.",
+          description: "Exact names or qualified names in the shared file. Use file+symbols together.",
         },
         items: {
           type: "array", minItems: 1, maxItems: SYMBOL_GET_BATCH_POLICY.maxItems,
@@ -710,7 +710,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
           items: { type: "string", minLength: 1 },
           description: "Optional exact identifiers whose in-body coverage should be reported.",
         },
-        maxTokens: { type: "integer", minimum: 1, maximum: ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens, description: "Optional inline token cap; the repository code-window policy still applies." },
+        maxTokens: { type: "integer", minimum: 1, maximum: ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens, description: "Tokens per symbol; default and maximum 8000." },
       },
       anyOf: [
         { required: ["file", "symbols"] },
@@ -891,7 +891,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.skeleton": {
     type: "function",
     name: "atlas_code_skeleton",
-    description: "Quick single-file declaration map: one row per top-level declaration and class member, grouped by owner, plus one row per top-level export or re-export statement (no symbolId), with source ranges, compact signatures, and reusable symbolId values for symbol.get. Includes private members by default; excludes bodies, control flow, and local functions. Reports totalSymbols, returnedSymbols, omittedSymbols, and complete. If omittedSymbols is nonzero, raise maxLines/maxTokens. Call symbol.get with the row's symbolId. Rows without a symbolId can be read with an exact-source read using their file and range.",
+    description: "Map declarations in a known file without bodies or control flow. Returns names, ranges, signatures, symbol handles, and completeness counts. Includes class members and exports, but excludes local functions.",
     parameters: {
       type: "object",
       properties: {
@@ -900,7 +900,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         exportedOnly: { type: "boolean", description: "Prefer exported symbols only when possible." },
         maxLines: { type: "integer", description: "Maximum declaration rows. Default 200; minimum 1, maximum 5000." },
         maxTokens: { type: "integer", description: "Approximate rendered map token budget. Default 4000; minimum 1, maximum 200000." },
-        identifiersToFind: { type: "array", items: { type: "string" }, description: "Optional identifier names used to focus the outline, up to 50." },
+        identifiersToFind: { type: "array", items: { type: "string" }, description: "Optional exact names to focus the outline." },
         ifNoneMatch: { type: "string", description: "Conditional-fetch ETag supplied by the runtime.", internalOnly: true },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
         surveyGap: { type: "string", minLength: 3, description: "Named structural fact absent from the delivered orientation. This justifies bypassing the survey-first redirect; it does not otherwise change skeleton retrieval." },
@@ -912,12 +912,12 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.survey": {
     type: "function",
     name: "atlas_code_survey",
-    description: "Use when the exact target is unknown or behavior spans files or owners. Returns a ranked multi-file symbol preview and call map; submit known paths together, and traverse its continuation only when omitted survey results are relevant.",
+    description: "Locate relevant declarations across known paths when the exact target is unclear. Returns a ranked multi-file symbol preview and call map.",
     parameters: {
       type: "object",
       properties: {
         paths: { type: ["string", "array"], items: { type: "string" }, description: "Repository-relative directory prefix or file path — one string or an array of them, e.g. \"src/billing\" or [\"lib/a.js\", \"lib/b.js\"]. Resolves up to 64 indexed files." },
-        symbols: { type: "array", items: { type: "string" }, description: "Optional. Dig terms: restrict the survey to these symbol names' neighborhoods (max 16)." },
+        symbols: { type: "array", items: { type: "string" }, description: "Optional declaration names to focus the survey." },
         maxFiles: { type: "integer", minimum: 1, maximum: 64, description: "Optional. Cap on files surveyed. Default 64, minimum 1, maximum 64." },
         sessionId: { type: "string", description: "Optional session namespace shared with related code retrieval calls.", internalOnly: true },
       },
@@ -928,12 +928,12 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.structure": {
     type: "function",
     name: "atlas_code_structure",
-    description: "Use when code relationships matter more than bodies. Returns an exact body-free inventory of files, symbols, imports, and selected fan-in and fan-out edges for known paths.",
+    description: "Inspect known paths without source bodies. Returns files, declarations, imports, and selected relationship edges. Select the needed edgeKinds.",
     parameters: {
       type: "object",
       properties: {
         paths: { type: ["string", "array"], items: { type: "string" }, description: "Repository-relative directory prefix or file path, e.g. \"src/routes\" or [\"lib/a.ts\", \"lib/b.ts\"]. Resolves up to 128 indexed files." },
-        edgeKinds: { type: "array", items: { type: "string", enum: ["imports", "calls", "references", "extends", "implements", "uses_type"] }, description: "Relationships to inventory. Select calls or references for behavioral traversal; defaults to imports." },
+        edgeKinds: { type: "array", items: { type: "string", enum: ["imports", "calls", "references", "extends", "implements", "uses_type"] }, description: "Relationships to include; defaults to imports." },
         maxFiles: { type: "integer", description: "Optional cap on resolved indexed files. Default 64, max 128." },
         includeSymbols: { type: "boolean", description: "Include per-file symbol summaries. Default true." },
         includeEdges: { type: "boolean", description: "Include exact internal/inbound/outbound edge rows. Default true." },
@@ -959,14 +959,14 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.lens": {
     type: "function",
     name: "atlas_code_lens",
-    description: "Use when one file or symbol is known but relevant identifiers, usages, or branches are scattered within it. Returns focused locations and enclosing-symbol context; include all known same-target identifiers in one request.",
+    description: "Locate identifiers\u2019 uses within a known file or symbol. Returns matching locations and enclosing-symbol context. Submit scattered identifiers together; a file path needs no prior ID lookup.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
         file: { type: "string", description: "Repository-relative file path fallback when you have a file but not an opaque symbolId." },
-        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "All declared identifier names needed from the selected file or symbol, matched together. String and comment occurrences of those identifier names may also be reported in identifiersFoundInText." },
-        contextLines: { type: "integer", minimum: 0, maximum: 8, description: "Context lines around each match, from 0 through 8. Use an exact-source read for a bounded range." },
+        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "Exact identifiers to locate together; results may include string/comment occurrences." },
+        contextLines: { type: "integer", minimum: 0, maximum: 8, description: "Neighboring lines per match, clamped to 8." },
         ifNoneMatch: { type: "string", description: "Conditional-fetch ETag supplied by the runtime.", internalOnly: true },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
       },
@@ -981,18 +981,18 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.window": {
     type: "function",
     name: "atlas_code_window",
-    description: "Use only when exact source is needed for a known symbol or anchored file region. Reuse source evidence already visible in context before calling this tool. Each call must target source outside delivered ranges; a new same-file window must target a named unresolved symbol or branch beyond existing evidence. Context, confidence, and corroboration use the evidence already visible. A known symbolId selects its exact bounded source body. Oversized file-mode results preserve that selection and add a bounded symbol map with explicit inline coverage; symbol follow-ups remain line/token bounded. Covered requests reuse their existing evidence ref; after a complete unchanged file is delivered, later file-anchored windows reuse it even when their identifiers differ.",
+    description: "Read a coherent source region around known declarations, including intervening control flow. Known names in a file need no prior ID lookup. Use granularity to select declaration regions, blocks, or a broader anchored file window within the issued limits.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact opaque ATLAS symbol ID from an indexed result." },
         file: { type: "string", description: "Existing repository-relative file path already surfaced by Atlas when no symbolId is available. Use a surfaced dependency path." },
         reason: { type: "string", description: "Why exact source is needed for this known symbol or anchored file region." },
-        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "All known same-file anchors for one bounded file-mode slice, each a non-empty exact name. Declared names resolve here: function, class, method, and variable names written exactly as they are declared. Submit anchored reads with at least one exact name." },
+        identifiersToFind: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "Exact declaration names in the selected file; include the names needed together." },
         expectedLines: { type: "integer", description: "Desired line count for the requested file-window slice, not the total file length. Symbol and block reads use their definition bounds." },
-        autoFill: { type: "boolean", description: "Keep a partially new window contiguous when dedupe would split it into fragments. Default true; false omits all already-visible lines. Preserves the selected window bounds." },
-        granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "Region shape: symbol (default) reads the named definition, block its enclosing block, fileWindow a broader anchored file slice." },
-        maxTokens: { type: "integer", minimum: 1, maximum: ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens, description: "Optional inline token cap for this selection. The effective maximum is configured per repository and reported in the runtime contract; larger values are clamped." },
+        autoFill: { type: "boolean", description: "Default true: keep partially new windows contiguous. False omits already-visible lines." },
+        granularity: { type: "string", enum: ["symbol", "block", "fileWindow"], description: "symbol: named declarations (default); block: enclosing control flow; fileWindow: broader anchored source region." },
+        maxTokens: { type: "integer", minimum: 1, maximum: ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens, description: "Inline token cap, clamped to the repository limit shown in the runtime contract." },
         sliceContext: { type: "object", description: "Task-slice accounting context supplied by orchestration.", internalOnly: true },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
       },
@@ -1160,7 +1160,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "memory.surface": {
     type: "function",
     name: "atlas_memory_surface",
-    description: "Memory-presence probe for exact symbol and file anchors. Returns which anchors have attached memories while keeping memory identifiers and bodies undisclosed.",
+    description: "Find memory stubs for known paths, symbols, or domains without retrieving memory bodies.",
     parameters: {
       type: "object",
       properties: {
@@ -1175,7 +1175,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "memory.get": {
     type: "function",
     name: "atlas_memory_get",
-    description: "Full memory retrieval for exact symbol and file anchors. Returns memory bodies grouped by their requested anchors.",
+    description: "Read memory bodies relevant to known paths, symbols, or domains. Verify their claims against current evidence.",
     parameters: {
       type: "object",
       properties: {

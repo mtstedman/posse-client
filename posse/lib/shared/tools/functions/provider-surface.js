@@ -71,37 +71,11 @@ export function renderAtlasGuidance(contract = {}, toolRenderer = new ProviderTo
     .some((tool) => String(tool?.suite || "").trim() === "atlas"
       || String(tool?.access || "").trim() === "atlas");
   if (!hasAtlas) return [];
-  const issued = (name) => toolRenderer.tryRender(toolReference("atlas", name));
-  const discovery = [issued("symbol.search"), issued("code.survey")].filter(Boolean);
-  const lens = issued("code.lens");
-  const relationships = [issued("symbol.callers"), issued("code.structure")].filter(Boolean);
-  const routing = [
-    "Atlas symbol tracing: Choose retrieval by the unresolved fact and the location already known, not by a need to switch tools.",
-    discovery.length ? `Use ${discovery.join(" or ")} to locate unknown targets.` : "",
-    lens ? `Use ${lens} for scattered details.` : "",
-    relationships.length ? `Use ${relationships.join(" or ")} only for a needed relationship, selecting the relevant relation kinds instead of all kinds.` : "",
-  ].filter(Boolean).join(" ");
-  const lines = [
-    routing,
-    "Atlas evidence refs: evidence_ref identifies content already visible in this context. Use it directly for citation, slicing, or handoff; do not call it for the same content.",
-  ];
-  const traversal = toolRenderer.tryRender(TOOL_REFS.atlas.traverseRef)
-    || toolRenderer.tryRender(TOOL_REFS.atlas.fetchRef);
-  if (traversal) {
-    lines.push(`Atlas stored-result traversal: Call ${traversal} only with an explicit traversal_ref for omitted content. Group concurrently ready traversal refs into one call; use one when it unlocks the next cursor. Omit limit for normal source traversal: limit measures characters per ref, not source lines. A successful call promotes that same ref to evidence_ref, and each returned evidence_ref identifies the visible text. A different traversal_ref alone advertises more missing content. Copy opaque refs as issued and do not calculate offsets. Start a fresh producer call for a materially different scope.`);
-  }
   const codeWindow = toolRenderer.tryRender(TOOL_REFS.atlas.codeWindow);
   const policy = contract?.atlasCodeWindowPolicy;
-  if (codeWindow) {
-    const reads = [];
-    const skeleton = issued("code.skeleton");
-    const symbolGet = issued("symbol.get");
-    if (skeleton) reads.push(`${skeleton} returns a compact list of a file's declarations with symbol handles`);
-    if (symbolGet) reads.push(`${symbolGet} returns complete bodies of named declarations, several in one file through file+symbols or independent ones through items`);
-    reads.push(`${codeWindow} returns a source region around named declarations including the same-file control flow between them; granularity symbol covers the named declarations' regions, and fileWindow covers most of the file and is the largest read`);
-    if (lens) reads.push(`${lens} returns the locations of an identifier's uses with their enclosing symbols`);
-    lines[0] += ` Atlas reads: ${reads.join("; ")}. None of these requires a prior symbol_id lookup.`;
-  }
+  // Tool purpose and parameter semantics belong to the issued schemas. Only
+  // per-run limits, which cannot live in a stable description, remain here.
+  const lines = [];
   if (codeWindow && policy) {
     lines.push(
       `Atlas code window limit: ${codeWindow} is capped at ${policy.maxWindowTokens} tokens and ${policy.maxWindowLines} lines per call for this run. Omit max_tokens to use that configured maximum; a smaller value narrows the result and a larger value is clamped.`,

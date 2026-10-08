@@ -1740,7 +1740,11 @@ function materializeWorktreeEvidenceSelector(selector, context) {
         }
       }
     }
-    if (!mergedLineRanges(matchingRanges).some((range) => selector.start >= range.start && endLine <= range.end)) {
+    // The same blank declaration separators bridged above sit between matched
+    // source refs, so the content match bridges them too.
+    const matchedRanges = mergedLineRanges(matchingRanges);
+    if (!matchedRanges.some((range) => selector.start >= range.start && endLine <= range.end)
+      && !deliveredAcrossBlankGaps(matchedRanges, selector.start, endLine, lines)) {
       fail(
         "AGENT_HANDOFF_EVIDENCE_CHANGED",
         `Evidence ${resolved.path}:${selector.start}-${endLine} does not match the delivered source; read this range again`,

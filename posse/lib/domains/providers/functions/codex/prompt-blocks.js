@@ -5,6 +5,9 @@ import { ProviderToolRenderer } from "../../../../shared/tools/classes/ProviderT
 import { researcherAtlasBatchGuidance } from "../../../integrations/functions/deterministic-mcp/researcher-dispatcher.js";
 
 export function buildCodexResearchMcpGuidance(executionContract, coreDeclarations = [], { nativeBatching = false } = {}) {
+  // Native Codex sessions receive the issued retrieval and handoff schemas
+  // directly. The remote researcher contract owns the behavior guidance.
+  if (nativeBatching && executionContract?.role === "researcher") return "";
   const renderer = new ProviderToolRenderer({ providerName: "codex", issuedSurface: executionContract });
   const queryAction = executionContract?.tools?.find(tool => tool.mcpName === formatToolReference(TOOL_REFS.atlas.query));
   const atlas = renderer.tryRender(TOOL_REFS.atlas.query) || (queryAction && renderer.tryRenderIssued(queryAction));
