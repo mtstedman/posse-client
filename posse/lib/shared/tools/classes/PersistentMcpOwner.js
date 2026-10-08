@@ -844,15 +844,16 @@ function sameFileAmbiguityBatchItems(result, toolArgs) {
   const requestedFile = String(
     toolArgs?.file || toolArgs?.path || toolArgs?.symbolRef?.file || toolArgs?.symbolRef?.path || "",
   ).trim();
-  if (!requestedFile) return null;
   const candidates = error?.details?.candidates;
   if (!Array.isArray(candidates) || candidates.length < 2) return null;
   if (candidates.length > SYMBOL_GET_BATCH_POLICY.maxItems) return null;
   const items = [];
+  const candidateFile = requestedFile || String(candidates[0]?.file || "").trim();
+  if (!candidateFile) return null;
   for (const candidate of candidates) {
     const symbolId = String(candidate?.symbolId || candidate?.symbol_id || "").trim();
-    if (!symbolId || String(candidate?.file || "") !== requestedFile) return null;
-    items.push({ symbolId, file: requestedFile });
+    if (!symbolId || String(candidate?.file || "") !== candidateFile) return null;
+    items.push({ symbolId, file: candidateFile });
   }
   return items;
 }
@@ -4156,7 +4157,6 @@ function recordOwnerToolObservation({
           ...(Number.isSafeInteger(synthesisAdmission?.assignedPhysicalCallStep) ? {
             physical_call_step: synthesisAdmission.assignedPhysicalCallStep,
             physical_call_ceiling: admissionMaxPhysicalCalls(synthesisAdmission),
-            physical_request: synthesisAdmission.physicalRequestId ? 0 : 1,
           } : {}),
           ...(synthesisAdmission?.physicalRequestId ? {
             measurement_version: 1,

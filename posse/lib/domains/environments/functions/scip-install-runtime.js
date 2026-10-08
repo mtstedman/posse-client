@@ -13,6 +13,7 @@ import {
 } from "../../../shared/platform/functions/process-env.js";
 import { findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
+import { trackSpawnedProcess } from "../../../shared/platform/functions/spawned-process.js";
 
 export { DEFAULT_POSSE_ROOT };
 
@@ -106,6 +107,8 @@ export async function runCommand(command, args, {
     let forceTimer = null;
     let settleTimer = null;
     let processGroupId = null;
+    let forgetTrackedProcess = () => {};
+    let onProcessExit = null;
 
     const finish = (result) => {
       if (settled) return;
@@ -113,6 +116,8 @@ export async function runCommand(command, args, {
       if (timer) clearTimeout(timer);
       if (forceTimer) clearTimeout(forceTimer);
       if (settleTimer) clearTimeout(settleTimer);
+      if (onProcessExit) process.removeListener("exit", onProcessExit);
+      forgetTrackedProcess();
       resolve(result);
     };
 
@@ -125,6 +130,12 @@ export async function runCommand(command, args, {
         detached: process.platform !== "win32",
       });
       if (process.platform !== "win32") processGroupId = child.pid || null;
+      forgetTrackedProcess = trackSpawnedProcess(child, spawnSpec.command, {
+        label: "scip:dependency-install",
+        cwd,
+      });
+      onProcessExit = () => terminateScipCommand(child, { processGroupId });
+      process.once("exit", onProcessExit);
     } catch (err) {
       finish({ ok: false, message: err?.message || String(err), status: null, signal: null });
       return;

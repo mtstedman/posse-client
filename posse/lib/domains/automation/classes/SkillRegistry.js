@@ -66,9 +66,17 @@ export class SkillRegistry {
       if (capability.id.startsWith("script:")) {
         const issued = this.store.get("entries", capability.id);
         demand(issued?.kind === "script" && issued.enabled && this.service.entryAvailable(issued), `Issued tool ${capability.id.slice(7)} must have a passing test for its current version`, "capability_unavailable");
+        demand(definition.contract.effect !== "read_only" || issued.effect === "read_only",
+          `Read-only skill cannot unlock write tool ${capability.id}`, "forbidden");
         continue;
       }
-      demand(AUTOMATION_BUILTINS[capability.id] || this.service.connectors?.has(capability.id), `Capability ${capability.id} has no installed adapter`, "capability_unavailable");
+      const builtin = AUTOMATION_BUILTINS[capability.id];
+      const connectorAvailable = this.service.connectors?.has(capability.id);
+      demand(builtin || connectorAvailable, `Capability ${capability.id} has no installed adapter`, "capability_unavailable");
+      const connector = connectorAvailable ? this.store.get("entries", capability.id) : null;
+      demand(definition.contract.effect !== "read_only"
+        || (builtin ? builtin.operation !== "write" : connector?.effect === "read_only"),
+      `Read-only skill cannot unlock write tool ${capability.id}`, "forbidden");
     }
     if (definition.runtime.mode === "bounded-agent") demand(this.service.agent, "Agent provider unavailable", "capability_unavailable");
   }

@@ -2,6 +2,8 @@
 export const ATLAS_REQUEST_OBSERVATION_TYPE = "system.atlas_request";
 
 export const RESPONSE_TRANSFORM_OBSERVATION_TYPE = "system.response_transform";
+export const PROVIDER_TOOL_REFERENCE_UNRESOLVED_OBSERVATION_TYPE = "provider.tool_reference_unresolved";
+export const RESEARCH_CHILD_ENVELOPE_NORMALIZED_OBSERVATION_TYPE = "handoff.research_child_envelope_normalized";
 
 // A frozen baseline that fails after passing for an earlier job of the same
 // work item, attributed to the jobs whose commits landed in between.

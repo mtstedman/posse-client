@@ -94,7 +94,8 @@ export function validateDefinition(definition) {
     resources.add(resource.id);
   }
   const granted = new Set();
-  demand(Array.isArray(definition.capabilities), "Capabilities must be an array (empty is allowed)");
+  demand(Array.isArray(definition.capabilities) && (definition.runtime?.mode === "instructions" || definition.capabilities.length > 0),
+    "Capabilities required for executable skills");
   for (const cap of definition.capabilities) {
     object(cap, ["kind", "id", "output_schema"], ["kind", "id"]);
     demand(["tool", "child_skill", "native_tool"].includes(cap.kind) && typeof cap.id === "string" && cap.id.length > 0 && !granted.has(cap.id), "Invalid/duplicate capability");
@@ -104,6 +105,8 @@ export function validateDefinition(definition) {
   for (const id of definition.required_capabilities || []) demand(granted.has(id), `Required capability missing: ${id}`);
   object(definition.runtime, ["mode", "recipe"], ["mode"]);
   if (definition.runtime.mode === "instructions") {
+    object(definition.contract, ["input_schema", "output_schema", "limits", "effect", "tests"], ["effect"]);
+    demand(["read_only", "artifact_write"].includes(definition.contract.effect), "Unsupported skill effect");
     demand(typeof definition.instructions === "string" && definition.instructions.trim() && Buffer.byteLength(definition.instructions) <= 128 * 1024, "Skill instructions are required (maximum 128 KiB)");
     demand(!definition.runtime.recipe?.length && !definition.output_roots?.length && !definition.resource_requirements?.length, "Instruction skills use the agent runtime and tool grants");
     return definition;

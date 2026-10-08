@@ -1,6 +1,9 @@
+import { selectPromptToolConditions } from "./prompt-tool-conditions.js";
 import { ProviderToolRenderer } from "../classes/ProviderToolRenderer.js";
 import { ATLAS_READ_GUIDANCE_TOKEN, TOOL_REFS, toolReference } from "../../../catalog/tool-references.js";
 import { ToolCatalog } from "../classes/ToolCatalog.js";
+import { recordObservation } from "../../../domains/observability/functions/observations.js";
+import { PROVIDER_TOOL_REFERENCE_UNRESOLVED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 
 function canonicalToolName(tool = {}) {
   return String(tool?.canonicalName || tool?.name || "").trim();
@@ -68,35 +71,12 @@ export function renderAtlasGuidance(contract = {}, toolRenderer = new ProviderTo
     .some((tool) => String(tool?.suite || "").trim() === "atlas"
       || String(tool?.access || "").trim() === "atlas");
   if (!hasAtlas) return [];
-  const name = (action) => toolRenderer.tryRender(toolReference("atlas", action));
-  const codeWindow = name("code.window");
-  const skeleton = name("code.skeleton");
-  const symbolGet = name("symbol.get");
-  const lens = name("code.lens");
-  const traversal = name("traverse_ref") || name("fetch_ref");
-  const lines = [
-    "Atlas symbol tracing: Choose retrieval by the unresolved fact and the location already known, not by a need to switch tools. Use search or survey to locate unknown targets; use lens for scattered details and callers/structure only for a needed relationship, selecting the relevant relation kinds instead of all kinds.",
-    `Atlas stored-result traversal: Call ${traversal || "the issued stored-result traversal tool"} only with an explicit traversal_ref for omitted content. Omit limit for normal source traversal: limit measures characters per ref, not source lines. Start a fresh producer call for a materially different scope.`,
-  ];
-  const hasCodeWindow = Boolean(codeWindow);
+  const codeWindow = toolRenderer.tryRender(TOOL_REFS.atlas.codeWindow);
   const policy = contract?.atlasCodeWindowPolicy;
-  // Describe what each read returns, not when to call it: prescriptive routing
-  // invites checklist tool use. The earlier line routed every known read to
-  // code.window and discouraged mapping; 37% of HARD-40 file reads reopened a
-  // file already read, mostly for names the previous window had revealed.
-  if (hasCodeWindow) {
-    const reads = [];
-    if (skeleton) {
-      reads.push(`${skeleton} returns a compact list of a file's declarations with symbol handles`);
-    }
-    if (symbolGet) {
-      reads.push(`${symbolGet} returns complete bodies of named declarations, several in one file through file+symbols or independent ones through items`);
-    }
-    reads.push(`${codeWindow} returns a source region around named declarations including the same-file control flow between them; granularity symbol covers the named declarations' regions, and fileWindow requests a broader anchored source region, subject to the issued limits`);
-    if (lens) reads.push(`${lens} returns the locations of an identifier's uses with their enclosing symbols`);
-    lines[0] += ` Atlas reads: ${reads.join("; ")}. None of these requires a prior symbol_id lookup.`;
-  }
-  if (hasCodeWindow && policy) {
+  // Tool purpose and parameter semantics belong to the issued schemas. Only
+  // per-run limits, which cannot live in a stable description, remain here.
+  const lines = [];
+  if (codeWindow && policy) {
     lines.push(
       `Atlas code window limit: ${codeWindow} is capped at ${policy.maxWindowTokens} tokens and ${policy.maxWindowLines} lines per call for this run. Omit max_tokens to use that configured maximum; a smaller value narrows the result and a larger value is clamped.`,
     );
@@ -118,15 +98,54 @@ export function renderToolBatchingGuidance(contract = {}, toolRenderer) {
 // final provider surface is known. Never guess an unissued callable name.
 export function renderProviderPromptContracts(prompt, contract = {}) {
   const renderer = new ProviderToolRenderer({ providerName: contract.provider, issuedSurface: contract });
-  return String(prompt || "")
-    .replaceAll(ATLAS_READ_GUIDANCE_TOKEN, renderAtlasGuidance(contract, renderer)
-      .filter((line) => !line.startsWith("Atlas stored-result traversal:"))
-      .join("\n"))
-    .replace(/\{\{tool:(tools|atlas)\.([a-zA-Z0-9_.]+)\}\}/g, (_token, suite, action) => {
-      // Older Remote authority may issue only the compatibility traversal.
-      if (suite === "atlas" && action === "traverse_ref") {
-        return renderer.tryRender(TOOL_REFS.atlas.traverseRef) || renderer.render(TOOL_REFS.atlas.fetchRef);
-      }
-      return renderer.render(toolReference(suite, action));
+  const observed = new Set();
+  const lookup = (reference) => renderer.tryRender(reference)
+    || (reference.suite === "atlas" && reference.canonicalName === "traverse_ref"
+      ? renderer.tryRender(TOOL_REFS.atlas.fetchRef) : null);
+  const observe = (reference) => {
+    const key = `${reference.suite}.${reference.canonicalName}`;
+    if (observed.has(key)) return;
+    observed.add(key);
+    recordObservation({
+      observation_type: PROVIDER_TOOL_REFERENCE_UNRESOLVED_OBSERVATION_TYPE,
+      summary: `Provider prompt tool reference unresolved: ${key}`,
+      detail: { provider: renderer.providerName, suite: reference.suite, tool: reference.canonicalName },
     });
+  };
+  const selected = selectPromptToolConditions(String(prompt || ""), {
+    hasTool: (key) => {
+      const separator = key.indexOf(".");
+      const reference = toolReference(key.slice(0, separator), key.slice(separator + 1));
+      if (lookup(reference)) return true;
+      observe(reference);
+      return false;
+    },
+    hasSuite: (suite) => renderer.issuedTools.some((tool) => (tool.suite || (tool.access === "atlas" ? "atlas" : "tools")) === suite && renderer.tryRenderIssued(tool)),
+  });
+  // Older Remote versions can still send unguarded tokens. Omit their
+  // dependent guidance after selecting guarded branches so call-time surface
+  // narrowing never fails prompt assembly or names an absent tool.
+  const missing = new Set();
+  for (const match of selected.matchAll(/\{\{tool:(tools|atlas)\.([a-zA-Z0-9_.]+)\}\}/g)) {
+    const reference = toolReference(match[1], match[2]);
+    if (lookup(reference)) continue;
+    observe(reference);
+    missing.add(match[0]);
+  }
+  const withoutMissingGuidance = selected.split(/(?=^=== CONTRACT:)/m).map(block => {
+    if (block.startsWith("=== CONTRACT:") && [...missing].some(token => block.includes(token))) return "";
+    return block.split("\n").filter(line => ![...missing].some(token => line.includes(token))).join("\n");
+  }).join("").replace(/\n{3,}/g, "\n\n");
+  const renderedPrompt = withoutMissingGuidance
+    .replaceAll(ATLAS_READ_GUIDANCE_TOKEN, renderAtlasGuidance(contract, renderer).join("\n"))
+    .replace(/\{\{tool:(tools|atlas)\.([a-zA-Z0-9_.]+)\}\}/g, (_token, suite, action) => {
+      const reference = toolReference(suite, action);
+      return lookup(reference) || "";
+    });
+  const acknowledgement = renderer.tryRender(TOOL_REFS.tools.ackOperatorFeedback);
+  if (!acknowledgement || String(prompt || "").includes(ATLAS_READ_GUIDANCE_TOKEN)
+    || selected.includes("{{tool:tools.ack_operator_feedback}}")
+    || renderedPrompt.includes(acknowledgement)) return renderedPrompt;
+  return [renderedPrompt.trim(), `Operator feedback acknowledgement tool: ${acknowledgement}. Acknowledge pending operator feedback before continuing.`]
+    .filter(Boolean).join("\n\n");
 }

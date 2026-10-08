@@ -277,11 +277,15 @@ export async function generateProjectMapAsync(projectDir, { gitExecAsyncFn = nul
 }
 
 export function getCachedProjectMap(projectDir) {
-  return readCache(projectDir);
+  const cached = readCache(projectDir);
+  return cached?.head_sha == null && cached && !cacheMatchesProject(cached, null)
+    ? ensureProjectMap(projectDir) : cached;
 }
 
 export async function getCachedProjectMapAsync(projectDir) {
-  return await readCacheAsync(projectDir);
+  const cached = await readCacheAsync(projectDir);
+  return cached?.head_sha == null && cached && !cacheMatchesProject(cached, null)
+    ? ensureProjectMapAsync(projectDir) : cached;
 }
 
 function cacheMatchesProject(cached, currentHead) {

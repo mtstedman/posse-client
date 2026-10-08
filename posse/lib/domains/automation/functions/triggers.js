@@ -56,6 +56,8 @@ function nextCronOccurrence(trigger, afterMs, lastLocalKey) {
       // A repeated hour can contain several scheduled minutes. Comparing only
       // the previous firing misses the second pass through an earlier minute.
       // Inspect the clock transition itself so this also works after restart.
+      // A schedule created after the first pass of that wall minute waits for
+      // the next day's occurrence when repeat is "once".
       if (trigger.dst.repeat === "once" && hasEarlierWallInstant(fmt, current, parts, localKey)) {
         previousParts = parts;
         continue;

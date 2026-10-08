@@ -193,7 +193,7 @@ function actionablePorcelainPaths(repoDir) {
   const paths = [];
   for (let i = 0; i < fields.length; i++) {
     const record = fields[i];
-    if (record.length < 4 || record[2] !== " " || !/^[ MADRCU?!]{2}$/.test(record.slice(0, 2))) {
+    if (record.length < 4 || record[2] !== " " || !/^[ MADRCTU?!]{2}$/.test(record.slice(0, 2))) {
       throw new Error("working tree status could not be parsed safely");
     }
     paths.push(record.slice(3));
@@ -231,7 +231,17 @@ function snapshotApplyRollbackState(repoDir) {
 }
 
 function rollbackSnapshotDiffApply(repoDir, state, { createdBranch = null } = {}) {
-  if (state.preexistingTrackedChanges) return false;
+  if (state.preexistingTrackedChanges) {
+    // Preserve the operator's managed edits and any partial patch, but leave
+    // the temporary recovery branch so later work resumes on the original ref.
+    if (createdBranch && state.branch) {
+      try {
+        gitExec(["checkout", "-m", state.branch], repoDir);
+        gitExec(["branch", "-D", createdBranch], repoDir);
+      } catch { /* Preserve partial changes if the merge cannot switch safely. */ }
+    }
+    return false;
+  }
   try { gitExec(["reset", "--hard", state.head], repoDir); } catch { /* best effort */ }
   // The snapshot itself and other managed recovery data may be untracked.
   try {
@@ -452,7 +462,7 @@ export function dropStash(stash, projectDir) {
     }
     const result = gitExec(["stash", "drop", ref], projectDir);
     const droppedHash = /^Dropped \S+ \(([0-9a-fA-F]{40,64})\)$/.exec(result)?.[1];
-    if (droppedHash !== expectedHash) {
+    if (listCurrentStashes(projectDir).some((entry) => entry.objectHash === expectedHash)) {
       if (droppedHash) {
         try {
           gitExec(["stash", "store", "-m", stash?.label || "Recovered Posse stash", droppedHash], projectDir);

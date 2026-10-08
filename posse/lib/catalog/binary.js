@@ -87,6 +87,12 @@ export const ENGAGEMENT_RECOVERY_HINT_METHOD = "engagement.recoveryHint";
 // `posse-remote engagement dispatch --stdio`. It is versioned independently
 // from the pure engagement launch-policy contract.
 export const PROVIDER_DISPATCH_PROTOCOL = "posse.provider-dispatch.v1";
+export const PROVIDER_DISPATCH_AUTH_MODES = Object.freeze(["oauth", "api"]);
+export const CLAUDE_NATIVE_MCP_SERVER = "posse";
+export const CODEX_NATIVE_MCP_SERVERS = Object.freeze(["posse", "posse_serial"]);
+export const CODEX_NATIVE_SERIAL_TOOL_IDS = Object.freeze([
+  "tools.agent_handoff", "tools.sub_agent", "tools.dispatch_agent", "tools.custom_tools", "tools.project_db_query",
+]);
 export const PROVIDER_DISPATCH_COMMAND = "engagement.dispatch";
 export const PROVIDER_DISPATCH_MAX_START_BYTES = 8 * 1024 * 1024;
 export const PROVIDER_DISPATCH_MAX_EVENT_BYTES = 2 * 1024 * 1024;

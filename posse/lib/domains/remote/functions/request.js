@@ -134,11 +134,11 @@ function capabilitiesFromPacket(packet = {}, providerName = null, customToolsAva
       transport: null,
     },
     coordination: {
-      agent_handoff_v1: capabilities.coordination.agent_handoff_v1,
-      agent_handoff_compact_v1: capabilities.coordination.agent_handoff_compact_v1,
-      agent_handoff_compact_v2: capabilities.coordination.agent_handoff_compact_v2,
-      agent_handoff_compact_v3: capabilities.coordination.agent_handoff_compact_v3,
-      sub_agent_v1: capabilities.coordination.sub_agent_v1,
+      agent_handoff_v1: localToolRole && capabilities.coordination.agent_handoff_v1,
+      agent_handoff_compact_v1: localToolRole && capabilities.coordination.agent_handoff_compact_v1,
+      agent_handoff_compact_v2: localToolRole && capabilities.coordination.agent_handoff_compact_v2,
+      agent_handoff_compact_v3: localToolRole && capabilities.coordination.agent_handoff_compact_v3,
+      sub_agent_v1: localToolRole && capabilities.coordination.sub_agent_v1,
     },
   };
 }

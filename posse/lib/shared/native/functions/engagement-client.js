@@ -113,6 +113,7 @@ export function verifyProviderDispatchCapabilitiesSync(provider, opts = {}) {
     || dispatch.protocol !== PROVIDER_DISPATCH_PROTOCOL
     || dispatch.cancellation !== true
     || dispatch.driftAttestation !== true
+    || dispatch.independentToolDeadline !== true
     || dispatch.breakerStoreVersion !== PROVIDER_BREAKER_STORE_VERSION
     || !Array.isArray(dispatch.events)
     || dispatch.events.length !== PROVIDER_DISPATCH_EVENTS.length

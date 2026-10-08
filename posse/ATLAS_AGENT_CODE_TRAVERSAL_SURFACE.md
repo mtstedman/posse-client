@@ -271,13 +271,13 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Use when one file or symbol is known but relevant identifiers, usages, or branches are scattered within it. Returns focused locations and enclosing-symbol context; include all known same-target identifiers in one request.
+Locate identifiers’ uses within a known file or symbol. Returns matching locations and enclosing-symbol context. Submit scattered identifiers together; a file path needs no prior ID lookup.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `contextLines` | `integer` | Optional | min 0; max 8 | Context lines around each match, from 0 through 8. Use an exact-source read for a bounded range. |
+| `contextLines` | `integer` | Optional | min 0; max 8 | Neighboring lines per match, clamped to 8. |
 | `file` | `string` | Conditional | min length 1 | Repository-relative file path fallback when you have a file but not an opaque symbolId. |
-| `identifiersToFind` | `array | string` | Required | min length 1; max length 5000; min items 1; max items 50 | All declared identifier names needed from the selected file or symbol, matched together. String and comment occurrences of those identifier names may also be reported in identifiersFoundInText. |
+| `identifiersToFind` | `array | string` | Required | min length 1; max length 5000; min items 1; max items 50 | Exact identifiers to locate together; results may include string/comment occurrences. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
 
 ### `atlas.code.skeleton`
@@ -294,13 +294,13 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Quick single-file declaration map: one row per top-level declaration and class member, grouped by owner, plus one row per top-level export or re-export statement (no symbolId), with source ranges, compact signatures, and reusable symbolId values for symbol.get. Includes private members by default; excludes bodies, control flow, and local functions. Reports totalSymbols, returnedSymbols, omittedSymbols, and complete. If omittedSymbols is nonzero, raise maxLines/maxTokens. Call symbol.get with the row's symbolId. Rows without a symbolId can be read with an exact-source read using their file and range.
+Map declarations in a known file without bodies or control flow. Returns names, ranges, signatures, symbol handles, and completeness counts. Includes class members and exports, but excludes local functions.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `exportedOnly` | `boolean` | Optional |  | Prefer exported symbols only when possible. |
 | `file` | `string` | Optional | min length 1 | Optional relative file path to inspect. |
-| `identifiersToFind` | `array | string` | Optional | max length 5000; max items 50 | Optional identifier names used to focus the outline, up to 50. |
+| `identifiersToFind` | `array | string` | Optional | max length 5000; max items 50 | Optional exact names to focus the outline. |
 | `maxLines` | `integer` | Optional | min 1; max 5000 | Maximum declaration rows. Default 200; minimum 1, maximum 5000. |
 | `maxTokens` | `integer` | Optional | min 1; max 200000 | Approximate rendered map token budget. Default 4000; minimum 1, maximum 200000. |
 | `surveyGap` | `string` | Optional | min length 3; max length 1000 | Named structural fact absent from the delivered orientation. This justifies bypassing the survey-first redirect; it does not otherwise change skeleton retrieval. |
@@ -320,11 +320,11 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Use when code relationships matter more than bodies. Returns an exact body-free inventory of files, symbols, imports, and selected fan-in and fan-out edges for known paths.
+Inspect known paths without source bodies. Returns files, declarations, imports, and selected relationship edges. Select the needed edgeKinds.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `edgeKinds` | `array<string>` | Optional | max items 6 | Relationships to inventory. Select calls or references for behavioral traversal; defaults to imports. |
+| `edgeKinds` | `array<string>` | Optional | max items 6 | Relationships to include; defaults to imports. |
 | `includeEdges` | `boolean` | Optional |  | Include exact internal/inbound/outbound edge rows. Default true. |
 | `includeSymbols` | `boolean` | Optional |  | Include per-file symbol summaries. Default true. |
 | `maxFiles` | `integer` | Optional | min 1; max 128 | Optional cap on resolved indexed files. Default 64, max 128. |
@@ -344,13 +344,13 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | Yes |
 
-Use when the exact target is unknown or behavior spans files or owners. Returns a ranked multi-file symbol preview and call map; submit known paths together, and traverse its continuation only when omitted survey results are relevant.
+Locate relevant declarations across known paths when the exact target is unclear. Returns a ranked multi-file symbol preview and call map.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `maxFiles` | `integer` | Optional | min 1; max 64 | Optional. Cap on files surveyed. Default 64, minimum 1, maximum 64. |
 | `paths` | `string | array` | Required | min length 1; max items 64 | Repository-relative directory prefix or file path — one string or an array of them, e.g. "src/billing" or ["lib/a.js", "lib/b.js"]. Resolves up to 64 indexed files. |
-| `symbols` | `array | string` | Optional | max length 5000; max items 16 | Optional. Dig terms: restrict the survey to these symbol names' neighborhoods (max 16). |
+| `symbols` | `array | string` | Optional | max length 5000; max items 16 | Optional declaration names to focus the survey. |
 
 ### `atlas.code.window`
 
@@ -366,16 +366,16 @@ Remote roles: `assessor`, `dev`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Use only when exact source is needed for a known symbol or anchored file region. Reuse source evidence already visible in context before calling this tool. Each call must target source outside delivered ranges; a new same-file window must target a named unresolved symbol or branch beyond existing evidence. Context, confidence, and corroboration use the evidence already visible. A known symbolId selects its exact bounded source body. Oversized file-mode results preserve that selection and add a bounded symbol map with explicit inline coverage; symbol follow-ups remain line/token bounded. Covered requests reuse their existing evidence ref; after a complete unchanged file is delivered, later file-anchored windows reuse it even when their identifiers differ.
+Read a coherent source region around known declarations, including intervening control flow. Known names in a file need no prior ID lookup. Use granularity to select declaration regions, blocks, or a broader anchored file window within the issued limits.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `autoFill` | `boolean` | Optional |  | Keep a partially new window contiguous when dedupe would split it into fragments. Default true; false omits all already-visible lines. Preserves the selected window bounds. |
+| `autoFill` | `boolean` | Optional |  | Default true: keep partially new windows contiguous. False omits already-visible lines. |
 | `expectedLines` | `integer | string` | Optional | min 1; max 20000; max length 20 | Desired line count for the requested file-window slice, not the total file length. Symbol and block reads use their definition bounds. |
 | `file` | `string` | Conditional | min length 1 | Existing repository-relative file path already surfaced by Atlas when no symbolId is available. Use a surfaced dependency path. |
-| `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | Region shape: symbol (default) reads the named definition, block its enclosing block, fileWindow a broader anchored file slice. |
-| `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | All known same-file anchors for one bounded file-mode slice, each a non-empty exact name. Declared names resolve here: function, class, method, and variable names written exactly as they are declared. Submit anchored reads with at least one exact name. |
-| `maxTokens` | `integer` | Optional | min 1; max 200000 | Optional inline token cap for this selection. The effective maximum is configured per repository and reported in the runtime contract; larger values are clamped. |
+| `granularity` | `string` | Optional | default "symbol"; values "symbol", "block", "fileWindow" | symbol: named declarations (default); block: enclosing control flow; fileWindow: broader anchored source region. |
+| `identifiersToFind` | `array | string` | Conditional | min length 1; max length 5000; min items 1; max items 50 | Exact declaration names in the selected file; include the names needed together. |
+| `maxTokens` | `integer` | Optional | min 1; max 200000 | Inline token cap, clamped to the repository limit shown in the runtime contract. |
 | `reason` | `string` | Required | max length 20000 | Why exact source is needed for this known symbol or anchored file region. |
 | `symbolId` | `string` | Conditional |  | Exact opaque ATLAS symbol ID from an indexed result. |
 
@@ -545,7 +545,7 @@ Compatibility traversal for unseen stored #ref content. Batch every independentl
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to return from each materialized ref page. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs. |
+| `limit` | `integer` | Optional | min 1; max 60000 | Characters per ref, not source lines. Omit for normal traversal. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs. |
 | `offset` | `integer` | Optional | min 0 | Character offset for paged materialized refs; for search mode, matched-row offset. Default: 0. |
 | `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use attempt-scoped authorization returned with a covered source response. Valid only when ref is one scalar string; arrays require separate calls because the authorization permits exactly one stored ref to be delivered once more. |
 | `ref` | `string | array` | Optional | max length 512; max items 100 | One hash ref alias such as #a3f9, or every independently needed alias as one array batch. |
@@ -757,7 +757,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Full memory retrieval for exact symbol and file anchors. Returns memory bodies grouped by their requested anchors.
+Read memory bodies relevant to known paths, symbols, or domains. Verify their claims against current evidence.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -804,7 +804,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Memory-presence probe for exact symbol and file anchors. Returns which anchors have attached memories while keeping memory identifiers and bodies undisclosed.
+Find memory stubs for known paths, symbols, or domains without retrieving memory bodies.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1151,7 +1151,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-List incoming resolved callers, references, or both for one exact symbol ID as compact file-to-symbol maps with IDs suitable for exact body retrieval.
+Find who calls or references a known symbol. Returns incoming relationships grouped by file with symbol handles. Select the needed relationship with mode.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1174,17 +1174,17 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Read exact symbol bodies with file and symbols (an array of exact names or qualified names sharing that file), a single ID/name, or independent selectors in items. Each symbol receives its own maxTokens allowance (default and maximum 8000); oversized bodies return a bounded first page with a traversal continuation. Errors remain per item.
+Read exact symbol bodies by file+symbols, symbolRef, symbolId, or independent items. Names resolve directly without a prior ID lookup. Oversized bodies return a bounded page and traversal_ref; errors remain per item.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `file` | `string` | Conditional | min length 1; max length 4000 | Shared repository-relative path for symbols, or optional exact path for scalar duplicate-body disambiguation. |
 | `identifiersToFind` | `array | string` | Optional | min length 1; max length 5000; min items 1; max items 50 | Optional exact identifiers whose in-body coverage should be reported. |
 | `items` | `array<any>` | Conditional | min items 1; max items 10 | Independent exact selectors, each with symbolId or symbolRef{name,file?,kind?}. Use items alone as the selector mode. |
-| `maxTokens` | `integer` | Optional | min 1; max 200000 | Optional inline token cap; the repository code-window policy still applies. |
+| `maxTokens` | `integer` | Optional | min 1; max 200000 | Tokens per symbol; default and maximum 8000. |
 | `symbolId` | `string` | Conditional |  | Exact symbol ID returned by Atlas. |
 | `symbolRef` | `object` | Conditional |  | Exact symbol reference used when no symbol ID is needed. |
-| `symbols` | `array<string>` | Conditional | min items 1; max items 10 | Exact names or qualified names in the shared file. Use file+symbols to share one path across the requested symbols. |
+| `symbols` | `array<string>` | Conditional | min items 1; max items 10 | Exact names or qualified names in the shared file. Use file+symbols together. |
 
 ### `atlas.symbol.search`
 
@@ -1200,7 +1200,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Repository discovery when the target or its location is unknown. Returns bounded symbol addresses. exportedFrom names the file that publicly re-exports the symbol when one is indexed. Multiword concepts and code-fragment queries can also return bounded, redacted sourceTextMatches from indexed files after an empty symbol-name lookup. Reuse returned IDs and evidence refs exactly as issued.
+Locate unknown declarations. Returns ranked symbol names, file locations, and handles for focused reads, without implementation bodies.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1223,16 +1223,16 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Stored-result traversal for content not present in the current context. Call only an explicit traversal_ref issued by a tool result; visible evidence_ref values are for citation or handoff and must not be traversed. Batch every independently needed traversal ref. A successful non-empty offset page promotes that same identity to evidence_ref; search pages are explicitly inspect-only and non-citable because their numbered rows are navigation, not source coordinates. A different opaque traversal_ref is returned only when more content remains.
+Read omitted stored content using issued traversal_ref values. Returns visible evidence or inspect-only search matches, plus an opaque continuation when content remains.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to return from each materialized ref page. Default: 8000 outside researcher delivery; compatibility max: 60000. Researcher delivery uses up to 32000 text characters for one ref; multi-ref calls share 32000 with at most 8000 per ref and 24 unique refs. |
-| `offset` | `integer` | Optional | min 0 | Compatibility selector for an initial or legacy traversal. Opaque traversal_ref identities already own their exact offset and ignore pagination mechanics supplied by the agent. |
-| `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use attempt-scoped authorization returned with a covered source response. Valid only when traversal_ref is one scalar string; arrays require separate calls because the authorization applies to exactly one ref. This exceptional recovery does not turn evidence_ref into ordinary traversal. |
+| `limit` | `integer` | Optional | min 1; max 60000 | Characters per ref, not source lines. Omit for normal traversal; response budgets still apply. |
+| `offset` | `integer` | Optional | min 0 | Leave unset: the capability already owns its offset. |
+| `reaccessAuthorization` | `string` | Optional | min length 16; max length 512 | One-use recovery token from a covered-source response. Requires one scalar string traversal_ref. |
 | `search` | `string` | Optional | max length 512 | Optional case-insensitive search within missing stored-ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. |
 | `search_mode` | `string` | Optional | values "auto", "literal", "regex" | Search interpretation. Default: auto. |
-| `traversal_ref` | `string | array` | Required | max length 512; max items 100 | One explicitly issued traversal ref such as #a3f9, or every independently needed traversal ref as one array batch. |
+| `traversal_ref` | `string | array` | Required | max length 512; max items 100 | One issued opaque capability or independently needed capabilities together. Copy exactly. |
 
 ### `tools.validate_artifact_output`
 

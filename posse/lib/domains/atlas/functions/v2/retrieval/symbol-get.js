@@ -340,7 +340,8 @@ async function readSymbolGet({
       ? errorEnvelope({action: "symbol.get", versionId, code: "invalid_params", message: "Invalid symbol.get batch item"})
       : readSymbolGet({view, versionId, params: item, readFile, repoRoot, ledger, repoId, config,
         hashRefContext, readSymbolBody, storeSourceTraversalRef, context}).catch(error => errorEnvelope({
-          action: "symbol.get", versionId, code: "source_unavailable",
+          action: "symbol.get", versionId,
+          code: error?.code === "source_unavailable" ? "source_unavailable" : "internal_error",
           message: String(error?.message || "Symbol source unavailable"),
         }))));
     return {ok: true, action: "symbol.get", versionId, data: {items, ...plan.overflow}};

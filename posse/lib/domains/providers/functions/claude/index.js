@@ -400,7 +400,7 @@ export async function callProvider(promptText, {
 
     const tierConfig = getModelTierConfig(modelTier);
     const modelToUse = selectExecutionModel({ jobModelName: modelName, globalModelOverride: getModelOverride(), tierModel: tierConfig.model });
-    if (modelToUse) {
+    if (modelToUse && !nativeDispatchEnabled) {
       args.push("--model", modelToUse);
     }
 
@@ -408,22 +408,23 @@ export async function callProvider(promptText, {
     const turns = maxTurns || getMaxTurns(role, modelTier, complexity, deepthink, filesToModifyCount);
     const outputTokenLimit = normalizeMaxOutputTokens(maxOutputTokens)
       || getMaxOutputTokensForProvider("claude", { role });
-    if (turns) {
+    if (turns && !nativeDispatchEnabled) {
       args.push("--max-turns", String(turns));
     }
-    if (priorSessionHandle) {
+    if (priorSessionHandle && !nativeDispatchEnabled) {
       args.push("--resume", String(priorSessionHandle));
     }
 
     // Reasoning effort is a CLI session setting on every route, native
     // controls included, as Codex's model_reasoning_effort is.
     const cliEffort = String(reasoningEffort || "").trim().toLowerCase();
-    if (CLAUDE_CLI_EFFORT_LEVELS.has(cliEffort)) {
+    if (!nativeDispatchEnabled && CLAUDE_CLI_EFFORT_LEVELS.has(cliEffort)) {
       args.push("--effort", cliEffort);
     }
 
     // Runtime agents must not load user/project settings. The per-job loader
     // cwd is empty by construction, so local is the only permitted source.
+    if (!nativeDispatchEnabled) {
     args.push("--setting-sources", "local");
     args.push("--disable-slash-commands");
     args.push("--strict-mcp-config");
@@ -436,6 +437,7 @@ export async function callProvider(promptText, {
       args.push("--no-session-persistence");
     }
 
+    }
     const providerPaths = normalizeProviderPaths({ cwd, projectDir });
     const mcpWorkspaceCwd = mcpCwd ? path.resolve(mcpCwd) : providerPaths.cwd;
     const spawnCwd = loaderCwd ? path.resolve(loaderCwd) : providerPaths.cwd;
@@ -464,8 +466,11 @@ export async function callProvider(promptText, {
       atlasPrefetchStatus,
       atlasAttachment,
     });
-    const disableSystemToolsResolved = typeof disableSystemTools === "boolean"
-      ? disableSystemTools : resolveDisableSystemTools();
+    if (nativeDispatchEnabled && (disableSystemTools === false || captureNativeSubagents)) {
+      throw new Error("Native Claude requires issued MCP tools only");
+    }
+    const disableSystemToolsResolved = nativeDispatchEnabled || (typeof disableSystemTools === "boolean"
+      ? disableSystemTools : resolveDisableSystemTools());
     const deterministicReadMcp = await buildClaudeDeterministicReadMcpConfigPayloadAsync(role, mcpWorkspaceCwd, {
       scopedFiles,
       createFiles,
@@ -491,6 +496,7 @@ export async function callProvider(promptText, {
       remoteToolSurface: _remoteToolSurface,
       mcpGate,
       disableAgentTools,
+      nativeDispatch: nativeDispatchEnabled,
     });
     if (deterministicReadMcp.serverConfig?.ownerSession) {
       let released = false;
@@ -526,6 +532,7 @@ export async function callProvider(promptText, {
     const promptAtlasAttachment = atlasReadyForMcp && remoteAtlasToolNames.length > 0
       ? { ...atlasAttachment, tools: remoteAtlasToolNames, surfaceToolNames: buildSurfaceNameMap(atlasContractTools) }
       : { ...atlasAttachment, active: false, tools: [] };
+
     let executionContract = buildExecutionContract({
       provider: "claude",
       role,
@@ -574,7 +581,9 @@ export async function callProvider(promptText, {
 
     // Permission route — single, platform-uniform path (never
     // --dangerously-skip-permissions; see buildClaudeToolPermissionArgs).
-    const { cliToolConfig, permissionArgs } = await reconcileLaunchPolicy({
+    let cliToolConfig = null;
+    if (!nativeDispatchEnabled) {
+    const launchPolicy = await reconcileLaunchPolicy({
       provider: "claude",
       role,
       request: () => ({ ...buildClaudeLaunchInput(executionContract, cliToolOptions), mcpServerNames }),
@@ -587,7 +596,8 @@ export async function callProvider(promptText, {
       },
       nativeValue: claudeLaunchPolicyFromPlan,
     });
-    const { toolsArg, disallowedToolsArg, allowedToolsArg } = permissionArgs;
+    cliToolConfig = launchPolicy.cliToolConfig;
+    const { toolsArg, disallowedToolsArg, allowedToolsArg } = launchPolicy.permissionArgs;
     if (toolsArg != null) {
       args.push("--tools", toolsArg);
     }
@@ -638,7 +648,9 @@ export async function callProvider(promptText, {
       throw setupErr;
     }
 
-    if (remoteSystemPromptText) {
+    }
+
+    if (remoteSystemPromptText && !nativeDispatchEnabled) {
       try {
         const rolePromptDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-claude-role-"));
         const rolePromptPath = path.join(rolePromptDir, "remote-system.md");
@@ -652,6 +664,7 @@ export async function callProvider(promptText, {
         throw setupErr;
       }
     }
+
     // ── Execution contract ──────────────────────────────────────────────
     // Remote owns normal provider-independent directives; native controls
     // bypass Remote and receive only this fixed read-only contract.
@@ -671,7 +684,7 @@ export async function callProvider(promptText, {
     const stablePromptText = omitSessionPreamble
       ? ""
       : [contractBlock, stableContext].filter(Boolean).join("\n\n");
-    if (stablePromptText.trim()) {
+    if (stablePromptText.trim() && !nativeDispatchEnabled) {
       try {
         const stablePromptDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-claude-system-"));
         const stablePromptPath = path.join(stablePromptDir, "execution-context.md");
@@ -685,7 +698,8 @@ export async function callProvider(promptText, {
         throw setupErr;
       }
     }
-    let systemPromptInline = null;
+    let systemPromptInline = nativeDispatchEnabled ? [renderProviderPromptContracts(remoteSystemPromptText, executionContract), stablePromptText].filter(Boolean).join("\n\n") : null;
+    if (!nativeDispatchEnabled) {
     try {
       // Normal Posse calls receive provider-independent isolation and
       // discipline from the Remote rule catalog. Native controls deliberately
@@ -711,6 +725,7 @@ export async function callProvider(promptText, {
     } catch (setupErr) {
       cleanupSetupFiles();
       throw setupErr;
+    }
     }
     // Effort travels only as the --effort CLI flag; the prompt carries no
     // thinking keywords, so native controls and Posse calls run at the same
@@ -741,9 +756,7 @@ export async function callProvider(promptText, {
         error.code = "CLAUDE_NATIVE_DISPATCH_UNSUPPORTED_MODE";
         throw error;
       }
-      const issuedToolIds = [...(deterministicReadMcp.contractTools || []), ...atlasContractTools]
-        .map((descriptor) => String(descriptor?.mcpName || ""))
-        .filter(Boolean);
+      const issuedToolIds = deterministicReadMcp.issuedToolIds || [];
       const stallRoleMultiplier = { researcher: 2, planner: 2 };
       const stallTimeoutMs = resolveProviderStallTimeout(stallTimeout)
         * (stallRoleMultiplier[role] || 1)
@@ -766,7 +779,7 @@ export async function callProvider(promptText, {
         projectDbCapability,
         issuedToolIds,
         resolvedSkillIds: skillsAttached,
-        cwd: providerPaths.cwd,
+        cwd: mcpWorkspaceCwd,
         readRoots,
         createRoots,
         scopedFiles,
@@ -778,7 +791,7 @@ export async function callProvider(promptText, {
         priorSessionHandle,
         recyclingMode,
       });
-      cleanupSetupFiles();
+      try {
       const nativeResult = await runClaudeNativeDispatch(request, {
         abortSignal,
         mcpGate,
@@ -792,6 +805,9 @@ export async function callProvider(promptText, {
       });
       nativeResult.stats.atlasMethod = atlasMethodForStats;
       resolve(nativeResult);
+      } finally {
+        cleanupSetupFiles();
+      }
       return;
     }
 

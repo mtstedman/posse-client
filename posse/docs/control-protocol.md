@@ -1014,6 +1014,14 @@ the WS — getting this wrong means clients and bridges never connect.
    relay. Pairing another device later = run `posse serve --pair` again and
    repeat the ceremony.
 
+5. **Host cancellation is terminal.** If the CLI or its host UI abandons an
+   unconsumed ceremony, it calls
+   `POST /v1/bridge-pair/cancel { qr_token }` with the same authenticated
+   `bridge:pair` bearer used for start and confirm. The relay verifies that
+   account owns the session and changes it to `canceled`. Phone status polls
+   then return `status: "canceled"`; cancellation is idempotent and cannot
+   cancel an already-consumed pair.
+
 **Recoverable failure modes** (relay returns one of these `error.code`s on
 the scan or confirm step):
 
@@ -1024,6 +1032,7 @@ qr_token_already_used      another phone won the scan race
 confirmation_pending       confirm called before scan
 confirmation_mismatch      4-char code didn't match what the phone committed
 already_consumed           pair already finished on a previous confirm
+pairing_canceled           pair was canceled by the host
 ```
 
 The phone treats `qr_token_*` codes as a cue to bounce the user back to

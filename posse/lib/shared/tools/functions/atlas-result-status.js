@@ -39,7 +39,7 @@ export async function observeAtlasExecution(context, execute, recover) {
     }
   }
   const response = await recover(executed);
-  if (context && before.count > 0 && atlasResultFailures(response?.result).count === 0) {
+  if (context && response?.result !== executed?.result && atlasResultFailures(response?.result).count === 0) {
     context.recoveredExecutions++;
   }
   return response;

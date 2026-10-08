@@ -9,20 +9,7 @@ const RESEARCHER_SCHEMA_DIET_DESCRIPTIONS = Object.freeze({
   "tools.git_history": "Inspect bounded repository history for commits, file changes, or blame context.",
   "tools.inspect_file": "Inspect one file's bounded metadata or content without mutation.",
   "tools.hash_file": "Calculate a deterministic file hash for verification.",
-  "atlas.traverse_ref": "Fetch content for issued traversal_ref values and batch independent refs. Evidence refs are citation-only.",
-  "atlas.symbol.search": "Find ranked symbol addresses by exact or semantic query; use returned IDs or locations for focused reads.",
-  "atlas.symbol.card": "Inspect one known symbol's compact signature and relationships.",
-  "atlas.symbol.callers": "List compact incoming caller or reference symbols for one exact symbol ID, grouped by file.",
-  "atlas.symbol.get": "Read exact bodies with file+symbols (exact names), a single ID/name, or independent items. Shared maxTokens applies per symbol; errors remain per item.",
-  "atlas.symbol.overview": "Inspect a known symbol's bounded relationship overview.",
-  "atlas.code.skeleton": "Inspect a body-free outline for one known file or symbol.",
-  "atlas.code.lens": "Locate all named identifiers within one known file or symbol before an exact source read.",
-  "atlas.code.window": "Read exact source for one known symbol or anchored file region. Reuse visible evidence and include all known same-file identifiers.",
-  "atlas.code.structure": "Inspect body-free files, symbols, imports, and selected relationship edges for known paths.",
-  "atlas.code.survey": "Survey ranked symbols and call relationships across known paths when the exact target is still unclear.",
-  "atlas.memory.surface": "Surface bounded repository memories for known symbols, files, or domains.",
-  "atlas.memory.get": "Retrieve bounded repository memories for known symbols, files, or domains.",
-  "atlas.memory.feedback": "Record whether one surfaced repository memory was useful.",
+
 });
 
 export function applyResearcherSchemaDiet(tool, { preserveDescription = false } = {}) {
@@ -30,12 +17,28 @@ export function applyResearcherSchemaDiet(tool, { preserveDescription = false } 
   const compactDescription = RESEARCHER_SCHEMA_DIET_DESCRIPTIONS[normalizedName];
   const { annotations: _annotations, ...withoutAnnotations } = tool;
   const inputSchema = stripAgentSchemaDescriptions(tool.inputSchema);
-  // Keep selection semantics that constraints alone cannot communicate.
-  // Enum values and validation limits survive the generic projection already.
-  for (const field of ["expectedLines", "granularity", "autoFill"]) {
-    const description = tool.inputSchema?.properties?.[field]?.description;
-    if (description && inputSchema?.properties?.[field]) inputSchema.properties[field].description = description;
-  }
+  // Keep semantic help that JSON types and limits cannot express. The facade
+  // uses snake_case; ordinary surfaces use camelCase. Preserve nested batch
+  // selectors too, without retaining descriptions on every obvious field.
+  const semanticFields = new Set([
+    "identifiers_to_find", "identifiersToFind",
+    "limit", "offset", "max_tokens", "maxTokens", "granularity", "expected_lines", "expectedLines",
+    "auto_fill", "autoFill", "edge_kinds", "edgeKinds", "mode", "kind", "context_lines", "contextLines",
+    "search_mode", "searchMode", "traversal_ref", "reaccess_authorization", "reaccessAuthorization",
+  ]);
+  const restore = (source, target) => {
+    if (!source || !target || typeof source !== "object" || typeof target !== "object") return;
+    for (const [key, value] of Object.entries(source)) {
+      if (key === "properties") {
+        for (const [field, schema] of Object.entries(value || {})) {
+          const projected = target.properties?.[field];
+          if (projected && semanticFields.has(field) && schema?.description) projected.description = schema.description;
+          restore(schema, projected);
+        }
+      } else if (key !== "description") restore(value, target[key]);
+    }
+  };
+  restore(tool.inputSchema, inputSchema);
   return {
     ...withoutAnnotations,
     ...(!preserveDescription && compactDescription ? { description: compactDescription } : {}),

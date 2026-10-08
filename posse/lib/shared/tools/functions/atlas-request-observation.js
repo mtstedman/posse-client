@@ -40,6 +40,7 @@ export async function observeAtlasRequest(args, execute, {
           session_id: args.session?.id || null,
           tool_name: args.toolName,
           duration_ms: Math.max(0, now() - started),
+          expanded_call_scope: "includes_recovery_children",
           expanded_calls: physicalRequest.expandedCalls,
           failed_executions: physicalRequest.failedExecutions,
           recovered_executions: physicalRequest.recoveredExecutions,

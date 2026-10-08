@@ -215,6 +215,17 @@ export class AssessmentHandoffAdapter {
     this.worker = worker;
   }
 
+  async cleanupScopedCheckWorktree(assessmentCwd, job, { expectedHead } = {}) {
+    const worker = this.worker;
+    return snapshotAndResetDirtyWorktreeAsync(assessmentCwd, worker.projectDir, {
+      expectedHead,
+      reason: `assessment-scoped-check-side-effects-wi-${job.work_item_id}-job-${job.id}`,
+      branchName: getWorkItem(job.work_item_id)?.branch_name || null,
+      wiId: job.work_item_id,
+      onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-checks] ${message}${C.reset}`),
+    });
+  }
+
   async runIfNeeded({ job, leaseToken, wtPath = null } = {}) {
     const worker = this.worker;
     const assessOnly = worker.parsePayload(job)._assess_only;
@@ -493,16 +504,7 @@ export class AssessmentHandoffAdapter {
         cwd: assessmentCwd,
         assessmentContext,
         siblingScopeOwners: (paths) => siblingJobScopeOwners(job.id, paths),
-        cleanupWorktree: async () => snapshotAndResetDirtyWorktreeAsync(
-          assessmentCwd,
-          worker.projectDir,
-          {
-            reason: `assessment-scoped-check-side-effects-wi-${job.work_item_id}-job-${job.id}`,
-            branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-            wiId: job.work_item_id,
-            onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-checks] ${message}${C.reset}`),
-          },
-        ),
+        cleanupWorktree: (options) => this.cleanupScopedCheckWorktree(assessmentCwd, job, options),
       });
       if (scopedCheckReceipt) {
         assessmentContext.scoped_check_evidence = scopedCheckReceipt.evidence;

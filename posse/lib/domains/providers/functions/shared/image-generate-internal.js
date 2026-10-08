@@ -128,10 +128,7 @@ async function _recordImageGenerationTelemetry({
   }
 }
 
-// Each image-capable provider owns construction of its OpenAI-shaped client
-// (env vars, baseURL, retry config). Import provider builders lazily so this
-// shared helper can be imported by those same provider modules without a
-// startup cycle.
+// Native dispatch owns provider HTTP. Lazy imports avoid a startup cycle.
 async function _buildImageClient(providerName) {
   const provider = String(providerName || "").trim().toLowerCase();
   const mod = provider === "openai"
@@ -144,92 +141,6 @@ async function _buildImageClient(providerName) {
     throw new Error(`Provider "${providerName}" does not support image generation.`);
   }
   return build();
-}
-
-function _buildOpenAiParams(model, args, ext) {
-  const isGptImage = String(model || "").startsWith("gpt-image");
-  const quality = isGptImage
-    ? ({ hd: "high", standard: "medium", low: "low" }[args.quality] || args.quality || "medium")
-    : (args.quality || "standard");
-  const params = {
-    model,
-    prompt: args.prompt,
-    n: 1,
-    size: args.size || "1024x1024",
-    quality,
-  };
-  if (isGptImage) {
-    const formatMap = { ".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".webp": "webp" };
-    params.output_format = formatMap[ext] || "png";
-  } else {
-    params.response_format = "b64_json";
-  }
-  return { params, quality };
-}
-
-function _buildGrokParams(model, args, ext) {
-  const normalizedModel = normalizeGrokImageModelName(model);
-  const isOpenAiImage = String(normalizedModel).startsWith("gpt-image");
-  const quality = ({ hd: "high", standard: "medium", low: "low" }[args.quality] || args.quality || "medium");
-  if (isOpenAiImage) {
-    const params = {
-      model: normalizedModel,
-      prompt: args.prompt,
-      response_format: "b64_json",
-      n: 1,
-      size: args.size || "1024x1024",
-      quality,
-    };
-    const formatMap = { ".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".webp": "webp" };
-    params.output_format = formatMap[ext] || "png";
-    return { params, quality };
-  }
-  // xAI /v1/images/generations does not accept `quality` or `size` — use
-  // `aspect_ratio` and `resolution` instead.
-  const params = {
-    model: normalizedModel,
-    prompt: args.prompt,
-    n: 1,
-    // xAI's inline base64 responses are large enough to be truncated by the
-    // upstream transport. Request a short-lived URL and download it below.
-    response_format: "url",
-  };
-  const aspect = _sizeToAspectRatio(args.size);
-  if (aspect) params.aspect_ratio = aspect;
-  const resolution = _qualityToResolution(args.quality);
-  if (resolution) params.resolution = resolution;
-  return { params, quality };
-}
-
-function _sizeToAspectRatio(size) {
-  if (!size || typeof size !== "string") return null;
-  const match = size.match(/^(\d+)\s*x\s*(\d+)$/i);
-  if (!match) return null;
-  const w = Number(match[1]);
-  const h = Number(match[2]);
-  if (!w || !h) return null;
-  if (w === h) return "1:1";
-  if (w > h) {
-    const ratio = w / h;
-    if (Math.abs(ratio - 16 / 9) < 0.05) return "16:9";
-    if (Math.abs(ratio - 4 / 3) < 0.05) return "4:3";
-    if (Math.abs(ratio - 3 / 2) < 0.05) return "3:2";
-    return "16:9";
-  }
-  const ratio = h / w;
-  if (Math.abs(ratio - 16 / 9) < 0.05) return "9:16";
-  if (Math.abs(ratio - 4 / 3) < 0.05) return "3:4";
-  if (Math.abs(ratio - 3 / 2) < 0.05) return "2:3";
-  return "9:16";
-}
-
-function _qualityToResolution(quality) {
-  const normalized = String(quality || "").trim().toLowerCase();
-  if (!normalized) return null;
-  if (normalized === "hd" || normalized === "high") return "2k";
-  if (normalized === "standard" || normalized === "medium" || normalized === "low" || normalized === "auto") return "1k";
-  if (normalized === "1k" || normalized === "2k") return normalized;
-  return null;
 }
 
 function _buildImageTimeoutError(timeoutMs) {
@@ -257,7 +168,7 @@ async function _generateImageWithTimeout(client, params, { timeoutMs = DEFAULT_I
   });
 
   try {
-    const requestPromise = client.images.generate(params, { signal: controller.signal });
+    const requestPromise = client.images.generate(params, { signal: controller.signal, timeoutMs: resolvedTimeoutMs });
     return await Promise.race([requestPromise, timeoutPromise]);
   } catch (err) {
     if (timedOut && (err?.name === "AbortError" || err?.code === "ABORT_ERR")) {
@@ -404,6 +315,7 @@ export async function execGenerateImageInternal(args = {}, {
       ext,
       filename,
       outputPath,
+      scopePredicates,
       provider,
       model,
       buildImageClient,
@@ -430,6 +342,7 @@ export async function execGenerateImageInternal(args = {}, {
     ext,
     filename,
     outputPath,
+    scopePredicates,
     provider,
     model,
     buildImageClient,
@@ -444,6 +357,7 @@ async function _executeGenerateImageWithRoute({
   ext,
   filename,
   outputPath,
+  scopePredicates,
   provider,
   model,
   buildImageClient,
@@ -454,9 +368,15 @@ async function _executeGenerateImageWithRoute({
   const startedAt = Date.now();
   try {
     const client = await buildImageClient(provider);
-    const { params, quality } = provider === "grok"
-      ? _buildGrokParams(model, args, ext)
-      : _buildOpenAiParams(model, args, ext);
+    const quality = args.quality;
+    const params = {
+      model: provider === "grok" ? normalizeGrokImageModelName(model) : model,
+      prompt: args.prompt,
+      format: ext === ".jpg" ? "jpeg" : ext.slice(1),
+      size: args.size,
+      quality,
+      cwd: path.dirname(outputPath),
+    };
 
     const response = await _generateImageWithTimeout(client, params, { timeoutMs: imageTimeoutMs });
     if (!Array.isArray(response?.data) || response.data.length === 0) {
@@ -496,6 +416,9 @@ async function _executeGenerateImageWithRoute({
       throw new Error(`Generated image exceeds the ${imageDownloadMaxBytes}-byte limit.`);
     }
 
+    if (!scopePredicates?.canCreate(outputPath)) {
+      throw new Error("Image creation scope was revoked during generation.");
+    }
     _writeImageInRequestedFormat(outputPath, imageBytes, ext);
     const outputBytes = fs.statSync(outputPath).size;
     const sizeKB = (outputBytes / 1024).toFixed(1);

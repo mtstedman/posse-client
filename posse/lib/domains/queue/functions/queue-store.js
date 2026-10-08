@@ -4235,16 +4235,18 @@ export function requeueOrphanedJobs({ force = false, ownerId = null, lockName = 
       changed.push(row);
       affectedWIs.add(work_item_id);
       if (job_type === "atlas_warm") {
-        releaseJobLocksForStatus(id, "failed");
         continue;
       }
       requeuedCount += 1;
       if (status === "awaiting_assessment") markAssessOnly.run(id);
-      _consumePendingHumanGateResume(id, { db });
-      releaseJobLocksForStatus(id, "queued");
     }
-    for (const wiId of affectedWIs) refreshWorkItemStatus(wiId);
   });
+
+  for (const { id, job_type } of changed) {
+    if (job_type !== "atlas_warm") _consumePendingHumanGateResume(id, { db });
+    releaseJobLocksForStatus(id, job_type === "atlas_warm" ? "failed" : "queued");
+  }
+  for (const wiId of affectedWIs) refreshWorkItemStatus(wiId);
 
   for (const { id, status, job_type } of changed) {
     logEvent({

@@ -238,11 +238,11 @@ export class McpGate {
     return publicResult;
   }
 
-  assertAttached({ jobId = null, workItemId = null, agentCallId = null } = {}) {
+  assertAttached({ jobId = null, workItemId = null, attemptId = null, agentCallId = null, cwd = null } = {}) {
     if (this.disposed) throw gateError("POSSE_MCP_GATE_DISPOSED", "MCP gate has been disposed");
     if (!this.binding) throw gateError("POSSE_MCP_GATE_ATTACHMENT_MISSING", "MCP gate has no active Job attachment");
-    for (const [label, expected] of Object.entries({ jobId, workItemId, agentCallId })) {
-      if (expected != null && Number(this.binding[label]) !== Number(expected)) {
+    for (const [label, expected] of Object.entries({ jobId, workItemId, attemptId, agentCallId, cwd })) {
+      if (expected != null && String(this.binding[label]) !== String(expected)) {
         throw gateError(
           "POSSE_MCP_GATE_ATTACHMENT_MISMATCH",
           `MCP gate ${label} does not match the dispatched Agent attachment`,

@@ -993,10 +993,14 @@ export class MutationPolicy {
     // Structural scans see quoted spans as placeholders so a metacharacter that
     // merely lives inside a grep pattern is not mistaken for shell syntax.
     const masked = maskQuoted(cmd);
-    // Input redirection is parsed by the shell, but shellWords only splits on
-    // whitespace. An attached operand such as </outside bypasses path checks.
-    if (/<(?!\()/.test(masked)) {
-      return { ok: false, error: "Error: Input redirection is not allowed in sandboxed bash. Pass a scoped file path to the command instead.", reasonClass: "shell_operator" };
+    // shellWords does not split attached redirection operands. Vet each
+    // redirected file through the same read boundary as positional paths.
+    if (/<<|<(?!\()\s*(?:$|[;|&])/.test(masked)) {
+      return { ok: false, error: "Error: Input redirection needs one scoped file operand.", reasonClass: "shell_operator" };
+    }
+    for (const match of masked.matchAll(/<(?!\()\s*(\S+)/g)) {
+      const blocked = readonlyBashPathReason(this, `cat ${match[1]}`);
+      if (blocked) return { ok: false, error: `Error: Read-only bash path blocked (${blocked}). Use the issued scoped file tools.`, reasonClass: "path" };
     }
     // `$()`, backticks and `$VAR` still expand inside double quotes, so those
     // checks see through single quotes only.

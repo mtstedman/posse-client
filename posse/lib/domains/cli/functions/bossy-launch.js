@@ -1,13 +1,8 @@
-// `posse --bossy` boots the Bossy fleet TUI in the current repository
-// context instead of running a Posse CLI command. Bossy is a user-facing
-// dashboard, not a method binary, so this launcher deliberately avoids the
-// BinaryManager runtime (heartbeat auth, daemon supervision): it only needs a
-// path to an executable and an inherited terminal.
-//
-// Resolution order:
-//   1. BOSSY_BIN            — explicit operator override, must exist
-//   2. verified cache       — versioned artifact downloaded by native pull
-//   3. `bossy` on PATH      — a system install
+// Bossy startup refreshes the server-issued artifact before handing over the
+// terminal. Artifact verification stays with Posse's native manager; no CLI
+// queue, daemon, or worker runtime is started here.
+// BOSSY_BIN remains an explicit override. Offline boots retain the verified
+// cache, then the system install on PATH, as fallbacks.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 
@@ -31,42 +26,69 @@ export function resolveBossyBinary({ env = process.env } = {}) {
   return { target: "bossy" + exeSuffix(), source: "path" };
 }
 
+async function ensureBossyArtifact(name, options) {
+  const { nativeBinaries } = await import("../../../shared/tools/classes/BinaryManager.js");
+  return nativeBinaries.ensureAvailable(name, options);
+}
+
+/** Refresh before spawn so this launch uses the issued version immediately. */
+export async function prepareBossyBinary({
+  env = process.env,
+  ensureAvailable = ensureBossyArtifact,
+  findCached = findVerifiedNativeBinaryArtifact,
+  log = console.error,
+} = {}) {
+  const resolved = resolveBossyBinary({ env });
+  if (resolved.error || resolved.source === "env") return resolved;
+
+  log("[bossy] Checking for updates…");
+  try {
+    const result = await ensureAvailable("bossy", { refresh: true });
+    if (result?.available && result.path) {
+      if (result.current === false) {
+        log("[bossy] Update check unavailable; using the verified cached version.");
+      } else if (result.downloaded) {
+        log(`[bossy] Updated to ${result.version}.`);
+      }
+      return { target: result.path, source: result.current === false ? "cache" : "remote" };
+    }
+  } catch { /* A failed refresh must not strand an offline dashboard. */ }
+
+  try {
+    const tokens = platformTokens();
+    const cached = await findCached({ name: "bossy", os: tokens.os, arch: tokens.arch });
+    if (cached?.binaryPath) {
+      log("[bossy] Update check unavailable; using the verified cached version.");
+      return { target: cached.binaryPath, source: "cache" };
+    }
+  } catch { /* PATH fallback remains valid. */ }
+  log("[bossy] Update check unavailable; trying the system installation.");
+  return resolved;
+}
+
 /**
  * Launch Bossy on the caller's terminal and resolve with its exit code.
- * Every CLI argument except the `--bossy` trigger is forwarded, so
- * `posse --bossy --sample` works the way `bossy --sample` does.
- *
- * @param {{ argv?: string[], env?: NodeJS.ProcessEnv }} [opts]
- * @returns {Promise<number>}
+ * Both `posse bossy` and `posse --bossy` forward the remaining arguments.
  */
-export async function launchBossy({ argv = process.argv.slice(2), env = process.env } = {}) {
-  let resolved = resolveBossyBinary({ env });
-  // An explicit override always wins. Otherwise prefer the newest artifact
-  // Bossy's previous boot downloaded and checksum-verified. The first update
-  // cannot replace the process currently executing, so activation is cleanly
-  // deferred until this next launch.
-  if (resolved.source !== "env") {
-    try {
-      const tokens = platformTokens();
-      const cached = await findVerifiedNativeBinaryArtifact({
-        name: "bossy", os: tokens.os, arch: tokens.arch,
-      });
-      if (cached?.binaryPath) resolved = { target: cached.binaryPath, source: "cache" };
-    } catch { /* PATH fallback remains valid */ }
-  }
+export async function launchBossy({
+  argv = process.argv.slice(2), env = process.env,
+  prepare = prepareBossyBinary, spawnProcess = spawn, log = console.error,
+} = {}) {
+  const resolved = await prepare({ env, log });
   if (resolved.error) {
-    console.error(`\nCannot launch Bossy: ${resolved.error}\n`);
+    log(`\nCannot launch Bossy: ${resolved.error}\n`);
     return 1;
   }
-  const args = argv.filter((arg) => arg !== "--bossy");
+  const forwarded = argv[0] === "bossy" ? argv.slice(1) : argv;
+  const args = forwarded.filter((arg) => arg !== "--bossy");
   return new Promise((resolve) => {
-    const child = spawn(resolved.target, args, { stdio: "inherit", env });
+    const child = spawnProcess(resolved.target, args, { stdio: "inherit", env });
     child.on("error", (err) => {
       if (err && err.code === "ENOENT") {
-        console.error("\nCannot launch Bossy: no `bossy` executable was found.");
-        console.error("Run `npm run pull:native`, install it on PATH, or set BOSSY_BIN to the binary.\n");
+        log("\nCannot launch Bossy: no `bossy` executable was found.");
+        log("Run `npm run pull:native -- bossy`, install it on PATH, or set BOSSY_BIN to the binary.\n");
       } else {
-        console.error(`\nCannot launch Bossy: ${err?.message || err}\n`);
+        log(`\nCannot launch Bossy: ${err?.message || err}\n`);
       }
       resolve(1);
     });

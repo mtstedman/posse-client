@@ -1,3 +1,5 @@
+import { CLAUDE_NATIVE_MCP_SERVER } from "../../../../catalog/binary.js";
+import { nativeIssuedToolIds } from "../shared/native-tool-catalog.js";
 import { buildMcpSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
 import { mcpClientToolDeadlineMs } from "../../../../catalog/mcp.js";
 import { readPlannerDispatchPolicy } from "../../../planning/functions/planner-dispatch-policy.js";
@@ -12,6 +14,7 @@ import {
   buildDeterministicReadMcpServerConfig,
   buildDeterministicReadMcpServerConfigAsync,
   roleUsesDeterministicReadMcp,
+  releaseDeterministicMcpServerSession,
 } from "../../../integrations/functions/deterministic-mcp.js";
 
 function mcpServerEnvWithProviderReferences(server = {}) {
@@ -198,7 +201,12 @@ export async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cw
   remoteMcpOAuthToken = "",
   mcpGate = null,
   disableAgentTools = false,
+  nativeDispatch = false,
 } = {}) {
+  if (nativeDispatch && disableAgentTools) {
+    if (allowWrite) throw new Error("A tool-free native turn cannot have write access");
+    return { active: false, tools: [], issuedToolIds: [], atlasTools: [], contractTools: [], payload: null };
+  }
   const enabled = roleUsesDeterministicReadMcp(role);
   if (!enabled) {
     return { active: false, tools: [], payload: null };
@@ -230,16 +238,26 @@ export async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cw
     remoteMcpOAuthToken,
     mcpGate,
     disableAgentTools,
+    isolateProviderHome: !nativeDispatch,
   });
   if (!server?.ready) {
+    if (nativeDispatch) throw new Error("Native Claude requires a ready MCP gateway");
     return inactiveDeterministicMcpPayload(role, allowWrite, server);
   }
-  const serverName = server.name || POSSE_MCP_GATEWAY_SERVER_NAME;
-  const toolNames = Array.isArray(server.tools) ? server.tools : [];
+  let issuedToolIds = null;
+  try {
+    if (nativeDispatch) issuedToolIds = await nativeIssuedToolIds(mcpGate);
+  } catch (error) {
+    releaseDeterministicMcpServerSession(server, { reason: "provider_setup_failed" });
+    throw error;
+  }
+  const serverName = nativeDispatch ? CLAUDE_NATIVE_MCP_SERVER : server.name || POSSE_MCP_GATEWAY_SERVER_NAME;
+  const toolNames = issuedToolIds ? issuedToolIds.filter(name => name.startsWith("tools.")) : Array.isArray(server.tools) ? server.tools : [];
   return {
     active: true,
     tools: toolNames,
-    atlasTools: Array.isArray(server.atlasTools) ? server.atlasTools : [],
+    atlasTools: issuedToolIds ? issuedToolIds.filter(name => name.startsWith("atlas.")) : Array.isArray(server.atlasTools) ? server.atlasTools : [],
+    issuedToolIds,
     serverName,
     serverConfig: server,
     ownerSession: server.ownerSession || null,
@@ -248,7 +266,7 @@ export async function buildClaudeDeterministicReadMcpConfigPayloadAsync(role, cw
       providerName: "claude",
       serverName,
     }),
-    payload: {
+    payload: nativeDispatch ? null : {
       mcpServers: {
         [serverName]: {
           command: server.command,

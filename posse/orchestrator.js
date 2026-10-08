@@ -104,10 +104,10 @@ for (const stream of [process.stdout, process.stderr]) {
 process.on("uncaughtException", (err) => recordFatalCrash("uncaughtException", err));
 process.on("unhandledRejection", (reason) => recordFatalCrash("unhandledRejection", reason));
 
-// `posse --bossy` hands the terminal straight to the Bossy fleet TUI without
+// `posse bossy` / `posse --bossy` refreshes and launches the Bossy TUI without
 // booting the CLI runtime (db, daemons, telemetry) underneath it — Bossy is
 // its own operator surface and reads Posse's persisted state itself.
-if (process.argv.includes("--bossy")) {
+if (process.argv[2] === "bossy" || process.argv.includes("--bossy")) {
   const { launchBossy } = await import("./lib/domains/cli/functions/bossy-launch.js");
   process.exit(await launchBossy());
 }

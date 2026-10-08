@@ -6,6 +6,7 @@
     "moduleResolution": "NodeNext",
     "noEmit": true,
     "skipLibCheck": true,
+    "types": ["node"],
     "strict": false,
     "target": "ES2022"
   },

@@ -35,6 +35,7 @@ export async function callAgentProvider(providerName, prompt, options = {}) {
       allowToolBatching: options.allowToolBatching === true,
       maxOutputTokens: options.maxOutputTokens || 2048,
       signal: options.signal,
+      cwd: options.cwd || process.cwd(),
     });
   }
   return await provider.callProvider(prompt, {
@@ -52,7 +53,6 @@ export async function callAgentProvider(providerName, prompt, options = {}) {
     disableAtlas: true,
     disableSystemTools: true,
     disableAgentTools: true,
-    nativeColdBoot: true,
-    signal: options.signal,
+    abortSignal: options.signal,
   });
 }

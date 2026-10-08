@@ -44,6 +44,8 @@ import { createCodexRolloutUsageTailer, reconcileCodexFreshSessionUsage, recover
 import { recoverCodexNativeSubagentTelemetry } from "./native-subagent-telemetry.js";
 import { prepareCodexNativeBatchingCatalog } from "./native-batching-catalog.js";
 import { _toTomlLiteral } from "./config-format.js";
+import { providerDispatchSupportedSync } from "../../../../shared/native/functions/engagement-client.js";
+import { buildNativeDispatchRequest, runNativeDispatch } from "../shared/native-dispatch.js";
 
 export function buildCodexRuntimeContractBlock(executionContract, {
   skipRolePrompt = false,
@@ -120,6 +122,8 @@ export async function callProvider(promptText, {
   deepthink = false,
   onLine = null,
   onAgentCommentary = null,
+  onProviderToolUse = null,
+  onProviderToolResult = null,
   cwd = null,          // real repo / worktree — codex sandbox root + MCP workspace
   loaderCwd = null,    // optional empty dir to spawn codex in (suppresses AGENTS.md parent-walk). Falls back to cwd.
   mcpCwd = null,       // optional override for MCP workspace root. Falls back to cwd.
@@ -152,11 +156,19 @@ export async function callProvider(promptText, {
   nativeBatchingCatalog = undefined,
   captureNativeSubagents = false,
 } = {}) {
-  const readiness = await isReadyAsync();
-  if (!readiness.ready) {
-    throw new Error(`Codex provider is not ready: ${readiness.reason}`);
+  const nativeDispatchEnabled = providerDispatchSupportedSync("codex");
+  if (nativeDispatchEnabled) {
+    if ((sandboxModeOverride != null && sandboxModeOverride !== "read-only")
+      || disableSystemToolsOverride === false || captureNativeSubagents) {
+      throw new Error("Native Codex requires its read-only sandbox and disabled native tools");
+    }
+  } else {
+    const readiness = await isReadyAsync();
+    if (!readiness.ready) {
+      throw new Error(`Codex provider is not ready: ${readiness.reason}`);
+    }
   }
-  const { cmd: codexCmd, args: codexArgs } = getCodexLaunchState();
+  const { cmd: codexCmd, args: codexArgs } = nativeDispatchEnabled ? {} : getCodexLaunchState();
   const providerPathsForAtlas = normalizeProviderPaths({ cwd, projectDir });
   const mcpWorkspaceCwdForAtlas = mcpCwd ? path.resolve(mcpCwd) : providerPathsForAtlas.cwd;
   const assignmentUnitForAtlas = resolveAtlasAssignmentUnit({
@@ -211,15 +223,16 @@ export async function callProvider(promptText, {
       return;
     }
     const atlasToolGateEnabled = resolveAtlasToolGateEnabled();
-    const disableSystemTools = typeof disableSystemToolsOverride === "boolean"
+    const disableSystemTools = nativeDispatchEnabled || (typeof disableSystemToolsOverride === "boolean"
       ? disableSystemToolsOverride
-      : resolveDisableSystemTools();
+      : resolveDisableSystemTools());
     const atlasReadyForMcp = hasProviderVisibleAtlasMcpTools({
       disableAtlas,
       atlasPrefetchStatus,
       atlasAttachment,
     });
     let deterministicReadMcp = await buildCodexDeterministicReadConfigOverridesAsync(role, mcpWorkspaceCwd, {
+      nativeDispatch: nativeDispatchEnabled,
       scopedFiles,
       createFiles,
       deleteFiles,
@@ -272,7 +285,7 @@ export async function callProvider(promptText, {
     const atlasServerName = deterministicReadMcp.active
       ? deterministicReadMcp.serverKey
       : atlasMcpServerKey;
-    if (deterministicReadMcp.codexNativeBatching) {
+    if (!nativeDispatchEnabled && deterministicReadMcp.codexNativeBatching) {
       try {
         const catalog = await prepareCodexNativeBatchingCatalog({
           cmd: codexCmd,
@@ -339,7 +352,7 @@ export async function callProvider(promptText, {
       codexNativeBatching: deterministicReadMcp.codexNativeBatching === true,
       webToolsActive: webTools.active,
     };
-    const codexLaunch = await reconcileLaunchPolicy({
+    const codexLaunch = nativeDispatchEnabled ? { lockdownOverrides: [], researchBootOverrides: [] } : await reconcileLaunchPolicy({
       provider: "codex",
       role,
       request: () => buildCodexLaunchInput(lockdownInput, CODEX_RESEARCH_BASE_INSTRUCTIONS_PATH),
@@ -414,6 +427,34 @@ export async function callProvider(promptText, {
 
     if (typeof recordFinalPrompt === "function") {
       recordFinalPrompt(finalPrompt, { systemPrompt: developerInstructionRoute.developerInstructions });
+    }
+
+    if (nativeDispatchEnabled) {
+      try {
+        const request = buildNativeDispatchRequest("codex", finalPrompt, {
+          jobId, workItemId, attemptId, agentCallId,
+          authMode: preferredAuthMode,
+          baseInstructions: role === "researcher" ? fs.readFileSync(CODEX_RESEARCH_BASE_INSTRUCTIONS_PATH, "utf8") : null,
+          systemPrompt: developerInstructionRoute.developerInstructions,
+          modelTier, modelName: modelToUse, reasoningEffort, role, roleMode,
+          allowWrite, allowTests, projectDbCapability,
+          issuedToolIds: deterministicReadMcp.issuedToolIds || [],
+          cwd: mcpWorkspaceCwd, readRoots, createRoots, scopedFiles, createFiles, deleteFiles,
+          maxTurns: turnLimit, maxOutputTokens: outputTokenLimit,
+          stallTimeoutMs: resolveProviderStallTimeout(stallTimeout) * (["researcher", "planner"].includes(role) ? 2 : 1) * 1000,
+          priorSessionHandle: resumeSessionHandle,
+          recyclingMode: resumeSessionHandle ? "resume" : "fresh",
+        });
+        const result = await runNativeDispatch(request, {
+          abortSignal, mcpGate, projectDir: providerPaths.projectDir, silent, onLine,
+          onAgentCommentary, onProviderToolUse, onProviderToolResult, onUsageSegment, onUsageProgress,
+        });
+        result.stats.atlasMethod = atlasMethodForStats;
+        resolve(result);
+      } finally {
+        cleanupDeterministicMcpSession();
+      }
+      return;
     }
 
     const configRoute = prepareCodexConfigForSpawn(combinedConfigOverrides, {

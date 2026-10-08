@@ -8,7 +8,6 @@ import {
   PROVIDER_DISPATCH_PROVIDERS,
 } from "../../../catalog/binary.js";
 import { buildRuntimeEnv } from "../../../domains/runtime/functions/paths.js";
-import { scrubClaudeChildEnv } from "../../../domains/providers/functions/claude/child-env.js";
 import {
   terminateSpawnedProcessTree,
   trackSpawnedProcess,
@@ -18,6 +17,7 @@ import {
   ProviderDispatchGateway,
   providerDispatchSurfaceDigest,
 } from "../../tools/classes/ProviderDispatchGateway.js";
+import { sortAgentToolDefinitions } from "../../tools/functions/agent-schema.js";
 import { verifyProviderDispatchCapabilitiesSync } from "./engagement-client.js";
 
 const MAX_STDERR_BYTES = 64 * 1024;
@@ -37,6 +37,9 @@ export class ProviderDispatchError extends Error {
     this.code = code;
     this.classification = classification;
     this.details = details;
+    if (Number.isFinite(details?.retryAfterMs) && details.retryAfterMs >= 0) {
+      this.retryAfterMs = details.retryAfterMs;
+    }
   }
 }
 
@@ -94,6 +97,8 @@ function resultFromTerminal(frame) {
       details: {
         partialOutput: frame.partialOutput ?? null,
         stats: frame.stats ?? null,
+        retryAfterMs: nativeError.retryAfterMs ?? null,
+        diagnostic: nativeError.detail ?? null,
       },
     },
   );
@@ -148,13 +153,34 @@ export async function dispatchProvider(request, {
   let toolGateway = null;
   let gateway = null;
   let observedSurfaceDigest = providerDispatchSurfaceDigest([]);
-  if (issuedToolIds.length > 0) {
+  if (request.decision != null) {
+    const decision = isObject(request.decision) && Array.isArray(request.decision.tools)
+      ? { ...request.decision, tools: sortAgentToolDefinitions(request.decision.tools) }
+      : request.decision;
+    if (!["anthropic", "openai", "grok"].includes(request.provider)
+      || !isObject(decision) || typeof decision.allowBatching !== "boolean"
+      || !Array.isArray(decision.tools) || decision.tools.length > 256
+      || decision.tools.length !== issuedToolIds.length
+      || decision.tools.some((tool, index) => !isObject(tool)
+        || tool.name !== issuedToolIds[index] || typeof tool.description !== "string"
+        || !isObject(tool.inputSchema))
+      || new Set(issuedToolIds).size !== issuedToolIds.length
+      || mcpGate != null) {
+      throw protocolError("Invalid decision-only surface or unexpected execution gateway");
+    }
+    observedSurfaceDigest = providerDispatchSurfaceDigest(decision.tools);
+    request = { ...request, decision };
+  } else if (issuedToolIds.length > 0) {
     try {
       toolGateway = new ProviderDispatchGateway({
         dispatchId: request.id,
         issuedToolIds,
         surfaceDigest: request.execution?.issuedToolSurfaceDigest || null,
         mcpGate,
+        identity: request.identity,
+        role: request.execution.role,
+        provider: request.provider,
+        cwd: request.scope.cwd,
         leaseTtlMs: Number(request.limits?.wallTimeoutMs || 0) + cancelGraceMs + forceKillGraceMs + 5_000,
       });
       ({ digest: observedSurfaceDigest } = await toolGateway.prepareSurface());
@@ -198,7 +224,6 @@ export async function dispatchProvider(request, {
 
   const processGroup = process.platform !== "win32";
   const childEnv = buildRuntimeEnv(projectDir || request.scope?.cwd, request.scope?.cwd, baseEnv);
-  if (request.provider === "claude") scrubClaudeChildEnv(childEnv);
   let proc;
   try {
     proc = spawnImpl(binaryPath, ["engagement", "dispatch", "--stdio"], {
@@ -231,7 +256,9 @@ export async function dispatchProvider(request, {
     let settled = false;
     let expectedSequence = 1;
     let sawStarted = false;
+    let sawSurfaceAttestation = false;
     let terminal = null;
+    let completedBeforeAbort = false;
     let pending = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
     let cancelSent = false;
@@ -320,16 +347,24 @@ export async function dispatchProvider(request, {
           || (expectedAdapterVersion && frame.adapterVersion !== expectedAdapterVersion))) {
         throw protocolError("Provider dispatch started with the wrong adapter identity", frame);
       }
-      if (frame.type === "surface.attested"
-        && (frame.expectedDigest !== request.execution?.issuedToolSurfaceDigest
-          || frame.observedDigest !== frame.expectedDigest)) {
-        throw protocolError("Provider dispatch reported a tool-surface mismatch", frame);
+      if (frame.type === "surface.attested") {
+        if (sawSurfaceAttestation) throw protocolError("Provider dispatch repeated its tool-surface attestation", frame);
+        if (frame.expectedDigest !== request.execution?.issuedToolSurfaceDigest
+          || frame.observedDigest !== frame.expectedDigest) {
+          throw protocolError("Provider dispatch reported a tool-surface mismatch", frame);
+        }
+        sawSurfaceAttestation = true;
+      }
+      if (!sawSurfaceAttestation
+        && !["dispatch.started", "status", "dispatch.failed", "dispatch.cancelled"].includes(frame.type)) {
+        throw protocolError("Provider dispatch emitted provider activity before tool-surface attestation", frame);
       }
       expectedSequence += 1;
       sawStarted = true;
       onEvent?.(frame);
       if (TERMINAL_EVENTS.has(frame.type)) {
         terminal = frame;
+        completedBeforeAbort = frame.type === "dispatch.completed" && !cancelSent && !signal?.aborted;
         proc.stdin.end();
       }
     };
@@ -370,7 +405,7 @@ export async function dispatchProvider(request, {
         finishReject(pendingError);
         return;
       }
-      if (cancelSent || signal?.aborted) {
+      if ((cancelSent || signal?.aborted) && !(completedBeforeAbort && code === 0)) {
         finishReject(cancellationError(terminal));
         return;
       }

@@ -492,6 +492,7 @@ export async function acquireWorktreeLockAsync(lockPath, {
   const start = Date.now();
   const resolvedWaitMs = resolveWorktreeLockWaitMs(waitMs);
   let lastRetryableError = null;
+  let contentionCount = 0;
   while (Date.now() - start < resolvedWaitMs) {
     throwIfAborted(signal);
     try {
@@ -507,6 +508,7 @@ export async function acquireWorktreeLockAsync(lockPath, {
       if (isAbortError(error)) throw error;
       if (!isRetryableLockOpenError(error)) throw error;
       lastRetryableError = error;
+      contentionCount++;
       try {
         const stat = await fs.promises.stat(lockPath);
         const reclaim = await shouldReclaimWorktreeLockAsync(lockPath, { stat, staleMs });
@@ -522,7 +524,8 @@ export async function acquireWorktreeLockAsync(lockPath, {
       } catch {
         // If lock inspection fails, keep waiting for owner to release.
       }
-      await sleepMsAsync(pollMs + Math.floor(Math.random() * pollMs), signal);
+      const backoffMs = Math.min(1000, pollMs * (2 ** Math.min(contentionCount, 4)));
+      await sleepMsAsync(backoffMs + Math.floor(Math.random() * backoffMs), signal);
     }
   }
   return { acquired: false, reason: "timeout", lockPath, lastErrorCode: lastRetryableError?.code || null, lastErrorMessage: lastRetryableError?.message || null };

@@ -139,6 +139,13 @@ export function classifyProviderError(err, {
   const status = errorStatus(err);
   const retryAfter = retryAfterHeader(err);
   const rateLimitTextSignal = hasRateLimitTextSignal(msg, status);
+  if (Number.isFinite(err?.retryAfterMs) && err.retryAfterMs >= 0) {
+    return {
+      backoffSec: clampRetryAfterSeconds(err.retryAfterMs / 1000, defaultBackoffSec),
+      isRateLimit: err.classification === "rate_limit",
+      source: err.code === "provider_circuit_open" ? "circuit_breaker" : "retry-after",
+    };
+  }
 
   // Circuit-breaker errors are synthetic local state; classify them before
   // provider retry hints so callers preserve the breaker reason and cooldown.

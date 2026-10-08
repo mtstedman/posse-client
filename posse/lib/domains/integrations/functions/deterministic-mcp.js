@@ -111,6 +111,7 @@ export async function buildDeterministicReadMcpServerConfigAsync(role, {
   remoteMcpOAuthToken = "",
   mcpGate = null,
   disableAgentTools = false,
+  isolateProviderHome = true,
 } = {}) {
   const spawnArgs = (await McpServerConfig.forDeterministicReadAsync(role, {
     cwd,
@@ -145,7 +146,7 @@ export async function buildDeterministicReadMcpServerConfigAsync(role, {
   // Running MCP-only means Posse is the sole source of context, so isolate the
   // provider CLI's home from its global memory/config. Generic + provider-keyed:
   // unprofiled providers are a no-op.
-  spawnArgs.providerHomeEnv = prepareIsolatedProviderHome(providerName);
+  if (isolateProviderHome) spawnArgs.providerHomeEnv = prepareIsolatedProviderHome(providerName);
   return spawnArgs;
 }
 

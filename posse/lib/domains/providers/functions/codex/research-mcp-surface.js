@@ -147,5 +147,5 @@ export async function prepareCodexResearchMcpSurface(attachment, { mcpGate = nul
       const [callable] = buildMcpAtlasSurfaceToolDescriptors([callableName], options);
       return [{ ...action, mcpName: callable.mcpName, providerSurfaceName: callable.providerSurfaceName, surfaceName: callable.surfaceName }];
     });
-  return { declarations: sortAgentToolDefinitions(declarations), atlasTools: atlasNames.map(name => name.slice("atlas.".length)), atlasContractTools };
+  return { declarations: sortAgentToolDefinitions(declarations), atlasTools: atlasNames.map(name => name.slice("atlas.".length)), atlasContractTools, issuedToolIds: [...byName.keys()] };
 }

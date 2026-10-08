@@ -148,6 +148,7 @@ async function runRemoteNativeMethodJson(method, payload, {
       json: true,
       timeoutMs,
       requiredRoute,
+      ...(method === "request-json" ? { workerFallback: false } : {}),
     },
   );
   if (!res.ok) {
@@ -155,7 +156,11 @@ async function runRemoteNativeMethodJson(method, payload, {
     /** @type {Error & { code?: string | number }} */
     const failure = new Error(`remote native method ${method} failed${detail ? `: ${detail}` : ""}`, { cause: res.error });
     const nativeCode = /** @type {{ code?: string | number } | null} */ (res.error)?.code;
-    if (nativeCode != null) failure.code = nativeCode;
+    if (nativeCode === "POSSE_NATIVE_WORKER_UNAVAILABLE"
+      && /** @type {{ details?: { reason?: string } } | null} */ (res.error)?.details?.reason === "timeout") {
+      failure.code = "POSSE_REMOTE_TIMEOUT";
+    } else if (nativeCode != null) failure.code = nativeCode;
+    else if (/timed out after \d+ms/.test(detail)) failure.code = "POSSE_REMOTE_TIMEOUT";
     throw failure;
   }
   return unwrapRemoteNativeResponse(res.json);

@@ -78,12 +78,21 @@ export class RegisteredAgentBridge {
     demand(Array.isArray(context_names) && context_names.every(name => typeof name === "string" && ID.test(name)), "Invalid context allowlist", "invalid_request");
     demand(Number.isInteger(max_concurrency) && max_concurrency >= 1 && max_concurrency <= 32, "Invalid concurrency limit", "invalid_request");
     demand(Number.isFinite(max_spend_usd) && max_spend_usd > 0 && max_spend_usd <= 10000, "Invalid spend limit", "invalid_request");
-    for (const agent of agents) this.validateAgent(agent);
+    const skillPins = {};
+    for (const agent of agents) {
+      const loaded = this.validateAgent(agent);
+      skillPins[agent] = loaded.definition.skills.map(reference => {
+        const skill = this.owner.agents.resolveSkill(loaded.definition, reference);
+        const identity = this.owner.registry.identity(skill);
+        const entry = this.store.get("entries", this.owner.registry.entryID(skill));
+        return { reference: identity, digest: entry.digest };
+      });
+    }
     const credential = secret();
     const registration = this.store.transaction(() => {
       demand(!this.store.get(REGISTRATIONS, id), "Registration ID already exists", "idempotency_conflict");
       const value = { id, identity: crypto.randomUUID(), revision: 1, enabled: true, credential_hash: verifier(credential),
-        agents: [...new Set(agents)], operations: [...new Set(operations)], context_names: [...new Set(context_names)],
+        agents: [...new Set(agents)], skill_pins: skillPins, operations: [...new Set(operations)], context_names: [...new Set(context_names)],
         max_concurrency, max_spend_usd, created_at: new Date().toISOString(), revoked_at: null };
       this.store.put(REGISTRATIONS, id, value); return value;
     });
@@ -175,9 +184,17 @@ export class RegisteredAgentBridge {
     return registration;
   }
 
-  validateAgent(name) {
+  validateAgent(name, skillPins = null) {
     const loaded = this.owner.agentDefinitions.load(name);
-    const definition = loaded.definition;
+    const definition = skillPins ? {
+      ...loaded.definition,
+      skills: skillPins.map(pin => {
+        const skill = this.owner.agents.resolveSkill(loaded.definition, pin.reference);
+        const entry = this.store.get("entries", this.owner.registry.entryID(skill));
+        demand(entry?.digest === pin.digest, `Pinned skill ${pin.reference} changed`, "skill_unavailable");
+        return pin.reference;
+      }),
+    } : loaded.definition;
     demand(["sandbox", "folder", "repository"].includes(definition.scope.kind), "Global agents cannot be exposed", "forbidden");
     // Capability validation is repeated for each request; this catches missing approvals at exposure time.
     const promptNames = definition.tools.filter(tool => this.store.get("prompt_tools", tool));
@@ -187,7 +204,7 @@ export class RegisteredAgentBridge {
     this.owner.agents.privateInputSchema(definition);
     demand(definition.autonomy.write_tools !== "confirm" || !resolved.capabilities.some(cap => cap.effect === "write"),
       "Write tools under confirmation cannot be exposed", "forbidden");
-    return loaded;
+    return { ...loaded, definition };
   }
 
   cwd(definition, registration, sessionID) {
@@ -248,7 +265,7 @@ export class RegisteredAgentBridge {
     const authority = local ? this.owner.exposures.authorize(request, transport.identity) : null;
     const registration = authority?.registration || this.authenticate(request);
     if (!local) this.owner.exposures.legacyAllowed(registration.id, request.agent);
-    const loaded = this.validateAgent(request.agent);
+    const loaded = this.validateAgent(request.agent, registration.skill_pins?.[request.agent] || null);
     demand(context.every(item => registration.context_names.includes(item.name)), "Context name is not registered", "forbidden");
     try { schemaCheck(this.owner.agents.privateInputSchema(loaded.definition), request.request.inputs || {}); }
     catch (error) {

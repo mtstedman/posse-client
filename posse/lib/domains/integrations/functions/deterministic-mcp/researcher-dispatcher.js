@@ -2,6 +2,7 @@
 import { camelToSnakeKey } from "../../../../catalog/field-case.js";
 import { SYMBOL_GET_BATCH_POLICY } from "../../../../catalog/symbol-get-batch.js";
 import { flattenSharedFileItems } from "../../../atlas/functions/v2/retrieval/symbol-get-batch.js";
+import { COMPACT_STRUCTURE_DEFAULT_MAX_FILES } from "../../../atlas/functions/v2/retrieval/compact-presentation.js";
 import { ATLAS_TOOL_DEFS_RAW } from "../../../../catalog/atlas-tools.js";
 
 export function researcherAtlasBatchGuidance() {
@@ -16,54 +17,6 @@ const EXCLUDED_ACTIONS = new Set([
   // route is the only one advertised by this experiment.
   "fetch_ref",
 ]);
-
-const ACTION_CARDS = Object.freeze({
-  traverse_ref: "requires traversal_ref; returns the withheld remainder of reads already made; one call carries up to 24 already-known refs sharing 32000 characters, where re-reading those regions costs one call each; reaccessAuthorization is valid only with one scalar traversal_ref; fields traversal_ref,limit,offset,search,search_mode,reaccessAuthorization",
-  "symbol.search": "requires query; returns ranked symbol addresses and metadata, not implementation source; fields query,scope,limit,semantic",
-  "symbol.card": "requires symbolId or symbolRef; fields symbolId,symbolRef",
-  "symbol.callers": "requires symbolId; list compact incoming caller or reference symbols grouped by file; fields symbolId,mode,limit,offset",
-  "symbol.get": "use file+symbols:[exact names or qualified names] for bodies in one file; also accepts symbolId or symbolRef, or items with independent, already-known selectors; returns complete exact symbol bodies; symbolRef:{name,file} resolves a known declaration directly without a preliminary symbol.search; each symbol has its own maxTokens allowance, at most 8000, and oversized bodies continue through traversal_ref; code.window provides surrounding source when needed; fields file,symbols,items,symbolId,symbolHandle,symbolRef,identifiersToFind,maxTokens",
-  "symbol.overview": "requires symbolId; fields symbolId,kind,minConfidence,limit,includeUnresolved",
-  "code.skeleton": "scan one file for declarations and class members, with source ranges, short symbolId handles for symbol.get (reuse the returned symbolId), and explicit completeness; fields file or symbolId,identifiersToFind,exportedOnly,limit,maxTokens,surveyGap",
-  "code.survey": "requires paths; limit is the file ceiling, at most 64, and a larger value is clamped; fields paths,identifiersToFind,limit",
-  "code.structure": "requires paths; exact inventory of one small directory or file set (default 12 files) with stable symbol handles, or an explicit relationship query when edgeKinds such as implements, extends, calls, or imports are supplied; imports is the default edge kind; use code.survey for a ranked preview across a wider file set; fields paths,edgeKinds,includeEdges,includeSymbols,limit",
-  "code.lens": "requires identifiersToFind and either symbolId or file; fields symbolId,file,identifiersToFind,contextLines",
-  "code.window": "requires reason+symbolId or reason+file+identifiersToFind; returns a coherent source region for related declarations and surrounding same-file control flow; fields symbolId,file,reason,identifiersToFind,granularity,maxTokens,autoFill",
-  "memory.feedback": "requires memoryId,verdict; fields memoryId,verdict,detail",
-  "memory.surface": "fields domains,paths,symbolIds",
-  "memory.get": "fields domains,paths,symbolIds",
-});
-
-// The typed dispatcher removes each direct tool's purpose description as well
-// as its name. Restore that task-blind selection signal while keeping the one-
-// tool, closed-argument surface and canonical execution path unchanged.
-const TYPED_ACTION_CARDS = Object.freeze({
-  traverse_ref: "requires traversal_ref; returns content omitted behind an explicit traversal_ref, which is the remainder of a read already made; one call carries up to 24 already-known refs sharing 32000 characters, where re-reading those regions costs one call each; reaccessAuthorization is valid only with one scalar traversal_ref; fields traversal_ref,limit,offset,search,search_mode,reaccessAuthorization",
-  "symbol.search": "requires query; returns ranked symbol addresses and metadata, not implementation source; fields query,scope,limit,semantic",
-  "symbol.card": "requires symbolId or symbolRef; get a compact relationship summary for one or several identified symbols; fields symbolId,symbolRef",
-  "symbol.callers": "requires symbolId; returns compact incoming resolved callers, references, or both, grouped by file; fields symbolId,mode,limit,offset",
-  "symbol.get": ACTION_CARDS["symbol.get"],
-  "symbol.overview": "requires symbolId; inspect concrete call and reference sites when relationships are the missing fact; fields symbolId,kind,minConfidence,limit,includeUnresolved",
-  "code.skeleton": ACTION_CARDS["code.skeleton"],
-  "code.survey": "requires paths; returns a ranked multi-file symbol preview and call map; limit is the file ceiling, at most 64, and a larger value is clamped; fields paths,identifiersToFind,limit",
-  "code.structure": "requires paths; read the exact inventory of one small directory or file set (default 12 files, paged beyond that) with stable symbol handles, or answer who-implements, who-extends, who-calls, or who-imports inside it in one call by naming edgeKinds explicitly (imports is the default; without edges it is a symbol list, not a relationship proof); use code.survey for a ranked preview across a wider file set; fields paths,edgeKinds,includeEdges,includeSymbols,limit",
-  "code.lens": "requires identifiersToFind and either symbolId or file; returns focused locations and enclosing-symbol context for identifiers in one target; fields symbolId,file,identifiersToFind,contextLines",
-  "code.window": "requires file+identifiersToFind; returns a coherent source region for the named declarations and surrounding same-file control flow; granularity symbol returns the named declarations' regions, fileWindow returns most of the file up to the window cap and is the largest read; the runtime supplies reason; fields file,identifiersToFind,granularity,maxTokens,autoFill",
-  "memory.surface": "probe memory presence for exact file or symbol anchors without returning bodies; fields domains,paths,symbolIds",
-  "memory.get": "retrieve memory bodies for exact file or symbol anchors; fields domains,paths,symbolIds",
-});
-
-// Keep the terse language arm terse, but state the one action boundary that
-// repeatedly caused otherwise avoidable validation/retry turns. This remains
-// prompt pressure: native validation still rejects every malformed window.
-const TYPED_TERSE_ACTION_CARDS = Object.freeze({
-  ...ACTION_CARDS,
-  "symbol.get": ACTION_CARDS["symbol.get"],
-  "code.window": "requires file+identifiersToFind; returns a coherent source region for the named declarations and surrounding same-file control flow; granularity symbol returns the named declarations' regions, fileWindow returns most of the file up to the window cap and is the largest read; fields file,identifiersToFind,granularity,maxTokens,autoFill",
-});
-
-const TYPED_DIRECT_SYMBOL_CARD =
-  "requires symbolId or symbolRef; returns a bounded exact-source excerpt plus caller and callee addresses for one identified symbol; fields symbolId,symbolRef";
 
 // Marker priority selects the primary language for telemetry. Tool descriptions
 // use the same compact contract across languages to keep provider schemas stable.
@@ -225,7 +178,9 @@ const TYPED_ACTION_ARG_REQUIREMENTS = Object.freeze({
   }),
   "code.structure": Object.freeze({
     required: Object.freeze(["paths"]),
-    properties: Object.freeze({ limit: Object.freeze({ maximum: 128 }) }),
+    properties: Object.freeze({ limit: Object.freeze({ maximum: 128,
+      description: `Maximum files to inventory; default ${COMPACT_STRUCTURE_DEFAULT_MAX_FILES}.`,
+    }) }),
   }),
   "code.lens": Object.freeze({
     required: Object.freeze(["identifiersToFind"]),
@@ -576,24 +531,18 @@ function dispatcherActions(atlasTools = []) {
   const actions = [];
   for (const tool of Array.isArray(atlasTools) ? atlasTools : []) {
     const action = atlasActionName(tool?.name);
-    if (!action || EXCLUDED_ACTIONS.has(action) || !ACTION_CARDS[action]) continue;
+    if (!action || EXCLUDED_ACTIONS.has(action) || !WORKFLOW_ACTIONS.includes(action)) continue;
     if (!actions.includes(action)) actions.push(action);
   }
   return actions;
 }
 
-// Direct tools share action cards, parameter definitions, selector
+// Direct tools share canonical descriptions, parameter definitions, selector
 // requirements and normalization with the researcher argument repair.
-export function buildResearcherDirectTools(atlasTools = [], {
-  purposeGuidance = false, symbolCardGuidance = false,
-} = {}) {
+export function buildResearcherDirectTools(atlasTools = [], _options = {}) {
   const surfaced = dispatcherActions(atlasTools);
   const actions = WORKFLOW_ACTIONS.filter(action => surfaced.includes(action));
   const shared = researcherReadActionArgsSchema({ allowSymbolHandles: true, includeWindowReason: false, actions });
-  const cards = {
-    ...(purposeGuidance ? TYPED_ACTION_CARDS : TYPED_TERSE_ACTION_CARDS),
-    ...(symbolCardGuidance ? { "symbol.card": TYPED_DIRECT_SYMBOL_CARD } : {}),
-  };
   return actions.map(action => {
     const canonicalFields = Object.keys(ATLAS_TOOL_DEFS_RAW[action]?.parameters?.properties || {});
     const advertisedNames = Object.fromEntries(Object.entries(researcherActionFieldAliases(action))
@@ -602,14 +551,28 @@ export function buildResearcherDirectTools(atlasTools = [], {
     if (fields.has("symbolId")) fields.add("symbolHandle");
     if (fields.has("file")) fields.add("path");
     const requirements = TYPED_ACTION_ARG_REQUIREMENTS[action] || {};
+    const fieldAliases = researcherActionFieldAliases(action);
+    const describe = (text) => {
+      let result = String(text || "");
+      for (const [native, advertised] of Object.entries(advertisedNames)) {
+        result = result.replace(new RegExp(`\\b${native}\\b`, "g"), advertised);
+      }
+      return advertiseCardText(result);
+    };
     const properties = Object.fromEntries(Object.entries(shared.properties)
       .filter(([field]) => fields.has(field))
-      .map(([field, definition]) => [field, { ...definition, ...requirements.properties?.[field] }]));
+      .map(([field, definition]) => {
+        const canonical = ATLAS_TOOL_DEFS_RAW[action]?.parameters?.properties?.[fieldAliases[field] || field];
+        const description = requirements.properties?.[field]?.description || canonical?.description || ("description" in definition ? definition.description : undefined);
+        return [field, { ...definition, ...requirements.properties?.[field],
+          ...(description ? { description: describe(description) } : {}),
+        }];
+      }));
     const original = atlasTools.find(tool => atlasActionName(tool?.name) === action);
     return {
       ...original,
       name: `atlas.${action}`,
-      description: advertiseCardText(cards[action]),
+      description: describe(ATLAS_TOOL_DEFS_RAW[action].description),
       inputSchema: advertisedSchema({ ...shared, ...requirements, properties }),
     };
   });

@@ -20,6 +20,9 @@ export class BaseProvider {
     this.module = module || {};
     this.call = this.call.bind(this);
     this.callProvider = this.callProvider.bind(this);
+    if (typeof this.module.callAgentTurn === "function") {
+      this.callAgentTurn = this.module.callAgentTurn.bind(this.module);
+    }
     this.renderTool = this.renderTool.bind(this);
   }
 

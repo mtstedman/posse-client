@@ -8,6 +8,12 @@ function matchesProfile(rule, profile) {
   throw new Error("Unsupported handoff profile constraint");
 }
 
+function hasProfileConstraint(value) {
+  if (!value || typeof value !== "object") return false;
+  if (value.if?.properties?.profile) return true;
+  return Object.values(value).some(hasProfileConstraint);
+}
+
 // Protocol/profile are supplied by the runtime. Preserve conditional report
 // validation by specializing fixed roles and using outcome for the two
 // ordinary researcher forms, whose outcome sets are disjoint.
@@ -20,6 +26,9 @@ export function projectRuntimeHandoffMetadata(tool, role) {
     if (!schema || typeof schema !== "object") return schema;
     if (Array.isArray(schema)) return schema.map(project);
     const out = { ...schema };
+    if (Object.values(out.properties || {}).some(hasProfileConstraint) || hasProfileConstraint(out.items)) {
+      throw new Error("Nested handoff profile constraints are unsupported");
+    }
     if (out.properties) {
       const { protocol: _protocol, profile: _profile, ...properties } = out.properties;
       out.properties = properties;
@@ -27,7 +36,6 @@ export function projectRuntimeHandoffMetadata(tool, role) {
     if (out.required) out.required = out.required.filter((key) => !["protocol", "profile"].includes(key));
     if (out.if?.properties?.profile) {
       const matching = profiles.filter(([profile]) => matchesProfile(out.if.properties.profile, profile));
-      if (!profiles.length) throw new Error(`No handoff profile for role ${role}`);
       const { if: _if, then: yes, else: no, ...rest } = out;
       if (matching.length === 0) return { ...project(rest), ...project(no || {}) };
       if (matching.length === profiles.length) return { ...project(rest), ...project(yes || {}) };

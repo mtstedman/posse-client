@@ -340,6 +340,13 @@ function normalizeEnvelope(source, roots, note) {
     out.outcome = out.outcome.trim().toLowerCase();
     note("outcome", "enum_case");
   }
+  if (out.profile === "researcher.pipeline.v1" && out.outcome === "complete") {
+    out.outcome = "success";
+    note("outcome", "bound_profile_outcome");
+  } else if (out.profile === "researcher.report.v1" && out.outcome === "success") {
+    out.outcome = "complete";
+    note("outcome", "bound_profile_outcome");
+  }
   if (out.handoffs != null && !Array.isArray(out.handoffs)) {
     const list = coerceList(out.handoffs);
     if (list?.how && list.how !== "single_entry") {

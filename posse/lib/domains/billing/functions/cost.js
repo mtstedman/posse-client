@@ -181,7 +181,6 @@ function finalizeCostAccumulator(entry, costKey = "costUsd") {
   entry.costPrecision = costPrecision(entry);
   entry[costKey] = exposedCostUsd(entry.knownCostUsd, entry.costPrecision);
   entry.uncachedInputTokens = Math.max(0, entry.inputTokens - entry.cachedInputTokens);
-  entry.billableInputKnownTokens = entry.billableInputTokens;
   entry.billableInputComplete = entry.billableInputUnknownCalls === 0;
   entry.billableTokens = entry.inexactUsageCalls > 0 ? null : entry.billableTokens;
   entry.cacheDiscountRatio = entry.inexactUsageCalls > 0

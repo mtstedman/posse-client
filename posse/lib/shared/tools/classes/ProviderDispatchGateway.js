@@ -113,15 +113,23 @@ export class ProviderDispatchGateway {
     issuedToolIds,
     surfaceDigest,
     mcpGate,
+    identity = {},
+    role = null,
+    provider = null,
+    cwd = null,
     leaseTtlMs,
     maxResponseBytes = PROVIDER_TOOL_GATEWAY_MAX_RESPONSE_BYTES,
   } = {}) {
     if (!validId(dispatchId, 120)) throw new Error("Provider dispatch gateway requires a valid dispatch id");
     if (!mcpGate || typeof mcpGate.callToolResult !== "function"
-      || typeof mcpGate.rpc !== "function" || typeof mcpGate.assertAttached !== "function") {
+      || typeof mcpGate.rpc !== "function" || typeof mcpGate.assertAttached !== "function"
+      || typeof mcpGate.assertCompatible !== "function") {
       throw new Error("Provider dispatch gateway requires an attached MCP gate");
     }
-    mcpGate.assertAttached();
+    mcpGate.assertCompatible({ role, providerName: provider });
+    mcpGate.assertAttached({ ...identity, cwd });
+    if (!mcpGate.binding) throw new Error("Provider dispatch gateway requires an active job binding");
+    this.binding = mcpGate.binding;
     const ids = Array.isArray(issuedToolIds) ? issuedToolIds.map((value) => String(value)) : [];
     if (ids.length === 0 || ids.some((value) => !validId(value)) || new Set(ids).size !== ids.length) {
       throw new Error("Provider dispatch gateway requires unique issued tool ids");
@@ -153,8 +161,10 @@ export class ProviderDispatchGateway {
 
   async start() {
     if (this.closed) throw new Error("Provider dispatch gateway is closed");
+    this.#assertBinding();
     if (this.server) return this.capability();
     await this.prepareSurface();
+    this.#assertBinding();
     this.expiresAt = Date.now() + this.leaseTtlMs;
     const server = http.createServer((req, res) => {
       this.#handle(req, res).catch((error) => {
@@ -232,9 +242,21 @@ export class ProviderDispatchGateway {
       return;
     }
     const body = await readJsonBody(req);
+    // Reading a streamed body yields. A lease checked at header arrival may
+    // have expired or been revoked before the complete call is available.
+    if (this.closed || this.expiresAt == null || Date.now() >= this.expiresAt) {
+      sendJson(res, 401, { ok: false, error: "lease_expired" }, this.maxResponseBytes);
+      return;
+    }
     const invalid = validateRequest(body, this);
     if (invalid) {
       sendJson(res, 403, { ok: false, error: invalid }, this.maxResponseBytes);
+      return;
+    }
+    try {
+      this.#assertBinding();
+    } catch {
+      sendJson(res, 403, { ok: false, error: "attachment_changed" }, this.maxResponseBytes);
       return;
     }
     if (body.type === "surface.get") {
@@ -259,6 +281,7 @@ export class ProviderDispatchGateway {
         signal: controller.signal,
       });
       if (controller.signal.aborted || this.closed) return;
+      this.#assertBinding();
       sendJson(res, 200, {
         ok: true,
         protocol: PROVIDER_TOOL_GATEWAY_PROTOCOL,
@@ -285,12 +308,14 @@ export class ProviderDispatchGateway {
     const cursors = new Set();
     let cursor = null;
     for (let page = 0; page < 16; page += 1) {
+      this.#assertBinding();
       const message = await this.mcpGate.rpc({
         jsonrpc: "2.0",
         id: `provider-dispatch-surface-${page}`,
         method: "tools/list",
         params: cursor ? { cursor } : {},
       }, { preflight: true });
+      this.#assertBinding();
       if (message?.error || !message?.result || !Array.isArray(message.result.tools)) {
         throw new Error("Provider dispatch gateway could not attest its MCP tool catalog");
       }
@@ -330,8 +355,18 @@ export class ProviderDispatchGateway {
 
   async prepareToolDescriptors() {
     if (this.closed) throw new Error("Provider dispatch gateway is closed");
+    this.#assertBinding();
     this.toolDescriptors ||= await this.#loadIssuedToolDescriptors();
     return JSON.parse(JSON.stringify(this.toolDescriptors));
+  }
+
+  #assertBinding() {
+    this.mcpGate.assertAttached();
+    // McpGate replaces its frozen binding on every attachment. Even another
+    // attachment with identical IDs must not inherit an older dispatch lease.
+    if (this.mcpGate.binding !== this.binding) {
+      throw new Error("Provider dispatch gateway job attachment changed");
+    }
   }
 
   async prepareSurface() {

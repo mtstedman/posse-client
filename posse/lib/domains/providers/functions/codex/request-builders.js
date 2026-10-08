@@ -9,6 +9,7 @@ import { buildDeterministicReadMcpServerConfig, buildDeterministicReadMcpServerC
 import { _toCodexConfigKey, _toTomlLiteral, appendCodexMcpEnvOverrides } from "./config-format.js";
 
 import { prepareCodexResearchMcpSurface } from "./research-mcp-surface.js";
+import { prepareCodexNativeAttachment } from "./native-dispatch.js";
 import { CODEX_AGENTS_MCP_SERVER_SUFFIX, CODEX_AGENT_DISPATCH_TOOLS } from "../../../../catalog/tool-surface/provider-attachments.js";
 import { readPlannerDispatchPolicy } from "../../../planning/functions/planner-dispatch-policy.js";
 
@@ -454,6 +455,7 @@ export function __testBuildCodexDeterministicReadConfigOverrides(role, cwd, opti
 }
 
 export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd, {
+  nativeDispatch = false,
   scopedFiles = [],
   createFiles = [],
   deleteFiles = [],
@@ -483,6 +485,10 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
   mcpGate = null,
   disableAgentTools = false,
 } = {}) {
+  if (nativeDispatch && disableAgentTools) {
+    if (allowWrite) throw new Error("A tool-free native turn cannot have write access");
+    return { active: false, tools: [], issuedToolIds: [], atlasTools: [], contractTools: [], configOverrides: [], serverConfig: null, serverKey: null };
+  }
   const enabled = roleUsesDeterministicReadMcp(role);
   if (!enabled) {
     return {
@@ -523,8 +529,10 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
     remoteMcpOAuthToken,
     mcpGate,
     disableAgentTools,
+    isolateProviderHome: !nativeDispatch,
   });
   if (!serverConfig?.ready) {
+    if (nativeDispatch) throw new Error("Native Codex requires a ready scoped MCP gateway");
     return {
       active: false,
       tools: [],
@@ -534,6 +542,14 @@ export async function buildCodexDeterministicReadConfigOverridesAsync(role, cwd,
     };
   }
 
+  if (nativeDispatch) {
+    try {
+      return await prepareCodexNativeAttachment(serverConfig, { mcpGate });
+    } catch (error) {
+      releaseDeterministicMcpServerSession(serverConfig, { reason: "native_surface_failed" });
+      throw error;
+    }
+  }
   const attachment = buildCodexDeterministicMcpAttachment(serverConfig, { role, disableSystemTools, nativeBatching, nativeBatchingCatalog });
   // Codex imports direct schemas during its own MCP initialization. The
   // research-only preflight below resolves folded researcher action aliases;

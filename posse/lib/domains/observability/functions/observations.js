@@ -2381,10 +2381,10 @@ export function getObservationsByJob(jobId, limit = 100) {
   const dbRows = db.prepare(`
     SELECT * FROM job_observations
     WHERE job_id = ?
-      AND observation_type NOT IN ('system.response_transform', 'tool.response_transform')
+      AND observation_type NOT IN (${INTERNAL_BACKGROUND_OBSERVATION_TYPES.map(() => "?").join(", ")})
     ORDER BY created_at DESC, id DESC
     LIMIT ?
-  `).all(jobId, cappedLimit);
+  `).all(jobId, ...INTERNAL_BACKGROUND_OBSERVATION_TYPES, cappedLimit);
   return mergeObservationRows([...fileRows, ...dbRows], "desc", cappedLimit);
 }
 
