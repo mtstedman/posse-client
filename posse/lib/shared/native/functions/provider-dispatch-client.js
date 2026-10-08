@@ -155,8 +155,12 @@ export async function dispatchProvider(request, {
         leaseTtlMs: Number(request.limits?.wallTimeoutMs || 0) + cancelGraceMs + forceKillGraceMs + 5_000,
       });
       ({ digest: observedSurfaceDigest } = await toolGateway.prepareSurface());
+      if (signal?.aborted) throw cancellationError();
       gateway = await toolGateway.start();
+      if (signal?.aborted) throw cancellationError();
     } catch (error) {
+      await toolGateway?.close();
+      if (signal?.aborted) throw cancellationError();
       throw new ProviderDispatchError(`Could not start provider tool gateway: ${error?.message || error}`, {
         code: "provider_tool_gateway_unavailable",
         classification: "gateway_tool_failure",
@@ -169,6 +173,10 @@ export async function dispatchProvider(request, {
     if (declaredDigest && declaredDigest !== observedSurfaceDigest) {
       throw protocolError("Provider dispatch empty tool surface does not match its digest");
     }
+  }
+  if (signal?.aborted) {
+    await toolGateway?.close();
+    throw cancellationError();
   }
   request = {
     ...request,
@@ -347,6 +355,10 @@ export async function dispatchProvider(request, {
     });
     proc.once("close", (code, closeSignal) => {
       if (settled) return;
+      if (cancelSent || signal?.aborted) {
+        finishReject(cancellationError(terminal));
+        return;
+      }
       if (pending.length > 0) {
         finishReject(protocolError("Provider dispatch exited with an incomplete event"));
         return;
@@ -371,10 +383,14 @@ export async function dispatchProvider(request, {
         reject(error);
       }
     });
-    signal?.addEventListener?.("abort", abort, { once: true });
     proc.stdin.on("error", (error) => {
       if (!settled && !terminal) finishReject(protocolError(`Provider dispatch stdin failed: ${error.message}`), true);
     });
+    signal?.addEventListener?.("abort", abort, { once: true });
+    if (signal?.aborted) {
+      finishReject(cancellationError(), true);
+      return;
+    }
     proc.stdin.write(encodedStart, (error) => {
       if (error) finishReject(protocolError(`Provider dispatch start write failed: ${error.message}`), true);
     });

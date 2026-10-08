@@ -23,6 +23,10 @@ import {
 import { parseCommandArguments } from "../../../shared/scope/functions/test-command.js";
 import { commandSpawnSpec } from "../../../shared/platform/functions/command-launch.js";
 
+import { TEST_SUBPROCESS_ENV_KEYS } from "../../../catalog/process.js";
+import { filterProcessEnv } from "../../../shared/platform/functions/process-env.js";
+import { parentSecretValues, redactExactValues } from "../../../shared/platform/functions/subprocess-output.js";
+
 export const CLOSEOUT_RESOLUTION_RULES = Object.freeze({
   APPEND_APPEND: "append_append",
   INSERT_BESIDE_MODIFY: "insert_beside_modify",
@@ -158,6 +162,7 @@ export function runCloseoutTestCommandSync(command, {
   spawnSyncImpl = spawnSync,
 } = {}) {
   const linked = [];
+  const secrets = parentSecretValues();
   try {
     if (dependencySourceDir) {
       for (const dir of CLOSEOUT_DEPENDENCY_DIRS) {
@@ -177,15 +182,15 @@ export function runCloseoutTestCommandSync(command, {
       maxBuffer: 16 * 1024 * 1024,
       windowsHide: true,
       windowsVerbatimArguments: spec.windowsVerbatimArguments === true,
-      env: process.env,
+      env: filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS }),
     });
-    const output = `${result?.stdout || ""}${result?.stderr || ""}`;
+    const output = redactExactValues(`${result?.stdout || ""}${result?.stderr || ""}`, secrets);
     if (result?.error) {
-      return { ok: false, status: null, output: `${result.error.message || result.error}\n${output}`.trim() };
+      return { ok: false, status: null, output: redactExactValues(`${result.error.message || result.error}\n${output}`, secrets).trim() };
     }
     return { ok: result?.status === 0, status: result?.status ?? null, output: output.trim() };
   } catch (error) {
-    return { ok: false, status: null, output: String(error?.message || error) };
+    return { ok: false, status: null, output: redactExactValues(error?.message || error, secrets) };
   } finally {
     for (const destination of linked) {
       try { fs.unlinkSync(destination); } catch { /* best effort */ }

@@ -1031,9 +1031,20 @@ Function OpenPosse
 FunctionEnd
 
 Function CreateDesktopShortcut
+  SetShellVarContext current
   SetOutPath "$PROFILE"
   !insertmacro BossyArgs $0
+  ClearErrors
+  CreateDirectory "$DESKTOP"
+  ${If} ${Errors}
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Posse could not prepare your Desktop folder at $DESKTOP. The Start menu shortcut is available under Posse." /SD IDOK
+    Return
+  ${EndIf}
+  ClearErrors
   CreateShortCut "$DESKTOP\Posse.lnk" "$SYSDIR\cmd.exe" $0 "$INSTDIR\setup\posse.ico" 0
+  ${If} ${Errors}
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Posse could not create the desktop shortcut at $DESKTOP\Posse.lnk. The Start menu shortcut is available under Posse." /SD IDOK
+  ${EndIf}
 FunctionEnd
 
 ; Trim leading/trailing spaces, tabs, and line breaks from the value on the stack.

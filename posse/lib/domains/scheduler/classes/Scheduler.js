@@ -2041,6 +2041,7 @@ export class Scheduler {
         // where a scheduler could otherwise fetch/mutate with an unscoped
         // cached envelope before its first session heartbeat.
         const sessionPoll = await this._sessionMonitor.poll();
+        if (!this._lockController.canDispatch()) break;
         if (sessionPoll?.teamSubmissionChanged && onTeamSubmissionChange) {
           this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, {
             workItemIds: sessionPoll.teamSubmissionWorkItemIds || [],
@@ -2070,6 +2071,7 @@ export class Scheduler {
           idle: activeWorkers.size === 0 && idleCount > 0,
           ...(trunkHints ? { hints: trunkHints } : {}),
         });
+        if (!this._lockController.canDispatch()) break;
         if (trunkPoll?.advanced && onTeamSubmissionChange) {
           this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, { workItemIds: [] });
         }
@@ -2088,6 +2090,7 @@ export class Scheduler {
           this._invokeCallback("onSessionEvent", onSessionEvent, event);
         }
         if (!sessionPoll?.unavailable) await this._sessionJobRouter.poll();
+        if (!this._lockController.canDispatch()) break;
 
         // Honor a bridge-issued run.stop. Owner-gated so a request written
         // for another scheduler cannot stop this one; consumed either way so
@@ -2632,7 +2635,7 @@ export class Scheduler {
             });
           }
         };
-        while (!stopCandidateScan && candidateCount < maxCandidateScan) {
+        while (this._running && !stopCandidateScan && candidateCount < maxCandidateScan) {
           const fetchLimit = Math.min(MAX_RUNNABLE_SCAN_PER_TICK, maxCandidateScan - candidateCount);
           // When agent compute slots are full, only scan the lanes that can still
           // launch: human gates (always) and background warm (if its own budget
@@ -2669,6 +2672,7 @@ export class Scheduler {
           // when the last fetch is already fresh enough.
           if (candidateCount === 0) {
             const activeTrunkPoll = await this._sharedTrunkPoller.poll({ idle: false });
+            if (!this._lockController.canDispatch()) break;
             if (activeTrunkPoll?.advanced && onTeamSubmissionChange) {
               this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, { workItemIds: [] });
             }
@@ -2676,6 +2680,7 @@ export class Scheduler {
 
           let yieldToImplementation = false;
           for (const job of candidates) {
+            if (!this._running) break;
             // A plan about to take a reserved slot waits (unscanned) until
             // ready implementation work has had first pick of it.
             if (!implementationPass
@@ -2696,6 +2701,7 @@ export class Scheduler {
               continue;
             }
             const sessionRoute = sessionPoll?.unavailable ? null : await this._sessionJobRouter.offer(job);
+            if (!this._lockController.canDispatch()) break;
             if (sessionRoute?.delegated) {
               skipJobIds.add(job.id);
               continue;
@@ -2929,6 +2935,7 @@ export class Scheduler {
               }
             }
 
+          if (!this._lockController.canDispatch()) break;
           const leaseScope = jobNeedsWriteLocks(job)
             ? queueLockIndex.scopeForJob(job)
             : null;
@@ -2970,14 +2977,21 @@ export class Scheduler {
           idleCount = 0;
           lastProgressTime = Date.now();
 
-          this._invokeCallback("onJobStart", onJobStart, leasedJob);
-
           // Promise.resolve().then guards against a workerCallback that throws
           // synchronously (or returns a non-promise): without it the throw
           // escapes to the tick-level catch with the lease still held and no
           // activeWorkers entry, leaving the job stuck until lease expiry.
           const workerPromise = Promise.resolve()
-            .then(() => workerCallback(leasedJob))
+            .then(() => {
+              if (this._lockController.canDispatch()) {
+                this._invokeCallback("onJobStart", onJobStart, leasedJob);
+                if (this._lockController.canDispatch()) return workerCallback(leasedJob);
+              }
+              // No worker started, so this token can safely return to the queue.
+              this.leaseManager.releaseWithoutAttemptPenalty(
+                { jobId: leasedJob.id, token: leasedJob._leaseToken }, "queued",
+              );
+            })
             .catch((err) => {
               // The recovery body itself can throw — releaseWithoutAttemptPenalty
               // runs BEGIN IMMEDIATE (SQLITE_BUSY under cross-process contention,

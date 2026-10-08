@@ -349,6 +349,7 @@ export class WorkerExecutionCoordinator {
 
       // -- Create attempt record --
       const attemptContext = await this.attemptLifecycle.prepare({
+        onAttemptCreated: (attemptId) => { currentAttemptId = attemptId; },
         job,
         leaseToken,
         wrappedJob,

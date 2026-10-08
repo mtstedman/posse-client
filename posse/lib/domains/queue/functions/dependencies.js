@@ -39,7 +39,7 @@ export function addDependency(jobId, dependsOnId, kind = "hard") {
     const cycle = db.prepare(`
       WITH RECURSIVE dep_chain(id) AS (
         SELECT depends_on_job_id FROM job_dependencies WHERE job_id = ?
-        UNION ALL
+        UNION
         SELECT jd.depends_on_job_id FROM job_dependencies jd
         JOIN dep_chain dc ON jd.job_id = dc.id
       )
@@ -129,7 +129,7 @@ export function rewireDependency(jobId, oldDependsOn, newDependsOn, kind = "hard
     const cycle = db.prepare(`
       WITH RECURSIVE dep_chain(id) AS (
         SELECT depends_on_job_id FROM job_dependencies WHERE job_id = ?
-        UNION ALL
+        UNION
         SELECT jd.depends_on_job_id FROM job_dependencies jd
         JOIN dep_chain dc ON jd.job_id = dc.id
       )
@@ -148,7 +148,11 @@ export function rewireDependency(jobId, oldDependsOn, newDependsOn, kind = "hard
     }
     db.prepare(`DELETE FROM job_dependencies WHERE job_id = ? AND depends_on_job_id = ?`)
       .run(jobId, oldDependsOn);
-    db.prepare(`INSERT OR IGNORE INTO job_dependencies (job_id, depends_on_job_id, dependency_kind) VALUES (?, ?, ?)`)
+    db.prepare(`
+      INSERT INTO job_dependencies (job_id, depends_on_job_id, dependency_kind) VALUES (?, ?, ?)
+      ON CONFLICT(job_id, depends_on_job_id) DO UPDATE SET dependency_kind = 'hard'
+      WHERE excluded.dependency_kind = 'hard' AND job_dependencies.dependency_kind = 'soft'
+    `)
       .run(jobId, newDependsOn, kind);
     rewired = true;
     const job = readJob(jobId);
@@ -204,7 +208,7 @@ export function rewireDependencyChain(jobId, oldDependsOn, newDependsOnIds, kind
         const cycle = db.prepare(`
           WITH RECURSIVE dep_chain(id) AS (
             SELECT depends_on_job_id FROM job_dependencies WHERE job_id = ?
-            UNION ALL
+            UNION
             SELECT jd.depends_on_job_id FROM job_dependencies jd
             JOIN dep_chain dc ON jd.job_id = dc.id
           )
@@ -221,7 +225,11 @@ export function rewireDependencyChain(jobId, oldDependsOn, newDependsOnIds, kind
       db.prepare(`DELETE FROM job_dependencies WHERE job_id = ? AND depends_on_job_id = ?`)
         .run(jobId, oldDependsOn);
       for (const replacementId of accepted) {
-        db.prepare(`INSERT OR IGNORE INTO job_dependencies (job_id, depends_on_job_id, dependency_kind) VALUES (?, ?, ?)`)
+        db.prepare(`
+          INSERT INTO job_dependencies (job_id, depends_on_job_id, dependency_kind) VALUES (?, ?, ?)
+          ON CONFLICT(job_id, depends_on_job_id) DO UPDATE SET dependency_kind = 'hard'
+          WHERE excluded.dependency_kind = 'hard' AND job_dependencies.dependency_kind = 'soft'
+        `)
           .run(jobId, replacementId, kind);
       }
       details.inserted = accepted;

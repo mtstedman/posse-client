@@ -13,6 +13,17 @@ export class SchedulerLockController {
     this.scheduler.schedulerLock.maybeLogStarvation(nowMs);
   }
 
+  canDispatch() {
+    const scheduler = this.scheduler;
+    if (!scheduler._running || scheduler._lockLost) return false;
+    const lock = scheduler.schedulerLock.info();
+    if (lock?.owner_id !== scheduler.ownerId || !(Date.parse(lock.expires_at) > Date.now())) {
+      this.stopForLoss("Scheduler no longer owns a live lock - stopping dispatch");
+      return false;
+    }
+    return true;
+  }
+
   renew() {
     if (!this.scheduler._running) return false;
     return this.scheduler.schedulerLock.renewNow();

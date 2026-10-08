@@ -36,7 +36,7 @@ export class ProviderAttemptLifecycle {
     this.worker = worker;
   }
 
-  async prepare({ job, leaseToken, wrappedJob } = {}) {
+  async prepare({ job, leaseToken, wrappedJob, onAttemptCreated } = {}) {
     const worker = this.worker;
     const role = worker._roleFor(job.job_type);
     const executionPayload = worker.parsePayload(job);
@@ -55,6 +55,7 @@ export class ProviderAttemptLifecycle {
           worker.emit(job.id, `${C.red}[stale-lease] WI#${job.work_item_id} job #${job.id} — lease lost before image-route readiness failure handling${C.reset}`);
           return { ok: false };
         }
+        onAttemptCreated?.(routeAttempt.attempt.id);
         completeAttempt(routeAttempt.attempt.id, {
           status: "failed",
           error_text: errMsg,
@@ -134,6 +135,7 @@ export class ProviderAttemptLifecycle {
           worker.emit(job.id, `${C.red}[stale-lease] WI#${job.work_item_id} job #${job.id} — lease lost before provider-auth liveness handling${C.reset}`);
           return { ok: false };
         }
+        onAttemptCreated?.(livenessAttempt.attempt.id);
         completeAttempt(livenessAttempt.attempt.id, {
           status: "failed",
           error_text: errMsg,
@@ -182,6 +184,7 @@ export class ProviderAttemptLifecycle {
     }
 
     const { attemptCount, attempt } = result;
+    onAttemptCreated?.(attempt.id);
     const effectiveAttemptCount = generationAttempts();
 
     // Recalculate tier if attempt drifted (provider already resolved above with job.provider).

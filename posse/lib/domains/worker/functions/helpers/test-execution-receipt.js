@@ -24,6 +24,7 @@ import {
   TEST_SUBPROCESS_ENV_KEYS,
   VERIFICATION_PULSE_CAPABILITY_ENV,
 } from "../../../../catalog/process.js";
+import { parentSecretValues, redactExactValues } from "../../../../shared/platform/functions/subprocess-output.js";
 import { filterProcessEnv } from "../../../../shared/platform/functions/process-env.js";
 import {
   describeToolchain,
@@ -79,7 +80,6 @@ const MUTATING_TEST_FLAGS = new Set([
 const INTERACTIVE_TEST_FLAGS = new Set([
   "--inspect", "--inspect-brk", "--open", "--ui", "--watch", "--watchall", "--watch-all",
 ]);
-const SENSITIVE_PARENT_ENV_NAME_RE = /(?:^|_)(?:api_?key|access_?key|private_?key|token|secret|credential|password|passwd|pwd|auth|oauth|bearer|pat|cookie|session)(?:_|$)|^posse_key$/i;
 
 function sha256(value) {
   return createHash("sha256").update(String(value || ""), "utf8").digest("hex");
@@ -92,19 +92,6 @@ function appendBounded(current, chunk, maxChars = MAX_STREAM_CHARS) {
     value: next.slice(next.length - maxChars),
     truncated: true,
   };
-}
-
-function parentSecretValues(baseEnv = process.env) {
-  return [...new Set(Object.entries(baseEnv || {})
-    .filter(([key, value]) => SENSITIVE_PARENT_ENV_NAME_RE.test(key) && String(value || "").length >= 6)
-    .map(([, value]) => String(value)))]
-    .sort((a, b) => b.length - a.length);
-}
-
-function redactExactValues(value, secrets) {
-  let output = String(value || "");
-  for (const secret of secrets) output = output.split(secret).join("[REDACTED:parent-env]");
-  return output;
 }
 
 function killProcessTree(child, {
