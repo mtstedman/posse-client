@@ -545,7 +545,6 @@ export const TOOL_CATALOG = {
 const REMOTE_ATLAS_INTERNAL_TOOLS = Object.freeze([
   "traverse_ref",
   "fetch_ref",
-  "create_ref",
   "repo.overview",
   "tree.overview",
   "tree.scope",
@@ -945,6 +944,7 @@ export function getDeterministicMcpToolNames(role, {
   finalReview = false,
   atlasAvailable = false,
   disableSystemTools = false,
+  researchInvestigation = false,
   customTools = false,
 } = {}) {
   if (role === "subagent") return ["sub_agent_next_input", "agent_handoff"];
@@ -997,9 +997,9 @@ export function getDeterministicMcpToolNames(role, {
       if (index !== -1) tools.splice(index, 1);
     }
   }
-  if (role === "researcher" && atlasAvailable && disableSystemTools) {
-    // Lock down generic browsing while retaining signed, budget-accounted
-    // literal search alongside Atlas retrieval.
+  if (role === "researcher" && atlasAvailable && disableSystemTools && researchInvestigation) {
+    // Dispatched code researchers start from a focused assignment. Keep
+    // directory discovery available to the normal researcher and planner.
     const index = tools.indexOf("list_files");
     if (index !== -1) tools.splice(index, 1);
   }

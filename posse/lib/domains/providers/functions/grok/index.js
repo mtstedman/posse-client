@@ -12,7 +12,7 @@ import { MCP_TOOL_DEADLINE_MODES } from "../../../../catalog/provider.js";
 import { getSetting } from "../../../queue/functions/index.js";
 import { getResolvedImageProtocol } from "../../../artifacts/functions/index.js";
 import { composeRemoteAssessorPromptForProvider } from "../shared/remote-assessor-prompt.js";
-import { appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
+import { appendExecutionTools, buildExecutionContract, renderExecutionContractBlock, renderProviderPromptContracts } from "../../../../shared/tools/functions/contract.js";
 import { projectFunctionToolSurface } from "../../../../shared/tools/functions/provider-surface.js";
 import { formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { issuedToolSurfaceForProviderPolicy, narrowProviderOptionsToRemoteIssuance } from "../../../../shared/tools/functions/issued-tool-policy.js";
@@ -479,8 +479,9 @@ export async function callProvider(promptText, {
   executionContract = projectFunctionToolSurface(executionContract, tools);
   const contractBlock = renderExecutionContractBlock(executionContract, {
     remoteComposed: skipRolePrompt,
+    remoteSystemPrompt,
   });
-  const remoteSystemPromptText = String(remoteSystemPrompt || "").trim() || null;
+  const remoteSystemPromptText = renderProviderPromptContracts(remoteSystemPrompt, executionContract).trim() || null;
   const systemPrompt = [
     remoteSystemPromptText,
     contractBlock,

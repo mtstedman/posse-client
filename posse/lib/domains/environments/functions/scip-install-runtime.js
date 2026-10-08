@@ -50,8 +50,13 @@ export function scipDependencyInstallEnv(sourceEnv = process.env) {
 export function terminateScipCommand(child, {
   platform = process.platform,
   spawnSyncImpl = spawnSync,
+  processGroupId = null,
 } = {}) {
-  if (!child || child.exitCode != null) return false;
+  if (!child) return false;
+  if (platform !== "win32" && Number.isInteger(processGroupId) && processGroupId > 0) {
+    try { process.kill(-processGroupId, "SIGKILL"); return true; } catch { /* fall through */ }
+  }
+  if (child.exitCode != null) return false;
   if (platform === "win32" && child.pid) {
     try {
       const killed = spawnSyncImpl("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
@@ -65,6 +70,17 @@ export function terminateScipCommand(child, {
     }
   }
   try { return child.kill("SIGKILL"); } catch { return false; }
+}
+
+async function waitForProcessGroupExit(processGroupId, timeoutMs = 5000) {
+  if (!processGroupId) return true;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { process.kill(-processGroupId, 0); }
+    catch (error) { if (error?.code === "ESRCH") return true; }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return false;
 }
 
 /**
@@ -89,6 +105,7 @@ export async function runCommand(command, args, {
     let timer = null;
     let forceTimer = null;
     let settleTimer = null;
+    let processGroupId = null;
 
     const finish = (result) => {
       if (settled) return;
@@ -105,7 +122,9 @@ export async function runCommand(command, args, {
         env,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        detached: process.platform !== "win32",
       });
+      if (process.platform !== "win32") processGroupId = child.pid || null;
     } catch (err) {
       finish({ ok: false, message: err?.message || String(err), status: null, signal: null });
       return;
@@ -114,10 +133,12 @@ export async function runCommand(command, args, {
     if (effectiveTimeoutMs != null) {
       timer = setTimeout(() => {
         timedOut = true;
-        terminateScipCommand(child);
-        forceTimer = setTimeout(() => terminateScipCommand(child), 1000);
+        terminateScipCommand(child, { processGroupId });
+        forceTimer = setTimeout(() => terminateScipCommand(child, { processGroupId }), 1000);
         forceTimer.unref?.();
-        settleTimer = setTimeout(() => {
+        settleTimer = setTimeout(async () => {
+          terminateScipCommand(child, { processGroupId });
+          await waitForProcessGroupExit(processGroupId, 1000);
           child.stdout?.destroy();
           child.stderr?.destroy();
           child.unref?.();
@@ -142,11 +163,14 @@ export async function runCommand(command, args, {
     child.on("error", (err) => {
       finish({ ok: false, message: err?.message || String(err), status: null, signal: null });
     });
-    child.on("close", (status, signal) => {
+    child.on("close", async (status, signal) => {
       if (timedOut) {
+        const groupExited = await waitForProcessGroupExit(processGroupId);
         finish({
           ok: false,
-          message: `timed out after ${effectiveTimeoutMs}ms`,
+          message: groupExited
+            ? `timed out after ${effectiveTimeoutMs}ms`
+            : `timed out after ${effectiveTimeoutMs}ms; process tree did not report exit`,
           status,
           signal,
         });

@@ -22,6 +22,7 @@ import {
   updateJobPayload,
   updateJobStatus,
 } from "../../../queue/functions/index.js";
+import { getRecentArtifacts } from "../../../queue/functions/artifacts.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { extractJsonResult } from "../../../../shared/format/functions/json.js";
@@ -1912,7 +1913,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     if (Number.isInteger(result.agentCallId)) {
       toolBudgetExhaustion = assessorToolBudgetExhaustion(result.agentCallId, job.id);
       if (toolBudgetExhaustion) {
-        const priorArtifact = getArtifacts(job.id, "review").at(-1);
+        const priorArtifact = getRecentArtifacts(job.id, 1, "review")[0];
         try {
           const metadata = typeof priorArtifact?.content_json === "string"
             ? JSON.parse(priorArtifact.content_json)
@@ -3073,13 +3074,14 @@ export async function runPostExecutionAssessment(worker, {
         cwd: assessmentCwd,
         assessmentContext,
         siblingScopeOwners: (paths) => siblingJobScopeOwners(job.id, paths),
-        cleanupWorktree: async () => snapshotAndResetDirtyWorktreeAsync(
+        cleanupWorktree: async ({ expectedHead }) => snapshotAndResetDirtyWorktreeAsync(
           assessmentCwd,
           worker.projectDir,
           {
             reason: `assessment-scoped-check-side-effects-wi-${job.work_item_id}-job-${job.id}`,
             branchName: getWorkItem(job.work_item_id)?.branch_name || null,
             wiId: job.work_item_id,
+            expectedHead,
             onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-checks] ${message}${C.reset}`),
           },
         ),

@@ -74,7 +74,7 @@ export function narrowLimits(limits, narrowing = limits) {
   return Object.fromEntries(Object.keys(limits).map(key => [key, Math.min(limits[key], narrowing[key])]));
 }
 export function validateDefinition(definition) {
-  object(definition, ["schema_version", "name", "version", "state", "intent", "binding", "capabilities", "required_capabilities", "resource_requirements", "contract", "runtime", "output_roots", "published_by", "published_at", "deprecated_at", "created_at", "updated_at"], ["schema_version", "name", "version", "intent", "binding", "capabilities", "contract", "runtime"]);
+  object(definition, ["schema_version", "name", "version", "state", "intent", "instructions", "binding", "capabilities", "required_capabilities", "resource_requirements", "contract", "runtime", "output_roots", "published_by", "published_at", "deprecated_at", "created_at", "updated_at"], ["schema_version", "name", "version", "intent", "binding", "capabilities", "contract", "runtime"]);
   demand(definition.schema_version === 1 && /^[a-z][a-z0-9-]*$/.test(definition.name), "Invalid skill identity");
   demand(/^(?:draft|(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$/.test(definition.version), "Invalid skill version");
   demand(typeof definition.intent === "string" && definition.intent.trim().length > 0 && definition.intent.length <= 20000, "Invalid skill intent");
@@ -93,6 +93,21 @@ export function validateDefinition(definition) {
     demand(Array.isArray(resource.operations) && resource.operations.length && resource.operations.every(op => AUTOMATION_RESOURCE_OPERATIONS.includes(op)), "Invalid resource requirement operation");
     resources.add(resource.id);
   }
+  const granted = new Set();
+  demand(Array.isArray(definition.capabilities), "Capabilities must be an array (empty is allowed)");
+  for (const cap of definition.capabilities) {
+    object(cap, ["kind", "id", "output_schema"], ["kind", "id"]);
+    demand(["tool", "child_skill", "native_tool"].includes(cap.kind) && typeof cap.id === "string" && cap.id.length > 0 && !granted.has(cap.id), "Invalid/duplicate capability");
+    granted.add(cap.id);
+    if (cap.output_schema) ajv.compile(cap.output_schema);
+  }
+  for (const id of definition.required_capabilities || []) demand(granted.has(id), `Required capability missing: ${id}`);
+  object(definition.runtime, ["mode", "recipe"], ["mode"]);
+  if (definition.runtime.mode === "instructions") {
+    demand(typeof definition.instructions === "string" && definition.instructions.trim() && Buffer.byteLength(definition.instructions) <= 128 * 1024, "Skill instructions are required (maximum 128 KiB)");
+    demand(!definition.runtime.recipe?.length && !definition.output_roots?.length && !definition.resource_requirements?.length, "Instruction skills use the agent runtime and tool grants");
+    return definition;
+  }
   const contract = definition.contract;
   object(contract, ["input_schema", "output_schema", "limits", "effect", "tests"], ["input_schema", "output_schema", "limits", "effect", "tests"]);
   validateLimits(contract.limits);
@@ -104,16 +119,7 @@ export function validateDefinition(definition) {
   let invalid = false;
   try { schemaCheck(contract.input_schema, contract.tests.invalid_input); } catch { invalid = true; }
   demand(invalid, "Invalid fixture must fail input validation");
-  const granted = new Set();
-  demand(Array.isArray(definition.capabilities) && definition.capabilities.length > 0, "Capabilities required");
-  for (const cap of definition.capabilities) {
-    object(cap, ["kind", "id", "output_schema"], ["kind", "id"]);
-    demand(["tool", "child_skill", "native_tool"].includes(cap.kind) && typeof cap.id === "string" && cap.id.length > 0 && !granted.has(cap.id), "Invalid/duplicate capability");
-    granted.add(cap.id);
-    if (cap.output_schema) ajv.compile(cap.output_schema);
-  }
-  for (const id of definition.required_capabilities || []) demand(granted.has(id), `Required capability missing: ${id}`);
-  object(definition.runtime, ["mode", "recipe"], ["mode"]);
+
   demand(["recipe", "bounded-agent"].includes(definition.runtime.mode), "Unknown runtime");
   if (definition.runtime.mode === "recipe") {
     demand(Array.isArray(definition.runtime.recipe) && definition.runtime.recipe.length > 0, "Recipe steps required");

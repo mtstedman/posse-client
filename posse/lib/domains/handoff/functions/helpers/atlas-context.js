@@ -53,6 +53,7 @@ import {
   buildResearcherVisibleTaskProjection,
   chooseResearcherPrefetchLane,
   normalizeResearchPrefetchFocusMode,
+  usesResearchPrefetchOrientation,
 } from "./research-prefetch-policy.js";
 import { isAtlasSymbolId } from "../../../atlas/functions/v2/symbol-id.js";
 import { atlasSymbolRefFromResearchSeed } from "./research-symbols.js";
@@ -2198,7 +2199,7 @@ export async function attachAtlasPlannerSlice(packet) {
 
     const atlasConfig = packet.atlas_config || getAtlasIntegrationConfig();
     const isResearcher = packet.recipient === "researcher";
-    const focusState = isResearcher ? _researchPrefetchFocusState(packet, atlasConfig) : null;
+    const focusState = usesResearchPrefetchOrientation(packet) ? _researchPrefetchFocusState(packet, atlasConfig) : null;
     const focusedResearcher = focusState?.mode === "on";
     const legacyTaskText = buildPlannerAtlasTaskText(packet);
     const taskText = focusedResearcher
@@ -2297,7 +2298,7 @@ async function _attachAtlasTreePrefetchContext(packet, {
   seedSymbols = [],
   focusState = null,
 }) {
-  const focusedResearcher = packet.recipient === "researcher" && focusState?.mode === "on";
+  const focusedResearcher = usesResearchPrefetchOrientation(packet) && focusState?.mode === "on";
   const prefetchTargets = selectAtlasPrefetchTargets(packet, treeScope.candidateFiles, {
     focus: focusState?.focus || null,
     visibleOnly: focusedResearcher,
@@ -2325,7 +2326,7 @@ async function _attachAtlasTreePrefetchContext(packet, {
   const wideningCallerPaths = Array.isArray(treeScope.scopeWidening)
     ? treeScope.scopeWidening.map((c) => (c && typeof c === "object" ? c.path : c)).filter(Boolean)
     : [];
-  const manifestEntryFiles = packet.recipient === "researcher"
+  const manifestEntryFiles = usesResearchPrefetchOrientation(packet)
     ? await _resolveManifestEntryFiles(packet)
     : [];
   const rankedSurveyPool = expandAtlasParallelEntrySiblings(packet.cwd, _uniqueAtlasPaths(
@@ -2352,7 +2353,7 @@ async function _attachAtlasTreePrefetchContext(packet, {
   });
   const contextAllowed = packet.recipient === "researcher"
     && _researcherGeneratedContextAllowed(packet, tools);
-  const decision = packet.recipient === "researcher" && focusState
+  const decision = usesResearchPrefetchOrientation(packet) && focusState
     ? chooseResearcherPrefetchLane({ focus: focusState.focus, treeScope, contextAllowed })
     : { lane: "survey", reason: "non_researcher_prefetch" };
   if (focusState) focusState.decision = decision;
@@ -3171,7 +3172,7 @@ async function _attachAtlasSlicePrefetchContext(packet, {
     .map((card) => _normalizeSliceCard(card, filePaths))
     .filter(Boolean);
 
-  const focusedResearcher = packet.recipient === "researcher" && focusState?.mode === "on";
+  const focusedResearcher = usesResearchPrefetchOrientation(packet) && focusState?.mode === "on";
   const prefetchTargets = selectAtlasPrefetchTargets(packet, filePaths, {
     focus: focusState?.focus || null,
     visibleOnly: focusedResearcher,
@@ -3526,7 +3527,7 @@ function renderAtlasContextSection(packet) {
     atlasHeading(`${label} CONTEXT`),
     hasCallableTools
       ? `${label} is active for this handoff; use the listed ${label} tools when they can answer the task.`
-      : packet.recipient === "researcher"
+      : usesResearchPrefetchOrientation(packet)
         ? `${label} is active for this handoff.`
       : `${label} context prefetch is active for this handoff. Use the prefetched context and its backed cursor pages as the initial code map.`,
     atlasField("Phase", packet.atlas.phase),
@@ -3819,7 +3820,7 @@ function _renderAtlasSurveyMissSection(sc, packet) {
 
 function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
   const slice = packet.atlas_slice_context;
-  if (packet.recipient === "researcher") {
+  if (usesResearchPrefetchOrientation(packet)) {
     const direction = slice?.surveyContext?.thinDirection;
     const roots = Array.isArray(direction?.roots) ? direction.roots.filter(Boolean).slice(0, 3) : [];
     const edges = Array.isArray(direction?.edges) ? direction.edges.filter((edge) => edge?.from && edge?.to).slice(0, 6) : [];

@@ -120,12 +120,60 @@ export function getArtifacts(jobId, typeFilter = null) {
   return hydrateArtifactRows(db.prepare(`SELECT * FROM artifacts WHERE job_id = ? ORDER BY created_at`).all(jobId));
 }
 
+// History consumers can select their visible tail before loading file payloads.
+export function getRecentArtifacts(jobId, limit = 6, typeFilter = null) {
+  const count = Math.max(0, Math.min(500, Number(limit) || 0));
+  if (count === 0) return [];
+  const rows = typeFilter
+    ? getDb().prepare(`
+      SELECT * FROM artifacts WHERE job_id = ? AND artifact_type = ?
+      ORDER BY created_at DESC, id DESC LIMIT ?
+    `).all(jobId, typeFilter, count)
+    : getDb().prepare(`
+      SELECT * FROM artifacts WHERE job_id = ?
+      ORDER BY created_at DESC, id DESC LIMIT ?
+    `).all(jobId, count);
+  return hydrateArtifactRows(rows.reverse());
+}
+
+export function getArtifactMetadataForJob(workItemId, jobId) {
+  return getDb().prepare(`
+    SELECT id, artifact_type, storage_kind, byte_size, created_at
+    FROM artifacts WHERE work_item_id = ? AND job_id = ? ORDER BY id DESC
+  `).all(workItemId, jobId);
+}
+
 export function getArtifactsByWorkItem(workItemId, typeFilter = null) {
   const db = getDb();
   if (typeFilter) {
     return hydrateArtifactRows(db.prepare(`SELECT * FROM artifacts WHERE work_item_id = ? AND artifact_type = ? ORDER BY created_at`).all(workItemId, typeFilter));
   }
   return hydrateArtifactRows(db.prepare(`SELECT * FROM artifacts WHERE work_item_id = ? ORDER BY created_at`).all(workItemId));
+}
+
+export function getArtifactPageByWorkItem(workItemId, {
+  typeFilter = null,
+  cursor = null,
+  limit = 32,
+} = {}) {
+  const count = Math.max(1, Math.min(500, Number(limit) || 32));
+  const position = cursor && typeof cursor.created_at === "string" && Number.isInteger(cursor.id)
+    ? cursor : null;
+  const rows = getDb().prepare(`
+    SELECT * FROM artifacts
+    WHERE work_item_id = ?
+      AND (? IS NULL OR artifact_type = ?)
+      AND (? IS NULL OR created_at < ? OR (created_at = ? AND id < ?))
+    ORDER BY created_at DESC, id DESC LIMIT ?
+  `).all(workItemId, typeFilter, typeFilter, position?.created_at ?? null,
+    position?.created_at ?? null, position?.created_at ?? null, position?.id ?? null,
+    count + 1);
+  const selected = rows.slice(0, count);
+  const last = selected.at(-1);
+  return {
+    items: hydrateArtifactRows(selected),
+    nextCursor: rows.length > count && last ? { created_at: last.created_at, id: last.id } : null,
+  };
 }
 
 export function getArtifact(id) {

@@ -5,20 +5,27 @@
  * no last piece that implies the others, so with `fanOut` the dependency
  * becomes one on every piece.
  */
-export function rewriteDependenciesAfterSplit(tasks, splitIndex, splitTaskCount, finalIndex, { fanOut = false } = {}) {
+export function dependencyIndexesAfterSplit(indexes, splitIndex, splitTaskCount, finalIndex, { fanOut = false } = {}) {
   const offset = splitTaskCount - 1;
-  if (offset <= 0) return;
+  if (offset <= 0) return [...indexes];
+  return [...new Set(indexes.flatMap((depIdx) => {
+    if (!Number.isInteger(depIdx)) return [depIdx];
+    if (depIdx === splitIndex) {
+      return fanOut ? Array.from({ length: splitTaskCount }, (_, piece) => splitIndex + piece) : [finalIndex];
+    }
+    if (depIdx > splitIndex) return [depIdx + offset];
+    return [depIdx];
+  }))];
+}
+
+export function rewriteDependenciesAfterSplit(tasks, splitIndex, splitTaskCount, finalIndex, { fanOut = false } = {}) {
+  if (splitTaskCount <= 1) return;
   for (let idx = splitIndex + 1; idx < tasks.length; idx++) {
     const task = tasks[idx];
     if (!Array.isArray(task?.depends_on_index)) continue;
-    task.depends_on_index = [...new Set(task.depends_on_index.flatMap((depIdx) => {
-      if (!Number.isInteger(depIdx)) return [depIdx];
-      if (depIdx === splitIndex) {
-        return fanOut ? Array.from({ length: splitTaskCount }, (_, piece) => splitIndex + piece) : [finalIndex];
-      }
-      if (depIdx > splitIndex) return [depIdx + offset];
-      return [depIdx];
-    }))];
+    task.depends_on_index = dependencyIndexesAfterSplit(
+      task.depends_on_index, splitIndex, splitTaskCount, finalIndex, { fanOut },
+    );
   }
 }
 

@@ -1,3 +1,6 @@
+import { observeAtlasExecution } from "../functions/atlas-result-status.js";
+import { sortAgentToolDefinitions } from "../functions/agent-schema.js";
+import { observeAtlasRequest } from "../functions/atlas-request-observation.js";
 import { executeDispatchAgent, submitWebResearchHandoff } from "../../../domains/web-research/classes/WebResearchRuntime.js";
 import { executeFinalReview } from "../../../domains/assessment/classes/FinalReviewRuntime.js";
 // @ts-check
@@ -1912,7 +1915,7 @@ function filterToolsListMessage(message, policy) {
     ...message,
     result: {
       ...message.result,
-      tools: tools.filter((tool) => toolAllowedByPolicy(policy, tool?.name)),
+      tools: sortAgentToolDefinitions(tools.filter((tool) => toolAllowedByPolicy(policy, tool?.name))),
     },
   };
 }
@@ -4153,7 +4156,12 @@ function recordOwnerToolObservation({
           ...(Number.isSafeInteger(synthesisAdmission?.assignedPhysicalCallStep) ? {
             physical_call_step: synthesisAdmission.assignedPhysicalCallStep,
             physical_call_ceiling: admissionMaxPhysicalCalls(synthesisAdmission),
-            physical_request: 1,
+            physical_request: synthesisAdmission.physicalRequestId ? 0 : 1,
+          } : {}),
+          ...(synthesisAdmission?.physicalRequestId ? {
+            measurement_version: 1,
+            measurement_unit: "expanded_call",
+            physical_request_id: synthesisAdmission.physicalRequestId,
           } : {}),
           ...(synthesisAdmission?.physicalBatchId ? {
             research_physical_batch_version: 1,
@@ -6810,6 +6818,10 @@ export class PersistentMcpOwner {
   }
 
   async _executeAtlasToolCall(args) {
+    return observeAtlasRequest(args, (request) => this._executeAtlasRequestItems(request));
+  }
+
+  async _executeAtlasRequestItems(args) {
     const binding = args?.binding || gatewayBindingSnapshot(args?.session);
     const boot = binding.bootConfig;
     const queueKey = [
@@ -6833,6 +6845,7 @@ export class PersistentMcpOwner {
       }));
       const physicalStep = Number.isSafeInteger(args.assignedPhysicalCallStep)
         ? args.assignedPhysicalCallStep : this._reserveResearchPhysicalCall(args.session, requested);
+      if (args.physicalRequest) args.physicalRequest.physicalStep ??= physicalStep;
       const physicalBatchId = crypto.randomUUID();
       const responses = await Promise.all(plan.items.map((item, index) => item.invalid
         ? { result: mcpToolErrorPayload(item.error || "Invalid symbol.get batch item", {
@@ -6863,6 +6876,7 @@ export class PersistentMcpOwner {
       const noticedBatchResult = appendAndRecordResearchBudgetNotice(batchResult, batchAdmission, args.session, "symbol.get");
       return mcpToolResultMessage(args.message, noticedBatchResult);
     }
+    if (args.physicalRequest) args.physicalRequest.expandedCalls++;
     const enqueuedAt = Date.now();
     const researchExploration = String(boot.role || "") === "researcher"
       && isResearchAtlasExplorationAction(effectiveAction);
@@ -6907,6 +6921,7 @@ export class PersistentMcpOwner {
           ? args.assignedPhysicalCallStep
           : this._reserveResearchPhysicalCall(args?.session, requested))
       : null;
+    if (args.physicalRequest) args.physicalRequest.physicalStep ??= assignedPhysicalCallStep;
     const synthesisAdmission = researchExploration && researchBatch?.admission
       ? {
           ...ownerResearchSynthesisAdmission(args?.session, effectiveAction, {
@@ -6926,6 +6941,7 @@ export class PersistentMcpOwner {
             })
           : null);
     if (synthesisAdmission) Object.assign(synthesisAdmission, {
+      physicalRequestId: args.physicalRequest?.id,
       reservedPhysicalCalls: () => this._researchCallReservations.get(researchBudgetKey(boot)),
     });
     if (synthesisAdmission && args.physicalBatchId) Object.assign(synthesisAdmission, {physicalBatchId: args.physicalBatchId});
@@ -6936,18 +6952,18 @@ export class PersistentMcpOwner {
     // the call that triggered them. They carry that call's queue slot so they
     // execute in it instead of queueing behind it, which would wait on itself.
     const slotArgs = { ...args, atlasQueueSlot: queueKey };
-    const executeWithRecovery = async () => {
-      const executed = await this._executeAtlasToolCallNow({
+    const executeWithRecovery = () => observeAtlasExecution(args.physicalRequest,
+      () => this._executeAtlasToolCallNow({
         ...args,
         binding,
         synthesisAdmission,
         enqueuedAt,
-      });
+      }), async (executed) => {
       const recovered = await this._recoverSameFileAmbiguity(executed, slotArgs, assignedPhysicalCallStep);
       const widened = await this._recoverEmptyIdentifierFilter(recovered, slotArgs, assignedPhysicalCallStep);
       const surveyed = await this._recoverLensDirectory(widened, slotArgs, assignedPhysicalCallStep);
       return this._resolveExactNameSearch(surveyed, slotArgs, assignedPhysicalCallStep);
-    };
+    });
     if (args?.atlasQueueSlot === queueKey) return executeWithRecovery();
     const concurrentResearchRead = researchExploration
       && CONCURRENT_RESEARCH_ATLAS_ACTIONS.has(effectiveAction)

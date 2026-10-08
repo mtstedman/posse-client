@@ -44,7 +44,6 @@ const INTERNAL_DETERMINISTIC_TOOL_NAMES = new Set(["copy_file"]);
 const RESEARCHER_ATLAS_LOCKED_GENERIC_TOOLS = new Set([
   "chain_read",
   "chain_verdict",
-  "list_files",
 ]);
 const TRUSTED_REMOTE_POLICY_OBJECTS = new WeakSet();
 const TRUSTED_REMOTE_SURFACE_OBJECTS = new WeakSet();
@@ -90,12 +89,14 @@ function narrowResearcherAtlasLockedAllowlist(toolAllowlist, {
   role = "",
   atlasAvailable = false,
   disableSystemTools = false,
+  researchInvestigation = false,
 } = {}) {
   if (String(role || "").trim().toLowerCase() !== "researcher"
     || atlasAvailable !== true
     || disableSystemTools !== true) return toolAllowlist;
   toolAllowlist.tools = toolAllowlist.tools.filter(
-    (name) => !RESEARCHER_ATLAS_LOCKED_GENERIC_TOOLS.has(name),
+    (name) => !RESEARCHER_ATLAS_LOCKED_GENERIC_TOOLS.has(name)
+      && !(researchInvestigation === true && name === "list_files"),
   );
   return toolAllowlist;
 }
@@ -742,6 +743,7 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     role: runtimeRole,
     atlasAvailable,
     disableSystemTools,
+    researchInvestigation: signed.researchInvestigation === true,
   });
   if (attachment.agentHandoff !== true) {
     toolAllowlist.tools = toolAllowlist.tools.filter((name) => name !== "agent_handoff");

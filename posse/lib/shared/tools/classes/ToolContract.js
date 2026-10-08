@@ -3,7 +3,7 @@ import { TOOL_REFS } from "../../../catalog/tool-references.js";
 import { normalizeAtlasCodeWindowPolicy } from "../../../catalog/atlas-tools.js";
 import { isToolAuthorizedByIssuedSurface } from "../functions/issued-tool-policy.js";
 import { renderAtlasGuidance, renderToolBatchingGuidance } from "../functions/provider-surface.js";
-import { projectAgentToolDefinition } from "../functions/agent-schema.js";
+import { projectAgentToolDefinition, sortAgentToolDefinitions } from "../functions/agent-schema.js";
 import { projectProviderToolDefinition } from "../functions/provider-schema.js";
 import { ProviderToolRenderer } from "./ProviderToolRenderer.js";
 import { ToolCatalog } from "./ToolCatalog.js";
@@ -218,8 +218,8 @@ const EXACT_NAME_EXAMPLE_PREFERENCE = Object.freeze({
 
 // Claude Code rejects a tool name it was not given before the call reaches
 // MCP ("No such tool available"), so a guessed Codex-style or canonical name
-// cannot be aliased server-side. Prompts name tools canonically; show the
-// mapping to the callable names with two tools actually issued to this call.
+// cannot be aliased server-side. Examples must use callable names from the
+// definitions actually issued to this call.
 function renderClaudeExactToolNameGuidance(contract = {}, toolRenderer) {
   if (String(contract?.provider || "").trim().toLowerCase() !== "claude") return [];
   if (!toolRenderer || typeof toolRenderer.tryRenderIssued !== "function") return [];
@@ -252,9 +252,8 @@ function renderClaudeExactToolNameGuidance(contract = {}, toolRenderer) {
     : [...tools, ...atlas].slice(0, 2);
   if (examples.length === 0) return [];
   const callables = examples.map((entry) => `\`${entry.callable}\``).join(", ");
-  const references = examples.map((entry) => `\`${entry.reference}\``).join(" / ");
   return [
-    `Tool names: call tools only by their exact listed names (for example ${callables}); this prompt refers to ${examples.length === 1 ? "it" : "them"} as ${references}.`,
+    `Tool names: call tools only by their exact listed names (for example ${callables}).`,
   ];
 }
 
@@ -290,7 +289,7 @@ export class ToolContract {
     return renderToolBatchingGuidance(contract, renderer).join("\n");
   }
 
-  renderProviderGuidanceBlock(toolRenderer = null) {
+  renderProviderGuidanceBlock(toolRenderer = null, { atlasEmbedded = false } = {}) {
     const contract = this.contract;
     const renderer = toolRenderer || new ProviderToolRenderer({
       providerName: contract.provider,
@@ -298,8 +297,7 @@ export class ToolContract {
     });
     return [
       ...renderClaudeExactToolNameGuidance(contract, renderer),
-      ...renderAtlasGuidance(contract),
-      ...renderToolBatchingGuidance(contract, renderer),
+      ...(atlasEmbedded ? [] : renderAtlasGuidance(contract, renderer)),
     ].join("\n");
   }
 
@@ -661,7 +659,7 @@ export class ToolContract {
       const def = toolMap[canonicalToolName(tool)];
       if (def) tools.push(projectProviderToolDefinition(def, this.contract.provider));
     }
-    return tools;
+    return sortAgentToolDefinitions(tools);
   }
 
   static build({

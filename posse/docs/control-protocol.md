@@ -122,6 +122,10 @@ whose terminal ack was not durably recorded fails replay with
 `command_in_progress`; clients MUST reconcile it with `command.status` rather
 than issuing the mutation under a new id. Bridges retain terminal command
 results for at least 30 days and never automatically expire pending claims.
+Completed results older than 30 days can be pruned when a later command completes.
+After that boundary, `command.status: not_found` does not prove the mutation
+never ran; reconcile against the target state and bridge audit history before
+choosing a new command id.
 
 `instance_id` identifies which bridge the relay should route to. The relay
 rejects (`ok: false`, `error.code: "instance_offline"` or
@@ -328,7 +332,7 @@ Reads the durable state of a previous command without repeating its effect.
 
 // result (unknown or retained states)
 { "command_id": "c_original-command-uuid", "status": "not_found" }
-{ "command_id": "c_original-command-uuid", "command_name": "queue.add", "status": "pending" }
+{ "command_id": "c_original-command-uuid", "command_name": "queue.add", "status": "pending", "created_at": "...", "updated_at": "...", "age_ms": 120000, "reconciliation": "Inspect the target state and bridge audit history; do not issue the mutation with a new id while its outcome is unknown." }
 
 // result (terminal; ack is the exact original command acknowledgement)
 {

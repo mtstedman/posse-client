@@ -896,7 +896,9 @@ export class AtlasToolExecutor {
     const rawArgs = canonicalizeAtlasRepoPaths(suppliedArgs, requestRepoPathRoots(request));
     const baseAction = resolveAtlasAction(toolName);
     const action = gatewayEffectiveAction(baseAction, rawArgs);
-    const args = nativeCompleteToolArgs(action, rawArgs);
+    // Keep the caller's search limit through caching and result trimming.
+    // Candidate-pool expansion belongs only at the native dispatch boundary.
+    const args = action === "symbol.search" ? rawArgs : nativeCompleteToolArgs(action, rawArgs);
     const pathError = action === "code.survey" ? codeSurveyPathError(args.paths ?? args.path) : null;
     if (pathError) {
       return conductorEnvelopeToToolResult({
@@ -1517,6 +1519,7 @@ export class AtlasToolExecutor {
         const converted = conductorEnvelopeToToolResult(envelope);
         return withExecutorDiagnostics(converted, {
           via: "conductor_retrieve",
+          ...(envelope?._retrievalDiagnostics ? { reader: envelope._retrievalDiagnostics } : {}),
           queue: { wait_ms: queueInfo.waitMs, mode: queueInfo.mode },
           timings_ms: {
             read_context: readContextMs,

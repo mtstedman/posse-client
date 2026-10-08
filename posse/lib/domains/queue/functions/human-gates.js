@@ -1,9 +1,7 @@
 import { createHash } from "crypto";
 import {
-  MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
-  MERGE_VERIFICATION_REVIEW_TYPE,
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
-  POST_MERGE_DB_TASK_REVIEW_TYPE,
+  HUMAN_GATE_RECONCILE_REASONS,
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
   canonicalHumanGateAction,
   humanGateContractForPayload,
@@ -16,6 +14,13 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { now, runImmediateTransaction } from "./common.js";
 import { flushEventsNow } from "./events.js";
 import { jobHasLiveLeaseAt } from "./lease-state.js";
+import {
+  abandonedResolverDecision,
+  beginResolutionDecision,
+  shouldRetireTerminalWorkItemGate,
+  sourceStateDecision,
+  terminalGateDecision,
+} from "./human-gate-decisions.js";
 
 const ACTIVE_GATE_STATES = Object.freeze(["open", "resolving"]);
 const WORK_ITEM_SINGLETON_GATE_KINDS = new Set([
@@ -371,32 +376,20 @@ export function beginHumanGateResolution({
     ).get(gateJobId));
     if (!row) return { ok: false, reason: "gate_contract_missing" };
 
-    const canonicalAction = canonicalHumanGateAction(action) || "respond";
-    const accepted = new Set([
-      ...row.allowed_actions,
-      ...row.allowed_actions.map(canonicalHumanGateAction),
-    ]);
-    if (!accepted.has(action) && !accepted.has(canonicalAction)) {
-      return {
-        ok: false,
-        reason: "action_not_allowed",
-        allowed_actions: row.allowed_actions,
-      };
-    }
-    const key = humanGateIdempotencyKey({
-      gateJobId,
-      generation: row.generation,
-      action: canonicalAction,
-      requestKey: idempotencyKey,
+    const decision = beginResolutionDecision({
+      gate: row,
+      action,
+      canonicalAction: canonicalHumanGateAction,
+      idempotencyKey: (resolvedAction) => humanGateIdempotencyKey({
+        gateJobId,
+        generation: row.generation,
+        action: resolvedAction,
+        requestKey: idempotencyKey,
+      }),
     });
-    if (row.gate_state === "resolved") {
-      return row.idempotency_key === key
-        ? { ok: true, idempotent: true, gate: row, action: row.resolution_action }
-        : { ok: false, reason: "gate_already_resolved", gate: row };
-    }
-    if (row.gate_state !== "open") {
-      return { ok: false, reason: "gate_not_open", gate: row };
-    }
+    if (!decision.ok || decision.idempotent) return decision;
+    const canonicalAction = decision.action;
+    const key = decision.idempotency_key;
 
     const gateJob = db.prepare(
       `SELECT status, lease_token, lease_expires_at, work_item_id FROM jobs WHERE id = ?`
@@ -422,15 +415,8 @@ export function beginHumanGateResolution({
       const original = db.prepare(
         `SELECT status, state_version FROM jobs WHERE id = ?`
       ).get(row.original_job_id);
-      if (!original) return { ok: false, reason: "original_job_missing" };
-      if (!row.allowed_source_states.includes(original.status)) {
-        return {
-          ok: false,
-          reason: "original_state_changed",
-          expected_states: row.allowed_source_states,
-          actual_state: original.status,
-        };
-      }
+      const sourceDecision = sourceStateDecision({ original, allowedStates: row.allowed_source_states });
+      if (!sourceDecision.ok) return sourceDecision;
       const reserved = db.prepare(`
         UPDATE jobs
         SET state_version = state_version + 1, updated_at = ?
@@ -674,6 +660,10 @@ export function reconcileHumanGates() {
     let registered = 0;
     let reopened = 0;
     let retired = 0;
+    const reasonCounts = {};
+    const countReason = (reason) => {
+      reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+    };
 
     const gateWorkItem = db.prepare(`SELECT work_item_id FROM jobs WHERE id = ?`);
 
@@ -751,6 +741,7 @@ export function reconcileHumanGates() {
       if (result.changes > 0) {
         if (terminalStatus === "canceled") _gateCanceledHook?.(db.prepare("SELECT * FROM jobs WHERE id = ?").get(row.gate_job_id));
         retired += 1;
+        countReason(HUMAN_GATE_RECONCILE_REASONS.CLOSED_CONTRACT_JOB);
         noteGateMutation(row.work_item_id);
       }
     }
@@ -777,24 +768,12 @@ export function reconcileHumanGates() {
           j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
           OR hg.gate_state IN ('open','resolving')
         )
-    `).all().filter((job) => {
-      const payload = asPayload(job.payload_json);
-      if (
-        payload.review_type === WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE
-        && job.work_item_status === "failed"
-      ) return false;
-      if (
-        payload.review_type === CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE
-        && job.work_item_status === "complete"
-        && job.work_item_merge_state !== "merged"
-      ) return false;
-      return payload.subtype !== "push_offer"
-        && payload.review_type !== POST_MERGE_DB_TASK_REVIEW_TYPE
-        && payload.review_type !== MERGE_VERIFICATION_REVIEW_TYPE
-        && payload.review_type !== MERGE_FAILURE_RECOVERY_REVIEW_TYPE;
-    });
+    `).all().filter((job) => shouldRetireTerminalWorkItemGate(job, asPayload(job.payload_json)));
     for (const job of terminalWorkItemGates) {
-      if (retireGateJob(job.id, "Owning work item is terminal")) retired += 1;
+      if (retireGateJob(job.id, "Owning work item is terminal")) {
+        retired += 1;
+        countReason(HUMAN_GATE_RECONCILE_REASONS.TERMINAL_WORK_ITEM);
+      }
     }
 
     // If the original job left every state permitted by the gate contract,
@@ -817,7 +796,10 @@ export function reconcileHumanGates() {
       if (retireGateJob(
         row.gate_job_id,
         `Original job state ${row.original_status} is outside the gate contract`,
-      )) retired += 1;
+      )) {
+        retired += 1;
+        countReason(HUMAN_GATE_RECONCILE_REASONS.SOURCE_STATE_CHANGED);
+      }
     }
 
     // ON DELETE SET NULL preserves a gate after its original job is pruned.
@@ -848,7 +830,10 @@ export function reconcileHumanGates() {
       if (retireGateJob(
         row.gate_job_id,
         `Original job #${row.referencedId} no longer exists`,
-      )) retired += 1;
+      )) {
+        retired += 1;
+        countReason(HUMAN_GATE_RECONCILE_REASONS.MISSING_ORIGINAL);
+      }
     }
 
     const missing = db.prepare(`
@@ -877,6 +862,7 @@ export function reconcileHumanGates() {
         });
         if (Number(gate?.gate_job_id) === Number(job.id)) {
           registered += 1;
+          countReason(HUMAN_GATE_RECONCILE_REASONS.REGISTERED_LEGACY);
           noteGateMutation(job.work_item_id);
         } else {
           db.prepare(`
@@ -888,6 +874,7 @@ export function reconcileHumanGates() {
             WHERE id=? AND status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
           `).run(now(), now(), job.id);
           retired += 1;
+          countReason(HUMAN_GATE_RECONCILE_REASONS.DUPLICATE_LEGACY);
           noteGateMutation(job.work_item_id);
         }
       } catch (error) {
@@ -899,7 +886,10 @@ export function reconcileHumanGates() {
         if (retireGateJob(
           job.id,
           `Could not establish durable gate contract: ${detail}`,
-        )) retired += 1;
+        )) {
+          retired += 1;
+          countReason(HUMAN_GATE_RECONCILE_REASONS.INVALID_LEGACY_CONTRACT);
+        }
       }
     }
 
@@ -934,6 +924,7 @@ export function reconcileHumanGates() {
         WHERE gate_job_id=? AND gate_state IN ('open','resolving')
       `).run(now(), now(), row.gate_job_id);
       retired += 1;
+      countReason(HUMAN_GATE_RECONCILE_REASONS.ORPHANED_GATE);
       noteGateMutation(row.work_item_id);
     }
 
@@ -974,6 +965,7 @@ export function reconcileHumanGates() {
         WHERE gate_job_id=? AND gate_state IN ('open','resolving')
       `).run(now(), now(), row.gate_job_id);
       retired += 1;
+      countReason(HUMAN_GATE_RECONCILE_REASONS.FAILED_RESOLUTION);
       noteGateMutation(row.work_item_id);
     }
 
@@ -1006,21 +998,29 @@ export function reconcileHumanGates() {
       const original = Number.isSafeInteger(referencedId) && referencedId > 0
         ? db.prepare(`SELECT status FROM jobs WHERE id = ?`).get(referencedId)
         : null;
-      if (Number.isSafeInteger(referencedId) && referencedId > 0 && !original) {
+      const decision = abandonedResolverDecision({
+        referencedId: Number.isSafeInteger(referencedId) && referencedId > 0 ? referencedId : null,
+        originalStatus: original?.status || null,
+        allowedStates: jsonArray(row.allowed_source_states_json),
+      });
+      if (decision === "retire_missing_original") {
         if (retireGateJob(
           row.gate_job_id,
           `Resolver disappeared after original job #${referencedId} was removed`,
-        )) retired += 1;
+        )) {
+          retired += 1;
+          countReason(HUMAN_GATE_RECONCILE_REASONS.MISSING_ORIGINAL);
+        }
         continue;
       }
-      if (
-        original
-        && !jsonArray(row.allowed_source_states_json).includes(original.status)
-      ) {
+      if (decision === "retire_source_changed") {
         if (retireGateJob(
           row.gate_job_id,
           `Resolver disappeared after the original job already changed to ${original.status}`,
-        )) retired += 1;
+        )) {
+          retired += 1;
+          countReason(HUMAN_GATE_RECONCILE_REASONS.SOURCE_STATE_CHANGED);
+        }
         continue;
       }
       db.prepare(`
@@ -1032,6 +1032,7 @@ export function reconcileHumanGates() {
         WHERE gate_job_id=? AND gate_state='resolving'
       `).run(now(), row.gate_job_id);
       reopened += 1;
+      countReason(HUMAN_GATE_RECONCILE_REASONS.ABANDONED_RESOLVER);
       noteGateMutation(row.work_item_id);
     }
 
@@ -1049,7 +1050,8 @@ export function reconcileHumanGates() {
         AND j.status IN (${TERMINAL_JOB_STATUSES_SQL})
     `).all();
     for (const row of inconsistent) {
-      if (row.status === "succeeded") {
+      const decision = terminalGateDecision({ jobStatus: row.status, headlessTimedOut: !!row.headless_timed_out });
+      if (decision === "resolve") {
         db.prepare(`
           UPDATE human_gates
           SET gate_state='resolved', resolved_at=?, updated_at=?,
@@ -1057,8 +1059,9 @@ export function reconcileHumanGates() {
           WHERE gate_job_id=?
         `).run(now(), now(), row.gate_job_id);
         retired += 1;
+        countReason(HUMAN_GATE_RECONCILE_REASONS.TERMINAL_GATE_JOB);
         noteGateMutation(row.work_item_id);
-      } else if (row.status === "canceled" || row.headless_timed_out) {
+      } else if (decision === "supersede") {
         db.prepare(`
           UPDATE human_gates
           SET gate_state='superseded', resolved_at=?, updated_at=?,
@@ -1067,6 +1070,7 @@ export function reconcileHumanGates() {
           WHERE gate_job_id=?
         `).run(now(), now(), row.headless_timed_out ? 1 : 0, row.gate_job_id);
         retired += 1;
+        countReason(HUMAN_GATE_RECONCILE_REASONS.TERMINAL_GATE_JOB);
         noteGateMutation(row.work_item_id);
       } else {
         db.prepare(`
@@ -1083,10 +1087,11 @@ export function reconcileHumanGates() {
           WHERE gate_job_id=?
         `).run(now(), row.gate_job_id);
         reopened += 1;
+        countReason(HUMAN_GATE_RECONCILE_REASONS.TERMINAL_GATE_JOB);
         noteGateMutation(row.work_item_id);
       }
     }
-    return { registered, reopened, retired };
+    return { registered, reopened, retired, reasonCounts };
   });
   if (mutated) {
     _humanGateReconcileHook?.([...affectedWorkItemIds]);

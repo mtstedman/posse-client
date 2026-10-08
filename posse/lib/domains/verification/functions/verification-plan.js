@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { adminGitExec } from "../../git/functions/admin-git-exec.js";
+import { detectNodePackageManager } from "../../../shared/tools/functions/node-package-manager.js";
 
 export const VERIFICATION_PLAN_SCHEMA_VERSION = 1;
 export const VERIFICATION_PLAN_CONFIG = "posse.verification.json";
@@ -53,10 +54,7 @@ function isCommitted(projectDir, relativePath) {
 }
 
 function packageManager(projectDir) {
-  if (fs.existsSync(path.join(projectDir, "pnpm-lock.yaml"))) return "pnpm";
-  if (fs.existsSync(path.join(projectDir, "yarn.lock"))) return "yarn";
-  if (fs.existsSync(path.join(projectDir, "bun.lock")) || fs.existsSync(path.join(projectDir, "bun.lockb"))) return "bun";
-  return "npm";
+  return detectNodePackageManager(projectDir).manager;
 }
 
 function packageScriptCommand(manager, script) {

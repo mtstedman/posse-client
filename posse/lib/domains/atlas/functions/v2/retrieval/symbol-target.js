@@ -9,6 +9,8 @@ import {
   uniqueResolutionSymbols,
 } from "./identifier-resolution.js";
 
+const exactIdentifier = value => normalizedQualifiedIdentifier(value, { caseSensitive: true });
+
 /**
  * Return every durable path-qualified location for an opaque symbol ID.
  * Stable IDs intentionally do not encode the mounted repository path.
@@ -85,7 +87,7 @@ function distinctQualifiedBearers(matches) {
   const bearers = new Map();
   for (const symbol of matches) {
     const display = String(symbol?.qualified_name || symbol?.name || "").trim();
-    const key = normalizedQualifiedIdentifier(display);
+    const key = exactIdentifier(display);
     if (!key) continue;
     const equivalent = [...bearers.keys()].find((candidate) => (
       candidate === key
@@ -138,6 +140,34 @@ function declarationsOverContainers(symbols) {
   return declarations.length > 0 ? declarations : symbols;
 }
 
+// Container preference applies within each file, never across repository paths.
+function declarationsByFile(symbols) {
+  const files = new Map();
+  for (const symbol of symbols) {
+    const rows = files.get(symbol.repo_rel_path) || [];
+    rows.push(symbol);
+    files.set(symbol.repo_rel_path, rows);
+  }
+  return [...files.values()].flatMap(declarationsOverContainers);
+}
+
+// Producer IDs can differ for the same declaration. Only identical, positive
+// byte spans in the same content and scope prove equivalence. Nearby lines,
+// overlapping ranges and shared names do not (getters/setters and overloads).
+function dedupeDeclarationSpans(symbols) {
+  const seen = new Set();
+  return symbols.filter(symbol => {
+    if (!symbol.content_hash || !Number.isSafeInteger(symbol.range_start)
+      || !Number.isSafeInteger(symbol.range_end) || symbol.range_start < 0
+      || symbol.range_end <= symbol.range_start) return true;
+    const key = JSON.stringify([symbol.repo_rel_path, symbol.content_hash, symbol.kind,
+      exactIdentifier(symbol.qualified_name || symbol.name), symbol.range_start, symbol.range_end]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 const MAX_NEAREST_FILE_DECLARATIONS = 8;
 
 function segmentsOf(value) {
@@ -161,30 +191,12 @@ async function visibleFileDeclarations(view, file, exportedOnly) {
     .filter((symbol) => !exportedOnly || !["private", "protected"].includes(String(symbol.visibility || "").toLowerCase()));
 }
 
-// A name that misses inside a named file is usually right about the member
-// and wrong about its spelling around it: httpx's Client._build_request_auth
-// is declared on BaseClient, bytes' BytesMut::drop sits in `impl Drop for
-// BytesMut`, express's req.fresh is a defineGetter `fresh`, and a kind hint of
-// "const" named zod's arrow-function _safeParse. When the file declares that
-// member exactly once (or once under the named owner), that declaration is the
-// one asked for.
+// File-local fallback uses the same qualified-name proof as indexed lookup.
+// A sole member in another owner does not establish inheritance or aliasing.
 function sameFileMemberTarget(fileSymbols, name) {
-  const requested = segmentsOf(name);
-  const member = requested.at(-1);
-  if (!member) return null;
-  const bearers = new Map();
-  for (const symbol of fileSymbols) {
-    const segments = segmentsOf(symbol.qualified_name || symbol.name);
-    if (segments.at(-1) === member) bearers.set(symbolTargetIdentity(symbol), symbol);
-  }
-  const candidates = [...bearers.values()];
-  const owner = requested.length > 1 ? requested.at(-2) : null;
-  if (owner) {
-    const owned = candidates.filter((symbol) => segmentsOf(symbol.qualified_name || symbol.name).slice(0, -1).includes(owner));
-    if (owned.length === 1) return owned[0];
-    if (owned.length > 1) return null;
-  }
-  return candidates.length === 1 ? candidates[0] : null;
+  const resolution = resolveRequestedIdentifierSymbols(fileSymbols, name, { caseSensitive: true });
+  const candidates = new Map(dedupeDeclarationSpans(resolution.matches).map(symbol => [symbolTargetIdentity(symbol), symbol]));
+  return candidates.size === 1 ? [...candidates.values()][0] : null;
 }
 
 function editDistance(left, right) {
@@ -254,7 +266,7 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
     ...(requestedFile ? { pathPrefix: requestedFile } : {}) };
   if (symbolRef.kind) opts.kinds = [String(symbolRef.kind)];
   const found = [];
-  for (const candidate of [...new Set([name, ...requestedIdentifierCandidates(name)])]) {
+  for (const candidate of [...new Set([name, ...requestedIdentifierCandidates(name, { caseSensitive: true })])]) {
     found.push(...await view.query.findSymbol(candidate, opts));
   }
   const eligible = symbolRef.exportedOnly === true
@@ -264,37 +276,39 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
     ? eligible.filter((symbol) => symbol.repo_rel_path === requestedFile)
     : eligible;
   const exported = pathExact;
-  const resolution = resolveRequestedIdentifierSymbols(uniqueResolutionSymbols(exported), name);
+  const resolution = resolveRequestedIdentifierSymbols(uniqueResolutionSymbols(exported), name, { caseSensitive: true });
   if (resolution.ambiguousBearers.length > 0) {
-    const names = new Set(resolution.ambiguousBearers.map(normalizedQualifiedIdentifier));
+    const names = new Set(resolution.ambiguousBearers.map(exactIdentifier));
     return { status: "ambiguous_symbol_ref", bearers: resolution.ambiguousBearers,
       targets: uniqueResolutionSymbols(exported).filter(symbol => names.has(
-        normalizedQualifiedIdentifier(symbol.qualified_name || symbol.name),
+        exactIdentifier(symbol.qualified_name || symbol.name),
       )).sort(compareSymbolTargets) };
   }
-  const matches = uniqueResolutionSymbols(resolution.matches).sort(compareSymbolTargets);
+  const resolved = uniqueResolutionSymbols(resolution.matches).sort(compareSymbolTargets);
+  const matches = dedupeDeclarationSpans(symbolRef.kind ? resolved : declarationsByFile(resolved));
   let fileDeclarations = [];
   if (matches.length === 0 && requestedFile) {
     const fileSymbols = await visibleFileDeclarations(view, requestedFile, symbolRef.exportedOnly === true);
-    const member = sameFileMemberTarget(fileSymbols, name);
+    const member = sameFileMemberTarget(symbolRef.kind
+      ? fileSymbols.filter(symbol => symbol.kind === String(symbolRef.kind)) : fileSymbols, name);
     if (member) return { status: "selected", target: member };
     fileDeclarations = nearestFileDeclarations(fileSymbols, name);
   }
   if (matches.length === 0) {
     const recovery = [...eligible];
     if (symbolRef.kind || requestedFile) {
-      for (const candidate of [...new Set([name, ...requestedIdentifierCandidates(name)])]) {
+      for (const candidate of [...new Set([name, ...requestedIdentifierCandidates(name, { caseSensitive: true })])]) {
         recovery.push(...await view.query.findSymbol(candidate, { fuzzy: false, limit: 500, scope: "name" }));
       }
     }
     const visibleRecovery = symbolRef.exportedOnly === true
       ? recovery.filter(symbol => !["private", "protected"].includes(String(symbol.visibility || "").toLowerCase()))
       : recovery;
-    const fallbackResolution = resolveRequestedIdentifierSymbols(uniqueResolutionSymbols(visibleRecovery), name);
-    const recoveryNames = new Set(fallbackResolution.ambiguousBearers.map(normalizedQualifiedIdentifier));
+    const fallbackResolution = resolveRequestedIdentifierSymbols(uniqueResolutionSymbols(visibleRecovery), name, { caseSensitive: true });
+    const recoveryNames = new Set(fallbackResolution.ambiguousBearers.map(exactIdentifier));
     const recoveryTargets = fallbackResolution.matches.length > 0 ? fallbackResolution.matches
       : uniqueResolutionSymbols(visibleRecovery).filter(symbol => recoveryNames.has(
-        normalizedQualifiedIdentifier(symbol.qualified_name || symbol.name),
+        exactIdentifier(symbol.qualified_name || symbol.name),
       ));
     return {
       status: "symbol_ref_not_found",
@@ -332,6 +346,10 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
   }
   const byPath = new Map();
   for (const match of matches) {
+    if (byPath.has(match.repo_rel_path)
+      && symbolTargetIdentity(byPath.get(match.repo_rel_path)) !== symbolTargetIdentity(match)) {
+      return { status: "ambiguous_symbol_ref", bearers: [...bearers.values()].sort(), targets: matches };
+    }
     if (!byPath.has(match.repo_rel_path)) byPath.set(match.repo_rel_path, match);
   }
   const targets = [...byPath.values()].sort(compareSymbolTargets);

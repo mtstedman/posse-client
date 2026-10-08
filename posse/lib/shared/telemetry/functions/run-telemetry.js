@@ -4,6 +4,7 @@ import path from "path";
 import { isMainThread, threadId } from "node:worker_threads";
 
 import { getRuntimeLogDir, getRuntimeResourcesDir, safeProcessCwd } from "../../../domains/runtime/functions/paths.js";
+import { readJsonlLines } from "./jsonl-reader.js";
 
 const GENERATED_RUN_STARTED_AT = new Date().toISOString();
 const PROCESS_STARTED_AT = GENERATED_RUN_STARTED_AT;
@@ -324,28 +325,23 @@ export function readRunTelemetryEntries(stream, {
   if (max === 0) return out;
 
   for (const filePath of orderedFiles) {
-    let lines;
-    try { lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/); }
-    catch { continue; }
-
-    const start = order === "asc" ? 0 : lines.length - 1;
-    const end = order === "asc" ? lines.length : -1;
-    const step = order === "asc" ? 1 : -1;
-    for (let i = start; i !== end; i += step) {
-      const raw = String(lines[i] || "").trim();
-      if (!raw) continue;
-      let parsed;
-      try { parsed = JSON.parse(raw); } catch { continue; }
-      if (currentEpochOnly) {
-        if (String(parsed?.run_id || "") !== RUN_ID) continue;
-        if (Number(parsed?.telemetry_epoch ?? -1) !== _telemetryEpoch) continue;
+    try {
+      for (const rawLine of readJsonlLines(filePath, { reverse: order !== "asc" })) {
+        const raw = rawLine.trim();
+        if (!raw) continue;
+        let parsed;
+        try { parsed = JSON.parse(raw); } catch { continue; }
+        if (currentEpochOnly) {
+          if (String(parsed?.run_id || "") !== RUN_ID) continue;
+          if (Number(parsed?.telemetry_epoch ?? -1) !== _telemetryEpoch) continue;
+        }
+        let keep = false;
+        try { keep = !!predicate(parsed); } catch { keep = false; }
+        if (!keep) continue;
+        out.push(parsed);
+        if (out.length >= max) return out;
       }
-      let keep = false;
-      try { keep = !!predicate(parsed); } catch { keep = false; }
-      if (!keep) continue;
-      out.push(parsed);
-      if (out.length >= max) return out;
-    }
+    } catch { /* unreadable history files do not hide other runs */ }
   }
   return out;
 }

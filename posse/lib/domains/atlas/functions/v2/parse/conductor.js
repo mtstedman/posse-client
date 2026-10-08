@@ -222,11 +222,24 @@ export function createConductorDaemon(opts = {}) {
     // Admission stays open for unrelated targets, so a slow WI-A write never
     // serializes reads against WI-B.
     const admissionKeys = readerAdmissionKeys(payload);
+    const admissionStarted = performance.now();
     await beginReaderAdmission(admissionKeys);
+    const admissionMs = Math.max(0, performance.now() - admissionStarted);
+    const roundTripStarted = performance.now();
     const entry = pickReaderEntry();
     entry.inFlight++;
     try {
-      return await call(entry.daemon, payload, reqOpts);
+      const result = await call(entry.daemon, payload, reqOpts);
+      if (payload.op === "retrieve" && result && typeof result === "object") {
+        const roundTripMs = Math.max(0, performance.now() - roundTripStarted);
+        const diagnostics = result._retrievalDiagnostics || {};
+        const serviceMs = diagnostics.timings_ms?.service;
+        result._retrievalDiagnostics = { ...diagnostics, timings_ms: {
+          ...diagnostics.timings_ms, admission: admissionMs, round_trip: roundTripMs,
+          ...(Number.isFinite(serviceMs) ? { round_trip_overhead: Math.max(0, roundTripMs - serviceMs) } : {}),
+        } };
+      }
+      return result;
     } catch (err) {
       if (err?.code === "DAEMON_TRANSPORT_GONE") await disposeReaderEntry(entry);
       throw err;

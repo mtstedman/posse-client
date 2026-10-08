@@ -1,9 +1,11 @@
 import fs from "fs";
 import path from "path";
+import crypto from "node:crypto";
 import { fileURLToPath } from "url";
 import { gitCurrentHash, gitCurrentHashAsync, gitExec, gitExecAsync } from "../../git/functions/utils.js";
 
 const CACHE_RELATIVE_PATH = path.join(".posse", "project-map.json");
+const NON_GIT_MAP_MAX_AGE_MS = 60_000;
 const SCAN_ROOTS = Object.freeze(["lib", "test", "prompts"]);
 const HOOK_BEGIN = "# >>> POSSE PROJECT MAP (managed) >>>";
 const HOOK_END = "# <<< POSSE PROJECT MAP (managed) <<<";
@@ -202,24 +204,38 @@ async function readCacheAsync(projectDir) {
 
 function writeJsonAtomic(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmpPath = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const tmpPath = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  let owned = false;
+  let fd = null;
   try {
-    fs.writeFileSync(tmpPath, JSON.stringify(value, null, 2), "utf8");
+    fd = fs.openSync(tmpPath, "wx");
+    owned = true;
+    fs.writeFileSync(fd, JSON.stringify(value, null, 2), "utf8");
+    fs.closeSync(fd);
+    fd = null;
     fs.renameSync(tmpPath, file);
   } catch (err) {
-    try { fs.rmSync(tmpPath, { force: true }); } catch { /* ignore */ }
+    if (fd != null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+    if (owned) { try { fs.rmSync(tmpPath, { force: true }); } catch { /* ignore */ } }
     throw err;
   }
 }
 
 async function writeJsonAtomicAsync(file, value) {
   await fs.promises.mkdir(path.dirname(file), { recursive: true });
-  const tmpPath = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const tmpPath = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  let owned = false;
+  let handle = null;
   try {
-    await fs.promises.writeFile(tmpPath, JSON.stringify(value, null, 2), "utf8");
+    handle = await fs.promises.open(tmpPath, "wx");
+    owned = true;
+    await handle.writeFile(JSON.stringify(value, null, 2), "utf8");
+    await handle.close();
+    handle = null;
     await fs.promises.rename(tmpPath, file);
   } catch (err) {
-    try { await fs.promises.rm(tmpPath, { force: true }); } catch { /* ignore */ }
+    if (handle) { try { await handle.close(); } catch { /* ignore */ } }
+    if (owned) { try { await fs.promises.rm(tmpPath, { force: true }); } catch { /* ignore */ } }
     throw err;
   }
 }
@@ -268,11 +284,19 @@ export async function getCachedProjectMapAsync(projectDir) {
   return await readCacheAsync(projectDir);
 }
 
+function cacheMatchesProject(cached, currentHead) {
+  if (!cached) return false;
+  if (currentHead != null) return cached.head_sha === currentHead;
+  if (cached.head_sha != null) return false;
+  const ageMs = Date.now() - Date.parse(cached.generated_at);
+  return Number.isFinite(ageMs) && ageMs >= 0 && ageMs < NON_GIT_MAP_MAX_AGE_MS;
+}
+
 export function ensureProjectMap(projectDir, { force = false, execImpl = null } = {}) {
   const root = normalizeProjectDir(projectDir);
   const currentHead = currentGitHead(root, execImpl);
   const cached = force ? null : readCache(root);
-  if (cached && (currentHead == null || cached.head_sha === currentHead)) {
+  if (cacheMatchesProject(cached, currentHead)) {
     return cached;
   }
   const map = generateProjectMap(root, { execImpl });
@@ -284,7 +308,7 @@ export async function ensureProjectMapAsync(projectDir, { force = false, gitExec
   const root = normalizeProjectDir(projectDir);
   const currentHead = await currentGitHeadAsync(root, gitExecAsyncFn);
   const cached = force ? null : await readCacheAsync(root);
-  if (cached && (currentHead == null || cached.head_sha === currentHead)) {
+  if (cacheMatchesProject(cached, currentHead)) {
     return cached;
   }
   const map = await generateProjectMapAsync(root, { gitExecAsyncFn });

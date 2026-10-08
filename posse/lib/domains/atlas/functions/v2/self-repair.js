@@ -73,11 +73,11 @@ export function enqueueAtlasSelfRepair({
     const viewsLayer = layers.find((layer) => layer.layer === "views");
     const viewExists = viewsLayer?.status === "ready" || viewsLayer?.status === "stale";
     const structuralBroken = notReady.some(
-      (layer) => layer.layer === "views" || layer.layer === "treesitter",
+      (layer) => layer.layer === "views" || layer.layer === "treesitter" || layer.layer === "tree-compression",
     );
 
-    // Structural repair: a missing/stale/failed view or parse layer gets one
-    // full main warm. main-full is resumable in practice — blobs are
+    // Structural repair: a missing/stale/failed view, parse, or compression
+    // layer gets one full main warm. main-full is resumable in practice — blobs are
     // content-addressed, so unchanged files are reused, not reparsed.
     if (structuralBroken) {
       const result = emitAtlasPipelineEvent({
@@ -95,7 +95,9 @@ export function enqueueAtlasSelfRepair({
       });
       if (result.ok) {
         actions.push({
-          layer: "views",
+          layer: notReady.some((layer) => layer.layer === "views" || layer.layer === "treesitter")
+            ? "views"
+            : "tree-compression",
           event: ATLAS_EVENTS.SELF_REPAIR,
           warmJobId: result.warmJobId,
           coalesced: !!result.coalesced,

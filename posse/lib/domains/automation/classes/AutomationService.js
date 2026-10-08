@@ -113,6 +113,7 @@ export class AutomationService {
       return Boolean(AUTOMATION_BUILTINS[capability.id] || this.connectors?.has?.(capability.id) === true);
     });
     if (!adaptersAvailable) return false;
+    if (entry.definition.runtime?.mode === "instructions") return true;
     if (entry.definition.runtime?.mode === "bounded-agent") return typeof this.agent === "function";
     if (entry.definition.runtime?.mode !== "recipe") return false;
     return true;
@@ -152,6 +153,7 @@ export class AutomationService {
     this.assertOwner();
     execution?.check();
     const { entry, grant } = this.resolve(principal, args.tool, "invoke", args.grant_id);
+    demand(entry.definition?.runtime?.mode !== "instructions", "Load this skill into an agent; instruction skills are not standalone tools", "skill_not_executable");
     demand(!schedule || grant.unattended && grant.revision === schedule.grant_revision, "Schedule grant changed or is not unattended", "grant_changed");
     // Write script tools confirm by default. No caller can ask a person yet,
     // so only a grant the operator marked unattended lets an agent run one.

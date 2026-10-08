@@ -242,7 +242,7 @@ export function runInTransaction(fn) {
 // silently drop its research branch). Caller decides what to do with the
 // rows (typically: mark succeeded with a synthetic artifact so the
 // synthesis dep can resolve and the planner is not blocked indefinitely).
-export function findStuckFanoutChildren(cutoffIso) {
+export function findStuckFanoutChildren(cutoffIso, jobId = null) {
   const db = getDb();
   return db.prepare(`
     SELECT id, work_item_id, payload_json, created_at, title
@@ -255,7 +255,8 @@ export function findStuckFanoutChildren(cutoffIso) {
       AND json_valid(payload_json) = 1
       AND json_extract(payload_json, '$.role_mode') = 'child'
       AND json_extract(payload_json, '$.fanout_run_id') IS NOT NULL
-  `).all(cutoffIso);
+      AND (? IS NULL OR id = ?)
+  `).all(cutoffIso, jobId, jobId);
 }
 
 export {
@@ -4173,51 +4174,26 @@ function clearExpiredParkedLeaseTokens(db, ts, cutoff) {
  * false-positive scheduler takeover could otherwise steal healthy in-flight
  * jobs from a live worker and create systemic stale-lease failures.
  */
-export function requeueOrphanedJobs({ force = false } = {}) {
+export function requeueOrphanedJobs({ force = false, ownerId = null, lockName = "main" } = {}) {
   const db = getDb();
   const ts = now();
   const leaseNow = new Date(_leaseNowMs()).toISOString();
-  // Boot-time callers pass force=true: the scheduler lock guarantees no other
-  // instance is running, so any actively-held job is by definition orphaned
-  // even if the lease hasn't expired yet (e.g. Ctrl+C kill within the 120s lease
-  // window). Parked human/review jobs are intentionally excluded.
-  const orphaned = force
-    ? db.prepare(`
-      SELECT id, status, work_item_id, job_type FROM jobs
-      WHERE status IN (${ACTIVE_LEASE_STATUSES_SQL})
-    `).all()
-    : db.prepare(`
-      SELECT id, status, work_item_id, job_type FROM jobs
-      WHERE status IN (${ACTIVE_LEASE_STATUSES_SQL})
-        AND (lease_expires_at IS NULL OR lease_expires_at < ?)
-    `).all(leaseNow);
-
-  if (orphaned.length === 0) return 0;
-  const warmOrphanIds = orphaned.filter((row) => row.job_type === "atlas_warm").map((row) => row.id);
-  const requeueIds = orphaned.filter((row) => row.job_type !== "atlas_warm").map((row) => row.id);
-  const assessOnlyIds = orphaned
-    .filter((row) => row.job_type !== "atlas_warm" && row.status === "awaiting_assessment")
-    .map((row) => row.id);
-  const requeuedAssessOnlyIds = [];
-  const chunkSize = 200;
-  const chunked = (values, fn) => {
-    for (let i = 0; i < values.length; i += chunkSize) {
-      fn(values.slice(i, i + chunkSize));
-    }
-  };
-
+  const changed = [];
   const affectedWIs = new Set();
-  let failedWarmCount = 0;
   let requeuedCount = 0;
-
-  // Phase 1: bulk-UPDATE under IMMEDIATE transaction. Keep the writer hold
-  // short — per-row lock release and event emission run after commit so they
-  // don't block readers. If the process crashes between phases, the stale
-  // file-lock sweeper (cleanupStaleFileLocks) requeues abandoned locks.
-  const recoverAll = db.transaction(() => {
-    chunked(warmOrphanIds, (ids) => {
-      const placeholders = ids.map(() => "?").join(",");
-      const res = db.prepare(`
+  runImmediateTransaction(db, () => {
+    // The lock check and candidate read must share the writer transaction with
+    // the updates. Another scheduler cannot replace this owner between them.
+    const lock = ownerId && db.prepare(`
+      SELECT owner_id, expires_at FROM scheduler_locks WHERE lock_name = ?
+    `).get(lockName);
+    const mayForce = force && lock?.owner_id === ownerId && lock.expires_at >= ts;
+    const orphaned = db.prepare(`
+      SELECT id, status, work_item_id, job_type, lease_owner, lease_token, lease_expires_at
+      FROM jobs WHERE status IN (${ACTIVE_LEASE_STATUSES_SQL})
+        AND (? OR lease_expires_at IS NULL OR lease_expires_at < ?)
+    `).all(mayForce ? 1 : 0, leaseNow);
+    const failWarm = db.prepare(`
         UPDATE jobs
         SET status = 'failed',
             lease_owner = NULL,
@@ -4226,15 +4202,10 @@ export function requeueOrphanedJobs({ force = false } = {}) {
             finished_at = ?,
             updated_at = ?,
             last_error = COALESCE(last_error, 'atlas_warm: orphaned on scheduler boot (fail-silent per policy)')
-        WHERE id IN (${placeholders})
-          AND status IN (${ACTIVE_LEASE_STATUSES_SQL})
-      `).run(ts, ts, ...ids);
-      failedWarmCount += res?.changes || 0;
-    });
-
-    chunked(requeueIds, (ids) => {
-      const placeholders = ids.map(() => "?").join(",");
-      const res = db.prepare(`
+        WHERE id = ? AND status = ? AND lease_owner IS ?
+          AND lease_token IS ? AND lease_expires_at IS ?
+    `);
+    const requeue = db.prepare(`
         UPDATE jobs
         SET status = 'queued',
             lease_owner = NULL,
@@ -4251,69 +4222,45 @@ export function requeueOrphanedJobs({ force = false } = {}) {
               ELSE MAX(0, attempt_count - 1)
             END,
             updated_at = ?
-        WHERE id IN (${placeholders})
-          AND status IN (${ACTIVE_LEASE_STATUSES_SQL})
-      `).run(ts, ts, ...ids);
-      requeuedCount += res?.changes || 0;
-      if ((res?.changes || 0) > 0) {
-        const changedRows = db.prepare(`
-          SELECT id
-          FROM jobs
-          WHERE id IN (${placeholders})
-            AND status = 'queued'
-        `).all(...ids);
-        for (const row of changedRows) {
-          if (assessOnlyIds.includes(row.id)) requeuedAssessOnlyIds.push(row.id);
-        }
+        WHERE id = ? AND status = ? AND lease_owner IS ?
+          AND lease_token IS ? AND lease_expires_at IS ?
+    `);
+    const markAssessOnly = db.prepare(`UPDATE jobs SET ${ASSESS_ONLY_PAYLOAD_SQL} WHERE id = ? AND status = 'queued'`);
+    for (const row of orphaned) {
+      const { id, status, work_item_id, job_type, lease_owner, lease_token, lease_expires_at } = row;
+      const result = job_type === "atlas_warm"
+        ? failWarm.run(ts, ts, id, status, lease_owner, lease_token, lease_expires_at)
+        : requeue.run(ts, ts, id, status, lease_owner, lease_token, lease_expires_at);
+      if (result.changes !== 1) continue;
+      changed.push(row);
+      affectedWIs.add(work_item_id);
+      if (job_type === "atlas_warm") {
+        releaseJobLocksForStatus(id, "failed");
+        continue;
       }
-    });
-
-    if (requeuedAssessOnlyIds.length > 0) {
-      chunked(requeuedAssessOnlyIds, (ids) => {
-        const placeholders = ids.map(() => "?").join(",");
-        db.prepare(`
-          UPDATE jobs
-          SET ${ASSESS_ONLY_PAYLOAD_SQL}
-          WHERE id IN (${placeholders})
-        `).run(...ids);
-      });
+      requeuedCount += 1;
+      if (status === "awaiting_assessment") markAssessOnly.run(id);
+      _consumePendingHumanGateResume(id, { db });
+      releaseJobLocksForStatus(id, "queued");
     }
+    for (const wiId of affectedWIs) refreshWorkItemStatus(wiId);
   });
 
-  recoverAll();
-
-  // Phase 2: per-row follow-up work outside the write transaction.
-  for (const { id, status, work_item_id, job_type } of orphaned) {
-    affectedWIs.add(work_item_id);
-    if (job_type === "atlas_warm") {
-      releaseJobLocksForStatus(id, "failed");
-      logEvent({
-        job_id: id,
-        event_type: EVENT_TYPES.JOB_WARM_LEASE_EXPIRED,
-        actor_type: EVENT_ACTORS.SCHEDULER,
-        message: "atlas_warm orphaned on scheduler boot; marked failed (fail-silent per ATLAS_WARM_JOB_POLICY)",
-      });
-      continue;
-    }
-    _consumePendingHumanGateResume(id, { db });
-    releaseJobLocksForStatus(id, "queued");
-    const wasAssessing = status === "awaiting_assessment";
+  for (const { id, status, job_type } of changed) {
     logEvent({
       job_id: id,
-      event_type: wasAssessing ? EVENT_TYPES.JOB_ASSESSMENT_ORPHANED : EVENT_TYPES.JOB_ORPHAN_REQUEUE,
+      event_type: job_type === "atlas_warm" ? EVENT_TYPES.JOB_WARM_LEASE_EXPIRED
+        : status === "awaiting_assessment" ? EVENT_TYPES.JOB_ASSESSMENT_ORPHANED : EVENT_TYPES.JOB_ORPHAN_REQUEUE,
       actor_type: EVENT_ACTORS.SCHEDULER,
-      message: wasAssessing
-        ? "Assessment orphaned (process crash), requeued as assess-only"
-        : "Requeued orphaned job from previous instance (attempt not counted)",
+      message: job_type === "atlas_warm"
+        ? "atlas_warm orphaned on scheduler boot; marked failed (fail-silent per ATLAS_WARM_JOB_POLICY)"
+        : status === "awaiting_assessment"
+          ? "Assessment orphaned (process crash), requeued as assess-only"
+          : "Requeued orphaned job from previous instance (attempt not counted)",
     });
   }
 
-  // Refresh WI status so it reflects the recovered jobs.
-  for (const wiId of affectedWIs) {
-    refreshWorkItemStatus(wiId);
-  }
-
-  if (failedWarmCount + requeuedCount > 0) {
+  if (changed.length > 0) {
     notifyQueueStateChanged({
       reason: "job_orphan_requeue",
     });

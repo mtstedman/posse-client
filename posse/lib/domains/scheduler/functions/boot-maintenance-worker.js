@@ -33,15 +33,13 @@ function serializeError(err) {
 // The force-requeue below assumes exclusivity: "we hold the scheduler lock, so
 // any leased/running row belongs to a dead process." That premise breaks if a
 // shutdown-during-boot released the lock while this worker was still spawning
-// and a restarted instance took it. Confirm the lock is still ours (or absent)
-// before force-requeuing; if a *different* owner now holds it, downgrade to a
-// non-forcing pass so we never clobber the new owner's fresh leases.
+// and a restarted instance took it. This preflight is advisory; queue recovery
+// checks the same ownership again under its write transaction.
 export function shouldForceRequeue(ownerId, lockName) {
-  if (!ownerId) return true;
+  if (!ownerId) return false;
   try {
     const info = getSchedulerLockInfo(lockName);
-    if (!info || !info.owner_id) return true;
-    return String(info.owner_id) === String(ownerId);
+    return !!info && String(info.owner_id) === String(ownerId) && info.expires_at >= new Date().toISOString();
   } catch {
     // If we cannot read the lock, prefer the conservative non-forcing pass.
     return false;
@@ -56,7 +54,7 @@ async function main() {
   const lockName = typeof workerData?.lockName === "string" ? workerData.lockName : "main";
   const force = shouldForceRequeue(ownerId, lockName);
 
-  const orphaned = requeueOrphanedJobs({ force });
+  const orphaned = requeueOrphanedJobs({ force, ownerId, lockName });
   const reconciledAttempts = reconcileOrphanedAttempts();
   // Runs after job/attempt reconciliation so requeued jobs have already shed
   // their leases — any agent_call still 'running' is now a confirmed orphan.

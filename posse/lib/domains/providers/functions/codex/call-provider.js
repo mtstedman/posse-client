@@ -6,7 +6,7 @@ import os from "os";
 import path from "path";
 import { TOOL_REFS } from "../../../../catalog/tool-references.js";
 import { ProviderToolRenderer } from "../../../../shared/tools/classes/ProviderToolRenderer.js";
-import { adaptExecutionContractForProvider, appendExecutionTools, buildExecutionContract, renderExecutionContractBlock } from "../../../../shared/tools/functions/contract.js";
+import { adaptExecutionContractForProvider, appendExecutionTools, buildExecutionContract, renderExecutionContractBlock, renderProviderPromptContracts } from "../../../../shared/tools/functions/contract.js";
 import { issuedToolSurfaceForProviderPolicy, issuedWebAccessEnabled } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildMcpAtlasSurfaceToolDescriptors } from "../../../../shared/tools/functions/mcp-surface.js";
 import { logAtlasAttachment, resolveAtlasAssignmentUnit, withAtlasExecutionPolicySnapshot } from "../../../integrations/functions/atlas.js";
@@ -47,6 +47,7 @@ import { _toTomlLiteral } from "./config-format.js";
 
 export function buildCodexRuntimeContractBlock(executionContract, {
   skipRolePrompt = false,
+  remoteSystemPrompt = "",
   nativeSystemToolsEnabled = false,
   codexCodeMode = false,
   codexNativeBatching = false,
@@ -54,6 +55,7 @@ export function buildCodexRuntimeContractBlock(executionContract, {
 } = {}) {
   const renderedContract = renderExecutionContractBlock(executionContract, {
     remoteComposed: skipRolePrompt,
+    remoteSystemPrompt,
   });
   const contractBlock = [renderedContract, codexCodeMode || codexNativeBatching ? buildCodexResearchMcpGuidance(executionContract, coreDeclarations, { nativeBatching: codexNativeBatching }) : null]
     .filter(Boolean).join("\n");
@@ -360,7 +362,6 @@ export async function callProvider(promptText, {
       ...webTools.configOverrides,
     ];
     const remoteSystemPromptText = String(remoteSystemPrompt || "").trim();
-    const promptPrelude = remoteSystemPromptText;
     let executionContract = buildExecutionContract({
       provider: "codex",
       role,
@@ -387,10 +388,12 @@ export async function callProvider(promptText, {
     executionContract = appendExecutionTools(executionContract, deterministicReadMcp.contractTools || deterministicReadMcp.tools);
     executionContract = appendExecutionTools(executionContract, atlasContractTools);
     executionContract = adaptExecutionContractForProvider(executionContract, "codex");
+    const promptPrelude = renderProviderPromptContracts(remoteSystemPromptText, executionContract);
     // Remote owns provider-independent behavior. The shared renderer keeps
     // provider-local guidance aligned with the exact issued Codex surface.
     const contractBlock = buildCodexRuntimeContractBlock(executionContract, {
       skipRolePrompt,
+      remoteSystemPrompt: remoteSystemPromptText,
       nativeSystemToolsEnabled: !disableSystemTools && !deterministicReadMcp.active,
       codexCodeMode: deterministicReadMcp.codexCodeMode === true,
       codexNativeBatching: deterministicReadMcp.codexNativeBatching === true,

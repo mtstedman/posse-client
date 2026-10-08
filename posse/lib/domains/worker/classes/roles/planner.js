@@ -650,6 +650,7 @@ export class PlannerRole extends BaseRole {
     // Resolve ATLAS handoff state for this planner job so ATLAS CONTEXT / ATLAS SLICE
     // PRUNING sections can be injected into the prompt for every provider.
     const plannerExecProvider = currentExecutionProvider(job);
+    const plannerRolePolicy = applyPlannerRoleModePolicy({}, { planningMode, roleMode: plannerRoleMode, assessmentReplan, plannerDispatch: payload.planner_dispatch === true, projectDir: worker.projectDir });
     const plannerPacket = await handoff({
       recipient: "planner",
       data: {
@@ -657,6 +658,8 @@ export class PlannerRole extends BaseRole {
         job_id: job.id,
         work_item_id: job.work_item_id,
         job_type: job.job_type,
+        // Prefetch must know the resolved route before it selects orientation.
+        planner_dispatch: plannerRolePolicy.planner_dispatch,
         project_db_capability: plannerDbCapability,
         disableAtlas: payload.disableAtlas === true || disableAtlasForReadRoot,
         disableAtlasReason: payload.disableAtlasReason
@@ -684,7 +687,9 @@ export class PlannerRole extends BaseRole {
         },
       },
     }, { providerName: plannerExecProvider });
-    applyPlannerRoleModePolicy(plannerPacket, { planningMode, roleMode: plannerRoleMode, assessmentReplan, plannerDispatch: payload.planner_dispatch === true, projectDir: worker.projectDir });
+    Object.assign(plannerPacket, plannerRolePolicy, {
+      agent_coordination: { ...plannerPacket.agent_coordination, ...plannerRolePolicy.agent_coordination },
+    });
     const plannerAttempts = getAttempts(job.id);
     Object.assign(plannerPacket, {
       job_type: job.job_type,

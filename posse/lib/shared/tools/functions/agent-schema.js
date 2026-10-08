@@ -16,6 +16,16 @@ function isObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+// Sort complete tool definitions after provider projection, without mutating
+// catalogs or schema arrays. Code-unit ordering is independent of host locale.
+export function sortAgentToolDefinitions(definitions = []) {
+  return [...definitions].sort((left, right) => {
+    const a = String(left?.name ?? left?.function?.name ?? "");
+    const b = String(right?.name ?? right?.function?.name ?? "");
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+}
+
 function hiddenPropertiesForInstance(schema) {
   const hidden = new Set();
   if (!isObject(schema)) return hidden;

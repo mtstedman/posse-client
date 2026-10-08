@@ -140,11 +140,33 @@ export function isAllowedSnapshotMediaType(contentType) {
   return WEB_SOURCE_SNAPSHOT_LIMITS.allowedMediaTypeSuffixes.some((suffix) => media.endsWith(suffix));
 }
 
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw signal.reason || failed("aborted");
+}
+
+async function waitForLookup(host, lookup, signal) {
+  throwIfAborted(signal);
+  if (!signal) return lookup(host);
+  let onAbort;
+  const aborted = new Promise((_, reject) => {
+    onAbort = () => reject(signal.reason || failed("aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => {
+      throwIfAborted(signal);
+      return lookup(host, { signal });
+    }), aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
 /**
  * @param {string} rawUrl
- * @param {{ lookup?: (host: string) => Promise<Array<{address: string}>> }} [deps]
+ * @param {{ lookup?: (host: string, options?: {signal: AbortSignal}) => Promise<Array<{address: string}>>, signal?: AbortSignal | null }} [deps]
  */
-async function assertFetchableUrl(rawUrl, { lookup = defaultLookup } = {}) {
+async function assertFetchableUrl(rawUrl, { lookup = defaultLookup, signal = null } = {}) {
   let parsed;
   try {
     parsed = new URL(rawUrl);
@@ -163,10 +185,12 @@ async function assertFetchableUrl(rawUrl, { lookup = defaultLookup } = {}) {
   }
   let addresses;
   try {
-    addresses = await lookup(host);
+    addresses = await waitForLookup(host, lookup, signal);
   } catch {
+    throwIfAborted(signal);
     throw failed(`could not resolve ${host}`);
   }
+  throwIfAborted(signal);
   if (!Array.isArray(addresses) || addresses.length === 0) throw failed(`could not resolve ${host}`);
   if (!addresses.every((entry) => isPublicAddress(entry?.address))) {
     throw rejected(`${host} resolves to a non-public address`);
@@ -220,7 +244,9 @@ export async function downloadWebSource(url, {
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
   let current = url;
   for (let hop = 0; hop <= WEB_SOURCE_SNAPSHOT_LIMITS.maxRedirects; hop += 1) {
-    const parsed = await assertFetchableUrl(current, { lookup });
+    throwIfAborted(combined);
+    const parsed = await assertFetchableUrl(current, { lookup, signal: combined });
+    throwIfAborted(combined);
     let response;
     try {
       response = await fetchImpl(parsed.toString(), {
@@ -245,6 +271,7 @@ export async function downloadWebSource(url, {
       throw rejected(`media type ${normalizeMediaType(contentType) || "(none)"} is not a text or data file`);
     }
     const bytes = await readCappedBody(response, maxBytes);
+    throwIfAborted(combined);
     let text;
     try {
       text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -356,6 +383,7 @@ export async function captureWebSources(sources, {
   const workItemId = workItemIdFrom(context);
   let remainingBytes = WEB_SOURCE_SNAPSHOT_LIMITS.maxTotalBytesPerDispatch;
   for (const source of sources) {
+    throwIfAborted(signal);
     const base = { url: source.url, label: source.label };
     let result;
     if (!workItemId) {
@@ -370,6 +398,7 @@ export async function captureWebSources(sources, {
           signal,
           maxBytes: Math.min(WEB_SOURCE_SNAPSHOT_LIMITS.maxBytes, remainingBytes),
         });
+        throwIfAborted(signal);
         remainingBytes -= download.bytes.length;
         const sha256 = crypto.createHash("sha256").update(download.bytes).digest("hex");
         const directory = path.join(workItemArtifactRoot(workItemId, projectDir), SNAPSHOT_DIR);

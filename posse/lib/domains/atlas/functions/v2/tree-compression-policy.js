@@ -5,10 +5,12 @@
 // one-time ML reseed. Lifted out of ParseEngine/ViewBuilder so both depend on
 // a single source rather than each carrying its own copy.
 
+import { ATLAS_EVENTS } from "./contracts/events.js";
+
 /**
- * ML labeling runs ONCE, at boot. Re-warms must not wait ~2 minutes on a
- * provider pass — the compressed tree is an orientation layer and is allowed
- * to lag; carried-forward labels cover it until the next boot.
+ * ML labeling normally runs at boot. A bounded self-repair warm may also
+ * reseed it after readiness detects a failed compression layer. Ordinary
+ * re-warms can use carried-forward labels until the next boot.
  *
  * @param {{ purpose?: string | null, mode?: string | null, triggerEvent?: string | null }} args
  * @returns {{ run: boolean, reason: string | null }}
@@ -19,7 +21,9 @@ export function shouldRunMlTreeCompressionReseed({ purpose, mode, triggerEvent }
     || purpose === "main-merge";
   if (!isMainPurpose) return { run: false, reason: "not_main_purpose" };
   if (mode !== "ml") return { run: false, reason: "mode_not_ml" };
-  if (triggerEvent !== "boot") return { run: false, reason: "ml_reseed_boot_only" };
+  if (triggerEvent !== "boot" && triggerEvent !== ATLAS_EVENTS.SELF_REPAIR) {
+    return { run: false, reason: "ml_reseed_boot_only" };
+  }
   return { run: true, reason: null };
 }
 

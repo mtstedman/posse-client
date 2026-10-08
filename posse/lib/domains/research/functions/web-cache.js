@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getArtifactsByWorkItem, storeArtifact } from "../../queue/functions/index.js";
+import { getArtifactPageByWorkItem } from "../../queue/functions/artifacts.js";
 
 const WEB_CACHE_ARTIFACT_TYPE = "web_fetch_cache";
 
@@ -59,10 +60,9 @@ function observedFetchUrls(jobId) {
     .filter(Boolean);
 }
 
-export function getWebFetchCacheEntries(workItemId) {
+export function getWebFetchCacheEntries(workItemId, { limit = null } = {}) {
   if (!workItemId) return [];
-  return getArtifactsByWorkItem(workItemId, WEB_CACHE_ARTIFACT_TYPE)
-    .map((artifact) => {
+  const asEntry = (artifact) => {
       const json = safeJson(artifact.content_json, {});
       return {
         artifactId: artifact.id,
@@ -72,12 +72,32 @@ export function getWebFetchCacheEntries(workItemId) {
         urlHash: json.url_hash || webCacheKey(json.url || artifact.url || ""),
         excerpt: artifact.content_long || json.evidence_excerpt || "",
       };
-    })
-    .filter((entry) => entry.normalizedUrl);
+    };
+  if (limit == null) {
+    return getArtifactsByWorkItem(workItemId, WEB_CACHE_ARTIFACT_TYPE)
+      .map(asEntry).filter((entry) => entry.normalizedUrl);
+  }
+  const target = Math.max(0, Math.floor(Number(limit) || 0));
+  const entries = [];
+  let cursor = null;
+  while (entries.length < target) {
+    const page = getArtifactPageByWorkItem(workItemId, {
+      typeFilter: WEB_CACHE_ARTIFACT_TYPE,
+      cursor,
+      limit: Math.min(32, target - entries.length),
+    });
+    for (const artifact of page.items) {
+      const entry = asEntry(artifact);
+      if (entry.normalizedUrl) entries.push(entry);
+    }
+    cursor = page.nextCursor;
+    if (!cursor) break;
+  }
+  return entries.slice(0, target).reverse();
 }
 
 export function buildWebFetchCachePreload(workItemId, { maxEntries = 8 } = {}) {
-  const entries = getWebFetchCacheEntries(workItemId).slice(-maxEntries);
+  const entries = getWebFetchCacheEntries(workItemId, { limit: maxEntries });
   if (entries.length === 0) return "";
   return [
     "PREVIOUSLY FETCHED URLS FOR THIS WORK ITEM:",

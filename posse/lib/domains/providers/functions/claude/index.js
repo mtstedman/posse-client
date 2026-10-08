@@ -11,7 +11,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { getSetting } from "../../../queue/functions/index.js";
-import { appendExecutionTools, buildClaudeCliToolConfig, buildClaudeLaunchInput, buildExecutionContract, CLAUDE_NATIVE_TOOL_NAMES, renderExecutionContractBlock, unknownClaudeNativeTools } from "../../../../shared/tools/functions/contract.js";
+import { appendExecutionTools, buildClaudeCliToolConfig, buildClaudeLaunchInput, buildExecutionContract, CLAUDE_NATIVE_TOOL_NAMES, renderExecutionContractBlock, renderProviderPromptContracts, unknownClaudeNativeTools } from "../../../../shared/tools/functions/contract.js";
 import { claudeLaunchPolicyFromPlan, normalizeClaudeCliToolConfig, normalizeClaudePermissionArgs, reconcileLaunchPolicy } from "../shared/engagement-launch.js";
 import { issuedToolSurfaceForProviderPolicy, issuedWebAccessEnabled } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap, formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
@@ -526,20 +526,6 @@ export async function callProvider(promptText, {
     const promptAtlasAttachment = atlasReadyForMcp && remoteAtlasToolNames.length > 0
       ? { ...atlasAttachment, tools: remoteAtlasToolNames, surfaceToolNames: buildSurfaceNameMap(atlasContractTools) }
       : { ...atlasAttachment, active: false, tools: [] };
-    if (remoteSystemPromptText) {
-      try {
-        const rolePromptDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-claude-role-"));
-        const rolePromptPath = path.join(rolePromptDir, "remote-system.md");
-        fs.writeFileSync(rolePromptPath, remoteSystemPromptText, "utf8");
-        cleanupRolePromptFile = () => {
-          try { fs.rmSync(rolePromptDir, { recursive: true, force: true }); } catch { /* no-op */ }
-        };
-        attachedSystemPromptFiles.push(rolePromptPath);
-      } catch (setupErr) {
-        cleanupSetupFiles();
-        throw setupErr;
-      }
-    }
     let executionContract = buildExecutionContract({
       provider: "claude",
       role,
@@ -652,6 +638,20 @@ export async function callProvider(promptText, {
       throw setupErr;
     }
 
+    if (remoteSystemPromptText) {
+      try {
+        const rolePromptDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-claude-role-"));
+        const rolePromptPath = path.join(rolePromptDir, "remote-system.md");
+        fs.writeFileSync(rolePromptPath, renderProviderPromptContracts(remoteSystemPromptText, executionContract), "utf8");
+        cleanupRolePromptFile = () => {
+          try { fs.rmSync(rolePromptDir, { recursive: true, force: true }); } catch { /* no-op */ }
+        };
+        attachedSystemPromptFiles.push(rolePromptPath);
+      } catch (setupErr) {
+        cleanupSetupFiles();
+        throw setupErr;
+      }
+    }
     // ── Execution contract ──────────────────────────────────────────────
     // Remote owns normal provider-independent directives; native controls
     // bypass Remote and receive only this fixed read-only contract.
@@ -666,6 +666,7 @@ export async function callProvider(promptText, {
         ].join("\n")
       : renderExecutionContractBlock(executionContract, {
           remoteComposed: skipRolePrompt,
+          remoteSystemPrompt: remoteSystemPromptText,
         });
     const stablePromptText = omitSessionPreamble
       ? ""

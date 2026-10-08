@@ -42,6 +42,7 @@ export class Bridge {
     this.presenceTimer = null;
     this.lastOperatorActivityAt = 0;
     this.stopping = false;
+    this.stopped = new Promise((resolve) => { this.resolveStopped = resolve; });
   }
 
   startBossyLocalFeed() {
@@ -132,6 +133,7 @@ export class Bridge {
   async start() {
     if (this.localServer) return this.info();
     this.stopping = false;
+    this.stopped = new Promise((resolve) => { this.resolveStopped = resolve; });
     try {
       this.changeStream = new ChangeStream({
         dbPath: getRuntimeDbPath(this.projectDir),
@@ -223,6 +225,7 @@ export class Bridge {
         },
         startPosse: () => this.runLauncher.start(),
         onOperatorActivity: () => this.noteOperatorActivity(),
+        stopBridge: () => this.stop(),
       });
       try {
         const address = await server.start();
@@ -302,5 +305,6 @@ export class Bridge {
     try { await bossyLocalStream?.close(); } catch { /* already torn down */ }
     try { changeStream?.close(); } catch { /* already torn down */ }
     try { await localServer?.close(); } catch { /* already torn down */ }
+    this.resolveStopped?.("local management");
   }
 }

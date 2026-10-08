@@ -63,22 +63,22 @@ export class WorktreeLock {
 }
 
 export class AsyncWorktreeLock {
-  #fileHandle;
+  #fd;
   #owner;
   #ownerToken;
   #released = false;
 
-  constructor({ lockPath, fileHandle, owner }) {
+  constructor({ lockPath, fd, owner }) {
     this.acquired = true;
     this.lockPath = lockPath;
-    this.#fileHandle = fileHandle;
+    this.#fd = fd;
     this.#owner = cloneOwner(owner);
     this.#ownerToken = owner?.ownerToken || null;
     registerActiveWorktreeLockToken(this.#ownerToken);
   }
 
-  get fileHandle() {
-    return this.#fileHandle;
+  get fd() {
+    return this.#fd;
   }
 
   get owner() {
@@ -99,8 +99,8 @@ export class AsyncWorktreeLock {
 
   async releaseAsync() {
     if (this.#released) return true;
-    try { if (this.#fileHandle?.close) await this.#fileHandle.close(); } catch { /* ignore */ }
-    this.#fileHandle = null;
+    try { if (this.#fd != null) fs.closeSync(this.#fd); } catch { /* ignore */ }
+    this.#fd = null;
     this.#released = true;
     unregisterActiveWorktreeLockToken(this.#ownerToken);
     for (let attempt = 0; attempt < 5; attempt += 1) {

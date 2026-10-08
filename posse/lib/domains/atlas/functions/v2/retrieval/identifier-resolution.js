@@ -21,9 +21,9 @@ function withoutGenericArguments(text) {
   return current;
 }
 
-export function normalizedQualifiedIdentifier(value) {
-  return withoutGenericArguments(String(value || "").trim())
-    .toLowerCase()
+export function normalizedQualifiedIdentifier(value, { caseSensitive = false } = {}) {
+  const text = String(value || "").trim();
+  return withoutGenericArguments(caseSensitive ? text : text.toLowerCase())
     .replace(/\?\./gu, ".")
     .replace(/\[\s*["']?([a-z_$][\w$-]*)["']?\s*\]/giu, ".$1")
     .replace(/\([^)]*\)/gu, "")
@@ -35,8 +35,8 @@ export function normalizedQualifiedIdentifier(value) {
     .replace(/^\.|\.$/gu, "");
 }
 
-export function requestedIdentifierCandidates(value) {
-  const normalized = normalizedQualifiedIdentifier(value);
+export function requestedIdentifierCandidates(value, { caseSensitive = false } = {}) {
+  const normalized = normalizedQualifiedIdentifier(value, { caseSensitive });
   if (!normalized) return [];
   const segments = normalized.split(".").filter(Boolean);
   // Exact index queries may be case-sensitive. Preserve the caller's member
@@ -55,9 +55,12 @@ function symbolResolutionKey(symbol) {
     return `local:${symbol.content_hash}:${symbol.local_id}`;
   }
   return [
-    normalizedQualifiedIdentifier(symbol?.qualified_name || symbol?.name),
+    normalizedQualifiedIdentifier(symbol?.qualified_name || symbol?.name, {caseSensitive: true}),
     String(symbol?.repo_rel_path || ""),
     Number(symbol?.range_start_line || 0),
+    Number(symbol?.range_end_line || 0),
+    symbol?.range_start ?? null,
+    symbol?.range_end ?? null,
     String(symbol?.kind || ""),
   ].join(":");
 }
@@ -72,9 +75,9 @@ export function uniqueResolutionSymbols(symbols) {
   });
 }
 
-function strictIdentifierMatches(symbol, requested) {
-  const name = normalizedQualifiedIdentifier(symbol?.name);
-  const qualifiedName = normalizedQualifiedIdentifier(symbol?.qualified_name);
+function strictIdentifierMatches(symbol, requested, normalize = normalizedQualifiedIdentifier) {
+  const name = normalize(symbol?.name);
+  const qualifiedName = normalize(symbol?.qualified_name);
   const qualifiedRequest = requested.includes(".");
   if (!qualifiedRequest) {
     return name === requested
@@ -91,11 +94,12 @@ function strictIdentifierMatches(symbol, requested) {
  * tail to an unrelated bearer. Tail candidates provide ambiguity diagnostics
  * only; a sole different owner is still not the requested declaration.
  */
-export function resolveRequestedIdentifierSymbols(symbols, identifier, { allowNamespacePrefix = true } = {}) {
-  const requested = normalizedQualifiedIdentifier(identifier);
+export function resolveRequestedIdentifierSymbols(symbols, identifier, { allowNamespacePrefix = true, caseSensitive = false } = {}) {
+  const normalize = value => normalizedQualifiedIdentifier(value, { caseSensitive });
+  const requested = normalize(identifier);
   if (!requested) return { matches: [], ambiguousBearers: [], matchKind: "none" };
   const candidates = uniqueResolutionSymbols(symbols);
-  const exact = candidates.filter((symbol) => strictIdentifierMatches(symbol, requested));
+  const exact = candidates.filter((symbol) => strictIdentifierMatches(symbol, requested, normalize));
   if (exact.length > 0) {
     return { matches: exact, ambiguousBearers: [], matchKind: "qualified" };
   }
@@ -103,13 +107,13 @@ export function resolveRequestedIdentifierSymbols(symbols, identifier, { allowNa
   // spelling compatibility only when the complete indexed owner AND member
   // are a suffix of the request. A bare member never proves its owner.
   const relative = allowNamespacePrefix ? candidates.filter((symbol) => {
-    const qualifiedName = normalizedQualifiedIdentifier(symbol?.qualified_name);
+    const qualifiedName = normalize(symbol?.qualified_name);
     return qualifiedName.includes(".") && requested.endsWith(`.${qualifiedName}`);
   }) : [];
   if (relative.length > 0) {
-    const longest = Math.max(...relative.map(symbol => normalizedQualifiedIdentifier(symbol.qualified_name).length));
+    const longest = Math.max(...relative.map(symbol => normalize(symbol.qualified_name).length));
     return {
-      matches: relative.filter(symbol => normalizedQualifiedIdentifier(symbol.qualified_name).length === longest),
+      matches: relative.filter(symbol => normalize(symbol.qualified_name).length === longest),
       ambiguousBearers: [],
       matchKind: "qualified",
     };
@@ -118,8 +122,8 @@ export function resolveRequestedIdentifierSymbols(symbols, identifier, { allowNa
   if (segments.length < 2) return { matches: [], ambiguousBearers: [], matchKind: "none" };
   const tail = segments.at(-1);
   const tailMatches = candidates.filter((symbol) => {
-    const name = normalizedQualifiedIdentifier(symbol?.name);
-    const qualifiedName = normalizedQualifiedIdentifier(symbol?.qualified_name);
+    const name = normalize(symbol?.name);
+    const qualifiedName = normalize(symbol?.qualified_name);
     return name === tail
       || qualifiedName === tail
       || Boolean(qualifiedName && qualifiedName.endsWith(`.${tail}`));
@@ -127,13 +131,13 @@ export function resolveRequestedIdentifierSymbols(symbols, identifier, { allowNa
   const bearers = new Map();
   for (const symbol of tailMatches) {
     const display = String(symbol?.qualified_name || symbol?.name || tail).trim();
-    const qualifiedName = normalizedQualifiedIdentifier(symbol?.qualified_name);
+    const qualifiedName = normalize(symbol?.qualified_name);
     // A parser can emit both a file/module container and its same-named
     // callable. Bare qualified names carry no owner beyond their file, so use
     // that file scope for both shapes. Otherwise the same declaration surface
     // (for example the `fastify` module and function in fastify.js) becomes two
     // indistinguishable ambiguity candidates.
-    const bareName = normalizedQualifiedIdentifier(symbol?.name || qualifiedName || tail);
+    const bareName = normalize(symbol?.name || qualifiedName || tail);
     const key = qualifiedName.includes(".")
       ? qualifiedName
       : `${bareName}@${String(symbol?.repo_rel_path || "")}`;

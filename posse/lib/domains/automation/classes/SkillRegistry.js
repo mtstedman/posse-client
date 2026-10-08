@@ -25,7 +25,7 @@ export class SkillRegistry {
     const drafts = this.store.list("drafts").filter(item => item.name === name && bindingMatches(item.binding, repoID, repoPath)).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
     demand(drafts.length, "Skill draft not found", "draft_not_found"); return drafts[0];
   }
-  reset(name, binding) { return this.saveDraft(csvTemplate(name || "process-csv-folder", binding)); }
+  reset(name, binding) { return this.saveDraft(instructionTemplate(name || "new-skill", binding)); }
   importPublished(definition, sourceDigest) {
     validateDefinition(definition);
     demand(["published", "deprecated"].includes(definition.state), "Imported skill must have a published lifecycle state");
@@ -108,6 +108,12 @@ export class SkillRegistry {
     const result = { skill_id: this.identity(definition), definition_digest: hash, checks, passed: false, tested_at: new Date().toISOString() };
     try {
       validateDefinition(definition); this.assertAdapters(definition);
+      if (definition.runtime.mode === "instructions") {
+        checks.push({ name: "Instructions and optional tools validate", passed: true, detail: "No model turn or tool execution is needed to validate an instruction document." });
+        result.passed = true;
+        this.store.put("tests", hash, result);
+        return result;
+      }
       checks.push({ name: "Definition and fixtures validate", passed: true });
       // Tests get only scratch resources. Real filesystem grants are never
       // copied into this temporary publication or expanded by fixture input.
@@ -180,4 +186,12 @@ export function csvTemplate(name, binding) {
     resource_requirements: [{ id: "csv-inbox", operations: ["list", "read"] }, { id: "csv-results", operations: ["write"] }],
     contract: { input_schema: { type: "object", additionalProperties: false, required: ["source_resource", "destination_resource", "readiness"], properties: { source_resource: { type: "string", enum: ["csv-inbox"] }, destination_resource: { type: "string", enum: ["csv-results"] }, readiness: { type: "object", additionalProperties: false, required: ["kind"], properties: { kind: { const: "atomic_rename" } } } } }, output_schema: { type: "object", required: ["processed", "skipped"], properties: { processed: { type: "array", items: { type: "object" } }, skipped: { type: "array", items: { type: "string" } } } }, effect: "artifact_write", limits: { wall_time_seconds: 120, turns: 8, calls: 16, spend_cap_usd: 1 }, tests: { valid_input: { source_resource: "csv-inbox", destination_resource: "csv-results", readiness: { kind: "atomic_rename" } }, invalid_input: {} } },
     runtime: { mode: "recipe", recipe: [{ id: "process", capability: "csv.process", input: "$input" }] } };
+}
+
+// Instructions are loaded into the calling agent, with optional tool extensions.
+export function instructionTemplate(name, binding) {
+  return { schema_version: 1, name, version: "1.0.0", state: "draft", intent: "Describe when to use this skill.", instructions: "", binding,
+    capabilities: [], contract: { input_schema: { type: "object" }, output_schema: { type: "object" },
+      limits: { wall_time_seconds: 120, turns: 6, calls: 8, spend_cap_usd: 0.25 }, effect: "read_only", tests: { valid_input: {}, invalid_input: null } },
+    runtime: { mode: "instructions" } };
 }

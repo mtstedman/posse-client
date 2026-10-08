@@ -15,10 +15,6 @@ const REQUIRED_ROLE_CONTRACTS = Object.freeze({
   assessor: Object.freeze(["rule-priority", "file-scope", "task-modes"]),
   preflight: Object.freeze([]),
 });
-const REQUIRED_PROMPT_RULES = Object.freeze([
-  "runtime-isolation",
-  "capability-discipline",
-]);
 
 function probePacket({ cwd = process.cwd(), providerName = "claude" } = {}) {
   return {
@@ -118,9 +114,6 @@ export function validateRemoteCompileReadinessResponse(response) {
   const finalPrompt = String(response?.final_prompt || "");
   const combinedPrompt = [systemPrompt, stableContext, userPrompt, finalPrompt].join("\n\n");
 
-  requireContains(errors, "system_prompt", systemPrompt, "ROLE CLASS: dev");
-  requireContains(errors, "system_prompt", systemPrompt, "RUNTIME ISOLATION");
-  requireContains(errors, "system_prompt", systemPrompt, "RUNTIME CAPABILITY DISCIPLINE");
   requireContains(errors, "system_prompt", systemPrompt, "FILE SCOPE CONTRACT");
   requireContains(errors, "system_prompt", systemPrompt, "DEV RESULT FORMAT");
   requireContains(errors, "stable_context", stableContext, "STABLE EXECUTION CONTEXT");
@@ -165,10 +158,6 @@ export function validateRemoteCompileReadinessResponse(response) {
   }
   if (!hasPath(metadata.raw_source_omitted_files, PROBE_FILE)) {
     errors.push("metadata.raw_source_omitted_files missing probe file");
-  }
-  const appliedRuleIds = Array.isArray(metadata.applied_rule_ids) ? metadata.applied_rule_ids : [];
-  for (const rule of ["runtime-isolation", "capability-discipline"]) {
-    if (!appliedRuleIds.includes(rule)) errors.push(`metadata.applied_rule_ids missing ${rule}`);
   }
 
   return {
@@ -234,12 +223,7 @@ export function validateRemotePromptBundleReadinessResponse(bundle) {
   }
 
   const rules = bundle?.rules;
-  for (const rule of REQUIRED_PROMPT_RULES) {
-    const entry = rules?.get?.(rule);
-    if (!entry) {
-      errors.push(`prompt rule missing: ${rule}`);
-      continue;
-    }
+  for (const [rule, entry] of rules?.entries?.() || []) {
     if (!String(entry.markdown || "").trim()) errors.push(`prompt rule body missing: ${rule}`);
     if (!Array.isArray(entry.applies_to) || entry.applies_to.length === 0) {
       errors.push(`prompt rule applicability missing: ${rule}`);

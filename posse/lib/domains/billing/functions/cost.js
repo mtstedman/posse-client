@@ -138,6 +138,64 @@ function aggregateCacheDiscountRatio(inputTokens, billableInputTokens) {
   return Math.max(0, Math.min(1, 1 - (billable / input)));
 }
 
+function newCostAccumulator(costKey = "costUsd") {
+  return {
+    callCount: 0,
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    billableInputTokens: 0,
+    billableInputUnknownCalls: 0,
+    billableTokens: 0,
+    outputTokens: 0,
+    turnsUsed: 0,
+    outputTruncatedCalls: 0,
+    [costKey]: 0,
+    unknownCostCalls: 0,
+    exactCostCalls: 0,
+    estimatedCostCalls: 0,
+    exactUsageCalls: 0,
+    inexactUsageCalls: 0,
+  };
+}
+
+function accumulateCostCall(entry, call, costKey = "costUsd") {
+  entry.callCount += 1;
+  entry.inputTokens += call.input_tokens || 0;
+  entry.cachedInputTokens += call.cached_input_tokens || 0;
+  entry.billableInputTokens += call.billable_input_tokens || 0;
+  if (!Number.isFinite(call.billable_input_tokens)) entry.billableInputUnknownCalls += 1;
+  entry.billableTokens += call.billable_tokens || 0;
+  entry.outputTokens += call.output_tokens || 0;
+  entry.turnsUsed += call.turns_used || 0;
+  if (call.output_truncated) entry.outputTruncatedCalls += 1;
+  if (Number.isFinite(call.resolved_cost_usd)) entry[costKey] += call.resolved_cost_usd;
+  if (call.cost_precision === "exact") entry.exactCostCalls += 1;
+  else if (call.cost_precision === "estimated") entry.estimatedCostCalls += 1;
+  else entry.unknownCostCalls += 1;
+  if (call.exact_usage === true) entry.exactUsageCalls += 1;
+  else if (call.exact_usage === false) entry.inexactUsageCalls += 1;
+}
+
+function finalizeCostAccumulator(entry, costKey = "costUsd") {
+  entry.knownCostUsd = entry[costKey];
+  entry.costPrecision = costPrecision(entry);
+  entry[costKey] = exposedCostUsd(entry.knownCostUsd, entry.costPrecision);
+  entry.uncachedInputTokens = Math.max(0, entry.inputTokens - entry.cachedInputTokens);
+  entry.billableInputKnownTokens = entry.billableInputTokens;
+  entry.billableInputComplete = entry.billableInputUnknownCalls === 0;
+  entry.billableTokens = entry.inexactUsageCalls > 0 ? null : entry.billableTokens;
+  entry.cacheDiscountRatio = entry.inexactUsageCalls > 0
+    ? null
+    : aggregateCacheDiscountRatio(entry.inputTokens, entry.billableInputTokens);
+  entry.costPer1kOutputTokensUsd = entry.inexactUsageCalls > 0
+    ? null
+    : costPer1kOutputTokens(entry.knownCostUsd, entry.outputTokens);
+  entry.exactUsageCoverage = entry.exactUsageCalls + entry.inexactUsageCalls > 0
+    ? entry.exactUsageCalls / (entry.exactUsageCalls + entry.inexactUsageCalls)
+    : null;
+  return entry;
+}
+
 function accumulateChildBreakdown(byKey, call, usageSegments = []) {
   if (!isAttributedChildAgentCall(call)) return;
   const parentRole = accountingRoleForAgentCall(call);
@@ -222,72 +280,21 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
   const rows = attributeCostRows(rawRows, db);
   const segmentsByCall = preloadUsageSegments(rows, db);
 
-  let totalCost = 0;
-  let totalInput = 0;
-  let totalCachedInput = 0;
-  let totalBillableInput = 0;
-  let totalBillable = 0;
-  let totalOutput = 0;
-  let totalTurns = 0;
-  let outputTruncatedCalls = 0;
+  const totals = newCostAccumulator("totalCostUsd");
   const sourceCounts = {};
-  let unknownCostCalls = 0;
-  let exactCostCalls = 0;
-  let estimatedCostCalls = 0;
-  let exactUsageCalls = 0;
-  let inexactUsageCalls = 0;
   const childBreakdowns = new Map();
   for (const raw of rows) {
     const usageSegments = segmentsByCall.get(Number(raw.id)) || [];
     const call = enrichCall(raw, db, usageSegments);
     accumulateChildBreakdown(childBreakdowns, call, usageSegments);
-    if (Number.isFinite(call.resolved_cost_usd)) totalCost += call.resolved_cost_usd;
-    totalInput += call.input_tokens || 0;
-    totalCachedInput += call.cached_input_tokens || 0;
-    totalBillableInput += call.billable_input_tokens || 0;
-    totalBillable += call.billable_tokens || 0;
-    totalOutput += call.output_tokens || 0;
-    totalTurns += call.turns_used || 0;
-    if (call.output_truncated) outputTruncatedCalls += 1;
+    accumulateCostCall(totals, call, "totalCostUsd");
     sourceCounts[call.cost_source] = (sourceCounts[call.cost_source] || 0) + 1;
-    if (call.cost_precision === "exact") exactCostCalls += 1;
-    else if (call.cost_precision === "estimated") estimatedCostCalls += 1;
-    else unknownCostCalls += 1;
-    if (call.exact_usage === true) exactUsageCalls += 1;
-    else if (call.exact_usage === false) inexactUsageCalls += 1;
   }
-
-  const rollupCostPrecision = costPrecision({
-    callCount: rows.length,
-    exactCostCalls,
-    estimatedCostCalls,
-    unknownCostCalls,
-  });
+  finalizeCostAccumulator(totals, "totalCostUsd");
   return {
     wiId: Number(wiId),
-    totalCostUsd: exposedCostUsd(totalCost, rollupCostPrecision),
-    knownCostUsd: totalCost,
-    costPrecision: rollupCostPrecision,
-    inputTokens: totalInput,
-    cachedInputTokens: totalCachedInput,
-    uncachedInputTokens: Math.max(0, totalInput - totalCachedInput),
-    billableInputTokens: totalBillableInput,
-    billableTokens: inexactUsageCalls > 0 ? null : totalBillable,
-    outputTokens: totalOutput,
-    turnsUsed: totalTurns,
-    outputTruncatedCalls,
-    cacheDiscountRatio: inexactUsageCalls > 0 ? null : aggregateCacheDiscountRatio(totalInput, totalBillableInput),
-    costPer1kOutputTokensUsd: inexactUsageCalls > 0 ? null : costPer1kOutputTokens(totalCost, totalOutput),
-    callCount: rows.length,
+    ...totals,
     costSourceCounts: sourceCounts,
-    unknownCostCalls,
-    exactCostCalls,
-    estimatedCostCalls,
-    exactUsageCalls,
-    inexactUsageCalls,
-    exactUsageCoverage: exactUsageCalls + inexactUsageCalls > 0
-      ? exactUsageCalls / (exactUsageCalls + inexactUsageCalls)
-      : null,
     children: finalizeChildBreakdowns(childBreakdowns),
   };
 }
@@ -314,125 +321,30 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
   const segmentsByCall = preloadUsageSegments(rows, db);
 
   const groups = new Map();
-  let grandCost = 0;
-  let totalInput = 0;
-  let totalCachedInput = 0;
-  let totalBillableInput = 0;
-  let totalBillable = 0;
-  let totalOutput = 0;
+  const grand = newCostAccumulator("totalCostUsd");
   const childBreakdowns = new Map();
   for (const raw of rows) {
     const usageSegments = segmentsByCall.get(Number(raw.id)) || [];
     const call = enrichCall(raw, db, usageSegments);
     accumulateChildBreakdown(childBreakdowns, call, usageSegments);
     const key = keyFn(call);
-    if (!groups.has(key)) {
-      groups.set(key, {
-        key,
-        callCount: 0,
-        inputTokens: 0,
-        cachedInputTokens: 0,
-        billableInputTokens: 0,
-        billableTokens: 0,
-        outputTokens: 0,
-        turnsUsed: 0,
-        outputTruncatedCalls: 0,
-        costUsd: 0,
-        unknownCostCalls: 0,
-        exactCostCalls: 0,
-        estimatedCostCalls: 0,
-        exactUsageCalls: 0,
-        inexactUsageCalls: 0,
-      });
-    }
-    const entry = groups.get(key);
-    entry.callCount += 1;
-    entry.inputTokens += call.input_tokens || 0;
-    entry.cachedInputTokens += call.cached_input_tokens || 0;
-    entry.billableInputTokens += call.billable_input_tokens || 0;
-    entry.billableTokens += call.billable_tokens || 0;
-    entry.outputTokens += call.output_tokens || 0;
-    entry.turnsUsed += call.turns_used || 0;
-    if (call.output_truncated) entry.outputTruncatedCalls += 1;
-    if (Number.isFinite(call.resolved_cost_usd)) entry.costUsd += call.resolved_cost_usd;
-    if (call.cost_precision === "exact") entry.exactCostCalls += 1;
-    else if (call.cost_precision === "estimated") entry.estimatedCostCalls += 1;
-    else entry.unknownCostCalls += 1;
-    if (call.exact_usage === true) entry.exactUsageCalls += 1;
-    else if (call.exact_usage === false) entry.inexactUsageCalls += 1;
-    if (Number.isFinite(call.resolved_cost_usd)) grandCost += call.resolved_cost_usd;
-    totalInput += call.input_tokens || 0;
-    totalCachedInput += call.cached_input_tokens || 0;
-    totalBillableInput += call.billable_input_tokens || 0;
-    totalBillable += call.billable_tokens || 0;
-    totalOutput += call.output_tokens || 0;
+    if (!groups.has(key)) groups.set(key, { key, ...newCostAccumulator() });
+    accumulateCostCall(groups.get(key), call);
+    accumulateCostCall(grand, call, "totalCostUsd");
   }
 
   const out = [...groups.values()].sort((a, b) => b.costUsd - a.costUsd);
   const children = finalizeChildBreakdowns(childBreakdowns);
   for (const entry of out) {
-    entry.knownCostUsd = entry.costUsd;
-    entry.costPrecision = costPrecision(entry);
-    entry.costUsd = exposedCostUsd(entry.knownCostUsd, entry.costPrecision);
-    entry.uncachedInputTokens = Math.max(0, entry.inputTokens - entry.cachedInputTokens);
-    entry.billableTokens = entry.inexactUsageCalls > 0 ? null : entry.billableTokens;
-    entry.cacheDiscountRatio = entry.inexactUsageCalls > 0
-      ? null
-      : aggregateCacheDiscountRatio(entry.inputTokens, entry.billableInputTokens);
-    entry.costPer1kOutputTokensUsd = entry.inexactUsageCalls > 0
-      ? null
-      : costPer1kOutputTokens(entry.knownCostUsd, entry.outputTokens);
-    entry.exactUsageCoverage = entry.exactUsageCalls + entry.inexactUsageCalls > 0
-      ? entry.exactUsageCalls / (entry.exactUsageCalls + entry.inexactUsageCalls)
-      : null;
+    finalizeCostAccumulator(entry);
     if (groupBy === "role") {
       entry.children = children.filter((child) => child.parentRole === entry.key);
     }
   }
-  const totalCallCount = rows.length;
-  const totalUnknownCostCalls = out.reduce((acc, entry) => acc + entry.unknownCostCalls, 0);
-  const totalExactCostCalls = out.reduce((acc, entry) => acc + entry.exactCostCalls, 0);
-  const totalEstimatedCostCalls = out.reduce((acc, entry) => acc + entry.estimatedCostCalls, 0);
-  const rollupCostPrecision = costPrecision({
-    callCount: totalCallCount,
-    exactCostCalls: totalExactCostCalls,
-    estimatedCostCalls: totalEstimatedCostCalls,
-    unknownCostCalls: totalUnknownCostCalls,
-  });
-  return {
-    groupBy,
-    totalCostUsd: exposedCostUsd(grandCost, rollupCostPrecision),
-    knownCostUsd: grandCost,
-    costPrecision: rollupCostPrecision,
-    inputTokens: totalInput,
-    cachedInputTokens: totalCachedInput,
-    uncachedInputTokens: Math.max(0, totalInput - totalCachedInput),
-    billableInputTokens: totalBillableInput,
-    billableTokens: out.some((entry) => entry.inexactUsageCalls > 0)
-      ? null
-      : totalBillable,
-    outputTokens: totalOutput,
-    turnsUsed: out.reduce((acc, entry) => acc + (entry.turnsUsed || 0), 0),
-    outputTruncatedCalls: out.reduce((acc, entry) => acc + (entry.outputTruncatedCalls || 0), 0),
-    unknownCostCalls: totalUnknownCostCalls,
-    exactCostCalls: totalExactCostCalls,
-    estimatedCostCalls: totalEstimatedCostCalls,
-    exactUsageCalls: out.reduce((acc, entry) => acc + entry.exactUsageCalls, 0),
-    inexactUsageCalls: out.reduce((acc, entry) => acc + entry.inexactUsageCalls, 0),
-    exactUsageCoverage: (() => {
-      const exact = out.reduce((acc, entry) => acc + entry.exactUsageCalls, 0);
-      const inexact = out.reduce((acc, entry) => acc + entry.inexactUsageCalls, 0);
-      return exact + inexact > 0 ? exact / (exact + inexact) : null;
-    })(),
-    cacheDiscountRatio: out.some((entry) => entry.inexactUsageCalls > 0)
-      ? null
-      : aggregateCacheDiscountRatio(totalInput, totalBillableInput),
-    costPer1kOutputTokensUsd: out.some((entry) => entry.inexactUsageCalls > 0)
-      ? null
-      : costPer1kOutputTokens(grandCost, totalOutput),
-    children,
-    groups: out,
-  };
+  finalizeCostAccumulator(grand, "totalCostUsd");
+  // The grouped report has historically omitted callCount at the top level.
+  delete grand.callCount;
+  return { groupBy, ...grand, children, groups: out };
 }
 
 /**
@@ -457,112 +369,28 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
   const segmentsByCall = preloadUsageSegments(rows, db);
 
   const byWi = new Map();
+  const grand = newCostAccumulator("totalCostUsd");
   for (const raw of rows) {
     if (raw.work_item_id == null) continue;
     const call = enrichCall(raw, db, segmentsByCall.get(Number(raw.id)) || []);
     let entry = byWi.get(call.work_item_id);
     if (!entry) {
-      entry = {
-        wiId: call.work_item_id,
-        callCount: 0,
-        inputTokens: 0,
-        cachedInputTokens: 0,
-        billableInputTokens: 0,
-        billableTokens: 0,
-        outputTokens: 0,
-        turnsUsed: 0,
-        outputTruncatedCalls: 0,
-        totalCostUsd: 0,
-        unknownCostCalls: 0,
-        exactCostCalls: 0,
-        estimatedCostCalls: 0,
-        exactUsageCalls: 0,
-        inexactUsageCalls: 0,
-      };
+      entry = { wiId: call.work_item_id, ...newCostAccumulator("totalCostUsd") };
       byWi.set(call.work_item_id, entry);
     }
-    entry.callCount += 1;
-    entry.inputTokens += call.input_tokens || 0;
-    entry.cachedInputTokens += call.cached_input_tokens || 0;
-    entry.billableInputTokens += call.billable_input_tokens || 0;
-    entry.billableTokens += call.billable_tokens || 0;
-    entry.outputTokens += call.output_tokens || 0;
-    entry.turnsUsed += call.turns_used || 0;
-    if (call.output_truncated) entry.outputTruncatedCalls += 1;
-    if (Number.isFinite(call.resolved_cost_usd)) entry.totalCostUsd += call.resolved_cost_usd;
-    if (call.cost_precision === "exact") entry.exactCostCalls += 1;
-    else if (call.cost_precision === "estimated") entry.estimatedCostCalls += 1;
-    else entry.unknownCostCalls += 1;
-    if (call.exact_usage === true) entry.exactUsageCalls += 1;
-    else if (call.exact_usage === false) entry.inexactUsageCalls += 1;
+    accumulateCostCall(entry, call, "totalCostUsd");
+    accumulateCostCall(grand, call, "totalCostUsd");
   }
 
   const enriched = [...byWi.values()];
-  for (const entry of enriched) {
-    entry.knownCostUsd = entry.totalCostUsd;
-    entry.costPrecision = costPrecision(entry);
-    entry.totalCostUsd = exposedCostUsd(entry.knownCostUsd, entry.costPrecision);
-    entry.uncachedInputTokens = Math.max(0, entry.inputTokens - entry.cachedInputTokens);
-    entry.billableTokens = entry.inexactUsageCalls > 0 ? null : entry.billableTokens;
-    entry.cacheDiscountRatio = entry.inexactUsageCalls > 0
-      ? null
-      : aggregateCacheDiscountRatio(entry.inputTokens, entry.billableInputTokens);
-    entry.costPer1kOutputTokensUsd = entry.inexactUsageCalls > 0
-      ? null
-      : costPer1kOutputTokens(entry.knownCostUsd, entry.outputTokens);
-    entry.exactUsageCoverage = entry.exactUsageCalls + entry.inexactUsageCalls > 0
-      ? entry.exactUsageCalls / (entry.exactUsageCalls + entry.inexactUsageCalls)
-      : null;
-  }
+  for (const entry of enriched) finalizeCostAccumulator(entry, "totalCostUsd");
   enriched.sort((a, b) => b.knownCostUsd - a.knownCostUsd);
-  const trimmed = enriched.slice(0, limit);
-  const grandCost = enriched.reduce((acc, e) => acc + e.knownCostUsd, 0);
-  const totalInput = enriched.reduce((acc, e) => acc + e.inputTokens, 0);
-  const totalCachedInput = enriched.reduce((acc, e) => acc + e.cachedInputTokens, 0);
-  const totalBillableInput = enriched.reduce((acc, e) => acc + e.billableInputTokens, 0);
-  const totalBillable = enriched.reduce((acc, e) => acc + (e.billableTokens || 0), 0);
-  const totalOutput = enriched.reduce((acc, e) => acc + e.outputTokens, 0);
-  const totalCallCount = enriched.reduce((acc, entry) => acc + entry.callCount, 0);
-  const totalUnknownCostCalls = enriched.reduce((acc, entry) => acc + entry.unknownCostCalls, 0);
-  const totalExactCostCalls = enriched.reduce((acc, entry) => acc + entry.exactCostCalls, 0);
-  const totalEstimatedCostCalls = enriched.reduce((acc, entry) => acc + entry.estimatedCostCalls, 0);
-  const rollupCostPrecision = costPrecision({
-    callCount: totalCallCount,
-    exactCostCalls: totalExactCostCalls,
-    estimatedCostCalls: totalEstimatedCostCalls,
-    unknownCostCalls: totalUnknownCostCalls,
-  });
+  finalizeCostAccumulator(grand, "totalCostUsd");
+  // The cross-WI report has historically omitted callCount at the top level.
+  delete grand.callCount;
   return {
-    totalCostUsd: exposedCostUsd(grandCost, rollupCostPrecision),
-    knownCostUsd: grandCost,
-    costPrecision: rollupCostPrecision,
-    inputTokens: totalInput,
-    cachedInputTokens: totalCachedInput,
-    uncachedInputTokens: Math.max(0, totalInput - totalCachedInput),
-    billableInputTokens: totalBillableInput,
-    billableTokens: enriched.some((entry) => entry.inexactUsageCalls > 0)
-      ? null
-      : totalBillable,
-    outputTokens: totalOutput,
-    turnsUsed: enriched.reduce((acc, e) => acc + (e.turnsUsed || 0), 0),
-    outputTruncatedCalls: enriched.reduce((acc, e) => acc + (e.outputTruncatedCalls || 0), 0),
-    unknownCostCalls: totalUnknownCostCalls,
-    exactCostCalls: totalExactCostCalls,
-    estimatedCostCalls: totalEstimatedCostCalls,
-    exactUsageCalls: enriched.reduce((acc, entry) => acc + entry.exactUsageCalls, 0),
-    inexactUsageCalls: enriched.reduce((acc, entry) => acc + entry.inexactUsageCalls, 0),
-    exactUsageCoverage: (() => {
-      const exact = enriched.reduce((acc, entry) => acc + entry.exactUsageCalls, 0);
-      const inexact = enriched.reduce((acc, entry) => acc + entry.inexactUsageCalls, 0);
-      return exact + inexact > 0 ? exact / (exact + inexact) : null;
-    })(),
-    cacheDiscountRatio: enriched.some((entry) => entry.inexactUsageCalls > 0)
-      ? null
-      : aggregateCacheDiscountRatio(totalInput, totalBillableInput),
-    costPer1kOutputTokensUsd: enriched.some((entry) => entry.inexactUsageCalls > 0)
-      ? null
-      : costPer1kOutputTokens(grandCost, totalOutput),
-    workItems: trimmed,
+    ...grand,
+    workItems: enriched.slice(0, limit),
     truncated: enriched.length > limit,
   };
 }

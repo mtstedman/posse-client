@@ -18,6 +18,7 @@ import {
 } from "../../../catalog/process.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
+import { detectNodePackageManager } from "../../../shared/tools/functions/node-package-manager.js";
 import { resolvePosseKey } from "../../../shared/native/functions/key.js";
 import { reconcileNativeBinaries } from "../../../shared/native/functions/binary-reconciliation.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
@@ -212,14 +213,7 @@ function packageDir(root, name) {
 }
 
 function detectPackageManager(root, pkg) {
-  const declared = String(pkg?.packageManager || "").trim().toLowerCase();
-  if (declared.startsWith("pnpm@")) return "pnpm";
-  if (declared.startsWith("yarn@")) return "yarn";
-  if (declared.startsWith("bun@")) return "bun";
-  if (fileExists(path.join(root, "pnpm-lock.yaml"))) return "pnpm";
-  if (fileExists(path.join(root, "yarn.lock"))) return "yarn";
-  if (fileExists(path.join(root, "bun.lockb")) || fileExists(path.join(root, "bun.lock"))) return "bun";
-  return "npm";
+  return detectNodePackageManager(root, { packageManager: pkg?.packageManager }).manager;
 }
 
 function nodeManifestFiles(root) {

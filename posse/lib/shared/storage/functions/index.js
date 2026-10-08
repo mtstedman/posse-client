@@ -4,7 +4,6 @@ import { installEventState } from "./event-state.js";
 // Opens the orchestrator database (better-sqlite3, synchronous).
 // Runs schema from sql.sql on first use if tables are missing.
 
-import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
 import { log } from "../../telemetry/functions/logging/logger.js";
@@ -17,6 +16,12 @@ import {
   isJsonValidityColumn as isKnownJsonValidityColumn,
 } from "./installers.js";
 import { bootstrapFreshDatabase } from "./fresh-bootstrap.js";
+import { runRegisteredHostMigrations } from "./host-migration-series.js";
+import {
+  ensureRuntimeDbDir,
+  openDatabaseHandle,
+  quarantineStaleIncompleteDb,
+} from "./database-lifecycle.js";
 import {
   HOST_SCHEMA_VERSION,
   ensureHostSchemaVersion,
@@ -148,42 +153,7 @@ export {
 
 let _db = null;
 let _dbPath = null;
-
-function isRecoverableDbError(err) {
-  const msg = err?.message || String(err || "");
-  return /disk I\/O error|database disk image is malformed|file is not a database|SQLITE_IOERR|SQLITE_CORRUPT|SQLITE_NOTADB/i.test(msg);
-}
-
-function applyDbPragmas(db, dbPath) {
-  let walEnabled = false;
-  try {
-    db.pragma("journal_mode = WAL");
-    walEnabled = true;
-  } catch (err) {
-    // Some Windows/sandboxed environments reject WAL on fresh DBs with a
-    // generic disk I/O error. Fall back to the default journal mode so startup
-    // still succeeds instead of crashing on first run.
-    try {
-      db.pragma("journal_mode = DELETE");
-    } catch {
-      throw err;
-    }
-    try {
-      const stamp = new Date().toISOString();
-      console.warn(`[posse][db] WAL unavailable for ${dbPath}; using DELETE journal mode (${stamp})`);
-    } catch {
-      // Best effort logging only.
-    }
-  }
-  db.pragma("foreign_keys = ON");
-  db.pragma("busy_timeout = 10000");
-  // Throughput-focused defaults for concurrent writer workloads.
-  // Best-effort: unsupported pragmas should not block startup.
-  try { db.pragma("synchronous = NORMAL"); } catch { /* best effort */ }
-  try { db.pragma("temp_store = MEMORY"); } catch { /* best effort */ }
-  try { db.pragma("mmap_size = 268435456"); } catch { /* best effort */ } // 256 MiB
-  return { walEnabled };
-}
+let _dbReady = false;
 
 export function withForeignKeysDisabled(db, fn) {
   db.pragma("foreign_keys = OFF");
@@ -1082,44 +1052,10 @@ export function __testRepairAgentCallsParentageSchema(db) {
 }
 
 
-function quarantineStaleIncompleteDb(dbPath, { force = false, ignoreAge = false } = {}) {
-  if (!fs.existsSync(dbPath)) return;
-
-  let stat;
-  try { stat = fs.statSync(dbPath); } catch { return false; }
-  if (!force && stat.size !== 0) return false;
-
-  const siblings = [dbPath, `${dbPath}-journal`, `${dbPath}-wal`, `${dbPath}-shm`]
-    .filter((p) => fs.existsSync(p));
-  if (siblings.length <= 1) return false;
-
-  const newestSiblingMs = Math.max(...siblings.map((p) => {
-    try { return fs.statSync(p).mtimeMs; } catch { return 0; }
-  }));
-  if (!ignoreAge && Date.now() - newestSiblingMs < 5000) return false;
-
-  const stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
-  let quarantined = false;
-  for (const filePath of siblings) {
-    try {
-      fs.renameSync(filePath, `${filePath}.corrupt-${stamp}`);
-      quarantined = true;
-    } catch {
-      // Best effort: if another process owns it, leave it alone and let SQLite report the error.
-    }
-  }
-  return quarantined;
-}
-
-function ensureRuntimeDbDir(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  try { fs.chmodSync(dir, 0o700); } catch { /* Windows/best-effort */ }
-}
-
 export function getDb() {
   const dbPath = path.resolve(getRuntimeDbPath());
   if (_db) {
-    if (_dbPath === dbPath) return _db;
+    if (_dbPath === dbPath && _dbReady) return _db;
     closeDb();
   }
 
@@ -1129,39 +1065,10 @@ export function getDb() {
 
   quarantineStaleIncompleteDb(dbPath);
 
-  _db = new Database(dbPath);
+  _db = openDatabaseHandle(dbPath);
   _dbPath = dbPath;
-
-  // Performance pragmas
+  // Keep the handle provisional until every bootstrap and migration step succeeds.
   try {
-    applyDbPragmas(_db, dbPath);
-  } catch (err) {
-    try { _db.close(); } catch {}
-    _db = null;
-    _dbPath = null;
-    if (!quarantineStaleIncompleteDb(dbPath, { force: true, ignoreAge: true })) throw err;
-    _db = new Database(dbPath);
-    _dbPath = dbPath;
-    applyDbPragmas(_db, dbPath);
-  }
-
-  // Some corrupted SQLite files still "open" successfully and only explode on
-  // the first schema read. Probe immediately so we can quarantine/rebuild once
-  // instead of letting later status/stream rendering fail with disk I/O errors.
-  try {
-    _db.prepare(`SELECT name FROM sqlite_master WHERE type='table' LIMIT 1`).get();
-  } catch (err) {
-    try { _db.close(); } catch {}
-    _db = null;
-    _dbPath = null;
-    if (!isRecoverableDbError(err) || !quarantineStaleIncompleteDb(dbPath, { force: true, ignoreAge: true })) {
-      throw err;
-    }
-    _db = new Database(dbPath);
-    _dbPath = dbPath;
-    applyDbPragmas(_db, dbPath);
-  }
-
   // Bootstrap schema if tables don't exist
   const hasJobs = _db.prepare(
     `SELECT name FROM sqlite_master WHERE type='table' AND name='jobs'`
@@ -2871,112 +2778,11 @@ export function getDb() {
     })());
   }
 
-  // ── Migration: ATLAS v2 host outbox support ───────────────────────────────
-  runHostMigration(_db, {
-    version: 5,
-    name: "atlas_v2_host_schema",
-    needs: needsAtlasV2HostSchemaRepair,
-    migrate: repairAtlasV2HostSchema,
-  });
-  runHostMigration(_db, {
-    version: 6,
-    name: "agent_calls_extended_thinking",
-    needs: needsAgentCallsExtendedThinkingRepair,
-    migrate: repairAgentCallsExtendedThinkingSchema,
-  });
-  runHostMigration(_db, {
-    version: 8,
-    name: "human_gate_assessment_lifecycle",
-    needs: needsHumanGateAssessmentSchemaRepair,
-    migrate: repairHumanGateAssessmentSchema,
-  });
-  runHostMigration(_db, {
-    version: 9,
-    name: "queue_foreign_key_orphans",
-    needs: needsQueueForeignKeyOrphanRepair,
-    migrate: repairQueueForeignKeyOrphans,
-  });
-  runHostMigration(_db, {
-    version: 10,
-    name: "bridge_command_results",
-    needs: needsBridgeCommandResultsSchema,
-    migrate: installBridgeCommandResultsSchema,
-  });
-  runHostMigration(_db, {
-    version: 11,
-    name: "waiting_lane_preparation_contracts",
-    needs: needsWaitingLanePreparationSchema,
-    migrate: repairWaitingLanePreparationSchema,
-  });
-  runHostMigration(_db, {
-    version: 12,
-    name: "shared_trunk_merge_operations",
-    needs: needsSharedTrunkMergeOperationSchema,
-    migrate: installSharedTrunkMergeOperationSchema,
-  });
-  runHostMigration(_db, {
-    version: 13,
-    name: "pairing_sessions",
-    needs: needsPairingSessionSchema,
-    migrate: installPairingSessionSchema,
-  });
-  runHostMigration(_db, {
-    version: 14,
-    name: "agent_calls_parentage",
-    needs: needsAgentCallsParentageRepair,
-    migrate: repairAgentCallsParentageSchema,
-  });
-  runHostMigration(_db, {
-    version: 15,
-    name: "agent_calls_web_research_child_kind",
-    needs: needsAgentCallsChildKindsRepair,
-    migrate: repairAgentCallsChildKindsSchema,
-  });
-  runHostMigration(_db, {
-    version: 16,
-    name: "pairing_sessions_pending_phase",
-    needs: needsPairingSessionPendingPhaseSchema,
-    migrate: repairPairingSessionPendingPhaseSchema,
-  });
-  runHostMigration(_db, {
-    version: 17,
-    name: "pairing_session_policy",
-    needs: needsPairingSessionPolicySchema,
-    migrate: installPairingSessionPolicySchema,
-  });
-  runHostMigration(_db, {
-    version: 18,
-    name: "work_item_delegations",
-    needs: needsWorkItemDelegationSchema,
-    migrate: installWorkItemDelegationSchema,
-  });
-  runHostMigration(_db, {
-    version: 19, name: "agent_calls_investigating_research_child",
-    needs: needsAgentCallsChildKindsRepair, migrate: repairAgentCallsChildKindsSchema,
-  });
-  runHostMigration(_db, {
-    version: 20,
-    name: "pairing_submission_approval",
-    needs: needsPairingSubmissionApprovalSchema,
-    migrate: installPairingSubmissionApprovalSchema,
-  });
-  runHostMigration(_db, {
-    version: 21,
-    name: "shared_trunk_abandoned_phase",
-    needs: needsSharedTrunkAbandonedPhaseSchema,
-    migrate: repairSharedTrunkAbandonedPhaseSchema,
-  });
-  runHostMigration(_db, {
-    version: 22,
-    name: "agent_calls_interrupted_status",
-    needs: needsAgentCallsInterruptedStatusRepair,
-    migrate: repairAgentCallsInterruptedStatusSchema,
-  });
-  runHostMigration(_db, {
-    version: 23,
-    name: "waiting_lane_scoped_layer_token",
-    needs: needsWaitingLanePreparationSchema,
-    migrate: repairWaitingLanePreparationSchema,
+  runRegisteredHostMigrations(_db, {
+    needsAgentCallsExtendedThinkingRepair, repairAgentCallsExtendedThinkingSchema,
+    needsAgentCallsParentageRepair, repairAgentCallsParentageSchema,
+    needsAgentCallsChildKindsRepair, repairAgentCallsChildKindsSchema,
+    needsAgentCallsInterruptedStatusRepair, repairAgentCallsInterruptedStatusSchema,
   });
   installBridgeChangeTracking(_db);
   ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);
@@ -2988,7 +2794,15 @@ export function getDb() {
   installTerminalTransitionTracking(_db);
   installEventState(_db);
 
+  _dbReady = true;
   return _db;
+  } catch (err) {
+    try { _db?.close(); } catch { /* preserve the initialization error */ }
+    _db = null;
+    _dbPath = null;
+    _dbReady = false;
+    throw err;
+  }
 }
 
 export function __testInstallJsonValidityTriggers(db) {
@@ -3005,5 +2819,6 @@ export function closeDb() {
     _db = null;
   }
   _dbPath = null;
+  _dbReady = false;
   bumpRunTelemetryEpoch();
 }

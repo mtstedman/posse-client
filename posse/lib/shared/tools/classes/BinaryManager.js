@@ -317,7 +317,13 @@ export class BinaryManager {
     const ensureKey = `${name}:${refresh ? "refresh" : "cached"}:${dryRun ? "plan" : "install"}`;
     const inFlight = this._artifactEnsures.get(ensureKey);
     if (inFlight) return inFlight;
-    const promise = this._ensureRemoteArtifact(name, { refresh, dryRun, onProgress })
+    // A cached ensure may have started before this refresh. Let it finish
+    // first so its late activation cannot replace the refresh's selection.
+    const precedingCached = refresh ? this._artifactEnsures.get(`${name}:cached:install`) : null;
+    const operation = precedingCached
+      ? precedingCached.catch(() => {}).then(() => this._ensureRemoteArtifact(name, { refresh, dryRun, onProgress }))
+      : this._ensureRemoteArtifact(name, { refresh, dryRun, onProgress });
+    const promise = operation
       .then(async (result) => {
         if (
           refresh

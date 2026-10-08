@@ -144,7 +144,10 @@ function cachedReceipt(jobId, key) {
     return metadata?.kind === RECEIPT_KIND
       && metadata?.schema_version === RECEIPT_SCHEMA_VERSION
       && metadata?.receipt_key === key
-      && metadata?.result;
+      && metadata?.result
+      // Infrastructure availability can change without a source commit. Keep
+      // the artifact as history, but retry an unavailable verification.
+      && metadata.result.status !== "unavailable";
   });
   if (!artifact) return null;
   const metadata = artifactJson(artifact);
@@ -579,13 +582,13 @@ export async function ensureAssessmentScopedCheckEvidence({
       ]);
       const headChanged = afterCommit !== actualCommit || afterHeadRef !== headRef;
       if (after !== before || headChanged) {
+        if (headChanged) throw new Error("worktree HEAD changed during deterministic checks; refusing to reset possible concurrent sibling progress");
         if (after !== before) {
           if (typeof cleanupWorktree !== "function") {
             throw new Error("deterministic changed-file checks modified the worktree but no cleanup implementation was available");
           }
-          await cleanupWorktree();
+          await cleanupWorktree({ expectedHead: { commit: actualCommit, ref: headRef } });
         }
-        if (headChanged) throw new Error("worktree HEAD changed during deterministic checks; refusing to reset possible concurrent sibling progress");
         const [cleaned, restoredCommit, restoredHeadRef] = await Promise.all([
           porcelain(cwd),
           currentCommit(cwd),

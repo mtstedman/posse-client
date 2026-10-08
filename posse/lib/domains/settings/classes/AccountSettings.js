@@ -145,11 +145,20 @@ export class AccountSettings {
 
       CREATE INDEX IF NOT EXISTS idx_repo_settings_key ON repo_settings(setting_key);
     `);
-    this._openPath = targetPath;
-    this._seedDefaults();
-    this.invalidate();
-    this._dataVersion = this._readDataVersion(this._db);
-    return this._db;
+    try {
+      this._seedDefaults();
+      this._openPath = targetPath;
+      this.invalidate();
+      this._dataVersion = this._readDataVersion(this._db);
+      return this._db;
+    } catch (error) {
+      try { this._db.close(); } catch { /* preserve the migration error */ }
+      this._db = null;
+      this._openPath = null;
+      this._dataVersion = null;
+      this.invalidate();
+      throw error;
+    }
   }
 
   close() {
@@ -184,6 +193,16 @@ export class AccountSettings {
     }
     if (version != null) this._dataVersion = version;
     return db;
+  }
+
+  _publishWrite(db, cacheChanges = new Map()) {
+    // SQLite's data_version does not advance for this connection's writes.
+    // An enclosing transaction may still roll back, so never publish its
+    // uncommitted values into the cache.
+    if (db.inTransaction) this.invalidate();
+    else for (const [key, value] of cacheChanges) this._cache.set(key, value);
+    this._dataVersion = this._readDataVersion(db);
+    notifySettingsChanged();
   }
 
   getPathForDisplay() {
@@ -223,21 +242,21 @@ export class AccountSettings {
     const cacheKey = String(key);
     if (REPO_SCOPED_SETTING_KEYS.has(cacheKey)) return null;
     const db = this._openForReadOrWrite();
-    if (this._cache.has(cacheKey)) return this._cache.get(cacheKey);
+    if (!db.inTransaction && this._cache.has(cacheKey)) return this._cache.get(cacheKey);
     const row = db
       .prepare(`SELECT setting_value FROM account_settings WHERE setting_key = ?`)
       .get(cacheKey);
     if (!row) {
-      this._cache.set(cacheKey, null);
+      if (!db.inTransaction) this._cache.set(cacheKey, null);
       return null;
     }
     const value = row.setting_value;
     if (value == null || value === "") {
-      this._cache.set(cacheKey, null);
+      if (!db.inTransaction) this._cache.set(cacheKey, null);
       return null;
     }
     const normalized = String(value);
-    this._cache.set(cacheKey, normalized);
+    if (!db.inTransaction) this._cache.set(cacheKey, normalized);
     return normalized;
   }
 
@@ -246,15 +265,14 @@ export class AccountSettings {
     const normalizedKey = String(key);
     if (REPO_SCOPED_SETTING_KEYS.has(normalizedKey)) {
       db.prepare(`DELETE FROM account_settings WHERE setting_key = ?`).run(normalizedKey);
-      this._cache.set(normalizedKey, null);
-      this._dataVersion = this._readDataVersion(db);
-      notifySettingsChanged();
+      this._publishWrite(db, new Map([[normalizedKey, null]]));
       return;
     }
     const validated = validateCatalogSettingValue(normalizedKey, value);
     if (!validated.ok) throw new Error(validated.error);
     const normalizedValue = validated.value;
     const isEmpty = normalizedValue == null || String(normalizedValue).trim() === "";
+    let cacheValue = null;
 
     if (isEmpty) {
       const catalog = getCatalogEntry(normalizedKey);
@@ -267,10 +285,9 @@ export class AccountSettings {
              SET setting_value = excluded.setting_value,
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
         ).run(normalizedKey, catalogValue);
-        this._cache.set(normalizedKey, catalogValue === "" ? null : catalogValue);
+        cacheValue = catalogValue === "" ? null : catalogValue;
       } else {
         db.prepare(`DELETE FROM account_settings WHERE setting_key = ?`).run(normalizedKey);
-        this._cache.set(normalizedKey, null);
       }
     } else {
       db.prepare(
@@ -280,10 +297,9 @@ export class AccountSettings {
            SET setting_value = excluded.setting_value,
                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
       ).run(normalizedKey, normalizedValue);
-      this._cache.set(normalizedKey, normalizedValue);
+      cacheValue = normalizedValue;
     }
-    this._dataVersion = this._readDataVersion(db);
-    notifySettingsChanged();
+    this._publishWrite(db, new Map([[normalizedKey, cacheValue]]));
   }
 
   /**
@@ -310,9 +326,8 @@ export class AccountSettings {
          WHERE account_settings.setting_value IS NULL
             OR account_settings.setting_value = ''`,
     ).run(normalizedKey, String(validated.value ?? ""));
+    this._publishWrite(db);
     this._cache.delete(normalizedKey);
-    this._dataVersion = this._readDataVersion(db);
-    notifySettingsChanged();
     return info.changes > 0;
   }
 
@@ -322,21 +337,21 @@ export class AccountSettings {
     if (!normalizedRepoPath) return null;
     const cacheKey = `repo:${normalizedRepoPath}\0${normalizedKey}`;
     const db = this._openForReadOrWrite();
-    if (this._cache.has(cacheKey)) return this._cache.get(cacheKey);
+    if (!db.inTransaction && this._cache.has(cacheKey)) return this._cache.get(cacheKey);
     const row = db
       .prepare(`SELECT setting_value FROM repo_settings WHERE repo_path = ? AND setting_key = ?`)
       .get(normalizedRepoPath, normalizedKey);
     if (!row) {
-      this._cache.set(cacheKey, null);
+      if (!db.inTransaction) this._cache.set(cacheKey, null);
       return null;
     }
     const value = row.setting_value;
     if (value == null || value === "") {
-      this._cache.set(cacheKey, null);
+      if (!db.inTransaction) this._cache.set(cacheKey, null);
       return null;
     }
     const normalized = String(value);
-    this._cache.set(cacheKey, normalized);
+    if (!db.inTransaction) this._cache.set(cacheKey, normalized);
     return normalized;
   }
 
@@ -353,7 +368,6 @@ export class AccountSettings {
 
     if (isEmpty) {
       db.prepare(`DELETE FROM repo_settings WHERE repo_path = ? AND setting_key = ?`).run(normalizedRepoPath, normalizedKey);
-      this._cache.set(cacheKey, null);
     } else {
       db.prepare(
         `INSERT INTO repo_settings (repo_path, setting_key, setting_value, updated_at)
@@ -362,14 +376,13 @@ export class AccountSettings {
            SET setting_value = excluded.setting_value,
                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
       ).run(normalizedRepoPath, normalizedKey, normalizedValue);
-      this._cache.set(cacheKey, normalizedValue);
     }
-    this._dataVersion = this._readDataVersion(db);
-    notifySettingsChanged();
+    this._publishWrite(db, new Map([[cacheKey, isEmpty ? null : normalizedValue]]));
   }
 
   setMany(updates = {}) {
     const db = this._openForReadOrWrite();
+    const cacheChanges = new Map();
     const upsert = db.prepare(
       `INSERT INTO account_settings (setting_key, setting_value, updated_at)
        VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -384,7 +397,7 @@ export class AccountSettings {
         const normalizedKey = String(key);
         if (REPO_SCOPED_SETTING_KEYS.has(normalizedKey)) {
           del.run(normalizedKey);
-          this._cache.set(normalizedKey, null);
+          cacheChanges.set(normalizedKey, null);
           continue;
         }
         const validated = validateCatalogSettingValue(normalizedKey, value);
@@ -396,20 +409,24 @@ export class AccountSettings {
           if (catalog) {
             const catalogValue = catalog.default == null ? "" : String(catalog.default);
             upsert.run(normalizedKey, catalogValue);
-            this._cache.set(normalizedKey, catalogValue === "" ? null : catalogValue);
+            cacheChanges.set(normalizedKey, catalogValue === "" ? null : catalogValue);
           } else {
             del.run(normalizedKey);
-            this._cache.set(normalizedKey, null);
+            cacheChanges.set(normalizedKey, null);
           }
         } else {
           upsert.run(normalizedKey, normalizedValue);
-          this._cache.set(normalizedKey, normalizedValue);
+          cacheChanges.set(normalizedKey, normalizedValue);
         }
       }
     });
-    tx(Object.entries(updates || {}));
-    this._dataVersion = this._readDataVersion(db);
-    notifySettingsChanged();
+    try {
+      tx(Object.entries(updates || {}));
+    } catch (error) {
+      this.invalidate();
+      throw error;
+    }
+    this._publishWrite(db, cacheChanges);
   }
 
   getAll() {
@@ -442,6 +459,12 @@ export class AccountSettings {
   }
 
   _seedDefaults() {
+    // Keep migration markers, rewritten values, and new defaults atomic.
+    // The cache is invalidated by open() only after this transaction commits.
+    this._db.transaction(() => this._seedDefaultsInTransaction())();
+  }
+
+  _seedDefaultsInTransaction() {
     this._migratePlanApprovalMode();
     this._migrateAtlasAutoFeedbackDefault();
     this._migrateAtlasToolGateDefault();
@@ -453,10 +476,7 @@ export class AccountSettings {
     const stmt = this._db.prepare(
       `INSERT OR IGNORE INTO account_settings (setting_key, setting_value) VALUES (?, ?)`,
     );
-    const tx = this._db.transaction((entries) => {
-      for (const entry of entries) stmt.run(entry.key, entry.default);
-    });
-    tx(ACCOUNT_SCOPED_SETTINGS_CATALOG);
+    for (const entry of ACCOUNT_SCOPED_SETTINGS_CATALOG) stmt.run(entry.key, entry.default);
     // These were briefly account settings, but they target a specific checked-out
     // repo and can poison every run when stored globally. Repo target now resolves
     // from cwd or explicit in-memory config objects only.

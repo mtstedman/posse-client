@@ -126,7 +126,7 @@ function normalizeHandoff(args, overages = []) {
     overages.push({ field: "web_research_handoff", bytes: packetBytes, soft_cap: WEB_RESEARCH_LIMITS.maxPacketBytes });
   }
   const input = exactObject(args, ["protocol", "summary", "findings", "gaps", "sources"], "web_research_handoff");
-  if (input.protocol !== WEB_RESEARCH_PROTOCOL) {
+  if (input.protocol != null && input.protocol !== WEB_RESEARCH_PROTOCOL) {
     throw runtimeError(
       "WEB_RESEARCH_PROTOCOL_INVALID",
       `protocol must be ${WEB_RESEARCH_PROTOCOL}`,
@@ -303,7 +303,7 @@ export class WebResearchRuntime {
       registration.accepting = false;
       if (this.parents.get(id) === registration) this.parents.delete(id);
       for (const dispatch of this.dispatches.values()) {
-        if (dispatch.parentAgentCallId === id && dispatch.status === "running") {
+        if (dispatch.registration === registration && dispatch.status === "running") {
           dispatch.controller.abort(runtimeError(
             "WEB_RESEARCH_PARENT_CLOSED",
             "Parent closed while web research was running",
@@ -535,6 +535,7 @@ export class WebResearchRuntime {
       id: `wrd_${crypto.randomUUID().replaceAll("-", "")}`,
       parentAgentCallId,
       question,
+      registration,
       status: "running",
       packet: null,
       childAgentCallId: null,
@@ -630,12 +631,12 @@ export class WebResearchRuntime {
       }
       const { sources: nominatedSources, dropped_sources: droppedSources, ...handoff } = dispatch.packet;
       const sources = nominatedSources.length > 0
-        ? await this.captureSources(nominatedSources, {
+        ? await Promise.race([this.captureSources(nominatedSources, {
           context,
           projectDir: registration.projectDir || runtimeContext.projectDir || null,
           signal: dispatch.controller.signal,
           dispatchId: dispatch.id,
-        })
+        }), abortPromise])
         : [];
       if (dispatch.controller.signal.aborted) throw dispatch.controller.signal.reason;
       const findings = handoff.findings.map((finding) => this.surfaceFinding(finding, context));

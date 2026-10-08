@@ -3,12 +3,12 @@ import path from "path";
 import { C } from "../../../shared/format/functions/colors.js";
 import {
   getAgentCallsByWorkItem,
-  getArtifacts,
   getJob,
   listJobs,
   listJobsByWorkItem,
   listWorkItems,
 } from "../../queue/functions/index.js";
+import { getRecentArtifacts } from "../../queue/functions/artifacts.js";
 import { getObservationsByJob } from "../../observability/functions/observations.js";
 import { isInternalBackgroundObservationType } from "../../../catalog/observation.js";
 import { dirSizeBytes, worktreeRootAsync } from "../../git/functions/worktree.js";
@@ -128,7 +128,7 @@ export async function runAuditCommand(args = [], { projectDir = process.cwd(), t
   for (const job of jobs) {
     const payload = safeJson(job.payload_json, {});
     const observations = getObservationsByJob(job.id, 20).reverse();
-    const artifacts = getArtifacts(job.id).slice(-6);
+    const artifacts = getRecentArtifacts(job.id, 6);
     const calls = (workItemCalls.get(job.work_item_id) || []).filter((call) => call.job_id === job.id).slice(-6);
 
     console.log(`  ${C.bold}Job #${job.id}${C.reset} WI#${job.work_item_id} ${job.job_type} ${C.dim}(${job.status})${C.reset}`);

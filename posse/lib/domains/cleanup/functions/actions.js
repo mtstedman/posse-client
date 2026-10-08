@@ -13,6 +13,7 @@ import {
   adminWorktreeRoot,
 } from "../../git/functions/admin-git.js";
 import { SNAPSHOT_REF_PREFIX } from "../../git/functions/worktree-snapshots.js";
+import { acquireWorktreeLock, gitStashLockPath } from "../../git/functions/worktree-locks.js";
 import { TERMINAL_JOB_STATUSES, TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { getLiveSchedulerBlockMessage, listJobsByWorkItem, logEvent } from "../../queue/functions/index.js";
 import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
@@ -186,35 +187,25 @@ export function restoreSnapshot(snapshot, destDir, projectDir = snapshot?.projec
 }
 
 function actionablePorcelainPaths(repoDir) {
-  const porcelain = gitExec(["status", "--porcelain"], repoDir);
-  return String(porcelain || "")
-    .split("\n")
-    .map((line) => String(line || ""))
-    .filter(Boolean)
-    .flatMap((line) => porcelainLinePaths(line))
-    .filter((relPath) => relPath
+  const porcelain = gitExec(["status", "--porcelain=v1", "-z"], repoDir, { trim: false });
+  const fields = String(porcelain || "").split("\0");
+  if (fields.pop() !== "") throw new Error("working tree status could not be parsed safely");
+  const paths = [];
+  for (let i = 0; i < fields.length; i++) {
+    const record = fields[i];
+    if (record.length < 4 || record[2] !== " " || !/^[ MADRCU?!]{2}$/.test(record.slice(0, 2))) {
+      throw new Error("working tree status could not be parsed safely");
+    }
+    paths.push(record.slice(3));
+    if (/[RC]/.test(record.slice(0, 2))) {
+      if (++i >= fields.length || !fields[i]) throw new Error("working tree status could not be parsed safely");
+      paths.push(fields[i]);
+    }
+  }
+  return paths.filter((relPath) => relPath
       && !relPath.startsWith(".posse/")
       && !relPath.startsWith(".posse-worktrees/")
       && !relPath.startsWith(".posse-test-suites/"));
-}
-
-function unquotePorcelainPath(value) {
-  const trimmed = String(value || "").trim();
-  if (trimmed.length >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
-    return trimmed.slice(1, -1).replace(/\\"/g, "\"").replace(/\\\\/g, "\\").replace(/\\/g, "/");
-  }
-  return trimmed.replace(/\\/g, "/");
-}
-
-function porcelainLinePaths(line) {
-  const token = String(line || "").slice(3).trim();
-  const renameSep = " -> ";
-  const sepIndex = token.indexOf(renameSep);
-  if (sepIndex === -1) return [unquotePorcelainPath(token)];
-  return [
-    unquotePorcelainPath(token.slice(0, sepIndex)),
-    unquotePorcelainPath(token.slice(sepIndex + renameSep.length)),
-  ];
 }
 
 function assertCleanForSnapshotDiff(repoDir) {
@@ -225,18 +216,27 @@ function assertCleanForSnapshotDiff(repoDir) {
 
 function snapshotApplyRollbackState(repoDir) {
   const head = gitExec(["rev-parse", "HEAD"], repoDir);
+  // Managed tracked files are allowed by the apply guard. A hard reset after
+  // an apply failure would erase their earlier changes.
+  const preexistingTrackedChanges = String(gitExec(
+    ["status", "--porcelain=v1", "-z"], repoDir, { trim: false },
+  )).split("\0").some((record) => record && !record.startsWith("?? "));
   let branch = null;
   try {
     branch = gitExec(["symbolic-ref", "--quiet", "--short", "HEAD"], repoDir);
   } catch {
     branch = null;
   }
-  return { head, branch };
+  return { head, branch, preexistingTrackedChanges };
 }
 
 function rollbackSnapshotDiffApply(repoDir, state, { createdBranch = null } = {}) {
+  if (state.preexistingTrackedChanges) return false;
   try { gitExec(["reset", "--hard", state.head], repoDir); } catch { /* best effort */ }
-  try { gitExec(["clean", "-fd"], repoDir); } catch { /* best effort */ }
+  // The snapshot itself and other managed recovery data may be untracked.
+  try {
+    gitExec(["clean", "-fd", "-e", ".posse/", "-e", ".posse-worktrees/", "-e", ".posse-test-suites/"], repoDir);
+  } catch { /* best effort */ }
   try {
     if (state.branch) gitExec(["checkout", state.branch], repoDir);
     else gitExec(["checkout", state.head], repoDir);
@@ -246,6 +246,7 @@ function rollbackSnapshotDiffApply(repoDir, state, { createdBranch = null } = {}
   if (createdBranch && createdBranch !== state.branch) {
     try { gitExec(["branch", "-D", createdBranch], repoDir); } catch { /* best effort */ }
   }
+  return true;
 }
 
 export function applySnapshotDiff(snapshot, projectDir) {
@@ -261,8 +262,8 @@ export function applySnapshotDiff(snapshot, projectDir) {
     try {
       gitExec(["stash", "apply", "--index", refName], repoDir);
     } catch (err) {
-      rollbackSnapshotDiffApply(repoDir, rollbackState);
-      throw new Error(`git stash apply ${refName} failed: ${err.message.split("\n")[0]}`);
+      const rolledBack = rollbackSnapshotDiffApply(repoDir, rollbackState);
+      throw new Error(`git stash apply ${refName} failed: ${err.message.split("\n")[0]}${rolledBack ? "" : "; partial changes retained to protect pre-existing managed edits"}`);
     }
     logEvent({
       event_type: EVENT_TYPES.CLEANUP_SNAPSHOT_DIFF_APPLIED,
@@ -307,12 +308,17 @@ export function applySnapshotDiff(snapshot, projectDir) {
       applied++;
     }
     if (fs.existsSync(diffPatch) && fs.statSync(diffPatch).size > 0) {
+      // Three-way apply also writes the index. Save its staged tree and put it
+      // back after applying the working-copy delta.
+      const stagedTree = gitExec(["write-tree"], repoDir);
       gitExec(["apply", "--3way", diffPatch], repoDir);
+      gitExec(["read-tree", stagedTree], repoDir);
       applied++;
     }
     if (applied === 0) throw new Error("snapshot contains no patch payload to apply");
   } catch (err) {
-    rollbackSnapshotDiffApply(repoDir, rollbackState, { createdBranch });
+    const rolledBack = rollbackSnapshotDiffApply(repoDir, rollbackState, { createdBranch });
+    if (!rolledBack) throw new Error(`${err.message}; partial changes retained to protect pre-existing managed edits`, { cause: err });
     throw err;
   }
 
@@ -433,11 +439,33 @@ export function discardWorktree(worktree, projectDir, { force = false } = {}) {
 }
 
 export function dropStash(stash, projectDir) {
-  const ref = resolveCurrentStashRef(stash, projectDir, "drop");
+  const lockPath = gitStashLockPath(projectDir, projectDir, { disabled: true });
+  const lock = acquireWorktreeLock(lockPath);
+  if (!lock.acquired) throw new Error(`git stash drop refused: timed out waiting for stash lock: ${lockPath}`);
+  let ref = stash?.ref || "(unresolved)";
   try {
-    gitExec(["stash", "drop", ref], projectDir);
+    ref = resolveCurrentStashRef(stash, projectDir, "drop");
+    const expectedHash = String(stash?.objectHash || "").trim();
+    if (!expectedHash) throw new Error("surveyed stash has no object hash");
+    if (gitExec(["rev-parse", ref], projectDir) !== expectedHash) {
+      throw new Error(`surveyed stash ${stash.ref} shifted during lookup`);
+    }
+    const result = gitExec(["stash", "drop", ref], projectDir);
+    const droppedHash = /^Dropped \S+ \(([0-9a-fA-F]{40,64})\)$/.exec(result)?.[1];
+    if (droppedHash !== expectedHash) {
+      if (droppedHash) {
+        try {
+          gitExec(["stash", "store", "-m", stash?.label || "Recovered Posse stash", droppedHash], projectDir);
+        } catch (recoveryError) {
+          throw new Error(`dropped unexpected stash ${droppedHash}; automatic recovery failed: ${recoveryError.message}`);
+        }
+      }
+      throw new Error(`dropped stash identity could not be confirmed${droppedHash ? `; recovered unexpected stash ${droppedHash}` : `: ${result}`}`);
+    }
   } catch (err) {
     throw new Error(`git stash drop ${ref} failed: ${err.message.split("\n")[0]}`);
+  } finally {
+    lock.release();
   }
   logEvent({
     event_type: EVENT_TYPES.CLEANUP_STASH_DROPPED,
@@ -450,10 +478,11 @@ export function dropStash(stash, projectDir) {
 
 export function restoreStash(stash, projectDir) {
   const ref = resolveCurrentStashRef(stash, projectDir, "apply");
+  const target = String(stash?.objectHash || "").trim() || ref;
   try {
-    gitExec(["stash", "apply", ref], projectDir);
+    gitExec(["stash", "apply", target], projectDir);
   } catch (err) {
-    throw new Error(`git stash apply ${ref} failed: ${err.message.split("\n")[0]}`);
+    throw new Error(`git stash apply ${target} failed: ${err.message.split("\n")[0]}`);
   }
   logEvent({
     event_type: EVENT_TYPES.CLEANUP_STASH_APPLIED,

@@ -7,10 +7,13 @@ export function toolReference(suite, canonicalName) {
 
 export const TOOL_REFS = Object.freeze({
   atlas: Object.freeze({
+    traverseRef: toolReference("atlas", "traverse_ref"),
+    fetchRef: toolReference("atlas", "fetch_ref"),
     query: toolReference("atlas", "query"),
     codeWindow: toolReference("atlas", "code.window"),
   }),
   tools: Object.freeze({
+    ackOperatorFeedback: toolReference("tools", "ack_operator_feedback"),
     agentHandoff: toolReference("tools", "agent_handoff"),
     bash: toolReference("tools", "bash"),
     chainRead: toolReference("tools", "chain_read"),
@@ -40,3 +43,5 @@ export function formatToolReference(reference) {
   const { suite, canonicalName } = normalizeToolReference(reference);
   return `${suite}.${canonicalName}`;
 }
+
+export const ATLAS_READ_GUIDANCE_TOKEN = "{{atlas_read_guidance}}";

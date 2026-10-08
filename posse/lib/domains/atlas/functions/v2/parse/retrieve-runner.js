@@ -377,6 +377,9 @@ export async function disposeConductorRetrieveResources() {
  * }} payload
  */
 export async function runConductorRetrieve(payload) {
+  const started = performance.now();
+  const timings = {};
+  let symbolDiagnostics = null;
   const viewPath = payload?.viewPath ? String(payload.viewPath) : null;
   const ledgerPath = payload?.ledgerPath ? String(payload.ledgerPath) : null;
   const readRoot = payload?.readRoot ? String(payload.readRoot) : null;
@@ -384,7 +387,11 @@ export async function runConductorRetrieve(payload) {
   const gateKey = dbHandleKey({ viewPath, ledgerPath });
   let needsEmbeddings = payload.semantic === true && !!readRoot && semanticDispatchEnabled(config);
   return RETRIEVE_DB_GATE.read(gateKey, async () => {
+    const admitted = performance.now();
+    timings.gate_wait = Math.max(0, admitted - started);
     const handles = getDbHandles({ viewPath, ledgerPath });
+    timings.handles = Math.max(0, performance.now() - admitted);
+    const dispatchStarted = performance.now();
     const view = handles.view;
     const ledger = handles.ledger;
     const runDispatch = async () => {
@@ -401,6 +408,7 @@ export async function runConductorRetrieve(payload) {
         ledger,
         ledgerPath: ledgerPath || undefined,
         versionId: String(payload.versionId || ""),
+        onRetrievalDiagnostics: (diagnostics) => { symbolDiagnostics = diagnostics; },
         repoRoot: readRoot || undefined,
         repoId: payload.repoId ? String(payload.repoId) : null,
         // The reader lane is READ-ONLY w.r.t. embeddings: never encode-on-demand
@@ -441,7 +449,13 @@ export async function runConductorRetrieve(payload) {
     }
     // Envelopes are JSON-safe by contract; round-trip defensively so a stray
     // non-clonable never kills the daemon transport.
-    return JSON.parse(JSON.stringify(envelope));
+    timings.dispatch = Math.max(0, performance.now() - dispatchStarted);
+    const serializationStarted = performance.now();
+    const result = JSON.parse(JSON.stringify(envelope));
+    timings.serialization = Math.max(0, performance.now() - serializationStarted);
+    timings.service = Math.max(0, performance.now() - started);
+    return { ...result, _retrievalDiagnostics: { timings_ms: timings,
+      ...(symbolDiagnostics ? { symbol: symbolDiagnostics } : {}) } };
   }, {
     label: "reader-db.retrieve",
     waitMs: 60_000,

@@ -1,3 +1,6 @@
+// Physical Atlas requests, distinct from expanded tool.atlas execution rows.
+export const ATLAS_REQUEST_OBSERVATION_TYPE = "system.atlas_request";
+
 export const RESPONSE_TRANSFORM_OBSERVATION_TYPE = "system.response_transform";
 
 // A frozen baseline that fails after passing for an earlier job of the same
@@ -6,6 +9,7 @@ export const BASELINE_SIBLING_REGRESSION_OBSERVATION_TYPE = "command.baseline_si
 
 export const INTERNAL_BACKGROUND_OBSERVATION_TYPES = Object.freeze([
   RESPONSE_TRANSFORM_OBSERVATION_TYPE,
+  ATLAS_REQUEST_OBSERVATION_TYPE,
   "tool.response_transform",
 ]);
 

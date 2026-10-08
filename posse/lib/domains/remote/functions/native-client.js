@@ -33,6 +33,18 @@ const REMOTE_ARTIFACT_METHODS = new Set([
 ]);
 
 const INVALID_POSSE_KEY_RE = /\binvalid posse_key\b/iu;
+const NATIVE_REQUEST_STARTUP_GRACE_MS = 10_000;
+
+// timeoutMs is the HTTP budget for each attempt. The child process must be
+// allowed to finish all authorized attempts plus its own startup/exit work.
+/** @param {{ timeoutMs?: number, maxRetries?: number, retryDelayMs?: number }} options */
+function nativeRequestProcessBudgetMs({ timeoutMs, maxRetries, retryDelayMs }) {
+  const perAttempt = Number(timeoutMs);
+  if (!Number.isFinite(perAttempt) || perAttempt <= 0) return undefined;
+  const retries = Number.isInteger(maxRetries) ? Math.max(0, Number(maxRetries)) : 0;
+  const delay = Number.isFinite(Number(retryDelayMs)) ? Math.max(0, Number(retryDelayMs)) : 0;
+  return Math.min(2_147_483_647, Math.ceil(perAttempt * (retries + 1) + delay * retries + NATIVE_REQUEST_STARTUP_GRACE_MS));
+}
 
 /** @param {unknown} value */
 function nativeHeartbeatFailureDetail(value) {
@@ -95,7 +107,11 @@ function unwrapRemoteNativeResponse(value) {
     const err = obj.error && typeof obj.error === "object"
       ? /** @type {Record<string, unknown>} */ (obj.error)
       : null;
-    throw new Error(String(err?.message || obj.message || "remote native request failed"));
+    /** @type {Error & { code?: string | number, status?: number }} */
+    const failure = new Error(String(err?.message || obj.message || "remote native request failed"));
+    if (typeof err?.code === "string" || typeof err?.code === "number") failure.code = err.code;
+    if (Number.isInteger(err?.status)) failure.status = Number(err.status);
+    throw failure;
   }
   if (obj.ok === true && Object.prototype.hasOwnProperty.call(obj, "data")) {
     return obj.data;
@@ -136,7 +152,11 @@ async function runRemoteNativeMethodJson(method, payload, {
   );
   if (!res.ok) {
     const detail = String(res.stderr || res.error?.message || "native process failed").trim();
-    throw new Error(`remote native method ${method} failed${detail ? `: ${detail}` : ""}`);
+    /** @type {Error & { code?: string | number }} */
+    const failure = new Error(`remote native method ${method} failed${detail ? `: ${detail}` : ""}`, { cause: res.error });
+    const nativeCode = /** @type {{ code?: string | number } | null} */ (res.error)?.code;
+    if (nativeCode != null) failure.code = nativeCode;
+    throw failure;
   }
   return unwrapRemoteNativeResponse(res.json);
 }
@@ -189,7 +209,7 @@ export async function runRemoteNativeRequestJson(request, opts = {}) {
   try {
     return await runRemoteNativeMethodJson("request-json", request, {
       manager,
-      timeoutMs: request.timeoutMs,
+      timeoutMs: nativeRequestProcessBudgetMs(request),
       requiredRoute,
     });
   } catch (error) {
@@ -198,6 +218,10 @@ export async function runRemoteNativeRequestJson(request, opts = {}) {
         .replace(/^remote native method request-json failed:?\s*/i, "")
         .trim(),
     );
-    throw new Error(`remote native request ${request.method || "GET"} ${request.path} failed${message ? `: ${message}` : ""}`);
+    /** @type {Error & { code?: string | number, status?: number }} */
+    const wrapped = new Error(`remote native request ${request.method || "GET"} ${request.path} failed${message ? `: ${message}` : ""}`, { cause: error });
+    if (error?.code != null) wrapped.code = error.code;
+    if (error?.status != null) wrapped.status = error.status;
+    throw wrapped;
   }
 }

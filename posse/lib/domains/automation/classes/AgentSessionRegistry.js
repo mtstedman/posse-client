@@ -42,11 +42,19 @@ export class AgentSessionRegistry {
   }
   principalFor(definition) { return principalFor(definition); }
 
-  // The application-facing contract is derived from the exact script tools in
-  // the definition. Their agent-facing params remain the only model surface.
+  // Include script tools selected directly or unlocked by instruction skills.
+  // Their agent-facing params remain the only model surface.
   privateInputSchema(definition) {
     const properties = {}, required = new Set();
-    for (const name of definition.tools) {
+    const toolNames = new Set(definition.tools);
+    for (const reference of definition.skills) {
+      const skill = this.resolveSkill(definition, reference);
+      if (skill.runtime.mode !== "instructions") continue;
+      for (const capability of skill.capabilities) {
+        if (capability.kind === "tool" && capability.id.startsWith("script:")) toolNames.add(capability.id.slice(7));
+      }
+    }
+    for (const name of toolNames) {
       if (this.store.get("prompt_tools", name) || this.store.get("sql_capabilities", name)) continue;
       const schema = this.scripts.load(name).manifest.inputs;
       if (!schema) continue;
@@ -104,7 +112,7 @@ export class AgentSessionRegistry {
       preRunContext = resolved.injected;
       session = {
         id, agent: checked.definition.name, agent_digest: exactDigest,
-        definition: checked.definition, capabilities, pre_run_context: structuredClone(preRunContext), messages: [], turns: [],
+        definition: checked.definition, capabilities, skill_instructions: resolved.instructions, pre_run_context: structuredClone(preRunContext), messages: [], turns: [],
         status: "idle", created_at: nowIso(this.now), updated_at: nowIso(this.now), active: null, pending: null,
         ownership: execution ? { kind: execution.kind, client_id: execution.clientID, agent: checked.definition.name } : { kind: "operator" },
         ...(execution ? { private_inputs_digest: execution.inputsDigest } : {}),
@@ -119,7 +127,7 @@ export class AgentSessionRegistry {
     };
     session.pending = null; session.updated_at = nowIso(this.now);
     this.store.put(SESSION_KIND, id, session);
-    return { session: this.publicSession(session), definition: structuredClone(session.definition), token, turn_id: turnID, messages: session.messages, capabilities: session.capabilities.map(publicCapability), pre_run_context: preRunContext, turn_message: sourceMessage };
+    return { session: this.publicSession(session), definition: structuredClone(session.definition), token, turn_id: turnID, messages: session.messages, capabilities: session.capabilities.map(publicCapability), pre_run_context: preRunContext, skill_instructions: structuredClone(session.skill_instructions || []), turn_message: sourceMessage };
   }
 
   assertOwnership(session, execution) {
@@ -240,6 +248,13 @@ export class AgentSessionRegistry {
     };
   }
 
+  resolveSkill(definition, identity) {
+    demand(/^[a-z][a-z0-9-]*(?:@[^@]+)?$/.test(identity), `Skill ${identity} is not a valid published skill reference`, "skill_unavailable");
+    return this.skills.resolveReference(identity,
+      definition.scope.kind === "repository" ? definition.scope.repo_id : definition.scope.kind === "folder" ? repositoryID(definition.scope.folder_path) : "",
+      definition.scope.kind === "folder" ? definition.scope.folder_path : "");
+  }
+
   resolveCapabilities(definition, suppliedPromptResults = [], execution = null) {
     const principal = principalFor(definition);
     const capabilities = [], injected = [];
@@ -264,12 +279,29 @@ export class AgentSessionRegistry {
       capabilities.push(this.capability(entry, principal, { name, kind: "script", description: tool.manifest.description, parameters: tool.manifest.params, effect: tool.manifest.effect }, execution));
     }
     demand(supplied.size === 0, `Unknown prompt tool result ${[...supplied.keys()][0]}`, "prompt_tool_result_unknown");
+    const instructions = [];
     for (const identity of definition.skills) {
-      demand(/^[a-z][a-z0-9-]*(?:@[^@]+)?$/.test(identity), `Skill ${identity} is not a valid published skill reference`, "skill_unavailable");
-      const skill = this.skills.resolveReference(identity,
-        definition.scope.kind === "repository" ? definition.scope.repo_id : definition.scope.kind === "folder" ? repositoryID(definition.scope.folder_path) : "",
-        definition.scope.kind === "folder" ? definition.scope.folder_path : "");
+      const skill = this.resolveSkill(definition, identity);
       const entry = this.store.get("entries", this.skills.entryID(skill));
+      if (skill.runtime.mode === "instructions") {
+        demand(entry?.enabled && this.service.entryAvailable(entry), `Skill ${identity} or one of its tools is unavailable`, "skill_unavailable");
+        instructions.push({ id: this.skills.identity(skill), digest: entry.digest, instructions: skill.instructions });
+        for (const grant of skill.capabilities) {
+          const toolEntry = grant.id.startsWith("script:") ? this.store.get("entries", grant.id)
+            : this.store.get("entries", `builtin:${grant.id}@1`) || this.store.get("entries", grant.id);
+          demand(toolEntry && toolEntry.kind !== "skill", `Skill tool ${grant.id} is unavailable`, "capability_unavailable");
+          const toolName = grant.id.startsWith("script:") ? grant.id.slice(7) : grant.id;
+          const extension = this.capability(toolEntry, principal, {
+            name: toolName, kind: toolEntry.kind, description: toolEntry.description,
+            parameters: toolEntry.input_schema, effect: toolEntry.effect === "read_only" ? "read" : "write",
+          }, execution);
+          const existing = capabilities.find(item => item.name === toolName);
+          demand(!existing || existing.entry_id === extension.entry_id && existing.digest === extension.digest,
+            `Agent capability name ${toolName} is ambiguous`, "agent_invalid");
+          if (!existing) capabilities.push(extension);
+        }
+        continue;
+      }
       capabilities.push(this.capability(entry, principal, {
         name: `skill.${skill.name}`, kind: "skill", description: skill.intent,
         parameters: skill.contract.input_schema, effect: skill.contract.effect === "read_only" ? "read" : "write",
@@ -277,7 +309,7 @@ export class AgentSessionRegistry {
     }
     const names = new Set();
     for (const item of capabilities) { demand(!names.has(item.name), `Agent capability name ${item.name} is ambiguous`, "agent_invalid"); names.add(item.name); }
-    return { capabilities, injected };
+    return { capabilities, injected, instructions };
   }
 
   capability(entry, principal, surface, execution = null) {

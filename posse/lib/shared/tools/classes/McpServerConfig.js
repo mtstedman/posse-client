@@ -352,6 +352,7 @@ function expectedMcpToolNames(role, bootPayload = {}) {
       finalReview: bootPayload.finalReview === true,
       atlasAvailable: bootPayload.atlasAvailable === true,
       disableSystemTools: bootPayload.disableSystemTools === true,
+      researchInvestigation: bootPayload.researchInvestigation === true,
       customTools: bootPayload.customTools === true,
     });
   } catch {
@@ -724,6 +725,7 @@ function buildDeterministicMcpBootPayload(role, {
     finalReview: finalReview === true,
     atlasAvailable: atlasEnabled,
     disableSystemTools: disableSystemTools === true,
+    researchInvestigation: researchInvestigation === true,
     customTools,
   });
   const allowShell = expectedTools.includes("bash");

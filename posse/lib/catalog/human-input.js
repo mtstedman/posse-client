@@ -20,6 +20,19 @@ export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment usi
 export const HUMAN_INPUT_FREE_TEXT_CHOICE_ID = "free_text";
 export const HUMAN_INPUT_FREE_TEXT_MAX_CHARS = 8000;
 export const HUMAN_GATE_STATES = Object.freeze(["open", "resolving", "resolved", "superseded"]);
+export const HUMAN_GATE_RECONCILE_REASONS = Object.freeze({
+  CLOSED_CONTRACT_JOB: "closed_contract_job",
+  TERMINAL_WORK_ITEM: "terminal_work_item",
+  SOURCE_STATE_CHANGED: "source_state_changed",
+  MISSING_ORIGINAL: "missing_original",
+  REGISTERED_LEGACY: "registered_legacy",
+  DUPLICATE_LEGACY: "duplicate_legacy",
+  INVALID_LEGACY_CONTRACT: "invalid_legacy_contract",
+  ORPHANED_GATE: "orphaned_gate",
+  FAILED_RESOLUTION: "failed_resolution",
+  ABANDONED_RESOLVER: "abandoned_resolver",
+  TERMINAL_GATE_JOB: "terminal_gate_job",
+});
 export const SCOPE_APPROVAL_MODES = Object.freeze({ DEFAULT: "default", AUTO: "auto" });
 export const SCOPE_APPROVAL_MODE_VALUES = Object.freeze(Object.values(SCOPE_APPROVAL_MODES));
 export const SCOPE_MODE_APPROVAL_SOURCE = "scope_mode_auto";

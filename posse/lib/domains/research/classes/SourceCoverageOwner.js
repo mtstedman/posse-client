@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { fetchHashRefForContext, jobAncestorRows, surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
+import { fetchHashRefForContext, surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { recordObservation } from "../../observability/functions/observations.js";
 import { hashRefModelVisibility } from "../../../shared/tools/functions/fetch-ref-policy.js";
 import { evidenceRefSurface } from "../../../shared/tools/functions/ref-surface.js";
@@ -229,40 +229,24 @@ export class SourceCoverageOwner {
       }
       return [];
     }
-    const ancestry = jobAncestorRows(this.db, this.jobId, this.workItemId);
-    if (ancestry.length === 0) return [];
-    const jobRank = new Map(ancestry.map((row, index) => [row.id, index]));
-    const placeholders = ancestry.map(() => "?").join(", ");
-    // Coverage recorded by an attempt that then failed points at source the
-    // model can no longer see: a failed attempt's context is discarded, so its
-    // evidence ref is dangling by construction and suppressing a re-read would
-    // leave the retry with a pointer and no source. The current attempt always
-    // counts, whatever its in-flight status.
-    const rows = this.db.prepare(`
+    // Stored evidence may be shared, but delivery to another agent does not
+    // put the source in this agent's context. Unknown agent identity must
+    // fail open rather than merge multiple contexts into one coverage ledger.
+    if (!this.agentCallId) return [];
+    return this.db.prepare(`
       SELECT o.id, o.job_id, o.attempt_id, o.detail_json
       FROM job_observations o
-      WHERE o.work_item_id = ? AND o.job_id IN (${placeholders}) AND o.observation_type = ?
-        AND (
-          (o.job_id = ? AND o.attempt_id = ?)
-          OR NOT EXISTS (
-            SELECT 1 FROM job_attempts a
-            WHERE a.id = o.attempt_id AND a.status IN ('failed', 'canceled')
-          )
-        )
+      WHERE o.work_item_id = ? AND o.job_id = ? AND o.attempt_id = ?
+        AND o.observation_type = ?
+        AND json_extract(o.detail_json, '$.agent_call_id') = ?
+      ORDER BY o.id DESC
     `).all(
       this.workItemId,
-      ...ancestry.map((row) => row.id),
-      COVERAGE_OBSERVATION,
       this.jobId,
       this.attemptId,
+      COVERAGE_OBSERVATION,
+      this.agentCallId,
     );
-    return rows.sort((left, right) => {
-      const leftCurrentAttempt = left.job_id === this.jobId && left.attempt_id === this.attemptId;
-      const rightCurrentAttempt = right.job_id === this.jobId && right.attempt_id === this.attemptId;
-      if (leftCurrentAttempt !== rightCurrentAttempt) return leftCurrentAttempt ? -1 : 1;
-      const rankDelta = (jobRank.get(left.job_id) ?? ancestry.length) - (jobRank.get(right.job_id) ?? ancestry.length);
-      return rankDelta || right.id - left.id;
-    });
   }
 
   #authorization(coverage) {
@@ -487,9 +471,7 @@ export class SourceCoverageOwner {
     const fresh = this.#freshSource(relative);
     if (!fresh) return { covered: false, partial: false, reason: "source_unavailable" };
 
-    // Only current-attempt delivery is already visible to this model context.
-    // Prior-attempt and ancestor coverage requires explicit reaccess and cannot
-    // safely be subtracted from a response that is otherwise being delivered.
+    // Only delivery to this agent can be subtracted from its next response.
     const fragments = this.#rows().flatMap((row) => {
       if (Number(row.job_id) !== this.jobId || Number(row.attempt_id) !== this.attemptId) return [];
       const coverage = rowDetail(row);
@@ -581,14 +563,14 @@ export class SourceCoverageOwner {
 
   async admitResolvedIntervalOrReserve({ repoRelativePath, startLine, endLine } = {}) {
     const admitted = this.admitResolvedInterval({ repoRelativePath, startLine, endLine });
-    if (admitted.covered || !this.attemptId) return admitted;
+    if (admitted.covered || !this.attemptId || !this.agentCallId) return admitted;
     const relative = normalizePath(repoRelativePath);
     if (!relative) return admitted;
     // Serialize resolved windows per file, not merely per selector. Different
     // selectors in one provider batch can resolve to the same source interval;
     // a selector-keyed reservation allowed both native results to enter the
     // model context before either coverage row became visible.
-    const key = `resolved:${this.jobId}:${this.attemptId}:${this.repositoryIdentity}:${relative}`;
+    const key = `resolved:${this.jobId}:${this.attemptId}:${this.agentCallId}:${this.repositoryIdentity}:${relative}`;
     let active = activeReservations.get(key);
     if (active && active.expiresAt <= Date.now()) {
       releaseReservation(active, "lease_expired");
@@ -682,7 +664,7 @@ export class SourceCoverageOwner {
   }
 
   /**
-   * Lines of one region that this attempt has already been shown, with the
+   * Lines of one region that this agent has already been shown, with the
    * evidence refs that carry them. Read-only: nothing is withheld on the
    * strength of it, and a caller is never refused for asking again.
    *
@@ -733,8 +715,8 @@ export class SourceCoverageOwner {
 
   async admitOrReserve(args = {}) {
     const admitted = this.admit(args);
-    if (admitted.covered || !this.attemptId || admitted.reason === "missing_selector_anchor") return admitted;
-    const key = `${this.jobId}:${this.attemptId}:${this.repositoryIdentity}:${sourceSelectorFingerprint(args)}`;
+    if (admitted.covered || !this.attemptId || !this.agentCallId || admitted.reason === "missing_selector_anchor") return admitted;
+    const key = `${this.jobId}:${this.attemptId}:${this.agentCallId}:${this.repositoryIdentity}:${sourceSelectorFingerprint(args)}`;
     let active = activeReservations.get(key);
     if (active && active.expiresAt <= Date.now()) {
       releaseReservation(active, "lease_expired");

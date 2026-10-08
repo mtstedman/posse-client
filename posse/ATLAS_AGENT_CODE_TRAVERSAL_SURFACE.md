@@ -39,25 +39,25 @@ Atlas: `atlas.fetch_ref`, `atlas.traverse_ref`.
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.run_unit_test`, `tools.search_files`, `tools.validate_artifact_output`, `tools.view_image`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `dev`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.final_review`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.run_unit_test`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `planner`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.run_unit_test`, `tools.search_files`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `researcher`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_claim`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `subagent`
 
@@ -125,7 +125,7 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`, `subagent
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Finish the current agent turn with a terminal handoff. Dev/fix and artificer use the compact completion form; call agent_handoff() for normal COMPLETE. Other roles submit posse.agent_handoff.v1 with evidence selectors. Posse ends provider generation after acknowledging the receipt.
+Finish the current agent turn with a terminal handoff. Dev/fix and artificer use the compact completion form; call agent_handoff() for normal COMPLETE. Other roles submit the report fields in the issued schema with evidence selectors. The receipt ends generation.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -147,12 +147,12 @@ Runtime handoff projection by role:
 
 | Role | Full fields | Compact v1 fields | Compact v3 fields |
 |---|---|---|---|
-| `artificer` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `evidence_gap`, `remaining_work`, `status` | `blocker`, `evidence_gap`, `remaining_work`, `status` |
-| `assessor` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `confidence`, `handoffs`, `outcome`, `profile`, `protocol` | `confidence`, `evidence`, `proof`, `questions`, `repair`, `verdict` |
-| `dev` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `file_requests`, `no_change_rationale`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `file_requests`, `no_change_rationale`, `remaining_work`, `status`, `verification_unavailable` |
-| `planner` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `shared_contracts`, `tasks` | `shared_contracts`, `tasks` |
-| `researcher` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `handoffs`, `outcome`, `profile`, `protocol` | `absence_checks`, `claims`, `file_priorities`, `key_files`, `key_symbols`, `memories`, `outcome`, `patterns`, `profile`, `questions`, `related_files`, `summary`, `verification_targets` |
-| `subagent` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `profile`, `protocol`, `remaining_work`, `status`, `verification_unavailable` | `handoffs`, `outcome`, `profile`, `protocol` | `handoffs`, `outcome`, `profile`, `protocol` |
+| `artificer` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `evidence_gap`, `remaining_work`, `status` | `blocker`, `evidence_gap`, `remaining_work`, `status` |
+| `assessor` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `remaining_work`, `status`, `verification_unavailable` | `confidence`, `handoffs`, `outcome` | `confidence`, `evidence`, `proof`, `questions`, `repair`, `verdict` |
+| `dev` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `file_requests`, `no_change_rationale`, `remaining_work`, `status`, `verification_unavailable` | `blocker`, `file_requests`, `no_change_rationale`, `remaining_work`, `status`, `verification_unavailable` |
+| `planner` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `remaining_work`, `status`, `verification_unavailable` | `shared_contracts`, `tasks` | `shared_contracts`, `tasks` |
+| `researcher` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `remaining_work`, `status`, `verification_unavailable` | `handoffs`, `outcome` | `absence_checks`, `claims`, `file_priorities`, `key_files`, `key_symbols`, `memories`, `outcome`, `patterns`, `questions`, `related_files`, `summary`, `verification_targets` |
+| `subagent` | `blocker`, `confidence`, `coverage`, `evidence_gap`, `file_requests`, `handoffs`, `no_change_rationale`, `outcome`, `remaining_work`, `status`, `verification_unavailable` | `handoffs`, `outcome` | `handoffs`, `outcome` |
 
 The exact role-specific handoff schemas are retained in the JSON contract pin.
 
@@ -406,34 +406,6 @@ Pack scoped PNG, JPEG, WebP, or GIF images (first frame) into one PNG sprite she
 | `map_path` | `string` | Optional | min length 1; max length 1024 | Optional destination .json for the frame map. Defaults to output_path with a .json extension. |
 | `output_path` | `string` | Required | min length 1; max length 1024 | Destination .png inside your output root. An existing file there is replaced. |
 | `padding` | `integer` | Optional | min 0; max 64 | Optional background pixels around and between cells. Default: 0. |
-
-### `atlas.create_ref`
-
-Remote roles: `assessor`, `dev`, `planner`, `researcher`.
-
-| Contract field | Value |
-|---|---|
-| Canonical name | `create_ref` |
-| Tool reference token | `atlas.create_ref` |
-| Provider callable name | Resolved from this token against the actual issued surface. |
-| Access | `atlas` |
-| Batchable input | Yes |
-| Parallel calls | No |
-| System-prefetch capable | No |
-
-Citation storage. Store inline text, a materialized ref slice, or a batch of chunks and receive evidence_ref identities for the already-visible chunks. The optional note remains attached to the stored ref.
-
-| Parameter | Type | Requirement | Constraints | Description |
-|---|---|---|---|---|
-| `chunks` | `array<any>` | Conditional | min items 1; max items 24 | Batch form: mint several chunks in one call (max 24) with per-item errors. Each item takes the same fields as the single form. |
-| `limit` | `integer` | Optional | min 1; max 60000 | Maximum characters to take from source_ref payload. |
-| `lines` | `string` | Optional | max length 32 | 1-based line range within source_ref payload, e.g. "120-180". |
-| `note` | `string` | Optional | max length 300 | Optional 'what is this' (max 300 chars). Surfaces inside the stub and stays sticky through handoffs. |
-| `object_type` | `string` | Optional | max length 80 | Optional object type label for the stub. Default agent.chunk. |
-| `offset` | `integer` | Optional | min 0 | Character offset within source_ref payload. Default 0. |
-| `owner_scope` | `string` | Optional | values "work_item", "job" | Visibility scope. Default work_item so the evidence identity can be handed to later agents in the work item. |
-| `source_ref` | `string` | Conditional | max length 512 | Existing materialized ref alias such as #a3f9 for a server-side slice. Combine with lines or offset and limit. |
-| `text` | `string` | Conditional | min length 1; max length 60000 | Inline authored or assembled content to store, up to 60000 characters. Existing stored material can be selected with source_ref. |
 
 ### `tools.custom_tools`
 
@@ -1327,7 +1299,6 @@ Submit the web specialty agent's sole final result. Every finding must name an e
 |---|---|---|---|---|
 | `findings` | `array<object>` | Required | min items 1 | Aim for at most 12 findings. |
 | `gaps` | `array<string>` | Optional |  | Material unresolved gaps; aim for at most 6. |
-| `protocol` | `string` | Required | values "posse.web_research.v1" |  |
 | `sources` | `array<object>` | Optional |  | Raw text or data files (JSON, CSV, XML, YAML, plain text) to snapshot byte-exact, such as a raw.githubusercontent.com dataset file. Name the data file itself. At most 4 are snapshotted. |
 | `summary` | `string` | Required | min length 1 | Concise synthesis; aim for under 2000 characters. |
 

@@ -9,11 +9,11 @@ import fs from "fs";
 import path from "path";
 import { C } from "../../../shared/format/functions/colors.js";
 import {
-  getArtifactsByWorkItem,
   getSetting,
   normalizeDbTaskPreMergePolicy,
   storeArtifact,
 } from "../../queue/functions/index.js";
+import { getArtifact, getArtifactMetadataForJob } from "../../queue/functions/artifacts.js";
 import { DB_TASK_PRE_MERGE_POLICIES, SETTING_KEYS } from "../../../catalog/settings.js";
 import {
   artifactsDir,
@@ -421,18 +421,21 @@ export function renderPlannerFilePriorities(entries) {
 
 export function latestPlanArtifactText(workItemId, jobId, preferredTypes = []) {
   if (!jobId) return "";
-  const artifacts = getArtifactsByWorkItem(workItemId)
-    .filter((artifact) => Number(artifact.job_id) === Number(jobId));
+  const artifacts = getArtifactMetadataForJob(workItemId, jobId);
+  const textById = new Map();
+  const content = (artifact) => {
+    if (!textById.has(artifact.id)) textById.set(artifact.id, getArtifact(artifact.id)?.content_long || "");
+    return textById.get(artifact.id);
+  };
   for (const type of preferredTypes) {
-    const match = artifacts
-      .filter((artifact) => artifact.artifact_type === type)
-      .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0];
-    if (match?.content_long) return match.content_long;
+    const match = artifacts.find((artifact) => artifact.artifact_type === type);
+    if (match && content(match)) return content(match);
   }
-  const fallback = artifacts
-    .filter((artifact) => artifact.content_long)
-    .sort((a, b) => Number(b.id || 0) - Number(a.id || 0))[0];
-  return fallback?.content_long || "";
+  for (const artifact of artifacts) {
+    const text = content(artifact);
+    if (text) return text;
+  }
+  return "";
 }
 
 export function buildPlanSynthesisArtifact(ctx, output) {

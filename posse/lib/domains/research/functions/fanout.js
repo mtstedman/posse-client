@@ -327,14 +327,18 @@ export function expireStuckFanoutChildren({ timeoutSec, nowMs = Date.now() } = {
       || (payload?.fanout_branch_index != null ? `branch-${payload.fanout_branch_index}` : "branch");
     const fanoutRunId = payload?.fanout_run_id || null;
     try {
-      runInTransaction(() => {
+      const transitioned = runInTransaction(() => {
+        // Selection and mutation can be separated by another scheduler or
+        // cancellation. Recheck the full timeout predicate under the write
+        // transaction before publishing synthetic evidence.
+        if (findStuckFanoutChildren(cutoffIso, row.id).length === 0) return false;
+        if (!updateJobStatus(row.id, "succeeded", { expectedStatuses: ["queued"] })) return false;
         storeArtifact({
           work_item_id: row.work_item_id,
           job_id: row.id,
           artifact_type: "response",
           content_long: `[Fanout child branch "${label}" timed out after ${effectiveTimeout}s before producing any findings. Synthesis is proceeding without this branch.]`,
         });
-        updateJobStatus(row.id, "succeeded");
         logEvent({
           work_item_id: row.work_item_id,
           job_id: row.id,
@@ -349,8 +353,9 @@ export function expireStuckFanoutChildren({ timeoutSec, nowMs = Date.now() } = {
             timeout_sec: effectiveTimeout,
           },
         });
+        return true;
       });
-      expired.push(row.id);
+      if (transitioned) expired.push(row.id);
     } catch {
       // Best-effort: a single child failure should not abort the sweep.
     }

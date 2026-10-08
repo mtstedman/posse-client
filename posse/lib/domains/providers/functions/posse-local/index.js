@@ -17,7 +17,7 @@ import { getSetting } from "../../../queue/functions/index.js";
 import { runMlNativeMethodAsync } from "../../../../shared/native/functions/ml-invoke.js";
 import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.js";
 import { ToolCatalog } from "../../../../shared/tools/classes/ToolCatalog.js";
-import { buildExecutionContract } from "../../../../shared/tools/functions/contract.js";
+import { buildExecutionContract, renderProviderPromptContracts } from "../../../../shared/tools/functions/contract.js";
 import { projectFunctionToolSurface } from "../../../../shared/tools/functions/provider-surface.js";
 import {
   issuedToolSurfaceForProviderPolicy,
@@ -689,7 +689,7 @@ export async function callProvider(promptText, opts = {}) {
   });
   const toolMode = toolDefinitions.length > 0;
   const system = [
-    remoteSystemPrompt,
+    renderProviderPromptContracts(remoteSystemPrompt, executionContract || {}),
     stableContext,
     localLiteralConstraintExpansion(promptText),
     toolInstructions,

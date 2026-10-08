@@ -1,3 +1,5 @@
+import { researchUsesReportProfile } from "../../research/functions/output-routing.js";
+import { bindHandoffMetadata, expandResearchChildHandoff } from "./helpers/runtime-handoff-input.js";
 import crypto from "crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -16,7 +18,6 @@ import {
   AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY,
   AGENT_HANDOFF_RESEARCH_PROSE_FIELDS,
   AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR,
-  RESEARCHER_REPORT_BRIEF_POLICY,
 } from "../../../catalog/handoff.js";
 import { HASH_REF_ALIAS_PATTERN, normalizeHashRefAlias } from "../../../catalog/hash-store.js";
 import { ARTIFICER_COMPLETION_STATUSES, DEV_COMPLETION_STATUSES } from "../../../catalog/native-tools.js";
@@ -71,16 +72,20 @@ import {
   truncateCompletionProse,
 } from "./helpers/shape-normalizer.js";
 import { normalizeResearchSymbolSeeds } from "./helpers/research-symbols.js";
-import { researcherPacketToStructuredOutput } from "./helpers/researcher-output.js";
 import { narrowCitationSegments } from "./helpers/citation-shorthand.js";
-import { claimEvidenceReferences } from "./helpers/evidence-references.js";
+import { plannerPromoteMappings, plannerCompatibilityTasks, renderAgentHandoffCompatibilityOutput } from "./helpers/compatibility-output.js";
+import { packetEvidence, packetEvidenceMetrics, verifyStagedPacketEvidence } from "./helpers/packet-evidence.js";
+import { positiveInt, latestAgentHandoffRejection } from "./helpers/rejection-store.js";
+import { serializeStoredAgentHandoffPacket, parseStoredAgentHandoffPacket } from "./helpers/packet-storage.js";
 import { missingReportClaimsMessage } from "./helpers/missing-report-claims.js";
 import { sharedPlanContractAdditions } from "./helpers/shared-plan-contracts.js";
 import { mergeResearchReportDraftClaims } from "./research-report-claim-drafts.js";
 import { finalReviewHandoffHold } from "../../assessment/functions/final-review-result.js";
-import { runtimeRoleForAgentCallRole } from "../../../catalog/agent-call.js";
+import { AGENT_CALL_CHILD_KINDS, runtimeRoleForAgentCallRole } from "../../../catalog/agent-call.js";
 
 export { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
+export { renderAgentHandoffCompatibilityOutput } from "./helpers/compatibility-output.js";
+export { recordAgentHandoffRejection, getLatestAgentHandoffRejection } from "./helpers/rejection-store.js";
 
 const PLANNER_TASK_MODES = new Set([
   "code",
@@ -2293,10 +2298,6 @@ function isGroundedClaimEvidence(evidence) {
   return ["Tool Result", "Full Tool Call"].includes(kind);
 }
 
-function isCompatibilityProofProvenance(evidence) {
-  return isGroundedClaimEvidence(evidence);
-}
-
 function materializeClaimEvidenceSelectors(value, context) {
   const cache = context?.[EVIDENCE_MATERIALIZATION_CACHE];
   const key = `claim:${JSON.stringify(value)}`;
@@ -2571,17 +2572,6 @@ function validateResearchClaimEvidence(claims, label) {
       `${label}.claims[${index}] has no evidence selector. Put narrative in summary and attach at least one existing ref or surfaced source range to evidence.`,
     );
   }
-}
-
-function plannerPromoteMappings(handoff) {
-  const destinations = [...new Set([
-    ...(handoff.report?.scope?.files_to_modify || []),
-    ...(handoff.report?.scope?.files_to_create || []),
-  ].map((value) => String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").trim()).filter(Boolean))];
-  return destinations.map((dest) => ({
-    pattern: dest.split("/").filter(Boolean).at(-1) || "",
-    dest,
-  }));
 }
 
 // Say what a target looks like when it is absent: "must be an object" left the
@@ -4714,11 +4704,6 @@ function ensureSchema(db = getDb()) {
   return db;
 }
 
-function positiveInt(value) {
-  const number = Number(value);
-  return Number.isInteger(number) && number > 0 ? number : null;
-}
-
 function parseJsonObject(value) {
   try {
     const parsed = JSON.parse(value || "{}");
@@ -4788,94 +4773,6 @@ function handoffRow(agentCallId, db = getDb()) {
   const id = positiveInt(agentCallId);
   if (!id) return null;
   return ensureSchema(db).prepare(`SELECT * FROM ${TABLE} WHERE agent_call_id = ?`).get(id) || null;
-}
-
-function boundedHandoffRejection(error) {
-  const code = String(error?.code || "AGENT_HANDOFF_REJECTED").slice(0, 120);
-  const message = String(error?.message || error || "agent_handoff was rejected").slice(0, 1000);
-  const issues = Array.isArray(error?.issues)
-    ? error.issues.slice(0, 24).map((issue) => ({
-        code: String(issue?.code || "AGENT_HANDOFF_SCHEMA_INVALID").slice(0, 120),
-        message: String(issue?.message || "Invalid agent_handoff arguments").slice(0, 500),
-        ...(issue?.selector ? { selector: String(issue.selector).slice(0, 500) } : {}),
-        ...(issue?.hint ? { hint: String(issue.hint).slice(0, 500) } : {}),
-      }))
-    : [];
-  const failing_selectors = Array.isArray(error?.failing_selectors)
-    ? error.failing_selectors.slice(0, 24).map((failure) => ({
-        selector: String(failure?.selector || "").slice(0, 500),
-        code: String(failure?.code || "AGENT_HANDOFF_SCHEMA_INVALID").slice(0, 120),
-        hint: String(failure?.hint || "Correct this selector and retry the handoff.").slice(0, 500),
-      })).filter((failure) => failure.selector)
-    : issues.filter((issue) => issue.selector).map((issue) => ({
-        selector: issue.selector,
-        code: issue.code,
-        hint: issue.hint || "Correct this selector and retry the handoff.",
-      }));
-  return { code, message, issues, failing_selectors };
-}
-
-export function recordAgentHandoffRejection(agentCallId, error, { db = getDb() } = {}) {
-  const id = positiveInt(agentCallId);
-  if (!id) return false;
-  try {
-    const call = db.prepare(`
-      SELECT work_item_id, job_id, attempt_id
-      FROM agent_calls
-      WHERE id = ?
-    `).get(id);
-    if (!call) return false;
-    const rejection = boundedHandoffRejection(error);
-    return recordObservation({
-      db,
-      work_item_id: positiveInt(call.work_item_id),
-      job_id: positiveInt(call.job_id),
-      attempt_id: positiveInt(call.attempt_id),
-      observation_type: "agent_handoff.rejected",
-      summary: `Rejected terminal agent handoff (${rejection.code})`,
-      detail: {
-        agent_call_id: id,
-        code: rejection.code,
-        message: rejection.message,
-        ...(rejection.issues.length > 0 ? { issues: rejection.issues } : {}),
-        ...(rejection.failing_selectors.length > 0
-          ? { failing_selectors: rejection.failing_selectors }
-          : {}),
-      },
-    });
-  } catch {
-    return false;
-  }
-}
-
-function latestAgentHandoffRejection(agentCallId, db = getDb()) {
-  const id = positiveInt(agentCallId);
-  if (!id) return null;
-  try {
-    const row = db.prepare(`
-      SELECT detail_json
-      FROM job_observations
-      WHERE observation_type = 'agent_handoff.rejected'
-        AND json_valid(detail_json)
-        AND json_extract(detail_json, '$.agent_call_id') = ?
-      ORDER BY id DESC
-      LIMIT 1
-    `).get(id);
-    if (!row?.detail_json) return null;
-    const detail = JSON.parse(row.detail_json);
-    return plainObject(detail) ? boundedHandoffRejection({
-      code: detail.code,
-      message: detail.message,
-      issues: detail.issues,
-      failing_selectors: detail.failing_selectors,
-    }) : null;
-  } catch {
-    return null;
-  }
-}
-
-export function getLatestAgentHandoffRejection(agentCallId, { db = getDb() } = {}) {
-  return latestAgentHandoffRejection(agentCallId, db);
 }
 
 export function getAgentHandoffRecord(agentCallId, { db = getDb() } = {}) {
@@ -5011,68 +4908,6 @@ export function getLatestCommittedAgentHandoffPacket({
     profile: packet.profile,
     outcome: packet.outcome,
   };
-}
-
-function mapStoredClaimEvidence(claim, mapEvidence) {
-  const detail = claim?.[1];
-  if (!detail || typeof detail !== "object") return claim;
-  const mapped = { ...detail };
-  for (const lane of ["evidence", "proof", "support"]) {
-    if (Array.isArray(detail[lane])) mapped[lane] = detail[lane].map(mapEvidence);
-  }
-  if (Array.isArray(detail.decoy)) {
-    mapped.decoy = detail.decoy.map(([evidence, reason]) => [mapEvidence(evidence), reason]);
-  }
-  return [claim[0], mapped];
-}
-
-function mapStoredPacketEvidence(packet, mapEvidence) {
-  return {
-    ...packet,
-    handoffs: (packet.handoffs || []).map((handoff) => ({
-      ...handoff,
-      report: {
-        ...handoff.report,
-        claims: (handoff.report?.claims || []).map((claim) => mapStoredClaimEvidence(claim, mapEvidence)),
-      },
-    })),
-  };
-}
-
-function serializeStoredAgentHandoffPacket(packet) {
-  const evidenceCatalog = packetEvidence(packet);
-  if (evidenceCatalog.length === 0) return JSON.stringify(packet);
-  const evidenceIds = new Map(evidenceCatalog.map((evidence, index) => [evidence.selector, index]));
-  const stored = mapStoredPacketEvidence(packet, (evidence) => ({
-    evidence_id: evidenceIds.get(evidence.selector),
-  }));
-  stored.evidence_catalog = evidenceCatalog;
-  return JSON.stringify(stored);
-}
-
-function parseStoredAgentHandoffPacket(materializedJson) {
-  const stored = JSON.parse(materializedJson);
-  if (!Array.isArray(stored.evidence_catalog)) return stored;
-  const selectors = new Set();
-  for (const evidence of stored.evidence_catalog) {
-    const selector = String(evidence?.selector || "");
-    if (!selector || selectors.has(selector)) {
-      fail("AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED", "Stored agent_handoff evidence catalog is invalid");
-    }
-    selectors.add(selector);
-  }
-  const packet = mapStoredPacketEvidence(stored, (pointer) => {
-    const evidenceId = Number(pointer?.evidence_id);
-    const evidence = Number.isInteger(evidenceId) && evidenceId >= 0
-      ? stored.evidence_catalog[evidenceId]
-      : null;
-    if (!evidence) {
-      fail("AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED", "Stored agent_handoff evidence pointer is missing");
-    }
-    return evidence;
-  });
-  delete packet.evidence_catalog;
-  return packet;
 }
 
 function compactResearcherCoverageInput(args) {
@@ -5538,7 +5373,7 @@ export function stageAgentHandoff(args, {
   if (!agentCallId) fail("AGENT_HANDOFF_CONTEXT_INVALID", "agent_handoff requires an active agent call");
   const database = ensureSchema(db);
   const call = database.prepare(`
-    SELECT ac.work_item_id, ac.job_id, ac.attempt_id, ac.role, j.payload_json
+    SELECT ac.work_item_id, ac.job_id, ac.attempt_id, ac.role, ac.child_kind, ac.parent_agent_call_id, j.payload_json
     FROM agent_calls ac
     LEFT JOIN jobs j ON j.id = ac.job_id
     WHERE ac.id = ?
@@ -5556,9 +5391,26 @@ export function stageAgentHandoff(args, {
   // A persisted child label (final_reviewer) hands off as the runtime role it
   // executes as.
   const effectiveRole = runtimeRoleForAgentCallRole(call.role || role || "");
-  const mergedArgs = effectiveRole === "researcher"
-    ? mergeResearchReportDraftClaims(args, agentCallId, database)
+  let boundArgs = effectiveRole === "researcher"
+    && call.child_kind === AGENT_CALL_CHILD_KINDS.RESEARCH && positiveInt(call.parent_agent_call_id)
+    ? expandResearchChildHandoff(args)
     : args;
+  const roleProfiles = Object.entries(AGENT_HANDOFF_PROFILE_POLICY)
+    .filter(([, policy]) => policy.roles.includes(effectiveRole));
+  let runtimeProfile = roleProfiles.length === 1 ? roleProfiles[0][0] : null;
+  if (effectiveRole === "researcher" && call.child_kind !== AGENT_CALL_CHILD_KINDS.RESEARCH) {
+    const workItem = resolvedContext.workItemId
+      ? database.prepare("SELECT mode, metadata_json FROM work_items WHERE id = ?").get(resolvedContext.workItemId)
+      : null;
+    let payload = {};
+    try { payload = JSON.parse(call.payload_json || "{}"); } catch { /* legacy job */ }
+    runtimeProfile = researchUsesReportProfile(workItem, payload)
+      ? "researcher.report.v1" : "researcher.pipeline.v1";
+  }
+  boundArgs = bindHandoffMetadata(boundArgs, runtimeProfile);
+  const mergedArgs = effectiveRole === "researcher"
+    ? mergeResearchReportDraftClaims(boundArgs, agentCallId, database)
+    : boundArgs;
   const serializedArgs = JSON.stringify(mergedArgs ?? null);
   if (Buffer.byteLength(serializedArgs, "utf8") > AGENT_HANDOFF_LIMITS.maxCallBytes) {
     fail("AGENT_HANDOFF_TOO_LARGE", `agent_handoff exceeds ${AGENT_HANDOFF_LIMITS.maxCallBytes} bytes`);
@@ -5850,309 +5702,6 @@ export function rejectAgentHandoffForLaterTool(agentCallId, toolName, { db = get
   return true;
 }
 
-function renderedEvidenceSelector(evidence) {
-  if (evidence?.path && Number.isInteger(evidence.source_start_line)
-    && Number.isInteger(evidence.source_end_line)) {
-    return `${evidence.path}:${evidence.source_start_line}-${evidence.source_end_line}`;
-  }
-  if (evidence?.provenance?.line_semantics === "source"
-    && Array.isArray(evidence.provenance.source_windows)
-    && evidence.provenance.source_windows.length > 0) {
-    return evidence.provenance.source_windows.map((window) => (
-      `${window.path}:${window.source_start_line}-${window.source_end_line}`
-    )).join(", ");
-  }
-  return evidence?.selector || evidence?.ref || "unavailable";
-}
-
-// An excerpt's lines with their source line numbers ("41\tcode"); a
-// multi-file window prefixes the path. Lines outside any source window keep
-// no gutter.
-function numberedEvidenceLines(evidence) {
-  const provenance = evidence?.provenance || {};
-  const sourceWindows = provenance.line_semantics === "source"
-    && Array.isArray(provenance.source_windows)
-    ? provenance.source_windows
-    : [];
-  const sourcePaths = new Set(sourceWindows.map((window) => window.path));
-  return String(evidence?.excerpt ?? "")
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .map((line, index) => {
-      if (evidence.path && Number.isInteger(evidence.source_start_line)) {
-        return `${evidence.source_start_line + index}\t${line}`;
-      }
-      const materializedLine = index + 1;
-      const window = sourceWindows.find((candidate) => (
-        materializedLine >= candidate.materialized_start_line
-        && materializedLine <= candidate.materialized_end_line
-      ));
-      if (!window) return line;
-      const sourceLine = window.source_start_line
-        + materializedLine - window.materialized_start_line;
-      const gutter = sourcePaths.size > 1 ? `${window.path}:${sourceLine}` : sourceLine;
-      return `${gutter}\t${line}`;
-    });
-}
-
-function fencedCode(lines) {
-  const text = lines.join("\n");
-  const longest = Math.max(0, ...(text.match(/`+/g) || []).map((run) => run.length));
-  const fence = "`".repeat(Math.max(3, longest + 1));
-  return `${fence}\n${text}\n${fence}`;
-}
-
-// The report brief reads [Summary] then, per claim, [Claim N] [Claim N code].
-// A range already quoted under an earlier claim is pointed to, not repeated.
-// Inline code is budgeted (RESEARCHER_REPORT_BRIEF_POLICY): each claim's first excerpt
-// is placed first so no claim loses all of its code, later excerpts fill in
-// claim order, and the remainder is listed by location.
-function renderClaimCodeSections(report) {
-  const claims = report.claims || [];
-  const excerptLimit = RESEARCHER_REPORT_BRIEF_POLICY.inlineExcerptLines;
-  const items = claimEvidenceReferences(report, renderedEvidenceSelector).map((records) => {
-    const seen = new Set();
-    return records.filter(({ location }) => !seen.has(location) && seen.add(location)).map((record) => {
-      const lines = record.repeatOf == null && record.evidence?.excerpt != null
-        ? numberedEvidenceLines(record.evidence)
-        : [];
-      const clipped = lines.length > excerptLimit;
-      const block = lines.length > 0
-        ? `${fencedCode(clipped ? lines.slice(0, excerptLimit) : lines)}${clipped ? `\n(${lines.length - excerptLimit} more lines at ${record.location})` : ""}`
-        : null;
-      return { ...record, block, inline: false, first: false };
-    });
-  });
-  let budget = RESEARCHER_REPORT_BRIEF_POLICY.inlineCodeChars;
-  const place = (item) => {
-    if (!item.block || item.inline || (item.block.length > budget && !item.first)) return;
-    item.inline = true;
-    budget -= item.block.length;
-  };
-  for (const list of items) {
-    const first = list.find((item) => item.block);
-    if (first) { first.first = true; place(first); }
-  }
-  for (const list of items) for (const item of list) place(item);
-  return claims.map((claim, claimIndex) => {
-    const marker = `[E${claimIndex + 1}]`;
-    const raw = String(claim[0] || "").replace(/\s+/g, " ").trim();
-    const label = raw === marker ? "" : raw.startsWith(`${marker} `) ? raw.slice(marker.length + 1) : raw;
-    const parts = [`${marker} ${label}`.trim()];
-    for (const item of items[claimIndex]) {
-      if (item.repeatOf != null) parts.push(`Code: ${item.location} (quoted under [E${item.repeatOf + 1}] above)`);
-      else if (item.inline) parts.push(`Code: ${item.location}\n${item.block}`);
-      else if (item.block) parts.push(`Code: ${item.location} (not inlined: report code budget reached)`);
-      else parts.push(`Code: ${item.location}`);
-    }
-    for (const [evidence, reason] of claim[1]?.decoy || []) {
-      parts.push(`Decoy: ${renderedEvidenceSelector(evidence)} — ${reason}`);
-    }
-    return parts.join("\n");
-  }).join("\n\n");
-}
-
-function renderExpandedEvidence(report, maxChars = AGENT_HANDOFF_LIMITS.recommendedEvidenceChars) {
-  const bySelector = new Map();
-  const add = (evidence, lane, reason = null) => {
-    if (!evidence?.selector || !evidence?.excerpt) return;
-    const existing = bySelector.get(evidence.selector);
-    if (existing) {
-      existing.lanes.add(lane);
-      if (reason) existing.reasons.add(reason);
-      return;
-    }
-    bySelector.set(evidence.selector, {
-      evidence,
-      lanes: new Set([lane]),
-      reasons: new Set(reason ? [reason] : []),
-    });
-  };
-  for (const claim of report.claims || []) {
-    const detail = claim[1] || {};
-    for (const lane of ["evidence", "proof", "support"]) {
-      for (const evidence of detail[lane] || []) add(evidence, lane);
-    }
-    for (const [evidence, reason] of detail.decoy || []) add(evidence, "decoy", reason);
-  }
-  if (bySelector.size === 0) return "";
-  const sections = [];
-  for (const { evidence, lanes, reasons } of bySelector.values()) {
-    const provenance = evidence.provenance || {};
-    const sourceWindows = provenance.line_semantics === "source"
-      && Array.isArray(provenance.source_windows)
-      ? provenance.source_windows
-      : [];
-    const sourceCoordinates = evidence.path
-      ? `${evidence.path}:${evidence.source_start_line}-${evidence.source_end_line}`
-      : sourceWindows.length > 0
-        ? sourceWindows.map((window) => (
-            `${window.path}:${window.source_start_line}-${window.source_end_line}`
-          )).join(", ")
-        : null;
-    const sourceOwner = provenance.source || provenance.kind || "materialized evidence";
-    const source = sourceCoordinates
-      ? `${sourceCoordinates} (${sourceOwner})`
-      : [provenance.source, provenance.object_type].filter(Boolean).join(" · ")
-        || provenance.kind
-        || "materialized evidence";
-    const quoted = numberedEvidenceLines(evidence).map((line) => `> ${line}`).join("\n");
-    sections.push([
-      `### ${evidence.selector}`,
-      `Lanes: ${[...lanes].join(", ")}  `,
-      `Source: ${source}`,
-      ...(reasons.size > 0 ? [`Excluded because: ${[...reasons].join("; ")}`] : []),
-      quoted,
-    ].join("\n\n"));
-  }
-  const expanded = sections.join("\n\n");
-  if (expanded.length <= maxChars) return `## Expanded evidence\n\n${expanded}`;
-  const omitted = expanded.length - maxChars;
-  return `## Expanded evidence\n\n${expanded.slice(0, maxChars).trimEnd()}\n\n[Expanded evidence truncated: ${omitted} additional characters remain available through the cited evidence selectors.]`;
-}
-
-function renderReport(report, { expandEvidence = false, claimCode = false } = {}) {
-  const parts = [];
-  if (report.summary) parts.push(`Summary: ${report.summary}`);
-  if (claimCode) {
-    const sections = renderClaimCodeSections(report);
-    if (sections) parts.push(sections);
-  } else {
-    for (const claim of report.claims) {
-      parts.push(`Claim: ${claim[0]}`);
-      const detail = claim[1] || {};
-      for (const evidence of ["evidence", "proof", "support"]
-        .flatMap((lane) => detail[lane] || [])) {
-        parts.push(`Evidence: ${renderedEvidenceSelector(evidence)}`);
-      }
-      for (const [evidence, reason] of detail.decoy || []) {
-        parts.push(`Decoy: ${renderedEvidenceSelector(evidence)} — ${reason}`);
-      }
-      if (detail.prose) parts.push(`Agent synthesis: ${detail.prose}`);
-    }
-  }
-  if (report.constraints.length) parts.push(`Constraints:\n${report.constraints.map((entry) => `- ${entry}`).join("\n")}`);
-  if (report.success_criteria.length) parts.push(`Success criteria:\n${report.success_criteria.map((entry) => `- ${entry}`).join("\n")}`);
-  if (report.questions.length) parts.push(`Questions:\n${report.questions.map((entry) => `- ${entry}`).join("\n")}`);
-  if (expandEvidence) {
-    const evidence = renderExpandedEvidence(report);
-    if (evidence) parts.push(evidence);
-  }
-  return parts.join("\n\n");
-}
-
-function evidenceRefs(report) {
-  const lanes = { proof: [], support: [], decoy: [] };
-  const selector = (item) => ({
-    ref: item.ref,
-    ...(item.lines && item.selector !== item.ref ? {
-      lines: {
-        start: item.lines.start,
-        count: item.lines.end - item.lines.start + 1,
-      },
-    } : {}),
-  });
-  for (const claim of report.claims || []) {
-    const detail = claim[1] || {};
-    for (const item of ["evidence", "proof", "support"].flatMap((lane) => detail[lane] || [])) {
-      const lane = item?.selector_kind === "path" || item?.path
-        ? "support"
-        : (isCompatibilityProofProvenance(item) ? "proof" : "support");
-      lanes[lane].push(selector(item));
-    }
-    for (const [item, reason] of detail.decoy || []) lanes.decoy.push({
-      ...selector(item),
-      why: reason,
-    });
-  }
-  for (const lane of Object.keys(lanes)) {
-    const seen = new Set();
-    lanes[lane] = lanes[lane].filter((entry) => {
-      const key = JSON.stringify([entry.ref, entry.lines || null]);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  }
-  return lanes;
-}
-
-function plannerTaskSpec(handoff) {
-  const report = handoff.report || {};
-  const sections = [];
-  const summary = String(report.summary || handoff.intent || "").trim();
-  if (summary) sections.push(summary);
-  const claims = [...new Set(
-    (report.claims || [])
-      .map((claim) => [claim?.[0], claim?.[1]?.prose].filter(Boolean).join(" — ").trim())
-      .filter(Boolean),
-  )];
-  if (claims.length > 0) {
-    sections.push(`Material context:\n${claims.map((claim) => `- ${claim}`).join("\n")}`);
-  }
-  const constraints = [...new Set(
-    (report.constraints || []).map((constraint) => String(constraint || "").trim()).filter(Boolean),
-  )];
-  if (constraints.length > 0) {
-    sections.push(`Constraints:\n${constraints.map((constraint) => `- ${constraint}`).join("\n")}`);
-  }
-  return sections.join("\n\n") || String(handoff.intent || "").trim();
-}
-
-function packetEvidence(packet) {
-  const bySelector = new Map();
-  const add = (evidence) => {
-    if (!evidence?.selector || bySelector.has(evidence.selector)) return;
-    bySelector.set(evidence.selector, evidence);
-  };
-  for (const handoff of packet.handoffs || []) {
-    for (const claim of handoff.report?.claims || []) {
-      const detail = claim[1] || {};
-      for (const lane of ["evidence", "proof", "support"]) {
-        for (const evidence of detail[lane] || []) add(evidence);
-      }
-      for (const [evidence] of detail.decoy || []) add(evidence);
-    }
-  }
-  return [...bySelector.values()];
-}
-
-function packetEvidenceMetrics(packet) {
-  const evidence = packetEvidence(packet);
-  const selectedLineCount = (item) => {
-    const windows = item?.selector === item?.ref
-      && Array.isArray(item?.provenance?.source_windows)
-      ? item.provenance.source_windows
-      : [];
-    if (windows.length > 0) {
-      const materializedLines = new Set();
-      for (const window of windows) {
-        for (let line = Number(window.materialized_start_line);
-          line <= Number(window.materialized_end_line);
-          line += 1) {
-          if (Number.isInteger(line) && line > 0) materializedLines.add(line);
-        }
-      }
-      if (materializedLines.size > 0) return materializedLines.size;
-    }
-    return Number(item?.lines?.end) - Number(item?.lines?.start) + 1;
-  };
-  const lineCounts = evidence.map(selectedLineCount)
-    .filter((count) => Number.isInteger(count) && count > 0);
-  const charCounts = evidence.map((item) => String(item?.excerpt || "").length);
-  return {
-    selectorCount: evidence.length,
-    selectorLinesMax: lineCounts.length > 0 ? Math.max(...lineCounts) : 0,
-    selectorCharsMax: charCounts.length > 0 ? Math.max(...charCounts) : 0,
-    selectorsOverRecommendedCount: evidence.filter((item) => {
-      const lines = selectedLineCount(item);
-      const chars = String(item?.excerpt || "").length;
-      return lines > AGENT_HANDOFF_LIMITS.recommendedSelectorLines
-        || chars > AGENT_HANDOFF_LIMITS.recommendedSelectorChars;
-    }).length,
-  };
-}
-
 function verifyPacketEvidenceAtCommit(packet) {
   const context = {
     workItemId: positiveInt(packet.work_item_id),
@@ -6160,112 +5709,8 @@ function verifyPacketEvidenceAtCommit(packet) {
     attemptId: positiveInt(packet.attempt_id),
     agentCallId: positiveInt(packet.agent_call_id),
   };
-  for (const evidence of packetEvidence(packet)) {
-    const expectedLineSemantics = evidence.provenance?.line_semantics
-      ?? evidence.line_semantics;
-    const stagedSourcePath = evidence.path ?? evidence.provenance?.path;
-    const stagedSourceWindow = Array.isArray(evidence.provenance?.source_windows)
-      ? evidence.provenance.source_windows[0] || null
-      : null;
-    const verified = materializeAgentHandoffEvidenceSelector(
-      evidence.selector,
-      context,
-      {
-        expectedLineSemantics,
-        stagedSourcePath,
-        stagedSourceWindow,
-      },
-    );
-    if (verified.source_content_sha256 !== evidence.source_content_sha256
-      || verified.excerpt_sha256 !== evidence.excerpt_sha256
-      || verified.excerpt !== evidence.excerpt
-      || verified.provenance?.line_semantics !== expectedLineSemantics) {
-      fail("AGENT_HANDOFF_EVIDENCE_CHANGED", `Evidence ${evidence.selector} changed after the report was staged`);
-    }
-  }
-}
-
-function boundedWords(value, maxWords = 30) {
-  const words = String(value || "").trim().split(/\s+/).filter(Boolean);
-  if (words.length <= maxWords) return words.join(" ");
-  return `${words.slice(0, maxWords).join(" ")}…`;
-}
-
-function renderCompletionCompatibilityOutput(packet) {
-  const completion = packet.completion || {};
-  const status = String(completion.status || "COMPLETE").toUpperCase();
-  const artificer = packet.profile === "artificer.result.v1";
-  const label = artificer ? "ARTIFICER RESULT" : "DEV RESULT";
-  const summary = status === "VERIFIED_NO_CHANGE"
-    ? "The requested end state already exists."
-    : status === "PARTIAL"
-      ? "Available assigned work was completed."
-      : status === "BLOCKED"
-        ? "Assigned work could not be completed."
-        : artificer
-          ? "All assigned deliverables were produced."
-          : "All assigned work was completed.";
-  let notes = "none";
-  if (completion.verification_unavailable) {
-    notes = `VERIFICATION_UNAVAILABLE: ${completion.verification_unavailable}`;
-  } else if (completion.evidence_gap) {
-    notes = `EVIDENCE_GAP: ${completion.evidence_gap}`;
-  } else if (status === "VERIFIED_NO_CHANGE") {
-    notes = completion.no_change_rationale;
-  } else if (status === "PARTIAL") {
-    notes = `Remaining: ${(completion.remaining_work || []).join("; ")}`;
-  } else if (status === "BLOCKED") {
-    notes = completion.blocker;
-  }
-  const result = `--- ${label} START ---\nstatus: ${status}\nsummary: ${summary}\nnotes: ${boundedWords(notes)}\n--- ${label} END ---`;
-  const fileRequests = Array.isArray(completion.file_requests) ? completion.file_requests : [];
-  if (fileRequests.length === 0) return result;
-  const requestBlock = [
-    "FILE_REQUEST:",
-    ...fileRequests.map((request) => `- ${request.path} — ${request.reason}`),
-    "FILE_REQUEST_END",
-  ].join("\n");
-  return `${requestBlock}\n${result}`;
-}
-
-function plannerCompatibilityTasks(packet) {
-  const indexes = new Map(packet.handoffs.map((handoff, index) => [handoff.id, index]));
-  return packet.handoffs.map((handoff) => {
-    const taskSpec = plannerTaskSpec(handoff);
-    const refs = evidenceRefs(handoff.report);
-    const metadata = Object.fromEntries(
-      PLANNER_REPORT_METADATA_KEYS
-        .filter((key) => handoff.report[key] != null)
-        .map((key) => [key, handoff.report[key]]),
-    );
-    const task = {
-        title: handoff.intent,
-        task_spec: taskSpec,
-        success_criteria: handoff.report.success_criteria.length ? handoff.report.success_criteria : [handoff.intent],
-        depends_on_index: handoff.depends_on.map((id) => indexes.get(id)),
-        task_mode: handoff.report.scope.task_mode || "code",
-        files_to_modify: handoff.report.scope.files_to_modify || [],
-        files_to_create: handoff.report.scope.files_to_create || [],
-        files_to_delete: handoff.report.scope.files_to_delete || [],
-        create_roots: handoff.report.scope.create_roots || [],
-        ...(handoff.report.scope.output_root ? { output_root: handoff.report.scope.output_root } : {}),
-        ...metadata,
-        job_type: handoff.target.role === "artificer" ? "artificer" : handoff.target.role,
-        ...(handoff.target.role === "human_input" ? { questions: handoff.report.questions } : {}),
-        dev_brief: {
-          source: "hash_ref_store",
-          summary: handoff.report.summary,
-          key_files: handoff.report.scope.files_to_modify || [],
-          related_files: [],
-          planner_file_priorities: (handoff.report.scope.files_to_modify || []).map((path, index) => ({ path, rank: index + 1 })),
-          ...refs,
-        },
-    };
-    if (handoff.target.kind === "system" && handoff.target.role === "promote") {
-      task.mappings = plannerPromoteMappings(handoff);
-    }
-    return task;
-  });
+  verifyStagedPacketEvidence(packet, context, materializeAgentHandoffEvidenceSelector,
+    (message) => fail("AGENT_HANDOFF_EVIDENCE_CHANGED", message));
 }
 
 function validatePlannerCompatibilityTasks(packet) {
@@ -6280,49 +5725,6 @@ function validatePlannerCompatibilityTasks(packet) {
       );
     }
   }
-}
-
-export function renderAgentHandoffCompatibilityOutput(packet) {
-  if (packet.completion && ["dev.result.v1", "artificer.result.v1"].includes(packet.profile)) {
-    return renderCompletionCompatibilityOutput(packet);
-  }
-  if (packet.profile === "planner.plan.v1") {
-    const tasks = plannerCompatibilityTasks(packet);
-    return `\`\`\`json\n${JSON.stringify(tasks, null, 2)}\n\`\`\``;
-  }
-  const first = packet.handoffs[0];
-  const report = renderReport(first.report, {
-    claimCode: packet.profile === "researcher.report.v1",
-  });
-  if (packet.profile === "assessor.verdict.v1") {
-    const reasons = [...new Set(
-      [first.report.summary, ...first.report.claims.map((claim) => [claim[0], claim[1]?.prose].filter(Boolean).join(" — "))]
-        .map((reason) => String(reason || "").trim())
-        .filter(Boolean),
-    )];
-    const repair = String(first.report.payload?.repair || "").trim();
-    const spawnJobs = packet.outcome === "fail" && repair
-      ? [{
-          job_type: "fix",
-          title: "Fix assessed defect",
-          payload: { instructions: repair },
-        }]
-      : [];
-    return `\`\`\`json\n${JSON.stringify({
-      verdict: packet.outcome,
-      confidence: packet.confidence,
-      reasons,
-      spawn_jobs: spawnJobs,
-      human_questions: first.report.questions,
-      suggestions: [],
-    }, null, 2)}\n\`\`\``;
-  }
-  if (packet.profile === "dev.result.v1") return `--- DEV RESULT START ---\n${report}\n--- DEV RESULT END ---`;
-  if (packet.profile === "artificer.result.v1") return `--- ARTIFICER RESULT START ---\n${report}\n--- ARTIFICER RESULT END ---`;
-  if (packet.profile === "researcher.pipeline.v1") {
-    return `\`\`\`json\n${JSON.stringify(researcherPacketToStructuredOutput(packet), null, 2)}\n\`\`\``;
-  }
-  return report;
 }
 
 export function finalizeAgentHandoffForProvider({ agentCallId, output = "", required = false, db = getDb() } = {}) {

@@ -59,6 +59,7 @@ import { readRepoFileResult } from "./repo-read.js";
 
 /**
  * @typedef {Object} DispatchContext
+ * @property {(diagnostics: object) => void} [onRetrievalDiagnostics]
  * @property {View} [view]
  * @property {string} versionId
  * @property {Ledger} [ledger]        Optional ledger for history-aware operations (review.delta, agent.feedback persistence, retrieval feedback boost).
@@ -262,6 +263,7 @@ function dispatchImpl(call, ctx) {
     case "symbol.get":
       if (!ctx.view) return notIndexed(action, ctx.versionId);
       return /** @type {any} */ (symbolGet({
+        onDiagnostics: ctx.onRetrievalDiagnostics,
         view: ctx.view,
         versionId: ctx.versionId,
         params: call,

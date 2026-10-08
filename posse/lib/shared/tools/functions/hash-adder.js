@@ -1385,6 +1385,7 @@ export function compactCodeWindowLensResult(toolName, result, {
               evidence_ref: surfaced.model_ref || surfaced.entry.ref,
               delivery_state: "available_unseen",
               origin: "continuation",
+              agent_call_id: hashContext.agent_call_id ?? null,
               stored_chars: Math.max(0, entry.payload_end - entry.payload_start),
               returned_chars: 0,
             },

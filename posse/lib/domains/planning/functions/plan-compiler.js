@@ -119,7 +119,7 @@ import {
   parseUnderScopedBroadGateMode,
 } from "./scope-gates.js";
 import { reconcilePlannerFileKinds } from "./scope-reconciliation.js";
-import { rewriteDependenciesAfterSplit, rewriteDependenciesAroundPostMergeDbTasks } from "./dependency-rewrite.js";
+import { dependencyIndexesAfterSplit, rewriteDependenciesAfterSplit, rewriteDependenciesAroundPostMergeDbTasks } from "./dependency-rewrite.js";
 import { cancelSupersededPlanChildren } from "./plan-cleanup.js";
 import { deriveAndRecordAssessmentScopes } from "./assessment-scopes.js";
 import {
@@ -826,17 +826,11 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         return [...new Set(roots)];
       };
       const rewritePendingDependenciesAfterSplit = (splitIndex, splitTaskCount, finalIndex, { fanOut = false } = {}) => {
-        const offset = splitTaskCount - 1;
-        if (offset <= 0) return;
+        if (splitTaskCount <= 1) return;
         for (const link of pendingDependencyLinks) {
-          link.dependsOnIndexes = [...new Set(link.dependsOnIndexes.flatMap((depIdx) => {
-            if (!Number.isInteger(depIdx)) return [depIdx];
-            if (depIdx === splitIndex) {
-              return fanOut ? Array.from({ length: splitTaskCount }, (_, piece) => splitIndex + piece) : [finalIndex];
-            }
-            if (depIdx > splitIndex) return [depIdx + offset];
-            return [depIdx];
-          }))];
+          link.dependsOnIndexes = dependencyIndexesAfterSplit(
+            link.dependsOnIndexes, splitIndex, splitTaskCount, finalIndex, { fanOut },
+          );
         }
       };
       // A database task that applies files this plan commits is held until

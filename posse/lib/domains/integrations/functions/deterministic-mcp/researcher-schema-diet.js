@@ -10,7 +10,6 @@ const RESEARCHER_SCHEMA_DIET_DESCRIPTIONS = Object.freeze({
   "tools.inspect_file": "Inspect one file's bounded metadata or content without mutation.",
   "tools.hash_file": "Calculate a deterministic file hash for verification.",
   "atlas.traverse_ref": "Fetch content for issued traversal_ref values and batch independent refs. Evidence refs are citation-only.",
-  "atlas.create_ref": "Create a bounded stored ref from visible text or source slices.",
   "atlas.symbol.search": "Find ranked symbol addresses by exact or semantic query; use returned IDs or locations for focused reads.",
   "atlas.symbol.card": "Inspect one known symbol's compact signature and relationships.",
   "atlas.symbol.callers": "List compact incoming caller or reference symbols for one exact symbol ID, grouped by file.",

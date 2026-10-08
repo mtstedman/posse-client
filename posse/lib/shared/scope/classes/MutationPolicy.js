@@ -993,6 +993,11 @@ export class MutationPolicy {
     // Structural scans see quoted spans as placeholders so a metacharacter that
     // merely lives inside a grep pattern is not mistaken for shell syntax.
     const masked = maskQuoted(cmd);
+    // Input redirection is parsed by the shell, but shellWords only splits on
+    // whitespace. An attached operand such as </outside bypasses path checks.
+    if (/<(?!\()/.test(masked)) {
+      return { ok: false, error: "Error: Input redirection is not allowed in sandboxed bash. Pass a scoped file path to the command instead.", reasonClass: "shell_operator" };
+    }
     // `$()`, backticks and `$VAR` still expand inside double quotes, so those
     // checks see through single quotes only.
     const maskedSingle = maskQuoted(cmd, { maskDouble: false });

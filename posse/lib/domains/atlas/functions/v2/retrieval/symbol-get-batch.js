@@ -123,7 +123,7 @@ function rebasedHeaderBlock(block, shift) {
 // answers one selector with several bearers) carries its own
 // {"action":"symbol.get","items":[...]} header. Returns the child-local index
 // of each nested item's header block, or null for an ordinary child.
-function nestedBatchHeaderBlocks(blocks) {
+function nestedBatchItems(blocks) {
   const first = blocks[0];
   if (first?.type !== "text" || typeof first.text !== "string") return null;
   let parsed;
@@ -133,9 +133,16 @@ function nestedBatchHeaderBlocks(blocks) {
     return null;
   }
   if (parsed?.action !== "symbol.get" || !Array.isArray(parsed.items)) return null;
-  return new Set(parsed.items
-    .map(item => (item?.contentBlocks ?? item?.content_blocks)?.[0])
-    .filter(Number.isSafeInteger));
+  return parsed.items;
+}
+
+function rebaseBatchItems(items, shift) {
+  return items.map(item => ({
+    ...item,
+    ...(Array.isArray(item.contentBlocks) ? {contentBlocks: item.contentBlocks.map(index => index + shift)} : {}),
+    ...(Array.isArray(item.content_blocks) ? {content_blocks: item.content_blocks.map(index => index + shift)} : {}),
+    ...(Array.isArray(item.items) ? {items: rebaseBatchItems(item.items, shift)} : {}),
+  }));
 }
 
 export function combineSymbolGetBatchResults(results, overflow = {}) {
@@ -146,8 +153,19 @@ export function combineSymbolGetBatchResults(results, overflow = {}) {
   const items = results.map((result) => {
     const offset = content.length;
     const blocks = Array.isArray(result?.content) ? result.content : [];
-    const nestedHeaders = nestedBatchHeaderBlocks(blocks);
-    if (nestedHeaders) {
+    const nestedItems = nestedBatchItems(blocks);
+    const nestedHeaders = new Set();
+    const collectHeaders = items => {
+      for (const item of items) {
+        if (Array.isArray(item.items)) collectHeaders(item.items);
+        else {
+          const index = (item.contentBlocks ?? item.content_blocks)?.[0];
+          if (Number.isSafeInteger(index)) nestedHeaders.add(index);
+        }
+      }
+    };
+    if (nestedItems) {
+      collectHeaders(nestedItems);
       // Flatten: drop the nested header and rebase each nested item's header
       // by where its blocks now land. Every later block stays byte-identical;
       // JSON-shaped source must not be rewritten.
@@ -168,6 +186,7 @@ export function combineSymbolGetBatchResults(results, overflow = {}) {
     // item says so explicitly.
     return {
       ...(isError ? { isError, errorCode: batchItemErrorCode(result) } : {}),
+      ...(nestedItems ? { items: rebaseBatchItems(nestedItems, offset - 1) } : {}),
       contentBlocks: Array.from({ length: content.length - offset }, (_, i) => offset + i),
     };
   });

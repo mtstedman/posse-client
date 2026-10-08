@@ -1,5 +1,8 @@
 // @ts-check
 
+import { proveDeclarationIdentity } from "./declaration-identity.js";
+import { SymbolReadRequest } from "../../../classes/v2/SymbolReadRequest.js";
+
 import { createSymbolGetSourceTraversalRef } from "../../../../../shared/tools/functions/hash-adder.js";
 import { buildCodeWindowMap, codeNeedWindow } from "./code.js";
 import { errorEnvelope } from "./envelope.js";
@@ -288,42 +291,6 @@ function annotateSymbolBody(body, resolution, identifiersToFind = []) {
   };
 }
 
-// Qualified-name segments with language punctuation removed: generic
-// arguments, Go receiver syntax and Rust `impl` blocks do not name an owner.
-function selectorSegments(value) {
-  return String(value || "")
-    .replace(/<[^<>]*>/gu, "")
-    .replace(/[()*&]/gu, "")
-    .split(/::|->|[./#\\]+/u)
-    .map((segment) => segment.trim())
-    .filter((segment) => segment && segment !== "impl");
-}
-
-function endsWithSegments(have, want) {
-  return want.length > 0 && want.length <= have.length
-    && want.every((segment, index) => have[have.length - want.length + index] === segment);
-}
-
-/**
- * The one indexed declaration a missed name lookup can only have meant: its
- * repository-wide exact recovery has exactly one bearer whose qualified name
- * ends with every requested segment (an inherited member, a sibling-file
- * guess). Serving it saves the call the error would cost. Only the file guess
- * is relaxed: a requested kind stays binding, and several or no exact bearers
- * keep the error with its candidate list.
- */
-function uniqueRecoveryTarget(selection, params) {
-  if (selection?.status !== "symbol_ref_not_found" || params.symbolRef?.kind) return null;
-  const want = selectorSegments(params.symbolRef?.name);
-  const targets = Array.isArray(selection.targets) ? selection.targets : [];
-  const rows = new Map();
-  for (const target of targets) {
-    if (!endsWithSegments(selectorSegments(target.qualified_name || target.name), want)) continue;
-    rows.set(`${symbolIdOf(target)}@${target.repo_rel_path}`, target);
-  }
-  return rows.size === 1 ? [...rows.values()][0] : null;
-}
-
 /**
  * Exact symbol body retrieval for the compact Atlas surface.
  *
@@ -338,10 +305,21 @@ function uniqueRecoveryTarget(selection, params) {
  *   config?: Record<string, any>,
  *   hashRefContext?: Record<string, unknown>,
  *   readSymbolBody?: typeof codeNeedWindow,
+ *   onDiagnostics?: (diagnostics: object) => void,
  *   storeSourceTraversalRef?: (candidate:{file:string,source:unknown}) => string|{ref:string}|Promise<string|{ref:string}>,
  * }} request
  */
-export async function symbolGet({
+export async function symbolGet(request) {
+  const context = new SymbolReadRequest(request);
+  try {
+    return await readSymbolGet({ ...request, view: context.view, readFile: context.readFile, context });
+  } finally {
+    try { request.onDiagnostics?.(context.diagnostics()); } catch { /* Diagnostics cannot fail a read. */ }
+  }
+}
+
+/** @param {Parameters<typeof symbolGet>[0] & {context: SymbolReadRequest}} request */
+async function readSymbolGet({
   view,
   versionId,
   params,
@@ -353,42 +331,43 @@ export async function symbolGet({
   hashRefContext = {},
   readSymbolBody = codeNeedWindow,
   storeSourceTraversalRef = null,
+  context,
 }) {
   if (isSymbolGetBatch(params)) {
     const plan = planSymbolGetBatch(params);
     if (plan.error) return errorEnvelope({action: "symbol.get", versionId, code: "invalid_params", message: plan.error});
     const items = await Promise.all(plan.items.map(item => item.invalid
       ? errorEnvelope({action: "symbol.get", versionId, code: "invalid_params", message: "Invalid symbol.get batch item"})
-      : symbolGet({view, versionId, params: item, readFile, repoRoot, ledger, repoId, config,
-        hashRefContext, readSymbolBody, storeSourceTraversalRef})));
+      : readSymbolGet({view, versionId, params: item, readFile, repoRoot, ledger, repoId, config,
+        hashRefContext, readSymbolBody, storeSourceTraversalRef, context}).catch(error => errorEnvelope({
+          action: "symbol.get", versionId, code: "source_unavailable",
+          message: String(error?.message || "Symbol source unavailable"),
+        }))));
     return {ok: true, action: "symbol.get", versionId, data: {items, ...plan.overflow}};
   }
-  let selection = params.symbolId
-    ? await selectSymbolTarget({
+  let selection = await context.measure("resolution", () => params.symbolId
+    ? selectSymbolTarget({
       view,
       symbolId: params.symbolId,
       file: params.file,
     })
-    : await selectSymbolRefTarget({
+    : selectSymbolRefTarget({
       view,
       symbolRef: params.symbolRef,
       file: params.file,
-    });
+    }));
+  if (selection.status === "ambiguous_symbol_ref") {
+    selection = await context.measure("declaration_proof", () => proveDeclarationIdentity(selection, params, readFile));
+  }
   const selector = params.symbolId || params.symbolRef?.name || "";
-  let recoveryNote = null;
   if (selection.status !== "selected" && selection.status !== "ambiguous") {
-    const recovered = uniqueRecoveryTarget(selection, params);
-    if (!recovered) return targetSelectionError(selection, selector, versionId);
-    const requestedAt = selection.requestedFile ? ` at ${selection.requestedFile}` : "";
-    recoveryNote = `${selector} is not declared${requestedAt}; served its only indexed match `
-      + `${recovered.qualified_name || recovered.name} at ${recovered.repo_rel_path}.`;
-    selection = { status: "selected", target: recovered };
+    return targetSelectionError(selection, selector, versionId);
   }
 
   if (selection.status === "selected") {
-    const resolution = await selectedBodyResolution({ view, target: selection.target, readFile });
+    const resolution = await context.measure("body_resolution", () => selectedBodyResolution({ view, target: selection.target, readFile }));
     if (resolution.stale) return errorEnvelope({ action: "symbol.get", versionId, ...resolution.stale });
-    const body = await readSelectedBody({
+    const body = await context.measure("render", () => readSelectedBody({
       target: resolution.target,
       source: resolution.source,
       symbolId: symbolIdOf(resolution.target),
@@ -402,9 +381,9 @@ export async function symbolGet({
       readSymbolBody,
       maxTokens: params.maxTokens,
       identifiersToFind: params.identifiersToFind,
-    });
+    }));
     const annotated = { ...annotateSymbolBody(body, resolution, params.identifiersToFind), action: "symbol.get" };
-    return recoveryNote && annotated.data ? { ...annotated, data: { ...annotated.data, note: recoveryNote } } : annotated;
+    return annotated;
   }
 
   const ambiguityPathChars = selection.targets.reduce((total, target) => (
@@ -428,12 +407,12 @@ export async function symbolGet({
   const unavailable = [];
   for (const target of selection.targets) {
     try {
-      const resolution = await selectedBodyResolution({ view, target, readFile });
+      const resolution = await context.measure("body_resolution", () => selectedBodyResolution({ view, target, readFile }));
       if (resolution.stale) {
         unavailable.push({ file: target.repo_rel_path, error: resolution.stale });
         continue;
       }
-      const body = await readSelectedBody({
+      const body = await context.measure("render", () => readSelectedBody({
         target: resolution.target,
         source: resolution.source,
         symbolId: symbolIdOf(resolution.target),
@@ -447,7 +426,7 @@ export async function symbolGet({
         readSymbolBody,
         maxTokens: params.maxTokens,
         identifiersToFind: params.identifiersToFind,
-      });
+      }));
       if (body?.ok === false || !body?.data) {
         unavailable.push({ file: target.repo_rel_path, error: body?.error || "source_unavailable" });
         continue;

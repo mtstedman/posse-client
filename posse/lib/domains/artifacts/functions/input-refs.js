@@ -10,6 +10,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { WORK_ITEM_INPUT_LIMITS, WORK_ITEM_INPUT_OBJECT_TYPE } from "../../../catalog/artifact.js";
+import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
+import { logEvent } from "../../queue/functions/events.js";
 import { surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { inputsDir, wiScopeId } from "./index.js";
 
@@ -35,15 +37,22 @@ function listInputFiles(root) {
   return files;
 }
 
-function readTextInput(filePath) {
+function readTextInput(filePath, onReadError) {
   let stat;
   try {
     stat = fs.statSync(filePath);
-  } catch {
+  } catch (error) {
+    onReadError(error);
     return null;
   }
   if (!stat.isFile() || stat.size === 0 || stat.size > WORK_ITEM_INPUT_LIMITS.maxBytesPerFile) return null;
-  const bytes = fs.readFileSync(filePath);
+  let bytes;
+  try {
+    bytes = fs.readFileSync(filePath);
+  } catch (error) {
+    onReadError(error);
+    return null;
+  }
   try {
     return { bytes, text: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
   } catch {
@@ -69,10 +78,18 @@ export function surfaceWorkItemInputs(workItemId, { projectDir = null } = {}) {
   }
   if (!fs.existsSync(root)) return [];
   const surfaced = [];
+  let readErrorCount = 0;
+  const readErrorSamples = [];
   for (const filePath of listInputFiles(root)) {
-    const input = readTextInput(filePath);
-    if (!input) continue;
     const relativePath = path.relative(root, filePath).replace(/\\/g, "/");
+    const input = readTextInput(filePath, (error) => {
+      readErrorCount += 1;
+      if (readErrorSamples.length < 3) readErrorSamples.push({
+        path: relativePath.slice(0, 160),
+        code: String(error?.code || "READ_FAILED").slice(0, 40),
+      });
+    });
+    if (!input) continue;
     const sha256 = crypto.createHash("sha256").update(input.bytes).digest("hex");
     try {
       const result = surfaceHashRefForContext({ work_item_id: id }, {
@@ -96,6 +113,17 @@ export function surfaceWorkItemInputs(workItemId, { projectDir = null } = {}) {
     } catch {
       // One unreadable input must not hide the others.
     }
+  }
+  if (readErrorCount > 0) {
+    try {
+      logEvent({
+        work_item_id: id,
+        event_type: EVENT_TYPES.WORK_ITEM_INPUT_READ_FAILED,
+        actor_type: EVENT_ACTORS.SYSTEM,
+        message: `${readErrorCount} operator input file(s) could not be read`,
+        event_json: JSON.stringify({ count: readErrorCount, samples: readErrorSamples }),
+      });
+    } catch { /* diagnostics must not block readable inputs */ }
   }
   return surfaced;
 }

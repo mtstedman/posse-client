@@ -19,7 +19,6 @@ const EXCLUDED_ACTIONS = new Set([
 
 const ACTION_CARDS = Object.freeze({
   traverse_ref: "requires traversal_ref; returns the withheld remainder of reads already made; one call carries up to 24 already-known refs sharing 32000 characters, where re-reading those regions costs one call each; reaccessAuthorization is valid only with one scalar traversal_ref; fields traversal_ref,limit,offset,search,search_mode,reaccessAuthorization",
-  create_ref: "fields text or source_ref+lines/offset/limit or chunks, plus object_type,note,owner_scope",
   "symbol.search": "requires query; returns ranked symbol addresses and metadata, not implementation source; fields query,scope,limit,semantic",
   "symbol.card": "requires symbolId or symbolRef; fields symbolId,symbolRef",
   "symbol.callers": "requires symbolId; list compact incoming caller or reference symbols grouped by file; fields symbolId,mode,limit,offset",
@@ -66,16 +65,14 @@ const TYPED_TERSE_ACTION_CARDS = Object.freeze({
 const TYPED_DIRECT_SYMBOL_CARD =
   "requires symbolId or symbolRef; returns a bounded exact-source excerpt plus caller and callee addresses for one identified symbol; fields symbolId,symbolRef";
 
-// Task-blind language-specific experimental levers. Keep every language in
-// one table so a treatment can be tuned by ecosystem rather than repository,
-// question, answer, or grader feedback. Marker priority selects the primary
-// language for telemetry; all detected languages contribute enabled booleans.
+// Marker priority selects the primary language for telemetry. Tool descriptions
+// use the same compact contract across languages to keep provider schemas stable.
 // Result compaction is transport-only and preserves source, symbol handles,
 // warnings, pagination, and non-default diagnostics, so it is language-neutral.
 export const RESEARCHER_TYPED_LANGUAGE_LEVERS = Object.freeze({
   php: Object.freeze({
     markers: Object.freeze(["composer.json"]),
-    purposeGuidance: true,
+    purposeGuidance: false,
     symbolCardGuidance: false,
     readyCallBatching: false,
     anchoredFileWindowMaxTokens: null,

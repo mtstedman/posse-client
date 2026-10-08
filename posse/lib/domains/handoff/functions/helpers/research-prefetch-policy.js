@@ -6,6 +6,15 @@ const MAX_VISIBLE_TASK_CHARS = 2_000;
 const MAX_FOCUS_TASK_CHARS = 1_200;
 const MAX_FOCUS_CLAUSES = 5;
 
+// Planner-first dispatch owns initial investigation just like the researcher.
+// Legacy handoff construction preserves the resolved flag in _raw_payload
+// until the planner attaches its role policy after prefetch.
+export function usesResearchPrefetchOrientation(packet) {
+  return packet?.recipient === "researcher"
+    || (packet?.recipient === "planner"
+      && (packet.planner_dispatch ?? packet._raw_payload?.planner_dispatch) === true);
+}
+
 const GENERIC_FOCUS_TERMS = new Set([
   "accuracy", "analyze", "answer", "applicable", "behavior", "code", "complete",
   "correct", "describe", "detail", "determine", "explain", "file", "files",

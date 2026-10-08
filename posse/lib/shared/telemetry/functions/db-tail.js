@@ -148,15 +148,18 @@ export function pruneTelemetryTableToTail(db, tableName, limit = getDbTelemetryT
     }
     return 0;
   }
-  const changes = db.prepare(`
-    DELETE FROM ${safeTable}
-    WHERE id NOT IN (
-      SELECT id FROM ${safeTable}
-      ORDER BY id DESC
-      LIMIT ?
-    )
-    ${prunablePredicate}
-  `).run(safeLimit, ...prunableParams).changes;
+  // Delete only rows selected for this archival pass. A concurrent insert can
+  // push another row out of the tail after selection; that row has not been
+  // archived and must wait for the next pass.
+  let changes = 0;
+  for (let i = 0; i < victims.length; i += ARCHIVE_FETCH_CHUNK_SIZE) {
+    const ids = victims.slice(i, i + ARCHIVE_FETCH_CHUNK_SIZE).map((row) => row.id);
+    const placeholders = ids.map(() => "?").join(",");
+    changes += db.prepare(`
+      DELETE FROM ${safeTable}
+      WHERE id IN (${placeholders}) ${prunablePredicate}
+    `).run(...ids, ...prunableParams).changes;
+  }
   if (shouldSampleMemory) {
     recordMemorySample("db.telemetry_prune.after", {
       table: safeTable,

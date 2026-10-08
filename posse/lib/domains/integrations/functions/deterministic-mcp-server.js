@@ -203,7 +203,7 @@ import {
   nonNegativeIntegerOrNull,
 } from "./deterministic-mcp/boot-config-parse.js";
 import { capString, sanitizeForLog } from "./deterministic-mcp/log-helpers.js";
-import { projectAgentToolSchema } from "../../../shared/tools/functions/agent-schema.js";
+import { projectAgentToolSchema, sortAgentToolDefinitions } from "../../../shared/tools/functions/agent-schema.js";
 import { resolveAgentFileAuthority } from "./deterministic-mcp/agent-file-authority.js";
 import {
   RESEARCH_CITATION_FETCH_GATE_ENABLED,
@@ -1620,6 +1620,7 @@ let DECLARED_NATIVE_TOOL_NAMES = (ownerHotGateway
       needsImageGeneration: allowImageGeneration,
       atlasAvailable,
       disableSystemTools: bootConfig.disableSystemTools === true,
+      researchInvestigation: bootConfig.researchInvestigation === true,
     })
     : legacyToolNamesForUnscopedRole()))
 ).filter(runtimeToolAvailable);
@@ -3060,6 +3061,7 @@ function computeDeclaredNativeToolNamesForCurrentBoot() {
         needsImageGeneration: allowImageGeneration,
         atlasAvailable,
         disableSystemTools: bootConfig.disableSystemTools === true,
+        researchInvestigation: bootConfig.researchInvestigation === true,
       })
       : legacyToolNamesForUnscopedRole()))
   ).filter(runtimeToolAvailable);
@@ -3926,11 +3928,11 @@ async function handleRequest(msg) {
         atlasCatalogSource: atlasAllowedActions && atlasAllowedActions !== _atlasAllowedActions ? "remote" : "local",
       });
     }
-    const tools = [...nativeTools, ...atlasTools]
+    const tools = sortAgentToolDefinitions([...nativeTools, ...atlasTools]
       .map(normalizeGatewayToolInputSchema)
       .map((tool) => (researcherSchemaDiet ? applyResearcherSchemaDiet(tool, {
         preserveDescription: researcherDirect && String(tool.name).startsWith("atlas."),
-      }) : tool));
+      }) : tool)));
     appendToolLog({
       event: "tools_list",
       requestId: id ?? null,

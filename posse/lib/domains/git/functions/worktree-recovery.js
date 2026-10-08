@@ -609,6 +609,7 @@ export async function snapshotAndResetDirtyWorktreeAsync(
     signal = null,
     worktreeLockWaitMs = null,
     nativeParity = {},
+    expectedHead = null,
   } = {},
 ) {
   try {
@@ -626,6 +627,16 @@ export async function snapshotAndResetDirtyWorktreeAsync(
     }
   }
   try {
+    if (expectedHead) {
+      const commit = String(await gitExecAsync(["rev-parse", "HEAD"], wtPath)).trim();
+      let ref = null;
+      try {
+        ref = String(await gitExecAsync(["symbolic-ref", "--quiet", "--short", "HEAD"], wtPath)).trim() || null;
+      } catch { /* detached HEAD has no symbolic ref */ }
+      if (commit !== expectedHead.commit || ref !== expectedHead.ref) {
+        throw new Error("worktree HEAD changed before deterministic check cleanup; refusing to reset possible concurrent sibling progress");
+      }
+    }
     const nativeWtPath = await resolveGitWorktreeRootAsync(wtPath, { signal });
     const nativeResult = await runGitNativeMethodAsync(
       "git.worktree.snapshotAndResetDirty",

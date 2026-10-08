@@ -132,41 +132,44 @@ export function ensureSessionLane({
 
 export function invalidateSessionLane(laneId, reason = "invalidated", { status = "invalidated" } = {}) {
   const db = getDb();
-  const ts = now();
-  const lane = db.prepare(`SELECT * FROM session_lanes WHERE id = ?`).get(Number(laneId));
-  const result = db.prepare(`
-    UPDATE session_lanes
-    SET status = ?, reason = ?, invalidated_at = ?, updated_at = ?,
-        reset_generation = reset_generation + 1
-    WHERE id = ? AND status = 'active'
-  `).run(status, reason, ts, ts, Number(laneId));
-
-  if (result.changes > 0) {
-    db.prepare(`
-      UPDATE job_sessions
-      SET status = ?, reason = ?, leased_by = NULL, lease_token = NULL, lease_expires_at = NULL,
-          last_used_at = ?
-      WHERE lane_id = ? AND status = 'active'
-    `).run(status, reason, ts, Number(laneId));
-    if (lane) {
-      logEvent({
-        work_item_id: lane.work_item_id,
-        event_type: EVENT_TYPES.SESSION_INVALIDATED,
-        actor_type: EVENT_ACTORS.SYSTEM,
-        message: `Session lane ${lane.lane} ${status}: ${reason}`,
-        event_json: JSON.stringify({
-          lane_id: lane.id,
-          lane: lane.lane,
-          provider: lane.provider,
-          skill_key: lane.skill_key || "",
-          reason,
-          status,
-        }),
-      });
-      flushEventsNow();
+  const transition = () => {
+    const ts = now();
+    const lane = db.prepare(`SELECT * FROM session_lanes WHERE id = ?`).get(Number(laneId));
+    const result = db.prepare(`
+      UPDATE session_lanes
+      SET status = ?, reason = ?, invalidated_at = ?, updated_at = ?,
+          reset_generation = reset_generation + 1
+      WHERE id = ? AND status = 'active'
+    `).run(status, reason, ts, ts, Number(laneId));
+    if (result.changes > 0) {
+      db.prepare(`
+        UPDATE job_sessions
+        SET status = ?, reason = ?, leased_by = NULL, lease_token = NULL, lease_expires_at = NULL,
+            last_used_at = ?
+        WHERE lane_id = ? AND status = 'active'
+      `).run(status, reason, ts, Number(laneId));
     }
+    return { lane, changes: result.changes };
+  };
+  const { lane, changes } = runImmediateTransaction(db, transition);
+  if (changes > 0 && lane) {
+    logEvent({
+      work_item_id: lane.work_item_id,
+      event_type: EVENT_TYPES.SESSION_INVALIDATED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Session lane ${lane.lane} ${status}: ${reason}`,
+      event_json: JSON.stringify({
+        lane_id: lane.id,
+        lane: lane.lane,
+        provider: lane.provider,
+        skill_key: lane.skill_key || "",
+        reason,
+        status,
+      }),
+    });
+    flushEventsNow();
   }
-  return result.changes;
+  return changes;
 }
 
 export function invalidateSessionLanesForWorkItem(workItemId, reason = "work_item_reset", { status = "invalidated" } = {}) {
@@ -201,10 +204,9 @@ export function recordInitialSessionHandle({
   if (!Number.isFinite(Number(laneId)) || !handle) {
     throw new Error("recordInitialSessionHandle requires laneId and handle");
   }
-  const lane = db.prepare(`SELECT * FROM session_lanes WHERE id = ?`).get(Number(laneId));
-  if (!lane || lane.status !== "active") return null;
-
   const execute = () => {
+    const lane = db.prepare(`SELECT * FROM session_lanes WHERE id = ?`).get(Number(laneId));
+    if (!lane || lane.status !== "active") return null;
     const existing = getActiveSessionForLane(lane.id);
     if (existing) return existing;
     const ts = now();
@@ -214,20 +216,19 @@ export function recordInitialSessionHandle({
           lane_id, work_item_id, lane, provider, skill_key, handle,
           parent_job_id, hop_count, status, created_at, last_used_at,
           expires_at, last_agent_call_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?)
+        ) SELECT id, work_item_id, lane, provider, skill_key, ?, ?, 0, 'active', ?, ?, ?, ?
+          FROM session_lanes WHERE id = ? AND status = 'active' AND reset_generation = ?
       `).run(
-        lane.id,
-        lane.work_item_id,
-        lane.lane,
-        lane.provider,
-        lane.skill_key || "",
         String(handle),
         parentJobId == null ? null : Number(parentJobId),
         ts,
         ts,
         expiresAt || null,
         lastAgentCallId == null ? null : Number(lastAgentCallId),
+        lane.id,
+        lane.reset_generation,
       );
+      if (info.changes === 0) return null;
       return db.prepare(`SELECT * FROM job_sessions WHERE id = ?`).get(info.lastInsertRowid);
     } catch (err) {
       const raced = isSqliteConstraintError(err) ? getActiveSessionForLane(lane.id) : null;
@@ -261,6 +262,13 @@ export function acquireSessionHandle({
     WHERE id = ? AND status = 'active'
       AND (lease_expires_at IS NULL OR lease_expires_at < ?)
       AND (expires_at IS NULL OR expires_at > ?)
+      AND EXISTS (
+        SELECT 1 FROM session_lanes AS parent
+        WHERE parent.id = job_sessions.lane_id AND parent.status = 'active'
+          AND parent.work_item_id = job_sessions.work_item_id
+          AND parent.lane = job_sessions.lane AND parent.provider = job_sessions.provider
+          AND parent.skill_key = job_sessions.skill_key
+      )
   `).run(Number(jobId), leaseToken, leaseExpiresAt, ts, session.id, ts, ts);
 
   if (result.changes === 0) return null;

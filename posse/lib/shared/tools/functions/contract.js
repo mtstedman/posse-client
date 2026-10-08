@@ -1,3 +1,4 @@
+import { ATLAS_READ_GUIDANCE_TOKEN } from "../../../catalog/tool-references.js";
 import { WEB_TOOL_ROLES } from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { ToolCatalog } from "../classes/ToolCatalog.js";
 import { CLAUDE_NATIVE_TOOL_NAMES, ToolContract, unknownClaudeNativeTools } from "../classes/ToolContract.js";
@@ -6,6 +7,7 @@ import { projectDbQuerySummaryForPermissions } from "./toolkit/project-db/schema
 
 export { WEB_TOOL_ROLES } from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 export { CLAUDE_NATIVE_TOOL_NAMES, unknownClaudeNativeTools };
+export { renderProviderPromptContracts } from "./provider-surface.js";
 
 export function buildExecutionContract(opts = {}) {
   return filterProjectDbTool(ToolContract.build(opts).toJSON(), opts);
@@ -58,10 +60,11 @@ export function adaptExecutionContractForProvider(contract = {}, provider = "gen
 
 export function renderExecutionContractBlock(contract = {}, {
   remoteComposed = false,
+  remoteSystemPrompt = "",
 } = {}) {
   const toolContract = new ToolContract(contract);
   return remoteComposed
-    ? toolContract.renderProviderGuidanceBlock()
+    ? toolContract.renderProviderGuidanceBlock(null, { atlasEmbedded: String(remoteSystemPrompt || "").includes(ATLAS_READ_GUIDANCE_TOKEN) })
     : toolContract.renderBlock();
 }
 

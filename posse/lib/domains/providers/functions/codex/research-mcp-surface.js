@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { sortAgentToolDefinitions } from "../../../../shared/tools/functions/agent-schema.js";
 import { buildMcpAtlasSurfaceToolDescriptors, renderMcpSurfaceName } from "../../../../shared/tools/functions/mcp-surface.js";
 import { TOOL_REFS, formatToolReference } from "../../../../catalog/tool-references.js";
 
@@ -146,5 +147,5 @@ export async function prepareCodexResearchMcpSurface(attachment, { mcpGate = nul
       const [callable] = buildMcpAtlasSurfaceToolDescriptors([callableName], options);
       return [{ ...action, mcpName: callable.mcpName, providerSurfaceName: callable.providerSurfaceName, surfaceName: callable.surfaceName }];
     });
-  return { declarations, atlasTools: atlasNames.map(name => name.slice("atlas.".length)), atlasContractTools };
+  return { declarations: sortAgentToolDefinitions(declarations), atlasTools: atlasNames.map(name => name.slice("atlas.".length)), atlasContractTools };
 }

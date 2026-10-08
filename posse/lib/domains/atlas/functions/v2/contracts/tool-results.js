@@ -917,12 +917,12 @@
  * `startLine`/`endLine`, `additionalWindows`, `map`, `identifiersFound`,
  * `identifiersReturned` and `identifiersOmitted`, each of which repeated the
  * same ranges or names. `identifiersMissing` and the continuation, traversal
- * and evidence fields are unchanged.
+ * and evidence fields are unchanged. `selectionBounded` remains internal
+ * and is omitted from the model-facing header for both boolean values.
  * @typedef {Object} CodeWindowDisplayHeader
  * @property {Array<{lines:[number,number],symbols?:string[],content_block:number}>} displayed One row per delivered source block, in block order; `symbols` are the map target ids (or names) whose declaration intersects the block.
  * @property {Array<{symbolId?:SymbolId,name?:string,lines?:[number,number],identifier?:string}>} [omitted] Requested declarations not fully inline (a partially delivered declaration appears here and in `displayed`), plus found-but-withheld identifiers the map did not list.
  * @property {Array<{lines:[number,number],evidence_refs?:Array<{ref:string,usage:string}>}>} [reused] Ranges withheld because they are already visible under the listed refs.
- * @property {false} [selectionBounded] Present only when the whole file was delivered; a bounded selection is the default and not stated.
  * @property {string[]} [missing] Requested identifiers not found in the file.
  * @property {true} [truncated]
  */

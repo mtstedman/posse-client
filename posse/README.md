@@ -451,112 +451,96 @@ launchers. Only committed work can be published: pushing or synchronizing
 reconstructs the client from the pushed source and does not preserve
 uncommitted, in-flight changes.
 
-`npm test` first runs `scripts/clean-test-artifacts.mjs`, then
-`scripts/run-tests.mjs`. The runner executes `test/core.test.js` plus every
-root-level `test/test-*.test.js` file.
+`npm test` cleans stale artifacts and runs the full catalog through
+`scripts/run-tests.mjs`. Core members execute in separate processes, with their
+own runtime sandbox. The aggregate `test/core.test.js`, `test/suites` wrappers,
+and `run-core-suite.mjs` selector have been removed.
 
-Runs report only what needs reading. A passing file prints nothing (a terminal
-gets one overwriting progress line); a failing file prints the moment it
-finishes, with its failed test names, errors and captured output; and each pass
-closes with the counts and a command that re-runs exactly the files that
-failed:
-
-```text
-FAIL test/test-waiting-lane-demand.test.js  (1 of 12 failed, 0.4s)
-  waiting lane demand > counts only unclaimed jobs
-      Expected values to be strictly equal: 3 !== 2
-      at TestContext.<anonymous> (file:///.../test/test-waiting-lane-demand.test.js:88:12)
-concurrent pass: 1 of 236 files failed: 2913 passed, 1 failed in 61.2s
-failed files:
-  test/test-waiting-lane-demand.test.js
-re-run: node scripts/run-tests.mjs files test/test-waiting-lane-demand.test.js
-```
-
-`node scripts/run-tests.mjs files <file>...` runs just the named files, each in
-the pass (concurrent or serial) it belongs to, with the sandbox environment a
-bare `node --test` would not set. To narrate every passing test again, set
-`POSSE_TEST_REPORTER=spec` (or `tap`, `dot`) for node's own reporters.
-
-Off Windows the two passes run together, and the serial pass runs four files at
-a time rather than one. Measured on this suite (Linux, 16 cores): the serial
-pass alone takes 315s at width 1, 122s at width 4 and 112s at width 8, always
-with identical results; running both passes together as well brings a full run
-from 524s to about 285s. Nothing in the serial list collides with anything else
-in it — sockets and pipes already carry per-process unique names and fixture
-repositories are `mkdtemp`'d — so the pass is capping how many heavy files run
-at once rather than keeping conflicting pairs apart.
-
-Windows keeps the original shape: one serial file at a time, strictly after the
-concurrent pass drains. That is where the EPERM/EBUSY flakiness the split
-exists for was seen, and none of the above was measured there. To try it:
+Use the same runner for files, whole domains, affected changes, and shards:
 
 ```bash
-POSSE_SERIAL_CONCURRENCY=4 POSSE_OVERLAP_PASSES=1 npm test
-```
-
-Both knobs work everywhere, so `POSSE_OVERLAP_PASSES=0` restores the sequential
-passes on any platform.
-
-Focused suites are available when you only need a specific area:
-
-```bash
-npm run test:core-only
-npm run test:quick
 npm run test:scheduler
 npm run test:atlas
-npm run test:providers
-npm run test:handoff
-npm run test:planning
-npm run test:toolkit
-npm run test:artifacts
-npm run test:git
-npm run test:ui
-npm run test:slow
+npm run test:domain -- worker
+npm run test:affected -- --base <successful-source-commit>
+npm run test:plan -- --base <successful-source-commit>
+node scripts/run-tests.mjs files test/core/suites/scheduler.test.js
+node scripts/run-tests.mjs domain scheduler --shard 1/3
+node scripts/run-tests.mjs catalog ci_portable
 ```
 
-Test discovery, serial/resource classification, nested core membership, and
-the `ci_portable` / `ci_windows` workflow partitions share
-`test/test-catalog.json`. Run `npm run test:catalog:check` after adding or
-moving a test. The check fails for missing, duplicate, unclassified, or
-catalogued-but-deleted files; it also verifies every nested core suite is
-actually imported by `test/core.test.js`.
+Domain aliases select both core and standalone regressions. The old `:fast`,
+`:slow`, and `test:quick` aliases are removed; use domains, files, or shards
+for narrow runs. `test:core-only` selects the explicit `core` partition.
+Inherited suite-name and fast/slow environment filters cannot hide tests. `--list` or
+`--json` prints the selection without running tests. An affected plan includes
+changed paths, selected domains, per-file reasons, and full fallback reasons.
 
-Each `scripts/run-tests.mjs` invocation also writes a unique run directory
-under `.posse-test-runs/`. Its atomic lane fragments and final `run.json`
-record the commit/tree identity, OS and Node version, lane configuration,
-catalog hash, per-file durations, categorized skips, stable failure
-fingerprints, and directly runnable reproduction commands. The timing ledger
-remains only a derived scheduling cache.
+The versioned `test/test-catalog.json` assigns every test its domains,
+execution lane, platform, and partitions. Source ownership, mandatory smoke
+files, aliases, and broad-change rules live in `test/test-domains.json`.
+Discovery covers `test` and `scripts/tests`; validation rejects unreachable
+suites and unknown domain labels. Run `npm run test:catalog:check` after adding
+or moving tests. Domain ownership is explicit metadata. Transitive static
+imports additionally include consumers of affected code. Runtime-selected
+consumers must be represented in domain assignments; test helpers, fixtures,
+shared code, dependencies, and unknown or deleted paths conservatively require
+the full suite.
 
-Estimated runtimes from recent local Windows runs are below. Use the
-allocation column for CI and automation timeouts; add more buffer on colder or
-slower hosts. Focused suites do not run `pretest`, so run `npm run test:clean`
-first when stale artifacts matter.
+On Linux/macOS the concurrent pool defaults to at most eight processes and
+the resource-heavy pool to four, with both pools overlapping. Windows keeps
+the resource-heavy pool at one and drains the first pool before starting it.
+`POSSE_PARALLEL_CONCURRENCY`, `POSSE_SERIAL_CONCURRENCY`, and
+`POSSE_OVERLAP_PASSES` control these limits. Stable `--shard N/M` membership is
+independent of local timing caches, so workers cover the selection exactly
+once. Within each pool, recent durations prioritize the longest files first.
 
-| Command | Covers | Recent local time | Suggested allocation |
-|---------|--------|-------------------|----------------------|
-| `npm test` | Default regression run: `pretest`, `test/core.test.js`, and root-level `test/test-*.test.js` files | ~13m | 15m |
-| `npm run test:core-only` | All correctness-critical core suites in `test/core.test.js` | ~6m 10s | 8m |
-| `npm run test:quick` | Non-slow core suites | ~5m 15s | 7m |
-| `npm run test:scheduler` | Lease, deadlock, scheduler, and runnable-job core suites | ~25s | 1m |
-| `npm run test:atlas` | ATLAS integration, smoke, and routing core suites | ~45s | 2m |
-| `npm run test:providers` | Provider-tagged core suites plus provider OOP coverage | ~20s | 1m |
-| `npm run test:handoff` | Handoff and file-request core suites | ~40s | 2m |
-| `npm run test:planning` | Planner and researcher-tagged core suites | ~10s | 1m |
-| `npm run test:toolkit` | Deterministic toolkit, tool runtime, and image resize suites | ~20s | 1m |
-| `npm run test:artifacts` | Artifact routing, assessment, fix, and manifest suites | ~10s | 1m |
-| `npm run test:git` | Git, worktree, pre-push, dirty-worktree, and merge-safety coverage | ~5m 15s | 7m |
-| `npm run test:ui` | Queue rendering, admin TUI, and timeline UI-adjacent suites | ~25s | 1m |
-| `npm run test:slow` | Slow-tagged core suites | ~5m | 7m |
+The default reporter prints failures and heartbeat progress. Set
+`POSSE_TEST_REPORTER=spec` for verbose output; an independent audit reporter
+still records skips and failures. Unexpected skips fail with either reporter.
+Required native capabilities are declared with `requires` in the catalog.
+Missing debug Atlas builds fail before spawning the suite; set
+`POSSE_ATLAS_DEBUG_BINARY` to the compatible debug executable. With the sibling
+`posse-bin` checkout, build it once using
+`cargo build --locked -p posse-atlas --manifest-path ../../posse-bin/Cargo.toml`
+from this package directory. The runner discovers that debug build automatically.
 
-### Verification time policy
+`npm run test:timings` reads measured file completion durations, including
+startup and teardown. Historical aggregate entries may remain in its rolling
+cache until that cache is removed.
+
+Each runner invocation writes immutable evidence beneath `.posse-test-runs/`:
+selection, starting and ending commit/cleanliness, catalog hash, runtime,
+completed execution files, durations, skips, and failures. Dirty runs have no
+reusable tree fingerprint. Publication uses a unique external receipt and
+rejects incomplete, dirty, or changed-candidate evidence.
+
+The central publisher defaults to affected tests since its last successfully
+published source commit. Missing/divergent baselines and broad changes run all
+tests. `--full-tests` forces full validation; `--shadow-tests` records the
+proposed affected selection and runs everything. A full audit is required at
+least every seven days when publishing. The publication baseline advances
+only after both source push and public-client synchronization succeed.
+`--no-tests` never advances that tested baseline. Coordinated multi-repository
+sweeps run the full Node suite because native and Remote dependencies also
+change outside the Node commit range. See the centralized deployment index
+for state locations and publication commands.
+
+GitHub runs the `ci_portable` partition in two stable shards on pull requests,
+main pushes, and nightly; the required `Node checks` job depends on both.
+Windows runs `ci_windows`. These hosted partitions do not replace the native
+full-suite publication gate. The canonical workflow in the deployment
+repository must match `.github/workflows/ci.yml`.
+
+Full suite timing depends on native binaries, host load, and storage. Use the
+run manifest's measured duration instead of the former aggregate estimates.
 
 Posse runs a repository's frozen test command and its canonical verification
 command under a declared time policy instead of a fixed 120-second cap:
 
 | Setting | Scope | Default | Meaning |
 |---------|-------|---------|---------|
-| `verification_wall_timeout_ms` | repository | 120000 | Wall-clock limit for a frozen test or canonical verify run. Set it to the window this table documents for the repository's own harness (for Posse itself, 900000). |
+| `verification_wall_timeout_ms` | repository | 120000 | Wall-clock limit for a frozen test or canonical verify run. Set it from measured suite durations; Posse uses a 900000 ms allocation for full verification. |
 | `verification_idle_timeout_ms` | repository | disabled | Kill a run that produces no output for this long. Enable only for harnesses that print progress while healthy; `npm test` here prints a heartbeat every 30s when headless, so it qualifies. |
 | `verification_wall_timeout_max_ms` | account | 1800000 | Administrator ceiling. Repository values above it are clamped, so a repository cannot pin a worker indefinitely. |
 | `verification_dependency_network_policy` | repository | allow | Dependency repair may fetch exact locked artifacts (`allow`, the default), use only existing caches (`cache_only`), or be disabled. Repairs always require a repository lock, frozen/no-script flags, and a clean-tree check. |

@@ -1,6 +1,7 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
 
 const MAX_COMMAND_ID_CHARS = 256;
+const PENDING_RECONCILIATION = "Inspect the target state and bridge audit history; do not issue the mutation with a new id while its outcome is unknown.";
 
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -106,12 +107,15 @@ export class CommandResultStore {
     const row = this.readRow(id);
     if (!row) return { command_id: id, status: "not_found" };
     if (row.state === "pending") {
+      const createdAtMs = Date.parse(row.created_at);
       return {
         command_id: id,
         command_name: row.command_name,
         status: "pending",
         created_at: row.created_at,
         updated_at: row.updated_at,
+        age_ms: Number.isFinite(createdAtMs) ? Math.max(0, Date.now() - createdAtMs) : null,
+        reconciliation: PENDING_RECONCILIATION,
       };
     }
     const ack = parseJson(row.ack_json);

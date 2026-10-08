@@ -8,6 +8,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
 import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
+import { detectNodePackageManager } from "../../../shared/tools/functions/node-package-manager.js";
 import { applyManagedPythonRuntimeEnv, envPathIncludesDir } from "../../runtime/functions/paths.js";
 import {
   resolveManagedPythonRuntimeForProject,
@@ -59,16 +60,8 @@ function normalizedNetworkPolicy(value) {
 }
 
 function nodeDetection(projectDir) {
-  const candidates = [
-    ["npm", "package-lock.json"],
-    ["npm", "npm-shrinkwrap.json"],
-    ["pnpm", "pnpm-lock.yaml"],
-    ["yarn", "yarn.lock"],
-    ["bun", "bun.lock"],
-    ["bun", "bun.lockb"],
-  ];
-  const found = candidates.find(([, lock]) => exists(path.join(projectDir, lock)));
-  return found ? { manager: found[0], lock: found[1] } : null;
+  const detected = detectNodePackageManager(projectDir);
+  return detected.lock ? detected : null;
 }
 
 function pythonRequirements(projectDir) {
@@ -551,12 +544,13 @@ function defaultGitStatus(projectDir) {
 
 function verificationResult(ecosystem, status, detail = {}) {
   return {
+    actionability: "infrastructure",
+    retry_class: status === "cancelled" ? "none" : "verification_infrastructure",
+    ...detail,
     ecosystem,
     status,
     ok: status === "passed",
-    actionability: status === "side_effect_detected" ? "repository_cleanup" : "infrastructure",
-    retry_class: status === "cancelled" ? "none" : "verification_infrastructure",
-    ...detail,
+    ...(status === "side_effect_detected" ? { actionability: "repository_cleanup" } : {}),
   };
 }
 

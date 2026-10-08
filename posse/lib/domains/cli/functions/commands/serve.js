@@ -604,7 +604,7 @@ export function installServeCrashGuard(bridge, {
   };
 }
 
-function waitForShutdown() {
+function waitForShutdown(stopped = null) {
   const signals = process.platform === "win32"
     ? ["SIGINT", "SIGTERM", "SIGBREAK"]
     : ["SIGINT", "SIGTERM"];
@@ -615,6 +615,7 @@ function waitForShutdown() {
       for (const signal of signals) process.off(signal, done);
     };
     for (const signal of signals) process.once(signal, done);
+    if (stopped) void stopped.then(done);
   }).finally(() => {
     cleanup();
   });
@@ -721,7 +722,7 @@ export async function runServeCommand(argv = [], {
   if (!wait) return { ok: true, bridge, info };
 
   const releaseCrashGuard = installServeCrashGuard(bridge, { projectDir });
-  const signal = await waitForShutdown();
+  const signal = await waitForShutdown(bridge.stopped);
   releaseCrashGuard();
   await bridge.stop();
   console.log(`\n  ${C.yellow}Posse bridge stopped${signal ? ` (${signal})` : ""}.${C.reset}\n`);

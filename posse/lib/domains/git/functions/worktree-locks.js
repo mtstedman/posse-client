@@ -14,6 +14,7 @@ import path from "path";
 import { createHash, randomBytes } from "crypto";
 import { setTimeout as sleepAsyncTimer } from "node:timers/promises";
 import { threadId } from "node:worker_threads";
+import Database from "better-sqlite3";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getIntSetting } from "../../queue/functions/index.js";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
@@ -30,6 +31,20 @@ const WORKTREE_LOCK_POLL_MS = 50;
 const WORKTREE_LOCK_LIVE_PID_STALE_MULTIPLIER = 10;
 const ACTIVE_WORKTREE_LOCK_TOKENS = new Set();
 
+// All local lock pathname transitions use one SQLite writer lock per directory.
+// A stale-file check followed by unlink cannot be made atomic with filesystem
+// stat alone: another reclaimer can replace the pathname between those calls.
+function withLockTransition(lockPath, fn) {
+  const arbiter = new Database(path.join(path.dirname(lockPath), ".posse-worktree-lock-arbiter.sqlite"), {
+    timeout: 10,
+  });
+  try {
+    return arbiter.transaction(fn).immediate();
+  } finally {
+    arbiter.close();
+  }
+}
+
 // Exclusive-create (`wx`) lock open normally fails with EEXIST when the lock is
 // held. On Windows it can instead fail with EPERM/EBUSY/EACCES when the lock
 // path is in a delete-pending state (a prior holder just unlinked it) or is
@@ -39,6 +54,7 @@ const ACTIVE_WORKTREE_LOCK_TOKENS = new Set();
 // behavior to avoid masking genuine permission errors.
 export function isRetryableLockOpenError(error) {
   if (error?.code === "EEXIST") return true;
+  if (error?.code === "SQLITE_BUSY") return true;
   if (process.platform === "win32") {
     return error?.code === "EPERM" || error?.code === "EBUSY" || error?.code === "EACCES";
   }
@@ -183,6 +199,22 @@ function lockMetadata(ownerToken) {
   };
 }
 
+function createLockFile(lockPath, signal = null) {
+  return withLockTransition(lockPath, () => {
+    const fd = fs.openSync(lockPath, "wx");
+    try {
+      throwIfAborted(signal);
+      const owner = lockMetadata(newOwnerToken());
+      fs.writeFileSync(fd, JSON.stringify(owner));
+      return { fd, owner };
+    } catch (error) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+      try { fs.rmSync(lockPath, { force: true }); } catch { /* ignore */ }
+      throw error;
+    }
+  });
+}
+
 function isWorktreeLockHandle(value) {
   return value instanceof WorktreeLock || value instanceof AsyncWorktreeLock;
 }
@@ -219,15 +251,6 @@ function lockFileExists(lockPath) {
   }
 }
 
-async function lockFileExistsAsync(lockPath) {
-  try {
-    await fs.promises.access(lockPath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function statMatchesExpected(lockPath, expectedStat = null) {
   if (!expectedStat) return true;
   try {
@@ -242,21 +265,15 @@ function statMatchesExpected(lockPath, expectedStat = null) {
   }
 }
 
-async function statMatchesExpectedAsync(lockPath, expectedStat = null) {
-  if (!expectedStat) return true;
+export function removeLockIfOwner(lockPath, ownerToken, { allowUnowned = false, expectedStat = null } = {}) {
   try {
-    const current = await fs.promises.stat(lockPath);
-    if (Number(current.size) !== Number(expectedStat.size)) return false;
-    if (Number(current.mtimeMs) !== Number(expectedStat.mtimeMs)) return false;
-    if (Number.isFinite(Number(expectedStat.dev)) && Number(current.dev) !== Number(expectedStat.dev)) return false;
-    if (Number.isFinite(Number(expectedStat.ino)) && Number(current.ino) !== Number(expectedStat.ino)) return false;
-    return true;
+    return withLockTransition(lockPath, () => removeLockIfOwnerUnderTransition(lockPath, ownerToken, { allowUnowned, expectedStat }));
   } catch {
     return false;
   }
 }
 
-export function removeLockIfOwner(lockPath, ownerToken, { allowUnowned = false, expectedStat = null } = {}) {
+function removeLockIfOwnerUnderTransition(lockPath, ownerToken, { allowUnowned = false, expectedStat = null } = {}) {
   let metadata = null;
   if (ownerToken) {
     metadata = readLockMetadata(lockPath);
@@ -282,29 +299,18 @@ export function removeLockIfOwner(lockPath, ownerToken, { allowUnowned = false, 
 }
 
 export async function removeLockIfOwnerAsync(lockPath, ownerToken, { allowUnowned = false, expectedStat = null } = {}) {
-  let metadata = null;
-  if (ownerToken) {
-    metadata = await readLockMetadataAsync(lockPath);
-    if (!metadata && !(await lockFileExistsAsync(lockPath))) return true;
-    if (metadata?.ownerToken !== ownerToken) return false;
-    // See sync twin: the stat pins the exact file observed at reclaim time.
-    if (expectedStat && !(await statMatchesExpectedAsync(lockPath, expectedStat))) return false;
-  } else if (allowUnowned) {
-    if (!expectedStat || !(await statMatchesExpectedAsync(lockPath, expectedStat))) return false;
-    metadata = await readLockMetadataAsync(lockPath);
-    if (metadata?.ownerToken) return false;
-  } else {
-    return false;
-  }
+  return removeLockIfOwner(lockPath, ownerToken, { allowUnowned, expectedStat });
+}
+
+export function writeReleasedMarker(lockPath, ownerToken) {
   try {
-    await fs.promises.rm(lockPath, { force: true });
-    return true;
+    return withLockTransition(lockPath, () => writeReleasedMarkerUnderTransition(lockPath, ownerToken));
   } catch {
     return false;
   }
 }
 
-export function writeReleasedMarker(lockPath, ownerToken) {
+function writeReleasedMarkerUnderTransition(lockPath, ownerToken) {
   if (!ownerToken) return false;
   const metadata = readLockMetadata(lockPath);
   if (ownerToken && metadata?.ownerToken !== ownerToken) return false;
@@ -324,22 +330,7 @@ export function writeReleasedMarker(lockPath, ownerToken) {
 }
 
 export async function writeReleasedMarkerAsync(lockPath, ownerToken) {
-  if (!ownerToken) return false;
-  const metadata = await readLockMetadataAsync(lockPath);
-  if (ownerToken && metadata?.ownerToken !== ownerToken) return false;
-  try {
-    await fs.promises.writeFile(lockPath, JSON.stringify({
-      ...(metadata || {}),
-      pid: metadata?.pid ?? process.pid,
-      threadId: metadata?.threadId ?? threadId,
-      ownerToken: metadata?.ownerToken || ownerToken || null,
-      createdAt: metadata?.createdAt || new Date().toISOString(),
-      releasedAt: new Date().toISOString(),
-    }));
-    return true;
-  } catch {
-    return false;
-  }
+  return writeReleasedMarker(lockPath, ownerToken);
 }
 
 function shouldReclaimWorktreeLock(lockPath, {
@@ -463,21 +454,7 @@ export function acquireWorktreeLock(lockPath, {
   while (Date.now() - start < resolvedWaitMs) {
     try {
       fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-      const fd = fs.openSync(lockPath, "wx");
-      const ownerToken = newOwnerToken();
-      const owner = lockMetadata(ownerToken);
-      // Owner metadata (pid) is what lets other waiters detect dead owners and
-      // reclaim the lock without waiting the full stale-age. A lock without
-      // metadata forces every waiter to wait out WORKTREE_LOCK_STALE_MS, so
-      // treat a failed write as a failed acquisition and retry.
-      try {
-        fs.writeFileSync(fd, JSON.stringify(owner));
-      } catch (writeErr) {
-        try { fs.closeSync(fd); } catch { /* ignore */ }
-        try { fs.rmSync(lockPath, { force: true }); } catch { /* ignore */ }
-        sleepMs(pollMs + Math.floor(Math.random() * pollMs));
-        continue;
-      }
+      const { fd, owner } = createLockFile(lockPath);
       return new WorktreeLock({ lockPath, fd, owner });
     } catch (error) {
       if (!isRetryableLockOpenError(error)) throw error;
@@ -519,28 +496,13 @@ export async function acquireWorktreeLockAsync(lockPath, {
     throwIfAborted(signal);
     try {
       await fs.promises.mkdir(path.dirname(lockPath), { recursive: true });
-      const fileHandle = await fs.promises.open(lockPath, "wx");
-      const ownerToken = newOwnerToken();
-      const owner = lockMetadata(ownerToken);
+      const { fd, owner } = createLockFile(lockPath, signal);
       if (signal?.aborted) {
-        try { await fileHandle.close(); } catch { /* ignore */ }
-        try { await fs.promises.rm(lockPath, { force: true }); } catch { /* ignore */ }
-        throwIfAborted(signal);
-      }
-      try {
-        await fileHandle.writeFile(JSON.stringify(owner));
-      } catch (writeErr) {
-        try { await fileHandle.close(); } catch { /* ignore */ }
-        try { await fs.promises.rm(lockPath, { force: true }); } catch { /* ignore */ }
-        await sleepMsAsync(pollMs + Math.floor(Math.random() * pollMs), signal);
-        continue;
-      }
-      if (signal?.aborted) {
-        const lock = new AsyncWorktreeLock({ lockPath, fileHandle, owner });
+        const lock = new AsyncWorktreeLock({ lockPath, fd, owner });
         await lock.releaseAsync();
         throwIfAborted(signal);
       }
-      return new AsyncWorktreeLock({ lockPath, fileHandle, owner });
+      return new AsyncWorktreeLock({ lockPath, fd, owner });
     } catch (error) {
       if (isAbortError(error)) throw error;
       if (!isRetryableLockOpenError(error)) throw error;

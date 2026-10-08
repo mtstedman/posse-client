@@ -56,8 +56,8 @@ function trimTransportFields(header) {
     // model needs; the requested span and the line count are derivable.
     "source_deduplicated", "requestedStartLine", "requestedEndLine", "reusedLineCount",
   ]) delete header[field];
-  // A bounded selection is the normal case; only a whole-file delivery is news.
-  if (header.selectionBounded === true) delete header.selectionBounded;
+  // Selection bounds remain internal; displayed ranges describe the source.
+  delete header.selectionBounded;
   // The count restates the ranges list.
   if (Array.isArray(header.continuationRanges)) delete header.continuationWindows;
   if (header.evidence_ref && typeof header.evidence_ref === "object") {

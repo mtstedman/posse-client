@@ -53,6 +53,13 @@ function nextCronOccurrence(trigger, afterMs, lastLocalKey) {
     const parts = localParts(fmt, current);
     const localKey = wallKey(parts);
     if (matchesCron(cron, parts) && (trigger.dst.repeat === "twice" || localKey !== lastLocalKey)) {
+      // A repeated hour can contain several scheduled minutes. Comparing only
+      // the previous firing misses the second pass through an earlier minute.
+      // Inspect the clock transition itself so this also works after restart.
+      if (trigger.dst.repeat === "once" && hasEarlierWallInstant(fmt, current, parts, localKey)) {
+        previousParts = parts;
+        continue;
+      }
       if (trigger.dst.repeat === "second") {
         const repeated = repeatedWallInstant(fmt, current, localKey);
         return { at: repeated || current, localKey };
@@ -66,6 +73,18 @@ function nextCronOccurrence(trigger, afterMs, lastLocalKey) {
     previousParts = parts;
   }
   demand(false, "Cron trigger has no occurrence within two years", "invalid_trigger");
+}
+
+function hasEarlierWallInstant(fmt, instant, parts, localKey) {
+  const windowMinutes = 180;
+  const earlier = localParts(fmt, instant - windowMinutes * 60000);
+  const wallMs = (value) => Date.UTC(value.year, value.month - 1, value.day, value.hour, value.minute);
+  // Outside a backward transition, avoid scanning the preceding three hours.
+  if (wallMs(parts) - wallMs(earlier) >= windowMinutes * 60000) return false;
+  for (let offset = 1; offset <= windowMinutes; offset++) {
+    if (wallKey(localParts(fmt, instant - offset * 60000)) === localKey) return true;
+  }
+  return false;
 }
 
 function repeatedWallInstant(fmt, first, localKey) {

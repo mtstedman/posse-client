@@ -1,6 +1,7 @@
 export const INTERNAL_TOOL_FAMILY = "internal";
 
 export const INTERNAL_ATLAS_ACTIONS = Object.freeze([
+  "create_ref",
   "info",
   "repo.register",
   "repo.status",

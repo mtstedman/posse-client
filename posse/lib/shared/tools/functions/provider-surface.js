@@ -1,3 +1,5 @@
+import { ProviderToolRenderer } from "../classes/ProviderToolRenderer.js";
+import { ATLAS_READ_GUIDANCE_TOKEN, TOOL_REFS, toolReference } from "../../../catalog/tool-references.js";
 import { ToolCatalog } from "../classes/ToolCatalog.js";
 
 function canonicalToolName(tool = {}) {
@@ -57,19 +59,26 @@ export function projectFunctionToolSurface(contract = {}, toolDefinitions = []) 
   };
 }
 
-export function renderAtlasGuidance(contract = {}) {
+export function renderAtlasGuidance(contract = {}, toolRenderer = new ProviderToolRenderer({
+  providerName: contract.provider,
+  issuedSurface: contract,
+})) {
   const tools = Array.isArray(contract?.tools) ? contract.tools : [];
   const hasAtlas = tools
     .some((tool) => String(tool?.suite || "").trim() === "atlas"
       || String(tool?.access || "").trim() === "atlas");
   if (!hasAtlas) return [];
-  const issued = new Set(tools.map((tool) => canonicalToolName(tool)));
+  const name = (action) => toolRenderer.tryRender(toolReference("atlas", action));
+  const codeWindow = name("code.window");
+  const skeleton = name("code.skeleton");
+  const symbolGet = name("symbol.get");
+  const lens = name("code.lens");
+  const traversal = name("traverse_ref") || name("fetch_ref");
   const lines = [
     "Atlas symbol tracing: Choose retrieval by the unresolved fact and the location already known, not by a need to switch tools. Use search or survey to locate unknown targets; use lens for scattered details and callers/structure only for a needed relationship, selecting the relevant relation kinds instead of all kinds.",
-    "Atlas evidence refs: evidence_ref identifies content already visible in this context. Use it directly for citation, slicing, or handoff; do not call it for the same content.",
-    "Atlas stored-result traversal: Call the issued stored-result traversal tool only with an explicit traversal_ref for omitted content. Group concurrently ready traversal refs into one call; use one when it unlocks the next cursor. Omit limit for normal source traversal: limit measures characters per ref, not source lines. A successful call promotes that same ref to evidence_ref, and each returned evidence_ref identifies the visible text. A different traversal_ref alone advertises more missing content. Copy opaque refs as issued and do not calculate offsets. Start a fresh producer call for a materially different scope.",
+    `Atlas stored-result traversal: Call ${traversal || "the issued stored-result traversal tool"} only with an explicit traversal_ref for omitted content. Omit limit for normal source traversal: limit measures characters per ref, not source lines. Start a fresh producer call for a materially different scope.`,
   ];
-  const hasCodeWindow = tools.some((tool) => canonicalToolName(tool) === "code.window");
+  const hasCodeWindow = Boolean(codeWindow);
   const policy = contract?.atlasCodeWindowPolicy;
   // Describe what each read returns, not when to call it: prescriptive routing
   // invites checklist tool use. The earlier line routed every known read to
@@ -77,19 +86,19 @@ export function renderAtlasGuidance(contract = {}) {
   // file already read, mostly for names the previous window had revealed.
   if (hasCodeWindow) {
     const reads = [];
-    if (issued.has("code.skeleton")) {
-      reads.push("code.skeleton returns a compact list of a file's declarations with symbol handles");
+    if (skeleton) {
+      reads.push(`${skeleton} returns a compact list of a file's declarations with symbol handles`);
     }
-    if (issued.has("symbol.get")) {
-      reads.push("symbol.get returns complete bodies of named declarations, several in one file through file+symbols or independent ones through items");
+    if (symbolGet) {
+      reads.push(`${symbolGet} returns complete bodies of named declarations, several in one file through file+symbols or independent ones through items`);
     }
-    reads.push("code.window returns a source region around named declarations including the same-file control flow between them; granularity symbol covers the named declarations' regions, and fileWindow covers most of the file and is the largest read");
-    if (issued.has("code.lens")) reads.push("code.lens returns the locations of an identifier's uses with their enclosing symbols");
+    reads.push(`${codeWindow} returns a source region around named declarations including the same-file control flow between them; granularity symbol covers the named declarations' regions, and fileWindow requests a broader anchored source region, subject to the issued limits`);
+    if (lens) reads.push(`${lens} returns the locations of an identifier's uses with their enclosing symbols`);
     lines[0] += ` Atlas reads: ${reads.join("; ")}. None of these requires a prior symbol_id lookup.`;
   }
   if (hasCodeWindow && policy) {
     lines.push(
-      `Atlas code window limit: code.window is capped at ${policy.maxWindowTokens} tokens and ${policy.maxWindowLines} lines per call for this run. Omit max_tokens to use that configured maximum; a smaller value narrows the result and a larger value is clamped.`,
+      `Atlas code window limit: ${codeWindow} is capped at ${policy.maxWindowTokens} tokens and ${policy.maxWindowLines} lines per call for this run. Omit max_tokens to use that configured maximum; a smaller value narrows the result and a larger value is clamped.`,
     );
   }
   return lines;
@@ -103,4 +112,21 @@ export function renderToolBatchingGuidance(contract = {}, toolRenderer) {
   return hasNativeBatch
     ? ["Schema batching: Tools with schema defined batch fields can combine items in one call within their declared limits."]
     : [];
+}
+
+// Remote owns contract prose; local projection binds names only after the
+// final provider surface is known. Never guess an unissued callable name.
+export function renderProviderPromptContracts(prompt, contract = {}) {
+  const renderer = new ProviderToolRenderer({ providerName: contract.provider, issuedSurface: contract });
+  return String(prompt || "")
+    .replaceAll(ATLAS_READ_GUIDANCE_TOKEN, renderAtlasGuidance(contract, renderer)
+      .filter((line) => !line.startsWith("Atlas stored-result traversal:"))
+      .join("\n"))
+    .replace(/\{\{tool:(tools|atlas)\.([a-zA-Z0-9_.]+)\}\}/g, (_token, suite, action) => {
+      // Older Remote authority may issue only the compatibility traversal.
+      if (suite === "atlas" && action === "traverse_ref") {
+        return renderer.tryRender(TOOL_REFS.atlas.traverseRef) || renderer.render(TOOL_REFS.atlas.fetchRef);
+      }
+      return renderer.render(toolReference(suite, action));
+    });
 }

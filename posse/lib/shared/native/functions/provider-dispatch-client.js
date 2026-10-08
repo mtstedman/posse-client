@@ -140,8 +140,11 @@ export async function dispatchProvider(request, {
   if (request.gateway != null) {
     throw protocolError("Provider dispatch gateway capabilities must be minted by the native client");
   }
-  const issuedToolIds = request.execution?.issuedToolIds;
-  if (!Array.isArray(issuedToolIds)) throw protocolError("Provider dispatch requires issued tool ids");
+  const requestedToolIds = request.execution?.issuedToolIds;
+  if (!Array.isArray(requestedToolIds)) throw protocolError("Provider dispatch requires issued tool ids");
+  // Native adapters attest descriptors against this list in order. Match the
+  // sorted gateway surface before calculating or transmitting its digest.
+  const issuedToolIds = [...requestedToolIds].sort();
   let toolGateway = null;
   let gateway = null;
   let observedSurfaceDigest = providerDispatchSurfaceDigest([]);
@@ -182,6 +185,7 @@ export async function dispatchProvider(request, {
     ...request,
     execution: {
       ...request.execution,
+      issuedToolIds,
       issuedToolSurfaceDigest: observedSurfaceDigest,
     },
   };
@@ -233,6 +237,7 @@ export async function dispatchProvider(request, {
     let cancelSent = false;
     let cancelTimer = null;
     let forceTimer = null;
+    let pendingError = null;
 
     const clearTimers = () => {
       if (cancelTimer) clearTimeout(cancelTimer);
@@ -246,16 +251,21 @@ export async function dispatchProvider(request, {
     };
     const finishReject = (error, kill = false) => {
       if (settled) return;
-      settled = true;
-      cleanup();
       if (kill) {
+        if (pendingError) return;
+        pendingError = error;
+        signal?.removeEventListener?.("abort", abort);
+        void toolGateway?.close();
+        if (cancelTimer) clearTimeout(cancelTimer);
         terminateSpawnedProcessTree(proc, { force: false, processGroup });
-        const timer = setTimeout(
+        forceTimer = setTimeout(
           () => terminateSpawnedProcessTree(proc, { force: true, processGroup }),
           forceKillGraceMs,
         );
-        timer.unref?.();
+        return;
       }
+      settled = true;
+      cleanup();
       reject(error);
     };
     const abort = () => {
@@ -325,7 +335,7 @@ export async function dispatchProvider(request, {
     };
 
     proc.stdout.on("data", (chunk) => {
-      if (settled) return;
+      if (settled || pendingError) return;
       try {
         pending = Buffer.concat([pending, Buffer.from(chunk)]);
         let newline;
@@ -348,6 +358,7 @@ export async function dispatchProvider(request, {
       stderr = Buffer.concat([stderr, Buffer.from(chunk).subarray(0, remaining)]);
     });
     proc.once("error", (error) => {
+      if (pendingError) return;
       finishReject(new ProviderDispatchError(`Could not start provider dispatch: ${error.message}`, {
         code: "provider_dispatch_spawn_failed",
         classification: "provider_unavailable",
@@ -355,6 +366,10 @@ export async function dispatchProvider(request, {
     });
     proc.once("close", (code, closeSignal) => {
       if (settled) return;
+      if (pendingError) {
+        finishReject(pendingError);
+        return;
+      }
       if (cancelSent || signal?.aborted) {
         finishReject(cancellationError(terminal));
         return;
@@ -384,7 +399,7 @@ export async function dispatchProvider(request, {
       }
     });
     proc.stdin.on("error", (error) => {
-      if (!settled && !terminal) finishReject(protocolError(`Provider dispatch stdin failed: ${error.message}`), true);
+      if (!settled && !pendingError && !terminal) finishReject(protocolError(`Provider dispatch stdin failed: ${error.message}`), true);
     });
     signal?.addEventListener?.("abort", abort, { once: true });
     if (signal?.aborted) {

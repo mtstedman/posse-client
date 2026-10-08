@@ -6,6 +6,7 @@
 
 import crypto from "node:crypto";
 import http from "node:http";
+import { sortAgentToolDefinitions } from "../functions/agent-schema.js";
 
 import {
   PROVIDER_TOOL_GATEWAY_MAX_REQUEST_BYTES,
@@ -85,7 +86,7 @@ function canonicalJson(value) {
 }
 
 export function providerDispatchSurfaceDigest(toolDescriptors = []) {
-  return crypto.createHash("sha256").update(canonicalJson(toolDescriptors)).digest("hex");
+  return crypto.createHash("sha256").update(canonicalJson(sortAgentToolDefinitions(toolDescriptors))).digest("hex");
 }
 
 function validateRequest(body, gateway) {
@@ -130,7 +131,7 @@ export class ProviderDispatchGateway {
       throw new Error("Provider dispatch gateway requires the issued tool surface digest");
     }
     this.dispatchId = dispatchId;
-    this.issuedToolIds = new Set(ids);
+    this.issuedToolIds = new Set(ids.sort());
     this.surfaceDigest = surfaceDigest == null ? null : surfaceDigest.replace(/^sha256:/, "").toLowerCase();
     this.mcpGate = mcpGate;
     this.lease = crypto.randomBytes(32).toString("base64url");

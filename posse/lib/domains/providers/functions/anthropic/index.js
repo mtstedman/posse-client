@@ -16,6 +16,7 @@ import {
   appendExecutionTools,
   buildExecutionContract,
   renderExecutionContractBlock,
+  renderProviderPromptContracts,
 } from "../../../../shared/tools/functions/contract.js";
 import { projectFunctionToolSurface } from "../../../../shared/tools/functions/provider-surface.js";
 import { formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
@@ -512,9 +513,10 @@ export async function callProvider(promptText, {
   const tools = toAnthropicTools(openAiTools);
   const contractBlock = renderExecutionContractBlock(executionContract, {
     remoteComposed: skipRolePrompt,
+    remoteSystemPrompt,
   });
   const omitSessionPreamble = recyclingMode === "resume";
-  const remoteSystemPromptText = omitSessionPreamble ? null : (String(remoteSystemPrompt || "").trim() || null);
+  const remoteSystemPromptText = omitSessionPreamble ? null : (renderProviderPromptContracts(remoteSystemPrompt, executionContract).trim() || null);
   const systemPrompt = [
     remoteSystemPromptText,
     omitSessionPreamble ? null : contractBlock,

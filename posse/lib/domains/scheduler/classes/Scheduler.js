@@ -11,7 +11,6 @@
 
 import crypto from "crypto";
 import { spawn } from "child_process";
-import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import {
   ancestorJobIdsForJob,
   queuedCohortJobIdsForJob,
@@ -90,15 +89,16 @@ import {
   recordBootCrashResumeMarker,
   recordRunDiagnostic,
   recordSchedulerLockDiagnostic,
-  recordSchedulerShutdownMarker,
   startRunHeartbeat,
 } from "../../../shared/telemetry/functions/run-diagnostics.js";
-import { maybeCompactRuntimeDb, maybeRunRuntimeRetention } from "../../ui/functions/admin/retention.js";
+import { maybeRunRuntimeRetention } from "../../ui/functions/admin/retention.js";
 import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
 import { describeModelCatalogWarning } from "../../providers/functions/model-catalog-validate.js";
 import { maybeExpireStuckFanoutChildren } from "../../research/functions/fanout.js";
 import { yieldNow } from "../../runtime/functions/yield.js";
-import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
+import { runSchedulerBootMaintenanceInWorker } from "../functions/boot-maintenance.js";
+import { coordinateSchedulerBoot } from "../functions/boot-coordination.js";
+import { awaitSchedulerWorkersForShutdown, coordinateSchedulerStop } from "../functions/shutdown-coordination.js";
 import {
   formatProviderAuthLivenessProbe,
   formatWorkspaceHealthCriticalDetail,
@@ -181,25 +181,6 @@ import { SchedulerLockLease } from "./SchedulerLockLease.js";
 import { SchedulerDispatchPlanner } from "./SchedulerDispatchPlanner.js";
 import { SchedulerLockController } from "./SchedulerLockController.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-
-const SCHEDULER_BOOT_MAINTENANCE_WORKER_URL = new URL("../functions/boot-maintenance-worker.js", import.meta.url);
-const SCHEDULER_BOOT_THREAD_MANAGER = new ThreadManager();
-
-function runSchedulerBootMaintenanceInWorker({ ownerId = null, lockName = "main" } = {}) {
-  return SCHEDULER_BOOT_THREAD_MANAGER.run(SCHEDULER_BOOT_MAINTENANCE_WORKER_URL, {
-    label: "Scheduler boot DB maintenance",
-    timeoutMs: 120_000,
-    workerData: {
-      dbPath: getRuntimeDbPath(),
-      // Passed so the worker can confirm we still hold the scheduler lock before
-      // force-requeuing every active lease. Guards the shutdown-during-boot race:
-      // if a Ctrl+C released the lock and a restarted instance already took it,
-      // this dying worker must not clobber the new owner's fresh leases.
-      lockName,
-      ownerId,
-    },
-  });
-}
 
 // While the ATLAS conductor is actively indexing (warm/merge/reindex), new
 // non-warm jobs are held back instead of leased: agents attaching mid-warm
@@ -1759,123 +1740,8 @@ export class Scheduler {
     log.info("scheduler", "Scheduler initialized", { concurrency: this.concurrency, pollMs: this.pollMs, leaseSec: this.leaseSec });
   }
 
-  async boot({ onBeforeLoop, onBeforeLoopFatal = false, onBootEvent = null, onBootAbort = null } = {}) {
-    const emitBootEvent = (label, patch) => {
-      if (typeof onBootEvent !== "function") return;
-      try { onBootEvent({ label, ...patch }); } catch { /* observational */ }
-    };
-    if (!(await this.acquireBootLock({ onBootEvent }))) return false;
-    // ── BOOT PHASES 2 & 3 in parallel ───────────────────────────────────────
-    // Orphan recovery touches the orchestrator DB (jobs / job_attempts /
-    // *_locks). Pre-loop hooks (provider warmups, ATLAS warmup) touch the
-    // network and .posse/atlas/* files. Disjoint storage, no write contention
-    // — so they race instead of serializing. This is what unblocks the
-    // per-language indexers from waiting on orphan recovery to finish.
-    /** @type {Error | null} */
-    let preLoopErr = null;
-    const recoverP = this.recoverOrphans({ onBootEvent }).catch((err) => {
-      this._log(`Boot: orphan recovery failed: ${err?.message || err}`, "red");
-      throw err;
-    });
-    const preLoopP = (async () => {
-      if (!onBeforeLoop) return;
-      this._log("Boot: running pre-loop hooks...");
-      emitBootEvent("pre-loop hooks", { section: "scheduler", status: "running" });
-      try {
-        await onBeforeLoop();
-        emitBootEvent("pre-loop hooks", { section: "scheduler", status: "ok" });
-      } catch (err) {
-        this._log(`Boot: onBeforeLoop failed: ${err.message}`, "yellow");
-        emitBootEvent("pre-loop hooks", { section: "scheduler", status: "failed", detail: err.message });
-        if (onBeforeLoopFatal) preLoopErr = err;
-      }
-    })();
-    // Outer boot timeout — last-resort wedge backstop. Per-step soft timeouts
-    // (bootWarmup softTimeoutMs, internal worker timeouts) handle ordinary
-    // slow paths. This 45-min race ceiling only fires if ALL of those failed
-    // to arm — e.g. a sync DB lock that froze the event loop before any
-    // timer could be registered. Boot fails loudly instead of hanging forever.
-    const SCHEDULER_BOOT_OUTER_TIMEOUT_MS = 45 * 60 * 1000;
-    /** @type {NodeJS.Timeout | null} */
-    let bootTimeoutTimer = null;
-    // Do not release boot ownership on the first rejection while the sibling
-    // phase is still running. In particular, orphan-recovery failure used to
-    // unwind RunSession cleanup while pre-loop warmups could continue and
-    // recreate resources behind the closed supervisor. Preserve the original
-    // rejection after both phases settle; the outer timeout remains the hard
-    // ceiling for a genuinely wedged sibling.
-    const bootPhases = Promise.allSettled([recoverP, preLoopP]).then((results) => {
-      const failed = results.find((result) => result.status === "rejected");
-      if (failed) throw failed.reason;
-    });
-    const bootRace = Promise.race([
-      bootPhases,
-      new Promise((_, reject) => {
-        bootTimeoutTimer = setTimeout(() => {
-          const err = new Error(`Scheduler boot exceeded outer ${SCHEDULER_BOOT_OUTER_TIMEOUT_MS / 60000}min timeout — a step is wedged`);
-          /** @type {any} */ (err).code = "SCHEDULER_BOOT_TIMEOUT";
-          reject(err);
-        }, SCHEDULER_BOOT_OUTER_TIMEOUT_MS);
-        bootTimeoutTimer?.unref?.();
-      }),
-    ]);
-    try {
-      await bootRace;
-    } catch (err) {
-      if (bootTimeoutTimer) clearTimeout(bootTimeoutTimer);
-      try { onBootAbort?.(err); } catch { /* best-effort cooperative cancellation */ }
-      if (/** @type {any} */ (err)?.code === "SCHEDULER_BOOT_TIMEOUT") {
-        this._log(`Boot: ${err.message}`, "red");
-        emitBootEvent("pre-loop hooks", { section: "scheduler", status: "failed", detail: err.message });
-        log.warn("scheduler", "Scheduler boot outer timeout fired", { timeoutMs: SCHEDULER_BOOT_OUTER_TIMEOUT_MS });
-        this.stop();
-        return false;
-      }
-      this.stop();
-      throw err;
-    }
-    if (bootTimeoutTimer) clearTimeout(bootTimeoutTimer);
-    if (preLoopErr) {
-      this._log("Boot: decision=EXIT (fatal pre-loop hook failed)", "red");
-      this.stop();
-      return false;
-    }
-    if (this._lockLost) {
-      // Renewal can lose the lock while orphan recovery / pre-loop hooks run
-      // (renewal starts at lock acquisition). _stopForSchedulerLockLoss only
-      // sets _lockLost/_running — without this check boot would "complete"
-      // and runLoop would throw instead of reporting a clean boot failure.
-      this._log("Boot: decision=EXIT (scheduler lock lost during boot phases)", "red");
-      this.stop();
-      return false;
-    }
-    if (this._stopRequested) {
-      this._log("Boot: decision=EXIT (stop requested during pre-loop hooks)", "yellow");
-      this.stop();
-      return false;
-    }
-    try {
-      await this.runHealthChecks({ onBootEvent });
-      if (this._lockLost) {
-        this._log("Boot: decision=EXIT (scheduler lock lost during health checks)", "red");
-        this.stop();
-        return false;
-      }
-      if (this._stopRequested) {
-        this._log("Boot: decision=EXIT (stop requested during health checks)", "yellow");
-        this.stop();
-        return false;
-      }
-      this.markBootComplete({ onBootEvent });
-      return true;
-    } catch (err) {
-      // Every failure after lock acquisition must converge on the same release
-      // path. Health probes are external I/O and can reject after orphan and
-      // pre-loop recovery succeeded; without this guard the scheduler lock and
-      // renewal timer survived the failed boot.
-      this.stop();
-      throw err;
-    }
+  async boot(options = {}) {
+    return coordinateSchedulerBoot(this, options);
   }
 
   /**
@@ -3268,49 +3134,7 @@ export class Scheduler {
         }
       }
 
-      // Wait for any still-running workers to finish (with timeout)
-      if (activeWorkers.size > 0) {
-        // Normal shutdown must stop mutation before a job becomes runnable
-        // again. Workers own the safe interruption path: abort, stash/reset
-        // partial work, then release their lease back to queued. Lock-loss
-        // handling already sent the same abort earlier.
-        if (!this._lockLost && onKillJob) {
-          for (const [jobId] of activeWorkers) {
-            this._invokeCallback("onKillJob", onKillJob, jobId, "shutdown");
-          }
-        }
-        this._log(`Waiting for ${activeWorkers.size} worker(s) to finish (${this._shutdownWorkerWaitMs}ms timeout)...`);
-        const workersDone = Promise.all([...activeWorkers.values()].map((w) => w.promise));
-        let shutdownTimer = null;
-        const timeout = new Promise((r) => { shutdownTimer = setTimeout(r, this._shutdownWorkerWaitMs); });
-        try {
-          await Promise.race([workersDone, timeout]);
-        } finally {
-          if (shutdownTimer) clearTimeout(shutdownTimer);
-        }
-        if (activeWorkers.size > 0 && this._lockLost) {
-          const abandonedIds = [...activeWorkers.keys()];
-          this._log(`${activeWorkers.size} worker(s) still running after scheduler lock loss — not requeueing from stale owner. Jobs: ${abandonedIds.join(", ")}`, "red");
-          logEvent({
-            event_type: EVENT_TYPES.SCHEDULER_WORKERS_LEFT_AFTER_LOCK_LOSS,
-            actor_type: EVENT_ACTORS.SCHEDULER,
-            actor_id: this.ownerId,
-            message: `Lock loss shutdown left ${activeWorkers.size} worker(s) running; stale owner did not requeue. Jobs: ${abandonedIds.join(", ")}`,
-          });
-        } else if (activeWorkers.size > 0) {
-          const abandonedIds = [];
-          for (const [jobId] of activeWorkers) {
-            abandonedIds.push(jobId);
-          }
-          this._log(`${activeWorkers.size} worker(s) still running after shutdown abort — left leased for expiry/recovery. Jobs: ${abandonedIds.join(", ")}`);
-          logEvent({
-            event_type: EVENT_TYPES.SCHEDULER_WORKERS_ABANDONED,
-            actor_type: EVENT_ACTORS.SCHEDULER,
-            actor_id: this.ownerId,
-            message: `Shutdown timeout: ${activeWorkers.size} worker(s) still active after abort; left leased for expiry/recovery to prevent duplicate execution. Jobs: ${abandonedIds.join(", ")}`,
-          });
-        }
-      }
+      await awaitSchedulerWorkersForShutdown(this, activeWorkers, onKillJob);
 
     } finally {
       if (previousAutoMergePolicy !== undefined) setCompleteWorkItemAutoMergePolicy(previousAutoMergePolicy);
@@ -3358,65 +3182,8 @@ export class Scheduler {
   /**
    * Stop the scheduler loop and release the lock.
    */
-  stop({ activeWorkers = this._activeRunWorkers, reason = "scheduler_stop", fromRunLoop = false } = {}) {
-    // An external stop only requests the run loop's shutdown. Its finally
-    // block releases the lock after workers have acknowledged their aborts.
-    if ((this._activeRunWorkers && !fromRunLoop) || this._deferredStopPromise) {
-      this.requestStop();
-      return;
-    }
-    if (activeWorkers?.size > 0) {
-      // The bounded shutdown wait may expire while a worker still owns its
-      // worktree. Keep the lock until that worker exits (or this process dies).
-      this.requestStop();
-      this._deferredStopPromise = Promise.allSettled([...activeWorkers.values()].map((entry) => entry.promise))
-        .then(() => {
-          this._deferredStopPromise = null;
-          try { this.stop({ activeWorkers: new Map(), reason }); } catch { /* lock expiry remains the recovery path */ }
-        });
-      return;
-    }
-    if (this._stopMarked) {
-      this.requestStop();
-      return;
-    }
-    this._stopMarked = true;
-    this.requestStop();
-    if (this._stopRunHeartbeat) {
-      const stopHeartbeat = this._stopRunHeartbeat;
-      this._stopRunHeartbeat = null;
-      try { stopHeartbeat(reason); } catch { /* observational */ }
-    }
-    try {
-      recordSchedulerShutdownMarker({
-        ownerId: this.ownerId,
-        reason,
-        activeWorkers,
-      });
-    } catch { /* observational */ }
-    // Guarded: releaseSchedulerLock runs a DELETE that can throw SQLITE_BUSY
-    // under the same cross-process contention that triggers lock-loss shutdown.
-    // Unguarded, that throw escapes stop() out of the run-loop finally, masking
-    // the loop's real error and skipping the SCHEDULER_STOPPED event. A stale
-    // lock row is self-healing (heartbeat-stale force-steal on next boot).
-    try { this.schedulerLock.release(); } catch { /* best-effort; lock self-heals via expiry */ }
-    // The run is over and its lock released; compaction re-checks that no
-    // other scheduler holds the lock before it VACUUMs.
-    try {
-      const compaction = maybeCompactRuntimeDb({ lockName: this.schedulerLock?.lockName || "main" });
-      if (compaction.attempted) {
-        this._log(compaction.ok
-          ? `Runtime DB compacted: ${compaction.before.bytes} -> ${compaction.after.bytes} bytes`
-          : `Runtime DB compaction failed: ${compaction.error}`, compaction.ok ? "cyan" : "yellow");
-      }
-    } catch { /* best-effort maintenance */ }
-
-    logEvent({
-      event_type: EVENT_TYPES.SCHEDULER_STOPPED,
-      actor_type: EVENT_ACTORS.SCHEDULER,
-      actor_id: this.ownerId,
-      message: "Scheduler stopped",
-    });
+  stop(options = {}) {
+    return coordinateSchedulerStop(this, options);
   }
 
   /**

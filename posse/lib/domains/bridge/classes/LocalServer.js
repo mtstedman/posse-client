@@ -173,6 +173,7 @@ export class LocalServer {
     getRelayStatus = null,
     startPosse = null,
     onOperatorActivity = null,
+    stopBridge = null,
     maxWsFrameBytes = DEFAULT_MAX_WS_FRAME_BYTES,
     maxWsBufferedBytes = DEFAULT_MAX_WS_BUFFERED_BYTES,
     wsHelloTimeoutMs = DEFAULT_WS_HELLO_TIMEOUT_MS,
@@ -191,6 +192,7 @@ export class LocalServer {
     this.getRelayStatus = getRelayStatus;
     this.startPosse = startPosse;
     this.onOperatorActivity = onOperatorActivity;
+    this.stopBridge = stopBridge;
     this.maxWsFrameBytes = Math.max(1024, Number(maxWsFrameBytes) || DEFAULT_MAX_WS_FRAME_BYTES);
     this.maxWsBufferedBytes = Math.max(
       this.maxWsFrameBytes,
@@ -314,6 +316,29 @@ export class LocalServer {
           limit: query.limit,
         }));
       }
+      return;
+    }
+    // Lifecycle control is local-only and bound to the exact running identity.
+    // It is deliberately absent from relay/WebSocket command dispatch.
+    if (req.method === "POST" && url.pathname === "/v1/bridge/stop") {
+      const peer = req.socket?.remoteAddress;
+      if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(peer)) {
+        sendJson(res, 403, { error: "local_control_only" });
+        return;
+      }
+      const request = await readJsonBody(req);
+      if (request.instance_id !== this.instanceId) {
+        sendJson(res, 409, { error: "bridge_identity_changed" });
+        return;
+      }
+      if (typeof this.stopBridge !== "function") {
+        sendJson(res, 503, { error: "bridge_stop_unavailable" });
+        return;
+      }
+      res.once("finish", () => {
+        void Promise.resolve().then(() => this.stopBridge()).catch(() => {});
+      });
+      sendJson(res, 202, { ok: true, instance_id: this.instanceId });
       return;
     }
     if (req.method === "POST" && url.pathname === "/v1/command") {

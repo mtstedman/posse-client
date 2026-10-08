@@ -447,6 +447,7 @@ export const EVENT_TYPES = Object.freeze({
   WORK_ITEM_CROSS_WI_MERGE_DEPENDENCY_REMOVED: "work_item.cross_wi_merge_dependency_removed",
   WORK_ITEM_CROSS_WI_MERGE_DEPENDENCY_STALE: "work_item.cross_wi_merge_dependency_stale",
   WORK_ITEM_DELETED: "work_item.deleted",
+  WORK_ITEM_INPUT_READ_FAILED: "work_item.input_read_failed",
   // Work-item gates for a failed work item (retry/accept/abandon) and for a
   // merge deferred on a failed or canceled upstream (wait/rebuild/abandon).
   WORK_ITEM_DISPOSITION_GATE_OPENED: "work_item.disposition_gate_opened",

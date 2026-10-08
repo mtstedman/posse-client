@@ -49,14 +49,21 @@ export function resolveInputContextSelection(rawSelection, availableDirs) {
 
   const byName = new Map();
   const byRelative = new Map();
+  const folded = new Map();
   availableDirs.forEach((entry) => {
-    byName.set(entry.name.toLowerCase(), { entry });
-    byRelative.set(entry.relativeDir.toLowerCase(), { entry });
+    byName.set(entry.name, entry);
+    byRelative.set(entry.relativeDir, entry);
+    for (const key of [entry.name.toLowerCase(), entry.relativeDir.toLowerCase()]) {
+      const matches = folded.get(key) || new Set();
+      matches.add(entry);
+      folded.set(key, matches);
+    }
   });
 
   const selected = [];
   const seen = new Set();
   const invalid = [];
+  const ambiguous = [];
 
   for (const token of tokens) {
     const normalized = token.toLowerCase();
@@ -87,18 +94,24 @@ export function resolveInputContextSelection(rawSelection, availableDirs) {
       continue;
     }
 
-    const nameMatch = byName.get(normalized) || byRelative.get(normalized);
-    if (!nameMatch) {
+    const exact = byName.get(token) || byRelative.get(token);
+    const candidates = folded.get(normalized);
+    if (!exact && candidates?.size > 1) {
+      ambiguous.push(token);
+      continue;
+    }
+    const match = exact || candidates?.values().next().value;
+    if (!match) {
       invalid.push(token);
       continue;
     }
-    if (!seen.has(nameMatch.entry.relativeDir)) {
-      seen.add(nameMatch.entry.relativeDir);
-      selected.push(nameMatch.entry.relativeDir);
+    if (!seen.has(match.relativeDir)) {
+      seen.add(match.relativeDir);
+      selected.push(match.relativeDir);
     }
   }
 
-  return { selectedDirs: selected, invalidTokens: invalid };
+  return { selectedDirs: selected, invalidTokens: invalid, ambiguousTokens: ambiguous };
 }
 
 export function mergeSuspectedDirsWithInputContexts(baseSuspectedDirs, inputContextSelection, projectDir = process.cwd()) {
@@ -114,13 +127,14 @@ export function mergeSuspectedDirsWithInputContexts(baseSuspectedDirs, inputCont
       inventoryError: inventory.inventoryError,
     };
   }
-  const { selectedDirs, invalidTokens } = resolveInputContextSelection(inputContextSelection, available);
+  const { selectedDirs, invalidTokens, ambiguousTokens } = resolveInputContextSelection(inputContextSelection, available);
   const mergedSet = new Set(base.map((item) => item.trim()).filter(Boolean));
   for (const dir of selectedDirs) mergedSet.add(dir);
   return {
     merged: [...mergedSet],
     selected: selectedDirs,
     invalidTokens,
+    ambiguousTokens,
     available,
     inventoryError: inventory.inventoryError,
   };
@@ -136,6 +150,12 @@ export function assertInputContextSelection(mergeResult, rawSelection) {
     throw err;
   }
   const invalid = Array.isArray(mergeResult?.invalidTokens) ? mergeResult.invalidTokens : [];
+  const ambiguous = Array.isArray(mergeResult?.ambiguousTokens) ? mergeResult.ambiguousTokens : [];
+  if (ambiguous.length > 0) {
+    const err = new Error(`Ambiguous input context selection(s): ${ambiguous.join(", ")}. Use the exact name, relative path, or inventory number.`);
+    err.code = "INVALID_INPUT_CONTEXT_SELECTION";
+    throw err;
+  }
   if (invalid.length === 0) return;
   const available = (mergeResult.available || []).map((entry) => entry.name);
   const suffix = available.length > 0 ? ` Available contexts: ${available.join(", ")}.` : " No input contexts are available.";

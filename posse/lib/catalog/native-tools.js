@@ -1,3 +1,4 @@
+import { projectRuntimeHandoffMetadata } from "./handoff-schema.js";
 import { RESEARCH_AGENT_TYPES, RESEARCH_CHILD_REQUEST_MODEL_TIERS } from "./planner-dispatch.js";
 // Native deterministic-MCP tool schema definitions (pure data).
 //
@@ -21,7 +22,6 @@ import {
   DOWNLOAD_FILE_LIMITS,
   DOWNLOAD_FILE_MEDIA_TYPES,
   WEB_RESEARCH_LIMITS,
-  WEB_RESEARCH_PROTOCOL,
 } from "./web-research.js";
 
 // Compatibility facade. Existing consumers retain this path while catalog
@@ -623,7 +623,7 @@ export const TOOL_AGENT_HANDOFF = {
   name: "agent_handoff",
   description:
     "Finish the current agent turn with a terminal handoff. Dev/fix and artificer use the compact completion form; call agent_handoff() for normal COMPLETE. " +
-    `Other roles submit ${AGENT_HANDOFF_PROTOCOL} with evidence selectors. Posse ends provider generation after acknowledging the receipt.`,
+    "Other roles submit the report fields in the issued schema with evidence selectors. The receipt ends generation.",
   parameters: {
     oneOf: [
       TERMINAL_COMPLETION_PARAMETERS,
@@ -1657,30 +1657,37 @@ export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
   maxHandoffs: 1,
 });
 
-export const TOOL_AGENT_HANDOFF_RESEARCH_CHILD = semanticRoleTool({
-  description: "Return one compact, evidence-backed investigation report to your parent. Every claim must cite a visible selector from your own reads. The receipt ends provider generation.",
-  profile: "research_investigation.v1",
-  outcomes: ["complete", "partial", "failed"],
-  handoff: exactHandoff(exactTarget("parent", "$parent"), exactReport({}, ["summary"], {
-    summaryMaxLength: 2000,
-    claims: {
-      type: "array",
-      maxItems: 12,
-      description: "Use named claim objects, not researcher.report.v1 claim tuples. A non-failed report needs at least one evidence-backed claim.",
-      items: {
-        type: "object",
-        properties: {
-          claim: { type: "string", minLength: 1, maxLength: 1000 },
-          evidence: { type: "array", minItems: 1, maxItems: 8, items: COMPACT_HANDOFF_SELECTOR },
-          summary: { type: "string", maxLength: 300 },
+export const TOOL_AGENT_HANDOFF_RESEARCH_CHILD = {
+  type: "function",
+  name: "agent_handoff",
+  description: "Return your investigation outcome and report to the planner. Every claim must cite visible evidence from your own reads. The receipt ends generation.",
+  parameters: {
+    type: "object",
+    properties: {
+      outcome: { type: "string", enum: ["complete", "partial", "failed"] },
+      report: exactReport({}, ["summary"], {
+        summaryMaxLength: 2000,
+        claims: {
+          type: "array",
+          maxItems: 12,
+          description: "A non-failed report needs at least one evidence-backed claim.",
+          items: {
+            type: "object",
+            properties: {
+              claim: { type: "string", minLength: 1, maxLength: 1000 },
+              evidence: { type: "array", minItems: 1, maxItems: 8, items: COMPACT_HANDOFF_SELECTOR },
+              summary: { type: "string", maxLength: 300 },
+            },
+            required: ["claim", "evidence"],
+            additionalProperties: false,
+          },
         },
-        required: ["claim", "evidence"],
-        additionalProperties: false,
-      },
+      }),
     },
-  })),
-  maxHandoffs: 1,
-});
+    required: ["outcome", "report"],
+    additionalProperties: false,
+  },
+};
 
 // Backward-compatible internal export. New role projection code must select
 // the exact researcher/planner/citation schemas above instead of this alias.
@@ -1742,7 +1749,7 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR_V3 = {
   },
 };
 
-export function getAgentHandoffToolSchemaForRole(role, {
+function selectAgentHandoffToolSchemaForRole(role, {
   compactCompletion = false,
   compactV3 = false,
   compactV4 = false,
@@ -1797,6 +1804,10 @@ export function getAgentHandoffToolSchemaForRole(role, {
   }
   if (normalizedRole === "subagent") return TOOL_AGENT_HANDOFF_CITATION;
   return TOOL_AGENT_HANDOFF;
+}
+
+export function getAgentHandoffToolSchemaForRole(role, options = {}) {
+  return projectRuntimeHandoffMetadata(selectAgentHandoffToolSchemaForRole(role, options), role);
 }
 
 // Provider-facing schemas intentionally differ from the permissive migration
@@ -2028,7 +2039,6 @@ export const TOOL_WEB_RESEARCH_HANDOFF = {
   parameters: {
     type: "object",
     properties: {
-      protocol: { type: "string", enum: [WEB_RESEARCH_PROTOCOL] },
       summary: {
         type: "string",
         minLength: 1,
@@ -2078,7 +2088,7 @@ export const TOOL_WEB_RESEARCH_HANDOFF = {
         },
       },
     },
-    required: ["protocol", "summary", "findings"],
+    required: ["summary", "findings"],
     additionalProperties: false,
   },
 };
