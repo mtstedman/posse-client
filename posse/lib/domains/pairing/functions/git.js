@@ -7,11 +7,20 @@ import { gitPushWithGitHubCliFallback } from "../../git/functions/git-push-auth.
 import { EMPTY_JOIN_FOLDER_ENTRIES } from "./join-folder.js";
 
 const NETWORK_SCHEMES = new Set(["https:", "http:", "ssh:", "git:"]);
-const NONINTERACTIVE_GIT_ENV = Object.freeze({
-  ...process.env,
-  GIT_TERMINAL_PROMPT: "0",
-  GCM_INTERACTIVE: "Never",
-});
+// Build the git environment without GIT_SSH_COMMAND: an inherited value
+// outranks the per-session core.sshCommand git config, so leaving it in place
+// would replace the session deploy key and fail every session remote probe
+// with "Repository not found". This env is frozen at import, so it drops the
+// variable explicitly rather than relying on the process-wide strip.
+export function noninteractiveGitEnv() {
+  const { GIT_SSH_COMMAND: _droppedSessionSshOverride, ...inherited } = process.env;
+  return {
+    ...inherited,
+    GIT_TERMINAL_PROMPT: "0",
+    GCM_INTERACTIVE: "Never",
+  };
+}
+const NONINTERACTIVE_GIT_ENV = Object.freeze(noninteractiveGitEnv());
 
 function git(args, projectDir, options = {}) {
   return adminGitExec(args, projectDir, {

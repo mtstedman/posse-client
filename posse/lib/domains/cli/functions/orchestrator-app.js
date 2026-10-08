@@ -2847,6 +2847,17 @@ export async function main() {
       pairSubcommand = arg.toLowerCase();
       break;
     }
+    // A GIT_SSH_COMMAND inherited from the launching environment outranks the
+    // per-session core.sshCommand in git's own precedence, so it silently
+    // replaces the session's deploy key and every session git operation (the
+    // branch probe, shared-trunk sync, and publish) fails "Repository not
+    // found". Posse drives session SSH through core.sshCommand alone, so an
+    // inherited GIT_SSH_COMMAND is never wanted; drop it for the whole session
+    // process before any git runs. A session clone that needs a custom SSH
+    // program still gets it through the repository's core.sshCommand.
+    if (process.env.GIT_SSH_COMMAND != null) {
+      delete process.env.GIT_SSH_COMMAND;
+    }
   }
   const commandPolicy = ["pair", "session"].includes(command)
       && ["leave", "close", "status", "admit", "members", "pending", "kick", "invite", "scope", "policy", "hold", "resume", "auto"].includes(pairSubcommand)
