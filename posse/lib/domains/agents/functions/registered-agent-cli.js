@@ -5,11 +5,11 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { AGENT_TURN_PROTOCOL } from "../../../catalog/agent.js";
-import { REGISTERED_AGENT_PROTOCOL } from "../../../catalog/registered-agent.js";
+import { AGENT_PROGRESS_PROTOCOL, REGISTERED_AGENT_CAPABILITIES, REGISTERED_AGENT_PROTOCOL } from "../../../catalog/registered-agent.js";
 import { registeredAgentSocketPath, registeredAgentGatewaySocketPath } from "../../automation/functions/paths.js";
 
 const MAX_BYTES = 1024 * 1024;
-const USAGE = "Usage: posse-agent chat <agent> [--client ID] [--session ID] --idempotency-key KEY --request-json --json | posse-agent run <agent> [--client ID] --idempotency-key KEY --request-json --json | posse-agent probe <agent> --json | posse-agent health --json | posse-agent version --json";
+const USAGE = "Usage: posse-agent chat <agent> [--client ID] [--session ID] --idempotency-key KEY --request-json --json [--progress] | posse-agent run <agent> [--client ID] --idempotency-key KEY --request-json --json [--progress] | posse-agent probe <agent> --json | posse-agent health --json | posse-agent version --json";
 
 function fault(code, message) { return Object.assign(new Error(message), { code }); }
 
@@ -32,12 +32,12 @@ function parse(argv) {
   const flags = {};
   for (let i = 0; i < rest.length; i++) {
     const flag = rest[i];
-    if (["--json", "--request-json"].includes(flag)) { if (flags[flag]) throw new Error(USAGE); flags[flag] = true; continue; }
+    if (["--json", "--request-json", "--progress"].includes(flag)) { if (flags[flag]) throw new Error(USAGE); flags[flag] = true; continue; }
     if (!["--session", "--idempotency-key", "--client"].includes(flag) || flags[flag] || !rest[i + 1]) throw new Error(USAGE);
     flags[flag] = rest[++i];
   }
   if (!flags["--json"] || !flags["--request-json"] || !flags["--idempotency-key"] || operation === "run" && flags["--session"]) throw new Error(USAGE);
-  return { operation, agent, session: flags["--session"], idempotencyKey: flags["--idempotency-key"], clientID: flags["--client"] };
+  return { operation, agent, session: flags["--session"], idempotencyKey: flags["--idempotency-key"], clientID: flags["--client"], progress: flags["--progress"] === true };
 }
 
 async function readStdin(input) {
@@ -88,7 +88,7 @@ function endpoint(local = false) {
   return socketPath;
 }
 
-function requestFrame(socketPath, payload, timeoutMs = 15 * 60 * 1000) {
+function requestFrame(socketPath, payload, timeoutMs = 15 * 60 * 1000, onProgress = null) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let buffer = Buffer.alloc(0), done = false;
@@ -97,14 +97,22 @@ function requestFrame(socketPath, payload, timeoutMs = 15 * 60 * 1000) {
     socket.once("connect", () => socket.write(JSON.stringify(payload) + "\n"));
     socket.on("data", chunk => {
       buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length > MAX_BYTES + 1024) return finish(new Error("Registered owner response is too large"));
-      const newline = buffer.indexOf(10);
-      if (newline < 0) return;
-      try {
-        const response = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
-        if (!response.ok) return finish(Object.assign(new Error(response.error || "Registered request failed"), { code: response.code }));
-        finish(null, response.result);
-      } catch (error) { finish(error); }
+      let newline;
+      while (!done && (newline = buffer.indexOf(10)) >= 0) {
+        const line = buffer.subarray(0, newline);
+        buffer = buffer.subarray(newline + 1);
+        try {
+          const response = JSON.parse(line.toString("utf8"));
+          // Progress lines precede the final frame only when the request asked for them.
+          if (onProgress && response && typeof response === "object" && Object.hasOwn(response, "progress") && !Object.hasOwn(response, "ok")) {
+            onProgress(response.progress);
+            continue;
+          }
+          if (!response.ok) return finish(Object.assign(new Error(response.error || "Registered request failed"), { code: response.code }));
+          return finish(null, response.result);
+        } catch (error) { return finish(error); }
+      }
+      if (buffer.length > MAX_BYTES + 1024) finish(new Error("Registered owner response is too large"));
     });
     socket.once("error", finish);
     socket.once("end", () => finish(new Error("Registered owner closed without a response")));
@@ -116,7 +124,7 @@ export async function runRegisteredAgentCli(argv = process.argv.slice(2), io = {
   let parsed;
   try { parsed = parse(argv); }
   catch (error) { stdout.write(JSON.stringify(fail("invalid_request", error.message)) + "\n"); return 64; }
-  if (parsed.operation === "version") { stdout.write(JSON.stringify({ protocol: REGISTERED_AGENT_PROTOCOL }) + "\n"); return 0; }
+  if (parsed.operation === "version") { stdout.write(JSON.stringify({ protocol: REGISTERED_AGENT_PROTOCOL, capabilities: REGISTERED_AGENT_CAPABILITIES }) + "\n"); return 0; }
   try {
     const explicit = Boolean(process.env.POSSE_AGENT_REGISTRATION_FILE || process.env.POSSE_AGENT_CREDENTIAL_FILE);
     const local = !explicit || process.env.POSSE_AGENT_USE_GATEWAY === "1";
@@ -131,8 +139,10 @@ export async function runRegisteredAgentCli(argv = process.argv.slice(2), io = {
     const request = { protocol: REGISTERED_AGENT_PROTOCOL,
       ...(clientID ? { client_id: clientID } : {}), ...(credential ? { credential: credential.credential } : {}),
       request_id: crypto.randomUUID(), operation: parsed.operation, agent: parsed.agent, idempotency_key: parsed.idempotencyKey,
-      ...(parsed.session ? { session: parsed.session } : {}), request: content };
-    const result = await requestFrame(socketPath, request);
+      ...(parsed.session ? { session: parsed.session } : {}), ...(parsed.progress ? { progress: true } : {}), request: content };
+    // stdout stays one envelope; progress goes to stderr as one JSON object per line.
+    const result = await requestFrame(socketPath, request, undefined, parsed.progress
+      ? event => stderr.write(JSON.stringify({ protocol: AGENT_PROGRESS_PROTOCOL, ...event }) + "\n") : null);
     stdout.write(JSON.stringify(result) + "\n");
     return result.status === "done" ? 0 : result.status === "needs_confirmation" ? 2 : 1;
   } catch (error) {

@@ -156,7 +156,8 @@ async function runChat({ runtime, name, session, provider, stdin, stdout, stderr
     while (true) {
       const message = (await terminal.question("> ")).trim();
       if (!message || message === "/exit") break;
-      let envelope = await runtime.run({ agent: name, message, session: activeSession, provider, cwd });
+      let envelope = await runtime.run({ agent: name, message, session: activeSession, provider, cwd,
+        onProgress: event => { const line = progressLine(event); if (line) stderr.write(line); } });
       activeSession = envelope.conversation_id || activeSession;
       while (envelope.status === "needs_confirmation") {
         const pending = envelope.pending[0];
@@ -169,6 +170,15 @@ async function runChat({ runtime, name, session, provider, stdin, stdout, stderr
     }
   } finally { terminal.close(); }
   return 0;
+}
+
+// Live activity for interactive chats; replies stay on stdout.
+export function progressLine(event) {
+  if (event?.type === "turn.started") return event.turn > 1 ? "  · reviewing results…\n" : "  · thinking…\n";
+  if (event?.type === "turn.retry") return "  ↻ response ran long; retrying with more room\n";
+  if (event?.type === "tool.started") return `  → ${event.tool}\n`;
+  if (event?.type === "tool.finished") return `  ${event.status === "ok" ? "✓" : "✗"} ${event.tool} ${((Number(event.duration_ms) || 0) / 1000).toFixed(1)}s${event.error_code ? ` (${event.error_code})` : ""}\n`;
+  return "";
 }
 
 function printEnvelope(envelope, json, print, stderr) {

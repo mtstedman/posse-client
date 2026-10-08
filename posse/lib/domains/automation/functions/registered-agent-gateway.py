@@ -3,6 +3,7 @@
 
 One client frame is forwarded over the owner's private socket. The HMAC binds
 the kernel identity and the exact frame; applications never reach that socket.
+Progress lines the owner writes before its final frame are relayed unchanged.
 """
 
 import base64
@@ -40,7 +41,39 @@ def read_frame(conn, limit=MAX_FRAME):
     raise ValueError("oversized frame")
 
 
+class LineReader:
+    """Reads newline-delimited frames from one socket, keeping bytes between frames."""
+
+    def __init__(self, conn, limit):
+        self.conn, self.limit, self.data = conn, limit, bytearray()
+
+    def next(self):
+        while True:
+            end = self.data.find(b"\n")
+            if end >= 0:
+                if end > self.limit:
+                    raise ValueError("oversized frame")
+                line = bytes(self.data[:end])
+                del self.data[:end + 1]
+                return line
+            if len(self.data) > self.limit:
+                raise ValueError("oversized frame")
+            chunk = self.conn.recv(65536)
+            if not chunk:
+                raise ValueError("closed frame")
+            self.data.extend(chunk)
+
+
+def is_progress(line):
+    try:
+        value = json.loads(line)
+    except (ValueError, UnicodeError):
+        return False
+    return isinstance(value, dict) and "progress" in value and "ok" not in value
+
+
 def handle(conn, key):
+    relaying = False
     try:
         conn.settimeout(5)
         pid, uid, gid = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
@@ -62,11 +95,21 @@ def handle(conn, key):
             backend.settimeout(900)
             backend.connect(BACKEND)
             backend.sendall(json.dumps(envelope, separators=(",", ":")).encode() + b"\n")
-            response = read_frame(backend, MAX_FRAME + 1024)
-        conn.sendall(response + b"\n")
+            reader = LineReader(backend, MAX_FRAME + 1024)
+            while True:
+                response = reader.next()
+                progress = request.get("progress") is True and is_progress(response)
+                conn.sendall(response + b"\n")
+                if not progress:
+                    break
+                if not relaying:
+                    relaying = True
+                    conn.settimeout(30)
     except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
         try:
-            conn.sendall(b'{"ok":false,"code":"unauthorized","error":"Registered gateway rejected request"}\n')
+            # Once progress has been relayed the request was accepted; report the lost owner, not a rejection.
+            conn.sendall(b'{"ok":false,"code":"owner_unavailable","error":"Registered owner closed without a response"}\n'
+                         if relaying else b'{"ok":false,"code":"unauthorized","error":"Registered gateway rejected request"}\n')
         except OSError:
             pass
     finally:

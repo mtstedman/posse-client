@@ -113,9 +113,15 @@ export class AutomationOwner {
       if (newline < 0) return;
       framed = true;
       socket.setTimeout(0);
+      // Registered callers that ask for progress get bounded progress lines before the final frame.
+      const progress = event => {
+        if (done || socket.destroyed) return;
+        const line = JSON.stringify({ progress: event }) + "\n";
+        if (Buffer.byteLength(line) <= AUTOMATION_MAX_RESPONSE_BYTES) socket.write(line);
+      };
       try {
         const request = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
-        Promise.resolve(gateway ? this.dispatchGateway(request) : registered ? this.dispatchRegistered(request) : this.dispatch(request)).then(result => {
+        Promise.resolve(gateway ? this.dispatchGateway(request, progress) : registered ? this.dispatchRegistered(request, progress) : this.dispatch(request)).then(result => {
           const response = JSON.stringify({ ok: true, result }) + "\n";
           demand(Buffer.byteLength(response) <= AUTOMATION_MAX_RESPONSE_BYTES,
             "Automation result exceeds the response limit; narrow the tool output or inspect the run locally", "response_too_large");
@@ -132,18 +138,18 @@ export class AutomationOwner {
     demand(request.kind === "operator" && timingSafeEqual(request.token, this.operatorToken), "Operator authentication failed", "unauthorized");
     return this.dispatchOperator(request.operation, request.args || {});
   }
-  dispatchRegistered(request) {
+  dispatchRegistered(request, onProgress = null) {
     demand(request && typeof request === "object" && !Array.isArray(request), "Invalid registered request", "invalid_request");
     if (request.kind === "health" && Object.keys(request).length === 1) return { protocol: "posse.registered_agent_request.v1", ready: !this.service.stopping && this.service.ownsLease() };
-    return this.registered.execute(request);
+    return this.registered.execute(request, null, { onProgress });
   }
-  dispatchGateway(envelope) {
+  dispatchGateway(envelope, onProgress = null) {
     demand(this.gatewayKey, "Gateway is unavailable", "unauthorized");
     const { request, identity } = verifyGatewayFrame(envelope, this.gatewayKey, this.gatewayNonces);
     if (request.kind === "health" && Object.keys(request).length === 1) return this.dispatchRegistered(request);
     if (request.kind === "probe" && typeof request.agent === "string" && Object.keys(request).length === 2)
       return this.exposures.probe(request.agent, identity);
-    return this.registered.execute(request, { identity, transport: "local_gateway" });
+    return this.registered.execute(request, { identity, transport: "local_gateway" }, { onProgress });
   }
   health() { return { ...this.service.health(), build: this.build, launch: this.launch }; }
   dispatchAgent(request) {

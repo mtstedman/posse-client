@@ -10,8 +10,12 @@ import { compileAgentPolicy } from "../functions/remote-policy.js";
 import { resolveAgentWorkingDirectory } from "../functions/scope.js";
 import { parseAgentToolTurn } from "../functions/tool-turn.js";
 
-const TOOL_TURN_MAX_OUTPUT_TOKENS = 1536;
+export const TOOL_TURN_MAX_OUTPUT_TOKENS = 4096;
+// A response that overruns its cap is repaired once with this much room before the turn fails.
+export const OUTPUT_LIMIT_REPAIR_MAX_OUTPUT_TOKENS = 16384;
+const OUTPUT_LIMIT_CODES = new Set(["output_limit", "OUTPUT_TOKEN_LIMIT"]);
 const TOOL_BATCH_MAX_CALLS = 8;
+const PROGRESS_ARGUMENT_BYTES = 4 * 1024;
 
 function digest(value) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 function toolIdempotencyKey(sessionID, turnID, tool, input) {
@@ -102,6 +106,19 @@ function toolResultSummary(output) {
     return { result: JSON.parse(serialized), result_truncated: false };
   } catch { return { result: null, result_truncated: true }; }
 }
+function progressEmitter(onProgress) {
+  if (typeof onProgress !== "function") return null;
+  let seq = 0;
+  return event => {
+    try { onProgress({ seq: ++seq, at: new Date().toISOString(), ...event }); } catch { /* progress is advisory */ }
+  };
+}
+function progressArguments(args) {
+  try {
+    const serialized = JSON.stringify(args ?? {});
+    return Buffer.byteLength(serialized) <= PROGRESS_ARGUMENT_BYTES ? { arguments: JSON.parse(serialized) } : { arguments_truncated: true };
+  } catch { return { arguments_truncated: true }; }
+}
 
 export class AgentRuntime {
   constructor({ definitions = null, client = null, compilePolicy = compileAgentPolicy, callProvider = callAgentProvider, now = () => Date.now(), ensureOwner = ensureAutomationOwner } = {}) {
@@ -115,7 +132,7 @@ export class AgentRuntime {
     return this.client;
   }
 
-  async run({ agent, message, bootstrapMessage = "", preRunContext = [], session = "", provider = "", idempotencyKey = "", cwd = process.cwd(), client: suppliedClient = null, execution = null, includeToolSummary = false }) {
+  async run({ agent, message, bootstrapMessage = "", preRunContext = [], session = "", provider = "", idempotencyKey = "", cwd = process.cwd(), client: suppliedClient = null, execution = null, includeToolSummary = false, onProgress = null }) {
     let client = null, started = null, turnUsage = usageTotals(), turnToolCalls = [], turnToolSummary = includeToolSummary ? [] : null;
     const fallback = { id: session, agent: String(agent || ""), agent_digest: "" };
     try {
@@ -164,7 +181,7 @@ export class AgentRuntime {
         systemPrompt: systemPrompt(compiled.systemPrompt, definition, started.capabilities, resolvedContext,
           { nativeTools: started.capabilities.length > 0 && agentProviderUsesNativeTools(route.provider), skillInstructions: started.skill_instructions || [] }), route, cwd,
         usage: turnUsage, toolCalls: turnToolCalls, toolSummary: turnToolSummary, startedAt: this.now(), prompt: effectiveMessage,
-        execution,
+        execution, progress: progressEmitter(onProgress),
       });
     } catch (error) {
       if (client && started) {
@@ -222,62 +239,31 @@ export class AgentRuntime {
         else parentSignal.addEventListener("abort", abortFromParent, { once: true });
       }
       const timer = setTimeout(() => controller.abort(), Math.max(0, deadline - this.now()));
+      state.progress?.({ type: "turn.started", turn: state.usage.turns + 1 });
       let generated;
       try {
         const providerCall = this.callProvider(state.route.provider, renderConversation(state.messages), {
           modelName: state.route.modelName, systemPrompt: state.systemPrompt, promptCache: true, cwd: state.cwd,
           signal: controller.signal, tools: state.tools, allowToolBatching: canBatchToolCalls(state.tools, state.definition),
-          maxOutputTokens: state.tools?.length ? TOOL_TURN_MAX_OUTPUT_TOKENS : undefined,
+          maxOutputTokens: state.maxOutputTokens || (state.tools?.length ? TOOL_TURN_MAX_OUTPUT_TOKENS : undefined),
         });
         generated = await abortable(providerCall, controller.signal);
+      } catch (error) {
+        if (!OUTPUT_LIMIT_CODES.has(error?.code) || state.maxOutputTokens) throw error;
+        // The provider already billed the truncated response; count it, then
+        // repeat the same turn once with room for long tool arguments.
+        state.execution?.check();
+        this.recordProviderUsage(state, error.stats);
+        state.maxOutputTokens = OUTPUT_LIMIT_REPAIR_MAX_OUTPUT_TOKENS;
+        state.progress?.({ type: "turn.retry", turn: state.usage.turns + 1, reason: "output_limit", max_output_tokens: state.maxOutputTokens });
+        continue;
       } finally {
         clearTimeout(timer);
         parentSignal?.removeEventListener("abort", abortFromParent);
       }
       state.execution?.check();
       if (this.now() >= deadline) throw Object.assign(new Error("Agent turn exceeded its wall-time limit"), { code: "agent_budget_exceeded" });
-      state.usage.turns += 1;
-      const billed = estimateBillableTokens({
-        provider: state.route.provider,
-        modelName: generated?.stats?.modelName || state.route.modelName,
-        modelTier: "standard",
-        inputTokens: generated?.stats?.inputTokens,
-        outputTokens: generated?.stats?.outputTokens,
-        cachedInputTokens: generated?.stats?.cachedInputTokens,
-        cacheCreationInputTokens: generated?.stats?.cacheCreationInputTokens,
-        longContextInputTokens: generated?.stats?.longContextInputTokens,
-      });
-      state.usage.input_tokens += billed.uncachedInputTokens + billed.cachedInputTokens + billed.cacheCreationInputTokens;
-      state.usage.output_tokens += billed.outputTokens;
-      state.usage.cache_read_tokens += billed.cachedInputTokens;
-      state.usage.cache_write_tokens += billed.cacheCreationInputTokens;
-      state.usage.uncached_input_tokens += billed.uncachedInputTokens;
-      if (billed.source === "none") {
-        state.usage.billable_input_tokens = null;
-        state.usage.billable_output_tokens = null;
-        state.usage.billable_tokens = null;
-      } else if (state.usage.billable_tokens !== null) {
-        state.usage.billable_input_tokens += billed.billableInputTokens;
-        state.usage.billable_output_tokens += billed.billableOutputTokens;
-        state.usage.billable_tokens += billed.billableTokens;
-      }
-      const priced = estimateCallCost({
-        provider: state.route.provider,
-        modelName: generated?.stats?.modelName || state.route.modelName,
-        modelTier: "standard",
-        inputTokens: generated?.stats?.inputTokens,
-        outputTokens: generated?.stats?.outputTokens,
-        cachedInputTokens: generated?.stats?.cachedInputTokens,
-        cacheCreationInputTokens: generated?.stats?.cacheCreationInputTokens,
-        knownCostUsd: generated?.stats?.costUsd,
-        longContextInputTokens: generated?.stats?.longContextInputTokens,
-      });
-      if (state.execution && !Number.isFinite(generated?.stats?.costUsd)
-        && (!Number.isFinite(generated?.stats?.inputTokens) || !Number.isFinite(generated?.stats?.outputTokens)
-          || priced.source === "none"))
-        throw Object.assign(new Error("Provider usage needs reconciliation"), { code: "usage_unknown" });
-      state.usage.cost_usd += Number(priced.costUsd) || 0;
-      if (state.usage.cost_usd > state.definition.limits.spend_usd) throw Object.assign(new Error("Agent turn exceeded its spend limit"), { code: "agent_budget_exceeded" });
+      this.recordProviderUsage(state, generated?.stats);
       const content = String(generated?.output || "").trim();
       const nativeCalls = generated?.toolCalls || (generated?.toolCall ? [generated.toolCall] : null);
       const { calls, malformed } = nativeCalls
@@ -330,17 +316,22 @@ export class AgentRuntime {
           const paused = await state.client.request("agent.turn.pause", { session_id: state.session.id, token: state.token, proposal });
           return this.envelope(paused.session, state.turnID, "needs_confirmation", "", state.toolCalls, [paused.pending], state.usage, null, state.toolSummary);
         }
+        const progressCall = { turn: state.usage.turns, call: state.usage.calls, tool: call.name, effect: tool.effect };
+        // Arguments ride along only for callers that opted into tool summaries.
+        state.progress?.({ type: "tool.started", ...progressCall, ...(state.toolSummary ? progressArguments(call.arguments) : {}) });
         try {
           const result = await state.client.request("agent.turn.invoke", { session_id: state.session.id, token: state.token, tool: call.name, input: call.arguments });
           const status = tool.kind === "script" && result.output?.ok === false ? "failed" : "ok";
           state.toolCalls.push({ tool: call.name, status, duration_ms: result.duration_ms, effect: tool.effect });
           state.toolSummary?.push({ tool: call.name, status, duration_ms: result.duration_ms, effect: tool.effect,
             ...toolResultSummary(result.output) });
+          state.progress?.({ type: "tool.finished", ...progressCall, status, duration_ms: Number(result.duration_ms) || 0 });
           results.push(formatLocalToolResult(call.name, result.output));
         } catch (toolError) {
           state.toolCalls.push({ tool: call.name, status: "failed", duration_ms: 0, effect: tool.effect, error: toolError.code || "tool_error" });
           state.toolSummary?.push({ tool: call.name, status: "failed", duration_ms: 0, effect: tool.effect,
             error_code: toolError.code || "tool_error", result: null, result_truncated: false });
+          state.progress?.({ type: "tool.finished", ...progressCall, status: "failed", duration_ms: 0, error_code: toolError.code || "tool_error" });
           results.push(formatLocalToolResult(call.name, `Error: ${toolError.message || toolError}`));
         }
       }
@@ -348,6 +339,51 @@ export class AgentRuntime {
       state.messages.push({ role: "user", content: results.map((result, index) => calls.length === 1 ? result : `Result ${index + 1}/${results.length}: ${result}`).join("\n\n") });
     }
     throw Object.assign(new Error("Agent turn exceeded its provider-turn limit"), { code: "agent_budget_exceeded" });
+  }
+
+  recordProviderUsage(state, stats = {}) {
+    state.usage.turns += 1;
+    const billed = estimateBillableTokens({
+      provider: state.route.provider,
+      modelName: stats?.modelName || state.route.modelName,
+      modelTier: "standard",
+      inputTokens: stats?.inputTokens,
+      outputTokens: stats?.outputTokens,
+      cachedInputTokens: stats?.cachedInputTokens,
+      cacheCreationInputTokens: stats?.cacheCreationInputTokens,
+      longContextInputTokens: stats?.longContextInputTokens,
+    });
+    state.usage.input_tokens += billed.uncachedInputTokens + billed.cachedInputTokens + billed.cacheCreationInputTokens;
+    state.usage.output_tokens += billed.outputTokens;
+    state.usage.cache_read_tokens += billed.cachedInputTokens;
+    state.usage.cache_write_tokens += billed.cacheCreationInputTokens;
+    state.usage.uncached_input_tokens += billed.uncachedInputTokens;
+    if (billed.source === "none") {
+      state.usage.billable_input_tokens = null;
+      state.usage.billable_output_tokens = null;
+      state.usage.billable_tokens = null;
+    } else if (state.usage.billable_tokens !== null) {
+      state.usage.billable_input_tokens += billed.billableInputTokens;
+      state.usage.billable_output_tokens += billed.billableOutputTokens;
+      state.usage.billable_tokens += billed.billableTokens;
+    }
+    const priced = estimateCallCost({
+      provider: state.route.provider,
+      modelName: stats?.modelName || state.route.modelName,
+      modelTier: "standard",
+      inputTokens: stats?.inputTokens,
+      outputTokens: stats?.outputTokens,
+      cachedInputTokens: stats?.cachedInputTokens,
+      cacheCreationInputTokens: stats?.cacheCreationInputTokens,
+      knownCostUsd: stats?.costUsd,
+      longContextInputTokens: stats?.longContextInputTokens,
+    });
+    if (state.execution && !Number.isFinite(stats?.costUsd)
+      && (!Number.isFinite(stats?.inputTokens) || !Number.isFinite(stats?.outputTokens)
+        || priced.source === "none"))
+      throw Object.assign(new Error("Provider usage needs reconciliation"), { code: "usage_unknown" });
+    state.usage.cost_usd += Number(priced.costUsd) || 0;
+    if (state.usage.cost_usd > state.definition.limits.spend_usd) throw Object.assign(new Error("Agent turn exceeded its spend limit"), { code: "agent_budget_exceeded" });
   }
 
   envelope(session, turnID, status, reply, toolCalls, pending, usage, error, toolSummary = null) {

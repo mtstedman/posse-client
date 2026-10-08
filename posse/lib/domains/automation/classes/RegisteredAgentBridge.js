@@ -7,6 +7,7 @@ import { REGISTERED_AGENT_MAX_CONTEXT_BYTES, REGISTERED_AGENT_MAX_REPLY_BYTES, R
 import { automationDataDir } from "../functions/paths.js";
 import { approveEntry, assertRegisteredCapability } from "../functions/registered-trust.js";
 import { demand, digest, object, schemaCheck } from "../functions/policy.js";
+import { scrubSecretText } from "../../../shared/telemetry/functions/logging/scrub-secret-text.js";
 
 const REGISTRATIONS = "registered_clients";
 const ID = /^[a-z][a-z0-9._-]{0,63}$/;
@@ -31,8 +32,48 @@ function failure(code, message = "Registered agent request failed") {
   return { protocol: AGENT_TURN_PROTOCOL, agent: "", agent_digest: "", conversation_id: "", turn_id: "",
     status: "failed", reply: "", tool_calls: [], pending: [], usage: null, error: { code, message } };
 }
+// Provider failures reach callers as stable public codes with fixed messages;
+// the provider's own message stays in the owner log.
+const PUBLIC_PROVIDER_ERRORS = new Map([
+  ["output_limit", ["agent_output_limit", "Agent response exceeded its output limit"]],
+  ["OUTPUT_TOKEN_LIMIT", ["agent_output_limit", "Agent response exceeded its output limit"]],
+  ["provider_rate_limit", ["provider_rate_limit", "Model provider rate limit reached"]],
+  ["provider_unavailable", ["provider_unavailable", "Model provider is unavailable"]],
+  ["provider_stall", ["provider_unavailable", "Model provider is unavailable"]],
+  ["provider_transport", ["provider_unavailable", "Model provider is unavailable"]],
+  ["provider_model_unavailable", ["provider_unavailable", "Model provider is unavailable"]],
+  ["provider_dispatch_unavailable", ["provider_unavailable", "Model provider is unavailable"]],
+  ["provider_authentication", ["provider_access_denied", "Model provider rejected the configured account"]],
+  ["provider_authorization", ["provider_access_denied", "Model provider rejected the configured account"]],
+]);
+const PROGRESS_TYPES = new Set(["turn.started", "turn.retry", "tool.started", "tool.finished"]);
+function safeProgress(event) {
+  if (!PROGRESS_TYPES.has(event?.type)) return null;
+  const projected = { seq: Number(event.seq) || 0, at: String(event.at || "").slice(0, 40), type: event.type };
+  for (const key of ["turn", "call", "duration_ms", "max_output_tokens"])
+    if (Number.isFinite(event[key])) projected[key] = event[key];
+  for (const key of ["tool", "effect", "status", "reason", "error_code"])
+    if (typeof event[key] === "string") projected[key] = event[key].slice(0, key === "tool" ? 120 : 64);
+  if (event.arguments && typeof event.arguments === "object" && !Array.isArray(event.arguments)) projected.arguments = event.arguments;
+  if (event.arguments_truncated === true) projected.arguments_truncated = true;
+  return projected;
+}
+// Callers see only public codes, so the owner log keeps the real cause.
+function logFailure(receipt, response, internal) {
+  try {
+    process.stderr.write(`${JSON.stringify({
+      event: "registered_agent.failed", at: new Date().toISOString(), agent: receipt.agent, operation: receipt.operation,
+      request_id: receipt.request_id, receipt: String(receipt.key || "").slice(0, 12), code: response.error?.code || "",
+      internal_code: String(internal?.code || "").slice(0, 64),
+      internal_message: scrubSecretText(String(internal?.message || "")).replace(/\s+/g, " ").slice(0, 500),
+    })}\n`);
+  } catch { /* logging cannot change the receipt */ }
+}
 function safeResult(result, receipt) {
   const allowedErrors = new Set(["agent_session_busy", "agent_request_busy", "idempotency_conflict", "agent_confirmation_required", "agent_budget_exceeded", "forbidden", "grant_changed", "capability_unavailable", "owner_unavailable", "external_outcome_unknown", "usage_unknown"]);
+  const providerError = PUBLIC_PROVIDER_ERRORS.get(result?.error?.code);
+  if (providerError) result = { ...result, error: { code: providerError[0], message: providerError[1] } };
+  for (const [code] of PUBLIC_PROVIDER_ERRORS.values()) allowedErrors.add(code);
   const status = TERMINAL.has(result?.status) ? result.status : "failed";
   const projected = {
     protocol: AGENT_TURN_PROTOCOL, agent: receipt.agent, agent_digest: receipt.agent_digest,
@@ -220,11 +261,12 @@ export class RegisteredAgentBridge {
   }
 
   validateRequest(request, local = false) {
-    object(request, ["protocol", "client_id", "credential", "request_id", "operation", "agent", "session", "idempotency_key", "request"],
+    object(request, ["protocol", "client_id", "credential", "request_id", "operation", "agent", "session", "idempotency_key", "request", "progress"],
       local ? ["protocol", "operation", "agent", "idempotency_key", "request"]
         : ["protocol", "client_id", "credential", "operation", "agent", "idempotency_key", "request"]);
     demand(request.protocol === REGISTERED_AGENT_PROTOCOL && REGISTERED_AGENT_OPERATIONS.includes(request.operation), "Unsupported registered agent protocol", "invalid_request");
     demand(request.request_id === undefined || typeof request.request_id === "string" && request.request_id.length <= 120, "Invalid request ID", "invalid_request");
+    demand(request.progress === undefined || typeof request.progress === "boolean", "Invalid progress selector", "invalid_request");
     demand((local && request.client_id === undefined && request.credential === undefined
       || local && typeof request.client_id === "string" && ID.test(request.client_id)
         && (request.credential === undefined || typeof request.credential === "string")
@@ -257,7 +299,7 @@ export class RegisteredAgentBridge {
     return context;
   }
 
-  async execute(request, transport = null) {
+  async execute(request, transport = null, { onProgress = null } = {}) {
     demand(!this.stopping, "Registered owner is stopping", "owner_unavailable");
     this.owner.service.assertOwner();
     const local = transport?.transport === "local_gateway";
@@ -417,13 +459,17 @@ export class RegisteredAgentBridge {
       result = await this.owner.agentRuntime.run({ agent: request.agent, message: request.request.message,
         bootstrapMessage: request.request.bootstrap_message || "", preRunContext: context, session: receipt.session_id,
         idempotencyKey: request.idempotency_key, client, execution,
-        includeToolSummary: request.request.include_tool_summary === true });
+        includeToolSummary: request.request.include_tool_summary === true,
+        onProgress: request.progress === true && typeof onProgress === "function"
+          ? event => { const projected = safeProgress(event); if (projected) onProgress(projected); } : null });
     } catch (error) {
       result = failure(["forbidden", "idempotency_conflict", "agent_session_busy", "capability_unavailable"].includes(error.code) ? error.code : "agent_error");
+      result.internalError = { code: error?.code || "agent_error", message: error?.message || String(error) };
     } finally { clearTimeout(timeout); }
     const response = executionState.uncertain
       ? safeResult(failure("external_outcome_unknown", "External write outcome needs operator reconciliation"), receipt)
       : safeResult(result, receipt);
+    if (response.status === "failed") logFailure(receipt, response, result?.internalError || result?.error);
     try {
       this.owner.service.assertOwner();
       receipt = this.store.transaction(() => {
