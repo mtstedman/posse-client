@@ -26,6 +26,14 @@ export class SkillRegistry {
     demand(drafts.length, "Skill draft not found", "draft_not_found"); return drafts[0];
   }
   reset(name, binding) { return this.saveDraft(instructionTemplate(name || "new-skill", binding)); }
+  deleteDraft(name, binding) {
+    demand(typeof name === "string" && name, "Draft name is required", "draft_invalid");
+    demand(binding && ["repository", "folder", "global", "run-only"].includes(binding.kind), "Invalid draft binding", "draft_invalid");
+    const key = this.draftKey({ name, binding });
+    const removed = Boolean(this.store.get("drafts", key));
+    this.store.remove("drafts", key);
+    return { ok: true, removed };
+  }
   importPublished(definition, sourceDigest) {
     validateDefinition(definition);
     demand(["published", "deprecated"].includes(definition.state), "Imported skill must have a published lifecycle state");

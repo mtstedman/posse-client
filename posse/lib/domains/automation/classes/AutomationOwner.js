@@ -171,6 +171,7 @@ export class AutomationOwner {
       case "draft.save": return this.registry.saveDraft(args.definition);
       case "draft.load": return this.registry.newest(args.name, args.repo_id || "", args.repo_path || "");
       case "draft.reset": return this.registry.reset(args.name, args.binding);
+      case "draft.delete": return this.registry.deleteDraft(args.name, args.binding);
       case "skill.list": return this.registry.list(args.query || {});
       case "skill.test": return this.registry.test(args.definition);
       case "skill.publish": return this.registry.publish(args.definition, args.actor || "local-operator");
