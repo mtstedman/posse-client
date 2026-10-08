@@ -1151,14 +1151,14 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Find who calls or references a known symbol. Returns incoming relationships grouped by file with symbol handles. Select the needed relationship with mode.
+List the symbols that directly call a known symbol: one level up, grouped by file with each caller's ID and name, without bodies or call-site lines. Use it to find what invokes a function or to trace a call chain up toward its entry points, one level per call; read a listed caller by its returned ID.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `limit` | `integer` | Optional | min 1; max 100 | Maximum returned type/file/symbol entries; default 20. |
-| `mode` | `string` | Optional | default "caller"; values "caller", "reference", "all" | Incoming relationship type; defaults to caller. |
+| `mode` | `string` | Optional | default "caller"; values "caller", "reference", "all" | caller (default) lists direct calls; reference lists non-call references; all lists both. |
 | `offset` | `integer` | Optional | min 0; max 100000 | Entry offset within the current index generation. |
-| `symbolId` | `string` | Required |  | Exact target symbol ID. |
+| `symbolId` | `string` | Required |  | Target symbol whose callers or references to list. |
 
 ### `atlas.symbol.get`
 

@@ -651,12 +651,12 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.callers": {
     type: "function",
     name: "atlas_symbol_callers",
-    description: "Find who calls or references a known symbol. Returns incoming relationships grouped by file with symbol handles. Select the needed relationship with mode.",
+    description: "List the symbols that directly call a known symbol: one level up, grouped by file with each caller's ID and name, without bodies or call-site lines. Use it to find what invokes a function or to trace a call chain up toward its entry points, one level per call; read a listed caller by its returned ID.",
     parameters: {
       type: "object",
       properties: {
-        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Exact target symbol ID." },
-        mode: { type: "string", enum: ["caller", "reference", "all"], description: "Incoming relationship type; defaults to caller." },
+        symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Target symbol whose callers or references to list." },
+        mode: { type: "string", enum: ["caller", "reference", "all"], description: "caller (default) lists direct calls; reference lists non-call references; all lists both." },
         limit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum returned type/file/symbol entries; default 20." },
         offset: { type: "integer", minimum: 0, maximum: 100000, description: "Entry offset within the current index generation." },
         minConfidence: { type: "number", minimum: 0, maximum: 100, description: "Legacy minimum resolved-edge confidence, 0..1 or 0..100.", internalOnly: true },
