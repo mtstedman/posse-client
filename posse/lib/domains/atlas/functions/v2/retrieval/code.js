@@ -1009,7 +1009,13 @@ function nativeIdentifierSelection(requestedIdentifiers, symbols, { preserveWind
 
   for (const requested of stringArray(requestedIdentifiers)) {
     const resolution = sourceFallbacks.get(requested) || resolveRequestedIdentifierSymbols(symbols, requested);
-    const matches = resolution.matches;
+    // A file's module container shares its bare name with the file (`fastify`
+    // in fastify.js, `route` in route.js) and spans every line. Binding it as a
+    // window anchor made native reject the whole-file "declaration" as index
+    // drift and omit the identifier the caller actually wanted (17 of 279
+    // windows in atlas592). Containers are never window anchors; a sole
+    // container match falls back to the ordinary lexical selection.
+    const matches = resolution.matches.filter((symbol) => !isContainerSymbol(symbol));
     if (resolution.ambiguousBearers.length > 0) {
       ambiguities.push({ identifier: requested, bearers: resolution.ambiguousBearers });
       continue;
@@ -1054,6 +1060,12 @@ function nativeIdentifierSelection(requestedIdentifiers, symbols, { preserveWind
     matchedSymbols: uniqueResolutionSymbols(matchedSymbols),
     identifierTargets,
   };
+}
+
+const CONTAINER_SYMBOL_KINDS = new Set(["module", "file", "package"]);
+
+function isContainerSymbol(symbol) {
+  return CONTAINER_SYMBOL_KINDS.has(String(symbol?.kind || "").toLowerCase());
 }
 
 function remapNativeIdentifiers(value, aliases) {

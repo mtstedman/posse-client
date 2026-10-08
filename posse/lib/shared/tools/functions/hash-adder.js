@@ -1322,6 +1322,12 @@ export function compactCodeWindowLensResult(toolName, result, {
           selector_fingerprint: sourceSelectorFingerprint(args),
         };
       }).filter((entry) => entry.payload_start >= 0 && entry.payload_end > entry.payload_start);
+      // Lens tail matches ride along in this continuation; their context
+      // lines are delivered source too, so they register coverage on fetch.
+      const lensTailSourceWindows = lensTail.length > 0
+        ? (structuredSourceMetadata("code.lens", continuationPayload, args)?.source_windows || [])
+        : [];
+      const continuationWindowsWithTail = [...continuationSourceWindows, ...lensTailSourceWindows];
       let surfaced;
       try {
         surfaced = surfaceHashRefForContext(hashContext, {
@@ -1339,12 +1345,12 @@ export function compactCodeWindowLensResult(toolName, result, {
             ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
             tool: continuationTool,
             windows: continuation.length,
-            line_semantics: continuationSourceWindows.length > 0 ? "source" : "materialized",
+            line_semantics: continuationWindowsWithTail.length > 0 ? "source" : "materialized",
             ...(rawContinuation ? { source_payload_encoding: RAW_SOURCE_LINES_ENCODING } : {}),
             ...(data.repo_rel_path ? { path: data.repo_rel_path } : {}),
             ...(data.repositoryIdentity ? { repository_identity: data.repositoryIdentity } : {}),
             ...(data.sourceVersion ? { source_version: data.sourceVersion } : {}),
-            source_windows: continuationSourceWindows,
+            source_windows: continuationWindowsWithTail,
           },
         }, scope);
       } catch (err) {
@@ -1489,6 +1495,10 @@ export function compactCodeWindowLensResult(toolName, result, {
   if (tool === "code.lens" && Array.isArray(data.matches) && data.matches.length > LENS_INLINE_MATCHES) {
     const tail = data.matches.slice(LENS_INLINE_MATCHES);
     const tailPayload = JSON.stringify({ tool: "code.lens", tailMatches: tail });
+    // The tail is exact source context. Record its windows so a later
+    // traverse_ref registers delivered coverage and the model can cite what
+    // it read there.
+    const tailSourceMetadata = structuredSourceMetadata("code.lens", tailPayload, args);
     let surfaced;
     try {
       surfaced = surfaceHashRefForContext(hashContext, {
@@ -1506,6 +1516,7 @@ export function compactCodeWindowLensResult(toolName, result, {
           ...hashRefModelVisibility(hashContext, { visibility: "hidden", issuedAs: "traversal" }),
           tool: "code.lens",
           matches: tail.length,
+          ...(tailSourceMetadata || {}),
         },
       }, scope);
     } catch (err) {
@@ -1963,7 +1974,15 @@ function structuredSourceMetadata(toolName, payload, args = {}) {
 
   if (isLens && envelope && typeof envelope === "object") {
     let cursor = 0;
-    for (const match of Array.isArray(envelope.matches) ? envelope.matches : []) {
+    // A paged lens tail carries the same per-match context as the inline
+    // matches. Without source windows a traverse_ref of that tail delivered
+    // lines the model could read but never cite (atlas592 JS_EXPRESS_3 lost
+    // 14 selectors that way).
+    const lensMatches = [
+      ...(Array.isArray(envelope.matches) ? envelope.matches : []),
+      ...(Array.isArray(envelope.tailMatches) ? envelope.tailMatches : []),
+    ];
+    for (const match of lensMatches) {
       const sourceLine = Number(match?.line);
       const before = Array.isArray(match?.context?.before) ? match.context.before.map(String) : [];
       const after = Array.isArray(match?.context?.after) ? match.context.after.map(String) : [];

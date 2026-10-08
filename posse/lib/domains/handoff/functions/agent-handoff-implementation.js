@@ -1207,6 +1207,33 @@ function evidenceProvenance(entry, context, seen = new Set()) {
  * @param {Array<{start: number, end: number}>} ranges
  * @returns {Array<{start: number, end: number}>}
  */
+// Exact symbol bodies arrive without the blank line that separates adjacent
+// declarations, so a citation spanning two delivered neighbours was split or
+// dropped at that one undelivered line (atlas592 JS_FASTIFY_2
+// lib/validation.js:212-254 became four fragments). A whitespace-only line
+// between delivered lines carries no content the model did not see; accept
+// it when both ends of the selector were delivered. Wide gaps are still
+// trimmed: a run of blank lines longer than a declaration separator is a
+// region the model never read, whatever it contains.
+const MAX_BRIDGED_BLANK_GAP_LINES = 2;
+
+function deliveredAcrossBlankGaps(openedRanges, start, end, lines) {
+  if (!Array.isArray(lines) || !Number.isInteger(start) || !Number.isInteger(end) || end < start) return false;
+  const delivered = (line) => openedRanges.some((range) => line >= range.start && line <= range.end);
+  if (!delivered(start) || !delivered(end)) return false;
+  let gap = 0;
+  for (let line = start + 1; line < end; line += 1) {
+    if (delivered(line)) {
+      gap = 0;
+      continue;
+    }
+    gap += 1;
+    if (gap > MAX_BRIDGED_BLANK_GAP_LINES) return false;
+    if (String(lines[line - 1] ?? "").trim() !== "") return false;
+  }
+  return true;
+}
+
 function mergeDeliveredRanges(ranges) {
   const sorted = (Array.isArray(ranges) ? ranges : [])
     .filter((range) => Number.isInteger(range?.start) && Number.isInteger(range?.end) && range.end >= range.start)
@@ -1667,7 +1694,8 @@ function materializeWorktreeEvidenceSelector(selector, context) {
   // delivered still falls outside every merged region.
   const openedRanges = mergeDeliveredRanges(resolved.opened_ranges);
   if (resolved.restrict_to_opened_ranges
-    && !openedRanges.some((range) => selector.start >= range.start && endLine <= range.end)) {
+    && !openedRanges.some((range) => selector.start >= range.start && endLine <= range.end)
+    && !deliveredAcrossBlankGaps(openedRanges, selector.start, endLine, lines)) {
     const delivered = openedRanges
       .filter((range) => range.end >= selector.start && range.start <= endLine)
       .slice(0, 8)

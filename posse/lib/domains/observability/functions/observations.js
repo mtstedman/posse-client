@@ -50,6 +50,7 @@ const RESEARCH_EXPLORATION_OBSERVATION_TYPES = Object.freeze([
 const ATLAS137_ATTEMPT_SCOPED_OBSERVATION_TYPES = new Set([
   "research.source_selection",
   "research.exploration_blocked",
+  "research.ceiling_grace",
   "source.coverage",
   "context.headroom_decision",
   "context.headroom_actual",

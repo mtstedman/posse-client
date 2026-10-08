@@ -207,6 +207,15 @@ const symbolCallerPageVersions = new WeakMap();
 // zero-active gap between those waves; a later model turn takes materially
 // longer and is admitted against the now-closed durable research lane.
 const RESEARCH_ATLAS_TERMINAL_BATCH_IDLE_MS = 250;
+// A provider emits one turn's parallel tool calls together; the model cannot
+// read the exhaustion notice carried by the call that reached the ceiling
+// until every sibling returns. Siblings that arrive while that emission is
+// still in flight, or within this gap after its last call returned, execute
+// past the ceiling instead of returning blocked (atlas592: 7 blocked calls,
+// all issued in the same turn as the exhausting call). The next model turn
+// takes far longer than this gap, so a call issued after reading the notice
+// is still blocked.
+const RESEARCH_CEILING_EMISSION_GRACE_MS = 1000;
 
 /** @param {any} session @param {string} requestedName @param {Record<string, any>} args */
 function compactCallerExecutorArgs(session, requestedName, args = {}) {
@@ -3026,11 +3035,32 @@ function staleGatewayBindingToolResult(message) {
   ));
 }
 
+// Per-session record of the parallel emission that reached the physical
+// ceiling. `opened` is set when the ceiling step is assigned; `active` counts
+// in-flight research physical calls; `lastReleasedAt` is when the latest one
+// returned.
+function researchCeilingEmissionFor(session) {
+  if (!session || typeof session !== "object") return null;
+  session._researchCeilingEmission ||= { opened: false, active: 0, lastReleasedAt: null };
+  return session._researchCeilingEmission;
+}
+
+function researchCeilingGraceDecision(emission, { now = Date.now(), graceMs = RESEARCH_CEILING_EMISSION_GRACE_MS } = {}) {
+  if (!emission?.opened) return { grace: false, reason: "ceiling_not_reached_in_flight" };
+  if (Number(emission.active) > 0) return { grace: true, reason: "emission_in_flight" };
+  const releasedAt = Number(emission.lastReleasedAt);
+  if (Number.isFinite(releasedAt) && now - releasedAt <= graceMs) {
+    return { grace: true, reason: "emission_idle_gap" };
+  }
+  return { grace: false, reason: "emission_closed" };
+}
+
 function ownerResearchSynthesisAdmission(session, requestedAction, {
   assignedExplorationStep = null,
   assignedPhysicalCallStep = null,
   explorationUnitWeight = 1,
   symbolFollowupDiscounted = false,
+  physicalCeilingGrace = false,
 } = {}) {
   const boot = session?.bootConfig || {};
   const policy = researchSynthesisPolicyFor(session);
@@ -3074,11 +3104,12 @@ function ownerResearchSynthesisAdmission(session, requestedAction, {
     const assignedCallStep = Number.isSafeInteger(assignedPhysicalCallStep)
       ? assignedPhysicalCallStep
       : Math.max(0, Number(status.call_steps || 0)) + 1;
-    const assignedPhysicalCeiling = assignedCallStep > policy.maxPhysicalCalls;
+    const assignedPhysicalCeiling = physicalCeilingGrace !== true && assignedCallStep > policy.maxPhysicalCalls;
     const finalFetchAlreadyUsed = synthesisRequired && citationFetchBatches >= 1;
     return {
       tracked: true,
       maxPhysicalCalls: policy.maxPhysicalCalls,
+      physicalCeilingGrace: physicalCeilingGrace === true,
       blocked: assignedPhysicalCeiling || finalFetchAlreadyUsed,
       blockReason: assignedPhysicalCeiling
         ? "physical_call_ceiling"
@@ -3116,11 +3147,15 @@ function ownerResearchSynthesisAdmission(session, requestedAction, {
   const assignedCallStep = Number.isSafeInteger(assignedPhysicalCallStep)
     ? assignedPhysicalCallStep
     : Math.max(0, Number(status.call_steps || 0)) + 1;
-  const assignedPhysicalCeiling = assignedCallStep > policy.maxPhysicalCalls;
+  const pastPhysicalCeiling = assignedCallStep > policy.maxPhysicalCalls;
+  // A graced sibling of the exhausting emission executes, but the budget is
+  // still spent: synthesis stays required and the closeout notice still lands.
+  const assignedPhysicalCeiling = physicalCeilingGrace !== true && pastPhysicalCeiling;
   const assignedAbsoluteCeiling = assignedUnitCeiling || assignedPhysicalCeiling;
   return {
     tracked: true,
     maxPhysicalCalls: policy.maxPhysicalCalls,
+    physicalCeilingGrace: physicalCeilingGrace === true,
     blocked: progressDecision.required || assignedAbsoluteCeiling,
     blockReason: progressDecision.reason || (assignedPhysicalCeiling
       ? "physical_call_ceiling"
@@ -3146,8 +3181,8 @@ function ownerResearchSynthesisAdmission(session, requestedAction, {
     assignedPhysicalCallStep: assignedCallStep,
     explorationUnitWeight: unitWeight,
     symbolFollowupDiscounted: symbolFollowupDiscounted === true,
-    synthesisRequired: progressDecision.required || assignedAbsoluteCeiling,
-    synthesisReason: progressDecision.reason || (assignedPhysicalCeiling
+    synthesisRequired: progressDecision.required || assignedAbsoluteCeiling || pastPhysicalCeiling,
+    synthesisReason: progressDecision.reason || (pastPhysicalCeiling
       ? "physical_call_ceiling"
       : (assignedUnitCeiling ? "exploration_ceiling" : null)),
   };
@@ -3335,6 +3370,9 @@ function appendAndRecordResearchBudgetNotice(result, admission, session, toolNam
 }
 
 export const __testAppendAndRecordResearchBudgetNotice = appendAndRecordResearchBudgetNotice;
+export const __testResearchCeilingGraceDecision = researchCeilingGraceDecision;
+export const __testResearchCeilingEmissionFor = researchCeilingEmissionFor;
+export const __testOwnerResearchSynthesisAdmission = ownerResearchSynthesisAdmission;
 
 function agentHandoffCallableName(session) {
   const boot = session?.bootConfig || {};
@@ -4157,6 +4195,7 @@ function recordOwnerToolObservation({
           ...(Number.isSafeInteger(synthesisAdmission?.assignedPhysicalCallStep) ? {
             physical_call_step: synthesisAdmission.assignedPhysicalCallStep,
             physical_call_ceiling: admissionMaxPhysicalCalls(synthesisAdmission),
+            ...(synthesisAdmission.physicalCeilingGrace === true ? { physical_ceiling_grace: true } : {}),
           } : {}),
           ...(synthesisAdmission?.physicalRequestId ? {
             measurement_version: 1,
@@ -5735,6 +5774,10 @@ export class PersistentMcpOwner {
     const activeToolRequest = method === "tools/call"
       ? session.beginToolRequest(message?.params?.name)
       : null;
+    // Set once a research physical call is tracked against the ceiling
+    // emission; released in the finally below so a thrown handler still
+    // closes the emission accounting.
+    let releaseResearchCeilingEmission = null;
     const preflight = body?.preflight === true && method === "tools/list";
     const proofEvent = preflight ? null : session.noteRequest(message);
     if (proofEvent === "initialize") {
@@ -5783,6 +5826,7 @@ export class PersistentMcpOwner {
       const policy = sessionToolPolicy(session);
       let preparedSubAgentHandoff = false;
       let assignedResearchPhysicalCallStep = null;
+      let researchPhysicalCeilingGrace = false;
       if (message.method === "tools/call") {
         const providerToolName = String(message?.params?.name || "");
         const rawProviderToolArgs = message?.params?.arguments || {};
@@ -5853,21 +5897,55 @@ export class PersistentMcpOwner {
           ? this._reserveResearchPhysicalCall(session, requested)
           : null;
         const researchPhysicalCallCeiling = researchSynthesisPolicyFor(session).maxPhysicalCalls;
-        if (Number.isSafeInteger(assignedResearchPhysicalCallStep)
-          && assignedResearchPhysicalCallStep > researchPhysicalCallCeiling) {
-          sendJson(res, 200, {
-            ok: true,
-            bootId: this.bootId,
-            sessionId: id,
-            message: ownerResearchPhysicalBudgetRejection({
-              session,
-              message,
-              toolName,
-              toolArgs,
-              assignedPhysicalCallStep: assignedResearchPhysicalCallStep,
-            }),
-          });
-          return;
+        const ceilingEmission = Number.isSafeInteger(assignedResearchPhysicalCallStep)
+          ? researchCeilingEmissionFor(session)
+          : null;
+        if (ceilingEmission && assignedResearchPhysicalCallStep >= researchPhysicalCallCeiling) {
+          ceilingEmission.opened = true;
+        }
+        if (ceilingEmission && assignedResearchPhysicalCallStep > researchPhysicalCallCeiling) {
+          const grace = researchCeilingGraceDecision(ceilingEmission);
+          if (!grace.grace) {
+            sendJson(res, 200, {
+              ok: true,
+              bootId: this.bootId,
+              sessionId: id,
+              message: ownerResearchPhysicalBudgetRejection({
+                session,
+                message,
+                toolName,
+                toolArgs,
+                assignedPhysicalCallStep: assignedResearchPhysicalCallStep,
+              }),
+            });
+            return;
+          }
+          researchPhysicalCeilingGrace = true;
+          if (session?.bootConfig?.attemptId != null) {
+            recordObservation({
+              work_item_id: session.bootConfig.workItemId ?? null,
+              job_id: session.bootConfig.jobId ?? null,
+              attempt_id: session.bootConfig.attemptId,
+              observation_type: "research.ceiling_grace",
+              summary: `Research call ${assignedResearchPhysicalCallStep} admitted past the ${researchPhysicalCallCeiling}-call ceiling: ${grace.reason}`,
+              detail: {
+                tool: `${requested.suite}.${requested.name}`,
+                physical_call_step: assignedResearchPhysicalCallStep,
+                physical_call_ceiling: researchPhysicalCallCeiling,
+                reason: grace.reason,
+                emission_active: ceilingEmission.active,
+                mcp_request_id: message?.id ?? null,
+              },
+            });
+          }
+        }
+        if (ceilingEmission) {
+          ceilingEmission.active += 1;
+          releaseResearchCeilingEmission = () => {
+            releaseResearchCeilingEmission = null;
+            ceilingEmission.active = Math.max(0, ceilingEmission.active - 1);
+            ceilingEmission.lastReleasedAt = Date.now();
+          };
         }
         const assessorRole = String(session?.bootConfig?.role || "");
         if (assessorToolBudgetApplies(assessorRole, requested.name)) {
@@ -6286,6 +6364,7 @@ export class PersistentMcpOwner {
             providerTransforms: routedTool.transforms,
             delegatedEvidence,
             assignedPhysicalCallStep: assignedResearchPhysicalCallStep,
+            physicalCeilingGrace: researchPhysicalCeilingGrace,
           });
           if (rejectAgentHandoffForLaterTool(
             session?.bootConfig?.agentCallId,
@@ -6344,6 +6423,7 @@ export class PersistentMcpOwner {
       const gatewayAdmission = {
         tracked: Number.isSafeInteger(assignedResearchPhysicalCallStep),
         assignedPhysicalCallStep: assignedResearchPhysicalCallStep,
+        physicalCeilingGrace: researchPhysicalCeilingGrace,
       };
       let response;
       try {
@@ -6588,6 +6668,7 @@ export class PersistentMcpOwner {
       });
     } finally {
       if (activeToolRequest != null) session.endToolRequest(activeToolRequest);
+      if (releaseResearchCeilingEmission) releaseResearchCeilingEmission();
     }
   }
 
@@ -6853,6 +6934,7 @@ export class PersistentMcpOwner {
         }) }
         : this._executeAtlasToolCall({ ...args, binding, toolName: "atlas.symbol.get", toolArgs: item,
           assignedPhysicalCallStep: physicalStep,
+          physicalCeilingGrace: args.physicalCeilingGrace === true,
           physicalBatchId,
           message: { ...args.message, id: `${args.message?.id ?? "symbols"}:${index}` },
         }).catch((error) => ({result: mcpToolErrorPayload("symbol.get batch item execution failed", {
@@ -6861,7 +6943,8 @@ export class PersistentMcpOwner {
         })}))));
       const batchMaxPhysicalCalls = researchSynthesisPolicyFor(args.session).maxPhysicalCalls;
       const batchAdmission = { tracked: String(boot.role || "") === "researcher", assignedPhysicalCallStep: physicalStep,
-        blocked: physicalStep > batchMaxPhysicalCalls,
+        physicalCeilingGrace: args.physicalCeilingGrace === true,
+        blocked: args.physicalCeilingGrace !== true && physicalStep > batchMaxPhysicalCalls,
         maxPhysicalCalls: batchMaxPhysicalCalls,
         reservedPhysicalCalls: () => this._researchCallReservations.get(researchBudgetKey(boot)) };
       const batchResult = appendResearchWorkBudget(
@@ -6929,6 +7012,7 @@ export class PersistentMcpOwner {
             assignedPhysicalCallStep,
             explorationUnitWeight: researchBatch.admission.explorationUnitWeight,
             symbolFollowupDiscounted,
+            physicalCeilingGrace: args?.physicalCeilingGrace === true,
           }),
           explorationUnitId: researchBatch.admission.explorationUnitId,
           explorationUnitKind: researchBatch.admission.explorationUnitKind,
@@ -6938,6 +7022,7 @@ export class PersistentMcpOwner {
       : (researchPhysicalWork
           ? ownerResearchSynthesisAdmission(args?.session, effectiveAction, {
               assignedPhysicalCallStep,
+              physicalCeilingGrace: args?.physicalCeilingGrace === true,
             })
           : null);
     if (synthesisAdmission) Object.assign(synthesisAdmission, {
