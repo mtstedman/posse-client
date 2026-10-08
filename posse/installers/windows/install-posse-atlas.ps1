@@ -631,7 +631,9 @@ $script:StepSeconds = [ordered]@{}
 $script:RunStartedAt = Get-Date
 
 function Format-StepTimings {
-  $parts = @($script:StepSeconds.Keys | ForEach-Object { "{0}={1}s" -f $_, $script:StepSeconds[$_] })
+  # GetEnumerator, not .Keys: one step is named "keys", and PowerShell reads
+  # $dictionary.Keys as that entry's value (the log then said "steps: 0=0s").
+  $parts = @($script:StepSeconds.GetEnumerator() | ForEach-Object { "{0}={1}s" -f $_.Key, $_.Value })
   $parts += ("total={0}s" -f [int]((Get-Date) - $script:RunStartedAt).TotalSeconds)
   return "steps: " + ($parts -join " ")
 }
@@ -2026,6 +2028,23 @@ function Step-Checkout {
   }
 }
 
+# PHP's OpenSSL never reads the Windows certificate store: it trusts whatever
+# openssl.cafile or SSL_CERT_FILE names, and a wrong or stale bundle there
+# fails getcomposer.org with "certificate verify failed". Posse's Composer
+# trusts the bundle Posse writes from Node's roots plus the Windows store
+# (composer-bootstrap.js); $null keeps PHP's own CA setup.
+function Write-ComposerCaFile {
+  if (-not $script:NodeBin -or -not $script:PosseDirResolved) { return $null }
+  $module = Join-Path $script:PosseDirResolved "lib\domains\environments\functions\composer-bootstrap.js"
+  if (-not (Test-Path -LiteralPath $module)) { return $null }
+  $code = 'const [, url, root] = process.argv; const { writeComposerCaFile } = await import(url); const file = writeComposerCaFile(root); if (file) console.log(file);'
+  $result = Get-NativeOutput $script:NodeBin @("--input-type=module", "-e", $code, ([Uri]$module).AbsoluteUri, $script:ManagedStateRoot) 60000
+  if (-not $result -or $result.ExitCode -ne 0) { return $null }
+  $file = ([string]$result.StdOut).Trim()
+  if ($file -and (Test-Path -LiteralPath $file)) { return $file }
+  return $null
+}
+
 function Step-Composer {
   Step-Begin "composer"
   if ($script:CriticalFailed) { Step-End "blocked"; return }
@@ -2082,7 +2101,10 @@ function Step-Composer {
       Step-End "partial" "composer unavailable (signature mismatch)"
       return
     }
-    $rc = Invoke-Logged -Description "run Composer installer" -Activity "Installing Composer" -Command @($php.Source, $setupPath, "--install-dir=$binDir", "--filename=composer.phar", "--quiet")
+    $installerArgs = @($php.Source, $setupPath, "--install-dir=$binDir", "--filename=composer.phar")
+    $caFile = Write-ComposerCaFile
+    if ($caFile) { $installerArgs += "--cafile=$caFile" }
+    $rc = Invoke-Logged -Description "run Composer installer" -Activity "Installing Composer" -Command ($installerArgs + @("--quiet"))
     if ($rc -eq 0 -and (Test-Path $pharPath)) {
       Step-End "ok" ("composer.phar installed into {0}" -f $pharPath)
     }

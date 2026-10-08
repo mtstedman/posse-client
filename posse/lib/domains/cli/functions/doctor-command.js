@@ -1,4 +1,5 @@
 import { renderDoctorHelp } from "./maintenance-help.js";
+import fs from "fs";
 import path from "path";
 
 import { C } from "../../../shared/format/functions/colors.js";
@@ -13,6 +14,15 @@ import {
   formatClientProvenance,
   resolveClientProvenance,
 } from "../../runtime/functions/client-provenance.js";
+import { DEFAULT_INSTALLED_POSSE_ROOT } from "../../../shared/platform/functions/managed-install-state.js";
+
+// A `.git` directory, or the `.git` file of a worktree, in this folder or above.
+function insideGitRepository(dir) {
+  for (let current = path.resolve(dir); ; current = path.dirname(current)) {
+    if (fs.existsSync(path.join(current, ".git"))) return true;
+    if (path.dirname(current) === current) return false;
+  }
+}
 
 function firstLine(value) {
   return String(value || "")
@@ -152,6 +162,7 @@ function createDoctorProgressRenderer({ log, colors, json }) {
 
 export async function cmdDoctor({
   projectDir = process.cwd(),
+  posseRoot = DEFAULT_INSTALLED_POSSE_ROOT,
   argv = process.argv.slice(3),
   runDoctor = doctorRepoDependencies,
   formatResult = formatBootDependencySync,
@@ -165,6 +176,12 @@ export async function cmdDoctor({
     return null;
   }
 
+  // Outside a git repository there is no project to provision: the folder
+  // doctor started in (often the home folder) would be walked, and every
+  // package.json + lockfile under it npm-installed. Check the installation.
+  const startedIn = projectDir;
+  const inRepository = insideGitRepository(startedIn);
+  projectDir = inRepository ? startedIn : posseRoot;
   const json = argv.includes("--json");
   const dryRun = argv.includes("--dry-run");
   const adoptNodeInstall = argv.includes("--adopt-node-install");
@@ -174,6 +191,7 @@ export async function cmdDoctor({
     const atlasConfig = getAtlasConfig?.() || {};
     result = await runDoctor({
       projectDir,
+      posseRoot,
       dryRun,
       adoptNodeInstall,
       includeNativeBinaries: true,
@@ -222,7 +240,9 @@ export async function cmdDoctor({
   const summary = report.summary || formatResult(result);
   const statusColor = result.ok ? colors.green : colors.red;
   log(`\n  ${statusColor}[doctor]${colors.reset} ${mode}: ${summary}`);
-  log(`  ${colors.dim}project: ${projectDir}${colors.reset}`);
+  log(inRepository
+    ? `  ${colors.dim}project: ${projectDir}${colors.reset}`
+    : `  ${colors.dim}project: none (${startedIn} is not a git repository; checked the Posse installation only)${colors.reset}`);
   log(`  ${colors.dim}client: ${formatClientProvenance(result.client_provenance)}${colors.reset}`);
   log(`  ${colors.dim}timeouts: package commands 30m; Jina download/deploy 2h${colors.reset}`);
 

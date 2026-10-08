@@ -56,6 +56,10 @@ import {
 
 const DEFAULT_MAX_BUFFER = 64 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120000;
+// `--version` normally answers at once; the slow budget only follows a
+// timeout (see isAvailable).
+const VERSION_PROBE_TIMEOUT_MS = 5_000;
+const SLOW_VERSION_PROBE_TIMEOUT_MS = 60_000;
 // A silent probe only retires the host once it has produced no message at all
 // for this long (see #probeWorkerHealth): long enough that any worker-routed
 // request a serial host could legitimately be chewing has passed its own
@@ -928,11 +932,19 @@ export class NativeBinary {
     if (this._versionProbe?.path === binaryPath && this._versionProbe?.mtimeMs === mtimeMs) {
       return this._versionProbe.matches;
     }
-    const result = this._spawnSync(binaryPath, ["--version"], {
+    const probe = (timeout) => this._spawnSync(binaryPath, ["--version"], {
       encoding: "utf8",
       windowsHide: true,
-      timeout: 5_000,
+      timeout,
     });
+    let result = probe(VERSION_PROBE_TIMEOUT_MS);
+    // A just-downloaded binary can sit in an antivirus first-run scan longer
+    // than the usual probe allows (Windows: a background install reported
+    // downloaded_version_mismatch, then the same artifact passed in the
+    // foreground). A timed-out probe is not a mismatch; it gets one long try.
+    if (/** @type {NodeJS.ErrnoException | undefined} */ (result?.error)?.code === "ETIMEDOUT") {
+      result = probe(SLOW_VERSION_PROBE_TIMEOUT_MS);
+    }
     const expected = `${nativeBinaryEntry(this.name)?.package} ${this.exactVersion}`;
     const matches = !result?.error && result?.status === 0 && String(result?.stdout || "").trim() === expected;
     this._versionProbe = { path: binaryPath, mtimeMs, matches };

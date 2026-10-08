@@ -188,6 +188,10 @@ function discoverLockBackedNodeRoots(projectDir, { maxDepth = 3, maxRoots = 16 }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
       if (DEPENDENCY_SCAN_SKIP_DIRS.has(entry.name)) continue;
+      // Dot directories hold tool and editor state, not project packages:
+      // `posse doctor` from a home folder otherwise runs npm install in every
+      // .vscode/extensions/<ext> and .cursor/extensions/<ext>.
+      if (entry.name.startsWith(".")) continue;
       stack.push({ dir: path.join(dir, entry.name), depth: depth + 1 });
     }
   }
@@ -658,12 +662,13 @@ function normalizeCommandTimeoutMs(value, fallback = DEFAULT_COMMAND_TIMEOUT_MS)
 /**
  * @param {string} command
  * @param {string[]} args
- * @param {{ cwd?: string, timeoutMs?: number | null, onProgress?: ((message: string) => void) | null }} [opts]
+ * @param {{ cwd?: string, timeoutMs?: number | null, onProgress?: ((message: string) => void) | null, extraEnv?: Record<string, string> | null }} [opts]
  */
 async function runCommand(command, args, {
   cwd,
   timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS,
   onProgress = null,
+  extraEnv = null,
 } = {}) {
   return await new Promise((resolve) => {
     let stdout = "";
@@ -676,7 +681,7 @@ async function runCommand(command, args, {
     let settleTimer = null;
     let onSigint = null;
     let onSigterm = null;
-    const env = dependencyInstallEnv();
+    const env = { ...dependencyInstallEnv(), ...extraEnv };
     const spawnSpec = commandSpawnSpec(command, args, { env });
     const removeSignalHandlers = () => {
       if (onSigint) process.off("SIGINT", onSigint);
@@ -1208,6 +1213,7 @@ async function ensureComposerProject(entry, opts) {
   ], {
     cwd: entry.root,
     timeoutMs: opts.timeoutMs,
+    extraEnv: composer.env,
   });
   let generatedIgnore = null;
   if (!run.ok) {

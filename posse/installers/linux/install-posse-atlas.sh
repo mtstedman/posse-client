@@ -1700,6 +1700,18 @@ step_checkout() {
   return 1
 }
 
+# PHP trusts whatever CA bundle openssl.cafile or SSL_CERT_FILE names, and a
+# wrong one fails getcomposer.org with "certificate verify failed". Prints the
+# bundle Posse's Composer trusts (Node's roots plus the OS store, written by
+# composer-bootstrap.js), or nothing, which keeps PHP's own CA setup.
+write_composer_cafile() {
+  local posse_dir="$1" install_root="$2"
+  local module="$posse_dir/lib/domains/environments/functions/composer-bootstrap.js"
+  [[ -n "${NODE_BIN:-}" && -f "$module" ]] || return 0
+  "$NODE_BIN" --input-type=module -e 'import { pathToFileURL } from "node:url"; const [, module, root] = process.argv; const { writeComposerCaFile } = await import(pathToFileURL(module).href); const file = writeComposerCaFile(root); if (file) console.log(file);' \
+    "$module" "$install_root" 2>/dev/null || true
+}
+
 do_install_composer_phar() {
   # Runs in a run_logged subshell: stdout/err go to the log.
   local bin_dir="$POSSE_DIR/scip/bin"
@@ -1716,7 +1728,9 @@ do_install_composer_phar() {
     rm -f "$setup"
     return 1
   fi
-  php "$setup" --install-dir="$bin_dir" --filename=composer.phar --quiet
+  local cafile
+  cafile="$(write_composer_cafile "$POSSE_DIR" "$POSSE_DIR")"
+  php "$setup" --install-dir="$bin_dir" --filename=composer.phar ${cafile:+"--cafile=$cafile"} --quiet
   local rc=$?
   rm -f "$setup"
   [[ $rc -eq 0 && -f "$phar" ]]

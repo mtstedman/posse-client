@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import tls from "node:tls";
 
 import { findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 import { composerBin, runCommand, scipDependencyInstallEnv } from "./scip-install-runtime.js";
@@ -21,12 +22,62 @@ export function managedComposerPhar(installRoot) {
   return path.join(installRoot, "scip", "bin", "composer.phar");
 }
 
+/** The CA bundle Posse's own Composer verifies TLS against. */
+export function managedComposerCaFile(installRoot) {
+  return path.join(installRoot, "scip", "bin", "composer-cacert.pem");
+}
+
+/**
+ * Writes the certificate authorities Posse's own downloads already trust
+ * (Node's bundled roots plus the OS store) for Posse's Composer. PHP's
+ * OpenSSL never reads the Windows store: it trusts whatever openssl.cafile or
+ * SSL_CERT_FILE names, and a wrong or stale bundle there (or an antivirus
+ * root only the OS store holds) fails every download with "certificate
+ * verify failed" while Posse's own downloads succeed.
+ *
+ * @param {string} installRoot
+ * @param {{ certificates?: (type: "default" | "system") => readonly string[] }} [options]
+ * @returns {string | null} the bundle path, or null when none could be written
+ *   (Composer then keeps PHP's own CA configuration)
+ */
+export function writeComposerCaFile(installRoot, {
+  certificates = (type) => (typeof tls.getCACertificates === "function" ? tls.getCACertificates(type) : tls.rootCertificates),
+} = {}) {
+  const pems = new Set();
+  for (const type of /** @type {const} */ (["default", "system"])) {
+    try { for (const pem of certificates(type)) pems.add(String(pem).trim()); } catch { /* that store is unavailable */ }
+  }
+  if (pems.size === 0) return null;
+  const file = managedComposerCaFile(installRoot);
+  const contents = `${[...pems].join("\n")}\n`;
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    if (fs.existsSync(file) && fs.readFileSync(file, "utf8") === contents) return file;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, contents);
+    fs.renameSync(tmp, file);
+    return file;
+  } catch {
+    fs.rmSync(tmp, { force: true });
+    // A bundle a running Composer holds open still verifies; keep using it.
+    return fs.existsSync(file) ? file : null;
+  }
+}
+
+function managedComposer(phar, caFile) {
+  return caFile
+    ? { command: "php", args: [phar], env: { COMPOSER_CAFILE: caFile } }
+    : { command: "php", args: [phar] };
+}
+
 /**
  * The Composer command Posse runs: `composer` on PATH, else PHP with Posse's
  * managed composer.phar. When PHP is present but Composer is not, Posse
  * installs composer.phar itself (Composer's signature-verified installer), so
  * a skipped or failed installer step is repaired by the next doctor run
- * instead of leaving PHP indexing unavailable.
+ * instead of leaving PHP indexing unavailable. The managed Composer verifies
+ * TLS with Posse's CA bundle (`env` holds COMPOSER_CAFILE; callers add it to
+ * the command's environment).
  *
  * @param {{
  *   installRoot: string,
@@ -38,7 +89,7 @@ export function managedComposerPhar(installRoot) {
  *   timeoutMs?: number,
  *   install?: boolean,
  * }} options
- * @returns {Promise<{ command: string, args: string[] } | { pending: string } | { error: string }>}
+ * @returns {Promise<{ command: string, args: string[], env?: Record<string, string> } | { pending: string } | { error: string }>}
  */
 export async function ensureComposer({
   installRoot,
@@ -60,7 +111,7 @@ export async function ensureComposer({
       env,
       timeoutMs: Math.min(timeoutMs, 30_000),
     });
-    if (healthy.ok) return { command: "php", args: [phar] };
+    if (healthy.ok) return managedComposer(phar, writeComposerCaFile(installRoot));
     if (!install) return { error: `Composer is not usable: ${firstLine(healthy.message) || "the managed composer.phar failed its version check"}` };
     if (dryRun) return { pending: `would reinstall Composer into ${path.dirname(phar)}` };
     onProgress?.("reinstalling Posse's unusable Composer");
@@ -98,7 +149,14 @@ export async function ensureComposer({
     }
     if (!verified) return { error: lastError };
     fs.mkdirSync(path.dirname(phar), { recursive: true });
-    const run = await runCommand(php, [setup, `--install-dir=${path.dirname(phar)}`, "--filename=composer.phar", "--quiet"], {
+    const caFile = writeComposerCaFile(installRoot);
+    const run = await runCommand(php, [
+      setup,
+      `--install-dir=${path.dirname(phar)}`,
+      "--filename=composer.phar",
+      ...(caFile ? [`--cafile=${caFile}`] : []),
+      "--quiet",
+    ], {
       env,
       timeoutMs,
     });
@@ -114,7 +172,7 @@ export async function ensureComposer({
       return { error: `the Composer installer produced an unusable composer.phar: ${firstLine(healthy.message) || "version check failed"}` };
     }
     onProgress?.(`installed Composer into ${path.dirname(phar)}`);
-    return { command: "php", args: [phar] };
+    return managedComposer(phar, caFile);
   } finally {
     fs.rmSync(setupDir, { recursive: true, force: true });
   }

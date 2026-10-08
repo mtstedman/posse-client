@@ -8,6 +8,7 @@ import {
   composerBin,
   fileExists,
   runCommand,
+  scipDependencyInstallEnv,
 } from "../../functions/scip-install-runtime.js";
 import {
   PHP_SCIP_ENV_INPUTS,
@@ -149,6 +150,7 @@ export class PhpScipEnvironmentInstaller extends ScipLanguageEnvironmentInstalle
         "--no-ansi",
       ], {
         cwd: envDir,
+        env: { ...scipDependencyInstallEnv(), ...composer.env },
         timeoutMs: this.timeoutMs,
       });
       if (!run.ok) {
