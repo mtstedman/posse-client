@@ -126,6 +126,7 @@ import { configureModelCatalogRuntimeWarnings } from "../../providers/functions/
 import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider } from "../../providers/functions/execution-routing.js";
 import { providerRoleForJobType } from "../../providers/functions/roles.js";
 import {
+  commandResumesInterruptedPairing,
   getCommandBootstrapPolicy,
   isHelpCommand,
   normalizeCommandName,
@@ -2877,9 +2878,12 @@ export async function main() {
     refreshNativeGit: commandPolicy.requiresNativeGit,
   });
   // A killed pairing host cannot integrate through the credential-free relay.
-  // The next invocation in the owning clone resumes its durable close/publish
-  // journal before other commands can start new work on stale branch state.
-  if (!isHelpCommand(command)) {
+  // The next invocation in the owning clone that would start new work resumes
+  // its durable close/publish journal first. Reads, reports, and operator
+  // configuration skip recovery: a poll in a clone whose session owner stopped
+  // (or whose relay heartbeat lapsed) must not close the session underneath
+  // the operator, and must not be refused while a deliberate close drains.
+  if (!isHelpCommand(command) && commandResumesInterruptedPairing(command, pairSubcommand)) {
     const { recoverInterruptedPairing } = await loadPairCommandModule();
     const recovery = await recoverInterruptedPairing(PROJECT_DIR, { C });
     // Session commands that resolve a ready integration, or refuse to start

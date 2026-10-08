@@ -100,6 +100,30 @@ export function getCommandBootstrapPolicy(command) {
   return COMMAND_BOOTSTRAP_POLICY_BY_NAME.get(normalized) || UNKNOWN_COMMAND_BOOTSTRAP_POLICY;
 }
 
+// Pairing verbs that only report a session; they never start work on it.
+const PAIRING_READ_SUBCOMMANDS = Object.freeze(["status", "members", "pending"]);
+
+/**
+ * True when a command may start new work on branch state, so an interrupted
+ * pairing close must be resumed before it runs. Read-only commands, operator
+ * configuration (`admin`), and session reports only observe the clone: a
+ * Bossy or dashboard poll in a clone whose session owner stopped must not
+ * close the session as a side effect, and must not be refused while a
+ * deliberate close drains.
+ *
+ * @param {string} command the normalized command name
+ * @param {string} [pairSubcommand] the `pair`/`session` verb, when any
+ */
+export function commandResumesInterruptedPairing(command, pairSubcommand = "") {
+  const policy = getCommandBootstrapPolicy(command);
+  if (policy.readOnly || policy.name === "admin") return false;
+  if (["pair", "session"].includes(policy.name)
+    && PAIRING_READ_SUBCOMMANDS.includes(String(pairSubcommand || "").toLowerCase())) {
+    return false;
+  }
+  return true;
+}
+
 export function isHelpCommand(command) {
   return getCommandBootstrapPolicy(command).name === "help";
 }

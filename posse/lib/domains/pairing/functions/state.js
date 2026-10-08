@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { SESSION_PUBLISH_MODES } from "../../../catalog/session-sync.js";
 import { runImmediateTransaction } from "../../queue/functions/common.js";
+import { readSessionLink } from "./session-link.js";
 
 const LIVE_PHASES_SQL = "'enrolling','pending','active','leaving','restore_blocked'";
 const PAIRING_OWNER_STALE_MS = 120_000;
@@ -272,14 +273,23 @@ export function pairingOwnerProcessIsAlive(
   state,
   kill = process.kill.bind(process),
   nowMs = Date.now(),
+  readLink = readSessionLink,
 ) {
   const pid = Number(state?.process_pid);
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   const lastHeartbeatMs = Date.parse(String(state?.updated_at || ""));
-  if (Number.isFinite(lastHeartbeatMs) && nowMs - lastHeartbeatMs > PAIRING_OWNER_STALE_MS) {
+  if (Number.isFinite(lastHeartbeatMs) && nowMs - lastHeartbeatMs > PAIRING_OWNER_STALE_MS
+    && !ownerAttemptedRelayRecently(state, pid, nowMs, readLink)) {
     // A reused PID can belong to an unrelated process. The durable monitor
     // heartbeat makes the PID evidence time-bounded without platform-specific
-    // process-start probes.
+    // process-start probes. A relay outage is the exception: the owner keeps
+    // the session and retries while the relay is unreachable, stamping each
+    // attempt on the session link, but the heartbeat only advances on a
+    // *successful* beat, so it goes stale while the process is healthy. A
+    // recent attempt from this same pid is the outage signature, so fall
+    // through to the liveness probe rather than reading the stale heartbeat
+    // as a crash. The kill() probe below is still the final arbiter: a pid
+    // that is actually gone stays dead even with a fresh link.
     return false;
   }
   if (pid === process.pid) return true;
@@ -291,4 +301,26 @@ export function pairingOwnerProcessIsAlive(
     // EPERM and unknown platform errors do not prove the recorded owner died.
     return true;
   }
+}
+
+// ownerAttemptedRelayRecently reports that this session's owner recorded a
+// relay heartbeat attempt within the stale window from the same pid. Only this
+// session's own console or scheduler monitor writes that link, so a reused or
+// unrelated pid never forges it, and a crashed owner stops stamping it and
+// lets it age out. A link for another session, a different owner pid, a read
+// failure, or an id-less state all decline, keeping the stale-is-dead default.
+function ownerAttemptedRelayRecently(state, pid, nowMs, readLink) {
+  const stateId = state?.id;
+  if (!stateId) return false;
+  let link;
+  try {
+    link = readLink({ stateId });
+  } catch {
+    return false;
+  }
+  if (!link) return false;
+  const linkPid = Number(link.owner_pid);
+  if (Number.isSafeInteger(linkPid) && linkPid > 0 && linkPid !== pid) return false;
+  const attemptMs = Date.parse(String(link.last_attempt_at || ""));
+  return Number.isFinite(attemptMs) && nowMs - attemptMs <= PAIRING_OWNER_STALE_MS;
 }
