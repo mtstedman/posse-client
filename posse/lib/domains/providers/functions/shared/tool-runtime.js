@@ -33,6 +33,7 @@ import {
   submitWebResearchHandoff,
 } from "../../../web-research/classes/WebResearchRuntime.js";
 import { executeFinalReview } from "../../../assessment/classes/FinalReviewRuntime.js";
+import { listIgnoredRepoPaths } from "../../../git/functions/ignored-paths.js";
 import { execProjectDbQuery } from "../../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
   acknowledgeOperatorFeedback,
@@ -414,7 +415,7 @@ export function createStandardToolHandlerMap({
     }
     return ledger;
   };
-  const beginLiveScopeRequest = (args, ctx) => {
+  const beginLiveScopeRequest = async (args, ctx) => {
     const ambient = getObservationContext() || {};
     const entries = Array.isArray(args?.requests) && args.requests.length > 0
       ? args.requests.slice(0, 24)
@@ -422,6 +423,8 @@ export function createStandardToolHandlerMap({
     let pendingResult = null;
     let lastResult = null;
     for (const entry of entries) {
+      // An untracked path the repository ignores is answered without a gate.
+      const [ignoredByRepository = null] = await listIgnoredRepoPaths(ctx?.cwd, [entry.path]);
       const result = requestJobScopeExpansion({
         jobId: ambient.job_id,
         workItemId: ambient.work_item_id,
@@ -433,6 +436,7 @@ export function createStandardToolHandlerMap({
         reason: entry.reason,
         source: entries.length > 1 ? "embedded_scope_batch_tool" : "embedded_internal_tool",
         liveWait: true,
+        ignoredByRepository,
       });
       lastResult = result;
       if (result?.approved === true) {
@@ -514,8 +518,8 @@ export function createStandardToolHandlerMap({
         return `Error: final_review failed - ${String(error?.message || error).slice(0, 500)}`;
       }
     },
-    request_scope(args, ctx) {
-      const result = beginLiveScopeRequest(args, ctx);
+    async request_scope(args, ctx) {
+      const result = await beginLiveScopeRequest(args, ctx);
       return result?.[LIVE_SCOPE_WAIT] === true ? result : JSON.stringify(result, null, 2);
     },
     chain_read(args, ctx) {
@@ -583,7 +587,7 @@ export function createStandardToolHandlerMap({
     read_file(args, ctx) {
       return deterministicReadFile(args, ctx.cwd, ctx.scopePredicates);
     },
-    write_file(args, ctx) {
+    async write_file(args, ctx) {
       if (!ctx.allowWrite) return "Error: Write access is not granted for this role.";
       const writePath = safePath(ctx.cwd, args.path, ctx.scopePredicates);
       const protectedErr = protectedMutationError("write_file", args.path, writePath, ctx);
@@ -597,7 +601,7 @@ export function createStandardToolHandlerMap({
         if (ambient.job_id == null) {
           return `Error: write_file blocked - ${args.path} is outside the allowed ${exists ? "edit" : "creation"} scope.`;
         }
-        const scopeResult = beginLiveScopeRequest({
+        const scopeResult = await beginLiveScopeRequest({
           path: toRepoRelativePath(ctx.cwd, writePath) ?? "",
           access: exists ? "modify" : "create",
           operation: "write_file",
@@ -618,7 +622,7 @@ export function createStandardToolHandlerMap({
       }
       return deterministicWriteFile(args, ctx.cwd, ctx.scopePredicates);
     },
-    edit_file(args, ctx) {
+    async edit_file(args, ctx) {
       if (!ctx.allowWrite) return "Error: Write access is not granted for this role.";
       const editPath = safePath(ctx.cwd, args.path, ctx.scopePredicates);
       const protectedErr = protectedMutationError("edit_file", args.path, editPath, ctx);
@@ -628,7 +632,7 @@ export function createStandardToolHandlerMap({
         if (ambient.job_id == null) {
           return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope (not in files_to_modify or create_roots).`;
         }
-        const scopeResult = beginLiveScopeRequest({
+        const scopeResult = await beginLiveScopeRequest({
           path: toRepoRelativePath(ctx.cwd, editPath) ?? "",
           access: "modify",
           operation: "edit_file",

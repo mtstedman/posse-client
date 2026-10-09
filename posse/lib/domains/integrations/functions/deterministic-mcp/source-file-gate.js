@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ATLAS_INDEXABLE_SOURCE_EXTENSIONS } from "../../../../catalog/files.js";
 import { hasWindowsPathRoot, toRepoRelativePath } from "../../../../shared/format/functions/display-paths.js";
+import { primaryCheckoutAlias } from "../../../../shared/scope/functions/primary-checkout-alias.js";
 
 export { ATLAS_INDEXABLE_SOURCE_EXTENSIONS };
 
@@ -26,7 +27,11 @@ export function normalizeRepoPathForGate(value, { cwd = null } = {}) {
   raw = raw.replace(/^file:\/\/\/?/iu, "");
 
   const absolute = path.isAbsolute(raw) || hasWindowsPathRoot(raw);
-  if (absolute) raw = toRepoRelativePath(cwd, raw);
+  if (absolute) {
+    // File tools resolve `<primary checkout>/x` from a linked worktree to the
+    // worktree's own `x` (safePath), so gate the read as that same repo path.
+    raw = toRepoRelativePath(cwd, raw) ?? (cwd ? primaryCheckoutAlias(cwd, raw)?.relative : null);
+  }
   if (!raw) return null;
 
   const text = path.posix.normalize(raw.replace(/\\/g, "/")).replace(/\/+$/g, "");

@@ -1,12 +1,17 @@
 import { AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY } from "../../../../catalog/handoff.js";
+import { recordHandoffSoftening } from "./field-diagnostics.js";
 
 const CONTRACT_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
 const {
+  acceptedTaskRoles: ACCEPTED_TASK_ROLES,
   maxContracts: MAX_CONTRACTS,
   maxDeclarations: MAX_DECLARATIONS,
   maxRefsPerTask: MAX_REFS_PER_TASK,
   minTaskRefs: MIN_TASK_REFS,
+  taskRoles: TASK_ROLES,
 } = AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY;
+const NON_DEV_ROLE_RULE = "shared_contract_non_dev_role";
+const DEGRADED_RULE = "shared_contract_degraded_to_constraints";
 
 function fail(code, message) {
   const error = new Error(message);
@@ -60,6 +65,10 @@ function stringList(value, label, { maxItems, maxLength, required = false } = {}
  * Resolve plan-local shared contracts into identical downstream task text.
  * The canonical handoff packet stays backward compatible: declarations become
  * ordinary task constraints and an explicit success criterion for each user.
+ * A contract that breaks the role, reference-count or owner rules is not
+ * rejected: its declarations become plain constraints on each task that
+ * referenced it, with no owner line or success criterion, and the repair is
+ * recorded. Only an unknown contract or owner id still fails.
  */
 export function sharedPlanContractAdditions(tasks, rawContracts) {
   if (!Array.isArray(tasks)) return new Map();
@@ -107,41 +116,61 @@ export function sharedPlanContractAdditions(tasks, rawContracts) {
       maxLength: 500,
       required: true,
     });
-    contracts.set(id, { id, ownerTaskId, declarations });
+    contracts.set(id, { id, index, ownerTaskId, declarations, users: [], counted: [], nonDevRefs: [] });
   }
 
-  const users = new Map([...contracts.keys()].map((id) => [id, []]));
   for (const [index, task] of taskInfo.entries()) {
     for (const ref of task.refs) {
       const contract = contracts.get(ref);
       if (!contract) {
         fail("AGENT_HANDOFF_SEMANTIC_INVALID", `agent_handoff.tasks[${index}].contract_refs references unknown contract ${ref}`);
       }
-      if (!AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY.taskRoles.includes(task.role)) {
-        fail("AGENT_HANDOFF_SEMANTIC_INVALID", `shared contract ${ref} may only be assigned to dev tasks`);
-      }
-      users.get(ref).push(task.id);
+      contract.users.push(task.id);
+      if (!ACCEPTED_TASK_ROLES.includes(task.role)) continue;
+      contract.counted.push(task.id);
+      if (!TASK_ROLES.includes(task.role)) contract.nonDevRefs.push({ index, role: task.role });
     }
   }
 
+  // Rejecting over contract framing cost the names: a live planner told its
+  // artificer-owned contract was invalid deleted it, and the dev task that
+  // used the art lost the exact file names. A contract that still breaks a
+  // rule keeps its declarations; only the owner and success framing go.
+  const degraded = new Set();
   for (const contract of contracts.values()) {
-    const contractUsers = users.get(contract.id);
-    if (contractUsers.length < MIN_TASK_REFS) {
-      fail("AGENT_HANDOFF_SEMANTIC_INVALID", `shared contract ${contract.id} must be referenced by at least ${MIN_TASK_REFS} dev tasks`);
+    const reasons = [
+      ...(contract.counted.length < contract.users.length ? ["task_role"] : []),
+      ...(contract.counted.length < MIN_TASK_REFS ? ["min_task_refs"] : []),
+      ...(!contract.counted.includes(contract.ownerTaskId) ? ["owner_reference"] : []),
+    ];
+    if (reasons.length > 0) {
+      degraded.add(contract.id);
+      recordHandoffSoftening(`agent_handoff.shared_contracts[${contract.index}]`, DEGRADED_RULE, {
+        contract: contract.id,
+        reasons,
+        task_ids: contract.users,
+      });
+      continue;
     }
-    if (!contractUsers.includes(contract.ownerTaskId)) {
-      fail("AGENT_HANDOFF_SEMANTIC_INVALID", `owner task ${contract.ownerTaskId} must reference shared contract ${contract.id}`);
+    for (const { index, role } of contract.nonDevRefs) {
+      recordHandoffSoftening(`agent_handoff.tasks[${index}].contract_refs`, NON_DEV_ROLE_RULE, {
+        contract: contract.id,
+        role,
+      });
     }
   }
 
   return new Map(taskInfo.map((task, index) => {
     const selected = task.refs.map((ref) => contracts.get(ref));
+    const kept = selected.filter((contract) => !degraded.has(contract.id));
     return [index, {
-      constraints: selected.flatMap((contract) => [
-        `[shared contract ${contract.id}] owner task: ${contract.ownerTaskId}`,
-        ...contract.declarations.map((declaration) => `[shared contract ${contract.id}] ${declaration}`),
-      ]),
-      successCriteria: selected.map(
+      constraints: selected.flatMap((contract) => (degraded.has(contract.id)
+        ? contract.declarations
+        : [
+          `[shared contract ${contract.id}] owner task: ${contract.ownerTaskId}`,
+          ...contract.declarations.map((declaration) => `[shared contract ${contract.id}] ${declaration}`),
+        ])),
+      successCriteria: kept.map(
         (contract) => `[shared contract ${contract.id}] All declared names, paths, signatures, and data shapes are used exactly.`,
       ),
     }];

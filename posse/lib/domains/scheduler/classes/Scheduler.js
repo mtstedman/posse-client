@@ -98,7 +98,7 @@ import { maybeExpireStuckFanoutChildren } from "../../research/functions/fanout.
 import { yieldNow } from "../../runtime/functions/yield.js";
 import { runSchedulerBootMaintenanceInWorker } from "../functions/boot-maintenance.js";
 import { coordinateSchedulerBoot } from "../functions/boot-coordination.js";
-import { awaitSchedulerWorkersForShutdown, coordinateSchedulerStop } from "../functions/shutdown-coordination.js";
+import { awaitSchedulerWorkersForShutdown, awaitSessionStopDrain, coordinateSchedulerStop } from "../functions/shutdown-coordination.js";
 import {
   formatProviderAuthLivenessProbe,
   formatWorkspaceHealthCriticalDetail,
@@ -1761,7 +1761,7 @@ export class Scheduler {
    * @param {function} workerCallback - async job executor
    * @param {object} opts
    */
-  async runLoop(workerCallback, { onIdle, onDone, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob, onTeamSubmissionChange, onSessionEvent } = {}) {
+  async runLoop(workerCallback, { onIdle, onDone, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob, onTeamSubmissionChange, onSessionEvent, beforeSessionStop } = {}) {
     // boot() starts renewal immediately after lock acquisition so long
     // pre-loop hooks cannot let the scheduler lock expire.
     if (!this._running) {
@@ -3144,6 +3144,10 @@ export class Scheduler {
       this.stop({ activeWorkers, reason: shutdownReason, fromRunLoop: true });
       this._activeRunWorkers = null;
       this._sharedTrunkPoller = null;
+      // Stopping the monitor clears the session's pulse cache. A merge started
+      // on job completion may still be reading git through it, so let the
+      // caller drain that work first.
+      await awaitSessionStopDrain(this, beforeSessionStop);
       this._sessionMonitor?.stop?.();
       this._sessionMonitor = null;
       this._sessionJobRouter = null;

@@ -63,6 +63,23 @@ function normalizeHistoryRef(op, value) {
   return `${parts[0]}..${parts[1]}`;
 }
 
+// `HEAD:src/a.js` names a file at a revision. The native ref check rejects
+// the colon with a bare message, so point the model at the ops that answer
+// the question instead. The revision part uses the native safe-ref set.
+const REVISION_PATH_REF_RE = /^(?!-)([A-Za-z0-9_./~^-]+):([^:\s][^:]*)$/u;
+
+function revisionPathRefHint(ref) {
+  if (typeof ref !== "string") return null;
+  const match = REVISION_PATH_REF_RE.exec(ref.trim());
+  if (!match) return null;
+  const rev = match[1];
+  const file = match[2].trim().replace(/^(?:\.\/)+/u, "");
+  if (!file) return null;
+  return `Error: git_history ref "${ref.trim()}" names a file at a revision, and git_history does not return file contents. `
+    + `Use op "diff" with ref "${rev}" and path "${file}" to see how the file differs from ${rev} (an empty diff means it is unchanged since ${rev}), `
+    + `or op "log" with path "${file}" for its commits.`;
+}
+
 const BLAME_ROW_RE = /^(\d+)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t/u;
 
 export const BLAME_LINE_TEXT_OMITTED_NOTE =
@@ -111,6 +128,8 @@ export function createGitHistoryExecutor(safePath, { nativeParity = {} } = {}) {
   return async function execGitHistory(args = {}, cwd, scopePredicates) {
     if (!args || typeof args !== "object") return "Error: git_history requires an argument object.";
     const op = String(args.op || "").trim();
+    const revisionPathHint = revisionPathRefHint(args.ref);
+    if (revisionPathHint) return revisionPathHint;
 
     let relPath = null;
     if (args.path != null) {

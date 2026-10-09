@@ -21,13 +21,20 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { verifyOrAcquireJobWriteLockForPath } from "./file-locks.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { teamManagedWriteGuard } from "../../pairing/functions/team-managed-write.js";
+import { primaryCheckoutAlias } from "../../../shared/scope/functions/primary-checkout-alias.js";
 
 function repoRelativePath(cwd, displayPath) {
   const base = path.resolve(cwd || process.cwd());
   const resolved = path.resolve(base, String(displayPath || ""));
   const rel = path.relative(base, resolved);
   if (!rel || rel === ".") return "";
-  if (path.isAbsolute(rel) || rel === ".." || rel.startsWith(`..${path.sep}`) || rel.startsWith("../")) return null;
+  if (path.isAbsolute(rel) || rel === ".." || rel.startsWith(`..${path.sep}`) || rel.startsWith("../")) {
+    // File tools resolve `<primary checkout>/x` from a linked worktree to the
+    // worktree's own `x` (safePath), so guard that same repo path.
+    const alias = primaryCheckoutAlias(base, String(displayPath || ""));
+    if (!alias) return null;
+    return alias.relative === "." ? "" : alias.relative;
+  }
   return rel.replace(/\\/g, "/");
 }
 

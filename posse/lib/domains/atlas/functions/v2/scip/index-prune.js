@@ -24,11 +24,19 @@
  * way on every restage, so it can never be replaced and must not pin the
  * superseded rows forever.
  *
+ * A stale whole-project snapshot likewise fails a document whose file changed
+ * under it (`range_clamped`) on every re-ingest. The warm restages that path
+ * through this session's batches, so such a failure does not block the prune
+ * once the session's manifest staged the path: in a complete session with no
+ * other unavailable document, that path was acknowledged (or rejected for
+ * syntax, which is exempt above).
+ *
  * @param {{
  *   staged: {
  *     reason?: string,
  *     results?: Array<{ ok?: boolean }>,
  *     unavailableDocuments?: Array<{ reason?: string }>,
+ *     manifest?: { batches?: Array<{ paths?: string[] }> } | null,
  *   } | null | undefined,
  *   intakeReports: Array<ScipIntakeReport | null | undefined>,
  * }} input
@@ -40,14 +48,25 @@ export function committedScipIndexIdsForPrune({ staged, intakeReports }) {
   if ((staged.unavailableDocuments || []).some((document) => (
     document?.reason !== "batch_document_unsupported_syntax"
   ))) return null;
+  const sessionPaths = new Set((staged.manifest?.batches || []).flatMap((batch) => batch?.paths || []));
   /** @type {Set<number>} */
   const ids = new Set();
   for (const report of intakeReports) {
     if (report?.ok !== true) return null;
-    if (Array.isArray(report.failed_documents) && report.failed_documents.length > 0) return null;
+    const failed = Array.isArray(report.failed_documents) ? report.failed_documents : [];
+    if (failed.some((document) => !restagedRangeDrift(document, sessionPaths))) return null;
     const id = report.scip_index_id;
     if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) return null;
     ids.add(id);
   }
   return [...ids].sort((left, right) => left - right);
+}
+
+/**
+ * @param {unknown} document
+ * @param {Set<string>} sessionPaths
+ */
+function restagedRangeDrift(document, sessionPaths) {
+  const failed = /** @type {{ reason?: unknown, repo_rel_path?: unknown } | null} */ (document);
+  return failed?.reason === "range_clamped" && sessionPaths.has(String(failed.repo_rel_path || ""));
 }

@@ -4294,6 +4294,35 @@ function recordOwnerToolObservation({
   }
 }
 
+// Tools the owner answers itself (final_review, custom_tools, terminal
+// handoffs and their rejections) never reach the gateway's invocation ledger.
+// Without this row, provider-replay reconciliation records the call as a
+// recovered, executed one.
+function recordOwnerAnsweredToolCall({
+  session,
+  toolName,
+  toolArgs,
+  result,
+  startedAt = null,
+  via,
+  rejectionCode = null,
+} = {}) {
+  try {
+    recordOwnerToolObservation({
+      session,
+      toolName,
+      toolArgs,
+      result,
+      durationMs: startedAt == null ? 0 : Date.now() - startedAt,
+      executor: { via },
+      ...(rejectionCode ? {
+        outcomeOverride: "rejected",
+        observationDetail: { executed: false, consumed_step: false, rejection_code: rejectionCode },
+      } : {}),
+    });
+  } catch { /* telemetry only */ }
+}
+
 function sourceSelectionItems(toolArgs = {}) {
   return [toolArgs || {}];
 }
@@ -6072,14 +6101,23 @@ export class PersistentMcpOwner {
         if (requested.suite === "tools" && requested.name === "agent_handoff") {
           const conflicts = session.toolRequestConflicts(activeToolRequest);
           if (conflicts.length > 0) {
+            const result = mcpToolErrorPayload(
+              "agent_handoff cannot be submitted while sibling tool calls are still running; wait for their results and submit a new terminal report",
+              { code: "terminal_handoff_concurrent_tool", details: { conflicts } },
+            );
+            recordOwnerAnsweredToolCall({
+              session,
+              toolName,
+              toolArgs,
+              result,
+              via: "agent_handoff_owner",
+              rejectionCode: "terminal_handoff_concurrent_tool",
+            });
             sendJson(res, 200, {
               ok: true,
               bootId: this.bootId,
               sessionId: id,
-              message: mcpToolResultMessage(message, mcpToolErrorPayload(
-                "agent_handoff cannot be submitted while sibling tool calls are still running; wait for their results and submit a new terminal report",
-                { code: "terminal_handoff_concurrent_tool", details: { conflicts } },
-              )),
+              message: mcpToolResultMessage(message, result),
             });
             return;
           }
@@ -6091,6 +6129,18 @@ export class PersistentMcpOwner {
             );
           } catch (error) {
             recordAgentHandoffRejection(session?.bootConfig?.agentCallId, error);
+            const result = {
+              content: [{ type: "text", text: `Error executing agent_handoff: ${String(error?.message || error).slice(0, 500)}` }],
+              isError: true,
+            };
+            recordOwnerAnsweredToolCall({
+              session,
+              toolName,
+              toolArgs,
+              result,
+              via: "agent_handoff_owner",
+              rejectionCode: String(error?.code || "AGENT_HANDOFF_REJECTED"),
+            });
             sendJson(res, 200, {
               ok: true,
               bootId: this.bootId,
@@ -6098,10 +6148,7 @@ export class PersistentMcpOwner {
               message: {
                 jsonrpc: "2.0",
                 id: message?.id ?? null,
-                result: {
-                  content: [{ type: "text", text: `Error executing agent_handoff: ${String(error?.message || error).slice(0, 500)}` }],
-                  isError: true,
-                },
+                result,
               },
             });
             return;
@@ -6109,6 +6156,21 @@ export class PersistentMcpOwner {
         }
         if (requested.name !== "agent_handoff"
           && rejectAgentHandoffForLaterTool(session?.bootConfig?.agentCallId, requested.name || toolName)) {
+          const result = {
+            content: [{
+              type: "text",
+              text: "agent_handoff was already staged; later tool calls invalidate the terminal report",
+            }],
+            isError: true,
+          };
+          recordOwnerAnsweredToolCall({
+            session,
+            toolName,
+            toolArgs,
+            result,
+            via: "agent_handoff_owner",
+            rejectionCode: "agent_handoff_terminal_violation",
+          });
           sendJson(res, 200, {
             ok: true,
             bootId: this.bootId,
@@ -6116,13 +6178,7 @@ export class PersistentMcpOwner {
             message: {
               jsonrpc: "2.0",
               id: message?.id ?? null,
-              result: {
-                content: [{
-                  type: "text",
-                  text: "agent_handoff was already staged; later tool calls invalidate the terminal report",
-                }],
-                isError: true,
-              },
+              result,
             },
           });
           return;
@@ -6206,6 +6262,7 @@ export class PersistentMcpOwner {
         if (requested.suite === "tools" && requested.name === "custom_tools") {
           // The shared hot gateway never holds agent tokens. The automation
           // owner authorizes Custom Tools from this session's signed token.
+          const startedAt = Date.now();
           let result;
           try {
             const payload = await new AutomationOwnerClient({
@@ -6216,22 +6273,26 @@ export class PersistentMcpOwner {
           } catch (error) {
             result = { content: [{ type: "text", text: `Error executing custom_tools: ${String(error?.message || error).slice(0, 500)}` }], isError: true };
           }
+          recordOwnerAnsweredToolCall({ session, toolName, toolArgs, result, startedAt, via: "custom_tools_owner" });
           sendJson(res, 200, { ok: true, bootId: this.bootId, sessionId: id, message: {
             jsonrpc: "2.0", id: message?.id ?? null, result,
           } });
           return;
         }
         if (requested.suite === "tools" && requested.name === "web_research_handoff") {
+          const startedAt = Date.now();
           try {
             const receipt = submitWebResearchHandoff(session?.bootConfig?.agentCallId, toolArgs);
+            const result = { content: [{ type: "text", text: JSON.stringify(receipt) }], isError: false };
+            recordOwnerAnsweredToolCall({ session, toolName, toolArgs, result, startedAt, via: "web_research_handoff_owner" });
             sendJson(res, 200, { ok: true, bootId: this.bootId, sessionId: id, terminalHandoffReceipt: true, message: {
-              jsonrpc: "2.0", id: message?.id ?? null,
-              result: { content: [{ type: "text", text: JSON.stringify(receipt) }], isError: false },
+              jsonrpc: "2.0", id: message?.id ?? null, result,
             } });
           } catch (error) {
+            const result = { content: [{ type: "text", text: String(error?.message || error) }], isError: true };
+            recordOwnerAnsweredToolCall({ session, toolName, toolArgs, result, startedAt, via: "web_research_handoff_owner" });
             sendJson(res, 200, { ok: true, bootId: this.bootId, sessionId: id, message: {
-              jsonrpc: "2.0", id: message?.id ?? null,
-              result: { content: [{ type: "text", text: String(error?.message || error) }], isError: true },
+              jsonrpc: "2.0", id: message?.id ?? null, result,
             } });
           }
           return;
@@ -6239,6 +6300,7 @@ export class PersistentMcpOwner {
         if (requested.suite === "tools" && requested.name === "final_review") {
           // Runs the declared tests and a reviewer child of this agent call;
           // the owner's progress heartbeat holds the transport open meanwhile.
+          const startedAt = Date.now();
           let text;
           let isError = false;
           try {
@@ -6256,6 +6318,8 @@ export class PersistentMcpOwner {
             isError = true;
             text = `Error executing final_review: ${String(error?.message || error).slice(0, 500)}`;
           }
+          const result = { content: [{ type: "text", text }], isError };
+          recordOwnerAnsweredToolCall({ session, toolName, toolArgs, result, startedAt, via: "final_review_owner" });
           sendJson(res, 200, {
             ok: true,
             bootId: this.bootId,
@@ -6263,7 +6327,7 @@ export class PersistentMcpOwner {
             message: {
               jsonrpc: "2.0",
               id: message?.id ?? null,
-              result: { content: [{ type: "text", text }], isError },
+              result,
             },
           });
           return;

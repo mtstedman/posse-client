@@ -245,6 +245,16 @@ export function recordAssessmentBoundaryEvent(job, classification, { repeated = 
   }
 }
 
+/** Path-shaped tokens in a verdict's reasons, suggestions and fix instructions. */
+export function assessmentVerdictPathTokens(verdict) {
+  const texts = [
+    ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+    ...(Array.isArray(verdict?.suggestions) ? verdict.suggestions : []),
+    ...(Array.isArray(verdict?.spawn_jobs) ? verdict.spawn_jobs : []).map((spec) => spec?.payload?.instructions),
+  ];
+  return [...new Set(texts.flatMap((text) => extractedPathTokens(text)))];
+}
+
 export function __testExtractedAssessmentPathTokens(text) {
   return extractedPathTokens(text);
 }

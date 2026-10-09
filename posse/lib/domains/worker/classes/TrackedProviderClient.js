@@ -2510,6 +2510,10 @@ export class TrackedProviderClient {
         err._killReason = this.worker._killReasons.get(job_id);
       }
       const stats = err.stats || {};
+      // A native adapter's contract reason rides beside the generic message.
+      const failureErrorText = (err.providerDiagnostic
+        ? `${err.message}: ${err.providerDiagnostic}`
+        : err.message)?.slice(0, 2000) || null;
       const terminalStopOwnsFailure = stats.terminalHandoffStopped === true
         || (terminalHandoffStop != null && abortSignal?.aborted !== true);
       const terminalUsageUnavailable = terminalStopOwnsFailure
@@ -2596,7 +2600,7 @@ export class TrackedProviderClient {
           opts,
           resolveCallCostEstimate: this.resolveCallCostEstimate,
         }),
-        error_text: err.message?.slice(0, 2000),
+        error_text: failureErrorText,
       });
 
       this._recordContextPressureTelemetry({
@@ -2648,7 +2652,7 @@ export class TrackedProviderClient {
         output: failureOutput,
         status: callStatus,
         stats: accountingStats,
-        errorText: err.message?.slice(0, 2000) || null,
+        errorText: failureErrorText,
       });
       recordOutput({
         agent_call_id: agentCallId,
@@ -2666,7 +2670,7 @@ export class TrackedProviderClient {
         providerUsageStatus,
         durationMs: recordedDurationMs,
         exitCode: recordedExitCode,
-        errorText: err.message?.slice(0, 2000) || null,
+        errorText: failureErrorText,
         output: failureOutput,
       });
 
@@ -2707,7 +2711,7 @@ export class TrackedProviderClient {
         reason: callInterrupted ? "provider_attempt_interrupted" : "provider_attempt_failed",
         status: callStatus,
         extra: {
-          error_text: err.message?.slice(0, 2000) || null,
+          error_text: failureErrorText,
           output_chars: recordedOutputChars,
           input_tokens: accountingInputTokens,
           output_tokens: accountingOutputTokens,

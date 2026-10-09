@@ -25,6 +25,9 @@ function operatorDispositionReviewQuestion(verdict) {
     if (verdict?._assessment_sibling_boundary_review === true) {
       return "The assessor failed this work only for paths owned by pending sibling tasks, so no automatic repair was dispatched. Should this work pass or fail?";
     }
+    if (verdict?._assessment_ignored_path_review === true) {
+      return "The assessor failed this work only for paths the repository ignores (git never commits them), so no automatic repair was dispatched. Should this work pass or fail?";
+    }
   }
   return "Automatic assessment could not establish sufficient confidence. Should this work pass or fail?";
 }
@@ -60,12 +63,13 @@ export function handle(job, verdict, ctx) {
   }
 
   const confidenceReview = verdict?._assessment_confidence_review === true;
-  // An evidence-free assessor fail and a repeated sibling-boundary fail
-  // suppress automatic repair and retry, but the claim itself is a defect
-  // question the operator can answer. Failing them closed killed WI 167
-  // (job 2209) with intact commits and no gate.
+  // An evidence-free assessor fail and a repeated sibling-boundary or
+  // ignored-path fail suppress automatic repair and retry, but the claim
+  // itself is a defect question the operator can answer. Failing them closed
+  // killed WI 167 (job 2209) with intact commits and no gate.
   const operatorDispositionReview = verdict?._assessment_unsupported_fail_review === true
-    || verdict?._assessment_sibling_boundary_review === true;
+    || verdict?._assessment_sibling_boundary_review === true
+    || verdict?._assessment_ignored_path_review === true;
   // A retry-eligible review whose stronger-tier retry is no longer available
   // (assessor already at the top tier, or the retry budget is spent) still
   // needs a disposition. Failing it closed discarded correct work and

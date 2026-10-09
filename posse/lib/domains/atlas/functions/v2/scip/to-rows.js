@@ -55,7 +55,13 @@ import { scipRoleIsDefinition, scipRoleIsImport } from "./decode.js";
 //       was indexed at, so views bind SCIP references by moniker and path
 //       (ledger/scip-monikers.js). The bump re-ingests every SCIP layer (and,
 //       through the view fingerprint, rebuilds every view).
-export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v7-definition-monikers";
+//   v8: intake skips a document hydrated from disk (no embedded text) whose
+//       occurrence ranges overflow the current file, instead of storing rows
+//       at shifted positions (a stale whole-project .scip re-ingested at a
+//       later head minted phantom zero-width rows). The bump re-ingests every
+//       SCIP artifact so stale documents go through the skip and are reported
+//       in failed_documents for restage.
+export const ATLAS_SCIP_ROWS_SPEC_VERSION = "scip-rows-v8-range-drift-skip";
 
 /** @typedef {import("./cache.js").CachedDocument} CachedDocument */
 /** @typedef {import("./cache.js").CachedOccurrence} CachedOccurrence */

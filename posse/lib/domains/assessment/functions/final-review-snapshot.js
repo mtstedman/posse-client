@@ -9,6 +9,7 @@ import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
 import { gitExecAsync } from "../../git/functions/utils.js";
+import { listIgnoredRepoPaths } from "../../git/functions/ignored-paths.js";
 import { unifiedLineDiff } from "../../../shared/format/functions/line-diff.js";
 import {
   FINAL_REVIEW_DELTA_INLINE_MAX_CHARS,
@@ -119,6 +120,8 @@ export async function collectScopedChange(cwd, payload = {}, { git = gitExecAsyn
   return {
     files: files.map((file) => ({ path: file, stat: stats.get(file) || (untracked.includes(file) ? "new" : "changed") })),
     renames,
+    // Declared paths git never commits; status never lists them.
+    ignored: await listIgnoredRepoPaths(cwd, [...scope.files], { git }),
     diff,
     digest: createHash("sha256").update(diff).digest("hex"),
     scopeDeclared: scope.declared,
@@ -229,6 +232,7 @@ export function renderFinalReviewEvidence({ job, workItem, payload = {}, change,
     : diff.slice(0, FINAL_REVIEW_DIFF_INLINE_MAX_CHARS);
   const files = Array.isArray(change?.files) ? change.files : [];
   const renames = Array.isArray(change?.renames) ? change.renames : [];
+  const ignored = Array.isArray(change?.ignored) ? change.ignored : [];
   return [
     "═══ FINAL REVIEW SNAPSHOT ═══",
     "TASK CONTRACT:",
@@ -247,6 +251,10 @@ export function renderFinalReviewEvidence({ job, workItem, payload = {}, change,
       ? "CHANGED FILES: none in the declared scope."
       : `CHANGED FILES (${files.length}, complete list):\n${files.map((file) => `- ${file.path} (${file.stat})`).join("\n")}`,
     renames.length === 0 ? null : `RENAMES TOUCHING DECLARED SCOPE:\n${renames.map((entry) => `- ${entry.from} -> ${entry.to}${entry.outsideScope ? " (one path outside declared scope)" : ""}`).join("\n")}`,
+    ignored.length === 0 ? null : [
+      "IGNORED BY REPOSITORY POLICY (declared in scope, but the repository's ignore rules exclude them: git never commits them, so they never appear in CHANGED FILES; their workspace copies are local, uncommitted state, and a generated file may be stale until the project's build or typecheck regenerates it. Judge the tracked sources instead, and do not report a finding whose only fix is editing, regenerating or committing one of these files):",
+      ...ignored.map((entry) => `- ${entry.path} (${entry.source})`),
+    ].join("\n"),
     files.length === 0 ? null : (diff.length <= FINAL_REVIEW_DIFF_INLINE_MAX_CHARS
       ? "DIFF (complete):"
       : `DIFF (first ${FINAL_REVIEW_DIFF_INLINE_MAX_CHARS} of ${diff.length} characters; read the remaining changed files with your read tools):`),

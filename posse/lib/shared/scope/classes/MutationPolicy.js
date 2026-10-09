@@ -3,6 +3,12 @@ import { validateScopedPath } from "../functions/validation.js";
 import fs from "fs";
 import path from "path";
 import { agentHiddenReadablePathReason } from "../functions/agent-hidden-paths.js";
+import { primaryCheckoutAlias } from "../functions/primary-checkout-alias.js";
+import {
+  checkoutReadRootContains,
+  checkoutReadRootForms,
+  isCheckoutReadRootFor,
+} from "../functions/checkout-read-root.js";
 
 const BLOCKED_ALWAYS = /^\s*(rm\s+-rf\s+[\/~]|shutdown|reboot|mkfs|dd\s|format\s|del\s+\/[sq]|:(){ :|curl\s.*\|\s*sh|wget\s.*\|\s*sh)/i;
 const BLOCKED_MUTATING_COMMAND = new RegExp(
@@ -427,6 +433,12 @@ function readonlyBashPathReason(policy, command) {
       }
       if (!absolute && !hasTraversal && !exists) continue;
       if (!pathIsInside(policy.cwd, lexical) && !policy.isWithinScopeRoot(lexical)) {
+        // Reading the primary checkout from a linked worktree would read stale
+        // trunk, so stay denied, but name the path in this job's checkout.
+        const alias = absolute ? primaryCheckoutAlias(policy.cwd, lexical) : null;
+        if (alias) {
+          return `path escapes the workspace read boundary: ${value}; it is in the primary checkout, not this job's checkout, so use the repo-relative path ${alias.relative}`;
+        }
         return `path escapes the workspace read boundary: ${value}`;
       }
       if (exists) {
@@ -620,6 +632,18 @@ function normalizeExternalResourceRoots(values = [], cwd = process.cwd(), allowe
     const abs = normalizeAbs(raw);
     if (!isSystemOwnedExternalResourceRoot(abs, allowedCategories)) continue;
     roots.push(abs);
+  }
+  return [...new Set(roots)];
+}
+
+function normalizeCheckoutReadRoots(values = [], cwd = process.cwd()) {
+  const roots = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const raw = String(value || "").trim();
+    if (!raw || !path.isAbsolute(raw)) continue;
+    const root = path.resolve(raw);
+    if (pathIsInside(cwd, root) || !isCheckoutReadRootFor(root, cwd)) continue;
+    roots.push(root);
   }
   return [...new Set(roots)];
 }
@@ -865,6 +889,12 @@ export class MutationPolicy {
       this.cwd,
       new Set(["artifacts", "workspace", "inputs"]),
     ));
+    // A read root on the job's own repository checkout (an artificer's work
+    // item worktree or project root). Read-only, never part of
+    // isWithinScopeRoot (which some tools treat as a writable artifact root),
+    // and blind to `.git`, `.posse`, `.posse-worktrees` and `.env*`.
+    this.checkoutReadRoots = Object.freeze(normalizeCheckoutReadRoots(readRoots, this.cwd));
+    this._checkoutReadRootForms = Object.freeze(this.checkoutReadRoots.flatMap((root) => checkoutReadRootForms(root)));
     this._grantedWritePaths = new Set();
   }
 
@@ -962,13 +992,33 @@ export class MutationPolicy {
       || matchesExternalRoot(filePath, this.externalReadRoots);
   }
 
+  isWithinCheckoutReadRoot(filePath) {
+    return this._checkoutReadRootForms.length > 0
+      && checkoutReadRootContains(this._checkoutReadRootForms, filePath);
+  }
+
+  // Absolute roots outside the cwd that file tools may read, for naming in a
+  // path rejection.
+  readableRoots() {
+    return [...new Set([...this.externalCreateRoots, ...this.externalReadRoots])];
+  }
+
   toToolkitPredicates() {
     return {
       canEdit: (absPath) => this.canEdit(absPath),
       canCreate: (absPath) => this.canCreate(absPath),
       canDelete: (absPath) => this.canDelete(absPath),
       isWithinScopeRoot: (absPath) => this.isWithinScopeRoot(absPath),
-      hasScope: !this.scope.isEmpty() || this.readRoots.length > 0 || this.externalReadRoots.length > 0,
+      isWithinCheckoutReadRoot: (absPath) => this.isWithinCheckoutReadRoot(absPath),
+      checkoutReadRoots: this.checkoutReadRoots,
+      readableRoots: this.readableRoots(),
+      // A checkout read root alone still counts as a declared scope, so write
+      // tools gate every target through canEdit/canCreate instead of treating
+      // an unscoped job as unrestricted.
+      hasScope: !this.scope.isEmpty()
+        || this.readRoots.length > 0
+        || this.externalReadRoots.length > 0
+        || this.checkoutReadRoots.length > 0,
       policy: this,
     };
   }

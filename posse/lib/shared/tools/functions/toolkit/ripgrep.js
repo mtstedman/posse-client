@@ -147,6 +147,63 @@ export function normalizedGlob(value) {
   return normalizeDisplaySlashes(String(value || "").trim());
 }
 
+const MAX_FLATTENED_BRACE_ALTERNATIVES = 64;
+
+function unescapedBraceIndex(text, from = 0) {
+  for (let i = from; i < text.length; i++) {
+    if (text[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (text[i] === "{") return i;
+  }
+  return -1;
+}
+
+function expandBraceAlternatives(text, results) {
+  const open = unescapedBraceIndex(text);
+  if (open < 0) {
+    if (!results.includes(text)) results.push(text);
+    return results.length <= MAX_FLATTENED_BRACE_ALTERNATIVES;
+  }
+  const close = findBraceClose(text, open);
+  if (close < 0) return false;
+  const head = text.slice(0, open);
+  const tail = text.slice(close + 1);
+  for (const alt of splitBraceAlternatives(text.slice(open + 1, close))) {
+    if (!expandBraceAlternatives(`${head}${alt}${tail}`, results)) return false;
+  }
+  return true;
+}
+
+// ripgrep rejects nested brace groups ("nested alternate groups are not
+// allowed"), but models write `{README*,playwright*.{js,ts}}`. Rewrite each
+// top-level group that nests into one single-level group of the same
+// alternatives; text outside the braces stays put, so anchoring is unchanged.
+// A glob that cannot be flattened safely is returned as is for rg to report.
+export function ripgrepIncludeGlob(value) {
+  const glob = normalizedGlob(value);
+  let out = "";
+  let cursor = 0;
+  for (let open = unescapedBraceIndex(glob); open >= 0; open = unescapedBraceIndex(glob, cursor)) {
+    const close = findBraceClose(glob, open);
+    if (close < 0) break;
+    const content = glob.slice(open + 1, close);
+    out += glob.slice(cursor, open);
+    cursor = close + 1;
+    if (unescapedBraceIndex(content) < 0) {
+      out += glob.slice(open, cursor);
+      continue;
+    }
+    const alternatives = [];
+    for (const alt of splitBraceAlternatives(content)) {
+      if (!expandBraceAlternatives(alt, alternatives)) return glob;
+    }
+    out += `{${alternatives.join(",")}}`;
+  }
+  return out + glob.slice(cursor);
+}
+
 export function regexPatternNeedsMultiline(value) {
   const pattern = String(value || "");
   if (/[\r\n]/u.test(pattern)) return true;
@@ -302,6 +359,10 @@ export function addRipgrepSkipGlobs(rgArgs, skipDirs) {
 export function addAgentHiddenRipgrepGlobs(rgArgs) {
   rgArgs.push("--glob", "!.gitignore");
   rgArgs.push("--glob", "!**/.gitignore");
+  // A linked worktree's `.git` is a file naming the primary checkout's private
+  // gitdir; the `.git/**` skip globs only exclude a `.git` directory.
+  rgArgs.push("--glob", "!.git");
+  rgArgs.push("--glob", "!**/.git");
 }
 
 function firstMatchedLine(text) {

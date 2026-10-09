@@ -39,7 +39,7 @@ import { buildCodexLaunchInput, codexLaunchOverridesFromPlan, normalizeCodexLaun
 import { prepareCodexResearchMcpSurface } from "./research-mcp-surface.js";
 import { codexExitCleanupRegistry, normalizeCodexSessionHandle, extractCodexSessionHandleFromStreamMessage } from "./session.js";
 import { __testBuildCloseStats, __testClassifyCodexStderrLine, _appendCodexToolUse, _extractCodexToolUse, appendBoundedCodexOutput, codexUsageEventDedupeKey, createCodexUsageAccumulator, extractLiveRequestUsageFromEvent, extractTurnCountFromEvent, extractUsageFromEvent, isTurnCompletedEvent, summarizeJsonEvent } from "./stream-events.js";
-import { CodexTerminalUsageFlush } from "./terminal-usage-flush.js";
+import { CodexTerminalUsageFlush, runWithTerminalUsageFlush } from "./terminal-usage-flush.js";
 import { createCodexRolloutUsageTailer, reconcileCodexFreshSessionUsage, recoverCodexRolloutUsage, resolveCodexCloseTurns, resolveCodexLiveTurnBudget, sliceCodexResumedSessionUsage } from "./rollout-usage.js";
 import { recoverCodexNativeSubagentTelemetry } from "./native-subagent-telemetry.js";
 import { prepareCodexNativeBatchingCatalog } from "./native-batching-catalog.js";
@@ -449,10 +449,16 @@ export async function callProvider(promptText, {
           priorSessionHandle: resumeSessionHandle,
           recyclingMode: resumeSessionHandle ? "resume" : "fresh",
         });
-        const result = await runNativeDispatch(request, {
-          abortSignal, mcpGate, projectDir: providerPaths.projectDir, silent, onLine,
-          onAgentCommentary, onProviderToolUse, onProviderToolResult, onUsageSegment, onUsageProgress,
-        });
+        // A terminal handoff stop lands before Codex records the usage of the
+        // request that made the handoff call; give that segment a bounded wait.
+        const result = await runWithTerminalUsageFlush(abortSignal, ({ signal, onUsage }) => runNativeDispatch(request, {
+          abortSignal: signal, mcpGate, projectDir: providerPaths.projectDir, silent, onLine,
+          onAgentCommentary, onProviderToolUse, onProviderToolResult, onUsageProgress,
+          onUsageSegment: (segment) => {
+            onUsage();
+            onUsageSegment?.(segment);
+          },
+        }));
         result.stats.atlasMethod = atlasMethodForStats;
         resolve(result);
       } finally {

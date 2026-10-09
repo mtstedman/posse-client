@@ -135,7 +135,7 @@ export async function buildAssessmentReplanDiffBlock(payload, researchCwd) {
   return narrative?.reason ? `DIFF NARRATIVE: unavailable (${narrative.reason})` : "";
 }
 
-export function buildPlannerAssessmentReplanContext(payload, { readRoot = "", diffBlock = "", cwdError = "" } = {}) {
+export function buildPlannerAssessmentReplanContext(payload, { readRoot = "", diffBlock = "", cwdError = "", priorResearchBlock = "" } = {}) {
   if (payload?._assessment_replan !== true) return "";
   const frame = replanFrame(payload);
   return [
@@ -147,6 +147,7 @@ export function buildPlannerAssessmentReplanContext(payload, { readRoot = "", di
       ? "Use the planner's read-only tools and terminal plan output. Earlier research is listed under WORK ITEM RESEARCH REFS when present; when a plan-blocking fact is still missing and dispatch_agent is issued to you, research children remain available."
       : "Use the standard planner's read-only tools and terminal plan output. No researcher dispatch is available on this loopback.",
     buildAssessmentReplanEvidenceBlock(payload, { researchCwd: readRoot, diffBlock, cwdError, readerLabel: "Planner" }),
+    priorResearchBlock ? String(priorResearchBlock).trimEnd() : "",
     Array.isArray(payload.assessment_evidence_selectors) && payload.assessment_evidence_selectors.length > 0
       ? "ASSESSOR EVIDENCE: the assessor's cited selectors are issued to you as traversal refs in the ref map; open them with traverse_ref before re-scoping the affected region."
       : "",
@@ -167,6 +168,9 @@ export function buildPlannerAssessmentReplanContext(payload, { readRoot = "", di
     promptLiteral("RETAINED WORK", JSON.stringify(payload.retained_work || [])),
     Array.isArray(payload.superseded_work) && payload.superseded_work.length > 0
       ? promptLiteral("SUPERSEDED WORK (canceled by this replan, not done; keep its scope and verification covered)", JSON.stringify(payload.superseded_work))
+      : "",
+    Array.isArray(payload.in_flight_work) && payload.in_flight_work.length > 0
+      ? promptLiteral("IN-FLIGHT WORK (still running when this replan was created; not canceled; its outcome is not known yet)", JSON.stringify(payload.in_flight_work))
       : "",
   ].filter(Boolean).join("\n\n");
 }

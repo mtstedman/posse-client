@@ -97,7 +97,7 @@ import {
   validatePlannerContextPreflight,
 } from "../../../planning/functions/planner-helpers.js";
 import { listProjectDbWrites } from "../../../../shared/tools/functions/toolkit/project-db/write-evidence.js";
-import { workItemResearchRefsBlock } from "../../../research/functions/work-item-research-refs.js";
+import { priorPlanResearchRefsBlock, workItemResearchRefsBlock } from "../../../research/functions/work-item-research-refs.js";
 import { knownRedTestCommandsForRepository } from "../../functions/helpers/test-execution-receipt.js";
 
 // A dispatch planner investigates the repository itself before it plans, so
@@ -321,6 +321,11 @@ export class PlannerRole extends BaseRole {
           readRoot: plannerReadRoot,
           cwdError: replanCwd?.error || "",
           diffBlock: await buildReplanDiff(payload, plannerReadRoot),
+          // Children an earlier plan dispatched, offered as refs to read; the
+          // continuity resolver still never seeds planning from them.
+          priorResearchBlock: payload.planner_dispatch === true
+            ? priorPlanResearchRefsBlock({ workItemId: job.work_item_id, jobId: job.id })
+            : "",
         })
       : "";
     const atlasReadMount = await ensureReadRootMounted({

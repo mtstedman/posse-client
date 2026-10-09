@@ -12,23 +12,70 @@ import {
 } from "../../../format/functions/display-paths.js";
 import { MutationPolicy, splitShellSubcommands as policySplitShellSubcommands } from "../../../scope/classes/MutationPolicy.js";
 import { agentHiddenReadablePathReason } from "../../../scope/functions/agent-hidden-paths.js";
+import { primaryCheckoutAlias } from "../../../scope/functions/primary-checkout-alias.js";
 
 const PRIVATE_WORKSPACE_DOT_DIRS = new Set([".git", ".claude", ".codex", ".posse-worktrees", ".posse-test-suites"]);
 const PRIVATE_POSSE_ROOTS = new Set(["agent-loaders", "db", "logs", "mcp", "research-state", "atlas"]);
 export const DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES = 5 * 1024 * 1024;
 
 export function safePath(cwd, filePath, scopePredicates = null) {
-  const resolved = path.resolve(cwd, filePath);
+  let resolved = path.resolve(cwd, filePath);
   const realCwd = realpathExistingPrefix(cwd);
-  const realResolved = realpathExistingPrefix(resolved);
-  const withinCwd = isInsideRoot(realResolved, realCwd, { followSymlinks: false });
+  let realResolved = realpathExistingPrefix(resolved);
+  let withinCwd = isInsideRoot(realResolved, realCwd, { followSymlinks: false });
   if (!withinCwd && !scopePredicates?.isWithinScopeRoot(realResolved)) {
-    throw new Error(`Path escapes working directory: ${filePath}`);
+    // A job in a linked worktree that names `<primary checkout>/x` means the
+    // same repo path in its own checkout, never the primary's stale copy.
+    const alias = primaryCheckoutAlias(cwd, filePath);
+    if (alias) {
+      resolved = alias.aliased;
+      realResolved = realpathExistingPrefix(resolved);
+      withinCwd = isInsideRoot(realResolved, realCwd, { followSymlinks: false });
+    }
+    if (!withinCwd) {
+      const checkoutPath = checkoutReadRootPath(filePath, resolved, realResolved, scopePredicates);
+      if (checkoutPath) return checkoutPath;
+      throw new Error(`Path escapes working directory: ${filePath}. Readable roots: ${readableRootsText(cwd, scopePredicates)}`);
+    }
   }
   if (withinCwd && isPrivateWorkspacePath(realCwd, realResolved)) {
     throw new Error(`Access to private workspace metadata is blocked: ${filePath}`);
   }
   return resolved;
+}
+
+// A read-only checkout root (an artificer's work item checkout) admits a path
+// by both its spelling and its symlink-resolved target. When that root is a
+// linked worktree, `<primary checkout>/x` names the same repo path in it.
+function checkoutReadRootPath(filePath, resolved, realResolved, scopePredicates) {
+  const within = scopePredicates?.isWithinCheckoutReadRoot;
+  if (typeof within !== "function") return null;
+  if (within(resolved) && within(realResolved)) return resolved;
+  for (const root of scopePredicates.checkoutReadRoots || []) {
+    const alias = primaryCheckoutAlias(root, filePath);
+    if (alias && within(alias.aliased) && within(realpathExistingPrefix(alias.aliased))) return alias.aliased;
+  }
+  return null;
+}
+
+/**
+ * True for an entry a list or search reached outside the cwd that no read
+ * root admits, such as a checkout read root's `.env*` file or a `.posse` file
+ * an include glob pulled back past the skip globs.
+ */
+export function isUnreadableOutsideCwd(cwd, absPath, scopePredicates = null) {
+  if (isInsideRoot(absPath, cwd, { followSymlinks: false })) return false;
+  return !scopePredicates?.isWithinScopeRoot?.(absPath)
+    && !scopePredicates?.isWithinCheckoutReadRoot?.(absPath);
+}
+
+function readableRootsText(cwd, scopePredicates) {
+  const roots = [
+    `${path.resolve(cwd)} (working directory)`,
+    ...(scopePredicates?.readableRoots || []),
+    ...(scopePredicates?.checkoutReadRoots || []).map((root) => `${root} (read-only checkout)`),
+  ];
+  return [...new Set(roots)].join(", ");
 }
 
 function isPrivateWorkspacePath(realCwd, resolvedPath) {

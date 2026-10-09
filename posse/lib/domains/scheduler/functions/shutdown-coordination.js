@@ -1,5 +1,5 @@
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { recordSchedulerShutdownMarker } from "../../../shared/telemetry/functions/run-diagnostics.js";
+import { recordRunDiagnostic, recordSchedulerShutdownMarker } from "../../../shared/telemetry/functions/run-diagnostics.js";
 import { logEvent } from "../../queue/functions/index.js";
 import { maybeCompactRuntimeDb } from "../../ui/functions/admin/retention.js";
 
@@ -111,4 +111,28 @@ export async function awaitSchedulerWorkersForShutdown(scheduler, activeWorkers,
         }
       }
 
+}
+
+// Await the caller's drain of in-flight run work (job-completion auto-merges)
+// before the run loop stops the session monitor. Not bounded: the caller
+// waits for the same work right after runLoop returns, so a limit here would
+// only stop the monitor in the middle of a merge without shortening the exit.
+export async function awaitSessionStopDrain(scheduler, drain) {
+  if (typeof drain !== "function") return;
+  const startedAt = Date.now();
+  let drainedMerges = 0;
+  let error = null;
+  try {
+    drainedMerges = Number(await drain()) || 0;
+  } catch (err) {
+    error = err?.message || String(err);
+  }
+  try {
+    recordRunDiagnostic("scheduler.session_stop_drain", {
+      owner_id: scheduler.ownerId,
+      drained_merges: drainedMerges,
+      waited_ms: Date.now() - startedAt,
+      error,
+    });
+  } catch { /* observational */ }
 }

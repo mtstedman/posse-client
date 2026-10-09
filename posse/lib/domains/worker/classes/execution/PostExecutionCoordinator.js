@@ -79,6 +79,12 @@ import {
   MAX_MCP_INFRA_BLOCK_RETRIES,
   MCP_INFRA_BLOCK_BACKOFF_MS,
 } from "../../functions/helpers/block-reason.js";
+import {
+  IMAGE_PROVIDER_BLOCK_RETRY_ERROR,
+  imageProviderBlockDisposition,
+  MAX_IMAGE_PROVIDER_BLOCK_RETRIES,
+  withImageProviderBlockRequeue,
+} from "../../functions/helpers/image-provider-block.js";
 import { providerQuotaResumeJitterSec } from "../../functions/helpers/provider-quota-pause.js";
 import {
   spawnDeadLetterRecoveryForDependents as spawnDeadLetterRecoveryForDependentsFromModule,
@@ -162,6 +168,7 @@ function parkBlockedRecoveryGate(worker, job, leaseToken, attempt, {
   blockReason,
   detail,
   fileRequests = [],
+  imageProviderReadiness = null,
 }) {
   const blockedPayload = {
     original_job_id: job.id,
@@ -172,6 +179,7 @@ function parkBlockedRecoveryGate(worker, job, leaseToken, attempt, {
     context: [
       `Task: ${job.title}`,
       `Block reason: ${blockReason}`,
+      ...(imageProviderReadiness ? [`Image provider readiness: ${imageProviderReadiness}`] : []),
       "",
       "Retry reruns the same task. Add instructions, provide the missing input, or choose replan; a retry with nothing changed will likely block again.",
       "",
@@ -628,13 +636,37 @@ export async function handlePostExecutionForWorker({
             return;
           }
 
+          // An unready image provider is an outage, not a task problem:
+          // requeue through the ordinary retry path a bounded number of times
+          // before the gate opens.
+          const blockedJob = getJob(job.id) || job;
+          const blockedJobPayload = this.parsePayload(blockedJob);
+          const imageProviderBlock = imageProviderBlockDisposition({
+            job: blockedJob,
+            payload: blockedJobPayload,
+            attemptId: attempt.id,
+            attempts: allAttempts,
+          });
+          if (imageProviderBlock.requeue) {
+            const payloadJson = JSON.stringify(withImageProviderBlockRequeue(blockedJobPayload, attempt.id));
+            updateJobPayload(job.id, payloadJson);
+            job.payload_json = payloadJson;
+            this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: ${imageProviderBlock.readiness} — requeueing (retry ${imageProviderBlock.retry}/${MAX_IMAGE_PROVIDER_BLOCK_RETRIES})${C.reset}`);
+            this._retryOrFail(job, leaseToken, IMAGE_PROVIDER_BLOCK_RETRY_ERROR, { attemptId: attempt.id });
+            await this._cleanupWorktreeIfDone(job.work_item_id);
+            return;
+          }
+
           const parked = parkBlockedRecoveryGate(this, job, leaseToken, attempt, {
-            blockedCount,
+            blockedCount: blockedCount - imageProviderBlock.requeuedBlocks,
             blockReason: fullBlockReason,
             detail: agentCompletionLog.body || output,
             fileRequests: hasPendingFileRequests()
               ? [...(pendingFileRequests.autoApproved || []), ...(pendingFileRequests.needsApproval || [])]
               : [],
+            imageProviderReadiness: imageProviderBlock.readiness
+              ? `${imageProviderBlock.readiness}${imageProviderBlock.generationRequeues > 0 ? ` (requeued ${imageProviderBlock.generationRequeues} time(s) before this gate)` : ""}`
+              : null,
           });
           if (!parked) return;
           refreshAndExtractInsightsFromModule(job.work_item_id);

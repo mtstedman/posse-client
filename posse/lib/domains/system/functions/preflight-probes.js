@@ -95,6 +95,9 @@ function staleLockProbe(projectDir, staleMs = STALE_LOCK_MS) {
   const locks = [];
   for (const lockRoot of lockRoots) {
     for (const lockPath of listFiles(lockRoot)) {
+      // Lock directories also hold the lock-transition arbiter DB and its
+      // SQLite journal (git/functions/worktree-locks.js); only *.lock files are locks.
+      if (!lockPath.endsWith(".lock")) continue;
       let stat = null;
       let owner = null;
       try {
@@ -236,6 +239,9 @@ async function staleLockProbeAsync(projectDir, staleMs = STALE_LOCK_MS) {
   const locks = [];
   for (const lockRoot of lockRoots) {
     for (const lockPath of await listFilesAsync(lockRoot)) {
+      // Lock directories also hold the lock-transition arbiter DB and its
+      // SQLite journal (git/functions/worktree-locks.js); only *.lock files are locks.
+      if (!lockPath.endsWith(".lock")) continue;
       let stat = null;
       let owner = null;
       try {

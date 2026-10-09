@@ -185,7 +185,7 @@ export class DisplayBottomInputRenderer {
     // ── Kill mode ──
     if (this._inputMode === "kill") {
       lines.push("");
-      lines.push(` ${C.red}${C.bold}\u26a1 Kill/Bump Worker${C.reset}  ${C.dim}Select worker to kill (moves to next attempt):${C.reset}`);
+      lines.push(` ${C.red}${C.bold}\u26a1 Kill Worker${C.reset}  ${C.dim}Select worker to kill (cancels its job; Retry runs it again):${C.reset}`);
       let idx = 1;
       const killJobIds = this._visibleKillJobIds();
       for (const jobId of killJobIds) {
@@ -277,7 +277,7 @@ export class DisplayBottomInputRenderer {
         : this._inputBuf;
       lines.push(` ${C.cyan}>${C.reset} ${displayBuf}${cursor}`);
       lines.push("");
-      lines.push(` ${C.dim}[Enter] kill & redirect  [Esc] cancel${C.reset}`);
+      lines.push(` ${C.dim}[Enter] queue nudge  [Esc] cancel${C.reset}`);
       return lines;
     }
 

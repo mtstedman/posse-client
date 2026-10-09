@@ -307,7 +307,13 @@ function isAncestor(projectDir, ancestor, descendant) {
   }
 }
 
-function refSha(projectDir, ref) {
+/**
+ * Resolve a ref to its object id, or "" when it does not resolve. `strict`
+ * callers turn "" into a terminal missing-ref result, so for them only git
+ * itself saying no reads as missing; an infrastructure failure (git never
+ * ran: cold pulse cache, native binary unavailable, busy gate) is rethrown.
+ */
+function refSha(projectDir, ref, { strict = false } = {}) {
   try {
     const oid = String(
       testOverrides?.resolveRefSha
@@ -315,7 +321,8 @@ function refSha(projectDir, ref) {
         : execGit(["rev-parse", ref], projectDir),
     ).trim();
     return SHA_RE.test(oid) ? oid : "";
-  } catch {
+  } catch (err) {
+    if (strict && !isGitCommandFailure(err)) throw err;
     return "";
   }
 }
@@ -1557,11 +1564,14 @@ export async function mergeToSharedTrunkAsync({
   const workItemContext = team.workItemContext || null;
   const provenance = await sessionProvenanceContext();
 
-  const sourceShaAtStart = refSha(projectDir, branch);
+  // Strict source and base reads: an infrastructure failure lands in the catch
+  // below and defers the merge instead of reading as a missing branch.
+  let sourceShaAtStart = null;
   let coordinated;
   try {
+    sourceShaAtStart = refSha(projectDir, branch, { strict: true });
     coordinated = await underMergeLock(() => withWorktreeLockAsync(projectDir, projectDir, async () => {
-    const sourceSha = refSha(projectDir, branch);
+    const sourceSha = refSha(projectDir, branch, { strict: true });
     if (!sourceSha) return { ok: false, reason: "source_head_unresolved", message: `Cannot resolve ${branch}` };
     const key = String(purposeKey || sourceSha);
     let existing = listUnresolvedSharedTrunkMergeOperations({ workItemId: Number(workItemId) })
@@ -1582,7 +1592,7 @@ export async function mergeToSharedTrunkAsync({
         return { ok: true, sharedTrunk: true, published: true, recovered: true, mergeHash: existing.candidateSha, targetBranch: config.branch, operation: existing };
       }
     }
-    let baseSha = sync.newSha || refSha(projectDir, config.branch);
+    let baseSha = sync.newSha || refSha(projectDir, config.branch, { strict: true });
     if (!baseSha) return { ok: false, reason: "base_head_unresolved" };
     let operation = existing || beginSharedTrunkMergeOperation({
       workItemId: Number(workItemId),
@@ -2170,7 +2180,9 @@ export async function mergeToSharedTrunkAsync({
     return { ok: false, reason: "push_retry_exhausted", operation };
     }), SHARED_TRUNK_MERGE_LOCK_OWNERS.MERGE, mergeLockAlreadyHeld === true);
   } catch (error) {
-    const operation = listSharedTrunkMergeOperations({ workItemId: Number(workItemId) })
+    // A source read that never completed journaled nothing for this attempt;
+    // matching on an unknown sha would adopt an earlier publication.
+    const operation = sourceShaAtStart === null ? null : listSharedTrunkMergeOperations({ workItemId: Number(workItemId) })
       .filter((value) => value.purpose === purpose
         && value.sourceBranch === branch
         && (!sourceShaAtStart || value.sourceSha === sourceShaAtStart))

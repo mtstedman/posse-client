@@ -51,7 +51,6 @@ import {
   checkPosseUpdateAvailabilityCached,
   formatPosseUpdateAvailableWarning,
 } from "../functions/update-command.js";
-import { createRunWrapUpTracker } from "../functions/review-session.js";
 import { BossyLocalStream } from "../../bridge/classes/BossyLocalStream.js";
 import { readHumanGateResnoozeSec } from "../../scheduler/functions/config.js";
 import { recordStartupDirtyTreeBlock } from "../../git/functions/startup-dirty-tree-block.js";
@@ -2893,16 +2892,9 @@ export class RunSession {
     });
   } catch { /* observational */ }
 
-  if (display && idleAutoMerge.isRunning()) {
-    const pendingAutoMergeWrapUp = createRunWrapUpTracker(display, {
-      subtitle: "All jobs are done. Finishing pending merge and ATLAS closeout; Enter leaves remaining ATLAS/ONNX work queued.",
-    });
-    pendingAutoMergeWrapUp.start("auto-merge", "finishing pending merge");
-    await idleAutoMerge.wait();
-    pendingAutoMergeWrapUp.done("auto-merge", "finished");
-  } else {
-    await idleAutoMerge.wait();
-  }
+  // runLoop already drained this before stopping the session monitor; a merge
+  // started after that (a worker that outlived the shutdown wait) is finished here.
+  await schedulerCallbacks.finishPendingAutoMerge();
 
   // ── Post-scheduler: clean up worktrees if shutdown was triggered ──
   if (await shutdown.finishAfterScheduler({

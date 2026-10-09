@@ -28,10 +28,10 @@ import {
   globToRegex,
   isWorkspaceRootIgnoredByGit,
   makeGitIgnoreChecker,
-  normalizedGlob,
   parseRipgrepJsonMatches,
   regexPatternNeedsMultiline,
   resolveRipgrepCommand,
+  ripgrepIncludeGlob,
 } from "./ripgrep.js";
 import { sanitizeAbsolutePathsInText, toDisplayPath } from "../../../format/functions/display-paths.js";
 import {
@@ -41,6 +41,7 @@ import {
   DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
   isSensitiveEnvFileOrTargetPath,
   isSensitiveEnvFilePath,
+  isUnreadableOutsideCwd,
   resolveDeterministicReadableFile,
   safePath,
   splitShellSubcommands,
@@ -711,6 +712,7 @@ export function createDeterministicToolkit({
         if (skipDirs.has(entry.name)) continue;
         const full = path.join(currentDir, entry.name);
         if (agentHiddenPathReasonForAbsolute(cwd, full)) continue;
+        if (isUnreadableOutsideCwd(cwd, full, scopePredicates)) continue;
         if (isGitIgnored(full)) continue;
         if (entry.isDirectory()) {
           if (recursive) walk(full);
@@ -733,6 +735,7 @@ export function createDeterministicToolkit({
           if (skipDirs.has(entry.name)) continue;
           const full = path.join(dir, entry.name);
           if (agentHiddenPathReasonForAbsolute(cwd, full)) continue;
+          if (isUnreadableOutsideCwd(cwd, full, scopePredicates)) continue;
           if (isGitIgnored(full)) continue;
           if (entry.isFile() && (!globRegex || globRegex.test(entry.name))) {
             if (results.length >= maxResults) {
@@ -854,7 +857,7 @@ export function createDeterministicToolkit({
       if (isWorkspaceRootIgnoredByGit(rootPath)) rgArgs.push("--no-ignore");
       addRipgrepSkipGlobs(rgArgs, skipDirs);
       addAgentHiddenRipgrepGlobs(rgArgs);
-      if (args.include) rgArgs.push("--glob", normalizedGlob(args.include));
+      if (args.include) rgArgs.push("--glob", ripgrepIncludeGlob(args.include));
       if (args.literal) rgArgs.push("--fixed-strings");
       if (args.case_insensitive) rgArgs.push("--ignore-case");
       if (args.multiline || (!args.literal && regexPatternNeedsMultiline(args.pattern))) {
@@ -893,6 +896,7 @@ export function createDeterministicToolkit({
           if (!entry.file) continue;
           const filePath = path.resolve(rootPath, entry.file);
           if (isSensitiveEnvFileOrTargetPath(filePath) || agentHiddenPathReasonForAbsolute(cwd, filePath)) continue;
+          if (isUnreadableOutsideCwd(cwd, filePath, scopePredicates)) continue;
           const display = toDisplayPath(cwd, filePath);
           rows.push(outputMode === "count" ? `${display}:${entry.count}` : display);
         }
@@ -953,7 +957,9 @@ export function createDeterministicToolkit({
         beforeContext,
         afterContext,
         {
-          isSensitivePath: (filePath) => isSensitiveEnvFileOrTargetPath(filePath) || !!agentHiddenPathReasonForAbsolute(cwd, filePath),
+          isSensitivePath: (filePath) => isSensitiveEnvFileOrTargetPath(filePath)
+            || !!agentHiddenPathReasonForAbsolute(cwd, filePath)
+            || isUnreadableOutsideCwd(cwd, filePath, scopePredicates),
           toDisplay: (filePath) => toDisplayPath(cwd, filePath),
         },
       );

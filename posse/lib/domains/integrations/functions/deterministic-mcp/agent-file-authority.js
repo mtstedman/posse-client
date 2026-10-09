@@ -12,6 +12,7 @@ import {
   getWorkItem,
 } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
+import { workItemCheckoutReadRoot } from "../../../../shared/scope/functions/checkout-read-root.js";
 
 const ACTIVE_JOB_STATUS_SET = new Set(ACTIVE_LEASE_STATUSES);
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
@@ -278,6 +279,12 @@ export function resolveAgentFileAuthority(attachment = {}, deps = {}) {
         "Persisted Job read scope escapes its Work Item boundary",
       );
     }
+  }
+  // The runtime grants an artificer one read-only root on its Work Item's
+  // checkout (its worktree, else the project root); the tool policy keeps
+  // `.git`, `.posse`, `.posse-worktrees` and `.env*` out of it.
+  if (runtime.artifactMode && attachedRole === "artificer") {
+    readRoots.push(workItemCheckoutReadRoot(roots.projectRoot, attachedWorkItemId));
   }
 
   return Object.freeze({

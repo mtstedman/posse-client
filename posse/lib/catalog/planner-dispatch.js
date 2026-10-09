@@ -7,10 +7,12 @@ import { MODEL_TIERS } from "./model.js";
 // fetches while the planner keeps judgment. The configured default is never
 // the strong tier and a child never inherits the planner's model. The planner
 // may request a stronger tier for a code child that needs deep multi-file
-// reasoning; web children always run on the configured child tier.
+// reasoning, for at most RESEARCH_CHILD_STRONG_LIMIT children per planner
+// call; web children always run on the configured child tier.
 export const RESEARCH_CHILD_DEFAULT_MODEL_TIERS = Object.freeze(MODEL_TIERS.filter((tier) => tier !== "strong"));
 export const RESEARCH_CHILD_REQUEST_MODEL_TIERS = MODEL_TIERS;
 export const RESEARCH_CHILD_FALLBACK_MODEL_TIER = "standard";
+export const RESEARCH_CHILD_STRONG_LIMIT = 1;
 
 export const PLANNER_DISPATCH_MODES = Object.freeze({ ROUTER: "router", PLANNER: "planner" });
 export const PLANNER_DISPATCH_MODE_VALUES = Object.freeze(Object.values(PLANNER_DISPATCH_MODES));
@@ -31,7 +33,7 @@ export const PLANNER_DISPATCH_SETTINGS = Object.freeze([
   // planning and cheaper models on the bounded reads that feed it.
   { key: SETTING_KEYS.PLANNER_DISPATCH_MODEL_TIER, default: "strong", options: MODEL_TIERS, description: "Model tier for the planner job on planner-led intake." },
   { key: SETTING_KEYS.PLANNER_DISPATCH_REASONING_EFFORT, default: "high", options: PLANNER_RESEARCH_EFFORT_VALUES, description: "Reasoning effort for the planner job on planner-led intake; each research child gets the effort the planner requests for it, clamped by the ceiling." },
-  { key: SETTING_KEYS.PLANNER_RESEARCH_CHILD_MODEL_TIER, default: "standard", options: RESEARCH_CHILD_DEFAULT_MODEL_TIERS, description: "Default model tier for research children dispatched by the planner: cheap or standard, always below the planner. The planner may request strong for one child that needs it." },
+  { key: SETTING_KEYS.PLANNER_RESEARCH_CHILD_MODEL_TIER, default: "standard", options: RESEARCH_CHILD_DEFAULT_MODEL_TIERS, description: "Default model tier for research children dispatched by the planner: cheap or standard, always below the planner. The planner may request strong for one child per planner call; further strong requests run on this tier." },
   { key: SETTING_KEYS.PLANNER_RESEARCH_CHILD_REASONING_EFFORT, default: "medium", options: PLANNER_RESEARCH_EFFORT_VALUES, description: "Reasoning effort a research child runs at when the planner does not request one; the ceiling still bounds every request." },
   { key: SETTING_KEYS.AGENT_DISPATCH_TOOL_TIMEOUT_SEC, default: "1500", numeric: { integer: true, min: 60, max: Math.floor((MCP_TRANSPORT_TIMEOUT_MS - 1) / 1000) }, description: "Timeout in seconds for the experimental agent-dispatch MCP gate; always below the owner transport deadline." },
 // Account-level: the dispatch mode and its budgets describe how this

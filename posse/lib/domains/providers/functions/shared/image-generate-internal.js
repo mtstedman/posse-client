@@ -15,6 +15,10 @@ const DEFAULT_IMAGE_GENERATION_TIMEOUT_MS = IMAGE_GENERATION_TIMEOUT_MS;
 const MAX_DOWNLOADED_IMAGE_BYTES = 64 * 1024 * 1024;
 const MAX_IMAGE_DOWNLOAD_REDIRECTS = 3;
 const NO_IMAGE_PROVIDERS_AVAILABLE = "No image providers available";
+// A provider can be unready for a moment (a credential or catalog reload), so
+// readiness is checked once more after this pause before the tool says no
+// image provider is ready.
+const IMAGE_PROVIDER_READINESS_RECHECK_MS = 2000;
 
 function _assertTrustedImageDownloadUrl(url, provider) {
   let parsed;
@@ -260,6 +264,31 @@ async function _isProviderReady(provider, capability) {
   return isProviderReady(provider, capability);
 }
 
+// Name each provider's readiness failure so the agent, the tool observation
+// and any BLOCKED handoff carry the cause, not only that nothing was ready.
+function _noImageProvidersError(failures) {
+  const reasons = new Map();
+  for (const failure of Array.isArray(failures) ? failures : []) {
+    const provider = String(failure?.provider || "").trim();
+    if (!provider || reasons.has(provider)) continue;
+    const reason = String(failure?.reason || "").split("\n")[0].trim().slice(0, 200);
+    reasons.set(provider, `${provider}: ${reason || "not ready"}`);
+  }
+  const detail = reasons.size ? ` (${[...reasons.values()].join("; ")})` : "";
+  return `Error: ${NO_IMAGE_PROVIDERS_AVAILABLE}${detail}`;
+}
+
+function _waitBeforeReadinessRecheck() {
+  return new Promise((resolve) => setTimeout(resolve, IMAGE_PROVIDER_READINESS_RECHECK_MS));
+}
+
+async function _checkReadinessWithOneRecheck(check, isReady, waitBeforeRecheck) {
+  const first = await check();
+  if (isReady(first)) return first;
+  await waitBeforeRecheck();
+  return await check();
+}
+
 export async function execGenerateImageInternal(args = {}, {
   cwd = process.cwd(),
   scopePredicates,
@@ -268,6 +297,7 @@ export async function execGenerateImageInternal(args = {}, {
   imageTimeoutMs = DEFAULT_IMAGE_GENERATION_TIMEOUT_MS,
   imageDownloadMaxBytes = MAX_DOWNLOADED_IMAGE_BYTES,
   enforceProviderAvailability = buildImageClient === _buildImageClient,
+  waitBeforeReadinessRecheck = _waitBeforeReadinessRecheck,
 } = {}) {
   if (!args.prompt || typeof args.prompt !== "string") {
     return "Error: prompt is required and must be a string.";
@@ -304,9 +334,13 @@ export async function execGenerateImageInternal(args = {}, {
 
   const providerOverride = args.provider ? String(args.provider).trim().toLowerCase() : null;
   if (enforceProviderAvailability && !providerOverride) {
-    const imageRoute = await _resolveImageExecutionProvider({ needs_image_generation: true });
+    const imageRoute = await _checkReadinessWithOneRecheck(
+      () => _resolveImageExecutionProvider({ needs_image_generation: true }),
+      (route) => route.readiness.ready,
+      waitBeforeReadinessRecheck,
+    );
     if (!imageRoute.readiness.ready) {
-      return `Error: ${NO_IMAGE_PROVIDERS_AVAILABLE}`;
+      return _noImageProvidersError(imageRoute.readiness.failures);
     }
     const provider = imageRoute.provider;
     const model = imageRoute.model || getDefaultImageModel(provider);
@@ -331,9 +365,13 @@ export async function execGenerateImageInternal(args = {}, {
     || getDefaultImageModel(provider);
 
   if (enforceProviderAvailability) {
-    const readiness = await _isProviderReady(provider, "images");
+    const readiness = await _checkReadinessWithOneRecheck(
+      () => _isProviderReady(provider, "images"),
+      (result) => result.ready,
+      waitBeforeReadinessRecheck,
+    );
     if (!readiness.ready) {
-      return `Error: ${NO_IMAGE_PROVIDERS_AVAILABLE}`;
+      return _noImageProvidersError([{ provider, reason: readiness.reason }]);
     }
   }
 

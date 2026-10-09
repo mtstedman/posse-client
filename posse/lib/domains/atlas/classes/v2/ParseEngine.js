@@ -724,12 +724,17 @@ export class ParseEngine {
     // A normal staged artifact represents the indexer's last full repository
     // view. Feed it into the same bounded intake lane, then let current-path
     // batches refresh any changed files while layer-mode parsing continues.
+    // Documents it skipped because the file changed under it (`range_clamped`)
+    // join those batches: a fresh layer for the current bytes supersedes any
+    // layer an older intake minted from the stale positions.
+    /** @type {string[]} */
+    const rangeDriftedPaths = [];
     const existingFiles = await listScipFiles(this.#scipDir).catch(() => []);
     if (existingFiles.length > 0) {
       for (const [batchOrdinal, file] of existingFiles.entries()) {
         if (onBatchReady) {
           const sourceLanguages = scipBasenameSourceLanguages(file);
-          await onBatchReady(file, {
+          const report = await onBatchReady(file, {
             session_id: null,
             batch_ordinal: batchOrdinal,
             batch_count: existingFiles.length,
@@ -741,6 +746,11 @@ export class ParseEngine {
             // to commit, but an omission cannot terminalize intake yet.
             terminalize_absent: false,
           });
+          for (const document of Array.isArray(report?.failed_documents) ? report.failed_documents : []) {
+            if (document?.reason === "range_clamped" && document.repo_rel_path) {
+              rangeDriftedPaths.push(String(document.repo_rel_path));
+            }
+          }
         }
       }
     }
@@ -773,10 +783,21 @@ export class ParseEngine {
       /** @type {any} */ (base).scip_batches_staged = files.length;
       return files;
     }
+    const requestedPaths = new Set(paths);
+    const restagePaths = [...new Set(rangeDriftedPaths)].filter((repoRelPath) => !requestedPaths.has(repoRelPath));
+    const stagePaths = restagePaths.length > 0 ? orderedUniquePaths([...paths, ...restagePaths]) : paths;
+    if (restagePaths.length > 0) {
+      this.#emitProgress({
+        kind: "line",
+        stream: "system",
+        stage: "scip",
+        text: `restaging ${restagePaths.length} SCIP document${restagePaths.length === 1 ? "" : "s"} whose staged index predates the current file`,
+      });
+    }
     try {
       const staged = await stageScipBatches({
         repoRoot: this.#repoRoot,
-        paths,
+        paths: stagePaths,
         scipDir: this.#scipDir,
         mode: this.#scipMode,
         config: this.#runtimeConfig,
@@ -977,6 +998,19 @@ export class ParseEngine {
             repo_rel_path: ".",
             reason: "parse_error",
             message: `SCIP index ${path.basename(scipPath)} is stale: ${result.documents_missing_text} document(s) reference files missing from the tree — restage needed`,
+          });
+        }
+        // Drift on files that still exist is repaired, not failed: intake
+        // skipped those documents and a batched warm restages them. Say so
+        // without a parse_error row, which would block publishing the warm.
+        const rangeDrifted = (result.failed_documents || [])
+          .filter((document) => document?.reason === "range_clamped").length;
+        if (rangeDrifted > 0) {
+          this.#emitProgress({
+            kind: "line",
+            stream: "system",
+            stage: "scip",
+            text: `SCIP index ${path.basename(scipPath)} predates ${rangeDrifted} changed document${rangeDrifted === 1 ? "" : "s"}; skipped their stale ranges`,
           });
         }
         base.blobs_ingested += result.documents_ingested;

@@ -262,7 +262,7 @@ export async function ingestScipFile({
   }
 
   const hydrateStartedAtMs = Date.now();
-  await prepareAndMutateDocumentText(index, repoRoot, { onEvent, scheme, language });
+  const diskHydratedPaths = await prepareAndMutateDocumentText(index, repoRoot, { onEvent, scheme, language });
   const hydrateMs = Date.now() - hydrateStartedAtMs;
   emit(onEvent, {
     kind: "atlas.scip.ingest.progress",
@@ -286,6 +286,7 @@ export async function ingestScipFile({
   const convertMs = Date.now() - convertStartedAtMs;
   const rowDocuments = normalizeNativeRowDocuments(nativeRows?.documents);
   assertNativeRowsCarryDefinitionMonikers(rowDocuments, rowsSpecVersion);
+  skipRangeDriftedDiskDocuments(rowDocuments, diskHydratedPaths);
   if (expectedContentHashes && typeof expectedContentHashes === "object") {
     for (const document of rowDocuments) {
       const expected = String(expectedContentHashes[document?.repo_rel_path] || "");
@@ -633,6 +634,7 @@ export async function ingestScipFile({
         documentsFailed++;
         const failReason = document.skip_reason || (!repoRelPath ? "path_not_canonical" : "parse_error");
         if (failReason === "missing_text") documentsMissingText++;
+        if (failReason === "range_clamped") documentsRangeClamped++;
         // Named, per-document failure evidence. The loop deliberately
         // continues, so the run's own success flag cannot stand in for this
         // document's durability; an acknowledgement receipt must exclude it.
@@ -822,7 +824,7 @@ function handleScipIndexDecodeFailure({ buf, err, onEvent, scipPath }) {
  * @param {import("./decode.js").ScipIndex} index
  * @param {string} repoRoot
  * @param {{ onEvent?: ((event: { kind: string, [k: string]: any }) => void) | null, scheme?: string | null, language?: string | null }} [opts]
- * @returns {Promise<void>}
+ * @returns {Promise<Set<string>>} Repo-relative paths whose text was read from disk.
  */
 async function prepareAndMutateDocumentText(index, repoRoot, opts = {}) {
   const docs = index.documents || [];
@@ -850,20 +852,24 @@ async function prepareAndMutateDocumentText(index, repoRoot, opts = {}) {
       percent: total > 0 ? (processed / total) * 100 : 0,
     });
   };
+  /** @type {Set<string>} */
+  const diskHydratedPaths = new Set();
   for (const doc of docs) {
-    await hydrateScipDocument(doc, index, repoRoot);
+    if (await hydrateScipDocument(doc, index, repoRoot)) diskHydratedPaths.add(doc.relative_path);
     processed++;
     const docLang = sourceLanguageForDocument(doc);
     if (docLang) langCurrent[docLang] = (langCurrent[docLang] || 0) + 1;
     emitHydrateProgress();
   }
+  return diskHydratedPaths;
 }
 
 /**
  * @param {Record<string, any>} doc
  * @param {import("./decode.js").ScipIndex} index
  * @param {string} repoRoot
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} True when the document had no embedded text and
+ *   took it from the current file on disk.
  */
 async function hydrateScipDocument(doc, index, repoRoot) {
   const repoRelPath = canonicalizePath(doc.relative_path, {
@@ -873,16 +879,16 @@ async function hydrateScipDocument(doc, index, repoRoot) {
   if (!repoRelPath) {
     doc.atlas_skip_reason = "path_not_canonical";
     doc.atlas_skip_message = `SCIP document path is not canonical repo-relative: ${doc.relative_path || "(empty)"}`;
-    return;
+    return false;
   }
   doc.relative_path = repoRelPath;
   if (isGeneratedSourceArtifactPath(repoRelPath)) {
     doc.atlas_skip_reason = "generated_artifact_skip";
     doc.atlas_skip_message = "SCIP document is checked-in generated golden output";
-    return;
+    return false;
   }
   const abs = resolveDocumentPath(index.metadata.project_root, repoRoot, repoRelPath);
-  if (!abs) return;
+  if (!abs) return false;
   if (doc.text) {
     try {
       const diskBytes = await fs.promises.readFile(abs);
@@ -901,16 +907,38 @@ async function hydrateScipDocument(doc, index, repoRoot) {
       // represents an explicit indexer payload and can be appended by callers
       // that intentionally ingest generated or out-of-tree sources.
     }
-    return;
+    return false;
   }
   try {
     const bytes = await fs.promises.readFile(abs);
     doc.text = decodeScipSourceBytes(bytes);
     doc.source_bytes = bytes;
     markMinifiedDocumentSkip(doc, repoRelPath, bytes);
+    return true;
   } catch {
     doc.atlas_skip_reason = "missing_text";
     doc.atlas_skip_message = `SCIP document ${repoRelPath} has no embedded text and could not be read from disk`;
+    return false;
+  }
+}
+
+/**
+ * A document the index carried without text was hydrated from the current
+ * file, so nothing proves its ranges were computed against these bytes. A
+ * range that overflows the file means the index predates it (a whole-project
+ * `.scip` re-ingested at a later head): its positions land on shifted lines
+ * and would mint phantom rows. Skip it the way an embedded-text mismatch is
+ * skipped; it is reported in `failed_documents` so a restage can cover it.
+ *
+ * @param {Array<{ repo_rel_path: string, range_clamp_count: number, skip_reason?: string | null, skip_message?: string | null }>} rowDocuments
+ * @param {Set<string>} diskHydratedPaths
+ */
+function skipRangeDriftedDiskDocuments(rowDocuments, diskHydratedPaths) {
+  for (const document of rowDocuments) {
+    if (document.skip_reason || !(document.range_clamp_count > 0)) continue;
+    if (!diskHydratedPaths.has(document.repo_rel_path)) continue;
+    document.skip_reason = "range_clamped";
+    document.skip_message = `${document.range_clamp_count} SCIP occurrence range(s) exceed the current ${document.repo_rel_path}; the index predates this file version and needs a restage`;
   }
 }
 

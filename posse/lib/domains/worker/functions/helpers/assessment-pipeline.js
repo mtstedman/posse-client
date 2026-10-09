@@ -48,6 +48,7 @@ import { refreshAndExtractInsights } from "./insights.js";
 import { renderBaselineSiblingRegression } from "./baseline-attribution.js";
 import { renderBaselineTestDebt } from "./baseline-test-debt.js";
 import { gitExec, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
+import { listIgnoredRepoPaths } from "../../../git/functions/ignored-paths.js";
 import {
   snapshotAndResetDirtyWorktreeAsync,
   stashDirtyWorktreeAsync,
@@ -99,6 +100,12 @@ import {
   recordAssessmentBoundaryEvent,
   renderAssessmentTaskBoundary,
 } from "./assessment-task-boundary.js";
+import {
+  classifyIgnoredPathOnlyAssessmentFailure,
+  ignoredPathReviewVerdict,
+  recordAssessmentIgnoredPathEvent,
+  renderIgnoredPathCorrection,
+} from "./assessment-ignored-paths.js";
 import {
   killShellCommandProcessTree as killShellCommandProcessTreeImpl,
   runShellCommandAsync as runShellCommandAsyncImpl,
@@ -537,6 +544,19 @@ function _buildDisabledRequiredTestsVerdict({ assessmentContext = null, taskSpec
 
 export function __testBuildDisabledRequiredTestsVerdict(options = {}) {
   return _buildDisabledRequiredTestsVerdict(options);
+}
+
+// processVerdict can rewrite the assessor's verdict before recording it
+// (confidence caps, low-confidence review routing, partial-deliverable
+// acceptance). The ASSESSED log line and the assessment.verdict observation
+// describe the recorded verdict; the assessor's own values ride along when
+// they differ.
+function _assessorVerdictDelta(verdict, effectiveVerdict) {
+  const assessorVerdict = verdict?.verdict ?? null;
+  const assessorConfidence = verdict?.confidence ?? null;
+  if (assessorVerdict === (effectiveVerdict?.verdict ?? null)
+    && assessorConfidence === (effectiveVerdict?.confidence ?? null)) return {};
+  return { assessor_verdict: assessorVerdict, assessor_confidence: assessorConfidence };
 }
 
 function _looksLikeAssessorVerdictObject(value) {
@@ -1365,7 +1385,7 @@ export function __testBuildAssessmentProviderScope(options) {
  * @param {boolean} opts.autoApprove - Pass through to callProvider
  * @returns {object} verdict: { verdict, confidence, reasons, spawn_jobs, human_questions }
  */
-export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, projectDir = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null, taskBoundaryRetryDepth = 0, attemptId = null, allowMutatingRunners = false } = {}) {
+export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, projectDir = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null, taskBoundaryRetryDepth = 0, ignoredPathRetryDepth = 0, attemptId = null, allowMutatingRunners = false } = {}) {
   const assessorProvider = String(
     routedProviderName
     || await agentDispatcher?.selectProvider?.({ role: "assessor", providerName: harnessAssessorProvider() })
@@ -1466,6 +1486,11 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       files_requested = [],
     } = assessmentContext;
     const sections = [];
+    // Git never commits a declared path the repository ignores, so it is
+    // absent from files_actually_committed by design.
+    const ignoredScope = task_mode === "code" && cwd
+      ? await listIgnoredRepoPaths(cwd, [...allowed_files, ...allowed_create_files, ...allowed_delete_files])
+      : [];
 
     if (assessmentContext.task_ab_test_evidence) {
       sections.push(String(assessmentContext.task_ab_test_evidence));
@@ -1534,6 +1559,9 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     if (allowed_create_roots.length > 0) {
       sections.push(`create_roots (free-write dirs): ${JSON.stringify(allowed_create_roots)}`);
     }
+    if (ignoredScope.length > 0) {
+      sections.push(`files_ignored_by_repository (declared scope paths the repository's ignore rules exclude; git never commits them, so they are absent from files_actually_committed by design; their workspace copies are local, uncommitted state, and generated files among them are rebuilt by the project's build or typecheck): ${JSON.stringify(ignoredScope.map((entry) => `${entry.path} (${entry.source})`))}`);
+    }
 
     if (files_committed.length > 0) {
       sections.push(`files_actually_committed: ${JSON.stringify(files_committed)}`);
@@ -1581,6 +1609,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
         branch_net_diff_detected ? `- branch_net_diff_detected=true means a zero-commit attempt is being assessed against preexisting WI branch changes; verify that branch diff directly and fail destructive or out-of-scope branch state.` : null,
         verified_no_change ? `- verified_no_change=true means no commit is expected; judge whether the current scoped file snapshots already satisfy the task.` : null,
         `- If out-of-scope files were committed, verdict MUST be "fail"; file requests are follow-up scope and do not authorize the current commit.`,
+        ignoredScope.length > 0 ? `- Paths in files_ignored_by_repository cannot be committed: do not fail because they are missing from files_actually_committed, do not require editing, regenerating or committing them, and do not treat their workspace copies as evidence of committed content; judge generated outputs by the scoped checks or build that regenerate them.` : null,
         `- If files_reverted is non-empty → the dev attempted out-of-scope edits that were ALREADY REVERTED by the system. Do NOT fail for this — it is informational only. Judge the task solely on whether the in-scope committed files satisfy the success criteria.`,
       ].filter(Boolean);
       if (files_requested.length > 0) {
@@ -2154,6 +2183,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       disableAtlas,
       remoteComposer,
       taskBoundaryRetryDepth: 1,
+      ignoredPathRetryDepth,
       attemptId,
       allowMutatingRunners,
     });
@@ -2176,6 +2206,37 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       // assessment review gate instead of failing the work item closed.
       _assessment_sibling_boundary_review: true,
     };
+  }
+  const ignoredPathViolation = assessmentTaskMode === "code" && job.job_type !== "artificer"
+    ? await classifyIgnoredPathOnlyAssessmentFailure(normalizedVerdict, { cwd, payload: parsedJobPayload, assessmentContext })
+    : null;
+  if (ignoredPathViolation && Number(ignoredPathRetryDepth) < 1) {
+    recordAssessmentIgnoredPathEvent(job, ignoredPathViolation);
+    return await assessResult(job, output, {
+      silent,
+      autoApprove,
+      modelTier,
+      reasoningEffort,
+      cwd,
+      projectDir,
+      routedProviderName: assessorProvider,
+      agentDispatcher,
+      assessmentContext,
+      abortSignal,
+      fallbackReads,
+      priorAssessmentFindings: [priorAssessmentFindings, renderIgnoredPathCorrection(ignoredPathViolation)].filter(Boolean).join("\n\n"),
+      trackedCall,
+      disableAtlas,
+      remoteComposer,
+      taskBoundaryRetryDepth,
+      ignoredPathRetryDepth: 1,
+      attemptId,
+      allowMutatingRunners,
+    });
+  }
+  if (ignoredPathViolation) {
+    recordAssessmentIgnoredPathEvent(job, ignoredPathViolation, { repeated: true });
+    return ignoredPathReviewVerdict(ignoredPathViolation, normalizedVerdict.raw);
   }
   const trustedScopedCheckFailure = _hasTrustedScopedCheckFailure(assessmentContext);
   if (normalizedVerdict.verdict === "fail"
@@ -2690,14 +2751,20 @@ export async function runPostExecutionAssessment(worker, {
     const emitFn = (msg) => worker.emit(job.id, msg);
     const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
     log.info("assessor", `Verdict: ${verdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons });
-    jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${verdict.verdict} (${verdict.confidence}) — ${passMsg.slice(0, 100)}` });
+    jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}) — ${passMsg.slice(0, 100)}` });
     recordObservation({
       work_item_id: job.work_item_id,
       job_id: job.id,
       attempt_id: attempt.id,
       observation_type: "assessment.verdict",
-      summary: `${verdict.verdict}: ${passMsg}`,
-      detail: { verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons, action },
+      summary: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}): ${passMsg}`,
+      detail: {
+        verdict: effectiveVerdict.verdict,
+        confidence: effectiveVerdict.confidence,
+        reasons: effectiveVerdict.reasons,
+        action,
+        ..._assessorVerdictDelta(verdict, effectiveVerdict),
+      },
     });
 
     const freshJob = getJob(job.id);
@@ -2991,14 +3058,20 @@ export async function runPostExecutionAssessment(worker, {
         const emitFn = (msg) => worker.emit(job.id, msg);
         const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
         log.info("assessor", `Verdict: ${verdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons });
-        jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${verdict.verdict} (${verdict.confidence}) — ${passMsg.slice(0, 100)}` });
+        jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}) — ${passMsg.slice(0, 100)}` });
         recordObservation({
           work_item_id: job.work_item_id,
           job_id: job.id,
           attempt_id: attempt.id,
           observation_type: "assessment.verdict",
-          summary: `${verdict.verdict}: ${passMsg}`,
-          detail: { verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons, action },
+          summary: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}): ${passMsg}`,
+          detail: {
+            verdict: effectiveVerdict.verdict,
+            confidence: effectiveVerdict.confidence,
+            reasons: effectiveVerdict.reasons,
+            action,
+            ..._assessorVerdictDelta(verdict, effectiveVerdict),
+          },
         });
 
         const freshJob = getJob(job.id);
@@ -3318,15 +3391,21 @@ export async function runPostExecutionAssessment(worker, {
       const emitFn = (msg) => worker.emit(job.id, msg);
       const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
       log.info("assessor", `Verdict: ${verdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons?.slice(0, 3) });
-      jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${verdict.verdict} (${verdict.confidence || "?"})${verdict.reasons?.length ? ` — ${verdict.reasons[0].slice(0, 100)}` : ""}` });
+      jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"})${effectiveVerdict.reasons?.length ? ` — ${effectiveVerdict.reasons[0].slice(0, 100)}` : ""}` });
 
       recordObservation({
         work_item_id: job.work_item_id,
         job_id: job.id,
         attempt_id: attempt.id,
         observation_type: "assessment.verdict",
-        summary: `${verdict.verdict} (${verdict.confidence || "?"})`,
-        detail: { reasons: verdict.reasons || [], spawn_jobs: verdict.spawn_jobs || [] },
+        summary: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"})`,
+        detail: {
+          verdict: effectiveVerdict.verdict,
+          confidence: effectiveVerdict.confidence,
+          reasons: effectiveVerdict.reasons || [],
+          spawn_jobs: effectiveVerdict.spawn_jobs || [],
+          ..._assessorVerdictDelta(verdict, effectiveVerdict),
+        },
       });
       const freshJob = getJob(job.id);
       const assessmentOutcome = updateAssessmentLifecycleFromVerdict(job.id, freshJob, effectiveVerdict);

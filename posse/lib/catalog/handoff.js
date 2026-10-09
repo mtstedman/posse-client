@@ -187,10 +187,15 @@ export const AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY = Object.freeze({
 // A planner may coin names only for cross-task symbols that repository lookup
 // cannot supply. Posse then copies the declarations into every referenced dev
 // task, avoiding independently invented interfaces while preserving the
-// canonical packet and downstream job format.
+// canonical packet and downstream job format. Contracts are advertised for dev
+// tasks; an artificer or promote task that references or owns one is accepted
+// as a recorded repair and counts like a dev task. A contract that still
+// breaks the role, reference-count or owner rules degrades to plain
+// constraints on the tasks that referenced it instead of failing the plan.
 export const AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY = Object.freeze({
   profiles: Object.freeze(["planner.plan.v1"]),
   taskRoles: Object.freeze(["dev"]),
+  acceptedTaskRoles: Object.freeze(["dev", "artificer", "promote"]),
   scope: "new_repository_symbols",
   minTaskRefs: 2,
   ownerMustReference: true,

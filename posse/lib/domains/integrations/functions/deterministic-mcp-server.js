@@ -5,6 +5,7 @@ import path from "path";
 import { inspect } from "util";
 import { atlasNativeToolIsComplementary, atlasReplacesNativeTool } from "../../../catalog/tools/source-navigation.js";
 import { blameWithoutLineText } from "../../git/functions/history.js";
+import { listIgnoredRepoPaths } from "../../git/functions/ignored-paths.js";
 import { redactComplementaryReadResult } from "./deterministic-mcp/read-file-redaction.js";
 import { redactComplementarySearchRows } from "./deterministic-mcp/search-file-redaction.js";
 import {
@@ -259,6 +260,27 @@ function finishToolInvocation(invocation, opts) {
       work_item_id: opts.work_item_id ?? mcpWorkItemId ?? undefined,
     });
   } catch { /* best effort */ }
+}
+
+// A tools/call answered by a gate never reaches the handler's begin/finish
+// pair. Record it as rejected and not executed, or provider-replay
+// reconciliation files it as an executed call and research counts it as a step.
+function recordRejectedToolCall({ toolName, args, text, reason }) {
+  const invocation = beginToolInvocation({ tool: toolName, input: args, cwd: workspaceCwd });
+  finishToolInvocation(invocation, {
+    tool: toolName,
+    input: args,
+    cwd: workspaceCwd,
+    ok: false,
+    outcome: "rejected",
+    rejection: text,
+    extraDetail: {
+      executed: false,
+      consumed_step: false,
+      gate_reason: reason || null,
+      transport: "deterministic_mcp",
+    },
+  });
 }
 
 const SERVER_INFO = { name: POSSE_MCP_GATEWAY_SERVER_INFO_NAME, version: "1.0.0" };
@@ -1842,6 +1864,8 @@ async function requestScopeExpansionWithinJob(args = {}) {
   let pendingResult = null;
   let lastResult = null;
   for (const entry of entries) {
+    // An untracked path the repository ignores is answered without a gate.
+    const [ignoredByRepository = null] = await listIgnoredRepoPaths(workspaceCwd, [entry.path]);
     const result = requestJobScopeExpansion({
       jobId: mcpJobId,
       workItemId: mcpWorkItemId,
@@ -1855,6 +1879,7 @@ async function requestScopeExpansionWithinJob(args = {}) {
         ? "deterministic_mcp_scope_batch_tool"
         : "deterministic_mcp_internal_tool")),
       liveWait: true,
+      ignoredByRepository,
     });
     lastResult = result;
     if (result?.approved === true) {
@@ -4089,6 +4114,7 @@ async function handleRequest(msg) {
         tool: requestedToolName,
         canonicalTool: toolName,
       });
+      recordRejectedToolCall({ toolName, args, text: errorText, reason: "agent_handoff_terminal_violation" });
       sendMessage(jsonRpcSuccess(id, {
         content: [{ type: "text", text: errorText }],
         isError: true,
@@ -4116,6 +4142,12 @@ async function handleRequest(msg) {
         text: citationGateText,
         trigger: citationFetchGate.reason || "citation_fetch_gate",
       });
+      recordRejectedToolCall({
+        toolName,
+        args,
+        text: citationGateText,
+        reason: citationFetchGate.reason || "citation_fetch_gate",
+      });
       sendMessage(jsonRpcSuccess(id, embeddedControlResult(
         citationGateText,
         "citation_fetch_gate",
@@ -4140,6 +4172,7 @@ async function handleRequest(msg) {
         trigger: "research_synthesis_gate",
         explorationStep: Number(researchState.explorationSteps || 0),
       });
+      recordRejectedToolCall({ toolName, args, text: errorText, reason: "research_synthesis_gate" });
       sendMessage(jsonRpcSuccess(id, embeddedControlResult(
         errorText,
         "research_closeout_gate",
@@ -4162,8 +4195,10 @@ async function handleRequest(msg) {
           role: roleName,
           reason: "unknown_atlas_tool",
         });
+        const deniedText = `Unknown ATLAS tool "${requestedToolName}"`;
+        recordRejectedToolCall({ toolName, args, text: deniedText, reason: "unknown_atlas_tool" });
         sendMessage(jsonRpcSuccess(id, {
-          content: [{ type: "text", text: `Unknown ATLAS tool "${requestedToolName}"` }],
+          content: [{ type: "text", text: deniedText }],
           isError: true,
         }));
         return;
@@ -4177,10 +4212,12 @@ async function handleRequest(msg) {
           role: roleName,
           reason: "mutating_atlas_tool_blocked_in_gateway",
         });
+        const deniedText = blockedAtlasMutationMessage(toolName);
+        recordRejectedToolCall({ toolName, args, text: deniedText, reason: "mutating_atlas_tool_blocked_in_gateway" });
         sendMessage(jsonRpcSuccess(id, {
           content: [{
             type: "text",
-            text: blockedAtlasMutationMessage(toolName),
+            text: deniedText,
           }],
           isError: true,
         }));
@@ -4195,10 +4232,12 @@ async function handleRequest(msg) {
           role: roleName,
           reason: "fallback_only_atlas_tool",
         });
+        const deniedText = `ATLAS tool ${toolName} is intentionally not exposed. Use ${issuedIndexedSourceReadPhrase(issuedAtlasActionsForModelText())} for indexed source. Deterministic ${isResearcherRole && !atlasAvailable ? "chain_read" : "read_file"} is reserved for non-indexed content, changed source, or the Atlas unavailable/strikeout escape hatch.`;
+        recordRejectedToolCall({ toolName, args, text: deniedText, reason: "fallback_only_atlas_tool" });
         sendMessage(jsonRpcSuccess(id, {
           content: [{
             type: "text",
-            text: `ATLAS tool ${toolName} is intentionally not exposed. Use ${issuedIndexedSourceReadPhrase(issuedAtlasActionsForModelText())} for indexed source. Deterministic ${isResearcherRole && !atlasAvailable ? "chain_read" : "read_file"} is reserved for non-indexed content, changed source, or the Atlas unavailable/strikeout escape hatch.`,
+            text: deniedText,
           }],
           isError: true,
         }));
@@ -4215,10 +4254,12 @@ async function handleRequest(msg) {
           role: roleName,
           atlasCatalogSource: atlasAllowedActions && atlasAllowedActions !== _atlasAllowedActions ? "remote" : "local",
         });
+        const deniedText = `ATLAS action ${routeCheck.effectiveAction || requestedToolName} is not allowed for the ${roleName || "this"} role. Use one of the role's allowed ATLAS tools instead.`;
+        recordRejectedToolCall({ toolName, args, text: deniedText, reason: "atlas_action_not_allowed" });
         sendMessage(jsonRpcSuccess(id, {
           content: [{
             type: "text",
-            text: `ATLAS action ${routeCheck.effectiveAction || requestedToolName} is not allowed for the ${roleName || "this"} role. Use one of the role's allowed ATLAS tools instead.`,
+            text: deniedText,
           }],
           isError: true,
         }));
@@ -4234,10 +4275,12 @@ async function handleRequest(msg) {
           ok: false,
           durationMs: Date.now() - start,
         });
+        const deniedText = `ATLAS tool ${requestedToolName} must be executed by the Posse MCP owner through AtlasToolExecutor; direct gateway execution is disabled.`;
+        recordRejectedToolCall({ toolName, args, text: deniedText, reason: "atlas_call_deferred_to_owner_required" });
         sendMessage(jsonRpcSuccess(id, {
           content: [{
             type: "text",
-            text: `ATLAS tool ${requestedToolName} must be executed by the Posse MCP owner through AtlasToolExecutor; direct gateway execution is disabled.`,
+            text: deniedText,
           }],
           isError: true,
         }));
@@ -4270,10 +4313,12 @@ async function handleRequest(msg) {
         role: roleName,
         toolCatalogSource: "remote",
       });
+      const deniedText = `Tool ${requestedToolName} is not allowed for the ${roleName || "current"} remote-issued tool surface.`;
+      recordRejectedToolCall({ toolName, args, text: deniedText, reason: "native_call_denied" });
       sendMessage(jsonRpcSuccess(id, {
         content: [{
           type: "text",
-          text: `Tool ${requestedToolName} is not allowed for the ${roleName || "current"} remote-issued tool surface.`,
+          text: deniedText,
         }],
         isError: true,
       }));
@@ -4296,6 +4341,7 @@ async function handleRequest(msg) {
         trigger: "research_synthesis_gate",
         explorationStep: Number(researchState.explorationSteps || 0),
       });
+      recordRejectedToolCall({ toolName, args, text: errorText, reason: "research_synthesis_gate" });
       sendMessage(jsonRpcSuccess(id, embeddedControlResult(
         errorText,
         "research_closeout_gate",
@@ -4330,6 +4376,7 @@ async function handleRequest(msg) {
           target: gateDecision.target || null,
           controlOnly: transientControl,
         });
+        recordRejectedToolCall({ toolName, args, text: errorText, reason: gateDecision.reason || "atlas_first_gate" });
         if (transientControl) {
           recordEmbeddedModelControlNotice(toolName, {
             kind: "atlas_first_gate",
@@ -4362,8 +4409,10 @@ async function handleRequest(msg) {
         durationMs: Date.now() - start,
         error: `Unknown tool "${toolName}"`,
       });
+      const deniedText = `Error: Unknown tool "${requestedToolName}"`;
+      recordRejectedToolCall({ toolName, args, text: deniedText, reason: "unknown_tool" });
       sendMessage(jsonRpcSuccess(id, {
-        content: [{ type: "text", text: `Error: Unknown tool "${requestedToolName}"` }],
+        content: [{ type: "text", text: deniedText }],
         isError: true,
       }));
       return;

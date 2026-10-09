@@ -48,6 +48,7 @@ import { validateArtifactRootPath } from "../../../planning/functions/plan-routi
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import { blockedRetryContext } from "../../functions/helpers/block-reason.js";
 import { formatToolReference, TOOL_REFS } from "../../../../catalog/tool-references.js";
+import { workItemCheckoutReadRoot } from "../../../../shared/scope/functions/checkout-read-root.js";
 
 const DEFAULT_DEPS = {
   currentExecutionProvider: defaultCurrentExecutionProvider,
@@ -138,6 +139,9 @@ export class ArtificerRole extends BaseRole {
 
     const createRoots = resolveContainedArtifactRoots(projectDir, payload.create_roots || [], "create_roots");
     const inputRoots = resolveContainedArtifactRoots(projectDir, payload.input_roots || [], "input_roots");
+    // One read-only root on the work item's checkout, so existing art, styles
+    // and markup can be matched; writes stay confined to the artifact roots.
+    const checkoutReadRoot = normalizeDisplaySlashes(workItemCheckoutReadRoot(projectDir, job.work_item_id));
     const researchArtifacts = getArtifactsByWorkItem(job.work_item_id, "response")
       .filter((a) => {
         const relatedJob = getJob(a.job_id);
@@ -241,6 +245,7 @@ export class ArtificerRole extends BaseRole {
       artCwd,
       artRoots,
       buildArtificerPrompt,
+      checkoutReadRoot,
       expandedFiles: new Set(),
       fallbackReads: packet.budgets?.fallback_reads_remaining ?? null,
       maxExpandSteps,
@@ -289,7 +294,7 @@ export class ArtificerRole extends BaseRole {
       scopedFiles: null,
       createFiles: null,
       createRoots: ctx.artRoots,
-      readRoots: ctx.inputRoots?.length > 0 ? ctx.inputRoots : null,
+      readRoots: [...new Set([...(ctx.inputRoots || []), ctx.checkoutReadRoot].filter(Boolean))],
       stableContext: ctx.packet?.stable_context || null,
       remoteSystemPrompt: ctx.packet?.remote_system_prompt || null,
       skillsAttached: ctx.packet?.skills_attached || null,

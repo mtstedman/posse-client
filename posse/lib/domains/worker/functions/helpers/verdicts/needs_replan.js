@@ -1,7 +1,12 @@
 // lib/domains/worker/functions/helpers/verdicts/needs_replan.js
 
 import { roleExecutionForBudget } from "../../../../settings/functions/repository-settings.js";
-import { REPLAN_CANCELABLE_JOB_TYPES, REPLAN_TRIGGERS, STALE_CANCELABLE_JOB_STATUSES } from "../../../../../catalog/job.js";
+import {
+  ACTIVE_LEASE_STATUSES,
+  REPLAN_CANCELABLE_JOB_TYPES,
+  REPLAN_TRIGGERS,
+  STALE_CANCELABLE_JOB_STATUSES,
+} from "../../../../../catalog/job.js";
 import {
   isDeferredImplementationAssessmentJob,
   TERMINAL_JOB_STATUSES,
@@ -232,6 +237,23 @@ export function handle(job, verdict, ctx) {
               job_id: sibling.id,
               job_type: sibling.job_type,
               title: sibling.title,
+              scoped_files: collectScopedFiles(siblingPayload),
+              ...(siblingPayload.test_command ? { test_command: siblingPayload.test_command } : {}),
+            };
+          }),
+        // Sibling work still running is neither retained nor canceled; without
+        // it the replan re-plans that scope blind to the work under way.
+        in_flight_work: allJobs
+          .filter((sibling) => sibling.id !== job.id
+            && ["dev", "fix", "artificer", "promote"].includes(sibling.job_type)
+            && ACTIVE_LEASE_STATUSES.includes(sibling.status))
+          .map((sibling) => {
+            const siblingPayload = parseJobPayload(sibling);
+            return {
+              job_id: sibling.id,
+              job_type: sibling.job_type,
+              title: sibling.title,
+              status: sibling.status,
               scoped_files: collectScopedFiles(siblingPayload),
               ...(siblingPayload.test_command ? { test_command: siblingPayload.test_command } : {}),
             };

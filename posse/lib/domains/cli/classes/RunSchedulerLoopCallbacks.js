@@ -68,7 +68,29 @@ export class RunSchedulerLoopCallbacks {
       onKillJob: (jobId, reason) => this.worker.killJob(jobId, reason),
       onTeamSubmissionChange: (change) => this.onTeamSubmissionChange(change),
       onSessionEvent: (event) => this.onSessionEvent(event),
+      // A merge onJobEnd started may still be publishing when the loop exits;
+      // the scheduler waits for it before stopping the session monitor.
+      beforeSessionStop: () => this.finishPendingAutoMerge(),
     };
+  }
+
+  // Waits until no auto-merge is running, including one chained behind the
+  // merge in flight (the whenIdle Team-submission retry) or started by a late
+  // onJobEnd meanwhile. Returns how many merges it waited for.
+  async finishPendingAutoMerge() {
+    if (!this.idleAutoMerge?.isRunning()) return 0;
+    const display = this.getDisplay();
+    const pendingAutoMergeWrapUp = display ? createRunWrapUpTracker(display, {
+      subtitle: "All jobs are done. Finishing pending merge and ATLAS closeout; Enter leaves remaining ATLAS/ONNX work queued.",
+    }) : null;
+    pendingAutoMergeWrapUp?.start("auto-merge", "finishing pending merge");
+    let merges = 0;
+    while (this.idleAutoMerge.isRunning()) {
+      merges += 1;
+      await this.idleAutoMerge.wait();
+    }
+    pendingAutoMergeWrapUp?.done("auto-merge", "finished");
+    return merges;
   }
 
   // Session roster changes and sync-state transitions from the scheduler's

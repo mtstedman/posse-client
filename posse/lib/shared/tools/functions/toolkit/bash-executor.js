@@ -14,6 +14,15 @@ import { MutationPolicy } from "../../../scope/classes/MutationPolicy.js";
 const SHELL_OPERATOR_RE = /[;&|<>]/;
 const SENSITIVE_SUBPROCESS_ENV_KEY_RE = /api[_-]?key|token|secret|credential|password|passwd|pwd|auth|oauth|bearer|^posse_key$/i;
 const COMMAND_INFLUENCING_ENV_KEY_RE = /^(?:bash_env$|bash_func_|cdpath$|dyld_|env$|git_|globignore$|ifs$|ld_|magic$|pager$|less$|lessopen$|ripgrep_config_path$|grep_options$|node_options$|pythonpath$|pythonhome$|shellopts$|tmp$|temp$|tmpdir$)/i;
+// Search utilities whose exit status 1 means "nothing matched"; their real
+// errors exit 2 or write to stderr.
+const NO_MATCH_EXIT_COMMANDS = new Set(["rg", "grep", "egrep", "fgrep", "findstr"]);
+
+function isSearchNoMatchExit(executable, status, stderr) {
+  if (status !== 1 || String(stderr || "").trim()) return false;
+  const name = String(executable || "").replace(/\\/g, "/").split("/").pop().toLowerCase().replace(/\.exe$/, "");
+  return NO_MATCH_EXIT_COMMANDS.has(name);
+}
 
 function scrubBashSubprocessEnv(baseEnv = process.env) {
   const env = {};
@@ -389,6 +398,9 @@ function execBashCommand(command, {
         err.stderr = result.stderr;
         err.status = result.status;
         throw err;
+      }
+      if (isSearchNoMatchExit(tokens[0], result.status, result.stderr)) {
+        return String(result.stdout || "").trim() ? result.stdout : "No matches found (exit code 1).";
       }
       if (result.status !== 0) {
         const err = new Error(`Command exited with code ${result.status}`);

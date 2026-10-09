@@ -281,6 +281,12 @@ export async function runNativeDispatch(request, {
     const details = error?.details && typeof error.details === "object" ? error.details : {};
     error.output = details.partialOutput || error.output || "";
     error.partialOutput = error.output;
+    // The adapter's contract reason is recorded beside the message, never in
+    // it: callers classify the message (rate limits, stalls) by pattern.
+    const reason = typeof details.diagnostic?.reason === "string"
+      ? details.diagnostic.reason.trim().slice(0, 300)
+      : "";
+    if (reason) error.providerDiagnostic = reason;
     error.stats = {
       ...commonStats,
       ...(details.stats || error.stats || {}),

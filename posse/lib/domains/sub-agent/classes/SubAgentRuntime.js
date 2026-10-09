@@ -1,4 +1,4 @@
-import { expandResearchChildHandoff } from "../../handoff/functions/helpers/runtime-handoff-input.js";
+import { expandResearchChildHandoff, researchChildHandoffMismatch } from "../../handoff/functions/helpers/runtime-handoff-input.js";
 import { RESEARCH_CHILD_PROFILE, RESEARCH_REPORT_OBJECT_TYPE, SUB_AGENT_OBSERVATION_TYPES } from "../../../catalog/sub-agent.js";
 import {
   PLANNER_DISPATCH_RETURN_MARGIN_MS,
@@ -7,6 +7,7 @@ import {
   RESEARCH_CHILD_DEFAULT_MODEL_TIERS,
   RESEARCH_CHILD_FALLBACK_MODEL_TIER,
   RESEARCH_CHILD_REQUEST_MODEL_TIERS,
+  RESEARCH_CHILD_STRONG_LIMIT,
 } from "../../../catalog/planner-dispatch.js";
 // @ts-check
 
@@ -800,6 +801,33 @@ function normalizeResearchBudget(value, policy, requestId, repairs, { agentType 
   return budget;
 }
 
+// At most RESEARCH_CHILD_STRONG_LIMIT research children run above the default
+// child tiers across one planner call, earlier batches included. A request
+// past the cap runs on the configured child tier with a repair note instead
+// of costing the planner its research.
+function capStrongResearchChildren(entries, priorEntries, policy, repairs) {
+  const strong = (entry) => entry.profile === RESEARCH_CHILD_PROFILE && entry.modelTier != null
+    && !RESEARCH_CHILD_DEFAULT_MODEL_TIERS.includes(entry.modelTier);
+  const fallback = policy?.childModelTier || RESEARCH_CHILD_FALLBACK_MODEL_TIER;
+  let used = priorEntries.filter((entry) => strong(entry) && entryCountsTowardResearchLimit(entry)).length;
+  for (const entry of entries) {
+    if (!strong(entry)) continue;
+    if (used < RESEARCH_CHILD_STRONG_LIMIT) {
+      used += 1;
+      continue;
+    }
+    repairs.push({
+      request_id: entry.id,
+      field: "budget.model_tier",
+      action: "defaulted",
+      reason: "strong_child_limit_per_planner_call",
+      limit: RESEARCH_CHILD_STRONG_LIMIT,
+      to: fallback,
+    });
+    entry.modelTier = fallback;
+  }
+}
+
 // Anchors arrive from a model. One unusable anchor is dropped and noted
 // instead of rejecting the whole batch: a rejection costs the planner a turn
 // and, in practice, the planner then resends without any anchors at all.
@@ -1496,7 +1524,7 @@ export class SubAgentRuntime {
     if (entry.sealed) throw runtimeError("SUB_AGENT_CURSOR_SEALED", "Citation child already submitted its terminal handoff", { stage: "terminal" });
     if (entry.profile === RESEARCH_CHILD_PROFILE) {
       packet = expandResearchChildHandoff(packet);
-      if (packet?.profile !== RESEARCH_CHILD_PROFILE) throw runtimeError("SUB_AGENT_PROFILE_INVALID", "Research child must return a research report", { stage: "terminal" });
+      if (packet?.profile !== RESEARCH_CHILD_PROFILE) throw runtimeError("SUB_AGENT_PROFILE_INVALID", researchChildHandoffMismatch(packet), { stage: "terminal" });
       // Citation and size are settled on the committed report after the child
       // exits, never here: these raw arguments precede selector validation,
       // and a rejection costs the child a whole full-context turn. Uncited
@@ -1855,6 +1883,15 @@ export class SubAgentRuntime {
         this.#releaseCapacity(normalized.length);
         return await this.#replayBatch(replay);
       }
+    }
+
+    // Counted after any capacity wait, with no await left before the batch
+    // registers, so a concurrent batch from this parent is already counted.
+    if (researchRequest) {
+      const priorEntries = [...this.batches.values()]
+        .filter((prior) => prior.parentCallId === parentCallId)
+        .flatMap((prior) => prior.entries);
+      capStrongResearchChildren(normalized, priorEntries, registration.researchPolicy, repairs);
     }
 
     const batch = {
