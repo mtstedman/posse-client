@@ -169,15 +169,12 @@ export class AgentSessionRegistry {
       execution.check();
       demand(confirmed === false, "Applications cannot confirm writes", "forbidden");
       assertRegisteredCapability(this.service, capability.entry_id, capability.digest, principal, capability.grant_id);
-      const currentGrant = this.store.get("grants", capability.grant_id);
-      if (capability.effect === "write") demand(session.definition.autonomy.write_tools === "allow" && currentGrant?.unattended,
-        "Unattended write grant is required", "forbidden");
     }
     const started = this.now();
     const run = this.service.invoke(principal, {
       operation: "invoke", tool: capability.entry_id, grant_id: capability.grant_id, input,
       idempotency_key: idempotency_key || toolIdempotencyKey(session_id, session.active.turn_id, tool, input),
-    }, null, { allowExternalWrite: !execution && (capability.effect !== "write" || session.definition.autonomy.write_tools === "allow" || confirmed === true), execution });
+    }, null, { allowExternalWrite: capability.effect !== "write" || session.definition.autonomy.write_tools === "allow" || confirmed === true, execution });
     await this.service.active.get(run.id)?.promise;
     const complete = this.store.run(run.id);
     demand(complete?.status === "succeeded", complete?.error || `Tool ${tool} failed`, complete?.error_code || "agent_tool_failed");
@@ -321,8 +318,8 @@ export class AgentSessionRegistry {
     demand(grants.length === 1, `${surface.name} has multiple matching grants; keep one exact grant`, "ambiguous_grant");
     if (execution) {
       assertRegisteredCapability(this.service, entry.id, entry.digest, principal, grants[0].id);
-      if (surface.effect === "write") demand(definitionAllowsWrite(execution.definition) && grants[0].unattended,
-        "Unattended write grant is required", "forbidden");
+      if (surface.effect === "write") demand(definitionAllowsWrite(execution.definition),
+        `${surface.name} is a write tool and this agent does not allow write tools`, "forbidden");
     }
     return { ...surface, entry_id: entry.id, digest: entry.digest, grant_id: grants[0].id };
   }

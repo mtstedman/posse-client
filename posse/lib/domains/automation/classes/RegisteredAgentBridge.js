@@ -5,7 +5,7 @@ import path from "node:path";
 import { AGENT_NAME_PATTERN, AGENT_SESSION_PATTERN, AGENT_TURN_PROTOCOL } from "../../../catalog/agent.js";
 import { REGISTERED_AGENT_MAX_CONTEXT_BYTES, REGISTERED_AGENT_MAX_REPLY_BYTES, REGISTERED_AGENT_OPERATIONS, REGISTERED_AGENT_PROTOCOL } from "../../../catalog/registered-agent.js";
 import { automationDataDir } from "../functions/paths.js";
-import { approveEntry, assertRegisteredCapability } from "../functions/registered-trust.js";
+import { assertRegisteredCapability } from "../functions/registered-trust.js";
 import { demand, digest, object, schemaCheck } from "../functions/policy.js";
 import { scrubSecretText } from "../../../shared/telemetry/functions/logging/scrub-secret-text.js";
 import { agentSessionIdleExpired } from "../../agents/functions/definition.js";
@@ -47,7 +47,8 @@ const PUBLIC_PROVIDER_ERRORS = new Map([
   ["provider_authentication", ["provider_access_denied", "Model provider rejected the configured account"]],
   ["provider_authorization", ["provider_access_denied", "Model provider rejected the configured account"]],
 ]);
-const PROGRESS_TYPES = new Set(["turn.started", "turn.retry", "tool.started", "tool.finished"]);
+const PROGRESS_TYPES = new Set(["turn.started", "turn.retry", "assistant.text", "tool.started", "tool.finished"]);
+const PROGRESS_TEXT_MAX = 4000;
 function safeProgress(event) {
   if (!PROGRESS_TYPES.has(event?.type)) return null;
   const projected = { seq: Number(event.seq) || 0, at: String(event.at || "").slice(0, 40), type: event.type };
@@ -57,6 +58,7 @@ function safeProgress(event) {
     if (typeof event[key] === "string") projected[key] = event[key].slice(0, key === "tool" ? 120 : 64);
   if (event.arguments && typeof event.arguments === "object" && !Array.isArray(event.arguments)) projected.arguments = event.arguments;
   if (event.arguments_truncated === true) projected.arguments_truncated = true;
+  if (event.type === "assistant.text" && typeof event.text === "string") projected.text = event.text.slice(0, PROGRESS_TEXT_MAX);
   return projected;
 }
 // Callers see only public codes, so the owner log keeps the real cause.
@@ -215,8 +217,6 @@ export class RegisteredAgentBridge {
   }
 
   publicRegistration(value) { return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "credential_hash")); }
-
-  approve(args) { const result = approveEntry(this.store, args); this.cancel(); return result; }
 
   authenticate(request) {
     const now = Date.now();
@@ -431,11 +431,7 @@ export class RegisteredAgentBridge {
           assertRegisteredCapability(this.owner.service, capability.entry_id, capability.digest,
             this.owner.agents.principalFor(pinned.definition), capability.grant_id);
       },
-      checkCapability: (id, pin, principal) => {
-        const nested = assertRegisteredCapability(this.owner.service, id, pin, principal, null);
-        if (["external_write", "artifact_write"].includes(nested.entry.effect))
-          demand(nested.grant.unattended, "Nested write needs an unattended grant", "forbidden");
-      },
+      checkCapability: (id, pin, principal) => { assertRegisteredCapability(this.owner.service, id, pin, principal, null); },
     });
     const client = { request: async (operation, args) => {
       if (operation === "agent.turn.abort") this.owner.service.assertOwner();

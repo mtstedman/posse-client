@@ -318,6 +318,9 @@ export class AgentRuntime {
         tool_calls: calls.map(({ id, name, arguments: args }) => ({ id, name, arguments: args })),
         raw: calls.length === 1 ? calls[0].raw : JSON.stringify(calls.map(({ name, arguments: args }) => ({ name, arguments: args }))),
         ...(native && generated?.providerContent ? { provider_content: generated.providerContent } : {}) };
+      // What a native model says beside its tool calls ("Let me check the
+      // scene first.") reaches the caller as it happens, so a chat can show it.
+      if (nativeCalls?.length && content) state.progress?.({ type: "assistant.text", turn: state.usage.turns, text: content });
       const results = [];
       const answer = (call, output, isError) => results.push({ role: "tool", tool_call_id: call.id, name: call.name,
         content: toolResultContent(call.name, output, { native }), is_error: isError });

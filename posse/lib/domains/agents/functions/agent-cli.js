@@ -49,7 +49,7 @@ function parse(argv) {
 }
 
 export async function runAgentCli(argv = process.argv.slice(3), io = {}) {
-  if (["clients", "trust", "repository", "service", "register", "registrations"].includes(argv[0])) return runRegisteredAdminCli(argv, io);
+  if (["clients", "repository", "service", "register", "registrations"].includes(argv[0])) return runRegisteredAdminCli(argv, io);
   const stdout = io.stdout || process.stdout, stderr = io.stderr || process.stderr, stdin = io.stdin || process.stdin;
   const print = value => stdout.write(`${value}\n`);
   const args = parse(argv);
@@ -176,6 +176,7 @@ async function runChat({ runtime, name, session, provider, stdin, stdout, stderr
 export function progressLine(event) {
   if (event?.type === "turn.started") return event.turn > 1 ? "  · reviewing results…\n" : "  · thinking…\n";
   if (event?.type === "turn.retry") return "  ↻ response ran long; retrying with more room\n";
+  if (event?.type === "assistant.text") return `${String(event.text || "").trim()}\n`;
   if (event?.type === "tool.started") return `  → ${event.tool}\n`;
   if (event?.type === "tool.finished") return `  ${event.status === "ok" ? "✓" : "✗"} ${event.tool} ${((Number(event.duration_ms) || 0) / 1000).toFixed(1)}s${event.error_code ? ` (${event.error_code})` : ""}\n`;
   return "";

@@ -87,7 +87,6 @@ after that path is verified.
 Operator examples:
 
 ```sh
-posse agent trust approve script:application.lookup --level application_safe --reviewed-by mason
 posse agent clients create kairos --agent kairos-angel --operation chat \
   --context get_angel_personality --context get_user_brief
 posse agent clients rotate kairos
@@ -100,13 +99,13 @@ sudo posse agent registrations show kairos-angel --client kairos
 sudo posse agent registrations revoke kairos-angel --client kairos
 ```
 
-An executable needs an exact-digest `application_safe` approval and an
-applicable current grant. Existing entries default to `operator_only`.
-Approving a new script version requires a new review. A write also needs the
-agent's `write_tools: allow` and an unattended grant. The operator's script
-review must establish that arguments and tool credentials cannot escape its
-declared resource contract. Prompt tools are data-only context and need no
-executable approval. Global and legacy general agents cannot be exposed.
+An executable runs at the exact digest the conversation pinned and needs an
+applicable current grant. There is no separate safety label: the operator
+who installs a tool is the one who registers the agent that lists it. The
+bounds that stay are real ones: a builtin's repository and folder resources
+and a SQL capability's fixed folder. A write needs only the agent's
+`write_tools: allow`. Prompt tools are data-only context. Global and legacy
+general agents cannot be exposed.
 
 For an opt-in Linux machine owner, first install the tested Posse package in a
 root-owned, non-writable system path (for example
@@ -124,8 +123,8 @@ users are admitted globally with separate client identities. A named client
 requires an explicit audience and shares its existing conversations with every
 member of that audience. If the agent was created in the operator's per-user
 automation database, registration imports its definition and prompt contexts
-from `~/.posse/automation.db` (or `--source-data-dir DIR`). Executable approvals
-and grants are never copied silently; missing dependencies fail registration
+from `~/.posse/automation.db` (or `--source-data-dir DIR`). Executable grants
+are never copied silently; missing dependencies fail registration
 without activating the audience. The command never prints a credential.
 When the operator edits an already registered definition, repeat registration
 with the same audience, operations, contexts, and budget plus

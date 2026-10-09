@@ -213,8 +213,6 @@ export class AutomationOwner {
       case "agent.exposure.restore": return this.exposures.restore(args.id);
       case "agent.exposure.list": return this.exposures.list();
       case "agent.exposure.retire_user": return this.exposures.retireUser(args.uid);
-      case "agent.trust.approve": return this.registered.approve(args);
-      case "agent.trust.list": return this.store.list("registered_trust");
       case "agent.repository.save": {
         const root = fs.realpathSync(args.root);
         demand(repositoryID(root) === args.id, "Repository ID/root mismatch", "invalid_request");

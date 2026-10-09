@@ -9,8 +9,6 @@ const USAGE = `Usage:
   posse agent clients list
   posse agent clients rotate ID
   posse agent clients revoke ID
-  posse agent trust approve ENTRY_ID --level application_safe|operator_only --reviewed-by ID
-  posse agent trust list
   posse agent repository save REPO_ID ROOT
   posse agent register NAME [--client ID] [--user USER] [--group GROUP] [--operation chat|run] [--context NAME] [--max-spend-usd USD] [--source-data-dir DIR] [--update-definition] [--package-root DIR] [--restore-preserving-conversations]
   posse agent registrations list [NAME]
@@ -25,10 +23,8 @@ function parseFlags(argv) {
   const flags = { agent: [], operation: [], context: [] };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
-    if (!["--agent", "--operation", "--context", "--level", "--reviewed-by"].includes(flag) || !argv[i + 1]) throw new Error(USAGE);
-    const key = flag.slice(2).replaceAll("-", "_");
-    if (["agent", "operation", "context"].includes(key)) flags[key].push(argv[++i]);
-    else flags[key] = argv[++i];
+    if (!["--agent", "--operation", "--context"].includes(flag) || !argv[i + 1]) throw new Error(USAGE);
+    flags[flag.slice(2)].push(argv[++i]);
   }
   return flags;
 }
@@ -79,10 +75,6 @@ export async function runRegisteredAdminCli(argv, io = {}) {
   } else if (noun === "clients" && verb === "list" && !id) result = await client.request("agent.client.list");
   else if (noun === "clients" && verb === "rotate" && id && !rest.length) result = await client.request("agent.client.rotate", { id });
   else if (noun === "clients" && verb === "revoke" && id && !rest.length) result = await client.request("agent.client.revoke", { id });
-  else if (noun === "trust" && verb === "approve" && id) {
-    const flags = parseFlags(rest);
-    result = await client.request("agent.trust.approve", { entry_id: id, trust_level: flags.level, reviewed_by: flags.reviewed_by });
-  } else if (noun === "trust" && verb === "list" && !id) result = await client.request("agent.trust.list");
   else if (noun === "repository" && verb === "save" && id && rest.length === 1) {
     result = await client.request("agent.repository.save", { id, root: rest[0] });
   } else if (noun === "registrations" && verb === "list" && !rest.length) {

@@ -321,7 +321,8 @@ a starter that fails until you edit it.
 - `posse tools grant <name> --repo <path> --roles dev` (or `--standalone`)
   exposes it through `custom_tools`. Write tools confirm by default: no agent
   surface except `posse agent` can ask a person, so other agent callers run a
-  `write` tool only under a grant made with `--unattended`.
+  `write` tool only under a grant made with `--unattended`. A registered
+  agent follows its own definition's `write_tools` instead.
 
 Bossy's Automation Studio Tools tab drives the same owner operations
 (`script.*`); it stores and runs nothing itself.
