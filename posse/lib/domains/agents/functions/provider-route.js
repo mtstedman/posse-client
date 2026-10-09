@@ -36,6 +36,9 @@ export async function callAgentProvider(providerName, prompt, options = {}) {
       systemPrompt: options.systemPrompt || null,
       tools: options.tools || [],
       transcript,
+      // Tool turns plan actions rather than compose prose; low effort keeps
+      // provider thinking from overrunning the turn's output cap.
+      reasoningEffort: options.reasoningEffort || (options.tools?.length ? "low" : "medium"),
       promptCache: options.promptCache === true,
       allowToolBatching: options.allowToolBatching === true,
       maxOutputTokens: options.maxOutputTokens || (options.tools?.length ? 2048 : 8000),

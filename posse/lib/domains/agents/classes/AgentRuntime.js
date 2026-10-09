@@ -10,9 +10,11 @@ import { resolveAgentWorkingDirectory } from "../functions/scope.js";
 import { parseAgentToolTurn } from "../functions/tool-turn.js";
 import { dispatchTranscript, renderConversation, toolCallId, toolOutputFailed, toolResultContent } from "../functions/transcript.js";
 
-export const TOOL_TURN_MAX_OUTPUT_TOKENS = 4096;
+// Provider thinking counts against these caps, so they leave room for a plan
+// before its tool calls.
+export const TOOL_TURN_MAX_OUTPUT_TOKENS = 8192;
 // A response that overruns its cap is repaired once with this much room before the turn fails.
-export const OUTPUT_LIMIT_REPAIR_MAX_OUTPUT_TOKENS = 16384;
+export const OUTPUT_LIMIT_REPAIR_MAX_OUTPUT_TOKENS = 32768;
 const OUTPUT_LIMIT_CODES = new Set(["output_limit", "OUTPUT_TOKEN_LIMIT"]);
 const TOOL_BATCH_MAX_CALLS = 8;
 const PROGRESS_ARGUMENT_BYTES = 4 * 1024;
@@ -252,11 +254,14 @@ export class AgentRuntime {
         });
         generated = await abortable(providerCall, controller.signal);
       } catch (error) {
-        if (!OUTPUT_LIMIT_CODES.has(error?.code) || state.maxOutputTokens) throw error;
-        // The provider already billed the truncated response; count it, then
-        // repeat the same turn once with room for long tool arguments.
+        if (!OUTPUT_LIMIT_CODES.has(error?.code)) throw error;
+        // The provider already billed the truncated response; count it.
         state.execution?.check();
         this.recordProviderUsage(state, error.stats);
+        // A response that overruns even the repair cap ends the turn with what
+        // it got done, rather than failing work that may already have changed.
+        if (state.maxOutputTokens) return this.completeAfterOverrun(state);
+        // Otherwise repeat the same turn once with room for long tool arguments.
         state.maxOutputTokens = OUTPUT_LIMIT_REPAIR_MAX_OUTPUT_TOKENS;
         state.progress?.({ type: "turn.retry", turn: state.usage.turns + 1, reason: "output_limit", max_output_tokens: state.maxOutputTokens });
         continue;
@@ -358,6 +363,17 @@ export class AgentRuntime {
       state.messages.push(request, ...results);
     }
     throw Object.assign(new Error("Agent turn exceeded its provider-turn limit"), { code: "agent_budget_exceeded" });
+  }
+
+  async completeAfterOverrun(state) {
+    const changes = state.toolCalls.filter(call => call.effect === "write" && call.status === "ok").length;
+    const reply = [
+      "I stopped here: my next step needed a longer response than one turn allows.",
+      changes ? `I made ${changes} change${changes === 1 ? "" : "s"} before stopping.` : "Nothing was changed.",
+      "Ask me to continue, or to take it one part at a time.",
+    ].join(" ");
+    const completed = await state.client.request("agent.turn.complete", { session_id: state.session.id, token: state.token, reply, tool_calls: state.toolCalls, usage: state.usage });
+    return this.envelope(completed.session, state.turnID, "done", reply, state.toolCalls, [], state.usage, null, state.toolSummary);
   }
 
   recordProviderUsage(state, stats = {}) {
