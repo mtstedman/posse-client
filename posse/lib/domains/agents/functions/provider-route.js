@@ -26,14 +26,19 @@ export function agentProviderUsesNativeTools(providerName) {
 
 export async function callAgentProvider(providerName, prompt, options = {}) {
   const provider = getProvider("dev", providerName);
-  if (options.tools?.length && typeof provider.callAgentTurn === "function") {
+  // An API provider whose native binary accepts transcripts takes the whole
+  // conversation as native messages, with or without tools. Otherwise it
+  // takes the flattened prompt, through a decision turn only when tools exist.
+  const transcript = options.transcript?.length && provider.supportsAgentTranscript?.() ? options.transcript : null;
+  if ((options.tools?.length || transcript) && typeof provider.callAgentTurn === "function") {
     return await provider.callAgentTurn(prompt, {
       modelName: options.modelName || null,
       systemPrompt: options.systemPrompt || null,
-      tools: options.tools,
+      tools: options.tools || [],
+      transcript,
       promptCache: options.promptCache === true,
       allowToolBatching: options.allowToolBatching === true,
-      maxOutputTokens: options.maxOutputTokens || 2048,
+      maxOutputTokens: options.maxOutputTokens || (options.tools?.length ? 2048 : 8000),
       signal: options.signal,
       cwd: options.cwd || process.cwd(),
     });

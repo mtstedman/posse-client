@@ -25,6 +25,8 @@ const ENGAGEMENT_SYNC_TIMEOUT_MS = 10_000;
 const PROVIDER_DISPATCH_NEGATIVE_CACHE_MS = 60_000;
 const providerDispatchSupportCache = new Map();
 const providerDispatchSupportOverridesForTests = new Map();
+const providerDispatchPromptFieldCache = new Map();
+const providerDispatchPromptFieldOverridesForTests = new Map();
 
 export function __testSetProviderDispatchSupport(provider, supported = null) {
   assertTestContext("__testSetProviderDispatchSupport");
@@ -36,6 +38,14 @@ export function __testSetProviderDispatchSupport(provider, supported = null) {
   }
   if (typeof supported !== "boolean") throw new TypeError("supported must be a boolean or null");
   providerDispatchSupportOverridesForTests.set(key, supported);
+}
+
+export function __testSetProviderDispatchPromptFields(provider, fields = null) {
+  assertTestContext("__testSetProviderDispatchPromptFields");
+  const key = String(provider || "").trim();
+  if (!key) throw new TypeError("provider is required");
+  if (fields == null) providerDispatchPromptFieldOverridesForTests.delete(key);
+  else providerDispatchPromptFieldOverridesForTests.set(key, [...fields]);
 }
 
 export function engagementBinaryIdentity(manager = nativeBinaries) {
@@ -165,6 +175,31 @@ export function providerDispatchSupportedSync(provider, opts = {}) {
     expiresAt: supported ? Number.POSITIVE_INFINITY : Date.now() + PROVIDER_DISPATCH_NEGATIVE_CACHE_MS,
   });
   return supported;
+}
+
+/**
+ * Whether the installed posse-remote accepts an optional prompt field, such as
+ * a conversation transcript. A binary that predates the field rejects any start
+ * frame carrying it, so callers keep their older request shape until then.
+ */
+export function providerDispatchPromptFieldSupportedSync(provider, field, opts = {}) {
+  const providerName = String(provider || "").trim();
+  if (providerDispatchPromptFieldOverridesForTests.has(providerName)) {
+    return providerDispatchPromptFieldOverridesForTests.get(providerName).includes(field);
+  }
+  const manager = opts.manager || nativeBinaries;
+  const cacheKey = `${engagementBinaryIdentity(manager)}:${providerName}`;
+  let cached = providerDispatchPromptFieldCache.get(cacheKey);
+  if (!cached || (!cached.fields && cached.expiresAt <= Date.now())) {
+    let fields = null;
+    try {
+      const dispatch = verifyProviderDispatchCapabilitiesSync(providerName, { ...opts, manager });
+      fields = Array.isArray(dispatch.promptFields) ? dispatch.promptFields.map(String) : [];
+    } catch { /* an unverifiable binary keeps the older request shape */ }
+    cached = { fields, expiresAt: Date.now() + PROVIDER_DISPATCH_NEGATIVE_CACHE_MS };
+    providerDispatchPromptFieldCache.set(cacheKey, cached);
+  }
+  return Boolean(cached.fields?.includes(field));
 }
 
 export function requestEngagementRecoveryHintSync(request, opts = {}) {

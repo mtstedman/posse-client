@@ -72,6 +72,7 @@ export function buildNativeDispatchRequest(provider, promptText, {
   maxToolResultChars = DEFAULT_MAX_TOOL_RESULT_CHARS,
   priorSessionHandle = null,
   recyclingMode = "fresh",
+  transcript = null,
 } = {}) {
   if (!PROVIDER_DISPATCH_PROVIDERS.includes(provider)) {
     throw new Error(`Unsupported provider dispatch adapter: ${String(provider)}`);
@@ -119,6 +120,7 @@ export function buildNativeDispatchRequest(provider, promptText, {
       ...(baseInstructions == null ? {} : { baseInstructions: String(baseInstructions) }),
       stableContext: stableContext == null ? null : String(stableContext),
       system: systemPrompt == null ? null : String(systemPrompt),
+      ...(Array.isArray(transcript) && transcript.length ? { transcript } : {}),
     },
     model: {
       tier: String(modelTier || "standard"),

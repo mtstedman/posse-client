@@ -155,6 +155,19 @@ export function resolveAtlasCodeLensCallable() {
 }
 
 export const RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS_SETTING = "research_synthesis_max_physical_calls";
+export const RESEARCH_BUDGET_VISIBILITY_SETTING = "research_budget_visibility";
+
+// "always" states the budget up front and after every retrieval; anything else,
+// including an unreadable or invalid value, keeps the closing countdown.
+export function resolveResearchBudgetVisibility() {
+  try {
+    return String(getAccountSetting(RESEARCH_BUDGET_VISIBILITY_SETTING) || "").trim().toLowerCase() === "always"
+      ? "always"
+      : "countdown";
+  } catch {
+    return "countdown";
+  }
+}
 
 // Effective physical ceiling for a NEW research session: the account setting
 // wins when it validates, then the process environment, then the built-in

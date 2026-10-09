@@ -76,6 +76,7 @@ import {
 import { flushSharedAtlasToolExecutorDeferredRefreshes, getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
 import {
   resolveAtlasResearchRuntimeGuidance,
+  resolveResearchBudgetVisibility,
   resolveResearchSynthesisPolicySnapshot,
 } from "../../../domains/integrations/functions/deterministic-mcp/gate-settings.js";
 import {
@@ -3346,6 +3347,15 @@ function recordOwnerResearchSynthesisRequired(session, progress = {}, toolName) 
 // batch's last result now carries the true figure.
 const RESEARCH_BUDGET_REMAINING_NOTICE_AT = 6;
 
+// research_budget_visibility=always states the total and the live remaining
+// count on every retrieval result instead of only in the closing window. One
+// value per session, so a setting change mid-attempt cannot flip the notices.
+function researchBudgetVisibilityFor(session) {
+  if (!session || typeof session !== "object") return resolveResearchBudgetVisibility();
+  session._researchBudgetVisibility ??= resolveResearchBudgetVisibility();
+  return session._researchBudgetVisibility;
+}
+
 function appendResearchBudgetExhaustedNotice(result, admission, session) {
   if (resolveAtlasResearchRuntimeGuidance()) return result;
   if (!admission?.tracked || admission.blocked || admission.physicalBatchId) return result;
@@ -3353,8 +3363,9 @@ function appendResearchBudgetExhaustedNotice(result, admission, session) {
   const remaining = researchWorkBudget(admission)?.remaining;
   if (!Number.isSafeInteger(remaining)) return result;
   if (remaining > 0) {
-    if (remaining > RESEARCH_BUDGET_REMAINING_NOTICE_AT) return result;
-    return appendOwnerModelControlNotice(result, `\n\n${buildResearchWorkBudgetRemainingText({ remaining })}`, {
+    const always = researchBudgetVisibilityFor(session) === "always";
+    if (!always && remaining > RESEARCH_BUDGET_REMAINING_NOTICE_AT) return result;
+    return appendOwnerModelControlNotice(result, `\n\n${buildResearchWorkBudgetRemainingText({ remaining, ...(always ? { limit: max } : {}) })}`, {
       kind: "research_budget_remaining",
       trigger: "physical_call_ceiling",
     });

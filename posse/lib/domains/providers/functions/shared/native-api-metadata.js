@@ -5,6 +5,7 @@ import { escalateModelTier } from "./turns.js";
 import { classifyProviderError } from "./api-resilience.js";
 import { providerRuntimeState } from "../../classes/runtime-state-singleton.js";
 import { callNativeApiProvider, callNativeApiAgentTurn } from "./native-api.js";
+import { providerDispatchPromptFieldSupportedSync } from "../../../../shared/native/functions/engagement-client.js";
 
 // Selection and cross-provider scheduling remain Node responsibilities.
 export function nativeApiMetadata(provider, credential) {
@@ -30,6 +31,7 @@ export function nativeApiMetadata(provider, credential) {
     escalateTier: escalateModelTier,
     callProvider: (prompt, options = {}) => callNativeApiProvider(provider, prompt, select(options)),
     callAgentTurn: (prompt, options = {}) => callNativeApiAgentTurn(provider, prompt, select(options)),
+    supportsAgentTranscript: () => providerDispatchPromptFieldSupportedSync(provider, "transcript"),
     // This is the orchestrator's routing pause, not the native transport breaker.
     tripRateLimit: (seconds, reason = "") => providerRuntimeState.tripRateLimit(provider, seconds, reason),
     getRateLimitState: () => providerRuntimeState.getRateLimitState(provider),

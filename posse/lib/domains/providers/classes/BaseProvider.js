@@ -23,6 +23,9 @@ export class BaseProvider {
     if (typeof this.module.callAgentTurn === "function") {
       this.callAgentTurn = this.module.callAgentTurn.bind(this.module);
     }
+    if (typeof this.module.supportsAgentTranscript === "function") {
+      this.supportsAgentTranscript = this.module.supportsAgentTranscript.bind(this.module);
+    }
     this.renderTool = this.renderTool.bind(this);
   }
 

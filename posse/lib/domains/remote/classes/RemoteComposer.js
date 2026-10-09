@@ -28,6 +28,8 @@ import {
   deriveRemoteToolSurfaceNarrowing,
   normalizeRemoteIssuedPolicy,
 } from "../../../shared/tools/functions/issued-tool-policy.js";
+import { resolveResearchBudgetVisibility, resolveResearchSynthesisMaxPhysicalCalls } from "../../integrations/functions/deterministic-mcp/gate-settings.js";
+import { buildResearchWorkBudgetUpfrontText } from "../../integrations/functions/deterministic-mcp/research-synthesis.js";
 
 const DEFAULT_LOCAL_ENRICHMENT_ENABLED = false;
 
@@ -558,6 +560,12 @@ function renderLocalPolicyOverlay(packet, { localPolicy = null } = {}) {
       "- Use the issued scoped-check tool for lint/typecheck, including PHP syntax checks; do not run php -l or php --syntax-check through the shell.",
       "- Assessors have no write permission. The shell must not modify files.",
     ].join("\n"));
+  }
+  // research_budget_visibility=always: the researcher learns its retrieval
+  // budget before its first call instead of six calls from the end. Research
+  // children carry their own budget line in the prompt their parent builds.
+  if (["researcher", "research"].includes(role) && resolveResearchBudgetVisibility() === "always") {
+    sections.push(buildResearchWorkBudgetUpfrontText({ limit: resolveResearchSynthesisMaxPhysicalCalls() }));
   }
   if (policy?.allow_tests === false && ["dev", "assessor"].includes(role)) {
     sections.push([

@@ -98,12 +98,15 @@ export async function callNativeApiAgentTurn(provider, promptText, options = {})
     name: tool.name, description: tool.description || "",
     inputSchema: tool.parameters || tool.input_schema || tool.inputSchema || { type: "object", properties: {} },
   }));
-  const request = buildNativeDispatchRequest(provider, promptText, {
-    ...options, role: "preflight", systemPrompt: options.systemPrompt,
+  // A transcript carries the whole conversation, including the latest user
+  // turn, so the flattened prompt is not sent beside it.
+  const transcript = Array.isArray(options.transcript) && options.transcript.length ? options.transcript : null;
+  const request = buildNativeDispatchRequest(provider, transcript ? "" : promptText, {
+    ...options, role: "preflight", systemPrompt: options.systemPrompt, transcript,
     maxTurns: 1, maxOutputTokens: normalizeMaxOutputTokens(options.maxOutputTokens) || 2048,
     stallTimeoutMs: resolveProviderStallTimeout(options.stallTimeout) * 1000,
     issuedToolIds: tools.map(tool => tool.name), decision: { tools, allowBatching: options.allowToolBatching === true },
   });
   const result = await runNativeDispatch(request, { abortSignal: options.signal, silent: true });
-  return { ...result, toolCalls: result.stats.toolDecisions || [] };
+  return { ...result, toolCalls: result.stats.toolDecisions || [], providerContent: result.stats.providerContent || null };
 }

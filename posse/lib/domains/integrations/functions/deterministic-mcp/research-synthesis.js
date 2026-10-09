@@ -307,9 +307,18 @@ export function buildResearchWorkBudgetExhaustedText({ handoffToolName = "" } = 
 // parallel batches blocked (93 wasted calls, cost +13%).
 export const RESEARCH_WORK_BUDGET_REMAINING_PREFIX = "RESEARCH WORK BUDGET:";
 
-export function buildResearchWorkBudgetRemainingText({ remaining = 0 } = {}) {
+export function buildResearchWorkBudgetRemainingText({ remaining = 0, limit = null } = {}) {
   const left = Number.isSafeInteger(remaining) && remaining > 0 ? remaining : 0;
+  if (Number.isSafeInteger(limit) && limit > 0) {
+    return `${RESEARCH_WORK_BUDGET_REMAINING_PREFIX} ${limit} retrieval calls for this task; ${left} ${left === 1 ? "remains" : "remain"}. Calls beyond that return blocked without executing.`;
+  }
   return `${RESEARCH_WORK_BUDGET_REMAINING_PREFIX} ${left} retrieval ${left === 1 ? "call remains" : "calls remain"}. Calls beyond that return blocked without executing.`;
+}
+
+// The up-front statement for research_budget_visibility=always: a fact about
+// the rail, with no instruction to stop or to spend it.
+export function buildResearchWorkBudgetUpfrontText({ limit = 0 } = {}) {
+  return `${RESEARCH_WORK_BUDGET_REMAINING_PREFIX} ${limit} retrieval calls for this task. Each retrieval result states how many remain; the terminal handoff does not use one.`;
 }
 
 export function buildResearchEarlyFetchBatchingText() {
