@@ -2234,15 +2234,25 @@ export function refreshWorkItemStatus(workItemId) {
       else if (hasAcceptedHumanGate) newStatus = "running";
       else newStatus = "blocked";
     } else if (stateJobs.some(j => ["running", "leased", "awaiting_assessment"].includes(j.status))) {
-      newStatus = "running";
+      // Planner-first dispatches preflight/research/plan children that run
+      // before the plan is produced. Those are planning-phase work: while every
+      // non-terminal job is a bootstrap job the work item is still "planning",
+      // not "running". Otherwise the status flips planning -> running ->
+      // planning as research children start and finish, which reads as the
+      // phase looping backwards (planner-first runs showed "planning" reappear
+      // after the last researcher returned). Mirrors the queued-only branch.
+      const nonTerminal = stateJobs.filter(j => !TERMINAL_JOB_STATUS_SET.has(j.status));
+      const allPlanning = nonTerminal.every(j => PIPELINE_BOOTSTRAP_JOB_TYPES.has(j.job_type));
+      newStatus = allPlanning ? "planning" : "running";
     } else if (stateJobs.some(j => j.status === "waiting_on_review")) {
       newStatus = "waiting_on_review";
     } else if (stateJobs.some(j => j.status === "blocked")) {
       newStatus = "blocked";
     } else if (stateJobs.some(j => j.status === "queued")) {
-      // Queued-only: "planning" if only routing/research/plan jobs remain, otherwise "running"
+      // Queued-only: "planning" if only bootstrap (preflight/research/plan)
+      // jobs remain, otherwise "running".
       const nonTerminal = stateJobs.filter(j => !TERMINAL_JOB_STATUS_SET.has(j.status));
-      const allPlanning = nonTerminal.every(j => ["preflight", "research", "plan"].includes(j.job_type));
+      const allPlanning = nonTerminal.every(j => PIPELINE_BOOTSTRAP_JOB_TYPES.has(j.job_type));
       newStatus = allPlanning ? "planning" : "running";
     } else {
       return; // ambiguous — leave untouched
