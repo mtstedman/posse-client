@@ -1104,7 +1104,8 @@ export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {
   // the planner's own test_command in force. A list inherited from the root
   // that no longer resolves is treated as absent.
   if (Array.isArray(payload?.tests_to_run) && unitTestPaths.length === 0 && !declaredCommand) return null;
-  if (unitTestPaths.length > 0) {
+  // File selection cannot replace the project's declared runner/loader.
+  if (unitTestPaths.length > 0 && !declaredCommand) {
     const command = unitTestPaths.join(", ");
     return {
       schema_version: RECEIPT_SCHEMA_VERSION,

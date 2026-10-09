@@ -131,6 +131,15 @@ export function normalizeAssessorConfidence(value, { fallback = "medium", allowN
   return fallback;
 }
 
+export function capVerdictForVerificationInfrastructure(verdict, testRun = null) {
+  const post = testRun?.post_change || testRun?.postChange;
+  const failedRunner = [post, post?.changed_tests].find((run) => run && ["infrastructure_error", "unavailable", "invalid"].includes(run.status));
+  if (!failedRunner || verdict?.verdict === "fail") return verdict;
+  return { ...verdict, verdict: "needs_review", confidence: "none", spawn_jobs: [], human_questions: [],
+    _disable_internal_retry: true, _assessment_infrastructure_review: true, _verification_blocked: true,
+    reasons: [`Required verification could not run (${failedRunner.reason || failedRunner.status}); repair the test harness, not application code.`] };
+}
+
 export function capVerdictForDeterministicTestRegression(verdict, testRun = null) {
   const postChange = testRun?.postChange || testRun?.post_change || null;
   if (testRun?.debt_only === true && postChange?.status === "failed") {
@@ -940,6 +949,7 @@ export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: cu
       ],
     };
   }
+  prepared = capVerdictForVerificationInfrastructure(prepared, assessedReceipt);
   prepared = capVerdictForHighRiskVerificationGap(
     prepared,
     payload,

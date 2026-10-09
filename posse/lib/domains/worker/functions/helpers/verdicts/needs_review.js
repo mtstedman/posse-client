@@ -35,6 +35,11 @@ function operatorDispositionReviewQuestion(verdict) {
 export function handle(job, verdict, ctx) {
   const { emitLog: log, spawnedJobs, spawnFromAssessor, reasonBrief } = ctx;
 
+  if (verdict._verification_blocked === true) {
+    const changed = typeof ctx.updateJobStatus === "function" ? ctx.updateJobStatus("blocked") : updateJobStatus(job.id, "blocked");
+    if (changed) log(`${C.yellow}[verification] BLOCKED${C.reset} WI#${job.work_item_id} job #${job.id}${reasonBrief}`);
+    return;
+  }
   const explicitHumanQuestions = Array.isArray(verdict.human_questions)
     ? verdict.human_questions.filter((question) => String(question || "").trim())
     : [];

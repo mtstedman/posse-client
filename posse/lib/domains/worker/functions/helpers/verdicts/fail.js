@@ -718,6 +718,7 @@ function _extractOriginalPayloadContext(job) {
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
     origOneshotOrigin, originalTestCommand: inheritableTestCommand, origTaskAbTestCommand,
     originalDevBrief, originalHashRefPacket,
+    originalTestsToRun: Array.isArray(origPayload.tests_to_run) ? origPayload.tests_to_run : null,
     verificationPlanInvalid: origPayload._verification_plan_invalid && typeof origPayload._verification_plan_invalid === "object"
       ? origPayload._verification_plan_invalid
       : null,
@@ -841,7 +842,7 @@ function _spawnRecoveryJobsForVerdict({
     originalSuccessCriteria, originalTaskSpec,
     origTaskMode, origOutputRoot, origNeedsImageGen, origPlannerSetFiles,
     origOneshotOrigin, originalTestCommand, origTaskAbTestCommand,
-    originalDevBrief, originalHashRefPacket, verificationPlanInvalid,
+    originalDevBrief, originalHashRefPacket, verificationPlanInvalid, originalTestsToRun,
   } = origCtx;
   // One-shot lineage marker survives every recovery spawn so later fixes and
   // file-request follow-ups keep the tightened one-shot policies.
@@ -1094,6 +1095,7 @@ function _spawnRecoveryJobsForVerdict({
       needs_image_generation: origNeedsImageGen,
       success_criteria: originalSuccessCriteria,
       ...(originalTestCommand ? { test_command: originalTestCommand } : {}),
+      ...(originalTestsToRun ? { tests_to_run: originalTestsToRun } : {}),
       ...(origTaskAbTestCommand ? { _task_ab_test_command: true } : {}),
       ...(verificationPlanInvalid ? { _verification_plan_invalid: verificationPlanInvalid } : {}),
       ...(currentPayload.risk != null ? { risk: currentPayload.risk } : {}),

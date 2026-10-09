@@ -4752,6 +4752,7 @@ export function clearAll() {
       db.prepare(`UPDATE artifacts SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
       db.prepare(`UPDATE events SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
       db.prepare(`UPDATE agent_calls SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
+      db.prepare(`UPDATE research_report_claim_drafts SET attempt_id = NULL`).run();
       db.prepare(`UPDATE job_observations SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
       db.prepare(`UPDATE run_insights SET work_item_id = NULL, job_id = NULL`).run();
       db.prepare(`UPDATE agent_handoff_packets SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();

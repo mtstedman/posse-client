@@ -18,7 +18,7 @@ export const FINAL_REVIEW_MODES = Object.freeze(["on", "off"]);
 export const FINAL_REVIEW_DEFAULT_MODE = "on";
 
 // Reviews per implementation attempt. Once spent, the handoff proceeds and
-// the independent assessment after it decides.
+// the persisted review remains unresolved; no second assessor is dispatched.
 export const FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT = 3;
 
 // Whole tool call: the declared tests plus the reviewer's own agent call. The

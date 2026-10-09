@@ -1,3 +1,5 @@
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
@@ -56,6 +58,39 @@ const ADAPTERS = Object.freeze({
     argv: (relative) => ["test", "--test", path.posix.basename(relative, ".rs")],
   },
 });
+
+// Resolve the repository's installed loader, never download one or infer that
+// Node's type stripping implements the project's TypeScript resolution rules.
+function nodeRunner(root, relative) {
+  let pkg = {};
+  try { pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")); } catch { /* no package */ }
+  const script = String(pkg.scripts?.test || "").trim();
+  if (/^(?:tsx\s+--test|node\s+--import(?:=|\s+)tsx\s+--test)(?:\s|$)/u.test(script)) {
+    try {
+      const cli = createRequire(path.join(root, "package.json")).resolve("tsx/cli");
+      return { runner: "node_test", executable: "node", args: [cli, "--test", relative] };
+    } catch { return { reason: "typescript_test_loader_unavailable" }; }
+  }
+  if (script && /\b(?:vitest|jest|mocha|ava)\b/u.test(script)) return { reason: "project_test_runner_requires_declared_command" };
+  const typed = /\.[cm]?ts$/u.test(relative);
+  return { runner: "node_test", executable: "node", args: [...(typed ? ["--experimental-strip-types"] : []), "--test", relative] };
+}
+
+function nodeBootstrapFailure(invocation, output) {
+  if (invocation.runner !== "node_test") return null;
+  if (/ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX|ERR_UNKNOWN_FILE_EXTENSION/u.test(output)) return "typescript_test_loader_unavailable";
+  if (/ERR_MODULE_NOT_FOUND/u.test(output)) {
+    const url = /url: ['"](file:[^'"]+)['"]/u.exec(output)?.[1];
+    if (url) {
+      try {
+        const missing = fileURLToPath(url);
+        if (!path.extname(missing) && [".ts", ".tsx", ".js"].some((ext) => fs.existsSync(missing + ext))) return "test_loader_resolution_mismatch";
+      } catch { /* malformed diagnostic */ }
+    }
+    if (/Cannot find package ['"]/u.test(output)) return "test_dependency_unavailable";
+  }
+  return null;
+}
 
 const PYTEST_SOURCE_RE = /^\s*(?:async\s+)?def\s+test\w*\s*\(|^\s*class\s+Test\w*|^\s*(?:import|from)\s+(?:pytest|unittest)\b/m;
 const PYTHON_MAIN_RE = /^if\s+__name__\s*==\s*["']__main__["']\s*:/m;
@@ -209,7 +244,9 @@ export function resolveUnitTestInvocation(projectDir, requestedPath, capability 
   if (!relativeReal || relativeReal.startsWith("..") || path.isAbsolute(relativeReal)) return null;
   const adapter = ADAPTERS[path.extname(normalized).toLowerCase()];
   if (!adapter) return null;
-  const resolved = adapter.resolve
+  const resolved = ["javascript", "typescript"].includes(adapter.language)
+    ? nodeRunner(root, normalized)
+    : adapter.resolve
     ? adapter.resolve(root, normalized, readSourceHead(real))
     : { runner: adapter.runner, executable: adapter.executable(), args: adapter.argv(normalized) };
   if (!resolved.runner) {
@@ -241,6 +278,8 @@ function missingExternalPythonModule(root, output) {
 
 function classifyCompletedRun(invocation, { code, stdout, stderr }, root) {
   const output = `${stdout}\n${stderr}`;
+  const bootstrapFailure = nodeBootstrapFailure(invocation, output);
+  if (bootstrapFailure) return { outcome: "infrastructure_error", reason: bootstrapFailure };
   const counts = testExecutionCounts(output);
   const zeroTests = !!counts && (counts.total === 0 || counts.skipped === counts.total);
   const noTests = { outcome: "unavailable", reason: "no_tests_executed" };

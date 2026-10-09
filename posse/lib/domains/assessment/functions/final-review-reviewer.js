@@ -2,8 +2,8 @@
 // the developer's agent call. Its prompt is the remote assessor composition
 // for the job plus the local snapshot; it reads files with its issued read
 // tools and ends with the ordinary assessor verdict. It is labeled
-// final_reviewer, so it neither spends the job's assessment call budget nor
-// counts as the independent assessment that follows the handoff.
+// final_reviewer; its durable verdict authorizes the reviewed change after
+// handoff, subject to deterministic scope, identity, and verification checks.
 
 import { getJob, getWorkItem } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";

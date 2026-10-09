@@ -1,3 +1,4 @@
+import { authoritativeFinalReview, latestFinalReview } from "../../../assessment/functions/final-review-authority.js";
 // lib/domains/worker/functions/helpers/assessment-pipeline.js
 //
 // Post-execution assessment pipeline extracted from worker.js.
@@ -1387,6 +1388,19 @@ export function __testBuildAssessmentProviderScope(options) {
  * @returns {object} verdict: { verdict, confidence, reasons, spawn_jobs, human_questions }
  */
 export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, projectDir = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null, taskBoundaryRetryDepth = 0, ignoredPathRetryDepth = 0, attemptId = null, allowMutatingRunners = false } = {}) {
+  const finalReview = await authoritativeFinalReview(job, parseJobPayload(job), cwd);
+  if (finalReview) {
+    const scopeFailure = _buildCommittedScopeViolationVerdict(assessmentContext, cwd);
+    if (scopeFailure) return scopeFailure;
+    const payload = parseJobPayload(job);
+    const disabledTests = _buildDisabledRequiredTestsVerdict({ assessmentContext, taskSpec: payload.root_task_spec || payload.original_task_spec || payload.task_spec || "" });
+    if (disabledTests) return disabledTests;
+    if (_hasTrustedScopedCheckFailure(assessmentContext)) {
+      return { verdict: "fail", confidence: "high", reasons: assessmentContext.scoped_check_result.failures.map((failure) => failure.message || failure.file || failure.check), _disable_internal_retry: true };
+    }
+    return finalReview;
+  }
+
   const assessorProvider = String(
     routedProviderName
     || await agentDispatcher?.selectProvider?.({ role: "assessor", providerName: harnessAssessorProvider() })
@@ -2635,7 +2649,7 @@ export async function runPostExecutionAssessment(worker, {
     hasFileChanges,
     autoApprove: worker.autoApprove,
   });
-  const skipAssessForSatisfiedNoop = satisfiedNoop && !verifiedNoChange;
+  const skipAssessForSatisfiedNoop = satisfiedNoop && !verifiedNoChange && !latestFinalReview(job.id);
   const shouldRunAssessment = ASSESSABLE_JOB_TYPES.has(job.job_type)
     && !worker.dryRun
     && !worker._shouldSkipAssessment(job);
@@ -2751,7 +2765,7 @@ export async function runPostExecutionAssessment(worker, {
     }
     const emitFn = (msg) => worker.emit(job.id, msg);
     const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
-    log.info("assessor", `Verdict: ${verdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons });
+    log.info("assessor", `Verdict: ${effectiveVerdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: effectiveVerdict.verdict, confidence: effectiveVerdict.confidence, reasons: effectiveVerdict.reasons });
     jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}) — ${passMsg.slice(0, 100)}` });
     recordObservation({
       work_item_id: job.work_item_id,
@@ -2788,8 +2802,9 @@ export async function runPostExecutionAssessment(worker, {
     // acquireAssessmentBarrier already moved the job to awaiting_assessment;
     // for worktree writers it also atomically proved there were no live sibling
     // writers and installed the WI-local assessment barrier.
-    worker.emit(job.id, `${C.yellow}[assessor]${C.reset} WI#${job.work_item_id} job #${job.id}: assessing ${shortJobTitle(job).slice(0, 50)}`);
-    syncAssessorWorkerDisplay(worker.display, job, {
+    const reviewed = latestFinalReview(job.id);
+    worker.emit(job.id, `${C.yellow}[${reviewed ? "verification" : "assessor"}]${C.reset} WI#${job.work_item_id} job #${job.id}: ${reviewed ? "verifying final review" : "assessing"} ${shortJobTitle(job).slice(0, 50)}`);
+    if (!reviewed) syncAssessorWorkerDisplay(worker.display, job, {
       tier: "cheap",
       effort: job.reasoning_effort || "medium",
       attempt: attempt.attempt_number || job.attempt_count || 1,
@@ -3059,7 +3074,7 @@ export async function runPostExecutionAssessment(worker, {
         }
         const emitFn = (msg) => worker.emit(job.id, msg);
         const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
-        log.info("assessor", `Verdict: ${verdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons });
+        log.info("assessor", `Verdict: ${effectiveVerdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: effectiveVerdict.verdict, confidence: effectiveVerdict.confidence, reasons: effectiveVerdict.reasons });
         jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}) — ${passMsg.slice(0, 100)}` });
         recordObservation({
           work_item_id: job.work_item_id,
@@ -3094,11 +3109,11 @@ export async function runPostExecutionAssessment(worker, {
       }
 
       const jobAc = worker._abortControllers.get(job.id);
-      assessorProvider = String(
+      assessorProvider = reviewed ? null : String(
         await worker.agentDispatcher?.selectProvider?.({ role: "assessor", providerName: harnessAssessorProvider() })
         || "",
       ).trim().toLowerCase();
-      if (!assessorProvider) {
+      if (!reviewed && !assessorProvider) {
         const routeError = new Error("Assessment requires an assessor Provider route from the AgentDispatcher");
         routeError.code = "POSSE_AGENT_PROVIDER_ROUTE_REQUIRED";
         throw routeError;
@@ -3392,7 +3407,7 @@ export async function runPostExecutionAssessment(worker, {
 
       const emitFn = (msg) => worker.emit(job.id, msg);
       const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
-      log.info("assessor", `Verdict: ${verdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: verdict.verdict, confidence: verdict.confidence, reasons: verdict.reasons?.slice(0, 3) });
+      log.info("assessor", `Verdict: ${effectiveVerdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: effectiveVerdict.verdict, confidence: effectiveVerdict.confidence, reasons: effectiveVerdict.reasons?.slice(0, 3) });
       jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"})${effectiveVerdict.reasons?.length ? ` — ${effectiveVerdict.reasons[0].slice(0, 100)}` : ""}` });
 
       recordObservation({

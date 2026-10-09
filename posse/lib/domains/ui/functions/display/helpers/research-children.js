@@ -1,6 +1,7 @@
 import { getAgentCalls, listAgentInteractions } from "../../../../queue/functions/index.js";
 import { getAgentHandoffRecord } from "../../../../handoff/functions/index.js";
 import { researchExplorationObservationStatus } from "../../../../observability/functions/observations.js";
+import { latestFinalReview } from "../../../../assessment/functions/final-review-authority.js";
 
 function reportClaims(packet) {
   const handoffs = Array.isArray(packet?.handoffs) ? packet.handoffs : [];
@@ -60,12 +61,17 @@ export function appendResearchChildMonitorRows(parents, {
   interactionsForJob = listAgentInteractions,
   handoffForCall = getAgentHandoffRecord,
   explorationStatus = researchExplorationObservationStatus,
+  finalReviewForJob = latestFinalReview,
   toolRows = [],
 } = {}) {
   return parents.flatMap((parent) => {
     let calls = [];
-    try { calls = callsForJob(parent.jobId).filter((call) => call.parent_agent_call_id && ["research", "web_research", "citation"].includes(call.child_kind)); } catch { return [parent]; }
+    try { calls = callsForJob(parent.jobId).filter((call) => call.parent_agent_call_id && ["research", "web_research", "citation", "final_review"].includes(call.child_kind)); } catch { return [parent]; }
     const childIds = new Set(calls.map((call) => Number(call.id)));
+    let finalReview = null;
+    if (calls.some((call) => call.child_kind === "final_review")) {
+      try { finalReview = finalReviewForJob(parent.jobId); } catch { /* historical review may be unavailable */ }
+    }
     const parentRows = (parent.interactionRows || []).filter((row) => !childIds.has(Number(row.agent_call_id)));
     const parentTools = toolRows.filter((row) => Number(row.job_id) === parent.jobId && !childIds.has(Number(row.agent_call_id)));
     const cleanParent = { ...parent, excludeCallIds: [...childIds], interactionRows: parentRows,
@@ -86,12 +92,16 @@ export function appendResearchChildMonitorRows(parents, {
       const pending = guidance.filter((row) => row.status === "active" && row.ack_state === "pending");
       const tools = toolRows.filter((row) => Number(row.agent_call_id) === Number(call.id));
       const running = call.status === "running";
-      const researchOutcome = childResearchOutcome(call, { handoffForCall, explorationStatus });
+      const researchOutcome = childResearchOutcome(call, { handoffForCall, explorationStatus: call.child_kind === "final_review" ? () => null : explorationStatus });
+      if (call.child_kind === "final_review") {
+        researchOutcome.budget = null;
+        if (Number(finalReview?.reviewer_agent_call_id) === Number(call.id)) researchOutcome.outcome = finalReview.outcome;
+      }
       const outcomeLabel = researchOutcomeLabel(researchOutcome);
-      const baseActivity = activityRows[0]?.body || call.activity || "Researching";
+      const baseActivity = activityRows[0]?.body || call.activity || (call.child_kind === "final_review" ? "Reviewing" : "Researching");
       return {
         ...parent, agentCallId: Number(call.id), parentAgentCallId: call.parent_agent_call_id,
-        role: `↳ ${call.child_kind === "web_research" ? "web researcher" : call.child_kind === "research" ? "code researcher" : "citation child"}`,
+        role: `↳ ${call.child_kind === "final_review" ? "final reviewer" : call.child_kind === "web_research" ? "web researcher" : call.child_kind === "research" ? "code researcher" : "citation child"}`,
         researchQuestion: call.activity, activity: outcomeLabel ? `${outcomeLabel} · ${baseActivity}` : baseActivity,
         state: running ? pending.length ? "nudge" : "live" : call.status === "succeeded" ? researchOutcome.outcome === "partial" ? "partial" : "done" : call.status === "canceled" ? "canceled" : "failed", status: call.status,
         researchOutcome,

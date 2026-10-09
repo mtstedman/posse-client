@@ -1,3 +1,4 @@
+import { finalReviewIdentity } from "../functions/final-review-authority.js";
 // FinalReviewRuntime — both sides of final_review.
 //
 // TrackedProviderClient registers each dev/fix agent call that was issued the
@@ -67,6 +68,7 @@ function finalReviewParentOf(agentCallId) {
 export class FinalReviewRuntime {
   constructor({
     collectChange = collectScopedChange,
+    identify = finalReviewIdentity,
     resolveTestPlan = resolveFrozenTestPlan,
     runTestPlan = runFrozenTestPlanOnce,
     snapshotFiles = snapshotReviewedFiles,
@@ -76,6 +78,7 @@ export class FinalReviewRuntime {
     lineageTests = lineageTestFiles,
   } = {}) {
     this.parents = new Map();
+    this.identify = identify;
     this.collectChange = collectChange;
     this.resolveTestPlan = resolveTestPlan;
     this.runTestPlan = runTestPlan;
@@ -164,6 +167,7 @@ export class FinalReviewRuntime {
     let checks = null;
     let change = null;
     let reviewerCallId = null;
+    let reviewIdentity = null;
     let mode = "fresh";
     try {
       const job = getJob(parent.jobId);
@@ -189,6 +193,7 @@ export class FinalReviewRuntime {
         ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS })
         : null;
       checks = this.runChecks(parent.cwd, change);
+      try { reviewIdentity = await this.identify(parent.cwd, payload); } catch { /* unavailable identities cannot authorize assessment */ }
       const session = parent.reviewer;
       let outcome;
       if (session && !session.ended && session.parked) {
@@ -218,6 +223,14 @@ export class FinalReviewRuntime {
       }
       ({ result, reviewerCallId } = await outcome);
       result = mergeCheckFindings(result, finalReviewCheckFindings({ checks, changedTestRun }));
+      if ([testRun, changedTestRun].some((run) => run && ["infrastructure_error", "unavailable", "invalid"].includes(run.status))) {
+        result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Required test verification could not run; repair the test runner before completing this change." };
+      }
+      if (!reviewIdentity) {
+        result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Cannot bind final review to the scoped workspace; verification is blocked." };
+      } else if (reviewIdentity !== await this.identify(parent.cwd, payload)) {
+        result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Scoped files changed during review; review the current change again." };
+      }
     } catch (error) {
       // The review could not run: never hold the handoff on it.
       result = {
@@ -252,6 +265,8 @@ export class FinalReviewRuntime {
         agent_call_id: parent.agentCallId,
         attempt_id: parent.attemptId ?? null,
         outcome: result.outcome,
+        review_identity: reviewIdentity,
+        summary: result.summary || null,
         finding_count: result.findings?.length || 0,
         reason: result.reason || null,
         reviewer_agent_call_id: reviewerCallId,
