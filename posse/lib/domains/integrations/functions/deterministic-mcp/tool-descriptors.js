@@ -755,7 +755,8 @@ function roleAllowlistForTool(toolName) {
   if (toolName === "web_research_handoff") return new Set(["researcher"]);
   if (toolName === "agent_claim" || toolName === "report_claims") return new Set(["researcher"]);
   if (toolName === "dispatch_agent") return new Set(["researcher", "planner"]);
-  if (toolName === "final_review") return new Set(["dev"]);
+  // The developer requests reviews; its reviewer child reports with it.
+  if (toolName === "final_review") return new Set(["dev", "assessor"]);
   if (toolName === "agent_handoff") {
     return new Set(["researcher", "planner", "dev", "artificer", "assessor", "subagent"]);
   }
@@ -904,7 +905,7 @@ export function getBaseToolNamesForRole(role, allowWrite, { needsImageGeneration
   }
   if (dispatchAgent && ["researcher", "planner"].includes(role)) names.unshift("dispatch_agent");
   if (webResearchHandoff && role === "researcher") names.unshift("web_research_handoff");
-  if (finalReview && role === "dev" && allowWrite) names.unshift("final_review");
+  if (finalReview && ((role === "dev" && allowWrite) || role === "assessor")) names.unshift("final_review");
   return names;
 }
 
@@ -1012,7 +1013,7 @@ export function getDeterministicMcpToolNames(role, {
   }
   if (dispatchAgent && ["researcher", "planner"].includes(role)) tools.unshift("dispatch_agent");
   if (webResearchHandoff && role === "researcher") tools.unshift("web_research_handoff");
-  if (finalReview && role === "dev") tools.unshift("final_review");
+  if (finalReview && (role === "dev" || role === "assessor")) tools.unshift("final_review");
   return tools;
 }
 

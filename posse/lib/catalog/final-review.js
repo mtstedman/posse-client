@@ -2,10 +2,12 @@
 //
 // final_review: the dev/fix close-out step. The agent calls it when its change
 // is complete; Posse runs the task's declared tests on the current workspace,
-// then a fresh read-only reviewer judges the change against the task contract,
-// and the structured result returns to the same agent session. A COMPLETE
-// handoff waits for a passing review, unless the review could not run or the
-// attempt's reviews are used up (domains/assessment, final review).
+// then a read-only reviewer judges the change against the task contract, and
+// the structured result returns to the same agent session. The reviewer
+// reports with the same tool and waits in it, so a later review continues the
+// same reviewer with only the diff since its report. A COMPLETE handoff waits
+// for a passing review, unless the review could not run or the attempt's
+// reviews are used up (domains/assessment, final review).
 
 export const FINAL_REVIEW_TOOL_NAME = "final_review";
 
@@ -30,6 +32,16 @@ export const FINAL_REVIEW_TEST_TIMEOUT_MS = 15 * 60 * 1000;
 export const FINAL_REVIEW_DIFF_INLINE_MAX_CHARS = 60_000;
 export const FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS = 6_000;
 export const FINAL_REVIEW_MAX_FINDINGS = 12;
+// A re-review sees only what changed since the reviewer's last report.
+export const FINAL_REVIEW_DELTA_INLINE_MAX_CHARS = 30_000;
+
+// The reviewer reports with the same tool and waits in it for the developer's
+// next revision; these are what its waiting call returns.
+export const FINAL_REVIEW_VERDICTS = Object.freeze(["pass", "fail", "needs_review"]);
+export const FINAL_REVIEW_REVIEWER_STATUS = Object.freeze({
+  REVISED: "revised",
+  DONE: "done",
+});
 
 export const FINAL_REVIEW_OUTCOMES = Object.freeze({
   PASS: "pass",

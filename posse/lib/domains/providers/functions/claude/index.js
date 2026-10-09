@@ -345,8 +345,12 @@ export async function callProvider(promptText, {
   onAgentCommentary = null, // (text: string) => void — visible assistant text, like Codex agent messages
   onProviderToolUse = null, // (toolUse) => void — each completed tool_use block as it streams
   onProviderToolResult = null, // ({ id, isError }) => void — each tool_result block as it streams
+  detachedCliControl = false,
 } = {}) {
-  const nativeDispatchEnabled = providerDispatchSupportedSync("claude");
+  // A detached A/B control is raw Claude Code: its own CLI and built-in read
+  // tools, which native dispatch cannot host. Only that explicit caller takes
+  // the CLI path; every Posse turn stays on native dispatch.
+  const nativeDispatchEnabled = detachedCliControl !== true && providerDispatchSupportedSync("claude");
   const resolvedClaude = nativeDispatchEnabled ? null : await getClaudeCommandAsync();
   const providerPathsForAtlas = normalizeProviderPaths({ cwd, projectDir });
   const mcpWorkspaceCwdForAtlas = mcpCwd ? path.resolve(mcpCwd) : providerPathsForAtlas.cwd;
@@ -408,9 +412,8 @@ export async function callProvider(promptText, {
     const turns = maxTurns || getMaxTurns(role, modelTier, complexity, deepthink, filesToModifyCount);
     const outputTokenLimit = normalizeMaxOutputTokens(maxOutputTokens)
       || getMaxOutputTokensForProvider("claude", { role });
-    if (turns && !nativeDispatchEnabled) {
-      args.push("--max-turns", String(turns));
-    }
+    // Turns are a target reported in stats, never a CLI kill: Posse's stall
+    // and wall timeouts end a session that genuinely needs ending.
     if (priorSessionHandle && !nativeDispatchEnabled) {
       args.push("--resume", String(priorSessionHandle));
     }

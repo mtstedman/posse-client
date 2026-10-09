@@ -45,6 +45,11 @@ export async function runFinalReviewer({
     lastError: null,
     cwd,
   });
+  // The reviewer reports with final_review and waits in it for the
+  // developer's revisions; it needs the handoff protocol for its final verdict.
+  if (packet.agent_coordination?.agent_handoff_v1 === true) {
+    packet.agent_coordination = { ...packet.agent_coordination, final_review_v1: true };
+  }
   try {
     await handoff(packet, { providerName });
   } catch {

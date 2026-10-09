@@ -287,6 +287,14 @@ export async function runNativeDispatch(request, {
       toolUses,
       toolUsesLoggedByToolkit: true,
     };
+    // A cancelled dispatch (Posse's terminal handoff stop) still reports the
+    // usage of every model request it completed. Keep it as partial usage
+    // after the stop, as the CLI paths do, with completed requests as turns.
+    if (error.code === "provider_dispatch_cancelled" && Number(error.stats.modelRequests) > 0
+      && error.stats.inputTokens != null && error.stats.outputTokens != null) {
+      error.stats.usagePartialAfterStop = true;
+      error.stats.numTurns ??= error.stats.modelRequests;
+    }
     error.toolUses = toolUses;
     throw error;
   }

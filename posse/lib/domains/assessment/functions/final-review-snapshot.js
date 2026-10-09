@@ -9,13 +9,16 @@ import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
 import { gitExecAsync } from "../../git/functions/utils.js";
+import { unifiedLineDiff } from "../../../shared/format/functions/line-diff.js";
 import {
+  FINAL_REVIEW_DELTA_INLINE_MAX_CHARS,
   FINAL_REVIEW_DIFF_INLINE_MAX_CHARS,
   FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS,
 } from "../../../catalog/final-review.js";
 
 const SCOPE_FIELDS = Object.freeze(["files_to_modify", "files_to_create", "files_to_delete"]);
 const MAX_UNTRACKED_FILE_CHARS = 20_000;
+const MAX_SNAPSHOT_FILE_CHARS = 400_000;
 
 function normalizeRepoPath(value) {
   return String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
@@ -57,7 +60,7 @@ export function parsePorcelainZ(output) {
   return entries;
 }
 
-function readUntrackedFile(cwd, repoPath) {
+function readUntrackedFile(cwd, repoPath, maxChars = MAX_UNTRACKED_FILE_CHARS) {
   let fd = null;
   try {
     const absolute = path.resolve(cwd, repoPath);
@@ -71,7 +74,8 @@ function readUntrackedFile(cwd, repoPath) {
     fd = fs.openSync(absolute, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
     if (!fs.fstatSync(fd).isFile()) return null;
     const text = fs.readFileSync(fd, "utf8");
-    return { text: text.includes("\0") ? "(binary file)" : text.slice(0, MAX_UNTRACKED_FILE_CHARS), mode: null, stat: null };
+    if (text.includes("\0")) return { text: "(binary file)", mode: null, stat: null, truncated: true };
+    return { text: text.slice(0, maxChars), mode: null, stat: null, truncated: text.length > maxChars };
   } catch {
     return null;
   } finally {
@@ -118,6 +122,72 @@ export async function collectScopedChange(cwd, payload = {}, { git = gitExecAsyn
     digest: createHash("sha256").update(diff).digest("hex"),
     scopeDeclared: scope.declared,
   };
+}
+
+/**
+ * The reviewed state of the job's scoped files, kept in memory with the parked
+ * reviewer so its next turn sees only what changed since it reported. Read in
+ * process with the same in-repository guards as the snapshot diff; the
+ * reviewer is sandboxed, so nothing here runs a subprocess on its behalf.
+ *
+ * @returns {Map<string, { text: string, truncated: boolean } | null>} null: absent
+ */
+export function snapshotReviewedFiles(cwd, payload = {}, change = {}, { alsoPaths = [] } = {}) {
+  const scope = finalReviewScope(payload);
+  const paths = new Set([
+    ...scope.files,
+    ...(Array.isArray(change?.files) ? change.files.map((file) => file.path) : []),
+    ...alsoPaths,
+  ].map(normalizeRepoPath).filter(Boolean));
+  const files = new Map();
+  for (const repoPath of [...paths].sort()) {
+    const content = readUntrackedFile(cwd, repoPath, MAX_SNAPSHOT_FILE_CHARS);
+    files.set(repoPath, content == null ? null : { text: content.text, truncated: content.truncated === true });
+  }
+  return files;
+}
+
+function fileDiffSection(diff, repoPath) {
+  const sections = String(diff || "").split(/^(?=diff --git )/m);
+  return sections.find((section) => section.startsWith("diff --git ")
+    && section.split("\n", 1)[0].endsWith(` b/${repoPath}`)) || null;
+}
+
+/**
+ * What changed in the scoped files between the reviewer's last report and now:
+ * the diff of the diff. A file the reviewer saw unchanged from the base has no
+ * earlier snapshot, so its change since the report is its diff from the base.
+ */
+export function diffSinceReview(previous, current, change = {}) {
+  const changed = [];
+  const sections = [];
+  const paths = new Set([...previous.keys(), ...current.keys()]);
+  for (const repoPath of [...paths].sort()) {
+    const after = current.get(repoPath) ?? null;
+    if (!previous.has(repoPath)) {
+      const section = fileDiffSection(change.diff, repoPath);
+      if (section) {
+        changed.push({ path: repoPath, status: "first changed since your report" });
+        sections.push(section.endsWith("\n") ? section : `${section}\n`);
+      }
+      continue;
+    }
+    const before = previous.get(repoPath) ?? null;
+    if ((before?.text ?? null) === (after?.text ?? null)) continue;
+    const status = before == null ? "created" : after == null ? "deleted" : "modified";
+    if (before?.truncated || after?.truncated) {
+      changed.push({ path: repoPath, status: `${status}; too large to diff inline, read it` });
+      continue;
+    }
+    const diff = unifiedLineDiff(before?.text ?? null, after?.text ?? null, { path: repoPath });
+    if (diff == null) {
+      changed.push({ path: repoPath, status: `${status}; rewritten, read it` });
+      continue;
+    }
+    changed.push({ path: repoPath, status });
+    sections.push(diff);
+  }
+  return { changed, diff: sections.join("") };
 }
 
 function tail(text, max) {
@@ -188,6 +258,34 @@ export function finalReviewInstructions() {
     "Judge the current workspace change, which is not committed yet, against the task contract in the attached snapshot.",
     "Check the actual files: the snapshot lists every changed file and inlines the diff up to its size limit; read any changed file it does not show.",
     "Use the declared test result as evidence.",
-    "Return the standard verdict: pass when the change meets the contract; fail with one reason per concrete defect the developer must fix, naming the file and the criterion it misses; needs_review only when the contract itself cannot be judged.",
+    "Check every success criterion before you report, and report every concrete defect at once, most severe first: each finding names the criterion it misses and locates it with hash refs, paths or symbols.",
+    "Report by calling final_review with your verdict (pass when the change meets the contract; fail with your findings; needs_review only when the contract itself cannot be judged). The call then waits while the developer works.",
+    "When it returns a revision, check your findings against the diff since your report, review only what changed, and call final_review again. When it returns status done, end with your terminal handoff carrying your latest verdict.",
   ].join("\n");
+}
+
+/**
+ * The parked reviewer's next turn after the developer revises: the declared
+ * test result and only what changed since its report, never the whole change
+ * again.
+ */
+export function renderFinalReviewRevision({ revision, testRun, delta }) {
+  const changed = Array.isArray(delta?.changed) ? delta.changed : [];
+  const diff = String(delta?.diff || "");
+  const inline = diff.length <= FINAL_REVIEW_DELTA_INLINE_MAX_CHARS ? diff : diff.slice(0, FINAL_REVIEW_DELTA_INLINE_MAX_CHARS);
+  return [
+    `═══ FINAL REVIEW: REVISION ${revision} ═══`,
+    "The developer revised the change after your report.",
+    renderTestRun(testRun),
+    "",
+    changed.length === 0
+      ? "CHANGED SINCE YOUR REPORT: nothing in the declared scope."
+      : `CHANGED SINCE YOUR REPORT (${changed.length}):\n${changed.map((entry) => `- ${entry.path} (${entry.status})`).join("\n")}`,
+    diff.length === 0 ? null : (diff.length <= FINAL_REVIEW_DELTA_INLINE_MAX_CHARS
+      ? "DIFF SINCE YOUR REPORT:"
+      : `DIFF SINCE YOUR REPORT (first ${FINAL_REVIEW_DELTA_INLINE_MAX_CHARS} of ${diff.length} characters; read the rest with your read tools):`),
+    diff.length === 0 ? null : `\`\`\`diff\n${inline}\n\`\`\``,
+    "",
+    "Check that each of your findings is fixed and review only these changes, then call final_review again with your verdict and every defect that remains or that the revision introduced.",
+  ].filter((line) => line != null).join("\n");
 }

@@ -3,6 +3,7 @@ import { sortAgentToolDefinitions } from "../functions/agent-schema.js";
 import { observeAtlasRequest } from "../functions/atlas-request-observation.js";
 import { executeDispatchAgent, submitWebResearchHandoff } from "../../../domains/web-research/classes/WebResearchRuntime.js";
 import { executeFinalReview } from "../../../domains/assessment/classes/FinalReviewRuntime.js";
+import { FINAL_REVIEW_REVIEWER_STATUS } from "../../../catalog/final-review.js";
 // @ts-check
 //
 // Persistent MCP owner for provider-launched stdio shims.
@@ -6244,6 +6245,12 @@ export class PersistentMcpOwner {
             const result = await executeFinalReview(toolArgs, {
               context: { agentCallId: session?.bootConfig?.agentCallId },
             });
+            if (result?.status === FINAL_REVIEW_REVIEWER_STATUS.REVISED) {
+              // Each bounce is a new review: the waiting reviewer gets a fresh
+              // tool and read allowance instead of "budget exhausted" advisories.
+              session._assessorToolCallCount = 0;
+              session._assessorFallbackReadCount = 0;
+            }
             text = JSON.stringify(result);
           } catch (error) {
             isError = true;

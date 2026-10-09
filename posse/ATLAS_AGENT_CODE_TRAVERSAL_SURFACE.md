@@ -37,7 +37,7 @@ Atlas: `atlas.fetch_ref`, `atlas.traverse_ref`.
 
 ### `assessor`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.run_unit_test`, `tools.search_files`, `tools.validate_artifact_output`, `tools.view_image`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.final_review`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.run_unit_test`, `tools.search_files`, `tools.validate_artifact_output`, `tools.view_image`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
@@ -554,7 +554,7 @@ Compatibility traversal for unseen stored #ref content. Batch every independentl
 
 ### `tools.final_review`
 
-Remote roles: `dev`.
+Remote roles: `assessor`, `dev`.
 
 | Contract field | Value |
 |---|---|
@@ -566,9 +566,12 @@ Remote roles: `dev`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Close out the finished change: runs the task's declared tests on the current workspace, then an independent reviewer checks the change against the task contract. Returns pass, or findings to fix before calling it again. Takes several minutes; the result arrives when the review completes.
+Developer: call with no arguments to close out the finished change. It runs the task's declared tests on the current workspace, then an independent reviewer checks the change against the task contract. Returns pass, or findings to fix before calling it again; the result arrives when the review completes. Reviewer: report your verdict and findings with this tool; it waits while the developer works and returns either the changes since your report or status done.
 
-This definition has no public parameters.
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `findings` | `array<object>` | Optional | max items 12 | Reviewer only. Every defect, most severe first. |
+| `verdict` | `string` | Optional | values "pass", "fail", "needs_review" | Reviewer only. pass, fail with findings, or needs_review when the contract itself cannot be judged. |
 
 ### `tools.generate_image`
 

@@ -10,7 +10,62 @@ import {
   FINAL_REVIEW_MAX_FINDINGS,
   FINAL_REVIEW_OBSERVATIONS,
   FINAL_REVIEW_OUTCOMES,
+  FINAL_REVIEW_VERDICTS,
 } from "../../../catalog/final-review.js";
+
+const FINDING_LOCATOR_MAX = 8;
+const HASH_REF_PATTERN = /^#[0-9A-Za-z]{4,12}$/;
+
+function locatorList(values, accept) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value || "").trim())
+    .filter((value) => value && accept(value)))]
+    .slice(0, FINDING_LOCATOR_MAX);
+}
+
+function reportedFinding(finding) {
+  const criterion = String(finding?.criterion || "").trim();
+  if (!criterion) return null;
+  const refs = locatorList(finding.refs, (value) => HASH_REF_PATTERN.test(value));
+  const paths = locatorList(finding.paths, (value) => value.length <= 500);
+  const symbols = locatorList(finding.symbols, (value) => value.length <= 200);
+  return {
+    severity: "high",
+    criterion: criterion.slice(0, 1000),
+    ...(refs.length > 0 ? { refs } : {}),
+    ...(paths.length > 0 ? { paths } : {}),
+    ...(symbols.length > 0 ? { symbols } : {}),
+  };
+}
+
+/**
+ * Map the reviewer's final_review report to the developer's tool result, or
+ * an { error } the reviewer can correct in its next call. Findings keep the
+ * hash refs, paths and symbols that locate them, so the developer goes
+ * straight to the defect.
+ */
+export function finalReviewResultFromReport(report = {}) {
+  const verdict = String(report?.verdict || "").trim().toLowerCase();
+  if (!FINAL_REVIEW_VERDICTS.includes(verdict)) {
+    return { error: `Report a verdict: one of ${FINAL_REVIEW_VERDICTS.join(", ")}.` };
+  }
+  const findings = (Array.isArray(report?.findings) ? report.findings : [])
+    .map(reportedFinding)
+    .filter(Boolean)
+    .slice(0, FINAL_REVIEW_MAX_FINDINGS);
+  if (verdict === "pass") {
+    return { outcome: FINAL_REVIEW_OUTCOMES.PASS, findings: [], summary: "The change meets the task contract." };
+  }
+  if (verdict === "fail") {
+    if (findings.length === 0) return { error: "A fail verdict needs findings: name each defect and the criterion it misses." };
+    return { outcome: FINAL_REVIEW_OUTCOMES.FINDINGS, findings };
+  }
+  return {
+    outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
+    findings: [],
+    reason: findings[0]?.criterion || "the reviewer could not judge the task contract",
+  };
+}
 
 function claimEvidence(claim) {
   if (!claim || typeof claim !== "object") return null;

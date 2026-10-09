@@ -2721,16 +2721,42 @@ export const TOOL_GET_BRIEF = {
   },
 };
 
+const FINAL_REVIEW_LOCATORS = (itemSchema) => ({ type: "array", maxItems: 8, items: itemSchema });
+
 export const TOOL_FINAL_REVIEW = {
   type: "function",
   name: "final_review",
   description:
-    "Close out the finished change: runs the task's declared tests on the current workspace, then an " +
-    "independent reviewer checks the change against the task contract. Returns pass, or findings to fix " +
-    "before calling it again. Takes several minutes; the result arrives when the review completes.",
+    "Developer: call with no arguments to close out the finished change. It runs the task's declared tests " +
+    "on the current workspace, then an independent reviewer checks the change against the task contract. " +
+    "Returns pass, or findings to fix before calling it again; the result arrives when the review completes. " +
+    "Reviewer: report your verdict and findings with this tool; it waits while the developer works and " +
+    "returns either the changes since your report or status done.",
   parameters: {
     type: "object",
-    properties: {},
+    properties: {
+      verdict: {
+        type: "string",
+        enum: ["pass", "fail", "needs_review"],
+        description: "Reviewer only. pass, fail with findings, or needs_review when the contract itself cannot be judged.",
+      },
+      findings: {
+        type: "array",
+        maxItems: 12,
+        description: "Reviewer only. Every defect, most severe first.",
+        items: {
+          type: "object",
+          properties: {
+            criterion: { type: "string", minLength: 1, maxLength: 1000, description: "The defect and the criterion it misses." },
+            refs: FINAL_REVIEW_LOCATORS({ type: "string", pattern: "^#[0-9A-Za-z]{4,12}$" }),
+            paths: FINAL_REVIEW_LOCATORS({ type: "string", minLength: 1, maxLength: 500 }),
+            symbols: FINAL_REVIEW_LOCATORS({ type: "string", minLength: 1, maxLength: 200 }),
+          },
+          required: ["criterion"],
+          additionalProperties: false,
+        },
+      },
+    },
     additionalProperties: false,
   },
 };
