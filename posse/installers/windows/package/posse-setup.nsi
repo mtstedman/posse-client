@@ -1155,8 +1155,14 @@ Section "Uninstall"
     nsExec::Exec '"$PowerShellExe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\setup\${ENGINE}" -Uninstall -NonInteractive -Plain -PosseDir "$INSTDIR\posse-client" $1'
     Pop $0
     ${If} $0 != 0
-      DetailPrint "Some Posse settings could not be removed. The posse-uninstall log in your Temp folder lists them."
+      MessageBox MB_ICONSTOP|MB_OK "Posse cleanup failed. The posse-uninstall log in your Temp folder has details. Close Posse and retry uninstall."
+      SetErrorLevel 1
+      Abort
     ${EndIf}
+  ${Else}
+    MessageBox MB_ICONSTOP|MB_OK "Posse's uninstall engine is missing. Repair the installation, then retry uninstall."
+    SetErrorLevel 1
+    Abort
   ${EndIf}
 
   DetailPrint "Removing shortcuts..."

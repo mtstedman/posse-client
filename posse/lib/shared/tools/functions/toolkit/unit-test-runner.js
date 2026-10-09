@@ -94,7 +94,7 @@ function nodeBootstrapFailure(invocation, output) {
 
 const PYTEST_SOURCE_RE = /^\s*(?:async\s+)?def\s+test\w*\s*\(|^\s*class\s+Test\w*|^\s*(?:import|from)\s+(?:pytest|unittest)\b/m;
 const PYTHON_MAIN_RE = /^if\s+__name__\s*==\s*["']__main__["']\s*:/m;
-const PHPUNIT_SOURCE_RE = /\bPHPUnit\\|\bextends\s+\\?(?:\w+\\)*\w*TestCase\b/;
+const PHPUNIT_SOURCE_RE = /\bPHPUnit\\/;
 const PHP_CLASS_EXTENDS_RE = /^\s*(?:(?:final|abstract|readonly)\s+)*class\s+\w+\s+extends\b/m;
 
 function readSourceHead(absolute) {
@@ -144,10 +144,10 @@ function pythonRunner(root, relative, source) {
 // the missing base class). It needs vendor/bin/phpunit and the config that
 // names its bootstrap. Plain assertion scripts run directly.
 function phpRunner(root, relative, source) {
-  if (PHPUNIT_SOURCE_RE.test(source)) {
-    const phpunit = nearestUpward(root, relative, ["vendor/bin/phpunit"]);
+  const phpunit = nearestUpward(root, relative, ["vendor/bin/phpunit"]);
+  const config = nearestUpward(root, relative, PHPUNIT_CONFIG_NAMES);
+  if (PHPUNIT_SOURCE_RE.test(source) || (PHP_CLASS_EXTENDS_RE.test(source) && phpunit && config)) {
     if (!phpunit) return { reason: "phpunit_unavailable" };
-    const config = nearestUpward(root, relative, PHPUNIT_CONFIG_NAMES);
     return { runner: "phpunit", executable: "php", args: [phpunit, ...(config ? ["-c", config] : []), relative] };
   }
   if (PHP_CLASS_EXTENDS_RE.test(source)) return { reason: "php_runner_unidentified" };

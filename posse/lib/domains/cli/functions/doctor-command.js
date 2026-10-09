@@ -1,5 +1,4 @@
 import { renderDoctorHelp } from "./maintenance-help.js";
-import fs from "fs";
 import path from "path";
 
 import { C } from "../../../shared/format/functions/colors.js";
@@ -15,14 +14,7 @@ import {
   resolveClientProvenance,
 } from "../../runtime/functions/client-provenance.js";
 import { DEFAULT_INSTALLED_POSSE_ROOT } from "../../../shared/platform/functions/managed-install-state.js";
-
-// A `.git` directory, or the `.git` file of a worktree, in this folder or above.
-function insideGitRepository(dir) {
-  for (let current = path.resolve(dir); ; current = path.dirname(current)) {
-    if (fs.existsSync(path.join(current, ".git"))) return true;
-    if (path.dirname(current) === current) return false;
-  }
-}
+import { isInstallationDoctor, isPosseProjectInitialized } from "./project-init-state.js";
 
 function firstLine(value) {
   return String(value || "")
@@ -176,20 +168,19 @@ export async function cmdDoctor({
     return null;
   }
 
-  // Outside a git repository there is no project to provision: the folder
-  // doctor started in (often the home folder) would be walked, and every
-  // package.json + lockfile under it npm-installed. Check the installation.
+  // A Git repository alone has not opted into Posse dependency management.
+  // Never discover manifests or build a venv in an uninitialized folder.
   const startedIn = projectDir;
-  const inRepository = insideGitRepository(startedIn);
-  projectDir = inRepository ? startedIn : posseRoot;
+  const initialized = isPosseProjectInitialized(startedIn)
+    || isInstallationDoctor(startedIn, posseRoot, argv);
   const json = argv.includes("--json");
   const dryRun = argv.includes("--dry-run");
   const adoptNodeInstall = argv.includes("--adopt-node-install");
   const progress = createDoctorProgressRenderer({ log, colors, json });
   let result;
   try {
-    const atlasConfig = getAtlasConfig?.() || {};
-    result = await runDoctor({
+    const atlasConfig = initialized ? (getAtlasConfig?.() || {}) : {};
+    result = initialized ? await runDoctor({
       projectDir,
       posseRoot,
       dryRun,
@@ -204,7 +195,14 @@ export async function cmdDoctor({
       scipLanguages: atlasConfig.scipLanguages ?? atlasConfig.atlas_scip_languages ?? null,
       onProgress: progress.onProgress,
       onEvent: progress.onEvent,
-    });
+    }) : {
+      ok: true,
+      status: "skipped",
+      project_dir: startedIn,
+      dry_run: dryRun,
+      counts: { checked: 0, installed: 0, dry_run: 0, failed: 0, ready: 0 },
+      doctor: { ok: true, mode: dryRun ? "plan" : "repair", summary: "repository dependencies skipped; run posse add or posse go to initialize", checked: 0, repaired: [], pending: [], failed: [], ready: [] },
+    };
   } catch (err) {
     const message = firstLine(err?.message || err) || "dependency doctor failed";
     const failure = { label: "dependency doctor", ok: false, status: "failed", message };
@@ -240,9 +238,9 @@ export async function cmdDoctor({
   const summary = report.summary || formatResult(result);
   const statusColor = result.ok ? colors.green : colors.red;
   log(`\n  ${statusColor}[doctor]${colors.reset} ${mode}: ${summary}`);
-  log(inRepository
+  log(initialized
     ? `  ${colors.dim}project: ${projectDir}${colors.reset}`
-    : `  ${colors.dim}project: none (${startedIn} is not a git repository; checked the Posse installation only)${colors.reset}`);
+    : `  ${colors.dim}project: none (${startedIn} is not initialized by Posse)${colors.reset}`);
   log(`  ${colors.dim}client: ${formatClientProvenance(result.client_provenance)}${colors.reset}`);
   log(`  ${colors.dim}timeouts: package commands 30m; Jina download/deploy 2h${colors.reset}`);
 

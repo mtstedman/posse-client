@@ -1,3 +1,4 @@
+import { emptyMaterializedPathsForJob } from "../../handoff/functions/helpers/file-materialization.js";
 // A final review authorizes only the scoped bytes and task contract it saw.
 // Persist this identity before review; committing those bytes does not change it.
 import fs from "node:fs";
@@ -10,13 +11,15 @@ import { finalReviewScope } from "./final-review-snapshot.js";
 
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 
-export async function finalReviewIdentity(cwd, payload) {
+export async function finalReviewIdentity(cwd, payload, { jobId = null } = {}) {
+  const placeholders = new Set(await emptyMaterializedPathsForJob(jobId, payload?.scope_generation ?? payload?._materialization_generation ?? 1, cwd));
   const scope = finalReviewScope(payload);
   const listed = String(await gitExecAsync(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd, { trim: false })).split("\0").filter(Boolean);
   const files = [...new Set([...listed.filter((file) => !scope.declared || scope.files.has(file)
     || scope.roots.some((root) => file === root || file.startsWith(`${root}/`))), ...scope.files])].sort();
   const root = fs.realpathSync(cwd);
   const states = files.map((file) => {
+    if (placeholders.has(file)) return [file, null];
     const absolute = path.resolve(cwd, file);
     if (!absolute.startsWith(`${path.resolve(cwd)}${path.sep}`)) throw new Error("Review path escapes workspace");
     if (!fs.existsSync(absolute) && !fs.lstatSync(absolute, { throwIfNoEntry: false })) return [file, null];
@@ -48,12 +51,24 @@ export async function authoritativeFinalReview(job, payload, cwd) {
   if (!review) return null; // Jobs never issued final_review retain their existing route.
   const unresolved = (reason) => ({ verdict: "needs_review", confidence: "none", reasons: [reason],
     spawn_jobs: [], human_questions: [], _disable_internal_retry: true, _assessment_infrastructure_review: true, _verification_blocked: true });
-  if (review.outcome !== "pass" || !review.review_identity) {
+  if (!["pass", "findings"].includes(review.outcome) || !review.review_identity) {
     return unresolved(review.reason || "Final review is missing, blocked, or has unresolved findings; no second assessor will be dispatched.");
   }
   let identity;
-  try { identity = await finalReviewIdentity(cwd, payload); } catch { return unresolved("Cannot verify the final-reviewed workspace identity."); }
+  try { identity = await finalReviewIdentity(cwd, payload, { jobId: job.id }); } catch { return unresolved("Cannot verify the final-reviewed workspace identity."); }
   if (identity !== review.review_identity) return unresolved("The task contract or scoped files changed after final review; the change requires review again.");
+  if (review.outcome === "findings") {
+    const reasons = (review.findings || []).map((finding) => [finding.criterion,
+      ...(finding.paths || []), ...(finding.refs || []), finding.evidence,
+      finding.suggested_verification].filter(Boolean).join(" — "));
+    if (!reasons.length) return unresolved("Final review reported findings without their details; an operator must resolve the review.");
+    const diagnostics = [review.declared_tests, review.changed_tests].filter(Boolean)
+      .map((run) => [run.command, run.status, run.failure_summary, run.stdout, run.stderr].filter(Boolean).join("\n"));
+    return { verdict: "fail", confidence: "high", reasons, human_questions: [],
+      spawn_jobs: [{ job_type: "fix", title: "Fix final review findings", payload: {
+        instructions: [...reasons, review.repair, ...diagnostics].filter(Boolean).join("\n\n"),
+      } }], _final_reviewer_agent_call_id: review.reviewer_agent_call_id };
+  }
   return { verdict: "pass", confidence: "high", reasons: [review.summary || "Final review passed for the exact committed change and task contract."],
     spawn_jobs: [], human_questions: [], _final_reviewer_agent_call_id: review.reviewer_agent_call_id };
 }

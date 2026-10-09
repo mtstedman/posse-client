@@ -2,6 +2,7 @@ import { renderDoctorHelp, renderUpdateHelp } from "./maintenance-help.js";
 import { C } from "../../../shared/format/functions/colors.js";
 // Pure data module: keeps this bootstrap free of the SQLite-backed graph.
 import { pairingCommandOpensSession } from "../../../catalog/pairing-command.js";
+import { isInstallationDoctor, isPosseProjectInitialized } from "./project-init-state.js";
 // doctor/update bootstrap that runs before orchestrator-app opens SQLite.
 // Windows cannot replace a loaded native addon, so Posse's own npm repair must
 // happen in a process that has never constructed a better-sqlite3 Database.
@@ -167,6 +168,12 @@ async function runDoctorBootstrap(argv) {
 
   const json = hasArg(argv, "--json");
   const dryRun = hasArg(argv, "--dry-run");
+  if (!isPosseProjectInitialized() && !isInstallationDoctor(process.cwd(), POSSE_ROOT, argv)) {
+    const summary = "repository dependencies skipped; run posse add or posse go to initialize";
+    if (json) console.log(JSON.stringify({ ok: true, status: "skipped", project_dir: process.cwd(), dry_run: dryRun, doctor: { ok: true, summary } }, null, 2));
+    else console.log(`\n  [doctor] ${summary}\n`);
+    return;
+  }
   const ownNode = process.env.POSSE_MAINTENANCE_NODE_REPAIRED === "1"
     ? { ok: true, status: "ok", label: "posse npm", message: "repaired by the maintenance parent" }
     : await repairOwnNodeTree({ argv, dryRun, json });
@@ -197,8 +204,9 @@ async function runUpdateBootstrap(argv) {
 
   const json = hasArg(argv, "--json");
   const dryRun = hasArg(argv, "--dry-run");
-  const ownNode = await repairOwnNodeTree({ argv, dryRun, json });
-  if (ownNode?.ok === false || ownNode?.status === "dry-run") {
+  const initializedProject = isPosseProjectInitialized();
+  const ownNode = initializedProject ? await repairOwnNodeTree({ argv, dryRun, json }) : null;
+  if (ownNode && (ownNode.ok === false || ownNode.status === "dry-run")) {
     if (json) console.log(JSON.stringify(maintenanceFailure(ownNode, dryRun), null, 2));
     else console.error(`\n  Posse update cannot start: ${ownNode.message || "npm dependency repair failed"}\n`);
     process.exitCode = 1;
@@ -206,7 +214,8 @@ async function runUpdateBootstrap(argv) {
   }
 
   const { cmdUpdate } = await import("./update-command.js");
-  const settings = readMaintenanceSettings(process.cwd());
+  const settings = initializedProject ? readMaintenanceSettings(process.cwd())
+    : { ok: true, scheduler_block: null, atlas_config: { enabled: false, scipMode: "off", scipLanguages: [] } };
   if (!settings.ok && !json) {
     console.warn(`  [bootstrap] settings probe unavailable; SCIP defaults to off: ${settings.error}`);
   }

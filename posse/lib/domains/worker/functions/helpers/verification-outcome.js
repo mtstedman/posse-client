@@ -33,7 +33,7 @@ function outcomeType(value = {}) {
   // Scoped checks that already fail at the pre-change commit are the same
   // debt a failing frozen baseline is: not attributable to the change.
   if (status === "baseline_debt") return "baseline_debt";
-  if (status === "failed") return phase === "baseline" ? "baseline_debt" : "product_failed";
+  if (status === "failed") return phase === "baseline" || value?.baseline_attribution?.debt_only === true ? "baseline_debt" : "product_failed";
   return "runner_unavailable";
 }
 

@@ -1,3 +1,4 @@
+import { editScopeRequestReason } from "../functions/edit-scope-preview.js";
 import fs from "fs";
 import path from "path";
 import {
@@ -263,7 +264,7 @@ export class ToolExecutor {
         path: toRepoRelativePath(ctx.cwd, editPath) ?? "",
         access: "modify",
         operation: "edit_file",
-        reason: "edit_file requires this existing file to complete the active job",
+        reason: editScopeRequestReason(args),
       });
     }
     return toolkit.execEditFile(args, ctx.cwd, ctx.scopePredicates);

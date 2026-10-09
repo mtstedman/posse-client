@@ -4,7 +4,8 @@ export function renderDoctorHelp({ log, colors }) {
   log(`
   ${colors.bold}posse doctor${colors.reset}
 
-  Repair dependency/runtime requirements for the current repo.
+  Repair dependency/runtime requirements for an initialized Posse repo.
+  In other folders, repository dependency checks are skipped.
 
   Usage:
     posse doctor
@@ -23,7 +24,8 @@ export function renderUpdateHelp({ log, colors }) {
   ${colors.bold}posse update${colors.reset}
 
   Fast-forward the local Posse client checkout, show what came in, and refresh
-  runtime dependencies, current native binaries, and Jina (posse doctor).
+  runtime dependencies, current native binaries, and Jina (posse doctor) when
+  the current repository has been initialized by Posse.
 
   Usage:
     posse update

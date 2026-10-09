@@ -1,3 +1,4 @@
+import { editScopeRequestReason } from "../../../../shared/tools/functions/edit-scope-preview.js";
 import fs from "fs";
 import path from "path";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../../runtime/functions/protected-paths.js";
@@ -636,7 +637,7 @@ export function createStandardToolHandlerMap({
           path: toRepoRelativePath(ctx.cwd, editPath) ?? "",
           access: "modify",
           operation: "edit_file",
-          reason: "edit_file requires this existing file to complete the active job",
+          reason: editScopeRequestReason(args),
         }, ctx);
         if (scopeResult?.[LIVE_SCOPE_WAIT] === true) {
           return {

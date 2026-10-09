@@ -238,11 +238,16 @@ After installation, run commands in the Git project you want Posse to work on:
 
 ```bash
 cd /path/to/your/git-project
+posse add "Describe the change you want"
 posse doctor
 posse admin
-posse add "Describe the change you want"
 posse go
 ```
+
+`posse add` and `posse go` initialize the project. Other repository commands
+require that initialization. `posse doctor` and `posse update` skip repository
+dependency installation when run elsewhere. The installer explicitly provisions
+shared tools from Posse's own checkout.
 
 `posse go` plans and runs queued work. Boot checks required dependencies,
 attempts doctor repair when unhealthy, and stops if verification still fails.

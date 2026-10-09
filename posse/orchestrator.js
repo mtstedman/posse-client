@@ -168,6 +168,21 @@ if (await runMaintenanceCliIfRequested()) {
   process.exit(process.exitCode ?? 0);
 }
 
+// Run and session hosting repair npm before the application loads. Refuse an
+// uninitialized project first so a command in an arbitrary folder cannot
+// install dependencies or create runtime state there.
+const { isPosseProjectInitialized, uninitializedProjectMessage } = await import("./lib/domains/cli/functions/project-init-state.js");
+const { pairingCommandOpensSession } = await import("./lib/catalog/pairing-command.js");
+const earlyCommand = String(process.argv[2] || "").toLowerCase();
+const opensSession = ["pair", "session"].includes(earlyCommand)
+  && pairingCommandOpensSession(process.argv.slice(3));
+if ((earlyCommand === "run" || opensSession)
+    && !process.argv.includes("--help") && !process.argv.includes("-h")
+    && !isPosseProjectInitialized()) {
+  process.stderr.write(`${uninitializedProjectMessage()}\n`);
+  process.exit(1);
+}
+
 await guardRunNodeDependencies();
 
 // User-defined agents use the provider runtime but not a repository queue.

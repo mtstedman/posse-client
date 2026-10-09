@@ -430,7 +430,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           0,
           Number.parseInt(planJobPayload._planner_modality_recovery_round || 0, 10) || 0,
         );
-        const errorMessage = "Planner plan modality mismatch: repository output required but no repository execution task was planned";
+        const errorMessage = modality.humanInputDeferralExhausted
+          ? "Planner human-input continuation limit reached: unresolved clarification requires review"
+          : "Planner plan modality mismatch: repository output required but no repository execution task was planned";
         logEvent({
           work_item_id: planJob.work_item_id,
           job_id: planJob.id,
@@ -448,7 +450,11 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           }),
         });
 
-        if (recoveryRound === 0) {
+        if (modality.humanInputDeferralExhausted) {
+          // Retrying repository routing cannot resolve repeated questions,
+          // and must not change the modality of an artifact work item.
+          worker.emit(planJob.id, `${C.red}[plan-recovery]${C.reset} WI#${planJob.work_item_id}: ${errorMessage}`);
+        } else if (recoveryRound === 0) {
           const corrected = correctInferredRoutingToRepo(modalityWorkItem, modalityIntakeHints);
           updateWorkItemRouting(planJob.work_item_id, {
             mode: corrected.mode,
@@ -2701,15 +2707,14 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         throw gateError;
       }
 
-      // A plan accepted only because it stops at human input still owes the
-      // repository work. Without a dependent, the answered gate would leave
-      // every job terminal and the work item would fail at reconciliation.
-      if (modality.acceptedByHumanInputDeferral && humanInputGateIds.length > 0) {
+      // Answering a clarification resolves the question, not the requirement.
+      // Mixed plans also need a continuation, even if independent work passes.
+      if (modality.requiresHumanInputContinuation && humanInputGateIds.length > 0) {
         const deferralRound = humanInputDeferrals + 1;
         const followUpPlan = spawnPlanAfterHumanInputDeferral(worker, planJob, humanInputGateIds, { deferralRound });
         worker.emit(
           planJob.id,
-          `${C.yellow}[plan-recovery]${C.reset} WI#${planJob.work_item_id}: planner stopped at human input; follow-up plan #${followUpPlan.id} waits for gate(s) ${humanInputGateIds.map((id) => `#${id}`).join(", ")} (deferral ${deferralRound}/${MAX_CONSECUTIVE_HUMAN_INPUT_DEFERRALS})`,
+          `${C.yellow}[plan-recovery]${C.reset} WI#${planJob.work_item_id}: follow-up plan #${followUpPlan.id} will incorporate answers from gate(s) ${humanInputGateIds.map((id) => `#${id}`).join(", ")} (deferral ${deferralRound}/${MAX_CONSECUTIVE_HUMAN_INPUT_DEFERRALS})`,
         );
         logEvent({
           work_item_id: planJob.work_item_id,

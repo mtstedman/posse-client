@@ -49,6 +49,7 @@ import {
 } from "./merge-closeout.js";
 import { conflictFilesFromMergeError, parkedMergeGuidance } from "./merge-park-guidance.js";
 import { runRegisteredTestsForMergeCandidate } from "../../../shared/tools/functions/toolkit/registered-tests.js";
+import { runDeclaredMergeCandidateChecks } from "./merge-candidate-checks.js";
 import { postChangeReceiptsAtCommit } from "../../queue/functions/verification-receipts.js";
 import { mergeToSharedTrunkAsync } from "./shared-trunk.js";
 import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
@@ -1266,7 +1267,7 @@ export function createMergeWorkflowHelpers(context, {
 
       const runProjectedCandidateGate = (stagedFiles) => {
         mergeStep = "integration_gate";
-        const candidateTests = runRegisteredTestsForMergeCandidate({
+        let candidateTests = runRegisteredTestsForMergeCandidate({
           cwd,
           workItemId: wiId,
           scopeFiles: stagedFiles,
@@ -1275,6 +1276,9 @@ export function createMergeWorkflowHelpers(context, {
             workItemId: wiId,
           },
         });
+        if (candidateTests.matched === 0 && wiId != null) {
+          candidateTests = runDeclaredMergeCandidateChecks({ cwd, jobs: listJobsByWorkItem(wiId), git: gitMergeExec }) || candidateTests;
+        }
         // Registered tests are one source of evidence; the jobs' own focused
         // receipts on the branch head are another. Report both, so an empty
         // registry never reads as "nothing was tested".
@@ -1303,6 +1307,8 @@ export function createMergeWorkflowHelpers(context, {
               test_id: result.test?.id || null,
               name: result.test?.name || null,
               ok: result.ok === true,
+              status: result.status || null,
+              note: result.note || null,
               run_id: result.run_id || null,
               failure: result.failure?.message || null,
             })),
@@ -1311,7 +1317,7 @@ export function createMergeWorkflowHelpers(context, {
         if (!candidateTests.ok) {
           const firstFailure = candidateTests.results.find((result) => !result.ok);
           const gateError = new Error(
-            `Projected merge candidate failed registered test ${firstFailure?.test?.name || firstFailure?.test?.id || "unknown"}: ${firstFailure?.failure?.message || candidateTests.summary}`,
+            `Projected merge candidate failed test ${firstFailure?.test?.name || firstFailure?.test?.id || "unknown"}: ${firstFailure?.failure?.message || candidateTests.summary}`,
           );
           gateError.code = "POSSE_MERGE_CANDIDATE_TEST_FAILED";
           gateError.integrationGate = candidateTests;

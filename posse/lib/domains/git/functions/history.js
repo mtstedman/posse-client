@@ -37,25 +37,6 @@ export const TOOL_GIT_HISTORY = {
   },
 };
 
-function scopeListsFromPredicates(scopePredicates) {
-  const scope = scopePredicates?.policy?.scope;
-  if (!scope || typeof scope !== "object") return { scopeFiles: [], scopeRoots: [] };
-  return {
-    scopeFiles: [
-      ...new Set([
-        ...(Array.isArray(scope.modifyFiles) ? scope.modifyFiles : []),
-        ...(Array.isArray(scope.createFiles) ? scope.createFiles : []),
-        ...(Array.isArray(scope.deleteFiles) ? scope.deleteFiles : []),
-      ].map((value) => String(value || "").replace(/\\/g, "/")).filter(Boolean)),
-    ],
-    scopeRoots: [
-      ...new Set((Array.isArray(scope.createRoots) ? scope.createRoots : [])
-        .map((value) => String(value || "").replace(/\\/g, "/"))
-        .filter(Boolean)),
-    ],
-  };
-}
-
 function normalizeHistoryRef(op, value) {
   if (op !== "diff" || typeof value !== "string") return value;
   const parts = value.trim().split(/\s+/);
@@ -142,7 +123,6 @@ export function createGitHistoryExecutor(safePath, { nativeParity = {} } = {}) {
     }
     if (op === "blame" && !relPath) return "Error: path is required for git_history blame.";
 
-    const scopeLists = scopeListsFromPredicates(scopePredicates);
     const nativePayload = {
       cwd,
       op,
@@ -152,8 +132,10 @@ export function createGitHistoryExecutor(safePath, { nativeParity = {} } = {}) {
       since: args.since ?? null,
       author: args.author ?? null,
       grep: args.grep ?? null,
-      scopeFiles: scopeLists.scopeFiles,
-      scopeRoots: scopeLists.scopeRoots,
+      // History is read-only; the job's write scope does not constrain it.
+      // safePath and the native executor still enforce repository boundaries.
+      scopeFiles: [],
+      scopeRoots: [],
     };
 
     try {

@@ -447,3 +447,30 @@ export async function materializeWritingScope(packet) {
   }
   return { applied: true, materialized, convertedToModify, promotedToCreate };
 }
+
+/** Only private-provenance placeholders with no bytes in HEAD, index or worktree. */
+export async function emptyMaterializedPathsForJob(jobId, generation, cwd) {
+  const empty = [];
+  for (const relPath of materializedPathsForJob(jobId, generation)) {
+    const absolute = assertSafeRelativePath(cwd, relPath, "materialized path");
+    assertNoSymlinkParents(cwd, absolute, relPath);
+    const stat = fs.lstatSync(absolute, { throwIfNoEntry: false });
+    if (!stat?.isFile() || stat.size !== 0) continue;
+    try {
+      if (String(await gitExecAsync(["ls-tree", "HEAD", "--", relPath], cwd)).trim()) continue;
+      // Materialization stages an empty blob. Never discard agent-staged bytes.
+      if (String(await gitExecAsync(["cat-file", "-s", `:${relPath}`], cwd)).trim() !== "0") continue;
+    } catch { continue; }
+    empty.push(relPath);
+  }
+  return empty;
+}
+
+export async function dropEmptyMaterializationsForJob(jobId, generation, cwd) {
+  const paths = await emptyMaterializedPathsForJob(jobId, generation, cwd);
+  for (const relPath of paths) {
+    await gitExecAsync(["rm", "--cached", "--", relPath], cwd);
+    fs.unlinkSync(path.join(cwd, relPath));
+  }
+  return paths;
+}

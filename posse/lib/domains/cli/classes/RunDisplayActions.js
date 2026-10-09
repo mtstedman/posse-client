@@ -311,23 +311,21 @@ export class RunDisplayActions {
     if (!this.display?.askQuestions) return [];
     const candidates = (Array.isArray(activeJobs) ? activeJobs : [])
       .filter((job) => {
-        const subtype = parseJobPayload(job)?.subtype;
         if (
           job?.job_type !== "human_input"
           || job?.status !== "waiting_on_human"
-          || !["plan_approval", "push_offer"].includes(subtype)
           || humanGateChoices(parseJobPayload(job)).length === 0
         ) return false;
         const contract = this.getHumanGate?.(job.id);
         return humanGateStateAllowsAnswer(contract?.gate_state);
       });
-    // Plan approval blocks execution, so the run may present it proactively.
+    // Recovery, review and approval gates block execution; present them proactively.
     // A push offer is an out-of-band publication convenience: keep it visible
     // in the queue/Bridge, but only open its prompt after the operator selects
     // Answer. This prevents every boot, snapshot, and idle callback from
     // turning completed work back into an unsolicited question.
     const pending = candidates.filter((job) => (
-      parseJobPayload(job)?.subtype === "plan_approval" || explicit
+      parseJobPayload(job)?.subtype !== "push_offer" || explicit
     ));
     // An automatic refresh must not withdraw an explicitly opened push prompt.
     const pendingIds = new Set(candidates.map((job) => Number(job.id)));

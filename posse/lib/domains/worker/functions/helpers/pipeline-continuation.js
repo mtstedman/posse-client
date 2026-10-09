@@ -1075,8 +1075,8 @@ function spawnPlanAfterResearchInternal(worker, researchJob, output, _options = 
 }
 
 /**
- * Continue a plan that stopped at human_input gates while repository work is
- * still owed: queue the next plan behind every gate, as research does after a
+ * Continue any plan containing human_input gates, including mixed plans:
+ * queue the next plan behind every gate, as research does after a
  * clarification. The planner reads the answers from the gates' response
  * artifacts (HUMAN ANSWERS) once the gates succeed.
  */
@@ -1105,6 +1105,7 @@ export function spawnPlanAfterHumanInputDeferral(worker, planJob, gateJobIds, { 
         deepthink_budget: budget,
         deepthink: isResearchBudgetDeep(budget),
         _planner_human_input_deferral_round: deferralRound,
+        _planner_human_input_origin_plan_id: planJob.id,
       }),
     });
     for (const gateId of gateIds) addDependency(followUp.id, gateId, "hard");

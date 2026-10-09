@@ -35,11 +35,6 @@ function operatorDispositionReviewQuestion(verdict) {
 export function handle(job, verdict, ctx) {
   const { emitLog: log, spawnedJobs, spawnFromAssessor, reasonBrief } = ctx;
 
-  if (verdict._verification_blocked === true) {
-    const changed = typeof ctx.updateJobStatus === "function" ? ctx.updateJobStatus("blocked") : updateJobStatus(job.id, "blocked");
-    if (changed) log(`${C.yellow}[verification] BLOCKED${C.reset} WI#${job.work_item_id} job #${job.id}${reasonBrief}`);
-    return;
-  }
   const explicitHumanQuestions = Array.isArray(verdict.human_questions)
     ? verdict.human_questions.filter((question) => String(question || "").trim())
     : [];
@@ -67,7 +62,8 @@ export function handle(job, verdict, ctx) {
     return;
   }
 
-  const confidenceReview = verdict?._assessment_confidence_review === true;
+  const confidenceReview = verdict?._assessment_confidence_review === true
+    || verdict?._verification_blocked === true;
   // An evidence-free assessor fail and a repeated sibling-boundary or
   // ignored-path fail suppress automatic repair and retry, but the claim
   // itself is a defect question the operator can answer. Failing them closed

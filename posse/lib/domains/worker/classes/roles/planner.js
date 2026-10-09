@@ -47,6 +47,7 @@ import { currentExecutionProvider } from "../../functions/helpers/diagnostics.js
 import { worktreePathAsync } from "../../../git/functions/worktree-path.js";
 import { ensureAtlasReadRootMounted } from "../../functions/helpers/atlas-read-root.js";
 import { getExplicitIntakeBindings, planCoverageGaps } from "../../../planning/functions/plan-routing.js";
+import { buildPlanClarificationContext } from "../../../planning/functions/plan-clarification-context.js";
 import { getEnabledSkillsForRole } from "../../../../shared/skills/functions/registry.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import {
@@ -762,7 +763,11 @@ export class PlannerRole extends BaseRole {
       promptLiteral("WORK ITEM", workItem.title),
       promptLiteral("DESCRIPTION", workItem.description || "(none)"),
       intakeHintsBlock ? `${intakeHintsBlock}\n` : "",
-      humanAnswers ? `HUMAN ANSWERS (from researcher clarification questions):\n${humanAnswers}\n` : "",
+      buildPlanClarificationContext(job),
+      payload._planner_human_input_origin_plan_id && !assessmentReplan
+        ? priorPlanResearchRefsBlock({ workItemId: job.work_item_id, jobId: job.id, packet: plannerPacket })
+        : "",
+      humanAnswers ? `HUMAN ANSWERS (from clarification questions):\n${humanAnswers}\n` : "",
       knownRedTestsBlock,
       payload.replan_reason && !assessmentReplan ? `REPLAN REASON (previous approach failed - you MUST take a different approach):\n${payload.replan_reason}\n` : "",
       planningMode === RED_TEAM_PLANNING_MODE && plannerRoleMode === "redteam"

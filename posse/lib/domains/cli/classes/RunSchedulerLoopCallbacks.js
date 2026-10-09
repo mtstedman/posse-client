@@ -55,6 +55,8 @@ export class RunSchedulerLoopCallbacks {
     this.backgroundWrapUp = null;
     this.pendingTeamSubmissionIds = new Set();
     this.teamSubmissionRetryArmed = false;
+    this.lastMergeQueueGeneration = null;
+    this.lastQueueMergeAttemptAt = 0;
   }
 
   callbacks() {
@@ -66,6 +68,7 @@ export class RunSchedulerLoopCallbacks {
       onBackgroundOnly: (state) => this.onBackgroundOnly(state),
       onSlotStatus: (status) => this.onSlotStatus(status),
       onKillJob: (jobId, reason) => this.worker.killJob(jobId, reason),
+      onQueueStateChange: (change) => this.onQueueStateChange(change),
       onTeamSubmissionChange: (change) => this.onTeamSubmissionChange(change),
       onSessionEvent: (event) => this.onSessionEvent(event),
       // A merge onJobEnd started may still be publishing when the loop exits;
@@ -390,6 +393,19 @@ export class RunSchedulerLoopCallbacks {
       this.backgroundWrapUp.skip("atlas", "queued for next run");
       this.backgroundWrapUp.skip("onnx", "queued for next run");
     }
+  }
+
+  onQueueStateChange({ generation }) {
+    if (generation === this.lastMergeQueueGeneration || !this.idleAutoMerge) return;
+    if (this.idleAutoMerge.isRunning() || Date.now() - this.lastQueueMergeAttemptAt < 5000) return;
+    let mergeable = false;
+    try { mergeable = this.hasAutoMergeableCompletedWorkItems?.() === true; } catch { return; }
+    this.lastMergeQueueGeneration = generation;
+    if (!mergeable) return;
+    this.lastQueueMergeAttemptAt = Date.now();
+    this.idleAutoMerge.start({ reason: "queue state change", runGc: false,
+      onError: (error) => this.getDisplay()?.addEvent(`${this.C.red}Auto-merge after queue change failed: ${error?.message || error}${this.C.reset}`),
+    });
   }
 
   onSlotStatus({ blockedByLock, blockedLockDetails = [] }) {

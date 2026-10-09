@@ -1,3 +1,4 @@
+import { editScopeRequestReason } from "../../../shared/tools/functions/edit-scope-preview.js";
 import crypto from "node:crypto";
 import process from "process";
 import fs from "fs";
@@ -1955,7 +1956,7 @@ async function editFileWithinScope(args = {}) {
       path: toRepoRelativePath(workspaceCwd, resolved.path) ?? "",
       access: "modify",
       operation: "edit_file",
-      reason: "edit_file requires this existing file to complete the active job",
+      reason: editScopeRequestReason(args),
       source: "deterministic_mcp_write_boundary",
     });
     if (isPendingLiveScopeResult(scopeResult)) {

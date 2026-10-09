@@ -3125,7 +3125,7 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
       id: task.id ?? `task-${index + 1}`,
       depends_on: task.depends_on ?? [],
       target: { kind: targetKind, role: taskRole },
-      intent: task.intent ?? `Execute ${task.id ?? `task-${index + 1}`} as summarized`,
+      intent: task.intent ?? String(task.summary || "").trim().split(/\r?\n/)[0].slice(0, 200),
       report,
     };
   });

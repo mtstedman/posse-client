@@ -75,9 +75,9 @@ Open a new shell, or load the generated PATH configuration:
 ```bash
 source ~/.config/posse/atlas.env
 cd /path/to/your/git-project
+posse add "Describe a small first task"
 posse doctor
 posse admin
-posse add "Describe a small first task"
 posse go
 ```
 

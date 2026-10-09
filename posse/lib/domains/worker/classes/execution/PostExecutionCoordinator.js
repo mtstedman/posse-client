@@ -21,7 +21,7 @@ import {
   updateJobProvider,
 } from "../../../queue/functions/index.js";
 import { parseFileRequest, splitFileRequestsByRisk } from "../../../handoff/functions/index.js";
-import { materializedPathsForJob } from "../../../handoff/functions/helpers/file-materialization.js";
+import { dropEmptyMaterializationsForJob, materializedPathsForJob } from "../../../handoff/functions/helpers/file-materialization.js";
 import { isArtifactMode } from "../../../artifacts/functions/index.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { runHookAsync } from "../../../git/functions/hooks.js";
@@ -804,6 +804,10 @@ export async function handlePostExecutionForWorker({
               job.id,
               materializationGeneration,
             );
+            if (agentCompletionLog.verifiedNoChange || agentCompletionLog.status === "PARTIAL") {
+              const dropped = new Set(await dropEmptyMaterializationsForJob(job.id, materializationGeneration, wtPath));
+              materializedCreatePaths = materializedCreatePaths.filter((entry) => !dropped.has(entry));
+            }
             const activeLocksForCommit = listActiveFileLocks();
             const headBefore = await gitCurrentHashAsync(wtPath);
             commitBaseHash = headBefore;

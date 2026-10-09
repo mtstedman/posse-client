@@ -1,3 +1,4 @@
+import { repairInstructions } from "../test-failure-evidence.js";
 // lib/domains/worker/functions/helpers/verdicts/fail.js
 
 import { createHash } from "node:crypto";
@@ -870,7 +871,7 @@ function _spawnRecoveryJobsForVerdict({
       continue;
     }
 
-    const fixInstructions = spec.payload?.instructions || verdict.reasons.join("\n");
+    const fixInstructions = repairInstructions(verdict, spec.payload?.instructions);
     const explicitFixModify = _sanitizeScopedFixPaths(spec.payload?.files_to_modify, "spawn_jobs.files_to_modify");
     const explicitFixCreate = _sanitizeScopedFixPaths(spec.payload?.files_to_create, "spawn_jobs.files_to_create");
     const explicitFixRoots = Array.isArray(spec.payload?.create_roots) ? spec.payload.create_roots : [];

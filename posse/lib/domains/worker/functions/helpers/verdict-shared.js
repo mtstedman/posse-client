@@ -134,10 +134,11 @@ export function normalizeAssessorConfidence(value, { fallback = "medium", allowN
 export function capVerdictForVerificationInfrastructure(verdict, testRun = null) {
   const post = testRun?.post_change || testRun?.postChange;
   const failedRunner = [post, post?.changed_tests].find((run) => run && ["infrastructure_error", "unavailable", "invalid"].includes(run.status));
-  if (!failedRunner || verdict?.verdict === "fail") return verdict;
-  return { ...verdict, verdict: "needs_review", confidence: "none", spawn_jobs: [], human_questions: [],
-    _disable_internal_retry: true, _assessment_infrastructure_review: true, _verification_blocked: true,
-    reasons: [`Required verification could not run (${failedRunner.reason || failedRunner.status}); repair the test harness, not application code.`] };
+  if (!failedRunner) return verdict;
+  return { ...verdict, verification_notes: [
+    ...(verdict?.verification_notes || []),
+    `Verification unavailable (${failedRunner.reason || failedRunner.status}); the reviewer verdict is retained.`,
+  ] };
 }
 
 export function capVerdictForDeterministicTestRegression(verdict, testRun = null) {

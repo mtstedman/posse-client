@@ -1,4 +1,5 @@
 import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
+import { isPosseProjectInitialized, uninitializedProjectMessage } from "./project-init-state.js";
 import { installCliWarningFilter } from "./warnings.js";
 import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 
@@ -376,6 +377,17 @@ async function ensureGitRepositoryInitialized({ verbose = false } = {}) {
   return { initialized: true };
 }
 
+async function assertGitRepositoryExists() {
+  try {
+    await adminGitExecAsync(["rev-parse", "--git-dir"], PROJECT_DIR, {
+      timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
+      maxBuffer: 1024 * 128,
+    });
+  } catch (err) {
+    throw new Error(`Git repository required for ${PROJECT_DIR}; only posse add or posse go initializes one: ${firstGitErrorLine(err)}`);
+  }
+}
+
 async function ensureSnapshotPushRefsGuarded({ verbose = false, timeoutMs = BOOT_PUSH_GUARD_TIMEOUT_MS } = {}) {
   if (await remotePushConfigsAreClearlyRestrictive(PROJECT_DIR, {
     timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
@@ -423,6 +435,9 @@ async function ensureGitReady() {
 
   const repoCheck = await tryGit(["rev-parse", "--git-dir"]);
   if (!repoCheck.ok) {
+    if (COMMAND !== "go") {
+      throw new Error(`Git repository required for ${PROJECT_DIR}; only posse add or posse go initializes one: ${firstGitErrorLine(repoCheck.error)}`);
+    }
     if (!isGitCommandFailure(repoCheck.error)) {
       throw new Error(`git availability probe failed (not a missing repo): ${firstGitErrorLine(repoCheck.error)}`);
     }
@@ -480,7 +495,8 @@ async function ensureRepoSetupConfirmed() {
   });
 
   try {
-    await ensureGitRepositoryInitialized({ verbose: true });
+    if (COMMAND === "go") await ensureGitRepositoryInitialized({ verbose: true });
+    else await assertGitRepositoryExists();
     await ensurePosseRuntimeIgnoresAsync(PROJECT_DIR);
     await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR, { git: runGit });
   } catch (err) {
@@ -933,7 +949,7 @@ function createStartupReadiness({ enabled = false } = {}) {
   };
 }
 
-async function init({ requireWritableArtifacts = true, refreshStartupContext = false, showReadiness = false, ensureNativeGit = false, refreshNativeGit = false } = {}) {
+async function init({ requireWritableArtifacts = true, allowGitInit = false, refreshStartupContext = false, showReadiness = false, ensureNativeGit = false, refreshNativeGit = false } = {}) {
   configureRuntimeEnv(PROJECT_DIR);
   const readiness = createStartupReadiness({ enabled: showReadiness });
   let startupContext = null;
@@ -961,7 +977,9 @@ async function init({ requireWritableArtifacts = true, refreshStartupContext = f
       });
     }
     if (requireWritableArtifacts) {
-      await readiness.step("Git repository", () => ensureGitRepositoryInitialized({ verbose: !showReadiness }));
+      await readiness.step("Git repository", () => allowGitInit
+        ? ensureGitRepositoryInitialized({ verbose: !showReadiness })
+        : assertGitRepositoryExists());
     }
     // Ensure the DB connection works — schema is bootstrapped by db.js. This is
     // still sync inside better-sqlite3, so render the readiness label first.
@@ -2673,6 +2691,17 @@ async function cmdServe() {
   return runServeCommand(process.argv.slice(3), { projectDir: PROJECT_DIR, C });
 }
 
+async function cmdJobVerdict() {
+  const { runJobVerdictCommand } = await import("./job-verdict-command.js");
+  const result = await runJobVerdictCommand(process.argv.slice(3), { projectDir: PROJECT_DIR });
+  if (result.ok) console.log(`Job verdict ${result.pending ? "reserved for the live run" : "applied"}.`);
+  else {
+    console.error(result.message || result.reason || "Could not apply the job verdict.");
+    process.exitCode = result.exitCode || 1;
+  }
+  return result;
+}
+
 async function cmdGate() {
   const { runGateCommand } = await loadGateCommandModule();
   const result = await runGateCommand(process.argv.slice(3), { projectDir: PROJECT_DIR });
@@ -2738,6 +2767,9 @@ const COMMAND_USAGE = {
     console.log(`\n  Usage: posse go [flags]`);
     console.log(`  plan + run in one shot: plans queued work items, then starts the scheduler.`);
     console.log(`  ${C.dim}Accepts the same flags as 'run' — see: posse run --help${C.reset}\n`);
+  },
+  job: () => {
+    console.log("Usage: posse job pass|fail <job-id> [--note \"reason\"]");
   },
   gate: () => {
     console.log(`\n  Usage: posse gate answer <gate-job-id> <action> [--feedback "details"]`);
@@ -2874,9 +2906,23 @@ export async function main() {
     await printCommandHelp(command);
     return;
   }
+  if (isHelpCommand(command)) {
+    await printGlobalHelp();
+    return;
+  }
+  if (!commandPolicy.known) {
+    await dispatchResolvedCommand(command);
+    return;
+  }
+  if (!["add", "go"].includes(command) && !isPosseProjectInitialized(PROJECT_DIR)) {
+    console.error(`\n${C.red}${uninitializedProjectMessage(PROJECT_DIR)}${C.reset}\n`);
+    process.exitCode = 1;
+    return;
+  }
   const runBootPanelOwnsReadiness = commandPolicy.name === "run" || commandPolicy.name === "go";
   await init({
     requireWritableArtifacts: commandPolicy.requiresWritableArtifacts,
+    allowGitInit: ["add", "go"].includes(command),
     refreshStartupContext: commandPolicy.refreshContextAfter,
     showReadiness: !runBootPanelOwnsReadiness
       && (commandPolicy.requiresProvider || commandPolicy.requiresNativeGit || commandPolicy.refreshContextAfter),
@@ -2959,6 +3005,8 @@ ${aliasDiagnostic}
     ${C.cyan}tools${C.reset}      Script tools for agents: create, test, secrets, grants
     ${C.dim}             tools [list|new|show|test|secret|grant|revoke] (posse tools help)${C.reset}
     ${C.cyan}review${C.reset}     Approve/reject completed work items
+    ${C.cyan}job${C.reset}        Give a parked job an operator verdict, including during a live run
+    ${C.dim}             job pass|fail <job-id> [--note "…"]${C.reset}
     ${C.cyan}gate answer${C.reset} Resolve a parked human gate by job ID
     ${C.dim}             gate answer <gate-job-id> pass|fail|retry|replan|skip [--feedback "…"]${C.reset}
     ${C.dim}             gate answer <gate-job-id> --text "…"  (a gate without choices)${C.reset}
@@ -3089,6 +3137,7 @@ async function dispatchResolvedCommand(command) {
     update: cmdUpdate,
     review: cmdReview,
     gate: cmdGate,
+    job: cmdJobVerdict,
     inject: cmdInject,
     ask: cmdAsk,
     image: cmdImage,

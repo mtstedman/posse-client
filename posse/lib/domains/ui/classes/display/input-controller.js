@@ -306,7 +306,7 @@ export class DisplayInputController {
   }
 
   _submitChoice(choiceIndex) {
-    if (!this._activeQ || this._inputBuf.length > 0) return false;
+    if (!this._activeQ) return false;
     const choices = Array.isArray(this._activeQ.choices) ? this._activeQ.choices : [];
     const choice = choices[choiceIndex];
     if (typeof choice !== "string" || !choice.trim()) return false;

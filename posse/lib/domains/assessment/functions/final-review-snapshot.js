@@ -86,10 +86,10 @@ function readUntrackedFile(cwd, repoPath, maxChars = MAX_UNTRACKED_FILE_CHARS) {
 }
 
 /** The job's scoped change on the current workspace: files, stats, and diff text. */
-export async function collectScopedChange(cwd, payload = {}, { git = gitExecAsync } = {}) {
+export async function collectScopedChange(cwd, payload = {}, { git = gitExecAsync, ignorePaths = new Set() } = {}) {
   const scope = finalReviewScope(payload);
   const status = await git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd, { trim: false });
-  const entries = parsePorcelainZ(status).filter((entry) => inScope(entry.path, scope)
+  const entries = parsePorcelainZ(status).filter((entry) => !ignorePaths.has(entry.path)).filter((entry) => inScope(entry.path, scope)
     || (entry.code.includes("R") && entry.previousPath && inScope(entry.previousPath, scope)));
   const renames = entries.filter((entry) => entry.code.includes("R") && entry.previousPath)
     .map((entry) => ({ from: entry.previousPath, to: entry.path,

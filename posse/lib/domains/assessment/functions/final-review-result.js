@@ -69,7 +69,8 @@ export function finalReviewResultFromReport(report = {}) {
 
 function claimEvidence(claim) {
   if (!claim || typeof claim !== "object") return null;
-  const evidence = Array.isArray(claim.evidence) ? claim.evidence : claim.evidence ? [claim.evidence] : [];
+  const detail = Array.isArray(claim) ? claim[1] || {} : claim;
+  const evidence = [detail.evidence, detail.proof, detail.support].flatMap((lane) => Array.isArray(lane) ? lane : lane ? [lane] : []);
   const rendered = evidence.map((entry) => (typeof entry === "string" ? entry : JSON.stringify(entry))).filter(Boolean);
   return rendered.length > 0 ? rendered.join("; ").slice(0, 600) : null;
 }
@@ -91,6 +92,7 @@ export function finalReviewResultFromVerdict(verdict, { claims = [] } = {}) {
   if (decision === "fail" && reasons.length > 0) {
     return {
       outcome: FINAL_REVIEW_OUTCOMES.FINDINGS,
+      repair: (verdict.spawn_jobs || []).map((spec) => spec.payload?.instructions).filter(Boolean).join("\n"),
       findings: reasons.slice(0, FINAL_REVIEW_MAX_FINDINGS).map((reason, index) => ({
         severity: "high",
         criterion: reason.slice(0, 1000),
@@ -172,11 +174,11 @@ export function finalReviewHandoffHold({ jobId, attemptId, agentCallId, db = get
   if (results.length >= FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT) return null;
   const latest = results.at(-1);
   if (!latest) {
-    return "Call final_review before a COMPLETE handoff: it runs the task's declared tests and an independent review of the change.";
+    return "Call tools_final_review before a COMPLETE handoff: it runs the task's declared tests and an independent review of the change.";
   }
   if (latest.outcome === FINAL_REVIEW_OUTCOMES.PASS) {
     if (!editedSince({ jobId, agentCallId, afterObservationId: latest.id, db })) return null;
-    return "The change was edited after its final review passed; call final_review again before the COMPLETE handoff.";
+    return "The change was edited after its final review passed; call tools_final_review again before the COMPLETE handoff.";
   }
-  return "The last final review returned findings; fix them and call final_review again before the COMPLETE handoff.";
+  return "The last final review returned findings; fix them and call tools_final_review again before the COMPLETE handoff.";
 }

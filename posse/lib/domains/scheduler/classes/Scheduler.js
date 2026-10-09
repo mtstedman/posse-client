@@ -1761,7 +1761,7 @@ export class Scheduler {
    * @param {function} workerCallback - async job executor
    * @param {object} opts
    */
-  async runLoop(workerCallback, { onIdle, onDone, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob, onTeamSubmissionChange, onSessionEvent, beforeSessionStop } = {}) {
+  async runLoop(workerCallback, { onIdle, onDone, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob, onTeamSubmissionChange, onSessionEvent, onQueueStateChange, beforeSessionStop } = {}) {
     // boot() starts renewal immediately after lock acquisition so long
     // pre-loop hooks cannot let the scheduler lock expire.
     if (!this._running) {
@@ -1900,6 +1900,8 @@ export class Scheduler {
       while (this._running) {
         try {
         const lapStartQueueGeneration = getQueueWakeGeneration();
+        // This durable generation also observes writers in other processes.
+        this._invokeCallback("onQueueStateChange", onQueueStateChange, { generation: lapStartQueueGeneration });
         this._refreshRuntimeSettings();
 
         // Bind pulse minting to the live session before any shared-trunk Git

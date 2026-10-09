@@ -450,7 +450,7 @@ function composerLockedDependencyClassFileMissing(projectRoot, output) {
   return false;
 }
 
-function classifyNestedRunnerInfrastructureFailure(command, result, { projectRoot = null } = {}) {
+export function classifyNestedRunnerInfrastructureFailure(command, result, { projectRoot = null } = {}) {
   if (result?.status === "infrastructure_error"
     && String(result?.code || "").toUpperCase() === "ENOENT") {
     return {
@@ -628,6 +628,12 @@ export function validatePlannerTestCommand(command) {
   } else if (/^(?:python(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?$/.test(executable)) {
     const moduleIndex = args.indexOf("-m");
     ok = moduleIndex >= 0 && ["pytest", "unittest"].includes(args[moduleIndex + 1]);
+  } else if (/^eslint(?:\.cmd)?$/.test(executable)) {
+    ok = !args.some((arg) => ["--output-file", "-o", "--cache"].includes(flagName(arg)));
+  } else if (/^(?:tsc|vue-tsc)(?:\.cmd)?$/.test(executable)) {
+    const noEmit = args.indexOf("--noemit");
+    ok = noEmit >= 0 && args[noEmit + 1] !== "false"
+      && !args.some((arg) => ["--build", "-b", "--incremental", "--composite"].includes(flagName(arg)));
   } else if (/^pytest(?:-\d+(?:\.\d+)*)?(?:\.exe)?$/.test(executable)) {
     ok = true;
   } else if (["cargo", "cargo.exe"].includes(executable)) {
@@ -1714,6 +1720,32 @@ async function attributeChangedTestFailures(fileResults, { base = null, scopePat
   };
 }
 
+// Compare the declared suite on today's sibling tree with this job's scoped
+// changes removed. An old frozen baseline cannot attribute a later sibling
+// failure; unchanged tests can also regress because production code changed.
+async function attributeDeclaredTestFailure(result, plan, { base, scopePaths, policy, cleanupOptions }) {
+  if (result.status !== "failed" || !base || !scopePaths?.length
+    || plan.verification_eligible === false || plan.source === "operator_approved_operation") return null;
+  const { cwd } = cleanupOptions;
+  const [before, actualCommit, originalHeadRef] = await Promise.all([porcelain(cwd), currentCommit(cwd), currentHeadRef(cwd)]);
+  if (String(before || "").trim()) return null;
+  let baseline = null;
+  try {
+    baseline = await withLineagePathsRestored({ cwd, baseCommit: base, paths: scopePaths,
+      run: () => runFrozenTestPlanOnce(plan, { cwd, timeoutMs: policy.wall_timeout_ms }),
+    });
+  } catch { /* Without a trustworthy comparison, retain the original failure. */ }
+  const cleanup = await restoreAfterTest({ ...cleanupOptions, before, actualCommit, originalHeadRef });
+  if (!["not_needed", "completed"].includes(cleanup.cleanupStatus)) {
+    return { commit: base, debt_only: false, cleanup_status: cleanup.cleanupStatus,
+      error: cleanup.cleanupError || "Could not restore the workspace after the attribution check." };
+  }
+  if (!baseline) return null;
+  const delta = testExecutionDelta({ ...baseline, exit_code: baseline.code ?? null }, { ...result, exit_code: result.code ?? null });
+  return { commit: base, comparison: "scoped_change_removed", baseline_status: baseline.status,
+    delta, debt_only: delta === "persistent_failure" };
+}
+
 async function executeReceipt({
   job,
   plan,
@@ -1933,7 +1965,7 @@ async function executeReceipt({
     { projectRoot: cwd },
   );
   const cleanupOptions = { cwd, siblingOwnedPaths, cleanupWorktree, cleanupPaths, allowProjectedBaseline };
-  const { cleanupStatus, cleanupError, siblingPaths } = await restoreAfterTest({
+  let { cleanupStatus, cleanupError, siblingPaths } = await restoreAfterTest({
     ...cleanupOptions,
     before,
     actualCommit,
@@ -1942,16 +1974,18 @@ async function executeReceipt({
   const cleanedUp = ["not_needed", "completed"].includes(cleanupStatus);
   // When nothing was declared, the changed test files are the plan and have
   // no baseline: their failures are compared with the base tree here.
-  const planAttribution = phase === "post_change" && plan.source === "changed_unit_tests" && cleanedUp
-    ? await attributeChangedTestFailures(result.file_results, {
-        ...changedTestsBase,
-        policy: effectivePolicy,
-        cleanupOptions,
-      })
+  const planAttribution = phase === "post_change" && cleanedUp
+    ? (plan.source === "changed_unit_tests"
+      ? await attributeChangedTestFailures(result.file_results, { ...changedTestsBase, policy: effectivePolicy, cleanupOptions })
+      : await attributeDeclaredTestFailure(result, plan, { ...changedTestsBase, policy: effectivePolicy, cleanupOptions }))
     : null;
   // Only once the plan's drift check and cleanup are done do the changed test
   // files run, in a window of their own.
-  const changedTests = changedTestPaths.length > 0 && cleanedUp
+  if (["failed", "unavailable"].includes(planAttribution?.cleanup_status)) {
+    cleanupStatus = planAttribution.cleanup_status;
+    cleanupError = planAttribution.error;
+  }
+  const changedTests = changedTestPaths.length > 0 && ["not_needed", "completed"].includes(cleanupStatus)
     ? await runChangedUnitTests(changedTestPaths, effectivePolicy, cleanupOptions, changedTestsBase)
     : null;
 
@@ -2269,9 +2303,7 @@ export async function ensurePostChangeTestReceipt({
   const changedPaths = changed.paths;
   // A failing changed test file is compared with the base tree before it
   // counts against the change.
-  const changedAttribution = changedPaths.length > 0
-    ? { changed_tests_base: changed.base, changed_tests_scope: changed.scopePaths }
-    : {};
+  const changedAttribution = { changed_tests_base: changed.base, changed_tests_scope: changed.scopePaths };
   if (changedPaths.length > 0 && plan) {
     // They join the declared plan rather than replace it.
     plan = { ...plan, changed_unit_test_paths: changedPaths, ...changedAttribution };
@@ -2293,6 +2325,7 @@ export async function ensurePostChangeTestReceipt({
     };
   }
   if (!plan) return null;
+  plan = { ...plan, ...changedAttribution };
   const debtIdentitiesFor = async (postChange) => {
     const identities = new Set();
     const add = (receipt) => {
@@ -2316,6 +2349,7 @@ export async function ensurePostChangeTestReceipt({
       debt_failure_identities: [...identities].sort(),
       debt_only: postChange?.status === "failed" && (
         (!!postIdentity && identities.has(postIdentity))
+        || postChange?.baseline_attribution?.debt_only === true
         || testExecutionDelta(baseline, postChange) === "persistent_failure"
       ),
     };
@@ -2394,6 +2428,7 @@ function compactOutput(receipt) {
 }
 
 export function testExecutionDelta(baseline, postChange) {
+  if (postChange?.status === "failed" && postChange?.baseline_attribution?.debt_only === true) return "persistent_failure";
   // The changed test files have no pre-development baseline; when they become
   // the plan, their failures were compared with the base tree instead.
   if (!baseline) {
@@ -2565,6 +2600,8 @@ function baselineAttributionSummary(attribution) {
   const debt = files.filter((file) => file.delta === "persistent_failure").map((file) => file.path);
   const introduced = Array.isArray(attribution?.introduced_paths) ? attribution.introduced_paths : [];
   return [
+    attribution?.comparison === "scoped_change_removed"
+      ? `the declared command ${attribution.debt_only ? "fails identically" : "does not fail identically"} with this job's scoped changes removed and sibling commits retained` : null,
     debt.length > 0 ? `${debt.join(", ")} already failed the same way at the pre-change commit ${commit}, so that failure is not this change's` : null,
     introduced.length > 0 ? `${introduced.join(", ")} fail${introduced.length === 1 ? "s" : ""} because of this change` : null,
     attribution?.error ? `the pre-change run could not complete (${attribution.error})` : null,

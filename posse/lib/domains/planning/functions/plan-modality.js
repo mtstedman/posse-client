@@ -63,7 +63,8 @@ export function plannerTaskProducesRepoOutput(task = {}) {
   return hasRepoFileScope(task);
 }
 
-// Each accepted human-input deferral queues a follow-up plan behind its gate.
+// Every planner-issued clarification queues a follow-up plan behind its gate,
+// including plans that also schedule independent executable work.
 // Bound the chain so a planner that keeps stopping at human input reaches the
 // modality-mismatch failure path instead of gating forever.
 export const MAX_CONSECUTIVE_HUMAN_INPUT_DEFERRALS = 2;
@@ -77,13 +78,14 @@ export function evaluatePlanModality({
   const requiredOutputs = requiredWorkItemOutputs(workItem, intakeHints);
   const repoExecutionRequired = requiresRepositoryExecution(workItem, intakeHints);
   const taskList = Array.isArray(tasks) ? tasks.filter(Boolean) : [];
+  const hasHumanInput = taskList.some((task) => normalizedTaskShape(task).jobType === "human_input");
   const deferredByHumanInput = taskList.length > 0
     && taskList.every((task) => normalizedTaskShape(task).jobType === "human_input");
   const hasRepoOutputTask = taskList.some(plannerTaskProducesRepoOutput);
   const observedOutputs = [];
   if (hasRepoOutputTask) observedOutputs.push("repo");
   if (taskList.some((task) => normalizedTaskShape(task).jobType === "artificer")) observedOutputs.push("artifact");
-  if (deferredByHumanInput) observedOutputs.push("human_input");
+  if (hasHumanInput) observedOutputs.push("human_input");
 
   const missingOutputs = requiredOutputs.filter((output) => {
     if (output === "repo") return repoExecutionRequired && !hasRepoOutputTask;
@@ -97,10 +99,11 @@ export function evaluatePlanModality({
     // human gate. The repository deliverable remains required after the gate;
     // rejecting this coordination-only plan merely pays for another planner
     // call that still lacks the input. The compiler owes a follow-up plan.
-    ok: missingOutputs.length === 0 || acceptedByHumanInputDeferral,
+    ok: (missingOutputs.length === 0 || acceptedByHumanInputDeferral) && (!hasHumanInput || deferralAvailable),
     deferredByHumanInput,
     acceptedByHumanInputDeferral,
-    humanInputDeferralExhausted: defersMissingOutput && !deferralAvailable,
+    requiresHumanInputContinuation: hasHumanInput && deferralAvailable,
+    humanInputDeferralExhausted: hasHumanInput && !deferralAvailable,
     requiredOutputs,
     repoExecutionRequired,
     observedOutputs,

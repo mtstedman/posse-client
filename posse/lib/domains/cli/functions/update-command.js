@@ -6,6 +6,7 @@ import path from "path";
 import { C } from "../../../shared/format/functions/colors.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
 import { adminGitExecAsync } from "../../git/functions/admin-git-exec.js";
+import { isPosseProjectInitialized } from "./project-init-state.js";
 
 const DEFAULT_REMOTE = "origin";
 const DEFAULT_BRANCH = "main";
@@ -412,6 +413,7 @@ export async function updatePosseClient({
 } = {}) {
   const resolvedPosseRoot = path.resolve(posseRoot || DEFAULT_POSSE_ROOT);
   const resolvedProjectDir = path.resolve(projectDir || process.cwd());
+  const initializedProject = isPosseProjectInitialized(resolvedProjectDir);
   const targetBranch = normalizeBranch(branch);
   const u = safeUi(ui);
 
@@ -668,6 +670,24 @@ export async function updatePosseClient({
 
     completedUpdate = update;
     phase = "deps";
+    if (!initializedProject) {
+      const dependencies = {
+        ok: true,
+        status: "skipped",
+        project_dir: resolvedProjectDir,
+        doctor: { ok: true, summary: "repository dependencies skipped; run posse add or posse go to initialize" },
+      };
+      u.done("deps", "ok", dependencies.doctor.summary);
+      return {
+        ok: update.ok !== false,
+        dry_run: dryRun,
+        posse_root: resolvedPosseRoot,
+        project_dir: resolvedProjectDir,
+        repo_root: repoRoot,
+        update,
+        dependencies,
+      };
+    }
     u.start("deps", dryRun
       ? "checking the dependency plan (posse doctor --dry-run)"
       : "refreshing dependencies (posse doctor)");

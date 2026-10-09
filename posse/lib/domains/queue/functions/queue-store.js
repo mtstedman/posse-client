@@ -3063,7 +3063,7 @@ export function requestJobScopeExpansion({
           access: normalizedAccess,
           operation: normalizedOperation,
           ignore_source: ignoreSource,
-          reason: String(reason || "").trim().slice(0, 500),
+          reason: String(reason || "").trim(),
           source: String(source || "internal_tool").slice(0, 80),
         }),
       });
@@ -3187,7 +3187,7 @@ export function requestJobScopeExpansion({
         path: normalizedPath,
         access: normalizedAccess,
         operation: normalizedOperation,
-        reason: String(reason || "").trim().slice(0, 500),
+        reason: String(reason || "").trim(),
       };
       const batch = [...scopeRequestBatchEntries(pending), entry];
       const updatedPending = { ...pending, batch };
@@ -3232,7 +3232,7 @@ export function requestJobScopeExpansion({
       path: normalizedPath,
       access: normalizedAccess,
       operation: normalizedOperation,
-      reason: String(reason || "").trim().slice(0, 500),
+      reason: String(reason || "").trim(),
       source: String(source || "internal_tool").slice(0, 80),
       requested_at: now(),
       attempt_id: Number(attemptId) || null,

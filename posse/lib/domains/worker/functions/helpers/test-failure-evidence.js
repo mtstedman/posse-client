@@ -182,3 +182,31 @@ export function renderTestFailureSummary(receipt) {
   if (omitted) lines.push(`[${omitted} failure detail(s) omitted; full output remains in the test artifact]`);
   return lines.join("\n");
 }
+
+// Keep the command and parsed failure names beside bounded diagnostic excerpts.
+// The full output remains in the test receipt; truncation never rejects a run.
+export function testRunDiagnostics(run) {
+  if (!run) return null;
+  const excerpt = (value) => {
+    const text = String(value || "");
+    return text.length > 8000 ? `${text.slice(0, 4000)}\n… output truncated …\n${text.slice(-4000)}` : text;
+  };
+  return {
+    command: run.command || null,
+    status: run.status || null,
+    reason: run.reason || null,
+    failure_summary: renderTestFailureSummary(run) || null,
+    stdout: excerpt(run.stdout),
+    stderr: excerpt(run.stderr),
+  };
+}
+
+export function repairInstructions(verdict, instructions = null) {
+  const evidence = verdict?._deterministic_evidence;
+  return [...new Set([
+    instructions,
+    ...(verdict?.reasons || []),
+    evidence?.failure_summary,
+    evidence?.output_tail,
+  ].filter(Boolean))].join("\n\n");
+}

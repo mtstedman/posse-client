@@ -1,3 +1,5 @@
+import { emptyMaterializedPathsForJob } from "../../handoff/functions/helpers/file-materialization.js";
+import { testRunDiagnostics } from "../../worker/functions/helpers/test-failure-evidence.js";
 import { finalReviewIdentity } from "../functions/final-review-authority.js";
 // FinalReviewRuntime — both sides of final_review.
 //
@@ -179,7 +181,9 @@ export class FinalReviewRuntime {
         cwd: parent.cwd,
         timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS,
       });
-      change = await this.collectChange(parent.cwd, payload);
+      const placeholders = new Set(await emptyMaterializedPathsForJob(job.id,
+        payload.scope_generation ?? payload._materialization_generation ?? 1, parent.cwd));
+      change = await this.collectChange(parent.cwd, payload, { ignorePaths: placeholders });
       // The assessment after handoff runs these too; running them here lets
       // the developer fix what they find in the same attempt. The change is
       // the lineage's, as in the post-change receipt: a fix also runs the test
@@ -187,13 +191,13 @@ export class FinalReviewRuntime {
       const changedPlan = changedTestPlan(job, payload, change, declaredPlan, {
         cwd: parent.cwd,
         resolvePlan: this.resolveTestPlan,
-        lineagePaths: await this.lineageTests(job, payload, parent.cwd),
+        lineagePaths: (await this.lineageTests(job, payload, parent.cwd)).filter((file) => !placeholders.has(file)),
       });
       changedTestRun = changedPlan
         ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS })
         : null;
       checks = this.runChecks(parent.cwd, change);
-      try { reviewIdentity = await this.identify(parent.cwd, payload); } catch { /* unavailable identities cannot authorize assessment */ }
+      try { reviewIdentity = await this.identify(parent.cwd, payload, { jobId: job.id }); } catch { /* unavailable identities cannot authorize assessment */ }
       const session = parent.reviewer;
       let outcome;
       if (session && !session.ended && session.parked) {
@@ -223,12 +227,9 @@ export class FinalReviewRuntime {
       }
       ({ result, reviewerCallId } = await outcome);
       result = mergeCheckFindings(result, finalReviewCheckFindings({ checks, changedTestRun }));
-      if ([testRun, changedTestRun].some((run) => run && ["infrastructure_error", "unavailable", "invalid"].includes(run.status))) {
-        result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Required test verification could not run; repair the test runner before completing this change." };
-      }
       if (!reviewIdentity) {
         result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Cannot bind final review to the scoped workspace; verification is blocked." };
-      } else if (reviewIdentity !== await this.identify(parent.cwd, payload)) {
+      } else if (reviewIdentity !== await this.identify(parent.cwd, payload, { jobId: job.id })) {
         result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Scoped files changed during review; review the current change again." };
       }
     } catch (error) {
@@ -245,12 +246,8 @@ export class FinalReviewRuntime {
     if (reviewsRemaining === 0) this.#release(parent);
     const response = {
       ...result,
-      declared_tests: testRun
-        ? { command: testRun.command || null, status: testRun.status || null, reason: testRun.reason || null }
-        : null,
-      changed_tests: changedTestRun
-        ? { command: changedTestRun.command || null, status: changedTestRun.status || null, reason: changedTestRun.reason || null }
-        : null,
+      declared_tests: testRunDiagnostics(testRun),
+      changed_tests: testRunDiagnostics(changedTestRun),
       changed_file_checks: checks ? { status: checks.status, summary: checks.summary || null } : null,
       changed_files: Array.isArray(change?.files) ? change.files.map((file) => file.path) : [],
       reviews_remaining: reviewsRemaining,
@@ -268,6 +265,10 @@ export class FinalReviewRuntime {
         review_identity: reviewIdentity,
         summary: result.summary || null,
         finding_count: result.findings?.length || 0,
+        findings: result.findings || [],
+        repair: result.repair || null,
+        declared_tests: response.declared_tests,
+        changed_tests: response.changed_tests,
         reason: result.reason || null,
         reviewer_agent_call_id: reviewerCallId,
         review_mode: mode,
