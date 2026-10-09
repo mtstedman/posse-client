@@ -35,6 +35,12 @@ import {
   snapshotReviewedFiles,
 } from "../functions/final-review-snapshot.js";
 import {
+  changedTestPlan,
+  finalReviewCheckFindings,
+  mergeCheckFindings,
+  runChangedFileChecks,
+} from "../functions/final-review-checks.js";
+import {
   finalReviewResultFromReport,
   finalReviewResultFromVerdict,
   finalReviewResultsForAttempt,
@@ -65,6 +71,7 @@ export class FinalReviewRuntime {
     snapshotFiles = snapshotReviewedFiles,
     lookupReviewerParent = finalReviewParentOf,
     record = recordObservation,
+    runChecks = runChangedFileChecks,
   } = {}) {
     this.parents = new Map();
     this.collectChange = collectChange;
@@ -73,6 +80,7 @@ export class FinalReviewRuntime {
     this.snapshotFiles = snapshotFiles;
     this.lookupReviewerParent = lookupReviewerParent;
     this.record = record;
+    this.runChecks = runChecks;
   }
 
   /**
@@ -149,6 +157,8 @@ export class FinalReviewRuntime {
     const startedAt = Date.now();
     let result;
     let testRun = null;
+    let changedTestRun = null;
+    let checks = null;
     let change = null;
     let reviewerCallId = null;
     let mode = "fresh";
@@ -157,11 +167,19 @@ export class FinalReviewRuntime {
       if (!job) throw finalReviewError("FINAL_REVIEW_CONTEXT_MISSING", `Job #${parent.jobId} no longer exists`);
       const payload = parseJobPayload(job);
       const workItem = getWorkItem(job.work_item_id);
-      testRun = await this.runTestPlan(this.resolveTestPlan(job, payload, { cwd: parent.cwd }), {
+      const declaredPlan = this.resolveTestPlan(job, payload, { cwd: parent.cwd });
+      testRun = await this.runTestPlan(declaredPlan, {
         cwd: parent.cwd,
         timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS,
       });
       change = await this.collectChange(parent.cwd, payload);
+      // The assessment after handoff runs these too; running them here lets
+      // the developer fix what they find in the same attempt.
+      const changedPlan = changedTestPlan(job, payload, change, declaredPlan, { cwd: parent.cwd, resolvePlan: this.resolveTestPlan });
+      changedTestRun = changedPlan
+        ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS })
+        : null;
+      checks = this.runChecks(parent.cwd, change);
       const session = parent.reviewer;
       let outcome;
       if (session && !session.ended && session.parked) {
@@ -178,10 +196,10 @@ export class FinalReviewRuntime {
         parked.resolve({
           status: FINAL_REVIEW_REVIEWER_STATUS.REVISED,
           revision: session.revision,
-          review: renderFinalReviewRevision({ revision: session.revision, testRun, delta }),
+          review: renderFinalReviewRevision({ revision: session.revision, testRun, delta, changedTestRun, checks }),
         });
       } else {
-        const evidence = renderFinalReviewEvidence({ job, workItem, payload, change, testRun });
+        const evidence = renderFinalReviewEvidence({ job, workItem, payload, change, testRun, changedTestRun, checks });
         const fresh = this.#startReviewer(parent, {
           instructions: finalReviewInstructions(),
           evidence,
@@ -190,6 +208,7 @@ export class FinalReviewRuntime {
         outcome = this.#awaitReport(fresh);
       }
       ({ result, reviewerCallId } = await outcome);
+      result = mergeCheckFindings(result, finalReviewCheckFindings({ checks, changedTestRun }));
     } catch (error) {
       // The review could not run: never hold the handoff on it.
       result = {
@@ -207,6 +226,10 @@ export class FinalReviewRuntime {
       declared_tests: testRun
         ? { command: testRun.command || null, status: testRun.status || null, reason: testRun.reason || null }
         : null,
+      changed_tests: changedTestRun
+        ? { command: changedTestRun.command || null, status: changedTestRun.status || null, reason: changedTestRun.reason || null }
+        : null,
+      changed_file_checks: checks ? { status: checks.status, summary: checks.summary || null } : null,
       changed_files: Array.isArray(change?.files) ? change.files.map((file) => file.path) : [],
       reviews_remaining: reviewsRemaining,
     };
@@ -225,6 +248,8 @@ export class FinalReviewRuntime {
         reviewer_agent_call_id: reviewerCallId,
         review_mode: mode,
         test_status: testRun?.status || null,
+        changed_tests_status: changedTestRun?.status || null,
+        changed_file_checks_status: checks?.status || null,
         change_digest: change?.digest || null,
         changed_file_count: Array.isArray(change?.files) ? change.files.length : 0,
         duration_ms: Date.now() - startedAt,

@@ -15,6 +15,7 @@ import {
   FINAL_REVIEW_DIFF_INLINE_MAX_CHARS,
   FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS,
 } from "../../../catalog/final-review.js";
+import { renderChangedFileChecks } from "./final-review-checks.js";
 
 const SCOPE_FIELDS = Object.freeze(["files_to_modify", "files_to_create", "files_to_delete"]);
 const MAX_UNTRACKED_FILE_CHARS = 20_000;
@@ -195,17 +196,17 @@ function tail(text, max) {
   return value.length <= max ? value : `…${value.slice(-max)}`;
 }
 
-function renderTestRun(testRun) {
-  if (!testRun || testRun.status === "skipped") return "DECLARED TESTS: none declared for this task.";
+function renderTestRun(testRun, label = "DECLARED TESTS") {
+  if (!testRun || testRun.status === "skipped") return `${label}: none declared for this task.`;
   if (testRun.status === "invalid_test_plan") {
-    return `DECLARED TESTS: \`${testRun.command || "(unknown)"}\` could not run (${testRun.reason || "invalid plan"}).`;
+    return `${label}: \`${testRun.command || "(unknown)"}\` could not run (${testRun.reason || "invalid plan"}).`;
   }
   const counts = testRun.test_counts && Number.isFinite(testRun.test_counts.total)
     ? `, ${testRun.test_counts.total} test(s)`
     : "";
   const exit = testRun.code ?? testRun.exit_code;
   return [
-    `DECLARED TESTS: \`${testRun.command}\` ran on the current workspace: ${String(testRun.status || "unknown").toUpperCase()}${exit != null ? ` (exit ${exit})` : ""}${counts}${testRun.reason ? `, ${testRun.reason}` : ""}.`,
+    `${label}: \`${testRun.command}\` ran on the current workspace: ${String(testRun.status || "unknown").toUpperCase()}${exit != null ? ` (exit ${exit})` : ""}${counts}${testRun.reason ? `, ${testRun.reason}` : ""}.`,
     testRun.status === "passed" ? null : "```text",
     testRun.status === "passed" ? null : tail([testRun.stdout, testRun.stderr].filter(Boolean).join("\n"), FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS),
     testRun.status === "passed" ? null : "```",
@@ -221,7 +222,7 @@ function list(label, values) {
  * The reviewer's local evidence block: contract, test result, change. Appended
  * after the remotely composed reviewer prompt, never sent to the remote.
  */
-export function renderFinalReviewEvidence({ job, workItem, payload = {}, change, testRun }) {
+export function renderFinalReviewEvidence({ job, workItem, payload = {}, change, testRun, changedTestRun = null, checks = null }) {
   const diff = String(change?.diff || "");
   const inline = diff.length <= FINAL_REVIEW_DIFF_INLINE_MAX_CHARS
     ? diff
@@ -239,6 +240,8 @@ export function renderFinalReviewEvidence({ job, workItem, payload = {}, change,
     list("Declared scope", [...SCOPE_FIELDS.flatMap((field) => payload[field] || []), ...(payload.create_roots || []).map((root) => `${root}/**`)]),
     "",
     renderTestRun(testRun),
+    changedTestRun ? renderTestRun(changedTestRun, "CHANGED TEST FILES") : null,
+    renderChangedFileChecks(checks),
     "",
     files.length === 0
       ? "CHANGED FILES: none in the declared scope."
@@ -257,7 +260,7 @@ export function finalReviewInstructions() {
     "FINAL REVIEW: the developer finished this task and requests an independent review before handing it off.",
     "Judge the current workspace change, which is not committed yet, against the task contract in the attached snapshot.",
     "Check the actual files: the snapshot lists every changed file and inlines the diff up to its size limit; read any changed file it does not show.",
-    "Use the declared test result as evidence.",
+    "Use the declared test, changed test file and changed-file check results as evidence: a failure located in a changed file is a defect in this change.",
     "Check every success criterion before you report, and report every concrete defect at once, most severe first: each finding names the criterion it misses and locates it with hash refs, paths or symbols.",
     "Report by calling final_review with your verdict (pass when the change meets the contract; fail with your findings; needs_review only when the contract itself cannot be judged). The call then waits while the developer works.",
     "When it returns a revision, check your findings against the diff since your report, review only what changed, and call final_review again. When it returns status done, end with your terminal handoff carrying your latest verdict.",
@@ -269,7 +272,7 @@ export function finalReviewInstructions() {
  * test result and only what changed since its report, never the whole change
  * again.
  */
-export function renderFinalReviewRevision({ revision, testRun, delta }) {
+export function renderFinalReviewRevision({ revision, testRun, delta, changedTestRun = null, checks = null }) {
   const changed = Array.isArray(delta?.changed) ? delta.changed : [];
   const diff = String(delta?.diff || "");
   const inline = diff.length <= FINAL_REVIEW_DELTA_INLINE_MAX_CHARS ? diff : diff.slice(0, FINAL_REVIEW_DELTA_INLINE_MAX_CHARS);
@@ -277,6 +280,8 @@ export function renderFinalReviewRevision({ revision, testRun, delta }) {
     `═══ FINAL REVIEW: REVISION ${revision} ═══`,
     "The developer revised the change after your report.",
     renderTestRun(testRun),
+    changedTestRun ? renderTestRun(changedTestRun, "CHANGED TEST FILES") : null,
+    renderChangedFileChecks(checks),
     "",
     changed.length === 0
       ? "CHANGED SINCE YOUR REPORT: nothing in the declared scope."

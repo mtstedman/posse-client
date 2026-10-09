@@ -16,6 +16,8 @@ export const PLANNER_REPORT_METADATA_KEYS = Object.freeze([
   "skip_assessment",
   "executed_by_planner",
   "test_command",
+  "tests_to_run",
+  "write_tests",
 ]);
 
 const RESEARCHER_PROFILES = new Set(["researcher.pipeline.v1", "researcher.report.v1"]);

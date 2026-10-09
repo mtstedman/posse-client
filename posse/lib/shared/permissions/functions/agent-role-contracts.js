@@ -51,7 +51,9 @@ export function resolveAgentRoleContract({ role, providerName = null, agentHando
     subAgent: !child && subAgent === true && HANDOFF_ROLES.has(normalizedRole),
     dispatchAgent: !child && dispatchAgent === true && ["researcher", "planner"].includes(normalizedRole),
     webResearchHandoff: !child && webResearchHandoff === true && normalizedRole === "researcher",
-    finalReview: !child && finalReview === true && agentHandoff === true && normalizedRole === "dev",
+    // The developer requests reviews; its reviewer (an assessor call flagged
+    // with final_review_v1) reports and waits with the same tool.
+    finalReview: !child && finalReview === true && agentHandoff === true && ["dev", "assessor"].includes(normalizedRole),
     researchInvestigation: !child && researchInvestigation === true && ["researcher", "planner"].includes(normalizedRole),
     coordinationChild: child,
   });

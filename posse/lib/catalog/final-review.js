@@ -27,6 +27,13 @@ export const FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT = 3;
 export const FINAL_REVIEW_TIMEOUT_MS = 40 * 60 * 1000;
 export const FINAL_REVIEW_TEST_TIMEOUT_MS = 15 * 60 * 1000;
 
+// Before the reviewer starts, final_review also runs the changed-file checks
+// the assessment harness runs after handoff and the unit test files the
+// change adds or edits, so their failures reach the developer in the same
+// attempt (domains/assessment/functions/final-review-checks.js).
+export const FINAL_REVIEW_CHECKS = Object.freeze(["lint", "typecheck"]);
+export const FINAL_REVIEW_CHECK_MAX_FILES = 250;
+
 // The reviewer gets the scoped diff inline up to this size, plus the full
 // changed-file list; it reads whatever does not fit with its read tools.
 export const FINAL_REVIEW_DIFF_INLINE_MAX_CHARS = 60_000;

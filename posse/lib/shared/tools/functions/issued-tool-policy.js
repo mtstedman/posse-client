@@ -202,7 +202,13 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
   if (tool.suite === "tools" && tool.name === "sub_agent_next_input") return coordination.subAgentNextInput === true;
   if (tool.suite === "tools" && tool.name === "dispatch_agent") return coordination.dispatchAgent === true;
   if (tool.suite === "tools" && tool.name === "web_research_handoff") return coordination.webResearchHandoff === true;
-  if (tool.suite === "tools" && tool.name === "final_review") return coordination.finalReview === true && policy.allow_write === true;
+  // The developer requests reviews on a writable lane; its read-only reviewer
+  // (an assessor child the client flags) reports and waits with the same tool.
+  // Mirrors posse-remote final_review_issued_to.
+  if (tool.suite === "tools" && tool.name === "final_review") {
+    return coordination.finalReview === true
+      && ((policy.allow_write === true && coordination.role === "dev") || coordination.role === "assessor");
+  }
   if (tool.suite === "tools" && tool.name === "ack_operator_feedback" && coordination.webResearchHandoff === true) return true;
   if (!policy.allow_read) return false;
   if (tool.suite === "atlas") return atlasAvailable !== false;
@@ -258,6 +264,7 @@ export function normalizeIssuedToolSurface(value, {
       dispatchAgent: dispatchAgentAvailable,
       webResearchHandoff: webResearchHandoffAvailable,
       finalReview: finalReviewAvailable,
+      role: normalizedRole,
     })) continue;
     if (!out.includes(tool.canonical)) out.push(tool.canonical);
   }
