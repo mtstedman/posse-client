@@ -549,8 +549,10 @@ async function codeLensWithNative({ view, versionId, params, readFile, repoRoot 
   if (resolved.target?.global_id != null) lensTargets.set(resolved.target.global_id, resolved.target);
   const fileSymbols = await view.query.symbolsInFile(targetPath);
   const sourceFallbacks = await resolveSourceIdentifierFallbacks(idents, fileSymbols, source, targetPath);
-  const nativeSelection = nativeIdentifierSelection(idents, fileSymbols, { sourceFallbacks });
-  if (nativeSelection.ambiguities.length > 0) {
+  const nativeSelection = nativeIdentifierSelection(idents, fileSymbols, { sourceFallbacks, literalOwnerFallback: true });
+  // Parity with native code.lens: one ambiguous selector must not discard the
+  // rest of a multi-identifier request; reject only when nothing is left.
+  if (nativeSelection.ambiguities.length > 0 && nativeSelection.identifiers.length === 0) {
     return ambiguousIdentifierEnvelope("code.lens", versionId, nativeSelection.ambiguities[0]);
   }
   for (const symbol of nativeSelection.matchedSymbols) {
@@ -578,12 +580,14 @@ async function codeLensWithNative({ view, versionId, params, readFile, repoRoot 
     scopeIndex: lensScopeIndex(fileSymbols, source),
     identifierAliases: nativeSelection.aliases,
     unresolvedIdentifiers: nativeSelection.unresolved,
+    ambiguities: nativeSelection.ambiguities,
+    literalFallbacks: nativeSelection.literalFallbacks,
   });
 }
 
 async function finishCodeLens({
   versionId, params, targetPath, symbolId, source, lens, calledFrom = [], scopeIndex = [],
-  identifierAliases = new Map(), unresolvedIdentifiers = [],
+  identifierAliases = new Map(), unresolvedIdentifiers = [], ambiguities = [], literalFallbacks = [],
 }) {
   const etag = String(lens.etag || "");
   if (params.ifNoneMatch && params.ifNoneMatch === etag) {
@@ -606,7 +610,17 @@ async function finishCodeLens({
   const fitted = fitLensContextBudget(scoped);
   const identifiersFound = remapNativeIdentifiers(lens.identifiersFound, identifierAliases);
   const identifiersFoundInText = remapNativeIdentifiers(lens.identifiersFoundInText, identifierAliases);
-  const identifiersMissing = remapNativeIdentifiers(lens.identifiersMissing, identifierAliases);
+  // Same shape as code.window: excluded selectors are also missing, and a
+  // literal call-path search that found nothing keeps its candidates.
+  const identifiersMissing = [...new Set([
+    ...remapNativeIdentifiers(lens.identifiersMissing, identifierAliases),
+    ...ambiguities.map((entry) => entry.identifier),
+  ])];
+  const missingKeys = new Set(identifiersMissing.map((entry) => entry.toLowerCase()));
+  const identifierAmbiguities = [
+    ...literalFallbacks.filter((entry) => missingKeys.has(entry.identifier.toLowerCase())),
+    ...ambiguities,
+  ].map((entry) => ({ identifier: entry.identifier, bearers: [...entry.bearers] }));
   const foundIdentifiers = new Set(
     [...identifiersFound, ...identifiersFoundInText].map((entry) => entry.toLowerCase()),
   );
@@ -625,6 +639,7 @@ async function finishCodeLens({
       ? { identifiersFoundInText }
       : {}),
     identifiersMissing,
+    ...(identifierAmbiguities.length > 0 ? { identifierAmbiguities } : {}),
     ...(unresolved.length > 0 ? { unresolved_identifiers: unresolved } : {}),
     truncated: lens.truncated === true,
     omittedMatchCount: Math.max(0, Number(lens.omittedMatchCount) || 0),
@@ -980,12 +995,28 @@ function isCodeWindowSizeLimitError(error) {
     || /response exceeds 2097152 serialized bytes/iu.test(message);
 }
 
-function nativeIdentifierSelection(requestedIdentifiers, symbols, { preserveWindowTargets = false, sourceFallbacks = new Map() } = {}) {
+/**
+ * True only when every tail bearer is qualified and none is owned by the
+ * requested owner segment. An unqualified bearer cannot prove ownership either
+ * way, so it stays an explicit ambiguity. Mirrors native code.lens.
+ */
+function tailBearersExcludeOwner(requested, bearers) {
+  const owner = normalizedQualifiedIdentifier(requested).split(".").filter(Boolean).at(-2);
+  if (!owner) return false;
+  return bearers.every((bearer) => {
+    const qualified = normalizedQualifiedIdentifier(bearer);
+    return qualified.includes(".")
+      && !qualified.split(".").some((segment) => segment.split("<")[0].trim() === owner);
+  });
+}
+
+function nativeIdentifierSelection(requestedIdentifiers, symbols, { preserveWindowTargets = false, sourceFallbacks = new Map(), literalOwnerFallback = false } = {}) {
   const identifiers = [];
   const indexed = [];
   const aliases = new Map();
   const unresolved = [];
   const ambiguities = [];
+  const literalFallbacks = [];
   const matchedSymbols = [];
   const identifierTargets = [];
   const seenNative = new Set();
@@ -1017,6 +1048,15 @@ function nativeIdentifierSelection(requestedIdentifiers, symbols, { preserveWind
     // container match falls back to the ordinary lexical selection.
     const matches = resolution.matches.filter((symbol) => !isContainerSymbol(symbol));
     if (resolution.ambiguousBearers.length > 0) {
+      // Lens is an occurrence map: `Bytes::from_request` in a file that only
+      // calls it has no bearer of that owner here, so search its literal call
+      // path instead of offering other owners' members as the only answer.
+      if (literalOwnerFallback && tailBearersExcludeOwner(requested, resolution.ambiguousBearers)) {
+        addNative(requested, requested);
+        unresolved.push(requested);
+        literalFallbacks.push({ identifier: requested, bearers: resolution.ambiguousBearers });
+        continue;
+      }
       ambiguities.push({ identifier: requested, bearers: resolution.ambiguousBearers });
       continue;
     }
@@ -1057,6 +1097,7 @@ function nativeIdentifierSelection(requestedIdentifiers, symbols, { preserveWind
     aliases,
     unresolved,
     ambiguities,
+    literalFallbacks,
     matchedSymbols: uniqueResolutionSymbols(matchedSymbols),
     identifierTargets,
   };

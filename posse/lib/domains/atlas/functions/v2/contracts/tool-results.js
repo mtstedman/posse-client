@@ -834,6 +834,7 @@
  * @property {string[]} identifiersFound
  * @property {string[]} [identifiersFoundInText]  Identifiers with no AST usage but present inside string/comment text (matchKind "text").
  * @property {string[]} identifiersMissing
+ * @property {Array<{identifier:string,bearers:string[]}>} [identifierAmbiguities] Qualified selectors excluded because several declarations share their bare tail, plus owner-qualified call paths whose literal search found nothing. A request whose selectors are all ambiguous remains an error.
  * @property {string[]} [unresolved_identifiers] Qualified or expression identifiers that could not be mapped to a native identifier in this file.
  * @property {boolean} truncated
  * @property {number} omittedMatchCount        Matches unavailable because the native hard cap omitted them; excludes traversal-backed display paging.

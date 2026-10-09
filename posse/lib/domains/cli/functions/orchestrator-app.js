@@ -1977,7 +1977,9 @@ function cmdDashboard(highlightJobId = null, { workItemIds = [] } = {}) {
   const inScope = (workItemId) => scopedIds.size === 0 || scopedIds.has(Number(workItemId));
   const workItems = listWorkItems().filter((wi) => inScope(wi.id));
   const allJobs = listJobs().filter((job) => inScope(job.work_item_id));
-  const peerSnapshot = scopedIds.size === 0 ? readPairingPeerSnapshot() : null;
+  // Read-only peer work is useful context in every view, including a scoped
+  // one, so surface it regardless of the local work-item scope filter.
+  const peerSnapshot = readPairingPeerSnapshot();
   const peersWithWork = (peerSnapshot?.peers || []).filter((peer) => (
     peer.work_items.length > 0 || peer.jobs.length > 0
   ));

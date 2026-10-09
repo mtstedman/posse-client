@@ -155,8 +155,12 @@ export async function callProvider(promptText, {
   nativeBatching = true,
   nativeBatchingCatalog = undefined,
   captureNativeSubagents = false,
+  detachedCliControl = false,
 } = {}) {
-  const nativeDispatchEnabled = providerDispatchSupportedSync("codex");
+  // A detached A/B control is raw Codex: its own CLI, sandbox and read tools,
+  // which native dispatch cannot host. Only that explicit caller takes the CLI
+  // path; every Posse turn stays on native dispatch.
+  const nativeDispatchEnabled = detachedCliControl !== true && providerDispatchSupportedSync("codex");
   if (nativeDispatchEnabled) {
     if ((sandboxModeOverride != null && sandboxModeOverride !== "read-only")
       || disableSystemToolsOverride === false || captureNativeSubagents) {

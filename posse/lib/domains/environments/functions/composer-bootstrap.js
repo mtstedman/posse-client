@@ -16,6 +16,10 @@ const COMPOSER_SIGNATURE_URL = "https://composer.github.io/installer.sig";
 // faster: enabled when the PHP build has them, never required.
 const COMPOSER_REQUIRED_EXTENSIONS = ["openssl"];
 const COMPOSER_PHP_EXTENSIONS = ["openssl", "curl", "zip"];
+// The php.ini settings that name the CA bundle PHP's TLS verifies against.
+const PHP_CA_SETTINGS = ["openssl.cafile", "curl.cainfo"];
+// PHP binaries whose CA settings this process already checked.
+const phpCaChecks = new Map();
 
 /** Where Posse keeps its own Composer, beside its other managed tools. */
 export function managedComposerPhar(installRoot) {
@@ -77,7 +81,8 @@ function managedComposer(phar, caFile) {
  * a skipped or failed installer step is repaired by the next doctor run
  * instead of leaving PHP indexing unavailable. The managed Composer verifies
  * TLS with Posse's CA bundle (`env` holds COMPOSER_CAFILE; callers add it to
- * the command's environment).
+ * the command's environment). On Windows, a PHP with no CA bundle of its own
+ * gets Posse's in php.ini, so any Composer it runs can verify TLS.
  *
  * @param {{
  *   installRoot: string,
@@ -102,8 +107,16 @@ export async function ensureComposer({
   // false: use a Composer that is already there, never install one.
   install = true,
 }) {
-  if (findCommandOnPath("composer", { env, platform })) return { command: composerBin(platform), args: [] };
   const php = findCommandOnPath("php", { env, platform });
+  const caFile = php && install && !dryRun && platform === "win32" ? writeComposerCaFile(installRoot) : null;
+  if (php && caFile) {
+    const key = `${php}\0${caFile}`;
+    const first = !phpCaChecks.has(key);
+    if (first) phpCaChecks.set(key, configurePhpCaFile(php, caFile, { env }));
+    const ca = await phpCaChecks.get(key);
+    if (first && (ca.changed || !ca.ok)) onProgress?.(ca.message);
+  }
+  if (findCommandOnPath("composer", { env, platform })) return { command: composerBin(platform), args: [] };
   if (!php) return { error: "PHP is not installed (or not on PATH), so Composer cannot run" };
   const phar = managedComposerPhar(installRoot);
   if (fs.existsSync(phar)) {
@@ -195,50 +208,33 @@ export async function enablePhpComposerExtensions(php, { env = process.env } = {
     return { ok: true, changed: false, message: "PHP has the extensions Composer needs" };
   }
 
-  const binary = (await phpOutput(php, ["-r", "echo PHP_BINARY;"], env)) || php;
-  let phpDir;
-  try { phpDir = path.dirname(fs.realpathSync(binary)); }
-  catch { phpDir = path.dirname(binary); }
+  const { phpDir, iniPath } = await phpIniLocation(php, env);
   const extDir = path.join(phpDir, "ext");
   const available = missing.filter((name) => fs.existsSync(path.join(extDir, `php_${name}.dll`)));
   const missingRequired = COMPOSER_REQUIRED_EXTENSIONS.filter((name) => missing.includes(name) && !available.includes(name));
   if (missingRequired.length > 0) {
     return { ok: false, changed: false, message: `this PHP build has no ${missingRequired.join(", ")} extension; install the official PHP for Windows build` };
   }
-  const loaded = await phpOutput(php, ["-r", "echo php_ini_loaded_file() ?: '';"], env);
-  const iniPath = loaded || path.join(phpDir, "php.ini");
   try {
-    if (!fs.existsSync(iniPath)) {
-      const template = ["php.ini-production", "php.ini-development"]
-        .map((name) => path.join(phpDir, name))
-        .find((candidate) => fs.existsSync(candidate));
-      if (!template) return { ok: false, changed: false, message: `PHP has no php.ini or php.ini template in ${phpDir}` };
-      fs.copyFileSync(template, iniPath);
-    } else if (!fs.existsSync(`${iniPath}.posse-backup`)) {
-      fs.copyFileSync(iniPath, `${iniPath}.posse-backup`);
-    }
-    let contents = fs.readFileSync(iniPath, "utf8");
-    const newline = contents.includes("\r\n") ? "\r\n" : "\n";
-    // A configured extension_dir that already holds these extensions stays:
-    // other extensions may load from it. Otherwise point it at PHP's own ext.
-    const configuredDir = /^[ \t]*extension_dir[ \t]*=[ \t]*"?([^"\r\n;]*)"?/imu.exec(contents)?.[1]?.trim() || "";
-    const keepDir = configuredDir && available.every((name) => fs.existsSync(path.join(path.resolve(phpDir, configuredDir), `php_${name}.dll`)));
-    // Drop active copies so the block below is authoritative; the template's
-    // commented examples stay as documentation.
-    if (!keepDir) contents = contents.replace(/^[ \t]*extension_dir[ \t]*=.*(?:\r?\n)?/gimu, "");
-    contents = contents.replace(/^[ \t]*extension[ \t]*=[ \t]*(?:php_)?(?:openssl|curl|zip)(?:\.dll)?[ \t]*(?:;.*)?(?:\r?\n)?/gimu, "");
-    const block = [
-      "; Posse: secure and fast Composer package downloads.",
-      ...(keepDir ? [] : [`extension_dir = "${extDir.replaceAll("\\", "/")}"`]),
-      ...available.map((name) => `extension=${name}`),
-    ].join(newline);
-    // Settings after a [PATH=...] or [HOST=...] section apply only there, so
-    // the block goes before the first such section.
-    const section = /^[ \t]*\[(?:PATH|HOST)=/imu.exec(contents);
-    contents = section
-      ? `${contents.slice(0, section.index).replace(/[\r\n]+$/u, "")}${newline}${newline}${block}${newline}${newline}${contents.slice(section.index)}`
-      : `${contents.replace(/[\r\n]+$/u, "")}${newline}${newline}${block}${newline}`;
-    fs.writeFileSync(iniPath, contents);
+    const written = editPhpIni(iniPath, phpDir, (contents) => {
+      // A configured extension_dir that already holds these extensions stays:
+      // other extensions may load from it. Otherwise point it at PHP's own ext.
+      const configuredDir = /^[ \t]*extension_dir[ \t]*=[ \t]*"?([^"\r\n;]*)"?/imu.exec(contents)?.[1]?.trim() || "";
+      const keepDir = configuredDir && available.every((name) => fs.existsSync(path.join(path.resolve(phpDir, configuredDir), `php_${name}.dll`)));
+      // Drop active copies so the block below is authoritative; the template's
+      // commented examples stay as documentation.
+      if (!keepDir) contents = contents.replace(/^[ \t]*extension_dir[ \t]*=.*(?:\r?\n)?/gimu, "");
+      contents = contents.replace(/^[ \t]*extension[ \t]*=[ \t]*(?:php_)?(?:openssl|curl|zip)(?:\.dll)?[ \t]*(?:;.*)?(?:\r?\n)?/gimu, "");
+      return {
+        contents,
+        lines: [
+          "; Posse: secure and fast Composer package downloads.",
+          ...(keepDir ? [] : [`extension_dir = "${extDir.replaceAll("\\", "/")}"`]),
+          ...available.map((name) => `extension=${name}`),
+        ],
+      };
+    });
+    if (!written) return { ok: false, changed: false, message: `PHP has no php.ini or php.ini template in ${phpDir}` };
   } catch (err) {
     return { ok: false, changed: false, message: `could not enable PHP's Composer extensions in ${iniPath}: ${err?.message || err}` };
   }
@@ -248,6 +244,93 @@ export async function enablePhpComposerExtensions(php, { env = process.env } = {
     return { ok: false, changed: true, message: `PHP still cannot load ${stillRequired.join(", ")} after configuring ${iniPath}` };
   }
   return { ok: true, changed: true, message: `enabled PHP ${available.join(", ")} in ${iniPath}` };
+}
+
+/**
+ * Gives a Windows PHP the certificate authorities it lacks. A fresh PHP for
+ * Windows names no CA bundle: its curl verifies nothing, and Composer falls
+ * back to the roots it carries, which miss any antivirus or proxy root that
+ * only the Windows store holds. Posse's COMPOSER_CAFILE covers only Posse's
+ * own Composer; php.ini covers a Composer you installed and the HTTPS calls
+ * a project's tests make. Only settings that are unset or name a missing
+ * file change: a CA bundle you configured stays.
+ *
+ * @param {string} php
+ * @param {string} caFile
+ * @param {{ env?: NodeJS.ProcessEnv }} [options]
+ * @returns {Promise<{ ok: boolean, changed: boolean, message: string }>}
+ */
+export async function configurePhpCaFile(php, caFile, { env = process.env } = {}) {
+  const code = `foreach (${JSON.stringify(PHP_CA_SETTINGS)} as $k) { $v = (string) ini_get($k); if ($v === "" || !is_file($v) || !is_readable($v)) { echo $k, PHP_EOL; } }`;
+  const output = await phpOutput(php, ["-r", code], env);
+  if (output === null) return { ok: false, changed: false, message: `${php} did not run` };
+  const unset = output.split(/\r?\n/u).map((line) => line.trim()).filter((line) => PHP_CA_SETTINGS.includes(line));
+  if (unset.length === 0) return { ok: true, changed: false, message: "PHP has a CA bundle" };
+
+  const { phpDir, iniPath } = await phpIniLocation(php, env);
+  const value = caFile.replaceAll("\\", "/");
+  try {
+    const written = editPhpIni(iniPath, phpDir, (contents) => ({
+      contents: unset.reduce((text, name) => text.replace(
+        new RegExp(`^[ \\t]*${name.replace(".", "\\.")}[ \\t]*=.*(?:\\r?\\n)?`, "gimu"),
+        "",
+      ), contents),
+      lines: [
+        "; Posse: certificate authorities for PHP's TLS (Composer, curl).",
+        ...unset.map((name) => `${name} = "${value}"`),
+      ],
+    }));
+    if (!written) return { ok: false, changed: false, message: `PHP has no php.ini or php.ini template in ${phpDir}` };
+  } catch (err) {
+    return { ok: false, changed: false, message: `could not set PHP's CA bundle in ${iniPath}: ${err?.message || err}` };
+  }
+  return { ok: true, changed: true, message: `set PHP's ${unset.join(" and ")} to ${caFile} in ${iniPath}` };
+}
+
+/**
+ * Where PHP reads its settings: the loaded php.ini, else php.ini beside the
+ * real binary (through winget's Links alias PHP_BINARY names the link).
+ */
+async function phpIniLocation(php, env) {
+  const binary = (await phpOutput(php, ["-r", "echo PHP_BINARY;"], env)) || php;
+  let phpDir;
+  try { phpDir = path.dirname(fs.realpathSync(binary)); }
+  catch { phpDir = path.dirname(binary); }
+  const loaded = await phpOutput(php, ["-r", "echo php_ini_loaded_file() ?: '';"], env);
+  return { phpDir, iniPath: loaded || path.join(phpDir, "php.ini") };
+}
+
+/**
+ * Adds a Posse block to php.ini (backed up once), creating php.ini from PHP's
+ * bundled template when there is none. `edit` drops the active lines the
+ * block replaces and returns the block's lines.
+ *
+ * @param {string} iniPath
+ * @param {string} phpDir
+ * @param {(contents: string) => { contents: string, lines: string[] }} edit
+ * @returns {boolean} false when there is neither a php.ini nor a template
+ */
+function editPhpIni(iniPath, phpDir, edit) {
+  if (!fs.existsSync(iniPath)) {
+    const template = ["php.ini-production", "php.ini-development"]
+      .map((name) => path.join(phpDir, name))
+      .find((candidate) => fs.existsSync(candidate));
+    if (!template) return false;
+    fs.copyFileSync(template, iniPath);
+  } else if (!fs.existsSync(`${iniPath}.posse-backup`)) {
+    fs.copyFileSync(iniPath, `${iniPath}.posse-backup`);
+  }
+  const original = fs.readFileSync(iniPath, "utf8");
+  const newline = original.includes("\r\n") ? "\r\n" : "\n";
+  const { contents, lines } = edit(original);
+  const block = lines.join(newline);
+  // Settings after a [PATH=...] or [HOST=...] section apply only there, so
+  // the block goes before the first such section.
+  const section = /^[ \t]*\[(?:PATH|HOST)=/imu.exec(contents);
+  fs.writeFileSync(iniPath, section
+    ? `${contents.slice(0, section.index).replace(/[\r\n]+$/u, "")}${newline}${newline}${block}${newline}${newline}${contents.slice(section.index)}`
+    : `${contents.replace(/[\r\n]+$/u, "")}${newline}${newline}${block}${newline}`);
+  return true;
 }
 
 async function missingPhpExtensions(php, env) {
