@@ -8,6 +8,7 @@ import { automationDataDir } from "../functions/paths.js";
 import { approveEntry, assertRegisteredCapability } from "../functions/registered-trust.js";
 import { demand, digest, object, schemaCheck } from "../functions/policy.js";
 import { scrubSecretText } from "../../../shared/telemetry/functions/logging/scrub-secret-text.js";
+import { agentSessionIdleExpired } from "../../agents/functions/definition.js";
 
 const REGISTRATIONS = "registered_clients";
 const ID = /^[a-z][a-z0-9._-]{0,63}$/;
@@ -196,15 +197,21 @@ export class RegisteredAgentBridge {
     }
     for (const session of this.store.list("agent_sessions")) {
       if (session.ownership?.kind !== "registered_chat" || session.status !== "idle"
-        || Date.parse(session.updated_at) >= now - CHAT_CONTENT_MS) continue;
-      this.store.transaction(() => {
-        this.store.put("registered_session_tombstones", session.id, { client_id: session.ownership.client_id,
-          agent: session.agent, expired_at: new Date(now).toISOString() });
-        this.store.remove("agent_sessions", session.id);
-      });
+        || (Date.parse(session.updated_at) >= now - CHAT_CONTENT_MS && !agentSessionIdleExpired(session, now))) continue;
+      this.expireSession(session, now);
     }
     for (const access of this.store.list("registered_access_audit"))
       if (Date.parse(access.last_at) < now - CHAT_CONTENT_MS) this.store.remove("registered_access_audit", access.id);
+  }
+
+  // A conversation past its content retention or its definition's idle limit
+  // ends for good: later turns on it are refused as expired.
+  expireSession(session, now) {
+    this.store.transaction(() => {
+      this.store.put("registered_session_tombstones", session.id, { client_id: session.ownership.client_id,
+        agent: session.agent, expired_at: new Date(now).toISOString() });
+      this.store.remove("agent_sessions", session.id);
+    });
   }
 
   publicRegistration(value) { return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "credential_hash")); }
@@ -325,6 +332,10 @@ export class RegisteredAgentBridge {
       const selected = this.store.get("agent_sessions", selector);
       if (selected) demand(selected.ownership?.client_id === registration.identity && selected.ownership.kind === "registered_chat"
         && selected.agent === request.agent, "Conversation is outside this registration", "forbidden");
+      if (selected && agentSessionIdleExpired(selected, Date.now())) {
+        this.expireSession(selected, Date.now());
+        demand(false, `Conversation ended after ${selected.definition.limits.idle_minutes} minutes without a turn`, "agent_session_expired");
+      }
     }
     let fresh = false;
     let receipt = this.store.transaction(() => {

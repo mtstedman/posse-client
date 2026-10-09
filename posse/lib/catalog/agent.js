@@ -13,6 +13,11 @@ export const AGENT_LIMITS = Object.freeze({
   spend_usd: 100,
   wall_seconds: 3600,
 });
+// Optional limits: a definition that omits one keeps its prior digest.
+// idle_minutes ends a chat conversation after that long without a turn.
+export const AGENT_OPTIONAL_LIMITS = Object.freeze({
+  idle_minutes: 90 * 24 * 60,
+});
 
 export const AGENT_DEFINITION_FIELDS = Object.freeze([
   "schema", "name", "description", "prompt", "model", "scope", "tools",

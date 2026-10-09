@@ -5,6 +5,7 @@ import {
   AGENT_DEFINITION_FIELDS,
   AGENT_DEFINITION_SCHEMA,
   AGENT_LIMITS,
+  AGENT_OPTIONAL_LIMITS,
   AGENT_NAME_PATTERN,
   AGENT_SCOPE_KINDS,
   AGENT_WRITE_MODES,
@@ -56,10 +57,15 @@ export function validateAgentDefinition(value, { filename = "" } = {}) {
   const autonomy = exactFields(definition.autonomy ?? { write_tools: "confirm" }, ["write_tools"], ["write_tools"], "autonomy", errors);
   if (autonomy && !AGENT_WRITE_MODES.includes(autonomy.write_tools)) errors.push("autonomy.write_tools must be confirm, allow, or deny");
 
-  const limits = exactFields(definition.limits, Object.keys(AGENT_LIMITS), Object.keys(AGENT_LIMITS), "limits", errors);
+  const limits = exactFields(definition.limits, [...Object.keys(AGENT_LIMITS), ...Object.keys(AGENT_OPTIONAL_LIMITS)],
+    Object.keys(AGENT_LIMITS), "limits", errors);
   if (limits) {
     for (const key of ["turns", "calls", "wall_seconds"]) {
       if (!Number.isInteger(limits[key]) || limits[key] <= 0 || limits[key] > AGENT_LIMITS[key]) errors.push(`limits.${key} must be an integer from 1 to ${AGENT_LIMITS[key]}`);
+    }
+    for (const [key, max] of Object.entries(AGENT_OPTIONAL_LIMITS)) {
+      if (Object.hasOwn(limits, key) && (!Number.isInteger(limits[key]) || limits[key] <= 0 || limits[key] > max))
+        errors.push(`limits.${key} must be an integer from 1 to ${max}`);
     }
     if (!Number.isFinite(limits.spend_usd) || limits.spend_usd <= 0 || limits.spend_usd > AGENT_LIMITS.spend_usd) errors.push(`limits.spend_usd must be greater than 0 and at most ${AGENT_LIMITS.spend_usd}`);
   }
@@ -86,9 +92,21 @@ export function validateAgentDefinition(value, { filename = "" } = {}) {
         calls: limits.calls,
         spend_usd: limits.spend_usd,
         wall_seconds: limits.wall_seconds,
+        ...(Object.hasOwn(limits, "idle_minutes") ? { idle_minutes: limits.idle_minutes } : {}),
       },
     },
   };
+}
+
+/**
+ * True when a conversation has gone longer without a turn than its pinned
+ * definition allows. A definition without idle_minutes never idles out.
+ */
+export function agentSessionIdleExpired(session, now) {
+  const minutes = session?.definition?.limits?.idle_minutes;
+  if (!Number.isInteger(minutes) || session.status !== "idle") return false;
+  const last = Date.parse(session.updated_at || session.created_at || "");
+  return Number.isFinite(last) && now - last > minutes * 60_000;
 }
 
 function canonical(value) {

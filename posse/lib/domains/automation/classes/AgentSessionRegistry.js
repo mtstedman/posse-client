@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 
 import { AGENT_SESSION_PATTERN } from "../../../catalog/agent.js";
-import { agentDefinitionDigest, validateAgentDefinition } from "../../agents/functions/definition.js";
+import { agentDefinitionDigest, agentSessionIdleExpired, validateAgentDefinition } from "../../agents/functions/definition.js";
 import { demand, digest, matchesGrant } from "../functions/policy.js";
 import { repositoryID } from "../functions/paths.js";
 import { assertRegisteredCapability } from "../functions/registered-trust.js";
@@ -102,6 +102,8 @@ export class AgentSessionRegistry {
           };
         }
       }
+      demand(!agentSessionIdleExpired(existing, this.now()),
+        `Conversation ${id} ended after ${existing.definition?.limits?.idle_minutes} minutes without a turn; start a new one`, "agent_session_expired");
       demand(existing.status !== "pending_confirmation", `Session ${id} is waiting for confirmation`, "agent_confirmation_required");
       demand(!this.active(existing), `Session ${id} already has an active turn`, "agent_session_busy");
       session = existing;
