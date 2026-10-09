@@ -662,18 +662,25 @@ const NON_INTERACTIVE_REVIEW_ACTIONS = Object.freeze({
   scope_expansion_request: "approve",
   scope_expansion_required: "approve",
   partial_work_recovery: "commit",
-  blocked_recovery: "fail",
-  assessment: "fail",
-  needs_review: "fail",
-  assessment_parse_error: "fail",
-  assessment_evidence_missing: "fail",
-  unknown_verdict: "fail",
-  assessment_transport_error: "fail",
-  assessment_retry_limit: "fail",
-  replan_limit: "fail",
-  unexecuted_replan_limit: "fail",
   artifact_routing_admin: "acknowledge",
 });
+
+// Reviews an unattended run leaves open for an operator. Answering them "fail"
+// discarded the work item and its verdict (a fix its assessor passed was
+// failed on a pre-existing broken test suite), while a parked gate costs
+// nothing and is answered later from the app, the phone or `posse gate answer`.
+const OPERATOR_OWNED_REVIEW_TYPES = new Set([
+  "blocked_recovery",
+  "assessment",
+  "needs_review",
+  "assessment_parse_error",
+  "assessment_evidence_missing",
+  "unknown_verdict",
+  "assessment_transport_error",
+  "assessment_retry_limit",
+  "replan_limit",
+  "unexecuted_replan_limit",
+]);
 
 // A scope-only run override uses the existing gate resolver and audit trail.
 // Only known file-scope gates qualify; unrelated reviews remain interactive.
@@ -689,9 +696,10 @@ export function scopeModeHumanInputAnswerForPayload(payload = {}, scopeMode = SC
 
 /**
  * Return the bounded action a production non-interactive run may take without
- * inventing human judgment. Approval gates proceed, partial work is preserved
- * for assessment, and assessment/capability reviews fail closed. Recovery
- * contracts whose only escape is an explicit waiver remain human-owned.
+ * inventing human judgment. Approval gates proceed and partial work is
+ * preserved for assessment. Assessment, capability, recovery and limit reviews
+ * return null: they stay open for an operator instead of failing the work item
+ * or fabricating a pass.
  */
 export function nonInteractiveHumanInputAnswerForPayload(payload = {}) {
   if (payload.subtype === "push_offer" || payload.subtype === "plan_approval") return null;
@@ -703,12 +711,9 @@ export function nonInteractiveHumanInputAnswerForPayload(payload = {}) {
   const reviewType = String(payload.review_type || "").trim();
   const reviewAction = NON_INTERACTIVE_REVIEW_ACTIONS[reviewType];
   if (reviewAction) return reviewAction;
+  if (OPERATOR_OWNED_REVIEW_TYPES.has(reviewType)) return null;
 
-  if (
-    Array.isArray(payload.file_requests)
-    && payload.file_requests.length > 0
-    && reviewType !== "blocked_recovery"
-  ) return "approve";
+  if (Array.isArray(payload.file_requests) && payload.file_requests.length > 0) return "approve";
 
   // Unknown closed-choice contracts are deliberately not guessed. Generic
   // clarification prompts can safely resume the agent with an explicit

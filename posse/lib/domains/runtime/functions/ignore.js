@@ -43,6 +43,8 @@ const GENERATED_CACHE_GLOBS = [
   ".coverage",
   ".coverage.*",
   "htmlcov/",
+  ".phpunit.cache/",
+  ".phpunit.result.cache",
 ];
 
 function toPosix(value) {
