@@ -332,6 +332,16 @@ export function claimHumanGatePromptPresentation(gateJobId) {
   });
 }
 
+/** Refresh a recovery prompt after its attempted operation produced new evidence. */
+export function refreshHumanGateContract(gateJobId, payload) {
+  const contract = humanGateContractForPayload(payload);
+  const actions = [...new Set(contract.allowed_actions.map((action) => canonicalHumanGateAction(action) || action))];
+  return getDb().prepare(`
+    UPDATE human_gates SET allowed_actions_json = ?, generation = generation + 1, updated_at = ?
+    WHERE gate_job_id = ? AND gate_state IN ('open', 'resolving') AND gate_kind = ?
+  `).run(JSON.stringify(actions), now(), gateJobId, contract.gate_kind).changes === 1;
+}
+
 /**
  * Advance the question generation for a materially revised, still-open gate.
  * Answers and owner-delivery reservations carry this generation, so bumping it

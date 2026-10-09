@@ -1,3 +1,4 @@
+import { testExecutionCounts } from "../../../shared/tools/functions/toolkit/test-output-counts.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -35,7 +36,9 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
       }, { projectRoot: checkout });
       const missingRunner = [127, 9009].includes(result.status)
         && /not found|not recognized as an internal or external command/i.test(result.output);
-      const unavailable = missingRunner || ["unavailable", "infrastructure_error"].includes(classified.status);
+      const counts = testExecutionCounts(result.output);
+      const noTests = result.ok && counts && (counts.total === 0 || counts.total === counts.skipped);
+      const unavailable = noTests || missingRunner || ["unavailable", "infrastructure_error"].includes(classified.status);
       return { ok: unavailable || result.ok, status: unavailable ? "unavailable" : result.ok ? "passed" : "failed",
         test: { name: command }, ...(unavailable ? { note: result.output } : {}),
         ...(!unavailable && !result.ok ? { failure: { message: result.output } } : {}),
@@ -44,7 +47,7 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
     const passed = results.filter((result) => result.status === "passed").length;
     const failed = results.filter((result) => !result.ok).length;
     const unavailable = results.filter((result) => result.status === "unavailable").length;
-    return { ok: failed === 0, matched: results.length, passed, failed, results,
+    return { ok: failed === 0, source: "job_test_command", matched: results.length, passed, failed, results,
       summary: `declared merge candidate checks: ${passed} passed, ${failed} failed, ${unavailable} unavailable`,
     };
   } finally {

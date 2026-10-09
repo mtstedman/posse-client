@@ -84,19 +84,17 @@ export async function drainPostMergeAtlasWarmJobs({
         await worker.execute({ ...job, _leaseToken: lease.leaseToken });
       } finally {
         clearTimeout(budgetTimer);
+        const unfinished = getJob(job.id);
+        if (["leased", "running"].includes(unfinished?.status)) {
+          releaseLease(job.id, lease.leaseToken, "queued", {
+            readyAt: new Date(Date.now() + 60_000).toISOString(),
+          });
+        }
       }
       ran += 1;
       const settled = getJob(job.id);
       const elapsedSec = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
       status(`ATLAS ${purpose} job #${job.id} ${settled?.status || "finished"} (${elapsedSec}s).`);
-      if (settled?.status === "leased" || settled?.status === "running") {
-        // A pre-attempt infrastructure failure is intentionally soft inside
-        // the warm executor. Do not strand this standalone closeout lease.
-        releaseLease(job.id, lease.leaseToken, "queued", {
-          readyAt: new Date(Date.now() + 60_000).toISOString(),
-        });
-        break;
-      }
       if (settled?.status === "queued") break;
     }
   } finally {

@@ -401,7 +401,7 @@ function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
     };
   }
   const invocation = packageManager
-    ? packageManagerRun(packageManager, "lint", ["--format", "json", ...targets])
+    ? packageManagerRun(packageManager, "lint", ["--format", "json", ...targets.map((file) => path.resolve(cwd, file))])
     : null;
   const result = eslint
     ? runProcess(process.execPath, [eslint, "--format", "json", ...targets], cwd)
@@ -418,6 +418,11 @@ function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
       durationMs: result.durationMs,
       failures: [],
     };
+  }
+  if (result.exitCode !== 0 && /No files matching the pattern|couldn.t find an eslint\.config|Invalid option|Invalid CLI option/i.test(`${result.stdout}\n${result.stderr}`)) {
+    return { name: "eslint", status: "unavailable", targets, command: result.command,
+      reason: `lint_invocation_invalid: ${compact(result.stderr || result.stdout)}`,
+      durationMs: result.durationMs, failures: [] };
   }
   const findings = parseEslintFindings(result.stdout, result.stderr, cwd)
     .filter((finding) => finding.severity === "error");

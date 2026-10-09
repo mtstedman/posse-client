@@ -19,10 +19,10 @@ import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 
 /**
  * @param {number} workItemId
- * @param {{ projectDir: string, actor?: string, workflow?: any }} options
+ * @param {{ projectDir: string, actor?: string, workflow?: any, testWaiver?: any }} options
  * @returns {Promise<{ ok: boolean, merge_hash?: string | null, already_merged?: boolean, reason?: string, message?: string }>}
  */
-export async function mergeWorkItemNow(workItemId, { projectDir, actor = "operator", workflow = null } = /** @type {any} */ ({})) {
+export async function mergeWorkItemNow(workItemId, { projectDir, actor = "operator", workflow = null, testWaiver = null } = /** @type {any} */ ({})) {
   const targetBranch = resolveTargetBranchForAdmin(projectDir);
   const helpers = workflow || createGitWorkflowHelpers({ projectDir, targetBranch, nonInteractive: true });
   const outcome = await withMergeLock(async () => {
@@ -37,9 +37,10 @@ export async function mergeWorkItemNow(workItemId, { projectDir, actor = "operat
       wiId: workItemId,
       retryDeterministicConflict: true,
       mergeLockAlreadyHeld: true,
+      testWaiver,
     });
     if (result?.ok) setMergeState(workItemId, "merged");
-    else if (!result?.deferred) markWorkItemMergeFailed(workItemId, { message: result?.message || null, targetBranch });
+    else if (!result?.deferred) markWorkItemMergeFailed(workItemId, { message: result?.message || null, targetBranch, integrationGate: result?.integrationGate || null });
     return { ...result, branchName: workItem.branch_name };
   });
   if (!outcome.acquired) {

@@ -40,5 +40,6 @@ export function testExecutionCounts(output = "") {
   if (/^\s*(?:No tests (?:executed|found|collected)[.!]?|No tests found, exiting with code 0|no tests ran in .+|\?\s+\S+\s+\[no test files\])\s*$/mi.test(text)) {
     return { total: 0, skipped: 0 };
   }
+  if (/^\s*(?:SKIP(?:PED)?\b|1\.\.0\s+#\s*SKIP)/mi.test(text)) return { total: 0, skipped: 0 };
   return null;
 }

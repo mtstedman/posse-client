@@ -1,3 +1,4 @@
+import { mergeTestWaiverFromGate } from "../../../git/functions/merge-test-waiver.js";
 // Answers to the merge verification review gate (see
 // queue/functions/merge-verification-review.js), from any surface: the
 // bridge's review.approve/review.reject and ask, `posse gate answer`, and the
@@ -133,16 +134,16 @@ export function mergeVerificationRejectionGuidance(gateJob, payload = {}, feedba
   ].filter(Boolean).join("\n");
 }
 
-async function mergeRecoveredWorkItem(workItemId, { actor, projectDir }) {
+async function mergeRecoveredWorkItem(workItemId, { actor, projectDir, testWaiver = null }) {
   // Standalone gate answers do not run scheduler boot. Warm the synchronous
   // preflight's native Git grant before checking the live worktree.
   await prewarmNativeGitAuth();
   const preflight = preflightReviewApproval(workItemId, { projectDir });
   if (!preflight.ok) return { ok: false, reason: preflight.reason, message: preflight.message || preflight.reason };
-  return mergeWorkItemNow(workItemId, { projectDir, actor });
+  return mergeWorkItemNow(workItemId, { projectDir, actor, testWaiver });
 }
 
-async function mergeAfterRecovery({ workItemId, actorLabel, projectDir, mergeWorkItem }) {
+async function mergeAfterRecovery({ workItemId, actorLabel, projectDir, mergeWorkItem, testWaiver = null }) {
   const workItem = getWorkItem(workItemId);
   if (workItem?.merge_state === "merged") {
     return { ok: true, merged: true, message: `WI#${workItemId} is already merged` };
@@ -155,7 +156,7 @@ async function mergeAfterRecovery({ workItemId, actorLabel, projectDir, mergeWor
   }
   let result;
   try {
-    result = await mergeWorkItem(workItemId, { actor: String(actorLabel || "operator").toLowerCase(), projectDir });
+    result = await mergeWorkItem(workItemId, { actor: String(actorLabel || "operator").toLowerCase(), projectDir, testWaiver });
   } catch (error) {
     result = { ok: false, message: error?.message || String(error) };
   }
@@ -190,6 +191,11 @@ export async function applyMergeVerificationReviewAnswer({
 } = {}) {
   const workItemId = Number(job.work_item_id);
   const effectiveAction = effectiveMergeGateAction(payload, action);
+  if (effectiveAction === "waive_tests") {
+    const testWaiver = mergeTestWaiverFromGate(job, payload, mergeVerificationFeedback(answer, metadata));
+    if (!testWaiver) return { ok: false, keepGateOpen: true, message: "No failed candidate checks are recorded; retry merge to obtain current diagnostics." };
+    return mergeAfterRecovery({ workItemId, actorLabel, projectDir, mergeWorkItem, testWaiver });
+  }
   if (effectiveAction === "merge") {
     return mergeAfterRecovery({ workItemId, actorLabel, projectDir, mergeWorkItem });
   }

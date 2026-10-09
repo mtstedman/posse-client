@@ -170,6 +170,7 @@ export class FinalReviewRuntime {
     let change = null;
     let reviewerCallId = null;
     let reviewIdentity = null;
+    let reviewInput = null;
     let mode = "fresh";
     try {
       const job = getJob(parent.jobId);
@@ -198,9 +199,18 @@ export class FinalReviewRuntime {
         : null;
       checks = this.runChecks(parent.cwd, change);
       try { reviewIdentity = await this.identify(parent.cwd, payload, { jobId: job.id }); } catch { /* unavailable identities cannot authorize assessment */ }
+      reviewInput = reviewIdentity ? JSON.stringify({
+        identity: reviewIdentity, change: change?.digest,
+        files: [...this.snapshotFiles(parent.cwd, payload, change)],
+        declared: testRunDiagnostics(testRun), changed: testRunDiagnostics(changedTestRun), checks,
+      }, (key, value) => ["duration_ms", "durationMs", "created_at", "started_at", "finished_at"].includes(key) ? undefined : value) : null;
       const session = parent.reviewer;
       let outcome;
-      if (session && !session.ended && session.parked) {
+      if (reviewInput && parent.lastReview?.input === reviewInput
+        && parent.lastReview.response.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS) {
+        mode = "unchanged";
+        outcome = Promise.resolve({ result: parent.lastReview.verdict, reviewerCallId: parent.lastReview.reviewerCallId });
+      } else if (session && !session.ended && session.parked) {
         // The reviewer is waiting in its own final_review call: hand it only
         // what changed since its report.
         mode = "revision";
@@ -226,7 +236,7 @@ export class FinalReviewRuntime {
         outcome = this.#awaitReport(fresh);
       }
       ({ result, reviewerCallId } = await outcome);
-      result = mergeCheckFindings(result, finalReviewCheckFindings({ checks, changedTestRun }));
+      if (mode !== "unchanged") result = mergeCheckFindings(result, finalReviewCheckFindings({ checks, changedTestRun }));
       if (!reviewIdentity) {
         result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Cannot bind final review to the scoped workspace; verification is blocked." };
       } else if (reviewIdentity !== await this.identify(parent.cwd, payload, { jobId: job.id })) {
@@ -246,6 +256,7 @@ export class FinalReviewRuntime {
     if (reviewsRemaining === 0) this.#release(parent);
     const response = {
       ...result,
+      ...(mode === "unchanged" ? { reused: true, reason: "The scoped change and verification evidence are unchanged. Address the recorded findings before requesting another review." } : {}),
       declared_tests: testRunDiagnostics(testRun),
       changed_tests: testRunDiagnostics(changedTestRun),
       changed_file_checks: checks ? { status: checks.status, summary: checks.summary || null } : null,
@@ -280,6 +291,7 @@ export class FinalReviewRuntime {
         duration_ms: Date.now() - startedAt,
       },
     });
+    parent.lastReview = { input: reviewInput, response, verdict: result, reviewerCallId };
     return response;
   }
 

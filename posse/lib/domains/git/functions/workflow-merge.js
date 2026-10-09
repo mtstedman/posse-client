@@ -1,3 +1,4 @@
+import { mergeTestWaiverCovers } from "./merge-test-waiver.js";
 // lib/domains/git/functions/workflow-merge.js
 // Merge workflow helpers for WI branches and target branch advancement.
 
@@ -893,6 +894,7 @@ export function createMergeWorkflowHelpers(context, {
     retryDeterministicConflict = false,
     suppressPostMergeEffects = false,
     sharedTrunkOperationId = null,
+    testWaiver = null,
   } = {}) {
     const targetBranch = currentTargetBranch();
     const log = (msg, extra = {}) => {
@@ -1285,6 +1287,8 @@ export function createMergeWorkflowHelpers(context, {
         const branchHead = mergeHeads(branch, targetBranch, cwd).branchHead;
         let focusedChecks = [];
         try { focusedChecks = postChangeReceiptsAtCommit(wiId, branchHead); } catch { focusedChecks = []; }
+        candidateTests = { ...candidateTests, candidate_tree: gitMergeExec(["write-tree"], cwd), target_head: preMergeHead };
+        const waived = mergeTestWaiverCovers(testWaiver, candidateTests);
         const focusedSummary = focusedChecks.length === 0
           ? "no focused check ran on the branch head"
           : `focused checks on the branch head: ${focusedChecks.slice(0, 4).map((check) => `${check.command || "check"} ${check.status}`).join("; ")}`;
@@ -1300,6 +1304,8 @@ export function createMergeWorkflowHelpers(context, {
             target_head: preMergeHead,
             staged_files: stagedFiles.slice(0, 100),
             focused_checks: focusedChecks.slice(0, 10),
+            candidate_tree: candidateTests.candidate_tree,
+            operator_waiver: waived ? testWaiver : null,
             matched: candidateTests.matched,
             passed: candidateTests.passed,
             failed: candidateTests.failed,
@@ -1314,7 +1320,7 @@ export function createMergeWorkflowHelpers(context, {
             })),
           }),
         });
-        if (!candidateTests.ok) {
+        if (!candidateTests.ok && !waived) {
           const firstFailure = candidateTests.results.find((result) => !result.ok);
           const gateError = new Error(
             `Projected merge candidate failed test ${firstFailure?.test?.name || firstFailure?.test?.id || "unknown"}: ${firstFailure?.failure?.message || candidateTests.summary}`,
@@ -1627,6 +1633,7 @@ export function createMergeWorkflowHelpers(context, {
     purpose = "final",
     purposeKey = null,
     mergeLockAlreadyHeld = false,
+    testWaiver = null,
   } = {}) {
     const runLocal = ({ suppressPostMergeEffects = false, worktreeLockAlreadyHeld = false, operationId = null } = {}) => runGitWorkflowTaskOffMainThread(
       "gitMergeToTarget",
@@ -1638,6 +1645,7 @@ export function createMergeWorkflowHelpers(context, {
         suppressPostMergeEffects,
         worktreeLockAlreadyHeld,
         sharedTrunkOperationId: operationId,
+        testWaiver,
       },
       { onPhase, signal, timeoutMs },
     );

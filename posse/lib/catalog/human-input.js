@@ -165,7 +165,7 @@ export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   shared_trunk_provenance: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance),
   [POST_MERGE_DB_TASK_REVIEW_TYPE]: freezeChoices(["run", "skip"]),
   [MERGE_VERIFICATION_REVIEW_TYPE]: freezeChoices(["pass", "fail"]),
-  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: freezeChoices(["merge", "send_back"]),
+  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: freezeChoices(["merge", "waive_tests", "send_back"]),
   [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: freezeChoices(["retry", "accept", "abandon"]),
   [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: freezeChoices(["wait", "rebuild", "abandon"]),
 });
@@ -308,7 +308,7 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
   },
   [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: {
     gate_kind: MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
-    allowed_actions: ["merge", "send_back"],
+    allowed_actions: ["merge", "waive_tests", "send_back"],
     allowed_source_states: ["succeeded"],
   },
   [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: {
@@ -479,6 +479,7 @@ function actionTransition(action) {
     wait: "keep_merge_deferred_until_upstream_merges",
     rebuild: "requeue_on_target_branch_without_inherited_edits",
     merge: "merge_work_item_into_target",
+    waive_tests: "record_candidate_test_waiver_and_merge",
     send_back: "requeue_work_item_for_rework",
   };
   if (String(action || "").startsWith("retry:")) return "queue_provider_specific_recovery";
@@ -620,6 +621,11 @@ export function humanInputChoicesForReviewType(reviewType) {
 // unavailable; gates persisted before their choices said so too (wowiekowie
 // 2026-10-01, gate #2252) still offered it, so the record narrows it as well.
 function narrowedReviewChoices(payload, reviewChoices) {
+  if (payload?.review_type === MERGE_FAILURE_RECOVERY_REVIEW_TYPE
+    && (!payload?.merge_failure_recovery?.integration_gate?.candidate_tree
+      || !payload?.merge_failure_recovery?.integration_gate?.target_head)) {
+    return reviewChoices.filter((choice) => choice !== "waive_tests");
+  }
   const reviewType = String(payload?.review_type || "").trim();
   if (!WORK_ITEM_DISPOSITION_REVIEW_TYPES.includes(reviewType)) return reviewChoices;
   const offered = normalizeHumanInputChoices(payload?.choices);

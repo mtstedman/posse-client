@@ -390,10 +390,12 @@ function scopedCheckFailureSummary(scopedVerification = null) {
     failure?.file || null,
     failure?.line ? `line ${failure.line}` : null,
     failure?.rule || null,
+    failure?.command || null,
     failure?.message || null,
   ].filter(Boolean).join(" — "));
+  const commands = (scopedVerification?.checks || []).filter((check) => check.status === "failed").map((check) => check.command).filter(Boolean);
   return rendered.length > 0
-    ? rendered.join("\n")
+    ? [...new Set(commands), ...rendered].join("\n").slice(0, 12000)
     : String(scopedVerification?.summary || "deterministic changed-file checks failed");
 }
 
@@ -451,7 +453,7 @@ export function capVerdictForHighRiskVerificationGap(
       },
       _verification_failure_class: "product_regression",
       reasons: [
-        "Deterministic changed-file checks failed for the assessed commit.",
+        `Deterministic changed-file checks failed for the assessed commit:\n${scopedCheckFailureSummary(scopedVerification)}`,
         ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
       ],
     };

@@ -1,3 +1,4 @@
+import { missingNodeTestDependency } from "../../../../shared/tools/functions/toolkit/node-test-failure.js";
 // Deterministic test execution owned by the worker, outside model context.
 //
 // A planner or benchmark harness identifies one explicit test command. The
@@ -491,7 +492,9 @@ export function classifyNestedRunnerInfrastructureFailure(command, result, { pro
       (composerDependencyInstallMissing(projectRoot) && (composerSymbolMissing || composerAutoloadMissing))
       || (composerSymbolMissing && composerLockedDependencyClassFileMissing(projectRoot, output))
     );
-  if (!nestedExecutableMissing && !composerRunnerMissing && !composerClassMissing) return result;
+  const nodeDependencyMissing = (["node", "node.exe", "npx", "npx.cmd"].includes(executable) || packageManager)
+    && missingNodeTestDependency(output);
+  if (!nestedExecutableMissing && !composerRunnerMissing && !composerClassMissing && !nodeDependencyMissing) return result;
   return {
     ...result,
     status: "infrastructure_error",

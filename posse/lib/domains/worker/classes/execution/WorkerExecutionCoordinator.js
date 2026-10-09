@@ -236,6 +236,26 @@ export class WorkerExecutionCoordinator {
       if (assessOnly.currentAttemptId) currentAttemptId = assessOnly.currentAttemptId;
       if (assessOnly.handled) return;
 
+      // Brief DEV/FIX on the type errors already present in the files it may
+      // edit. The job holds its write locks and its worktree is ready here.
+      await runPreDevTypecheck({
+        worker,
+        job,
+        payload: worker.parsePayload(job),
+        wtPath,
+        signal: executeAbortController?.signal || null,
+        cleanupWorktree: wtPath
+          ? async () => snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
+              reason: `pre-dev-typecheck-side-effects-wi-${job.work_item_id}-job-${job.id}`,
+              branchName: branchName || null,
+              wiId: job.work_item_id,
+              signal: executeAbortController?.signal || null,
+              onMsg: (message) => worker.emit(job.id, `${C.dim}[typecheck] ${message}${C.reset}`),
+            })
+          : null,
+        siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
+      });
+
       // Freeze and execute the explicit test plan before DEV sees the task.
       // The receipt is persisted outside the handoff context packet, so baseline output
       // cannot become implementation feedback or leak between benchmark arms.
@@ -326,26 +346,6 @@ export class WorkerExecutionCoordinator {
           );
         }
       }
-
-      // Brief DEV/FIX on the type errors already present in the files it may
-      // edit. The job holds its write locks and its worktree is ready here.
-      await runPreDevTypecheck({
-        worker,
-        job,
-        payload: worker.parsePayload(job),
-        wtPath,
-        signal: executeAbortController?.signal || null,
-        cleanupWorktree: wtPath
-          ? async () => snapshotAndResetDirtyWorktreeAsync(wtPath, worker.projectDir, {
-              reason: `pre-dev-typecheck-side-effects-wi-${job.work_item_id}-job-${job.id}`,
-              branchName: branchName || null,
-              wiId: job.work_item_id,
-              signal: executeAbortController?.signal || null,
-              onMsg: (message) => worker.emit(job.id, `${C.dim}[typecheck] ${message}${C.reset}`),
-            })
-          : null,
-        siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
-      });
 
       // -- Create attempt record --
       const attemptContext = await this.attemptLifecycle.prepare({

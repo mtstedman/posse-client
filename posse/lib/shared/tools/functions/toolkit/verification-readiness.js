@@ -250,7 +250,7 @@ export function groupVerificationFiles(projectRoot, files = []) {
 
 export function packageManagerRun(manager, script, extraArgs = []) {
   const command = manager;
-  if (manager === "yarn") {
+  if (manager === "yarn" || manager === "pnpm") {
     return { command, args: ["run", script, ...extraArgs] };
   }
   if (manager === "bun") {

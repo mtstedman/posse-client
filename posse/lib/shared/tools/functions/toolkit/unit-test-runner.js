@@ -1,3 +1,4 @@
+import { missingNodeTestDependency } from "./node-test-failure.js";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { spawn } from "child_process";
@@ -78,6 +79,7 @@ function nodeRunner(root, relative) {
 
 function nodeBootstrapFailure(invocation, output) {
   if (invocation.runner !== "node_test") return null;
+  if (missingNodeTestDependency(output)) return "test_dependency_unavailable";
   if (/ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX|ERR_UNKNOWN_FILE_EXTENSION/u.test(output)) return "typescript_test_loader_unavailable";
   if (/ERR_MODULE_NOT_FOUND/u.test(output)) {
     const url = /url: ['"](file:[^'"]+)['"]/u.exec(output)?.[1];

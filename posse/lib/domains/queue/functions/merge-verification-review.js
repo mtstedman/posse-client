@@ -375,13 +375,22 @@ export function mergeVerificationReviewGateJobSpec(workItem, requirement, { pass
 export function mergeFailureRecoveryGateJobSpec(workItem, {
   message = null,
   targetBranch = null,
+  integrationGate = null,
 } = {}) {
   const label = `WI#${workItem.id}${workItem.title ? ` "${String(workItem.title).slice(0, 80)}"` : ""}`;
   const detail = String(message || "Git could not merge the work-item branch").trim().slice(0, 1000);
+  const canWaive = !!integrationGate?.candidate_tree && !!integrationGate?.target_head;
+  const failedChecks = (integrationGate?.results || []).filter((result) => !result.ok)
+    .map((result) => `${result.test?.name || result.test?.id}: ${result.failure?.message || result.note || result.status}`);
   const question = [
     `Merge of ${label}${targetBranch ? ` into ${targetBranch}` : ""} failed: ${detail}.`,
     "merge: merge it now (resolve the repository condition first). send_back: return the work item for rework on its branch.",
-  ].join(" ");
+    canWaive ? "waive_tests: accept the recorded failing checks and squash-merge this candidate; failures remain recorded. Leave this gate unanswered to keep the branch and defer." : "Leave this gate unanswered to keep the branch and defer.",
+    integrationGate ? (integrationGate.source === "job_test_command"
+      ? "These checks were declared by development or repair jobs."
+      : "These checks came from the repository test registry.") : null,
+    ...failedChecks,
+  ].filter(Boolean).join(" ");
   return {
     work_item_id: workItem.id,
     job_type: "human_input",
@@ -390,7 +399,7 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
     max_attempts: 1,
     payload_json: JSON.stringify({
       review_type: MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
-      choices: humanInputChoicesForReviewType(MERGE_FAILURE_RECOVERY_REVIEW_TYPE),
+      choices: humanInputChoicesForReviewType(MERGE_FAILURE_RECOVERY_REVIEW_TYPE).filter((choice) => choice !== "waive_tests" || canWaive),
       questions: [question],
       prompt: question,
       context: detail,
@@ -400,6 +409,7 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
         failed_at: new Date().toISOString(),
         target_branch: targetBranch || null,
         message: detail,
+        integration_gate: integrationGate,
       },
     }),
   };

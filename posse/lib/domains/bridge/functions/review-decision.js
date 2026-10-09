@@ -455,7 +455,7 @@ export async function finalizeApprovedReview(workItemId, {
         { wiId: wi.id, retryDeterministicConflict: true, mergeLockAlreadyHeld: true },
       );
       if (!result?.ok) {
-        if (!result?.deferred) markWorkItemMergeFailed(wi.id);
+        if (!result?.deferred) markWorkItemMergeFailed(wi.id, { message: result?.message || null, integrationGate: result?.integrationGate || null });
         return { ...result, branchName: lockedWi.branch_name };
       }
       return {

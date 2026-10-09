@@ -282,6 +282,7 @@ export function createAutoMergeWorkflowHelpers(context, {
           markWorkItemMergeFailed(wi.id, {
             message: mergeResultText(result, "merge failed"),
             targetBranch,
+            integrationGate: result?.integrationGate || null,
           });
           logEvent({
             work_item_id: wi.id,

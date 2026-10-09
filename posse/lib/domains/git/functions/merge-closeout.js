@@ -9,6 +9,7 @@
 // has merged, and resolves only conflicts whose shape proves ordering was the
 // cause. Anything else is a real overlapping edit and stays parked.
 
+import { installedNodeRoots } from "../../verification/functions/prerequisite-adapters.js";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -165,10 +166,13 @@ export function runCloseoutTestCommandSync(command, {
   const secrets = parentSecretValues();
   try {
     if (dependencySourceDir) {
-      for (const dir of CLOSEOUT_DEPENDENCY_DIRS) {
+      const dependencyDirs = new Set([...CLOSEOUT_DEPENDENCY_DIRS,
+        ...installedNodeRoots(dependencySourceDir).map((root) => path.join(root, "node_modules")),
+      ]);
+      for (const dir of dependencyDirs) {
         const source = path.join(dependencySourceDir, dir);
         const destination = path.join(cwd, dir);
-        if (!fs.existsSync(source) || fs.existsSync(destination)) continue;
+        if (!fs.existsSync(source) || fs.existsSync(destination) || !fs.existsSync(path.dirname(destination))) continue;
         fs.symlinkSync(source, destination, process.platform === "win32" ? "junction" : "dir");
         linked.push(destination);
       }

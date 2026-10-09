@@ -1,3 +1,4 @@
+import { refreshHumanGateContract } from "./human-gates.js";
 import { registerAttemptStartHook } from "./attempts.js";
 // lib/queue.js — SQLite DB layer for the orchestrator job queue
 //
@@ -1467,7 +1468,7 @@ export function releaseWorkItemAutoMergeAuthorization(id, previousMergeState = n
   return result.changes === 1;
 }
 
-export function markWorkItemMergeFailed(id, { message = null, targetBranch = null } = {}) {
+export function markWorkItemMergeFailed(id, { message = null, targetBranch = null, integrationGate = null } = {}) {
   const db = getDb();
   const execute = () => {
     const result = db.prepare(`
@@ -1479,8 +1480,15 @@ export function markWorkItemMergeFailed(id, { message = null, targetBranch = nul
     releaseWorkItemLocksForMergeState(id, "merge_failed");
     const workItem = getWorkItem(id);
     if (!workItem) return true;
-    if (activeMergeFailureRecoveryGateId(id, db)) return true;
-    const gate = createJob(mergeFailureRecoveryGateJobSpec(workItem, { message, targetBranch }));
+    const spec = mergeFailureRecoveryGateJobSpec(workItem, { message, targetBranch, integrationGate });
+    const existingGateId = activeMergeFailureRecoveryGateId(id, db);
+    if (existingGateId) {
+      // Refresh diagnostics and candidate identity after every failed retry.
+      updateJobPayload(existingGateId, spec.payload_json);
+      refreshHumanGateContract(existingGateId, JSON.parse(spec.payload_json));
+      return true;
+    }
+    const gate = createJob(spec);
     if (gate?.status === "queued") {
       forceUpdateJobStatus(gate.id, "waiting_on_human", { expectedStatuses: ["queued"] });
     }

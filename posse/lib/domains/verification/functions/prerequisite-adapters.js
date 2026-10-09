@@ -193,7 +193,7 @@ const LINK_SCAN_SKIP = new Set(["node_modules", ".git", ".posse", ".posse-worktr
 // Package roots in the primary checkout that already carry installed
 // dependencies: the repository root plus workspace packages up to three
 // levels deep, which covers pnpm/yarn/npm workspaces without parsing globs.
-function installedNodeRoots(primary, { maxDepth = 3, maxRoots = 32 } = {}) {
+export function installedNodeRoots(primary, { maxDepth = 3, maxRoots = 32 } = {}) {
   const out = [];
   const stack = [{ dir: primary, depth: 0 }];
   while (stack.length > 0 && out.length < maxRoots) {

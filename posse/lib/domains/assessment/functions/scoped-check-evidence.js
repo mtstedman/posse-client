@@ -1,3 +1,5 @@
+import { lineageChangedTestPaths } from "../../worker/functions/helpers/test-execution-receipt.js";
+import { parseJobPayload } from "../../queue/functions/payload.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -409,8 +411,9 @@ export async function ensureAssessmentScopedCheckEvidence({
   const branchFiles = Array.isArray(assessmentContext.branch_net_diff_files)
     ? assessmentContext.branch_net_diff_files
     : [];
+  const lineage = await lineageChangedTestPaths({ job, payload: parseJobPayload(job), cwd, head: expectedCommit, fallbackBase: assessmentContext.commit_base_hash });
   const allFiles = declaredScopeFiles(cwd, {
-    files: committedFiles.length > 0 ? committedFiles : branchFiles,
+    files: [...new Set([...committedFiles, ...(lineage.base ? lineage.scopePaths : branchFiles)])],
   }).sort();
   if (allFiles.length === 0) return null;
   const files = allFiles.slice(0, MAX_CHANGED_FILES);

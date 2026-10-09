@@ -49,6 +49,7 @@ async function main() {
     return helpers.gitMergeToTarget(args.branch, args.cwd || projectDir, {
       wiId: args.wiId ?? null,
       retryDeterministicConflict: args.retryDeterministicConflict === true,
+      testWaiver: args.testWaiver || null,
       suppressPostMergeEffects: args.suppressPostMergeEffects === true,
       worktreeLockAlreadyHeld: args.worktreeLockAlreadyHeld === true,
       sharedTrunkOperationId: args.sharedTrunkOperationId || null,
