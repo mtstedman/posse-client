@@ -92,6 +92,7 @@ import {
   testRunScopeAttribution,
   ensurePostChangeTestReceipt,
   renderTestExecutionEvidence,
+  postChangeTestLogSummary,
   testReceiptObservationDetail,
 } from "./test-execution-receipt.js";
 import {
@@ -2841,9 +2842,10 @@ export async function runPostExecutionAssessment(worker, {
     if (deterministicTestRun?.post_change) {
       const postReceipt = deterministicTestRun.post_change;
       const source = postReceipt.source || "planner";
+      const logSummary = postChangeTestLogSummary(postReceipt);
       worker.emit(
         job.id,
-        `${postReceipt.status === "passed" ? C.green : postReceipt.status === "failed" ? C.red : C.yellow}[assessor-test] ${postReceipt.reused ? "Reused" : "Ran"} frozen command: ${postReceipt.status}${C.reset}`,
+        `${logSummary.tone === "passed" ? C.green : logSummary.tone === "failed" ? C.red : C.yellow}[assessor-test] ${postReceipt.reused ? "Reused" : "Ran"} frozen command: ${logSummary.text}${C.reset}`,
       );
       recordObservation({
         work_item_id: job.work_item_id,

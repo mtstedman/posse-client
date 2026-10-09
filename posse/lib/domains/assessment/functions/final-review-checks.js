@@ -10,7 +10,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { runScopedChecks } from "../../../shared/tools/functions/toolkit/scoped-runners.js";
-import { resolveFrozenTestPlan } from "../../worker/functions/helpers/test-execution-receipt.js";
+import {
+  lineageChangedTestPaths,
+  resolveFrozenTestPlan,
+} from "../../worker/functions/helpers/test-execution-receipt.js";
 import {
   FINAL_REVIEW_CHECKS,
   FINAL_REVIEW_CHECK_MAX_FILES,
@@ -32,15 +35,38 @@ function existingChangedFiles(cwd, change) {
 /**
  * Unit test plan for test files the change adds or edits that the declared
  * plan does not already run, or null when there are none. Only files the
- * repository's unit-test runner recognizes resolve.
+ * repository's unit-test runner recognizes resolve. `lineagePaths` are the
+ * test files changed since the lineage base (lineageTestFiles): a fix runs
+ * the tests its root committed, as its post-change receipt does, even when
+ * the fix leaves them untouched.
  */
-export function changedTestPlan(job, payload, change, declaredPlan, { cwd, resolvePlan = resolveFrozenTestPlan } = {}) {
+export function changedTestPlan(job, payload, change, declaredPlan, {
+  cwd,
+  resolvePlan = resolveFrozenTestPlan,
+  lineagePaths = [],
+} = {}) {
   if (!cwd) return null;
   const declared = new Set(Array.isArray(declaredPlan?.unit_test_paths) ? declaredPlan.unit_test_paths : []);
-  const candidates = existingChangedFiles(cwd, change).filter((file) => !declared.has(file));
+  const lineage = (Array.isArray(lineagePaths) ? lineagePaths : [])
+    .filter((file) => file && fs.existsSync(path.join(cwd, file)));
+  const candidates = [...new Set([...existingChangedFiles(cwd, change), ...lineage])]
+    .filter((file) => !declared.has(file));
   if (candidates.length === 0) return null;
   const plan = resolvePlan(job, { task_mode: payload?.task_mode || "code", tests_to_run: candidates }, { cwd });
   return Array.isArray(plan?.unit_test_paths) && plan.unit_test_paths.length > 0 ? plan : null;
+}
+
+/**
+ * Test files changed since the job's lineage base, diffed against the working
+ * tree, committed or not: the files the post-change receipt will run. Empty
+ * when the lineage cannot be read; the review never waits on it.
+ */
+export async function lineageTestFiles(job, payload, cwd) {
+  try {
+    return (await lineageChangedTestPaths({ job, payload, cwd })).paths;
+  } catch {
+    return [];
+  }
 }
 
 function locatedFile(line) {

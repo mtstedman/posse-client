@@ -42,6 +42,7 @@ import {
   testRunScopeAttribution,
   ensurePostChangeTestReceipt,
   renderTestExecutionEvidence,
+  postChangeTestLogSummary,
   testReceiptObservationDetail,
 } from "../../functions/helpers/test-execution-receipt.js";
 import {
@@ -411,9 +412,10 @@ export class AssessmentHandoffAdapter {
       });
       const postReceipt = deterministicTestRun?.post_change || null;
       if (postReceipt) {
+        const logSummary = postChangeTestLogSummary(postReceipt);
         worker.emit(
           job.id,
-          `${postReceipt.status === "passed" ? C.green : postReceipt.status === "failed" ? C.red : C.yellow}[assessor-test] ${postReceipt.reused ? "Reused" : "Ran"} frozen command: ${postReceipt.status}${C.reset}`,
+          `${logSummary.tone === "passed" ? C.green : logSummary.tone === "failed" ? C.red : C.yellow}[assessor-test] ${postReceipt.reused ? "Reused" : "Ran"} frozen command: ${logSummary.text}${C.reset}`,
         );
         recordObservation({
           work_item_id: job.work_item_id,

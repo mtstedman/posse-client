@@ -176,6 +176,49 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
   };
 }
 
+// The post-change receipt runs the test files the change created or edited
+// beside the declared plan, outside its baseline comparison. One that fails on
+// the assessed commit is deterministic evidence that the change is not done,
+// whatever the declared plan reported, unless it failed the same way before
+// the change (its baseline_attribution); only the files whose failure the
+// change introduced count.
+export function capVerdictForChangedTestFailure(verdict, testRun = null) {
+  const postChange = testRun?.postChange || testRun?.post_change || null;
+  const changed = postChange?.changed_tests || null;
+  const attribution = changed?.baseline_attribution || null;
+  if (["fail", "needs_replan"].includes(verdict?.verdict)
+    || !["failed", "timed_out"].includes(changed?.status)
+    || attribution?.debt_only === true) return verdict;
+  const paths = Array.isArray(attribution?.introduced_paths)
+    ? attribution.introduced_paths
+    : Array.isArray(changed.paths) ? changed.paths : [];
+  const outputTail = [changed.stdout, changed.stderr]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join("\n")
+    .slice(-1600);
+  const failureSummary = renderTestFailureSummary(changed);
+  return {
+    ...verdict,
+    verdict: "fail",
+    human_questions: [],
+    _disable_internal_retry: true,
+    verification_status: "frozen_test_failed",
+    _deterministic_failure_identity: changed.failure_fingerprint || failureSummary || null,
+    _deterministic_evidence: {
+      kind: "changed_test_failure",
+      status: changed.status,
+      paths,
+      failure_summary: failureSummary || null,
+      output_tail: outputTail || null,
+    },
+    reasons: [
+      `The test files this change created or edited (${paths.join(", ")}) ${changed.status === "timed_out" ? "timed out" : "failed"} on the assessed commit; the change must be repaired before it can pass.`,
+      ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+    ],
+  };
+}
+
 // A declared test that fails after the change against a baseline that ran
 // nothing comparable cannot discriminate the change. That is a verification
 // plan problem at every risk level, not a pass.
@@ -883,6 +926,7 @@ export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: cu
   const scopedVerification = latestScopedCheckVerification(job.id, assessedCommitHash);
   const canonicalVerification = latestCanonicalVerification(job.id, assessedCommitHash);
   prepared = capVerdictForDeterministicTestRegression(prepared, assessedReceipt);
+  prepared = capVerdictForChangedTestFailure(prepared, assessedReceipt);
   prepared = capVerdictForNonDiscriminatingTestFailure(prepared, assessedReceipt);
   const canonicalOutcome = canonicalVerification?.verification_outcome
     || (canonicalVerification ? verificationOutcome({ ...canonicalVerification, phase: "post_change" }) : null);

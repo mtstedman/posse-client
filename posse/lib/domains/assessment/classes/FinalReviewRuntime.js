@@ -37,6 +37,7 @@ import {
 import {
   changedTestPlan,
   finalReviewCheckFindings,
+  lineageTestFiles,
   mergeCheckFindings,
   runChangedFileChecks,
 } from "../functions/final-review-checks.js";
@@ -72,6 +73,7 @@ export class FinalReviewRuntime {
     lookupReviewerParent = finalReviewParentOf,
     record = recordObservation,
     runChecks = runChangedFileChecks,
+    lineageTests = lineageTestFiles,
   } = {}) {
     this.parents = new Map();
     this.collectChange = collectChange;
@@ -81,6 +83,7 @@ export class FinalReviewRuntime {
     this.lookupReviewerParent = lookupReviewerParent;
     this.record = record;
     this.runChecks = runChecks;
+    this.lineageTests = lineageTests;
   }
 
   /**
@@ -174,8 +177,14 @@ export class FinalReviewRuntime {
       });
       change = await this.collectChange(parent.cwd, payload);
       // The assessment after handoff runs these too; running them here lets
-      // the developer fix what they find in the same attempt.
-      const changedPlan = changedTestPlan(job, payload, change, declaredPlan, { cwd: parent.cwd, resolvePlan: this.resolveTestPlan });
+      // the developer fix what they find in the same attempt. The change is
+      // the lineage's, as in the post-change receipt: a fix also runs the test
+      // files its root committed.
+      const changedPlan = changedTestPlan(job, payload, change, declaredPlan, {
+        cwd: parent.cwd,
+        resolvePlan: this.resolveTestPlan,
+        lineagePaths: await this.lineageTests(job, payload, parent.cwd),
+      });
       changedTestRun = changedPlan
         ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS })
         : null;
