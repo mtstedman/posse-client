@@ -2067,6 +2067,8 @@ export function reconcileProviderToolUseReplay({
         summary: String(row.summary || ""),
         phase: String(detail?.phase || ""),
         inv: detail?.inv == null ? null : String(detail.inv),
+        provider_call_id: detail?.provider_call_id || detail?.provider_tool_use_id || null,
+        failed: detail?.ok === false || ["failed", "rejected"].includes(detail?.outcome || detail?.status),
         consumed: false,
       }];
     } catch {
@@ -2088,9 +2090,14 @@ export function reconcileProviderToolUseReplay({
       continue;
     }
     const summary = summarizeToolUseForReconciliation(toolUse, cwd);
+    // A provider-rejected request never reached the toolkit. It must not
+    // consume the completion of a later successful retry of the same tool.
+    const compatible = (row) => !row.consumed
+      && (!row.provider_call_id || row.provider_call_id === toolUse.id)
+      && (!(toolUse.status === "failed" || toolUse.input?.__unparsedToolInput) || row.failed);
     const matching = summary == null ? null : (
       persisted.find((row) => (
-        !row.consumed
+        compatible(row)
         && row.observation_type === summary.observation_type
         && reconciliationSummaryMatches(row.summary, summary.summary)
       ))
@@ -2098,7 +2105,7 @@ export function reconcileProviderToolUseReplay({
       // begin/finish wrapper. Agent-call identity, canonical type, and an
       // unconsumed completion record are durable proof of the physical call.
       || persisted.find((row) => (
-        !row.consumed
+        compatible(row)
         && row.observation_type === summary.observation_type
       ))
     );
@@ -2283,7 +2290,9 @@ export function recordToolUseObservations({
   const now = Date.now();
   const replayBucketKey = resolvedJobId == null ? "__global__" : String(resolvedJobId);
   for (const toolUse of tool_uses) {
-    const summary = _summarizeToolUse(toolUse, cwd);
+    const summary = toolUse?.observation_detail?.recovered_from_provider_rollout
+      ? summarizeToolUseForReconciliation(toolUse, cwd)
+      : _summarizeToolUse(toolUse, cwd);
     if (!summary) continue;
     const status = String(toolUse?.status || "").trim();
     const rejectedStatus = ["rejected", "denied", "cancelled", "canceled"].includes(status.toLowerCase());

@@ -241,6 +241,8 @@ export async function runNativeDispatch(request, {
           toolUses.push(toolUse);
           onProviderToolUse?.(toolUse);
         } else if (event.type === "tool.completed") {
+          const toolUse = toolUses.findLast((use) => use.id === String(event.toolCallId || ""));
+          if (toolUse && event.ok === false) toolUse.status = "failed";
           onProviderToolResult?.({
             id: String(event.toolCallId || ""),
             isError: event.ok === false,

@@ -1777,11 +1777,12 @@ function recordContextMeterSample(context, toolName, {
   emittedSizeChars,
   bounded = false,
   ref = null,
+  deliveryPending = false,
 } = {}) {
   try {
     const meter = ContextMeter.forContext(context);
     if (!meter) return;
-    const snapshot = meter.recordToolResult({ fullSizeChars, emittedSizeChars, bounded });
+    const snapshot = meter.recordToolResult({ fullSizeChars, emittedSizeChars, bounded, deliveryPending });
     if (bounded) {
       logEvent({
         work_item_id: context.work_item_id ?? null,
@@ -2063,12 +2064,16 @@ export function appendHashRefIfMajor(toolName, result, {
   ambient = null,
   searchPaging = null,
   materializeCharCap = DEFAULT_MATERIALIZE_CHAR_CAP,
+  meterAtDelivery = false,
 } = {}) {
+  const recordSample = (sampleContext, sampleTool, sample) => {
+    recordContextMeterSample(sampleContext, sampleTool, { ...sample, deliveryPending: meterAtDelivery });
+  };
   const hashContext = contextForHashRefs(context);
   if (!hasHashRefScope(hashContext)) return result;
   if (!shouldSurfaceHashRef(toolName, result, { minChars, ambient })) {
     if (typeof result === "string") {
-      recordContextMeterSample(hashContext, toolName, {
+      recordSample(hashContext, toolName, {
         fullSizeChars: result.length,
         emittedSizeChars: result.length,
         bounded: false,
@@ -2238,7 +2243,7 @@ export function appendHashRefIfMajor(toolName, result, {
     }
     if (!anchor?.ok || !anchor?.entry?.ref) {
       recordHashSurfaceFailure(hashContext, toolName, boundedAnchor.length, anchor || "surface_failed");
-      recordContextMeterSample(hashContext, toolName, {
+      recordSample(hashContext, toolName, {
         fullSizeChars: sizeChars,
         emittedSizeChars: boundedAnchor.length,
         bounded: true,
@@ -2266,7 +2271,7 @@ export function appendHashRefIfMajor(toolName, result, {
         }),
       ] : ["\n\n[bounded_result_unretained]"]),
     ].join("");
-    recordContextMeterSample(hashContext, toolName, {
+    recordSample(hashContext, toolName, {
       fullSizeChars: sizeChars,
       emittedSizeChars: bounded.length,
       bounded: true,
@@ -2313,7 +2318,7 @@ export function appendHashRefIfMajor(toolName, result, {
     }, { ownerScope: resolvedOwnerScope });
   } catch (err) {
     recordHashSurfaceFailure(hashContext, toolName, sizeChars, err?.message || err);
-    recordContextMeterSample(hashContext, toolName, {
+    recordSample(hashContext, toolName, {
       fullSizeChars: originalSizeChars,
       emittedSizeChars: sizeChars,
       bounded: originalSizeChars > sizeChars,
@@ -2322,7 +2327,7 @@ export function appendHashRefIfMajor(toolName, result, {
   }
   if (!surfaced?.ok) {
     recordHashSurfaceFailure(hashContext, toolName, sizeChars, surfaced || "surface_failed");
-    recordContextMeterSample(hashContext, toolName, {
+    recordSample(hashContext, toolName, {
       fullSizeChars: originalSizeChars,
       emittedSizeChars: sizeChars,
       bounded: originalSizeChars > sizeChars,
@@ -2337,7 +2342,7 @@ export function appendHashRefIfMajor(toolName, result, {
     sizeChars,
     refRole: "citation",
   })}`;
-  recordContextMeterSample(hashContext, toolName, {
+  recordSample(hashContext, toolName, {
     fullSizeChars: originalSizeChars,
     emittedSizeChars: stamped.length,
     bounded: originalSizeChars > sizeChars,

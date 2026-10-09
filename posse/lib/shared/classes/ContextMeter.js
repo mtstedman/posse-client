@@ -72,6 +72,7 @@ export class ContextMeter {
       CONTEXT_PRESSURE_THRESHOLDS.avgOutputTokensPerTurn,
     );
     this.thresholds = thresholds || CONTEXT_PRESSURE_THRESHOLDS;
+    this.toolSchemaChars = 0;
     this.emittedChars = 0;
     this.fullToolResultChars = 0;
     this.trimmedBeforeIngressChars = 0;
@@ -84,13 +85,33 @@ export class ContextMeter {
     this.promptChars = positiveNumber(chars, this.promptChars);
   }
 
+  recordMcpResponse(method, result) {
+    if (!result || typeof result !== "object") return;
+    if (method === "tools/list" && Array.isArray(result.tools)) {
+      this.toolSchemaChars = JSON.stringify(result.tools).length;
+    } else if (method === "tools/call" && Array.isArray(result.content)) {
+      const chars = result.content.reduce((total, block) =>
+        total + (block.type === "text" && typeof block.text === "string" ? block.text.length : 0), 0);
+      this.recordToolResult({ fullSizeChars: chars, emittedSizeChars: chars });
+    }
+  }
+
   recordToolResult({
     fullSizeChars = 0,
     emittedSizeChars = null,
     bounded = false,
+    deliveryPending = false,
   } = {}) {
     const full = positiveNumber(fullSizeChars, 0);
     const emitted = emittedSizeChars == null ? full : positiveNumber(emittedSizeChars, 0);
+    if (deliveryPending) {
+      // Retain compression telemetry now; final owner delivery counts the
+      // emitted payload and the physical tool result exactly once.
+      const trimmed = bounded ? Math.max(0, full - emitted) : 0;
+      this.fullToolResultChars += trimmed;
+      this.trimmedBeforeIngressChars += trimmed;
+      return this.snapshot();
+    }
     this.toolResults += 1;
     this.fullToolResultChars += full;
     this.emittedChars += emitted;
@@ -103,7 +124,7 @@ export class ContextMeter {
   snapshot() {
     const emittedTokens = estimateTokensFromChars(this.emittedChars);
     const promptTokens = estimateTokensFromChars(this.promptChars);
-    const estimateTokens = promptTokens + emittedTokens + (this.toolResults * this.avgOutputTokensPerTurn);
+    const estimateTokens = promptTokens + estimateTokensFromChars(this.toolSchemaChars) + emittedTokens + (this.toolResults * this.avgOutputTokensPerTurn);
     const band = estimateTokens >= this.thresholds.resetTokens
       ? "reset"
       : estimateTokens >= this.thresholds.hardTokens
@@ -115,6 +136,7 @@ export class ContextMeter {
       key: this.key,
       prompt_chars: this.promptChars,
       prompt_tokens_est: promptTokens,
+      tool_schema_chars: this.toolSchemaChars,
       emitted_chars: this.emittedChars,
       emitted_tokens_est: emittedTokens,
       full_tool_result_chars: this.fullToolResultChars,

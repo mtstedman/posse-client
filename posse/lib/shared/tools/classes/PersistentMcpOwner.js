@@ -1,3 +1,4 @@
+import { ContextMeter } from "../../classes/ContextMeter.js";
 import { observeAtlasExecution } from "../functions/atlas-result-status.js";
 import { sortAgentToolDefinitions } from "../functions/agent-schema.js";
 import { observeAtlasRequest } from "../functions/atlas-request-observation.js";
@@ -3696,6 +3697,7 @@ function appendHashRefToMcpTextResult(result, toolName, toolArgs, session) {
     ? compacted
     : compactCodeWindowLensResult(requested.name || toolName, compacted.result, { args, context });
   const stamped = appendHashRefIfMajor(requested.name || toolName, refPaged.result, {
+    meterAtDelivery: true,
     args,
     context,
     source: `atlas:${requested.name || toolName}`,
@@ -5809,6 +5811,14 @@ export class PersistentMcpOwner {
       this._sessionIdsByTokenHash.set(tokenHash(token), id);
     }
     session.touch();
+    // Count the final delivered payload once, including native gateway reads,
+    // dispatch results and every source block, rather than hash-ref fragments.
+    const sendResponse = (response, status, body) => {
+      sendJson(response, status, body);
+      try {
+        ContextMeter.forContext(hashRefToolContext(session))?.recordMcpResponse(message.method, body?.message?.result);
+      } catch { /* Shadow telemetry must never affect tool delivery. */ }
+    };
     const requestAbort = new AbortController();
     let heartbeat = null;
     if (req.headers[MCP_OWNER_PROGRESS_HEADER] === "1") {
@@ -5824,7 +5834,7 @@ export class PersistentMcpOwner {
     });
     const method = String(message?.method || "").trim();
     if (method === MCP_SESSION_RELEASED_NOTIFICATION) {
-      sendJson(res, 403, { ok: false, error: "reserved_owner_method" });
+      sendResponse(res, 403, { ok: false, error: "reserved_owner_method" });
       return;
     }
     const activeToolRequest = method === "tools/call"
@@ -5867,7 +5877,7 @@ export class PersistentMcpOwner {
             sessionId: id,
           });
         }
-        sendJson(res, 200, {
+        sendResponse(res, 200, {
           ok: true,
           bootId: this.bootId,
           sessionId: id,
@@ -5888,7 +5898,7 @@ export class PersistentMcpOwner {
         const rawProviderToolArgs = message?.params?.arguments || {};
         if (delegatedEvidence) {
           if (!delegatedEvidenceRequestAllowed(providerToolName, rawProviderToolArgs)) {
-            sendJson(res, 200, { ok: true, message: {
+            sendResponse(res, 200, { ok: true, message: {
               jsonrpc: "2.0", id: message.id,
               result: mcpToolErrorPayload("Citation children may only consume issued read-only evidence tools"),
             } });
@@ -5901,7 +5911,7 @@ export class PersistentMcpOwner {
           transport: "persistent-mcp",
           workItemId: session?.bootConfig?.workItemId,
         })) {
-          sendJson(res, 200, {
+          sendResponse(res, 200, {
             ok: true,
             bootId: this.bootId,
             sessionId: id,
@@ -5914,7 +5924,7 @@ export class PersistentMcpOwner {
         }
         if (!toolAllowedByPolicy(policy, providerToolName, providerToolArgs)) {
           recordDeniedToolCall(session, providerToolName, providerToolArgs, policy, message);
-          sendJson(res, 200, {
+          sendResponse(res, 200, {
             ok: true,
             bootId: this.bootId,
             sessionId: id,
@@ -5940,7 +5950,7 @@ export class PersistentMcpOwner {
             durationMs: 0,
             executor: { via: "typed_dispatcher_symbol_handle" },
           });
-          sendJson(res, 200, {
+          sendResponse(res, 200, {
             ok: true,
             bootId: this.bootId,
             sessionId: id,
@@ -5962,7 +5972,7 @@ export class PersistentMcpOwner {
         if (ceilingEmission && assignedResearchPhysicalCallStep > researchPhysicalCallCeiling) {
           const grace = researchCeilingGraceDecision(ceilingEmission);
           if (!grace.grace) {
-            sendJson(res, 200, {
+            sendResponse(res, 200, {
               ok: true,
               bootId: this.bootId,
               sessionId: id,
@@ -6022,7 +6032,7 @@ export class PersistentMcpOwner {
               used: ceiling.used,
               cap: ceiling.cap,
             });
-            sendJson(res, 200, {
+            sendResponse(res, 200, {
               ok: true,
               bootId: this.bootId,
               sessionId: id,
@@ -6086,7 +6096,7 @@ export class PersistentMcpOwner {
               parent_agent_call_id: session?.bootConfig?.agentCallId ?? null,
             },
           });
-          sendJson(res, 200, {
+          sendResponse(res, 200, {
             ok: true,
             bootId: this.bootId,
             sessionId: id,
@@ -6113,7 +6123,7 @@ export class PersistentMcpOwner {
               via: "agent_handoff_owner",
               rejectionCode: "terminal_handoff_concurrent_tool",
             });
-            sendJson(res, 200, {
+            sendResponse(res, 200, {
               ok: true,
               bootId: this.bootId,
               sessionId: id,
@@ -6141,7 +6151,7 @@ export class PersistentMcpOwner {
               via: "agent_handoff_owner",
               rejectionCode: String(error?.code || "AGENT_HANDOFF_REJECTED"),
             });
-            sendJson(res, 200, {
+            sendResponse(res, 200, {
               ok: true,
               bootId: this.bootId,
               sessionId: id,
@@ -6171,7 +6181,7 @@ export class PersistentMcpOwner {
             via: "agent_handoff_owner",
             rejectionCode: "agent_handoff_terminal_violation",
           });
-          sendJson(res, 200, {
+          sendResponse(res, 200, {
             ok: true,
             bootId: this.bootId,
             sessionId: id,
@@ -6210,7 +6220,7 @@ export class PersistentMcpOwner {
                 duration_ms: Date.now() - startedAt,
               },
             });
-            sendJson(res, 200, {
+            sendResponse(res, 200, {
               ok: true,
               bootId: this.bootId,
               sessionId: id,
@@ -6243,7 +6253,7 @@ export class PersistentMcpOwner {
                 duration_ms: Date.now() - startedAt,
               },
             });
-            sendJson(res, 200, {
+            sendResponse(res, 200, {
               ok: true,
               bootId: this.bootId,
               sessionId: id,
@@ -6274,7 +6284,7 @@ export class PersistentMcpOwner {
             result = { content: [{ type: "text", text: `Error executing custom_tools: ${String(error?.message || error).slice(0, 500)}` }], isError: true };
           }
           recordOwnerAnsweredToolCall({ session, toolName, toolArgs, result, startedAt, via: "custom_tools_owner" });
-          sendJson(res, 200, { ok: true, bootId: this.bootId, sessionId: id, message: {
+          sendResponse(res, 200, { ok: true, bootId: this.bootId, sessionId: id, message: {
             jsonrpc: "2.0", id: message?.id ?? null, result,
           } });
           return;
@@ -6285,13 +6295,13 @@ export class PersistentMcpOwner {
             const receipt = submitWebResearchHandoff(session?.bootConfig?.agentCallId, toolArgs);
             const result = { content: [{ type: "text", text: JSON.stringify(receipt) }], isError: false };
             recordOwnerAnsweredToolCall({ session, toolName, toolArgs, result, startedAt, via: "web_research_handoff_owner" });
-            sendJson(res, 200, { ok: true, bootId: this.bootId, sessionId: id, terminalHandoffReceipt: true, message: {
+            sendResponse(res, 200, { ok: true, bootId: this.bootId, sessionId: id, terminalHandoffReceipt: true, message: {
               jsonrpc: "2.0", id: message?.id ?? null, result,
             } });
           } catch (error) {
             const result = { content: [{ type: "text", text: String(error?.message || error) }], isError: true };
             recordOwnerAnsweredToolCall({ session, toolName, toolArgs, result, startedAt, via: "web_research_handoff_owner" });
-            sendJson(res, 200, { ok: true, bootId: this.bootId, sessionId: id, message: {
+            sendResponse(res, 200, { ok: true, bootId: this.bootId, sessionId: id, message: {
               jsonrpc: "2.0", id: message?.id ?? null, result,
             } });
           }
@@ -6320,7 +6330,7 @@ export class PersistentMcpOwner {
           }
           const result = { content: [{ type: "text", text }], isError };
           recordOwnerAnsweredToolCall({ session, toolName, toolArgs, result, startedAt, via: "final_review_owner" });
-          sendJson(res, 200, {
+          sendResponse(res, 200, {
             ok: true,
             bootId: this.bootId,
             sessionId: id,
@@ -6391,7 +6401,7 @@ export class PersistentMcpOwner {
             // This path answers directly, so a completed dispatch ends the
             // planner's triage count here rather than in the notice hook.
             if (requested.name === "dispatch_agent") notePlannerTriageCall(session, policy, requested);
-            sendJson(res, 200, {
+            sendResponse(res, 200, {
               ok: true,
               bootId: this.bootId,
               sessionId: id,
@@ -6436,7 +6446,7 @@ export class PersistentMcpOwner {
                 duration_ms: Date.now() - startedAt,
               },
             });
-            sendJson(res, 200, {
+            sendResponse(res, 200, {
               ok: true,
               bootId: this.bootId,
               sessionId: id,
@@ -6467,7 +6477,7 @@ export class PersistentMcpOwner {
             session?.bootConfig?.agentCallId,
             requested.name || toolName,
           )) {
-            sendJson(res, 200, {
+            sendResponse(res, 200, {
               ok: true,
               bootId: this.bootId,
               sessionId: id,
@@ -6508,7 +6518,7 @@ export class PersistentMcpOwner {
           const finalizedResponse = delegatedEvidence
             ? routedResponse
             : appendPlannerTriageNotice(routedResponse, session, policy, requested, requested.name || toolName);
-          sendJson(res, 200, {
+          sendResponse(res, 200, {
             ok: true,
             bootId: this.bootId,
             sessionId: id,
@@ -6743,7 +6753,7 @@ export class PersistentMcpOwner {
       if (terminalHandoffReceipt && completedTool.name === "agent_handoff") {
         void flushSharedAtlasToolExecutorDeferredRefreshes({ sessionId: session?.id || id });
       }
-      sendJson(res, 200, {
+      sendResponse(res, 200, {
         ok: true,
         bootId: this.bootId,
         sessionId: id,
@@ -6757,7 +6767,7 @@ export class PersistentMcpOwner {
         request_count: session.attachProof.requestCount,
         error: ownerErrorSummary(err),
       });
-      sendJson(res, 500, {
+      sendResponse(res, 500, {
         ok: false,
         bootId: this.bootId,
         sessionId: id,
