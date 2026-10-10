@@ -1438,6 +1438,9 @@ function _summarizeAtlasArgs(input = {}) {
     else if (typeof value === "object" && key === "symbolRef") {
       out[key] = symbolRef(value) || "[object]";
     }
+    else if (key === "__unparsedToolInput" && typeof value?.raw === "string") {
+      out[key] = _truncate(value.raw, 160);
+    }
     else if (typeof value === "object") out[key] = "[object]";
     else out[key] = _truncate(value, 80);
   }
@@ -2092,11 +2095,15 @@ export function reconcileProviderToolUseReplay({
     const summary = summarizeToolUseForReconciliation(toolUse, cwd);
     // A provider-rejected request never reached the toolkit. It must not
     // consume the completion of a later successful retry of the same tool.
-    const compatible = (row) => !row.consumed
+    const compatible = (row) => !row.consumed && row.phase !== "begin"
       && (!row.provider_call_id || row.provider_call_id === toolUse.id)
-      && (!(toolUse.status === "failed" || toolUse.input?.__unparsedToolInput) || row.failed);
+      && ((row.provider_call_id && row.provider_call_id === toolUse.id)
+        || (!(toolUse.status === "failed" || toolUse.input?.__unparsedToolInput) || row.failed));
     const matching = summary == null ? null : (
-      persisted.find((row) => (
+      persisted.find((row) => compatible(row)
+        && row.provider_call_id === toolUse.id && !!row.provider_call_id
+        && row.observation_type === summary.observation_type)
+      || persisted.find((row) => (
         compatible(row)
         && row.observation_type === summary.observation_type
         && reconciliationSummaryMatches(row.summary, summary.summary)

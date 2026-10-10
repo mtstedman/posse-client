@@ -3,8 +3,9 @@ import { SETTING_KEYS } from "./settings.js";
 import { SUB_AGENT_LIMITS } from "./sub-agent.js";
 import { MODEL_TIERS } from "./model.js";
 
-// Dispatched research exists to spend a cheaper model on bounded reads and
-// fetches while the planner keeps judgment. The configured default is never
+// Dispatched research isolates bounded reads and fetches while the planner
+// keeps judgment. Its price depends on the configured models, which may be
+// identical for parent and child. The configured default is never
 // the strong tier and a child never inherits the planner's model. The planner
 // may request a stronger tier for a code child that needs deep multi-file
 // reasoning, for at most RESEARCH_CHILD_STRONG_LIMIT children per planner
@@ -28,12 +29,12 @@ export const PLANNER_DISPATCH_SETTINGS = Object.freeze([
   { key: SETTING_KEYS.PLANNER_RESEARCH_CHILD_MAX_TURNS, default: "24", numeric: { integer: true, min: 1, max: 64 }, description: "Maximum tool/reasoning turns assigned to a research child." },
   { key: SETTING_KEYS.PLANNER_RESEARCH_RESULT_CHARS, default: "12000", numeric: { integer: true, min: 1000, max: 48000 }, description: "Maximum compact research result characters returned per child." },
   { key: SETTING_KEYS.PLANNER_RESEARCH_EXPAND_CHARS, default: "8000", numeric: { integer: true, min: 0, max: 24000 }, description: "Maximum source-brief characters automatically expanded across one planner research batch; zero disables expansion." },
-  { key: SETTING_KEYS.PLANNER_DISPATCH_TRIAGE_MAX_TURNS, default: "6", numeric: { integer: true, min: 1, max: 24 }, description: "Prompted planner-owned read budget for the direct/simple path; the research decision happens before those reads." },
+  { key: SETTING_KEYS.PLANNER_DISPATCH_TRIAGE_MAX_TURNS, default: "6", numeric: { integer: true, min: 1, max: 24 }, description: "Prompted planner-owned read budget for the direct/simple path, including bounded orientation before the research decision." },
   // The point of planner-led intake is to spend the expensive model on
   // planning and cheaper models on the bounded reads that feed it.
   { key: SETTING_KEYS.PLANNER_DISPATCH_MODEL_TIER, default: "strong", options: MODEL_TIERS, description: "Model tier for the planner job on planner-led intake." },
   { key: SETTING_KEYS.PLANNER_DISPATCH_REASONING_EFFORT, default: "high", options: PLANNER_RESEARCH_EFFORT_VALUES, description: "Reasoning effort for the planner job on planner-led intake; each research child gets the effort the planner requests for it, clamped by the ceiling." },
-  { key: SETTING_KEYS.PLANNER_RESEARCH_CHILD_MODEL_TIER, default: "standard", options: RESEARCH_CHILD_DEFAULT_MODEL_TIERS, description: "Default model tier for research children dispatched by the planner: cheap or standard, always below the planner. The planner may request strong for one child per planner call; further strong requests run on this tier." },
+  { key: SETTING_KEYS.PLANNER_RESEARCH_CHILD_MODEL_TIER, default: "standard", options: RESEARCH_CHILD_DEFAULT_MODEL_TIERS, description: "Default model tier for research children dispatched by the planner: cheap or standard. Configured tiers may resolve to the same model as the planner. The planner may request strong for one child per planner call; further strong requests run on this tier." },
   { key: SETTING_KEYS.PLANNER_RESEARCH_CHILD_REASONING_EFFORT, default: "medium", options: PLANNER_RESEARCH_EFFORT_VALUES, description: "Reasoning effort a research child runs at when the planner does not request one; the ceiling still bounds every request." },
   { key: SETTING_KEYS.AGENT_DISPATCH_TOOL_TIMEOUT_SEC, default: "1500", numeric: { integer: true, min: 60, max: Math.floor((MCP_TRANSPORT_TIMEOUT_MS - 1) / 1000) }, description: "Timeout in seconds for the experimental agent-dispatch MCP gate; always below the owner transport deadline." },
 // Account-level: the dispatch mode and its budgets describe how this

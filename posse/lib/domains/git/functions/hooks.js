@@ -424,18 +424,18 @@ function secretsFindingsForContent(file, content) {
   return findings;
 }
 
-function secretsBlockResult(findings) {
+function secretsBlockResult(findings, { advisory = false } = {}) {
   if (findings.length === 0) return { ok: true, output: "" };
   const output = [
-    "SECRETS DETECTED — COMMIT BLOCKED",
+    advisory ? "SECRET PATTERNS DETECTED — SCOPED COMMIT CONTINUES" : "SECRETS DETECTED — COMMIT BLOCKED",
     "",
     ...findings.slice(0, 20),
     findings.length > 20 ? `  ... and ${findings.length - 20} more` : "",
     "",
-    "Remove the secrets before committing.",
+    advisory ? "Review these added lines for unintended credentials." : "Remove the secrets before committing.",
     "If these are false positives, set skip_hook_secrets_scan=true in Posse admin.",
   ].filter(Boolean).join("\n");
-  return { ok: false, output };
+  return { ok: false, output, findings: findings.slice(0, 20) };
 }
 
 // A git check that could not RUN (sync gate busy, posse-git unavailable) is
@@ -528,38 +528,92 @@ function findingsForWorkingTreeContent(file, stat, content) {
   return secretsFindingsForContent(file, content);
 }
 
-function secretsScanWorkingTreePaths(cwd, paths = []) {
+// Scoped commits compare the exact working-tree bytes against HEAD, including
+// staged edits. Existing fixture credentials outside added lines are not new
+// findings. Untracked files have no base, so every line is new.
+function scopedSecretDiffArgs(paths) {
+  return ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", "--unified=0", "HEAD", "--", ...paths];
+}
+
+function scopedSecretDiffFindings(diff) {
   const findings = [];
-  for (const file of normalizedWorkingTreeScanPaths(paths)) {
+  let file = "";
+  let lineNumber = 0;
+  for (const line of String(diff).split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      file = "";
+      lineNumber = 0;
+    } else if (line.startsWith("+++ ") && lineNumber === 0) {
+      let name = line.slice(4);
+      if (name.startsWith('"')) {
+        try { name = JSON.parse(name); } catch { /* retain git's quoted path */ }
+      }
+      file = name.replace(/^b\//, "");
+    } else if (line.startsWith("@@ ")) {
+      lineNumber = Number(line.match(/\+(\d+)/)?.[1] || 0);
+    } else if (line.startsWith("+") && file) {
+      for (const { re, label } of SECRET_PATTERNS) {
+        if (re.test(line.slice(1))) findings.push(`  ${file}:${lineNumber} — ${label}`);
+      }
+      lineNumber++;
+    } else if (line.startsWith(" ")) lineNumber++;
+  }
+  return findings;
+}
+
+function secretsScanWorkingTreePaths(cwd, paths = []) {
+  const files = normalizedWorkingTreeScanPaths(paths);
+  if (!files.length) return { ok: true, output: "" };
+  const findings = [];
+  let newFiles;
+  try {
+    // An unborn repository has no baseline; scan all requested content.
+    let head = false;
+    try { gitExec(["rev-parse", "--verify", "HEAD"], cwd); head = true; }
+    catch (err) { if (!isGitCommandFailure(err)) throw err; }
+    if (head) {
+      findings.push(...scopedSecretDiffFindings(gitExec(scopedSecretDiffArgs(files), cwd, { trim: false })));
+      newFiles = gitExec(["--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--", ...files], cwd, { trim: false }).split("\0").filter(Boolean);
+    } else newFiles = files;
+  } catch (err) { return gitInfraBlockResult("Scoped secrets scan", err); }
+  for (const file of newFiles) {
     const fullPath = workingTreeScanTarget(cwd, file);
     if (!fullPath) continue;
-    let content;
     try {
       const stat = fs.lstatSync(fullPath);
-      if (stat.isSymbolicLink()) content = fs.readlinkSync(fullPath, "utf-8");
-      else if (stat.isFile()) content = fs.readFileSync(fullPath, "utf-8");
-      else continue;
+      const content = stat.isSymbolicLink() ? fs.readlinkSync(fullPath, "utf-8")
+        : stat.isFile() ? fs.readFileSync(fullPath, "utf-8") : "";
       findings.push(...findingsForWorkingTreeContent(file, stat, content));
     } catch { continue; }
   }
-  return secretsBlockResult(findings);
+  return secretsBlockResult(findings, { advisory: true });
 }
 
 async function secretsScanWorkingTreePathsAsync(cwd, paths = []) {
+  const files = normalizedWorkingTreeScanPaths(paths);
+  if (!files.length) return { ok: true, output: "" };
   const findings = [];
-  for (const file of normalizedWorkingTreeScanPaths(paths)) {
+  let newFiles;
+  try {
+    let head = false;
+    try { await gitExecAsync(["rev-parse", "--verify", "HEAD"], cwd); head = true; }
+    catch (err) { if (!isGitCommandFailure(err)) throw err; }
+    if (head) {
+      findings.push(...scopedSecretDiffFindings(await gitExecAsync(scopedSecretDiffArgs(files), cwd, { trim: false })));
+      newFiles = (await gitExecAsync(["--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--", ...files], cwd, { trim: false })).split("\0").filter(Boolean);
+    } else newFiles = files;
+  } catch (err) { return gitInfraBlockResult("Scoped secrets scan", err); }
+  for (const file of newFiles) {
     const fullPath = workingTreeScanTarget(cwd, file);
     if (!fullPath) continue;
-    let content;
     try {
       const stat = await fs.promises.lstat(fullPath);
-      if (stat.isSymbolicLink()) content = await fs.promises.readlink(fullPath, "utf-8");
-      else if (stat.isFile()) content = await fs.promises.readFile(fullPath, "utf-8");
-      else continue;
+      const content = stat.isSymbolicLink() ? await fs.promises.readlink(fullPath, "utf-8")
+        : stat.isFile() ? await fs.promises.readFile(fullPath, "utf-8") : "";
       findings.push(...findingsForWorkingTreeContent(file, stat, content));
     } catch { continue; }
   }
-  return secretsBlockResult(findings);
+  return secretsBlockResult(findings, { advisory: true });
 }
 
 function secretsScan({ cwd, paths = null }) {

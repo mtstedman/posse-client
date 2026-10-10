@@ -3504,6 +3504,7 @@ async function runNativeToolThroughGate(toolName, args, handler) {
   return appendHashRefIfMajor(toolName, result, {
     args,
     context: {
+      cwd: workspaceCwd,
       work_item_id: mcpWorkItemId,
       job_id: mcpJobId,
       attempt_id: mcpAttemptId,

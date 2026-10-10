@@ -239,6 +239,11 @@ export class FinalReviewRuntime {
       }
       ({ result, reviewerCallId } = await outcome);
       result = mergeCheckFindings(result, finalReviewCheckFindings({ checks, changedTestRun }));
+      if (result.outcome === FINAL_REVIEW_OUTCOMES.PASS
+        && ["unavailable", "infrastructure_error", "invalid"].includes(changedTestRun?.status)) {
+        result = { ...result, outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
+          reason: `Changed tests did not execute (${changedTestRun.reason || changedTestRun.status}); restore their verification prerequisites.` };
+      }
       if (!reviewIdentity) {
         result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Cannot bind final review to the scoped workspace; verification is blocked." };
       } else if (reviewIdentity !== await this.identify(parent.cwd, payload, { jobId: job.id })) {

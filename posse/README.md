@@ -136,8 +136,12 @@ behavior remains available to its existing callers; gated planners receive only
 
 Account settings bound total children per planner call (default 2), child turns
 (24), timeout (1200 seconds), effort (medium by default with a high ceiling),
-and returned report-size target (12000 characters; longer reports remain intact). The triage turn setting is prompt
-guidance; child limits are runtime-enforced. The separate dispatch MCP timeout
+and returned report-size target (12000 characters; longer reports remain intact).
+The runtime converts the triage turn setting into a planner repository-read
+allowance of two calls per turn. Reads before and after child reports share
+that allowance; failed read attempts also count. Handoff, clarification, and
+child dispatch remain available when reads are exhausted. Child limits are
+also runtime-enforced. The separate dispatch MCP timeout
 (1500 seconds) reserves time to return results. Existing child cancellation and
 stall handling are reused.
 
@@ -576,6 +580,29 @@ Check stages are `fast`, `required`, and `canonical`; intents are `test`,
 `lint`, `typecheck`, and `contract`. Commands and working directories pass the
 same direct-spawn safety validation as legacy frozen tests. Planner input may
 select optional check IDs but cannot remove required checks or invent commands.
+
+For custom class-based test frameworks, declare which script executes each
+test file in the same committed config. `unit_test_runners` applies to both
+path-only test tools and automatic changed-test verification:
+
+```json
+{
+  "schema_version": 1,
+  "checks": [],
+  "unit_test_runners": [
+    { "files": ["tests/integration/**"], "runtime": "php", "script": "run-tests.php", "args": ["integration"] }
+  ]
+}
+```
+
+Patterns and scripts are relative to the repository root. Supported runtimes
+are `node`, `php`, and `python`; arguments are literal strings, with no shell
+expansion. Each file must match at most one runner. A declaration promises
+that the command executes every matching test; use narrow patterns reflecting
+the runner's real discovery rules. A suite shared by several changed files
+runs once per batch. Empty output or an explicit zero-test summary does not
+count as a pass. Changed tests with an unavailable runner or missing dependency
+require review instead of silently inheriting a pass from another command.
 
 The same policy applies to the git verify hooks and the configured
 `canonical_verify_cmd` / `pre_assess_cmd` path. Every verification result is

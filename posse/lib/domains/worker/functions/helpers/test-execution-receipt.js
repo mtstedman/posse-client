@@ -1361,13 +1361,15 @@ function repositoryReceiptCandidates(jobId, limit = 512) {
 }
 
 /**
- * Historical planner commands whose latest repository baseline is red.
+ * Historical commands whose latest conclusive receipt on this lineage is red.
  * This is planning input, not a waiver: it steers new plans toward a passing
  * check or an explicit task that repairs the pre-existing failure.
  */
 export async function knownRedTestCommandsForRepository(projectDir, { limit = 12 } = {}) {
-  const repositoryFingerprintValue = await repositoryFingerprint(projectDir);
-  if (!repositoryFingerprintValue) return [];
+  const [repositoryFingerprintValue, head] = await Promise.all([
+    repositoryFingerprint(projectDir), currentCommit(projectDir),
+  ]);
+  if (!repositoryFingerprintValue || !head) return [];
   const rows = getDb().prepare(`
     SELECT id
     FROM artifacts
@@ -1378,12 +1380,17 @@ export async function knownRedTestCommandsForRepository(projectDir, { limit = 12
   const receipts = rows
     .map((row) => parseReceiptArtifact(getArtifact(row.id)))
     .filter((receipt) => receipt
-      && receipt.phase === "baseline"
-      && receipt.source === "planner"
+      && ["passed", "failed"].includes(receipt.status)
+      && receipt.tree_state !== "dirty"
       && receipt.repository_fingerprint === repositoryFingerprintValue);
   const latestByCommand = new Map();
   const failedIdentities = new Map();
+  const ancestry = new Map([[head, true]]);
   for (const receipt of receipts) {
+    const commit = receipt.executed_commit_hash || receipt.commit_hash;
+    if (!commit) continue;
+    if (!ancestry.has(commit)) ancestry.set(commit, await isAncestorCommit(projectDir, commit, head));
+    if (!ancestry.get(commit)) continue;
     const key = [receipt.command || "", receipt.cwd_relative || ""].join("\0");
     if (!receipt.command) continue;
     if (!latestByCommand.has(key)) latestByCommand.set(key, receipt);

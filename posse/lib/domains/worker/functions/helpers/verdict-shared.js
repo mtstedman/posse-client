@@ -133,6 +133,21 @@ export function normalizeAssessorConfidence(value, { fallback = "medium", allowN
 
 export function capVerdictForVerificationInfrastructure(verdict, testRun = null) {
   const post = testRun?.post_change || testRun?.postChange;
+  const changed = post?.changed_tests;
+  if (verdict?.verdict === "pass" && changed?.paths?.length > 0
+    && ["infrastructure_error", "unavailable", "invalid"].includes(changed.status)) {
+    return {
+      ...verdict,
+      verdict: "needs_review",
+      verification_status: "changed_tests_unverified",
+      _disable_internal_retry: true,
+      _assessment_confidence_review: true,
+      reasons: [
+        `Changed test files did not execute (${changed.reason || changed.status}): ${changed.paths.join(", ")}. Restore the runner or supply an explicit repository runner mapping before accepting their verification.`,
+        ...(verdict.reasons || []),
+      ],
+    };
+  }
   const failedRunner = [post, post?.changed_tests].find((run) => run && ["infrastructure_error", "unavailable", "invalid"].includes(run.status));
   if (!failedRunner) return verdict;
   return { ...verdict, verification_notes: [

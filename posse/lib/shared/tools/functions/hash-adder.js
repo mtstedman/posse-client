@@ -58,6 +58,7 @@ import {
 } from "./hash-ref-view.js";
 import {
   canonicalEvidenceSourcePath,
+  toolEvidenceSourcePath,
   normalizedEvidenceSourceWindows,
   sourceEvidenceCitationSurface,
 } from "./source-evidence.js";
@@ -1325,7 +1326,7 @@ export function compactCodeWindowLensResult(toolName, result, {
       // Lens tail matches ride along in this continuation; their context
       // lines are delivered source too, so they register coverage on fetch.
       const lensTailSourceWindows = lensTail.length > 0
-        ? (structuredSourceMetadata("code.lens", continuationPayload, args)?.source_windows || [])
+        ? (structuredSourceMetadata("code.lens", continuationPayload, args, context)?.source_windows || [])
         : [];
       const continuationWindowsWithTail = [...continuationSourceWindows, ...lensTailSourceWindows];
       let surfaced;
@@ -1498,7 +1499,7 @@ export function compactCodeWindowLensResult(toolName, result, {
     // The tail is exact source context. Record its windows so a later
     // traverse_ref registers delivered coverage and the model can cite what
     // it read there.
-    const tailSourceMetadata = structuredSourceMetadata("code.lens", tailPayload, args);
+    const tailSourceMetadata = structuredSourceMetadata("code.lens", tailPayload, args, context);
     let surfaced;
     try {
       surfaced = surfaceHashRefForContext(hashContext, {
@@ -1910,7 +1911,8 @@ function mergeSourceWindows(windows) {
   return merged.map(({ content_lines: _contentLines, ...window }) => window);
 }
 
-function structuredSourceMetadata(toolName, payload, args = {}) {
+function structuredSourceMetadata(toolName, payload, args = {}, context = {}) {
+  const sourcePathFor = (value) => toolEvidenceSourcePath(value, context.cwd || context.projectDir);
   const normalizedTool = String(toolName || "").toLowerCase().replace(/^tools[.:]/, "");
   const isRead = ["read_file", "chain_read", "inspect_file"].includes(normalizedTool);
   const isWindow = normalizedTool.endsWith("code.window") || normalizedTool.endsWith("symbol.get");
@@ -1928,7 +1930,7 @@ function structuredSourceMetadata(toolName, payload, args = {}) {
       content_kind: envelope?.contentKind || CODE_CONTENT_KINDS.UNKNOWN,
     };
   }
-  const fallbackPath = canonicalEvidenceSourcePath(
+  const fallbackPath = sourcePathFor(
     envelope?.repo_rel_path
       || envelope?.repoRelPath
       || envelope?.path
@@ -1956,7 +1958,7 @@ function structuredSourceMetadata(toolName, payload, args = {}) {
       const sourceEnd = Number.isInteger(declaredEnd) && declaredEnd === contentEnd
         ? declaredEnd
         : contentEnd;
-      const sourcePath = canonicalEvidenceSourcePath(
+      const sourcePath = sourcePathFor(
         candidate.repo_rel_path || candidate.repoRelPath || candidate.path || fallbackPath,
       );
       if (!sourcePath || !Number.isInteger(sourceStart) || sourceStart < 1 || sourceEnd < sourceStart) continue;
@@ -1987,7 +1989,7 @@ function structuredSourceMetadata(toolName, payload, args = {}) {
       const sourceLine = Number(match?.line);
       const before = Array.isArray(match?.context?.before) ? match.context.before.map(String) : [];
       const after = Array.isArray(match?.context?.after) ? match.context.after.map(String) : [];
-      const sourcePath = canonicalEvidenceSourcePath(match?.repo_rel_path || match?.repoRelPath || fallbackPath);
+      const sourcePath = sourcePathFor(match?.repo_rel_path || match?.repoRelPath || fallbackPath);
       if (!sourcePath || !Number.isInteger(sourceLine) || sourceLine < 1 || typeof match?.text !== "string") continue;
       const materializedLines = [...before, match.text, ...after].map((line) => {
         const located = encodedContentMaterializedRange(payload, line, cursor);
@@ -2033,7 +2035,11 @@ function structuredSourceMetadata(toolName, payload, args = {}) {
   }
 
   const sourceWindows = mergeSourceWindows(windows);
-  if (sourceWindows.length === 0) return null;
+  // Numbered source without a valid path must not fall back to materialized
+  // offsets: the same selector would then prove entirely different lines.
+  if (sourceWindows.length === 0) return isRead && windows.length > 0
+    ? { line_semantics: "materialized", citable: false }
+    : null;
   const paths = [...new Set(sourceWindows.map((window) => window.path))];
   return {
     line_semantics: "source",
@@ -2135,7 +2141,7 @@ export function appendHashRefIfMajor(toolName, result, {
   const resolvedOwnerScope = ownerScope || (hashContext.job_id != null ? "job" : null);
   const sourceMetadata = boundPolicy && sizeChars > boundPolicy.capChars
     ? null
-    : structuredSourceMetadata(toolName, text, args);
+    : structuredSourceMetadata(toolName, text, args, context);
 
   if (boundedIngress) {
     // A clipped skeleton envelope cannot establish complete source lines,

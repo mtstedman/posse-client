@@ -555,8 +555,8 @@ export function __testSubAgentRoutingEnabled(toolNames = []) {
 }
 
 // Planner-owned direct-path read budget. The research decision belongs before
-// these calls. The owner applies prompt pressure at the first read and at the
-// configured budget, but never refuses a call or removes a tool.
+// these calls. Count reads before and after delegation against the same
+// frozen allowance; completion, clarification and delegation stay available.
 //
 // The setting is stated in turns; the owner sees calls, and planners measured
 // ~1.81 calls per turn (median 2), so the call threshold is two per budgeted
@@ -571,7 +571,7 @@ const PLANNER_TRIAGE_UNCOUNTED_TOOLS = new Set([
 ]);
 
 function createPlannerTriageState() {
-  return { calls: 0, dispatched: false, pathNoticeIssued: false, budgetNoticeIssued: false };
+  return { calls: 0, admittedCalls: 0, dispatched: false, pathNoticeIssued: false, budgetNoticeIssued: false };
 }
 
 function plannerTriageEnabled(session, policy) {
@@ -641,11 +641,10 @@ function notePlannerTriageCall(session, policy, requested, { record = recordObse
     }
     return "";
   }
-  if (state.dispatched) return "";
   if (PLANNER_TRIAGE_UNCOUNTED_TOOLS.has(`${requested?.suite}.${requested?.name}`)) return "";
   state.calls += 1;
   const threshold = plannerTriageThresholdCalls(boot.agentCallId);
-  if (!state.pathNoticeIssued) {
+  if (!state.pathNoticeIssued && !state.dispatched) {
     state.pathNoticeIssued = true;
     try {
       record({
@@ -688,6 +687,24 @@ function notePlannerTriageCall(session, policy, requested, { record = recordObse
     // The notice is advisory; telemetry must not break the tool result.
   }
   return plannerTriageNoticeText(threshold.turns);
+}
+
+function reservePlannerRead(session, policy, requested) {
+  if (!isResearchPhysicalWorkRequest(requested)) return null;
+  const state = plannerTriageSessionState(session, policy);
+  if (!state) return null;
+  const threshold = plannerTriageThresholdCalls(session.bootConfig?.agentCallId);
+  // Admission is synchronous, before dispatch, so concurrent calls cannot all
+  // consume the last slot. Failed reads consume their physical call as well.
+  if (state.admittedCalls < threshold.calls) {
+    state.admittedCalls++;
+    return null;
+  }
+  return mcpToolErrorPayload(
+    `Planner read allowance exhausted (${threshold.calls} calls, including reads after child research). `
+      + "Use the evidence already returned to finish the plan. If evidence is insufficient, report the specific gap or ask a focused clarification; do not claim an unverified conclusion.",
+    { code: "planner_read_budget_exhausted" },
+  );
 }
 
 function appendPlannerTriageNotice(response, session, policy, requested, toolName) {
@@ -3660,6 +3677,7 @@ function atlasExecutorSessionContext(session, bootConfig = session?.bootConfig |
 function hashRefToolContext(session) {
   const boot = session?.bootConfig || {};
   return {
+    cwd: boot.cwd || null,
     work_item_id: boot.workItemId ?? null,
     job_id: boot.jobId ?? null,
     attempt_id: boot.attemptId ?? null,
@@ -4066,10 +4084,13 @@ function ownerToolStructuredError(result = null, error = null) {
       || "",
   ).trim() || null;
   const status = String(structured?.details?.status || "").trim() || null;
+  const reason = typeof structured?.details?.reason === "string"
+    ? capString(structured.details.reason, 300) : null;
   return {
     ...(code ? { error_code: code } : {}),
     ...(message ? { error_message: message } : {}),
     ...(status ? { error_status: status } : {}),
+    ...(reason ? { error_reason: reason } : {}),
   };
 }
 
@@ -5959,6 +5980,14 @@ export class PersistentMcpOwner {
           return;
         }
         const requested = requestedToolPolicyName(toolName, toolArgs);
+        const plannerReadRejection = reservePlannerRead(session, policy, requested);
+        if (plannerReadRejection) {
+          recordOwnerToolObservation({ session, toolName, toolArgs, result: plannerReadRejection,
+            durationMs: 0, observationDetail: { planner_read_budget_exhausted: true } });
+          sendResponse(res, 200, { ok: true, bootId: this.bootId, sessionId: id,
+            message: mcpToolResultMessage(message, plannerReadRejection) });
+          return;
+        }
         assignedResearchPhysicalCallStep = isResearchPhysicalWorkRequest(requested)
           ? this._reserveResearchPhysicalCall(session, requested)
           : null;

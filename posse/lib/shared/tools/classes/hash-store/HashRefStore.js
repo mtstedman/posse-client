@@ -830,6 +830,10 @@ export class HashRefStore {
   }
 
   _enforceMaterializedBudget({ preserveRefOnTimestampTie = null } = {}) {
+    // Issued citations are a promise to an active call. Keep their backing
+    // bytes until it finishes (handoff snapshots then own lasting evidence).
+    // Query lifecycle state rather than leaving permanent metadata pins.
+    const liveEvidence = this._liveEvidenceSql();
     const statsQuery = this.db.prepare(`
       SELECT COUNT(*) AS count, COALESCE(SUM(length(COALESCE(payload_text, ''))), 0) AS chars
       FROM ${this.config.table}
@@ -837,6 +841,7 @@ export class HashRefStore {
         AND entry_kind = 'materialized'
         AND COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) != 1
         AND COALESCE(json_extract(metadata_json, '$.handoff_evidence_pinned'), 0) != 1
+        AND NOT (${liveEvidence})
     `);
     while (true) {
       const stats = statsQuery.get(this.ownerId);
@@ -851,6 +856,7 @@ export class HashRefStore {
           AND entry_kind = 'materialized'
           AND COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) != 1
           AND COALESCE(json_extract(metadata_json, '$.handoff_evidence_pinned'), 0) != 1
+          AND NOT (${liveEvidence})
         ORDER BY updated_at ASC,
                  CASE WHEN ref = ? THEN 1 ELSE 0 END ASC,
                  id ASC
@@ -860,6 +866,20 @@ export class HashRefStore {
       this._evictMaterializedRow(row);
     }
     this._reportPinnedPressure();
+  }
+
+  _liveEvidenceSql() {
+    const { table, aliasTable, ownerColumn } = this.config;
+    return `EXISTS (
+      SELECT 1 FROM hash_ref_evidence_refs evidence
+      JOIN agent_calls call ON call.id = evidence.agent_call_id
+      WHERE call.status = 'running'
+        AND (evidence.source_ref = ${table}.ref OR evidence.source_ref IN (
+          SELECT alias.ref FROM ${aliasTable} alias
+          WHERE alias.target_ref = ${table}.ref
+            AND alias.${ownerColumn} = ${table}.${ownerColumn}
+        ))
+    )`;
   }
 
   _reportPinnedPressure() {
@@ -874,6 +894,7 @@ export class HashRefStore {
         AND (
           COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) = 1
           OR COALESCE(json_extract(metadata_json, '$.handoff_evidence_pinned'), 0) = 1
+          OR ${this._liveEvidenceSql()}
         )
     `).get(this.ownerId);
     const pinnedChars = Number(stats?.chars || 0);
@@ -891,6 +912,7 @@ export class HashRefStore {
           AND (
             COALESCE(json_extract(metadata_json, '$.bounded_ingress'), 0) = 1
             OR COALESCE(json_extract(metadata_json, '$.handoff_evidence_pinned'), 0) = 1
+            OR ${this._liveEvidenceSql()}
           )
         ORDER BY updated_at DESC, id DESC
         LIMIT 1

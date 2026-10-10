@@ -12,6 +12,7 @@ import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
 import {
   completeAttempt,
+  getWorkItem,
   incrementAndCreateAttempt,
   logEvent,
   refreshWorkItemStatus,
@@ -283,6 +284,15 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
   try {
     const payload = parseJobPayload(job) || {};
     const purpose = String(payload.purpose || "wi");
+    const workItem = getWorkItem(job.work_item_id);
+    if ((purpose === "wi" || purpose === "wi-live" || WAITING_LANE_PURPOSE_SET.has(purpose))
+      && workItem?.merge_state === "merged") {
+      // Main refresh and WI cleanup still matter after merge. A WI-local view
+      // refresh cannot help a branch that has already closed.
+      worker._releaseLease(job, leaseToken, "canceled");
+      worker.emit(job.id, `${C.dim}[atlas] canceled obsolete ${purpose} warm for merged WI#${job.work_item_id}${C.reset}`);
+      return;
+    }
     const repoRoot = resolveAtlasRepoRoot(worker);
     const clamped = clampPaths(payload.paths);
     // A truncated path list must not silently narrow reindex coverage: for

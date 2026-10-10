@@ -357,7 +357,7 @@ function reportScopedSecretFindings(secretsResult, { opts = {}, paths = [], phas
     wiId: opts?.wiId ?? null,
     phase,
     paths,
-    findings: secretsResult.output || null,
+    findings: secretsResult.findings?.join("\n") || secretsResult.output || null,
   });
 }
 

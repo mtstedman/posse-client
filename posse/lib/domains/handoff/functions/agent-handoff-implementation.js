@@ -1972,6 +1972,13 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
   const lines = normalizedLines(entry.payload_text);
   const lineage = sourceLineage(entry, context);
   let lineSemantics = lineage.line_semantics;
+  if (lineSemantics === "materialized"
+    && selector.start != null && coordinateSpace !== "materialized"
+    && ["read_file", "chain_read", "inspect_file"].includes(entry.metadata?.tool || entry.descriptor?.tool || entry.object_type)
+    && lines.some((line) => /^\s*\d+\t/.test(line))) {
+    fail("AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
+      `Evidence ${selector.ref} contains numbered source without source-coordinate provenance; request a different source window before citing source lines`);
+  }
   const legacySourceCoordinates = lineSemantics === "materialized"
     && lines.length === 1 && selector.start > lines.length && coordinateSpace !== "materialized";
   if (coordinateSpace && coordinateSpace !== lineSemantics
@@ -4631,6 +4638,9 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
       value: Object.freeze({
         count: cleanupItems.length,
         items: Object.freeze(cleanupItems),
+        omitted_cleanup_records: materializationContext[EVIDENCE_CLEANUP_OVERFLOW],
+        dropped_selectors: cleanupItems.filter((item) => item.outcome === "dropped").length,
+        // Legacy telemetry field counts omitted records, not selectors.
         dropped: materializationContext[EVIDENCE_CLEANUP_OVERFLOW],
       }),
       enumerable: false,

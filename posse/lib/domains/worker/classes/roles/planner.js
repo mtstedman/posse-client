@@ -47,6 +47,7 @@ import { currentExecutionProvider } from "../../functions/helpers/diagnostics.js
 import { worktreePathAsync } from "../../../git/functions/worktree-path.js";
 import { ensureAtlasReadRootMounted } from "../../functions/helpers/atlas-read-root.js";
 import { getExplicitIntakeBindings, planCoverageGaps } from "../../../planning/functions/plan-routing.js";
+import { buildRepeatedRequestContext } from "../../../planning/functions/repeated-request-context.js";
 import { buildPlanClarificationContext } from "../../../planning/functions/plan-clarification-context.js";
 import { getEnabledSkillsForRole } from "../../../../shared/skills/functions/registry.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
@@ -362,7 +363,7 @@ export class PlannerRole extends BaseRole {
     const knownRedTestsBlock = knownRedTests.length > 0
       ? [
           promptLiteral("KNOWN-RED TEST COMMANDS FROM THIS REPOSITORY", JSON.stringify(knownRedTests)),
-          "These commands most recently failed on an unchanged baseline. Do not use one as this work item's verification unless the plan explicitly repairs that debt; prefer an applicable command known to pass. Failure identities are historical evidence, never permission to ignore a new identity.",
+          "These commands most recently failed in conclusive verification on the current repository lineage. This historical status may be stale: re-check a relevant command on the current baseline when practical, or prefer an applicable command known to pass. A current pass clears the warning; a continuing failure needs an explicit repair task or another applicable check. Failure identities are historical evidence, never permission to ignore a new identity.",
           "",
         ].join("\n")
       : "";
@@ -764,6 +765,7 @@ export class PlannerRole extends BaseRole {
       promptLiteral("DESCRIPTION", workItem.description || "(none)"),
       intakeHintsBlock ? `${intakeHintsBlock}\n` : "",
       buildPlanClarificationContext(job),
+      buildRepeatedRequestContext(workItem),
       payload._planner_human_input_origin_plan_id && !assessmentReplan
         ? priorPlanResearchRefsBlock({ workItemId: job.work_item_id, jobId: job.id, packet: plannerPacket })
         : "",
@@ -829,7 +831,7 @@ export class PlannerRole extends BaseRole {
   async composePrompt({ contextText, contract, job, ctx } = {}) {
     const researchPolicy = ctx.plannerPacket?.planner_dispatch_policy;
     const researchBudget = researchPolicy ? [
-      `Research decision and budgets: decide before your first repository/source tool call. If the work is simple and clearly scoped, use zero children and plan directly; your direct-path read budget is about ${researchPolicy.triageMaxTurns} turns (roughly ${researchPolicy.triageMaxTurns * 2} tool calls). Otherwise dispatch one batch immediately, before collecting orientation context. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, with a ${researchPolicy.resultChars}-character result target. Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier; a code child may request model_tier strong for deep multi-file reasoning, and web children stay on cheap or standard. Keep investigation in the children and planning judgment here.`,
+      `Research decision and budgets: decide before your first repository/source tool call. If the work is simple and clearly scoped, use zero children and plan directly. Otherwise dispatch one batch immediately, before collecting orientation context. Your repository read allowance is ${researchPolicy.triageMaxTurns * 2} tool calls across this planner call, including reads after child reports. The runtime enforces this allowance; use existing evidence to finish or report the specific missing evidence when it is exhausted. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, with a ${researchPolicy.resultChars}-character result target. Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier; a code child may request model_tier strong for deep multi-file reasoning, and web children stay on cheap or standard. Keep investigation in the children and planning judgment here.`,
       "For code research, prefer a one-sentence question plus up to eight anchors (repo-relative paths, optional symbols or line ranges, or a parent-held #ref) over repeating context in prose. Anchors are starting points, not conclusions.",
       "Completed entries contain a compact packet. When the tool result includes research_expansion.files and research_expansion.brief, that brief is already visible: cite research_expansion.files[].ref and do not fetch it again; traverse the evidence ref only to read beyond the shown hunks. Timed-out and failed entries contain error instead of packet. An identical retry replays the settled digest, including a timeout, so narrow or reword a retry.",
     ].join("\n") : null;

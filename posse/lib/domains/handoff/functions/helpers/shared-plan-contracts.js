@@ -1,5 +1,6 @@
 import { AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY } from "../../../../catalog/handoff.js";
 import { recordHandoffSoftening } from "./field-diagnostics.js";
+import { truncateCompletionProse } from "./shape-normalizer.js";
 
 const CONTRACT_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
 const {
@@ -36,18 +37,23 @@ function exactObject(value, keys, label) {
   return object;
 }
 
-function requiredString(value, label, maxLength) {
+function requiredString(value, label, maxLength, { identity = false } = {}) {
   if (typeof value !== "string" || !value.trim()) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} is required`);
   }
   const text = value.trim();
   if (text.length > maxLength) {
-    fail("AGENT_HANDOFF_TOO_LARGE", `${label} exceeds ${maxLength} characters`);
+    // Identifiers are join keys. Truncating them can alias distinct contracts
+    // or orphan a valid owner; preserve their spelling while softening the cap.
+    recordHandoffSoftening(label, identity ? "identity_length_preserved" : "text_truncated", {
+      max: maxLength, received: text.length,
+    });
+    if (!identity) return truncateCompletionProse(text, maxLength);
   }
   return text;
 }
 
-function stringList(value, label, { maxItems, maxLength, required = false } = {}) {
+function stringList(value, label, { maxItems, maxLength, required = false, identity = false } = {}) {
   if (value == null && !required) return [];
   if (!Array.isArray(value) || (required && value.length === 0)) {
     fail(
@@ -56,9 +62,9 @@ function stringList(value, label, { maxItems, maxLength, required = false } = {}
     );
   }
   if (value.length > maxItems) {
-    fail("AGENT_HANDOFF_TOO_LARGE", `${label} exceeds ${maxItems} entries`);
+    recordHandoffSoftening(label, "list_trimmed", { max: maxItems, received: value.length });
   }
-  return value.map((entry, index) => requiredString(entry, `${label}[${index}]`, maxLength));
+  return value.slice(0, maxItems).map((entry, index) => requiredString(entry, `${label}[${index}]`, maxLength, { identity }));
 }
 
 /**
@@ -77,17 +83,18 @@ export function sharedPlanContractAdditions(tasks, rawContracts) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", "agent_handoff.shared_contracts must be an array");
   }
   if (contractsInput.length > MAX_CONTRACTS) {
-    fail("AGENT_HANDOFF_TOO_LARGE", `agent_handoff.shared_contracts exceeds ${MAX_CONTRACTS} entries`);
+    recordHandoffSoftening("agent_handoff.shared_contracts", "list_trimmed", { max: MAX_CONTRACTS, received: contractsInput.length });
   }
 
   const taskInfo = tasks.map((raw, index) => {
     const task = objectValue(raw, `agent_handoff.tasks[${index}]`);
     const id = task.id == null
       ? `task-${index + 1}`
-      : requiredString(task.id, `agent_handoff.tasks[${index}].id`, 80);
+      : requiredString(task.id, `agent_handoff.tasks[${index}].id`, 80, { identity: true });
     const refs = stringList(task.contract_refs, `agent_handoff.tasks[${index}].contract_refs`, {
       maxItems: MAX_REFS_PER_TASK,
       maxLength: 64,
+      identity: true,
     });
     if (new Set(refs).size !== refs.length) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", `agent_handoff.tasks[${index}].contract_refs contains duplicates`);
@@ -97,17 +104,17 @@ export function sharedPlanContractAdditions(tasks, rawContracts) {
   const taskIds = new Set(taskInfo.map(({ id }) => id));
 
   const contracts = new Map();
-  for (const [index, raw] of contractsInput.entries()) {
+  for (const [index, raw] of contractsInput.slice(0, MAX_CONTRACTS).entries()) {
     const label = `agent_handoff.shared_contracts[${index}]`;
     const contract = exactObject(raw, ["id", "owner_task_id", "declarations"], label);
-    const id = requiredString(contract.id, `${label}.id`, 64);
+    const id = requiredString(contract.id, `${label}.id`, 64, { identity: true });
     if (!CONTRACT_ID_PATTERN.test(id)) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.id must use lowercase letters, digits, and hyphens`);
     }
     if (contracts.has(id)) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", `agent_handoff.shared_contracts has duplicate id ${id}`);
     }
-    const ownerTaskId = requiredString(contract.owner_task_id, `${label}.owner_task_id`, 80);
+    const ownerTaskId = requiredString(contract.owner_task_id, `${label}.owner_task_id`, 80, { identity: true });
     if (!taskIds.has(ownerTaskId)) {
       fail("AGENT_HANDOFF_SEMANTIC_INVALID", `${label}.owner_task_id references unknown task ${ownerTaskId}`);
     }
@@ -119,7 +126,22 @@ export function sharedPlanContractAdditions(tasks, rawContracts) {
     contracts.set(id, { id, index, ownerTaskId, declarations, users: [], counted: [], nonDevRefs: [] });
   }
 
+  const droppedIds = new Set(contractsInput.slice(MAX_CONTRACTS)
+    .map((raw) => typeof raw?.id === "string" ? raw.id.trim() : null)
+    .filter((id) => id && !contracts.has(id)));
   for (const [index, task] of taskInfo.entries()) {
+    for (const ref of task.refs) {
+      if (!contracts.has(ref) && !droppedIds.has(ref)) {
+        fail("AGENT_HANDOFF_SEMANTIC_INVALID", `agent_handoff.tasks[${index}].contract_refs references unknown contract ${ref}`);
+      }
+    }
+  }
+  for (const [index, task] of taskInfo.entries()) {
+    const dropped = task.refs.filter((ref) => droppedIds.has(ref));
+    if (dropped.length) {
+      recordHandoffSoftening(`agent_handoff.tasks[${index}].contract_refs`, "capped_contract_refs_removed", { received: dropped.length });
+      task.refs = task.refs.filter((ref) => !droppedIds.has(ref));
+    }
     for (const ref of task.refs) {
       const contract = contracts.get(ref);
       if (!contract) {
@@ -168,6 +190,7 @@ export function sharedPlanContractAdditions(tasks, rawContracts) {
         ? contract.declarations
         : [
           `[shared contract ${contract.id}] owner task: ${contract.ownerTaskId}`,
+          `[shared contract ${contract.id}] Ownership coordinates the interface; it does not expand file scope. Implement declarations only in this task's declared write scope. Declarations in sibling-owned files are read-only context for this task.`,
           ...contract.declarations.map((declaration) => `[shared contract ${contract.id}] ${declaration}`),
         ])),
       successCriteria: kept.map(

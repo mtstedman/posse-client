@@ -112,7 +112,7 @@ import {
   leaseNowMs as _leaseNowMs,
   leaseRequeueGraceSec,
 } from "./leases.js";
-import { findDeadlockedJobs } from "./dependencies.js";
+import { findDeadlockedJobs, getAllDependencies } from "./dependencies.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import {
   __registerHumanGateReconcileHook,
@@ -122,6 +122,7 @@ import {
   registerHumanGate,
 } from "./human-gates.js";
 import {
+  dependentSiblingScopeApproval,
   LIVE_SCOPE_WAIT_TIMEOUT_MS,
   jobHasLivePendingScopeRequest,
   scopeRequestBatchEntries,
@@ -463,6 +464,9 @@ export {
 // ═════════════════════════════════════════════════════════════════════════════
 
 export function createWorkItem(title, description, priority = "normal", opts = {}) {
+  if (!/[^\s\p{P}]/u.test(`${title || ""} ${description || ""}`)) {
+    throw new Error("A work item needs a request, not only whitespace or punctuation.");
+  }
   const db = getDb();
   const tier = opts.governance_tier || "mvp";
   const recycle = ["on", "off"].includes(String(opts.session_recycle || "").toLowerCase())
@@ -3097,7 +3101,8 @@ export function requestJobScopeExpansion({
       autoApprovalEnabled = String(getSetting(SETTING_KEYS.SCOPE_AUTO_APPROVAL) ?? "true") !== "false";
     } catch { /* default on */ }
     const autoClass = autoApprovalEnabled
-      ? classifyAutoApprovableScopeRequest({
+      ? dependentSiblingScopeApproval(current, normalizedPath, normalizedAccess,
+        listJobsByWorkItem(current.work_item_id), getAllDependencies()) || classifyAutoApprovableScopeRequest({
         path: normalizedPath,
         jobType: current.job_type,
         createRoots: payload.create_roots,
@@ -3117,6 +3122,7 @@ export function requestJobScopeExpansion({
           access: normalizedAccess,
           operation: normalizedOperation,
           reason: autoClass.reason,
+          ...(autoClass.sibling_job_ids ? { sibling_job_ids: autoClass.sibling_job_ids } : {}),
           approved_at: now(),
         },
       ].slice(-20);
@@ -3134,6 +3140,7 @@ export function requestJobScopeExpansion({
           operation: normalizedOperation,
           auto: true,
           reason: autoClass.reason,
+          ...(autoClass.sibling_job_ids ? { sibling_job_ids: autoClass.sibling_job_ids } : {}),
         }),
       });
       return {

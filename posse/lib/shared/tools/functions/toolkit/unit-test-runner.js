@@ -7,6 +7,7 @@ import path from "path";
 import { TEST_SUBPROCESS_ENV_KEYS } from "../../../../catalog/process.js";
 import { filterProcessEnv } from "../../../platform/functions/process-env.js";
 import { testExecutionCounts } from "./test-output-counts.js";
+import { pythonExecutable, repositoryTestRunner } from "./repository-test-runner.js";
 
 const SKIP_DIRS = new Set([
   ".git", ".hg", ".svn", ".idea", ".vscode", ".cache", ".next", ".nuxt",
@@ -26,14 +27,6 @@ const OUTCOME_STATUS = Object.freeze({
   infrastructure_error: "infrastructure_error",
   unavailable: "unavailable",
 });
-
-// The managed project venv, when Posse provisioned one, is where pytest lives;
-// a bare python3 on the host may not have it.
-function pythonExecutable() {
-  const managed = String(process.env.POSSE_PROJECT_PYTHON || "").trim();
-  if (managed && path.isAbsolute(managed) && fs.existsSync(managed)) return managed;
-  return "python3";
-}
 
 const ADAPTERS = Object.freeze({
   ".cjs": { language: "javascript", runner: "node_test", executable: () => "node", argv: (relative) => ["--test", relative] },
@@ -78,8 +71,12 @@ function nodeRunner(root, relative) {
 }
 
 function nodeBootstrapFailure(invocation, output) {
-  if (invocation.runner !== "node_test") return null;
+  if (invocation.runner !== "node_test"
+    && !(invocation.runner === "repository_script" && invocation.executable === process.execPath)) return null;
   if (missingNodeTestDependency(output)) return "test_dependency_unavailable";
+  if (/browserType\.launch: Executable doesn't exist|browserType\.launch:[^\n]*Host system is missing dependencies/u.test(output)) {
+    return "test_browser_unavailable";
+  }
   if (/ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX|ERR_UNKNOWN_FILE_EXTENSION/u.test(output)) return "typescript_test_loader_unavailable";
   if (/ERR_MODULE_NOT_FOUND/u.test(output)) {
     const url = /url: ['"](file:[^'"]+)['"]/u.exec(output)?.[1];
@@ -246,11 +243,11 @@ export function resolveUnitTestInvocation(projectDir, requestedPath, capability 
   if (!relativeReal || relativeReal.startsWith("..") || path.isAbsolute(relativeReal)) return null;
   const adapter = ADAPTERS[path.extname(normalized).toLowerCase()];
   if (!adapter) return null;
-  const resolved = ["javascript", "typescript"].includes(adapter.language)
+  const resolved = repositoryTestRunner(root, normalized) || (["javascript", "typescript"].includes(adapter.language)
     ? nodeRunner(root, normalized)
     : adapter.resolve
     ? adapter.resolve(root, normalized, readSourceHead(real))
-    : { runner: adapter.runner, executable: adapter.executable(), args: adapter.argv(normalized) };
+    : { runner: adapter.runner, executable: adapter.executable(), args: adapter.argv(normalized) });
   if (!resolved.runner) {
     return Object.freeze({ path: normalized, language: adapter.language, runner: null, reason: resolved.reason });
   }
@@ -286,6 +283,9 @@ function classifyCompletedRun(invocation, { code, stdout, stderr }, root) {
   const zeroTests = !!counts && (counts.total === 0 || counts.skipped === counts.total);
   const noTests = { outcome: "unavailable", reason: "no_tests_executed" };
   switch (invocation.runner) {
+    case "repository_script":
+      if (code === 0) return zeroTests || !stdout.trim() ? noTests : { outcome: "passed", reason: null };
+      return { outcome: "product_failed", reason: "tests_failed" };
     case "pytest":
       if (/No module named pytest\b/.test(output)) return { outcome: "infrastructure_error", reason: "pytest_unavailable" };
       if (code === 5 || (code === 0 && zeroTests)) return noTests;
@@ -430,8 +430,16 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
 export async function runUnitTestFiles({ projectDir, paths = [], capability = null, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const discovered = capability || discoverUnitTestCapability({ projectDir });
   const results = [];
+  const repositoryRuns = new Map();
   for (const testPath of paths) {
-    results.push(await runUnitTestFile({ projectDir, path: testPath, capability: discovered, timeoutMs }));
+    const invocation = resolveUnitTestInvocation(projectDir, testPath, discovered);
+    const key = invocation?.runner === "repository_script"
+      ? JSON.stringify([invocation.executable, invocation.args]) : null;
+    const reused = key && repositoryRuns.has(key);
+    const result = (key && repositoryRuns.get(key))
+      || await runUnitTestFile({ projectDir, path: testPath, capability: discovered, timeoutMs });
+    if (key) repositoryRuns.set(key, result);
+    results.push({ ...result, path: testPath, ...(reused ? { reused: true, duration_ms: 0 } : {}) });
   }
   // A real failure is the actionable result; otherwise anything that did not
   // run keeps the whole set unverified.

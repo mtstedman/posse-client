@@ -194,8 +194,18 @@ export function createMergeWorkflowHelpers(context, {
     return result;
   }
 
-  function squashCommitArgs(subject, sharedTrunkOperationId = null, wiId = null) {
+  function squashCommitArgs(subject, sharedTrunkOperationId = null, wiId = null, source = null) {
     const args = ["commit", "-m", subject];
+    if (source) {
+      // Keep the recovery subject stable, but preserve the work's descriptive
+      // commit subjects in the squash body instead of losing them on main.
+      const subjects = gitMergeExec(["log", "--no-merges", "--format=%s", "--max-count=50",
+        `${source.targetBranch}..${source.branch}`, "--"], source.cwd);
+      if (subjects.trim()) {
+        const changes = subjects.slice(0, 12000).split("\n").filter(Boolean).map((line) => `- ${line}`).join("\n");
+        args.push("-m", `Included changes:\n${changes}`);
+      }
+    }
     if (sharedTrunkOperationId) {
       args.push("-m", `Posse-Shared-Trunk-Operation: ${sharedTrunkOperationId}`);
     }
@@ -1363,7 +1373,7 @@ export function createMergeWorkflowHelpers(context, {
           });
           emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch });
           mergeStep = "commit";
-          gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId, wiId), cwd);
+          gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId, wiId, { branch, targetBranch, cwd }), cwd);
           mergeCreated = true;
           mergeStep = "postcommit";
         } else {
@@ -1467,7 +1477,7 @@ export function createMergeWorkflowHelpers(context, {
               if (stagedFiles.length > 0) runProjectedCandidateGate(stagedFiles);
               emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch });
               mergeStep = "commit";
-              gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId, wiId), cwd);
+              gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId, wiId, { branch, targetBranch, cwd }), cwd);
               mergeCreated = true;
               mergeStep = "postcommit";
               mergeHash = gitMergeExec(["rev-parse", "HEAD"], cwd);

@@ -99,7 +99,7 @@ function manifestChecks(projectDir) {
   }));
 }
 
-function configuredChecks(projectDir) {
+export function readRepositoryVerificationConfig(projectDir) {
   const configPath = path.join(projectDir, VERIFICATION_PLAN_CONFIG);
   if (!fs.existsSync(configPath)) return null;
   if (!isCommitted(projectDir, VERIFICATION_PLAN_CONFIG)) {
@@ -112,7 +112,7 @@ function configuredChecks(projectDir) {
   if (config?.schema_version !== VERIFICATION_PLAN_SCHEMA_VERSION || !Array.isArray(config?.checks)) {
     return { error: "verification_plan_config_schema_invalid", checks: [] };
   }
-  return { error: null, checks: config.checks };
+  return { ...config, error: null, checks: config.checks };
 }
 
 function normalizeCheck(raw, index, validateCommand) {
@@ -188,7 +188,7 @@ export function resolveRepositoryVerificationPlan({
 } = {}) {
   if (!projectDir || typeof validateCommand !== "function") return null;
   const root = path.resolve(projectDir);
-  const configured = configuredChecks(root);
+  const configured = readRepositoryVerificationConfig(root);
   const source = configured ? "repository_config" : "package_manifest";
   if (configured?.error) return {
     schema_version: VERIFICATION_PLAN_SCHEMA_VERSION,

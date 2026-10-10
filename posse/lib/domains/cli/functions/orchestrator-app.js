@@ -1307,6 +1307,11 @@ async function cmdAdd() {
     return;
   }
 
+  if (!/[\p{L}\p{N}]/u.test(description)) {
+    console.log(`  ${C.red}Describe the work with words or digits. For staging files, use git add .${C.reset}`);
+    return;
+  }
+
   // Task priority selection is temporarily hidden from intake UX.
   // Keep a fixed "medium" semantic, mapped to the queue's canonical "normal".
   const priority = "normal";

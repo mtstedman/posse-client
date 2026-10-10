@@ -76,3 +76,7 @@ export const TEST_SUBPROCESS_ENV_KEYS = Object.freeze([
   "cargo_home", "rustup_home", "goroot", "gopath", "java_home",
   "dotnet_root", "virtual_env", "pythonpath",
 ]);
+
+export const REPOSITORY_TEST_SCRIPT_RUNTIMES = Object.freeze({
+  node: ".(?:c|m)?js", php: ".php", python: ".py",
+});

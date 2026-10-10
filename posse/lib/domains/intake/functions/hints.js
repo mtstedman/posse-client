@@ -169,7 +169,9 @@ export function inferIntakeHints(text = "", fallbackMode = "build") {
   const questionIntent = directQuestionIntent || explicitReadOnlyIntent;
   const selfDirectedImplementationQuestion = /\b(?:how|what|where)\s+(?:do|can|should|would)\s+(?:i|we)\b/.test(lower);
   const passiveRequirementIntent = hasPassiveRepoRequirementIntent(lower);
-  const implementationIntent = passiveRequirementIntent || hasRepoMutationIntent(lower, {
+  const politeDeliveryRequest = !explicitReadOnlyIntent
+    && /^(?:please\s+)?(?:can|could)\s+(?:we|i)\s+(?:get|have)\s+(?:a|an)\s+\S/u.test(lower.trim());
+  const implementationIntent = passiveRequirementIntent || politeDeliveryRequest || hasRepoMutationIntent(lower, {
     includeCreate: true,
     includeCompletion: true,
   });

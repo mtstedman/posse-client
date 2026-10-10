@@ -69,6 +69,9 @@ export async function authoritativeFinalReview(job, payload, cwd) {
         instructions: [...reasons, review.repair, ...diagnostics].filter(Boolean).join("\n\n"),
       } }], _final_reviewer_agent_call_id: review.reviewer_agent_call_id };
   }
+  if (["unavailable", "infrastructure_error", "invalid"].includes(review.changed_tests?.status)) {
+    return unresolved(`Changed test verification is incomplete (${review.changed_tests.reason || review.changed_tests.status}); a passing review cannot establish execution of those tests.`);
+  }
   return { verdict: "pass", confidence: "high", reasons: [review.summary || "Final review passed for the exact committed change and task contract."],
     spawn_jobs: [], human_questions: [], _final_reviewer_agent_call_id: review.reviewer_agent_call_id };
 }

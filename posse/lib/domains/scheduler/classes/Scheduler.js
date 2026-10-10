@@ -1,3 +1,4 @@
+import { releaseUnusedCompletedWorkItemLocks } from "../functions/unused-planned-locks.js";
 // lib/scheduler.js — Job scheduler with lease-based execution
 //
 // The scheduler does NOT execute jobs. It:
@@ -2028,6 +2029,8 @@ export class Scheduler {
         if (Date.now() - lastStaleLockSweep > STALE_LOCK_SWEEP_MS) {
           lastStaleLockSweep = Date.now();
           try {
+            const unused = await releaseUnusedCompletedWorkItemLocks(this.projectDir);
+            if (unused > 0) this._log(`Released ${unused} unused planned file lock(s) after completed assessment`);
             const swept = cleanupStaleFileLocks();
             if (swept.job_locks_released > 0 || swept.wi_locks_released > 0) {
               this._log(`Released ${swept.job_locks_released} stale job lock(s), ${swept.wi_locks_released} stale WI lock(s)`);

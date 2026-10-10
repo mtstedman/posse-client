@@ -1,3 +1,16 @@
+import path from "node:path";
+
+// Tool execution already authorizes the read. Translate its address using the
+// execution root, never the orchestrator cwd or a guessed basename.
+export function toolEvidenceSourcePath(value, projectDir) {
+  const relative = canonicalEvidenceSourcePath(value);
+  if (relative) return relative;
+  if (!projectDir || !value) return null;
+  const paths = /^[A-Za-z]:[\\/]/.test(String(projectDir)) ? path.win32 : path.posix;
+  if (!paths.isAbsolute(String(projectDir)) || !paths.isAbsolute(String(value))) return null;
+  return canonicalEvidenceSourcePath(paths.relative(String(projectDir), String(value)));
+}
+
 export function canonicalEvidenceSourcePath(value) {
   const normalized = String(value || "")
     .trim()
