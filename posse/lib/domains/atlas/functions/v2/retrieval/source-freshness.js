@@ -15,6 +15,6 @@ export function staleSymbolSource(target, source) {
   return {
     code: "index_drift",
     message: "Indexed symbol does not match the current file. Refresh the WI index or use a file-based code.lens lookup; stale symbol ranges were not read.",
-    details: { file: target.repo_rel_path, indexedHash: target.content_hash, actualHash },
+    details: { file: target.repo_rel_path, name: target.qualified_name || target.name, indexedHash: target.content_hash, actualHash },
   };
 }

@@ -1,3 +1,4 @@
+import { parkDirtyWorktreeRecovery } from "../../functions/helpers/dirty-worktree-recovery.js";
 import crypto from "crypto";
 import fs from "node:fs";
 import {
@@ -1492,6 +1493,14 @@ export async function handlePostExecutionForWorker({
                   staged: blockedStaged.slice(0, 50),
                 }),
               });
+            }
+            if (gitErr?.code === "GIT_SCOPED_COMMIT_OUT_OF_SCOPE_DIRTY" && blockedPaths.length) {
+              completeAttempt(attempt.id, { status: "interrupted", duration_ms: Date.now() - startTime,
+                error_text: gitFailureDetail });
+              parkDirtyWorktreeRecovery(this, job, leaseToken, {
+                paths: blockedPaths, attemptId: attempt.id, output, phase: "commit",
+              });
+              return;
             }
             await wrappedJob.setError(lockTimeout.timeout
               ? `Git commit blocked by worktree lock timeout: ${gitFailureDetail}`

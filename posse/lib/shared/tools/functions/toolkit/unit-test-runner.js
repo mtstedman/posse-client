@@ -309,6 +309,12 @@ function classifyCompletedRun(invocation, { code, stdout, stderr }, root) {
       return { outcome: "product_failed", reason: "tests_failed" };
     case "php_script":
       if (code === 0) return zeroTests || !stdout.trim() ? noTests : { outcome: "passed", reason: null };
+      // A standalone integration script can abort before exercising any code.
+      // Recognize explicit prerequisite exceptions, not arbitrary assertion
+      // prose or a failed connection (which can itself be a product defect).
+      if (/\bUncaught (?:RuntimeException|LogicException):[^\n]*(?:\btest\b|\btesting\b)[^\n]*(?:database|server|socket|service|environment variable)[^\n]*(?:is required|not configured|not available|unavailable)\b/i.test(output)) {
+        return { outcome: "infrastructure_error", reason: "test_prerequisite_unavailable" };
+      }
       if (/(?:Failed opening required|failed to open stream)[^\n]*vendor[\\/]autoload\.php/i.test(output)) {
         return { outcome: "infrastructure_error", reason: "php_dependency_unavailable" };
       }

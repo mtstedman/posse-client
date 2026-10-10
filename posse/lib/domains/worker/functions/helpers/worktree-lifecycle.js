@@ -1,3 +1,5 @@
+import { parkDirtyWorktreeRecovery } from "./dirty-worktree-recovery.js";
+import { DIRTY_WORKTREE_RECOVERY_ERROR, DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js";
 // lib/domains/worker/functions/helpers/worktree-lifecycle.js
 //
 // Worktree lifecycle helpers extracted from worker.js: setup/recovery,
@@ -717,6 +719,14 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       if (actual && expected && actual !== expected) return false;
       const siblingLocks = activeLiveSiblingWriteLocks(job);
       const dirty = await inspectIgnorableSetupDirty(candidatePath, earlyPayload, siblingLocks, { signal });
+      const recoveryPaths = [...(dirty.blockingEntries || []), ...(dirty.residualEntries || [])]
+        .filter(entry => entry.status !== "!!")
+        .map(entry => entry.path);
+      if (recoveryPaths.length) {
+        throw Object.assign(new Error("Dirty worktree needs an operator recovery choice"), {
+          code: DIRTY_WORKTREE_RECOVERY_ERROR, paths: recoveryPaths, deferWorktreeCleanup: true,
+        });
+      }
       if (!dirty.tolerated) {
         return siblingLocks.length > 0
           && jobHasSetupCleanupPrecedence(job, siblingLocks)
@@ -928,6 +938,13 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
         const ignorableDirty = earlyPayload
           ? classifyIgnorableSetupDirty(earlyPayload, dirtyState.dirtyPost, dirtyState.ignoredPost, siblingLocks)
           : { tolerated: false, residualEntries: [], siblingEntries: [] };
+        const recoveryPaths = [...(ignorableDirty.blockingEntries || []), ...(ignorableDirty.residualEntries || [])]
+          .filter(entry => entry.status !== "!!").map(entry => entry.path);
+        if (earlyPayload && recoveryPaths.length) {
+          throw Object.assign(new Error("Dirty worktree needs an operator recovery choice"), {
+            code: DIRTY_WORKTREE_RECOVERY_ERROR, paths: recoveryPaths, deferWorktreeCleanup: true,
+          });
+        }
         if (ignorableDirty.tolerated) {
           if ((ignorableDirty.residualEntries || []).length > 0 && !toleratedResidualLogged) {
             logToleratedUntrackedResidual(worker, job, wi, {
@@ -1226,9 +1243,19 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
         onError: () => { /* outbox failure must not block lease */ },
       });
     }
+    if (earlyPayload?.[DIRTY_WORKTREE_RECOVERY_KEY]) {
+      const payload = worker.parsePayload(getJob(job.id) || job);
+      delete payload[DIRTY_WORKTREE_RECOVERY_KEY];
+      job.payload_json = JSON.stringify(payload);
+      updateJobPayload(job.id, job.payload_json);
+    }
     return { ok: true, wtPath, branchName, sentinelPath: job._activeWorktreeSentinel || null };
   } catch (gitErr) {
     if (prepTrace) finalizePrepTrace(prepTrace, { ok: false, error: gitErr?.message || String(gitErr) });
+    if (gitErr?.code === DIRTY_WORKTREE_RECOVERY_ERROR) {
+      parkDirtyWorktreeRecovery(worker, job, leaseToken, { paths: gitErr.paths, phase: "setup" });
+      return { ok: false, wtPath: null, branchName: null, sentinelPath: null };
+    }
     if (isAbortError(gitErr)) {
       worker.emit(job.id, `${C.dim}[system] WI#${job.work_item_id} worktree setup aborted${C.reset}`);
       throw gitErr;

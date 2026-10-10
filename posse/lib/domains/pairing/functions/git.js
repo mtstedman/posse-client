@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { adminGitExec } from "../../git/functions/admin-git.js";
 import { gitPushWithGitHubCliFallback } from "../../git/functions/git-push-auth.js";
+import { isPosseRuntimeOnlyGitignoreContent } from "../../runtime/functions/ignore.js";
 import { EMPTY_JOIN_FOLDER_ENTRIES } from "./join-folder.js";
 
 const NETWORK_SCHEMES = new Set(["https:", "http:", "ssh:", "git:"]);
@@ -177,6 +178,45 @@ export function initializeFreshPairingCheckout(projectDir) {
   excludePosseRuntimeFolders(root);
   appendLocalExcludes(root, FRESH_CHECKOUT_EXCLUDES);
   return root;
+}
+
+// Entries a folder may hold after `posse add` or `posse go` ran in it before
+// the join: Posse's state, the repository those commands initialized, the
+// runtime ignore file they staged for an initial commit, and the worktree
+// folder. Nothing of the member's own.
+const POSSE_INITIALIZED_ENTRIES = Object.freeze(new Set([
+  ...EMPTY_JOIN_FOLDER_ENTRIES, ".git", ".gitignore", ".posse-worktrees",
+]));
+
+/**
+ * A folder someone set up by hand with `posse add` or `posse go` before
+ * joining holds a repository with no commits and Posse's own staged
+ * `.gitignore`. That is still an empty folder for a join: drop the staged
+ * file (the session branch brings the project's own) and take the checkout
+ * over as a fresh one. Returns false, changing nothing, when the folder
+ * holds anything else, so the clean-checkout check reports it.
+ */
+export function adoptPosseInitializedCheckout(root) {
+  if (!headIsUnborn(root)) return false;
+  const entries = fs.readdirSync(root);
+  if (entries.some((entry) => !POSSE_INITIALIZED_ENTRIES.has(entry))) return false;
+  const gitignorePath = path.join(root, ".gitignore");
+  if (fs.existsSync(gitignorePath)) {
+    if (!isPosseRuntimeOnlyGitignoreContent(root, fs.readFileSync(gitignorePath, "utf8"))) return false;
+    try {
+      git(["rm", "--cached", "--quiet", "--ignore-unmatch", "--", ".gitignore"], root, { timeoutMs: 10_000 });
+    } catch { /* an unstaged file is removed below either way */ }
+    fs.rmSync(gitignorePath, { force: true });
+  }
+  // Anything else staged (nothing Posse writes) would make the checkout dirty.
+  if (git(["diff", "--cached", "--name-only"], root, { timeoutMs: 10_000 }).trim()) return false;
+  const worktrees = path.join(root, ".posse-worktrees");
+  try {
+    if (fs.existsSync(worktrees) && fs.readdirSync(worktrees).length === 0) fs.rmdirSync(worktrees);
+  } catch { /* excluded below */ }
+  excludePosseRuntimeFolders(root);
+  appendLocalExcludes(root, FRESH_CHECKOUT_EXCLUDES);
+  return true;
 }
 
 // Undo initializeFreshPairingCheckout after a join that never checked anything

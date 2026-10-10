@@ -188,11 +188,18 @@ export function finalReviewCheckFindings({ checks = null, changedTestRun = null 
   if (changedTestRun?.status === "failed" || changedTestRun?.status === "timed_out") {
     findings.push({
       severity: "high",
-      criterion: `Test files this change added or edited ${changedTestRun.status === "timed_out" ? "time out" : "fail"}: ${changedTestRun.command}\n${tail([changedTestRun.stdout, changedTestRun.stderr].filter(Boolean).join("\n"), 800)}`.slice(0, 1000),
+      criterion: `Test files this change added or edited ${changedTestRun.status === "timed_out" ? "time out" : "fail"}: ${changedTestRun.command}\n${failureExcerpt(changedTestRun)}`.slice(0, 1000),
       paths: String(changedTestRun.command || "").split(", ").filter(Boolean).slice(0, 8),
     });
   }
   return findings;
+}
+
+function failureExcerpt(run) {
+  const output = [run.failure_summary, run.stderr, run.stdout].filter(Boolean).join("\n");
+  // Exceptions precede child-process Buffer dumps and runner summaries. Keep
+  // the beginning as well as the end so the repair instruction retains them.
+  return output.length <= 800 ? output : `${output.slice(0, 550)}\n…\n${output.slice(-240)}`;
 }
 
 /**

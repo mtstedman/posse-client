@@ -952,7 +952,34 @@ export class AtlasToolExecutor {
       return duplicateSuppressedToolResult(action);
     }
     const run = async () => {
-      const value = await this.#runThroughGate({ ...request, toolName, args, action, repoKey });
+      let value = await this.#runThroughGate({ ...request, toolName, args, action, repoKey });
+      const drift = value?.result?.structuredContent?.error;
+      if (drift?.code === "index_drift" && drift.details?.file) {
+        // Edits from another session or an external tool do not necessarily
+        // pass through this executor's write hook. Repair the exact stale file
+        // once at the read boundary, outside the reader gate.
+        const boot = request.session?.bootConfig || request.session || {};
+        const scheduled = await this.scheduleDeterministicWriteRefresh({
+          ...request,
+          toolName: "edit_file",
+          args: { path: drift.details.file },
+          session: { ...request.session, bootConfig: { ...boot,
+            atlas: { ...boot.atlas, liveBuffers: "deterministic-writes" } } },
+        });
+        if (scheduled) {
+          this.#releaseDeferredRefresh(repoKey)?.catch(() => {});
+          await this.#flushPendingRefresh(repoKey);
+          const failed = this.#failedRefreshes.get(repoKey);
+          if (!failed) {
+            const retryArgs = { ...args };
+            if (action === "symbol.get" && args.symbolId && drift.details.name) {
+              delete retryArgs.symbolId;
+              retryArgs.symbolRef = { name: drift.details.name, file: drift.details.file };
+            }
+            value = await this.#runThroughGate({ ...request, toolName, args: retryArgs, action, repoKey });
+          }
+        }
+      }
       if (semanticRepeatKey && successfulAtlasToolResult(value)) {
         this.#rememberSemanticRepeat(semanticRepeatKey, dedupeRepoKey);
       }
@@ -1866,6 +1893,7 @@ export class AtlasToolExecutor {
   }
 
   #rememberDedupe(key, payload) {
+    if (!successfulAtlasToolResult(payload)) return;
     this.#recentDedupe.set(key, { atMs: this.#now(), payload: cloneJson(payload) });
     while (this.#recentDedupe.size > this.#dedupeMax) {
       const oldest = this.#recentDedupe.keys().next().value;

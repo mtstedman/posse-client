@@ -100,6 +100,10 @@ export const HUMAN_INPUT_REVIEW_DIFF_SCOPES = Object.freeze({
   ATTEMPT: "attempt",
   WORK_ITEM: "work_item",
 });
+export const DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE = "dirty_worktree_recovery";
+export const DIRTY_WORKTREE_RECOVERY_ERROR = "WORKTREE_DIRTY_RECOVERY_REQUIRED";
+export const DIRTY_WORKTREE_RECOVERY_KEY = "_dirty_worktree_recovery";
+
 const ATTEMPT_REVIEW_DIFF = Object.freeze({ scope: HUMAN_INPUT_REVIEW_DIFF_SCOPES.ATTEMPT });
 // A dead letter is a recovery choice; it judges code only when the job
 // committed some before it died.
@@ -122,6 +126,7 @@ const HUMAN_INPUT_REVIEW_DIFF_POLICIES = Object.freeze({
   oneshot_dead_letter_recovery: COMMITTED_ATTEMPT_REVIEW_DIFF,
   stall_exhausted_recovery: COMMITTED_ATTEMPT_REVIEW_DIFF,
   partial_work_recovery: WORK_ITEM_REVIEW_DIFF,
+  [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE]: WORK_ITEM_REVIEW_DIFF,
   [MERGE_VERIFICATION_REVIEW_TYPE]: WORK_ITEM_REVIEW_DIFF,
   [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: WORK_ITEM_REVIEW_DIFF,
   // Only "accept" (pass the failed jobs as an operator review) judges code.
@@ -146,26 +151,27 @@ const DEFAULT_HUMAN_GATE_SOURCE_STATES = Object.freeze(
 export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   scope_expansion_request: freezeChoices(["approve", "deny"]),
   scope_expansion_required: freezeChoices(["approve", "reject"]),
+  [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE]: freezeChoices(["commit", "send_back", "fail"]),
   partial_work_recovery: freezeChoices(["extend", "commit", "revert"]),
   blocked_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery),
   dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
   research_dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
   oneshot_dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
   stall_exhausted_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
-  assessment: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  needs_review: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  assessment_parse_error: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  assessment_evidence_missing: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  unknown_verdict: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  assessment_transport_error: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  assessment_retry_limit: freezeChoices(["retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  assessment: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  needs_review: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  assessment_parse_error: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  assessment_evidence_missing: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  unknown_verdict: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  assessment_transport_error: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
+  assessment_retry_limit: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
   replan_limit: freezeChoices(["replan", "pass", "fail", "explicit_waiver"]),
   unexecuted_replan_limit: freezeChoices(["replan", "fail", "explicit_waiver"]),
   artifact_routing_admin: freezeChoices(["acknowledge"]),
   shared_trunk_provenance: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance),
   [POST_MERGE_DB_TASK_REVIEW_TYPE]: freezeChoices(["run", "skip"]),
   [MERGE_VERIFICATION_REVIEW_TYPE]: freezeChoices(["pass", "fail"]),
-  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: freezeChoices(["merge", "waive_tests", "send_back"]),
+  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: freezeChoices(["merge", "commit", "waive_tests", "send_back"]),
   [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: freezeChoices(["retry", "accept", "abandon"]),
   [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: freezeChoices(["wait", "rebuild", "abandon"]),
 });
@@ -194,6 +200,11 @@ export const CANONICAL_HUMAN_GATE_ACTIONS = Object.freeze([
 ]);
 
 const HUMAN_GATE_CONTRACTS = Object.freeze({
+  [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE]: {
+    gate_kind: "developer_blocked",
+    allowed_actions: ["commit", "send_back", "fail"],
+    allowed_source_states: ["waiting_on_human", "waiting_on_review", "blocked"],
+  },
   scope_expansion_request: {
     gate_kind: "scope_expansion_required",
     allowed_actions: ["approve", "deny", "reject"],
@@ -248,32 +259,32 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
   },
   assessment_transport_error: {
     gate_kind: "assessment_transport_unavailable",
-    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   assessment_retry_limit: {
     gate_kind: "assessment_retry_exhausted",
-    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   assessment_parse_error: {
     gate_kind: "assessment_review",
-    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   assessment_evidence_missing: {
     gate_kind: "assessor_evidence_unavailable",
-    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   unknown_verdict: {
     gate_kind: "assessment_review",
-    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   needs_review: {
     gate_kind: "assessment_review",
-    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   replan_limit: {
@@ -308,7 +319,7 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
   },
   [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: {
     gate_kind: MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
-    allowed_actions: ["merge", "waive_tests", "send_back"],
+    allowed_actions: ["merge", "commit", "waive_tests", "send_back"],
     allowed_source_states: ["succeeded"],
   },
   [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: {
@@ -323,7 +334,7 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
   },
   assessment: {
     gate_kind: "assessment_review",
-    allowed_actions: ["retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
 });
@@ -564,6 +575,7 @@ export function humanGateContractForPayload(payload = {}, {
 export const HUMAN_INPUT_COORDINATION_REVIEW_TYPES = Object.freeze([
   "scope_expansion_request",
   "scope_expansion_required",
+  DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE,
   "partial_work_recovery",
   "blocked_recovery",
   "dead_letter_recovery",
@@ -595,7 +607,7 @@ const HUMAN_INPUT_CHOICE_ALIASES = Object.freeze({
   revert: /\b(revert|discard|drop|dead[- ]?letter|deadletter|abandon|kill)\b/i,
   acknowledge: /\b(acknowledge|acknowledged|understood|noted|ok|okay)\b/i,
   merge: /\b(merge|merge now|retry merge|retry the merge)\b/i,
-  send_back: /\b(send[ _-]?back|rework|return it)\b/i,
+  send_back: /\b(send[ _-]?back|rework|return it|fix|repair)\b/i,
 });
 
 export function normalizeHumanInputChoices(choices, { limit = 9 } = {}) {

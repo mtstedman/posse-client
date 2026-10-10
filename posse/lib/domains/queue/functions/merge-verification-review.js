@@ -385,6 +385,7 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
   const question = [
     `Merge of ${label}${targetBranch ? ` into ${targetBranch}` : ""} failed: ${detail}.`,
     "merge: merge it now (resolve the repository condition first). send_back: return the work item for rework on its branch.",
+    "commit: include current dirty work in local commits. Branch edits return for validation; target-only edits are committed before retrying merge.",
     canWaive ? "waive_tests: accept the recorded failing checks and squash-merge this candidate; failures remain recorded. Leave this gate unanswered to keep the branch and defer." : "Leave this gate unanswered to keep the branch and defer.",
     integrationGate ? (integrationGate.source === "job_test_command"
       ? "These checks were declared by development or repair jobs."

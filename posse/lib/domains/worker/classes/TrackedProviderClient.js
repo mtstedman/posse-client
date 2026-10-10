@@ -88,6 +88,7 @@ import {
 } from "../../sub-agent/classes/SubAgentRuntime.js";
 import { webResearchRuntime } from "../../web-research/classes/WebResearchRuntime.js";
 import { finalReviewRuntime } from "../../assessment/classes/FinalReviewRuntime.js";
+import { FINAL_REVIEW_NO_PROGRESS_CODE } from "../../../catalog/final-review.js";
 import { runFinalReviewer } from "../../assessment/functions/final-review-reviewer.js";
 import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 import { publishContextBudgetCheckpoint } from "../../billing/functions/context-budget.js";
@@ -1532,9 +1533,10 @@ export class TrackedProviderClient {
         attemptId: observationContext?.attempt_id ?? null,
       })?.active === true,
     );
-    const terminalAbortController = terminalReceiptRequired ? new AbortController() : null;
+    const terminalAbortController = new AbortController();
     const providerAbortSignal = combinedAbortSignal(abortSignal, terminalAbortController?.signal);
     let terminalHandoffStop = null;
+    let finalReviewFailure = null;
     let terminalProviderError = null;
     let terminalAbortIssuedAt = null;
     let providerReturnedAt = null;
@@ -2082,6 +2084,10 @@ export class TrackedProviderClient {
           workItemId: work_item_id,
           attemptId: observationContext?.attempt_id ?? null,
           cwd: reviewCwd,
+          onTerminalFailure: (error) => {
+            finalReviewFailure = error;
+            terminalAbortController.abort(error);
+          },
           runReview: ({ instructions, evidence }) => runFinalReviewer({
             call: (prompt, callOpts, context) => this.call(prompt, callOpts, context),
             composePrompt: (packet, text, composeOpts) => this.deps.composePromptRemoteAware(packet, text, composeOpts),
@@ -2117,6 +2123,10 @@ export class TrackedProviderClient {
         );
       } catch (error) {
         providerReturnedAt = Date.now();
+        if (finalReviewFailure && !abortSignal?.aborted) {
+          Object.assign(finalReviewFailure, { stats: error?.stats || {}, output: error?.output || "", toolUses: error?.toolUses || [] });
+          throw finalReviewFailure;
+        }
         if (
           !terminalHandoffStop
           || abortSignal?.aborted
@@ -2165,6 +2175,10 @@ export class TrackedProviderClient {
         terminalProviderError = error;
       }
       providerReturnedAt ??= Date.now();
+      if (finalReviewFailure && !abortSignal?.aborted) {
+        Object.assign(finalReviewFailure, { stats: providerResult?.stats || {}, output: providerResult?.output || "" });
+        throw finalReviewFailure;
+      }
       if (abortSignal?.aborted) {
         const error = providerCallAbortedError(abortSignal, this.worker, job_id);
         error.stats = providerResult?.stats || {};
@@ -3135,6 +3149,7 @@ export class TrackedProviderClient {
       // Stamp the provider that produced the error and when it surfaced:
       // attempt handling may see it only after a runtime fallback ran, and
       // must pause this provider as of now, not the job's or a later reading.
+      if (err?.code === FINAL_REVIEW_NO_PROGRESS_CODE) throw err;
       markProviderErrorObserved(err, providerName);
       let activeErr = err;
       if (isAbortError(activeErr) || activeErr?._killReason) throw activeErr;

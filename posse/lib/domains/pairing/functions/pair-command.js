@@ -42,6 +42,7 @@ import {
   excludeGeneratedPairingPaths,
   listUntrackedPairingPaths,
   deletePublishedPairingBranch,
+  adoptPosseInitializedCheckout,
   discardFreshPairingCheckout,
   findPairingRemote,
   initializeFreshPairingCheckout,
@@ -1121,6 +1122,7 @@ async function monitorPairing(remoteClient, stateId, {
       role,
       sessionCode,
       branch: state.shared_branch,
+      targetBranch: role === "host" ? state.original_branch : null,
       sync: latestSync?.sync,
       peersSync: latestSync?.peers_sync,
       peers: snapshot?.peers || status?.peers || [],
@@ -2093,6 +2095,9 @@ async function runJoin({ projectDir, remoteClient, code, C, json, environment })
   let freshCheckout = false;
   try {
     root = repositoryRoot(projectDir);
+    // `posse add` or `posse go` typed here before the join left a repository
+    // with no commits and Posse's own staged ignore file: still an empty folder.
+    freshCheckout = adoptPosseInitializedCheckout(root);
   } catch {
     root = initializeFreshPairingCheckout(projectDir);
     freshCheckout = true;

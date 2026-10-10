@@ -1,3 +1,4 @@
+import { DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js";
 // lib/domains/worker/functions/helpers/worktree-dirty-classification.js
 //
 // Porcelain parsing and the tolerable-dirty policy extracted from
@@ -115,6 +116,9 @@ export function classifyIgnorableSetupDirty(payload = {}, dirtyPorcelain = "", i
   const blockingEntries = [];
   for (const entry of entries) {
     const claimedByCurrent = payloadExplicitlyClaimsPath(payload, entry.path);
+    // Explicit recovery authorizes keeping these files through this setup.
+    // The worker consumes the marker before starting the next developer turn.
+    if (claimedByCurrent && payload[DIRTY_WORKTREE_RECOVERY_KEY]?.paths?.includes(entry.path)) continue;
     const untrackedResidual = (entry.status === "??" || entry.status === "!!") && !claimedByCurrent;
     const siblingLock = !claimedByCurrent
       ? siblingLocks.find((lock) => siblingLockCoversPath(lock, entry.path))

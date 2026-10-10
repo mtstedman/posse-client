@@ -20,6 +20,7 @@ import { parseJobPayload } from "../../queue/functions/payload.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import {
   FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
+  FINAL_REVIEW_NO_PROGRESS_CODE,
   FINAL_REVIEW_OBSERVATIONS,
   FINAL_REVIEW_OUTCOMES,
   FINAL_REVIEW_REVIEWER_STATUS,
@@ -92,7 +93,7 @@ export class FinalReviewRuntime {
   }
 
   /**
-   * @param {{ agentCallId: number, jobId: number, workItemId: number, attemptId: number, cwd: string, runReview: (input: { instructions: string, evidence: string }) => Promise<{ verdict: any, claims?: any[], agentCallId?: number | null }> }} parent
+   * @param {{ agentCallId: number, jobId: number, workItemId: number, attemptId: number, cwd: string, onTerminalFailure?: (error: Error) => void, runReview: (input: { instructions: string, evidence: string }) => Promise<{ verdict: any, claims?: any[], agentCallId?: number | null }> }} parent
    * @returns {() => void} unregister
    */
   registerParent(parent) {
@@ -152,6 +153,8 @@ export class FinalReviewRuntime {
       throw finalReviewError("FINAL_REVIEW_IN_PROGRESS", "A final review is already running for this agent call; wait for its result.");
     }
     const prior = finalReviewResultsForAttempt({ jobId: parent.jobId, attemptId: parent.attemptId });
+    const stopped = prior.find((review) => review.terminal_code === FINAL_REVIEW_NO_PROGRESS_CODE);
+    if (stopped) return this.#stopUnchangedReview(parent, stopped);
     if (prior.length >= FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT) {
       this.#release(parent);
       return {
@@ -170,12 +173,20 @@ export class FinalReviewRuntime {
     let change = null;
     let reviewerCallId = null;
     let reviewIdentity = null;
-    let reviewInput = null;
     let mode = "fresh";
     try {
       const job = getJob(parent.jobId);
       if (!job) throw finalReviewError("FINAL_REVIEW_CONTEXT_MISSING", `Job #${parent.jobId} no longer exists`);
       const payload = parseJobPayload(job);
+      // A changed runner transcript is not an implementation revision. Compare
+      // the full scoped bytes and task contract before spending another check
+      // or reviewer call, including when the first submission had no diff.
+      try { reviewIdentity = await this.identify(parent.cwd, payload, { jobId: job.id }); } catch { /* ordinary review reports unavailable identity */ }
+      const rejected = prior.at(-1);
+      if (reviewIdentity && rejected?.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS
+        && rejected.review_identity === reviewIdentity) {
+        return this.#stopUnchangedReview(parent, rejected);
+      }
       const workItem = getWorkItem(job.work_item_id);
       const declaredPlan = this.resolveTestPlan(job, payload, { cwd: parent.cwd });
       testRun = await this.runTestPlan(declaredPlan, {
@@ -198,19 +209,10 @@ export class FinalReviewRuntime {
         ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS })
         : null;
       checks = this.runChecks(parent.cwd, change);
-      try { reviewIdentity = await this.identify(parent.cwd, payload, { jobId: job.id }); } catch { /* unavailable identities cannot authorize assessment */ }
-      reviewInput = reviewIdentity ? JSON.stringify({
-        identity: reviewIdentity, change: change?.digest,
-        files: [...this.snapshotFiles(parent.cwd, payload, change)],
-        declared: testRunDiagnostics(testRun), changed: testRunDiagnostics(changedTestRun), checks,
-      }, (key, value) => ["duration_ms", "durationMs", "created_at", "started_at", "finished_at"].includes(key) ? undefined : value) : null;
+      try { reviewIdentity = await this.identify(parent.cwd, payload, { jobId: job.id }); } catch { reviewIdentity = null; /* unavailable identities cannot authorize assessment */ }
       const session = parent.reviewer;
       let outcome;
-      if (reviewInput && parent.lastReview?.input === reviewInput
-        && parent.lastReview.response.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS) {
-        mode = "unchanged";
-        outcome = Promise.resolve({ result: parent.lastReview.verdict, reviewerCallId: parent.lastReview.reviewerCallId });
-      } else if (session && !session.ended && session.parked) {
+      if (session && !session.ended && session.parked) {
         // The reviewer is waiting in its own final_review call: hand it only
         // what changed since its report.
         mode = "revision";
@@ -236,7 +238,7 @@ export class FinalReviewRuntime {
         outcome = this.#awaitReport(fresh);
       }
       ({ result, reviewerCallId } = await outcome);
-      if (mode !== "unchanged") result = mergeCheckFindings(result, finalReviewCheckFindings({ checks, changedTestRun }));
+      result = mergeCheckFindings(result, finalReviewCheckFindings({ checks, changedTestRun }));
       if (!reviewIdentity) {
         result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Cannot bind final review to the scoped workspace; verification is blocked." };
       } else if (reviewIdentity !== await this.identify(parent.cwd, payload, { jobId: job.id })) {
@@ -256,7 +258,6 @@ export class FinalReviewRuntime {
     if (reviewsRemaining === 0) this.#release(parent);
     const response = {
       ...result,
-      ...(mode === "unchanged" ? { reused: true, reason: "The scoped change and verification evidence are unchanged. Address the recorded findings before requesting another review." } : {}),
       declared_tests: testRunDiagnostics(testRun),
       changed_tests: testRunDiagnostics(changedTestRun),
       changed_file_checks: checks ? { status: checks.status, summary: checks.summary || null } : null,
@@ -291,8 +292,24 @@ export class FinalReviewRuntime {
         duration_ms: Date.now() - startedAt,
       },
     });
-    parent.lastReview = { input: reviewInput, response, verdict: result, reviewerCallId };
     return response;
+  }
+
+  #stopUnchangedReview(parent, rejected) {
+    const reason = rejected.terminal_code === FINAL_REVIEW_NO_PROGRESS_CODE ? rejected.reason
+      : `Job stopped: the developer resubmitted unchanged scoped code after a failed final review. No second assessment was run. Unresolved findings: ${(rejected.findings || []).map((finding) => finding.criterion).join("; ")}`;
+    const result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, terminal_code: FINAL_REVIEW_NO_PROGRESS_CODE,
+      reason, findings: rejected.findings || [], reviews_remaining: 0 };
+    if (rejected.terminal_code !== FINAL_REVIEW_NO_PROGRESS_CODE) {
+      this.record({ work_item_id: parent.workItemId ?? null, job_id: parent.jobId,
+        attempt_id: parent.attemptId, observation_type: FINAL_REVIEW_OBSERVATIONS.RESULT,
+        summary: reason, detail: { ...result, agent_call_id: parent.agentCallId,
+          review_identity: rejected.review_identity, reviewer_agent_call_id: rejected.reviewer_agent_call_id,
+          review_mode: "unchanged", previous_review_id: rejected.id } });
+    }
+    this.#release(parent);
+    parent.onTerminalFailure?.(finalReviewError(FINAL_REVIEW_NO_PROGRESS_CODE, reason));
+    return result;
   }
 
   #startReviewer(parent, { instructions, evidence, snapshot }) {

@@ -1,5 +1,7 @@
 import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import { isPosseProjectInitialized, uninitializedProjectMessage } from "./project-init-state.js";
+import { sessionJoinRequest } from "../../pairing/functions/join-folder.js";
+import { collectSessionView, formatSessionViewLines } from "../../pairing/functions/session-view.js";
 import { installCliWarningFilter } from "./warnings.js";
 import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 
@@ -1618,9 +1620,21 @@ async function cmdImage() {
 
 function cmdQueue() {
   const all = listWorkItems();
+  // In a session the others' queues are part of the picture.
+  let session = null;
+  try {
+    session = collectSessionView();
+  } catch { /* no pairing state: the local queue is the whole queue */ }
+  const printSession = () => {
+    if (!session) return;
+    console.log(`  ${C.bold}Session${C.reset}`);
+    for (const line of formatSessionViewLines(session)) console.log(`    ${line}`);
+    console.log();
+  };
 
   if (all.length === 0) {
     console.log(`\n  Queue is empty. Use 'add' to add work items.\n`);
+    printSession();
     return;
   }
 
@@ -1650,6 +1664,7 @@ function cmdQueue() {
     }
     console.log();
   }
+  printSession();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2914,7 +2929,10 @@ export async function main() {
     await dispatchResolvedCommand(command);
     return;
   }
-  if (!["add", "go"].includes(command) && !isPosseProjectInitialized(PROJECT_DIR)) {
+  // A join bootstraps its database here; the pairing domain then creates an
+  // empty Git checkout and fetches the host's history after admission.
+  if (!["add", "go"].includes(command) && !sessionJoinRequest()
+      && !isPosseProjectInitialized(PROJECT_DIR)) {
     console.error(`\n${C.red}${uninitializedProjectMessage(PROJECT_DIR)}${C.reset}\n`);
     process.exitCode = 1;
     return;

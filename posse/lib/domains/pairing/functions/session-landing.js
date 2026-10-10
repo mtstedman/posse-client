@@ -109,6 +109,27 @@ function participantRows({ role, members, peersSync, peers, local }) {
 }
 
 /**
+ * Everyone in the session and what each runs, as lines (no colors): the
+ * landing screen's middle, also shown by `posse status` and `posse queue`.
+ */
+export function formatSessionParticipants({
+  role = "member",
+  peersSync = [],
+  peers = [],
+  members = [],
+  local = { work_items: [], jobs: [] },
+} = {}) {
+  const rows = participantRows({ role, members, peersSync, peers, local });
+  const width = Math.min(NAME_WIDTH_MAX, Math.max(...rows.map((row) => row.name.length)));
+  const lines = [`In this session (${rows.length}):`];
+  for (const row of rows) {
+    const name = row.name.length > width ? `${row.name.slice(0, width - 1)}…` : row.name.padEnd(width);
+    lines.push(`  ${name}  ${row.detail}`);
+  }
+  return lines;
+}
+
+/**
  * The landing screen as lines (no colors): session and connection, everyone
  * in it and what they run, what needs you, and the next things to type.
  */
@@ -116,6 +137,8 @@ export function formatSessionLanding({
   role = "member",
   sessionCode = null,
   branch = null,
+  // Host only: the branch of its own repository the session merges into.
+  targetBranch = null,
   sync = null,
   peersSync = [],
   peers = [],
@@ -141,13 +164,14 @@ export function formatSessionLanding({
   lines.push(`Connection: ${disconnected ? `${SESSION_SYNC_GLYPHS[SESSION_SYNC_STATES.DISCONNECTED]} reconnecting` : "connected"}`
     + ` · ${syncText}`
     + `${observing ? " · posse go (another terminal) is running this session" : ""}`);
-  const rows = participantRows({ role, members, peersSync, peers, local });
-  const width = Math.min(NAME_WIDTH_MAX, Math.max(...rows.map((row) => row.name.length)));
-  lines.push(`In this session (${rows.length}):`);
-  for (const row of rows) {
-    const name = row.name.length > width ? `${row.name.slice(0, width - 1)}…` : row.name.padEnd(width);
-    lines.push(`  ${name}  ${row.detail}`);
+  // The shared branch is the part people confuse with their repository: say
+  // where work goes and how it reaches the real branch.
+  if (branch) {
+    lines.push(host
+      ? `Work: lands on ${branch}, a temporary session branch${targetBranch ? `, not ${targetBranch}` : ""}; merge or close puts it on ${targetBranch || "your branch"}.`
+      : `Work: lands on ${branch}, a temporary session branch; the host merges it into their repository.`);
   }
+  lines.push(...formatSessionParticipants({ role, members, peersSync, peers, local }));
   if (host) {
     const pending = (Array.isArray(members) ? members : []).filter((member) => member?.state === "pending");
     if (pending.length > 0) {
@@ -163,6 +187,11 @@ export function formatSessionLanding({
     lines.push(`Needs you: ${plural(waiting, "approval")} waiting · type go to answer ${waiting === 1 ? "it" : "them"} in the run screen`);
   }
   const queued = (Array.isArray(local?.work_items) ? local.work_items : []).length;
+  // A queued task does nothing until go runs it here; say so, since the
+  // others only see it as queued until then.
+  if (queued > 0 && !observing) {
+    lines.push(`Queued here: ${plural(queued, "task")} · ${queued === 1 ? "it starts" : "they start"} when you type go; everyone in the session sees ${queued === 1 ? "it" : "them"}.`);
+  }
   const start = queued > 0 ? `go (run your ${plural(queued, "task")})` : "go";
   lines.push(observing
     ? "Next: add <task> · status · Ctrl+C detaches this console (posse go keeps the session)"

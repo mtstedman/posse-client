@@ -1,3 +1,5 @@
+import { applyDirtyWorktreeRecovery } from "../helpers/dirty-worktree-recovery.js";
+import { DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE } from "../../../../catalog/human-input.js";
 import { processVerdict } from "../helpers/process-verdict.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { retainBoundedText } from "../../../../shared/format/functions/bounded-text.js";
@@ -807,6 +809,13 @@ export async function runHumanInputJob(worker, job, {
       }
     }
 
+    if (payload.review_type === DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE) {
+      handledReviewDecision = true;
+      await applyDirtyWorktreeRecovery({ worker, job, payload, action: selectedAction,
+        feedback: resolutionMetadata?.operator_feedback || resolutionMetadata?.feedback || resolutionAnswer,
+        operationKey: `${resolutionClaim.idempotency_key}:resume_original` });
+    }
+
     if (payload.original_job_id && payload.review_type === "partial_work_recovery") {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
@@ -1284,7 +1293,9 @@ export async function runHumanInputJob(worker, job, {
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
       const exactAction = humanInputChoiceFromAnswer(lastAnswer, actionChoices);
-      const reviewDecision = exactAction === "retry_assessment"
+      const reviewDecision = exactAction === "send_back"
+        ? "send_back"
+        : exactAction === "retry_assessment"
         ? "retry"
         : (exactAction === "explicit_waiver"
           ? "skip"
@@ -1383,6 +1394,19 @@ export async function runHumanInputJob(worker, job, {
               }),
             });
           }
+        } else if (assessmentReview && exactAction === "send_back") {
+          handledReviewDecision = true;
+          const next = worker.parsePayload(origJob);
+          delete next._assess_only;
+          next.instructions = [next.instructions || next.task_spec || origJob.title,
+            `Review gate #${job.id} returned this job for fixes:`, payload.context,
+            resolutionMetadata?.operator_feedback || resolutionMetadata?.feedback || lastAnswer,
+          ].filter(Boolean).join("\n\n");
+          beginJobRetryGeneration(origJob.id, { payload: next });
+          const resumed = requestParkedJobResumeAfterGate({ gateJobId: job.id, originalJobId: origJob.id,
+            operationKey: `${resolutionClaim.idempotency_key}:resume_original`, reason: "send_back" });
+          if (!resumed.ok) throw new Error(`Developer repair resume failed: ${resumed.reason}`);
+          cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
         } else if (assessmentReview && reviewDecision === "retry") {
           cancelPendingReviewGatesForOriginal(origJob.id, { exceptJobId: job.id });
           pendingReviewGatesAlreadyCanceled = true;

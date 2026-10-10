@@ -154,7 +154,7 @@ if (process.argv[2] === "tools") {
 // A session join typed in any folder runs in a folder of its own. This runs
 // before the application import below, which writes Posse state (run logs,
 // the database) into the current folder.
-const { relocateSessionJoinIfNeeded } = await import("./lib/domains/pairing/functions/join-folder.js");
+const { relocateSessionJoinIfNeeded, sessionJoinRequest } = await import("./lib/domains/pairing/functions/join-folder.js");
 const relocatedJoin = await relocateSessionJoinIfNeeded();
 if (relocatedJoin) process.exit(relocatedJoin.exitCode);
 
@@ -170,13 +170,14 @@ if (await runMaintenanceCliIfRequested()) {
 
 // Run and session hosting repair npm before the application loads. Refuse an
 // uninitialized project first so a command in an arbitrary folder cannot
-// install dependencies or create runtime state there.
+// install dependencies or create runtime state there. Joining owns first-run
+// initialization in the folder selected above.
 const { isPosseProjectInitialized, uninitializedProjectMessage } = await import("./lib/domains/cli/functions/project-init-state.js");
 const { pairingCommandOpensSession } = await import("./lib/catalog/pairing-command.js");
 const earlyCommand = String(process.argv[2] || "").toLowerCase();
 const opensSession = ["pair", "session"].includes(earlyCommand)
   && pairingCommandOpensSession(process.argv.slice(3));
-if ((earlyCommand === "run" || opensSession)
+if ((earlyCommand === "run" || (opensSession && !sessionJoinRequest()))
     && !process.argv.includes("--help") && !process.argv.includes("-h")
     && !isPosseProjectInitialized()) {
   process.stderr.write(`${uninitializedProjectMessage()}\n`);

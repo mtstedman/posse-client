@@ -13,6 +13,7 @@ import { getDefaultTierModel } from "../../providers/functions/model-catalog.js"
 import { listPersistedProviderPauses } from "../../providers/functions/provider-pause-state.js";
 import { formatProviderPause } from "./admin-provider-pause.js";
 import { providerRoleForJobType } from "../../providers/functions/roles.js";
+import { collectSessionView, formatSessionViewLines } from "../../pairing/functions/session-view.js";
 
 const DEFAULT_STATUS_DETAIL_LIMIT = 25;
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
@@ -140,11 +141,19 @@ export function collectStatusData({ targetBranch, args = [] } = {}) {
     // Account settings unavailable: status still renders.
   }
 
+  let session = null;
+  try {
+    session = collectSessionView({ nowMs });
+  } catch {
+    // Older schema or no pairing state: status still renders.
+  }
+
   return {
     generated_at: new Date(nowMs).toISOString(),
     generated_at_ms: nowMs,
     target_branch: targetBranch,
     delivery: getPublicationTelemetry(),
+    session,
     provider_pauses: providerPauses,
     filter: {
       active: options.active,
@@ -255,6 +264,10 @@ function renderHumanStatus(data, { C }) {
   write(`  ${C.bold}Delivery:${C.reset} local=${C.green}tracked${C.reset}  remote=${publication.publication_state || "unknown"}  deployed=${publication.deployment_state || "unverified"}`);
   if (publication.remote || publication.branch) {
     write(`  ${C.dim}${publication.remote || "remote"}/${publication.branch || data.target_branch}${publication.ahead_count != null ? ` · ${publication.ahead_count} ahead` : ""}${C.reset}`);
+  }
+  if (data.session) {
+    write(`\n  ${C.bold}Session:${C.reset}`);
+    for (const line of formatSessionViewLines(data.session)) write(`    ${line}`);
   }
   if (data.provider_pauses.length > 0) {
     write(`  ${C.bold}Provider pauses:${C.reset}`);

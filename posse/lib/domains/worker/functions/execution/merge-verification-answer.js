@@ -1,3 +1,4 @@
+import { commitMergeRecoveryDirt } from "../../../git/functions/merge-dirty-recovery.js";
 import { mergeTestWaiverFromGate } from "../../../git/functions/merge-test-waiver.js";
 // Answers to the merge verification review gate (see
 // queue/functions/merge-verification-review.js), from any surface: the
@@ -48,6 +49,7 @@ import {
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../../catalog/event.js";
 import {
+  DIRTY_WORKTREE_RECOVERY_KEY,
   MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
   MERGE_VERIFICATION_REVIEW_TYPE,
 } from "../../../../catalog/human-input.js";
@@ -109,7 +111,7 @@ function sendBackRefusal(workItem, gateJobId) {
  * { ok: false, message } to keep the gate open.
  */
 export function prepareMergeVerificationReviewAnswer(job, payload, action) {
-  if (effectiveMergeGateAction(payload, action) !== "fail") return { ok: true };
+  if (!["fail", "commit"].includes(effectiveMergeGateAction(payload, action))) return { ok: true };
   const workItem = getWorkItem(Number(job.work_item_id));
   // A stale gate is retired by the claimed answer's own state check.
   if (!stillUnderReview(workItem)) return { ok: true };
@@ -188,9 +190,29 @@ export async function applyMergeVerificationReviewAnswer({
   actorLabel = "Human",
   projectDir = process.cwd(),
   mergeWorkItem = mergeRecoveredWorkItem,
+  commitDirtyWork = commitMergeRecoveryDirt,
 } = {}) {
   const workItemId = Number(job.work_item_id);
-  const effectiveAction = effectiveMergeGateAction(payload, action);
+  let effectiveAction = effectiveMergeGateAction(payload, action);
+  const pendingValidation = parseJobPayload(getJob(job.id) || job)[DIRTY_WORKTREE_RECOVERY_KEY]?.source_validation_required;
+  if (pendingValidation && ["merge", "waive_tests", "pass"].includes(effectiveAction)) {
+    return { ok: false, keepGateOpen: true,
+      message: "Recovered branch edits still need validation. Choose commit to finish recovery or send_back to validate them." };
+  }
+  if (effectiveAction === "commit") {
+    const wi = getWorkItem(workItemId);
+    if (!stillUnderReview(wi)) return { ok: false, message: "The work item is no longer awaiting merge" };
+    const refusal = sendBackRefusal(wi, job.id);
+    if (refusal) return { ok: false, keepGateOpen: true, message: refusal };
+    try {
+      const committed = await commitDirtyWork(wi, { projectDir, gateJobId: job.id });
+      if (!committed.sourceChanged) return mergeAfterRecovery({ workItemId, actorLabel, projectDir, mergeWorkItem });
+      effectiveAction = "fail";
+      metadata = { ...metadata, operator_feedback: ["Dirty branch work was explicitly included. Validate the preserved changes before resubmitting for merge.", mergeVerificationFeedback(answer, metadata)].filter(Boolean).join("\n") };
+    } catch (error) {
+      return { ok: false, keepGateOpen: true, message: error.message || String(error) };
+    }
+  }
   if (effectiveAction === "waive_tests") {
     const testWaiver = mergeTestWaiverFromGate(job, payload, mergeVerificationFeedback(answer, metadata));
     if (!testWaiver) return { ok: false, keepGateOpen: true, message: "No failed candidate checks are recorded; retry merge to obtain current diagnostics." };

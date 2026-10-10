@@ -244,7 +244,7 @@ posse admin
 posse go
 ```
 
-`posse add` and `posse go` initialize the project. Other repository commands
+`posse add`, `posse go`, and session joins initialize the project. Other repository commands
 require that initialization. `posse doctor` and `posse update` skip repository
 dependency installation when run elsewhere. The installer explicitly provisions
 shared tools from Posse's own checkout.
@@ -697,6 +697,12 @@ posse session join ABCDE-FG234
 # invite links are accepted directly too
 posse session join 'posse://session?token=ABCDE-FG234'
 ```
+
+Joining initializes Posse automatically. From a nonempty folder, the command
+runs in `~/posse-sessions/<CODE>`; use `--here` to join in an existing clean
+clone. An empty folder takes the session repository's history after admission.
+A folder where `posse add` or `posse go` already ran, with nothing committed,
+still counts as empty.
 
 The joiner displays a four-character countersign. The host confirms it from the
 hosting clone (a second terminal is fine):
