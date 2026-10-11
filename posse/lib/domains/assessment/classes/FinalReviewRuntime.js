@@ -20,7 +20,6 @@ import { parseJobPayload } from "../../queue/functions/payload.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import {
   FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
-  FINAL_REVIEW_NO_PROGRESS_CODE,
   FINAL_REVIEW_OBSERVATIONS,
   FINAL_REVIEW_OUTCOMES,
   FINAL_REVIEW_REVIEWER_PARK_MS,
@@ -51,6 +50,7 @@ import {
   finalReviewResultFromVerdict,
   finalReviewResultsForAttempt,
   repeatedDeterministicReview,
+  semanticFinalReviewResults,
 } from "../functions/final-review-result.js";
 
 const REVIEWER_DONE_INSTRUCTION = "The developer has finished with this review. End now with your terminal handoff carrying your latest verdict.";
@@ -97,7 +97,7 @@ export class FinalReviewRuntime {
   }
 
   /**
-   * @param {{ agentCallId: number, jobId: number, workItemId: number, attemptId: number, cwd: string, onTerminalFailure?: (error: Error) => void, runReview: (input: { instructions: string, evidence: string }) => Promise<{ verdict: any, claims?: any[], agentCallId?: number | null }> }} parent
+   * @param {{ agentCallId: number, jobId: number, workItemId: number, attemptId: number, cwd: string, runReview: (input: { instructions: string, evidence: string }) => Promise<{ verdict: any, claims?: any[], agentCallId?: number | null }> }} parent
    * @returns {() => void} unregister
    */
   registerParent(parent) {
@@ -166,14 +166,18 @@ export class FinalReviewRuntime {
       throw finalReviewError("FINAL_REVIEW_IN_PROGRESS", "A final review is already running for this agent call; wait for its result.");
     }
     const prior = finalReviewResultsForAttempt({ jobId: parent.jobId, attemptId: parent.attemptId });
-    const semanticPrior = prior.filter((review) => review.review_mode !== "deterministic");
-    const stopped = prior.find((review) => review.terminal_code === FINAL_REVIEW_NO_PROGRESS_CODE);
-    if (stopped) return this.#stopUnchangedReview(parent, stopped);
+    const semanticPrior = semanticFinalReviewResults(prior);
     let currentIdentity = null;
     try {
       const job = getJob(parent.jobId);
       if (job) currentIdentity = await this.identify(parent.cwd, parseJobPayload(job), { jobId: job.id });
     } catch { /* a fresh review will report the identity failure */ }
+    const unchanged = prior.at(-1);
+    if (unchanged?.review_mode === "unchanged" && currentIdentity === unchanged.review_identity) {
+      this.#release(parent);
+      return { outcome: FINAL_REVIEW_OUTCOMES.FINDINGS, findings: unchanged.findings || [],
+        reason: unchanged.reason, reviews_remaining: Math.max(0, FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT - semanticPrior.length) };
+    }
     const repeated = repeatedDeterministicReview(prior, currentIdentity);
     if (repeated && currentIdentity) {
       this.#release(parent);
@@ -211,7 +215,7 @@ export class FinalReviewRuntime {
       const rejected = prior.at(-1);
       if (reviewIdentity && rejected?.review_mode !== "deterministic" && rejected?.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS
         && rejected.review_identity === reviewIdentity) {
-        return this.#stopUnchangedReview(parent, rejected);
+        return this.#returnUnchangedReview(parent, rejected, semanticPrior.length);
       }
       const workItem = getWorkItem(job.work_item_id);
       const declaredPlan = this.resolveTestPlan(job, payload, { cwd: parent.cwd });
@@ -341,20 +345,17 @@ export class FinalReviewRuntime {
     return response;
   }
 
-  #stopUnchangedReview(parent, rejected) {
-    const reason = rejected.terminal_code === FINAL_REVIEW_NO_PROGRESS_CODE ? rejected.reason
-      : `Job stopped: the developer resubmitted unchanged scoped code after a failed final review. No second assessment was run. Unresolved findings: ${(rejected.findings || []).map((finding) => finding.criterion).join("; ")}`;
-    const result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, terminal_code: FINAL_REVIEW_NO_PROGRESS_CODE,
-      reason, findings: rejected.findings || [], reviews_remaining: 0 };
-    if (rejected.terminal_code !== FINAL_REVIEW_NO_PROGRESS_CODE) {
-      this.record({ work_item_id: parent.workItemId ?? null, job_id: parent.jobId,
-        attempt_id: parent.attemptId, observation_type: FINAL_REVIEW_OBSERVATIONS.RESULT,
-        summary: reason, detail: { ...result, agent_call_id: parent.agentCallId,
-          review_identity: rejected.review_identity, reviewer_agent_call_id: rejected.reviewer_agent_call_id,
-          review_mode: "unchanged", previous_review_id: rejected.id } });
-    }
+  #returnUnchangedReview(parent, rejected, semanticCount) {
+    const reason = `The scoped code is unchanged since the failed final review. Existing findings remain; no second review was run. Hand off for repair when ready.`;
+    const result = { outcome: FINAL_REVIEW_OUTCOMES.FINDINGS,
+      reason, findings: rejected.findings || [],
+      reviews_remaining: Math.max(0, FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT - semanticCount) };
+    this.record({ work_item_id: parent.workItemId ?? null, job_id: parent.jobId,
+      attempt_id: parent.attemptId, observation_type: FINAL_REVIEW_OBSERVATIONS.RESULT,
+      summary: reason, detail: { ...result, agent_call_id: parent.agentCallId,
+        review_identity: rejected.review_identity, reviewer_agent_call_id: rejected.reviewer_agent_call_id,
+        review_mode: "unchanged", previous_review_id: rejected.id } });
     this.#release(parent);
-    parent.onTerminalFailure?.(finalReviewError(FINAL_REVIEW_NO_PROGRESS_CODE, reason));
     return result;
   }
 

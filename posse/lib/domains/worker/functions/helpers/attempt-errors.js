@@ -56,7 +56,6 @@ import {
 import { siblingJobScopePaths } from "../../../queue/functions/file-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
-import { FINAL_REVIEW_NO_PROGRESS_CODE } from "../../../../catalog/final-review.js";
 import { processVerdict } from "./process-verdict.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
 import {
@@ -469,22 +468,6 @@ export async function handleExecuteAttemptError(worker, {
   // rewrite the attempt or repeat retry/dead-letter side effects.
   if (currentJob?.lease_token !== leaseToken) {
     worker.emit(job.id, `${C.yellow}[worker] job #${job.id} lease already released; finalization failed: ${err?.message || err}${C.reset}`);
-    return;
-  }
-
-  if (err.code === FINAL_REVIEW_NO_PROGRESS_CODE) {
-    // A rejected unchanged submission is a terminal lack of progress, not a
-    // provider interruption or permission to start another fix/assessment.
-    completeAttempt(attempt.id, { status: "failed", duration_ms: Date.now() - startTime, error_text: err.message });
-    setJobError(job.id, err.message);
-    await stashWorktreeForFailure(job, wtPath, worker.projectDir);
-    worker._releaseLease(job, leaseToken, "failed");
-    logEvent({ work_item_id: job.work_item_id, job_id: job.id, attempt_id: attempt.id,
-      event_type: EVENT_TYPES.JOB_NOOP_FAILURE, actor_type: EVENT_ACTORS.WORKER,
-      message: err.message, event_json: JSON.stringify({ code: err.code }) });
-    worker.emit(job.id, `${C.red}[worker] ${err.message}${C.reset}`);
-    refreshAndExtractInsights(job.work_item_id);
-    worker._cleanupWorktreeIfDone(job.work_item_id);
     return;
   }
 

@@ -144,6 +144,10 @@ export function finalReviewResultsForAttempt({ jobId, attemptId, db = getDb() })
     .map((row) => ({ id: Number(row.id), ...parseDetail(row) }));
 }
 
+export function semanticFinalReviewResults(results = []) {
+  return results.filter((result) => !["deterministic", "unchanged"].includes(result.review_mode));
+}
+
 /** Bound repeated deterministic failures without charging a semantic review. */
 export function repeatedDeterministicReview(results = [], reviewIdentity = null) {
   const recent = results.slice(-FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS);
@@ -200,9 +204,14 @@ export function finalReviewHandoffHold({ jobId, attemptId, agentCallId, db = get
   if (!finalReviewIssuedTo({ jobId, agentCallId, db })) return null;
   const results = finalReviewResultsForAttempt({ jobId, attemptId, db });
   if (results.some((result) => result.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED)) return null;
-  if (results.filter((result) => result.review_mode !== "deterministic").length >= FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT) return null;
+  if (semanticFinalReviewResults(results).length >= FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT) return null;
   if (repeatedDeterministicReview(results)) return null;
   const latest = results.at(-1);
+  if (latest?.review_mode === "unchanged") {
+    return editedSince({ jobId, agentCallId, afterObservationId: latest.id, db })
+      ? "The change was edited after unchanged findings were returned; call tools_final_review again before the COMPLETE handoff."
+      : null;
+  }
   if (!latest) {
     return "Call tools_final_review before a COMPLETE handoff: it runs the task's declared tests and an independent review of the change.";
   }

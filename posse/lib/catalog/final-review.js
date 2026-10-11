@@ -17,12 +17,11 @@ export const FINAL_REVIEW_SETTING_KEY = "final_review_mode";
 export const FINAL_REVIEW_MODES = Object.freeze(["on", "off"]);
 export const FINAL_REVIEW_DEFAULT_MODE = "on";
 
-// Reviews per implementation attempt. An unchanged resubmission after findings
-// terminates the job earlier. Once spent, the handoff proceeds and
+// Reviews per implementation attempt. An unchanged resubmission reuses the
+// existing findings without spending a review. Once spent, handoff proceeds and
 // the persisted review remains unresolved; no second assessor is dispatched.
 export const FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT = 3;
 export const FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS = 2;
-export const FINAL_REVIEW_NO_PROGRESS_CODE = "FINAL_REVIEW_NO_PROGRESS";
 export const FINAL_REVIEW_CONTINUATION_NEXT_ACTION = "verify_preserved_candidate";
 
 // Whole tool call: the declared tests plus the reviewer's own agent call. The
