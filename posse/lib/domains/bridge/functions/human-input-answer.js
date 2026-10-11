@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { Worker } from "../../worker/classes/Worker.js";
 import { runHumanInputJob } from "../../worker/functions/execution/human-input-job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { getHumanGate, getJob, getLatestAttempt } from "../../queue/functions/index.js";
+import { getHumanGate, getJob, getLatestAttempt, isMergeFailureRecoveryPayload, mergeVerificationReviewGateState } from "../../queue/functions/index.js";
 import { now } from "../../queue/functions/common.js";
 import { jobHasLiveLeaseAt } from "../../queue/functions/lease-state.js";
 import {
@@ -325,10 +325,14 @@ export async function answerHumanInput(jobId, args = {}, {
       work_item_id: fresh?.work_item_id || current.work_item_id,
     };
   }
+  const nextReview = isMergeFailureRecoveryPayload(payload)
+    ? mergeVerificationReviewGateState(current.work_item_id)
+    : null;
   return {
     ok: true,
     job_id: id,
     status: fresh?.status || "unknown",
     work_item_id: fresh?.work_item_id || current.work_item_id,
+    ...(nextReview?.open ? { next_gate_job_id: nextReview.gate_job_id } : {}),
   };
 }

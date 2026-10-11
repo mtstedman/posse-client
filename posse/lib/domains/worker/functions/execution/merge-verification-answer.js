@@ -38,9 +38,11 @@ import {
   appendReviewRejectionDescription,
   getJob,
   getWorkItem,
+  holdForCurrentMergeVerificationReview,
   hasUnresolvedSharedTrunkMergeOperation,
   isMergeFailureRecoveryPayload,
   logEvent,
+  mergeVerificationReviewGateState,
   requeueWorkItemAfterRejection,
   reviewRejectionReadiness,
   runInTransaction,
@@ -156,6 +158,24 @@ async function mergeAfterRecovery({ workItemId, actorLabel, projectDir, mergeWor
       ok: false,
       message: `WI#${workItemId} is ${workItem ? workItem.status : "gone"}; the merge recovery no longer applies`,
     };
+  }
+  const priorReview = mergeVerificationReviewGateState(workItemId);
+  if (priorReview?.approved && workItem.branch_name) {
+    let branchHead;
+    try {
+      branchHead = String(await gitExecAsync(["rev-parse", "--verify", workItem.branch_name], projectDir)).trim();
+    } catch (error) {
+      return { ok: false, keepGateOpen: true,
+        message: `Cannot inspect ${workItem.branch_name}: ${error?.message || error}` };
+    }
+    if (priorReview.reviewed_branch_head !== branchHead) {
+      const review = holdForCurrentMergeVerificationReview(workItemId, branchHead);
+      if (review?.gate_job_id) return {
+        ok: true,
+        review_gate_id: review.gate_job_id,
+        message: `WI#${workItemId} is waiting for review of the current branch at gate #${review.gate_job_id}; preserved implementation jobs will not rerun.`,
+      };
+    }
   }
   let result;
   try {

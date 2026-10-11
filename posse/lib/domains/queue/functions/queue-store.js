@@ -1390,6 +1390,19 @@ function holdForMergeVerificationReview(workItem, observedBranchHead = null) {
   return { gate_job_id: Number(gate.id), opened: true };
 }
 
+// A recovery answer can discover that the earlier merge review was bound to
+// a branch head replaced by a target update/rebase. Retire that recovery
+// decision into a fresh review without rerunning the implementation jobs.
+export function holdForCurrentMergeVerificationReview(workItemId, observedBranchHead) {
+  if (!/^[0-9a-f]{40}$/i.test(String(observedBranchHead || ""))) return null;
+  const db = getDb();
+  return runImmediateTransaction(db, () => {
+    const workItem = getWorkItem(workItemId);
+    if (!workItem || workItem.status !== "complete" || workItem.merge_state === "merged") return null;
+    return holdForMergeVerificationReview(workItem, observedBranchHead);
+  });
+}
+
 /**
  * Atomically claim a completed work item for automatic publication.
  *
