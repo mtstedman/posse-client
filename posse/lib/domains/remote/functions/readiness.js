@@ -100,6 +100,20 @@ function requireAnyContains(errors, label, text, needles, description) {
   }
 }
 
+function requirePromptLiteral(errors, text, legacyLabel, readableLabel = legacyLabel) {
+  const value = String(text || "");
+  // Readable literals use a matching fence that grows when the body contains
+  // backticks. Do not mistake a later section's closing fence for this one.
+  const readable = new RegExp(
+    "(?:^|\\n)" + readableLabel + ":\\r?\\n(`{3,})text\\r?\\n"
+    + "(?:(?!\\1)[\\s\\S])+?\\r?\\n\\1(?=\\r?\\n|$)",
+  ).test(value);
+  if (!readable && !value.includes(`${legacyLabel} (literal JSON string):`)) {
+    errors.push(`user_prompt missing ${legacyLabel} literal or fenced ${readableLabel} section`);
+  }
+  return readable;
+}
+
 export function validateRemoteCompileReadinessResponse(response) {
   const errors = [];
   pushMissing(errors, "prompt_version", response?.prompt_version);
@@ -123,11 +137,13 @@ export function validateRemoteCompileReadinessResponse(response) {
   requireContains(errors, "stable_context", stableContext, "tool_surface:");
   requireContains(errors, "stable_context", stableContext, "tool_policy:");
   requireContains(errors, "stable_context", stableContext, "files_to_modify:");
-  requireContains(errors, "user_prompt", userPrompt, "INSTRUCTIONS (literal JSON string):");
+  const readableTask = requirePromptLiteral(errors, userPrompt, "INSTRUCTIONS", "TASK");
   requireContains(errors, "user_prompt", userPrompt, "PREVIOUS ATTEMPT FAILED");
-  requireContains(errors, "user_prompt", userPrompt, "SUCCESS CRITERIA (literal JSON string):");
-  requireContains(errors, "user_prompt", userPrompt, "TEST COMMAND (literal JSON string):");
-  requireContains(errors, "user_prompt", userPrompt, "GOVERNANCE TIER: PRODUCTION");
+  requirePromptLiteral(errors, userPrompt, "SUCCESS CRITERIA");
+  requirePromptLiteral(errors, userPrompt, "TEST COMMAND");
+  // Compact execution roles deliberately omit the governance prose. Legacy
+  // compiler responses still carry it; the probe requests production rigor.
+  if (!readableTask) requireContains(errors, "user_prompt", userPrompt, "GOVERNANCE TIER: PRODUCTION");
   requireContains(errors, "user_prompt", userPrompt, "CONTEXT FROM PREVIOUS RUNS");
   requireContains(errors, "user_prompt", userPrompt, "PROJECT SUMMARY (literal JSON string):");
   requireContains(errors, "user_prompt", userPrompt, "HISTORICAL INSIGHTS");
