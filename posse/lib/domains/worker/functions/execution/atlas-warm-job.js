@@ -1,7 +1,7 @@
 // ATLAS v2 warm-job executor.
 //
 // Workstream E provides the scheduling seam: this function is called by
-// Worker for `atlas_warm` jobs. Phase 2.1 wires the Warmer behind this
+// Worker for `atlas_warm` jobs. ParseEngine runs behind this
 // executor so the result reflects real ledger/view work; if the ledger
 // isn't bootstrapped yet (fresh install with no ATLAS v2 setup), the
 // executor falls back to an all-paths-skipped stub result so the

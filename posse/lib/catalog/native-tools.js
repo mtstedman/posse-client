@@ -1,5 +1,7 @@
 import { projectRuntimeHandoffMetadata } from "./handoff-schema.js";
-import { RESEARCH_AGENT_TYPES, RESEARCH_CHILD_REQUEST_MODEL_TIERS } from "./planner-dispatch.js";
+import { PLANNER_DISPATCH_SETTINGS, RESEARCH_AGENT_TYPES, RESEARCH_CHILD_REQUEST_MODEL_TIERS } from "./planner-dispatch.js";
+import { SETTING_KEYS } from "./settings.js";
+import { PROJECT_DB_TYPES } from "./project-db.js";
 // Native deterministic-MCP tool schema definitions (pure data).
 //
 // Canonical JSON Schemas for the in-tree deterministic tools. Per the catalog
@@ -12,12 +14,18 @@ import { RESEARCH_AGENT_TYPES, RESEARCH_CHILD_REQUEST_MODEL_TIERS } from "./plan
 
 import {
   AGENT_HANDOFF_LIMITS,
+  AGENT_HANDOFF_PLANNER_METADATA_ENUMS,
   AGENT_HANDOFF_PROTOCOL,
+  AGENT_HANDOFF_PROFILES,
+  AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES,
+  AGENT_HANDOFF_RESEARCH_QUESTION_CATEGORIES,
+  AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES,
   AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY,
+  AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES,
   AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY,
 } from "./handoff.js";
 import { SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "./sub-agent.js";
-import { SPRITE_SHEET_FIT_MODES, SPRITE_SHEET_LIMITS } from "./artifact.js";
+import { ARTIFACT_TASK_MODE_VALUES, SPRITE_SHEET_FIT_MODES, SPRITE_SHEET_LIMITS, TASK_MODE_VALUES } from "./artifact.js";
 import {
   DOWNLOAD_FILE_LIMITS,
   DOWNLOAD_FILE_MEDIA_TYPES,
@@ -71,6 +79,19 @@ export const TOOL_WRITE_FILE = {
     additionalProperties: false,
   },
 };
+
+// edit_file's mutually exclusive modes, as the fields each one takes. The
+// schema's oneOf and the scope-request preview both derive from this list.
+export const EDIT_FILE_MODES = Object.freeze([
+  Object.freeze(["old_string", "new_string"]),
+  Object.freeze(["replaceLines"]),
+  Object.freeze(["edits"]),
+  Object.freeze(["replacePattern"]),
+  Object.freeze(["insertAt"]),
+  Object.freeze(["append"]),
+  Object.freeze(["jsonPath", "jsonValue"]),
+  Object.freeze(["executable"]),
+]);
 
 function exclusiveEditMode(...fields) {
   const allowed = ["path", ...fields];
@@ -163,16 +184,7 @@ export const TOOL_EDIT_FILE = {
       },
     },
     required: ["path"],
-    oneOf: [
-      exclusiveEditMode("old_string", "new_string"),
-      exclusiveEditMode("replaceLines"),
-      exclusiveEditMode("edits"),
-      exclusiveEditMode("replacePattern"),
-      exclusiveEditMode("insertAt"),
-      exclusiveEditMode("append"),
-      exclusiveEditMode("jsonPath", "jsonValue"),
-      exclusiveEditMode("executable"),
-    ],
+    oneOf: EDIT_FILE_MODES.map((fields) => exclusiveEditMode(...fields)),
     additionalProperties: false,
   },
 };
@@ -228,6 +240,18 @@ export const TOOL_REQUEST_SCOPE = {
       { required: ["path", "access", "operation"] },
       { required: ["requests"] },
     ],
+    additionalProperties: false,
+  },
+};
+
+// Model-facing dev form; the canonical schema still accepts scalar runtime calls.
+export const TOOL_REQUEST_SCOPE_DEV = {
+  ...TOOL_REQUEST_SCOPE,
+  description: "Request approval for one or more exact paths outside the current writable scope in a single requests array.",
+  parameters: {
+    type: "object",
+    properties: { requests: TOOL_REQUEST_SCOPE.parameters.properties.requests },
+    required: ["requests"],
     additionalProperties: false,
   },
 };
@@ -295,8 +319,8 @@ const AGENT_HANDOFF_RESEARCH_DATA = {
         properties: {
           path: { type: "string", minLength: 1, maxLength: 500 },
           rank: { type: "integer", minimum: 1, maximum: 100, description: "One-based priority order; must equal this entry's position in the array." },
-          usefulness: { type: "string", enum: ["primary", "supporting", "context", "low"] },
-          evidence: { type: "string", enum: ["audited_file_read", "atlas", "search", "prior_research", "web"] },
+          usefulness: { type: "string", enum: [...AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES] },
+          evidence: { type: "string", enum: [...AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES] },
           reason: { type: "string", minLength: 1, maxLength: 240 },
         },
         required: ["path", "rank", "usefulness", "evidence", "reason"],
@@ -320,7 +344,7 @@ const AGENT_HANDOFF_RESEARCH_DATA = {
     scope_estimate: {
       type: "object",
       properties: {
-        confidence: { type: "string", enum: ["high", "medium", "low"] },
+        confidence: { type: "string", enum: [...AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES] },
         likely_touch_count: { type: "integer", minimum: 0, maximum: 1000 },
         unknowns: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 1000 } },
         scope_reasons: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 1000 } },
@@ -352,7 +376,7 @@ const AGENT_HANDOFF_RESEARCH_DATA = {
         type: "object",
         properties: {
           id: { type: "string", minLength: 1, maxLength: 40 },
-          category: { type: "string", enum: ["data-handling", "security", "convention", "config", "unclear-pattern"] },
+          category: { type: "string", enum: [...AGENT_HANDOFF_RESEARCH_QUESTION_CATEGORIES] },
           question: { type: "string", minLength: 1, maxLength: 1000 },
           context: { type: "string", minLength: 1, maxLength: 1000 },
           impact: { type: "string", minLength: 1, maxLength: 1000 },
@@ -382,18 +406,15 @@ const AGENT_HANDOFF_RESEARCH_DATA = {
 };
 
 const AGENT_HANDOFF_PLANNER_REPORT_FIELDS = {
-  dev_mode: {
-    type: "string",
-    enum: ["feature_impl", "bug_fix", "defensive_change", "refactor", "cleanup", "hotfix"],
-  },
+  dev_mode: { type: "string", enum: [...AGENT_HANDOFF_PLANNER_METADATA_ENUMS.dev_mode] },
   risk: { type: "integer", minimum: 1, maximum: 5 },
   risk_tags: { type: "array", maxItems: 20, items: { type: "string", minLength: 1, maxLength: 80 } },
-  scope_confidence: { type: "string", enum: ["high", "medium", "low"] },
+  scope_confidence: { type: "string", enum: [...AGENT_HANDOFF_PLANNER_METADATA_ENUMS.scope_confidence] },
   skills: { type: "array", maxItems: 20, items: { type: "string", minLength: 1, maxLength: 100 } },
-  deepthink_budget: { type: "string", enum: ["low", "normal", "high", "xhigh"] },
-  model_tier: { type: "string", enum: ["cheap", "standard", "strong"] },
-  reasoning_effort: { type: "string", enum: ["low", "medium", "high"] },
-  priority: { type: "string", enum: ["low", "normal", "high", "urgent"] },
+  deepthink_budget: { type: "string", enum: [...AGENT_HANDOFF_PLANNER_METADATA_ENUMS.deepthink_budget] },
+  model_tier: { type: "string", enum: [...AGENT_HANDOFF_PLANNER_METADATA_ENUMS.model_tier] },
+  reasoning_effort: { type: "string", enum: [...AGENT_HANDOFF_PLANNER_METADATA_ENUMS.reasoning_effort] },
+  priority: { type: "string", enum: [...AGENT_HANDOFF_PLANNER_METADATA_ENUMS.priority] },
   skip_assessment: { type: "boolean" },
   executed_by_planner: {
     type: "boolean",
@@ -664,14 +685,14 @@ export const TOOL_AGENT_HANDOFF = {
       profile: {
         type: "string",
         enum: [
-          "researcher.pipeline.v1",
-          "researcher.report.v1",
-          "planner.plan.v1",
-          "dev.result.v1",
-          "artificer.result.v1",
-          "assessor.verdict.v1",
-          "citation_synthesis.v1",
-          "research_investigation.v1",
+          AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE,
+          AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT,
+          AGENT_HANDOFF_PROFILES.PLANNER_PLAN,
+          AGENT_HANDOFF_PROFILES.DEV_RESULT,
+          AGENT_HANDOFF_PROFILES.ARTIFICER_RESULT,
+          AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT,
+          AGENT_HANDOFF_PROFILES.CITATION_SYNTHESIS,
+          AGENT_HANDOFF_PROFILES.RESEARCH_INVESTIGATION,
         ],
       },
       outcome: {
@@ -758,7 +779,7 @@ export const TOOL_AGENT_HANDOFF = {
                   properties: {
                     task_mode: {
                       type: "string",
-                      enum: ["code", "report", "content", "image", "intake_processing", "db"],
+                      enum: TASK_MODE_VALUES,
                       default: "code",
                     },
                     files_to_modify: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
@@ -795,7 +816,7 @@ export const TOOL_AGENT_HANDOFF = {
         allOf: [
           {
             if: {
-              properties: { profile: { not: { const: "researcher.report.v1" } } },
+              properties: { profile: { not: { const: AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT } } },
               required: ["profile"],
             },
             then: {
@@ -817,7 +838,7 @@ export const TOOL_AGENT_HANDOFF = {
           },
           {
             if: {
-              properties: { profile: { const: "researcher.report.v1" } },
+              properties: { profile: { const: AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT } },
               required: ["profile"],
             },
             then: {
@@ -837,7 +858,7 @@ export const TOOL_AGENT_HANDOFF = {
           },
           {
             if: {
-              properties: { profile: { const: "assessor.verdict.v1" } },
+              properties: { profile: { const: AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT } },
               required: ["profile"],
             },
             then: { required: ["confidence"] },
@@ -847,7 +868,7 @@ export const TOOL_AGENT_HANDOFF = {
             if: {
               properties: {
                 profile: {
-                  not: { enum: ["researcher.pipeline.v1", "researcher.report.v1"] },
+                  not: { enum: [AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT] },
                 },
               },
               required: ["profile"],
@@ -856,14 +877,14 @@ export const TOOL_AGENT_HANDOFF = {
           },
           {
             if: {
-              properties: { profile: { not: { const: "planner.plan.v1" } } },
+              properties: { profile: { not: { const: AGENT_HANDOFF_PROFILES.PLANNER_PLAN } } },
               required: ["profile"],
             },
             then: forbidAgentHandoffScopeFields(["output_root"]),
           },
           {
             if: {
-              properties: { profile: { const: "planner.plan.v1" } },
+              properties: { profile: { const: AGENT_HANDOFF_PROFILES.PLANNER_PLAN } },
               required: ["profile"],
             },
             then: AGENT_HANDOFF_PLANNER_TASK_REQUIREMENTS,
@@ -976,7 +997,7 @@ const RESEARCHER_PIPELINE_HANDOFF_CLAIMS = {
 };
 
 const RESEARCHER_PIPELINE_LIMITS =
-  AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY["researcher.pipeline.v1"];
+  AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY[AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE];
 
 const HANDOFF_STRING_LIST = {
   type: "array",
@@ -994,7 +1015,7 @@ const PLANNER_SCOPE = {
   properties: {
     task_mode: {
       type: "string",
-      enum: ["code", "report", "content", "image", "intake_processing", "db"],
+      enum: TASK_MODE_VALUES,
       default: "code",
     },
     files_to_modify: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 } },
@@ -1337,8 +1358,8 @@ const V2_ASSESSOR_CLAIMS = {
 export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   description:
     "Finish research with the active profile and target. Staged report claims remain assessment-grade and evidence-backed, while an unsupported submitted claim moves into a clearly marked summary note with no retry. Pipeline claims are advisory and may omit evidence; invalid pipeline selectors are dropped so the planner can inspect the claim itself. Preserve exact existing verification commands in research.verification_targets. Use outcome input_required when an unresolved choice would materially change security, authentication, data handling, or user-facing semantics and leave that choice to the human. The receipt ends generation.",
-  profile: "researcher.pipeline.v1",
-  profiles: ["researcher.pipeline.v1", "researcher.report.v1"],
+  profile: AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE,
+  profiles: [AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT],
   outcomes: ["success", "gap", "input_required", "complete"],
   handoff: exactHandoff({
     oneOf: [exactTarget("pipeline", "$pipeline"), exactTarget("result", "$result")],
@@ -1347,7 +1368,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
   rules: [
     {
       if: {
-        properties: { profile: { const: "researcher.pipeline.v1" } },
+        properties: { profile: { const: AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE } },
         required: ["profile"],
       },
       then: {
@@ -1368,7 +1389,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER = semanticRoleTool({
     },
     {
       if: {
-        properties: { profile: { const: "researcher.report.v1" } },
+        properties: { profile: { const: AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT } },
         required: ["profile"],
       },
       then: {
@@ -1429,7 +1450,7 @@ export const TOOL_AGENT_HANDOFF_ASSESSOR = semanticRoleTool({
     "Finish assessment with one exact verdict report and explicit confidence. claims must be an array; each item uses claim plus optional summary and optional proof containing only visible stored hash-ref strings. Terminal assessor proof may use tool-owned evidence or agent-authored prose refs. " +
     "A fail verdict must include at least one claim with proof so automatic repair starts only from a supported assertion. " +
     "Submit the canonical claim objects and their hash-ref proof selectors, plus the verdict fields present in the schema. The receipt ends provider generation.",
-  profile: "assessor.verdict.v1",
+  profile: AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT,
   outcomes: ["pass", "fail", "needs_replan", "needs_review", "blocked"],
   confidence: true,
   handoff: {
@@ -1463,7 +1484,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
     properties: {
       profile: {
         type: "string",
-        enum: ["researcher.pipeline.v1", "researcher.report.v1"],
+        enum: [AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT],
       },
       outcome: {
         type: "string",
@@ -1521,8 +1542,8 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
           properties: {
             path: { type: "string", minLength: 1, maxLength: 300 },
             rank: { type: "integer", minimum: 1, maximum: 12, description: "One-based priority order; must equal this entry's position in the array." },
-            usefulness: { type: "string", enum: ["primary", "supporting", "context", "low"] },
-            evidence: { type: "string", enum: ["audited_file_read", "atlas", "search", "prior_research", "web"] },
+            usefulness: { type: "string", enum: [...AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES] },
+            evidence: { type: "string", enum: [...AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES] },
             reason: { type: "string", minLength: 1, maxLength: 160 },
           },
           required: ["path", "rank", "usefulness", "evidence", "reason"],
@@ -1556,7 +1577,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
     allOf: [
       {
         if: {
-          properties: { profile: { const: "researcher.pipeline.v1" } },
+          properties: { profile: { const: AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE } },
           required: ["profile"],
         },
         then: {
@@ -1578,7 +1599,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V3 = {
       },
       {
         if: {
-          properties: { profile: { const: "researcher.report.v1" } },
+          properties: { profile: { const: AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT } },
           required: ["profile"],
         },
         then: {
@@ -1602,7 +1623,7 @@ export const TOOL_AGENT_HANDOFF_RESEARCHER_V4 = {
   parameters: {
     type: "object",
     properties: {
-      profile: { type: "string", enum: ["researcher.report.v1"] },
+      profile: { type: "string", enum: [AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT] },
       outcome: { type: "string", enum: ["complete"] },
       summary: {
         type: "string",
@@ -1676,7 +1697,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
 export const TOOL_AGENT_HANDOFF_CITATION = semanticRoleTool({
   description:
     "Finish citation synthesis with one parent report containing supported findings in named claim objects and optional summaries. Before the first handoff, narrow every evidence selector and target a sum of 30 or fewer selected lines. Submit the citation report fields present in the schema. The receipt ends provider generation.",
-  profile: "citation_synthesis.v1",
+  profile: AGENT_HANDOFF_PROFILES.CITATION_SYNTHESIS,
   outcomes: ["complete", "partial", "failed"],
   handoff: exactHandoff(exactTarget("parent", "$parent"), exactReport({}, ["summary"], {
     summaryMaxLength: 500,
@@ -1864,13 +1885,13 @@ const SUB_AGENT_REQUEST = {
   type: "object",
   properties: {
     id: { type: "string", minLength: 1, maxLength: 40 },
-    profile: { type: "string", enum: ["citation_synthesis.v1"] },
+    profile: { type: "string", enum: [AGENT_HANDOFF_PROFILES.CITATION_SYNTHESIS] },
     intent: { type: "string", minLength: 1, maxLength: 2000 },
     inputs: {
       type: "array",
       minItems: 1,
       maxItems: 3,
-      description: "Ordered evidence refs or deterministic read calls selected by the parent. Children materialize them lazily through a private cursor.",
+      description: `Ordered evidence refs or deterministic read calls. Each input must materialize at most ${SUB_AGENT_LIMITS.maxEvidenceLines} lines and ${SUB_AGENT_LIMITS.maxEvidenceChars} characters; select bounded ranges. Children consume inputs lazily.`,
       items: {
         oneOf: [
           {
@@ -1920,7 +1941,6 @@ export const TOOL_SUB_AGENT = {
   name: "sub_agent",
   description:
     "Dispatch or control an admin-gated batch of one to three isolated citation agents. " +
-    "Mandatory routing check: after two parent evidence calls across multiple targets, dispatch one batch before another read or materialization call when at least two related targets still need synthesis. Continue directly when current context contains the answers or the remaining question needs one targeted call. Prefetched names, skeletons, and file lists provide orientation; child agents synthesize evidence while developer parents apply it. " +
     "Children receive a private lazy input cursor plus a terminal handoff capability. Use wait_all when the answer is needed before continuing; async returns immediately and status collects results.",
   parameters: {
     oneOf: [
@@ -2011,7 +2031,7 @@ export const TOOL_DISPATCH_AGENT = {
           model_tier: {
             type: "string",
             enum: [...RESEARCH_CHILD_REQUEST_MODEL_TIERS],
-            description: "Omit for the configured child tier, which is cheaper than the planner. A code child may request strong for a question that needs deep reasoning across many files; web children run on cheap or standard only.",
+            description: "Omit for the configured child tier; it may use the same model as the planner. A code child may request strong for a question that needs deep reasoning across many files; web children run on cheap or standard only.",
           },
         },
         additionalProperties: false,
@@ -2024,36 +2044,26 @@ export const TOOL_DISPATCH_AGENT = {
 
 export const TOOL_DISPATCH_AGENT_PLANNER = {
   ...TOOL_DISPATCH_AGENT,
-  description: "Dispatch one focused researcher or a batch of two to three independent researchers. Batch children run concurrently; the call returns after every child settles. Give each child a self-contained question; code requests may add bounded repository anchors. For bulk external data, ask a web child to nominate the raw source file; findings, source snapshots, and reports return as durable refs that tasks cite directly. The administrator bounds child count, effort, turns, and duration.",
+  description: "Dispatch one focused researcher or a batch of independent researchers. Batch children run concurrently; the call returns after every child settles. Give each child a self-contained question; code requests may add bounded repository anchors. For bulk external data, ask a web child to nominate the raw source file; findings, source snapshots, and reports return as durable refs that tasks cite directly. Use a concise question and at most eight starting anchors. The administrator bounds child count, effort, turns, and duration.",
   parameters: {
     type: "object",
-    oneOf: [
-      TOOL_DISPATCH_AGENT.parameters,
-      {
-        type: "object",
-        properties: {
-          requests: {
-            type: "array",
-            minItems: 2,
-            maxItems: 3,
-            items: {
-              type: "object",
-              properties: {
-                id: { type: "string", minLength: 1, maxLength: 40 },
-                agent_type: { type: "string", enum: RESEARCH_AGENT_TYPES },
-                question: { type: "string", minLength: 1, description: RESEARCH_QUESTION_DESCRIPTION },
-                anchors: TOOL_DISPATCH_AGENT.parameters.properties.anchors,
-                budget: TOOL_DISPATCH_AGENT.parameters.properties.budget,
-              },
-              required: ["id", "agent_type", "question"],
-              additionalProperties: false,
-            },
+    properties: {
+      requests: {
+        type: "array",
+        minItems: 1,
+        maxItems: Number(PLANNER_DISPATCH_SETTINGS.find((entry) => entry.key === SETTING_KEYS.PLANNER_RESEARCH_MAX_CHILDREN).default),
+        items: {
+          ...TOOL_DISPATCH_AGENT.parameters,
+          properties: {
+            id: { type: "string", minLength: 1, maxLength: 40 },
+            ...TOOL_DISPATCH_AGENT.parameters.properties,
           },
+          required: ["id", "agent_type", "question"],
         },
-        required: ["requests"],
-        additionalProperties: false,
       },
-    ],
+    },
+    required: ["requests"],
+    additionalProperties: false,
   },
 };
 
@@ -2258,7 +2268,7 @@ export const TOOL_VALIDATE_ARTIFACT_OUTPUT = {
       output_root: { type: "string", description: "Artifact output directory to validate. Defaults to the working directory." },
       task_mode: {
         type: "string",
-        enum: ["image", "report", "content", "intake_processing"],
+        enum: ARTIFACT_TASK_MODE_VALUES,
         description: "Artifact task mode. Default: image.",
       },
       expected_files: {
@@ -2307,7 +2317,7 @@ export const TOOL_PRUNE_ARTIFACT_OUTPUT = {
       output_root: { type: "string", description: "Artifact output directory to prune. Defaults to the working directory." },
       task_mode: {
         type: "string",
-        enum: ["image", "report", "content", "intake_processing"],
+        enum: ARTIFACT_TASK_MODE_VALUES,
         description: "Artifact task mode used to derive allowed formats. Default: image.",
       },
       allowed_extensions: {
@@ -2600,6 +2610,23 @@ export const TOOL_RUN_SCOPED_CHECKS = {
   },
 };
 
+// Assessor defaults to its assigned scope; legacy aliases remain runtime-compatible.
+export const TOOL_RUN_SCOPED_CHECKS_ASSESSOR = {
+  ...TOOL_RUN_SCOPED_CHECKS,
+  parameters: {
+    ...TOOL_RUN_SCOPED_CHECKS.parameters,
+    properties: {
+      checks: TOOL_RUN_SCOPED_CHECKS.parameters.properties.checks,
+      scope: {
+        type: "object",
+        description: "Optional narrower file selection. Omit to check the assigned scope.",
+        properties: { files: TOOL_RUN_SCOPED_CHECKS.parameters.properties.scope.properties.files },
+        additionalProperties: false,
+      },
+    },
+  },
+};
+
 export const TOOL_RUN_UNIT_TEST = {
   type: "function",
   name: "run_unit_test",
@@ -2738,11 +2765,7 @@ export const TOOL_PULL_BRIEF = {
 export const TOOL_GET_BRIEF = {
   type: "function",
   name: "get_brief",
-  description:
-    "Load the research brief already prepared for this work item in one call: canonical structured research " +
-    "(key files, patterns, constraints), the ranked file-priority list, the function/class index, " +
-    "plus a manifest of staged source files. One call at the start of planning returns the complete " +
-    "pre-staged handoff context; raw brief markdown is omitted only when structured research includes the complete planning synthesis.",
+  description: "Load an available upstream research brief, structured findings, and source manifest.",
   parameters: {
     type: "object",
     properties: {},
@@ -2756,7 +2779,7 @@ export const TOOL_FINAL_REVIEW = {
   type: "function",
   name: "final_review",
   description:
-    "Developer: call with no arguments to close out the finished change. It runs the task's declared tests " +
+    "Developer: call to close out the finished change; include completion_report when the task requests a delivery report. It runs the task's declared tests " +
     "on the current workspace, then an independent reviewer checks the change against the task contract. " +
     "Returns pass, or findings to fix before calling it again; the result arrives when the review completes. " +
     "Reviewer: report your verdict and findings with this tool; it waits while the developer works and " +
@@ -2764,6 +2787,16 @@ export const TOOL_FINAL_REVIEW = {
   parameters: {
     type: "object",
     properties: {
+      completion_report: {
+        type: "object",
+        description: "Developer only. Delivery facts for the final reviewer, kept with the final-review record; report-only criteria belong here rather than in a source-file comment.",
+        properties: {
+          summary: { type: "string", minLength: 1, maxLength: 4000 },
+          verification: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 300 } },
+        },
+        required: ["summary"],
+        additionalProperties: false,
+      },
       verdict: {
         type: "string",
         enum: ["pass", "fail", "needs_review"],
@@ -2786,6 +2819,29 @@ export const TOOL_FINAL_REVIEW = {
         },
       },
     },
+    additionalProperties: false,
+  },
+};
+
+export const TOOL_FINAL_REVIEW_ASSESSOR = {
+  ...TOOL_FINAL_REVIEW,
+  description: "Report your review verdict and all findings, most severe first. The call waits for a developer revision or status done. For a revision, review the changed evidence and report again; for done, submit your terminal handoff. Call without arguments only to continue waiting after an already delivered report.",
+  parameters: {
+    type: "object",
+    properties: {
+      verdict: TOOL_FINAL_REVIEW.parameters.properties.verdict,
+      findings: TOOL_FINAL_REVIEW.parameters.properties.findings,
+    },
+    additionalProperties: false,
+  },
+};
+
+export const TOOL_FINAL_REVIEW_DEV = {
+  ...TOOL_FINAL_REVIEW,
+  description: "Request review of the finished change. Include completion_report when a delivery report is required. Declared tests and independent review run before the result returns; fix returned findings and call again.",
+  parameters: {
+    type: "object",
+    properties: { completion_report: TOOL_FINAL_REVIEW.parameters.properties.completion_report },
     additionalProperties: false,
   },
 };
@@ -2953,7 +3009,7 @@ export const TOOL_PROJECT_DB_QUERY = {
   // projectDbQuerySchemaForPermissions (toolkit/project-db/schema.js).
   description:
     "Run a single SQL statement against this project's configured application database " +
-    "(sqlite/postgres/mysql). One statement per call; read results are row- and byte-capped.",
+    `(${PROJECT_DB_TYPES.join("/")}). One statement per call; read results are row- and byte-capped.`,
   parameters: {
     type: "object",
     properties: {

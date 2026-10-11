@@ -29,7 +29,6 @@ import { getSharedConductor, isConductorIndexingInFlight, onConductorIndexingSuc
 import {
   openEmbeddingResources,
   retirePooledEmbeddingResourcesAndWait,
-  semanticDispatchEnabled,
 } from "../../atlas/functions/v2/embeddings/resources.js";
 import { fallbackQueryPlan, planQuery } from "../../atlas/functions/v2/retrieval/orchestrator/query-planner.js";
 import { extractAtlasResponseTelemetry, extractAtlasResultArtifacts } from "../../atlas/functions/v2/signal-extraction.js";
@@ -1472,7 +1471,7 @@ async function executeEmbeddedAtlasV2Tool({
     const wantsSemanticDispatch = (action === "symbol.search" && payload?.semantic)
       || (action === "slice.build" && payload?.taskText && payload?.semantic !== false)
       || ((action === "context" || action === "context.summary") && payload?.taskText);
-    const semanticWanted = !!(wantsSemanticDispatch && semanticDispatchEnabled(config || {}));
+    const semanticWanted = !!wantsSemanticDispatch;
     const callPayload = payload && typeof payload === "object" ? payload : {};
     const dispatchCall = ATLAS_V2_GATEWAY_ACTIONS.has(action)
       ? { ...callPayload, action, gatewayAction: typeof callPayload.action === "string" ? callPayload.action : callPayload.gatewayAction }

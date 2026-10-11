@@ -1,9 +1,7 @@
+import { AGENT_HANDOFF_PROFILES } from "../../../catalog/handoff.js";
 // @ts-check
-import {
-  createAgentHandoffPacketTable,
-  createResearchReportClaimDraftTable,
-  getDb,
-} from "../../../shared/storage/functions/index.js";
+import { getDb } from "../../../shared/storage/functions/index.js";
+import { createAgentHandoffPacketTable, createResearchReportClaimDraftTable } from "../../../shared/storage/functions/table-definitions.js";
 
 const TABLE = "research_report_claim_drafts";
 const CLAIM_ID_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
@@ -225,7 +223,7 @@ export function mergeResearchReportDraftClaims(args, agentCallId, db = getDb()) 
   const drafts = researchReportDraftClaims(agentCallId, db);
   if (drafts.length === 0 || !args || typeof args !== "object" || Array.isArray(args)) return args;
   const copy = JSON.parse(JSON.stringify(args));
-  if (copy.profile !== "researcher.report.v1") return copy;
+  if (copy.profile !== AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT) return copy;
   if (Array.isArray(copy.handoffs)) {
     const report = copy.handoffs[0]?.report;
     if (!report || typeof report !== "object") return copy;

@@ -5,6 +5,8 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getArtifact } from "./artifacts.js";
 import {
+  MERGE_DEBT_RANGE_RECEIPT_COMMITS,
+  MERGE_DEBT_RANGE_RECEIPT_ROWS,
   TEST_EXECUTION_RECEIPT_KIND,
   TEST_EXECUTION_RECEIPT_MIME_TYPE,
 } from "../../../catalog/verification.js";
@@ -64,6 +66,41 @@ export function postChangeReceiptsAtCommit(workItemId, commitHash, { limit = 256
     });
   }
   return receipts;
+}
+
+/**
+ * Commits where `command` (run in `cwdRelative`) passed, newest first, across
+ * every work item: a work item's start baseline on the target, or a
+ * post-change run. The merge gate starts debt attribution at the newest one
+ * still on the target, instead of the candidate's merge base.
+ */
+export function passingReceiptCommits(command, {
+  cwdRelative = null,
+  rowLimit = MERGE_DEBT_RANGE_RECEIPT_ROWS,
+  commitLimit = MERGE_DEBT_RANGE_RECEIPT_COMMITS,
+} = {}) {
+  const wanted = String(command || "").trim();
+  if (!wanted) return [];
+  const wantedCwd = cwdRelative && cwdRelative !== "." ? String(cwdRelative) : null;
+  const rows = getDb().prepare(`
+    SELECT id
+    FROM artifacts
+    WHERE mime_type = ?
+    ORDER BY id DESC
+    LIMIT ?
+  `).all(TEST_EXECUTION_RECEIPT_MIME_TYPE, rowLimit);
+  const commits = [];
+  for (const row of rows) {
+    const receipt = parseReceipt(getArtifact(row.id));
+    if (!receipt || receipt.status !== "passed" || String(receipt.command || "").trim() !== wanted) continue;
+    const receiptCwd = receipt.cwd_relative ?? (receipt.normalized_cwd && receipt.normalized_cwd !== "." ? receipt.normalized_cwd : null);
+    if ((receiptCwd || null) !== wantedCwd) continue;
+    const commit = normalizedCommit(receipt.executed_commit_hash) || normalizedCommit(receipt.commit_hash);
+    if (!commit || commits.includes(commit)) continue;
+    commits.push(commit);
+    if (commits.length >= commitLimit) break;
+  }
+  return commits;
 }
 
 /** The work item's newest dev/fix commit: what its branch head normally is. */

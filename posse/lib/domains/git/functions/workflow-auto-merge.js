@@ -5,6 +5,7 @@ import {
   activeWorkItemDispositionGates,
   authorizeWorkItemAutoMerge,
   findMergeHoldingGate,
+  holdForCurrentMergeVerificationReview,
   listCrossWiMergeBlockers,
   listWorkItems,
   logEvent,
@@ -280,6 +281,14 @@ export function createAutoMergeWorkflowHelpers(context, {
           if (typeof display?.setRunPhase === "function") {
             display.setRunPhase(`Merge deferred for WI#${wi.id}; review required`);
           }
+        } else if (result.reviewStale) {
+          // The operator approved an earlier branch commit (a refresh that
+          // resolved content, or new commits). Nothing failed: ask for review
+          // of the current commit instead of opening a merge-failure gate.
+          releaseWorkItemAutoMergeAuthorization(wi.id, authorization.previousMergeState);
+          const review = holdForCurrentMergeVerificationReview(wi.id, result.branchHead);
+          say(`  ${C.yellow}[git]${C.reset} WI#${wi.id}: branch changed since its merge review; merge waits for review of the current commit${review?.gate_job_id ? ` (gate #${review.gate_job_id})` : ""}`);
+          updateStep("merge", "skipped", `WI#${wi.id} waits for merge review`);
         } else {
           failedWorkItemIds.add(wi.id);
           markWorkItemMergeFailed(wi.id, mergeFailureDiagnostics({

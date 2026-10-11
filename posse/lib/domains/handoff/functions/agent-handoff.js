@@ -1,4 +1,7 @@
-// Stable terminal-handoff facade. The implementation remains cohesive until
-// its repository, validation, and evidence paths can be separated without
-// circular private dependencies.
+// Stable public terminal-handoff surface for existing callers.
 export * from "./agent-handoff-implementation.js";
+export {
+  getAgentHandoffRecord,
+  getCommittedAttemptCompletion,
+  getLatestCommittedAgentHandoffPacket,
+} from "./agent-handoff-records.js";

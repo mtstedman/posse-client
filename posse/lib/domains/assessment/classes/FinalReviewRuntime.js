@@ -20,10 +20,14 @@ import { parseJobPayload } from "../../queue/functions/payload.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import {
   FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
+  FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS,
   FINAL_REVIEW_OBSERVATIONS,
   FINAL_REVIEW_OUTCOMES,
+  FINAL_REVIEW_REVIEW_MODES,
   FINAL_REVIEW_REVIEWER_PARK_MS,
   FINAL_REVIEW_REVIEWER_STATUS,
+  FINAL_REVIEW_REVIEWER_WALL_MS,
+  FINAL_REVIEW_REVISION_MIN_REMAINING_MS,
   FINAL_REVIEW_TEST_TIMEOUT_MS,
 } from "../../../catalog/final-review.js";
 import {
@@ -33,12 +37,13 @@ import {
 import {
   collectScopedChange,
   diffSinceReview,
-  finalReviewInstructions,
+  finalReviewCoreInstructions,
   renderFinalReviewEvidence,
   renderFinalReviewRevision,
   snapshotReviewedFiles,
 } from "../functions/final-review-snapshot.js";
 import {
+  addedTestFiles,
   changedTestPlan,
   finalReviewCheckFindings,
   lineageTestFiles,
@@ -46,17 +51,35 @@ import {
   runChangedFileChecks,
 } from "../functions/final-review-checks.js";
 import {
+  finalReviewInfrastructureRetriesLeft,
   finalReviewResultFromReport,
   finalReviewResultFromVerdict,
   finalReviewResultsForAttempt,
+  finalReviewReviewsRemaining,
   repeatedDeterministicReview,
   semanticFinalReviewResults,
 } from "../functions/final-review-result.js";
 
 const REVIEWER_DONE_INSTRUCTION = "The developer has finished with this review. End now with your terminal handoff carrying your latest verdict.";
+const REVIEWER_WAITING_INSTRUCTION = "The developer is still working. Call final_review again to wait for the revision.";
+const MODES = FINAL_REVIEW_REVIEW_MODES;
 
 function finalReviewError(code, message) {
   return Object.assign(new Error(message), { code });
+}
+
+function completionReportFromArgs(args) {
+  const report = args?.completion_report;
+  if (!report || typeof report !== "object" || Array.isArray(report)) return null;
+  const summary = String(report.summary || "").trim().slice(0, 4000);
+  if (!summary) return null;
+  const verification = (Array.isArray(report.verification) ? report.verification : [])
+    .map(item => String(item || "").trim().slice(0, 300)).filter(Boolean).slice(0, 8);
+  return { summary, verification };
+}
+
+function sameCompletionReport(a, b) {
+  return JSON.stringify(a || null) === JSON.stringify(b || null);
 }
 
 function deferred() {
@@ -82,6 +105,7 @@ export class FinalReviewRuntime {
     runChecks = runChangedFileChecks,
     lineageTests = lineageTestFiles,
     reviewerParkMs = FINAL_REVIEW_REVIEWER_PARK_MS,
+    reviewerWallMs = FINAL_REVIEW_REVIEWER_WALL_MS,
   } = {}) {
     this.parents = new Map();
     this.identify = identify;
@@ -94,6 +118,9 @@ export class FinalReviewRuntime {
     this.runChecks = runChecks;
     this.lineageTests = lineageTests;
     this.reviewerParkMs = reviewerParkMs;
+    // The reviewer's own wall (final-review-reviewer.js); a parked reviewer
+    // close to it is not handed a revision.
+    this.reviewerWallMs = reviewerWallMs;
   }
 
   /**
@@ -132,12 +159,13 @@ export class FinalReviewRuntime {
     return false;
   }
 
-  async execute({ agentCallId, args = {} } = {}) {
+  /** `signal` aborts when the caller's tool call dies (its client disconnected). */
+  async execute({ agentCallId, args = {}, signal = null } = {}) {
     const callId = Number(agentCallId);
     const parent = this.parents.get(callId);
-    if (parent) return await this.#developerReview(parent);
+    if (parent) return await this.#developerReview(parent, args);
     const reviewed = this.#parentReviewedBy(callId);
-    if (reviewed?.entry) return await this.#reviewerReport(reviewed.entry, callId, args);
+    if (reviewed?.entry) return await this.#reviewerReport(reviewed.entry, callId, args, { signal });
     // A final-review child whose developer already finished: tell it to end.
     if (reviewed?.orphan) return { status: FINAL_REVIEW_REVIEWER_STATUS.DONE, instruction: REVIEWER_DONE_INSTRUCTION };
     throw finalReviewError("FINAL_REVIEW_UNAVAILABLE", "final_review is not available for this agent call; hand off when the change is complete.");
@@ -161,29 +189,32 @@ export class FinalReviewRuntime {
     return { entry };
   }
 
-  async #developerReview(parent) {
+  async #developerReview(parent, args) {
     if (parent.inFlight) {
       throw finalReviewError("FINAL_REVIEW_IN_PROGRESS", "A final review is already running for this agent call; wait for its result.");
     }
     const prior = finalReviewResultsForAttempt({ jobId: parent.jobId, attemptId: parent.attemptId });
     const semanticPrior = semanticFinalReviewResults(prior);
+    if (Object.hasOwn(args, "completion_report")) parent.completionReport = completionReportFromArgs(args);
+    const completionReport = parent.completionReport || null;
     let currentIdentity = null;
     try {
       const job = getJob(parent.jobId);
       if (job) currentIdentity = await this.identify(parent.cwd, parseJobPayload(job), { jobId: job.id });
     } catch { /* a fresh review will report the identity failure */ }
     const unchanged = prior.at(-1);
-    if (unchanged?.review_mode === "unchanged" && currentIdentity === unchanged.review_identity) {
+    if (unchanged?.review_mode === MODES.UNCHANGED && currentIdentity === unchanged.review_identity
+      && sameCompletionReport(completionReport, unchanged.completion_report)) {
       this.#release(parent);
       return { outcome: FINAL_REVIEW_OUTCOMES.FINDINGS, findings: unchanged.findings || [],
-        reason: unchanged.reason, reviews_remaining: Math.max(0, FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT - semanticPrior.length) };
+        reason: unchanged.reason, reviews_remaining: finalReviewReviewsRemaining(prior) };
     }
     const repeated = repeatedDeterministicReview(prior, currentIdentity);
     if (repeated && currentIdentity) {
       this.#release(parent);
       return { outcome: FINAL_REVIEW_OUTCOMES.FINDINGS, findings: repeated.findings || [],
         reason: "The same deterministic failure was observed twice on unchanged work; hand off so the existing recovery path can act on it.",
-        reviews_remaining: Math.max(0, FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT - semanticPrior.length) };
+        reviews_remaining: finalReviewReviewsRemaining(prior) };
     }
     if (semanticPrior.length >= FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT) {
       this.#release(parent);
@@ -192,6 +223,15 @@ export class FinalReviewRuntime {
         findings: [],
         reason: `This attempt's ${FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT} final reviews are used; hand off when the change is complete.`,
         reviews_remaining: 0,
+      };
+    }
+    if (finalReviewInfrastructureRetriesLeft(prior) === 0) {
+      this.#release(parent);
+      return {
+        outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
+        findings: [],
+        reason: `The final review could not run ${FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS} times in this attempt; hand off when the change is complete, and the assessment will verify it.`,
+        reviews_remaining: finalReviewReviewsRemaining(prior),
       };
     }
     parent.inFlight = true;
@@ -203,7 +243,8 @@ export class FinalReviewRuntime {
     let change = null;
     let reviewerCallId = null;
     let reviewIdentity = null;
-    let mode = "fresh";
+    let mode = MODES.FRESH;
+    let verdictObtained = false;
     try {
       const job = getJob(parent.jobId);
       if (!job) throw finalReviewError("FINAL_REVIEW_CONTEXT_MISSING", `Job #${parent.jobId} no longer exists`);
@@ -211,12 +252,13 @@ export class FinalReviewRuntime {
       // A changed runner transcript is not an implementation revision. Compare
       // the full scoped bytes and task contract before spending another check
       // or reviewer call, including when the first submission had no diff.
+      // Any earlier rejection of these exact bytes counts, not only the last:
+      // reverting to a rejected candidate never buys a new verdict.
       try { reviewIdentity = await this.identify(parent.cwd, payload, { jobId: job.id }); } catch { /* ordinary review reports unavailable identity */ }
-      const rejected = prior.at(-1);
-      if (reviewIdentity && rejected?.review_mode !== "deterministic" && rejected?.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS
-        && rejected.review_identity === reviewIdentity) {
-        return this.#returnUnchangedReview(parent, rejected, semanticPrior.length);
-      }
+      const rejected = reviewIdentity ? semanticPrior.findLast((review) =>
+        review.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS && review.review_identity === reviewIdentity
+        && sameCompletionReport(completionReport, review.completion_report)) : null;
+      if (rejected) return this.#returnUnchangedReview(parent, rejected, prior);
       const workItem = getWorkItem(job.work_item_id);
       const declaredPlan = this.resolveTestPlan(job, payload, { cwd: parent.cwd });
       testRun = await this.runTestPlan(declaredPlan, {
@@ -230,81 +272,109 @@ export class FinalReviewRuntime {
       // the developer fix what they find in the same attempt. The change is
       // the lineage's, as in the post-change receipt: a fix also runs the test
       // files its root committed.
+      const lineage = await this.lineageTests(job, payload, parent.cwd);
+      const lineagePaths = Array.isArray(lineage) ? lineage : Array.isArray(lineage?.paths) ? lineage.paths : [];
       const changedPlan = changedTestPlan(job, payload, change, declaredPlan, {
         cwd: parent.cwd,
         resolvePlan: this.resolveTestPlan,
-        lineagePaths: (await this.lineageTests(job, payload, parent.cwd)).filter((file) => !placeholders.has(file)),
+        lineagePaths: lineagePaths.filter((file) => !placeholders.has(file)),
       });
       changedTestRun = changedPlan
         ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS })
         : null;
       checks = this.runChecks(parent.cwd, change);
       try { reviewIdentity = await this.identify(parent.cwd, payload, { jobId: job.id }); } catch { reviewIdentity = null; /* unavailable identities cannot authorize assessment */ }
-      const deterministicFindings = finalReviewCheckFindings({ checks, changedTestRun });
+      // Only failures the change provably introduced skip the reviewer; any
+      // other failure is evidence it judges.
+      const deterministicFindings = finalReviewCheckFindings({ checks, changedTestRun,
+        addedTestPaths: addedTestFiles(change, lineage) });
       if (deterministicFindings.length > 0) {
         // These failures are actionable without a semantic judgment. Return
         // them to the developer and retain the review budget for its repair.
-        mode = "deterministic";
+        mode = MODES.DETERMINISTIC;
         result = { outcome: FINAL_REVIEW_OUTCOMES.FINDINGS, findings: deterministicFindings };
       } else {
-        const session = parent.reviewer;
+        let session = parent.reviewer;
+        if (session && !session.ended && session.waitingForRevision
+          && (session.startedAt ?? 0) + this.reviewerWallMs - Date.now() < FINAL_REVIEW_REVISION_MIN_REMAINING_MS) {
+          // Too little of the parked reviewer's wall is left to judge a
+          // revision: release it and judge the change with a fresh reviewer.
+          this.#release(parent);
+          session = null;
+        }
         let outcome;
         if (session && !session.ended && session.waitingForRevision) {
           // The reviewer is waiting in its own final_review call: hand it only
           // what changed since its report.
-          mode = "revision";
+          mode = MODES.REVISION;
           const snapshot = this.snapshotFiles(parent.cwd, payload, change, { alsoPaths: [...session.snapshot.keys()] });
           const delta = diffSinceReview(session.snapshot, snapshot, change);
           session.revision += 1;
           session.pendingSnapshot = snapshot;
           session.revisionExpected = true;
+          // Set only when the reviewer's call actually takes the revision.
           session.revisionDelivered = false;
           outcome = this.#awaitReport(session);
           const revision = {
             status: FINAL_REVIEW_REVIEWER_STATUS.REVISED,
             revision: session.revision,
-            review: renderFinalReviewRevision({ revision: session.revision, testRun, delta, changedTestRun, checks }),
+            review: renderFinalReviewRevision({ revision: session.revision, testRun, delta, changedTestRun, checks, completionReport }),
           };
           const parked = session.parked;
           session.parked = null;
-          if (parked) {
-            session.revisionDelivered = true;
-            parked.resolve(revision);
-          }
+          if (parked) parked.resolve(revision);
           else session.pendingRevision = revision;
         } else {
-          const evidence = renderFinalReviewEvidence({ job, workItem, payload, change, testRun, changedTestRun, checks });
+          const evidence = renderFinalReviewEvidence({ job, workItem, payload, change, testRun, changedTestRun, checks, completionReport });
           const fresh = this.#startReviewer(parent, {
-            instructions: finalReviewInstructions(),
+            instructions: finalReviewCoreInstructions(),
             evidence,
             snapshot: this.snapshotFiles(parent.cwd, payload, change),
           });
           outcome = this.#awaitReport(fresh);
         }
-        ({ result, reviewerCallId } = await outcome);
-        result = mergeCheckFindings(result, deterministicFindings);
+        const reported = await outcome;
+        reviewerCallId = reported.reviewerCallId;
+        if (reported.infrastructure) {
+          mode = MODES.INFRASTRUCTURE;
+          result = reported.result;
+        } else {
+          verdictObtained = true;
+          result = mergeCheckFindings(reported.result, deterministicFindings);
+        }
       }
-      if (result.outcome === FINAL_REVIEW_OUTCOMES.PASS
-        && ["unavailable", "infrastructure_error", "invalid", "timed_out", "skipped"].includes(changedTestRun?.status)) {
-        result = { ...result, outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
-          reason: `Changed tests did not establish complete coverage (${changedTestRun.reason || changedTestRun.status}); restore their verification prerequisites.` };
-      }
-      if (!reviewIdentity) {
-        result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Cannot bind final review to the scoped workspace; verification is blocked." };
-      } else if (reviewIdentity !== await this.identify(parent.cwd, payload, { jobId: job.id })) {
-        result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Scoped files changed during review; review the current change again." };
+      if (mode !== MODES.INFRASTRUCTURE) {
+        if (result.outcome === FINAL_REVIEW_OUTCOMES.PASS
+          && ["unavailable", "infrastructure_error", "invalid", "timed_out", "skipped"].includes(changedTestRun?.status)) {
+          result = { ...result, outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
+            reason: `Changed tests did not establish complete coverage (${changedTestRun.reason || changedTestRun.status}); restore their verification prerequisites.` };
+        }
+        if (!reviewIdentity) {
+          result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Cannot bind final review to the scoped workspace; verification is blocked." };
+        } else if (reviewIdentity !== await this.identify(parent.cwd, payload, { jobId: job.id })) {
+          result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Scoped files changed during review; review the current change again." };
+        }
       }
     } catch (error) {
-      // The review could not run: never hold the handoff on it.
+      // No reviewer verdict: an infrastructure round, which spends no review.
+      if (!verdictObtained) mode = MODES.INFRASTRUCTURE;
       result = {
         outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
         findings: [],
-        reason: `The final review could not run (${String(error?.message || error).slice(0, 300)}); hand off when the change is complete.`,
+        reason: `The final review could not run (${String(error?.message || error).slice(0, 300)})`,
       };
     } finally {
       parent.inFlight = false;
     }
-    const reviewsRemaining = Math.max(0, FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT - semanticPrior.length - (mode === "deterministic" ? 0 : 1));
+    const recorded = [...prior, { review_mode: mode }];
+    const reviewsRemaining = finalReviewReviewsRemaining(recorded);
+    if (mode === MODES.INFRASTRUCTURE) {
+      // The handoff waits for a bounded number of these rounds, then proceeds
+      // to the ordinary assessment.
+      result = { ...result, reason: `${result.reason}; ${finalReviewInfrastructureRetriesLeft(recorded) > 0
+        ? "call final_review again"
+        : "hand off when the change is complete, and the assessment will verify it"}.` };
+    }
     if (reviewsRemaining === 0) this.#release(parent);
     const response = {
       ...result,
@@ -312,6 +382,7 @@ export class FinalReviewRuntime {
       changed_tests: testRunDiagnostics(changedTestRun),
       changed_file_checks: checks ? { status: checks.status, summary: checks.summary || null } : null,
       changed_files: Array.isArray(change?.files) ? change.files.map((file) => file.path) : [],
+      completion_report: completionReport,
       reviews_remaining: reviewsRemaining,
     };
     this.record({
@@ -325,6 +396,7 @@ export class FinalReviewRuntime {
         attempt_id: parent.attemptId ?? null,
         outcome: result.outcome,
         review_identity: reviewIdentity,
+        completion_report: completionReport,
         summary: result.summary || null,
         finding_count: result.findings?.length || 0,
         findings: result.findings || [],
@@ -345,16 +417,20 @@ export class FinalReviewRuntime {
     return response;
   }
 
-  #returnUnchangedReview(parent, rejected, semanticCount) {
-    const reason = `The scoped code is unchanged since the failed final review. Existing findings remain; no second review was run. Hand off for repair when ready.`;
+  #returnUnchangedReview(parent, rejected, prior) {
+    const latest = semanticFinalReviewResults(prior).at(-1);
+    const reason = latest?.id === rejected.id
+      ? "The scoped code is unchanged since the failed final review. Existing findings remain; no second review was run. Hand off for repair when ready."
+      : "The scoped code matches a candidate an earlier final review rejected. Its findings remain; no new review was run. Hand off for repair when ready.";
     const result = { outcome: FINAL_REVIEW_OUTCOMES.FINDINGS,
       reason, findings: rejected.findings || [],
-      reviews_remaining: Math.max(0, FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT - semanticCount) };
+      reviews_remaining: finalReviewReviewsRemaining(prior) };
     this.record({ work_item_id: parent.workItemId ?? null, job_id: parent.jobId,
       attempt_id: parent.attemptId, observation_type: FINAL_REVIEW_OBSERVATIONS.RESULT,
       summary: reason, detail: { ...result, agent_call_id: parent.agentCallId,
         review_identity: rejected.review_identity, reviewer_agent_call_id: rejected.reviewer_agent_call_id,
-        review_mode: "unchanged", previous_review_id: rejected.id } });
+        review_mode: MODES.UNCHANGED, completion_report: rejected.completion_report || null,
+        previous_review_id: rejected.id } });
     this.#release(parent);
     return result;
   }
@@ -362,6 +438,7 @@ export class FinalReviewRuntime {
   #startReviewer(parent, { instructions, evidence, snapshot }) {
     const session = {
       agentCallId: null,
+      startedAt: Date.now(),
       ended: false,
       released: false,
       awaitingReport: null,
@@ -380,7 +457,17 @@ export class FinalReviewRuntime {
       .then(() => parent.runReview({ instructions, evidence }))
       .then((review) => ({ review }), (error) => ({ error }))
       .then((ended) => {
+        // The reviewer ended (its terminal handoff, a provider error, its
+        // wall): a call it left parked answers done, and the developer's next
+        // call starts a fresh reviewer.
         session.ended = true;
+        session.pendingRevision = null;
+        session.awaitingReport = null;
+        if (session.parked) {
+          const parked = session.parked;
+          session.parked = null;
+          parked.resolve({ status: FINAL_REVIEW_REVIEWER_STATUS.DONE, instruction: REVIEWER_DONE_INSTRUCTION });
+        }
         if (parent.reviewer === session) parent.reviewer = null;
         return ended;
       });
@@ -388,7 +475,10 @@ export class FinalReviewRuntime {
   }
 
   // The reviewer's next report, or — when it ends without one, as a reviewer
-  // without the tool does — the verdict from its terminal handoff.
+  // without the tool does — the verdict from its terminal handoff. A reviewer
+  // handed a revision must report on it with final_review: its terminal
+  // verdict may predate the revision, so it never authorizes the revised
+  // candidate, and the round obtained no verdict.
   #awaitReport(session) {
     const report = deferred();
     session.awaitingReport = report;
@@ -396,20 +486,24 @@ export class FinalReviewRuntime {
       report.promise,
       session.run.then((ended) => {
         if (ended.error) throw ended.error;
-        if (session.revisionExpected && !session.revisionDelivered) return {
+        const reviewerCallId = ended.review?.agentCallId ?? session.agentCallId ?? null;
+        if (session.revisionExpected) return {
+          infrastructure: true,
           result: { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [],
-            reason: "the reviewer ended before receiving the revised candidate" },
-          reviewerCallId: ended.review?.agentCallId ?? session.agentCallId ?? null,
+            reason: session.revisionDelivered
+              ? "the reviewer ended without reporting on the revised candidate"
+              : "the reviewer ended before receiving the revised candidate" },
+          reviewerCallId,
         };
         return {
           result: finalReviewResultFromVerdict(ended.review?.verdict, { claims: ended.review?.claims || [] }),
-          reviewerCallId: ended.review?.agentCallId ?? session.agentCallId ?? null,
+          reviewerCallId,
         };
       }),
     ]);
   }
 
-  async #reviewerReport(parent, callId, args) {
+  async #reviewerReport(parent, callId, args, { signal = null } = {}) {
     const session = parent.reviewer;
     if (!session || session.released || session.ended) {
       return { status: FINAL_REVIEW_REVIEWER_STATUS.DONE, instruction: REVIEWER_DONE_INSTRUCTION };
@@ -422,7 +516,7 @@ export class FinalReviewRuntime {
     }
     const waiting = session.awaitingReport;
     if (!waiting) {
-      if (session.waitingForRevision) return this.#parkReviewer(session);
+      if (session.waitingForRevision) return this.#parkReviewer(session, { signal });
       return { status: "not_waiting", error: "Your report was already delivered; wait in final_review for the developer's revision." };
     }
     const mapped = finalReviewResultFromReport(args);
@@ -432,19 +526,43 @@ export class FinalReviewRuntime {
     session.pendingSnapshot = null;
     session.waitingForRevision = true;
     waiting.resolve({ result: mapped, reviewerCallId: callId });
-    return this.#parkReviewer(session);
+    return this.#parkReviewer(session, { signal });
   }
 
-  async #parkReviewer(session) {
+  // The reviewer waits in its final_review call for the developer's revision.
+  // The wait ends with the revision, a periodic "still working" before the
+  // client's deadline, or done on release. When the call itself dies (its
+  // client disconnected), it is unparked so a later revision waits for the
+  // reviewer's next call instead of resolving into nothing.
+  async #parkReviewer(session, { signal = null } = {}) {
     const parked = deferred();
     session.parked = parked;
-    const timer = setTimeout(() => {
+    const unpark = (value) => {
       if (session.parked !== parked) return;
       session.parked = null;
-      parked.resolve({ status: FINAL_REVIEW_REVIEWER_STATUS.WAITING,
-        instruction: "The developer is still working. Call final_review again to wait for the revision." });
-    }, this.reviewerParkMs);
-    try { return await parked.promise; } finally { clearTimeout(timer); }
+      parked.resolve(value);
+    };
+    const waiting = { status: FINAL_REVIEW_REVIEWER_STATUS.WAITING, instruction: REVIEWER_WAITING_INSTRUCTION };
+    const timer = setTimeout(() => unpark(waiting), this.reviewerParkMs);
+    const cancel = () => unpark(waiting);
+    if (signal?.aborted) cancel();
+    else signal?.addEventListener?.("abort", cancel, { once: true });
+    try {
+      const value = await parked.promise;
+      if (value?.status === FINAL_REVIEW_REVIEWER_STATUS.REVISED) {
+        if (signal?.aborted) {
+          // Resolved into a call that died before returning it: keep it for
+          // the reviewer's next call.
+          if (!session.ended && !session.released && !session.pendingRevision) session.pendingRevision = value;
+        } else {
+          session.revisionDelivered = true;
+        }
+      }
+      return value;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", cancel);
+    }
   }
 
   #release(parent) {
@@ -462,6 +580,6 @@ export class FinalReviewRuntime {
 
 export const finalReviewRuntime = new FinalReviewRuntime();
 
-export function executeFinalReview(args = {}, { context = {} } = {}) {
-  return finalReviewRuntime.execute({ agentCallId: context.agentCallId, args: args || {} });
+export function executeFinalReview(args = {}, { context = {}, signal = null } = {}) {
+  return finalReviewRuntime.execute({ agentCallId: context.agentCallId, args: args || {}, signal });
 }

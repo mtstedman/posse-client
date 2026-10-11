@@ -12,6 +12,10 @@
 
 import { C } from "../../../../../shared/format/functions/colors.js";
 
+export function posseWordmark() {
+  return `${C.green}${C.bold}\u259f${C.reset} ${C.brightWhite}${C.bold}POSSE${C.reset}`;
+}
+
 const PROVIDER_BRAND_COLORS = Object.freeze({
   claude: C.orange,
   openai: C.green,

@@ -69,11 +69,12 @@ export class ToolCatalog {
     compactCompletion = false,
     compactV3 = false,
     researchInvestigation = false,
+    plannerMaxChildren = null,
   } = {}) {
     const entry = this.get(name);
     if (entry) {
       if (role) {
-        return getToolSchemaForRole(name, role, { compactCompletion, compactV3, researchInvestigation });
+        return getToolSchemaForRole(name, role, { compactCompletion, compactV3, researchInvestigation, plannerMaxChildren });
       }
       return entry.schema || null;
     }

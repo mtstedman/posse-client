@@ -35,12 +35,12 @@ import {
   gitExecAsync,
 } from "../../../git/functions/utils.js";
 
-export function detectDrift(worker, job, files, cwd) {
+export async function detectDrift(worker, job, files, cwd) {
   if (!files || files.length === 0 || !cwd) return "";
   const payload = parseJobPayload(job);
   if (payload._plan_base_commit && payload._plan_file_sha256) {
     try {
-      const drift = planAnchorDrift(payload, files, cwd, job.work_item_id);
+      const drift = await planAnchorDrift(payload, files, cwd, job.work_item_id);
       if (!drift?.entries?.length) return "";
       const detail = drift.entries.map((entry) => {
         const source = entry.ancestry_known
@@ -69,7 +69,7 @@ export function detectDrift(worker, job, files, cwd) {
   }
   if (!job.created_at) return "";
   try {
-    const commitLog = gitExec(
+    const commitLog = await gitExecAsync(
       ["log", "--format=%H", `--since=${job.created_at}`, "--", ...files],
       cwd,
     );
@@ -78,15 +78,15 @@ export function detectDrift(worker, job, files, cwd) {
     const oldestHash = commits[commits.length - 1];
     let diff = "";
     try {
-      diff = gitExec(
+      diff = (await gitExecAsync(
         ["diff", `${oldestHash}~1..HEAD`, "--", ...files],
         cwd,
-      ).trim();
+      )).trim();
     } catch {
-      diff = gitExec(
+      diff = (await gitExecAsync(
         ["diff", `${oldestHash}..HEAD`, "--", ...files],
         cwd,
-      ).trim();
+      )).trim();
     }
     if (!diff) return "";
     const trimmed = diff.length > 3000 ? diff.slice(0, 3000) + "\n...(truncated)" : diff;

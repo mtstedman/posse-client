@@ -8,6 +8,8 @@ import {
   ENGAGEMENT_CONTRACT_VERSION,
   ENGAGEMENT_RECOVERY_HINT_METHOD,
   ENGAGEMENT_RECOVERY_POLICY_DIGEST,
+  PROVIDER_DISPATCH_CAPABILITIES_NEGATIVE_TTL_MS,
+  PROVIDER_DISPATCH_CAPABILITIES_TTL_MS,
   PROVIDER_DISPATCH_COMMAND,
   PROVIDER_BREAKER_STORE_VERSION,
   PROVIDER_DISPATCH_EVENTS,
@@ -23,21 +25,16 @@ import { nativeBinaries } from "../../tools/classes/BinaryManager.js";
 
 const ENGAGEMENT_SYNC_TIMEOUT_MS = 10_000;
 const PROVIDER_DISPATCH_NEGATIVE_CACHE_MS = 60_000;
-const providerDispatchSupportCache = new Map();
-const providerDispatchSupportOverridesForTests = new Map();
 const providerDispatchPromptFieldCache = new Map();
 const providerDispatchPromptFieldOverridesForTests = new Map();
+// One engagement.capabilities answer per posse-remote handle, checked against
+// the binary file identity before reuse. BinaryManager replaces the handle when
+// it installs another issued version.
+let providerDispatchCapabilityProbes = new WeakMap();
 
-export function __testSetProviderDispatchSupport(provider, supported = null) {
-  assertTestContext("__testSetProviderDispatchSupport");
-  const key = String(provider || "").trim();
-  if (!key) throw new TypeError("provider is required");
-  if (supported == null) {
-    providerDispatchSupportOverridesForTests.delete(key);
-    return;
-  }
-  if (typeof supported !== "boolean") throw new TypeError("supported must be a boolean or null");
-  providerDispatchSupportOverridesForTests.set(key, supported);
+export function __testResetProviderDispatchCapabilities() {
+  assertTestContext("__testResetProviderDispatchCapabilities");
+  providerDispatchCapabilityProbes = new WeakMap();
 }
 
 export function __testSetProviderDispatchPromptFields(provider, fields = null) {
@@ -113,9 +110,22 @@ export function verifyEngagementRecoveryCapabilitiesSync(opts = {}) {
   return capabilities;
 }
 
-/** Verify the independent streaming provider-dispatch contract. */
-export function verifyProviderDispatchCapabilitiesSync(provider, opts = {}) {
-  const capabilities = callEngagementMethodSync(ENGAGEMENT_CAPABILITIES_METHOD, null, opts);
+function remoteBinaryHandle(manager) {
+  try {
+    const handle = manager.binary("remote");
+    return handle && typeof handle === "object" ? handle : null;
+  } catch {
+    return null;
+  }
+}
+
+function probeProviderDispatchContract(opts) {
+  let capabilities;
+  try {
+    capabilities = callEngagementMethodSync(ENGAGEMENT_CAPABILITIES_METHOD, null, opts);
+  } catch (error) {
+    return { failure: { reason: error?.reason || "call-failed", message: String(error?.message || error) } };
+  }
   const dispatch = capabilities.providerDispatch;
   const toolGateway = dispatch?.toolGateway;
   if (!isPlainObject(dispatch)
@@ -133,48 +143,60 @@ export function verifyProviderDispatchCapabilitiesSync(provider, opts = {}) {
     || toolGateway.path !== PROVIDER_TOOL_GATEWAY_PATH
     || toolGateway.maxRequestBytes !== PROVIDER_TOOL_GATEWAY_MAX_REQUEST_BYTES
     || toolGateway.maxResponseBytes !== PROVIDER_TOOL_GATEWAY_MAX_RESPONSE_BYTES) {
-    throw engagementError("unsupported", "posse-remote does not serve the provider dispatch contract");
+    return { failure: { reason: "unsupported", message: "posse-remote does not serve the provider dispatch contract" } };
   }
+  return { dispatch };
+}
+
+function providerDispatchOutcome(probe, provider) {
+  if (probe.failure) return probe;
+  const { dispatch } = probe;
   const providers = Array.isArray(dispatch.providers) ? dispatch.providers : [];
   if (!providers.includes(provider)) {
-    throw engagementError("unsupported-provider", `posse-remote does not include the ${provider} provider adapter`);
+    const unavailableReason = isPlainObject(dispatch.unavailableReasons)
+      && Object.hasOwn(dispatch.unavailableReasons, provider)
+      && typeof dispatch.unavailableReasons[provider] === "string"
+      ? dispatch.unavailableReasons[provider].trim() : "";
+    return { failure: {
+      reason: "unsupported-provider",
+      message: unavailableReason
+        ? `The ${provider} provider is unavailable: ${unavailableReason}`
+        : `posse-remote does not include the ${provider} provider adapter`,
+    } };
   }
   if (!isPlainObject(dispatch.adapterVersions)
     || typeof dispatch.adapterVersions[provider] !== "string"
     || !dispatch.adapterVersions[provider]) {
-    throw engagementError("unsupported-provider", `posse-remote has no compatible ${provider} adapter version`);
+    return { failure: { reason: "unsupported-provider", message: `posse-remote has no compatible ${provider} adapter version` } };
   }
-  return dispatch;
+  return probe;
 }
 
 /**
- * Rollout probe for a provider adapter. An adapter that is not advertised
- * leaves the existing executor in place; once advertised, the caller must use
- * the native route and let later compatibility/runtime failures fail closed.
+ * Verify the independent streaming provider-dispatch contract.
+ *
+ * The probe blocks the event loop for a posse-remote spawn, and readiness
+ * checks, provider selection and every dispatch ask it, so one answer serves
+ * every provider until its catalog TTL lapses or the binary identity changes.
+ * Each throw is a fresh error; callers may annotate what they catch.
  */
-export function providerDispatchSupportedSync(provider, opts = {}) {
-  const providerName = String(provider || "").trim();
-  if (providerDispatchSupportOverridesForTests.has(providerName)) {
-    return providerDispatchSupportOverridesForTests.get(providerName);
-  }
+export function verifyProviderDispatchCapabilitiesSync(provider, opts = {}) {
   const manager = opts.manager || nativeBinaries;
-  const cacheKey = `${engagementBinaryIdentity(manager)}:${providerName}`;
-  const cached = providerDispatchSupportCache.get(cacheKey);
-  if (cached && (cached.supported || cached.expiresAt > Date.now())) {
-    return cached.supported;
+  const handle = remoteBinaryHandle(manager);
+  const identity = engagementBinaryIdentity(manager);
+  let probe = handle ? providerDispatchCapabilityProbes.get(handle) : null;
+  let outcome = probe?.identity === identity ? providerDispatchOutcome(probe, provider) : null;
+  const ttlMs = outcome?.dispatch
+    ? PROVIDER_DISPATCH_CAPABILITIES_TTL_MS
+    : PROVIDER_DISPATCH_CAPABILITIES_NEGATIVE_TTL_MS;
+  const ageMs = outcome ? Date.now() - probe.probedAt : -1;
+  if (!outcome || ageMs < 0 || ageMs >= ttlMs) {
+    probe = { ...probeProviderDispatchContract({ ...opts, manager }), identity, probedAt: Date.now() };
+    if (handle) providerDispatchCapabilityProbes.set(handle, probe);
+    outcome = providerDispatchOutcome(probe, provider);
   }
-  let supported = false;
-  try {
-    verifyProviderDispatchCapabilitiesSync(providerName, { ...opts, manager });
-    supported = true;
-  } catch {
-    supported = false;
-  }
-  providerDispatchSupportCache.set(cacheKey, {
-    supported,
-    expiresAt: supported ? Number.POSITIVE_INFINITY : Date.now() + PROVIDER_DISPATCH_NEGATIVE_CACHE_MS,
-  });
-  return supported;
+  if (outcome.failure) throw engagementError(outcome.failure.reason, outcome.failure.message);
+  return outcome.dispatch;
 }
 
 /**

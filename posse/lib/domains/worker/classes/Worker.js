@@ -57,7 +57,6 @@ import { Job } from "../../queue/classes/job/Job.js";
 import { AssessmentSession } from "../../assessment/classes/AssessmentSession.js";
 import { processVerdict } from "./roles/assessor.js";
 import { PlanSession } from "../../planning/classes/PlanSession.js";
-import { cleanupAgentLoaderAsync, loaderPathForJob } from "../functions/helpers/agent-loader.js";
 import { TrackedProviderClient } from "./TrackedProviderClient.js";
 import { Agent } from "./Agent.js";
 import { RoleRegistry } from "./RoleRegistry.js";

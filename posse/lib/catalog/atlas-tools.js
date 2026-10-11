@@ -710,7 +710,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
           items: { type: "string", minLength: 1 },
           description: "Optional exact identifiers whose in-body coverage should be reported.",
         },
-        maxTokens: { type: "integer", minimum: 1, maximum: ATLAS_CODE_WINDOW_SAFETY_MAXIMUMS.maxWindowTokens, description: "Tokens per symbol; default and maximum 8000." },
+        maxTokens: { type: "integer", minimum: 1, maximum: SYMBOL_GET_BATCH_POLICY.maxTokensPerSymbol, description: "Tokens per symbol; default and maximum 8000." },
       },
       anyOf: [
         { required: ["file", "symbols"] },
@@ -891,19 +891,19 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "code.skeleton": {
     type: "function",
     name: "atlas_code_skeleton",
-    description: "Map declarations in a known file without bodies or control flow. Returns names, ranges, signatures, symbol handles, and completeness counts. Includes class members and exports, but excludes local functions.",
+    description: "Map declarations in a known file without bodies or control flow. Returns names, ranges, signatures, symbol handles, and completeness counts. Includes class members and exports, but excludes local functions. If truncated, narrow with identifiersToFind or exportedOnly.",
     parameters: {
       type: "object",
       properties: {
         symbolId: { type: "string", pattern: ATLAS_SYMBOL_ID_PATTERN, description: "Opaque ATLAS symbol ID selecting its containing file. Use identifiersToFind to focus declarations." },
         file: { type: "string", description: "Optional relative file path to inspect." },
         exportedOnly: { type: "boolean", description: "Prefer exported symbols only when possible." },
-        maxLines: { type: "integer", description: "Maximum declaration rows. Default 200; minimum 1, maximum 5000." },
-        maxTokens: { type: "integer", description: "Approximate rendered map token budget. Default 4000; minimum 1, maximum 200000." },
+        maxLines: { internalOnly: true, type: "integer", description: "Maximum declaration rows. Default 200; minimum 1, maximum 5000." },
+        maxTokens: { internalOnly: true, type: "integer", description: "Approximate rendered map token budget. Default 4000; minimum 1, maximum 200000." },
         identifiersToFind: { type: "array", items: { type: "string" }, description: "Optional exact names to focus the outline." },
         ifNoneMatch: { type: "string", description: "Conditional-fetch ETag supplied by the runtime.", internalOnly: true },
         sessionId: { type: "string", description: "Live-buffer overlay namespace supplied by the runtime.", internalOnly: true },
-        surveyGap: { type: "string", minLength: 3, description: "Named structural fact absent from the delivered orientation. This justifies bypassing the survey-first redirect; it does not otherwise change skeleton retrieval." },
+        surveyGap: { internalOnly: true, type: "string", minLength: 3, description: "Ignored legacy input retained for compatibility." },
       },
       required: [],
       additionalProperties: false,

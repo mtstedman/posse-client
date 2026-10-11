@@ -61,6 +61,8 @@ export function createGitWorkflowHelpers(options = {}) {
     canonicalSquashMergeEvidence: merge.canonicalSquashMergeEvidence,
     mergeIterativePassToTarget: merge.mergeIterativePassToTarget,
     reconcileCanonicalSquashMergeWorkItems: merge.reconcileCanonicalSquashMergeWorkItems,
+    recoverInterruptedSquash: merge.recoverInterruptedSquash,
+    recoverInterruptedSquashAsync: merge.recoverInterruptedSquashAsync,
     gitBranchExists: cleanup.gitBranchExists,
     gitWorktreePathsForBranch: cleanup.gitWorktreePathsForBranch,
     gitWorktreeRemove: cleanup.gitWorktreeRemove,

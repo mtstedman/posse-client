@@ -9,9 +9,12 @@ import { normalizeFailureFingerprintText } from "../../worker/functions/helpers/
 import {
   FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
   FINAL_REVIEW_MAX_FINDINGS,
+  FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS,
   FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS,
   FINAL_REVIEW_OBSERVATIONS,
   FINAL_REVIEW_OUTCOMES,
+  FINAL_REVIEW_REVIEW_MODES,
+  FINAL_REVIEW_UNCHARGED_REVIEW_MODES,
   FINAL_REVIEW_VERDICTS,
 } from "../../../catalog/final-review.js";
 
@@ -144,16 +147,37 @@ export function finalReviewResultsForAttempt({ jobId, attemptId, db = getDb() })
     .map((row) => ({ id: Number(row.id), ...parseDetail(row) }));
 }
 
+/** The results that spent one of the attempt's reviews: a reviewer's verdict. */
 export function semanticFinalReviewResults(results = []) {
-  return results.filter((result) => !["deterministic", "unchanged"].includes(result.review_mode));
+  return results.filter((result) => !FINAL_REVIEW_UNCHARGED_REVIEW_MODES.includes(result.review_mode));
 }
 
-/** Bound repeated deterministic failures without charging a semantic review. */
+/** Reviews this attempt has left, given its results so far. */
+export function finalReviewReviewsRemaining(results = []) {
+  return Math.max(0, FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT - semanticFinalReviewResults(results).length);
+}
+
+/** Rounds that obtained no reviewer verdict, which the handoff may still wait on. */
+export function finalReviewInfrastructureRounds(results = []) {
+  return results.filter((result) => result.review_mode === FINAL_REVIEW_REVIEW_MODES.INFRASTRUCTURE).length;
+}
+
+export function finalReviewInfrastructureRetriesLeft(results = []) {
+  return Math.max(0, FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS - finalReviewInfrastructureRounds(results));
+}
+
+/**
+ * Bound repeated deterministic failures without charging a semantic review.
+ * With `reviewIdentity` (the runtime's short-circuit), the rounds must be on
+ * that same unchanged candidate. Without it (the handoff hold), the same
+ * deterministic fingerprint over the last rounds is enough, so edits that
+ * never fix the failure cannot hold the handoff indefinitely.
+ */
 export function repeatedDeterministicReview(results = [], reviewIdentity = null) {
   const recent = results.slice(-FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS);
   if (recent.length < FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS) return null;
   const signature = (result) => JSON.stringify({
-    review_identity: result.review_identity,
+    review_identity: reviewIdentity ? result.review_identity : null,
     findings: (result.findings || []).map((finding) => ({
       criterion: normalizeFailureFingerprintText(finding.criterion), paths: finding.paths || [],
     })),
@@ -167,7 +191,7 @@ export function repeatedDeterministicReview(results = [], reviewIdentity = null)
   });
   const last = recent.at(-1);
   if (!last.review_identity || (reviewIdentity && last.review_identity !== reviewIdentity)
-    || recent.some((result) => result.review_mode !== "deterministic"
+    || recent.some((result) => result.review_mode !== FINAL_REVIEW_REVIEW_MODES.DETERMINISTIC
       || result.outcome !== FINAL_REVIEW_OUTCOMES.FINDINGS
       || signature(result) !== signature(last))) return null;
   return last;
@@ -197,23 +221,31 @@ function editedSince({ jobId, agentCallId, afterObservationId, db }) {
 /**
  * Why a COMPLETE handoff must wait for the final review, or null when it may
  * proceed: the call was not issued the tool, the latest review passed and the
- * change was not edited since, a review could not run, or the attempt's
- * reviews are used up.
+ * change was not edited since, the latest review could not run and its
+ * bounded retries are spent, the reviewer could not judge the work, or the
+ * attempt's reviews are used up. Only the latest review decides.
  */
 export function finalReviewHandoffHold({ jobId, attemptId, agentCallId, db = getDb() }) {
   if (!finalReviewIssuedTo({ jobId, agentCallId, db })) return null;
   const results = finalReviewResultsForAttempt({ jobId, attemptId, db });
-  if (results.some((result) => result.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED)) return null;
+  const latest = results.at(-1);
+  if (!latest) {
+    return "Call tools_final_review before a COMPLETE handoff: it runs the task's declared tests and an independent review of the change.";
+  }
+  if (latest.review_mode === FINAL_REVIEW_REVIEW_MODES.INFRASTRUCTURE) {
+    // No reviewer verdict was obtained. Once the retries are spent, the
+    // ordinary assessment verifies the change after handoff.
+    return finalReviewInfrastructureRetriesLeft(results) > 0
+      ? "The last final review could not run; call tools_final_review again before the COMPLETE handoff."
+      : null;
+  }
+  if (latest.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED) return null;
   if (semanticFinalReviewResults(results).length >= FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT) return null;
   if (repeatedDeterministicReview(results)) return null;
-  const latest = results.at(-1);
-  if (latest?.review_mode === "unchanged") {
+  if (latest.review_mode === FINAL_REVIEW_REVIEW_MODES.UNCHANGED) {
     return editedSince({ jobId, agentCallId, afterObservationId: latest.id, db })
       ? "The change was edited after unchanged findings were returned; call tools_final_review again before the COMPLETE handoff."
       : null;
-  }
-  if (!latest) {
-    return "Call tools_final_review before a COMPLETE handoff: it runs the task's declared tests and an independent review of the change.";
   }
   if (latest.outcome === FINAL_REVIEW_OUTCOMES.PASS) {
     if (!editedSince({ jobId, agentCallId, afterObservationId: latest.id, db })) return null;

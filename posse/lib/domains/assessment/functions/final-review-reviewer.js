@@ -8,12 +8,17 @@
 import { getJob, getWorkItem } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { buildHandoffPacket, handoff } from "../../handoff/functions/index.js";
-import { getAgentHandoffRecord } from "../../handoff/functions/agent-handoff.js";
+import { getAgentHandoffRecord } from "../../handoff/functions/agent-handoff-records.js";
 import { extractJsonResult } from "../../../shared/format/functions/json.js";
 import { AGENT_CALL_CHILD_KINDS, AGENT_CALL_ROLE_LABELS } from "../../../catalog/agent-call.js";
 import { FINAL_REVIEW_REVIEWER_WALL_MS } from "../../../catalog/final-review.js";
+import { AGENT_HANDOFF_PROFILES } from "../../../catalog/handoff.js";
 import { runWithObservationContext } from "../../observability/functions/observations.js";
-import { finalReviewInstructions } from "./final-review-snapshot.js";
+import {
+  finalReviewCoreInstructions,
+  finalReviewInstructions,
+  finalReviewModeInstructions,
+} from "./final-review-snapshot.js";
 
 /**
  * @param {{
@@ -21,7 +26,7 @@ import { finalReviewInstructions } from "./final-review-snapshot.js";
  *   composePrompt: (packet: object, instructions: string, opts: object) => Promise<string>,
  *   jobId: number, workItemId: number, attemptId: number | null, cwd: string,
  *   providerName: string, parentAgentCallId: number, abortSignal?: AbortSignal | null,
- *   instructions: string, evidence: string,
+ *   instructions: string, evidence: string, wallMs?: number,
  * }} input
  */
 async function runFinalReviewerInContext({
@@ -36,6 +41,7 @@ async function runFinalReviewerInContext({
   abortSignal = null,
   instructions,
   evidence,
+  wallMs = FINAL_REVIEW_REVIEWER_WALL_MS,
 }) {
   const job = getJob(jobId);
   if (!job) throw new Error(`Job #${jobId} no longer exists`);
@@ -53,15 +59,25 @@ async function runFinalReviewerInContext({
     kind: AGENT_CALL_CHILD_KINDS.FINAL_REVIEW,
     parentAgentCallId,
   } });
+  // Composition issues the reviewer's tool surface, so how the reviewer
+  // reports is chosen after it: full final-review instructions are reduced to
+  // their mode-neutral core first. Only a surface that carries final_review
+  // gets the report-and-wait lines; without an issued surface the reviewer
+  // reports in its terminal handoff.
+  const coreInstructions = [true, false].some((reportAndWait) => instructions === finalReviewInstructions({ reportAndWait }))
+    ? finalReviewCoreInstructions() : instructions;
+  const composed = await composePrompt(packet, coreInstructions, { providerName });
   const canReportAndWait = Array.isArray(packet.remote_tool_surface)
-    ? packet.remote_tool_surface.includes("tools.final_review")
-    : packet.agent_coordination?.final_review_v1 === true;
-  const issuedInstructions = instructions === finalReviewInstructions()
-    ? finalReviewInstructions({ reportAndWait: canReportAndWait }) : instructions;
-  const composed = await composePrompt(packet, issuedInstructions, { providerName });
-  const wallSignal = AbortSignal.timeout(FINAL_REVIEW_REVIEWER_WALL_MS);
+    && packet.remote_tool_surface.includes("tools.final_review");
+  const modeInstructions = finalReviewModeInstructions({ reportAndWait: canReportAndWait });
+  const wallSignal = AbortSignal.timeout(wallMs);
   const reviewerSignal = abortSignal ? AbortSignal.any([abortSignal, wallSignal]) : wallSignal;
-  const result = await call([composed, evidence].filter(Boolean).join("\n\n"), {
+  // A reviewer cut off by its wall has no verdict on the work, whatever its
+  // partial output says: the round obtained no verdict (infrastructure).
+  const wallExpired = () => wallSignal.aborted && !abortSignal?.aborted;
+  const wallError = () => Object.assign(new Error("the reviewer reached its time limit before reporting"),
+    { code: "FINAL_REVIEW_REVIEWER_WALL" });
+  const result = await call([composed, modeInstructions, evidence].filter(Boolean).join("\n\n"), {
     role: "assessor",
     modelTier: "standard",
     reasoningEffort: "medium",
@@ -91,14 +107,15 @@ async function runFinalReviewerInContext({
     jobModelName: null,
     // The reviewer must not move the developer job's provider/model pin.
     persistJobProvider: false,
-  });
+  }).catch((error) => { throw wallExpired() ? wallError() : error; });
+  if (wallExpired()) throw wallError();
   const { _normalizeAssessorVerdictShape } = await import("../../worker/functions/helpers/assessment-pipeline.js");
   let parsed = extractJsonResult(result?.output || "").value;
   if (Array.isArray(parsed) && parsed.length === 1) parsed = parsed[0];
   const handoffPacket = Number.isInteger(result?.agentCallId) ? getAgentHandoffRecord(result.agentCallId)?.packet : null;
   return {
     verdict: _normalizeAssessorVerdictShape(parsed, result?.output || ""),
-    claims: handoffPacket?.profile === "assessor.verdict.v1" && Array.isArray(handoffPacket?.handoffs?.[0]?.report?.claims)
+    claims: handoffPacket?.profile === AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT && Array.isArray(handoffPacket?.handoffs?.[0]?.report?.claims)
       ? handoffPacket.handoffs[0].report.claims
       : [],
     agentCallId: Number.isInteger(result?.agentCallId) ? result.agentCallId : null,

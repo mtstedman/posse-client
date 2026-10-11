@@ -588,8 +588,11 @@ export function normalizeArtifactCreateFiles(filesToCreate = [], outputRoot, opt
     const file = rawFile.replace(/\\/g, "/").trim().replace(/^\.\//, "");
     const matchingRoot = [...rootForms].find((form) => file === form || file.startsWith(form + "/"));
     if (matchingRoot) {
-      const normalized = `${normalizedRoot}${file.slice(matchingRoot.length)}`;
-      normalizedFiles.push(normalized);
+      // A root alias may still carry `..` segments; keep the path only if it
+      // stays inside the output root once normalized.
+      const tail = path.posix.normalize(file.slice(matchingRoot.length).replace(/^\/+/, "") || ".");
+      if (tail === ".." || tail.startsWith("../")) addWarning("artifact_path_dropped", rawFile, null);
+      else normalizedFiles.push(tail === "." ? normalizedRoot : `${normalizedRoot}/${tail}`);
       continue;
     }
 

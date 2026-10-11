@@ -16,7 +16,8 @@ import {
   logEvent,
   mergeVerificationDebtWaiver,
   mergeVerificationDebtWaiverCovers,
-  mergeVerificationReviewGateState,
+  currentMergeVerificationApproval,
+  rebindMergeVerificationReviewAfterRefresh,
   updateWorkItemMetadata,
 } from "../../queue/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
@@ -47,24 +48,49 @@ import {
   resolveHandoffSquashConflicts,
 } from "./handoff-conflict-resolution.js";
 import {
+  CLOSEOUT_TEST_TIMEOUT_MS,
   closeoutTestCommandFromJobs,
   droppableHandoffSyncJobIds,
   refreshBranchForCloseout,
   runCloseoutTestCommandSync,
 } from "./merge-closeout.js";
 import { conflictFilesFromMergeError, parkedMergeGuidance } from "./merge-park-guidance.js";
-import { runRegisteredTestsForMergeCandidate } from "../../../shared/tools/functions/toolkit/registered-tests.js";
-import { runRegisteredTest } from "../../../shared/tools/functions/toolkit/registered-tests.js";
-import { runDeclaredMergeCandidateChecks, withTemporaryMergeCandidateCheckout } from "./merge-candidate-checks.js";
-import { classifyMergeTargetDebt } from "./merge-target-debt.js";
-import { MERGE_GATE_WALL_BUDGET_MS } from "../../../catalog/verification.js";
+import {
+  mergeCandidateRegisteredTests,
+  registryMergeCheckFailureKind,
+  runRegisteredTest,
+  runRegisteredTestsForMergeCandidate,
+} from "../../../shared/tools/functions/toolkit/registered-tests.js";
+import {
+  declaredMergeCandidateCommands,
+  runDeclaredMergeCandidateChecks,
+  withTemporaryMergeCandidateCheckout,
+} from "./merge-candidate-checks.js";
+import { classifyMergeTargetDebt, classifyUnavailableMergeCheck, mergeCheckFailureFingerprint } from "./merge-target-debt.js";
+import { boundMergeGateEvidence, mergeGateOutputTail } from "./merge-failure-diagnostics.js";
+import {
+  MERGE_CLOSEOUT_WORKTREE_PREFIX,
+  MERGE_GATE_STORED_RESULTS,
+  MERGE_GATE_TASK_RESERVE_MS,
+  MERGE_GATE_WALL_BUDGET_MS,
+  MERGE_TARGET_COMPARISON_OUTCOMES,
+  MERGE_TARGET_DEBT_OUTCOMES,
+  MERGE_TARGET_PROCEEDING_OUTCOMES,
+} from "../../../catalog/verification.js";
+import {
+  readMergeInProgressMarker,
+  recoverInterruptedSquash as recoverInterruptedSquashIn,
+  removeMergeInProgressMarker,
+  writeMergeInProgressMarker,
+} from "./merge-interrupted-squash.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { postChangeReceiptsAtCommit } from "../../queue/functions/verification-receipts.js";
+import { passingReceiptCommits, postChangeReceiptsAtCommit } from "../../queue/functions/verification-receipts.js";
 import { mergeToSharedTrunkAsync } from "./shared-trunk.js";
 import { SHARED_TRUNK_SESSION_USER_TRAILER } from "../../../catalog/shared-trunk.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
+import { isAbortError } from "../../runtime/functions/yield.js";
 
 function reservedRuntimeMergeError(paths = []) {
   const blocked = filterPosseRuntimePaths(paths);
@@ -74,6 +100,64 @@ function reservedRuntimeMergeError(paths = []) {
   error.code = "GIT_RESERVED_RUNTIME_PATH";
   error.runtimePaths = blocked;
   return error;
+}
+
+/**
+ * Append a failing check to a work item's target_debt (the work item whose
+ * merge commit introduced it), or extend the matching entry's blocked work
+ * items. Returns the stored entry, or null when the work item is gone.
+ */
+export function recordTargetDebt(workItemId, record) {
+  let stored = null;
+  getDb().transaction(() => {
+    const row = getWorkItem(workItemId);
+    if (!row) return;
+    let metadata;
+    try { metadata = JSON.parse(row.metadata_json || "{}"); } catch { metadata = {}; }
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) metadata = {};
+    const existing = Array.isArray(metadata.target_debt) ? metadata.target_debt : [];
+    const prior = existing.find((item) => item.command === record.command
+      && (item.failure_fingerprint || null) === (record.failure_fingerprint || null) && item.commit === record.commit);
+    if (prior) {
+      prior.blocked_work_item_ids = [...new Set([...(prior.blocked_work_item_ids || []), ...(record.blocked_work_item_ids || [])])];
+      stored = prior;
+    } else {
+      stored = { ...record, blocked_work_item_ids: record.blocked_work_item_ids || [], recorded_at: new Date().toISOString() };
+      existing.push(stored);
+    }
+    updateWorkItemMetadata(workItemId, { ...metadata, target_debt: existing });
+  })();
+  return stored;
+}
+
+/**
+ * A merge whose candidate passed `command` (in `cwdRelative`) clears the
+ * open target_debt entries for that check: the target no longer fails it.
+ */
+function resolveTargetDebtEntries({ command, cwdRelative = null, workItemId, mergeHash }) {
+  const resolved = [];
+  getDb().transaction(() => {
+    const rows = getDb().prepare(`
+      SELECT id FROM work_items
+      WHERE json_valid(metadata_json) AND json_extract(metadata_json, '$.target_debt') IS NOT NULL
+    `).all();
+    for (const { id } of rows) {
+      const row = getWorkItem(id);
+      let metadata;
+      try { metadata = JSON.parse(row?.metadata_json || "{}"); } catch { continue; }
+      const entries = Array.isArray(metadata?.target_debt) ? metadata.target_debt : [];
+      let changed = false;
+      for (const entry of entries) {
+        if (entry.resolved_by || entry.command !== command || (entry.cwd_relative || null) !== (cwdRelative || null)) continue;
+        if (entry.commit === mergeHash) continue;
+        entry.resolved_by = { work_item_id: workItemId, commit: mergeHash, resolved_at: new Date().toISOString() };
+        changed = true;
+        resolved.push({ work_item_id: Number(id), command, commit: entry.commit });
+      }
+      if (changed) updateWorkItemMetadata(id, { ...metadata, target_debt: entries });
+    }
+  })();
+  return resolved;
 }
 
 export function createMergeWorkflowHelpers(context, {
@@ -283,6 +367,54 @@ export function createMergeWorkflowHelpers(context, {
     updateWorkItemMetadata(wiId, metadata);
   }
 
+  // After the merge commit: a failure merged under a waiver, or a check
+  // unavailable on the target too, is recorded on this work item at its merge
+  // commit (the push offer warns about it); a check that passed clears earlier
+  // entries for the same command.
+  function recordMergeGateOutcome({ wiId, mergeHash, targetBranch, outcome }) {
+    if (!outcome || wiId == null || !/^[0-9a-f]{40}$/i.test(String(mergeHash || ""))) return;
+    try {
+      for (const result of [...outcome.waived, ...outcome.unavailable]) {
+        const classification = result.target_debt_classification;
+        const waivedResult = outcome.waived.includes(result);
+        const record = recordTargetDebt(wiId, {
+          command: String(result.test?.name || result.test?.id || ""),
+          cwd_relative: result.cwd_relative || null,
+          failure_fingerprint: result.status === "unavailable" ? null : mergeCheckFailureFingerprint(result),
+          commit: mergeHash,
+          target_branch: targetBranch,
+          outcome: classification?.outcome || MERGE_TARGET_COMPARISON_OUTCOMES.UNVERIFIED,
+          blocked_work_item_ids: [],
+          ...(waivedResult ? { waived_by_gate: outcome.waivedByGate } : {}),
+        });
+        if (!record) continue;
+        logEvent({ work_item_id: wiId, event_type: EVENT_TYPES.WORK_ITEM_TARGET_DEBT_INTRODUCED,
+          actor_type: EVENT_ACTORS.SYSTEM,
+          message: waivedResult
+            ? `${record.command} ${record.outcome} merged into ${targetBranch} under waiver gate #${outcome.waivedByGate ?? "unknown"}`
+            : `${record.command} merged into ${targetBranch} unverified: unavailable on the target too`,
+          event_json: JSON.stringify(record) });
+      }
+      for (const result of outcome.passed) {
+        const command = String(result.test?.name || result.test?.id || "");
+        if (!command) continue;
+        const resolved = resolveTargetDebtEntries({ command, cwdRelative: result.cwd_relative || null, workItemId: wiId, mergeHash });
+        if (resolved.length > 0) {
+          logEvent({ work_item_id: wiId, event_type: EVENT_TYPES.GIT_MERGE_TARGET_DEBT, actor_type: EVENT_ACTORS.SYSTEM,
+            message: `${command} passed in the merge of WI#${wiId}; resolved ${resolved.length} recorded ${targetBranch} debt entr${resolved.length === 1 ? "y" : "ies"}`,
+            event_json: JSON.stringify({ resolved_by: { work_item_id: wiId, commit: mergeHash }, resolved }) });
+        }
+      }
+    } catch (error) {
+      // The merge already landed; the evidence record is best effort.
+      try {
+        logEvent({ work_item_id: wiId, event_type: EVENT_TYPES.GIT_MERGE, actor_type: EVENT_ACTORS.SYSTEM,
+          message: `Recording merge gate evidence for WI#${wiId} failed: ${error?.message || error}`,
+          event_json: JSON.stringify({ merge_hash: mergeHash }) });
+      } catch { /* observational */ }
+    }
+  }
+
   function branchCheckoutPaths(branch, cwd) {
     try {
       const listing = gitMergeExec(["worktree", "list", "--porcelain"], cwd, { trim: false });
@@ -320,7 +452,7 @@ export function createMergeWorkflowHelpers(context, {
   // resolve only ordering-induced conflicts. Returns { refreshed, reason } to
   // continue, or { park } with the merge result when the work item must wait
   // for manual review.
-  function runCloseoutRefresh({ wiId, branch, targetBranch, cwd, sourceDirty, log }) {
+  function runCloseoutRefresh({ wiId, branch, targetBranch, cwd, sourceDirty, log, deadlineMs = Infinity, approval = null }) {
     if (wiId == null) return { refreshed: false, reason: "not_a_work_item_merge" };
     try {
       if (gitMergeExec(["merge-base", targetBranch, branch], cwd) === gitMergeExec(["rev-parse", targetBranch], cwd)) {
@@ -358,7 +490,7 @@ export function createMergeWorkflowHelpers(context, {
     } else if (checkedOut.length > 0) {
       return skip("branch_checked_out_elsewhere");
     } else {
-      worktreePath = fs.mkdtempSync(path.join(os.tmpdir(), "posse-closeout-"));
+      worktreePath = fs.mkdtempSync(path.join(os.tmpdir(), MERGE_CLOSEOUT_WORKTREE_PREFIX));
       try {
         gitMergeExec(["worktree", "add", "--detach", worktreePath, branch], cwd);
         ownsWorktree = true;
@@ -368,6 +500,24 @@ export function createMergeWorkflowHelpers(context, {
       }
     }
 
+    // The close-out test shares the merge worker's deadline with the gate. A
+    // test cut short by that budget proves nothing about the resolution, so it
+    // skips the refresh instead of parking the work item as a conflict.
+    let testBudgetExpired = false;
+    const runBoundedTestCommand = (command, options = {}) => {
+      const remainingMs = deadlineMs - Date.now();
+      if (remainingMs < 1000) {
+        testBudgetExpired = true;
+        return { ok: false, status: null, timed_out: true, output: "merge task budget expired before the close-out test" };
+      }
+      const bounded = remainingMs < CLOSEOUT_TEST_TIMEOUT_MS;
+      const outcome = runCloseoutTestCommand(command, {
+        ...options,
+        ...(bounded ? { timeoutMs: Math.floor(remainingMs) } : {}),
+      });
+      if (bounded && !outcome?.ok && outcome?.timed_out) testBudgetExpired = true;
+      return outcome;
+    };
     let result;
     try {
       result = refreshBranchForCloseout({
@@ -379,7 +529,7 @@ export function createMergeWorkflowHelpers(context, {
         ownsWorktree,
         droppableSyncJobIds: droppableHandoffSyncJobIds(dependencies),
         testCommand,
-        runTestCommand: runCloseoutTestCommand,
+        runTestCommand: runBoundedTestCommand,
         isIgnorableStatusLine: (line) => isRuntimePorcelainLine(line, worktreePath),
       });
     } finally {
@@ -406,7 +556,21 @@ export function createMergeWorkflowHelpers(context, {
           ? `; 3-way merged work committed inside merges with later target changes in ${result.threeWayMergedFiles.join(", ")}`
           : "",
       ].join("");
-      log(`Close-out refreshed ${branch} onto ${targetBranch}${result.resolvedFiles.length > 0 ? `; resolved ordering conflicts in ${result.resolvedFiles.join(", ")}` : ""}${restoredNote}`, {
+      // Replaying the reviewed commits without resolving or merging content
+      // keeps the reviewed change: carry an operator approval to the new head.
+      // Restored files take the reviewed head's own content.
+      const contentPreserving = (result.resolvedFiles?.length || 0) === 0
+        && (result.threeWayMergedFiles?.length || 0) === 0;
+      const reviewRebind = !approval ? null
+        : contentPreserving
+          ? rebindMergeVerificationReviewAfterRefresh(wiId, {
+            gateJobId: approval.gate_job_id,
+            fromHead: result.branchHead,
+            toHead: result.refreshedHead,
+            targetHead: result.targetHead,
+          })
+          : { ok: false, reason: "refresh_changed_content" };
+      log(`Close-out refreshed ${branch} onto ${targetBranch}${result.resolvedFiles.length > 0 ? `; resolved ordering conflicts in ${result.resolvedFiles.join(", ")}` : ""}${restoredNote}${reviewRebind?.ok ? `; merge review gate #${approval.gate_job_id} rebound to the refreshed head` : ""}`, {
         json: {
           ...detail,
           closeout_refreshed: true,
@@ -418,10 +582,20 @@ export function createMergeWorkflowHelpers(context, {
           three_way_merged_files: result.threeWayMergedFiles || [],
           resolution_rules: result.rules,
           test_command: result.testCommand,
+          content_preserving: contentPreserving,
+          merge_review_rebind: reviewRebind,
         },
       });
-      return { refreshed: true };
+      return {
+        refreshed: true,
+        fromHead: result.branchHead,
+        refreshedHead: result.refreshedHead,
+        targetHead: result.targetHead,
+        contentPreserving,
+        reviewRebind,
+      };
     }
+    if (result.testFailed && testBudgetExpired) return skip("closeout_test_budget_expired");
     if (result.testFailed) {
       const message = `Merge parked for manual review: close-out refresh of ${branch} resolved ordering conflicts in ${result.files.join(", ")}, but its test command failed (${result.testCommand})`;
       log(message, { json: { ...detail, closeout_test_failed: true, test_command: result.testCommand, test_output: result.testOutput } });
@@ -925,8 +1099,14 @@ export function createMergeWorkflowHelpers(context, {
     suppressPostMergeEffects = false,
     sharedTrunkOperationId = null,
     testWaiver = null,
+    taskDeadlineMs = null,
   } = {}) {
     const targetBranch = currentTargetBranch();
+    // The gate and the close-out test end before the worker's own deadline,
+    // so a thread timeout never interrupts them with the squash staged.
+    const budgetEndMs = Number.isFinite(Number(taskDeadlineMs)) && Number(taskDeadlineMs) > 0
+      ? Number(taskDeadlineMs) - MERGE_GATE_TASK_RESERVE_MS
+      : Infinity;
     const log = (msg, extra = {}) => {
       logEvent({
         work_item_id: wiId,
@@ -978,6 +1158,37 @@ export function createMergeWorkflowHelpers(context, {
     }
 
     const initialHeads = mergeHeads(branch, targetBranch, cwd);
+    // An operator approval binds the branch commit it reviewed. A branch that
+    // moved since needs a fresh review before any refresh or test runs; the
+    // auto-merge caller routes reviewStale to that review instead of a
+    // merge-failure gate.
+    const approval = wiId == null ? null : currentMergeVerificationApproval(wiId);
+    const reviewStaleResult = (observedHead, detail) => {
+      const short = (sha) => String(sha || "unknown").slice(0, 12);
+      const message = `Merge review gate #${approval.gate_job_id} covered branch commit ${short(approval.reviewed_branch_head)}, not ${short(observedHead)}; review the current branch before merging`;
+      log(message, {
+        json: {
+          branch,
+          target: targetBranch,
+          review_stale: true,
+          gate_job_id: approval.gate_job_id,
+          reviewed_branch_head: approval.reviewed_branch_head || null,
+          branch_head: observedHead || null,
+          reason: detail,
+        },
+      });
+      return {
+        ok: false,
+        reviewStale: true,
+        gateJobId: approval.gate_job_id,
+        branchHead: observedHead || null,
+        targetHead: initialHeads.targetHead,
+        message,
+      };
+    };
+    if (approval && approval.reviewed_branch_head !== initialHeads.branchHead) {
+      return reviewStaleResult(initialHeads.branchHead, "branch_moved_since_review");
+    }
     const priorDeterministicFailure = workItemMetadata(wiId)[DETERMINISTIC_MERGE_FAILURE_KEY];
     const unchangedConflictResult = (detail = null) => {
       // A content conflict is a pure function of the two tree heads. A manual
@@ -1108,8 +1319,15 @@ export function createMergeWorkflowHelpers(context, {
       });
     }
 
-    const closeout = runCloseoutRefresh({ wiId, branch, targetBranch, cwd, sourceDirty, log });
+    const closeout = runCloseoutRefresh({ wiId, branch, targetBranch, cwd, sourceDirty, log, deadlineMs: budgetEndMs, approval });
     if (closeout.park) return closeout.park;
+    // A refresh that resolved or merged content changed what the operator
+    // reviewed; one that only replayed the reviewed commits was rebound.
+    if (approval && closeout.refreshed && !closeout.reviewRebind?.ok) {
+      return reviewStaleResult(closeout.refreshedHead, closeout.contentPreserving
+        ? `review_rebind_failed: ${closeout.reviewRebind?.reason || "unknown"}`
+        : "closeout_refresh_changed_content");
+    }
     // A re-approval whose refresh could not move the branch would only rerun
     // the identical conflicting squash merge.
     if (memoBlocksSquash && !closeout.refreshed) {
@@ -1118,8 +1336,21 @@ export function createMergeWorkflowHelpers(context, {
 
     let currentBranch = null;
     let autoStash = null;
+    let mergeMarkerWritten = false;
 
     try {
+      // Pre-flight: an earlier merge interrupted mid-gate (thread timeout,
+      // crash) left its squash staged and its temporary checkouts registered.
+      // Unstage it (a later dirty-tree commit would ship an unverified
+      // candidate) and remove the checkouts before anything below reads the
+      // tree as dirty.
+      const interrupted = recoverInterruptedSquash(cwd, { log });
+      if (interrupted.action === "failed") {
+        const message = `Merge refused: could not repair the squash an interrupted merge gate left in the target worktree (${interrupted.error}); unstage it before merging ${branch}`;
+        log(message, { json: { branch, target: targetBranch, interrupted_merge_recovery: "failed" } });
+        return { ok: false, dirty: true, message };
+      }
+
       // Pre-flight: MERGE_HEAD in the target checkout is never Posse's own
       // state — every Posse merge here is `merge --squash`, which does not
       // write MERGE_HEAD under any failure mode. Aborting it would discard a
@@ -1296,87 +1527,138 @@ export function createMergeWorkflowHelpers(context, {
       let mergeHash = null;
       let mergeStep = "merge";
       let mergeCreated = false;
+      // Evidence the gate leaves for after the commit: checks merged under an
+      // operator waiver or proceeding as target_unavailable (recorded on this
+      // work item at the merge commit), and checks that passed (they resolve
+      // earlier debt entries for the same command).
+      let gateOutcome = null;
+
+      // The first commit in (merge base, target head] where this check last
+      // passed: debt attribution starts there, so neighbours merged before
+      // that pass are not suspects. Falls back to the merge base.
+      const attributionRangeStart = (result, candidate, mergeBase) => {
+        if (!/^[0-9a-f]{40}$/i.test(String(mergeBase || ""))) return mergeBase || null;
+        let commits = [];
+        try {
+          commits = passingReceiptCommits(String(result.test?.name || ""), { cwdRelative: result.cwd_relative || null });
+        } catch { commits = []; }
+        for (const commit of commits) {
+          try {
+            gitMergeExec(["merge-base", "--is-ancestor", commit, candidate.targetHead], candidate.checkout);
+            gitMergeExec(["merge-base", "--is-ancestor", mergeBase, commit], candidate.checkout);
+            return commit;
+          } catch { /* not in range; try an older pass */ }
+        }
+        return mergeBase;
+      };
 
       const runProjectedCandidateGate = (stagedFiles) => {
         mergeStep = "integration_gate";
-        const gateDeadlineMs = Date.now() + MERGE_GATE_WALL_BUDGET_MS;
-        let candidateTests = withTemporaryMergeCandidateCheckout({ cwd, git: gitMergeExec }, (candidate) => {
-          let tests = runRegisteredTestsForMergeCandidate({
-            cwd: candidate.checkout,
-            workItemId: wiId,
-            scopeFiles: stagedFiles,
-            beforeEachTest: candidate.reset,
-            deadlineMs: gateDeadlineMs,
-            actor: {
-              role: "assessor_handoff",
-              workItemId: wiId,
-            },
-          });
-          if (tests.matched === 0 && wiId != null) {
-            tests = runDeclaredMergeCandidateChecks({ cwd, jobs: listJobsByWorkItem(wiId), git: gitMergeExec, candidate,
-              deadlineMs: gateDeadlineMs }) || tests;
-          }
-          if (!tests.ok && wiId != null) {
-            const workItem = getWorkItem(wiId);
-            const runCurrent = (initial, timeoutMs) => {
-              if (tests.source === "job_test_command") {
-                const one = runDeclaredMergeCandidateChecks({
-                  cwd, git: gitMergeExec,
-                  jobs: [{ status: "succeeded", job_type: "dev", payload_json: JSON.stringify({ test_command: initial.test.name }) }],
-                  candidate: { ...candidate, reset: () => {} },
-                  run: (command, options) => runCloseoutTestCommandSync(command, { ...options, timeoutMs }),
-                });
-                return one?.results[0] || null;
-              }
-              const result = runRegisteredTest({
-                args: { test_id: initial.test.id, timeout_ms: timeoutMs },
+        const gateDeadlineMs = Math.min(Date.now() + MERGE_GATE_WALL_BUDGET_MS, budgetEndMs);
+        // Select checks before paying for a candidate checkout: registered
+        // tests the changed files select, else the jobs' declared commands.
+        const registered = mergeCandidateRegisteredTests({ cwd, workItemId: wiId, scopeFiles: stagedFiles });
+        const declaredCommands = wiId == null || registered.tests.length > 0
+          ? [] : declaredMergeCandidateCommands(listJobsByWorkItem(wiId));
+        let candidateTests = registered.tests.length === 0 && declaredCommands.length === 0
+          ? { ok: true, matched: 0, passed: 0, failed: 0, results: [],
+            summary: registered.scopeFiles.length === 0 ? "merge candidate has no changed files"
+              : "no active registered tests match the merge candidate" }
+          : withTemporaryMergeCandidateCheckout({ cwd, git: gitMergeExec }, (candidate) => {
+            let tests = registered.tests.length > 0
+              ? runRegisteredTestsForMergeCandidate({
                 cwd: candidate.checkout,
+                workItemId: wiId,
                 scopeFiles: stagedFiles,
-                actor: { role: "assessor_handoff", workItemId: wiId },
-              });
-              return { ...result, status: result.ok ? "passed" : "failed",
-                stdout: result.failure?.message || "", stderr: "", exit_code: result.ok ? 0 : 1 };
-            };
-            const lookupWorkItem = (branchName) => getDb().prepare(
-              "SELECT id, branch_name, merge_state FROM work_items WHERE branch_name = ? ORDER BY id DESC LIMIT 1",
-            ).get(branchName);
-            tests = {
-              ...tests,
-              results: tests.results.map((result) => {
-                if (result.ok || result.status === "unavailable") return result;
-                const debt = classifyMergeTargetDebt({
-                  candidateResult: result,
-                  candidateCommit: candidate.candidateCommit,
-                  targetHead: candidate.targetHead,
-                  mergeBase: workItem?.merge_base_hash,
-                  targetBranch,
-                  checkout: candidate.checkout,
-                  git: gitMergeExec,
-                  reset: candidate.reset,
-                  runCurrent: (timeoutMs) => runCurrent(result, timeoutMs),
-                  lookupWorkItem,
-                  deadlineMs: gateDeadlineMs,
+                selection: registered,
+                beforeEachTest: candidate.reset,
+                deadlineMs: gateDeadlineMs,
+                actor: {
+                  role: "assessor_handoff",
+                  workItemId: wiId,
+                },
+              })
+              : runDeclaredMergeCandidateChecks({ cwd, jobs: listJobsByWorkItem(wiId), git: gitMergeExec, candidate,
+                deadlineMs: gateDeadlineMs });
+            if (!tests.ok && wiId != null) {
+              const workItem = getWorkItem(wiId);
+              const runCurrent = (initial, timeoutMs) => {
+                if (tests.source === "job_test_command") {
+                  const one = runDeclaredMergeCandidateChecks({
+                    cwd, git: gitMergeExec,
+                    jobs: [{ status: "succeeded", job_type: "dev", payload_json: JSON.stringify({ test_command: initial.test.name }) }],
+                    candidate: { ...candidate, reset: () => {} },
+                    run: (command, options) => runCloseoutTestCommandSync(command, { ...options, timeoutMs }),
+                  });
+                  return one?.results[0] || null;
+                }
+                const result = runRegisteredTest({
+                  args: { test_id: initial.test.id, timeout_ms: timeoutMs },
+                  cwd: candidate.checkout,
+                  scopeFiles: stagedFiles,
+                  actor: { role: "assessor_handoff", workItemId: wiId },
                 });
-                return { ...result, target_debt_classification: debt };
-              }),
-            };
-            const allowProvenDebt = getSetting(SETTING_KEYS.MERGE_TARGET_DEBT_AUTO_PROCEED) !== "false";
-            tests.ok = allowProvenDebt && tests.results.every((result) => result.ok
-              || ["target_debt", "changed_debt"].includes(result.target_debt_classification?.outcome));
-            const outcomes = tests.results.filter((result) => !result.ok)
-              .map((result) => result.target_debt_classification?.outcome || "unverified");
-            tests.summary = `${tests.summary}; target comparison: ${outcomes.join(", ")}`;
-          }
-          return tests;
-        });
+                const failureKind = registryMergeCheckFailureKind(result);
+                return { ...result, status: result.ok ? "passed" : "failed",
+                  ...(failureKind ? { failure_kind: failureKind } : {}),
+                  stdout: result.failure?.message || "", stderr: "",
+                  exit_code: Number.isInteger(result.failure?.exit_code) ? result.failure.exit_code : result.ok ? 0 : 1,
+                  signal: result.failure?.signal || null };
+              };
+              const lookupWorkItem = (branchName) => getDb().prepare(
+                "SELECT id, branch_name, merge_state FROM work_items WHERE branch_name = ? ORDER BY id DESC LIMIT 1",
+              ).get(branchName);
+              tests = {
+                ...tests,
+                results: tests.results.map((result) => {
+                  if (result.ok) return result;
+                  const debt = result.status === "unavailable"
+                    ? classifyUnavailableMergeCheck({
+                      candidateResult: result,
+                      candidateCommit: candidate.candidateCommit,
+                      targetHead: candidate.targetHead,
+                      reset: candidate.reset,
+                      runCurrent: (timeoutMs) => runCurrent(result, timeoutMs),
+                      deadlineMs: gateDeadlineMs,
+                    })
+                    : classifyMergeTargetDebt({
+                      candidateResult: result,
+                      candidateCommit: candidate.candidateCommit,
+                      targetHead: candidate.targetHead,
+                      rangeStart: tests.source === "job_test_command"
+                        ? attributionRangeStart(result, candidate, workItem?.merge_base_hash)
+                        : workItem?.merge_base_hash,
+                      targetBranch,
+                      checkout: candidate.checkout,
+                      git: gitMergeExec,
+                      reset: candidate.reset,
+                      runCurrent: (timeoutMs) => runCurrent(result, timeoutMs),
+                      lookupWorkItem,
+                      deadlineMs: gateDeadlineMs,
+                    });
+                  return { ...result, target_debt_classification: debt };
+                }),
+              };
+              const allowProvenDebt = getSetting(SETTING_KEYS.MERGE_TARGET_DEBT_AUTO_PROCEED) !== "false";
+              tests.ok = allowProvenDebt && tests.results.every((result) => result.ok
+                || MERGE_TARGET_PROCEEDING_OUTCOMES.includes(result.target_debt_classification?.outcome));
+              const outcomes = tests.results.filter((result) => !result.ok)
+                .map((result) => result.target_debt_classification?.outcome || MERGE_TARGET_COMPARISON_OUTCOMES.UNVERIFIED);
+              tests.summary = `${tests.summary}; target comparison: ${outcomes.join(", ")}`;
+            }
+            return tests;
+          });
         // Registered tests are one source of evidence; the jobs' own focused
         // receipts on the branch head are another. Report both, so an empty
         // registry never reads as "nothing was tested".
         const branchHead = mergeHeads(branch, targetBranch, cwd).branchHead;
-        const reviewState = wiId == null ? null : mergeVerificationReviewGateState(wiId);
-        if (reviewState?.approved && reviewState.reviewed_branch_head !== branchHead) {
+        // Defensive: the pre-refresh check and the rebind already settled
+        // this; a branch moved underneath the merge still fails closed.
+        const reviewState = wiId == null ? null : currentMergeVerificationApproval(wiId);
+        if (reviewState && reviewState.reviewed_branch_head !== branchHead) {
           const error = new Error(`Merge review gate #${reviewState.gate_job_id} covered a different branch commit; review the current branch before merging`);
           error.code = "POSSE_MERGE_REVIEW_STALE";
+          error.gateJobId = reviewState.gate_job_id;
           throw error;
         }
         let focusedChecks = [];
@@ -1384,26 +1666,15 @@ export function createMergeWorkflowHelpers(context, {
         candidateTests = { ...candidateTests, candidate_tree: gitMergeExec(["write-tree"], cwd), target_head: preMergeHead };
         for (const result of candidateTests.results) {
           const debt = result.target_debt_classification;
-          if (!["target_debt", "changed_debt"].includes(debt?.outcome)) continue;
+          if (!MERGE_TARGET_DEBT_OUTCOMES.includes(debt?.outcome)) continue;
           const introducerId = debt.introducer?.work_item_id;
           if (!introducerId) continue;
           const command = String(result.test?.name || result.test?.id || "");
-          const record = { command, failure_fingerprint: debt.failure_fingerprint || null,
-            commit: debt.introducer.commit, target_branch: targetBranch,
-            blocked_work_item_ids: [wiId] };
-          getDb().transaction(() => {
-            const row = getWorkItem(introducerId);
-            if (!row) return;
-            let metadata;
-            try { metadata = JSON.parse(row.metadata_json || "{}"); } catch { metadata = {}; }
-            const existing = Array.isArray(metadata.target_debt) ? metadata.target_debt : [];
-            const prior = existing.find((item) => item.command === command
-              && item.failure_fingerprint === record.failure_fingerprint && item.commit === record.commit);
-            if (prior) {
-              prior.blocked_work_item_ids = [...new Set([...(prior.blocked_work_item_ids || []), wiId])];
-            } else existing.push(record);
-            updateWorkItemMetadata(introducerId, { ...metadata, target_debt: existing });
-          })();
+          const record = recordTargetDebt(introducerId, { command, cwd_relative: result.cwd_relative || null,
+            failure_fingerprint: debt.failure_fingerprint || null,
+            commit: debt.introducer.commit, target_branch: targetBranch, outcome: debt.outcome,
+            blocked_work_item_ids: [wiId] });
+          if (!record) continue;
           logEvent({ work_item_id: wiId, event_type: EVENT_TYPES.GIT_MERGE_TARGET_DEBT,
             actor_type: EVENT_ACTORS.SYSTEM,
             message: `${targetBranch} ${debt.outcome} in ${command} introduced by WI#${introducerId}`,
@@ -1437,14 +1708,14 @@ export function createMergeWorkflowHelpers(context, {
             matched: candidateTests.matched,
             passed: candidateTests.passed,
             failed: candidateTests.failed,
-            tests: candidateTests.results.map((result) => ({
+            tests: candidateTests.results.slice(0, MERGE_GATE_STORED_RESULTS).map((result) => ({
               test_id: result.test?.id || null,
               name: result.test?.name || null,
               ok: result.ok === true,
               status: result.status || null,
-              note: result.note || null,
+              note: result.note == null ? null : mergeGateOutputTail(result.note),
               run_id: result.run_id || null,
-              failure: result.failure?.message || null,
+              failure: result.failure?.message == null ? null : mergeGateOutputTail(result.failure.message),
               target_debt_classification: result.target_debt_classification || null,
             })),
           }),
@@ -1455,12 +1726,26 @@ export function createMergeWorkflowHelpers(context, {
           const gateError = new Error(
             `Projected merge candidate ${firstFailure?.status === "unavailable" ? "has an unverified required check" : "failed test"} ${firstFailure?.test?.name || firstFailure?.test?.id || "unknown"} on ${targetBranch}`
             + `${debt ? ` (${debt.outcome}${debt.introducer ? `, WI#${debt.introducer.work_item_id}` : ""})` : ""}: `
-            + `${firstFailure?.failure?.message || candidateTests.summary}`,
+            + `${mergeGateOutputTail(firstFailure?.failure?.message || candidateTests.summary)}`,
           );
           gateError.code = "POSSE_MERGE_CANDIDATE_TEST_FAILED";
-          gateError.integrationGate = candidateTests;
+          // Classification is done: store only bounded evidence.
+          gateError.integrationGate = boundMergeGateEvidence(candidateTests);
           throw gateError;
         }
+        const failing = candidateTests.results.filter((result) => !result.ok);
+        gateOutcome = {
+          // Failures merged under an operator or review waiver that are not
+          // proven debt of another work item: this merge introduces them.
+          waived: waived
+            ? failing.filter((result) => !MERGE_TARGET_DEBT_OUTCOMES.includes(result.target_debt_classification?.outcome))
+            : [],
+          waivedByGate: waived ? (mergeTestWaiverCovers(testWaiver, candidateTests) ? testWaiver?.gate_job_id : debtWaiver?.gate_job_id) ?? null : null,
+          // Unavailable on the target too: merged, but nothing verified it.
+          unavailable: waived ? [] : failing.filter((result) => result.target_debt_classification?.outcome
+            === MERGE_TARGET_COMPARISON_OUTCOMES.TARGET_UNAVAILABLE),
+          passed: candidateTests.results.filter((result) => result.ok === true),
+        };
         return candidateTests;
       };
 
@@ -1477,6 +1762,14 @@ export function createMergeWorkflowHelpers(context, {
 
         mergeStep = "merge";
         emitMergePhase(onPhase, "merge", `${label === "merge" ? "Merging" : "Retrying merge of"} ${branch} into ${targetBranch}`, { branch, target: targetBranch });
+        writeMergeInProgressMarker(gitMergeExec, cwd, {
+          branch,
+          target: targetBranch,
+          pre_merge_head: preMergeHead,
+          wi_id: wiId,
+          subject: expectedSquashSubject(branch, targetBranch),
+        });
+        mergeMarkerWritten = true;
         gitMergeExec(["merge", "--squash", branch], cwd);
         mergeStep = "diff";
         const staged = gitMergeExec(["diff", "--cached", "--name-only"], cwd);
@@ -1645,6 +1938,7 @@ export function createMergeWorkflowHelpers(context, {
             wiId,
           });
           if (recovered?.ok) {
+            recordMergeGateOutcome({ wiId, mergeHash: recovered.mergeHash, targetBranch, outcome: gateOutcome });
             if (!suppressPostMergeEffects) {
               emitAtlasMainAdvancedAfterMerge({
                 wiId,
@@ -1693,6 +1987,8 @@ export function createMergeWorkflowHelpers(context, {
           timedOut,
           runtimePathBlocked: finalMergeErr?.code === "GIT_RESERVED_RUNTIME_PATH",
           runtimePaths: finalMergeErr?.runtimePaths || [],
+          ...(finalMergeErr?.code === "POSSE_MERGE_REVIEW_STALE"
+            ? { reviewStale: true, gateJobId: finalMergeErr.gateJobId ?? null } : {}),
           integrationGateFailed: finalMergeErr?.code === "POSSE_MERGE_CANDIDATE_TEST_FAILED",
           integrationGate: finalMergeErr?.integrationGate || null,
           deterministicConflict,
@@ -1723,6 +2019,7 @@ export function createMergeWorkflowHelpers(context, {
 
       log(`Merged ${branch} into ${targetBranch} at ${mergeHash}`, { json: { branch, target: targetBranch, merge_hash: mergeHash } });
       clearDeterministicMergeFailure(wiId);
+      if (mergeCreated) recordMergeGateOutcome({ wiId, mergeHash, targetBranch, outcome: gateOutcome });
       if (!suppressPostMergeEffects && (mergeCreated || (preMergeHead && mergeHash && mergeHash !== preMergeHead))) {
         emitAtlasMainAdvancedAfterMerge({
           wiId,
@@ -1753,7 +2050,53 @@ export function createMergeWorkflowHelpers(context, {
         ? restoreAutoStash(cwd, autoStash, log, `setup failure for ${branch}`)
         : null;
       return { ok: false, message: `Merge failed: ${firstGitLine(err)}${restoreWarning ? `; ${restoreWarning}` : ""}`, stashPopWarning: restoreWarning, targetBranch };
+    } finally {
+      // Every exit that reaches here committed or aborted the squash. Keep the
+      // marker only if the squash is somehow still staged, so the next merge or
+      // startup repairs it instead of a dirty-tree policy committing it.
+      if (mergeMarkerWritten) settleMergeInProgressMarker(cwd);
     }
+  }
+
+  function settleMergeInProgressMarker(cwd) {
+    try {
+      const marker = readMergeInProgressMarker(gitMergeExec, cwd);
+      if (!marker) return;
+      const head = gitMergeExec(["rev-parse", "HEAD"], cwd);
+      const staged = gitLinesOrNull(["diff", "--cached", "--name-only"], cwd);
+      if (head === marker.pre_merge_head && (staged == null || staged.length > 0)) return;
+      removeMergeInProgressMarker(gitMergeExec, cwd);
+    } catch { /* the next merge pre-flight repairs or clears it */ }
+  }
+
+  /**
+   * Repair a target checkout a merge interrupted mid-gate left behind. Callers
+   * outside a merge take the worktree lock, so a live merge's own temporary
+   * checkouts are never removed underneath it.
+   */
+  function recoverInterruptedSquash(cwd = projectDir, { log = null, worktreeLockAlreadyHeld = true } = {}) {
+    const record = log || ((message, extra = {}) => logEvent({
+      event_type: EVENT_TYPES.GIT_MERGE,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message,
+      event_json: extra.json ? JSON.stringify(extra.json) : undefined,
+    }));
+    const run = () => recoverInterruptedSquashIn({
+      cwd,
+      exec: gitMergeExec,
+      preserveSnapshot: (dir, marker) => preserveDirtyWorktreeSnapshot(dir, projectDir, {
+        reason: "interrupted-merge-gate",
+        branchName: marker?.target || null,
+        wiId: marker?.wi_id ?? null,
+        onMsg: (msg) => record(msg),
+      }),
+      log: record,
+    });
+    return worktreeLockAlreadyHeld ? run() : withWorktreeLock(cwd, projectDir, run);
+  }
+
+  function recoverInterruptedSquashAsync(cwd = projectDir, { worktreeLockAlreadyHeld = false, timeoutMs = MERGE_GATE_TASK_RESERVE_MS } = {}) {
+    return runGitWorkflowTaskOffMainThread("recoverInterruptedSquash", { cwd, worktreeLockAlreadyHeld }, { timeoutMs });
   }
 
   async function gitMergeToTargetAsync(branch, cwd, {
@@ -1767,20 +2110,43 @@ export function createMergeWorkflowHelpers(context, {
     mergeLockAlreadyHeld = false,
     testWaiver = null,
   } = {}) {
-    const runLocal = ({ suppressPostMergeEffects = false, worktreeLockAlreadyHeld = false, operationId = null } = {}) => runGitWorkflowTaskOffMainThread(
-      "gitMergeToTarget",
-      {
-        branch,
-        cwd,
-        wiId,
-        retryDeterministicConflict,
-        suppressPostMergeEffects,
-        worktreeLockAlreadyHeld,
-        sharedTrunkOperationId: operationId,
-        testWaiver,
-      },
-      { onPhase, signal, timeoutMs },
-    );
+    const runLocal = async ({ suppressPostMergeEffects = false, worktreeLockAlreadyHeld = false, operationId = null } = {}) => {
+      const limitMs = Number(timeoutMs == null ? GIT_WORKFLOW_TASK_TIMEOUT_MS : timeoutMs);
+      try {
+        return await runGitWorkflowTaskOffMainThread(
+          "gitMergeToTarget",
+          {
+            branch,
+            cwd,
+            wiId,
+            retryDeterministicConflict,
+            suppressPostMergeEffects,
+            worktreeLockAlreadyHeld,
+            sharedTrunkOperationId: operationId,
+            testWaiver,
+            taskDeadlineMs: Number.isFinite(limitMs) && limitMs > 0 ? Date.now() + limitMs : null,
+          },
+          { onPhase, signal, timeoutMs },
+        );
+      } catch (error) {
+        // The terminated worker ran no finally blocks: unstage its squash and
+        // remove its temporary checkouts before reporting the timeout.
+        if (["THREAD_TIMEOUT", "THREAD_ABORTED"].includes(error?.code) || isAbortError(error)) {
+          try {
+            await recoverInterruptedSquashAsync(cwd, { worktreeLockAlreadyHeld });
+          } catch (recoveryError) {
+            logEvent({
+              work_item_id: wiId,
+              event_type: EVENT_TYPES.GIT_MERGE,
+              actor_type: EVENT_ACTORS.SYSTEM,
+              message: `Merge recovery after ${error.code} failed; the next merge or startup repairs the target worktree: ${firstGitLine(recoveryError)}`,
+              event_json: JSON.stringify({ branch, interrupted_merge_recovery: "deferred", error: firstGitLine(recoveryError) }),
+            });
+          }
+        }
+        throw error;
+      }
+    };
     const result = await mergeToSharedTrunkAsync({
       projectDir,
       branch,
@@ -1905,6 +2271,8 @@ export function createMergeWorkflowHelpers(context, {
     mergeIterativePassToTarget,
     reconcileCanonicalSquashMergeWorkItems,
     queueAtlasMainRefreshAfterMerge,
+    recoverInterruptedSquash,
+    recoverInterruptedSquashAsync,
     refreshAtlasMainAfterMerge,
   };
 }

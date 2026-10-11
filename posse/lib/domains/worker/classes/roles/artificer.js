@@ -30,7 +30,9 @@ import {
   parseMissingContext,
 } from "../../../handoff/functions/index.js";
 import { getAvailableProviders, getProviderName } from "../../../providers/functions/provider.js";
-import { artifactsDir, wiScopeId } from "../../../artifacts/functions/index.js";
+import { artifactsDir, getConfiguredImageModel, wiScopeId } from "../../../artifacts/functions/index.js";
+import { imageModelNativeFormats } from "../../../providers/functions/model-catalog.js";
+import { COMMON_WEB_ROOTS, WEB_IMAGE_DESTINATION_PHRASES } from "../../../../catalog/skill-inference.js";
 import { BaseRole, projectPromptPacketForProvider } from "../BaseRole.js";
 import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import { hasStructuredArtificerLog as defaultHasStructuredArtificerLog } from "../../functions/helpers/artifact-output.js";
@@ -189,14 +191,23 @@ export class ArtificerRole extends BaseRole {
 
     const taskMode = payload.task_mode || "content";
     const needsImageGeneration = !!(payload.needs_image_generation || taskMode === "image");
-    const webImageDestination = /\b(?:htdocs|public_html|public|www|web|static)\/|\bweb\s+(?:asset|image)|\bwebsite\b/i.test(
-      [payload.task_spec, ...(Array.isArray(payload.files_to_create) ? payload.files_to_create : [])].filter(Boolean).join("\n"),
-    );
-    const nativeWebFormatGuidance = needsImageGeneration && webImageDestination
-      ? String(payload.image_model || "").startsWith("gpt-image")
-        ? "WEB IMAGE FORMAT: This image model can produce JPEG or WebP directly. Prefer a native JPEG or WebP for opaque photographic assets; use PNG for transparency or lossless graphics."
-        : "WEB IMAGE FORMAT: This image model produces PNG. Generate PNG at the needed dimensions; requesting JPEG or WebP would require a separate local conversion."
+    const webRoots = COMMON_WEB_ROOTS.filter(Boolean);
+    const webImageDestination = (Array.isArray(payload.files_to_create) ? payload.files_to_create : [])
+      .some((filePath) => webRoots.includes(
+        String(filePath || "").trim().replace(/\\/g, "/").replace(/^(?:\.?\/)+/, "").split("/")[0].toLowerCase(),
+      ))
+      || WEB_IMAGE_DESTINATION_PHRASES.some((pattern) => pattern.test(String(payload.task_spec || "")));
+    // A provider-default route carries no model; the provider's configured
+    // model is the one generate_image runs. An unknown model gets no claim.
+    const nativeImageFormats = needsImageGeneration && webImageDestination
+      ? imageModelNativeFormats(payload.image_model
+        || (payload.image_provider ? getConfiguredImageModel(payload.image_provider) : null))
       : null;
+    const nativeWebFormatGuidance = !nativeImageFormats
+      ? null
+      : nativeImageFormats.some((format) => format !== "png")
+        ? "WEB IMAGE FORMAT: This image model can produce JPEG or WebP directly. Prefer a native JPEG or WebP for opaque photographic assets; use PNG for transparency or lossless graphics."
+        : "WEB IMAGE FORMAT: This image model produces PNG. Generate PNG at the needed dimensions; requesting JPEG or WebP would require a separate local conversion.";
     const outputRootDisplay = outputRoot || "(not set - check task spec)";
     const buildArtificerInstructions = (extraSections = []) => [
       loadNudges(job.id, { attemptId: ctx.attemptId }),

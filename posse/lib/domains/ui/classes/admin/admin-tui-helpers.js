@@ -7,7 +7,7 @@
 // stateful AdminTUI class) following the same split the settings-controller
 // module uses.
 
-import { runtimeDbLooksBusyOrCorrupt, getModelProviderDefaults } from "../../functions/admin/shared-helpers.js";
+import { runtimeDbLooksBusyOrCorrupt, resolveEffectiveModelSetting, resolveEffectiveImageModelSetting } from "../../functions/admin/shared-helpers.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { listSettings, getSetting } from "../../../queue/functions/index.js";
 import { isProviderSelectable } from "../../../providers/functions/provider.js";
@@ -111,47 +111,11 @@ export function sanitizeAdminStatusText(value) {
 }
 
 export function getEffectiveModelSetting(def) {
-  const stored = safeGetSetting(def.key);
-  const providerDefaults = getModelProviderDefaults(def.provider);
-  const baseModel = def.tier ? providerDefaults?.[def.tier]?.model : null;
-
-  let effectiveModel = "";
-  let source = "default";
-  if (!def.tier && stored && String(stored).trim()) {
-    effectiveModel = String(stored).trim();
-    source = "global";
-  } else if (def.tier && stored && String(stored).trim()) {
-    effectiveModel = String(stored).trim();
-    source = "global";
-  } else if (!def.tier && def.provider === "claude") {
-    effectiveModel = stored || `${C.dim}tier-driven${C.reset}`;
-    source = stored ? "global" : "default";
-  } else if (baseModel != null) {
-    effectiveModel = baseModel || getDefaultTierModel(def.provider, def.tier) || "";
-    source = "default";
-  } else if (def.provider === "claude" && def.tier === "standard") {
-    effectiveModel = getDefaultTierModel("claude", "standard") || "sonnet";
-    source = "default";
-  }
-
-  return {
-    storedValue: stored || "",
-    effectiveModel: String(effectiveModel || "").trim() || (def.provider === "claude" && def.tier === "standard" ? (getDefaultTierModel("claude", "standard") || "sonnet") : ""),
-    source,
-  };
+  return resolveEffectiveModelSetting(def, safeGetSetting(def.key));
 }
 
 export function getEffectiveImageModelSetting(def) {
-  const stored = safeGetSetting(def.key);
-  const choices = getImageModelOptions(def.provider, { currentValue: stored });
-  const effectiveModel = choices.some((choice) => choice.value === stored)
-    ? stored
-    : (choices[0]?.value || "");
-  return {
-    storedValue: stored || "",
-    effectiveModel,
-    source: stored ? "global" : "default",
-  };
+  return resolveEffectiveImageModelSetting(def, safeGetSetting(def.key));
 }
 
 export function getModelChoicesForEntry(entry) {

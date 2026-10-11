@@ -6,7 +6,6 @@
 import {
   abandonJobScopeExpansionRequest,
   completeAttempt,
-  createJob,
   decrementAttemptCount,
   flagStallResume,
   getAttempts,
@@ -16,7 +15,6 @@ import {
   jobHasLivePendingScopeRequest,
   logEvent,
   listJobsByWorkItem,
-  runInTransaction,
   setJobError,
   settleJobScopeExpansionAttempt,
   storeArtifact,
@@ -55,7 +53,6 @@ import {
 } from "../../../queue/functions/sibling-locks.js";
 import { siblingJobScopePaths } from "../../../queue/functions/file-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
-import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
 import { processVerdict } from "./process-verdict.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
 import {
@@ -1106,17 +1103,11 @@ export async function handleExecuteAttemptError(worker, {
 
 const SQLITE_CONTENTION_MAX_REQUEUES = 4;
 const SQLITE_CONTENTION_BACKOFF_BASE_MS = 20_000;
-const VERIFICATION_INFRASTRUCTURE_MAX_REQUEUES = 2;
-const VERIFICATION_INFRASTRUCTURE_BACKOFF_BASE_MS = 5_000;
 
 function isSqliteContentionError(err) {
   const code = String(err?.code || err?.errno || "").toUpperCase();
   if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") return true;
   return /database is (?:busy|locked)|sqlite_(?:busy|locked)/i.test(String(err?.message || err || ""));
-}
-
-function isVerificationInfrastructureError(err) {
-  return String(err?.code || "") === "POSSE_VERIFICATION_INFRASTRUCTURE";
 }
 
 export function handleCatastrophicExecuteError(worker, { job, leaseToken, outerErr, attemptId = null }) {
@@ -1130,72 +1121,6 @@ export function handleCatastrophicExecuteError(worker, { job, leaseToken, outerE
   }
   if (attemptId == null && handlePreAttemptInterruption(worker, { job, leaseToken, outerErr })) {
     return;
-  }
-
-  // Baseline verification runs before ProviderAttemptLifecycle creates an
-  // implementation attempt. Keep its bounded retry budget in payload state
-  // and release the lease directly; decrementing attempt_count here could
-  // erase a real attempt from an earlier resume of the same job.
-  if (isVerificationInfrastructureError(outerErr) && !worker.shuttingDown) {
-    try {
-      const payload = parseJobPayload(job) || {};
-      const prior = Math.max(0, Number(payload._verification_infrastructure_requeues || 0) || 0);
-      const message = String(outerErr?.message || "Verification infrastructure unavailable");
-      setJobError(job.id, message);
-      if (prior < VERIFICATION_INFRASTRUCTURE_MAX_REQUEUES) {
-        payload._verification_infrastructure_requeues = prior + 1;
-        delete payload._verification_blocked;
-        updateJobPayload(job.id, JSON.stringify(payload));
-        const delayMs = VERIFICATION_INFRASTRUCTURE_BACKOFF_BASE_MS * (prior + 1);
-        const readyAt = new Date(Date.now() + delayMs).toISOString();
-        if (worker._releaseLease(job, leaseToken, "queued", { readyAt })) {
-          worker.emit(
-            job.id,
-            `${C.yellow}[verification] WI#${job.work_item_id} job #${job.id}: infrastructure unavailable (${prior + 1}/${VERIFICATION_INFRASTRUCTURE_MAX_REQUEUES}); retrying without consuming an implementation attempt${C.reset}`,
-          );
-          return;
-        }
-      } else {
-        payload._verification_blocked = {
-          schema_version: 1,
-          type: "verification_blocked",
-          diagnostic: message,
-          rerun_command: String(outerErr?.rerun_command || "").trim() || null,
-          verification_outcome: outerErr?.verification_outcome || null,
-        };
-        updateJobPayload(job.id, JSON.stringify(payload));
-      }
-      if (prior >= VERIFICATION_INFRASTRUCTURE_MAX_REQUEUES && runInTransaction(() => {
-        if (!worker._releaseLease(job, leaseToken, "waiting_on_human")) return false;
-        createJob({
-          work_item_id: job.work_item_id,
-          job_type: "human_input",
-          title: `Verification blocked: ${job.title.slice(0, 80)}`,
-          parent_job_id: job.id,
-          priority: "high",
-          payload_json: JSON.stringify({
-            original_job_id: job.id,
-            review_type: "blocked_recovery",
-            question_kind: "blocked_recovery",
-            choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
-            verification_failure_class: "verification_infrastructure",
-            questions: [`Required baseline verification for job #${job.id} could not run. Restore the test runner, then choose retry; or choose replan, explicit_waiver, or fail.`],
-            context: [message, outerErr?.rerun_command ? `Command: ${outerErr.rerun_command}` : null]
-              .filter(Boolean).join("\n"),
-          }),
-        });
-        return true;
-      })) {
-        worker.emit(
-          job.id,
-          `${C.yellow}[verification] WI#${job.work_item_id} job #${job.id}: infrastructure retries exhausted; job preserved for recovery${C.reset}`,
-        );
-        return;
-      }
-    } catch {
-      // Fall through to ordinary catastrophic recovery; lease expiry remains
-      // the last-resort recovery if its bookkeeping also fails.
-    }
   }
 
   worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} catastrophic error on job #${job.id}: ${outerErr.message}${C.reset}`);

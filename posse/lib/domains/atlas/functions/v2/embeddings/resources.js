@@ -34,17 +34,6 @@ import { ensureAtlasEmbeddingModelRoot, inspectAtlasEmbeddingModel } from "./jin
  */
 
 /**
- * Semantic capability is always installed. Individual requests still choose
- * semantic or lexical behavior through their explicit `semantic` argument.
- *
- * @param {Record<string, unknown>} _config
- * @returns {boolean}
- */
-export function semanticDispatchEnabled(_config = {}) {
-  return true;
-}
-
-/**
  * @param {{
  *   repoRoot: string,
  *   config?: Record<string, unknown>,

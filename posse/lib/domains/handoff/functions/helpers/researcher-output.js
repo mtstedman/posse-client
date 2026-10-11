@@ -1,3 +1,4 @@
+import { AGENT_HANDOFF_PROFILES } from "../../../../catalog/handoff.js";
 // lib/domains/handoff/functions/helpers/researcher-output.js
 //
 // Researcher structured output parsing helpers.
@@ -90,7 +91,7 @@ function researcherEvidenceRefs(report = {}) {
  * terminal profile.
  */
 export function researcherPacketToStructuredOutput(packet) {
-  if (!packet || !["researcher.pipeline.v1", "researcher.report.v1"].includes(packet.profile)) {
+  if (!packet || ![AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT].includes(packet.profile)) {
     const error = new Error("Expected a validated researcher terminal packet");
     error.code = "RESEARCHER_PACKET_INVALID";
     throw error;

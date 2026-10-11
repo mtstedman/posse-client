@@ -147,7 +147,7 @@ export class DeveloperRole extends BaseRole {
       throw new Error(`Deterministic delete failed: ${deleteOutcome.failed.map((entry) => `${entry.path} (${entry.reason})`).join(", ")}`);
     }
 
-    const driftContext = worker.detectDrift(job, files, devCwd);
+    const driftContext = await worker.detectDrift(job, files, devCwd);
 
     let continuationContext = "";
     const isRetry = previousAttempts.length > 0;

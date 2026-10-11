@@ -1,13 +1,11 @@
 // Schema-evolution helpers. The fresh-DB path in db/index.js's
 // getDb() invokes these once after opening; tests poke them directly
 // via the __testRepair* facades. Anything in this module rewrites an
-// existing table (drop+rename through a temp name) — the table
-// constructors (workItemsCreateSql, jobsCreateSql, eventsCreateSql,
-// artifactsCreateSql) and their index installers stay in db/index.js
-// so the fresh-init path can use them without going through migrations.
+// existing table (drop+rename through a temp name). Table constructors and
+// index installers live in table-definitions.js so both this repair path and
+// fresh initialization use the same definitions.
 
 import {
-  ARTIFACT_TYPES,
   WORK_ITEM_PRIORITY_LIST_SQL,
   WORK_ITEM_STATUS_LIST_SQL,
   WORK_ITEM_MODE_LIST_SQL,
@@ -15,9 +13,11 @@ import {
   WORK_ITEM_SESSION_RECYCLE_LIST_SQL,
   WORK_ITEM_MERGE_STATE_LIST_SQL,
   WORK_ITEM_PLAN_APPROVAL_STATE_LIST_SQL,
-  _copyTableColumns,
+} from "../../../catalog/work-item.js";
+import { ARTIFACT_TYPES } from "../../../catalog/artifact.js";
+import { _copyTableColumns, copyCompatibleColumns } from "./table-copy.js";
+import {
   artifactsCreateSql,
-  copyCompatibleColumns,
   createArtifactIndexes,
   createEventsIndexes,
   createJobsIndexes,
@@ -31,7 +31,7 @@ import {
   withForeignKeysDisabled,
   waitingLanePreparationsCreateSql,
   workItemsCreateSql,
-} from "./index.js";
+} from "./table-definitions.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
 export const HOST_SCHEMA_VERSION = 23;

@@ -11,12 +11,11 @@ import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { unlimitedCapacityGauge } from "../display/helpers/brand.js";
 import { getRuntimeDbPath, getRuntimeReportsDir } from "../../../runtime/functions/paths.js";
-import { getProviderTierDefaults } from "../../../providers/functions/model-catalog.js";
+import { getDefaultTierModel, getImageModelOptions, getProviderTierDefaults } from "../../../providers/functions/model-catalog.js";
 import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";
 import { formatRelativeTime as fmtRelativeTime, formatTokens as fmtTokens } from "../../../../shared/format/functions/units.js";
 import {
   getAdminSettingPresentation,
-  NUMERIC_SETTING_RULES,
   toDisplaySettingKey,
   toStorageSettingKey,
 } from "../../../settings/functions/admin-catalog.js";
@@ -70,6 +69,40 @@ export function fit(str, width) {
 export function finiteNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+export function resolveEffectiveModelSetting(def, stored) {
+  const providerDefaults = getModelProviderDefaults(def.provider);
+  const baseModel = def.tier ? providerDefaults?.[def.tier]?.model : null;
+  let effectiveModel = "";
+  let source = "default";
+  if (stored && String(stored).trim()) {
+    effectiveModel = String(stored).trim();
+    source = "global";
+  } else if (!def.tier && def.provider === "claude") {
+    effectiveModel = stored || `${C.dim}tier-driven${C.reset}`;
+    source = stored ? "global" : "default";
+  } else if (baseModel != null) {
+    effectiveModel = baseModel || getDefaultTierModel(def.provider, def.tier) || "";
+  } else if (def.provider === "claude" && def.tier === "standard") {
+    effectiveModel = getDefaultTierModel("claude", "standard") || "sonnet";
+  }
+  return {
+    storedValue: stored || "",
+    effectiveModel: String(effectiveModel || "").trim()
+      || (def.provider === "claude" && def.tier === "standard" ? (getDefaultTierModel("claude", "standard") || "sonnet") : ""),
+    source,
+  };
+}
+
+export function resolveEffectiveImageModelSetting(def, stored) {
+  const choices = getImageModelOptions(def.provider, { currentValue: stored });
+  const storedIsValid = choices.some((choice) => choice.value === stored);
+  return {
+    storedValue: storedIsValid ? (stored || "") : "",
+    effectiveModel: storedIsValid ? stored : (choices[0]?.value || ""),
+    source: storedIsValid && stored ? "global" : "default",
+  };
 }
 
 export function parseJsonObject(value) {
@@ -208,40 +241,7 @@ export function correspondingLimitSettingKey(settingKey) {
   return `${parsed.provider}_limit_tokens_${parsed.windowKey}`;
 }
 
-export function normalizeNumericSettingValue(settingKey, value) {
-  const key = toStorageSettingKey(settingKey);
-  const trimmed = String(value ?? "").trim();
-  if (!trimmed) return { ok: true, value: "" };
-
-  let rule = NUMERIC_SETTING_RULES[key] || null;
-  if (!rule && /^[a-z0-9]+_(?:account_)?limit_tokens_(?:session|week)$/i.test(key)) {
-    rule = { integer: true, min: 0 };
-  } else if (!rule && /^[a-z0-9]+_observed_pct_(?:session|week)$/i.test(key)) {
-    rule = { integer: false, min: 0, max: 100 };
-  }
-  if (!rule) return { ok: true, value };
-
-  if (!/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
-    return { ok: false, error: `${settingKey} must be a number.` };
-  }
-  const numberValue = Number(trimmed);
-  if (!Number.isFinite(numberValue)) {
-    return { ok: false, error: `${settingKey} must be finite.` };
-  }
-  if (rule.integer && !Number.isInteger(numberValue)) {
-    return { ok: false, error: `${settingKey} must be an integer.` };
-  }
-  if (numberValue < rule.min) {
-    return { ok: false, error: `${settingKey} must be at least ${rule.min}.` };
-  }
-  if (rule.max != null && numberValue > rule.max) {
-    return { ok: false, error: `${settingKey} must be at most ${rule.max}.` };
-  }
-  if (Math.abs(numberValue) > Number.MAX_SAFE_INTEGER) {
-    return { ok: false, error: `${settingKey} is too large to store safely.` };
-  }
-  return { ok: true, value: rule.integer ? String(Math.trunc(numberValue)) : String(numberValue) };
-}
+export { normalizeNumericSettingValue } from "../../../settings/functions/admin-validation.js";
 
 export function buildProviderUsageWindowMap(summaries = []) {
   const map = new Map();

@@ -416,7 +416,7 @@
  * @property {string[]} [identifiersToFind]   Max 50.
  * @property {string} [ifNoneMatch]
  * @property {string} [sessionId]             Optional live-buffer overlay namespace.
- * @property {string} [surveyGap]              Exact structural fact missing from a delivered survey; bypasses survey-aware redirect.
+ * @property {string} [surveyGap]              Ignored legacy input retained for compatibility.
  */
 
 /**

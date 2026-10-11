@@ -1,4 +1,5 @@
-import { editScopeRequestReason } from "../../../shared/tools/functions/edit-scope-preview.js";
+import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
+import { applyPlannerSchemaDiet } from "../../../shared/tools/functions/planner-schema-diet.js";
 import crypto from "node:crypto";
 import process from "process";
 import fs from "fs";
@@ -6,8 +7,9 @@ import path from "path";
 import { inspect } from "util";
 import { atlasNativeToolIsComplementary, atlasReplacesNativeTool } from "../../../catalog/tools/source-navigation.js";
 import { blameWithoutLineText } from "../../git/functions/history.js";
-import { listIgnoredRepoPaths } from "../../git/functions/ignored-paths.js";
 import { redactComplementaryReadResult } from "./deterministic-mcp/read-file-redaction.js";
+import { createScopedMutationTools } from "./deterministic-mcp/scoped-mutations.js";
+import { ResearchSessionStore } from "../classes/ResearchSessionStore.js";
 import { redactComplementarySearchRows } from "./deterministic-mcp/search-file-redaction.js";
 import {
   TOOL_HASH_FILE,
@@ -21,7 +23,6 @@ import {
   TOOL_PRUNE_ARTIFACT_OUTPUT,
   TOOL_CLEAN_IMAGE,
   TOOL_EXTRACT_IMAGE_TEXT,
-  TOOL_RUN_SCOPED_CHECKS,
   TOOL_RUN_UNIT_TEST,
   TOOL_SEARCH_FILES,
   TOOL_GIT_HISTORY,
@@ -40,7 +41,6 @@ import {
   buildScopePredicates,
   createDeterministicToolkit,
   createBashExecutor,
-  isSensitiveEnvFileOrTargetPath,
   safePath,
 } from "../../../shared/tools/functions/toolkit/index.js";
 import {
@@ -51,7 +51,6 @@ import {
   TOOL_SUB_AGENT,
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_WEB_RESEARCH_HANDOFF,
-  TOOL_FINAL_REVIEW,
   TOOL_DOWNLOAD_FILE,
   TOOL_COMPOSE_SPRITE_SHEET,
   TOOL_VIEW_IMAGE,
@@ -64,6 +63,7 @@ import { resolveWebToolsEnabled } from "../../providers/functions/shared/tool-po
 import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS, TOOL_CUSTOM_TOOLS } from "../../../catalog/custom-tools.js";
 import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { IMAGE_GENERATION_MAX_CALLS_PER_JOB } from "../../../catalog/artifact.js";
+import { TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { discoverUnitTestCapability } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { roleUsesCanonicalRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
 import {
@@ -100,7 +100,6 @@ import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
 import { AutomationOwnerClient } from "../../automation/classes/AutomationOwnerClient.js";
 import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES, registeredToolNames } from "../../../shared/tools/functions/tool-suites.js";
 import { appendHashRefIfMajor } from "../../../shared/tools/functions/hash-adder.js";
-import { createChainLedger } from "../../../shared/tools/functions/chain-ledger.js";
 import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
 import { normalizeProjectDbCapability } from "../../../shared/tools/functions/issued-tool-policy.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
@@ -120,9 +119,7 @@ import {
   grantApprovedScopeEntries,
   LIVE_SCOPE_WAIT_TIMEOUT_MS,
   recordAgentActivity,
-  requestJobScopeExpansion,
 } from "../../queue/functions/index.js";
-import { guardToolWriteLock } from "../../queue/functions/write-lock-guard.js";
 import { runWithTeamManagedToolGrant } from "../../pairing/functions/team-managed-write.js";
 import { getAtlasIntegrationConfig, getAtlasRouteForRole } from "./atlas/config.js";
 import { resolveAtlasRepoTarget } from "./atlas/repo.js";
@@ -137,6 +134,7 @@ import {
   DEFAULT_MCP_OAUTH_TTL_SECONDS,
   MCP_OAUTH_AUDIENCE,
   MCP_OAUTH_TOKEN_TYPE,
+  MCP_PROTOCOL_VERSION,
   POSSE_MCP_GATEWAY_SERVER_INFO_NAME,
   POSSE_MCP_GATEWAY_SERVER_NAME,
 } from "../../../catalog/mcp.js";
@@ -196,8 +194,7 @@ import { stripPosseMcpGatewayPrefix } from "./mcp-gateway.js";
 import { setRuntimePathOverrides } from "../../runtime/functions/paths.js";
 import { AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
 import { readResponseTextWithLimit } from "../../remote/functions/client.js";
-import { protectedMutablePathReason, relativePathFromCwd } from "../../runtime/functions/protected-paths.js";
-import { sanitizeAbsolutePathsInText, toRepoRelativePath } from "../../../shared/format/functions/display-paths.js";
+import { sanitizeAbsolutePathsInText } from "../../../shared/format/functions/display-paths.js";
 import {
   parseEnvBool,
   parseBoolOverride,
@@ -217,7 +214,6 @@ import {
   buildResearchCitationFetchGateText,
   buildResearchCurtainCallText,
   buildResearchSynthesisRequiredText,
-  createNativeExplorationNoveltyTracker,
   isResearchAtlasCitationFetchAction,
   isResearchAtlasExplorationAction,
   researchSynthesisDecision,
@@ -285,13 +281,12 @@ function recordRejectedToolCall({ toolName, args, text, reason }) {
 }
 
 const SERVER_INFO = { name: POSSE_MCP_GATEWAY_SERVER_INFO_NAME, version: "1.0.0" };
-const SUPPORTED_PROTOCOL = "2024-11-05";
 // Atlas325 P0.1: no run artifact recorded the tool surface the provider
 // actually saw (names, atlas.query action enum, schema digest, effective
 // policy, research limits). Record it once per attempt and issued digest.
 // The observation type deliberately starts with "tool." so it sits beside the
 // tool ledger, but every tool-mix consumer must skip it: it is not a call.
-export const TOOL_SURFACE_ISSUED_OBSERVATION_TYPE = "tool.surface.issued";
+export { TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 const issuedToolSurfaceRecords = new Map();
 const ISSUED_TOOL_SURFACE_RECORD_LIMIT = 256;
 
@@ -1201,6 +1196,9 @@ function buildRemoteToolSurfaceRequest() {
         shell: allowBash,
         tests: bootConfig.allowTests === true,
         image_generation: allowImageGeneration,
+        image_inspection: tokenToolAllowlistForSuite("tools")?.has("read_image_metadata") === true,
+        artifact_validation: tokenToolAllowlistForSuite("tools")?.has("validate_artifact_output") === true,
+        integrity_verification: tokenToolAllowlistForSuite("tools")?.has("hash_file") === true,
         project_db: projectDbCapabilityGrant,
       },
       atlas: atlasCapabilities,
@@ -1357,6 +1355,26 @@ const {
       onFallback: (error) => appendToolLog({ event: "search_files_redaction_fallback", error }),
     })
     : rows),
+});
+
+const {
+  LIVE_SCOPE_WAIT,
+  requestScopeWithinJob,
+  writeFileWithinScope,
+  editFileWithinScope,
+  moveFileWithinScope,
+  copyFileWithinScope,
+  makeDirWithinScope,
+} = createScopedMutationTools({
+  get workspaceCwd() { return workspaceCwd; },
+  get effectiveScopePredicates() { return effectiveScopePredicates; },
+  get mcpJobId() { return mcpJobId; },
+  get mcpWorkItemId() { return mcpWorkItemId; },
+  get mcpAttemptId() { return mcpAttemptId; },
+  get mcpAgentCallId() { return mcpAgentCallId; },
+  get writeEnabled() { return writeEnabled; },
+  execWriteFile,
+  execEditFile,
 });
 
 function _normalizeReadRange(argVal, fallback) {
@@ -1739,10 +1757,11 @@ addToolSchema(TOOL_REPORT_CLAIMS);
 addToolSchema(TOOL_SUB_AGENT);
 addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
 addToolSchema(getToolSchemaForRole("dispatch_agent", roleName, {
+  plannerMaxChildren: roleName === "planner" ? readPlannerDispatchPolicy({ projectDir: workspaceCwd }).maxChildren : null,
   researchInvestigation: bootConfig.researchInvestigation === true,
 }));
 addToolSchema(TOOL_WEB_RESEARCH_HANDOFF);
-addToolSchema(TOOL_FINAL_REVIEW);
+addToolSchema(getToolSchemaForRole("final_review", roleName));
 
 // Atlas-active researchers use the ordinary bounded read_file fallback. The
 // chain ledger remains available only when Atlas is absent.
@@ -1769,14 +1788,14 @@ addToolSchema(projectDbQuerySchemaForCurrentBoot());
 addToolSchema(TOOL_CUSTOM_TOOLS);
 if (writeEnabled) {
   for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_DOWNLOAD_FILE, TOOL_COMPOSE_SPRITE_SHEET]) {
-    addToolSchema(schema);
+    addToolSchema(schema.name === "request_scope" ? getToolSchemaForRole("request_scope", roleName) : schema);
   }
 }
 if (allowBash) {
   addToolSchema(TOOL_BASH);
 }
 if (ownerHotGateway || roleName === "assessor") {
-  addToolSchema(TOOL_RUN_SCOPED_CHECKS);
+  addToolSchema(getToolSchemaForRole("run_scoped_checks", roleName));
 }
 if (unitTestCapability.available && (ownerHotGateway || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
 
@@ -1836,159 +1855,6 @@ function normalizeGatewayToolInputSchema(tool) {
   };
 }
 
-function protectedMutationError(toolName, displayPath, absolutePath) {
-  const relPath = relativePathFromCwd(workspaceCwd, absolutePath);
-  const reason = protectedMutablePathReason(relPath);
-  return reason ? `Error: ${toolName} blocked - ${displayPath} is protected: ${reason}.` : null;
-}
-
-function resolveMutationPath(toolName, displayPath) {
-  try {
-    return { path: safePath(workspaceCwd, displayPath, effectiveScopePredicates) };
-  } catch (err) {
-    return { error: `Error: ${toolName} blocked - ${err?.message || String(err)}` };
-  }
-}
-
-const LIVE_SCOPE_WAIT = Symbol("posse.mcp-live-scope-wait");
-
-function isPendingLiveScopeResult(result) {
-  return result?.live === true
-    && ["scope_approval_pending", "scope_approval_batched"].includes(result?.code);
-}
-
-async function requestScopeExpansionWithinJob(args = {}) {
-  const requestedEntries = Array.isArray(args?.requests) && args.requests.length > 0
-    ? args.requests
-    : [args || {}];
-  const entries = requestedEntries.slice(0, 24);
-  let pendingResult = null;
-  let lastResult = null;
-  for (const entry of entries) {
-    // An untracked path the repository ignores is answered without a gate.
-    const [ignoredByRepository = null] = await listIgnoredRepoPaths(workspaceCwd, [entry.path]);
-    const result = requestJobScopeExpansion({
-      jobId: mcpJobId,
-      workItemId: mcpWorkItemId,
-      attemptId: mcpAttemptId,
-      agentCallId: mcpAgentCallId,
-      path: entry.path,
-      access: entry.access,
-      operation: entry.operation,
-      reason: entry.reason,
-      source: String(entry.source || (entries.length > 1
-        ? "deterministic_mcp_scope_batch_tool"
-        : "deterministic_mcp_internal_tool")),
-      liveWait: true,
-      ignoredByRepository,
-    });
-    lastResult = result;
-    if (result?.approved === true) {
-      // Widen the subprocess-local predicates so this same MCP invocation can
-      // finish the blocked operation. The queue already persisted the grant.
-      grantApprovedScopeEntries(result, effectiveScopePredicates);
-    }
-    if (isPendingLiveScopeResult(result)) pendingResult = result;
-  }
-  const result = pendingResult || lastResult;
-  if (requestedEntries.length > entries.length && result && typeof result === "object") {
-    return {
-      ...result,
-      repair_note: `Only the first ${entries.length} scope requests were processed; submit the remaining ${requestedEntries.length - entries.length} exact path(s) in another request_scope call.`,
-      requests_processed: entries.length,
-      requests_remaining: requestedEntries.length - entries.length,
-    };
-  }
-  return result;
-}
-
-async function requestScopeWithinJob(args = {}) {
-  const result = await requestScopeExpansionWithinJob(args);
-  if (isPendingLiveScopeResult(result)) {
-    return { [LIVE_SCOPE_WAIT]: true, request: result, operation: "request_scope", args };
-  }
-  return JSON.stringify(result, null, 2);
-}
-
-async function writeFileWithinScope(args = {}) {
-  if (!writeEnabled) return "Error: Write access is not granted for this role.";
-  const resolved = resolveMutationPath("write_file", args.path);
-  if (resolved.error) return resolved.error;
-  const protectedErr = protectedMutationError("write_file", args.path, resolved.path);
-  if (protectedErr) return protectedErr;
-  const exists = fs.existsSync(resolved.path);
-  const allowed = exists
-    ? effectiveScopePredicates.canEdit(resolved.path)
-    : effectiveScopePredicates.canCreate(resolved.path);
-  if (!allowed) {
-    if (!mcpJobId) {
-      return `Error: write_file blocked - ${args.path} is outside the allowed ${exists ? "edit" : "creation"} scope.`;
-    }
-    const scopeResult = await requestScopeExpansionWithinJob({
-      path: toRepoRelativePath(workspaceCwd, resolved.path) ?? "",
-      access: exists ? "modify" : "create",
-      operation: "write_file",
-      reason: `write_file requires this ${exists ? "existing" : "new"} file to complete the active job`,
-      source: "deterministic_mcp_write_boundary",
-    });
-    if (isPendingLiveScopeResult(scopeResult)) {
-      return { [LIVE_SCOPE_WAIT]: true, request: scopeResult, operation: "write_file", args };
-    }
-    if (scopeResult?.approved !== true) {
-      return JSON.stringify(scopeResult, null, 2);
-    }
-    // Approved: complete the original write in the same call.
-  }
-  return execWriteFile(args || {}, workspaceCwd, effectiveScopePredicates);
-}
-
-async function editFileWithinScope(args = {}) {
-  if (!writeEnabled) return "Error: Write access is not granted for this role.";
-  const resolved = resolveMutationPath("edit_file", args.path);
-  if (resolved.error) return resolved.error;
-  const protectedErr = protectedMutationError("edit_file", args.path, resolved.path);
-  if (protectedErr) return protectedErr;
-  if (!effectiveScopePredicates.canEdit(resolved.path)) {
-    if (!mcpJobId) {
-      return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope.`;
-    }
-    const scopeResult = await requestScopeExpansionWithinJob({
-      path: toRepoRelativePath(workspaceCwd, resolved.path) ?? "",
-      access: "modify",
-      operation: "edit_file",
-      reason: editScopeRequestReason(args),
-      source: "deterministic_mcp_write_boundary",
-    });
-    if (isPendingLiveScopeResult(scopeResult)) {
-      return { [LIVE_SCOPE_WAIT]: true, request: scopeResult, operation: "edit_file", args };
-    }
-    if (scopeResult?.approved !== true) {
-      return JSON.stringify(scopeResult, null, 2);
-    }
-    // Approved: complete the original edit in the same call.
-  }
-  return execEditFile(args || {}, workspaceCwd, effectiveScopePredicates);
-}
-
-function pathsReferToSameExistingFile(a, b) {
-  try {
-    const aStat = fs.statSync(a);
-    const bStat = fs.statSync(b);
-    if (aStat.dev === bStat.dev && aStat.ino !== 0 && aStat.ino === bStat.ino) return true;
-  } catch {
-    return false;
-  }
-  try {
-    const realA = fs.realpathSync.native ? fs.realpathSync.native(a) : fs.realpathSync(a);
-    const realB = fs.realpathSync.native ? fs.realpathSync.native(b) : fs.realpathSync(b);
-    return process.platform === "win32"
-      ? realA.toLowerCase() === realB.toLowerCase()
-      : realA === realB;
-  } catch {
-    return false;
-  }
-}
-
 function blockedAtlasMutationMessage(toolName) {
   const action = String(toolName || "")
     .replace(/^tools\./, "")
@@ -2013,289 +1879,19 @@ function blockedAtlasMutationMessage(toolName) {
   return `ATLAS tool ${toolName} is not exposed through the Posse MCP gateway. Continue with the deterministic tools exposed for this role.`;
 }
 
-function moveFileWithinScope(args = {}) {
-  if (!writeEnabled) return "Error: move_file is not available for this role.";
-  const sourcePath = safePath(workspaceCwd, args.source, effectiveScopePredicates);
-  const destinationPath = safePath(workspaceCwd, args.destination, effectiveScopePredicates);
-  const protectedSourceErr = protectedMutationError("move_file", args.source, sourcePath);
-  if (protectedSourceErr) return protectedSourceErr;
-  const protectedDestinationErr = protectedMutationError("move_file", args.destination, destinationPath);
-  if (protectedDestinationErr) return protectedDestinationErr;
-  if (isSensitiveEnvFileOrTargetPath(sourcePath)) {
-    return "Error: move_file blocked - reading .env files is blocked.";
-  }
-  if (isSensitiveEnvFileOrTargetPath(destinationPath)) {
-    return "Error: move_file blocked - writing .env files is blocked.";
-  }
-  if (!fs.existsSync(sourcePath)) return `Error: Source file not found: ${args.source}`;
-  const sourceStat = fs.statSync(sourcePath);
-  if (!sourceStat.isFile()) return `Error: Source path is not a file: ${args.source}`;
-  if (!effectiveScopePredicates.canEdit(sourcePath)) {
-    return `Error: move_file blocked - ${args.source} is outside the allowed edit scope.`;
-  }
-
-  const overwrite = args.overwrite === true;
-  const destinationExists = fs.existsSync(destinationPath);
-  const destinationIsSource = destinationExists && pathsReferToSameExistingFile(sourcePath, destinationPath);
-  if (destinationExists && !destinationIsSource && !overwrite) {
-    return `Error: Destination already exists: ${args.destination} (set overwrite=true to replace).`;
-  }
-  if (destinationExists && !effectiveScopePredicates.canEdit(destinationPath)) {
-    return `Error: move_file blocked - ${args.destination} is outside the allowed edit scope.`;
-  }
-  if (!destinationExists && !effectiveScopePredicates.canCreate(destinationPath)) {
-    return `Error: move_file blocked - ${args.destination} is outside the allowed creation scope.`;
-  }
-  const sourceLockErr = guardToolWriteLock("move_file", args.source, workspaceCwd);
-  if (sourceLockErr) return sourceLockErr;
-  const destinationLockErr = guardToolWriteLock("move_file", args.destination, workspaceCwd);
-  if (destinationLockErr) return destinationLockErr;
-
-  const destinationDir = path.dirname(destinationPath);
-  const replacementTempPath = () => path.join(destinationDir, `.posse-move-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
-  const replaceDestination = (fromPath) => {
-    if (!destinationExists) {
-      fs.renameSync(fromPath, destinationPath);
-      return;
-    }
-    const backupPath = replacementTempPath();
-    let backupCreated = false;
-    try {
-      fs.renameSync(destinationPath, backupPath);
-      backupCreated = true;
-      fs.renameSync(fromPath, destinationPath);
-      fs.rmSync(backupPath, { force: true });
-    } catch (err) {
-      if (backupCreated && !fs.existsSync(destinationPath) && fs.existsSync(backupPath)) {
-        try { fs.renameSync(backupPath, destinationPath); } catch { /* preserve error below */ }
-      }
-      throw err;
-    }
-  };
-
-  try {
-    fs.mkdirSync(destinationDir, { recursive: true });
-    if (destinationIsSource) {
-      if (path.normalize(sourcePath) !== path.normalize(destinationPath)) {
-        const tempPath = replacementTempPath();
-        fs.renameSync(sourcePath, tempPath);
-        fs.renameSync(tempPath, destinationPath);
-      }
-    } else {
-      replaceDestination(sourcePath);
-    }
-  } catch (err) {
-    if (err?.code !== "EXDEV") {
-      const reason = err?.code ? ` (${err.code})` : "";
-      return `Error: move_file failed for ${args.source} -> ${args.destination}${reason}.`;
-    }
-    const tempPath = replacementTempPath();
-    try {
-      fs.copyFileSync(sourcePath, tempPath);
-      replaceDestination(tempPath);
-      fs.rmSync(sourcePath, { force: true });
-    } catch (copyErr) {
-      try { if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { force: true }); } catch { /* best-effort */ }
-      const reason = copyErr?.code ? ` (${copyErr.code})` : "";
-      return `Error: move_file failed for ${args.source} -> ${args.destination}${reason}.`;
-    }
-  }
-
-  return JSON.stringify({
-    ok: true,
-    source: path.relative(workspaceCwd, sourcePath).replace(/\\/g, "/"),
-    destination: path.relative(workspaceCwd, destinationPath).replace(/\\/g, "/"),
-    overwritten: destinationExists && overwrite && !destinationIsSource,
-  }, null, 2);
-}
-
-function copyFileWithinScope(args = {}) {
-  if (!writeEnabled) return "Error: copy_file is not available for this role.";
-  const sourcePath = safePath(workspaceCwd, args.source, effectiveScopePredicates);
-  const destinationPath = safePath(workspaceCwd, args.destination, effectiveScopePredicates);
-  const protectedSourceErr = protectedMutationError("copy_file", args.source, sourcePath);
-  if (protectedSourceErr) return protectedSourceErr;
-  const protectedDestinationErr = protectedMutationError("copy_file", args.destination, destinationPath);
-  if (protectedDestinationErr) return protectedDestinationErr;
-  if (isSensitiveEnvFileOrTargetPath(sourcePath)) {
-    return "Error: copy_file blocked - reading .env files is blocked.";
-  }
-  if (isSensitiveEnvFileOrTargetPath(destinationPath)) {
-    return "Error: copy_file blocked - writing .env files is blocked.";
-  }
-  if (!fs.existsSync(sourcePath)) return `Error: Source file not found: ${args.source}`;
-  const sourceStat = fs.statSync(sourcePath);
-  if (!sourceStat.isFile()) return `Error: Source path is not a file: ${args.source}`;
-
-  const overwrite = args.overwrite === true;
-  const destinationExists = fs.existsSync(destinationPath);
-  if (destinationExists && !overwrite) {
-    return `Error: Destination already exists: ${args.destination} (set overwrite=true to replace).`;
-  }
-  if (destinationExists && !effectiveScopePredicates.canEdit(destinationPath)) {
-    return `Error: copy_file blocked - ${args.destination} is outside the allowed edit scope.`;
-  }
-  if (!destinationExists && !effectiveScopePredicates.canCreate(destinationPath)) {
-    return `Error: copy_file blocked - ${args.destination} is outside the allowed creation scope.`;
-  }
-  const destinationLockErr = guardToolWriteLock("copy_file", args.destination, workspaceCwd);
-  if (destinationLockErr) return destinationLockErr;
-
-  try {
-    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
-    if (destinationExists && overwrite) fs.rmSync(destinationPath, { force: true });
-    fs.copyFileSync(sourcePath, destinationPath);
-  } catch (err) {
-    const reason = err?.code ? ` (${err.code})` : "";
-    return `Error: copy_file failed for ${args.source} -> ${args.destination}${reason}.`;
-  }
-  return JSON.stringify({
-    ok: true,
-    source: path.relative(workspaceCwd, sourcePath).replace(/\\/g, "/"),
-    destination: path.relative(workspaceCwd, destinationPath).replace(/\\/g, "/"),
-    overwritten: destinationExists && overwrite,
-  }, null, 2);
-}
-
-function makeDirWithinScope(args = {}) {
-  if (!writeEnabled) return "Error: make_dir is not available for this role.";
-  if (!args.path || typeof args.path !== "string") return "Error: path is required.";
-  const dirPath = safePath(workspaceCwd, args.path, effectiveScopePredicates);
-  const protectedErr = protectedMutationError("make_dir", args.path, dirPath);
-  if (protectedErr) return protectedErr;
-  if (fs.existsSync(dirPath)) {
-    if (!fs.statSync(dirPath).isDirectory()) {
-      return `Error: Path exists and is not a directory: ${args.path}`;
-    }
-    return JSON.stringify({
-      ok: true,
-      path: path.relative(workspaceCwd, dirPath).replace(/\\/g, "/"),
-      created: false,
-    }, null, 2);
-  }
-  if (!effectiveScopePredicates.canCreate(dirPath)) {
-    return `Error: make_dir blocked - ${args.path} is outside the allowed creation scope.`;
-  }
-  try {
-    fs.mkdirSync(dirPath, { recursive: true });
-  } catch (err) {
-    const reason = err?.code ? ` (${err.code})` : "";
-    return `Error: make_dir failed for ${args.path}${reason}.`;
-  }
-  return JSON.stringify({
-    ok: true,
-    path: path.relative(workspaceCwd, dirPath).replace(/\\/g, "/"),
-    created: true,
-  }, null, 2);
-}
-
-// ── Researcher read-gate state machine ─────────────────────────────────────
-// Tracks what the researcher has read, gates the next read until a verdict is
-// emitted (relevant/irrelevant). Persists to a JSON file so restarts resume.
-
-const RESEARCH_STATE_LIMIT = 5000;
-// Keyed by runtimeSessionKey(). Each entry owns everything mutable about one
-// research session: the chain ledger, the one-shot notice flags, and the
-// native-exploration novelty tracker. Nothing research-mutable lives at module
-// scope except the pointers to the currently selected owner.
-const researchSessionsByKey = new Map();
-
-// D-7: the durable ledger file must carry the same identity as the in-memory
-// session key. `job-<id>-attempt-<id>.json` was coarser than runtimeSessionKey(),
-// so two sessions differing only by agent call, binding epoch, role, or token
-// held separate in-memory ledgers that wrote one shared file and clobbered each
-// other. (workspaceCwd is already the path root, so cwd is not a colliding axis.)
-function researchSessionLedgerToken(sessionKey) {
-  return crypto.createHash("sha256")
-    .update(String(sessionKey || ""), "utf8")
-    .digest("hex")
-    .slice(0, 16);
-}
-
-function researchStatePathForCurrentBoot(sessionKey = runtimeSessionKey()) {
-  if (!isResearcherRole || !mcpJobId || !mcpAttemptId) return null;
-  const logDir = path.join(workspaceCwd, ".posse", "research-state");
-  const sessionToken = researchSessionLedgerToken(sessionKey);
-  return path.join(logDir, `job-${mcpJobId}-attempt-${mcpAttemptId}-session-${sessionToken}.json`);
-}
-
-function readResearchState(filePath) {
-  if (!filePath) return null;
-  try {
-    if (!fs.existsSync(filePath)) return null;
-    const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    return data && typeof data === "object" ? data : null;
-  } catch {
-    return null;
-  }
-}
-
-function normalizedResearchStateExtras(data = {}) {
-  const explorationSteps = Number(data.explorationSteps);
-  const lastNovelEvidenceStep = Number(data.lastNovelEvidenceStep);
-  const synthesisRequiredAt = data.synthesisRequiredAt ? String(data.synthesisRequiredAt) : null;
-  return {
-    explorationSteps: Number.isFinite(explorationSteps) && explorationSteps >= 0 ? Math.floor(explorationSteps) : 0,
-    lastNovelEvidenceStep: Number.isFinite(lastNovelEvidenceStep) && lastNovelEvidenceStep >= 0
-      ? Math.floor(lastNovelEvidenceStep)
-      : 0,
-    synthesisRequiredAt,
-    synthesisReason: data.synthesisReason ? String(data.synthesisReason) : null,
-    synthesisNoticeEmitted: synthesisRequiredAt ? data.synthesisNoticeEmitted !== false : false,
-  };
-}
-
-function writeResearchState(filePath, coreState, state) {
-  if (!filePath) return;
-  try {
-    const researchLogDir = path.dirname(filePath);
-    fs.mkdirSync(researchLogDir, { recursive: true, mode: 0o700 });
-    try { fs.chmodSync(researchLogDir, 0o700); } catch { /* best effort */ }
-    const data = {
-      jobId: mcpJobId,
-      workItemId: mcpWorkItemId,
-      ...coreState,
-      explorationSteps: state.explorationSteps,
-      lastNovelEvidenceStep: state.lastNovelEvidenceStep,
-      synthesisRequiredAt: state.synthesisRequiredAt,
-      synthesisReason: state.synthesisReason,
-      synthesisNoticeEmitted: state.synthesisNoticeEmitted,
-    };
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { encoding: "utf8", mode: 0o600 });
-    try { fs.chmodSync(filePath, 0o600); } catch { /* best effort */ }
-  } catch { /* best effort */ }
-}
-
-function createResearchLedger(filePath = null) {
-  const loaded = readResearchState(filePath);
-  let ledgerState = null;
-  const persist = filePath ? {
-    load: () => loaded,
-    save: (coreState) => writeResearchState(filePath, coreState, ledgerState),
-  } : null;
-  const ledger = createChainLedger({
-    readFile: (args) => execReadFile(args, workspaceCwd, effectiveScopePredicates),
-    cwd: workspaceCwd,
-    persist,
-  });
-  Object.assign(ledger.state, normalizedResearchStateExtras(loaded || {}));
-  ledgerState = ledger.state;
-  return ledger;
-}
-
-// Pointers into the currently selected research-session owner. They are
-// re-pointed by selectResearchStateForCurrentBoot(); they are never a session's
-// only home for mutable state.
-let researchLogPath = null;
-let researchLedger = null;
-let researchState = null;
-let researchNoticeFlags = null;
-let nativeExplorationNovelty = null;
-selectResearchStateForCurrentBoot(runtimeSessionKey());
-
-function saveResearchState() {
-  researchLedger.save();
-}
+// Research progress belongs to one ledger/notice/novelty owner per MCP session.
+const researchSessionStore = new ResearchSessionStore({
+  getRuntime: () => ({
+    isResearcherRole,
+    mcpJobId,
+    mcpWorkItemId,
+    mcpAttemptId,
+    workspaceCwd,
+    effectiveScopePredicates,
+  }),
+  execReadFile,
+});
+researchSessionStore.select(runtimeSessionKey());
 
 function isResearchExplorationTool(toolName, { requestedAtlasTool = false } = {}) {
   const normalized = String(toolName || "");
@@ -2306,7 +1902,7 @@ function isResearchExplorationTool(toolName, { requestedAtlasTool = false } = {}
 }
 
 function researchSynthesisStaleStepCount() {
-  return Math.max(0, Number(researchState.explorationSteps || 0) - Number(researchState.lastNovelEvidenceStep || 0));
+  return Math.max(0, Number(researchSessionStore.state.explorationSteps || 0) - Number(researchSessionStore.state.lastNovelEvidenceStep || 0));
 }
 
 function syncResearchSynthesisStateFromObservations() {
@@ -2316,9 +1912,9 @@ function syncResearchSynthesisStateFromObservations() {
     attemptId: mcpAttemptId,
     agentCallId: mcpAgentCallId,
   });
-  const priorExplorationSteps = Number(researchState.explorationSteps || 0);
+  const priorExplorationSteps = Number(researchSessionStore.state.explorationSteps || 0);
   const observedExplorationSteps = Number(observed.exploration_steps || 0);
-  researchState.explorationSteps = Math.max(
+  researchSessionStore.state.explorationSteps = Math.max(
     priorExplorationSteps,
     observedExplorationSteps,
   );
@@ -2328,67 +1924,67 @@ function syncResearchSynthesisStateFromObservations() {
   // resetting it.
   const lastNovelEvidenceStep = Number(observed.last_novel_evidence_step || 0);
   if (observedExplorationSteps > priorExplorationSteps && lastNovelEvidenceStep > 0) {
-    researchState.lastNovelEvidenceStep = Math.max(
-      Number(researchState.lastNovelEvidenceStep || 0),
+    researchSessionStore.state.lastNovelEvidenceStep = Math.max(
+      Number(researchSessionStore.state.lastNovelEvidenceStep || 0),
       lastNovelEvidenceStep,
     );
   }
-  if (observed.synthesis_required && !researchState.synthesisRequiredAt) {
-    researchState.synthesisRequiredAt = new Date().toISOString();
-    researchState.synthesisReason = `exploration_steps=${researchState.explorationSteps}; absolute_ceiling=${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}; source=owner_observation`;
-    researchState.synthesisNoticeEmitted = true;
+  if (observed.synthesis_required && !researchSessionStore.state.synthesisRequiredAt) {
+    researchSessionStore.state.synthesisRequiredAt = new Date().toISOString();
+    researchSessionStore.state.synthesisReason = `exploration_steps=${researchSessionStore.state.explorationSteps}; absolute_ceiling=${RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS}; source=owner_observation`;
+    researchSessionStore.state.synthesisNoticeEmitted = true;
   }
 }
 
 function researchSynthesisStatus() {
-  if (!researchState.synthesisRequiredAt) return null;
+  if (!researchSessionStore.state.synthesisRequiredAt) return null;
   return {
     required: true,
-    required_at: researchState.synthesisRequiredAt,
-    reason: researchState.synthesisReason || null,
-    exploration_steps: researchState.explorationSteps,
+    required_at: researchSessionStore.state.synthesisRequiredAt,
+    reason: researchSessionStore.state.synthesisReason || null,
+    exploration_steps: researchSessionStore.state.explorationSteps,
     stale_steps: researchSynthesisStaleStepCount(),
-    last_novel_evidence_step: researchState.lastNovelEvidenceStep,
-    relevant_files: researchState.relevant.size,
-    irrelevant_files: researchState.irrelevant.size,
+    last_novel_evidence_step: researchSessionStore.state.lastNovelEvidenceStep,
+    relevant_files: researchSessionStore.state.relevant.size,
+    irrelevant_files: researchSessionStore.state.irrelevant.size,
   };
 }
 
 function recordResearchSynthesisRequiredObservation() {
-  if (!isResearcherRole || researchState.synthesisNoticeEmitted) return;
+  if (!isResearcherRole || researchSessionStore.state.synthesisNoticeEmitted) return;
   try {
     _recordObservation({
       work_item_id: mcpWorkItemId ?? undefined,
       job_id: mcpJobId ?? undefined,
       attempt_id: mcpAttemptId ?? undefined,
       observation_type: "research.synthesis_required",
-      summary: `Research synthesis required after ${researchState.explorationSteps} exploration calls with ${researchSynthesisStaleStepCount()} stale calls`,
+      summary: `Research synthesis required after ${researchSessionStore.state.explorationSteps} exploration calls with ${researchSynthesisStaleStepCount()} stale calls`,
       detail: {
         kind: "research_synthesis_required",
-        exploration_steps: researchState.explorationSteps,
+        exploration_steps: researchSessionStore.state.explorationSteps,
         stale_steps: researchSynthesisStaleStepCount(),
         min_exploration_steps: RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
         stale_exploration_steps: RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
-        last_novel_evidence_step: researchState.lastNovelEvidenceStep,
-        relevant_files: researchState.relevant.size,
-        irrelevant_files: researchState.irrelevant.size,
-        reason: researchState.synthesisReason || null,
+        last_novel_evidence_step: researchSessionStore.state.lastNovelEvidenceStep,
+        relevant_files: researchSessionStore.state.relevant.size,
+        irrelevant_files: researchSessionStore.state.irrelevant.size,
+        reason: researchSessionStore.state.synthesisReason || null,
       },
     });
-    researchState.synthesisNoticeEmitted = true;
+    researchSessionStore.state.synthesisNoticeEmitted = true;
   } catch { /* best effort */ }
 }
 
 function maybeMarkResearchSynthesisRequired({ toolName = null } = {}) {
   syncResearchSynthesisStateFromObservations();
-  if (!isResearcherRole || researchState.synthesisRequiredAt) return false;
-  const explorationSteps = Number(researchState.explorationSteps || 0);
+  if (!isResearcherRole || researchSessionStore.state.synthesisRequiredAt) return false;
+  const explorationSteps = Number(researchSessionStore.state.explorationSteps || 0);
   const staleSteps = researchSynthesisStaleStepCount();
   const decision = researchSynthesisDecision({ explorationSteps, staleSteps });
   if (!decision.required) return false;
 
-  researchState.synthesisRequiredAt = new Date().toISOString();
-  researchState.synthesisReason = [
+  researchSessionStore.state.synthesisRequiredAt = new Date().toISOString();
+  researchSessionStore.state.synthesisReason = [
     `exploration_steps=${explorationSteps}`,
     `stale_steps=${staleSteps}`,
     decision.absoluteCeilingReached ? `absolute_ceiling=${decision.explorationCeiling}` : null,
@@ -2400,20 +1996,20 @@ function maybeMarkResearchSynthesisRequired({ toolName = null } = {}) {
 
 function noteResearchExplorationStep({ toolName, requestedAtlasTool = false, novelRelevantFile = false } = {}) {
   if (!isResearcherRole || !isResearchExplorationTool(toolName, { requestedAtlasTool })) return null;
-  researchState.explorationSteps += 1;
+  researchSessionStore.state.explorationSteps += 1;
   if (novelRelevantFile) {
-    researchState.lastNovelEvidenceStep = researchState.explorationSteps;
+    researchSessionStore.state.lastNovelEvidenceStep = researchSessionStore.state.explorationSteps;
   }
   maybeMarkResearchSynthesisRequired({ toolName });
-  saveResearchState();
+  researchSessionStore.save();
   return researchSynthesisStatus();
 }
 
 function shouldBlockForResearchSynthesis(toolName, { requestedAtlasTool = false } = {}) {
   maybeMarkResearchSynthesisRequired({ toolName });
-  if (!isResearcherRole || !researchState.synthesisRequiredAt) return false;
+  if (!isResearcherRole || !researchSessionStore.state.synthesisRequiredAt) return false;
   const normalized = String(toolName || "");
-  if (normalized === "chain_verdict" && researchState.currentlyReading) return false;
+  if (normalized === "chain_verdict" && researchSessionStore.state.currentlyReading) return false;
   if (requestedAtlasTool || normalized.startsWith("atlas.") || normalized.startsWith("atlas_")) {
     return isResearchAtlasExplorationAction(normalized);
   }
@@ -2431,7 +2027,7 @@ function researchCitationFetchGate(toolName) {
     agentCallId: mcpAgentCallId,
   });
   if (
-    researchState.synthesisRequiredAt
+    researchSessionStore.state.synthesisRequiredAt
     && Number(observed.citation_fetch_batches || 0) >= 1
   ) {
     return {
@@ -2582,19 +2178,19 @@ function embeddedControlResult(text, kind, trigger = null) {
 
 function researchExplorationNoticeResult(text, toolName) {
   if (!isResearcherRole || !isResearchExplorationTool(toolName)) return { text, kind: null };
-  const explorationSteps = Number(researchState.explorationSteps || 0);
+  const explorationSteps = Number(researchSessionStore.state.explorationSteps || 0);
   const curtainStart = RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS
     - RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS;
   let notice = null;
   let noticeKind = null;
-  if (researchState.synthesisRequiredAt) {
-    researchNoticeFlags.midpoint = true;
-    researchNoticeFlags.curtain = true;
+  if (researchSessionStore.state.synthesisRequiredAt) {
+    researchSessionStore.noticeFlags.midpoint = true;
+    researchSessionStore.noticeFlags.curtain = true;
     notice = buildResearchSynthesisRequiredMessage({ includeCurrentCall: true });
     noticeKind = "research_closeout";
-  } else if (explorationSteps >= curtainStart && !researchNoticeFlags.curtain) {
-    researchNoticeFlags.midpoint = true;
-    researchNoticeFlags.curtain = true;
+  } else if (explorationSteps >= curtainStart && !researchSessionStore.noticeFlags.curtain) {
+    researchSessionStore.noticeFlags.midpoint = true;
+    researchSessionStore.noticeFlags.curtain = true;
     notice = buildResearchCurtainCallText({ explorationSteps, handoffToolName: embeddedAgentHandoffCallableName() });
     noticeKind = "research_curtain";
   }
@@ -2613,8 +2209,8 @@ function appendResearchExplorationNotice(text, toolName) {
 }
 
 function chainRead(args) {
-  let raw = researchLedger.chainRead(args || {});
-  const inherited = researchLedger.takeInheritedVerdict?.();
+  let raw = researchSessionStore.ledger.chainRead(args || {});
+  const inherited = researchSessionStore.ledger.takeInheritedVerdict?.();
   if (inherited) {
     recordResearchEvidenceObservation({
       filePath: inherited.path,
@@ -2634,7 +2230,7 @@ function chainRead(args) {
 }
 
 function chainVerdict(args) {
-  const raw = researchLedger.chainVerdict(args || {});
+  const raw = researchSessionStore.ledger.chainVerdict(args || {});
   let response;
   try {
     response = JSON.parse(raw);
@@ -3047,7 +2643,7 @@ function gateScopeKeyForBootConfig(config = bootConfig, { sessionId = null } = {
 
 function releaseGatewaySessionState(config, { sessionId = null } = {}) {
   const released = releaseGatewayScope(gateScopeKeyForBootConfig(config, { sessionId }));
-  researchSessionsByKey.delete(runtimeSessionKey(config, sessionId));
+  researchSessionStore.release(runtimeSessionKey(config, sessionId));
   return released;
 }
 
@@ -3109,10 +2705,11 @@ function rebuildNativeToolSchemas() {
   addToolSchema(TOOL_SUB_AGENT);
   addToolSchema(TOOL_SUB_AGENT_NEXT_INPUT);
   addToolSchema(getToolSchemaForRole("dispatch_agent", roleName, {
+    plannerMaxChildren: roleName === "planner" ? readPlannerDispatchPolicy({ projectDir: workspaceCwd }).maxChildren : null,
     researchInvestigation: bootConfig.researchInvestigation === true,
   }));
   addToolSchema(TOOL_WEB_RESEARCH_HANDOFF);
-  addToolSchema(TOOL_FINAL_REVIEW);
+  addToolSchema(getToolSchemaForRole("final_review", roleName));
   if (ownerHotGateway) {
     addToolSchema(readFileSchemaForCurrentBoot());
     addToolSchema(TOOL_CHAIN_READ);
@@ -3134,12 +2731,12 @@ function rebuildNativeToolSchemas() {
   addToolSchema(TOOL_CUSTOM_TOOLS);
   if (writeEnabled) {
     for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_DOWNLOAD_FILE, TOOL_COMPOSE_SPRITE_SHEET]) {
-      addToolSchema(schema);
+      addToolSchema(schema.name === "request_scope" ? getToolSchemaForRole("request_scope", roleName) : schema);
     }
   }
   if (allowBash) addToolSchema(TOOL_BASH);
   if (ownerHotGateway || roleName === "assessor") {
-    addToolSchema(TOOL_RUN_SCOPED_CHECKS);
+    addToolSchema(getToolSchemaForRole("run_scoped_checks", roleName));
   }
   if (unitTestCapability.available && (ownerHotGateway || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
   if (allowImageHelpers) {
@@ -3252,44 +2849,6 @@ function recomputeAtlasAllowedActionsForCurrentBoot() {
   } catch {
     return new Set();
   }
-}
-
-function createResearchSessionOwner(sessionKey, filePath) {
-  return {
-    sessionKey: String(sessionKey || ""),
-    filePath,
-    ledger: createResearchLedger(filePath),
-    // Threshold-crossing one-shot notice flags, owned per session.
-    noticeFlags: { midpoint: false, curtain: false, extension: false },
-    // Novelty is scoped to the session key and its repository root, so
-    // identical arguments in another session are independent evidence.
-    novelty: createNativeExplorationNoveltyTracker({
-      scopeKey: `${String(sessionKey || "")}|repo:${workspaceCwd}`,
-    }),
-  };
-}
-
-// Eviction and gateway restart deliberately drop the novelty and notice state
-// instead of inheriting another session's: a rebuilt owner re-credits evidence
-// and may re-emit at most one already-shown notice, which fails toward keeping
-// the evidence window open rather than forcing premature closeout.
-function selectResearchStateForCurrentBoot(sessionKey = runtimeSessionKey()) {
-  const key = String(sessionKey || runtimeSessionKey());
-  researchLogPath = researchStatePathForCurrentBoot(key);
-  let session = researchSessionsByKey.get(key);
-  if (!session) {
-    session = createResearchSessionOwner(key, researchLogPath);
-    researchSessionsByKey.set(key, session);
-    while (researchSessionsByKey.size > RESEARCH_STATE_LIMIT) {
-      const oldest = researchSessionsByKey.keys().next().value;
-      if (oldest == null || oldest === key) break;
-      researchSessionsByKey.delete(oldest);
-    }
-  }
-  researchLedger = session.ledger;
-  researchState = session.ledger.state;
-  researchNoticeFlags = session.noticeFlags;
-  nativeExplorationNovelty = session.novelty;
 }
 
 function applyRuntimeBootConfig(nextConfig = {}, {
@@ -3458,7 +3017,7 @@ function applyRuntimeBootConfig(nextConfig = {}, {
   }
   rebuildNativeToolSchemas();
   rebuildToolExecutors();
-  selectResearchStateForCurrentBoot(nextSessionKey);
+  researchSessionStore.select(nextSessionKey);
   return { applied: true, usedVerifiedFallback: oauthVerificationFailed && parsedConfig === fallbackVerifiedConfig };
 }
 
@@ -3731,7 +3290,7 @@ async function completeNativeToolCall({
     // read scores as stale and can force a spurious mid-traversal closeout.
     noteResearchExplorationStep({
       toolName,
-      novelRelevantFile: nativeExplorationNovelty.isNovel(toolName, args, text),
+      novelRelevantFile: researchSessionStore.novelty.isNovel(toolName, args, text),
     });
   }
   if (ok) {
@@ -3848,7 +3407,7 @@ async function handleRequest(msg) {
   if (method === "initialize") {
     const instructions = mcpServerInstructions();
     sendMessage(jsonRpcSuccess(id, {
-      protocolVersion: params?.protocolVersion || SUPPORTED_PROTOCOL,
+      protocolVersion: params?.protocolVersion || MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
       serverInfo: SERVER_INFO,
       ...(instructions ? { instructions } : {}),
@@ -3959,7 +3518,7 @@ async function handleRequest(msg) {
       .map(normalizeGatewayToolInputSchema)
       .map((tool) => (researcherSchemaDiet ? applyResearcherSchemaDiet(tool, {
         preserveDescription: researcherDirect && String(tool.name).startsWith("atlas."),
-      }) : tool)));
+      }) : roleName === "planner" ? applyPlannerSchemaDiet(tool, { dbExecutionAvailable: nativeTools.some((entry) => entry.name === "project_db_query" || entry.name === "tools.project_db_query") }) : tool)));
     appendToolLog({
       event: "tools_list",
       requestId: id ?? null,
@@ -4165,14 +3724,14 @@ async function handleRequest(msg) {
         requestId: id ?? null,
         tool: requestedToolName,
         canonicalTool: toolName,
-        explorationSteps: researchState.explorationSteps,
+        explorationSteps: researchSessionStore.state.explorationSteps,
         staleSteps: researchSynthesisStaleStepCount(),
       });
       recordEmbeddedModelControlNotice(toolName, {
         kind: "research_closeout_gate",
         text: errorText,
         trigger: "research_synthesis_gate",
-        explorationStep: Number(researchState.explorationSteps || 0),
+        explorationStep: Number(researchSessionStore.state.explorationSteps || 0),
       });
       recordRejectedToolCall({ toolName, args, text: errorText, reason: "research_synthesis_gate" });
       sendMessage(jsonRpcSuccess(id, embeddedControlResult(
@@ -4334,14 +3893,14 @@ async function handleRequest(msg) {
         requestId: id ?? null,
         tool: requestedToolName,
         canonicalTool: toolName,
-        explorationSteps: researchState.explorationSteps,
+        explorationSteps: researchSessionStore.state.explorationSteps,
         staleSteps: researchSynthesisStaleStepCount(),
       });
       recordEmbeddedModelControlNotice(toolName, {
         kind: "research_closeout_gate",
         text: errorText,
         trigger: "research_synthesis_gate",
-        explorationStep: Number(researchState.explorationSteps || 0),
+        explorationStep: Number(researchSessionStore.state.explorationSteps || 0),
       });
       recordRejectedToolCall({ toolName, args, text: errorText, reason: "research_synthesis_gate" });
       sendMessage(jsonRpcSuccess(id, embeddedControlResult(
@@ -4431,8 +3990,8 @@ async function handleRequest(msg) {
           tasks_shape: describeTasksShape(args?.tasks),
           handoff_targets: describeTargetShapes(args?.handoffs),
         }
-      : (toolName === "chain_verdict" && researchState?.currentlyReading?.path)
-        ? { ...args, path: researchState.currentlyReading.path }
+      : (toolName === "chain_verdict" && researchSessionStore.state?.currentlyReading?.path)
+        ? { ...args, path: researchSessionStore.state.currentlyReading.path }
         : args;
     // Record the request the moment it's made (append-only "<type>.started"),
     // then close it with the completion row on every exit path so duration and

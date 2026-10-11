@@ -2,7 +2,7 @@ import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAu
 import { pulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import { readResponseTextWithLimit } from "../../remote/functions/client.js";
 import { TEAM_PUBLICATION_MODES } from "../../../catalog/team.js";
-import { SESSION_SYNC_POLICY, TRUNK_HEAD_PATTERN } from "../../../catalog/session-sync.js";
+import { SESSION_COMPUTE_POLICY_VALUES, SESSION_SYNC_POLICY, TRUNK_HEAD_PATTERN } from "../../../catalog/session-sync.js";
 
 export const PAIRING_AUTH_ROUTE = "pairing:session";
 export const PAIRING_PROTOCOL = "posse.pairing.v1";
@@ -76,7 +76,7 @@ function validateRepository(endpoint, payload, status) {
 function validatePolicies(endpoint, payload, status) {
   if (payload.policies == null) return;
   const policies = recordPayload(endpoint, payload.policies, status);
-  if (!["each-member", "capability-routing", "host-only"].includes(policies.compute)) {
+  if (!SESSION_COMPUTE_POLICY_VALUES.includes(policies.compute)) {
     throw invalidResponse(endpoint, "policies.compute is invalid", status);
   }
   if (!["none", "side-trunk"].includes(policies.integration)) {
@@ -293,7 +293,7 @@ export function validatePairingRemoteResponse(endpoint, payload, status = null) 
       throw invalidResponse(endpoint, "enrollment_open is invalid", status);
     }
     if (response.compute_policy != null
-      && !["each-member", "capability-routing", "host-only"].includes(response.compute_policy)) {
+      && !SESSION_COMPUTE_POLICY_VALUES.includes(response.compute_policy)) {
       throw invalidResponse(endpoint, "compute_policy is invalid", status);
     }
   if (response.integration_policy != null

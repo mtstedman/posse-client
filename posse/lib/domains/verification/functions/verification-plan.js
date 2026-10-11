@@ -7,6 +7,7 @@ import path from "node:path";
 
 import { adminGitExec } from "../../git/functions/admin-git-exec.js";
 import { detectNodePackageManager } from "../../../shared/tools/functions/node-package-manager.js";
+import { PACKAGE_MANIFEST_FALLBACK_SCRIPTS } from "../../../catalog/verification.js";
 
 export const VERIFICATION_PLAN_SCHEMA_VERSION = 1;
 export const VERIFICATION_PLAN_CONFIG = "posse.verification.json";
@@ -19,6 +20,27 @@ export function verificationPlanSnapshot(plan) {
     plan_id: plan?.plan_id || null,
     check_ids: Array.isArray(plan?.checks) ? plan.checks.map((check) => check.id) : [],
   };
+}
+
+/**
+ * The registry graph a job is planned against, read from the planner's read
+ * root, or null. Only a committed posse.verification.json is an obligation
+ * worth freezing, and only while it and the manifest its commands read are
+ * unmodified there: operator WIP is not a plan.
+ */
+export function plannedRepositoryVerificationSnapshot({ projectDir, validateCommand } = {}) {
+  if (!projectDir) return null;
+  const plan = resolveRepositoryVerificationPlan({ projectDir, validateCommand });
+  if (plan?.source !== "repository_config") return null;
+  try {
+    const status = adminGitExec(["status", "--porcelain", "--", VERIFICATION_PLAN_CONFIG, "package.json"], projectDir, {
+      timeoutMs: 5_000,
+    });
+    if (String(status || "").trim()) return null;
+  } catch {
+    return null;
+  }
+  return verificationPlanSnapshot(plan);
 }
 
 const STAGES = Object.freeze(["fast", "required", "canonical"]);
@@ -72,42 +94,29 @@ function packageScriptCommand(manager, script) {
   return `${manager} run ${script}`;
 }
 
-function scriptIntent(script) {
-  if (/typecheck|types/.test(script)) return "typecheck";
-  if (/lint/.test(script)) return "lint";
-  if (/check|verify/.test(script) && !/test/.test(script)) return "contract";
-  return "test";
-}
-
-function scriptStage(script) {
-  if (/(?:^|:)(?:fast|quick|unit|changed)$/.test(script)) return "fast";
-  if (/^(?:lint|typecheck|check)(?::|$)/.test(script)) return "required";
-  return "canonical";
-}
-
+// The legacy manifest fallback is one test script from a closed catalog
+// list, never an inferred deployment, publish, or umbrella gate. It applies
+// only when the planner selected nothing; it is never an added obligation.
 function manifestChecks(projectDir) {
   const manifestPath = path.join(projectDir, "package.json");
   if (!fs.existsSync(manifestPath)) return [];
   let manifest;
   try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")); } catch { return []; }
   const scripts = manifest?.scripts && typeof manifest.scripts === "object" ? manifest.scripts : {};
-  const candidates = Object.keys(scripts).filter((name) => (
-    /^(?:test|verify)(?::(?:fast|quick|unit|changed|all))?$/.test(name)
-    || /^(?:lint|typecheck|check)(?::changed)?$/.test(name)
-  ));
-  const manager = packageManager(projectDir);
-  return candidates.map((script) => ({
+  const script = PACKAGE_MANIFEST_FALLBACK_SCRIPTS.find((name) => typeof scripts[name] === "string");
+  if (!script) return [];
+  return [{
     id: `package:${script}`,
-    command: packageScriptCommand(manager, script),
-    definition_sha256: sha256(String(scripts[script] || "")),
+    command: packageScriptCommand(packageManager(projectDir), script),
+    definition_sha256: sha256(scripts[script]),
     cwd: ".",
-    intent: scriptIntent(script),
-    stage: scriptStage(script),
-    required: scriptStage(script) !== "fast",
+    intent: "test",
+    stage: "canonical",
+    required: true,
     depends_on: [],
     timeout_policy: "repository",
     evidence: { commit_bound: true, clean_tree_required: true, output_required: true },
-  }));
+  }];
 }
 
 export function readRepositoryVerificationConfig(projectDir) {

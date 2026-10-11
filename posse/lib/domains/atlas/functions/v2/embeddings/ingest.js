@@ -162,11 +162,6 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
   };
   emitProgress(true);
 
-  // Atlas owns document encoding and batches against its resident Jina session.
-  const encodeTexts = async (texts) => typeof encoder.encodeDocuments === "function"
-    ? encoder.encodeDocuments(texts, signal)
-    : encoder.encode(texts, signal);
-
   try {
     const iterator = symbolSource.pages[Symbol.asyncIterator]();
     let candidateOffset = 0;
@@ -205,8 +200,7 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
           batch_size: batch.length,
           symbols: summarizeSymbols(batch),
         });
-        const supportsStructuredSymbols = typeof encoder.encodeSymbols === "function";
-        /** @type {Array<{ symbol: ViewSymbol, key: { content_hash: string, local_id: number }, text: string | null }>} */
+        /** @type {Array<{ symbol: ViewSymbol, key: { content_hash: string, local_id: number }, text: string }>} */
         const codeInputs = [];
         /** @type {Array<{ symbol: ViewSymbol, key: { content_hash: string, local_id: number }, text: string }>} */
         const documentationInputs = [];
@@ -246,18 +240,12 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
             continue;
           }
           if (!codePresent) {
-            let text = null;
-            if (!supportsStructuredSymbols) {
-              const textStartedAt = performance.now();
-              text = encoder.buildSymbolText(s);
-              currentBatchTiming.textBuildMs += elapsedSince(textStartedAt);
-              if (!text || text.length === 0) {
-                report.skipped++;
-                batchSkipped++;
-              } else {
-                codeInputs.push({ symbol: s, key: codeKey, text });
-                keptBySymbolKey.set(symbolKey(s), s);
-              }
+            const textStartedAt = performance.now();
+            const text = encoder.buildSymbolText(s);
+            currentBatchTiming.textBuildMs += elapsedSince(textStartedAt);
+            if (!text || text.length === 0) {
+              report.skipped++;
+              batchSkipped++;
             } else {
               codeInputs.push({ symbol: s, key: codeKey, text });
               keptBySymbolKey.set(symbolKey(s), s);
@@ -315,17 +303,14 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
           view_path: viewPathForTelemetry(view),
           batch: batchNumber,
           offset: batchOffset,
-          supports_structured_symbols: supportsStructuredSymbols,
           expected_count: expectedCount,
           code_count: codeInputs.length,
           documentation_count: documentationInputs.length,
           kept: summarizeSymbols([...keptBySymbolKey.values()]),
-          texts: supportsStructuredSymbols
-            ? summarizeTexts(documentationInputs.map((input) => input.text))
-            : summarizeTexts([
-                ...codeInputs.map((input) => String(input.text || "")),
-                ...documentationInputs.map((input) => input.text),
-              ]),
+          texts: summarizeTexts([
+            ...codeInputs.map((input) => input.text),
+            ...documentationInputs.map((input) => input.text),
+          ]),
           encoder: encoderTelemetry(encoder),
         });
         /** @type {Float32Array[]} */
@@ -333,28 +318,15 @@ export async function ingestView({ view, index, encoder, batchSize, signal, limi
         /** @type {Float32Array[]} */
         let documentationVectors = [];
         try {
-          if (supportsStructuredSymbols && codeInputs.length > 0) {
-            // Structured encoders receive an explicitly blank documentation field:
-            // canonical code vectors must not silently absorb JSDoc again.
-            codeVectors = await encoder.encodeSymbols(
-              codeInputs.map((input) => ({ ...input.symbol, doc: null })),
-              signal,
-            );
-            report.batches++;
-          }
-          if (supportsStructuredSymbols && documentationInputs.length > 0) {
-            documentationVectors = await encodeTexts(documentationInputs.map((input) => input.text));
-            report.batches++;
-          }
-          if (!supportsStructuredSymbols) {
-            const vectors = await encodeTexts([
-              ...codeInputs.map((input) => String(input.text || "")),
-              ...documentationInputs.map((input) => input.text),
-            ]);
-            codeVectors = vectors.slice(0, codeInputs.length);
-            documentationVectors = vectors.slice(codeInputs.length);
-            report.batches++;
-          }
+          // Atlas owns document encoding and batches against its resident Jina
+          // session; streaming parse intake uses the same encoder method.
+          const vectors = await encoder.encodeDocuments([
+            ...codeInputs.map((input) => input.text),
+            ...documentationInputs.map((input) => input.text),
+          ], signal);
+          codeVectors = vectors.slice(0, codeInputs.length);
+          documentationVectors = vectors.slice(codeInputs.length);
+          report.batches++;
         } catch (err) {
           recordEmbeddingForensics("ingest.batch.encode.error", {
             view_path: viewPathForTelemetry(view),

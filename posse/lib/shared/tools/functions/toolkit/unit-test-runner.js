@@ -5,6 +5,7 @@ import { spawn, spawnSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import { TEST_SUBPROCESS_ENV_KEYS } from "../../../../catalog/process.js";
+import { TEST_DIRECTORY_NAME_PATTERN, TEST_HELPER_DIRECTORIES } from "../../../../catalog/verification.js";
 import { filterProcessEnv } from "../../../platform/functions/process-env.js";
 import { testExecutionCounts } from "./test-output-counts.js";
 import { pythonExecutable, repositoryTestRunner } from "./repository-test-runner.js";
@@ -15,7 +16,7 @@ const SKIP_DIRS = new Set([
   ".posse", ".posse-worktrees", ".posse-test-suites", "build", "coverage", "dist",
   "node_modules", "target", "vendor", "venv", ".venv",
 ]);
-const TEST_HELPER_DIRS = new Set(["support"]);
+const TEST_HELPER_DIRS = new Set(TEST_HELPER_DIRECTORIES);
 const MAX_OUTPUT_CHARS = 128 * 1024;
 const MAX_SOURCE_SNIFF_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -142,22 +143,72 @@ function pythonRunner(root, relative, source) {
   return { reason: "python_runner_unidentified" };
 }
 
+function xmlText(value) {
+  return String(value || "").replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").trim();
+}
+
+function xmlAttribute(attributes, name) {
+  return new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`).exec(attributes || "")?.slice(1).find((value) => value != null) ?? null;
+}
+
+// Whether a PHPUnit config's <testsuites> declares this file: an exact
+// <file>, or a <directory> holding it whose suffix (default Test.php) and
+// prefix the file name carries, with paths relative to the config. An
+// <exclude> wins; a glob directory is never guessed at.
+function phpUnitConfigDeclares(root, config, relative) {
+  let xml;
+  try { xml = readSourceHead(path.join(root, config)); } catch { return false; }
+  const configDirectory = path.posix.dirname(config);
+  const resolve = (value) => {
+    const text = xmlText(value).replace(/\\/g, "/");
+    if (!text || /[*?[]/.test(text) || path.posix.isAbsolute(text)) return null;
+    const joined = path.posix.normalize(configDirectory === "." ? text : `${configDirectory}/${text}`).replace(/\/+$/, "");
+    return joined === ".." || joined.startsWith("../") ? null : joined;
+  };
+  const within = (directory) => directory === "." || relative.startsWith(`${directory}/`);
+  const suites = [...xml.matchAll(/<testsuites\b[^>]*>([\s\S]*?)<\/testsuites>/g)].map((match) => match[1]).join("\n");
+  if (!suites) return false;
+  const excluded = [...suites.matchAll(/<exclude\b[^>]*>([\s\S]*?)<\/exclude>/g)].flatMap((match) => {
+    const inner = match[1];
+    const nested = [...inner.matchAll(/<(?:directory|file)\b[^>]*>([\s\S]*?)<\/(?:directory|file)>/g)].map((entry) => entry[1]);
+    return (nested.length > 0 ? nested : [inner]).map(resolve).filter(Boolean);
+  });
+  if (excluded.some((entry) => entry === relative || within(entry))) return false;
+  const included = suites.replace(/<exclude\b[^>]*>[\s\S]*?<\/exclude>/g, "");
+  const name = path.posix.basename(relative);
+  if ([...included.matchAll(/<file\b[^>]*>([\s\S]*?)<\/file>/g)].some((match) => resolve(match[1]) === relative)) return true;
+  return [...included.matchAll(/<directory\b([^>]*)>([\s\S]*?)<\/directory>/g)].some((match) => {
+    const directory = resolve(match[2]);
+    if (!directory || !within(directory)) return false;
+    const suffix = xmlAttribute(match[1], "suffix") ?? "Test.php";
+    const prefix = xmlAttribute(match[1], "prefix") ?? "";
+    return name.endsWith(suffix) && name.startsWith(prefix);
+  });
+}
+
 // A PHPUnit class only defines a class; `php <file>` runs nothing (or dies on
 // the missing base class). It needs vendor/bin/phpunit and the config that
-// names its bootstrap. Plain assertion scripts run directly.
+// names its bootstrap. A class extending a framework base (Laravel's
+// Tests\TestCase) is PHPUnit's only when the repository's own config declares
+// it. Plain assertion scripts run directly.
 function phpRunner(root, relative, source) {
   const phpunit = nearestUpward(root, relative, ["vendor/bin/phpunit"]);
   const config = nearestUpward(root, relative, PHPUNIT_CONFIG_NAMES);
+  const invocation = () => ({ runner: "phpunit", executable: "php", args: [phpunit, ...(config ? ["-c", config] : []), relative] });
   if (PHPUNIT_SOURCE_RE.test(source)) {
     if (!phpunit) return { reason: "phpunit_unavailable" };
-    return { runner: "phpunit", executable: "php", args: [phpunit, ...(config ? ["-c", config] : []), relative] };
+    return invocation();
   }
-  if (PHP_CLASS_EXTENDS_RE.test(source)) return { reason: "php_runner_unidentified" };
+  if (PHP_CLASS_EXTENDS_RE.test(source)) {
+    return phpunit && config && phpUnitConfigDeclares(root, config, relative)
+      ? invocation()
+      : { reason: "php_runner_unidentified" };
+  }
   return { runner: "php_script", executable: "php", args: [relative] };
 }
 
 function isTestDirectoryName(name) {
-  return /^tests?/i.test(String(name || ""));
+  return TEST_DIRECTORY_NAME_PATTERN.test(String(name || ""));
 }
 
 function commandAvailable(executable) {
@@ -241,6 +292,8 @@ export function discoverUnitTestCapability({ projectDir, scipAvailable = true } 
     files: Object.freeze(files),
     languages: Object.freeze(languages),
     missing_executables: Object.freeze(missing),
+    // Without Git's view, ignored and generated test files are not filtered.
+    git_visibility: visible ? "filtered" : "unavailable",
   });
 }
 

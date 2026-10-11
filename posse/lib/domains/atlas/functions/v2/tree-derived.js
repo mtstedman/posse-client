@@ -5,10 +5,12 @@
 // persists the returned tree tables.
 
 import { sha256Hex } from "./hash.js";
+import { recordRun, rollbackSavepoint, parseJsonArray, parseJsonObject } from "./derived-state-helpers.js";
 import { normalizeRepoPath } from "./paths.js";
 import { runAtlasNativeMethodAsync } from "./native/invoke.js";
 import { refreshViewTreeNativeAsync } from "./native/storage.js";
 import { atlasTreeNativeTimeoutMs } from "./tree-native-timeout.js";
+import { readTreeScopeNodes as readTreeScopeNodesRows, readTreeScopeSymbolFiles as readTreeScopeSymbolFilesRows } from "./tree-scope-rows.js";
 
 const TREE_RUN_KIND = "tree-derived";
 
@@ -732,34 +734,7 @@ function readTreeRefs(db) {
  * @param {import("better-sqlite3").Database} db
  */
 function readTreeScopeNodes(db) {
-  if (!tableExists(db, "atlas_tree_scope_nodes")) return [];
-  return db.prepare(
-    `SELECT node_id AS nodeId, parent_node_id AS parentNodeId, kind, label,
-            repo_rel_path AS repoRelPath, depth, sort_order AS sortOrder,
-            descendant_symbol_count AS descendantSymbolCount,
-            descendant_file_count AS descendantFileCount,
-            generated, test, config,
-            aggregates_json AS aggregatesJson, terms_json AS termsJson,
-            projected_terms_json AS projectedTermsJson
-     FROM atlas_tree_scope_nodes
-     ORDER BY depth ASC, sort_order ASC, node_id ASC`,
-  ).all().map((row) => ({
-    nodeId: String(row.nodeId || ""),
-    parentNodeId: row.parentNodeId ? String(row.parentNodeId) : null,
-    kind: String(row.kind || ""),
-    label: String(row.label || ""),
-    repoRelPath: normalizeRepoPath(row.repoRelPath),
-    depth: Number(row.depth || 0),
-    sortOrder: Number(row.sortOrder || 0),
-    descendantSymbolCount: Number(row.descendantSymbolCount || 0),
-    descendantFileCount: Number(row.descendantFileCount || 0),
-    generated: Number(row.generated || 0) > 0,
-    test: Number(row.test || 0) > 0,
-    config: Number(row.config || 0) > 0,
-    aggregates: parseJsonObject(row.aggregatesJson),
-    terms: parseJsonArray(row.termsJson).map(String),
-    projectedTerms: parseJsonArray(row.projectedTermsJson).map(String),
-  }));
+  return readTreeScopeNodesRows(db, { normalizePath: normalizeRepoPath, hasTable: tableExists });
 }
 
 /**
@@ -783,18 +758,7 @@ function readTreeScopeTermStats(db) {
  * @param {import("better-sqlite3").Database} db
  */
 function readTreeScopeSymbolFiles(db) {
-  if (!tableExists(db, "atlas_tree_scope_symbol_files")) return [];
-  return db.prepare(
-    `SELECT symbol_ref AS symbolRef, symbol_node_id AS symbolNodeId,
-            file_node_id AS fileNodeId, repo_rel_path AS repoRelPath
-     FROM atlas_tree_scope_symbol_files
-     ORDER BY repo_rel_path ASC, symbol_ref ASC, symbol_node_id ASC`,
-  ).all().map((row) => ({
-    symbolRef: String(row.symbolRef || ""),
-    symbolNodeId: String(row.symbolNodeId || ""),
-    fileNodeId: String(row.fileNodeId || ""),
-    repoRelPath: normalizeRepoPath(row.repoRelPath),
-  }));
+  return readTreeScopeSymbolFilesRows(db, { normalizePath: normalizeRepoPath, hasTable: tableExists });
 }
 
 function compareStrings(a, b) {
@@ -827,49 +791,4 @@ function objectOr(value) {
 function numberOr(value, fallback) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
-}
-
-function recordRun(db, kind, status, durationMs, details) {
-  try {
-    db.prepare(
-      "INSERT INTO derived_state_runs(built_at, kind, status, duration_ms, details_json) VALUES (?, ?, ?, ?, ?)",
-    ).run(new Date().toISOString(), kind, status, Math.max(0, Math.round(durationMs)), JSON.stringify(details || {}));
-  } catch {
-    // Derived-state run telemetry must never break retrieval.
-  }
-}
-
-/**
- * @param {import("better-sqlite3").Database} db
- * @param {string} name
- */
-function rollbackSavepoint(db, name) {
-  try {
-    db.exec(`ROLLBACK TO ${name}`);
-  } catch {
-    // Preserve the original writer failure.
-  }
-  try {
-    db.exec(`RELEASE ${name}`);
-  } catch {
-    // Ignore cleanup failures.
-  }
-}
-
-function parseJsonArray(value) {
-  try {
-    const parsed = JSON.parse(String(value || "[]"));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function parseJsonObject(value) {
-  try {
-    const parsed = JSON.parse(String(value || "{}"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
 }

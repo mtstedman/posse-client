@@ -104,8 +104,7 @@ export class WorkerExecutionFinalizer {
       }
     }
 
-    // Clean up per-job agent loader dir regardless of outcome — it's always
-    // supposed to be empty of real content (pre-launch guard asserts this).
+    // Remove per-job loader dirs left by the former Node CLI provider path.
     if (worker.projectDir && job.id != null) {
       try {
         await cleanupAgentLoaderAsync(loaderPathForJob(worker.projectDir, job.id));

@@ -10,18 +10,6 @@ export class ClaudeProvider extends BaseProvider {
     this.usageCache = null;
   }
 
-  warmOauthSession(opts = {}) {
-    const result = super.warmOauthSession(opts);
-    if (result && typeof result.then === "function") {
-      return result.then((value) => {
-        if (value?.ok) this.oauthPrimed = true;
-        return value;
-      });
-    }
-    if (result?.ok) this.oauthPrimed = true;
-    return result;
-  }
-
   async warmOauthSessionAsync(opts = {}) {
     const result = await super.warmOauthSessionAsync(opts);
     if (result?.ok) this.oauthPrimed = true;

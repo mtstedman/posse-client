@@ -6,8 +6,9 @@
 // the structured result returns to the same agent session. The reviewer
 // reports with the same tool and waits in it, so a later review continues the
 // same reviewer with only the diff since its report. A COMPLETE handoff waits
-// for a passing review, unless the review could not run or the attempt's
-// reviews are used up (domains/assessment, final review).
+// for a passing review, unless the review could not run within its bounded
+// retries, the reviewer could not judge it, or the attempt's reviews are used
+// up (domains/assessment, final review).
 
 export const FINAL_REVIEW_TOOL_NAME = "final_review";
 
@@ -24,6 +25,28 @@ export const FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT = 3;
 export const FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS = 2;
 export const FINAL_REVIEW_CONTINUATION_NEXT_ACTION = "verify_preserved_candidate";
 
+// How a recorded final review reached its result. Only a reviewer's verdict
+// (fresh or revision) spends one of the attempt's reviews. Proven
+// deterministic findings, reused findings for an unchanged candidate, and a
+// review that obtained no reviewer verdict (provider error, a reviewer that
+// ended without reporting on its revision, the reviewer's wall) are free.
+export const FINAL_REVIEW_REVIEW_MODES = Object.freeze({
+  FRESH: "fresh",
+  REVISION: "revision",
+  DETERMINISTIC: "deterministic",
+  UNCHANGED: "unchanged",
+  INFRASTRUCTURE: "infrastructure",
+});
+export const FINAL_REVIEW_UNCHARGED_REVIEW_MODES = Object.freeze([
+  FINAL_REVIEW_REVIEW_MODES.DETERMINISTIC,
+  FINAL_REVIEW_REVIEW_MODES.UNCHANGED,
+  FINAL_REVIEW_REVIEW_MODES.INFRASTRUCTURE,
+]);
+// Infrastructure rounds per attempt the handoff waits on: while they remain,
+// the developer is told to call final_review again; after them the handoff
+// proceeds and the ordinary assessment verifies the change.
+export const FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS = 2;
+
 // Whole tool call: the declared tests plus the reviewer's own agent call. The
 // owner's progress heartbeat keeps the transport alive meanwhile; this is the
 // provider client's per-call deadline (catalog/mcp.js).
@@ -36,6 +59,20 @@ export const FINAL_REVIEW_TEST_TIMEOUT_MS = 15 * 60 * 1000;
 // attempt (domains/assessment/functions/final-review-checks.js).
 export const FINAL_REVIEW_CHECKS = Object.freeze(["lint", "typecheck"]);
 export const FINAL_REVIEW_CHECK_MAX_FILES = 250;
+
+// Only a failure attributable to the change in process is a finding without
+// the reviewer: a check failure on a line the change added, or a failing or
+// timed-out test file the change added that its runner ran on its own (a
+// repository script runs one shared suite for every file it covers). Every
+// other failure may predate the change; the reviewer judges it as evidence.
+// The labels head each attribution in the reviewer's evidence.
+export const FINAL_REVIEW_CHECK_ATTRIBUTION_LABELS = Object.freeze({
+  introduced: "On lines this change added (defects in this change):",
+  inChanged: "Elsewhere in the changed files (may predate this change; judge whether the change caused it):",
+  elsewhere: "Elsewhere in the project (may predate this change; a caller this change broke is still its defect):",
+});
+export const FINAL_REVIEW_PROVEN_TEST_STATUSES = Object.freeze(["failed", "timed_out"]);
+export const FINAL_REVIEW_SHARED_TEST_RUNNERS = Object.freeze(["repository_script"]);
 
 // The reviewer gets the scoped diff inline up to this size, plus the full
 // changed-file list; it reads whatever does not fit with its read tools.
@@ -55,6 +92,9 @@ export const FINAL_REVIEW_REVIEWER_STATUS = Object.freeze({
 });
 export const FINAL_REVIEW_REVIEWER_PARK_MS = 35 * 60_000;
 export const FINAL_REVIEW_REVIEWER_WALL_MS = 55 * 60_000;
+// A parked reviewer with less of its wall left than this cannot judge a
+// revision; it is released and the revision goes to a fresh reviewer.
+export const FINAL_REVIEW_REVISION_MIN_REMAINING_MS = 10 * 60_000;
 
 export const FINAL_REVIEW_OUTCOMES = Object.freeze({
   PASS: "pass",

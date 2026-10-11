@@ -96,7 +96,7 @@ import { ATLAS_WI_REFRESH_MAX_SOURCE_PASSES } from "../../../../catalog/atlas.js
 import { ATLAS_EVENTS } from "../../functions/v2/contracts/events.js";
 import { ingestScipFile, listScipFiles } from "../../functions/v2/scip/ingester.js";
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
-import { startOnnxRefresh } from "../../functions/v2/parse/onnx-index-runner.js";
+import { startEmbeddingRefresh } from "../../functions/v2/parse/embedding-intake-runner.js";
 import { hasLanguageSemantics } from "../../functions/v2/resolver/adapters/registry.js";
 import { ensureScipStaged, formatScipStageFailure, stageScipBatches } from "../../functions/v2/scip/stager.js";
 import { reclaimSupersededScipState } from "../../functions/v2/scip/session-reclaim.js";
@@ -396,7 +396,7 @@ async function publishForkedBaselineView(builder, ledger, {
     if (!Number.isSafeInteger(parentSeq) || parentSeq < 0) {
       return { seeded: false, reason: "parent_view_unreadable" };
     }
-    await ledger.forkBranch(branch, parentBranch, parentSeq, { label: "Warmer.seedForkedBaseline" });
+    await ledger.forkBranch(branch, parentBranch, parentSeq, { label: "ParseEngine.seedForkedBaseline" });
     patchViewBranchMeta(stagedPath, {
       branch,
       parent_branch: parentBranch,
@@ -498,7 +498,7 @@ export class ParseEngine {
     // entry point so a transient ledger fault surfaces through the
     // appropriate error contract (skipped record for handleWarmJob,
     // throw for the synchronous mount/replay paths) instead of leaking
-    // out of `new Warmer(...)`.
+    // out of `new ParseEngine(...)`.
   }
 
   // Idempotent default-branch init. Cheap on the hot path: one
@@ -678,7 +678,7 @@ export class ParseEngine {
       }
       return staged.files || [];
     } catch (err) {
-      logAtlasError(`[Warmer.#stageScipFiles] ensureScipStaged(${scipDir}) threw:`, err);
+      logAtlasError(`[ParseEngine.#stageScipFiles] ensureScipStaged(${scipDir}) threw:`, err);
       return [];
     }
   }
@@ -832,7 +832,7 @@ export class ParseEngine {
       if (opts.reclaim) await this.#reclaimSupersededScipState(staged, intakeReports, opts.reclaim);
       return staged.files || [];
     } catch (err) {
-      logAtlasError(`[Warmer.#stageScipBatches] stageScipBatches(${this.#scipDir}) threw:`, err);
+      logAtlasError(`[ParseEngine.#stageScipBatches] stageScipBatches(${this.#scipDir}) threw:`, err);
       base.skipped.push({
         repo_rel_path: ".",
         reason: "parse_error",
@@ -862,7 +862,7 @@ export class ParseEngine {
       scope,
     });
     if (reclaimed.rowError) {
-      logAtlasError("[Warmer.#reclaimSupersededScipState] prune failed; superseded rows kept:", reclaimed.rowError);
+      logAtlasError("[ParseEngine.#reclaimSupersededScipState] prune failed; superseded rows kept:", reclaimed.rowError);
     }
     const pruned = reclaimed.rows;
     if (pruned && pruned.deleted > 0) {
@@ -887,12 +887,12 @@ export class ParseEngine {
           });
         }
       } catch (err) {
-        logAtlasError("[Warmer.#reclaimSupersededScipState] external symbol collection failed; rows kept:", err);
+        logAtlasError("[ParseEngine.#reclaimSupersededScipState] external symbol collection failed; rows kept:", err);
       }
     }
     const gc = reclaimed.sessions;
     for (const failure of gc?.failed || []) {
-      logAtlasError(`[Warmer.#reclaimSupersededScipState] SCIP batch session ${failure.session} kept; delete failed:`, failure.error);
+      logAtlasError(`[ParseEngine.#reclaimSupersededScipState] SCIP batch session ${failure.session} kept; delete failed:`, failure.error);
     }
     if (gc && gc.removed.length > 0) {
       this.#emitProgress({
@@ -1018,7 +1018,7 @@ export class ParseEngine {
         base.ledger_entries_appended += result.ledger_entries_appended || 0;
       } catch (err) {
         completedWithoutError = false;
-        logAtlasError(`[Warmer.#ingestScipFiles] ingest ${scipPath} threw:`, err);
+        logAtlasError(`[ParseEngine.#ingestScipFiles] ingest ${scipPath} threw:`, err);
         base.skipped.push({
           repo_rel_path: ".",
           reason: "parse_error",
@@ -1093,13 +1093,13 @@ export class ParseEngine {
       })).catch((error) => ({ bytes: null, producedAt: null, error }));
       const intake = tail
         .catch((err) => {
-          logAtlasError("[Warmer.#createScipIngestQueue] previous intake failed:", err);
+          logAtlasError("[ParseEngine.#createScipIngestQueue] previous intake failed:", err);
         })
         .then(async () => {
           const ready = await prepared;
           if (ready.error || !ready.bytes) {
             const error = ready.error || new Error(`SCIP read failed for ${file}`);
-            logAtlasError(`[Warmer.#createScipIngestQueue] read ${file} threw:`, error);
+            logAtlasError(`[ParseEngine.#createScipIngestQueue] read ${file} threw:`, error);
             base.skipped.push({
               repo_rel_path: ".",
               reason: "parse_error",
@@ -1514,7 +1514,7 @@ export class ParseEngine {
       // Treat any unexpected exception as "warming failed" — surface in
       // result rather than throwing. Callers (the executor) decide
       // whether to log as info or escalate.
-      logAtlasError(`[Warmer.handleWarmJob] purpose=${purpose} threw:`, err);
+      logAtlasError(`[ParseEngine.handleWarmJob] purpose=${purpose} threw:`, err);
       if (isVerboseAtlasErrors()) {
         // Verbose mode: re-throw so the caller sees the full stack on
         // the attempt rather than a list of generic per-path skips.
@@ -1679,7 +1679,7 @@ export class ParseEngine {
   mountForWorktreeAsync(args, opts = {}) {
     const key = args?.worktreePath ? worktreeViewPath(args.worktreePath) : this.#repoRoot;
     return runSqliteWrite(key, () => withAtlasViewWriteLock(key, () => this.mountForWorktree(args)), {
-      label: opts.label || "Warmer.mountForWorktree",
+      label: opts.label || "ParseEngine.mountForWorktree",
       waitMs: opts.waitMs,
     });
   }
@@ -1718,7 +1718,7 @@ export class ParseEngine {
   seedForkedBaselineAsync(args, opts = {}) {
     const key = args?.outViewPath || this.#repoRoot;
     return runSqliteWrite(key, () => withAtlasViewWriteLock(key, () => this.seedForkedBaseline(args)), {
-      label: opts.label || "Warmer.seedForkedBaseline",
+      label: opts.label || "ParseEngine.seedForkedBaseline",
       waitMs: opts.waitMs,
     });
   }
@@ -1773,7 +1773,7 @@ export class ParseEngine {
   cleanupWiViewAsync(args, opts = {}) {
     const key = args?.workItemId == null ? this.#repoRoot : warmedViewPath(this.#repoRoot, args.workItemId);
     return runSqliteWrite(key, () => this.cleanupWiView(args), {
-      label: opts.label || "Warmer.cleanupWiView",
+      label: opts.label || "ParseEngine.cleanupWiView",
       waitMs: opts.waitMs,
     });
   }
@@ -1834,10 +1834,10 @@ export class ParseEngine {
         workItemId: payload.work_item_id,
         markBranchAbandoned: false,
       }, {
-        label: "Warmer.cleanupWiView.job",
+        label: "ParseEngine.cleanupWiView.job",
       });
     } catch (err) {
-      logAtlasError(`[Warmer.#cleanupFromJob] wi=${payload.work_item_id} threw:`, err);
+      logAtlasError(`[ParseEngine.#cleanupFromJob] wi=${payload.work_item_id} threw:`, err);
       base.skipped = [{
         repo_rel_path: ".",
         reason: "parse_error",
@@ -1895,13 +1895,13 @@ export class ParseEngine {
         sourceBranch,
         ontoBranch,
         Number(payload.from_seq || 0),
-        { label: "Warmer.replayMerge" },
+        { label: "ParseEngine.replayMerge" },
       );
       const rec = this.#ledger.getBranch(sourceBranch);
       if (rec && rec.status === "active") {
         await this.#emitStage("merge", `marking ${sourceBranch} merged`);
         await this.#ledger.setBranchStatus(sourceBranch, "merged", {
-          label: "Warmer.replayMerge.setBranchStatus",
+          label: "ParseEngine.replayMerge.setBranchStatus",
         });
       }
       const out = { entries };
@@ -1921,7 +1921,7 @@ export class ParseEngine {
         ontoBranch,
         fromSeq: Number(payload.from_seq || 0),
       })) {
-        logAtlasError(`[Warmer.#mergeToMain] ${sourceBranch} -> ${ontoBranch} threw:`, err);
+        logAtlasError(`[ParseEngine.#mergeToMain] ${sourceBranch} -> ${ontoBranch} threw:`, err);
         base.skipped = [{
           repo_rel_path: ".",
           reason: "parse_error",
@@ -1933,7 +1933,7 @@ export class ParseEngine {
       if (rec && rec.status === "active") {
         await this.#emitStage("merge", `marking ${sourceBranch} merged`);
         await this.#ledger.setBranchStatus(sourceBranch, "merged", {
-          label: "Warmer.replayMerge.idempotentSetBranchStatus",
+          label: "ParseEngine.replayMerge.idempotentSetBranchStatus",
         });
       }
     }
@@ -2258,7 +2258,7 @@ export class ParseEngine {
         await this.#maybeIngestEmbeddings({ viewPath: outPath, base, purpose: payload.purpose });
         await this.#maybeReseedTreeCompression({ viewPath: outPath, base, purpose: payload.purpose, triggerEvent: payload?.trigger_event ?? null });
       } catch (err) {
-        logAtlasError(`[Warmer.#rebuildBranchView] branch=${branch} threw:`, err);
+        logAtlasError(`[ParseEngine.#rebuildBranchView] branch=${branch} threw:`, err);
         base.skipped.push({
           repo_rel_path: ".",
           reason: "parse_error",
@@ -2623,7 +2623,7 @@ export class ParseEngine {
         await this.#maybeReseedTreeCompression({ viewPath: outPath, base, purpose: payload.purpose, triggerEvent: payload?.trigger_event ?? null });
         return { fallback: false, result: base };
       } catch (err) {
-        logAtlasError(`[Warmer.#updateBranchViewIncremental] branch=${branch} fell back to full rebuild:`, err);
+        logAtlasError(`[ParseEngine.#updateBranchViewIncremental] branch=${branch} fell back to full rebuild:`, err);
         try { if (view) view.close(); } catch { /* ignore */ }
         return { fallback: true, result: base };
       }
@@ -2831,7 +2831,7 @@ export class ParseEngine {
           base.tail_entries = entries.length;
           return base;
         } catch (err) {
-          logAtlasError("[Warmer.#catchupWaitingLane] bounded tail failed:", err);
+          logAtlasError("[ParseEngine.#catchupWaitingLane] bounded tail failed:", err);
           return this.#waitingLaneMiss(base, "needs_reprepare", "bounded_tail_failed");
         } finally {
           try { view?.close(); } catch { /* cleanup */ }
@@ -2857,7 +2857,7 @@ export class ParseEngine {
         base.tail_entries = entries.length;
         return base;
       } catch (err) {
-        logAtlasError("[Warmer.#catchupWaitingLane] exact clone failed:", err);
+        logAtlasError("[ParseEngine.#catchupWaitingLane] exact clone failed:", err);
         return this.#waitingLaneMiss(base, "needs_reprepare", "exact_clone_failed");
       }
     });
@@ -2900,7 +2900,7 @@ export class ParseEngine {
       base.waiting_lane_operation = "prefetch";
       return base;
     } catch (err) {
-      logAtlasError("[Warmer.#prefetchWaitingLane] failed:", err);
+      logAtlasError("[ParseEngine.#prefetchWaitingLane] failed:", err);
       return this.#waitingLaneMiss(base, "needs_reprepare", "prefetch_failed");
     } finally {
       try { view?.close(); } catch { /* cleanup */ }
@@ -3416,7 +3416,7 @@ export class ParseEngine {
             ? await /** @type {any} */ (this.#parser).parseBuffer({ bytes: fileBytes, repo_rel_path })
             : await this.#parser.parseFile({ absPath, repoRoot: parseRoot });
         } catch (err) {
-          logAtlasError(`[Warmer.#indexPaths] parse failed for ${repo_rel_path}:`, err);
+          logAtlasError(`[ParseEngine.#indexPaths] parse failed for ${repo_rel_path}:`, err);
           base.skipped.push({
             repo_rel_path,
             reason: "parse_error",
@@ -3447,7 +3447,7 @@ export class ParseEngine {
             ? `retained ${partialSymbolCount} symbols and ${partialEdgeCount} edges from valid syntax regions`
             : "partial extraction contained no symbols and was discarded";
           const err = new Error(`tree-sitter parse error for ${repo_rel_path}; ${disposition}`);
-          logAtlasError(`[Warmer.#indexPaths] recovered parse was partial for ${repo_rel_path}:`, err);
+          logAtlasError(`[ParseEngine.#indexPaths] recovered parse was partial for ${repo_rel_path}:`, err);
           if (retainPartial) {
             parsed = { ...parsed, hasError: false };
             /** @type {any} */ (base).treesitter_partial_layers = Number(/** @type {any} */ (base).treesitter_partial_layers || 0) + 1;
@@ -3504,7 +3504,7 @@ export class ParseEngine {
             ...parsed,
             byte_size: parsedByteSize,
           }, {
-            label: "Warmer.mergeBlobParseRows",
+            label: "ParseEngine.mergeBlobParseRows",
           });
           if (Number(merged?.inserted_symbols || 0) > 0 || Number(merged?.inserted_edges || 0) > 0) {
             /** @type {any} */ (base).parser_rows_merged = Number(/** @type {any} */ (base).parser_rows_merged || 0)
@@ -3677,9 +3677,8 @@ export class ParseEngine {
     });
     const encoder = /** @type {any} */ (resources.encoder);
     const index = /** @type {any} */ (resources.index);
-    const supportsStructuredSymbols = typeof encoder.encodeSymbols === "function";
     recordIntakeTelemetry(base, "onnx.queue_started", { document_window: documentWindow });
-    const runner = /** @type {any} */ (startOnnxRefresh({
+    const runner = /** @type {any} */ (startEmbeddingRefresh({
       mode: "changed",
       modelId: String(encoder.model || encoder.modelId || "jina"),
       modelVersion: String(encoder.model_version || encoder.modelVersion || "unknown"),
@@ -3702,9 +3701,7 @@ export class ParseEngine {
           }));
         return await symbolsMissingFromEmbeddingIndex(index, symbols);
       },
-      ...(supportsStructuredSymbols ? {} : {
-        buildSymbolText: (symbol) => String(encoder.buildSymbolText(symbol) || ""),
-      }),
+      buildSymbolText: (symbol) => String(encoder.buildSymbolText(symbol) || ""),
       embedSymbols: async (symbols, signal, onProgress) => {
         const startedAt = nowMs();
         recordIntakeTelemetry(base, "onnx.batch_started", { symbols: symbols.length });
@@ -3726,14 +3723,10 @@ export class ParseEngine {
             try { onProgress(event); } catch { /* progress is observational */ }
           }
         };
-        const vectors = supportsStructuredSymbols
-          ? await encoder.encodeSymbols(symbols, signal, onNativeProgress)
-          : typeof encoder.encodeDocuments === "function"
-            ? await encoder.encodeDocuments(symbols.map((symbol) => String(symbol.text || "")), signal, onNativeProgress)
-            : await encoder.encode(symbols.map((symbol) => String(symbol.text || "")), signal, onNativeProgress);
-        const normalized = Array.isArray(vectors)
-          ? vectors.map((vector, index) => ({ symbol_key: symbols[index].symbol_key, vector }))
-          : vectors;
+        const vectors = await encoder.encodeDocuments(
+          symbols.map((symbol) => String(symbol.text || "")), signal, onNativeProgress,
+        );
+        const normalized = vectors.map((vector, index) => ({ symbol_key: symbols[index].symbol_key, vector }));
         recordIntakeTelemetry(base, "onnx.batch_completed", {
           symbols: symbols.length,
           duration_ms: nowMs() - startedAt,
@@ -3790,7 +3783,7 @@ export class ParseEngine {
         error: formatAtlasError(err),
       });
       intake.documents.abort(err);
-      logAtlasError("[Warmer.#finishDocumentEmbeddingIntake] streaming ingest failed:", err);
+      logAtlasError("[ParseEngine.#finishDocumentEmbeddingIntake] streaming ingest failed:", err);
     } finally {
       intake.closed = true;
       try { await intake.resources.close(); } catch { /* final bulk pass can reopen/reconcile */ }
@@ -3939,7 +3932,7 @@ export class ParseEngine {
         base.embeddings_error = result.reason;
       }
     } catch (err) {
-      logAtlasError(`[Warmer.#resumeEmbeddingsNow] viewPath=${viewPath} threw:`, err);
+      logAtlasError(`[ParseEngine.#resumeEmbeddingsNow] viewPath=${viewPath} threw:`, err);
       base.embeddings_provider = resources.provider;
       base.embeddings_error = formatAtlasError(err);
       base.embeddings_complete = false;
@@ -3963,7 +3956,7 @@ export class ParseEngine {
       view = View.mount({ dbPath: viewPath, mode: "readonly" });
       return exportTreeCompressionMlSnapshot(view._unsafeDb());
     } catch (err) {
-      logAtlasError(`[Warmer.#exportMlCompressionSnapshot] viewPath=${viewPath} threw:`, err);
+      logAtlasError(`[ParseEngine.#exportMlCompressionSnapshot] viewPath=${viewPath} threw:`, err);
       return null;
     } finally {
       try { view?.close?.(); } catch { /* ignore */ }
@@ -3983,10 +3976,10 @@ export class ParseEngine {
       view = View.mount({ dbPath: viewPath, mode: "readwrite" });
       const result = importTreeCompressionMlSnapshot(view._unsafeDb(), /** @type {any} */ (carried));
       if (!result.ok) {
-        logAtlasError(`[Warmer.#importMlCompressionSnapshot] viewPath=${viewPath} import skipped:`, new Error(result.error || "unknown"));
+        logAtlasError(`[ParseEngine.#importMlCompressionSnapshot] viewPath=${viewPath} import skipped:`, new Error(result.error || "unknown"));
       }
     } catch (err) {
-      logAtlasError(`[Warmer.#importMlCompressionSnapshot] viewPath=${viewPath} threw:`, err);
+      logAtlasError(`[ParseEngine.#importMlCompressionSnapshot] viewPath=${viewPath} threw:`, err);
     } finally {
       try { view?.close?.(); } catch { /* ignore */ }
     }
@@ -4040,7 +4033,7 @@ export class ParseEngine {
     } catch (err) {
       // The deterministic snapshot is already persisted; an ML failure must
       // never break the warm. Surface it in the result for operators.
-      logAtlasError(`[Warmer.#maybeReseedTreeCompression] viewPath=${viewPath} threw:`, err);
+      logAtlasError(`[ParseEngine.#maybeReseedTreeCompression] viewPath=${viewPath} threw:`, err);
       base.tree_compression_reseed = { ok: false, error: formatAtlasError(err) };
     }
   }
@@ -4460,7 +4453,7 @@ export class ParseEngine {
         error: errorForTelemetry(err),
         base,
       });
-      logAtlasError(`[Warmer.#ingestEmbeddingsForView] ${viewPath} threw:`, err);
+      logAtlasError(`[ParseEngine.#ingestEmbeddingsForView] ${viewPath} threw:`, err);
     } finally {
       try { if (view) view.close(); } catch { /* ignore */ }
       const closeStartedAt = nowMs();
@@ -4512,7 +4505,7 @@ export class ParseEngine {
         view_path: viewPath,
         error: errorForTelemetry(err),
       });
-      logAtlasError(`[Warmer.#reconcileInterruptedEmbeddings] ${viewPath} threw:`, err);
+      logAtlasError(`[ParseEngine.#reconcileInterruptedEmbeddings] ${viewPath} threw:`, err);
     }
   }
 }

@@ -20,7 +20,19 @@ export {
 export * from "./waiting-lane-preparations.js";
 export * from "./cross-instance-claims.js";
 export * from "./shared-trunk-merge-state.js";
-export * from "./session-job-router.js";
+export {
+  SESSION_JOB_PROTOCOL,
+  SESSION_PACKET_PROTOCOL,
+  SESSION_JOB_OFFER_TTL_MS,
+  SESSION_JOB_CLAIM_TTL_MS,
+  sessionJobOfferKey,
+  peerCanExecuteSessionJob,
+  shouldOfferSessionJob,
+  sessionOriginatorConcurrencyBlocked,
+  offerSessionJob,
+  reconcileSessionDelegationCommits,
+} from "./session-job-router.js";
+export { SessionJobRouter, createSessionJobRouter } from "../classes/SessionJobRouter.js";
 export * from "./post-merge-db-tasks.js";
 export * from "./merge-verification-review.js";
 export * from "./merge-holding-gate.js";

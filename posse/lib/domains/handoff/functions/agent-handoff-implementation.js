@@ -9,14 +9,20 @@ import {
   AGENT_HANDOFF_ALIAS_POLICY,
   AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY,
   AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES,
+  AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS,
   AGENT_HANDOFF_LIMITS,
   AGENT_HANDOFF_PLANNER_CONTRACT_KEYS,
   AGENT_HANDOFF_PLANNER_CONTRACT_VERSION,
   AGENT_HANDOFF_PLANNER_DEPENDENCY_EDGE_POLICIES,
+  AGENT_HANDOFF_PLANNER_REPORT_KEYS,
+  AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS,
   AGENT_HANDOFF_PROFILE_POLICY,
+  AGENT_HANDOFF_PROFILES,
   AGENT_HANDOFF_PROTOCOL,
   AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY,
+  AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES,
   AGENT_HANDOFF_RESEARCH_PROSE_FIELDS,
+  AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES,
   AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR,
 } from "../../../catalog/handoff.js";
 import { HASH_REF_ALIAS_PATTERN, normalizeHashRefAlias } from "../../../catalog/hash-store.js";
@@ -29,7 +35,7 @@ import {
   surfaceHashRefForContext,
 } from "../../queue/functions/hash-refs.js";
 import { recordObservation } from "../../observability/functions/observations.js";
-import { createAgentHandoffPacketTable, getDb } from "../../../shared/storage/functions/index.js";
+import { getDb } from "../../../shared/storage/functions/index.js";
 import {
   hashRefModelVisibility,
   hashRefModelVisibleScope,
@@ -39,7 +45,6 @@ import {
 } from "../../../shared/tools/functions/toolkit/path-policy.js";
 import { splitEditableLines } from "../../../shared/tools/functions/toolkit/structured-read.js";
 import {
-  canonicalEvidenceSourcePath,
   normalizedEvidenceSourceWindow,
 } from "../../../shared/tools/functions/source-evidence.js";
 import { validatePlannedTask } from "../../planning/functions/plan-routing.js";
@@ -58,7 +63,6 @@ import { redactString } from "../../bridge/functions/redaction.js";
 import {
   normalizePlannerReportMetadata,
   normalizeResearchData,
-  PLANNER_REPORT_METADATA_KEYS,
   structuredStringLength,
 } from "./helpers/terminal-report-metadata.js";
 import {
@@ -76,37 +80,25 @@ import { narrowCitationSegments } from "./helpers/citation-shorthand.js";
 import { plannerPromoteMappings, plannerCompatibilityTasks, renderAgentHandoffCompatibilityOutput } from "./helpers/compatibility-output.js";
 import { packetEvidence, packetEvidenceMetrics, verifyStagedPacketEvidence } from "./helpers/packet-evidence.js";
 import { positiveInt, latestAgentHandoffRejection } from "./helpers/rejection-store.js";
+import { canonicalSourcePath, evidenceSourcePathSyntaxError } from "./evidence-source-path.js";
+import { AGENT_HANDOFF_PACKET_TABLE as TABLE, agentHandoffSchema } from "../classes/AgentHandoffSchema.js";
+import { handoffRow } from "./agent-handoff-records.js";
+import { recordAtlasTrunkHitRate } from "./atlas-prefetch-terminal-telemetry.js";
 import { serializeStoredAgentHandoffPacket, parseStoredAgentHandoffPacket } from "./helpers/packet-storage.js";
 import { missingReportClaimsMessage } from "./helpers/missing-report-claims.js";
 import { sharedPlanContractAdditions } from "./helpers/shared-plan-contracts.js";
 import { mergeResearchReportDraftClaims } from "./research-report-claim-drafts.js";
 import { finalReviewHandoffHold } from "../../assessment/functions/final-review-result.js";
 import { AGENT_CALL_CHILD_KINDS, runtimeRoleForAgentCallRole } from "../../../catalog/agent-call.js";
+import { TASK_MODE_VALUES } from "../../../catalog/artifact.js";
+import {
+  AGENT_HANDOFF_OBSERVATION_TYPES,
+  HANDOFF_TRAVERSAL_COMPLETION_CHECK_OBSERVATION_TYPE,
+} from "../../../catalog/observation.js";
 
 export { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 export { renderAgentHandoffCompatibilityOutput } from "./helpers/compatibility-output.js";
 export { recordAgentHandoffRejection, getLatestAgentHandoffRejection } from "./helpers/rejection-store.js";
-
-const PLANNER_TASK_MODES = new Set([
-  "code",
-  "report",
-  "content",
-  "image",
-  "intake_processing",
-  "db",
-]);
-
-const PLANNER_REPORT_KEYS = Object.freeze([
-  "summary",
-  "claims",
-  "scope",
-  "constraints",
-  "success_criteria",
-  "questions",
-  "research",
-  ...PLANNER_REPORT_METADATA_KEYS,
-  "payload",
-]);
 
 const PLANNER_COMPACT_TASK_KEYS = Object.freeze([
   "id",
@@ -119,10 +111,9 @@ const PLANNER_COMPACT_TASK_KEYS = Object.freeze([
   "scope",
   "constraints",
   "success_criteria",
-  ...PLANNER_REPORT_METADATA_KEYS,
+  ...AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS,
 ]);
 
-const TABLE = "agent_handoff_packets";
 const EVIDENCE_MATERIALIZATION_CACHE = Symbol("agent_handoff_evidence_materialization_cache");
 const EVIDENCE_CLEANUP = Symbol("agent_handoff_evidence_cleanup");
 const SHAPE_NORMALIZATIONS = Symbol("agent_handoff_shape_normalizations");
@@ -135,7 +126,6 @@ function noteShapeNormalization(context, fieldPath, rule) {
   notes.push({ path: String(fieldPath), rule: String(rule) });
 }
 const EVIDENCE_CLEANUP_OVERFLOW = Symbol("agent_handoff_evidence_cleanup_overflow");
-const READY_DBS = new WeakSet();
 
 function fail(code, message) {
   const err = new Error(message);
@@ -192,8 +182,8 @@ function recordEvidenceCleanup(context, {
   if (records.some((entry) => entry.key === key)) return;
   // Coverage reconciliation reads claim-demotion records by submitted index.
   // Keep every demotion, even when ordinary diagnostics have reached their cap.
-  if (action === "demote_unverified_claim_to_summary"
-    || records.filter((entry) => entry.action !== "demote_unverified_claim_to_summary").length < 24) {
+  if (action === AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.DEMOTE_UNVERIFIED_CLAIM_TO_SUMMARY
+    || records.filter((entry) => entry.action !== AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.DEMOTE_UNVERIFIED_CLAIM_TO_SUMMARY).length < 24) {
     records.push({ key, ...record });
   } else {
     context[EVIDENCE_CLEANUP_OVERFLOW] += 1;
@@ -210,13 +200,13 @@ function recordEvidenceCleanup(context, {
 // the cleanup without requiring a report rewrite. Dev results keep strict rejection. Assessor prose
 // is redacted, while its defect-evidence selectors retain strict validation.
 const LENIENT_PIPELINE_HANDOFF_PROFILES = new Set([
-  "researcher.pipeline.v1",
-  "planner.plan.v1",
+  AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE,
+  AGENT_HANDOFF_PROFILES.PLANNER_PLAN,
 ]);
 
 const LENIENT_HANDOFF_PROSE_PROFILES = new Set([
   ...LENIENT_PIPELINE_HANDOFF_PROFILES,
-  "assessor.verdict.v1",
+  AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT,
 ]);
 
 // Prose explaining code that parses credentials quotes URL userinfo
@@ -260,8 +250,8 @@ const DROPPABLE_AFTER_NARROWING_ERRORS = new Set([
 ]);
 
 const STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES = new Set([
-  "planner.plan.v1",
-  "researcher.report.v1",
+  AGENT_HANDOFF_PROFILES.PLANNER_PLAN,
+  AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT,
 ]);
 
 const CLAIM_EVIDENCE_DEMOTION = Symbol("claimEvidenceDemotion");
@@ -270,14 +260,14 @@ const CLAIM_SUBMITTED_INDEX = Symbol("claimSubmittedIndex");
 function advisoryResearchEvidenceCleanupAction(error) {
   const code = String(error?.code || "");
   return ADVISORY_RESEARCH_EVIDENCE_ERRORS.has(code) || DROPPABLE_AFTER_NARROWING_ERRORS.has(code)
-    ? "drop_advisory_research_selector"
+    ? AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.DROP_ADVISORY_RESEARCH_SELECTOR
     : null;
 }
 
 function strictClaimEvidenceCleanupAction(error) {
   const code = String(error?.code || "");
   if (ADVISORY_RESEARCH_EVIDENCE_ERRORS.has(code) || DROPPABLE_AFTER_NARROWING_ERRORS.has(code)) {
-    return "drop_unverifiable_strict_claim_selector";
+    return AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.DROP_UNVERIFIABLE_STRICT_CLAIM_SELECTOR;
   }
   return null;
 }
@@ -289,8 +279,8 @@ function evidenceRecoveryAction(error, mode) {
 }
 
 function evidenceFailureModeForProfile(profile) {
-  if (profile === "researcher.pipeline.v1") return "annotate";
-  if (profile === "researcher.report.v1") return "retain";
+  if (profile === AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE) return "annotate";
+  if (profile === AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT) return "retain";
   if (STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES.has(profile)) return "demote";
   // Every other profile: a selector that cannot be materialized is dropped
   // and kept as an unverified annotation on its claim. Rejecting the packet
@@ -380,7 +370,7 @@ function boundedString(value, label, max, { required = true, lenient = false, co
       if (!detectSensitiveAgentHandoffText(redacted)) {
         recordEvidenceCleanup(context, {
           outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
-          action: "redact_sensitive_prose",
+          action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.REDACT_SENSITIVE_PROSE,
           selector: label,
           code: "AGENT_HANDOFF_SENSITIVE_CONTENT",
           message: `${label} contained ${sensitiveLabel}; committed with the match redacted`,
@@ -392,7 +382,7 @@ function boundedString(value, label, max, { required = true, lenient = false, co
     if (userinfoRedacted !== text && !detectSensitiveAgentHandoffText(userinfoRedacted)) {
       recordEvidenceCleanup(context, {
         outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
-        action: "redact_url_userinfo",
+        action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.REDACT_URL_USERINFO,
         selector: label,
         code: "AGENT_HANDOFF_SENSITIVE_CONTENT",
         message: `${label} quoted URL userinfo; committed with it redacted`,
@@ -421,21 +411,6 @@ function trimToCap(list, label, maxItems) {
 // so an aggregate overrun is noted for the consumer rather than rejected.
 function noteBudgetOverrun(label, rule, max, received) {
   recordHandoffSoftening(label, rule, { max, received });
-}
-
-function evidenceSourcePathSyntaxError(value) {
-  const raw = String(value || "");
-  if (!raw || raw !== raw.trim()) return "evidence selector.path must be a non-empty trimmed path";
-  if (path.isAbsolute(raw) || /^[A-Za-z]:/.test(raw)) {
-    return "evidence selector.path must be repo-relative, not absolute";
-  }
-  if (/[\r\n\t]/.test(raw)) return "evidence selector.path must be a single-line path";
-  const normalized = raw.replace(/\\/g, "/").replace(/^\.\//, "");
-  if (!normalized || normalized === "." || normalized === ".."
-    || normalized.split("/").some((segment) => segment === "." || segment === "..")) {
-    return "evidence selector.path must not traverse directories";
-  }
-  return null;
 }
 
 export function parseAgentHandoffEvidenceSelector(value) {
@@ -551,10 +526,6 @@ function deliveredSourceExcerptMatches(sourceExcerpt, deliveredExcerpt) {
   const deliveredLines = String(deliveredExcerpt ?? "").replace(/\r\n?/g, "\n").split("\n");
   return sourceLines.length === deliveredLines.length
     && sourceLines.every((line, index) => deliveredRedactedLineMatches(line, deliveredLines[index]));
-}
-
-function canonicalSourcePath(value) {
-  return evidenceSourcePathSyntaxError(value) ? null : canonicalEvidenceSourcePath(value);
 }
 
 function sourceLineage(entry, context, seen = new Set()) {
@@ -1676,7 +1647,7 @@ function materializeWorktreeEvidenceSelector(selector, context) {
   const endLine = Math.min(selector.end, lines.length);
   if (endLine !== selector.end) {
     recordEvidenceCleanup(context, {
-      action: "clamp_path_end", outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
+      action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.CLAMP_PATH_END, outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
       selector: `${resolved.path}:${selector.start}-${selector.end}`,
       normalizedSelector: `${resolved.path}:${selector.start}-${endLine}`,
     });
@@ -2064,7 +2035,7 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
             sourceSlice = clampedSlice;
             recordEvidenceCleanup(context, {
               outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
-              action: "clamp_source_end",
+              action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.CLAMP_SOURCE_END,
               refObjectType: entry.object_type || null,
               selector: selectorValue,
               normalizedSelector: `${selector.ref}:${start}-${end}`,
@@ -2086,7 +2057,7 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
           if (translatedCoordinates.sourceContentRelative === true) {
             recordEvidenceCleanup(context, {
               outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
-              action: "normalize_compact_source_relative_range",
+              action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.NORMALIZE_COMPACT_SOURCE_RELATIVE_RANGE,
               refObjectType: entry.object_type || null,
               selector: selectorValue,
               normalizedSelector: `${selector.ref}:${start}-${end}`,
@@ -2095,7 +2066,7 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
           if (translatedCoordinates.clampedMaterializedEnd != null) {
             recordEvidenceCleanup(context, {
               outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
-              action: "clamp_ref_relative_end",
+              action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.CLAMP_REF_RELATIVE_END,
               refObjectType: entry.object_type || null,
               selector: selectorValue,
               normalizedSelector: `${selector.ref}:${start}-${end}`,
@@ -2120,7 +2091,7 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
         if (surfacedPathEvidence) {
           recordEvidenceCleanup(context, {
             outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
-            action: "normalize_ref_source_coordinates_to_surfaced_path",
+            action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.NORMALIZE_REF_SOURCE_COORDINATES_TO_SURFACED_PATH,
             refObjectType: entry.object_type || null,
             selector: selectorValue,
             normalizedSelector: surfacedPathEvidence.source_selector,
@@ -2171,7 +2142,7 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
       lineSemantics = "source";
       recordEvidenceCleanup(context, {
         outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
-        action: "normalize_materialized_envelope_to_source_window",
+        action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.NORMALIZE_MATERIALIZED_ENVELOPE_TO_SOURCE_WINDOW,
         refObjectType: entry.object_type || null,
         selector: selectorValue,
         normalizedSelector: `${selector.ref}:${start}-${end}`,
@@ -2186,7 +2157,7 @@ export function materializeAgentHandoffEvidenceSelector(selectorValue, context, 
       end = lines.length;
       recordEvidenceCleanup(context, {
         outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
-        action: "clamp_materialized_end",
+        action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.CLAMP_MATERIALIZED_END,
         refObjectType: entry.object_type || null,
         selector: selectorValue,
         normalizedSelector: `${selector.ref}:${start}-${end}`,
@@ -2246,17 +2217,17 @@ function normalizeScope(value, label, profile) {
     ["task_mode", "files_to_modify", "files_to_create", "files_to_delete", "create_roots", "output_root", "key_files", "related_files"],
     label,
   );
-  if (!["researcher.pipeline.v1", "researcher.report.v1"].includes(profile)
+  if (![AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT].includes(profile)
     && (source.key_files != null || source.related_files != null)) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} does not allow researcher seed fields for ${profile}`);
   }
-  if (profile !== "planner.plan.v1" && source.output_root != null) {
+  if (profile !== AGENT_HANDOFF_PROFILES.PLANNER_PLAN && source.output_root != null) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} does not allow output_root for ${profile}`);
   }
   const out = {};
   if (source.task_mode != null) {
     const taskMode = boundedString(source.task_mode, `${label}.task_mode`, 40).toLowerCase();
-    if (!PLANNER_TASK_MODES.has(taskMode)) {
+    if (!TASK_MODE_VALUES.includes(taskMode)) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.task_mode is not supported: ${taskMode}`);
     }
     out.task_mode = taskMode;
@@ -2393,7 +2364,7 @@ function resolveClaimEvidenceSelectors(value, context) {
     }, context));
     recordEvidenceCleanup(context, {
       outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
-      action: "trim_selector_to_delivered_ranges",
+      action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.TRIM_SELECTOR_TO_DELIVERED_RANGES,
       selector: value,
       normalizedSelectors: materialized.map((evidence) => evidence.source_selector || evidence.selector),
     });
@@ -2485,7 +2456,7 @@ function materializeClaim(
         if (!action) throw error;
         recordEvidenceCleanup(context, {
           outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.DROPPED,
-          action: "drop_unverifiable_decoy_selector",
+          action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.DROP_UNVERIFIABLE_DECOY_SELECTOR,
           selector: normalizedEntry[0],
           code: error.code,
           message: error.message,
@@ -2616,7 +2587,7 @@ function validateResearchClaimEvidence(claims, label) {
 // Say what a target looks like when it is absent: "must be an object" left the
 // producer guessing at a field it had simply omitted, and cost another turn.
 function expectedTargetShapes(policy, profile) {
-  if (profile === "planner.plan.v1") {
+  if (profile === AGENT_HANDOFF_PROFILES.PLANNER_PLAN) {
     return '{"kind":"agent","role":"dev"|"artificer"} or {"kind":"system","role":"human_input"|"promote"}';
   }
   // Non-planner kinds are fixed sinks whose schema requires role "$<kind>".
@@ -2631,7 +2602,7 @@ function validateTarget(target, policy, profile, label) {
   const kind = boundedString(out.kind, `${label}.kind`, 20);
   if (!policy.targetKinds.includes(kind)) fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} does not allow target kind ${kind}`);
   const role = out.role == null ? null : boundedString(out.role, `${label}.role`, 40);
-  if (profile === "planner.plan.v1") {
+  if (profile === AGENT_HANDOFF_PROFILES.PLANNER_PLAN) {
     const allowed = kind === "agent" ? ["dev", "artificer"] : ["human_input", "promote"];
     if (!allowed.includes(role)) fail("AGENT_HANDOFF_TARGET_INVALID", `${profile} target ${kind} requires one of: ${allowed.join(", ")}`);
   } else if (kind === "pipeline" && role != null && role !== "$pipeline") {
@@ -2734,7 +2705,7 @@ function inferWritableScopeForTask(handoff, context) {
 }
 
 function validatePlannerPacketSemantics(packet, { context = null } = {}) {
-  if (packet.profile !== "planner.plan.v1") return;
+  if (packet.profile !== AGENT_HANDOFF_PROFILES.PLANNER_PLAN) return;
   if (packet.outcome !== "success") return;
   for (const [index, handoff] of packet.handoffs.entries()) {
     if ((handoff.report?.questions || []).length > 0) {
@@ -2947,7 +2918,7 @@ function validateNarrativeEvidenceBoundary(handoff, handoffIndex) {
 }
 
 function validateCitationChildPacketSemantics(packet) {
-  if (packet.profile !== "citation_synthesis.v1") return;
+  if (packet.profile !== AGENT_HANDOFF_PROFILES.CITATION_SYNTHESIS) return;
   const report = packet.handoffs[0]?.report || {};
   if (Object.keys(report.scope || {}).length > 0) {
     fail(
@@ -2995,7 +2966,7 @@ function plannerContractFromWorkItem(workItem) {
   }
   const hasExactExecutableHandoffs = Object.hasOwn(contract, "exact_executable_handoffs");
   const exactExecutableHandoffs = contract.exact_executable_handoffs;
-  const plannerLimit = AGENT_HANDOFF_PROFILE_POLICY["planner.plan.v1"].maxHandoffs;
+  const plannerLimit = AGENT_HANDOFF_PROFILE_POLICY[AGENT_HANDOFF_PROFILES.PLANNER_PLAN].maxHandoffs;
   if (hasExactExecutableHandoffs && (
     !Number.isInteger(exactExecutableHandoffs)
     || exactExecutableHandoffs < 1
@@ -3017,7 +2988,7 @@ function plannerContractFromWorkItem(workItem) {
 }
 
 function validatePlannerPacketAgainstWorkItem(packet, workItem) {
-  if (packet.profile !== "planner.plan.v1" || !workItem) return;
+  if (packet.profile !== AGENT_HANDOFF_PROFILES.PLANNER_PLAN || !workItem) return;
   const contract = plannerContractFromWorkItem(workItem);
   if (!contract) return;
   const executableHandoffs = packet.handoffs.filter((handoff) => handoff.target?.kind === "agent");
@@ -3125,7 +3096,7 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
       constraints: [...(task.constraints ?? []), ...additions.constraints],
       success_criteria: [...task.success_criteria, ...additions.successCriteria],
     };
-    for (const key of PLANNER_REPORT_METADATA_KEYS) {
+    for (const key of AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS) {
       if (task[key] != null) report[key] = task[key];
     }
     return {
@@ -3138,7 +3109,7 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
   });
   return {
     protocol: AGENT_HANDOFF_PROTOCOL,
-    profile: "planner.plan.v1",
+    profile: AGENT_HANDOFF_PROFILES.PLANNER_PLAN,
     outcome: "success",
     handoffs,
   };
@@ -3158,7 +3129,7 @@ const PLANNER_TARGET_BY_TASK_ROLE = Object.freeze({
 function derivePlannerHandoffTargets(args, { role = "", context = null } = {}) {
   const source = plainObject(args);
   if (String(role || "").trim().toLowerCase() !== "planner" || !source) return args;
-  if (source.profile !== "planner.plan.v1" || !Array.isArray(source.handoffs)) return args;
+  if (source.profile !== AGENT_HANDOFF_PROFILES.PLANNER_PLAN || !Array.isArray(source.handoffs)) return args;
   const roleKeys = compatibilityAliasKeys("plannerTaskRole");
   let changed = false;
   const handoffs = source.handoffs.map((raw, index) => {
@@ -3231,7 +3202,7 @@ function hasCanonicalAssessorEnvelope(source) {
     "target",
     "intent",
     "report",
-    ...PLANNER_REPORT_KEYS,
+    ...AGENT_HANDOFF_PLANNER_REPORT_KEYS,
   ]);
   return source.handoffs.every((raw) => {
     const entry = plainObject(raw);
@@ -3239,7 +3210,7 @@ function hasCanonicalAssessorEnvelope(source) {
     const target = plainObject(entry.target);
     if (target?.kind !== "pipeline" || (target?.role != null && target.role !== "$pipeline")) return false;
     const report = plainObject(entry.report);
-    return !report || Object.keys(report).every((key) => PLANNER_REPORT_KEYS.includes(key));
+    return !report || Object.keys(report).every((key) => AGENT_HANDOFF_PLANNER_REPORT_KEYS.includes(key));
   });
 }
 
@@ -3326,7 +3297,7 @@ function normalizeAssessorTerminalArgs(source) {
   }
   return {
     protocol: AGENT_HANDOFF_PROTOCOL,
-    profile: "assessor.verdict.v1",
+    profile: AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT,
     outcome,
     confidence,
     handoffs: [{
@@ -3392,14 +3363,14 @@ function researcherEvidenceSelector(value, context) {
         AGENT_HANDOFF_LIMITS.targetSelectorLines,
       );
       const narrowed = { ref: parsed.ref, path: first.path, lines: { start: first.source_start_line, count } };
-      recordEvidenceCleanup(context, { action: "narrow_whole_ref", outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
+      recordEvidenceCleanup(context, { action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.NARROW_WHOLE_REF, outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
         selector: candidate, normalizedSelector: narrowed, code: error.code });
       return narrowed;
     }
     const lineCount = normalizedLines(fetched.entry.payload_text).length;
     const end = Math.min(Math.max(1, lineCount), AGENT_HANDOFF_LIMITS.targetSelectorLines);
     const narrowed = `${parsed.ref}:1-${end}`;
-    recordEvidenceCleanup(context, { action: "narrow_whole_ref", outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
+    recordEvidenceCleanup(context, { action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.NARROW_WHOLE_REF, outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.NORMALIZED,
       selector: candidate, normalizedSelector: narrowed, code: error.code });
     return narrowed;
   }
@@ -3409,7 +3380,7 @@ function boundedResearcherItems(values, limit, label, context, inputCount = valu
   const kept = values.slice(0, limit);
   const omittedCount = Math.max(0, inputCount - kept.length);
   if (omittedCount > 0) recordEvidenceCleanup(context, {
-    action: "drop_researcher_overflow", outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.DROPPED,
+    action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.DROP_RESEARCHER_OVERFLOW, outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.DROPPED,
     selector: label, code: "AGENT_HANDOFF_TOO_LARGE", omittedCount,
     message: `${label}: omitted ${omittedCount} item(s); retained ${kept.length}`,
   });
@@ -3540,11 +3511,11 @@ function researcherFilePriorities(value, keyFiles) {
     const entry = plainObject(raw);
     const path = firstAssessorText(entry?.path, entry?.file);
     if (!path) return [];
-    const usefulness = ["primary", "supporting", "context", "low"]
+    const usefulness = AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES
       .includes(String(entry.usefulness || "").toLowerCase())
       ? String(entry.usefulness).toLowerCase()
       : "primary";
-    const evidence = ["audited_file_read", "atlas", "search", "prior_research", "web"]
+    const evidence = AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES
       .includes(String(entry.evidence || "").toLowerCase())
       ? String(entry.evidence).toLowerCase()
       : "atlas";
@@ -3562,10 +3533,10 @@ function researcherFilePriorities(value, keyFiles) {
 
 function hasCanonicalResearcherEnvelope(source) {
   if (!Array.isArray(source.handoffs) || source.handoffs.length < 1) return false;
-  if (!["researcher.pipeline.v1", "researcher.report.v1"].includes(source.profile)) {
+  if (![AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT].includes(source.profile)) {
     return false;
   }
-  const expectedTarget = source.profile === "researcher.report.v1"
+  const expectedTarget = source.profile === AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT
     ? { kind: "result", role: "$result" }
     : { kind: "pipeline", role: "$pipeline" };
   return source.handoffs.every((raw) => {
@@ -3577,7 +3548,7 @@ function hasCanonicalResearcherEnvelope(source) {
 }
 
 function normalizeResearcherTerminalArgs(source, context) {
-  if (source.profile === "research_investigation.v1") return null;
+  if (source.profile === AGENT_HANDOFF_PROFILES.RESEARCH_INVESTIGATION) return null;
   if (!Array.isArray(source.handoffs) || hasCanonicalResearcherEnvelope(source)) {
     return null;
   }
@@ -3598,13 +3569,13 @@ function normalizeResearcherTerminalArgs(source, context) {
     first.outcome,
     report.outcome,
   ).toLowerCase();
-  const requestedProfile = ["researcher.pipeline.v1", "researcher.report.v1"].includes(source.profile)
+  const requestedProfile = [AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT].includes(source.profile)
     ? source.profile
     : null;
   const profile = requestedProfile || (outcomeInput === "complete"
-    ? "researcher.report.v1"
-    : "researcher.pipeline.v1");
-  const outcome = profile === "researcher.report.v1"
+    ? AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT
+    : AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE);
+  const outcome = profile === AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT
     ? "complete"
     : (["success", "gap", "input_required"].includes(outcomeInput)
         ? outcomeInput
@@ -3698,7 +3669,7 @@ function normalizeResearcherTerminalArgs(source, context) {
       context,
     },
   );
-  const target = profile === "researcher.report.v1"
+  const target = profile === AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT
     ? { kind: "result", role: "$result" }
     : { kind: "pipeline", role: "$pipeline" };
   return {
@@ -3792,7 +3763,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
       evidence: "atlas",
       reason: "Selected terminal research seed.",
     }));
-    const target = profile === "researcher.report.v1"
+    const target = profile === AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT
       ? { kind: "result", role: "$result" }
       : { kind: "pipeline", role: "$pipeline" };
     return {
@@ -3859,7 +3830,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
       : stringArray(compact.questions, "agent_handoff.questions", 3, 240);
     return {
       protocol: AGENT_HANDOFF_PROTOCOL,
-      profile: "assessor.verdict.v1",
+      profile: AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT,
       outcome,
       confidence,
       handoffs: [{
@@ -3890,7 +3861,7 @@ function normalizeSemanticAgentHandoffArgs(args, { role = "", context = {} } = {
       const rawEntry = plainObject(raw);
       if (!rawEntry) return raw;
       const entry = { ...rawEntry };
-      const flatReportKeys = PLANNER_REPORT_KEYS.filter((key) => Object.hasOwn(entry, key));
+      const flatReportKeys = AGENT_HANDOFF_PLANNER_REPORT_KEYS.filter((key) => Object.hasOwn(entry, key));
       const reportSource = plainObject(entry.report);
       if (reportSource || flatReportKeys.length > 0) {
         const report = { ...(reportSource || {}) };
@@ -3980,7 +3951,7 @@ function materializeTerminalCompletion(args, role) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", "evidence_gap is only valid for artificer completion");
   }
 
-  const profile = role === "artificer" ? "artificer.result.v1" : "dev.result.v1";
+  const profile = role === "artificer" ? AGENT_HANDOFF_PROFILES.ARTIFICER_RESULT : AGENT_HANDOFF_PROFILES.DEV_RESULT;
   return {
     protocol: AGENT_HANDOFF_PROTOCOL,
     profile,
@@ -4018,7 +3989,7 @@ function materializeTerminalCompletion(args, role) {
 
 function normalizeReportPayload(value, label, profile, { lenientProse = false, context = null } = {}) {
   if (value == null) return {};
-  if (profile !== "assessor.verdict.v1") {
+  if (profile !== AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT) {
     exactKeys(value, [], label);
     return {};
   }
@@ -4093,7 +4064,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
       message: `${profile} does not allow outcome ${outcome}`,
     });
   }
-  if (profile === "assessor.verdict.v1") {
+  if (profile === AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT) {
     if (source.confidence == null) {
       issues.push({
         code: "AGENT_HANDOFF_SCHEMA_INVALID",
@@ -4139,12 +4110,12 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
 
     const report = capture(() => exactKeys(
       entry.report,
-      PLANNER_REPORT_KEYS,
+      AGENT_HANDOFF_PLANNER_REPORT_KEYS,
       `${label}.report`,
     ));
     if (!report) continue;
     const researcherLimits = AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY[profile];
-    const researcherReport = profile === "researcher.report.v1";
+    const researcherReport = profile === AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT;
     const summaryLimit = researcherLimits
       ? (researcherLimits.maxSummaryChars ?? AGENT_HANDOFF_LIMITS.maxCallBytes)
       : AGENT_HANDOFF_LIMITS.maxSummaryChars;
@@ -4265,7 +4236,7 @@ function collectAgentHandoffValidationIssues(args, { context = {}, role = "", ma
               if (action) {
                 recordEvidenceCleanup(context, {
                   outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.DROPPED,
-                  action: "drop_unverifiable_decoy_selector",
+                  action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.DROP_UNVERIFIABLE_DECOY_SELECTOR,
                   selector: decoy[0],
                   code: error.code,
                   message: error.message,
@@ -4365,7 +4336,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   const outcome = boundedString(source.outcome, "outcome", 40);
   if (!policy.outcomes.includes(outcome)) fail("AGENT_HANDOFF_OUTCOME_INVALID", `${profile} does not allow outcome ${outcome}`);
   let confidence = null;
-  if (profile === "assessor.verdict.v1") {
+  if (profile === AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT) {
     if (source.confidence == null) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", "assessor confidence is required and must be low, medium, or high");
     }
@@ -4384,7 +4355,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   const evidenceFailureMode = evidenceFailureModeForProfile(profile);
   const counters = { evidence: 0, narrative: 0 };
   const researcherLimits = AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY[profile];
-  const researcherReport = profile === "researcher.report.v1";
+  const researcherReport = profile === AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT;
   const summaryLimit = researcherLimits
     ? (researcherLimits.maxSummaryChars ?? AGENT_HANDOFF_LIMITS.maxCallBytes)
     : AGENT_HANDOFF_LIMITS.maxSummaryChars;
@@ -4419,7 +4390,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     });
     entryCounters.narrative += intent.length;
     const reportLabel = `handoffs[${index}].report`;
-    const report = exactKeys(entry.report, PLANNER_REPORT_KEYS, reportLabel);
+    const report = exactKeys(entry.report, AGENT_HANDOFF_PLANNER_REPORT_KEYS, reportLabel);
     let summary = boundedString(
       report.summary,
       `handoffs[${index}].report.summary`,
@@ -4462,7 +4433,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     });
     if (STRICT_CLAIM_EVIDENCE_RECOVERY_PROFILES.has(profile)) {
       const unverifiedClaims = claims.filter((claim) => (
-        profile === "researcher.report.v1"
+        profile === AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT
           ? !Array.isArray(claim?.[1]?.evidence)
             || !claim[1].evidence.some(isGroundedClaimEvidence)
           : claim[CLAIM_EVIDENCE_DEMOTION] === true
@@ -4490,7 +4461,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
           const claimIndex = Number(claim?.[CLAIM_SUBMITTED_INDEX] || 0);
           recordEvidenceCleanup(materializationContext, {
             outcome: AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES.DROPPED,
-            action: "demote_unverified_claim_to_summary",
+            action: AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.DEMOTE_UNVERIFIED_CLAIM_TO_SUMMARY,
             selector: `<claim:${claimIndex || "unknown"}>`,
             code: "AGENT_HANDOFF_CLAIM_EVIDENCE_UNAVAILABLE",
             message: String(claim?.[0] || ""),
@@ -4499,7 +4470,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
         claims = retainedClaims;
       }
     }
-    if (profile === "researcher.report.v1") {
+    if (profile === AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT) {
       validateResearchClaimEvidence(claims, reportLabel);
     }
     if (AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY.profiles.includes(profile)
@@ -4677,7 +4648,7 @@ export function materializeAgentHandoff(args, options = {}) {
         work_item_id: context.work_item_id ?? context.workItemId ?? null,
         job_id: context.job_id ?? context.jobId ?? null,
         attempt_id: context.attempt_id ?? context.attemptId ?? null,
-        observation_type: "agent_handoff.shape_normalized",
+        observation_type: AGENT_HANDOFF_OBSERVATION_TYPES.SHAPE_NORMALIZED,
         summary: `Repaired ${shapeNotes.length} agent_handoff field shape(s) before validation`,
         detail: { count: shapeNotes.length, normalizations: shapeNotes },
       });
@@ -4699,7 +4670,7 @@ export function materializeAgentHandoff(args, options = {}) {
           work_item_id: context.work_item_id ?? context.workItemId ?? null,
           job_id: context.job_id ?? context.jobId ?? null,
           attempt_id: context.attempt_id ?? context.attemptId ?? null,
-          observation_type: "agent_handoff.target_derived",
+          observation_type: AGENT_HANDOFF_OBSERVATION_TYPES.TARGET_DERIVED,
           summary: `Derived ${derivedTargets.length} planner handoff target(s) from the task role`,
           detail: { count: derivedTargets.length, derived: derivedTargets },
         });
@@ -4728,7 +4699,7 @@ export function materializeAgentHandoff(args, options = {}) {
         work_item_id: context.work_item_id ?? context.workItemId ?? null,
         job_id: context.job_id ?? context.jobId ?? null,
         attempt_id: context.attempt_id ?? context.attemptId ?? null,
-        observation_type: "agent_handoff.evidence_cleanup",
+        observation_type: AGENT_HANDOFF_OBSERVATION_TYPES.EVIDENCE_CLEANUP,
         summary: `Cleaned ${packet.evidence_cleanup.count} terminal evidence selector(s)`,
         detail: packet.evidence_cleanup,
       });
@@ -4737,13 +4708,6 @@ export function materializeAgentHandoff(args, options = {}) {
     }
   }
   return packet;
-}
-
-function ensureSchema(db = getDb()) {
-  if (READY_DBS.has(db)) return db;
-  createAgentHandoffPacketTable(db);
-  READY_DBS.add(db);
-  return db;
 }
 
 function parseJsonObject(value) {
@@ -4782,7 +4746,7 @@ function successfulImageGenerationObserved(context) {
 
 function enforceArtificerImageGeneration(packet, call, context) {
   const role = String(call?.role || packet?.role || "").trim().toLowerCase();
-  const complete = packet?.profile === "artificer.result.v1"
+  const complete = packet?.profile === AGENT_HANDOFF_PROFILES.ARTIFICER_RESULT
     && (packet?.completion?.status === "COMPLETE" || packet?.outcome === "complete");
   if (role !== "artificer" || !complete) return;
   const payload = parseJsonObject(call?.payload_json);
@@ -4799,7 +4763,7 @@ function enforceArtificerImageGeneration(packet, call, context) {
 // could not run, or an attempt's spent reviews, never hold it.
 function enforceDevFinalReview(packet, call, context) {
   const role = String(call?.role || packet?.role || "").trim().toLowerCase();
-  const complete = packet?.profile === "dev.result.v1"
+  const complete = packet?.profile === AGENT_HANDOFF_PROFILES.DEV_RESULT
     && (packet?.completion?.status === "COMPLETE" || packet?.outcome === "complete");
   if (role !== "dev" || !complete) return;
   const hold = finalReviewHandoffHold({
@@ -4809,147 +4773,6 @@ function enforceDevFinalReview(packet, call, context) {
     db: context?.db || getDb(),
   });
   if (hold) fail("AGENT_HANDOFF_FINAL_REVIEW_REQUIRED", hold);
-}
-
-function handoffRow(agentCallId, db = getDb()) {
-  const id = positiveInt(agentCallId);
-  if (!id) return null;
-  return ensureSchema(db).prepare(`SELECT * FROM ${TABLE} WHERE agent_call_id = ?`).get(id) || null;
-}
-
-export function getAgentHandoffRecord(agentCallId, { db = getDb() } = {}) {
-  const row = handoffRow(agentCallId, db);
-  if (!row) return null;
-  return { ...row, packet: parseStoredAgentHandoffPacket(row.materialized_packet_json) };
-}
-
-/**
- * The structured completion (status, blocker, remaining_work) an attempt's
- * dev/fix/artificer call committed. Post-execution otherwise sees only the
- * compatibility DEV/ARTIFICER RESULT block, whose notes are cut to 30 words.
- * Null when the attempt committed no compact completion packet.
- */
-export function getCommittedAttemptCompletion({ jobId, attemptId } = {}, { db = getDb() } = {}) {
-  const expectedJobId = positiveInt(jobId);
-  const expectedAttemptId = positiveInt(attemptId);
-  if (!expectedJobId || !expectedAttemptId) return null;
-  const row = ensureSchema(db).prepare(`
-    SELECT materialized_packet_json
-    FROM ${TABLE}
-    WHERE job_id = ? AND attempt_id = ? AND status = 'committed'
-      AND profile IN ('dev.result.v1', 'artificer.result.v1')
-    ORDER BY agent_call_id DESC
-    LIMIT 1
-  `).get(expectedJobId, expectedAttemptId);
-  if (!row) return null;
-  try {
-    const completion = JSON.parse(row.materialized_packet_json)?.completion;
-    return plainObject(completion) ? completion : null;
-  } catch {
-    return null;
-  }
-}
-
-function handoffCustodyFailure(message) {
-  const error = new Error(message);
-  error.code = "AGENT_HANDOFF_CUSTODY_INVALID";
-  throw error;
-}
-
-/**
- * Return the terminal packet attached to the newest exact research agent call.
- * A present packet is a custody boundary: invalid, non-committed, or mismatched
- * rows fault instead of becoming permission to parse a compatibility artifact.
- */
-export function getLatestCommittedAgentHandoffPacket({
-  workItemId,
-  jobId,
-  attemptId = null,
-} = {}, { db = getDb() } = {}) {
-  const expectedWorkItemId = positiveInt(workItemId);
-  const expectedJobId = positiveInt(jobId);
-  const expectedAttemptId = attemptId == null ? null : positiveInt(attemptId);
-  if (!expectedWorkItemId || !expectedJobId || (attemptId != null && !expectedAttemptId)) {
-    handoffCustodyFailure("Exact work item and job identities are required to read a terminal handoff");
-  }
-  const database = ensureSchema(db);
-  const params = [expectedWorkItemId, expectedJobId];
-  const attemptClause = expectedAttemptId == null ? "" : " AND ac.attempt_id = ?";
-  if (expectedAttemptId != null) params.push(expectedAttemptId);
-  const row = database.prepare(`
-    SELECT p.*,
-      ac.work_item_id AS call_work_item_id,
-      ac.job_id AS call_job_id,
-      ac.attempt_id AS call_attempt_id,
-      ac.role AS call_role
-    FROM agent_calls ac
-    JOIN ${TABLE} p ON p.agent_call_id = ac.id
-    WHERE ac.work_item_id = ?
-      AND ac.job_id = ?
-      AND ac.parent_agent_call_id IS NULL
-      AND ac.role = 'researcher'
-      ${attemptClause}
-    ORDER BY ac.id DESC
-    LIMIT 1
-  `).get(...params);
-  if (!row) return null;
-  if (row.status !== "committed") {
-    handoffCustodyFailure(`Newest terminal handoff for research job #${expectedJobId} is ${row.status}`);
-  }
-  if (!row.committed_at) {
-    handoffCustodyFailure(`Committed terminal handoff for research job #${expectedJobId} has no commit timestamp`);
-  }
-  const digest = crypto.createHash("sha256").update(row.materialized_packet_json).digest("hex");
-  if (digest !== row.packet_digest) {
-    handoffCustodyFailure(`Terminal handoff digest verification failed for research job #${expectedJobId}`);
-  }
-  let packet;
-  try {
-    packet = parseStoredAgentHandoffPacket(row.materialized_packet_json);
-  } catch (error) {
-    handoffCustodyFailure(`Terminal handoff packet could not be decoded for research job #${expectedJobId}: ${error?.message || error}`);
-  }
-
-  const identities = [
-    ["work item", expectedWorkItemId, row.call_work_item_id, row.work_item_id, packet.work_item_id],
-    ["job", expectedJobId, row.call_job_id, row.job_id, packet.job_id],
-    ["agent call", row.agent_call_id, packet.agent_call_id],
-  ];
-  const resolvedAttemptId = expectedAttemptId || positiveInt(row.call_attempt_id);
-  if (resolvedAttemptId) {
-    identities.push([
-      "attempt",
-      resolvedAttemptId,
-      row.call_attempt_id,
-      row.attempt_id,
-      packet.attempt_id,
-    ]);
-  }
-  for (const [label, expected, ...values] of identities) {
-    if (values.some((value) => positiveInt(value) !== positiveInt(expected))) {
-      handoffCustodyFailure(`Terminal handoff ${label} identity mismatch for research job #${expectedJobId}`);
-    }
-  }
-  if (row.call_role !== "researcher" || row.role !== row.call_role || packet.role !== row.role) {
-    handoffCustodyFailure(`Terminal handoff role identity mismatch for research job #${expectedJobId}`);
-  }
-  if (packet.profile !== row.profile
-    || !["researcher.pipeline.v1", "researcher.report.v1"].includes(packet.profile)) {
-    handoffCustodyFailure(`Terminal handoff profile identity mismatch for research job #${expectedJobId}`);
-  }
-  if (packet.outcome !== row.outcome) {
-    handoffCustodyFailure(`Terminal handoff outcome identity mismatch for research job #${expectedJobId}`);
-  }
-  return {
-    packet,
-    packet_digest: digest,
-    agent_call_id: positiveInt(row.agent_call_id),
-    work_item_id: expectedWorkItemId,
-    job_id: expectedJobId,
-    attempt_id: resolvedAttemptId,
-    profile: packet.profile,
-    outcome: packet.outcome,
-  };
 }
 
 function compactResearcherCoverageInput(args) {
@@ -5042,16 +4865,16 @@ export function getTraversalCompletionSnapshotForCall(context = {}) {
       ? db.prepare(`
           SELECT detail_json
           FROM job_observations
-          WHERE job_id = ? AND observation_type = 'handoff.traversal_completion_check'
+          WHERE job_id = ? AND observation_type = ?
           ORDER BY id DESC LIMIT 1
-        `).get(context.jobId)
+        `).get(context.jobId, HANDOFF_TRAVERSAL_COMPLETION_CHECK_OBSERVATION_TYPE)
       : db.prepare(`
           SELECT detail_json
           FROM job_observations
           WHERE job_id = ? AND attempt_id = ?
-            AND observation_type = 'handoff.traversal_completion_check'
+            AND observation_type = ?
           ORDER BY id DESC LIMIT 1
-        `).get(context.jobId, context.attemptId);
+        `).get(context.jobId, context.attemptId, HANDOFF_TRAVERSAL_COMPLETION_CHECK_OBSERVATION_TYPE);
     if (!row) return null;
     const detail = JSON.parse(String(row.detail_json || "{}"));
     const mode = ["off", "shadow", "on"].includes(String(detail.mode)) ? String(detail.mode) : "off";
@@ -5115,7 +4938,7 @@ function recordTraversalCompletionGate(context, check, detail = {}) {
       work_item_id: context.workItemId,
       job_id: context.jobId,
       attempt_id: context.attemptId,
-      observation_type: "agent_handoff.traversal_completion_gate",
+      observation_type: AGENT_HANDOFF_OBSERVATION_TYPES.TRAVERSAL_COMPLETION_GATE,
       summary: `Traversal completion gate ${detail.status || "checked"}`,
       detail: {
         mode: check.mode,
@@ -5140,10 +4963,10 @@ function latestRejectedTraversalCompletionRepair(context, check) {
       SELECT id, detail_json
       FROM job_observations
       WHERE job_id = ? AND attempt_id = ?
-        AND observation_type = 'agent_handoff.traversal_completion_gate'
+        AND observation_type = ?
       ORDER BY id DESC
       LIMIT 1
-    `).get(context.jobId, context.attemptId);
+    `).get(context.jobId, context.attemptId, AGENT_HANDOFF_OBSERVATION_TYPES.TRAVERSAL_COMPLETION_GATE);
     if (!row?.detail_json) return null;
     const detail = JSON.parse(String(row.detail_json || "{}"));
     if (detail.status !== "rejected" || detail.requirements_digest !== check.requirements_digest) {
@@ -5213,7 +5036,7 @@ function hasNovelResearchSourceAfter(context, observationId) {
 }
 
 function enforceResearcherTraversalCompletion(packet, coverage, check, context) {
-  if (packet?.profile !== "researcher.report.v1") return;
+  if (packet?.profile !== AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT) return;
   if (!check) {
     recordTraversalCompletionGate(context, {
       mode: "unavailable",
@@ -5256,7 +5079,7 @@ function enforceResearcherTraversalCompletion(packet, coverage, check, context) 
   ]));
   const demotedSubmittedIndexes = new Set(
     (packet?.evidence_cleanup?.items || []).flatMap((item) => {
-      if (item?.action !== "demote_unverified_claim_to_summary") return [];
+      if (item?.action !== AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.DEMOTE_UNVERIFIED_CLAIM_TO_SUMMARY) return [];
       const match = String(item?.selector || "").match(/^<claim:([1-9][0-9]*)>$/);
       return match ? [Number(match[1])] : [];
     }),
@@ -5413,7 +5236,7 @@ export function stageAgentHandoff(args, {
 } = {}) {
   const agentCallId = positiveInt(context.agentCallId ?? context.agent_call_id);
   if (!agentCallId) fail("AGENT_HANDOFF_CONTEXT_INVALID", "agent_handoff requires an active agent call");
-  const database = ensureSchema(db);
+  const database = agentHandoffSchema.ensure(db);
   const call = database.prepare(`
     SELECT ac.work_item_id, ac.job_id, ac.attempt_id, ac.role, ac.child_kind, ac.parent_agent_call_id, j.payload_json
     FROM agent_calls ac
@@ -5447,7 +5270,7 @@ export function stageAgentHandoff(args, {
     let payload = {};
     try { payload = JSON.parse(call.payload_json || "{}"); } catch { /* legacy job */ }
     runtimeProfile = researchUsesReportProfile(workItem, payload)
-      ? "researcher.report.v1" : "researcher.pipeline.v1";
+      ? AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT : AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE;
   }
   boundArgs = bindHandoffMetadata(boundArgs, runtimeProfile);
   const mergedArgs = effectiveRole === "researcher"
@@ -5586,156 +5409,11 @@ export function stageAgentHandoff(args, {
   };
 }
 
-function recordAtlasTrunkHitRate(packet, context) {
-  const database = context?.db || getDb();
-  const jobId = positiveInt(context?.jobId ?? context?.job_id);
-  const attemptId = positiveInt(context?.attemptId ?? context?.attempt_id);
-  if (!jobId) return false;
-  try {
-    const row = database.prepare(`
-      SELECT detail_json
-      FROM job_observations
-      WHERE job_id = ?
-        AND observation_type = 'atlas.prefetch.trunk'
-        AND (? IS NULL OR attempt_id = ?)
-      ORDER BY id DESC
-      LIMIT 1
-    `).get(jobId, attemptId, attemptId);
-    if (!row?.detail_json) return false;
-    const trunk = JSON.parse(row.detail_json);
-    const rankedFiles = canonicalPathList(trunk?.ranked_files);
-    const surveyFiles = canonicalPathList(trunk?.survey_files);
-    const pointedFiles = canonicalPathList(
-      Array.isArray(trunk?.pointed_files)
-        ? trunk.pointed_files
-        : [...rankedFiles, ...surveyFiles],
-    );
-    const citedFiles = citedSourcePaths(packet);
-    const pointed = new Set(pointedFiles);
-    const hitFiles = citedFiles.filter((file) => pointed.has(file));
-    // Prefetch fetches, redacts and ledgers real source. Whether that work is
-    // reaching the reader, or being paid for twice, is only visible by asking
-    // which prefetched files were read again from the agent's own budget.
-    const prefetchYield = atlasPrefetchReadYield(database, jobId, attemptId);
-    const hitRate = citedFiles.length > 0 ? hitFiles.length / citedFiles.length : null;
-    const pointedPrecision = pointedFiles.length > 0 ? hitFiles.length / pointedFiles.length : null;
-    return recordObservation({
-      db: database,
-      work_item_id: positiveInt(context?.workItemId ?? context?.work_item_id),
-      job_id: jobId,
-      attempt_id: attemptId,
-      observation_type: "atlas.prefetch.trunk_hit_rate",
-      summary: `ATLAS trunk covered ${hitFiles.length}/${citedFiles.length} terminally cited file(s)`,
-      detail: {
-        kind: "atlas_prefetch_trunk_hit_rate",
-        ranked_files: rankedFiles,
-        survey_files: surveyFiles,
-        pointed_files: pointedFiles,
-        cited_files: citedFiles,
-        hit_files: hitFiles,
-        pointed_file_count: pointedFiles.length,
-        cited_file_count: citedFiles.length,
-        hit_file_count: hitFiles.length,
-        hit_rate: hitRate,
-        pointed_precision: pointedPrecision,
-        ...prefetchYield,
-      },
-    });
-  } catch {
-    return false;
-  }
-}
-
-/**
- * How much of what prefetch delivered the agent then paid to read again.
- * Read-only telemetry: a prefetched window the agent re-reads is work stored
- * twice, and a prefetched file it never touches is work with no reader.
- *
- * @param {any} database
- * @param {number} jobId
- * @param {number|null} attemptId
- * @returns {Record<string, unknown>}
- */
-function atlasPrefetchReadYield(database, jobId, attemptId) {
-  try {
-    const rows = database.prepare(`
-      SELECT detail_json
-      FROM job_observations
-      WHERE job_id = ?
-        AND (? IS NULL OR attempt_id = ?)
-        AND observation_type = 'source.coverage'
-      ORDER BY id ASC
-    `).all(jobId, attemptId, attemptId);
-    const prefetched = new Set();
-    const readAgain = new Set();
-    let rereadCalls = 0;
-    for (const row of rows) {
-      let detail = {};
-      try { detail = JSON.parse(String(row.detail_json || "{}")); } catch { continue; }
-      const coverage = detail?.coverage && typeof detail.coverage === "object" ? detail.coverage : detail;
-      const sourcePath = canonicalSourcePath(coverage?.repo_rel_path);
-      if (!sourcePath) continue;
-      const origin = String(detail?.origin || coverage?.origin || "");
-      if (origin === "prefetch") { prefetched.add(sourcePath); continue; }
-      if (!prefetched.has(sourcePath)) continue;
-      readAgain.add(sourcePath);
-      rereadCalls += 1;
-    }
-    return {
-      prefetched_file_count: prefetched.size,
-      prefetched_files_read_again: readAgain.size,
-      prefetched_reread_calls: rereadCalls,
-    };
-  } catch {
-    return {};
-  }
-}
-
-
-function citedSourcePaths(packet) {
-  const out = [];
-  const seen = new Set();
-  const push = (value) => {
-    const sourcePath = canonicalSourcePath(value);
-    if (!sourcePath || seen.has(sourcePath)) return;
-    seen.add(sourcePath);
-    out.push(sourcePath);
-  };
-  for (const handoff of Array.isArray(packet?.handoffs) ? packet.handoffs : []) {
-    for (const claim of Array.isArray(handoff?.report?.claims) ? handoff.report.claims : []) {
-      const detail = claim?.[1];
-      for (const lane of ["evidence", "proof", "support"]) {
-        for (const evidence of Array.isArray(detail?.[lane]) ? detail[lane] : []) {
-          push(evidence?.path);
-          for (const window of Array.isArray(evidence?.provenance?.source_windows)
-            ? evidence.provenance.source_windows
-            : []) {
-            push(window?.path);
-          }
-        }
-      }
-    }
-  }
-  return out.sort();
-}
-
-function canonicalPathList(value) {
-  const out = [];
-  const seen = new Set();
-  for (const entry of Array.isArray(value) ? value : []) {
-    const sourcePath = canonicalSourcePath(entry);
-    if (!sourcePath || seen.has(sourcePath)) continue;
-    seen.add(sourcePath);
-    out.push(sourcePath);
-  }
-  return out;
-}
-
 export function rejectAgentHandoffForLaterTool(agentCallId, toolName, { db = getDb() } = {}) {
   const row = handoffRow(agentCallId, db);
   if (!row || !["staged", "committed"].includes(row.status)) return false;
   if (row.status === "staged") {
-    ensureSchema(db).prepare(`
+    agentHandoffSchema.ensure(db).prepare(`
       UPDATE ${TABLE}
       SET status='rejected', rejection_code=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE agent_call_id=? AND status='staged'
@@ -5756,7 +5434,7 @@ function verifyPacketEvidenceAtCommit(packet) {
 }
 
 function validatePlannerCompatibilityTasks(packet) {
-  if (packet.profile !== "planner.plan.v1" || packet.outcome !== "success") return;
+  if (packet.profile !== AGENT_HANDOFF_PROFILES.PLANNER_PLAN || packet.outcome !== "success") return;
   const tasks = plannerCompatibilityTasks(packet);
   for (const [index, task] of tasks.entries()) {
     const errors = validatePlannedTask(task, index, tasks.length);
@@ -5773,7 +5451,7 @@ export function finalizeAgentHandoffForProvider({ agentCallId, output = "", requ
   const row = handoffRow(agentCallId, db);
   if (!required) {
     if (row?.status === "staged") {
-      ensureSchema(db).prepare(`
+      agentHandoffSchema.ensure(db).prepare(`
         UPDATE ${TABLE}
         SET status='rejected', rejection_code='not_effectively_issued', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
         WHERE agent_call_id=? AND status='staged'
@@ -5802,7 +5480,7 @@ export function finalizeAgentHandoffForProvider({ agentCallId, output = "", requ
   try {
     verifyPacketEvidenceAtCommit(packet);
   } catch (error) {
-    ensureSchema(db).prepare(`
+    agentHandoffSchema.ensure(db).prepare(`
       UPDATE ${TABLE}
       SET status='rejected', rejection_code='evidence_recheck_failed', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE agent_call_id=? AND status='staged'
@@ -5810,13 +5488,13 @@ export function finalizeAgentHandoffForProvider({ agentCallId, output = "", requ
     fail("TERMINAL_PROTOCOL_ERROR", `agent_handoff evidence recheck failed: ${error?.message || String(error)}`);
   }
   const continuationChars = typeof output === "string" ? output.length : String(output ?? "").length;
-  const isPlannerPacket = packet.profile === "planner.plan.v1";
+  const isPlannerPacket = packet.profile === AGENT_HANDOFF_PROFILES.PLANNER_PLAN;
   const plannerTaskSpecChars = isPlannerPacket
     ? plannerCompatibilityTasks(packet).map((task) => task.task_spec.length)
     : [];
   const evidenceMetrics = packetEvidenceMetrics(packet);
   if (row.status === "staged") {
-    ensureSchema(db).prepare(`
+    agentHandoffSchema.ensure(db).prepare(`
       UPDATE ${TABLE}
       SET status='committed', continuation_prose_chars=?, committed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
       WHERE agent_call_id=? AND status='staged'

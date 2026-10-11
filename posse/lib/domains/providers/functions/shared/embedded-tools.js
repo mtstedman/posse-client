@@ -1,3 +1,4 @@
+import { readPlannerDispatchPolicy } from "../../../planning/functions/planner-dispatch-policy.js";
 // Shared builder for the embedded (function-calling) tool definitions used by
 // OpenAI and Grok. Both providers expose the same deterministic tool surface;
 // the only per-provider differences are a couple of overrides (the assessor's
@@ -59,6 +60,8 @@ export function buildEmbeddedToolDefinitions(contract, overrides = {}) {
       compactCompletion: contract?.agentHandoffCompactV1 === true,
       compactV3: contract?.agentHandoffCompactV3 === true,
       researchInvestigation: contract?.researchInvestigation === true,
+      plannerMaxChildren: name === "dispatch_agent" && contract?.role === "planner"
+        ? readPlannerDispatchPolicy({ projectDir: contract?.scope?.readRoots?.[0] || null }).maxChildren : null,
     });
     if (schema) map[name] = schema;
   }

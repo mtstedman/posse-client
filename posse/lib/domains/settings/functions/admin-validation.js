@@ -8,9 +8,9 @@ import {
   getTextModelOptions,
 } from "../../providers/functions/model-catalog.js";
 import { isProviderEnabledForAccount, providerRegistry } from "../../providers/functions/provider.js";
+import { PROJECT_DB_TYPES } from "../../../catalog/project-db.js";
 import {
   normalizePermissions as normalizeProjectDbPermissions,
-  PROJECT_DB_TYPES,
 } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import {
   ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS,
@@ -81,7 +81,7 @@ export function getModelChoicesForEntry(entry) {
   return baseChoices.slice();
 }
 
-function normalizeNumericSettingValue(settingKey, value) {
+export function normalizeNumericSettingValue(settingKey, value) {
   const key = toStorageSettingKey(settingKey);
   const trimmed = String(value ?? "").trim();
   if (!trimmed) return { ok: true, value: "" };

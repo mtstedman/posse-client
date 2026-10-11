@@ -46,13 +46,16 @@ function jobsOwningCommits(workItemId, excludeJobId, commits) {
   return [...byJob.values()];
 }
 
-async function localTargetMerges(commits, cwd, git) {
+// Every merged work item's squash commit in (lastPass, failing]. The whole
+// range is walked, not only first parents: a work-item branch that merged its
+// target in brings the target's squash commits in through a second parent.
+async function localTargetMerges(commits, cwd, git, { from, to }) {
   const targetBranch = resolveTargetBranchForAdmin(cwd);
   if (!targetBranch || commits.length === 0) return [];
   let lines;
   try {
-    lines = String(await git(["log", "--first-parent", "--format=%H%x09%s",
-      `${commits.at(-1)}^..${commits[0]}`], cwd) || "").split("\n").filter(Boolean);
+    lines = String(await git(["log", `--max-count=${MAX_RANGE_COMMITS}`, "--format=%H%x09%s",
+      `${from}..${to}`], cwd) || "").split("\n").filter(Boolean);
   } catch { return []; }
   const inRange = new Set(commits);
   const lookup = getDb().prepare(`
@@ -106,7 +109,7 @@ export async function attributeBaselineFailure({ job, receipt, cwd } = {}, {
   }
   if (commits.length === 0) return null;
   const suspects = jobsOwningCommits(job.work_item_id, job.id, commits);
-  const mergedWorkItems = await localTargetMerges(commits, cwd, git);
+  const mergedWorkItems = await localTargetMerges(commits, cwd, git, { from: lastPass.commit_hash, to: failingCommit });
   const currentFingerprint = String(receipt.failure_fingerprint || "");
   const eligibleSuspects = [];
   for (const suspect of suspects) {

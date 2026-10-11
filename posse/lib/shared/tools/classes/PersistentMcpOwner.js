@@ -1,7 +1,20 @@
 import { ContextMeter } from "../../classes/ContextMeter.js";
+import { PersistentMcpSession } from "./PersistentMcpSession.js";
+import {
+  capString,
+  cloneJson,
+  createSubAgentRoutingState,
+  gatewayGateBindingKey,
+  mcpToolErrorPayload,
+  ownerErrorSummary,
+  stripToolsPrefix,
+  toolsListCount,
+  jsonlParseBuffer,
+} from "../functions/mcp-owner-session-support.js";
 import { observeAtlasExecution } from "../functions/atlas-result-status.js";
 import { sortAgentToolDefinitions } from "../functions/agent-schema.js";
 import { observeAtlasRequest } from "../functions/atlas-request-observation.js";
+import { codexSoftCheckpoint } from "../functions/codex-soft-checkpoint.js";
 import { executeDispatchAgent, submitWebResearchHandoff } from "../../../domains/web-research/classes/WebResearchRuntime.js";
 import { executeFinalReview } from "../../../domains/assessment/classes/FinalReviewRuntime.js";
 import { FINAL_REVIEW_REVIEWER_STATUS } from "../../../catalog/final-review.js";
@@ -18,6 +31,12 @@ import { getAccountSetting } from "../../../domains/settings/functions/account-s
 import { getAtlasIntegrationConfig } from "../../../domains/integrations/functions/atlas/config.js";
 import crypto from "node:crypto";
 import { ATLAS_MUTATION_PATH_FIELDS } from "../../../catalog/tools/filesystem-mutations.js";
+import {
+  ATLAS_COMPACT_STRUCTURE_GATED_MAX_CHARS,
+  ATLAS_COMPACT_STRUCTURE_GATED_ROLES,
+  ATLAS_COMPACT_STRUCTURE_ROLES,
+  ATLAS_HISTORICAL_ACTION_ALIASES,
+} from "../../../catalog/atlas.js";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -34,19 +53,17 @@ import { SUB_AGENT_EVIDENCE_OUTCOMES, isSubAgentEvidenceSafeNativeTool, isSubAge
 import {
   DEFAULT_MCP_OAUTH_TTL_SECONDS,
   MCP_SESSION_RELEASED_NOTIFICATION,
-  MCP_REQUEST_TIMEOUT_MS,
   MCP_CONCURRENT_ATLAS_ACTIONS,
-  MCP_TOOL_DEADLINE_MS,
   MCP_CONTROL_METHODS,
   MCP_OWNER_PROGRESS_HEADER,
   MCP_OWNER_HEARTBEAT_INTERVAL_MS,
+  MCP_TERMINAL_HANDOFF_TOOLS,
   POSSE_MCP_GATEWAY_SERVER_NAME,
-  mcpToolDeadlineClass,
 } from "../../../catalog/mcp.js";
 import { renderAgentHandoffCallableName } from "../functions/mcp-surface.js";
 import { AutomationOwnerClient } from "../../../domains/automation/classes/AutomationOwnerClient.js";
 import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS } from "../../../catalog/custom-tools.js";
-import { RESPONSE_TRANSFORM_OBSERVATION_TYPE } from "../../../catalog/observation.js";
+import { RESPONSE_TRANSFORM_OBSERVATION_TYPE, TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { roleUsesBoundedRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
 import {
   assessorFallbackReadKey,
@@ -62,7 +79,6 @@ import {
   normalizeResearcherTypedAtlasFieldNames,
 } from "../functions/researcher-typed-result-compaction.js";
 import { omitAtlasCacheMetadata } from "../functions/atlas-agent-result.js";
-import { sanitizeAbsolutePathsInText } from "../../format/functions/display-paths.js";
 import {
   bootConfigFromMcpOAuthClaims,
   mintMcpOAuthTokenForBootConfig,
@@ -163,13 +179,13 @@ import {
 } from "../../../domains/integrations/functions/deterministic-mcp/research-synthesis.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
-import { appendHashRefIfMajor, compactCodeStructureResult, compactCodeSurveyResult, compactCodeWindowLensResult, createHashRefResult, fetchHashRefTool, hashRefTraversalInputs } from "../functions/hash-adder.js";
+import { appendHashRefIfMajor, compactCodeWindowLensResult, createHashRefResult, fetchHashRefTool, hashRefTraversalInputs } from "../functions/hash-adder.js";
+import { compactCodeStructureResult, compactCodeSurveyResult } from "../functions/atlas-result-paging.js";
 import {
   bindAgentAttachmentToSignedContract,
   isInternalAtlasAction,
   narrowBootConfigToSignedClaims,
 } from "../functions/issued-tool-policy.js";
-import { toolSchemaTelemetry } from "../functions/tool-schema-telemetry.js";
 import { validateToolArguments } from "../functions/schema-validation.js";
 import { sourceSelectorFingerprint } from "../../../domains/research/classes/SourceCoverageOwner.js";
 import {
@@ -187,22 +203,6 @@ import {
 } from "../../../domains/research/functions/owner-source-admission.js";
 
 const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
-const DEFAULT_REQUEST_TIMEOUT_MS = MCP_REQUEST_TIMEOUT_MS;
-const MAX_OWNER_ATLAS_GATE_EVENTS = 64;
-// A child that produces NO response across this many consecutive request
-// timeouts is treated as wedged (event loop blocked, native deadlock) rather
-// than merely slow, and is force-killed so the next request respawns it. Any
-// response resets the counter, so a legitimately long single call does not
-// trip it. The gateway is stateless per request, so respawn loses nothing.
-const MAX_CONSECUTIVE_REQUEST_TIMEOUTS = 2;
-// Minimum spacing between child (re)spawns. Without it, a server spec that
-// crashes on startup turns every forwarded request into a fresh, heavy Node
-// process spawn — a hot crash-loop. The shim already treats the resulting
-// backoff error as a transient 5xx and retries.
-const GATEWAY_RESTART_BACKOFF_MS = 2000;
-const JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
-const MCP_FRAME_TOO_LARGE_CODE = "POSSE_MCP_FRAME_TOO_LARGE";
-const SESSION_TOKEN_EXPIRY_GRACE_MS = 5 * 60 * 1000;
 const OWNER_MODEL_CONTROL_NOTICES = Symbol("ownerModelControlNotices");
 const SOURCE_EVIDENCE_REUSE_NOTICE_KIND = "source_evidence_reuse";
 const sourceEvidenceReuseNoticeAttempts = new WeakMap();
@@ -261,8 +261,8 @@ function researcherStructureExecutorArgs(session, requestedName, args = {}) {
 /** @param {any} session */
 function researcherStructureProjection(session) {
   const role = String(session?.bootConfig?.role || "");
-  if (role === "researcher") return COMPACT_STRUCTURE_PROJECTION;
-  if (role !== "dev" && role !== "assessor") return null;
+  if (ATLAS_COMPACT_STRUCTURE_ROLES.includes(role)) return COMPACT_STRUCTURE_PROJECTION;
+  if (!ATLAS_COMPACT_STRUCTURE_GATED_ROLES.includes(role)) return null;
   try {
     return getAccountSetting(SETTING_KEYS.ATLAS_COMPACT_STRUCTURE_DEV_ASSESSOR) === "on"
       ? COMPACT_STRUCTURE_PROJECTION : null;
@@ -270,8 +270,8 @@ function researcherStructureProjection(session) {
 }
 
 function structureMaxChars(session) {
-  return String(session?.bootConfig?.role || "") === "researcher"
-    ? COMPACT_STRUCTURE_DEFAULT_MAX_CHARS : 12_000;
+  return ATLAS_COMPACT_STRUCTURE_ROLES.includes(String(session?.bootConfig?.role || ""))
+    ? COMPACT_STRUCTURE_DEFAULT_MAX_CHARS : ATLAS_COMPACT_STRUCTURE_GATED_MAX_CHARS;
 }
 
 export const __testCompactCallerExecutorArgs = compactCallerExecutorArgs;
@@ -315,20 +315,6 @@ const SUB_AGENT_WRITE_TOOLS = new Set([
   "tools.apply_patch",
   "atlas.edit.apply",
 ]);
-
-function createSubAgentRoutingState() {
-  return {
-    evidenceCalls: 0,
-    targets: new Set(),
-    selections: new Map(),
-    delegatedTargets: new Set(),
-    delegatedSelections: new Map(),
-    dispatched: false,
-    reminderIssued: false,
-    materializedChars: 0,
-    mutated: false,
-  };
-}
 
 function subAgentRoutingEnabled(policy) {
   return policy?.suites?.tools?.has("sub_agent") === true;
@@ -533,6 +519,24 @@ function appendToolResultText(response, suffix, { kind = "runtime_control", trig
   return result === response.result ? response : { ...response, result };
 }
 
+// Applied once to the response the provider receives, never to an inner
+// execution a recovery may replace or to a batch item, so a consumed
+// checkpoint is always a delivered one.
+function appendCodexSoftCheckpoint(response, session, toolName) {
+  if (!response?.result || response.result.isError === true) return response;
+  let checkpoint;
+  try { checkpoint = codexSoftCheckpoint(session); } catch { return response; }
+  if (!checkpoint) return response;
+  const updated = appendToolResultText(response, checkpoint.text, {
+    kind: "codex_soft_checkpoint", trigger: checkpoint.trigger,
+  });
+  if (updated === response) session._codexSoftCheckpointCallId = null;
+  if (updated !== response) recordOwnerModelControlNotice(session, toolName, {
+    kind: "codex_soft_checkpoint", text: checkpoint.text, trigger: checkpoint.trigger,
+  });
+  return updated;
+}
+
 export function __testSubAgentRoutingSequence(calls = []) {
   const state = createSubAgentRoutingState();
   return calls.map((call) => {
@@ -606,8 +610,8 @@ function plannerTriageNoticeText(turns) {
 }
 
 function plannerPathNoticeText(turns) {
-  return "\n\nResearch decision checkpoint: this planner-owned read began the direct/simple path. "
-    + "If the work needs nontrivial research, dispatch it now before making another read; otherwise continue directly "
+  return "\n\nResearch decision checkpoint: keep orientation to at most two bounded calls before choosing the research path. "
+    + "If substantial investigation is already clear, dispatch now; otherwise resolve the remaining scope uncertainty or continue directly "
     + `and do not dispatch later after accumulating planner context. Direct-path budget: ~${turns} turn${turns === 1 ? "" : "s"}.`;
 }
 
@@ -753,8 +757,6 @@ export function __testPlannerTriageSequence({
   });
   return { notices, observations, state: session._plannerTriage || null };
 }
-const TOKEN_CLOCK_SKEW_MS = 30 * 1000;
-const SESSION_ORPHAN_TTL_MS = 8 * 60 * 60 * 1000;
 const ATLAS_TOOL_ACTION_SET = /** @type {Set<string>} */ (new Set(ATLAS_TOOL_ACTIONS));
 const ATLAS_NESTED_ACTION_WRAPPERS = new Set(["query", "code", "repo", "agent", "workflow"]);
 const ATLAS_RESEARCHER_WORKFLOW_ACTIONS = new Set(researcherWorkflowActions());
@@ -1162,37 +1164,6 @@ function tokenHash(value) {
   return crypto.createHash("sha256").update(String(value || ""), "utf8").digest("base64url");
 }
 
-function capString(value, max = 500) {
-  const text = String(value ?? "");
-  return text.length > max ? `${text.slice(0, Math.max(0, max - 3))}...` : text;
-}
-
-function ownerErrorSummary(err) {
-  if (!err) return null;
-  const cause = err.cause && err.cause !== err ? err.cause : null;
-  return {
-    name: err?.name || null,
-    code: err?.code || err?.errno || null,
-    status: err?.status || err?.statusCode || err?.response?.status || null,
-    message: capString(err?.message || String(err), 700),
-    cause: cause ? {
-      name: cause?.name || null,
-      code: cause?.code || cause?.errno || null,
-      status: cause?.status || cause?.statusCode || cause?.response?.status || null,
-      message: capString(cause?.message || String(cause), 700),
-    } : null,
-  };
-}
-
-function isPowershellClixmlProgressNoise(chunk) {
-  const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || "");
-  return /#<\s*CLIXML/i.test(text) && /Preparing modules for first use/i.test(text);
-}
-
-function cloneJson(value) {
-  return JSON.parse(JSON.stringify(value || {}));
-}
-
 function stripGatewaySessionTokenFields(value = {}) {
   const out = cloneJson(value);
   delete out.mcpOAuthToken;
@@ -1202,13 +1173,6 @@ function stripGatewaySessionTokenFields(value = {}) {
     delete out.mcpAuth.token;
   }
   return out;
-}
-
-function stripToolsPrefix(name) {
-  const raw = String(name || "").trim();
-  if (raw.startsWith("tools.")) return raw.slice("tools.".length);
-  if (raw.startsWith("tools_")) return raw.slice("tools_".length);
-  return raw;
 }
 
 function stripAtlasPrefix(name) {
@@ -2005,31 +1969,6 @@ function recordToolsListFailure(session, listError) {
   }
 }
 
-function toolsListCount(message) {
-  const tools = message?.result?.tools;
-  return Array.isArray(tools) ? tools.length : null;
-}
-
-function toolsListNames(message) {
-  const tools = message?.result?.tools;
-  if (!Array.isArray(tools)) return [];
-  return [...new Set(tools
-    .map((tool) => String(tool?.name || "").trim())
-    .filter(Boolean))].sort();
-}
-
-function toolsListDigest(names = []) {
-  if (!Array.isArray(names)) return null;
-  return crypto.createHash("sha256").update(names.join("\n"), "utf8").digest("hex");
-}
-
-function agentHandoffSchemaTelemetry(message) {
-  const tools = message?.result?.tools;
-  if (!Array.isArray(tools)) return null;
-  const schema = tools.find((tool) => stripToolsPrefix(tool?.name) === "agent_handoff");
-  return schema ? toolSchemaTelemetry(schema) : null;
-}
-
 function atlasActionEnumFromToolsList(message) {
   const tools = message?.result?.tools;
   if (!Array.isArray(tools)) return [];
@@ -2089,7 +2028,7 @@ function recordProviderIssuedToolSurface(session, message) {
       work_item_id: boot.workItemId ?? null,
       job_id: boot.jobId ?? null,
       attempt_id: boot.attemptId ?? null,
-      observation_type: "tool.surface.issued",
+      observation_type: TOOL_SURFACE_ISSUED_OBSERVATION_TYPE,
       summary: `Provider-issued tool surface: ${names.length} tool${names.length === 1 ? "" : "s"}; ${actionEnum.length} Atlas action${actionEnum.length === 1 ? "" : "s"}; schema ${schemaSha256.slice(0, 12)}`,
       detail,
     });
@@ -2139,21 +2078,6 @@ function gatewaySessionReleaseNotification(session) {
   }, session);
 }
 
-function gatewayGateBindingKey(bootConfig = {}, sessionId = null) {
-  const numericPart = (value) => Number(value) || null;
-  return JSON.stringify([
-    String(bootConfig?.mcpOAuth?.tokenId || sessionId || "").trim(),
-    numericPart(bootConfig?.jobId),
-    numericPart(bootConfig?.workItemId),
-    numericPart(bootConfig?.attemptId),
-    numericPart(bootConfig?.agentCallId),
-    String(bootConfig?.role || "").trim(),
-    path.resolve(String(bootConfig?.cwd || ".")),
-    bootConfig?.atlasAvailable === true,
-    bootConfig?.atlasGateEnabled === true,
-  ]);
-}
-
 function gatewayBindingSnapshot(session) {
   const bootConfig = cloneJson(session?.bootConfig || {});
   return {
@@ -2169,12 +2093,6 @@ function gatewayBindingIsCurrent(session, binding) {
   if (binding.epoch != null && currentEpoch !== binding.epoch) return false;
   return gatewayGateBindingKey(session?.bootConfig || {}, session?.id) === binding.key;
 }
-
-// P0.3: historical action names that models still emit. A replacement is
-// named only when the replacement itself is issued to the session.
-const ATLAS_HISTORICAL_ACTION_ALIASES = Object.freeze({
-  "code.get": "symbol.get",
-});
 
 function issuedAtlasActionsForPolicy(policy) {
   const allowed = policy?.suites?.atlas || new Set();
@@ -2336,36 +2254,6 @@ function recordDeniedToolCall(session, toolName, args, policy, message, override
       },
     });
   } catch { /* telemetry only */ }
-}
-
-function mcpToolErrorPayload(message, error = null, { cwd = null } = {}) {
-  // Scrub here, not at call sites: the structured/_meta channels re-embed the
-  // raw error, so a caller-side scrub of the message alone still leaks.
-  const scrub = (value) => (cwd ? sanitizeAbsolutePathsInText(String(value), cwd) : String(value));
-  const text = scrub(message || "ATLAS tool execution failed");
-  const structured = error && typeof error === "object"
-    ? {
-        code: error.code ? String(error.code) : "atlas_tool_error",
-        message: error.message ? scrub(error.message) : text,
-        ...(error.details === undefined ? {} : {
-          details: typeof error.details === "string" ? scrub(error.details) : error.details,
-        }),
-      }
-    : null;
-  const bearers = Array.isArray(structured?.details?.bearers)
-    ? [...new Set(structured.details.bearers
-      .map((bearer) => scrub(bearer).trim())
-      .filter(Boolean))]
-      .slice(0, 20)
-    : [];
-  const visibleDetails = bearers.length > 0
-    ? `\nQualified bearers: ${bearers.map((bearer) => JSON.stringify(bearer)).join(", ")}`
-    : "";
-  return {
-    content: [{ type: "text", text: `Error: ${text}${visibleDetails}` }],
-    isError: true,
-    ...(structured ? { structuredContent: { error: structured }, _meta: { atlasError: structured } } : {}),
-  };
 }
 
 export function __testMcpToolErrorPayload(message, error = null, options = {}) {
@@ -4621,41 +4509,6 @@ function recordSourceSelectionObservations({
   }
 }
 
-function jsonlParseBuffer(buffer, onMessage, { onParseError = null, maxBufferBytes = JSONL_STDOUT_BUFFER_MAX_BYTES } = {}) {
-  let next = buffer;
-  while (next.length > 0) {
-    const newlineIdx = next.indexOf(0x0a);
-    if (newlineIdx < 0) break;
-    const lineBytes = next.subarray(0, newlineIdx);
-    next = next.subarray(newlineIdx + 1);
-    if (lineBytes.length > maxBufferBytes) {
-      const err = Object.assign(new Error(`MCP session stdout JSONL frame exceeded ${maxBufferBytes} bytes`), {
-        code: MCP_FRAME_TOO_LARGE_CODE,
-      });
-      if (typeof onParseError === "function") onParseError(err, "");
-      continue;
-    }
-    let line = lineBytes.toString("utf8");
-    if (line.endsWith("\r")) line = line.slice(0, -1);
-    line = line.trim();
-    if (!line) continue;
-    try {
-      onMessage(JSON.parse(line));
-    } catch (err) {
-      if (typeof onParseError === "function") onParseError(err, line);
-    }
-  }
-  if (next.length > maxBufferBytes) {
-    const err = Object.assign(new Error(`MCP session stdout JSONL buffer exceeded ${maxBufferBytes} bytes without newline`), {
-      code: MCP_FRAME_TOO_LARGE_CODE,
-      partialFrame: true,
-    });
-    if (typeof onParseError === "function") onParseError(err, "");
-    return Buffer.alloc(0);
-  }
-  return next;
-}
-
 export function __testOwnerSourceRangeEvidence(coverageOwner, sinceId, toolArgs) {
   return ownerSourceRangeEvidence(coverageOwner, sinceId, toolArgs);
 }
@@ -4666,588 +4519,6 @@ export function __testOwnerWindowResponseRangeEvidence(result) {
 
 export function __testJsonlParseBuffer(buffer, onMessage, opts = {}) {
   return jsonlParseBuffer(buffer, onMessage, opts);
-}
-
-class PersistentMcpSession {
-  /** @param {Record<string, any>} [options] */
-  constructor({
-    id,
-    token,
-    claims,
-    bootConfig,
-    serverSpec,
-    agentOwned = false,
-    spawnImpl = spawn,
-  } = {}) {
-    this.id = id;
-    this.token = token;
-    this.claims = claims || {};
-    this.bootConfig = bootConfig || {};
-    this.serverSpec = serverSpec || null;
-    this.agentOwned = agentOwned === true;
-    this._spawn = spawnImpl;
-    this._proc = null;
-    this._stdoutBuffer = Buffer.alloc(0);
-    this._discardingOversizeFrame = false;
-    this._pending = new Map();
-    this._activeRequestId = null;
-    this._controlSession = null;
-    this._seq = 0;
-    this._consecutiveTimeouts = 0;
-    this._crashesSinceHealthy = 0;
-    this.startedAt = null;
-    this.lastExit = null;
-    this.prewarmedAt = null;
-    this.prewarmError = null;
-    this._prewarmPromise = null;
-    this.tokenVerified = !!claims?.__verified;
-    this.tokenSource = claims?.__source || (this.tokenVerified ? "local" : "registered");
-    const now = Date.now();
-    this.registeredAt = now;
-    this.updatedAt = now;
-    this.lastSeenAt = now;
-    this.expiresAt = Number.isFinite(Number(claims?.exp)) ? Number(claims.exp) * 1000 : null;
-    this.attachProof = this._newAttachProof();
-    this._gatewayBindingEpoch = 1;
-    this._atlasGateEventSeq = 0;
-    this._atlasGateEvents = [];
-    this._subAgentRouting = createSubAgentRoutingState();
-    this._plannerTriage = null;
-    this._atlasSymbolHandles = null;
-    this._atlasPromotedTraversalRefs = new Set();
-    this._activeToolRequests = new Map();
-    this._toolRequestSequence = 0;
-  }
-
-  beginToolRequest(toolName) {
-    const token = ++this._toolRequestSequence;
-    const name = String(toolName || "unknown").slice(0, 160);
-    const terminal = /^(?:tools\.)?(?:agent_handoff|web_research_handoff)$/.test(name);
-    const entry = { name, terminal, conflicts: new Set() };
-    for (const active of this._activeToolRequests.values()) {
-      if (terminal && !active.terminal) entry.conflicts.add(active.name);
-      if (!terminal && active.terminal) active.conflicts.add(name);
-    }
-    this._activeToolRequests.set(token, entry);
-    return token;
-  }
-
-  toolRequestConflicts(token) {
-    return [...(this._activeToolRequests.get(token)?.conflicts || [])];
-  }
-
-  endToolRequest(token) {
-    return this._activeToolRequests.delete(token);
-  }
-
-  _newAttachProof() {
-    return {
-      initializeSeenAt: null,
-      toolsListSeenAt: null,
-      toolsListCount: null,
-      toolsListNames: [],
-      toolsListSha256: null,
-      agentHandoffToolSchemaName: null,
-      agentHandoffToolSchemaSha256: null,
-      agentHandoffToolSchemaChars: null,
-      firstToolCallSeenAt: null,
-      firstToolName: null,
-      requestCount: 0,
-      lastRequestAt: null,
-      lastMethod: null,
-      lastOwnerError: null,
-    };
-  }
-
-  /** @param {Record<string, any>} [options] */
-  update({ token, claims, bootConfig, serverSpec, agentOwned = undefined } = {}) {
-    if (token) this.token = token;
-    if (claims) {
-      this.claims = claims;
-      this.tokenVerified = !!claims.__verified;
-      this.tokenSource = claims.__source || (this.tokenVerified ? "local" : "registered");
-      this.expiresAt = Number.isFinite(Number(claims?.exp)) ? Number(claims.exp) * 1000 : this.expiresAt;
-    }
-    if (bootConfig) {
-      const previousBindingKey = gatewayGateBindingKey(this.bootConfig, this.id);
-      const nextBindingKey = gatewayGateBindingKey(bootConfig, this.id);
-      this.bootConfig = bootConfig;
-      if (previousBindingKey !== nextBindingKey) {
-        this._gatewayBindingEpoch += 1;
-        this._atlasGateEventSeq = 0;
-        this._atlasGateEvents = [];
-        this._subAgentRouting = createSubAgentRoutingState();
-        this._plannerTriage = null;
-        this._atlasSymbolHandles = null;
-      }
-    }
-    if (serverSpec) this.serverSpec = serverSpec;
-    if (agentOwned !== undefined && (agentOwned === true) !== this.agentOwned) {
-      throw new Error("MCP session ownership cannot change after registration");
-    }
-    this.updatedAt = Date.now();
-    this.attachProof = this._newAttachProof();
-    this.touch();
-  }
-
-  touch(now = Date.now()) {
-    this.lastSeenAt = now;
-  }
-
-  snapshotAttachProof() {
-    return {
-      initializeSeenAt: this.attachProof.initializeSeenAt || null,
-      toolsListSeenAt: this.attachProof.toolsListSeenAt || null,
-      toolsListCount: this.attachProof.toolsListCount ?? null,
-      toolsListNames: Array.isArray(this.attachProof.toolsListNames)
-        ? [...this.attachProof.toolsListNames]
-        : [],
-      toolsListSha256: this.attachProof.toolsListSha256 || null,
-      agentHandoffToolSchemaName: this.attachProof.agentHandoffToolSchemaName || null,
-      agentHandoffToolSchemaSha256: this.attachProof.agentHandoffToolSchemaSha256 || null,
-      agentHandoffToolSchemaChars: this.attachProof.agentHandoffToolSchemaChars ?? null,
-      firstToolCallSeenAt: this.attachProof.firstToolCallSeenAt || null,
-      firstToolName: this.attachProof.firstToolName || null,
-      requestCount: this.attachProof.requestCount || 0,
-      lastRequestAt: this.attachProof.lastRequestAt || null,
-      lastMethod: this.attachProof.lastMethod || null,
-      lastOwnerError: this.attachProof.lastOwnerError || null,
-    };
-  }
-
-  noteRequest(message = {}, now = Date.now()) {
-    const method = String(message?.method || "").trim();
-    this.attachProof.requestCount += 1;
-    this.attachProof.lastRequestAt = now;
-    this.attachProof.lastMethod = method || null;
-    if (method === "initialize" && !this.attachProof.initializeSeenAt) {
-      this.attachProof.initializeSeenAt = now;
-      return "initialize";
-    }
-    if (method === "tools/call" && !this.attachProof.firstToolCallSeenAt) {
-      this.attachProof.firstToolCallSeenAt = now;
-      this.attachProof.firstToolName = String(message?.params?.name || "").trim() || null;
-      return "tools/call";
-    }
-    return null;
-  }
-
-  noteToolsList(response = null, now = Date.now()) {
-    const count = toolsListCount(response);
-    const names = toolsListNames(response);
-    const handoffSchema = agentHandoffSchemaTelemetry(response);
-    this.attachProof.toolsListSeenAt = this.attachProof.toolsListSeenAt || now;
-    this.attachProof.toolsListCount = count;
-    this.attachProof.toolsListNames = names;
-    this.attachProof.toolsListSha256 = toolsListDigest(names);
-    this.attachProof.agentHandoffToolSchemaName = handoffSchema?.name || null;
-    this.attachProof.agentHandoffToolSchemaSha256 = handoffSchema?.sha256 || null;
-    this.attachProof.agentHandoffToolSchemaChars = handoffSchema?.chars ?? null;
-    return count;
-  }
-
-  noteOwnerError(err, method = null, now = Date.now()) {
-    this.attachProof.lastOwnerError = {
-      at: now,
-      method: method || this.attachProof.lastMethod || null,
-      error: ownerErrorSummary(err),
-    };
-  }
-
-  noteAtlasGateEvent({ action = "", args = {}, ok = false, empty = false } = {}) {
-    const normalizedAction = String(action || "").trim();
-    if (!normalizedAction) return;
-    this._atlasGateEvents.push({
-      seq: ++this._atlasGateEventSeq,
-      action: normalizedAction,
-      args: cloneJson(args && typeof args === "object" ? args : {}),
-      ok: ok === true,
-      empty: empty === true,
-    });
-    if (this._atlasGateEvents.length > MAX_OWNER_ATLAS_GATE_EVENTS) {
-      this._atlasGateEvents.splice(0, this._atlasGateEvents.length - MAX_OWNER_ATLAS_GATE_EVENTS);
-    }
-  }
-
-  atlasGateEventsSnapshot() {
-    return cloneJson(this._atlasGateEvents) || [];
-  }
-
-  isExpired(now = Date.now()) {
-    // Agent-owned registration follows the authoritative in-process Agent
-    // lifecycle. Its bearer has a separate hard expiry at the RPC boundary
-    // and is rotated before reuse, so pruning registration by token age here
-    // would strand an otherwise reusable Agent before it can rotate.
-    if (this.agentOwned) return false;
-    const idleMs = now - (this.lastSeenAt || this.registeredAt || now);
-    if (this.expiresAt && now > this.expiresAt + SESSION_TOKEN_EXPIRY_GRACE_MS) {
-      return idleMs > SESSION_TOKEN_EXPIRY_GRACE_MS;
-    }
-    return idleMs > SESSION_ORPHAN_TTL_MS;
-  }
-
-  isTokenExpired(now = Date.now()) {
-    return !!this.expiresAt && now > this.expiresAt + TOKEN_CLOCK_SKEW_MS;
-  }
-
-  _rejectPending(error) {
-    for (const entry of this._pending.values()) {
-      clearTimeout(entry.timer);
-      entry.reject(error);
-    }
-    this._pending.clear();
-    this._activeRequestId = null;
-  }
-
-  ensureStarted() {
-    if (this._proc && this._proc.exitCode == null) return;
-    if (!this.serverSpec?.command) {
-      throw new Error("MCP session has no registered server spec");
-    }
-    // Respawn backoff: a spec that crashes on startup would otherwise hot-loop
-    // one heavy Node spawn per forwarded request. Allow the first respawn after
-    // a crash immediately (a single restart is normal and several tests depend
-    // on it), but once the child has died repeatedly without ever answering,
-    // throttle spawns to one per backoff window. The crash counter resets on any
-    // healthy response, so this only engages for a genuinely broken child.
-    if (this._crashesSinceHealthy >= 2
-      && this.lastExit?.at
-      && Date.now() - this.lastExit.at < GATEWAY_RESTART_BACKOFF_MS) {
-      const err = /** @type {Error & { code: string }} */ (
-        new Error("MCP session restarting; backing off after repeated exits")
-      );
-      err.code = "GATEWAY_RESTART_BACKOFF";
-      throw err;
-    }
-    const spec = this.serverSpec;
-    const proc = this._spawn(spec.command, spec.args || [], {
-      cwd: spec.cwd || process.cwd(),
-      env: spec.env || process.env,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
-    this._proc = proc;
-    this.startedAt = Date.now();
-    this.lastExit = null;
-    this._consecutiveTimeouts = 0;
-    this._stdoutBuffer = Buffer.alloc(0);
-    this._discardingOversizeFrame = false;
-    let finished = false;
-    const finish = ({ code = null, signal = null, error = null } = {}) => {
-      if (finished || this._proc !== proc) return;
-      finished = true;
-      this.lastExit = {
-        at: Date.now(),
-        code,
-        signal,
-        ...(error ? { error: ownerErrorSummary(error) } : {}),
-      };
-      if (this._proc === proc) this._proc = null;
-      this._crashesSinceHealthy += 1;
-      this._prewarmPromise = null;
-      this.prewarmedAt = null;
-      const failure = error || new Error(`MCP session exited (${code ?? signal ?? "unknown"})`);
-      this._rejectPending(failure);
-    };
-    const failStream = (error) => {
-      finish({ error });
-      try { proc.kill?.("SIGTERM"); } catch { /* best effort */ }
-    };
-    proc.stdin?.on?.("error", failStream);
-    proc.stdout?.on("data", (chunk) => {
-      if (this._proc !== proc) return;
-      this._handleStdout(chunk);
-    });
-    proc.stdout?.on?.("error", failStream);
-    proc.stderr?.on("data", (chunk) => {
-      try {
-        if (isPowershellClixmlProgressNoise(chunk)) return;
-        process.stderr.write(`[posse-mcp-owner:${this.id}] ${chunk}`);
-      } catch {
-        // diagnostics only
-      }
-    });
-    proc.stderr?.on?.("error", failStream);
-    proc.once("error", (error) => finish({ error }));
-    proc.once("exit", (code, signal) => finish({ code, signal }));
-    for (const frame of Array.isArray(spec.startupFrames) ? spec.startupFrames : []) {
-      this._write(frame);
-    }
-  }
-
-  request(message = {}, { signal = null } = {}) {
-    if (signal?.aborted) return Promise.reject(signal.reason || new Error("MCP request aborted"));
-    this.ensureStarted();
-    const id = message && Object.prototype.hasOwnProperty.call(message, "id") ? message.id : null;
-    const outbound = cloneJson(message);
-    if (id == null) {
-      this._write(outbound);
-      return Promise.resolve(null);
-    }
-    const internalId = `owner-${this.id}-${++this._seq}`;
-    outbound.id = internalId;
-    let onAbort;
-    return new Promise((resolve, reject) => {
-      this._pending.set(internalId, {
-        originalId: id,
-        resolve,
-        reject,
-        timer: null,
-        outbound,
-      });
-      onAbort = () => {
-        // A disconnected queued caller must never execute later. An already
-        // running call retains its promise, watchdog and serial slot so the
-        // owner processes its actual result instead of refunding active work
-        // as a transport failure merely because the HTTP client disconnected.
-        if (this._activeRequestId === internalId) return;
-        this._pending.delete(internalId);
-        reject(signal.reason || new Error("MCP request aborted"));
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-      this._startNextRequest();
-    }).finally(() => signal?.removeEventListener("abort", onAbort));
-  }
-
-  requestControl(message, options = {}) {
-    if (!MCP_CONTROL_METHODS.includes(message?.method)) throw new Error("MCP control child only accepts handshake methods");
-    this._controlSession ||= new PersistentMcpSession({
-      id: `${this.id}-control`, token: this.token, claims: this.claims,
-      bootConfig: this.bootConfig, serverSpec: this.serverSpec, spawnImpl: this._spawn,
-    });
-    this._controlSession.update({ serverSpec: this.serverSpec });
-    return this._controlSession.request(message, options);
-  }
-
-  _startNextRequest() {
-    if (this._activeRequestId || this._pending.size === 0) return;
-    const [id, entry] = this._pending.entries().next().value;
-    this._activeRequestId = id;
-    const tool = stripPosseMcpGatewayPrefix(entry.outbound?.params?.name);
-    // A tool's registered deadline may extend the default watchdog, never
-    // shorten it.
-    const timeoutMs = Math.max(
-      DEFAULT_REQUEST_TIMEOUT_MS,
-      MCP_TOOL_DEADLINE_MS[mcpToolDeadlineClass(tool)] || 0,
-    );
-    const onTimeout = () => {
-      // Retain the active entry after rejecting its caller: a late response
-      // releases the serial child and resets the watchdog. Queued requests
-      // cannot create additional strikes against that same slow operation.
-      this._consecutiveTimeouts += 1;
-      entry.reject(new Error(`MCP session request timed out after ${timeoutMs}ms`));
-      if (this._consecutiveTimeouts >= MAX_CONSECUTIVE_REQUEST_TIMEOUTS) {
-        this.stop({ force: true });
-        return;
-      }
-      entry.timer = setTimeout(onTimeout, timeoutMs);
-      entry.timer.unref?.();
-    };
-    entry.timer = setTimeout(onTimeout, timeoutMs);
-    entry.timer.unref?.();
-    try {
-      this._write(entry.outbound);
-    } catch (err) {
-      clearTimeout(entry.timer);
-      this._pending.delete(id);
-      this._activeRequestId = null;
-      entry.reject(err);
-      this._startNextRequest();
-    }
-  }
-
-  notify(message = {}) {
-    if (!this._proc || this._proc.exitCode != null || this._proc.killed) return false;
-    const outbound = cloneJson(message);
-    if (outbound && typeof outbound === "object") delete outbound.id;
-    try {
-      this._write(outbound);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  prewarm() {
-    if (this._prewarmPromise) return this._prewarmPromise;
-    this._prewarmPromise = (async () => {
-      this.ensureStarted();
-      await this.request({
-        jsonrpc: "2.0",
-        id: "owner-prewarm-init",
-        method: "initialize",
-        params: {
-          protocolVersion: "2024-11-05",
-          capabilities: {},
-          clientInfo: { name: "posse-mcp-owner", version: "1.0.0" },
-        },
-      });
-      await this.request({
-        jsonrpc: "2.0",
-        id: "owner-prewarm-tools",
-        method: "tools/list",
-        params: {},
-      });
-      this.prewarmedAt = Date.now();
-      this.prewarmError = null;
-      return true;
-    })().catch((err) => {
-      this.prewarmError = String(err?.message || err);
-      this._prewarmPromise = null;
-      throw err;
-    });
-    return this._prewarmPromise;
-  }
-
-  _write(message) {
-    if (!this._proc?.stdin || this._proc.stdin.destroyed) {
-      throw new Error("MCP session stdin is closed");
-    }
-    this._proc.stdin.write(`${JSON.stringify(message)}\n`, "utf8");
-  }
-
-  _handleStdout(chunk) {
-    let incoming = Buffer.from(chunk);
-    if (this._discardingOversizeFrame) {
-      // The rest of a frame already answered as too large.
-      const newlineIdx = incoming.indexOf(0x0a);
-      if (newlineIdx < 0) return;
-      incoming = incoming.subarray(newlineIdx + 1);
-      this._discardingOversizeFrame = false;
-    }
-    this._stdoutBuffer = Buffer.concat([this._stdoutBuffer, incoming]);
-    this._stdoutBuffer = jsonlParseBuffer(
-      this._stdoutBuffer,
-      (message) => this._handleMessage(message),
-      {
-        onParseError: (err) => {
-          try {
-            process.stderr.write(`[posse-mcp-owner:${this.id}] failed to parse session stdout: ${err?.message || err}\n`);
-          } catch {
-            // diagnostics only
-          }
-          if (err?.code !== MCP_FRAME_TOO_LARGE_CODE) return;
-          if (err.partialFrame) this._discardingOversizeFrame = true;
-          this._answerActiveRequestWithOversizeReply();
-        },
-      },
-    );
-  }
-
-  // The serial child has one request in flight, so an oversized frame is its
-  // reply. Answer it now; waiting for the watchdog would strike the child and
-  // eventually kill it for a request it already finished.
-  _answerActiveRequestWithOversizeReply() {
-    const id = this._activeRequestId;
-    const entry = id ? this._pending.get(id) : null;
-    if (!entry) return;
-    const text = `The tool result exceeded the ${JSONL_STDOUT_BUFFER_MAX_BYTES} byte transport limit and was discarded. Request a narrower range or a smaller file.`;
-    this._handleMessage(entry.outbound?.method === "tools/call"
-      ? { jsonrpc: "2.0", id, result: mcpToolErrorPayload(text, { code: "result_too_large", message: text }) }
-      : { jsonrpc: "2.0", id, error: { code: -32603, message: text } });
-  }
-
-  _handleMessage(message) {
-    const id = String(message?.id ?? "");
-    const entry = this._pending.get(id);
-    if (!entry) return;
-    this._pending.delete(id);
-    this._activeRequestId = null;
-    clearTimeout(entry.timer);
-    // The child answered — it is alive and responsive, so clear any accumulated
-    // timeout strikes and crash-loop history.
-    this._consecutiveTimeouts = 0;
-    this._crashesSinceHealthy = 0;
-    const restored = { ...message, id: entry.originalId };
-    entry.resolve(restored);
-    this._startNextRequest();
-  }
-
-  stop({ force = false } = {}) {
-    const proc = this._proc;
-    if (!proc || proc.exitCode != null || proc.killed) return false;
-    if (process.platform === "win32") {
-      try {
-        const args = ["/pid", String(proc.pid), "/T"];
-        if (force) args.push("/F");
-        const killer = this._spawn("taskkill", args, {
-          stdio: "ignore",
-          windowsHide: true,
-        });
-        killer.unref?.();
-        return true;
-      } catch {
-        // Fall through to the direct child kill.
-      }
-    }
-    try {
-      proc.kill(force ? "SIGKILL" : "SIGTERM");
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  close({ force = false, timeoutMs = 10000 } = {}) {
-    return Promise.all([
-      this._closeProcess({ force, timeoutMs }),
-      this._controlSession?.close({ force, timeoutMs }),
-    ]).then(([closed]) => closed);
-  }
-
-  _closeProcess({ force = false, timeoutMs = 10000 } = {}) {
-    const proc = this._proc;
-    if (!proc || proc.exitCode != null) return Promise.resolve(false);
-    return new Promise((resolve) => {
-      let settled = false;
-      let procExited = false;
-      let treeKillFinished = process.platform !== "win32";
-      const done = (value) => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        resolve(value);
-      };
-      const maybeDone = () => {
-        if (procExited && treeKillFinished) done(true);
-      };
-      const timer = setTimeout(() => {
-        try { proc.kill("SIGKILL"); } catch { /* best effort */ }
-        done(false);
-      }, Math.max(100, Number(timeoutMs) || 10000));
-      timer.unref?.();
-      proc.once("exit", () => {
-        procExited = true;
-        maybeDone();
-      });
-      try {
-        if (process.platform === "win32") {
-          const args = ["/pid", String(proc.pid), "/T"];
-          if (force) args.push("/F");
-          const killer = this._spawn("taskkill", args, {
-            stdio: "ignore",
-            windowsHide: true,
-          });
-          killer.once("close", (code) => {
-            treeKillFinished = true;
-            if (code !== 0 && !procExited) {
-              try { proc.kill(force ? "SIGKILL" : "SIGTERM"); } catch { done(false); }
-            }
-            maybeDone();
-          });
-          killer.once("error", () => {
-            treeKillFinished = true;
-            try { proc.kill(force ? "SIGKILL" : "SIGTERM"); } catch { done(false); }
-            maybeDone();
-          });
-        } else {
-          proc.kill(force ? "SIGKILL" : "SIGTERM");
-        }
-      } catch {
-        done(false);
-      }
-    });
-  }
 }
 
 export class PersistentMcpOwner {
@@ -6357,6 +5628,7 @@ export class PersistentMcpOwner {
           try {
             const result = await executeFinalReview(toolArgs, {
               context: { agentCallId: session?.bootConfig?.agentCallId },
+              signal: requestAbort.signal,
             });
             if (result?.status === FINAL_REVIEW_REVIEWER_STATUS.REVISED) {
               // Each bounce is a new review: the waiting reviewer gets a fresh
@@ -6556,9 +5828,14 @@ export class PersistentMcpOwner {
               trigger: "parent_evidence_threshold",
             });
           }
+          // Delegated evidence feeds a child's input, not this model.
           const finalizedResponse = delegatedEvidence
             ? routedResponse
-            : appendPlannerTriageNotice(routedResponse, session, policy, requested, requested.name || toolName);
+            : appendCodexSoftCheckpoint(
+                appendPlannerTriageNotice(routedResponse, session, policy, requested, requested.name || toolName),
+                session,
+                requested.name || toolName,
+              );
           sendResponse(res, 200, {
             ok: true,
             bootId: this.bootId,
@@ -6740,12 +6017,18 @@ export class PersistentMcpOwner {
         }
       }
       if (message.method === "tools/call" && mcpToolCallSuccess(response)) {
-        // A successful write keeps the runtime watchdog from killing a job
-        // that is still producing its change (bounded by a hard ceiling).
         const writtenTool = requestedToolPolicyName(
           String(message?.params?.name || ""),
           message?.params?.arguments || {},
         );
+        // A terminal handoff receipt ends the call: it neither carries the
+        // checkpoint nor spends it. Delegated evidence feeds a child's input.
+        if (!delegatedEvidence
+          && !(writtenTool.suite === "tools" && MCP_TERMINAL_HANDOFF_TOOLS.includes(writtenTool.name))) {
+          response = appendCodexSoftCheckpoint(response, session, String(message?.params?.name || ""));
+        }
+        // A successful write keeps the runtime watchdog from killing a job
+        // that is still producing its change (bounded by a hard ceiling).
         if (writtenTool.suite === "tools") {
           jobWriteActivity.noteToolCall(session?.bootConfig?.jobId, writtenTool.name);
         }
@@ -6787,7 +6070,7 @@ export class PersistentMcpOwner {
           )
         : null;
       const terminalHandoffReceipt = completedTool?.suite === "tools"
-        && ["agent_handoff", "web_research_handoff"].includes(completedTool.name)
+        && MCP_TERMINAL_HANDOFF_TOOLS.includes(completedTool.name)
         && mcpToolCallSuccess(response);
       // Handing off is the agent moving on from the file it edited last:
       // refresh it now so the assessor's ATLAS reads start from a current view.

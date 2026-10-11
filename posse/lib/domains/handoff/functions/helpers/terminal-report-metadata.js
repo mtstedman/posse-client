@@ -1,38 +1,17 @@
-import { DEV_MODE_ORDER } from "../../../../shared/policies/functions/dev-modes.js";
+import {
+  AGENT_HANDOFF_PLANNER_METADATA_ENUMS,
+  AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS,
+  AGENT_HANDOFF_PROFILES,
+  AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES,
+  AGENT_HANDOFF_RESEARCH_QUESTION_CATEGORIES,
+  AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES,
+  AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES,
+} from "../../../../catalog/handoff.js";
 import { detectSensitiveAgentHandoffText } from "../agent-handoff-boundaries.js";
 import { filterKnownHandoffFields } from "./field-diagnostics.js";
 import { normalizeResearchSymbolSeeds } from "./research-symbols.js";
 
-export const PLANNER_REPORT_METADATA_KEYS = Object.freeze([
-  "dev_mode",
-  "risk",
-  "risk_tags",
-  "scope_confidence",
-  "skills",
-  "deepthink_budget",
-  "model_tier",
-  "reasoning_effort",
-  "priority",
-  "skip_assessment",
-  "executed_by_planner",
-  "test_command",
-  "tests_to_run",
-  "write_tests",
-]);
-
-const RESEARCHER_PROFILES = new Set(["researcher.pipeline.v1", "researcher.report.v1"]);
-const PLANNER_METADATA_ENUMS = Object.freeze({
-  dev_mode: new Set(DEV_MODE_ORDER),
-  scope_confidence: new Set(["high", "medium", "low"]),
-  deepthink_budget: new Set(["low", "normal", "high", "xhigh"]),
-  model_tier: new Set(["cheap", "standard", "strong"]),
-  reasoning_effort: new Set(["low", "medium", "high"]),
-  priority: new Set(["low", "normal", "high", "urgent"]),
-});
-const RESEARCH_USEFULNESS = new Set(["primary", "supporting", "context", "low"]);
-const RESEARCH_EVIDENCE = new Set(["audited_file_read", "atlas", "search", "prior_research", "web"]);
-const CONFIDENCE = new Set(["high", "medium", "low"]);
-const QUESTION_CATEGORIES = new Set(["data-handling", "security", "convention", "config", "unclear-pattern"]);
+const RESEARCHER_PROFILES = new Set([AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT]);
 const HASH_REF_SELECTOR_RE = /^#[0-9a-z]{4,12}(?::L?[0-9]+-L?[0-9]+)?$/;
 function fail(code, message) {
   const err = new Error(message);
@@ -73,7 +52,7 @@ function stringArray(value, label, maxItems = 50, maxChars = 1000) {
 
 function enumString(value, label, allowed, maxChars = 80) {
   const normalized = boundedString(value, label, maxChars).toLowerCase();
-  if (!allowed.has(normalized)) {
+  if (!allowed.includes(normalized)) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} must be one of: ${[...allowed].join(", ")}`);
   }
   return normalized;
@@ -125,8 +104,8 @@ export function normalizeResearchData(value, label, profile) {
     return {
       path: boundedString(entry.path, `${label}.planner_file_priorities[${index}].path`, 500),
       rank: entry.rank,
-      usefulness: enumString(entry.usefulness, `${label}.planner_file_priorities[${index}].usefulness`, RESEARCH_USEFULNESS),
-      evidence: enumString(entry.evidence, `${label}.planner_file_priorities[${index}].evidence`, RESEARCH_EVIDENCE),
+      usefulness: enumString(entry.usefulness, `${label}.planner_file_priorities[${index}].usefulness`, AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES),
+      evidence: enumString(entry.evidence, `${label}.planner_file_priorities[${index}].evidence`, AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES),
       reason: boundedString(entry.reason, `${label}.planner_file_priorities[${index}].reason`, 240),
     };
   });
@@ -153,7 +132,7 @@ export function normalizeResearchData(value, label, profile) {
       fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.scope_estimate.likely_touch_count must be an integer from 0 through 1000`);
     }
     scopeEstimate = {
-      confidence: enumString(estimate.confidence, `${label}.scope_estimate.confidence`, CONFIDENCE),
+      confidence: enumString(estimate.confidence, `${label}.scope_estimate.confidence`, AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES),
       likely_touch_count: estimate.likely_touch_count,
       unknowns: stringArray(estimate.unknowns, `${label}.scope_estimate.unknowns`),
       scope_reasons: stringArray(estimate.scope_reasons, `${label}.scope_estimate.scope_reasons`),
@@ -193,7 +172,7 @@ export function normalizeResearchData(value, label, profile) {
       const entry = exactKeys(raw, ["id", "category", "question", "context", "impact"], `${label}.question_details[${index}]`);
       return {
         id: boundedString(entry.id, `${label}.question_details[${index}].id`, 40),
-        category: enumString(entry.category, `${label}.question_details[${index}].category`, QUESTION_CATEGORIES),
+        category: enumString(entry.category, `${label}.question_details[${index}].category`, AGENT_HANDOFF_RESEARCH_QUESTION_CATEGORIES),
         question: boundedString(entry.question, `${label}.question_details[${index}].question`, 1000),
         context: boundedString(entry.context, `${label}.question_details[${index}].context`, 1000),
         impact: boundedString(entry.impact, `${label}.question_details[${index}].impact`, 1000),
@@ -229,13 +208,13 @@ export function normalizeResearchData(value, label, profile) {
 }
 
 export function normalizePlannerReportMetadata(report, label, profile) {
-  const present = PLANNER_REPORT_METADATA_KEYS.filter((key) => report[key] != null);
+  const present = AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS.filter((key) => report[key] != null);
   if (present.length === 0) return {};
-  if (profile !== "planner.plan.v1") {
+  if (profile !== AGENT_HANDOFF_PROFILES.PLANNER_PLAN) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.${present[0]} is valid only for planner reports`);
   }
   const out = {};
-  for (const [key, allowed] of Object.entries(PLANNER_METADATA_ENUMS)) {
+  for (const [key, allowed] of Object.entries(AGENT_HANDOFF_PLANNER_METADATA_ENUMS)) {
     if (report[key] != null) out[key] = enumString(report[key], `${label}.${key}`, allowed);
   }
   if (report.risk != null) {

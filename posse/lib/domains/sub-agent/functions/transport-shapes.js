@@ -131,6 +131,9 @@ export function publicEntry(entry) {
       handle: entry.handle,
       status: entry.status,
       error: entry.error,
+      ...(entry.profile === RESEARCH_CHILD_PROFILE && entry.status !== "cancelled"
+        ? { retry_guidance: "An identical dispatch replays this settled result. If research is still needed and child budget remains, narrow or reword the question; otherwise continue with available evidence or report the gap." }
+        : {}),
       ...coverage,
       ...(entry.usage ? { usage: entry.usage } : {}),
     };

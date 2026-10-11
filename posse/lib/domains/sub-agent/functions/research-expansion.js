@@ -1,5 +1,5 @@
 import { HASH_REF_ALIAS_MAX_CHARS } from "../../../catalog/hash-store.js";
-import { SUB_AGENT_LIMITS } from "../../../catalog/sub-agent.js";
+import { RESEARCH_CHILD_PROFILE, SUB_AGENT_LIMITS } from "../../../catalog/sub-agent.js";
 import {
   materializeAgentHandoffEvidenceSelector,
   parseAgentHandoffEvidenceSelector,
@@ -180,7 +180,7 @@ export function expandResearchBatchEvidence(batch, {
   const occurrences = [];
 
   for (const entry of batch.entries || []) {
-    if (entry.status !== "completed" || entry.profile !== "research_investigation.v1"
+    if (entry.status !== "completed" || entry.profile !== RESEARCH_CHILD_PROFILE
       || entry.agentType !== "code" || !entry.sourceContext) continue;
     let claimNumber = 0;
     for (const handoff of entry.packet?.handoffs || []) {
@@ -345,6 +345,7 @@ export function expandResearchBatchEvidence(batch, {
   const result = {
     files,
     brief,
+    ...(files.length && brief ? { usage_guidance: "This brief is already visible. Cite files[].ref without rereading; use an issued traversal_ref only for source beyond the shown hunks." } : {}),
     expanded_chars: brief.length,
     expanded_hunks: files.reduce((sum, file) => sum + file.hunks.length, 0),
     omitted: occurrences.filter((occurrence) => occurrence.evidence.expanded !== true).length,

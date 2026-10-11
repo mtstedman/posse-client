@@ -44,10 +44,6 @@ export function atlasEmbeddingModelCacheDir(modelConfig, homeDir = os.homedir())
  * @param {string} modelCacheDir
  * @returns {string} absolute model root for posse-ml's --model-root
  */
-export function ensureJinaMlModelRoot(modelCacheDir) {
-  return ensureAtlasEmbeddingModelRoot(ATLAS_JINA_MODEL, modelCacheDir);
-}
-
 export function ensureAtlasEmbeddingModelRoot(modelConfig, modelCacheDir) {
   const cacheDir = path.resolve(String(modelCacheDir || ""));
   if (!String(modelCacheDir || "").trim() || !directoryExists(cacheDir)) {

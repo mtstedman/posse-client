@@ -5,7 +5,29 @@
 import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole } from "../../settings/functions/repository-settings.js";
 import fs from "fs";
 import path from "path";
-import { PLANNER_ALLOWED_JOB_TYPES } from "../../../catalog/job.js";
+import { ARTIFACT_TASK_MODE_VALUES } from "../../../catalog/artifact.js";
+import {
+  JOB_MODEL_TIERS,
+  JOB_REASONING_EFFORTS,
+  PLANNER_ALLOWED_JOB_TYPES,
+  PLANNER_MODEL_TIER_ALIASES,
+  PLANNER_REASONING_EFFORT_ALIASES,
+} from "../../../catalog/job.js";
+import { DEFAULT_DEV_MODE } from "../../../catalog/dev-mode.js";
+import {
+  COMMON_WEB_ROOTS,
+  FRONTEND_DESIGN_LOGIC_PHRASES,
+  FRONTEND_DESIGN_UI_SURFACE_PHRASES,
+  FRONTEND_DESIGN_VISUAL_PHRASES,
+  SKILL_INFERENCE_BROWSER_SCRIPT_EXTENSIONS,
+  SKILL_INFERENCE_COMPONENT_EXTENSIONS,
+  SKILL_INFERENCE_LOGIC_BASENAME_WORDS,
+  SKILL_INFERENCE_LOGIC_DIRECTORIES,
+  SKILL_INFERENCE_MARKUP_EXTENSIONS,
+  SKILL_INFERENCE_STYLESHEET_EXTENSIONS,
+  SKILL_INFERENCE_TEST_BASENAME_PATTERN,
+  SKILL_INFERENCE_TEST_DIRECTORIES,
+} from "../../../catalog/skill-inference.js";
 import { DB_TASK_PRE_MERGE_POLICIES, SETTING_KEYS } from "../../../catalog/settings.js";
 import { getIntSetting } from "../../queue/functions/index.js";
 import {
@@ -29,7 +51,7 @@ import {
 } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { snapshotPlanAnchor } from "../../verification/functions/plan-anchor.js";
-import { resolveRepositoryVerificationPlan, verificationPlanSnapshot } from "../../verification/functions/verification-plan.js";
+import { plannedRepositoryVerificationSnapshot } from "../../verification/functions/verification-plan.js";
 import {
   getAvailableProviders,
   getProviderMap,
@@ -87,7 +109,7 @@ import {
   NO_IMAGE_PROVIDERS_AVAILABLE,
   resolveImageExecutionProvider as resolveImageExecutionProviderFromModule,
 } from "../../providers/functions/execution-routing.js";
-import { DEFAULT_DEV_MODE, isValidDevMode, normalizeDevMode } from "../../../shared/policies/functions/dev-modes.js";
+import { isValidDevMode, normalizeDevMode } from "../../../shared/policies/functions/dev-modes.js";
 import {
   buildDeterministicDelegations as buildDeterministicDelegationsFromModule,
   delegationRoleForJobType as delegationRoleForJobTypeFromModule,
@@ -327,29 +349,75 @@ function taskTextForSkillInference(task = {}) {
   ].filter(Boolean).join("\n").toLowerCase();
 }
 
-function taskPathsForSkillInference(task = {}) {
-  return [
-    ...(Array.isArray(task.files_to_modify) ? task.files_to_modify : []),
-    ...(Array.isArray(task.files_to_create) ? task.files_to_create : []),
-    ...(Array.isArray(task.files_to_delete) ? task.files_to_delete : []),
-  ].map((filePath) => String(filePath || "").replace(/\\/g, "/").toLowerCase());
+function skillInferencePaths(paths) {
+  return (Array.isArray(paths) ? paths : [])
+    .map((filePath) => String(filePath || "").trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, ""))
+    .filter(Boolean);
 }
 
+function pathHasExtension(lowerPath, extensions) {
+  return extensions.some((ext) => lowerPath.endsWith(ext));
+}
+
+function isSkillInferenceTestPath(filePath) {
+  const lower = filePath.toLowerCase();
+  const dirs = lower.split("/").slice(0, -1);
+  return dirs.some((dir) => SKILL_INFERENCE_TEST_DIRECTORIES.includes(dir))
+    || SKILL_INFERENCE_TEST_BASENAME_PATTERN.test(lower);
+}
+
+// Stem tokens split on separators and camelCase boundaries, so basename words
+// match whole tokens only.
+function stemTokens(filePath) {
+  const stem = filePath.split("/").pop().replace(/\.[^.]*$/, "");
+  return stem.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[\s._-]+/).filter(Boolean);
+}
+
+function isLogicModulePath(filePath) {
+  const dirs = filePath.toLowerCase().split("/").slice(0, -1);
+  if (dirs.some((dir) => SKILL_INFERENCE_LOGIC_DIRECTORIES.includes(dir))) return true;
+  const tokens = stemTokens(filePath);
+  if (tokens.length > 1 && tokens[0] === "use") return true; // hook: useDebounce, use-debounce
+  return tokens.some((token) => SKILL_INFERENCE_LOGIC_BASENAME_WORDS.includes(token.toLowerCase()));
+}
+
+function countPhraseHits(patterns, text) {
+  return patterns.filter((pattern) => pattern.test(text)).length;
+}
+
+// The frontend-design skill follows visual responsibility, judged from the
+// files the task writes and the weight of its stated work. A stylesheet edit
+// is visual work by itself. A template or component that is not a logic
+// module needs UI phrasing that outweighs logic phrasing; a brand-new one
+// with no phrasing either way is UI. A plain script under a web root also
+// needs an explicit visual phrase. Deleted and test files never count.
 export function shouldInferFrontendDesignSkill(task, { finalJobType, taskMode } = {}) {
   if (finalJobType !== "dev" || taskMode !== "code") return false;
+  const created = new Set(skillInferencePaths(task.files_to_create));
+  const touched = [...skillInferencePaths(task.files_to_modify), ...created]
+    .filter((filePath) => !isSkillInferenceTestPath(filePath));
+  if (touched.length === 0) return false;
+  if (touched.some((filePath) => pathHasExtension(filePath.toLowerCase(), SKILL_INFERENCE_STYLESHEET_EXTENSIONS))) return true;
+
   const text = taskTextForSkillInference(task);
-  const title = String(task.title || "").toLowerCase();
-  const paths = taskPathsForSkillInference(task);
-  const frontendExt = /\.(css|scss|sass|less|html|htm|jsx|tsx|vue|svelte)$/;
-  const frontendPath = paths.some((filePath) => frontendExt.test(filePath));
-  const browserJsPath = paths.some((filePath) => /^htdocs\/.*\.js$/.test(filePath));
-  // Rendering and generic create/update work can describe application logic.
-  // Infer the design skill only from a stated visual responsibility.
-  const explicitVisualWork = /\b(?:visual design|page design|ui design|ux design|layout|responsive(?: design)?|stylesheet|typography|spacing|contrast|color palette|theme|accessible interface|accessibility of (?:the )?(?:page|site|interface)|visual polish|styling)\b/.test(text);
-  const titledDesignTask = /\b(?:design|style|restyle|redesign|polish)\b.{0,45}\b(?:page|site|screen|interface|layout|navigation|hero|footer|header|visual|component|ui|ux)\b/.test(title);
-  const titledUiBuild = /\b(?:build|create|implement|update|improve)\b.{0,45}\b(?:user interface|website|web page|landing page|screen|dashboard|visual component)\b/.test(title);
-  const designIntent = explicitVisualWork || titledDesignTask || titledUiBuild;
-  return (frontendPath || browserJsPath) && designIntent;
+  const visual = countPhraseHits(FRONTEND_DESIGN_VISUAL_PHRASES, text);
+  const ui = visual + countPhraseHits(FRONTEND_DESIGN_UI_SURFACE_PHRASES, text);
+  const logic = countPhraseHits(FRONTEND_DESIGN_LOGIC_PHRASES, text);
+  const uiFiles = touched.filter((filePath) => {
+    const lower = filePath.toLowerCase();
+    return (pathHasExtension(lower, SKILL_INFERENCE_MARKUP_EXTENSIONS)
+      || pathHasExtension(lower, SKILL_INFERENCE_COMPONENT_EXTENSIONS))
+      && !isLogicModulePath(filePath);
+  });
+  if (uiFiles.length > 0) {
+    if (ui > logic) return true;
+    return ui === 0 && logic === 0 && uiFiles.some((filePath) => created.has(filePath));
+  }
+  const webRoots = COMMON_WEB_ROOTS.filter(Boolean);
+  const browserScript = touched.some((filePath) => pathHasExtension(filePath.toLowerCase(), SKILL_INFERENCE_BROWSER_SCRIPT_EXTENSIONS)
+    && webRoots.includes(filePath.split("/")[0].toLowerCase())
+    && !isLogicModulePath(filePath));
+  return browserScript && visual > 0 && ui > logic;
 }
 
 function mergeSkillId(skillIds, skillId) {
@@ -360,7 +428,7 @@ function mergeSkillId(skillIds, skillId) {
 export function createJobsFromPlan(worker, planJob, tasks, {
   atlasDevBriefsEnabled: _atlasDevBriefsEnabled = false,
   sourceHashRefContext = null,
-  fileKindProjectDir = worker.projectDir,
+  planReadRoot = worker.projectDir,
   artifactTaskSlug = (title, mode) => `${String(mode || "task")}-${String(title || "task")}`,
   buildIntermediateReportTask = (task) => task,
   createPlanApprovalGate = createPlanApprovalGateFromModule,
@@ -550,15 +618,6 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       // gates and other coordination jobs are runtime-owned.
       // Defense-in-depth: LLMs can conflate task_mode values with job_type (e.g. "content").
       const PLANNER_ALLOWED_TYPES = PLANNER_ALLOWED_JOB_TYPES;
-      const VALID_TIERS = new Set(["cheap", "standard", "strong"]);
-      const VALID_EFFORTS = new Set(["low", "medium", "high"]);
-      // LLMs confuse the two enum sets — normalize crossed values before validation
-      const TIER_SYNONYMS = { low: "cheap", medium: "standard", high: "strong", max: "strong", premium: "high",
-        haiku: "cheap", sonnet: "standard", opus: "strong",
-        "1": "cheap", "2": "standard", "3": "strong",
-        mid: "standard", lo: "cheap", hi: "strong" };
-      const EFFORT_SYNONYMS = { cheap: "low", standard: "medium", strong: "high",
-        mid: "medium", lo: "low", hi: "high" };
       let createdCount = 0;
       const underScopedDroppedTitles = [];
       const researchCandidateFiles = new Set();
@@ -1143,7 +1202,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: removed ${protectedScopeOmissions.length} protected .env scope target(s) from task "${t.title}"`,
           );
         }
-        const fileKindValidation = reconcilePlannerFileKinds(t, fileKindProjectDir, {
+        const fileKindValidation = reconcilePlannerFileKinds(t, planReadRoot, {
           tasks,
           taskIndex: i,
         });
@@ -1277,8 +1336,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           t.task_mode = "code";
         }
         // LLMs may put task_mode values in job_type — route to artificer
-        const ARTIFACT_JOB_TYPE_PIVOTS = new Set(["content", "image", "report", "intake_processing"]);
-        if (ARTIFACT_JOB_TYPE_PIVOTS.has(t.job_type)) {
+        if (ARTIFACT_TASK_MODE_VALUES.includes(t.job_type)) {
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: pivoted job_type "${t.job_type}" → "artificer" (task_mode="${t.job_type}") in task "${t.title}"`);
           if (!t.task_mode || t.task_mode === "code") t.task_mode = t.job_type;
           t.job_type = "artificer";
@@ -1309,26 +1367,28 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           createdCount++;
           continue;
         }
+        // Planner output can cross the tier and effort enums; resolve known
+        // aliases before checking the persisted job values.
         const normalizeTierAlias = (value) => {
           let current = value;
           for (let i = 0; i < 4; i++) {
-            if (typeof current !== "string" || !Object.hasOwn(TIER_SYNONYMS, current)) break;
-            current = TIER_SYNONYMS[current];
+            if (typeof current !== "string" || !Object.hasOwn(PLANNER_MODEL_TIER_ALIASES, current)) break;
+            current = PLANNER_MODEL_TIER_ALIASES[current];
           }
           return current;
         };
-        const usedTierSynonym = typeof t.model_tier === "string" && Object.hasOwn(TIER_SYNONYMS, t.model_tier);
+        const usedTierSynonym = typeof t.model_tier === "string" && Object.hasOwn(PLANNER_MODEL_TIER_ALIASES, t.model_tier);
         const rawTier = usedTierSynonym ? normalizeTierAlias(t.model_tier) : t.model_tier;
-        const modelTier = VALID_TIERS.has(rawTier) ? rawTier : getDefaultModelTierForRole(jobType);
+        const modelTier = JOB_MODEL_TIERS.includes(rawTier) ? rawTier : getDefaultModelTierForRole(jobType);
       const plannerComplexityScore = normalizePlannerScore(t.planner_complexity_score ?? t.complexity);
       const plannerRiskScore = normalizePlannerScore(t.planner_risk_score ?? t.risk);
       const plannerVerificationScore = normalizePlannerScore(t.planner_failure_cost_score ?? t.verification_difficulty);
         if (t.model_tier && !usedTierSynonym && t.model_tier !== modelTier) {
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: normalized model_tier "${t.model_tier}" → "${modelTier}" in task "${t.title}"`);
         }
-        const usedEffortSynonym = typeof t.reasoning_effort === "string" && Object.hasOwn(EFFORT_SYNONYMS, t.reasoning_effort);
-        const rawEffort = usedEffortSynonym ? EFFORT_SYNONYMS[t.reasoning_effort] : t.reasoning_effort;
-        const baseReasoningEffort = VALID_EFFORTS.has(rawEffort) ? rawEffort : getDefaultReasoningEffortForRole(jobType);
+        const usedEffortSynonym = typeof t.reasoning_effort === "string" && Object.hasOwn(PLANNER_REASONING_EFFORT_ALIASES, t.reasoning_effort);
+        const rawEffort = usedEffortSynonym ? PLANNER_REASONING_EFFORT_ALIASES[t.reasoning_effort] : t.reasoning_effort;
+        const baseReasoningEffort = JOB_REASONING_EFFORTS.includes(rawEffort) ? rawEffort : getDefaultReasoningEffortForRole(jobType);
         const taskHasExplicitBudget = t.deepthink_budget != null || t.research_budget != null || t.deepthink != null;
         const taskBudgetSource = t.deepthink_budget != null
           ? "deepthink_budget"
@@ -2079,7 +2139,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         const declaredTestCommand = typeof t.test_command === "string" ? t.test_command.trim() : "";
         const requestedTestsToRun = Array.isArray(t.tests_to_run) ? t.tests_to_run : [];
         const unitTestCapability = requestedTestsToRun.length > 0
-          ? discoverUnitTestCapability({ projectDir: worker.projectDir })
+          ? discoverUnitTestCapability({ projectDir: planReadRoot })
           : null;
         const compiledTestsToRun = [...new Set(requestedTestsToRun
           .map((value) => String(value || "").trim().replace(/\\/g, "/"))
@@ -2090,7 +2150,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           if (declaredTestCommand) {
             const testCommandValidation = validatePlannerTestCommand(declaredTestCommand);
             const repositoryValidation = testCommandValidation.ok
-              ? validatePlannerTestCommandForRepository(declaredTestCommand, worker.projectDir)
+              ? validatePlannerTestCommandForRepository(declaredTestCommand, planReadRoot)
               : testCommandValidation;
             plannerTestCommandValid = repositoryValidation.ok;
             if (testCommandValidation.ok && !repositoryValidation.ok) {
@@ -2130,11 +2190,13 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         }
         const compiledTestCommand = pinnedTestCommand
           || (rejectedPlannerTestCommand ? null : (t.test_command || null));
+        // The registry the planner read, not the main checkout: a replan or
+        // follow-up plan reads the work item's own tree.
         const repositoryVerificationSnapshot = shouldApplyExecutionPolicy
-          ? verificationPlanSnapshot(resolveRepositoryVerificationPlan({
-              projectDir: worker.projectDir,
-              validateCommand: (command) => validatePlannerTestCommandForRepository(command, worker.projectDir),
-            }))
+          ? plannedRepositoryVerificationSnapshot({
+              projectDir: planReadRoot,
+              validateCommand: (command) => validatePlannerTestCommandForRepository(command, planReadRoot),
+            })
           : null;
         const executionPolicy = shouldApplyExecutionPolicy
           ? resolveTaskExecutionPolicy({
@@ -2143,8 +2205,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               taskMode,
               currentModelTier: modelTier,
               currentReasoningEffort: reasoningEffort,
-              plannerModelTierExplicit: VALID_TIERS.has(rawTier),
-              plannerReasoningEffortExplicit: VALID_EFFORTS.has(rawEffort),
+              plannerModelTierExplicit: JOB_MODEL_TIERS.includes(rawTier),
+              plannerReasoningEffortExplicit: JOB_REASONING_EFFORTS.includes(rawEffort),
               taskAbPinnedTestCommand: Boolean(pinnedTestCommand),
               plannerTestCommandValid,
             })
@@ -2193,7 +2255,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               taskSpec: compiledTaskSpec,
             });
         const planAnchor = finalJobType === "dev" && taskMode === "code"
-          ? snapshotPlanAnchor(worker.projectDir, [
+          ? snapshotPlanAnchor(planReadRoot, [
               ...(t.files_to_modify || []),
               ...(t.files_to_create || []),
               ...(t.files_to_delete || []),

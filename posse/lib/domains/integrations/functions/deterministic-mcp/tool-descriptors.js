@@ -73,6 +73,10 @@ import {
   TOOL_SUB_AGENT_NEXT_INPUT,
   TOOL_DISPATCH_AGENT,
   TOOL_DISPATCH_AGENT_PLANNER,
+  TOOL_FINAL_REVIEW_DEV,
+  TOOL_FINAL_REVIEW_ASSESSOR,
+  TOOL_RUN_SCOPED_CHECKS_ASSESSOR,
+  TOOL_REQUEST_SCOPE_DEV,
   TOOL_WEB_RESEARCH_HANDOFF,
 } from "../../../../catalog/native-tools.js";
 
@@ -580,12 +584,12 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       // allowWrite:false): read/inspect tools plus project_db_query — whose
       // write capability comes from the projectDbWrite override, not the
       // file-write grant. No file mutation tools on this lane.
-      read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "project_db_query"],
+      read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "project_db_query"],
       // Exact files_to_create are materialized as empty files before a code
       // dev/fix provider starts, then moved into files_to_modify. write_file
       // remains registered for compatibility/artificer output but must not be
       // issued on this surface; edit_file can populate the empty file.
-      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "request_scope", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_unit_test", "project_db_query"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "request_scope", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_unit_test", "project_db_query"],
     }),
     artificer: Object.freeze({
       read: ["ack_operator_feedback"],
@@ -609,8 +613,8 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     // item itself; the issued capability and operator grant decide whether
     // that is read-only or read/write.
     planner: Object.freeze({
-      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "run_unit_test", "project_db_query"],
-      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "run_unit_test", "project_db_query"],
+      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "run_unit_test", "project_db_query"],
+      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "run_unit_test", "project_db_query"],
     }),
     // Internal one-turn JSON model passes are not Jobs and therefore cannot
     // possess an Agent-bound MCP gate. Their prompts explicitly prohibit tool
@@ -850,9 +854,22 @@ export function getToolSchemaForRole(name, role, {
   compactV4 = false,
   requireResearcherCoverage = false,
   researchInvestigation = false,
+  plannerMaxChildren = null,
 } = {}) {
+  if (role === "assessor") {
+    if (name === "final_review") return TOOL_FINAL_REVIEW_ASSESSOR;
+    if (name === "run_scoped_checks") return TOOL_RUN_SCOPED_CHECKS_ASSESSOR;
+  }
+  if (["dev", "fix"].includes(role)) {
+    if (name === "final_review") return TOOL_FINAL_REVIEW_DEV;
+    if (name === "request_scope") return TOOL_REQUEST_SCOPE_DEV;
+  }
   if (name === "dispatch_agent" && role === "planner" && researchInvestigation) {
-    return TOOL_DISPATCH_AGENT_PLANNER;
+    const schema = structuredClone(TOOL_DISPATCH_AGENT_PLANNER);
+    if (Number.isInteger(plannerMaxChildren) && plannerMaxChildren >= 1) {
+      schema.parameters.properties.requests.maxItems = plannerMaxChildren;
+    }
+    return schema;
   }
   if (name !== "agent_handoff") return getToolSchema(name);
   return getAgentHandoffToolSchemaForRole(role, {
@@ -951,7 +968,7 @@ export function getDeterministicMcpToolNames(role, {
   if (role === "subagent") return ["sub_agent_next_input", "agent_handoff"];
   if (!roleUsesDeterministicReadMcp(role)) return [];
   if (role === "preflight") return [];
-  const tools = [...DETERMINISTIC_READ_TOOLS];
+  const tools = DETERMINISTIC_READ_TOOLS.filter((name) => !["planner", "dev", "fix"].includes(role) || name !== "hash_file");
   if (customTools) tools.unshift("custom_tools");
   if (roleUsesDeterministicWriteMcp(role)) {
     tools.push(...DETERMINISTIC_WRITE_TOOLS.filter((name) => (
@@ -1178,6 +1195,25 @@ export function projectAtlasToolDefinitionForRuntime(schema = {}, {
   codeWindowPolicy = null,
 } = {}) {
   const normalizedAction = normalizeAtlasActionName(action || schema?.name);
+  if (normalizedAction === "symbol.get") {
+    const projected = cloneJson(schema);
+    for (const key of ["parameters", "inputSchema"]) {
+      const budget = projected?.[key]?.properties?.maxTokens;
+      if (budget) budget.maximum = ATLAS_TOOL_DEFS_RAW["symbol.get"].parameters.properties.maxTokens.maximum;
+    }
+    return projected;
+  }
+  if (normalizedAction === "code.skeleton") {
+    const projected = cloneJson(schema);
+    for (const schemaKey of ["parameters", "inputSchema"]) {
+      const properties = projected?.[schemaKey]?.properties;
+      if (!properties) continue;
+      for (const [field, definition] of Object.entries(ATLAS_TOOL_DEFS_RAW["code.skeleton"].parameters.properties)) {
+        if (definition.internalOnly === true && properties[field]) properties[field].internalOnly = true;
+      }
+    }
+    return projected;
+  }
   if (normalizedAction !== "code.window" || !codeWindowPolicy) return schema;
   const projected = cloneJson(schema);
   const policy = normalizeAtlasCodeWindowPolicy(codeWindowPolicy);

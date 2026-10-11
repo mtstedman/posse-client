@@ -17,34 +17,40 @@
 import fs from "fs";
 import path from "path";
 import Database from "better-sqlite3";
+import {
+  PROJECT_DB_CONFIG_TABLE,
+  PROJECT_DB_LEGACY_MUTATING_PERMISSIONS,
+  PROJECT_DB_PERMISSIONS,
+  PROJECT_DB_PERMISSIONS_VERSION,
+  PROJECT_DB_TYPES,
+  PROJECT_DB_TYPE_LIST_SQL,
+} from "../../../../../catalog/project-db.js";
 import { getRuntimeDbPath } from "../../../../../domains/runtime/functions/paths.js";
 
-export const PROJECT_DB_TYPES = Object.freeze(["sqlite", "postgres", "mysql"]);
+export {
+  PROJECT_DB_CONFIG_TABLE,
+  PROJECT_DB_PERMISSIONS,
+  PROJECT_DB_PERMISSIONS_VERSION,
+  PROJECT_DB_TYPES,
+} from "../../../../../catalog/project-db.js";
 
 // The two permission scopes the operator can grant. READ covers SELECT and the
 // read-only inspection verbs (PRAGMA/EXPLAIN/SHOW/DESCRIBE); WRITE covers
 // UPDATE, INSERT, DELETE, CREATE, and ALTER — see permissions.js. WRITE does
 // not imply READ. DROP/TRUNCATE and the rest are always blocked in
 // permissions.js.
-export const PROJECT_DB_PERMISSIONS = Object.freeze(["read", "write"]);
-
 // Grant scheme version stamped on the row whenever the operator saves
 // permissions. Version 1 was the per-verb scheme, where `write` meant UPDATE
 // only and INSERT/DELETE/CREATE/ALTER were separate grants. Reading a version 1
 // `write` as today's broad `write` would widen authority the operator never
 // gave, so every version 1 mutating grant is SUSPENDED: the row keeps only
 // `read` until the operator saves permissions again under this scheme.
-export const PROJECT_DB_PERMISSIONS_VERSION = 2;
-const LEGACY_MUTATING_PERMISSIONS = Object.freeze(["write", "insert", "delete", "create", "alter"]);
-
-export const PROJECT_DB_CONFIG_TABLE = "project_db_config";
-
 // Single-row table (id is pinned to 1): exactly one project DB per repo.
 export const PROJECT_DB_CONFIG_DDL = `
   CREATE TABLE IF NOT EXISTS ${PROJECT_DB_CONFIG_TABLE} (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
-    db_type TEXT CHECK (db_type IS NULL OR db_type IN ('sqlite', 'postgres', 'mysql')),
+    db_type TEXT CHECK (db_type IS NULL OR db_type IN (${PROJECT_DB_TYPE_LIST_SQL})),
     host TEXT,
     port INTEGER,
     database TEXT,
@@ -84,7 +90,7 @@ function ensureTable(db) {
 
 function legacyMutatingGrants(value) {
   const tokens = new Set(String(value || "").split(",").map((entry) => entry.trim().toLowerCase()));
-  return LEGACY_MUTATING_PERMISSIONS.filter((perm) => tokens.has(perm));
+  return PROJECT_DB_LEGACY_MUTATING_PERMISSIONS.filter((perm) => tokens.has(perm));
 }
 
 export function normalizePermissions(value) {

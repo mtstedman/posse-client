@@ -18,9 +18,8 @@ export const providerRegistry = new ProviderRegistry({ aliases: PROVIDER_ALIASES
 providerRegistry.register("claude", claude);
 providerRegistry.register("posse-local", posseLocal);
 
-// Optional providers are loaded best-effort. Missing dependencies (e.g. no
-// openai SDK installed, or its transitive `agentkeepalive` shim pruned from
-// node_modules) become load errors on the registry, not boot failures. The
+// Optional providers are loaded best-effort. Missing Node dependencies become
+// load errors on the registry, not boot failures. The
 // loader table is the single source of truth for re-loading a provider after a
 // missing dependency has been repaired (see reloadOptionalProvider).
 const OPTIONAL_PROVIDER_LOADERS = Object.freeze({
@@ -42,9 +41,8 @@ for (const [name, load] of Object.entries(OPTIONAL_PROVIDER_LOADERS)) {
 /**
  * Canonical names of optional providers whose CURRENT load error is a
  * missing-module failure (ERR_MODULE_NOT_FOUND). This is the one provider-load
- * failure that a dependency install can recover — e.g. the openai SDK's
- * transitive `agentkeepalive` shim was dropped from node_modules by an npm
- * prune/partial install. Any other load error (syntax, runtime) is NOT
+ * failure that a dependency install can recover. Any other load error
+ * (syntax, runtime) is NOT
  * install-recoverable and is excluded.
  *
  * @returns {string[]}

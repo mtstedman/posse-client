@@ -1,4 +1,5 @@
 import { PLANNER_DISPATCH_SETTING_KEYS, PLANNER_DISPATCH_MODES } from "../../../catalog/planner-dispatch.js";
+import { PROJECT_DB_PERMISSIONS, PROJECT_DB_TYPES } from "../../../catalog/project-db.js";
 import { PROVIDER_ROLE_NAMES } from "../../providers/functions/roles.js";
 import {
   SETTINGS_CATALOG,
@@ -16,25 +17,15 @@ export const SKILL_SETTING_PREFIX = "skill_enabled:";
 // These are synthetic settings rows: they render in the admin settings UI but
 // persist to the per-repo orchestrator.db (via the project-db accessor), NOT to
 // the account.db settings catalog. The password row is masked and never shown.
-export const PROJECT_DB_SETTING_KEYS = new Set([
-  "project_db_enabled",
-  "project_db_type",
-  "project_db_permissions",
-  "project_db_database",
-  "project_db_host",
-  "project_db_port",
-  "project_db_username",
-  "project_db_password",
-]);
-export const PROJECT_DB_TYPE_OPTIONS = Object.freeze([
-  Object.freeze({ value: "sqlite", label: "sqlite" }),
-  Object.freeze({ value: "postgres", label: "postgres" }),
-  Object.freeze({ value: "mysql", label: "mysql" }),
-]);
-export const PROJECT_DB_PERMISSION_OPTIONS = Object.freeze([
-  Object.freeze({ value: "read", label: "read (SELECT, inspection)" }),
-  Object.freeze({ value: "write", label: "write (UPDATE, INSERT, DELETE, CREATE, ALTER)" }),
-]);
+export const PROJECT_DB_TYPE_OPTIONS = Object.freeze(PROJECT_DB_TYPES.map((value) => Object.freeze({ value, label: value })));
+const PROJECT_DB_PERMISSION_LABELS = Object.freeze({
+  read: "read (SELECT, inspection)",
+  write: "write (UPDATE, INSERT, DELETE, CREATE, ALTER)",
+});
+export const PROJECT_DB_PERMISSION_OPTIONS = Object.freeze(PROJECT_DB_PERMISSIONS.map((value) => Object.freeze({
+  value,
+  label: PROJECT_DB_PERMISSION_LABELS[value],
+})));
 
 export const PROJECT_DB_SETTING_DEFS = Object.freeze([
   Object.freeze({ key: "project_db_enabled", default: "false", valueType: "boolean" }),
@@ -46,6 +37,7 @@ export const PROJECT_DB_SETTING_DEFS = Object.freeze([
   Object.freeze({ key: "project_db_username", default: "" }),
   Object.freeze({ key: "project_db_password", default: "", sensitive: true }),
 ]);
+export const PROJECT_DB_SETTING_KEYS = new Set(PROJECT_DB_SETTING_DEFS.map((def) => def.key));
 
 // Visual ordering for specialized AdminTUI rows lives beside the ordinary
 // settings groups so machine projections and the interactive editor cannot
@@ -67,7 +59,7 @@ export const ADMIN_AGENT_SETTING_SECTIONS = Object.freeze([
 ]);
 
 export const ADMIN_PROVIDER_SETTING_SECTIONS = Object.freeze([
-  Object.freeze({ provider: "claude", label: "Claude", settingKeys: Object.freeze(["claude_execution_mode", "claude_run_budget_pct_session"]) }),
+  Object.freeze({ provider: "claude", label: "Claude", settingKeys: Object.freeze(["claude_run_budget_pct_session"]) }),
   Object.freeze({ provider: "anthropic", label: "Anthropic API", settingKeys: Object.freeze([]) }),
   Object.freeze({ provider: "codex", label: "Codex", settingKeys: Object.freeze(["codex_auth_mode", "codex_run_budget_pct_session"]) }),
   Object.freeze({ provider: "openai", label: "OpenAI", settingKeys: Object.freeze(["openai_run_budget_usd", "openai_daily_budget_usd", "openai_account_limit_tokens_session", "openai_account_limit_tokens_week"]) }),
@@ -238,7 +230,6 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   planner_dispatch_mode: "Planner-led intake",
   // Providers
   artifact_image_provider: "Image provider",
-  claude_execution_mode: "Claude CLI mode",
   claude_run_budget_pct_session: "Claude run budget (%)",
   codex_auth_mode: "Codex sign-in",
   codex_run_budget_pct_session: "Codex run budget (%)",
@@ -458,7 +449,6 @@ const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   planner_dispatch_mode: "How new requests reach the planner, for every repository on this account. Router runs research and preflight first, as usual; planner lets the planner take the request directly and send out its own bounded research helpers.",
   // Providers
   artifact_image_provider: "Provider that generates image artifacts. Only providers with a configured key can be selected.",
-  claude_execution_mode: "How Posse drives the Claude CLI. Print runs each call with claude -p and streams JSON (recommended); interactive runs a terminal session and follows Claude's own session log.",
   claude_run_budget_pct_session: "Share of your current Claude session window a single Posse run is expected to use. Shown as a budget bar; Posse does not stop jobs when it is reached.",
   codex_auth_mode: "How Posse signs in to Codex. OAuth uses your ChatGPT login; API uses an API key from the environment; auto tries OAuth only. OAuth and auto never fall back to an API key.",
   codex_run_budget_pct_session: "Share of your current Codex session window a single Posse run is expected to use. Shown as a budget bar; Posse does not stop jobs when it is reached.",

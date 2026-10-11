@@ -175,9 +175,10 @@ function accumulateCostCall(entry, call, costKey = "costUsd") {
   entry.turnsUsed += call.turns_used || 0;
   if (call.output_truncated) entry.outputTruncatedCalls += 1;
   if (Number.isFinite(call.resolved_cost_usd)) entry[costKey] += call.resolved_cost_usd;
+  // A persisted aggregate cost (`aggregate:known`) was itself computed from
+  // Posse's rate table at completion, so a fallback basis taints it too.
   if (Number.isFinite(call.resolved_cost_usd)
-    && /^(?:family|tier)_fallback:/.test(call.pricing_basis || "")
-    && call.cost_source !== "aggregate:known") {
+    && /^(?:family|tier)_fallback:/.test(call.pricing_basis || "")) {
     entry.fallbackPricedUsd += call.resolved_cost_usd;
     entry.fallbackPricedCalls += 1;
   }

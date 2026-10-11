@@ -50,6 +50,19 @@ export const JOB_MODEL_TIER_LIST_SQL = sqlList(JOB_MODEL_TIERS);
 export const JOB_REASONING_EFFORTS = Object.freeze(["low", "medium", "high"]);
 export const JOB_REASONING_EFFORT_LIST_SQL = sqlList(JOB_REASONING_EFFORTS);
 
+// Planner-emitted job fields may use crossed tier/effort names or common
+// provider nicknames. Compilation resolves these before checking the enums.
+export const PLANNER_MODEL_TIER_ALIASES = Object.freeze({
+  low: "cheap", medium: "standard", high: "strong", max: "strong", premium: "high",
+  haiku: "cheap", sonnet: "standard", opus: "strong",
+  "1": "cheap", "2": "standard", "3": "strong",
+  mid: "standard", lo: "cheap", hi: "strong",
+});
+export const PLANNER_REASONING_EFFORT_ALIASES = Object.freeze({
+  cheap: "low", standard: "medium", strong: "high",
+  mid: "medium", lo: "low", hi: "high",
+});
+
 // Worker types persisted on job_attempts.worker_type. These are execution
 // identities, not provider-selectable roles: deterministic/system paths and
 // human gates are intentionally present here but absent from PROVIDER_ROLE_NAMES.
@@ -76,6 +89,24 @@ export const JOB_ASSESSOR_VERDICTS = Object.freeze([
   "not_assessed",
 ]);
 export const JOB_ASSESSOR_VERDICT_LIST_SQL = sqlList(JOB_ASSESSOR_VERDICTS);
+// The database sentinel records an unassessed job; a model may return only
+// the actionable verdicts.
+export const JOB_ASSESSOR_MODEL_VERDICTS = Object.freeze(
+  JOB_ASSESSOR_VERDICTS.filter((verdict) => verdict !== "not_assessed"),
+);
+
+export const ASSESSMENT_LIFECYCLE = Object.freeze({
+  NOT_STARTED: "not_started",
+  IMPLEMENTATION_COMPLETE: "implementation_complete",
+  PENDING: "assessment_pending",
+  PASSED: "assessment_passed",
+  FAILED: "assessment_failed",
+  NEEDS_HUMAN: "assessment_needs_human",
+  UNAVAILABLE: "assessment_unavailable",
+  WAIVED: "assessment_waived",
+});
+export const ASSESSMENT_LIFECYCLE_STATES = Object.freeze(Object.values(ASSESSMENT_LIFECYCLE));
+export const ASSESSMENT_LIFECYCLE_STATE_LIST_SQL = sqlList(ASSESSMENT_LIFECYCLE_STATES);
 
 export const JOB_ASSESSOR_CONFIDENCE = Object.freeze(["low", "medium", "high"]);
 export const JOB_ASSESSOR_CONFIDENCE_LIST_SQL = sqlList(JOB_ASSESSOR_CONFIDENCE);

@@ -8,7 +8,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { extractJson } from "../../../../shared/format/functions/json.js";
 import { getAtlasDeterministicToolDefinitions } from "../../../../shared/tools/functions/toolkit/atlas.js";
-import { materializeCodeSurveyPages } from "../../../../shared/tools/functions/hash-adder.js";
+import { materializeCodeSurveyPages } from "../../../../shared/tools/functions/atlas-result-paging.js";
 import { renderTraversalRefStub } from "../../../../shared/tools/functions/ref-surface.js";
 import { hashRefModelVisibility } from "../../../../shared/tools/functions/fetch-ref-policy.js";
 import { getAtlasIntegrationConfig, resolveAtlasExecutionAttachment } from "../../../integrations/functions/atlas.js";
@@ -43,7 +43,6 @@ import { readProjectDbConfig } from "../../../../shared/tools/functions/toolkit/
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { formatAtlasBackendText, atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
 import { isExternallyRoutedAtlasTool } from "../../../integrations/functions/deterministic-mcp/tool-descriptors.js";
-import { semanticDispatchEnabled } from "../../../atlas/functions/v2/embeddings/resources.js";
 import {
   atlasResultData,
   atlasResultField,
@@ -122,11 +121,6 @@ function internalAtlasTools(packet) {
     ...(Array.isArray(packet?.atlas?.internalTools) ? packet.atlas.internalTools : []),
     ...(Array.isArray(packet?.atlas?.tools) ? packet.atlas.tools : []),
   ]);
-}
-
-function rawTextSlicePrefetchEnabled(packet) {
-  const config = packet?.atlas_config || getAtlasIntegrationConfig();
-  return semanticDispatchEnabled(config);
 }
 
 function _isPrefetchCwdUsable(cwd) {
@@ -3107,18 +3101,13 @@ async function _attachAtlasSlicePrefetchContext(packet, {
     return;
   }
 
-  const useRawTaskText = rawTextSlicePrefetchEnabled(packet);
-  if (!useRawTaskText && seedFiles.length === 0) return;
-
   const sliceArgs = {
     editedFiles: seedFiles,
     maxCards: packet.recipient === "planner" ? 12 : packet.recipient === "researcher" ? 10 : 8,
     maxTokens: packet.recipient === "planner" ? 1800 : packet.recipient === "researcher" ? 1600 : 1400,
+    taskText,
+    semantic: true,
   };
-  if (useRawTaskText) {
-    sliceArgs.taskText = taskText;
-    sliceArgs.semantic = true;
-  }
 
   packet.atlas_slice_prefetch_attempted = true;
   const raw = await _executeAtlasPrefetchForReuse(packet, "slice.build", sliceArgs, {
@@ -3700,7 +3689,7 @@ function _renderAtlasSurveySection(sc, packet, { trim = 0 } = {}) {
   if (fileCount > 0) {
     // Rendered before issuance is known (packet.atlas.tools is empty under
     // remote issuance), so name no exact-source tool the recipient may lack.
-    lines.push("  structure already visible for surveyed files: do not call code.skeleton for them unless a named omitted/bounded fact requires surveyGap; read exact code with an issued exact-source tool and issue independent reads together.");
+    lines.push("  Use the delivered survey for orientation; request another outline only for a specific missing structural fact.");
   }
   const publicEntryPaths = _surveyParallelPublicEntryPaths(sc, packet);
   if (publicEntryPaths.length > 0) {

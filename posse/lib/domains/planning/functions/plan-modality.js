@@ -1,3 +1,4 @@
+import { ARTIFACT_TASK_MODE_VALUES } from "../../../catalog/artifact.js";
 import {
   requiredWorkItemOutputs,
   requiresRepositoryExecution,
@@ -31,7 +32,7 @@ function normalizedTaskShape(task = {}) {
   let taskMode = String(task.task_mode || "code").trim().toLowerCase();
   if (jobType === "code") jobType = "dev";
   if (taskMode === "dev") taskMode = "code";
-  if (["content", "image", "report", "intake_processing"].includes(jobType)) {
+  if (ARTIFACT_TASK_MODE_VALUES.includes(jobType)) {
     if (!task.task_mode || taskMode === "code") taskMode = jobType;
     jobType = "artificer";
   }

@@ -150,8 +150,7 @@ export class BaseProvider {
     return this.createToolRenderer(issuedSurface).render(reference);
   }
 
-  // Construct a provider-specific image-generation client (currently an
-  // OpenAI-shaped client, since both openai and grok use that SDK). Throws
+  // Construct a provider-specific native image-generation client. Throws
   // if the provider does not support images or is missing credentials.
   buildImageClient(opts = {}) {
     if (typeof this.module.buildImageClient === "function") {
@@ -165,13 +164,6 @@ export class BaseProvider {
       return this.module.isReady();
     }
     return { ready: true, reason: null };
-  }
-
-  getClaudeInfo() {
-    if (typeof this.module.getClaudeInfo === "function") {
-      return this.module.getClaudeInfo();
-    }
-    return { available: false, version: null, path: null };
   }
 
   extractJson(text) {
@@ -195,17 +187,10 @@ export class BaseProvider {
     return this.getUsageSummary(opts);
   }
 
-  warmOauthSession(opts = {}) {
-    if (typeof this.module.warmOauthSession === "function") {
-      return this.module.warmOauthSession(opts);
-    }
-    return { attempted: false, ok: true, skipped: "not-supported" };
-  }
-
   async warmOauthSessionAsync(opts = {}) {
     if (typeof this.module.warmOauthSessionAsync === "function") {
       return await this.module.warmOauthSessionAsync(opts);
     }
-    return this.warmOauthSession(opts);
+    return { attempted: false, ok: true, skipped: "not-supported" };
   }
 }

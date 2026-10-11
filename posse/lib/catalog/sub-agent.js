@@ -3,7 +3,9 @@
 // canonical tool names but do not trust remote-provided access labels, so both
 // native and Atlas evidence safety must be explicit closed sets.
 
-export const RESEARCH_CHILD_PROFILE = "research_investigation.v1";
+import { AGENT_HANDOFF_PROFILES } from "./handoff.js";
+
+export const RESEARCH_CHILD_PROFILE = AGENT_HANDOFF_PROFILES.RESEARCH_INVESTIGATION;
 export const RESEARCH_CHILD_PROMPT_PROFILE = "researcher_code_child";
 // A research child's full compact report, surfaced to the parent only when a
 // multi-child tool result would otherwise cross the physical client limit.

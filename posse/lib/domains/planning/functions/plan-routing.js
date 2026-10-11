@@ -6,6 +6,7 @@
 import fs from "fs";
 import path from "path";
 import { REPO_CODE_EXTENSIONS } from "../../../catalog/files.js";
+import { COMMON_WEB_ROOTS } from "../../../catalog/skill-inference.js";
 import { isArtifactMode } from "../../artifacts/functions/index.js";
 import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
 import { requiredWorkItemOutputs } from "../../intake/functions/objective-contract.js";
@@ -235,7 +236,6 @@ const PROMOTE_ACTION_NEAR_ARTIFACT_RE = new RegExp(
   String.raw`\b${PROMOTE_ACTION_PATTERN}\b[\s\S]{0,120}${ARTIFACT_SOURCE_PATTERN}|${ARTIFACT_SOURCE_PATTERN}[\s\S]{0,120}\b${PROMOTE_ACTION_PATTERN}\b`
 );
 const PROMOTE_DESTINATION_RE = /\b(?:into|to|under|within|dest(?:ination)?|repo(?:sitory)?|public|htdocs|assets?|docs?|snapshots?)\b|(?:^|\/)(?:public|htdocs|assets|docs|data)\//;
-const COMMON_WEB_ROOTS = Object.freeze(["", "htdocs", "public", "public_html", "www", "web", "static"]);
 
 function hasExplicitPromoteFields(task) {
   return (typeof task?.source_dir === "string" && task.source_dir.trim())

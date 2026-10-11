@@ -9,7 +9,6 @@ export * from "./v2/PipelineHooks.js";
 export * from "./v2/RetrievalCache.js";
 export * from "./v2/View.js";
 export * from "./v2/ViewBuilder.js";
-export * from "./v2/Warmer.js";
 export * from "./v2/ledger/BlobStore.js";
 export * from "./v2/ledger/FeedbackStore.js";
 export * from "./v2/ledger/Interner.js";

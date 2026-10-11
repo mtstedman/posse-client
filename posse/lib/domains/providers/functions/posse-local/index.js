@@ -490,10 +490,6 @@ export function isReady({
   return { ready: true, reason: null };
 }
 
-export function getClaudeInfo() {
-  return { cmd: "posse-ml", args: [ML_GENERATE_METHOD] };
-}
-
 export function escalateTier(currentTier, attemptCount, options = {}) {
   return escalateModelTier(currentTier, attemptCount, options);
 }

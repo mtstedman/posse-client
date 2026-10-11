@@ -92,7 +92,6 @@ export const SETTING_KEYS = Object.freeze({
   CONTEXT_COMPACTION_RECENT_TARGET_TOKENS: "context_compaction_recent_target_tokens",
   CONTEXT_EXPAND_FILE_BUDGET_PER_ATTEMPT: "context_expand_file_budget_per_attempt",
   CONTEXT_EXPAND_MAX_STEPS: "context_expand_max_steps",
-  CLAUDE_EXECUTION_MODE: "claude_execution_mode",
   CLAUDE_RUN_BUDGET_PCT_SESSION: "claude_run_budget_pct_session",
   CLAUDE_USAGE_BACKOFF_MS: "claude_usage_backoff_ms",
   CLAUDE_USAGE_CACHE_MS: "claude_usage_cache_ms",
@@ -192,7 +191,6 @@ export const SETTING_KEYS = Object.freeze({
   TARGET_BRANCH: "target_branch",
   WEB_TOOLS_ENABLED: "web_tools_enabled",
   WAITING_LANE_SHADOW_MODE: "waiting_lane_shadow_mode",
-  ENGAGEMENT_ENGINE: "engagement_engine",
   WAITING_LANE_GIT_PREPARATION_ENABLED: "waiting_lane_git_preparation_enabled",
   WAITING_LANE_ATLAS_SNAPSHOT_ENABLED: "waiting_lane_atlas_snapshot_enabled",
   WAITING_LANE_ATLAS_CATCHUP_ENABLED: "waiting_lane_atlas_catchup_enabled",
@@ -235,7 +233,6 @@ export const CODEX_AUTH_MODE_OPTIONS = Object.freeze([
   Object.freeze({ value: "auto", label: "auto (oauth only)" }),
 ]);
 
-export const CLAUDE_EXECUTION_MODE_VALUES = Object.freeze(["print", "interactive"]);
 export const ASSESSMENT_SCOPE_MODE_VALUES = Object.freeze(["off", "shadow"]);
 export const AGENT_COORDINATION_MODE_VALUES = Object.freeze(["off", "handoff", "subagents"]);
 export const CONTEXT_COMPACTION_MODE_VALUES = Object.freeze(["off", "shadow", "inject", "enforce"]);
@@ -269,6 +266,11 @@ export const ATLAS_MEMORY_SURFACE_MODE_VALUES = Object.freeze(["auto", "off", "o
 export const SESSION_RECYCLE_MODE_VALUES = Object.freeze(["off", "dev-fix", "full"]);
 export const STARTUP_DIRTY_TREE_POLICY_VALUES = Object.freeze(["block", "commit"]);
 export const WAITING_LANE_SHADOW_MODE_VALUES = Object.freeze(["off", "shadow"]);
-// Where provider launch policy is computed: posse-remote (native, default; the
-// JS policy remains its fallback) or the JS client only (js, a kill switch).
-export const ENGAGEMENT_ENGINE_VALUES = Object.freeze(["native", "js"]);
+
+// Settings no code reads any more. Opening the account DB deletes their stored
+// rows, so an operator cannot keep a value that silently does nothing.
+export const RETIRED_SETTING_KEYS = Object.freeze([
+  "claude_cli_path",
+  "claude_execution_mode",
+  "engagement_engine",
+]);

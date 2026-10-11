@@ -1,4 +1,4 @@
-import { PLANNER_REPORT_METADATA_KEYS } from "./terminal-report-metadata.js";
+import { AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS, AGENT_HANDOFF_PROFILES } from "../../../../catalog/handoff.js";
 import { researcherPacketToStructuredOutput } from "./researcher-output.js";
 import { renderReport } from "./report-rendering.js";
 
@@ -86,7 +86,7 @@ function boundedWords(value, maxWords = 30) {
 function renderCompletionCompatibilityOutput(packet) {
   const completion = packet.completion || {};
   const status = String(completion.status || "COMPLETE").toUpperCase();
-  const artificer = packet.profile === "artificer.result.v1";
+  const artificer = packet.profile === AGENT_HANDOFF_PROFILES.ARTIFICER_RESULT;
   const label = artificer ? "ARTIFICER RESULT" : "DEV RESULT";
   const summary = status === "VERIFIED_NO_CHANGE"
     ? "The requested end state already exists."
@@ -126,7 +126,7 @@ export function plannerCompatibilityTasks(packet) {
     const taskSpec = plannerTaskSpec(handoff);
     const refs = evidenceRefs(handoff.report);
     const metadata = Object.fromEntries(
-      PLANNER_REPORT_METADATA_KEYS
+      AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS
         .filter((key) => handoff.report[key] != null)
         .map((key) => [key, handoff.report[key]]),
     );
@@ -162,18 +162,18 @@ export function plannerCompatibilityTasks(packet) {
 
 
 export function renderAgentHandoffCompatibilityOutput(packet) {
-  if (packet.completion && ["dev.result.v1", "artificer.result.v1"].includes(packet.profile)) {
+  if (packet.completion && [AGENT_HANDOFF_PROFILES.DEV_RESULT, AGENT_HANDOFF_PROFILES.ARTIFICER_RESULT].includes(packet.profile)) {
     return renderCompletionCompatibilityOutput(packet);
   }
-  if (packet.profile === "planner.plan.v1") {
+  if (packet.profile === AGENT_HANDOFF_PROFILES.PLANNER_PLAN) {
     const tasks = plannerCompatibilityTasks(packet);
     return `\`\`\`json\n${JSON.stringify(tasks, null, 2)}\n\`\`\``;
   }
   const first = packet.handoffs[0];
   const report = renderReport(first.report, {
-    claimCode: packet.profile === "researcher.report.v1",
+    claimCode: packet.profile === AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT,
   });
-  if (packet.profile === "assessor.verdict.v1") {
+  if (packet.profile === AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT) {
     const reasons = [...new Set(
       [first.report.summary, ...first.report.claims.map((claim) => [claim[0], claim[1]?.prose].filter(Boolean).join(" — "))]
         .map((reason) => String(reason || "").trim())
@@ -196,9 +196,9 @@ export function renderAgentHandoffCompatibilityOutput(packet) {
       suggestions: [],
     }, null, 2)}\n\`\`\``;
   }
-  if (packet.profile === "dev.result.v1") return `--- DEV RESULT START ---\n${report}\n--- DEV RESULT END ---`;
-  if (packet.profile === "artificer.result.v1") return `--- ARTIFICER RESULT START ---\n${report}\n--- ARTIFICER RESULT END ---`;
-  if (packet.profile === "researcher.pipeline.v1") {
+  if (packet.profile === AGENT_HANDOFF_PROFILES.DEV_RESULT) return `--- DEV RESULT START ---\n${report}\n--- DEV RESULT END ---`;
+  if (packet.profile === AGENT_HANDOFF_PROFILES.ARTIFICER_RESULT) return `--- ARTIFICER RESULT START ---\n${report}\n--- ARTIFICER RESULT END ---`;
+  if (packet.profile === AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE) {
     return `\`\`\`json\n${JSON.stringify(researcherPacketToStructuredOutput(packet), null, 2)}\n\`\`\``;
   }
   return report;

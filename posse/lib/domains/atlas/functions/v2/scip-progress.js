@@ -9,7 +9,7 @@ import path from "path";
 
 /**
  * Compact a SCIP-ingest event into a single-line progress string the
- * existing system stream can render. The Warmer's progress channel is
+ * existing system stream can render. ParseEngine's progress channel is
  * line-oriented; the event payload stays available in result_json via
  * the per-purpose handlers' own counters.
  *

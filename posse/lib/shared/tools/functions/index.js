@@ -1,6 +1,7 @@
 export * from "./chain-ledger.js";
 export * from "./contract.js";
 export * from "./hash-adder.js";
+export * from "./atlas-result-paging.js";
 export * from "./mcp-surface.js";
 export * from "./provider-surface.js";
 export * from "./tool-parity.js";

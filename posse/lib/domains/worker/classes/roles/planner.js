@@ -731,13 +731,6 @@ export class PlannerRole extends BaseRole {
       ? [
         "PLANNER-LED INTAKE:",
         "  No upfront research ran. The routing record below is a starting point, not the complete input.",
-        "  Make the research decision now, from the work item and intake record, before repository/source reads.",
-        "  For nontrivial unknowns, dispatch one bounded batch immediately; give each child one self-contained",
-        "  question and only the paths or refs already supplied. Do not collect orientation context first.",
-        "  For a simple, clearly scoped job, use zero children and plan directly. A planner-owned read starts",
-        "  that direct path; do not dispatch researchers later after accumulating planner context.",
-        "  After dispatched findings return, use planner reads only for narrow, plan-blocking verification.",
-        "  Produce one terminal plan grounded in evidence you or your children read.",
         "  Do not call get_brief solely to reload the synthetic routing record.",
         promptLiteral("SYNTHETIC ROUTING RECORD", researchBrief || "(none)"),
         "",
@@ -753,7 +746,7 @@ export class PlannerRole extends BaseRole {
       : fastFileCount > 0 || fullCount > 0 ? [
         "RESEARCH CONTEXT:",
         "  Call the get_brief tool ONCE before planning. In a single response it returns the researcher's full",
-        "  analysis, the structured research data (key files, patterns, constraints), the ranked file-priority list,",
+        "  analysis, structured findings (key files, patterns, constraints),",
         "  a function/class index for the key files, and a manifest of staged source files.",
         "  Start from get_brief. Read a path from its full_sources manifest only when you need a specific function",
         "  body or pattern the brief does not cover; fall back to the project root only as a last resort.",
@@ -830,11 +823,9 @@ export class PlannerRole extends BaseRole {
 
   async composePrompt({ contextText, contract, job, ctx } = {}) {
     const researchPolicy = ctx.plannerPacket?.planner_dispatch_policy;
-    const researchBudget = researchPolicy ? [
-      `Research decision and budgets: decide before your first repository/source tool call. If the work is simple and clearly scoped, use zero children and plan directly. Otherwise dispatch one batch immediately, before collecting orientation context. Your repository read allowance is ${researchPolicy.triageMaxTurns * 2} tool calls across this planner call, including reads after child reports. The runtime enforces this allowance; use existing evidence to finish or report the specific missing evidence when it is exhausted. Across this planner call, at most ${researchPolicy.maxChildren} children; each at most ${researchPolicy.childMaxTurns} turns, ${researchPolicy.childTimeoutMs} ms, with a ${researchPolicy.resultChars}-character result target. Children run at effort ${researchPolicy.childReasoningEffort || "medium"} unless you request another (ceiling ${researchPolicy.effortCeiling}) on the ${researchPolicy.childModelTier} model tier; a code child may request model_tier strong for deep multi-file reasoning, and web children stay on cheap or standard. Keep investigation in the children and planning judgment here.`,
-      "For code research, prefer a one-sentence question plus up to eight anchors (repo-relative paths, optional symbols or line ranges, or a parent-held #ref) over repeating context in prose. Anchors are starting points, not conclusions.",
-      "Completed entries contain a compact packet. When the tool result includes research_expansion.files and research_expansion.brief, that brief is already visible: cite research_expansion.files[].ref and do not fetch it again; traverse the evidence ref only to read beyond the shown hunks. Timed-out and failed entries contain error instead of packet. An identical retry replays the settled digest, including a timeout, so narrow or reword a retry.",
-    ].join("\n") : null;
+    const researchBudget = researchPolicy
+      ? `Research budget: ${researchPolicy.triageMaxTurns * 2} planner reads; up to ${researchPolicy.maxChildren} children, ${researchPolicy.childMaxTurns} turns each.`
+      : null;
     const remoteInstructions = [contract, researchBudget, contextText]
       .filter((part) => part != null && String(part) !== "")
       .join("\n");
@@ -1105,7 +1096,7 @@ export class PlannerRole extends BaseRole {
     }
     worker.createJobsFromPlan(job, tasks, {
       atlasDevBriefsEnabled: !!ctx.plannerPacket?.atlas?.active,
-      fileKindProjectDir: ctx.plannerReadRoot || worker.projectDir,
+      planReadRoot: ctx.plannerReadRoot || worker.projectDir,
       planAttemptId: ctx.attemptId || null,
       sourceHashRefContext: {
         work_item_id: job.work_item_id,

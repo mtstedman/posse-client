@@ -4,6 +4,7 @@ import { SUB_AGENT_LIMITS } from "./sub-agent.js";
 import { FINAL_REVIEW_TIMEOUT_MS } from "./final-review.js";
 
 export const MCP_SESSION_RELEASED_NOTIFICATION = "posse/sessionReleased";
+export const MCP_PROTOCOL_VERSION = "2024-11-05";
 
 export const POSSE_MCP_GATEWAY_SERVER_NAME = "posse-gateway";
 export const POSSE_MCP_GATEWAY_SERVER_INFO_NAME = "posse-gateway-mcp";
@@ -111,6 +112,12 @@ export const MCP_OWNER_PROGRESS_HEADER = "x-posse-owner-progress";
 export const MCP_CONTROL_METHODS = Object.freeze([
   "initialize", "notifications/initialized", "tools/list", "ping",
   "resources/list", "resources/templates/list",
+]);
+
+// Native tools whose successful result is the agent call's terminal report.
+export const MCP_TERMINAL_HANDOFF_TOOLS = Object.freeze([
+  "agent_handoff",
+  "web_research_handoff",
 ]);
 
 export const MCP_CONCURRENT_ATLAS_ACTIONS = Object.freeze([

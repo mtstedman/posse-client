@@ -257,10 +257,23 @@ export async function applyMergeVerificationReviewAnswer({
     if (!/^[0-9a-f]{40}$/i.test(branchHead)) {
       return { ok: false, keepGateOpen: true, message: `Cannot bind review to ${workItem.branch_name}: invalid branch head` };
     }
+    // The operator reviewed the commit the gate was opened for. Commits that
+    // landed on the branch since were never shown, so they are not approved:
+    // the next authorization opens a fresh gate for them. Gates opened before
+    // the opening head was recorded bind the current head.
+    const current = parseJobPayload(getJob(job.id) || job);
+    const openedHead = /^[0-9a-f]{40}$/i.test(String(current.opened_branch_head || "")) ? current.opened_branch_head : null;
+    const reviewedHead = openedHead || branchHead;
     updateJobPayload(job.id, JSON.stringify({
-      ...parseJobPayload(getJob(job.id) || job),
-      reviewed_branch_head: branchHead,
+      ...current,
+      reviewed_branch_head: reviewedHead,
     }));
+    if (reviewedHead !== branchHead) {
+      return {
+        ok: true,
+        message: `WI#${workItemId}: ${actorLabel.toLowerCase()} approved ${reviewedHead.slice(0, 12)}, but ${workItem.branch_name} has moved to ${branchHead.slice(0, 12)} since this gate opened; the newer commits need their own review before merge`,
+      };
+    }
     return { ok: true, message: `WI#${workItemId} may merge: ${actorLabel.toLowerCase()} reviewed the change` };
   }
   if (effectiveAction !== "fail") return { ok: false, message: `Unknown merge review answer ${action}` };

@@ -23,6 +23,31 @@ export const LEGACY_REVIEW_CHOICE_IDS = Object.freeze({
   pipeline_head_recovery: Object.freeze(["pass", "fail", "skip", "replan"]),
 });
 
+// Question kinds whose legacy list spelled the waiver "skip". Only these keep
+// that alias (the CLI's `skip`, a parked legacy answer). A legacy
+// blocked_recovery "skip" cancelled the job, so it never means the waiver.
+export const LEGACY_SKIP_WAIVER_KINDS = Object.freeze(Object.keys(LEGACY_REVIEW_CHOICE_IDS)
+  .filter((kind) => kind !== "blocked_recovery" && LEGACY_REVIEW_CHOICE_IDS[kind].includes("skip")));
+
+function storedChoiceId(entry) {
+  if (typeof entry === "string") return entry.trim();
+  return String(entry?.choice_id ?? entry?.value ?? entry?.id ?? "").trim();
+}
+
+/**
+ * The current action a legacy review gate's "skip" stands for, or null. A gate
+ * parked under the exact legacy list still shows "skip" (as the waiver); the
+ * current list spells it explicit_waiver, so the answer is translated before
+ * it is matched against the current choices.
+ */
+export function legacyReviewChoiceAction(kind, storedChoices, choiceId) {
+  if (String(choiceId || "").trim() !== "skip" || !LEGACY_SKIP_WAIVER_KINDS.includes(kind)) return null;
+  const legacy = LEGACY_REVIEW_CHOICE_IDS[kind];
+  const stored = Array.isArray(storedChoices) ? storedChoices.map(storedChoiceId) : [];
+  if (stored.length !== legacy.length || !stored.every((id, index) => id === legacy[index])) return null;
+  return "explicit_waiver";
+}
+
 export function validReviewChoiceIDs(kind, ids, canonical) {
   const legacy = LEGACY_REVIEW_CHOICE_IDS[kind];
   if (!legacy || ids.length === 0) return false;

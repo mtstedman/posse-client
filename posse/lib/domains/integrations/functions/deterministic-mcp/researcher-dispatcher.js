@@ -233,7 +233,6 @@ const WORKFLOW_ARG_FIELDS = new Set([
   "searchMode",
   "search_mode",
   "semantic",
-  "surveyGap",
   "symbolId",
   "symbolHandle",
   "symbolIds",
@@ -544,7 +543,8 @@ export function buildResearcherDirectTools(atlasTools = [], _options = {}) {
   const actions = WORKFLOW_ACTIONS.filter(action => surfaced.includes(action));
   const shared = researcherReadActionArgsSchema({ allowSymbolHandles: true, includeWindowReason: false, actions });
   return actions.map(action => {
-    const canonicalFields = Object.keys(ATLAS_TOOL_DEFS_RAW[action]?.parameters?.properties || {});
+    const canonicalFields = Object.entries(ATLAS_TOOL_DEFS_RAW[action]?.parameters?.properties || {})
+      .filter(([, definition]) => definition.internalOnly !== true).map(([field]) => field);
     const advertisedNames = Object.fromEntries(Object.entries(researcherActionFieldAliases(action))
       .map(([advertised, native]) => [native, advertised]));
     const fields = new Set(canonicalFields.map(field => advertisedNames[field] || field));

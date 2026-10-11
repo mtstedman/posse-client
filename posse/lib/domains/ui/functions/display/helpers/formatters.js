@@ -4,7 +4,14 @@ import { C } from "../../../../../shared/format/functions/colors.js";
 import { formatTokens, formatUsd } from "../../../../../shared/format/functions/units.js";
 import { scrubSecrets } from "../../../../../shared/telemetry/classes/logging/secret-scrub.js";
 export { displayColumnWidth, fit, stripAnsi } from "../../../../../shared/format/functions/ansi.js";
-import { stripAnsi } from "../../../../../shared/format/functions/ansi.js";
+import { fit, stripAnsi } from "../../../../../shared/format/functions/ansi.js";
+
+export function visiblePad(text, width) {
+  const safeWidth = Math.max(0, width | 0);
+  const fitted = fit(String(text || ""), safeWidth);
+  const visible = stripAnsi(fitted).length;
+  return `${fitted}${" ".repeat(Math.max(0, safeWidth - visible))}`;
+}
 
 export function formatConsoleArg(arg) {
   let text;

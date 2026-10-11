@@ -5,6 +5,7 @@
 // edges; failures are recorded but must not make view materialization fail.
 
 import { sha256Hex } from "./hash.js";
+import { recordRun, rollbackSavepoint, parseJsonArray, parseJsonObject } from "./derived-state-helpers.js";
 
 const GRAPH_EDGE_KINDS = new Set(["calls", "imports", "extends", "implements"]);
 const PROCESS_ENTRY_NAMES = new Set(["main", "run", "start", "serve", "handler", "execute", "orchestrate"]);
@@ -447,49 +448,4 @@ function countClusterBridges(component, adjacency) {
     }
   }
   return count;
-}
-
-function recordRun(db, kind, status, durationMs, details) {
-  try {
-    db.prepare(
-      "INSERT INTO derived_state_runs(built_at, kind, status, duration_ms, details_json) VALUES (?, ?, ?, ?, ?)",
-    ).run(new Date().toISOString(), kind, status, Math.max(0, Math.round(durationMs)), JSON.stringify(details || {}));
-  } catch {
-    // Derived-state run telemetry must never break retrieval.
-  }
-}
-
-/**
- * @param {import("better-sqlite3").Database} db
- * @param {string} name
- */
-function rollbackSavepoint(db, name) {
-  try {
-    db.exec(`ROLLBACK TO ${name}`);
-  } catch {
-    // The original writer failure is more useful than rollback noise.
-  }
-  try {
-    db.exec(`RELEASE ${name}`);
-  } catch {
-    // Ignore cleanup failures; callers get the structured refresh error.
-  }
-}
-
-function parseJsonArray(value) {
-  try {
-    const parsed = JSON.parse(String(value || "[]"));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function parseJsonObject(value) {
-  try {
-    const parsed = JSON.parse(String(value || "{}"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
 }

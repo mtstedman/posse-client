@@ -11,9 +11,10 @@ import {
   HUMAN_INPUT_FREE_TEXT_MAX_CHARS,
   humanInputChoiceFromAnswer,
   humanInputChoicesForPayload,
+  questionKindForReviewType,
 } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
-import { LEGACY_REVIEW_CHOICE_IDS, validReviewChoiceIDs } from "../../../catalog/gate-actions.js";
+import { LEGACY_REVIEW_CHOICE_IDS, legacyReviewChoiceAction, validReviewChoiceIDs } from "../../../catalog/gate-actions.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { scrubSecrets } from "../../../shared/telemetry/classes/logging/secret-scrub.js";
 import { now, runImmediateTransaction } from "./common.js";
@@ -54,27 +55,7 @@ const FEEDBACK_PHASES = new Set([
 ]);
 const FEEDBACK_STATUSES = new Set(["running", "blocked", "waiting", "verifying", "done"]);
 
-const REVIEW_KIND_BY_TYPE = new Map([
-  ["needs_review", "assessment_review"],
-  ["assessment_parse_error", "assessment_review"],
-  ["assessment_evidence_missing", "assessment_transport_recovery"],
-  ["unknown_verdict", "assessment_review"],
-  ["replan_limit", "assessment_review"],
-  ["assessment_transport_error", "assessment_transport_recovery"],
-  ["assessment_retry_limit", "assessment_retry_limit"],
-  ["unexecuted_replan_limit", "unexecuted_replan_recovery"],
-  ["blocked_recovery", "blocked_recovery"],
-  ["partial_work_recovery", "partial_work_recovery"],
-  ["dead_letter_recovery", "dead_letter_recovery"],
-  ["stall_exhausted_recovery", "dead_letter_recovery"],
-  ["research_dead_letter_recovery", "dead_letter_recovery"],
-  ["oneshot_dead_letter_recovery", "dead_letter_recovery"],
-  ["artifact_routing_admin", "artifact_routing_admin"],
-  ["shared_trunk_provenance", "shared_trunk_provenance"],
-  ["work_item_failure_disposition", "work_item_failure_disposition"],
-  ["cross_wi_upstream_disposition", "cross_wi_upstream_disposition"],
-  ["scope_expansion_request", "file_scope_approval"],
-]);
+
 const LEGACY_PIPELINE_HEAD_REVIEW_TYPES = new Set([
   "research_dead_letter_recovery",
   "oneshot_dead_letter_recovery",
@@ -377,8 +358,8 @@ function choiceRecord(choiceId, overrides = {}) {
   };
 }
 
-function typedKindForGate(payload) {
-  const reviewKind = REVIEW_KIND_BY_TYPE.get(String(payload?.review_type || ""));
+export function typedKindForGate(payload) {
+  const reviewKind = questionKindForReviewType(payload?.review_type);
   // Older pipeline-head recovery rows persisted a question vocabulary that
   // never matched their dead-letter runtime handler. Prefer the corrected
   // review contract so those already-open gates become actionable too.
@@ -1160,6 +1141,12 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
           humanInputChoiceFromAnswer(choiceId, humanInputChoicesForPayload(question.payload)) || choiceId,
         ),
       } : {}),
+      // A legacy list's "skip" is not among the owner prompt's current
+      // choices; carry what the prompt needs to translate it.
+      ...(question.owner_delivery && legacyReviewChoiceAction(question.kind, question.payload?.choices, choiceId) ? {
+        question_kind: question.kind,
+        stored_choice_ids: question.payload.choices.map(choiceIdFromEntry),
+      } : {}),
     };
     const reservationId = insertActionReservation(db, {
       actionId,
@@ -1372,6 +1359,9 @@ function ownerDeliveryDescriptor(row) {
     choice_id: choiceId,
     ...(choiceId === HUMAN_INPUT_FREE_TEXT_CHOICE_ID && typeof descriptor.answer_text === "string"
       ? { answer_text: descriptor.answer_text }
+      : {}),
+    ...(typeof descriptor.question_kind === "string" && Array.isArray(descriptor.stored_choice_ids)
+      ? { question_kind: descriptor.question_kind, stored_choice_ids: descriptor.stored_choice_ids.map(String) }
       : {}),
   };
 }

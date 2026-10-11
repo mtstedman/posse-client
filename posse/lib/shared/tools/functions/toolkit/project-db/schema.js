@@ -5,6 +5,7 @@
 // what it may write. It never describes scopes the job does not hold.
 
 import { TOOL_PROJECT_DB_QUERY } from "../../../../../catalog/native-tools.js";
+import { PROJECT_DB_TYPES } from "../../../../../catalog/project-db.js";
 import { normalizePermissions } from "./config.js";
 
 const SCOPE_STATEMENTS = Object.freeze({
@@ -32,7 +33,7 @@ export function projectDbQuerySchemaForPermissions(permissions = []) {
     ...TOOL_PROJECT_DB_QUERY,
     description:
       "Run a single SQL statement against this project's configured application database " +
-      `(sqlite/postgres/mysql). You may run ${allowed.join(", and ")}. ` +
+      `(${PROJECT_DB_TYPES.join("/")}). You may run ${allowed.join(", and ")}. ` +
       "One statement per call; read results are row- and byte-capped.",
   };
 }

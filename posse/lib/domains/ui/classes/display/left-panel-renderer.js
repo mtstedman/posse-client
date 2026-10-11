@@ -125,11 +125,11 @@ function formatQueueJobTitle(title, maxWidth, siblingTitles = []) {
     .map((other) => _sanitizeDisplayLine(other || ""))
     .filter((otherText) => (
       otherText !== text
-      && otherText.length > width
+      && otherText.length >= width
       && otherText.slice(0, width) === clippedHead
     ));
   const hasSameVisiblePrefix = matchingSiblings.length > 0;
-  if (!hasSameVisiblePrefix || width < 14) return clippedHead;
+  if (!hasSameVisiblePrefix) return clippedHead;
 
   const marker = "…";
   const commonPrefixLength = (left, right) => {
@@ -148,26 +148,34 @@ function formatQueueJobTitle(title, maxWidth, siblingTitles = []) {
     .replace(/^[\s:;,.()[\]{}"'`<>/\\|+\-=]+/, "")
     .replace(/^(?:and|or|in|for|to|with|from|of|the|a|an)\s+/i, "");
 
+  // The closest sibling (longest shared prefix) is the one this row is most
+  // easily confused with, so the visible snippet starts where they diverge.
+  // A longer difference from a farther sibling would clip to the same text.
+  let closestPrefixLen = -1;
   let bestSnippet = "";
   for (const otherText of matchingSiblings) {
     const prefixLen = commonPrefixLength(text, otherText);
+    if (prefixLen < closestPrefixLen) continue;
     const suffixLen = commonSuffixLength(text, otherText, prefixLen);
     const differingEnd = Math.max(prefixLen, text.length - suffixLen);
     const snippet = stripLeadingFiller(text.slice(prefixLen, differingEnd));
-    if (snippet.length > bestSnippet.length) bestSnippet = snippet;
+    if (prefixLen > closestPrefixLen || snippet.length > bestSnippet.length) {
+      closestPrefixLen = prefixLen;
+      bestSnippet = snippet;
+    }
   }
   if (bestSnippet) {
+    // Very narrow queue rows still need the words that distinguish siblings.
+    // There is no room for both a shared prefix and the useful part here.
+    if (width < 14) return `${marker}${bestSnippet.slice(0, width - marker.length)}`;
     const headWidth = Math.max(6, Math.min(Math.floor(width * 0.48), width - marker.length - 4));
     const snippetWidth = Math.max(4, width - marker.length - headWidth);
     return `${text.slice(0, headWidth)}${marker}${bestSnippet.slice(0, snippetWidth)}`;
   }
 
-  const hasSharedPrefix = siblingTitles.some((other) => {
-    const otherText = _sanitizeDisplayLine(other || "");
-    return otherText !== text && otherText.length > width && otherText.slice(0, width) === clippedHead;
-  });
-  if (!hasSharedPrefix) return clippedHead;
-
+  // The closest sibling differs only by filler or extends this title. A
+  // sibling that exactly fills the row also lands here (matchingSiblings uses
+  // >= width), so show this row's head and tail.
   const headWidth = Math.max(6, Math.floor((width - marker.length) * 0.55));
   const tailWidth = Math.max(4, width - marker.length - headWidth);
   return `${text.slice(0, headWidth)}${marker}${text.slice(-tailWidth)}`;

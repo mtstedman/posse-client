@@ -1,26 +1,8 @@
+import { REQUEST_KIND_CHOICES, ITERATIVE_WORKFLOW_CHOICES } from "../../../catalog/intake.js";
+
 export function defaultOutputModeForMode(fallbackMode = "build") {
   return "auto";
 }
-
-const REQUEST_KIND_CHOICES = Object.freeze([
-  { value: "task", aliases: ["t"] },
-  { value: "bugfix", aliases: ["b", "bug"] },
-  { value: "design", aliases: ["d", "ux", "ui"] },
-  { value: "context", aliases: ["c"] },
-  { value: "question", aliases: ["q"] },
-  { value: "oneshot", aliases: ["o", "one-shot"] },
-  { value: "image", aliases: ["i"] },
-  { value: "report", aliases: ["r"] },
-  { value: "analysis", aliases: ["a", "analyze"] },
-]);
-
-const ITERATIVE_WORKFLOW_CHOICES = Object.freeze([
-  { value: "bugfix", aliases: ["b", "bug"] },
-  { value: "ux", aliases: ["u", "d", "ui", "design"] },
-  { value: "refactor", aliases: ["r"] },
-  { value: "audit", aliases: ["a"] },
-  { value: "iterate", aliases: ["i"] },
-]);
 
 function normalizeChoice(value, choices, fallback) {
   const raw = String(value || "").trim().toLowerCase();

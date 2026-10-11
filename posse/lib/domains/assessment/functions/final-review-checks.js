@@ -5,25 +5,34 @@
 // assessor would find reaches the developer while it can still fix it in the
 // same attempt. Live 2026-10-09: final_review passed a change whose typecheck
 // failed in the changed file, and twice passed a change whose own new test
-// failed; both surfaced only at assessment and cost a fix job each.
+// failed; both surfaced only at assessment and cost a fix job each. Only a
+// failure attributable to the change in process (an added line, an added
+// test file) is returned without the reviewer: debt in an untouched line or a
+// pre-existing test is the reviewer's evidence, never a finding by itself.
 
 import fs from "node:fs";
 import path from "node:path";
 import { runScopedChecks } from "../../../shared/tools/functions/toolkit/scoped-runners.js";
+import { discoverUnitTestCapability } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import {
+  changedUnitTestPlan,
+  lineageBaseCommit,
   lineageChangedTestPaths,
-  resolveFrozenTestPlan,
 } from "../../worker/functions/helpers/test-execution-receipt.js";
 import {
   FINAL_REVIEW_CHECKS,
+  FINAL_REVIEW_CHECK_ATTRIBUTION_LABELS,
   FINAL_REVIEW_CHECK_MAX_FILES,
   FINAL_REVIEW_MAX_FINDINGS,
   FINAL_REVIEW_OUTCOMES,
+  FINAL_REVIEW_PROVEN_TEST_STATUSES,
+  FINAL_REVIEW_SHARED_TEST_RUNNERS,
   FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS,
 } from "../../../catalog/final-review.js";
 
 // A located diagnostic line: `path(line,col): ...` (tsc) or `path:line:col ...`.
-const LOCATED_LINE = /^\s*([^\s():]+\.[A-Za-z0-9]+)[(:]\d/u;
+const LOCATED_LINE = /^\s*([^\s():]+\.[A-Za-z0-9]+)(?:\((\d+)|:(\d+))/u;
+const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/u;
 
 /** Changed files that still exist; a deletion has nothing to lint or run. */
 function existingChangedFiles(cwd, change) {
@@ -42,39 +51,106 @@ function existingChangedFiles(cwd, change) {
  */
 export function changedTestPlan(job, payload, change, declaredPlan, {
   cwd,
-  resolvePlan = resolveFrozenTestPlan,
   lineagePaths = [],
 } = {}) {
-  if (!cwd) return null;
+  if (!cwd || !["dev", "fix"].includes(String(job?.job_type || ""))
+    || String(payload?.task_mode || "code") !== "code") return null;
   const declared = new Set([
     ...(Array.isArray(declaredPlan?.unit_test_paths) ? declaredPlan.unit_test_paths : []),
     ...(Array.isArray(declaredPlan?.covered_unit_test_paths) ? declaredPlan.covered_unit_test_paths : []),
   ]);
   const lineage = (Array.isArray(lineagePaths) ? lineagePaths : [])
     .filter((file) => file && fs.existsSync(path.join(cwd, file)));
+  const capability = discoverUnitTestCapability({ projectDir: cwd });
+  if (!capability.available) return null;
+  const discovered = new Set(capability.files);
   const candidates = [...new Set([...existingChangedFiles(cwd, change), ...lineage])]
-    .filter((file) => !declared.has(file));
+    .filter((file) => discovered.has(file) && !declared.has(file));
   if (candidates.length === 0) return null;
-  const plan = resolvePlan(job, { task_mode: payload?.task_mode || "code", tests_to_run: candidates }, { cwd });
-  return Array.isArray(plan?.unit_test_paths) && plan.unit_test_paths.length > 0 ? plan : null;
+  // The changed files run alone: the declared plan already carries the
+  // repository's registered checks. The lineage base stays on the plan so a
+  // failing file can be told apart from one the base tree did not have.
+  let base = null;
+  try { base = lineageBaseCommit(job, payload) || null; } catch { base = null; }
+  return changedUnitTestPlan(candidates, { cwd, capability, base });
 }
 
 /**
  * Test files changed since the job's lineage base, diffed against the working
- * tree, committed or not: the files the post-change receipt will run. Empty
+ * tree, committed or not: the files the post-change receipt will run, and
+ * those of them absent at the base when the lineage diff reports it. Empty
  * when the lineage cannot be read; the review never waits on it.
+ *
+ * @returns {Promise<{ paths: string[], addedPaths: string[] }>}
  */
 export async function lineageTestFiles(job, payload, cwd) {
   try {
-    return (await lineageChangedTestPaths({ job, payload, cwd })).paths;
+    const lineage = await lineageChangedTestPaths({ job, payload, cwd });
+    return {
+      paths: Array.isArray(lineage?.paths) ? lineage.paths : [],
+      addedPaths: Array.isArray(lineage?.addedPaths) ? lineage.addedPaths : [],
+    };
   } catch {
-    return [];
+    return { paths: [], addedPaths: [] };
   }
 }
 
-function locatedFile(line) {
+/**
+ * The lines the scoped change added, per file, read from its diff in
+ * process. A file the diff creates counts every line, including an untracked
+ * file whose diff is synthesized without hunks.
+ *
+ * @returns {Map<string, Set<number> | true>} true: the whole file is added
+ */
+export function addedLinesByFile(diff) {
+  const added = new Map();
+  let file = null;
+  let header = false;
+  let created = false;
+  let next = 0;
+  for (const line of String(diff || "").split("\n")) {
+    if (line.startsWith("diff --git ")) {
+      file = null;
+      header = true;
+      created = false;
+      continue;
+    }
+    if (header && line.startsWith("--- ")) {
+      created = line === "--- /dev/null";
+      continue;
+    }
+    if (header && line.startsWith("+++ ")) {
+      header = false;
+      file = line === "+++ /dev/null" ? null : line.slice(4).replace(/^b\//u, "");
+      if (file) added.set(file, created ? true : added.get(file) || new Set());
+      continue;
+    }
+    const lines = file ? added.get(file) : null;
+    if (!(lines instanceof Set)) continue;
+    const hunk = HUNK_HEADER.exec(line);
+    if (hunk) next = Number(hunk[1]);
+    else if (line.startsWith("+")) lines.add(next++);
+    else if (line.startsWith(" ")) next += 1;
+  }
+  return added;
+}
+
+/**
+ * Test files absent at the lineage base, as far as the review can tell in
+ * process: those the lineage diff reports added, and those the scoped change
+ * creates outright, every line of which is the change's own.
+ */
+export function addedTestFiles(change, lineage = null) {
+  const created = [...addedLinesByFile(change?.diff)].filter(([, lines]) => lines === true).map(([file]) => file);
+  return [...new Set([...(Array.isArray(lineage?.addedPaths) ? lineage.addedPaths : []), ...created])];
+}
+
+function locatedLine(line) {
   const match = LOCATED_LINE.exec(line);
-  return match ? match[1].replace(/\\/gu, "/").replace(/^\.\//u, "") : null;
+  return match ? {
+    file: match[1].replace(/\\/gu, "/").replace(/^\.\//u, ""),
+    line: Number(match[2] || match[3]),
+  } : null;
 }
 
 // A package-root check prints paths relative to that root (`src/a.ts` for
@@ -84,34 +160,57 @@ function namesChangedFile(file, changed) {
 }
 
 /**
- * Split check failures into those located in a changed file and the rest. A
- * failure elsewhere may predate the change or be a caller it broke, so it is
- * shown to the reviewer but never becomes a finding by itself.
+ * Split check failures by attribution. `introduced`: located on a line the
+ * change added, a defect of this change. `inChanged`: in a changed file but
+ * not on an added line, which may be debt the change never touched.
+ * `elsewhere`: outside the changed files, which may predate the change or be
+ * a caller it broke. Only `introduced` becomes a finding by itself; the rest
+ * is shown to the reviewer.
  */
-function splitFailures(failures, changed) {
+function splitFailures(failures, changed, added = new Map()) {
+  const introduced = [];
   const inChanged = [];
   const elsewhere = [];
   const changedFilesNamed = (names) => changed.filter((file) => names.some((name) => namesChangedFile(name, [file])));
+  // An ambiguous package-relative path is attributed only when the line is
+  // added in every changed file it may name.
+  const onAddedLine = (name, line) => {
+    const files = changedFilesNamed([name]);
+    return files.length > 0 && files.every((file) => {
+      const lines = added.get(file);
+      return lines === true || (lines instanceof Set && Number.isSafeInteger(line) && lines.has(line));
+    });
+  };
   for (const failure of Array.isArray(failures) ? failures : []) {
     const check = failure?.check || "check";
+    const message = String(failure?.message || "").trim();
     if (failure?.file) {
-      const text = `${failure.file}: ${String(failure.message || "").trim()}`;
-      if (namesChangedFile(String(failure.file), changed)) {
-        inChanged.push({ check, text, files: changedFilesNamed([String(failure.file)]) });
-      } else {
+      const file = String(failure.file);
+      const text = `${file}: ${message}`;
+      if (!namesChangedFile(file, changed)) {
         elsewhere.push({ check, text, files: [] });
+        continue;
       }
+      const line = Number(failure.line) || message.split("\n").map(locatedLine).find(Boolean)?.line || null;
+      (onAddedLine(file, line) ? introduced : inChanged).push({ check, text, files: changedFilesNamed([file]) });
       continue;
     }
-    const lines = String(failure?.message || "").split("\n").filter((line) => line.trim());
-    const located = lines.filter((line) => locatedFile(line));
-    const hits = located.filter((line) => namesChangedFile(locatedFile(line), changed));
-    if (hits.length > 0) inChanged.push({ check, text: hits.join("\n"), files: changedFilesNamed(hits.map(locatedFile)) });
-    const rest = located.filter((line) => !hits.includes(line));
-    if (rest.length > 0) elsewhere.push({ check, text: rest.join("\n"), files: [] });
+    const lines = message.split("\n").filter((line) => line.trim());
+    const located = lines.map((text) => ({ text, at: locatedLine(text) })).filter((entry) => entry.at);
+    const hits = located.filter((entry) => namesChangedFile(entry.at.file, changed));
+    const proven = hits.filter((entry) => onAddedLine(entry.at.file, entry.at.line));
+    const unattributed = hits.filter((entry) => !proven.includes(entry));
+    for (const [bucket, entries] of [[introduced, proven], [inChanged, unattributed]]) {
+      if (entries.length > 0) {
+        bucket.push({ check, text: entries.map((entry) => entry.text).join("\n"),
+          files: changedFilesNamed(entries.map((entry) => entry.at.file)) });
+      }
+    }
+    const rest = located.filter((entry) => !hits.includes(entry));
+    if (rest.length > 0) elsewhere.push({ check, text: rest.map((entry) => entry.text).join("\n"), files: [] });
     else if (located.length === 0) elsewhere.push({ check, text: lines.join("\n"), files: [] });
   }
-  return { inChanged, elsewhere };
+  return { introduced, inChanged, elsewhere };
 }
 
 /**
@@ -130,17 +229,19 @@ export function runChangedFileChecks(cwd, change, { runChecks = runScopedChecks 
       status: "unavailable",
       summary: `changed-file checks could not run (${String(error?.message || error).slice(0, 200)})`,
       files,
+      introduced: [],
       inChanged: [],
       elsewhere: [],
     };
   }
-  const { inChanged, elsewhere } = result?.status === "failed"
-    ? splitFailures(result.failures, files)
-    : { inChanged: [], elsewhere: [] };
+  const { introduced, inChanged, elsewhere } = result?.status === "failed"
+    ? splitFailures(result.failures, files, addedLinesByFile(change?.diff))
+    : { introduced: [], inChanged: [], elsewhere: [] };
   return {
     status: String(result?.status || "unavailable"),
     summary: String(result?.summary || ""),
     files,
+    introduced,
     inChanged,
     elsewhere,
   };
@@ -159,24 +260,25 @@ export function renderChangedFileChecks(checks) {
   const block = (entries) => `\`\`\`text\n${tail(entries.map((entry) => `[${entry.check}] ${entry.text}`).join("\n"), FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS)}\n\`\`\``;
   return [
     head,
-    checks.inChanged.length > 0 ? "In changed files (defects in this change):" : null,
-    checks.inChanged.length > 0 ? block(checks.inChanged) : null,
-    checks.elsewhere.length > 0
-      ? "Elsewhere in the project (may predate this change; a caller this change broke is still its defect):"
-      : null,
-    checks.elsewhere.length > 0 ? block(checks.elsewhere) : null,
-  ].filter((line) => line != null).join("\n");
+    ...["introduced", "inChanged", "elsewhere"].flatMap((attribution) => {
+      const entries = Array.isArray(checks[attribution]) ? checks[attribution] : [];
+      return entries.length > 0 ? [FINAL_REVIEW_CHECK_ATTRIBUTION_LABELS[attribution], block(entries)] : [];
+    }),
+  ].join("\n");
 }
 
 /**
- * Findings the deterministic evidence proves on its own: a check failure
- * located in a changed file, and a failing test file the change added or
- * edited. They stand even when the reviewer passes the change.
+ * Findings the deterministic evidence proves on its own, attributed in
+ * process: a check failure on a line the change added, and a failing or
+ * timed-out test file the change added (`addedTestPaths`, addedTestFiles)
+ * that its runner ran on its own. They stand even when the reviewer passes
+ * the change. A failure in an edited, pre-existing test or elsewhere in a
+ * changed file may predate the change, so the reviewer judges it instead.
  */
-export function finalReviewCheckFindings({ checks = null, changedTestRun = null } = {}) {
+export function finalReviewCheckFindings({ checks = null, changedTestRun = null, addedTestPaths = [] } = {}) {
   const findings = [];
   const byCheck = new Map();
-  for (const entry of checks?.inChanged || []) {
+  for (const entry of checks?.introduced || []) {
     const prior = byCheck.get(entry.check) || { texts: [], files: [] };
     byCheck.set(entry.check, { texts: [...prior.texts, entry.text], files: [...prior.files, ...entry.files] });
   }
@@ -184,15 +286,25 @@ export function finalReviewCheckFindings({ checks = null, changedTestRun = null 
     const paths = [...new Set(files)].slice(0, 8);
     findings.push({
       severity: "high",
-      criterion: `${check} fails in changed files:\n${texts.join("\n")}`.slice(0, 1000),
+      criterion: `${check} fails on lines this change added:\n${texts.join("\n")}`.slice(0, 1000),
       ...(paths.length > 0 ? { paths } : {}),
     });
   }
-  if (changedTestRun?.status === "failed") {
+  const added = new Set(Array.isArray(addedTestPaths) ? addedTestPaths : []);
+  const proven = (Array.isArray(changedTestRun?.file_results) ? changedTestRun.file_results : [])
+    .filter((result) => added.has(result?.path)
+      && FINAL_REVIEW_PROVEN_TEST_STATUSES.includes(result.status)
+      && result.reused !== true
+      && !FINAL_REVIEW_SHARED_TEST_RUNNERS.includes(result.runner));
+  if (proven.length > 0) {
+    const paths = [...new Set(proven.map((result) => result.path))];
     findings.push({
       severity: "high",
-      criterion: `Test files this change added or edited fail: ${changedTestRun.command}\n${failureExcerpt(changedTestRun)}`.slice(0, 1000),
-      paths: String(changedTestRun.command || "").split(", ").filter(Boolean).slice(0, 8),
+      criterion: `Test files this change added fail: ${proven.map((result) => `${result.path} (${result.status})`).join(", ")}\n${failureExcerpt({
+        stderr: proven.map((result) => result.stderr).filter(Boolean).join("\n"),
+        stdout: proven.map((result) => `[${result.path}] ${result.status}\n${String(result.stdout || "")}`.trim()).join("\n\n"),
+      })}`.slice(0, 1000),
+      paths: paths.slice(0, 8),
     });
   }
   return findings;

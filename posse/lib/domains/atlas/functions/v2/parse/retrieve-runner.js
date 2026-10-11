@@ -19,7 +19,7 @@
 import { View } from "../../../classes/v2/View.js";
 import { Ledger } from "../../../classes/v2/Ledger.js";
 import { dispatch, normalizeActionName } from "../retrieval/index.js";
-import { openEmbeddingResources, retirePooledEmbeddingResources, semanticDispatchEnabled } from "../embeddings/resources.js";
+import { openEmbeddingResources, retirePooledEmbeddingResources } from "../embeddings/resources.js";
 import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
 import { fallbackQueryPlan, planQuery } from "../retrieval/orchestrator/query-planner.js";
 import { AsyncResourceGate } from "../../../../../shared/concurrency/classes/AsyncGate.js";
@@ -385,7 +385,7 @@ export async function runConductorRetrieve(payload) {
   const readRoot = payload?.readRoot ? String(payload.readRoot) : null;
   const config = payload?.config && typeof payload.config === "object" ? payload.config : {};
   const gateKey = dbHandleKey({ viewPath, ledgerPath });
-  let needsEmbeddings = payload.semantic === true && !!readRoot && semanticDispatchEnabled(config);
+  let needsEmbeddings = payload.semantic === true && !!readRoot;
   return RETRIEVE_DB_GATE.read(gateKey, async () => {
     const admitted = performance.now();
     timings.gate_wait = Math.max(0, admitted - started);

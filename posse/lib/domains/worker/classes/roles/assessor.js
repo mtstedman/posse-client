@@ -28,12 +28,7 @@ import { processVerdict } from "../../functions/helpers/process-verdict.js";
 
 export {
   assessResult,
-  __testBuildRegisteredTestRunEvidence,
-  __testBuildAssessmentProviderScope,
-  __testBuildCommittedScopeViolationVerdict,
-  __testFindOutOfScopeCommittedFiles,
   __testLooksLikeAssessorAccessLimitation,
-  __testRerunFailedRegisteredTestsForAssessment,
   _normalizeAssessorVerdictShape,
 } from "../../functions/helpers/assessment-pipeline.js";
 export {

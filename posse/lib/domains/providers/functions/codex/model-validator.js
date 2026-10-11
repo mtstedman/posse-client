@@ -1,6 +1,6 @@
-import { spawnSync } from "child_process";
 import { getSetting } from "../../../queue/functions/index.js";
-import { getClaudeInfo, getModelTierConfig } from "./index.js";
+import { getModelTierConfig } from "./index.js";
+import { buildNativeDispatchRequest, runNativeDispatch } from "../shared/native-dispatch.js";
 import { getMergedTextModels } from "../model-catalog.js";
 
 function normalizeModelName(value) {
@@ -53,67 +53,45 @@ export function getCurrentCodexModels({ includeKnown = true } = {}) {
   return uniqueModels(candidates);
 }
 
-function buildValidationEnv(authMode = "oauth", env = process.env) {
-  const next = { ...env };
-  delete next.ANTHROPIC_API_KEY;
-  delete next.XAI_API_KEY;
-  delete next.GITHUB_TOKEN;
-  const normalized = String(authMode || "oauth").trim().toLowerCase();
-  if (normalized === "oauth") {
-    delete next.CODEX_API_KEY;
-    delete next.OPENAI_API_KEY;
-  }
-  return next;
-}
-
-function summarizeOutput(stdout = "", stderr = "") {
-  const combined = `${String(stdout || "")}\n${String(stderr || "")}`;
-  const lines = combined
-    .split(/\r?\n/)
-    .map((line) => String(line || "").trim())
-    .filter(Boolean);
-  return lines.slice(-3).join(" | ");
-}
-
-function defaultProbe({
+async function defaultProbe({
   model,
   cwd = process.cwd(),
   prompt = "Reply with exactly OK",
   timeoutMs = 120000,
   authMode = "oauth",
 } = {}) {
-  const cli = getClaudeInfo();
-  const cmd = cli?.cmd || "codex";
-  const baseArgs = Array.isArray(cli?.args) ? cli.args : [];
-  const args = [
-    ...baseArgs,
-    "exec",
-    "--ephemeral",
-    "--skip-git-repo-check",
-    "--sandbox",
-    "read-only",
-    "-m",
-    model,
-    prompt,
-  ];
   const startedAt = Date.now();
-  const result = spawnSync(cmd, args, {
-    cwd,
-    env: buildValidationEnv(authMode),
-    encoding: "utf8",
-    timeout: timeoutMs,
-  });
-  const durationMs = Date.now() - startedAt;
-  const exitCode = Number.isInteger(result.status) ? result.status : -1;
-  return {
-    ok: exitCode === 0,
-    exitCode,
-    durationMs,
-    summary: summarizeOutput(result.stdout, result.stderr),
-  };
+  const deadlineMs = Number.isFinite(timeoutMs) ? Math.max(1_000, timeoutMs) : 120_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error("Codex model validation timed out")), deadlineMs);
+  timer.unref?.();
+  try {
+    const request = buildNativeDispatchRequest("codex", prompt, {
+      role: "preflight",
+      modelTier: "cheap",
+      modelName: model,
+      authMode: authMode === "auto" ? null : authMode,
+      cwd,
+      issuedToolIds: [],
+      maxTurns: 1,
+      maxOutputTokens: 32,
+      stallTimeoutMs: deadlineMs,
+      wallTimeoutMs: deadlineMs,
+    });
+    const result = await runNativeDispatch(request, {
+      abortSignal: controller.signal,
+      projectDir: cwd,
+      silent: true,
+    });
+    return { ok: true, exitCode: 0, durationMs: Date.now() - startedAt, summary: String(result.output || "").trim() };
+  } catch (error) {
+    return { ok: false, exitCode: 1, durationMs: Date.now() - startedAt, summary: String(error?.message || error) };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-export function validateCodexModels({
+export async function validateCodexModels({
   models = null,
   cwd = process.cwd(),
   prompt = "Reply with exactly OK",
@@ -122,22 +100,23 @@ export function validateCodexModels({
   probe = defaultProbe,
 } = {}) {
   const targetModels = uniqueModels(Array.isArray(models) ? models : getCurrentCodexModels({ includeKnown: true }));
-  const results = targetModels.map((model) => {
-    const probeResult = probe({
+  const results = [];
+  for (const model of targetModels) {
+    const probeResult = await probe({
       model,
       cwd,
       prompt,
       timeoutMs,
       authMode,
     }) || {};
-    return {
+    results.push({
       model,
       ok: probeResult.ok === true,
       exitCode: Number.isInteger(probeResult.exitCode) ? probeResult.exitCode : -1,
       durationMs: Number.isFinite(probeResult.durationMs) ? probeResult.durationMs : null,
       summary: String(probeResult.summary || "").trim(),
-    };
-  });
+    });
+  }
   const passed = results.filter((entry) => entry.ok).map((entry) => entry.model);
   const failed = results.filter((entry) => !entry.ok).map((entry) => entry.model);
   return {
@@ -163,8 +142,4 @@ export function formatCodexModelValidationReport(report) {
     lines.push(`[${status}] ${row.model} exit=${row.exitCode} duration=${duration}${row.summary ? ` | ${row.summary}` : ""}`);
   }
   return lines.join("\n");
-}
-
-export function __testBuildValidationEnv(authMode = "oauth", env = process.env) {
-  return buildValidationEnv(authMode, env);
 }

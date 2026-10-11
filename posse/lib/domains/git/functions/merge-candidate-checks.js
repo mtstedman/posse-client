@@ -1,5 +1,5 @@
 import { testExecutionCounts } from "../../../shared/tools/functions/toolkit/test-output-counts.js";
-import { MERGE_CHECK_FAILURE_KINDS } from "../../../catalog/verification.js";
+import { MERGE_CANDIDATE_CHECKOUT_PREFIX, MERGE_CHECK_FAILURE_KINDS } from "../../../catalog/verification.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +10,7 @@ import { runCloseoutTestCommandSync } from "./merge-closeout.js";
 
 /** Create one disposable checkout of the staged candidate for merge checks. */
 export function withTemporaryMergeCandidateCheckout({ cwd, git }, use) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "posse-merge-check-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), MERGE_CANDIDATE_CHECKOUT_PREFIX));
   const checkout = path.join(root, "candidate");
   let added = false;
   try {
@@ -43,10 +43,15 @@ export function withTemporaryMergeCandidateCheckout({ cwd, git }, use) {
   }
 }
 
+/** The distinct test commands succeeded dev/fix jobs declared for the merge gate. */
+export function declaredMergeCandidateCommands(jobs = []) {
+  return [...new Set((jobs || []).filter((job) => job.status === "succeeded" && ["dev", "fix"].includes(job.job_type))
+    .map((job) => String(parseJobPayload(job).test_command || "").trim()).filter(Boolean))];
+}
+
 /** Verify the staged tree without letting test side effects alter the merge. */
 export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = runCloseoutTestCommandSync, candidate = null, deadlineMs = null }) {
-  const commands = [...new Set(jobs.filter((job) => job.status === "succeeded" && ["dev", "fix"].includes(job.job_type))
-    .map((job) => String(parseJobPayload(job).test_command || "").trim()).filter(Boolean))];
+  const commands = declaredMergeCandidateCommands(jobs);
   if (commands.length === 0) return null;
   const runInCheckout = ({ checkout, reset }) => {
     const results = commands.map((command) => {
@@ -58,10 +63,11 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
       if (!validation.ok) return { ok: false, status: "unavailable", failure_kind: MERGE_CHECK_FAILURE_KINDS.MISSING_RUNNER,
         test: { name: command }, note: validation.reason };
       const cwdRelative = validation.cwd_relative || null;
+      const timeoutMs = Math.min(10 * 60_000, remainingMs);
       const result = run(validation.execution_command || command, {
         cwd: validation.cwd_relative ? path.resolve(checkout, validation.cwd_relative) : checkout,
         dependencySourceDir: validation.cwd_relative ? path.resolve(cwd, validation.cwd_relative) : cwd,
-        timeoutMs: Math.min(10 * 60_000, remainingMs),
+        timeoutMs,
       });
       // An absent runner leaves required verification unresolved. A process
       // that timed out, was killed, or overflowed cannot be called unavailable.
@@ -87,7 +93,7 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
                 : !result.ok ? MERGE_CHECK_FAILURE_KINDS.TEST_FAILURE : null;
       return { ok: !unavailable && result.ok && !abnormal, status: unavailable ? "unavailable" : result.ok && !abnormal ? "passed" : "failed",
         ...(failureKind ? { failure_kind: failureKind } : {}),
-        test: { name: command }, cwd_relative: cwdRelative, ...(unavailable ? { note: result.output } : {}),
+        test: { name: command }, cwd_relative: cwdRelative, timeout_ms: timeoutMs, ...(unavailable ? { note: result.output } : {}),
         stdout: result.stdout ?? result.output ?? "", stderr: result.stderr ?? "",
         exit_code: result.status, signal: result.signal ?? null,
         ...(!unavailable && (!result.ok || abnormal) ? { failure: { message: result.output || `merge check ended without a result (${failureKind})` } } : {}),

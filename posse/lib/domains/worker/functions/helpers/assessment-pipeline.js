@@ -5,7 +5,6 @@ import { reserveFinalReviewContinuation } from "../../../assessment/functions/fi
 // Post-execution assessment pipeline extracted from worker.js.
 
 import path from "path";
-import fs from "fs";
 import crypto from "crypto";
 import {
   acquireAssessmentBarrier,
@@ -38,24 +37,26 @@ import {
   attachAssessmentDiffContextAsync,
   buildHandoffPacket,
   composePromptRemoteAware,
-  buildSmartPreload,
   handoff,
   renderAtlasHandoffSections,
 } from "../../../handoff/functions/index.js";
 import {
-  getAgentHandoffRecord,
   isRetryableTerminalHandoffError,
 } from "../../../handoff/functions/agent-handoff.js";
+import { getAgentHandoffRecord } from "../../../handoff/functions/agent-handoff-records.js";
 import { refreshAndExtractInsights } from "./insights.js";
 import { renderBaselineSiblingRegression } from "./baseline-attribution.js";
 import { renderBaselineTestDebt } from "./baseline-test-debt.js";
-import { gitExec, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
+import { gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
 import { listIgnoredRepoPaths } from "../../../git/functions/ignored-paths.js";
 import {
   snapshotAndResetDirtyWorktreeAsync,
   stashDirtyWorktreeAsync,
 } from "../../../git/functions/worktree.js";
-import { ASSESSABLE_JOB_TYPES } from "../../../../catalog/job.js";
+import { ASSESSABLE_JOB_TYPES, ASSESSMENT_LIFECYCLE, JOB_ASSESSOR_MODEL_VERDICTS } from "../../../../catalog/job.js";
+import { ASSESSMENT_VERDICT_OBSERVATION_TYPE } from "../../../../catalog/observation.js";
+import { AGENT_HANDOFF_PROFILES } from "../../../../catalog/handoff.js";
+import { PIXEL_VISUAL_EVIDENCE_TOOL_NAMES, UNSUCCESSFUL_VISUAL_TOOL_STATUSES } from "../../../../catalog/assessment.js";
 import { effectiveArtifactTaskMode } from "../../../providers/functions/execution-routing.js";
 import {
   artifactOutputClaimsReusableComplete,
@@ -70,7 +71,6 @@ import {
   buildWorkflowModeBlock,
   getWorkItemWorkflowConfig,
 } from "../../../intake/functions/hints.js";
-import { isInsideRoot, isUnderRoot, normPath, normalizeRoots } from "../../../../shared/scope/functions/path.js";
 import { isTestCollateralPath } from "../../../../shared/policies/functions/scope-auto-approval.js";
 import { processVerdict } from "./process-verdict.js";
 import { normalizeAssessorConfidence } from "./verdict-shared.js";
@@ -85,9 +85,9 @@ import {
 } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
+import { ASSESSMENT_FAILURE_CLASSES } from "../../../../catalog/human-input.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { runImmediateTransaction } from "../../../queue/functions/common.js";
-import { ensureRegisteredTestTables, runRegisteredTest } from "../../../../shared/tools/functions/toolkit/registered-tests.js";
 import {
   persistPendingAssessmentFileRequests,
   shouldDeferAssessmentToFileRequestContinuation,
@@ -140,6 +140,17 @@ export {
   renderAssessmentTaskBoundary,
 } from "./assessment-task-boundary.js";
 import { workItemResearchRefsBlock } from "../../../research/functions/work-item-research-refs.js";
+import { buildAssessmentFileSnapshots } from "../../../assessment/functions/assessment-file-snapshots.js";
+import {
+  mergeUniquePaths,
+  findOutOfScopeCommittedFiles,
+  buildCommittedScopeViolationVerdict,
+  buildAssessmentProviderScope,
+} from "../../../assessment/functions/assessment-scope.js";
+import {
+  buildLocalAssessmentEvidence,
+  renderAssessmentDependencyDiffs,
+} from "../../../assessment/functions/assessment-evidence.js";
 
 export function taskAbAssessorTier(workItem) {
   let metadata = workItem?.metadata_json;
@@ -180,18 +191,18 @@ export function assessmentLifecycleStateFromOutcome(freshJob, verdict = null) {
   // failure (for example, when required verification was rejected). The outer
   // job status is therefore authoritative whenever it is terminal; consulting
   // the raw verdict first produced assessment_passed + status=failed rows.
-  if (freshJob?.status === "succeeded") return "assessment_passed";
+  if (freshJob?.status === "succeeded") return ASSESSMENT_LIFECYCLE.PASSED;
   if (["waiting_on_human", "waiting_on_review"].includes(freshJob?.status)) {
-    return "assessment_needs_human";
+    return ASSESSMENT_LIFECYCLE.NEEDS_HUMAN;
   }
-  if (freshJob?.status === "failed") return "assessment_failed";
-  if (verdict?.verdict === "pass") return "assessment_passed";
-  if (verdict?.verdict === "fail") return "assessment_failed";
+  if (freshJob?.status === "failed") return ASSESSMENT_LIFECYCLE.FAILED;
+  if (verdict?.verdict === "pass") return ASSESSMENT_LIFECYCLE.PASSED;
+  if (verdict?.verdict === "fail") return ASSESSMENT_LIFECYCLE.FAILED;
   return null;
 }
 
 export function assessmentVerdictFailureText(freshJob, verdict = null) {
-  if (assessmentLifecycleStateFromOutcome(freshJob, verdict) !== "assessment_failed") return null;
+  if (assessmentLifecycleStateFromOutcome(freshJob, verdict) !== ASSESSMENT_LIFECYCLE.FAILED) return null;
   const verdictName = String(verdict?.verdict || freshJob?.assessor_verdict || "failed").trim() || "failed";
   const reasons = (Array.isArray(verdict?.reasons) ? verdict.reasons : [])
     .map((reason) => String(reason || "").trim())
@@ -203,21 +214,44 @@ export function assessmentVerdictFailureText(freshJob, verdict = null) {
 export function updateAssessmentLifecycleFromVerdict(jobId, freshJob, verdict = null) {
   const state = assessmentLifecycleStateFromOutcome(freshJob, verdict);
   const error = assessmentVerdictFailureText(freshJob, verdict);
-  if (state === "assessment_passed" || state === "assessment_failed") {
+  if (state === ASSESSMENT_LIFECYCLE.PASSED || state === ASSESSMENT_LIFECYCLE.FAILED) {
     setAssessmentLifecycle(jobId, state, { error, completed: true });
-  } else if (state === "assessment_needs_human") {
+  } else if (state === ASSESSMENT_LIFECYCLE.NEEDS_HUMAN) {
     setAssessmentLifecycle(jobId, state);
   }
   // Events and observations are retention-bounded. Keep the terminal reason
   // on the job row as well so a failed assessment remains diagnosable after
   // its detailed telemetry has been pruned.
-  if (state === "assessment_failed" && error) setJobError(jobId, error);
+  if (state === ASSESSMENT_LIFECYCLE.FAILED && error) setJobError(jobId, error);
   return { state, error };
+}
+
+// The attempt row is this execution's own; the job row may already belong to
+// a new lease owner. A lost lease closes the attempt as interrupted and leaves
+// the job untouched (the route below declines to write as well).
+function recordAssessmentInfrastructureAttempt(job, leaseToken, attemptId, startTime, message) {
+  if (!isLeaseValid(job.id, leaseToken)) {
+    completeAttempt(attemptId, {
+      status: "interrupted",
+      duration_ms: Date.now() - startTime,
+      error_text: `Lease expired before the assessment infrastructure failure was recorded — ${message}`.slice(0, 4000),
+    });
+    return false;
+  }
+  completeAttempt(attemptId, {
+    status: "succeeded",
+    duration_ms: Date.now() - startTime,
+    error_text: message,
+  });
+  setJobError(job.id, message);
+  return true;
 }
 
 export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, error, {
   pendingFileRequests = null,
   readyAt = null,
+  failureClass = ASSESSMENT_FAILURE_CLASSES.INFRASTRUCTURE,
+  question = null,
 } = {}) {
   // A delayed provider or runner result must not rewrite recovery state after
   // cancellation or another worker has taken ownership of this job.
@@ -242,7 +276,7 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
         verification_outcome: error?.verification_outcome || null,
       };
       updateJobPayload(job.id, JSON.stringify(recoveryPayload));
-      setAssessmentLifecycle(job.id, "assessment_needs_human", { error: diagnostic });
+      setAssessmentLifecycle(job.id, ASSESSMENT_LIFECYCLE.NEEDS_HUMAN, { error: diagnostic });
       setJobError(job.id, diagnostic);
       createJob({
         work_item_id: job.work_item_id,
@@ -255,8 +289,8 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
           review_type: "blocked_recovery",
           question_kind: "blocked_recovery",
           choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
-          verification_failure_class: "assessment_infrastructure",
-          questions: [`Assessment for job #${job.id} could not finish. Restore the runner or provider, then choose retry; or choose replan, explicit_waiver, or fail.`],
+          verification_failure_class: failureClass,
+          questions: [question || `Assessment for job #${job.id} could not finish. Restore the runner or provider, then choose retry; or choose replan, explicit_waiver, or fail.`],
           context: [diagnostic, error?.rerun_command ? `Command: ${error.rerun_command}` : null]
             .filter(Boolean).join("\n").slice(0, 2000),
         }),
@@ -277,6 +311,7 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
         error: message.slice(0, 2000),
         operator_actionable: true,
         gated_immediately: gateImmediately,
+        failure_class: failureClass,
       }),
     });
     worker.emit(job.id, `${C.yellow}[assessor] Assessment infrastructure exhausted; job preserved for recovery${C.reset}`);
@@ -286,7 +321,7 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
       terminalProtocolFailure,
     };
   }
-  setAssessmentLifecycle(job.id, "assessment_unavailable", { error: message });
+  setAssessmentLifecycle(job.id, ASSESSMENT_LIFECYCLE.UNAVAILABLE, { error: message });
   worker._releaseLease(job, leaseToken, "queued", {
     readyAt: readyAt || new Date(Date.now() + 2_000).toISOString(),
   });
@@ -325,10 +360,6 @@ export function assessmentTerminalHandoffRetryDecision(
   };
 }
 
-function _mergeUniquePaths(...groups) {
-  return [...new Set(groups.flat().filter(Boolean).map((value) => String(value).replace(/\\/g, "/")))];
-}
-
 function _looksLikeAssessorAccessLimitation(text) {
   const source = String(text || "").toLowerCase();
   if (!source) return false;
@@ -357,144 +388,6 @@ function _looksLikeAssessorAccessLimitation(text) {
 
 export function __testLooksLikeAssessorAccessLimitation(text) {
   return _looksLikeAssessorAccessLimitation(text);
-}
-
-// Memoized per cwd: the nested-repo prefix is fixed for a directory for the
-// lifetime of a session, and this runs inside every committed-scope check —
-// without the cache each check pays a synchronous `git rev-parse` on the main
-// thread. Failures are not cached (a transient git error must retry).
-// Bounded by the number of distinct worktree/project cwds the process touches
-// (a handful per run); never invalidated — the prefix is derived from on-disk
-// repo layout, which is stable for the process lifetime.
-const _nestedRepoPrefixCache = new Map();
-
-function _deriveNestedRepoPrefix(cwd = process.cwd()) {
-  if (!cwd) return null;
-  const key = path.resolve(cwd);
-  if (_nestedRepoPrefixCache.has(key)) return _nestedRepoPrefixCache.get(key);
-  try {
-    const repoRoot = path.resolve(gitExec(["rev-parse", "--show-toplevel"], cwd));
-    const rel = path.relative(repoRoot, key);
-    const prefix = (!rel || rel === "." || !isInsideRoot(key, repoRoot, { allowEqual: false, followSymlinks: false }))
-      ? null
-      : (normPath(rel) || null);
-    _nestedRepoPrefixCache.set(key, prefix);
-    return prefix;
-  } catch {
-    return null;
-  }
-}
-
-function _scopePathCandidates(filePath, nestedRepoPrefix = null) {
-  const normalized = normPath(filePath);
-  if (!normalized) return [];
-  const candidates = [normalized];
-  if (nestedRepoPrefix) {
-    const prefix = `${nestedRepoPrefix}/`;
-    if (normalized.startsWith(prefix)) {
-      const stripped = normalized.slice(prefix.length);
-      if (stripped) candidates.push(stripped);
-    }
-  }
-  return [...new Set(candidates)];
-}
-
-function _findOutOfScopeCommittedFiles(filesCommitted, {
-  allowedFiles = [],
-  allowedCreateFiles = [],
-  allowedDeleteFiles = [],
-  allowedCreateRoots = [],
-  cwd = process.cwd(),
-  nestedRepoPrefix = null,
-} = {}) {
-  const effectiveNestedRepoPrefix = nestedRepoPrefix || _deriveNestedRepoPrefix(cwd);
-  const allAllowed = new Set([
-    ...allowedFiles,
-    ...allowedCreateFiles,
-    ...allowedDeleteFiles,
-  ].flatMap((value) => _scopePathCandidates(value, effectiveNestedRepoPrefix)));
-  const normalizedRoots = normalizeRoots(allowedCreateRoots, cwd);
-  return (Array.isArray(filesCommitted) ? filesCommitted : []).filter((filePath) => {
-    const candidates = _scopePathCandidates(filePath, effectiveNestedRepoPrefix);
-    if (candidates.length === 0) return true;
-    return !candidates.some((candidate) => allAllowed.has(candidate) || isUnderRoot(candidate, normalizedRoots));
-  });
-}
-
-export function __testFindOutOfScopeCommittedFiles(filesCommitted, opts = {}) {
-  return _findOutOfScopeCommittedFiles(filesCommitted, opts);
-}
-
-function _requestedScopePathSet(filesRequested = [], cwd = null) {
-  const out = new Set();
-  for (const request of Array.isArray(filesRequested) ? filesRequested : []) {
-    const value = _normalizeAssessmentScopePath(request?.path, cwd);
-    if (value) out.add(value);
-  }
-  return out;
-}
-
-function _buildCommittedScopeViolationVerdict(assessmentContext = null, cwd = null) {
-  if (!assessmentContext || typeof assessmentContext !== "object") return null;
-  const taskMode = assessmentContext.task_mode || "code";
-  if (isArtifactMode(taskMode)) return null;
-  if (assessmentContext.files_committed_unknown === true) {
-    const detail = assessmentContext.files_committed_error
-      ? ` Error: ${String(assessmentContext.files_committed_error).slice(0, 240)}`
-      : "";
-    return {
-      verdict: "fail",
-      confidence: "high",
-      reasons: [
-        `Deterministic scope verification failed: could not verify the actual committed files for commit ${assessmentContext.commit_hash || "(unknown)"}.${detail}`,
-      ],
-      spawn_jobs: [],
-      human_questions: [],
-      suggestions: [],
-      raw: "",
-    };
-  }
-  const filesCommitted = Array.isArray(assessmentContext.files_committed)
-    ? assessmentContext.files_committed
-    : [];
-  if (filesCommitted.length === 0) return null;
-
-  const outOfScope = _findOutOfScopeCommittedFiles(filesCommitted, {
-    // The harness hands the job the paths both sides of its target merge
-    // changed; resolving them is required, so they are in scope.
-    allowedFiles: _mergeUniquePaths(
-      assessmentContext.allowed_files || [],
-      assessmentContext.merge_resolution_files || [],
-    ),
-    allowedCreateFiles: assessmentContext.allowed_create_files || [],
-    allowedDeleteFiles: assessmentContext.allowed_delete_files || [],
-    allowedCreateRoots: assessmentContext.allowed_create_roots || [],
-    cwd,
-  });
-  if (outOfScope.length === 0) return null;
-
-  const requestedPaths = _requestedScopePathSet(assessmentContext.files_requested, cwd);
-  const requestedCommitted = outOfScope.filter((filePath) =>
-    requestedPaths.has(_normalizeAssessmentScopePath(filePath, cwd))
-  );
-  const requestedNote = requestedCommitted.length > 0
-    ? ` Requested-file entries are follow-up scope, not permission for this commit: ${JSON.stringify(requestedCommitted)}.`
-    : "";
-  return {
-    verdict: "fail",
-    confidence: "high",
-    reasons: [
-      `Deterministic scope violation: committed out-of-scope file(s) ${JSON.stringify(outOfScope)}.${requestedNote}`,
-    ],
-    spawn_jobs: [],
-    human_questions: [],
-    suggestions: [],
-    raw: "",
-  };
-}
-
-export function __testBuildCommittedScopeViolationVerdict(assessmentContext = null, cwd = null) {
-  return _buildCommittedScopeViolationVerdict(assessmentContext, cwd);
 }
 
 function _addedScopedDiffText(scopedDiff = "") {
@@ -610,22 +503,6 @@ function _looksLikeAssessorVerdictObject(value) {
     );
 }
 
-const PIXEL_VISUAL_EVIDENCE_TOOL_NAMES = new Set([
-  "view_image",
-  "inspect_image",
-  "analyze_image",
-  "image_preview",
-]);
-const UNSUCCESSFUL_VISUAL_TOOL_STATUSES = new Set([
-  "blocked",
-  "cancelled",
-  "canceled",
-  "denied",
-  "error",
-  "failed",
-  "rejected",
-]);
-
 function imageAssessmentRequiresPixelEvidence(payload = {}) {
   if (String(payload?.task_mode || "").trim().toLowerCase() !== "image") return false;
   const criteria = Array.isArray(payload?.success_criteria) ? payload.success_criteria : [];
@@ -652,8 +529,8 @@ function imageAssessmentHasPixelEvidence(toolUses = [], { ledgerAuthoritative = 
   return (Array.isArray(toolUses) ? toolUses : []).some((use) => {
     const normalizedName = pixelEvidenceToolName(use);
     if (ledgerAuthoritative && normalizedName === "view_image") return false;
-    return PIXEL_VISUAL_EVIDENCE_TOOL_NAMES.has(normalizedName)
-      && !UNSUCCESSFUL_VISUAL_TOOL_STATUSES.has(String(use?.status || "").trim().toLowerCase());
+    return PIXEL_VISUAL_EVIDENCE_TOOL_NAMES.includes(normalizedName)
+      && !UNSUCCESSFUL_VISUAL_TOOL_STATUSES.includes(String(use?.status || "").trim().toLowerCase());
   });
 }
 
@@ -725,7 +602,7 @@ export function __testApplyImageVisualEvidencePolicy(options = {}) {
   return applyImageVisualEvidencePolicy(options);
 }
 
-const ASSESSOR_VALID_VERDICTS = new Set(["pass", "fail", "blocked", "needs_replan", "needs_review"]);
+const ASSESSOR_VALID_VERDICTS = new Set(JOB_ASSESSOR_MODEL_VERDICTS);
 
 function _isReusableAssessorVerdict(verdictJson, verdict) {
   return verdictJson?.repaired !== true
@@ -804,53 +681,6 @@ function _hasTrustedScopedCheckFailure(assessmentContext) {
   ));
 }
 
-function _normalizeAssessmentScopePath(value, cwd = null, nestedRepoPrefix = null) {
-  if (!value) return null;
-  const raw = String(value).trim();
-  if (!raw) return null;
-  if (path.isAbsolute(raw)) return raw;
-  const normalized = raw.replace(/\\/g, "/");
-  const prefix = nestedRepoPrefix || (cwd ? _deriveNestedRepoPrefix(cwd) : null);
-  if (prefix && normalized.startsWith(`${prefix}/`)) {
-    return normalized.slice(prefix.length + 1);
-  }
-  return normalized;
-}
-
-function buildAssessmentProviderScope({ cwd = null, assessmentContext = null } = {}) {
-  if (!assessmentContext || typeof assessmentContext !== "object") {
-    return { scopedFiles: [], createFiles: [], deleteFiles: [], createRoots: [] };
-  }
-  const nestedRepoPrefix = _deriveNestedRepoPrefix(cwd);
-
-  const scopedFiles = _mergeUniquePaths(
-    ...(Array.isArray(assessmentContext.allowed_files) ? [assessmentContext.allowed_files] : []),
-    ...(Array.isArray(assessmentContext.files_committed) ? [assessmentContext.files_committed] : []),
-    ...(Array.isArray(assessmentContext.files_reverted) ? [assessmentContext.files_reverted] : []),
-    ...(Array.isArray(assessmentContext.manifest?.files)
-      ? [assessmentContext.manifest.files.map((f) => f?.path).filter(Boolean)]
-      : []),
-  ).map((value) => _normalizeAssessmentScopePath(value, cwd, nestedRepoPrefix)).filter(Boolean);
-
-  const createFiles = _mergeUniquePaths(
-    ...(Array.isArray(assessmentContext.allowed_create_files) ? [assessmentContext.allowed_create_files] : []),
-    ...(Array.isArray(assessmentContext.manifest?.files)
-      ? [assessmentContext.manifest.files.map((f) => f?.path).filter(Boolean)]
-      : []),
-  ).map((value) => _normalizeAssessmentScopePath(value, cwd, nestedRepoPrefix)).filter(Boolean);
-
-  const deleteFiles = _mergeUniquePaths(
-    ...(Array.isArray(assessmentContext.allowed_delete_files) ? [assessmentContext.allowed_delete_files] : []),
-  ).map((value) => _normalizeAssessmentScopePath(value, cwd, nestedRepoPrefix)).filter(Boolean);
-
-  const createRoots = _mergeUniquePaths(
-    ...(Array.isArray(assessmentContext.allowed_create_roots) ? [assessmentContext.allowed_create_roots] : []),
-    ...(assessmentContext.output_root ? [_normalizeAssessmentScopePath(assessmentContext.output_root, cwd, nestedRepoPrefix)] : []),
-  ).filter(Boolean);
-
-  return { scopedFiles, createFiles, deleteFiles, createRoots };
-}
-
 function stripInternalAssessmentPolicyPayload(payload = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
   const stripped = { ...payload };
@@ -925,311 +755,6 @@ function _buildVerificationCapabilityBlock(payload = {}) {
   ].filter(Boolean).join("\n");
 }
 
-function _dbTableExists(db, tableName) {
-  try {
-    return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`).get(tableName);
-  } catch {
-    return false;
-  }
-}
-
-function _parseFailureJson(value) {
-  if (!value) return null;
-  try {
-    const parsed = JSON.parse(String(value));
-    return parsed && typeof parsed === "object" ? parsed : { message: String(parsed) };
-  } catch {
-    return { message: String(value) };
-  }
-}
-
-function _parseJsonArray(value) {
-  if (Array.isArray(value)) return value;
-  if (value == null || value === "") return [];
-  try {
-    const parsed = JSON.parse(String(value));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function _compactEvidenceText(value, max = 360) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  if (text.length <= max) return text;
-  return `${text.slice(0, max)}...`;
-}
-
-function _normalizeEvidenceScopeFiles(scopeFiles = []) {
-  const out = [];
-  const seen = new Set();
-  for (const value of Array.isArray(scopeFiles) ? scopeFiles : []) {
-    const rel = String(value || "")
-      .replace(/\\/g, "/")
-      .replace(/^\.\//, "")
-      .trim();
-    if (!rel || rel === "." || rel === ".." || rel.startsWith("../") || /^[A-Za-z]:\//.test(rel)) continue;
-    if (seen.has(rel)) continue;
-    seen.add(rel);
-    out.push(rel);
-  }
-  return out;
-}
-
-function _rowRegisteredTestTargetFiles(row) {
-  return _parseJsonArray(row?.target_files_json).map((value) => String(value || "")).filter(Boolean);
-}
-
-function _registeredTestTargetsOverlapScope(row, scopeFiles = []) {
-  const normalizedScope = _normalizeEvidenceScopeFiles(scopeFiles);
-  if (normalizedScope.length === 0) return true;
-  const scopeSet = new Set(normalizedScope);
-  const targets = _rowRegisteredTestTargetFiles(row);
-  if (targets.length === 0) return false;
-  return targets.some((file) => scopeSet.has(file));
-}
-
-function _formatTargetImportHints(value) {
-  const imports = _parseJsonArray(value);
-  if (imports.length === 0) return "";
-  return imports.slice(0, 8).map((entry) => {
-    const parts = [];
-    if (Array.isArray(entry?.symbols) && entry.symbols.length > 0) parts.push(`symbols=${entry.symbols.join(",")}`);
-    if (entry?.default) parts.push(`default=${entry.default}`);
-    if (entry?.namespace) parts.push(`namespace=${entry.namespace}`);
-    return `${entry?.path || "unknown"}${parts.length ? ` (${parts.join("; ")})` : ""}`;
-  }).join("; ");
-}
-
-function _formatRegisteredTestRunEvidence(rows = []) {
-  if (!Array.isArray(rows) || rows.length === 0) return "";
-  const ordered = [...rows].reverse();
-  const passed = ordered.filter((row) => Number(row.ok) === 1).length;
-  const failed = ordered.length - passed;
-  const lines = [
-    `REGISTERED POSSE TEST RUNS (runtime DB evidence from this job before assessment):`,
-    `summary: ${passed}/${ordered.length} run${ordered.length === 1 ? "" : "s"} passed${failed ? `; ${failed} failed` : ""}.`,
-    `Use this as verification evidence from the dev's registered test tools and system handoff rechecks. Rerun a relevant test or suite if it is central to the verdict or the result looks stale.`,
-  ];
-
-  for (const row of ordered) {
-    const status = Number(row.ok) === 1 ? "PASS" : "FAIL";
-    const suite = row.suite_name || row.suite_slug || `suite#${row.suite_id}`;
-    const test = row.test_name || row.test_slug || (row.test_id ? `test#${row.test_id}` : "suite run");
-    const duration = Number.isFinite(Number(row.duration_ms)) ? `${Number(row.duration_ms)}ms` : "?ms";
-    const actor = row.created_by_role ? ` by ${row.created_by_role}` : "";
-    const created = row.created_at ? ` at ${row.created_at}` : "";
-    const language = row.language ? ` ${row.language}` : "";
-    lines.push(`- ${status} run #${row.id}${actor}: ${suite} / ${test}${language} (${duration})${created}`);
-    const targetFiles = _rowRegisteredTestTargetFiles(row);
-    const targetSymbols = _parseJsonArray(row.target_symbols_json).map((value) => String(value || "")).filter(Boolean);
-    const importHints = _formatTargetImportHints(row.target_imports_json);
-    if (targetFiles.length > 0 || targetSymbols.length > 0) {
-      lines.push(`  targets: files=[${targetFiles.join(", ")}]${targetSymbols.length > 0 ? ` symbols=[${targetSymbols.join(", ")}]` : ""}`);
-    }
-    if (importHints) lines.push(`  imports: ${importHints}`);
-    if (status === "FAIL") {
-      const failure = _parseFailureJson(row.failure_json);
-      const message = _compactEvidenceText(failure?.message || failure?.error || JSON.stringify(failure || {}));
-      if (message) lines.push(`  failure: ${message}`);
-    }
-  }
-  return `\n${lines.join("\n")}\n`;
-}
-
-function _registeredTestRunRowsForJob({ jobId, limit = 30, scopeFiles = [], db }) {
-  if (!jobId || !db) return [];
-  ensureRegisteredTestTables(db);
-  if (!_dbTableExists(db, "posse_test_runs")) return [];
-  if (!_dbTableExists(db, "posse_test_suites")) return [];
-  if (!_dbTableExists(db, "posse_tests")) return [];
-  const cap = Math.max(1, Math.min(80, Number(limit) || 30));
-  const queryLimit = _normalizeEvidenceScopeFiles(scopeFiles).length > 0 ? Math.min(240, cap * 4) : cap;
-  const rows = db.prepare(`
-    SELECT
-      r.id,
-      r.ok,
-      r.duration_ms,
-      r.failure_json,
-      r.created_by_role,
-      r.created_at,
-      s.id AS suite_id,
-      s.name AS suite_name,
-      s.slug AS suite_slug,
-      t.id AS test_id,
-      t.name AS test_name,
-      t.slug AS test_slug,
-      t.language AS language,
-      t.target_files_json AS target_files_json,
-      t.target_symbols_json AS target_symbols_json,
-      t.target_imports_json AS target_imports_json
-    FROM posse_test_runs r
-    JOIN posse_test_suites s ON s.id = r.suite_id
-    LEFT JOIN posse_tests t ON t.id = r.test_id
-    WHERE r.created_by_job_id = ?
-      AND COALESCE(r.created_by_role, 'dev') IN ('dev', 'fix', 'assessor_handoff')
-    ORDER BY r.created_at DESC, r.id DESC
-    LIMIT ?
-  `).all(Number(jobId), queryLimit);
-  const scopedRows = _normalizeEvidenceScopeFiles(scopeFiles).length > 0
-    ? rows.filter((row) => _registeredTestTargetsOverlapScope(row, scopeFiles))
-    : rows;
-  return scopedRows.slice(0, cap);
-}
-
-function _failedRegisteredTestsNeedingHandoffRecheck({ jobId, limit = 30, scopeFiles = [], db }) {
-  const rows = _registeredTestRunRowsForJob({ jobId, limit, scopeFiles, db });
-  const latestByTest = new Map();
-  for (const row of rows) {
-    if (!row.test_id || latestByTest.has(row.test_id)) continue;
-    latestByTest.set(row.test_id, row);
-  }
-  return [...latestByTest.values()]
-    .filter((row) => Number(row.ok) === 0)
-    .filter((row) => ["dev", "fix"].includes(String(row.created_by_role || "dev")))
-    .slice(0, 10);
-}
-
-function _rerunFailedRegisteredTestsForAssessment({ job, cwd, scopeFiles = [], db }) {
-  if (!job?.id || !db) return [];
-  const failed = _failedRegisteredTestsNeedingHandoffRecheck({ jobId: job.id, scopeFiles, db });
-  const results = [];
-  for (const row of failed) {
-    const result = runRegisteredTest({
-      args: { test_id: row.test_id },
-      cwd,
-      scopeFiles,
-      actor: {
-        role: "assessor_handoff",
-        jobId: job.id,
-        workItemId: job.work_item_id,
-      },
-      db,
-    });
-    results.push({
-      test_id: row.test_id,
-      previous_run_id: row.id,
-      rerun_id: result.run_id || null,
-      ok: result.ok === true,
-      summary: result.summary || "",
-      failure: result.failure || null,
-    });
-  }
-  return results;
-}
-
-export function __testBuildRegisteredTestRunEvidence({ jobId, limit = 20, scopeFiles = [], db = null } = {}) {
-  if (!jobId) return "";
-  let handle = db;
-  try {
-    handle = handle || getDb();
-    const rows = _registeredTestRunRowsForJob({ jobId, limit, scopeFiles, db: handle });
-    return _formatRegisteredTestRunEvidence(rows);
-  } catch {
-    return "";
-  }
-}
-
-export function __testRerunFailedRegisteredTestsForAssessment(opts = {}) {
-  return _rerunFailedRegisteredTestsForAssessment(opts);
-}
-
-function _buildLocalAssessmentEvidence({
-  fileVerification = "",
-  scopedCheckEvidence = "",
-  assessmentDiffNarrative = "",
-  assessmentScopedDiff = "",
-  assessmentDependencyDiffs = "",
-  mergeResolutionEvidence = "",
-  assessmentFileSnapshots = "",
-  registeredTestRunEvidence = "",
-  workerStatusOutput = "",
-} = {}) {
-  const primaryChangeEvidence = assessmentScopedDiff
-    || assessmentDiffNarrative
-    || assessmentFileSnapshots;
-  const completePrimaryDiffContract = assessmentScopedDiff
-    ? [
-        `COMPLETE PRIMARY DIFF CONTRACT:`,
-        `The attached SCOPED GIT DIFF is the full diff for the entire assessed task scope, not a summary or excerpt.`,
-        `Do not spend issued tools re-fetching, reconstructing, or symbol-resolving changes already present in it. Use source reads only for material surrounding context that the diff does not contain.`,
-      ].join("\n")
-    : "";
-  // The primary diff is accepted upstream through 128K. Keep enough room here
-  // for that indivisible view plus deterministic test receipts; otherwise the
-  // final assembly boundary would silently undo the handoff decision and send
-  // the assessor back through repository reads.
-  const evidenceBudgetChars = 224_000;
-  const sections = [];
-  let usedChars = 0;
-  const appendWhole = (value, label) => {
-    const text = String(value || "").trim();
-    if (!text) return false;
-    if (usedChars + text.length > evidenceBudgetChars) {
-      sections.push(`[${label} omitted because the bounded assessment evidence packet is full]`);
-      return false;
-    }
-    sections.push(text);
-    usedChars += text.length;
-    return true;
-  };
-  // Receipts and the primary change view are indivisible evidence. In
-  // particular, never turn a complete diff into a misleading partial diff at
-  // this final assembly boundary.
-  const primaryChangeEvidenceAttached = appendWhole(primaryChangeEvidence, "primary change evidence");
-  appendWhole(mergeResolutionEvidence, "target merge resolution evidence");
-  appendWhole(scopedCheckEvidence, "deterministic changed-file check evidence");
-  appendWhole(registeredTestRunEvidence, "registered test evidence");
-  const dependencyChangeEvidenceAttached = appendWhole(assessmentDependencyDiffs, "dependency change evidence");
-  appendWhole(fileVerification, "scope verification evidence");
-  if (workerStatusOutput && !registeredTestRunEvidence) {
-    const prefix = "WORKER STATUS (context only; never proof):\n";
-    const remaining = Math.max(0, evidenceBudgetChars - usedChars - prefix.length);
-    if (remaining > 0) sections.push(`${prefix}${String(workerStatusOutput).slice(0, remaining)}`);
-  }
-  return {
-    text: [
-      `LOCAL ASSESSMENT EVIDENCE`,
-      `This block was attached by the local client after remote prompt compilation. Treat deterministic receipts, the primary change view, and labeled read-only upstream dependency contracts as ground truth. Worker status is context only, never proof.`,
-      completePrimaryDiffContract || null,
-      sections.join("\n") || null,
-    ].filter(Boolean).join("\n"),
-    primaryChangeEvidenceAttached,
-    dependencyChangeEvidenceAttached,
-  };
-}
-
-export function __testBuildLocalAssessmentEvidence(options = {}) {
-  return _buildLocalAssessmentEvidence(options);
-}
-
-function _renderAssessmentDependencyDiffs(assessmentContext = null) {
-  const entries = Array.isArray(assessmentContext?.dependency_git_diffs)
-    ? assessmentContext.dependency_git_diffs
-    : [];
-  if (entries.length === 0) return "";
-  const sections = entries.map((entry) => {
-    const header = [
-      `DEPENDENCY JOB #${entry.job_id}: ${entry.title || "upstream dependency"}`,
-      `dependency_kind: ${entry.dependency_kind || "hard"}`,
-      `commit: ${entry.commit_hash || "unknown"}`,
-      Array.isArray(entry.files) && entry.files.length > 0
-        ? `files_in_attached_dependency_view: ${JSON.stringify(entry.files)}`
-        : null,
-    ].filter(Boolean).join("\n");
-    if (entry.diff) return `${header}\n${entry.diff}`;
-    const reason = entry.status === "over_inline_cap"
-      ? `diff omitted because it exceeds the dependency inline cap (${entry.bytes ?? "unknown"} bytes)`
-      : "diff prefetch failed";
-    return `${header}\n[${reason}]${entry.stat ? `\n${entry.stat}` : ""}`;
-  });
-  return [
-    `UPSTREAM DEPENDENCY CONTRACT DIFFS (READ-ONLY CONTEXT — not current task scope):`,
-    `These direct dependencies completed before this job. Use their supplied contract changes to assess integration; do not require the current job to edit these files unless they are also in the current writable scope.`,
-    sections.join("\n\n"),
-  ].join("\n");
-}
-
 function assessmentBudgetInfrastructureError(message, detail = {}, {
   retryable = true,
   gateImmediately = false,
@@ -1288,134 +813,6 @@ function assessorToolBudgetExhaustion(agentCallId, jobId = null) {
   }
 }
 
-function _formatLineNumberedFile(raw = "", startLine = 1) {
-  return String(raw || "")
-    .split("\n")
-    .map((ln, i) => `${String(startLine + i).padStart(4)}\t${ln}`)
-    .join("\n");
-}
-
-function _extractTaskLineRanges(taskSpec = "") {
-  const ranges = [];
-  for (const match of String(taskSpec || "").matchAll(/lines?\s+~?(\d+)\s*(?:[-–]\s*~?(\d+))?/gi)) {
-    const start = Number(match[1]);
-    const end = Number(match[2] || match[1]);
-    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
-    ranges.push({
-      start: Math.max(1, start - 20),
-      end: Math.max(start, end + 20),
-    });
-  }
-  return ranges.slice(0, 6);
-}
-
-function _mergeLineRanges(ranges = []) {
-  if (!Array.isArray(ranges) || ranges.length === 0) return [];
-  const sorted = ranges
-    .map((r) => ({ start: Math.max(1, Number(r.start) || 1), end: Math.max(1, Number(r.end) || 1) }))
-    .sort((a, b) => a.start - b.start);
-  const merged = [sorted[0]];
-  for (const range of sorted.slice(1)) {
-    const last = merged[merged.length - 1];
-    if (range.start <= last.end + 5) {
-      last.end = Math.max(last.end, range.end);
-    } else {
-      merged.push(range);
-    }
-  }
-  return merged;
-}
-
-function _buildAssessmentFileSnapshots({ cwd = null, assessmentContext = null, taskSpec = "" } = {}) {
-  if (!cwd || !assessmentContext || typeof assessmentContext !== "object") return "";
-
-  const committedPaths = _mergeUniquePaths(
-    ...(Array.isArray(assessmentContext.files_committed) ? [assessmentContext.files_committed] : []),
-  );
-  // Changed files are the authoritative snapshot set. Fall back to scoped task
-  // targets only when commit discovery was unavailable or empty.
-  const candidatePaths = (committedPaths.length > 0
-    ? committedPaths
-    : _mergeUniquePaths(
-        ...(Array.isArray(assessmentContext.allowed_files) ? [assessmentContext.allowed_files] : []),
-      )).slice(0, 6);
-  if (candidatePaths.length === 0) return "";
-
-  const lineHints = _extractTaskLineRanges(taskSpec);
-  const sections = [];
-  const totalBudgetChars = 48_000;
-  const perFileBudgetChars = 20_000;
-  let usedChars = 0;
-  const addSection = (section) => {
-    const remaining = totalBudgetChars - usedChars;
-    if (remaining <= 0) return false;
-    const bounded = String(section || "").slice(0, Math.min(perFileBudgetChars, remaining));
-    if (bounded) {
-      sections.push(bounded);
-      usedChars += bounded.length;
-    }
-    return usedChars < totalBudgetChars;
-  };
-
-  for (const relPath of candidatePaths) {
-    const normalizedPath = _normalizeAssessmentScopePath(relPath, cwd);
-    if (!normalizedPath) continue;
-    const absPath = path.isAbsolute(normalizedPath) ? normalizedPath : path.resolve(cwd, normalizedPath);
-    let raw = "";
-    try {
-      raw = fs.readFileSync(absPath, "utf8");
-    } catch {
-      if (!addSection(`=== ${normalizedPath} === (file not found or unreadable during assessment preload)`)) break;
-      continue;
-    }
-
-    const lines = raw.replace(/\r\n/g, "\n").split("\n");
-    // Prefer focused excerpts even for small files; whole-file snapshots are
-    // resent after every agentic tool round-trip.
-    const smart = buildSmartPreload(raw, taskSpec);
-    if (smart && Array.isArray(smart.matched) && smart.matched.length > 0) {
-      const parts = [`=== ${normalizedPath} (${smart.totalLines} lines) ===`];
-      if (smart.imports && smart.imports.trim()) parts.push(`\nIMPORTS:\n${smart.imports}`);
-      for (const fn of smart.matched) {
-        parts.push(`\nFUNCTION: ${fn.name} [lines ${fn.startLine}-${fn.endLine}]\n${fn.content}`);
-      }
-      if (smart.toc && smart.toc.length > 0) {
-        parts.push(`\nOTHER FUNCTIONS (read-only reference):`);
-        for (const fn of smart.toc.slice(0, 20)) {
-          parts.push(`  ${fn.name} [lines ${fn.startLine}-${fn.endLine}]`);
-        }
-      }
-      if (!addSection(parts.join("\n"))) break;
-      continue;
-    }
-
-    const mergedHints = _mergeLineRanges(lineHints.map((range) => ({
-      start: range.start,
-      end: Math.min(lines.length, range.end),
-    })));
-    if (mergedHints.length > 0) {
-      const parts = [`=== ${normalizedPath} (${lines.length} lines, targeted excerpts) ===`];
-      for (const range of mergedHints) {
-        const excerpt = lines.slice(range.start - 1, range.end).join("\n");
-        parts.push(`\nLINES ${range.start}-${range.end}:\n${_formatLineNumberedFile(excerpt, range.start)}`);
-      }
-      if (!addSection(parts.join("\n"))) break;
-      continue;
-    }
-
-    const head = lines.slice(0, 120).join("\n");
-    if (!addSection(`=== ${normalizedPath} (${lines.length} lines, head excerpt) ===\n${_formatLineNumberedFile(head)}`)) break;
-  }
-
-  return sections.length > 0
-    ? `\nSCOPED FILE SNAPSHOTS (ground truth — use these to verify without re-reading when possible):\n${sections.join("\n\n")}\n`
-    : "";
-}
-
-export function __testBuildAssessmentProviderScope(options) {
-  return buildAssessmentProviderScope(options);
-}
-
 /**
  * Assess the result of a completed job.
  *
@@ -1429,7 +826,7 @@ export function __testBuildAssessmentProviderScope(options) {
 export async function assessResult(job, output, { silent = false, autoApprove = false, modelTier = "standard", reasoningEffort = "medium", cwd = null, projectDir = null, routedProviderName = null, agentDispatcher = null, assessmentContext = null, abortSignal = null, fallbackReads = null, priorAssessmentFindings = "", trackedCall = null, disableAtlas = false, remoteComposer = null, taskBoundaryRetryDepth = 0, ignoredPathRetryDepth = 0, attemptId = null, allowMutatingRunners = false } = {}) {
   const finalReview = await authoritativeFinalReview(job, parseJobPayload(job), cwd);
   if (finalReview) {
-    const scopeFailure = _buildCommittedScopeViolationVerdict(assessmentContext, cwd);
+    const scopeFailure = buildCommittedScopeViolationVerdict(assessmentContext, cwd);
     if (scopeFailure) return scopeFailure;
     const payload = parseJobPayload(job);
     const disabledTests = _buildDisabledRequiredTestsVerdict({ assessmentContext, taskSpec: payload.root_task_spec || payload.original_task_spec || payload.task_spec || "" });
@@ -1502,7 +899,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   const assessmentScopedDiff = assessmentContext?.scoped_git_diff
     ? `\nSCOPED GIT DIFF (COMPLETE FULL DIFF FOR ASSESSED TASK SCOPE — DO NOT RE-FETCH OR RECONSTRUCT):\n${assessmentContext.scoped_git_diff}\n`
     : "";
-  const assessmentDependencyDiffs = _renderAssessmentDependencyDiffs(assessmentContext);
+  const assessmentDependencyDiffs = renderAssessmentDependencyDiffs(assessmentContext);
   const diffPrefetchStatus = String(assessmentContext?.scoped_git_diff_status || "");
   const diffStatusNotice = diffPrefetchStatus === "over_inline_cap"
     ? [
@@ -1518,7 +915,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     : "";
   const assessmentFileSnapshots = assessmentScopedDiff || diffPrefetchStatus
     ? ""
-    : _buildAssessmentFileSnapshots({ cwd, assessmentContext, taskSpec });
+    : buildAssessmentFileSnapshots({ cwd, assessmentContext, taskSpec });
 
   // Worker output is status context, never assessment proof. Prefer the
   // structured completion result and preserve it intact even when it exceeds
@@ -1646,8 +1043,8 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
         sections.push(`target_merge_resolution_files (changed on both sides of the harness's target-branch merge; resolving them was required, so they are in scope): ${JSON.stringify(merge_resolution_files)}`);
       }
       // Check for scope violations deterministically
-      const outOfScope = _findOutOfScopeCommittedFiles(files_committed, {
-        allowedFiles: _mergeUniquePaths(allowed_files, merge_resolution_files),
+      const outOfScope = findOutOfScopeCommittedFiles(files_committed, {
+        allowedFiles: mergeUniquePaths(allowed_files, merge_resolution_files),
         allowedCreateFiles: allowed_create_files,
         allowedDeleteFiles: allowed_delete_files,
         allowedCreateRoots: allowed_create_roots,
@@ -1696,7 +1093,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     }
   }
 
-  const deterministicScopeViolation = _buildCommittedScopeViolationVerdict(assessmentContext, cwd);
+  const deterministicScopeViolation = buildCommittedScopeViolationVerdict(assessmentContext, cwd);
   if (deterministicScopeViolation) {
     return deterministicScopeViolation;
   }
@@ -1706,7 +1103,6 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   }
 
   const providerScope = buildAssessmentProviderScope({ cwd, assessmentContext });
-  const registeredTestRunEvidence = "";
 
   // Resolve the assessor handoff packet before prompt composition. The packet
   // carries remote-prompt identity, stable scope/tool metadata, and ATLAS status.
@@ -1757,7 +1153,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     assessorAtlasPrefetchStatus = null;
   }
 
-  const localAssessmentEvidencePacket = _buildLocalAssessmentEvidence({
+  const localAssessmentEvidencePacket = buildLocalAssessmentEvidence({
     fileVerification,
     scopedCheckEvidence: assessmentContext?.scoped_check_evidence || "",
     assessmentDiffNarrative,
@@ -1765,7 +1161,6 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     assessmentDependencyDiffs,
     mergeResolutionEvidence: assessmentContext?.merge_resolution_evidence || "",
     assessmentFileSnapshots,
-    registeredTestRunEvidence,
     workerStatusOutput,
   });
   const localAssessmentEvidence = localAssessmentEvidencePacket.text;
@@ -2035,10 +1430,10 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       }
       const handoffRecord = getAgentHandoffRecord(result.agentCallId);
       const packet = handoffRecord?.packet;
-      trustedAssessorEvidenceChars = packet?.profile === "assessor.verdict.v1"
+      trustedAssessorEvidenceChars = packet?.profile === AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT
         ? Math.max(0, Number(packet.evidence_chars) || 0)
         : 0;
-      trustedAssessorClaims = packet?.profile === "assessor.verdict.v1"
+      trustedAssessorClaims = packet?.profile === AGENT_HANDOFF_PROFILES.ASSESSOR_VERDICT
         && Array.isArray(packet?.handoffs?.[0]?.report?.claims)
         ? packet.handoffs[0].report.claims
         : [];
@@ -2733,7 +2128,7 @@ export async function runPostExecutionAssessment(worker, {
         return;
       }
       const siblingLocks = barrier.blockers || [];
-      setAssessmentLifecycle(job.id, "implementation_complete");
+      setAssessmentLifecycle(job.id, ASSESSMENT_LIFECYCLE.IMPLEMENTATION_COMPLETE);
       markAssessmentRetryAssessOnly(job, pendingFileRequests);
       completeAttempt(attempt.id, {
         status: "succeeded",
@@ -2764,7 +2159,7 @@ export async function runPostExecutionAssessment(worker, {
       ? await inspectAssessmentWorktreeReadiness(wtPath)
       : { ready: true };
     if (!readiness.ready) {
-      setAssessmentLifecycle(job.id, "implementation_complete");
+      setAssessmentLifecycle(job.id, ASSESSMENT_LIFECYCLE.IMPLEMENTATION_COMPLETE);
       markAssessmentRetryAssessOnly(job, pendingFileRequests);
       completeAttempt(attempt.id, {
         status: "succeeded",
@@ -2796,7 +2191,7 @@ export async function runPostExecutionAssessment(worker, {
     }
   }
   if (shouldRunAssessment && !skipAssessForFileRequest) {
-    setAssessmentLifecycle(job.id, "implementation_complete");
+    setAssessmentLifecycle(job.id, ASSESSMENT_LIFECYCLE.IMPLEMENTATION_COMPLETE);
     beginAttachedAssessmentAttempt(job.id, leaseToken);
   }
   if (shouldRunAssessment && skipAssessForSatisfiedNoop) {
@@ -2835,7 +2230,7 @@ export async function runPostExecutionAssessment(worker, {
       work_item_id: job.work_item_id,
       job_id: job.id,
       attempt_id: attempt.id,
-      observation_type: "assessment.verdict",
+      observation_type: ASSESSMENT_VERDICT_OBSERVATION_TYPE,
       summary: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}): ${passMsg}`,
       detail: {
         verdict: effectiveVerdict.verdict,
@@ -2907,12 +2302,7 @@ export async function runPostExecutionAssessment(worker, {
       });
     } catch (testError) {
       const testInfraMsg = `Deterministic post-change test execution failed to initialize: ${testError?.message || testError}`;
-      completeAttempt(attempt.id, {
-        status: "succeeded",
-        duration_ms: Date.now() - startTime,
-        error_text: testInfraMsg,
-      });
-      setJobError(job.id, testInfraMsg);
+      recordAssessmentInfrastructureAttempt(job, leaseToken, attempt.id, startTime, testInfraMsg);
       routeAssessmentInfrastructureFailure(worker, job, leaseToken, testError, {
         pendingFileRequests,
       });
@@ -2940,12 +2330,7 @@ export async function runPostExecutionAssessment(worker, {
       taskAbAssessmentEvidence = renderTestExecutionEvidence(deterministicTestRun ? { ...deterministicTestRun, scope_attribution: testRunScopeAttribution(job.id, deterministicTestRun) } : {});
       if (isVerificationInfrastructureOutcome(postReceipt)) {
         const testInfraMsg = `Deterministic post-change test execution unavailable: ${postReceipt.reason || postReceipt.status}`;
-        completeAttempt(attempt.id, {
-          status: "succeeded",
-          duration_ms: Date.now() - startTime,
-          error_text: testInfraMsg,
-        });
-        setJobError(job.id, testInfraMsg);
+        recordAssessmentInfrastructureAttempt(job, leaseToken, attempt.id, startTime, testInfraMsg);
         routeAssessmentInfrastructureFailure(worker, job, leaseToken,
           verificationInfrastructureError(postReceipt, "Deterministic post-change test execution unavailable"), {
           pendingFileRequests,
@@ -2965,12 +2350,7 @@ export async function runPostExecutionAssessment(worker, {
       const failureMessage = configuredVerification.message
         || configuredVerification.error?.message
         || "Pre-assessment hook failed";
-      completeAttempt(attempt.id, {
-        status: "succeeded",
-        duration_ms: Date.now() - startTime,
-        error_text: failureMessage,
-      });
-      setJobError(job.id, failureMessage);
+      recordAssessmentInfrastructureAttempt(job, leaseToken, attempt.id, startTime, failureMessage);
       routeAssessmentInfrastructureFailure(
         worker,
         job,
@@ -3145,7 +2525,7 @@ export async function runPostExecutionAssessment(worker, {
           work_item_id: job.work_item_id,
           job_id: job.id,
           attempt_id: attempt.id,
-          observation_type: "assessment.verdict",
+          observation_type: ASSESSMENT_VERDICT_OBSERVATION_TYPE,
           summary: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}): ${passMsg}`,
           detail: {
             verdict: effectiveVerdict.verdict,
@@ -3488,7 +2868,7 @@ export async function runPostExecutionAssessment(worker, {
         work_item_id: job.work_item_id,
         job_id: job.id,
         attempt_id: attempt.id,
-        observation_type: "assessment.verdict",
+        observation_type: ASSESSMENT_VERDICT_OBSERVATION_TYPE,
         summary: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"})`,
         detail: {
           verdict: effectiveVerdict.verdict,

@@ -23,6 +23,20 @@ export const CONTEXT_PRESSURE_THRESHOLDS = Object.freeze({
   avgOutputTokensPerTurn: 800,
 });
 
+// Overflow digest kinds a bounding policy can name. Unknown kinds fall back to
+// the generic line digest.
+export const CONTEXT_BOUNDING_DIGEST_KINDS = Object.freeze([
+  "generic",
+  "search_files",
+  "list_files",
+  "symbol_card",
+  "code_structure",
+]);
+
+// A code_structure digest lists at most this many files, each with its
+// declaration count.
+export const CONTEXT_CODE_STRUCTURE_DIGEST_FILE_LIMIT = 20;
+
 export const CONTEXT_BOUNDING_POLICIES = Object.freeze({
   search_files: Object.freeze({
     capChars: 8000,
@@ -84,18 +98,20 @@ export const CONTEXT_BOUNDING_POLICIES = Object.freeze({
   // on large repositories. Claude spills results above its inline ceiling to
   // a temporary file, which adds a redundant native read (and can prompt a
   // Windows-only Get-Content command on Linux). Keep the full result behind
-  // traversal_ref and deliver a transport-safe preview.
+  // traversal_ref and deliver a transport-safe preview. The payload is one
+  // JSON line, so its digest summarizes the parsed inventory instead of
+  // excerpting lines.
   "code.structure": Object.freeze({
     capChars: 18000,
     headChars: 13000,
     tailChars: 1000,
-    digest: "generic",
+    digest: "code_structure",
   }),
   "atlas.code.structure": Object.freeze({
     capChars: 18000,
     headChars: 13000,
     tailChars: 1000,
-    digest: "generic",
+    digest: "code_structure",
   }),
   "code.skeleton": Object.freeze({
     capChars: 18000,

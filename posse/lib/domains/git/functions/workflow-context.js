@@ -17,6 +17,7 @@ const MUTATING_GIT_WORKFLOW_TASKS = new Set([
   // publication ("native pulse token cache cold").
   "validatePushCandidate",
   "gitMergeToTarget",
+  "recoverInterruptedSquash",
   "cleanupWiBranch",
   "snapshotAndRemoveWorktreeOnly",
   "ensureCleanTargetBranch",

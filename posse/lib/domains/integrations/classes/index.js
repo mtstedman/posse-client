@@ -1,2 +1,2 @@
-export {};
+export { ResearchSessionStore } from "./ResearchSessionStore.js";
 

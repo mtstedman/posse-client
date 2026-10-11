@@ -163,12 +163,12 @@ import {
   recoverHeadlessHumanTimeouts,
   recoverOrphanedReviewJobs,
 } from "../functions/headless-recovery.js";
-import { createSharedTrunkPoller } from "../functions/shared-trunk-poller.js";
-import { createSessionEventFeed, createSessionMonitor } from "../functions/session-monitor.js";
+import { createSharedTrunkPoller } from "./SharedTrunkPoller.js";
+import { createSessionEventFeed, createSessionMonitor } from "./SessionMonitor.js";
 import {
-  createSessionJobRouter,
   sessionOriginatorConcurrencyBlocked,
 } from "../../queue/functions/session-job-router.js";
+import { createSessionJobRouter } from "../../queue/classes/SessionJobRouter.js";
 import { tickSessionAutoPublish } from "../../pairing/functions/session-auto-publish.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { pairingPeerTrunkHints } from "../../pairing/functions/work-items.js";

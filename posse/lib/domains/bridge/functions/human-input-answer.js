@@ -10,7 +10,9 @@ import {
   answerWorkItemQuestionChoice,
   answerWorkItemQuestionText,
   projectWorkItemInteractions,
+  typedKindForGate,
 } from "../../queue/functions/interaction-contract.js";
+import { legacyReviewChoiceAction } from "../../../catalog/gate-actions.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isReviewGateJob } from "./review-decision.js";
 import {
@@ -179,9 +181,18 @@ export async function answerHumanInput(jobId, args = {}, {
   const questions = Array.isArray(payload?.questions) && payload.questions.length > 0
     ? payload.questions
     : [`Human input needed for: ${current.title}`];
-  const answers = normalizeAnswers(questions, args);
+  let answers = normalizeAnswers(questions, args);
   if (answers.length === 0 || answers.every((answer) => String(answer?.answer ?? answer ?? "").trim() === "")) {
     return { ok: false, reason: "empty_answer" };
+  }
+  // A gate parked under a legacy review list still shows "skip" as its
+  // waiver; the current choices spell it explicit_waiver.
+  const legacyAction = choices.includes("skip")
+    ? null
+    : legacyReviewChoiceAction(typedKindForGate(payload), payload?.choices, latestAnswerText(answers));
+  if (legacyAction) {
+    answers = answers.map((answer) => (answerText(answer) !== "skip" ? answer
+      : typeof answer === "string" ? legacyAction : { ...answer, answer: legacyAction }));
   }
   const selectedChoice = allowChoiceFeedback
     ? humanInputChoiceFromAnswer(latestAnswerText(answers), choices)

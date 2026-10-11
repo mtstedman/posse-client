@@ -19,6 +19,7 @@ import {
   PNG_SIGNATURE,
   readJpegDimensions,
   resizeRgbaNearest,
+  stripPngMetadataChunks,
 } from "./image-codec.js";
 import {
   addAgentHiddenRipgrepGlobs,
@@ -50,7 +51,7 @@ import { createTestExecutionExecutors } from "./test-execution.js";
 import { createObservationWrapper } from "./factory.js";
 import { boundedSearchRows, renderSearchContentRows } from "./search-results.js";
 import { createTextMutationHelpers } from "./edits-mutations.js";
-import { applyAtomicEdits } from "./edit-spans.js";
+import { applyAtomicEdits, ambiguousExactMatchMessage, EMPTY_OLD_STRING_ERROR } from "./edit-spans.js";
 import {
   buildStructuredReadResult as buildStructuredReadResultFromModule,
   formatNumberedLines as formatNumberedLinesFromModule,
@@ -664,9 +665,10 @@ export function createDeterministicToolkit({
     if (typeof args.old_string !== "string" || typeof args.new_string !== "string") {
       return "Error: old_string/new_string mode requires both old_string and new_string.";
     }
+    if (!args.old_string) return `Error: ${EMPTY_OLD_STRING_ERROR}.`;
     const exactCount = content.split(args.old_string).length - 1;
     if (exactCount > 1) {
-      return `Error: old_string found ${exactCount} times in ${displayPath}. It must be unique - provide more surrounding context.`;
+      return `Error: ${ambiguousExactMatchMessage(content, args.old_string)} in ${displayPath}.`;
     }
     if (exactCount === 1) {
       content = content.replace(args.old_string, () => args.new_string);
@@ -686,7 +688,7 @@ export function createDeterministicToolkit({
       return `Error: old_string not found in ${displayPath}. Make sure it matches exactly (including whitespace/indentation); line-ending mismatch may be the cause.`;
     }
     if (normalizedCount > 1) {
-      return `Error: old_string found ${normalizedCount} times in ${displayPath} after normalizing line endings. It must be unique - provide more surrounding context.`;
+      return `Error: ${ambiguousExactMatchMessage(content, oldWithFileEol)} in ${displayPath} after normalizing line endings.`;
     }
 
     content = content.replace(oldWithFileEol, () => newWithFileEol);
@@ -1547,6 +1549,23 @@ export function createDeterministicToolkit({
     }, null, 2);
   }
 
+  // The smaller of a pixel re-encode and the original with its metadata
+  // chunks stripped. Neither carries text, EXIF or other metadata, and the
+  // result is never larger than the input.
+  function metadataFreePng(original) {
+    const parsed = decodePngToRgba(original);
+    const encoded = encodeRgbaToPng(parsed.width, parsed.height, parsed.data);
+    const stripped = stripPngMetadataChunks(original);
+    const encoding = encoded.length < stripped.buffer.length ? "reencoded" : "stripped_original";
+    return {
+      width: parsed.width,
+      height: parsed.height,
+      buffer: encoding === "reencoded" ? encoded : stripped.buffer,
+      encoding,
+      report: { metadata_stripped: stripped.dropped.length > 0, dropped_chunks: stripped.dropped, encoding },
+    };
+  }
+
   function execOptimizeImage(args, cwd, scopePredicates) {
     const srcPath = safePathImpl(cwd, args.path, scopePredicates);
     if (!fs.existsSync(srcPath)) return `Error: File not found: ${toDisplayPath(cwd, srcPath)}`;
@@ -1571,18 +1590,17 @@ export function createDeterministicToolkit({
 
     try {
       const original = fs.readFileSync(srcPath);
-      const parsed = decodePngToRgba(original);
-      const encoded = encodeRgbaToPng(parsed.width, parsed.height, parsed.data);
-      const chosen = encoded.length < original.length ? encoded : original;
+      const png = metadataFreePng(original);
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
-      if (destPath !== srcPath || chosen !== original) fs.writeFileSync(destPath, chosen);
+      if (destPath !== srcPath || !png.buffer.equals(original)) fs.writeFileSync(destPath, png.buffer);
       return JSON.stringify({
         ok: true,
         input: toDisplayPath(cwd, srcPath),
         output: toDisplayPath(cwd, destPath),
         format: "png",
-        original: { width: parsed.width, height: parsed.height },
-        reason: "reencoded_png_without_metadata",
+        original: { width: png.width, height: png.height },
+        reason: png.encoding === "reencoded" ? "reencoded_png_without_metadata" : "stripped_png_metadata",
+        ...png.report,
       }, null, 2);
     } catch (err) {
       return `Error: optimize_image failed - ${sanitizeAbsolutePathsInText(err.message, cwd)}`;
@@ -1644,17 +1662,16 @@ export function createDeterministicToolkit({
       }
 
       if (inputFormat === "png") {
-        const parsed = decodePngToRgba(inputBuffer);
-        const encoded = encodeRgbaToPng(parsed.width, parsed.height, parsed.data);
-        const chosen = encoded.length < inputBuffer.length ? encoded : inputBuffer;
-        if (destPath !== srcPath || chosen !== inputBuffer) fs.writeFileSync(destPath, chosen);
+        const png = metadataFreePng(inputBuffer);
+        if (destPath !== srcPath || !png.buffer.equals(inputBuffer)) fs.writeFileSync(destPath, png.buffer);
         return JSON.stringify({
           ok: true,
           input: toDisplayPath(cwd, srcPath),
           output: toDisplayPath(cwd, destPath),
           input_format: inputFormat,
           output_format: "png",
-          dimensions: { width: parsed.width, height: parsed.height },
+          dimensions: { width: png.width, height: png.height },
+          ...png.report,
         }, null, 2);
       }
 

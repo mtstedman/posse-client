@@ -19,7 +19,7 @@ import { GIT_READ_ROUTE } from "../../../catalog/binary.js";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
 import { View as AtlasView } from "../../atlas/classes/v2/View.js";
 import { viewFingerprintForOptions } from "../../atlas/classes/v2/ViewBuilder.js";
-import { Warmer } from "../../atlas/classes/v2/Warmer.js";
+import { ParseEngine } from "../../atlas/classes/v2/ParseEngine.js";
 import { getSharedConductor } from "../../atlas/functions/v2/parse/conductor.js";
 import { getSharedAtlasToolExecutor } from "../../atlas/functions/v2/tools/executor.js";
 import { reconcileWiSource } from "../../atlas/functions/v2/wi-source-proof.js";
@@ -1799,7 +1799,7 @@ async function v2JoinResultAsync(args = {}) {
     getSharedAtlasToolExecutor().clearReadContext({ workItemId });
     getSharedAtlasToolExecutor().clearWriteRefreshFailure({ workItemId });
     ledger = await Ledger.open({ dbPath: ctx.ledgerDbPath });
-    const warmer = new Warmer({
+    const warmer = new ParseEngine({
       ledger,
       repoRoot: ctx.repoRoot,
       defaultBranch: baselineBranch,
@@ -2118,7 +2118,7 @@ export function prewarmAtlasV2BootDeps() {
   if (_atlasV2DepsPrewarmPromise) return _atlasV2DepsPrewarmPromise;
   _atlasV2DepsPrewarmPromise = Promise.all([
     import("../../atlas/classes/v2/Ledger.js"),
-    import("../../atlas/classes/v2/Warmer.js"),
+    import("../../atlas/classes/v2/ParseEngine.js"),
     import("../../atlas/classes/v2/ParserAdapter.js"),
   ]).then(
     () => ({ ok: true }),
@@ -2178,7 +2178,7 @@ function seedAtlasBootReadiness({ ok, result = null, config = null }) {
 /**
  * A pairing session's trunk starts at the repository's main commit, so its
  * baseline starts the way a WI worktree's does: a ledger fork of main plus a
- * clone of main's view (Warmer.seedForkedBaseline). Without it every session
+ * clone of main's view (ParseEngine.seedForkedBaseline). Without it every session
  * cold-indexed an empty root branch and rebuilt its view. Anything unproven
  * (no main index, main view not current, branch already present) seeds
  * nothing and boot indexes as before.
@@ -2195,7 +2195,7 @@ async function seedSessionBaselineFromMain(storage, baselineBranch, config) {
   try {
     ledger = await Ledger.open({ dbPath: storage.ledgerDbPath });
     if (ledger.getBranch(baselineBranch)) return { seeded: false, reason: "branch_exists" };
-    const warmer = new Warmer({ ledger, repoRoot: storage.repoRoot, defaultBranch: baselineBranch, config });
+    const warmer = new ParseEngine({ ledger, repoRoot: storage.repoRoot, defaultBranch: baselineBranch, config });
     return await warmer.seedForkedBaselineAsync({
       branch: baselineBranch,
       parentViewPath,
@@ -2591,7 +2591,7 @@ export async function warmAtlasMergedToMainNow(opts = {}) {
     if (!ledger.getBranch(targetBranch)) {
       await ledger.ensureRootBranch(targetBranch, { label: "atlas.mergeWarm.ensureTargetBranch" });
     }
-    const warmer = new Warmer({
+    const warmer = new ParseEngine({
       ledger,
       repoRoot: storage.repoRoot,
       defaultBranch: targetBranch,

@@ -147,6 +147,30 @@ function rejection(code, classification, message, extra = {}) {
   };
 }
 
+/**
+ * Reject a fetch that needs a traversal capability this agent was not issued.
+ * Only a ref issued to this agent call as evidence is citation-only with a
+ * cited path to read; any other ref (a typo, an invented ref, one from another
+ * attempt or agent) is unknown here and has nothing to read.
+ */
+export function traversalRefNotIssuedRejection(entry = null, context = {}) {
+  const initial = entry
+    ? visibleScope(entry, context)
+    : { visibility: "none", issued_as: null };
+  return rejection(
+    "traversal_ref_not_issued",
+    "not_issued_for_traversal",
+    initial.issued_as === "evidence"
+      ? "This ref is citation-only and cannot be fetched by this agent. Read the cited path or symbol with source tools; use only an explicit traversal_ref as a fetch capability."
+      : "This ref is unknown or was not issued to this agent, so it cannot be fetched. Use only an explicit traversal_ref from this agent's tool results as a fetch capability.",
+    {
+      fetch_class: entry ? fetchClassForEntry(entry) : "missing",
+      initial_visibility: initial.visibility,
+      issued_as: initial.issued_as,
+    },
+  );
+}
+
 function allowed(classification, args, extra = {}) {
   return {
     allowed: true,
@@ -195,14 +219,7 @@ export function admitHashRefFetch({
   requireTraversal = false,
 } = {}) {
   if (!entry) {
-    if (requireTraversal) {
-      return rejection(
-        "traversal_ref_not_issued",
-        "not_issued_for_traversal",
-        "This identity was not issued as a traversal capability for the current attempt. Follow an explicit traversal_ref from a tool result; visible evidence refs are citation-only.",
-        { fetch_class: "missing", initial_visibility: "none", issued_as: null },
-      );
-    }
+    if (requireTraversal) return traversalRefNotIssuedRejection(null, context);
     return allowed("fetch_miss", args);
   }
   const fetchClass = fetchClassForEntry(entry);
@@ -211,12 +228,7 @@ export function admitHashRefFetch({
   const searchSignature = normalizeSearchSignature(args);
 
   if (requireTraversal && initial.issued_as !== "traversal") {
-    return rejection(
-      "traversal_ref_not_issued",
-      "not_issued_for_traversal",
-      "This stored identity was not issued as a traversal capability for the current attempt. Follow an explicit traversal_ref from a tool result; visible evidence refs are citation-only.",
-      { fetch_class: fetchClass, initial_visibility: initial.visibility, issued_as: initial.issued_as },
-    );
+    return traversalRefNotIssuedRejection(entry, context);
   }
 
   if (enforce && initial.visibility === "full" && fetchClass !== "result_continuation") {

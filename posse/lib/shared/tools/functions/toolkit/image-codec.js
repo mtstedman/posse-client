@@ -58,12 +58,51 @@ function paethPredictor(a, b, c) {
   return c;
 }
 
+// Walk a PNG's chunks after the signature, through IEND. Each chunk carries
+// its type, its data and its full byte range (length, type, data and CRC).
+function* pngChunks(buffer) {
+  let offset = 8;
+  while (offset + 8 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.toString("ascii", offset + 4, offset + 8);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd + 4 > buffer.length) throw new Error("Corrupt PNG chunk layout.");
+    yield { type, data: buffer.subarray(dataStart, dataEnd), start: offset, end: dataEnd + 4 };
+    if (type === "IEND") return;
+    offset = dataEnd + 4;
+  }
+}
+
+// Chunks a metadata strip keeps: the image itself plus colour and pixel
+// geometry. Every other chunk is dropped: text, EXIF, timestamps, provenance
+// manifests (caBX) and anything unrecognized.
+export const PNG_PRESERVED_CHUNK_TYPES = Object.freeze(new Set([
+  "IHDR", "PLTE", "tRNS", "IDAT", "IEND", "gAMA", "cHRM", "sRGB", "iCCP", "sBIT", "pHYs",
+]));
+
+/**
+ * Copy a PNG keeping only PNG_PRESERVED_CHUNK_TYPES, byte for byte. Returns
+ * the stripped buffer and the dropped chunk types (in file order, unique).
+ */
+export function stripPngMetadataChunks(buffer) {
+  if (buffer.length < 8 || !buffer.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    throw new Error("Only PNG inputs are supported.");
+  }
+  const kept = [PNG_SIGNATURE];
+  const dropped = [];
+  for (const chunk of pngChunks(buffer)) {
+    if (PNG_PRESERVED_CHUNK_TYPES.has(chunk.type)) kept.push(buffer.subarray(chunk.start, chunk.end));
+    else if (!dropped.includes(chunk.type)) dropped.push(chunk.type);
+  }
+  return { buffer: Buffer.concat(kept), dropped };
+}
+
 export function decodePngToRgba(buffer) {
   if (buffer.length < 8 || !buffer.subarray(0, 8).equals(PNG_SIGNATURE)) {
     throw new Error("Only PNG inputs are supported.");
   }
 
-  let offset = 8;
   let width = 0;
   let height = 0;
   let bitDepth = 0;
@@ -71,14 +110,7 @@ export function decodePngToRgba(buffer) {
   let interlace = 0;
   const idatChunks = [];
 
-  while (offset + 8 <= buffer.length) {
-    const length = buffer.readUInt32BE(offset);
-    const type = buffer.toString("ascii", offset + 4, offset + 8);
-    const dataStart = offset + 8;
-    const dataEnd = dataStart + length;
-    if (dataEnd + 4 > buffer.length) throw new Error("Corrupt PNG chunk layout.");
-    const data = buffer.subarray(dataStart, dataEnd);
-
+  for (const { type, data } of pngChunks(buffer)) {
     if (type === "IHDR") {
       width = data.readUInt32BE(0);
       height = data.readUInt32BE(4);
@@ -87,10 +119,7 @@ export function decodePngToRgba(buffer) {
       interlace = data[12];
     } else if (type === "IDAT") {
       idatChunks.push(data);
-    } else if (type === "IEND") {
-      break;
     }
-    offset = dataEnd + 4;
   }
 
   if (!width || !height) throw new Error("PNG is missing IHDR metadata.");

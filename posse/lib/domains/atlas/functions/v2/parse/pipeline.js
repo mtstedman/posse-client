@@ -3,7 +3,7 @@
 import { createDbWriteSemaphore, createScipStageSemaphore } from "./semaphore.js";
 import { SCIP_INDEXER_COUNT } from "../scip/indexers.js";
 import { emitParseEvent } from "./events.js";
-import { startOnnxRefresh } from "./onnx-index-runner.js";
+import { startEmbeddingRefresh } from "./embedding-intake-runner.js";
 
 /**
  * @param {{
@@ -39,7 +39,7 @@ export function createParsePipeline({
  *   ingestScip?: (lang: string, staged: unknown) => Promise<unknown> | unknown,
  *   mergeLanguage?: (lang: string, sources: string[]) => Promise<unknown> | unknown,
  *   finalizeGraph?: () => Promise<unknown> | unknown,
- *   onnx?: Parameters<typeof startOnnxRefresh>[0] | null,
+ *   onnx?: Parameters<typeof startEmbeddingRefresh>[0] | null,
  *   dbWriteSemaphore?: import("../../../classes/v2/ParseSemaphore.js").ParseSemaphore,
  *   scipStageSemaphore?: import("../../../classes/v2/ParseSemaphore.js").ParseSemaphore,
  *   onEvent?: (event: { kind: string, [k: string]: unknown }) => void,
@@ -55,7 +55,7 @@ export async function runParsePipeline(opts) {
   // complete. Start its consumer before the language-wide work finishes so
   // the bounded ONNX window provides natural backpressure to its producer.
   const streamingOnnx = opts.onnx?.documents
-    ? startOnnxRefresh(opts.onnx)
+    ? startEmbeddingRefresh(opts.onnx)
     : null;
   const streamingOutcome = streamingOnnx instanceof Promise
     ? streamingOnnx.then(
@@ -90,5 +90,5 @@ export async function runParsePipeline(opts) {
     return outcome.value;
   }
   if (streamingOnnx) return streamingOnnx;
-  return opts.onnx ? startOnnxRefresh(opts.onnx) : null;
+  return opts.onnx ? startEmbeddingRefresh(opts.onnx) : null;
 }

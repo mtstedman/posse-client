@@ -7,7 +7,7 @@
 
 import { parentPort, workerData } from "node:worker_threads";
 import { Ledger } from "../../atlas/classes/v2/Ledger.js";
-import { Warmer } from "../../atlas/classes/v2/Warmer.js";
+import { ParseEngine } from "../../atlas/classes/v2/ParseEngine.js";
 import { sharedParserAdapter } from "../../atlas/classes/v2/ParserAdapter.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
@@ -136,7 +136,7 @@ async function main() {
       stage: "initializing",
       text: "constructing ATLAS warmer",
     });
-    const warmer = new Warmer({
+    const warmer = new ParseEngine({
       ledger,
       parserAdapter: sharedParserAdapter,
       repoRoot,

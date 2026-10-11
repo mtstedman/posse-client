@@ -790,6 +790,8 @@ export function bindAgentAttachmentToSignedContract(signedBootConfig = {}, attac
     attemptId: attachment.attemptId ?? null,
     agentCallId: attachment.agentCallId ?? null,
     promptChars: Math.max(0, Number(attachment.promptChars) || 0),
+    // The call's turn target; the Codex soft checkpoint fires at twice it.
+    maxTurns: optionalPositiveInteger(attachment.maxTurns),
     // Attempt budgets are Job-scoped, so the long-lived Agent token normally
     // leaves them unset. Bind the trusted attachment while retaining the
     // signed remote issuance (and any explicit signed value) as the ceiling.

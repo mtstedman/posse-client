@@ -24,7 +24,12 @@ import {
   isPosseRuntimeOnlyGitignoreContent,
 } from "../../runtime/functions/ignore.js";
 import { GIT_OPERATION_TIMEOUT_MS, isGitCommandFailure } from "./utils.js";
-import { snapshotAndResetDirtyWorktree } from "./worktree.js";
+import {
+  preserveDirtyWorktreeSnapshot as nativePreserveDirtyWorktreeSnapshot,
+  snapshotAndResetDirtyWorktree,
+  withWorktreeLock as nativeWithWorktreeLock,
+} from "./worktree.js";
+import { readMergeInProgressMarker, recoverInterruptedSquash, temporaryMergeWorktrees } from "./merge-interrupted-squash.js";
 import { GIT_WORKFLOW_TASK_TIMEOUT_MS } from "./workflow-context.js";
 import { firstGitLine } from "./workflow-git-utils.js";
 import { inspectPreparedWorktreeLockedAsync } from "./prepared-worktree-recovery.js";
@@ -203,6 +208,65 @@ export async function reconcileWaitingLaneFilesystemAtStartupAsync(projectDir, {
 
 export function createStartupDirtyGuardHelpers(context) {
   const { projectDir, runGitWorkflowTaskOffMainThread, gitExec, gitExecAsync } = context;
+  const preserveDirtyWorktreeSnapshot = context.preserveDirtyWorktreeSnapshot || nativePreserveDirtyWorktreeSnapshot;
+  const withWorktreeLock = context.withWorktreeLock || nativeWithWorktreeLock;
+
+  // A merge interrupted mid-gate (crash, Ctrl-C, thread timeout) left its
+  // squash staged in the target checkout. Unstage it before the dirty-tree
+  // policy reads the tree: policy=commit would otherwise commit a candidate
+  // whose gate never finished. The repair takes the merge's worktree lock, so
+  // a merge another process is running keeps its staged squash and checkouts.
+  function recoverInterruptedMerge() {
+    const exec = (args, cwd, options = {}) => gitExec(args, cwd, { timeoutMs: GIT_OPERATION_TIMEOUT_MS, ...options });
+    let marker = null;
+    try {
+      marker = readMergeInProgressMarker(exec, projectDir);
+      if (!marker && temporaryMergeWorktrees(exec, projectDir).length === 0) {
+        return { action: "none", marker: null, removedWorktrees: [] };
+      }
+    } catch {
+      return { action: "none", marker: null, removedWorktrees: [] };
+    }
+    const log = (message, extra = {}) => logEvent({
+      event_type: EVENT_TYPES.GIT_MERGE,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message,
+      event_json: extra.json ? JSON.stringify(extra.json) : undefined,
+    });
+    try {
+      return withWorktreeLock(projectDir, projectDir, () => recoverInterruptedSquash({
+        cwd: projectDir,
+        exec,
+        preserveSnapshot: (dir, found) => preserveDirtyWorktreeSnapshot(dir, projectDir, {
+          reason: "interrupted-merge-gate",
+          branchName: found?.target || null,
+          wiId: found?.wi_id ?? null,
+          onMsg: (msg) => log(msg),
+        }),
+        log,
+      }));
+    } catch (error) {
+      // Only an interrupted squash must stop the boot; leftover checkouts of
+      // a merge another process still runs are its own to remove.
+      return marker
+        ? { action: "failed", marker, removedWorktrees: [], error: firstGitLine(error) }
+        : { action: "none", marker: null, removedWorktrees: [] };
+    }
+  }
+
+  function interruptedMergeBlockedResult({ reason, policy, recovery }) {
+    return {
+      ok: false,
+      blocked: true,
+      dirty: true,
+      policy,
+      action: "blocked",
+      blockReason: "interrupted_merge",
+      dirtyCount: 0,
+      dirtyLines: [],
+      message: `Startup dirty tree guard blocked ${reason}: a merge interrupted mid-gate left its squash staged and it could not be unstaged (${recovery.error}). Run \`git reset --merge\` in the target checkout, then start again.`,
+    };
+  }
 
   // Boot reconciliation surfaces journal/config problems as persisted health,
   // never as a thrown error: the journal rows are durable, so a throw here
@@ -729,6 +793,11 @@ export function createStartupDirtyGuardHelpers(context) {
     // Sweep a SCIP infer-tsconfig placeholder orphaned by an interrupted index
     // before measuring dirtiness, so it can't trip the guard.
     sweepOrphanedInferTsconfig(projectDir);
+    const interrupted = recoverInterruptedMerge();
+    if (interrupted.action === "failed") {
+      emitPhase("interrupted merge could not be repaired");
+      return interruptedMergeBlockedResult({ reason, policy: mode, recovery: interrupted });
+    }
     const dirtyLines = startupDirtyLines();
     if (!dirtyLines.length) {
       emitPhase("target tree clean");
@@ -820,6 +889,15 @@ export function createStartupDirtyGuardHelpers(context) {
     // before measuring dirtiness, so it can't trip the guard.
     await sweepOrphanedInferTsconfigAsync(projectDir, { signal });
     throwIfAborted(signal);
+    const interrupted = recoverInterruptedMerge();
+    if (interrupted.action === "failed") {
+      emitPhase("interrupted merge could not be repaired");
+      return {
+        ...interruptedMergeBlockedResult({ reason, policy: mode, recovery: interrupted }),
+        waitingLaneFilesystemRecovery,
+        sharedTrunkRecovery,
+      };
+    }
     const dirtyLines = await startupDirtyLinesAsync({ signal });
     throwIfAborted(signal);
     if (!dirtyLines.length) {
@@ -908,6 +986,12 @@ export function createStartupDirtyGuardHelpers(context) {
     const trackedRuntime = await trackedRuntimePathsAsync({ signal });
     if (trackedRuntime.length > 0) {
       return trackedRuntimeBlockedResult({ reason, paths: trackedRuntime, policy: mode });
+    }
+    // The run's guard unstages an interrupted merge's squash before it reads
+    // the tree, so this check must not report that squash as dirt.
+    const interrupted = recoverInterruptedMerge();
+    if (interrupted.action === "failed") {
+      return interruptedMergeBlockedResult({ reason, policy: mode, recovery: interrupted });
     }
     const dirtyLines = await startupDirtyLinesAsync({ signal });
     if (!dirtyLines.length) return { ok: true, dirty: false, policy: mode, action: "clean" };

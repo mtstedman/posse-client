@@ -703,11 +703,9 @@ export class RunSession {
   }
 
   // ── Provider dependency self-heal (OFF the critical path) ──────────────────
-  // A provider whose optional SDK lost a transitive shim dep — the recurring
-  // case is the openai SDK's `agentkeepalive`, which npm prune/partial-installs
-  // intermittently drop — fails to LOAD and paints a hard ✗ "needs attn" chip
-  // on EVERY boot, because the boot dependency check is dryRun and never repairs
-  // it. Detect that ONE recoverable condition (ERR_MODULE_NOT_FOUND) and run a
+  // A provider whose optional Node dependency is missing fails to load and
+  // paints a hard ✗ "needs attn" chip on every boot because the boot dependency
+  // check is dryRun. Detect that recoverable condition (ERR_MODULE_NOT_FOUND) and run a
   // scoped, node-only install against the posse install root in the background;
   // on success the provider module is re-imported in-process and the chip flips
   // ✗ → ✓ with no restart. Never blocks boot; the abort signal tears it down.

@@ -144,9 +144,8 @@
  */
 
 /**
- * Encoder that turns a symbol or query text into a vector. Implementations
- * may be local (transformers.js, ONNX runtime) or remote (provider API);
- * the contract is the same.
+ * Encoder that turns a symbol or query text into a vector. Production
+ * encoding runs through the native posse-ml method boundary.
  *
  * @typedef {Object} EmbeddingEncoder
  *
@@ -155,25 +154,24 @@
  * @property {number} dim
  *
  * @property {(texts: string[], signal?: AbortSignal) => Promise<Float32Array[]>} encode
- *   Batch encode. Returns one Float32Array per input.
+ *   Batch encode. Returns one Float32Array per input. Query encoding falls
+ *   back to this when `encodeQuery` is absent.
  *
- * @property {(texts: string[], signal?: AbortSignal) => Promise<Float32Array[]>} [encodeDocuments]
- *   Optional document-specific batch encoding.
+ * @property {(texts: string[], signal?: AbortSignal, onProgress?: (event: Record<string, unknown>) => void) => Promise<Float32Array[]>} encodeDocuments
+ *   Document batch encode. Returns one Float32Array per input. Both bulk
+ *   (`ingestView`) and streaming parse intake encode symbol and
+ *   documentation texts through this method.
  *
  * @property {(text: string, signal?: AbortSignal) => Promise<Float32Array>} [encodeQuery]
  *   Optional query-specific encoding. Semantic search prefers this when present.
- *
- * @property {(symbols: EmbeddingSymbolInput[], signal?: AbortSignal) => Promise<Float32Array[]>} [encodeSymbols]
- *   Optional structured-symbol batch encode. Remote ATLAS encoders use this to
- *   keep canonicalization server-side; local encoders may omit it and rely on
- *   buildSymbolText + encode.
  *
  * @property {(symbol: EmbeddingSymbolInput) => string} buildSymbolText
  *   Canonicalize the text representation of a symbol used for embedding.
  *   Concrete implementations decide what to include (name, qualified
  *   name, signature, body lead, ...) — but the function must be deterministic
  *   so the same symbol always produces the same input string under the
- *   same encoder version.
+ *   same encoder version. Both intake paths build every code-channel text
+ *   with it.
  *
  * @property {() => void | Promise<void>} [dispose]
  *   Release encoder-owned runtime resources when present.

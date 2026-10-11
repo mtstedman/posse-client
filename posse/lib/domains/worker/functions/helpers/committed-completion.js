@@ -6,7 +6,7 @@
 // helpers read that structured completion and what it says about a failed
 // scoped commit.
 
-import { getCommittedAttemptCompletion } from "../../../handoff/functions/agent-handoff.js";
+import { getCommittedAttemptCompletion } from "../../../handoff/functions/agent-handoff-records.js";
 
 /**
  * The attempt's committed completion when it agrees with the rendered status.

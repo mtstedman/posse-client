@@ -1,7 +1,7 @@
 // @ts-check
 //
-// Server-side helper for Node worker-thread daemons (ONNX encoder, SCIP
-// conductor). A host module calls runDaemonThread(handler) and the rest — the
+// Server-side helper for Node worker-thread daemons (SCIP and parse
+// conductors). A host module calls runDaemonThread(handler) and the rest — the
 // message loop, id echo, error wrapping — is handled here, matching the wire
 // shape the Daemon/ThreadTransport client expects (`{ id, payload }` in,
 // `{ id, ok, data } | { id, ok: false, error }` out).

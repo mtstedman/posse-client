@@ -1,3 +1,11 @@
+import {
+  INTAKE_INTENT_TYPES,
+  INTAKE_DELIVERABLE_TYPES,
+  INTAKE_OUTPUT_MODES,
+  INTAKE_TERMINAL_OUTPUTS,
+  INTAKE_HINT_SOURCES,
+  INTAKE_WORKFLOW_MODES,
+} from "../../../catalog/intake.js";
 import fs from "fs";
 import path from "path";
 import {
@@ -11,54 +19,12 @@ import {
   looksLikeImageDepictionRequest,
 } from "./request-semantics.js";
 
-const VALID_INTENTS = new Set([
-  "task",
-  "bugfix",
-  "design",
-  "context",
-  "question",
-  "oneshot",
-  "image",
-  "report",
-  "analysis",
-]);
-
-const VALID_DELIVERABLES = new Set([
-  "code",
-  "patch",
-  "answer",
-  "image",
-  "markdown",
-  "pdf",
-  "json",
-  "mixed",
-]);
-
-const VALID_OUTPUTS = new Set([
-  "auto",
-  "repo",
-  "artifact",
-  "question_only",
-]);
-
-const VALID_DESIRED_OUTPUTS = new Set([
-  "repo",
-  "artifact",
-  "question_only",
-]);
-
-const VALID_HINT_SOURCES = new Set([
-  "explicit",
-  "inferred",
-]);
-
-const VALID_WORKFLOW_MODES = new Set([
-  "bugfix",
-  "ux",
-  "refactor",
-  "audit",
-  "iterate",
-]);
+const VALID_INTENTS = new Set(INTAKE_INTENT_TYPES);
+const VALID_DELIVERABLES = new Set(INTAKE_DELIVERABLE_TYPES);
+const VALID_OUTPUTS = new Set(INTAKE_OUTPUT_MODES);
+const VALID_DESIRED_OUTPUTS = new Set(INTAKE_TERMINAL_OUTPUTS);
+const VALID_HINT_SOURCES = new Set(INTAKE_HINT_SOURCES);
+const VALID_WORKFLOW_MODES = new Set(INTAKE_WORKFLOW_MODES);
 
 const ONESHOT_TOKEN_RE = /(?:^|\s)#one[-_]?shot\b/i;
 const ONESHOT_DIRECTIVE_RES = [

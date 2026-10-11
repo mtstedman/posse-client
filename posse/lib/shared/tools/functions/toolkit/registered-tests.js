@@ -12,8 +12,10 @@ import {
   resolveManagedPythonTestToolchain,
 } from "../../../../domains/runtime/functions/python-runtime.js";
 import { inspectManagedPythonTestToolchain } from "../../../../domains/environments/functions/python-test-toolchain.js";
+import { primaryCheckoutFor } from "../../../../domains/verification/functions/prerequisite-adapters.js";
 import { createWorkspaceSkipDirs } from "../../../../domains/runtime/functions/workspace-skip.js";
 import { TEST_SUBPROCESS_ENV_KEYS } from "../../../../catalog/process.js";
+import { MERGE_CHECK_FAILURE_KINDS } from "../../../../catalog/verification.js";
 import { filterProcessEnv } from "../../../platform/functions/process-env.js";
 
 const SUPPORTED_LANGUAGES = new Set(["javascript", "node", "js", "python", "py"]);
@@ -709,22 +711,31 @@ except Exception as exc:
     sys.exit(1)
 `;
 
-function resolvePythonCommand(cwd = process.cwd()) {
+// A worktree or a merge-candidate checkout has no runtime of its own: the
+// project's managed runtime is keyed on the primary checkout's path, and its
+// venv lives there, so resolve both from the primary (as the verification
+// prerequisite adapters do).
+export function resolvePythonCommand(cwd = process.cwd(), {
+  resolveManagedRuntime = resolveManagedPythonRuntimeForProject,
+  inspectSharedToolchain = inspectManagedPythonTestToolchain,
+} = {}) {
   const workspace = path.resolve(cwd || process.cwd());
-  const managedRuntime = resolveManagedPythonRuntimeForProject({ projectDir: workspace });
-  const sharedRuntime = inspectManagedPythonTestToolchain();
+  const primary = primaryCheckoutFor(workspace) || workspace;
+  const managedRuntime = resolveManagedRuntime({ projectDir: primary });
+  const sharedRuntime = inspectSharedToolchain();
+  const venvRoots = [...new Set([workspace, primary])];
   const candidates = [
     ...(managedRuntime?.ready ? [{ command: managedRuntime.python, args: [] }] : []),
-    ...(sharedRuntime.ready ? [{ command: resolveManagedPythonTestToolchain().python, args: [] }] : []),
-    ...(process.platform === "win32"
+    ...(sharedRuntime?.ready ? [{ command: resolveManagedPythonTestToolchain().python, args: [] }] : []),
+    ...venvRoots.flatMap((root) => (process.platform === "win32"
       ? [
-        { command: path.join(workspace, ".venv", "Scripts", "python.exe"), args: [] },
-        { command: path.join(workspace, "venv", "Scripts", "python.exe"), args: [] },
+        { command: path.join(root, ".venv", "Scripts", "python.exe"), args: [] },
+        { command: path.join(root, "venv", "Scripts", "python.exe"), args: [] },
       ]
       : [
-        { command: path.join(workspace, ".venv", "bin", "python"), args: [] },
-        { command: path.join(workspace, "venv", "bin", "python"), args: [] },
-      ]),
+        { command: path.join(root, ".venv", "bin", "python"), args: [] },
+        { command: path.join(root, "venv", "bin", "python"), args: [] },
+      ])),
     { command: "python", args: [] },
     { command: "python3", args: [] },
     { command: "py", args: ["-3"] },
@@ -825,6 +836,7 @@ function runSource({
       exit_code: result.status ?? null,
       signal: result.signal || null,
       timed_out: result.error?.code === "ETIMEDOUT",
+      error_code: result.error?.code || null,
     };
     try {
       const workspaceAfter = snapshotWorkspace(workspace);
@@ -1204,29 +1216,30 @@ export function runRegisteredTest(options = {}) {
   };
 }
 
-export function runRegisteredTestsForMergeCandidate({
-  cwd,
-  workItemId = null,
-  scopeFiles = [],
-  actor = {},
-  db = getDb(),
-  beforeEachTest = null,
-  deadlineMs = null,
-} = {}) {
+/**
+ * How a registered check run ended, in merge-gate terms: a timeout, a signal
+ * or an output overflow is not a test result. Null for a pass.
+ */
+export function registryMergeCheckFailureKind(result) {
+  if (result?.ok === true) return null;
+  const failure = result?.failure || {};
+  if (failure.timed_out || failure.error_code === "ETIMEDOUT") return MERGE_CHECK_FAILURE_KINDS.TIMEOUT;
+  if (failure.error_code === "ENOBUFS") return MERGE_CHECK_FAILURE_KINDS.OUTPUT_OVERFLOW;
+  if (failure.signal) return MERGE_CHECK_FAILURE_KINDS.SIGNAL;
+  return MERGE_CHECK_FAILURE_KINDS.TEST_FAILURE;
+}
+
+/**
+ * The active registered tests a merge candidate's changed files select: tests
+ * of merged or unowned work, and the candidate's own. Selection needs only the
+ * file list, so the merge gate decides whether to build a checkout at all.
+ */
+export function mergeCandidateRegisteredTests({ cwd, workItemId = null, scopeFiles = [], db = getDb() } = {}) {
   ensureRegisteredTestTables(db);
   const normalizedScopeFiles = normalizeScopeFiles(cwd, scopeFiles);
-  if (normalizedScopeFiles.length === 0) {
-    return {
-      ok: true,
-      summary: "merge candidate has no changed files",
-      matched: 0,
-      passed: 0,
-      failed: 0,
-      results: [],
-    };
-  }
+  if (normalizedScopeFiles.length === 0) return { scopeFiles: [], tests: [] };
   const candidateWorkItemId = Number(workItemId);
-  const rows = db.prepare(`
+  const tests = db.prepare(`
     SELECT t.*
     FROM posse_tests t
     LEFT JOIN work_items wi ON wi.id = t.created_by_work_item_id
@@ -1239,19 +1252,50 @@ export function runRegisteredTestsForMergeCandidate({
     ORDER BY t.created_at, t.id
   `).all(Number.isInteger(candidateWorkItemId) && candidateWorkItemId > 0 ? candidateWorkItemId : -1)
     .filter((test) => targetFilesOverlapScope(test, normalizedScopeFiles));
+  return { scopeFiles: normalizedScopeFiles, tests };
+}
+
+export function runRegisteredTestsForMergeCandidate({
+  cwd,
+  workItemId = null,
+  scopeFiles = [],
+  actor = {},
+  db = getDb(),
+  beforeEachTest = null,
+  deadlineMs = null,
+  selection = null,
+} = {}) {
+  ensureRegisteredTestTables(db);
+  const selected = selection || mergeCandidateRegisteredTests({ cwd, workItemId, scopeFiles, db });
+  const normalizedScopeFiles = selected.scopeFiles;
+  if (normalizedScopeFiles.length === 0) {
+    return {
+      ok: true,
+      summary: "merge candidate has no changed files",
+      matched: 0,
+      passed: 0,
+      failed: 0,
+      results: [],
+    };
+  }
+  const rows = selected.tests;
 
   const results = rows.map((test) => {
     const remainingMs = deadlineMs == null ? DEFAULT_TIMEOUT_MS : deadlineMs - Date.now();
-    if (remainingMs < 1000) return { ok: false, status: "failed", failure_kind: "timeout",
+    if (remainingMs < 1000) return { ok: false, status: "failed", failure_kind: MERGE_CHECK_FAILURE_KINDS.TIMEOUT,
       test: testPublic(test), failure: { message: "merge gate wall budget expired before this registered check" } };
     beforeEachTest?.();
-    return runRegisteredTestSingle({
-      args: { test_id: test.id, timeout_ms: Math.min(DEFAULT_TIMEOUT_MS, remainingMs) },
+    // Target comparison reruns use the same per-test timeout as this run.
+    const timeoutMs = Math.min(DEFAULT_TIMEOUT_MS, remainingMs);
+    const result = runRegisteredTestSingle({
+      args: { test_id: test.id, timeout_ms: timeoutMs },
       cwd,
       actor,
       scopeFiles: normalizedScopeFiles,
       db,
     });
+    const failureKind = registryMergeCheckFailureKind(result);
+    return { ...result, timeout_ms: timeoutMs, ...(failureKind ? { failure_kind: failureKind } : {}) };
   });
   const passed = results.filter((result) => result.ok).length;
   const failed = results.length - passed;

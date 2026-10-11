@@ -16,7 +16,7 @@
 
 import path from "node:path";
 
-import { AGENT_HANDOFF_PROFILE_POLICY } from "../../../../catalog/handoff.js";
+import { AGENT_HANDOFF_PROFILE_POLICY, AGENT_HANDOFF_PROFILES } from "../../../../catalog/handoff.js";
 
 export const AGENT_HANDOFF_COMPLETION_PROSE_MAX_CHARS = 1000;
 
@@ -340,10 +340,10 @@ function normalizeEnvelope(source, roots, note) {
     out.outcome = out.outcome.trim().toLowerCase();
     note("outcome", "enum_case");
   }
-  if (out.profile === "researcher.pipeline.v1" && out.outcome === "complete") {
+  if (out.profile === AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE && out.outcome === "complete") {
     out.outcome = "success";
     note("outcome", "bound_profile_outcome");
-  } else if (out.profile === "researcher.report.v1" && out.outcome === "success") {
+  } else if (out.profile === AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT && out.outcome === "success") {
     out.outcome = "complete";
     note("outcome", "bound_profile_outcome");
   }

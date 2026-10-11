@@ -10,6 +10,7 @@
 import path from "path";
 import { execFileSync } from "child_process";
 import { C } from "../../../shared/format/functions/colors.js";
+import { providerTurnLimitMode, TURN_LIMIT_MODES } from "../../../catalog/provider.js";
 import { roleBrandColor, unlimitedCapacityGauge } from "../../ui/functions/display/helpers/brand.js";
 import { getCommandPositionalArgs } from "./flags.js";
 import { readRecentPrompts } from "../../../shared/telemetry/functions/logging/prompt-log.js";
@@ -259,8 +260,11 @@ export function cmdCalls({ tierModelName }) {
       const promptK = call.prompt_chars ? `${(call.prompt_chars / 1024).toFixed(0)}K` : "";
       const outputK = call.output_chars ? `${(call.output_chars / 1024).toFixed(0)}K` : "";
       const turns = call.turns_used != null ? ` turns:${call.turns_used}` : "";
+      // Rows from before the column was written carry no mode; the call's own
+      // provider still determines it.
+      const turnLimitMode = call.turn_limit_mode ?? providerTurnLimitMode(call.provider);
       const turnLimit = call.max_turns_configured != null
-        ? ` ${call.turn_limit_mode === "enforced" ? "turn limit" : "turn target"}:${call.max_turns_configured}`
+        ? ` ${turnLimitMode === TURN_LIMIT_MODES.ENFORCED ? "turn limit" : "turn target"}:${call.max_turns_configured}`
         : "";
       const capHit = call.output_truncated ? ` ${C.yellow}cap:${call.output_limit_reason || "hit"}${C.reset}` : "";
 
@@ -677,7 +681,7 @@ export async function cmdCodexModels({ projectDir }) {
     return { models };
   }
 
-  const report = validateCodexModels({
+  const report = await validateCodexModels({
     authMode,
     cwd: projectDir,
   });

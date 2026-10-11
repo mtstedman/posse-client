@@ -560,7 +560,7 @@ export function buildSyntheticResearchBrief(routingOrReason = null, { plannerDis
     key_files: keyFiles,
     related_files: [],
     constraints: [plannerDispatch
-      ? "No upfront researcher ran. Before repository or source reads, the planner must choose from the work item and intake route: dispatch one bounded research batch immediately for nontrivial unknowns, or use zero children and plan a simple, clearly scoped job directly."
+      ? "No upfront researcher ran; the work item and intake route are the initial planning context."
       : "Researcher was skipped by deterministic routing; planner should rely on the original work item and intake hints."],
     questions_for_human: false,
     questions: [],

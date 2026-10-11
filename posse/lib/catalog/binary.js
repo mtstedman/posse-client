@@ -72,12 +72,6 @@ export const REMOTE_ARTIFACTS_READ_ROUTE = "artifacts:read";
 // Must equal posse-bin's ENGAGEMENT_CONTRACT_VERSION; requests carry it and
 // the binary refuses any other.
 export const ENGAGEMENT_CONTRACT_VERSION = 2;
-// SHA-256 (hex) of test/fixtures/engagement/launch-plan.json with CRLF read as
-// LF. engagement.capabilities reports the digest of the fixture the binary was
-// verified against; a mismatch means the two policies may differ, so the
-// client keeps its JS policy. Updated with the fixture (the engagement test
-// fails until it matches).
-export const ENGAGEMENT_POLICY_DIGEST = "d7605331132a30968d40ea6059f83bc8d9d06915954ff33b6e8a2c0fa3e48cfe";
 export const ENGAGEMENT_RECOVERY_POLICY_DIGEST = "88b40cdc7bf34db84352e50c803b1eb157d01559edbb8f425c0b823e3134b54c";
 export const ENGAGEMENT_CAPABILITIES_METHOD = "engagement.capabilities";
 export const ENGAGEMENT_LAUNCH_PLAN_METHOD = "engagement.launchPlan";
@@ -94,6 +88,13 @@ export const CODEX_NATIVE_SERIAL_TOOL_IDS = Object.freeze([
   "tools.agent_handoff", "tools.sub_agent", "tools.dispatch_agent", "tools.custom_tools", "tools.project_db_query",
 ]);
 export const PROVIDER_DISPATCH_COMMAND = "engagement.dispatch";
+// How long one engagement.capabilities answer stands for a posse-remote binary
+// identity. The probe is a blocking spawn, so readiness checks and dispatch
+// share it. An unusable answer (no binary, another contract, an adapter not
+// advertised) is re-probed sooner: adapters such as Codex depend on host CLI
+// state that the binary identity does not capture.
+export const PROVIDER_DISPATCH_CAPABILITIES_TTL_MS = 30_000;
+export const PROVIDER_DISPATCH_CAPABILITIES_NEGATIVE_TTL_MS = 10_000;
 export const PROVIDER_DISPATCH_MAX_START_BYTES = 8 * 1024 * 1024;
 export const PROVIDER_DISPATCH_MAX_EVENT_BYTES = 2 * 1024 * 1024;
 export const PROVIDER_TOOL_GATEWAY_PROTOCOL = "posse.provider-tool-gateway.v1";

@@ -24,6 +24,7 @@ import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { FINAL_REVIEW_DEFAULT_MODE } from "../../../catalog/final-review.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import { HANDOFF_SOURCE_EXTENSIONS } from "../../../catalog/files.js";
+import { HANDOFF_TRAVERSAL_COMPLETION_CHECK_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 
 import fs from "fs";
 import path from "path";
@@ -1942,7 +1943,7 @@ function _applyTraversalCompletionCheck(packet) {
       work_item_id: packet.work_item_id ?? ctx.work_item_id ?? null,
       job_id: packet.job_id ?? ctx.job_id ?? null,
       attempt_id: ctx.attempt_id ?? null,
-      observation_type: "handoff.traversal_completion_check",
+      observation_type: HANDOFF_TRAVERSAL_COMPLETION_CHECK_OBSERVATION_TYPE,
       summary: `Traversal completion check ${status} (${check.mode}; lanes=${lanes}; terms=${terms})`,
       detail: {
         kind: "handoff_traversal_completion_check",
@@ -2724,7 +2725,7 @@ export function researcherPacketToStructuredOutput(packet) {
   return researcherPacketToStructuredOutputFromModule(packet);
 }
 
-export { getAgentHandoffRecord, getLatestCommittedAgentHandoffPacket } from "./agent-handoff.js";
+export { getAgentHandoffRecord, getLatestCommittedAgentHandoffPacket } from "./agent-handoff-records.js";
 
 export {
   bindAutoExpandedDevBriefEvidenceToAgentCall,

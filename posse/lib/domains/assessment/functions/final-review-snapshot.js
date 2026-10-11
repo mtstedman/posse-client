@@ -229,7 +229,7 @@ function list(label, values) {
  * The reviewer's local evidence block: contract, test result, change. Appended
  * after the remotely composed reviewer prompt, never sent to the remote.
  */
-export function renderFinalReviewEvidence({ job, workItem, payload = {}, change, testRun, changedTestRun = null, checks = null }) {
+export function renderFinalReviewEvidence({ job, workItem, payload = {}, change, testRun, changedTestRun = null, checks = null, completionReport = null }) {
   const diff = String(change?.diff || "");
   const inline = diff.length <= FINAL_REVIEW_DIFF_INLINE_MAX_CHARS
     ? diff
@@ -247,6 +247,7 @@ export function renderFinalReviewEvidence({ job, workItem, payload = {}, change,
       ? `Task specification:\n${payload.root_task_spec || payload.original_task_spec || payload.task_spec || payload.instructions}` : null,
     payload.fix_instructions ? `Required repair (the original contract still applies):\n${payload.fix_instructions}` : null,
     list("Success criteria", payload.success_criteria),
+    completionReport ? `DEVELOPER COMPLETION REPORT (delivery statement; verify factual claims against the workspace):\n${completionReport.summary}${completionReport.verification?.length ? `\nVerification:\n${completionReport.verification.map(item => `- ${item}`).join("\n")}` : ""}` : null,
     list("Declared scope", [...SCOPE_FIELDS.flatMap((field) => payload[field] || []), ...(payload.create_roots || []).map((root) => `${root}/**`)]),
     "",
     renderTestRun(testRun),
@@ -268,14 +269,25 @@ export function renderFinalReviewEvidence({ job, workItem, payload = {}, change,
   ].filter((line) => line != null).join("\n");
 }
 
-/** Task instructions sent through remote composition (no repository content). */
-export function finalReviewInstructions({ reportAndWait = true } = {}) {
+/**
+ * Task instructions sent through remote composition (no repository content).
+ * They are mode-neutral: how the reviewer reports depends on the tool surface
+ * the composition issues, so those lines are chosen after it
+ * (finalReviewModeInstructions).
+ */
+export function finalReviewCoreInstructions() {
   return [
     "FINAL REVIEW: the developer finished this task and requests an independent review before handing it off.",
     "Judge the current workspace change, which is not committed yet, against the task contract in the attached snapshot.",
     "Check the actual files: the snapshot lists every changed file and inlines the diff up to its size limit; read any changed file it does not show.",
-    "Use the declared test, changed test file and changed-file check results as evidence: a failure located in a changed file is a defect in this change.",
-    "Check every success criterion before you report, and report every concrete defect at once, most severe first: each finding names the criterion it misses and locates it with hash refs, paths or symbols.",
+    "Use the declared test, changed test file and changed-file check results as evidence. A failure on a line this change added, or in a test file it added, is its defect; any other failure, including one elsewhere in a changed file or in an edited existing test, may predate the change, so report it only when the change caused it.",
+    "Treat a developer completion report in the snapshot as the delivery report. Check its factual claims; a report-only requirement does not require a source-file comment.",
+  ].join("\n");
+}
+
+/** How the reviewer reports: through final_review only when its surface has the tool. */
+export function finalReviewModeInstructions({ reportAndWait = false } = {}) {
+  return [
     reportAndWait
       ? "Report by calling final_review with your verdict (pass when the change meets the contract; fail with your findings; needs_review only when the contract itself cannot be judged). The call then waits while the developer works."
       : "Report your verdict in the terminal assessor handoff (pass when the change meets the contract; fail with your findings; needs_review only when the contract itself cannot be judged).",
@@ -283,18 +295,23 @@ export function finalReviewInstructions({ reportAndWait = true } = {}) {
   ].join("\n");
 }
 
+export function finalReviewInstructions({ reportAndWait = true } = {}) {
+  return [finalReviewCoreInstructions(), finalReviewModeInstructions({ reportAndWait })].join("\n");
+}
+
 /**
  * The parked reviewer's next turn after the developer revises: the declared
  * test result and only what changed since its report, never the whole change
  * again.
  */
-export function renderFinalReviewRevision({ revision, testRun, delta, changedTestRun = null, checks = null }) {
+export function renderFinalReviewRevision({ revision, testRun, delta, changedTestRun = null, checks = null, completionReport = null }) {
   const changed = Array.isArray(delta?.changed) ? delta.changed : [];
   const diff = String(delta?.diff || "");
   const inline = diff.length <= FINAL_REVIEW_DELTA_INLINE_MAX_CHARS ? diff : diff.slice(0, FINAL_REVIEW_DELTA_INLINE_MAX_CHARS);
   return [
     `═══ FINAL REVIEW: REVISION ${revision} ═══`,
     "The developer revised the change after your report.",
+    completionReport ? `UPDATED DEVELOPER COMPLETION REPORT:\n${completionReport.summary}${completionReport.verification?.length ? `\nVerification:\n${completionReport.verification.map(item => `- ${item}`).join("\n")}` : ""}` : null,
     renderTestRun(testRun),
     changedTestRun ? renderTestRun(changedTestRun, "CHANGED TEST FILES") : null,
     renderChangedFileChecks(checks),

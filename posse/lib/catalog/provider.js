@@ -19,6 +19,12 @@ export function providerTurnLimitMode(provider) {
   return PROVIDER_TURN_LIMIT_MODE[String(provider || "").trim().toLowerCase()] || TURN_LIMIT_MODES.NONE;
 }
 
+// callProvider options that once launched a raw provider CLI as an A/B control
+// (Claude Code or Codex with its own tools, sandbox and cold boot). Provider
+// turns run only through native dispatch, so the Claude and Codex adapters
+// refuse these instead of ignoring them: raw CLI controls belong to the harness.
+export const RAW_CLI_CONTROL_OPTIONS = Object.freeze(["detachedCliControl", "sandboxModeOverride", "nativeColdBoot"]);
+
 // Artificer chat runtimes can invoke the issued image-generation tool. Codex
 // has no such execution route; image model ownership is a separate catalog.
 export const IMAGE_TOOL_CHAT_PROVIDERS = Object.freeze(PROVIDER_OPTIONS.filter((provider) => provider !== "codex"));

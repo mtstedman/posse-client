@@ -1,5 +1,5 @@
 import { getAgentCalls, listAgentInteractions } from "../../../../queue/functions/index.js";
-import { getAgentHandoffRecord } from "../../../../handoff/functions/index.js";
+import { getAgentHandoffRecord } from "../../../../handoff/functions/agent-handoff-records.js";
 import { researchExplorationObservationStatus } from "../../../../observability/functions/observations.js";
 import { latestFinalReview } from "../../../../assessment/functions/final-review-authority.js";
 

@@ -1,4 +1,5 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
+import { ASSESSMENT_LIFECYCLE, ASSESSMENT_LIFECYCLE_STATES } from "../../../catalog/job.js";
 import { LEASE_HOLDING_STATUSES, now, runImmediateTransaction } from "./common.js";
 import { leaseNowMs } from "./lease-clock.js";
 
@@ -109,7 +110,7 @@ export function incrementAndCreateAssessmentAttempt(
     db.prepare(`
       UPDATE jobs
       SET assessment_attempt_count = ?,
-          assessment_state = 'assessment_pending',
+          assessment_state = '${ASSESSMENT_LIFECYCLE.PENDING}',
           assessment_last_error = NULL,
           state_version = state_version + 1,
           updated_at = ?
@@ -134,7 +135,7 @@ export function beginAttachedAssessmentAttempt(jobId, leaseToken) {
   const result = db.prepare(`
     UPDATE jobs
     SET assessment_attempt_count = assessment_attempt_count + 1,
-        assessment_state = 'assessment_pending',
+        assessment_state = '${ASSESSMENT_LIFECYCLE.PENDING}',
         assessment_last_error = NULL,
         state_version = state_version + 1,
         updated_at = ?
@@ -153,17 +154,7 @@ export function setAssessmentLifecycle(jobId, state, {
   error = null,
   completed = false,
 } = {}) {
-  const allowed = new Set([
-    "not_started",
-    "implementation_complete",
-    "assessment_pending",
-    "assessment_passed",
-    "assessment_failed",
-    "assessment_needs_human",
-    "assessment_unavailable",
-    "assessment_waived",
-  ]);
-  if (!allowed.has(state)) throw new Error(`Invalid assessment lifecycle state: ${state}`);
+  if (!ASSESSMENT_LIFECYCLE_STATES.includes(state)) throw new Error(`Invalid assessment lifecycle state: ${state}`);
   const db = getDb();
   const result = db.prepare(`
     UPDATE jobs

@@ -1,189 +1,31 @@
-// Claude provider entry point.
-//
-// Owns provider contract assembly, tool wiring, stats accounting, and
-// print-mode CLI execution. Provider-specific lifecycle and parsing helpers
-// live under the providers class/function split.
-
-import { execFile, spawn } from "child_process";
+// Claude provider prompt projection and Rust dispatch boundary.
 import crypto from "node:crypto";
-import { MCP_TOOL_DEADLINE_MODES } from "../../../../catalog/provider.js";
-import fs from "fs";
-import os from "os";
 import path from "path";
+import { MCP_TOOL_DEADLINE_MODES } from "../../../../catalog/provider.js";
 import { getSetting } from "../../../queue/functions/index.js";
-import { appendExecutionTools, buildClaudeCliToolConfig, buildClaudeLaunchInput, buildExecutionContract, CLAUDE_NATIVE_TOOL_NAMES, renderExecutionContractBlock, renderProviderPromptContracts, unknownClaudeNativeTools } from "../../../../shared/tools/functions/contract.js";
-import { claudeLaunchPolicyFromPlan, normalizeClaudeCliToolConfig, normalizeClaudePermissionArgs, reconcileLaunchPolicy } from "../shared/engagement-launch.js";
-import { issuedToolSurfaceForProviderPolicy, issuedWebAccessEnabled } from "../../../../shared/tools/functions/issued-tool-policy.js";
-import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap, formatAtlasToolUseDisplayName } from "../../../../shared/tools/functions/mcp-surface.js";
-import { buildRuntimeEnv, normalizeProviderPaths } from "../../../runtime/functions/paths.js";
+import { appendExecutionTools, buildExecutionContract, renderExecutionContractBlock, renderProviderPromptContracts } from "../../../../shared/tools/functions/contract.js";
+import { issuedToolSurfaceForProviderPolicy } from "../../../../shared/tools/functions/issued-tool-policy.js";
+import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap } from "../../../../shared/tools/functions/mcp-surface.js";
+import { normalizeProviderPaths } from "../../../runtime/functions/paths.js";
 import { logAtlasAttachment, resolveAtlasAssignmentUnit, withAtlasExecutionPolicySnapshot } from "../../../integrations/functions/atlas.js";
 import { releaseDeterministicMcpServerSession } from "../../../integrations/functions/deterministic-mcp.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
-import { stripPosseMcpGatewayPrefix } from "../../../integrations/functions/mcp-gateway.js";
-import { summarizeObservedToolUse } from "../shared/tool-runtime.js";
-import { buildWindowsSpawn, terminateSpawnedProcess, trackSpawnedProcess } from "../shared/windows-spawn.js";
 import { hasProviderVisibleAtlasMcpTools } from "../shared/atlas-mcp.js";
-import { logProviderMcpSurfaceTelemetry, logProviderCliStderrTelemetry, logProviderMcpAttachProofTelemetry } from "../shared/mcp-telemetry.js";
-import { C } from "../../../../shared/format/functions/colors.js";
-import { appendBoundedText } from "../../../../shared/format/functions/bounded-text.js";
 import { providerRuntimeState } from "../../classes/runtime-state-singleton.js";
 import { getProviderTierDefaults } from "../model-catalog.js";
 import { selectExecutionModel } from "../shared/model-selection.js";
-import { normalizeProviderUsage } from "../shared/usage-normalization.js";
-import { resolveDisableSystemTools, resolveWebToolsEnabled } from "../shared/tool-policy-settings.js";
-import {
-  getUsageSummary,
-  refreshUsageSummary,
-} from "./usage-summary.js";
-import { buildClaudeNativeSubagentTelemetry, parseClaudeTaskNotification } from "./native-subagent-telemetry.js";
-import { extractClaudeUnknownToolResults, nearestIssuedClaudeToolName } from "./unknown-tool-names.js";
-import { recordObservation } from "../../../observability/functions/observations.js";
-import {
-  getClaudeCommandAsync,
-  getClaudeInfo,
-  getClaudeReadiness,
-  isReady,
-} from "./cli-discovery.js";
-import { InteractiveCliUnavailableError } from "../../classes/InteractiveCliSession.js";
-import { ClaudeInteractiveSession } from "../../classes/claude/ClaudeInteractiveSession.js";
-import { ClaudeStreamTelemetry } from "../../classes/claude/ClaudeStreamTelemetry.js";
-import { stripTerminalControls } from "../shared/interactive-cli-session.js";
-import {
-  extractClaudeSessionHandleFromStreamMessage,
-  isClaudeResumeHandleExpiredError,
-} from "./session-handles.js";
+import { getUsageSummary, refreshUsageSummary } from "./usage-summary.js";
+import { getClaudeReadiness, isReady } from "./cli-discovery.js";
 import { escalateModelTier, getMaxOutputTokensForProvider, getMaxTurnsForProvider } from "../shared/turns.js";
 import { normalizeMaxOutputTokens } from "../shared/output-limits.js";
-import { providerStallPaused, resolveProviderStallTimeout } from "../shared/stall-timeout.js";
-import { providerDispatchSupportedSync } from "../../../../shared/native/functions/engagement-client.js";
-import { roleBrandColor, roleBrandIcon } from "../../../ui/functions/display/helpers/brand.js";
+import { resolveProviderStallTimeout } from "../shared/stall-timeout.js";
 import { classifyProviderError } from "../shared/api-resilience.js";
-import {
-  buildClaudeAtlasMcpConfigPayloadAsync,
-  buildClaudeDeterministicReadMcpConfigPayloadAsync,
-  __testBuildClaudeAtlasMcpConfigPayload,
-  __testBuildClaudeDeterministicReadMcpConfigPayload,
-  claudeMcpDeadlineEnv,
-} from "./mcp-config.js";
-import {
-  CLAUDE_EXECUTION_MODE_INTERACTIVE,
-  CLAUDE_EXECUTION_MODE_PRINT,
-  resolveClaudeExecutionMode,
-} from "./execution-mode.js";
+import { buildClaudeAtlasAttachmentAsync, buildClaudeNativeMcpAttachmentAsync } from "./mcp-config.js";
 import { classifyClaudeCliFailure, __testClassifyClaudeCliFailure } from "./failure-classification.js";
-import { applyClaudeCacheTtlPolicy, scrubClaudeChildEnv } from "./child-env.js";
-import {
-  __testRunClaudeWarmupViaInteractiveCli,
-  warmOauthSession,
-  warmOauthSessionAsync,
-  warmOauthSessionInteractive,
-} from "./oauth-warmup.js";
-import {
-  __testExtractClaudeToolUsesFromStreamMessage,
-  _estimateClaudeApiEquivalentCostUsd,
-  _extractClaudeToolUsesFromStreamMessage,
-  _extractStreamUsage,
-  _normalizeClaudeToolUseBlock,
-  _usageNumberOrNull,
-  claudeCacheCreationSplit,
-  estimateTokensFromText,
-  parseTokenUsage,
-} from "./stream-usage.js";
-import { buildClaudeNativeDispatchRequest, runClaudeNativeDispatch } from "./native-dispatch.js";
+import { warmOauthSessionAsync } from "./oauth-warmup.js";
+import { buildNativeDispatchRequest, rejectRawCliControlOptions, runNativeDispatch } from "../shared/native-dispatch.js";
 
-// Same cap as the Codex agent-message forwarding (codex/stream-events.js).
-const AGENT_COMMENTARY_MAX_CHARS = 2048;
-
-export { __testBuildClaudeAtlasMcpConfigPayload, __testBuildClaudeDeterministicReadMcpConfigPayload, __testClassifyClaudeCliFailure, __testExtractClaudeToolUsesFromStreamMessage, __testRunClaudeWarmupViaInteractiveCli, getClaudeInfo, getClaudeReadiness, getUsageSummary, isReady, refreshUsageSummary, scrubClaudeChildEnv, warmOauthSession, warmOauthSessionAsync, warmOauthSessionInteractive };
-
-// Claude Code defers MCP schemas behind ToolSearch by default. Posse's isolated
-// workers intentionally do not expose that ambient discovery surface, so every
-// explicitly attached server must opt into upfront loading. A future lazy
-// server can opt out deliberately with alwaysLoad:false.
-export function applyClaudeMcpLoadingPolicy(mcpServers = {}) {
-  return Object.fromEntries(Object.entries(mcpServers).map(([name, config]) => [
-    name,
-    config && typeof config === "object" && !Array.isArray(config)
-      ? {
-          ...config,
-          alwaysLoad: config.alwaysLoad !== false,
-        }
-      : config,
-  ]));
-}
-
-// Translate a tool-contract decision + the attached MCP server names into the
-// CLI's permission flags. We never emit --dangerously-skip-permissions (refused
-// as root on Linux). Without MCP, --tools pins the built-in surface positively.
-// With MCP, an explicit --tools list suppresses MCP tools in Claude 2.1 even
-// though that flag's help describes built-ins only, so use the equivalent
-// native-tool denylist plus --allowedTools instead.
-//
-// toClaudeCliFlags expresses the MCP-active branches as a blocklist
-// (tools === null = "all built-ins minus disallowedTools"). The only built-ins
-// meant to survive that blocklist are the web tools, and only for web-enabled
-// roles (researcher, assessor, dev) — where toClaudeCliFlags strips WebFetch/WebSearch
-// out of disallowedTools. For an explicit positive built-in list, derive its
-// complement from the known native catalog so switching to a denylist for MCP
-// does not widen the built-in surface.
-export function buildClaudeToolPermissionArgs(cliToolConfig = {}, mcpServerNames = []) {
-  let nativeToolsArg;
-  if (cliToolConfig.tools != null) {
-    nativeToolsArg = cliToolConfig.tools;
-  } else {
-    const disallowed = new Set(
-      String(cliToolConfig.disallowedTools || "")
-        .split(",").map((t) => t.trim()).filter(Boolean),
-    );
-    nativeToolsArg = ["WebFetch", "WebSearch"].filter((t) => !disallowed.has(t)).join(",");
-  }
-  // Claude permission rules target callable tool names, not a bare server id.
-  // Grant the documented server wildcard so every upfront-loaded tool from the
-  // attached server is callable without an interactive permission prompt.
-  const mcpRules = (mcpServerNames || []).map((name) => `mcp__${name}__*`);
-  const availableNativeRules = String(nativeToolsArg || "")
-    .split(",").map((rule) => rule.trim()).filter(Boolean);
-  const mcpActive = mcpRules.length > 0;
-  const toolsArg = mcpActive ? null : nativeToolsArg;
-  const disallowedToolsArg = mcpActive
-    ? [...new Set([
-        ...String(cliToolConfig.disallowedTools || "").split(",").map((rule) => rule.trim()).filter(Boolean),
-        ...(cliToolConfig.tools != null
-          ? CLAUDE_NATIVE_TOOL_NAMES.filter((rule) => !availableNativeRules.includes(rule))
-          : []),
-      ])].join(",")
-    : null;
-  const allowRules = [];
-  if (cliToolConfig.dangerouslySkipPermissions) {
-    // Previously-bypassed branches surface only read-only (Read/Glob/Grep), web
-    // (WebFetch/WebSearch), or — in the gateway-down fallback — operator-opted-in
-    // autoApprove tools. A bare allow of the surfaced set reproduces the prior
-    // permissiveness without the flag, and unlike the flag it runs as root.
-    if (nativeToolsArg) allowRules.push(nativeToolsArg);
-  } else if (cliToolConfig.allowedTools) {
-    // Scoped branches carry precise Write(...)/Edit(...)/Bash(...) rules; keep
-    // them verbatim so file scoping is preserved (do not widen with bare tools).
-    allowRules.push(cliToolConfig.allowedTools);
-  }
-  const alreadyAllowedBare = new Set(
-    cliToolConfig.dangerouslySkipPermissions ? availableNativeRules : [],
-  );
-  allowRules.push(...mcpRules.filter((rule) => !alreadyAllowedBare.has(rule)));
-  return {
-    toolsArg,
-    disallowedToolsArg,
-    allowedToolsArg: allowRules.filter(Boolean).join(","),
-  };
-}
-
-const NATIVE_COLD_BOOT_SYSTEM_PROMPT = [
-  "You are an isolated native-control research worker.",
-  "Use only the instructions, context, and tools explicitly provided by Posse for this job.",
-  "Do not use user memory, user settings, local Claude project state, slash-command skills, prior sessions, or ambient workspace context.",
-  "If needed context is not present in the prompt or available through the attached Posse tools, report that it is unavailable.",
-].join("\n");
-
-// ─── Colors ──────────────────────────────────────────────────────────────────
+export { __testClassifyClaudeCliFailure, getClaudeReadiness, getUsageSummary, isReady, refreshUsageSummary, warmOauthSessionAsync };
 
 // ─── Capabilities ───────────────────────────────────────────────────────────
 
@@ -195,8 +37,6 @@ export const capabilities = Object.freeze({
 });
 
 // ─── Model Tier Config ──────────────────────────────────────────────────────
-
-const CLAUDE_CLI_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 // Maps the DB schema's model_tier + reasoning_effort to concrete Claude settings.
 // Model overrides come from Posse settings, not shell env.
@@ -262,27 +102,8 @@ export function __testGetMaxTurns(role, modelTier = "standard", complexity = nul
   return getMaxTurns(role, modelTier, complexity, deepthink, filesToModifyCount);
 }
 
-// ─── Claude CLI Caller ──────────────────────────────────────────────────────
+// ─── Claude provider turn ────────────────────────────────────────────────────
 
-/**
- * Call Claude Code CLI with a prompt.
- *
- * Prompt is piped via stdin (no command-line length limits).
- * Returns { output, stats } where stats has timing, char counts, and model info.
- *
- * @param {string} promptText - The prompt to send
- * @param {object} opts
- * @param {string} opts.role - Worker role: 'researcher' | 'planner' | 'dev' | 'assessor'
- * @param {boolean} opts.allowWrite - Allow file writes (dev role)
- * @param {string} opts.modelTier - 'cheap' | 'standard' | 'strong'
- * @param {string} opts.reasoningEffort - 'low' | 'medium' | 'high' — controls thinking depth
- * @param {string} opts.activity - Short description for the header
- * @param {boolean} opts.silent - Suppress console output
- * @param {boolean} opts.autoApprove - Skip tool permission prompts
- * @param {number} opts.maxTurns - Override max turns for this call
- * @param {boolean} opts.deepthink - Raise planning/research turn budget for deep repo-wide analysis
- * @returns {Promise<{output: string, stats: object}>}
- */
 export async function callProvider(promptText, {
   role = "planner",
   roleMode = null,
@@ -297,7 +118,6 @@ export async function callProvider(promptText, {
   activity = "",
   silent = false,
   autoApprove = false,
-  disableSystemTools = null,
   scopedFiles = null,  // string[] — files_to_modify: Write/Edit scoped to these exact paths
   createFiles = null,  // string[] — files_to_create: Write scoped to these exact new file paths
   createRoots = null,  // string[] — directories where Write is allowed for any path under them
@@ -313,10 +133,9 @@ export async function callProvider(promptText, {
   jobDir = null,       // per-job scratch dir noted in the prompt
   onLine = null,       // (line: string) => void — routes output lines externally (implies silent stdout)
   cwd = null,          // real repo / worktree — used for MCP workspace + git ops
-  loaderCwd = null,    // optional empty dir to spawn the claude process in (suppresses parent-walk CLAUDE.md discovery). Falls back to cwd.
   mcpCwd = null,       // optional override for MCP workspace root. Falls back to cwd.
   projectDir = null,   // project root for runtime path resolution
-  abortSignal = null,  // AbortSignal — when aborted, kills the child process
+  abortSignal = null,  // AbortSignal — cancels the Rust dispatch
   stallTimeout = null, // Override stall timeout in seconds (default: 600)
   needsImageGeneration = false,
   jobId = null,
@@ -334,119 +153,38 @@ export async function callProvider(promptText, {
   disableAtlas = false,
   atlasPrefetchStatus = null,
   atlasConfig = null,
-  executionMode = null,
-  interactiveBackend = null,
   _remoteIssuedPolicy = null,
   _remoteToolSurface = null,
   mcpGate = null,
   disableAgentTools = false,
-  nativeColdBoot = false,
-  captureNativeSubagents = false,
   skillsAttached = null,
   onAgentCommentary = null, // (text: string) => void — visible assistant text, like Codex agent messages
   onProviderToolUse = null, // (toolUse) => void — each completed tool_use block as it streams
   onProviderToolResult = null, // ({ id, isError }) => void — each tool_result block as it streams
-  detachedCliControl = false,
+  ...otherOptions      // checked only for retired raw CLI controls
 } = {}) {
-  // A detached A/B control is raw Claude Code: its own CLI and built-in read
-  // tools, which native dispatch cannot host. Only that explicit caller takes
-  // the CLI path; every Posse turn stays on native dispatch.
-  const nativeDispatchEnabled = detachedCliControl !== true && providerDispatchSupportedSync("claude");
-  const resolvedClaude = nativeDispatchEnabled ? null : await getClaudeCommandAsync();
+  rejectRawCliControlOptions("claude", otherOptions);
   const providerPathsForAtlas = normalizeProviderPaths({ cwd, projectDir });
   const mcpWorkspaceCwdForAtlas = mcpCwd ? path.resolve(mcpCwd) : providerPathsForAtlas.cwd;
   const assignmentUnitForAtlas = resolveAtlasAssignmentUnit({
     workItemId,
     fallback: `${activity || ""}\n${String(promptText || "").slice(0, 512)}`,
   });
-  const preparedAtlasMcp = await buildClaudeAtlasMcpConfigPayloadAsync(
+  const preparedAtlasMcp = await buildClaudeAtlasAttachmentAsync(
     role,
     mcpWorkspaceCwdForAtlas,
     { assignmentUnit: assignmentUnitForAtlas, workItemId, disableAtlas, atlasConfig },
   );
-  return new Promise((resolve, reject) => {
-    void (async () => {
-    let cleanupAtlasMcpConfig = () => {};
-    let cleanupDeterministicMcpSession = () => null;
-    let cleanupRolePromptFile = () => {};
-    let cleanupStablePromptFile = () => {};
-    let cleanupSystemPromptFile = () => {};
-    const cleanupSetupFiles = (mcpAttachProofContext = null) => {
-      const releaseResult = cleanupDeterministicMcpSession();
-      let attachProofResult = null;
-      if (mcpAttachProofContext) {
-        try {
-          attachProofResult = logProviderMcpAttachProofTelemetry({
-            providerName: "claude",
-            role,
-            workItemId,
-            jobId,
-            attemptId,
-            deterministicReadMcp: mcpAttachProofContext.deterministicReadMcp || null,
-            releaseResult,
-            exitCode: mcpAttachProofContext.exitCode ?? null,
-            phase: mcpAttachProofContext.phase || "provider_cleanup",
-          });
-        } catch {
-          attachProofResult = null;
-        }
-      }
-      cleanupAtlasMcpConfig();
-      cleanupRolePromptFile();
-      cleanupStablePromptFile();
-      cleanupSystemPromptFile();
-      return { releaseResult, attachProofResult };
-    };
-    try {
-    const args = [];
-    const attachedSystemPromptFiles = [];
-    const omitSessionPreamble = recyclingMode === "resume";
-    const remoteSystemPromptText = omitSessionPreamble ? "" : String(remoteSystemPrompt || "").trim();
-
-    const tierConfig = getModelTierConfig(modelTier);
-    const modelToUse = selectExecutionModel({ jobModelName: modelName, globalModelOverride: getModelOverride(), tierModel: tierConfig.model });
-    if (modelToUse && !nativeDispatchEnabled) {
-      args.push("--model", modelToUse);
-    }
-
-    // ── Max turns ──────────────────────────────────────────────────────────
+  let cleanupDeterministicMcpSession = () => null;
+  try {
+    const remoteSystemPromptText = recyclingMode === "resume" ? "" : String(remoteSystemPrompt || "").trim();
+    const modelToUse = selectExecutionModel({ jobModelName: modelName, globalModelOverride: getModelOverride(), tierModel: getModelTierConfig(modelTier).model });
     const turns = maxTurns || getMaxTurns(role, modelTier, complexity, deepthink, filesToModifyCount);
     const outputTokenLimit = normalizeMaxOutputTokens(maxOutputTokens)
       || getMaxOutputTokensForProvider("claude", { role });
-    // Turns are a target reported in stats, never a CLI kill: Posse's stall
-    // and wall timeouts end a session that genuinely needs ending.
-    if (priorSessionHandle && !nativeDispatchEnabled) {
-      args.push("--resume", String(priorSessionHandle));
-    }
-
-    // Reasoning effort is a CLI session setting on every route, native
-    // controls included, as Codex's model_reasoning_effort is.
-    const cliEffort = String(reasoningEffort || "").trim().toLowerCase();
-    if (!nativeDispatchEnabled && CLAUDE_CLI_EFFORT_LEVELS.has(cliEffort)) {
-      args.push("--effort", cliEffort);
-    }
-
-    // Runtime agents must not load user/project settings. The per-job loader
-    // cwd is empty by construction, so local is the only permitted source.
-    if (!nativeDispatchEnabled) {
-    args.push("--setting-sources", "local");
-    args.push("--disable-slash-commands");
-    args.push("--strict-mcp-config");
-    if (nativeColdBoot) {
-      // Benchmark/native controls must be a genuinely fresh Claude Code
-      // agent: no CLAUDE.md, skills, plugins, hooks, configured MCP servers,
-      // prior sessions, or persisted session state. Safe mode retains Claude's
-      // built-in tools and auth/model selection.
-      args.push("--safe-mode");
-      args.push("--no-session-persistence");
-    }
-
-    }
     const providerPaths = normalizeProviderPaths({ cwd, projectDir });
     const mcpWorkspaceCwd = mcpCwd ? path.resolve(mcpCwd) : providerPaths.cwd;
-    const spawnCwd = loaderCwd ? path.resolve(loaderCwd) : providerPaths.cwd;
-    const assignmentUnit = assignmentUnitForAtlas;
-    const { attachment: atlasAttachment, payload: atlasMcpPayload } = preparedAtlasMcp;
+    const { attachment: atlasAttachment } = preparedAtlasMcp;
     const executionAtlasConfig = withAtlasExecutionPolicySnapshot(atlasConfig, atlasAttachment);
     const atlasMethodForStats = disableAtlas ? null : (atlasAttachment?.method || "baseline");
     logAtlasAttachment({
@@ -470,12 +208,7 @@ export async function callProvider(promptText, {
       atlasPrefetchStatus,
       atlasAttachment,
     });
-    if (nativeDispatchEnabled && (disableSystemTools === false || captureNativeSubagents)) {
-      throw new Error("Native Claude requires issued MCP tools only");
-    }
-    const disableSystemToolsResolved = nativeDispatchEnabled || (typeof disableSystemTools === "boolean"
-      ? disableSystemTools : resolveDisableSystemTools());
-    const deterministicReadMcp = await buildClaudeDeterministicReadMcpConfigPayloadAsync(role, mcpWorkspaceCwd, {
+    const deterministicReadMcp = await buildClaudeNativeMcpAttachmentAsync(role, mcpWorkspaceCwd, {
       scopedFiles,
       createFiles,
       deleteFiles,
@@ -485,7 +218,6 @@ export async function callProvider(promptText, {
       projectDbWrite,
       projectDbCapability,
       needsImageGeneration,
-      disableSystemTools: disableSystemToolsResolved,
       jobId,
       workItemId,
       attemptId,
@@ -500,7 +232,6 @@ export async function callProvider(promptText, {
       remoteToolSurface: _remoteToolSurface,
       mcpGate,
       disableAgentTools,
-      nativeDispatch: nativeDispatchEnabled,
     });
     if (deterministicReadMcp.serverConfig?.ownerSession) {
       let released = false;
@@ -523,7 +254,7 @@ export async function callProvider(promptText, {
     }
     const atlasServerName = deterministicReadMcp.active
       ? deterministicReadMcp.serverName
-      : atlasMcpPayload?.serverName;
+      : null;
     const remoteAtlasToolNames = Array.isArray(deterministicReadMcp.atlasTools)
       ? deterministicReadMcp.atlasTools
       : [];
@@ -556,216 +287,31 @@ export async function callProvider(promptText, {
       readRoots,
       needsImageGeneration,
       platform: process.platform,
-      includeBaseTools: !(deterministicReadMcp.active || disableSystemToolsResolved),
+      includeBaseTools: false,
       projectDir: providerPaths.cwd,
     });
     executionContract = appendExecutionTools(executionContract, deterministicReadMcp.contractTools || deterministicReadMcp.tools);
     executionContract = appendExecutionTools(executionContract, atlasContractTools);
-    const cliToolOptions = {
-      autoApprove,
-      scopedFiles,
-      createFiles,
-      createRoots,
-      readRoots,
-      scopeCwd: mcpWorkspaceCwd,
-      deterministicReadMcpActive: deterministicReadMcp.active,
-      disableSystemTools: disableSystemToolsResolved,
-      webToolsEnabled: resolveWebToolsEnabled() && issuedWebAccessEnabled(_remoteIssuedPolicy),
-    };
-    // MCP servers are resolved here so their names can drive the permission
-    // allowlist below. The Posse MCP gateway exposes the deterministic and
-    // atlas.* suites from a single process, so do not attach a second ATLAS
-    // MCP server when the gateway is already active.
-    const atlasServedByGateway = !!deterministicReadMcp.active;
-    const mergedMcpServers = applyClaudeMcpLoadingPolicy({
-      ...(deterministicReadMcp.payload?.mcpServers || {}),
-      ...(atlasServedByGateway || !atlasReadyForMcp ? {} : (atlasMcpPayload?.mcpServers || {})),
+    const contractBlock = renderExecutionContractBlock(executionContract, {
+      remoteComposed: skipRolePrompt,
+      remoteSystemPrompt: remoteSystemPromptText,
     });
-    const mcpServerNames = Object.keys(mergedMcpServers);
-
-    // Permission route — single, platform-uniform path (never
-    // --dangerously-skip-permissions; see buildClaudeToolPermissionArgs).
-    let cliToolConfig = null;
-    if (!nativeDispatchEnabled) {
-    const launchPolicy = await reconcileLaunchPolicy({
-      provider: "claude",
-      role,
-      request: () => ({ ...buildClaudeLaunchInput(executionContract, cliToolOptions), mcpServerNames }),
-      jsPolicy: () => {
-        const jsCliToolConfig = buildClaudeCliToolConfig(executionContract, cliToolOptions);
-        return {
-          cliToolConfig: normalizeClaudeCliToolConfig(jsCliToolConfig),
-          permissionArgs: normalizeClaudePermissionArgs(buildClaudeToolPermissionArgs(jsCliToolConfig, mcpServerNames)),
-        };
-      },
-      nativeValue: claudeLaunchPolicyFromPlan,
-    });
-    cliToolConfig = launchPolicy.cliToolConfig;
-    const { toolsArg, disallowedToolsArg, allowedToolsArg } = launchPolicy.permissionArgs;
-    if (toolsArg != null) {
-      args.push("--tools", toolsArg);
-    }
-    if (disallowedToolsArg) {
-      args.push("--disallowedTools", disallowedToolsArg);
-    }
-    if (allowedToolsArg) {
-      args.push("--allowedTools", allowedToolsArg);
-    }
-
-    if ((role === "dev" && allowWrite) && !cliToolConfig.allowedTools && !cliToolConfig.dangerouslySkipPermissions) {
-      throw new Error(
-        `Dev role requires either file scope (scopedFiles/createFiles/createRoots) or autoApprove=true. ` +
-        `Without one, tool calls block on permission prompts in headless mode.`
-      );
-    }
-    if ((role === "artificer" && allowWrite) && !cliToolConfig.allowedTools && !cliToolConfig.dangerouslySkipPermissions && !(createRoots?.length > 0)) {
-      throw new Error(`Artificer role requires either create_roots scope or autoApprove=true.`);
-    }
-
-    try {
-      // mergedMcpServers / mcpServerNames are computed above (they drive the
-      // --allowedTools rules); reuse them here to write the --mcp-config.
-      logProviderMcpSurfaceTelemetry({
-        providerName: "claude",
-        role,
-        workItemId,
-        jobId,
-        attemptId,
-        deterministicReadMcp,
-        atlasReadyForMcp,
-        atlasContractTools,
-        mcpServerNames: Object.keys(mergedMcpServers),
-        cliToolConfig,
-        emittedCliArgs: args,
-      });
-      if (Object.keys(mergedMcpServers).length > 0) {
-        const mcpConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-atlas-v2-"));
-        cleanupAtlasMcpConfig = () => {
-          try { fs.rmSync(mcpConfigDir, { recursive: true, force: true }); } catch { /* no-op */ }
-        };
-        const mcpConfigPath = path.join(mcpConfigDir, "claude-mcp-config.json");
-        fs.writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: mergedMcpServers }, null, 2), "utf8");
-        args.push("--mcp-config", mcpConfigPath);
-      }
-    } catch (setupErr) {
-      cleanupSetupFiles();
-      throw setupErr;
-    }
-
-    }
-
-    if (remoteSystemPromptText && !nativeDispatchEnabled) {
-      try {
-        const rolePromptDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-claude-role-"));
-        const rolePromptPath = path.join(rolePromptDir, "remote-system.md");
-        fs.writeFileSync(rolePromptPath, renderProviderPromptContracts(remoteSystemPromptText, executionContract), "utf8");
-        cleanupRolePromptFile = () => {
-          try { fs.rmSync(rolePromptDir, { recursive: true, force: true }); } catch { /* no-op */ }
-        };
-        attachedSystemPromptFiles.push(rolePromptPath);
-      } catch (setupErr) {
-        cleanupSetupFiles();
-        throw setupErr;
-      }
-    }
-
-    // ── Execution contract ──────────────────────────────────────────────
-    // Remote owns normal provider-independent directives; native controls
-    // bypass Remote and receive only this fixed read-only contract.
-    const contractBlock = nativeColdBoot
-      ? [
-          "Execution contract:",
-          "- This is a read-only native Claude Code research session.",
-          "- Available tools: Read, Glob, Grep.",
-          "- Use those native tools to inspect the repository before answering.",
-          "- Do not use MCP, Atlas, prior sessions, or ambient memory.",
-          "- Do not modify files.",
-        ].join("\n")
-      : renderExecutionContractBlock(executionContract, {
-          remoteComposed: skipRolePrompt,
-          remoteSystemPrompt: remoteSystemPromptText,
-        });
-    const stablePromptText = omitSessionPreamble
+    const stablePromptText = recyclingMode === "resume"
       ? ""
       : [contractBlock, stableContext].filter(Boolean).join("\n\n");
-    if (stablePromptText.trim() && !nativeDispatchEnabled) {
-      try {
-        const stablePromptDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-claude-system-"));
-        const stablePromptPath = path.join(stablePromptDir, "execution-context.md");
-        fs.writeFileSync(stablePromptPath, stablePromptText, "utf8");
-        cleanupStablePromptFile = () => {
-          try { fs.rmSync(stablePromptDir, { recursive: true, force: true }); } catch { /* no-op */ }
-        };
-        attachedSystemPromptFiles.push(stablePromptPath);
-      } catch (setupErr) {
-        cleanupSetupFiles();
-        throw setupErr;
-      }
-    }
-    let systemPromptInline = nativeDispatchEnabled ? [renderProviderPromptContracts(remoteSystemPromptText, executionContract), stablePromptText].filter(Boolean).join("\n\n") : null;
-    if (!nativeDispatchEnabled) {
-    try {
-      // Normal Posse calls receive provider-independent isolation and
-      // discipline from the Remote rule catalog. Native controls deliberately
-      // bypass Remote, so retain the isolation fallback only on that route.
-      const systemPromptParts = nativeColdBoot ? [NATIVE_COLD_BOOT_SYSTEM_PROMPT] : [];
-      for (const filePath of attachedSystemPromptFiles) {
-        try {
-          const text = fs.readFileSync(filePath, "utf-8").trim();
-          if (text) systemPromptParts.push(text);
-        } catch {
-          // Optional prompt files are best-effort. Remote remains the owner of
-          // normal runtime behavior; native controls use the fallback above.
-        }
-      }
-      const systemPromptDir = fs.mkdtempSync(path.join(os.tmpdir(), "posse-claude-system-"));
-      const systemPromptPath = path.join(systemPromptDir, "system.md");
-      systemPromptInline = systemPromptParts.join("\n\n");
-      fs.writeFileSync(systemPromptPath, systemPromptInline, "utf8");
-      cleanupSystemPromptFile = () => {
-        try { fs.rmSync(systemPromptDir, { recursive: true, force: true }); } catch { /* no-op */ }
-      };
-      args.push("--system-prompt-file", systemPromptPath);
-    } catch (setupErr) {
-      cleanupSetupFiles();
-      throw setupErr;
-    }
-    }
-    // Effort travels only as the --effort CLI flag; the prompt carries no
-    // thinking keywords, so native controls and Posse calls run at the same
-    // requested effort.
+    const systemPromptInline = [renderProviderPromptContracts(remoteSystemPromptText, executionContract), stablePromptText].filter(Boolean).join("\n\n");
     const finalPrompt = promptText;
 
-    // Log the fully-assembled user-message prompt (contract
-    // + handoff packet content) along with BOTH the paths of the system
-    // prompt files AND their concatenated contents. Without the contents,
-    // grepping the prompt log for role-prompt text (e.g. "You are the
-    // researcher…") finds nothing, which looks identical to "the role
-    // portion was dropped" even though the files are folded into a
-    // Posse-owned --system-prompt-file at runtime.
     if (typeof recordFinalPrompt === "function") {
-      recordFinalPrompt(finalPrompt, {
-        systemPrompt: systemPromptInline || null,
-        systemPromptFiles: attachedSystemPromptFiles,
-      });
+      recordFinalPrompt(finalPrompt, { systemPrompt: systemPromptInline || null, systemPromptFiles: [] });
     }
 
-    // When onLine is set, suppress direct stdout (display handles output)
-    const directOutput = !onLine && !silent;
-    const selectedExecutionMode = resolveClaudeExecutionMode({ requested: executionMode, interactiveBackend });
-
-    if (nativeDispatchEnabled) {
-      if (nativeColdBoot || selectedExecutionMode !== CLAUDE_EXECUTION_MODE_PRINT) {
-        const error = new Error("The native Claude adapter does not support cold-boot or interactive execution modes");
-        error.code = "CLAUDE_NATIVE_DISPATCH_UNSUPPORTED_MODE";
-        throw error;
-      }
       const issuedToolIds = deterministicReadMcp.issuedToolIds || [];
       const stallRoleMultiplier = { researcher: 2, planner: 2 };
       const stallTimeoutMs = resolveProviderStallTimeout(stallTimeout)
         * (stallRoleMultiplier[role] || 1)
         * 1_000;
-      const request = buildClaudeNativeDispatchRequest(finalPrompt, {
+      const request = buildNativeDispatchRequest("claude", finalPrompt, {
         dispatchId: `claude-${agentCallId || crypto.randomUUID()}`,
         jobId,
         workItemId,
@@ -795,8 +341,7 @@ export async function callProvider(promptText, {
         priorSessionHandle,
         recyclingMode,
       });
-      try {
-      const nativeResult = await runClaudeNativeDispatch(request, {
+      const nativeResult = await runNativeDispatch(request, {
         abortSignal,
         mcpGate,
         projectDir: providerPaths.projectDir,
@@ -808,1121 +353,10 @@ export async function callProvider(promptText, {
         onUsageSegment,
       });
       nativeResult.stats.atlasMethod = atlasMethodForStats;
-      resolve(nativeResult);
-      } finally {
-        cleanupSetupFiles();
-      }
-      return;
-    }
-
-    // Visual framing
-    const color = roleBrandColor(role, C.cyan);
-    const icon = roleBrandIcon(role);
-    const showHeader = directOutput && role !== "assessor";
-
-    const tierLabel = tierConfig ? ` ${C[tierConfig.color] || ""}[${tierConfig.label}]${C.reset}` : "";
-    const effortLabel = reasoningEffort !== "medium" ? ` ${C.dim}effort:${reasoningEffort}${C.reset}` : "";
-    const modelLabel = modelToUse ? ` ${C.dim}model:${modelToUse}${C.reset}` : "";
-    const turnsLabel = turns ? ` ${C.dim}turns:${turns}${C.reset}` : "";
-    const modeLabel = selectedExecutionMode !== CLAUDE_EXECUTION_MODE_PRINT ? ` ${C.dim}mode:${selectedExecutionMode}${C.reset}` : "";
-    const actLabel = activity ? `  ${C.dim}-- ${activity}${C.reset}` : "";
-
-    if (showHeader) {
-      console.log(`\n${color}+${"---".repeat(20)}+${C.reset}`);
-      console.log(`${color}|${C.reset} [${icon}] ${color}${C.bold}${role.toUpperCase()}${C.reset}${tierLabel}${effortLabel}${modelLabel}${turnsLabel}${modeLabel}${actLabel}`);
-      console.log(`${color}+${"---".repeat(20)}+${C.reset}`);
-    }
-
-    const startTime = Date.now();
-    const childEnv = claudeMcpDeadlineEnv(mergedMcpServers, scrubClaudeChildEnv(buildRuntimeEnv(providerPaths.projectDir, providerPaths.cwd, process.env)));
-    Object.assign(
-      childEnv,
-      deterministicReadMcp.providerChildEnv
-        || deterministicReadMcp.serverConfig?.providerChildEnv
-        || {},
-    );
-    // Clean, Posse-owned provider home from the MCP helper (generic + provider-
-    // keyed). No-op until a `claude` home profile is registered.
-    const providerHomeEnv = deterministicReadMcp.providerHomeEnv
-      || deterministicReadMcp.serverConfig?.providerHomeEnv
-      || null;
-    if (providerHomeEnv?.isolated && providerHomeEnv.envVar) {
-      childEnv[providerHomeEnv.envVar] = providerHomeEnv.home;
-    }
-    // Re-scrub after composing helper-provided environment fragments so no
-    // later layer can accidentally switch Claude Code from OAuth to API-key auth.
-    scrubClaudeChildEnv(childEnv);
-    const issuedCacheTools = [
-      ...(issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy) || []),
-      ...(Array.isArray(_remoteToolSurface) ? _remoteToolSurface : []),
-    ];
-    applyClaudeCacheTtlPolicy(childEnv, { priorSessionHandle, recyclingMode,
-      issuedToolSurface: issuedCacheTools });
-
-    if (selectedExecutionMode === CLAUDE_EXECUTION_MODE_INTERACTIVE) {
-      void (async () => {
-        const STALL_ROLE_MULTIPLIER = { researcher: 2, planner: 2 };
-        const baseTimeout = resolveProviderStallTimeout(stallTimeout);
-        const timeoutMs = baseTimeout * (STALL_ROLE_MULTIPLIER[role] || 1) * 1000;
-        try {
-          const result = await new ClaudeInteractiveSession({
-            args,
-            cwd: spawnCwd,
-            env: childEnv,
-            timeoutMs,
-            backend: interactiveBackend,
-            abortSignal,
-            onLine,
-            directOutput,
-            color,
-            startTime,
-            pauseTimeoutWhile: () => providerStallPaused({ jobId, agentCallId }),
-          }).runProviderCall(finalPrompt);
-          const mcpCleanup = cleanupSetupFiles({
-            deterministicReadMcp,
-            exitCode: result.exitCode,
-            phase: "provider_close",
-          });
-          const enforceMcpAttachProof = !interactiveBackend;
-          const durationMs = result.durationMs ?? (Date.now() - startTime);
-          const output = String(result.output || "").trim();
-          const interactiveUsage = result.usage && typeof result.usage === "object" ? result.usage : {};
-          const hasInteractiveUsage = _usageNumberOrNull(interactiveUsage.input_tokens) != null
-            || _usageNumberOrNull(interactiveUsage.output_tokens) != null
-            || _usageNumberOrNull(interactiveUsage.cache_creation_input_tokens) != null
-            || _usageNumberOrNull(interactiveUsage.cache_read_input_tokens) != null;
-          const estimatedInputTokens = _usageNumberOrNull(interactiveUsage.input_tokens) ?? estimateTokensFromText(finalPrompt);
-          const estimatedOutputTokens = _usageNumberOrNull(interactiveUsage.output_tokens) ?? estimateTokensFromText(output);
-          const estimatedUsage = {
-            input_tokens: estimatedInputTokens,
-            output_tokens: estimatedOutputTokens,
-            cache_creation_input_tokens: _usageNumberOrNull(interactiveUsage.cache_creation_input_tokens) ?? undefined,
-            cache_read_input_tokens: _usageNumberOrNull(interactiveUsage.cache_read_input_tokens) ?? undefined,
-            cache_creation: interactiveUsage.cache_creation ?? undefined,
-          };
-          const apiEquivalentCostUsd = _estimateClaudeApiEquivalentCostUsd({
-            modelName: modelToUse,
-            modelTier,
-            usage: estimatedUsage,
-          });
-          if (onLine) {
-            onLine(`${C.dim}completed: ${(durationMs / 1000).toFixed(1)}s | ${output.length} chars via interactive session${C.reset}`);
-          }
-          const stats = {
-            role,
-            modelTier,
-            reasoningEffort,
-            modelName: modelToUse,
-            promptChars: finalPrompt.length,
-            outputChars: output.length,
-            inputTokens: estimatedInputTokens,
-            outputTokens: estimatedOutputTokens,
-            cacheCreationInputTokens: _usageNumberOrNull(interactiveUsage.cache_creation_input_tokens),
-            cacheReadInputTokens: _usageNumberOrNull(interactiveUsage.cache_read_input_tokens),
-            cachedInputTokens: _usageNumberOrNull(interactiveUsage.cache_read_input_tokens),
-            reasoningOutputTokens: _usageNumberOrNull(interactiveUsage.thinking_tokens ?? interactiveUsage.reasoning_output_tokens),
-            costUsd: apiEquivalentCostUsd,
-            totalCostUsd: null,
-            numTurns: null,
-            durationMs,
-            exitCode: result.exitCode,
-            maxTurns: turns,
-            maxOutputTokens: outputTokenLimit,
-            outputTruncated: false,
-            outputLimitReason: null,
-            toolUses: null,
-            atlasMethod: atlasMethodForStats,
-            sessionHandle: result.sessionHandle || null,
-            priorSessionHandle: priorSessionHandle || null,
-            sessionExpired: false,
-            executionMode: CLAUDE_EXECUTION_MODE_INTERACTIVE,
-            usageEstimated: !hasInteractiveUsage,
-            usageFinalized: hasInteractiveUsage === true,
-            usageCapturePrecision: hasInteractiveUsage ? "aggregate_only" : "unknown",
-            interactiveCompletedBy: result.completedBy || null,
-            mcpAttachProof: mcpCleanup.attachProofResult?.proof || null,
-            mcpAttachMissingProof: enforceMcpAttachProof && mcpCleanup.attachProofResult?.missingProof === true,
-          };
-          if (hasInteractiveUsage) {
-            try {
-              onUsageSegment?.({
-                requestOrdinal: 1,
-                provider: "claude",
-                modelName: modelToUse,
-                inputTokens: estimatedInputTokens,
-                cachedInputTokens: stats.cachedInputTokens ?? 0,
-                cacheCreationInputTokens: stats.cacheCreationInputTokens ?? 0,
-                ...claudeCacheCreationSplit([interactiveUsage]),
-                outputTokens: estimatedOutputTokens,
-                requestContextInputTokens: estimatedInputTokens,
-                durationMs,
-                usageSource: "aggregate_only",
-                precision: "aggregate_only",
-              });
-            } catch { /* accounting persistence cannot break provider execution */ }
-          }
-          if (stats.mcpAttachMissingProof) {
-            const err = new Error("Claude deterministic MCP attach proof missing: provider exited without owner-observed initialize/tools-list.");
-            err.code = "MCP_ATTACH_PROOF_MISSING";
-            err.stats = stats;
-            err.stdout = output || null;
-            err.output = output || null;
-            err.partialOutput = output || null;
-            err.mcpAttachMissingProof = true;
-            reject(err);
-            return;
-          }
-          resolve({ output, stats });
-        } catch (err) {
-          cleanupSetupFiles({
-            deterministicReadMcp,
-            exitCode: null,
-            phase: "provider_error",
-          });
-          const transcript = err?.transcript ? stripTerminalControls(err.transcript) : "";
-          const timeoutText = /timed out/i.test(String(err?.message || ""));
-          const preserveError = err?.name === "AbortError"
-            || err instanceof InteractiveCliUnavailableError
-            || err?.code === "INTERACTIVE_CLI_UNAVAILABLE";
-          const wrapped = preserveError ? err : new Error(
-            timeoutText
-              ? `Claude interactive session timed out after ${timeoutMs / 1000}s waiting for idle state.`
-              : `Claude interactive session failed: ${err?.message || err || "unknown error"}`
-          );
-          wrapped.code = wrapped.code || (timeoutText ? "CLAUDE_INTERACTIVE_TIMEOUT" : "CLAUDE_INTERACTIVE_FAILED");
-          wrapped.stats = {
-            role,
-            modelTier,
-            reasoningEffort,
-            modelName: modelToUse,
-            promptChars: finalPrompt.length,
-            outputChars: transcript.length,
-            durationMs: Date.now() - startTime,
-            exitCode: null,
-            maxTurns: turns,
-            maxOutputTokens: outputTokenLimit,
-            outputTruncated: false,
-            outputLimitReason: null,
-            atlasMethod: atlasMethodForStats,
-            priorSessionHandle: priorSessionHandle || null,
-            sessionExpired: !!priorSessionHandle && isClaudeResumeHandleExpiredError(`${transcript}\n${wrapped.message}`),
-            executionMode: CLAUDE_EXECUTION_MODE_INTERACTIVE,
-          };
-          wrapped.stdout = transcript || null;
-          wrapped.partialOutput = transcript || null;
-          reject(wrapped);
-        }
-      })();
-      return;
-    }
-
-    // Prompt is piped via stdin to avoid Windows 32K command-line length limit.
-    // "-p" puts Claude Code in print mode reading from stdin.
-    // "--output-format stream-json" gives us streaming JSONL with token usage stats.
-    const fullArgs = [...resolvedClaude.args, ...args, "-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages"];
-    // Opus 5 omits readable thinking by default; request its supported summary
-    // display without changing effort or adding thinking to the answer body.
-    if (/^claude-opus-5(?:$|-)/.test(modelToUse)
-      && !fullArgs.some((arg) => String(arg).startsWith("--thinking-display"))) {
-      fullArgs.push("--thinking-display", "summarized");
-    }
-
-    let proc;
-    try {
-      const launch = buildWindowsSpawn(resolvedClaude.command, fullArgs);
-      const processGroup = process.platform !== "win32";
-      proc = spawn(launch.command, launch.args, {
-        cwd: spawnCwd,
-        shell: false,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: childEnv,
-        windowsHide: true,
-        windowsVerbatimArguments: launch.windowsVerbatimArguments,
-        detached: processGroup,
-      });
-      trackSpawnedProcess(proc, launch.command, {
-        label: `claude:${role || "provider"}`,
-        cwd: spawnCwd,
-        processGroup,
-      });
-    } catch (spawnErr) {
-      cleanupSetupFiles();
-      throw spawnErr;
-    }
-
-    const forceKillTimers = new Set();
-    const scheduleForceKill = () => {
-      const timer = setTimeout(() => {
-        forceKillTimers.delete(timer);
-        terminateSpawnedProcess(proc, { force: true });
-      }, 3000);
-      timer.unref?.();
-      forceKillTimers.add(timer);
-    };
-    const clearForceKillTimers = () => {
-      for (const timer of forceKillTimers) clearTimeout(timer);
-      forceKillTimers.clear();
-    };
-
-    // Abort handling — kill the child process when signal fires
-    if (abortSignal) {
-      const onAbort = () => {
-        terminateSpawnedProcess(proc, { force: false });
-        scheduleForceKill();
-      };
-      if (abortSignal.aborted) {
-        onAbort();
-      } else {
-        abortSignal.addEventListener("abort", onAbort, { once: true });
-        proc.on("close", () => abortSignal.removeEventListener("abort", onAbort));
-      }
-    }
-
-    // Write prompt to stdin and close
-    proc.stdin.on("error", () => {}); // prevent EPIPE crash if child exits early
-    proc.stdin.write(finalPrompt);
-    proc.stdin.end();
-
-    let stderr = "";
-    let lineCount = 0;
-    let gotFirstOutput = false;
-    let killedByStallDetector = false;
-
-    // Role-aware stall timeout: researchers/planners legitimately run longer
-    // with little or no streaming output (thinking models, large codebases).
-    const STALL_ROLE_MULTIPLIER = { researcher: 2, planner: 2 };
-    const baseTimeout = resolveProviderStallTimeout(stallTimeout);
-    const STALL_TIMEOUT = baseTimeout * (STALL_ROLE_MULTIPLIER[role] || 1) * 1000;
-
-    // stream-json state
-    let jsonLineBuf = "";      // partial JSONL line buffer
-    let fullOutput = "";       // accumulated text output from deltas
-    let textLineBuf = "";      // buffer for assembling text lines from deltas
-    // Hard cap on unbounded line buffers. A single JSONL message larger than
-    // this is almost certainly a malformed stream (binary garbage from a
-    // crashed child, or a line that never terminates) — drop it rather than
-    // let memory grow without bound.
-    const LINE_BUF_MAX = 16 * 1024 * 1024; // 16 MiB
-    const toolUses = [];       // track tool calls: [{ tool, input }, ...]
-    const seenToolUseKeys = new Set();
-    const nativeSubagentNotifications = [];
-    const seenNativeSubagentNotificationKeys = new Set();
-    const providerToolBatches = new Map();
-    const providerTurnIndexesById = new Map();
-    let _providerTurnSequence = 0;
-    let _activeProviderTurn = null;
-    let _pendingToolUse = null;  // current tool_use block from content_block_start
-    let _pendingToolInput = "";  // accumulate input_json_delta for current tool
-    let _lastChainReadPath = null; // remember so chain_verdict live log shows the file
-    let resultData = null;     // final result message with usage stats
-    let latestSessionHandle = null;
-    const streamTelemetry = new ClaudeStreamTelemetry();
-
-    // The CLI reports its loaded tool surface once, at session start. A built-in
-    // Posse does not catalog cannot be denied and silently costs every turn.
-    let checkedInitTools = false;
-    function warnOnUnknownNativeTools(message) {
-      if (checkedInitTools || message?.type !== "system" || message?.subtype !== "init") return;
-      checkedInitTools = true;
-      const unknown = unknownClaudeNativeTools(message.tools);
-      if (unknown.length === 0) return;
-      const line = `Claude CLI loaded built-in tools Posse cannot deny: ${unknown.join(", ")} — add them to the Claude native tool catalog`;
-      if (directOutput) process.stdout.write(`${color}|${C.reset} ${C.yellow}${line}${C.reset}\n`);
-      else onLine?.(`${C.yellow}${line}${C.reset}`);
-    }
-
-    // Claude Code refuses a tool name it was not given before the call reaches
-    // MCP, so the refusal is visible only here, as a tool_result error.
-    let initToolNames = [];
-    const seenUnknownToolResults = new Set();
-    function observeUnknownToolNames(message) {
-      if (message?.type === "system" && message?.subtype === "init" && Array.isArray(message.tools)) {
-        initToolNames = message.tools.map((name) => String(name || "")).filter(Boolean);
-        return;
-      }
-      for (const refusal of extractClaudeUnknownToolResults(message)) {
-        const toolUse = refusal.toolUseId
-          ? toolUses.find((entry) => entry.id === refusal.toolUseId) || null
-          : null;
-        const attempted = refusal.attempted || toolUse?.tool || null;
-        const key = refusal.toolUseId || `${attempted}\0${_providerTurnSequence}`;
-        if (seenUnknownToolResults.has(key)) continue;
-        seenUnknownToolResults.add(key);
-        const issuedNames = [
-          ...initToolNames,
-          ...(executionContract?.tools || []).map((tool) => tool?.providerSurfaceName || tool?.surfaceName),
-        ];
-        const nearestIssued = attempted ? nearestIssuedClaudeToolName(attempted, issuedNames) : null;
-        const turn = toolUse?.providerTurnIndex ?? (_providerTurnSequence || null);
-        recordObservation({
-          work_item_id: workItemId ?? null,
-          job_id: jobId ?? null,
-          attempt_id: attemptId ?? null,
-          observation_type: "provider.unknown_tool_name",
-          summary: `Claude called unissued tool ${attempted || "(unnamed)"}${nearestIssued ? ` (nearest issued: ${nearestIssued})` : ""}`,
-          detail: {
-            provider: "claude",
-            role,
-            attempted,
-            nearest_issued: nearestIssued,
-            turn,
-            tool_use_id: refusal.toolUseId,
-          },
-        });
-      }
-    }
-
-    // Visible assistant text is the agent's own commentary (START:/FINISH:
-    // and status lines). Thinking blocks and native sub-agent sidechains are
-    // not commentary. Mirrors the Codex agent_message forwarding.
-    function emitAgentCommentary(message) {
-      if (typeof onAgentCommentary !== "function") return;
-      if (message?.type !== "assistant" || message.parent_tool_use_id || message.isSidechain === true) return;
-      const content = message?.message?.content;
-      if (!Array.isArray(content)) return;
-      for (const block of content) {
-        if (block?.type !== "text") continue;
-        const text = typeof block.text === "string" ? block.text.trim() : "";
-        if (!text) continue;
-        try { onAgentCommentary(text.slice(0, AGENT_COMMENTARY_MAX_CHARS)); } catch { /* live telemetry must not break the provider */ }
-      }
-    }
-
-    function emitProviderToolResults(message) {
-      if (typeof onProviderToolResult !== "function") return;
-      if (message?.type !== "user" || message.parent_tool_use_id) return;
-      const content = message?.message?.content;
-      if (!Array.isArray(content)) return;
-      for (const block of content) {
-        if (block?.type !== "tool_result") continue;
-        const id = typeof block.tool_use_id === "string" && block.tool_use_id.trim() ? block.tool_use_id.trim() : null;
-        if (!id) continue;
-        try { onProviderToolResult({ id, isError: block.is_error === true }); } catch { /* live telemetry must not break the provider */ }
-      }
-    }
-
-    function observeStreamTelemetry(message) {
-      emitAgentCommentary(message);
-      emitProviderToolResults(message);
-      warnOnUnknownNativeTools(message);
-      observeUnknownToolNames(message);
-      for (const summary of streamTelemetry.observe(message)) {
-        for (const line of summary.split(/\r?\n/).filter(Boolean)) {
-          if (directOutput) process.stdout.write(`${color}|${C.reset} [thinking] ${line}\n`);
-          else onLine?.(`[thinking] ${line}`);
-        }
-      }
-    }
-
-    function shouldShowPreResultToolTarget(displayName, target) {
-      if (displayName === "list_files") return false;
-      const normalized = String(target || "").replace(/\\/g, "/");
-      if (!normalized) return false;
-      if (normalized === "." || normalized === "src") return true;
-      return !/(^|\/)\.(?:posse|git|claude|codex)(?:\/|$)/i.test(normalized);
-    }
-
-    function toolUseReplayKey(toolUse) {
-      const id = typeof toolUse?.id === "string" && toolUse.id.trim() ? toolUse.id.trim() : null;
-      if (id) return `id:${id}`;
-      return `${toolUse?.tool || ""}\0${JSON.stringify(toolUse?.input ?? null)}`;
-    }
-
-    function providerMessageId(msg) {
-      const candidates = [
-        msg?.message?.id,
-        msg?.message_id,
-        msg?.messageId,
-        msg?.type === "assistant" ? msg?.id : null,
-      ];
-      for (const candidate of candidates) {
-        if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
-      }
-      return null;
-    }
-
-    function allocateProviderTurn(providerTurnId = null, { activate = false } = {}) {
-      let providerTurnIndex = providerTurnId
-        ? providerTurnIndexesById.get(providerTurnId) || null
-        : null;
-      if (providerTurnIndex == null) {
-        providerTurnIndex = ++_providerTurnSequence;
-        if (providerTurnId) providerTurnIndexesById.set(providerTurnId, providerTurnIndex);
-      }
-      const turn = { providerTurnId, providerTurnIndex };
-      if (activate) _activeProviderTurn = turn;
-      return turn;
-    }
-
-    function prepareIncrementalProviderTurn(msg) {
-      if (msg?.type === "message_start") {
-        return allocateProviderTurn(providerMessageId(msg), { activate: true });
-      }
-      if (msg?.type === "content_block_start" && !_activeProviderTurn) {
-        return allocateProviderTurn(providerMessageId(msg), { activate: true });
-      }
-      return _activeProviderTurn;
-    }
-
-    function recordStreamMessageToolUses(msg) {
-      let turn = _activeProviderTurn;
-      if (msg?.type === "assistant") {
-        turn = allocateProviderTurn(providerMessageId(msg));
-      }
-      const extracted = _extractClaudeToolUsesFromStreamMessage(msg, {
-        providerTurnIndex: turn?.providerTurnIndex ?? null,
-      });
-      if (extracted.length > 0 && !turn) {
-        turn = allocateProviderTurn(providerMessageId(msg), { activate: true });
-      }
-      for (const toolUse of extracted) {
-        recordCompletedToolUse({
-          ...toolUse,
-          ...(toolUse.providerTurnId || !turn?.providerTurnId
-            ? {}
-            : { providerTurnId: turn.providerTurnId }),
-          ...(toolUse.providerTurnIndex || !turn?.providerTurnIndex
-            ? {}
-            : { providerTurnIndex: turn.providerTurnIndex }),
-        });
-      }
-    }
-
-    function recordNativeSubagentNotification(msg) {
-      if (!captureNativeSubagents) return;
-      const notification = parseClaudeTaskNotification(msg);
-      if (!notification) return;
-      const key = `${notification.taskId || ""}\0${notification.toolUseId || ""}\0${notification.status || ""}`;
-      if (seenNativeSubagentNotificationKeys.has(key)) return;
-      seenNativeSubagentNotificationKeys.add(key);
-      nativeSubagentNotifications.push(notification);
-    }
-
-    function updateProviderBatch(normalized) {
-      const providerTurnId = typeof normalized.providerTurnId === "string"
-        && normalized.providerTurnId.trim()
-        ? normalized.providerTurnId.trim()
-        : null;
-      const providerTurnIndex = Number.isFinite(Number(normalized.providerTurnIndex))
-        && Number(normalized.providerTurnIndex) > 0
-        ? Math.floor(Number(normalized.providerTurnIndex))
-        : null;
-      if (!providerTurnId && providerTurnIndex == null) return;
-      const groupKey = providerTurnId
-        ? `id:${providerTurnId}`
-        : `index:${providerTurnIndex}`;
-      const batch = providerToolBatches.get(groupKey) || [];
-      batch.push(normalized);
-      providerToolBatches.set(groupKey, batch);
-      const expectedSize = Math.max(
-        batch.length,
-        ...batch.map((entry) => Number(entry.providerBatchSize) || 0),
-      );
-      batch.forEach((entry, providerBatchIndex) => {
-        entry.providerBatchIndex = providerBatchIndex;
-        entry.providerBatchSize = expectedSize;
-      });
-    }
-
-    function recordCompletedToolUse(toolUse) {
-      if (!toolUse?.tool) return;
-      const normalized = {
-        id: typeof toolUse.id === "string" && toolUse.id.trim() ? toolUse.id.trim() : null,
-        tool: toolUse.tool,
-        input: toolUse.input && typeof toolUse.input === "object" ? toolUse.input : null,
-        ...(typeof toolUse.providerTurnId === "string" && toolUse.providerTurnId.trim()
-          ? { providerTurnId: toolUse.providerTurnId.trim() }
-          : {}),
-        ...(Number.isFinite(Number(toolUse.providerTurnIndex)) && Number(toolUse.providerTurnIndex) > 0
-          ? { providerTurnIndex: Math.floor(Number(toolUse.providerTurnIndex)) }
-          : {}),
-        ...(Number.isFinite(Number(toolUse.providerBatchIndex)) && Number(toolUse.providerBatchIndex) >= 0
-          ? { providerBatchIndex: Math.floor(Number(toolUse.providerBatchIndex)) }
-          : {}),
-        ...(Number.isFinite(Number(toolUse.providerBatchSize)) && Number(toolUse.providerBatchSize) > 0
-          ? { providerBatchSize: Math.floor(Number(toolUse.providerBatchSize)) }
-          : {}),
-      };
-      const key = toolUseReplayKey(normalized);
-      if (seenToolUseKeys.has(key)) return;
-      seenToolUseKeys.add(key);
-      toolUses.push(normalized);
-      updateProviderBatch(normalized);
-      if (typeof onProviderToolUse === "function") {
-        try { onProviderToolUse(normalized); } catch { /* live telemetry must not break the provider */ }
-      }
-
-      // A terminal handoff is the job's exit, not activity worth a live line;
-      // a rejected one still surfaces through its error.
-      const isTerminalHandoffCall = stripPosseMcpGatewayPrefix(normalized.tool || "") === "agent_handoff";
-      if (onLine && normalized.tool && !isTerminalHandoffCall) {
-        // Strip MCP server prefixes so the live log shows the bare tool
-        // name (e.g. "chain_read" instead of "mcp__posse-gateway__chain_read").
-        const gatewayDisplayName = normalized.tool
-          .replace(/^mcp__atlas-v2__/, "atlas.");
-        let displayName = stripPosseMcpGatewayPrefix(gatewayDisplayName)
-          .replace(/^mcp__atlas-v2__/, "atlas.");
-        // The chain_read / chain_verdict pair gates a single file review.
-        // chain_verdict's args never carry the file path (that lives in
-        // the MCP server's chain state), so thread the path forward from
-        // the most recent chain_read for a cleaner live log.
-        let enrichedInput = normalized.input || {};
-        if (displayName === "chain_read" && enrichedInput.path) {
-          _lastChainReadPath = enrichedInput.path;
-        } else if (displayName === "chain_verdict" && _lastChainReadPath && !enrichedInput.path) {
-          enrichedInput = { ...enrichedInput, path: _lastChainReadPath };
-          _lastChainReadPath = null; // consumed
-        }
-        displayName = formatAtlasToolUseDisplayName(normalized.tool, enrichedInput) || displayName;
-        const target = summarizeObservedToolUse(normalized.tool, enrichedInput).target;
-        if (target) {
-          // Shorten absolute paths to relative when they start with cwd.
-          try {
-            const cwdNorm = providerPaths.cwd.replace(/\\/g, "/");
-            const targetNorm = target.replace(/\\/g, "/");
-            const short = targetNorm.startsWith(cwdNorm + "/")
-              ? targetNorm.slice(cwdNorm.length + 1)
-              : targetNorm;
-            if (shouldShowPreResultToolTarget(displayName, short)) {
-              onLine(`${C.dim}[tool] ${displayName}: ${short}${C.reset}`);
-            } else {
-              onLine(`${C.dim}[tool] ${displayName}${C.reset}`);
-            }
-          } catch (_e) {
-            if (shouldShowPreResultToolTarget(displayName, target)) {
-              onLine(`${C.dim}[tool] ${displayName}: ${target}${C.reset}`);
-            } else {
-              onLine(`${C.dim}[tool] ${displayName}${C.reset}`);
-            }
-          }
-        } else {
-          // No target (e.g. chain_verdict with only a verdict field) —
-          // still log the tool name so the live stream shows activity.
-          onLine(`${C.dim}[tool] ${displayName}${C.reset}`);
-        }
-      }
-    }
-
-    const spinFrames = ["|", "/", "-", "\\"];
-    let spinIdx = 0;
-    let lastActivity = Date.now();
-
-    let heartbeat;
-    if (directOutput) {
-      heartbeat = setInterval(() => {
-        if (providerStallPaused({ jobId, agentCallId })) {
-          lastActivity = Date.now();
-          return;
-        }
-        if (!gotFirstOutput) {
-          const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-          const frame = spinFrames[spinIdx++ % spinFrames.length];
-          process.stdout.write(`\r${color}|${C.reset} ${C.dim}${frame} waiting... ${elapsed}s${C.reset}   `);
-        }
-
-        if (Date.now() - lastActivity > STALL_TIMEOUT) {
-          clearInterval(heartbeat);
-          killedByStallDetector = true;
-          const phase = gotFirstOutput ? "mid-execution" : "waiting for first output";
-          process.stdout.write(`\r${color}|${C.reset} ${C.red}!! Stalled ${phase} (no output for ${(STALL_TIMEOUT / 1000)}s) -- killing process.${C.reset}\n`);
-          terminateSpawnedProcess(proc, { force: false });
-          scheduleForceKill();
-        }
-      }, 500);
-    } else if (onLine) {
-      heartbeat = setInterval(() => {
-        if (providerStallPaused({ jobId, agentCallId })) {
-          lastActivity = Date.now();
-          return;
-        }
-        if (Date.now() - lastActivity > STALL_TIMEOUT) {
-          clearInterval(heartbeat);
-          killedByStallDetector = true;
-          const phase = gotFirstOutput ? "mid-execution" : "waiting for first output";
-          onLine(`${C.red}!! Stalled ${phase} (no output for ${(STALL_TIMEOUT / 1000)}s) -- killing process${C.reset}`);
-          terminateSpawnedProcess(proc, { force: false });
-          scheduleForceKill();
-        }
-      }, 500);
-    } else {
-      // Silent mode (no display, no direct output) — still need stall detection
-      // or the process can hang forever with no way to recover.
-      heartbeat = setInterval(() => {
-        if (providerStallPaused({ jobId, agentCallId })) {
-          lastActivity = Date.now();
-          return;
-        }
-        if (Date.now() - lastActivity > STALL_TIMEOUT) {
-          clearInterval(heartbeat);
-          killedByStallDetector = true;
-          terminateSpawnedProcess(proc, { force: false });
-          scheduleForceKill();
-        }
-      }, 500);
-    }
-
-    /** Emit accumulated text lines to onLine/directOutput. */
-    function emitTextLines(text) {
-      textLineBuf += text;
-      const lines = textLineBuf.split("\n");
-      textLineBuf = lines.pop(); // keep incomplete last line
-      if (textLineBuf.length > LINE_BUF_MAX) {
-        textLineBuf = textLineBuf.slice(-LINE_BUF_MAX);
-      }
-      for (const ln of lines) {
-        if (directOutput) {
-          process.stdout.write(`${color}|${C.reset} ${ln}\n`);
-        } else if (onLine) {
-          onLine(ln);
-        }
-        lineCount++;
-      }
-    }
-
-    proc.stdout?.setEncoding?.("utf8");
-    proc.stderr?.setEncoding?.("utf8");
-
-    proc.stdout.on("data", (chunk) => {
-      try {
-        const text = chunk.toString();
-        lastActivity = Date.now();
-
-        // Parse stream-json JSONL — each complete line is a JSON message
-        jsonLineBuf += text;
-        const jsonLines = jsonLineBuf.split("\n");
-        jsonLineBuf = jsonLines.pop(); // keep incomplete last line
-        if (jsonLineBuf.length > LINE_BUF_MAX) {
-          if (onLine) onLine(`${C.yellow}stream-json line exceeded ${LINE_BUF_MAX} bytes without newline — dropping buffer${C.reset}`);
-          jsonLineBuf = "";
-        }
-
-        for (const raw of jsonLines) {
-          if (!raw.trim()) continue;
-          try {
-            const msg = JSON.parse(raw);
-            observeStreamTelemetry(msg);
-            latestSessionHandle = extractClaudeSessionHandleFromStreamMessage(msg) || latestSessionHandle;
-
-          // Text content deltas — stream to display.
-          // Accept any delta that carries text (text_delta, input_json_delta, etc.)
-          // to avoid silently dropping output if the CLI changes delta types.
-          const deltaText = msg.type === "content_block_delta" && msg.delta?.text;
-          if (deltaText) {
-            if (!gotFirstOutput) {
-              gotFirstOutput = true;
-              const waitTime = ((Date.now() - startTime) / 1000).toFixed(1);
-              if (directOutput) {
-                process.stdout.write(`\r${color}|${C.reset} ${C.dim}first output after ${waitTime}s${C.reset}                    \n`);
-              } else if (onLine) {
-                onLine(`${C.dim}first output after ${waitTime}s${C.reset}`);
-              }
-            }
-            fullOutput += deltaText;
-            emitTextLines(deltaText);
-          }
-
-          // Track tool use — capture tool name on block start, accumulate
-          // input JSON from deltas, finalize on block stop.
-          const incrementalProviderTurn = prepareIncrementalProviderTurn(msg);
-          const startedToolUse = msg.type === "content_block_start"
-            ? _normalizeClaudeToolUseBlock(msg.content_block)
-            : null;
-          if (startedToolUse) {
-            _pendingToolUse = {
-              ...startedToolUse,
-              ...(incrementalProviderTurn?.providerTurnId
-                ? { providerTurnId: incrementalProviderTurn.providerTurnId }
-                : {}),
-              ...(incrementalProviderTurn?.providerTurnIndex
-                ? { providerTurnIndex: incrementalProviderTurn.providerTurnIndex }
-                : {}),
-            };
-            _pendingToolInput = "";
-          }
-          if (_pendingToolUse && msg.type === "content_block_delta" && msg.delta?.type === "input_json_delta") {
-            _pendingToolInput += msg.delta.partial_json || "";
-          }
-          if (msg.type === "content_block_stop" && _pendingToolUse) {
-            try { _pendingToolUse.input = JSON.parse(_pendingToolInput); } catch { /* partial */ }
-            recordCompletedToolUse(_pendingToolUse);
-            _pendingToolUse = null;
-            _pendingToolInput = "";
-          }
-
-          // Newer Claude Code stream-json sessions may emit complete
-          // assistant messages with content[] tool_use blocks instead of
-          // Anthropic-style content_block_start/content_block_delta events.
-          recordStreamMessageToolUses(msg);
-          recordNativeSubagentNotification(msg);
-
-          if (msg.type === "message_stop" || msg.type === "result") {
-            _activeProviderTurn = null;
-          }
-
-          // Final result — contains usage stats and possibly full output
-          if (msg.type === "result") {
-            resultData = msg;
-            // Only use result.result if it's more complete than what we accumulated
-            // from content_block_delta events. This avoids wiping good output with
-            // a truncated or final-turn-only result string.
-            if (msg.result && typeof msg.result === "string" && msg.result.length > fullOutput.length) {
-              fullOutput = msg.result;
-            }
-          }
-          } catch {
-            // Not valid JSON — may be a raw line during fallback, emit as text
-            if (!gotFirstOutput) {
-              gotFirstOutput = true;
-            }
-            if (directOutput) {
-              process.stdout.write(`${color}|${C.reset} ${raw}\n`);
-            } else if (onLine && raw.trim()) {
-              onLine(raw);
-            }
-            fullOutput += raw + "\n";
-            lineCount++;
-          }
-        }
-      } catch (handlerErr) {
-        const msg = String(handlerErr?.message || handlerErr || "unknown stream handler error");
-        if (directOutput) process.stderr.write(`${color}|${C.reset} ${C.yellow}[stderr] ${msg}${C.reset}\n`);
-        else if (onLine) onLine(`${C.yellow}[stderr] ${msg}${C.reset}`);
-      }
-    });
-
-    proc.stderr.on("data", (chunk) => {
-      try {
-        const text = chunk.toString();
-        stderr = appendBoundedText(stderr, text);
-        lastActivity = Date.now();
-        if (directOutput && text.trim()) {
-          process.stderr.write(`${color}|${C.reset} ${C.dim}${C.yellow}[stderr] ${text.trim()}${C.reset}\n`);
-        } else if (onLine && text.trim()) {
-          onLine(`${C.yellow}[stderr] ${text.trim()}${C.reset}`);
-        }
-      } catch (handlerErr) {
-        const msg = String(handlerErr?.message || handlerErr || "unknown stderr handler error");
-        if (directOutput) process.stderr.write(`${color}|${C.reset} ${C.yellow}[stderr] ${msg}${C.reset}\n`);
-        else if (onLine) onLine(`${C.yellow}[stderr] ${msg}${C.reset}`);
-      }
-    });
-
-    proc.on("close", (code, signal) => {
-      const mcpCleanup = cleanupSetupFiles({
-        deterministicReadMcp,
-        exitCode: code,
-        phase: "provider_close",
-      });
-      if (heartbeat) clearInterval(heartbeat);
-      clearForceKillTimers();
-      const durationMs = Date.now() - startTime;
-      const elapsed = (durationMs / 1000).toFixed(1);
-
-      // Bug fix: flush remaining jsonLineBuf — if the final result message
-      // arrived without a trailing newline, it's stuck here unparsed.
-      if (jsonLineBuf.trim()) {
-        try {
-          const msg = JSON.parse(jsonLineBuf);
-          observeStreamTelemetry(msg);
-          latestSessionHandle = extractClaudeSessionHandleFromStreamMessage(msg) || latestSessionHandle;
-          if (msg.type === "content_block_delta" && msg.delta?.text) {
-            fullOutput += msg.delta.text;
-            emitTextLines(msg.delta.text);
-          }
-          const incrementalProviderTurn = prepareIncrementalProviderTurn(msg);
-          const startedToolUse = msg.type === "content_block_start"
-            ? _normalizeClaudeToolUseBlock(msg.content_block)
-            : null;
-          if (startedToolUse) {
-            _pendingToolUse = {
-              ...startedToolUse,
-              ...(incrementalProviderTurn?.providerTurnId
-                ? { providerTurnId: incrementalProviderTurn.providerTurnId }
-                : {}),
-              ...(incrementalProviderTurn?.providerTurnIndex
-                ? { providerTurnIndex: incrementalProviderTurn.providerTurnIndex }
-                : {}),
-            };
-            _pendingToolInput = "";
-          }
-          if (_pendingToolUse && msg.type === "content_block_delta" && msg.delta?.type === "input_json_delta") {
-            _pendingToolInput += msg.delta.partial_json || "";
-          }
-          if (msg.type === "content_block_stop" && _pendingToolUse) {
-            try { _pendingToolUse.input = JSON.parse(_pendingToolInput); } catch { /* partial */ }
-            recordCompletedToolUse(_pendingToolUse);
-            _pendingToolUse = null;
-            _pendingToolInput = "";
-          }
-          recordStreamMessageToolUses(msg);
-          recordNativeSubagentNotification(msg);
-          if (msg.type === "message_stop" || msg.type === "result") {
-            _activeProviderTurn = null;
-          }
-          if (msg.type === "result") {
-            resultData = msg;
-            if (msg.result && typeof msg.result === "string" && msg.result.length > fullOutput.length) {
-              fullOutput = msg.result;
-            }
-          }
-        } catch {
-          // Not valid JSON — treat as raw text
-          fullOutput += jsonLineBuf + "\n";
-        }
-        jsonLineBuf = "";
-      }
-
-      // Flush any remaining text in the line buffer
-      if (textLineBuf.trim()) {
-        if (directOutput) {
-          process.stdout.write(`${color}|${C.reset} ${textLineBuf}\n`);
-        } else if (onLine) {
-          onLine(textLineBuf);
-        }
-        lineCount++;
-      }
-
-      if (directOutput) {
-        // footer intentionally suppressed — elapsed time is logged via onLine/event system
-      } else if (onLine) {
-        // Show output chars when lineCount is 0 but we have output (common with
-        // stream-json where output arrives via the result message, not deltas).
-        const sizeHint = lineCount === 0 && fullOutput.length > 0
-          ? ` (${fullOutput.length} chars via result)`
-          : "";
-        onLine(`${C.dim}completed: ${elapsed}s | ${lineCount} lines${sizeHint}${C.reset}`);
-      }
-
-      // Extract token usage from stream-json result, fallback to stderr parsing
-      const captured = streamTelemetry.snapshot();
-      // Without the CLI result and without a finalized stream, fall back to
-      // the per-message usage the stream did carry: a lower bound, recorded
-      // as incomplete rather than as missing.
-      const partialUsage = resultData == null && !captured.finalized ? captured.partial : null;
-      const usage = resultData != null ? _extractStreamUsage(resultData) : (partialUsage?.usage || captured.usage);
-      // Some CLI result versions omit thinking details even though every
-      // completed message reported them. Supplement only matching totals.
-      if (resultData != null && captured.finalized && !usage.output_tokens_details
-        && ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
-          .every(field => usage[field] === captured.usage[field])) {
-        usage.output_tokens_details = captured.usage.output_tokens_details;
-      }
-      const stderrTokens = parseTokenUsage(stderr);
-      const normalizedUsage = normalizeProviderUsage("claude", usage, { stderrTokens });
-      const apiEquivalentCostUsd = _estimateClaudeApiEquivalentCostUsd({
-        modelName: modelToUse,
-        modelTier,
-        usage,
-        stderrTokens,
-        segments: captured.segments,
-      });
-      latestSessionHandle = extractClaudeSessionHandleFromStreamMessage(resultData) || latestSessionHandle;
-
-      const stats = {
-        role,
-        modelTier,
-        reasoningEffort,
-        modelName: modelToUse,
-        promptChars: finalPrompt.length,
-        outputChars: fullOutput.length,
-        inputTokens: normalizedUsage.inputTokens,
-        outputTokens: normalizedUsage.outputTokens,
-        cacheCreationInputTokens: normalizedUsage.cacheCreationInputTokens,
-        cacheReadInputTokens: normalizedUsage.cacheReadInputTokens,
-        cachedInputTokens: normalizedUsage.cachedInputTokens,
-        reasoningOutputTokens: normalizedUsage.reasoningOutputTokens,
-        usageFinalized: resultData != null || captured.finalized,
-        usageCapturePrecision: resultData != null
-          ? "aggregate_only"
-          : captured.finalized ? "exact" : partialUsage ? "incomplete" : "unknown",
-        ...(partialUsage ? { usagePartialAfterStop: true } : {}),
-        thinkingTelemetry: captured.thinking,
-        longContextInputTokens: captured.finalized ? Math.max(...captured.segments.map(segment => (
-          segment.usage.input_tokens + segment.usage.cache_read_input_tokens + segment.usage.cache_creation_input_tokens
-        ))) : null,
-        costUsd: apiEquivalentCostUsd ?? resultData?.cost_usd ?? null,
-        totalCostUsd: resultData?.total_cost_usd ?? null,
-        // Completed model rounds. The CLI's num_turns also counts native tool
-        // results (WebFetch/WebSearch: 48 for 12 rounds against a cap of 20),
-        // which reads as a bypassed cap; it is kept as cliNumTurns. Rounds the
-        // stream saw count even when usage is not finalized; the CLI count is
-        // used only when the stream showed no model round at all.
-        numTurns: captured.modelRounds || resultData?.num_turns || null,
-        cliNumTurns: resultData?.num_turns ?? null,
-        durationMs,
-        exitCode: code,
-        maxTurns: turns,
-        maxOutputTokens: outputTokenLimit,
-        outputTruncated: false,
-        outputLimitReason: null,
-        // The stream parser was active even when no tool_use blocks occurred.
-        // Preserve [] as a known zero; null is reserved for execution modes
-        // where tool telemetry is genuinely unavailable.
-        toolUses,
-        atlasMethod: atlasMethodForStats,
-        sessionHandle: latestSessionHandle || null,
-        priorSessionHandle: priorSessionHandle || null,
-        sessionExpired: false,
-        executionMode: CLAUDE_EXECUTION_MODE_PRINT,
-        mcpAttachProof: mcpCleanup.attachProofResult?.proof || null,
-        mcpAttachMissingProof: mcpCleanup.attachProofResult?.missingProof === true,
-      };
-      if (captureNativeSubagents) {
-        stats.nativeSubagentTelemetry = buildClaudeNativeSubagentTelemetry({
-          toolUses,
-          notifications: nativeSubagentNotifications,
-          aggregateUsage: {
-            inputTokens: normalizedUsage.inputTokens,
-            outputTokens: normalizedUsage.outputTokens,
-            cachedInputTokens: normalizedUsage.cachedInputTokens,
-            cacheCreationInputTokens: normalizedUsage.cacheCreationInputTokens,
-            cacheReadInputTokens: normalizedUsage.cacheReadInputTokens,
-            reasoningOutputTokens: normalizedUsage.reasoningOutputTokens,
-          },
-          totalCostUsd: stats.totalCostUsd ?? stats.costUsd,
-        });
-      }
-      if (resultData == null && captured.finalized) {
-        for (const [index, segment] of captured.segments.entries()) {
-          const normalized = normalizeProviderUsage("claude", segment.usage);
-          try {
-            onUsageSegment?.({
-              requestOrdinal: index + 1,
-              provider: "claude",
-              modelName: segment.model || modelToUse,
-              ...normalized,
-              ...claudeCacheCreationSplit([segment.usage]),
-              requestContextInputTokens: normalized.inputTokens,
-              usageSource: "stream",
-              precision: "exact",
-            });
-          } catch { /* accounting persistence cannot break provider execution */ }
-        }
-      } else if (resultData != null) {
-        try {
-          onUsageSegment?.({
-            requestOrdinal: 1,
-            provider: "claude",
-            modelName: modelToUse,
-            inputTokens: normalizedUsage.inputTokens ?? 0,
-            cachedInputTokens: normalizedUsage.cachedInputTokens ?? 0,
-            cacheCreationInputTokens: normalizedUsage.cacheCreationInputTokens ?? 0,
-            ...claudeCacheCreationSplit([usage]),
-            outputTokens: normalizedUsage.outputTokens ?? 0,
-            requestContextInputTokens: normalizedUsage.inputTokens ?? 0,
-            durationMs,
-            usageSource: "aggregate_only",
-            precision: "aggregate_only",
-          });
-        } catch { /* accounting persistence cannot break provider execution */ }
-      }
-
-      // Persist MCP-relevant CLI stderr (only when present) so a gateway
-      // attach-under-load failure leaves a trace even on a clean exit, where
-      // the stderr would otherwise be discarded. Best-effort; never throws.
-      try {
-        logProviderCliStderrTelemetry({
-          providerName: "claude",
-          role,
-          workItemId,
-          jobId,
-          attemptId,
-          exitCode: code,
-          stderr,
-          attachProof: stats.mcpAttachProof,
-        });
-      } catch { /* telemetry only */ }
-
-      if (code !== 0) {
-        const reason = killedByStallDetector ? "stall_kill" : "error";
-        const exhaustedTurns = !killedByStallDetector
-          && !fullOutput.trim()
-          && resultData?.num_turns != null
-          && turns != null
-          && Number(resultData.num_turns) >= Number(turns);
-        const prefix = killedByStallDetector
-          ? `claude killed by stall detector (no output for ${baseTimeout * (STALL_ROLE_MULTIPLIER[role] || 1)}s)`
-          : exhaustedTurns
-            ? `claude exhausted turn budget (${resultData?.num_turns}/${turns})`
-            : Number.isFinite(code)
-              ? `claude exited ${code}`
-              : signal
-                ? `claude exited via signal ${signal}`
-                : "claude exited with unknown status";
-        // Build a tool-use summary so retries know what was already explored
-        let toolSummary = "";
-        if (toolUses.length > 0) {
-          const lines = toolUses.map((toolUse) => summarizeObservedToolUse(toolUse.tool, toolUse.input || {}).summary);
-          toolSummary = `\nTool calls (${toolUses.length}): ${lines.join("; ")}`;
-        }
-        const err = new Error(`${prefix}${stderr ? '\n' + stderr : ''}${fullOutput ? '\nPartial output: ' + fullOutput.slice(0, 500) : ''}${toolSummary}`);
-        err.code = code;
-        err.stats = stats;
-        err.stallKill = killedByStallDetector;
-        err.stderr = stderr || null;
-        err.stdout = fullOutput || null;
-        err.output = fullOutput || null;
-        err.partialOutput = fullOutput || null;
-        err.toolUses = toolUses.length > 0 ? toolUses : null;
-        err.sessionExpired = !!priorSessionHandle && isClaudeResumeHandleExpiredError(`${stderr}\n${fullOutput}\n${prefix}`);
-        if (err.sessionExpired) err.stats.sessionExpired = true;
-        reject(err);
-      } else {
-        if (stats.mcpAttachMissingProof) {
-          const err = new Error("Claude deterministic MCP attach proof missing: provider exited without owner-observed initialize/tools-list.");
-          err.code = "MCP_ATTACH_PROOF_MISSING";
-          err.stats = stats;
-          err.stderr = stderr || null;
-          err.stdout = fullOutput || null;
-          err.output = fullOutput || null;
-          err.partialOutput = fullOutput || null;
-          err.toolUses = toolUses.length > 0 ? toolUses : null;
-          err.mcpAttachMissingProof = true;
-          reject(err);
-          return;
-        }
-        // Detect empty output — likely the model exhausted its turn budget on
-        // tool calls and never produced a final text response.
-        if (!fullOutput.trim() && turns) {
-          const usedTurns = resultData?.num_turns || "?";
-          if (onLine) {
-            onLine(`${C.yellow}⚠ empty output after ${usedTurns}/${turns} turns (${elapsed}s) — model may have exhausted turn budget on tool calls${C.reset}`);
-          }
-        }
-        resolve({ output: fullOutput.trim(), stats });
-      }
-    });
-
-    proc.on("error", (err) => {
-      cleanupSetupFiles();
-      if (heartbeat) clearInterval(heartbeat);
-      clearForceKillTimers();
-      const wrapped = new Error(
-        `Failed to spawn claude at: ${resolvedClaude.command} ${resolvedClaude.args.join(" ")}\n` +
-        `Is Claude Code installed? npm install -g @anthropic-ai/claude-code\n${err.message}`
-      );
-      wrapped.stats = {
-        role,
-        modelTier,
-        modelName: modelToUse,
-        promptChars: finalPrompt.length,
-        outputChars: 0,
-        durationMs: Date.now() - startTime,
-        exitCode: null,
-        maxTurns: turns,
-        maxOutputTokens: outputTokenLimit,
-        outputTruncated: false,
-        outputLimitReason: null,
-        executionMode: CLAUDE_EXECUTION_MODE_PRINT,
-      };
-      reject(wrapped);
-    });
-    } catch (err) {
-      cleanupSetupFiles();
-      reject(err);
-    }
-    })();
-  });
+      return nativeResult;
+  } finally {
+    cleanupDeterministicMcpSession();
+  }
 }
 
 // ─── Model Escalation ───────────────────────────────────────────────────────

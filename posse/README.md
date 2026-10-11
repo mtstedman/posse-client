@@ -33,8 +33,8 @@ Key behavior:
 - File-scope locking so non-overlapping mutating jobs can run in parallel.
 - Provider routing across Claude Code, the Anthropic API, OpenAI, Codex, Grok,
   and Copilot.
-- ATLAS semantic search with optional local ONNX embeddings:
-  [setup](docs/atlas/embeddings-local-setup.md).
+- ATLAS semantic search with native Jina embeddings; install the model with
+  `posse atlas-v2 models pull`.
 - Artifact workflows for reports, content, images, and intake processing.
 - Durable typed human-input and review gates with one authoritative,
   idempotent resolution per original job and recovery kind.
@@ -93,27 +93,14 @@ tools require both the issued role grant and the operator kill switch. Internal
 ATLAS orchestration actions, including `edit.plan` and `workflow`, are excluded
 from provider and MCP surfaces even if a caller asserts them.
 
-## Codex MCP batching
+## Codex provider dispatch
 
-Restricted Codex researcher, planner, assessor, and developer sessions default
-to native MCP batching. Several ready calls may share a model turn. Researcher
-reads may run concurrently; planner, assessor, and developer operations execute
-in order, including writes. Scope approvals, sub-agent control, dependent
-decisions, and terminal handoff remain separate. An explicit
-`nativeBatching: false` provider option retains the previous transport.
-
-Native batching creates a temporary transport catalog from the selected Codex
-CLI's `debug models --bundled` output, preserving the selected model's other
-metadata. The CLI must contain that exact model. An explicitly supplied
-`nativeBatchingCatalog` provider option is validated. The legacy
-`POSSE_CODEX_RESEARCH_MODEL_CATALOG` configures the researcher catalog only;
-it is not needed to enable batching. Temporary catalogs are cleaned up when the
-provider invocation ends. The user's Codex configuration is not rewritten.
-
-These restricted batching sessions suppress Codex host utilities, including
-plain sleep and native collaboration. Posse-issued sub-agent tools retain their
-concurrent dispatch, `wait_all`, and status waits. Explicit native-tool sessions
-retain their host coordination and sleep capabilities.
+Codex turns use the Rust `posse-remote` adapter. Posse assembles the issued
+execution contract, model choice, and prompt before dispatch; the native
+adapter owns CLI launch, stream handling, session resume, and usage accounting.
+The deterministic MCP gateway remains the authority for scoped tools. The
+installed `posse-remote` must advertise a compatible Codex adapter before a
+Codex turn can run.
 
 ### Experimental planner dispatch
 

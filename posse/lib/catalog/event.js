@@ -283,6 +283,9 @@ export const EVENT_TYPES = Object.freeze({
   JOB_PARTIAL_DELIVERABLE_ACCEPTED: "job.partial_deliverable_accepted",
   JOB_PROMOTE_CONFLICT_PREVIEW: "job.promote_conflict_preview",
   JOB_PROMOTE_CROSS_WI_SOURCE: "job.promote_cross_wi_source",
+  // A promote resolved duplicate source basenames; the payload names the
+  // pick, its alternatives and the PROMOTE_SOURCE_PICK_RULES rule used.
+  JOB_PROMOTE_SOURCE_SELECTED: "job.promote_source_selected",
   JOB_PROVIDER_CIRCUIT_OPEN: "job.provider_circuit_open",
   JOB_PROVIDER_REROUTED: "job.provider_rerouted",
   JOB_RECOVERY_CAP_REACHED: "job.recovery_cap_reached",
@@ -514,3 +517,13 @@ export const QUEUE_STATE_EVENT_TYPES = Object.freeze([
   EVENT_TYPES.JOB_WRITE_LOCK_BLOCKED,
   EVENT_TYPES.SHARED_TRUNK_CLAIM_WARNING,
 ]);
+
+// How a promote chose among same-named source files (the `rule` field of
+// JOB_PROMOTE_SOURCE_SELECTED): every copy had identical bytes, exactly one
+// differing copy was declared by the producing artificer, or exactly one sat
+// at the output root.
+export const PROMOTE_SOURCE_PICK_RULES = Object.freeze({
+  IDENTICAL_CONTENT: "identical_content",
+  DECLARED: "declared",
+  TOP_LEVEL: "top_level",
+});

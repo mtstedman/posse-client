@@ -31,6 +31,7 @@ import {
   runImmediateTransaction,
 } from "./common.js";
 import { withMergeLockSync } from "./locks.js";
+import { reviseOpenHumanGateGeneration } from "./human-gates.js";
 
 const OPEN_GATE_STATUSES = ["queued", "waiting_on_human"];
 const OPEN_GATE_STATUSES_SQL = `(${OPEN_GATE_STATUSES.map((status) => `'${status}'`).join(", ")})`;
@@ -38,6 +39,10 @@ const OPEN_GATE_STATUSES_SQL = `(${OPEN_GATE_STATUSES.map((status) => `'${status
 export function pushOfferWarningLines(state = {}) {
   const branch = String(state.pushBranch || state.targetBranch || "target");
   return (Array.isArray(state.pushWarnings) ? state.pushWarnings : []).slice(0, 10).map((warning) => {
+    if (warning.kind === "target_debt" && warning.waived_by_gate) {
+      return `${branch} may be red: WI#${warning.work_item_id} merged a failing ${warning.command || "check"}`
+        + ` at ${String(warning.commit || "").slice(0, 7)} under waiver gate #${warning.waived_by_gate}.`;
+    }
     if (warning.kind === "target_debt") {
       return `${branch} is red: WI#${warning.work_item_id} introduced a failing ${warning.command || "check"}`
         + ` at ${String(warning.commit || "").slice(0, 7)}; blocked WI(s) ${(warning.blocked_work_item_ids || []).map((id) => `#${id}`).join(", ") || "unknown"}.`;
@@ -286,6 +291,9 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
         if (previous.prompt !== prompt) {
           db.prepare("UPDATE jobs SET payload_json = ?, updated_at = ? WHERE id = ?")
             .run(JSON.stringify({ ...previous, prompt, questions: [prompt], push_warnings: state.pushWarnings || [] }), now(), latest.id);
+          // The operator must answer the warnings now shown, not the prompt
+          // they read before: an answer to the old generation is refused.
+          reviseOpenHumanGateGeneration(latest.id);
         }
         return {
           ok: true,

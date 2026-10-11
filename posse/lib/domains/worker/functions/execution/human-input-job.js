@@ -63,6 +63,10 @@ import {
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE, REPLAN_TRIGGERS } from "../../../../catalog/job.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import {
+  ASSESSMENT_FAILURE_CLASSES,
+  BLOCKED_RECOVERY_RETRY_SCOPES,
+  BLOCKED_RECOVERY_SKIP_INTENT_WORDS,
+  BLOCKED_RECOVERY_WAIVER_WORDS,
   POST_MERGE_DB_TASK_REVIEW_TYPE,
   exactHumanInputChoiceFromAnswer,
   humanInputChoiceFromAnswer,
@@ -147,6 +151,54 @@ function blockedRecoveryReplanContext(payload) {
   return bounded.retained
     ? bounded.text
     : `${bounded.text}\n[truncated from ${bounded.originalChars} chars]`;
+}
+
+function hasUnnegatedMatch(text, pattern) {
+  for (const match of text.matchAll(new RegExp(pattern.source, "g"))) {
+    if (!/\b(?:do not|don't|dont|not|never|no)\s+(?:want\s+to\s+)?$/.test(text.slice(0, match.index))) return true;
+  }
+  return false;
+}
+
+/**
+ * One reading of a blocked_recovery answer, shared by answer validation, the
+ * gate's recorded action and the transition. Only the waiver's own words
+ * waive (the exact choice, an `explicit_waiver:` prefix, or waive/waiver).
+ * A skip/cancel/ignore/bypass/unblock intent keeps its legacy cancel meaning
+ * where the stored list offers "skip" and is invalid everywhere else, so the
+ * gate stays open and names the offered actions.
+ * @returns {{ decision: "retry"|"replan"|"skip"|"waive"|"fail"|"pass"|"invalid"|"unknown", action: string|null }}
+ */
+export function blockedRecoveryDecision(answer, choices = []) {
+  const text = String(answer || "").trim().toLowerCase();
+  const offers = (id) => choices.includes(id);
+  const decide = (decision) => {
+    if (decision === "skip") return offers("skip") ? { decision, action: "skip" } : { decision: "invalid", action: null };
+    if (decision === "waive") {
+      return offers("explicit_waiver") ? { decision, action: "explicit_waiver" } : { decision: "invalid", action: null };
+    }
+    if (decision === "retry") {
+      return { decision, action: offers("retry") ? "retry" : (offers("retry_with_changes") ? "retry_with_changes" : null) };
+    }
+    if (["replan", "fail", "pass"].includes(decision)) return { decision, action: offers(decision) ? decision : null };
+    return { decision: "unknown", action: null };
+  };
+  if (!text || text === "(skipped)") return decide("unknown");
+  const matched = humanInputChoiceFromAnswer(text, choices);
+  const namedWaiver = text === "explicit_waiver"
+    || /^explicit_waiver\s*(?::|-|—)/.test(text)
+    || hasUnnegatedMatch(text, BLOCKED_RECOVERY_WAIVER_WORDS);
+  if (matched === "explicit_waiver") {
+    // The waiver alias also matches skip/cancel-style words; they never waive.
+    if (namedWaiver) return decide("waive");
+    return decide(hasUnnegatedMatch(text, BLOCKED_RECOVERY_SKIP_INTENT_WORDS) ? "skip" : "unknown");
+  }
+  if (matched === "retry_with_changes") return decide("retry");
+  // Waiver words are never free-form retry guidance, even negated.
+  if (!matched && (namedWaiver || BLOCKED_RECOVERY_WAIVER_WORDS.test(text))) {
+    return decide(namedWaiver ? "waive" : "unknown");
+  }
+  return decide(classifyBlockedRecoveryAnswer(text));
 }
 
 function isOneshotScopeSelectionPayload(payload) {
@@ -485,17 +537,21 @@ export async function runHumanInputJob(worker, job, {
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
       // Blocked recovery deliberately accepts free-form operational guidance
-      // as an implicit retry; its dedicated classifier below preserves that
-      // long-standing contract while still recognizing explicit actions.
+      // as an implicit retry; its dedicated reading below preserves that
+      // long-standing contract while still recognizing explicit actions. An
+      // answer it cannot apply (skip/cancel where no skip is offered, pass
+      // where pass is not offered, an unreadable action) keeps the gate open.
+      const blockedDecision = payload.review_type === "blocked_recovery"
+        ? blockedRecoveryDecision(lastAnswer, actionChoices)
+        : null;
       const invalidClosedChoice = actionChoices.length > 0
         && payload.review_type !== "blocked_recovery"
         && !humanInputChoiceFromAnswer(lastAnswer, actionChoices);
-      const disallowedBlockedPass = payload.review_type === "blocked_recovery"
-        && classifyBlockedRecoveryAnswer(lastAnswer) === "pass"
-        && !actionChoices.includes("pass");
+      const invalidBlockedAnswer = blockedDecision != null
+        && (["invalid", "unknown"].includes(blockedDecision.decision) || !blockedDecision.action);
       const invalidUncataloguedReview = uncataloguedReview
         && classifyReviewAnswer(lastAnswer) === "unknown";
-      if (invalidClosedChoice || invalidUncataloguedReview || disallowedBlockedPass) {
+      if (invalidClosedChoice || invalidUncataloguedReview || invalidBlockedAnswer) {
         const choiceMessage = actionChoices.length > 0
           ? `Human input did not select one of: ${actionChoices.join(", ")}`
           : `Human input did not provide a recognized action for review type ${payload.review_type}`;
@@ -508,10 +564,9 @@ export async function runHumanInputJob(worker, job, {
     const resolutionMetadata = [...resolutionAnswers].reverse().find((answer) => (
       answer && typeof answer === "object" && answer.metadata && typeof answer.metadata === "object"
     ))?.metadata || null;
-    let selectedAction = humanInputChoiceFromAnswer(resolutionAnswer, actionChoices);
-    if (!selectedAction && payload.review_type === "blocked_recovery") {
-      selectedAction = classifyBlockedRecoveryAnswer(resolutionAnswer) || "retry";
-    }
+    let selectedAction = payload.review_type === "blocked_recovery"
+      ? blockedRecoveryDecision(resolutionAnswer, actionChoices).action
+      : humanInputChoiceFromAnswer(resolutionAnswer, actionChoices);
     if (!selectedAction && payload.review_type) {
       const reviewAction = classifyReviewAnswer(resolutionAnswer);
       if (reviewAction !== "unknown") selectedAction = reviewAction;
@@ -1054,12 +1109,7 @@ export async function runHumanInputJob(worker, job, {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
-      const exactRecoveryAction = humanInputChoiceFromAnswer(lastAnswer, actionChoices);
-      const decision = exactRecoveryAction === "explicit_waiver"
-        ? "waive"
-        : (exactRecoveryAction === "retry_with_changes"
-          ? "retry"
-          : classifyBlockedRecoveryAnswer(lastAnswer));
+      const { decision } = blockedRecoveryDecision(lastAnswer, actionChoices);
       handledReviewDecision = true;
       const restoreGateDependentsToOriginal = () => {
         if (!origJob) return 0;
@@ -1077,10 +1127,16 @@ export async function runHumanInputJob(worker, job, {
         const restoredDependents = restoreGateDependentsToOriginal();
         const origPayload = worker.parsePayload(origJob);
         const retryingVerification = origPayload._verification_blocked?.type === "verification_blocked";
-        const retryingAssessment = retryingVerification && origPayload._assess_only === true;
+        // Missing bound evidence cannot be reassessed: only the implementation
+        // can regenerate it, so that retry resumes the developer.
+        const sourceMissing = payload.verification_failure_class === ASSESSMENT_FAILURE_CLASSES.SOURCE_MISSING;
+        const retryingAssessment = retryingVerification && origPayload._assess_only === true && !sourceMissing;
         if (retryingVerification) {
           delete origPayload._verification_blocked;
-          delete origPayload._verification_infrastructure_requeues;
+        }
+        if (sourceMissing) {
+          delete origPayload._assess_only;
+          delete origPayload._assessment_source_recovery_count;
         }
         // A bare choice ("retry") is a decision, not guidance: say so instead
         // of pasting the word into the task as if it were instructions.
@@ -1092,23 +1148,29 @@ export async function runHumanInputJob(worker, job, {
           bareRetry ? "The operator chose retry without new instructions." : answerText,
         ].join("\n");
         // A restored runner needs a fresh bounded verification attempt, not
-        // a rewrite of an implementation task that never started.
-        if (!retryingVerification || !bareRetry) {
+        // a rewrite of an implementation task that never started. Operator
+        // text on an assessment retry is recorded below, never pasted into
+        // the task: code guidance goes through replan.
+        if (!retryingVerification || (!bareRetry && !retryingAssessment)) {
           if (typeof origPayload.task_spec === "string" && origPayload.task_spec.trim()) {
             origPayload.task_spec = `${origPayload.task_spec.trim()}\n\nBLOCKED RECOVERY GUIDANCE:\n${recoveryNote}`;
           } else {
             origPayload.task_spec = recoveryNote;
           }
         }
-        if (retryingAssessment && !bareRetry) delete origPayload._assess_only;
         origPayload._blocked_recovery = {
           ...(origPayload._blocked_recovery || {}),
           recovery_job_id: job.id,
           action: "retry",
           human_answer: String(lastAnswer || ""),
           bare_retry: bareRetry,
+          // Which work the retry replays; a failed reassessment of an
+          // unchanged candidate still earns its ordinary fix.
+          retry_scope: retryingAssessment
+            ? BLOCKED_RECOVERY_RETRY_SCOPES.ASSESSMENT
+            : BLOCKED_RECOVERY_RETRY_SCOPES.IMPLEMENTATION,
         };
-        if (retryingAssessment && bareRetry) {
+        if (retryingAssessment) {
           // Restore the runner/provider and reassess the preserved candidate.
           // An operator-authorized retry needs one fresh assessment slot, but
           // must not replay the implementation or consume its attempt budget.
@@ -1195,7 +1257,7 @@ export async function runHumanInputJob(worker, job, {
         });
       } else {
         finalHumanStatus = "failed";
-        worker.emit(job.id, `${C.yellow}[human] Blocked recovery answer was not actionable; expected retry, skip, replan, explicit_waiver, or fail${C.reset}`);
+        worker.emit(job.id, `${C.yellow}[human] Blocked recovery answer was not actionable; expected one of: ${actionChoices.join(", ")}${C.reset}`);
       }
     }
 

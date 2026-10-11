@@ -4,6 +4,8 @@
 // task-mode / work-item-mode configuration that decides which artifact
 // directories a job needs and which task modes a WI permits.
 
+import { ARTIFACT_PROTOCOLS } from "./artifact-protocols.js";
+
 const sqlList = (values) => values.map((v) => `'${v}'`).join(", ");
 
 // Image generations one artificer Job may request. The deterministic MCP
@@ -130,6 +132,11 @@ export const TASK_MODES = Object.freeze({
   // channel.
   db: Object.freeze({ needsInputs: false, needsWorkspace: false, needsArtifacts: false }),
 });
+export const TASK_MODE_VALUES = Object.freeze(Object.keys(TASK_MODES));
+
+// Modes with output protocols are routed to artificer when a planner emits a
+// task mode as job_type. The same modes are accepted by artifact tools.
+export const ARTIFACT_TASK_MODE_VALUES = Object.freeze(Object.keys(ARTIFACT_PROTOCOLS));
 
 // Work-item-level intent that constrains the planner's task-mode choices.
 export const WI_MODES = Object.freeze({
@@ -144,3 +151,6 @@ export const WI_MODES = Object.freeze({
 export const UNSCOPED_GIT_ADD_TASK_MODES = new Set([
   "report", "content", "image", "intake_processing",
 ]);
+
+// File formats that make image inspection relevant to a scoped code task.
+export const IMAGE_INSPECTION_EXTENSIONS = Object.freeze(["png", "jpg", "jpeg", "webp", "gif", "svg", "ico", "bmp", "tif", "tiff"]);

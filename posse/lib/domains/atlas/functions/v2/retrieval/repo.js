@@ -15,7 +15,7 @@ import { refresh as systemAtlasRefresh } from "../../../../system/functions/atla
 import { supportedLanguageTags } from "../parser/languages/index.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { __atlasNativeManagerForTests } from "../native/invoke.js";
-import { openEmbeddingResources, semanticDispatchEnabled } from "../embeddings/resources.js";
+import { openEmbeddingResources } from "../embeddings/resources.js";
 import { openViewWithMeta, removeSqliteFile, viewFreshness } from "../view-health.js";
 import { buildAtlasCapabilities } from "../capabilities.js";
 import { readGraphOverview } from "../graph-derived.js";
@@ -1280,7 +1280,7 @@ function combinedHitRate(cards, slices) {
  * @param {{ config?: Record<string, unknown>, embeddingStatus?: { enabled?: boolean, provider?: string | null, backend?: string | null, indexedCount?: number, reason?: string | null } | null, view?: View, edges?: Awaited<ReturnType<typeof computeEdgeStats>>, repoRoot?: string }} args
  */
 function buildSemanticStatus({ config = {}, embeddingStatus = null, view, edges, repoRoot }) {
-  const dispatchEnabled = semanticDispatchEnabled(config);
+  const dispatchEnabled = true;
   const embeddingsEnabled = embeddingStatus?.enabled === true;
   const enrichment = readSemanticEnrichmentStatus({ view, edges });
   return {

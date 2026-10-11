@@ -1,7 +1,6 @@
 import path from "path";
 
 import { getSetting, setSetting } from "../../queue/functions/index.js";
-import { discoverClaudeCli } from "./claude/cli-discovery.js";
 import { discoverCodexCli } from "./codex/index.js";
 
 function readSetting(key) {
@@ -47,9 +46,10 @@ function initOne(discovery, { force = false, dryRun = false } = {}) {
   };
 }
 
+// posse-remote finds the Claude CLI itself, so Codex is the only CLI path
+// Posse records.
 export function initializeProviderCliSettings({ force = false, dryRun = false } = {}) {
   const entries = [
-    initOne(discoverClaudeCli(), { force, dryRun }),
     initOne(discoverCodexCli(), { force, dryRun }),
   ];
   return {

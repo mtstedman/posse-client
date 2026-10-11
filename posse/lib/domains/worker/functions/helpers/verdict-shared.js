@@ -4,7 +4,11 @@
 
 import path from "path";
 import { INFERRED_SCOPE_BARE_EXTENSIONS } from "../../../../catalog/files.js";
-import { RECEIPT_CONFIDENCE_POLICY } from "../../../../catalog/verification.js";
+import {
+  RECEIPT_CONFIDENCE_POLICY,
+  REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID,
+  UNESTABLISHED_COVERAGE_STATUSES,
+} from "../../../../catalog/verification.js";
 import { inferGeneratedArtifactDeletionTargets } from "../../../../shared/scope/classes/MutationPolicy.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
 import {
@@ -34,7 +38,11 @@ import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logg
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { latestTestReceiptDelta } from "./test-execution-receipt.js";
-import { renderTestFailureSummary } from "./test-failure-evidence.js";
+import {
+  attributedDebtCoverageEstablished,
+  debtCoverageEstablished,
+  renderTestFailureSummary,
+} from "./test-failure-evidence.js";
 import { verificationOutcome } from "./verification-outcome.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { getMaxFixChainDepth, getWiFailureThreshold } from "../../../settings/functions/tunables.js";
@@ -86,6 +94,11 @@ function replanFailedBlockedRecoveryRetry(job, verdict, payload) {
   if (verdict?.verdict !== "fail") return verdict;
   const recovery = payload?._blocked_recovery;
   if (recovery?.action !== "retry") return verdict;
+  // An assessment-only retry (BLOCKED_RECOVERY_RETRY_SCOPES.ASSESSMENT)
+  // reassessed the same candidate after an infrastructure failure; its first
+  // real verdict earns the ordinary fix, bounded by the fix chain depth and
+  // the work-item failure threshold. Legacy rows lack the scope.
+  if (recovery?.retry_scope === "assessment") return verdict;
 
   const recoveryJobId = Number(recovery.recovery_job_id);
   if (!Number.isSafeInteger(recoveryJobId) || recoveryJobId <= 0) return verdict;
@@ -132,6 +145,17 @@ export function normalizeAssessorConfidence(value, { fallback = "medium", allowN
   return fallback;
 }
 
+// A rejection is the repository's when the receipt's plan came from the
+// repository, or when its reason is the registry's own (receipts stored
+// before a registry failure stopped rejecting the planner's command).
+function rejectedByRepositoryPlan(post) {
+  if (["repository_config", "package_manifest"].includes(post?.source)) return true;
+  const registry = post?.verification_plan;
+  const reason = String(post?.validation_error || post?.reason || "");
+  if (/^verification_(?:plan|check)_/u.test(reason)) return true;
+  return !!reason && !!registry?.status && registry.status !== "ready" && reason === String(registry.reason || "");
+}
+
 export function capVerdictForVerificationInfrastructure(verdict, testRun = null, payload = {}) {
   const post = testRun?.post_change || testRun?.postChange;
   const changed = post?.changed_tests;
@@ -149,19 +173,61 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
       ],
     };
   }
+  // A plan that never ran is a planning or repository-configuration defect at
+  // every risk level, never a pass. The planner can replan its own command;
+  // only the repository can fix its committed registry.
+  if (verdict?.verdict === "pass" && ["rejected", "invalid_test_plan"].includes(post?.status)) {
+    const detail = post.validation_error || post.reason || post.status;
+    if (rejectedByRepositoryPlan(post)) {
+      return {
+        ...verdict,
+        verdict: "needs_review",
+        verification_status: "repository_verification_plan_invalid",
+        _verification_failure_class: "verification_plan_invalid",
+        _verification_blocked: true,
+        _disable_internal_retry: true,
+        reasons: [
+          `The committed repository verification plan cannot run (${detail}); fix posse.verification.json, then recover verification for the preserved candidate.`,
+          ...(Array.isArray(verdict.reasons) ? verdict.reasons : []),
+        ],
+      };
+    }
+    return {
+      ...verdict,
+      verdict: "needs_replan",
+      verification_status: "verification_plan_invalid",
+      _verification_failure_class: "verification_plan_invalid",
+      _disable_internal_retry: true,
+      reasons: [
+        `The declared verification recipe is invalid (${detail}); replan verification instead of editing product code.`,
+        ...(Array.isArray(verdict.reasons) ? verdict.reasons : []),
+      ],
+    };
+  }
   const declaredCommand = String(payload?.test_command || "").trim();
+  // A test check that failed before the change, the same way and over at
+  // least as many cases, is debt with established coverage: it is kept as
+  // debt, not as missing verification. Its before-change runs are the frozen
+  // baseline's and the rerun with the change's scope removed.
+  const baselineChecks = [
+    ...(Array.isArray(testRun?.baseline?.check_runs) ? testRun.baseline.check_runs : []),
+    ...(Array.isArray(post?.baseline_attribution?.baseline_check_runs) ? post.baseline_attribution.baseline_check_runs : []),
+  ];
+  const establishedDebt = (check) => baselineChecks.some((baselineCheck) => (baselineCheck.check_id || null) === (check.check_id || null)
+    && debtCoverageEstablished(check, baselineCheck));
   const incompleteChecks = Array.isArray(post?.check_runs)
     ? post.check_runs.filter((check) => check.intent === "test"
-      && (check.status !== "passed" || ["unknown", "none_executed", "aborted_or_unknown"].includes(check.coverage_status)))
+      && (check.status !== "passed" || UNESTABLISHED_COVERAGE_STATUSES.includes(check.coverage_status))
+      && !establishedDebt(check))
     : [];
-  const unverifiedCoverage = post?.status === "passed"
-    && ["unknown", "none_executed", "aborted_or_unknown"].includes(post.coverage_status);
-  const unavailablePost = post && ["infrastructure_error", "unavailable", "invalid", "skipped", "timed_out"].includes(post.status);
-  if (verdict?.verdict === "pass" && (unverifiedCoverage || incompleteChecks.length > 0
-    || unavailablePost || (declaredCommand && !post))) {
-    const detail = incompleteChecks.length > 0
-      ? incompleteChecks.map((check) => `${check.check_id || check.command}: ${check.reason || check.coverage_status || check.status}`).join("; ")
-      : post?.reason || post?.coverage_status || "no post-change receipt";
+  // A single declared check that failed the same way before the change can
+  // stand only when its coverage is established; a runner that stopped at
+  // the pre-existing failure, or reported no cases, can hide later failures.
+  const singleCheckDebt = post?.status === "failed" && !Array.isArray(post?.check_runs)
+    && testRun?.delta !== "out_of_scope_failure"
+    && (testRun?.debt_only === true || testRun?.delta === "persistent_failure" || post?.baseline_attribution?.debt_only === true);
+  if (verdict?.verdict === "pass" && singleCheckDebt
+    && !debtCoverageEstablished(post, testRun?.baseline) && !attributedDebtCoverageEstablished(post)) {
     return {
       ...verdict,
       verdict: "needs_review",
@@ -170,7 +236,29 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
       _verification_blocked: true,
       _disable_internal_retry: true,
       reasons: [
-        `Required test coverage is unverified (${detail}). Preserve the candidate and recover the missing verification before accepting it.`,
+        `The declared check failed as it did before the change, but its run did not establish that it still executed every case it executed before (${post.test_counts ? `${post.test_counts.total} case(s) reported` : "no case count reported"}). Preserve the candidate and recover verification before accepting it.`,
+        ...(Array.isArray(verdict.reasons) ? verdict.reasons : []),
+      ],
+    };
+  }
+  const unverifiedCoverage = post?.status === "passed"
+    && UNESTABLISHED_COVERAGE_STATUSES.includes(post.coverage_status);
+  const unavailablePost = post && ["infrastructure_error", "unavailable", "invalid", "skipped", "timed_out"].includes(post.status);
+  if (verdict?.verdict === "pass" && (unverifiedCoverage || incompleteChecks.length > 0
+    || unavailablePost || (declaredCommand && !post))) {
+    const detail = incompleteChecks.length > 0
+      ? incompleteChecks.map((check) => `${check.check_id || check.command}: ${check.reason || check.coverage_status || check.status}`).join("; ")
+      : post?.reason || post?.coverage_status || "no post-change receipt";
+    const registryUnavailable = incompleteChecks.some((check) => check.check_id === REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID);
+    return {
+      ...verdict,
+      verdict: "needs_review",
+      verification_status: "declared_tests_unverified",
+      _verification_failure_class: "verification_coverage_incomplete",
+      _verification_blocked: true,
+      _disable_internal_retry: true,
+      reasons: [
+        `Required test coverage is unverified (${detail}). Preserve the candidate and recover the missing verification before accepting it.${registryUnavailable ? " The committed repository verification plan cannot run; fix posse.verification.json." : ""}`,
         ...(Array.isArray(verdict.reasons) ? verdict.reasons : []),
       ],
     };
@@ -239,12 +327,22 @@ export function capVerdictForChangedTestFailure(verdict, testRun = null) {
   const postChange = testRun?.postChange || testRun?.post_change || null;
   const changed = postChange?.changed_tests || null;
   const attribution = changed?.baseline_attribution || null;
+  // A timeout keeps its uncertainty unless the base run shows that same file
+  // passing before the change (delta "regression"); a new file that hangs has
+  // no base run and stays gated as infrastructure.
+  const regressedTimeouts = changed?.status === "timed_out" && Array.isArray(attribution?.files)
+    ? attribution.files
+      .filter((file) => file?.status === "timed_out" && file?.delta === "regression" && file?.path)
+      .map((file) => file.path)
+    : [];
   if (["fail", "needs_replan"].includes(verdict?.verdict)
-    || changed?.status !== "failed"
+    || (changed?.status !== "failed" && regressedTimeouts.length === 0)
     || attribution?.debt_only === true) return verdict;
-  const paths = Array.isArray(attribution?.introduced_paths)
-    ? attribution.introduced_paths
-    : Array.isArray(changed.paths) ? changed.paths : [];
+  const paths = regressedTimeouts.length > 0
+    ? regressedTimeouts
+    : Array.isArray(attribution?.introduced_paths)
+      ? attribution.introduced_paths
+      : Array.isArray(changed.paths) ? changed.paths : [];
   const outputTail = [changed.stdout, changed.stderr]
     .map((value) => String(value || "").trim())
     .filter(Boolean)
@@ -1061,7 +1159,9 @@ export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: cu
         ...prepared,
         ...confidenceCap,
         reasons: [
-          `Deterministic test receipt delta ${assessedReceipt.delta} cannot support high confidence; the rating ceiling and any high pass confidence floor are capped at ${receiptPolicy.ceiling}.`,
+          receiptPolicy.high_floor === receiptPolicy.ceiling
+            ? `Deterministic test receipt delta ${assessedReceipt.delta} cannot support high confidence; the rating ceiling and any high pass confidence floor are capped at ${receiptPolicy.ceiling}.`
+            : `Deterministic test receipt delta ${assessedReceipt.delta} cannot support high confidence; the rating ceiling is capped at ${receiptPolicy.ceiling}, and a high pass confidence floor still stands.`,
           ...(prepared.reasons || []),
         ],
       };

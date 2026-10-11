@@ -3,7 +3,7 @@ import os from "os";
 import path from "path";
 import Database from "better-sqlite3";
 import { SETTINGS_CATALOG, getCatalogEntry, validateCatalogSettingValue } from "../functions/catalog.js";
-import { PLAN_APPROVAL_MODES, SETTING_KEYS } from "../../../catalog/settings.js";
+import { PLAN_APPROVAL_MODES, RETIRED_SETTING_KEYS, SETTING_KEYS } from "../../../catalog/settings.js";
 
 const ACCOUNT_DB_BUSY_TIMEOUT_MS = 2000;
 
@@ -481,6 +481,8 @@ export class AccountSettings {
     // repo and can poison every run when stored globally. Repo target now resolves
     // from cwd or explicit in-memory config objects only.
     this._db.prepare(`DELETE FROM account_settings WHERE setting_key IN ('atlas_repo_id', 'atlas_repo_path', 'target_branch')`).run();
+    const retired = this._db.prepare(`DELETE FROM account_settings WHERE setting_key = ?`);
+    for (const key of RETIRED_SETTING_KEYS) retired.run(key);
   }
 
   _migratePlanApprovalMode() {

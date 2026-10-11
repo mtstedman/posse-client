@@ -63,6 +63,23 @@ export const SESSION_LINK_OWNERS = Object.freeze({
   SCHEDULER: "scheduler",
 });
 
+export const SESSION_COMPUTE_POLICIES = Object.freeze({
+  EACH_MEMBER: "each-member",
+  CAPABILITY_ROUTING: "capability-routing",
+  HOST_ONLY: "host-only",
+});
+
+export const SESSION_COMPUTE_POLICY_VALUES = Object.freeze(Object.values(SESSION_COMPUTE_POLICIES));
+
+// Authoritative Git-ref contracts for work delegated to another session peer.
+export const SESSION_JOB_PROTOCOL = "posse.session_job.v1";
+export const SESSION_PACKET_PROTOCOL = "posse.session_packet.v1";
+export const SESSION_JOB_OFFER_TTL_MS = 15_000;
+export const SESSION_JOB_CLAIM_TTL_MS = 120_000;
+export const SESSION_ROUTABLE_JOB_TYPES = Object.freeze([
+  "research", "plan", "dev", "assess", "fix", "summarize", "artificer",
+]);
+
 // The Remote's membership lease per role (rust/catalog/pairing.rs:6-7): a
 // participant whose heartbeats stop for this long is dropped from the session.
 export const SESSION_LEASE_SEC = Object.freeze({

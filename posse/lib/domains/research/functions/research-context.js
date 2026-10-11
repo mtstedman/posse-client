@@ -21,6 +21,7 @@ import {
 import { recordObservation } from "../../observability/functions/observations.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { buildSyntheticResearchBrief } from "./routing.js";
+import { AGENT_HANDOFF_PROFILES } from "../../../catalog/handoff.js";
 
 const DEFAULT_DEPS = Object.freeze({
   getArtifacts,
@@ -196,7 +197,7 @@ export function resolveResearchContextForWorkItem({
         error,
       );
     }
-    const profileMismatch = packet.profile === "researcher.report.v1";
+    const profileMismatch = packet.profile === AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT;
     return {
       brief: deps.renderAgentHandoffCompatibilityOutput(packet),
       structuredData,

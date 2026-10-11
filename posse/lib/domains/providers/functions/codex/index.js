@@ -1,8 +1,7 @@
 // lib/domains/providers/functions/codex/index.js
 //
-// Native Codex CLI provider facade for the posse orchestrator.
+// Codex provider facade for Rust dispatch and usage discovery.
 
-export { __testBuildCodexWebToolsOverrides } from "./prompt-blocks.js";
 export {
   capabilities,
   MODEL_TIERS,
@@ -13,20 +12,17 @@ export {
 export { hasCredentials, __testResolveCodexAuthMode } from "./auth.js";
 export {
   discoverCodexCli,
-  getClaudeInfo,
   isReady,
   isReadyAsync,
   __testResolveWindowsPathCommand,
   __testIsProtectedWindowsAppCodexPath,
   __testIsExecutableCodexCli,
-  __testCodexCliSupportsExecContract,
   __testPrioritizeCodexCandidatePaths,
   __testFindCodexNativeExecutableForShim,
   __testResolveCodexLaunchPath,
   __testSelectCodexCandidateFromProbes,
   __testFindWindowsStandaloneCodexExecutables,
   __testFindWindowsLegacyCodexExecutables,
-  __testBuildCodexWindowsLaunchEnv,
   __testCodexLaunchNeedsResolution,
 } from "./cli-discovery.js";
 export {
@@ -42,42 +38,7 @@ export {
   __testResetCodexUsageState,
   __testGetCodexInteractiveUsageUnavailableReason,
 } from "./usage.js";
-export {
-  __testAppendBoundedCodexOutput,
-  __testBuildCloseStats,
-  __testClassifyCodexStderrLine,
-  __testExtractCodexToolUse,
-  __testAppendCodexToolUseEvent,
-  codexAgentMessageText as __testCodexAgentMessageText,
-  summarizeJsonEvent as __testSummarizeCodexJsonEvent,
-  extractUsageFromEvent as __testExtractCodexUsageFromEvent,
-  extractLiveRequestUsageFromEvent as __testExtractCodexLiveRequestUsageFromEvent,
-  extractTurnCountFromEvent as __testExtractCodexTurnCountFromEvent,
-  isTurnCompletedEvent as __testIsCodexTurnCompletedEvent,
-  codexUsageEventDedupeKey as __testCodexUsageEventDedupeKey,
-  createCodexUsageAccumulator as __testCreateCodexUsageAccumulator,
-} from "./stream-events.js";
-export {
-  __testExtractCodexSessionHandleFromStreamMessage,
-  __testRegisterCodexExitCleanup,
-  __testDrainCodexExitCleanups,
-} from "./session.js";
-export {
-  buildCodexExecArgs as __testBuildCodexExecArgs,
-  prepareCodexConfigForSpawn as __testPrepareCodexConfigForSpawn,
-  shouldSpillCodexConfigOverrides as __testShouldSpillCodexConfigOverrides,
-  __testCollectCodexExtraDirs,
-} from "./cli-spawn.js";
-export {
-  appendCodexMcpEnvOverrides as __testAppendCodexMcpEnvOverrides,
-  sanitizeCodexMcpEnvValue as __testSanitizeCodexMcpEnvValue,
-} from "./config-format.js";
-export {
-  __testBuildCodexAtlasConfigOverrides,
-  __testBuildCodexDeveloperInstructionRoute,
-  __testBuildCodexDeterministicReadConfigOverrides,
-  __testBuildCodexSystemToolLockdownOverrides,
-} from "./request-builders.js";
 export { buildWindowsSpawn as __testBuildCodexSpawn, terminateSpawnedProcess as __testTerminateSpawnedProcess } from "../shared/windows-spawn.js";
 export { callProvider, buildCodexRuntimeContractBlock as __testBuildCodexRuntimeContractBlock } from "./call-provider.js";
+export { buildCodexNativeMcpAttachmentAsync } from "./request-builders.js";
 export { escalateTier, extractJson, getRateLimitState, isCodexResumeHandleExpiredError as __testIsCodexResumeHandleExpiredError, parseErrorBackoff, tripRateLimit } from "./errors.js";

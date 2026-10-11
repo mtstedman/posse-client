@@ -1,7 +1,7 @@
 import { getAgentCalls, logEvent } from "../../queue/functions/index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { getAgentHandoffRecord } from "../../handoff/functions/index.js";
+import { getAgentHandoffRecord } from "../../handoff/functions/agent-handoff-records.js";
 
 // Dispatch attempts the runtime refused before a child could start. They are
 // recorded as tool error observations on the planner's job; without them the

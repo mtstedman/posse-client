@@ -13,8 +13,8 @@
 //   warn_only                   — warn but keep sending the configured model.
 //   off                         — no validation, no fallback.
 //
-// Codex carve-out: the local Codex CLI probe (codex-model-validator.js) is
-// authoritative for what the CLI accepts, so "missing from catalog" is
+// Codex carve-out: explicit Rust dispatch model validation is authoritative
+// for what the adapter accepts, so "missing from catalog" is
 // warn-only for codex; only an explicit deprecated flag falls back.
 
 import {

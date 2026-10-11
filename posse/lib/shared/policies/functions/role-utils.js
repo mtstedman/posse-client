@@ -1,5 +1,9 @@
 // Shared pure helpers for role execution, research budgets, and plan parsing.
 
+import { RESEARCH_BUDGETS, RESEARCH_BUDGET_STEP } from "../../../catalog/research-budget.js";
+import { MODEL_TIERS } from "../../../catalog/model.js";
+import { JOB_REASONING_EFFORTS } from "../../../catalog/job.js";
+
 export const CHECKPOINT_TOKEN_THRESHOLD = 15_000;
 
 export function safeParseJson(str) {
@@ -11,8 +15,7 @@ export function getWorkItemMetadata(workItem) {
   return safeParseJson(workItem?.metadata_json) || {};
 }
 
-export const RESEARCH_BUDGETS = Object.freeze(["low", "normal", "high", "xhigh"]);
-const RESEARCH_BUDGET_RANK = Object.freeze({ low: 0, normal: 1, high: 2, xhigh: 3 });
+const RESEARCH_BUDGET_RANK = Object.freeze(Object.fromEntries(RESEARCH_BUDGETS.map((budget, index) => [budget, index])));
 
 export function normalizeResearchBudget(value, fallback = "normal") {
   const normalizedFallback = RESEARCH_BUDGETS.includes(fallback) ? fallback : "normal";
@@ -47,9 +50,6 @@ export function maxResearchBudget(...budgets) {
 // A research budget steps a role's base up or down one rung per level:
 // low = one below, normal = the base, high = one above, xhigh = two above,
 // clamped to each ladder.
-const RESEARCH_BUDGET_STEP = Object.freeze({ low: -1, normal: 0, high: 1, xhigh: 2 });
-const MODEL_TIER_LADDER = Object.freeze(["cheap", "standard", "strong"]);
-const REASONING_EFFORT_LADDER = Object.freeze(["low", "medium", "high"]);
 
 function stepLadder(ladder, base, fallback, step) {
   const baseIndex = ladder.indexOf(String(base || "").trim().toLowerCase());
@@ -58,12 +58,12 @@ function stepLadder(ladder, base, fallback, step) {
 }
 
 export function stepModelTier(base, step) {
-  return stepLadder(MODEL_TIER_LADDER, base, "standard", step);
+  return stepLadder(MODEL_TIERS, base, "standard", step);
 }
 
 export function researchModelTierForBudget(budget, base = "standard") {
   const step = RESEARCH_BUDGET_STEP[normalizeResearchBudget(budget)];
-  return stepLadder(MODEL_TIER_LADDER, base, "standard", step);
+  return stepLadder(MODEL_TIERS, base, "standard", step);
 }
 
 export function resolveResearchBudgetForRouting(baseBudget, routingBudget, {
@@ -94,7 +94,7 @@ export function getResearchBudget(workItem, payload = null) {
 
 export function researchBudgetToReasoningEffort(budget, base = "medium") {
   const step = RESEARCH_BUDGET_STEP[normalizeResearchBudget(budget)];
-  return stepLadder(REASONING_EFFORT_LADDER, base, "medium", step);
+  return stepLadder(JOB_REASONING_EFFORTS, base, "medium", step);
 }
 
 export function researchBudgetToMaxTurnsOverride(budget, role = "researcher", opts = {}) {

@@ -47,7 +47,14 @@ import {
   MERGE_VERIFICATION_REVIEW_TYPE,
   humanInputChoicesForReviewType,
 } from "../../../catalog/human-input.js";
-import { BASELINE_TEST_DEBT_PAYLOAD_KEY } from "../../../catalog/verification.js";
+import {
+  BASELINE_TEST_DEBT_PAYLOAD_KEY,
+  MERGE_GATE_PROMPT_LINE_CHARS,
+  MERGE_REVIEW_REFRESH_AUDIT_LIMIT,
+  MERGE_TARGET_COMPARISON_OUTCOMES,
+  MERGE_TARGET_DEBT_OUTCOMES,
+} from "../../../catalog/verification.js";
+import { now, runImmediateTransaction } from "./common.js";
 import { parseJobPayload } from "./payload.js";
 
 export const MERGE_REVIEW_MIN_RISK = 4;
@@ -364,10 +371,41 @@ export function mergeVerificationDebtWaiver(workItemId, branchHead) {
 export function mergeVerificationDebtWaiverCovers(waiver, candidateTests) {
   if (!waiver || candidateTests?.source !== "job_test_command" || !Array.isArray(candidateTests.results)) return false;
   return candidateTests.results.every((result) => result.ok || (
-    ["target_debt", "changed_debt"].includes(result.target_debt_classification?.outcome)
+    MERGE_TARGET_DEBT_OUTCOMES.includes(result.target_debt_classification?.outcome)
     && waiver.checks.some((check) => check.command === result.test?.name
       && check.cwd_relative === (result.cwd_relative || null))
   ));
+}
+
+/**
+ * Carry an approval across a close-out refresh that replayed the reviewed
+ * commits onto the target without resolving any content (merge.js reports
+ * contentPreserving): the operator reviewed exactly this change. Compare-and-
+ * set on the reviewed head, so a concurrent answer or rebind wins, and keep a
+ * bounded audit of each rebind on the gate.
+ */
+export function rebindMergeVerificationReviewAfterRefresh(workItemId, {
+  gateJobId,
+  fromHead,
+  toHead,
+  targetHead = null,
+} = {}) {
+  const sha = /^[0-9a-f]{40}$/i;
+  if (!sha.test(String(fromHead || "")) || !sha.test(String(toHead || ""))) return { ok: false, reason: "invalid_head" };
+  const db = getDb();
+  return runImmediateTransaction(db, () => {
+    const state = mergeVerificationReviewGateState(workItemId);
+    if (!state?.approved || state.gate_job_id !== Number(gateJobId)) return { ok: false, reason: "approval_changed" };
+    const row = db.prepare("SELECT payload_json FROM jobs WHERE id = ?").get(Number(gateJobId));
+    const payload = parseJobPayload(row);
+    if (payload.reviewed_branch_head !== fromHead) return { ok: false, reason: "reviewed_head_changed" };
+    const refresh = { from_head: fromHead, to_head: toHead, target_head: targetHead || null, rebound_at: now() };
+    const refreshes = [...(Array.isArray(payload.reviewed_branch_refreshes) ? payload.reviewed_branch_refreshes : []), refresh]
+      .slice(-MERGE_REVIEW_REFRESH_AUDIT_LIMIT);
+    const updated = db.prepare("UPDATE jobs SET payload_json = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify({ ...payload, reviewed_branch_head: toHead, reviewed_branch_refreshes: refreshes }), now(), Number(gateJobId));
+    return updated.changes === 1 ? { ok: true, gate_job_id: Number(gateJobId), ...refresh } : { ok: false, reason: "gate_update_failed" };
+  });
 }
 
 /** Cheap candidate filter: an unapproved review gate already holds this work item. */
@@ -376,7 +414,10 @@ export function mergeVerificationReviewHoldsAutoMerge(workItemId) {
 }
 
 /** createJob() arguments for the review gate of a work item. */
-export function mergeVerificationReviewGateJobSpec(workItem, requirement, { passedChecks = [] } = {}) {
+export function mergeVerificationReviewGateJobSpec(workItem, requirement, { passedChecks = [], openedBranchHead = null } = {}) {
+  // The branch commit the operator is shown; a pass binds this commit, not
+  // whatever the branch points at when the answer arrives.
+  const openedHead = /^[0-9a-f]{40}$/i.test(String(openedBranchHead || "")) ? String(openedBranchHead) : null;
   const note = mergeVerificationReviewNote(requirement, { passedChecks });
   const label = `WI#${workItem.id}${workItem.title ? ` "${String(workItem.title).slice(0, 80)}"` : ""}`;
   const question = [
@@ -397,6 +438,7 @@ export function mergeVerificationReviewGateJobSpec(workItem, requirement, { pass
       prompt: question,
       context: note,
       branch_name: workItem.branch_name || null,
+      ...(openedHead ? { opened_branch_head: openedHead } : {}),
       waived_job_ids: requirement.waivedJobIds,
       waived_verifications: requirement.waivers,
       replaced_verifications: requirement.replacements,
@@ -422,20 +464,24 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
   const canWaive = allowWaive == null
     ? !!integrationGate?.candidate_tree && !!integrationGate?.target_head
     : !!allowWaive;
+  const lineTail = (text) => {
+    const value = String(text ?? "");
+    return value.length > MERGE_GATE_PROMPT_LINE_CHARS ? `...${value.slice(-MERGE_GATE_PROMPT_LINE_CHARS)}` : value;
+  };
   const failedChecks = (integrationGate?.results || []).filter((result) => !result.ok)
-    .map((result) => `${result.test?.name || result.test?.id}: ${result.failure?.message || result.note || result.status}`);
+    .map((result) => `${String(result.test?.name || result.test?.id).slice(0, 300)}: ${lineTail(result.failure?.message || result.note || result.status)}`);
   const attribution = (integrationGate?.results || []).filter((result) => !result.ok)
     .map((result) => {
       const debt = result.target_debt_classification;
       const check = result.test?.name || result.test?.id || "required check";
       if (!debt) return `${check}: target comparison unavailable.`;
-      if (debt.outcome === "target_debt" || debt.outcome === "changed_debt") {
+      if (MERGE_TARGET_DEBT_OUTCOMES.includes(debt.outcome)) {
         const source = debt.introducer?.work_item_id
           ? `introduced by WI#${debt.introducer.work_item_id} at ${String(debt.introducer.commit || "").slice(0, 12)}`
           : "introducer not identified";
         return `${check}: ${debt.outcome}; ${source}; target is red.`;
       }
-      if (debt.outcome === "regression") return `${check}: target passed; candidate failed.`;
+      if (debt.outcome === MERGE_TARGET_COMPARISON_OUTCOMES.REGRESSION) return `${check}: target passed; candidate failed.`;
       return `${check}: ${debt.outcome || "unverified"}${debt.reason ? ` (${debt.reason})` : ""}.`;
     });
   const question = [

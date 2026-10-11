@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { sortAgentToolDefinitions } from "../../../../shared/tools/functions/agent-schema.js";
 import path from "node:path";
 import { mcpClientToolDeadlineMs } from "../../../../catalog/mcp.js";
+import { RAW_CLI_CONTROL_OPTIONS } from "../../../../catalog/provider.js";
 import { readPlannerDispatchPolicy } from "../../../planning/functions/planner-dispatch-policy.js";
 
 import { dispatchProvider } from "../../../../shared/native/functions/provider-dispatch-client.js";
@@ -32,6 +33,16 @@ function taskModeFor({ taskMode, roleMode, projectDbCapability }) {
   if (String(projectDbCapability || "none") !== "none") return "db";
   if (String(roleMode || "").trim().toLowerCase() === "web") return "research";
   return "code";
+}
+
+// A caller that still asks for a raw CLI control would otherwise get an
+// ordinary Posse turn and mistake it for the control it wanted.
+export function rejectRawCliControlOptions(provider, options = {}) {
+  for (const name of RAW_CLI_CONTROL_OPTIONS) {
+    const value = options?.[name];
+    if (value === undefined || value === null || value === false) continue;
+    throw new Error(`The ${provider} provider does not accept ${name}: raw CLI controls belong to the harness, and Posse provider turns run only through native dispatch.`);
+  }
 }
 
 export function buildNativeDispatchRequest(provider, promptText, {
@@ -270,6 +281,9 @@ export async function runNativeDispatch(request, {
         inputTokens: stats.inputTokens ?? 0,
         cachedInputTokens: stats.cachedInputTokens ?? 0,
         cacheCreationInputTokens: stats.cacheCreationInputTokens ?? 0,
+        // The measured cache-write TTL split, when the adapter reported it.
+        cacheCreation5mTokens: stats.cacheCreation5mTokens ?? null,
+        cacheCreation1hTokens: stats.cacheCreation1hTokens ?? null,
         outputTokens: stats.outputTokens ?? 0,
         requestContextInputTokens: stats.inputTokens ?? 0,
         durationMs: stats.durationMs ?? null,

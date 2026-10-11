@@ -5,7 +5,7 @@ import { RESEARCH_CLAIM_REVIEW as POLICY } from "../../../catalog/research-claim
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getArtifacts, storeArtifact, getSetting } from "../../queue/functions/index.js";
 import { getPromptBundleRolePrompt } from "../../remote/functions/prompt-bundle.js";
-import { getLatestCommittedAgentHandoffPacket } from "../../handoff/functions/agent-handoff-implementation.js";
+import { getLatestCommittedAgentHandoffPacket } from "../../handoff/functions/agent-handoff-records.js";
 import { buildClaimReviewInput, claimReviewDigest, parseClaimReview } from "./claim-review.js";
 
 // A separately tracked provider operation after research. The committed packet

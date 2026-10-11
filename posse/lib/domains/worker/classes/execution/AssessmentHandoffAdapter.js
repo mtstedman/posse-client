@@ -8,7 +8,6 @@ import {
   incrementAndCreateAssessmentAttempt,
   isLeaseValid,
   logEvent,
-  setJobError,
   setAssessmentLifecycle,
   updateJobPayload,
 } from "../../../queue/functions/index.js";
@@ -25,6 +24,7 @@ import {
   isArtifactMode,
 } from "../../../artifacts/functions/index.js";
 import { ASSESSABLE_JOB_TYPES } from "../../../../catalog/job.js";
+import { ASSESSMENT_FAILURE_CLASSES } from "../../../../catalog/human-input.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import {
@@ -89,7 +89,7 @@ import {
   renderConfiguredVerificationEvidence,
 } from "../../functions/helpers/configured-verification.js";
 import { repairTestDependencies } from "../../functions/helpers/test-dependency-repair.js";
-import { isVerificationInfrastructureOutcome } from "../../functions/helpers/verification-outcome.js";
+import { isVerificationInfrastructureOutcome, verificationInfrastructureError } from "../../functions/helpers/verification-outcome.js";
 import { routeAssessmentInfrastructureFailure } from "../../functions/helpers/assessment-pipeline.js";
 
 function _syncAssessorWorkerDisplay(display, job, {
@@ -137,7 +137,6 @@ export function retryAssessmentOnlyAfterTerminalHandoffError(
   { delayMs = 2_000 } = {},
 ) {
   if (!isRetryableTerminalHandoffError(error)) return false;
-  preserveAssessmentOnlyRetryPayload(worker, job);
   worker.emit(job.id, `${C.yellow}[assess-only] Missing terminal handoff — retrying assessor only${C.reset}`);
   parkAssessmentFailure(worker, job, leaseToken, error, { delayMs });
   return true;
@@ -171,26 +170,18 @@ export async function resolveAssessmentOnlyProvider(agentDispatcher) {
   };
 }
 
+// Assess-only failures share the attached path's owner: retry within the
+// assessment budget, then preserve the committed candidate behind a
+// blocked_recovery gate. Failing closed here failed the job with no gate and
+// let the deadlock sweep cancel its hard dependents.
 function parkAssessmentFailure(worker, job, leaseToken, error, {
   delayMs = 2_000,
+  pendingFileRequests = readPendingAssessmentFileRequests(worker.parsePayload(job)),
 } = {}) {
-  const fresh = getJob(job.id) || job;
-  const count = Number(fresh.assessment_attempt_count || 0);
-  const max = Math.max(1, Number(fresh.assessment_max_attempts || 3));
-  const message = String(error?.message || error || "Assessment unavailable");
-  preserveAssessmentOnlyRetryPayload(worker, job);
-  if (count >= max) {
-    const terminalProtocolFailure = isRetryableTerminalHandoffError(error);
-    setAssessmentLifecycle(job.id, "assessment_failed", { error: message, completed: true });
-    setJobError(job.id, `Assessment infrastructure exhausted after ${count}/${max} attempts: ${message}`);
-    worker.emit(job.id, `${C.red}[assess-only] Assessment recovery exhausted; failed closed without a human gate${C.reset}`);
-    worker._releaseLease(job, leaseToken, "failed");
-    return { gated: false, terminalProtocolFailure };
-  }
-  setAssessmentLifecycle(job.id, "assessment_unavailable", { error: message });
-  const readyAt = new Date(Date.now() + delayMs).toISOString();
-  worker._releaseLease(job, leaseToken, "queued", { readyAt });
-  return { gated: false, readyAt };
+  return routeAssessmentInfrastructureFailure(worker, job, leaseToken, error, {
+    pendingFileRequests,
+    readyAt: new Date(Date.now() + delayMs).toISOString(),
+  });
 }
 
 export function spawnDeferredAssessmentFileRequestFollowUp(
@@ -269,7 +260,13 @@ export class AssessmentHandoffAdapter {
         }
       } else {
         missing.assessmentGateImmediately = true;
-        routeAssessmentInfrastructureFailure(worker, job, leaseToken, missing);
+        // Restoring a runner cannot recover lost evidence; retry resumes the
+        // implementation that regenerates it.
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken, missing, {
+          pendingFileRequests,
+          failureClass: ASSESSMENT_FAILURE_CLASSES.SOURCE_MISSING,
+          question: `Assessment evidence for job #${job.id} is still missing after automatic repair. Choose retry to resume the implementation and regenerate it; or choose replan, explicit_waiver, or fail.`,
+        });
         worker.emit(job.id, `${C.yellow}[assess-only] Missing bound source after automatic repair; completed work preserved for recovery${C.reset}`);
       }
       return { handled: true };
@@ -429,7 +426,9 @@ export class AssessmentHandoffAdapter {
           },
         });
         if (isVerificationInfrastructureOutcome(postReceipt)) {
-          throw new Error(`Deterministic post-change test execution unavailable: ${postReceipt.reason || postReceipt.status}`);
+          // Typed like the attached path, so the recovery gate carries the
+          // rerun command and the verification outcome.
+          throw verificationInfrastructureError(postReceipt, "Deterministic post-change test execution unavailable");
         }
       }
       const configuredVerification = await ensureConfiguredVerification(worker, {
@@ -579,17 +578,27 @@ export class AssessmentHandoffAdapter {
       refreshAndExtractInsightsFromModule(job.work_item_id);
       worker._cleanupWorktreeIfDone(job.work_item_id);
     } catch (assessErr) {
+      // A late failure after another owner took the lease must not rewrite
+      // that owner's job; only this execution's own attempt row is closed.
+      if (!isLeaseValid(job.id, leaseToken)) {
+        completeAttempt(assessAttempt.attempt.id, {
+          status: "interrupted",
+          duration_ms: Date.now() - assessStart,
+          error_text: `Lease expired before assess-only failure was recorded: ${assessErr.message}`.slice(0, 4000),
+        });
+        worker.emit(job.id, `${C.yellow}[lease] WI#${job.work_item_id} job #${job.id} - lease expired before assess-only failure; result discarded${C.reset}`);
+        return { handled: true, currentAttemptId: assessAttempt.attempt.id };
+      }
       completeAttempt(assessAttempt.attempt.id, {
         status: "failed",
         duration_ms: Date.now() - assessStart,
         error_text: assessErr.message,
       });
       worker.emit(job.id, `${C.red}[assess-only] Assessment failed: ${assessErr.message.split("\n")[0]}${C.reset}`);
-      // The developer's committed output remains authoritative. Assessment
-      // Transport/tool failures have their own retry budget. Terminal handoff
-      // protocol failures are internal harness faults and fail closed without
-      // asking the operator to repair them.
-      parkAssessmentFailure(worker, job, leaseToken, assessErr);
+      // The developer's committed output remains authoritative. Transport,
+      // tool and terminal-protocol failures share the assessment retry
+      // budget; once it is spent the job waits behind a recovery gate.
+      parkAssessmentFailure(worker, job, leaseToken, assessErr, { pendingFileRequests });
     }
     return { handled: true, currentAttemptId: assessAttempt.attempt.id };
   }

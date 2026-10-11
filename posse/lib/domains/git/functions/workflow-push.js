@@ -17,8 +17,16 @@ import { gitExec, resolvePushBranch } from "./utils.js";
 import { GIT_MERGE_TIMEOUT_MS } from "./workflow-git-utils.js";
 import { resolveSharedTrunkConfigRuntime } from "./shared-trunk-config.js";
 import { SETTING_KEYS, SHARED_TRUNK_DEFAULTS } from "../../../catalog/settings.js";
+import { MERGE_TARGET_COMPARISON_OUTCOMES } from "../../../catalog/verification.js";
 import { getAccountRepoSetting } from "../../settings/functions/account-settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
+
+// Merged without verification: unavailable on the target too, or waived
+// while unverified. The push offer reports these as unverified, not as debt.
+const UNVERIFIED_DEBT_OUTCOMES = new Set([
+  MERGE_TARGET_COMPARISON_OUTCOMES.TARGET_UNAVAILABLE,
+  MERGE_TARGET_COMPARISON_OUTCOMES.UNVERIFIED,
+]);
 
 export function pushEvidenceWarnings(items, unpushedCommits = new Set(), unresolvedGates = []) {
   const warnings = [];
@@ -27,12 +35,18 @@ export function pushEvidenceWarnings(items, unpushedCommits = new Set(), unresol
     let metadata = {};
     try { metadata = JSON.parse(wi.metadata_json || "{}"); } catch { /* legacy metadata */ }
     for (const debt of Array.isArray(metadata?.target_debt) ? metadata.target_debt : []) {
-      if (!unpushedCommits.has(debt.commit)) continue;
+      // A later merge whose candidate passed the same check cleared it.
+      if (debt.resolved_by || !unpushedCommits.has(debt.commit)) continue;
       const key = `${debt.commit}\0${debt.command}\0${debt.failure_fingerprint || ""}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      if (UNVERIFIED_DEBT_OUTCOMES.has(debt.outcome)) {
+        warnings.push({ kind: "unverified", work_item_id: wi.id, commit: debt.commit, command: debt.command });
+        continue;
+      }
       warnings.push({ kind: "target_debt", work_item_id: wi.id, commit: debt.commit,
-        command: debt.command, blocked_work_item_ids: debt.blocked_work_item_ids || [] });
+        command: debt.command, blocked_work_item_ids: debt.blocked_work_item_ids || [],
+        ...(debt.waived_by_gate ? { waived_by_gate: debt.waived_by_gate } : {}) });
     }
   }
   for (const gate of unresolvedGates || []) {
@@ -44,7 +58,9 @@ export function pushEvidenceWarnings(items, unpushedCommits = new Set(), unresol
   return warnings;
 }
 
-function openUnverifiedMergeGates() {
+// Open recovery gates whose candidate stayed unverified against a target
+// commit in the range being pushed, on the branch being pushed.
+export function openUnverifiedMergeGates({ unpushedCommits = new Set(), pushBranch = null } = {}) {
   try {
     const rows = getDb().prepare(`
       SELECT work_item_id, payload_json FROM jobs
@@ -53,8 +69,12 @@ function openUnverifiedMergeGates() {
         AND json_extract(payload_json, '$.merge_failure_recovery.integration_gate') IS NOT NULL
     `).all();
     return rows.flatMap((row) => {
-      const gate = JSON.parse(row.payload_json)?.merge_failure_recovery?.integration_gate;
-      return (gate?.results || []).filter((result) => result?.target_debt_classification?.outcome === "unverified")
+      const recovery = JSON.parse(row.payload_json)?.merge_failure_recovery;
+      const gate = recovery?.integration_gate;
+      if (!unpushedCommits.has(gate?.target_head)) return [];
+      if (pushBranch && recovery?.target_branch && recovery.target_branch !== pushBranch) return [];
+      return (gate?.results || [])
+        .filter((result) => result?.target_debt_classification?.outcome === MERGE_TARGET_COMPARISON_OUTCOMES.UNVERIFIED)
         .map((result) => ({ work_item_id: row.work_item_id, command: result.test?.name || result.test?.id || "check" }));
     });
   } catch { return []; }
@@ -159,7 +179,8 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       } catch { /* retain the unresolved range instead of guessing */ }
     }
 
-    const pushWarnings = pushEvidenceWarnings(listWorkItems(), unpushedCommits, openUnverifiedMergeGates());
+    const pushWarnings = pushEvidenceWarnings(listWorkItems(), unpushedCommits,
+      openUnverifiedMergeGates({ unpushedCommits, pushBranch }));
 
     const dirtyItems = auditWorktreeState();
     const unmergedWIs = dirtyItems

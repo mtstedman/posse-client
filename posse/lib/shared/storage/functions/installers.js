@@ -126,3 +126,21 @@ export function installTerminalTransitionTracking(db) {
       VALUES (NEW.id, CASE WHEN NEW.status = 'dead_letter' THEN 'failed' ELSE NEW.status END, NEW.finished_at, 'owner_transition'); END;
   `);
 }
+
+export function installExportClaimColumns(db) {
+  // Legacy rows predate the claim protocol; mark them mirrored before new
+  // pending rows can be inserted. These additions remain unversioned for
+  // mixed-version fleet readers.
+  db.transaction(() => {
+    for (const table of ["events", "job_observations"]) {
+      const columns = new Set(db.pragma(`table_info(${table})`).map((column) => column.name));
+      const legacy = !columns.has("export_state");
+      if (legacy) db.exec(`ALTER TABLE ${table} ADD COLUMN export_state TEXT NOT NULL DEFAULT 'pending'`);
+      if (!columns.has("export_claim_token")) db.exec(`ALTER TABLE ${table} ADD COLUMN export_claim_token TEXT`);
+      if (!columns.has("export_claimed_at")) db.exec(`ALTER TABLE ${table} ADD COLUMN export_claimed_at TEXT`);
+      if (!columns.has("export_run_id")) db.exec(`ALTER TABLE ${table} ADD COLUMN export_run_id TEXT`);
+      if (legacy) db.exec(`UPDATE ${table} SET export_state = 'mirrored'`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_export ON ${table}(export_state, id)`);
+    }
+  }).immediate();
+}

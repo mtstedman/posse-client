@@ -1,7 +1,24 @@
 import { atlasResultFailures } from "./atlas-result-status.js";
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { ATLAS_REQUEST_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { recordObservation } from "../../../domains/observability/functions/observations.js";
+
+function stableJson(value) {
+  if (Array.isArray(value)) return value.map(stableJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableJson(value[key])]));
+  }
+  return value;
+}
+
+export function atlasRequestShape(toolArgs, result) {
+  const canonical = JSON.stringify(stableJson(toolArgs ?? {}));
+  return {
+    request_fingerprint: createHash("sha256").update(canonical).digest("hex"),
+    response_chars: result == null ? 0 : JSON.stringify(result).length,
+  };
+}
 
 // Recursive recovery and batch fan-out inherit one context. Only the outer
 // provider request records elapsed time; child durations are never summed here.
@@ -39,6 +56,7 @@ export async function observeAtlasRequest(args, execute, {
           agent_call_id: boot.agentCallId ?? null,
           session_id: args.session?.id || null,
           tool_name: args.toolName,
+          ...atlasRequestShape(args.toolArgs, response?.result),
           duration_ms: Math.max(0, now() - started),
           expanded_call_scope: "includes_recovery_children",
           expanded_calls: physicalRequest.expandedCalls,

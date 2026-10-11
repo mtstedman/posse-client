@@ -244,6 +244,22 @@ const IMAGE_MODEL_CHOICES_INTERNAL = Object.freeze({
   ]),
 });
 
+// Output formats each image-model family returns without a local conversion,
+// matched by model-id prefix. gpt-image takes the format as a request
+// parameter; the other families always return PNG.
+const IMAGE_MODEL_NATIVE_FORMATS = Object.freeze([
+  Object.freeze({ prefix: "gpt-image", formats: Object.freeze(["png", "jpeg", "webp"]) }),
+  Object.freeze({ prefix: "dall-e", formats: Object.freeze(["png"]) }),
+  Object.freeze({ prefix: "grok-imagine", formats: Object.freeze(["png"]) }),
+]);
+
+/** Native output formats of an image model, or null when the model is unknown. */
+export function imageModelNativeFormats(model) {
+  const id = String(model || "").trim().toLowerCase();
+  if (!id) return null;
+  return IMAGE_MODEL_NATIVE_FORMATS.find((entry) => id.startsWith(entry.prefix))?.formats || null;
+}
+
 export function getDefaultImageProvider() {
   return Object.keys(IMAGE_MODEL_CHOICES_INTERNAL)[0] || "openai";
 }

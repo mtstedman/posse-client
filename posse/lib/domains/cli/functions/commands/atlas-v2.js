@@ -14,10 +14,7 @@
 // All subcommands are read-only by default. `rebuild`, `warm-now`, and
 // `purge-views` mutate the ATLAS on-disk layout but never the host repo.
 //
-// Workstream F owns this file. The warmer that consumes `atlas_warm` jobs
-// is implemented in Phase 2; until then `warm-now` and `rebuild` produce
-// queued jobs that the deterministic AtlasWarmRole drains (currently as a
-// no-op stub — observable via `posse atlas-v2 status`).
+// ParseEngine consumes queued `atlas_warm` jobs through AtlasWarmRole.
 
 import fs from "fs";
 import path from "path";

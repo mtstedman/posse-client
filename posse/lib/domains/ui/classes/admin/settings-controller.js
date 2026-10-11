@@ -13,7 +13,6 @@ import {
   formatProviderSettingValue,
   formatProviderUsageHeader,
   formatProviderUsageWindow,
-  getModelProviderDefaults,
   getPrintableInput,
   getProviderUsageSettingHint,
   isBackspaceKey,
@@ -27,6 +26,8 @@ import {
   parseProviderList,
   parseProviderUsageSettingKey,
   parseReportTimestamp,
+  resolveEffectiveImageModelSetting,
+  resolveEffectiveModelSetting,
   renderUsageBar,
   runtimeDbLooksBusyOrCorrupt,
   toDisplaySettingEntry,
@@ -74,7 +75,6 @@ import {
   MODEL_SETTING_DEFS,
   PROVIDER_LABELS,
   PROVIDER_OPTIONS,
-  getDefaultTierModel,
   getImageModelOptions,
   getProviderTierDefaults,
 } from "../../../providers/functions/model-catalog.js";
@@ -271,48 +271,11 @@ function withCatalogSource(entry) {
 }
 
 function getEffectiveModelSetting(def) {
-  const stored = safeGetSetting(def.key);
-  const providerDefaults = getModelProviderDefaults(def.provider);
-  const baseModel = def.tier ? providerDefaults?.[def.tier]?.model : null;
-
-  let effectiveModel = "";
-  let source = "default";
-  if (!def.tier && stored && String(stored).trim()) {
-    effectiveModel = String(stored).trim();
-    source = "global";
-  } else if (def.tier && stored && String(stored).trim()) {
-    effectiveModel = String(stored).trim();
-    source = "global";
-  } else if (!def.tier && def.provider === "claude") {
-    effectiveModel = stored || `${C.dim}tier-driven${C.reset}`;
-    source = stored ? "global" : "default";
-  } else if (baseModel != null) {
-    effectiveModel = baseModel || getDefaultTierModel(def.provider, def.tier) || "";
-    source = "default";
-  } else if (def.provider === "claude" && def.tier === "standard") {
-    effectiveModel = getDefaultTierModel("claude", "standard") || "sonnet";
-    source = "default";
-  }
-
-  return {
-    storedValue: stored || "",
-    effectiveModel: String(effectiveModel || "").trim() || (def.provider === "claude" && def.tier === "standard" ? (getDefaultTierModel("claude", "standard") || "sonnet") : ""),
-    source,
-  };
+  return resolveEffectiveModelSetting(def, safeGetSetting(def.key));
 }
 
 function getEffectiveImageModelSetting(def) {
-  const stored = safeGetSetting(def.key);
-  const choices = getImageModelOptions(def.provider, { currentValue: stored });
-  const storedIsValid = choices.some((choice) => choice.value === stored);
-  const effectiveModel = storedIsValid
-    ? stored
-    : (choices[0]?.value || "");
-  return {
-    storedValue: storedIsValid ? (stored || "") : "",
-    effectiveModel,
-    source: storedIsValid ? "global" : "default",
-  };
+  return resolveEffectiveImageModelSetting(def, safeGetSetting(def.key));
 }
 
 function getProviderUsageStoredValue(settingKey) {

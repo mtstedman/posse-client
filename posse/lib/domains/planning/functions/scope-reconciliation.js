@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { adminGitExec } from "../../git/functions/admin-git-exec.js";
 import { gitExecBuffer } from "../../git/functions/utils.js";
+import { AGENT_HANDOFF_PROFILES } from "../../../catalog/handoff.js";
 
 function pathEntryExists(target) {
   try {
@@ -214,7 +215,7 @@ export function validatePlannerTaskFileKinds(tasks, projectDir) {
 }
 
 export function validatePlannerPacketFileKinds(packet, projectDir) {
-  if (packet?.profile !== "planner.plan.v1" || packet?.outcome !== "success") return [];
+  if (packet?.profile !== AGENT_HANDOFF_PROFILES.PLANNER_PLAN || packet?.outcome !== "success") return [];
   const nodes = Array.isArray(packet?.handoffs) ? packet.handoffs.map(handoffNode) : [];
   return validateNodes(nodes, projectDir);
 }
@@ -282,7 +283,7 @@ function scopeListWithout(list, filePath) {
  */
 export function repairPlannerPacketFileKinds(packet, projectDir, { maxPasses = 3 } = {}) {
   const repairs = [];
-  if (packet?.profile !== "planner.plan.v1" || packet?.outcome !== "success") return repairs;
+  if (packet?.profile !== AGENT_HANDOFF_PROFILES.PLANNER_PLAN || packet?.outcome !== "success") return repairs;
   for (let pass = 0; pass < maxPasses; pass += 1) {
     const issues = validatePlannerPacketFileKinds(packet, projectDir);
     if (issues.length === 0) break;

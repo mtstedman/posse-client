@@ -1,5 +1,7 @@
 import { DIRTY_WORKTREE_RECOVERY_KEY } from "../../../catalog/human-input.js";
 import fs from "node:fs";
+import path from "node:path";
+import { MERGE_IN_PROGRESS_MARKER } from "../../../catalog/verification.js";
 import { gitCommitAllAsync } from "./commit-scope.js";
 import { gitExecAsync } from "./utils.js";
 import { resolveTargetBranchAsync, worktreePathAsync } from "./worktree.js";
@@ -26,6 +28,13 @@ export async function commitMergeRecoveryDirt(workItem, { projectDir, gateJobId 
   const targetBranch = await resolveTargetBranchAsync(projectDir);
   if (String(await gitExecAsync(["branch", "--show-current"], projectDir)).trim() !== targetBranch) {
     throw new Error(`The target checkout must be on ${targetBranch} before committing recovery work`);
+  }
+  // A merge interrupted mid-gate left a squash staged here whose checks never
+  // finished: committing it would ship an unverified candidate. The merge
+  // choice repairs it (merge pre-flight) and reruns the gate.
+  const markerPath = String(await gitExecAsync(["rev-parse", "--git-path", MERGE_IN_PROGRESS_MARKER], projectDir)).trim();
+  if (markerPath && fs.existsSync(path.resolve(projectDir, markerPath))) {
+    throw new Error("An interrupted merge left its squash staged in the target checkout; choose merge to unstage it and rerun its checks instead of committing it");
   }
   const sourceScope = fs.existsSync(cwd) ? await dirtyScope(cwd) : { modifyFiles: [], createFiles: [], deleteFiles: [], createRoots: [] };
   const sourceChanged = sourceScope.modifyFiles.length + sourceScope.createFiles.length + sourceScope.deleteFiles.length > 0;

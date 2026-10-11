@@ -27,7 +27,6 @@ export function nativeApiMetadata(provider, credential) {
   return {
     MODEL_TIERS, getModelTierConfig,
     getCredentialEnvVars: () => [credential], hasCredentials: () => !!process.env[credential],
-    getClaudeInfo: () => ({ cmd: `${provider}-native-dispatch`, args: [] }),
     escalateTier: escalateModelTier,
     callProvider: (prompt, options = {}) => callNativeApiProvider(provider, prompt, select(options)),
     callAgentTurn: (prompt, options = {}) => callNativeApiAgentTurn(provider, prompt, select(options)),
@@ -39,12 +38,3 @@ export function nativeApiMetadata(provider, credential) {
     parseErrorBackoff: error => classifyProviderError(error, { defaultBackoffSec: 15 }),
   };
 }
-
-// Compatibility hooks exercise Node-owned tool policy, not provider execution.
-export { sharedSafePath as __testSafePath, sharedBuildScopePredicates as __testBuildScopePredicates } from "./response-tooling.js";
-import { createOpenAiCompatibleTooling } from "./response-tooling.js";
-import { TOOL_GENERATE_IMAGE } from "../../../../catalog/native-tools.js";
-const policyTools = createOpenAiCompatibleTooling({ buildImageTool: () => TOOL_GENERATE_IMAGE });
-export const __testGetToolsForRole = policyTools.getToolsForRole;
-export const __testInspectFile = policyTools.deterministicInspectFile;
-export const __testResizeImage = policyTools.deterministicResizeImage;

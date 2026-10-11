@@ -1,12 +1,11 @@
 import { ATLAS_READ_GUIDANCE_TOKEN } from "../../../catalog/tool-references.js";
 import { WEB_TOOL_ROLES } from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { ToolCatalog } from "../classes/ToolCatalog.js";
-import { CLAUDE_NATIVE_TOOL_NAMES, ToolContract, unknownClaudeNativeTools } from "../classes/ToolContract.js";
+import { ToolContract } from "../classes/ToolContract.js";
 import { projectDbEffectivePermissions } from "./toolkit/project-db/config.js";
 import { projectDbQuerySummaryForPermissions } from "./toolkit/project-db/schema.js";
 
 export { WEB_TOOL_ROLES } from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
-export { CLAUDE_NATIVE_TOOL_NAMES, unknownClaudeNativeTools };
 export { renderProviderPromptContracts } from "./provider-surface.js";
 
 export function buildExecutionContract(opts = {}) {
@@ -74,14 +73,6 @@ export function renderProviderGuidanceBlock(contract = {}) {
 
 export function renderProviderBatchingGuidanceBlock(contract = {}) {
   return new ToolContract(contract).renderProviderBatchingGuidanceBlock();
-}
-
-export function buildClaudeCliToolConfig(contract = {}, opts = {}) {
-  return new ToolContract(contract).toClaudeCliFlags(opts);
-}
-
-export function buildClaudeLaunchInput(contract = {}, opts = {}) {
-  return new ToolContract(contract).toClaudeLaunchInput(opts);
 }
 
 export function buildProviderToolDefinitions(toolMap = {}, contract = {}) {

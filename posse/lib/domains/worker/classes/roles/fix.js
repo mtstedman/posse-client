@@ -298,7 +298,7 @@ export class FixRole extends BaseRole {
       worker.emit(job.id, `${C.green}[new]${C.reset} WI#${job.work_item_id} job #${job.id}: first attempt`);
     }
 
-    const fixDriftContext = worker.detectDrift(job, fixFiles, fixCwd);
+    const fixDriftContext = await worker.detectDrift(job, fixFiles, fixCwd);
     const fixNudgeContext = loadNudges(job.id, { attemptId: ctx.attemptId });
     const fixFallbackReads = packet.budgets?.fallback_reads_remaining ?? null;
     const fixTaskMode = payload.task_mode || "code";

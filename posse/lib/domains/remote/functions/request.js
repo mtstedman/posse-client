@@ -1,3 +1,4 @@
+import { ARTIFACT_TASK_MODE_VALUES, IMAGE_INSPECTION_EXTENSIONS } from "../../../catalog/artifact.js";
 import {
   HASH_REF_ALIAS_PATTERN,
   HASH_REF_LANES,
@@ -84,6 +85,15 @@ function capabilitiesFromPacket(packet = {}, providerName = null, customToolsAva
     || taskMode === "image"
   );
 
+  const assessment = packet._raw_payload?.assessmentContext || packet._raw_payload?.assessment_context || {};
+  const scopedPaths = [...(packet.files_to_modify || []), ...(packet.files_to_create || []), ...(packet.related_files || []),
+    ...(assessment.allowed_files || []), ...(assessment.files_committed || []),
+    ...(assessment.manifest?.files || []).map(file => file?.path).filter(Boolean)];
+  const imageInspection = imageGenerationAvailable || taskMode === "intake_processing" || tools.image_inspection === true
+    || scopedPaths.some((file) => IMAGE_INSPECTION_EXTENSIONS.includes(String(file).split(".").at(-1).toLowerCase()));
+  const artifactValidation = ARTIFACT_TASK_MODE_VALUES.includes(taskMode) || tools.artifact_validation === true
+    || !!(packet.artifact_contract || packet._raw_payload?.artifact_contract);
+
   const capabilities = {
     tools: {
       read: narrowBoolCapability(tools.read, packet?.tool_policy?.allow_read === true),
@@ -91,6 +101,9 @@ function capabilitiesFromPacket(packet = {}, providerName = null, customToolsAva
       shell: narrowBoolCapability(tools.shell, packet?.tool_policy?.allow_shell === true),
       tests: narrowBoolCapability(tools.tests, packet?.tool_policy?.allow_tests === true),
       image_generation: narrowBoolCapability(tools.image_generation, imageGenerationAvailable),
+      ...(imageInspection && tools.image_inspection !== false ? { image_inspection: true } : {}),
+      ...(artifactValidation && tools.artifact_validation !== false ? { artifact_validation: true } : {}),
+      ...(tools.integrity_verification === true ? { integrity_verification: true } : {}),
       project_db: ["read", "write"].includes(projectDbCapability) ? projectDbCapability : "none",
       // Only the local owner probe may establish availability; payload flags narrow it.
       custom_tools_v1: narrowBoolCapability(tools.custom_tools_v1, customToolsAvailable),

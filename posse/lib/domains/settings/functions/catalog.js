@@ -40,7 +40,6 @@ import {
   SHARED_TRUNK_LIMITS,
   AGENT_COORDINATION_MODE_VALUES,
   ASSESSMENT_SCOPE_MODE_VALUES,
-  CLAUDE_EXECUTION_MODE_VALUES,
   CODEX_AUTH_MODE_OPTIONS,
   CONTEXT_COMPACTION_MODE_VALUES,
   DB_TASK_PRE_MERGE_POLICIES,
@@ -65,7 +64,6 @@ import {
   SESSION_RECYCLE_MODE_VALUES,
   STARTUP_DIRTY_TREE_POLICY_VALUES,
   WAITING_LANE_SHADOW_MODE_VALUES,
-  ENGAGEMENT_ENGINE_VALUES,
 } from "../../../catalog/settings.js";
 import {
   ATLAS_AUTO_FEEDBACK_VALUES,
@@ -87,7 +85,6 @@ import {
 export {
   AGENT_COORDINATION_MODE_VALUES,
   ASSESSMENT_SCOPE_MODE_VALUES,
-  CLAUDE_EXECUTION_MODE_VALUES,
   CODEX_AUTH_MODE_OPTIONS,
   CONTEXT_COMPACTION_MODE_VALUES,
   FIX_SCOPE_HANDOFF_GUARD_VALUES,
@@ -157,7 +154,6 @@ export const SETTINGS_CATALOG = [
   ...PROVIDER_ROLE_SETTING_DEFS,
   ...ROLE_REASONING_EFFORT_SETTING_DEFS,
   ...ROLE_MODEL_TIER_SETTING_DEFS,
-  { key: SETTING_KEYS.ENGAGEMENT_ENGINE, default: "native", options: ENGAGEMENT_ENGINE_VALUES, adminVisible: false, description: "Provider launch policy engine: native asks posse-remote (falling back to this client's policy when the binary cannot answer); js uses this client's policy only, as a kill switch" },
 
   // ── Model selection (empty = use provider tier default) ──────────────────
   ...MODEL_SELECTION_SETTINGS,
@@ -300,8 +296,6 @@ export const SETTINGS_CATALOG = [
 
   // ── Behaviors ────────────────────────────────────────────────────────────
   { key: "auto_merge_completed", default: "false", valueType: "boolean", description: "Auto-merge work items that pass assessment" },
-  { key: "claude_execution_mode", default: "print", options: CLAUDE_EXECUTION_MODE_VALUES, description: "Claude execution mode: print uses claude -p stream-json; interactive uses a PTY session and Claude session/log idle state" },
-  { key: "claude_cli_path",       default: "",      adminVisible: false, description: "Explicit path to Claude CLI binary (empty = auto-detect)" },
   { key: "codex_auth_mode",      default: "oauth", options: CODEX_AUTH_MODE_OPTIONS, description: "Codex auth mode (oauth, api, or auto). oauth/auto never fall back to API keys; api must be explicit." },
   { key: "codex_cli_path",       default: "",      adminVisible: false, description: "Explicit path to Codex CLI binary (empty = auto-detect)" },
   { key: "pre_assess_cmd",       default: "",      description: "Optional shell command to run before assessment" },

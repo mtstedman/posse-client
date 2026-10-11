@@ -53,7 +53,13 @@ async function main() {
       suppressPostMergeEffects: args.suppressPostMergeEffects === true,
       worktreeLockAlreadyHeld: args.worktreeLockAlreadyHeld === true,
       sharedTrunkOperationId: args.sharedTrunkOperationId || null,
+      taskDeadlineMs: Number.isFinite(Number(args.taskDeadlineMs)) ? Number(args.taskDeadlineMs) : null,
       onPhase: (event = {}) => post({ type: "progress", event }),
+    });
+  }
+  if (task === "recoverInterruptedSquash") {
+    return helpers.recoverInterruptedSquash(args.cwd || projectDir, {
+      worktreeLockAlreadyHeld: args.worktreeLockAlreadyHeld === true,
     });
   }
   if (task === "cleanupWiBranch") {

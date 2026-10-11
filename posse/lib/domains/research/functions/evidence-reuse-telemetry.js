@@ -8,17 +8,15 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { AGENT_HANDOFF_PROFILES } from "../../../catalog/handoff.js";
+import { RESEARCH_EVIDENCE_REUSE_OBSERVATIONS } from "../../../catalog/observation.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { recordObservation } from "../../observability/functions/observations.js";
 import { gitCurrentHash } from "../../git/functions/utils.js";
 import { jobAncestorRows } from "../../queue/functions/hash-refs.js";
 import { getSetting } from "../../settings/functions/repository-settings.js";
 
-export const RESEARCH_EVIDENCE_REUSE_OBSERVATIONS = Object.freeze({
-  context: "research.evidence_reuse.context",
-  coverage: "research.evidence_reuse.coverage",
-  prefetch: "research.evidence_reuse.prefetch",
-});
+export { RESEARCH_EVIDENCE_REUSE_OBSERVATIONS } from "../../../catalog/observation.js";
 
 function sha256(value) {
   return crypto.createHash("sha256").update(String(value ?? "")).digest("hex");
@@ -267,7 +265,7 @@ function inheritedEvidenceStatus(packet, db) {
       : []),
   ].map((value) => String(value || "").trim()).filter(Boolean))];
   const closedCandidate = continuity?.source === "terminal_packet"
-    && continuity?.profile === "researcher.pipeline.v1"
+    && continuity?.profile === AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE
     && continuity?.freshness === "fresh"
     && !continuity?.fallback_reason
     && keyFiles.length > 0

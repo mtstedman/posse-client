@@ -36,7 +36,6 @@ import { beginToolInvocation, filterProviderToolUseReplay, finishToolInvocation,
 import { recordPrompt } from "../../../shared/telemetry/functions/logging/prompt-log.js";
 import { recordOutput } from "../../../shared/telemetry/functions/logging/output-log.js";
 import { resolveAtlasExecutionAttachment, withAtlasExecutionPolicySnapshot } from "../../integrations/functions/atlas.js";
-import { provisionAgentLoader, provisionAgentLoaderAsync, provisionSessionLaneLoader, provisionSessionLaneLoaderAsync, assertLoaderClean, assertLoaderCleanAsync } from "../functions/helpers/agent-loader.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import {
   resolvePrimaryExecutionModelName,
@@ -185,15 +184,6 @@ export function sessionContractFingerprint(options = {}, providerName = "") {
   );
   return crypto.createHash("sha256").update(JSON.stringify({
     provider: String(providerName || "").trim().toLowerCase(),
-    ...(String(providerName || "").trim().toLowerCase() === "codex"
-      ? {
-          codexNativeBatchingRequested: effective.nativeBatching !== false,
-          codexNativeBatchingCatalog: String(effective.nativeBatchingCatalog ?? (
-            String(effective.role || "").trim().toLowerCase() === "researcher"
-              ? process.env.POSSE_CODEX_RESEARCH_MODEL_CATALOG || "" : ""
-          )),
-        }
-      : {}),
     role: String(effective.role || "").trim().toLowerCase(),
     disableSystemTools: effective.disableSystemTools === true,
     promptVersion,
@@ -439,12 +429,6 @@ const DEFAULT_DEPS = {
   recordPrompt,
   recordOutput,
   resolveAtlasExecutionAttachment,
-  provisionAgentLoader,
-  provisionAgentLoaderAsync,
-  provisionSessionLaneLoader,
-  provisionSessionLaneLoaderAsync,
-  assertLoaderClean,
-  assertLoaderCleanAsync,
   resolvePrimaryExecutionModelName,
   sanitizeExecutionHintsForRole,
   selectFallbackProvider,
@@ -493,14 +477,18 @@ function buildAccountingStats(stats, {
   outputTruncated = stats.outputTruncated === true,
   outputLimitReason = stats.outputLimitReason || null,
   providerStopCode = null,
+  // The cache counters that belong with inputTokens/outputTokens. An exact
+  // terminal lower bound takes all four from the segment sums.
+  cachedInputTokens = stats.cachedInputTokens,
+  cacheCreationInputTokens = stats.cacheCreationInputTokens,
 } = {}) {
   const measured = inputTokens != null && outputTokens != null;
   return {
     ...stats,
     inputTokens,
     outputTokens,
-    cachedInputTokens: measured ? (stats.cachedInputTokens ?? null) : null,
-    cacheCreationInputTokens: measured ? (stats.cacheCreationInputTokens ?? null) : null,
+    cachedInputTokens: measured ? (cachedInputTokens ?? null) : null,
+    cacheCreationInputTokens: measured ? (cacheCreationInputTokens ?? null) : null,
     reasoningOutputTokens: measured ? (stats.reasoningOutputTokens ?? null) : null,
     outputChars,
     durationMs,
@@ -773,6 +761,7 @@ function agentJobAttachment(opts = {}, context = {}) {
     attemptId: context.attemptId ?? opts.attemptId ?? null,
     agentCallId: context.agentCallId ?? opts.agentCallId ?? null,
     promptChars: opts.promptChars || 0,
+    maxTurns: opts.maxTurns ?? null,
     fallbackReads: opts.fallbackReads ?? null,
     researchWorkBudgetCalls: opts.researchWorkBudgetCalls ?? null,
     assessorMaxToolCalls: opts.assessorMaxToolCalls ?? null,
@@ -935,18 +924,6 @@ export class TrackedProviderClient {
         }
       : {};
     this.deps = { ...DEFAULT_DEPS, ...isolatedAccountingDeps, ...deps };
-    if (Object.prototype.hasOwnProperty.call(deps, "provisionAgentLoader")
-      && !Object.prototype.hasOwnProperty.call(deps, "provisionAgentLoaderAsync")) {
-      this.deps.provisionAgentLoaderAsync = null;
-    }
-    if (Object.prototype.hasOwnProperty.call(deps, "provisionSessionLaneLoader")
-      && !Object.prototype.hasOwnProperty.call(deps, "provisionSessionLaneLoaderAsync")) {
-      this.deps.provisionSessionLaneLoaderAsync = null;
-    }
-    if (Object.prototype.hasOwnProperty.call(deps, "assertLoaderClean")
-      && !Object.prototype.hasOwnProperty.call(deps, "assertLoaderCleanAsync")) {
-      this.deps.assertLoaderCleanAsync = null;
-    }
     this.call = this.call.bind(this);
     this.trackedCall = this.trackedCall.bind(this);
   }
@@ -1015,6 +992,8 @@ export class TrackedProviderClient {
         outputTokens: stats.outputTokens,
         cachedInputTokens: stats.cachedInputTokens,
         cacheCreationInputTokens: stats.cacheCreationInputTokens,
+        cacheCreation5mTokens: stats.cacheCreation5mTokens ?? null,
+        cacheCreation1hTokens: stats.cacheCreation1hTokens ?? null,
         requestContextInputTokens: stats.longContextInputTokens ?? stats.inputTokens,
         durationMs: stats.durationMs,
         usageSource: "aggregate_only",
@@ -1041,6 +1020,13 @@ export class TrackedProviderClient {
         : providerUsageMeasured ? stats.inputTokens : null,
       accountingOutputTokens: exactTerminalLowerBound ? segmentSummary.outputTokens
         : providerUsageMeasured ? stats.outputTokens : null,
+      // The cache counters follow the same source as input/output, so a
+      // lower-bound row prices its segment-sum input with the cache split
+      // those segments measured instead of stale or absent terminal stats.
+      accountingCachedInputTokens: exactTerminalLowerBound ? segmentSummary.cachedInputTokens
+        : providerUsageMeasured ? (stats.cachedInputTokens ?? null) : null,
+      accountingCacheCreationInputTokens: exactTerminalLowerBound ? segmentSummary.cacheCreationInputTokens
+        : providerUsageMeasured ? (stats.cacheCreationInputTokens ?? null) : null,
     };
   }
 
@@ -1833,7 +1819,7 @@ export class TrackedProviderClient {
         error.code = "POSSE_AGENT_DISPATCHER_REQUIRED";
         throw error;
       }
-      const attachment = agentJobAttachment(attemptOpts, {
+      const attachment = agentJobAttachment({ ...attemptOpts, maxTurns: startedMaxTurns }, {
           providerName,
           cwd,
           projectDir: this.worker.projectDir,
@@ -2240,6 +2226,8 @@ export class TrackedProviderClient {
         segmentSummary,
         accountingInputTokens,
         accountingOutputTokens,
+        accountingCachedInputTokens,
+        accountingCacheCreationInputTokens,
       } = this._resolveProviderAccounting({
         agentCallId,
         providerName,
@@ -2368,6 +2356,8 @@ export class TrackedProviderClient {
       const accountingStats = buildAccountingStats(stats, {
         inputTokens: accountingInputTokens,
         outputTokens: accountingOutputTokens,
+        cachedInputTokens: accountingCachedInputTokens,
+        cacheCreationInputTokens: accountingCacheCreationInputTokens,
         outputChars: recordedOutputChars,
         exitCode: terminalProviderError == null ? stats.exitCode : null,
         providerUsageStatus,
@@ -2537,6 +2527,8 @@ export class TrackedProviderClient {
         segmentSummary: failureSegmentSummary,
         accountingInputTokens,
         accountingOutputTokens,
+        accountingCachedInputTokens,
+        accountingCacheCreationInputTokens,
       } = this._resolveProviderAccounting({
         agentCallId,
         providerName,
@@ -2586,6 +2578,8 @@ export class TrackedProviderClient {
       const accountingStats = buildAccountingStats(stats, {
         inputTokens: accountingInputTokens,
         outputTokens: accountingOutputTokens,
+        cachedInputTokens: accountingCachedInputTokens,
+        cacheCreationInputTokens: accountingCacheCreationInputTokens,
         outputChars: recordedOutputChars,
         durationMs: recordedDurationMs,
         exitCode: recordedExitCode,
@@ -2793,16 +2787,10 @@ export class TrackedProviderClient {
     persistJobProvider = true,
   } = {}) {
     const {
-      assertLoaderClean: assertLoaderCleanSync,
-      assertLoaderCleanAsync: assertLoaderCleanAsyncDep,
       getAvailableProviders,
       getObservationContext,
       getProvider,
       getProviderRateLimitState,
-      provisionAgentLoader: provisionAgentLoaderSync,
-      provisionAgentLoaderAsync: provisionAgentLoaderAsyncDep,
-      provisionSessionLaneLoader: provisionSessionLaneLoaderSync,
-      provisionSessionLaneLoaderAsync: provisionSessionLaneLoaderAsyncDep,
       recordObservation,
       resolvePrimaryExecutionModelName,
       resolveAtlasExecutionAttachment,
@@ -3094,29 +3082,6 @@ export class TrackedProviderClient {
     prompt = sessionPrepared.prompt;
     opts = sessionPrepared.opts;
 
-    if (job_id != null && this.worker.projectDir) {
-      await timeProviderSetupPhase("provider.loader_prepare", {
-        role: opts.role,
-        provider: providerName,
-        job_id,
-        work_item_id,
-      }, async () => {
-        const sessionKey = String(providerName || "").toLowerCase() === "claude"
-          ? sessionPrepared.opts?._sessionRecycle?.decision?.key
-          : null;
-        const loaderPath = sessionKey
-          ? await (provisionSessionLaneLoaderAsyncDep
-            ? provisionSessionLaneLoaderAsyncDep(this.worker.projectDir, sessionKey)
-            : provisionSessionLaneLoaderSync(this.worker.projectDir, sessionKey))
-          : await (provisionAgentLoaderAsyncDep
-            ? provisionAgentLoaderAsyncDep(this.worker.projectDir, job_id)
-            : provisionAgentLoaderSync(this.worker.projectDir, job_id));
-        if (assertLoaderCleanAsyncDep) await assertLoaderCleanAsyncDep(loaderPath);
-        else assertLoaderCleanSync(loaderPath);
-        opts = { ...opts, loaderCwd: loaderPath, mcpCwd: opts.cwd || this.worker.projectDir };
-      });
-    }
-
     try {
       const observationContext = {
         work_item_id,
@@ -3194,8 +3159,6 @@ export class TrackedProviderClient {
           } = preReuseOpts;
           const retryOpts = {
             ...modelRetryBaseOpts,
-            // Loader provisioning ran after the pre-reuse snapshot; keep it.
-            ...(opts.loaderCwd ? { loaderCwd: opts.loaderCwd, mcpCwd: opts.mcpCwd } : {}),
             modelName: runtimeFallbackModel,
             _modelFallbackAttempted: true,
           };
@@ -3366,7 +3329,6 @@ export class TrackedProviderClient {
               : sessionlessOpts;
             const fbOpts = {
               ...fallbackBaseOpts,
-              ...(opts.loaderCwd ? { loaderCwd: opts.loaderCwd, mcpCwd: opts.mcpCwd } : {}),
               abortSignal: opts.abortSignal,
               modelName: fbModelName || undefined,
               _fallbackAttempted: true,

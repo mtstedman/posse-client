@@ -17,6 +17,7 @@ import { isProviderQuotaBackoff } from "./shared/quota-reset.js";
 import { providerPauseSettingKey, readProviderPauseRecord, writeProviderPause } from "./provider-pause-state.js";
 import { providerRegistry, optionalProvidersMissingModule, reloadOptionalProvider } from "../classes/registry-singleton.js";
 import { providerRuntimeState } from "../classes/runtime-state-singleton.js";
+import { verifyProviderDispatchCapabilitiesSync } from "../../../shared/native/functions/engagement-client.js";
 import { getDefaultTierModel, PROVIDER_OPTIONS } from "./model-catalog.js";
 import { isProviderEnabledByCatalog } from "./model-catalog-store.js";
 import { resolveEffectiveTierModel } from "./model-catalog-validate.js";
@@ -235,21 +236,6 @@ export function getProvider(role = "dev", providerName = null) {
   const name = providerName || selectProviderName(role);
   const canonicalName = canonicalProviderName(name || "claude");
 
-  if (canonicalName !== "claude" && !providerRegistry.has(canonicalName)) {
-    throw new Error(
-      `Provider "${name}" selected for role "${role}" but not loaded. ` +
-      (canonicalName === "anthropic"
-        ? "Ensure the '@anthropic-ai/sdk' package is installed and ANTHROPIC_API_KEY is configured."
-        : canonicalName === "openai"
-        ? "Ensure the 'openai' package is installed: npm install openai"
-        : canonicalName === "codex"
-          ? "Ensure the Codex CLI is installed and accessible."
-          : canonicalName === "grok"
-            ? "Ensure the 'openai' package is installed and XAI_API_KEY is configured."
-          : `No module found for provider "${name}".`)
-    );
-  }
-
   const provider = providerRegistry.get(canonicalName);
   if (provider) return provider;
 
@@ -366,31 +352,25 @@ export function tierModelName(tier, { providerName, role, jobType } = {}) {
 
 // Node raises ERR_MODULE_NOT_FOUND when a provider's import graph can't be
 // resolved. The message names the unresolved specifier — e.g. "Cannot find
-// package 'agentkeepalive' imported from ...". That specifier is the real
-// culprit, which may be the optional `openai` SDK itself or one of its
-// transitive deps (as happens with a partially-installed node_modules).
+// package 'some-package' imported from ...". Report the actual missing
+// specifier so a damaged Node installation has an actionable diagnostic.
 function missingModuleSpecifier(loadErr) {
   const match = /Cannot find (?:package|module) ['"]([^'"]+)['"]/.exec(loadErr?.message || "");
   return match ? match[1] : null;
 }
 
 // Translate a provider module's load error into an actionable reason. For
-// ERR_MODULE_NOT_FOUND we name the actual missing dependency rather than
-// blaming `openai` unconditionally — otherwise a missing transitive dep sends
-// the user to run `npm install openai`, which is already installed and won't help.
+// ERR_MODULE_NOT_FOUND we name the actual missing dependency.
 function providerLoadErrorReason(canonicalName, loadErr) {
   if (!loadErr) return `provider module "${canonicalName}" not loaded`;
   if (loadErr.code !== "ERR_MODULE_NOT_FOUND") {
     return loadErr.message?.split("\n")[0] || String(loadErr);
   }
   const missing = missingModuleSpecifier(loadErr);
-  if (missing && missing !== "openai") {
+  if (missing) {
     return `${canonicalName} provider dependency "${missing}" not installed (run npm install)`;
   }
-  // The openai SDK itself is missing (or the specifier was unparseable).
-  return canonicalName === "codex"
-    ? "codex provider dependencies not available"
-    : "openai package not installed (npm install openai)";
+  return `${canonicalName} provider dependencies not available (run npm install)`;
 }
 
 // ─── Provider Dependency Self-Heal ──────────────────────────────────────────
@@ -398,10 +378,8 @@ function providerLoadErrorReason(canonicalName, loadErr) {
 /**
  * Optional providers that failed to LOAD at boot because of a missing module
  * (ERR_MODULE_NOT_FOUND) — the one provider-load failure that a dependency
- * install can recover. The common case is the openai SDK's transitive
- * `agentkeepalive` shim being dropped from node_modules by an npm prune/partial
- * install, which hard-fails grok/openai/codex at boot on EVERY boot because the
- * boot dependency check is dryRun and never installs.
+ * install can recover. The boot dependency check is dryRun and cannot repair
+ * an incomplete Node installation by itself.
  *
  * @returns {string[]} canonical provider names
  */
@@ -476,6 +454,13 @@ export function isProviderReady(providerName, capability = null) {
   if (!providerRegistry.has(canonicalName)) {
     const loadErr = providerRegistry.getLoadError(canonicalName);
     return { ready: false, reason: providerLoadErrorReason(canonicalName, loadErr) };
+  }
+  if (["anthropic", "openai", "grok"].includes(canonicalName)) {
+    try {
+      verifyProviderDispatchCapabilitiesSync(canonicalName);
+    } catch (error) {
+      return { ready: false, reason: String(error?.message || error) };
+    }
   }
   if (capability === "images" && !isImageCapableProvider(canonicalName)) {
     return { ready: false, reason: `provider "${providerName}" does not support image generation` };
@@ -788,9 +773,7 @@ export async function getConfiguredProviderUsageAsync(opts = {}) {
   return results.filter(Boolean);
 }
 
-// Shared head/tail for the prime-auth twins: they differ only in which warm
-// call they make (sync warmOauthSession vs async warmOauthSessionAsync with
-// interactive options).
+// Shared result shape for cached and asynchronous native auth warmup.
 function alreadyPrimedResult() {
   return {
     attempted: false,
@@ -812,28 +795,15 @@ function finalizePrimeAuthResults(providerResults) {
   };
 }
 
-export function primeProviderUsageAuth({ cwd = null, force = false, timeoutMs = 20_000 } = {}) {
-  if (providerRuntimeState.isUsageAuthPrimed() && !force) return alreadyPrimedResult();
-
-  const configuredProviders = getEffectiveUsageProviderSet();
-  const providerResults = [];
-  const claudeProvider = providerRegistry.get("claude");
-  if (configuredProviders.has("claude") && typeof claudeProvider?.warmOauthSession === "function") {
-    providerResults.push({
-      provider: "claude",
-      ...(claudeProvider.warmOauthSession({ cwd, timeoutMs }) || { attempted: false, ok: false, skipped: "unknown" }),
-    });
-  }
-
-  return finalizePrimeAuthResults(providerResults);
+export function primeProviderUsageAuth() {
+  // Provider dispatch is asynchronous; synchronous usage reads do not prime auth.
+  return { attempted: false, ok: false, skipped: "async-native-required", providers: [] };
 }
 
 export async function primeProviderUsageAuthAsync({
   cwd = null,
   force = false,
   timeoutMs = 20_000,
-  preferInteractive = false,
-  interactiveBackend = null,
 } = {}) {
   if (providerRuntimeState.isUsageAuthPrimed() && !force) return alreadyPrimedResult();
 
@@ -847,14 +817,7 @@ export async function primeProviderUsageAuthAsync({
         ...(await claudeProvider.warmOauthSessionAsync({
           cwd,
           timeoutMs,
-          preferInteractive,
-          interactiveBackend,
         }) || { attempted: false, ok: false, skipped: "unknown" }),
-      });
-    } else if (typeof claudeProvider?.warmOauthSession === "function") {
-      providerResults.push({
-        provider: "claude",
-        ...(claudeProvider.warmOauthSession({ cwd, timeoutMs }) || { attempted: false, ok: false, skipped: "unknown" }),
       });
     }
   }

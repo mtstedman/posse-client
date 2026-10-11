@@ -218,10 +218,17 @@ export function summarizeUsageSegments(agentCallId, {
   const contiguous = segments.every((segment, index) => Number(segment.request_ordinal) === index + 1);
   let exact = exactSegmentState && contiguous;
   let mismatch = exactSegmentState && !contiguous;
+  // The cache-write TTL lanes are summed only when every segment measured
+  // them; otherwise the call keeps the unsplit pricing default.
+  const lanesMeasured = segments.length > 0 && segments.every((segment) => (
+    segment.cache_creation_5m_input_tokens != null || segment.cache_creation_1h_input_tokens != null
+  ));
   const totals = {
     inputTokens: 0,
     cachedInputTokens: 0,
     cacheCreationInputTokens: 0,
+    cacheCreation5mTokens: lanesMeasured ? 0 : null,
+    cacheCreation1hTokens: lanesMeasured ? 0 : null,
     outputTokens: 0,
     longContextTierInputTokens: 0,
     durationMs: 0,
@@ -235,6 +242,10 @@ export function summarizeUsageSegments(agentCallId, {
     totals.inputTokens += count(segment.input_tokens);
     totals.cachedInputTokens += count(segment.cached_input_tokens);
     totals.cacheCreationInputTokens += count(segment.cache_creation_input_tokens);
+    if (lanesMeasured) {
+      totals.cacheCreation5mTokens += count(segment.cache_creation_5m_input_tokens);
+      totals.cacheCreation1hTokens += count(segment.cache_creation_1h_input_tokens);
+    }
     totals.outputTokens += count(segment.output_tokens);
     if (segment.duration_ms != null) {
       durationObserved = true;
@@ -346,6 +357,8 @@ function estimatedAggregateCost(call, totals, longContextTierInputTokens = null)
     outputTokens: totals.outputTokens,
     cachedInputTokens: totals.cachedInputTokens,
     cacheCreationInputTokens: totals.cacheCreationInputTokens,
+    cacheCreation5mTokens: totals.cacheCreation5mTokens ?? null,
+    cacheCreation1hTokens: totals.cacheCreation1hTokens ?? null,
     knownCostUsd: call.cost_estimate_usd ?? call.costEstimateUsd,
     longContextInputTokens: longContextTierInputTokens,
   });
@@ -413,6 +426,8 @@ export function resolveCanonicalCallAccounting(call = {}, {
         outputTokens,
         cachedInputTokens,
         cacheCreationInputTokens,
+        cacheCreation5mTokens: segments.cacheCreation5mTokens,
+        cacheCreation1hTokens: segments.cacheCreation1hTokens,
       }, longContextTierInputTokens)
       : null;
     // Completion persists the exact cost and billable-input result calculated

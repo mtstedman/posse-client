@@ -1,8 +1,11 @@
-import { normalizeGrokImageModelName } from "../model-catalog.js";
+import { imageModelNativeFormats, normalizeGrokImageModelName } from "../model-catalog.js";
 
 export function buildGrokImageGenerateParams(imageModel, args = {}, ext = ".png") {
   const normalizedImageModel = normalizeGrokImageModelName(imageModel);
-  const isOpenAiImage = normalizedImageModel.startsWith("gpt-image");
+  const nativeFormats = imageModelNativeFormats(normalizedImageModel) || ["png"];
+  // Only the gpt-image family returns more than PNG, and it takes the OpenAI
+  // request shape with the format as an output_format parameter.
+  const isOpenAiImage = nativeFormats.length > 1;
   const normalizedQuality = ({ hd: "high", standard: "medium", low: "low" }[args.quality] || args.quality || "medium");
   if (isOpenAiImage) {
     const params = {
@@ -14,7 +17,7 @@ export function buildGrokImageGenerateParams(imageModel, args = {}, ext = ".png"
       quality: normalizedQuality,
     };
     const formatMap = { ".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".webp": "webp" };
-    params.output_format = formatMap[ext] || "png";
+    params.output_format = nativeFormats.includes(formatMap[ext]) ? formatMap[ext] : "png";
     return { params, quality: normalizedQuality };
   }
   const params = {

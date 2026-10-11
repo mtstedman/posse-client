@@ -21,6 +21,35 @@ export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment usi
 export const HUMAN_INPUT_FREE_TEXT_CHOICE_ID = "free_text";
 export const HUMAN_INPUT_FREE_TEXT_MAX_CHARS = 8000;
 export const HUMAN_GATE_STATES = Object.freeze(["open", "resolving", "resolved", "superseded"]);
+// Legacy review types are projected into the same typed question kind by the
+// queue and the bridge. Keep the mapping in one catalog so both agree.
+export const QUESTION_KIND_BY_REVIEW_TYPE = Object.freeze({
+  needs_review: "assessment_review",
+  assessment_parse_error: "assessment_review",
+  assessment_evidence_missing: "assessment_transport_recovery",
+  unknown_verdict: "assessment_review",
+  replan_limit: "assessment_review",
+  assessment_transport_error: "assessment_transport_recovery",
+  assessment_retry_limit: "assessment_retry_limit",
+  unexecuted_replan_limit: "unexecuted_replan_recovery",
+  blocked_recovery: "blocked_recovery",
+  partial_work_recovery: "partial_work_recovery",
+  dead_letter_recovery: "dead_letter_recovery",
+  stall_exhausted_recovery: "dead_letter_recovery",
+  research_dead_letter_recovery: "dead_letter_recovery",
+  oneshot_dead_letter_recovery: "dead_letter_recovery",
+  artifact_routing_admin: "artifact_routing_admin",
+  shared_trunk_provenance: "shared_trunk_provenance",
+  work_item_failure_disposition: "work_item_failure_disposition",
+  cross_wi_upstream_disposition: "cross_wi_upstream_disposition",
+  scope_expansion_request: "file_scope_approval",
+});
+export function questionKindForReviewType(value) {
+  const reviewType = String(value || "");
+  return Object.hasOwn(QUESTION_KIND_BY_REVIEW_TYPE, reviewType)
+    ? QUESTION_KIND_BY_REVIEW_TYPE[reviewType]
+    : null;
+}
 export const HUMAN_GATE_RECONCILE_REASONS = Object.freeze({
   CLOSED_CONTRACT_JOB: "closed_contract_job",
   TERMINAL_WORK_ITEM: "terminal_work_item",
@@ -34,6 +63,24 @@ export const HUMAN_GATE_RECONCILE_REASONS = Object.freeze({
   ABANDONED_RESOLVER: "abandoned_resolver",
   TERMINAL_GATE_JOB: "terminal_gate_job",
 });
+// Why a blocked_recovery gate's assessment could not finish. The class picks
+// what its retry replays: an infrastructure failure reassesses the preserved
+// candidate, while missing bound evidence resumes the implementation, the only
+// owner that can regenerate it.
+export const ASSESSMENT_FAILURE_CLASSES = Object.freeze({
+  INFRASTRUCTURE: "assessment_infrastructure",
+  SOURCE_MISSING: "assessment_source_missing",
+});
+// Stamped on `_blocked_recovery.retry_scope` by a blocked_recovery retry.
+export const BLOCKED_RECOVERY_RETRY_SCOPES = Object.freeze({
+  ASSESSMENT: "assessment",
+  IMPLEMENTATION: "implementation",
+});
+// A blocked job's verification is waived only by the waiver's own words.
+// Skip/cancel-style words cancel the job on a legacy list that offers "skip"
+// and are refused on every other list; they never waive.
+export const BLOCKED_RECOVERY_WAIVER_WORDS = /\b(?:waive[sd]?|waiver)\b/;
+export const BLOCKED_RECOVERY_SKIP_INTENT_WORDS = /\b(?:skip|skipped|ignore|ignored|bypass|bypassed|cancel|canceled|cancelled|unblock)\b/;
 export const SCOPE_APPROVAL_MODES = Object.freeze({ DEFAULT: "default", AUTO: "auto" });
 export const SCOPE_APPROVAL_MODE_VALUES = Object.freeze(Object.values(SCOPE_APPROVAL_MODES));
 export const SCOPE_MODE_APPROVAL_SOURCE = "scope_mode_auto";

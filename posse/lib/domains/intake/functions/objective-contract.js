@@ -1,3 +1,4 @@
+import { INTAKE_TERMINAL_OUTPUTS, INTAKE_HINT_SOURCES } from "../../../catalog/intake.js";
 import {
   hasDirectQuestionIntent,
   hasFunctionalFailureIntent,
@@ -8,8 +9,8 @@ import {
   hasRepoMutationIntent,
 } from "./implementation-intent.js";
 
-const VALID_OUTPUTS = new Set(["repo", "artifact", "question_only"]);
-const VALID_SOURCES = new Set(["explicit", "inferred"]);
+const VALID_OUTPUTS = new Set(INTAKE_TERMINAL_OUTPUTS);
+const VALID_SOURCES = new Set(INTAKE_HINT_SOURCES);
 
 export function parseWorkItemMetadata(workItem = null) {
   try {

@@ -1,19 +1,44 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import {
+  VOLATILE_CHECKOUT_DIR_PREFIXES,
+  VOLATILE_CHECKOUT_SUBDIRS,
+  VOLATILE_TEST_OUTPUT_PATTERNS,
+} from "../../../../catalog/verification.js";
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// A disposable checkout under the system temporary directory, by its literal
+// and its resolved path (macOS /var is /private/var), with either separator.
+const TEMP_CHECKOUT_PATH = (() => {
+  const roots = new Set([os.tmpdir()]);
+  try { roots.add(fs.realpathSync(os.tmpdir())); } catch { /* the literal path still matches */ }
+  const pattern = [...roots]
+    .map((root) => root.replace(/[\\/]+$/u, "").split(/[\\/]/u).map(escapeRegExp).join("[\\\\/]"))
+    .join("|");
+  const prefixes = VOLATILE_CHECKOUT_DIR_PREFIXES.map(escapeRegExp).join("|");
+  const subdirs = VOLATILE_CHECKOUT_SUBDIRS.map(escapeRegExp).join("|");
+  return new RegExp(
+    `(?:${pattern})[\\\\/](?:${prefixes})[A-Za-z0-9._-]+[\\\\/](?:(?:${subdirs})[\\\\/])?`,
+    process.platform === "win32" ? "gi" : "g",
+  );
+})();
 
 export function normalizeFailureFingerprintText(value) {
-  return String(value || "")
+  let text = String(value || "")
     .replace(/\x1b\[[0-9;]*m/g, "")
     .replace(/\r\n?/g, "\n")
     .replace(/\[REDACTED:[^\]]+\][\\/]/gi, "")
     .replace(/(?:[A-Za-z]:)?[^\s"'`()\[\]{}]*\.?posse-worktrees[\\/]wi-\d+[\\/]/gi, "")
+    .replace(TEMP_CHECKOUT_PATH, "")
     .replace(/(\.(?:[cm]?[jt]sx?|php|py|rb|go|rs|java|cs|cpp|c|h)):\d+(?::\d+)?/gi, "$1:<line>")
     .replace(/(\.(?:[cm]?[jt]sx?|php|py|rb|go|rs|java|cs|cpp|c|h))\(\d+(?::\d+)?\)/gi, "$1(<line>)")
-    .replace(/\bon line \d+\b/gi, "on line <line>")
-    .replace(/^([✔✖▶].*) \(\d+(?:\.\d+)?ms\)$/gm, "$1 (<duration>)")
-    .replace(/^((?:ℹ|#) duration_ms) \d+(?:\.\d+)?$/gm, "$1 <duration>")
-    .replace(/^(Ran \d+ tests? in) \d+(?:\.\d+)?s$/gm, "$1 <duration>")
-    .replace(/[ \t]+$/gm, "")
-    .trim();
+    .replace(/\bon line \d+\b/gi, "on line <line>");
+  for (const [pattern, replacement] of VOLATILE_TEST_OUTPUT_PATTERNS) text = text.replace(pattern, replacement);
+  return text.replace(/[ \t]+$/gm, "").trim();
 }
 
 // Parse only a complete, single Node spec report. Nested/suite failures and
@@ -142,8 +167,40 @@ export function testFailureFingerprint(result = {}) {
   ])).digest("hex");
 }
 
+/**
+ * One check's failure identity, or null when the check passed or its output
+ * cannot be compared (truncated, or a structured report that did not parse).
+ */
+export function checkRunFailureFingerprint(run = {}) {
+  if (!run || run.status === "passed" || run.stdout_truncated || run.stderr_truncated) return null;
+  if (looksLikeStructuredTestReport(run.stdout) && !structuredFailureReport(run.stdout)) return null;
+  return testFailureFingerprint(run);
+}
+
+/**
+ * A multi-check receipt's failure identity: its non-passed checks' own
+ * identities, by check. Output from a passing check (a linter's timing, a
+ * package manager's "Done in") never decides whether a failure persisted.
+ * Undefined for a receipt that predates per-check identities; null when a
+ * non-passed check cannot be compared.
+ */
+export function checkRunsFailureFingerprint(checkRuns) {
+  if (!Array.isArray(checkRuns) || !checkRuns.some((run) => run && Object.hasOwn(run, "failure_fingerprint"))) return undefined;
+  const pairs = [];
+  for (const run of checkRuns) {
+    if (run?.status === "passed") continue;
+    if (!run?.failure_fingerprint) return null;
+    pairs.push([String(run.check_id || run.command || ""), run.failure_fingerprint]);
+  }
+  if (pairs.length === 0) return null;
+  pairs.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  return createHash("sha256").update(JSON.stringify(["check_runs_v1", pairs])).digest("hex");
+}
+
 export function comparableTestFailureFingerprint(receipt) {
   if (!receipt || typeof receipt !== "object") return null;
+  const byCheck = checkRunsFailureFingerprint(receipt.check_runs);
+  if (byCheck !== undefined) return byCheck;
   if (receipt.stdout_truncated || receipt.stderr_truncated) return null;
   // Recompute old receipts from immutable evidence; do not rewrite artifacts
   // or compare an old raw-output hash against a new structured hash.
@@ -154,6 +211,45 @@ export function comparableTestFailureFingerprint(receipt) {
     return testFailureFingerprint(receipt);
   }
   return receipt.failure_fingerprint || null;
+}
+
+function coversBaselineCases(postCounts, baselineCounts) {
+  const post = Number(postCounts?.total);
+  const baseline = Number(baselineCounts?.total);
+  return Number.isFinite(post) && post > 0 && Number.isFinite(baseline) && post >= baseline;
+}
+
+/**
+ * Whether a failure that predates the change still ran what it ran before:
+ * both runs failed the same way, and the run after the change reported at
+ * least as many cases as before, and more than none. A runner that stops at
+ * its first failure, or output without a case count, establishes nothing.
+ */
+export function debtCoverageEstablished(post, baselineCheck) {
+  if (post?.status !== "failed" || baselineCheck?.status !== "failed") return false;
+  const identity = comparableTestFailureFingerprint(post);
+  return !!identity
+    && identity === comparableTestFailureFingerprint(baselineCheck)
+    && coversBaselineCases(post.test_counts, baselineCheck.test_counts);
+}
+
+/**
+ * The same, for a single-check receipt whose debt was attributed by rerunning
+ * on the lineage base: with the change's scope removed (one declared run), or
+ * file by file (changed test files as the plan).
+ */
+export function attributedDebtCoverageEstablished(post) {
+  const attribution = post?.baseline_attribution;
+  if (post?.status !== "failed" || attribution?.debt_only !== true) return false;
+  if (Array.isArray(attribution.files)) {
+    return attribution.files.length > 0 && attribution.files.every((file) => file.delta === "persistent_failure"
+      && coversBaselineCases(file.test_counts, file.baseline_test_counts));
+  }
+  return debtCoverageEstablished(post, {
+    status: attribution.baseline_status,
+    test_counts: attribution.baseline_test_counts,
+    failure_fingerprint: attribution.baseline_failure_fingerprint,
+  });
 }
 
 export function renderTestFailureSummary(receipt) {

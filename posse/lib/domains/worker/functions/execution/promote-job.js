@@ -28,7 +28,7 @@ import { looksLikeFileDestination, normalizeRootRelativePromoteDest, validatePro
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
 import { logBadInputFailure } from "./bad-input.js";
 import { activeSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
-import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { EVENT_TYPES, EVENT_ACTORS, PROMOTE_SOURCE_PICK_RULES } from "../../../../catalog/event.js";
 import { LEASE_HOLDING_STATUSES } from "../../../../catalog/job.js";
 import { assertPromoteCopyPlan, copyPromoteFileSync } from "./promote-files.js";
 
@@ -154,13 +154,20 @@ function listSourceFiles(sourceDir) {
   return files;
 }
 
-/** Resolve duplicate basenames before copying to a single destination. */
-export function selectPromoteSourceFiles(files, { sourceDir, namedFiles = [], onPick = () => {} } = {}) {
-  const declared = Array.isArray(namedFiles) ? namedFiles : [];
+/**
+ * Resolve duplicate basenames before copying to a single destination. A
+ * declared path matches one file exactly, never by suffix: resolved against
+ * the project (absolute or `.posse/resources/...` forms) or equal to the
+ * file's path under the output root.
+ */
+export function selectPromoteSourceFiles(files, { sourceDir, projectDir = null, namedFiles = [], onPick = () => {} } = {}) {
+  const declared = (Array.isArray(namedFiles) ? namedFiles : [])
+    .map((raw) => String(raw || "").trim().replace(/\\/g, "/"))
+    .filter(Boolean);
   const isDeclared = (file) => declared.some((raw) => {
-    const normalized = String(raw || "").replace(/\\/g, "/");
-    return normalized === file.relative || normalized === file.full.replace(/\\/g, "/")
-      || normalized.endsWith(`/${file.relative}`);
+    if (path.posix.normalize(raw) === file.relative) return true;
+    const resolved = projectDir ? path.resolve(projectDir, raw) : path.isAbsolute(raw) ? path.resolve(raw) : null;
+    return resolved === path.resolve(file.full);
   });
   const byName = new Map();
   for (const file of files) {
@@ -183,16 +190,17 @@ export function selectPromoteSourceFiles(files, { sourceDir, namedFiles = [], on
       copies.find(isDeclared) || copies.find((file) => file.relative === name) || copies[0]
     ));
     let pick = candidates.length === 1 ? candidates[0] : null;
+    let rule = pick ? PROMOTE_SOURCE_PICK_RULES.IDENTICAL_CONTENT : null;
     if (!pick) {
       const named = candidates.filter(isDeclared);
-      if (named.length === 1) pick = named[0];
+      if (named.length === 1) [pick, rule] = [named[0], PROMOTE_SOURCE_PICK_RULES.DECLARED];
     }
     if (!pick) {
       const topLevel = candidates.filter((file) => file.relative === name);
-      if (topLevel.length === 1) pick = topLevel[0];
+      if (topLevel.length === 1) [pick, rule] = [topLevel[0], PROMOTE_SOURCE_PICK_RULES.TOP_LEVEL];
     }
     if (!pick) throw new Error(`Promote source "${name}" is ambiguous in ${sourceDir}: ${matches.map((file) => file.relative).join(", ")}`);
-    onPick({ name, selected: pick.relative, alternatives: matches.map((file) => file.relative) });
+    onPick({ name, selected: pick.relative, alternatives: matches.map((file) => file.relative), rule });
     selected.push(pick);
   }
   return selected;
@@ -449,8 +457,20 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
       const sourceArtificer = findSourceArtificer(job, sourceDir, [pattern]);
       const selectedFiles = selectPromoteSourceFiles(sourceFiles, {
         sourceDir,
+        projectDir: worker.projectDir,
         namedFiles: sourceArtificer?.payload?.files_to_create || [],
-        onPick: (pick) => worker.emit(job.id, `${C.yellow}[promote]${C.reset} selected ${pick.selected} for ${pick.name}; alternatives: ${pick.alternatives.join(", ")}`),
+        onPick: (pick) => {
+          worker.emit(job.id, `${C.yellow}[promote]${C.reset} selected ${pick.selected} for ${pick.name} (${pick.rule}); alternatives: ${pick.alternatives.join(", ")}`);
+          logEvent({
+            work_item_id: job.work_item_id,
+            job_id: job.id,
+            attempt_id: attempt.attempt.id,
+            event_type: EVENT_TYPES.JOB_PROMOTE_SOURCE_SELECTED,
+            actor_type: EVENT_ACTORS.WORKER,
+            message: `Promote selected ${pick.selected} for ${pick.name} by ${pick.rule}`,
+            event_json: JSON.stringify({ pattern, ...pick }),
+          });
+        },
       });
       if (explicitFileDest && selectedFiles.length > 1) {
         throw new Error(`Promote mapping "${pattern}" matched ${selectedFiles.length} files but destination is a single file: ${resolvedDest}`);

@@ -5,6 +5,7 @@
 
 import { isPermanentProviderRuntimeBlock } from "./block-reason.js";
 import { providerTurnLimitMode, TURN_LIMIT_MODES } from "../../../../catalog/provider.js";
+import { providerErrorSource } from "../../../providers/functions/shared/api-resilience.js";
 
 export function buildPromptExcerpt(text = "", maxChars = 1200) {
   const value = String(text || "").trim();
@@ -221,6 +222,10 @@ export function buildFailureDiagnosticsArtifact(errOrMsg, attemptCount, { provid
     sections.push("", `### Tool Calls (${details.toolUses.length})`, ...toolLines);
   }
   if (details.stats) {
+    // The turn limit belongs to the provider that ran the failed call. A
+    // runtime fallback can run a different provider than the job's, so the
+    // job provider is only the last resort.
+    const callProvider = providerErrorSource(errOrMsg) || details.stats.provider || providerName;
     sections.push("", "### Call Stats", JSON.stringify({
       exit_code: details.stats.exitCode ?? null,
       duration_ms: details.stats.durationMs ?? null,
@@ -230,7 +235,7 @@ export function buildFailureDiagnosticsArtifact(errOrMsg, attemptCount, { provid
       model_name: details.stats.modelName ?? null,
       max_turns: details.stats.maxTurns ?? null,
       num_turns: details.stats.numTurns ?? null,
-      turn_limit_mode: providerTurnLimitMode(providerName || details.stats.provider),
+      turn_limit_mode: providerTurnLimitMode(callProvider),
     }, null, 2));
   }
 

@@ -4,6 +4,7 @@ import { sessionJoinRequest } from "../../pairing/functions/join-folder.js";
 import { collectSessionView, formatSessionViewLines } from "../../pairing/functions/session-view.js";
 import { installCliWarningFilter } from "./warnings.js";
 import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
+import { INTAKE_RESPONSE_SHAPE_CHOICES } from "../../../catalog/intake.js";
 
 installCliWarningFilter();
 
@@ -65,7 +66,6 @@ import path from "path";
 import { getDb, closeDb } from "../../../shared/storage/functions/index.js";
 import { flushEventsNow } from "../../queue/functions/events.js";
 import { spawnSync } from "child_process";
-import { findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 import { editorCommandLabel, parseEditorCommand, resolveEditorCommand } from "./editor.js";
 import { initArtifactRootsAsync, ensureArtifactDirs, wiScopeId, contextDir, isArtifactMode, getArtifactProtocol, getResolvedImageProtocol, artifactsDir, pruneEmptyArtifactDirsAsync } from "../../artifacts/functions/index.js";
 import {
@@ -121,7 +121,6 @@ import { modelTierColor, statusColor, statusIcon } from "../../ui/functions/disp
 import { computeJobProgressStats } from "../../ui/functions/display/helpers/job-status.js";
 import { roleBrandColor } from "../../ui/functions/display/helpers/brand.js";
 import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
-import { getCatalogRuntimeFallbackInt } from "../../settings/functions/catalog.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { configureRunTelemetry } from "../../../shared/telemetry/functions/run-telemetry.js";
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
@@ -136,7 +135,8 @@ import {
   shouldRefreshContextAfterCommand,
 } from "./command-bootstrap-policy.js";
 import { dispatchCommand } from "./dispatch.js";
-import { assertGitIdentityChecks } from "./git-readiness.js";
+import { BOOT_GIT_PROBE_TIMEOUT_MS, createGitReadiness } from "./git-readiness.js";
+import { printCommandUsage, printCommandHelp, printGlobalHelp } from "./command-help.js";
 import {
   getCommandPositionalArgs,
   hasArgFlag,
@@ -165,8 +165,7 @@ import {
 } from "../../intake/functions/input-contexts.js";
 import { inferWiMode, resolveWorkItemMode } from "../../intake/functions/mode-inference.js";
 import { researchBudgetMetadata, researchPayload } from "../../research/functions/payload.js";
-import { atlasV2UsageSummary } from "./atlas-v2-help.js";
-import { buildRuntimeEnv, getRuntimeDbPath } from "../../runtime/functions/paths.js";
+import { buildRuntimeEnv } from "../../runtime/functions/paths.js";
 import { formatClientProvenance, resolveClientProvenance } from "../../runtime/functions/client-provenance.js";
 import { clearColdIndex as clearColdIndexImpl } from "./cold-index.js";
 import {
@@ -240,8 +239,6 @@ import {
 } from "../../git/functions/admin-git.js";
 import { resolveTargetBranch, resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
 import { mergeFailureDiagnostics } from "../../git/functions/merge-failure-diagnostics.js";
-import { GIT_OPERATION_TIMEOUT_MS, gitExecAsync, isGitCommandFailure } from "../../git/functions/utils.js";
-import { ensureRestrictivePushRefspecsAsync, remotePushConfigsAreClearlyRestrictive } from "../../git/functions/push-guard.js";
 import { hasExplicitOneshotIntent, normalizeIntakeHints, rebaseIntakeHintsForMode } from "../../intake/functions/hints.js";
 import {
   collectHandledSuggestionKeys,
@@ -315,263 +312,17 @@ function maybeAnnounceAutoMergeSetting() {
   console.log(`  ${C.dim}Completed WI branches will be merged during wrap-up unless that setting is disabled.${C.reset}\n`);
 }
 
-// Per-process cache: a command's PATH location does not change mid-run.
-const _commandOnPathCache = new Map();
-
-async function commandOnPath(commandName) {
-  if (_commandOnPathCache.has(commandName)) {
-    return _commandOnPathCache.get(commandName);
-  }
-  const ok = findCommandOnPath(commandName) !== null;
-  _commandOnPathCache.set(commandName, ok);
-  return ok;
-}
-
-async function posseAliasDiagnostic() {
-  if (await commandOnPath("posse")) return "";
-  if (!(await commandOnPath("claude-org"))) return "";
-  return `  ${C.yellow}Alias notice:${C.reset} legacy command ${C.cyan}claude-org${C.reset} is on PATH, but ${C.cyan}posse${C.reset} is not. Re-run the installer or npm link this package to add the alias.\n`;
-}
-
-const BOOT_GIT_PROBE_TIMEOUT_MS = GIT_OPERATION_TIMEOUT_MS;
-const BOOT_PUSH_GUARD_TIMEOUT_MS = 2_500;
-
-function firstGitErrorLine(err) {
-  return String(err?.stderr || err?.message || err || "unknown")
-    .split(/\r?\n/)
-    .find((line) => line.trim()) || "unknown";
-}
-
-async function ensureGitRepositoryInitialized({ verbose = false } = {}) {
-  // Repository bootstrap runs for intake/admin commands that do not own native
-  // Git readiness, so it uses the direct system-Git adapter: a fresh or
-  // unauthenticated checkout must still be able to create its repository.
-  try {
-    await adminGitExecAsync(["rev-parse", "--git-dir"], PROJECT_DIR, {
-      timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
-      maxBuffer: 1024 * 128,
-    });
-    return { initialized: false };
-  } catch (err) {
-    // Only git itself saying "not a repository" may trigger init. A probe
-    // that could not run (git missing, timeout) must not re-initialize an
-    // existing repo; the admin adapter marks those as command failures too.
-    if (!isGitCommandFailure(err) || err?.killed === true || typeof err?.syscall === "string") {
-      throw new Error(`git availability probe failed (not a missing repo): ${firstGitErrorLine(err)}`);
-    }
-    // First run in a fresh directory: create the local repository before
-    // writing Posse runtime files so ignore rules can be staged for HEAD.
-  }
-
-  if (verbose) {
-    console.log(`\n  ${C.yellow}${PROJECT_DIR} is not a git repository — initializing one.${C.reset}`);
-  }
-  try {
-    await adminGitExecAsync(["init"], PROJECT_DIR, {
-      timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
-      maxBuffer: 1024 * 1024,
-    });
-  } catch (err) {
-    throw new Error(`failed to git init: ${firstGitErrorLine(err)}`);
-  }
-  if (verbose) {
-    console.log(`  ${C.green}Initialized git repo.${C.reset}`);
-  }
-  return { initialized: true };
-}
-
-async function assertGitRepositoryExists() {
-  try {
-    await adminGitExecAsync(["rev-parse", "--git-dir"], PROJECT_DIR, {
-      timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
-      maxBuffer: 1024 * 128,
-    });
-  } catch (err) {
-    throw new Error(`Git repository required for ${PROJECT_DIR}; only posse add or posse go initializes one: ${firstGitErrorLine(err)}`);
-  }
-}
-
-async function ensureSnapshotPushRefsGuarded({ verbose = false, timeoutMs = BOOT_PUSH_GUARD_TIMEOUT_MS } = {}) {
-  if (await remotePushConfigsAreClearlyRestrictive(PROJECT_DIR, {
-    timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
-    gitExecAsyncFn: adminGitExecAsync,
-  })) {
-    return;
-  }
-  try {
-    const changed = await ensureRestrictivePushRefspecsAsync(PROJECT_DIR, {
-      timeoutMs,
-      bypassNativeBridge: true,
-    });
-    if (verbose && changed.length > 0) {
-      console.log(`  ${C.dim}Restricted git push refspecs to protect Posse recovery snapshots.${C.reset}`);
-    }
-  } catch (err) {
-    if (verbose) {
-      console.log(`  ${C.yellow}Could not verify git push refspec safety: ${err?.message || String(err)}${C.reset}`);
-    }
-  }
-}
-
-/**
- * Ensure the project directory is a git repo with at least one commit.
- * Worktrees require a valid HEAD to branch from. Throws with a clear message
- * if the repo is unusable, or auto-creates an initial commit if the repo
- * exists but is empty (no commits yet).
- *
- * Initializes a missing repo before probing HEAD and user identity. The HEAD
- * and identity checks still run in parallel so the boot spinner is not blocked
- * by serial git calls once repository presence is settled.
- */
-async function ensureGitReady() {
-  const tryGit = async (args) => {
-    try {
-      const stdout = await gitExecAsync(args, PROJECT_DIR, {
-        timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
-        maxBuffer: 1024 * 1024,
-      });
-      return { ok: true, stdout: String(stdout || "").trim() };
-    } catch (err) {
-      return { ok: false, error: err };
-    }
-  };
-
-  const repoCheck = await tryGit(["rev-parse", "--git-dir"]);
-  if (!repoCheck.ok) {
-    if (COMMAND !== "go") {
-      throw new Error(`Git repository required for ${PROJECT_DIR}; only posse add or posse go initializes one: ${firstGitErrorLine(repoCheck.error)}`);
-    }
-    if (!isGitCommandFailure(repoCheck.error)) {
-      throw new Error(`git availability probe failed (not a missing repo): ${firstGitErrorLine(repoCheck.error)}`);
-    }
-    const initCheck = await tryGit(["init"]);
-    if (!initCheck.ok) {
-      throw new Error(`could not initialize git repository: ${firstGitErrorLine(initCheck.error)}`);
-    }
-    await ensurePosseRuntimeIgnoresAsync(PROJECT_DIR);
-  }
-
-  // rev-parse HEAD confirms HEAD exists. Run this in parallel with the
-  // user.name / user.email probes.
-  const [headCheck, nameCheck, emailCheck] = await Promise.all([
-    tryGit(["rev-parse", "HEAD"]),
-    tryGit(["config", "user.name"]),
-    tryGit(["config", "user.email"]),
-  ]);
-  assertGitIdentityChecks(nameCheck, emailCheck);
-  if (!headCheck.ok) {
-    // Repo exists but has no commits — create an initial empty commit so HEAD is valid
-    console.log(`\n  ${C.yellow}Git repo has no commits. Creating initial commit so worktrees can branch from HEAD...${C.reset}`);
-    const git = async (args) => {
-      const result = await tryGit(args);
-      if (!result.ok) throw result.error;
-      return result.stdout;
-    };
-    await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR, { git });
-    const commitResult = await tryGit([
-      "commit",
-      "--allow-empty",
-      "-m",
-      "chore: initial commit (posse bootstrap)",
-    ]);
-    if (!commitResult.ok) {
-      throw new Error(`could not create initial commit: ${String(commitResult.error?.message || commitResult.error || "unknown").split("\n")[0]}`);
-    }
-    console.log(`  ${C.green}Initial commit created.${C.reset}\n`);
-  }
-  await ensureSnapshotPushRefsGuarded();
-}
-
-/**
- * First-run setup check. Auto-initializes a missing git repo and creates the
- * initial commit when HEAD is missing — no confirmation prompt, so `posse go`
- * works the first time in a fresh directory. Only missing user identity still
- * prompts (interactive) or aborts (non-interactive), since it can't be derived.
- * Returns true if the repo is ready to proceed, false to abort cmdRun.
- */
-async function ensureRepoSetupConfirmed() {
-  // Async so the boot event loop isn't blocked on git between the interactive
-  // prompts (the broader boot orchestration requires every task be off-loop).
-  const runGit = async (args) => await adminGitExecAsync(args, PROJECT_DIR, {
-    timeoutMs: BOOT_GIT_PROBE_TIMEOUT_MS,
-    maxBuffer: 1024 * 1024,
-  });
-
-  try {
-    if (COMMAND === "go") await ensureGitRepositoryInitialized({ verbose: true });
-    else await assertGitRepositoryExists();
-    await ensurePosseRuntimeIgnoresAsync(PROJECT_DIR);
-    await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR, { git: runGit });
-  } catch (err) {
-    console.error(`  ${C.red}${firstGitErrorLine(err)}${C.reset}\n`);
-    return false;
-  }
-
-  const configValue = async (args) => {
-    try { return (await runGit(args)).trim(); } catch { return ""; }
-  };
-  const readIdentity = async () => {
-    const [name, email, globalName, globalEmail] = await Promise.all([
-      configValue(["config", "user.name"]),
-      configValue(["config", "user.email"]),
-      configValue(["config", "--global", "user.name"]),
-      configValue(["config", "--global", "user.email"]),
-    ]);
-    return { name, email, globalName, globalEmail };
-  };
-  let identity = await readIdentity();
-  if (!identity.name || !identity.email) {
-    const canPromptForIdentity = !NON_INTERACTIVE && !!process.stdin?.isTTY && !!process.stdout?.isTTY;
-    if (!canPromptForIdentity) {
-      console.error(`\n  ${C.red}Git user identity not configured for ${PROJECT_DIR}.${C.reset}`);
-      console.error(`  Posse needs both user.name and user.email before it can create the initial commit.`);
-      console.error(`  Run: git config --global user.name "Your Name" && git config --global user.email "you@example.com"\n`);
-      return false;
-    }
-    console.log(`\n  ${C.yellow}Git user identity not configured for ${PROJECT_DIR}.${C.reset}`);
-    console.log(`  Posse commits changes in worktrees and needs a name + email.`);
-    const nameDefault = identity.name || identity.globalName || "";
-    const emailDefault = identity.email || identity.globalEmail || "";
-    const nameIn = (await ask(`  Name${nameDefault ? ` [${nameDefault}]` : ""}: `)).trim() || nameDefault;
-    if (!nameIn) { console.log(`  ${C.red}Aborted - name is required.${C.reset}\n`); return false; }
-    const emailIn = (await ask(`  Email${emailDefault ? ` [${emailDefault}]` : ""}: `)).trim() || emailDefault;
-    if (!emailIn) { console.log(`  ${C.red}Aborted - email is required.${C.reset}\n`); return false; }
-    const scopeAns = (await ask(`  Save globally (so all repos use this)? [Y/n]: `)).trim().toLowerCase();
-    const scopeArgs = (scopeAns === "n" || scopeAns === "no") ? [] : ["--global"];
-    try {
-      await runGit(["config", ...scopeArgs, "user.name", nameIn]);
-      await runGit(["config", ...scopeArgs, "user.email", emailIn]);
-      identity = await readIdentity();
-      if (!identity.name || !identity.email) {
-        throw new Error("git config did not return both user.name and user.email after saving");
-      }
-      console.log(`  ${C.green}Git identity saved and verified (${scopeArgs.length > 0 ? "global" : "local"}).${C.reset}`);
-    } catch (err) {
-      console.error(`  ${C.red}Failed to save git identity: ${err.message.split("\n")[0]}${C.reset}\n`);
-      return false;
-    }
-  }
-
-  let hasHead = true;
-  try { await runGit(["rev-parse", "HEAD"]); } catch { hasHead = false; }
-  if (!hasHead) {
-    // Worktrees need a valid HEAD to branch from. ensureGitReady creates this
-    // commit unconditionally later in boot, so make it automatic here too
-    // instead of prompting.
-    console.log(`\n  ${C.yellow}Repo has no commits yet — creating an initial commit so worktrees can branch from HEAD.${C.reset}`);
-    try {
-      await stagePosseRuntimeGitignoreForInitialCommit(PROJECT_DIR, { git: runGit });
-      await runGit(["commit", "--allow-empty", "-m", "chore: initial commit (posse bootstrap)"]);
-      console.log(`  ${C.green}Initial commit created.${C.reset}\n`);
-    } catch (err) {
-      console.error(`  ${C.red}Failed to create initial commit: ${err.message.split("\n")[0]}${C.reset}\n`);
-      return false;
-    }
-  }
-
-  await ensureSnapshotPushRefsGuarded({ verbose: true });
-  return true;
-}
+const {
+  ensureGitRepositoryInitialized,
+  assertGitRepositoryExists,
+  ensureGitReady,
+  ensureRepoSetupConfirmed,
+} = createGitReadiness({
+  projectDir: PROJECT_DIR,
+  command: COMMAND,
+  nonInteractive: NON_INTERACTIVE,
+  ask,
+});
 
 let _gitWorkflowHelpersPromise = null;
 let _adminGitWorkflowHelpersPromise = null;
@@ -1093,37 +844,17 @@ function isReviewableWorkItem(wi) {
   });
 }
 
-const RESPONSE_SHAPE_ALIASES = new Map([
-  ["a", "auto"],
-  ["auto", "auto"],
-  ["r", "repo"],
-  ["repo", "repo"],
-  ["code", "repo"],
-  ["artifact", "artifact"],
-  ["artifacts", "artifact"],
-  ["f", "artifact"],
-  ["file", "artifact"],
-  ["files", "artifact"],
-  ["q", "question_only"],
-  ["question", "question_only"],
-  ["question-only", "question_only"],
-  ["question_only", "question_only"],
-]);
-
 function normalizeResponseShapeChoice(value, fallback = "auto") {
   const raw = String(value || "").trim().toLowerCase();
   if (!raw) return { value: fallback, explicit: false };
-  const normalized = RESPONSE_SHAPE_ALIASES.get(raw) || raw;
+  const normalized = INTAKE_RESPONSE_SHAPE_CHOICES.find((choice) => choice.value === raw
+    || choice.aliases.includes(raw)
+    || choice.normalizationAliases?.includes(raw))?.value || raw;
   return { value: normalized, explicit: normalized !== "auto" };
 }
 
 async function promptForResponseShapeChoice(defaultOutputMode = "auto") {
-  const value = await askSelectorChoice("  Response shape?", [
-    { value: "auto", label: "Auto", aliases: ["a"] },
-    { value: "repo", label: "Repo", aliases: ["r", "code"] },
-    { value: "artifact", label: "Artifact", aliases: ["f", "file", "files"] },
-    { value: "question_only", label: "Question", aliases: ["q", "question-only", "question"] },
-  ], {
+  const value = await askSelectorChoice("  Response shape?", INTAKE_RESPONSE_SHAPE_CHOICES, {
     defaultValue: defaultOutputMode || "auto",
     fallbackAsk: (prompt) => ask(prompt),
   });
@@ -1287,7 +1018,7 @@ function promptViaEditor(header) {
 async function cmdAdd() {
   const rawArgs = process.argv.slice(3);
   if (rawArgs.includes("--help") || rawArgs.includes("-h")) {
-    COMMAND_USAGE.add();
+    printCommandUsage("add");
     return;
   }
 
@@ -2742,7 +2473,7 @@ async function cmdGate() {
     return result;
   }
   if (result.reason === "usage") {
-    COMMAND_USAGE.gate();
+    printCommandUsage("gate");
   } else if (result.reason === "answer_required") {
     console.error(`\n  ${C.red}Gate job #${result.job_id} has no choices; it takes a free-text answer.${C.reset}`);
     console.error(`  ${C.dim}posse gate answer ${result.job_id} --text "your answer"   (posse gate show ${result.job_id} prints the question)${C.reset}\n`);
@@ -2764,117 +2495,9 @@ async function cmdGate() {
 // Per-command --help, intercepted in main() before init/dispatch so that
 // `posse <command> --help` prints usage instead of executing the command
 // (previously `posse run --help` booted the scheduler).
-const COMMAND_USAGE = {
-  add: () => {
-    console.log(`\n  Usage: posse add "description of what you want built"`);
-    console.log(`  ${C.dim}Optional: --mode build|report|image --oneshot --intent task|bugfix|design|context|question|oneshot|report|image (hotkeys ok: b,d,c,q,o,r,i) --output repo|artifact|question_only --files LIST --constraints LIST${C.reset}\n`);
-  },
-  run: () => {
-    console.log(`\n  Usage: posse run [flags]`);
-    console.log(`  Execute all pending jobs (scheduler + worker loop).\n`);
-    console.log(`    ${C.cyan}--concurrency N${C.reset}     Run N workers in parallel`);
-    console.log(`    ${C.cyan}--auto-approve${C.reset}      Dev won't pause for tool permission prompts`);
-    console.log(`    ${C.cyan}--scope-mode MODE${C.reset}   File-scope approvals: default or auto (this run only)`);
-    console.log(`    ${C.cyan}--auto-merge${C.reset} / ${C.cyan}--no-auto-merge${C.reset}  Merge (or don't) completed WI branches during wrap-up`);
-    console.log(`    ${C.cyan}--auto-approve-plan${C.reset} Skip plan approval gates for this run`);
-    console.log(`    ${C.cyan}--no-tui${C.reset}            Disable split-screen display (classic output)`);
-    console.log(`    ${C.cyan}--non-interactive${C.reset}   Suppress terminal prompts; leave app gates open instead`);
-    console.log(`    ${C.cyan}--dry-run${C.reset}           Research + plan only — dev jobs auto-pass without execution`);
-    console.log(`    ${C.cyan}--stall-timeout N${C.reset}   Seconds before killing stalled process`);
-    console.log(`    ${C.cyan}--work-item N${C.reset}       Run only jobs for one work item (repeat or comma-separate)`);
-    console.log(`    ${C.cyan}--cold-index${C.reset}        Clear the cold index before starting\n`);
-  },
-  go: () => {
-    console.log(`\n  Usage: posse go [flags]`);
-    console.log(`  plan + run in one shot: plans queued work items, then starts the scheduler.`);
-    console.log(`  ${C.dim}Accepts the same flags as 'run' — see: posse run --help${C.reset}\n`);
-  },
-  job: () => {
-    console.log("Usage: posse job pass|fail <job-id> [--note \"reason\"]");
-  },
-  gate: () => {
-    console.log(`\n  Usage: posse gate answer <gate-job-id> <action> [--feedback "details"]`);
-    console.log(`         posse gate answer <gate-job-id> --text "answer"   (a gate without choices)`);
-    console.log(`         posse gate show <gate-job-id>   (alias: gate diff)`);
-    console.log(`  Resolve a parked human gate without starting the scheduler, or show its question,`);
-    console.log(`  choices and, for a verdict on code, the diff it judges.`);
-    console.log(`  ${C.dim}Common actions: pass, fail, retry, replan, skip. The gate's catalogued choices remain authoritative.${C.reset}\n`);
-  },
-  serve: () => {
-    console.log(`\n  Usage: posse serve [--show-token] [--pair]`);
-    console.log(`  Start this clone's HTTP+WebSocket control bridge for phone/web clients.`);
-    console.log(`  ${C.dim}This does not join clones or share Git work; use \`posse pair\` for multi-user shared-trunk collaboration.${C.reset}\n`);
-  },
-  pair: () => {
-    console.log(`\n  Usage:`);
-    console.log(`    posse pair [host] [--remote origin] [--branch posse/pair-name]`);
-    console.log(`    posse pair <CODE>`);
-    console.log(`    posse pair join <CODE>`);
-    console.log(`    posse pair status`);
-    console.log(`    posse pair leave`);
-    console.log(`\n  Opens or joins multi-user collaboration across separate clones on one shared Git side trunk.`);
-    console.log(`  Live participants see bounded, read-only peer WI/job summaries outside their local queue.`);
-    console.log(`  Each clone keeps its own queue and database; peer activity is never scheduled locally.`);
-    console.log(`  The host console takes typed commands: ${C.cyan}close${C.reset} drains and integrates; ${C.cyan}Ctrl+C${C.reset} forces close and integration.`);
-    console.log(`  ${C.dim}This does not expose a phone/web control bridge; use \`posse serve --pair\` for that.${C.reset}\n`);
-  },
-  session: () => {
-    console.log(`\n  Usage:`);
-    console.log(`    posse session host [--remote origin] [--branch posse/pair-name] [--merge-mode ask|auto] [--deploy-mode ask|auto]`);
-    console.log(`    posse session join <CODE|posse://session?...> [--here]`);
-    console.log(`    posse session admit <COUNTERSIGN>`);
-    console.log(`    posse session members|pending`);
-    console.log(`    posse session kick <MEMBER-ID>`);
-    console.log(`    posse session invite open|close`);
-    console.log(`    posse session scope <MEMBER-ID> '<JSON>'`);
-    console.log(`    posse session policy each-member|capability-routing|host-only`);
-    console.log(`    posse session publication direct|github-pr`);
-    console.log(`    posse session status`);
-    console.log(`    posse session hold [reason]`);
-    console.log(`    posse session resume`);
-    console.log(`    posse session merge|deploy`);
-    console.log(`    posse session auto [merge|deploy on|off]`);
-    console.log(`    posse session leave|close [--keep-branch|--history-preserving]`);
-    console.log(`    posse session integrate [--approve-source-oid SHA --approve-origin-oid SHA]`);
-    console.log(`    posse session abandon-integration`);
-    console.log(`\n  Opens or joins a shared Posse collaboration session.`);
-    console.log(`  Joiners wait for the host to confirm their four-character countersign.`);
-    console.log(`  A join typed outside an empty folder runs in ~/posse-sessions/<CODE>; --here joins in this clone instead.`);
-    console.log(`  hold keeps this checkout where it is (fetches continue) until resume or 30 minutes pass.`);
-    console.log(`  merge squashes the team's work into your branch and deploy pushes it to origin; the session keeps running.`);
-    console.log(`  Each asks for your approval unless you turn it on with auto (trusted teams).\n`);
-  },
-  unpair: () => {
-    console.log(`\n  Usage: posse unpair [--json]`);
-    console.log(`  Members leave and restore locally; hosts gracefully drain peers and integrate the side trunk.\n`);
-  },
-  "local-models": () => {
-    console.log(`\n  Usage: posse local-models [list [--json] | download [shorthand]]`);
-    console.log(`  Lists signed local models with download size and recommended memory.`);
-    console.log(`  Downloads always require an interactive, size-aware confirmation.\n`);
-  },
-  "native-binaries": () => {
-    console.log(`\n  Usage: posse native-binaries\n  Reconcile native artifacts and emit NDJSON progress.\n`);
-  },
-};
-
 function helpFlagRequested() {
   const args = process.argv.slice(3);
   return args.includes("--help") || args.includes("-h");
-}
-
-async function printCommandHelp(command) {
-  // Doctor and update own richer, lazily loaded help. Dispatching them here
-  // keeps `posse <command> --help` out of bootstrap while avoiding a second
-  // copy of their timeout and safety contract in the global usage table.
-  if (command === "doctor") return cmdDoctor();
-  if (command === "update") return cmdUpdate();
-  const usage = COMMAND_USAGE[command];
-  if (usage) {
-    usage();
-    return;
-  }
-  await printGlobalHelp();
 }
 
 export async function main() {
@@ -2924,11 +2547,11 @@ export async function main() {
   configureRunTelemetry({ enabled: !informationalOnly });
   configureModelCatalogRuntimeWarnings({ enabled: !informationalOnly });
   if (!isHelpCommand(command) && commandPolicy.known && helpFlagRequested()) {
-    await printCommandHelp(command);
+    await printCommandHelp(command, { projectDir: PROJECT_DIR, cmdDoctor, cmdUpdate });
     return;
   }
   if (isHelpCommand(command)) {
-    await printGlobalHelp();
+    await printGlobalHelp(PROJECT_DIR);
     return;
   }
   if (!commandPolicy.known) {
@@ -2992,157 +2615,11 @@ export async function main() {
   await maybeWarnPosseUpdateAvailable(commandPolicy);
 
   if (isHelpCommand(command)) {
-    await printGlobalHelp();
+    await printGlobalHelp(PROJECT_DIR);
     return;
   }
 
   return dispatchResolvedCommand(command);
-}
-
-async function printGlobalHelp() {
-  const aliasDiagnostic = await posseAliasDiagnostic();
-  console.log(`
-${C.bold}  Posse (claude-org v4) — SQLite Job Queue Orchestrator${C.reset}
-  ${C.dim}Project: ${PROJECT_DIR}${C.reset}
-  ${C.dim}Providers: configured per role in Posse settings${C.reset}
-  ${C.dim}DB:      ${getRuntimeDbPath(PROJECT_DIR)}${C.reset}
-${aliasDiagnostic}
-
-  ${C.bold}Workflow:${C.reset}
-    ${C.cyan}add${C.reset}        Queue a work item (what you want built)
-    ${C.cyan}plan${C.reset}       Create research + plan jobs for queued items
-    ${C.cyan}run${C.reset}        Execute all pending jobs (scheduler + worker)
-    ${C.cyan}go${C.reset}         plan + run in one shot
-
-  ${C.bold}Manage:${C.reset}
-    ${C.cyan}queue${C.reset}      Show all work items and their status
-    ${C.cyan}status${C.reset}     Detailed job-level status
-    ${C.dim}             status [--active] [--limit N|all] [--json]${C.reset}
-    ${C.cyan}serve${C.reset}      Control this clone from paired phone/web clients
-    ${C.dim}             serve [--show-token] [--pair]${C.reset}
-    ${C.cyan}health${C.reset}     Failure/stuck-job health summary
-    ${C.cyan}dashboard${C.reset}  Visual job board
-    ${C.cyan}doctor${C.reset}     Repair dependencies, native binaries, and Jina
-    ${C.dim}             doctor [--dry-run] [--json]${C.reset}
-    ${C.cyan}update${C.reset}     Update Posse + dependencies, binaries, and Jina
-    ${C.dim}             update [--dry-run] [--json] [--branch main]${C.reset}
-    ${C.cyan}tools${C.reset}      Script tools for agents: create, test, secrets, grants
-    ${C.dim}             tools [list|new|show|test|secret|grant|revoke] (posse tools help)${C.reset}
-    ${C.cyan}review${C.reset}     Approve/reject completed work items
-    ${C.cyan}job${C.reset}        Give a parked job an operator verdict, including during a live run
-    ${C.dim}             job pass|fail <job-id> [--note "…"]${C.reset}
-    ${C.cyan}gate answer${C.reset} Resolve a parked human gate by job ID
-    ${C.dim}             gate answer <gate-job-id> pass|fail|retry|replan|skip [--feedback "…"]${C.reset}
-    ${C.dim}             gate answer <gate-job-id> --text "…"  (a gate without choices)${C.reset}
-    ${C.dim}             gate show <gate-job-id>  (question, choices and the diff a verdict judges)${C.reset}
-    ${C.cyan}events${C.reset}     Show event log (audit trail)
-    ${C.dim}             events [jobId] [--session]${C.reset}
-    ${C.cyan}timeline${C.reset}   Full execution chain for a work item
-    ${C.dim}             timeline <wi-id> [--json] [--verbose]${C.reset}
-    ${C.cyan}sessions${C.reset}   Session-recycling lanes and token savings
-    ${C.dim}             sessions [wi-id] [--json] [--savings] [--all]${C.reset}
-    ${C.cyan}cost${C.reset}       Per-WI cost attribution + pricing overrides
-    ${C.dim}             cost | cost <wi-id> [--by role|provider|tier|model] [--json] [--recycling]${C.reset}
-    ${C.dim}             cost pricing [list|set <provider> <model> <in/M> <out/M>]${C.reset}
-    ${C.cyan}fanout${C.reset}     Research fanout quality/readiness report
-    ${C.dim}             fanout [--json] [--limit N]${C.reset}
-    ${C.cyan}plan review/approve/reject${C.reset}  Review/approve plans before dev/fix run
-    ${C.dim}             plan review <wi-id>${C.reset}
-    ${C.dim}             plan approve <wi-id>${C.reset}
-    ${C.dim}             plan reject <wi-id> [--feedback "…"] [--replan]${C.reset}
-    ${C.cyan}calls${C.reset}      Agent call performance stats
-    ${C.cyan}prompts${C.reset}    Recent agent prompts (last 3 days, JSONL log)
-    ${C.dim}             prompts [--job N] [--role R] [--limit N] [--full]${C.reset}
-    ${C.cyan}replay${C.reset}     Compressed replay packet for one agent call
-    ${C.dim}             replay <agent-call-id> [--json] [--exact-prompt]${C.reset}
-    ${C.cyan}usage${C.reset}      Show cached provider usage/quota tracker
-    ${C.dim}             usage [--json] [--refresh|--force-refresh]${C.reset}
-    ${C.cyan}atlas-smoke${C.reset}  Run Posse's local ATLAS smoke test against a repo
-    ${C.dim}             atlas-smoke <repoPath> [query] [provider]${C.reset}
-    ${C.cyan}shared-trunk-smoke${C.reset}  Run a disposable two-clone shared-trunk race/claim smoke
-    ${C.dim}             shared-trunk-smoke [--json]${C.reset}
-    ${C.cyan}shared-trunk${C.reset}  Inspect or abandon publication journal operations
-    ${C.dim}             shared-trunk ops [--json] | shared-trunk ops abandon <id> | shared-trunk provenance reset${C.reset}
-    ${C.cyan}pairing-preflight${C.reset}  Verify this member's shared-remote access
-    ${C.dim}             pairing-preflight [--json]${C.reset}
-    ${C.cyan}pair${C.reset}       Collaborate across clones on a shared Git side trunk
-    ${C.dim}             pair [host] [--remote origin] [--branch name] | pair <CODE> | pair join <CODE> | pair leave | pair status${C.reset}
-    ${C.dim}             Host: g gracefully drains/integrates; Ctrl+C forces close/integration; unlike serve, pair does not connect phone/web clients${C.reset}
-    ${C.cyan}session${C.reset}    Host or join the shared session model (preferred; pair is an alias)
-    ${C.dim}             session host|join|admit|status|hold|resume|members|pending|kick|scope|policy|publication|invite|leave|close|integrate|abandon-integration${C.reset}
-    ${C.cyan}unpair${C.reset}     Leave pairing; host drains and integrates, members restore locally
-    ${C.cyan}atlas${C.reset}        Atlas admin commands
-    ${C.dim}             atlas mutations are system-owned; use atlas-v2 diagnostics${C.reset}
-    ${C.cyan}atlas-v2${C.reset}     Inspect/manage the ATLAS v2 ledger, views, and warmer queue
-    ${C.dim}             atlas-v2 ${atlasV2UsageSummary({ compact: true })}${C.reset}
-    ${C.cyan}mcp-status${C.reset} Show repo-scoped MCP runtime state
-    ${C.cyan}codex-models${C.reset} Validate/list Codex model candidates against CLI
-    ${C.dim}             codex-models [validate|list] [oauth|api|auto]${C.reset}
-    ${C.cyan}local-models${C.reset} List/download signed local models with size and system recommendations
-    ${C.dim}             local-models [list [--json] | download [shorthand]]${C.reset}
-    ${C.cyan}native-binaries${C.reset} Reconcile signed native artifacts (NDJSON progress)
-    ${C.cyan}windows-events${C.reset} Probe Windows crash/resource events into the run dir
-    ${C.dim}             windows-events [--around ISO] [--minutes N] [--json]${C.reset}
-    ${C.cyan}audit${C.reset}      Provider/handoff audit for jobs or work items
-    ${C.dim}             audit | audit <jobId> | audit wi<id> | audit worktrees${C.reset}
-    ${C.cyan}admin${C.reset}      Stats, session history, and settings management
-    ${C.dim}             admin init [--provider-clis-only] | admin describe --json | admin set/clear [--json] | admin snapshot | admin worktrees | admin memory <note|suppress|correct> <id> | admin provider-pause [clear <provider|all>] | admin settings${C.reset}
-    ${C.cyan}merge${C.reset}      Merge a completed WI branch
-    ${C.dim}             merge <wi_id> [--yes]${C.reset}
-    ${C.cyan}prune${C.reset}      Clean up orphaned worktrees
-    ${C.dim}             prune [--dry-run]${C.reset}
-    ${C.cyan}purge${C.reset}      Delete ALL posse/* branches + worktrees (asks first)
-    ${C.cyan}cleanup${C.reset}    Triage leftover snapshots, branches, worktrees, stashes
-    ${C.dim}             cleanup [--auto] [--dry-run]  (--auto asks before discarding)${C.reset}
-    ${C.cyan}clear${C.reset}      Reset everything
-
-  ${C.bold}Mid-Run:${C.reset}
-    ${C.cyan}inject${C.reset}     Quick-add work item (scheduler picks it up)
-    ${C.cyan}ask${C.reset}        Ask a question (research-only, no dev tasks)
-    ${C.cyan}image${C.reset}      Generate an image directly (skips research/plan)
-
-  ${C.bold}Flags:${C.reset}
-      ${C.cyan}--auto-approve${C.reset}   Dev won't pause for tool permission prompts
-      ${C.cyan}--scope-mode MODE${C.reset} File-scope approvals: default or auto (this run only)
-      ${C.cyan}--auto-merge${C.reset}     Merge completed WI branches during wrap-up
-      ${C.cyan}--no-auto-merge${C.reset}  Disable auto-merge for this run
-      ${C.cyan}--auto-approve-plan${C.reset} Skip plan approval gates for this run
-      ${C.cyan}--deepthink${C.reset}      Raise planner/research budget for deeper analysis
-      ${C.cyan}--deepthink-budget N${C.reset}  Set planner/research budget: low, normal, high, xhigh
-      ${C.cyan}--oneshot${C.reset}        Propose one-shot routing; deterministic gate still validates scope and safety
-      ${C.cyan}--intent KIND${C.reset}    Intake type: task, bugfix, design, context, question, oneshot, report, image ${C.dim}(hotkeys ok)${C.reset}
-      ${C.cyan}--input-contexts${C.reset} Select context dirs from resources/inputs (names, indices, or all)
-      ${C.cyan}--files LIST${C.reset}     Optional hinted files for research/planning
-      ${C.cyan}--constraints LIST${C.reset} Optional intake constraints for research/planning
-      ${C.cyan}--session-recycle${C.reset} Enable session recycling for this work item
-      ${C.cyan}--no-session-recycle${C.reset} Disable session recycling for this work item
-      ${C.cyan}--red-team-plan${C.reset}  Use primary planner -> red-team planner -> synthesis planner
-      ${C.cyan}--iterate${C.reset}        Guided iterative workflow intake ${C.dim}([b]ugfix|[d]esign/ux|[r]efactor|[a]udit|[i]terate)${C.reset}
-      ${C.cyan}--iterate-red-team${C.reset} Persist red-team planning across iterative follow-up rounds
-      ${C.cyan}--concurrency N${C.reset}  Run N workers in parallel       ${C.dim}(default: ${getCatalogRuntimeFallbackInt("scheduler_concurrency", 3)})${C.reset}
-    ${C.cyan}--no-tui${C.reset}         Disable split-screen display (classic output)
-    ${C.cyan}--non-interactive${C.reset} Suppress terminal prompts; leave app gates open instead
-    ${C.cyan}--bossy${C.reset}          Open the Bossy fleet TUI for this machine's posses instead of the CLI
-    ${C.cyan}--dry-run${C.reset}        Research + plan only — dev jobs auto-pass without execution
-    ${C.cyan}--stall-timeout N${C.reset}  Seconds before killing stalled process ${C.dim}(default: ${getCatalogRuntimeFallbackInt("stall_timeout", 600)})${C.reset}
-
-  ${C.bold}Settings:${C.reset}
-    Runtime behavior is configured in Posse admin/account settings.
-    Secrets remain in the environment.
-
-  ${C.bold}Provider / Remote Secrets:${C.reset}
-    ${C.cyan}POSSE_KEY${C.reset}                  Posse remote API key ${C.dim}(required for remote prompt/tool catalog)${C.reset}
-    ${C.cyan}ANTHROPIC_API_KEY${C.reset}          Anthropic API key ${C.dim}(required if using anthropic provider)${C.reset}
-    ${C.cyan}OPENAI_API_KEY${C.reset}             OpenAI API key ${C.dim}(required if using openai provider)${C.reset}
-    ${C.cyan}CODEX_API_KEY${C.reset}              Optional Codex CLI API key ${C.dim}(or cached ~/.codex/auth.json login)${C.reset}
-    ${C.cyan}XAI_API_KEY${C.reset}                xAI API key ${C.dim}(required if using grok provider)${C.reset}
-    ${C.cyan}CLAUDE_CODE_OAUTH_TOKEN${C.reset}    Claude OAuth token override
-
-  ${C.bold}Example:${C.reset}
-    posse add "Build a REST API for user management"
-    posse add "Add JWT authentication to all endpoints"
-    posse go --auto-approve
-`);
 }
 
 async function dispatchResolvedCommand(command) {

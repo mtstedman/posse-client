@@ -11,6 +11,7 @@ import {
 } from "../../../catalog/bridge.js";
 import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { LEGACY_REVIEW_CHOICE_IDS, validReviewChoiceIDs } from "../../../catalog/gate-actions.js";
+import { questionKindForReviewType } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -63,24 +64,7 @@ const NUDGE_STATES = new Set([
 ]);
 const ACKNOWLEDGEMENT_DECISIONS = new Set(["accepted", "rejected", "deferred"]);
 const QUESTION_CHOICE_IDS = WORK_ITEM_QUESTION_CHOICE_IDS;
-const QUESTION_KIND_BY_REVIEW_TYPE = new Map([
-  ["needs_review", "assessment_review"],
-  ["assessment_parse_error", "assessment_review"],
-  ["assessment_evidence_missing", "assessment_transport_recovery"],
-  ["unknown_verdict", "assessment_review"],
-  ["replan_limit", "assessment_review"],
-  ["assessment_transport_error", "assessment_transport_recovery"],
-  ["assessment_retry_limit", "assessment_retry_limit"],
-  ["unexecuted_replan_limit", "unexecuted_replan_recovery"],
-  ["blocked_recovery", "blocked_recovery"],
-  ["partial_work_recovery", "partial_work_recovery"],
-  ["dead_letter_recovery", "dead_letter_recovery"],
-  ["stall_exhausted_recovery", "dead_letter_recovery"],
-  ["research_dead_letter_recovery", "dead_letter_recovery"],
-  ["oneshot_dead_letter_recovery", "dead_letter_recovery"],
-  ["artifact_routing_admin", "artifact_routing_admin"],
-  ["scope_expansion_request", "file_scope_approval"],
-]);
+
 const LEGACY_PIPELINE_HEAD_REVIEW_TYPES = new Set([
   "research_dead_letter_recovery",
   "oneshot_dead_letter_recovery",
@@ -214,7 +198,7 @@ function validStoredChoiceEntries(kind, entries) {
 }
 
 function storedQuestionKind(payload) {
-  const reviewKind = QUESTION_KIND_BY_REVIEW_TYPE.get(String(payload?.review_type || ""));
+  const reviewKind = questionKindForReviewType(payload?.review_type);
   // Project legacy pipeline-head rows through the handler they actually use.
   // This prevents bridges from offering pass/replan actions that the worker
   // can only reject or reinterpret as a retry.

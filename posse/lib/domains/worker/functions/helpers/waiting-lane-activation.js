@@ -34,7 +34,7 @@ import { tombstoneWaitingLanePreparationForCleanup } from "../../../git/function
 import { resolveWorkItemAtlasContext } from "../../../integrations/functions/atlas.js";
 import { Ledger } from "../../../atlas/classes/v2/Ledger.js";
 import { View } from "../../../atlas/classes/v2/View.js";
-import { Warmer } from "../../../atlas/classes/v2/Warmer.js";
+import { ParseEngine } from "../../../atlas/classes/v2/ParseEngine.js";
 import { ledgerBranchForWi } from "../../../atlas/functions/v2/runtime-paths.js";
 import { withAtlasViewWriteLock } from "../../../atlas/functions/v2/view-write-lock.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
@@ -226,7 +226,7 @@ async function reconcileAndMountAtlas({
       if (allowCatchup && !ledgerCurrent) {
         return { attached: false, atlas_ready: false, reason: "atlas_generation_not_current" };
       }
-      const warmer = new Warmer({
+      const warmer = new ParseEngine({
         ledger,
         repoRoot: ctx.repoRoot,
         defaultBranch: generation.target_branch,

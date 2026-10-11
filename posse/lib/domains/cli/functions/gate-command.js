@@ -1,4 +1,6 @@
+import { LEGACY_SKIP_WAIVER_KINDS } from "../../../catalog/gate-actions.js";
 import { humanInputChoicesForPayload } from "../../../catalog/human-input.js";
+import { typedKindForGate } from "../../queue/functions/interaction-contract.js";
 import { answerHumanInput } from "../../bridge/functions/human-input-answer.js";
 import { getHumanGate, getJob } from "../../queue/functions/index.js";
 import { resolveGateReviewDiffTarget } from "../../queue/functions/gate-review-target.js";
@@ -15,7 +17,7 @@ const GATE_SHOW_CONTEXT_MAX_LINES = 20;
 const ACTION_ALIASES = Object.freeze({
   retry: Object.freeze(["retry", "retry_assessment", "retry_with_changes", "run"]),
   pass: Object.freeze(["pass", "run"]),
-  skip: Object.freeze(["skip", "explicit_waiver"]),
+  skip: Object.freeze(["skip"]),
 });
 
 const VALUE_FLAGS = Object.freeze(["--feedback", "--text"]);
@@ -47,13 +49,21 @@ function positionalArgs(argv = []) {
   return out;
 }
 
-export function resolveGateCliAction(requestedAction, choices = []) {
+/**
+ * The gate choice an operator's CLI action names. `skip` reaches the waiver
+ * only on the gate kinds whose legacy list spelled the waiver "skip"; on a
+ * blocked_recovery gate it meant cancel, so it never waives there.
+ */
+export function resolveGateCliAction(requestedAction, choices = [], payload = {}) {
   const requested = String(requestedAction || "").trim().toLowerCase();
   const allowed = (Array.isArray(choices) ? choices : []).map((choice) => String(choice || "").trim());
   if (!requested) return null;
   const exact = allowed.find((choice) => choice.toLowerCase() === requested);
   if (exact) return exact;
-  for (const candidate of ACTION_ALIASES[requested] || []) {
+  const aliases = requested === "skip" && LEGACY_SKIP_WAIVER_KINDS.includes(typedKindForGate(payload || {}))
+    ? [...ACTION_ALIASES.skip, "explicit_waiver"]
+    : ACTION_ALIASES[requested] || [];
+  for (const candidate of aliases) {
     const match = allowed.find((choice) => choice.toLowerCase() === candidate);
     if (match) return match;
   }
@@ -192,7 +202,7 @@ export async function runGateCommand(argv = [], {
       : { ...(result || {}), ok: false, action: "answer", answer_text: answer, exitCode: 1 };
   }
   if (args.length !== 3 && !text) return { ok: false, reason: "usage", exitCode: 2 };
-  const action = text ? null : resolveGateCliAction(args[2], choices);
+  const action = text ? null : resolveGateCliAction(args[2], choices, payload);
   if (!action) {
     return {
       ok: false,

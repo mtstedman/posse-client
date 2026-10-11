@@ -7,7 +7,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { gitExecAsync } from "../../git/functions/utils.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { FINAL_REVIEW_OBSERVATIONS } from "../../../catalog/final-review.js";
+import { FINAL_REVIEW_OBSERVATIONS, FINAL_REVIEW_REVIEW_MODES } from "../../../catalog/final-review.js";
 import { finalReviewScope } from "./final-review-snapshot.js";
 
 const digest = (value) => createHash("sha256").update(value).digest("hex");
@@ -21,8 +21,9 @@ export async function finalReviewIdentity(cwd, payload, { jobId = null } = {}) {
     .filter((value) => value && !path.posix.isAbsolute(value)
       && !value.split("/").some((part) => !part || part === "." || part === ".."));
   const listed = String(await gitExecAsync(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd, { trim: false })).split("\0").filter(Boolean);
-  const files = [...new Set([...listed.filter((file) => !scope.declared || scope.files.has(file)
-    || scope.roots.some((root) => file === root || file.startsWith(`${root}/`))), ...scope.files, ...readPaths])].sort();
+  const scoped = new Set([...listed.filter((file) => !scope.declared || scope.files.has(file)
+    || scope.roots.some((root) => file === root || file.startsWith(`${root}/`))), ...scope.files]);
+  const files = [...new Set([...scoped, ...readPaths])].sort();
   const root = fs.realpathSync(cwd);
   const states = files.map((file) => {
     if (placeholders.has(file)) return [file, null];
@@ -31,6 +32,9 @@ export async function finalReviewIdentity(cwd, payload, { jobId = null } = {}) {
     if (!fs.existsSync(absolute) && !fs.lstatSync(absolute, { throwIfNoEntry: false })) return [file, null];
     const stat = fs.lstatSync(absolute);
     if (stat.isSymbolicLink()) return [file, "symlink", digest(fs.readlinkSync(absolute))];
+    // A planner's read dependency may name a directory; it binds no bytes,
+    // and must never make every review and its authority unavailable.
+    if (!scoped.has(file) && !stat.isFile()) return [file, "non_file"];
     if (!fs.realpathSync(absolute).startsWith(`${root}${path.sep}`) || !stat.isFile()) throw new Error("Review path is not a workspace file");
     return [file, stat.mode & 0o111, digest(fs.readFileSync(absolute))];
   });
@@ -55,6 +59,11 @@ export function latestFinalReview(jobId, db = getDb()) {
 export async function authoritativeFinalReview(job, payload, cwd) {
   const review = latestFinalReview(job.id);
   if (!review) return null; // Jobs never issued final_review retain their existing route.
+  // The latest review obtained no reviewer verdict (provider error, a
+  // reviewer that ended without reporting, its wall): nothing to authorize or
+  // gate, so the ordinary assessment verifies the change with its own
+  // bounded recovery.
+  if (review.review_mode === FINAL_REVIEW_REVIEW_MODES.INFRASTRUCTURE) return null;
   const unresolved = (reason) => ({ verdict: "needs_review", confidence: "none", reasons: [reason],
     spawn_jobs: [], human_questions: [], _disable_internal_retry: true, _assessment_infrastructure_review: true, _verification_blocked: true });
   let identity;

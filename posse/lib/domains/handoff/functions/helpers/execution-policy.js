@@ -1,4 +1,5 @@
 // Deterministic scope/risk policy used to route downstream agent budget.
+import { AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES } from "../../../../catalog/handoff.js";
 
 const TIER_RANK = Object.freeze({ cheap: 0, standard: 1, strong: 2 });
 const EFFORT_RANK = Object.freeze({ low: 0, medium: 1, high: 2 });
@@ -81,7 +82,7 @@ export function normalizeScopeConfidence(value, fallback = "medium") {
   const raw = String(value || "").trim().toLowerCase();
   if (raw === "hi") return "high";
   if (raw === "med") return "medium";
-  if (["high", "medium", "low"].includes(raw)) return raw;
+  if (AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES.includes(raw)) return raw;
   return fallback;
 }
 

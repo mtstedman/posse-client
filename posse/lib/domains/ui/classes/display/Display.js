@@ -17,7 +17,9 @@ import { DisplayStatusRenderer } from "./status-renderer.js";
 import { DisplayBottomInputRenderer } from "./bottom-input-renderer.js";
 import { DisplayLeftPanelRenderer } from "./left-panel-renderer.js";
 import { DisplayRightPanelRenderer } from "./right-panel-renderer.js";
+import { DisplayMonitorRenderer } from "./monitor-renderer.js";
 import { C } from "../../../../shared/format/functions/colors.js";
+import { legacyReviewChoiceAction } from "../../../../catalog/gate-actions.js";
 import {
   STALE_CANCELABLE_JOB_STATUSES,
   TERMINAL_WORK_ITEM_STATUSES,
@@ -330,6 +332,7 @@ export class Display {
     this._bottomInputRenderer = new DisplayBottomInputRenderer();
     this._leftPanelRenderer = new DisplayLeftPanelRenderer();
     this._rightPanelRenderer = new DisplayRightPanelRenderer();
+    this._monitorRenderer = new DisplayMonitorRenderer();
 
     // ── Approval mode state ──
     this._approvalData = null;  // array of report objects
@@ -1270,7 +1273,13 @@ export class Display {
     const freeText = choices.length === 0 && typeof delivery.answer_text === "string"
       ? delivery.answer_text.trim()
       : "";
-    if (choices.length > 0 ? !choices.includes(choiceId) : !freeText) {
+    // A gate parked under a legacy review list shows "skip" as its waiver;
+    // the prompt offers the current spelling.
+    const legacyAction = choices.includes(choiceId)
+      ? null
+      : legacyReviewChoiceAction(delivery.question_kind, delivery.stored_choice_ids, choiceId);
+    const answerChoice = legacyAction && choices.includes(legacyAction) ? legacyAction : choiceId;
+    if (choices.length > 0 ? !choices.includes(answerChoice) : !freeText) {
       return { delivered: false, reason: "choice_not_allowed" };
     }
 
@@ -1297,7 +1306,7 @@ export class Display {
     // Free text answers every remaining question, as it does for a parked
     // gate (answerHumanInput gives each question the same answer).
     do {
-      q.answers.push({ question: q.questions[q.currentIdx], answer: freeText || choiceId, metadata });
+      q.answers.push({ question: q.questions[q.currentIdx], answer: freeText || answerChoice, metadata });
       q.currentIdx += 1;
     } while (freeText && q.currentIdx < q.questions.length);
     if (q.currentIdx < q.questions.length) {
@@ -1842,93 +1851,93 @@ export class Display {
     return this._rightPanelRenderer._buildRight.call(this, ...args);
   }
   _buildMonitor(...args) {
-    return this._rightPanelRenderer._buildMonitor.call(this, ...args);
+    return this._monitorRenderer._buildMonitor.call(this, ...args);
   }
 
   _monitorControlsLine(...args) {
-    return this._rightPanelRenderer._monitorControlsLine.call(this, ...args);
+    return this._monitorRenderer._monitorControlsLine.call(this, ...args);
   }
   _monitorAgentActionsLine(...args) {
-    return this._rightPanelRenderer._monitorAgentActionsLine.call(this, ...args);
+    return this._monitorRenderer._monitorAgentActionsLine.call(this, ...args);
   }
   _monitorAgentNavigationLine(...args) {
-    return this._rightPanelRenderer._monitorAgentNavigationLine.call(this, ...args);
+    return this._monitorRenderer._monitorAgentNavigationLine.call(this, ...args);
   }
 
   _buildMonitorEmptyLines(...args) {
-    return this._rightPanelRenderer._buildMonitorEmptyLines.call(this, ...args);
+    return this._monitorRenderer._buildMonitorEmptyLines.call(this, ...args);
   }
 
   _monitorPendingQuestionRows(...args) {
-    return this._rightPanelRenderer._monitorPendingQuestionRows.call(this, ...args);
+    return this._monitorRenderer._monitorPendingQuestionRows.call(this, ...args);
   }
 
   _monitorAskBox(...args) {
-    return this._rightPanelRenderer._monitorAskBox.call(this, ...args);
+    return this._monitorRenderer._monitorAskBox.call(this, ...args);
   }
 
   _collectMonitorAgents(...args) {
-    return this._rightPanelRenderer._collectMonitorAgents.call(this, ...args);
+    return this._monitorRenderer._collectMonitorAgents.call(this, ...args);
   }
   _selectMonitorAgent(...args) {
-    return this._rightPanelRenderer._selectMonitorAgent.call(this, ...args);
+    return this._monitorRenderer._selectMonitorAgent.call(this, ...args);
   }
   _buildMonitorFleetLines(...args) {
-    return this._rightPanelRenderer._buildMonitorFleetLines.call(this, ...args);
+    return this._monitorRenderer._buildMonitorFleetLines.call(this, ...args);
   }
   _monitorToolActivityForJob(...args) {
-    return this._rightPanelRenderer._monitorToolActivityForJob.call(this, ...args);
+    return this._monitorRenderer._monitorToolActivityForJob.call(this, ...args);
   }
   _monitorFeedbackEntries(...args) {
-    return this._rightPanelRenderer._monitorFeedbackEntries.call(this, ...args);
+    return this._monitorRenderer._monitorFeedbackEntries.call(this, ...args);
   }
   _monitorBoxLine(...args) {
-    return this._rightPanelRenderer._monitorBoxLine.call(this, ...args);
+    return this._monitorRenderer._monitorBoxLine.call(this, ...args);
   }
   _monitorBoxedLane(...args) {
-    return this._rightPanelRenderer._monitorBoxedLane.call(this, ...args);
+    return this._monitorRenderer._monitorBoxedLane.call(this, ...args);
   }
   _formatMonitorFeedbackRow(...args) {
-    return this._rightPanelRenderer._formatMonitorFeedbackRow.call(this, ...args);
+    return this._monitorRenderer._formatMonitorFeedbackRow.call(this, ...args);
   }
   _formatMonitorToolRow(...args) {
-    return this._rightPanelRenderer._formatMonitorToolRow.call(this, ...args);
+    return this._monitorRenderer._formatMonitorToolRow.call(this, ...args);
   }
   _formatToolDetailRows(...args) {
-    return this._rightPanelRenderer._formatToolDetailRows.call(this, ...args);
+    return this._monitorRenderer._formatToolDetailRows.call(this, ...args);
   }
   _formatMonitorToolRows(...args) {
-    return this._rightPanelRenderer._formatMonitorToolRows.call(this, ...args);
+    return this._monitorRenderer._formatMonitorToolRows.call(this, ...args);
   }
   _buildMonitorFeedbackToolLanes(...args) {
-    return this._rightPanelRenderer._buildMonitorFeedbackToolLanes.call(this, ...args);
+    return this._monitorRenderer._buildMonitorFeedbackToolLanes.call(this, ...args);
   }
   _buildMonitorAgentCard(...args) {
-    return this._rightPanelRenderer._buildMonitorAgentCard.call(this, ...args);
+    return this._monitorRenderer._buildMonitorAgentCard.call(this, ...args);
   }
   _monitorFeedbackEntryLines(...args) {
-    return this._rightPanelRenderer._monitorFeedbackEntryLines.call(this, ...args);
+    return this._monitorRenderer._monitorFeedbackEntryLines.call(this, ...args);
   }
   _buildMonitorChangesBox(...args) {
-    return this._rightPanelRenderer._buildMonitorChangesBox.call(this, ...args);
+    return this._monitorRenderer._buildMonitorChangesBox.call(this, ...args);
   }
   _monitorDiffFilesForAgent(...args) {
-    return this._rightPanelRenderer._monitorDiffFilesForAgent.call(this, ...args);
+    return this._monitorRenderer._monitorDiffFilesForAgent.call(this, ...args);
   }
   _monitorDiffDetailForFile(...args) {
-    return this._rightPanelRenderer._monitorDiffDetailForFile.call(this, ...args);
+    return this._monitorRenderer._monitorDiffDetailForFile.call(this, ...args);
   }
   _monitorDiffBodyLines(...args) {
-    return this._rightPanelRenderer._monitorDiffBodyLines.call(this, ...args);
+    return this._monitorRenderer._monitorDiffBodyLines.call(this, ...args);
   }
   _buildMonitorFocusLines(...args) {
-    return this._rightPanelRenderer._buildMonitorFocusLines.call(this, ...args);
+    return this._monitorRenderer._buildMonitorFocusLines.call(this, ...args);
   }
   _buildGateReviewDiffPane(...args) {
-    return this._rightPanelRenderer._buildGateReviewDiffPane.call(this, ...args);
+    return this._monitorRenderer._buildGateReviewDiffPane.call(this, ...args);
   }
   _monitorRecentEventsForJob(...args) {
-    return this._rightPanelRenderer._monitorRecentEventsForJob.call(this, ...args);
+    return this._monitorRenderer._monitorRecentEventsForJob.call(this, ...args);
   }
   _classifyEvent(...args) {
     return this._rightPanelRenderer._classifyEvent.call(this, ...args);
