@@ -234,23 +234,47 @@ function recordSessionIdentities(snapshot) {
   const sessionId = snapshot.session_id;
   if (!sessionId) return;
   const seen = snapshot.peers.flatMap((peer) => peer.git_identities || []);
-  if (seen.length === 0) return;
+  const seenMembers = [
+    ...snapshot.peers.map((peer) => peer.instance_id),
+    ...snapshot.members.map((member) => member.instance_id),
+  ].filter(Boolean);
+  if (seen.length === 0 && seenMembers.length === 0) return;
   const stored = readRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_SESSION_IDENTITIES);
   const known = stored?.session_id === sessionId && Array.isArray(stored.identities) ? stored.identities : [];
+  const knownMembers = stored?.session_id === sessionId && Array.isArray(stored.member_ids) ? stored.member_ids : [];
   const merged = [...new Set([...known, ...seen])].slice(0, SESSION_IDENTITIES_MAX);
-  if (merged.length === known.length) return;
-  writeRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_SESSION_IDENTITIES, { session_id: sessionId, identities: merged });
+  const mergedMembers = [...new Set([...knownMembers, ...seenMembers])];
+  if (merged.length === known.length && mergedMembers.length === knownMembers.length) return;
+  writeRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_SESSION_IDENTITIES, {
+    session_id: sessionId, identities: merged, member_ids: mergedMembers,
+  });
 }
 
-/**
- * Git identities that may author this session's trunk commits: those the
- * live peers advertise now, plus every one a member advertised earlier in the
- * session. The console clears the peer snapshot as it stops, and a close
- * drains members before its final sync, so without the record a member's
- * last unverified commit could never be attributed and the close would fail.
- * A member who left or was removed cannot push any more: close revokes the
- * session keys before its final sync.
- */
+/** Posse instance IDs observed in this session, retained after a peer leaves. */
+export function sessionProvenanceMembers(sessionId, { snapshot = readPairingPeerSnapshot() } = {}) {
+  const live = snapshot?.session_id === String(sessionId)
+    ? [
+        ...(snapshot.peers || []).map((peer) => peer.instance_id),
+        ...(snapshot.members || []).map((member) => member.instance_id),
+      ].filter(Boolean)
+    : [];
+  const stored = readRuntimeStatus(RUNTIME_STATUS_KEYS.PAIRING_SESSION_IDENTITIES);
+  const recorded = stored?.session_id === String(sessionId) && Array.isArray(stored.member_ids)
+    ? stored.member_ids : [];
+  return [...new Set([...live, ...recorded])];
+}
+
+export function pairingSessionProvenance(state) {
+  if (!state?.baseline_oid || !state?.remote_session_id) return null;
+  return {
+    baselineOid: state.baseline_oid,
+    sessionId: state.remote_session_id,
+    memberIds: [...new Set([state.instance_id, ...sessionProvenanceMembers(state.remote_session_id)].filter(Boolean))],
+  };
+}
+
+/** Historical peer Git identities retained for diagnostics and callers that
+ * still inspect them. Session trunk attribution uses member instance IDs. */
 export function sessionProvenanceIdentities(sessionId, { snapshot = readPairingPeerSnapshot() } = {}) {
   // A snapshot written for another session never vouches for this one.
   const otherSession = sessionId && snapshot?.session_id && snapshot.session_id !== String(sessionId);

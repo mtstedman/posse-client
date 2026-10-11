@@ -4,6 +4,11 @@
 
 export const SHARED_TRUNK_NATIVE_CONTRACT_VERSION = 4;
 
+// The session and durable per-clone Posse identity recorded on every new
+// session trunk squash commit. This is attribution metadata, not a Git author
+// email or an authentication secret.
+export const SHARED_TRUNK_SESSION_USER_TRAILER = "Posse-Session-User";
+
 export const SHARED_TRUNK_NATIVE_METHODS = Object.freeze({
   CAPABILITIES: "git.capabilities",
   PREFLIGHT: "git.trunk.preflight",

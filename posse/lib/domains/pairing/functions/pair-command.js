@@ -98,8 +98,8 @@ import {
   collectPairingWorkItems,
   diffPairingPeerActivity,
   pairingPeerTrunkHints,
+  pairingSessionProvenance,
   readPairingPeerSnapshot,
-  sessionProvenanceIdentities,
   writePairingPeerSnapshot,
 } from "./work-items.js";
 import {
@@ -589,8 +589,13 @@ async function retryWhileMergeLockBusy(operation, { delays = MERGE_LOCK_RETRY_DE
 async function takeFinalMemberSync(projectDir, state) {
   if (state?.role !== "member" || !["active", "leaving"].includes(state.phase)) return null;
   try {
+    const provenance = pairingSessionProvenance(state);
+    if (!provenance) return { ok: false, reason: "session_provenance_unavailable" };
     const synced = await retryWhileMergeLockBusy(
-      () => syncSharedTrunkFromOrigin(projectDir, { raiseBlockedGate: false }),
+      () => syncSharedTrunkFromOrigin(projectDir, {
+        raiseBlockedGate: false,
+        provenance,
+      }),
     );
     if (!synced.ok) {
       return { ok: false, reason: synced.blockedReason || synced.reason || "sync_failed" };
@@ -1728,13 +1733,14 @@ async function closeClaimedHostSession(root, remoteClient, state, {
   // Members are gone by now and the console cleared the live snapshot as it
   // stopped; the session's recorded identities still attribute a member's
   // last commit that no poll verified before the close.
-  const gitIdentities = sessionProvenanceIdentities(state.remote_session_id);
   if (checkoutSharedBranchForClose(root, state.shared_branch) && !json) {
     console.log(`  ${C.dim}[pair close] switched back to ${state.shared_branch} to take the final sync${C.reset}`);
   }
-  const synced = await retryWhileMergeLockBusy(() => syncSharedTrunkFromOrigin(root, {
-    provenance: state.baseline_oid ? { baselineOid: state.baseline_oid, gitIdentities } : null,
-  }));
+  const provenance = pairingSessionProvenance(state);
+  if (!provenance) throw Object.assign(new Error("Final shared-trunk sync lacks session provenance"), {
+    code: "session_provenance_unavailable",
+  });
+  const synced = await retryWhileMergeLockBusy(() => syncSharedTrunkFromOrigin(root, { provenance }));
   if (!synced.ok) {
     const blocked = synced.reason === "fast_forward_blocked"
       ? ` (${synced.blockedReason === "dirty"

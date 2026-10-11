@@ -16,7 +16,7 @@ import {
   readSessionHoldStatus,
   SESSION_HOLD_STATES,
 } from "../../pairing/functions/session-hold.js";
-import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
+import { pairingSessionProvenance } from "../../pairing/functions/work-items.js";
 import { reconcileSessionDelegationCommits } from "../../queue/functions/session-job-router.js";
 import {
   reconcileSharedTrunkOperations,
@@ -29,10 +29,12 @@ import {
 } from "../../git/functions/shared-trunk-peer-heads.js";
 import {
   createJob,
+  forceUpdateJobStatus,
   listActiveFileLocks,
   logEvent,
   readRuntimeStatus,
   RUNTIME_STATUS_KEYS,
+  setJobResult,
   syncCrossInstanceClaims,
   updateSharedTrunkRuntimeStatus,
 } from "../../queue/functions/index.js";
@@ -61,7 +63,28 @@ function provenanceGateRows() {
 // A provenance gate belongs to the session branch it was raised for; one left
 // by an earlier session must never move this session's baseline.
 function gateBelongsToSession(job, state) {
-  return Boolean(state?.shared_branch) && parseJson(job.payload_json).branch === state.shared_branch;
+  const payload = parseJson(job.payload_json);
+  return state?.phase === "active" && Boolean(state.shared_branch && state.remote_session_id)
+    && payload.branch === state.shared_branch
+    && (!payload.remote || payload.remote === state.remote_name)
+    && payload.session_id === state.remote_session_id;
+}
+
+const OPEN_PROVENANCE_GATE_STATUSES = Object.freeze(["queued", "leased", "running", "waiting_on_human", "blocked"]);
+
+function retireProvenanceGate(job, reason, remoteOid = null) {
+  if (!forceUpdateJobStatus(job.id, "canceled", { expectedStatuses: OPEN_PROVENANCE_GATE_STATUSES })) return false;
+  setJobResult(job.id, { canceled: true, reason, remote_oid: remoteOid });
+  return true;
+}
+
+function retireOpenProvenanceGates(state, reason, remoteOid = null) {
+  if (!state) return;
+  for (const job of provenanceGateRows()) {
+    if (OPEN_PROVENANCE_GATE_STATUSES.includes(job.status) && gateBelongsToSession(job, state)) {
+      retireProvenanceGate(job, reason, remoteOid);
+    }
+  }
 }
 
 function applyProvenanceGateDecision() {
@@ -74,6 +97,16 @@ function applyProvenanceGateDecision() {
   if (!gate) return null;
   const payload = parseJson(gate.payload_json);
   const result = parseJson(gate.result_json);
+  const observedOid = readRuntimeStatus(RUNTIME_STATUS_KEYS.SHARED_TRUNK)?.remote_sha;
+  if ((observedOid && observedOid !== payload.remote_oid)
+    || (observedOid === payload.remote_oid && state.baseline_oid === observedOid)) {
+    getDb().prepare("UPDATE jobs SET result_json=? WHERE id=?").run(JSON.stringify({
+      ...result,
+      provenance_applied: true,
+      provenance_superseded: true,
+    }), gate.id);
+    return { gateId: gate.id, superseded: true };
+  }
   const gateContract = getDb().prepare(
     "SELECT resolution_action FROM human_gates WHERE gate_job_id = ?"
   ).get(gate.id);
@@ -114,11 +147,13 @@ function ensureProvenanceGate(result) {
     });
   }
   const live = getLivePairingState();
-  const existing = provenanceGateRows().find((job) => (
-    ["queued", "leased", "running", "waiting_on_human", "blocked"].includes(job.status)
-    && gateBelongsToSession(job, live)
-  ));
-  if (existing) return existing;
+  for (const job of provenanceGateRows()) {
+    if (!OPEN_PROVENANCE_GATE_STATUSES.includes(job.status) || !gateBelongsToSession(job, live)) continue;
+    if (parseJson(job.payload_json).remote_oid === remoteOid) return job;
+    // The exact tip named by a pending review has moved. Retire that review
+    // before creating one for the tip actually fetched this cycle.
+    retireProvenanceGate(job, "remote_tip_superseded", remoteOid);
+  }
   const commits = (result?.provenance?.commits || []).slice(0, 32);
   const gate = createJob({
     work_item_id: null,
@@ -135,6 +170,7 @@ function ensureProvenanceGate(result) {
       remote_oid: remoteOid,
       branch: live?.shared_branch || null,
       remote: live?.remote_name || null,
+      session_id: live?.remote_session_id || null,
       commits,
     },
   });
@@ -409,14 +445,23 @@ export class SharedTrunkPoller {
     const deadline = setTimeout(() => controller.abort(new Error("Shared-trunk poll deadline exceeded")), remainingDeadlineMs);
     deadline.unref?.();
     try {
+      const provenanceOptions = this._provenanceContext();
       const result = await this._sync(this.projectDir, {
         includeClaims: config.claimsEnabled === true,
         ...(this._claimCursor ? { claimAfter: this._claimCursor } : {}),
-        ...this._provenanceContext(),
+        ...provenanceOptions,
         ...(holdFastForward ? { holdFastForward: true } : {}),
         signal: controller.signal,
       });
       const effectiveConfig = result?.config || config;
+      if (provenanceOptions.provenance && result?.ok === true && result?.fetchCompleted === true) {
+        retireOpenProvenanceGates(getLivePairingState(), "provenance_verified", result.remoteSha || null);
+        this._updateStatus({
+          provenance_gate_job_id: null,
+          provenance_gate_rejected: false,
+          provenance_gate_rejected_oid: null,
+        });
+      }
       if (result?.ok === true && this._failureRecorded) {
         // Clear a failure this poller recorded (deadline, thrown sync, bad
         // configuration); the coordinator clears its own on success.
@@ -618,16 +663,14 @@ export class SharedTrunkPoller {
 
   _provenanceContext() {
     const session = getLivePairingState();
-    if (!session?.baseline_oid || session.phase !== "active") return {};
-    const snapshot = readPairingPeerSnapshot();
-    const gitIdentities = (snapshot?.peers || [])
-      .flatMap((peer) => Array.isArray(peer.git_identities) ? peer.git_identities : []);
-    return {
-      provenance: {
-        baselineOid: session.baseline_oid,
-        gitIdentities,
-      },
-    };
+    if (!session || session.phase !== "active") return {};
+    const provenance = pairingSessionProvenance(session);
+    if (!provenance) {
+      throw Object.assign(new Error("Active session provenance identity is incomplete"), {
+        code: "session_provenance_unavailable",
+      });
+    }
+    return { provenance };
   }
 
   // Claims reconcile only against a fetch that actually completed — the

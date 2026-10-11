@@ -806,9 +806,16 @@ status snapshot; it never enters the local queue and cannot be scheduled,
 claimed, or changed by this Posse instance. Background preparation jobs such as
 ATLAS warmup stay local and are not relayed as paired work or app status.
 Unknown shared-trunk commits are not absorbed: Posse compares only the recorded
-session baseline through the fetched tip and accepts an operation trailer or a
-known member committer identity. Anything else creates a typed repository
-recovery gate for accepting that exact tip or rejecting it for manual review.
+session baseline through the fetched tip. New Posse merge commits carry
+`Posse-Session-User: <session-id>:<instance-id>`; the instance ID persists for
+the clone across sessions. Posse checks that the named instance participated in
+the named session, or that a local operation journal binds the exact commit.
+Older session commits without the trailer require an exact-tip recovery review.
+Administrator-managed trunks without a Session retain their previous committer
+identity check. The trailer identifies a Posse participant but is not a
+cryptographic signature against someone with direct write access to the Git
+remote. A failed check creates a typed repository recovery gate for accepting
+that exact tip or rejecting it for manual review.
 
 With `capability-routing`, a throttled or unavailable local provider can offer a
 bounded work packet through `refs/posse/handoff/*`; `host-only` routes member

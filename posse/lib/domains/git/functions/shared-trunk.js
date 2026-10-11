@@ -51,6 +51,7 @@ import {
   SHARED_TRUNK_MERGE_LOCK_OWNERS,
   SHARED_TRUNK_PUSH_REFUSALS,
   SHARED_TRUNK_PUSH_REFUSED_REASONS,
+  SHARED_TRUNK_SESSION_USER_TRAILER,
 } from "../../../catalog/shared-trunk.js";
 import {
   gitHubCliAuthRemediation,
@@ -58,7 +59,8 @@ import {
 } from "./git-push-auth.js";
 
 const SHA_RE = /^[0-9a-f]{40,64}$/iu;
-const MAX_PROVENANCE_COMMITS = 256;
+const PROVENANCE_PAGE_SIZE = 256;
+const SESSION_USER_TRAILER_RE = new RegExp(`^${SHARED_TRUNK_SESSION_USER_TRAILER}:\\s*(\\S+)\\s*$`, "gmu");
 
 // Test-only seams (set through __testSharedTrunkInternals.setTestOverrides).
 // Production always runs with overrides null; the reconcile arms are otherwise
@@ -141,22 +143,19 @@ async function activeSessionHold() {
 }
 
 async function sessionProvenanceContext() {
-  try {
-    const [{ getLivePairingState }, { readPairingPeerSnapshot }] = await Promise.all([
-      import("../../pairing/functions/state.js"),
-      import("../../pairing/functions/work-items.js"),
-    ]);
-    const state = getLivePairingState();
-    if (!state?.baseline_oid || state.phase !== "active") return null;
-    const snapshot = readPairingPeerSnapshot();
-    return {
-      baselineOid: state.baseline_oid,
-      gitIdentities: (snapshot?.peers || [])
-        .flatMap((peer) => Array.isArray(peer.git_identities) ? peer.git_identities : []),
-    };
-  } catch {
-    return null;
+  const [{ getLivePairingState }, { pairingSessionProvenance }] = await Promise.all([
+    import("../../pairing/functions/state.js"),
+    import("../../pairing/functions/work-items.js"),
+  ]);
+  const state = getLivePairingState();
+  if (!state || state.phase !== "active") return null;
+  const provenance = pairingSessionProvenance(state);
+  if (!provenance) {
+    throw Object.assign(new Error("Active session provenance identity is incomplete"), {
+      code: "session_provenance_unavailable",
+    });
   }
+  return provenance;
 }
 
 function nativeResult(envelope) {
@@ -438,6 +437,8 @@ export function verifySharedTrunkProvenance(projectDir, {
   baselineOid,
   newSha,
   gitIdentities = [],
+  sessionId = null,
+  memberIds = [],
   exec = execGit,
 } = {}) {
   if (!SHA_RE.test(String(baselineOid || "")) || !SHA_RE.test(String(newSha || ""))) {
@@ -448,45 +449,54 @@ export function verifySharedTrunkProvenance(projectDir, {
   } catch {
     return { ok: false, reason: "provenance_baseline_not_ancestor", commits: [] };
   }
-  const rawLog = exec([
-    "log", `--max-count=${MAX_PROVENANCE_COMMITS + 1}`,
-    "--format=%H%x00%ce%x00%B%x00", `${baselineOid}..${newSha}`,
-  ], projectDir, { trim: false });
-  const fields = String(rawLog || "").split("\0");
-  while (fields.length > 0 && !fields.at(-1).trim()) fields.pop();
-  const commits = [];
-  for (let index = 0; index + 2 < fields.length; index += 3) {
-    commits.push({
-      commit: fields[index].trim(),
-      email: fields[index + 1].trim().toLowerCase(),
-      message: fields[index + 2],
-    });
-  }
-  if (commits.length > MAX_PROVENANCE_COMMITS) {
-    return { ok: false, reason: "provenance_range_too_large", commits: [] };
-  }
   const identities = new Set(
     gitIdentities.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean),
   );
+  const members = new Set(memberIds.map((value) => String(value || "").trim()).filter(Boolean));
   try {
     const localEmail = exec(["config", "--get", "user.email"], projectDir).trim().toLowerCase();
     if (localEmail) identities.add(localEmail);
   } catch { /* identity is optional */ }
   const unknown = [];
-  for (const commit of commits) {
-    if (!SHA_RE.test(commit.commit)) {
-      return { ok: false, reason: "provenance_range_invalid", commits: [] };
+  // Page the immutable OID range so a held or offline checkout can verify a
+  // long legitimate session without loading every commit message at once.
+  for (let offset = 0; ; offset += PROVENANCE_PAGE_SIZE) {
+    const rawLog = exec([
+      "log", `--max-count=${PROVENANCE_PAGE_SIZE}`, `--skip=${offset}`,
+      "--format=%H%x00%ce%x00%B%x00", `${baselineOid}..${newSha}`,
+    ], projectDir, { trim: false });
+    const fields = String(rawLog || "").split("\0");
+    while (fields.length > 0 && !fields.at(-1).trim()) fields.pop();
+    if (fields.length % 3 !== 0) return { ok: false, reason: "provenance_range_invalid", commits: [] };
+    const count = fields.length / 3;
+    for (let index = 0; index < fields.length; index += 3) {
+      const commit = fields[index].trim();
+      const email = fields[index + 1].trim().toLowerCase();
+      const message = fields[index + 2];
+      if (!SHA_RE.test(commit)) return { ok: false, reason: "provenance_range_invalid", commits: [] };
+      const operationId = message.match(/^Posse-Shared-Trunk-Operation:\s*(\S+)\s*$/mu)?.[1] || null;
+      let journaled = false;
+      if (operationId) {
+        try {
+          const operation = getSharedTrunkMergeOperation(operationId);
+          journaled = operation?.candidateSha === commit;
+        } catch { /* an unverifiable trailer is not provenance */ }
+      }
+      if (journaled) continue;
+      if (sessionId) {
+        const values = [...message.matchAll(SESSION_USER_TRAILER_RE)];
+        const prefix = `${sessionId}:`;
+        if (values.length === 1 && values[0][1].startsWith(prefix)
+          && members.has(values[0][1].slice(prefix.length))) continue;
+      } else if (identities.has(email)) {
+        // Administrator-managed trunks have no Posse session to bind a token
+        // to, and retain their existing identity policy.
+        continue;
+      }
+      unknown.push({ commit, email: email || null });
+      if (unknown.length >= 32) return { ok: false, reason: "unknown_commit_provenance", commits: unknown };
     }
-    const operationId = commit.message.match(/^Posse-Shared-Trunk-Operation:\s*(\S+)\s*$/mu)?.[1] || null;
-    let journaled = false;
-    if (operationId) {
-      try {
-        const operation = getSharedTrunkMergeOperation(operationId);
-        journaled = operation?.candidateSha === commit.commit;
-      } catch { /* an unverifiable trailer is not provenance */ }
-    }
-    if (journaled || identities.has(commit.email)) continue;
-    unknown.push({ commit: commit.commit, email: commit.email || null });
+    if (count < PROVENANCE_PAGE_SIZE) break;
   }
   return unknown.length > 0
     ? { ok: false, reason: "unknown_commit_provenance", commits: unknown }
@@ -1062,6 +1072,8 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       baselineOid: provenance.baselineOid,
       newSha: fetched.remoteSha,
       gitIdentities: provenance.gitIdentities,
+      sessionId: provenance.sessionId,
+      memberIds: provenance.memberIds,
     });
     if (!proof.ok && proof.reason === "unknown_commit_provenance" && proof.commits.length > 0) {
       try {
@@ -1562,7 +1574,16 @@ export async function mergeToSharedTrunkAsync({
     return { ...blocked, deferred: isTransientSharedTrunkMergeResult(blocked) };
   }
   const workItemContext = team.workItemContext || null;
-  const provenance = await sessionProvenanceContext();
+  let provenance;
+  try {
+    provenance = await sessionProvenanceContext();
+  } catch (error) {
+    return {
+      ok: false, deferred: true, sharedTrunk: true, unavailable: true,
+      reason: error?.code || "session_provenance_unavailable",
+      message: error?.message || String(error),
+    };
+  }
 
   // Strict source and base reads: an infrastructure failure lands in the catch
   // below and defers the merge instead of reading as a missing branch.

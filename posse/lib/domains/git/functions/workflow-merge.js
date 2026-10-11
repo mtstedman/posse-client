@@ -62,6 +62,8 @@ import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { postChangeReceiptsAtCommit } from "../../queue/functions/verification-receipts.js";
 import { mergeToSharedTrunkAsync } from "./shared-trunk.js";
+import { SHARED_TRUNK_SESSION_USER_TRAILER } from "../../../catalog/shared-trunk.js";
+import { getLivePairingState } from "../../pairing/functions/state.js";
 import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
 
 function reservedRuntimeMergeError(paths = []) {
@@ -217,6 +219,15 @@ export function createMergeWorkflowHelpers(context, {
     }
     if (sharedTrunkOperationId) {
       args.push("-m", `Posse-Shared-Trunk-Operation: ${sharedTrunkOperationId}`);
+      const session = getLivePairingState();
+      if (session?.phase === "active" && session.shared_branch === (source?.targetBranch || currentTargetBranch())) {
+        if (!session.remote_session_id || !session.instance_id) {
+          throw Object.assign(new Error("Active session commit identity is incomplete"), {
+            code: "session_commit_identity_unavailable",
+          });
+        }
+        args.push("-m", `${SHARED_TRUNK_SESSION_USER_TRAILER}: ${session.remote_session_id}:${session.instance_id}`);
+      }
     }
     const delegation = workItemMetadata(wiId)?.session_delegation;
     if (delegation?.originator_instance_id && Number.isSafeInteger(Number(delegation.origin_work_item_id))) {
