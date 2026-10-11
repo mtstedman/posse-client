@@ -10,8 +10,9 @@ import { redactBridgeValue, redactString } from "../../bridge/functions/redactio
 import { canonicalAtlasToolUseActionName, formatAtlasToolDisplayName } from "../../../shared/tools/functions/mcp-surface.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
-import { markTelemetryRowsMirrored, pruneTelemetryTableToTail } from "../../../shared/telemetry/functions/db-tail.js";
-import { appendRunTelemetry, getRunTelemetryStartedAt, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
+import { pruneTelemetryTableToTail } from "../../../shared/telemetry/functions/db-tail.js";
+import { registerTransactionLifecycleHooks } from "../../queue/functions/common.js";
+import { appendRunTelemetry, getRunTelemetryId, getRunTelemetryStartedAt, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
 import {
   isResearchAtlasCitationFetchAction,
   isResearchAtlasExplorationAction,
@@ -24,8 +25,18 @@ import {
   getToolBatchingClass,
   TOOL_BATCHING_CLASSES,
 } from "../../../catalog/tool-surface/batching.js";
+import { FINAL_REVIEW_OBSERVATIONS } from "../../../catalog/final-review.js";
 
 let _fd = null;
+let _observationExportAfterTransaction = false;
+registerTransactionLifecycleHooks({
+  onCommit: () => {
+    if (!_observationExportAfterTransaction) return;
+    _observationExportAfterTransaction = false;
+    try { pruneTelemetryTableToTail(getDb(), "job_observations"); } catch { /* retry on later activity */ }
+  },
+  onRollback: () => { _observationExportAfterTransaction = false; },
+});
 let _currentDate = "";
 let _streamDisabledUntilMs = 0;
 let _streamLastFailure = null;
@@ -429,11 +440,27 @@ function _insertObservationRow(db, {
   summary,
   detailJson,
   createdAt,
+  exportState = "pending",
 }) {
-  return db.prepare(`
-    INSERT INTO job_observations (work_item_id, job_id, attempt_id, observation_type, summary, detail_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(work_item_id, job_id, attempt_id, observation_type, summary, detailJson, createdAt);
+  const insert = () => {
+    const info = db.prepare(`
+      INSERT INTO job_observations (work_item_id, job_id, attempt_id, observation_type, summary, detail_json, created_at, export_state, export_run_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(work_item_id, job_id, attempt_id, observation_type, summary, detailJson, createdAt, exportState, getRunTelemetryId());
+    if (job_id && [FINAL_REVIEW_OBSERVATIONS.ISSUED, FINAL_REVIEW_OBSERVATIONS.RESULT].includes(observation_type)) {
+      const detail = JSON.parse(detailJson || "{}");
+      const agentCallId = Number(detail?.agent_call_id);
+      if (Number.isSafeInteger(agentCallId) && agentCallId > 0) {
+        db.prepare(`
+          INSERT INTO final_review_records
+            (observation_id, job_id, attempt_id, agent_call_id, observation_type, detail_json, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(Number(info.lastInsertRowid), job_id, attempt_id, agentCallId, observation_type, detailJson, createdAt);
+      }
+    }
+    return info;
+  };
+  return db.transaction(insert)();
 }
 
 function _resolveObservationScopeForInsert(db, {
@@ -560,11 +587,13 @@ export function recordObservation({
     const db = suppliedDb || getDb();
     const detailJson = normalizeJsonText(detail);
     const createdAt = nowIso();
+    const internalBackground = isInternalBackgroundObservationType(observation_type);
+    const exportState = internalBackground ? "mirrored" : "pending";
     let scope = { work_item_id, job_id, attempt_id };
 
     let info;
     try {
-      info = _insertObservationRow(db, { ...scope, observation_type, summary, detailJson, createdAt });
+      info = _insertObservationRow(db, { ...scope, observation_type, summary, detailJson, createdAt, exportState });
     } catch (err) {
       if (!_isForeignKeyConstraintError(err)) throw err;
       const requestedScope = { ...scope };
@@ -575,7 +604,7 @@ export function recordObservation({
         observationType: observation_type,
         error: err,
       });
-      info = _insertObservationRow(db, { ...scope, observation_type, summary, detailJson, createdAt });
+      info = _insertObservationRow(db, { ...scope, observation_type, summary, detailJson, createdAt, exportState });
     }
 
     const row = {
@@ -588,12 +617,6 @@ export function recordObservation({
       detail_json: detailJson,
       created_at: createdAt,
     };
-
-    const internalBackground = isInternalBackgroundObservationType(observation_type);
-    const mirrored = internalBackground ? false : appendRunTelemetry("observations", {
-      ...row,
-      detail,
-    });
 
     if (!internalBackground) {
       _writeStreamEntry({
@@ -608,10 +631,8 @@ export function recordObservation({
         detail_json: detailJson,
       });
     }
-    if (mirrored) {
-      markTelemetryRowsMirrored("job_observations", [row.id]);
-      try { pruneTelemetryTableToTail(db, "job_observations"); } catch { /* best effort */ }
-    }
+    if (db.inTransaction) _observationExportAfterTransaction = true;
+    else try { pruneTelemetryTableToTail(db, "job_observations"); } catch { /* durable pending row retries later */ }
     return true;
   } catch (err) {
     appendRunTelemetry("observations", {
@@ -1280,10 +1301,11 @@ function _summarizeCatalogToolUse(tool, input = {}, cwdNorm = null, rel = (value
     const filePath = rel(rawPath);
     if (!filePath && spec.requireTarget) return null;
     const changed = _truncate(input.old_string || "", 60);
+    const editCount = Array.isArray(input.edits) ? input.edits.length : null;
     return {
       observation_type: spec.type,
-      summary: `${spec.label}: ${_truncate(filePath || ".", 140)}${changed ? ` (${changed})` : ""}`,
-      detail: _catalogDetail({ spec, input, cwdNorm, tool, catalogName, extra: { path: _normalizePath(rawPath) } }),
+      summary: `${spec.label}: ${_truncate(filePath || ".", 140)}${editCount != null ? ` (${editCount} edits)` : changed ? ` (${changed})` : ""}`,
+      detail: _catalogDetail({ spec, input, cwdNorm, tool, catalogName, extra: { path: _normalizePath(rawPath), ...(editCount != null ? { edit_count: editCount } : {}) } }),
     };
   }
 

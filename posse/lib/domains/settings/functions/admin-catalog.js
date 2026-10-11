@@ -1046,6 +1046,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     "atlas_prose_dedup",
     "atlas_code_lens_callable",
     "atlas_view_layer_merge",
+    "atlas_compact_structure_dev_assessor",
   ], "rollback switches; defaults are the adopted behavior"),
   group("debug_tool_ablation", "debug", "Tool Ablation", [
     "atlas_tools_disabled",

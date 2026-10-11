@@ -5,9 +5,11 @@ import { isMainThread, threadId } from "node:worker_threads";
 
 import { getRuntimeLogDir, getRuntimeResourcesDir, safeProcessCwd } from "../../../domains/runtime/functions/paths.js";
 import { readJsonlLines } from "./jsonl-reader.js";
+import { safeTelemetryStringify as safeStringify } from "./safe-json.js";
 
 const GENERATED_RUN_STARTED_AT = new Date().toISOString();
 const PROCESS_STARTED_AT = GENERATED_RUN_STARTED_AT;
+const INHERITED_RUN_ID = !!process.env.POSSE_RUN_ID;
 const RUN_STARTED_AT = String(process.env.POSSE_RUN_STARTED_AT || GENERATED_RUN_STARTED_AT);
 const GENERATED_RUN_ID = `${RUN_STARTED_AT.replace(/[:.]/g, "-")}-pid${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
 const RUN_ID = String(process.env.POSSE_RUN_ID || GENERATED_RUN_ID).replace(/[^A-Za-z0-9_.-]/g, "_");
@@ -40,18 +42,6 @@ let _exitHookInstalled = false;
 let _telemetryEpoch = 0;
 let _telemetryEnabled = true;
 let _activeLifecycleOwnerToken = null;
-
-function safeStringify(value) {
-  const seen = new WeakSet();
-  return JSON.stringify(value, (_key, val) => {
-    if (typeof val === "bigint") return val.toString();
-    if (val && typeof val === "object") {
-      if (seen.has(val)) return "[Circular]";
-      seen.add(val);
-    }
-    return val;
-  });
-}
 
 function streamFileName(stream) {
   return STREAM_FILES[stream] || `${String(stream || "telemetry").replace(/[^A-Za-z0-9_.-]/g, "_")}.jsonl`;
@@ -106,8 +96,9 @@ export function bumpRunTelemetryEpoch() {
   return _telemetryEpoch;
 }
 
-export function getRunTelemetryDir() {
-  return path.join(getRuntimeLogDir(), "runs", RUN_ID);
+export function getRunTelemetryDir(runId = RUN_ID) {
+  const safeRunId = String(runId || RUN_ID).replace(/[^A-Za-z0-9_.-]/g, "_");
+  return path.join(getRuntimeLogDir(), "runs", safeRunId);
 }
 
 function ensureManifest(runDir) {
@@ -116,7 +107,7 @@ function ensureManifest(runDir) {
   // Worker threads may append their own telemetry streams, but the process
   // main thread exclusively owns run lifecycle metadata. Otherwise a worker
   // exit can mark the shared run clean while the scheduler is still alive.
-  if (!isMainThread || _manifestDirs.has(runDir)) return;
+  if (!isMainThread || INHERITED_RUN_ID || _manifestDirs.has(runDir)) return;
   const manifestPath = path.join(runDir, "manifest.json");
   if (!fs.existsSync(manifestPath)) {
     const manifest = {
@@ -169,7 +160,7 @@ function updateManifest(runDir, patch = {}, { expectedLifecycleOwnerToken = unde
 }
 
 export function beginRunTelemetryLifecycle({ ownerId = null } = {}) {
-  if (!isMainThread || !_telemetryEnabled) return null;
+  if (!isMainThread || INHERITED_RUN_ID || !_telemetryEnabled) return null;
   const runDir = getRunTelemetryDir();
   ensureManifest(runDir);
   const previousManifest = readManifest(runDir);
@@ -201,7 +192,7 @@ export function beginRunTelemetryLifecycle({ ownerId = null } = {}) {
 }
 
 export function updateRunTelemetryManifest(patch = {}) {
-  if (!isMainThread || !_telemetryEnabled) return false;
+  if (!isMainThread || INHERITED_RUN_ID || !_telemetryEnabled) return false;
   const runDir = getRunTelemetryDir();
   ensureManifest(runDir);
   return updateManifest(runDir, patch, _activeLifecycleOwnerToken
@@ -229,35 +220,38 @@ export function listRunTelemetryManifests({ includeCurrent = true } = {}) {
   }
 }
 
-function openStream(stream) {
+function openStream(stream, runId = RUN_ID) {
   if (!_telemetryEnabled) return null;
-  const runDir = getRunTelemetryDir();
+  const runDir = getRunTelemetryDir(runId);
   const filePath = path.join(runDir, streamFileName(stream));
-  const existing = _streams.get(stream);
+  const streamKey = `${runId}:${stream}`;
+  const existing = _streams.get(streamKey);
   if (existing?.filePath === filePath && existing.fd != null) return existing;
 
   if (existing?.fd != null) {
     try { fs.closeSync(existing.fd); } catch { /* ignore */ }
   }
 
-  ensureManifest(runDir);
+  if (runId === RUN_ID) ensureManifest(runDir);
+  else fs.mkdirSync(runDir, { recursive: true });
   const fd = fs.openSync(filePath, "a");
   const next = { fd, filePath, runDir };
-  _streams.set(stream, next);
+  _streams.set(streamKey, next);
   ensureExitHook();
   return next;
 }
 
-export function appendRunTelemetry(stream, entry = {}) {
+export function appendRunTelemetry(stream, entry = {}, { runId = RUN_ID } = {}) {
   if (!_telemetryEnabled) return false;
   try {
-    const target = openStream(stream);
+    const target = openStream(stream, runId);
     if (!target) return false;
     const line = safeStringify({
       t: entry?.created_at || entry?.t || nowIso(),
-      run_id: RUN_ID,
+      run_id: runId,
       telemetry_epoch: _telemetryEpoch,
       ...entry,
+      writer_pid: process.pid,
     });
     fs.writeSync(target.fd, `${line}\n`);
     return true;
@@ -269,14 +263,14 @@ export function appendRunTelemetry(stream, entry = {}) {
 export function closeRunTelemetry({ cleanExit = true, exitCode = undefined } = {}) {
   const dirs = new Set(_manifestDirs);
   for (const stream of _streams.values()) {
-    if (stream?.runDir) dirs.add(stream.runDir);
+    if (stream?.runDir === getRunTelemetryDir()) dirs.add(stream.runDir);
     if (stream?.fd != null) {
       try { fs.closeSync(stream.fd); } catch { /* ignore */ }
     }
   }
   _streams.clear();
   _manifestDirs.clear();
-  if (isMainThread) {
+  if (isMainThread && !INHERITED_RUN_ID) {
     for (const runDir of dirs) {
       const manifest = readManifest(runDir);
       if (_activeLifecycleOwnerToken) {
@@ -321,6 +315,7 @@ export function readRunTelemetryEntries(stream, {
     : listRunTelemetryFiles(stream);
   const orderedFiles = order === "asc" ? files : files.reverse();
   const out = [];
+  const seenExportIds = new Set();
   const max = limit == null ? Infinity : Math.max(0, Number(limit) || 0);
   if (max === 0) return out;
 
@@ -333,11 +328,19 @@ export function readRunTelemetryEntries(stream, {
         try { parsed = JSON.parse(raw); } catch { continue; }
         if (currentEpochOnly) {
           if (String(parsed?.run_id || "") !== RUN_ID) continue;
-          if (Number(parsed?.telemetry_epoch ?? -1) !== _telemetryEpoch) continue;
+          // Child processes share the run ID but have independent local epoch
+          // counters. Only this process's old epochs are stale here.
+          if (Number(parsed?.writer_pid) === process.pid
+            && Number(parsed?.telemetry_epoch ?? -1) !== _telemetryEpoch) continue;
         }
         let keep = false;
         try { keep = !!predicate(parsed); } catch { keep = false; }
         if (!keep) continue;
+        if (parsed?.export_id) {
+          const key = `${parsed.run_id || ""}:${parsed.export_id}`;
+          if (seenExportIds.has(key)) continue;
+          seenExportIds.add(key);
+        }
         out.push(parsed);
         if (out.length >= max) return out;
       }

@@ -1,18 +1,21 @@
 import { missingNodeTestDependency } from "./node-test-failure.js";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import { TEST_SUBPROCESS_ENV_KEYS } from "../../../../catalog/process.js";
 import { filterProcessEnv } from "../../../platform/functions/process-env.js";
 import { testExecutionCounts } from "./test-output-counts.js";
 import { pythonExecutable, repositoryTestRunner } from "./repository-test-runner.js";
+import { gitExec } from "../../../../domains/git/functions/utils.js";
 
 const SKIP_DIRS = new Set([
   ".git", ".hg", ".svn", ".idea", ".vscode", ".cache", ".next", ".nuxt",
-  "build", "coverage", "dist", "node_modules", "target", "vendor", "venv", ".venv",
+  ".posse", ".posse-worktrees", ".posse-test-suites", "build", "coverage", "dist",
+  "node_modules", "target", "vendor", "venv", ".venv",
 ]);
+const TEST_HELPER_DIRS = new Set(["support"]);
 const MAX_OUTPUT_CHARS = 128 * 1024;
 const MAX_SOURCE_SNIFF_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -145,7 +148,7 @@ function pythonRunner(root, relative, source) {
 function phpRunner(root, relative, source) {
   const phpunit = nearestUpward(root, relative, ["vendor/bin/phpunit"]);
   const config = nearestUpward(root, relative, PHPUNIT_CONFIG_NAMES);
-  if (PHPUNIT_SOURCE_RE.test(source) || (PHP_CLASS_EXTENDS_RE.test(source) && phpunit && config)) {
+  if (PHPUNIT_SOURCE_RE.test(source)) {
     if (!phpunit) return { reason: "phpunit_unavailable" };
     return { runner: "phpunit", executable: "php", args: [phpunit, ...(config ? ["-c", config] : []), relative] };
   }
@@ -192,6 +195,7 @@ function walkTestFiles(root, current, inTestDirectory, output) {
     const absolute = path.join(current, entry.name);
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name.toLowerCase())) continue;
+      if (inTestDirectory && TEST_HELPER_DIRS.has(entry.name.toLowerCase())) continue;
       walkTestFiles(root, absolute, inTestDirectory || isTestDirectoryName(entry.name), output);
       continue;
     }
@@ -202,6 +206,18 @@ function walkTestFiles(root, current, inTestDirectory, output) {
   }
 }
 
+function gitVisiblePaths(root) {
+  try {
+    const output = gitExec(["ls-files", "--cached", "--others", "--exclude-standard", "-z"], root, {
+      trim: false,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return new Set(String(output || "").split("\0").filter(Boolean));
+  } catch {
+    return null;
+  }
+}
+
 export function discoverUnitTestCapability({ projectDir, scipAvailable = true } = {}) {
   const root = path.resolve(String(projectDir || ""));
   if (!root || !fs.existsSync(root) || !scipAvailable) {
@@ -209,13 +225,19 @@ export function discoverUnitTestCapability({ projectDir, scipAvailable = true } 
   }
   const files = [];
   walkTestFiles(root, root, isTestDirectoryName(path.basename(root)), files);
+  const visible = gitVisiblePaths(root);
+  if (visible) {
+    for (let index = files.length - 1; index >= 0; index -= 1) {
+      if (!visible.has(files[index])) files.splice(index, 1);
+    }
+  }
   files.sort();
   const adapters = [...new Set(files.map((file) => ADAPTERS[path.extname(file).toLowerCase()].executable()))];
   const missing = adapters.filter((executable) => !commandAvailable(executable));
   const languages = [...new Set(files.map((file) => ADAPTERS[path.extname(file).toLowerCase()].language))].sort();
   return Object.freeze({
-    available: files.length > 0 && missing.length === 0,
-    reason: files.length === 0 ? "no_unit_tests" : missing.length > 0 ? "test_adapter_unavailable" : null,
+    available: files.length > 0 && missing.length < adapters.length,
+    reason: files.length === 0 ? "no_unit_tests" : missing.length === adapters.length ? "test_adapter_unavailable" : null,
     files: Object.freeze(files),
     languages: Object.freeze(languages),
     missing_executables: Object.freeze(missing),

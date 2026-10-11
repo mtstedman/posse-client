@@ -11,6 +11,7 @@ export function normalizeFailureFingerprintText(value) {
     .replace(/\bon line \d+\b/gi, "on line <line>")
     .replace(/^([✔✖▶].*) \(\d+(?:\.\d+)?ms\)$/gm, "$1 (<duration>)")
     .replace(/^((?:ℹ|#) duration_ms) \d+(?:\.\d+)?$/gm, "$1 <duration>")
+    .replace(/^(Ran \d+ tests? in) \d+(?:\.\d+)?s$/gm, "$1 <duration>")
     .replace(/[ \t]+$/gm, "")
     .trim();
 }
@@ -195,6 +196,7 @@ export function testRunDiagnostics(run) {
     command: run.command || null,
     status: run.status || null,
     reason: run.reason || null,
+    ...(Array.isArray(run.check_runs) ? { check_runs: run.check_runs } : {}),
     failure_summary: renderTestFailureSummary(run) || null,
     stdout: excerpt(run.stdout),
     stderr: excerpt(run.stderr),

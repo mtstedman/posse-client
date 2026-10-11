@@ -328,6 +328,7 @@ export function saveReport(reportData, { projectDir = process.cwd() } = {}) {
             outputChars: d.totalOutput,
             costUsd: d.totalCostUsd == null ? null : nonNegativeNumber(d.totalCostUsd),
             knownCostUsd: nonNegativeNumber(d.knownCostUsd),
+            fallbackPricedUsd: nonNegativeNumber(d.fallbackPricedUsd),
             costPrecision: d.costPrecision || "unknown",
             exactCostCalls: nonNegativeNumber(d.exactCostCalls),
             estimatedCostCalls: nonNegativeNumber(d.estimatedCostCalls),
@@ -459,6 +460,7 @@ export function buildReviewReportData(reviewable, {
       : null;
     const totalCostUsd = wiCost?.totalCostUsd == null ? null : Math.max(0, Number(wiCost.totalCostUsd) || 0);
     const knownCostUsd = Math.max(0, Number(wiCost?.knownCostUsd) || 0);
+    const fallbackPricedUsd = Math.max(0, Number(wiCost?.fallbackPricedUsd) || 0);
     const costPrecision = wiCost?.costPrecision || "unknown";
     const toolUsageSummary = toolUsageByWorkItem.get(wi.id) || [];
     const totalToolCalls = toolUsageSummary.reduce((sum, item) => sum + (item.count || 0), 0);
@@ -547,6 +549,7 @@ export function buildReviewReportData(reviewable, {
       totalOutputTokens,
       totalCostUsd,
       knownCostUsd,
+      fallbackPricedUsd,
       costPrecision,
       exactCostCalls: Number(wiCost?.exactCostCalls) || 0,
       estimatedCostCalls: Number(wiCost?.estimatedCostCalls) || 0,

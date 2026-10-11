@@ -1210,6 +1210,8 @@ export function runRegisteredTestsForMergeCandidate({
   scopeFiles = [],
   actor = {},
   db = getDb(),
+  beforeEachTest = null,
+  deadlineMs = null,
 } = {}) {
   ensureRegisteredTestTables(db);
   const normalizedScopeFiles = normalizeScopeFiles(cwd, scopeFiles);
@@ -1238,13 +1240,19 @@ export function runRegisteredTestsForMergeCandidate({
   `).all(Number.isInteger(candidateWorkItemId) && candidateWorkItemId > 0 ? candidateWorkItemId : -1)
     .filter((test) => targetFilesOverlapScope(test, normalizedScopeFiles));
 
-  const results = rows.map((test) => runRegisteredTestSingle({
-    args: { test_id: test.id },
-    cwd,
-    actor,
-    scopeFiles: normalizedScopeFiles,
-    db,
-  }));
+  const results = rows.map((test) => {
+    const remainingMs = deadlineMs == null ? DEFAULT_TIMEOUT_MS : deadlineMs - Date.now();
+    if (remainingMs < 1000) return { ok: false, status: "failed", failure_kind: "timeout",
+      test: testPublic(test), failure: { message: "merge gate wall budget expired before this registered check" } };
+    beforeEachTest?.();
+    return runRegisteredTestSingle({
+      args: { test_id: test.id, timeout_ms: Math.min(DEFAULT_TIMEOUT_MS, remainingMs) },
+      cwd,
+      actor,
+      scopeFiles: normalizedScopeFiles,
+      db,
+    });
+  });
   const passed = results.filter((result) => result.ok).length;
   const failed = results.length - passed;
   return {

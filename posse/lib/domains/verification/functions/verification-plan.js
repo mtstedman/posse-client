@@ -11,6 +11,16 @@ import { detectNodePackageManager } from "../../../shared/tools/functions/node-p
 export const VERIFICATION_PLAN_SCHEMA_VERSION = 1;
 export const VERIFICATION_PLAN_CONFIG = "posse.verification.json";
 
+export function verificationPlanSnapshot(plan) {
+  return {
+    schema_version: VERIFICATION_PLAN_SCHEMA_VERSION,
+    status: plan?.status || "none",
+    source: plan?.source || null,
+    plan_id: plan?.plan_id || null,
+    check_ids: Array.isArray(plan?.checks) ? plan.checks.map((check) => check.id) : [],
+  };
+}
+
 const STAGES = Object.freeze(["fast", "required", "canonical"]);
 const INTENTS = new Set(["test", "lint", "typecheck", "contract"]);
 const CHECK_ID_RE = /^[a-z0-9][a-z0-9._:-]{0,79}$/;
@@ -89,6 +99,7 @@ function manifestChecks(projectDir) {
   return candidates.map((script) => ({
     id: `package:${script}`,
     command: packageScriptCommand(manager, script),
+    definition_sha256: sha256(String(scripts[script] || "")),
     cwd: ".",
     intent: scriptIntent(script),
     stage: scriptStage(script),
@@ -137,6 +148,7 @@ function normalizeCheck(raw, index, validateCommand) {
       id,
       command: displayCommand,
       execution_command: validation.execution_command || command,
+      ...(raw?.definition_sha256 ? { definition_sha256: raw.definition_sha256 } : {}),
       cwd_relative: validation.cwd_relative || (cwd === "." ? null : cwd),
       intent,
       stage,

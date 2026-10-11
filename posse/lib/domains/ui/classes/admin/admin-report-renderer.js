@@ -78,6 +78,7 @@ export function buildAdminReportAnalytics(reports = []) {
   let tokens = 0;
   let duration = 0;
   let cost = 0;
+  let fallbackPricedUsd = 0;
   let toolCalls = 0;
   let merged = 0;
   let failedItems = 0;
@@ -87,6 +88,7 @@ export function buildAdminReportAnalytics(reports = []) {
     tokens += number(totals.inputTokens) + number(totals.outputTokens);
     duration += number(totals.durationMs);
     cost += number(totals.knownCostUsd ?? totals.costUsd);
+    fallbackPricedUsd += number(totals.fallbackPricedUsd);
     toolCalls += number(totals.toolCalls);
     if (item?.delivery?.localState === "merged" || item?.workItem?.mergeState === "merged") merged += 1;
     if (["failed", "rejected"].includes(String(item?.workItem?.status || item?.decision || "").toLowerCase())) failedItems += 1;
@@ -121,6 +123,7 @@ export function buildAdminReportAnalytics(reports = []) {
     tokens,
     duration,
     cost,
+    fallbackPricedUsd,
     toolCalls,
     merged,
     failedItems,
@@ -146,6 +149,7 @@ export function renderAdminReportDashboardSummary(reports, width) {
   }
   const success = data.calls > 0 ? `${Math.round((data.successfulCalls / data.calls) * 100)}% call success` : "no calls";
   lines.push(fit(` ${C.brightWhite}${data.reports} reports${C.reset}  ·  ${data.items} work items  ·  ${fmtTokens(data.tokens)} tokens  ·  ${fmtUsd(data.cost)} known cost`, inner));
+  if (data.fallbackPricedUsd > 0) lines.push(fit(` ${C.dim}Fallback-priced subtotal: ${fmtUsd(data.fallbackPricedUsd)}${C.reset}`, inner));
   lines.push(fit(` ${C.green}${data.merged} merged${C.reset}  ·  ${success}  ·  ${fmtDuration(data.duration)} agent time  ·  ${data.toolCalls} tool calls`, inner));
   const recent = data.runs.slice(0, 10).reverse();
   lines.push(fit(` ${C.dim}Recent token trend${C.reset}  ${C.cyan}${sparkline(recent.map((run) => run.tokens))}${C.reset}  ${C.dim}latest ${data.latest?.timestamp || "unknown"}  ·  [5] Reports for detail${C.reset}`, inner));
@@ -184,6 +188,7 @@ export function renderAdminReports(reports, width) {
   lines.push(` ${C.bold}Portfolio${C.reset}`);
   lines.push(fit(`  ${data.reports} reports  ·  ${data.items} work items  ·  ${data.calls} agent calls  ·  ${data.toolCalls} tools`, inner));
   lines.push(fit(`  ${fmtTokens(data.tokens)} tokens  ·  ${fmtDuration(data.duration)} agent time  ·  ${fmtUsd(data.cost)} known cost`, inner));
+  if (data.fallbackPricedUsd > 0) lines.push(fit(`  ${fmtUsd(data.fallbackPricedUsd)} fallback-priced`, inner));
   lines.push(fit(`  ${C.green}${data.merged} merged${C.reset}  ·  ${successRate}% call success${data.failedItems > 0 ? `  ·  ${C.red}${data.failedItems} failed/rejected${C.reset}` : ""}`, inner));
   lines.push("");
 

@@ -4,8 +4,11 @@
 // worker.js to keep execute-path orchestration lean.
 
 import { C } from "../../../../shared/format/functions/colors.js";
+import { EVENT_ACTORS, EVENT_TYPES } from "../../../../catalog/event.js";
 import { isAbortError } from "../../../runtime/functions/yield.js";
-import { getWorkItem, clearStallResume } from "../../../queue/functions/index.js";
+import { getWorkItem, clearStallResume, logEvent } from "../../../queue/functions/index.js";
+import { parseJobPayload } from "../../../queue/functions/payload.js";
+import { planAnchorDrift } from "../../../verification/functions/plan-anchor.js";
 import { siblingJobScopePaths } from "../../../queue/functions/file-locks.js";
 import { activeSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
 import {
@@ -33,7 +36,38 @@ import {
 } from "../../../git/functions/utils.js";
 
 export function detectDrift(worker, job, files, cwd) {
-  if (!files || files.length === 0 || !job.created_at || !cwd) return "";
+  if (!files || files.length === 0 || !cwd) return "";
+  const payload = parseJobPayload(job);
+  if (payload._plan_base_commit && payload._plan_file_sha256) {
+    try {
+      const drift = planAnchorDrift(payload, files, cwd, job.work_item_id);
+      if (!drift?.entries?.length) return "";
+      const detail = drift.entries.map((entry) => {
+        const source = entry.ancestry_known
+          ? [entry.outside_commits.length ? `${entry.outside_commits.length} outside commit(s)` : null,
+              entry.uncommitted ? "uncommitted changes" : null].filter(Boolean).join("; ") || "change origin unknown"
+          : "planning commit is outside current ancestry";
+        return `- ${entry.path}: ${source}`;
+      }).join("\n");
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.JOB_PLAN_ANCHOR_DRIFT,
+        actor_type: EVENT_ACTORS.WORKER,
+        message: `Plan anchor drift on ${drift.entries.length} scoped file(s)`,
+        event_json: JSON.stringify(drift),
+      });
+      worker.emit(job.id, `${C.yellow}[drift]${C.reset} WI#${job.work_item_id} job #${job.id}: ${drift.entries.length} scoped file(s) changed since planning`);
+      return [
+        "PLAN ANCHOR DRIFT: scoped files changed since this task was planned.",
+        "Re-read current files and adjust the task instructions to their current contents.",
+        detail.length > 1800 ? `${detail.slice(0, 1800)}\n...(truncated)` : detail,
+      ].join("\n");
+    } catch {
+      return "";
+    }
+  }
+  if (!job.created_at) return "";
   try {
     const commitLog = gitExec(
       ["log", "--format=%H", `--since=${job.created_at}`, "--", ...files],

@@ -5,6 +5,20 @@
 
 export const PROVIDER_OPTIONS = Object.freeze(["claude", "anthropic", "openai", "codex", "grok", "copilot", "posse-local"]);
 
+export const TURN_LIMIT_MODES = Object.freeze({ TARGET: "target", ENFORCED: "enforced", NONE: "none" });
+export const PROVIDER_TURN_LIMIT_MODE = Object.freeze({
+  claude: TURN_LIMIT_MODES.TARGET,
+  codex: TURN_LIMIT_MODES.TARGET,
+  anthropic: TURN_LIMIT_MODES.ENFORCED,
+  openai: TURN_LIMIT_MODES.ENFORCED,
+  grok: TURN_LIMIT_MODES.ENFORCED,
+  "posse-local": TURN_LIMIT_MODES.ENFORCED,
+  copilot: TURN_LIMIT_MODES.NONE,
+});
+export function providerTurnLimitMode(provider) {
+  return PROVIDER_TURN_LIMIT_MODE[String(provider || "").trim().toLowerCase()] || TURN_LIMIT_MODES.NONE;
+}
+
 // Artificer chat runtimes can invoke the issued image-generation tool. Codex
 // has no such execution route; image model ownership is a separate catalog.
 export const IMAGE_TOOL_CHAT_PROVIDERS = Object.freeze(PROVIDER_OPTIONS.filter((provider) => provider !== "codex"));

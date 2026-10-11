@@ -6,6 +6,7 @@
 import {
   abandonJobScopeExpansionRequest,
   completeAttempt,
+  createJob,
   decrementAttemptCount,
   flagStallResume,
   getAttempts,
@@ -15,6 +16,7 @@ import {
   jobHasLivePendingScopeRequest,
   logEvent,
   listJobsByWorkItem,
+  runInTransaction,
   setJobError,
   settleJobScopeExpansionAttempt,
   storeArtifact,
@@ -36,6 +38,7 @@ import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { isAbortError } from "../../../runtime/functions/yield.js";
 import {
   buildFailureDiagnosticsArtifact,
+  currentExecutionProvider,
   getErrorDetails,
   isPermanentProviderConfigError,
   retryingAttemptWording,
@@ -52,6 +55,7 @@ import {
 } from "../../../queue/functions/sibling-locks.js";
 import { siblingJobScopePaths } from "../../../queue/functions/file-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
 import { FINAL_REVIEW_NO_PROGRESS_CODE } from "../../../../catalog/final-review.js";
 import { processVerdict } from "./process-verdict.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
@@ -1101,7 +1105,7 @@ export async function handleExecuteAttemptError(worker, {
       job_id: job.id,
       attempt_id: attempt.id,
       artifact_type: "log",
-      content_long: buildFailureDiagnosticsArtifact(err, attemptCount),
+      content_long: buildFailureDiagnosticsArtifact(err, attemptCount, { providerName: currentExecutionProvider(job) }),
     });
   }
   if (failureDetails.partialOutput) {
@@ -1178,11 +1182,30 @@ export function handleCatastrophicExecuteError(worker, { job, leaseToken, outerE
         };
         updateJobPayload(job.id, JSON.stringify(payload));
       }
-      if (prior >= VERIFICATION_INFRASTRUCTURE_MAX_REQUEUES
-        && worker._releaseLease(job, leaseToken, "failed")) {
+      if (prior >= VERIFICATION_INFRASTRUCTURE_MAX_REQUEUES && runInTransaction(() => {
+        if (!worker._releaseLease(job, leaseToken, "waiting_on_human")) return false;
+        createJob({
+          work_item_id: job.work_item_id,
+          job_type: "human_input",
+          title: `Verification blocked: ${job.title.slice(0, 80)}`,
+          parent_job_id: job.id,
+          priority: "high",
+          payload_json: JSON.stringify({
+            original_job_id: job.id,
+            review_type: "blocked_recovery",
+            question_kind: "blocked_recovery",
+            choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
+            verification_failure_class: "verification_infrastructure",
+            questions: [`Required baseline verification for job #${job.id} could not run. Restore the test runner, then choose retry; or choose replan, explicit_waiver, or fail.`],
+            context: [message, outerErr?.rerun_command ? `Command: ${outerErr.rerun_command}` : null]
+              .filter(Boolean).join("\n"),
+          }),
+        });
+        return true;
+      })) {
         worker.emit(
           job.id,
-          `${C.red}[verification] WI#${job.work_item_id} job #${job.id}: infrastructure retries exhausted; failed closed without a human gate${C.reset}`,
+          `${C.yellow}[verification] WI#${job.work_item_id} job #${job.id}: infrastructure retries exhausted; job preserved for recovery${C.reset}`,
         );
         return;
       }

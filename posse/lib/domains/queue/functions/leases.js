@@ -367,6 +367,15 @@ export function releaseLeaseWithoutAttemptPenalty(jobId, leaseToken, finalStatus
   const db = getDb();
   const execute = () => {
     const released = releaseLeaseInternal(db, jobId, leaseToken, finalStatus, { readyAt });
+    if (released && finalStatus === "queued" && attemptId == null) {
+      // A freshness deferral has no implementation attempt. Remove only
+      // work-item locks inserted by this lease; an older attempt may own the
+      // same work item's other paths and must keep them through the retry.
+      db.prepare(`DELETE FROM work_item_file_locks
+        WHERE source_job_id = ? AND released_at IS NULL
+          AND json_valid(metadata_json)
+          AND json_extract(metadata_json, '$.lease_token') = ?`).run(jobId, leaseToken);
+    }
     // Pre-attempt deferrals have nothing to refund. The execution owner must
     // supply the attempt it created under this lease; assessment attempts use
     // their own counter and never refund an implementation attempt.

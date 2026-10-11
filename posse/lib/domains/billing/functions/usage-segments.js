@@ -21,6 +21,12 @@ function positiveOrdinal(value) {
   return Number.isInteger(numeric) && numeric > 0 ? numeric : null;
 }
 
+function optionalCount(value) {
+  if (value == null) return null;
+  const numeric = Number(value);
+  return Number.isSafeInteger(numeric) && numeric >= 0 ? numeric : null;
+}
+
 // Cache counters are subsets of the input counter. Every place that reports or
 // compares call-level counters must apply the same containment so a single row
 // cannot present one `cached` value to the aggregate match test and a different
@@ -66,6 +72,8 @@ export function normalizeUsageSegment(segment = {}) {
     inputTokens: count(segment.inputTokens ?? segment.input_tokens),
     cachedInputTokens: count(segment.cachedInputTokens ?? segment.cached_input_tokens),
     cacheCreationInputTokens: count(segment.cacheCreationInputTokens ?? segment.cache_creation_input_tokens),
+    cacheCreation5mTokens: optionalCount(segment.cacheCreation5mTokens ?? segment.cache_creation_5m_input_tokens),
+    cacheCreation1hTokens: optionalCount(segment.cacheCreation1hTokens ?? segment.cache_creation_1h_input_tokens),
     outputTokens: count(segment.outputTokens ?? segment.output_tokens),
     requestContextInputTokens: count(
       segment.requestContextInputTokens
@@ -89,15 +97,18 @@ export function recordUsageSegment(segment, { db = getDb() } = {}) {
     INSERT INTO provider_usage_segments (
       agent_call_id, request_ordinal, provider, model_name,
       input_tokens, cached_input_tokens, cache_creation_input_tokens,
+      cache_creation_5m_input_tokens, cache_creation_1h_input_tokens,
       output_tokens, request_context_input_tokens, duration_ms,
       usage_source, precision
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(agent_call_id, request_ordinal) DO UPDATE SET
       provider = excluded.provider,
       model_name = excluded.model_name,
       input_tokens = excluded.input_tokens,
       cached_input_tokens = excluded.cached_input_tokens,
       cache_creation_input_tokens = excluded.cache_creation_input_tokens,
+      cache_creation_5m_input_tokens = excluded.cache_creation_5m_input_tokens,
+      cache_creation_1h_input_tokens = excluded.cache_creation_1h_input_tokens,
       output_tokens = excluded.output_tokens,
       request_context_input_tokens = excluded.request_context_input_tokens,
       duration_ms = COALESCE(excluded.duration_ms, provider_usage_segments.duration_ms),
@@ -113,6 +124,7 @@ export function recordUsageSegment(segment, { db = getDb() } = {}) {
   `).run(
     row.agentCallId, row.requestOrdinal, row.provider, row.modelName,
     row.inputTokens, row.cachedInputTokens, row.cacheCreationInputTokens,
+    row.cacheCreation5mTokens, row.cacheCreation1hTokens,
     row.outputTokens, row.requestContextInputTokens, row.durationMs,
     row.usageSource, row.precision,
   );
@@ -237,8 +249,8 @@ export function summarizeUsageSegments(agentCallId, {
       totals.longContextTierInputTokens += count(segment.input_tokens);
     }
     if (exact) {
-      // Segments carry no cache-write TTL split, so Claude writes take pricing's
-      // 1-hour default, matching cost_estimate_usd for Posse's 1-hour writes.
+      // Native and Node Claude segments can carry the measured TTL split. Old
+      // rows retain the conservative unsplit pricing fallback.
       const priced = estimateCallCost({
         provider: segment.provider,
         modelName: segment.model_name,
@@ -247,6 +259,8 @@ export function summarizeUsageSegments(agentCallId, {
         outputTokens: segment.output_tokens,
         cachedInputTokens: segment.cached_input_tokens,
         cacheCreationInputTokens: segment.cache_creation_input_tokens,
+        cacheCreation5mTokens: segment.cache_creation_5m_input_tokens,
+        cacheCreation1hTokens: segment.cache_creation_1h_input_tokens,
         longContextInputTokens: pricingInput,
       });
       if (priced.source !== "none" && Number.isFinite(priced.costUsd)) totals.costUsd += priced.costUsd;
@@ -259,6 +273,8 @@ export function summarizeUsageSegments(agentCallId, {
         outputTokens: segment.output_tokens,
         cachedInputTokens: segment.cached_input_tokens,
         cacheCreationInputTokens: segment.cache_creation_input_tokens,
+        cacheCreation5mTokens: segment.cache_creation_5m_input_tokens,
+        cacheCreation1hTokens: segment.cache_creation_1h_input_tokens,
         longContextInputTokens: pricingInput,
       });
       totals.billableInputTokens += billable.billableInputTokens;

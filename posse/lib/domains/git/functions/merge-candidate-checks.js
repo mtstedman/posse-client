@@ -1,16 +1,15 @@
 import { testExecutionCounts } from "../../../shared/tools/functions/toolkit/test-output-counts.js";
+import { MERGE_CHECK_FAILURE_KINDS } from "../../../catalog/verification.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseJobPayload } from "../../queue/functions/payload.js";
+import { installedNodeRoots } from "../../verification/functions/prerequisite-adapters.js";
 import { classifyNestedRunnerInfrastructureFailure, validatePlannerTestCommandForRepository } from "../../worker/functions/helpers/test-execution-receipt.js";
 import { runCloseoutTestCommandSync } from "./merge-closeout.js";
 
-/** Verify the staged tree without letting test side effects alter the merge. */
-export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = runCloseoutTestCommandSync }) {
-  const commands = [...new Set(jobs.filter((job) => job.status === "succeeded" && ["dev", "fix"].includes(job.job_type))
-    .map((job) => String(parseJobPayload(job).test_command || "").trim()).filter(Boolean))];
-  if (commands.length === 0) return null;
+/** Create one disposable checkout of the staged candidate for merge checks. */
+export function withTemporaryMergeCandidateCheckout({ cwd, git }, use) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "posse-merge-check-"));
   const checkout = path.join(root, "candidate");
   let added = false;
@@ -20,36 +19,21 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
     const commit = git(["commit-tree", tree, "-p", head, "-m", "Temporary merge verification candidate"], cwd);
     git(["worktree", "add", "--detach", checkout, commit], cwd);
     added = true;
-    const results = commands.map((command) => {
-      git(["reset", "--hard", commit], checkout);
+    const reset = (revision = commit) => {
+      git(["reset", "--hard", revision], checkout);
       git(["clean", "-fdx"], checkout);
-      const validation = validatePlannerTestCommandForRepository(command, checkout);
-      if (!validation.ok) return { ok: true, status: "unavailable", test: { name: command }, note: validation.reason };
-      const result = run(validation.execution_command || command, {
-        cwd: validation.cwd_relative ? path.resolve(checkout, validation.cwd_relative) : checkout,
-        dependencySourceDir: validation.cwd_relative ? path.resolve(cwd, validation.cwd_relative) : cwd,
-      });
-      // Missing runners are advisory; an executed failing command is evidence.
-      const classified = classifyNestedRunnerInfrastructureFailure(validation.execution_command || command, {
-        status: result.status == null ? "unavailable" : result.ok ? "passed" : "failed",
-        code: result.status, stdout: result.output, stderr: "",
-      }, { projectRoot: checkout });
-      const missingRunner = [127, 9009].includes(result.status)
-        && /not found|not recognized as an internal or external command/i.test(result.output);
-      const counts = testExecutionCounts(result.output);
-      const noTests = result.ok && counts && (counts.total === 0 || counts.total === counts.skipped);
-      const unavailable = noTests || missingRunner || ["unavailable", "infrastructure_error"].includes(classified.status);
-      return { ok: unavailable || result.ok, status: unavailable ? "unavailable" : result.ok ? "passed" : "failed",
-        test: { name: command }, ...(unavailable ? { note: result.output } : {}),
-        ...(!unavailable && !result.ok ? { failure: { message: result.output } } : {}),
-      };
-    });
-    const passed = results.filter((result) => result.status === "passed").length;
-    const failed = results.filter((result) => !result.ok).length;
-    const unavailable = results.filter((result) => result.status === "unavailable").length;
-    return { ok: failed === 0, source: "job_test_command", matched: results.length, passed, failed, results,
-      summary: `declared merge candidate checks: ${passed} passed, ${failed} failed, ${unavailable} unavailable`,
+      const dependencyDirs = new Set(["node_modules", "vendor",
+        ...installedNodeRoots(cwd).map((nodeRoot) => path.relative(cwd, path.join(nodeRoot, "node_modules"))),
+      ]);
+      for (const relative of dependencyDirs) {
+        if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+        const source = path.join(cwd, relative);
+        const destination = path.join(checkout, relative);
+        if (!fs.existsSync(source) || fs.existsSync(destination) || !fs.existsSync(path.dirname(destination))) continue;
+        fs.symlinkSync(source, destination, process.platform === "win32" ? "junction" : "dir");
+      }
     };
+    return use({ checkout, candidateCommit: commit, targetHead: head, reset });
   } finally {
     try {
       if (added) git(["worktree", "remove", "--force", checkout], cwd);
@@ -57,4 +41,64 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
       fs.rmSync(root, { recursive: true, force: true });
     }
   }
+}
+
+/** Verify the staged tree without letting test side effects alter the merge. */
+export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = runCloseoutTestCommandSync, candidate = null, deadlineMs = null }) {
+  const commands = [...new Set(jobs.filter((job) => job.status === "succeeded" && ["dev", "fix"].includes(job.job_type))
+    .map((job) => String(parseJobPayload(job).test_command || "").trim()).filter(Boolean))];
+  if (commands.length === 0) return null;
+  const runInCheckout = ({ checkout, reset }) => {
+    const results = commands.map((command) => {
+      const remainingMs = deadlineMs == null ? 10 * 60_000 : deadlineMs - Date.now();
+      if (remainingMs < 1000) return { ok: false, status: "failed", failure_kind: MERGE_CHECK_FAILURE_KINDS.TIMEOUT,
+        test: { name: command }, failure: { message: "merge gate wall budget expired before this declared check" } };
+      reset();
+      const validation = validatePlannerTestCommandForRepository(command, checkout);
+      if (!validation.ok) return { ok: false, status: "unavailable", failure_kind: MERGE_CHECK_FAILURE_KINDS.MISSING_RUNNER,
+        test: { name: command }, note: validation.reason };
+      const cwdRelative = validation.cwd_relative || null;
+      const result = run(validation.execution_command || command, {
+        cwd: validation.cwd_relative ? path.resolve(checkout, validation.cwd_relative) : checkout,
+        dependencySourceDir: validation.cwd_relative ? path.resolve(cwd, validation.cwd_relative) : cwd,
+        timeoutMs: Math.min(10 * 60_000, remainingMs),
+      });
+      // An absent runner leaves required verification unresolved. A process
+      // that timed out, was killed, or overflowed cannot be called unavailable.
+      const classified = classifyNestedRunnerInfrastructureFailure(validation.execution_command || command, {
+        status: result.error_code === "ENOENT" ? "infrastructure_error" : result.ok ? "passed" : "failed",
+        code: result.error_code || result.status, stdout: result.stdout ?? result.output, stderr: result.stderr ?? "",
+      }, { projectRoot: checkout });
+      const missingRunner = [127, 9009].includes(result.status)
+        && /not found|not recognized as an internal or external command/i.test(result.output);
+      const counts = testExecutionCounts(result.output);
+      const noTests = result.ok && counts && (counts.total === 0 || counts.total === counts.skipped);
+      const abnormal = result.timed_out || result.error_code === "ETIMEDOUT" || result.signal
+        || result.error_code === "ENOBUFS" || (result.error_code && result.error_code !== "ENOENT")
+        || result.status == null && result.error_code !== "ENOENT";
+      const unavailable = !abnormal && (noTests || missingRunner || result.error_code === "ENOENT"
+        || classified.status === "infrastructure_error");
+      const failureKind = unavailable
+        ? noTests ? MERGE_CHECK_FAILURE_KINDS.NO_TESTS : MERGE_CHECK_FAILURE_KINDS.MISSING_RUNNER
+        : result.timed_out || result.error_code === "ETIMEDOUT" ? MERGE_CHECK_FAILURE_KINDS.TIMEOUT
+          : result.error_code === "ENOBUFS" ? MERGE_CHECK_FAILURE_KINDS.OUTPUT_OVERFLOW
+            : result.signal ? MERGE_CHECK_FAILURE_KINDS.SIGNAL
+              : result.error_code || result.status == null ? MERGE_CHECK_FAILURE_KINDS.SPAWN_ERROR
+                : !result.ok ? MERGE_CHECK_FAILURE_KINDS.TEST_FAILURE : null;
+      return { ok: !unavailable && result.ok && !abnormal, status: unavailable ? "unavailable" : result.ok && !abnormal ? "passed" : "failed",
+        ...(failureKind ? { failure_kind: failureKind } : {}),
+        test: { name: command }, cwd_relative: cwdRelative, ...(unavailable ? { note: result.output } : {}),
+        stdout: result.stdout ?? result.output ?? "", stderr: result.stderr ?? "",
+        exit_code: result.status, signal: result.signal ?? null,
+        ...(!unavailable && (!result.ok || abnormal) ? { failure: { message: result.output || `merge check ended without a result (${failureKind})` } } : {}),
+      };
+    });
+    const passed = results.filter((result) => result.status === "passed").length;
+    const failed = results.filter((result) => result.status === "failed").length;
+    const unavailable = results.filter((result) => result.status === "unavailable").length;
+    return { ok: failed === 0 && unavailable === 0, source: "job_test_command", matched: results.length, passed, failed, unavailable, results,
+      summary: `declared merge candidate checks: ${passed} passed, ${failed} failed, ${unavailable} unavailable`,
+    };
+  };
+  return candidate ? runInCheckout(candidate) : withTemporaryMergeCandidateCheckout({ cwd, git }, runInCheckout);
 }

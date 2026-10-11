@@ -37,11 +37,12 @@ import {
   isVerificationInfrastructureOutcome,
   verificationOutcome,
 } from "./verification-outcome.js";
-import { resolveRepositoryVerificationPlan } from "../../../verification/functions/verification-plan.js";
+import { resolveRepositoryVerificationPlan, verificationPlanSnapshot } from "../../../verification/functions/verification-plan.js";
 import { withLineagePathsRestored } from "../../../verification/functions/lineage-tree.js";
 import {
   TEST_EXECUTION_RECEIPT_KIND,
   TEST_EXECUTION_RECEIPT_MIME_TYPE,
+  TEST_EXECUTION_REUSE_KIND,
   TEST_SCRIPT_NO_VERIFICATION_REASON,
   VERIFICATION_DEPENDENCY_LOCK_INVALID,
 } from "../../../../catalog/verification.js";
@@ -52,6 +53,7 @@ import {
 } from "./test-failure-evidence.js";
 import {
   discoverUnitTestCapability,
+  resolveUnitTestInvocation,
   runUnitTestFiles,
 } from "../../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { testExecutionCounts } from "../../../../shared/tools/functions/toolkit/test-output-counts.js";
@@ -1090,6 +1092,93 @@ function lineageTestsToRun(job, payload) {
   }
 }
 
+function lineageRepositoryVerificationSnapshot(job, payload) {
+  if (payload?._repository_verification_plan_snapshot) return payload._repository_verification_plan_snapshot;
+  const rootJobId = Number(payload?.root_job_id);
+  if (!Number.isSafeInteger(rootJobId) || rootJobId <= 0 || rootJobId === Number(job?.id)) return null;
+  try {
+    const row = getDb().prepare("SELECT payload_json FROM jobs WHERE id = ?").get(rootJobId);
+    return JSON.parse(row?.payload_json || "{}")?._repository_verification_plan_snapshot || null;
+  } catch {
+    return null;
+  }
+}
+
+// A declared command proves one discovered test file only when its exact
+// argv matches the repository runner's invocation for that file. A broad
+// suite, a name filter, or a command that merely mentions the path does not.
+function exactDeclaredTestFile(command, cwd, cwdRelative = null) {
+  if (!cwd || cwdRelative) return null;
+  let argv;
+  try { argv = parseCommandArguments(command); } catch { return null; }
+  const capability = discoverUnitTestCapability({ projectDir: cwd });
+  if (!capability.available) return null;
+  const candidates = capability.files.filter((file) => argv.includes(file));
+  if (candidates.length !== 1) return null;
+  const invocation = resolveUnitTestInvocation(cwd, candidates[0], capability);
+  if (!invocation?.runner) return null;
+  const expected = [invocation.executable, ...invocation.args];
+  return expected.length === argv.length && expected.every((value, index) => value === argv[index])
+    ? candidates[0] : null;
+}
+
+// A planner command is an additional selection, never a replacement for
+// committed repository obligations. Keep each check's identity and command
+// so execution can report which obligations actually ran.
+function sameRepositoryCheckInvocation(plan, check, cwd) {
+  if (Array.isArray(plan.unit_test_paths) || (check.cwd_relative || null) !== (plan.cwd_relative || null)) return false;
+  if (check.execution_command === plan.execution_command) return true;
+  const command = String(plan.execution_command || "").trim();
+  if (check.id === "package:test" && /^(?:npm|npm\.cmd) (?:run )?test$/u.test(command)) return true;
+  if (check.id.startsWith("package:") && cwd && !check.cwd_relative) {
+    try {
+      const script = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf8"))?.scripts?.[check.id.slice(8)];
+      if (typeof script === "string" && script.trim() === command) return true;
+    } catch { /* no committed package script to compare */ }
+  }
+  return false;
+}
+
+function withRepositoryChecks(plan, repositoryPlan, cwd = null) {
+  if (!plan || !repositoryPlan) return plan;
+  if (repositoryPlan.status !== "ready") {
+    return { ...plan, verification_plan: repositoryPlan,
+      validation_error: repositoryPlan.reason || "verification_plan_invalid",
+      verification_eligible: false };
+  }
+  const checks = repositoryPlan.checks.map((check) => ({ ...check }));
+  const primaryMatches = checks.some((check) => sameRepositoryCheckInvocation(plan, check, cwd));
+  const executionChecks = primaryMatches ? checks : [{
+    id: plan.check_id,
+    command: plan.command,
+    execution_command: plan.execution_command,
+    cwd_relative: plan.cwd_relative || null,
+    source: plan.source,
+    intent: plan.intent || "test",
+    ...(Array.isArray(plan.unit_test_paths) ? { unit_test_paths: plan.unit_test_paths } : {}),
+  }, ...checks];
+  return { ...plan, verification_plan: repositoryPlan, execution_checks: executionChecks,
+    plan_id: primaryMatches ? repositoryPlan.plan_id
+      : sha256(`combined-verification-v1\0${plan.plan_id}\0${repositoryPlan.plan_id}`) };
+}
+
+function withUnresolvedTestSelection(plan, unresolved) {
+  if (!plan || unresolved.length === 0) return plan;
+  const paths = [...new Set(unresolved)].slice(0, 24);
+  const reason = `planner_test_selection_unresolved:${paths.join(",")}`;
+  if (plan.validation_error) return { ...plan, unresolved_test_paths: paths };
+  const primary = { id: plan.check_id, command: plan.command,
+    execution_command: plan.execution_command, cwd_relative: plan.cwd_relative || null,
+    source: plan.source, intent: plan.intent || "test",
+    ...(Array.isArray(plan.unit_test_paths) ? { unit_test_paths: plan.unit_test_paths } : {}) };
+  return { ...plan, unresolved_test_paths: paths,
+    plan_id: sha256(`unresolved-selection-v1\0${plan.plan_id}\0${paths.join("\0")}`),
+    execution_checks: [...(Array.isArray(plan.execution_checks) ? plan.execution_checks : [primary]), {
+      id: "planner:unresolved_test_selection", command: paths.join(", "), intent: "test",
+      unavailable_reason: reason,
+    }] };
+}
+
 export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
   if (!["dev", "fix"].includes(String(job?.job_type || ""))) return null;
   if (String(payload?.task_mode || "code") !== "code") return null;
@@ -1097,26 +1186,55 @@ export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {
     ? payload.test_command.trim()
     : "";
   const testsToRun = lineageTestsToRun(job, payload);
+  const selectedPaths = Array.isArray(testsToRun)
+    ? [...new Set(testsToRun.map((value) => String(value || "").trim().replace(/\\/g, "/")).filter(Boolean))]
+    : [];
+  let repositoryPlan = cwd ? resolveRepositoryVerificationPlan({
+    projectDir: cwd,
+    selectedCheckIds: payload?.verification_check_ids,
+    validateCommand: (candidate) => validatePlannerTestCommandForRepository(candidate, cwd),
+  }) : null;
+  const plannedSnapshot = lineageRepositoryVerificationSnapshot(job, payload);
+  if (cwd && plannedSnapshot?.schema_version === 1) {
+    const currentSnapshot = verificationPlanSnapshot(repositoryPlan);
+    if (plannedSnapshot.plan_id !== currentSnapshot.plan_id
+      || plannedSnapshot.source !== currentSnapshot.source
+      || plannedSnapshot.status !== currentSnapshot.status) {
+      repositoryPlan = {
+        schema_version: 1,
+        source: currentSnapshot.source || plannedSnapshot.source || "repository_config",
+        status: "invalid_plan",
+        reason: "verification_plan_changed_since_planning",
+        planned_snapshot: plannedSnapshot,
+        current_snapshot: currentSnapshot,
+        checks: [],
+        plan_id: sha256(`verification_plan_changed_since_planning\0${plannedSnapshot.plan_id || "none"}\0${currentSnapshot.plan_id || "none"}`),
+      };
+    }
+  }
   const capability = Array.isArray(testsToRun) && cwd
     ? discoverUnitTestCapability({ projectDir: cwd })
     : null;
   const unitTestPaths = Array.isArray(testsToRun)
-    ? [...new Set(testsToRun
-      .map((value) => String(value || "").trim().replace(/\\/g, "/"))
-      .filter((value) => capability?.available && capability.files.includes(value)))]
+    ? selectedPaths.filter((value) => capability?.available && capability.files.includes(value))
       .slice(0, 24)
     : [];
-  // Invalid or unresolved candidates are intentionally dropped. An explicit
-  // planner list that resolves empty means "no runnable unit test", not
-  // permission to substitute a broad repository/deployment gate. The plan
-  // compiler writes the list on every task, so an empty one must still leave
-  // the planner's own test_command in force. A list inherited from the root
-  // that no longer resolves is treated as absent.
-  if (Array.isArray(payload?.tests_to_run) && unitTestPaths.length === 0 && !declaredCommand) return null;
+  const unresolvedSelection = selectedPaths.filter((value) => !unitTestPaths.includes(value));
+  // Preserve unresolved selections as missing coverage. The planner cannot
+  // turn an unknown or deleted test path into a passing repository check.
+  if (Array.isArray(payload?.tests_to_run) && unitTestPaths.length === 0 && !declaredCommand && !repositoryPlan) {
+    if (unresolvedSelection.length === 0) return null;
+    return { schema_version: RECEIPT_SCHEMA_VERSION, command: "planner test selection",
+      execution_command: "planner test selection", cwd_relative: null,
+      source: "planner_unit_tests", plan_id: sha256(`unresolved-only\0${unresolvedSelection.join("\0")}`),
+      check_id: "planner:unresolved_test_selection", intent: "test",
+      verification_plan: null, validation_error: `planner_test_selection_unresolved:${unresolvedSelection.slice(0, 24).join(",")}`,
+      verification_eligible: false, unresolved_test_paths: unresolvedSelection.slice(0, 24) };
+  }
   // File selection cannot replace the project's declared runner/loader.
   if (unitTestPaths.length > 0 && !declaredCommand) {
     const command = unitTestPaths.join(", ");
-    return {
+    return withUnresolvedTestSelection(withRepositoryChecks({
       schema_version: RECEIPT_SCHEMA_VERSION,
       command,
       execution_command: command,
@@ -1129,15 +1247,11 @@ export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {
       validation_error: null,
       verification_eligible: true,
       unit_test_paths: unitTestPaths,
-    };
+    }, repositoryPlan, cwd), unresolvedSelection);
   }
   const command = declaredCommand;
   if (!command && cwd) {
-    const verificationPlan = resolveRepositoryVerificationPlan({
-      projectDir: cwd,
-      selectedCheckIds: payload?.verification_check_ids,
-      validateCommand: (candidate) => validatePlannerTestCommandForRepository(candidate, cwd),
-    });
+    const verificationPlan = repositoryPlan;
     if (!verificationPlan) return null;
     if (verificationPlan.status !== "ready") {
       return {
@@ -1157,7 +1271,7 @@ export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {
     const selected = [...verificationPlan.checks].reverse().find((check) => check.stage === "canonical")
       || verificationPlan.checks.at(-1);
     if (!selected) return null;
-    return {
+    return withUnresolvedTestSelection({
       schema_version: RECEIPT_SCHEMA_VERSION,
       command: selected.command,
       execution_command: selected.execution_command,
@@ -1167,9 +1281,10 @@ export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {
       check_id: selected.id,
       intent: selected.intent,
       verification_plan: verificationPlan,
+      execution_checks: verificationPlan.checks,
       validation_error: null,
       verification_eligible: true,
-    };
+    }, unresolvedSelection);
   }
   if (!command) return null;
   const taskAbAcceptance = payload?._task_ab_test_command === true;
@@ -1197,7 +1312,10 @@ export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {
           cwd_relative: approvalRequest.cwd_relative,
         }
       : validatePlannerTestCommand(command);
-  return {
+  const coveredFile = validation.ok && source !== "operator_approved_operation"
+    ? exactDeclaredTestFile(validation.execution_command || command, cwd, validation.cwd_relative || null)
+    : null;
+  return withUnresolvedTestSelection(withRepositoryChecks({
     schema_version: RECEIPT_SCHEMA_VERSION,
     command,
     execution_command: validation.execution_command || command,
@@ -1209,7 +1327,8 @@ export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {
     verification_plan: null,
     validation_error: validation.ok ? null : validation.reason,
     verification_eligible: source !== "operator_approved_operation",
-  };
+    ...(coveredFile ? { covered_unit_test_paths: [coveredFile] } : {}),
+  }, repositoryPlan, cwd), unresolvedSelection);
 }
 
 function frozenTestPlanFromReceipt(receipt = {}) {
@@ -1241,9 +1360,12 @@ function frozenTestPlanFromReceipt(receipt = {}) {
     check_id: receipt.check_id || null,
     intent: receipt.intent || "test",
     verification_plan: receipt.verification_plan || null,
+    ...(Array.isArray(receipt.execution_checks) ? { execution_checks: receipt.execution_checks } : {}),
+    ...(Array.isArray(receipt.unresolved_test_paths) ? { unresolved_test_paths: receipt.unresolved_test_paths } : {}),
     validation_error: receipt.validation_error || null,
     verification_eligible: receipt.verification_eligible !== false,
     ...(Array.isArray(receipt.unit_test_paths) ? { unit_test_paths: receipt.unit_test_paths } : {}),
+    ...(Array.isArray(receipt.covered_unit_test_paths) ? { covered_unit_test_paths: receipt.covered_unit_test_paths } : {}),
   };
 }
 
@@ -1275,7 +1397,7 @@ export function isReusableReceipt(receipt, policy = null, { projectDir = null } 
   // Every reusable result is an execution claim. Legacy rows without policy
   // identity, changed toolchains, and transient infrastructure outcomes must
   // all run again. In particular, a timeout is evidence, never a cache hit.
-  if (!REUSABLE_RECEIPT_STATUSES.has(receipt.status)) return false;
+  if (!REUSABLE_RECEIPT_STATUSES.has(receipt.status) || receipt.tree_state !== "clean") return false;
   if (!policy?.fingerprint
     || !receipt.policy_fingerprint
     || !receipt.toolchain_fingerprint
@@ -1284,9 +1406,10 @@ export function isReusableReceipt(receipt, policy = null, { projectDir = null } 
     && receipt.toolchain_fingerprint === toolchainFingerprint(describeToolchain({ projectDir }));
 }
 
-export function findFrozenTestBaseline(jobId, { policy = null, projectDir = null } = {}) {
+export function findFrozenTestBaseline(jobId, { policy = null, projectDir = null, planId = null } = {}) {
   return storedReceipts(jobId)
     .find((receipt) => receipt.phase === "baseline"
+      && (!planId || receipt.plan_id === planId)
       && isReusableReceipt(receipt, policy, { projectDir })) || null;
 }
 
@@ -1296,12 +1419,16 @@ function findLatestFrozenTestBaseline(jobId) {
     .sort((left, right) => Number(right.artifact_id || 0) - Number(left.artifact_id || 0))[0] || null;
 }
 
-function findPostChangeReceipt(jobId, planId, commitHash, { policy = null, projectDir = null, accept = () => true } = {}) {
+function findPostChangeReceipt(jobId, planId, commitHash, {
+  policy = null, projectDir = null, treeFingerprint = null, accept = () => true,
+} = {}) {
   return storedReceipts(jobId)
     .find((receipt) => (
       receipt.phase === "post_change"
       && receipt.plan_id === planId
       && receipt.commit_hash === commitHash
+      && !!treeFingerprint
+      && receipt.tree_fingerprint === treeFingerprint
       && isReusableReceipt(receipt, policy, { projectDir })
       && accept(receipt)
     )) || null;
@@ -1342,6 +1469,38 @@ async function repositoryFingerprint(cwd) {
 function worktreeFingerprint(commitHash, porcelainStatus) {
   if (!commitHash || porcelainStatus == null) return null;
   return sha256(`worktree-v1\0${commitHash}\0${porcelainStatus}`);
+}
+
+async function dirtyPathDigests(cwd, porcelainStatus) {
+  const root = path.resolve(cwd);
+  const entries = [];
+  for (const relative of porcelainChangedPaths(porcelainStatus).sort()) {
+    const absolute = path.resolve(root, relative);
+    if (absolute !== root && !absolute.startsWith(`${root}${path.sep}`)) return null;
+    let digest;
+    try {
+      const stat = await fs.promises.lstat(absolute);
+      if (stat.isSymbolicLink()) digest = sha256(`symlink\0${await fs.promises.readlink(absolute)}`);
+      else if (stat.isFile()) {
+        const hash = createHash("sha256");
+        for await (const chunk of fs.createReadStream(absolute)) hash.update(chunk);
+        digest = hash.digest("hex");
+      } else digest = sha256(`kind\0${stat.mode}`);
+    } catch (error) {
+      if (error?.code !== "ENOENT") return null;
+      digest = "missing";
+    }
+    entries.push([relative, digest]);
+  }
+  return entries;
+}
+
+// Dirty receipts are historical evidence only. Hash their actual bytes so a
+// second edit with the same porcelain status cannot impersonate this input.
+export async function dirtyWorktreeFingerprint(cwd, commitHash, porcelainStatus) {
+  if (!commitHash || !porcelainStatus) return null;
+  const digests = await dirtyPathDigests(cwd, porcelainStatus);
+  return digests ? sha256(`worktree-dirty-v1\0${commitHash}\0${porcelainStatus}\0${JSON.stringify(digests)}`) : null;
 }
 
 function repositoryReceiptCandidates(jobId, limit = 512) {
@@ -1476,6 +1635,42 @@ function storeRepositoryBaselineReference(job, receipt, { reuseScope = "reposito
   });
 }
 
+function recordPostChangeReuse(job, attemptId, sourceReceipt) {
+  const sourceId = Number(sourceReceipt?.artifact_id);
+  if (!Number.isSafeInteger(sourceId) || sourceId <= 0) return null;
+  const consumer = {
+    job_id: Number(job.id),
+    attempt_id: Number.isSafeInteger(Number(attemptId)) && Number(attemptId) > 0 ? Number(attemptId) : null,
+    phase: "post_change",
+  };
+  const existing = getArtifacts(job.id, "log").find((artifact) => {
+    let detail;
+    try { detail = JSON.parse(String(artifact.content_json || "{}")); } catch { return false; }
+    return detail.kind === TEST_EXECUTION_REUSE_KIND
+      && detail.source_artifact_id === sourceId
+      && detail.consumer?.job_id === consumer.job_id
+      && detail.consumer?.attempt_id === consumer.attempt_id;
+  });
+  if (existing) return existing.id;
+  const artifact = storeArtifact({
+    work_item_id: job.work_item_id,
+    job_id: job.id,
+    attempt_id: consumer.attempt_id,
+    artifact_type: "log",
+    content_json: {
+      kind: TEST_EXECUTION_REUSE_KIND,
+      schema_version: 1,
+      source_artifact_id: sourceId,
+      source_job_id: sourceReceipt.artifact_job_id || job.id,
+      plan_id: sourceReceipt.plan_id || null,
+      commit_hash: sourceReceipt.commit_hash || null,
+      consumer,
+      observed_at: new Date().toISOString(),
+    },
+  });
+  return artifact.id;
+}
+
 async function isAncestorCommit(cwd, ancestor, descendant) {
   if (!ancestor || !descendant) return false;
   try {
@@ -1532,6 +1727,7 @@ async function restorePathsToHead(cwd, paths = []) {
 async function restoreAfterTest({
   cwd,
   before,
+  beforeDirtyDigests = null,
   actualCommit,
   originalHeadRef,
   siblingOwnedPaths = null,
@@ -1543,6 +1739,15 @@ async function restoreAfterTest({
   const afterCommit = await currentCommit(cwd);
   const afterHeadRef = await currentHeadRef(cwd);
   const headChanged = afterCommit !== actualCommit || afterHeadRef !== originalHeadRef;
+  if (beforeDirtyDigests) {
+    const afterDirtyDigests = await dirtyPathDigests(cwd, after);
+    const afterByPath = new Map(afterDirtyDigests || []);
+    if (!afterDirtyDigests || beforeDirtyDigests.some(([relative, digest]) => afterByPath.get(relative) !== digest)) {
+      // The original dirty bytes cannot be reconstructed by restoring HEAD.
+      // Preserve them and decline this receipt instead of destroying work.
+      return { cleanupStatus: "unavailable", cleanupError: "pre-existing dirty input changed during verification", siblingPaths: new Set() };
+    }
+  }
   // Sibling jobs of the same work item share this worktree. Files they own
   // (their write locks, or files materialized for them) that changed while
   // this test ran are their work, not this test's side effects.
@@ -1756,6 +1961,111 @@ async function attributeDeclaredTestFailure(result, plan, { base, scopePaths, po
     delta, debt_only: delta === "persistent_failure" };
 }
 
+async function runVerificationCheck(check, { cwd, policy, phase = null } = {}) {
+  const executionCommand = check.execution_command || check.command;
+  const raw = Array.isArray(check.unit_test_paths)
+    ? await runUnitTestFiles({
+        projectDir: cwd,
+        paths: check.unit_test_paths,
+        capability: discoverUnitTestCapability({ projectDir: cwd }),
+        timeoutMs: policy.wall_timeout_ms,
+      }).then((aggregate) => ({
+        status: aggregate.status,
+        ok: aggregate.ok,
+        code: aggregate.ok === true ? 0 : aggregate.ok === false ? 1 : null,
+        signal: null,
+        timed_out: aggregate.status === "timed_out",
+        duration_ms: aggregate.results.reduce((sum, result) => sum + Number(result.duration_ms || 0), 0),
+        stdout: aggregate.results.map((result) => `[${result.path}] ${String(result.status || "unknown")}\n${String(result.stdout || "")}`.trim()).join("\n\n"),
+        stderr: aggregate.results.map((result) => String(result.stderr || "")).filter(Boolean).join("\n\n"),
+        reason: aggregate.ok == null ? aggregate.results.find((result) => result.ok == null)?.reason || "unit_test_unavailable" : null,
+        file_results: aggregate.results,
+      }))
+    : await runCommand(executionCommand, {
+        cwd: check.cwd_relative ? path.resolve(cwd, check.cwd_relative) : cwd,
+        timeoutMs: policy.wall_timeout_ms,
+        idleTimeoutMs: policy.idle_timeout_ms,
+        trustedShell: check.source === "task_ab_acceptance",
+      });
+  const classified = check.source !== "task_ab_acceptance" && check.source !== "operator_approved_operation" && phase === "baseline"
+    ? classifyPackageManagerTestPlanFailure(executionCommand, raw) : raw;
+  const result = classifyNestedRunnerInfrastructureFailure(executionCommand, classified, { projectRoot: cwd });
+  const counts = check.intent === "test" ? testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`) : null;
+  const empty = result.status === "passed" && counts && (counts.total === 0 || counts.skipped === counts.total);
+  return { ...result, status: empty ? "skipped" : result.status,
+    ok: empty ? null : result.ok,
+    reason: empty ? "no_tests_executed" : result.reason || null,
+    check_id: check.id || check.check_id || null,
+    command: check.command,
+    intent: check.intent || "test",
+    test_counts: counts,
+    coverage_status: testCoverageStatus(result, check.intent || "test", counts) };
+}
+
+function testCoverageStatus(result, intent, counts) {
+  if (intent !== "test") return "not_applicable";
+  if (counts && (counts.total === 0 || counts.skipped === counts.total)) return "none_executed";
+  if (result.status !== "passed") return "aborted_or_unknown";
+  return counts?.total > 0 ? "reported_executed" : "unknown";
+}
+
+function aggregateCheckCoverageStatus(checkRuns = []) {
+  const tests = checkRuns.filter((run) => run.intent === "test");
+  if (tests.length === 0) return "not_applicable";
+  if (tests.every((run) => run.coverage_status === "reported_executed")) return "reported_executed";
+  if (tests.some((run) => run.coverage_status === "none_executed")) return "none_executed";
+  return "unknown";
+}
+
+async function runVerificationChecks(plan, { cwd, policy, phase = null } = {}) {
+  const checks = Array.isArray(plan.execution_checks) && plan.execution_checks.length > 0
+    ? plan.execution_checks : [{ ...plan, id: plan.check_id }];
+  const deadline = Date.now() + policy.wall_timeout_ms;
+  const runs = [];
+  for (const check of checks) {
+    if (check.unavailable_reason) {
+      runs.push({ check_id: check.id || null, command: check.command, intent: check.intent || "test",
+        status: "unavailable", ok: null, reason: check.unavailable_reason,
+        coverage_status: check.intent && check.intent !== "test" ? "not_applicable" : "unknown",
+        stdout: "", stderr: "", duration_ms: 0, code: null });
+      continue;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining < 1000) {
+      runs.push({ check_id: check.id || null, command: check.command, intent: check.intent || "test",
+        status: "unavailable", ok: null, reason: "verification_plan_wall_budget_exhausted",
+        coverage_status: check.intent && check.intent !== "test" ? "not_applicable" : "unknown",
+        stdout: "", stderr: "", duration_ms: 0, code: null });
+      continue;
+    }
+    runs.push(await runVerificationCheck(check, { cwd,
+      policy: { ...policy, wall_timeout_ms: remaining, idle_timeout_ms: policy.idle_timeout_ms == null
+        ? null : Math.min(policy.idle_timeout_ms, remaining) }, phase }));
+  }
+  const status = runs.some((run) => run.status === "failed") ? "failed"
+    : runs.some((run) => run.status === "timed_out") ? "timed_out"
+      : runs.some((run) => run.status === "infrastructure_error") ? "infrastructure_error"
+        : runs.some((run) => run.status !== "passed") ? "unavailable" : "passed";
+  return {
+    status,
+    ok: status === "passed" ? true : status === "failed" || status === "timed_out" ? false : null,
+    code: status === "passed" ? 0 : status === "failed" ? 1 : null,
+    signal: runs.find((run) => run.signal)?.signal || null,
+    timed_out: status === "timed_out",
+    timeout_kind: runs.find((run) => run.timed_out)?.timeout_kind || null,
+    duration_ms: runs.reduce((sum, run) => sum + Number(run.duration_ms || 0), 0),
+    stdout: runs.map((run) => `[${run.check_id || run.command}] ${run.status}\n${run.stdout || ""}`.trim()).join("\n\n").slice(-MAX_STREAM_CHARS),
+    stderr: runs.map((run) => `[${run.check_id || run.command}] ${run.status}\n${run.stderr || ""}`.trim()).join("\n\n").slice(-MAX_STREAM_CHARS),
+    reason: runs.find((run) => run.status !== "passed")?.reason || null,
+    check_runs: runs.map((run) => ({ check_id: run.check_id, command: run.command, intent: run.intent,
+      status: run.status, ok: run.ok, reason: run.reason, exit_code: run.code,
+      duration_ms: run.duration_ms, test_counts: run.test_counts || null,
+      coverage_status: run.coverage_status || "unknown" })),
+    coverage_status: aggregateCheckCoverageStatus(runs),
+    file_results: runs.flatMap((run) => run.file_results || []),
+  };
+}
+
 async function executeReceipt({
   job,
   plan,
@@ -1805,7 +2115,9 @@ async function executeReceipt({
     normalized_cwd: plan.cwd_relative || ".",
     baseline_commit_hash: phase === "baseline" ? (commitHash || actualCommit) : null,
     assessed_commit_hash: phase === "post_change" ? (commitHash || actualCommit) : null,
-    tree_fingerprint: worktreeFingerprint(actualCommit, initialPorcelain),
+    tree_fingerprint: initialPorcelain
+      ? await dirtyWorktreeFingerprint(cwd, actualCommit, initialPorcelain)
+      : worktreeFingerprint(actualCommit, initialPorcelain),
     tree_state: initialPorcelain === "" ? "clean" : "dirty",
   };
   const testedIntegratedDescendant = !!(
@@ -1911,7 +2223,8 @@ async function executeReceipt({
     });
   }
   const before = initialPorcelain;
-  if (before && !allowProjectedBaseline) {
+  const beforeDirtyDigests = before ? await dirtyPathDigests(cwd, before) : null;
+  if (before && (!allowProjectedBaseline || !beforeDirtyDigests)) {
     return storeReceipt(job, attemptId, {
       kind: RECEIPT_KIND,
       schema_version: RECEIPT_SCHEMA_VERSION,
@@ -1927,7 +2240,7 @@ async function executeReceipt({
       exit_code: null,
       duration_ms: 0,
       failure_fingerprint: null,
-      reason: "worktree_not_clean_before_test",
+      reason: beforeDirtyDigests ? "worktree_not_clean_before_test" : "dirty_input_fingerprint_unavailable",
       cleanup_status: "not_attempted",
       stdout: "",
       stderr: "",
@@ -1940,7 +2253,10 @@ async function executeReceipt({
   const executionCwd = plan.cwd_relative
     ? path.resolve(cwd, plan.cwd_relative)
     : cwd;
-  const rawResult = Array.isArray(plan.unit_test_paths)
+  const hasExecutionChecks = Array.isArray(plan.execution_checks) && plan.execution_checks.length > 0;
+  const rawResult = hasExecutionChecks
+    ? await runVerificationChecks(plan, { cwd, policy: effectivePolicy, phase })
+    : Array.isArray(plan.unit_test_paths)
     ? await runUnitTestFiles({
         projectDir: cwd,
         paths: plan.unit_test_paths,
@@ -1966,10 +2282,10 @@ async function executeReceipt({
         idleTimeoutMs: effectivePolicy.idle_timeout_ms,
         trustedShell: plan.source === "task_ab_acceptance",
       });
-  const plannerClassifiedResult = !["task_ab_acceptance", "operator_approved_operation"].includes(plan.source) && phase === "baseline"
+  const plannerClassifiedResult = !hasExecutionChecks && !["task_ab_acceptance", "operator_approved_operation"].includes(plan.source) && phase === "baseline"
     ? classifyPackageManagerTestPlanFailure(executionCommand, rawResult)
     : rawResult;
-  const result = classifyNestedRunnerInfrastructureFailure(
+  const result = hasExecutionChecks ? plannerClassifiedResult : classifyNestedRunnerInfrastructureFailure(
     executionCommand,
     plannerClassifiedResult,
     { projectRoot: cwd },
@@ -1978,6 +2294,7 @@ async function executeReceipt({
   let { cleanupStatus, cleanupError, siblingPaths } = await restoreAfterTest({
     ...cleanupOptions,
     before,
+    beforeDirtyDigests,
     actualCommit,
     originalHeadRef,
   });
@@ -2002,6 +2319,9 @@ async function executeReceipt({
   const testCounts = testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`);
   const noTestsExecuted = result.status === "passed" && testCounts
     && (testCounts.total === 0 || testCounts.skipped === testCounts.total);
+  const coverageStatus = hasExecutionChecks
+    ? aggregateCheckCoverageStatus(result.check_runs)
+    : testCoverageStatus(result, plan.intent || "test", testCounts);
   const receiptData = {
     kind: RECEIPT_KIND,
     schema_version: RECEIPT_SCHEMA_VERSION,
@@ -2012,6 +2332,10 @@ async function executeReceipt({
     cwd_relative: plan.cwd_relative || null,
     source: plan.source,
     ...(Array.isArray(plan.unit_test_paths) ? { unit_test_paths: plan.unit_test_paths } : {}),
+    ...(Array.isArray(plan.covered_unit_test_paths) ? { covered_unit_test_paths: plan.covered_unit_test_paths } : {}),
+    ...(Array.isArray(plan.execution_checks) ? { execution_checks: plan.execution_checks } : {}),
+    ...(Array.isArray(plan.unresolved_test_paths) ? { unresolved_test_paths: plan.unresolved_test_paths } : {}),
+    ...(Array.isArray(result.check_runs) ? { check_runs: result.check_runs } : {}),
     verification_eligible: plan.verification_eligible !== false,
     commit_hash: commitHash || actualCommit,
     executed_commit_hash: actualCommit,
@@ -2023,6 +2347,7 @@ async function executeReceipt({
       ? null
       : noTestsExecuted ? null : result.ok,
     test_counts: testCounts,
+    coverage_status: coverageStatus,
     exit_code: result.code,
     signal: result.signal,
     timed_out: result.timed_out,
@@ -2126,17 +2451,17 @@ export async function ensurePreDevelopmentTestBaseline({
     return legacy ? { ...legacy, reused: true } : null;
   }
   const effectivePolicy = effectiveVerificationPolicy({ cwd, policy, timeoutMs, idleTimeoutMs });
-  const existing = findFrozenTestBaseline(job?.id, { policy: effectivePolicy, projectDir: cwd });
-  if (existing) return { ...existing, reused: true };
   const plan = resolveFrozenTestPlan(job, payload, { cwd });
   if (!plan) return null;
+  const existing = findFrozenTestBaseline(job?.id, { policy: effectivePolicy, projectDir: cwd, planId: plan.plan_id });
+  if (existing) return { ...existing, reused: true };
   // An approved operational command is intentionally single-phase. Running a
   // migration, build, generator, or server-start command against the baseline
   // can mutate state before implementation and still is not test evidence.
   if (plan.source === "operator_approved_operation") return null;
   const rootJobId = Number(payload?.root_job_id || payload?.original_job_id || 0);
   if (Number.isSafeInteger(rootJobId) && rootJobId > 0 && rootJobId !== Number(job?.id)) {
-    const rootBaseline = findFrozenTestBaseline(rootJobId, { policy: effectivePolicy, projectDir: cwd });
+    const rootBaseline = findFrozenTestBaseline(rootJobId, { policy: effectivePolicy, projectDir: cwd, planId: plan.plan_id });
     if (rootBaseline?.plan_id === plan.plan_id) {
       return storeRepositoryBaselineReference(job, rootBaseline, { reuseScope: "lineage_root" });
     }
@@ -2307,7 +2632,7 @@ export async function ensurePostChangeTestReceipt({
         cwd,
         head: assessedCommit,
         fallbackBase: baseline?.commit_hash,
-        exclude: plan?.unit_test_paths || [],
+        exclude: [...(plan?.unit_test_paths || []), ...(plan?.covered_unit_test_paths || [])],
       })
     : { base: null, paths: [], scopePaths: [] };
   const changedPaths = changed.paths;
@@ -2368,9 +2693,14 @@ export async function ensurePostChangeTestReceipt({
   // plan's: they ran to a pass or a fail. One that never ran to a result runs
   // again on reassessment, with the plan.
   const changedTestPaths = JSON.stringify(plan.changed_unit_test_paths || []);
+  const currentHead = await currentCommit(cwd);
+  const currentPorcelain = await porcelain(cwd);
+  const reusableTreeFingerprint = currentHead && currentPorcelain === ""
+    ? worktreeFingerprint(currentHead, currentPorcelain) : null;
   const existing = findPostChangeReceipt(job.id, plan.plan_id, assessedCommit, {
     policy: effectivePolicy,
     projectDir: cwd,
+    treeFingerprint: reusableTreeFingerprint,
     accept: (receipt) => changedTestPaths === "[]" || (
       REUSABLE_RECEIPT_STATUSES.has(receipt.changed_tests?.status)
       && JSON.stringify(receipt.changed_tests.paths || []) === changedTestPaths
@@ -2378,9 +2708,12 @@ export async function ensurePostChangeTestReceipt({
   });
   if (existing) {
     const debt = await debtIdentitiesFor(existing);
+    const reuseRecordId = recordPostChangeReuse(job, attemptId, existing);
     return {
       baseline,
-      post_change: { ...existing, reused: true },
+      post_change: { ...existing, reused: true,
+        reuse_source_artifact_id: existing.artifact_id,
+        reuse_record_artifact_id: reuseRecordId },
       reused: true,
       ...debt,
     };
@@ -2646,6 +2979,9 @@ export function renderTestExecutionEvidence({
     `source: ${plan.source}`,
     `baseline: ${statusLabel(baseline)} (exit ${baseline?.exit_code ?? "unknown"}, ${baseline?.duration_ms ?? 0}ms)`,
     `post_change: ${statusLabel(postChange)} (exit ${postChange?.exit_code ?? "unknown"}, ${postChange?.duration_ms ?? 0}ms)`,
+    postChange?.coverage_status ? `post_change_coverage: ${postChange.coverage_status}` : null,
+    ...(Array.isArray(postChange?.check_runs) ? postChange.check_runs.map((check) =>
+      `check ${check.check_id || check.command}: ${String(check.status || "unknown").toUpperCase()} [coverage: ${check.coverage_status || "unknown"}]${check.reason ? ` (${check.reason})` : ""}`) : []),
     `delta: ${delta}`,
     scopeAttribution
       ? `scope_attribution: ${scopeAttribution.in_scope_count} error(s) in this task's files, ${scopeAttribution.attributable_outside_count} new error(s) elsewhere attributable to this change, ${scopeAttribution.unattributed_outside_count} error(s) in files this task does not own (pre-existing or owned by unfinished sibling tasks).${scopeAttribution.attributable ? "" : " The typecheck failure is not attributable to this task: judge it by its own files, which are clean."}`
@@ -2677,7 +3013,7 @@ export function renderTestExecutionEvidence({
       ? `A human approved this exact command for post-change execution. Its exit status records operational execution only and is not test evidence or approval of correctness.`
       : rejected
       ? `The orchestration layer rejected this command without executing it (${postChange?.reason || baseline?.reason || "unsafe command shape"}). Do not run it through shell; judge from other deterministic evidence or request a registered single-runner command on a future plan.`
-      : `The orchestration layer ran this frozen command outside model context. Do not rerun it. Judge the implementation using this before/after result together with the diff and task criteria.`,
+      : `The orchestration layer ran this frozen verification plan outside model context. Do not rerun it. Judge the implementation using this before/after result together with the diff and task criteria.`,
   ].filter(Boolean).join("\n");
 }
 
@@ -2704,6 +3040,7 @@ export function testReceiptObservationDetail(receipt = {}) {
     verification_eligible: receipt.verification_eligible !== false,
     phase: receipt.phase || null,
     status: receipt.status || null,
+    coverage_status: receipt.coverage_status || null,
     reason: receipt.reason || null,
     validation_error: receipt.validation_error || null,
     exit_code: receipt.exit_code ?? null,
@@ -2722,6 +3059,7 @@ export function testReceiptObservationDetail(receipt = {}) {
     plan_id: receipt.plan_id || null,
     verification_plan_id: receipt.verification_plan_id || receipt.plan_id || null,
     check_id: receipt.check_id || null,
+    ...(Array.isArray(receipt.check_runs) ? { check_runs: receipt.check_runs } : {}),
     intent: receipt.intent || null,
     cleanup_status: receipt.cleanup_status || null,
     failure_fingerprint: receipt.failure_fingerprint || null,
@@ -2729,6 +3067,7 @@ export function testReceiptObservationDetail(receipt = {}) {
     reused: receipt.reused === true,
     reuse_scope: receipt.reuse_scope || null,
     reuse_source_artifact_id: receipt.reuse_source_artifact_id || null,
+    reuse_record_artifact_id: receipt.reuse_record_artifact_id || null,
     reuse_source_job_id: receipt.reuse_source_job_id || null,
     reuse_eligible: receipt.phase === "baseline" && REUSABLE_RECEIPT_STATUSES.has(receipt.status),
     reuse_hit: receipt.reused === true,
@@ -2757,7 +3096,10 @@ export async function runFrozenTestPlanOnce(plan, { cwd, timeoutMs = null } = {}
     return { status: "invalid_test_plan", ok: null, reason: plan.validation_error || "not_a_verification_command", command: plan.command };
   }
   const policy = effectiveVerificationPolicy({ cwd, timeoutMs });
-  const raw = Array.isArray(plan.unit_test_paths)
+  const hasExecutionChecks = Array.isArray(plan.execution_checks) && plan.execution_checks.length > 0;
+  const raw = hasExecutionChecks
+    ? await runVerificationChecks(plan, { cwd, policy })
+    : Array.isArray(plan.unit_test_paths)
     ? await runUnitTestFiles({
         projectDir: cwd,
         paths: plan.unit_test_paths,
@@ -2779,11 +3121,14 @@ export async function runFrozenTestPlanOnce(plan, { cwd, timeoutMs = null } = {}
         timeoutMs: policy.wall_timeout_ms,
         idleTimeoutMs: policy.idle_timeout_ms,
       });
-  const result = classifyNestedRunnerInfrastructureFailure(plan.execution_command || plan.command, raw, { projectRoot: cwd });
+  const result = hasExecutionChecks ? raw
+    : classifyNestedRunnerInfrastructureFailure(plan.execution_command || plan.command, raw, { projectRoot: cwd });
   return {
     ...result,
     command: plan.command,
     test_counts: testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`),
+    coverage_status: hasExecutionChecks ? aggregateCheckCoverageStatus(result.check_runs)
+      : testCoverageStatus(result, plan.intent || "test", testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`)),
   };
 }
 

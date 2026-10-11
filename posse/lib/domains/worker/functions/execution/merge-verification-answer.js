@@ -56,6 +56,7 @@ import {
 import { preflightReviewApproval } from "../../../bridge/functions/review-decision.js";
 import { mergeWorkItemNow } from "../../../git/functions/operator-merge.js";
 import { prewarmNativeGitAuth } from "../../../git/functions/native/prewarm.js";
+import { gitExecAsync } from "../../../git/functions/utils.js";
 
 const MAX_FEEDBACK_CHARS = 2000;
 
@@ -222,6 +223,24 @@ export async function applyMergeVerificationReviewAnswer({
     return mergeAfterRecovery({ workItemId, actorLabel, projectDir, mergeWorkItem });
   }
   if (effectiveAction === "pass") {
+    const workItem = getWorkItem(workItemId);
+    if (!stillUnderReview(workItem) || !workItem.branch_name) {
+      return { ok: false, keepGateOpen: true, message: `WI#${workItemId} is no longer awaiting merge on a branch` };
+    }
+    let branchHead;
+    try {
+      branchHead = String(await gitExecAsync(["rev-parse", "--verify", workItem.branch_name], projectDir)).trim();
+    } catch (error) {
+      return { ok: false, keepGateOpen: true,
+        message: `Cannot bind review to ${workItem.branch_name}: ${error?.message || error}` };
+    }
+    if (!/^[0-9a-f]{40}$/i.test(branchHead)) {
+      return { ok: false, keepGateOpen: true, message: `Cannot bind review to ${workItem.branch_name}: invalid branch head` };
+    }
+    updateJobPayload(job.id, JSON.stringify({
+      ...parseJobPayload(getJob(job.id) || job),
+      reviewed_branch_head: branchHead,
+    }));
     return { ok: true, message: `WI#${workItemId} may merge: ${actorLabel.toLowerCase()} reviewed the change` };
   }
   if (effectiveAction !== "fail") return { ok: false, message: `Unknown merge review answer ${action}` };

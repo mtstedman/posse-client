@@ -28,7 +28,7 @@ import {
   convertImageFileToPngExplicit,
   decodePngToRgba,
   detectImageFormat,
-  encodeRgbaToPng,
+  encodeRgbaToPngAsync,
   readImageDimensions,
   resampleRgba,
   resolveExplicitImageConverters,
@@ -102,16 +102,16 @@ async function decodeToRgba(bytes, format, { converters, tempRoot, deadline, now
 
 /**
  * Downscale RGBA pixels to a PNG within the delivery limits.
- * @returns {{ png: Buffer, width: number, height: number } | { error: string }}
+ * @returns {Promise<{ png: Buffer, width: number, height: number } | { error: string }>}
  */
-function downscaleToPng(rgba, maxSide) {
+async function downscaleToPng(rgba, maxSide) {
   let side = maxSide;
   for (let attempt = 0; attempt < VIEW_IMAGE_LIMITS.maxDownscaleAttempts; attempt += 1) {
     const size = viewImageTargetSize(rgba.width, rgba.height, side);
     const pixels = size.width === rgba.width && size.height === rgba.height
       ? rgba.data
       : resampleRgba(rgba.width, rgba.height, rgba.data, size.width, size.height);
-    const png = encodeRgbaToPng(size.width, size.height, pixels);
+    const png = await encodeRgbaToPngAsync(size.width, size.height, pixels);
     if (png.length <= VIEW_IMAGE_LIMITS.maxOutputBytes) return { png, width: size.width, height: size.height };
     // PNG bytes scale roughly with pixel count; shrink the long edge by the
     // square root of the overshoot, with headroom.
@@ -193,7 +193,7 @@ export async function viewImageWithinScope(args, {
       now,
     });
     if ("error" in rgba) return refusal(`${display}: ${rgba.error}`);
-    const reduced = downscaleToPng(rgba, VIEW_IMAGE_LIMITS.maxOutputSide);
+    const reduced = await downscaleToPng(rgba, VIEW_IMAGE_LIMITS.maxOutputSide);
     if ("error" in reduced) return refusal(`${display}: ${reduced.error}`);
     delivered = {
       bytes: reduced.png,

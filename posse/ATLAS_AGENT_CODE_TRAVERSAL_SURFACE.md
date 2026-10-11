@@ -490,11 +490,12 @@ Remote roles: `artificer`, `dev`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Edit an existing file within the allowed scope. Provide exactly one mode: exact old_string/new_string, replaceLines, replacePattern, insertAt, append, jsonPath/jsonValue, or executable.
+Edit an existing file within the allowed scope. Provide exactly one mode: exact old_string/new_string, replaceLines, atomic edits[], replacePattern, insertAt, append, jsonPath/jsonValue, or executable. For several edits to one file, send edits[] once: every item resolves against the original file, and overlaps reject the whole batch.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `append` | `string` | Conditional |  | Content to append to the file. |
+| `edits` | `array<any>` | Conditional | min items 1 | Atomic edits to one file. Use when several changes are known; all line numbers and old_string values refer to the file before this call. A failed or overlapping item writes nothing. |
 | `executable` | `boolean` | Conditional |  | Set or clear the file's executable permission bits without changing its content. |
 | `insertAt` | `object` | Conditional |  | Insert content before a 1-based line number. Use line_count + 1 to insert after the last line. |
 | `jsonPath` | `string` | Conditional |  | Dot-separated JSON path to update. |

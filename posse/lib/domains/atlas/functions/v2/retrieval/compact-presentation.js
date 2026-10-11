@@ -511,6 +511,9 @@ export function projectCompactCodeStructure(data, options = {}) {
       ...(indexedSymbols != null ? { indexedSymbols } : {}),
     },
     ...(incomplete ? { incomplete } : {}),
+    ...(Array.isArray(record.unindexedPaths) && record.unindexedPaths.length > 0
+      ? { unindexedPaths: record.unindexedPaths.map((value) => String(value)) }
+      : {}),
     ...(Array.isArray(record.warnings) && record.warnings.length > 0
       ? { warnings: record.warnings.map((value) => String(value)) }
       : {}),

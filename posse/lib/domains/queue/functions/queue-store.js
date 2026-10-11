@@ -6,8 +6,10 @@ import { registerAttemptStartHook } from "./attempts.js";
 // Uses better-sqlite3 (synchronous) for simplicity and atomicity.
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { ATLAS_FRESHNESS_PRELEASE_FENCE_MS } from "../../../catalog/atlas.js";
 import {
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
+  MERGE_FAILURE_KINDS,
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
   humanGateStateAllowsAnswer,
 } from "../../../catalog/human-input.js";
@@ -55,6 +57,7 @@ import { findMergeHoldingGate } from "./merge-holding-gate.js";
 import {
   activeMergeFailureRecoveryGateId,
   committedJobIdsForWorkItem,
+  isMergeFailureRecoveryPayload,
   isMergeVerificationReviewJob,
   mergeFailureRecoveryGateJobSpec,
   mergeVerificationReviewGateJobSpec,
@@ -1354,16 +1357,17 @@ export function setMergeState(id, mergeState) {
 // gate that holds the merge (opened here when none covers the current
 // waivers), or null when the merge may proceed. Runs inside the authorization
 // transaction.
-function holdForMergeVerificationReview(workItem) {
+function holdForMergeVerificationReview(workItem, observedBranchHead = null) {
   const requirement = mergeVerificationReviewRequirement(listJobsByWorkItem(workItem.id), {
     committedJobIds: committedJobIdsForWorkItem(workItem.id),
   });
   if (!requirement.required) return null;
   const existing = mergeVerificationReviewGateState(workItem.id, { waivedJobIds: requirement.waivedJobIds });
-  if (existing?.approved) return null;
+  if (existing?.approved && (observedBranchHead == null || existing.reviewed_branch_head === observedBranchHead)) return null;
   if (existing?.holds) return existing;
   const passedChecks = postChangeReceiptsAtCommit(workItem.id, latestImplementationCommit(workItem.id))
-    .filter((receipt) => receipt.status === "passed");
+    .filter((receipt) => receipt.status === "passed"
+      && ["reported_executed", "not_applicable"].includes(receipt.coverage_status));
   const gate = createJob(mergeVerificationReviewGateJobSpec(workItem, requirement, { passedChecks }));
   if (!gate?.id) return null;
   // Parked like a push offer: answered out of band (bridge, CLI, review),
@@ -1393,7 +1397,7 @@ function holdForMergeVerificationReview(workItem) {
  * a gate already open/resolving wins and prevents publication; once this claim
  * lands, gate resolution is rejected until the merge settles or releases it.
  */
-export function authorizeWorkItemAutoMerge(id, { expectedBranch = null } = {}) {
+export function authorizeWorkItemAutoMerge(id, { expectedBranch = null, observedBranchHead = null } = {}) {
   const db = getDb();
   return runImmediateTransaction(db, () => {
     const current = getWorkItem(id);
@@ -1434,7 +1438,7 @@ export function authorizeWorkItemAutoMerge(id, { expectedBranch = null } = {}) {
         gate_state: activeGate.gate_state,
       };
     }
-    const verificationReview = holdForMergeVerificationReview(current);
+    const verificationReview = holdForMergeVerificationReview(current, observedBranchHead);
     if (verificationReview) {
       return { ok: false, reason: "verification_review_required", gate_job_id: verificationReview.gate_job_id };
     }
@@ -1472,7 +1476,8 @@ export function releaseWorkItemAutoMergeAuthorization(id, previousMergeState = n
   return result.changes === 1;
 }
 
-export function markWorkItemMergeFailed(id, { message = null, targetBranch = null, integrationGate = null } = {}) {
+export function markWorkItemMergeFailed(id, { message = null, targetBranch = null, targetHead = null,
+  integrationGate = null, failureKind = null } = {}) {
   const db = getDb();
   const execute = () => {
     const result = db.prepare(`
@@ -1484,8 +1489,33 @@ export function markWorkItemMergeFailed(id, { message = null, targetBranch = nul
     releaseWorkItemLocksForMergeState(id, "merge_failed");
     const workItem = getWorkItem(id);
     if (!workItem) return true;
-    const spec = mergeFailureRecoveryGateJobSpec(workItem, { message, targetBranch, integrationGate });
     const existingGateId = activeMergeFailureRecoveryGateId(id, db);
+    const incomingKind = failureKind || (integrationGate?.ok === false
+      ? MERGE_FAILURE_KINDS.INTEGRATION_TEST : MERGE_FAILURE_KINDS.UNKNOWN);
+    const prior = existingGateId
+      ? parseJobPayload(getJob(existingGateId))?.merge_failure_recovery || null
+      : null;
+    const incomingHead = targetHead || integrationGate?.target_head || null;
+    const previousFailures = Array.isArray(prior?.previous_failures) ? [...prior.previous_failures] : [];
+    if (prior && incomingKind !== MERGE_FAILURE_KINDS.UNKNOWN) previousFailures.push({
+      failure_kind: prior.failure_kind || MERGE_FAILURE_KINDS.UNKNOWN,
+      message: prior.message || null,
+      target_head: prior.target_head || null,
+    });
+    const preservePrior = prior && incomingKind === MERGE_FAILURE_KINDS.UNKNOWN
+      && prior.failure_kind !== MERGE_FAILURE_KINDS.UNKNOWN;
+    const spec = mergeFailureRecoveryGateJobSpec(workItem, {
+      message: preservePrior ? prior.message : message,
+      targetBranch: targetBranch || prior?.target_branch || null,
+      targetHead: preservePrior ? incomingHead || prior.target_head : incomingHead,
+      integrationGate: preservePrior ? prior.integration_gate : integrationGate,
+      failureKind: preservePrior ? prior.failure_kind : incomingKind,
+      retryCount: prior ? Number(prior.retry_count || 0) + 1 : 0,
+      previousFailures,
+      allowWaive: preservePrior
+        ? !!incomingHead && incomingHead === prior.integration_gate?.target_head
+        : !!integrationGate?.candidate_tree && !!integrationGate?.target_head,
+    });
     if (existingGateId) {
       // Refresh diagnostics and candidate identity after every failed retry.
       updateJobPayload(existingGateId, spec.payload_json);
@@ -2152,6 +2182,11 @@ export function countWorkItemJobs(workItemId) {
 /**
  * Recompute work item status from its jobs. Returns the new status (or null if unchanged).
  */
+function isPostCompletionGateJob(job) {
+  return isPushOfferJob(job) || isMergeVerificationReviewJob(job)
+    || (job?.job_type === "human_input" && isMergeFailureRecoveryPayload(parseJobPayload(job)));
+}
+
 export function refreshWorkItemStatus(workItemId) {
   const db = getDb();
   let result = null;
@@ -2174,15 +2209,14 @@ export function refreshWorkItemStatus(workItemId) {
       return;
     }
 
-    // Push-offer gates are out-of-band deploy prompts — an open one must not
-    // drag a completed work item back to waiting_on_human. Neither may a merge
-    // verification review, which only a completed work item opens. A database
+    // Publication and post-completion merge gates must not drag a completed
+    // work item back to waiting_on_human. A database
     // task held for the merge must likewise not keep the work item from merging.
     // Work-item disposition gates decide a failed or merge-deferred item;
     // they must not turn it into a waiting one either.
     const jobs = listJobsByWorkItem(workItemId)
       .filter((job) => !isShadowFanoutJob(job))
-      .filter((job) => !isPushOfferJob(job) && !isMergeVerificationReviewJob(job))
+      .filter((job) => !isPostCompletionGateJob(job))
       .filter((job) => !isPostMergeHeldDbJob(job))
       .filter((job) => !isWorkItemDispositionGateJob(job));
     if (jobs.length === 0) return;
@@ -2295,7 +2329,7 @@ export function refreshWorkItemStatuses(statusFilter = null) {
 export function completionBlockersForWorkItem(workItemId) {
   const jobs = listJobsByWorkItem(workItemId)
     .filter((job) => !isShadowFanoutJob(job))
-    .filter((job) => !isPushOfferJob(job) && !isMergeVerificationReviewJob(job))
+    .filter((job) => !isPostCompletionGateJob(job))
     .filter((job) => !isPostMergeHeldDbJob(job))
     .filter((job) => !isWorkItemDispositionGateJob(job))
     .filter((job) => !NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type));
@@ -2610,7 +2644,21 @@ export function forceUpdateJobStatus(id, status, opts = {}) {
 
 export function setJobResult(id, result) {
   const db = getDb();
-  const json = result === undefined ? null : JSON.stringify(result);
+  let nextResult = result;
+  if (result && typeof result === "object" && !Array.isArray(result)
+    && !Object.hasOwn(result, "tool_mix")) {
+    const prior = db.prepare("SELECT result_json FROM jobs WHERE id = ?").get(id)?.result_json;
+    if (prior) {
+      try {
+        const previous = JSON.parse(prior);
+        if (previous && typeof previous === "object" && !Array.isArray(previous)
+          && Object.hasOwn(previous, "tool_mix")) {
+          nextResult = { ...result, tool_mix: previous.tool_mix };
+        }
+      } catch { /* malformed historical result has no reliable tool mix */ }
+    }
+  }
+  const json = nextResult === undefined ? null : JSON.stringify(nextResult);
   db.prepare(`UPDATE jobs SET result_json = ?, last_error = NULL, updated_at = ? WHERE id = ?`).run(json, now(), id);
 }
 
@@ -4579,6 +4627,20 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
         AND evidence_warm.job_type = 'atlas_warm'
         AND evidence_warm.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
     )`);
+
+  // A recently queued main refresh can be identified without leasing the
+  // consumer first. This short fence avoids transient lock acquisition;
+  // after it expires the worker's own bounded freshness gate decides.
+  conditions.push(`(j.job_type NOT IN ('plan', 'dev', 'fix', 'assess')
+    OR NOT EXISTS (
+      SELECT 1 FROM jobs main_warm
+      WHERE main_warm.job_type = 'atlas_warm'
+        AND main_warm.status IN ('queued', 'leased', 'running')
+        AND main_warm.created_at >= ?
+        AND json_valid(main_warm.payload_json)
+        AND json_extract(main_warm.payload_json, '$.purpose') IN ('main-full', 'main-incremental', 'main-merge')
+    ))`);
+  params.push(new Date(Date.now() - ATLAS_FRESHNESS_PRELEASE_FENCE_MS).toISOString());
 
   const safeLimit = Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 1);
   params.push(safeLimit);

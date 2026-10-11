@@ -71,7 +71,7 @@ import {
   resolveClaudeExecutionMode,
 } from "./execution-mode.js";
 import { classifyClaudeCliFailure, __testClassifyClaudeCliFailure } from "./failure-classification.js";
-import { scrubClaudeChildEnv } from "./child-env.js";
+import { applyClaudeCacheTtlPolicy, scrubClaudeChildEnv } from "./child-env.js";
 import {
   __testRunClaudeWarmupViaInteractiveCli,
   warmOauthSession,
@@ -85,6 +85,7 @@ import {
   _extractStreamUsage,
   _normalizeClaudeToolUseBlock,
   _usageNumberOrNull,
+  claudeCacheCreationSplit,
   estimateTokensFromText,
   parseTokenUsage,
 } from "./stream-usage.js";
@@ -851,6 +852,12 @@ export async function callProvider(promptText, {
     // Re-scrub after composing helper-provided environment fragments so no
     // later layer can accidentally switch Claude Code from OAuth to API-key auth.
     scrubClaudeChildEnv(childEnv);
+    const issuedCacheTools = [
+      ...(issuedToolSurfaceForProviderPolicy(_remoteIssuedPolicy) || []),
+      ...(Array.isArray(_remoteToolSurface) ? _remoteToolSurface : []),
+    ];
+    applyClaudeCacheTtlPolicy(childEnv, { priorSessionHandle, recyclingMode,
+      issuedToolSurface: issuedCacheTools });
 
     if (selectedExecutionMode === CLAUDE_EXECUTION_MODE_INTERACTIVE) {
       void (async () => {
@@ -945,6 +952,7 @@ export async function callProvider(promptText, {
                 inputTokens: estimatedInputTokens,
                 cachedInputTokens: stats.cachedInputTokens ?? 0,
                 cacheCreationInputTokens: stats.cacheCreationInputTokens ?? 0,
+                ...claudeCacheCreationSplit([interactiveUsage]),
                 outputTokens: estimatedOutputTokens,
                 requestContextInputTokens: estimatedInputTokens,
                 durationMs,
@@ -1783,6 +1791,7 @@ export async function callProvider(promptText, {
               provider: "claude",
               modelName: segment.model || modelToUse,
               ...normalized,
+              ...claudeCacheCreationSplit([segment.usage]),
               requestContextInputTokens: normalized.inputTokens,
               usageSource: "stream",
               precision: "exact",
@@ -1798,6 +1807,7 @@ export async function callProvider(promptText, {
             inputTokens: normalizedUsage.inputTokens ?? 0,
             cachedInputTokens: normalizedUsage.cachedInputTokens ?? 0,
             cacheCreationInputTokens: normalizedUsage.cacheCreationInputTokens ?? 0,
+            ...claudeCacheCreationSplit([usage]),
             outputTokens: normalizedUsage.outputTokens ?? 0,
             requestContextInputTokens: normalizedUsage.inputTokens ?? 0,
             durationMs,

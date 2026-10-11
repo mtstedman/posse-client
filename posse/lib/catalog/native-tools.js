@@ -87,7 +87,8 @@ export const TOOL_EDIT_FILE = {
   name: "edit_file",
   description:
     "Edit an existing file within the allowed scope. Provide exactly one mode: exact old_string/new_string, " +
-    "replaceLines, replacePattern, insertAt, append, jsonPath/jsonValue, or executable.",
+    "replaceLines, atomic edits[], replacePattern, insertAt, append, jsonPath/jsonValue, or executable. " +
+    "For several edits to one file, send edits[] once: every item resolves against the original file, and overlaps reject the whole batch.",
   parameters: {
     type: "object",
     properties: {
@@ -104,6 +105,33 @@ export const TOOL_EDIT_FILE = {
         },
         required: ["start", "end", "content"],
         additionalProperties: false,
+      },
+      edits: {
+        type: "array",
+        minItems: 1,
+        description: "Atomic edits to one file. Use when several changes are known; all line numbers and old_string values refer to the file before this call. A failed or overlapping item writes nothing.",
+        items: {
+          type: "object",
+          properties: {
+            old_string: { type: "string" },
+            new_string: { type: "string" },
+            replaceLines: {
+              type: "object",
+              properties: {
+                start: { type: "integer", minimum: 1 },
+                end: { type: "integer", minimum: 1 },
+                content: { type: "string" },
+              },
+              required: ["start", "end", "content"],
+              additionalProperties: false,
+            },
+          },
+          oneOf: [
+            { required: ["old_string", "new_string"] },
+            { required: ["replaceLines"] },
+          ],
+          additionalProperties: false,
+        },
       },
       replacePattern: {
         type: "object",
@@ -138,6 +166,7 @@ export const TOOL_EDIT_FILE = {
     oneOf: [
       exclusiveEditMode("old_string", "new_string"),
       exclusiveEditMode("replaceLines"),
+      exclusiveEditMode("edits"),
       exclusiveEditMode("replacePattern"),
       exclusiveEditMode("insertAt"),
       exclusiveEditMode("append"),

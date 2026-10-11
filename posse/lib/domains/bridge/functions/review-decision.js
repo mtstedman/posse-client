@@ -19,6 +19,7 @@ import { describePartialWorkJobs, partialWorkToMerge } from "../../queue/functio
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/reviewable.js";
 import { createGitWorkflowHelpers } from "../../git/functions/workflows.js";
+import { mergeFailureDiagnostics } from "../../git/functions/merge-failure-diagnostics.js";
 import { resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
 import { redactBridgeValue } from "./redaction.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
@@ -440,7 +441,8 @@ export async function finalizeApprovedReview(workItemId, {
         };
       }
       if (!lockedWi.branch_name) {
-        markWorkItemMergeFailed(wi.id);
+        markWorkItemMergeFailed(wi.id, mergeFailureDiagnostics({ reason: "branch_missing", message: "The approved work-item branch is no longer available." },
+          { targetBranch: resolveTargetBranchForAdmin(projectDir) }));
         return {
           ok: false,
           reason: "branch_missing",
@@ -455,7 +457,8 @@ export async function finalizeApprovedReview(workItemId, {
         { wiId: wi.id, retryDeterministicConflict: true, mergeLockAlreadyHeld: true },
       );
       if (!result?.ok) {
-        if (!result?.deferred) markWorkItemMergeFailed(wi.id, { message: result?.message || null, integrationGate: result?.integrationGate || null });
+        if (!result?.deferred) markWorkItemMergeFailed(wi.id, mergeFailureDiagnostics(result,
+          { targetBranch: resolveTargetBranchForAdmin(projectDir) }));
         return { ...result, branchName: lockedWi.branch_name };
       }
       return {
@@ -476,7 +479,8 @@ export async function finalizeApprovedReview(workItemId, {
         merged: true,
       };
     }
-    if (mergeAttempted) markWorkItemMergeFailed(wi.id);
+    if (mergeAttempted) markWorkItemMergeFailed(wi.id, mergeFailureDiagnostics({ message: err?.message || String(err) },
+      { targetBranch: resolveTargetBranchForAdmin(projectDir) }));
     return {
       ok: false,
       reason: mergeAttempted ? "merge_failed" : "merge_lock_failed",

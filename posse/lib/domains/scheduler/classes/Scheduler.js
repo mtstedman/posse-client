@@ -2676,7 +2676,9 @@ export class Scheduler {
                   path: orderConflict.candidate.path,
                   lock_kind: orderConflict.candidate.lock_kind,
                   wait_state: orderConflict.wait_state,
-                  message: `#${job.id} waits for WI#${orderConflict.lock.work_item_id} to merge; both plan edits to ${orderConflict.candidate.path}`,
+                  message: `#${job.id} waits for WI#${orderConflict.lock.work_item_id} to merge; ${orderConflict.wait_state?.via_job_id
+                    ? `its sibling #${orderConflict.wait_state.via_job_id} and WI#${orderConflict.lock.work_item_id} both plan ${orderConflict.candidate.path}`
+                    : `it and WI#${orderConflict.lock.work_item_id} both plan ${orderConflict.candidate.path}`}`,
                 });
                 skipJobIds.add(job.id);
                 continue;

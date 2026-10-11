@@ -9,6 +9,8 @@
 
 import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import { C } from "../../../shared/format/functions/colors.js";
+import { mergeFailureDiagnostics } from "../../git/functions/merge-failure-diagnostics.js";
+import { resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
 import {
   addDependency,
   createJob,
@@ -335,7 +337,8 @@ export async function processIterativeWrapUp({
         continue;
       }
       if (!mergeResult.ok) {
-        markWorkItemMergeFailed(wi.id);
+        markWorkItemMergeFailed(wi.id, mergeFailureDiagnostics(mergeResult,
+          { targetBranch: resolveTargetBranchForAdmin(projectDir) }));
         wi = markIterativeFinished(
           wi,
           `Iteration blocked at ${reason}: pass merge failed before next loop (${mergeResult.message || "unknown merge error"}).`,

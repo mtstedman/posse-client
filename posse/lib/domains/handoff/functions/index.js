@@ -22,12 +22,14 @@
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { FINAL_REVIEW_DEFAULT_MODE } from "../../../catalog/final-review.js";
+import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import { HANDOFF_SOURCE_EXTENSIONS } from "../../../catalog/files.js";
 
 import fs from "fs";
 import path from "path";
 import {
   getAttempts,
+  getAgentCallById,
   getDependencies,
   getIntSetting,
   getJob,
@@ -98,6 +100,7 @@ import {
   resolveAtlasHandoffState as resolveAtlasHandoffStateFromModule,
 } from "./helpers/atlas-context.js";
 import { materializeRenderedLifecycleCoverage } from "./helpers/lifecycle-prefetch.js";
+import { handoffPrefetchObservationContext } from "./helpers/observation-context.js";
 import { classifyAtlasFailure } from "../../integrations/functions/atlas-embedded.js";
 import { DEFAULT_DEV_MODE, DEFAULT_FIX_DEV_MODE, normalizeDevMode, renderSelectedDevModeContract } from "../../../shared/policies/functions/dev-modes.js";
 import { runWithObservationContext, getObservationContext, recordObservation } from "../../observability/functions/observations.js";
@@ -873,7 +876,7 @@ function _atlasHandoffPrefetchAllowed(packet) {
   return { allowed: true, reason: null, source: null };
 }
 
-function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) {
+function _applyToolPolicy(recipient, packet, { readSetting = getSetting, reviewerChildIdentity = null } = {}) {
   const base = TOOL_POLICIES[recipient] || TOOL_POLICIES.dev;
   const hints = packet.context_hints || {};
 
@@ -907,6 +910,18 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
     && recipient === "dev"
     && base.allow_write === true
     && String(readSetting(SETTING_KEYS.FINAL_REVIEW_MODE) || FINAL_REVIEW_DEFAULT_MODE).trim().toLowerCase() !== "off";
+  const parentCallId = Number(reviewerChildIdentity?.parentAgentCallId);
+  const parentCall = reviewerChildIdentity?.kind === AGENT_CALL_CHILD_KINDS.FINAL_REVIEW
+    && Number.isSafeInteger(parentCallId) && parentCallId > 0
+    ? getAgentCallById(parentCallId) : null;
+  const trustedFinalReviewer = handoffEnabled && recipient === "assessor"
+    && ["dev", "fix"].includes(packet.job_type)
+    && parentCall && ["dev", "fix"].includes(parentCall.role)
+    && Number(parentCall.job_id) === Number(packet.job_id)
+    && Number(parentCall.work_item_id) === Number(packet.work_item_id);
+  if (handoffEnabled && reviewerChildIdentity && !trustedFinalReviewer) {
+    throw new Error("final-review child identity does not match its parent call");
+  }
   packet.agent_coordination = {
     mode: ["off", "handoff", "subagents"].includes(coordinationMode) ? coordinationMode : "off",
     agent_handoff_v1: handoffEnabled,
@@ -916,7 +931,7 @@ function _applyToolPolicy(recipient, packet, { readSetting = getSetting } = {}) 
     sub_agent_v1: subAgentEnabled,
     dispatch_agent_v1: dispatchAgentEnabled,
     web_research_handoff_v1: false,
-    final_review_v1: finalReviewEnabled,
+    final_review_v1: finalReviewEnabled || !!trustedFinalReviewer,
     status: "experimental",
     source: "repo_setting_snapshot",
   };
@@ -1388,7 +1403,7 @@ function _attachSkills(packet) {
  * @param {object} input — either a handoff packet (has .recipient) or { recipient, data }
  * @returns {object} The same packet, enriched in-place
  */
-export async function handoff(input, { providerName = null } = {}) {
+export async function handoff(input, { providerName = null, reviewerChildIdentity = null } = {}) {
   // Accept both styles: handoff(packet) or handoff({ recipient, data })
   let packet;
   if (input.recipient && input.job_type) {
@@ -1657,12 +1672,7 @@ export async function handoff(input, { providerName = null } = {}) {
   // If a parent context already exists (worker.js wraps most handoff calls),
   // inherit its attempt_id but override ids with the packet's for accuracy.
   const parentCtx = getObservationContext() || {};
-  const prefetchCtx = {
-    work_item_id: packet.work_item_id ?? parentCtx.work_item_id ?? null,
-    job_id: packet.job_id ?? parentCtx.job_id ?? null,
-    attempt_id: parentCtx.attempt_id ?? null,
-    role: packet.recipient ?? parentCtx.role ?? null,
-  };
+  const prefetchCtx = handoffPrefetchObservationContext(packet, parentCtx);
   let atlasPrefetchStepError = null;
   const atlasPrefetchPacket = { ...packet };
   const atlasHandoffPrefetchPolicy = _atlasHandoffPrefetchAllowed(packet);
@@ -1885,8 +1895,10 @@ export async function handoff(input, { providerName = null } = {}) {
   // Memory bodies are not prefetched; agents can call memory.get for exact
   // anchors they are about to rely on.
   const kaizenTelemetry = {};
-  packet.run_insights = await timeHandoffStep(packet, "insights.load", () => _loadRelevantInsightsAsync(recipient, packet, { cwd: packet.cwd || process.cwd(), telemetry: kaizenTelemetry }));
-  packet.memory_surface = await timeHandoffStep(packet, "memory.surface", () => _loadMemorySurfaceAsync(recipient, packet, { cwd: packet.cwd || process.cwd(), telemetry: kaizenTelemetry }));
+  packet.run_insights = await timeHandoffStep(packet, "insights.load", () => runWithObservationContext(prefetchCtx,
+    () => _loadRelevantInsightsAsync(recipient, packet, { cwd: packet.cwd || process.cwd(), telemetry: kaizenTelemetry })));
+  packet.memory_surface = await timeHandoffStep(packet, "memory.surface", () => runWithObservationContext(prefetchCtx,
+    () => _loadMemorySurfaceAsync(recipient, packet, { cwd: packet.cwd || process.cwd(), telemetry: kaizenTelemetry })));
   await timeHandoffStep(packet, "insights.memory_prefetch_notice", () => _applyMemoryPrefetchNotice(packet));
   await timeHandoffStep(packet, "insights.log", () => _logSurfacedInsights(packet, recipient, kaizenTelemetry));
 
@@ -1895,7 +1907,7 @@ export async function handoff(input, { providerName = null } = {}) {
   await timeHandoffStep(packet, "traversal_completion.resolve", () => _applyTraversalCompletionCheck(packet));
   await timeHandoffStep(packet, "atlas_shadow_guardrails.resolve", () => _applyAtlasShadowGuardrails(packet));
   await timeHandoffStep(packet, "hash_refs.proof_expand", () => _expandHashRefProofs(packet));
-  await timeHandoffStep(packet, "tool_policy.apply", () => _applyToolPolicy(recipient, packet));
+  await timeHandoffStep(packet, "tool_policy.apply", () => _applyToolPolicy(recipient, packet, { reviewerChildIdentity }));
   await timeHandoffStep(packet, "drop_telemetry.emit", () => _emitHandoffDropTelemetry(packet));
 
   return packet;

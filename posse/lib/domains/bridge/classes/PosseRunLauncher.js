@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { getLiveSchedulerBlockMessage } from "../../queue/functions/index.js";
+import { environmentForNewRun } from "../../../shared/telemetry/functions/run-env.js";
 
 const ORCHESTRATOR_PATH = fileURLToPath(
   new URL("../../../../orchestrator.js", import.meta.url),
@@ -64,6 +65,7 @@ export class PosseRunLauncher {
             detached: true,
             stdio: "ignore",
             windowsHide: true,
+            env: environmentForNewRun(),
           },
         );
       } catch (err) {

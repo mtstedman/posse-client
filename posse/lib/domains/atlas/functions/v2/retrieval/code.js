@@ -479,6 +479,8 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
   if (params.ifNoneMatch && params.ifNoneMatch === etag) {
     return notModifiedEnvelope({ action: "code.skeleton", versionId, etag });
   }
+  const noDeclarations = !String(result.content || "").trim()
+    && Number(result.totalSymbols || 0) === 0;
   /** @type {CodeSkeletonData} */
   const data = {
     ...(identifiersNotDeclared.length > 0
@@ -493,13 +495,18 @@ async function codeGetSkeletonWithNative({ view, versionId, params, readFile, re
     endLine: Number(result.endLine || 1),
     truncated: result.truncated === true,
     matchStatus: String(result.matchStatus || ""),
-    ...(typeof result.degradedReason === "string" && result.degradedReason
-      ? { degradedReason: result.degradedReason }
-      : {}),
+    ...(noDeclarations
+      ? {
+        degradedReason: "no_declarations",
+        nextBestAction: "Use file.read or code.window to inspect source without indexed declarations.",
+      }
+      : (typeof result.degradedReason === "string" && result.degradedReason
+        ? { degradedReason: result.degradedReason }
+        : {})),
     totalSymbols: Number(result.totalSymbols || 0),
     returnedSymbols: Number(result.returnedSymbols || 0),
     omittedSymbols: Number(result.omittedSymbols || 0),
-    complete: result.complete === true,
+    complete: !noDeclarations && result.complete === true,
     etag,
   };
   return okEnvelope({

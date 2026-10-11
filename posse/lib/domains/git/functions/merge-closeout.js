@@ -188,13 +188,26 @@ export function runCloseoutTestCommandSync(command, {
       windowsVerbatimArguments: spec.windowsVerbatimArguments === true,
       env: filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS }),
     });
-    const output = redactExactValues(`${result?.stdout || ""}${result?.stderr || ""}`, secrets);
+    const stdout = redactExactValues(result?.stdout || "", secrets);
+    const stderr = redactExactValues(result?.stderr || "", secrets);
+    const output = `${stdout}${stderr}`;
+    const errorCode = result?.error?.code || null;
+    const details = {
+      status: result?.status ?? null,
+      signal: result?.signal || null,
+      error_code: errorCode,
+      timed_out: errorCode === "ETIMEDOUT",
+      stdout,
+      stderr,
+    };
     if (result?.error) {
-      return { ok: false, status: null, output: redactExactValues(`${result.error.message || result.error}\n${output}`, secrets).trim() };
+      return { ok: false, ...details, output: redactExactValues(`${result.error.message || result.error}\n${output}`, secrets).trim() };
     }
-    return { ok: result?.status === 0, status: result?.status ?? null, output: output.trim() };
+    return { ok: result?.status === 0, ...details, output: output.trim() };
   } catch (error) {
-    return { ok: false, status: null, output: redactExactValues(error?.message || error, secrets) };
+    return { ok: false, status: null, signal: null, error_code: error?.code || null,
+      timed_out: error?.code === "ETIMEDOUT", stdout: "", stderr: "",
+      output: redactExactValues(error?.message || error, secrets) };
   } finally {
     for (const destination of linked) {
       try { fs.unlinkSync(destination); } catch { /* best effort */ }

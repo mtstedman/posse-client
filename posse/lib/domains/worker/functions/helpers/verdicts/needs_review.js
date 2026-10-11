@@ -32,6 +32,40 @@ function operatorDispositionReviewQuestion(verdict) {
   return "Automatic assessment could not establish sufficient confidence. Should this work pass or fail?";
 }
 
+function gateVerificationEvidence(reviewEvidence) {
+  const post = reviewEvidence?.post_change;
+  const scoped = reviewEvidence?.scoped_checks;
+  const receipts = {};
+  const summary = [];
+  if (post) {
+    receipts.post_change = {
+      artifact_id: post.artifact_id || null,
+      assessed_commit_hash: post.assessed_commit_hash || post.commit_hash || null,
+      status: post.status || "unknown",
+      coverage_status: post.coverage_status || "unknown",
+      checks: Array.isArray(post.check_runs) ? post.check_runs.slice(0, 20).map((check) => ({
+        check_id: check.check_id || null,
+        status: check.status || "unknown",
+        coverage_status: check.coverage_status || "unknown",
+      })) : [],
+    };
+    summary.push(`Post-change tests: ${receipts.post_change.status}; coverage ${receipts.post_change.coverage_status}${post.artifact_id ? `; receipt #${post.artifact_id}` : ""}.`);
+  }
+  if (scoped?.result) {
+    receipts.scoped_checks = {
+      artifact_id: scoped.artifact_id || null,
+      assessed_commit_hash: scoped.result.assessed_commit_hash || null,
+      status: scoped.result.status || "unknown",
+      checks: Array.isArray(scoped.result.checks) ? scoped.result.checks.slice(0, 20).map((check) => ({
+        name: check.name || null,
+        status: check.status || "unknown",
+      })) : [],
+    };
+    summary.push(`Scoped checks: ${receipts.scoped_checks.status}${scoped.artifact_id ? `; receipt #${scoped.artifact_id}` : ""}.`);
+  }
+  return { receipts, summary };
+}
+
 export function handle(job, verdict, ctx) {
   const { emitLog: log, spawnedJobs, spawnFromAssessor, reasonBrief } = ctx;
 
@@ -110,6 +144,7 @@ export function handle(job, verdict, ctx) {
   const questions = explicitHumanQuestions.length > 0 && !repeatsAnsweredClarification
     ? explicitHumanQuestions
     : [operatorDispositionReviewQuestion(verdict)];
+  const verificationEvidence = gateVerificationEvidence(ctx.reviewEvidence);
   const humanJob = spawnFromAssessor("failed", "human_input", {
     work_item_id: job.work_item_id,
     title: `Review needed: ${job.title}`,
@@ -119,7 +154,10 @@ export function handle(job, verdict, ctx) {
     payload_json: JSON.stringify({
       original_job_id: job.id,
       questions,
-      context: verdict.reasons,
+      context: [...verdict.reasons, ...verificationEvidence.summary].join("\n"),
+      ...(Object.keys(verificationEvidence.receipts).length > 0
+        ? { verification_evidence: verificationEvidence.receipts }
+        : {}),
       ...(assessmentReview
         ? {
             review_type: "needs_review",

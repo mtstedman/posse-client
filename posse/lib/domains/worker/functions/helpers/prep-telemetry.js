@@ -73,6 +73,7 @@ export function startPrepTrace({
     actorId,
     leaseAcquiredAtMs,
     startedAtMs: nowMs(),
+    startedAtWallMs: Date.now(),
     phases: [],
     onPhase,
   };
@@ -120,8 +121,8 @@ export function finalizePrepTrace(ctx = {}, extra = {}) {
   const phases = Array.isArray(ctx.phases) ? ctx.phases : [];
   const summary = {
     prep_total_ms: total,
-    lease_to_setup_ms: Number.isFinite(Number(ctx.leaseAcquiredAtMs))
-      ? Math.max(0, Math.round((Date.now() - Number(ctx.leaseAcquiredAtMs)) * 1000) / 1000)
+    lease_to_setup_ms: Number.isFinite(Number(ctx.leaseAcquiredAtMs)) && Number(ctx.leaseAcquiredAtMs) > 0
+      ? Math.max(0, Math.round((Number(ctx.startedAtWallMs) - Number(ctx.leaseAcquiredAtMs)) * 1000) / 1000)
       : null,
     phases,
     ...extra,

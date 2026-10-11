@@ -136,6 +136,11 @@ export function materializeHashRefView(text, args = {}) {
         limit,
         returned_chars: selectedText.length,
         match_count: rows.length,
+        ...(rows.length === 0 ? {
+          no_match_hint: searchError
+            ? "The search expression is invalid; use a literal search or correct the regex."
+            : "No matches in this stored view. Try a shorter literal term or inspect another evidence ref.",
+        } : {}),
         truncated_match_rows: truncatedMatchRows,
         next_offset: rowOffset + selectedRowCount < rows.length ? rowOffset + selectedRowCount : null,
         has_more: rowOffset + selectedRowCount < rows.length,

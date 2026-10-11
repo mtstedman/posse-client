@@ -315,6 +315,9 @@ export function runCostCommand(args = []) {
       : "";
     const diagnosticSummary = formatCostDiagnostics(totals);
     console.log(`  ${C.dim}Status:${C.reset} ${wi.status}  ${C.dim}Calls:${C.reset} ${totals.callCount}  ${C.dim}Tokens:${C.reset} ${tokenSummary}${billableSummary}  ${C.dim}Total:${C.reset} ${C.bold}${formatUsd(totals.totalCostUsd)}${C.reset}`);
+    if (totals.fallbackPricedCalls > 0) {
+      console.log(`  ${C.dim}Fallback-priced:${C.reset} ${formatUsd(totals.fallbackPricedUsd)} across ${totals.fallbackPricedCalls} call(s)`);
+    }
     if (diagnosticSummary) {
       console.log(`  ${C.dim}${diagnosticSummary}${C.reset}`);
     }
@@ -358,6 +361,9 @@ export function runCostCommand(args = []) {
     ? `, ${formatCostTokens(summary.billableTokens)} billable total`
     : "";
   console.log(`\n  ${C.bold}Top Work Items by Cost${C.reset}  ${C.dim}(grand total: ${formatUsd(summary.totalCostUsd)}${billableSummary}${summary.truncated ? "; more below the cutoff" : ""})${C.reset}\n`);
+  if (summary.fallbackPricedCalls > 0) {
+    console.log(`  ${C.dim}Fallback-priced subtotal:${C.reset} ${formatUsd(summary.fallbackPricedUsd)} across ${summary.fallbackPricedCalls} call(s)\n`);
+  }
   for (const row of summary.workItems) {
     const wi = getWorkItem(row.wiId);
     const title = wi ? wi.title.slice(0, 60) : "(missing)";

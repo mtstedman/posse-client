@@ -15,6 +15,23 @@ function isObject(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+export function projectLocalToolDefinition(tool) {
+  if (tool?.name !== "edit_file") return tool;
+  const parameters = isObject(tool.parameters) ? tool.parameters : {};
+  const { edits: _edits, ...properties } = isObject(parameters.properties) ? parameters.properties : {};
+  return {
+    ...tool,
+    description: "Edit one allowed file with one exact, line, pattern, insertion, append, JSON, or executable mode.",
+    parameters: {
+      ...parameters,
+      properties,
+      oneOf: Array.isArray(parameters.oneOf)
+        ? parameters.oneOf.filter((branch) => !(Array.isArray(branch.required) && branch.required.includes("edits")))
+        : parameters.oneOf,
+    },
+  };
+}
+
 function uniqueSchemas(schemas) {
   const seen = new Set();
   return schemas.filter((schema) => {
@@ -95,6 +112,7 @@ function projectOpenAiCompatibleSchema(value, { root = false } = {}) {
 export function projectProviderToolDefinition(definition = {}, providerName = "generic") {
   const projected = projectAgentToolDefinition(definition);
   const provider = String(providerName || "").trim().toLowerCase();
+  if (provider === "posse-local") return projectLocalToolDefinition(projected);
   if (!OPENAI_COMPATIBLE_SCHEMA_PROVIDERS.has(provider)) return projected;
   const result = { ...projected };
   for (const key of ["parameters", "inputSchema", "input_schema"]) {

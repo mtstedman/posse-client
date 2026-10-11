@@ -43,6 +43,8 @@ export async function codeStructure({ view, versionId, params = {}, repoRoot }) 
     maxFiles,
   }));
   const paths = Array.isArray(selection.paths) ? selection.paths : [];
+  const unindexedPaths = requested.filter((requestedPath) => !indexedPaths.some((indexedPath) =>
+    indexedPath === requestedPath || indexedPath.startsWith(`${requestedPath}/`)));
   const files = [];
   for (const repoPath of paths) {
     files.push({ path: repoPath, symbols: await view.query.symbolsInFile(repoPath) });
@@ -88,6 +90,7 @@ export async function codeStructure({ view, versionId, params = {}, repoRoot }) 
   data.warnings = warnings;
   if (pathAmbiguity) data.pathAmbiguity = pathAmbiguity;
   if (negativeEvidence) data.negativeEvidence = negativeEvidence;
+  if (unindexedPaths.length > 0) data.unindexedPaths = unindexedPaths;
 
   return okEnvelope({ action, versionId, data });
 }

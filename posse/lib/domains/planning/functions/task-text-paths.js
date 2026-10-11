@@ -6,7 +6,7 @@
 // consumer/install paths and other files under the old root stay untouched.
 
 import path from "path";
-import { normalizeArtifactCreateFiles } from "../../artifacts/functions/index.js";
+import { getResourcesDir, normalizeArtifactCreateFiles } from "../../artifacts/functions/index.js";
 
 function toPosix(value) {
   return String(value || "").replace(/\\/g, "/").replace(/\/+$/, "");
@@ -33,14 +33,15 @@ export function movedOutputPathReplacements({ projectDir = null, filesToCreate =
   const newRoot = toPosix(toRoot);
   if (!oldRoot || !newRoot || oldRoot === newRoot || !Array.isArray(filesToCreate)) return [];
   const pairs = new Map();
+  const normalizationContext = { projectDir, resourcesDir: getResourcesDir(projectDir) };
   const add = (from, to) => {
     if (!from || !to || from === to || pairs.has(from)) return;
     pairs.set(from, to);
   };
   for (const raw of filesToCreate) {
     if (typeof raw !== "string" || !raw.trim()) continue;
-    const before = normalizeArtifactCreateFiles([raw], oldRoot)[0];
-    const after = normalizeArtifactCreateFiles([raw], newRoot)[0];
+    const before = normalizeArtifactCreateFiles([raw], oldRoot, normalizationContext)[0];
+    const after = normalizeArtifactCreateFiles([raw], newRoot, normalizationContext)[0];
     if (!before || !after || before === after) continue;
     add(before, after);
     add(projectRelative(projectDir, before), projectRelative(projectDir, after));

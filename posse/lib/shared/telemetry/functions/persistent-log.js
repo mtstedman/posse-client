@@ -4,22 +4,11 @@ import { isMainThread, threadId } from "node:worker_threads";
 
 import { getRuntimeLogDir, safeProcessCwd } from "../../../domains/runtime/functions/paths.js";
 import { getRunTelemetryId } from "./run-telemetry.js";
+import { safeTelemetryStringify as safeStringify } from "./safe-json.js";
 
 const MAX_PERSISTENT_LOG_BYTES = 50 * 1024 * 1024;
 const MAX_PERSISTENT_LOG_ROTATIONS = 2;
 const _ensuredDirs = new Set();
-
-function safeStringify(value) {
-  const seen = new WeakSet();
-  return JSON.stringify(value, (_key, val) => {
-    if (typeof val === "bigint") return val.toString();
-    if (val && typeof val === "object") {
-      if (seen.has(val)) return "[Circular]";
-      seen.add(val);
-    }
-    return val;
-  });
-}
 
 function streamFileName(stream) {
   return `${String(stream || "persistent").replace(/[^A-Za-z0-9_.-]/g, "_")}.jsonl`;

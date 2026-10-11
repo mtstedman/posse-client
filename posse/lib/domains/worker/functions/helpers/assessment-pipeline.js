@@ -1,4 +1,5 @@
 import { authoritativeFinalReview, latestFinalReview } from "../../../assessment/functions/final-review-authority.js";
+import { reserveFinalReviewContinuation } from "../../../assessment/functions/final-review-continuation.js";
 // lib/domains/worker/functions/helpers/assessment-pipeline.js
 //
 // Post-execution assessment pipeline extracted from worker.js.
@@ -83,7 +84,9 @@ import {
   waitForAtlasWarmJobCompletion,
 } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
+import { runImmediateTransaction } from "../../../queue/functions/common.js";
 import { ensureRegisteredTestTables, runRegisteredTest } from "../../../../shared/tools/functions/toolkit/registered-tests.js";
 import {
   persistPendingAssessmentFileRequests,
@@ -128,7 +131,7 @@ import {
   renderConfiguredVerificationEvidence,
 } from "./configured-verification.js";
 import { repairTestDependencies } from "./test-dependency-repair.js";
-import { isVerificationInfrastructureOutcome } from "./verification-outcome.js";
+import { isVerificationInfrastructureOutcome, verificationInfrastructureError } from "./verification-outcome.js";
 
 export { capVerdictForDeterministicTestRegression } from "./verdict-shared.js";
 export {
@@ -216,6 +219,9 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
   pendingFileRequests = null,
   readyAt = null,
 } = {}) {
+  // A delayed provider or runner result must not rewrite recovery state after
+  // cancellation or another worker has taken ownership of this job.
+  if (!isLeaseValid(job.id, leaseToken)) return { gated: false, infrastructureFailure: true, leaseLost: true };
   const message = String(error?.message || error || "Assessment unavailable");
   markAssessmentRetryAssessOnly(job, pendingFileRequests);
   const fresh = getJob(job.id) || job;
@@ -224,27 +230,58 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
   const gateImmediately = error?.assessmentGateImmediately === true;
   if (count >= max || gateImmediately) {
     const terminalProtocolFailure = isRetryableTerminalHandoffError(error);
-    setAssessmentLifecycle(job.id, "assessment_failed", { error: message, completed: true });
-    setJobError(job.id, `Assessment infrastructure exhausted after ${count}/${max} attempts: ${message}`);
+    const diagnostic = `Assessment infrastructure exhausted after ${count}/${max} attempts: ${message}`;
+    const gated = runImmediateTransaction(getDb(), () => {
+      if (!worker._releaseLease(job, leaseToken, "waiting_on_human")) return false;
+      const recoveryPayload = parseJobPayload(job);
+      recoveryPayload._verification_blocked = {
+        schema_version: 1,
+        type: "verification_blocked",
+        diagnostic,
+        rerun_command: String(error?.rerun_command || "").trim() || null,
+        verification_outcome: error?.verification_outcome || null,
+      };
+      updateJobPayload(job.id, JSON.stringify(recoveryPayload));
+      setAssessmentLifecycle(job.id, "assessment_needs_human", { error: diagnostic });
+      setJobError(job.id, diagnostic);
+      createJob({
+        work_item_id: job.work_item_id,
+        job_type: "human_input",
+        title: `Verification blocked: ${job.title.slice(0, 80)}`,
+        parent_job_id: job.id,
+        priority: "high",
+        payload_json: JSON.stringify({
+          original_job_id: job.id,
+          review_type: "blocked_recovery",
+          question_kind: "blocked_recovery",
+          choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
+          verification_failure_class: "assessment_infrastructure",
+          questions: [`Assessment for job #${job.id} could not finish. Restore the runner or provider, then choose retry; or choose replan, explicit_waiver, or fail.`],
+          context: [diagnostic, error?.rerun_command ? `Command: ${error.rerun_command}` : null]
+            .filter(Boolean).join("\n").slice(0, 2000),
+        }),
+      });
+      return true;
+    });
+    if (!gated) return { gated: false, infrastructureFailure: true, leaseLost: true };
     logEvent({
       work_item_id: job.work_item_id,
       job_id: job.id,
       event_type: EVENT_TYPES.JOB_ASSESSMENT_INFRASTRUCTURE_EXHAUSTED,
       actor_type: EVENT_ACTORS.WORKER,
-      message: `Assessment infrastructure exhausted after ${count}/${max} attempts; failed closed without interrupting the operator`,
+      message: `Assessment infrastructure exhausted after ${count}/${max} attempts; preserved the job for operator recovery`,
       event_json: JSON.stringify({
         attempts: count,
         max_attempts: max,
         terminal_protocol_failure: terminalProtocolFailure,
         error: message.slice(0, 2000),
-        operator_actionable: false,
+        operator_actionable: true,
         gated_immediately: gateImmediately,
       }),
     });
-    worker.emit(job.id, `${C.red}[assessor] Assessment infrastructure exhausted; failed closed without a human gate${C.reset}`);
-    worker._releaseLease(job, leaseToken, "failed");
+    worker.emit(job.id, `${C.yellow}[assessor] Assessment infrastructure exhausted; job preserved for recovery${C.reset}`);
     return {
-      gated: false,
+      gated: true,
       infrastructureFailure: true,
       terminalProtocolFailure,
     };
@@ -845,6 +882,7 @@ function _buildRemoteAssessmentInstructions({
   verificationCapabilityBlock = "",
   atlasBlock = "",
   priorAssessmentFindings = "",
+  historicalFinalReview = "",
   fallbackReads = null,
   researchRefsBlock = null,
 } = {}) {
@@ -855,6 +893,7 @@ function _buildRemoteAssessmentInstructions({
     researchRefsBlock || null,
     `If the bounded role result marks VERIFICATION_UNAVAILABLE, keep the completion status tied to product work. Treat the unavailable method as NOT_APPLICABLE when attached evidence or one obvious equivalent invocation establishes the criterion; it is not, by itself, a reason to block.`,
     atlasBlock || null,
+    historicalFinalReview || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
     _buildAssessmentBoundaryBlock(job),
     ``,
@@ -1400,6 +1439,29 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     }
     return finalReview;
   }
+  const continuation = await reserveFinalReviewContinuation(job, parseJobPayload(job), cwd);
+  if (["exhausted", "candidate_changed", "canceled", "identity_unavailable"].includes(continuation.status)) {
+    const reason = continuation.status === "exhausted"
+      ? `Final-review verification continuation budget exhausted (${continuation.count}/${continuation.ceiling}) for this work item. The repaired candidate still needs a current review.`
+      : continuation.status === "candidate_changed"
+        ? "The candidate changed after its verification continuation was reserved; review the current candidate in a new bounded attempt."
+        : continuation.status === "canceled"
+          ? "The job was canceled before its verification continuation could run."
+          : "The repaired candidate could not be bound to a workspace identity for verification continuation.";
+    return { verdict: "needs_review", confidence: "none", reasons: [reason],
+      spawn_jobs: [], human_questions: [], _disable_internal_retry: true,
+      _assessment_infrastructure_review: true, _verification_blocked: true };
+  }
+  const previousFinalReview = latestFinalReview(job.id);
+  const historicalFinalReview = previousFinalReview?.review_identity
+    ? ["PREVIOUS FINAL REVIEW (historical evidence for an earlier candidate; inspect and verify the current change):",
+      ...(["reserved", "reused"].includes(continuation.status)
+        ? [`Verification continuation ${continuation.count}/${continuation.ceiling}; verify the current candidate before approving it.`] : []),
+      `Outcome: ${previousFinalReview.outcome || "unknown"}`,
+      ...(previousFinalReview.findings || []).map((finding) =>
+        `- ${[finding.criterion, ...(finding.paths || [])].filter(Boolean).join(" — ")}`),
+    ].join("\n")
+    : "";
 
   const assessorProvider = String(
     routedProviderName
@@ -1715,6 +1777,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     workflowModeBlock,
     verificationCapabilityBlock,
     atlasBlock || null,
+    historicalFinalReview || null,
     priorAssessmentFindings ? `PRIOR ASSESSMENT FINDINGS (build on these; do not re-request the same evidence unless necessary):\n${priorAssessmentFindings}` : null,
     _buildAssessmentBoundaryBlock(job),
     ``,
@@ -1744,6 +1807,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     verificationCapabilityBlock,
     atlasBlock,
     priorAssessmentFindings,
+    historicalFinalReview,
     fallbackReads: effectiveFallbackReads,
     researchRefsBlock: workItemResearchRefsBlock({ workItemId: job?.work_item_id, jobId: job?.id, packet: assessorPacket, projectDir }),
   });
@@ -2882,7 +2946,8 @@ export async function runPostExecutionAssessment(worker, {
           error_text: testInfraMsg,
         });
         setJobError(job.id, testInfraMsg);
-        routeAssessmentInfrastructureFailure(worker, job, leaseToken, new Error(testInfraMsg), {
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken,
+          verificationInfrastructureError(postReceipt, "Deterministic post-change test execution unavailable"), {
           pendingFileRequests,
         });
         return;
@@ -3406,7 +3471,16 @@ export async function runPostExecutionAssessment(worker, {
       }
 
       const emitFn = (msg) => worker.emit(job.id, msg);
-      const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
+      const { action, effectiveVerdict } = processVerdict(job, verdict, {
+        emit: emitFn,
+        autoApprove: worker.autoApprove,
+        leaseToken,
+        assessedCommitHash,
+        reviewEvidence: {
+          post_change: deterministicTestRun?.post_change || null,
+          scoped_checks: scopedCheckReceipt || null,
+        },
+      });
       log.info("assessor", `Verdict: ${effectiveVerdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: effectiveVerdict.verdict, confidence: effectiveVerdict.confidence, reasons: effectiveVerdict.reasons?.slice(0, 3) });
       jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"})${effectiveVerdict.reasons?.length ? ` — ${effectiveVerdict.reasons[0].slice(0, 100)}` : ""}` });
 

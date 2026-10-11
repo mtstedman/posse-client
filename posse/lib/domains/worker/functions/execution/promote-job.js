@@ -137,6 +137,67 @@ function isImageArtifactName(name) {
   return IMAGE_ARTIFACT_EXTENSIONS.has(path.posix.extname(String(name || "")).toLowerCase());
 }
 
+function listSourceFiles(sourceDir) {
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile()) files.push({
+        name: entry.name,
+        full,
+        relative: path.relative(sourceDir, full).replace(/\\/g, "/"),
+      });
+    }
+  };
+  walk(sourceDir);
+  return files;
+}
+
+/** Resolve duplicate basenames before copying to a single destination. */
+export function selectPromoteSourceFiles(files, { sourceDir, namedFiles = [], onPick = () => {} } = {}) {
+  const declared = Array.isArray(namedFiles) ? namedFiles : [];
+  const isDeclared = (file) => declared.some((raw) => {
+    const normalized = String(raw || "").replace(/\\/g, "/");
+    return normalized === file.relative || normalized === file.full.replace(/\\/g, "/")
+      || normalized.endsWith(`/${file.relative}`);
+  });
+  const byName = new Map();
+  for (const file of files) {
+    if (!byName.has(file.name)) byName.set(file.name, []);
+    byName.get(file.name).push(file);
+  }
+  const selected = [];
+  for (const [name, matches] of byName) {
+    if (matches.length === 1) {
+      selected.push(matches[0]);
+      continue;
+    }
+    const byContent = new Map();
+    for (const file of matches) {
+      const sha = createHash("sha256").update(fs.readFileSync(file.full)).digest("hex");
+      if (!byContent.has(sha)) byContent.set(sha, []);
+      byContent.get(sha).push(file);
+    }
+    const candidates = [...byContent.values()].map((copies) => (
+      copies.find(isDeclared) || copies.find((file) => file.relative === name) || copies[0]
+    ));
+    let pick = candidates.length === 1 ? candidates[0] : null;
+    if (!pick) {
+      const named = candidates.filter(isDeclared);
+      if (named.length === 1) pick = named[0];
+    }
+    if (!pick) {
+      const topLevel = candidates.filter((file) => file.relative === name);
+      if (topLevel.length === 1) pick = topLevel[0];
+    }
+    if (!pick) throw new Error(`Promote source "${name}" is ambiguous in ${sourceDir}: ${matches.map((file) => file.relative).join(", ")}`);
+    onPick({ name, selected: pick.relative, alternatives: matches.map((file) => file.relative) });
+    selected.push(pick);
+  }
+  return selected;
+}
+
 // The artificer that produced this promote's source directory, when one
 // sibling in the WI wrote there and named the missing files in its brief;
 // its task and criteria give the repair the deck's style and constraints.
@@ -207,7 +268,8 @@ function spawnMissingImageRepair(worker, job, payload, { sourceDir, missingMappi
   const missingNames = missingMappings.map((mapping) => mapping.pattern);
   const source = findSourceArtificer(job, sourceDir, missingNames);
   const outputRoot = path.relative(worker.projectDir, sourceDir).replace(/\\/g, "/");
-  const existing = fs.readdirSync(sourceDir).filter((name) => isImageArtifactName(name)).sort();
+  const existing = listSourceFiles(sourceDir).filter((file) => isImageArtifactName(file.name))
+    .map((file) => file.relative);
   const fixInstructions = [
     `Generate exactly these missing image files into the output root, with these exact filenames: ${missingNames.join(", ")}.`,
     `The other files of this set already exist in the output root (${existing.length} file(s)${existing.length > 0 ? `: ${existing.slice(0, 12).join(", ")}${existing.length > 12 ? ", …" : ""}` : ""}); match their style, dimensions and border, and do not regenerate or modify them.`,
@@ -363,16 +425,8 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
           deferredWildcard = true;
         }
       }
-      const sourceFiles = [];
-      const walk = (dir) => {
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-          if (entry.isDirectory()) walk(path.join(dir, entry.name));
-          else if (entry.isFile() && matchFile(entry.name) && !(wildcard && pendingRepairs.has(entry.name))) {
-            sourceFiles.push({ name: entry.name, full: path.join(dir, entry.name) });
-          }
-        }
-      };
-      walk(sourceDir);
+      const sourceFiles = listSourceFiles(sourceDir)
+        .filter((file) => matchFile(file.name) && !(wildcard && pendingRepairs.has(file.name)));
 
       if (sourceFiles.length === 0) {
         if (deferredWildcard) continue;
@@ -392,11 +446,17 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
         });
         throw new Error(`No files matching "${pattern}" in ${sourceDir}`);
       }
-      if (explicitFileDest && sourceFiles.length > 1) {
-        throw new Error(`Promote mapping "${pattern}" matched ${sourceFiles.length} files but destination is a single file: ${resolvedDest}`);
+      const sourceArtificer = findSourceArtificer(job, sourceDir, [pattern]);
+      const selectedFiles = selectPromoteSourceFiles(sourceFiles, {
+        sourceDir,
+        namedFiles: sourceArtificer?.payload?.files_to_create || [],
+        onPick: (pick) => worker.emit(job.id, `${C.yellow}[promote]${C.reset} selected ${pick.selected} for ${pick.name}; alternatives: ${pick.alternatives.join(", ")}`),
+      });
+      if (explicitFileDest && selectedFiles.length > 1) {
+        throw new Error(`Promote mapping "${pattern}" matched ${selectedFiles.length} files but destination is a single file: ${resolvedDest}`);
       }
 
-      for (const { name, full } of sourceFiles) {
+      for (const { name, full } of selectedFiles) {
         worker._throwIfKilled(job.id);
         const dst = explicitFileDest ? destAbs : path.join(destAbs, name);
         plannedCopies.push({

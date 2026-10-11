@@ -474,6 +474,7 @@ export function agentCallsCreateSql(tableName = "agent_calls") {
           cached_input_tokens INTEGER,
           cache_creation_input_tokens INTEGER,
           max_turns_configured INTEGER,
+          turn_limit_mode TEXT,
           turns_used INTEGER,
           max_output_tokens_configured INTEGER,
           output_truncated INTEGER NOT NULL DEFAULT 0 CHECK (output_truncated IN (0,1)),
@@ -1678,6 +1679,8 @@ export function getDb() {
   //                                       accounting; tokens are the stream's
   //                                       per-message lower bound (precision
   //                                       incomplete, no cost estimate)
+  //   'measured_lower_bound'            — every observed segment is exact, but
+  //                                       terminal stop may have hidden later usage
   //   'unavailable'                     — provider reported no usage
   //   NULL                              — legacy rows / failed calls
   const hasAgentCallUsageStatus = _db.prepare(
@@ -1686,8 +1689,12 @@ export function getDb() {
   if (hasAgentCallUsageStatus.cnt === 0) {
     _db.exec(`ALTER TABLE agent_calls ADD COLUMN provider_usage_status TEXT`);
   }
+  if (_db.prepare(`SELECT COUNT(*) AS cnt FROM pragma_table_info('agent_calls') WHERE name='turn_limit_mode'`).get().cnt === 0) {
+    _db.exec(`ALTER TABLE agent_calls ADD COLUMN turn_limit_mode TEXT`);
+  }
   for (const [column, sqlType] of [
     ["billing_precision", "TEXT"],
+    ["pricing_basis", "TEXT"],
     ["exact_billable_input_tokens", "REAL"],
     ["long_context_tier_input_tokens", "INTEGER"],
     ["provider_request_duration_ms", "INTEGER"],
@@ -1710,6 +1717,8 @@ export function getDb() {
       input_tokens INTEGER NOT NULL DEFAULT 0,
       cached_input_tokens INTEGER NOT NULL DEFAULT 0,
       cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_creation_5m_input_tokens INTEGER,
+      cache_creation_1h_input_tokens INTEGER,
       output_tokens INTEGER NOT NULL DEFAULT 0,
       request_context_input_tokens INTEGER NOT NULL DEFAULT 0,
       duration_ms INTEGER,
@@ -1754,6 +1763,11 @@ export function getDb() {
       FOREIGN KEY (coverage_observation_id) REFERENCES job_observations(id) ON DELETE SET NULL
     );
   `);
+  for (const column of ["cache_creation_5m_input_tokens", "cache_creation_1h_input_tokens"]) {
+    if (_db.prepare("SELECT COUNT(*) AS cnt FROM pragma_table_info('provider_usage_segments') WHERE name = ?").get(column).cnt === 0) {
+      _db.exec(`ALTER TABLE provider_usage_segments ADD COLUMN ${column} INTEGER`);
+    }
+  }
 
   const hasAgentCallCachedInputTokens = _db.prepare(
     `SELECT COUNT(*) as cnt FROM pragma_table_info('agent_calls') WHERE name='cached_input_tokens'`
@@ -1850,6 +1864,43 @@ export function getDb() {
   _db.exec(`
     CREATE INDEX IF NOT EXISTS idx_job_observations_attempt_type
       ON job_observations(attempt_id, observation_type, id);
+  `);
+  // Final-review authority must survive observation-tail pruning. Backfill
+  // existing review events once; subsequent writes mirror transactionally.
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS final_review_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      observation_id INTEGER UNIQUE,
+      job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      attempt_id INTEGER REFERENCES job_attempts(id) ON DELETE SET NULL,
+      agent_call_id INTEGER NOT NULL,
+      observation_type TEXT NOT NULL CHECK (observation_type IN ('final_review.issued', 'final_review.result')),
+      detail_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_final_review_records_job ON final_review_records(job_id, id);
+    CREATE INDEX IF NOT EXISTS idx_final_review_records_attempt ON final_review_records(attempt_id, id);
+    CREATE TABLE IF NOT EXISTS final_review_continuations (
+      work_item_id INTEGER NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+      job_id INTEGER NOT NULL,
+      attempt_id INTEGER NOT NULL,
+      candidate_identity TEXT NOT NULL,
+      source_review_identity TEXT NOT NULL,
+      checkpoint_json TEXT NOT NULL CHECK (json_valid(checkpoint_json)),
+      reserved_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      PRIMARY KEY (job_id, attempt_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_final_review_continuations_work_item
+      ON final_review_continuations(work_item_id, reserved_at);
+    INSERT OR IGNORE INTO final_review_records
+      (observation_id, job_id, attempt_id, agent_call_id, observation_type, detail_json, created_at)
+    SELECT id, job_id, attempt_id, CAST(json_extract(detail_json, '$.agent_call_id') AS INTEGER),
+      observation_type, detail_json, created_at
+    FROM job_observations
+    WHERE job_id IS NOT NULL
+      AND observation_type IN ('final_review.issued', 'final_review.result')
+      AND json_valid(detail_json)
+      AND CAST(json_extract(detail_json, '$.agent_call_id') AS INTEGER) > 0;
   `);
 
   // ── Migration: add 'delegator' to job_attempts worker_type CHECK ────────
@@ -2793,6 +2844,22 @@ export function getDb() {
   installJsonValidityTriggers(_db);
   installTerminalTransitionTracking(_db);
   installEventState(_db);
+
+  // Export claims are unversioned additions so mixed-version fleet readers
+  // keep their supported schema version. Legacy rows predate this protocol;
+  // mark them mirrored once, before new pending rows can be inserted.
+  _db.transaction(() => {
+    for (const table of ["events", "job_observations"]) {
+      const columns = new Set(_db.pragma(`table_info(${table})`).map((column) => column.name));
+      const legacy = !columns.has("export_state");
+      if (legacy) _db.exec(`ALTER TABLE ${table} ADD COLUMN export_state TEXT NOT NULL DEFAULT 'pending'`);
+      if (!columns.has("export_claim_token")) _db.exec(`ALTER TABLE ${table} ADD COLUMN export_claim_token TEXT`);
+      if (!columns.has("export_claimed_at")) _db.exec(`ALTER TABLE ${table} ADD COLUMN export_claimed_at TEXT`);
+      if (!columns.has("export_run_id")) _db.exec(`ALTER TABLE ${table} ADD COLUMN export_run_id TEXT`);
+      if (legacy) _db.exec(`UPDATE ${table} SET export_state = 'mirrored'`);
+      _db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_export ON ${table}(export_state, id)`);
+    }
+  }).immediate();
 
   _dbReady = true;
   return _db;

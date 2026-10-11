@@ -153,7 +153,7 @@ function cachedReceipt(jobId, key) {
   });
   if (!artifact) return null;
   const metadata = artifactJson(artifact);
-  return { result: withVerificationOutcome(metadata.result) };
+  return { result: withVerificationOutcome(metadata.result), artifact_id: artifact.id };
 }
 
 // Failure identity that survives the line shifts an edit introduces: check,
@@ -432,6 +432,7 @@ export async function ensureAssessmentScopedCheckEvidence({
 
   let result;
   let reused = false;
+  let artifactId = null;
   let persistReceipt = false;
   if (!commitCoverage.eligible) {
     result = unavailableResult({
@@ -456,6 +457,7 @@ export async function ensureAssessmentScopedCheckEvidence({
     const cached = cachedReceipt(job.id, key);
     if (cached) {
       result = cached.result;
+      artifactId = cached.artifact_id;
       reused = true;
     } else {
       const runOnce = () => runScopedChecksImpl({
@@ -609,7 +611,7 @@ export async function ensureAssessmentScopedCheckEvidence({
   const evidence = renderAssessmentScopedCheckEvidence(result, { omittedFileCount, reused });
   if (!reused) {
     if (persistReceipt) {
-      storeArtifact({
+      const artifact = storeArtifact({
         work_item_id: job.work_item_id,
         job_id: job.id,
         artifact_type: "log",
@@ -623,6 +625,7 @@ export async function ensureAssessmentScopedCheckEvidence({
           result,
         },
       });
+      artifactId = artifact.id;
     }
     recordObservation({
       work_item_id: job.work_item_id,
@@ -640,5 +643,5 @@ export async function ensureAssessmentScopedCheckEvidence({
       },
     });
   }
-  return { result, evidence, reused };
+  return { result, evidence, reused, artifact_id: artifactId };
 }

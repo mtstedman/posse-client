@@ -7,12 +7,16 @@ import os from "os";
 import path from "path";
 import {
   finalizeApprovedWorkItemMerge,
+  getSetting,
   getWorkItem,
   getWorkItemMergeDependencies,
   listJobsByWorkItem,
   listWorkItems,
   listCrossWiMergeBlockers,
   logEvent,
+  mergeVerificationDebtWaiver,
+  mergeVerificationDebtWaiverCovers,
+  mergeVerificationReviewGateState,
   updateWorkItemMetadata,
 } from "../../queue/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
@@ -50,7 +54,12 @@ import {
 } from "./merge-closeout.js";
 import { conflictFilesFromMergeError, parkedMergeGuidance } from "./merge-park-guidance.js";
 import { runRegisteredTestsForMergeCandidate } from "../../../shared/tools/functions/toolkit/registered-tests.js";
-import { runDeclaredMergeCandidateChecks } from "./merge-candidate-checks.js";
+import { runRegisteredTest } from "../../../shared/tools/functions/toolkit/registered-tests.js";
+import { runDeclaredMergeCandidateChecks, withTemporaryMergeCandidateCheckout } from "./merge-candidate-checks.js";
+import { classifyMergeTargetDebt } from "./merge-target-debt.js";
+import { MERGE_GATE_WALL_BUDGET_MS } from "../../../catalog/verification.js";
+import { SETTING_KEYS } from "../../../catalog/settings.js";
+import { getDb } from "../../../shared/storage/functions/index.js";
 import { postChangeReceiptsAtCommit } from "../../queue/functions/verification-receipts.js";
 import { mergeToSharedTrunkAsync } from "./shared-trunk.js";
 import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
@@ -1279,26 +1288,123 @@ export function createMergeWorkflowHelpers(context, {
 
       const runProjectedCandidateGate = (stagedFiles) => {
         mergeStep = "integration_gate";
-        let candidateTests = runRegisteredTestsForMergeCandidate({
-          cwd,
-          workItemId: wiId,
-          scopeFiles: stagedFiles,
-          actor: {
-            role: "assessor_handoff",
+        const gateDeadlineMs = Date.now() + MERGE_GATE_WALL_BUDGET_MS;
+        let candidateTests = withTemporaryMergeCandidateCheckout({ cwd, git: gitMergeExec }, (candidate) => {
+          let tests = runRegisteredTestsForMergeCandidate({
+            cwd: candidate.checkout,
             workItemId: wiId,
-          },
+            scopeFiles: stagedFiles,
+            beforeEachTest: candidate.reset,
+            deadlineMs: gateDeadlineMs,
+            actor: {
+              role: "assessor_handoff",
+              workItemId: wiId,
+            },
+          });
+          if (tests.matched === 0 && wiId != null) {
+            tests = runDeclaredMergeCandidateChecks({ cwd, jobs: listJobsByWorkItem(wiId), git: gitMergeExec, candidate,
+              deadlineMs: gateDeadlineMs }) || tests;
+          }
+          if (!tests.ok && wiId != null) {
+            const workItem = getWorkItem(wiId);
+            const runCurrent = (initial, timeoutMs) => {
+              if (tests.source === "job_test_command") {
+                const one = runDeclaredMergeCandidateChecks({
+                  cwd, git: gitMergeExec,
+                  jobs: [{ status: "succeeded", job_type: "dev", payload_json: JSON.stringify({ test_command: initial.test.name }) }],
+                  candidate: { ...candidate, reset: () => {} },
+                  run: (command, options) => runCloseoutTestCommandSync(command, { ...options, timeoutMs }),
+                });
+                return one?.results[0] || null;
+              }
+              const result = runRegisteredTest({
+                args: { test_id: initial.test.id, timeout_ms: timeoutMs },
+                cwd: candidate.checkout,
+                scopeFiles: stagedFiles,
+                actor: { role: "assessor_handoff", workItemId: wiId },
+              });
+              return { ...result, status: result.ok ? "passed" : "failed",
+                stdout: result.failure?.message || "", stderr: "", exit_code: result.ok ? 0 : 1 };
+            };
+            const lookupWorkItem = (branchName) => getDb().prepare(
+              "SELECT id, branch_name, merge_state FROM work_items WHERE branch_name = ? ORDER BY id DESC LIMIT 1",
+            ).get(branchName);
+            tests = {
+              ...tests,
+              results: tests.results.map((result) => {
+                if (result.ok || result.status === "unavailable") return result;
+                const debt = classifyMergeTargetDebt({
+                  candidateResult: result,
+                  candidateCommit: candidate.candidateCommit,
+                  targetHead: candidate.targetHead,
+                  mergeBase: workItem?.merge_base_hash,
+                  targetBranch,
+                  checkout: candidate.checkout,
+                  git: gitMergeExec,
+                  reset: candidate.reset,
+                  runCurrent: (timeoutMs) => runCurrent(result, timeoutMs),
+                  lookupWorkItem,
+                  deadlineMs: gateDeadlineMs,
+                });
+                return { ...result, target_debt_classification: debt };
+              }),
+            };
+            const allowProvenDebt = getSetting(SETTING_KEYS.MERGE_TARGET_DEBT_AUTO_PROCEED) !== "false";
+            tests.ok = allowProvenDebt && tests.results.every((result) => result.ok
+              || ["target_debt", "changed_debt"].includes(result.target_debt_classification?.outcome));
+            const outcomes = tests.results.filter((result) => !result.ok)
+              .map((result) => result.target_debt_classification?.outcome || "unverified");
+            tests.summary = `${tests.summary}; target comparison: ${outcomes.join(", ")}`;
+          }
+          return tests;
         });
-        if (candidateTests.matched === 0 && wiId != null) {
-          candidateTests = runDeclaredMergeCandidateChecks({ cwd, jobs: listJobsByWorkItem(wiId), git: gitMergeExec }) || candidateTests;
-        }
         // Registered tests are one source of evidence; the jobs' own focused
         // receipts on the branch head are another. Report both, so an empty
         // registry never reads as "nothing was tested".
         const branchHead = mergeHeads(branch, targetBranch, cwd).branchHead;
+        const reviewState = wiId == null ? null : mergeVerificationReviewGateState(wiId);
+        if (reviewState?.approved && reviewState.reviewed_branch_head !== branchHead) {
+          const error = new Error(`Merge review gate #${reviewState.gate_job_id} covered a different branch commit; review the current branch before merging`);
+          error.code = "POSSE_MERGE_REVIEW_STALE";
+          throw error;
+        }
         let focusedChecks = [];
         try { focusedChecks = postChangeReceiptsAtCommit(wiId, branchHead); } catch { focusedChecks = []; }
         candidateTests = { ...candidateTests, candidate_tree: gitMergeExec(["write-tree"], cwd), target_head: preMergeHead };
-        const waived = mergeTestWaiverCovers(testWaiver, candidateTests);
+        for (const result of candidateTests.results) {
+          const debt = result.target_debt_classification;
+          if (!["target_debt", "changed_debt"].includes(debt?.outcome)) continue;
+          const introducerId = debt.introducer?.work_item_id;
+          if (!introducerId) continue;
+          const command = String(result.test?.name || result.test?.id || "");
+          const record = { command, failure_fingerprint: debt.failure_fingerprint || null,
+            commit: debt.introducer.commit, target_branch: targetBranch,
+            blocked_work_item_ids: [wiId] };
+          getDb().transaction(() => {
+            const row = getWorkItem(introducerId);
+            if (!row) return;
+            let metadata;
+            try { metadata = JSON.parse(row.metadata_json || "{}"); } catch { metadata = {}; }
+            const existing = Array.isArray(metadata.target_debt) ? metadata.target_debt : [];
+            const prior = existing.find((item) => item.command === command
+              && item.failure_fingerprint === record.failure_fingerprint && item.commit === record.commit);
+            if (prior) {
+              prior.blocked_work_item_ids = [...new Set([...(prior.blocked_work_item_ids || []), wiId])];
+            } else existing.push(record);
+            updateWorkItemMetadata(introducerId, { ...metadata, target_debt: existing });
+          })();
+          logEvent({ work_item_id: wiId, event_type: EVENT_TYPES.GIT_MERGE_TARGET_DEBT,
+            actor_type: EVENT_ACTORS.SYSTEM,
+            message: `${targetBranch} ${debt.outcome} in ${command} introduced by WI#${introducerId}`,
+            event_json: JSON.stringify({ outcome: debt.outcome, command, ...debt }) });
+          logEvent({ work_item_id: introducerId, event_type: EVENT_TYPES.WORK_ITEM_TARGET_DEBT_INTRODUCED,
+            actor_type: EVENT_ACTORS.SYSTEM,
+            message: `${command} blocked WI#${wiId} on ${targetBranch}`,
+            event_json: JSON.stringify(record) });
+        }
+        const debtWaiver = wiId == null ? null : mergeVerificationDebtWaiver(wiId, branchHead);
+        const reviewDebtWaived = mergeVerificationDebtWaiverCovers(debtWaiver, candidateTests);
+        const waived = mergeTestWaiverCovers(testWaiver, candidateTests) || reviewDebtWaived;
         const focusedSummary = focusedChecks.length === 0
           ? "no focused check ran on the branch head"
           : `focused checks on the branch head: ${focusedChecks.slice(0, 4).map((check) => `${check.command || "check"} ${check.status}`).join("; ")}`;
@@ -1316,6 +1422,7 @@ export function createMergeWorkflowHelpers(context, {
             focused_checks: focusedChecks.slice(0, 10),
             candidate_tree: candidateTests.candidate_tree,
             operator_waiver: waived ? testWaiver : null,
+            review_debt_waiver: reviewDebtWaived ? debtWaiver : null,
             matched: candidateTests.matched,
             passed: candidateTests.passed,
             failed: candidateTests.failed,
@@ -1327,13 +1434,17 @@ export function createMergeWorkflowHelpers(context, {
               note: result.note || null,
               run_id: result.run_id || null,
               failure: result.failure?.message || null,
+              target_debt_classification: result.target_debt_classification || null,
             })),
           }),
         });
         if (!candidateTests.ok && !waived) {
           const firstFailure = candidateTests.results.find((result) => !result.ok);
+          const debt = firstFailure?.target_debt_classification;
           const gateError = new Error(
-            `Projected merge candidate failed test ${firstFailure?.test?.name || firstFailure?.test?.id || "unknown"}: ${firstFailure?.failure?.message || candidateTests.summary}`,
+            `Projected merge candidate ${firstFailure?.status === "unavailable" ? "has an unverified required check" : "failed test"} ${firstFailure?.test?.name || firstFailure?.test?.id || "unknown"} on ${targetBranch}`
+            + `${debt ? ` (${debt.outcome}${debt.introducer ? `, WI#${debt.introducer.work_item_id}` : ""})` : ""}: `
+            + `${firstFailure?.failure?.message || candidateTests.summary}`,
           );
           gateError.code = "POSSE_MERGE_CANDIDATE_TEST_FAILED";
           gateError.integrationGate = candidateTests;

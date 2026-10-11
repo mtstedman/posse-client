@@ -143,7 +143,7 @@ export function __testExtractClaudeToolUsesFromStreamMessage(msg) {
 // Sums the raw cache-write TTL split (usage.cache_creation.ephemeral_{5m,1h}
 // _input_tokens). Returns null when no usage carries it, so pricing applies its
 // Claude default rather than reading a missing split as zero.
-function claudeCacheCreationSplit(usages = []) {
+export function claudeCacheCreationSplit(usages = []) {
   let split = null;
   for (const usage of usages) {
     const creation = usage?.cache_creation;

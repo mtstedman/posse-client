@@ -259,6 +259,9 @@ export function cmdCalls({ tierModelName }) {
       const promptK = call.prompt_chars ? `${(call.prompt_chars / 1024).toFixed(0)}K` : "";
       const outputK = call.output_chars ? `${(call.output_chars / 1024).toFixed(0)}K` : "";
       const turns = call.turns_used != null ? ` turns:${call.turns_used}` : "";
+      const turnLimit = call.max_turns_configured != null
+        ? ` ${call.turn_limit_mode === "enforced" ? "turn limit" : "turn target"}:${call.max_turns_configured}`
+        : "";
       const capHit = call.output_truncated ? ` ${C.yellow}cap:${call.output_limit_reason || "hit"}${C.reset}` : "";
 
       console.log(
@@ -267,7 +270,7 @@ export function cmdCalls({ tierModelName }) {
         `${C.dim}${tierModelName(call.model_tier, { providerName: call.provider }).padEnd(9)}${C.reset} ` +
         `${jobRef.padEnd(5)} ` +
         `${dur.padStart(7)} ` +
-        `${C.dim}in:${promptK.padEnd(5)} out:${outputK.padEnd(5)}${turns}${C.reset}${capHit} ` +
+        `${C.dim}in:${promptK.padEnd(5)} out:${outputK.padEnd(5)}${turns}${turnLimit}${C.reset}${capHit} ` +
         `${call.activity || ""}`
       );
     }

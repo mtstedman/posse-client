@@ -140,6 +140,7 @@ export const EVENT_TYPES = Object.freeze({
   GIT_BRANCH_PRESERVED: "git.branch_preserved",
   GIT_MERGE: "git.merge",
   GIT_MERGE_CANDIDATE_TESTS: "git.merge_candidate_tests",
+  GIT_MERGE_TARGET_DEBT: "git.merge_target_debt",
   GIT_PUSHED: "git.pushed",
   GIT_REVIEW_COMMIT_DIRTY: "git.review_commit_dirty",
   GIT_REVIEW_DISCARD_FILES: "git.review_discard_files",
@@ -201,6 +202,7 @@ export const EVENT_TYPES = Object.freeze({
   JOB_CATASTROPHIC_ERROR: "job.catastrophic_error",
   JOB_COMMIT_FAILED: "job.commit_failed",
   JOB_COMMIT_INFRA_RETRY: "job.commit_infra_retry",
+  JOB_PLAN_ANCHOR_DRIFT: "job.plan_anchor_drift",
   JOB_CREATED: "job.created",
   JOB_DEAD_LETTER_RECOVERY: "job.dead_letter_recovery",
   JOB_DEAD_LETTER_RECOVERY_FAILED: "job.dead_letter_recovery_failed",
@@ -398,6 +400,7 @@ export const EVENT_TYPES = Object.freeze({
   ATLAS_REINDEX_STARTED: "atlas.reindex_started",
   ATLAS_REINDEX_STATUS: "atlas.reindex_status",
   ATLAS_FEEDBACK_TASK_TEXT_MATCH: "atlas.feedback_task_text_match",
+  ATLAS_FRESHNESS_GATE_CHECKED: "atlas.freshness_gate.checked",
   ATLAS_FRESHNESS_GATE_DEFERRED: "atlas.freshness_gate.deferred",
   ATLAS_FRESHNESS_GATE_DEGRADED: "atlas.freshness_gate.degraded",
   ATLAS_WARM_COMPLETED: "atlas.warm_completed",
@@ -475,6 +478,7 @@ export const EVENT_TYPES = Object.freeze({
   WORK_ITEM_STATUS_TRANSITION_REJECTED: "work_item.status_transition_rejected",
   // A planner-declared test command already fails at the frozen baseline.
   WORK_ITEM_TEST_BASELINE_FAILING: "work_item.test_baseline_failing",
+  WORK_ITEM_TARGET_DEBT_INTRODUCED: "work_item.target_debt_introduced",
 
   // ── worker ──────────────────────────────────────────────────────────────
   WORKER_FINALIZER_FAILED: "worker.finalizer_failed",

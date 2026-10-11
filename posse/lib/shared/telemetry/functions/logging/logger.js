@@ -65,7 +65,11 @@ function _scrubValue(value, seen = new WeakSet()) {
   if (!value || typeof value !== "object") return value;
   if (seen.has(value)) return "[Circular]";
   seen.add(value);
-  if (Array.isArray(value)) return value.map((item) => _scrubValue(item, seen));
+  if (Array.isArray(value)) {
+    const out = value.map((item) => _scrubValue(item, seen));
+    seen.delete(value);
+    return out;
+  }
   const out = {};
   for (const [key, item] of Object.entries(value)) {
     out[key] = _scrubValue(item, seen);

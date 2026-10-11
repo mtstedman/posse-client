@@ -13,6 +13,7 @@ import {
   humanInputChoicesForPayload,
 } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
+import { LEGACY_REVIEW_CHOICE_IDS, validReviewChoiceIDs } from "../../../catalog/gate-actions.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { scrubSecrets } from "../../../shared/telemetry/classes/logging/secret-scrub.js";
 import { now, runImmediateTransaction } from "./common.js";
@@ -106,6 +107,8 @@ const CHOICE_COPY = Object.freeze({
   skip: ["Skip", "Skip this work and continue where policy permits."],
   replan: ["Replan", "Return the Work Item to its planning path."],
   retry: ["Retry", "Retry through the canonical owner transition."],
+  send_back: ["Send back", "Return the implementation for repair and reassessment."],
+  retry_assessment: ["Retry assessment", "Run assessment again on the current implementation."],
   explicit_waiver: ["Explicit waiver", "Accept the current work while recording that deterministic verification did not pass."],
   "retry:claude": ["Retry with Claude", "Retry through the Claude provider path."],
   "retry:anthropic": ["Retry with Anthropic API", "Retry through the direct Anthropic API provider path."],
@@ -411,6 +414,7 @@ function validChoiceEntries(kind, entries) {
     return ids.slice(0, -2).every((id) => normalizedCandidateId(id));
   }
   const allowed = WORK_ITEM_QUESTION_CHOICE_IDS[kind] || [];
+  if (Object.hasOwn(LEGACY_REVIEW_CHOICE_IDS, kind)) return validReviewChoiceIDs(kind, ids, allowed);
   if (["dead_letter_recovery", "work_item_failure_disposition", "cross_wi_upstream_disposition"].includes(kind)) {
     let previous = -1;
     return ids.every((id) => {
@@ -447,7 +451,17 @@ function gateChoiceRecords(kind, payload) {
     }
     return [];
   }
-  return explicit.map((entry) => choiceRecord(choiceIdFromEntry(entry), entry));
+  return explicit.map((entry) => {
+    const choiceId = choiceIdFromEntry(entry);
+    if (kind !== "blocked_recovery" && Object.hasOwn(LEGACY_REVIEW_CHOICE_IDS, kind) && choiceId === "skip") {
+      return choiceRecord(choiceId, {
+        ...(typeof entry === "object" && entry !== null ? entry : {}),
+        label: "Explicit waiver (legacy skip)",
+        consequence: "Accept the current work under the recorded waiver.",
+      });
+    }
+    return choiceRecord(choiceId, entry);
+  });
 }
 
 function gateQuestionState(job) {

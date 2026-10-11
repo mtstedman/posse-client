@@ -21,7 +21,9 @@ export const FINAL_REVIEW_DEFAULT_MODE = "on";
 // terminates the job earlier. Once spent, the handoff proceeds and
 // the persisted review remains unresolved; no second assessor is dispatched.
 export const FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT = 3;
+export const FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS = 2;
 export const FINAL_REVIEW_NO_PROGRESS_CODE = "FINAL_REVIEW_NO_PROGRESS";
+export const FINAL_REVIEW_CONTINUATION_NEXT_ACTION = "verify_preserved_candidate";
 
 // Whole tool call: the declared tests plus the reviewer's own agent call. The
 // owner's progress heartbeat keeps the transport alive meanwhile; this is the
@@ -49,8 +51,11 @@ export const FINAL_REVIEW_DELTA_INLINE_MAX_CHARS = 30_000;
 export const FINAL_REVIEW_VERDICTS = Object.freeze(["pass", "fail", "needs_review"]);
 export const FINAL_REVIEW_REVIEWER_STATUS = Object.freeze({
   REVISED: "revised",
+  WAITING: "waiting",
   DONE: "done",
 });
+export const FINAL_REVIEW_REVIEWER_PARK_MS = 35 * 60_000;
+export const FINAL_REVIEW_REVIEWER_WALL_MS = 55 * 60_000;
 
 export const FINAL_REVIEW_OUTCOMES = Object.freeze({
   PASS: "pass",

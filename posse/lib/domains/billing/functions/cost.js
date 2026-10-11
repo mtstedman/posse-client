@@ -7,6 +7,7 @@
 // the fly with token × rate math.
 
 import { getDb } from "../../../shared/storage/functions/index.js";
+import { pricingBasis } from "./pricing.js";
 import {
   listUsageSegmentsForAgentCalls,
   resolveCanonicalCallAccounting,
@@ -43,6 +44,8 @@ function buildWhere({ wiId = null, since = null } = {}) {
 
 function enrichCall(call, db = getDb(), usageSegments = null) {
   const accounting = resolveCanonicalCallAccounting(call, { db, usageSegments });
+  const rateBasis = call.pricing_basis || pricingBasis({ provider: call.provider,
+    modelName: call.model_name, modelTier: call.model_tier });
   const inputTokens = accounting.inputTokens;
   const outputTokens = accounting.outputTokens;
   const cachedInputTokens = accounting.cachedInputTokens;
@@ -61,6 +64,7 @@ function enrichCall(call, db = getDb(), usageSegments = null) {
       : aggregateCacheDiscountRatio(inputTokens, accounting.billableInputTokens),
     resolved_cost_usd: accounting.costUsd,
     cost_source: accounting.costSource,
+    pricing_basis: rateBasis,
     cost_precision: accounting.costPrecision,
     accounting_precision: accounting.precision,
     exact_usage: accounting.exact,
@@ -153,6 +157,8 @@ function newCostAccumulator(costKey = "costUsd") {
     unknownCostCalls: 0,
     exactCostCalls: 0,
     estimatedCostCalls: 0,
+    fallbackPricedUsd: 0,
+    fallbackPricedCalls: 0,
     exactUsageCalls: 0,
     inexactUsageCalls: 0,
   };
@@ -169,6 +175,12 @@ function accumulateCostCall(entry, call, costKey = "costUsd") {
   entry.turnsUsed += call.turns_used || 0;
   if (call.output_truncated) entry.outputTruncatedCalls += 1;
   if (Number.isFinite(call.resolved_cost_usd)) entry[costKey] += call.resolved_cost_usd;
+  if (Number.isFinite(call.resolved_cost_usd)
+    && /^(?:family|tier)_fallback:/.test(call.pricing_basis || "")
+    && call.cost_source !== "aggregate:known") {
+    entry.fallbackPricedUsd += call.resolved_cost_usd;
+    entry.fallbackPricedCalls += 1;
+  }
   if (call.cost_precision === "exact") entry.exactCostCalls += 1;
   else if (call.cost_precision === "estimated") entry.estimatedCostCalls += 1;
   else entry.unknownCostCalls += 1;
@@ -270,7 +282,7 @@ export function workItemCost(wiId, { since = null, db = null } = {}) {
     SELECT id, work_item_id, job_id, parent_agent_call_id, child_kind,
            role, provider, model_tier, model_name,
            input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens,
-           cost_estimate_usd, billing_precision, exact_billable_input_tokens,
+           cost_estimate_usd, pricing_basis, billing_precision, exact_billable_input_tokens,
            long_context_tier_input_tokens, provider_request_duration_ms,
            usage_segment_count, status, turns_used, output_truncated
     FROM agent_calls
@@ -310,7 +322,7 @@ export function aggregateCost({ groupBy = "provider", wiId = null, since = null 
     SELECT id, work_item_id, job_id, parent_agent_call_id, child_kind,
            role, provider, model_tier, model_name,
            input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens,
-           cost_estimate_usd, billing_precision, exact_billable_input_tokens,
+           cost_estimate_usd, pricing_basis, billing_precision, exact_billable_input_tokens,
            long_context_tier_input_tokens, provider_request_duration_ms,
            usage_segment_count, status, turns_used, output_truncated
     FROM agent_calls
@@ -359,7 +371,7 @@ export function topWorkItemCosts({ since = null, limit = 20 } = {}) {
   const rows = db.prepare(`
     SELECT id, work_item_id, job_id, role, provider, model_tier, model_name,
            input_tokens, output_tokens, cached_input_tokens, cache_creation_input_tokens,
-           cost_estimate_usd, billing_precision, exact_billable_input_tokens,
+           cost_estimate_usd, pricing_basis, billing_precision, exact_billable_input_tokens,
            long_context_tier_input_tokens, provider_request_duration_ms,
            usage_segment_count, status, turns_used, output_truncated
     FROM agent_calls

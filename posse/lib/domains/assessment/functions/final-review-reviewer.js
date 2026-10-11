@@ -11,6 +11,9 @@ import { buildHandoffPacket, handoff } from "../../handoff/functions/index.js";
 import { getAgentHandoffRecord } from "../../handoff/functions/agent-handoff.js";
 import { extractJsonResult } from "../../../shared/format/functions/json.js";
 import { AGENT_CALL_CHILD_KINDS, AGENT_CALL_ROLE_LABELS } from "../../../catalog/agent-call.js";
+import { FINAL_REVIEW_REVIEWER_WALL_MS } from "../../../catalog/final-review.js";
+import { runWithObservationContext } from "../../observability/functions/observations.js";
+import { finalReviewInstructions } from "./final-review-snapshot.js";
 
 /**
  * @param {{
@@ -21,7 +24,7 @@ import { AGENT_CALL_CHILD_KINDS, AGENT_CALL_ROLE_LABELS } from "../../../catalog
  *   instructions: string, evidence: string,
  * }} input
  */
-export async function runFinalReviewer({
+async function runFinalReviewerInContext({
   call,
   composePrompt,
   jobId,
@@ -45,17 +48,19 @@ export async function runFinalReviewer({
     lastError: null,
     cwd,
   });
-  // The reviewer reports with final_review and waits in it for the
-  // developer's revisions; it needs the handoff protocol for its final verdict.
-  if (packet.agent_coordination?.agent_handoff_v1 === true) {
-    packet.agent_coordination = { ...packet.agent_coordination, final_review_v1: true };
-  }
-  try {
-    await handoff(packet, { providerName });
-  } catch {
-    // Context enrichment is optional; the snapshot carries the evidence.
-  }
-  const composed = await composePrompt(packet, instructions, { providerName });
+  // Handoff validates the parent call before issuing reviewer coordination.
+  await handoff(packet, { providerName, reviewerChildIdentity: {
+    kind: AGENT_CALL_CHILD_KINDS.FINAL_REVIEW,
+    parentAgentCallId,
+  } });
+  const canReportAndWait = Array.isArray(packet.remote_tool_surface)
+    ? packet.remote_tool_surface.includes("tools.final_review")
+    : packet.agent_coordination?.final_review_v1 === true;
+  const issuedInstructions = instructions === finalReviewInstructions()
+    ? finalReviewInstructions({ reportAndWait: canReportAndWait }) : instructions;
+  const composed = await composePrompt(packet, issuedInstructions, { providerName });
+  const wallSignal = AbortSignal.timeout(FINAL_REVIEW_REVIEWER_WALL_MS);
+  const reviewerSignal = abortSignal ? AbortSignal.any([abortSignal, wallSignal]) : wallSignal;
   const result = await call([composed, evidence].filter(Boolean).join("\n\n"), {
     role: "assessor",
     modelTier: "standard",
@@ -72,7 +77,7 @@ export async function runFinalReviewer({
     stableContext: packet.stable_context || null,
     sessionPacket: packet,
     remoteSystemPrompt: packet.remote_system_prompt || null,
-    abortSignal,
+    abortSignal: reviewerSignal,
     cwd,
     _parentAgentCallId: parentAgentCallId,
     _childKind: AGENT_CALL_CHILD_KINDS.FINAL_REVIEW,
@@ -98,4 +103,14 @@ export async function runFinalReviewer({
       : [],
     agentCallId: Number.isInteger(result?.agentCallId) ? result.agentCallId : null,
   };
+}
+
+/** @param {Parameters<typeof runFinalReviewerInContext>[0]} input */
+export async function runFinalReviewer(input) {
+  return runWithObservationContext({
+    work_item_id: input.workItemId,
+    job_id: input.jobId,
+    attempt_id: input.attemptId,
+    role: "assessor",
+  }, () => runFinalReviewerInContext(input));
 }

@@ -1,5 +1,6 @@
 import { emptyMaterializedPathsForJob } from "../../handoff/functions/helpers/file-materialization.js";
-// A final review authorizes only the scoped bytes and task contract it saw.
+// A final review authorizes the scoped bytes, named read dependencies, and
+// task contract it saw.
 // Persist this identity before review; committing those bytes does not change it.
 import fs from "node:fs";
 import path from "node:path";
@@ -14,9 +15,14 @@ const digest = (value) => createHash("sha256").update(value).digest("hex");
 export async function finalReviewIdentity(cwd, payload, { jobId = null } = {}) {
   const placeholders = new Set(await emptyMaterializedPathsForJob(jobId, payload?.scope_generation ?? payload?._materialization_generation ?? 1, cwd));
   const scope = finalReviewScope(payload);
+  const readPaths = (Array.isArray(payload?.dev_brief?.key_files) ? payload.dev_brief.key_files : [])
+    .slice(0, 64)
+    .map((value) => String(value || "").trim().replace(/\\/g, "/"))
+    .filter((value) => value && !path.posix.isAbsolute(value)
+      && !value.split("/").some((part) => !part || part === "." || part === ".."));
   const listed = String(await gitExecAsync(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd, { trim: false })).split("\0").filter(Boolean);
   const files = [...new Set([...listed.filter((file) => !scope.declared || scope.files.has(file)
-    || scope.roots.some((root) => file === root || file.startsWith(`${root}/`))), ...scope.files])].sort();
+    || scope.roots.some((root) => file === root || file.startsWith(`${root}/`))), ...scope.files, ...readPaths])].sort();
   const root = fs.realpathSync(cwd);
   const states = files.map((file) => {
     if (placeholders.has(file)) return [file, null];
@@ -37,11 +43,11 @@ export async function finalReviewIdentity(cwd, payload, { jobId = null } = {}) {
 }
 
 export function latestFinalReview(jobId, db = getDb()) {
-  const issued = db.prepare("SELECT detail_json FROM job_observations WHERE job_id = ? AND observation_type = ? ORDER BY id DESC LIMIT 1")
+  const issued = db.prepare("SELECT detail_json FROM final_review_records WHERE job_id = ? AND observation_type = ? ORDER BY id DESC LIMIT 1")
     .get(jobId, FINAL_REVIEW_OBSERVATIONS.ISSUED);
   if (!issued) return null;
   const callId = JSON.parse(issued.detail_json).agent_call_id;
-  const result = db.prepare("SELECT detail_json FROM job_observations WHERE job_id = ? AND observation_type = ? AND json_extract(detail_json, '$.agent_call_id') = ? ORDER BY id DESC LIMIT 1")
+  const result = db.prepare("SELECT detail_json FROM final_review_records WHERE job_id = ? AND observation_type = ? AND agent_call_id = ? ORDER BY id DESC LIMIT 1")
     .get(jobId, FINAL_REVIEW_OBSERVATIONS.RESULT, callId);
   return result ? JSON.parse(result.detail_json) : {};
 }
@@ -51,12 +57,15 @@ export async function authoritativeFinalReview(job, payload, cwd) {
   if (!review) return null; // Jobs never issued final_review retain their existing route.
   const unresolved = (reason) => ({ verdict: "needs_review", confidence: "none", reasons: [reason],
     spawn_jobs: [], human_questions: [], _disable_internal_retry: true, _assessment_infrastructure_review: true, _verification_blocked: true });
+  let identity;
+  try { identity = await finalReviewIdentity(cwd, payload, { jobId: job.id }); } catch { return unresolved("Cannot verify the final-reviewed workspace identity."); }
+  // A repair after the last semantic review needs fresh verification. Let the
+  // ordinary assessment run on that candidate; the old result stays in the
+  // durable review ledger as historical context, not an approval or a gate.
+  if (review.review_identity && identity !== review.review_identity) return null;
   if (!["pass", "findings"].includes(review.outcome) || !review.review_identity) {
     return unresolved(review.reason || "Final review is missing, blocked, or has unresolved findings; no second assessor will be dispatched.");
   }
-  let identity;
-  try { identity = await finalReviewIdentity(cwd, payload, { jobId: job.id }); } catch { return unresolved("Cannot verify the final-reviewed workspace identity."); }
-  if (identity !== review.review_identity) return unresolved("The task contract or scoped files changed after final review; the change requires review again.");
   if (review.outcome === "findings") {
     const reasons = (review.findings || []).map((finding) => [finding.criterion,
       ...(finding.paths || []), ...(finding.refs || []), finding.evidence,
@@ -69,7 +78,7 @@ export async function authoritativeFinalReview(job, payload, cwd) {
         instructions: [...reasons, review.repair, ...diagnostics].filter(Boolean).join("\n\n"),
       } }], _final_reviewer_agent_call_id: review.reviewer_agent_call_id };
   }
-  if (["unavailable", "infrastructure_error", "invalid"].includes(review.changed_tests?.status)) {
+  if (["unavailable", "infrastructure_error", "invalid", "timed_out", "skipped"].includes(review.changed_tests?.status)) {
     return unresolved(`Changed test verification is incomplete (${review.changed_tests.reason || review.changed_tests.status}); a passing review cannot establish execution of those tests.`);
   }
   return { verdict: "pass", confidence: "high", reasons: [review.summary || "Final review passed for the exact committed change and task contract."],

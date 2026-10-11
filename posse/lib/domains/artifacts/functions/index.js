@@ -528,7 +528,8 @@ export function injectArtifactScope(payload, scopeId, projectDir = null) {
     delete scoped._artifact_scope_warnings;
   } else if (Array.isArray(scoped.files_to_create) && scoped.output_root) {
     const warnings = [];
-    scoped.files_to_create = normalizeArtifactCreateFiles(scoped.files_to_create, scoped.output_root, { warnings });
+    scoped.files_to_create = normalizeArtifactCreateFiles(scoped.files_to_create, scoped.output_root,
+      { warnings, projectDir, resourcesDir: getResourcesDir(projectDir) });
     if (warnings.length > 0) scoped._artifact_scope_warnings = warnings;
     else delete scoped._artifact_scope_warnings;
   }
@@ -542,6 +543,18 @@ export function normalizeArtifactCreateFiles(filesToCreate = [], outputRoot, opt
 
   const normalizedFiles = [];
   const rootPrefix = normalizedRoot + "/";
+  const rootForms = new Set([normalizedRoot]);
+  const projectDir = String(opts?.projectDir || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  const resourcesDir = String(opts?.resourcesDir || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  if (projectDir && normalizedRoot.startsWith(projectDir + "/")) {
+    rootForms.add(normalizedRoot.slice(projectDir.length + 1));
+  }
+  if (resourcesDir && normalizedRoot.startsWith(resourcesDir + "/")) {
+    const relative = normalizedRoot.slice(resourcesDir.length + 1);
+    rootForms.add(relative);
+    rootForms.add(`resources/${relative}`);
+    rootForms.add(`.posse/resources/${relative}`);
+  }
   const warnings = Array.isArray(opts?.warnings) ? opts.warnings : null;
   const addWarning = (type, file, normalized = null) => {
     if (!warnings) return;
@@ -573,8 +586,10 @@ export function normalizeArtifactCreateFiles(filesToCreate = [], outputRoot, opt
   for (const rawFile of filesToCreate) {
     if (typeof rawFile !== "string" || !rawFile.trim()) continue;
     const file = rawFile.replace(/\\/g, "/").trim().replace(/^\.\//, "");
-    if (file === normalizedRoot || file.startsWith(rootPrefix)) {
-      normalizedFiles.push(file);
+    const matchingRoot = [...rootForms].find((form) => file === form || file.startsWith(form + "/"));
+    if (matchingRoot) {
+      const normalized = `${normalizedRoot}${file.slice(matchingRoot.length)}`;
+      normalizedFiles.push(normalized);
       continue;
     }
 

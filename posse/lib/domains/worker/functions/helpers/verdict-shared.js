@@ -4,6 +4,7 @@
 
 import path from "path";
 import { INFERRED_SCOPE_BARE_EXTENSIONS } from "../../../../catalog/files.js";
+import { RECEIPT_CONFIDENCE_POLICY } from "../../../../catalog/verification.js";
 import { inferGeneratedArtifactDeletionTargets } from "../../../../shared/scope/classes/MutationPolicy.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
 import {
@@ -131,11 +132,11 @@ export function normalizeAssessorConfidence(value, { fallback = "medium", allowN
   return fallback;
 }
 
-export function capVerdictForVerificationInfrastructure(verdict, testRun = null) {
+export function capVerdictForVerificationInfrastructure(verdict, testRun = null, payload = {}) {
   const post = testRun?.post_change || testRun?.postChange;
   const changed = post?.changed_tests;
   if (verdict?.verdict === "pass" && changed?.paths?.length > 0
-    && ["infrastructure_error", "unavailable", "invalid"].includes(changed.status)) {
+    && ["infrastructure_error", "unavailable", "invalid", "timed_out", "skipped"].includes(changed.status)) {
     return {
       ...verdict,
       verdict: "needs_review",
@@ -145,6 +146,32 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null)
       reasons: [
         `Changed test files did not execute (${changed.reason || changed.status}): ${changed.paths.join(", ")}. Restore the runner or supply an explicit repository runner mapping before accepting their verification.`,
         ...(verdict.reasons || []),
+      ],
+    };
+  }
+  const declaredCommand = String(payload?.test_command || "").trim();
+  const incompleteChecks = Array.isArray(post?.check_runs)
+    ? post.check_runs.filter((check) => check.intent === "test"
+      && (check.status !== "passed" || ["unknown", "none_executed", "aborted_or_unknown"].includes(check.coverage_status)))
+    : [];
+  const unverifiedCoverage = post?.status === "passed"
+    && ["unknown", "none_executed", "aborted_or_unknown"].includes(post.coverage_status);
+  const unavailablePost = post && ["infrastructure_error", "unavailable", "invalid", "skipped", "timed_out"].includes(post.status);
+  if (verdict?.verdict === "pass" && (unverifiedCoverage || incompleteChecks.length > 0
+    || unavailablePost || (declaredCommand && !post))) {
+    const detail = incompleteChecks.length > 0
+      ? incompleteChecks.map((check) => `${check.check_id || check.command}: ${check.reason || check.coverage_status || check.status}`).join("; ")
+      : post?.reason || post?.coverage_status || "no post-change receipt";
+    return {
+      ...verdict,
+      verdict: "needs_review",
+      verification_status: "declared_tests_unverified",
+      _verification_failure_class: "verification_coverage_incomplete",
+      _verification_blocked: true,
+      _disable_internal_retry: true,
+      reasons: [
+        `Required test coverage is unverified (${detail}). Preserve the candidate and recover the missing verification before accepting it.`,
+        ...(Array.isArray(verdict.reasons) ? verdict.reasons : []),
       ],
     };
   }
@@ -173,7 +200,8 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
   }
   if (["fail", "needs_replan"].includes(verdict?.verdict)
     || !["regression", "changed_failure", "post_only", "infrastructure_unavailable"].includes(testRun?.delta)
-    || !["failed", "timed_out"].includes(postChange?.status)) return verdict;
+    || !["failed", "timed_out"].includes(postChange?.status)
+    || (postChange?.status === "timed_out" && testRun?.delta !== "regression")) return verdict;
   const outputTail = [postChange?.stdout, postChange?.stderr]
     .map((value) => String(value || "").trim())
     .filter(Boolean)
@@ -212,7 +240,7 @@ export function capVerdictForChangedTestFailure(verdict, testRun = null) {
   const changed = postChange?.changed_tests || null;
   const attribution = changed?.baseline_attribution || null;
   if (["fail", "needs_replan"].includes(verdict?.verdict)
-    || !["failed", "timed_out"].includes(changed?.status)
+    || changed?.status !== "failed"
     || attribution?.debt_only === true) return verdict;
   const paths = Array.isArray(attribution?.introduced_paths)
     ? attribution.introduced_paths
@@ -549,6 +577,20 @@ export function capVerdictForHighRiskVerificationGap(
     const status = postChange.status || "not_run";
     const detail = postChange.validation_error || postChange.reason || null;
     const testDelta = testRun?.delta || null;
+    if (["infrastructure_error", "unavailable", "invalid", "skipped", "timed_out"].includes(status)) {
+      return {
+        ...verdict,
+        verdict: "needs_review",
+        verification_status: "declared_tests_unverified",
+        _verification_failure_class: "verification_coverage_incomplete",
+        _verification_blocked: true,
+        _disable_internal_retry: true,
+        reasons: [
+          `The declared check did not produce usable test evidence (${detail || status}); preserve the candidate and recover verification.`,
+          ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
+        ],
+      };
+    }
     if (["invalid_test_plan", "rejected"].includes(status)
       || ["persistent_failure", "baseline_only", "indeterminate"].includes(testDelta)) {
       return {
@@ -967,7 +1009,7 @@ export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: cu
       ],
     };
   }
-  prepared = capVerdictForVerificationInfrastructure(prepared, assessedReceipt);
+  prepared = capVerdictForVerificationInfrastructure(prepared, assessedReceipt, payload);
   prepared = capVerdictForHighRiskVerificationGap(
     prepared,
     payload,
@@ -1002,35 +1044,24 @@ export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: cu
     allowNone: true,
   });
   let passConfidenceFloor = configuredPassConfidenceFloor;
-  if (prepared.verdict === "pass" && configuredPassConfidenceFloor === "high") {
-    // delta null means NO deterministic receipts exist for this commit —
-    // that is the case with the least machine-checkable evidence, so the
-    // high floor (needs_review / strong-tier escalation) must stand, not be
-    // capped away. Only known non-discriminating receipt shapes cap the floor:
-    // questionable or future deltas must retain strong-tier scrutiny.
-    const mediumConfidenceDeltas = new Set([
-      "pass_to_pass",
-      "persistent_failure",
-      "post_only",
-      "baseline_only",
-    ]);
-    if (mediumConfidenceDeltas.has(assessedReceipt.delta)) {
-      passConfidenceFloor = "medium";
-      // `confidence` is the assessor's self-rating, not the policy floor:
-      // cap a high rating this receipt cannot support, but never raise a
-      // rating below the floor, or the floor check below would pass it.
+  if (prepared.verdict === "pass") {
+    const receiptPolicy = RECEIPT_CONFIDENCE_POLICY[assessedReceipt.delta] || null;
+    if (receiptPolicy) {
+      if (configuredPassConfidenceFloor === "high") passConfidenceFloor = receiptPolicy.high_floor;
+      // The assessor's rating is capped independently of the configured
+      // floor; no receipt may raise a rating that was already below it.
       const assessorConfidence = normalizeAssessorConfidence(prepared.confidence, {
         fallback: "medium",
         allowNone: true,
       }) || "none";
-      const confidenceCap = ASSESSOR_CONFIDENCE_RANK[assessorConfidence] > ASSESSOR_CONFIDENCE_RANK[passConfidenceFloor]
-        ? { confidence: passConfidenceFloor, assessor_reported_confidence: prepared.confidence }
+      const confidenceCap = ASSESSOR_CONFIDENCE_RANK[assessorConfidence] > ASSESSOR_CONFIDENCE_RANK[receiptPolicy.ceiling]
+        ? { confidence: receiptPolicy.ceiling, assessor_reported_confidence: prepared.confidence }
         : {};
       prepared = {
         ...prepared,
         ...confidenceCap,
         reasons: [
-          `Deterministic test receipt delta ${assessedReceipt.delta} cannot support high confidence; the pass confidence floor is capped at medium.`,
+          `Deterministic test receipt delta ${assessedReceipt.delta} cannot support high confidence; the rating ceiling and any high pass confidence floor are capped at ${receiptPolicy.ceiling}.`,
           ...(prepared.reasons || []),
         ],
       };

@@ -8,6 +8,7 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import crypto from "crypto";
+import { performance } from "node:perf_hooks";
 import { isInsideRoot, isUnderRoot, normPath, normalizeRoots, resolvePathWithin } from "../../../shared/scope/functions/path.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 
@@ -1339,7 +1340,15 @@ export class Worker {
     const hasEvidenceWarmJob = Number.isInteger(evidenceWarmJobId) && evidenceWarmJobId > 0;
     const evidenceWarmRequired = payload?._atlas_evidence_warm_required === true;
     if (hasEvidenceWarmJob || evidenceWarmRequired) {
+      const freshnessStartedAt = performance.now();
       const evidenceWarm = getAtlasWarmJobCompletion(hasEvidenceWarmJob ? evidenceWarmJobId : null);
+      logEvent({ work_item_id: job.work_item_id, job_id: job.id,
+        event_type: EVENT_TYPES.ATLAS_FRESHNESS_GATE_CHECKED, actor_type: EVENT_ACTORS.ATLAS,
+        message: "Checked ATLAS evidence warm readiness",
+        event_json: JSON.stringify({ source: "evidence_warm", job_type: job.job_type,
+          ready: evidenceWarm.ok === true, duration_ms: Math.max(0, performance.now() - freshnessStartedAt),
+          warm_job_id: hasEvidenceWarmJob ? evidenceWarmJobId : null }),
+      });
       const missingWarm = ["missing_warm_job_id", "warm_job_missing"].includes(evidenceWarm.skipped);
       const warmLabel = hasEvidenceWarmJob ? `#${evidenceWarmJobId}` : "(missing)";
       if (!evidenceWarm.completed && !missingWarm) {
@@ -1410,10 +1419,18 @@ export class Worker {
     }
     const priorDeferrals = atlasFreshnessDeferralCount(payload);
     const config = getAtlasIntegrationConfig();
+    const freshnessStartedAt = performance.now();
     const gate = await checkAtlasMainFreshnessGate({
       cwd: this.projectDir,
       config,
       requestRefresh: priorDeferrals < ATLAS_FRESHNESS_GATE_MAX_DEFERRALS,
+    });
+    logEvent({ work_item_id: job.work_item_id, job_id: job.id,
+      event_type: EVENT_TYPES.ATLAS_FRESHNESS_GATE_CHECKED, actor_type: EVENT_ACTORS.ATLAS,
+      message: "Checked ATLAS main freshness",
+      event_json: JSON.stringify({ source: "main", job_type: job.job_type,
+        ready: gate.ready === true, attempted: gate.attempted === true, action: gate.action || null,
+        duration_ms: Math.max(0, performance.now() - freshnessStartedAt) }),
     });
     if (gate.ready || !gate.attempted) return { ok: true, gate };
 

@@ -189,6 +189,14 @@ export class ArtificerRole extends BaseRole {
 
     const taskMode = payload.task_mode || "content";
     const needsImageGeneration = !!(payload.needs_image_generation || taskMode === "image");
+    const webImageDestination = /\b(?:htdocs|public_html|public|www|web|static)\/|\bweb\s+(?:asset|image)|\bwebsite\b/i.test(
+      [payload.task_spec, ...(Array.isArray(payload.files_to_create) ? payload.files_to_create : [])].filter(Boolean).join("\n"),
+    );
+    const nativeWebFormatGuidance = needsImageGeneration && webImageDestination
+      ? String(payload.image_model || "").startsWith("gpt-image")
+        ? "WEB IMAGE FORMAT: This image model can produce JPEG or WebP directly. Prefer a native JPEG or WebP for opaque photographic assets; use PNG for transparency or lossless graphics."
+        : "WEB IMAGE FORMAT: This image model produces PNG. Generate PNG at the needed dimensions; requesting JPEG or WebP would require a separate local conversion."
+      : null;
     const outputRootDisplay = outputRoot || "(not set - check task spec)";
     const buildArtificerInstructions = (extraSections = []) => [
       loadNudges(job.id, { attemptId: ctx.attemptId }),
@@ -202,6 +210,7 @@ export class ArtificerRole extends BaseRole {
       needsImageGeneration
         ? "REAL IMAGE GENERATION REQUIRED: Call generate_image for the requested visual output. Do not hand-author SVG or substitute text/vector markup."
         : null,
+      nativeWebFormatGuidance,
       inputRoots.length > 0 ? `INPUT ROOTS (read-only): ${inputRoots.join(", ")}` : null,
       blockedRetry.block,
       "",

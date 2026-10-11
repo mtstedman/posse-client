@@ -10,6 +10,7 @@
 
 import { execFileSync, execSync, spawnSync } from "child_process";
 import { MutationPolicy } from "../../../scope/classes/MutationPolicy.js";
+import { environmentForNewRun } from "../../../telemetry/functions/run-env.js";
 
 const SHELL_OPERATOR_RE = /[;&|<>]/;
 const SENSITIVE_SUBPROCESS_ENV_KEY_RE = /api[_-]?key|token|secret|credential|password|passwd|pwd|auth|oauth|bearer|^posse_key$/i;
@@ -31,7 +32,7 @@ function scrubBashSubprocessEnv(baseEnv = process.env) {
       || COMMAND_INFLUENCING_ENV_KEY_RE.test(String(key || ""))) continue;
     env[key] = value;
   }
-  return env;
+  return environmentForNewRun(env);
 }
 
 function parseCommandLine(command) {

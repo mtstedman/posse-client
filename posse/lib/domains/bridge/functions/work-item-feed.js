@@ -10,6 +10,7 @@ import {
   WORK_ITEM_STATS_PROTOCOL,
 } from "../../../catalog/bridge.js";
 import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { LEGACY_REVIEW_CHOICE_IDS, validReviewChoiceIDs } from "../../../catalog/gate-actions.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -92,6 +93,8 @@ const QUESTION_CHOICE_COPY = Object.freeze({
   skip: ["Skip", "Skip this work and continue where policy permits."],
   replan: ["Replan", "Return the Work Item to its planning path."],
   retry: ["Retry", "Retry through the canonical owner transition."],
+  send_back: ["Send back", "Return the implementation for repair and reassessment."],
+  retry_assessment: ["Retry assessment", "Run assessment again on the current implementation."],
   explicit_waiver: ["Explicit waiver", "Accept the current work while recording that deterministic verification did not pass."],
   "retry:claude": ["Retry with Claude", "Retry through the Claude provider path."],
   "retry:anthropic": ["Retry with Anthropic API", "Retry through the direct Anthropic API provider path."],
@@ -197,6 +200,7 @@ function validStoredChoiceEntries(kind, entries) {
     return ids.slice(0, -2).every((id) => /^candidate:sha256:[0-9a-f]{64}$/.test(id));
   }
   const allowed = QUESTION_CHOICE_IDS[kind] || [];
+  if (Object.hasOwn(LEGACY_REVIEW_CHOICE_IDS, kind)) return validReviewChoiceIDs(kind, ids, allowed);
   if (["dead_letter_recovery", "work_item_failure_disposition", "cross_wi_upstream_disposition"].includes(kind)) {
     let previous = -1;
     return ids.every((id) => {
@@ -244,7 +248,17 @@ function storedQuestionChoices(kind, payload) {
     }
     return [];
   }
-  return entries.map(storedChoiceRecord).filter(Boolean);
+  return entries.map((entry) => {
+    if (kind !== "blocked_recovery" && Object.hasOwn(LEGACY_REVIEW_CHOICE_IDS, kind) && choiceIdFromEntry(entry) === "skip") {
+      return storedChoiceRecord({
+        ...(typeof entry === "object" && entry !== null ? entry : {}),
+        choice_id: "skip",
+        label: "Explicit waiver (legacy skip)",
+        consequence: "Accept the current work under the recorded waiver.",
+      });
+    }
+    return storedChoiceRecord(entry);
+  }).filter(Boolean);
 }
 
 function questionStateForJob(job) {

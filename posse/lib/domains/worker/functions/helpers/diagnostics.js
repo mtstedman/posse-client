@@ -4,6 +4,7 @@
 // context, and execution-provider summaries.
 
 import { isPermanentProviderRuntimeBlock } from "./block-reason.js";
+import { providerTurnLimitMode, TURN_LIMIT_MODES } from "../../../../catalog/provider.js";
 
 export function buildPromptExcerpt(text = "", maxChars = 1200) {
   const value = String(text || "").trim();
@@ -190,7 +191,7 @@ export function retryingAttemptWording(errorDetails = null) {
   return null;
 }
 
-export function buildFailureDiagnosticsArtifact(errOrMsg, attemptCount) {
+export function buildFailureDiagnosticsArtifact(errOrMsg, attemptCount, { providerName = null } = {}) {
   const details = getErrorDetails(errOrMsg);
   const sections = [
     "## Provider Failure Diagnostics",
@@ -229,6 +230,7 @@ export function buildFailureDiagnosticsArtifact(errOrMsg, attemptCount) {
       model_name: details.stats.modelName ?? null,
       max_turns: details.stats.maxTurns ?? null,
       num_turns: details.stats.numTurns ?? null,
+      turn_limit_mode: providerTurnLimitMode(providerName || details.stats.provider),
     }, null, 2));
   }
 
@@ -249,7 +251,8 @@ export function extractResearchRetryContext(logArtifacts = []) {
     const toolSectionMatch = text.match(/### Tool Calls \(\d+\)\n([\s\S]*?)(?:\n### |\s*$)/);
     const statsMatch = text.match(/### Call Stats\n([\s\S]*?)$/);
     const statsText = statsMatch?.[1] || "";
-    const turnBudgetExhausted = /"max_turns":\s*(\d+)/.test(statsText)
+    const turnBudgetExhausted = statsText.includes(`"turn_limit_mode": "${TURN_LIMIT_MODES.ENFORCED}"`)
+      && /"max_turns":\s*(\d+)/.test(statsText)
       && /"num_turns":\s*(\d+)/.test(statsText)
       && (() => {
         const maxTurns = Number((statsText.match(/"max_turns":\s*(\d+)/) || [])[1]);

@@ -208,8 +208,12 @@ function renderTestRun(testRun, label = "DECLARED TESTS") {
     ? `, ${testRun.test_counts.total} test(s)`
     : "";
   const exit = testRun.code ?? testRun.exit_code;
+  const checks = Array.isArray(testRun.check_runs)
+    ? testRun.check_runs.map((check) => `- ${check.check_id || check.command}: ${String(check.status || "unknown").toUpperCase()} [coverage: ${check.coverage_status || "unknown"}]${check.reason ? ` (${check.reason})` : ""}`).join("\n")
+    : null;
   return [
     `${label}: \`${testRun.command}\` ran on the current workspace: ${String(testRun.status || "unknown").toUpperCase()}${exit != null ? ` (exit ${exit})` : ""}${counts}${testRun.reason ? `, ${testRun.reason}` : ""}.`,
+    checks ? `CHECK RESULTS:\n${checks}` : null,
     testRun.status === "passed" ? null : "```text",
     testRun.status === "passed" ? null : tail([testRun.stdout, testRun.stderr].filter(Boolean).join("\n"), FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS),
     testRun.status === "passed" ? null : "```",
@@ -265,15 +269,17 @@ export function renderFinalReviewEvidence({ job, workItem, payload = {}, change,
 }
 
 /** Task instructions sent through remote composition (no repository content). */
-export function finalReviewInstructions() {
+export function finalReviewInstructions({ reportAndWait = true } = {}) {
   return [
     "FINAL REVIEW: the developer finished this task and requests an independent review before handing it off.",
     "Judge the current workspace change, which is not committed yet, against the task contract in the attached snapshot.",
     "Check the actual files: the snapshot lists every changed file and inlines the diff up to its size limit; read any changed file it does not show.",
     "Use the declared test, changed test file and changed-file check results as evidence: a failure located in a changed file is a defect in this change.",
     "Check every success criterion before you report, and report every concrete defect at once, most severe first: each finding names the criterion it misses and locates it with hash refs, paths or symbols.",
-    "Report by calling final_review with your verdict (pass when the change meets the contract; fail with your findings; needs_review only when the contract itself cannot be judged). The call then waits while the developer works.",
-    "When it returns a revision, check your findings against the diff since your report, review only what changed, and call final_review again. When it returns status done, end with your terminal handoff carrying your latest verdict.",
+    reportAndWait
+      ? "Report by calling final_review with your verdict (pass when the change meets the contract; fail with your findings; needs_review only when the contract itself cannot be judged). The call then waits while the developer works."
+      : "Report your verdict in the terminal assessor handoff (pass when the change meets the contract; fail with your findings; needs_review only when the contract itself cannot be judged).",
+    ...(reportAndWait ? ["When it returns a revision, check your findings against the diff since your report, review only what changed, and call final_review again. When it returns status done, end with your terminal handoff carrying your latest verdict."] : []),
   ].join("\n");
 }
 

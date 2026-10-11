@@ -236,13 +236,13 @@ function findInRows(rows, provider, modelName) {
   const model = normalizeModel(modelName);
   if (!prov || !model) return null;
   for (const row of rows) {
-    if (row.provider === prov && row.modelName === model) return row;
+    if (row.provider === prov && row.modelName === model) return { ...row, match: "exact" };
   }
   // Family fallback against DB rows: cover cases where the operator added a
   // generic entry ("sonnet") for a family of versioned model names.
   for (const cand of familyCandidates(model)) {
     for (const row of rows) {
-      if (row.provider === prov && row.modelName === cand) return row;
+      if (row.provider === prov && row.modelName === cand) return { ...row, match: "family" };
     }
   }
   return null;
@@ -261,11 +261,11 @@ function findInRemoteCatalog(provider, modelName) {
   if (!prov || !model) return null;
   const exactKey = `${prov}:${model}`;
   const exact = map.get(exactKey);
-  if (exact) return { ...exact, key: exactKey };
+  if (exact) return { ...exact, key: exactKey, match: "exact" };
   for (const cand of familyCandidates(model)) {
     const key = `${prov}:${cand}`;
     const hit = map.get(key);
-    if (hit) return { ...hit, key };
+    if (hit) return { ...hit, key, match: "family" };
   }
   return null;
 }
@@ -275,10 +275,10 @@ function findInDefaults(provider, modelName) {
   const model = normalizeModel(modelName);
   if (!prov || !model) return null;
   const exactKey = `${prov}:${model}`;
-  if (DEFAULT_PRICING[exactKey]) return { ...DEFAULT_PRICING[exactKey], key: exactKey };
+  if (DEFAULT_PRICING[exactKey]) return { ...DEFAULT_PRICING[exactKey], key: exactKey, match: "exact" };
   for (const cand of familyCandidates(model)) {
     const key = `${prov}:${cand}`;
-    if (DEFAULT_PRICING[key]) return { ...DEFAULT_PRICING[key], key };
+    if (DEFAULT_PRICING[key]) return { ...DEFAULT_PRICING[key], key, match: "family" };
   }
   return null;
 }
@@ -288,7 +288,7 @@ function findTierDefault(provider, tier) {
   const t = normalizeTier(tier);
   if (!prov || !t) return null;
   const key = `${prov}:${t}`;
-  return TIER_DEFAULTS[key] ? { ...TIER_DEFAULTS[key], key } : null;
+  return TIER_DEFAULTS[key] ? { ...TIER_DEFAULTS[key], key, match: "tier" } : null;
 }
 
 function applyUsageRateAdjustments(rates, { provider, modelName, inputTokens } = {}) {
@@ -305,13 +305,13 @@ function applyUsageRateAdjustments(rates, { provider, modelName, inputTokens } =
 
 /**
  * Resolve the per-million USD rate for a given call.
- * @returns {{inputPerM: number, outputPerM: number, source: string} |
- *           {inputPerM: 0, outputPerM: 0, source: "none"}}
+ * @returns {{inputPerM: number, outputPerM: number, source: string,
+ *            match: "exact"|"family"|"tier"|"none"}}
  */
 export function resolvePricing({ provider, modelName, modelTier } = {}) {
   const dbHit = findInRows(dbRows(), provider, modelName);
   if (dbHit) {
-    return { inputPerM: dbHit.inputPerM, cachedInputPerM: dbHit.cachedInputPerM, outputPerM: dbHit.outputPerM, source: "db" };
+    return { inputPerM: dbHit.inputPerM, cachedInputPerM: dbHit.cachedInputPerM, outputPerM: dbHit.outputPerM, source: "db", match: dbHit.match, matchedModel: dbHit.modelName };
   }
   const remoteHit = findInRemoteCatalog(provider, modelName);
   if (remoteHit) {
@@ -324,17 +324,29 @@ export function resolvePricing({ provider, modelName, modelTier } = {}) {
         : remoteHit.input,
       outputPerM: remoteHit.output,
       source: `remote:${remoteHit.key}`,
+      match: remoteHit.match,
     };
   }
   const defHit = findInDefaults(provider, modelName);
   if (defHit) {
-    return { inputPerM: defHit.input, cachedInputPerM: Number.isFinite(Number(defHit.cachedInput)) ? Number(defHit.cachedInput) : defHit.input, outputPerM: defHit.output, source: `default:${defHit.key}` };
+    return { inputPerM: defHit.input, cachedInputPerM: Number.isFinite(Number(defHit.cachedInput)) ? Number(defHit.cachedInput) : defHit.input, outputPerM: defHit.output, source: `default:${defHit.key}`, match: defHit.match };
   }
   const tierHit = findTierDefault(provider, modelTier);
   if (tierHit) {
-    return { inputPerM: tierHit.input, cachedInputPerM: Number.isFinite(Number(tierHit.cachedInput)) ? Number(tierHit.cachedInput) : tierHit.input, outputPerM: tierHit.output, source: `tier:${tierHit.key}` };
+    return { inputPerM: tierHit.input, cachedInputPerM: Number.isFinite(Number(tierHit.cachedInput)) ? Number(tierHit.cachedInput) : tierHit.input, outputPerM: tierHit.output, source: `tier:${tierHit.key}`, match: tierHit.match };
   }
-  return { inputPerM: 0, cachedInputPerM: 0, outputPerM: 0, source: "none" };
+  return { inputPerM: 0, cachedInputPerM: 0, outputPerM: 0, source: "none", match: "none" };
+}
+
+export function pricingBasis({ provider, modelName, modelTier } = {}) {
+  const resolved = resolvePricing({ provider, modelName, modelTier });
+  if (resolved.match === "none") return "none";
+  const match = resolved.match === "family" ? "family_fallback"
+    : resolved.match === "tier" ? "tier_fallback" : "exact";
+  const source = resolved.source === "db"
+    ? `db:${normalizeProvider(provider)}:${resolved.matchedModel}`
+    : resolved.source;
+  return `${match}:${source}`;
 }
 
 /**

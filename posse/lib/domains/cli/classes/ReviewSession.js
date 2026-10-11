@@ -3,6 +3,7 @@
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { orderWorkItemsByMergeDependencies } from "../../queue/functions/cross-wi-deps.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
+import { mergeFailureDiagnostics } from "../../git/functions/merge-failure-diagnostics.js";
 import { describePartialWorkJobs, partialWorkToMerge } from "../../queue/functions/partial-work.js";
 import {
   computeJobProgressStats,
@@ -316,7 +317,7 @@ export class ReviewSession {
           };
         }
         if (!lockedWi.branch_name) {
-          this._markMergeFailed(wi.id);
+          this._markMergeFailed(wi.id, { reason: "branch_missing", message: "Work-item branch is no longer available" });
           return { ok: false, reason: "branch_missing", message: "Work-item branch is no longer available" };
         }
         const result = await mergeFn(lockedWi.branch_name, PROJECT_DIR, {
@@ -330,7 +331,7 @@ export class ReviewSession {
           },
         });
         if (!result.ok) {
-          if (!result.deferred) this._markMergeFailed(wi.id);
+          if (!result.deferred) this._markMergeFailed(wi.id, result);
           return { ...result, branchName: lockedWi.branch_name };
         }
         return {
@@ -1070,7 +1071,7 @@ export class ReviewSession {
             };
           }
           if (!lockedWi.branch_name) {
-            this._markMergeFailed(wiId);
+            this._markMergeFailed(wiId, { reason: "branch_missing", message: "Work-item branch is no longer available" });
             return { ok: false, reason: "branch_missing", message: "Work-item branch is no longer available" };
           }
           const result = await mergeFn(lockedWi.branch_name, PROJECT_DIR, {
@@ -1084,7 +1085,7 @@ export class ReviewSession {
             },
           });
           if (!result.ok) {
-            if (!result.deferred) this._markMergeFailed(wiId);
+            if (!result.deferred) this._markMergeFailed(wiId, result);
             return { ...result, branchName: lockedWi.branch_name };
           }
           return {
@@ -1506,9 +1507,9 @@ export class ReviewSession {
     return { ok: completed !== false };
   }
 
-  _markMergeFailed(wiId) {
+  _markMergeFailed(wiId, result = {}) {
     if (typeof this.markWorkItemMergeFailed === "function") {
-      return this.markWorkItemMergeFailed(wiId);
+      return this.markWorkItemMergeFailed(wiId, mergeFailureDiagnostics(result, { targetBranch: this.targetBranch() }));
     }
     const current = typeof this.getWorkItem === "function" ? this.getWorkItem(wiId) : null;
     if (current?.merge_state === "merged") return false;

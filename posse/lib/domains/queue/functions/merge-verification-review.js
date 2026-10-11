@@ -43,6 +43,7 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
 import {
   MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
+  MERGE_FAILURE_KINDS,
   MERGE_VERIFICATION_REVIEW_TYPE,
   humanInputChoicesForReviewType,
 } from "../../../catalog/human-input.js";
@@ -200,6 +201,8 @@ export function mergeVerificationReviewRequirement(jobs = [], { committedJobIds 
         title: String(job.title || "").slice(0, 160),
         risk: jobRiskScore(job),
         command: String(debt.command).trim(),
+        cwd_relative: debt.cwd_relative || null,
+        failure_fingerprint: debt.failure_fingerprint || null,
         exit_code: debt.exit_code ?? null,
       });
     }
@@ -327,12 +330,44 @@ export function mergeVerificationReviewGateState(workItemId, { waivedJobIds = nu
     open,
     requeued,
     approved: passed && coversAll,
+    reviewed_branch_head: payload.reviewed_branch_head || null,
     // Open, or answered with anything but pass that did not send the work
     // item back (a fail from before rejections requeued): the operator still
     // owns it. A fail that requeued is spent; the reworked work item gets a
     // new gate.
     holds: open || (gateState === "resolved" && row.resolution_action !== "pass" && !requeued),
   };
+}
+
+/** An approval only covers the reviewed branch and its recorded debt checks. */
+export function mergeVerificationDebtWaiver(workItemId, branchHead) {
+  const state = mergeVerificationReviewGateState(workItemId);
+  if (!state?.approved || !/^[0-9a-f]{40}$/i.test(String(branchHead || ""))
+    || state.reviewed_branch_head !== branchHead) return null;
+  const gate = getDb().prepare("SELECT payload_json FROM jobs WHERE id = ?").get(state.gate_job_id);
+  const payload = parseJobPayload(gate);
+  let entries = Array.isArray(payload.waived_verifications) ? payload.waived_verifications : [];
+  if (entries.length === 0) {
+    const ids = (payload.waived_job_ids || []).map(Number).filter(Number.isInteger);
+    if (ids.length === 0) return null;
+    const jobs = getDb().prepare(`SELECT id, payload_json FROM jobs WHERE work_item_id = ?`).all(workItemId);
+    entries = jobs.filter((job) => ids.includes(Number(job.id))).map((job) =>
+      parseJobPayload(job)[BASELINE_TEST_DEBT_PAYLOAD_KEY]).filter(Boolean);
+  }
+  const checks = entries.map((entry) => ({
+    command: String(entry.command || "").trim(),
+    cwd_relative: entry.cwd_relative || null,
+  })).filter((entry) => entry.command);
+  return checks.length ? { gate_job_id: state.gate_job_id, branch_head: branchHead, checks } : null;
+}
+
+export function mergeVerificationDebtWaiverCovers(waiver, candidateTests) {
+  if (!waiver || candidateTests?.source !== "job_test_command" || !Array.isArray(candidateTests.results)) return false;
+  return candidateTests.results.every((result) => result.ok || (
+    ["target_debt", "changed_debt"].includes(result.target_debt_classification?.outcome)
+    && waiver.checks.some((check) => check.command === result.test?.name
+      && check.cwd_relative === (result.cwd_relative || null))
+  ));
 }
 
 /** Cheap candidate filter: an unapproved review gate already holds this work item. */
@@ -375,15 +410,36 @@ export function mergeVerificationReviewGateJobSpec(workItem, requirement, { pass
 export function mergeFailureRecoveryGateJobSpec(workItem, {
   message = null,
   targetBranch = null,
+  targetHead = null,
   integrationGate = null,
+  failureKind = MERGE_FAILURE_KINDS.UNKNOWN,
+  retryCount = 0,
+  previousFailures = [],
+  allowWaive = null,
 } = {}) {
   const label = `WI#${workItem.id}${workItem.title ? ` "${String(workItem.title).slice(0, 80)}"` : ""}`;
   const detail = String(message || "Git could not merge the work-item branch").trim().slice(0, 1000);
-  const canWaive = !!integrationGate?.candidate_tree && !!integrationGate?.target_head;
+  const canWaive = allowWaive == null
+    ? !!integrationGate?.candidate_tree && !!integrationGate?.target_head
+    : !!allowWaive;
   const failedChecks = (integrationGate?.results || []).filter((result) => !result.ok)
     .map((result) => `${result.test?.name || result.test?.id}: ${result.failure?.message || result.note || result.status}`);
+  const attribution = (integrationGate?.results || []).filter((result) => !result.ok)
+    .map((result) => {
+      const debt = result.target_debt_classification;
+      const check = result.test?.name || result.test?.id || "required check";
+      if (!debt) return `${check}: target comparison unavailable.`;
+      if (debt.outcome === "target_debt" || debt.outcome === "changed_debt") {
+        const source = debt.introducer?.work_item_id
+          ? `introduced by WI#${debt.introducer.work_item_id} at ${String(debt.introducer.commit || "").slice(0, 12)}`
+          : "introducer not identified";
+        return `${check}: ${debt.outcome}; ${source}; target is red.`;
+      }
+      if (debt.outcome === "regression") return `${check}: target passed; candidate failed.`;
+      return `${check}: ${debt.outcome || "unverified"}${debt.reason ? ` (${debt.reason})` : ""}.`;
+    });
   const question = [
-    `Merge of ${label}${targetBranch ? ` into ${targetBranch}` : ""} failed: ${detail}.`,
+    `${failureKind === MERGE_FAILURE_KINDS.INTEGRATION_TEST ? "Merge candidate checks for" : "Merge of"} ${label}${targetBranch ? ` into ${targetBranch}` : ""} failed: ${detail}.`,
     "merge: merge it now (resolve the repository condition first). send_back: return the work item for rework on its branch.",
     "commit: include current dirty work in local commits. Branch edits return for validation; target-only edits are committed before retrying merge.",
     canWaive ? "waive_tests: accept the recorded failing checks and squash-merge this candidate; failures remain recorded. Leave this gate unanswered to keep the branch and defer." : "Leave this gate unanswered to keep the branch and defer.",
@@ -391,6 +447,7 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
       ? "These checks were declared by development or repair jobs."
       : "These checks came from the repository test registry.") : null,
     ...failedChecks,
+    ...attribution,
   ].filter(Boolean).join(" ");
   return {
     work_item_id: workItem.id,
@@ -403,12 +460,17 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
       choices: humanInputChoicesForReviewType(MERGE_FAILURE_RECOVERY_REVIEW_TYPE).filter((choice) => choice !== "waive_tests" || canWaive),
       questions: [question],
       prompt: question,
-      context: detail,
+      context: [detail, ...attribution].join(" ").slice(0, 1000),
+      attribution_summary: attribution,
       branch_name: workItem.branch_name || null,
       waived_job_ids: [],
       [MERGE_FAILURE_RECOVERY_KEY]: {
         failed_at: new Date().toISOString(),
         target_branch: targetBranch || null,
+        target_head: targetHead || integrationGate?.target_head || null,
+        failure_kind: failureKind,
+        retry_count: retryCount,
+        previous_failures: previousFailures.slice(-3),
         message: detail,
         integration_gate: integrationGate,
       },

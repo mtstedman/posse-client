@@ -181,9 +181,19 @@ export function chooseSurveyScope(input = {}, deps = {}) {
     root,
     source_prefix: sourcePrefix,
   }));
-  const withPromotions = (result) => promotionDetail.length > 0
-    ? { ...result, vendoredPromoted: promotionDetail }
-    : result;
+  const allSeeds = uniq(seedFiles);
+  const withPromotions = (result) => {
+    const selected = Array.isArray(result.paths) ? new Set(result.paths) : null;
+    const droppedSeeds = allSeeds.filter((seed) =>
+      !result.inject || (selected
+        ? !selected.has(seed)
+        : !(seed === result.paths || seed.startsWith(`${result.paths}/`))));
+    return {
+      ...result,
+      ...(droppedSeeds.length > 0 ? { droppedSeeds } : {}),
+      ...(promotionDetail.length > 0 ? { vendoredPromoted: promotionDetail } : {}),
+    };
+  };
 
   const symbols = deriveSymbols(taskText, keySymbols);
   // A relational/enumerative task must never collapse to one dir (rungs 2-3):

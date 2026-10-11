@@ -11,6 +11,7 @@ import {
   ONESHOT_SCOPE_SELECTION_SUBTYPE,
 } from "./job.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./native-tools.js";
+import { GATE_ACTION_ORDER, orderedGateActions, validReviewChoiceIDs } from "./gate-actions.js";
 
 const freezeChoices = (choices) => Object.freeze([...choices]);
 export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment using the available evidence and explicit assumptions.";
@@ -52,6 +53,14 @@ export const MERGE_VERIFICATION_REVIEW_TYPE = "merge_verification_review";
 // Gates opened before this type existed carry MERGE_VERIFICATION_REVIEW_TYPE
 // with the merge-failure payload key; their pass/fail mean merge/send_back.
 export const MERGE_FAILURE_RECOVERY_REVIEW_TYPE = "merge_failure_recovery";
+export const MERGE_FAILURE_KINDS = Object.freeze({
+  INTEGRATION_TEST: "integration_test",
+  CONFLICT: "conflict",
+  RUNTIME_PATH: "runtime_path",
+  BRANCH_MISSING: "branch_missing",
+  TIMEOUT: "timeout",
+  UNKNOWN: "unknown",
+});
 // Work-item gates (no original job) for states no job gate covers. A failed
 // work item that still owns a branch or implementation work asks whether to
 // retry its failed jobs on that branch, accept assessment-only failures, or
@@ -158,15 +167,15 @@ export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   research_dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
   oneshot_dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
   stall_exhausted_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
-  assessment: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  needs_review: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  assessment_parse_error: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  assessment_evidence_missing: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  unknown_verdict: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  assessment_transport_error: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  assessment_retry_limit: freezeChoices(["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"]),
-  replan_limit: freezeChoices(["replan", "pass", "fail", "explicit_waiver"]),
-  unexecuted_replan_limit: freezeChoices(["replan", "fail", "explicit_waiver"]),
+  assessment: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review),
+  needs_review: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review),
+  assessment_parse_error: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review),
+  assessment_evidence_missing: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_transport_recovery),
+  unknown_verdict: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review),
+  assessment_transport_error: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_transport_recovery),
+  assessment_retry_limit: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_retry_limit),
+  replan_limit: orderedGateActions(["replan", "pass", "fail", "explicit_waiver"]),
+  unexecuted_replan_limit: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.unexecuted_replan_recovery),
   artifact_routing_admin: freezeChoices(["acknowledge"]),
   shared_trunk_provenance: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance),
   [POST_MERGE_DB_TASK_REVIEW_TYPE]: freezeChoices(["run", "skip"]),
@@ -189,15 +198,7 @@ export const HUMAN_GATE_RECOVERY_KINDS = Object.freeze([
   "scope_expansion_required",
 ]);
 
-export const CANONICAL_HUMAN_GATE_ACTIONS = Object.freeze([
-  "pass",
-  "fail",
-  "explicit_waiver",
-  "retry_assessment",
-  "retry_with_changes",
-  "replan",
-  "recheck",
-]);
+export const CANONICAL_HUMAN_GATE_ACTIONS = GATE_ACTION_ORDER;
 
 const HUMAN_GATE_CONTRACTS = Object.freeze({
   [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE]: {
@@ -259,42 +260,42 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
   },
   assessment_transport_error: {
     gate_kind: "assessment_transport_unavailable",
-    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_transport_recovery],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   assessment_retry_limit: {
     gate_kind: "assessment_retry_exhausted",
-    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_retry_limit],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   assessment_parse_error: {
     gate_kind: "assessment_review",
-    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   assessment_evidence_missing: {
     gate_kind: "assessor_evidence_unavailable",
-    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_transport_recovery],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   unknown_verdict: {
     gate_kind: "assessment_review",
-    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   needs_review: {
     gate_kind: "assessment_review",
-    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   replan_limit: {
     gate_kind: "fix_chain_exhausted",
-    allowed_actions: ["replan", "pass", "fail", "explicit_waiver"],
+    allowed_actions: [...HUMAN_INPUT_ACTION_ENUMS.replan_limit],
     allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
   },
   unexecuted_replan_limit: {
     gate_kind: "fix_chain_exhausted",
-    allowed_actions: ["replan", "fail", "explicit_waiver"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.unexecuted_replan_recovery],
     allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
   },
   artifact_routing_admin: {
@@ -334,7 +335,7 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
   },
   assessment: {
     gate_kind: "assessment_review",
-    allowed_actions: ["send_back", "retry_assessment", "pass", "fail", "explicit_waiver", "replan"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
 });
@@ -633,14 +634,27 @@ export function humanInputChoicesForReviewType(reviewType) {
 // unavailable; gates persisted before their choices said so too (wowiekowie
 // 2026-10-01, gate #2252) still offered it, so the record narrows it as well.
 function narrowedReviewChoices(payload, reviewChoices) {
+  const reviewType = String(payload?.review_type || "").trim();
+  const offered = normalizeHumanInputChoices(payload?.choices);
+  if (reviewType === "blocked_recovery"
+    && validReviewChoiceIDs("blocked_recovery", offered, WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery)) {
+    // Legacy skip cancels a blocked job. It must not become a waiver when an
+    // old saved gate is answered after the new catalog is installed.
+    return offered;
+  }
+  if (["assessment", "needs_review", "assessment_parse_error", "assessment_evidence_missing",
+    "unknown_verdict", "assessment_transport_error", "assessment_retry_limit", "replan_limit",
+    "unexecuted_replan_limit"].includes(reviewType)
+    && offered.length > 0 && offered.every((action) => reviewChoices.includes(action))
+    && offered.every((action, index) => index === 0 || reviewChoices.indexOf(action) > reviewChoices.indexOf(offered[index - 1]))) {
+    return offered;
+  }
   if (payload?.review_type === MERGE_FAILURE_RECOVERY_REVIEW_TYPE
     && (!payload?.merge_failure_recovery?.integration_gate?.candidate_tree
       || !payload?.merge_failure_recovery?.integration_gate?.target_head)) {
     return reviewChoices.filter((choice) => choice !== "waive_tests");
   }
-  const reviewType = String(payload?.review_type || "").trim();
   if (!WORK_ITEM_DISPOSITION_REVIEW_TYPES.includes(reviewType)) return reviewChoices;
-  const offered = normalizeHumanInputChoices(payload?.choices);
   const acceptUnavailable = reviewType === WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE
     && Array.isArray(payload?.acceptable_job_ids)
     && payload.acceptable_job_ids.length === 0;

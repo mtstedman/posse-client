@@ -19,6 +19,7 @@ import { nativeBinaries } from "../../../../shared/tools/classes/BinaryManager.j
 import { ToolCatalog } from "../../../../shared/tools/classes/ToolCatalog.js";
 import { buildExecutionContract, renderProviderPromptContracts } from "../../../../shared/tools/functions/contract.js";
 import { projectFunctionToolSurface } from "../../../../shared/tools/functions/provider-surface.js";
+import { projectLocalToolDefinition } from "../../../../shared/tools/functions/provider-schema.js";
 import {
   issuedToolSurfaceForProviderPolicy,
   narrowProviderOptionsToRemoteIssuance,
@@ -663,7 +664,8 @@ export async function callProvider(promptText, opts = {}) {
       if (!fileWriteAuthorized) return 0;
       const priority = (tool) => LOCAL_FILE_WRITE_TOOLS.has(String(tool?.name || "")) ? 0 : 1;
       return priority(left) - priority(right);
-    });
+    })
+    .map(projectLocalToolDefinition);
   if (executionContract) {
     executionContract = projectFunctionToolSurface(executionContract, toolDefinitions);
   }

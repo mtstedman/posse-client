@@ -973,11 +973,10 @@ export class TrackedProviderClient {
     const captureIncomplete = terminalUsageUnavailable
       || stats.usageCapturePrecision === "incomplete"
       || (!providerUsageMeasured && missingUsagePrecision === "incomplete");
-    const usageStatus = providerUsageStatus(stats, {
+    let usageStatus = providerUsageStatus(stats, {
       measured: providerUsageMeasured,
       unavailable: terminalUsageUnavailable,
     });
-    if (captureIncomplete) this.deps.markUsageSegmentsIncomplete(agentCallId);
     const expectedTotals = providerUsageMeasured ? {
       inputTokens: stats.inputTokens,
       outputTokens: stats.outputTokens,
@@ -988,6 +987,16 @@ export class TrackedProviderClient {
       modelTier,
       expectedTotals,
     });
+    // Completed request segments remain exact even when a terminal stop may
+    // have prevented a later request from reporting. The call is a measured
+    // lower bound; its status carries that qualification separately.
+    const exactTerminalLowerBound = (terminalUsageUnavailable || stats.usagePartialAfterStop === true)
+      && segmentSummary.exact === true;
+    if (exactTerminalLowerBound) usageStatus = "measured_lower_bound";
+    else if (captureIncomplete) {
+      this.deps.markUsageSegmentsIncomplete(agentCallId);
+      segmentSummary = this.deps.summarizeUsageSegments(agentCallId, { modelTier, expectedTotals });
+    }
     if (!providerUsageMeasured && segmentSummary.requestCount === 0) {
       segmentSummary = {
         ...segmentSummary,
@@ -1017,7 +1026,7 @@ export class TrackedProviderClient {
         expectedTotals,
       });
     }
-    if (captureIncomplete && !segmentSummary.exact) {
+    if (captureIncomplete && !exactTerminalLowerBound && !segmentSummary.exact) {
       segmentSummary = {
         ...segmentSummary,
         precision: "incomplete",
@@ -1029,8 +1038,10 @@ export class TrackedProviderClient {
       providerUsageMeasured,
       providerUsageStatus: usageStatus,
       segmentSummary,
-      accountingInputTokens: providerUsageMeasured ? stats.inputTokens : null,
-      accountingOutputTokens: providerUsageMeasured ? stats.outputTokens : null,
+      accountingInputTokens: exactTerminalLowerBound ? segmentSummary.inputTokens
+        : providerUsageMeasured ? stats.inputTokens : null,
+      accountingOutputTokens: exactTerminalLowerBound ? segmentSummary.outputTokens
+        : providerUsageMeasured ? stats.outputTokens : null,
     };
   }
 

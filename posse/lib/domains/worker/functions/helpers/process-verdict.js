@@ -39,6 +39,7 @@ export function processVerdict(job, verdict, {
   humanApprovedReplan = false,
   replanTrigger = null,
   assessedCommitHash = undefined,
+  reviewEvidence = null,
 } = {}) {
   const emitLog = emit || ((msg) => console.log(`  ${msg}`));
   const spawnedJobs = [];
@@ -101,6 +102,7 @@ export function processVerdict(job, verdict, {
     humanApprovedReplan,
     replanTrigger,
     reasonBrief,
+    reviewEvidence,
     leaseToken,
     recordAssessorVerdict,
     spawnedJobs,

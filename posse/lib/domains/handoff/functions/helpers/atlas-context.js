@@ -3064,6 +3064,7 @@ function _summarizeSurveyScope(scope) {
     symbols: Array.isArray(scope.symbols) ? scope.symbols.slice(0, 16).map((s) => String(s)) : null,
     reason: scope.reason || null,
     vendoredPromoted: Array.isArray(scope.vendoredPromoted) ? scope.vendoredPromoted.slice(0, 16) : [],
+    droppedSeeds: Array.isArray(scope.droppedSeeds) ? scope.droppedSeeds.slice(0, 64) : [],
   };
 }
 

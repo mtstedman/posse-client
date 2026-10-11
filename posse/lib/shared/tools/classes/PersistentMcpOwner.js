@@ -5,6 +5,7 @@ import { observeAtlasRequest } from "../functions/atlas-request-observation.js";
 import { executeDispatchAgent, submitWebResearchHandoff } from "../../../domains/web-research/classes/WebResearchRuntime.js";
 import { executeFinalReview } from "../../../domains/assessment/classes/FinalReviewRuntime.js";
 import { FINAL_REVIEW_REVIEWER_STATUS } from "../../../catalog/final-review.js";
+import { getAccountSetting } from "../../../domains/settings/functions/account-settings.js";
 // @ts-check
 //
 // Persistent MCP owner for provider-launched stdio shims.
@@ -259,14 +260,24 @@ function researcherStructureExecutorArgs(session, requestedName, args = {}) {
 
 /** @param {any} session */
 function researcherStructureProjection(session) {
+  const role = String(session?.bootConfig?.role || "");
+  if (role === "researcher") return COMPACT_STRUCTURE_PROJECTION;
+  if (role !== "dev" && role !== "assessor") return null;
+  try {
+    return getAccountSetting(SETTING_KEYS.ATLAS_COMPACT_STRUCTURE_DEV_ASSESSOR) === "on"
+      ? COMPACT_STRUCTURE_PROJECTION : null;
+  } catch { return null; }
+}
+
+function structureMaxChars(session) {
   return String(session?.bootConfig?.role || "") === "researcher"
-    ? COMPACT_STRUCTURE_PROJECTION
-    : null;
+    ? COMPACT_STRUCTURE_DEFAULT_MAX_CHARS : 12_000;
 }
 
 export const __testCompactCallerExecutorArgs = compactCallerExecutorArgs;
 export const __testResearcherStructureExecutorArgs = researcherStructureExecutorArgs;
 export const __testResearcherStructureProjection = researcherStructureProjection;
+export const __testStructureMaxChars = structureMaxChars;
 export const __testRememberCompactCallerPageVersion = rememberCompactCallerPageVersion;
 const CONCURRENT_RESEARCH_ATLAS_ACTIONS = new Set(MCP_CONCURRENT_ATLAS_ACTIONS);
 const SUB_AGENT_ROUTING_MIN_EVIDENCE_CALLS = 2;
@@ -2065,9 +2076,10 @@ function recordProviderIssuedToolSurface(session, message) {
         direct: policy.atlasResearcherDirect === true,
       },
       limits: { ...researchSynthesisPolicyFor(session) },
-      projections: usesResearcherAtlasReadSurface(policy)
-        ? { "symbol.callers": "compact-v1", "code.structure": "compact-structure-v1" }
-        : {},
+      projections: {
+        ...(usesResearcherAtlasReadSurface(policy) ? { "symbol.callers": "compact-v1" } : {}),
+        ...(researcherStructureProjection(session) ? { "code.structure": "compact-structure-v1" } : {}),
+      },
       instructions_sha256: null,
       role: boot.role || null,
       provider: boot.providerName || null,
@@ -3706,7 +3718,7 @@ function appendHashRefToMcpTextResult(result, toolName, toolArgs, session) {
     args,
     context,
     projection: researcherStructureProjection(session),
-    maxChars: COMPACT_STRUCTURE_DEFAULT_MAX_CHARS,
+    maxChars: structureMaxChars(session),
   });
   const compacted = structureCompacted.compacted
     ? structureCompacted

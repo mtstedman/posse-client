@@ -239,6 +239,7 @@ import {
   findAdminLegacyWorktree,
 } from "../../git/functions/admin-git.js";
 import { resolveTargetBranch, resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
+import { mergeFailureDiagnostics } from "../../git/functions/merge-failure-diagnostics.js";
 import { GIT_OPERATION_TIMEOUT_MS, gitExecAsync, isGitCommandFailure } from "../../git/functions/utils.js";
 import { ensureRestrictivePushRefspecsAsync, remotePushConfigsAreClearlyRestrictive } from "../../git/functions/push-guard.js";
 import { hasExplicitOneshotIntent, normalizeIntakeHints, rebaseIntakeHintsForMode } from "../../intake/functions/hints.js";
@@ -2271,7 +2272,7 @@ async function cmdMerge() {
       return { ok: true, alreadyMerged: true, branchName: lockedWi.branch_name || wi.branch_name };
     }
     if (!lockedWi.branch_name) {
-      markWorkItemMergeFailed(wi.id);
+      markWorkItemMergeFailed(wi.id, mergeFailureDiagnostics({ reason: "branch_missing", message: "Work-item branch is no longer available" }, { targetBranch }));
       return { ok: false, reason: "branch_missing", message: "Work-item branch is no longer available" };
     }
     // The operator confirmed the merge prompt above — honor it past a
@@ -2282,7 +2283,7 @@ async function cmdMerge() {
       mergeLockAlreadyHeld: true,
     });
     if (result.ok) setMergeState(wi.id, "merged");
-    else if (!result.deferred) markWorkItemMergeFailed(wi.id);
+    else if (!result.deferred) markWorkItemMergeFailed(wi.id, mergeFailureDiagnostics(result, { targetBranch }));
     return { ...result, branchName: lockedWi.branch_name };
   });
   if (!mergeOutcome.acquired) {

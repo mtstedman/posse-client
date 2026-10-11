@@ -18,6 +18,47 @@ import { GIT_MERGE_TIMEOUT_MS } from "./workflow-git-utils.js";
 import { resolveSharedTrunkConfigRuntime } from "./shared-trunk-config.js";
 import { SETTING_KEYS, SHARED_TRUNK_DEFAULTS } from "../../../catalog/settings.js";
 import { getAccountRepoSetting } from "../../settings/functions/account-settings.js";
+import { getDb } from "../../../shared/storage/functions/index.js";
+
+export function pushEvidenceWarnings(items, unpushedCommits = new Set(), unresolvedGates = []) {
+  const warnings = [];
+  const seen = new Set();
+  for (const wi of items || []) {
+    let metadata = {};
+    try { metadata = JSON.parse(wi.metadata_json || "{}"); } catch { /* legacy metadata */ }
+    for (const debt of Array.isArray(metadata?.target_debt) ? metadata.target_debt : []) {
+      if (!unpushedCommits.has(debt.commit)) continue;
+      const key = `${debt.commit}\0${debt.command}\0${debt.failure_fingerprint || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      warnings.push({ kind: "target_debt", work_item_id: wi.id, commit: debt.commit,
+        command: debt.command, blocked_work_item_ids: debt.blocked_work_item_ids || [] });
+    }
+  }
+  for (const gate of unresolvedGates || []) {
+    const key = `unverified\0${gate.work_item_id}\0${gate.command}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    warnings.push({ kind: "unverified", work_item_id: gate.work_item_id, command: gate.command });
+  }
+  return warnings;
+}
+
+function openUnverifiedMergeGates() {
+  try {
+    const rows = getDb().prepare(`
+      SELECT work_item_id, payload_json FROM jobs
+      WHERE job_type = 'human_input' AND status IN ('queued', 'waiting_on_human')
+        AND json_valid(payload_json)
+        AND json_extract(payload_json, '$.merge_failure_recovery.integration_gate') IS NOT NULL
+    `).all();
+    return rows.flatMap((row) => {
+      const gate = JSON.parse(row.payload_json)?.merge_failure_recovery?.integration_gate;
+      return (gate?.results || []).filter((result) => result?.target_debt_classification?.outcome === "unverified")
+        .map((result) => ({ work_item_id: row.work_item_id, command: result.test?.name || result.test?.id || "check" }));
+    });
+  } catch { return []; }
+}
 
 export function createPushWorkflowHelpers(context, { auditWorktreeState, askSingleKeyYesNo }) {
   const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, nonInteractive, askFn, nativeParity } = context;
@@ -100,15 +141,25 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     // null = no upstream ref yet (never pushed) or git error; callers fall
     // back to the merge-count gate in that case.
     let aheadCount = null;
+    let unpushedCommits = new Set();
     try {
       const upstreamRef = `${effectiveRemote}/${pushBranch}`;
       gitExec(["rev-parse", "--verify", "--quiet", upstreamRef], projectDir, { nativeParity });
       const counted = gitExec(["rev-list", "--count", `${upstreamRef}..${pushBranch}`], projectDir, { timeoutMs: 5000, nativeParity }).trim();
       const parsed = Number.parseInt(counted, 10);
       aheadCount = Number.isFinite(parsed) ? parsed : null;
+      unpushedCommits = new Set(gitExec(["rev-list", `${upstreamRef}..${pushBranch}`], projectDir,
+        { timeoutMs: 5000, nativeParity }).split(/\r?\n/).filter(Boolean));
     } catch {
       aheadCount = null;
+      try {
+        // No tracking ref means every local commit is still unpublished.
+        unpushedCommits = new Set(gitExec(["rev-list", pushBranch], projectDir,
+          { timeoutMs: 5000, nativeParity }).split(/\r?\n/).filter(Boolean));
+      } catch { /* retain the unresolved range instead of guessing */ }
     }
+
+    const pushWarnings = pushEvidenceWarnings(listWorkItems(), unpushedCommits, openUnverifiedMergeGates());
 
     const dirtyItems = auditWorktreeState();
     const unmergedWIs = dirtyItems
@@ -137,6 +188,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       workingTreeStatus,
       unmergedWIs,
       aheadCount,
+      pushWarnings,
     };
   }
 
@@ -396,6 +448,14 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     }
     if (pushBranchInfo.fallback) {
       console.log(`  ${C.yellow}Configured target branch ${C.cyan}${pushBranchInfo.missingBranch}${C.yellow} is not a local branch; using ${C.cyan}${pushBranch}${C.yellow} for push.${C.reset}`);
+    }
+
+    for (const warning of Array.isArray(state.pushWarnings) ? state.pushWarnings : []) {
+      if (warning.kind === "target_debt") {
+        console.log(`  ${C.red}${C.bold}\u26a0 ${pushBranch} is red: WI#${warning.work_item_id} introduced ${warning.command} failure at ${String(warning.commit).slice(0, 7)}.${C.reset}`);
+      } else if (warning.kind === "unverified") {
+        console.log(`  ${C.yellow}${C.bold}\u26a0 Merge verification remains unverified for WI#${warning.work_item_id}: ${warning.command}.${C.reset}`);
+      }
     }
 
     const workingTreeStatus = String(state.workingTreeStatus || "").trim();

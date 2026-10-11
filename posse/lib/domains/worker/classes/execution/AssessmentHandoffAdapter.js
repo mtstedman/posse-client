@@ -90,6 +90,7 @@ import {
 } from "../../functions/helpers/configured-verification.js";
 import { repairTestDependencies } from "../../functions/helpers/test-dependency-repair.js";
 import { isVerificationInfrastructureOutcome } from "../../functions/helpers/verification-outcome.js";
+import { routeAssessmentInfrastructureFailure } from "../../functions/helpers/assessment-pipeline.js";
 
 function _syncAssessorWorkerDisplay(display, job, {
   tier = "cheap",
@@ -267,10 +268,9 @@ export class AssessmentHandoffAdapter {
           worker._releaseLease(job, leaseToken, "queued");
         }
       } else {
-        setAssessmentLifecycle(job.id, "assessment_failed", { error: missing.message, completed: true });
-        setJobError(job.id, `${missing.message}; automatic source repair already attempted`);
-        worker.emit(job.id, `${C.red}[assess-only] Missing bound source after automatic repair; failed closed without a human gate${C.reset}`);
-        worker._releaseLease(job, leaseToken, "failed");
+        missing.assessmentGateImmediately = true;
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken, missing);
+        worker.emit(job.id, `${C.yellow}[assess-only] Missing bound source after automatic repair; completed work preserved for recovery${C.reset}`);
       }
       return { handled: true };
     }

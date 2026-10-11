@@ -58,6 +58,7 @@ export function postChangeReceiptsAtCommit(workItemId, commitHash, { limit = 256
       command: String(receipt.command || "").slice(0, 300) || null,
       source: receipt.source || null,
       status: String(receipt.status || "unknown"),
+      coverage_status: String(receipt.coverage_status || "unknown"),
       commit_hash: commit,
       test_counts: receipt.test_counts || null,
     });

@@ -35,6 +35,17 @@ import { withMergeLockSync } from "./locks.js";
 const OPEN_GATE_STATUSES = ["queued", "waiting_on_human"];
 const OPEN_GATE_STATUSES_SQL = `(${OPEN_GATE_STATUSES.map((status) => `'${status}'`).join(", ")})`;
 
+export function pushOfferWarningLines(state = {}) {
+  const branch = String(state.pushBranch || state.targetBranch || "target");
+  return (Array.isArray(state.pushWarnings) ? state.pushWarnings : []).slice(0, 10).map((warning) => {
+    if (warning.kind === "target_debt") {
+      return `${branch} is red: WI#${warning.work_item_id} introduced a failing ${warning.command || "check"}`
+        + ` at ${String(warning.commit || "").slice(0, 7)}; blocked WI(s) ${(warning.blocked_work_item_ids || []).map((id) => `#${id}`).join(", ") || "unknown"}.`;
+    }
+    return `Merge verification remains unverified for WI#${warning.work_item_id}: ${warning.command || "check"}.`;
+  });
+}
+
 export function closePushOfferGate(jobId, status, result, {
   expectedStatuses = OPEN_GATE_STATUSES,
 } = {}) {
@@ -257,6 +268,9 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
   if (!workItemId) return { ok: false, reason: "no_work_item" };
 
   const db = getDb();
+  const countText = aheadCount != null ? `${aheadCount} commit(s)` : "pending commits";
+  const warningLines = pushOfferWarningLines(state);
+  const prompt = [...warningLines, `Push ${countText} on ${state.pushBranch} to ${state.effectiveRemote || "origin"}?`].join("\n");
   const outcome = withMergeLockSync(() => runImmediateTransaction(db, () => {
     const remote = String(state.effectiveRemote || "origin");
     const branch = String(state.pushBranch);
@@ -268,6 +282,11 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
         OPEN_GATE_STATUSES.includes(latest.status)
         && humanGateStateAllowsAnswer(latest.gate_state)
       ) {
+        const previous = parsedObject(latest.payload_json);
+        if (previous.prompt !== prompt) {
+          db.prepare("UPDATE jobs SET payload_json = ?, updated_at = ? WHERE id = ?")
+            .run(JSON.stringify({ ...previous, prompt, questions: [prompt], push_warnings: state.pushWarnings || [] }), now(), latest.id);
+        }
         return {
           ok: true,
           jobId: Number(latest.id),
@@ -288,7 +307,6 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
 
     cancelOpenPushOfferGatesInTransaction("superseded_by_new_offer");
 
-    const countText = aheadCount != null ? `${aheadCount} commit(s)` : "pending commits";
     const payload = {
       subtype: PUSH_OFFER_SUBTYPE,
       question_kind: "push_offer",
@@ -307,8 +325,9 @@ export function upsertPushOfferGate(state = {}, { createdBy = "run_wrapup" } = {
           title: String(item.title || "").slice(0, 120),
           branch: String(item.branchName || item.branch || "").slice(0, 120),
       })),
-      prompt: `Push ${countText} on ${branch} to ${remote}?`,
-      questions: [`Push ${countText} on ${branch} to ${remote}?`],
+      push_warnings: state.pushWarnings || [],
+      prompt,
+      questions: [prompt],
       created_by: createdBy,
     };
 

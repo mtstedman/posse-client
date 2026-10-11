@@ -5,7 +5,7 @@ import {
   mergeJobResultFields,
 } from "../../../queue/functions/index.js";
 import { summarizeJobToolMix } from "../../../observability/functions/observations.js";
-import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
+import { PARKED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 import {
   cleanupAgentLoaderAsync,
   loaderPathForJob,
@@ -77,11 +77,11 @@ export class WorkerExecutionFinalizer {
       try {
         const freshJob = getJob(job.id);
         // Persist a compact per-job tool-usage profile before the observation
-        // tail prune reclaims this terminal job's rows (10-min grace). Runs for
-        // every terminal job, unconditionally — this is measurement, not the
+        // tail prune reclaims this job's rows (10-min grace). Runs for
+        // parked and terminal jobs — this is measurement, not the
         // auto-feedback path (which is gated + succeeded-only). Advisory: a
         // failure here must never fail finalization.
-        if (freshJob && TERMINAL_JOB_STATUSES.includes(String(freshJob.status || ""))) {
+        if (freshJob && [...TERMINAL_JOB_STATUSES, ...PARKED_JOB_STATUSES].includes(String(freshJob.status || ""))) {
           const toolMix = summarizeJobToolMix(job.id);
           if (toolMix) mergeJobResultFields(job.id, { tool_mix: toolMix });
         }

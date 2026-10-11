@@ -1,8 +1,8 @@
 import { registerTransactionLifecycleHooks } from "./common.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { warnOnceForInvalidEventType } from "../../observability/functions/event-types.js";
-import { markTelemetryRowsMirrored, pruneTelemetryTableToTail } from "../../../shared/telemetry/functions/db-tail.js";
-import { appendRunTelemetry, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
+import { pruneTelemetryTableToTail } from "../../../shared/telemetry/functions/db-tail.js";
+import { getRunTelemetryId, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
 import {
   AGENT_ACTIVITY_KINDS,
   AGENT_ACTIVITY_LIMITS,
@@ -159,10 +159,6 @@ export function queryRetainedEventRows({
   }).map(normalizeEventRow).filter(Boolean);
 }
 
-function appendEventFileRow(row) {
-  return appendRunTelemetry("events", normalizeEventRow(row));
-}
-
 function insertEventRow(stmt, row) {
   const createdAt = row.created_at || nowIso();
   const info = stmt.run(
@@ -175,6 +171,7 @@ function insertEventRow(stmt, row) {
     row.message,
     row.event_json,
     createdAt,
+    getRunTelemetryId(),
   );
   return { ...row, id: Number(info.lastInsertRowid), created_at: createdAt };
 }
@@ -230,9 +227,16 @@ const EVENT_BATCH_FLUSH_AT = 64;
 const _pendingEvents = [];
 let _eventFlushTimer = null;
 let _eventFlushAfterTransaction = false;
+let _eventExportAfterTransaction = false;
 registerTransactionLifecycleHooks({
-  onCommit: () => { if (_eventFlushAfterTransaction) flushEventsNow(); },
-  onRollback: () => { _eventFlushAfterTransaction = false; },
+  onCommit: () => {
+    if (_eventFlushAfterTransaction) flushEventsNow();
+    if (_eventExportAfterTransaction) {
+      _eventExportAfterTransaction = false;
+      try { pruneTelemetryTableToTail(getDb(), "events"); } catch { /* retry on later activity */ }
+    }
+  },
+  onRollback: () => { _eventFlushAfterTransaction = false; _eventExportAfterTransaction = false; },
 });
 let _eventExitHookInstalled = false;
 
@@ -274,12 +278,10 @@ export function flushEventsNow() {
   _eventFlushAfterTransaction = false;
   const drain = _pendingEvents.splice(0, _pendingEvents.length);
   const stmt = db.prepare(`
-    INSERT INTO events (work_item_id, job_id, attempt_id, event_type, actor_type, actor_id, message, event_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO events (work_item_id, job_id, attempt_id, event_type, actor_type, actor_id, message, event_json, created_at, export_run_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   let insertedRows = [];
-  let mirroredAllRows = true;
-  const mirroredIds = [];
   const insertMany = db.transaction((rows) => {
     for (const row of rows) {
       insertedRows.push(insertEventRow(stmt, row));
@@ -299,17 +301,8 @@ export function flushEventsNow() {
       } catch { /* drop this one event */ }
     }
   }
-  for (const row of insertedRows) {
-    try {
-      if (appendEventFileRow(row)) mirroredIds.push(row.id);
-      else mirroredAllRows = false;
-    } catch {
-      mirroredAllRows = false;
-    }
-  }
-  markTelemetryRowsMirrored("events", mirroredIds);
-  if (mirroredAllRows) {
-    try { pruneTelemetryTableToTail(db, "events"); } catch { /* telemetry pruning is best effort */ }
+  if (insertedRows.length > 0) {
+    try { pruneTelemetryTableToTail(db, "events"); } catch { /* durable pending rows retry later */ }
   }
   return drain.length;
 }
@@ -370,20 +363,13 @@ export function logEvent({
 export function logDurableEvent(args = {}) {
   const db = getDb();
   const stmt = db.prepare(`
-    INSERT INTO events (work_item_id, job_id, attempt_id, event_type, actor_type, actor_id, message, event_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO events (work_item_id, job_id, attempt_id, event_type, actor_type, actor_id, message, event_json, created_at, export_run_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const inserted = insertEventRow(stmt, eventRow(args));
   if (!db.inTransaction) {
-    try {
-      if (appendEventFileRow(inserted)) {
-        markTelemetryRowsMirrored("events", [inserted.id]);
-        pruneTelemetryTableToTail(db, "events");
-      }
-    } catch {
-      // The DB event is the recovery authority; telemetry mirroring is best effort.
-    }
-  }
+    try { pruneTelemetryTableToTail(db, "events"); } catch { /* durable pending row retries later */ }
+  } else _eventExportAfterTransaction = true;
   return inserted;
 }
 
@@ -527,7 +513,7 @@ export function getEventsByWorkItemSinceId(workItemId, sinceId = 0, limit = 100)
   flushEventsNow();
   const db = getDb();
   const cappedLimit = Math.max(0, Number(limit) || 0);
-  const fileRows = readEventFileRows({ workItemId, sinceId, limit: cappedLimit, order: "asc" });
+  const fileRows = readEventFileRows({ workItemId, sinceId, limit: null, order: "asc" });
   const dbRows = db.prepare(`
     SELECT * FROM events
     WHERE work_item_id = ?
@@ -546,7 +532,7 @@ export function getEventsSinceId(sinceId = 0, limit = 100) {
   flushEventsNow();
   const db = getDb();
   const cappedLimit = Math.max(0, Number(limit) || 0);
-  const fileRows = readEventFileRows({ sinceId, limit: cappedLimit, order: "asc" });
+  const fileRows = readEventFileRows({ sinceId, limit: null, order: "asc" });
   const dbRows = db.prepare(`
     SELECT * FROM events
     WHERE id > ?
@@ -560,7 +546,7 @@ export function getHeadEventId() {
   flushEventsNow();
   const db = getDb();
   const row = db.prepare(`SELECT COALESCE(MAX(id), 0) AS id FROM events`).get();
-  const fileHead = readEventFileRows({ limit: 1, order: "desc" })[0]?.id || 0;
+  const fileHead = readEventFileRows({ limit: null, order: "desc" }).reduce((max, row) => Math.max(max, Number(row.id || 0)), 0);
   return Math.max(Number(row?.id || 0), Number(fileHead || 0));
 }
 

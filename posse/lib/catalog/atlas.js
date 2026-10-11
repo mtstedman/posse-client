@@ -13,6 +13,11 @@ export const ATLAS_IDENTIFIER_BEARER_LIMIT = 12;
 // changing still fails instead of looping.
 export const ATLAS_WI_REFRESH_MAX_SOURCE_PASSES = 3;
 
+// The worker's normal freshness retry window is three 2.5-second waits.
+// A pending main warm may keep a fresh job out of the lease pool only for
+// this bounded interval; the worker remains the authoritative readiness gate.
+export const ATLAS_FRESHNESS_PRELEASE_FENCE_MS = 3 * 2500;
+
 export const ATLAS_PATH_RECOVERY_POLICY = Object.freeze({
   indexedPathLimit: 5000,
   candidateLimit: 3,

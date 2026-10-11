@@ -16,6 +16,8 @@ import { withMergeLock } from "../../queue/functions/locks.js";
 import { createGitWorkflowHelpers } from "./workflows.js";
 import { resolveTargetBranchForAdmin } from "./target-branch.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
+import { mergeFailureDiagnostics } from "./merge-failure-diagnostics.js";
+export { mergeFailureDiagnostics } from "./merge-failure-diagnostics.js";
 
 /**
  * @param {number} workItemId
@@ -30,7 +32,7 @@ export async function mergeWorkItemNow(workItemId, { projectDir, actor = "operat
     if (!workItem) return { ok: false, reason: "no_such_wi", message: "The work item no longer exists" };
     if (workItem.merge_state === "merged") return { ok: true, alreadyMerged: true };
     if (!workItem.branch_name) {
-      markWorkItemMergeFailed(workItemId, { message: "The work-item branch is no longer available", targetBranch });
+      markWorkItemMergeFailed(workItemId, mergeFailureDiagnostics({ reason: "branch_missing", message: "The work-item branch is no longer available" }, { targetBranch }));
       return { ok: false, reason: "branch_missing", message: "The work-item branch is no longer available" };
     }
     const result = await helpers.gitMergeToTargetAsync(workItem.branch_name, projectDir, {
@@ -40,7 +42,7 @@ export async function mergeWorkItemNow(workItemId, { projectDir, actor = "operat
       testWaiver,
     });
     if (result?.ok) setMergeState(workItemId, "merged");
-    else if (!result?.deferred) markWorkItemMergeFailed(workItemId, { message: result?.message || null, targetBranch, integrationGate: result?.integrationGate || null });
+    else if (!result?.deferred) markWorkItemMergeFailed(workItemId, mergeFailureDiagnostics(result, { targetBranch }));
     return { ...result, branchName: workItem.branch_name };
   });
   if (!outcome.acquired) {

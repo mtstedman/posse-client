@@ -17,6 +17,8 @@ import { DEADLOCK_TERMINAL_STATUSES } from "../../../catalog/job.js";
 import { appendRunTelemetry, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
 import { discardHashRefTraversalsForAgentCall } from "./hash-refs.js";
 import { isAgentCallChildKind } from "../../../catalog/agent-call.js";
+import { providerTurnLimitMode } from "../../../catalog/provider.js";
+import { pricingBasis } from "../../billing/functions/pricing.js";
 
 // Provider-native web tool uses are replayed after the agent process returns,
 // so they can land a beat after finished_at while still belonging to the call.
@@ -153,14 +155,14 @@ export function createAgentCall({
     INSERT INTO agent_calls (
       work_item_id, job_id, attempt_id, parent_agent_call_id, child_kind,
       role, model_tier, model_name, activity,
-      prompt_chars, max_turns_configured, max_output_tokens_configured, provider,
+      prompt_chars, max_turns_configured, turn_limit_mode, max_output_tokens_configured, provider,
       reasoning_effort, extended_thinking, atlas_method, atlas_prefetch_status, skills,
       prior_session_handle, session_handle, originator_instance_id, executor_instance_id, started_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     work_item_id, job_id, attempt_id, parentAgentCallId, normalizedChildKind,
     role, model_tier, model_name, activity,
-    prompt_chars, max_turns_configured, max_output_tokens_configured, provider,
+    prompt_chars, max_turns_configured, providerTurnLimitMode(provider), max_output_tokens_configured, provider,
     reasoning_effort, extended_thinking ? 1 : 0, atlas_method, atlas_prefetch_status, normalizeSkillsColumn(skills),
     prior_session_handle == null ? null : String(prior_session_handle),
     session_handle == null ? null : String(session_handle),
@@ -220,6 +222,9 @@ export function completeAgentCall(id, {
   session_handle = null,
 } = {}) {
   const db = getDb();
+  const pricedCall = db.prepare("SELECT provider, model_tier, model_name FROM agent_calls WHERE id = ?").get(id);
+  const rateBasis = pricedCall ? pricingBasis({ provider: pricedCall.provider,
+    modelTier: pricedCall.model_tier, modelName: model_name || pricedCall.model_name }) : null;
   db.prepare(`
     UPDATE agent_calls
     SET status = ?, finished_at = ?, duration_ms = ?,
@@ -237,6 +242,7 @@ export function completeAgentCall(id, {
         skills = COALESCE(?, skills),
         session_handle = COALESCE(?, session_handle),
         cost_estimate_usd = COALESCE(?, cost_estimate_usd),
+        pricing_basis = COALESCE(?, pricing_basis),
         provider_usage_status = COALESCE(?, provider_usage_status),
         billing_precision = COALESCE(?, billing_precision),
         exact_billable_input_tokens = COALESCE(?, exact_billable_input_tokens),
@@ -260,6 +266,7 @@ export function completeAgentCall(id, {
     normalizeSkillsColumn(skills),
     session_handle == null ? null : String(session_handle),
     cost_estimate_usd,
+    rateBasis,
     provider_usage_status == null ? null : String(provider_usage_status),
     billing_precision == null ? null : String(billing_precision),
     exact_billable_input_tokens,

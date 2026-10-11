@@ -50,6 +50,7 @@ import { createTestExecutionExecutors } from "./test-execution.js";
 import { createObservationWrapper } from "./factory.js";
 import { boundedSearchRows, renderSearchContentRows } from "./search-results.js";
 import { createTextMutationHelpers } from "./edits-mutations.js";
+import { applyAtomicEdits } from "./edit-spans.js";
 import {
   buildStructuredReadResult as buildStructuredReadResultFromModule,
   formatNumberedLines as formatNumberedLinesFromModule,
@@ -527,6 +528,7 @@ export function createDeterministicToolkit({
 
     const exactRequested = args.old_string !== undefined || args.new_string !== undefined;
     const replaceLines = args.replaceLines;
+    const edits = args.edits;
     const replacePattern = args.replacePattern;
     const insertAt = args.insertAt;
     const append = args.append;
@@ -536,6 +538,7 @@ export function createDeterministicToolkit({
     const modes = [
       exactRequested && "old_string/new_string",
       replaceLines !== undefined && "replaceLines",
+      edits !== undefined && "edits",
       replacePattern !== undefined && "replacePattern",
       insertAt !== undefined && "insertAt",
       append !== undefined && "append",
@@ -543,7 +546,7 @@ export function createDeterministicToolkit({
       executableRequested && "executable",
     ].filter(Boolean);
     if (modes.length === 0) {
-      return "Error: edit_file requires exactly one edit mode: old_string/new_string, replaceLines, replacePattern, insertAt, append, jsonPath/jsonValue, or executable.";
+      return "Error: edit_file requires exactly one edit mode: old_string/new_string, replaceLines, edits, replacePattern, insertAt, append, jsonPath/jsonValue, or executable.";
     }
     if (modes.length > 1) {
       return `Error: edit_file accepts only one edit mode per call; received ${modes.join(", ")}.`;
@@ -552,6 +555,16 @@ export function createDeterministicToolkit({
     if (modes[0] === "executable") {
       setFileExecutable(filePath, Boolean(args.executable));
       return `File mode updated: ${displayPath} (executable=${Boolean(args.executable)})`;
+    }
+
+    if (modes[0] === "edits") {
+      if (Object.keys(args).some((key) => !["path", "edits"].includes(key))) {
+        return "Error: edits mode accepts only path and edits.";
+      }
+      const applied = applyAtomicEdits(originalContent, edits);
+      if (applied.error) return `Error: ${applied.error}.`;
+      writeTextFileAtomic(filePath, applied.content);
+      return `File edited: ${displayPath} (${applied.editCount} atomic edits)`;
     }
 
     if (modes[0] === "replaceLines") {
@@ -1557,9 +1570,12 @@ export function createDeterministicToolkit({
     if (lockErr) return lockErr;
 
     try {
-      const parsed = decodePngToRgba(fs.readFileSync(srcPath));
+      const original = fs.readFileSync(srcPath);
+      const parsed = decodePngToRgba(original);
+      const encoded = encodeRgbaToPng(parsed.width, parsed.height, parsed.data);
+      const chosen = encoded.length < original.length ? encoded : original;
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
-      fs.writeFileSync(destPath, encodeRgbaToPng(parsed.width, parsed.height, parsed.data));
+      if (destPath !== srcPath || chosen !== original) fs.writeFileSync(destPath, chosen);
       return JSON.stringify({
         ok: true,
         input: toDisplayPath(cwd, srcPath),
@@ -1629,7 +1645,9 @@ export function createDeterministicToolkit({
 
       if (inputFormat === "png") {
         const parsed = decodePngToRgba(inputBuffer);
-        fs.writeFileSync(destPath, encodeRgbaToPng(parsed.width, parsed.height, parsed.data));
+        const encoded = encodeRgbaToPng(parsed.width, parsed.height, parsed.data);
+        const chosen = encoded.length < inputBuffer.length ? encoded : inputBuffer;
+        if (destPath !== srcPath || chosen !== inputBuffer) fs.writeFileSync(destPath, chosen);
         return JSON.stringify({
           ok: true,
           input: toDisplayPath(cwd, srcPath),
@@ -1911,7 +1929,7 @@ export function createDeterministicToolkit({
       const edgeOnly = args.edge_only ?? args.edgeOnly;
       const keyed = _applyAlphaKey(parsed, { targetColor, tolerance, edgeOnly });
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
-      fs.writeFileSync(destPath, encodeRgbaToPng(parsed.width, parsed.height, keyed.data));
+      fs.writeFileSync(destPath, encodeRgbaToPng(parsed.width, parsed.height, keyed.data, { forceRgba: true }));
       const metadata = readImageFacts(destPath);
       return JSON.stringify({
         ok: true,

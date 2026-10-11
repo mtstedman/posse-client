@@ -5,9 +5,11 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { getToolMetadataRegistry } from "../../../shared/tools/functions/tool-suites.js";
 import { getToolCatalogEntry } from "../../integrations/functions/deterministic-mcp/tool-descriptors.js";
+import { normalizeFailureFingerprintText } from "../../worker/functions/helpers/test-failure-evidence.js";
 import {
   FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
   FINAL_REVIEW_MAX_FINDINGS,
+  FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS,
   FINAL_REVIEW_OBSERVATIONS,
   FINAL_REVIEW_OUTCOMES,
   FINAL_REVIEW_VERDICTS,
@@ -72,7 +74,9 @@ function claimEvidence(claim) {
   const detail = Array.isArray(claim) ? claim[1] || {} : claim;
   const evidence = [detail.evidence, detail.proof, detail.support].flatMap((lane) => Array.isArray(lane) ? lane : lane ? [lane] : []);
   const rendered = evidence.map((entry) => (typeof entry === "string" ? entry : JSON.stringify(entry))).filter(Boolean);
-  return rendered.length > 0 ? rendered.join("; ").slice(0, 600) : null;
+  // The handoff contract already bounds evidence size. Cutting serialized
+  // selectors here can remove their ref or line range and leave invalid JSON.
+  return rendered.length > 0 ? rendered.join("; ") : null;
 }
 
 /**
@@ -132,18 +136,43 @@ function mutatingToolObservationTypes() {
 export function finalReviewResultsForAttempt({ jobId, attemptId, db = getDb() }) {
   if (!jobId || !attemptId) return [];
   return db.prepare(`
-    SELECT id, detail_json
-    FROM job_observations
+    SELECT observation_id AS id, detail_json
+    FROM final_review_records
     WHERE job_id = ? AND attempt_id = ? AND observation_type = ?
     ORDER BY id ASC
   `).all(jobId, attemptId, FINAL_REVIEW_OBSERVATIONS.RESULT)
     .map((row) => ({ id: Number(row.id), ...parseDetail(row) }));
 }
 
+/** Bound repeated deterministic failures without charging a semantic review. */
+export function repeatedDeterministicReview(results = [], reviewIdentity = null) {
+  const recent = results.slice(-FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS);
+  if (recent.length < FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS) return null;
+  const signature = (result) => JSON.stringify({
+    review_identity: result.review_identity,
+    findings: (result.findings || []).map((finding) => ({
+      criterion: normalizeFailureFingerprintText(finding.criterion), paths: finding.paths || [],
+    })),
+    checks: [result.declared_tests, result.changed_tests].map((check) => check && ({
+      command: check.command, status: check.status, reason: check.reason,
+      failure_summary: normalizeFailureFingerprintText(check.failure_summary),
+      stdout: normalizeFailureFingerprintText(check.stdout),
+      stderr: normalizeFailureFingerprintText(check.stderr),
+    })),
+    changed_file_checks_status: result.changed_file_checks_status,
+  });
+  const last = recent.at(-1);
+  if (!last.review_identity || (reviewIdentity && last.review_identity !== reviewIdentity)
+    || recent.some((result) => result.review_mode !== "deterministic"
+      || result.outcome !== FINAL_REVIEW_OUTCOMES.FINDINGS
+      || signature(result) !== signature(last))) return null;
+  return last;
+}
+
 export function finalReviewIssuedTo({ jobId, agentCallId, db = getDb() }) {
   if (!jobId || !agentCallId) return false;
   return db.prepare(`
-    SELECT detail_json FROM job_observations WHERE job_id = ? AND observation_type = ?
+    SELECT detail_json FROM final_review_records WHERE job_id = ? AND observation_type = ?
   `).all(jobId, FINAL_REVIEW_OBSERVATIONS.ISSUED)
     .some((row) => Number(parseDetail(row).agent_call_id) === Number(agentCallId));
 }
@@ -171,7 +200,8 @@ export function finalReviewHandoffHold({ jobId, attemptId, agentCallId, db = get
   if (!finalReviewIssuedTo({ jobId, agentCallId, db })) return null;
   const results = finalReviewResultsForAttempt({ jobId, attemptId, db });
   if (results.some((result) => result.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED)) return null;
-  if (results.length >= FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT) return null;
+  if (results.filter((result) => result.review_mode !== "deterministic").length >= FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT) return null;
+  if (repeatedDeterministicReview(results)) return null;
   const latest = results.at(-1);
   if (!latest) {
     return "Call tools_final_review before a COMPLETE handoff: it runs the task's declared tests and an independent review of the change.";

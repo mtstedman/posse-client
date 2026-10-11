@@ -816,6 +816,7 @@
  * @property {boolean} truncated
  * @property {string} matchStatus             Whether identifier matching was exact, fallback, or absent.
  * @property {string} [degradedReason]         Stable degradation reason; omitted when the result is complete.
+ * @property {string} [nextBestAction]         Suggested source read when no declarations were indexed.
  * @property {string} [etag]
  */
 
@@ -1031,6 +1032,7 @@
  * @property {Record<string, unknown>} metrics
  * @property {boolean} truncated
  * @property {string[]} warnings
+ * @property {string[]} [unindexedPaths] Requested paths absent from the indexed file inventory.
  * @property {PathAmbiguityData} [pathAmbiguity]
  * @property {NegativeEvidenceData} [negativeEvidence]
  */

@@ -336,13 +336,17 @@ export function recordFileLaneWait(detail = {}) {
   if (!existing) {
     const orderWait = descriptor.holder_type === "work_item"
       && detail.wait_state?.reason === WORK_ITEM_ORDER_WAIT_REASON;
+    const viaJobId = Number(detail.wait_state?.via_job_id) || null;
+    const orderCause = viaJobId
+      ? `its sibling #${viaJobId} and WI#${descriptor.holder_work_item_id} both plan ${descriptor.path}`
+      : `it and WI#${descriptor.holder_work_item_id} both plan ${descriptor.path}`;
     logEvent({
       work_item_id: descriptor.waiter_work_item_id,
       job_id: descriptor.waiter_job_id,
       event_type: EVENT_TYPES.FILE_LANE_WAITING,
       actor_type: EVENT_ACTORS.SCHEDULER,
       message: orderWait
-        ? `Job is waiting for WI#${descriptor.holder_work_item_id} to merge, fail or be canceled; both plan edits to ${descriptor.path}`
+        ? `Job is waiting for WI#${descriptor.holder_work_item_id} to merge, fail or be canceled; ${orderCause}`
         : "Job is waiting for a file lane",
       event_json: JSON.stringify({
         event_kind: "lane_state",
@@ -431,7 +435,8 @@ export function reconcileFileLaneWaits() {
     if (jobs.length === 0) break;
     for (const job of jobs) {
       lastId = Number(job.id);
-      const descriptor = waitDescriptorForConflict(job, findWriteLockConflict(job, getJobWriteScope(job), snapshot));
+      const descriptor = waitDescriptorForConflict(job, findWriteLockConflict(job, getJobWriteScope(job), snapshot,
+        { ignoreHardDependencyPredecessors: true }));
       if (!descriptor) continue;
       desired.set(`${descriptor.waiter_job_id}|${descriptor.lane_id}|${descriptor.holder_key}`, descriptor);
     }
@@ -943,7 +948,7 @@ export function loadWorkItemOrder(db = getDb(), { workItemLocks = null, runnable
     if (job.dispatchable === 1 && (!runnable || runnable.has(entry.id))) entry.ready = true;
     const scope = getJobPathTouchScope(job);
     if (scope.unknown) continue;
-    entry.planned.push(...scopeToLockRows(scope));
+    entry.planned.push(...scopeToLockRows(scope).map((row) => ({ ...row, job_id: job.id })));
   }
   for (const lock of workItemLocks || activeWiLocks(db)) {
     entries.get(Number(lock.work_item_id))?.held.push({ path: lock.path, lock_kind: lock.lock_kind });
@@ -969,7 +974,7 @@ export function findWorkItemOrderConflict(job, order = null) {
   const hit = findWorkItemOrderUpstream(
     resolved,
     job.work_item_id,
-    ownScope.unknown ? [] : scopeToLockRows(ownScope),
+    ownScope.unknown ? [] : scopeToLockRows(ownScope).map((row) => ({ ...row, job_id: job.id })),
   );
   if (!hit) return null;
   return {
@@ -986,13 +991,20 @@ export function findWorkItemOrderConflict(job, order = null) {
       lock_kind: hit.holder.lock_kind,
     },
     candidate: { path: hit.candidate.path, lock_kind: hit.candidate.lock_kind },
-    wait_state: { reason: WORK_ITEM_ORDER_WAIT_REASON, upstream_work_item_id: hit.upstream.id },
+    wait_state: {
+      reason: WORK_ITEM_ORDER_WAIT_REASON,
+      upstream_work_item_id: hit.upstream.id,
+      ...(hit.candidate.job_id && hit.candidate.job_id !== job.id
+        ? { via_job_id: hit.candidate.job_id }
+        : {}),
+    },
   };
 }
 
 export function findWriteLockConflict(job, scope = getJobWriteScope(job), snapshot = null, {
   workItemOrder = true,
   runnableWorkItemIds = null,
+  ignoreHardDependencyPredecessors = false,
 } = {}) {
   if (!jobNeedsWriteLocks(job) || !hasWriteScope(scope)) return null;
   const db = getDb();
@@ -1015,6 +1027,7 @@ export function findWriteLockConflict(job, scope = getJobWriteScope(job), snapsh
     : activeJobLocks(db, { workItemId: job.work_item_id });
   const allowJobIds = new Set([
     ...ancestorJobIdsForJob(job, db),
+    ...(ignoreHardDependencyPredecessors ? unmetHardDependencyPredecessorJobIdsForJob(job, db) : []),
     ...queuedCohortJobIdsForJob(job, db),
     ...queuedDependentJobIdsForJob(job, db),
   ]);
@@ -1113,6 +1126,26 @@ export function ancestorJobIdsForJob(job, db = getDb()) {
   return ids;
 }
 
+// A predecessor already prevents dispatch through the hard dependency. Its
+// file lock must not manufacture an additional lane wait for the successor.
+export function unmetHardDependencyPredecessorJobIdsForJob(job, db = getDb()) {
+  if (!job?.id) return new Set();
+  const rows = db.prepare(`
+    WITH RECURSIVE predecessors(id) AS (
+      SELECT depends_on_job_id FROM job_dependencies
+      WHERE job_id = ? AND dependency_kind = 'hard'
+      UNION
+      SELECT jd.depends_on_job_id FROM job_dependencies jd
+      JOIN predecessors p ON jd.job_id = p.id
+      WHERE jd.dependency_kind = 'hard'
+    )
+    SELECT j.id FROM predecessors p
+    JOIN jobs j ON j.id = p.id
+    WHERE j.status != 'succeeded'
+  `).all(job.id);
+  return new Set(rows.map((row) => Number(row.id)));
+}
+
 // When an assessor failure spawns multiple fix jobs from the same parent dev
 // job, all targeting the same file, those siblings would otherwise phantom-lock
 // each other in `activeJobLocks` and deadlock the entire cohort. Their queued
@@ -1161,7 +1194,7 @@ export function queuedDependentJobIdsForJob(job, db = getDb()) {
   return ids;
 }
 
-function insertMissingWiLocks(db, job, scope, ts, source = "scheduler_handoff") {
+function insertMissingWiLocks(db, job, scope, ts, source = "scheduler_handoff", leaseToken = null) {
   const wi = db.prepare(`
     SELECT status, branch_name, merge_state
     FROM work_items
@@ -1174,7 +1207,8 @@ function insertMissingWiLocks(db, job, scope, ts, source = "scheduler_handoff") 
     INSERT OR IGNORE INTO work_item_file_locks (work_item_id, path, lock_kind, source_job_id, acquired_at, metadata_json)
     VALUES (?, ?, ?, ?, ?, ?)
   `);
-  const metadata = JSON.stringify({ source, job_type: job.job_type });
+  const metadata = JSON.stringify({ source, job_type: job.job_type,
+    ...(leaseToken ? { lease_token: leaseToken } : {}) });
   for (const lock of scopeToLockRows(scope)) {
     stmt.run(job.work_item_id, lock.path, lock.lock_kind, job.id, ts, metadata);
   }
@@ -1497,7 +1531,7 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
     clearFileLaneWaitsForJob(fresh.id, "lane_acquired");
 
     if (needsWriteLocks && hasScope) {
-      if (!assessmentBarrier) insertMissingWiLocks(db, fresh, scope, ts);
+      if (!assessmentBarrier) insertMissingWiLocks(db, fresh, scope, ts, "scheduler_handoff", leaseToken);
       insertJobLocks(db, fresh, scope, ts);
     }
 

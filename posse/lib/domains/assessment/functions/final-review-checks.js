@@ -46,7 +46,10 @@ export function changedTestPlan(job, payload, change, declaredPlan, {
   lineagePaths = [],
 } = {}) {
   if (!cwd) return null;
-  const declared = new Set(Array.isArray(declaredPlan?.unit_test_paths) ? declaredPlan.unit_test_paths : []);
+  const declared = new Set([
+    ...(Array.isArray(declaredPlan?.unit_test_paths) ? declaredPlan.unit_test_paths : []),
+    ...(Array.isArray(declaredPlan?.covered_unit_test_paths) ? declaredPlan.covered_unit_test_paths : []),
+  ]);
   const lineage = (Array.isArray(lineagePaths) ? lineagePaths : [])
     .filter((file) => file && fs.existsSync(path.join(cwd, file)));
   const candidates = [...new Set([...existingChangedFiles(cwd, change), ...lineage])]
@@ -185,10 +188,10 @@ export function finalReviewCheckFindings({ checks = null, changedTestRun = null 
       ...(paths.length > 0 ? { paths } : {}),
     });
   }
-  if (changedTestRun?.status === "failed" || changedTestRun?.status === "timed_out") {
+  if (changedTestRun?.status === "failed") {
     findings.push({
       severity: "high",
-      criterion: `Test files this change added or edited ${changedTestRun.status === "timed_out" ? "time out" : "fail"}: ${changedTestRun.command}\n${failureExcerpt(changedTestRun)}`.slice(0, 1000),
+      criterion: `Test files this change added or edited fail: ${changedTestRun.command}\n${failureExcerpt(changedTestRun)}`.slice(0, 1000),
       paths: String(changedTestRun.command || "").split(", ").filter(Boolean).slice(0, 8),
     });
   }

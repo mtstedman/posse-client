@@ -184,20 +184,60 @@ export function decodePngToRgba(buffer) {
   return { width, height, data: rgba };
 }
 
-export function encodeRgbaToPng(width, height, rgba) {
-  const stride = width * 4;
-  const raw = Buffer.alloc((stride + 1) * height);
-  for (let row = 0; row < height; row++) {
-    const rowOffset = row * (stride + 1);
-    raw[rowOffset] = 0;
-    rgba.copy(raw, rowOffset + 1, row * stride, row * stride + stride);
+function pngRawRows(width, height, rgba, { forceRgba = false } = {}) {
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1
+    || !Buffer.isBuffer(rgba) || rgba.length !== width * height * 4) {
+    throw new Error("PNG dimensions and RGBA pixel buffer do not match.");
   }
+  let opaque = !forceRgba;
+  for (let pixel = 3; opaque && pixel < rgba.length; pixel += 4) opaque = rgba[pixel] === 255;
+  const channels = opaque ? 3 : 4;
+  const stride = width * channels;
+  const raw = Buffer.alloc((stride + 1) * height);
+  let previous = Buffer.alloc(stride);
+  for (let row = 0; row < height; row++) {
+    const source = Buffer.allocUnsafe(stride);
+    for (let pixel = 0; pixel < width; pixel++) {
+      const from = (row * width + pixel) * 4;
+      const to = pixel * channels;
+      source[to] = rgba[from];
+      source[to + 1] = rgba[from + 1];
+      source[to + 2] = rgba[from + 2];
+      if (channels === 4) source[to + 3] = rgba[from + 3];
+    }
+    let bestFilter = 0;
+    let bestScore = Number.POSITIVE_INFINITY;
+    let best = null;
+    for (let filter = 0; filter <= 4; filter++) {
+      const candidate = Buffer.allocUnsafe(stride);
+      let score = 0;
+      for (let index = 0; index < stride; index++) {
+        const left = index >= channels ? source[index - channels] : 0;
+        const up = previous[index];
+        const upLeft = index >= channels ? previous[index - channels] : 0;
+        const predictor = filter === 1 ? left : filter === 2 ? up
+          : filter === 3 ? Math.floor((left + up) / 2)
+            : filter === 4 ? paethPredictor(left, up, upLeft) : 0;
+        const value = (source[index] - predictor) & 0xff;
+        candidate[index] = value;
+        score += value < 128 ? value : 256 - value;
+      }
+      if (score < bestScore) { bestScore = score; bestFilter = filter; best = candidate; }
+    }
+    const offset = row * (stride + 1);
+    raw[offset] = bestFilter;
+    best.copy(raw, offset + 1);
+    previous = source;
+  }
+  return { raw, colorType: opaque ? 2 : 6 };
+}
 
+function pngFromCompressed(width, height, colorType, compressed) {
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(width, 0);
   ihdr.writeUInt32BE(height, 4);
   ihdr[8] = 8;
-  ihdr[9] = 6;
+  ihdr[9] = colorType;
   ihdr[10] = 0;
   ihdr[11] = 0;
   ihdr[12] = 0;
@@ -205,9 +245,23 @@ export function encodeRgbaToPng(width, height, rgba) {
   return Buffer.concat([
     PNG_SIGNATURE,
     makePngChunk("IHDR", ihdr),
-    makePngChunk("IDAT", zlib.deflateSync(raw)),
+    makePngChunk("IDAT", compressed),
     makePngChunk("IEND", Buffer.alloc(0)),
   ]);
+}
+
+export function encodeRgbaToPng(width, height, rgba, options = {}) {
+  const { raw, colorType } = pngRawRows(width, height, rgba, options);
+  return pngFromCompressed(width, height, colorType, zlib.deflateSync(raw, { level: 9 }));
+}
+
+export async function encodeRgbaToPngAsync(width, height, rgba, options = {}) {
+  const { raw, colorType } = pngRawRows(width, height, rgba, options);
+  const compressed = await new Promise((resolve, reject) => zlib.deflate(raw, { level: 9 }, (error, bytes) => {
+    if (error) reject(error);
+    else resolve(bytes);
+  }));
+  return pngFromCompressed(width, height, colorType, compressed);
 }
 
 export function detectImageFormat(buffer) {

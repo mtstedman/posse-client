@@ -19,8 +19,10 @@ import {
 import { C } from "../../../shared/format/functions/colors.js";
 import { gcWorktreesAsync } from "./worktree.js";
 import { sortWorkItemsByCompletion } from "./merge-closeout.js";
+import { mergeFailureDiagnostics } from "./merge-failure-diagnostics.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE } from "../../../catalog/human-input.js";
+import { gitExecSafeAsync } from "./utils.js";
 
 const AUTO_MERGE_STATUS_RECONCILE_STATUSES = [
   "queued",
@@ -141,7 +143,8 @@ export function createAutoMergeWorkflowHelpers(context, {
       const deferredIds = new Set();
       for (const wi of pendingMergeable) {
         const targetBranch = currentTargetBranch();
-        const authorization = authorizeWorkItemAutoMerge(wi.id, { expectedBranch: wi.branch_name });
+        const observedBranchHead = await gitExecSafeAsync(["rev-parse", "--verify", wi.branch_name], projectDir);
+        const authorization = authorizeWorkItemAutoMerge(wi.id, { expectedBranch: wi.branch_name, observedBranchHead });
         if (!authorization.ok && authorization.reason === "verification_review_required") {
           // Not a stale candidate: the authorization opened (and logged) a review gate.
           say(`  ${C.yellow}[git]${C.reset} WI#${wi.id}: planned verification was waived (baseline debt); merge waits for operator review (gate #${authorization.gate_job_id})`);
@@ -279,11 +282,10 @@ export function createAutoMergeWorkflowHelpers(context, {
           }
         } else {
           failedWorkItemIds.add(wi.id);
-          markWorkItemMergeFailed(wi.id, {
+          markWorkItemMergeFailed(wi.id, mergeFailureDiagnostics({
+            ...result,
             message: mergeResultText(result, "merge failed"),
-            targetBranch,
-            integrationGate: result?.integrationGate || null,
-          });
+          }, { targetBranch }));
           logEvent({
             work_item_id: wi.id,
             event_type: EVENT_TYPES.WORK_ITEM_MERGE_FAILED,

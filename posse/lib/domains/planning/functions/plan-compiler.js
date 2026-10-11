@@ -28,6 +28,8 @@ import {
   updateWorkItemRouting,
 } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
+import { snapshotPlanAnchor } from "../../verification/functions/plan-anchor.js";
+import { resolveRepositoryVerificationPlan, verificationPlanSnapshot } from "../../verification/functions/verification-plan.js";
 import {
   getAvailableProviders,
   getProviderMap,
@@ -39,6 +41,7 @@ import { C } from "../../../shared/format/functions/colors.js";
 import {
   artifactTaskOutputRoot,
   contextDir,
+  getResourcesDir,
   getWiModeConfig,
   isValidTaskMode,
   normalizeArtifactCreateFiles,
@@ -115,7 +118,7 @@ import {
   reissueHashRefHandoffPacket,
 } from "../../handoff/functions/helpers/hash-ref-packet.js";
 import {
-  isBroadNarrowScopedCodeTask,
+  broadNarrowScopedCodeTaskSignal,
   parseUnderScopedBroadGateMode,
 } from "./scope-gates.js";
 import { reconcilePlannerFileKinds } from "./scope-reconciliation.js";
@@ -321,8 +324,6 @@ function taskTextForSkillInference(task = {}) {
     task.task_spec,
     task.instructions,
     ...(Array.isArray(task.success_criteria) ? task.success_criteria : [task.success_criteria]),
-    ...(Array.isArray(task.files_to_modify) ? task.files_to_modify : []),
-    ...(Array.isArray(task.files_to_create) ? task.files_to_create : []),
   ].filter(Boolean).join("\n").toLowerCase();
 }
 
@@ -334,15 +335,21 @@ function taskPathsForSkillInference(task = {}) {
   ].map((filePath) => String(filePath || "").replace(/\\/g, "/").toLowerCase());
 }
 
-function shouldInferFrontendDesignSkill(task, { finalJobType, taskMode } = {}) {
+export function shouldInferFrontendDesignSkill(task, { finalJobType, taskMode } = {}) {
   if (finalJobType !== "dev" || taskMode !== "code") return false;
   const text = taskTextForSkillInference(task);
+  const title = String(task.title || "").toLowerCase();
   const paths = taskPathsForSkillInference(task);
   const frontendExt = /\.(css|scss|sass|less|html|htm|jsx|tsx|vue|svelte)$/;
   const frontendPath = paths.some((filePath) => frontendExt.test(filePath));
   const browserJsPath = paths.some((filePath) => /^htdocs\/.*\.js$/.test(filePath));
-  const designIntent = /\b(ui|ux|front-?end|layout|responsive|stylesheet|css|style|styling|design|visual|component|hero|nav|navigation|footer|header|cards?|theme|typography|spacing|contrast|accessib(?:le|ility)?|mobile|desktop|page|pages)\b/.test(text);
-  return frontendPath || (browserJsPath && designIntent);
+  // Rendering and generic create/update work can describe application logic.
+  // Infer the design skill only from a stated visual responsibility.
+  const explicitVisualWork = /\b(?:visual design|page design|ui design|ux design|layout|responsive(?: design)?|stylesheet|typography|spacing|contrast|color palette|theme|accessible interface|accessibility of (?:the )?(?:page|site|interface)|visual polish|styling)\b/.test(text);
+  const titledDesignTask = /\b(?:design|style|restyle|redesign|polish)\b.{0,45}\b(?:page|site|screen|interface|layout|navigation|hero|footer|header|visual|component|ui|ux)\b/.test(title);
+  const titledUiBuild = /\b(?:build|create|implement|update|improve)\b.{0,45}\b(?:user interface|website|web page|landing page|screen|dashboard|visual component)\b/.test(title);
+  const designIntent = explicitVisualWork || titledDesignTask || titledUiBuild;
+  return (frontendPath || browserJsPath) && designIntent;
 }
 
 function mergeSkillId(skillIds, skillId) {
@@ -1718,15 +1725,15 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             const hasModifyScope = Array.isArray(t.files_to_modify) && t.files_to_modify.length > 0;
             const hasCreateScope = Array.isArray(t.files_to_create) && t.files_to_create.length > 0;
             const hasDeleteScope = Array.isArray(t.files_to_delete) && t.files_to_delete.length > 0;
-            const broadNarrowScope = isBroadNarrowScopedCodeTask(t);
-            const shouldDropForBroadNarrowScope = underScopedBroadGateMode === "enforce" && broadNarrowScope;
+            const broadNarrowScope = broadNarrowScopedCodeTaskSignal(t);
+            const shouldDropForBroadNarrowScope = underScopedBroadGateMode === "enforce" && broadNarrowScope === "strong";
             if (underScopedBroadGateMode !== "off" && broadNarrowScope) {
-              const level = underScopedBroadGateMode === "enforce" ? C.red : C.yellow;
+              const level = shouldDropForBroadNarrowScope ? C.red : C.yellow;
               worker.emit(
                 planJob.id,
                 `${level}[plan-scope]${C.reset} WI#${planJob.work_item_id}: broad code task "${t.title}" has narrow writable scope (${underScopedBroadGateMode})`
               );
-              if (underScopedBroadGateMode === "warn") {
+              if (!shouldDropForBroadNarrowScope) {
                 logEvent({
                   work_item_id: planJob.work_item_id,
                   job_id: planJob.id,
@@ -1842,7 +1849,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           }
 
           if (taskMode !== "content") {
-            const normalizedFilesToCreate = normalizeArtifactCreateFiles(t.files_to_create || [], t.output_root || defaultRoot);
+            const normalizedFilesToCreate = normalizeArtifactCreateFiles(t.files_to_create || [], t.output_root || defaultRoot,
+              { projectDir: worker.projectDir, resourcesDir: getResourcesDir(worker.projectDir) });
             if (JSON.stringify(normalizedFilesToCreate) !== JSON.stringify(t.files_to_create || [])) {
               t.files_to_create = normalizedFilesToCreate;
               worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: rebased artifact files_to_create into output_root for task "${t.title}"`);
@@ -2122,6 +2130,12 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         }
         const compiledTestCommand = pinnedTestCommand
           || (rejectedPlannerTestCommand ? null : (t.test_command || null));
+        const repositoryVerificationSnapshot = shouldApplyExecutionPolicy
+          ? verificationPlanSnapshot(resolveRepositoryVerificationPlan({
+              projectDir: worker.projectDir,
+              validateCommand: (command) => validatePlannerTestCommandForRepository(command, worker.projectDir),
+            }))
+          : null;
         const executionPolicy = shouldApplyExecutionPolicy
           ? resolveTaskExecutionPolicy({
               task: t,
@@ -2178,6 +2192,13 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               needsImageGeneration: !!t.needs_image_generation,
               taskSpec: compiledTaskSpec,
             });
+        const planAnchor = finalJobType === "dev" && taskMode === "code"
+          ? snapshotPlanAnchor(worker.projectDir, [
+              ...(t.files_to_modify || []),
+              ...(t.files_to_create || []),
+              ...(t.files_to_delete || []),
+            ])
+          : null;
         const payloadJson = finalJobType === "promote"
           ? JSON.stringify(normalizedPromotePayload)
           : JSON.stringify({
@@ -2196,12 +2217,17 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               files_to_modify: t.files_to_modify || [],
               files_to_create: t.files_to_create || [],
               files_to_delete: t.files_to_delete || [],
+              ...(planAnchor ? {
+                _plan_base_commit: planAnchor.base_commit,
+                _plan_file_sha256: planAnchor.file_sha256,
+              } : {}),
               create_roots: t.create_roots || [],
               ...(Array.isArray(t.must_modify) && t.must_modify.length > 0 ? { must_modify: t.must_modify } : {}),
               ...(protectedScopeOmissions.length > 0 ? { protected_scope_omissions: protectedScopeOmissions } : {}),
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
               test_command: compiledTestCommand,
               tests_to_run: compiledTestsToRun,
+              ...(repositoryVerificationSnapshot ? { _repository_verification_plan_snapshot: repositoryVerificationSnapshot } : {}),
               write_tests: writeTests,
               ...(pinnedTestCommand ? { _task_ab_test_command: true } : {}),
               ...(rejectedPlannerTestCommand ? { _verification_plan_invalid: rejectedPlannerTestCommand } : {}),
@@ -2485,6 +2511,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
               test_command: compiledTestCommand,
               tests_to_run: compiledTestsToRun,
+              ...(repositoryVerificationSnapshot ? { _repository_verification_plan_snapshot: repositoryVerificationSnapshot } : {}),
               write_tests: writeTests,
               ...(pinnedTestCommand ? { _task_ab_test_command: true } : {}),
               ...(rejectedPlannerTestCommand ? { _verification_plan_invalid: rejectedPlannerTestCommand } : {}),

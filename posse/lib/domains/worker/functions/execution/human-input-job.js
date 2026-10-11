@@ -1076,6 +1076,12 @@ export async function runHumanInputJob(worker, job, {
       } else if (decision === "retry") {
         const restoredDependents = restoreGateDependentsToOriginal();
         const origPayload = worker.parsePayload(origJob);
+        const retryingVerification = origPayload._verification_blocked?.type === "verification_blocked";
+        const retryingAssessment = retryingVerification && origPayload._assess_only === true;
+        if (retryingVerification) {
+          delete origPayload._verification_blocked;
+          delete origPayload._verification_infrastructure_requeues;
+        }
         // A bare choice ("retry") is a decision, not guidance: say so instead
         // of pasting the word into the task as if it were instructions.
         const answerText = String(lastAnswer || "").trim();
@@ -1085,11 +1091,16 @@ export async function runHumanInputJob(worker, job, {
           `Blocked recovery from human_input job #${job.id}:`,
           bareRetry ? "The operator chose retry without new instructions." : answerText,
         ].join("\n");
-        if (typeof origPayload.task_spec === "string" && origPayload.task_spec.trim()) {
-          origPayload.task_spec = `${origPayload.task_spec.trim()}\n\nBLOCKED RECOVERY GUIDANCE:\n${recoveryNote}`;
-        } else {
-          origPayload.task_spec = recoveryNote;
+        // A restored runner needs a fresh bounded verification attempt, not
+        // a rewrite of an implementation task that never started.
+        if (!retryingVerification || !bareRetry) {
+          if (typeof origPayload.task_spec === "string" && origPayload.task_spec.trim()) {
+            origPayload.task_spec = `${origPayload.task_spec.trim()}\n\nBLOCKED RECOVERY GUIDANCE:\n${recoveryNote}`;
+          } else {
+            origPayload.task_spec = recoveryNote;
+          }
         }
+        if (retryingAssessment && !bareRetry) delete origPayload._assess_only;
         origPayload._blocked_recovery = {
           ...(origPayload._blocked_recovery || {}),
           recovery_job_id: job.id,
@@ -1097,10 +1108,18 @@ export async function runHumanInputJob(worker, job, {
           human_answer: String(lastAnswer || ""),
           bare_retry: bareRetry,
         };
-        beginJobRetryGeneration(origJob.id, {
-          payload: origPayload,
-          attemptBudget: getIntSetting(SETTING_KEYS.DEFAULT_MAX_ATTEMPTS, 3),
-        });
+        if (retryingAssessment && bareRetry) {
+          // Restore the runner/provider and reassess the preserved candidate.
+          // An operator-authorized retry needs one fresh assessment slot, but
+          // must not replay the implementation or consume its attempt budget.
+          extendAssessmentMaxAttempts(origJob.id, Number(origJob.assessment_attempt_count || 0) + 1);
+          updateJobPayload(origJob.id, JSON.stringify(origPayload));
+        } else {
+          beginJobRetryGeneration(origJob.id, {
+            payload: origPayload,
+            attemptBudget: getIntSetting(SETTING_KEYS.DEFAULT_MAX_ATTEMPTS, 3),
+          });
+        }
         await worker._setJobRowStatus(origJob, "queued");
         worker.emit(job.id, `${C.cyan}[human] Blocked job #${origJob.id} queued for retry with human guidance${restoredDependents ? `; restored ${restoredDependents} dependent(s) to the retried job` : ""}${C.reset}`);
         logEvent({
