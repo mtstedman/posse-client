@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import Ajv from "ajv";
+import { SchemaValidatorCache } from "../classes/SchemaValidatorCache.js";
 import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
 import { AUTOMATION_RESOURCE_OPERATIONS } from "../../../catalog/custom-tools.js";
 
-const ajv = new Ajv({ strict: true, allErrors: false, validateFormats: false, ownProperties: true });
+const ajv = new SchemaValidatorCache();
 export function demand(condition, message, code = "invalid_request") {
   if (!condition) throw Object.assign(new Error(message), { code });
 }
