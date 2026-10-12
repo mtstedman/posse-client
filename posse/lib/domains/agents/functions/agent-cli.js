@@ -22,6 +22,7 @@ export const AGENT_USAGE = `Usage:
   posse agent save <definition.json|->
   posse agent conversations [<name>] [--json]
   posse agent export <session-id> [--json]
+  posse agent dispatch < request.json
 
 Qualify a model as provider:model (for example codex:gpt-6.1-sol) or use
 --provider to override the account's dev provider. The familiar cheap,
@@ -49,6 +50,10 @@ function parse(argv) {
 }
 
 export async function runAgentCli(argv = process.argv.slice(3), io = {}) {
+  if (argv[0] === "dispatch") {
+    const { runAgentDispatchCli } = await import("./dispatch-cli.js");
+    return runAgentDispatchCli(argv.slice(1), io);
+  }
   if (["clients", "repository", "service", "register", "registrations"].includes(argv[0])) return runRegisteredAdminCli(argv, io);
   const stdout = io.stdout || process.stdout, stderr = io.stderr || process.stderr, stdin = io.stdin || process.stdin;
   const print = value => stdout.write(`${value}\n`);
