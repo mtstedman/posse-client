@@ -120,6 +120,8 @@ import {
   setGitHubDefaultBranch,
 } from "./github-session.js";
 import { ensurePairingEnvironmentReady, pairingEnvironmentWarning } from "./environment-preflight.js";
+import { checkPairingRuntimeCommands } from "./runtime-preflight.js";
+import { PAIRING_ENVIRONMENT_PROGRESS_INTERVAL_MS } from "../../../catalog/pairing-environment.js";
 import { PairingMonitor } from "../classes/PairingMonitor.js";
 import { acknowledgeOwnerLaunch, posseWindowScript, spawnedByLiveSessionOwner } from "./session-owner-launch.js";
 import { describeSessionHold, describeSessionResume, printMemberChanges } from "./monitor-view.js";
@@ -1001,29 +1003,34 @@ async function closeClaimedHostSession(root, remoteClient, state, {
 // it can take minutes.
 async function preparePairingEnvironment(root, environment, { C, json, before }) {
   if (!json) console.log(`  ${C.dim}Checking runtime dependencies before ${before}...${C.reset}`);
-  let repairing = false;
   let lastProgress = "";
   const untrackedBefore = listUntrackedPairingPaths(root);
+  const startedAt = Date.now();
+  const heartbeat = json ? null : setInterval(() => {
+    console.log(`  ${C.dim}[deps] Still working: ${lastProgress || "checking repository dependencies"} (${Math.floor((Date.now() - startedAt) / 1000)}s elapsed)${C.reset}`);
+  }, PAIRING_ENVIRONMENT_PROGRESS_INTERVAL_MS);
+  heartbeat?.unref?.();
   let result;
   try {
     result = await environment.prepare(root, {
       onRepair: () => {
-        repairing = true;
         if (!json) console.log(`  ${C.dim}Installing what is missing (the same repair posse go runs)...${C.reset}`);
       },
       onProgress: json ? null : (event = {}) => {
         const text = String(event?.message || "").split(/\r?\n/u)[0].trim();
-        if (!repairing || !text || text === lastProgress) return;
+        if (!text || text === lastProgress) return;
         lastProgress = text;
         console.log(`  ${C.dim}[deps] ${text}${C.reset}`);
       },
     });
   } finally {
+    if (heartbeat) clearInterval(heartbeat);
     // Also when it throws: the restore that follows needs a clean checkout.
     excludeGeneratedPairingPaths(root, untrackedBefore);
   }
   const warning = pairingEnvironmentWarning(result);
   if (warning && !json) console.log(`  ${C.yellow}${warning}${C.reset}`);
+  if (!warning && !json) console.log(`  ${C.green}Runtime dependencies ready.${C.reset}`);
   return result;
 }
 
@@ -1040,6 +1047,7 @@ async function runHost({
 }) {
   const autoMerge = mergeMode === "auto";
   const autoDeploy = deployMode === "auto";
+  if (!json) console.log(`  ${C.dim}[pair check] Checking repository and remote branch...${C.reset}`);
   const root = repositoryRoot(projectDir);
   assertPairingSchedulerStopped();
   assertCleanPairingCheckout(root);
@@ -1076,8 +1084,11 @@ async function runHost({
     ), { code: "pairing_provider_unsupported" });
   }
   assertSessionSshPathSupported(root);
+  if (!json) console.log(`  ${C.dim}[pair check] Checking ${remote}/${defaultBranch} access and current checkout...${C.reset}`);
   assertHostTrunkMatchesRemote(root, remote, defaultBranch);
+  if (!json) console.log(`  ${C.dim}[pair check] Checking GitHub sign-in and session permissions...${C.reset}`);
   const { owner: githubOwner } = assertGitHubCliReady(root);
+  if (!json) console.log(`  ${C.green}[pair check] GitHub session permissions ready.${C.reset}`);
   // Last, because a repair can take minutes: every cheaper refusal comes first.
   await preparePairingEnvironment(root, environment, { C, json, before: "opening the session" });
   const state = createPairingState({
@@ -1282,7 +1293,8 @@ async function runJoin({ projectDir, remoteClient, code, C, json, environment })
     // `posse add` or `posse go` typed here before the join left a repository
     // with no commits and Posse's own staged ignore file: still an empty folder.
     freshCheckout = adoptPosseInitializedCheckout(root);
-  } catch {
+  } catch (error) {
+    if (String(error?.code || "").startsWith("pairing_environment_command_")) throw error;
     root = initializeFreshPairingCheckout(projectDir);
     freshCheckout = true;
   }
@@ -1979,8 +1991,13 @@ export async function runPairingCommand(argv = [], {
   remoteClientFactory = createPairingRemoteClient,
   pairingProcessIsAlive = pairingOwnerProcessIsAlive,
   pairingEnvironment = PAIRING_ENVIRONMENT,
+  pairingRuntimeCheck = checkPairingRuntimeCommands,
 } = {}) {
   const args = parsePairArgs(argv);
+  if (["host", "join"].includes(args.action)) {
+    await pairingRuntimeCheck(projectDir, { host: args.action === "host",
+      onProgress: args.json ? () => {} : (event) => console.log(`  ${C.dim}[pair check] ${event.message}${C.reset}`) });
+  }
   let client = remoteClient;
   if (!client && !["status", "integrate", "abandon-integration", "hold", "resume", "merge", "deploy", "auto"]
     .includes(args.action)) {

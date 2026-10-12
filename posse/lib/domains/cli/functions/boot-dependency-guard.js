@@ -16,7 +16,10 @@ export async function ensureBootDependencyGuard({ check, repair, onRepair = () =
     && !(result.doctor?.pending?.length > 0);
   let checked;
   try { checked = await check(); }
-  catch { checked = null; }
+  catch (err) {
+    if (signal?.aborted || err?.name === "AbortError") throw err;
+    checked = null;
+  }
   if (healthy(checked)) return checked;
   onRepair();
   let repaired;

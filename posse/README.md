@@ -863,6 +863,15 @@ clone active. If Posse can run, it can pair: anything still missing after the
 repair leaves the session running without it, with the same warning a run
 shows, and pairing stops only where `posse run` would stop.
 
+Before enrollment, pairing checks Git, OpenSSH, and `ssh-keygen`; hosts also
+check the GitHub CLI (`gh`). Version probes have a ten-second limit and name
+the failing command with a recovery step. Git handles repository transport;
+`gh` handles the host's GitHub API access. Dependency checks show progress
+during both checking and repair, including the package or indexer being checked.
+Readiness checks have a two-minute worker limit; installation keeps its normal
+repair budget. Optional dependency failures still allow pairing with a warning;
+run `posse doctor` for a detailed repair report.
+
 Successful WI and iterative merges are published automatically to the exact
 side branch. Posse still runs committed-conflict checks and `pre_push_gate`, but
 does not create a human push-offer gate for that automatic publication.

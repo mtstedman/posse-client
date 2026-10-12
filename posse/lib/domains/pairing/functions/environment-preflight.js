@@ -1,4 +1,5 @@
 import { getAtlasIntegrationConfig } from "../../integrations/functions/atlas/config.js";
+import { PAIRING_DEPENDENCY_CHECK_TIMEOUT_MS } from "../../../catalog/pairing-environment.js";
 import { ensureBootDependencyGuard } from "../../cli/functions/boot-dependency-guard.js";
 import {
   ensureBootDependenciesInWorker,
@@ -36,13 +37,36 @@ export async function ensurePairingEnvironmentReady(projectDir, {
   getDependencyConfig = getAtlasIntegrationConfig,
   onRepair = () => {},
   onProgress = null,
+  signal = null,
 } = {}) {
   const input = pairingDependencyInput(projectDir, getDependencyConfig);
-  const workerOptions = { timeoutMs: REPAIR_TIMEOUT_MS, onProgress };
+  const probe = async (repairing) => {
+    const phase = repairing ? "repair" : "check";
+    let latest = "repository dependencies";
+    onProgress?.({ phase, message: `${repairing ? "Repairing" : "Checking"} ${latest}...` });
+    try {
+      const result = await sync({ ...input, ...(repairing ? { doctor: true } : {}), dryRun: !repairing }, {
+        timeoutMs: repairing ? REPAIR_TIMEOUT_MS : PAIRING_DEPENDENCY_CHECK_TIMEOUT_MS,
+        signal,
+        onProgress: (event = {}) => {
+          if (event.message) latest = String(event.message).split(/\r?\n/u)[0].slice(0, 200);
+          onProgress?.({ ...event, phase });
+        },
+      });
+      onProgress?.({ phase, message: `${repairing ? "Repair" : "Check"} complete: ${formatBootDependencySync(result)}` });
+      return result;
+    } catch (error) {
+      if (signal?.aborted || error?.name === "AbortError") throw error;
+      const failure = new Error(`Dependency ${phase} failed while checking ${latest}: ${String(error?.message || error).split(/\r?\n/u)[0]}. Run \`posse doctor\` for a detailed repair report.`, { cause: error });
+      onProgress?.({ phase, status: "failed", message: failure.message });
+      throw failure;
+    }
+  };
   return ensureBootDependencyGuard({
-    check: () => sync({ ...input, dryRun: true }, workerOptions),
-    repair: () => sync({ ...input, doctor: true, dryRun: false }, workerOptions),
+    check: () => probe(false),
+    repair: () => probe(true),
     onRepair,
+    signal,
   });
 }
 

@@ -6,6 +6,7 @@ import { adminGitExec } from "../../git/functions/admin-git.js";
 import { gitPushWithGitHubCliFallback } from "../../git/functions/git-push-auth.js";
 import { isPosseRuntimeOnlyGitignoreContent } from "../../runtime/functions/ignore.js";
 import { EMPTY_JOIN_FOLDER_ENTRIES } from "./join-folder.js";
+import { pairingCommandError } from "./environment-errors.js";
 
 const NETWORK_SCHEMES = new Set(["https:", "http:", "ssh:", "git:"]);
 // Build the git environment without GIT_SSH_COMMAND: an inherited value
@@ -24,11 +25,16 @@ export function noninteractiveGitEnv() {
 const NONINTERACTIVE_GIT_ENV = Object.freeze(noninteractiveGitEnv());
 
 function git(args, projectDir, options = {}) {
-  return adminGitExec(args, projectDir, {
-    timeoutMs: 60_000,
-    env: NONINTERACTIVE_GIT_ENV,
-    ...options,
-  });
+  const timeoutMs = options.timeoutMs ?? 60_000;
+  try {
+    return adminGitExec(args, projectDir, {
+      timeoutMs: 60_000,
+      env: NONINTERACTIVE_GIT_ENV,
+      ...options,
+    });
+  } catch (error) {
+    throw pairingCommandError("git", error, { timeoutMs, operation: args[0] });
+  }
 }
 
 function push(args, projectDir, remote, options = {}) {

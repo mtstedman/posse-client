@@ -143,12 +143,17 @@ export function resolveWindowsCommand(command, {
   const raw = String(command || "");
   if (platform !== "win32" || !raw || path.win32.isAbsolute(raw) || /[\\/]/u.test(raw)) return raw;
 
+  const lookupName = raw.replace(/\.(?:cmd|bat)$/iu, "");
+  const localMatch = findCommandOnPath(lookupName, { platform, env });
+  if (localMatch) return localMatch;
+
   let result;
   try {
-    result = spawnSyncImpl("where.exe", [raw.replace(/\.(?:cmd|bat)$/iu, "")], {
+    result = spawnSyncImpl("where.exe", [lookupName], {
       env,
       encoding: "utf8",
       windowsHide: true,
+      timeout: 5000,
     });
   } catch {
     return raw;

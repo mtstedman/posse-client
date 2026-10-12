@@ -4,14 +4,20 @@ import path from "node:path";
 
 import { resolveSshHostname } from "../../git/functions/git-push-auth.js";
 import { canonicalRepositoryLocator } from "./git.js";
+import { pairingCommandError } from "./environment-errors.js";
 
 function run(command, args, { cwd, exec = execFileSync } = {}) {
-  return String(exec(command, args, {
-    cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: 60_000,
-  }) || "").trim();
+  try {
+    return String(exec(command, args, {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 60_000,
+    }) || "").trim();
+  } catch (error) {
+    const failure = pairingCommandError(command, error, { timeoutMs: 60_000, operation: args[0] });
+    throw failure?.code === "pairing_environment_command_timeout" ? failure : error;
+  }
 }
 
 function safeSessionPart(value) {
@@ -83,6 +89,8 @@ export function assertGitHubCliReady(projectDir, options = {}) {
   try {
     output = run("gh", ["api", "user", "--include"], { cwd: projectDir, ...options });
   } catch (error) {
+    const failure = pairingCommandError("gh", error, { timeoutMs: 60_000, operation: "GitHub authentication check" });
+    if (failure?.code === "pairing_environment_command_timeout") throw failure;
     if (error?.code === "ENOENT") {
       throw githubCliError("pairing_github_cli_missing", [
         "Hosting a session needs the GitHub CLI (gh), which is not installed.",

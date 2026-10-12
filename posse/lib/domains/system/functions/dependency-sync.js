@@ -1345,6 +1345,7 @@ async function ensureJinaModel(entry, opts) {
 }
 
 async function ensureDependencyEntry(entry, ensure, opts) {
+  opts.onProgress?.(`${entry.label}: ${opts.dryRun ? "checking dependencies" : "checking and repairing dependencies"}`);
   try {
     return await withDependencyInstallLock(opts.posseRoot, () => ensure(entry, opts), {
       dryRun: opts.dryRun,
