@@ -10,6 +10,7 @@ import {
 } from "../../../catalog/session-sync.js";
 import { isGitCommandFailure } from "../classes/Repo.js";
 import { gitExecAsync } from "./utils.js";
+import { throwIfAborted } from "../../runtime/functions/yield.js";
 
 const GIT_TIMEOUT_MS = 5_000;
 
@@ -22,14 +23,18 @@ export async function classifyPeerTrunkHead(projectDir, {
   head,
   remoteSha,
   exec = gitExecAsync,
+  signal = null,
 } = {}) {
+  throwIfAborted(signal);
   const peerHead = String(head || "").toLowerCase();
   const originHead = String(remoteSha || "").toLowerCase();
   if (!TRUNK_HEAD_PATTERN.test(peerHead) || !TRUNK_HEAD_PATTERN.test(originHead)) return null;
   if (peerHead === originHead) return { relation: PEER_TRUNK_HEAD_RELATIONS.SYNCED, behind_count: 0 };
   try {
-    await exec(["cat-file", "-e", `${peerHead}^{commit}`], projectDir, { timeoutMs: GIT_TIMEOUT_MS });
+    await exec(["cat-file", "-e", `${peerHead}^{commit}`], projectDir, { timeoutMs: GIT_TIMEOUT_MS, signal });
+    throwIfAborted(signal);
   } catch (error) {
+    throwIfAborted(signal);
     return isGitCommandFailure(error)
       ? { relation: PEER_TRUNK_HEAD_RELATIONS.UNVERIFIED, behind_count: null }
       : null;
@@ -39,11 +44,13 @@ export async function classifyPeerTrunkHead(projectDir, {
     counts = String(await exec(
       ["rev-list", "--left-right", "--count", `${peerHead}...${originHead}`],
       projectDir,
-      { timeoutMs: GIT_TIMEOUT_MS },
+      { timeoutMs: GIT_TIMEOUT_MS, signal },
     ) || "").trim().split(/\s+/u).map((value) => Number.parseInt(value, 10));
   } catch {
+    throwIfAborted(signal);
     return null;
   }
+  throwIfAborted(signal);
   const [peerOnly, originOnly] = counts;
   if (!Number.isSafeInteger(peerOnly) || !Number.isSafeInteger(originOnly)) return null;
   if (peerOnly > 0) return { relation: PEER_TRUNK_HEAD_RELATIONS.AHEAD, behind_count: null };

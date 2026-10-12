@@ -9,6 +9,7 @@
 // lives in runtime status, so the console and `posse go` hand it over.
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 import {
   SESSION_AUTO_PUBLISH_POLICY,
@@ -17,6 +18,8 @@ import {
 } from "../../../catalog/session-sync.js";
 import { adminGitExecAsync } from "../../git/functions/admin-git.js";
 import { readRuntimeStatus, RUNTIME_STATUS_KEYS, writeRuntimeStatus } from "../../queue/functions/runtime-status.js";
+import { runImmediateTransaction } from "../../queue/functions/common.js";
+import { getDb } from "../../../shared/storage/functions/index.js";
 import { readPairingPromotionJournal } from "./promotion.js";
 import { activeSessionCloseClaim } from "./session-close-claim.js";
 import { recordUnattendedFailure } from "./session-publish-command.js";
@@ -105,7 +108,8 @@ function parseResult(output) {
   const lines = String(output || "").split(/\r?\n/u).filter((line) => line.trim().startsWith("{"));
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     try {
-      return JSON.parse(lines[index]);
+      const result = JSON.parse(lines[index]);
+      if (typeof result?.ok === "boolean") return result;
     } catch { /* not the result line */ }
   }
   return null;
@@ -137,6 +141,17 @@ function sessionClosing(state, nowMs) {
   return Boolean(drain) && Number.isFinite(requestedMs) && nowMs - requestedMs <= DRAIN_REQUEST_FRESH_MS;
 }
 
+// The child writes completion/backoff fields to this same row. Update only
+// our own run inside a transaction so attaching its pid cannot erase them.
+function updateRunRecord(sessionId, runId, update) {
+  return runImmediateTransaction(getDb(), () => {
+    if (getLivePairingState()?.remote_session_id !== sessionId) return false;
+    const current = readRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_AUTO_PUBLISH);
+    if (current?.session_id !== sessionId || current.run?.id !== runId) return false;
+    return writeRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_AUTO_PUBLISH, update(current));
+  });
+}
+
 async function tickOnce({
   projectDir,
   report = () => {},
@@ -147,6 +162,10 @@ async function tickOnce({
   sessionActive = true,
   recordFailure = recordUnattendedFailure,
 } = {}) {
+  const startedAtMs = Date.now();
+  const reportOutcome = (text, meta) => {
+    try { report(text, meta); } catch { /* a closed console must not kill its owner */ }
+  };
   if (!sessionActive) return null;
   const state = getLivePairingState();
   if (!state || state.role !== "host" || state.phase !== "active" || !state.remote_session_id) return null;
@@ -180,11 +199,24 @@ async function tickOnce({
       localAhead = Number(ahead) > 0;
     } catch { /* no local or remote-tracking target yet */ }
   }
+  // Git probes yield to session changes and other publishers. Never apply a
+  // decision or overwrite bookkeeping captured before that yield.
+  const currentTimeMs = nowMs + Math.max(0, Date.now() - startedAtMs);
+  const live = getLivePairingState();
+  if (!live || live.id !== state.id || live.remote_session_id !== sessionId
+    || live.phase !== "active" || live.role !== "host" || Number(live.process_pid) !== process.pid
+    || live.merge_mode !== state.merge_mode || live.deploy_mode !== state.deploy_mode
+    || live.shared_branch !== state.shared_branch || live.original_branch !== target
+    || live.origin_remote_name !== state.origin_remote_name
+    || !Number.isFinite(Date.parse(String(live.updated_at || "")))
+    || currentTimeMs - Date.parse(live.updated_at) > policy.OWNER_FRESH_MS
+    || sessionClosing(live, currentTimeMs)
+    || JSON.stringify(readRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_AUTO_PUBLISH)) !== JSON.stringify(stored)) return null;
   const decision = autoPublishDecision({
     // The trunk the session was published from, not baseline_oid: that is the
     // provenance baseline, which follows every verified trunk tip.
     mergeAuto, deployAuto, trunkSha, startSha: state.original_head, localAhead,
-    signature: `${trunkSha || ""}:${localSha}`, record, nowMs, policy,
+    signature: `${trunkSha || ""}:${localSha}`, record, nowMs: currentTimeMs, policy,
   });
   if (!decision.action) {
     // Ticks come every few seconds; the row changes only when the state does.
@@ -194,18 +226,36 @@ async function tickOnce({
     return { action: null, waiting: decision.waiting || null };
   }
   const action = decision.action;
+  const runId = randomUUID();
+  const runStartedAt = new Date(currentTimeMs).toISOString();
+  const reservedUntil = new Date(currentTimeMs + policy.RUN_TIMEOUT_MS).toISOString();
+  const reservation = {
+    ...decision.record,
+    pending_since: null,
+    // If recording the pid or processing close fails, this fence survives:
+    // an uncertain child must not trigger another immediate publication.
+    retry_after: reservedUntil,
+    run: { id: runId, pid: null, action, started_at: runStartedAt },
+  };
+  if (!writeRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_AUTO_PUBLISH, reservation)) {
+    throw new Error("Could not record automatic publication run");
+  }
+  const finishRunRecord = ({ preserveRetry = false } = {}) => updateRunRecord(sessionId, runId, (current) => {
+    const { run: _finished, ...rest } = current;
+    return { ...rest, retry_after: !preserveRetry && rest.retry_after === reservedUntil ? decision.record.retry_after || null : rest.retry_after };
+  });
   let child;
   try {
     child = start(action, { cwd: projectDir });
   } catch (error) {
-    report(`could not start auto ${action}: ${error?.message || error}`, { ok: false, action });
+    try {
+      if (finishRunRecord({ preserveRetry: true })) recordFailure(action, Object.assign(new Error(error?.message || String(error)), {
+        code: "session_publish_run_lost",
+      }));
+    } catch { /* the reservation still bounds retries if storage is unavailable */ }
+    reportOutcome(`could not start auto ${action}: ${error?.message || error}`, { ok: false, action });
     return null;
   }
-  writeRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_AUTO_PUBLISH, {
-    ...decision.record,
-    pending_since: null,
-    run: { pid: child.pid, action, started_at: new Date(nowMs).toISOString() },
-  });
   let output = "";
   const collect = (chunk) => {
     output += String(chunk);
@@ -214,43 +264,63 @@ async function tickOnce({
   child.stdout?.on("data", collect);
   child.stderr?.on("data", collect);
   let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
+  const stopChild = () => {
     // Its own process group: the push and the verify command stop with it.
     try { process.kill(-child.pid, "SIGTERM"); } catch {
-      try { child.kill("SIGTERM"); } catch { /* already gone */ }
+      try { child.kill?.("SIGTERM"); } catch { /* already gone */ }
     }
+  };
+  const timer = setTimeout(() => {
+    timedOut = true;
+    stopChild();
   }, policy.RUN_TIMEOUT_MS);
   timer.unref?.();
   // `close`, not `exit`: the output may still be arriving at exit.
   child.once("close", (code) => {
     clearTimeout(timer);
-    const current = readRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_AUTO_PUBLISH);
-    if (current?.session_id === sessionId && Number(current.run?.pid) === child.pid) {
-      const { run: _finished, ...rest } = current;
-      writeRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_AUTO_PUBLISH, rest);
+    // EventEmitter callbacks run outside tickOnce's promise boundary. Keep a
+    // transient DB/output failure here from crashing the session owner.
+    try {
+      let result = parseResult(output);
+      // Retain the durable delay until failure bookkeeping replaces it. A
+      // failed backoff write must not turn a lost result into a restart loop.
+      if (!finishRunRecord({ preserveRetry: !result || timedOut })) return;
+      if (!result || timedOut) {
+        // The run died without saying what happened (or ran out of time); it
+        // counts as a failure here, or the next tick would start it again at
+        // once, forever.
+        const message = timedOut
+          ? `took longer than ${Math.round(policy.RUN_TIMEOUT_MS / 60_000)} minutes and was stopped`
+          : `stopped without a result (exit ${code})`;
+        let handled = { paused: false };
+        try {
+          handled = recordFailure(action, Object.assign(new Error(message), { code: "session_publish_run_lost" }));
+        } catch { /* the backoff row is best effort */ }
+        result = { ok: false, message, paused: handled?.paused === true };
+      }
+      const line = describeUnattendedResult(action, result);
+      if (line) reportOutcome(line.text, { ok: line.ok, action });
+    } catch (error) {
+      reportOutcome(`could not record auto ${action} result: ${error?.message || error}`, { ok: false, action });
     }
-    let result = parseResult(output);
-    if (!result || timedOut) {
-      // The run died without saying what happened (or ran out of time); it
-      // counts as a failure here, or the next tick would start it again at
-      // once, forever.
-      const message = timedOut
-        ? `took longer than ${Math.round(policy.RUN_TIMEOUT_MS / 60_000)} minutes and was stopped`
-        : `stopped without a result (exit ${code})`;
-      let handled = { paused: false };
-      try {
-        handled = recordFailure(action, Object.assign(new Error(message), { code: "session_publish_run_lost" }));
-      } catch { /* the backoff row is best effort */ }
-      result = { ok: false, message, paused: handled?.paused === true };
-    }
-    const line = describeUnattendedResult(action, result);
-    if (line) report(line.text, { ok: line.ok, action });
   });
-  child.once("error", (error) => {
+  // Failed signals can emit more than one error while the child is alive.
+  // Only close proves it has stopped and can retire the watchdog.
+  child.on("error", (error) => {
+    reportOutcome(`auto ${action} failed to run: ${error?.message || error}`, { ok: false, action });
+  });
+  // Install listeners before attaching the pid: a failed write must never
+  // leave a spawned child with an unhandled error event.
+  try {
+    const recorded = updateRunRecord(sessionId, runId, (current) => ({
+      ...current, run: { ...current.run, pid: child.pid },
+    }));
+    if (!recorded) throw new Error("Could not record automatic publication run");
+  } catch (error) {
     clearTimeout(timer);
-    report(`auto ${action} failed to run: ${error?.message || error}`, { ok: false, action });
-  });
+    stopChild();
+    throw error;
+  }
   return { action, pid: child.pid };
 }
 

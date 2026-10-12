@@ -39,6 +39,7 @@ import {
   updateSharedTrunkRuntimeStatus,
 } from "../../queue/functions/index.js";
 import { updatePairingEnrollment } from "../../pairing/functions/state.js";
+import { abortError, throwIfAborted } from "../../runtime/functions/yield.js";
 
 function parseJson(value) {
   try {
@@ -301,8 +302,24 @@ export class SharedTrunkPoller {
     return tracked;
   }
 
-  async _pollOnce({ force = false, idle = false } = {}) {
-    const pollStartedAt = this._nowMs();
+  async _pollOnce(options = {}) {
+    // Setup probes and lock/recovery work belong to the same lifetime as the
+    // fetch. Owners must be able to cancel even before configuration resolves.
+    const controller = new AbortController();
+    this._activeController = controller;
+    const deadline = setTimeout(() => controller.abort(Object.assign(new Error("Shared-trunk poll deadline exceeded"), {
+      code: "shared_trunk_poll_deadline",
+    })), this._pollDeadlineMs);
+    deadline.unref?.();
+    try {
+      return await this._pollWithSignal({ ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(deadline);
+      if (this._activeController === controller) this._activeController = null;
+    }
+  }
+
+  async _pollWithSignal({ force = false, idle = false, signal } = {}) {
     try {
       applyProvenanceGateDecision();
     } catch (error) {
@@ -356,7 +373,8 @@ export class SharedTrunkPoller {
     }
     let config;
     try {
-      config = await this._resolveConfig(this.projectDir, { nativeCapabilityPreflight: true });
+      config = await this._resolveConfig(this.projectDir, { nativeCapabilityPreflight: true, signal });
+      throwIfAborted(signal);
     } catch (err) {
       // An explicitly enabled but invalid configuration is a fail-closed
       // health condition. Surface it; never quietly run the local-only path.
@@ -371,7 +389,7 @@ export class SharedTrunkPoller {
       this._lastPollAt = errorNow;
       this._nextDueAt = errorNow + errorIntervalSec * 1000;
       this._configErrorAt = errorNow;
-      const configurationError = err?.code !== "remote_default_unavailable";
+      const configurationError = !signal?.aborted && err?.code !== "remote_default_unavailable";
       this._log({
         event_type: EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE,
         actor_type: EVENT_ACTORS.SCHEDULER,
@@ -381,7 +399,8 @@ export class SharedTrunkPoller {
         event_json: JSON.stringify({ error: err?.message || String(err), configuration_error: configurationError }),
       });
       this._recordFailure(
-        errorCode(err?.code, configurationError ? "configuration_invalid" : "configuration_unavailable"),
+        signal?.aborted ? errorCode(signal.reason?.code, "ABORT_ERR")
+          : errorCode(err?.code, configurationError ? "configuration_invalid" : "configuration_unavailable"),
         { configuration_error: configurationError },
       );
       return { attempted: false, unavailable: true, configurationError, error: err };
@@ -435,24 +454,26 @@ export class SharedTrunkPoller {
     this._recordCadence(intervalSec, this._nextDueAt, { force: true, configuration_error: false });
     const holdFastForward = holdActive;
     this._lastPollHeld = holdFastForward;
-    const controller = new AbortController();
-    this._activeController = controller;
-    const remainingDeadlineMs = Math.max(0, this._pollDeadlineMs - (this._nowMs() - pollStartedAt));
-    if (remainingDeadlineMs === 0) {
-      this._recordFailure("shared_trunk_poll_deadline");
-      return { attempted: false, unavailable: true, config, reason: "shared_trunk_poll_deadline" };
-    }
-    const deadline = setTimeout(() => controller.abort(new Error("Shared-trunk poll deadline exceeded")), remainingDeadlineMs);
-    deadline.unref?.();
     try {
+      throwIfAborted(signal);
+      const session = getLivePairingState();
+      const assertCurrent = () => {
+        throwIfAborted(signal);
+        const live = getLivePairingState();
+        if (live?.id !== session?.id || live?.remote_session_id !== session?.remote_session_id
+          || live?.phase !== session?.phase || live?.shared_branch !== session?.shared_branch) {
+          throw abortError("Shared-trunk session changed during poll");
+        }
+      };
       const provenanceOptions = this._provenanceContext();
       const result = await this._sync(this.projectDir, {
         includeClaims: config.claimsEnabled === true,
         ...(this._claimCursor ? { claimAfter: this._claimCursor } : {}),
         ...provenanceOptions,
         ...(holdFastForward ? { holdFastForward: true } : {}),
-        signal: controller.signal,
+        signal,
       });
+      assertCurrent();
       const effectiveConfig = result?.config || config;
       if (provenanceOptions.provenance && result?.ok === true && result?.fetchCompleted === true) {
         retireOpenProvenanceGates(getLivePairingState(), "provenance_verified", result.remoteSha || null);
@@ -472,7 +493,8 @@ export class SharedTrunkPoller {
       }
       // Peer heads are classified only against a fetch that completed; a
       // skipped (merge_in_progress) or failed sync proves nothing about them.
-      if (result?.fetchCompleted === true) await this._classifyPeerHints(result);
+      if (result?.fetchCompleted === true) await this._classifyPeerHints(result, signal, assertCurrent);
+      assertCurrent();
       if (result?.reason === "shared_trunk_provenance_blocked") ensureProvenanceGate(result);
       if (result?.blocked || result?.diverged || (result?.unresolved?.length || 0) > 0
         || result?.reason === "unresolved_shared_trunk_operation") {
@@ -480,7 +502,8 @@ export class SharedTrunkPoller {
         // inclusive fetch is still authoritative for the advisory mirror —
         // without this the peer-claim view ages for as long as one journal
         // row stays unresolved.
-        await this._reconcileClaims(result, effectiveConfig, controller.signal);
+        await this._reconcileClaims(result, effectiveConfig, signal);
+        assertCurrent();
         await reconcileSessionDelegationCommits(this.projectDir);
         return { ...result, attempted: true, config: effectiveConfig, blocked: true };
       }
@@ -492,7 +515,8 @@ export class SharedTrunkPoller {
           updateSharedTrunkRuntimeStatus({ provenance_gate_rejected: false, provenance_gate_job_id: null });
         }
       }
-      await this._reconcileClaims(result, effectiveConfig, controller.signal);
+      await this._reconcileClaims(result, effectiveConfig, signal);
+      assertCurrent();
       await reconcileSessionDelegationCommits(this.projectDir);
       return { ...result, config: effectiveConfig };
     } catch (err) {
@@ -506,19 +530,16 @@ export class SharedTrunkPoller {
         message: `Shared-trunk fetch failed; dispatch will continue: ${err?.message || err}`,
         event_json: JSON.stringify({ error: err?.message || String(err), fail_open: true }),
       });
-      this._recordFailure(controller.signal.aborted
-        ? "shared_trunk_poll_deadline"
+      this._recordFailure(signal?.aborted
+        ? errorCode(signal.reason?.code, "ABORT_ERR")
         : errorCode(err?.code, "shared_trunk_sync_failed"));
       return { attempted: true, unavailable: true, config, error: err };
-    } finally {
-      clearTimeout(deadline);
-      if (this._activeController === controller) this._activeController = null;
     }
   }
 
   /** Abort the in-flight sync, if any (its owner is shutting down). */
   abortInFlight(reason = "Shared-trunk poll aborted by its owner") {
-    this._activeController?.abort(new Error(reason));
+    this._activeController?.abort(abortError(reason));
   }
 
   _holdStatus() {
@@ -599,7 +620,7 @@ export class SharedTrunkPoller {
   // head against the fetched origin ref with read-only object queries and
   // cache the relation per (head, origin head). Heads still absent go to the
   // negative cache; a peer advertising two such heads is muted for a while.
-  async _classifyPeerHints(result) {
+  async _classifyPeerHints(result, signal = null, assertCurrent = () => throwIfAborted(signal)) {
     const hints = this._latestHints;
     if (hints.length === 0) return;
     const nowMs = this._nowMs();
@@ -613,13 +634,15 @@ export class SharedTrunkPoller {
       const heads = [...new Set(hints.map((hint) => hint.trunk_head))]
         .slice(0, SESSION_SYNC_POLICY.HINT_HEADS_PER_POLL);
       for (const head of heads) {
+        assertCurrent();
         if (this._nowMs() - nowMs > SESSION_SYNC_POLICY.HINT_CLASSIFY_BUDGET_MS) break;
         const cached = prior[head];
         if (cached?.against === remoteSha) {
           rememberBounded(this._triedHeads, head, true, SESSION_SYNC_POLICY.HINT_TRIED_MAX);
           continue;
         }
-        const classified = await this._classifyHead(this.projectDir, { head, remoteSha });
+        const classified = await this._classifyHead(this.projectDir, { head, remoteSha, signal });
+        assertCurrent();
         // Git could not answer: nothing is proven, so the head stays unseen.
         if (!classified?.relation) continue;
         rememberBounded(this._triedHeads, head, true, SESSION_SYNC_POLICY.HINT_TRIED_MAX);
@@ -651,6 +674,7 @@ export class SharedTrunkPoller {
         this._updateStatus({ peer_heads: mergePeerHeadCache(prior, updates) });
       }
     } catch (error) {
+      assertCurrent();
       // Hints are advisory; classification must never fail the poll.
       this._log({
         event_type: EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE,

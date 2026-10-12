@@ -34,7 +34,7 @@ import {
   emitMainAdvanced as emitAtlasV2MainAdvanced,
   isAtlasV2EmissionEnabled,
 } from "../../atlas/classes/v2/PipelineHooks.js";
-import { resolveSharedTrunkConfigRuntime, SharedTrunkConfigError } from "./shared-trunk-config.js";
+import { resolveSharedTrunkConfigRuntime } from "./shared-trunk-config.js";
 import {
   fetchSharedTrunkNative,
   ffUpdateSharedTrunkNative,
@@ -45,6 +45,7 @@ import {
 import { gitExec } from "./utils.js";
 import { isGitCommandFailure } from "../classes/Repo.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
+import { throwIfAborted } from "../../runtime/functions/yield.js";
 import { withWorktreeLockAsync } from "./worktree.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import {
@@ -71,8 +72,10 @@ function execGit(args, cwd, options) {
   return (testOverrides?.gitExec || gitExec)(args, cwd, options);
 }
 
-function sharedTrunkCapabilities(projectDir) {
-  return (testOverrides?.capabilities || getSharedTrunkNativeCapabilities)(projectDir, { timeoutMs: 30_000 });
+function sharedTrunkCapabilities(projectDir, signal = null) {
+  return (testOverrides?.capabilities || getSharedTrunkNativeCapabilities)(projectDir, {
+    timeoutMs: 30_000, ...(signal ? { signal } : {}),
+  });
 }
 
 /** Native options for one trunk call. In an approval-managed Session every
@@ -230,17 +233,18 @@ async function underMergeLock(fn, ownerSuffix, alreadyHeld = false) {
   return locked.result;
 }
 
-async function runtimeSharedTrunkConfig(projectDir) {
+async function runtimeSharedTrunkConfig(projectDir, signal = null) {
   let capabilityEnvelope = null;
   let capabilityError = null;
   let config;
   try {
     config = await resolveSharedTrunkConfigRuntime(projectDir, {
+      signal,
       remoteDefaultBranchResolver: testOverrides?.resolveRemoteDefaultBranch || null,
       targetBranchResolver: testOverrides?.resolveTargetBranch || null,
       nativeCapabilityPreflight: async ({ projectDir: root }) => {
         try {
-          capabilityEnvelope = await sharedTrunkCapabilities(root);
+          capabilityEnvelope = await sharedTrunkCapabilities(root, signal);
         } catch (err) {
           capabilityError = err;
         }
@@ -250,12 +254,15 @@ async function runtimeSharedTrunkConfig(projectDir) {
       },
     });
   } catch (err) {
-    if (!(err instanceof SharedTrunkConfigError)) throw err;
+    // Target-branch/native probes can fail before a typed configuration is
+    // available. Keep these operational failures retryable too; otherwise a
+    // cold native transport escapes the merge coordinator's recovery boundary.
+    throwIfAborted(signal);
     return {
       config: { enabled: true, remote: null, branch: null, claimsEnabled: false },
       capabilities: null,
       unavailable: true,
-      reason: err.code,
+      reason: err.code || "configuration_unavailable",
       error: err,
     };
   }
@@ -800,8 +807,10 @@ async function fetchRemote(projectDir, config, { includeClaims = false, claimAft
   };
 }
 
-async function reconcileAlreadyLocked(projectDir, config, { fetched = null, includeClaims = false, claimAfter = null } = {}) {
-  const observed = fetched || await fetchRemote(projectDir, config, { includeClaims, claimAfter });
+async function reconcileAlreadyLocked(projectDir, config, { fetched = null, includeClaims = false, claimAfter = null, signal = null } = {}) {
+  throwIfAborted(signal);
+  const observed = fetched || await fetchRemote(projectDir, config, { includeClaims, claimAfter, signal });
+  throwIfAborted(signal);
   if (!observed.ok) return { ...observed, config, operations: [], unresolved: [] };
   const operations = [];
   const unresolved = [];
@@ -815,6 +824,7 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
     // the whole reconcile, which would turn a recoverable journal entry into
     // a startup crash loop.
     try {
+      throwIfAborted(signal);
       if (!operation.candidateSha && operation.phase === "intent") {
         const recoveredCandidate = candidateRecoveredFromIntent(projectDir, operation);
         if (recoveredCandidate) {
@@ -839,6 +849,7 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
       }
       if (operation.candidateSha && isAncestor(projectDir, operation.candidateSha, observed.remoteSha)) {
         const proof = await teamPublishedProof({ projectDir, operation, observedOid: observed.remoteSha });
+        throwIfAborted(signal);
         if (!proof?.ok) {
           if (TEAM_FATAL_FAILURE_REASONS.includes(String(proof?.reason || ""))
             || [
@@ -887,7 +898,8 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
         const localHead = refSha(projectDir, operation.targetBranch);
         const reset = localHead === observed.remoteSha
           ? { ok: true, recovered: "already_reset" }
-          : await strictResetRejected(projectDir, config, operation, observed.remoteSha);
+          : await strictResetRejected(projectDir, config, operation, observed.remoteSha, null, signal);
+        throwIfAborted(signal);
         if (!reset.ok) {
           operation = transition(operation, {
             phase: "publish_unknown",
@@ -935,6 +947,7 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
       unresolved.push(operation);
       operations.push({ operation, recovered: null });
     } catch (err) {
+      throwIfAborted(signal);
       sharedTrunkEvent(EVENT_TYPES.SHARED_TRUNK_SYNC_UNAVAILABLE, `Shared-trunk reconciliation failed for WI#${operation.workItemId}: ${err?.message || err}`, {
         operation_id: operation.operationId,
         error_code: err?.code || null,
@@ -963,8 +976,8 @@ async function reconcileAlreadyLocked(projectDir, config, { fetched = null, incl
 }
 
 /** Startup/poll callable. It never guesses publication from local state alone. */
-export async function reconcileSharedTrunkOperations(projectDir, { includeClaims = false, claimAfter = null } = {}) {
-  const runtime = await runtimeSharedTrunkConfig(projectDir);
+export async function reconcileSharedTrunkOperations(projectDir, { includeClaims = false, claimAfter = null, signal = null } = {}) {
+  const runtime = await runtimeSharedTrunkConfig(projectDir, signal);
   if (!runtime.config.enabled) {
     return { ok: true, skipped: "disabled", unavailable: false, config: runtime.config, operations: [], unresolved: [] };
   }
@@ -978,7 +991,7 @@ export async function reconcileSharedTrunkOperations(projectDir, { includeClaims
     return { ok: false, unavailable: true, reason: runtime.reason, config: runtime.config, operations: [], unresolved: [] };
   }
   return underMergeLock(
-    () => withWorktreeLockAsync(projectDir, projectDir, () => reconcileAlreadyLocked(projectDir, runtime.config, { includeClaims, claimAfter })),
+    () => withWorktreeLockAsync(projectDir, projectDir, () => reconcileAlreadyLocked(projectDir, runtime.config, { includeClaims, claimAfter, signal }), { signal }),
     SHARED_TRUNK_MERGE_LOCK_OWNERS.RECONCILE,
   );
 }
@@ -1117,7 +1130,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       provenance_commits: [],
     });
   }
-  const reconciliation = await reconcileAlreadyLocked(projectDir, config, { fetched });
+  const reconciliation = await reconcileAlreadyLocked(projectDir, config, { fetched, signal });
   const blocking = reconciliation.unresolved.filter((operation) => operation.operationId !== allowOperationId);
   if (blocking.length) {
     return {
@@ -1196,7 +1209,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       unavailable: true,
       errorCode: syncErrorCode(err?.code, "ff_update_failed"),
     });
-    return { ok: false, unavailable: true, operational: true, config, fetchedClaims: fetched.fetchedClaims, reason: err?.code || "ff_update_failed", error: err };
+    return { ok: false, unavailable: true, operational: true, config, fetchCompleted: true, remoteSha: fetched.remoteSha, fetchedClaims: fetched.fetchedClaims, ...claimFetchMetadata(fetched), reason: err?.code || "ff_update_failed", error: err };
   }
   if (nativeUnavailable(ffEnvelope)) {
     recordSyncStatus(projectDir, config, {
@@ -1209,7 +1222,7 @@ export async function syncSharedTrunkAlreadyLocked(projectDir, {
       remote: config.remote,
       branch: config.branch,
     });
-    return { ok: false, unavailable: true, config, fetchedClaims: fetched.fetchedClaims, reason: ffEnvelope?.reason || "native_capability_unavailable" };
+    return { ok: false, unavailable: true, config, fetchCompleted: true, remoteSha: fetched.remoteSha, fetchedClaims: fetched.fetchedClaims, ...claimFetchMetadata(fetched), reason: ffEnvelope?.reason || "native_capability_unavailable" };
   }
   const ff = nativeResult(ffEnvelope) || {};
   const status = String(ff.status || ff.outcome || "").toLowerCase();
@@ -1302,7 +1315,7 @@ export async function syncSharedTrunkFromOrigin(projectDir, {
   holdFastForward = false,
   raiseBlockedGate = true,
 } = {}) {
-  const runtime = await runtimeSharedTrunkConfig(projectDir);
+  const runtime = await runtimeSharedTrunkConfig(projectDir, signal);
   if (!runtime.config.enabled) {
     return {
       ok: true,
@@ -1332,7 +1345,7 @@ export async function syncSharedTrunkFromOrigin(projectDir, {
       signal,
       holdFastForward: holdFastForward === true,
       raiseBlockedGate: raiseBlockedGate !== false,
-    })),
+    }), { signal }),
     SHARED_TRUNK_MERGE_LOCK_OWNERS.SYNC,
   );
 }
@@ -1486,16 +1499,17 @@ function sharedTrunkAuthRemediation(projectDir, config, failure) {
   return gitHubCliAuthRemediation(remoteUrl);
 }
 
-async function strictResetRejected(projectDir, config, operation, remoteOid = operation.baseSha, workItemContext = null) {
+async function strictResetRejected(projectDir, config, operation, remoteOid = operation.baseSha, workItemContext = null, signal = null) {
   let envelope;
   try {
+    throwIfAborted(signal);
     envelope = await (testOverrides?.resetRejected || resetRejectedSharedTrunkNative)({
       cwd: projectDir,
       remote: config.remote,
       branch: config.branch,
       expectedCandidateOid: operation.candidateSha,
       remoteOid,
-    }, nativeTrunkOptions(workItemContext, 390_000));
+    }, nativeTrunkOptions(workItemContext, 390_000, signal));
   } catch (err) {
     return { ok: false, reason: err?.code || "reset_rejected_candidate_failed", error: err };
   }

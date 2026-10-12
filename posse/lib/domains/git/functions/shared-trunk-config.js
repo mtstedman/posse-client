@@ -13,6 +13,7 @@ import {
   SHARED_TRUNK_LIMITS,
 } from "../../../catalog/settings.js";
 import { SHARED_TRUNK_REMOTE_HEAD_FAILURES } from "../../../catalog/shared-trunk.js";
+import { throwIfAborted } from "../../runtime/functions/yield.js";
 import {
   getAccountRepoSetting,
   getAccountSettingsDataVersion,
@@ -340,7 +341,9 @@ export async function resolveSharedTrunkConfigRuntime(projectDir = process.cwd()
   nativeCapabilityPreflight = null,
   remoteDefaultBranchResolver = null,
   targetBranchResolver = null,
+  signal = null,
 } = {}) {
+  throwIfAborted(signal);
   const repoPath = path.resolve(String(projectDir || process.cwd()));
   const settingCache = new Map();
   const readSetting = (key) => {
@@ -365,9 +368,10 @@ export async function resolveSharedTrunkConfigRuntime(projectDir = process.cwd()
   ]);
   const resolvedTargetBranch = await (
     typeof targetBranchResolver === "function"
-      ? targetBranchResolver(repoPath)
-      : targetBranchModule.resolveTargetBranchAsync(repoPath)
+      ? targetBranchResolver(repoPath, { signal })
+      : targetBranchModule.resolveTargetBranchAsync(repoPath, { signal })
   );
+  throwIfAborted(signal);
   const cacheKey = remoteDefaultCacheKey(repoPath, remote, branch);
   let detectedRemoteDefaultBranch;
   if (remoteDefaultBranchCache.has(cacheKey)) {
@@ -375,7 +379,7 @@ export async function resolveSharedTrunkConfigRuntime(projectDir = process.cwd()
   } else if (typeof remoteDefaultBranchResolver === "function") {
     detectedRemoteDefaultBranch = await remoteDefaultBranchResolver(
       repoPath,
-      Object.freeze({ remote, branch }),
+      Object.freeze({ remote, branch, signal }),
     );
     cacheSharedTrunkRemoteDefaultBranch(repoPath, remote, branch, detectedRemoteDefaultBranch);
   } else {
@@ -384,9 +388,10 @@ export async function resolveSharedTrunkConfigRuntime(projectDir = process.cwd()
       advertisedHead = await gitUtilsModule.gitExecAsync(
         ["ls-remote", "--symref", remote, "HEAD"],
         repoPath,
-        { timeoutMs: 30_000 },
+        { timeoutMs: 30_000, signal },
       );
     } catch (error) {
+      throwIfAborted(signal);
       const unavailable = new SharedTrunkConfigError(
         "remote_default_unavailable",
         `Could not query the default branch of remote ${remote}: ${error?.message || error}`,
@@ -400,9 +405,11 @@ export async function resolveSharedTrunkConfigRuntime(projectDir = process.cwd()
     if (headFailure) throw sharedTrunkRemoteHeadError(headFailure, remote);
     cacheSharedTrunkRemoteDefaultBranch(repoPath, remote, branch, detectedRemoteDefaultBranch);
   }
+  throwIfAborted(signal);
   const preflightResult = typeof nativeCapabilityPreflight === "function"
-    ? await nativeCapabilityPreflight({ projectDir: repoPath, remote, branch })
+    ? await nativeCapabilityPreflight({ projectDir: repoPath, remote, branch, signal })
     : nativeCapabilityPreflight;
+  throwIfAborted(signal);
 
   return resolveSharedTrunkConfig(repoPath, {
     readSetting,
