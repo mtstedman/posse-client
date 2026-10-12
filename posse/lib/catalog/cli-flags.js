@@ -13,6 +13,12 @@
 // The three legacy Sets (VALUE_FLAGS, FLAG_VALUE_FLAGS, KNOWN_FLAGS) are now
 // derived from this table so adding or renaming a flag requires updating one
 // row. A drift test in test-cli-flags-descriptor.test.js asserts the derivation matches.
+export const STARTUP_UPDATE_FLAGS = Object.freeze({
+  update: "--update-at-boot",
+  skip: "--no-update-at-boot",
+  stash: "--stash",
+});
+
 export const FLAG_DESCRIPTORS = Object.freeze([
   // Global value flags (affect work-item creation, mode, scope).
   { name: "--mode", takesValue: true, category: "value" },
@@ -61,6 +67,7 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "--approve-origin-oid", takesValue: true, category: "filter-value" },
 
   // Boolean flags.
+  ...Object.values(STARTUP_UPDATE_FLAGS).map((name) => ({ name, takesValue: false, category: "boolean" })),
   { name: "--all", takesValue: false, category: "boolean" },
   { name: "--auto-approve", takesValue: false, category: "boolean" },
   { name: "--auto-approve-plan", takesValue: false, category: "boolean" },

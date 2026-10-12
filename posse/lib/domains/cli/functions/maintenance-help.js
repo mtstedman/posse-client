@@ -1,3 +1,5 @@
+import { STARTUP_UPDATE_FLAGS } from "../../../catalog/cli-flags.js";
+
 // Keep maintenance help available even when npm dependencies are missing.
 
 export function renderDoctorHelp({ log, colors }) {
@@ -32,8 +34,11 @@ export function renderUpdateHelp({ log, colors }) {
     posse update --dry-run     check for updates without touching the checkout
     posse update --json        machine-readable result
     posse update --branch main
+    posse update ${STARTUP_UPDATE_FLAGS.stash}        save local installation edits before updating
 
-  The update is fast-forward only and refuses local tracked edits.
+  The update is fast-forward only and normally refuses local tracked edits.
+  ${STARTUP_UPDATE_FLAGS.stash} saves tracked and untracked edits in a named Git stash and leaves
+  them there, so the installation runs the upstream code. It never discards work.
   Each dependency command is capped at 30 minutes and Jina deployment at 2 hours.
 `);
 }

@@ -85,6 +85,9 @@ export const ATLAS_RESEARCH_PREFETCH_FOCUS_MODE_VALUES = Object.freeze(["off", "
 export const ATLAS_MEMORY_SURFACE_MODE_VALUES = Object.freeze(["auto", "off", "on"]);
 export const SESSION_RECYCLE_MODE_VALUES = Object.freeze(["off", "dev-fix", "full"]);
 export const STARTUP_DIRTY_TREE_POLICY_VALUES = Object.freeze(["block", "commit"]);
+export const STARTUP_UPDATE_MODES = Object.freeze({ ASK: "ask", AUTO: "auto", OFF: "off" });
+export const STARTUP_UPDATE_MODE_VALUES = Object.freeze(Object.values(STARTUP_UPDATE_MODES));
+export const DEFAULT_STARTUP_UPDATE_MODE = STARTUP_UPDATE_MODES.ASK;
 export const WAITING_LANE_SHADOW_MODE_VALUES = Object.freeze(["off", "shadow"]);
 
 // Settings no code reads any more. Opening the account DB deletes their stored

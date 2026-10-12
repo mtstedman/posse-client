@@ -173,8 +173,21 @@ async function runChat({ runtime, name, session, provider, stdin, stdout, stderr
 }
 
 // Live activity for interactive chats; replies stay on stdout.
+function compactTokens(value) {
+  const count = Number(value) || 0;
+  return count >= 1000 ? `${(count / 1000).toFixed(1)}k` : String(count);
+}
+
+/** One provider call's tokens, with how much of its input came from the prompt cache. */
+export function usageText(usage = {}) {
+  const cached = Number(usage.cache_read_tokens) || 0;
+  return `${compactTokens(usage.input_tokens)} in${cached ? ` (${compactTokens(cached)} cached)` : ""} · ${compactTokens(usage.output_tokens)} out`
+    + (Number(usage.cost_usd) > 0 ? ` · $${Number(usage.cost_usd).toFixed(3)}` : "");
+}
+
 export function progressLine(event) {
   if (event?.type === "turn.started") return event.turn > 1 ? "  · reviewing results…\n" : "  · thinking…\n";
+  if (event?.type === "turn.finished") return `    ${usageText(event.usage)}\n`;
   if (event?.type === "turn.retry") return "  ↻ response ran long; retrying with more room\n";
   if (event?.type === "assistant.text") return `${String(event.text || "").trim()}\n`;
   if (event?.type === "tool.started") return `  → ${event.tool}\n`;

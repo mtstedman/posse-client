@@ -2,6 +2,12 @@
 export const TEST_SCRIPT_NO_VERIFICATION_REASON = "test_script_has_no_verification";
 export const VERIFICATION_DEPENDENCY_LOCK_INVALID = "verification_dependency_lock_invalid";
 export const DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY = "allow";
+export const TEST_STRICTNESS = Object.freeze({ PERMISSIVE: "permissive", STRICT: "strict" });
+export const TEST_STRICTNESS_VALUES = Object.freeze(Object.values(TEST_STRICTNESS));
+export const DEFAULT_TEST_STRICTNESS = TEST_STRICTNESS.PERMISSIVE;
+export const PERMISSIVE_TEST_OUTCOMES = Object.freeze([
+  "runner_unavailable", "dependency_unavailable", "no_applicable_suite", "invalid_plan", "unsafe_command",
+]);
 
 // A merge candidate may proceed past an unavailable runner, but a process
 // that started and failed to finish has not supplied advisory evidence.

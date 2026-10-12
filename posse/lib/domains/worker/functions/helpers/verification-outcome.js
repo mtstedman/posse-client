@@ -2,6 +2,8 @@
 // wire-level `status` fields for compatibility; this adapter gives every path
 // one typed decision model so infrastructure cannot masquerade as a product
 // regression.
+import { requiresTestVerification } from "../../../settings/functions/test-strictness.js";
+import { PERMISSIVE_TEST_OUTCOMES } from "../../../../catalog/verification.js";
 
 export const VERIFICATION_OUTCOME_SCHEMA_VERSION = 1;
 
@@ -73,6 +75,16 @@ export function isVerificationInfrastructureOutcome(value) {
     ? value
     : value?.verification_outcome?.type || verificationOutcome(value).type;
   return INFRASTRUCTURE_OUTCOMES.has(String(type || ""));
+}
+
+export function isAdvisoryTestResult(value, options = {}) {
+  if (requiresTestVerification(options)) return false;
+  const type = value?.verification_outcome?.type || verificationOutcome(value).type;
+  return PERMISSIVE_TEST_OUTCOMES.includes(type);
+}
+
+export function isBlockingVerificationInfrastructureOutcome(value, options = {}) {
+  return isVerificationInfrastructureOutcome(value) && !isAdvisoryTestResult(value, options);
 }
 
 export function verificationInfrastructureError(value, prefix = "Verification infrastructure unavailable") {

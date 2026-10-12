@@ -1,4 +1,6 @@
 import { emptyMaterializedPathsForJob } from "../../handoff/functions/helpers/file-materialization.js";
+import { isAdvisoryTestResult } from "../../worker/functions/helpers/verification-outcome.js";
+import { getTestStrictness } from "../../settings/functions/test-strictness.js";
 // A final review authorizes the scoped bytes, named read dependencies, and
 // task contract it saw.
 // Persist this identity before review; committing those bytes does not change it.
@@ -43,7 +45,7 @@ export async function finalReviewIdentity(cwd, payload, { jobId = null } = {}) {
     "success_criteria", "root_success_criteria", "constraints", "test_command", "tests_to_run", "verification_contract",
     "files_to_modify", "files_to_create", "files_to_delete", "create_roots",
   ].map((key) => [key, payload?.[key] ?? null]));
-  return digest(JSON.stringify({ contract, states }));
+  return digest(JSON.stringify({ contract, states, test_strictness: getTestStrictness({ projectDir: cwd }) }));
 }
 
 export function latestFinalReview(jobId, db = getDb()) {
@@ -87,7 +89,8 @@ export async function authoritativeFinalReview(job, payload, cwd) {
         instructions: [...reasons, review.repair, ...diagnostics].filter(Boolean).join("\n\n"),
       } }], _final_reviewer_agent_call_id: review.reviewer_agent_call_id };
   }
-  if (["unavailable", "infrastructure_error", "invalid", "timed_out", "skipped"].includes(review.changed_tests?.status)) {
+  if (!isAdvisoryTestResult(review.changed_tests, { projectDir: cwd })
+    && ["unavailable", "infrastructure_error", "invalid", "timed_out", "skipped"].includes(review.changed_tests?.status)) {
     return unresolved(`Changed test verification is incomplete (${review.changed_tests.reason || review.changed_tests.status}); a passing review cannot establish execution of those tests.`);
   }
   return { verdict: "pass", confidence: "high", reasons: [review.summary || "Final review passed for the exact committed change and task contract."],

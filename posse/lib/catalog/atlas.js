@@ -73,6 +73,9 @@ export const VALID_ATLAS_BOOT_REINDEX_POLICIES = readonlySet(ATLAS_BOOT_REINDEX_
 export const ATLAS_SCIP_RESTAGE_POLICY_VALUES = Object.freeze(["never", "missing", "smart", "always"]);
 export const VALID_ATLAS_SCIP_RESTAGE_POLICIES = readonlySet(ATLAS_SCIP_RESTAGE_POLICY_VALUES);
 export const ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT = 24;
+// Warm purposes that stage and ingest repository SCIP. WI warms are hot-view
+// materialization only; repo-level SCIP belongs to main-branch warms.
+export const ATLAS_SCIP_WARM_PURPOSES = Object.freeze(["main-incremental", "main-full", "main-merge"]);
 
 export const ATLAS_AUTO_FEEDBACK_VALUES = Object.freeze(["off", "dry-run", "write"]);
 export const VALID_ATLAS_AUTO_FEEDBACK_MODES = readonlySet(ATLAS_AUTO_FEEDBACK_VALUES);

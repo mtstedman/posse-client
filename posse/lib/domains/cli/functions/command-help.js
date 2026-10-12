@@ -5,6 +5,7 @@ import { WORK_ITEM_MODES } from "../../../catalog/work-item.js";
 import { getCatalogRuntimeFallbackInt } from "../../settings/functions/catalog.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { atlasV2UsageSummary } from "./atlas-v2-help.js";
+import { STARTUP_UPDATE_FLAGS } from "../../../catalog/cli-flags.js";
 
 // Command help belongs to the CLI presentation surface. Keep it independent
 // of application startup so help can render before repository initialization.
@@ -32,6 +33,8 @@ const COMMAND_USAGE = {
     console.log(`    ${C.cyan}--auto-approve-plan${C.reset} Skip plan approval gates for this run`);
     console.log(`    ${C.cyan}--no-tui${C.reset}            Disable split-screen display (classic output)`);
     console.log(`    ${C.cyan}--non-interactive${C.reset}   Suppress terminal prompts; leave app gates open instead`);
+    console.log(`    ${C.cyan}${STARTUP_UPDATE_FLAGS.update}${C.reset}    Save installation edits, update if behind upstream, and restart`);
+    console.log(`    ${C.cyan}${STARTUP_UPDATE_FLAGS.skip}${C.reset} Skip startup updates for this run`);
     console.log(`    ${C.cyan}--dry-run${C.reset}           Research + plan only — dev jobs auto-pass without execution`);
     console.log(`    ${C.cyan}--stall-timeout N${C.reset}   Seconds before killing stalled process`);
     console.log(`    ${C.cyan}--work-item N${C.reset}       Run only jobs for one work item (repeat or comma-separate)`);
@@ -96,6 +99,7 @@ const COMMAND_USAGE = {
     console.log(`  hold keeps this checkout where it is (fetches continue) until resume or 30 minutes pass.`);
     console.log(`  merge squashes the team's work into your branch and deploy pushes it to origin; the session keeps running.`);
     console.log(`  Each asks for your approval unless you turn it on with auto (trusted teams).\n`);
+    console.log(`  Startup offers a client update; use ${STARTUP_UPDATE_FLAGS.update} to accept automatically or ${STARTUP_UPDATE_FLAGS.skip} to skip.\n`);
   },
   unpair: () => {
     console.log(`\n  Usage: posse unpair [--json]`);

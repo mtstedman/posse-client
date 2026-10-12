@@ -95,7 +95,7 @@ import {
   wiCommitTree,
   wiPathsDifferingFromCommit,
 } from "../../functions/v2/wi-source-proof.js";
-import { ATLAS_WI_REFRESH_MAX_SOURCE_PASSES } from "../../../../catalog/atlas.js";
+import { ATLAS_SCIP_WARM_PURPOSES, ATLAS_WI_REFRESH_MAX_SOURCE_PASSES } from "../../../../catalog/atlas.js";
 import { ATLAS_EVENTS } from "../../functions/v2/contracts/events.js";
 import { ingestScipFile, listScipFiles } from "../../functions/v2/scip/ingester.js";
 import { mergeLayerRows } from "../../functions/v2/ledger/layer-merge.js";
@@ -630,11 +630,7 @@ export class ParseEngine {
     // WI warms are intentionally hot-view materialization only. Repo-level
     // SCIP staging/intake belongs to main warms; letting a WI warm run it turns
     // a one-file follow-up into a boot-scale indexing job.
-    return (
-      purpose === "main-incremental" ||
-      purpose === "main-full" ||
-      purpose === "main-merge"
-    );
+    return ATLAS_SCIP_WARM_PURPOSES.includes(purpose);
   }
 
   /**

@@ -59,7 +59,9 @@ function remoteHeadFailure(error, remote, branch) {
   return preflightFailure(headError.code, headError.message, { remote, branch });
 }
 
-function authFailure(projectDir, remote, failure, gitExec = adminGitExec) {
+function authFailure(projectDir, remote, failure, {
+  gitExec = adminGitExec, sessionCredentials = false,
+} = {}) {
   const status = resultStatus(failure);
   const detail = {
     stderr: failure?.stderr,
@@ -71,6 +73,15 @@ function authFailure(projectDir, remote, failure, gitExec = adminGitExec) {
   };
   if (!["auth_failed", "authentication_failed", "unauthorized"].includes(status)
     && !isGitPushAuthenticationFailure(detail)) return null;
+  if (sessionCredentials) {
+    // Keep the SSH failure available to enrollment's bounded key retry and
+    // blocked-network detection. A personal gh login cannot fix a member's
+    // deploy-key access to the host's private session repository.
+    return preflightFailure("shared_trunk_authentication_required", [
+      "Session Git access failed; check the host-installed session key and the SSH connection.",
+      detail.stderr || detail.message,
+    ].filter(Boolean).join("\n"), { remote });
+  }
   let remoteUrl = null;
   try {
     remoteUrl = gitExec(["remote", "get-url", "--push", remote], projectDir, { timeoutMs: 5_000 }).trim();
@@ -192,7 +203,7 @@ export async function runSharedTrunkAccessPreflight(projectDir = process.cwd(), 
       branch: config.branch,
     });
   } catch (error) {
-    const auth = authFailure(projectDir, config.remote, error, options.gitExec);
+    const auth = authFailure(projectDir, config.remote, error, options);
     if (auth) return auth;
     const remoteHead = remoteHeadFailure(error, config.remote, config.branch);
     if (remoteHead) return remoteHead;
@@ -209,7 +220,7 @@ export async function runSharedTrunkAccessPreflight(projectDir = process.cwd(), 
     });
   }
   const remoteCheck = nativeResult(remoteEnvelope) || {};
-  const remoteAuth = authFailure(projectDir, config.remote, remoteCheck, options.gitExec);
+  const remoteAuth = authFailure(projectDir, config.remote, remoteCheck, options);
   if (remoteAuth) return remoteAuth;
   const remoteOid = String(remoteCheck.remoteOid || remoteCheck.remote_oid || "").trim();
   const checkedRemote = String(remoteCheck.remote || "").trim();
@@ -236,7 +247,7 @@ export async function runSharedTrunkAccessPreflight(projectDir = process.cwd(), 
     try {
       claimProbe = await roundTripClaimProbe({ projectDir, config, casPush, randomKey });
     } catch (error) {
-      const auth = authFailure(projectDir, config.remote, error, options.gitExec);
+      const auth = authFailure(projectDir, config.remote, error, options);
       if (auth) return { ...auth, remoteOid };
       return preflightFailure(error?.code || "claim_ref_access_failed", error?.message || String(error), {
         remote: config.remote,

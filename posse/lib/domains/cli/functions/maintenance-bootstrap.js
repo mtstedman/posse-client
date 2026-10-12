@@ -3,6 +3,7 @@ import { C } from "../../../shared/format/functions/colors.js";
 // Pure data module: keeps this bootstrap free of the SQLite-backed graph.
 import { pairingCommandOpensSession } from "../../../catalog/pairing-command.js";
 import { isInstallationDoctor, isPosseProjectInitialized } from "./project-init-state.js";
+import { STARTUP_UPDATE_FLAGS } from "../../../catalog/cli-flags.js";
 // doctor/update bootstrap that runs before orchestrator-app opens SQLite.
 // Windows cannot replace a loaded native addon, so Posse's own npm repair must
 // happen in a process that has never constructed a better-sqlite3 Database.
@@ -216,6 +217,13 @@ async function runUpdateBootstrap(argv) {
   const { cmdUpdate } = await import("./update-command.js");
   const settings = initializedProject ? readMaintenanceSettings(process.cwd())
     : { ok: true, scheduler_block: null, atlas_config: { enabled: false, scipMode: "off", scipLanguages: [] } };
+  if (argv.includes(STARTUP_UPDATE_FLAGS.stash) && !settings.ok) {
+    const message = `Cannot verify whether Posse is running: ${settings.error || "settings probe failed"}`;
+    if (json) console.log(JSON.stringify({ ok: false, update: { status: "blocked", message } }));
+    else process.stderr.write(`${message}\n`);
+    process.exitCode = 1;
+    return;
+  }
   if (!settings.ok && !json) {
     console.warn(`  [bootstrap] settings probe unavailable; SCIP defaults to off: ${settings.error}`);
   }
@@ -252,7 +260,7 @@ export async function runMaintenanceCliIfRequested(argv = process.argv.slice(2))
   return false;
 }
 
-function needsRunnablePosse(argv) {
+export function needsRunnablePosse(argv) {
   if (["run", "go"].includes(argv[0])) return true;
   // Hosting or joining a session runs the same work: if Posse can run, it can
   // pair, and only what stops run/go stops pairing.

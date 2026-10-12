@@ -100,6 +100,13 @@ function toolResultSummary(output) {
     return { result: JSON.parse(serialized), result_truncated: false };
   } catch { return { result: null, result_truncated: true }; }
 }
+const PROGRESS_USAGE_FIELDS = ["input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens", "cost_usd"];
+// What one provider call cost, and the turn so far, for live progress.
+function usageProgress(before, after) {
+  const pick = (usage, base = null) => Object.fromEntries(PROGRESS_USAGE_FIELDS.map(key =>
+    [key, (Number(usage[key]) || 0) - (base ? Number(base[key]) || 0 : 0)]));
+  return { usage: pick(after, before), totals: pick(after) };
+}
 function progressEmitter(onProgress) {
   if (typeof onProgress !== "function") return null;
   let seq = 0;
@@ -257,13 +264,15 @@ export class AgentRuntime {
         if (!OUTPUT_LIMIT_CODES.has(error?.code)) throw error;
         // The provider already billed the truncated response; count it.
         state.execution?.check();
+        const billed = { ...state.usage };
         this.recordProviderUsage(state, error.stats);
         // A response that overruns even the repair cap ends the turn with what
         // it got done, rather than failing work that may already have changed.
         if (state.maxOutputTokens) return this.completeAfterOverrun(state);
         // Otherwise repeat the same turn once with room for long tool arguments.
         state.maxOutputTokens = OUTPUT_LIMIT_REPAIR_MAX_OUTPUT_TOKENS;
-        state.progress?.({ type: "turn.retry", turn: state.usage.turns + 1, reason: "output_limit", max_output_tokens: state.maxOutputTokens });
+        state.progress?.({ type: "turn.retry", turn: state.usage.turns + 1, reason: "output_limit", max_output_tokens: state.maxOutputTokens,
+          ...usageProgress(billed, state.usage) });
         continue;
       } finally {
         clearTimeout(timer);
@@ -271,7 +280,9 @@ export class AgentRuntime {
       }
       state.execution?.check();
       if (this.now() >= deadline) throw Object.assign(new Error("Agent turn exceeded its wall-time limit"), { code: "agent_budget_exceeded" });
+      const before = { ...state.usage };
       this.recordProviderUsage(state, generated?.stats);
+      state.progress?.({ type: "turn.finished", turn: state.usage.turns, ...usageProgress(before, state.usage) });
       const content = String(generated?.output || "").trim();
       const nativeCalls = generated?.toolCalls || (generated?.toolCall ? [generated.toolCall] : null);
       let calls, malformed;

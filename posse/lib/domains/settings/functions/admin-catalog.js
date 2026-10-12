@@ -331,6 +331,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     "scheduler_max_active_worktrees",
     "scheduler_implementation_reserved_slots",
     "startup_dirty_tree_policy",
+    "startup_update_mode",
     "session_recycle_mode",
     "web_tools_enabled",
   ]),
@@ -411,6 +412,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     "db_task_pre_merge_policy",
   ]),
   group("repo_verification", "repo", "Verification", [
+    "test_strictness",
     "canonical_verify_cmd",
     "verification_wall_timeout_ms",
     "verification_idle_timeout_ms",

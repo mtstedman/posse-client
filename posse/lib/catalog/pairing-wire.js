@@ -9,6 +9,9 @@ export const PAIRING_PROTOCOL = "posse.pairing.v1";
 
 export const DEFAULT_TIMEOUT_MS = 20_000;
 
+export const ADMISSION_POLL_INTERVAL_MS = 2_000;
+export const ADMISSION_MAX_CONSECUTIVE_FAILURES = 3;
+
 export const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 export const PAIRING_CODE_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{5}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{5}$/u;

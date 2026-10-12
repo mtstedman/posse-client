@@ -7,6 +7,8 @@ import { C } from "../../../shared/format/functions/colors.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
 import { adminGitExecAsync } from "../../git/functions/admin-git-exec.js";
 import { isPosseProjectInitialized } from "./project-init-state.js";
+import { PosseUpdateWork } from "../classes/PosseUpdateWork.js";
+import { STARTUP_UPDATE_FLAGS } from "../../../catalog/cli-flags.js";
 
 const DEFAULT_REMOTE = "origin";
 const DEFAULT_BRANCH = "main";
@@ -308,7 +310,7 @@ export function formatPosseUpdateAvailableWarning(check = {}) {
   const from = shortSha(check.local_sha);
   const to = shortSha(check.remote_sha);
   const range = from && to ? ` (${from} -> ${to})` : "";
-  return `Posse update available${range}. Run posse update.`;
+  return `Posse update available${range}. Run posse update or start with ${STARTUP_UPDATE_FLAGS.update}.`;
 }
 
 // Step keys emitted to the ui: checkout → fetch → apply → deps.
@@ -405,6 +407,7 @@ export async function updatePosseClient({
   remote = DEFAULT_REMOTE,
   branch = DEFAULT_BRANCH,
   dryRun = false,
+  stash = false,
   git = runGitCommand,
   runDoctor = null,
   getAtlasConfig = null,
@@ -422,6 +425,7 @@ export async function updatePosseClient({
   let before = "";
   let mergeStarted = false;
   let completedUpdate = null;
+  let preservedWork = null;
   try {
     if (!dryRun) {
       if (typeof getSchedulerBlockMessage !== "function") {
@@ -490,10 +494,15 @@ export async function updatePosseClient({
       return { ok: false, dry_run: dryRun, posse_root: resolvedPosseRoot, repo_root: repoRoot, update, dependencies: null };
     }
 
-    const dirty = await gitOutput(git, ["status", "--porcelain", "--untracked-files=no"], {
+    if (stash && !dryRun) {
+      preservedWork = new PosseUpdateWork({ repoRoot, git: (args, opts) => callGit(git, args, opts) });
+      await preservedWork.acquire();
+    }
+    const statusArgs = ["status", "--porcelain", stash ? "--untracked-files=all" : "--untracked-files=no"];
+    const dirty = await gitOutput(git, statusArgs, {
       cwd: repoRoot,
     });
-    if (dirty) {
+    if (dirty && !stash) {
       const update = blockedUpdate("Posse checkout has local tracked changes; commit or stash them before updating", {
         repo_root: repoRoot,
         remote,
@@ -507,7 +516,7 @@ export async function updatePosseClient({
     }
 
     before = await gitOutput(git, ["rev-parse", "HEAD"], { cwd: repoRoot });
-    u.done("checkout", "ok", `${targetBranch} @ ${shortSha(before)} · clean`);
+    u.done("checkout", "ok", `${targetBranch} @ ${shortSha(before)} · ${dirty ? "local work will be saved in Git" : "clean"}`);
 
     phase = "fetch";
     u.start("fetch", dryRun
@@ -614,10 +623,10 @@ export async function updatePosseClient({
 
       u.start("apply", `fast-forwarding to ${shortSha(remoteSha)}`);
       const applyHead = await gitOutput(git, ["rev-parse", "HEAD"], { cwd: repoRoot });
-      const applyDirty = await gitOutput(git, ["status", "--porcelain", "--untracked-files=no"], {
+      const applyDirty = await gitOutput(git, statusArgs, {
         cwd: repoRoot,
       });
-      if (applyHead !== before || applyDirty) {
+      if (applyHead !== before || applyDirty !== dirty) {
         const update = blockedUpdate("Posse checkout changed while the update was being prepared; retry after preserving the new work", {
           repo_root: repoRoot,
           remote,
@@ -631,6 +640,15 @@ export async function updatePosseClient({
         });
         u.done("apply", "fail", update.message);
         return { ok: false, dry_run: dryRun, posse_root: resolvedPosseRoot, repo_root: repoRoot, update, dependencies: null };
+      }
+      if (dirty) {
+        await preservedWork.save();
+        const remaining = await gitOutput(git, statusArgs, { cwd: repoRoot });
+        const savedHead = await gitOutput(git, ["rev-parse", "HEAD"], { cwd: repoRoot });
+        if (remaining || savedHead !== before) {
+          throw new Error("Posse checkout changed while saving local work; saved work remains in Git, inspect the checkout before retrying");
+        }
+        u.note("apply", `local work saved as ${preservedWork.savedWork.oid}; retained in git stash list`);
       }
       // Merge the resolved sha, not FETCH_HEAD — a concurrent fetch in the
       // same checkout (live posse runs do this) can repoint FETCH_HEAD
@@ -668,6 +686,7 @@ export async function updatePosseClient({
       };
     }
 
+    if (preservedWork?.savedWork) update.saved_work = preservedWork.savedWork;
     completedUpdate = update;
     phase = "deps";
     if (!initializedProject) {
@@ -763,9 +782,12 @@ export async function updatePosseClient({
         message,
         ...(before ? { before } : {}),
         ...(rollback ? { rollback } : {}),
+        ...(preservedWork?.savedWork ? { saved_work: preservedWork.savedWork } : {}),
       },
       dependencies: dependencyFailure,
     };
+  } finally {
+    preservedWork?.release();
   }
 }
 
@@ -905,6 +927,11 @@ function renderUpdateSummary({ log, colors, result }) {
   if (update.ok !== false && !depsOk) {
     log(`  ${colors.yellow}! some dependencies need attention — run posse doctor after fixing the tools it names${colors.reset}`);
   }
+  if (update.saved_work) {
+    const saved = update.saved_work;
+    log(`  ${colors.yellow}${saved.retained ? "Local installation work remains saved in Git" : "Local work preservation could not be verified"} (${saved.oid || saved.message}).${colors.reset}`);
+    log(`    ${colors.dim}Inspect git stash list in ${result.repo_root}; restore with git stash apply --index ${saved.oid || "<saved-stash>"}${colors.reset}`);
+  }
   log(`  ${colors.dim}install: ${result.posse_root}${colors.reset}`);
   if (update.remote_url) {
     log(`  ${colors.dim}source:  ${update.remote}/${update.branch} (${update.remote_url})${colors.reset}`);
@@ -955,6 +982,7 @@ export async function cmdUpdate({
       projectDir,
       branch,
       dryRun,
+      stash: hasArg(argv, STARTUP_UPDATE_FLAGS.stash),
       git,
       runDoctor,
       getAtlasConfig,

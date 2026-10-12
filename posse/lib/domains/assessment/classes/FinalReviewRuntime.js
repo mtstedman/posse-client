@@ -1,4 +1,6 @@
 import { emptyMaterializedPathsForJob } from "../../handoff/functions/helpers/file-materialization.js";
+import { isAdvisoryTestResult } from "../../worker/functions/helpers/verification-outcome.js";
+import { renderTestStrictness } from "../../settings/functions/test-strictness.js";
 import { testRunDiagnostics } from "../../worker/functions/helpers/test-failure-evidence.js";
 import { finalReviewIdentity } from "../functions/final-review-authority.js";
 import { completeFinalReview } from "../functions/final-review-completion.js";
@@ -327,14 +329,16 @@ export class FinalReviewRuntime {
           const revision = {
             status: FINAL_REVIEW_REVIEWER_STATUS.REVISED,
             revision: session.revision,
-            review: renderFinalReviewRevision({ revision: session.revision, testRun, delta, changedTestRun, checks, completionReport }),
+            review: [renderTestStrictness({ projectDir: parent.cwd }),
+              renderFinalReviewRevision({ revision: session.revision, testRun, delta, changedTestRun, checks, completionReport })].join("\n\n"),
           };
           const parked = session.parked;
           session.parked = null;
           if (parked) parked.resolve(revision);
           else session.pendingRevision = revision;
         } else {
-          const evidence = renderFinalReviewEvidence({ job, workItem, payload, change, testRun, changedTestRun, checks, completionReport });
+          const evidence = [renderTestStrictness({ projectDir: parent.cwd }),
+            renderFinalReviewEvidence({ job, workItem, payload, change, testRun, changedTestRun, checks, completionReport })].join("\n\n");
           const fresh = this.#startReviewer(parent, {
             instructions: finalReviewCoreInstructions(),
             evidence,
@@ -354,6 +358,7 @@ export class FinalReviewRuntime {
       }
       if (mode !== MODES.INFRASTRUCTURE) {
         if (result.outcome === FINAL_REVIEW_OUTCOMES.PASS
+          && !isAdvisoryTestResult(changedTestRun, { projectDir: parent.cwd })
           && ["unavailable", "infrastructure_error", "invalid", "timed_out", "skipped"].includes(changedTestRun?.status)) {
           result = { ...result, outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
             reason: `Changed tests did not establish complete coverage (${changedTestRun.reason || changedTestRun.status}); restore their verification prerequisites.` };

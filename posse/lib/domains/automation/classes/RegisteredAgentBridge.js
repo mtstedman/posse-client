@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { AGENT_NAME_PATTERN, AGENT_SESSION_PATTERN, AGENT_TURN_PROTOCOL } from "../../../catalog/agent.js";
-import { REGISTERED_AGENT_MAX_CONTEXT_BYTES, REGISTERED_AGENT_MAX_REPLY_BYTES, REGISTERED_AGENT_OPERATIONS, REGISTERED_AGENT_PROTOCOL } from "../../../catalog/registered-agent.js";
+import { REGISTERED_AGENT_MAX_CONTEXT_BYTES, REGISTERED_AGENT_MAX_REPLY_BYTES, REGISTERED_AGENT_OPERATIONS, REGISTERED_AGENT_PROTOCOL,
+  REGISTERED_AGENT_TERMINAL_STATUSES } from "../../../catalog/registered-agent.js";
 import { automationDataDir } from "../functions/paths.js";
 import { assertRegisteredCapability } from "../functions/registered-trust.js";
 import { demand, digest, object, schemaCheck } from "../functions/policy.js";
@@ -13,7 +14,7 @@ import { agentSessionIdleExpired } from "../../agents/functions/definition.js";
 const REGISTRATIONS = "registered_clients";
 const ID = /^[a-z][a-z0-9._-]{0,63}$/;
 const KEY = /^[a-zA-Z0-9._:-]{1,120}$/;
-const TERMINAL = new Set(["done", "failed", "needs_confirmation"]);
+const TERMINAL = new Set(REGISTERED_AGENT_TERMINAL_STATUSES);
 const RECEIPT_CONTENT_MS = 30 * 24 * 60 * 60 * 1000;
 const CHAT_CONTENT_MS = 90 * 24 * 60 * 60 * 1000;
 const TRANSIENT_BUSY_CODES = new Set(["agent_session_busy", "agent_request_busy"]);
@@ -47,8 +48,9 @@ const PUBLIC_PROVIDER_ERRORS = new Map([
   ["provider_authentication", ["provider_access_denied", "Model provider rejected the configured account"]],
   ["provider_authorization", ["provider_access_denied", "Model provider rejected the configured account"]],
 ]);
-const PROGRESS_TYPES = new Set(["turn.started", "turn.retry", "assistant.text", "tool.started", "tool.finished"]);
+const PROGRESS_TYPES = new Set(["turn.started", "turn.retry", "turn.finished", "assistant.text", "tool.started", "tool.finished"]);
 const PROGRESS_TEXT_MAX = 4000;
+const PROGRESS_USAGE_FIELDS = ["input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens", "cost_usd"];
 function safeProgress(event) {
   if (!PROGRESS_TYPES.has(event?.type)) return null;
   const projected = { seq: Number(event.seq) || 0, at: String(event.at || "").slice(0, 40), type: event.type };
@@ -59,6 +61,11 @@ function safeProgress(event) {
   if (event.arguments && typeof event.arguments === "object" && !Array.isArray(event.arguments)) projected.arguments = event.arguments;
   if (event.arguments_truncated === true) projected.arguments_truncated = true;
   if (event.type === "assistant.text" && typeof event.text === "string") projected.text = event.text.slice(0, PROGRESS_TEXT_MAX);
+  for (const key of ["usage", "totals"]) {
+    if (!event[key] || typeof event[key] !== "object") continue;
+    projected[key] = Object.fromEntries(PROGRESS_USAGE_FIELDS
+      .filter(field => Number.isFinite(event[key][field])).map(field => [field, event[key][field]]));
+  }
   return projected;
 }
 // Callers see only public codes, so the owner log keeps the real cause.

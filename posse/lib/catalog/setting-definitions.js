@@ -1,9 +1,10 @@
 // @ts-check
 // Canonical setting definitions. Pure data, derived role/model rows, and defaults only.
 import { RESEARCH_CLAIM_REVIEW } from "./research-claim-review.js";
+import { DEFAULT_STARTUP_UPDATE_MODE, STARTUP_UPDATE_MODE_VALUES } from "./setting-policy.js";
 import { FINAL_REVIEW_DEFAULT_MODE, FINAL_REVIEW_MODES } from "./final-review.js";
 import { PLANNER_DISPATCH_SETTINGS } from "./planner-dispatch.js";
-import { DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY } from "./verification.js";
+import { DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY, DEFAULT_TEST_STRICTNESS, TEST_STRICTNESS_VALUES } from "./verification.js";
 import { PROVIDER_OPTIONS, PROVIDER_LABELS } from "./provider.js";
 import { MODEL_TIERS as MODEL_TIER_NAMES } from "./model.js";
 import { IMAGE_PROVIDER_OPTIONS, getBuiltinDefaultTierModel as getDefaultTierModel } from "./provider-model-defaults.js";
@@ -183,12 +184,14 @@ export const SETTING_DEFINITIONS = [
   { key: "bridge_identity_migrated_to", default: "", adminVisible: false, description: "Project dir that claimed the legacy machine-global bridge identity (auto-updated)" },
 
   // ── Behaviors ────────────────────────────────────────────────────────────
+  { key: "startup_update_mode", default: DEFAULT_STARTUP_UPDATE_MODE, options: STARTUP_UPDATE_MODE_VALUES, description: "Refresh the Posse installation at startup: ask offers an interactive update, auto saves local installation edits in Git and updates without prompting, off skips startup updates. Accepted updates restart into fresh code; saved edits remain in Git stash." },
   { key: "auto_merge_completed", default: "false", valueType: "boolean", description: "Auto-merge work items that pass assessment" },
   { key: "codex_auth_mode",      default: "oauth", options: CODEX_AUTH_MODE_OPTIONS, description: "Codex auth mode (oauth, api, or auto). oauth/auto never fall back to API keys; api must be explicit." },
   { key: "codex_cli_path",       default: "",      adminVisible: false, description: "Explicit path to Codex CLI binary (empty = auto-detect)" },
   { key: "pre_assess_cmd",       default: "",      description: "Optional shell command to run before assessment" },
   { key: "pre_push_verify_cmd",  default: "",      description: "Optional shell command to run before pushing" },
   { key: "canonical_verify_cmd", default: "", scope: "repo", description: "Repository-owned canonical verification command run before assessment and push" },
+  { key: "test_strictness", default: DEFAULT_TEST_STRICTNESS, scope: "repo", options: TEST_STRICTNESS_VALUES, description: "Permissive (default) treats missing, unavailable, or zero tests as advisory. Strict requires test verification before completion. Actual failures remain actionable in both modes." },
   { key: "db_task_pre_merge_policy", default: DB_TASK_PRE_MERGE_POLICIES.HOLD, scope: "repo", options: DB_TASK_PRE_MERGE_POLICY_VALUES, description: "Database (task_mode db) tasks that depend on file changes not yet merged: hold (default) parks them until the work item merges, then asks the operator before they write the project database; run executes them at once against the work-item branch (only for a project database that is not production)" },
   { key: "verification_wall_timeout_ms", default: "", runtimeFallback: "120000", scope: "repo", numeric: { integer: true, min: 1000 }, description: "Milliseconds a frozen test or canonical verification command may run before Posse stops it (empty = 120000). Set it to the window the repository's own harness documents." },
   { key: "verification_idle_timeout_ms", default: "", scope: "repo", numeric: { integer: true, min: 1000 }, description: "Milliseconds a verification command may stay silent before Posse treats it as hung (empty = disabled). Enable only for harnesses that print progress while healthy." },

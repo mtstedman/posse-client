@@ -1,6 +1,7 @@
 import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import { isPosseProjectInitialized, uninitializedProjectMessage } from "./project-init-state.js";
 import { sessionJoinRequest } from "../../pairing/functions/join-folder.js";
+import { applyPairingGitEnvironment } from "../../pairing/functions/git-environment.js";
 import { collectSessionView, formatSessionViewLines } from "../../pairing/functions/session-view.js";
 import { installCliWarningFilter } from "./warnings.js";
 import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
@@ -566,6 +567,7 @@ function createStartupReadiness({ enabled = false } = {}) {
 
 async function init({ requireWritableArtifacts = true, allowGitInit = false, refreshStartupContext = false, showReadiness = false, ensureNativeGit = false, refreshNativeGit = false } = {}) {
   configureRuntimeEnv(PROJECT_DIR);
+  applyPairingGitEnvironment();
   const readiness = createStartupReadiness({ enabled: showReadiness });
   let startupContext = null;
   try {

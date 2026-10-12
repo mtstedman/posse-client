@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { AgentReleaseReconciler } from "../../automation/classes/AgentReleaseReconciler.js";
 import { SystemRegisteredAgentManager } from "../../automation/classes/SystemRegisteredAgentManager.js";
 import { AutomationOwnerClient } from "../../automation/classes/AutomationOwnerClient.js";
 import { automationOperatorTokenPath } from "../../automation/functions/paths.js";
@@ -16,6 +17,7 @@ const USAGE = `Usage:
   posse agent registrations revoke NAME [--client ID]
   posse agent registrations retire-user UID
   posse agent service install --system --package-root /opt/posse-agent/current/posse
+  posse agent service update --system [--sha REV] [--retry] [--dry-run]
   posse agent service status --system
   posse agent service remove --system`;
 
@@ -27,6 +29,32 @@ function parseFlags(argv) {
     flags[flag.slice(2)].push(argv[++i]);
   }
   return flags;
+}
+
+function usageError() { return Object.assign(new Error(USAGE), { code: "invalid_request" }); }
+
+/** `service <verb> --system ...` arguments, or a usage error. */
+export function parseServiceArgs(verb, scope, rest) {
+  if (scope !== "--system") throw usageError();
+  if (verb === "install") {
+    if (rest.length !== 2 || rest[0] !== "--package-root" || !rest[1]) throw usageError();
+    return { verb, packageRoot: rest[1] };
+  }
+  if (verb === "update") {
+    // --retry forgets a recorded failure of the resolved inputs; --fallback is
+    // how the fallback reconcile unit runs (not in the usage text).
+    const parsed = { verb, sha: "", dryRun: false, retry: false, fallback: false };
+    const switches = { "--dry-run": "dryRun", "--retry": "retry", "--fallback": "fallback" };
+    for (let index = 0; index < rest.length; index++) {
+      const field = switches[rest[index]];
+      if (field && !parsed[field]) parsed[field] = true;
+      else if (rest[index] === "--sha" && !parsed.sha && /^[0-9a-fA-F]{7,40}$/.test(rest[index + 1] || "")) parsed.sha = rest[++index];
+      else throw usageError();
+    }
+    return parsed;
+  }
+  if (["status", "remove"].includes(verb) && !rest.length) return { verb };
+  throw usageError();
 }
 
 export async function runRegisteredAdminCli(argv, io = {}) {
@@ -54,14 +82,19 @@ export async function runRegisteredAdminCli(argv, io = {}) {
     return 0;
   }
   if (noun === "service") {
-    const root = id === "--system" && rest[0] === "--package-root" ? rest[1] : "";
-    if (id !== "--system" || verb === "install" && (!root || rest.length !== 2)
-      || verb !== "install" && rest.length) throw Object.assign(new Error(USAGE), { code: "invalid_request" });
-    const manager = new SystemRegisteredAgentManager({ packageRoot: root });
-    const result = verb === "install" ? manager.install() : verb === "status" ? manager.status() : verb === "remove" ? manager.remove() : null;
-    if (!result) throw Object.assign(new Error(USAGE), { code: "invalid_request" });
+    const parsed = parseServiceArgs(verb, id, rest);
+    const manager = io.serviceManager || new SystemRegisteredAgentManager({ packageRoot: parsed.packageRoot || "" });
+    const releases = () => io.releaseReconciler || new AgentReleaseReconciler();
+    let result, code = 0;
+    if (parsed.verb === "install") result = manager.install();
+    else if (parsed.verb === "remove") result = manager.remove();
+    else if (parsed.verb === "status") result = { ...manager.status(), release: releases().status() };
+    else {
+      result = await releases().update({ sha: parsed.sha, dryRun: parsed.dryRun, retry: parsed.retry, fallback: parsed.fallback });
+      code = result.ok ? 0 : 1;
+    }
     (io.stdout || process.stdout).write(`${JSON.stringify(result)}\n`);
-    return 0;
+    return code;
   }
   const system = noun === "registrations";
   const client = io.client || new AutomationOwnerClient({ operator: true,

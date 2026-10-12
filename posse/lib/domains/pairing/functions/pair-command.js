@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { PAIRING_ACTION_ARITY } from "../../../catalog/pairing-command.js";
+import { ADMISSION_POLL_INTERVAL_MS, ADMISSION_MAX_CONSECUTIVE_FAILURES } from "../../../catalog/pairing-wire.js";
+import { STARTUP_UPDATE_FLAGS } from "../../../catalog/cli-flags.js";
 import {
   SESSION_COMPUTE_POLICY_VALUES,
   SESSION_SYNC_GLYPHS,
@@ -175,8 +177,10 @@ function inviteToken(value) {
 async function waitForPairingAdmission(remoteClient, stateId, pendingToken, {
   C,
   json = false,
+  wait = sleep,
 } = {}) {
   let interrupted = false;
+  let consecutiveFailures = 0;
   const stop = () => { interrupted = true; };
   // `on`, not `once`: a Ctrl+C that belonged to a foreground command must
   // leave the handler in place for the next one.
@@ -188,10 +192,23 @@ async function waitForPairingAdmission(remoteClient, stateId, pendingToken, {
       if (!state || state.phase !== "pending") {
         return { status: "left" };
       }
-      const pending = validatePairingRemoteResponse(
-        "pending",
-        await remoteClient.pendingStatus(pendingToken),
-      );
+      let response;
+      try {
+        response = await remoteClient.pendingStatus(pendingToken);
+      } catch (error) {
+        if (interrupted) return { status: "left" };
+        const status = Number(error?.status);
+        const transient = ["pairing_remote_timeout", "pairing_remote_unavailable"].includes(error?.code)
+          || status === 408 || status === 429 || (status >= 500 && status <= 599);
+        consecutiveFailures += 1;
+        if (!transient || consecutiveFailures >= ADMISSION_MAX_CONSECUTIVE_FAILURES) throw error;
+        touchPairingState(stateId, undefined, ["pending"]);
+        if (!json) console.log(`  ${C.yellow}Relay temporarily unavailable; retrying admission status...${C.reset}`);
+        await wait(ADMISSION_POLL_INTERVAL_MS);
+        continue;
+      }
+      if (interrupted) return { status: "left" };
+      const pending = validatePairingRemoteResponse("pending", response);
       if (pending.session_id !== state.remote_session_id) {
         throw sessionChanged("Pending credential resolved to a different session");
       }
@@ -200,8 +217,9 @@ async function waitForPairingAdmission(remoteClient, stateId, pendingToken, {
         branch: state.shared_branch,
       }, pending.repository);
       touchPairingState(stateId, undefined, ["pending"]);
+      consecutiveFailures = 0;
       if (pending.status !== "pending") return pending;
-      await sleep(2_000);
+      await wait(ADMISSION_POLL_INTERVAL_MS);
     }
     if (!json) console.log(`\n  ${C.yellow}Session join cancelled.${C.reset}\n`);
     return { status: "left" };
@@ -277,6 +295,9 @@ export function parsePairArgs(argv = []) {
   };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
+    // These options are consumed before the runtime starts, including in the
+    // fresh process launched after updating. They do not change session policy.
+    if (arg === STARTUP_UPDATE_FLAGS.update || arg === STARTUP_UPDATE_FLAGS.skip) continue;
     if (arg === "--json") {
       if (json) {
         throw Object.assign(new Error("--json may only be specified once"), {
@@ -610,12 +631,13 @@ function printSessionSyncRows(log, C, derived, { observing = false, listedInstan
 }
 
 // GitHub can take a few seconds to honor a deploy key it has just accepted,
-// and a member's first fetch runs the moment it is admitted. An auth rejection
-// then is retried for a bounded window instead of failing the whole join.
+// and the host and member use theirs immediately after installation. An auth
+// rejection is retried for a bounded window instead of failing enrollment.
 const SESSION_KEY_RETRY_DELAYS_MS = Object.freeze([2_000, 3_000, 5_000, 8_000, 13_000, 20_000]);
 
 function sessionKeyNotYetAccepted(error) {
-  return /Permission denied \(publickey\)|Repository not found|Could not read from remote repository/iu
+  return error?.code === "shared_trunk_authentication_required"
+    || /Permission denied \(publickey\)|Repository not found|Could not read from remote repository/iu
     .test(String(error?.message || ""));
 }
 
@@ -1001,14 +1023,23 @@ async function closeClaimedHostSession(root, remoteClient, state, {
 // The run gate's dependency repair, before a session opens or a member goes
 // active. Quiet while the check passes; a repair streams its progress, since
 // it can take minutes.
-async function preparePairingEnvironment(root, environment, { C, json, before }) {
+async function preparePairingEnvironment(root, environment, {
+  C, json, before, stateId = null, progressIntervalMs = PAIRING_ENVIRONMENT_PROGRESS_INTERVAL_MS,
+}) {
   if (!json) console.log(`  ${C.dim}Checking runtime dependencies before ${before}...${C.reset}`);
   let lastProgress = "";
   const untrackedBefore = listUntrackedPairingPaths(root);
   const startedAt = Date.now();
-  const heartbeat = json ? null : setInterval(() => {
-    console.log(`  ${C.dim}[deps] Still working: ${lastProgress || "checking repository dependencies"} (${Math.floor((Date.now() - startedAt) / 1000)}s elapsed)${C.reset}`);
-  }, PAIRING_ENVIRONMENT_PROGRESS_INTERVAL_MS);
+  // Member dependency repair can take longer than the owner-staleness window.
+  // Keep local enrollment alive even in JSON mode, before relay activation.
+  const touchEnrollment = () => {
+    if (stateId) touchPairingState(stateId, undefined, ["enrolling"]);
+  };
+  touchEnrollment();
+  const heartbeat = json && !stateId ? null : setInterval(() => {
+    touchEnrollment();
+    if (!json) console.log(`  ${C.dim}[deps] Still working: ${lastProgress || "checking repository dependencies"} (${Math.floor((Date.now() - startedAt) / 1000)}s elapsed)${C.reset}`);
+  }, progressIntervalMs);
   heartbeat?.unref?.();
   let result;
   try {
@@ -1139,20 +1170,27 @@ async function runHost({
     }
     await withWorktreeLockAsync(root, root, async () => {
       assertPairingSchedulerStopped();
-      publishedOid = createAndPublishPairingBranch(root, {
+      const retryNetwork = (operation) => retryWhileSessionKeyPropagates(operation, {
+        onWait: (_attempt, waitMs) => {
+          if (!json) console.log(`  ${C.dim}Waiting for GitHub to accept this host's session key (retry in ${Math.round(waitMs / 1000)}s)...${C.reset}`);
+        },
+      });
+      publishedOid = await createAndPublishPairingBranch(root, {
         remote: sessionRemote,
         branch: sharedBranch,
         expectedUrl: sessionUrl,
         baseBranch: provisioned ? defaultBranch : null,
-      });
+      }, { retryNetwork });
       // The session repository's default is the trunk it was cut from; the
       // shared branch stays a side branch, as shared-trunk preflight requires.
       if (provisioned) setGitHubDefaultBranch(provisioned.repository, defaultBranch, { cwd: root });
       configurePairingSettings(root, { remote: sessionRemote, branch: sharedBranch });
-      const preflight = await runSharedTrunkAccessPreflight(root);
-      if (!preflight.ok) {
-        throw Object.assign(new Error(preflight.message), { code: preflight.code, preflight });
-      }
+      await retryNetwork(async () => {
+        const preflight = await runSharedTrunkAccessPreflight(root, { sessionCredentials: true });
+        if (!preflight.ok) {
+          throw Object.assign(new Error(preflight.message), { code: preflight.code, preflight });
+        }
+      });
     });
     started = validatePairingRemoteResponse("sessions", await remoteClient.start({
       instance_id: ensureBridgeInstanceId(root),
@@ -1449,6 +1487,7 @@ async function runJoinInCheckout({
       configurePairingSettings(root, { remote: pairingRemote.remote, branch: sharedBranch });
       await retryWhileSessionKeyPropagates(async () => {
         const preflight = await runSharedTrunkAccessPreflight(root, {
+          sessionCredentials: true,
           requireScopeEnforcement: true,
           onCapabilities: (capabilities) => {
             pulseTokenManager.confirmNativeScopeEnforcement(capabilities?.scopeEnforcement === true);
@@ -1459,7 +1498,7 @@ async function runJoinInCheckout({
         }
       }, { onWait: onKeyWait });
     });
-    await preparePairingEnvironment(root, environment, { C, json, before: "activating the session" });
+    await preparePairingEnvironment(root, environment, { C, json, before: "activating the session", stateId: state.id });
     updatePairingEnrollment(state.id, {
       remoteSessionId: joined.session_id,
       relayToken: memberToken,
@@ -1579,6 +1618,12 @@ async function runStatus({
   }
   if (state.phase !== "active") {
     clearPairingPeerSnapshot();
+    if (pairingProcessIsAlive(state)) {
+      const result = { ok: true, paired: false, role: state.role, phase: state.phase, owner_running: true };
+      if (json) console.log(JSON.stringify(result));
+      else console.log(`\n  Session ${state.phase}; its owning process is still running.\n`);
+      return result;
+    }
     const restored = await restoreLocalPairing(repositoryRoot(projectDir), state);
     const result = { ok: restored.ok, paired: false, ended: state.phase, restored };
     if (json) console.log(JSON.stringify(result));
@@ -1630,6 +1675,15 @@ async function runStatus({
   }
   if (status && status.status !== "active") {
     clearPairingPeerSnapshot();
+    // The owner must drain, fetch the final trunk and preserve its promotion
+    // journal before restoring. A status poll cannot remove its credentials.
+    if (pairingProcessIsAlive(state)) {
+      const result = { ok: true, paired: false, role: state.role, phase: state.phase,
+        status, owner_running: true };
+      if (json) console.log(JSON.stringify(result));
+      else console.log(`\n  Session ${status.status}; its owning process is completing shutdown.\n`);
+      return result;
+    }
     const restored = await restoreLocalPairing(repositoryRoot(projectDir), state);
     const result = { ok: restored.ok, paired: false, ended: status.status, restored };
     if (json) console.log(JSON.stringify(result));
@@ -2229,6 +2283,7 @@ export async function recoverInterruptedPairing(projectDir = process.cwd(), {
 }
 
 export const __testPairingCommandInternals = Object.freeze({
+  waitForPairingAdmission, preparePairingEnvironment,
   monitorPairing, printMemberChanges, finishHostShutdown, retryWhileSessionKeyPropagates,
   retireEndedSessionQueueRows, retryWhileMergeLockBusy, runPendingIntegration, printPromotionForApproval,
   askToPublishPromotion, spawnedByLiveSessionOwner, posseWindowScript, acknowledgeOwnerLaunch,

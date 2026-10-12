@@ -19,7 +19,7 @@ import { runDaemonThread } from "../../../../../shared/tools/classes/daemon/thre
 import { installNativeThreadBridge } from "../../../../../shared/tools/classes/daemon/native-thread-bridge.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
-import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../../../catalog/binary.js";
+import { conductorGitRoutes } from "./conductor-git-routes.js";
 import { createDbWriteSemaphore, createScipStageSemaphore } from "./semaphore.js";
 import { SCIP_INDEXER_COUNT } from "../scip/indexers.js";
 import {
@@ -120,7 +120,7 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       // capped filesystem walk on large repositories. Warm git:mutate too: the
       // fileset hash lists the staged ref with `git ls-tree`, which the native
       // encoder classifies as mutate, and a sync call on a cold route fails.
-      await nativeBinaries.binary("git").prewarmNativeAuth([GIT_READ_ROUTE, GIT_MUTATE_ROUTE]);
+      await nativeBinaries.binary("git").prewarmNativeAuth(conductorGitRoutes("stage"));
       const { ensureScipStaged } = await import("../scip/stager.js");
       const lang = String(request.lang || "").trim();
       const config = lang
@@ -153,6 +153,11 @@ runDaemonThread(async (payload, _message, emitProgress) => {
       // owning the ledger. This subsumes stage+ingest; merge ("zip") still runs
       // as a separate write-queue step. ParseEngine's own scip/tree overlap is
       // the co-promise, internalized.
+      const purpose = String(request.job?.purpose || "");
+      // Main warms stage SCIP through the same synchronous Git calls as the
+      // stage op above; without the grant every merge re-indexed every language.
+      const gitRoutes = conductorGitRoutes("warm", purpose);
+      if (gitRoutes.length > 0) await nativeBinaries.binary("git").prewarmNativeAuth(gitRoutes);
       const ledger = await getLedger(request.ledgerPath, request.dbPath);
       const { ParseEngine } = await import("../../../classes/v2/ParseEngine.js");
       const { sharedParserAdapter } = await import("../../../classes/v2/ParserAdapter.js");
@@ -173,7 +178,6 @@ runDaemonThread(async (payload, _message, emitProgress) => {
         // ledger/view writers, so queued merges/warms must not wait behind it.
         deferEmbeddings: true,
       });
-      const purpose = String(request.job?.purpose || "");
       const targetLocal = purpose === "wi-snapshot"
         || purpose === "wi-catchup"
         || purpose === "wi-prefetch"

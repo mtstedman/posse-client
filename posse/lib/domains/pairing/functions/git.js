@@ -435,7 +435,9 @@ export function validateBranchName(projectDir, branch) {
 // empty, and its default branch must be that trunk, never the shared side
 // branch: shared-trunk preflight refuses a side trunk that is the remote's
 // default branch.
-export function createAndPublishPairingBranch(projectDir, { remote, branch, expectedUrl = null, baseBranch = null }) {
+export async function createAndPublishPairingBranch(projectDir, {
+  remote, branch, expectedUrl = null, baseBranch = null,
+}, { retryNetwork = (operation) => operation() } = {}) {
   const normalizedRemote = validateRemoteName(remote);
   if (expectedUrl != null) assertPairingRemoteTargets(projectDir, normalizedRemote, expectedUrl);
   validateBranchName(projectDir, branch);
@@ -455,7 +457,9 @@ export function createAndPublishPairingBranch(projectDir, { remote, branch, expe
   } catch (error) {
     if (error?.code === "pairing_branch_exists") throw error;
   }
-  const remoteExisting = git(["ls-remote", "--heads", normalizedRemote, remoteRef], projectDir).trim();
+  // Retry each transport step independently. Restarting this whole function
+  // after a push failed would refuse the branch we already created locally.
+  const remoteExisting = (await retryNetwork(() => git(["ls-remote", "--heads", normalizedRemote, remoteRef], projectDir))).trim();
   if (remoteExisting) {
     throw Object.assign(new Error(`Remote branch ${branch} already exists`), {
       code: "pairing_branch_exists",
@@ -465,10 +469,10 @@ export function createAndPublishPairingBranch(projectDir, { remote, branch, expe
   const oid = git(["rev-parse", "HEAD"], projectDir, { timeoutMs: 5_000 }).trim();
   if (baseBranch != null) {
     const baseRef = `refs/heads/${baseBranch}`;
-    const baseExisting = git(["ls-remote", "--heads", normalizedRemote, baseRef], projectDir).trim();
-    if (!baseExisting) push(["push", normalizedRemote, `${oid}:${baseRef}`], projectDir, normalizedRemote);
+    const baseExisting = (await retryNetwork(() => git(["ls-remote", "--heads", normalizedRemote, baseRef], projectDir))).trim();
+    if (!baseExisting) await retryNetwork(() => push(["push", normalizedRemote, `${oid}:${baseRef}`], projectDir, normalizedRemote));
   }
-  push(["push", "--set-upstream", normalizedRemote, `${oid}:${remoteRef}`], projectDir, normalizedRemote);
+  await retryNetwork(() => push(["push", "--set-upstream", normalizedRemote, `${oid}:${remoteRef}`], projectDir, normalizedRemote));
   // Pushing an object id sets no upstream. The shared branch must track the
   // session remote (as a member's does): session-scoped commits on it are
   // matched to the session repository through that remote.

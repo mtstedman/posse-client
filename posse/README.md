@@ -245,6 +245,30 @@ shared tools from Posse's own checkout.
 attempts doctor repair when unhealthy, and stops if verification still fails.
 Use `posse help` for the full CLI reference.
 
+Interactive `run`, `go`, and session starts offer to refresh Posse when its
+installation is behind `origin/main`. Accepting saves local tracked and
+untracked installation edits in a named Git stash, fast-forwards the client,
+refreshes dependencies, and restarts the original command in a fresh process.
+Saved edits stay in Git so the refreshed installation uses the published code;
+the project you are working on is not stashed or pulled. Inspect `git stash list`
+in the installation checkout and use `git stash apply --index <saved-OID>` to
+restore saved work deliberately.
+
+Use `posse go --update-at-boot` (also supported by `run` and session starts) to
+accept automatically, including in noninteractive use. It stops startup if the
+freshness check or update fails. Use `--no-update-at-boot` to skip the offer.
+Read-only commands and help do not perform this startup check. Standalone
+`posse update --stash` provides the same preservation option; plain `posse update`
+continues to refuse tracked installation edits. Only committed upstream work
+can be pulled.
+
+Admin → General → Workflow includes **Startup Update Mode** (`startup_update_mode`)
+as an account-wide preference: `ask` (default) offers an update in interactive
+starts, `auto` updates without prompting even in noninteractive starts, and `off`
+skips startup updates. Set it from the CLI with
+`posse admin set startup_update_mode auto`. The command-line boot flags
+override this preference for that invocation; `--no-update-at-boot` takes priority.
+
 ## Upgrade Notes
 
 - Admin-set global model overrides act as fallbacks; explicit per-job model
@@ -539,6 +563,15 @@ run manifest's measured duration instead of the former aggregate estimates.
 Posse runs a repository's frozen test command and its canonical verification
 command under a declared time policy instead of a fixed 120-second cap:
 
+**Test strictness** is a repository setting under **Repository → Verification**
+in the admin settings. `test_strictness=permissive` is the default: missing,
+unavailable, unconfigured, and zero-test runs are recorded as diagnostics and
+do not force review or replanning. The assessor judges the implementation from
+the available evidence. Set `test_strictness=strict` to require verification
+and retain review/recovery gates for missing test evidence. Unknown case counts
+alone do not block a successful run in either mode. Actual failures, timeouts,
+and workspace-integrity checks remain actionable in both modes.
+
 | Setting | Scope | Default | Meaning |
 |---------|-------|---------|---------|
 | `verification_wall_timeout_ms` | repository | 120000 | Wall-clock limit for a frozen test or canonical verify run. Set it from measured suite durations; Posse uses a 900000 ms allocation for full verification. |
@@ -592,8 +625,9 @@ expansion. Each file must match at most one runner. A declaration promises
 that the command executes every matching test; use narrow patterns reflecting
 the runner's real discovery rules. A suite shared by several changed files
 runs once per batch. Empty output or an explicit zero-test summary does not
-count as a pass. Changed tests with an unavailable runner or missing dependency
-require review instead of silently inheriting a pass from another command.
+count as executed tests. Changed tests with an unavailable runner or missing
+dependency remain explicit diagnostics; strict test mode requires their
+verification before completion.
 
 The same policy applies to the git verify hooks and the configured
 `canonical_verify_cmd` / `pre_assess_cmd` path. Every verification result is

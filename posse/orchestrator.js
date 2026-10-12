@@ -122,6 +122,12 @@ if ((earlyCommand === "run" || (opensSession && !sessionJoinRequest()))
 
 await guardRunNodeDependencies();
 
+// The account preference is read in a short-lived child after npm repair;
+// the bootstrap itself still holds no native addon during an accepted update.
+const { runStartupUpdateIfNeeded } = await import("./lib/domains/cli/functions/startup-update.js");
+const startupUpdateExitCode = await runStartupUpdateIfNeeded();
+if (startupUpdateExitCode !== null) process.exit(startupUpdateExitCode);
+
 // User-defined agents use the provider runtime but not a repository queue.
 // Keep this after the native dependency guard and before the main app opens
 // repository state, so `posse agent` works from any directory.

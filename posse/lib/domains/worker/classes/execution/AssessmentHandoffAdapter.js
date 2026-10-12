@@ -89,7 +89,7 @@ import {
   renderConfiguredVerificationEvidence,
 } from "../../functions/helpers/configured-verification.js";
 import { repairTestDependencies } from "../../functions/helpers/test-dependency-repair.js";
-import { isVerificationInfrastructureOutcome, verificationInfrastructureError } from "../../functions/helpers/verification-outcome.js";
+import { isBlockingVerificationInfrastructureOutcome, verificationInfrastructureError } from "../../functions/helpers/verification-outcome.js";
 import { routeAssessmentInfrastructureFailure } from "../../functions/helpers/assessment-pipeline.js";
 
 function _syncAssessorWorkerDisplay(display, job, {
@@ -425,7 +425,7 @@ export class AssessmentHandoffAdapter {
             cwd: assessmentCwd,
           },
         });
-        if (isVerificationInfrastructureOutcome(postReceipt)) {
+        if (isBlockingVerificationInfrastructureOutcome(postReceipt, { projectDir: worker.projectDir })) {
           // Typed like the attached path, so the recovery gate carries the
           // rerun command and the verification outcome.
           throw verificationInfrastructureError(postReceipt, "Deterministic post-change test execution unavailable");
@@ -440,7 +440,7 @@ export class AssessmentHandoffAdapter {
         // inspection may use output_root, but the verifier must not.
         wtPath: wtPath || worker.projectDir,
       });
-      if (isVerificationInfrastructureOutcome(configuredVerification)) {
+      if (isBlockingVerificationInfrastructureOutcome(configuredVerification, { projectDir: worker.projectDir })) {
         throw configuredVerification.error
           || new Error(configuredVerification.message || "Pre-assessment hook failed");
       }
@@ -551,7 +551,7 @@ export class AssessmentHandoffAdapter {
         return { handled: true, currentAttemptId: assessAttempt.attempt.id };
       }
       const emitFn = (msg) => worker.emit(job.id, msg);
-      processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
+      processVerdict(job, verdict, { emit: emitFn, projectDir: worker.projectDir, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
       const freshJob = getJob(job.id);
       if (freshJob?.status === "succeeded") {
         setAssessmentLifecycle(job.id, "assessment_passed", { completed: true });

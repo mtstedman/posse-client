@@ -19,7 +19,8 @@ import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { latestTestReceiptDelta } from "./test-execution-receipt.js";
 import { attributedDebtCoverageEstablished, debtCoverageEstablished, renderTestFailureSummary } from "./test-failure-evidence.js";
-import { verificationOutcome } from "./verification-outcome.js";
+import { verificationOutcome, isAdvisoryTestResult } from "./verification-outcome.js";
+import { requiresTestVerification } from "../../../settings/functions/test-strictness.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { getMaxFixChainDepth, getWiFailureThreshold } from "../../../settings/functions/tunables.js";
 
@@ -132,10 +133,17 @@ function rejectedByRepositoryPlan(post) {
   return !!reason && !!registry?.status && registry.status !== "ready" && reason === String(registry.reason || "");
 }
 
-export function capVerdictForVerificationInfrastructure(verdict, testRun = null, payload = {}) {
+export function capVerdictForVerificationInfrastructure(verdict, testRun = null, payload = {}, options = {}) {
   const post = testRun?.post_change || testRun?.postChange;
   const changed = post?.changed_tests;
+  const strict = requiresTestVerification(options);
+  // Unknown coverage means the output parser could not count cases, not
+  // that a successful command failed to verify the change. Strict mode gates
+  // explicit empty or aborted coverage without treating parser gaps as failures.
+  const knownCoverageGap = (run) => strict && run.coverage_status !== "unknown"
+    && UNESTABLISHED_COVERAGE_STATUSES.includes(run.coverage_status);
   if (verdict?.verdict === "pass" && changed?.paths?.length > 0
+    && !isAdvisoryTestResult(changed, options)
     && ["infrastructure_error", "unavailable", "invalid", "timed_out", "skipped"].includes(changed.status)) {
     return {
       ...verdict,
@@ -149,10 +157,10 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
       ],
     };
   }
-  // A plan that never ran is a planning or repository-configuration defect at
-  // every risk level, never a pass. The planner can replan its own command;
-  // only the repository can fix its committed registry.
-  if (verdict?.verdict === "pass" && ["rejected", "invalid_test_plan"].includes(post?.status)) {
+  // Strict mode requires a runnable verification plan at every risk level.
+  // The planner can replan its own command; only the repository can fix its
+  // committed registry. Permissive mode retains these as diagnostics.
+  if (strict && verdict?.verdict === "pass" && ["rejected", "invalid_test_plan"].includes(post?.status)) {
     const detail = post.validation_error || post.reason || post.status;
     if (rejectedByRepositoryPlan(post)) {
       return {
@@ -193,7 +201,8 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
     && debtCoverageEstablished(check, baselineCheck));
   const incompleteChecks = Array.isArray(post?.check_runs)
     ? post.check_runs.filter((check) => check.intent === "test"
-      && (check.status !== "passed" || UNESTABLISHED_COVERAGE_STATUSES.includes(check.coverage_status))
+      && (check.status !== "passed" || knownCoverageGap(check))
+      && !isAdvisoryTestResult(check, options)
       && !establishedDebt(check))
     : [];
   // A single declared check that failed the same way before the change can
@@ -218,10 +227,11 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
     };
   }
   const unverifiedCoverage = post?.status === "passed"
-    && UNESTABLISHED_COVERAGE_STATUSES.includes(post.coverage_status);
-  const unavailablePost = post && ["infrastructure_error", "unavailable", "invalid", "skipped", "timed_out"].includes(post.status);
+    && knownCoverageGap(post);
+  const unavailablePost = post && !isAdvisoryTestResult(post, options)
+    && ["infrastructure_error", "unavailable", "invalid", "skipped", "timed_out"].includes(post.status);
   if (verdict?.verdict === "pass" && (unverifiedCoverage || incompleteChecks.length > 0
-    || unavailablePost || (declaredCommand && !post))) {
+    || unavailablePost || (strict && declaredCommand && !post))) {
     const detail = incompleteChecks.length > 0
       ? incompleteChecks.map((check) => `${check.check_id || check.command}: ${check.reason || check.coverage_status || check.status}`).join("; ")
       : post?.reason || post?.coverage_status || "no post-change receipt";
@@ -239,7 +249,7 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
       ],
     };
   }
-  const failedRunner = [post, post?.changed_tests].find((run) => run && ["infrastructure_error", "unavailable", "invalid"].includes(run.status));
+  const failedRunner = [post, changed, ...(post?.check_runs || [])].find((run) => run && isAdvisoryTestResult(run, options));
   if (!failedRunner) return verdict;
   return { ...verdict, verification_notes: [
     ...(verdict?.verification_notes || []),
@@ -523,6 +533,7 @@ export function capVerdictForHighRiskVerificationGap(
   scopedVerification = null,
   assessedCommitHash = null,
   canonicalVerification = null,
+  options = {},
 ) {
   if (verdict?.verdict !== "pass") return verdict;
   const policy = payload?._execution_policy && typeof payload._execution_policy === "object"
@@ -575,7 +586,8 @@ export function capVerdictForHighRiskVerificationGap(
       ],
     };
   }
-  if (scopedStatus === "incomplete" || scopedVerification?.coverage_complete === false) {
+  const strict = requiresTestVerification(options);
+  if (strict && (scopedStatus === "incomplete" || scopedVerification?.coverage_complete === false)) {
     if (canonicalVerificationEligible
       && canonicalVerification?.setting_key === "canonical_verify_cmd") {
       return {
@@ -633,7 +645,7 @@ export function capVerdictForHighRiskVerificationGap(
 
   const operationalOnly = postChange?.status === "passed"
     && postChange?.verification_eligible === false;
-  if (operationalOnly) {
+  if (strict && operationalOnly) {
     return {
       ...verdict,
       verdict: "needs_review",
@@ -646,6 +658,7 @@ export function capVerdictForHighRiskVerificationGap(
   }
 
   if (command && postChange && postChange.status !== "passed"
+    && !isAdvisoryTestResult(postChange, options)
     && testRun?.debt_only !== true
     && testRun?.delta !== "persistent_failure") {
     const status = postChange.status || "not_run";
@@ -733,6 +746,8 @@ export function capVerdictForHighRiskVerificationGap(
       verification_commit_hash: requiredCommit,
     };
   }
+
+  if (!strict) return verdict;
 
   // When the verification gap is structural (no runner for the changed files,
   // no toolchain in the repository), a stronger assessor cannot close it: it
@@ -1003,7 +1018,7 @@ function _shouldReplanForDesiredOutputs(job, verdict) {
   };
 }
 
-export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: currentAssessedCommitHash } = {}) {
+export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: currentAssessedCommitHash, projectDir = null } = {}) {
   const workItem = getWorkItem(job.work_item_id);
   const desiredOutputs = _getDesiredOutputs(workItem);
   const payload = parseJobPayload(job);
@@ -1083,7 +1098,7 @@ export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: cu
       ],
     };
   }
-  prepared = capVerdictForVerificationInfrastructure(prepared, assessedReceipt, payload);
+  prepared = capVerdictForVerificationInfrastructure(prepared, assessedReceipt, payload, { projectDir });
   prepared = capVerdictForHighRiskVerificationGap(
     prepared,
     payload,
@@ -1091,6 +1106,7 @@ export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: cu
     scopedVerification,
     assessedCommitHash,
     canonicalVerification,
+    { projectDir },
   );
   prepared = capVerdictForFailedUnitTestRuns(prepared, failedUnitTestRunsAtCommit(job.id, assessedCommitHash));
   prepared = replanFailedBlockedRecoveryRetry(job, prepared, payload);

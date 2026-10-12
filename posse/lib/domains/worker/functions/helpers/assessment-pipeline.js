@@ -57,7 +57,8 @@ import { ensureAssessmentScopedCheckEvidence } from "../../../assessment/functio
 import { assessmentWorktreeDirtySummary, inspectAssessmentWorktreeReadiness } from "./assessment-worktree-readiness.js";
 import { ensureConfiguredVerification, renderConfiguredVerificationEvidence } from "./configured-verification.js";
 import { repairTestDependencies } from "./test-dependency-repair.js";
-import { isVerificationInfrastructureOutcome, verificationInfrastructureError } from "./verification-outcome.js";
+import { renderTestStrictness } from "../../../settings/functions/test-strictness.js";
+import { isBlockingVerificationInfrastructureOutcome, verificationInfrastructureError } from "./verification-outcome.js";
 
 export { capVerdictForDeterministicTestRegression } from "./verdict-shared.js";
 export {
@@ -654,12 +655,13 @@ function _buildRemoteAssessmentInstructions({
   ].filter(Boolean).join("\n");
 }
 
-function _buildVerificationCapabilityBlock(payload = {}) {
+function _buildVerificationCapabilityBlock(payload = {}, projectDir = null) {
   const contract = payload?.verification_contract && typeof payload.verification_contract === "object"
     ? payload.verification_contract
     : null;
   return [
     `VERIFICATION CAPABILITY CONTRACT:`,
+    renderTestStrictness({ projectDir }),
     `Your issued tools plus the deterministic evidence attached to this prompt are the complete set of available verification methods for this attempt.`,
     `Use those assigned capabilities. Discard browser, lint, shell, or other verification options that are not callable through the issued tool surface and are not represented by deterministic verification evidence.`,
     `An unavailable optional method is NOT_APPLICABLE: do not lower confidence, fail, block, or ask a human merely because it cannot be run.`,
@@ -792,7 +794,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   let taskSpec = "";
   let parsedJobPayload = parseJobPayload(job);
   const visibleJobPayload = stripInternalAssessmentPolicyPayload(parsedJobPayload);
-  const verificationCapabilityBlock = _buildVerificationCapabilityBlock(visibleJobPayload);
+  const verificationCapabilityBlock = _buildVerificationCapabilityBlock(visibleJobPayload, projectDir || cwd);
   const workItem = getWorkItem(job.work_item_id);
   // Assessment retries can re-enter through an assess-only path with the
   // developer tier in their payload. Re-apply the task A/B pin at the final
@@ -2119,7 +2121,7 @@ export async function runPostExecutionAssessment(worker, {
       return;
     }
     const emitFn = (msg) => worker.emit(job.id, msg);
-    const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken });
+    const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, projectDir: worker.projectDir, autoApprove: worker.autoApprove, leaseToken });
     log.info("assessor", `Verdict: ${effectiveVerdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: effectiveVerdict.verdict, confidence: effectiveVerdict.confidence, reasons: effectiveVerdict.reasons });
     jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}) — ${passMsg.slice(0, 100)}` });
     recordObservation({
@@ -2224,7 +2226,7 @@ export async function runPostExecutionAssessment(worker, {
         },
       });
       taskAbAssessmentEvidence = renderTestExecutionEvidence(deterministicTestRun ? { ...deterministicTestRun, scope_attribution: testRunScopeAttribution(job.id, deterministicTestRun) } : {});
-      if (isVerificationInfrastructureOutcome(postReceipt)) {
+      if (isBlockingVerificationInfrastructureOutcome(postReceipt, { projectDir: worker.projectDir })) {
         const testInfraMsg = `Deterministic post-change test execution unavailable: ${postReceipt.reason || postReceipt.status}`;
         recordAssessmentInfrastructureAttempt(job, leaseToken, attempt.id, startTime, testInfraMsg);
         routeAssessmentInfrastructureFailure(worker, job, leaseToken,
@@ -2242,7 +2244,7 @@ export async function runPostExecutionAssessment(worker, {
       wtPath,
       preAssessAlreadyVerified,
     });
-    if (isVerificationInfrastructureOutcome(configuredVerification)) {
+    if (isBlockingVerificationInfrastructureOutcome(configuredVerification, { projectDir: worker.projectDir })) {
       const failureMessage = configuredVerification.message
         || configuredVerification.error?.message
         || "Pre-assessment hook failed";
@@ -2414,7 +2416,7 @@ export async function runPostExecutionAssessment(worker, {
           return;
         }
         const emitFn = (msg) => worker.emit(job.id, msg);
-        const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
+        const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, projectDir: worker.projectDir, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
         log.info("assessor", `Verdict: ${effectiveVerdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: effectiveVerdict.verdict, confidence: effectiveVerdict.confidence, reasons: effectiveVerdict.reasons });
         jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}) — ${passMsg.slice(0, 100)}` });
         recordObservation({
@@ -2748,6 +2750,7 @@ export async function runPostExecutionAssessment(worker, {
 
       const emitFn = (msg) => worker.emit(job.id, msg);
       const { effectiveVerdict } = processVerdict(job, verdict, {
+        projectDir: worker.projectDir,
         emit: emitFn,
         autoApprove: worker.autoApprove,
         leaseToken,

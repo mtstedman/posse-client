@@ -396,6 +396,15 @@ const TYPED_OUTPUT_FIELD_ALIASES = Object.freeze([
   ["identifiersComplete", "complete"],
 ]);
 
+// A native field name: lower camelCase identifier. Paths, dotted or `::`
+// symbols, and capitalized names never match.
+const CAMEL_FIELD_KEY = /^[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*$/;
+// Maps whose keys are data (identifiers, paths, languages, kinds), not field
+// names. Their values are normalized; their own keys are left exactly as is.
+const DATA_KEYED_FIELDS = new Set([
+  "resolvedIdentifiers", "resolved_identifiers", "deps", "byLang", "byKind", "taxonomy", "backends",
+]);
+
 function mergeFacadeField(current, incoming) {
   if (current === undefined) return incoming;
   if (Array.isArray(current) && Array.isArray(incoming)) {
@@ -427,7 +436,7 @@ export function normalizeResearcherTypedAtlasFieldNames(text, { action = null } 
   if (!parsed || typeof parsed !== "object") return null;
 
   let renamedFields = 0;
-  const visit = (value) => {
+  const visit = (value, dataKeyed = false) => {
     if (Array.isArray(value)) {
       for (const item of value) visit(item);
       return;
@@ -435,8 +444,9 @@ export function normalizeResearcherTypedAtlasFieldNames(text, { action = null } 
     if (!value || typeof value !== "object") return;
     // Embedded calls use the native input contract, not result field names.
     for (const [key, child] of Object.entries(value)) {
-      if (key !== "args") visit(child);
+      if (key !== "args") visit(child, !dataKeyed && DATA_KEYED_FIELDS.has(key));
     }
+    if (dataKeyed) return;
     if (typeof value.symbolHandle === "string" && value.symbolHandle) {
       value.symbolId = value.symbolHandle;
       delete value.symbolHandle;
@@ -513,7 +523,10 @@ export function normalizeResearcherTypedAtlasFieldNames(text, { action = null } 
     // One convention on the agent surface: every remaining camelCase key
     // becomes snake_case after the explicit aliases run. This text is payload,
     // never the MCP envelope, so a batch item's isError is data like any other.
+    // Only field names convert: a key that is data (a file path, a symbol, a
+    // file name like Makefile) keeps its exact spelling.
     for (const key of Object.keys(value)) {
+      if (!CAMEL_FIELD_KEY.test(key)) continue;
       const snake = camelToSnakeKey(key);
       if (snake === key) continue;
       value[snake] = mergeFacadeField(value[snake], value[key]);
