@@ -2779,8 +2779,9 @@ export const TOOL_FINAL_REVIEW = {
   description:
     "Developer: call to close out the finished change; include completion_report when the task requests a delivery report. It runs the task's declared tests " +
     "on the current workspace, then an independent reviewer checks the change against the task contract. " +
-    "Returns pass, or findings to fix before calling it again; the result arrives when the review completes. " +
-    "Reviewer: report your verdict and findings with this tool; it waits while the developer works and " +
+    "An accepted pass saves completion and ends both agent sessions immediately, with no further tool turns. " +
+    "Findings return to the developer to fix before calling it again. " +
+    "Reviewer: report your verdict and findings with this tool; after findings it waits while the developer works and " +
     "returns either the changes since your report or status done.",
   parameters: {
     type: "object",
@@ -2823,7 +2824,7 @@ export const TOOL_FINAL_REVIEW = {
 
 export const TOOL_FINAL_REVIEW_ASSESSOR = {
   ...TOOL_FINAL_REVIEW,
-  description: "Report your review verdict and all findings, most severe first. The call waits for a developer revision or status done. For a revision, review the changed evidence and report again; for done, submit your terminal handoff. Call without arguments only to continue waiting after an already delivered report.",
+  description: "Report your review verdict and all findings, most severe first. An accepted pass saves completion and ends both agent sessions immediately, with no further tool turns. Findings wait for a developer revision or status done. Review a revision and report again; for done without an accepted pass, submit your terminal handoff. Call without arguments only to continue waiting after an already delivered report.",
   parameters: {
     type: "object",
     properties: {
@@ -2836,7 +2837,7 @@ export const TOOL_FINAL_REVIEW_ASSESSOR = {
 
 export const TOOL_FINAL_REVIEW_DEV = {
   ...TOOL_FINAL_REVIEW,
-  description: "Request review of the finished change. Include completion_report when a delivery report is required. Declared tests and independent review run before the result returns; fix returned findings and call again.",
+  description: "Request review of the finished change. Include completion_report when a delivery report is required. An accepted pass saves completion and ends both agent sessions immediately, with no further tool turns. Fix returned findings and call again.",
   parameters: {
     type: "object",
     properties: { completion_report: TOOL_FINAL_REVIEW.parameters.properties.completion_report },

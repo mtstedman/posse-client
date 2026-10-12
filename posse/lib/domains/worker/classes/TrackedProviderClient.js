@@ -79,7 +79,7 @@ import {
   resolveAtlasResearcherSchemaDiet,
 } from "../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { AGENT_ACTIVITY_LIMITS } from "../../../catalog/event.js";
-import { AGENT_CALL_ROLE_LABELS } from "../../../catalog/agent-call.js";
+import { AGENT_CALL_ROLE_LABELS, AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import { RESEARCH_CHILD_FALLBACK_MODEL_TIER } from "../../../catalog/planner-dispatch.js";
 import {
   buildCitationChildPrompt,
@@ -87,6 +87,7 @@ import {
 } from "../../sub-agent/classes/SubAgentRuntime.js";
 import { webResearchRuntime } from "../../web-research/classes/WebResearchRuntime.js";
 import { finalReviewRuntime } from "../../assessment/classes/FinalReviewRuntime.js";
+import { FINAL_REVIEW_TOOL_NAME } from "../../../catalog/final-review.js";
 import { runFinalReviewer } from "../../assessment/functions/final-review-reviewer.js";
 import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 import { publishContextBudgetCheckpoint } from "../../billing/functions/context-budget.js";
@@ -1514,7 +1515,12 @@ export class TrackedProviderClient {
     const webResearchHandoffTerminal = opts._webResearchChild === true
       && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.webResearchHandoffV1 === true
       && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.web_research_handoff_v1 === true;
-    const terminalReceiptRequired = handoffRequired || webResearchHandoffTerminal;
+    const finalReviewEnabled = String(opts.role || "").trim().toLowerCase() === "dev"
+      && !opts._parentAgentCallId
+      && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.finalReviewV1 === true
+      && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.final_review_v1 === true;
+    const terminalReceiptRequired = handoffRequired || webResearchHandoffTerminal
+      || finalReviewEnabled || opts._childKind === AGENT_CALL_CHILD_KINDS.FINAL_REVIEW;
     const handoffToolSchema = agentHandoffToolSchemaTelemetry(
       opts.role,
       effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.agentHandoffCompactV1 === true,
@@ -2067,10 +2073,6 @@ export class TrackedProviderClient {
       }
       // A dev/fix agent issued final_review: its call runs the declared tests
       // and a reviewer child of this agent call (domains/assessment, final review).
-      const finalReviewEnabled = String(opts.role || "").trim().toLowerCase() === "dev"
-        && !opts._parentAgentCallId
-        && effectiveCapabilityOpts?._remoteIssuedPolicy?.coordination?.finalReviewV1 === true
-        && effectiveCapabilityOpts?.sessionPacket?.agent_coordination?.final_review_v1 === true;
       if (finalReviewEnabled) {
         const reviewCwd = cwd || this.worker?.projectDir || null;
         unregisterFinalReviewParent = finalReviewRuntime.registerParent({
@@ -2182,7 +2184,7 @@ export class TrackedProviderClient {
         handoffFinalization = this.deps.finalizeAgentHandoffForProvider({
           agentCallId,
           output: providerOutput,
-          required: handoffRequired,
+          required: handoffRequired || terminalHandoffStop?.source === FINAL_REVIEW_TOOL_NAME,
         });
       } catch (error) {
         error.output ??= providerOutput;

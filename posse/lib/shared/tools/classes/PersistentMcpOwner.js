@@ -16,7 +16,8 @@ import { sortAgentToolDefinitions } from "../functions/agent-schema.js";
 import { observeAtlasRequest } from "../functions/atlas-request-observation.js";
 import { codexSoftCheckpoint } from "../functions/codex-soft-checkpoint.js";
 import { executeDispatchAgent, submitWebResearchHandoff } from "../../../domains/web-research/classes/WebResearchRuntime.js";
-import { executeFinalReview } from "../../../domains/assessment/classes/FinalReviewRuntime.js";
+import { executeFinalReview, finalReviewRuntime } from "../../../domains/assessment/classes/FinalReviewRuntime.js";
+import { finalReviewPassedForCall } from "../../../domains/assessment/functions/final-review-result.js";
 import { FINAL_REVIEW_REVIEWER_STATUS } from "../../../catalog/final-review.js";
 import { getAccountSetting } from "../../../domains/settings/functions/account-settings.js";
 // @ts-check
@@ -5244,6 +5245,21 @@ export class PersistentMcpOwner {
         );
         const toolName = routedTool.toolName;
         const toolArgs = routedTool.toolArgs;
+        const callId = session?.bootConfig?.agentCallId;
+        if (finalReviewPassedForCall(callId)) {
+          sendResponse(res, 200, { ok: true, bootId: this.bootId, sessionId: id,
+            message: mcpToolResultMessage(message, mcpToolErrorPayload(
+              "Final review passed; this agent call is complete and cannot run more tools.",
+            )) });
+          return;
+        }
+        if (finalReviewRuntime.parents.get(Number(callId))?.inFlight) {
+          sendResponse(res, 200, { ok: true, bootId: this.bootId, sessionId: id,
+            message: mcpToolResultMessage(message, mcpToolErrorPayload(
+              "Final review is running; wait for its result before calling another tool.",
+            )) });
+          return;
+        }
         if (routedTool.routingError) {
           const result = mcpToolErrorPayload(routedTool.routingError);
           recordOwnerToolObservation({
@@ -5620,6 +5636,13 @@ export class PersistentMcpOwner {
           return;
         }
         if (requested.suite === "tools" && requested.name === "final_review") {
+          if (session.toolRequestConflicts(activeToolRequest).length > 0) {
+            sendResponse(res, 200, { ok: true, bootId: this.bootId, sessionId: id,
+              message: mcpToolResultMessage(message, mcpToolErrorPayload(
+                "Final review cannot start while sibling tool calls are running; wait for their results.",
+              )) });
+            return;
+          }
           // Runs the declared tests and a reviewer child of this agent call;
           // the owner's progress heartbeat holds the transport open meanwhile.
           const startedAt = Date.now();

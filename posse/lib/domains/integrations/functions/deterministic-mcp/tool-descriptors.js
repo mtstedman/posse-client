@@ -339,7 +339,7 @@ export const TOOL_CATALOG = {
   final_review: {
     schema: TOOL_FINAL_REVIEW,
     access: "coordination",
-    summary: "Run the task's declared tests and an independent review of the finished change before its COMPLETE handoff.",
+    summary: "Run declared tests and independent review; an accepted pass saves completion and ends both agent sessions.",
     budgetExempt: true,
     observation: { type: "tool.final_review", label: "FinalReview", format: "generic", targetKeys: [] },
   },

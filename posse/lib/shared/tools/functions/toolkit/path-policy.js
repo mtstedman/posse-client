@@ -59,14 +59,16 @@ function checkoutReadRootPath(filePath, resolved, realResolved, scopePredicates)
 }
 
 /**
- * True for an entry a list or search reached outside the cwd that no read
- * root admits, such as a checkout read root's `.env*` file or a `.posse` file
- * an include glob pulled back past the skip globs.
+ * List and search results must satisfy the same workspace/read-root boundary
+ * as direct reads, including private metadata and symlink targets. A checkout
+ * alias cannot authorize results read from a different checkout's actual file.
  */
-export function isUnreadableOutsideCwd(cwd, absPath, scopePredicates = null) {
-  if (isInsideRoot(absPath, cwd, { followSymlinks: false })) return false;
-  return !scopePredicates?.isWithinScopeRoot?.(absPath)
-    && !scopePredicates?.isWithinCheckoutReadRoot?.(absPath);
+export function isUnreadablePath(cwd, absPath, scopePredicates = null) {
+  try {
+    return safePath(cwd, absPath, scopePredicates) !== path.resolve(absPath);
+  } catch {
+    return true;
+  }
 }
 
 function readableRootsText(cwd, scopePredicates) {

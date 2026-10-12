@@ -34,7 +34,8 @@ import {
   executeDispatchAgent,
   submitWebResearchHandoff,
 } from "../../../web-research/classes/WebResearchRuntime.js";
-import { executeFinalReview } from "../../../assessment/classes/FinalReviewRuntime.js";
+import { executeFinalReview, finalReviewRuntime } from "../../../assessment/classes/FinalReviewRuntime.js";
+import { finalReviewPassedForCall } from "../../../assessment/functions/final-review-result.js";
 import { listIgnoredRepoPaths } from "../../../git/functions/ignored-paths.js";
 import { execProjectDbQuery } from "../../../../shared/tools/functions/toolkit/project-db/query.js";
 import {
@@ -803,6 +804,12 @@ export async function executeToolWithMap(name, argsStr, context, {
 
   try {
     const ambient = getObservationContext() || {};
+    if (finalReviewPassedForCall(ambient.agent_call_id)) {
+      return "Error: Final review passed; this agent call is complete and cannot run more tools.";
+    }
+    if (name !== "final_review" && finalReviewRuntime.parents.get(Number(ambient.agent_call_id))?.inFlight) {
+      return "Error: Final review is running; wait for its result before calling another tool.";
+    }
     if (
       name === "agent_handoff"
       && ambient.job_id != null
@@ -813,14 +820,17 @@ export async function executeToolWithMap(name, argsStr, context, {
         name,
       );
     }
-    const violatesTerminalHandoff = () => name !== "agent_handoff"
+    const violatesTerminalHandoff = () => !finalReviewPassedForCall(ambient.agent_call_id)
+      && name !== "agent_handoff"
       && rejectAgentHandoffForLaterTool(ambient.agent_call_id, name);
     if (violatesTerminalHandoff()) {
       return "Error: agent_handoff was already staged; later tool calls invalidate the terminal report";
     }
     const handler = handlers[name];
     if (typeof handler === "function") {
-      const run = () => handler(args, context);
+      const run = () => finalReviewPassedForCall(ambient.agent_call_id)
+        ? "Error: Final review passed; this agent call is complete and cannot run more tools."
+        : handler(args, context);
       // The operator channel must stay reachable no matter what holds the
       // worktree gate: the trio touches only SQLite, so running it ungated
       // cannot conflict with a blocking tool's write barrier — and gating it
@@ -846,6 +856,9 @@ export async function executeToolWithMap(name, argsStr, context, {
           attemptId: ambientJob.attempt_id,
           signal: context?.abortSignal || null,
         });
+        if (finalReviewPassedForCall(ambient.agent_call_id)) {
+          return "Error: Final review passed; this agent call is complete and cannot run more tools.";
+        }
         if (decision?.approved === true) {
           const entries = Array.isArray(decision.batch) && decision.batch.length > 0
             ? decision.batch
@@ -857,7 +870,9 @@ export async function executeToolWithMap(name, argsStr, context, {
           // mutation lane only for the original write/edit operation itself.
           const continuation = result;
           result = typeof continuation.resume === "function"
-            ? await PROVIDER_TOOL_GATE.write(key, () => continuation.resume(decision), {
+            ? await PROVIDER_TOOL_GATE.write(key, () => finalReviewPassedForCall(ambient.agent_call_id)
+              ? "Error: Final review passed; this agent call is complete and cannot run more tools."
+              : continuation.resume(decision), {
               label: `${label}.approved`,
               waitMs: 120000,
               barrierName: `${label}.approved`,

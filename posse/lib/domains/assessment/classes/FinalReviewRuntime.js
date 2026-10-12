@@ -1,6 +1,7 @@
 import { emptyMaterializedPathsForJob } from "../../handoff/functions/helpers/file-materialization.js";
 import { testRunDiagnostics } from "../../worker/functions/helpers/test-failure-evidence.js";
 import { finalReviewIdentity } from "../functions/final-review-authority.js";
+import { completeFinalReview } from "../functions/final-review-completion.js";
 // FinalReviewRuntime — both sides of final_review.
 //
 // TrackedProviderClient registers each dev/fix agent call that was issued the
@@ -9,7 +10,8 @@ import { finalReviewIdentity } from "../functions/final-review-authority.js";
 // builds the snapshot and waits for the reviewer's report. The reviewer
 // reports with the same tool and waits in it: when the developer revises and
 // calls again, the reviewer's waiting call returns only what changed since its
-// report, so neither side starts over. The reviewer is released when the
+// report, so neither side starts over. An accepted pass saves completion and
+// stops both provider calls. The reviewer is also released when the
 // developer's call ends or the attempt's reviews are spent. One review runs at
 // a time per agent call; an attempt has a fixed number of reviews.
 
@@ -55,6 +57,7 @@ import {
   finalReviewResultFromReport,
   finalReviewResultFromVerdict,
   finalReviewResultsForAttempt,
+  finalReviewPassedForCall,
   finalReviewReviewsRemaining,
   repeatedDeterministicReview,
   semanticFinalReviewResults,
@@ -106,6 +109,7 @@ export class FinalReviewRuntime {
     lineageTests = lineageTestFiles,
     reviewerParkMs = FINAL_REVIEW_REVIEWER_PARK_MS,
     reviewerWallMs = FINAL_REVIEW_REVIEWER_WALL_MS,
+    completePass = completeFinalReview,
   } = {}) {
     this.parents = new Map();
     this.identify = identify;
@@ -121,6 +125,7 @@ export class FinalReviewRuntime {
     // The reviewer's own wall (final-review-reviewer.js); a parked reviewer
     // close to it is not handed a revision.
     this.reviewerWallMs = reviewerWallMs;
+    this.completePass = completePass;
   }
 
   /**
@@ -163,6 +168,9 @@ export class FinalReviewRuntime {
   async execute({ agentCallId, args = {}, signal = null } = {}) {
     const callId = Number(agentCallId);
     const parent = this.parents.get(callId);
+    if (parent?.completed || finalReviewPassedForCall(callId)) {
+      throw finalReviewError("FINAL_REVIEW_TERMINAL", "Final review passed; this agent call is complete and cannot run more tools.");
+    }
     if (parent) return await this.#developerReview(parent, args);
     const reviewed = this.#parentReviewedBy(callId);
     if (reviewed?.entry) return await this.#reviewerReport(reviewed.entry, callId, args, { signal });
@@ -414,6 +422,12 @@ export class FinalReviewRuntime {
         duration_ms: Date.now() - startedAt,
       },
     });
+    if (result.outcome === FINAL_REVIEW_OUTCOMES.PASS) {
+      parent.completed = true;
+      this.#release(parent);
+      this.completePass({ agentCallId: parent.agentCallId, reviewerAgentCallId: reviewerCallId,
+        cwd: parent.cwd, summary: result.summary });
+    }
     return response;
   }
 

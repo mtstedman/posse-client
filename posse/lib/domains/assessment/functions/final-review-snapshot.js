@@ -291,7 +291,7 @@ export function finalReviewModeInstructions({ reportAndWait = false } = {}) {
     reportAndWait
       ? "Report by calling final_review with your verdict (pass when the change meets the contract; fail with your findings; needs_review only when the contract itself cannot be judged). The call then waits while the developer works."
       : "Report your verdict in the terminal assessor handoff (pass when the change meets the contract; fail with your findings; needs_review only when the contract itself cannot be judged).",
-    ...(reportAndWait ? ["When it returns a revision, check your findings against the diff since your report, review only what changed, and call final_review again. When it returns status done, end with your terminal handoff carrying your latest verdict."] : []),
+    ...(reportAndWait ? ["When it returns a revision, check your findings against the diff since your report, review only what changed, and call final_review again. An accepted pass saves completion and ends both agent sessions immediately. When it returns status done without an accepted pass, end with your terminal handoff carrying your latest verdict."] : []),
   ].join("\n");
 }
 

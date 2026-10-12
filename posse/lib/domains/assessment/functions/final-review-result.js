@@ -6,6 +6,8 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { getToolMetadataRegistry } from "../../../shared/tools/functions/tool-suites.js";
 import { getToolCatalogEntry } from "../../integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { normalizeFailureFingerprintText } from "../../worker/functions/helpers/test-failure-evidence.js";
+import { getAgentCallById } from "../../queue/functions/agent-calls.js";
+import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import {
   FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
   FINAL_REVIEW_MAX_FINDINGS,
@@ -145,6 +147,19 @@ export function finalReviewResultsForAttempt({ jobId, attemptId, db = getDb() })
     ORDER BY id ASC
   `).all(jobId, attemptId, FINAL_REVIEW_OBSERVATIONS.RESULT)
     .map((row) => ({ id: Number(row.id), ...parseDetail(row) }));
+}
+
+/** A passing review ends its developer and the reviewer that reported it. */
+export function finalReviewPassedForCall(agentCallId) {
+  if (!agentCallId) return false;
+  const call = getAgentCallById(agentCallId);
+  if (!call) return false;
+  const reviewer = call.child_kind === AGENT_CALL_CHILD_KINDS.FINAL_REVIEW;
+  const parentId = reviewer ? call.parent_agent_call_id : call.id;
+  return finalReviewResultsForAttempt({ jobId: call.job_id, attemptId: call.attempt_id })
+    .some((result) => result.agent_call_id === parentId
+      && result.outcome === FINAL_REVIEW_OUTCOMES.PASS
+      && (!reviewer || result.reviewer_agent_call_id === call.id));
 }
 
 /** The results that spent one of the attempt's reviews: a reviewer's verdict. */

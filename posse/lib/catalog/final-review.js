@@ -2,10 +2,10 @@
 //
 // final_review: the dev/fix close-out step. The agent calls it when its change
 // is complete; Posse runs the task's declared tests on the current workspace,
-// then a read-only reviewer judges the change against the task contract, and
-// the structured result returns to the same agent session. The reviewer
-// reports with the same tool and waits in it, so a later review continues the
-// same reviewer with only the diff since its report. A COMPLETE handoff waits
+// then a read-only reviewer judges the change against the task contract. An
+// accepted pass saves completion and ends both sessions without another tool
+// turn. Findings return to the developer; the reviewer waits in the tool so a
+// later review continues it with only the diff since its report. A COMPLETE handoff waits
 // for a passing review, unless the review could not run within its bounded
 // retries, the reviewer could not judge it, or the attempt's reviews are used
 // up (domains/assessment, final review).

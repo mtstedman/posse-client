@@ -42,7 +42,7 @@ import {
   DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
   isSensitiveEnvFileOrTargetPath,
   isSensitiveEnvFilePath,
-  isUnreadableOutsideCwd,
+  isUnreadablePath,
   resolveDeterministicReadableFile,
   safePath,
   splitShellSubcommands,
@@ -727,7 +727,7 @@ export function createDeterministicToolkit({
         if (skipDirs.has(entry.name)) continue;
         const full = path.join(currentDir, entry.name);
         if (agentHiddenPathReasonForAbsolute(cwd, full)) continue;
-        if (isUnreadableOutsideCwd(cwd, full, scopePredicates)) continue;
+        if (isUnreadablePath(cwd, full, scopePredicates)) continue;
         if (isGitIgnored(full)) continue;
         if (entry.isDirectory()) {
           if (recursive) walk(full);
@@ -750,7 +750,7 @@ export function createDeterministicToolkit({
           if (skipDirs.has(entry.name)) continue;
           const full = path.join(dir, entry.name);
           if (agentHiddenPathReasonForAbsolute(cwd, full)) continue;
-          if (isUnreadableOutsideCwd(cwd, full, scopePredicates)) continue;
+          if (isUnreadablePath(cwd, full, scopePredicates)) continue;
           if (isGitIgnored(full)) continue;
           if (entry.isFile() && (!globRegex || globRegex.test(entry.name))) {
             if (results.length >= maxResults) {
@@ -770,12 +770,15 @@ export function createDeterministicToolkit({
 
   // Entries beside a missing path, nearest first. `close` marks a plural,
   // singular or one-letter slip (`tests` for `test`).
-  function nearestExistingSiblings(missingPath) {
+  function nearestExistingSiblings(missingPath, cwd, scopePredicates) {
     const parent = path.dirname(missingPath);
     const wanted = path.basename(missingPath).toLowerCase();
     let names;
     try {
-      names = fs.readdirSync(parent, { withFileTypes: true }).filter((entry) => !entry.name.startsWith(".")).map((entry) => entry.name);
+      names = fs.readdirSync(parent, { withFileTypes: true })
+        .filter((entry) => !entry.name.startsWith("."))
+        .filter((entry) => !isUnreadablePath(cwd, path.join(parent, entry.name), scopePredicates))
+        .map((entry) => entry.name);
     } catch {
       return [];
     }
@@ -833,7 +836,7 @@ export function createDeterministicToolkit({
       const hiddenErr = agentHiddenPathError(cwd, searchPath, args.path || ".");
       if (hiddenErr) return `Error: ${hiddenErr}`;
       if (!fs.existsSync(searchPath)) {
-        const nearby = args._pathRepaired ? [] : nearestExistingSiblings(searchPath);
+        const nearby = args._pathRepaired ? [] : nearestExistingSiblings(searchPath, cwd, scopePredicates);
         const close = nearby.filter((entry) => entry.close);
         const [only] = close;
         const listed = nearby.slice(0, 5).map((entry) => toDisplayPath(cwd, entry.path));
@@ -870,9 +873,11 @@ export function createDeterministicToolkit({
         String(SEARCH_MAX_FILE_BYTES),
       ];
       if (isWorkspaceRootIgnoredByGit(rootPath)) rgArgs.push("--no-ignore");
+      if (args.include) rgArgs.push("--glob", ripgrepIncludeGlob(args.include));
+      // Later ripgrep globs win: an include must not re-admit hidden metadata
+      // or sensitive files excluded by the workspace policy.
       addRipgrepSkipGlobs(rgArgs, skipDirs);
       addAgentHiddenRipgrepGlobs(rgArgs);
-      if (args.include) rgArgs.push("--glob", ripgrepIncludeGlob(args.include));
       if (args.literal) rgArgs.push("--fixed-strings");
       if (args.case_insensitive) rgArgs.push("--ignore-case");
       if (args.multiline || (!args.literal && regexPatternNeedsMultiline(args.pattern))) {
@@ -911,7 +916,7 @@ export function createDeterministicToolkit({
           if (!entry.file) continue;
           const filePath = path.resolve(rootPath, entry.file);
           if (isSensitiveEnvFileOrTargetPath(filePath) || agentHiddenPathReasonForAbsolute(cwd, filePath)) continue;
-          if (isUnreadableOutsideCwd(cwd, filePath, scopePredicates)) continue;
+          if (isUnreadablePath(cwd, filePath, scopePredicates)) continue;
           const display = toDisplayPath(cwd, filePath);
           rows.push(outputMode === "count" ? `${display}:${entry.count}` : display);
         }
@@ -974,7 +979,7 @@ export function createDeterministicToolkit({
         {
           isSensitivePath: (filePath) => isSensitiveEnvFileOrTargetPath(filePath)
             || !!agentHiddenPathReasonForAbsolute(cwd, filePath)
-            || isUnreadableOutsideCwd(cwd, filePath, scopePredicates),
+            || isUnreadablePath(cwd, filePath, scopePredicates),
           toDisplay: (filePath) => toDisplayPath(cwd, filePath),
         },
       );
