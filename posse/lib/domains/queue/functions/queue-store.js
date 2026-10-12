@@ -3984,8 +3984,8 @@ export {
 /**
  * Clear session data (work items, jobs) but preserve artifacts and logs.
  * Events, agent_calls, and artifacts are kept.
- * Foreign keys are temporarily disabled so CASCADE doesn't wipe artifacts
- * when parent rows in work_items/jobs are deleted.
+ * Detach retained history first, then let foreign-key actions remove dependent
+ * queue state. Keep enforcement on so newly added dependents cannot be orphaned.
  */
 export function clearAll() {
   // Drain buffered events while their parent rows still exist, then detach
@@ -3993,68 +3993,65 @@ export function clearAll() {
   // event batch can wake after reset and try to reference deleted queue rows.
   flushEventsNow();
   const db = getDb();
-  db.pragma("foreign_keys = OFF");
-  try {
-    db.transaction(() => {
-      // Detach preserved history from deleted parents before removing queue rows.
-      db.prepare(`UPDATE artifacts SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
-      db.prepare(`UPDATE events SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
-      db.prepare(`UPDATE agent_calls SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
-      db.prepare(`UPDATE research_report_claim_drafts SET attempt_id = NULL`).run();
-      db.prepare(`UPDATE job_observations SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
-      db.prepare(`UPDATE run_insights SET work_item_id = NULL, job_id = NULL`).run();
-      db.prepare(`UPDATE agent_handoff_packets SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
-      db.prepare(`UPDATE agent_interactions SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
-      db.prepare(`UPDATE agent_interaction_applications SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
-      db.prepare(`UPDATE posse_test_suites SET created_by_work_item_id = NULL, created_by_job_id = NULL`).run();
-      db.prepare(`UPDATE posse_tests SET created_by_work_item_id = NULL, created_by_job_id = NULL`).run();
-      db.prepare(`UPDATE posse_test_runs SET created_by_work_item_id = NULL, created_by_job_id = NULL`).run();
-      db.prepare(`DELETE FROM agent_run_hash_ref_aliases`).run();
-      db.prepare(`DELETE FROM job_hash_ref_aliases`).run();
-      db.prepare(`DELETE FROM work_item_hash_ref_aliases`).run();
-      db.prepare(`DELETE FROM hash_ref_traversal_refs`).run();
-      db.prepare(`DELETE FROM hash_ref_evidence_refs`).run();
-      db.prepare(`DELETE FROM agent_run_hash_refs`).run();
-      db.prepare(`DELETE FROM job_hash_refs`).run();
-      db.prepare(`DELETE FROM work_item_hash_refs`).run();
-      db.prepare(`DELETE FROM hash_ref_aliases`).run();
-      db.prepare(`DELETE FROM job_file_locks`).run();
-      db.prepare(`DELETE FROM work_item_file_locks`).run();
-      db.prepare(`DELETE FROM file_lane_waits`).run();
-      db.prepare(`DELETE FROM file_materializations`).run();
-      db.prepare(`DELETE FROM waiting_lane_preparations`).run();
-      db.prepare(`DELETE FROM human_gate_outbox`).run();
-      db.prepare(`DELETE FROM human_gates`).run();
-      db.prepare(`DELETE FROM job_terminal_transitions`).run();
-      db.prepare(`DELETE FROM work_item_terminal_transitions`).run();
-      db.prepare(`DELETE FROM session_recycle_savings`).run();
-      db.prepare(`DELETE FROM job_sessions`).run();
-      db.prepare(`DELETE FROM session_lanes`).run();
-      db.prepare(`DELETE FROM context_budget_checkpoints`).run();
-      db.prepare(`DELETE FROM source_reaccess_authorizations`).run();
-      db.prepare(`DELETE FROM shared_trunk_claim_deferrals`).run();
-      db.prepare(`DELETE FROM shared_trunk_merge_operations`).run();
-      // Derived queue-state projection of the retained event log. Its owner
-      // cascades cannot fire while foreign keys are off, and the detached
-      // events above no longer re-project it, so it is dropped outright.
-      db.prepare(`DELETE FROM queue_event_state`).run();
-      db.prepare(`DELETE FROM job_attempts`).run();
-      db.prepare(`DELETE FROM job_dependencies`).run();
-      db.prepare(`DELETE FROM jobs`).run();
-      db.prepare(`DELETE FROM work_items`).run();
-      db.prepare(`DELETE FROM scheduler_locks`).run();
-      db.prepare(`DELETE FROM scheduler_wakeups`).run();
-      const violations = db.pragma("foreign_key_check");
-      if (violations.length > 0) {
-        const sample = violations.slice(0, 5)
-          .map((row) => `${row.table}[${row.rowid}] -> ${row.parent}`)
-          .join(", ");
-        throw new Error(`Queue reset would leave ${violations.length} foreign-key violation(s): ${sample}`);
-      }
-    })();
-  } finally {
-    db.pragma("foreign_keys = ON");
+  if (db.pragma("foreign_keys", { simple: true }) !== 1) {
+    throw new Error("Queue reset requires foreign-key enforcement");
   }
+  db.transaction(() => {
+    // Detach preserved history from deleted parents before removing queue rows.
+    db.prepare(`UPDATE artifacts SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
+    db.prepare(`UPDATE events SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
+    db.prepare(`UPDATE agent_calls SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
+    db.prepare(`UPDATE research_report_claim_drafts SET attempt_id = NULL`).run();
+    db.prepare(`UPDATE job_observations SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
+    db.prepare(`UPDATE run_insights SET work_item_id = NULL, job_id = NULL`).run();
+    db.prepare(`UPDATE agent_handoff_packets SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
+    db.prepare(`UPDATE agent_interactions SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
+    db.prepare(`UPDATE agent_interaction_applications SET work_item_id = NULL, job_id = NULL, attempt_id = NULL`).run();
+    db.prepare(`UPDATE posse_test_suites SET created_by_work_item_id = NULL, created_by_job_id = NULL`).run();
+    db.prepare(`UPDATE posse_tests SET created_by_work_item_id = NULL, created_by_job_id = NULL`).run();
+    db.prepare(`UPDATE posse_test_runs SET created_by_work_item_id = NULL, created_by_job_id = NULL`).run();
+    db.prepare(`DELETE FROM agent_run_hash_ref_aliases`).run();
+    db.prepare(`DELETE FROM job_hash_ref_aliases`).run();
+    db.prepare(`DELETE FROM work_item_hash_ref_aliases`).run();
+    db.prepare(`DELETE FROM hash_ref_traversal_refs`).run();
+    db.prepare(`DELETE FROM hash_ref_evidence_refs`).run();
+    db.prepare(`DELETE FROM agent_run_hash_refs`).run();
+    db.prepare(`DELETE FROM job_hash_refs`).run();
+    db.prepare(`DELETE FROM work_item_hash_refs`).run();
+    db.prepare(`DELETE FROM hash_ref_aliases`).run();
+    db.prepare(`DELETE FROM job_file_locks`).run();
+    db.prepare(`DELETE FROM work_item_file_locks`).run();
+    db.prepare(`DELETE FROM file_lane_waits`).run();
+    db.prepare(`DELETE FROM file_materializations`).run();
+    db.prepare(`DELETE FROM waiting_lane_preparations`).run();
+    db.prepare(`DELETE FROM human_gate_outbox`).run();
+    db.prepare(`DELETE FROM human_gates`).run();
+    db.prepare(`DELETE FROM job_terminal_transitions`).run();
+    db.prepare(`DELETE FROM work_item_terminal_transitions`).run();
+    db.prepare(`DELETE FROM session_recycle_savings`).run();
+    db.prepare(`DELETE FROM job_sessions`).run();
+    db.prepare(`DELETE FROM session_lanes`).run();
+    db.prepare(`DELETE FROM context_budget_checkpoints`).run();
+    db.prepare(`DELETE FROM source_reaccess_authorizations`).run();
+    db.prepare(`DELETE FROM shared_trunk_claim_deferrals`).run();
+    db.prepare(`DELETE FROM shared_trunk_merge_operations`).run();
+    // Clear the derived queue-state projection; the retained, detached events
+    // above no longer describe a live queue.
+    db.prepare(`DELETE FROM queue_event_state`).run();
+    db.prepare(`DELETE FROM job_attempts`).run();
+    db.prepare(`DELETE FROM job_dependencies`).run();
+    db.prepare(`DELETE FROM jobs`).run();
+    db.prepare(`DELETE FROM work_items`).run();
+    db.prepare(`DELETE FROM scheduler_locks`).run();
+    db.prepare(`DELETE FROM scheduler_wakeups`).run();
+    const violations = db.pragma("foreign_key_check");
+    if (violations.length > 0) {
+      const sample = violations.slice(0, 5)
+        .map((row) => `${row.table}[${row.rowid}] -> ${row.parent}`)
+        .join(", ");
+      throw new Error(`Queue reset would leave ${violations.length} foreign-key violation(s): ${sample}`);
+    }
+  })();
 }
 
 export { getJobStats, getWorkItemJobStats } from "./stats.js";
