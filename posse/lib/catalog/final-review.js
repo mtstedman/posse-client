@@ -46,6 +46,9 @@ export const FINAL_REVIEW_UNCHARGED_REVIEW_MODES = Object.freeze([
 // the developer is told to call final_review again; after them the handoff
 // proceeds and the ordinary assessment verifies the change.
 export const FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS = 2;
+// Allow one correction of a malformed report, then release the reviewer into
+// the bounded infrastructure recovery path instead of spending turns forever.
+export const FINAL_REVIEW_MAX_INVALID_REPORTS = 2;
 
 // Whole tool call: the declared tests plus the reviewer's own agent call. The
 // owner's progress heartbeat keeps the transport alive meanwhile; this is the

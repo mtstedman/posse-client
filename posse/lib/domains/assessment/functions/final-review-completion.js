@@ -9,8 +9,9 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 // A validated pass owns close-out. Save the ordinary completion packets before
 // stopping either provider, so the worker keeps its existing handoff/assessment
 // path without asking either model for another turn.
-export function completeFinalReview({ agentCallId, reviewerAgentCallId, cwd, summary }) {
+export function completeFinalReview({ agentCallId, reviewerAgentCallId, cwd, summary, recordResult = () => {} }) {
   const receipts = runImmediateTransaction(getDb(), () => {
+    recordResult();
     const saved = [];
     const reviewer = reviewerAgentCallId ? getAgentCallById(reviewerAgentCallId) : null;
     if (reviewer?.parent_agent_call_id === agentCallId

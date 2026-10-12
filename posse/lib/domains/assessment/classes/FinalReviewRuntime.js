@@ -26,6 +26,7 @@ import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import {
   FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
   FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS,
+  FINAL_REVIEW_MAX_INVALID_REPORTS,
   FINAL_REVIEW_OBSERVATIONS,
   FINAL_REVIEW_OUTCOMES,
   FINAL_REVIEW_REVIEW_MODES,
@@ -34,6 +35,7 @@ import {
   FINAL_REVIEW_REVIEWER_WALL_MS,
   FINAL_REVIEW_REVISION_MIN_REMAINING_MS,
   FINAL_REVIEW_TEST_TIMEOUT_MS,
+  FINAL_REVIEW_TIMEOUT_MS,
 } from "../../../catalog/final-review.js";
 import {
   resolveFrozenTestPlan,
@@ -112,6 +114,7 @@ export class FinalReviewRuntime {
     lineageTests = lineageTestFiles,
     reviewerParkMs = FINAL_REVIEW_REVIEWER_PARK_MS,
     reviewerWallMs = FINAL_REVIEW_REVIEWER_WALL_MS,
+    reviewTimeoutMs = FINAL_REVIEW_TIMEOUT_MS,
     completePass = completeFinalReview,
   } = {}) {
     this.parents = new Map();
@@ -128,11 +131,12 @@ export class FinalReviewRuntime {
     // The reviewer's own wall (final-review-reviewer.js); a parked reviewer
     // close to it is not handed a revision.
     this.reviewerWallMs = reviewerWallMs;
+    this.reviewTimeoutMs = reviewTimeoutMs;
     this.completePass = completePass;
   }
 
   /**
-   * @param {{ agentCallId: number, jobId: number, workItemId: number, attemptId: number, cwd: string, runReview: (input: { instructions: string, evidence: string, abortSignal: AbortSignal }) => Promise<{ verdict: any, claims?: any[], agentCallId?: number | null }> }} parent
+   * @param {{ agentCallId: number, jobId: number, workItemId: number, attemptId: number, cwd: string, runReview: (input: { instructions: string, evidence: string, abortSignal: AbortSignal, onAgentCallCreated: (id: number) => void }) => Promise<{ verdict: any, claims?: any[], agentCallId?: number | null }> }} parent
    * @returns {() => void} unregister
    */
   registerParent(parent) {
@@ -181,7 +185,8 @@ export class FinalReviewRuntime {
       }
       // Own the entire round, including identity reads and durable recording.
       parent.inFlight = true;
-      const reviewSignal = signal ? AbortSignal.any([signal, parent.controller.signal]) : parent.controller.signal;
+      const reviewSignal = AbortSignal.any([parent.controller.signal,
+        AbortSignal.timeout(this.reviewTimeoutMs), ...(signal ? [signal] : [])]);
       const cancel = () => this.#release(parent);
       reviewSignal.addEventListener("abort", cancel, { once: true });
       try {
@@ -229,6 +234,18 @@ export class FinalReviewRuntime {
       if (job) currentIdentity = await this.identify(parent.cwd, parseJobPayload(job), { jobId: job.id });
     } catch { /* a fresh review will report the identity failure */ }
     signal.throwIfAborted();
+    if (parent.pendingReview) {
+      const pending = parent.pendingReview;
+      if (pending.response.outcome === FINAL_REVIEW_OUTCOMES.PASS
+        && (!currentIdentity || currentIdentity !== pending.observation.detail.review_identity
+          || !sameCompletionReport(completionReport, pending.response.completion_report))) {
+        const reason = "The candidate changed before its passing review could be saved; review the current change again.";
+        pending.observation.summary = reason;
+        pending.response = { ...pending.response, outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, reason };
+        pending.observation.detail = { ...pending.observation.detail, outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, reason };
+      }
+      return this.#saveReview(parent, pending);
+    }
     const unchanged = prior.at(-1);
     if (unchanged?.review_mode === MODES.UNCHANGED && currentIdentity === unchanged.review_identity
       && sameCompletionReport(completionReport, unchanged.completion_report)) {
@@ -282,6 +299,12 @@ export class FinalReviewRuntime {
       // reverting to a rejected candidate never buys a new verdict.
       try { reviewIdentity = await this.identify(parent.cwd, payload, { jobId: job.id }); } catch { /* ordinary review reports unavailable identity */ }
       signal.throwIfAborted();
+      if (!reviewIdentity) throw finalReviewError("FINAL_REVIEW_CONTEXT_MISSING", "Cannot bind final review to the scoped workspace; verification is blocked.");
+      const assertCandidateUnchanged = async () => {
+        const current = await this.identify(parent.cwd, payload, { jobId: job.id });
+        signal.throwIfAborted();
+        if (current !== reviewIdentity) throw finalReviewError("FINAL_REVIEW_CANDIDATE_CHANGED", "Scoped files changed during verification; review the current candidate again.");
+      };
       const rejected = reviewIdentity ? semanticPrior.findLast((review) =>
         review.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS && review.review_identity === reviewIdentity
         && sameCompletionReport(completionReport, review.completion_report)) : null;
@@ -293,6 +316,7 @@ export class FinalReviewRuntime {
         timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS,
       });
       signal.throwIfAborted();
+      await assertCandidateUnchanged();
       const placeholders = new Set(await emptyMaterializedPathsForJob(job.id,
         payload.scope_generation ?? payload._materialization_generation ?? 1, parent.cwd));
       change = await this.collectChange(parent.cwd, payload, { ignorePaths: placeholders });
@@ -313,7 +337,7 @@ export class FinalReviewRuntime {
         : null;
       signal.throwIfAborted();
       checks = this.runChecks(parent.cwd, change);
-      try { reviewIdentity = await this.identify(parent.cwd, payload, { jobId: job.id }); } catch { reviewIdentity = null; /* unavailable identities cannot authorize assessment */ }
+      await assertCandidateUnchanged();
       signal.throwIfAborted();
       // Only failures the change provably introduced skip the reviewer; any
       // other failure is evidence it judges.
@@ -420,7 +444,7 @@ export class FinalReviewRuntime {
       completion_report: completionReport,
       reviews_remaining: reviewsRemaining,
     };
-    this.record({
+    const observation = {
       work_item_id: parent.workItemId ?? null,
       job_id: parent.jobId ?? null,
       attempt_id: parent.attemptId ?? null,
@@ -448,14 +472,40 @@ export class FinalReviewRuntime {
         changed_file_count: Array.isArray(change?.files) ? change.files.length : 0,
         duration_ms: Date.now() - startedAt,
       },
-    });
-    if (result.outcome === FINAL_REVIEW_OUTCOMES.PASS) {
-      parent.completed = true;
+    };
+    return this.#saveReview(parent, { response, observation, failures: 0 });
+  }
+
+  #saveReview(parent, pending) {
+    const { response, observation } = pending;
+    const blocked = () => ({ ...response, outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, summary: null,
+      persistence_error: pending.error || null,
+      reason: pending.failures < FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS
+        ? "The review result could not be saved. Call final_review once more to retry saving it; no new reviewer will run."
+        : "The review result could not be saved after bounded retries. Hand off with status BLOCKED and report the persistence failure; do not request another review." });
+    if (pending.failures >= FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS) return blocked();
+    parent.pendingReview = pending;
+    const recordResult = () => {
+      if (this.record(observation) === false) throw new Error("Could not persist the final-review result");
+    };
+    try {
+      if (response.outcome === FINAL_REVIEW_OUTCOMES.PASS) {
+        // Pass authority and completion must commit together. A failed write
+        // retains this exact result for a bounded save retry, not a new model.
+        this.completePass({ agentCallId: parent.agentCallId,
+          reviewerAgentCallId: observation.detail.reviewer_agent_call_id,
+          cwd: parent.cwd, summary: response.summary, recordResult });
+        parent.completed = true;
+        this.#release(parent);
+      } else recordResult();
+      parent.pendingReview = null;
+      return response;
+    } catch (error) {
+      pending.error = String(error?.message || error).slice(0, 300);
+      pending.failures++;
       this.#release(parent);
-      this.completePass({ agentCallId: parent.agentCallId, reviewerAgentCallId: reviewerCallId,
-        cwd: parent.cwd, summary: result.summary });
+      return blocked();
     }
-    return response;
   }
 
   #returnUnchangedReview(parent, rejected, prior) {
@@ -466,14 +516,14 @@ export class FinalReviewRuntime {
     const result = { outcome: FINAL_REVIEW_OUTCOMES.FINDINGS,
       reason, findings: rejected.findings || [],
       reviews_remaining: finalReviewReviewsRemaining(prior) };
-    this.record({ work_item_id: parent.workItemId ?? null, job_id: parent.jobId,
+    const observation = { work_item_id: parent.workItemId ?? null, job_id: parent.jobId,
       attempt_id: parent.attemptId, observation_type: FINAL_REVIEW_OBSERVATIONS.RESULT,
       summary: reason, detail: { ...result, agent_call_id: parent.agentCallId,
         review_identity: rejected.review_identity, reviewer_agent_call_id: rejected.reviewer_agent_call_id,
         review_mode: MODES.UNCHANGED, completion_report: rejected.completion_report || null,
-        previous_review_id: rejected.id } });
+        previous_review_id: rejected.id } };
     this.#release(parent);
-    return result;
+    return this.#saveReview(parent, { response: result, observation, failures: 0 });
   }
 
   #startReviewer(parent, { instructions, evidence, snapshot }) {
@@ -492,13 +542,47 @@ export class FinalReviewRuntime {
       snapshot: null,
       pendingSnapshot: snapshot,
       revision: 0,
+      invalidReports: 0,
       run: null,
+      wallTimer: null,
     };
     parent.reviewer = session;
+    // Cover setup as well as provider execution, including a provider that
+    // ignores cancellation. The owner must always settle the developer's wait.
+    session.wallTimer = setTimeout(() => {
+      if (parent.reviewer === session) {
+        this.#release(parent, "the reviewer reached its time limit before reporting");
+        session.controller.abort();
+      }
+    }, this.reviewerWallMs);
+    session.wallTimer.unref?.();
     session.run = Promise.resolve()
       .then(() => {
         session.controller.signal.throwIfAborted();
-        return parent.runReview({ instructions, evidence, abortSignal: session.controller.signal });
+        return parent.runReview({ instructions, evidence, abortSignal: session.controller.signal,
+          onAgentCallCreated: (id) => {
+            // Bind before the child can use tools, including a child whose
+            // setup finishes after its session was released or replaced.
+            if (session.released || session.ended) {
+              parent.retiredReviewerCalls.add(id);
+              session.controller.abort();
+              return;
+            }
+            if (session.agentCallId != null && session.agentCallId !== id) {
+              parent.retiredReviewerCalls.add(session.agentCallId);
+              if (session.waitingForRevision || session.revisionExpected) {
+                // Provider fallback starts from the original prompt, without
+                // the prior review conversation. It cannot judge a delta that
+                // assumes that lost context; the next round needs a full view.
+                parent.retiredReviewerCalls.add(id);
+                this.#release(parent, "the reviewer provider changed after reporting; a fresh review of the current candidate is required");
+                session.controller.abort();
+                return;
+              }
+            }
+            session.agentCallId = id;
+          },
+        });
       })
       .then((review) => ({ review }), (error) => ({ error }))
       .then((ended) => {
@@ -506,6 +590,7 @@ export class FinalReviewRuntime {
         // wall): a call it left parked answers done, and the developer's next
         // call starts a fresh reviewer.
         session.ended = true;
+        clearTimeout(session.wallTimer);
         const endedCallId = ended.review?.agentCallId ?? session.agentCallId;
         if (endedCallId != null) parent.retiredReviewerCalls.add(endedCallId);
         session.pendingRevision = null;
@@ -561,13 +646,24 @@ export class FinalReviewRuntime {
       session.revisionDelivered = true;
       return revision;
     }
+    if (session.revisionExpected && !session.revisionDelivered) {
+      return { status: "not_waiting", error: "Wait for the revised candidate before reporting on it." };
+    }
     const waiting = session.awaitingReport;
     if (!waiting) {
       if (session.waitingForRevision) return this.#parkReviewer(session, { signal });
       return { status: "not_waiting", error: "Your report was already delivered; wait in final_review for the developer's revision." };
     }
     const mapped = finalReviewResultFromReport(args);
-    if (mapped.error) return { status: "invalid_report", error: mapped.error };
+    if (mapped.error) {
+      session.invalidReports++;
+      if (session.invalidReports >= FINAL_REVIEW_MAX_INVALID_REPORTS) {
+        this.#release(parent, "the reviewer repeatedly returned an invalid report");
+        return { status: FINAL_REVIEW_REVIEWER_STATUS.DONE, instruction: REVIEWER_DONE_INSTRUCTION, error: mapped.error };
+      }
+      return { status: "invalid_report", error: mapped.error };
+    }
+    session.invalidReports = 0;
     session.awaitingReport = null;
     session.snapshot = session.pendingSnapshot;
     session.pendingSnapshot = null;
@@ -615,16 +711,17 @@ export class FinalReviewRuntime {
     }
   }
 
-  #release(parent) {
+  #release(parent, reason = "the reviewer session was released before reporting") {
     const session = parent?.reviewer;
     if (!session) return;
     session.released = true;
+    clearTimeout(session.wallTimer);
     if (session.agentCallId != null) parent.retiredReviewerCalls.add(session.agentCallId);
     if (session.awaitingReport) {
       const report = session.awaitingReport;
       session.awaitingReport = null;
       report.resolve({ infrastructure: true, reviewerCallId: session.agentCallId,
-        result: { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "the reviewer session was released before reporting" } });
+        result: { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason } });
       session.controller.abort();
     }
     if (session.parked) {

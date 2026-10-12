@@ -1437,6 +1437,7 @@ export class TrackedProviderClient {
     if (agentCallId == null) {
       throw new Error("createAgentCall must return an object with an id");
     }
+    opts._onAgentCallCreated?.(agentCallId);
     ContextMeter.forContext({ agent_call_id: agentCallId }, { promptChars: prompt.length });
     // What the provider actually sends, once it reports it (recordFinalPrompt).
     let finalPromptChars = null;
@@ -2081,7 +2082,7 @@ export class TrackedProviderClient {
           workItemId: work_item_id,
           attemptId: observationContext?.attempt_id ?? null,
           cwd: reviewCwd,
-          runReview: ({ instructions, evidence, abortSignal: reviewAbortSignal }) => runFinalReviewer({
+          runReview: ({ instructions, evidence, abortSignal: reviewAbortSignal, onAgentCallCreated }) => runFinalReviewer({
             call: (prompt, callOpts, context) => this.call(prompt, callOpts, context),
             composePrompt: (packet, text, composeOpts) => this.deps.composePromptRemoteAware(packet, text, composeOpts),
             jobId: job_id,
@@ -2090,6 +2091,7 @@ export class TrackedProviderClient {
             cwd: reviewCwd,
             providerName,
             parentAgentCallId: agentCallId,
+            onAgentCallCreated,
             abortSignal: abortSignal ? AbortSignal.any([abortSignal, reviewAbortSignal]) : reviewAbortSignal,
             instructions,
             evidence,

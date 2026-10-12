@@ -27,7 +27,7 @@ import {
  *   jobId: number, workItemId: number, attemptId: number | null, cwd: string,
  *   providerName: string, parentAgentCallId: number, abortSignal?: AbortSignal | null,
  *   instructions: string, evidence: string, wallMs?: number,
- *   atlasConfig?: object | null, disableAtlas?: boolean,
+ *   atlasConfig?: object | null, disableAtlas?: boolean, onAgentCallCreated?: (id: number) => void,
  * }} input
  */
 async function runFinalReviewerInContext({
@@ -45,7 +45,9 @@ async function runFinalReviewerInContext({
   wallMs = FINAL_REVIEW_REVIEWER_WALL_MS,
   atlasConfig = null,
   disableAtlas = false,
+  onAgentCallCreated,
 }) {
+  abortSignal?.throwIfAborted();
   const job = getJob(jobId);
   if (!job) throw new Error(`Job #${jobId} no longer exists`);
   const packet = buildHandoffPacket(job, {
@@ -65,6 +67,7 @@ async function runFinalReviewerInContext({
     kind: AGENT_CALL_CHILD_KINDS.FINAL_REVIEW,
     parentAgentCallId,
   } });
+  abortSignal?.throwIfAborted();
   // Composition issues the reviewer's tool surface, so how the reviewer
   // reports is chosen after it: full final-review instructions are reduced to
   // their mode-neutral core first. Only a surface that carries final_review
@@ -73,6 +76,7 @@ async function runFinalReviewerInContext({
   const coreInstructions = [true, false].some((reportAndWait) => instructions === finalReviewInstructions({ reportAndWait }))
     ? finalReviewCoreInstructions() : instructions;
   const composed = await composePrompt(packet, coreInstructions, { providerName });
+  abortSignal?.throwIfAborted();
   const canReportAndWait = Array.isArray(packet.remote_tool_surface)
     && packet.remote_tool_surface.includes("tools.final_review");
   const modeInstructions = finalReviewModeInstructions({ reportAndWait: canReportAndWait });
@@ -103,6 +107,7 @@ async function runFinalReviewerInContext({
     remoteSystemPrompt: packet.remote_system_prompt || null,
     abortSignal: reviewerSignal,
     cwd,
+    _onAgentCallCreated: onAgentCallCreated,
     _parentAgentCallId: parentAgentCallId,
     _childKind: AGENT_CALL_CHILD_KINDS.FINAL_REVIEW,
     _agentCallRole: AGENT_CALL_ROLE_LABELS.FINAL_REVIEWER,
