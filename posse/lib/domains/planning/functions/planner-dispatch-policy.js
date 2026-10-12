@@ -64,7 +64,7 @@ export function readPlannerDispatchPolicy({ projectDir = null, readSetting = get
     try {
       values[key] = readSetting(key, { projectDir });
     } catch {
-      // Defaults keep dispatch inactive if the settings store is unavailable.
+      // Apply catalog defaults if the settings store is unavailable.
       values[key] = null;
     }
   }

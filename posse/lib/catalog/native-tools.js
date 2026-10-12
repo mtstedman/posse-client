@@ -47,7 +47,7 @@ export const TOOL_READ_FILE = {
     properties: {
       path: { type: "string", description: "File path (absolute or relative to working directory)" },
       offset: { type: "integer", description: "Starting line number, 1-based. Default: 1" },
-      limit: { type: "integer", description: "Maximum number of lines to read. Default: 2000 outside the Atlas-first source gate. Under the active gate, non-indexed reads default to and are capped at 250; changed/unavailable indexed escape reads retain the native reader bounds." },
+      limit: { type: "integer", description: "Maximum number of lines to read. Default: 2000; researcher reads with Atlas use the issued per-call bounds." },
       maxBytes: { type: "integer", description: "Maximum bytes to return in structured mode." },
       search: { type: "string", maxLength: 200, description: "Case-insensitive regex pattern to search within the selected line range. Unsafe nested-quantifier patterns are treated as literal text; results are capped at 100 matches." },
       searchContext: { type: "integer", minimum: 0, description: "Context lines around each search match in structured mode. Used only with search; default 2." },
@@ -2654,9 +2654,7 @@ export const TOOL_CHAIN_READ = {
     "unsupported operation, or when ATLAS is unavailable. The first read of a file locks the chain until you " +
     "classify that file as relevant or irrelevant. Large files may be paged with " +
     "offset/limit; after the file is tagged relevant, later continuation pages inherit " +
-    "that verdict. When ATLAS is active, indexed evidence and withheld ranges stay on the issued ATLAS " +
-    "retrieval surface; raw indexed reads are reserved for changed files or the ATLAS unavailable/strikeout " +
-    "escape hatch. " +
+    "that verdict. Use issued ATLAS retrieval for indexed evidence and withheld ranges when available. " +
     "A previously relevant file restored from the audit ledger retains its verdict. " +
     "Optional search/jsonPath/maxBytes uses the same structured extraction as the issued exact-file reader.",
   parameters: {
@@ -2667,7 +2665,7 @@ export const TOOL_CHAIN_READ = {
         description: "Path to the file to read (relative to project root).",
       },
       offset: { type: "integer", description: "Starting line number, 1-based. Default: 1" },
-      limit: { type: "integer", description: "Maximum number of lines to read. Default: 2000 outside the Atlas-first source gate. Under the active gate, non-indexed reads default to and are capped at 250; changed/unavailable indexed escape reads retain the native reader bounds." },
+      limit: { type: "integer", description: "Maximum number of lines to read. Default: 2000; researcher reads with Atlas use the issued per-call bounds." },
       maxBytes: { type: "integer", description: "Maximum bytes to return in structured mode." },
       search: { type: "string", maxLength: 200, description: "Case-insensitive regex pattern to search within the selected line range. Unsafe nested-quantifier patterns are treated as literal text; results are capped at 100 matches." },
       searchContext: { type: "integer", minimum: 0, description: "Context lines around each search match in structured mode. Used only with search; default 2." },

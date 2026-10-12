@@ -145,14 +145,9 @@ import {
   buildAtlasGateScopeKey,
   configureGate,
   isGateActive,
-  isGatedTool,
-  isUnlocked as isGateUnlocked,
-  checkNativeToolAllowed,
-  applyNativeReadLineLimit,
   ATLAS_CHAIN_READ_MAX_LINES,
   ATLAS_RESEARCHER_READ_MAX_LINES,
   isIndexableSourcePath,
-  buildLockedToolError,
   noteAtlasCall,
   releaseGate,
   unlockForAtlasUnavailable,
@@ -531,11 +526,9 @@ let mcpAgentCallId = Number(bootConfig.agentCallId) || null;
 let agentAuthorityError = null;
 let mcpPromptChars = Math.max(0, Number(bootConfig.promptChars) || 0);
 let atlasAvailable = bootConfig.atlasAvailable === true;
-let atlasGateEnabled = bootConfig.atlasGateEnabled === true;
+// Legacy boot configurations may still carry this flag. It no longer gates reads.
+const atlasGateEnabled = false;
 let atlasPrefetchStatus = String(bootConfig.atlasPrefetchStatus || "").trim().toLowerCase();
-// Fail-open deadman: if ATLAS-first gate remains locked while ATLAS calls are
-// stuck/cancelled in the host bridge, unlock native tools to avoid permanent
-// job deadlock. Keep this short so blocked runs recover promptly.
 const GATEWAY_SCOPE_STATE_LIMIT = 5000;
 const gatewayScopeStateByKey = new Map();
 const ownerAtlasGateEventSeqByScope = new Map();
@@ -566,14 +559,6 @@ const RESEARCH_NATIVE_SYNTHESIS_GATED_TOOLS = new Set([
   "git_history",
   "inspect_file",
   "hash_file",
-]);
-// These ATLAS-first denials are temporary admission controls: the native call
-// itself is valid, but it arrived before the required ATLAS discovery state.
-// Return them as model-visible control results so providers do not enter tool
-// error recovery. Permanent source-policy denials remain hard tool errors.
-const TRANSIENT_ATLAS_GATE_CONTROL_REASONS = new Set([
-  "global_atlas_first_required",
-  "indexed_file_discovery_required",
 ]);
 
 if (mcpDbPath) {
@@ -780,13 +765,6 @@ appendToolLog({
   role: roleName,
   atlasPrefetchStatus: atlasPrefetchStatus || null,
 });
-if (atlasAvailable && !atlasGateEnabled) {
-  appendToolLog({
-    event: "atlas_gate_passive_warning",
-    message: "ATLAS is available but atlas_tool_gate_enabled=false; agents can use native list/search/read before real ATLAS retrieval.",
-    role: roleName,
-  });
-}
 
 function getDeterministicAtlasConfig() {
   const base = getAtlasIntegrationConfig();
@@ -1701,24 +1679,7 @@ function readFileSchemaForCurrentBoot() {
       },
     };
   }
-  const changedSourceUse = writeEnabled
-    ? "verification after source changed during this run"
-    : "exact source that changed after Atlas retrieval";
-  const atlasUseDescription = `While the Atlas-first source gate is active, non-indexed reads default to and are capped at ${ATLAS_CHAIN_READ_MAX_LINES} lines. Use this tool only for documentation, configuration, manifests, other non-source artifacts, ${changedSourceUse}, or the Atlas unavailable/strikeout escape hatch. For other indexed source, use ${issuedIndexedSourceReadPhrase(issuedAtlasActionsForModelText())}.`;
-  return {
-    ...TOOL_READ_FILE,
-    description: `${TOOL_READ_FILE.description} ${atlasUseDescription}`,
-    parameters: {
-      ...TOOL_READ_FILE.parameters,
-      properties: {
-        ...TOOL_READ_FILE.parameters.properties,
-        limit: {
-          ...TOOL_READ_FILE.parameters.properties.limit,
-          description: `Maximum number of lines to read. Under the active Atlas-first source gate, non-indexed reads default to and are capped at ${ATLAS_CHAIN_READ_MAX_LINES}; changed/unavailable indexed escape reads retain the native reader bounds.`,
-        },
-      },
-    },
-  };
+  return TOOL_READ_FILE;
 }
 
 function compactAgentHandoffIssued() {
@@ -2922,7 +2883,6 @@ function applyRuntimeBootConfig(nextConfig = {}, {
   mcpAgentCallId = Number(bootConfig.agentCallId) || null;
   mcpPromptChars = Math.max(0, Number(bootConfig.promptChars) || 0);
   atlasAvailable = bootConfig.atlasAvailable === true;
-  atlasGateEnabled = bootConfig.atlasGateEnabled === true;
   atlasPrefetchStatus = String(bootConfig.atlasPrefetchStatus || "").trim().toLowerCase();
   imageGenerationMaxCalls = Number.isInteger(Number(bootConfig.imageGenerationMaxCalls)) && Number(bootConfig.imageGenerationMaxCalls) >= 0
     ? Number(bootConfig.imageGenerationMaxCalls)
@@ -3793,7 +3753,7 @@ async function handleRequest(msg) {
           role: roleName,
           reason: "fallback_only_atlas_tool",
         });
-        const deniedText = `ATLAS tool ${toolName} is intentionally not exposed. Use ${issuedIndexedSourceReadPhrase(issuedAtlasActionsForModelText())} for indexed source. Deterministic ${isResearcherRole && !atlasAvailable ? "chain_read" : "read_file"} is reserved for non-indexed content, changed source, or the Atlas unavailable/strikeout escape hatch.`;
+        const deniedText = `ATLAS tool ${toolName} is intentionally not exposed. Use ${issuedIndexedSourceReadPhrase(issuedAtlasActionsForModelText())} for indexed source. Use the issued deterministic ${isResearcherRole && !atlasAvailable ? "chain_read" : "read_file"} tool for exact file content.`;
         recordRejectedToolCall({ toolName, args, text: deniedText, reason: "fallback_only_atlas_tool" });
         sendMessage(jsonRpcSuccess(id, {
           content: [{
@@ -3909,54 +3869,6 @@ async function handleRequest(msg) {
         "research_synthesis_gate",
       )));
       return;
-    }
-
-    // Route 2: Native tool, but the ATLAS-first gate is active for this role
-    // and the tool is still locked. Return a verbose isError so the LLM reads
-    // the rule and redirects to an ATLAS call.
-    if (!delegatedEvidenceCursor && !atlasNativeToolIsComplementary(toolName, roleName)
-      && isGateActive({ scopeKey: gateScopeKey }) && isGatedTool(toolName)) {
-      const gateDecision = checkNativeToolAllowed(toolName, args, { cwd: workspaceCwd, scopeKey: gateScopeKey });
-      if (gateDecision.allowed) {
-        args = applyNativeReadLineLimit(args, gateDecision);
-        // Continue to the native handler below.
-      } else {
-        const errorText = buildLockedToolError(toolName, {
-          args,
-          cwd: workspaceCwd,
-          scopeKey: gateScopeKey,
-          issuedAtlasActions: issuedAtlasActionsForModelText(),
-        });
-        const transientControl = TRANSIENT_ATLAS_GATE_CONTROL_REASONS.has(gateDecision.reason);
-        appendToolLog({
-          event: "tool_gated",
-          requestId: id ?? null,
-          tool: requestedToolName,
-          canonicalTool: toolName,
-          reason: gateDecision.reason || null,
-          target: gateDecision.target || null,
-          controlOnly: transientControl,
-        });
-        recordRejectedToolCall({ toolName, args, text: errorText, reason: gateDecision.reason || "atlas_first_gate" });
-        if (transientControl) {
-          recordEmbeddedModelControlNotice(toolName, {
-            kind: "atlas_first_gate",
-            text: errorText,
-            trigger: gateDecision.reason || "atlas_first_gate",
-          });
-          sendMessage(jsonRpcSuccess(id, embeddedControlResult(
-            errorText,
-            "atlas_first_gate",
-            gateDecision.reason || "atlas_first_gate",
-          )));
-        } else {
-          sendMessage(jsonRpcSuccess(id, {
-            content: [{ type: "text", text: errorText }],
-            isError: true,
-          }));
-        }
-        return;
-      }
     }
 
     const handler = TOOL_EXECUTORS.get(toolName);

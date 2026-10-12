@@ -191,12 +191,12 @@ Remote roles: `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Read exact missing file context through the deterministic fallback. When ATLAS is active, successful ATLAS source retrieval already counts as file-content evidence. This reader covers remaining ATLAS evidence gaps, exact mutated or non-indexed state, an unsupported operation, or when ATLAS is unavailable. The first read of a file locks the chain until you classify that file as relevant or irrelevant. Large files may be paged with offset/limit; after the file is tagged relevant, later continuation pages inherit that verdict. When ATLAS is active, indexed evidence and withheld ranges stay on the issued ATLAS retrieval surface; raw indexed reads are reserved for changed files or the ATLAS unavailable/strikeout escape hatch. A previously relevant file restored from the audit ledger retains its verdict. Optional search/jsonPath/maxBytes uses the same structured extraction as the issued exact-file reader.
+Read exact missing file context through the deterministic fallback. When ATLAS is active, successful ATLAS source retrieval already counts as file-content evidence. This reader covers remaining ATLAS evidence gaps, exact mutated or non-indexed state, an unsupported operation, or when ATLAS is unavailable. The first read of a file locks the chain until you classify that file as relevant or irrelevant. Large files may be paged with offset/limit; after the file is tagged relevant, later continuation pages inherit that verdict. Use issued ATLAS retrieval for indexed evidence and withheld ranges when available. A previously relevant file restored from the audit ledger retains its verdict. Optional search/jsonPath/maxBytes uses the same structured extraction as the issued exact-file reader.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `jsonPath` | `string` | Optional |  | Dot-separated JSON path to extract from a JSON file. |
-| `limit` | `integer` | Optional |  | Maximum number of lines to read. Default: 2000 outside the Atlas-first source gate. Under the active gate, non-indexed reads default to and are capped at 250; changed/unavailable indexed escape reads retain the native reader bounds. |
+| `limit` | `integer` | Optional |  | Maximum number of lines to read. Default: 2000; researcher reads with Atlas use the issued per-call bounds. |
 | `maxBytes` | `integer` | Optional |  | Maximum bytes to return in structured mode. |
 | `offset` | `integer` | Optional |  | Starting line number, 1-based. Default: 1 |
 | `path` | `string` | Required |  | Path to the file to read (relative to project root). |
@@ -877,7 +877,7 @@ Read the contents of a file. Returns numbered lines for precise references. Use 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `jsonPath` | `string` | Optional |  | Dot-separated JSON path to extract from a JSON file. |
-| `limit` | `integer` | Optional |  | Maximum number of lines to read. Default: 2000 outside the Atlas-first source gate. Under the active gate, non-indexed reads default to and are capped at 250; changed/unavailable indexed escape reads retain the native reader bounds. |
+| `limit` | `integer` | Optional |  | Maximum number of lines to read. Default: 2000; researcher reads with Atlas use the issued per-call bounds. |
 | `maxBytes` | `integer` | Optional |  | Maximum bytes to return in structured mode. |
 | `offset` | `integer` | Optional |  | Starting line number, 1-based. Default: 1 |
 | `path` | `string` | Required |  | File path (absolute or relative to working directory) |

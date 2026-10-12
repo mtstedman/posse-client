@@ -22,7 +22,7 @@ export const PLANNER_RESEARCH_EFFORT_VALUES = Object.freeze(["low", "medium", "h
 export const PLANNER_DISPATCH_RETURN_MARGIN_MS = 10_000;
 
 export const PLANNER_DISPATCH_SETTINGS = Object.freeze([
-  { key: SETTING_KEYS.PLANNER_DISPATCH_MODE, default: PLANNER_DISPATCH_MODES.ROUTER, options: PLANNER_DISPATCH_MODE_VALUES, description: "Planner-led intake for every repository on this account. Router preserves current behavior; planner lets eligible nontrivial intake skip upfront research and preflight while the planner dispatches bounded code or web research children." },
+  { key: SETTING_KEYS.PLANNER_DISPATCH_MODE, default: PLANNER_DISPATCH_MODES.PLANNER, options: PLANNER_DISPATCH_MODE_VALUES, description: "Planner-led intake for every repository on this account. Planner is the default: eligible nontrivial intake skips upfront research and preflight while the planner dispatches bounded code or web research children. Router restores the upfront research/preflight flow." },
   { key: SETTING_KEYS.PLANNER_RESEARCH_EFFORT_CEILING, default: "high", options: PLANNER_RESEARCH_EFFORT_VALUES, description: "Maximum requested reasoning effort for investigating research children." },
   { key: SETTING_KEYS.PLANNER_RESEARCH_MAX_CHILDREN, default: "2", numeric: { integer: true, min: 1, max: SUB_AGENT_LIMITS.maxBatch }, description: "Maximum research children across one planner call." },
   { key: SETTING_KEYS.PLANNER_RESEARCH_CHILD_TIMEOUT_MS, default: "1200000", numeric: { integer: true, min: 5000, max: MCP_TRANSPORT_TIMEOUT_MS - PLANNER_DISPATCH_RETURN_MARGIN_MS - 1000 }, description: "Research child timeout ceiling in milliseconds, further bounded by the dispatch tool timeout with time reserved for returning results." },

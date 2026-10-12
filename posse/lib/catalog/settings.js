@@ -270,6 +270,8 @@ export const WAITING_LANE_SHADOW_MODE_VALUES = Object.freeze(["off", "shadow"]);
 // Settings no code reads any more. Opening the account DB deletes their stored
 // rows, so an operator cannot keep a value that silently does nothing.
 export const RETIRED_SETTING_KEYS = Object.freeze([
+  "atlas_tool_gate_enabled",
+  "atlas_tool_gate_default_migrated_at",
   "claude_cli_path",
   "claude_execution_mode",
   "engagement_engine",

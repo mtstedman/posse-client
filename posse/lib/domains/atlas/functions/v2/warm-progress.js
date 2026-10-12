@@ -20,12 +20,8 @@
 //   * `warmReadinessDone` never downgrades ONNX: a successful warm whose
 //     embeddings stage had nothing to do keeps the previous resting state.
 
-// A warm that hasn't ticked in this long reads as idle. This is a crashed-warm
-// backstop only — both warm paths land a terminal done()/seed() — so it must
-// sit ABOVE the longest legitimately-quiet phase (view merge, ONNX model load
-// emit no percents for tens of seconds). A short window here made the bar
-// flash its resting "incomplete" label mid-warm and then resume.
-const STALE_MS = 30_000;
+// The warm owner ends readiness in its completion/failure path. Model loading
+// and embedding batches can be quiet for minutes, so silence is not completion.
 
 // Stage-anchored composite for the ATLAS bar. Raw ParseEngine percents are
 // per-stage and per-language (php parse runs 0→100, then typescript starts at
@@ -188,15 +184,12 @@ export function warmReadinessSeed(seed = {}, now = Date.now()) {
 }
 
 /**
- * Read the current readiness for rendering. `active` is false once the warm
- * finished OR the last tick went stale (a crashed/abandoned warm shouldn't pin
- * the bar mid-fill forever).
- * @param {number} [now]
+ * Read the current readiness for rendering. Activity follows the warm owner's
+ * lifecycle, including quiet model-loading and embedding phases.
  * @returns {WarmReadiness}
  */
-export function getWarmReadiness(now = Date.now()) {
-  const active = _s.active && now - _s.at < STALE_MS;
-  return { ..._s, active };
+export function getWarmReadiness() {
+  return { ..._s };
 }
 
 /** Test-only: return the singleton to its pristine pre-boot state. */

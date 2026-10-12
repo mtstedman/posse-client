@@ -337,10 +337,10 @@ export class DisplayLeftPanelRenderer {
       if (pct >= 100) return { glyph: `${C.green}✓${C.reset}`, restColor: C.green };
       return { glyph: `${C.yellow}!${C.reset}`, restColor: C.yellow };
     };
-    const row = (key, label, color, target, known, right, off = false) => {
+    const row = (key, label, color, target, known, right, off = false, active = r.active) => {
       const shown = ease(key, target, known);
       const g = readinessGauge(known && !off ? shown : null, { width: 16, color });
-      const st = rowState(color, known, r.active, target ?? 0, off);
+      const st = rowState(color, known, active, target ?? 0, off);
       return ` ${st.glyph} ${color}${label.padEnd(5)}${C.reset} ${g.bar} ${st.restColor}${right}${C.reset}`;
     };
     // Resting label: "ready" (fully warmed) / "incomplete" (warm didn't
@@ -358,12 +358,15 @@ export class DisplayLeftPanelRenderer {
         ? `${pctStr(r.atlas ?? 0)} ${r.lang || r.stage || ""}`.trimEnd()
         : restLabel(r.atlas));
     // ONNX (embeddings).
+    const onnxBuilding = r.active && r.sawEmbeddings;
     const onnxRight = onnxOff
       ? "off"
-      : (r.active && r.onnx != null ? pctStr(r.onnx) : restLabel(r.onnx));
+      : (onnxBuilding
+        ? `Building…${r.onnx != null ? ` ${pctStr(r.onnx)}` : ""}`
+        : restLabel(r.onnx));
     return [
       row("atlas", "ATLAS", C.cyan, r.atlas ?? 0, r.atlas != null || r.active, atlasRight, atlasOff),
-      row("onnx", "ONNX", C.magenta, r.onnx ?? 0, r.onnx != null, onnxRight, onnxOff),
+      row("onnx", "ONNX", C.magenta, r.onnx ?? 0, r.onnx != null || onnxBuilding, onnxRight, onnxOff, onnxBuilding),
     ];
   }
 

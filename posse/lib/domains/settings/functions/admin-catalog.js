@@ -295,7 +295,6 @@ const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   // Debug · ATLAS internals
   atlas_usage_telemetry: "ATLAS usage telemetry",
   atlas_live_buffers: "Stream edit buffers to ATLAS",
-  atlas_tool_gate_enabled: "Require ATLAS before file tools",
   atlas_memory_surface: "Memory lookups in handoffs",
   atlas_drift_check: "Index drift checks",
   atlas_auto_feedback: "ATLAS result feedback",
@@ -514,7 +513,6 @@ const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   // Debug · ATLAS internals
   atlas_usage_telemetry: "Record ATLAS action counts and latency in a per-repository telemetry store. Off stops recording; tool results are unaffected.",
   atlas_live_buffers: "Send developer file writes and edits to the live ATLAS index as they happen.",
-  atlas_tool_gate_enabled: "Make agents try ATLAS before they may use the general file read and search tools.",
   atlas_memory_surface: "Check each handoff for saved ATLAS memory on the files and symbols involved. On and auto list what they find; off never checks.",
   atlas_drift_check: "Periodically check that the ATLAS index still matches the current commit.",
   atlas_auto_feedback: "Let agents rate ATLAS results when a job ends. Write saves the ratings and uses them to rank future results; dry-run records what would be saved; off disables it.",
@@ -1101,7 +1099,6 @@ export const SETTINGS_GROUPS = Object.freeze([
   group("debug_atlas_internals", "debug", "ATLAS Internals", [
     "atlas_usage_telemetry",
     "atlas_live_buffers",
-    "atlas_tool_gate_enabled",
     "atlas_memory_surface",
     "atlas_drift_check",
     "atlas_auto_feedback",

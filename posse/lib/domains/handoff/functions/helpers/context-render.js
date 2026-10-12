@@ -4,7 +4,6 @@
 
 import { renderAtlasHandoffSectionsWithMeta } from "./atlas-context.js";
 import { reissueHashRefHandoffPacket, renderHashRefHandoffPacket } from "./hash-ref-packet.js";
-import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { atlasBackendLabel } from "../../../integrations/functions/atlas-label.js";
 import { getObservationContext } from "../../../observability/functions/observations.js";
 import { buildScopePlausibilityWarning } from "./scope-preflight.js";
@@ -403,12 +402,9 @@ function renderPacketContextString(packet, {
 
     const preloadedParts = buildEditableFileParts().filter(Boolean);
     if (includeDynamic) {
-      const atlasGateEnabled = packet.atlas?.gateEnabled != null ? !!packet.atlas.gateEnabled : resolveAtlasToolGateEnabled();
       const atlasLabel = atlasBackendLabel(packet.atlas);
       const atlasExactAccess = packet.atlas?.active && !packet.atlas?.prefetchFailed
-        ? (atlasGateEnabled
-          ? `Use ${atlasLabel} prefetch plus focused ${atlasLabel} code retrieval first for scoped source files; issued exact-file read/search tools are fallback only when ${atlasLabel} cannot provide remaining exact content or you have mutated files and need current worktree state.`
-          : `Use ${atlasLabel} code retrieval first for scoped source files when possible; use the issued exact-file read/search tools when ${atlasLabel} cannot provide remaining exact content or you have mutated files and need current worktree state.`)
+        ? `Use ${atlasLabel} code retrieval first for scoped source files when possible; use the issued exact-file read/search tools for remaining exact content or current worktree state.`
         : "Use the issued exact-file read/search tools to inspect exact content before editing.";
       const accessNote = [
         "EDITABLE FILE CONTENT ACCESS:",

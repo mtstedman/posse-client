@@ -288,7 +288,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
   const payload = { ...(args || {}) };
   const fallbackOnlyNested = nestedFallbackOnlyAction(payload);
   if (ATLAS_FALLBACK_ONLY_ACTIONS.has(normalizedAction) || fallbackOnlyNested) {
-    throw new Error("ATLAS file.read is intentionally not exposed. Use code.window in file mode, its continuation handle, or code.lens for indexed source. Deterministic read_file/chain_read is reserved for non-indexed content, changed source, or the Atlas unavailable/strikeout escape hatch.");
+    throw new Error("ATLAS file.read is intentionally not exposed. Use code.window in file mode, its continuation handle, or code.lens for indexed source. Use the issued deterministic read_file/chain_read tool for exact file content.");
   }
   if (payload.repo_id && !payload.repoId) payload.repoId = String(payload.repo_id);
   if (atlasActionSupportsRepoId(normalizedAction)) {

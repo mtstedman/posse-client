@@ -4,6 +4,7 @@ import path from "path";
 import Database from "better-sqlite3";
 import { SETTINGS_CATALOG, getCatalogEntry, validateCatalogSettingValue } from "../functions/catalog.js";
 import { PLAN_APPROVAL_MODES, RETIRED_SETTING_KEYS, SETTING_KEYS } from "../../../catalog/settings.js";
+import { PLANNER_DISPATCH_MODES } from "../../../catalog/planner-dispatch.js";
 
 const ACCOUNT_DB_BUSY_TIMEOUT_MS = 2000;
 
@@ -467,7 +468,8 @@ export class AccountSettings {
   _seedDefaultsInTransaction() {
     this._migratePlanApprovalMode();
     this._migrateAtlasAutoFeedbackDefault();
-    this._migrateAtlasToolGateDefault();
+    this._migratePlannerDispatchDefault();
+    this._migrateHandoffCoordinationDefault();
     this._migrateAtlasResultRefPagingDefault();
     this._migrateAtlasSearchResultPagingDefault();
     this._migrateAtlasPrefetchEntrypointRankDefault();
@@ -635,30 +637,41 @@ export class AccountSettings {
       .run(markerKey);
   }
 
-  _migrateAtlasToolGateDefault() {
-    const markerKey = "atlas_tool_gate_default_migrated_at";
+  _migratePlannerDispatchDefault() {
+    const markerKey = "planner_dispatch_default_migrated_at";
     const marker = this._db
       .prepare(`SELECT setting_value FROM account_settings WHERE setting_key = ?`)
       .get(markerKey);
     if (marker) return;
 
-    const gateRow = this._db
-      .prepare(`SELECT setting_value FROM account_settings WHERE setting_key = ?`)
-      .get("atlas_tool_gate_enabled");
-    const gateValue = String(gateRow?.setting_value ?? "").trim().toLowerCase();
-    if (gateRow && gateValue === "") {
-      this._db
-        .prepare(
-          `UPDATE account_settings
-             SET setting_value = 'true',
-                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-           WHERE setting_key = 'atlas_tool_gate_enabled'`,
-        )
-        .run();
-    }
+    // Legacy rows do not record whether router was seeded or selected. Move
+    // them once; an explicit router selection after this migration survives.
+    this._db
+      .prepare(
+        `UPDATE account_settings
+           SET setting_value = ?,
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE setting_key = ? AND lower(trim(setting_value)) = ?`,
+      )
+      .run(PLANNER_DISPATCH_MODES.PLANNER, SETTING_KEYS.PLANNER_DISPATCH_MODE, PLANNER_DISPATCH_MODES.ROUTER);
     this._db
       .prepare(`INSERT OR IGNORE INTO account_settings (setting_key, setting_value) VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
       .run(markerKey);
+  }
+
+  _migrateHandoffCoordinationDefault() {
+    const markerKey = "handoff_coordination_default_migrated_at";
+    if (this._db.prepare(`SELECT 1 FROM account_settings WHERE setting_key = ?`).get(markerKey)) return;
+
+    this._db.prepare(
+      `UPDATE repo_settings
+         SET setting_value = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+       WHERE setting_key = ? AND lower(trim(setting_value)) = 'off'`,
+    ).run(getCatalogEntry(SETTING_KEYS.AGENT_COORDINATION_MODE).default, SETTING_KEYS.AGENT_COORDINATION_MODE);
+    this._db.prepare(
+      `INSERT OR IGNORE INTO account_settings (setting_key, setting_value)
+       VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+    ).run(markerKey);
   }
 }
 

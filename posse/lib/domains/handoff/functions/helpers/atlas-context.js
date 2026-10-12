@@ -4040,10 +4040,6 @@ function renderAtlasResearchContextSection(packet, { trim = 0 } = {}) {
     lines.push(atlasSubFailureLine("atlas.context", research.agentContext.error));
   }
 
-  if (packet.atlas?.gateEnabled) {
-    const label = atlasBackendLabel(packet.atlas);
-    lines.push(`${label} gate note: prefetch does not count as active retrieval; make a targeted retrieval call only for a remaining code-evidence gap, never merely to unlock native tools.`);
-  }
   return lines.join("\n");
 }
 

@@ -6,7 +6,7 @@ import {
 } from "./research-synthesis.js";
 
 export const ATLAS_TOOL_GATE_SETTING = "atlas_tool_gate_enabled";
-export const ATLAS_TOOL_GATE_DEFAULT = true;
+export const ATLAS_TOOL_GATE_DEFAULT = false;
 export const ATLAS_CODE_LENS_CALLABLE_SETTING = "atlas_code_lens_callable";
 export const ATLAS_CODE_LENS_CALLABLE_DEFAULT = true;
 
@@ -19,11 +19,9 @@ function parseBoolean(value, fallback = false) {
 }
 
 export function resolveAtlasToolGateEnabled() {
-  try {
-    return parseBoolean(getAccountSetting(ATLAS_TOOL_GATE_SETTING), ATLAS_TOOL_GATE_DEFAULT);
-  } catch {
-    return ATLAS_TOOL_GATE_DEFAULT;
-  }
+  // Compatibility projection for providers and handoff packets. Native reads
+  // no longer require ATLAS discovery, regardless of legacy account values.
+  return ATLAS_TOOL_GATE_DEFAULT;
 }
 
 export const ATLAS_GATEWAY_DEDUP_ADVERTISE_SETTING = "atlas_gateway_dedup_advertise";

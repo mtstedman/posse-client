@@ -104,11 +104,13 @@ Codex turn can run.
 
 ### Experimental planner dispatch
 
-Set the account setting `planner_dispatch_mode=planner` to enable planner-led
-intake. The separate `agent_coordination_mode` setting still governs citation
-sub-agents. The default `router` retains the existing upfront research/preflight
-flow. On the gated route, the planner can plan simple work directly or call one
-tool:
+Planner-led intake is the default account setting (`planner_dispatch_mode=planner`).
+Existing `router` settings migrate to `planner` once on update; selecting `router`
+afterward restores the upfront research/preflight flow. The separate
+`agent_coordination_mode` setting defaults to `handoff`; existing repositories
+with `off` migrate once to terminal handoff reports, preserving `subagents` and
+subsequent explicit `off` selections. It still governs citation sub-agents. The planner
+can plan simple work directly or call one tool:
 
 ```json
 {"agent_type":"code","question":"Find the request validation path and its tests","budget":{"reasoning_effort":"medium","max_turns":12}}
