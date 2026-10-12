@@ -303,11 +303,12 @@ export function enqueueWaitingLaneAtlasWarm({
       updateJobPayload(existing.row.id, JSON.stringify(mergedPayload));
       db.prepare(`
         UPDATE jobs
-        SET priority = ?, parent_job_id = ?, ready_at = ?, updated_at = ?
+        SET priority = ?, parent_job_id = ?, ready_at = MAX(COALESCE(ready_at, ?), ?), updated_at = ?
         WHERE id = ? AND status = 'queued'
       `).run(
         strongerPriority(priority, existing.row.priority),
         parentId,
+        nowIso(),
         nowIso(),
         nowIso(),
         existing.row.id,
@@ -701,13 +702,14 @@ export function emitAtlasPipelineEvent({
           SET title = ?,
               priority = ?,
               payload_json = ?,
-              ready_at = ?,
+              ready_at = MAX(COALESCE(ready_at, ?), ?),
               updated_at = ?
           WHERE id = ?
         `).run(
           warmJobTitle(eventType),
           strongerPriority(priority, existingWarm.row.priority),
           JSON.stringify(mergedPayload),
+          nowIso(),
           nowIso(),
           nowIso(),
           existingWarm.row.id,

@@ -2081,7 +2081,7 @@ export class TrackedProviderClient {
           workItemId: work_item_id,
           attemptId: observationContext?.attempt_id ?? null,
           cwd: reviewCwd,
-          runReview: ({ instructions, evidence }) => runFinalReviewer({
+          runReview: ({ instructions, evidence, abortSignal: reviewAbortSignal }) => runFinalReviewer({
             call: (prompt, callOpts, context) => this.call(prompt, callOpts, context),
             composePrompt: (packet, text, composeOpts) => this.deps.composePromptRemoteAware(packet, text, composeOpts),
             jobId: job_id,
@@ -2090,7 +2090,7 @@ export class TrackedProviderClient {
             cwd: reviewCwd,
             providerName,
             parentAgentCallId: agentCallId,
-            abortSignal,
+            abortSignal: abortSignal ? AbortSignal.any([abortSignal, reviewAbortSignal]) : reviewAbortSignal,
             instructions,
             evidence,
             atlasConfig: opts.atlasConfig || null,

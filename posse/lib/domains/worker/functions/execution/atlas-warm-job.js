@@ -98,7 +98,9 @@ const ATLAS_WARM_DISABLED_REQUEUE_DELAY_MS = 10 * 60 * 1000;
 
 // A warm whose daemon host was retired mid-request goes back to the queue
 // briefly deferred, so the replacement host (or the next boot) runs it.
+// Bound these refunds too: repeated retirements must not keep a job alive forever.
 const ATLAS_WARM_HOST_RETIRED_REQUEUE_DELAY_MS = 5_000;
+const ATLAS_WARM_HOST_RETIRED_MAX_DEFERRALS = 3;
 
 // A warm that timed out waiting for the ledger SQLite gate did no work. It goes
 // back to the queue as the same row (later warm events for its target coalesce
@@ -580,7 +582,7 @@ export function isAtlasWarmHostRetired(err) {
 
 /**
  * Requeue a warm interrupted by a daemon host retire without an attempt
- * penalty. Returns true when it handled the error.
+ * penalty, or fail it after bounded deferrals. Returns true when handled.
  * @param {any} worker
  * @param {any} job
  * @param {number} attemptId
@@ -590,10 +592,22 @@ export function isAtlasWarmHostRetired(err) {
  */
 export function requeueAtlasWarmAfterHostRetire(worker, job, attemptId, startTime, leaseToken, err) {
   if (!isAtlasWarmHostRetired(err)) return false;
+  const payload = parseJobPayload(job) || {};
+  const count = Number(payload._atlas_warm_host_retire_deferrals || 0);
+  const deferrals = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+  const exhausted = deferrals >= ATLAS_WARM_HOST_RETIRED_MAX_DEFERRALS;
+  const message = exhausted
+    ? `ATLAS daemon host retired repeatedly after ${deferrals} deferrals; warm failed`
+    : "ATLAS daemon host retired mid-warm — requeuing for the replacement host";
+  if (exhausted) setJobError(job.id, message);
+  else {
+    job.payload_json = JSON.stringify({ ...payload, _atlas_warm_host_retire_deferrals: deferrals + 1 });
+    updateJobPayload(job.id, job.payload_json);
+  }
   completeAttempt(attemptId, {
-    status: "interrupted",
+    status: exhausted ? "failed" : "interrupted",
     duration_ms: nowMs() - startTime,
-    error_text: "ATLAS daemon host retired mid-warm",
+    error_text: message,
   });
   logEvent({
     work_item_id: job.work_item_id,
@@ -601,15 +615,15 @@ export function requeueAtlasWarmAfterHostRetire(worker, job, attemptId, startTim
     attempt_id: attemptId,
     event_type: EVENT_TYPES.ATLAS_WARM_HOST_RETIRED,
     actor_type: EVENT_ACTORS.ATLAS,
-    message: "ATLAS daemon host retired mid-warm — requeuing for the replacement host",
+    message,
   });
-  const released = worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
+  const released = exhausted ? worker._releaseLease(job, leaseToken, "failed") : worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
     attemptId,
     readyAt: new Date(Date.now() + ATLAS_WARM_HOST_RETIRED_REQUEUE_DELAY_MS).toISOString(),
   });
   if (released && job.work_item_id) refreshWorkItemStatus(job.work_item_id);
   try {
-    worker.emit(job.id, `${C.dim}[atlas] warm job #${job.id} interrupted: daemon host retired — ${released ? "requeued" : "lease already released"}${C.reset}`);
+    worker.emit(job.id, `${C.dim}[atlas] warm job #${job.id}: ${message} — ${released ? (exhausted ? "failed" : "requeued") : "lease already released"}${C.reset}`);
   } catch { /* emit is best-effort */ }
   return true;
 }
