@@ -80,6 +80,8 @@ export function applyAtomicEdits(original, edits) {
     const keys = Object.keys(item);
     const lineMode = keys.includes("replaceLines");
     const allowed = lineMode ? ["replaceLines"] : ["old_string", "new_string"];
+    const unknown = keys.find((key) => !["replaceLines", "old_string", "new_string"].includes(key));
+    if (unknown) return { error: `arguments.edits[${index}].${unknown} is not allowed` };
     if (keys.some((key) => !allowed.includes(key)) || !keys.length) return { error: `edits[${index}]: use exactly one supported edit mode without path` };
     const span = lineMode ? lineSpan(content, item) : exactSpan(content, item);
     if (span.error) return { error: `edits[${index}]: ${span.error}` };

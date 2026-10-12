@@ -380,7 +380,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       logEvent({
         event_type: EVENT_TYPES.GIT_PUSHED,
         actor_type: EVENT_ACTORS.HUMAN,
-        message: `Pushed ${pushBranch} to ${effectiveRemote} after merging ${mergedCount} WI(s)`,
+        message: `Pushed ${pushBranch} to ${effectiveRemote}${mergedCount > 0 ? ` after merging ${mergedCount} WI(s) in this action` : ""}`,
       });
       return { ok: true, effectiveRemote, pushBranch };
     } catch (pushErr) {

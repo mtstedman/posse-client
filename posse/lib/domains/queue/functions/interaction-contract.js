@@ -77,6 +77,9 @@ const HANDLER_BY_KIND = new Map([
   ["push_offer", "git_push"],
   ["shared_trunk_provenance", "human_input"],
   ["work_item_failure_disposition", "human_input"],
+  ["merge_verification_review", "human_input"],
+  ["merge_failure_recovery", "human_input"],
+  ["post_merge_db_task", "human_input"],
   ["cross_wi_upstream_disposition", "human_input"],
 ]);
 

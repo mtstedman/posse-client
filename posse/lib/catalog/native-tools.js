@@ -114,7 +114,7 @@ export const TOOL_EDIT_FILE = {
     type: "object",
     properties: {
       path: { type: "string", description: "File path to edit" },
-      old_string: { type: "string", description: "Exact text to find (must be unique in file)" },
+      old_string: { type: "string", description: "Exact existing text copied from a recent read, preserving whitespace. Must occur exactly once; zero or multiple matches leave the file unchanged." },
       new_string: { type: "string", description: "Replacement text" },
       replaceLines: {
         type: "object",
@@ -134,8 +134,8 @@ export const TOOL_EDIT_FILE = {
         items: {
           type: "object",
           properties: {
-            old_string: { type: "string" },
-            new_string: { type: "string" },
+            old_string: { type: "string", description: "Exact existing text copied from a recent read, preserving whitespace. Must occur exactly once; zero or multiple matches leave the file unchanged." },
+            new_string: { type: "string", description: "Replacement text for the exact unique match" },
             replaceLines: {
               type: "object",
               properties: {

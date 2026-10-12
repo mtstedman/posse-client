@@ -1,3 +1,4 @@
+import { stripHashRefSurfaceSuffix } from "../../../shared/tools/functions/ref-surface.js";
 import { AsyncLocalStorage } from "async_hooks";
 import fs from "fs";
 import path from "path";
@@ -1270,7 +1271,7 @@ function _summarizeCatalogToolUse(tool, input = {}, cwdNorm = null, rel = (value
     try { if (callId) reviewer = getAgentCallById(callId)?.child_kind === AGENT_CALL_CHILD_KINDS.FINAL_REVIEW; } catch { /* replay may lack a runtime database */ }
     return {
       observation_type: spec.type,
-      summary: finalReviewLogSummary({ input, result: observationDetail?.final_review_result, reviewer }),
+      summary: finalReviewLogSummary({ input, result: observationDetail?.final_review_result, reviewer, lifecycle: true }),
       detail: _catalogDetail({ spec, cwdNorm, tool, catalogName, extra: { input: _summarizeAtlasArgs(input) } }),
     };
   }
@@ -1852,6 +1853,7 @@ export function nativeReadResultStats(tool, resultText) {
     const spec = TOOL_CATALOG[_normalizeCatalogToolName(tool)]?.observation;
     if (!spec || !READ_RESULT_STATS_TYPES.has(spec.type)) return null;
     if (typeof resultText !== "string" || resultText === "" || /^Error:/i.test(resultText)) return null;
+    resultText = stripHashRefSurfaceSuffix(resultText);
     const structured = _structuredReadStats(resultText);
     if (structured) return structured;
     // Plain numbered-lines format: execReadFile appends "... (N more lines)"

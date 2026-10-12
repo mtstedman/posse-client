@@ -98,7 +98,7 @@ function nodeBootstrapFailure(invocation, output) {
 const PYTEST_SOURCE_RE = /^\s*(?:async\s+)?def\s+test\w*\s*\(|^\s*class\s+Test\w*|^\s*(?:import|from)\s+(?:pytest|unittest)\b/m;
 const PYTHON_MAIN_RE = /^if\s+__name__\s*==\s*["']__main__["']\s*:/m;
 const PHPUNIT_SOURCE_RE = /\bPHPUnit\\/;
-const PHP_CLASS_EXTENDS_RE = /^\s*(?:(?:final|abstract|readonly)\s+)*class\s+\w+\s+extends\b/m;
+const PHP_CLASS_EXTENDS_RE = /^\s*(?:(?:final|abstract|readonly)\s+)*class\s+\w+\s+extends\s+([\\\w]+)/gm;
 
 function readSourceHead(absolute) {
   let fd;
@@ -199,11 +199,11 @@ function phpRunner(root, relative, source) {
     if (!phpunit) return { reason: "phpunit_unavailable" };
     return invocation();
   }
-  if (PHP_CLASS_EXTENDS_RE.test(source)) {
-    return phpunit && config && phpUnitConfigDeclares(root, config, relative)
-      ? invocation()
-      : { reason: "php_runner_unidentified" };
+  const bases = [...source.matchAll(PHP_CLASS_EXTENDS_RE)].map((match) => match[1]);
+  if (bases.length > 0 && config && phpUnitConfigDeclares(root, config, relative)) {
+    return phpunit ? invocation() : { reason: "phpunit_unavailable" };
   }
+  if (bases.some((base) => /(?:TestCase|TestBase|BaseTest)$/i.test(base))) return { reason: "php_runner_unidentified" };
   return { runner: "php_script", executable: "php", args: [relative] };
 }
 

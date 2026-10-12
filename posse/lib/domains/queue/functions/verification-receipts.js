@@ -118,3 +118,23 @@ export function latestImplementationCommit(workItemId) {
   `).get(workItemId);
   return normalizedCommit(row?.commit_hash);
 }
+
+/** Historical successes for gate explanation only; never candidate authorization. */
+export function historicalPassingChecks(workItemId, commands = [], { limit = 256 } = {}) {
+  const wanted = new Set(commands);
+  if (!workItemId || wanted.size === 0) return [];
+  const rows = getDb().prepare(`SELECT id FROM artifacts WHERE work_item_id = ? AND mime_type = ? ORDER BY id DESC LIMIT ?`)
+    .all(workItemId, TEST_EXECUTION_RECEIPT_MIME_TYPE, limit);
+  const seen = new Set();
+  const checks = [];
+  for (const row of rows) {
+    const artifact = getArtifact(row.id);
+    const receipt = parseReceipt(artifact);
+    if (receipt?.phase !== "post_change" || receipt.status !== "passed" || !wanted.has(receipt.command)) continue;
+    const commit = normalizedCommit(receipt.executed_commit_hash) || normalizedCommit(receipt.commit_hash);
+    if (!commit || seen.has(receipt.command)) continue;
+    seen.add(receipt.command);
+    checks.push({ command: receipt.command, commit_hash: commit, job_id: artifact.job_id, artifact_id: row.id });
+  }
+  return checks;
+}

@@ -110,7 +110,7 @@ export function buildStructuredReadResult({ args, displayPath, content, selected
     returnedLines = rawContent.split("\n");
     clipped = true;
   }
-  const data = { ok: true, path: displayPath, totalBytes, totalLines, startLine, returnedLines: returnedLines.length, truncated: Boolean(truncated || clipped), content: rawContent, numberedContent: formatNumberedLines(returnedLines, startLine) };
+  const data = { ok: true, path: displayPath, totalBytes, totalLines, startLine, returnedLines: returnedLines.length, truncated: Boolean(truncated || clipped), content: rawContent };
   if (args.search != null) {
     const compiled = compileReadSearchPattern(args.search);
     if (!compiled.ok) return `Error: ${compiled.message}`;

@@ -25,6 +25,7 @@ export const MERGE_GATE_WALL_BUDGET_MS = 12 * 60_000;
 export const MERGE_GATE_TASK_RESERVE_MS = 2 * 60_000;
 // Temporary checkouts a merge registers under the OS temp directory. A merge
 // interrupted mid-gate leaves them registered; recovery removes them.
+export const BASELINE_CHECKOUT_PREFIX = "posse-baseline-";
 export const MERGE_CANDIDATE_CHECKOUT_PREFIX = "posse-merge-check-";
 export const MERGE_CLOSEOUT_WORKTREE_PREFIX = "posse-closeout-";
 // Written under the target checkout's git dir just before `merge --squash`
@@ -171,7 +172,7 @@ export const VOLATILE_TEST_OUTPUT_PATTERNS = Object.freeze([
 // posse-closeout-XXXXXX, ...), sometimes with the checkout in one of these
 // subdirectories. Their paths differ on every run, so failure fingerprints
 // strip them as they strip worktree paths.
-export const VOLATILE_CHECKOUT_DIR_PREFIXES = Object.freeze(["posse-merge-check-", "posse-closeout-"]);
+export const VOLATILE_CHECKOUT_DIR_PREFIXES = Object.freeze(["posse-merge-check-", "posse-closeout-", BASELINE_CHECKOUT_PREFIX]);
 export const VOLATILE_CHECKOUT_SUBDIRS = Object.freeze(["candidate"]);
 
 // Bounds on hashing a dirty worktree's content into a receipt identity. A

@@ -42,6 +42,9 @@ export const QUESTION_KIND_BY_REVIEW_TYPE = Object.freeze({
   shared_trunk_provenance: "shared_trunk_provenance",
   work_item_failure_disposition: "work_item_failure_disposition",
   cross_wi_upstream_disposition: "cross_wi_upstream_disposition",
+  merge_verification_review: "merge_verification_review",
+  merge_failure_recovery: "merge_failure_recovery",
+  post_merge_db_task: "post_merge_db_task",
   scope_expansion_request: "file_scope_approval",
 });
 export function questionKindForReviewType(value) {

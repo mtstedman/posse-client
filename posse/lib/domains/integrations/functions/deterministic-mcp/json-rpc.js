@@ -1,4 +1,5 @@
 // @ts-check
+import { stripHashRefSurfaceSuffix } from "../../../../shared/tools/functions/ref-surface.js";
 //
 // Pure JSON-RPC envelope + param helpers for the deterministic MCP gateway.
 //
@@ -69,7 +70,7 @@ function structuredToolOutcome(value) {
 }
 
 export function classifyNativeToolResult(text) {
-  const value = String(text || "").trim();
+  const value = stripHashRefSurfaceSuffix(text).trim();
   if (NATIVE_TOOL_EXECUTION_FAILURE_RE.test(value)) return "failed";
   if (/^(?:Error:|AUDIT ERROR:)/i.test(value)) return "rejected";
   if (value.startsWith("{")) {

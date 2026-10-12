@@ -275,7 +275,7 @@ export class WorkerExecutionCoordinator {
           : null,
         siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
         repairDependencies: wtPath
-          ? (receipt) => repairTestDependencies(worker, job, wtPath, {
+          ? (receipt, baselineCwd = wtPath) => repairTestDependencies(worker, job, baselineCwd, {
               signal: executeAbortController?.signal || null,
               phase: "intake",
               receipt,

@@ -204,7 +204,8 @@ function renderTestRun(testRun, label = "DECLARED TESTS") {
   if (testRun.status === "invalid_test_plan") {
     return `${label}: \`${testRun.command || "(unknown)"}\` could not run (${testRun.reason || "invalid plan"}).`;
   }
-  const counts = testRun.test_counts && Number.isFinite(testRun.test_counts.total)
+  const files = Array.isArray(testRun.file_results) ? testRun.file_results : [];
+  const counts = files.length === 0 && testRun.test_counts && Number.isFinite(testRun.test_counts.total)
     ? `, ${testRun.test_counts.total} test(s)`
     : "";
   const exit = testRun.code ?? testRun.exit_code;
@@ -214,9 +215,16 @@ function renderTestRun(testRun, label = "DECLARED TESTS") {
   return [
     `${label}: \`${testRun.command}\` ran on the current workspace: ${String(testRun.status || "unknown").toUpperCase()}${exit != null ? ` (exit ${exit})` : ""}${counts}${testRun.reason ? `, ${testRun.reason}` : ""}.`,
     checks ? `CHECK RESULTS:\n${checks}` : null,
-    testRun.status === "passed" ? null : "```text",
-    testRun.status === "passed" ? null : tail([testRun.stdout, testRun.stderr].filter(Boolean).join("\n"), FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS),
-    testRun.status === "passed" ? null : "```",
+    ...files.map((file) => [
+      `- ${file.path}: ${String(file.outcome || file.status || "unknown").toUpperCase()} (runner: ${file.runner || "unknown"}; tests: ${file.test_counts?.total ?? "unknown"}${file.reused ? "; reused runner result" : ""})`,
+      file.command ? `  Command: ${file.command}` : null,
+      "```text",
+      tail([file.stdout, file.stderr].filter(Boolean).join("\n"), Math.min(2000, Math.floor(FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS / Math.max(1, files.length)))),
+      "```",
+    ].filter(line => line != null).join("\n")),
+    files.length > 0 ? null : "```text",
+    files.length > 0 ? null : tail([testRun.stdout, testRun.stderr].filter(Boolean).join("\n"), FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS),
+    files.length > 0 ? null : "```",
   ].filter((line) => line != null).join("\n");
 }
 

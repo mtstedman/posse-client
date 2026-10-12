@@ -162,7 +162,8 @@ export function testFailureFingerprint(result = {}) {
     result.status,
     result.code ?? result.exit_code ?? "unknown",
     result.signal ?? null,
-    report || normalizeFailureFingerprintText(result.stdout),
+    report ? { framework: report.framework || "node", failures: report.failures }
+      : normalizeFailureFingerprintText(result.stdout),
     normalizeFailureFingerprintText(result.stderr),
   ])).digest("hex");
 }

@@ -1,3 +1,4 @@
+import { historicalPassingChecks } from "./verification-receipts.js";
 // Operator review before auto-merging work whose verification was waived.
 //
 // A planner test command that already fails before the change (baseline debt,
@@ -130,6 +131,7 @@ export function sensitiveScopeTerms(jobs = []) {
     const values = [
       ...SCOPE_FIELDS.flatMap((field) => (Array.isArray(payload[field]) ? payload[field] : [])),
       ...(Array.isArray(payload.risk_tags) ? payload.risk_tags : []),
+      ...(Array.isArray(payload._execution_policy?.risk_tags) ? payload._execution_policy.risk_tags : []),
     ];
     for (const value of values) {
       for (const word of scopeWords(value)) {
@@ -268,7 +270,7 @@ function commandList(commands) {
  * pass on the commit being merged, and why review is needed. `passedChecks`
  * are passing post-change receipts on that commit (verification-receipts.js).
  */
-export function mergeVerificationReviewNote(requirement, { passedChecks = [] } = {}) {
+export function mergeVerificationReviewNote(requirement, { passedChecks = [], repairChecks = [] } = {}) {
   const lines = [];
   const byCommand = new Map();
   for (const waiver of requirement.waivers || []) {
@@ -278,7 +280,10 @@ export function mergeVerificationReviewNote(requirement, { passedChecks = [] } =
   for (const [command, entries] of byCommand) {
     const exit = entries.find((entry) => entry.exit_code != null)?.exit_code;
     const jobs = entries.map((entry) => `#${entry.job_id} (risk ${entry.risk})`).join(", ");
-    lines.push(`Planned verification \`${command}\` already failed before any change (baseline debt${exit != null ? `, exit ${exit}` : ""}), so it could not verify job ${jobs}.`);
+    lines.push(`Planned verification \`${command}\` already failed before any change (baseline debt${exit != null ? `, exit ${exit}` : ""}), recorded for job ${jobs}. Historical debt remains recorded independently of later repairs.`);
+  }
+  for (const check of repairChecks) {
+    lines.push(`Later verification passed: \`${check.command}\` on ${check.commit_hash} (job #${check.job_id}). This historical result does not establish coverage of the exact merge candidate.`);
   }
   for (const replacement of requirement.replacements || []) {
     const replacedBy = replacement.jobs
@@ -298,7 +303,7 @@ export function mergeVerificationReviewNote(requirement, { passedChecks = [] } =
         .join(", ");
       lines.push(`Passed on the commit being merged${commit ? ` (${commit})` : ""}: ${rendered}. It still needs review: ${reasons.join("; ")}.`);
     } else {
-      lines.push(`No executed check covers the change, and it needs review: ${reasons.join("; ")}.`);
+      lines.push(`No passing check is recorded for the exact commit being merged; review is required: ${reasons.join("; ")}.`);
     }
   }
   return lines.join(" ");
@@ -418,7 +423,8 @@ export function mergeVerificationReviewGateJobSpec(workItem, requirement, { pass
   // The branch commit the operator is shown; a pass binds this commit, not
   // whatever the branch points at when the answer arrives.
   const openedHead = /^[0-9a-f]{40}$/i.test(String(openedBranchHead || "")) ? String(openedBranchHead) : null;
-  const note = mergeVerificationReviewNote(requirement, { passedChecks });
+  const repairChecks = historicalPassingChecks(workItem.id, (requirement.waivers || []).map(entry => entry.command));
+  const note = mergeVerificationReviewNote(requirement, { passedChecks, repairChecks });
   const label = `WI#${workItem.id}${workItem.title ? ` "${String(workItem.title).slice(0, 80)}"` : ""}`;
   const question = [
     `Automatic merge of ${label} stopped for review.`,
@@ -441,6 +447,7 @@ export function mergeVerificationReviewGateJobSpec(workItem, requirement, { pass
       ...(openedHead ? { opened_branch_head: openedHead } : {}),
       waived_job_ids: requirement.waivedJobIds,
       waived_verifications: requirement.waivers,
+      repair_checks: repairChecks,
       replaced_verifications: requirement.replacements,
       review_triggers: requirement.triggers,
       ...(passedChecks.length > 0 ? { passed_checks: passedChecks.slice(0, 10) } : {}),

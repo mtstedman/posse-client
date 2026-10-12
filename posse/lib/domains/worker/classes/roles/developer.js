@@ -1,3 +1,4 @@
+import { renderFailedAttemptRecovery } from "../../functions/helpers/failed-attempt-recovery.js";
 // lib/domains/worker/classes/roles/developer.js
 //
 // Developer role handler for scoped repo mutations, checkpoint capture, and
@@ -249,6 +250,7 @@ export class DeveloperRole extends BaseRole {
       withheldEvidenceNotice,
       researchRefsBlock,
       blockedRetry.block,
+      renderFailedAttemptRecovery(payload),
       promptLiteral("WORK ITEM", workItem.title),
       promptLiteral("TASK", job.title),
       "",

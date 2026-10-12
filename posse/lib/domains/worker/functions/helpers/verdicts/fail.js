@@ -1100,6 +1100,7 @@ function _spawnRecoveryJobsForVerdict({
       ...(origTaskAbTestCommand ? { _task_ab_test_command: true } : {}),
       ...(verificationPlanInvalid ? { _verification_plan_invalid: verificationPlanInvalid } : {}),
       ...(currentPayload.risk != null ? { risk: currentPayload.risk } : {}),
+      ...(Array.isArray(currentPayload.risk_tags) ? { risk_tags: [...currentPayload.risk_tags] } : {}),
       ...(currentPayload._execution_policy && typeof currentPayload._execution_policy === "object"
         ? { _execution_policy: currentPayload._execution_policy }
         : {}),

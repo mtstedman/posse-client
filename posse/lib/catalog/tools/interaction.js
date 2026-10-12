@@ -23,6 +23,9 @@ export const WORK_ITEM_QUESTION_CHOICE_IDS = Object.freeze({
   work_item_failure_disposition: Object.freeze(["retry", "accept", "abandon"]),
   // @linked +posse:posse/lib/domains/bridge/functions/work-item-feed.js#validStoredChoiceEntries +posse:posse/lib/domains/queue/functions/interaction-contract.js#validChoiceEntries (ordered subsets)
   cross_wi_upstream_disposition: Object.freeze(["wait", "rebuild", "abandon"]),
+  merge_verification_review: Object.freeze(["pass", "fail"]),
+  merge_failure_recovery: Object.freeze(["merge", "commit", "waive_tests", "send_back"]),
+  post_merge_db_task: Object.freeze(["run", "skip"]),
   legacy_unstructured: Object.freeze([]),
 });
 // @catalog-sync end

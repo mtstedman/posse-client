@@ -116,9 +116,7 @@ export function renderProviderPromptContracts(prompt, contract = {}) {
     hasTool: (key) => {
       const separator = key.indexOf(".");
       const reference = toolReference(key.slice(0, separator), key.slice(separator + 1));
-      if (lookup(reference)) return true;
-      observe(reference);
-      return false;
+      return !!lookup(reference);
     },
     hasSuite: (suite) => renderer.issuedTools.some((tool) => (tool.suite || (tool.access === "atlas" ? "atlas" : "tools")) === suite && renderer.tryRenderIssued(tool)),
   });

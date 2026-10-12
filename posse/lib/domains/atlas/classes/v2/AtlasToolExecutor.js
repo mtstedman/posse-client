@@ -1712,7 +1712,13 @@ export class AtlasToolExecutor {
       : (action === "symbol.search" && typeof args.query === "string" ? args.query : undefined);
     const wantsSemantic = (action === "symbol.search" && args.semantic)
       || (action === "slice.build" && args.taskText && args.semantic !== false)
-      || ((action === "context" || action === "context.summary") && args.taskText);
+      || ((action === "context" || action === "context.summary" || action === "tree.scope") && args.taskText);
+    if (wantsSemantic && workItemKeyForRequest(request) && context.readRoot && context.ledgerPath) {
+      seedWorkItemEmbeddingStore({
+        mainRepoRoot: repoRootFromLedgerPath(context.ledgerPath, context.readRoot),
+        worktreeRoot: context.readRoot,
+      });
+    }
     const boot = request.session?.bootConfig || request.session || {};
     const atlas = boot?.atlas && typeof boot.atlas === "object" ? boot.atlas : {};
     const executionConfig = {

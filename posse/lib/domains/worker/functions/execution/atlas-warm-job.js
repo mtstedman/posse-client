@@ -82,6 +82,10 @@ export function shouldSettleWaitingLaneAtlasPurpose(purpose) {
   return WAITING_LANE_SETTLEMENT_PURPOSE_SET.has(String(purpose || ""));
 }
 
+export function atlasWarmCompletionStatus(result) {
+  return result?.generation_proof_reason === "durable_generation_publication_failed" ? "failed" : "succeeded";
+}
+
 function nowMs() {
   return Date.now();
 }
@@ -432,7 +436,7 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
       attempt_id: attempt.attempt.id,
       event_type: EVENT_TYPES.ATLAS_WARM_COMPLETED,
       actor_type: EVENT_ACTORS.ATLAS,
-      message: `ATLAS warm (${purpose}) completed: considered=${paths.length} branch=${branch || baselineBranch}`,
+      message: `ATLAS warm (${purpose}) ${atlasWarmCompletionStatus(result)}: considered=${paths.length} branch=${branch || baselineBranch}`,
       event_json: JSON.stringify({
         purpose,
         branch,
@@ -509,12 +513,17 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
       } catch { /* best effort — the next main warm ingests staged scip anyway */ }
     }
 
+    const completionStatus = atlasWarmCompletionStatus(result);
+    const publicationError = completionStatus === "failed"
+      ? `ATLAS generation publication failed: ${result.generation_publish_error?.code || result.generation_proof_reason}` : null;
+    if (publicationError) setJobError(job.id, publicationError);
     completeAttempt(attempt.attempt.id, {
-      status: "succeeded",
+      status: completionStatus,
+      ...(publicationError ? { error_text: publicationError } : {}),
       duration_ms: result.duration_ms,
       output_chars: 0,
     });
-    if (worker._releaseLease(job, leaseToken, "succeeded") && job.work_item_id) {
+    if (worker._releaseLease(job, leaseToken, completionStatus) && job.work_item_id) {
       refreshWorkItemStatus(job.work_item_id);
     }
   } catch (err) {
@@ -807,7 +816,7 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
             }
             logAtlasWarmTelemetry("atlas.warm.conductor_result", {
               ...warmTelemetry,
-              outcome: "ok",
+              outcome: atlasWarmCompletionStatus(result) === "succeeded" ? "ok" : "error",
               duration_ms: nowMs() - conductorStartedAt,
               paths_indexed: Number(result?.paths_indexed) || 0,
               blobs_ingested: Number(result?.blobs_ingested) || 0,
@@ -884,7 +893,7 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
               return executeWarm(sourceProof, true);
             },
           });
-      warmOk = true;
+      warmOk = atlasWarmCompletionStatus(result) === "succeeded";
       return result;
     } finally {
       if (tracksGlobalReadiness) warmReadinessDone(warmOk);

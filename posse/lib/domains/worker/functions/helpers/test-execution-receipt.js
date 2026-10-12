@@ -1,3 +1,4 @@
+import { withBaselineCheckout } from "../../../verification/functions/baseline-checkout.js";
 import { missingNodeTestDependency } from "../../../../shared/tools/functions/toolkit/node-test-failure.js";
 // Deterministic test execution owned by the worker, outside model context.
 //
@@ -2670,31 +2671,29 @@ export async function ensurePreDevelopmentTestBaseline({
     ...(Array.isArray(payload?.files_to_delete) ? payload.files_to_delete : []),
   ])];
   const useLineageProjection = !!(rootBaseCommit && lineagePaths.length > 0);
-  const executeBaseline = (dependencyRepair = null) => executeReceipt({
-    job,
-    plan,
-    phase: "baseline",
-    cwd,
-    commitHash: rootBaseCommit || null,
-    policy: effectivePolicy,
-    cleanupWorktree,
-    siblingOwnedPaths,
-    dependencyRepair,
-    allowProjectedBaseline: useLineageProjection,
-  });
-  const runBaseline = (dependencyRepair = null) => useLineageProjection
-    ? withLineagePathsRestored({
-        cwd,
-        baseCommit: rootBaseCommit,
-        paths: lineagePaths,
-        run: () => executeBaseline(dependencyRepair),
-      })
-    : executeBaseline(dependencyRepair);
-  const receipt = await runBaseline();
-  // The first receipt remains an honest record of the unavailable toolchain.
-  // Re-run at the same commit after repair so the frozen, reusable baseline is
-  // the actual repository result rather than an infrastructure failure.
-  return retryAfterDependencyRepair(receipt, repairDependencies, (dependencyRepair) => runBaseline(dependencyRepair));
+  const runAt = async (executionCwd, cleanup) => {
+    const executeBaseline = (dependencyRepair = null) => executeReceipt({
+      job, plan, phase: "baseline", cwd: executionCwd,
+      commitHash: rootBaseCommit || headCommit || null,
+      policy: effectivePolicy, cleanupWorktree: cleanup,
+      siblingOwnedPaths: executionCwd === cwd ? siblingOwnedPaths : null,
+      dependencyRepair,
+      allowProjectedBaseline: useLineageProjection,
+    });
+    const runBaseline = (dependencyRepair = null) => useLineageProjection
+      ? withLineagePathsRestored({ cwd: executionCwd, baseCommit: rootBaseCommit, paths: lineagePaths,
+          run: () => executeBaseline(dependencyRepair) })
+      : executeBaseline(dependencyRepair);
+    const receipt = await runBaseline();
+    return retryAfterDependencyRepair(receipt,
+      typeof repairDependencies === "function" ? (unavailable) => repairDependencies(unavailable, executionCwd) : null,
+      (dependencyRepair) => runBaseline(dependencyRepair));
+  };
+  // A sibling placeholder is one instance of dirty shared state. Test HEAD
+  // in isolation rather than special-casing filenames or ignoring dirty bytes.
+  return headPorcelain && headCommit && !useLineageProjection
+    ? withBaselineCheckout({ cwd, commit: headCommit, run: runAt })
+    : runAt(cwd, cleanupWorktree);
 }
 
 /** A path test for the task's declared scope; an undeclared scope admits every path. */

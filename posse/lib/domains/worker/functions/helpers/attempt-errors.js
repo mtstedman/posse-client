@@ -1,3 +1,4 @@
+import { linkFailedAttemptSnapshot } from "./failed-attempt-recovery.js";
 // lib/domains/worker/functions/helpers/attempt-errors.js
 //
 // Execute-attempt error taxonomy extracted from worker.js:
@@ -188,6 +189,7 @@ async function stashWorktreeForFailure(job, wtPath, projectDir) {
           });
         },
       });
+      linkFailedAttemptSnapshot(job, snapshotDir);
       linkSiblingDirtyRecoverySnapshot({
         workItemId: job.work_item_id,
         snapshotDir,
@@ -197,6 +199,7 @@ async function stashWorktreeForFailure(job, wtPath, projectDir) {
       });
     } catch (resetErr) {
       if (resetErr?.snapshotDir) {
+        linkFailedAttemptSnapshot(job, resetErr.snapshotDir);
         linkSiblingDirtyRecoverySnapshot({
           workItemId: job.work_item_id,
           snapshotDir: resetErr.snapshotDir,
@@ -1062,7 +1065,7 @@ export async function handleExecuteAttemptError(worker, {
     duration_ms: Date.now() - startTime,
     error_text: err.message,
   });
-  setJobError(job.id, err.message);
+  setJobError(job.id, err.providerDiagnostic ? `${err.message}: ${err.providerDiagnostic}` : err.message);
 
   await stashWorktreeForFailure(job, wtPath, worker?.projectDir);
 
@@ -1076,7 +1079,8 @@ export async function handleExecuteAttemptError(worker, {
     attempt_id: attempt.id,
     event_type: EVENT_TYPES.JOB_ATTEMPT_FAILED,
     actor_type: EVENT_ACTORS.SYSTEM,
-    message: attemptMessage,
+    message: err.providerDiagnostic ? `${attemptMessage} (${err.providerDiagnostic})` : attemptMessage,
+    ...(err.providerDiagnostic ? { event_json: JSON.stringify({ provider_diagnostic: err.providerDiagnostic }) } : {}),
   });
 
   if (failureDetails.stderr || failureDetails.partialOutput || failureDetails.toolUses.length > 0 || failureDetails.stats) {

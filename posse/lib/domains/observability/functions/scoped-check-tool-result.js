@@ -1,3 +1,4 @@
+import { stripHashRefSurfaceSuffix } from "../../../shared/tools/functions/ref-surface.js";
 const MAX_COMMAND_CHARS = 1200;
 const MAX_SCOPED_FILES = 250;
 
@@ -10,7 +11,7 @@ function nonNegativeFiniteOrNull(value) {
 function parseResult(resultText) {
   if (typeof resultText !== "string" || !resultText.trimStart().startsWith("{")) return null;
   try {
-    const value = JSON.parse(resultText);
+    const value = JSON.parse(stripHashRefSurfaceSuffix(resultText));
     return value && typeof value === "object" && !Array.isArray(value) ? value : null;
   } catch {
     return null;

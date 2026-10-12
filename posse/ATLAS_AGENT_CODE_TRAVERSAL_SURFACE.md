@@ -498,7 +498,7 @@ Edit an existing file within the allowed scope. Provide exactly one mode: exact 
 | `jsonPath` | `string` | Conditional |  | Dot-separated JSON path to update. |
 | `jsonValue` | `any` | Conditional |  | Value to write when jsonPath is used. |
 | `new_string` | `string` | Conditional |  | Replacement text |
-| `old_string` | `string` | Conditional |  | Exact text to find (must be unique in file) |
+| `old_string` | `string` | Conditional |  | Exact existing text copied from a recent read, preserving whitespace. Must occur exactly once; zero or multiple matches leave the file unchanged. |
 | `path` | `string` | Required |  | File path to edit |
 | `replaceLines` | `object` | Conditional |  | Replace a 1-based inclusive line range [start, end] with content. Line numbers use the numbered-file output convention. |
 | `replacePattern` | `object` | Conditional |  | Replace a regex match. Patterns are case-sensitive; global=false requires a unique match. Patterns longer than 500 characters or with unsafe nested quantifiers are rejected. Replacement uses JavaScript replacement syntax ($1, $$). |
