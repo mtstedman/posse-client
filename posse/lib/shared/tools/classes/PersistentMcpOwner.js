@@ -144,6 +144,7 @@ import {
 import { classifyMcpToolResult } from "../../../domains/integrations/functions/deterministic-mcp/json-rpc.js";
 import { stripPosseMcpGatewayPrefix } from "../../../domains/integrations/functions/mcp-gateway.js";
 import {
+  beginToolInvocation,
   recordObservation,
   recordToolUseObservations,
   isResearchInfrastructureFailure,
@@ -4230,6 +4231,7 @@ function recordOwnerAnsweredToolCall({
   startedAt = null,
   via,
   rejectionCode = null,
+  observationDetail = null,
 } = {}) {
   try {
     recordOwnerToolObservation({
@@ -4239,6 +4241,7 @@ function recordOwnerAnsweredToolCall({
       result,
       durationMs: startedAt == null ? 0 : Date.now() - startedAt,
       executor: { via },
+      ...(observationDetail ? { observationDetail } : {}),
       ...(rejectionCode ? {
         outcomeOverride: "rejected",
         observationDetail: { executed: false, consumed_step: false, rejection_code: rejectionCode },
@@ -5646,13 +5649,19 @@ export class PersistentMcpOwner {
           // Runs the declared tests and a reviewer child of this agent call;
           // the owner's progress heartbeat holds the transport open meanwhile.
           const startedAt = Date.now();
+          const boot = session.bootConfig;
+          const invocation = beginToolInvocation({ tool: toolName, input: toolArgs, cwd: boot.cwd,
+            work_item_id: boot.workItemId, job_id: boot.jobId, attempt_id: boot.attemptId, agent_call_id: boot.agentCallId });
           let text;
           let isError = false;
+          let reviewResult = null;
           try {
             const result = await executeFinalReview(toolArgs, {
               context: { agentCallId: session?.bootConfig?.agentCallId },
               signal: requestAbort.signal,
             });
+            reviewResult = { status: result.status, outcome: result.outcome, reason: result.reason,
+              summary: result.summary, error: result.error, findings: result.findings };
             if (result?.status === FINAL_REVIEW_REVIEWER_STATUS.REVISED) {
               // Each bounce is a new review: the waiting reviewer gets a fresh
               // tool and read allowance instead of "budget exhausted" advisories.
@@ -5665,7 +5674,9 @@ export class PersistentMcpOwner {
             text = `Error executing final_review: ${String(error?.message || error).slice(0, 500)}`;
           }
           const result = { content: [{ type: "text", text }], isError };
-          recordOwnerAnsweredToolCall({ session, toolName, toolArgs, result, startedAt, via: "final_review_owner" });
+          recordOwnerAnsweredToolCall({ session, toolName, toolArgs, result, startedAt, via: "final_review_owner",
+            observationDetail: { ...(invocation ? { inv: invocation.inv } : {}), phase: "finish",
+              final_review_result: reviewResult } });
           sendResponse(res, 200, {
             ok: true,
             bootId: this.bootId,

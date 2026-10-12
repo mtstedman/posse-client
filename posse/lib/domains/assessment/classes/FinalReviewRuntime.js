@@ -2,6 +2,7 @@ import { emptyMaterializedPathsForJob } from "../../handoff/functions/helpers/fi
 import { testRunDiagnostics } from "../../worker/functions/helpers/test-failure-evidence.js";
 import { finalReviewIdentity } from "../functions/final-review-authority.js";
 import { completeFinalReview } from "../functions/final-review-completion.js";
+import { finalReviewLogSummary } from "../functions/final-review-log-summary.js";
 // FinalReviewRuntime — both sides of final_review.
 //
 // TrackedProviderClient registers each dev/fix agent call that was issued the
@@ -398,7 +399,7 @@ export class FinalReviewRuntime {
       job_id: parent.jobId ?? null,
       attempt_id: parent.attemptId ?? null,
       observation_type: FINAL_REVIEW_OBSERVATIONS.RESULT,
-      summary: `final_review ${result.outcome}${result.findings?.length ? ` (${result.findings.length} finding(s))` : ""}`,
+      summary: finalReviewLogSummary({ result }),
       detail: {
         agent_call_id: parent.agentCallId,
         attempt_id: parent.attemptId ?? null,

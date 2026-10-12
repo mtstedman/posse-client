@@ -25,7 +25,10 @@ import {
   getToolBatchingClass,
   TOOL_BATCHING_CLASSES,
 } from "../../../catalog/tool-surface/batching.js";
-import { FINAL_REVIEW_OBSERVATIONS } from "../../../catalog/final-review.js";
+import { FINAL_REVIEW_OBSERVATIONS, FINAL_REVIEW_TOOL_NAME } from "../../../catalog/final-review.js";
+import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
+import { getAgentCallById } from "../../queue/functions/agent-calls.js";
+import { finalReviewLogSummary } from "../../assessment/functions/final-review-log-summary.js";
 
 let _fd = null;
 let _observationExportAfterTransaction = false;
@@ -1254,12 +1257,23 @@ function _catalogDetail({ spec, cwdNorm, tool, catalogName, extra = {} }) {
   };
 }
 
-function _summarizeCatalogToolUse(tool, input = {}, cwdNorm = null, rel = (value) => _normalizePath(value)) {
+function _summarizeCatalogToolUse(tool, input = {}, cwdNorm = null, rel = (value) => _normalizePath(value), observationDetail = {}) {
   const catalogName = _normalizeCatalogToolName(tool);
   const entry = TOOL_CATALOG[catalogName];
   if (!entry || entry.gateTier === "atlas") return null;
   const spec = entry.observation;
   if (!spec) throw new Error(`Missing observation spec for deterministic tool ${catalogName}`);
+
+  if (catalogName === FINAL_REVIEW_TOOL_NAME) {
+    let reviewer = false;
+    const callId = observationDetail?.agent_call_id ?? getObservationContext()?.agent_call_id;
+    try { if (callId) reviewer = getAgentCallById(callId)?.child_kind === AGENT_CALL_CHILD_KINDS.FINAL_REVIEW; } catch { /* replay may lack a runtime database */ }
+    return {
+      observation_type: spec.type,
+      summary: finalReviewLogSummary({ input, result: observationDetail?.final_review_result, reviewer }),
+      detail: _catalogDetail({ spec, cwdNorm, tool, catalogName, extra: { input: _summarizeAtlasArgs(input) } }),
+    };
+  }
 
   if (spec.format === "command") {
     const command = _truncate(input[spec.commandKey || "command"] || "", 140);
@@ -1719,7 +1733,7 @@ function _summarizeToolUse(toolUse, cwd = null) {
     return sliced || ".";
   };
 
-  const catalogSummary = _summarizeCatalogToolUse(tool, input, cwdNorm, rel);
+  const catalogSummary = _summarizeCatalogToolUse(tool, input, cwdNorm, rel, toolUse.observation_detail);
   if (catalogSummary) return catalogSummary;
 
   if (webToolKind === "fetch") {
@@ -1915,13 +1929,14 @@ export function beginToolInvocation({
   work_item_id = undefined,
   job_id = undefined,
   attempt_id = undefined,
+  agent_call_id = undefined,
 } = {}) {
   try {
-    const summary = _summarizeToolUse({ tool, input }, cwd);
-    if (!summary) return null;
     const context = getObservationContext() || {};
+    const agentCallId = agent_call_id ?? context.agent_call_id ?? null;
+    const summary = _summarizeToolUse({ tool, input, observation_detail: { agent_call_id: agentCallId } }, cwd);
+    if (!summary) return null;
     const resolvedJobId = job_id ?? context.job_id ?? null;
-    const agentCallId = context.agent_call_id ?? null;
     const startedAtMs = Date.now();
     const inv = `${resolvedJobId ?? "g"}-${startedAtMs}-${++_toolInvocationSeq}`;
     recordObservation({
