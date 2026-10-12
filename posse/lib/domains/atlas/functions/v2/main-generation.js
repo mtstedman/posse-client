@@ -256,6 +256,7 @@ export function publishAtlasMainGenerationToView({
     }
     const materialization = inspectViewMaterialization(view._unsafeDb(), {
       treeCompressionMode: normalizeTreeCompressionMode(treeCompressionMode),
+      allowCarriedMlLabels: true,
     });
     if (!materialization.ok) {
       throw new Error(`main generation view materialization is not complete (${materialization.reason || "unknown"})`);

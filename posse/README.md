@@ -613,7 +613,10 @@ select optional check IDs but cannot remove required checks or invent commands.
 
 For custom class-based test frameworks, declare which script executes each
 test file in the same committed config. `unit_test_runners` applies to both
-path-only test tools and automatic changed-test verification:
+path-only test tools and automatic changed-test verification. Direct Node
+single-file commands (`node tests/example.mjs` or `node --test tests/example.mjs`)
+also honor the matching declaration, freezing its runner and arguments before
+development:
 
 ```json
 {
@@ -634,6 +637,21 @@ runs once per batch. Empty output or an explicit zero-test summary does not
 count as executed tests. Changed tests with an unavailable runner or missing
 dependency remain explicit diagnostics; strict test mode requires their
 verification before completion.
+
+Use the same declaration for browser tests that need a setup wrapper. The
+repository wrapper owns its locked test dependencies, browser installation,
+frontend build, candidate-local server, readiness wait, and cleanup. It runs
+from the exact verification checkout, including detached baselines; it must
+not reuse a server serving another checkout. Runtime environment values should
+be supplied by that wrapper or fixtures, since verification does not inherit
+arbitrary application environment variables or parent credentials. Posse does
+not infer external installations or server commands from prose documentation.
+
+For directly invoked Node test files, dependency repair finds the nearest
+owning locked package instead of assuming the repository root. It can reuse
+the corresponding primary checkout's matching install and verifies that a
+reported missing package actually resolves before reporting repair success.
+An unrelated sibling lockfile does not authorize installing test tooling.
 
 The same policy applies to the git verify hooks and the configured
 `canonical_verify_cmd` / `pre_assess_cmd` path. Every verification result is

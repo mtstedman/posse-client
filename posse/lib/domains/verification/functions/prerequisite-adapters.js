@@ -15,6 +15,7 @@ import {
   resolveManagedPythonTestToolchain,
 } from "../../runtime/functions/python-runtime.js";
 import { inspectManagedPythonTestToolchain } from "../../environments/functions/python-test-toolchain.js";
+import { nodePrerequisiteContext, nodePrerequisiteReady } from "./node-prerequisite-context.js";
 import {
   DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY,
   VERIFICATION_DEPENDENCY_LOCK_INVALID,
@@ -165,6 +166,9 @@ function selectedEcosystems({ projectDir, command, receipt }) {
 // daemon; a standalone clone (real `.git` directory) has no primary.
 export function primaryCheckoutFor(root) {
   try {
+    const requestedRoot = path.resolve(root);
+    root = requestedRoot;
+    while (!fs.existsSync(path.join(root, ".git")) && path.dirname(root) !== root) root = path.dirname(root);
     const dotGit = path.join(root, ".git");
     if (!fs.statSync(dotGit).isFile()) return null;
     const match = /^gitdir:\s*(.+?)\s*$/mu.exec(fs.readFileSync(dotGit, "utf8"));
@@ -182,7 +186,8 @@ export function primaryCheckoutFor(root) {
     if (path.basename(commonDir) !== ".git") return null;
     const primary = path.dirname(commonDir);
     if (path.resolve(primary) === path.resolve(root) || !directoryExists(primary)) return null;
-    return primary;
+    const corresponding = path.join(primary, path.relative(root, requestedRoot));
+    return directoryExists(corresponding) ? corresponding : null;
   } catch {
     return null;
   }
@@ -644,7 +649,8 @@ export async function repairVerificationPrerequisites({
     };
   }
 
-  return withDependencyInstallLock(root, async () => {
+  const nodeContext = ecosystems.includes("node") ? nodePrerequisiteContext(root, command, receipt) : null;
+  return withDependencyInstallLock(nodeContext?.projectDir || root, async () => {
     const before = await gitStatus(root);
     if (before == null) {
       return { ok: false, status: "blocked", reason: "git_state_unavailable", network_policy: policy, results: [] };
@@ -652,18 +658,22 @@ export async function repairVerificationPrerequisites({
     const results = [];
     for (const ecosystem of ecosystems) {
       const adapter = VERIFICATION_PREREQUISITE_ADAPTERS[ecosystem];
+      const dependencyRoot = ecosystem === "node" ? nodeContext.projectDir : root;
+      const verify = () => ecosystem === "node"
+        ? nodePrerequisiteReady(nodeContext)
+        : adapter.verify({ projectDir: dependencyRoot, env, posseRoot });
       if (ecosystem === "node" && linkFromPrimary) {
         let link;
-        try { link = linkNodeDependenciesFromPrimaryCheckout(root); } catch (error) { link = { ok: false, reason: error?.code || error?.message || "link_failed" }; }
-        if (link.ok && adapter.verify({ projectDir: root })) {
+        try { link = linkNodeDependenciesFromPrimaryCheckout(dependencyRoot); } catch (error) { link = { ok: false, reason: error?.code || error?.message || "link_failed" }; }
+        if (link.ok && verify()) {
           onProgress?.(`node: linked ${link.linked.join(", ") || "node_modules"} from ${link.primary}`);
           results.push(verificationResult(ecosystem, "passed", {
             reason: null,
             command: "link:primary_checkout",
             linked: link.linked,
             primary_checkout: link.primary,
-            lockfile: nodeDetection(root)?.lock || null,
-            lockfile_sha256: hashFile(path.join(root, nodeDetection(root)?.lock || "")),
+            lockfile: path.relative(root, path.join(dependencyRoot, nodeDetection(dependencyRoot).lock)),
+            lockfile_sha256: hashFile(path.join(dependencyRoot, nodeDetection(dependencyRoot).lock)),
             network_policy: policy,
           }));
           continue;
@@ -704,14 +714,14 @@ export async function repairVerificationPrerequisites({
         }
         if (activation.reason) onProgress?.(`python: managed runtime unavailable (${activation.reason})`);
       }
-      const spec = adapter.repair({ projectDir: root, networkPolicy: policy, posseRoot });
+      const spec = adapter.repair({ projectDir: dependencyRoot, networkPolicy: policy, posseRoot });
       if (!spec.ok) {
         results.push(verificationResult(ecosystem, "blocked", { reason: spec.reason }));
         continue;
       }
       onProgress?.(`${ecosystem}: ${spec.command} ${spec.args.join(" ")}`);
       const run = await runCommand(spec.command, spec.args, {
-        cwd: root,
+        cwd: dependencyRoot,
         env: spec.env,
         signal,
         timeoutMs,
@@ -735,10 +745,12 @@ export async function repairVerificationPrerequisites({
       }));
       if (!run.ok) continue;
       if (spec.activatePythonRuntime) applyManagedPythonRuntimeEnv(env, spec.activatePythonRuntime);
-      if (!adapter.verify({ projectDir: root, env, posseRoot })) {
+      if (!verify()) {
         results[results.length - 1] = verificationResult(ecosystem, "blocked", {
           ...results[results.length - 1],
           reason: "dependency_verification_failed",
+          status: "blocked",
+          ok: false,
         });
       }
     }

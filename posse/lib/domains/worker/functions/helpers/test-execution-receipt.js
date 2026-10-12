@@ -1,6 +1,7 @@
 import { runCommand, MAX_STREAM_CHARS } from "./test-command-process.js";
 import { withBaselineCheckout } from "../../../verification/functions/baseline-checkout.js";
 import { missingNodeTestDependency } from "../../../../shared/tools/functions/toolkit/node-test-failure.js";
+import { declaredNodeTestCommand } from "../../../../shared/tools/functions/toolkit/repository-test-runner.js";
 // Deterministic test execution owned by the worker, outside model context.
 //
 // A planner or benchmark harness identifies one explicit test command. The
@@ -745,7 +746,7 @@ export function validatePlannerTestCommandForRepository(command, cwd) {
     };
   }
   const packageInvocation = packageManagerScriptInvocation(command);
-  if (!packageInvocation) return shape;
+  if (!packageInvocation) return declaredNodeTestCommand(cwd, shape);
   if (packageInvocation.invalid) return { ok: false, reason: packageInvocation.invalid };
   if (packageInvocation.built_in) return { ...shape, repository_validated: true, built_in: true };
   const root = packageInvocation.cwd_relative
@@ -1102,7 +1103,7 @@ export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {
           execution_command: approvalRequest.execution_command,
           cwd_relative: approvalRequest.cwd_relative,
         }
-      : validatePlannerTestCommand(command);
+      : declaredNodeTestCommand(cwd, validatePlannerTestCommand(command));
   const coveredFile = validation.ok && source !== "operator_approved_operation"
     ? exactDeclaredTestFile(validation.execution_command || command, cwd, validation.cwd_relative || null)
     : null;
@@ -1112,7 +1113,9 @@ export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {
     execution_command: validation.execution_command || command,
     cwd_relative: validation.cwd_relative || null,
     source,
-    plan_id: sha256(`${source}\0${command}`),
+    plan_id: sha256(validation.repository_runner
+      ? `${source}\0${command}\0${validation.execution_command}`
+      : `${source}\0${command}`),
     check_id: `legacy:${sha256(command).slice(0, 16)}`,
     intent: "test",
     verification_plan: null,

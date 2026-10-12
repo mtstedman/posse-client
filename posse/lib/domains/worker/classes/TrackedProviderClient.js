@@ -2093,6 +2093,8 @@ export class TrackedProviderClient {
             abortSignal,
             instructions,
             evidence,
+            atlasConfig: opts.atlasConfig || null,
+            disableAtlas: opts.disableAtlas === true,
           }),
         });
       }

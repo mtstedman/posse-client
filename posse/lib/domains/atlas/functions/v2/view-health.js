@@ -8,7 +8,7 @@
 import fs from "fs";
 import path from "path";
 import { languageForPath } from "./parse/language-buckets.js";
-import { treeCompressionSnapshotIsValidEmpty } from "./tree-compression.js";
+import { treeCompressionSnapshotIsValidEmpty, TREE_COMPRESSION_ML_PROFILE } from "./tree-compression.js";
 
 function viewTableExists(db, table) {
   try {
@@ -29,7 +29,7 @@ function viewCount(db, sql, ...params) {
  * tree coverage or its configured compression pass.
  *
  * @param {import("better-sqlite3").Database} db
- * @param {{ treeCompressionMode?: string | null }} [options]
+ * @param {{ treeCompressionMode?: string | null, allowCarriedMlLabels?: boolean }} [options]
  */
 export function inspectViewMaterialization(db, options = {}) {
   const required = ["symbols", "atlas_tree_nodes", "derived_state_runs"];
@@ -61,7 +61,7 @@ export function inspectViewMaterialization(db, options = {}) {
       return { ok: false, reason: "tree_compression_tables_missing", counts };
     }
     const snapshot = db.prepare(
-      "SELECT id, status, summary_json AS summaryJson FROM atlas_tree_compression_snapshots ORDER BY id DESC LIMIT 1",
+      "SELECT id, profile, status, summary_json AS summaryJson FROM atlas_tree_compression_snapshots ORDER BY id DESC LIMIT 1",
     ).get();
     const compressionStatus = String(db.prepare(
       "SELECT status FROM derived_state_runs WHERE kind='tree-compression-snapshot' ORDER BY id DESC LIMIT 1",
@@ -85,7 +85,12 @@ export function inspectViewMaterialization(db, options = {}) {
       Number(snapshot.id),
     );
     const compression = { seeds, staleSeeds, labeledSeeds };
-    if (staleSeeds > 0) return { ok: false, reason: "tree_compression_stale", counts, compression };
+    // Ordinary main refreshes deliberately carry ML annotations until boot.
+    // Their drift is not stale source materialization. Publication may carry
+    // those labels, while readiness still requests bounded label self-repair.
+    const carriedMlLabels = options.allowCarriedMlLabels === true
+      && compressionMode === "ml" && snapshot.profile === TREE_COMPRESSION_ML_PROFILE;
+    if (staleSeeds > 0 && !carriedMlLabels) return { ok: false, reason: "tree_compression_stale", counts, compression };
     if (seeds <= 0 && !treeCompressionSnapshotIsValidEmpty(db, snapshot)) {
       return { ok: false, reason: "tree_compression_empty", counts, compression };
     }

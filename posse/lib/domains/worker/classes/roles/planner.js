@@ -640,6 +640,7 @@ export class PlannerRole extends BaseRole {
         : ["- When the research brief supplies verification_targets, preserve one applicable exact command on the corresponding task; do not replace a targeted security or regression check with unrelated generic verification."]),
       "- Prefer a package/manifest script or a single recognized test runner. Do not compose shell pipelines, setup steps, or cleanup commands.",
       "- Existing repository test/check shell wrappers are valid by exact path (for example tests/check.sh); invoke executable wrappers directly, or use bash/sh for a non-executable wrapper.",
+      "- For browser/integration tests, select the repository runner that provisions dependencies, builds this checkout, starts its services, waits for readiness, and cleans up. A bare test file is not self-contained when its documented setup requires an external server or tooling. Honor committed unit_test_runners declarations; do not assume another checkout's server verifies this candidate.",
       "- Migration, build, code-generation, server-start, and deploy commands are not tests. Select an existing test/check command that validates their behavior; if none exists, omit test_command.",
       "- The worker freezes that command before DEV and runs it once before and once after implementation; DEV must not run it.",
       "- If no existing suite applies, omit test_command instead of inventing one. Test execution is verification metadata, not a success criterion.",

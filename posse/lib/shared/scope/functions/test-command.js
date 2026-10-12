@@ -24,6 +24,7 @@ export function isSafeDirectNodeTestScriptArgs(args = []) {
 export function parseCommandArguments(command) {
   const tokens = [];
   let current = "";
+  let tokenStarted = false;
   let quote = null;
   const value = String(command || "").trim();
   for (let index = 0; index < value.length; index++) {
@@ -46,12 +47,14 @@ export function parseCommandArguments(command) {
     }
     if (char === "\"" || char === "'") {
       quote = char;
+      tokenStarted = true;
       continue;
     }
     if (/\s/.test(char)) {
-      if (current) {
+      if (tokenStarted) {
         tokens.push(current);
         current = "";
+        tokenStarted = false;
       }
       continue;
     }
@@ -59,14 +62,16 @@ export function parseCommandArguments(command) {
       const next = value[index + 1];
       if (/\s/.test(next) || next === "\"" || next === "'" || next === "\\") {
         current += next;
+        tokenStarted = true;
         index++;
         continue;
       }
     }
     current += char;
+    tokenStarted = true;
   }
   if (quote) throw new Error("test command contains an unclosed quote");
-  if (current) tokens.push(current);
+  if (tokenStarted) tokens.push(current);
   if (tokens.length === 0) throw new Error("test command is empty");
   return tokens;
 }

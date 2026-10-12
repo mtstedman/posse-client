@@ -150,7 +150,7 @@ function normalizeCheck(raw, index, validateCommand) {
       command: displayCommand,
       execution_command: validation.execution_command || command,
       ...(raw?.definition_sha256 ? { definition_sha256: raw.definition_sha256 } : {}),
-      cwd_relative: validation.cwd_relative || (cwd === "." ? null : cwd),
+      cwd_relative: validation.cwd_relative !== undefined ? validation.cwd_relative : (cwd === "." ? null : cwd),
       intent,
       stage,
       required: raw?.required !== false && stage !== "fast",

@@ -1974,6 +1974,7 @@ export class ParseEngine {
         && this.#viewMetaMatchesBuildMode(meta)
         && inspectViewMaterialization(view._unsafeDb(), {
           treeCompressionMode: this.#treeCompressionMode,
+          allowCarriedMlLabels: true,
         }).ok;
       if (!current) return false;
       base.view_written = outPath;

@@ -27,6 +27,7 @@ import {
  *   jobId: number, workItemId: number, attemptId: number | null, cwd: string,
  *   providerName: string, parentAgentCallId: number, abortSignal?: AbortSignal | null,
  *   instructions: string, evidence: string, wallMs?: number,
+ *   atlasConfig?: object | null, disableAtlas?: boolean,
  * }} input
  */
 async function runFinalReviewerInContext({
@@ -42,6 +43,8 @@ async function runFinalReviewerInContext({
   instructions,
   evidence,
   wallMs = FINAL_REVIEW_REVIEWER_WALL_MS,
+  atlasConfig = null,
+  disableAtlas = false,
 }) {
   const job = getJob(jobId);
   if (!job) throw new Error(`Job #${jobId} no longer exists`);
@@ -53,6 +56,9 @@ async function runFinalReviewerInContext({
     maxAttempts: 1,
     lastError: null,
     cwd,
+    atlasConfig,
+    disableAtlas,
+    disableAtlasReason: disableAtlas ? "Parent worktree ATLAS attachment unavailable" : null,
   });
   // Handoff validates the parent call before issuing reviewer coordination.
   await handoff(packet, { providerName, reviewerChildIdentity: {
@@ -92,6 +98,8 @@ async function runFinalReviewerInContext({
     recyclingMode: "fresh",
     stableContext: packet.stable_context || null,
     sessionPacket: packet,
+    atlasConfig,
+    disableAtlas,
     remoteSystemPrompt: packet.remote_system_prompt || null,
     abortSignal: reviewerSignal,
     cwd,
