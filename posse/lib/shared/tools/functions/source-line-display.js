@@ -1,9 +1,4 @@
-import {
-  CODE_CONTENT_KINDS,
-  RAW_SOURCE_LINES_ENCODING,
-  SOURCE_LINE_DISPLAY_FORMAT,
-  SOURCE_WINDOW_DISPLAY_FIELDS,
-} from "../../../catalog/source-display.js";
+import { CODE_CONTENT_KINDS, RAW_SOURCE_LINES_ENCODING, SOURCE_LINE_DISPLAY_FORMAT, SOURCE_WINDOW_DISPLAY_FIELDS } from "../../../catalog/source-display.js";
 import { canonicalEvidenceSourcePath, normalizedEvidenceSourceWindows } from "./source-evidence.js";
 import { sourceRows } from "./source-continuation.js";
 import { codeLensDisplay } from "./code-lens-display.js";
@@ -25,15 +20,7 @@ function numberedWindow(window, fallbackPath) {
   return rows.map((row, index) => `${start + index}\t${row}`).join("");
 }
 
-function parseInclusiveRange(text) {
-  const match = /^(\d+)-(\d+)$/u.exec(String(text ?? ""));
-  if (!match) return null;
-  const start = Number(match[1]);
-  const end = Number(match[2]);
-  return Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 1 && end >= start
-    ? [start, end]
-    : null;
-}
+
 
 function rangesIntersect([start, end], [otherStart, otherEnd]) {
   return otherStart <= end && otherEnd >= start;

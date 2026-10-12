@@ -1,3 +1,4 @@
+import { readonlySet } from "./readonly-collections.js";
 // Artifact-domain catalogue.
 //
 // Artifact types used by the `artifacts` table CHECK constraint and by the
@@ -148,7 +149,7 @@ export const WI_MODES = Object.freeze({
 // Task modes whose commits do not enforce scope on `git add` (artifact
 // outputs go to dedicated dirs, not into the repo's tracked files). Used by
 // git/commit-scope.js to short-circuit the scope check for these modes.
-export const UNSCOPED_GIT_ADD_TASK_MODES = new Set([
+export const UNSCOPED_GIT_ADD_TASK_MODES = readonlySet([
   "report", "content", "image", "intake_processing",
 ]);
 

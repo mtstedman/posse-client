@@ -1,4 +1,5 @@
-import { stripHashRefSurfaceSuffix } from "../../../shared/tools/functions/ref-surface.js";
+import { parseResult } from "./tool-result-object.js";
+import "../../../shared/tools/functions/ref-surface.js";
 // Project a run_unit_test result into its tool observation: what ran, what it
 // proved, at which commit, and enough of the failure output to act on. The
 // generic tool error field is cut at 200 characters and the serialized result
@@ -7,15 +8,6 @@ import { stripHashRefSurfaceSuffix } from "../../../shared/tools/functions/ref-s
 const MAX_OUTPUT_EXCERPT_CHARS = 4000;
 const UNIT_TEST_OUTCOMES = new Set(["passed", "product_failed", "infrastructure_error", "unavailable", "timed_out"]);
 
-function parseResult(resultText) {
-  if (typeof resultText !== "string" || !resultText.trimStart().startsWith("{")) return null;
-  try {
-    const value = JSON.parse(stripHashRefSurfaceSuffix(resultText));
-    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
-  } catch {
-    return null;
-  }
-}
 
 function nonNegativeIntegerOrNull(value) {
   const number = Number(value);

@@ -14,12 +14,7 @@ import { parseJsonObject } from "../../../queue/functions/payload.js";
 import { FAILED_JOB_STATUSES, FAILED_JOB_STATUSES_SQL } from "../../../../catalog/job.js";
 import { ATLAS_WARM_JOB_TYPE } from "./contracts/jobs.js";
 import { VIEW_SCHEMA_VERSION } from "./contracts/index.js";
-import {
-  ledgerDbPath,
-  mainViewPath,
-  atlasDir,
-  warmedViewsDir,
-} from "./runtime-paths.js";
+import { ledgerDbPath, mainViewPath, atlasDir, warmedViewsDir } from "./runtime-paths.js";
 
 const ACTIVE_STATUSES = new Set(["leased", "running"]);
 const WAITING_STATUSES = new Set(["queued", "blocked"]);
@@ -537,7 +532,7 @@ function graphHealthSummary(queue, C) {
   for (const family of ATLAS_WARM_FAMILY_ORDER) {
     const counts = byFamily[family] || {};
     const active = Number(counts.running || 0) + Number(counts.leased || 0);
-    const waiting = Number(counts.queued || 0) + Number(counts.blocked || 0);
+    (Number(counts.queued || 0) + Number(counts.blocked || 0));
     const failed = Number(counts.failed || 0) + Number(counts.dead_letter || 0);
     const activeEvents = Number(counts.running_events || 0) + Number(counts.leased_events || 0);
     const waitingEvents = Number(counts.queued_events || 0) + Number(counts.blocked_events || 0);

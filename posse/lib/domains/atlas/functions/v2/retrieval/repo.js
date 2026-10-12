@@ -689,16 +689,6 @@ async function computeStats(view) {
 
 /**
  * @param {View} view
- * @returns {import("better-sqlite3").Database | null}
- */
-function viewDb(view) {
-  return typeof /** @type {any} */ (view)._unsafeDb === "function"
-    ? /** @type {any} */ (view)._unsafeDb()
-    : null;
-}
-
-/**
- * @param {View} view
  * @param {{ pathPrefix?: string }} [opts]
  * @returns {Promise<ViewSymbol[]>}
  */

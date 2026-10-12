@@ -110,9 +110,7 @@ export function buildCapabilityFlags(config = {}) {
  * @param {string} summary
  * @returns {AtlasCapabilityItem}
  */
-function planned(enabled, summary) {
-  return capability("planned", false, enabled, "planned", summary, enabled ? "configured_pending_implementation" : null);
-}
+
 
 /**
  * @param {AtlasCapabilityStatus} status

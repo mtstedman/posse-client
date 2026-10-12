@@ -1,38 +1,16 @@
+import { DEAD_LETTER_RECOVERY_PROVIDERS } from "../../../../catalog/provider.js";
 // lib/domains/worker/functions/helpers/dead-letter.js
 //
 // Retry/dead-letter flow and fast-failure provider diagnostics extracted from
 // worker.js to keep execution orchestration focused.
 
 import { ROLE_DRIVEN_JOB_TYPES } from "../../../../catalog/job.js";
-import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
-import {
-  applyDelegation,
-  cancelDeadlockedJobsAtomic,
-  completeAttempt,
-  createJob,
-  getArtifacts,
-  getAttempts,
-  getJob,
-  getDependents,
-  getSetting,
-  logEvent,
-  rewireDependency,
-  storeArtifact,
-  updateJobProvider,
-  updateJobPayload,
-} from "../../../queue/functions/index.js";
+import { applyDelegation, cancelDeadlockedJobsAtomic, completeAttempt, createJob, getArtifacts, getAttempts, getJob, getDependents, getSetting, logEvent, rewireDependency, storeArtifact, updateJobProvider, updateJobPayload } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import { C } from "../../../../shared/format/functions/colors.js";
-import {
-  buildPromptExcerpt,
-  getErrorDetails,
-  isDeterministicPolicyConflict,
-  isPermanentProviderConfigError,
-  isTurnBudgetExhaustedDetails,
-  retryingAttemptWording,
-} from "./diagnostics.js";
+import { buildPromptExcerpt, getErrorDetails, isDeterministicPolicyConflict, isPermanentProviderConfigError, isTurnBudgetExhaustedDetails, retryingAttemptWording } from "./diagnostics.js";
 import { refreshAndExtractInsights } from "./insights.js";
 import { spawnResearchAfterPreflight } from "./pipeline-continuation.js";
 import { RetryPolicy } from "../../../../shared/policies/classes/RetryPolicy.js";
@@ -59,7 +37,7 @@ function deadLetterRecoveryProviders(job = null) {
   // providers. Do not offer a choice whose only effect is to obscure the same
   // setup/worktree failure behind a different label.
   if (job && getAttempts(job.id).length === 0) return [];
-  return ["claude", "anthropic", "openai", "codex", "grok"]
+  return DEAD_LETTER_RECOVERY_PROVIDERS
     .filter((provider) => isProviderSelectable(provider) && isProviderReady(provider).ready);
 }
 

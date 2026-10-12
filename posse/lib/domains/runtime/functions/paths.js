@@ -1,89 +1,21 @@
-import fs from "fs";
-import os from "os";
+import { normalizeCwd, normalizeProjectDir, getRuntimeRoot, getRuntimeDbPath, getRuntimeResourcesDir, getRuntimeLogDir } from "./base-paths.js";
+export { normalizeCwd, normalizeProjectDir, safeProcessCwd, getRuntimeRoot, getRuntimeDbPath, getRuntimeResourcesDir, getRuntimeLogDir, getRuntimeReportsDir, setRuntimePathOverrides, getRuntimePathOverridesForTests, setRuntimePathOverridesForTests } from "./base-paths.js";
 import path from "path";
-import {
-  resolveManagedPythonRuntimeForProject,
-  resolveManagedPythonTestToolchain,
-} from "./python-runtime.js";
+import { resolveManagedPythonRuntimeForProject, resolveManagedPythonTestToolchain } from "./python-runtime.js";
 import { inspectManagedPythonTestToolchain } from "../../environments/functions/python-test-toolchain.js";
 
-let runtimePathOverrides = {};
-let testRuntimeRoot = null;
 
-function isUnderTest() {
-  return Boolean(process.env.NODE_TEST_CONTEXT || process.env.POSSE_TEST_RUN);
-}
 
-function getTestRuntimeLogDir() {
-  if (!testRuntimeRoot) {
-    testRuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "posse-test-runtime-"));
-  }
-  return path.join(testRuntimeRoot, "logs");
-}
 
-function overridePath(key) {
-  const value = runtimePathOverrides?.[key];
-  return value ? path.resolve(value) : null;
-}
 
-export function normalizeCwd(cwd = null) {
-  return path.resolve(cwd || safeProcessCwd());
-}
 
-export function normalizeProjectDir(projectDir = null, cwd = null) {
-  return path.resolve(overridePath("projectDir")
-    || projectDir
-    || cwd
-    || safeProcessCwd());
-}
 
-export function safeProcessCwd() {
-  try {
-    return process.cwd();
-  } catch {
-    return os.tmpdir();
-  }
-}
 
-export function getRuntimeRoot(projectDir = null, cwd = null) {
-  const override = overridePath("runtimeRoot");
-  if (override) return override;
-  const projectRoot = normalizeProjectDir(projectDir, cwd);
-  return path.join(projectRoot, ".posse");
-}
 
-export function getRuntimeDbPath(projectDir = null, cwd = null) {
-  const override = overridePath("dbPath");
-  if (override) return override;
-  const projectRoot = normalizeProjectDir(projectDir, cwd);
-  return path.join(getRuntimeRoot(projectRoot, cwd), "db", "orchestrator.db");
-}
 
-export function getRuntimeResourcesDir(projectDir = null, cwd = null) {
-  const override = overridePath("resourcesDir");
-  if (override) return override;
-  const projectRoot = normalizeProjectDir(projectDir, cwd);
-  return path.join(getRuntimeRoot(projectRoot, cwd), "resources");
-}
 
-export function getRuntimeLogDir(projectDir = null, cwd = null) {
-  const override = overridePath("logDir");
-  if (override) return override;
-  const runtimeRootOverride = overridePath("runtimeRoot");
-  if (runtimeRootOverride) return path.join(runtimeRootOverride, "logs");
-  // Direct unit tests often exercise an in-memory database without installing
-  // runtime-path overrides. Keep their logger side effects out of the source
-  // checkout while preserving explicit fixture/project destinations.
-  if (isUnderTest() && !overridePath("projectDir") && projectDir == null && cwd == null) {
-    return getTestRuntimeLogDir();
-  }
-  const projectRoot = normalizeProjectDir(projectDir, cwd);
-  return path.join(getRuntimeRoot(projectRoot, cwd), "logs");
-}
 
-export function getRuntimeReportsDir(projectDir = null, cwd = null) {
-  return path.join(path.dirname(getRuntimeDbPath(projectDir, cwd)), "reports");
-}
+
 
 function pathKey(env) {
   if (process.platform !== "win32") return "PATH";
@@ -149,21 +81,8 @@ export function refreshProcessRuntimeEnv(projectDir, env = process.env) {
   };
 }
 
-export function setRuntimePathOverrides(overrides = null) {
-  runtimePathOverrides = {};
-  if (!overrides || typeof overrides !== "object") return;
-  for (const [key, value] of Object.entries(overrides)) {
-    if (value == null || String(value).trim() === "") continue;
-    runtimePathOverrides[key] = path.resolve(String(value));
-  }
-}
 
-export const setRuntimePathOverridesForTests = setRuntimePathOverrides;
 
-/** Snapshot the exact override layer so nested test fixtures can restore it. */
-export function getRuntimePathOverridesForTests() {
-  return { ...runtimePathOverrides };
-}
 
 export function normalizeProviderPaths({ cwd = null, projectDir = null } = {}) {
   const normalizedCwd = normalizeCwd(cwd);

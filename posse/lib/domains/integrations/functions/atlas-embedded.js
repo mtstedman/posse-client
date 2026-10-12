@@ -1,3 +1,4 @@
+import { ledgerSupportsViewMeta as embeddedLedgerSupportsViewMeta } from "../../atlas/functions/v2/ledger/view-meta-support.js";
 // @ts-check
 //
 // Embedded ATLAS v2 executor for providers that expose ATLAS as in-process
@@ -990,11 +991,6 @@ function resolveEmbeddedV2LedgerPath({ repoRoot, viewMeta, cwd = null, config = 
   return candidateEmbeddedV2LedgerPaths({ repoRoot, viewMeta, cwd, config })[0] || null;
 }
 
-function embeddedLedgerSupportsViewMeta(ledger, viewMeta) {
-  const branch = typeof viewMeta?.branch === "string" && viewMeta.branch ? viewMeta.branch : null;
-  if (!ledger || !branch || typeof ledger.getBranch !== "function") return true;
-  try { return !!ledger.getBranch(branch); } catch { return false; }
-}
 
 async function openEmbeddedLedgerForView({ repoRoot, viewMeta, cwd = null, config = null, readOnly = false }) {
   const paths = candidateEmbeddedV2LedgerPaths({ repoRoot, viewMeta, cwd, config });

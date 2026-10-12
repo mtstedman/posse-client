@@ -1,4 +1,4 @@
-import { log } from "../../../shared/telemetry/functions/logging/logger.js";
+import "../../../shared/telemetry/functions/logging/logger.js";
 import { logEvent } from "../../queue/functions/index.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 

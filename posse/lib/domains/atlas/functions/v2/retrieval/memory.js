@@ -37,7 +37,6 @@ const MEMORY_DOMAINS = new Set([
 // time-based: an ephemeral memory is retired once it has been surfaced enough
 // times without earning promotion; a dormant memory is never retired by age.
 // String enum, future-proofed (room for a `pinned` tier later).
-const MEMORY_LIFESPANS = new Set(["ephemeral", "durable"]);
 const MEMORY_LIFESPAN = Object.freeze({
   default: "ephemeral",
   durable: "durable",
@@ -1035,11 +1034,7 @@ function normalizePaths(values) {
   return out;
 }
 
-function clampNumber(value, min, max, fallback) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
-}
+
 
 function clampInt(value, min, max, fallback) {
   const n = Number.parseInt(String(value ?? ""), 10);

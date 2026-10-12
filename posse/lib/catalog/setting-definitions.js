@@ -1,0 +1,361 @@
+// @ts-check
+// Canonical setting definitions. Pure data, derived role/model rows, and defaults only.
+import { RESEARCH_CLAIM_REVIEW } from "./research-claim-review.js";
+import { FINAL_REVIEW_DEFAULT_MODE, FINAL_REVIEW_MODES } from "./final-review.js";
+import { PLANNER_DISPATCH_SETTINGS } from "./planner-dispatch.js";
+import { DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY } from "./verification.js";
+import { PROVIDER_OPTIONS, PROVIDER_LABELS } from "./provider.js";
+import { MODEL_TIERS as MODEL_TIER_NAMES } from "./model.js";
+import { IMAGE_PROVIDER_OPTIONS, getBuiltinDefaultTierModel as getDefaultTierModel } from "./provider-model-defaults.js";
+import { PROVIDER_ROLE_SETTING_DEFS, ROLE_MODEL_TIER_SETTING_DEFS, ROLE_REASONING_EFFORT_SETTING_DEFS } from "./provider-role-settings.js";
+import { SHARED_TRUNK_DEFAULTS, SHARED_TRUNK_LIMITS, AGENT_COORDINATION_MODE_VALUES, ASSESSMENT_SCOPE_MODE_VALUES, CODEX_AUTH_MODE_OPTIONS, CONTEXT_COMPACTION_MODE_VALUES, DB_TASK_PRE_MERGE_POLICIES, DB_TASK_PRE_MERGE_POLICY_VALUES, FIX_SCOPE_HANDOFF_GUARD_VALUES, GIT_COMMIT_STYLE_VALUES, HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES, KAIZEN_TO_ATLAS_MODE_VALUES, LOG_LEVEL_VALUES, MODEL_CATALOG_ENFORCEMENT_VALUES, PLAN_APPROVAL_MODES, PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES, RESEARCH_FANOUT_MODE_VALUES, RESEARCH_EVIDENCE_REUSE_MODE_VALUES, RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES, RESEARCH_BUDGET_VISIBILITY_VALUES, ATLAS_SHADOW_GUARDRAILS_MODE_VALUES, ATLAS_HANDOFF_PREFETCH_MODE_VALUES, ATLAS_RESEARCH_PREFETCH_FOCUS_MODE_VALUES, ATLAS_MEMORY_SURFACE_MODE_VALUES, SESSION_RECYCLE_MODE_VALUES, STARTUP_DIRTY_TREE_POLICY_VALUES, WAITING_LANE_SHADOW_MODE_VALUES } from "./setting-policy.js";
+import { ATLAS_AUTO_FEEDBACK_VALUES, ATLAS_BOOT_REINDEX_POLICY_VALUES, ATLAS_EMBEDDING_MODEL_OPTIONS, DEFAULT_ATLAS_EMBEDDING_MODEL_ID, ATLAS_PHASE_VALUES, ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT, ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES, ATLAS_SCIP_LANGUAGE_OPTIONS, ATLAS_SCIP_MODE_VALUES, ATLAS_SCIP_RESTAGE_POLICY_VALUES, ATLAS_TREE_COMPRESSION_MODE_VALUES, ATLAS_TRANSPORT_VALUES, ATLAS_V2_MODE_VALUES } from "./atlas.js";
+
+export function buildModelSelectionSettings() {
+  const entries = [];
+  for (const provider of PROVIDER_OPTIONS) {
+    for (const tier of MODEL_TIER_NAMES) {
+      const fallbackModel = getDefaultTierModel(provider, tier);
+      entries.push({
+        key: `${provider}_model_${tier}`,
+        default: "",
+        description: `${PROVIDER_LABELS[provider]} model for ${tier} tier${fallbackModel ? ` (empty = ${fallbackModel})` : ""}`,
+      });
+    }
+  }
+  for (const option of IMAGE_PROVIDER_OPTIONS) {
+    entries.push({
+      key: `${option.value}_image_model`,
+      default: "",
+      description: `${PROVIDER_LABELS[option.value]} image generation model`,
+    });
+  }
+  return entries;
+}
+
+export const MODEL_SELECTION_SETTINGS = Object.freeze(buildModelSelectionSettings());
+
+export const SETTING_DEFINITIONS = [
+  // ── Provider routing ─────────────────────────────────────────────────────
+  // Provider keys default empty so admin code falls through persisted setting
+  // before using the hardcoded default.
+  ...PROVIDER_ROLE_SETTING_DEFS,
+  ...ROLE_REASONING_EFFORT_SETTING_DEFS,
+  ...ROLE_MODEL_TIER_SETTING_DEFS,
+
+  // ── Model selection (empty = use provider tier default) ──────────────────
+  ...MODEL_SELECTION_SETTINGS,
+  { key: "artifact_image_provider", default: "", description: "Provider used for image artifacts (openai or grok)" },
+
+  // ── Remote model catalog (fetched from posse-remote /v1/catalog/models) ──
+  { key: "model_catalog_cache_ms", default: "86400000", numeric: { integer: true, min: 60000 }, description: "Milliseconds to cache the remote model catalog before refreshing (default 24h)" },
+  { key: "model_catalog_enforcement", default: "warn_and_fallback", options: MODEL_CATALOG_ENFORCEMENT_VALUES, description: "Stale configured-model handling: warn_and_fallback substitutes the tier default at runtime, warn_only keeps the configured model, off disables validation" },
+  { key: "model_catalog_json", default: "", adminVisible: false, description: "Cached remote model/pricing catalog payload (auto-updated)" },
+  { key: "model_catalog_fetched_at", default: "", adminVisible: false, description: "Timestamp of the last successful model catalog fetch (auto-updated)" },
+  { key: "posse_local_generation_enabled", default: "false", valueType: "boolean", description: "Operator opt-in for staged posse-local text generation when the signed model catalog has not enabled the provider" },
+
+  // ── Token caps and observed-usage calibration ────────────────────────────
+  { key: "claude_limit_tokens_session", default: "", numeric: { integer: true, min: 0 }, description: "Token cap for Claude's 5-hour rolling window" },
+  { key: "claude_limit_tokens_week",    default: "", numeric: { integer: true, min: 0 }, description: "Token cap for Claude's 7-day rolling window" },
+  { key: "claude_observed_pct_session", default: "", numeric: { integer: false, min: 0, max: 100 }, description: "Observed Claude session usage % (calibrates 5-hour cap)" },
+  { key: "claude_observed_pct_week",    default: "", numeric: { integer: false, min: 0, max: 100 }, description: "Observed Claude weekly usage % (calibrates 7-day cap)" },
+  { key: "openai_limit_tokens_session", default: "", numeric: { integer: true, min: 0 }, description: "Token cap for OpenAI's session window" },
+  { key: "openai_limit_tokens_week",    default: "", numeric: { integer: true, min: 0 }, description: "Token cap for OpenAI's weekly window" },
+  { key: "openai_observed_pct_session", default: "", numeric: { integer: false, min: 0, max: 100 }, description: "Observed OpenAI session usage % calibration" },
+  { key: "openai_observed_pct_week",    default: "", numeric: { integer: false, min: 0, max: 100 }, description: "Observed OpenAI weekly usage % calibration" },
+  { key: "openai_account_limit_tokens_session", default: "", numeric: { integer: true, min: 0 }, description: "Hard OpenAI account-level session token cap" },
+  { key: "openai_account_limit_tokens_week",    default: "", numeric: { integer: true, min: 0 }, description: "Hard OpenAI account-level weekly token cap" },
+  { key: "claude_run_budget_pct_session", default: "", numeric: { integer: false, min: 0, max: 100 }, description: "Claude run budget as a percent of the current session window (empty = no run budget)" },
+  { key: "codex_run_budget_pct_session", default: "", numeric: { integer: false, min: 0, max: 100 }, description: "Codex run budget as a percent of the current session window (empty = no run budget)" },
+  { key: "openai_run_budget_usd", default: "", numeric: { integer: false, min: 0 }, description: "OpenAI run spend budget in USD (empty = no run budget)" },
+  { key: "grok_run_budget_usd", default: "", numeric: { integer: false, min: 0 }, description: "Grok run spend budget in USD (empty = no run budget)" },
+  { key: "openai_image_budget_usd", default: "", numeric: { integer: false, min: 0 }, description: "OpenAI image-generation spend budget in USD (empty = no image budget)" },
+  { key: "grok_image_budget_usd", default: "", numeric: { integer: false, min: 0 }, description: "Grok image-generation spend budget in USD (empty = no image budget)" },
+  { key: "openai_daily_budget_usd", default: "", numeric: { integer: false, min: 0 }, description: "OpenAI daily spend budget in USD (empty = no dashboard budget bar)" },
+  { key: "grok_daily_budget_usd",   default: "", numeric: { integer: false, min: 0 }, description: "Grok daily spend budget in USD (empty = no dashboard budget bar)" },
+  { key: "claude_usage_cache_ms", default: "120000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to cache Claude usage summaries before refreshing" },
+  { key: "claude_usage_backoff_ms", default: "300000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to wait before retrying Claude usage refresh after an error" },
+  { key: "codex_usage_cache_ms", default: "120000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to cache Codex usage summaries before refreshing" },
+  { key: "codex_usage_backoff_ms", default: "300000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to wait before retrying Codex usage refresh after an error" },
+  { key: "context_compaction_mode", default: "shadow", options: CONTEXT_COMPACTION_MODE_VALUES, description: "Rolling context compaction mode: off records nothing, shadow records savings telemetry only, inject/reset modes are future behavior gates" },
+  { key: "context_compaction_trigger_input_tokens", default: "32000", numeric: { integer: true, min: 1 }, description: "Input-token pressure threshold for rolling-context shadow observations" },
+  { key: "context_compaction_session_reset_input_tokens", default: "96000", numeric: { integer: true, min: 1 }, description: "Resumed-session input-token threshold that would trigger a future context rollup reset" },
+  { key: "context_compaction_recent_target_tokens", default: "12000", numeric: { integer: true, min: 1000 }, description: "Target exact-recent token window used by rolling-context savings estimates" },
+  { key: "max_output_tokens_researcher", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for researcher provider calls (empty = role/provider default)" },
+  { key: "max_output_tokens_planner", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for planner provider calls (empty = role/provider default)" },
+  { key: "max_output_tokens_dev", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for dev provider calls (empty = role/provider default)" },
+  { key: "max_output_tokens_artificer", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for artificer provider calls (empty = role/provider default)" },
+  { key: "max_output_tokens_assessor", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for assessor provider calls (empty = role/provider default)" },
+  { key: "max_output_tokens_preflight", default: "", numeric: { integer: true, min: 1 }, description: "Output-token cap for preflight provider calls (empty = role/provider default)" },
+
+  // ── Hidden runtime tracking (live usage state, written by providers) ─────
+  { key: "claude_session_tokens",        default: "", adminVisible: false, description: "Live Claude session token count (auto-updated)" },
+  { key: "claude_session_max",           default: "", adminVisible: false, description: "Live Claude session token max (auto-updated)" },
+  { key: "claude_session_reset_at",      default: "", adminVisible: false, description: "Live Claude session reset timestamp (auto-updated)" },
+  { key: "claude_weekly_tokens",         default: "", adminVisible: false, description: "Live Claude weekly token count (auto-updated)" },
+  { key: "claude_weekly_max",            default: "", adminVisible: false, description: "Live Claude weekly token max (auto-updated)" },
+  { key: "claude_weekly_reset_at",       default: "", adminVisible: false, description: "Live Claude weekly reset timestamp (auto-updated)" },
+  { key: "claude_usage_subscription_type", default: "", adminVisible: false, description: "Detected Claude subscription type (auto-updated)" },
+  { key: "claude_usage_rate_limit_tier", default: "", adminVisible: false, description: "Detected Claude rate limit tier (auto-updated)" },
+  { key: "claude_usage_source",          default: "", adminVisible: false, description: "Source of last Claude usage observation (auto-updated)" },
+  { key: "claude_usage_last_updated",    default: "", adminVisible: false, description: "Last Claude usage update timestamp (auto-updated)" },
+  ...PROVIDER_OPTIONS.map((provider) => ({
+    key: `${provider}_rate_limit_state`,
+    default: "",
+    adminVisible: false,
+    description: `${PROVIDER_LABELS[provider]} persisted rate-limit cooldown state (auto-updated)`,
+  })),
+
+  // ── Scheduler ────────────────────────────────────────────────────────────
+  { key: "scheduler_concurrency", default: "", runtimeFallback: "3", numeric: { integer: true, min: 1 }, description: "Default number of worker slots when --concurrency is not passed (empty = 3)" },
+  { key: "scheduler_max_active_worktrees", default: "", numeric: { integer: true, min: 1 }, description: "Maximum number of active work-item worktrees the scheduler may run at once (empty = no cap)" },
+  { key: "scheduler_implementation_reserved_slots", default: "1", numeric: { integer: true, min: 0 }, description: "Agent slots plan jobs leave for ready dev/fix/artificer/promote jobs: once plans hold all but this many slots, the rest go to that work first (0 = off)" },
+  { key: "waiting_lane_shadow_mode", default: "off", options: WAITING_LANE_SHADOW_MODE_VALUES, description: "Waiting-lane eligibility observation: off records nothing; shadow records decisions without creating a detached worktree or parked view" },
+  { key: "waiting_lane_git_preparation_enabled", default: "false", valueType: "boolean", description: "Create guarded detached waiting-lane worktrees after eligible research startup" },
+  { key: "waiting_lane_atlas_snapshot_enabled", default: "false", valueType: "boolean", description: "Create parked ATLAS snapshots for eligible detached waiting lanes" },
+  { key: "waiting_lane_atlas_catchup_enabled", default: "false", valueType: "boolean", description: "Refresh parked waiting-lane views after validated main-generation publication" },
+  { key: "waiting_lane_activation_enabled", default: "false", valueType: "boolean", description: "Consume a validated prepared waiting lane during developer activation" },
+  { key: "waiting_lane_preparation_concurrency", default: "1", numeric: { integer: true, min: 1 }, description: "Maximum concurrent repository preparation jobs; independent of agent and ATLAS background slots" },
+  { key: "waiting_lane_max_prepared_lanes", default: "1", numeric: { integer: true, min: 1 }, description: "Maximum resident detached waiting-lane caches before safe LRU/TTL eviction" },
+  { key: "waiting_lane_prepared_ttl_ms", default: "3600000", numeric: { integer: true, min: 1000 }, description: "Idle lifetime in milliseconds for a prepared detached waiting lane" },
+  { key: "waiting_lane_max_hot_paths", default: "64", numeric: { integer: true, min: 1, max: 512 }, description: "Maximum normalized researcher hot paths retained for final mounted-view prefetch" },
+  { key: "scheduler_poll_ms",     default: "500", numeric: { integer: true, min: 1 }, description: "Scheduler poll interval in milliseconds" },
+  { key: "scheduler_repair_poll_ms", default: "5000", numeric: { integer: true, min: 1 }, description: "Fallback scheduler repair interval when no queue-state wake arrives" },
+  { key: "default_lease_seconds", default: "120", numeric: { integer: true, min: 1 }, description: "Default job lease duration in seconds" },
+  { key: "worker_lease_renew_max_transient_errors", default: "2", numeric: { integer: true, min: 0 }, description: "Transient lease-renewal errors tolerated before aborting a job" },
+  { key: "posse_db_telemetry_tail_limit", default: "20", numeric: { integer: true, min: 0 }, description: "Recent event/observation telemetry rows kept in SQLite after file mirroring; 0 disables pruning" },
+  { key: "posse_retention_days", default: "90", numeric: { integer: true, min: 0 }, description: "Days to retain runtime DB telemetry rows; 0 disables scheduled retention" },
+  { key: "lease_requeue_grace_sec", default: "60", numeric: { integer: true, min: 0 }, description: "Grace seconds after lease expiry before requeueing held jobs" },
+  { key: "worker_provider_circuit_ttl_ms", default: "300000", numeric: { integer: true, min: 1000 }, description: "Milliseconds a worker keeps a provider circuit open after fast repeated failures" },
+  { key: "worktree_lock_wait_ms", default: "180000", numeric: { integer: true, min: 0 }, description: "Milliseconds to wait for a worker worktree lock before retrying without attempt penalty" },
+  { key: "startup_dirty_tree_policy", default: "block", options: STARTUP_DIRTY_TREE_POLICY_VALUES, description: "Boot behavior when the target git tree is dirty: block startup or commit current work first" },
+  { key: "git_atlas_post_commit_hook_timeout_ms", default: "600000", numeric: { integer: true, min: 1000 }, description: "Milliseconds to wait for the ATLAS post-commit hook during scoped git commits" },
+  { key: "stall_timeout",         default: "", runtimeFallback: "600", numeric: { integer: true, min: 1 }, description: "Seconds before a stalled job is killed (empty = 600)" },
+  { key: "max_job_runtime_sec",   default: "", numeric: { integer: true, min: 1 }, description: "Maximum seconds a job may run before runtime cancellation (empty = 2x stall_timeout)" },
+  { key: "runtime_write_grace_sec", default: "180", numeric: { integer: true, min: 0 }, description: "A job past its runtime cap keeps running while its last successful file write is at most this many seconds old (0 = off)" },
+  { key: "runtime_write_ceiling_multiplier", default: "2", numeric: { integer: true, min: 1 }, description: "Hard ceiling, as a multiple of the runtime cap, on how far write activity can extend a job (1 = no extension)" },
+  { key: "headless_human_timeout_sec", default: "600", numeric: { integer: true, min: 1 }, description: "Seconds to wait for human input in headless mode" },
+  { key: "human_gate_resnooze_sec", default: "600", numeric: { integer: true, min: 30 }, description: "Seconds a parked human gate snoozes before the scheduler re-surfaces its prompt (display sessions only)" },
+  { key: "human_gate_max_resurfaces", default: "2", numeric: { integer: true, min: 0 }, description: "Maximum automatic reminders for a parked human gate across interactive restarts and scheduler snooze cycles; 0 disables reminders" },
+  { key: "default_max_attempts",  default: "3", numeric: { integer: true, min: 1 }, description: "Default maximum attempts per job" },
+  { key: "scheduler_shadow_conflict_metrics", default: "true", valueType: "boolean", description: "Emit shadow metrics for relaxed scheduler root-root conflicts that strict mode would block" },
+  { key: "target_branch",         default: "", scope: "repo", description: "Repo merge target branch (empty = auto-detect remote default/main/master before the current terminal branch)" },
+  // Session owns trunk enrollment and publication. Keep these repo-scoped
+  // runtime/legacy CLI keys for existing and manually configured trunks, but
+  // omit them from the operator admin description consumed by Posse and Bossy.
+  { key: "shared_trunk_enabled", default: String(SHARED_TRUNK_DEFAULTS.enabled), scope: "repo", adminVisible: false, valueType: "boolean", description: "Allow this clone to synchronize and automatically push its configured Posse side trunk" },
+  { key: "shared_trunk_branch", default: SHARED_TRUNK_DEFAULTS.branch, scope: "repo", adminVisible: false, description: "Shared Posse side-trunk branch; must match target_branch and must not be the remote default branch" },
+  { key: "shared_trunk_remote", default: SHARED_TRUNK_DEFAULTS.remote, scope: "repo", adminVisible: false, description: "Git remote used to synchronize the shared Posse side trunk" },
+  { key: "shared_trunk_fetch_interval_sec", default: String(SHARED_TRUNK_DEFAULTS.fetchIntervalSec), scope: "repo", adminVisible: false, numeric: { integer: true, ...SHARED_TRUNK_LIMITS.fetchIntervalSec }, description: "Seconds between shared-trunk fetches while a scheduler run has active or queued work" },
+  { key: "shared_trunk_fetch_interval_idle_sec", default: String(SHARED_TRUNK_DEFAULTS.fetchIntervalIdleSec), scope: "repo", adminVisible: false, numeric: { integer: true, ...SHARED_TRUNK_LIMITS.fetchIntervalIdleSec }, description: "Seconds between shared-trunk fetches while a live scheduler run is idle-parked" },
+  { key: "shared_trunk_push_retry_max", default: String(SHARED_TRUNK_DEFAULTS.pushRetryMax), scope: "repo", adminVisible: false, numeric: { integer: true, ...SHARED_TRUNK_LIMITS.pushRetryMax }, description: "Maximum bounded fetch/re-merge retries after a shared-trunk push race" },
+  { key: "shared_trunk_claims_enabled", default: String(SHARED_TRUNK_DEFAULTS.claimsEnabled), scope: "repo", adminVisible: false, valueType: "boolean", description: "Publish and consume advisory cross-instance file claims for this shared trunk" },
+  { key: "shared_trunk_claims_ttl_min", default: String(SHARED_TRUNK_DEFAULTS.claimsTtlMin), scope: "repo", adminVisible: false, numeric: { integer: true, ...SHARED_TRUNK_LIMITS.claimsTtlMin }, description: "Maximum lifetime in minutes of an advisory cross-instance file claim" },
+  { key: "shared_trunk_claim_defer_max_min", default: String(SHARED_TRUNK_DEFAULTS.claimDeferMaxMin), scope: "repo", adminVisible: false, numeric: { integer: true, ...SHARED_TRUNK_LIMITS.claimDeferMaxMin }, description: "Maximum minutes a peer claim may defer dispatch before the advisory hardens open" },
+  { key: "git_commit_style",      default: "off", scope: "repo", options: GIT_COMMIT_STYLE_VALUES, description: "Commit subject policy: off, Conventional Commits, or Conventional Commits decorated with Gitmoji; enabled modes use one standard-tier assessor pass over the scoped diff" },
+  { key: "session_recycle_mode",  default: "dev-fix", options: SESSION_RECYCLE_MODE_VALUES, description: "Session recycling mode: off, dev-fix, or full" },
+  { key: "session_recycle_strict_provider", default: "true", valueType: "boolean", description: "Reset recycled lanes instead of resuming when a later job chooses a different provider" },
+  { key: "posse_session_lease_ttl", default: "300", numeric: { integer: true, min: 1 }, description: "Seconds before a recycled session lease is released" },
+
+  // ── Pipeline / escalation limits ─────────────────────────────────────────
+  { key: "posse_wi_failure_threshold", default: "5", numeric: { integer: true, min: 1 }, description: "Failed dev/fix jobs per work item before assessor escalates to human_input" },
+  { key: "scope_auto_approval", default: "true", valueType: "boolean", description: "Auto-approve mechanical scope requests (create-root-covered paths, test files for dev/fix, generated lockfiles) instead of opening a human gate" },
+  { key: "posse_max_fix_chain_depth", default: "2", numeric: { integer: true, min: 1 }, description: "Maximum fix-chain depth (fix→fix→fix…) before automatically researching and replanning" },
+  { key: "posse_max_replans", default: "3", numeric: { integer: true, min: 1 }, description: "Maximum needs_replan loops per work item before escalating to human_input" },
+  { key: "posse_max_file_request_depth", default: "2", numeric: { integer: true, min: 0 }, description: "Maximum follow-up depth for dev file-request approval chains" },
+  { key: "file_request_low_risk_extensions", default: "", description: "Comma-separated extensions to treat as low-risk file creation requests; protected, package, and CI paths remain high-risk" },
+  { key: "posse_fanout_child_timeout_sec", default: "1200", numeric: { integer: true, min: 1 }, description: "Seconds a fanout research child may sit in queued status before being marked timed-out so synthesis can proceed" },
+  { key: "posse_display_max_events", default: "250", numeric: { integer: true, min: 10 }, description: "Maximum live events held in the terminal UI ring buffer" },
+  { key: "posse_display_event_rate_limit_per_sec", default: "300", numeric: { integer: true, min: 10 }, description: "Per-second event rate above which the terminal UI starts dropping events to stay responsive" },
+
+  // ── Bridge ───────────────────────────────────────────────────────────────
+  // Identity is repo-scoped: each repo is its own relay instance so one
+  // machine can expose N posse sessions to the phone. The LAN token, bind
+  // host, and relay URL stay machine-global.
+  { key: "bridge_port", default: "", scope: "repo", numeric: { integer: true, min: 1, max: 65535 }, description: "Loopback port for this repo's Posse bridge (empty = auto-pick 7531+)" },
+  { key: "bridge_label", default: "", scope: "repo", description: "Optional display label for this repo's Posse bridge instance" },
+  { key: "bridge_bind_host", default: "127.0.0.1", adminVisible: false, description: "Bind host for the local Posse bridge" },
+  { key: "bridge_local_token", default: "", adminVisible: false, description: "Bearer token for local Posse bridge clients" },
+  { key: "mcp_oauth_signing_key", default: "", adminVisible: false, description: "Local signing key for Posse MCP OAuth capability tokens" },
+  { key: "bridge_instance_id", default: "", scope: "repo", adminVisible: false, description: "Stable Posse bridge instance identifier for this repo" },
+  { key: "bridge_relay_token", default: "", scope: "repo", adminVisible: false, description: "Bearer token for this repo's Posse relay bridge connection" },
+  { key: "bridge_relay_url", default: "wss://app.yourposseai.com/v1/instance", adminVisible: false, description: "Relay WebSocket URL for the Posse bridge" },
+  { key: "bridge_identity_migrated_to", default: "", adminVisible: false, description: "Project dir that claimed the legacy machine-global bridge identity (auto-updated)" },
+
+  // ── Behaviors ────────────────────────────────────────────────────────────
+  { key: "auto_merge_completed", default: "false", valueType: "boolean", description: "Auto-merge work items that pass assessment" },
+  { key: "codex_auth_mode",      default: "oauth", options: CODEX_AUTH_MODE_OPTIONS, description: "Codex auth mode (oauth, api, or auto). oauth/auto never fall back to API keys; api must be explicit." },
+  { key: "codex_cli_path",       default: "",      adminVisible: false, description: "Explicit path to Codex CLI binary (empty = auto-detect)" },
+  { key: "pre_assess_cmd",       default: "",      description: "Optional shell command to run before assessment" },
+  { key: "pre_push_verify_cmd",  default: "",      description: "Optional shell command to run before pushing" },
+  { key: "canonical_verify_cmd", default: "", scope: "repo", description: "Repository-owned canonical verification command run before assessment and push" },
+  { key: "db_task_pre_merge_policy", default: DB_TASK_PRE_MERGE_POLICIES.HOLD, scope: "repo", options: DB_TASK_PRE_MERGE_POLICY_VALUES, description: "Database (task_mode db) tasks that depend on file changes not yet merged: hold (default) parks them until the work item merges, then asks the operator before they write the project database; run executes them at once against the work-item branch (only for a project database that is not production)" },
+  { key: "verification_wall_timeout_ms", default: "", runtimeFallback: "120000", scope: "repo", numeric: { integer: true, min: 1000 }, description: "Milliseconds a frozen test or canonical verification command may run before Posse stops it (empty = 120000). Set it to the window the repository's own harness documents." },
+  { key: "verification_idle_timeout_ms", default: "", scope: "repo", numeric: { integer: true, min: 1000 }, description: "Milliseconds a verification command may stay silent before Posse treats it as hung (empty = disabled). Enable only for harnesses that print progress while healthy." },
+  { key: "verification_wall_timeout_max_ms", default: "1800000", numeric: { integer: true, min: 1000 }, description: "Administrator ceiling on any repository verification timeout (default 30 minutes)" },
+  { key: "pre_dev_typecheck", default: "true", valueType: "boolean", scope: "repo", description: "Before a dev or fix job edits files, run the repository's typecheck script and show the agent the existing type errors in the files it may edit, so it fixes them in passing" },
+  { key: "verification_dependency_network_policy", default: DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY, scope: "repo", options: Object.freeze(["cache_only", "allow", "disabled"]), description: "Network policy for lock-backed verification dependency repair: allow (default), cache_only, or disabled" },
+  { key: "posse_log_scrub_secrets", default: "true", valueType: "boolean", description: "Scrub secret-looking values from prompt and output logs" },
+  { key: "posse_log_level",        default: "info", options: LOG_LEVEL_VALUES, description: "Minimum runtime file-log level: debug, info, warn, or error" },
+  { key: "skip_hooks",           default: "false", valueType: "boolean", description: "Skip all deterministic safety hooks" },
+  { key: "skip_hook_secrets_scan", default: "false", valueType: "boolean", description: "Skip the staged secret scan hook" },
+  { key: "skip_hook_post_dev_verify", default: "false", valueType: "boolean", description: "Skip the post-dev verification hook" },
+  { key: "skip_hook_pre_push_gate", default: "false", valueType: "boolean", description: "Skip the pre-push gate hook" },
+  { key: "worktree_clean_ignored", default: "false", valueType: "boolean", description: "Clean ignored files when resetting worker worktrees" },
+  { key: "snapshot_retention_days", default: "30", numeric: { integer: true, min: 0 }, description: "Days to retain recovered dirty-worktree snapshots" },
+  { key: "snapshot_max_bytes", default: "2147483648", numeric: { integer: true, min: 0 }, description: "Maximum recovered snapshot storage bytes" },
+  { key: "snapshot_max_refs", default: "500", numeric: { integer: true, min: 0 }, description: "Maximum recovered snapshot refs to retain" },
+  { key: "snapshot_dedup", default: "true", valueType: "boolean", description: "Reuse duplicate recovered dirty-worktree snapshots" },
+  { key: "web_tools_enabled",    default: "true", valueType: "boolean", description: "Allow web research tools (Claude WebSearch/WebFetch, Codex web_search) for researcher, assessor, dev (fallback for missing external facts), and native-team roles, and the artificer's download_file tool" },
+  { key: "research_fanout",      default: "off", options: RESEARCH_FANOUT_MODE_VALUES, description: "Research fanout mode for preflight fanout-clear decisions (off, shadow, on)" },
+  { key: "final_review_mode", default: FINAL_REVIEW_DEFAULT_MODE, scope: "repo", options: FINAL_REVIEW_MODES, description: "Dev/fix close-out: before a COMPLETE handoff the agent calls final_review, which runs the declared tests and an independent read-only review and returns findings to fix" },
+  { key: "research_claim_review", default: "off", scope: "repo", options: RESEARCH_CLAIM_REVIEW.modes, description: "Bounded source-backed review of committed research claims; shadow records findings and usage without changing the report" },
+  { key: "research_evidence_reuse", default: "shadow", scope: "repo", options: RESEARCH_EVIDENCE_REUSE_MODE_VALUES, description: "Research evidence reuse accounting: off records nothing; shadow measures strict source and Atlas duplicate candidates without changing retrieval routing" },
+  { key: "research_traversal_completion_check", default: "off", options: RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES, description: "Traversal completion check mode for researcher/dev handoffs: off, shadow, or on" },
+  { key: "research_traversal_completion_max_chars", default: "1600", numeric: { integer: true, min: 180 }, description: "Maximum rendered characters for the traversal completion check directive" },
+  { key: "research_synthesis_max_physical_calls", default: "", numeric: { integer: true, min: 16, max: 200 }, description: "Experimental researcher physical tool-call ceiling per attempt (blank keeps the built-in 26). Logical exploration units, batch width, turn, and novelty limits are unchanged; the value is snapshotted once per research session" },
+  { key: "research_budget_visibility", default: "countdown", options: RESEARCH_BUDGET_VISIBILITY_VALUES, description: "Experimental: when a researcher sees its retrieval-call budget. countdown states the remaining calls only once six or fewer remain; always states the total in its first message and the remaining count on every retrieval result. Neither tells it to stop; the value is snapshotted once per research session" },
+  { key: "atlas_research_runtime_guidance", default: "on", options: ["off", "on"], adminVisible: false, description: "Model-visible dynamic Atlas research notices. Off preserves enforcement, accounting, result metadata, and ordinary error responses without appending navigation, repair, batching, or closeout instructions." },
+  { key: "atlas_shadow_guardrails", default: "shadow", options: ATLAS_SHADOW_GUARDRAILS_MODE_VALUES, description: "Telemetry-only ATLAS guardrails for deploy provenance, exact-count, negative-evidence, and token-pressure A/B miss patterns" },
+  { key: "atlas_gate_nudge", default: "on", options: ["off", "on"], description: "Return an in-band area-survey nudge after repeated code.lens/code.window calls on one target; off keeps observation-only shadow telemetry" },
+  { key: "atlas_handoff_prefetch", default: "on", options: ATLAS_HANDOFF_PREFETCH_MODE_VALUES, description: "ATLAS handoff preload: on attaches system-side survey/slice/context blocks at agent boot; off skips every handoff prefetch so agents pull ATLAS context on demand (pointer-first boot, for token A/Bs)" },
+  { key: "atlas_research_prefetch_focus", default: "on", options: ATLAS_RESEARCH_PREFETCH_FOCUS_MODE_VALUES, adminVisible: false, description: "Researcher ATLAS prefetch focus: on uses only researcher-visible task signals, chooses survey or generated context, and confidence-gates automatic source bodies; shadow records the focused decision while preserving legacy retrieval; off disables the focused policy" },
+  {
+    key: "plan_approval_mode",
+    default: PLAN_APPROVAL_MODES.AUTO_APPROVE,
+    options: [
+      { value: PLAN_APPROVAL_MODES.AUTO_APPROVE, label: "Auto-approve all plans" },
+      { value: PLAN_APPROVAL_MODES.CRITICAL_RISK, label: "Approve critical-risk plans" },
+      { value: PLAN_APPROVAL_MODES.ALL_PLANS, label: "Approve every plan" },
+    ],
+    description: "Choose whether plans run automatically, require approval only for critical risk, or always require approval",
+  },
+  { key: "agent_coordination_mode", default: "handoff", scope: "repo", options: AGENT_COORDINATION_MODE_VALUES, description: "Agent coordination: terminal handoff reports by default, off to disable them, or subagents to add bounded citation sub-agents." },
+  ...PLANNER_DISPATCH_SETTINGS,
+  { key: "disable_system_tools", default: "true", valueType: "boolean", adminVisible: false, description: "Disable Claude's native Read/Write/Grep/Glob/Edit/Bash; agents use only the deterministic MCP + ATLAS tool surface" },
+
+  // ── Assessor tuning ──────────────────────────────────────────────────────
+  { key: "assessment_scope_mode",                    default: "off", options: ASSESSMENT_SCOPE_MODE_VALUES, description: "Plan-time assessment-scope experiment: off disables derivation; shadow records hypothetical groups without changing jobs, dependencies, or assessment behavior" },
+  { key: "merge_target_debt_auto_proceed", default: "true", valueType: "boolean", adminVisible: false, description: "Allow a merge check failure proven to be target debt by a passing single-commit revert to proceed. False still records the classification but opens the merge recovery gate." },
+  { key: "assessment_scope_max_group_jobs",          default: "4", numeric: { integer: true, min: 2, max: 16 }, description: "Maximum jobs in one hypothetical shadow assessment group" },
+  { key: "assessment_scope_max_group_chars",         default: "120000", numeric: { integer: true, min: 16000, max: 400000 }, description: "Maximum estimated evidence characters in one hypothetical shadow assessment group" },
+  { key: "assessor_fallback_reads",                default: "4", numeric: { integer: true, min: 0 }, description: "Extra assessor fallback file reads allowed during verification before retrying (read on attempt 1 if dev didn't surface output)" },
+  { key: "assessor_fallback_reads_retry_step",     default: "2", numeric: { integer: true, min: 0 }, description: "Additional fallback reads added per retry attempt" },
+  { key: "assessor_internal_retry_limit",          default: "2", numeric: { integer: true, min: 0 }, description: "Internal retry limit before failing assessment" },
+  { key: "assessor_max_tool_calls",       default: "12", numeric: { integer: true, min: 1 }, description: "Hard per-call assessor MCP tool ceiling; agent_handoff remains available after exhaustion" },
+  { key: "assessor_parse_retry_input_tokens_cap", default: "150000", numeric: { integer: true, min: 0 }, description: "Shared assessor input-token cap across retries for one job (0 disables the cap; missing telemetry falls back to prompt_chars / 4)" },
+
+  // ── Handoff / planner ────────────────────────────────────────────────────
+  { key: "handoff_max_prompt_chars", default: "600000", numeric: { integer: true, min: 1 }, description: "Maximum characters in a single agent prompt" },
+  { key: "handoff_max_context_chars", default: "", numeric: { integer: true, min: 1 }, description: "Maximum characters for rendered handoff file context before optional sections are dropped (empty = derived from prompt cap)" },
+  { key: "handoff_preload_editable_file_bodies", default: "off", options: HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES, description: "Editable file body preload mode: off, small, or always. Merge-conflict handoffs force preload so conflict markers remain visible." },
+  { key: "fix_scope_handoff_guard", default: "auto", options: FIX_SCOPE_HANDOFF_GUARD_VALUES, description: "Fix handoff scope broadening mode: off, auto, warn, or enforce" },
+  { key: "handoff_max_file_bytes", default: "150000", numeric: { integer: true, min: 1 }, description: "Maximum bytes to preload from a single handoff file" },
+  { key: "handoff_max_preload_total_bytes", default: "80000", numeric: { integer: true, min: 1 }, description: "Maximum cumulative bytes to bulk-preload from source files for no-read handoffs" },
+  { key: "handoff_max_related_files_total_bytes", default: "400000", numeric: { integer: true, min: 1 }, description: "Maximum cumulative bytes to preload from related handoff files" },
+  // posse_remote_url is intentionally not a catalog setting: the remote domain is
+  // fixed (POSSE_REMOTE_DEFAULT_URL). It was an early-testing override that could
+  // strand the client and native heartbeat auth on a dead localhost endpoint.
+  { key: "posse_remote_response_signing_secret", default: "", adminVisible: false, description: "Shared HMAC secret for verifying posse-remote prompt compile and bundle response integrity (empty = verification disabled)" },
+  { key: "posse_remote_timeout_ms", default: "", runtimeFallback: "60000", numeric: { integer: true, min: 100 }, description: "Remote prompt compiler request timeout in milliseconds (empty = 60000)" },
+  { key: "context_expand_max_steps", default: "2", numeric: { integer: true, min: 0 }, description: "Maximum in-attempt MISSING_CONTEXT expansion retries per agent call" },
+  { key: "context_expand_file_budget_per_attempt", default: "8", numeric: { integer: true, min: 0 }, description: "Maximum distinct files auto-added from MISSING_CONTEXT per attempt" },
+  { key: "skills_enabled", default: "true", valueType: "boolean", description: "Enable planner-selected skill attachments for dev jobs" },
+  { key: "skills_disabled_ids", default: "", description: "Skill ids disabled by admin; new skills are enabled by default" },
+  { key: "planner_max_tasks",        default: "50", numeric: { integer: true, min: 1 }, description: "Maximum tasks the planner is allowed to emit" },
+  { key: "planner_under_scoped_broad_gate", default: "warn", options: PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES, description: "Broad under-scoped gate mode: off, warn, or enforce" },
+
+  // ── Max turns per role (empty = use computed base) ───────────────────────
+  { key: "max_turns_researcher", default: "", numeric: { integer: true, min: 1 }, description: "Override base turn count for researcher" },
+  { key: "max_turns_planner",    default: "", numeric: { integer: true, min: 1 }, description: "Override base turn count for planner" },
+  { key: "max_turns_dev",        default: "", numeric: { integer: true, min: 1 }, description: "Override base turn count for dev" },
+  { key: "max_turns_assessor",   default: "", numeric: { integer: true, min: 1 }, description: "Override base turn count for assessor" },
+
+  // ── ATLAS integration ──────────────────────────────────────────────────────
+  { key: "atlas_v2",                      default: "on",                 options: ATLAS_V2_MODE_VALUES, description: "ATLAS v2 backend mode. The pipeline contract (research seed handoffs, tree prefetch, symbol cards) assumes on; off is a degraded-compatibility escape hatch (broken native binary, CI, kill switch) where agents fall back to raw read/search tools." },
+  { key: "atlas_usage_telemetry", default: "on",                options: ["off", "on"], description: "Record best-effort Atlas action usage in the dedicated per-repository telemetry store. Off disables emission and keeps the telemetry lane dormant." },
+  { key: "atlas_parse_max_parallel",       default: "",                   numeric: { integer: true, min: 1 }, adminVisible: false, description: "Internal Atlas Parse maximum concurrent SCIP-stage subprocesses (empty = computed from languages and CPU)" },
+  { key: "atlas_parse_per_lang_tandem",    default: "true",               valueType: "boolean", adminVisible: false, description: "Internal Atlas Parse tandem tree-sitter/SCIP staging flag" },
+  { key: "atlas_parse_file_progress_throttle_ms", default: "100",         numeric: { integer: true, min: 0 }, adminVisible: false, description: "Internal Atlas Parse filename progress throttle in milliseconds; 0 emits every event" },
+  { key: "atlas_parse_band_max_rows",      default: "8",                  numeric: { integer: true, min: 1 }, adminVisible: false, description: "Internal Atlas Parse terminal band maximum row count" },
+  { key: "atlas_parse_onnx_background_initial", default: "true",          valueType: "boolean", adminVisible: false, description: "Internal Atlas Parse initial ONNX embedding background flag" },
+  { key: "atlas_parse_onnx_background_batch_size", default: "16",         numeric: { integer: true, min: 1 }, adminVisible: false, description: "Internal Atlas Parse background ONNX embedding batch size" },
+  // Native heartbeat trust configuration. Binary execution is hardwired on;
+  // these settings provide the authenticated launch envelope, not a feature gate.
+  { key: "posse_native_heartbeat_url",    default: "",                   adminVisible: false, description: "Heartbeat URL passed explicitly to key-gated native Posse binaries" },
+  { key: "posse_native_heartbeat_public_key_url", default: "",           adminVisible: false, description: "Optional heartbeat public-key discovery URL passed explicitly to native Posse binaries" },
+  { key: "posse_native_heartbeat_jwt_public_key", default: "",           adminVisible: false, description: "Ed25519 JWT public key passed explicitly to native Posse binaries" },
+  { key: "posse_native_heartbeat_jwt_public_key_sha256", default: "",     adminVisible: false, description: "Pinned SHA-256 fingerprint for native Posse binary heartbeat public-key trust" },
+  { key: "posse_native_heartbeat_jwt_audience", default: "",             adminVisible: false, description: "Optional JWT audience override passed explicitly to native Posse binaries" },
+  { key: "posse_native_heartbeat_timeout_seconds", default: "",          numeric: { integer: true, min: 1 }, adminVisible: false, description: "Timeout in seconds for native Posse binary heartbeat requests" },
+  { key: "atlas_scip_mode",               default: "on",                 options: ATLAS_SCIP_MODE_VALUES, description: "ATLAS v2 SCIP mode: off, on, on-demand, or both. on stages/consumes .scip indexes during warmup." },
+  { key: "atlas_scip_languages",          default: ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES.join(","), options: ATLAS_SCIP_LANGUAGE_OPTIONS, multi: true, description: "Languages enabled for ATLAS SCIP and scoped lint. Saving this selector installs Posse-managed deps for the selected languages." },
+  { key: "atlas_scip_index_command",      default: "",                   description: "Optional override for the central Posse SCIP indexer registry (empty = auto-detect Posse-managed indexers)" },
+  { key: "atlas_scip_index_args",         default: "",                   description: "Arguments for atlas_scip_index_command. Supports {output}, {repoRoot}, and {scipDir} placeholders" },
+  { key: "atlas_scip_index_timeout_ms",   default: "360000",             numeric: { integer: true, min: 1000 }, description: "Maximum time to wait for a SCIP indexer child process during boot/warmup (default 6min — generous so I/O or CPU contention during boot doesn't masquerade as a hang)" },
+  { key: "atlas_scip_cold_index_timeout_ms", default: "1800000",         numeric: { integer: true, min: 1000 }, description: "Maximum time to wait when a SCIP language has no canonical output or the previous staging attempt failed (default 30min — first-index on a large repo can take a while)" },
+  { key: "atlas_scip_restage_policy",     default: "smart",              options: ATLAS_SCIP_RESTAGE_POLICY_VALUES, description: "SCIP restage policy: never, missing, smart, or always" },
+  { key: "atlas_tools_disabled", default: "",                    description: "Comma-separated atlas action names removed from newly minted agent contracts (ablation gate; e.g. code.survey,symbol.card). Empty disables nothing." },
+  { key: "agent_tools_disabled", default: "",                    description: "Testing toggle for every issued agent tool: comma-separated names removed from newly minted agent contracts. Plain or tools.-prefixed names remove native tools (read_file, search_files, list_files); dotted or atlas.-prefixed names remove Atlas actions (code.lens, atlas.symbol.get). Prefix an entry with <role>: to limit it to that role (researcher:tools.read_file, planner:code.lens); unprefixed entries apply to every role. Role names: researcher, planner, dev, artificer, assessor. researcher: also targets planner-dispatched research children, which mint as researcher; citation children keep only their protected tools. agent_handoff and sub_agent_next_input stay issued. Agents keep the set resolved when their gate was minted. Empty disables nothing." },
+  { key: "atlas_search_result_paging", default: "on",             options: ["off", "on"], description: "Bounded-ingress paging for symbol.search results: keep the top of the ranked payload inline (10K char cap) and page the remainder behind a traversal_ref. On (default) is a transport invariant — unbounded search was a primary retained-input regression; off is an operator escape hatch." },
+  { key: "atlas_result_ref_paging",       default: "on",                 options: ["off", "on"], description: "Window/lens result ref-paging (TOKEN-LEVERS L3b): when a code.window/code.lens result exceeds atlas_result_ref_paging_min_chars, keep the top-ranked portion inline (code.lens: top matches; code.window: head lines) and page the remainder behind a traversal_ref stub. ADOPTED run41 (7C/2P/0W vs 4C/5P/0W for +2.4% cost); flip off to restore full inline results." },
+  { key: "atlas_compact_structure_dev_assessor", default: "off", options: ["off", "on"], description: "Compact code.structure results for developer and assessor calls to a 12K character paged view. Off until live comparison of rereads and review outcomes." },
+  { key: "atlas_result_ref_paging_min_chars", default: "12000",          numeric: { integer: true, min: 2000 }, description: "Char threshold above which L3b pages a window/lens result (default 12000, set from run36 Stage-0 distribution: code.window p50 6.7k/p90 13.1k, code.lens p50 13.3k/p90 24.3k)." },
+  { key: "atlas_prefetch_entrypoint_rank", default: "on", options: ["off", "on"], description: "Entry-point/export-graph prefetch ranking (TOKEN-LEVERS L4a): promote entry-shaped and strongly imported files in native tree.scope candidate order. ADOPTED run46 (cost -16.2%, hits 53/54 vs 48/54, 0 vs 1 WRONG); flip off to restore graph-weight ranking." },
+  { key: "atlas_tree_identifier_routing_shadow", default: "off", options: ["off", "on"], adminVisible: false, description: "Shadow-only exact task-identifier routing: measure counterfactual tree.scope ranks and overhead during handoff prefetch without changing model-visible candidates." },
+  { key: "atlas_survey_brief_edge_count", default: "8", numeric: { integer: true, min: 0, max: 32 }, description: "Number of ranked code.survey relationship edges shown in the initial handoff preview. The default 8 preserves the established preview; values above 8 use a category-balanced expanded preview while the complete survey remains available through its retained cursor." },
+  { key: "atlas_survey_edge_cap", default: "0", numeric: { integer: true, min: 0 }, description: "Total code.survey internal/inbound/outbound edge-row cap (TOKEN-LEVERS L4b). 0 (default) preserves current per-category caps." },
+  { key: "atlas_ambient_ref_stamping", default: "off",            options: ["off", "on"], description: "Ambient ref stamping experiment: stamp evidence-class tool results at any size and lower the generic stub floor to 500 chars. Off (default) keeps the long-standing 4000-char floor." },
+  { key: "atlas_survey_tail_refs",        default: "off",                options: ["off", "on"], adminVisible: false, description: "Legacy compatibility setting. code.survey now always stores large snapshots as stable ten-file hash pages with a backed next-page cursor." },
+  { key: "atlas_answer_contract_tight",   default: "on",                 options: ["off", "on"], description: "Tight researcher answer contract (TOKEN-LEVERS L2): report/question research jobs use the researcher_report_tight remote prompt profile (hard answer budget, citation-dense, no narrative padding). ADOPTED run39 (answer chars -49%, cost -34%, median hits unchanged); flip off to restore the standard researcher_report profile. Requires a posse-remote build that ships the tight profile." },
+  { key: "atlas_gateway_dedup_advertise", default: "on",                 options: ["off", "on"], description: "Gateway de-advertisement (TOKEN-LEVERS L5a): on the owner-hot gateway path, drop the four ATLAS gateway wrappers (query/code/repo/agent) from the advertised tools/list since the individual per-action tools are already advertised. ADOPTED after the Stage 5A dispatch smoke and payload gate; flip off to advertise the wrappers again. Dispatch is always retained." },
+  { key: "atlas_researcher_schema_diet", default: "on",  options: ["off", "on"], adminVisible: false, description: "Researcher-only provider schema diet (default on since atlas551/552): use concise top-level semantics, description-free input fields, and no advertised fetch_ref compatibility alias while preserving runtime validation, canonical dispatch, and all JSON Schema constraints." },
+  { key: "atlas_prose_dedup",             default: "on",                 options: ["off", "on"], description: "Policy-prose dedup (TOKEN-LEVERS L5b): the runtime role contract lists routed tools and compact cross-tool routing guidance instead of repeating handoff prefetch/fallback policy and provider schema semantics. ADOPTED after the Stage 5A contract gate; flip off to restore the full compatibility contract." },
+  { key: "atlas_scip_max_age_hours",      default: String(ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT), numeric: { integer: true, min: 0 }, description: "Maximum age in hours before smart SCIP restage refreshes an otherwise unchanged index" },
+  { key: "atlas_phases",                  default: ATLAS_PHASE_VALUES.join(","), options: ATLAS_PHASE_VALUES, multi: true, description: "ATLAS phases: research, planning, assessment, dev" },
+  { key: "atlas_live_funnel",             default: "true",               valueType: "boolean", description: "Whether ATLAS actively injects context into prompts" },
+  { key: "atlas_auto_feedback",           default: "off",                options: ATLAS_AUTO_FEEDBACK_VALUES, description: "ATLAS agent feedback mode: off disables job-end writes and retrieval weighting; dry-run previews writes while retaining existing weights; write persists and applies feedback" },
+  { key: "atlas_live_index",              default: "true",               valueType: "boolean", description: "Enable ATLAS live index overlays so long-running jobs see in-progress edits" },
+  { key: "atlas_live_buffers",            default: "true",               valueType: "boolean", description: "Push deterministic write/edit buffers into ATLAS during dev jobs" },
+  { key: "atlas_memory_surface",          default: "on",                 options: ATLAS_MEMORY_SURFACE_MODE_VALUES, description: "Probe ATLAS memory anchor presence in handoffs. on/auto = return exact files/symbols with attached memory; off = never probe." },
+  { key: "atlas_memory_mode",             default: "on",                 options: ["off", "on"], description: "Master ATLAS memory mode. off removes memory prefetch, tools, prompt contracts, and persistence from agent runs." },
+  { key: "posse_kaizen_to_atlas",         default: "off",                options: KAIZEN_TO_ATLAS_MODE_VALUES, adminVisible: false, description: "Reserved Kaizen insight promotion setting. Kaizen promotion is currently hardwired off." },
+  { key: "atlas_view_layer_merge",        default: "on",                 options: ["off", "on"], description: "ATLAS v2 order-independent view build: source view symbols/edges from per-source tree-sitter+SCIP layers (on, default) vs the legacy flat tables (off). Off is a fallback during the layer-merge rollout." },
+  { key: "atlas_embedding_model_id",      default: DEFAULT_ATLAS_EMBEDDING_MODEL_ID,       options: ATLAS_EMBEDDING_MODEL_OPTIONS, description: "Native ATLAS embedding model. Jina v2 code currently runs through ONNX; additional qualified native models will appear here." },
+  { key: "atlas_tree_compression_mode",   default: "ml",                 options: ATLAS_TREE_COMPRESSION_MODE_VALUES, description: "ATLAS tree compression seed mode: off, deterministic, or ml. ml runs an explicit one-time model enrichment pass over the cached tree seed snapshot." },
+  { key: "atlas_tree_compression_provider", default: "", options: [{ value: "", label: "active (researcher provider)" }, ...PROVIDER_OPTIONS.map((provider) => ({ value: provider, label: PROVIDER_LABELS[provider] || provider }))], description: "Provider for the optional ATLAS tree compression ML pass (empty = active researcher provider)" },
+  { key: "atlas_tree_compression_model_tier", default: "standard",       options: MODEL_TIER_NAMES, description: "Model tier for the optional ATLAS tree compression ML pass" },
+  { key: "atlas_tree_compression_max_seeds", default: "80",              numeric: { integer: true, min: 1, max: 500 }, description: "Maximum ATLAS tree compression seeds stored in the cached snapshot" },
+  { key: "atlas_tree_compression_model_max_seeds", default: "40",        numeric: { integer: true, min: 1, max: 200 }, description: "Maximum ATLAS tree compression seeds sent to the one-time ML enrichment pass" },
+  { key: "atlas_transport",               default: "v2",                 options: ATLAS_TRANSPORT_VALUES, adminVisible: false, description: "ATLAS transport: v2 native" },
+  { key: "atlas_install_path",            default: "",                   adminVisible: false, description: "Deprecated ATLAS runtime path setting; ignored by v2 native ATLAS" },
+  { key: "atlas_node_path",               default: "",                   adminVisible: false, description: "Deprecated ATLAS Node.js path setting; ignored by v2 native ATLAS" },
+  { key: "atlas_command",                 default: "",                   adminVisible: false, description: "Deprecated ATLAS server command setting; ignored by v2 native ATLAS" },
+  { key: "atlas_args",                    default: "",                   adminVisible: false, description: "Deprecated ATLAS server args setting; ignored by v2 native ATLAS" },
+  { key: "atlas_url",                     default: "",                   adminVisible: false, description: "Deprecated ATLAS HTTP URL setting; ignored by v2 native ATLAS" },
+  { key: "atlas_host",                    default: "",                   adminVisible: false, description: "Deprecated ATLAS HTTP host setting; ignored by v2 native ATLAS" },
+  { key: "atlas_port",                    default: "",                   numeric: { integer: true, min: 1 }, adminVisible: false, description: "Deprecated ATLAS HTTP port setting; ignored by v2 native ATLAS" },
+  { key: "atlas_server_name",             default: "",                   adminVisible: false, description: "MCP server name for ATLAS (default atlas-v2)" },
+  { key: "atlas_boot_reindex_policy",     default: "smart",              options: ATLAS_BOOT_REINDEX_POLICY_VALUES, description: "Boot reindex: always, missing, or smart" },
+  { key: "atlas_reindex_on_commit",       default: "true",               valueType: "boolean", description: "Install merge-only post-commit hook for incremental reindex" },
+  { key: "atlas_drift_check",             default: "true",               valueType: "boolean", description: "Periodically check ATLAS graph drift against HEAD" },
+  { key: "atlas_verbose_errors",          default: "false",              valueType: "boolean", adminVisible: false, description: "Include ATLAS error stacks in logs and skipped records" },
+  { key: "atlas_drift_check_interval_ms", default: "",                   runtimeFallback: "600000", numeric: { integer: true, min: 60000 }, adminVisible: false, description: "ATLAS drift check interval in milliseconds" },
+  { key: "atlas_v2_view_wait_ms",         default: "2500",               numeric: { integer: true, min: 0 }, adminVisible: false, description: "Maximum milliseconds ATLAS v2 proxy waits for a current view before reporting not-ready" },
+  { key: "atlas_v2_auto_refresh_stale",   default: "true",               valueType: "boolean", adminVisible: false, description: "Allow ATLAS v2 proxy reads to queue a baseline main-view refresh when a stale view is detected" },
+  { key: "atlas_code_lens_callable",      default: "true",               valueType: "boolean", description: "Expose code.lens as an agent-callable ATLAS tool. Off keeps the implementation available internally while removing it from newly minted agent contracts." },
+  { key: "atlas_auto_feedback_default_migrated_at", default: "",         adminVisible: false, description: "Internal migration marker for the ATLAS agent-feedback default change" },
+  { key: "atlas_result_ref_paging_default_migrated_at", default: "",     adminVisible: false, description: "Internal migration marker for the adopted L3b result ref-paging default" },
+  { key: "atlas_prefetch_entrypoint_rank_default_migrated_at", default: "", adminVisible: false, description: "Internal migration marker for the adopted L4a prefetch-ranking default" },
+  { key: "atlas_gateway_dedup_advertise_default_migrated_at", default: "", adminVisible: false, description: "Internal migration marker for the adopted L5a gateway de-advertisement default" },
+  { key: "atlas_prose_dedup_default_migrated_at", default: "", adminVisible: false, description: "Internal migration marker for the adopted L5b policy-prose dedup default" },
+  { key: "atlas_v2_boot_timeout_ms",      default: "5400000",            numeric: { integer: true, min: 1000 }, adminVisible: false, description: "Maximum milliseconds to wait for ATLAS v2 boot/warm worker completion (default 90min — enough for a full first ONNX index on slower machines)" },
+  { key: "atlas_handoff_prefetch_timeout_ms", default: "90000",          numeric: { integer: true, min: 1000 }, adminVisible: false, description: "Maximum milliseconds to wait for ATLAS handoff prefetch before deterministic fallback (default 90s — covers the composed tree and survey prefetch under contention)" },
+  { key: "atlas_v2_boot_soft_timeout_ms", default: "15000",              numeric: { integer: true, min: 0 }, adminVisible: false, description: "Milliseconds before ATLAS boot warmup automatically continues in the background; 0 waits for completion" },
+  { key: "atlas_embedded_timeout_ms",     default: "90000",              numeric: { integer: true, min: 1000 }, adminVisible: false, description: "Default timeout in milliseconds for embedded ATLAS tool calls (default 90s — survives contention)" },
+  { key: "atlas_embedded_queue_wait_ms",  default: "90000",              numeric: { integer: true, min: 0 }, adminVisible: false, description: "Maximum milliseconds embedded ATLAS calls wait for protected ATLAS assets (default 90s)" },
+  { key: "atlas_job_cache_ttl_ms",        default: "300000",             numeric: { integer: true, min: 0 }, adminVisible: false, description: "TTL in milliseconds for per-job embedded ATLAS result cache entries" },
+  { key: "atlas_prefetch_cache_ttl_ms",   default: "600000",             numeric: { integer: true, min: 0 }, adminVisible: false, description: "TTL in milliseconds for ATLAS prefetch cache entries" },
+  { key: "atlas_corruption_cooldown_ms",  default: "120000",             numeric: { integer: true, min: 0 }, adminVisible: false, description: "Cooldown in milliseconds after ATLAS graph corruption before retrying embedded ATLAS" },
+  { key: "atlas_job_cache",               default: "true",               valueType: "boolean", adminVisible: false, description: "Cache repeated read-only embedded ATLAS tool results within a single job" },
+];

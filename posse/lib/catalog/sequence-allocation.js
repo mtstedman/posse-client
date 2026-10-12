@@ -1,3 +1,4 @@
+import { readonlySet } from "./readonly-collections.js";
 // Sequence-allocation files: version pins and migration manifests that hand
 // out the next number of a shared sequence (schema version, migration chain
 // index). Two in-flight work items that both edit one of these each claim the
@@ -12,14 +13,14 @@
 //
 // Pure data and derived lookup only; no I/O.
 
-export const SEQUENCE_ALLOCATION_MANIFEST_BASENAMES = new Set([
+export const SEQUENCE_ALLOCATION_MANIFEST_BASENAMES = readonlySet([
   "migration-chain.json",
   "migration_chain.json",
   "migration-manifest.json",
   "migration_manifest.json",
 ]);
 
-export const SEQUENCE_ALLOCATION_SCHEMA_PIN_BASENAMES = new Set([
+export const SEQUENCE_ALLOCATION_SCHEMA_PIN_BASENAMES = readonlySet([
   "SCHEMA_VERSION",
   "SCHEMA_VERSION.txt",
   "schema_version",
@@ -29,13 +30,13 @@ export const SEQUENCE_ALLOCATION_SCHEMA_PIN_BASENAMES = new Set([
   ".schema-version",
 ]);
 
-export const SEQUENCE_ALLOCATION_DIRECTORY_PIN_BASENAMES = new Set([
+export const SEQUENCE_ALLOCATION_DIRECTORY_PIN_BASENAMES = readonlySet([
   "VERSION",
   "VERSION.txt",
   "version.txt",
 ]);
 
-export const SEQUENCE_ALLOCATION_DATABASE_DIR_SEGMENTS = new Set([
+export const SEQUENCE_ALLOCATION_DATABASE_DIR_SEGMENTS = readonlySet([
   "db",
   "database",
   "databases",

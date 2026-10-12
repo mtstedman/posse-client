@@ -1,3 +1,4 @@
+import { readonlySet } from "./readonly-collections.js";
 // ATLAS-domain catalogue.
 //
 // Phase names, transport choices, vector backends, role order, server defaults,
@@ -56,42 +57,43 @@ export const ATLAS_V2_MODE_VALUES = Object.freeze([
   Object.freeze({ value: "v2", label: "v2 (deprecated alias for on)" }),
   Object.freeze({ value: "required", label: "required (v2 fail-closed)" }),
 ]);
-export const VALID_ATLAS_V2_MODES = new Set(
+export const VALID_ATLAS_V2_MODES = readonlySet(
   ATLAS_V2_MODE_VALUES.map((entry) => (entry && typeof entry === "object" ? entry.value : entry)),
 );
 
 export const ATLAS_PHASE_VALUES = Object.freeze(["research", "planning", "assessment", "dev"]);
-export const VALID_ATLAS_PHASES = new Set(ATLAS_PHASE_VALUES);
+export const VALID_ATLAS_PHASES = readonlySet(ATLAS_PHASE_VALUES);
 
 export const ATLAS_TRANSPORT_VALUES = Object.freeze(["v2"]);
-export const VALID_ATLAS_TRANSPORTS = new Set(ATLAS_TRANSPORT_VALUES);
+export const VALID_ATLAS_TRANSPORTS = readonlySet(ATLAS_TRANSPORT_VALUES);
 
 export const ATLAS_BOOT_REINDEX_POLICY_VALUES = Object.freeze(["always", "missing", "smart"]);
-export const VALID_ATLAS_BOOT_REINDEX_POLICIES = new Set(ATLAS_BOOT_REINDEX_POLICY_VALUES);
+export const VALID_ATLAS_BOOT_REINDEX_POLICIES = readonlySet(ATLAS_BOOT_REINDEX_POLICY_VALUES);
 
 export const ATLAS_SCIP_RESTAGE_POLICY_VALUES = Object.freeze(["never", "missing", "smart", "always"]);
-export const VALID_ATLAS_SCIP_RESTAGE_POLICIES = new Set(ATLAS_SCIP_RESTAGE_POLICY_VALUES);
+export const VALID_ATLAS_SCIP_RESTAGE_POLICIES = readonlySet(ATLAS_SCIP_RESTAGE_POLICY_VALUES);
 export const ATLAS_SCIP_MAX_AGE_HOURS_DEFAULT = 24;
 
 export const ATLAS_AUTO_FEEDBACK_VALUES = Object.freeze(["off", "dry-run", "write"]);
-export const VALID_ATLAS_AUTO_FEEDBACK_MODES = new Set(ATLAS_AUTO_FEEDBACK_VALUES);
+export const VALID_ATLAS_AUTO_FEEDBACK_MODES = readonlySet(ATLAS_AUTO_FEEDBACK_VALUES);
 
 export const ATLAS_TREE_COMPRESSION_MODE_VALUES = Object.freeze(["off", "deterministic", "ml"]);
-export const VALID_ATLAS_TREE_COMPRESSION_MODES = new Set(ATLAS_TREE_COMPRESSION_MODE_VALUES);
+export const VALID_ATLAS_TREE_COMPRESSION_MODES = readonlySet(ATLAS_TREE_COMPRESSION_MODE_VALUES);
 
 // Historical raw values that mean "v2 is OFF". Kept for the mode normalizer
 // so older persisted/settings values degrade predictably.
-export const ATLAS_V2_FLAG_OFF_VALUES = new Set(["0", "false", "no", "off", "legacy"]);
+export const ATLAS_V2_FLAG_OFF_VALUES = readonlySet(["0", "false", "no", "off", "legacy"]);
 
 // Historical/raw truthy values that collapse to the canonical `on` mode.
-// Other authority modes (`shadow`, `preferred`, `required`) are kept distinct.
-export const ATLAS_V2_FLAG_ON_VALUES = new Set(["1", "true", "yes", "on", "v2"]);
+// Authority-mode normalization handles the deprecated shadow/preferred aliases
+// and the fail-closed required mode separately.
+export const ATLAS_V2_FLAG_ON_VALUES = readonlySet(["1", "true", "yes", "on", "v2"]);
 
 // ATLAS SCIP mode is an admin/DB-backed setting. `on` consumes staged `.scip`
 // files and attempts to stage one first when an indexer command is configured
 // or auto-detected.
 export const ATLAS_SCIP_MODE_VALUES = Object.freeze(["off", "on", "on-demand", "both"]);
-export const VALID_ATLAS_SCIP_MODES = new Set(ATLAS_SCIP_MODE_VALUES);
+export const VALID_ATLAS_SCIP_MODES = readonlySet(ATLAS_SCIP_MODE_VALUES);
 
 // Languages with centrally managed SCIP indexer entries. This list feeds both
 // the admin selector and the stager's auto-detection filter.
@@ -109,7 +111,7 @@ export const ATLAS_SCIP_LANGUAGE_OPTIONS = Object.freeze([
 ]);
 export const ATLAS_SCIP_LANGUAGE_VALUES = Object.freeze(ATLAS_SCIP_LANGUAGE_OPTIONS.map((entry) => entry.value));
 export const ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES = Object.freeze(["typescript", "python", "php"]);
-export const VALID_ATLAS_SCIP_LANGUAGES = new Set(ATLAS_SCIP_LANGUAGE_VALUES);
+export const VALID_ATLAS_SCIP_LANGUAGES = readonlySet(ATLAS_SCIP_LANGUAGE_VALUES);
 
 // Installation-level runners made available to the deterministic test tool
 // for every selected language. Python is provisioned by Posse because pytest
@@ -222,7 +224,7 @@ export const ATLAS_EMBEDDING_MODEL_OPTIONS = Object.freeze([
   Object.freeze({ value: ATLAS_JINA_MODEL.modelId, label: ATLAS_JINA_MODEL.label }),
   Object.freeze({ value: ATLAS_CODERANK_MODEL.modelId, label: ATLAS_CODERANK_MODEL.label }),
 ]);
-export const VALID_ATLAS_EMBEDDING_MODEL_IDS = new Set(
+export const VALID_ATLAS_EMBEDDING_MODEL_IDS = readonlySet(
   ATLAS_EMBEDDING_MODEL_OPTIONS.map((entry) => entry.value),
 );
 export const DEFAULT_ATLAS_EMBEDDING_MODEL_ID = ATLAS_JINA_MODEL.modelId;

@@ -1,3 +1,5 @@
+import { looksReDosProne } from "../../../../../shared/format/functions/regex-risk.js";
+import { truncateUtf8String } from "../../../../../shared/format/functions/utf8-truncate.js";
 // @ts-check
 //
 // file.read handler. Reads a non-indexed file (e.g. JSON, YAML, config)
@@ -283,21 +285,6 @@ function truncateUtf8AtLineBoundary(content, maxBytes) {
   return { content: kept.join("\n"), truncated: true };
 }
 
-/**
- * @param {string} text
- * @param {number} maxBytes
- */
-function truncateUtf8String(text, maxBytes) {
-  let used = 0;
-  let out = "";
-  for (const char of String(text || "")) {
-    const next = Buffer.byteLength(char, "utf8");
-    if (used + next > maxBytes) break;
-    out += char;
-    used += next;
-  }
-  return out;
-}
 
 /**
  * @param {string} content
@@ -411,18 +398,6 @@ export function searchLinesWithBudget(lines, patternSource, timeBudgetMs = SEARC
   });
 }
 
-/**
- * Very small guard for common catastrophic-backtracking shapes. Suspicious
- * patterns are treated as literal text rather than evaluated as regexes.
- *
- * @param {string} pattern
- * @returns {boolean}
- */
-function looksReDosProne(pattern) {
-  return /\([^)]*[+*][^)]*\)[+*{]/.test(pattern)
-    || /(\.\*){3,}/.test(pattern)
-    || /\[[^\]]+\][+*]\s*[+*{]/.test(pattern);
-}
 
 /**
  * @param {string} value

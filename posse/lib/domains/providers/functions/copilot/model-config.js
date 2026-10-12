@@ -1,4 +1,6 @@
-import { getSetting } from "../../../queue/functions/index.js";
+import { readModelSetting } from "../shared/setting-read.js";
+export { readModelSetting } from "../shared/setting-read.js";
+import "../../../queue/functions/index.js";
 import { getProviderTierDefaults } from "../model-catalog.js";
 import { escalateModelTier, getMaxTurnsForProvider } from "../shared/turns.js";
 
@@ -20,14 +22,6 @@ export const MODEL_TIERS = {
   },
 };
 
-export function readModelSetting(key) {
-  try {
-    const value = getSetting(key);
-    return value && String(value).trim() ? String(value).trim() : null;
-  } catch {
-    return null;
-  }
-}
 
 export function getModelOverride() {
   return readModelSetting("copilot_model") || null;

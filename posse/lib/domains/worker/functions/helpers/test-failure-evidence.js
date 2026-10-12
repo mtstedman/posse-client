@@ -154,17 +154,30 @@ function looksLikeStructuredTestReport(output) {
     || (/^PHPUnit\s+\d+/m.test(text) && /^(?:There (?:was|were) \d+ (?:errors?|failures?):|Tests:\s*\d+)/m.test(text));
 }
 
-export function testFailureFingerprint(result = {}) {
+function relativeExecutionPaths(value, executionRoot) {
+  const text = String(value || "");
+  if (!executionRoot) return text;
+  const root = String(executionRoot).replace(/[\\/]+$/u, "");
+  if (!root) return text;
+  const pattern = root.split(/[\\/]/u).map(escapeRegExp).join("[\\\\/]");
+  return text.replace(new RegExp(`${pattern}[\\\\/]`, process.platform === "win32" ? "gi" : "g"), "");
+}
+
+export function testFailureFingerprint(result = {}, { executionRoot = result.execution_root || null } = {}) {
   if (result.status === "passed") return null;
+  // Compare the same relative source paths across a working checkout and an
+  // isolated baseline. Keep the captured output intact as execution evidence.
+  const stdout = relativeExecutionPaths(result.stdout, executionRoot);
+  const stderr = relativeExecutionPaths(result.stderr, executionRoot);
   const report = result.stdout_truncated || result.stderr_truncated
-    ? null : structuredFailureReport(result.stdout);
+    ? null : structuredFailureReport(stdout);
   return createHash("sha256").update(JSON.stringify([
     result.status,
     result.code ?? result.exit_code ?? "unknown",
     result.signal ?? null,
     report ? { framework: report.framework || "node", failures: report.failures }
-      : normalizeFailureFingerprintText(result.stdout),
-    normalizeFailureFingerprintText(result.stderr),
+      : normalizeFailureFingerprintText(stdout),
+    normalizeFailureFingerprintText(stderr),
   ])).digest("hex");
 }
 
@@ -172,10 +185,10 @@ export function testFailureFingerprint(result = {}) {
  * One check's failure identity, or null when the check passed or its output
  * cannot be compared (truncated, or a structured report that did not parse).
  */
-export function checkRunFailureFingerprint(run = {}) {
+export function checkRunFailureFingerprint(run = {}, options = {}) {
   if (!run || run.status === "passed" || run.stdout_truncated || run.stderr_truncated) return null;
   if (looksLikeStructuredTestReport(run.stdout) && !structuredFailureReport(run.stdout)) return null;
-  return testFailureFingerprint(run);
+  return testFailureFingerprint(run, options);
 }
 
 /**

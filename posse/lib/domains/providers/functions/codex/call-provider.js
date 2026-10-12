@@ -144,7 +144,7 @@ export async function callProvider(promptText, {
     const workingDir = providerPaths.cwd;
     const mcpWorkspaceCwd = mcpCwd ? path.resolve(mcpCwd) : workingDir;
     const resumeSessionHandle = normalizeCodexSessionHandle(priorSessionHandle);
-    const assignmentUnit = assignmentUnitForAtlas;
+
     const { attachment: atlasAttachment } = preparedAtlasConfig;
     const executionAtlasConfig = withAtlasExecutionPolicySnapshot(atlasConfig, atlasAttachment);
     const atlasMethodForStats = disableAtlas ? null : (atlasAttachment?.method || "baseline");

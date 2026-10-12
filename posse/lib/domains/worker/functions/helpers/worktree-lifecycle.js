@@ -10,25 +10,9 @@ import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { slugify } from "../../../../shared/format/functions/slug.js";
 import { recordWaitingLaneTelemetry } from "../../../observability/functions/waiting-lane-telemetry.js";
-import { cleanupArtifactDirs, cleanupArtifactDirsAsync, isArtifactMode, contextDir, wiScopeId } from "../../../artifacts/functions/index.js";
+import { cleanupArtifactDirsAsync, isArtifactMode, contextDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../queue/functions/common.js";
-import {
-  clearWaitingLanePreparedAssetProof,
-  completeAttempt,
-  crossWiSyncSourceRejection,
-  getJob,
-  getWaitingLanePreparation,
-  getWorkItem,
-  incrementAndCreateAttempt,
-  logEvent,
-  setJobError,
-  setWorkItemBranch,
-  poisonWaitingLanePreparation,
-  retireWaitingLanePreparation,
-  rollbackPendingCrossWiSyncHandoffsForJob,
-  storeArtifact,
-  updateJobPayload,
-} from "../../../queue/functions/index.js";
+import { clearWaitingLanePreparedAssetProof, completeAttempt, crossWiSyncSourceRejection, getJob, getWaitingLanePreparation, getWorkItem, incrementAndCreateAttempt, logEvent, setJobError, setWorkItemBranch, poisonWaitingLanePreparation, retireWaitingLanePreparation, rollbackPendingCrossWiSyncHandoffsForJob, storeArtifact, updateJobPayload } from "../../../queue/functions/index.js";
 
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 const SETUP_DEFER_NOTICE_INTERVAL_MS = 30_000;
@@ -42,73 +26,23 @@ const MAX_SETUP_TRANSIENT_INFRA_RETRIES = 3;
 const setupDeferNoticeLastSeen = new Map();
 import { MUTATING_JOB_TYPES, WORKTREE_JOB_TYPES } from "../../../../catalog/job.js";
 import { jobNeedsGitWorktreeAsync } from "../../../git/functions/policy.js";
-import {
-  disposeWorkItemAtlasGraph,
-  ensureWorkItemAtlasJoinAsync,
-  getAtlasIntegrationConfig,
-} from "../../../integrations/functions/atlas.js";
-import {
-  emitDevLeased as emitAtlasV2DevLeased,
-  emitWiCleanup as emitAtlasV2WiCleanup,
-  isAtlasV2EmissionEnabled,
-} from "../../../atlas/classes/v2/PipelineHooks.js";
-import {
-  classifyDirtyWorktreeAsync,
-  configureWorktreeScopeAsync,
-  gitWorktreeAddAsync,
-  isMergeInProgressAsync,
-  mergeTargetIntoWorktreeAsync,
-  resolveTargetBranchAsync,
-  safeSnapshotAndRemoveWorktreeAsync,
-  snapshotAndResetDirtyWorktreeAsync,
-  withWorktreeLockAsync,
-  worktreePathAsync,
-} from "../../../git/functions/worktree.js";
-import {
-  gitCurrentHashAsync,
-  gitExecAsync,
-} from "../../../git/functions/utils.js";
+import { disposeWorkItemAtlasGraph, ensureWorkItemAtlasJoinAsync, getAtlasIntegrationConfig } from "../../../integrations/functions/atlas.js";
+import { emitDevLeased as emitAtlasV2DevLeased, emitWiCleanup as emitAtlasV2WiCleanup, isAtlasV2EmissionEnabled } from "../../../atlas/classes/v2/PipelineHooks.js";
+import { classifyDirtyWorktreeAsync, configureWorktreeScopeAsync, gitWorktreeAddAsync, isMergeInProgressAsync, mergeTargetIntoWorktreeAsync, resolveTargetBranchAsync, safeSnapshotAndRemoveWorktreeAsync, snapshotAndResetDirtyWorktreeAsync, withWorktreeLockAsync, worktreePathAsync } from "../../../git/functions/worktree.js";
+import { gitCurrentHashAsync, gitExecAsync } from "../../../git/functions/utils.js";
 import { isAbortError, yieldNow } from "../../../runtime/functions/yield.js";
-import {
-  finalizePrepTrace,
-  startPrepTrace,
-  withPhase,
-} from "./prep-telemetry.js";
+import { finalizePrepTrace, startPrepTrace, withPhase } from "./prep-telemetry.js";
 import { isTransientCommitInfraFailure } from "./commit-infra.js";
 import { isIterativeWorkItemActive } from "../../../planning/functions/state.js";
-import {
-  activeLiveSiblingWriteLocks,
-  siblingLockSummary,
-} from "../../../queue/functions/sibling-locks.js";
+import { activeLiveSiblingWriteLocks, siblingLockSummary } from "../../../queue/functions/sibling-locks.js";
 import { withBranchLockAsync } from "../../../git/functions/worktree-locks.js";
 import { removePreparedWorktreeIfSafeAsync } from "../../../git/functions/prepared-worktree-recovery.js";
 import { tombstoneWaitingLanePreparationForCleanup } from "../../../git/functions/waiting-lane-cleanup.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
-import {
-  clearActiveWorktreeSentinel,
-  isSentinelProcessAlive,
-  readActiveWorktreeSentinel,
-  sentinelHasOtherLiveJob,
-  sentinelJobStillActive,
-  writeActiveWorktreeSentinel,
-} from "./worktree-sentinel.js";
-import {
-  classifyIgnorableSetupDirty,
-  inspectIgnorableSetupDirty,
-  isRuntimeResidualPath,
-  normalizeRepoPath,
-  parsePorcelainEntries,
-  payloadExplicitlyClaimsPath,
-  snapshotAndResetSetupBlockingPathsAsync,
-  targetedSetupDirtyRecoveryEligible,
-} from "./worktree-dirty-classification.js";
+import { clearActiveWorktreeSentinel, isSentinelProcessAlive, readActiveWorktreeSentinel, sentinelHasOtherLiveJob, sentinelJobStillActive, writeActiveWorktreeSentinel } from "./worktree-sentinel.js";
+import { classifyIgnorableSetupDirty, inspectIgnorableSetupDirty, isRuntimeResidualPath, normalizeRepoPath, parsePorcelainEntries, payloadExplicitlyClaimsPath, snapshotAndResetSetupBlockingPathsAsync, targetedSetupDirtyRecoveryEligible } from "./worktree-dirty-classification.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
-import {
-  jobHasSetupCleanupPrecedence,
-  nextTransientSetupRetryPayload,
-  setupCleanupPrecedenceJobId,
-  transientSetupRetryCountFromPayload,
-} from "./worktree-setup-policy.js";
+import { jobHasSetupCleanupPrecedence, nextTransientSetupRetryPayload, transientSetupRetryCountFromPayload } from "./worktree-setup-policy.js";
 import { pendingCrossWiFileSyncs } from "./cross-wi-sync.js";
 import { tryActivateWaitingLaneForJobAsync } from "./waiting-lane-activation.js";
 

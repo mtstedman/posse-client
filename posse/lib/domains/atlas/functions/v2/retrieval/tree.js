@@ -1,3 +1,4 @@
+import { missingTables } from "../ledger/missing-tables.js";
 // @ts-check
 //
 // Tree retrieval shims. Rust owns tree traversal, scope scoring, and expansion;
@@ -489,22 +490,6 @@ function treeRowsAvailable(db) {
   }
 }
 
-/**
- * @param {import("better-sqlite3").Database} db
- * @param {readonly string[]} tableNames
- */
-function missingTables(db, tableNames) {
-  try {
-    const present = new Set(db.prepare(
-      `SELECT name FROM sqlite_master
-       WHERE type = 'table'
-         AND name IN (${tableNames.map(() => "?").join(", ")})`,
-    ).all(...tableNames).map((row) => String(row.name || "")));
-    return tableNames.filter((name) => !present.has(name));
-  } catch {
-    return [...tableNames];
-  }
-}
 
 function normalizeScopeRefs(params = {}) {
   const refs = [];

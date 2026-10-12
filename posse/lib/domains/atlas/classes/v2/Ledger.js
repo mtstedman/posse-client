@@ -11,20 +11,11 @@
 // short transaction.
 
 import path from "path";
-import Database from "better-sqlite3";
 import { isCanonicalRepoPath } from "../../functions/v2/paths.js";
 import { isContentHash } from "../../functions/v2/hash.js";
 import { runSqliteWrite } from "../../../../shared/concurrency/functions/sqlite-gate.js";
-import {
-  ensureLayerRevisionTracking,
-  openLedgerDb,
-  openLedgerDbReadOnly,
-} from "../../functions/v2/ledger/schema.js";
-import {
-  ensureLedgerNativeAsync,
-  invalidateStorageCacheNativeAsync,
-  writeLedgerNativeAsync,
-} from "../../functions/v2/native/storage.js";
+import { ensureLayerRevisionTracking, openLedgerDb, openLedgerDbReadOnly } from "../../functions/v2/ledger/schema.js";
+import { ensureLedgerNativeAsync, invalidateStorageCacheNativeAsync, writeLedgerNativeAsync } from "../../functions/v2/native/storage.js";
 import { BlobStore } from "./ledger/BlobStore.js";
 import { FeedbackStore } from "./ledger/FeedbackStore.js";
 import { Interner } from "./ledger/Interner.js";
@@ -48,11 +39,11 @@ const MAIN_BRANCH = "main";
 
 /** @implements {LedgerContract} */
 export class Ledger {
-  /** @type {Database.Database} */
+  /** @type {import("better-sqlite3").Database} */
   #db;
   /** @type {string} */
   #dbPath;
-  /** @type {Record<string, Database.Statement>} */
+  /** @type {Record<string, import("better-sqlite3").Statement>} */
   #stmt;
   /** @type {FeedbackStore} */
   #feedback;
@@ -785,7 +776,7 @@ export class Ledger {
    * needs read-only joins across blob_symbols / blob_edges that the
    * public API doesn't surface). External callers must use the public API.
    *
-   * @returns {Database.Database}
+   * @returns {import("better-sqlite3").Database}
    */
   _unsafeDb() {
     return this.#db;

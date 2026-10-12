@@ -1,3 +1,4 @@
+import { MODEL_TIER_ROLES } from "../../../catalog/scheduler-roles.js";
 // The runtime watchdog kills a job so its next attempt runs on a stronger
 // model (attempt N+1 escalates the tier). When the next attempt would run the
 // same model (already on the top tier, a pinned model name, or a preserved
@@ -15,9 +16,6 @@ import { getDefaultModelTierForRole } from "../../settings/functions/repository-
 // runtime cap, so a runaway worker still frees its compute slot.
 export const RUNTIME_NO_ESCALATION_BACKSTOP_MULTIPLIER = 3;
 
-// Job types whose attempts run a tiered model. Every other job type (promote,
-// atlas_warm, human_input, ...) is killed for runtime purely as stuck work.
-const MODEL_TIER_ROLES = new Set(["researcher", "planner", "dev", "assessor", "artificer"]);
 
 function jobPayload(job) {
   const raw = job?.payload_json;

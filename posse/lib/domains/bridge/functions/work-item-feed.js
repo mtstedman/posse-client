@@ -1,24 +1,14 @@
 import crypto from "node:crypto";
 import path from "node:path";
 
-import {
-  WORK_ITEM_ACTION_PROTOCOL,
-  WORK_ITEM_BOUNDS,
-  WORK_ITEM_FEED_EVENT_PROTOCOL,
-  WORK_ITEM_HISTORY_PROTOCOL,
-  WORK_ITEM_OVERVIEW_PROTOCOL,
-  WORK_ITEM_STATS_PROTOCOL,
-} from "../../../catalog/bridge.js";
-import { FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { WORK_ITEM_BOUNDS, WORK_ITEM_FEED_EVENT_PROTOCOL } from "../../../catalog/bridge.js";
+import { FAILED_JOB_STATUSES, OPEN_HUMAN_GATE_JOB_STATUSES, PENDING_HUMAN_GATE_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { LEGACY_REVIEW_CHOICE_IDS, validReviewChoiceIDs } from "../../../catalog/gate-actions.js";
 import { questionKindForReviewType } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import {
-  listRunTelemetryFiles,
-  readRunTelemetryEntries,
-} from "../../../shared/telemetry/functions/run-telemetry.js";
+import { listRunTelemetryFiles, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
 import { getSetting } from "../../queue/functions/settings.js";
 import { jobHasLiveLeaseAt } from "../../queue/functions/lease-state.js";
 import { redactBridgeValue } from "./redaction.js";
@@ -252,8 +242,8 @@ function questionStateForJob(job) {
   if (job?.human_gate_state === "resolved") return "answered";
   if (job?.human_gate_state === "superseded") return "rejected";
   if (job?.human_gate_state === "resolving") return "pending";
-  if (["queued", "waiting_on_human", "waiting_on_review"].includes(job?.status)) return "open";
-  if (["running", "assessing"].includes(job?.status)) return "pending";
+  if (OPEN_HUMAN_GATE_JOB_STATUSES.includes(job?.status)) return "open";
+  if (PENDING_HUMAN_GATE_JOB_STATUSES.includes(job?.status)) return "pending";
   if (job?.status === "succeeded") return "answered";
   if (FAILED_JOB_STATUS_SET.has(job?.status)) return "rejected";
   return "closed";

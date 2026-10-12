@@ -1,39 +1,22 @@
 // Runtime session orchestration for the run command.
 // Keeps the CLI entry point thin while preserving the existing command behavior.
 
-import readline from "readline";
-import { displayRoleForJobType } from "../../providers/functions/roles.js";
-import { ensureRemoteCatalogLoaded, getRemoteCatalog } from "../../providers/functions/model-catalog-store.js";
-import { describeModelCatalogWarning, validateConfiguredModels } from "../../providers/functions/model-catalog-validate.js";
-import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
-import { cancelOpenPushOfferGates } from "../../queue/functions/push-offer.js";
-import {
-  RUNTIME_STATUS_KEYS,
-  clearRuntimeStatus,
-  markCleanShutdown,
-  markForcedShutdown,
-  writeRuntimeStatus,
-} from "../../queue/functions/runtime-status.js";
-import { createBootPanel } from "./boot-panel.js";
-import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
-import { setConductorKeepWarm, closeSharedConductor } from "../../atlas/functions/v2/parse/conductor.js";
-import { renderNeuralNetworkBanner } from "../../ui/functions/display/neural-network-banner.js";
+import "../../providers/functions/roles.js";
+import "../../providers/functions/model-catalog-store.js";
+import "../../providers/functions/model-catalog-validate.js";
+import "../../remote/functions/model-catalog-refresh.js";
+import "../../queue/functions/push-offer.js";
+import { markCleanShutdown, markForcedShutdown } from "../../queue/functions/runtime-status.js";
+import "./boot-panel.js";
+import "../../atlas/functions/v2/scip/indexers.js";
+import "../../atlas/functions/v2/parse/conductor.js";
+import "../../ui/functions/display/neural-network-banner.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isPushOfferJob } from "../../queue/functions/common.js";
 import { activeWorkItemDispositionGates } from "../../queue/functions/work-item-dispositions.js";
-import {
-  activeMergeFailureRecoveryGateId,
-  mergeVerificationReviewGateState,
-} from "../../queue/functions/merge-verification-review.js";
+import { activeMergeFailureRecoveryGateId, mergeVerificationReviewGateState } from "../../queue/functions/merge-verification-review.js";
 import { resolveGateReviewDiffTarget } from "../../queue/functions/gate-review-target.js";
-import {
-  CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
-  MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
-  MERGE_VERIFICATION_REVIEW_TYPE,
-  WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
-  humanGateStateAllowsAnswer,
-  humanInputChoicesForPayload,
-} from "../../../catalog/human-input.js";
+import { CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE, MERGE_FAILURE_RECOVERY_REVIEW_TYPE, MERGE_VERIFICATION_REVIEW_TYPE, WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE, humanGateStateAllowsAnswer, humanInputChoicesForPayload } from "../../../catalog/human-input.js";
 import { getHumanGate, listJobs } from "../../queue/functions/index.js";
 import { closeDb } from "../../../shared/storage/functions/index.js";
 import { flushEventsNow } from "../../queue/functions/events.js";
@@ -41,16 +24,14 @@ import { closeLog, log } from "../../../shared/telemetry/functions/logging/logge
 import { closeOutputLog } from "../../../shared/telemetry/functions/logging/output-log.js";
 import { closePromptLog } from "../../../shared/telemetry/functions/logging/prompt-log.js";
 import { closeObservationLog } from "../../observability/functions/observations.js";
-import { recordRunDiagnostic } from "../../../shared/telemetry/functions/run-diagnostics.js";
-import { ensureBootDependenciesInWorker, formatBootDependencySync } from "../../system/functions/dependency-sync.js";
-import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { ACTIVE_LEASE_STATUSES, LOCK_HOLDING_JOB_STATUSES } from "../../../catalog/job.js";
+import "../../../shared/telemetry/functions/run-diagnostics.js";
+import "../../system/functions/dependency-sync.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
-import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
-import { fit as fitAnsi } from "../../../shared/format/functions/ansi.js";
-import { nativeBinaries as defaultNativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
-import { daemonSupervisor as defaultDaemonSupervisor } from "../../../shared/tools/classes/daemon/index.js";
-import { persistentMcpOwner } from "../../../shared/tools/classes/PersistentMcpOwner.js";
+import "../../runtime/functions/paths.js";
+import "../../../shared/format/functions/ansi.js";
+import "../../../shared/tools/classes/BinaryManager.js";
+import "../../../shared/tools/classes/daemon/index.js";
+import "../../../shared/tools/classes/PersistentMcpOwner.js";
 
 export const PROVIDER_AUTH_WARMUP_TIMEOUT_MS = 30_000;
 export const PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS = 1_200;

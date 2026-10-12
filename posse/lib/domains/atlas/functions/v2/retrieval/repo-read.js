@@ -1,3 +1,4 @@
+import { SAME_NAME_SKIP_DIRS } from "../../../../../catalog/atlas-path-discovery.js";
 // @ts-check
 
 import fs from "node:fs";
@@ -132,7 +133,7 @@ function ioFailure(error, failure, relPath) {
 }
 
 const SAME_NAME_WALK_LIMIT = 40_000;
-const SAME_NAME_SKIP_DIRS = new Set([".git", "node_modules", ".posse", "target", "vendor", "dist", "build", "__pycache__"]);
+
 
 // A misremembered directory (packages/common/helpers/x.ts for
 // packages/core/helpers/x.ts) otherwise costs a search call to recover. List

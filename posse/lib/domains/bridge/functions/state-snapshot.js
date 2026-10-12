@@ -1,34 +1,14 @@
-import {
-  getEvents,
-  getEventsByWorkItem,
-  getEventsByWorkItemSinceId,
-  getEventsSinceId,
-  getHeadEventId,
-  getHumanGate,
-  getJob,
-  getWorkItem,
-  listJobs,
-  listJobsByWorkItem,
-  listWorkItems,
-} from "../../queue/functions/index.js";
-import {
-  isPushOfferJob,
-  TERMINAL_JOB_STATUSES,
-  TERMINAL_WORK_ITEM_STATUSES,
-} from "../../queue/functions/common.js";
+import { promptFromGatePayload } from "./gate-prompt.js";
+import { isReadyOneshotScopeSelection } from "./gate-readiness.js";
+import { getEvents, getEventsByWorkItem, getEventsByWorkItemSinceId, getEventsSinceId, getHeadEventId, getHumanGate, getJob, getWorkItem, listJobs, listJobsByWorkItem, listWorkItems } from "../../queue/functions/index.js";
+import { isPushOfferJob, TERMINAL_JOB_STATUSES, TERMINAL_WORK_ITEM_STATUSES } from "../../queue/functions/common.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/reviewable.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { composeInstanceStatus } from "./instance-status.js";
-import {
-  BACKGROUND_JOB_TYPES,
-  ONESHOT_SCOPE_SELECTION_SUBTYPE,
-} from "../../../catalog/job.js";
+import { BACKGROUND_JOB_TYPES } from "../../../catalog/job.js";
 import { BRIDGE_OPEN_GATE_STATUSES } from "../../../catalog/bridge.js";
-import {
-  humanGateStateAllowsAnswer,
-  humanGateStateIsActive,
-} from "../../../catalog/human-input.js";
+import { humanGateStateAllowsAnswer, humanGateStateIsActive } from "../../../catalog/human-input.js";
 import { bridgeGateAnswerContract, bridgeGateKindForJob } from "./gate-contract.js";
 import { buildReviewBrief } from "./review-brief.js";
 import { pairingSessionSummary } from "../../pairing/functions/work-items.js";
@@ -50,14 +30,7 @@ function boundedLimit(value, fallback = DEFAULT_LIMIT) {
   return Math.max(1, Math.min(MAX_LIMIT, n));
 }
 
-function parseJsonField(text) {
-  if (text == null || text === "") return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
+
 
 function boundedText(value, maxChars = MAX_SUMMARY_CHARS) {
   if (value == null) return null;
@@ -246,23 +219,7 @@ export function projectBridgeWorkItemFromJobs(workItem, jobs = []) {
   });
 }
 
-function promptFromGatePayload(payload, fallback = null) {
-  if (Array.isArray(payload?.questions) && payload.questions.length > 0) {
-    return payload.questions.map((question) => String(question || "").trim()).filter(Boolean).join("\n\n");
-  }
-  if (typeof payload?.prompt === "string" && payload.prompt.trim()) return payload.prompt.trim();
-  if (typeof payload?.response_prompt === "string" && payload.response_prompt.trim()) {
-    return payload.response_prompt.trim();
-  }
-  return fallback;
-}
 
-function isReadyOneshotScopeSelection(payload = {}) {
-  const isScopeSelection = payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
-    || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE;
-  if (!isScopeSelection) return true;
-  return payload?.selector?.status === "ready" || payload?.oneshot_scope?.status === "ready";
-}
 
 function gateRetryChain(originalJobId) {
   const lineage = [];
@@ -305,7 +262,7 @@ export function normalizeGate(job) {
     work_item_id: job.work_item_id == null ? null : Number(job.work_item_id),
     kind,
     title: job.title || "",
-    prompt: promptFromGatePayload(payload),
+    prompt: promptFromGatePayload(payload, { responsePrompt: true }),
     opened_at: job.updated_at || job.created_at || null,
     status: job.status,
     ...(reviewBrief ? { review_brief: reviewBrief } : {}),

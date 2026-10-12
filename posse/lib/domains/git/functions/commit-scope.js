@@ -26,11 +26,7 @@ import { runGitNativeMethod } from "./native/invoke.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { getRuntimeDbPath, getRuntimeResourcesDir, getRuntimeRoot, normalizeProjectDir } from "../../runtime/functions/paths.js";
 import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
-import {
-  classifyScopedCommit,
-  collectScopedCommitDiff,
-  getGitCommitStyle,
-} from "./commit-message-policy.js";
+import { classifyScopedCommit, collectScopedCommitDiff, getGitCommitStyle } from "./commit-message-policy.js";
 
 const GIT_COMMAND_TIMEOUT_MS = 60_000;
 const DEFAULT_GIT_COMMIT_CORE_TIMEOUT_MS = 60_000;
@@ -1102,11 +1098,11 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
     };
     throwIfOutOfScopeDirty();
 
-    const transactionPaths = [...new Set([
+    ([...new Set([
       ...nativeModifyPaths,
       ...nativeCreatePaths,
       ...nativeDeletePaths,
-    ])].sort((left, right) => norm(left).localeCompare(norm(right)));
+    ])].sort((left, right) => norm(left).localeCompare(norm(right))));
     const preflightPaths = expectedNativeChanges().map((entry) => entry.path);
 
     if (preflightPaths.length > 0) {

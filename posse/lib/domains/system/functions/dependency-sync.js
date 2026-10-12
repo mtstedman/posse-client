@@ -1,21 +1,19 @@
+import { NODE_LOCKS } from "../../../catalog/node-package-managers.js";
+import { DEPENDENCY_SCAN_SKIP_DIRS } from "../../../catalog/dependency-discovery.js";
 // @ts-check
 //
 // Boot-time dependency repair. This keeps startup honest by syncing local
 // package environments to checked-in manifests before workers start using
 // SCIP, registered tests, or repo-local toolchains.
 
+import { canonicalJsonNativePrimitives } from "../../../shared/format/functions/canonical-json.js";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { spawn, spawnSync } from "child_process";
 
-import {
-  ATLAS_LANGUAGE_TEST_TOOLCHAINS,
-} from "../../../catalog/atlas.js";
-import {
-  DEPENDENCY_INSTALL_ENV_PREFIXES,
-  DEPENDENCY_SYNC_INSTALL_ENV_KEYS,
-} from "../../../catalog/process.js";
+import { ATLAS_LANGUAGE_TEST_TOOLCHAINS } from "../../../catalog/atlas.js";
+import { DEPENDENCY_INSTALL_ENV_PREFIXES, DEPENDENCY_SYNC_INSTALL_ENV_KEYS } from "../../../catalog/process.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
 import { detectNodePackageManager } from "../../../shared/tools/functions/node-package-manager.js";
@@ -28,33 +26,15 @@ import { adminGitExec } from "../../git/functions/admin-git-exec.js";
 import { installScipLanguageDependencies } from "../../atlas/functions/v2/scip/dependencies.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
 import { normalizeScipLanguages } from "../../atlas/functions/v2/scip/languages.js";
-import {
-  DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS,
-  inspectJinaModel as inspectJinaModelDefault,
-  pullJinaModel as pullJinaModelDefault,
-} from "../../atlas/functions/v2/embeddings/jina-model.js";
-import {
-  DEFAULT_POSSE_ROOT,
-  getPythonToolchainExecutable,
-  listPythonProjectManifests,
-  resolveManagedPythonRuntimeForProject,
-} from "../../runtime/functions/python-runtime.js";
+import { DEFAULT_JINA_MODEL_OPERATION_TIMEOUT_MS, inspectJinaModel as inspectJinaModelDefault, pullJinaModel as pullJinaModelDefault } from "../../atlas/functions/v2/embeddings/jina-model.js";
+import { DEFAULT_POSSE_ROOT, getPythonToolchainExecutable, listPythonProjectManifests, resolveManagedPythonRuntimeForProject } from "../../runtime/functions/python-runtime.js";
 import { ensureManagedPythonToolchain } from "../../environments/functions/python-toolchain-install.js";
-import {
-  ensureManagedPythonTestToolchain,
-  inspectManagedPythonTestToolchain,
-} from "../../environments/functions/python-test-toolchain.js";
+import { ensureManagedPythonTestToolchain, inspectManagedPythonTestToolchain } from "../../environments/functions/python-test-toolchain.js";
 import { ensureComposer } from "../../environments/functions/composer-bootstrap.js";
 import { commandSpawnSpec, findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 import { glibcFloorProblem, runtimeGlibcVersion } from "../../../shared/platform/functions/native-runtime-floor.js";
-import {
-  filterProcessEnv,
-  isUnboundedCommandTimeout,
-} from "../../../shared/platform/functions/process-env.js";
-import {
-  managedInstallStateRoot,
-  managedToolRoot,
-} from "../../../shared/platform/functions/managed-install-state.js";
+import { filterProcessEnv, isUnboundedCommandTimeout } from "../../../shared/platform/functions/process-env.js";
+import { managedInstallStateRoot, managedToolRoot } from "../../../shared/platform/functions/managed-install-state.js";
 import { npmInstalledPackageDirs } from "./node-lock-validation.js";
 import { repairPosseNodeTreeUnlocked } from "./posse-node-repair.js";
 
@@ -122,14 +102,6 @@ function hashText(value) {
   return crypto.createHash("sha256").update(String(value || "")).digest("hex");
 }
 
-function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
 function uniqueByPath(entries) {
   const seen = new Set();
   const out = [];
@@ -143,31 +115,9 @@ function uniqueByPath(entries) {
   return out;
 }
 
-const DEPENDENCY_SCAN_SKIP_DIRS = new Set([
-  ".git",
-  ".hg",
-  ".svn",
-  ".posse",
-  ".posse-worktrees",
-  ".posse-test-suites",
-  "node_modules",
-  "vendor",
-  "dist",
-  "build",
-  "coverage",
-  ".next",
-  ".nuxt",
-  ".cache",
-  "__pycache__",
-]);
 
 function hasNodeLock(root) {
-  return fileExists(path.join(root, "package-lock.json"))
-    || fileExists(path.join(root, "npm-shrinkwrap.json"))
-    || fileExists(path.join(root, "pnpm-lock.yaml"))
-    || fileExists(path.join(root, "yarn.lock"))
-    || fileExists(path.join(root, "bun.lockb"))
-    || fileExists(path.join(root, "bun.lock"));
+  return NODE_LOCKS.some(([, lock]) => fileExists(path.join(root, lock)));
 }
 
 function discoverLockBackedNodeRoots(projectDir, { maxDepth = 3, maxRoots = 16 } = {}) {
@@ -239,7 +189,7 @@ function nodeManifestHash(root) {
     const rel = path.relative(root, file).replace(/\\/g, "/");
     if (rel === "package.json") {
       const pkg = readJson(file) || {};
-      return `${rel}\0${stableJson({
+      return `${rel}\0${canonicalJsonNativePrimitives({
         dependencies: pkg.dependencies || {},
         devDependencies: pkg.devDependencies || {},
         optionalDependencies: pkg.optionalDependencies || {},
@@ -440,11 +390,11 @@ function inspectNodeProject(root) {
     path.join(root, "bun.lock"),
   ];
   const installStamp = path.join(nodeModules, ".package-lock.json");
-  const manifestStamp = Math.max(
+  (Math.max(
     safeMtimeMs(packageJson),
     ...lockCandidates.map(safeMtimeMs),
-  );
-  const installedStamp = safeMtimeMs(installStamp) || safeMtimeMs(nodeModules);
+  ));
+  (safeMtimeMs(installStamp) || safeMtimeMs(nodeModules));
   const { required, optional } = packageNames(pkg);
   const missingRequired = required.filter((name) => !dirExists(packageDir(root, name)));
   const missingOptional = optional.filter((name) => !dirExists(packageDir(root, name)));
@@ -1142,7 +1092,6 @@ async function ensurePythonProject(entry, opts) {
   const after = inspectPythonProject(entry.root, inspectOpts);
   return { ...after, label: entry.label, ok: after.status === "ok", status: after.status === "ok" ? "installed" : "failed", action: "install", message: `python environment installed (${dependencyInstall ? `${dependencyInstall.detail} + ` : ""}pytest)` };
 }
-
 
 function inspectComposerProject(root) {
   const composerJson = path.join(root, "composer.json");

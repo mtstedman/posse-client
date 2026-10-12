@@ -1,3 +1,7 @@
+import { providerPauseClearTracker } from "../classes/ProviderPauseClearTracker.js";
+import { getAtlasIntegrationConfig } from "../../integrations/functions/atlas.js";
+import { NATIVE_API_PROVIDERS } from "../../../catalog/provider.js";
+import { readModelSetting as readDbSetting } from "./shared/setting-read.js";
 // lib/provider/provider.js — Provider router
 //
 // Selects the right LLM provider (claude, anthropic, openai, codex, grok, copilot) per role based on
@@ -7,9 +11,9 @@
 // Multi-provider: settings support comma-separated lists (e.g. "claude,openai").
 // Execution treats the configured list as an equal-weight pool.
 
-import { getArtifactProtocol, getConfiguredImageProviders } from "../../artifacts/functions/index.js";
-import { getAtlasIntegrationConfig, getAtlasProviderSupport } from "../../integrations/functions/atlas.js";
-import { getSetting, setSetting } from "../../settings/functions/repository-settings.js";
+import { getConfiguredImageProviders } from "../../artifacts/functions/index.js";
+import { getAtlasProviderSupport } from "../../integrations/functions/atlas.js";
+import { setSetting } from "../../settings/functions/repository-settings.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { classifyProviderError } from "./shared/api-resilience.js";
 import { PROVIDER_QUOTA_SCOPES } from "../../../catalog/provider.js";
@@ -21,11 +25,7 @@ import { verifyProviderDispatchCapabilitiesSync } from "../../../shared/native/f
 import { getDefaultTierModel, PROVIDER_OPTIONS } from "./model-catalog.js";
 import { isProviderEnabledByCatalog } from "./model-catalog-store.js";
 import { resolveEffectiveTierModel } from "./model-catalog-validate.js";
-import {
-  DELEGATION_PROVIDER_ROLE_NAMES,
-  PROVIDER_ROLE_NAMES,
-  providerRoleForJobType,
-} from "./roles.js";
+import { DELEGATION_PROVIDER_ROLE_NAMES, PROVIDER_ROLE_NAMES, providerRoleForJobType } from "./roles.js";
 
 const PERSISTED_RATE_LIMIT_MIN_SECONDS = 60;
 
@@ -135,14 +135,6 @@ function parseProviderList(value) {
   return providers.length > 0 ? providers : ["claude"];
 }
 
-function readDbSetting(key) {
-  try {
-    const value = getSetting(key);
-    return value && String(value).trim() ? String(value).trim() : null;
-  } catch {
-    return null;
-  }
-}
 
 function persistedRateLimitSettingKey(providerName) {
   return providerPauseSettingKey(canonicalProviderName(providerName));
@@ -164,17 +156,10 @@ function readPersistedRateLimitState(providerName, { nowMs = Date.now() } = {}) 
   };
 }
 
-// Operator clears (`posse admin provider-pause clear`) this process has
-// applied, by provider. Each clear releases the in-memory pause once, so a
-// pause tripped after it still holds.
-const appliedProviderPauseClears = new Map();
-
 function applyOperatorPauseClear(mod, providerName, persisted) {
-  if (!Number.isFinite(persisted?.clearedAtMs)) return;
-  const canonicalName = canonicalProviderName(providerName);
-  if (appliedProviderPauseClears.get(canonicalName) === persisted.clearedAtMs) return;
-  appliedProviderPauseClears.set(canonicalName, persisted.clearedAtMs);
-  if (typeof mod.tripRateLimit === "function") mod.tripRateLimit(0);
+  providerPauseClearTracker.apply(canonicalProviderName(providerName), persisted?.clearedAtMs, () => {
+    if (typeof mod.tripRateLimit === "function") mod.tripRateLimit(0);
+  });
 }
 
 function persistRateLimitState(providerName, backoffSec, reason = "") {
@@ -455,7 +440,7 @@ export function isProviderReady(providerName, capability = null) {
     const loadErr = providerRegistry.getLoadError(canonicalName);
     return { ready: false, reason: providerLoadErrorReason(canonicalName, loadErr) };
   }
-  if (["anthropic", "openai", "grok"].includes(canonicalName)) {
+  if (NATIVE_API_PROVIDERS.includes(canonicalName)) {
     try {
       verifyProviderDispatchCapabilitiesSync(canonicalName);
     } catch (error) {

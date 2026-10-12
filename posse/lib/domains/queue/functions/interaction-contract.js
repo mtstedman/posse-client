@@ -1,7 +1,12 @@
+import { CHOICE_COPY } from "../../../catalog/work-item-interaction-copy.js";
+import { ACTION_METADATA_KEY, QUESTION_CAPABILITY, MAX_QUESTIONS, MAX_NUDGES, MAX_FEEDBACK, MAX_PROMPT_CHARS, MAX_CONTEXT_CHARS, MAX_FEEDBACK_SUMMARY_CHARS, MAX_FEEDBACK_DETAIL_CHARS, MAX_NUDGE_BODY_CHARS, MAX_ACTION_ID_BYTES, DIRECT_ACTION_RESERVATION_STALE_MS, LIVE_OWNER_DELIVERY_HANDLERS, LIVE_OWNER_DELIVERY_HANDLERS_SQL, FEEDBACK_PHASES, FEEDBACK_STATUSES, LEGACY_PIPELINE_HEAD_REVIEW_TYPES, HANDLER_BY_KIND } from "../../../catalog/work-item-interactions.js";
 import { JOB_TYPE_ROLE_REGISTRY } from "../../../catalog/provider.js";
 import { WORK_ITEM_ACTION_PROTOCOL } from "../../../catalog/bridge.js";
 import {
   FAILED_JOB_STATUSES,
+  CURRENT_HUMAN_GATE_JOB_STATUSES_SQL,
+  OPEN_HUMAN_GATE_JOB_STATUSES,
+  PENDING_HUMAN_GATE_JOB_STATUSES,
   TERMINAL_JOB_STATUSES,
   TERMINAL_JOB_STATUSES_SQL,
 } from "../../../catalog/job.js";
@@ -26,91 +31,25 @@ import { notifyQueueStateChanged } from "./wakeups.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 
 const ACTION_PROTOCOL = WORK_ITEM_ACTION_PROTOCOL;
-const ACTION_METADATA_KEY = "work_item_action";
-const QUESTION_CAPABILITY = "question.answer";
-const MAX_QUESTIONS = 20;
-const MAX_NUDGES = 64;
-const MAX_FEEDBACK = 64;
-const MAX_PROMPT_CHARS = 2000;
-const MAX_CONTEXT_CHARS = 1000;
-const MAX_FEEDBACK_SUMMARY_CHARS = 180;
-const MAX_FEEDBACK_DETAIL_CHARS = 360;
-const MAX_NUDGE_BODY_CHARS = 4000;
-const MAX_ACTION_ID_BYTES = 128;
-const DIRECT_ACTION_RESERVATION_STALE_MS = 30 * 60 * 1000;
+
+
+
+
+
+
+
+
+
+
+
+
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const FAILED_JOB_STATUS_SET = new Set(FAILED_JOB_STATUSES);
-const OPEN_GATE_STATUS_SET = new Set(["queued", "waiting_on_human", "waiting_on_review"]);
-const CURRENT_GATE_STATUSES = Object.freeze([
-  "queued", "waiting_on_human", "waiting_on_review", "running", "assessing",
-]);
-const CURRENT_GATE_STATUSES_SQL = `(${CURRENT_GATE_STATUSES.map((status) => `'${status}'`).join(", ")})`;
-const LIVE_OWNER_DELIVERY_HANDLERS = new Set(["scope", "review", "human_input", "one_shot"]);
-const LIVE_OWNER_DELIVERY_HANDLERS_SQL = [...LIVE_OWNER_DELIVERY_HANDLERS]
-  .map((handler) => `'${handler}'`)
-  .join(",");
-const FEEDBACK_PHASES = new Set([
-  "reading", "planning", "editing", "testing", "verifying", "blocked", "finalizing", "handoff",
-]);
-const FEEDBACK_STATUSES = new Set(["running", "blocked", "waiting", "verifying", "done"]);
+const OPEN_GATE_STATUS_SET = new Set(OPEN_HUMAN_GATE_JOB_STATUSES);
+const PENDING_GATE_STATUS_SET = new Set(PENDING_HUMAN_GATE_JOB_STATUSES);
+const CURRENT_GATE_STATUSES_SQL = `(${CURRENT_HUMAN_GATE_JOB_STATUSES_SQL})`;
 
-
-const LEGACY_PIPELINE_HEAD_REVIEW_TYPES = new Set([
-  "research_dead_letter_recovery",
-  "oneshot_dead_letter_recovery",
-]);
-
-const HANDLER_BY_KIND = new Map([
-  ["plan_approval", "plan"],
-  ["file_scope_approval", "scope"],
-  ["assessment_review", "review"],
-  ["assessment_transport_recovery", "review"],
-  ["assessment_retry_limit", "review"],
-  ["unexecuted_replan_recovery", "review"],
-  ["pipeline_head_recovery", "review"],
-  ["blocked_recovery", "human_input"],
-  ["partial_work_recovery", "human_input"],
-  ["dead_letter_recovery", "human_input"],
-  ["artifact_routing_admin", "human_input"],
-  ["one_shot_file_scope", "one_shot"],
-  ["push_offer", "git_push"],
-  ["shared_trunk_provenance", "human_input"],
-  ["work_item_failure_disposition", "human_input"],
-  ["merge_verification_review", "human_input"],
-  ["merge_failure_recovery", "human_input"],
-  ["post_merge_db_task", "human_input"],
-  ["cross_wi_upstream_disposition", "human_input"],
-]);
-
-const CHOICE_COPY = Object.freeze({
-  approve: ["Approve", "Allow the exact requested transition."],
-  reject: ["Reject", "Reject the exact requested transition."],
-  pass: ["Pass", "Accept the current work as passing."],
-  fail: ["Fail", "Mark the current work as failed."],
-  skip: ["Skip", "Skip this work and continue where policy permits."],
-  replan: ["Replan", "Return the Work Item to its planning path."],
-  retry: ["Retry", "Retry through the canonical owner transition."],
-  send_back: ["Send back", "Return the implementation for repair and reassessment."],
-  retry_assessment: ["Retry assessment", "Run assessment again on the current implementation."],
-  explicit_waiver: ["Explicit waiver", "Accept the current work while recording that deterministic verification did not pass."],
-  "retry:claude": ["Retry with Claude", "Retry through the Claude provider path."],
-  "retry:anthropic": ["Retry with Anthropic API", "Retry through the direct Anthropic API provider path."],
-  "retry:openai": ["Retry with OpenAI", "Retry through the OpenAI provider path."],
-  "retry:codex": ["Retry with Codex", "Retry through the Codex provider path."],
-  "retry:grok": ["Retry with Grok", "Retry through the Grok provider path."],
-  extend: ["Extend", "Resume partial work with an extended turn budget."],
-  commit: ["Commit", "Commit the bounded partial output for assessment."],
-  revert: ["Revert", "Discard the bounded partial output."],
-  plan: ["Use planned flow", "Create a plan instead of a one-shot edit."],
-  cancel: ["Cancel request", "Stop without creating a continuation job."],
-  push: ["Push", "Run the repository-aware canonical push gate."],
-  decline: ["Decline", "Close this push offer without pushing."],
-  accept: ["Accept", "Accept the assessed implementation under operator review."],
-  abandon: ["Abandon", "Cancel the work item and discard its branch."],
-  wait: ["Wait", "Keep the merge deferred until its upstream work is recovered."],
-  rebuild: ["Rebuild", "Discard inherited edits and rerun the work item from the target branch."],
-});
 
 function parseJsonObject(value) {
   if (!value) return {};
@@ -453,7 +392,7 @@ function gateQuestionState(job) {
   if (job?.gate_state === "resolved") return "answered";
   if (job?.gate_state === "superseded") return "closed";
   if (OPEN_GATE_STATUS_SET.has(job.status)) return "open";
-  if (["running", "assessing"].includes(job.status)) return "pending";
+  if (PENDING_GATE_STATUS_SET.has(job.status)) return "pending";
   if (job.status === "succeeded") return "answered";
   if (FAILED_JOB_STATUS_SET.has(job.status)) return "rejected";
   if (job.status === "canceled") return "closed";

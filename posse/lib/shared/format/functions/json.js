@@ -32,7 +32,24 @@ function sanitizeJson(raw) {
     }
     out += ch;
   }
-  return out.replace(/,\s*([\]}])/g, "$1");
+  // Comments are gone, so a comma followed by whitespace and a closing
+  // delimiter is repairable only outside a quoted value.
+  let sanitized = "";
+  inStr = false;
+  esc = false;
+  for (let i = 0; i < out.length; i++) {
+    const ch = out[i];
+    if (esc) { esc = false; sanitized += ch; continue; }
+    if (ch === "\\" && inStr) { esc = true; sanitized += ch; continue; }
+    if (ch === '"') { inStr = !inStr; sanitized += ch; continue; }
+    if (!inStr && ch === ",") {
+      let next = i + 1;
+      while (next < out.length && /\s/.test(out[next])) next++;
+      if (out[next] === "]" || out[next] === "}") continue;
+    }
+    sanitized += ch;
+  }
+  return sanitized;
 }
 
 function repairTruncated(raw) {

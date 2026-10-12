@@ -1,38 +1,14 @@
-import {
-  AGENT_HANDOFF_PLANNER_METADATA_ENUMS,
-  AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS,
-  AGENT_HANDOFF_PROFILES,
-  AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES,
-  AGENT_HANDOFF_RESEARCH_QUESTION_CATEGORIES,
-  AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES,
-  AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES,
-} from "../../../../catalog/handoff.js";
+import { exactKeys, plainObject, fail } from "./report-schema.js";
+import { AGENT_HANDOFF_PLANNER_METADATA_ENUMS, AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS, AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES, AGENT_HANDOFF_RESEARCH_QUESTION_CATEGORIES, AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES, AGENT_HANDOFF_SCOPE_CONFIDENCE_VALUES } from "../../../../catalog/handoff.js";
 import { detectSensitiveAgentHandoffText } from "../agent-handoff-boundaries.js";
-import { filterKnownHandoffFields } from "./field-diagnostics.js";
+import "./field-diagnostics.js";
 import { normalizeResearchSymbolSeeds } from "./research-symbols.js";
 
 const RESEARCHER_PROFILES = new Set([AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT]);
 const HASH_REF_SELECTOR_RE = /^#[0-9a-z]{4,12}(?::L?[0-9]+-L?[0-9]+)?$/;
-function fail(code, message) {
-  const err = new Error(message);
-  err.code = code;
-  throw err;
-}
 
-function plainObject(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
-}
 
-function exactKeys(value, allowed, label) {
-  const object = plainObject(value);
-  if (!object) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} must be an object`);
-  const filtered = filterKnownHandoffFields(object, allowed, label);
-  if (filtered) return filtered;
-  for (const key of Object.keys(object)) {
-    if (!allowed.includes(key)) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.${key} is not allowed`);
-  }
-  return object;
-}
+
 
 function boundedString(value, label, max, { required = true } = {}) {
   if (typeof value !== "string") fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} must be a string`);

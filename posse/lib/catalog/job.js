@@ -1,3 +1,4 @@
+import { readonlySet } from "./readonly-collections.js";
 // Job-domain catalogue.
 //
 // Job types, statuses, model tiers, reasoning efforts, assessor verdicts/
@@ -135,6 +136,19 @@ export const ACTIVE_LEASE_STATUSES = Object.freeze([
 ]);
 export const ACTIVE_LEASE_STATUSES_SQL = sqlList(ACTIVE_LEASE_STATUSES);
 
+// Human-input gate jobs execute directly and park while waiting for an answer.
+// Assessment statuses belong to the implementation being reviewed, not its
+// human-input gate. A running gate is visible while its owner resolves it.
+export const OPEN_HUMAN_GATE_JOB_STATUSES = Object.freeze([
+  "queued", "waiting_on_human", "waiting_on_review",
+]);
+export const PENDING_HUMAN_GATE_JOB_STATUSES = Object.freeze(["running"]);
+export const CURRENT_HUMAN_GATE_JOB_STATUSES = Object.freeze([
+  ...OPEN_HUMAN_GATE_JOB_STATUSES,
+  ...PENDING_HUMAN_GATE_JOB_STATUSES,
+]);
+export const CURRENT_HUMAN_GATE_JOB_STATUSES_SQL = sqlList(CURRENT_HUMAN_GATE_JOB_STATUSES);
+
 export const PROVIDER_QUEUE_JOB_STATUSES = Object.freeze([
   "queued",
   "leased",
@@ -190,7 +204,7 @@ export const DEADLOCK_TERMINAL_STATUSES_SQL = sqlList(DEADLOCK_TERMINAL_STATUSES
 // assessable. They are intentionally absent from the broad mutation sets
 // below; repository preparation receives its narrower locks separately.
 
-export const MUTATING_JOB_TYPES = new Set(["dev", "fix", "artificer", "promote"]);
+export const MUTATING_JOB_TYPES = readonlySet(["dev", "fix", "artificer", "promote"]);
 
 // What asked for a loopback replan. The replan planner's framing depends on
 // it: an operator replan after a blocked job carries no assessor findings.
@@ -201,13 +215,13 @@ export const REPLAN_TRIGGERS = Object.freeze({
   FIX_CHAIN_EXHAUSTED: "fix_chain_exhausted",
   BLOCKED_RECOVERY_RETRY_FAILED: "blocked_recovery_retry_failed",
 });
-export const ASSESSABLE_JOB_TYPES = new Set(["dev", "fix", "artificer"]);
-export const QUEUE_LOCKING_JOB_TYPES = new Set(["dev", "fix", "promote"]);
+export const ASSESSABLE_JOB_TYPES = readonlySet(["dev", "fix", "artificer"]);
+export const QUEUE_LOCKING_JOB_TYPES = readonlySet(["dev", "fix", "promote"]);
 
 // Job types whose work is local/deterministic and never goes through a
 // provider call (no Claude/OpenAI/Codex/etc.). Used by the worker to skip
 // agent dispatch for these and run them in-process.
-export const NON_PROVIDER_JOB_TYPES = new Set([
+export const NON_PROVIDER_JOB_TYPES = readonlySet([
   "human_input",
   "promote",
   "atlas_warm",
@@ -219,12 +233,12 @@ export const NON_PROVIDER_JOB_TYPES = new Set([
 // Job types that emit a declared output contract enforced by the worker
 // (allowed/forbidden file lists, scope checks). Other mutating types still
 // run but don't carry an explicit contract.
-export const DECLARED_OUTPUT_CONTRACT_JOB_TYPES = new Set(["dev", "fix"]);
+export const DECLARED_OUTPUT_CONTRACT_JOB_TYPES = readonlySet(["dev", "fix"]);
 
 // Job types that count as "substantive work" when deciding whether an
 // iterative work item has produced progress since the last loopback anchor.
 // Excludes scheduling/coordination types like research/plan/assess.
-export const ITERATIVE_SUBSTANTIVE_JOB_TYPES = new Set([
+export const ITERATIVE_SUBSTANTIVE_JOB_TYPES = readonlySet([
   "dev", "fix", "artificer", "human_input",
 ]);
 
@@ -232,21 +246,21 @@ export const ITERATIVE_SUBSTANTIVE_JOB_TYPES = new Set([
 // downstream task types that would otherwise execute against the now-stale
 // plan; preflight/research/plan are excluded because they bootstrap the
 // replan itself.
-export const REPLAN_CANCELABLE_JOB_TYPES = new Set([
+export const REPLAN_CANCELABLE_JOB_TYPES = readonlySet([
   "dev", "fix", "artificer", "promote", "summarize",
 ]);
 
 // Job types the planner may emit directly. Excludes coordination types
 // (research, plan, delegate, assess) which the runtime spawns implicitly,
 // and atlas_warm which is scheduled separately.
-export const PLANNER_ALLOWED_JOB_TYPES = new Set([
+export const PLANNER_ALLOWED_JOB_TYPES = readonlySet([
   "dev", "artificer", "promote", "human_input",
 ]);
 
 // Job types that represent role-driven planning work (researcher/planner/
 // preflight). Treated specially by dead-letter recovery so that a failed
 // scheduling job doesn't recur in a tight retry loop.
-export const ROLE_DRIVEN_JOB_TYPES = new Set(["research", "plan", "preflight"]);
+export const ROLE_DRIVEN_JOB_TYPES = readonlySet(["research", "plan", "preflight"]);
 
 // Runnable-selection fairness. Plan jobs order with dev work by created_at, so
 // a queue of older plans took every freed agent slot while a ready dev job
@@ -254,31 +268,31 @@ export const ROLE_DRIVEN_JOB_TYPES = new Set(["research", "plan", "preflight"]);
 // slots (scheduler_implementation_reserved_slots), the scheduler offers the
 // remaining slots to ready implementation work first; plans still take them
 // when no implementation job can start.
-export const SLOT_CAPPED_PLANNING_JOB_TYPES = new Set(["plan"]);
+export const SLOT_CAPPED_PLANNING_JOB_TYPES = readonlySet(["plan"]);
 export const RESERVED_SLOT_IMPLEMENTATION_JOB_TYPES = Object.freeze(["dev", "fix", "artificer", "promote"]);
 
 // Job types that require an isolated git worktree (subset of
 // MUTATING_JOB_TYPES — artificer writes only to artifact dirs and does not
 // need the worktree).
-export const WORKTREE_JOB_TYPES = new Set(["dev", "fix", "promote"]);
+export const WORKTREE_JOB_TYPES = readonlySet(["dev", "fix", "promote"]);
 
 // Background maintenance work, NOT agent work. These run on a separate scheduler
 // budget so they never consume one of the N agent compute slots, and they are
 // kept out of the agent pipeline/fleet/lock views. Both current types are
 // deterministic, non-provider, fail-silent accelerators.
-export const BACKGROUND_JOB_TYPES = new Set(["atlas_warm", "waiting_lane_prepare"]);
+export const BACKGROUND_JOB_TYPES = readonlySet(["atlas_warm", "waiting_lane_prepare"]);
 
 // Optional accelerators never participate in WI completion, hard-dependency
 // deadlock propagation, reviewability, or assessment. Keep this canonical so
 // queue paths do not grow independent literal exclusions.
-export const NON_COMPLETION_BLOCKING_JOB_TYPES = new Set([
+export const NON_COMPLETION_BLOCKING_JOB_TYPES = readonlySet([
   "atlas_warm",
   "waiting_lane_prepare",
 ]);
 
 // Repository-structural jobs need worktree-admin/root locking without being
 // classified as source-mutating or assessable agent work.
-export const REPOSITORY_PREPARATION_JOB_TYPES = new Set(["waiting_lane_prepare"]);
+export const REPOSITORY_PREPARATION_JOB_TYPES = readonlySet(["waiting_lane_prepare"]);
 
 // Canonical lookup for the optional-accelerator contract above. Review,
 // display, and assessment surfaces derive visibility from this predicate

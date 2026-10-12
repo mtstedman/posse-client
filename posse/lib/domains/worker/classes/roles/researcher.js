@@ -11,58 +11,20 @@ import { atlasMemoryEnabled } from "../../../../shared/policies/functions/memory
 import { getAccountSetting } from "../../../settings/functions/account-settings.js";
 import { BaseRole } from "../BaseRole.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
-import {
-  getArtifacts,
-  getArtifactsByWorkItem,
-  getAttempts,
-  getJob,
-  getWorkItem,
-  storeArtifact,
-} from "../../../queue/functions/index.js";
+import { getArtifacts, getArtifactsByWorkItem, getAttempts, getJob, getWorkItem, storeArtifact } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { persistResearcherMemories } from "../../functions/helpers/research-memories.js";
-import {
-  contextDir,
-  wiScopeId,
-} from "../../../artifacts/functions/index.js";
-import {
-  buildAssessmentReplanEvidenceBlock,
-  resolveAssessmentReplanCwd,
-  releaseAssessmentReplanCwd,
-  buildAssessmentReplanDiffBlock,
-} from "../../../planning/functions/assessment-replan-context.js";
-import {
-  buildResearchIntakePreload,
-  getWorkItemIntakeHints,
-  getWorkItemWorkflowConfig,
-  buildWorkflowModeBlock,
-} from "../../../intake/functions/hints.js";
+import "../../../artifacts/functions/index.js";
+import { buildAssessmentReplanEvidenceBlock, resolveAssessmentReplanCwd, releaseAssessmentReplanCwd, buildAssessmentReplanDiffBlock } from "../../../planning/functions/assessment-replan-context.js";
+import { buildResearchIntakePreload, getWorkItemIntakeHints, getWorkItemWorkflowConfig, buildWorkflowModeBlock } from "../../../intake/functions/hints.js";
 import { currentExecutionProvider, extractResearchRetryContext } from "../../functions/helpers/diagnostics.js";
 import { collectAtlasCoveredFiles, composePromptRemoteAware, handoff, parseResearcherStructuredOutput, renderAtlasHandoffSections, sanitizeResearcherStructuredOutput } from "../../../handoff/functions/index.js";
-import {
-  getResearchBudget as defaultGetResearchBudget,
-  isDeepthinkTask as defaultIsDeepthinkTask,
-  isResearchBudgetDeep as defaultIsResearchBudgetDeep,
-  maxTurnsOverrideFromPayload as defaultMaxTurnsOverrideFromPayload,
-  researchBudgetFromDeepthink,
-  researchBudgetToMaxTurnsOverride as defaultResearchBudgetToMaxTurnsOverride,
-  shortJobTitle as defaultShortJobTitle,
-} from "../../../../shared/policies/functions/role-utils.js";
-import {
-  getDefaultModelTierForRole,
-  getDefaultReasoningEffortForRole,
-  inheritedReasoningEffortForBudget,
-} from "../../../settings/functions/repository-settings.js";
-import {
-  spawnFailureForRole,
-  spawnSuccessForRole,
-} from "../../../../shared/policies/functions/spawn-policy.js";
+import { getResearchBudget as defaultGetResearchBudget, isDeepthinkTask as defaultIsDeepthinkTask, isResearchBudgetDeep as defaultIsResearchBudgetDeep, maxTurnsOverrideFromPayload as defaultMaxTurnsOverrideFromPayload, researchBudgetFromDeepthink, researchBudgetToMaxTurnsOverride as defaultResearchBudgetToMaxTurnsOverride, shortJobTitle as defaultShortJobTitle } from "../../../../shared/policies/functions/role-utils.js";
+import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole, inheritedReasoningEffortForBudget } from "../../../settings/functions/repository-settings.js";
+import { spawnFailureForRole, spawnSuccessForRole } from "../../../../shared/policies/functions/spawn-policy.js";
 import { hasLineRef } from "../../../research/functions/line-refs.js";
 import { buildWebFetchCachePreload, cacheResearchWebFetches } from "../../../research/functions/web-cache.js";
-import {
-  captureWaitingLaneResearchHotPaths,
-  requestWaitingLaneResearchDemand,
-} from "../../../research/functions/waiting-lane-demand.js";
+import { captureWaitingLaneResearchHotPaths, requestWaitingLaneResearchDemand } from "../../../research/functions/waiting-lane-demand.js";
 import { ensureAtlasReadRootMounted } from "../../functions/helpers/atlas-read-root.js";
 import { runResearchClaimReview } from "../../../research/functions/run-claim-review.js";
 import { researchUsesReportProfile } from "../../../research/functions/output-routing.js";

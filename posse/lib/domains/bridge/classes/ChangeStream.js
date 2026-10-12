@@ -1,42 +1,21 @@
+import { promptFromGatePayload } from "../functions/gate-prompt.js";
+import { isReadyOneshotScopeSelection } from "../functions/gate-readiness.js";
 import { EventEmitter } from "node:events";
 import crypto from "node:crypto";
 
 import Database from "better-sqlite3";
 
-import {
-  BRIDGE_EVENT_KINDS,
-  BRIDGE_FRAME_TYPES,
-  BRIDGE_OPEN_GATE_STATUSES,
-  BRIDGE_PROTOCOL_VERSION,
-} from "../../../catalog/bridge.js";
-import {
-  BACKGROUND_JOB_TYPES,
-  ONESHOT_SCOPE_SELECTION_SUBTYPE,
-  TERMINAL_JOB_STATUSES,
-} from "../../../catalog/job.js";
+import { BRIDGE_EVENT_KINDS, BRIDGE_FRAME_TYPES, BRIDGE_OPEN_GATE_STATUSES, BRIDGE_PROTOCOL_VERSION } from "../../../catalog/bridge.js";
+import { BACKGROUND_JOB_TYPES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
-import {
-  AGENT_ACTIVITY_KINDS,
-  AGENT_ACTIVITY_LIMITS,
-  AGENT_ACTIVITY_PROTOCOL,
-  AGENT_ACTIVITY_STATUSES,
-  EVENT_TYPES,
-} from "../../../catalog/event.js";
+import { AGENT_ACTIVITY_KINDS, AGENT_ACTIVITY_LIMITS, AGENT_ACTIVITY_PROTOCOL, AGENT_ACTIVITY_STATUSES, EVENT_TYPES } from "../../../catalog/event.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { composeInstanceStatus } from "../functions/instance-status.js";
 import { bridgeGateAnswerContract, bridgeGateKindForJob } from "../functions/gate-contract.js";
 import { buildReviewBrief } from "../functions/review-brief.js";
-import {
-  projectBridgeGateDetail,
-  projectBridgeJobState,
-  projectBridgeWorkItemFromJobs,
-} from "../functions/state-snapshot.js";
+import { projectBridgeGateDetail, projectBridgeJobState, projectBridgeWorkItemFromJobs } from "../functions/state-snapshot.js";
 import { workItemCost } from "../../billing/functions/cost.js";
-import {
-  WORK_ITEM_BOUNDS,
-  createStreamFeedPayload,
-  projectFeedEvent,
-} from "../functions/work-item-feed.js";
+import { WORK_ITEM_BOUNDS, createStreamFeedPayload, projectFeedEvent } from "../functions/work-item-feed.js";
 
 const DEFAULT_REPLAY_LIMIT = 1000;
 const DEFAULT_TAIL_LIMIT = 100;
@@ -98,12 +77,6 @@ function resolutionForJob(job, payload = {}) {
   return "answered";
 }
 
-function isReadyOneshotScopeSelection(payload = {}) {
-  const isScopeSelection = payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
-    || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE;
-  if (!isScopeSelection) return true;
-  return payload?.selector?.status === "ready" || payload?.oneshot_scope?.status === "ready";
-}
 
 function isOpenGateJob(job, payload = {}) {
   const contractAllowsOpen = humanGateStateAllowsAnswer(job?.human_gate_state);
@@ -112,13 +85,6 @@ function isOpenGateJob(job, payload = {}) {
     && isReadyOneshotScopeSelection(payload);
 }
 
-function promptFromGatePayload(payload) {
-  if (Array.isArray(payload?.questions) && payload.questions.length > 0) {
-    return payload.questions.map((question) => String(question || "").trim()).filter(Boolean).join("\n\n");
-  }
-  if (typeof payload?.prompt === "string" && payload.prompt.trim()) return payload.prompt.trim();
-  return null;
-}
 
 function gatePayloadForJob(job) {
   const payload = parseJsonField(job.payload_json) || {};

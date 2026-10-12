@@ -1,4 +1,5 @@
-import { stripHashRefSurfaceSuffix } from "../../../shared/tools/functions/ref-surface.js";
+import { parseResult } from "./tool-result-object.js";
+import "../../../shared/tools/functions/ref-surface.js";
 const MAX_COMMAND_CHARS = 1200;
 const MAX_SCOPED_FILES = 250;
 
@@ -8,15 +9,6 @@ function nonNegativeFiniteOrNull(value) {
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
-function parseResult(resultText) {
-  if (typeof resultText !== "string" || !resultText.trimStart().startsWith("{")) return null;
-  try {
-    const value = JSON.parse(stripHashRefSurfaceSuffix(resultText));
-    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
-  } catch {
-    return null;
-  }
-}
 
 export function scopedCheckToolResultObservation({ tool, resultText = "" } = {}) {
   const name = String(tool || "").trim().toLowerCase().replace(/^tools[._-]/, "");

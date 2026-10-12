@@ -1,3 +1,4 @@
+import { readonlySet } from "./readonly-collections.js";
 // Waiting-lane preparation catalogue.
 //
 // This module freezes the persisted vocabulary shared by the queue, scheduler,
@@ -32,19 +33,19 @@ export const WAITING_LANE_STATES = Object.freeze([
 ]);
 export const WAITING_LANE_STATE_LIST_SQL = sqlList(WAITING_LANE_STATES);
 
-export const WAITING_LANE_PREPARATORY_STATES = new Set([
+export const WAITING_LANE_PREPARATORY_STATES = readonlySet([
   "requested",
   "preparing_git",
   "waiting_atlas",
   "ready",
   "stale",
 ]);
-export const WAITING_LANE_NONTERMINAL_STATES = new Set([
+export const WAITING_LANE_NONTERMINAL_STATES = readonlySet([
   ...WAITING_LANE_PREPARATORY_STATES,
   "activating",
   "active",
 ]);
-export const WAITING_LANE_TERMINAL_STATES = new Set(["poisoned", "retired"]);
+export const WAITING_LANE_TERMINAL_STATES = readonlySet(["poisoned", "retired"]);
 
 export const WAITING_LANE_DEMAND_REASONS = Object.freeze([
   "research",

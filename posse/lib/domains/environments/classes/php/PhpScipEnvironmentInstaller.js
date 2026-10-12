@@ -3,27 +3,8 @@
 import fs from "fs";
 import path from "path";
 import { ScipLanguageEnvironmentInstaller } from "../ScipLanguageEnvironmentInstaller.js";
-import {
-  commandOnPath,
-  composerBin,
-  fileExists,
-  runCommand,
-  scipDependencyInstallEnv,
-} from "../../functions/scip-install-runtime.js";
-import {
-  PHP_SCIP_ENV_INPUTS,
-  PHP_SCIP_TRACKS,
-  PHP_SCIP_TRACK_ORDER,
-  describePhpScipSelection,
-  parsePhpCliVersion,
-  phpScipEnvInputHash,
-  phpScipUpstreamCommand,
-  readPhpScipEnvStamp,
-  removePhpScipEnvStamp,
-  resolvePhpScipRuntime,
-  selectPhpScipTrack,
-  writePhpScipEnvStamp,
-} from "../../functions/php-scip-tracks.js";
+import { commandOnPath, fileExists, runCommand, scipDependencyInstallEnv } from "../../functions/scip-install-runtime.js";
+import { PHP_SCIP_ENV_INPUTS, PHP_SCIP_TRACKS, PHP_SCIP_TRACK_ORDER, describePhpScipSelection, parsePhpCliVersion, phpScipEnvInputHash, phpScipUpstreamCommand, readPhpScipEnvStamp, removePhpScipEnvStamp, resolvePhpScipRuntime, selectPhpScipTrack, writePhpScipEnvStamp } from "../../functions/php-scip-tracks.js";
 import { ensureComposer } from "../../functions/composer-bootstrap.js";
 
 /** @typedef {import("../../functions/php-scip-tracks.js").PhpScipTrackId} PhpScipTrackId */

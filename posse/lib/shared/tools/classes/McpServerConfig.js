@@ -1,3 +1,4 @@
+import { deepFreezeJson } from "../../format/functions/freeze-json.js";
 import { errorSummary, safeRemoteOrigin, remoteSurfaceSummary } from "../functions/mcp-diagnostics.js";
 import path from "path";
 import crypto from "node:crypto";
@@ -56,15 +57,6 @@ const MINTED_AGENT_GATES = new WeakSet();
 const ISSUED_CITATION_CHILD_SURFACES = new WeakMap();
 const CITATION_CHILD_PERMIT_TTL_MS = 120_000;
 
-function deepFreezeJson(value) {
-  const clone = JSON.parse(JSON.stringify(value));
-  const freeze = (entry) => {
-    if (!entry || typeof entry !== "object" || Object.isFrozen(entry)) return entry;
-    for (const child of Object.values(entry)) freeze(child);
-    return Object.freeze(entry);
-  };
-  return freeze(clone);
-}
 
 function consumeCitationChildPermit(surface, {
   role,

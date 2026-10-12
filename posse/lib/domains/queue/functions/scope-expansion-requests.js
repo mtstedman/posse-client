@@ -647,6 +647,9 @@ export function createScopeExpansionOperations({
    * Wait for a human decision without ending the provider call, then consume the
    * decision atomically. Polling is intentional: deterministic MCP runs in a
    * child process, so in-memory queue wake listeners cannot observe the answer.
+   * @param {{jobId?: number|string, requestId?: string, attemptId?: number|null,
+   * signal?: AbortSignal|null, pollMs?: number, timeoutMs?: number|null,
+   * useQueueWake?: boolean}} [options]
    */
   async function awaitJobScopeExpansionDecision({
     jobId,

@@ -1,3 +1,4 @@
+import { settingsChangeNotifier } from "./SettingsChangeNotifier.js";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -70,18 +71,8 @@ if (isUnderTest() && !normalizeDbPath(process.env.POSSE_ACCOUNT_DB_PATH)) {
   resolveTestRedirectPath();
 }
 
-// ATLAS (and any future module that caches DB-backed config) registers an
-// invalidator on globalThis at import time. Invoking it here guarantees that
-// every settings write clears downstream caches, regardless of which key
-// changed.
 function notifySettingsChanged() {
-  try {
-    if (typeof globalThis.__POSSE_INVALIDATE_ATLAS_CONFIG_CACHE === "function") {
-      globalThis.__POSSE_INVALIDATE_ATLAS_CONFIG_CACHE();
-    }
-  } catch {
-    // best-effort
-  }
+  settingsChangeNotifier.notify();
 }
 
 export class AccountSettings {

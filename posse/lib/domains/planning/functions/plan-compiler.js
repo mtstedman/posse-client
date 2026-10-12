@@ -1,3 +1,4 @@
+import { plannedTaskDedupeKey } from "./planned-task-dedupe.js";
 // lib/domains/planning/functions/plan-compiler.js
 //
 // Planner task compilation extracted from worker.js.
@@ -6,154 +7,46 @@ import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole } from "..
 import fs from "fs";
 import path from "path";
 import { ARTIFACT_TASK_MODE_VALUES } from "../../../catalog/artifact.js";
-import {
-  JOB_MODEL_TIERS,
-  JOB_REASONING_EFFORTS,
-  PLANNER_ALLOWED_JOB_TYPES,
-  PLANNER_MODEL_TIER_ALIASES,
-  PLANNER_REASONING_EFFORT_ALIASES,
-} from "../../../catalog/job.js";
+import { JOB_MODEL_TIERS, JOB_REASONING_EFFORTS, PLANNER_ALLOWED_JOB_TYPES, PLANNER_MODEL_TIER_ALIASES, PLANNER_REASONING_EFFORT_ALIASES } from "../../../catalog/job.js";
 import { DEFAULT_DEV_MODE } from "../../../catalog/dev-mode.js";
-import {
-  COMMON_WEB_ROOTS,
-  FRONTEND_DESIGN_LOGIC_PHRASES,
-  FRONTEND_DESIGN_UI_SURFACE_PHRASES,
-  FRONTEND_DESIGN_VISUAL_PHRASES,
-  SKILL_INFERENCE_BROWSER_SCRIPT_EXTENSIONS,
-  SKILL_INFERENCE_COMPONENT_EXTENSIONS,
-  SKILL_INFERENCE_LOGIC_BASENAME_WORDS,
-  SKILL_INFERENCE_LOGIC_DIRECTORIES,
-  SKILL_INFERENCE_MARKUP_EXTENSIONS,
-  SKILL_INFERENCE_STYLESHEET_EXTENSIONS,
-  SKILL_INFERENCE_TEST_BASENAME_PATTERN,
-  SKILL_INFERENCE_TEST_DIRECTORIES,
-} from "../../../catalog/skill-inference.js";
+import { COMMON_WEB_ROOTS, FRONTEND_DESIGN_LOGIC_PHRASES, FRONTEND_DESIGN_UI_SURFACE_PHRASES, FRONTEND_DESIGN_VISUAL_PHRASES, SKILL_INFERENCE_BROWSER_SCRIPT_EXTENSIONS, SKILL_INFERENCE_COMPONENT_EXTENSIONS, SKILL_INFERENCE_LOGIC_BASENAME_WORDS, SKILL_INFERENCE_LOGIC_DIRECTORIES, SKILL_INFERENCE_MARKUP_EXTENSIONS, SKILL_INFERENCE_STYLESHEET_EXTENSIONS, SKILL_INFERENCE_TEST_BASENAME_PATTERN, SKILL_INFERENCE_TEST_DIRECTORIES } from "../../../catalog/skill-inference.js";
 import { DB_TASK_PRE_MERGE_POLICIES, SETTING_KEYS } from "../../../catalog/settings.js";
 import { getIntSetting } from "../../queue/functions/index.js";
-import {
-  addDependency,
-  applyDelegation,
-  compiledRewiresPayload,
-  completeJobExecutedByPlanner,
-  getDependents,
-  getJob,
-  getSetting,
-  getWorkItem,
-  isDbTaskJob,
-  logEvent,
-  normalizeDbTaskPreMergePolicy,
-  rewireDependency,
-  retireWaitingLanePlanning,
-  setJobError,
-  updateJobPayload,
-  updateJobStatus,
-  updateWorkItemRouting,
-} from "../../queue/functions/index.js";
+import { addDependency, applyDelegation, compiledRewiresPayload, completeJobExecutedByPlanner, getDependents, getJob, getSetting, getWorkItem, isDbTaskJob, logEvent, normalizeDbTaskPreMergePolicy, rewireDependency, retireWaitingLanePlanning, setJobError, updateJobPayload, updateJobStatus, updateWorkItemRouting } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { snapshotPlanAnchor } from "../../verification/functions/plan-anchor.js";
 import { plannedRepositoryVerificationSnapshot } from "../../verification/functions/verification-plan.js";
-import {
-  getAvailableProviders,
-  getProviderMap,
-  getProviderName,
-  isProviderReady,
-  needsDelegation,
-} from "../../providers/functions/provider.js";
+import { getAvailableProviders, getProviderMap, getProviderName, needsDelegation } from "../../providers/functions/provider.js";
 import { C } from "../../../shared/format/functions/colors.js";
-import {
-  artifactTaskOutputRoot,
-  contextDir,
-  getResourcesDir,
-  getWiModeConfig,
-  isValidTaskMode,
-  normalizeArtifactCreateFiles,
-  workItemArtifactRoot,
-  wiScopeId,
-} from "../../artifacts/functions/index.js";
-import {
-  hasWritableScope,
-  normalizeResearcherCitationTriage,
-} from "../../handoff/functions/index.js";
+import { artifactTaskOutputRoot, contextDir, getResourcesDir, getWiModeConfig, isValidTaskMode, normalizeArtifactCreateFiles, workItemArtifactRoot, wiScopeId } from "../../artifacts/functions/index.js";
+import { hasWritableScope, normalizeResearcherCitationTriage } from "../../handoff/functions/index.js";
 import { resolveResearchContextForWorkItem } from "../../research/functions/research-context.js";
 import { movedOutputPathReplacements, rewriteTaskTextPaths } from "./task-text-paths.js";
 import { projectDbEffectivePermissions } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { listProjectDbWrites, verifiedProjectDbExecution } from "../../../shared/tools/functions/toolkit/project-db/write-evidence.js";
-import {
-  normalizeRiskTags,
-  resolveTaskExecutionPolicy,
-} from "../../handoff/functions/helpers/execution-policy.js";
-import {
-  operationalCommandApprovalRequest,
-  validatePlannerTestCommand,
-  validatePlannerTestCommandForRepository,
-} from "../../worker/functions/helpers/test-execution-receipt.js";
+import { normalizeRiskTags, resolveTaskExecutionPolicy } from "../../handoff/functions/helpers/execution-policy.js";
+import { operationalCommandApprovalRequest, validatePlannerTestCommand, validatePlannerTestCommandForRepository } from "../../worker/functions/helpers/test-execution-receipt.js";
 import { validateSkillIds } from "../../../shared/skills/functions/registry.js";
 import { discoverUnitTestCapability } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
-import {
-  buildStructuredDataPromotePlan as buildStructuredDataPromotePlanFromModule,
-  getExplicitIntakeBindings as getExplicitIntakeBindingsFromModule,
-  getCreateFileKindSummary as getCreateFileKindSummaryFromModule,
-  inferPromoteTask as inferPromoteTaskFromModule,
-  looksLikeArtifactGenerationTask as looksLikeArtifactGenerationTaskFromModule,
-  looksLikeRepoCodeCreationTask as looksLikeRepoCodeCreationTaskFromModule,
-  createsRepoPathFiles as createsRepoPathFilesFromModule,
-  declaresOnlyArtifactScope as declaresOnlyArtifactScopeFromModule,
-  looksLikeRepoDesignTask as looksLikeRepoDesignTaskFromModule,
-  looksLikeStructuredDataRepoTransformTask as looksLikeStructuredDataRepoTransformTaskFromModule,
-  normalizePromoteMappings as normalizePromoteMappingsFromModule,
-  validatePlannedTask as validatePlannedTaskFromModule,
-} from "./plan-routing.js";
+import { buildStructuredDataPromotePlan as buildStructuredDataPromotePlanFromModule, getExplicitIntakeBindings as getExplicitIntakeBindingsFromModule, getCreateFileKindSummary as getCreateFileKindSummaryFromModule, inferPromoteTask as inferPromoteTaskFromModule, looksLikeArtifactGenerationTask as looksLikeArtifactGenerationTaskFromModule, looksLikeRepoCodeCreationTask as looksLikeRepoCodeCreationTaskFromModule, createsRepoPathFiles as createsRepoPathFilesFromModule, declaresOnlyArtifactScope as declaresOnlyArtifactScopeFromModule, looksLikeRepoDesignTask as looksLikeRepoDesignTaskFromModule, looksLikeStructuredDataRepoTransformTask as looksLikeStructuredDataRepoTransformTaskFromModule, normalizePromoteMappings as normalizePromoteMappingsFromModule, validatePlannedTask as validatePlannedTaskFromModule } from "./plan-routing.js";
 import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
-import {
-  effectiveArtifactTaskMode as effectiveArtifactTaskModeFromModule,
-  NO_IMAGE_PROVIDERS_AVAILABLE,
-  resolveImageExecutionProvider as resolveImageExecutionProviderFromModule,
-} from "../../providers/functions/execution-routing.js";
+import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider as resolveImageExecutionProviderFromModule } from "../../providers/functions/execution-routing.js";
 import { isValidDevMode, normalizeDevMode } from "../../../shared/policies/functions/dev-modes.js";
-import {
-  buildDeterministicDelegations as buildDeterministicDelegationsFromModule,
-  delegationRoleForJobType as delegationRoleForJobTypeFromModule,
-} from "../../providers/functions/delegation-routing.js";
+import { buildDeterministicDelegations as buildDeterministicDelegationsFromModule, delegationRoleForJobType as delegationRoleForJobTypeFromModule } from "../../providers/functions/delegation-routing.js";
 import { repairWebAssetCreateScope as repairWebAssetCreateScopeFromModule } from "../../git/functions/commit-scope.js";
-import {
-  createPlanApprovalGate as createPlanApprovalGateFromModule,
-  planApprovalRequirement,
-} from "./plan-approval.js";
-import {
-  getResearchBudget,
-  isResearchBudgetDeep,
-  maxResearchBudget,
-  normalizeResearchBudget,
-  researchBudgetFromDeepthink,
-  researchBudgetToReasoningEffort,
-} from "../../../shared/policies/functions/role-utils.js";
+import { createPlanApprovalGate as createPlanApprovalGateFromModule, planApprovalRequirement } from "./plan-approval.js";
+import { getResearchBudget, isResearchBudgetDeep, maxResearchBudget, normalizeResearchBudget, researchBudgetFromDeepthink, researchBudgetToReasoningEffort } from "../../../shared/policies/functions/role-utils.js";
 import { spawnFromRole as defaultSpawnFromRole } from "../../queue/functions/spawn-guard.js";
-import {
-  collectRequestedImageOutputs,
-  disclaimsImageGeneration,
-  hasRequestedImageGenerationOutput,
-} from "./image-outputs.js";
+import { collectRequestedImageOutputs, disclaimsImageGeneration, hasRequestedImageGenerationOutput } from "./image-outputs.js";
 import { sanitizePlannerDevBrief } from "./planner-helpers.js";
 import { compilerRewriteRecord, plannerTaskSnapshot } from "./planner-task-provenance.js";
-import {
-  normalizeHashRefHandoffPacket,
-  reissueHashRefHandoffPacket,
-} from "../../handoff/functions/helpers/hash-ref-packet.js";
-import {
-  broadNarrowScopedCodeTaskSignal,
-  parseUnderScopedBroadGateMode,
-} from "./scope-gates.js";
+import { normalizeHashRefHandoffPacket, reissueHashRefHandoffPacket } from "../../handoff/functions/helpers/hash-ref-packet.js";
+import { broadNarrowScopedCodeTaskSignal, parseUnderScopedBroadGateMode } from "./scope-gates.js";
 import { reconcilePlannerFileKinds } from "./scope-reconciliation.js";
 import { dependencyIndexesAfterSplit, rewriteDependenciesAfterSplit, rewriteDependenciesAroundPostMergeDbTasks } from "./dependency-rewrite.js";
 import { cancelSupersededPlanChildren } from "./plan-cleanup.js";
 import { deriveAndRecordAssessmentScopes } from "./assessment-scopes.js";
-import {
-  normalizeExplicitImageGenerationTask,
-  resolvePromoteSourceDir,
-  rewriteTaskImageOutputPaths,
-  routePromoteTaskByOutputDir,
-  splitTaskByCreateFileKind,
-} from "./task-splitting.js";
+import { normalizeExplicitImageGenerationTask, resolvePromoteSourceDir, rewriteTaskImageOutputPaths, routePromoteTaskByOutputDir, splitTaskByCreateFileKind } from "./task-splitting.js";
 import { ASSESSABLE_JOB_TYPES, TERMINAL_JOB_STATUSES, WORKTREE_JOB_TYPES } from "../../../catalog/job.js";
 import { normPath } from "../../../shared/scope/functions/path.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -161,10 +54,7 @@ import { promoteWaitingLaneOnDevDemand } from "../../research/functions/waiting-
 import { adoptPlannedRepoRouting, correctInferredRoutingToRepo } from "../../intake/functions/objective-contract.js";
 import { MAX_CONSECUTIVE_HUMAN_INPUT_DEFERRALS, evaluatePlanModality } from "./plan-modality.js";
 import { spawnPlanAfterHumanInputDeferral } from "../../worker/functions/helpers/pipeline-continuation.js";
-import {
-  isSensitiveEnvRepoPath,
-  normalizeRepoRelativePath,
-} from "../../runtime/functions/protected-paths.js";
+import { isSensitiveEnvRepoPath, normalizeRepoRelativePath } from "../../runtime/functions/protected-paths.js";
 
 const FRONTEND_DESIGN_SKILL_ID = "frontend-design";
 const REPORT_DELIVERABLE_EXTENSIONS = "md|txt|json|csv|html";
@@ -271,74 +161,10 @@ function formatPromoteDestinationList(files = []) {
   return files.length > 3 ? `${visible}, +${files.length - 3} more` : visible;
 }
 
-const DEDUPE_SORTED_ARRAY_KEYS = new Set([
-  "create_roots",
-  "depends_on_index",
-  "files_to_create",
-  "files_to_delete",
-  "files_to_modify",
-  "input_roots",
-  "mappings",
-  "success_criteria",
-]);
 
-function stableDedupeValue(value, key = null) {
-  if (Array.isArray(value)) {
-    const normalized = value.map((entry) => stableDedupeValue(entry));
-    if (!DEDUPE_SORTED_ARRAY_KEYS.has(key)) return normalized;
-    return normalized.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
-  }
-  if (value && typeof value === "object") {
-    const out = {};
-    for (const childKey of Object.keys(value).sort()) {
-      out[childKey] = stableDedupeValue(value[childKey], childKey);
-    }
-    return out;
-  }
-  return value;
-}
 
-function normalizedTaskTitleForDedupe(value) {
-  return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
-}
 
-function parsePayloadForDedupe(payloadJson) {
-  if (!payloadJson) return null;
-  if (typeof payloadJson === "object") return payloadJson;
-  try {
-    return JSON.parse(payloadJson);
-  } catch {
-    return payloadJson;
-  }
-}
 
-function plannedTaskDedupeKey(task, {
-  finalJobType,
-  taskMode,
-  provider = null,
-  modelTier = null,
-  reasoningEffort = null,
-  payloadJson = null,
-  promoteFollowUp = null,
-} = {}) {
-  if (!task || !finalJobType || finalJobType === "promote") return null;
-  return JSON.stringify(stableDedupeValue({
-    job_type: finalJobType,
-    title: normalizedTaskTitleForDedupe(task.title),
-    task_mode: taskMode || null,
-    provider: provider || null,
-    model_tier: modelTier || null,
-    reasoning_effort: reasoningEffort || null,
-    depends_on_index: Array.isArray(task.depends_on_index) ? task.depends_on_index : [],
-    payload: parsePayloadForDedupe(payloadJson),
-    promote_follow_up: promoteFollowUp ? {
-      title: promoteFollowUp.title || null,
-      mappings: Array.isArray(promoteFollowUp.mappings) ? promoteFollowUp.mappings : [],
-      files_to_create: Array.isArray(promoteFollowUp.files_to_create) ? promoteFollowUp.files_to_create : [],
-      create_roots: Array.isArray(promoteFollowUp.create_roots) ? promoteFollowUp.create_roots : [],
-    } : null,
-  }));
-}
 
 function taskTextForSkillInference(task = {}) {
   return [

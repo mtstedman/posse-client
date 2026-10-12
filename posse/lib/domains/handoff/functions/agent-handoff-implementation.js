@@ -1,3 +1,8 @@
+import { HANDOFF_IMAGE_EVIDENCE_EXTENSIONS as IMAGE_EVIDENCE_EXTENSIONS } from "../../../catalog/files.js";
+import { parseAgentHandoffEvidenceSelector, normalizedLines } from "./helpers/evidence-selector.js";
+import { fail, plainObject } from "./helpers/report-schema.js";
+export { parseAgentHandoffEvidenceSelector } from "./helpers/evidence-selector.js";
+import { exactKeys } from "./helpers/report-schema.js";
 import { researchUsesReportProfile } from "../../research/functions/output-routing.js";
 import { bindHandoffMetadata, expandResearchChildHandoff } from "./helpers/runtime-handoff-input.js";
 import crypto from "crypto";
@@ -5,82 +10,30 @@ import fs from "node:fs";
 import path from "node:path";
 import { RAW_SOURCE_LINES_ENCODING } from "../../../catalog/source-display.js";
 
-import {
-  AGENT_HANDOFF_ALIAS_POLICY,
-  AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY,
-  AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES,
-  AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS,
-  AGENT_HANDOFF_LIMITS,
-  AGENT_HANDOFF_PLANNER_CONTRACT_KEYS,
-  AGENT_HANDOFF_PLANNER_CONTRACT_VERSION,
-  AGENT_HANDOFF_PLANNER_DEPENDENCY_EDGE_POLICIES,
-  AGENT_HANDOFF_PLANNER_REPORT_KEYS,
-  AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS,
-  AGENT_HANDOFF_PROFILE_POLICY,
-  AGENT_HANDOFF_PROFILES,
-  AGENT_HANDOFF_PROTOCOL,
-  AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY,
-  AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES,
-  AGENT_HANDOFF_RESEARCH_PROSE_FIELDS,
-  AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES,
-  AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR,
-} from "../../../catalog/handoff.js";
-import { HASH_REF_ALIAS_PATTERN, normalizeHashRefAlias } from "../../../catalog/hash-store.js";
+import { AGENT_HANDOFF_ALIAS_POLICY, AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY, AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES, AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS, AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PLANNER_CONTRACT_KEYS, AGENT_HANDOFF_PLANNER_CONTRACT_VERSION, AGENT_HANDOFF_PLANNER_DEPENDENCY_EDGE_POLICIES, AGENT_HANDOFF_PLANNER_REPORT_KEYS, AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS, AGENT_HANDOFF_PROFILE_POLICY, AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_PROTOCOL, AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY, AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES, AGENT_HANDOFF_RESEARCH_PROSE_FIELDS, AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES, AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR } from "../../../catalog/handoff.js";
+import { normalizeHashRefAlias } from "../../../catalog/hash-store.js";
 import { ARTIFICER_COMPLETION_STATUSES, DEV_COMPLETION_STATUSES } from "../../../catalog/native-tools.js";
-import {
-  fetchHashRefForContext,
-  findFetchedHashRefViewsForContext,
-  findVisibleHashRefSourceWindowsForContext,
-  materializeHashRefEvidenceForContext,
-  surfaceHashRefForContext,
-} from "../../queue/functions/hash-refs.js";
+import { fetchHashRefForContext, findFetchedHashRefViewsForContext, findVisibleHashRefSourceWindowsForContext, materializeHashRefEvidenceForContext, surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
 import { recordObservation } from "../../observability/functions/observations.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import {
-  hashRefModelVisibility,
-  hashRefModelVisibleScope,
-} from "../../../shared/tools/functions/fetch-ref-policy.js";
-import {
-  resolveDeterministicReadableFile,
-} from "../../../shared/tools/functions/toolkit/path-policy.js";
+import { hashRefModelVisibility, hashRefModelVisibleScope } from "../../../shared/tools/functions/fetch-ref-policy.js";
+import { resolveDeterministicReadableFile } from "../../../shared/tools/functions/toolkit/path-policy.js";
 import { splitEditableLines } from "../../../shared/tools/functions/toolkit/structured-read.js";
-import {
-  normalizedEvidenceSourceWindow,
-} from "../../../shared/tools/functions/source-evidence.js";
+import { normalizedEvidenceSourceWindow } from "../../../shared/tools/functions/source-evidence.js";
 import { validatePlannedTask } from "../../planning/functions/plan-routing.js";
-import {
-  repairPlannerPacketFileKinds,
-  validatePlannerPacketFileKinds,
-} from "../../planning/functions/scope-reconciliation.js";
+import { repairPlannerPacketFileKinds, validatePlannerPacketFileKinds } from "../../planning/functions/scope-reconciliation.js";
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
-import {
-  detectSensitiveAgentHandoffText,
-  copiedAgentHandoffEvidenceWindows,
-  findCopiedAgentHandoffEvidence,
-  stripCopiedAgentHandoffEvidence,
-} from "./agent-handoff-boundaries.js";
+import { detectSensitiveAgentHandoffText, copiedAgentHandoffEvidenceWindows, findCopiedAgentHandoffEvidence, stripCopiedAgentHandoffEvidence } from "./agent-handoff-boundaries.js";
 import { redactString } from "../../bridge/functions/redaction.js";
-import {
-  normalizePlannerReportMetadata,
-  normalizeResearchData,
-  structuredStringLength,
-} from "./helpers/terminal-report-metadata.js";
-import {
-  filterKnownHandoffFields,
-  recordHandoffSoftening,
-  runWithHandoffFieldDiagnostics,
-} from "./helpers/field-diagnostics.js";
-import {
-  normalizeAgentHandoffShape,
-  relativizeEvidenceSelector,
-  truncateCompletionProse,
-} from "./helpers/shape-normalizer.js";
+import { normalizePlannerReportMetadata, normalizeResearchData, structuredStringLength } from "./helpers/terminal-report-metadata.js";
+import { recordHandoffSoftening, runWithHandoffFieldDiagnostics } from "./helpers/field-diagnostics.js";
+import { normalizeAgentHandoffShape, relativizeEvidenceSelector, truncateCompletionProse } from "./helpers/shape-normalizer.js";
 import { normalizeResearchSymbolSeeds } from "./helpers/research-symbols.js";
 import { narrowCitationSegments } from "./helpers/citation-shorthand.js";
 import { plannerPromoteMappings, plannerCompatibilityTasks, renderAgentHandoffCompatibilityOutput } from "./helpers/compatibility-output.js";
 import { packetEvidence, packetEvidenceMetrics, verifyStagedPacketEvidence } from "./helpers/packet-evidence.js";
 import { positiveInt, latestAgentHandoffRejection } from "./helpers/rejection-store.js";
-import { canonicalSourcePath, evidenceSourcePathSyntaxError } from "./evidence-source-path.js";
+import { canonicalSourcePath } from "./evidence-source-path.js";
 import { AGENT_HANDOFF_PACKET_TABLE as TABLE, agentHandoffSchema } from "../classes/AgentHandoffSchema.js";
 import { handoffRow } from "./agent-handoff-records.js";
 import { recordAtlasTrunkHitRate } from "./atlas-prefetch-terminal-telemetry.js";
@@ -91,10 +44,7 @@ import { mergeResearchReportDraftClaims } from "./research-report-claim-drafts.j
 import { finalReviewHandoffHold } from "../../assessment/functions/final-review-result.js";
 import { AGENT_CALL_CHILD_KINDS, runtimeRoleForAgentCallRole } from "../../../catalog/agent-call.js";
 import { TASK_MODE_VALUES } from "../../../catalog/artifact.js";
-import {
-  AGENT_HANDOFF_OBSERVATION_TYPES,
-  HANDOFF_TRAVERSAL_COMPLETION_CHECK_OBSERVATION_TYPE,
-} from "../../../catalog/observation.js";
+import { AGENT_HANDOFF_OBSERVATION_TYPES, HANDOFF_TRAVERSAL_COMPLETION_CHECK_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 
 export { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 export { renderAgentHandoffCompatibilityOutput } from "./helpers/compatibility-output.js";
@@ -127,11 +77,6 @@ function noteShapeNormalization(context, fieldPath, rule) {
 }
 const EVIDENCE_CLEANUP_OVERFLOW = Symbol("agent_handoff_evidence_cleanup_overflow");
 
-function fail(code, message) {
-  const err = new Error(message);
-  err.code = code;
-  throw err;
-}
 
 function evidenceSelectorText(selector) {
   if (typeof selector === "string") return selector;
@@ -295,9 +240,6 @@ export function isRetryableTerminalHandoffError(error) {
   );
 }
 
-function plainObject(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
-}
 
 function sameCompatibilityValue(left, right) {
   if (left === right) return true;
@@ -337,16 +279,6 @@ function compatibilityAlias(source, aliasId, label) {
   return canonicalPresent ? source[canonicalKey] : source[aliasKey];
 }
 
-function exactKeys(value, allowed, label) {
-  const object = plainObject(value);
-  if (!object) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} must be an object`);
-  const filtered = filterKnownHandoffFields(object, allowed, label);
-  if (filtered) return filtered;
-  for (const key of Object.keys(object)) {
-    if (!allowed.includes(key)) fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label}.${key} is not allowed`);
-  }
-  return object;
-}
 
 function boundedString(value, label, max, { required = true, lenient = false, context = null } = {}) {
   if (typeof value !== "string") fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} must be a string`);
@@ -413,94 +345,7 @@ function noteBudgetOverrun(label, rule, max, received) {
   recordHandoffSoftening(label, rule, { max, received });
 }
 
-export function parseAgentHandoffEvidenceSelector(value) {
-  let ref = null;
-  let sourcePath = null;
-  let qualifiedPath = null;
-  let start = null;
-  let end = null;
-  if (typeof value === "string") {
-    const raw = value.trim();
-    const refMatch = raw.toLowerCase().match(/^(#[0-9a-z]{4,12})(?::(?:l)?(\d+)(?:-(?:l)?(\d+))?)?$/);
-    const pathMatch = refMatch
-      ? null
-      : raw.match(/^(.+):(?:l)?(\d+)(?:-(?:l)?(\d+))?$/i);
-    if (refMatch) {
-      [, ref] = refMatch;
-      if (refMatch[2]) {
-        start = Number(refMatch[2]);
-        end = Number(refMatch[3] || refMatch[2]);
-      }
-    } else if (pathMatch) {
-      sourcePath = String(pathMatch[1] || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
-      start = Number(pathMatch[2]);
-      end = Number(pathMatch[3] || pathMatch[2]);
-    } else {
-      // Bare paths are useful for inspected binary artifacts, which have no
-      // meaningful source line coordinates. Materialization still requires a
-      // successful current-call artifact inspection and normal path policy.
-      sourcePath = raw.replace(/\\/g, "/").replace(/^\.\//, "");
-    }
-  } else {
-    const selector = exactKeys(value, ["ref", "path", "lines"], "evidence selector");
-    if (selector.ref == null && selector.path == null) {
-      fail("AGENT_HANDOFF_SELECTOR_INVALID", "Evidence selector must contain ref or path");
-    }
-    if (selector.ref != null) {
-      ref = normalizeHashRefAlias(selector.ref);
-      if (selector.path != null) {
-        qualifiedPath = String(selector.path || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
-      }
-    } else {
-      sourcePath = String(selector.path || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
-    }
-    if (selector.lines != null) {
-      const lines = exactKeys(selector.lines, ["start", "end", "count"], "evidence selector.lines");
-      start = Number(lines.start);
-      if (lines.count != null && lines.end != null) {
-        fail("AGENT_HANDOFF_SELECTOR_INVALID", `Evidence line range for ${ref} must use count or end, not both`);
-      }
-      const count = lines.count == null ? null : Number(lines.count);
-      end = count == null ? Number(lines.end) : start + count - 1;
-      if (count != null && (!Number.isInteger(count) || count < 1 || count > AGENT_HANDOFF_LIMITS.maxSelectorLines)) {
-        fail(
-          "AGENT_HANDOFF_SELECTOR_INVALID",
-          `Evidence line count for ${ref || sourcePath} must be an integer from 1 through ${AGENT_HANDOFF_LIMITS.maxSelectorLines}`,
-        );
-      }
-    }
-  }
-  if (ref != null && !HASH_REF_ALIAS_PATTERN.test(ref)) {
-    fail("AGENT_HANDOFF_SELECTOR_INVALID", `Invalid evidence ref: ${String(ref || "")}`);
-  }
-  if (sourcePath != null) {
-    const pathError = evidenceSourcePathSyntaxError(sourcePath);
-    if (pathError) fail("AGENT_HANDOFF_SELECTOR_INVALID", pathError);
-  }
-  if (qualifiedPath != null) {
-    const pathError = evidenceSourcePathSyntaxError(qualifiedPath);
-    if (pathError) fail("AGENT_HANDOFF_SELECTOR_INVALID", pathError);
-    if (start == null) {
-      fail("AGENT_HANDOFF_SELECTOR_INVALID", `Path-qualified evidence selector ${ref} requires a line range`);
-    }
-  }
-  if ((start == null) !== (end == null)) {
-    fail("AGENT_HANDOFF_SELECTOR_INVALID", `Evidence line range must include start and end for ${ref || sourcePath}`);
-  }
-  if (start != null && (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start)) {
-    fail("AGENT_HANDOFF_SELECTOR_INVALID", `Invalid 1-based inclusive line range for ${ref || sourcePath}`);
-  }
-  return sourcePath == null
-    ? { ref, ...(qualifiedPath == null ? {} : { path: qualifiedPath }), start, end }
-    : { path: sourcePath, start, end };
-}
 
-function normalizedLines(payload) {
-  const text = String(payload ?? "").replace(/\r\n?/g, "\n");
-  const lines = text.split("\n");
-  if (lines.length > 1 && lines.at(-1) === "") lines.pop();
-  return lines;
-}
 
 function deliveredRedactedLineMatches(sourceLine, deliveredLine) {
   const source = String(sourceLine ?? "");
@@ -1445,9 +1290,7 @@ function surfacedPathCandidates(context) {
     .sort((left, right) => left.path.localeCompare(right.path));
 }
 
-const IMAGE_EVIDENCE_EXTENSIONS = new Set([
-  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".svg", ".avif",
-]);
+
 const ARTIFACT_EVIDENCE_ROOT = ".posse/resources/artifacts/";
 
 // Non-code deliverables cannot be "surfaced" the way source lines are: there

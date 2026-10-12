@@ -1,48 +1,15 @@
-import {
-  completeAttempt,
-  getJob,
-  setJobResult,
-  storeArtifact,
-} from "../../../queue/functions/index.js";
+import { completeAttempt, getJob, storeArtifact } from "../../../queue/functions/index.js";
 import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
 import { C } from "../../../../shared/format/functions/colors.js";
-import {
-  assessmentRetryFallbackReads as _assessmentRetryFallbackReads,
-  isAssessorParseRetryBudgetExceeded as _isAssessorParseRetryBudgetExceeded,
-  shouldFastPassArtifactAssessment,
-  shouldOverrideArtifactMissingFail,
-} from "../../functions/execution/assessment-policy.js";
-import {
-  runPostExecutionAssessment as runPostExecutionAssessmentFromModule,
-} from "../../functions/helpers/assessment-pipeline.js";
-import {
-  collectPartialWorkStateAsync as collectPartialWorkStateAsyncFromModule,
-  commitScopedPartialWorkAsync as commitScopedPartialWorkAsyncFromModule,
-  recordPartialWorkDetected as recordPartialWorkDetectedFromModule,
-  revertPartialWork as revertPartialWorkFromModule,
-  setPartialWorkError as setPartialWorkErrorFromModule,
-  shouldOfferPartialTurnExtension as shouldOfferPartialTurnExtensionFromModule,
-  spawnPartialWorkReviewJob as spawnPartialWorkReviewJobFromModule,
-  stashPartialWorkForExtensionAsync as stashPartialWorkForExtensionAsyncFromModule,
-} from "../../functions/helpers/partial-work.js";
-import {
-  getErrorDetails as getErrorDetailsFromModule,
-} from "../../functions/helpers/diagnostics.js";
-import {
-  refreshAndExtractInsights as refreshAndExtractInsightsFromModule,
-} from "../../functions/helpers/insights.js";
-import {
-  shortJobTitle as shortJobTitleFromModule,
-} from "../../../../shared/policies/functions/role-utils.js";
-import {
-  logBadInputFailure as _logBadInputFailure,
-} from "../../functions/execution/bad-input.js";
-import {
-  isProviderError as _isProviderError,
-} from "../../functions/execution/job-helpers.js";
-import {
-  syncAssessorWorkerDisplay as syncAssessorWorkerDisplayFromModule,
-} from "../../functions/execution/display-sync.js";
+import { assessmentRetryFallbackReads as _assessmentRetryFallbackReads, isAssessorParseRetryBudgetExceeded as _isAssessorParseRetryBudgetExceeded, shouldFastPassArtifactAssessment, shouldOverrideArtifactMissingFail } from "../../functions/execution/assessment-policy.js";
+import { runPostExecutionAssessment as runPostExecutionAssessmentFromModule } from "../../functions/helpers/assessment-pipeline.js";
+import { collectPartialWorkStateAsync as collectPartialWorkStateAsyncFromModule, commitScopedPartialWorkAsync as commitScopedPartialWorkAsyncFromModule, recordPartialWorkDetected as recordPartialWorkDetectedFromModule, revertPartialWork as revertPartialWorkFromModule, setPartialWorkError as setPartialWorkErrorFromModule, shouldOfferPartialTurnExtension as shouldOfferPartialTurnExtensionFromModule, spawnPartialWorkReviewJob as spawnPartialWorkReviewJobFromModule, stashPartialWorkForExtensionAsync as stashPartialWorkForExtensionAsyncFromModule } from "../../functions/helpers/partial-work.js";
+import { getErrorDetails as getErrorDetailsFromModule } from "../../functions/helpers/diagnostics.js";
+import { refreshAndExtractInsights as refreshAndExtractInsightsFromModule } from "../../functions/helpers/insights.js";
+import { shortJobTitle as shortJobTitleFromModule } from "../../../../shared/policies/functions/role-utils.js";
+import { logBadInputFailure as _logBadInputFailure } from "../../functions/execution/bad-input.js";
+import { isProviderError as _isProviderError } from "../../functions/execution/job-helpers.js";
+import { syncAssessorWorkerDisplay as syncAssessorWorkerDisplayFromModule } from "../../functions/execution/display-sync.js";
 
 function _syncAssessorWorkerDisplay(display, job, {
   tier = "cheap",

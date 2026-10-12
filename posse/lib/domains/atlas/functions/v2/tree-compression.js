@@ -1,3 +1,4 @@
+import { missingTables } from "./ledger/missing-tables.js";
 // @ts-check
 //
 // Quick tree-compression snapshot for ATLAS v2.
@@ -926,18 +927,6 @@ function normalizeRepoPath(value) {
     .replace(/^\/+|\/+$/g, "");
 }
 
-function missingTables(db, tableNames) {
-  try {
-    const present = new Set(db.prepare(
-      `SELECT name FROM sqlite_master
-       WHERE type = 'table'
-         AND name IN (${tableNames.map(() => "?").join(", ")})`,
-    ).all(...tableNames).map((row) => String(row.name || "")));
-    return tableNames.filter((name) => !present.has(name));
-  } catch {
-    return [...tableNames];
-  }
-}
 
 function clampInt(value, min, max, fallback) {
   const parsed = Number.parseInt(String(value ?? ""), 10);

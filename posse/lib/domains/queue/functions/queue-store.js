@@ -1,3 +1,4 @@
+import { PIPELINE_BOOTSTRAP_JOB_TYPES, parseWorkItemMetadataRecord, missingExecutionReason, isActiveIterativeWorkItemRecord } from "./work-item-execution-contract.js";
 import { refreshHumanGateContract } from "./human-gates.js";
 import { registerAttemptStartHook } from "./attempts.js";
 // lib/queue.js — SQLite DB layer for the orchestrator job queue
@@ -7,198 +8,48 @@ import { registerAttemptStartHook } from "./attempts.js";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { ATLAS_FRESHNESS_PRELEASE_FENCE_MS } from "../../../catalog/atlas.js";
-import {
-  CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
-  MERGE_FAILURE_KINDS,
-  WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
-  humanGateStateAllowsAnswer,
-} from "../../../catalog/human-input.js";
-import {
-  MUTATING_JOB_TYPES,
-  NON_COMPLETION_BLOCKING_JOB_TYPES,
-  ONESHOT_SCOPE_SELECTION_SUBTYPE,
-} from "../../../catalog/job.js";
+import { CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE, MERGE_FAILURE_KINDS, WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE, humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
+import { MUTATING_JOB_TYPES, NON_COMPLETION_BLOCKING_JOB_TYPES, ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isShadowFanoutJob } from "../../research/functions/fanout-payload.js";
 import { parseJobPayload } from "./payload.js";
 import { beginJobRetryGeneration, completeAttempt, hasImplementationAttempts, isLeaseValid, setAssessmentLifecycle } from "./attempts.js";
-import {
-  ACTIVE_LEASE_STATUSES,
-  ACTIVE_LEASE_STATUSES_SQL,
-  DEADLOCK_TERMINAL_STATUSES_SQL,
-  FAILED_JOB_STATUSES,
-  LEASE_HOLDING_STATUSES,
-  LEASE_HOLDING_STATUSES_SQL,
-  TERMINAL_JOB_STATUSES,
-  TERMINAL_JOB_STATUSES_SQL,
-  TERMINAL_WORK_ITEM_STATUSES,
-  isPushOfferJob,
-  normalizeSkillsColumn,
-  now,
-  runImmediateTransaction,
-} from "./common.js";
+import { ACTIVE_LEASE_STATUSES, ACTIVE_LEASE_STATUSES_SQL, DEADLOCK_TERMINAL_STATUSES_SQL, FAILED_JOB_STATUSES, LEASE_HOLDING_STATUSES, LEASE_HOLDING_STATUSES_SQL, TERMINAL_JOB_STATUSES, TERMINAL_JOB_STATUSES_SQL, TERMINAL_WORK_ITEM_STATUSES, isPushOfferJob, normalizeSkillsColumn, now, runImmediateTransaction } from "./common.js";
 import { flushEventsNow, getEvents, logDurableEvent, logEvent } from "./events.js";
-import {
-  APPLIED_DB_TASKS_KEY,
-  POST_MERGE_DB_HOLD_KEY,
-  appliedDbTaskEntries,
-  hasActivePostMergeDbGate,
-  isDbTaskJob,
-  isPostMergeDbGateJob,
-  isPostMergeDbTaskJob,
-  isPostMergeHeldDbJob,
-  postMergeDbGateJobSpec,
-  postMergeDbHoldRecord,
-  supersededPostMergeDbMessage,
-  supersededPostMergeDbPayload,
-  supersedingPostMergeDbTask,
-} from "./post-merge-db-tasks.js";
+import { APPLIED_DB_TASKS_KEY, POST_MERGE_DB_HOLD_KEY, appliedDbTaskEntries, hasActivePostMergeDbGate, isDbTaskJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, postMergeDbGateJobSpec, postMergeDbHoldRecord, supersededPostMergeDbMessage, supersededPostMergeDbPayload, supersedingPostMergeDbTask } from "./post-merge-db-tasks.js";
 import { findMergeHoldingGate } from "./merge-holding-gate.js";
-import {
-  activeMergeFailureRecoveryGateId,
-  committedJobIdsForWorkItem,
-  isMergeFailureRecoveryPayload,
-  isMergeVerificationReviewJob,
-  mergeFailureRecoveryGateJobSpec,
-  mergeVerificationReviewGateJobSpec,
-  mergeVerificationReviewGateState,
-  mergeVerificationReviewRequirement,
-} from "./merge-verification-review.js";
+import { activeMergeFailureRecoveryGateId, committedJobIdsForWorkItem, isMergeFailureRecoveryPayload, isMergeVerificationReviewJob, mergeFailureRecoveryGateJobSpec, mergeVerificationReviewGateJobSpec, mergeVerificationReviewGateState, mergeVerificationReviewRequirement } from "./merge-verification-review.js";
 import { latestImplementationCommit, postChangeReceiptsAtCommit } from "./verification-receipts.js";
-import {
-  activeWorkItemDispositionGates,
-  crossWiUpstreamDispositionGateSpec,
-  crossWiUpstreamEpisode,
-  crossWiUpstreamGateEpisodes,
-  discardedPlanContext,
-  dispositionGateChoicesText,
-  failedLeafJobs,
-  failedWorkItemRestorationPlan,
-  hasWorkItemFailureGateForEpisode,
-  isCrossWiUpstreamDispositionGateJob,
-  isWorkItemDispositionGateJob,
-  operatorCanceledHeldDbTasks,
-  recoverableHeldDbTasks,
-  staleCrossWiUpstreams,
-  supersededFailedGateJobs,
-  unaskedStaleCrossWiUpstreams,
-  workItemFailureDispositionGateSpec,
-  workItemFailureIsRecoverable,
-} from "./work-item-dispositions.js";
+import { activeWorkItemDispositionGates, crossWiUpstreamDispositionGateSpec, crossWiUpstreamEpisode, crossWiUpstreamGateEpisodes, discardedPlanContext, dispositionGateChoicesText, failedLeafJobs, failedWorkItemRestorationPlan, hasWorkItemFailureGateForEpisode, isCrossWiUpstreamDispositionGateJob, isWorkItemDispositionGateJob, operatorCanceledHeldDbTasks, recoverableHeldDbTasks, staleCrossWiUpstreams, supersededFailedGateJobs, unaskedStaleCrossWiUpstreams, workItemFailureDispositionGateSpec, workItemFailureIsRecoverable } from "./work-item-dispositions.js";
 import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole, getIntSetting, getSetting } from "./settings.js";
 import { invalidateSessionLanesForWorkItem as invalidateSessionLanesForWorkItemInternal } from "./sessions.js";
-import {
-  getQueueWakeGeneration,
-  notifyQueueStateChanged,
-  waitForQueueStateChangeAfter,
-} from "./wakeups.js";
+import { getQueueWakeGeneration, notifyQueueStateChanged, waitForQueueStateChangeAfter } from "./wakeups.js";
 import { listUnresolvedActionableFailures } from "./failure-actionability.js";
-import {
-  releaseJobLocksForStatus,
-  releaseWorkItemFileLocks,
-  releaseWorkItemLocksForMergeState,
-  releaseWorkItemLocksForStatus,
-} from "./file-locks.js";
-import {
-  WORK_ITEM_BRANCH_RESET_KEY,
-  clearCrossWiMergeDependenciesForWorkItem,
-  getWorkItemMergeDependencies,
-  pendingCrossWiMergeUpstreamIds,
-  rollbackPendingCrossWiSyncHandoffsForJob,
-} from "./cross-wi-deps.js";
+import { buildJobRecoveryGraph, hasSucceededRecoveryDescendant } from "./job-recovery-graph.js";
+import { releaseJobLocksForStatus, releaseWorkItemFileLocks, releaseWorkItemLocksForMergeState, releaseWorkItemLocksForStatus } from "./file-locks.js";
+import { WORK_ITEM_BRANCH_RESET_KEY, clearCrossWiMergeDependenciesForWorkItem, getWorkItemMergeDependencies, pendingCrossWiMergeUpstreamIds, rollbackPendingCrossWiSyncHandoffsForJob } from "./cross-wi-deps.js";
 import { jobHasLiveLeaseAt } from "./lease-state.js";
-import {
-  __registerRequeueExpiredLeases,
-  consumePendingHumanGateResume as _consumePendingHumanGateResume,
-  graceCutoff as _graceCutoff,
-  leaseNowMs as _leaseNowMs,
-  leaseRequeueGraceSec,
-} from "./leases.js";
+import { __registerRequeueExpiredLeases, consumePendingHumanGateResume as _consumePendingHumanGateResume, graceCutoff as _graceCutoff, leaseNowMs as _leaseNowMs } from "./leases.js";
 import { findDeadlockedJobs, getAllDependencies } from "./dependencies.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import {
-  __registerHumanGateReconcileHook,
-  registerGateCanceledHook,
-  findActiveHumanGateForPayload,
-  getHumanGate,
-  registerHumanGate,
-} from "./human-gates.js";
-import { jobHasLivePendingScopeRequest } from "./scope-expansion.js";
+import { __registerHumanGateReconcileHook, registerGateCanceledHook, findActiveHumanGateForPayload, getHumanGate, registerHumanGate } from "./human-gates.js";
+import "./scope-expansion.js";
 import { createScopeExpansionOperations } from "./scope-expansion-requests.js";
-import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
-import { requiresRepositoryExecution } from "../../intake/functions/objective-contract.js";
+import "../../intake/functions/hints.js";
+import "../../intake/functions/objective-contract.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 const ACTIVE_LEASE_STATUS_SET = new Set(ACTIVE_LEASE_STATUSES);
 const FAILED_JOB_STATUS_SET = new Set(FAILED_JOB_STATUSES);
-const PIPELINE_BOOTSTRAP_JOB_TYPES = new Set(["preflight", "research", "plan"]);
 
-function parseWorkItemMetadataRecord(wi) {
-  try {
-    const parsed = wi?.metadata_json ? JSON.parse(wi.metadata_json) : {};
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
 
-function isExplicitResearchOnlyWorkItem(wi) {
-  if (!wi) return false;
-  if (wi.mode === "report" || wi.source === "ask") return true;
-  const metadata = parseWorkItemMetadataRecord(wi);
-  if (String(metadata.mode || "").trim().toLowerCase() === "question") return true;
-  if (String(metadata.workflow_mode || "").trim().toLowerCase() === "audit") return true;
-  const hints = metadata.intake_hints && typeof metadata.intake_hints === "object"
-    ? metadata.intake_hints
-    : {};
-  const outputMode = String(hints.output_mode || "").trim().toLowerCase();
-  const outputModeSource = String(hints.output_mode_source || "").trim().toLowerCase();
-  return outputMode === "question_only"
-    && (!outputModeSource || outputModeSource === "explicit");
-}
 
-function missingRequiredBuildExecution(wi, jobs) {
-  if (!wi || wi.mode !== "build" || isExplicitResearchOnlyWorkItem(wi)) return false;
-  if (!jobs.some((job) => PIPELINE_BOOTSTRAP_JOB_TYPES.has(job.job_type))) return false;
-  return !jobs.some((job) => MUTATING_JOB_TYPES.has(job.job_type));
-}
 
-function jobProducesRepositoryOutput(job) {
-  if (!job) return false;
-  if (job.job_type === "promote") return true;
-  if (job.job_type !== "dev" && job.job_type !== "fix") return false;
-  const payload = parseJobPayload(job);
-  const taskMode = String(payload.task_mode || "code").trim().toLowerCase();
-  return taskMode === "code" || taskMode === "db";
-}
 
-function missingRequiredRepoExecution(wi, jobs) {
-  if (!wi || isExplicitResearchOnlyWorkItem(wi)) return false;
-  if (!jobs.some((job) => PIPELINE_BOOTSTRAP_JOB_TYPES.has(job.job_type))) return false;
-  const intakeHints = getWorkItemIntakeHints(wi, wi.mode || "build");
-  if (!requiresRepositoryExecution(wi, intakeHints)) return false;
-  return !jobs.some(jobProducesRepositoryOutput);
-}
 
-function missingExecutionReason(wi, jobs) {
-  if (missingRequiredRepoExecution(wi, jobs)) return "missing_required_repo_execution";
-  if (missingRequiredBuildExecution(wi, jobs)) return "missing_required_build_execution";
-  return null;
-}
 
-function isActiveIterativeWorkItemRecord(wi) {
-  if (!wi?.metadata_json) return false;
-  try {
-    const metadata = JSON.parse(wi.metadata_json);
-    const iteration = metadata?.iteration && typeof metadata.iteration === "object"
-      ? metadata.iteration
-      : {};
-    return !!(metadata?.iterate || metadata?.workflow_mode) && iteration.active !== false;
-  } catch {
-    return false;
-  }
-}
+
 
 export {
   beginAttachedAssessmentAttempt,
@@ -2307,7 +2158,7 @@ export function refreshWorkItemStatus(workItemId) {
       if (hasAnswerableHumanGate) newStatus = "waiting_on_human";
       else if (hasAcceptedHumanGate) newStatus = "running";
       else newStatus = "blocked";
-    } else if (stateJobs.some(j => ["running", "leased", "awaiting_assessment"].includes(j.status))) {
+    } else if (stateJobs.some(j => ACTIVE_LEASE_STATUSES.includes(j.status))) {
       // Planner-first dispatches preflight/research/plan children that run
       // before the plan is produced. Those are planning-phase work: while every
       // non-terminal job is a bootstrap job the work item is still "planning",
@@ -2363,48 +2214,11 @@ export function completionBlockersForWorkItem(workItemId) {
     .filter((job) => !NON_COMPLETION_BLOCKING_JOB_TYPES.has(job.job_type));
   if (jobs.length === 0) return [];
 
-  const byParent = new Map();
-  const link = (originalId, job) => {
-    const id = Number(originalId);
-    if (!Number.isSafeInteger(id) || id <= 0 || id === Number(job.id)) return;
-    if (!byParent.has(id)) byParent.set(id, []);
-    byParent.get(id).push(job);
-  };
-  for (const job of jobs) {
-    if (job.parent_job_id) link(job.parent_job_id, job);
-    // Recovery work is not always a child of the job it replaces: a
-    // dead-letter retry, a partial-deliverable repair or a promote follow-up
-    // records the original in its payload. A succeeded one recovers the
-    // original just as a succeeded child does.
-    let payload = null;
-    try { payload = job.payload_json ? JSON.parse(job.payload_json) : null; } catch { payload = null; }
-    if (!payload || typeof payload !== "object") continue;
-    for (const originalId of [
-      payload._dead_letter_recovery?.original_job_id,
-      payload._promote_followup_of,
-      payload._partial_deliverable_repair_for,
-      payload._promote_missing_repair_for,
-    ]) {
-      if (originalId != null && Number(originalId) !== Number(job.parent_job_id)) link(originalId, job);
-    }
-  }
-
-  function hasSucceededDescendant(jobId) {
-    const stack = [...(byParent.get(jobId) || [])];
-    const seen = new Set();
-    while (stack.length > 0) {
-      const current = stack.pop();
-      if (!current || seen.has(current.id)) continue;
-      seen.add(current.id);
-      if (current.status === "succeeded" && current.job_type !== "human_input") return true;
-      stack.push(...(byParent.get(current.id) || []));
-    }
-    return false;
-  }
+  const byOriginal = buildJobRecoveryGraph(jobs);
 
   return jobs.filter((job) => {
     if (job.status === "succeeded" || job.status === "canceled") return false;
-    if ((job.status === "failed" || job.status === "dead_letter") && hasSucceededDescendant(job.id)) return false;
+    if ((job.status === "failed" || job.status === "dead_letter") && hasSucceededRecoveryDescendant(job.id, byOriginal)) return false;
     return true;
   });
 }

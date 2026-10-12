@@ -9,10 +9,7 @@
 import { ATLAS_TOOL_ACTIONS } from "./tool-params.js";
 import { ATLAS_RUNTIME_INPUTS } from "./runtimes.js";
 import { SYMBOL_GET_BATCH_POLICY } from "../../../../../catalog/symbol-get-batch.js";
-import {
-  INTERNAL_ATLAS_ACTIONS,
-  INTERNAL_TOOL_FAMILY,
-} from "../../../../../catalog/internal-tools.js";
+import { INTERNAL_ATLAS_ACTIONS, INTERNAL_TOOL_FAMILY } from "../../../../../catalog/internal-tools.js";
 
 const ATLAS_SYMBOL_ID_PATTERN = "^[0-9a-f]{64}:[0-9]+$";
 const TASK_TYPES = Object.freeze(["debug", "review", "implement", "explain"]);
@@ -101,12 +98,7 @@ const targetRequired = () => ({
     { required: ["file"] },
   ],
 });
-const codeWindowTargetRequired = () => ({
-  anyOf: [
-    { required: ["symbolId"] },
-    { required: ["file", "identifiersToFind"] },
-  ],
-});
+
 const createRefInputMode = () => ({
   oneOf: [
     { required: ["text"] },

@@ -4,11 +4,12 @@
 // list, the relayed peer snapshot, the derived sync state, and this clone's
 // own advertised work), so any surface can render it.
 
+import { ACTIVE_LEASE_STATUSES } from "../../../catalog/job.js";
 import { SESSION_SYNC_GLYPHS, SESSION_SYNC_STATES } from "../../../catalog/session-sync.js";
 import { formatPeerSyncRow } from "./sync-state.js";
 import { sessionMemberLabel } from "./session-console.js";
 
-const RUNNING_JOB_STATUSES = new Set(["leased", "running", "awaiting_assessment"]);
+const RUNNING_JOB_STATUSES = new Set(ACTIVE_LEASE_STATUSES);
 const WAITING_JOB_STATUSES = new Set(["waiting_on_human", "waiting_on_review"]);
 const NAME_WIDTH_MAX = 36;
 

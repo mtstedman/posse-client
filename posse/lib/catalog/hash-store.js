@@ -1,10 +1,11 @@
+import { readonlySet } from "./readonly-collections.js";
 export const HASH_REF_OWNER_SCOPES = Object.freeze([
   "work_item",
   "job",
   "agent_run",
 ]);
 
-export const HASH_REF_OWNER_SCOPE_SET = new Set(HASH_REF_OWNER_SCOPES);
+export const HASH_REF_OWNER_SCOPE_SET = readonlySet(HASH_REF_OWNER_SCOPES);
 export const HASH_REF_OWNER_SCOPE_LIST_SQL = HASH_REF_OWNER_SCOPES.map((value) => `'${value}'`).join(",");
 
 export const HASH_REF_ENTRY_KINDS = Object.freeze([
@@ -12,7 +13,7 @@ export const HASH_REF_ENTRY_KINDS = Object.freeze([
   "descriptor",
 ]);
 
-export const HASH_REF_ENTRY_KIND_SET = new Set(HASH_REF_ENTRY_KINDS);
+export const HASH_REF_ENTRY_KIND_SET = readonlySet(HASH_REF_ENTRY_KINDS);
 export const HASH_REF_ENTRY_KIND_LIST_SQL = HASH_REF_ENTRY_KINDS.map((value) => `'${value}'`).join(",");
 
 export const HASH_REF_LANES = Object.freeze([
@@ -21,7 +22,7 @@ export const HASH_REF_LANES = Object.freeze([
   "decoy",
 ]);
 
-export const HASH_REF_LANE_SET = new Set(HASH_REF_LANES);
+export const HASH_REF_LANE_SET = readonlySet(HASH_REF_LANES);
 export const HASH_REF_LANE_LIST_SQL = HASH_REF_LANES.map((value) => `'${value}'`).join(",");
 
 export const HASH_REF_ALIAS_PATTERN = /^#[0-9a-z]{4,12}$/;
@@ -74,5 +75,5 @@ export const HASH_REF_DESTINATIONS = Object.freeze([
   "handoff",
 ]);
 
-export const HASH_REF_DESTINATION_SET = new Set(HASH_REF_DESTINATIONS);
+export const HASH_REF_DESTINATION_SET = readonlySet(HASH_REF_DESTINATIONS);
 export const HASH_REF_DESTINATION_LIST_SQL = HASH_REF_DESTINATIONS.map((value) => `'${value}'`).join(",");

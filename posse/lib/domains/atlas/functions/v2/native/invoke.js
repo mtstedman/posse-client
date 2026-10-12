@@ -7,10 +7,7 @@
 // an invalid response, the call fails. During migration, Node implementations
 // are used only as explicit parity oracles outside this boundary.
 
-import {
-  ATLAS_EXECUTE_TOOL_CONTRACT_VERSION,
-  ATLAS_NATIVE_PROTOCOL,
-} from "../../../../../catalog/binary.js";
+import { ATLAS_NATIVE_PROTOCOL } from "../../../../../catalog/binary.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { hasNativeThreadBridge, nativeThreadBridgeRequest } from "../../../../../shared/tools/classes/daemon/native-thread-bridge.js";
 

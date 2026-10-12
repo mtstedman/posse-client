@@ -1,8 +1,6 @@
-import {
-  getSetting,
-  getWorkItem,
-  logEvent,
-} from "../../../queue/functions/index.js";
+import { readSettingText, readSettingBool } from "../../../settings/functions/safe-setting-read.js";
+import { diffPorcelainEntries, parsePorcelainZ } from "../../../git/functions/porcelain-diff.js";
+import { getWorkItem, logEvent } from "../../../queue/functions/index.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { snapshotAndResetDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
 import { gitExecAsync } from "../../../git/functions/utils.js";
@@ -10,29 +8,10 @@ import { recordObservation } from "../../../observability/functions/observations
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { runShellCommandAsync } from "./assessment-runner.js";
-import {
-  describeToolchain,
-  resolveVerificationPolicy,
-  toolchainFingerprint,
-} from "../../../settings/functions/verification-policy.js";
+import { describeToolchain, resolveVerificationPolicy, toolchainFingerprint } from "../../../settings/functions/verification-policy.js";
 import { verificationOutcome } from "./verification-outcome.js";
 
-function readSettingText(key, projectDir = null) {
-  try {
-    const value = getSetting(key, projectDir ? { projectDir } : {});
-    return value == null ? "" : String(value).trim();
-  } catch {
-    return "";
-  }
-}
 
-function readSettingBool(key, fallback = false) {
-  const value = readSettingText(key).toLowerCase();
-  if (!value) return fallback;
-  if (["1", "true", "yes", "on"].includes(value)) return true;
-  if (["0", "false", "no", "off"].includes(value)) return false;
-  return fallback;
-}
 
 export function configuredVerificationPlan(projectDir, {
   preAssessAlreadyVerified = false,
@@ -71,30 +50,8 @@ async function gitPorcelainZ(cwd) {
   ) || "");
 }
 
-function parsePorcelainZ(raw = "") {
-  const parts = String(raw || "").split("\0").filter(Boolean);
-  const entries = [];
-  for (let index = 0; index < parts.length; index += 1) {
-    const item = parts[index];
-    const status = item.slice(0, 2);
-    const filePath = item.slice(3);
-    let oldPath = null;
-    if ((status.includes("R") || status.includes("C")) && index + 1 < parts.length) {
-      oldPath = parts[++index];
-    }
-    entries.push({ status, path: filePath, old_path: oldPath });
-  }
-  return entries;
-}
 
-function porcelainEntryKey(entry) {
-  return `${entry.status}\0${entry.path || ""}\0${entry.old_path || ""}`;
-}
 
-function diffPorcelainEntries(beforeRaw, afterRaw) {
-  const beforeKeys = new Set(parsePorcelainZ(beforeRaw).map(porcelainEntryKey));
-  return parsePorcelainZ(afterRaw).filter((entry) => !beforeKeys.has(porcelainEntryKey(entry)));
-}
 
 async function commitBinding(cwd, assessedCommitHash) {
   const assessed = String(assessedCommitHash || "").trim().toLowerCase();

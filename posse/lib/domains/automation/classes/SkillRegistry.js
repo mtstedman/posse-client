@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { AUTOMATION_BUILTINS } from "../../../catalog/custom-tools.js";
-import { definitionDigest, demand, digest, validateDefinition } from "../functions/policy.js";
+import { definitionDigest, demand, validateDefinition } from "../functions/policy.js";
 
 export class SkillRegistry {
   constructor(service) { this.service = service; this.store = service.store; }

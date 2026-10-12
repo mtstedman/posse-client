@@ -4,45 +4,21 @@
 
 import path from "path";
 import { INFERRED_SCOPE_BARE_EXTENSIONS } from "../../../../catalog/files.js";
-import {
-  RECEIPT_CONFIDENCE_POLICY,
-  REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID,
-  UNESTABLISHED_COVERAGE_STATUSES,
-} from "../../../../catalog/verification.js";
+import { RECEIPT_CONFIDENCE_POLICY, REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID, UNESTABLISHED_COVERAGE_STATUSES } from "../../../../catalog/verification.js";
 import { inferGeneratedArtifactDeletionTargets } from "../../../../shared/scope/classes/MutationPolicy.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
-import {
-  countFailedJobs,
-  getAttempts,
-  getDependents,
-  getEventsByWorkItem,
-  getJob,
-  getWorkItem,
-  listJobsByWorkItem,
-  logEvent,
-  runInTransaction,
-  updateJobPayload,
-  updateJobStatus,
-  updateWorkItemMetadata,
-} from "../../../queue/functions/index.js";
+import { countFailedJobs, getAttempts, getDependents, getEventsByWorkItem, getJob, getWorkItem, listJobsByWorkItem, logEvent, runInTransaction, updateJobPayload, updateJobStatus, updateWorkItemMetadata } from "../../../queue/functions/index.js";
 import { parseJobPayload, parseJsonObject } from "../../../queue/functions/payload.js";
-import { artifactsDir, isArtifactMode, wiScopeId } from "../../../artifacts/functions/index.js";
+import { artifactsDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { sanitizeHumanQuestions } from "./human-question-classifier.js";
 import { listUnresolvedActionableFailures } from "../../../queue/functions/failure-actionability.js";
-import {
-  countInternalAssessmentRetries,
-  getAssessmentInternalRetryLimit,
-} from "./assessment-shared.js";
+import { countInternalAssessmentRetries, getAssessmentInternalRetryLimit } from "./assessment-shared.js";
 import { validateScopedPath } from "../../../../shared/scope/functions/validation.js";
 import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { latestTestReceiptDelta } from "./test-execution-receipt.js";
-import {
-  attributedDebtCoverageEstablished,
-  debtCoverageEstablished,
-  renderTestFailureSummary,
-} from "./test-failure-evidence.js";
+import { attributedDebtCoverageEstablished, debtCoverageEstablished, renderTestFailureSummary } from "./test-failure-evidence.js";
 import { verificationOutcome } from "./verification-outcome.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { getMaxFixChainDepth, getWiFailureThreshold } from "../../../settings/functions/tunables.js";

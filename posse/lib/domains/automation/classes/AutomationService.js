@@ -3,7 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { AUTOMATION_BUILTINS, CUSTOM_TOOLS_TERMINAL } from "../../../catalog/custom-tools.js";
-import { authorize, definitionDigest, demand, digest, matchesGrant, narrowLimits, object, publicEntry, schemaCheck, subject, validateDefinition, validateGrant } from "../functions/policy.js";
+import { authorize, demand, digest, matchesGrant, narrowLimits, object, publicEntry, schemaCheck, subject, validateGrant } from "../functions/policy.js";
 import { ResourceSandbox } from "./ResourceSandbox.js";
 import { nextOccurrence, previewOccurrences, validateTrigger } from "../functions/triggers.js";
 

@@ -8,35 +8,14 @@ import { getDefaultReasoningEffortForRole } from "../../../settings/functions/re
 import { C } from "../../../../shared/format/functions/colors.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
-import { getArtifacts, getAttempts, getIntSetting, getSetting, getWorkItem, storeArtifact } from "../../../queue/functions/index.js";
-import {
-  applyDeterministicDeletes,
-  buildPromptAsync,
-  buildHandoffPacket,
-  handoff,
-  attachRequestedContext,
-  parseMissingContext,
-  renderAtlasHandoffSections,
-} from "../../../handoff/functions/index.js";
+import { getArtifacts, getAttempts, getIntSetting, getWorkItem, storeArtifact } from "../../../queue/functions/index.js";
+import { applyDeterministicDeletes, buildPromptAsync, buildHandoffPacket, handoff, attachRequestedContext, parseMissingContext, renderAtlasHandoffSections } from "../../../handoff/functions/index.js";
 import { BaseRole, projectPromptPacketForProvider } from "../BaseRole.js";
 import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../../functions/helpers/diagnostics.js";
-import {
-  extractCheckpointFromOutput as defaultExtractCheckpointFromOutput,
-  loadCheckpoint as defaultLoadCheckpoint,
-  parseAgentCompletionLog as defaultParseAgentCompletionLog,
-  scopedDeleteTargets as defaultScopedDeleteTargets,
-} from "../../functions/helpers/mutation-guards.js";
-import {
-  CHECKPOINT_TOKEN_THRESHOLD,
-  maxTurnsOverrideFromPayload,
-  shortJobTitle as defaultShortJobTitle,
-  uniqueScopeFiles as defaultUniqueScopeFiles,
-} from "../../../../shared/policies/functions/role-utils.js";
+import { extractCheckpointFromOutput as defaultExtractCheckpointFromOutput, loadCheckpoint as defaultLoadCheckpoint, parseAgentCompletionLog as defaultParseAgentCompletionLog, scopedDeleteTargets as defaultScopedDeleteTargets } from "../../functions/helpers/mutation-guards.js";
+import { CHECKPOINT_TOKEN_THRESHOLD, maxTurnsOverrideFromPayload, shortJobTitle as defaultShortJobTitle, uniqueScopeFiles as defaultUniqueScopeFiles } from "../../../../shared/policies/functions/role-utils.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
-import {
-  spawnFailureForRole,
-  spawnSuccessForRole,
-} from "../../../../shared/policies/functions/spawn-policy.js";
+import { spawnFailureForRole, spawnSuccessForRole } from "../../../../shared/policies/functions/spawn-policy.js";
 import { projectDbEffectivePermissions } from "../../../../shared/tools/functions/toolkit/project-db/config.js";
 import { workItemResearchRefsBlock } from "../../../research/functions/work-item-research-refs.js";
 import { blockedRetryContext } from "../../functions/helpers/block-reason.js";

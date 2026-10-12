@@ -1,33 +1,18 @@
 import { AutomationOwnerClient } from "../../automation/classes/AutomationOwnerClient.js";
 import { repositoryID } from "../../automation/functions/paths.js";
 import { RemotePromptClient } from "./RemotePromptClient.js";
-import {
-  getPromptBundleVersion,
-  loadRemotePromptBundle,
-} from "../functions/prompt-bundle.js";
+import { getPromptBundleVersion, loadRemotePromptBundle } from "../functions/prompt-bundle.js";
 import { buildRemoteCompileRequest } from "../functions/request.js";
 import { renderLocalEnrichment } from "../functions/render-enrichment.js";
-import {
-  renderAutoExpandedDevBriefEvidence,
-  stageAutoExpandedDevBriefEvidence,
-} from "../../handoff/functions/helpers/hash-ref-packet.js";
-import {
-  getPosseRemoteTimeoutMs,
-  getPosseRemoteUrl,
-} from "../functions/mode.js";
+import { renderAutoExpandedDevBriefEvidence, stageAutoExpandedDevBriefEvidence } from "../../handoff/functions/helpers/hash-ref-packet.js";
+import { getPosseRemoteTimeoutMs, getPosseRemoteUrl } from "../functions/mode.js";
 import { getSetting } from "../../queue/functions/settings.js";
 import { getWorkItem } from "../../queue/functions/index.js";
 import { atlasMemoryEnabled } from "../../../shared/policies/functions/memory-mode.js";
 import { recordObservation } from "../../observability/functions/observations.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
-import {
-  estimateTokensFromChars,
-  resolveContextCompactionConfig,
-} from "../../settings/functions/context-compaction.js";
-import {
-  deriveRemoteToolSurfaceNarrowing,
-  normalizeRemoteIssuedPolicy,
-} from "../../../shared/tools/functions/issued-tool-policy.js";
+import { estimateTokensFromChars, resolveContextCompactionConfig } from "../../settings/functions/context-compaction.js";
+import { deriveRemoteToolSurfaceNarrowing, normalizeRemoteIssuedPolicy } from "../../../shared/tools/functions/issued-tool-policy.js";
 import { resolveResearchBudgetVisibility, resolveResearchSynthesisMaxPhysicalCalls } from "../../integrations/functions/deterministic-mcp/gate-settings.js";
 import { buildResearchWorkBudgetUpfrontText } from "../../integrations/functions/deterministic-mcp/research-synthesis.js";
 
@@ -116,7 +101,7 @@ export class RemoteComposer {
     maxPromptChars = null,
     maxContextChars = null,
   } = {}) {
-    const localPolicyBeforeRemote = localPolicyCeiling(packet?.tool_policy);
+    (localPolicyCeiling(packet?.tool_policy));
     // Worker-owned root, not packet.cwd (which may be a worktree) or task capabilities.
     // Gate creation runs concurrently and performs the same owner-scoped check.
     const customToolsAvailable = !!projectDir

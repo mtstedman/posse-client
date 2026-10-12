@@ -9,26 +9,11 @@ import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { normalizeDisplaySlashes } from "../../../../shared/format/functions/display-paths.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
-import {
-  getArtifactsByWorkItem,
-  getAttempts,
-  getIntSetting,
-  getJob,
-  getSetting,
-  getWorkItem,
-  storeArtifact,
-} from "../../../queue/functions/index.js";
+import { getArtifactsByWorkItem, getAttempts, getIntSetting, getJob, getWorkItem, storeArtifact } from "../../../queue/functions/index.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
-import {
-  buildPromptAsync,
-  buildHandoffPacket,
-  extractResearcherFiles as defaultExtractResearcherFiles,
-  handoff,
-  packetToDynamicContextString,
-  parseMissingContext,
-} from "../../../handoff/functions/index.js";
+import { buildPromptAsync, buildHandoffPacket, extractResearcherFiles as defaultExtractResearcherFiles, handoff, packetToDynamicContextString, parseMissingContext } from "../../../handoff/functions/index.js";
 import { getAvailableProviders, getProviderName } from "../../../providers/functions/provider.js";
 import { artifactsDir, getConfiguredImageModel, wiScopeId } from "../../../artifacts/functions/index.js";
 import { imageModelNativeFormats } from "../../../providers/functions/model-catalog.js";
@@ -37,15 +22,10 @@ import { BaseRole, projectPromptPacketForProvider } from "../BaseRole.js";
 import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import { hasStructuredArtificerLog as defaultHasStructuredArtificerLog } from "../../functions/helpers/artifact-output.js";
 import { maxTurnsOverrideFromPayload } from "../../../../shared/policies/functions/role-utils.js";
-import {
-  looksLikePermissionRequest as defaultLooksLikePermissionRequest,
-} from "../../functions/helpers/mutation-guards.js";
+import { looksLikePermissionRequest as defaultLooksLikePermissionRequest } from "../../functions/helpers/mutation-guards.js";
 import { selectFallbackProvider as defaultSelectFallbackProvider } from "../../../providers/functions/delegation-routing.js";
 import { shortJobTitle as defaultShortJobTitle } from "../../../../shared/policies/functions/role-utils.js";
-import {
-  spawnFailureForRole,
-  spawnSuccessForRole,
-} from "../../../../shared/policies/functions/spawn-policy.js";
+import { spawnFailureForRole, spawnSuccessForRole } from "../../../../shared/policies/functions/spawn-policy.js";
 import { validateArtifactRootPath } from "../../../planning/functions/plan-routing.js";
 import { promptPersistenceSummary } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import { blockedRetryContext } from "../../functions/helpers/block-reason.js";

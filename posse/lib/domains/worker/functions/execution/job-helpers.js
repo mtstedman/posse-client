@@ -1,8 +1,7 @@
+import "../../../../shared/platform/functions/process-liveness.js";
+export { isProcessAlive } from "../../../../shared/platform/functions/process-liveness.js";
 import path from "path";
-import {
-  buildOperatorGuidanceForAttempt,
-  getArtifacts,
-} from "../../../queue/functions/index.js";
+import { buildOperatorGuidanceForAttempt, getArtifacts } from "../../../queue/functions/index.js";
 import { slugify } from "../../../../shared/format/functions/slug.js";
 import { estimateCallCost } from "../../../billing/functions/pricing.js";
 import { isInsideRoot } from "../../../runtime/functions/fs-safety.js";
@@ -16,18 +15,6 @@ export function loadNudges(jobId, { attemptId = null, agentCallId = null } = {})
   });
 }
 
-export function isProcessAlive(pid) {
-  const numericPid = Number(pid);
-  if (!Number.isInteger(numericPid) || numericPid <= 0) return null;
-  try {
-    process.kill(numericPid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    if (error?.code === "EPERM") return true;
-    return null;
-  }
-}
 
 export function artifactTaskSlug(title, fallback = "artifact") {
   return slugify(title || fallback, { fallback, maxLength: 40 });

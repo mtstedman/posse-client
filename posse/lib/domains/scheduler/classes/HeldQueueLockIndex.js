@@ -1,5 +1,6 @@
 import {
   ACTIVE_LEASE_STATUSES,
+  LOCK_HOLDING_JOB_STATUSES,
   QUEUE_LOCKING_JOB_TYPES,
   TERMINAL_JOB_STATUSES,
   WORKTREE_JOB_TYPES,
@@ -17,14 +18,7 @@ const ROOT_LOCKING_JOB_TYPES = WORKTREE_JOB_TYPES;
 const QUEUED_REPAIR_LOCK_JOB_TYPES = new Set(["fix", "promote"]);
 const TERMINAL_JOB_STATUSES_SET = new Set(TERMINAL_JOB_STATUSES);
 const ACTIVE_ASSESSMENT_BARRIER_STATUSES = new Set(ACTIVE_LEASE_STATUSES);
-const LOCK_HOLDING_STATUSES = new Set([
-  "leased",
-  "running",
-  "awaiting_assessment",
-  "waiting_on_human",
-  "waiting_on_review",
-  "blocked",
-]);
+const LOCK_HOLDING_STATUSES = new Set(LOCK_HOLDING_JOB_STATUSES);
 
 // Aggregate queue mutations (orphan sweep, expired-lease sweep, deadlock
 // cancel) emit a single wake without a specific jobId / workItemId. The

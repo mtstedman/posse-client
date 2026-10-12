@@ -8,16 +8,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
-import {
-  ATLAS_VECTOR_NATIVE_ROUTE,
-  GIT_MUTATE_ROUTE,
-  GIT_READ_ROUTE,
-  ML_NATIVE_ROUTE,
-  REMOTE_CATALOG_READ_ROUTE,
-  REMOTE_PROMPTS_BUNDLE_ROUTE,
-  REMOTE_PROMPTS_COMPILE_ROUTE,
-} from "../../../catalog/binary.js";
-import { VERIFICATION_PULSE_CAPABILITY_ENV } from "../../../catalog/process.js";
+import { ATLAS_VECTOR_NATIVE_ROUTE, GIT_MUTATE_ROUTE, GIT_READ_ROUTE, ML_NATIVE_ROUTE, REMOTE_CATALOG_READ_ROUTE, REMOTE_PROMPTS_BUNDLE_ROUTE, REMOTE_PROMPTS_COMPILE_ROUTE } from "../../../catalog/binary.js";
 import { NativeAuthHandshake } from "./NativeAuthHandshake.js";
 import { heartbeatAuthManager } from "./HeartbeatAuthManager.js";
 import { pulseTokenManager } from "./PulseTokenManager.js";

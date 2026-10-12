@@ -4,71 +4,25 @@ import { linkFailedAttemptSnapshot } from "./failed-attempt-recovery.js";
 // Execute-attempt error taxonomy extracted from worker.js:
 // deterministic interruptions, retryable interruptions, and catastrophic errors.
 
-import {
-  abandonJobScopeExpansionRequest,
-  completeAttempt,
-  decrementAttemptCount,
-  flagStallResume,
-  getAttempts,
-  getJob,
-  getWorkItem,
-  incrementAttemptCount,
-  jobHasLivePendingScopeRequest,
-  logEvent,
-  listJobsByWorkItem,
-  setJobError,
-  settleJobScopeExpansionAttempt,
-  storeArtifact,
-  updateJobPayload,
-  updateJobProvider,
-} from "../../../queue/functions/index.js";
+import { abandonJobScopeExpansionRequest, completeAttempt, decrementAttemptCount, flagStallResume, getAttempts, getJob, getWorkItem, incrementAttemptCount, logEvent, listJobsByWorkItem, setJobError, settleJobScopeExpansionAttempt, storeArtifact, updateJobPayload, updateJobProvider } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
-import {
-  getProviderBackoff,
-  getProviderName,
-  getProviderRateLimitState,
-  pauseProvider,
-} from "../../../providers/functions/provider.js";
+import { getProviderBackoff, getProviderName, getProviderRateLimitState, pauseProvider } from "../../../providers/functions/provider.js";
 import { providerRoleForJobType } from "../../../providers/functions/roles.js";
 import { providerErrorSource } from "../../../providers/functions/shared/api-resilience.js";
 import { runtimeKillCanEscalate } from "../../../scheduler/functions/runtime-escalation.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { isAbortError } from "../../../runtime/functions/yield.js";
-import {
-  buildFailureDiagnosticsArtifact,
-  currentExecutionProvider,
-  getErrorDetails,
-  isPermanentProviderConfigError,
-  retryingAttemptWording,
-} from "./diagnostics.js";
+import { buildFailureDiagnosticsArtifact, currentExecutionProvider, getErrorDetails, isPermanentProviderConfigError, retryingAttemptWording } from "./diagnostics.js";
 import { refreshAndExtractInsights } from "./insights.js";
 import { gitHasChangesAsync } from "../../../git/functions/utils.js";
-import {
-  snapshotAndResetDirtyWorktreeAsync,
-  stashDirtyWorktreeAsync,
-} from "../../../git/functions/worktree.js";
-import {
-  activeSiblingWriteLocks,
-  siblingLockSummary,
-} from "../../../queue/functions/sibling-locks.js";
+import { snapshotAndResetDirtyWorktreeAsync, stashDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
+import { activeSiblingWriteLocks, siblingLockSummary } from "../../../queue/functions/sibling-locks.js";
 import { siblingJobScopePaths } from "../../../queue/functions/file-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { processVerdict } from "./process-verdict.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
-import {
-  isLongProviderPause,
-  isProviderQuotaBackoff,
-  MAX_PROVIDER_ERROR_REQUEUES,
-  MAX_PROVIDER_PAUSED_BOUNCES,
-  MAX_PROVIDER_QUOTA_PAUSES,
-  planProviderPausedRequeue,
-  planProviderQuotaPause,
-  PROVIDER_ERROR_PREFIX,
-  PROVIDER_PAUSED_PREFIX,
-  PROVIDER_QUOTA_PAUSE_PREFIX,
-  providerInterruptionStreak,
-} from "./provider-quota-pause.js";
+import { isLongProviderPause, isProviderQuotaBackoff, MAX_PROVIDER_ERROR_REQUEUES, MAX_PROVIDER_PAUSED_BOUNCES, MAX_PROVIDER_QUOTA_PAUSES, planProviderPausedRequeue, planProviderQuotaPause, PROVIDER_ERROR_PREFIX, PROVIDER_PAUSED_PREFIX, PROVIDER_QUOTA_PAUSE_PREFIX, providerInterruptionStreak } from "./provider-quota-pause.js";
 
 export const MAX_LIVE_SCOPE_WAIT_INTERRUPTIONS = 3;
 

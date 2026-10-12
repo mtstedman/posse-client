@@ -1,127 +1,42 @@
 import { parkDirtyWorktreeRecovery } from "../../functions/helpers/dirty-worktree-recovery.js";
 import crypto from "crypto";
 import fs from "node:fs";
-import {
-  completeAttempt,
-  createJob,
-  getAttempts,
-  getDependents,
-  getJob,
-  getWorkItem,
-  isLeaseValid,
-  abandonJobScopeExpansionRequest,
-  listActiveFileLocks,
-  logEvent,
-  rewireDependency,
-  runInTransaction,
-  settleJobScopeExpansionAttempt,
-  setAttemptCommitHash,
-  setJobResult,
-  storeArtifact,
-  updateJobPayload,
-  updateJobProvider,
-} from "../../../queue/functions/index.js";
+import { completeAttempt, createJob, getAttempts, getDependents, getJob, getWorkItem, isLeaseValid, abandonJobScopeExpansionRequest, listActiveFileLocks, logEvent, rewireDependency, runInTransaction, settleJobScopeExpansionAttempt, setAttemptCommitHash, setJobResult, storeArtifact, updateJobPayload, updateJobProvider } from "../../../queue/functions/index.js";
 import { parseFileRequest, splitFileRequestsByRisk } from "../../../handoff/functions/index.js";
 import { dropEmptyMaterializationsForJob, materializedPathsForJob } from "../../../handoff/functions/helpers/file-materialization.js";
 import { isArtifactMode } from "../../../artifacts/functions/index.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { runHookAsync } from "../../../git/functions/hooks.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
-import {
-  gitCurrentHashAsync,
-  gitExecAsync,
-  gitHasChangesAsync,
-} from "../../../git/functions/utils.js";
-import {
-  gitCommitAllAsync as gitCommitAllAsyncFromModule,
-} from "../../../git/functions/commit-scope.js";
+import { gitCurrentHashAsync, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
+import { gitCommitAllAsync as gitCommitAllAsyncFromModule } from "../../../git/functions/commit-scope.js";
 import { listAttemptCommittedFilesAsync } from "../../../git/functions/attempt-committed-files.js";
-import {
-  snapshotAndResetDirtyWorktreeAsync as snapshotAndResetDirtyWorktreeAsyncFromModule,
-} from "../../../git/functions/worktree.js";
-import { ASSESSABLE_JOB_TYPES, MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
+import { snapshotAndResetDirtyWorktreeAsync as snapshotAndResetDirtyWorktreeAsyncFromModule } from "../../../git/functions/worktree.js";
+import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
-import {
-  activeSiblingWriteLocks,
-} from "../../../queue/functions/sibling-locks.js";
-import {
-  isTransientCommitInfraFailure,
-} from "../../functions/helpers/commit-infra.js";
-import {
-  filterFileRequestsToOutOfScope,
-  validateDeclaredOutputContract,
-} from "../../functions/execution/declared-output-contract.js";
-import {
-  formatCommitFailureDetail,
-  formatCommitFailureSummary,
-  worktreeLockTimeoutInfoAsync,
-} from "../../functions/execution/commit-diagnostics.js";
+import { activeSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
+import { isTransientCommitInfraFailure } from "../../functions/helpers/commit-infra.js";
+import { filterFileRequestsToOutOfScope, validateDeclaredOutputContract } from "../../functions/execution/declared-output-contract.js";
+import { formatCommitFailureDetail, formatCommitFailureSummary, worktreeLockTimeoutInfoAsync } from "../../functions/execution/commit-diagnostics.js";
 import { storePostAgentFailureCheckpoint } from "../../functions/execution/post-agent-checkpoint.js";
 import { linkSiblingDirtyRecoverySnapshot } from "../../functions/helpers/sibling-dirty-recovery.js";
 import { finishPostCommitSync } from "../../functions/helpers/post-commit-sync.js";
-import {
-  runPostExecutionAssessment as runPostExecutionAssessmentFromModule,
-} from "../../functions/helpers/assessment-pipeline.js";
-import {
-  refreshAndExtractInsights as refreshAndExtractInsightsFromModule,
-} from "../../functions/helpers/insights.js";
-import {
-  detectBranchNetDiffForNoWriteAsync as detectBranchNetDiffForNoWriteAsyncFromModule,
-  finishNoWriteAttempt as finishNoWriteAttemptFromModule,
-  shouldShortCircuitNoWriteAssessment as shouldShortCircuitNoWriteAssessmentFromModule,
-} from "../../functions/helpers/no-write-retry.js";
-import {
-  AGENT_BLOCKED_ERROR_PREFIX,
-  BLOCKED_PROVIDER_PAYLOAD_KEY,
-  isPermanentProviderRuntimeBlock,
-  isProviderSandboxMisreadBlock,
-  isTransientMcpInfraBlock,
-  MAX_MCP_INFRA_BLOCK_RETRIES,
-  MCP_INFRA_BLOCK_BACKOFF_MS,
-} from "../../functions/helpers/block-reason.js";
-import {
-  IMAGE_PROVIDER_BLOCK_RETRY_ERROR,
-  imageProviderBlockDisposition,
-  MAX_IMAGE_PROVIDER_BLOCK_RETRIES,
-  withImageProviderBlockRequeue,
-} from "../../functions/helpers/image-provider-block.js";
+import { runPostExecutionAssessment as runPostExecutionAssessmentFromModule } from "../../functions/helpers/assessment-pipeline.js";
+import { refreshAndExtractInsights as refreshAndExtractInsightsFromModule } from "../../functions/helpers/insights.js";
+import { detectBranchNetDiffForNoWriteAsync as detectBranchNetDiffForNoWriteAsyncFromModule, finishNoWriteAttempt as finishNoWriteAttemptFromModule, shouldShortCircuitNoWriteAssessment as shouldShortCircuitNoWriteAssessmentFromModule } from "../../functions/helpers/no-write-retry.js";
+import { AGENT_BLOCKED_ERROR_PREFIX, BLOCKED_PROVIDER_PAYLOAD_KEY, isPermanentProviderRuntimeBlock, isProviderSandboxMisreadBlock, isTransientMcpInfraBlock, MAX_MCP_INFRA_BLOCK_RETRIES, MCP_INFRA_BLOCK_BACKOFF_MS } from "../../functions/helpers/block-reason.js";
+import { IMAGE_PROVIDER_BLOCK_RETRY_ERROR, imageProviderBlockDisposition, MAX_IMAGE_PROVIDER_BLOCK_RETRIES, withImageProviderBlockRequeue } from "../../functions/helpers/image-provider-block.js";
 import { providerQuotaResumeJitterSec } from "../../functions/helpers/provider-quota-pause.js";
-import {
-  spawnDeadLetterRecoveryForDependents as spawnDeadLetterRecoveryForDependentsFromModule,
-} from "../../functions/helpers/dead-letter.js";
-import {
-  committedCompletionForAttempt,
-  selfDeclaredUnwrittenPaths,
-  unwrittenMaterializedPaths,
-} from "../../functions/helpers/committed-completion.js";
-import {
-  parseAgentCompletionLog as parseAgentCompletionLogFromModule,
-  scopedDeleteTargets as scopedDeleteTargetsFromModule,
-  isDeleteNoopSatisfied as isDeleteNoopSatisfiedFromModule,
-  isFilePlacementNoopSatisfied as isFilePlacementNoopSatisfiedFromModule,
-} from "../../functions/helpers/mutation-guards.js";
-import {
-  requiresGitNoopCheck as requiresGitNoopCheckFromModule,
-} from "../../../providers/functions/execution-routing.js";
-import {
-  assessmentRetryFallbackReads as _assessmentRetryFallbackReads,
-  isAssessorParseRetryBudgetExceeded as _isAssessorParseRetryBudgetExceeded,
-  shouldFastPassArtifactAssessment,
-  shouldOverrideArtifactMissingFail,
-} from "../../functions/execution/assessment-policy.js";
-import {
-  logBadInputFailure as _logBadInputFailure,
-} from "../../functions/execution/bad-input.js";
-import {
-  isProviderError as _isProviderError,
-} from "../../functions/execution/job-helpers.js";
-import {
-  shortJobTitle as shortJobTitleFromModule,
-} from "../../../../shared/policies/functions/role-utils.js";
-import {
-  syncAssessorWorkerDisplay as syncAssessorWorkerDisplayFromModule,
-} from "../../functions/execution/display-sync.js";
+import { spawnDeadLetterRecoveryForDependents as spawnDeadLetterRecoveryForDependentsFromModule } from "../../functions/helpers/dead-letter.js";
+import { committedCompletionForAttempt, selfDeclaredUnwrittenPaths, unwrittenMaterializedPaths } from "../../functions/helpers/committed-completion.js";
+import { parseAgentCompletionLog as parseAgentCompletionLogFromModule, scopedDeleteTargets as scopedDeleteTargetsFromModule, isDeleteNoopSatisfied as isDeleteNoopSatisfiedFromModule, isFilePlacementNoopSatisfied as isFilePlacementNoopSatisfiedFromModule } from "../../functions/helpers/mutation-guards.js";
+import { requiresGitNoopCheck as requiresGitNoopCheckFromModule } from "../../../providers/functions/execution-routing.js";
+import { assessmentRetryFallbackReads as _assessmentRetryFallbackReads, isAssessorParseRetryBudgetExceeded as _isAssessorParseRetryBudgetExceeded, shouldFastPassArtifactAssessment, shouldOverrideArtifactMissingFail } from "../../functions/execution/assessment-policy.js";
+import { logBadInputFailure as _logBadInputFailure } from "../../functions/execution/bad-input.js";
+import { isProviderError as _isProviderError } from "../../functions/execution/job-helpers.js";
+import { shortJobTitle as shortJobTitleFromModule } from "../../../../shared/policies/functions/role-utils.js";
+import { syncAssessorWorkerDisplay as syncAssessorWorkerDisplayFromModule } from "../../functions/execution/display-sync.js";
 
 function _syncAssessorWorkerDisplay(display, job, {
   tier = "cheap",

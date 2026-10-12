@@ -1,3 +1,4 @@
+import { formatNativeDownloadMiB, summarizeNativeArtifactResults } from "../functions/native-artifact-summary.js";
 // Runtime session orchestration for the run command.
 // Keeps the CLI entry point thin while preserving the existing command behavior.
 
@@ -17,10 +18,7 @@ import { refreshProcessRuntimeEnv } from "../../runtime/functions/paths.js";
 import { verifyFrozenResearchFixture, assertFrozenResearchJob } from "../../runtime/functions/frozen-research-fixture.js";
 import { LOCK_HOLDING_JOB_STATUSES, PARKED_JOB_STATUSES } from "../../../catalog/job.js";
 import { TERMINAL_WORK_ITEM_STATUSES, WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
-import {
-  isIterativeWorkItemActive,
-  parseWorkItemMetadata,
-} from "../../planning/functions/state.js";
+import { isIterativeWorkItemActive, parseWorkItemMetadata } from "../../planning/functions/state.js";
 import { getResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { nativeBinaries as defaultNativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { daemonSupervisor as defaultDaemonSupervisor } from "../../../shared/tools/classes/daemon/index.js";
@@ -33,24 +31,8 @@ import { RunIdleAutoMergeController } from "./RunIdleAutoMergeController.js";
 import { RunHumanAnswerRelay } from "./RunHumanAnswerRelay.js";
 import { RunSchedulerLoopCallbacks } from "./RunSchedulerLoopCallbacks.js";
 import { RunShutdownController } from "./RunShutdownController.js";
-import {
-  PROVIDER_AUTH_WARMUP_TIMEOUT_MS,
-  PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS,
-  closeRuntimeStateForExit,
-  describeOpenGatesAtExit,
-  firstLine,
-  handleWrapUpSignal,
-  listOpenHumanGatesAtExit,
-  openParkingGateForWorkItem,
-  operationalRunJobs,
-  summarizeRunCompletion,
-  bootScipLangPatchFromEvent,
-  scopeScipEventToSourceLanguage,
-} from "../functions/run-session.js";
-import {
-  checkPosseUpdateAvailabilityCached,
-  formatPosseUpdateAvailableWarning,
-} from "../functions/update-command.js";
+import { PROVIDER_AUTH_WARMUP_TIMEOUT_MS, PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS, closeRuntimeStateForExit, describeOpenGatesAtExit, firstLine, handleWrapUpSignal, listOpenHumanGatesAtExit, openParkingGateForWorkItem, operationalRunJobs, summarizeRunCompletion, bootScipLangPatchFromEvent, scopeScipEventToSourceLanguage } from "../functions/run-session.js";
+import { checkPosseUpdateAvailabilityCached, formatPosseUpdateAvailableWarning } from "../functions/update-command.js";
 import { BossyLocalStream } from "../../bridge/classes/BossyLocalStream.js";
 import { readHumanGateResnoozeSec } from "../../scheduler/functions/config.js";
 import { recordStartupDirtyTreeBlock } from "../../git/functions/startup-dirty-tree-block.js";
@@ -59,22 +41,7 @@ const OPEN_WORK_ITEM_STATUSES = Object.freeze(
   WORK_ITEM_STATUSES.filter((status) => !TERMINAL_WORK_ITEM_STATUSES.includes(status)),
 );
 
-function formatNativeDownloadMiB(bytes) {
-  const value = Math.max(0, Number(bytes) || 0) / (1024 * 1024);
-  return value >= 10 ? value.toFixed(1) : value.toFixed(2);
-}
 
-function summarizeNativeArtifactResults(results) {
-  const unavailable = results.filter((result) => result?.ok !== true);
-  const downloaded = results.filter((result) => result?.downloaded).length;
-  return {
-    unavailable,
-    downloaded,
-    detail: unavailable.length > 0
-      ? `${results.length - unavailable.length}/${results.length} ready; unavailable: ${unavailable.map((result) => result.name).join(", ")}`
-      : `${results.length} ready${downloaded > 0 ? `; ${downloaded} downloaded` : ""}`,
-  };
-}
 
 export class RunSession {
   constructor(deps = {}) {
@@ -1895,9 +1862,9 @@ export class RunSession {
           if (eventLanguages.length > 0) {
             const kind = String(event.kind || "");
             const stage = String(event.stage || "");
-            const percent = Number(event.percent ?? event.language_percent);
-            const current = Number(event.language_current ?? event.current ?? event.progress_current);
-            const total = Number(event.language_total ?? event.total ?? event.progress_total);
+            (Number(event.percent ?? event.language_percent));
+            (Number(event.language_current ?? event.current ?? event.progress_current));
+            (Number(event.language_total ?? event.total ?? event.progress_total));
             // SCIP indexing → restage_* events / stage="scip" or stage="scip.indexing"
             // SCIP intaking → atlas.scip.ingest.* events
             // ATLAS parsing → stage in {checking,sampling,parsing,writing ledger,recording delta}

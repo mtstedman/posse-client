@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { shouldConsiderScipRestage } from "./atlas-restage-policy.js";
 
 import path from "path";
 import { fileURLToPath } from "url";
@@ -8,16 +9,9 @@ import { logEvent } from "../../queue/functions/events.js";
 import { adminGitExec } from "../../git/functions/admin-git.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
 import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
-import {
-  getAtlasIntegrationConfig,
-  reindexAtlasAfterCommit,
-} from "./atlas.js";
-import {
-  emitMainAdvanced as emitAtlasV2MainAdvanced,
-  emitScipRestageRequested as emitAtlasV2ScipRestageRequested,
-  isAtlasV2EmissionEnabled,
-} from "../../atlas/classes/v2/PipelineHooks.js";
-import { normalizeAtlasScipMode, shouldRunScipPhase } from "./atlas-v2-mode.js";
+import { getAtlasIntegrationConfig, reindexAtlasAfterCommit } from "./atlas.js";
+import { emitMainAdvanced as emitAtlasV2MainAdvanced, emitScipRestageRequested as emitAtlasV2ScipRestageRequested, isAtlasV2EmissionEnabled } from "../../atlas/classes/v2/PipelineHooks.js";
+import "./atlas-v2-mode.js";
 import { describeScipStagingState } from "../../atlas/functions/v2/scip/stager.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
@@ -120,10 +114,6 @@ function skippedStatusIsSuccess(skipped) {
   ].includes(String(skipped || ""));
 }
 
-function shouldConsiderScipRestage(config = {}) {
-  const policy = String(config?.scipRestagePolicy || "missing").trim().toLowerCase();
-  return shouldRunScipPhase(normalizeAtlasScipMode(config?.scipMode)) && (policy === "smart" || policy === "always");
-}
 
 function eventTypeForPostCommitStatus(message, data = {}) {
   if (data.skipped) return EVENT_TYPES.ATLAS_REINDEX_SKIPPED;

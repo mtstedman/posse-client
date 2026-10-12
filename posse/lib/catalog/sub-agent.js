@@ -1,3 +1,4 @@
+import { readonlySet } from "./readonly-collections.js";
 // Canonical local policy for deterministic tools that a citation child may
 // consume through its private evidence cursor. Remote issuance surfaces carry
 // canonical tool names but do not trust remote-provided access labels, so both
@@ -60,7 +61,7 @@ export const SUB_AGENT_EVIDENCE_SAFE_NATIVE_TOOLS = Object.freeze([
   "tools.extract_image_text",
 ]);
 
-const SUB_AGENT_EVIDENCE_SAFE_NATIVE_TOOL_SET = new Set(SUB_AGENT_EVIDENCE_SAFE_NATIVE_TOOLS);
+const SUB_AGENT_EVIDENCE_SAFE_NATIVE_TOOL_SET = readonlySet(SUB_AGENT_EVIDENCE_SAFE_NATIVE_TOOLS);
 
 export function isSubAgentEvidenceSafeNativeTool(name) {
   return SUB_AGENT_EVIDENCE_SAFE_NATIVE_TOOL_SET.has(String(name || ""));
@@ -110,7 +111,7 @@ export const SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOLS = Object.freeze([
   "atlas.runtime.queryOutput",
 ]);
 
-const SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOL_SET = new Set(SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOLS);
+const SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOL_SET = readonlySet(SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOLS);
 
 export function isSubAgentEvidenceSafeAtlasTool(name) {
   return SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOL_SET.has(String(name || ""));

@@ -73,8 +73,8 @@ Key behavior:
   daemon supervision, and hash-ref tool context storage.
 - Runtime prompt pieces: fetched from `posse-remote` with
   `GET /v1/prompts/bundle` and kept in process memory only.
-- `test/`: core regression suite, focused suite wrappers, and root-level
-  integration tests.
+- `test/`: catalogued core regression members and integration tests, with
+  shared fixtures and runner support.
 
 ## Remote Tool Authority
 
@@ -102,7 +102,7 @@ The deterministic MCP gateway remains the authority for scoped tools. The
 installed `posse-remote` must advertise a compatible Codex adapter before a
 Codex turn can run.
 
-### Experimental planner dispatch
+### Planner dispatch
 
 Planner-led intake is the default account setting (`planner_dispatch_mode=planner`).
 Existing `router` settings migrate to `planner` once on update; selecting `router`
@@ -140,13 +140,12 @@ press `n` to send guidance to that exact call. Parent and sibling nudges remain
 separate. Agent-call records and planner completion events retain child lineage,
 usage, questions, and the zero-child decision.
 
-Testing requires the matching `feat/planner-dispatch-framework` remote branch
-for the code-child prompt and capability contract. Use both workbranches with an
-isolated test repository and enable planner dispatch there. Test a simple direct
-plan, a code investigation, a web investigation, a child nudge, and a canceled
-parent. The feature remains off by default. Oneshot, trivial no-research, and
-web-only intake retain their existing routes. A red-team chain's primary planner
-and an assessment replan may dispatch; the critique and synthesis planners cannot.
+Planner dispatch requires a compatible remote code-child prompt and capability
+contract. Validate direct planning, code and web investigations, child nudges,
+and parent cancellation in an isolated test repository. Oneshot, trivial
+no-research, and web-only intake retain their existing routes. A red-team
+chain's primary planner and an assessment replan may dispatch; the critique and
+synthesis planners cannot.
 
 ## Assessment replanning
 
@@ -514,22 +513,25 @@ completed execution files, durations, skips, and failures. Dirty runs have no
 reusable tree fingerprint. Publication uses a unique external receipt and
 rejects incomplete, dirty, or changed-candidate evidence.
 
-The central publisher defaults to affected tests since its last successfully
-published source commit. Missing/divergent baselines and broad changes run all
-tests. `--full-tests` forces full validation; `--shadow-tests` records the
-proposed affected selection and runs everything. A full audit is required at
-least every seven days when publishing. The publication baseline advances
-only after both source push and public-client synchronization succeed.
+The central publisher defaults to the two `ci_portable` shards, each with
+strict skip checks on the same committed candidate. Its aggregate receipt
+verifies that the shards cover that partition exactly once. Static, contract,
+and catalog checks also run. Explicit `--affected-tests` mode compares against
+the last successfully published source commit and can fall back to the full
+suite for missing/divergent baselines, broad changes, or full validation older
+than seven days. `--full-tests` requires full validation; `--shadow-tests`
+records the affected selection and runs everything. The publication baseline
+advances only after source push and public-client synchronization succeed.
 `--no-tests` never advances that tested baseline. Coordinated multi-repository
-sweeps run the full Node suite because native and Remote dependencies also
-change outside the Node commit range. See the centralized deployment index
-for state locations and publication commands.
+sweeps run full Node validation because native and Remote dependencies change
+outside the Node commit range. See the centralized deployment index for state
+locations and publication commands.
 
 GitHub runs the `ci_portable` partition in two stable shards on pull requests,
 main pushes, and nightly; the required `Node checks` job depends on both.
-Windows runs `ci_windows`. These hosted partitions do not replace the native
-full-suite publication gate. The canonical workflow in the deployment
-repository must match `.github/workflows/ci.yml`.
+Windows runs `ci_windows`. Portable receipts do not claim full/native
+validation. The canonical workflow in the deployment repository must match
+`.github/workflows/ci.yml`.
 
 Full suite timing depends on native binaries, host load, and storage. Use the
 run manifest's measured duration instead of the former aggregate estimates.

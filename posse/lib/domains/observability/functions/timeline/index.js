@@ -1,3 +1,4 @@
+import { costPrecision } from "../../../billing/functions/cost-precision.js";
 // lib/timeline.js
 //
 // Builds a consolidated timeline for a work item: the research brief, the
@@ -63,12 +64,6 @@ function callAccounting(call) {
   return call._accounting;
 }
 
-function costPrecision({ callCount, exactCostCalls, estimatedCostCalls, unknownCostCalls }) {
-  if (callCount > 0 && unknownCostCalls === callCount) return "unknown";
-  if (unknownCostCalls > 0) return "partial";
-  if (estimatedCostCalls > 0) return "estimated";
-  return "exact";
-}
 
 function indexBy(rows, keyField) {
   const out = new Map();

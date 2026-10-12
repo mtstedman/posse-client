@@ -1,3 +1,4 @@
+import { readonlySet } from "./readonly-collections.js";
 export const INTERNAL_TOOL_FAMILY = "internal";
 
 export const INTERNAL_ATLAS_ACTIONS = Object.freeze([
@@ -30,11 +31,11 @@ export const INTERNAL_ATLAS_ACTIONS = Object.freeze([
   "scip.ingest",
   "workflow",
 ]);
-export const INTERNAL_ATLAS_ACTION_SET = new Set(INTERNAL_ATLAS_ACTIONS);
+export const INTERNAL_ATLAS_ACTION_SET = readonlySet(INTERNAL_ATLAS_ACTIONS);
 
 export const INTERNAL_ATLAS_SURFACE_ACTIONS = Object.freeze([
   INTERNAL_TOOL_FAMILY,
   "file.write",
   ...INTERNAL_ATLAS_ACTIONS,
 ]);
-export const INTERNAL_ATLAS_SURFACE_ACTION_SET = new Set(INTERNAL_ATLAS_SURFACE_ACTIONS);
+export const INTERNAL_ATLAS_SURFACE_ACTION_SET = readonlySet(INTERNAL_ATLAS_SURFACE_ACTIONS);

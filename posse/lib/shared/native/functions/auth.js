@@ -5,6 +5,9 @@
 // pin set. Alternate trust roots are accepted only through an explicit policy
 // object or the isolated node-test bootstrap.
 
+import { isLoopbackHostname } from "../../platform/functions/hostname.js";
+export { isLoopbackHostname } from "../../platform/functions/hostname.js";
+
 import { getSetting } from "../../../domains/queue/functions/index.js";
 import { POSSE_REMOTE_DEFAULT_URL } from "../../../domains/remote/functions/mode.js";
 
@@ -213,16 +216,6 @@ function validateAuthUrl(value, developmentMode, label) {
   if (url.protocol === "https:") return url;
   if (developmentMode && url.protocol === "http:" && isLoopbackHostname(url.hostname)) return url;
   throw nativeAuthPolicyError("POSSE_NATIVE_AUTH_POLICY_INVALID", `${label} must use HTTPS; loopback HTTP requires explicit development mode`);
-}
-
-/** @param {string} hostname */
-export function isLoopbackHostname(hostname = "") {
-  const host = String(hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
-  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") return true;
-  const ipv4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/u);
-  if (!ipv4) return false;
-  const octets = ipv4.slice(1).map((part) => Number.parseInt(part, 10));
-  return octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255) && octets[0] === 127;
 }
 
 /** @param {Record<string, unknown>} envelope */

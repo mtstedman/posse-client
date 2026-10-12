@@ -1,6 +1,7 @@
+import { readCodexLimitSetting as readOpenAiLimitSetting } from "../shared/usage-limit-setting.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getAccountSetting } from "../../../settings/functions/account-settings.js";
-import { getSetting } from "../../../queue/functions/index.js";
+import "../../../queue/functions/index.js";
 import { loadUsageEntries, summarizeUsageEntries } from "../shared/local-usage-summary.js";
 
 const OPENAI_USAGE_WINDOW_DEFS = [
@@ -8,19 +9,6 @@ const OPENAI_USAGE_WINDOW_DEFS = [
   { key: "week", label: "Week (7d)", durationMs: 7 * 24 * 60 * 60 * 1000 },
 ];
 
-function readOpenAiLimitSetting(key) {
-  try {
-    const stored = getSetting(key);
-    if (stored != null && String(stored).trim() !== "") {
-      const parsed = parseInt(String(stored).trim(), 10);
-      if (!Number.isNaN(parsed) && parsed > 0) return parsed;
-    }
-  } catch {
-    // Ignore DB-read failures and fall back to null.
-  }
-
-  return null;
-}
 
 function getOpenAiUsageLimits() {
   return {

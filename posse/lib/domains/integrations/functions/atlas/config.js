@@ -1,3 +1,4 @@
+import { settingsChangeNotifier } from "../../../settings/classes/SettingsChangeNotifier.js";
 import { getSetting, getSettingsDataVersion } from "../../../queue/functions/index.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { getAtlasRouteDefinitionForRole, TOOL_ROLE_LIBRARY } from "../deterministic-mcp/tool-descriptors.js";
@@ -948,4 +949,4 @@ export function getAtlasRouteForRole(role, { config = getAtlasIntegrationConfig(
   };
 }
 
-globalThis.__POSSE_INVALIDATE_ATLAS_CONFIG_CACHE = invalidateAtlasIntegrationConfigCache;
+settingsChangeNotifier.subscribe(invalidateAtlasIntegrationConfigCache);

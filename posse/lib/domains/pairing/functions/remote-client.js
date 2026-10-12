@@ -1,23 +1,24 @@
+import { PAIRING_AUTH_ROUTE, PAIRING_PROTOCOL, DEFAULT_TIMEOUT_MS, SESSION_ID_RE, PAIRING_CODE_RE, TOKEN_RE, COUNTERSIGN_RE, FINGERPRINT_RE, SESSION_STATUSES, PEER_ROLES, MAX_PEERS, MAX_WORK_ITEMS, MAX_JOBS, MAX_PAIRING_RESPONSE_BYTES, REMOTE_ERROR_MESSAGES } from "../../../catalog/pairing-wire.js";
+export { PAIRING_AUTH_ROUTE, PAIRING_PROTOCOL } from "../../../catalog/pairing-wire.js";
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { pulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import { readResponseTextWithLimit } from "../../remote/functions/client.js";
 import { TEAM_PUBLICATION_MODES } from "../../../catalog/team.js";
 import { SESSION_COMPUTE_POLICY_VALUES, SESSION_SYNC_POLICY, TRUNK_HEAD_PATTERN } from "../../../catalog/session-sync.js";
 
-export const PAIRING_AUTH_ROUTE = "pairing:session";
-export const PAIRING_PROTOCOL = "posse.pairing.v1";
-const DEFAULT_TIMEOUT_MS = 20_000;
-const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const PAIRING_CODE_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{5}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{5}$/u;
-const TOKEN_RE = /^pp[hm]_[0-9a-f]{32}$/u;
-const COUNTERSIGN_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$/u;
-const FINGERPRINT_RE = /^[0-9a-f]{64}$/u;
-const SESSION_STATUSES = new Set(["active", "draining", "closed", "expired"]);
-const PEER_ROLES = new Set(["host", "member"]);
-const MAX_PEERS = 100;
-const MAX_WORK_ITEMS = 50;
-const MAX_JOBS = 100;
-const MAX_PAIRING_RESPONSE_BYTES = 8 * 1024 * 1024;
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function invalidResponse(endpoint, detail, status = null) {
   const error = new Error(`Pairing relay returned an invalid ${endpoint} response: ${detail}`);
@@ -329,13 +330,6 @@ export function validatePairingRemoteResponse(endpoint, payload, status = null) 
   return response;
 }
 
-// Remote error codes whose remedy is local, with the message the operator
-// needs instead of the relay's terse text.
-const REMOTE_ERROR_MESSAGES = Object.freeze({
-  pairing_instance_conflicts_with_host:
-    "This folder's Posse instance id matches the session host's (was .posse copied from the host?). "
-    + "Join from a fresh empty folder.",
-});
 
 function responseError(body, status) {
   const code = String(body?.error?.code || "pairing_remote_error");

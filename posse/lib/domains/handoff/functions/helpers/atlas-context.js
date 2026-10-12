@@ -1,3 +1,4 @@
+import { truncateUtf8String as _truncateUtf8String } from "../../../../shared/format/functions/utf8-truncate.js";
 // lib/domains/handoff/functions/helpers/atlas-context.js
 //
 // ATLAS handoff-state resolution, planner slice prefetch, and context rendering.
@@ -1628,17 +1629,6 @@ async function _prefetchSliceSkeletons(filePaths, {
   return results;
 }
 
-function _truncateUtf8String(text, maxBytes) {
-  let used = 0;
-  let out = "";
-  for (const char of String(text || "")) {
-    const next = Buffer.byteLength(char, "utf8");
-    if (used + next > maxBytes) break;
-    out += char;
-    used += next;
-  }
-  return out;
-}
 
 function _truncateUtf8AtLineBoundary(content, maxBytes) {
   const text = String(content || "");

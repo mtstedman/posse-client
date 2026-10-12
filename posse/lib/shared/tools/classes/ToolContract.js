@@ -3,7 +3,7 @@ import { TOOL_REFS } from "../../../catalog/tool-references.js";
 import { normalizeAtlasCodeWindowPolicy } from "../../../catalog/atlas-tools.js";
 import { isToolAuthorizedByIssuedSurface } from "../functions/issued-tool-policy.js";
 import { renderAtlasGuidance, renderToolBatchingGuidance } from "../functions/provider-surface.js";
-import { projectAgentToolDefinition, sortAgentToolDefinitions } from "../functions/agent-schema.js";
+import { sortAgentToolDefinitions } from "../functions/agent-schema.js";
 import { projectProviderToolDefinition } from "../functions/provider-schema.js";
 import { ProviderToolRenderer } from "./ProviderToolRenderer.js";
 import { ToolCatalog } from "./ToolCatalog.js";

@@ -14,11 +14,7 @@ import { getRuntimeDbPath, getRuntimeReportsDir } from "../../../runtime/functio
 import { getDefaultTierModel, getImageModelOptions, getProviderTierDefaults } from "../../../providers/functions/model-catalog.js";
 import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";
 import { formatRelativeTime as fmtRelativeTime, formatTokens as fmtTokens } from "../../../../shared/format/functions/units.js";
-import {
-  getAdminSettingPresentation,
-  toDisplaySettingKey,
-  toStorageSettingKey,
-} from "../../../settings/functions/admin-catalog.js";
+import { getAdminSettingPresentation, toDisplaySettingKey } from "../../../settings/functions/admin-catalog.js";
 
 export function toDisplaySettingEntry(entry) {
   if (!entry || typeof entry !== "object") return entry;
@@ -322,7 +318,7 @@ export function loadIndexedReport(report) {
 }
 
 export function loadReports(projectDir) {
-  const dbPath = getRuntimeDbPath(projectDir);
+  (getRuntimeDbPath(projectDir));
   const reportsDir = getRuntimeReportsDir(projectDir);
   if (!fs.existsSync(reportsDir)) return [];
 

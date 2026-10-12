@@ -8,30 +8,14 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { waitingLaneGenerationsEqual } from "../../../../catalog/waiting-lane.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { Worktree } from "../../../git/classes/Worktree.js";
-import {
-  withRepositoryWorktreeAdminLockAsync,
-  withWorktreeLockAsync,
-} from "../../../git/functions/worktree-locks.js";
-import {
-  gitTopLevelAsync,
-  worktreePathAsync,
-} from "../../../git/functions/worktree-path.js";
+import { withRepositoryWorktreeAdminLockAsync, withWorktreeLockAsync } from "../../../git/functions/worktree-locks.js";
+import { gitTopLevelAsync, worktreePathAsync } from "../../../git/functions/worktree-path.js";
 import { recordWaitingLaneTelemetry } from "../../../observability/functions/waiting-lane-telemetry.js";
 import { resolveAtlasRepoTargetAsync } from "../../../integrations/functions/atlas.js";
-import {
-  claimWaitingLanePlanning,
-  getWaitingLanePreparation,
-  poisonWaitingLanePreparation,
-  retireWaitingLanePreparation,
-  updateJobPayload,
-} from "../../../queue/functions/index.js";
-import {
-  isWaitingLanePhysicalPreparationEnabled,
-  readWaitingLaneCoordinatorSettings,
-} from "../../../scheduler/functions/waiting-lane-coordinator.js";
+import { claimWaitingLanePlanning, getWaitingLanePreparation, poisonWaitingLanePreparation, retireWaitingLanePreparation, updateJobPayload } from "../../../queue/functions/index.js";
+import { isWaitingLanePhysicalPreparationEnabled, readWaitingLaneCoordinatorSettings } from "../../../scheduler/functions/waiting-lane-coordinator.js";
 import { requestWaitingLanePlannerDemand } from "../../../research/functions/waiting-lane-demand.js";
 import { ensureWaitingLanePlannerAtlasReadView } from "./atlas-read-root.js";
 import { waitingLaneActivationEnabled } from "./waiting-lane-activation.js";

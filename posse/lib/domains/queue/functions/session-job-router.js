@@ -6,14 +6,7 @@
 import crypto from "node:crypto";
 
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
-import {
-  SESSION_COMPUTE_POLICIES,
-  SESSION_JOB_PROTOCOL,
-  SESSION_PACKET_PROTOCOL,
-  SESSION_JOB_OFFER_TTL_MS,
-  SESSION_JOB_CLAIM_TTL_MS,
-  SESSION_ROUTABLE_JOB_TYPES,
-} from "../../../catalog/session-sync.js";
+import { SESSION_COMPUTE_POLICIES, SESSION_JOB_PROTOCOL, SESSION_PACKET_PROTOCOL, SESSION_JOB_OFFER_TTL_MS, SESSION_JOB_CLAIM_TTL_MS, SESSION_ROUTABLE_JOB_TYPES } from "../../../catalog/session-sync.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { adminGitExecAsync } from "../../git/functions/admin-git.js";
@@ -22,17 +15,7 @@ import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
 import { getSetting } from "../../settings/functions/repository-settings.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
-import {
-  createJob,
-  createWorkItem,
-  getJob,
-  getWorkItem,
-  logEvent,
-  refreshWorkItemStatus,
-  updateJobProvider,
-  updateJobStatus,
-  updateWorkItemStatus,
-} from "./queue-store.js";
+import { createJob, createWorkItem, getWorkItem, logEvent, refreshWorkItemStatus, updateJobProvider, updateJobStatus, updateWorkItemStatus } from "./queue-store.js";
 import { now, runImmediateTransaction } from "./common.js";
 
 // These names were already exported from this module; preserve that API while

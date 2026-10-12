@@ -1,3 +1,5 @@
+import { abortError } from "../../concurrency/functions/abortable.js";
+import { abortable } from "../../concurrency/functions/abortable.js";
 // @ts-check
 
 import fs from "node:fs";
@@ -519,22 +521,6 @@ function readWithSignal(reader, signal) {
   });
 }
 
-function abortable(promise, signal) {
-  if (signal.aborted) return Promise.reject(abortError());
-  return new Promise((resolve, reject) => {
-    const onAbort = () => reject(abortError());
-    signal.addEventListener("abort", onAbort, { once: true });
-    Promise.resolve(promise).then(resolve, reject).finally(() => {
-      signal.removeEventListener("abort", onAbort);
-    });
-  });
-}
-
-function abortError() {
-  const err = new Error("operation aborted");
-  err.name = "AbortError";
-  return err;
-}
 
 function shaFromDigestHeader(value) {
   const match = /^sha-256=([A-Za-z0-9+/]+={0,2})$/.exec(String(value || "").trim());

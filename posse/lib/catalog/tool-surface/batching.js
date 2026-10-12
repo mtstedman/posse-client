@@ -1,3 +1,4 @@
+import { readonlySet } from "../readonly-collections.js";
 // Deterministic execution ordering policy. This is catalog data plus a pure
 // lookup; it deliberately has no provider-registry dependency.
 export const TOOL_BATCHING_CLASSES = Object.freeze({
@@ -10,7 +11,7 @@ export const TOOL_BATCHING_CLASSES = Object.freeze({
   ORDERED: "ordered",
 });
 
-const PARALLEL_READ_TOOLS = new Set([
+const PARALLEL_READ_TOOLS = readonlySet([
   "read_file", "list_files", "search_files", "git_history", "hash_file", "read_image_metadata",
   "validate_artifact_output", "extract_image_text", "view_image", "query", "code", "repo", "action.search",
   "manual", "symbol.search", "symbol.overview", "symbol.callers", "tree.branch", "tree.expand", "code.skeleton",
@@ -18,17 +19,17 @@ const PARALLEL_READ_TOOLS = new Set([
   "file.read",
 ]);
 
-const PARALLEL_WRITE_TOOLS = new Set([
+const PARALLEL_WRITE_TOOLS = readonlySet([
   "agent_claim",
   "report_claims", // Existing sessions retain the same execution semantics.
 ]);
 
-const NATIVE_BATCH_TOOLS = new Set([
+const NATIVE_BATCH_TOOLS = readonlySet([
   "sub_agent", "inspect_file", "download_file", "fetch_ref", "traverse_ref", "create_ref", "symbol.card", "symbol.get",
   "code.survey", "memory.surface", "memory.get",
 ]);
 
-const SERIAL_PROTOCOL_TOOLS = new Set([
+const SERIAL_PROTOCOL_TOOLS = readonlySet([
   "agent_handoff", "sub_agent_next_input", "chain_read", "chain_verdict", "get_operator_feedback",
   "ack_operator_feedback", "agent.feedback", "memory.store", "memory.feedback", "final_review",
 ]);

@@ -1,17 +1,13 @@
+import { PROVIDER_CAPABILITIES } from "../../../../catalog/provider-capabilities.js";
+import { readModelSetting } from "../shared/setting-read.js";
 // @ts-check
 
 import fs from "node:fs";
-import { MCP_TOOL_DEADLINE_MODES } from "../../../../catalog/provider.js";
 import os from "node:os";
 import path from "node:path";
 
 import { ML_GENERATE_METHOD } from "../../../../catalog/binary.js";
-import {
-  GEMMA_LOCAL_MODEL_ID,
-  LOCAL_MODEL_IDS,
-  LOCAL_MODEL_PROFILES,
-  QWEN_LOCAL_MODEL_ID,
-} from "../../../../catalog/local-model.js";
+import { GEMMA_LOCAL_MODEL_ID, LOCAL_MODEL_IDS, LOCAL_MODEL_PROFILES, QWEN_LOCAL_MODEL_ID } from "../../../../catalog/local-model.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getSetting } from "../../../queue/functions/index.js";
 import { runMlNativeMethodAsync } from "../../../../shared/native/functions/ml-invoke.js";
@@ -20,23 +16,14 @@ import { ToolCatalog } from "../../../../shared/tools/classes/ToolCatalog.js";
 import { buildExecutionContract, renderProviderPromptContracts } from "../../../../shared/tools/functions/contract.js";
 import { projectFunctionToolSurface } from "../../../../shared/tools/functions/provider-surface.js";
 import { projectLocalToolDefinition } from "../../../../shared/tools/functions/provider-schema.js";
-import {
-  issuedToolSurfaceForProviderPolicy,
-  narrowProviderOptionsToRemoteIssuance,
-} from "../../../../shared/tools/functions/issued-tool-policy.js";
+import { issuedToolSurfaceForProviderPolicy, narrowProviderOptionsToRemoteIssuance } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { extractJson } from "../../../../shared/format/functions/json.js";
 import { isProviderEnabledByCatalog } from "../model-catalog-store.js";
 import { getProviderTierDefaults } from "../model-catalog.js";
 import { buildEmbeddedToolDefinitions } from "../shared/embedded-tools.js";
 import { selectExecutionModel } from "../shared/model-selection.js";
 import { escalateModelTier } from "../shared/turns.js";
-import {
-  buildLocalPlannerToolInstructions,
-  formatGemmaLocalToolResult,
-  formatLocalToolResult,
-  LOCAL_PLANNER_TOOL_TURN_LIMIT,
-  runLocalPlannerToolLoop,
-} from "./tool-protocol.js";
+import { buildLocalPlannerToolInstructions, formatGemmaLocalToolResult, formatLocalToolResult, LOCAL_PLANNER_TOOL_TURN_LIMIT, runLocalPlannerToolLoop } from "./tool-protocol.js";
 
 export { extractJson };
 
@@ -408,13 +395,7 @@ function suppressedReplayCompletion(role, targetPath, name, args, result, contex
   ].join("\n");
 }
 
-export const capabilities = Object.freeze({
-  images: false,
-  sessionResume: false,
-  toolAttachment: "function",
-  localGeneration: true,
-  mcpToolDeadline: MCP_TOOL_DEADLINE_MODES.IN_PROCESS,
-});
+export const capabilities = PROVIDER_CAPABILITIES["posse-local"];
 
 export const MODEL_TIERS = Object.freeze({
   cheap: Object.freeze({ model: getProviderTierDefaults("posse-local").cheap.model, thinking: false, label: "LOCAL QWEN", color: "cyan" }),
@@ -430,14 +411,6 @@ export function defaultLocalGenerationRuntimeRoot(homeDir = os.homedir()) {
   return path.join(homeDir, ".posse", "runtime", "onnx-genai");
 }
 
-function readModelSetting(key) {
-  try {
-    const value = getSetting(key);
-    return value && String(value).trim() ? String(value).trim() : null;
-  } catch {
-    return null;
-  }
-}
 
 export function getModelTierConfig(tier = "standard") {
   const key = tier in MODEL_TIERS ? tier : "standard";

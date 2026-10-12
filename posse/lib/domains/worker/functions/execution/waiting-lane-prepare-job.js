@@ -9,40 +9,13 @@
 import path from "node:path";
 
 import { C } from "../../../../shared/format/functions/colors.js";
-import {
-  WAITING_LANE_ATLAS_PURPOSES,
-  normalizeWaitingLaneGeneration,
-} from "../../../../catalog/waiting-lane.js";
+import { normalizeWaitingLaneGeneration } from "../../../../catalog/waiting-lane.js";
 import { Worktree } from "../../../git/classes/Worktree.js";
-import {
-  withRepositoryWorktreeAdminLockAsync,
-  withWorktreeLockAsync,
-} from "../../../git/functions/worktree-locks.js";
-import {
-  gitTopLevelAsync,
-  nestedProjectSubpathAsync,
-  worktreePathAsync,
-} from "../../../git/functions/worktree-path.js";
+import { withRepositoryWorktreeAdminLockAsync, withWorktreeLockAsync } from "../../../git/functions/worktree-locks.js";
+import { gitTopLevelAsync, nestedProjectSubpathAsync, worktreePathAsync } from "../../../git/functions/worktree-path.js";
 import { enqueueWaitingLaneAtlasWarm } from "../../../atlas/classes/v2/PipelineHooks.js";
-import {
-  claimWaitingLaneGitPreparation,
-  completeAttempt,
-  ensureWaitingLanePreparation,
-  getWaitingLanePreparation,
-  incrementAndCreateAttempt,
-  poisonWaitingLanePreparation,
-  recordWaitingLaneGitPrepared,
-  refreshWorkItemStatus,
-  retireWaitingLanePreparation,
-  setJobResult,
-  storeArtifact,
-} from "../../../queue/functions/index.js";
-import {
-  canRunWaitingLanePreparation,
-  readWaitingLaneCoordinatorSettings,
-  waitingLaneAtlasPurposeForPreparation,
-  waitingLanePhysicalPreparationGate,
-} from "../../../scheduler/functions/waiting-lane-coordinator.js";
+import { claimWaitingLaneGitPreparation, completeAttempt, ensureWaitingLanePreparation, getWaitingLanePreparation, incrementAndCreateAttempt, poisonWaitingLanePreparation, recordWaitingLaneGitPrepared, refreshWorkItemStatus, retireWaitingLanePreparation, setJobResult, storeArtifact } from "../../../queue/functions/index.js";
+import { canRunWaitingLanePreparation, readWaitingLaneCoordinatorSettings, waitingLaneAtlasPurposeForPreparation, waitingLanePhysicalPreparationGate } from "../../../scheduler/functions/waiting-lane-coordinator.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
 import { recordWaitingLaneTelemetry } from "../../../observability/functions/waiting-lane-telemetry.js";
 

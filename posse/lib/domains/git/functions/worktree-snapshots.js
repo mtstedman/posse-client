@@ -389,20 +389,7 @@ export async function readSnapshotNoteAsync(projectDir, objectHash, options = {}
   );
 }
 
-async function readSnapshotNoteNodeAsync(projectDir, objectHash, options = {}) {
-  if (!objectHash) return null;
-  try {
-    const raw = await gitExecAsync(
-      ["notes", `--ref=${SNAPSHOT_NOTES_REF}`, "show", objectHash],
-      projectDir,
-      options,
-    );
-    return raw ? JSON.parse(raw) : null;
-  } catch (err) {
-    if (isAbortError(err)) throw err;
-    return null;
-  }
-}
+
 
 // writeSnapshotNote routes via node-git while writeSnapshotNoteAsync routes
 // via the native git.snapshot.writeNote method — intentionally divergent

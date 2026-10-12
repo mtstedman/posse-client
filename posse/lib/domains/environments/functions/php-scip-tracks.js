@@ -1,4 +1,8 @@
+import { PHP_SCIP_ENV_STAMP_FILENAME, PHP_SCIP_ENV_STAMP_SCHEMA, PHP_SCIP_ENV_INPUTS, PHP_SCIP_TRACKS, PHP_SCIP_TRACK_ORDER } from "../../../catalog/php-scip.js";
+export { PHP_SCIP_ENV_STAMP_FILENAME, PHP_SCIP_ENV_STAMP_SCHEMA, PHP_SCIP_ENV_INPUTS, PHP_SCIP_TRACKS, PHP_SCIP_TRACK_ORDER } from "../../../catalog/php-scip.js";
 // @ts-check
+/** @typedef {import('../../../catalog/php-scip.js').PhpScipTrackId} PhpScipTrackId */
+/** @typedef {import('../../../catalog/php-scip.js').PhpScipTrack} PhpScipTrack */
 //
 // Posse ships two Composer environments for the PHP SCIP indexer:
 //
@@ -16,30 +20,10 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-export const PHP_SCIP_ENV_STAMP_FILENAME = ".posse-scip-env.json";
-export const PHP_SCIP_ENV_STAMP_SCHEMA = 1;
-export const PHP_SCIP_ENV_INPUTS = Object.freeze(["composer.json", "composer.lock", "patch-scip-php.mjs"]);
 
-/** @typedef {"modern" | "legacy"} PhpScipTrackId */
 
-/**
- * @typedef {{
- *   id: PhpScipTrackId,
- *   dir: string,
- *   minPhp: string,
- *   description: string,
- * }} PhpScipTrack
- */
 
-/** @type {Readonly<Record<PhpScipTrackId, Readonly<PhpScipTrack>>>} */
-export const PHP_SCIP_TRACKS = Object.freeze({
-  modern: Object.freeze({ id: "modern", dir: "php", minPhp: "8.3.0", description: "current upstream scip-php" }),
-  legacy: Object.freeze({ id: "legacy", dir: "php-legacy", minPhp: "8.1.0", description: "pinned scip-php v0.0.2" }),
-});
 
-/** Preference order when no installer decision is recorded. */
-/** @type {readonly PhpScipTrackId[]} */
-export const PHP_SCIP_TRACK_ORDER = Object.freeze(["modern", "legacy"]);
 
 /**
  * @param {unknown} text

@@ -1,20 +1,8 @@
 import path from "path";
-import {
-  isLeaseValid,
-  logEvent,
-  storeArtifact,
-  updateJobPayload,
-} from "../../../queue/functions/index.js";
+import { isLeaseValid, logEvent, updateJobPayload } from "../../../queue/functions/index.js";
 import { logAttemptSkippedStaleLease } from "../../functions/execution/attempt-logging.js";
-import {
-  getProviderName,
-} from "../../../providers/functions/provider.js";
-import {
-  injectArtifactScope,
-  isArtifactMode,
-  buildManifest,
-  wiScopeId,
-} from "../../../artifacts/functions/index.js";
+import { getProviderName } from "../../../providers/functions/provider.js";
+import { injectArtifactScope, isArtifactMode, buildManifest, wiScopeId } from "../../../artifacts/functions/index.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { yieldNow } from "../../../runtime/functions/yield.js";
@@ -22,50 +10,24 @@ import { recordObservation, runWithObservationContext } from "../../../observabi
 import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { roleBrandColor } from "../../../ui/functions/display/helpers/brand.js";
-import {
-  runHumanInputJob as runHumanInputJobFromModule,
-} from "../../functions/execution/human-input-job.js";
-import {
-  runPromoteJob as runPromoteJobFromModule,
-} from "../../functions/execution/promote-job.js";
-import {
-  runAtlasWarmJob as runAtlasWarmJobFromModule,
-} from "../../functions/execution/atlas-warm-job.js";
-import {
-  runWaitingLanePreparationJob as runWaitingLanePreparationJobFromModule,
-} from "../../functions/execution/waiting-lane-prepare-job.js";
+import { runHumanInputJob as runHumanInputJobFromModule } from "../../functions/execution/human-input-job.js";
+import { runPromoteJob as runPromoteJobFromModule } from "../../functions/execution/promote-job.js";
+import { runAtlasWarmJob as runAtlasWarmJobFromModule } from "../../functions/execution/atlas-warm-job.js";
+import { runWaitingLanePreparationJob as runWaitingLanePreparationJobFromModule } from "../../functions/execution/waiting-lane-prepare-job.js";
 import { runLegacyDelegateJob as runLegacyDelegateJobFromModule } from "../../functions/execution/legacy-delegate-job.js";
 import { runPreDevTypecheck } from "../../functions/helpers/pre-dev-typecheck.js";
 import { siblingOwnedWorktreePaths } from "../../../queue/functions/file-locks.js";
-import {
-  setUpWorktreeForJob as setUpWorktreeForJobFromModule,
-  clearActiveWorktreeSentinel as clearActiveWorktreeSentinelFromModule,
-} from "../../functions/helpers/worktree-lifecycle.js";
+import { setUpWorktreeForJob as setUpWorktreeForJobFromModule, clearActiveWorktreeSentinel as clearActiveWorktreeSentinelFromModule } from "../../functions/helpers/worktree-lifecycle.js";
 import { gateDbTaskBeforeExecution } from "../../functions/helpers/db-task-merge-hold.js";
-import {
-  ensurePreDevelopmentTestBaseline,
-  testReceiptObservationDetail,
-} from "../../functions/helpers/test-execution-receipt.js";
-import {
-  snapshotAndResetDirtyWorktreeAsync,
-} from "../../../git/functions/worktree.js";
+import { ensurePreDevelopmentTestBaseline, testReceiptObservationDetail } from "../../functions/helpers/test-execution-receipt.js";
+import { snapshotAndResetDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
 import { repairTestDependencies } from "../../functions/helpers/test-dependency-repair.js";
 import { recordBaselineSiblingRegression } from "../../functions/helpers/baseline-attribution.js";
 import { recordBaselineTestDebt } from "../../functions/helpers/baseline-test-debt.js";
-import {
-  isVerificationInfrastructureOutcome,
-} from "../../functions/helpers/verification-outcome.js";
-import {
-  handleCatastrophicExecuteError as handleCatastrophicExecuteErrorFromModule,
-  handleExecuteAttemptError as handleExecuteAttemptErrorFromModule,
-  handlePendingScopeApprovalPause as handlePendingScopeApprovalPauseFromModule,
-} from "../../functions/helpers/attempt-errors.js";
-import {
-  isProviderError as _isProviderError,
-} from "../../functions/execution/job-helpers.js";
-import {
-  shortJobTitle as shortJobTitleFromModule,
-} from "../../../../shared/policies/functions/role-utils.js";
+import { isVerificationInfrastructureOutcome } from "../../functions/helpers/verification-outcome.js";
+import { handleCatastrophicExecuteError as handleCatastrophicExecuteErrorFromModule, handleExecuteAttemptError as handleExecuteAttemptErrorFromModule, handlePendingScopeApprovalPause as handlePendingScopeApprovalPauseFromModule } from "../../functions/helpers/attempt-errors.js";
+import { isProviderError as _isProviderError } from "../../functions/execution/job-helpers.js";
+import { shortJobTitle as shortJobTitleFromModule } from "../../../../shared/policies/functions/role-utils.js";
 import { AssessmentHandoffAdapter } from "./AssessmentHandoffAdapter.js";
 import { ProviderAttemptLifecycle } from "./ProviderAttemptLifecycle.js";
 import { PostExecutionCoordinator } from "./PostExecutionCoordinator.js";

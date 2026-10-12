@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { canonicalJsonNativePrimitives } from "../../../shared/format/functions/canonical-json.js";
 import path from "node:path";
 
 import { parseLeadingJsonValue } from "./delegated-evidence.js";
@@ -23,14 +24,6 @@ const NON_SELECTION_KEYS = new Set([
 
 function sha256(value) {
   return crypto.createHash("sha256").update(String(value ?? ""), "utf8").digest("hex");
-}
-
-function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
 }
 
 function normalizedPath(value) {
@@ -108,7 +101,7 @@ function resultPayload(result) {
 
 function identityRecord(tool, args, paths) {
   const targetKeys = new Set([...paths].map((entry) => `path:${entry}`));
-  const selectionKey = `selection:${sha256(stableJson({
+  const selectionKey = `selection:${sha256(canonicalJsonNativePrimitives({
     tool: canonicalTool(tool),
     arguments: selectionValue(args || {}),
   }))}`;
@@ -156,7 +149,7 @@ export function subAgentDispatchIdentities(args = {}, { materializeRef = null } 
           excerpt_sha256: evidence?.excerpt_sha256 || null,
         };
         const targetKeys = new Set([...paths].map((entry) => `path:${entry}`));
-        const selectionKey = `selection:${sha256(stableJson({ kind: "ref", ...refIdentity }))}`;
+        const selectionKey = `selection:${sha256(canonicalJsonNativePrimitives({ kind: "ref", ...refIdentity }))}`;
         mergeIdentities(identities, {
           targetKeys,
           selectionKeys: new Set([selectionKey]),

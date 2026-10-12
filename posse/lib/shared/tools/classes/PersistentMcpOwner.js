@@ -1,16 +1,10 @@
+import { notePlannerTriageCall, reservePlannerRead, appendPlannerTriageNotice, __testPlannerTriageSequence, isResearchPhysicalWorkRequest, mcpToolCallSuccess, appendToolResultText, recordOwnerModelControlNotice, effectiveAtlasResearchAction, appendOwnerModelControlNotice, attachTelemetryContext, ATLAS_NESTED_ACTION_WRAPPERS, ownerControlNoticePublicMetadata, OWNER_MODEL_CONTROL_NOTICES } from "../functions/planner-triage.js";
+export { __testPlannerTriageSequence } from "../functions/planner-triage.js";
+import { randomToken, __testShortenUnixSocketPath, defaultPipePath, sendJson, readJsonBody, bearerFrom, tokenEqual, tokenHash } from "../functions/mcp-owner-transport.js";
+export { __testShortenUnixSocketPath } from "../functions/mcp-owner-transport.js";
 import { ContextMeter } from "../../classes/ContextMeter.js";
 import { PersistentMcpSession } from "./PersistentMcpSession.js";
-import {
-  capString,
-  cloneJson,
-  createSubAgentRoutingState,
-  gatewayGateBindingKey,
-  mcpToolErrorPayload,
-  ownerErrorSummary,
-  stripToolsPrefix,
-  toolsListCount,
-  jsonlParseBuffer,
-} from "../functions/mcp-owner-session-support.js";
+import { capString, cloneJson, createSubAgentRoutingState, gatewayGateBindingKey, mcpToolErrorPayload, ownerErrorSummary, stripToolsPrefix, toolsListCount, jsonlParseBuffer } from "../functions/mcp-owner-session-support.js";
 import { observeAtlasExecution } from "../functions/atlas-result-status.js";
 import { sortAgentToolDefinitions } from "../functions/agent-schema.js";
 import { observeAtlasRequest } from "../functions/atlas-request-observation.js";
@@ -32,15 +26,9 @@ import { getAccountSetting } from "../../../domains/settings/functions/account-s
 import { getAtlasIntegrationConfig } from "../../../domains/integrations/functions/atlas/config.js";
 import crypto from "node:crypto";
 import { ATLAS_MUTATION_PATH_FIELDS } from "../../../catalog/tools/filesystem-mutations.js";
-import {
-  ATLAS_COMPACT_STRUCTURE_GATED_MAX_CHARS,
-  ATLAS_COMPACT_STRUCTURE_GATED_ROLES,
-  ATLAS_COMPACT_STRUCTURE_ROLES,
-  ATLAS_HISTORICAL_ACTION_ALIASES,
-} from "../../../catalog/atlas.js";
+import { ATLAS_COMPACT_STRUCTURE_GATED_MAX_CHARS, ATLAS_COMPACT_STRUCTURE_GATED_ROLES, ATLAS_COMPACT_STRUCTURE_ROLES, ATLAS_HISTORICAL_ACTION_ALIASES } from "../../../catalog/atlas.js";
 import fs from "node:fs";
 import http from "node:http";
-import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { teamManagedToolAdmitted } from "../../../domains/pairing/functions/team-managed-write.js";
@@ -51,161 +39,53 @@ import { compactResearchSearchResult, compactResearchSearchRows } from "../funct
 
 import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js";
 import { SUB_AGENT_EVIDENCE_OUTCOMES, isSubAgentEvidenceSafeNativeTool, isSubAgentEvidenceSafeAtlasTool } from "../../../catalog/sub-agent.js";
-import {
-  DEFAULT_MCP_OAUTH_TTL_SECONDS,
-  MCP_SESSION_RELEASED_NOTIFICATION,
-  MCP_CONCURRENT_ATLAS_ACTIONS,
-  MCP_CONTROL_METHODS,
-  MCP_OWNER_PROGRESS_HEADER,
-  MCP_OWNER_HEARTBEAT_INTERVAL_MS,
-  MCP_TERMINAL_HANDOFF_TOOLS,
-  POSSE_MCP_GATEWAY_SERVER_NAME,
-} from "../../../catalog/mcp.js";
+import { DEFAULT_MCP_OAUTH_TTL_SECONDS, MCP_SESSION_RELEASED_NOTIFICATION, MCP_CONCURRENT_ATLAS_ACTIONS, MCP_CONTROL_METHODS, MCP_OWNER_PROGRESS_HEADER, MCP_OWNER_HEARTBEAT_INTERVAL_MS, MCP_TERMINAL_HANDOFF_TOOLS, POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../catalog/mcp.js";
 import { renderAgentHandoffCallableName } from "../functions/mcp-surface.js";
 import { AutomationOwnerClient } from "../../../domains/automation/classes/AutomationOwnerClient.js";
 import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS } from "../../../catalog/custom-tools.js";
 import { RESPONSE_TRANSFORM_OBSERVATION_TYPE, TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { roleUsesBoundedRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
-import {
-  assessorFallbackReadKey,
-  isAssessorFallbackReadKey,
-} from "../../../domains/assessment/functions/fallback-read-tools.js";
-import {
-  assessorToolBudgetApplies,
-  assessorToolCallCeilingDecision,
-} from "../functions/assessor-tool-budget.js";
-import {
-  compactSkeletonSymbolHandles,
-  compactResearcherTypedAtlasText,
-  normalizeResearcherTypedAtlasFieldNames,
-} from "../functions/researcher-typed-result-compaction.js";
+import { assessorFallbackReadKey, isAssessorFallbackReadKey } from "../../../domains/assessment/functions/fallback-read-tools.js";
+import { assessorToolBudgetApplies, assessorToolCallCeilingDecision } from "../functions/assessor-tool-budget.js";
+import { compactSkeletonSymbolHandles, compactResearcherTypedAtlasText, normalizeResearcherTypedAtlasFieldNames } from "../functions/researcher-typed-result-compaction.js";
 import { omitAtlasCacheMetadata } from "../functions/atlas-agent-result.js";
-import {
-  bootConfigFromMcpOAuthClaims,
-  mintMcpOAuthTokenForBootConfig,
-  verifyMcpOAuthToken,
-} from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
+import { bootConfigFromMcpOAuthClaims, mintMcpOAuthTokenForBootConfig, verifyMcpOAuthToken } from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
 import { ATLAS_TOOL_ACTIONS } from "../../../domains/atlas/functions/v2/contracts/tool-params.js";
 import { atlasDescriptorSchemaForAction } from "../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
 import { validationFailureForAction } from "../../../domains/atlas/functions/v2/retrieval/dispatch.js";
-import {
-  COMPACT_STRUCTURE_DEFAULT_MAX_CHARS,
-  COMPACT_STRUCTURE_DEFAULT_MAX_FILES,
-  COMPACT_STRUCTURE_PROJECTION,
-} from "../../../domains/atlas/functions/v2/retrieval/compact-presentation.js";
+import { COMPACT_STRUCTURE_DEFAULT_MAX_CHARS, COMPACT_STRUCTURE_DEFAULT_MAX_FILES, COMPACT_STRUCTURE_PROJECTION } from "../../../domains/atlas/functions/v2/retrieval/compact-presentation.js";
 import { flushSharedAtlasToolExecutorDeferredRefreshes, getSharedAtlasToolExecutor } from "../../../domains/atlas/functions/v2/tools/executor.js";
-import {
-  resolveAtlasResearchRuntimeGuidance,
-  resolveResearchBudgetVisibility,
-  resolveResearchSynthesisPolicySnapshot,
-} from "../../../domains/integrations/functions/deterministic-mcp/gate-settings.js";
-import {
-  researcherDispatcherIssuedActions,
-  normalizeResearcherTypedActionArgs,
-  researcherTypedLanguageLeversForRootEntries,
-  researcherWorkflowActions,
-} from "../../../domains/integrations/functions/deterministic-mcp/researcher-dispatcher.js";
-import {
-  operatorFeedbackDeliveryForJob,
-  operatorFeedbackDeliveryText,
-} from "../../../domains/providers/functions/shared/tool-runtime.js";
-import {
-  getAgentHandoffRecord,
-  getTraversalCompletionSnapshotForCall,
-  materializeAgentHandoffEvidenceSelector,
-  recordAgentHandoffRejection,
-  rejectAgentHandoffForLaterTool,
-} from "../../../domains/handoff/functions/agent-handoff.js";
+import { resolveAtlasResearchRuntimeGuidance, resolveResearchBudgetVisibility, resolveResearchSynthesisPolicySnapshot } from "../../../domains/integrations/functions/deterministic-mcp/gate-settings.js";
+import { researcherDispatcherIssuedActions, normalizeResearcherTypedActionArgs, researcherTypedLanguageLeversForRootEntries, researcherWorkflowActions } from "../../../domains/integrations/functions/deterministic-mcp/researcher-dispatcher.js";
+import { operatorFeedbackDeliveryForJob, operatorFeedbackDeliveryText } from "../../../domains/providers/functions/shared/operator-feedback-delivery.js";
+import { getAgentHandoffRecord, getTraversalCompletionSnapshotForCall, materializeAgentHandoffEvidenceSelector, recordAgentHandoffRejection, rejectAgentHandoffForLaterTool } from "../../../domains/handoff/functions/agent-handoff.js";
 import { agentHandoffTerminator } from "../../../domains/handoff/classes/AgentHandoffTerminator.js";
 import { acknowledgeWebResearchHandoffReceipt } from "../../../domains/web-research/classes/WebResearchRuntime.js";
-import {
-  assertSubAgentParentReady,
-  executeSubAgent,
-  executeSubAgentNextInput,
-  prepareSubAgentHandoff,
-  sealSubAgentHandoff,
-  subAgentCompletionSignal,
-  subAgentRuntime,
-} from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
+import { assertSubAgentParentReady, executeSubAgent, executeSubAgentNextInput, prepareSubAgentHandoff, sealSubAgentHandoff, subAgentCompletionSignal } from "../../../domains/sub-agent/classes/SubAgentRuntime.js";
 import { classifyDelegatedToolResult } from "../../../domains/sub-agent/functions/delegated-evidence.js";
-import { evidenceRefSurface } from "../functions/ref-surface.js";
+import "../functions/ref-surface.js";
 import { sourceLineDisplay, compactSourceEvidenceSuffix } from "../functions/source-line-display.js";
 import { SYMBOL_GET_BATCH_POLICY } from "../../../catalog/symbol-get-batch.js";
-import { PLANNER_DISPATCH_SETTINGS } from "../../../catalog/planner-dispatch.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { isSymbolGetBatch, planSymbolGetBatch, combineSymbolGetBatchResults } from "../../../domains/atlas/functions/v2/retrieval/symbol-get-batch.js";
 import { symbolMatchesRequestedIdentifier } from "../../../domains/atlas/functions/v2/retrieval/identifier-resolution.js";
 import { refreshSourceDecisionNavigation } from "../functions/source-decision-points.js";
-import {
-  subAgentDispatchIdentities,
-  subAgentEvidenceCallIdentities,
-  subAgentMutationTargetKeys,
-} from "../../../domains/sub-agent/functions/routing-identity.js";
+import { subAgentDispatchIdentities, subAgentEvidenceCallIdentities, subAgentMutationTargetKeys } from "../../../domains/sub-agent/functions/routing-identity.js";
 import { classifyMcpToolResult } from "../../../domains/integrations/functions/deterministic-mcp/json-rpc.js";
 import { stripPosseMcpGatewayPrefix } from "../../../domains/integrations/functions/mcp-gateway.js";
-import {
-  beginToolInvocation,
-  recordObservation,
-  recordToolUseObservations,
-  isResearchInfrastructureFailure,
-  RESEARCH_INFRASTRUCTURE_REFUND_LIMIT,
-  researchExplorationObservationStatus,
-  researchChildBudgetCallId,
-} from "../../../domains/observability/functions/observations.js";
-import {
-  fetchHashRefEvidenceForContext,
-  materializeHashRefEvidenceForContext,
-  issueHashRefTraversalForContext,
-  listHashRefTraversalsForContext,
-} from "../../../domains/queue/functions/hash-refs.js";
-import {
-  RESEARCH_CITATION_FETCH_GATE_ENABLED,
-  RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
-  RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
-  RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS,
-  RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
-  RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
-  buildResearchWorkBudgetExhaustedText,
-  buildResearchWorkBudgetRemainingText,
-  buildResearchCitationFetchGateText,
-  buildResearchCurtainCallText,
-  buildResearchEarlyFetchBatchingText,
-  buildResearchFinalFetchBatchText,
-  buildResearchFinalSlotLimitText,
-  buildResearchSynthesisRequiredText,
-  isResearchAtlasCitationFetchAction,
-  isResearchAtlasExplorationAction,
-  researchSynthesisDecision,
-  researchSynthesisExplorationCeiling,
-  validateResearchWorkBudgetCalls,
-} from "../../../domains/integrations/functions/deterministic-mcp/research-synthesis.js";
+import { beginToolInvocation, recordObservation, recordToolUseObservations, isResearchInfrastructureFailure, RESEARCH_INFRASTRUCTURE_REFUND_LIMIT, researchExplorationObservationStatus, researchChildBudgetCallId } from "../../../domains/observability/functions/observations.js";
+import { fetchHashRefEvidenceForContext, materializeHashRefEvidenceForContext, issueHashRefTraversalForContext, listHashRefTraversalsForContext } from "../../../domains/queue/functions/hash-refs.js";
+import { RESEARCH_CITATION_FETCH_GATE_ENABLED, RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS, RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS, RESEARCH_SYNTHESIS_MAX_PHYSICAL_CALLS, RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS, RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS, buildResearchWorkBudgetExhaustedText, buildResearchWorkBudgetRemainingText, buildResearchCitationFetchGateText, buildResearchCurtainCallText, buildResearchEarlyFetchBatchingText, buildResearchFinalFetchBatchText, buildResearchFinalSlotLimitText, buildResearchSynthesisRequiredText, isResearchAtlasCitationFetchAction, isResearchAtlasExplorationAction, researchSynthesisDecision, researchSynthesisExplorationCeiling, validateResearchWorkBudgetCalls } from "../../../domains/integrations/functions/deterministic-mcp/research-synthesis.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
 import { NativeAuthHandshake } from "../../native/classes/NativeAuthHandshake.js";
 import { appendHashRefIfMajor, compactCodeWindowLensResult, createHashRefResult, fetchHashRefTool, hashRefTraversalInputs } from "../functions/hash-adder.js";
 import { compactCodeStructureResult, compactCodeSurveyResult } from "../functions/atlas-result-paging.js";
-import {
-  bindAgentAttachmentToSignedContract,
-  isInternalAtlasAction,
-  narrowBootConfigToSignedClaims,
-} from "../functions/issued-tool-policy.js";
+import { bindAgentAttachmentToSignedContract, isInternalAtlasAction, narrowBootConfigToSignedClaims } from "../functions/issued-tool-policy.js";
 import { validateToolArguments } from "../functions/schema-validation.js";
 import { sourceSelectorFingerprint } from "../../../domains/research/classes/SourceCoverageOwner.js";
-import {
-  admitSourceContextHeadroom,
-  releaseSourceContextHeadroomReservation,
-} from "../../../domains/research/functions/context-headroom.js";
-import {
-  materializeDisplayedSourceCoverage,
-  numberedReadCoverageHunks,
-  searchResultCoverageHunks,
-  sourceCoverageIsSuppressive,
-  prepareSourceCoverage,
-  sourceCoverageOwnerForSession,
-  suppressCoveredSourceInterval,
-} from "../../../domains/research/functions/owner-source-admission.js";
+import { admitSourceContextHeadroom, releaseSourceContextHeadroomReservation } from "../../../domains/research/functions/context-headroom.js";
+import { materializeDisplayedSourceCoverage, numberedReadCoverageHunks, searchResultCoverageHunks, sourceCoverageIsSuppressive, prepareSourceCoverage, sourceCoverageOwnerForSession, suppressCoveredSourceInterval } from "../../../domains/research/functions/owner-source-admission.js";
 
-const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
-const OWNER_MODEL_CONTROL_NOTICES = Symbol("ownerModelControlNotices");
 const SOURCE_EVIDENCE_REUSE_NOTICE_KIND = "source_evidence_reuse";
 const sourceEvidenceReuseNoticeAttempts = new WeakMap();
 const symbolCallerPageVersions = new WeakMap();
@@ -515,11 +395,6 @@ export function __testSubAgentRoutingGuardResult(reason) {
   return subAgentRoutingGuardResult(reason);
 }
 
-function appendToolResultText(response, suffix, { kind = "runtime_control", trigger = null } = {}) {
-  if (!suffix || !response || response?.result?.isError === true) return response;
-  const result = appendOwnerModelControlNotice(response.result, suffix, { kind, trigger });
-  return result === response.result ? response : { ...response, result };
-}
 
 // Applied once to the response the provider receives, never to an inner
 // execution a recovery may replace or to a batch item, so a consumed
@@ -571,217 +446,24 @@ export function __testSubAgentRoutingEnabled(toolNames = []) {
   });
 }
 
-// Planner-owned direct-path read budget. The research decision belongs before
-// these calls. Count reads before and after delegation against the same
-// frozen allowance; completion, clarification and delegation stay available.
-//
-// The setting is stated in turns; the owner sees calls, and planners measured
-// ~1.81 calls per turn (median 2), so the call threshold is two per budgeted
-// turn.
-const PLANNER_TRIAGE_CALLS_PER_TURN = 2;
-const PLANNER_TRIAGE_DEFAULT_TURNS = Number(PLANNER_DISPATCH_SETTINGS
-  .find((entry) => entry.key === SETTING_KEYS.PLANNER_DISPATCH_TRIAGE_MAX_TURNS)?.default) || 6;
-const PLANNER_TRIAGE_UNCOUNTED_TOOLS = new Set([
-  "tools.dispatch_agent",
-  "tools.agent_handoff",
-  "tools.ack_operator_feedback",
-]);
 
-function createPlannerTriageState() {
-  return { calls: 0, admittedCalls: 0, dispatched: false, pathNoticeIssued: false, budgetNoticeIssued: false };
-}
 
-function plannerTriageEnabled(session, policy) {
-  const boot = session?.bootConfig || {};
-  return String(boot.role || "").trim().toLowerCase() === "planner"
-    && boot.researchInvestigation === true
-    && policy?.suites?.tools?.has("dispatch_agent") === true;
-}
 
-// Read the direct-path budget from the policy frozen for this planner call
-// (the one its prompt rendered), falling back to the catalog default.
-function plannerTriageThresholdCalls(agentCallId) {
-  const configured = Number(subAgentRuntime.parents.get(Number(agentCallId))?.researchPolicy?.triageMaxTurns);
-  const turns = Number.isSafeInteger(configured) && configured > 0 ? configured : PLANNER_TRIAGE_DEFAULT_TURNS;
-  return { turns, calls: turns * PLANNER_TRIAGE_CALLS_PER_TURN };
-}
 
-function plannerTriageNoticeText(turns) {
-  return `\n\nDirect-path read budget reached (~${turns} turn${turns === 1 ? "" : "s"} of planner-owned reads). `
-    + "Finish or hand off the plan now; do not start research after accumulating this context.";
-}
 
-function plannerPathNoticeText(turns) {
-  return "\n\nResearch decision checkpoint: keep orientation to at most two bounded calls before choosing the research path. "
-    + "If substantial investigation is already clear, dispatch now; otherwise resolve the remaining scope uncertainty or continue directly "
-    + `and do not dispatch later after accumulating planner context. Direct-path budget: ~${turns} turn${turns === 1 ? "" : "s"}.`;
-}
 
-function plannerLateDispatchNoticeText(calls) {
-  return `\n\nLate-dispatch checkpoint: research was dispatched after ${calls} planner-owned tool call${calls === 1 ? "" : "s"}. `
-    + "Use the returned findings now and limit further planner reads to narrow, plan-blocking verification.";
-}
 
-function plannerTriageSessionState(session, policy) {
-  if (!session || !plannerTriageEnabled(session, policy)) return null;
-  if (!session._plannerTriage) session._plannerTriage = createPlannerTriageState();
-  return session._plannerTriage;
-}
 
-// Count one successful planner call; returns the one-shot notice text when the
-// budget is crossed, otherwise "". The caller appends it to the tool result.
-// Only a dispatch_agent call that succeeded ends counting: a failed dispatch
-// leaves the planner reading on its own, which is what the notice is for.
-function notePlannerTriageCall(session, policy, requested, { record = recordObservation } = {}) {
-  const state = plannerTriageSessionState(session, policy);
-  if (!state) return "";
-  const boot = session.bootConfig || {};
-  if (`${requested?.suite}.${requested?.name}` === "tools.dispatch_agent") {
-    state.dispatched = true;
-    if (state.calls > 0) {
-      try {
-        record({
-          work_item_id: boot.workItemId ?? null,
-          job_id: boot.jobId ?? null,
-          attempt_id: boot.attemptId ?? null,
-          observation_type: "planner.dispatch_after_own_reads",
-          summary: `Planner dispatched research after ${state.calls} own tool call(s)`,
-          detail: {
-            calls_before_dispatch: state.calls,
-            agent_call_id: boot.agentCallId ?? null,
-          },
-        });
-      } catch {
-        // Prompt pressure and telemetry must not break a successful dispatch.
-      }
-      return plannerLateDispatchNoticeText(state.calls);
-    }
-    return "";
-  }
-  if (PLANNER_TRIAGE_UNCOUNTED_TOOLS.has(`${requested?.suite}.${requested?.name}`)) return "";
-  state.calls += 1;
-  const threshold = plannerTriageThresholdCalls(boot.agentCallId);
-  if (!state.pathNoticeIssued && !state.dispatched) {
-    state.pathNoticeIssued = true;
-    try {
-      record({
-        work_item_id: boot.workItemId ?? null,
-        job_id: boot.jobId ?? null,
-        attempt_id: boot.attemptId ?? null,
-        observation_type: "planner.direct_path_started",
-        summary: "Planner made an own tool call before dispatching research",
-        detail: {
-          calls: state.calls,
-          direct_read_budget_calls: threshold.calls,
-          direct_read_budget_turns: threshold.turns,
-          tool: `${requested?.suite}.${requested?.name}`,
-          agent_call_id: boot.agentCallId ?? null,
-        },
-      });
-    } catch {
-      // The notice is advisory; telemetry must not break the tool result.
-    }
-    return plannerPathNoticeText(threshold.turns);
-  }
-  if (state.budgetNoticeIssued || state.calls < threshold.calls) return "";
-  state.budgetNoticeIssued = true;
-  try {
-    record({
-      work_item_id: boot.workItemId ?? null,
-      job_id: boot.jobId ?? null,
-      attempt_id: boot.attemptId ?? null,
-      observation_type: "planner.triage_budget_exceeded",
-      summary: `Planner direct-path read budget reached after ${state.calls} call(s)`,
-      detail: {
-        calls: state.calls,
-        threshold: threshold.calls,
-        triage_max_turns: threshold.turns,
-        tool: `${requested?.suite}.${requested?.name}`,
-        agent_call_id: boot.agentCallId ?? null,
-      },
-    });
-  } catch {
-    // The notice is advisory; telemetry must not break the tool result.
-  }
-  return plannerTriageNoticeText(threshold.turns);
-}
 
-function reservePlannerRead(session, policy, requested) {
-  if (!isResearchPhysicalWorkRequest(requested)) return null;
-  const state = plannerTriageSessionState(session, policy);
-  if (!state) return null;
-  const threshold = plannerTriageThresholdCalls(session.bootConfig?.agentCallId);
-  // Admission is synchronous, before dispatch, so concurrent calls cannot all
-  // consume the last slot. Failed reads consume their physical call as well.
-  if (state.admittedCalls < threshold.calls) {
-    state.admittedCalls++;
-    return null;
-  }
-  return mcpToolErrorPayload(
-    `Planner read allowance exhausted (${threshold.calls} calls, including reads after child research). `
-      + "Use the evidence already returned to finish the plan. If evidence is insufficient, report the specific gap or ask a focused clarification; do not claim an unverified conclusion.",
-    { code: "planner_read_budget_exhausted" },
-  );
-}
 
-function appendPlannerTriageNotice(response, session, policy, requested, toolName) {
-  if (!mcpToolCallSuccess(response)) return response;
-  const notice = notePlannerTriageCall(session, policy, requested);
-  const budgetNotice = notice.includes("Direct-path read budget reached");
-  const finalized = appendToolResultText(response, notice, {
-    kind: budgetNotice ? "planner_triage_budget" : "planner_research_decision",
-    trigger: budgetNotice ? "planner_triage_threshold" : "planner_research_decision_checkpoint",
-  });
-  if (finalized !== response) {
-    recordOwnerModelControlNotice(session, toolName, {
-      kind: budgetNotice ? "planner_triage_budget" : "planner_research_decision",
-      text: notice,
-      trigger: budgetNotice ? "planner_triage_threshold" : "planner_research_decision_checkpoint",
-    });
-  }
-  return finalized;
-}
 
-export function __testPlannerTriageSequence({
-  role = "planner",
-  researchInvestigation = true,
-  tools = ["dispatch_agent", "agent_handoff", "read_file"],
-  agentCallId = null,
-} = {}, calls = []) {
-  const session = { bootConfig: { role, researchInvestigation, agentCallId } };
-  const policy = { suites: { tools: new Set(tools.map((name) => String(name))) } };
-  const observations = [];
-  const record = (entry) => { observations.push(entry); return true; };
-  const notices = calls.map((call) => {
-    const requested = { suite: String(call?.suite || "tools"), name: String(call?.name || "") };
-    if (call?.ok === false) return "";
-    return notePlannerTriageCall(session, policy, requested, { record });
-  });
-  return { notices, observations, state: session._plannerTriage || null };
-}
+
+
 const ATLAS_TOOL_ACTION_SET = /** @type {Set<string>} */ (new Set(ATLAS_TOOL_ACTIONS));
-const ATLAS_NESTED_ACTION_WRAPPERS = new Set(["query", "code", "repo", "agent", "workflow"]);
-const ATLAS_RESEARCHER_WORKFLOW_ACTIONS = new Set(researcherWorkflowActions());
-const RESEARCH_NATIVE_PHYSICAL_WORK_TOOLS = new Set([
-  "read_file",
-  "chain_verdict",
-  "list_files",
-  "search_files",
-  "git_history",
-  "inspect_file",
-  "hash_file",
-]);
 
-// Research admission/classification must see the REAL action: gateway wrappers
-// (atlas_query/atlas_code/atlas_repo/...) carry it nested in args.action, and
-// classifying by the wrapper name would serialize concurrent-eligible reads
-// and let a wrapped fetch.ref bypass the citation gate.
-function effectiveAtlasResearchAction(requested) {
-  if (!requested || requested.suite !== "atlas") return requested?.name || "";
-  return ATLAS_NESTED_ACTION_WRAPPERS.has(requested.name) && requested.nested
-    ? requested.nested
-    : requested.name;
-}
+const ATLAS_RESEARCHER_WORKFLOW_ACTIONS = new Set(researcherWorkflowActions());
+
+
 
 /**
  * Clamp a count argument that exceeds its advertised ceiling instead of
@@ -1010,17 +692,6 @@ function withNestedAtlasAction(toolArgs, action) {
 export const __testExactNameSearchTarget = exactNameSearchTarget;
 export const __testNearestNameSearchArgs = nearestNameSearchArgs;
 
-function isResearchPhysicalWorkRequest(requested) {
-  if (!requested) return false;
-  if (requested.suite === "atlas") {
-    const action = effectiveAtlasResearchAction(requested);
-    if (action === "workflow") return false;
-    return isResearchAtlasExplorationAction(action)
-      || isResearchAtlasCitationFetchAction(action);
-  }
-  return requested.suite === "tools"
-    && RESEARCH_NATIVE_PHYSICAL_WORK_TOOLS.has(requested.name);
-}
 
 function researchBudgetKey(boot = {}) {
   return [boot.jobId ?? "no-job", boot.attemptId ?? "no-attempt", researchChildBudgetCallId(boot.agentCallId) || "parent"].join(":");
@@ -1093,78 +764,16 @@ export function __testResetResearchSynthesisPolicySnapshots() {
   researchPolicySnapshots.clear();
 }
 
-function randomToken() {
-  return crypto.randomBytes(32).toString("base64url");
-}
 
-function safeIdPart(value) {
-  return String(value || "").replace(/[^A-Za-z0-9_.-]/g, "_");
-}
 
-// Unix domain socket paths are capped at ~108 bytes (sockaddr_un.sun_path). A
-// long TMPDIR (some systemd/CI/sandbox setups) can push the default path past
-// that and make listen() fail with ENAMETOOLONG. Keep the bound path short.
-const UNIX_SOCKET_PATH_MAX = 100;
 
-function shortenUnixSocketPath(candidate, suffix) {
-  if (Buffer.byteLength(candidate) <= UNIX_SOCKET_PATH_MAX) return candidate;
-  const shortId = crypto.createHash("sha1").update(String(suffix)).digest("hex").slice(0, 16);
-  // POSIX-only path (this branch never runs on win32); keep forward slashes
-  // regardless of the host so the bound socket path is deterministic.
-  for (const base of ["/tmp", "/var/tmp"]) {
-    const short = path.posix.join(base, `posse-mcp-${shortId}.sock`);
-    if (Buffer.byteLength(short) <= UNIX_SOCKET_PATH_MAX) return short;
-  }
-  return candidate; // best effort; listen() will surface any residual error
-}
 
-export function __testShortenUnixSocketPath(candidate, suffix) {
-  return shortenUnixSocketPath(candidate, suffix);
-}
 
-function defaultPipePath(bootId) {
-  const suffix = `${process.pid}-${safeIdPart(bootId)}`;
-  if (process.platform === "win32") return `\\\\.\\pipe\\posse-mcp-owner-${suffix}`;
-  return shortenUnixSocketPath(path.join(os.tmpdir(), `posse-mcp-owner-${suffix}.sock`), suffix);
-}
 
-function sendJson(res, status, body) {
-  const text = JSON.stringify(body);
-  res.writeHead(status, {
-    "content-type": "application/json; charset=utf-8",
-    "content-length": Buffer.byteLength(text),
-  });
-  res.end(text);
-}
 
-async function readJsonBody(req) {
-  const chunks = [];
-  let total = 0;
-  for await (const chunk of req) {
-    total += chunk.length;
-    if (total > MAX_OWNER_BODY_BYTES) throw new Error("request_body_too_large");
-    chunks.push(chunk);
-  }
-  const text = Buffer.concat(chunks).toString("utf8").trim();
-  if (!text) return {};
-  return JSON.parse(text);
-}
 
-function bearerFrom(req) {
-  const raw = String(req?.headers?.authorization || "");
-  const match = /^Bearer\s+(.+)$/i.exec(raw.trim());
-  return match ? match[1].trim() : "";
-}
 
-function tokenEqual(left, right) {
-  const a = crypto.createHash("sha256").update(String(left || ""), "utf8").digest();
-  const b = crypto.createHash("sha256").update(String(right || ""), "utf8").digest();
-  return crypto.timingSafeEqual(a, b);
-}
 
-function tokenHash(value) {
-  return crypto.createHash("sha256").update(String(value || ""), "utf8").digest("base64url");
-}
 
 function stripGatewaySessionTokenFields(value = {}) {
   const out = cloneJson(value);
@@ -1177,12 +786,7 @@ function stripGatewaySessionTokenFields(value = {}) {
   return out;
 }
 
-function stripAtlasPrefix(name) {
-  const raw = String(name || "").trim();
-  if (raw.startsWith("atlas.")) return raw.slice("atlas.".length);
-  if (raw.startsWith("atlas_")) return raw.slice("atlas_".length).replace(/_/g, ".");
-  return raw;
-}
+
 
 function normalizeAtlasActionName(name) {
   const raw = String(name || "").trim();
@@ -1912,16 +1516,7 @@ function firstStructuredJsonValue(text = "") {
   return { value: null, remainder: source.trim() };
 }
 
-function researcherWorkflowStepOutput(result = null) {
-  const text = Array.isArray(result?.content)
-    ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").filter(Boolean).join("\n")
-    : "";
-  const parsed = firstStructuredJsonValue(text);
-  return {
-    value: parsed.value ?? (text ? { text } : null),
-    ...(parsed.remainder ? { remainder: parsed.remainder } : {}),
-  };
-}
+
 
 function filterToolsListMessage(message, policy) {
   const tools = message?.result?.tools;
@@ -2040,19 +1635,6 @@ function recordProviderIssuedToolSurface(session, message) {
   }
 }
 
-function attachTelemetryContext(session, ownerBootId, bootConfig = session?.bootConfig || {}) {
-  const boot = bootConfig || {};
-  return {
-    component: "deterministic_mcp",
-    owner_boot_id: ownerBootId || null,
-    session_id: session?.id || null,
-    provider: boot.providerName || null,
-    role: boot.role || null,
-    work_item_id: boot.workItemId ?? null,
-    job_id: boot.jobId ?? null,
-    attempt_id: boot.attemptId ?? null,
-  };
-}
 
 function injectSessionContext(message, session, { delegatedEvidence = false } = {}) {
   const outbound = cloneJson(message);
@@ -2660,17 +2242,6 @@ function isMemoryToolAction(action) {
   return String(action || "").startsWith("memory.");
 }
 
-function ownerControlNoticePublicMetadata(notice = {}) {
-  return {
-    kind: String(notice.kind || "runtime_control"),
-    chars: String(notice.text || "").length,
-    sha256: crypto.createHash("sha256").update(String(notice.text || ""), "utf8").digest("hex"),
-    ...(notice.trigger ? { trigger: String(notice.trigger) } : {}),
-    ...(notice.explorationStep != null && Number.isFinite(Number(notice.explorationStep))
-      ? { exploration_step: Number(notice.explorationStep) }
-      : {}),
-  };
-}
 
 function preserveOwnerModelControlNotices(source, target) {
   if (source === target) return target;
@@ -2686,38 +2257,6 @@ function preserveOwnerModelControlNotices(source, target) {
 
 export const __testPreserveOwnerModelControlNotices = preserveOwnerModelControlNotices;
 
-function appendOwnerModelControlNotice(result, suffix, detail = {}) {
-  const content = result?.content;
-  if (!Array.isArray(content) || !suffix) return result;
-  const textIndex = content.findIndex((part) => part?.type === "text" && typeof part.text === "string");
-  if (textIndex < 0) return result;
-  const textPart = content[textIndex];
-  const notice = {
-    kind: detail.kind || "runtime_control",
-    text: String(suffix),
-    trigger: detail.trigger || null,
-    explorationStep: detail.explorationStep ?? null,
-  };
-  const publicNotice = ownerControlNoticePublicMetadata(notice);
-  const priorPublic = Array.isArray(result?._meta?.posseControlNotices)
-    ? result._meta.posseControlNotices
-    : [];
-  const next = {
-    ...result,
-    content: content.map((part, index) => (
-      index === textIndex ? { ...textPart, text: `${textPart.text}${notice.text}` } : part
-    )),
-    _meta: {
-      ...(result?._meta && typeof result._meta === "object" ? result._meta : {}),
-      posseControlNotices: [...priorPublic, publicNotice],
-    },
-  };
-  Object.defineProperty(next, OWNER_MODEL_CONTROL_NOTICES, {
-    value: [...(result?.[OWNER_MODEL_CONTROL_NOTICES] || []), notice],
-    enumerable: false,
-  });
-  return next;
-}
 
 function tagOwnerModelControlNotice(result, text, detail = {}) {
   if (!result || !text) return result;
@@ -3683,15 +3222,6 @@ function appendOwnerOperatorFeedbackDelivery(result, session, toolName = "") {
   }
 }
 
-function mcpToolCallSuccess(response = null) {
-  const result = response?.result;
-  if (!result || result.isError === true) return false;
-  if (result?._meta?.posseControlOnly === true) return false;
-  const text = Array.isArray(result?.content)
-    ? result.content.map((entry) => typeof entry?.text === "string" ? entry.text : "").join("")
-    : "";
-  return !/^(?:Error:|AUDIT ERROR:)/i.test(String(text || ""));
-}
 
 function atlasGateResultState(result = null) {
   const text = Array.isArray(result?.content)
@@ -3996,39 +3526,6 @@ function ownerToolStructuredError(result = null, error = null) {
   };
 }
 
-function recordOwnerModelControlNotice(session, toolName, notice = {}) {
-  const boot = session?.bootConfig || {};
-  try {
-    recordObservation({
-      work_item_id: boot.workItemId ?? null,
-      job_id: boot.jobId ?? null,
-      attempt_id: boot.attemptId ?? null,
-      observation_type: "tool.response_control",
-      summary: `Model-visible ${notice.kind || "runtime"} notice appended to ${toolName || "tool result"}`,
-      detail: {
-        kind: notice.kind || "runtime_control",
-        tool: toolName || null,
-        text: String(notice.text || ""),
-        chars: String(notice.text || "").length,
-        trigger: notice.trigger || null,
-        exploration_step: notice.explorationStep ?? null,
-        source: "mcp_owner",
-      },
-    });
-  } catch (error) {
-    try {
-      appendRunTelemetry("diagnostics", {
-        kind: "mcp.owner.response_control_observation_failed",
-        ...attachTelemetryContext(session, null),
-        tool_name: toolName || null,
-        control_kind: notice.kind || "runtime_control",
-        error: ownerErrorSummary(error),
-      });
-    } catch {
-      // Response-control telemetry is advisory and must not break a tool result.
-    }
-  }
-}
 
 /**
  * @param {{

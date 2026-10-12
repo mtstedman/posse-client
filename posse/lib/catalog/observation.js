@@ -1,3 +1,4 @@
+import { readonlySet } from "./readonly-collections.js";
 // Physical Atlas requests, distinct from expanded tool.atlas execution rows.
 export const ATLAS_REQUEST_OBSERVATION_TYPE = "system.atlas_request";
 
@@ -29,7 +30,7 @@ export const INTERNAL_BACKGROUND_OBSERVATION_TYPES = Object.freeze([
   "tool.response_transform",
 ]);
 
-const INTERNAL_BACKGROUND_OBSERVATION_TYPE_SET = new Set(INTERNAL_BACKGROUND_OBSERVATION_TYPES);
+const INTERNAL_BACKGROUND_OBSERVATION_TYPE_SET = readonlySet(INTERNAL_BACKGROUND_OBSERVATION_TYPES);
 
 export function isInternalBackgroundObservationType(value) {
   return INTERNAL_BACKGROUND_OBSERVATION_TYPE_SET.has(String(value || ""));

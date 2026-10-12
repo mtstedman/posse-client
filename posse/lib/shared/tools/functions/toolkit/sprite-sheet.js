@@ -1,3 +1,4 @@
+import { firstMissingAncestor, removeEmptyDirectories } from "../../../platform/functions/transactional-directories.js";
 // @ts-check
 //
 // compose_sprite_sheet: the artificer packs scoped images into one PNG atlas
@@ -327,31 +328,7 @@ function fillBackground(atlas, background) {
   }
 }
 
-function firstMissingAncestor(directory) {
-  let missing = null;
-  let cursor = directory;
-  while (!fs.existsSync(cursor)) {
-    missing = cursor;
-    const parent = path.dirname(cursor);
-    if (parent === cursor) break;
-    cursor = parent;
-  }
-  return missing;
-}
 
-function removeEmptyDirectories(directory, stopAt) {
-  if (!stopAt) return;
-  let cursor = directory;
-  for (;;) {
-    try {
-      fs.rmdirSync(cursor);
-    } catch {
-      return;
-    }
-    if (cursor === stopAt) return;
-    cursor = path.dirname(cursor);
-  }
-}
 
 // Write every output to a temp file beside it, then rename them all into
 // place. On failure nothing new is left: temps are removed, an output already

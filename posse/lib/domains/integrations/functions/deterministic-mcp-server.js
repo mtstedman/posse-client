@@ -11,50 +11,8 @@ import { redactComplementaryReadResult } from "./deterministic-mcp/read-file-red
 import { createScopedMutationTools } from "./deterministic-mcp/scoped-mutations.js";
 import { ResearchSessionStore } from "../classes/ResearchSessionStore.js";
 import { redactComplementarySearchRows } from "./deterministic-mcp/search-file-redaction.js";
-import {
-  TOOL_HASH_FILE,
-  TOOL_LIST_FILES,
-  TOOL_READ_FILE,
-  TOOL_WRITE_FILE,
-  TOOL_EDIT_FILE,
-  TOOL_REQUEST_SCOPE,
-  TOOL_READ_IMAGE_METADATA,
-  TOOL_VALIDATE_ARTIFACT_OUTPUT,
-  TOOL_PRUNE_ARTIFACT_OUTPUT,
-  TOOL_CLEAN_IMAGE,
-  TOOL_EXTRACT_IMAGE_TEXT,
-  TOOL_RUN_UNIT_TEST,
-  TOOL_SEARCH_FILES,
-  TOOL_GIT_HISTORY,
-  TOOL_INSPECT_FILE,
-  TOOL_BASH,
-  TOOL_AGENT_FEEDBACK,
-  TOOL_GET_OPERATOR_FEEDBACK,
-  TOOL_ACK_OPERATOR_FEEDBACK,
-  TOOL_MOVE_FILE,
-  TOOL_COPY_FILE,
-  TOOL_MAKE_DIR,
-  TOOL_CHAIN_READ,
-  TOOL_CHAIN_VERDICT,
-  TOOL_GENERATE_IMAGE,
-  TOOL_GET_BRIEF,
-  buildScopePredicates,
-  createDeterministicToolkit,
-  createBashExecutor,
-  safePath,
-} from "../../../shared/tools/functions/toolkit/index.js";
-import {
-  TOOL_AGENT_HANDOFF,
-  TOOL_PROJECT_DB_QUERY,
-  TOOL_AGENT_CLAIM,
-  TOOL_REPORT_CLAIMS,
-  TOOL_SUB_AGENT,
-  TOOL_SUB_AGENT_NEXT_INPUT,
-  TOOL_WEB_RESEARCH_HANDOFF,
-  TOOL_DOWNLOAD_FILE,
-  TOOL_COMPOSE_SPRITE_SHEET,
-  TOOL_VIEW_IMAGE,
-} from "../../../catalog/native-tools.js";
+import { TOOL_HASH_FILE, TOOL_LIST_FILES, TOOL_READ_FILE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_REQUEST_SCOPE, TOOL_READ_IMAGE_METADATA, TOOL_VALIDATE_ARTIFACT_OUTPUT, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_CLEAN_IMAGE, TOOL_EXTRACT_IMAGE_TEXT, TOOL_RUN_UNIT_TEST, TOOL_SEARCH_FILES, TOOL_GIT_HISTORY, TOOL_INSPECT_FILE, TOOL_BASH, TOOL_AGENT_FEEDBACK, TOOL_GET_OPERATOR_FEEDBACK, TOOL_ACK_OPERATOR_FEEDBACK, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_CHAIN_READ, TOOL_CHAIN_VERDICT, TOOL_GENERATE_IMAGE, TOOL_GET_BRIEF, buildScopePredicates, createDeterministicToolkit, createBashExecutor, safePath } from "../../../shared/tools/functions/toolkit/index.js";
+import { TOOL_PROJECT_DB_QUERY, TOOL_AGENT_CLAIM, TOOL_REPORT_CLAIMS, TOOL_SUB_AGENT, TOOL_SUB_AGENT_NEXT_INPUT, TOOL_WEB_RESEARCH_HANDOFF, TOOL_DOWNLOAD_FILE, TOOL_COMPOSE_SPRITE_SHEET, TOOL_VIEW_IMAGE } from "../../../catalog/native-tools.js";
 import { downloadFilesWithinScope } from "../../web-research/functions/download-files.js";
 import { composeSpriteSheetWithinScope } from "../../../shared/tools/functions/toolkit/sprite-sheet.js";
 import { viewImageWithinScope } from "../../../shared/tools/functions/toolkit/view-image.js";
@@ -66,173 +24,61 @@ import { IMAGE_GENERATION_MAX_CALLS_PER_JOB } from "../../../catalog/artifact.js
 import { TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { discoverUnitTestCapability } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { roleUsesCanonicalRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
-import {
-  assessorFallbackReadCallKey,
-  isAssessorFallbackReadKey,
-} from "../../assessment/functions/fallback-read-tools.js";
-import {
-  assessorToolBudgetApplies,
-  assessorToolCallCeilingDecision,
-  ASSESSOR_READ_ALLOWANCE_ADVISORY_TEXT,
-} from "../../../shared/tools/functions/assessor-tool-budget.js";
+import { assessorFallbackReadCallKey, isAssessorFallbackReadKey } from "../../assessment/functions/fallback-read-tools.js";
+import { assessorToolBudgetApplies, assessorToolCallCeilingDecision, ASSESSOR_READ_ALLOWANCE_ADVISORY_TEXT } from "../../../shared/tools/functions/assessor-tool-budget.js";
 import { execProjectDbQuery } from "../../../shared/tools/functions/toolkit/project-db/query.js";
-import {
-  recordAgentHandoffRejection,
-  rejectAgentHandoffForLaterTool,
-  stageAgentHandoff,
-  getTraversalCompletionSnapshotForCall,
-} from "../../handoff/functions/agent-handoff.js";
+import { recordAgentHandoffRejection, rejectAgentHandoffForLaterTool, stageAgentHandoff, getTraversalCompletionSnapshotForCall } from "../../handoff/functions/agent-handoff.js";
 import { executeResearchReportClaims } from "../../handoff/functions/research-report-claim-drafts.js";
-import {
-  assertSubAgentParentReady,
-  executeSubAgent,
-  executeSubAgentNextInput,
-  prepareSubAgentHandoff,
-  sealSubAgentHandoff,
-} from "../../sub-agent/classes/SubAgentRuntime.js";
-import {
-  executeDispatchAgent,
-  submitWebResearchHandoff,
-} from "../../web-research/classes/WebResearchRuntime.js";
+import { assertSubAgentParentReady, executeSubAgent, executeSubAgentNextInput, prepareSubAgentHandoff, sealSubAgentHandoff } from "../../sub-agent/classes/SubAgentRuntime.js";
+import { executeDispatchAgent, submitWebResearchHandoff } from "../../web-research/classes/WebResearchRuntime.js";
 import { capProjectDbPermissions, readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { projectDbQuerySchemaForPermissions } from "../../../shared/tools/functions/toolkit/project-db/schema.js";
 import { ToolRegistry } from "../../../shared/tools/classes/ToolRegistry.js";
 import { AutomationOwnerClient } from "../../automation/classes/AutomationOwnerClient.js";
-import { declareToolSuites, LIVE_CHANNEL_TOOL_NAMES, registeredToolNames } from "../../../shared/tools/functions/tool-suites.js";
+import { declareToolSuites, registeredToolNames } from "../../../shared/tools/functions/tool-suites.js";
 import { appendHashRefIfMajor } from "../../../shared/tools/functions/hash-adder.js";
 import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
 import { normalizeProjectDbCapability } from "../../../shared/tools/functions/issued-tool-policy.js";
 import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
-import {
-  operatorFeedbackDeliveryForJob,
-  operatorFeedbackDeliveryText,
-} from "../../providers/functions/shared/tool-runtime.js";
+import { operatorFeedbackDeliveryForJob, operatorFeedbackDeliveryText } from "../../providers/functions/shared/operator-feedback-delivery.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, researchExplorationObservationStatus, runWithObservationContext } from "../../observability/functions/observations.js";
 import { scopedCheckToolResultObservation } from "../../observability/functions/scoped-check-tool-result.js";
 import { unitTestToolResultObservation } from "../../observability/functions/unit-test-tool-result.js";
-import {
-  acknowledgeOperatorFeedback,
-  awaitJobScopeExpansionDecision,
-  countPendingOperatorFeedbackForJob,
-  getIntSetting,
-  getOperatorFeedbackForJob,
-  grantApprovedScopeEntries,
-  LIVE_SCOPE_WAIT_TIMEOUT_MS,
-  recordAgentActivity,
-} from "../../queue/functions/index.js";
+import { acknowledgeOperatorFeedback, awaitJobScopeExpansionDecision, countPendingOperatorFeedbackForJob, getIntSetting, getOperatorFeedbackForJob, grantApprovedScopeEntries, LIVE_SCOPE_WAIT_TIMEOUT_MS, recordAgentActivity } from "../../queue/functions/index.js";
 import { runWithTeamManagedToolGrant } from "../../pairing/functions/team-managed-write.js";
 import { getAtlasIntegrationConfig, getAtlasRouteForRole } from "./atlas/config.js";
-import { resolveAtlasRepoTarget } from "./atlas/repo.js";
-import { shouldUseAtlasV2 } from "./atlas-v2-mode.js";
+import "./atlas-v2-mode.js";
 import { atlasBackendLabel } from "./atlas-label.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { PulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import { ParentPulseTokenManager } from "../../../shared/native/classes/ParentPulseTokenManager.js";
 import { prewarmNativeGitAuth } from "../../git/functions/native/prewarm.js";
-import {
-  DEFAULT_MCP_OAUTH_TTL_SECONDS,
-  MCP_OAUTH_AUDIENCE,
-  MCP_OAUTH_TOKEN_TYPE,
-  MCP_PROTOCOL_VERSION,
-  POSSE_MCP_GATEWAY_SERVER_INFO_NAME,
-  POSSE_MCP_GATEWAY_SERVER_NAME,
-} from "../../../catalog/mcp.js";
+import { DEFAULT_MCP_OAUTH_TTL_SECONDS, MCP_OAUTH_AUDIENCE, MCP_OAUTH_TOKEN_TYPE, MCP_PROTOCOL_VERSION, POSSE_MCP_GATEWAY_SERVER_INFO_NAME, POSSE_MCP_GATEWAY_SERVER_NAME } from "../../../catalog/mcp.js";
 import { renderAgentHandoffCallableName } from "../../../shared/tools/functions/mcp-surface.js";
 import { AGENT_HANDOFF_PROTOCOL } from "../../../catalog/handoff.js";
 import { REMOTE_CATALOG_READ_ROUTE } from "../../../catalog/binary.js";
-import {
-  buildAtlasGateScopeKey,
-  configureGate,
-  isGateActive,
-  ATLAS_CHAIN_READ_MAX_LINES,
-  ATLAS_RESEARCHER_READ_MAX_LINES,
-  isIndexableSourcePath,
-  noteAtlasCall,
-  releaseGate,
-  unlockForAtlasUnavailable,
-  isFallbackAtlasPrefetchStatus,
-} from "./deterministic-mcp/gate.js";
-import {
-  resolveAtlasGatewayDedupAdvertise,
-  resolveAtlasResearcherSchemaDiet,
-  resolveResearchSynthesisPolicySnapshot,
-} from "./deterministic-mcp/gate-settings.js";
-import {
-  applyResearcherTypedNativeToolShape,
-  buildResearcherDirectTools,
-  researcherTypedLanguageLeversForRootEntries,
-} from "./deterministic-mcp/researcher-dispatcher.js";
+import { buildAtlasGateScopeKey, configureGate, isGateActive, ATLAS_CHAIN_READ_MAX_LINES, ATLAS_RESEARCHER_READ_MAX_LINES, isIndexableSourcePath, noteAtlasCall, releaseGate, unlockForAtlasUnavailable, isFallbackAtlasPrefetchStatus } from "./deterministic-mcp/gate.js";
+import { resolveAtlasGatewayDedupAdvertise, resolveAtlasResearcherSchemaDiet, resolveResearchSynthesisPolicySnapshot } from "./deterministic-mcp/gate-settings.js";
+import { applyResearcherTypedNativeToolShape, buildResearcherDirectTools, researcherTypedLanguageLeversForRootEntries } from "./deterministic-mcp/researcher-dispatcher.js";
 import { applyResearcherSchemaDiet } from "./deterministic-mcp/researcher-schema-diet.js";
-import {
-  bootConfigFromMcpOAuthClaims,
-  buildMcpOAuthClaimsFromBootConfig,
-  verifyMcpOAuthToken,
-} from "./deterministic-mcp/oauth-token.js";
-import {
-  DETERMINISTIC_IMAGE_HELPER_TOOLS,
-  DETERMINISTIC_IMAGE_TOOLS,
-  DETERMINISTIC_IMAGE_VIEW_TOOLS,
-  DETERMINISTIC_OCR_TOOLS,
-  DETERMINISTIC_WRITE_TOOLS,
-  SURFACED_ATLAS_TOOL_DEFS,
-  buildFoldedAtlasToolDescriptor,
-  buildNativeToolDescriptor,
-  getDeterministicMcpToolNames,
-  getToolSchemaForRole,
-  isBlockedFoldedAtlasTool,
-  isExternallyRoutedAtlasTool,
-  isFallbackOnlyAtlasTool,
-} from "./deterministic-mcp/tool-descriptors.js";
+import { bootConfigFromMcpOAuthClaims, buildMcpOAuthClaimsFromBootConfig, verifyMcpOAuthToken } from "./deterministic-mcp/oauth-token.js";
+import { DETERMINISTIC_IMAGE_HELPER_TOOLS, DETERMINISTIC_IMAGE_TOOLS, DETERMINISTIC_IMAGE_VIEW_TOOLS, DETERMINISTIC_OCR_TOOLS, DETERMINISTIC_WRITE_TOOLS, SURFACED_ATLAS_TOOL_DEFS, buildFoldedAtlasToolDescriptor, buildNativeToolDescriptor, getDeterministicMcpToolNames, getToolSchemaForRole, isBlockedFoldedAtlasTool, isExternallyRoutedAtlasTool, isFallbackOnlyAtlasTool } from "./deterministic-mcp/tool-descriptors.js";
 import { ATLAS_TOOL_ACTIONS } from "../../atlas/functions/v2/contracts/tool-params.js";
 import { stripPosseMcpGatewayPrefix } from "./mcp-gateway.js";
 import { setRuntimePathOverrides } from "../../runtime/functions/paths.js";
 import { AsyncResourceGate } from "../../../shared/concurrency/classes/AsyncGate.js";
 import { readResponseTextWithLimit } from "../../remote/functions/client.js";
 import { sanitizeAbsolutePathsInText } from "../../../shared/format/functions/display-paths.js";
-import {
-  parseEnvBool,
-  parseBoolOverride,
-  bootString,
-  nonNegativeIntegerOrNull,
-} from "./deterministic-mcp/boot-config-parse.js";
+import { parseEnvBool, parseBoolOverride, bootString, nonNegativeIntegerOrNull } from "./deterministic-mcp/boot-config-parse.js";
 import { capString, sanitizeForLog } from "./deterministic-mcp/log-helpers.js";
 import { projectAgentToolSchema, sortAgentToolDefinitions } from "../../../shared/tools/functions/agent-schema.js";
 import { resolveAgentFileAuthority } from "./deterministic-mcp/agent-file-authority.js";
-import {
-  RESEARCH_CITATION_FETCH_GATE_ENABLED,
-  RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS,
-  NATIVE_DUPLICATE_READ_SUPPRESSED_PREFIX,
-  RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS,
-  RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS,
-  RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS,
-  buildResearchCitationFetchGateText,
-  buildResearchCurtainCallText,
-  buildResearchSynthesisRequiredText,
-  isResearchAtlasCitationFetchAction,
-  isResearchAtlasExplorationAction,
-  researchSynthesisDecision,
-  researchSynthesisExplorationCeiling,
-} from "./deterministic-mcp/research-synthesis.js";
-import {
-  jsonRpcSuccess,
-  jsonRpcError,
-  hiddenSessionFromParams,
-  stripHiddenSessionParam,
-  classifyNativeToolResult,
-  isSuccessfulNativeToolResult,
-} from "./deterministic-mcp/json-rpc.js";
+import { RESEARCH_CITATION_FETCH_GATE_ENABLED, RESEARCH_SYNTHESIS_CURTAIN_CALL_REMAINING_STEPS, NATIVE_DUPLICATE_READ_SUPPRESSED_PREFIX, RESEARCH_SYNTHESIS_MAX_EXPLORATION_STEPS, RESEARCH_SYNTHESIS_MIN_EXPLORATION_STEPS, RESEARCH_SYNTHESIS_STALE_EXPLORATION_STEPS, buildResearchCitationFetchGateText, buildResearchCurtainCallText, buildResearchSynthesisRequiredText, isResearchAtlasCitationFetchAction, isResearchAtlasExplorationAction, researchSynthesisDecision, researchSynthesisExplorationCeiling } from "./deterministic-mcp/research-synthesis.js";
+import { jsonRpcSuccess, jsonRpcError, hiddenSessionFromParams, stripHiddenSessionParam, classifyNativeToolResult, isSuccessfulNativeToolResult } from "./deterministic-mcp/json-rpc.js";
 
 /** Safe wrapper — recording must never break tool execution in the MCP subprocess. */
-function recordToolInvocation(opts) {
-  try {
-    _recordToolInvocation({
-      ...opts,
-      job_id: opts.job_id ?? mcpJobId ?? undefined,
-      work_item_id: opts.work_item_id ?? mcpWorkItemId ?? undefined,
-    });
-  } catch { /* best effort */ }
-}
+
 
 /** Safe wrappers for the start/finish invocation pair (see observations.js). */
 function beginToolInvocation(opts) {
@@ -351,12 +197,11 @@ const MAX_STDIN_CONTENT_LENGTH_BYTES = 16 * 1024 * 1024;
 // frame max leaves room for one max-size body plus headers and pipelining.
 const MAX_STDIN_BUFFER_BYTES = MAX_STDIN_CONTENT_LENGTH_BYTES * 2;
 const scopeParseState = { invalid: false };
-const ATLAS_LIVE_BUFFER_GATE = new AsyncResourceGate({ name: "ATLAS live buffer" });
 const DETERMINISTIC_TOOL_GATE = new AsyncResourceGate({ name: "deterministic native tool" });
-const DEFAULT_ATLAS_LIVE_BUFFER_TOOL_WAIT_MS = (() => {
+((() => {
   const parsed = Number(process.env.POSSE_DETERMINISTIC_MCP_ATLAS_LIVE_BUFFER_TOOL_WAIT_MS);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 2000;
-})();
+})());
 
 function parseScopeEnvArray(env, key) {
   const raw = env?.[key];
@@ -799,19 +644,6 @@ function getDeterministicAtlasConfig() {
   };
 }
 
-function getDeterministicAtlasRepoTarget(atlasCfg = getDeterministicAtlasConfig()) {
-  try {
-    return resolveAtlasRepoTarget({ cwd: workspaceCwd, config: atlasCfg });
-  } catch {
-    return {
-      repoPath: atlasCfg?.requestedRepoPath || workspaceCwd,
-      repoId: atlasCfg?.requestedRepoId || null,
-      source: "fallback",
-      ready: true,
-    };
-  }
-}
-
 let _atlasMemoryCountResolved = false;
 let _atlasMemoryCount = null;
 function getAtlasMemoryCountForRemoteCatalog() {
@@ -832,11 +664,6 @@ function getAtlasMemoryCountForRemoteCatalog() {
   // ATLAS storage reads belong to the owner/conductor lane. The MCP gateway can
   // surface explicit boot metadata, but should not open the ledger for catalog
   // decoration.
-  return null;
-}
-
-function getDeterministicAtlasBranch() {
-  if (mcpWorkItemId != null) return `wi-${mcpWorkItemId}`;
   return null;
 }
 
@@ -3062,29 +2889,6 @@ function atlasLiveBufferMode() {
   return "off";
 }
 
-async function maybePushAtlasLiveBuffer({ toolName, args } = {}) {
-  const queued = buildQueuedAtlasLiveBufferDetail({ toolName, args, reason: "owner_executor" });
-  if (!queued) return null;
-  const detail = {
-    ...queued,
-    attempted: false,
-    queued: true,
-    ok: null,
-  };
-  recordAtlasLiveObservation({
-    ...detail,
-    summary: `ATLAS buffer.push (${detail.path || "unknown path"}) deferred to owner executor`,
-    detail,
-  });
-  appendToolLog({
-    event: "atlas_live_buffer_deferred_to_owner",
-    tool: toolName,
-    path: queued.path || null,
-    reason: "owner_executor",
-  });
-  return detail;
-}
-
 function buildQueuedAtlasLiveBufferDetail({ toolName, args, reason = "timeout", timeoutMs = null } = {}) {
   if (atlasLiveBufferMode() !== "deterministic-writes") return null;
   if (toolName !== "write_file" && toolName !== "edit_file") return null;
@@ -3159,34 +2963,6 @@ async function maybeRefreshAtlasIndexAfterLiveWrite({ relPath, toolName, source 
     detail: observation,
   });
   return observation;
-}
-
-async function readAtlasLiveBufferContent({ absPath, relPath, toolName }) {
-  try {
-    return await ATLAS_LIVE_BUFFER_GATE.read(
-      absPath,
-      async () => {
-        let stat = null;
-        try {
-          stat = await fs.promises.stat(absPath);
-        } catch (err) {
-          if (err?.code === "ENOENT") return { ok: false, reason: "missing" };
-          return { ok: false, reason: "stat_failed", error: capString(err?.message || String(err), 240) };
-        }
-        if (!stat.isFile()) return { ok: false, reason: "not_file" };
-        const size = Number(stat.size || 0);
-        if (size > 512 * 1024) return { ok: false, reason: "file_too_large", size };
-        try {
-          return { ok: true, content: await fs.promises.readFile(absPath, "utf8") };
-        } catch (err) {
-          return { ok: false, reason: "read_failed", error: capString(err?.message || String(err), 240) };
-        }
-      },
-      { label: `atlas.liveBuffer.${toolName}:${relPath}`, waitMs: 5000 },
-    );
-  } catch (err) {
-    return { ok: false, reason: "gate_timeout", error: capString(err?.message || String(err), 240) };
-  }
 }
 
 // Framing mode is detected from the first received message.
@@ -3346,7 +3122,7 @@ async function handleRequest(msg) {
     }
     return;
   }
-  const delegatedEvidenceCursor = session?.bootConfig?.delegatedEvidenceCursor === true;
+  (session?.bootConfig?.delegatedEvidenceCursor === true);
   // Owner-hot messages are session-scoped per message; without the hidden
   // param the module globals (mcpJobId/mcpAttemptId/role/cwd) are STICKY
   // leftovers from the previous message. Job-scoped tools consult this flag

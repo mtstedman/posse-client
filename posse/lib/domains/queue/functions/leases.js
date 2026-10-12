@@ -11,25 +11,11 @@
 import crypto from "crypto";
 import { LeaseManager } from "../classes/LeaseManager.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import {
-  LEASE_HOLDING_STATUSES_SQL,
-  PARKED_JOB_STATUSES,
-  TERMINAL_JOB_STATUSES_SQL,
-  now,
-  runImmediateTransaction,
-} from "./common.js";
+import { LEASE_HOLDING_STATUSES_SQL, PARKED_JOB_STATUSES, TERMINAL_JOB_STATUSES_SQL, now, runImmediateTransaction } from "./common.js";
 import { logEvent } from "./events.js";
 import { isLeaseValid } from "./attempts.js";
-import {
-  acquireLeaseWithWriteLocks,
-  acquireLeaseWithWriteLocksAsync,
-  releaseJobLocksForStatus,
-} from "./file-locks.js";
-import {
-  graceCutoff,
-  leaseNowMs,
-  leaseRequeueGraceSec,
-} from "./lease-clock.js";
+import { acquireLeaseWithWriteLocks, acquireLeaseWithWriteLocksAsync, releaseJobLocksForStatus } from "./file-locks.js";
+import { leaseNowMs, leaseRequeueGraceSec } from "./lease-clock.js";
 import { rollbackPendingCrossWiSyncHandoffsForJob } from "./cross-wi-deps.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";

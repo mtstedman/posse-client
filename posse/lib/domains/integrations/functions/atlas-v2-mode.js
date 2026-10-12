@@ -67,43 +67,8 @@ export function shouldUseAtlasV2({ config = null } = {}) {
   return true;
 }
 
-/**
- * Legacy dual-backend execution has been removed.
- *
- * @param {{ config?: any }} [args]
- * @returns {boolean}
- */
-export function shouldRunDualBackends({ config = null } = {}) {
-  void config;
-  return false;
-}
 
-/**
- * Compatibility view retained for callers that have not yet dropped the
- * historical shadow API. It no longer enables dual execution.
- *
- * @typedef {"off" | "shadow" | "preferred" | "required"} ShadowAuthorityMode
- *
- * @param {string | null | undefined} [value]
- * @returns {ShadowAuthorityMode}
- */
-export function shadowAuthorityMode(value = "shadow") {
-  const mode = normalizeAtlasV2Mode(value);
-  if (mode === "required" || mode === "on") return "required";
-  return "off";
-}
 
-/**
- * Shadow execution has been removed; deprecated shadow values normalize to
- * normal v2-on behavior.
- *
- * @param {string | null | undefined} [value]
- * @returns {boolean}
- */
-export function isAtlasShadowEnabled(value = "on") {
-  void value;
-  return false;
-}
 
 /** @typedef {"off" | "on" | "on-demand" | "both"} AtlasScipMode */
 

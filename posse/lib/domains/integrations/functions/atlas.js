@@ -1,3 +1,5 @@
+import { shouldConsiderScipRestage as shouldAutoRestageScip } from "./atlas-restage-policy.js";
+import { isAbortLikeError as isAbortLikeAtlasError } from "../../../shared/concurrency/functions/abort-classification.js";
 // @ts-check
 //
 // ATLAS v2-native integration facade.
@@ -33,11 +35,7 @@ import { readScipBatchCoverage } from "../../atlas/functions/v2/scip/batch-cover
 import { listScipFiles } from "../../atlas/functions/v2/scip/ingester.js";
 import { scopePathsForScipSourceLanguages } from "../../atlas/functions/v2/scip/source-scope.js";
 import { scipBasenameSourceLanguages } from "../../atlas/functions/v2/scip-progress.js";
-import {
-  inspectViewMaterialization,
-  openViewWithMeta,
-  viewFreshness,
-} from "../../atlas/functions/v2/view-health.js";
+import { openViewWithMeta, viewFreshness } from "../../atlas/functions/v2/view-health.js";
 import { readAtlasMainIntakeState } from "../../atlas/functions/v2/main-intake-state.js";
 import { withAtlasMainSourceProofLock } from "../../atlas/functions/v2/main-generation.js";
 import { runSqliteWrite } from "../../../shared/concurrency/functions/sqlite-gate.js";
@@ -48,48 +46,12 @@ import { sanitizeWorkerExecArgv } from "../../runtime/functions/worker-exec-argv
 import { getAtlasV2BootTimeoutMs } from "../../settings/functions/tunables.js";
 import { recordEmbeddingForensics, errorForTelemetry } from "../../atlas/functions/v2/embeddings/forensics.js";
 import { resetAtlasRebuildableData } from "../../atlas/functions/v2/data-schema-reset.js";
-import {
-  warmReadinessProgress,
-  warmReadinessSeed,
-  warmReadinessStarted,
-} from "../../atlas/functions/v2/warm-progress.js";
-import {
-  formatAtlasError,
-  isVerboseAtlasErrors,
-  logAtlasError,
-} from "../../atlas/functions/v2/verbose-errors.js";
-import {
-  isAuthoritativeAtlasV2Mode,
-  normalizeAtlasScipMode,
-  shouldRunScipPhase,
-  shouldUseAtlasV2,
-} from "./atlas-v2-mode.js";
-import {
-  ATLAS_ROLE_ORDER,
-  applyAtlasBootEnv,
-  buildAtlasBootEnv,
-  __resetAtlasRuntimeDisabledForTests,
-  disableAtlasForRun,
-  getAtlasIntegrationConfig,
-  getAtlasProviderSupport as getConfiguredAtlasProviderSupport,
-  getAtlasRouteForRole,
-  getAtlasRuntimeDisabledReason,
-  invalidateAtlasIntegrationConfigCache,
-  isAtlasRuntimeDisabled,
-  loadAdaptiveSplitTarget,
-  normalizeAtlasRuntimeDisableRepoKey,
-  resolveAtlasAssignmentUnit,
-  resolveSplitAssignment,
-  withAtlasConfigOverrides,
-} from "./atlas/config.js";
-import {
-  emitMainAdvanced as emitAtlasV2MainAdvanced,
-  isAtlasV2EmissionEnabled as isAtlasV2PipelineEmissionEnabled,
-} from "../../atlas/classes/v2/PipelineHooks.js";
-import {
-  resolveAtlasRepoTarget,
-  resolveAtlasRepoTargetAsync,
-} from "./atlas/repo.js";
+import { warmReadinessProgress, warmReadinessSeed, warmReadinessStarted } from "../../atlas/functions/v2/warm-progress.js";
+import { formatAtlasError, isVerboseAtlasErrors, logAtlasError } from "../../atlas/functions/v2/verbose-errors.js";
+import { isAuthoritativeAtlasV2Mode, normalizeAtlasScipMode, shouldRunScipPhase, shouldUseAtlasV2 } from "./atlas-v2-mode.js";
+import { ATLAS_ROLE_ORDER, applyAtlasBootEnv, buildAtlasBootEnv, __resetAtlasRuntimeDisabledForTests, disableAtlasForRun, getAtlasIntegrationConfig, getAtlasProviderSupport as getConfiguredAtlasProviderSupport, getAtlasRouteForRole, getAtlasRuntimeDisabledReason, invalidateAtlasIntegrationConfigCache, isAtlasRuntimeDisabled, loadAdaptiveSplitTarget, normalizeAtlasRuntimeDisableRepoKey, resolveAtlasAssignmentUnit, resolveSplitAssignment, withAtlasConfigOverrides } from "./atlas/config.js";
+import { emitMainAdvanced as emitAtlasV2MainAdvanced, isAtlasV2EmissionEnabled as isAtlasV2PipelineEmissionEnabled } from "../../atlas/classes/v2/PipelineHooks.js";
+import { resolveAtlasRepoTarget, resolveAtlasRepoTargetAsync } from "./atlas/repo.js";
 import { normalizeWaitingLaneGeneration, waitingLaneGenerationsEqual } from "../../../catalog/waiting-lane.js";
 import { normalizeAtlasCodeWindowPolicy } from "../../../catalog/atlas-tools.js";
 import { getEffectiveCodeWindowPolicy } from "../../atlas/functions/v2/retrieval/policy.js";
@@ -296,13 +258,7 @@ function resolveFallbackMode(config = {}) {
   return (config.normalizedMode || config.mode) === "required" ? "fail" : "preload";
 }
 
-function resolveNonNegativeMs(value, fallback) {
-  if (value != null) {
-    const explicit = Number(value);
-    if (Number.isFinite(explicit) && explicit >= 0) return explicit;
-  }
-  return fallback;
-}
+
 
 function resolveAtlasV2BootTimeoutMs(value = null, config = null) {
   if (value != null && String(value).trim() !== "") {
@@ -722,60 +678,9 @@ export async function checkAtlasMainFreshnessGate({
   };
 }
 
-async function inspectMainViewForBoot(
-  viewPath,
-  branch,
-  ledgerDbPath = null,
-  { layerMerge = null, treeCompressionMode = "off" } = {},
-) {
-  const status = {
-    exists: false,
-    readable: false,
-    branchMatches: false,
-    current: false,
-    meta: null,
-    freshness: null,
-    structure: null,
-    materialization: null,
-    error: null,
-  };
-  const probe = await openViewWithMeta(viewPath, AtlasView);
-  try {
-    status.exists = !!probe.exists;
-    if (!probe.ok) {
-      status.error = probe.error?.message || String(probe.error || "view_unreadable");
-      return status;
-    }
-    status.readable = true;
-    status.meta = probe.meta || null;
-    status.structure = inspectViewMaterialization(probe.view._unsafeDb(), { treeCompressionMode: "off" });
-    status.materialization = inspectViewMaterialization(probe.view._unsafeDb(), { treeCompressionMode });
-    status.branchMatches = probe.meta?.branch === branch;
-    if (!status.branchMatches) return status;
-    if (!ledgerDbPath) {
-      status.current = status.structure?.ok === true;
-      return status;
-    }
-    let ledger = null;
-    try {
-      ledger = Ledger.openReadOnly({ dbPath: ledgerDbPath });
-      status.freshness = viewFreshness(probe.meta, ledger, { layerMerge });
-      status.current = status.freshness.current === true && status.structure?.ok === true;
-    } catch (err) {
-      status.error = err?.message || String(err);
-      status.current = false;
-    } finally {
-      try { ledger?.close?.(); } catch { /* ignore */ }
-    }
-    return status;
-  } finally {
-    try { if (probe.ok) probe.view.close(); } catch { /* ignore */ }
-  }
-}
 
-async function mainViewMatchesBranch(viewPath, branch) {
-  return (await inspectMainViewForBoot(viewPath, branch)).branchMatches;
-}
+
+
 
 function workItemViewPath(worktreePath = null) {
   const root = worktreePath || process.cwd();
@@ -2647,18 +2552,6 @@ export async function warmAtlasMergedToMainNow(opts = {}) {
   }
 }
 
-function isAbortLikeAtlasError(err) {
-  if (!err) return false;
-  const anyErr = /** @type {any} */ (err);
-  return anyErr.name === "AbortError"
-    || anyErr.code === "ABORT_ERR"
-    || anyErr.code === "DAEMON_ABORTED";
-}
-
-function shouldAutoRestageScip(config = {}) {
-  const policy = String(config?.scipRestagePolicy || "missing").trim().toLowerCase();
-  return shouldRunScipPhase(normalizeAtlasScipMode(config?.scipMode)) && (policy === "smart" || policy === "always");
-}
 
 export function reconcileAtlasDriftIfIdle(opts = {}) {
   const config = opts?.config || getAtlasIntegrationConfig();

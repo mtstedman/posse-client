@@ -1,3 +1,4 @@
+import { deepFreezeJson } from "../../format/functions/freeze-json.js";
 // @ts-check
 //
 // Monotonic consumer for Posse Remote tool capability decisions.
@@ -325,7 +326,7 @@ export function isInternalAtlasAction(value) {
 
 export function isToolAuthorizedByIssuedSurface(toolLike, issuedSurface = null) {
   const object = plainObject(toolLike);
-  const rawName = object ? object.name : toolLike;
+  (object ? object.name : toolLike);
   const specAccess = String(object?.access || "");
   const suite = entrySuite(toolLike, specAccess === "atlas" ? "atlas" : "tools");
   const tool = canonicalToolEntry(toolLike, suite);
@@ -575,15 +576,6 @@ export function isRegisteredRemoteToolSurface(value) {
   );
 }
 
-function deepFreezeJson(value) {
-  const clone = JSON.parse(JSON.stringify(value));
-  const freeze = (entry) => {
-    if (!entry || typeof entry !== "object" || Object.isFrozen(entry)) return entry;
-    for (const child of Object.values(entry)) freeze(child);
-    return Object.freeze(entry);
-  };
-  return freeze(clone);
-}
 
 export function deriveRemoteToolSurfaceNarrowing(authorityValue, candidateValue, opts = {}) {
   if (!isRegisteredRemoteToolSurface(authorityValue)) return null;

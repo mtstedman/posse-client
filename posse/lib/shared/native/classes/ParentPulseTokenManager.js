@@ -1,5 +1,6 @@
 // @ts-check
 
+import { validPulseEnvelope } from "../functions/pulse-envelope.js";
 import http from "node:http";
 import crypto from "node:crypto";
 
@@ -81,7 +82,7 @@ export class ParentPulseTokenManager {
     const route = String(requiredRoute || "").trim();
     const envelope = this._cache.get(route) || null;
     const grant = this._grants.get(route) || null;
-    if (!validEnvelope(envelope, route) || !validRouteGrant(grant, envelope)) {
+    if (!validPulseEnvelope(envelope, route) || !validRouteGrant(grant, envelope)) {
       if (envelope) this._cache.delete(route);
       if (grant) this._grants.delete(route);
       return null;
@@ -100,7 +101,7 @@ export class ParentPulseTokenManager {
 
   getHeartbeatGrant() {
     const live = [...this._grants.entries()]
-      .filter(([route, grant]) => validEnvelope(this._cache.get(route), route)
+      .filter(([route, grant]) => validPulseEnvelope(this._cache.get(route), route)
         && Number(grant?.expiresAt) > Math.floor(Date.now() / 1000));
     if (live.length === 0) return null;
     const expiresAt = Math.min(...live.map(([, grant]) => Number(grant.expiresAt)));
@@ -205,7 +206,7 @@ export class ParentPulseTokenManager {
             fail(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response contained an invalid capability grant"));
             return;
           }
-          if (!validEnvelope(envelope, route)) {
+          if (!validPulseEnvelope(envelope, route)) {
             fail(brokerError("POSSE_PARENT_PULSE_INVALID_RESPONSE", "parent pulse response did not contain the requested route grant"));
             return;
           }
@@ -238,19 +239,6 @@ export class ParentPulseTokenManager {
       req.end(body);
     });
   }
-}
-
-function validEnvelope(value, route) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  if (String(value.route || "") !== route) return false;
-  if (!String(value.token || "").trim() || !String(value.kid || "").trim()) return false;
-  const expiresAt = Number(value.expiresAt);
-  const refreshAfter = Number(value.refreshAfter);
-  return Number.isSafeInteger(expiresAt)
-    && Number.isSafeInteger(refreshAfter)
-    && refreshAfter > 0
-    && refreshAfter < expiresAt
-    && expiresAt > Math.floor(Date.now() / 1000);
 }
 
 function validRouteGrant(grant, envelope) {

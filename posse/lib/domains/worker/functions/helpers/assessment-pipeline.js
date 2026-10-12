@@ -1,3 +1,4 @@
+import { diffPorcelainEntries } from "../../../git/functions/porcelain-diff.js";
 import { authoritativeFinalReview, latestFinalReview } from "../../../assessment/functions/final-review-authority.js";
 import { reserveFinalReviewContinuation } from "../../../assessment/functions/final-review-continuation.js";
 // lib/domains/worker/functions/helpers/assessment-pipeline.js
@@ -6,23 +7,7 @@ import { reserveFinalReviewContinuation } from "../../../assessment/functions/fi
 
 import path from "path";
 import crypto from "crypto";
-import {
-  acquireAssessmentBarrier,
-  beginAttachedAssessmentAttempt,
-  completeAttempt,
-  createJob,
-  getArtifacts,
-  getAttempts,
-  getJob,
-  getWorkItem,
-  isLeaseValid,
-  logEvent,
-  setJobError,
-  setAssessmentLifecycle,
-  storeArtifact,
-  updateJobPayload,
-  updateJobStatus,
-} from "../../../queue/functions/index.js";
+import { acquireAssessmentBarrier, beginAttachedAssessmentAttempt, completeAttempt, createJob, getArtifacts, getAttempts, getJob, getWorkItem, isLeaseValid, logEvent, setJobError, setAssessmentLifecycle, storeArtifact, updateJobPayload, updateJobStatus } from "../../../queue/functions/index.js";
 import { getRecentArtifacts } from "../../../queue/functions/artifacts.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
@@ -33,103 +18,44 @@ import { recordObservation } from "../../../observability/functions/observations
 import { isArtifactMode, buildManifest, validateManifestAgainstContract } from "../../../artifacts/functions/index.js";
 import { harnessAssessorEffort, harnessAssessorProvider } from "./assessment-shared.js";
 import { getProviderBackoff } from "../../../providers/functions/provider.js";
-import {
-  attachAssessmentDiffContextAsync,
-  buildHandoffPacket,
-  composePromptRemoteAware,
-  handoff,
-  renderAtlasHandoffSections,
-} from "../../../handoff/functions/index.js";
-import {
-  isRetryableTerminalHandoffError,
-} from "../../../handoff/functions/agent-handoff.js";
+import { attachAssessmentDiffContextAsync, buildHandoffPacket, composePromptRemoteAware, handoff, renderAtlasHandoffSections } from "../../../handoff/functions/index.js";
+import { isRetryableTerminalHandoffError } from "../../../handoff/functions/agent-handoff.js";
 import { getAgentHandoffRecord } from "../../../handoff/functions/agent-handoff-records.js";
 import { refreshAndExtractInsights } from "./insights.js";
 import { renderBaselineSiblingRegression } from "./baseline-attribution.js";
 import { renderBaselineTestDebt } from "./baseline-test-debt.js";
 import { gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
 import { listIgnoredRepoPaths } from "../../../git/functions/ignored-paths.js";
-import {
-  snapshotAndResetDirtyWorktreeAsync,
-  stashDirtyWorktreeAsync,
-} from "../../../git/functions/worktree.js";
+import { snapshotAndResetDirtyWorktreeAsync, stashDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
 import { ASSESSABLE_JOB_TYPES, ASSESSMENT_LIFECYCLE, JOB_ASSESSOR_MODEL_VERDICTS } from "../../../../catalog/job.js";
 import { ASSESSMENT_VERDICT_OBSERVATION_TYPE } from "../../../../catalog/observation.js";
 import { AGENT_HANDOFF_PROFILES } from "../../../../catalog/handoff.js";
 import { PIXEL_VISUAL_EVIDENCE_TOOL_NAMES, UNSUCCESSFUL_VISUAL_TOOL_STATUSES } from "../../../../catalog/assessment.js";
 import { effectiveArtifactTaskMode } from "../../../providers/functions/execution-routing.js";
-import {
-  artifactOutputClaimsReusableComplete,
-  filterNewOrChangedManifestFiles,
-  materializeFallbackArtifactOutput,
-} from "./artifact-output.js";
+import { artifactOutputClaimsReusableComplete, filterNewOrChangedManifestFiles, materializeFallbackArtifactOutput } from "./artifact-output.js";
 import { scopedDeleteTargets } from "./mutation-guards.js";
-import {
-  sanitizeHumanQuestions,
-} from "./human-question-classifier.js";
-import {
-  buildWorkflowModeBlock,
-  getWorkItemWorkflowConfig,
-} from "../../../intake/functions/hints.js";
+import { sanitizeHumanQuestions } from "./human-question-classifier.js";
+import { buildWorkflowModeBlock, getWorkItemWorkflowConfig } from "../../../intake/functions/hints.js";
 import { isTestCollateralPath } from "../../../../shared/policies/functions/scope-auto-approval.js";
 import { processVerdict } from "./process-verdict.js";
 import { normalizeAssessorConfidence } from "./verdict-shared.js";
-import {
-  activeSiblingWriteLocks,
-  siblingLockSummary,
-} from "../../../queue/functions/sibling-locks.js";
+import { activeSiblingWriteLocks, siblingLockSummary } from "../../../queue/functions/sibling-locks.js";
 import { siblingJobScopeOwners, siblingOwnedWorktreePaths } from "../../../queue/functions/file-locks.js";
-import {
-  getAtlasWarmJobCompletion,
-  waitForAtlasWarmJobCompletion,
-} from "../../../atlas/classes/v2/PipelineHooks.js";
+import { getAtlasWarmJobCompletion, waitForAtlasWarmJobCompletion } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
 import { ASSESSMENT_FAILURE_CLASSES } from "../../../../catalog/human-input.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { runImmediateTransaction } from "../../../queue/functions/common.js";
-import {
-  persistPendingAssessmentFileRequests,
-  shouldDeferAssessmentToFileRequestContinuation,
-} from "./assessment-file-requests.js";
-import {
-  testRunScopeAttribution,
-  ensurePostChangeTestReceipt,
-  renderTestExecutionEvidence,
-  postChangeTestLogSummary,
-  testReceiptObservationDetail,
-} from "./test-execution-receipt.js";
-import {
-  buildAssessmentTaskBoundary,
-  classifySiblingOnlyAssessmentFailure,
-  recordAssessmentBoundaryEvent,
-  renderAssessmentTaskBoundary,
-} from "./assessment-task-boundary.js";
-import {
-  classifyIgnoredPathOnlyAssessmentFailure,
-  ignoredPathReviewVerdict,
-  recordAssessmentIgnoredPathEvent,
-  renderIgnoredPathCorrection,
-} from "./assessment-ignored-paths.js";
-import {
-  killShellCommandProcessTree as killShellCommandProcessTreeImpl,
-  runShellCommandAsync as runShellCommandAsyncImpl,
-} from "./assessment-runner.js";
-import {
-  assessorCallBudgetStatus,
-  getAssessorMaxToolCalls,
-  isAssessorParseRetryBudgetExceeded as assessorTokenBudgetStatus,
-  raiseAssessmentFallbackReadsForScope,
-} from "../execution/assessment-policy.js";
+import { persistPendingAssessmentFileRequests, shouldDeferAssessmentToFileRequestContinuation } from "./assessment-file-requests.js";
+import { testRunScopeAttribution, ensurePostChangeTestReceipt, renderTestExecutionEvidence, postChangeTestLogSummary, testReceiptObservationDetail } from "./test-execution-receipt.js";
+import { buildAssessmentTaskBoundary, classifySiblingOnlyAssessmentFailure, recordAssessmentBoundaryEvent, renderAssessmentTaskBoundary } from "./assessment-task-boundary.js";
+import { classifyIgnoredPathOnlyAssessmentFailure, ignoredPathReviewVerdict, recordAssessmentIgnoredPathEvent, renderIgnoredPathCorrection } from "./assessment-ignored-paths.js";
+import { killShellCommandProcessTree as killShellCommandProcessTreeImpl, runShellCommandAsync as runShellCommandAsyncImpl } from "./assessment-runner.js";
+import { assessorCallBudgetStatus, getAssessorMaxToolCalls, isAssessorParseRetryBudgetExceeded as assessorTokenBudgetStatus, raiseAssessmentFallbackReadsForScope } from "../execution/assessment-policy.js";
 import { ensureAssessmentScopedCheckEvidence } from "../../../assessment/functions/scoped-check-evidence.js";
-import {
-  assessmentWorktreeDirtySummary,
-  inspectAssessmentWorktreeReadiness,
-} from "./assessment-worktree-readiness.js";
-import {
-  ensureConfiguredVerification,
-  renderConfiguredVerificationEvidence,
-} from "./configured-verification.js";
+import { assessmentWorktreeDirtySummary, inspectAssessmentWorktreeReadiness } from "./assessment-worktree-readiness.js";
+import { ensureConfiguredVerification, renderConfiguredVerificationEvidence } from "./configured-verification.js";
 import { repairTestDependencies } from "./test-dependency-repair.js";
 import { isVerificationInfrastructureOutcome, verificationInfrastructureError } from "./verification-outcome.js";
 
@@ -141,16 +67,8 @@ export {
 } from "./assessment-task-boundary.js";
 import { workItemResearchRefsBlock } from "../../../research/functions/work-item-research-refs.js";
 import { buildAssessmentFileSnapshots } from "../../../assessment/functions/assessment-file-snapshots.js";
-import {
-  mergeUniquePaths,
-  findOutOfScopeCommittedFiles,
-  buildCommittedScopeViolationVerdict,
-  buildAssessmentProviderScope,
-} from "../../../assessment/functions/assessment-scope.js";
-import {
-  buildLocalAssessmentEvidence,
-  renderAssessmentDependencyDiffs,
-} from "../../../assessment/functions/assessment-evidence.js";
+import { mergeUniquePaths, findOutOfScopeCommittedFiles, buildCommittedScopeViolationVerdict, buildAssessmentProviderScope } from "../../../assessment/functions/assessment-scope.js";
+import { buildLocalAssessmentEvidence, renderAssessmentDependencyDiffs } from "../../../assessment/functions/assessment-evidence.js";
 
 export function taskAbAssessorTier(workItem) {
   let metadata = workItem?.metadata_json;
@@ -1809,30 +1727,8 @@ async function gitPorcelainZAsync(wtPath) {
   return gitExecAsync(["status", "--porcelain=v1", "-z"], wtPath, { trim: false });
 }
 
-function parsePorcelainZ(raw = "") {
-  const parts = String(raw || "").split("\0").filter(Boolean);
-  const entries = [];
-  for (let i = 0; i < parts.length; i++) {
-    const item = parts[i];
-    const status = item.slice(0, 2);
-    const filePath = item.slice(3);
-    let oldPath = null;
-    if ((status.includes("R") || status.includes("C")) && i + 1 < parts.length) {
-      oldPath = parts[++i];
-    }
-    entries.push({ status, path: filePath, old_path: oldPath });
-  }
-  return entries;
-}
 
-function porcelainEntryKey(entry) {
-  return `${entry.status}\0${entry.path || ""}\0${entry.old_path || ""}`;
-}
 
-function diffPorcelainEntries(beforeRaw, afterRaw) {
-  const beforeKeys = new Set(parsePorcelainZ(beforeRaw).map(porcelainEntryKey));
-  return parsePorcelainZ(afterRaw).filter((entry) => !beforeKeys.has(porcelainEntryKey(entry)));
-}
 
 export function shouldReuseUnchangedArtifactManifest({
   taskMode = "code",
@@ -2851,7 +2747,7 @@ export async function runPostExecutionAssessment(worker, {
       }
 
       const emitFn = (msg) => worker.emit(job.id, msg);
-      const { action, effectiveVerdict } = processVerdict(job, verdict, {
+      const { effectiveVerdict } = processVerdict(job, verdict, {
         emit: emitFn,
         autoApprove: worker.autoApprove,
         leaseToken,

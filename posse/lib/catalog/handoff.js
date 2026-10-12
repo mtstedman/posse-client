@@ -1,3 +1,4 @@
+import { readonlySet } from "./readonly-collections.js";
 // Canonical terminal-handoff vocabulary shared by schemas and runtime policy.
 import { DEV_MODE_ORDER } from "./dev-mode.js";
 import { JOB_MODEL_TIERS, JOB_REASONING_EFFORTS } from "./job.js";
@@ -81,7 +82,7 @@ export const AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS = Object.freeze({
 
 // Remote serves researcher_report_direct with the same researcher.report.v1
 // handoff and claim staging, so it is a report-only handoff profile too.
-const RESEARCHER_REPORT_PROMPT_PROFILES = new Set([
+const RESEARCHER_REPORT_PROMPT_PROFILES = readonlySet([
   "researcher_report",
   "researcher_report_tight",
   "researcher_report_direct",

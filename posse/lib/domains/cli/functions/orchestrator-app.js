@@ -67,59 +67,15 @@ import { getDb, closeDb } from "../../../shared/storage/functions/index.js";
 import { flushEventsNow } from "../../queue/functions/events.js";
 import { spawnSync } from "child_process";
 import { editorCommandLabel, parseEditorCommand, resolveEditorCommand } from "./editor.js";
-import { initArtifactRootsAsync, ensureArtifactDirs, wiScopeId, contextDir, isArtifactMode, getArtifactProtocol, getResolvedImageProtocol, artifactsDir, pruneEmptyArtifactDirsAsync } from "../../artifacts/functions/index.js";
-import {
-  createWorkItem,
-  getWorkItem,
-  listWorkItems,
-  updateWorkItemStatus,
-  updateWorkItemMetadata,
-  updateWorkItemResearchSkip,
-  setMergeState,
-  markWorkItemMergeFailed,
-  listJobs,
-  listJobsByWorkItem,
-  getJob,
-  getWorkItemJobStats,
-  createJob,
-  getEvents,
-  getEventsByWorkItem,
-  getArtifacts,
-  getArtifactsByWorkItem,
-  storeArtifact,
-  logEvent,
-  findRunnableJob,
-  getAgentCallStats,
-  listAgentCalls,
-  getAgentCallsByWorkItem,
-  getDependencies,
-  cancelWorkItemJobs,
-  addDependency,
-  skipJob,
-  refreshWorkItemStatus,
-  updateJobPayload,
-  cleanupRunningAgentCalls,
-  getSetting,
-  setSetting,
-  listSettings,
-  requeueWaitingHumanInputJobs,
-  findWriteLockConflict,
-  getJobWriteScope,
-  listActiveFileLocks,
-  requeueWorkItemAfterRejection,
-  getLiveSchedulerBlockMessage,
-} from "../../queue/functions/index.js";
+import { initArtifactRootsAsync, ensureArtifactDirs, wiScopeId, getResolvedImageProtocol, artifactsDir, pruneEmptyArtifactDirsAsync } from "../../artifacts/functions/index.js";
+import { createWorkItem, getWorkItem, listWorkItems, updateWorkItemStatus, setMergeState, markWorkItemMergeFailed, listJobs, listJobsByWorkItem, getWorkItemJobStats, createJob, getEvents, logEvent, getDependencies, getSetting, setSetting, listSettings, getLiveSchedulerBlockMessage } from "../../queue/functions/index.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
 import { LOCK_HOLDING_JOB_STATUSES } from "../../queue/functions/common.js";
 import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/reviewable.js";
-import {
-  jobIsBackgroundAtlasWarm,
-  jobLabel,
-  reviewVisibleJobs,
-} from "../../ui/functions/display/helpers/job-status.js";
+import { jobIsBackgroundAtlasWarm, jobLabel, reviewVisibleJobs } from "../../ui/functions/display/helpers/job-status.js";
 import { modelTierColor, statusColor, statusIcon } from "../../ui/functions/display/status-palette.js";
 import { computeJobProgressStats } from "../../ui/functions/display/helpers/job-status.js";
-import { roleBrandColor } from "../../ui/functions/display/helpers/brand.js";
+import "../../ui/functions/display/helpers/brand.js";
 import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { configureRunTelemetry } from "../../../shared/telemetry/functions/run-telemetry.js";
@@ -127,140 +83,45 @@ import { getDefaultTierModel } from "../../providers/functions/model-catalog.js"
 import { configureModelCatalogRuntimeWarnings } from "../../providers/functions/model-catalog-validate.js";
 import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider } from "../../providers/functions/execution-routing.js";
 import { providerRoleForJobType } from "../../providers/functions/roles.js";
-import {
-  commandResumesInterruptedPairing,
-  getCommandBootstrapPolicy,
-  isHelpCommand,
-  normalizeCommandName,
-  shouldRefreshContextAfterCommand,
-} from "./command-bootstrap-policy.js";
+import { commandResumesInterruptedPairing, getCommandBootstrapPolicy, isHelpCommand, normalizeCommandName, shouldRefreshContextAfterCommand } from "./command-bootstrap-policy.js";
 import { dispatchCommand } from "./dispatch.js";
 import { BOOT_GIT_PROBE_TIMEOUT_MS, createGitReadiness } from "./git-readiness.js";
 import { printCommandUsage, printCommandHelp, printGlobalHelp } from "./command-help.js";
-import {
-  getCommandPositionalArgs,
-  hasArgFlag,
-  hasIntakeHintFlags,
-  parseAutoMerge,
-  parseConcurrency,
-  parseScopeMode,
-  parseFlagValue,
-  parseIntakeHintsFromArgv,
-  parseModeFlagFromArgv,
-  parseResearchBudgetFromArgv,
-  parseSessionRecycleFlagFromArgv,
-  parseStallTimeout,
-  parseTierFlagFromArgv,
-  parseWorkItemIdsFlagFromArgv,
-  rejectUnknownFlags,
-  resolveResearchBudgetForDeepthink,
-} from "./flags.js";
-import {
-  defaultOutputModeForMode,
-  normalizeIterativeWorkflowModeChoice,
-} from "../../intake/functions/choices.js";
-import {
-  assertInputContextSelection,
-  mergeSuspectedDirsWithInputContexts,
-} from "../../intake/functions/input-contexts.js";
+import { getCommandPositionalArgs, hasArgFlag, hasIntakeHintFlags, parseAutoMerge, parseConcurrency, parseScopeMode, parseFlagValue, parseIntakeHintsFromArgv, parseModeFlagFromArgv, parseResearchBudgetFromArgv, parseSessionRecycleFlagFromArgv, parseStallTimeout, parseTierFlagFromArgv, parseWorkItemIdsFlagFromArgv, rejectUnknownFlags, resolveResearchBudgetForDeepthink } from "./flags.js";
+import { defaultOutputModeForMode, normalizeIterativeWorkflowModeChoice } from "../../intake/functions/choices.js";
+import { assertInputContextSelection, mergeSuspectedDirsWithInputContexts } from "../../intake/functions/input-contexts.js";
 import { inferWiMode, resolveWorkItemMode } from "../../intake/functions/mode-inference.js";
-import { researchBudgetMetadata, researchPayload } from "../../research/functions/payload.js";
+import { researchBudgetMetadata } from "../../research/functions/payload.js";
 import { buildRuntimeEnv } from "../../runtime/functions/paths.js";
 import { formatClientProvenance, resolveClientProvenance } from "../../runtime/functions/client-provenance.js";
 import { clearColdIndex as clearColdIndexImpl } from "./cold-index.js";
-import {
-  createReviewSession as createReviewSessionImpl,
-  createReviewSessionDeps as createReviewSessionDepsImpl,
-  createRunSessionDeps as createRunSessionDepsImpl,
-} from "./session-factories.js";
+import { createReviewSession as createReviewSessionImpl, createRunSessionDeps as createRunSessionDepsImpl } from "./session-factories.js";
 import { drainPostMergeAtlasWarmJobs } from "./post-merge-closeout.js";
 import { operationalRunJobs } from "./run-session.js";
 import { planQueuedWorkItemsUnlessStartupBlocked, selectQueuedWorkItemsToPlan } from "./queued-work-item-planning.js";
 import { recordStartupDirtyTreeBlock } from "../../git/functions/startup-dirty-tree-block.js";
-import {
-  classifyResearchForRouting as classifyResearchForRoutingImpl,
-  createInitialResearchOrPlanJob as createInitialResearchOrPlanJobImpl,
-} from "../../research/functions/intake-routing.js";
-import {
-  applyIterativeWorkflowProfile as applyIterativeWorkflowProfileImpl,
-  shouldUseRedTeamPlanForWorkItem as shouldUseRedTeamPlanForWorkItemImpl,
-  shouldPersistIterativeRedTeamPlan as shouldPersistIterativeRedTeamPlanImpl,
-  persistIterativeRedTeamPlanIfRequested as persistIterativeRedTeamPlanIfRequestedImpl,
-  spawnIterativeNextPass as spawnIterativeNextPassImpl,
-  processIterativeWrapUp as processIterativeWrapUpImpl,
-} from "../../planning/functions/orchestration.js";
-import {
-  ITERATIVE_WORKFLOW_PROFILES,
-  ITERATIVE_RELOOP_PROMPTS,
-  getIterativeWorkflowProfile,
-  getIterativeReloopPrompt,
-  parseWorkItemMetadata,
-  metadataRedTeamPlanningEnabled,
-  getIterativeState,
-  persistIterativeState,
-  isIterativeWorkItemActive,
-  isIterativeAwaitingLoopResolution,
-  isIterativeFinalized,
-  shouldAutoApproveIterativeWorkItem,
-  hasMergedHistory,
-  summarizeIterativeReasons,
-  iterativeFollowUpJobsAfter,
-  markIterativeFinished,
-} from "../../planning/functions/state.js";
-import {
-  ensurePosseRuntimeIgnoresAsync,
-  stagePosseRuntimeGitignoreForInitialCommit,
-} from "../../runtime/functions/ignore.js";
-import { runHook } from "../../git/functions/hooks.js";
-import {
-  formatPendingRecoveryStartupNotice,
-  refreshProjectContextAsync,
-} from "../../project/functions/context.js";
-import { ensureProjectMapAsync, ensureProjectMapRebuildHookAsync, getCachedProjectMap } from "../../project/functions/map.js";
-import { buildSyntheticResearchBrief, classifyResearchTask } from "../../research/functions/routing.js";
-import {
-  createResearchFanoutJobs,
-  getResearchFanoutMode,
-  logFanoutSkipped,
-} from "../../research/functions/fanout.js";
+import { classifyResearchForRouting as classifyResearchForRoutingImpl, createInitialResearchOrPlanJob as createInitialResearchOrPlanJobImpl } from "../../research/functions/intake-routing.js";
+import { applyIterativeWorkflowProfile as applyIterativeWorkflowProfileImpl, shouldUseRedTeamPlanForWorkItem as shouldUseRedTeamPlanForWorkItemImpl, persistIterativeRedTeamPlanIfRequested as persistIterativeRedTeamPlanIfRequestedImpl, processIterativeWrapUp as processIterativeWrapUpImpl } from "../../planning/functions/orchestration.js";
+import { ITERATIVE_WORKFLOW_PROFILES, getIterativeWorkflowProfile, parseWorkItemMetadata, isIterativeWorkItemActive, shouldAutoApproveIterativeWorkItem, hasMergedHistory } from "../../planning/functions/state.js";
+import { ensurePosseRuntimeIgnoresAsync, stagePosseRuntimeGitignoreForInitialCommit } from "../../runtime/functions/ignore.js";
+import "../../git/functions/hooks.js";
+import { formatPendingRecoveryStartupNotice, refreshProjectContextAsync } from "../../project/functions/context.js";
+import { ensureProjectMapAsync, ensureProjectMapRebuildHookAsync } from "../../project/functions/map.js";
+import "../../research/functions/routing.js";
+import "../../research/functions/fanout.js";
 import { closeLog, log } from "../../../shared/telemetry/functions/logging/logger.js";
-import { closeObservationLog, getRecentToolInvocations, getToolInvocationCountsByJob } from "../../observability/functions/observations.js";
-import { closePromptLog, readRecentPrompts } from "../../../shared/telemetry/functions/logging/prompt-log.js";
+import { closeObservationLog } from "../../observability/functions/observations.js";
+import { closePromptLog } from "../../../shared/telemetry/functions/logging/prompt-log.js";
 import { loadRemotePromptBundle } from "../../remote/functions/prompt-bundle.js";
-import { jobsNeedGitWorktree } from "../../git/functions/policy.js";
-import {
-  adminDeleteBranchPreservingTip,
-  adminGitExec,
-  adminGitExecAsync,
-  adminPreserveDirtyWorktreeSnapshot,
-  adminWorktreePath,
-  adminWorktreeRoot,
-  findAdminLegacyWorktree,
-} from "../../git/functions/admin-git.js";
+import "../../git/functions/policy.js";
+import { adminDeleteBranchPreservingTip, adminGitExec, adminGitExecAsync, adminPreserveDirtyWorktreeSnapshot, adminWorktreePath, adminWorktreeRoot, findAdminLegacyWorktree } from "../../git/functions/admin-git.js";
 import { resolveTargetBranch, resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
 import { mergeFailureDiagnostics } from "../../git/functions/merge-failure-diagnostics.js";
 import { hasExplicitOneshotIntent, normalizeIntakeHints, rebaseIntakeHintsForMode } from "../../intake/functions/hints.js";
-import {
-  collectHandledSuggestionKeys,
-  createApprovedSuggestionFollowUp,
-  suggestionDecisionEventJson,
-  suggestionDevJobDecision,
-  suggestionReviewKey,
-} from "../../planning/functions/suggestions.js";
-import { approvePlan, rejectPlan, respawnAfterRejection, findPendingGate, isPlanApprovalEnabled, setPlanApprovalOverrideForRun } from "../../planning/functions/plan-approval.js";
-import {
-  createRedTeamPlanChain,
-  RED_TEAM_PLANNING_MODE,
-  redTeamPlanningPayload,
-} from "../../planning/functions/red-team-plan.js";
-import {
-  getResearchBudget,
-  isResearchBudgetDeep,
-  maxResearchBudget,
-  normalizeResearchBudget,
-  researchBudgetFromDeepthink,
-  researchBudgetToReasoningEffort,
-} from "../../../shared/policies/functions/role-utils.js";
+import "../../planning/functions/suggestions.js";
+import { approvePlan, rejectPlan, respawnAfterRejection, findPendingGate, setPlanApprovalOverrideForRun } from "../../planning/functions/plan-approval.js";
+import "../../planning/functions/red-team-plan.js";
+import { getResearchBudget, isResearchBudgetDeep, maxResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { ask, askMultiline, askSelectorChoice } from "./input-prompts.js";
 import { confirmManualMerge, parseMergeCommandArgs } from "./merge-command.js";
@@ -801,9 +662,7 @@ function shouldUseRedTeamPlanForWorkItem(wi) {
   return shouldUseRedTeamPlanForWorkItemImpl(wi, { redTeamPlan: RED_TEAM_PLAN, iterateRedTeam: ITERATE_RED_TEAM_PLAN });
 }
 
-function shouldPersistIterativeRedTeamPlan() {
-  return shouldPersistIterativeRedTeamPlanImpl({ redTeamPlan: RED_TEAM_PLAN, iterateRedTeam: ITERATE_RED_TEAM_PLAN });
-}
+
 
 function persistIterativeRedTeamPlanIfRequested(wi) {
   return persistIterativeRedTeamPlanIfRequestedImpl(wi, { redTeamPlan: RED_TEAM_PLAN, iterateRedTeam: ITERATE_RED_TEAM_PLAN });
@@ -817,13 +676,7 @@ function createInitialResearchOrPlanJob(workItem, opts = {}) {
   return createInitialResearchOrPlanJobImpl(workItem, { projectDir: PROJECT_DIR, ...opts });
 }
 
-function spawnIterativeNextPass(wi, state) {
-  return spawnIterativeNextPassImpl(wi, state, {
-    projectDir: PROJECT_DIR,
-    redTeamPlan: RED_TEAM_PLAN,
-    iterateRedTeam: ITERATE_RED_TEAM_PLAN,
-  });
-}
+
 
 async function processIterativeWrapUp(opts = {}) {
   const helpers = await getGitWorkflowHelpers();
@@ -1593,9 +1446,7 @@ function sessionBootDeps() {
   };
 }
 
-async function createReviewSessionDeps() {
-  return createReviewSessionDepsImpl(sessionBootDeps());
-}
+
 
 async function createReviewSession() {
   return createReviewSessionImpl(sessionBootDeps());

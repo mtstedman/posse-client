@@ -1,3 +1,4 @@
+import { readonlySet } from "./readonly-collections.js";
 export const CONTEXT_CHARS_PER_TOKEN_ESTIMATE = 4;
 
 export const CONTEXT_FETCH_REF_DEFAULT_LIMIT_CHARS = 8000;
@@ -188,5 +189,5 @@ export const CONTEXT_TRIM_CLASSES = Object.freeze([
   "aged_relevant",
 ]);
 
-export const CONTEXT_TRIM_CLASS_SET = new Set(CONTEXT_TRIM_CLASSES);
+export const CONTEXT_TRIM_CLASS_SET = readonlySet(CONTEXT_TRIM_CLASSES);
 export const CONTEXT_TRIM_CLASS_LIST_SQL = CONTEXT_TRIM_CLASSES.map((value) => `'${value}'`).join(",");

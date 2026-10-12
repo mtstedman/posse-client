@@ -1,7 +1,7 @@
 import readline from "node:readline/promises";
 import fs from "node:fs";
 
-import { AgentDefinitionStore } from "../classes/AgentDefinitionStore.js";
+import "../classes/AgentDefinitionStore.js";
 import { AgentRuntime } from "../classes/AgentRuntime.js";
 import { runRegisteredAdminCli } from "./registered-agent-admin-cli.js";
 

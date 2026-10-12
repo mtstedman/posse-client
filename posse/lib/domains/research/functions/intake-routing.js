@@ -12,46 +12,21 @@ import { getDefaultModelTierForRole, getProviderPoolForRole, roleExecutionForBud
 import fs from "node:fs";
 import path from "path";
 
-import {
-  createJob,
-  getWorkItem,
-  logEvent,
-  refreshWorkItemStatus,
-  storeArtifact,
-  updateWorkItemMetadata,
-  updateWorkItemResearchSkip,
-} from "../../queue/functions/index.js";
+import { createJob, logEvent, refreshWorkItemStatus, storeArtifact, updateWorkItemMetadata, updateWorkItemResearchSkip } from "../../queue/functions/index.js";
 import { ensureProjectMap, getCachedProjectMap } from "../../project/functions/map.js";
 import { gitExec } from "../../git/functions/utils.js";
 import { parseWorkItemMetadata } from "../../planning/functions/state.js";
 import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
 import { buildSyntheticResearchBrief, classifyResearchTask } from "./routing.js";
 import { buildOneshotScopeSelector } from "./oneshot-scope-selection.js";
-import {
-  evaluateScopedContractDirectEligibility,
-  evaluateOneshotRequestEligibility,
-  isOneshotRiskyTargetPath,
-  normalizeCandidatePath,
-  oneshotPathCorroboration,
-  oneshotTargetRisk,
-  pathTokenSets,
-  tokenizeForPathMatch,
-} from "./oneshot-policy.js";
-import {
-  createResearchFanoutJobs,
-  getResearchFanoutMode,
-  logFanoutSkipped,
-} from "./fanout.js";
+import { evaluateScopedContractDirectEligibility, evaluateOneshotRequestEligibility, isOneshotRiskyTargetPath, normalizeCandidatePath, oneshotPathCorroboration, oneshotTargetRisk, pathTokenSets, tokenizeForPathMatch } from "./oneshot-policy.js";
+import { createResearchFanoutJobs, getResearchFanoutMode, logFanoutSkipped } from "./fanout.js";
 import { createRedTeamPlanChain, redTeamPlanningPayload } from "../../planning/functions/red-team-plan.js";
 import { isPlanApprovalEnabled } from "../../planning/functions/plan-approval.js";
 import { classifyCreateFileKind } from "../../planning/functions/plan-routing.js";
 import { researchPayload } from "./payload.js";
 import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
-import {
-  normalizeResearchBudget,
-  resolveResearchBudgetForRouting,
-  stepModelTier,
-} from "../../../shared/policies/functions/role-utils.js";
+import { normalizeResearchBudget, resolveResearchBudgetForRouting, stepModelTier } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 

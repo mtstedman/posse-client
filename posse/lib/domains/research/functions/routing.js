@@ -1,16 +1,8 @@
+import { WEB_VENDOR_HINTS, FILE_MENTION_RE } from "../../../catalog/research-routing.js";
 import { normalizeResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { slugify } from "../../../shared/format/functions/slug.js";
 import { hasExplicitOneshotIntent } from "../../intake/functions/hints.js";
-import {
-  evaluateScopedContractDirectEligibility,
-  ONESHOT_AMBIGUOUS_SIGNAL_RE as AMBIGUOUS_RE,
-  ONESHOT_BROAD_SCOPE_SIGNAL_RE as BROAD_SCOPE_RE,
-  ONESHOT_COMPLEX_SIGNAL_RE as COMPLEX_RE,
-  ONESHOT_FORMAT_SWEEP_SIGNAL_RE as FORMAT_RE,
-  ONESHOT_LOW_BLAST_SCOPE_RE as LOW_BLAST_SCOPE_RE,
-  ONESHOT_RENAME_SIGNAL_RE as RENAME_RE,
-  evaluateOneshotRequestEligibility,
-} from "./oneshot-policy.js";
+import { evaluateScopedContractDirectEligibility, ONESHOT_AMBIGUOUS_SIGNAL_RE as AMBIGUOUS_RE, ONESHOT_BROAD_SCOPE_SIGNAL_RE as BROAD_SCOPE_RE, ONESHOT_COMPLEX_SIGNAL_RE as COMPLEX_RE, ONESHOT_FORMAT_SWEEP_SIGNAL_RE as FORMAT_RE, ONESHOT_LOW_BLAST_SCOPE_RE as LOW_BLAST_SCOPE_RE, ONESHOT_RENAME_SIGNAL_RE as RENAME_RE, evaluateOneshotRequestEligibility } from "./oneshot-policy.js";
 
 const SIMPLE_NO_RESEARCH_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|rename|renaming|copy\s*edit|docs?\s+fix|formatting|whitespace)\b/i;
 const ONESHOT_SIMPLE_RE = /\b(?:typo|spelling|comment\s+fix|comment-only|copy\s*edit|docs?\s+fix|whitespace)\b/i;
@@ -35,52 +27,8 @@ const WEB_LOOKUP_INTENT_RE = /\b(?:browse|website|webpage|online|internet|docume
 const DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+(?:ai|app|cloud|co|com|dev|edu|gov|io|net|org)\b/gi;
 const LOCAL_REPOSITORY_SCOPE_RE = /\b(?:this|current|local|our)\s+(?:(?:[a-z0-9_.-]+)\s+){0,2}(?:codebase|project|repo(?:sitory)?|checkout|(?:working|source)\s+tree)\b|\b(?:codebase|project|repo(?:sitory)?|checkout|(?:working|source)\s+tree)\s+(?:implementation|source)\b/i;
 
-const WEB_VENDOR_HINTS = {
-  anthropic: ["docs.anthropic.com", "anthropic.com"],
-  aws: ["docs.aws.amazon.com", "aws.amazon.com"],
-  azure: ["learn.microsoft.com", "azure.microsoft.com"],
-  cloudflare: ["developers.cloudflare.com", "cloudflare.com"],
-  datadog: ["docs.datadoghq.com", "datadoghq.com"],
-  google: ["cloud.google.com", "developers.google.com"],
-  grok: ["docs.x.ai", "x.ai"],
-  openai: ["platform.openai.com", "openai.com"],
-  opentelemetry: ["opentelemetry.io"],
-  prometheus: ["prometheus.io"],
-  redis: ["redis.io"],
-  sendgrid: ["docs.sendgrid.com", "sendgrid.com"],
-  shopify: ["shopify.dev", "shopify.com"],
-  stripe: ["docs.stripe.com", "stripe.com"],
-  taxjar: ["developers.taxjar.com", "taxjar.com"],
-};
 
-const FILE_EXTENSIONS = [
-  "cjs",
-  "css",
-  "go",
-  "html",
-  "java",
-  "js",
-  "json",
-  "jsx",
-  "md",
-  "mjs",
-  "php",
-  "py",
-  "rb",
-  "rs",
-  "sh",
-  "sql",
-  "ts",
-  "tsx",
-  "toml",
-  "yaml",
-  "yml",
-];
 
-const FILE_MENTION_RE = new RegExp(
-  `(?:^|[\\s\`"'(\\[])((?:\\.{1,2}[\\\\/])?(?:[A-Za-z0-9_.-]+[\\\\/])*[A-Za-z0-9_.-]+\\.(?:${FILE_EXTENSIONS.join("|")}))(?=$|\\.(?=\\s|$)|[^A-Za-z0-9_.-])`,
-  "gi",
-);
 
 function normalizeText(value) {
   return String(value || "").replace(/\r\n/g, "\n").trim();

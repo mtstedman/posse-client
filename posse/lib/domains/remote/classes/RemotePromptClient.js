@@ -1,3 +1,4 @@
+import { deepFreezeJson } from "../../../shared/format/functions/freeze-json.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import {
   REMOTE_CATALOG_READ_ROUTE,
@@ -30,15 +31,6 @@ const AGENT_FLOW_AUTH = new HeartbeatAuthManager({
   developmentMode: true,
 });
 
-function deepFreezeJson(value) {
-  const clone = JSON.parse(JSON.stringify(value));
-  const freeze = (entry) => {
-    if (!entry || typeof entry !== "object" || Object.isFrozen(entry)) return entry;
-    for (const child of Object.values(entry)) freeze(child);
-    return Object.freeze(entry);
-  };
-  return freeze(clone);
-}
 
 export function isRemotePromptClientIssuance(value) {
   return !!value && typeof value === "object" && TRUSTED_COMPILE_ISSUANCES.has(value);

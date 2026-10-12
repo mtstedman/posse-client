@@ -1,3 +1,4 @@
+import { FUZZY_SCAN_SKIP_DIRS } from "../../../catalog/scope-discovery.js";
 import fs from "node:fs";
 import path from "node:path";
 import { adminGitExec } from "../../git/functions/admin-git-exec.js";
@@ -222,7 +223,7 @@ export function validatePlannerPacketFileKinds(packet, projectDir) {
 
 const FUZZY_SCAN_MAX_ENTRIES = 40000;
 const FUZZY_SCAN_MAX_DEPTH = 10;
-const FUZZY_SCAN_SKIP_DIRS = new Set([".git", "node_modules", ".posse", "dist", "build", "target", "vendor", ".cache"]);
+
 
 // Files in the checkout that share the requested path's basename. Bounded
 // walk; a repository too large to scan simply yields no fuzzy match.

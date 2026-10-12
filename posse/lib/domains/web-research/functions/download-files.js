@@ -1,3 +1,5 @@
+import { removeEmptyDirectories } from "../../../shared/platform/functions/transactional-directories.js";
+import { firstMissingAncestor } from "../../../shared/platform/functions/transactional-directories.js";
 // @ts-check
 //
 // download_file: the artificer's scoped lane for external files. The harness
@@ -263,31 +265,6 @@ function createByteBudget(jobBytesUsed) {
   };
 }
 
-function firstMissingAncestor(directory) {
-  let missing = null;
-  let cursor = directory;
-  while (!fs.existsSync(cursor)) {
-    missing = cursor;
-    const parent = path.dirname(cursor);
-    if (parent === cursor) break;
-    cursor = parent;
-  }
-  return missing;
-}
-
-function removeEmptyDirectories(directory, stopAt) {
-  if (!stopAt) return;
-  let cursor = directory;
-  for (;;) {
-    try {
-      fs.rmdirSync(cursor);
-    } catch {
-      return;
-    }
-    if (cursor === stopAt) return;
-    cursor = path.dirname(cursor);
-  }
-}
 
 /**
  * Download one prepared item. Throws ItemError with a model-visible reason.

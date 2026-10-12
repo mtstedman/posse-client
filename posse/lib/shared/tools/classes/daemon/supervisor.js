@@ -23,12 +23,8 @@
 // thread-local daemons deduped, and the MAIN thread's shutdownAll ledger sweep
 // covers every thread's hosts because the ledger file is per-PROCESS.
 
-import { Daemon } from "./Daemon.js";
-import {
-  listOwnDaemonSpawns,
-  reapOwnDaemonSpawns,
-  waitForOwnDaemonLedgerIdentityHydration,
-} from "./process-ledger.js";
+/** @typedef {import("./Daemon.js").Daemon} Daemon */
+import { listOwnDaemonSpawns, reapOwnDaemonSpawns, waitForOwnDaemonLedgerIdentityHydration } from "./process-ledger.js";
 import { appendRunTelemetry } from "../../../telemetry/functions/run-telemetry.js";
 
 const DEFAULT_SHUTDOWN_GRACE_MS = 2_000;

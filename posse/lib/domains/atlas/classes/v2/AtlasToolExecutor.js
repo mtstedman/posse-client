@@ -1,3 +1,4 @@
+import { stripAtlasPrefix } from "../../../../shared/tools/functions/atlas-tool-name.js";
 // @ts-check
 //
 // Central ATLAS tool execution coordinator. Protocol layers (MCP, embedded
@@ -552,12 +553,6 @@ function withDispatchWaitingMarker(value) {
   };
 }
 
-function stripAtlasPrefix(name = "") {
-  const raw = String(name || "").trim();
-  if (raw.startsWith("atlas.")) return raw.slice("atlas.".length);
-  if (raw.startsWith("atlas_")) return raw.slice("atlas_".length).replace(/_/g, ".");
-  return raw;
-}
 
 function resolveAtlasAction(toolName = "") {
   const stripped = stripAtlasPrefix(toolName);

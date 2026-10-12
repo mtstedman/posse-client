@@ -1,3 +1,4 @@
+import { normalizeJsonText } from "../../../shared/format/functions/json-text.js";
 // Durable operator/agent interaction channel used by Monitor Agents.
 //
 // A nudge is durable guidance scoped to a job. Feedback pending before a
@@ -38,18 +39,6 @@ function normalizePositiveInt(value, fallback = null) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function normalizeJsonText(value) {
-  if (value == null) return null;
-  if (typeof value === "string") {
-    try {
-      JSON.parse(value);
-      return value;
-    } catch {
-      return JSON.stringify(value);
-    }
-  }
-  return JSON.stringify(value);
-}
 
 function metadataObject(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) return value;
@@ -835,6 +824,8 @@ export function getOperatorFeedbackForJob({
  * Claim feedback for automatic attachment to one tool result. Unlike the
  * recovery getter, this returns each pending item at most once per attempt so
  * parallel/batched tool results do not repeat the same operator message.
+ * @param {{job_id?: number|string, attempt_id?: number|null,
+ * agent_call_id?: number|null, limit?: number}} [options]
  */
 export function takeOperatorFeedbackDeliveryForToolResult({
   job_id,

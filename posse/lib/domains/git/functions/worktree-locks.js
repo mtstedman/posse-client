@@ -1,3 +1,4 @@
+import { isProcessAlive } from "../../../shared/platform/functions/process-liveness.js";
 import { threadLifetimeRegistry } from "../../../shared/concurrency/classes/ThreadLifetimeRegistry.js";
 // File-based worktree locks. The same lock file is used to gate concurrent
 // worktree mutations from inside the same machine — both within one Posse
@@ -119,18 +120,6 @@ function resolveWorktreeLockWaitMs(waitMs = null) {
   return WORKTREE_LOCK_WAIT_MS;
 }
 
-function isProcessAlive(pid) {
-  const numericPid = Number(pid);
-  if (!Number.isInteger(numericPid) || numericPid <= 0) return null;
-  try {
-    process.kill(numericPid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "ESRCH") return false;
-    if (error?.code === "EPERM") return true;
-    return null;
-  }
-}
 
 function reclaimWorktreeLockByAge({ ownerCreatedAtMs, ownerToken, staleMs, stat }) {
   const referenceMs = ownerCreatedAtMs ?? Number(stat?.mtimeMs || 0);

@@ -1,8 +1,9 @@
+import { PROVIDER_CAPABILITIES } from "../../../../catalog/provider-capabilities.js";
+import { readModelSetting } from "../shared/setting-read.js";
 // Claude provider prompt projection and Rust dispatch boundary.
 import crypto from "node:crypto";
 import path from "path";
-import { MCP_TOOL_DEADLINE_MODES } from "../../../../catalog/provider.js";
-import { getSetting } from "../../../queue/functions/index.js";
+import "../../../queue/functions/index.js";
 import { appendExecutionTools, buildExecutionContract, renderExecutionContractBlock, renderProviderPromptContracts } from "../../../../shared/tools/functions/contract.js";
 import { issuedToolSurfaceForProviderPolicy } from "../../../../shared/tools/functions/issued-tool-policy.js";
 import { buildMcpAtlasSurfaceToolDescriptors, buildSurfaceNameMap } from "../../../../shared/tools/functions/mcp-surface.js";
@@ -29,12 +30,7 @@ export { __testClassifyClaudeCliFailure, getClaudeReadiness, getUsageSummary, is
 
 // ─── Capabilities ───────────────────────────────────────────────────────────
 
-export const capabilities = Object.freeze({
-  images: false,
-  sessionResume: true,
-  toolAttachment: "mcp",
-  mcpToolDeadline: MCP_TOOL_DEADLINE_MODES.SERVER_CONFIG,
-});
+export const capabilities = PROVIDER_CAPABILITIES["claude"];
 
 // ─── Model Tier Config ──────────────────────────────────────────────────────
 
@@ -61,14 +57,6 @@ export const MODEL_TIERS = {
   },
 };
 
-function readModelSetting(key) {
-  try {
-    const value = getSetting(key);
-    return value && String(value).trim() ? String(value).trim() : null;
-  } catch {
-    return null;
-  }
-}
 
 function getModelOverride() {
   return readModelSetting("claude_model") || null;

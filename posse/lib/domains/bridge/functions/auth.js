@@ -2,19 +2,9 @@ import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
-import {
-  BRIDGE_HEALTH_PROOF_CONTEXT,
-  BRIDGE_PORT_SCAN_END,
-  BRIDGE_PORT_SCAN_START,
-} from "../../../catalog/bridge.js";
+import { BRIDGE_HEALTH_PROOF_CONTEXT } from "../../../catalog/bridge.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
-import {
-  claimAccountSettingIfAbsent,
-  getAccountRepoSetting,
-  getAccountSetting,
-  setAccountRepoSetting,
-  setAccountSetting,
-} from "../../settings/functions/account-settings.js";
+import { claimAccountSettingIfAbsent, getAccountRepoSetting, getAccountSetting, setAccountRepoSetting, setAccountSetting } from "../../settings/functions/account-settings.js";
 import { getDefaultAccountSettings } from "../../settings/classes/AccountSettings.js";
 
 const TOKEN_BYTES = 32;

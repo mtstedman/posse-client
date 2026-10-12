@@ -1,3 +1,6 @@
+import { GIT_HOOK_BINARY_EXTENSIONS as BINARY_EXTENSIONS } from "../../../catalog/files.js";
+import { readSettingBool } from "../../settings/functions/safe-setting-read.js";
+import { readSettingText } from "../../settings/functions/safe-setting-read.js";
 // lib/domains/git/functions/hooks.js — deterministic git safety gates
 //
 // Each hook is a pure function: (context) => { ok: boolean, output: string }
@@ -11,17 +14,10 @@
 import fs from "fs";
 import path from "path";
 import { execFile, execFileSync } from "child_process";
-import { getSetting } from "../../queue/functions/index.js";
+import "../../queue/functions/index.js";
 import { resolveVerificationPolicy } from "../../settings/functions/verification-policy.js";
 import { snapshotPublishingPushConfigs, snapshotPublishingPushConfigsAsync } from "./push-guard.js";
-import {
-  gitExec,
-  gitExecAsync,
-  gitExecBuffer,
-  gitExecBufferAsync,
-  isGitCaptureLimitError,
-  isGitCommandFailure,
-} from "./utils.js";
+import { gitExec, gitExecAsync, gitExecBuffer, gitExecBufferAsync, isGitCaptureLimitError, isGitCommandFailure } from "./utils.js";
 import { GIT_CAPTURE_MAX_BYTES, GIT_NATIVE_MAX_CAPTURE_BYTES } from "../../../catalog/binary.js";
 import { SECRET_PATTERNS } from "../../../shared/telemetry/functions/logging/secret-patterns.js";
 import { resolvePathWithin } from "../../runtime/functions/fs-safety.js";
@@ -187,22 +183,6 @@ function execFileText(command, args, {
   });
 }
 
-function readSettingText(key, projectDir = null) {
-  try {
-    const value = getSetting(key, projectDir ? { projectDir } : {});
-    return value == null ? "" : String(value).trim();
-  } catch {
-    return "";
-  }
-}
-
-function readSettingBool(key, fallback = false) {
-  const value = readSettingText(key).toLowerCase();
-  if (!value) return fallback;
-  if (["1", "true", "yes", "on"].includes(value)) return true;
-  if (["0", "false", "no", "off"].includes(value)) return false;
-  return fallback;
-}
 
 // ─── Hook runner ────────────────────────────────────────────────────────────
 
@@ -393,14 +373,7 @@ export function __testRunHookShellCommandAsync(command, opts = {}) {
 // Scans staged files for leaked credentials before commit.
 // ctx: { cwd: string, paths?: string[] }
 //
-const BINARY_EXTENSIONS = new Set([
-  ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp",
-  ".woff", ".woff2", ".ttf", ".eot", ".otf",
-  ".mp4", ".mp3", ".wav", ".ogg", ".webm",
-  ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
-  ".pdf", ".doc", ".docx", ".xls", ".xlsx",
-  ".lock", ".min.js", ".min.css",
-]);
+
 
 // Shared secrets-scan evaluators: which files scan, how a file's content is
 // judged, and how findings render live once — the twins keep only the git

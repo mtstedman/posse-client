@@ -1,10 +1,12 @@
+import { MAX_SCOPES, MAX_GRANT_BYTES, SCOPE_RE } from "../../../catalog/native-auth.js";
+import { deepFreeze } from "../../format/functions/deep-freeze.js";
 // @ts-check
 
+import { validPulseEnvelope } from "../functions/pulse-envelope.js";
 import { CAPABILITY_HANDSHAKE_PROTOCOL } from "../../permissions/classes/CapabilityHandshakeManager.js";
 
-const MAX_SCOPES = 32;
-const MAX_GRANT_BYTES = 256 * 1024;
-const SCOPE_RE = /^[A-Za-z0-9._:/-]{1,160}$/;
+
+
 
 /**
  * Owns native service-door keys and their in-flight mint promises.
@@ -58,7 +60,7 @@ export class NativeAuthHandshake {
     ]));
     const pulses = {};
     for (const [route, value] of entries) {
-      if (!validPulse(value, route)) {
+      if (!validPulseEnvelope(value, route)) {
         throw handshakeError(
           "POSSE_NATIVE_HEARTBEAT_UNAVAILABLE",
           `native service key is unavailable for route ${route}`,
@@ -120,24 +122,6 @@ function buildGrant(request, pulses) {
   return deepFreeze(grant);
 }
 
-function validPulse(value, route) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  if (String(value.route || "") !== route) return false;
-  if (!String(value.token || "").trim() || !String(value.kid || "").trim()) return false;
-  const expiresAt = Number(value.expiresAt);
-  const refreshAfter = Number(value.refreshAfter);
-  return Number.isSafeInteger(expiresAt)
-    && Number.isSafeInteger(refreshAfter)
-    && refreshAfter > 0
-    && refreshAfter < expiresAt
-    && expiresAt > Math.floor(Date.now() / 1000);
-}
-
-function deepFreeze(value) {
-  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
-  for (const child of Object.values(value)) deepFreeze(child);
-  return Object.freeze(value);
-}
 
 function handshakeError(code, message) {
   const error = /** @type {Error & { code: string }} */ (new Error(message));

@@ -1,3 +1,4 @@
+import { readonlySet } from "./readonly-collections.js";
 // Native-binary catalogue.
 //
 // Authoritative registry for the Rust-compiled helper binaries Posse ships
@@ -136,10 +137,10 @@ export const REMOTE_MODEL_PACKAGE_DOWNLOAD_METHOD = "remote.modelPackageDownload
 // Folder + manifest keys. These are OUR canonical os/arch tokens — distinct
 // from node's process.platform / process.arch, which the maps below translate.
 export const BINARY_OS_VALUES = Object.freeze(["windows", "macos", "linux"]);
-export const VALID_BINARY_OS = new Set(BINARY_OS_VALUES);
+export const VALID_BINARY_OS = readonlySet(BINARY_OS_VALUES);
 
 export const BINARY_ARCH_VALUES = Object.freeze(["x64", "arm64"]);
-export const VALID_BINARY_ARCH = new Set(BINARY_ARCH_VALUES);
+export const VALID_BINARY_ARCH = readonlySet(BINARY_ARCH_VALUES);
 
 // process.platform -> our os token.
 export const OS_BY_NODE_PLATFORM = Object.freeze({
@@ -252,11 +253,11 @@ export function nativeWorkerMaxRequestBytes(name) {
 // enough to propagate it to pull/reconcile loops; there is no second name list
 // to remember to update.
 export const BINARY_NAMES = Object.freeze(Object.keys(NATIVE_BINARIES));
-export const VALID_BINARY_NAMES = new Set(BINARY_NAMES);
+export const VALID_BINARY_NAMES = readonlySet(BINARY_NAMES);
 export const BINARY_PACKAGE_NAMES = Object.freeze(
   BINARY_NAMES.map((name) => NATIVE_BINARIES[name].package),
 );
-export const VALID_BINARY_PACKAGE_NAMES = new Set(BINARY_PACKAGE_NAMES);
+export const VALID_BINARY_PACKAGE_NAMES = readonlySet(BINARY_PACKAGE_NAMES);
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

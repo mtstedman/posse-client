@@ -8,6 +8,7 @@ import {
   isPushOfferJob,
 } from "../../../../queue/functions/common.js";
 import {
+  ACTIVE_LEASE_STATUSES,
   MUTATING_JOB_TYPES,
   QUEUE_LOCKING_JOB_TYPES,
   jobTypeIsNonCompletionBlocking,
@@ -175,7 +176,7 @@ export function workItemDisplayStatus(wi, jobs = []) {
   ));
   if (status !== "canceled" && activeJobs.length > 0) {
     if (hasAnswerableHumanGate) return "waiting_on_human";
-    if (activeJobs.some((job) => ["running", "leased", "awaiting_assessment"].includes(job.status))) return "running";
+    if (activeJobs.some((job) => ACTIVE_LEASE_STATUSES.includes(job.status))) return "running";
     if (activeJobs.some((job) => job.status === "waiting_on_review")) return "waiting_on_review";
     if (activeJobs.some((job) => job.status === "blocked")) return "blocked";
     if (activeJobs.some((job) => job.status === "queued")) {

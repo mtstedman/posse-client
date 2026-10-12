@@ -1,3 +1,4 @@
+import { normalizeObservationRow, observationSortValue, mergeObservationRows, normalizeJsonText } from "./observation-row-projection.js";
 import { stripHashRefSurfaceSuffix } from "../../../shared/tools/functions/ref-surface.js";
 import { AsyncLocalStorage } from "async_hooks";
 import fs from "fs";
@@ -14,18 +15,9 @@ import { getRuntimeLogDir } from "../../runtime/functions/paths.js";
 import { pruneTelemetryTableToTail } from "../../../shared/telemetry/functions/db-tail.js";
 import { registerTransactionLifecycleHooks } from "../../queue/functions/common.js";
 import { appendRunTelemetry, getRunTelemetryId, getRunTelemetryStartedAt, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
-import {
-  isResearchAtlasCitationFetchAction,
-  isResearchAtlasExplorationAction,
-} from "../../integrations/functions/deterministic-mcp/research-synthesis.js";
-import {
-  INTERNAL_BACKGROUND_OBSERVATION_TYPES,
-  isInternalBackgroundObservationType,
-} from "../../../catalog/observation.js";
-import {
-  getToolBatchingClass,
-  TOOL_BATCHING_CLASSES,
-} from "../../../catalog/tool-surface/batching.js";
+import { isResearchAtlasCitationFetchAction, isResearchAtlasExplorationAction } from "../../integrations/functions/deterministic-mcp/research-synthesis.js";
+import { INTERNAL_BACKGROUND_OBSERVATION_TYPES, isInternalBackgroundObservationType } from "../../../catalog/observation.js";
+import { getToolBatchingClass, TOOL_BATCHING_CLASSES } from "../../../catalog/tool-surface/batching.js";
 import { FINAL_REVIEW_OBSERVATIONS, FINAL_REVIEW_TOOL_NAME } from "../../../catalog/final-review.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import { getAgentCallById } from "../../queue/functions/agent-calls.js";
@@ -153,69 +145,14 @@ function _rememberToolReplayFingerprint(bucketKey, fingerprint, now = Date.now()
   return true;
 }
 
-function normalizeJsonText(value) {
-  if (value == null) return null;
-  if (typeof value === "string") {
-    try {
-      JSON.parse(value);
-      return value;
-    } catch {
-      return JSON.stringify(value);
-    }
-  }
-  return JSON.stringify(value);
-}
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-function normalizeObservationRow(row) {
-  if (!row) return null;
-  const id = Number(row.id || 0);
-  return {
-    id: Number.isFinite(id) && id > 0 ? id : null,
-    work_item_id: row.work_item_id ?? row.wi ?? null,
-    job_id: row.job_id ?? row.job ?? null,
-    attempt_id: row.attempt_id ?? row.attempt ?? null,
-    observation_type: row.observation_type ?? row.type ?? null,
-    summary: row.summary ?? null,
-    detail_json: row.detail_json ?? null,
-    created_at: row.created_at || row.t || null,
-  };
-}
 
-function observationSortValue(row) {
-  if (row?.id != null) return Number(row.id);
-  return Date.parse(row?.created_at || "") || 0;
-}
 
-function observationKey(row) {
-  if (row?.id != null) return `id:${row.id}`;
-  return [
-    row?.created_at || "",
-    row?.work_item_id ?? "",
-    row?.job_id ?? "",
-    row?.attempt_id ?? "",
-    row?.observation_type || "",
-    row?.summary || "",
-  ].join("|");
-}
 
-function mergeObservationRows(rows, order = "desc", limit = 100) {
-  const deduped = new Map();
-  for (const raw of rows || []) {
-    const row = normalizeObservationRow(raw);
-    if (!row?.observation_type) continue;
-    deduped.set(observationKey(row), row);
-  }
-  const sorted = [...deduped.values()].sort((a, b) => {
-    const delta = observationSortValue(a) - observationSortValue(b);
-    return order === "asc" ? delta : -delta;
-  });
-  const max = limit == null ? sorted.length : Math.max(0, Number(limit) || 0);
-  return sorted.slice(0, max);
-}
 
 function matchesNumber(value, expected) {
   if (expected == null) return true;

@@ -2,17 +2,7 @@ import crypto from "node:crypto";
 
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { queryRetainedEventRows } from "../../queue/functions/events.js";
-import {
-  WORK_ITEM_BOUNDS,
-  WORK_ITEM_HISTORY_PROTOCOL,
-  commonEnvelope,
-  decimalId,
-  observedAt,
-  projectFeedEvent,
-  resolveRangeRequest,
-  retentionInfo,
-  validateRepositoryBinding,
-} from "./work-item-feed.js";
+import { WORK_ITEM_BOUNDS, WORK_ITEM_HISTORY_PROTOCOL, commonEnvelope, observedAt, projectFeedEvent, resolveRangeRequest, retentionInfo, validateRepositoryBinding } from "./work-item-feed.js";
 
 const FEED_KINDS = new Set([
   "comment", "chat", "question", "answer", "nudge", "agent_update",

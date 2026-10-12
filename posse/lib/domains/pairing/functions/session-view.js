@@ -5,6 +5,7 @@
 // queue` show it so a member's work is visible to the host, and the host's
 // to a member, in the same places as local work.
 
+import { ACTIVE_LEASE_STATUSES } from "../../../catalog/job.js";
 import { readSessionSync } from "./session-sync.js";
 import { formatSessionParticipants } from "./session-landing.js";
 import { getLivePairingState } from "./state.js";
@@ -14,7 +15,7 @@ import {
   readPairingPeerSnapshot,
 } from "./work-items.js";
 
-const RUNNING_JOB_STATUSES = new Set(["leased", "running", "awaiting_assessment"]);
+const RUNNING_JOB_STATUSES = new Set(ACTIVE_LEASE_STATUSES);
 
 /** Null outside an active session. */
 export function collectSessionView({

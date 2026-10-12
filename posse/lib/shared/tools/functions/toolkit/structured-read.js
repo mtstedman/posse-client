@@ -1,3 +1,5 @@
+import { looksReDosProne } from "../../../format/functions/regex-risk.js";
+export { looksReDosProne } from "../../../format/functions/regex-risk.js";
 const READ_FILE_MAX_SEARCH_MATCHES = 100;
 const READ_FILE_MAX_SEARCH_PATTERN_CHARS = 200;
 // A matching line longer than this is reported as snippets around each match
@@ -24,9 +26,7 @@ export function hasStructuredReadOptions(args = {}) {
 }
 
 function escapeRegExp(value) { return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-export function looksReDosProne(pattern) {
-  return /\([^)]*[+*][^)]*\)[+*{]/.test(pattern) || /(\.\*){3,}/.test(pattern) || /\[[^\]]+\][+*]\s*[+*{]/.test(pattern);
-}
+
 
 function compileReadSearchPattern(pattern) {
   const raw = String(pattern || "");

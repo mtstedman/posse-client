@@ -3,6 +3,7 @@
 // add imports from provider/settings/runtime graphs here: Windows must be able
 // to replace native addons before any of them are loaded.
 
+import { canonicalJsonNativePrimitives } from "../../../shared/format/functions/canonical-json.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -42,14 +43,6 @@ function hashText(value) {
   return crypto.createHash("sha256").update(String(value || "")).digest("hex");
 }
 
-function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
 function packageDir(root, name) {
   const value = String(name || "");
   if (value.startsWith("@")) {
@@ -67,7 +60,7 @@ function nodeManifestHash(root) {
     const rel = path.relative(root, file).replace(/\\/g, "/");
     if (rel !== "package.json") return `${rel}\0${hashFile(file)}`;
     const pkg = readJson(file) || {};
-    return `${rel}\0${stableJson({
+    return `${rel}\0${canonicalJsonNativePrimitives({
       dependencies: pkg.dependencies || {},
       devDependencies: pkg.devDependencies || {},
       optionalDependencies: pkg.optionalDependencies || {},

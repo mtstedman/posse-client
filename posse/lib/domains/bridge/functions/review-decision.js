@@ -23,13 +23,13 @@ import { mergeFailureDiagnostics } from "../../git/functions/merge-failure-diagn
 import { resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
 import { redactBridgeValue } from "./redaction.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
-import { QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
+import { OPEN_HUMAN_GATE_JOB_STATUSES, QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
 import {
   isHumanInputCoordinationPayload,
   isHumanInputReviewPayload,
 } from "../../../catalog/human-input.js";
 
-const OPEN_REVIEW_GATE_STATUSES = new Set(["queued", "waiting_on_human", "waiting_on_review"]);
+const OPEN_REVIEW_GATE_STATUSES = new Set(OPEN_HUMAN_GATE_JOB_STATUSES);
 const MAX_BRIDGE_MERGE_ERROR_CHARS = 2000;
 
 function bridgeMergeError(value) {

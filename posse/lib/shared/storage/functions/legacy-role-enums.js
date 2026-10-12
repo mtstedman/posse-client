@@ -25,7 +25,7 @@ export function repairLegacyRoleEnums(_db) {
       }
 
       // Read current jobs schema to preserve all columns dynamically
-      const currentJobsCols = _db.pragma("table_info(jobs)").map(c => c.name);
+      (_db.pragma("table_info(jobs)").map(c => c.name));
 
       // jobs: add 'artificer' to job_type CHECK
       migrateTable("jobs", `

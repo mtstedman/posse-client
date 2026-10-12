@@ -1,3 +1,4 @@
+import { normalizeJsonText } from "../../../shared/format/functions/json-text.js";
 import { registerTransactionLifecycleHooks } from "./common.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { warnOnceForInvalidEventType } from "../../observability/functions/event-types.js";
@@ -48,18 +49,6 @@ function nonNegativeActivityNumber(value) {
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
-function normalizeJsonText(value) {
-  if (value == null) return null;
-  if (typeof value === "string") {
-    try {
-      JSON.parse(value);
-      return value;
-    } catch {
-      return JSON.stringify(value);
-    }
-  }
-  return JSON.stringify(value);
-}
 
 function nowIso() {
   return new Date().toISOString();

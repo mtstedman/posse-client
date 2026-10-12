@@ -6,140 +6,37 @@
 // edit, Esc/Bksp to back up, ←→ to switch settings panes.
 
 import readline from "readline";
-import {
-  buildProviderUsageWindowMap,
-  clipPlainTail,
-  correspondingLimitSettingKey,
-  finiteNumber,
-  fit,
-  fmtDate,
-  formatModelSettingDisplayValue,
-  formatProviderSettingValue,
-  formatProviderUsageHeader,
-  formatProviderUsageWindow,
-  getPrintableInput,
-  getProviderUsageSettingHint,
-  isBackspaceKey,
-  isBooleanSettingValue,
-  isEnterKey,
-  loadIndexedReport,
-  loadReportIndex,
-  loadReports,
-  matchesHotkey,
-  normalizeNumericSettingValue,
-  normalizeRawInput,
-  parseJsonObject,
-  parseProviderList,
-  parseProviderUsageSettingKey,
-  parseReportTimestamp,
-  renderUsageBar,
-  toDisplaySettingEntry,
-  visibleLength,
-} from "../../functions/admin/shared-helpers.js";
-import {
-  buildAdminGitDiffFileDetail,
-  buildAdminGitDiffSnapshot,
-} from "../../functions/admin/git-diff-review.js";
-import fs from "fs";
-import path from "path";
+import { fit, fmtDate, formatProviderUsageHeader, formatProviderUsageWindow, getPrintableInput, isBackspaceKey, isEnterKey, loadReportIndex, loadReports, matchesHotkey } from "../../functions/admin/shared-helpers.js";
+import { buildAdminGitDiffFileDetail, buildAdminGitDiffSnapshot } from "../../functions/admin/git-diff-review.js";
 import { Worker } from "worker_threads";
 import { purgeRuntimeLogs } from "../../functions/admin/purge-runtime-logs.js";
 import { sanitizeWorkerExecArgv } from "../../../runtime/functions/worker-exec-argv.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { AdminSettingsController } from "./settings-controller.js";
-import {
-  renderAdminReportDashboardSummary,
-  renderAdminReports,
-} from "./admin-report-renderer.js";
-import {
-  normalizeAdminLine,
-  sanitizeAdminStatusText,
-  shortRunStartLabel,
-  providerDashboardLabel,
-  providerCostQualifier,
-  providerDailyBudgetSettingKey,
-  configuredUsdBudget,
-  renderUsdUsageBar,
-  safeGetSetting,
-} from "./admin-tui-helpers.js";
+import { renderAdminReportDashboardSummary, renderAdminReports } from "./admin-report-renderer.js";
+import { normalizeAdminLine, sanitizeAdminStatusText, shortRunStartLabel, providerDashboardLabel, providerCostQualifier, providerDailyBudgetSettingKey, configuredUsdBudget, renderUsdUsageBar, safeGetSetting } from "./admin-tui-helpers.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
-import {
-  listWorkItems,
-  listJobs,
-  findRunnableJobsBatch,
-  findWriteLockConflict,
-  getAgentCallStats,
-  listActiveFileLocks,
-  listWorkItemsWithCallRollups,
-  getAgentCallsWithToolCountsByWorkItem,
-  getAgentCallById,
-  getToolInvocationsForAgentCall,
-  getJob,
-} from "../../../queue/functions/index.js";
-import {
-  getArtifactProtocols,
-  getArtifactProtocol,
-  getConfiguredImageModel,
-  getConfiguredImageProviders,
-  getResolvedImageProtocol,
-} from "../../../artifacts/functions/index.js";
-import { getConfiguredProviderUsage, inferProviderWindowLimit } from "../../../providers/functions/provider.js";
-import { getRuntimeDbPath, getRuntimeLogDir, getRuntimeReportsDir } from "../../../runtime/functions/paths.js";
+import { listWorkItems, listJobs, findRunnableJobsBatch, findWriteLockConflict, getAgentCallStats, listActiveFileLocks, listWorkItemsWithCallRollups, getAgentCallsWithToolCountsByWorkItem, getAgentCallById, getToolInvocationsForAgentCall } from "../../../queue/functions/index.js";
+import { getResolvedImageProtocol } from "../../../artifacts/functions/index.js";
+import { getConfiguredProviderUsage } from "../../../providers/functions/provider.js";
+import { getRuntimeDbPath } from "../../../runtime/functions/paths.js";
 import { jobReportStatus, workItemDisplayStatus } from "../display/Display.js";
 import { FAILED_JOB_STATUSES } from "../../../../catalog/job.js";
-import { getAccountSettingsPathForDisplay } from "../../../settings/functions/account-settings.js";
+import "../../../settings/functions/account-settings.js";
 import { readRecentPrompts } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
 import { PROMPT_BODY_STORAGE_NOTICE } from "../../../../shared/telemetry/functions/logging/prompt-persistence.js";
 import { readRecentOutputs } from "../../../../shared/telemetry/functions/logging/output-log.js";
-import { isAdminVisibleCatalogKey } from "../../../settings/functions/catalog.js";
-import {
-  loadSkillManifests,
-  parseSkillIds,
-  setSkillEnabled,
-} from "../../../../shared/skills/functions/registry.js";
-import {
-  getCurrentRunProviderUsage,
-  getLatestRunStartedAtIso,
-  getTodayProviderUsage,
-} from "../../functions/display/helpers/provider-usage.js";
+import "../../../settings/functions/catalog.js";
+import "../../../../shared/skills/functions/registry.js";
+import { getCurrentRunProviderUsage, getLatestRunStartedAtIso, getTodayProviderUsage } from "../../functions/display/helpers/provider-usage.js";
 import { roleBrandColor } from "../../functions/display/helpers/brand.js";
 import { statusColor as paletteStatusColor } from "../../functions/display/status-palette.js";
-import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";
+import { stripAnsi } from "../../../../shared/format/functions/ansi.js";
 import { formatConsoleArg } from "../../functions/display/helpers/formatters.js";
-import {
-  POSSE_MASCOT_CELL_WIDTH,
-  renderPosseMascotFrame,
-} from "../../functions/display/helpers/mascot.js";
-import {
-  formatDuration as fmtDuration,
-  formatRelativeTime as fmtRelativeTime,
-  formatSignedTokens as fmtSignedTokens,
-  formatTokens as fmtTokens,
-  formatUsd as fmtUsd,
-} from "../../../../shared/format/functions/units.js";
-import {
-  loadAtlasV2ProcessIndicators,
-  renderAtlasV2ProcessIndicators,
-} from "../../../atlas/functions/v2/process-indicators.js";
-import {
-  ADMIN_DEFAULT_SETTINGS_PANE,
-  ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS,
-  BOOLEAN_SETTING_KEYS,
-  DEFAULT_ACCOUNT_SETTING_ROWS,
-  ENUM_SETTING_OPTIONS,
-  HIDDEN_SETTING_KEYS,
-  NUMERIC_SETTING_RULES,
-  PROVIDER_SETTING_KEYS,
-  SETTINGS_PANES,
-  formatAdminSettingValue,
-  getAdminSettingPresentation,
-  ATLAS_PHASE_OPTIONS,
-  ATLAS_PHASE_SETTING_KEYS,
-  ATLAS_PHASE_VALUES,
-  SKILL_SETTING_PREFIX,
-  toDisplaySettingKey,
-  toStorageSettingKey,
-} from "../../../settings/functions/admin-catalog.js";
+import { POSSE_MASCOT_CELL_WIDTH, renderPosseMascotFrame } from "../../functions/display/helpers/mascot.js";
+import { formatDuration as fmtDuration, formatSignedTokens as fmtSignedTokens, formatTokens as fmtTokens, formatUsd as fmtUsd } from "../../../../shared/format/functions/units.js";
+import { loadAtlasV2ProcessIndicators, renderAtlasV2ProcessIndicators } from "../../../atlas/functions/v2/process-indicators.js";
+import { ADMIN_DEFAULT_SETTINGS_PANE, SETTINGS_PANES, formatAdminSettingValue, getAdminSettingPresentation, toStorageSettingKey } from "../../../settings/functions/admin-catalog.js";
 
 // Keep Settings on shortcut 1, but start on Dashboard so the first screen shows
 // the operational agent/work summary instead of configuration controls.

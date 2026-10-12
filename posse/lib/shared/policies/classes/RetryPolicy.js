@@ -1,5 +1,6 @@
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getSetting } from "../../../domains/queue/functions/index.js";
+import { escalateModelTier } from "../../../domains/providers/functions/shared/turns.js";
 
 function asPositiveInt(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -30,12 +31,10 @@ export class RetryPolicy {
     return Math.min(this.capBackoffSec, Math.max(this.baseBackoffSec, Math.floor(computed)));
   }
 
-  escalateTier(currentTier = "standard", attemptCount = 1) {
+  escalateTier(currentTier = "standard", attemptCount = 1, options = {}) {
     const tier = String(currentTier || "standard");
     const attempt = Math.max(1, Number(attemptCount) || 1);
-    if (attempt >= 3) return "strong";
-    if (attempt >= 2 && tier === "cheap") return "standard";
-    return tier;
+    return escalateModelTier(tier, attempt, options);
   }
 
   static fromSettings() {

@@ -7,36 +7,13 @@
 
 import path from "path";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
-import {
-  applyDelegation,
-  createJob,
-  extendJobMaxAttempts,
-  flagStallResume,
-  getWorkItem,
-  listActiveFileLocks,
-  logEvent,
-  setAttemptCommitHash,
-  setJobError,
-  setJobResult,
-  storeArtifact,
-  updateJobPayload,
-} from "../../../queue/functions/index.js";
+import { applyDelegation, createJob, extendJobMaxAttempts, flagStallResume, getWorkItem, listActiveFileLocks, logEvent, setAttemptCommitHash, setJobError, setJobResult, storeArtifact, updateJobPayload } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { gitCommitAll, gitCommitAllAsync } from "../../../git/functions/commit-scope.js";
 import { listAttemptCommittedFilesAsync } from "../../../git/functions/attempt-committed-files.js";
 import { gitCurrentHash, gitCurrentHashAsync, gitExec, gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
-import {
-  snapshotAndResetDirtyWorktree,
-  snapshotAndResetDirtyWorktreeAsync,
-  withWorktreeLock,
-  withWorktreeLockAsync,
-} from "../../../git/functions/worktree.js";
-import {
-  acquireWorktreeLock,
-  acquireWorktreeLockAsync,
-  gitStashLockPath,
-  gitStashLockPathAsync,
-} from "../../../git/functions/worktree-locks.js";
+import { snapshotAndResetDirtyWorktreeAsync, withWorktreeLock, withWorktreeLockAsync } from "../../../git/functions/worktree.js";
+import { acquireWorktreeLock, acquireWorktreeLockAsync, gitStashLockPath, gitStashLockPathAsync } from "../../../git/functions/worktree-locks.js";
 import { MutationPolicy, scopedDeleteTargets } from "../../../../shared/scope/classes/MutationPolicy.js";
 import { findActiveSiblingLockForPath } from "../../../queue/functions/sibling-locks.js";
 import { isTurnBudgetExhaustedDetails } from "./diagnostics.js";

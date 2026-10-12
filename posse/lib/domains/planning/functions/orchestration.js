@@ -11,45 +11,15 @@ import { roleExecutionForBudget } from "../../settings/functions/repository-sett
 import { C } from "../../../shared/format/functions/colors.js";
 import { mergeFailureDiagnostics } from "../../git/functions/merge-failure-diagnostics.js";
 import { resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
-import {
-  addDependency,
-  createJob,
-  getJob,
-  getWorkItem,
-  listJobsByWorkItem,
-  listWorkItems,
-  logEvent,
-  markWorkItemMergeFailed,
-  refreshWorkItemStatus,
-  reopenWorkItemForFollowUp,
-  setMergeState,
-  updateWorkItemMetadata,
-} from "../../queue/functions/index.js";
-import {
-  ITERATIVE_WORKFLOW_PROFILES,
-  getIterativeReloopPrompt,
-  getIterativeState,
-  getIterativeWorkflowProfile,
-  isIterativeWorkItemActive,
-  iterativeFollowUpJobsAfter,
-  markIterativeFinished,
-  metadataRedTeamPlanningEnabled,
-  parseWorkItemMetadata,
-  persistIterativeState,
-  summarizeIterativeReasons,
-} from "./state.js";
+import { addDependency, createJob, getJob, getWorkItem, listJobsByWorkItem, listWorkItems, logEvent, markWorkItemMergeFailed, refreshWorkItemStatus, reopenWorkItemForFollowUp, updateWorkItemMetadata } from "../../queue/functions/index.js";
+import { ITERATIVE_WORKFLOW_PROFILES, getIterativeReloopPrompt, getIterativeState, getIterativeWorkflowProfile, isIterativeWorkItemActive, iterativeFollowUpJobsAfter, markIterativeFinished, metadataRedTeamPlanningEnabled, parseWorkItemMetadata, persistIterativeState, summarizeIterativeReasons } from "./state.js";
 import { classifyResearchForRouting } from "../../research/functions/intake-routing.js";
 import { createRedTeamPlanChain, redTeamPlanningPayload } from "./red-team-plan.js";
 import { normalizeIntakeHints } from "../../intake/functions/hints.js";
 import { researchPayload } from "../../research/functions/payload.js";
-import {
-  getResearchBudget,
-} from "../../../shared/policies/functions/role-utils.js";
+import { getResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import {
-  isTransientSharedTrunkMergeResult,
-  sharedTrunkTeamResultNeedsAttention,
-} from "../../git/functions/shared-trunk.js";
+import { isTransientSharedTrunkMergeResult, sharedTrunkTeamResultNeedsAttention } from "../../git/functions/shared-trunk.js";
 import { ACTIVE_LEASE_STATUSES, DEADLOCK_TERMINAL_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);

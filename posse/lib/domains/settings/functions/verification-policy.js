@@ -1,3 +1,5 @@
+import { VERIFICATION_POLICY_SCHEMA_VERSION, DEFAULT_VERIFICATION_WALL_TIMEOUT_MS, DEFAULT_VERIFICATION_WALL_TIMEOUT_MAX_MS, MIN_VERIFICATION_TIMEOUT_MS, VERIFICATION_CHECK_CLASSES, VERIFICATION_IDENTITY_FILES, VERIFICATION_IDENTITY_SKIP_DIRS } from "../../../catalog/verification-policy.js";
+export { VERIFICATION_POLICY_SCHEMA_VERSION, DEFAULT_VERIFICATION_WALL_TIMEOUT_MS, DEFAULT_VERIFICATION_WALL_TIMEOUT_MAX_MS, MIN_VERIFICATION_TIMEOUT_MS, VERIFICATION_CHECK_CLASSES } from "../../../catalog/verification-policy.js";
 // Verification time policy: how long a deterministic verification command may
 // run before the orchestration layer stops it, and the identity a receipt
 // must carry so a timeout observed under one policy is never reused under
@@ -16,17 +18,17 @@
 // silent while healthy (Posse's own runner is silent between lanes unless the
 // reporter heartbeat is enabled).
 
+import { canonicalJsonNullFallback } from "../../../shared/format/functions/canonical-json.js";
 import { createHash } from "crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { getSetting } from "./repository-settings.js";
 
-export const VERIFICATION_POLICY_SCHEMA_VERSION = 1;
-export const DEFAULT_VERIFICATION_WALL_TIMEOUT_MS = 120_000;
-export const DEFAULT_VERIFICATION_WALL_TIMEOUT_MAX_MS = 1_800_000;
-export const MIN_VERIFICATION_TIMEOUT_MS = 1_000;
-export const VERIFICATION_CHECK_CLASSES = Object.freeze(["frozen_test", "canonical_verify", "hook_verify"]);
+
+
+
+
 
 function sha256(value) {
   return createHash("sha256").update(String(value || ""), "utf8").digest("hex");
@@ -57,27 +59,8 @@ export function verificationPolicyFingerprint({
   ].join("\0"));
 }
 
-const VERIFICATION_IDENTITY_FILES = new Set([
-  "package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
-  "composer.json", "composer.lock",
-  "requirements.txt", "requirements.lock", "poetry.lock", "uv.lock", "pdm.lock", "pyproject.toml",
-  "go.mod", "go.sum", "Cargo.toml", "Cargo.lock",
-  "Gemfile", "Gemfile.lock", "pom.xml", "gradle.lockfile", "packages.lock.json",
-  "posse.verification.json",
-]);
-const VERIFICATION_IDENTITY_SKIP_DIRS = new Set([
-  ".git", ".hg", ".svn", ".posse", ".posse-worktrees", "node_modules", "vendor", "target", "dist", "build", "coverage", "__pycache__",
-]);
 
-function stableJson(value) {
-  if (value === null) return "null";
-  if (["string", "number", "boolean"].includes(typeof value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
-  }
-  return "null";
-}
+
 
 function repositoryIdentityFiles(projectDir, { maxDepth = 4, maxFiles = 96 } = {}) {
   if (!projectDir) return [];
@@ -177,7 +160,7 @@ export function describeToolchain({
 
 export function toolchainFingerprint(toolchain = describeToolchain()) {
   const described = toolchain && typeof toolchain === "object" ? toolchain : describeToolchain();
-  return sha256(stableJson(described));
+  return sha256(canonicalJsonNullFallback(described));
 }
 
 /**

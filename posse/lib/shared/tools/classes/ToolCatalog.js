@@ -8,7 +8,7 @@ import {
   getCanonicalToolExecutionSpec,
   getToolCatalogEntry,
   getToolSchemaForRole,
-} from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
+} from "../functions/tool-descriptors.js";
 import { projectAgentToolDefinition } from "../functions/agent-schema.js";
 
 const RUNTIME_TOOL_OVERRIDES = new Map();

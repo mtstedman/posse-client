@@ -1,44 +1,27 @@
+import { JS_SOURCE_EXTENSIONS, PHP_SOURCE_EXTENSIONS, PYTHON_SOURCE_EXTENSIONS, GO_SOURCE_EXTENSIONS, RUST_SOURCE_EXTENSIONS, CPP_SOURCE_EXTENSIONS, RUBY_SOURCE_EXTENSIONS, SHELL_SOURCE_EXTENSIONS, CLANG_SOURCE_EXTENSIONS, SOURCE_EXTENSIONS, MAX_SCOPE_ROOT_FILES, MAX_FAILURES, MAX_OUTPUT_CHARS, MISSING_TOOLING_RE, ESM_SYNTAX_RE } from "../../../../catalog/scoped-verification.js";
 import fs from "fs";
 import path from "path";
 import { spawn, spawnSync } from "child_process";
-import {
-  getPythonToolchainExecutable,
-  resolveManagedPythonRuntimeForProject,
-  resolveManagedPythonTestToolchain,
-} from "../../../../domains/runtime/functions/python-runtime.js";
+import { getPythonToolchainExecutable, resolveManagedPythonRuntimeForProject, resolveManagedPythonTestToolchain } from "../../../../domains/runtime/functions/python-runtime.js";
 import { inspectManagedPythonTestToolchain } from "../../../../domains/environments/functions/python-test-toolchain.js";
 import { gitCurrentHash } from "../../../../domains/git/functions/utils.js";
-import {
-  groupVerificationFiles,
-  packageManagerRun,
-  verificationReadinessManifest,
-} from "./verification-readiness.js";
+import { groupVerificationFiles, packageManagerRun, verificationReadinessManifest } from "./verification-readiness.js";
 import { sanitizeAbsolutePathsInText, toRepoRelativePath } from "../../../format/functions/display-paths.js";
 import { commandSpawnSpec } from "../../../platform/functions/command-launch.js";
 
-const JS_SOURCE_EXTENSIONS = new Set([".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx"]);
-const PHP_SOURCE_EXTENSIONS = new Set([".php"]);
-const PYTHON_SOURCE_EXTENSIONS = new Set([".py", ".pyi"]);
-const GO_SOURCE_EXTENSIONS = new Set([".go"]);
-const RUST_SOURCE_EXTENSIONS = new Set([".rs"]);
-const C_SOURCE_EXTENSIONS = new Set([".c", ".h"]);
-const CPP_SOURCE_EXTENSIONS = new Set([".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"]);
-const RUBY_SOURCE_EXTENSIONS = new Set([".rb"]);
-const SHELL_SOURCE_EXTENSIONS = new Set([".sh", ".bash"]);
-const CLANG_SOURCE_EXTENSIONS = new Set([...C_SOURCE_EXTENSIONS, ...CPP_SOURCE_EXTENSIONS]);
-const SOURCE_EXTENSIONS = new Set([
-  ...JS_SOURCE_EXTENSIONS,
-  ...PHP_SOURCE_EXTENSIONS,
-  ...PYTHON_SOURCE_EXTENSIONS,
-  ...GO_SOURCE_EXTENSIONS,
-  ...RUST_SOURCE_EXTENSIONS,
-  ...CLANG_SOURCE_EXTENSIONS,
-  ...RUBY_SOURCE_EXTENSIONS,
-  ...SHELL_SOURCE_EXTENSIONS,
-]);
-const MAX_SCOPE_ROOT_FILES = 250;
-const MAX_FAILURES = 60;
-const MAX_OUTPUT_CHARS = 6000;
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 function currentGitCommit(cwd, gitCurrentHashImpl = gitCurrentHash) {
   try {
@@ -306,12 +289,6 @@ function parseEslintFindings(stdout, stderr, cwd) {
   return findings;
 }
 
-// A verifier whose runner binary is missing (no node_modules in a fresh
-// worktree, a package script whose tool is not installed) is a dependency
-// problem, not a product failure. Mirror the other runners' "unavailable"
-// contract so assessment can repair the worktree or defer, instead of
-// failing the change and spawning fix jobs for code that is correct.
-const MISSING_TOOLING_RE = /(?:^|\n)\s*(?:\/bin\/)?sh: (?:\d+: )?[\w@./-]+: (?:command )?not found|(?:^|\n)\s*[\w@./-]+: (?:command )?not found|\bENOENT\b|node_modules missing|Cannot find module ['"]?(?:eslint|typescript|tsc)\b/i;
 
 function missingToolingReason(result) {
   const text = `${result?.stderr || ""}\n${result?.stdout || ""}\n${result?.error || ""}`;
@@ -319,8 +296,6 @@ function missingToolingReason(result) {
   return match ? `dependency_unavailable: ${compact(match[0].trim(), 200)}` : null;
 }
 
-// Top-level static import/export, or import.meta, outside comments.
-const ESM_SYNTAX_RE = /^[ \t]*(?:import[ \t]*[\w{*'"]|export[ \t]*[\w{*])|\bimport\.meta\b/m;
 
 // `node --check` on an ambiguous `.js` file (no "type" in the nearest
 // package.json) exits 0 without reporting syntax errors once the source uses

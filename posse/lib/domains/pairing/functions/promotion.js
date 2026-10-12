@@ -1,3 +1,4 @@
+import { PROTOCOL, LEGACY_PROTOCOL, SHA_RE, MAX_REBUILDS, SUMMARY_MAX_COMMITS, SUMMARY_MAX_FILES, CONTROL_CHARACTERS, STALE_APPROVAL_MESSAGE } from "../../../catalog/pairing-promotion.js";
 import path from "node:path";
 
 import { createGitWorkflowHelpers } from "../../git/functions/workflows.js";
@@ -23,10 +24,9 @@ import {
   resolveSessionSquashBase,
 } from "./session-publish.js";
 
-const PROTOCOL = "posse.pairing_promotion.v2";
-const LEGACY_PROTOCOL = "posse.pairing_promotion.v1";
-const SHA_RE = /^[0-9a-f]{40,64}$/iu;
-const MAX_REBUILDS = 3;
+
+
+
 
 function git(args, projectDir, options = {}) {
   return adminGitExec(args, projectDir, { timeoutMs: 15 * 60_000, ...options });
@@ -145,14 +145,9 @@ export function markPairingPromotion(journal, values = {}) {
   });
 }
 
-const SUMMARY_MAX_COMMITS = 20;
-const SUMMARY_MAX_FILES = 25;
-// Author names and subjects come from members' commits and reach the host's
-// terminal as they decide; control characters could hide or rewrite lines, and
-// bidirectional overrides could reorder what a line appears to say.
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu;
-const STALE_APPROVAL_MESSAGE = "Origin moved after this candidate was frozen; run `posse session integrate` "
-  + "to rebuild it on the new origin and approve that instead";
+
+
+
 
 /**
  * What a frozen promotion would publish, for the host to approve: the session

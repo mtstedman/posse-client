@@ -13,7 +13,7 @@ import { requiredWorkItemOutputs } from "../../intake/functions/objective-contra
 import { hasExplicitRepoWorkIntent, hasRepoMutationIntent } from "../../intake/functions/implementation-intent.js";
 import { plannerTaskProducesRepoOutput } from "./plan-modality.js";
 import { validateMutableRepoPath } from "../../runtime/functions/protected-paths.js";
-import { validateCreateRootPath, validateScopedPath } from "../../../shared/scope/functions/validation.js";
+import { validateScopedPath } from "../../../shared/scope/functions/validation.js";
 import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
 
 function isStringArray(value) {

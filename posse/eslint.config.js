@@ -9,6 +9,7 @@ export default [
       "coverage/**",
       "dist/**",
       "node_modules/**",
+      // Historical experiment checkouts are inputs, not package source.
       "scripts/atlas-ab/**",
     ],
   },
@@ -40,6 +41,28 @@ export default [
       "no-constant-binary-expression": "off",
       "no-regex-spaces": "off",
       "preserve-caught-error": "off",
+    },
+  },
+  {
+    files: ["lib/**/*.js", "orchestrator.js", "registered-agent.js"],
+    rules: {
+      "no-unused-vars": ["error", {
+        args: "none",
+        caughtErrors: "none",
+        varsIgnorePattern: "^_",
+        ignoreRestSiblings: true,
+      }],
+    },
+  },
+  {
+    files: ["lib/catalog/**/*.js"],
+    rules: {
+      "no-restricted-imports": ["error", {
+        patterns: [{
+          group: ["**/domains/**", "**/shared/**", "node:*"],
+          message: "Catalogs depend on catalog data; runtime mechanisms belong in domains or shared modules.",
+        }],
+      }],
     },
   },
 ];

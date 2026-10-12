@@ -1,3 +1,4 @@
+import { deepFreeze } from "../../format/functions/deep-freeze.js";
 // @ts-check
 
 import { scopeGrantedBy } from "../functions/scope-grants.js";
@@ -184,11 +185,6 @@ function freezeJson(value) {
   return deepFreeze(cloned);
 }
 
-function deepFreeze(value) {
-  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
-  for (const child of Object.values(value)) deepFreeze(child);
-  return Object.freeze(value);
-}
 
 function handshakeError(code, message) {
   const error = /** @type {Error & { code: string }} */ (new Error(message));

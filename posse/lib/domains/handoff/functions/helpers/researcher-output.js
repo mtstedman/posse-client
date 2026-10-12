@@ -1,3 +1,4 @@
+import { normalizeLineRange as normalizeCitationLines } from "./citation-range.js";
 import { AGENT_HANDOFF_PROFILES } from "../../../../catalog/handoff.js";
 // lib/domains/handoff/functions/helpers/researcher-output.js
 //
@@ -220,14 +221,6 @@ function citationEntryParts(entry) {
   return { rawRef: "", why: "" };
 }
 
-function normalizeCitationLines(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const start = Number(value.start);
-  const count = value.count == null ? null : Number(value.count);
-  const end = count == null ? Number(value.end) : start + count - 1;
-  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) return null;
-  return { start, end };
-}
 
 /**
  * Normalize researcher hash-ref citation triage into the closed lane contract

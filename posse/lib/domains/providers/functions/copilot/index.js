@@ -1,19 +1,10 @@
+import { PROVIDER_CAPABILITIES } from "../../../../catalog/provider-capabilities.js";
 // lib/domains/providers/functions/copilot/index.js
 //
 // GitHub Copilot CLI provider for the posse orchestrator.
 //
-// PHASE 1 (this file): SKELETON ONLY.
-//   - Registers the provider in the catalog/registry surface.
-//   - Implements credentials/readiness checks so `posse status` / settings
-//     surfaces show the right state ("binary missing", "no token", etc.).
-//   - callProvider() throws "not_implemented" until Phase 2 lands.
-//
-// PHASE 2 (next): implement the spawn/JSONL pipeline modeled on
-//   `lib/domains/providers/functions/codex/index.js`. The shape mirrors `codex exec` —
-//   spawn `copilot -p <prompt> --output-format json --model <tier>` and
-//   consume the JSONL stream line-by-line.
-//
-// PHASE 3: ATLAS v2 MCP attachment via `--additional-mcp-config <path>`.
+// Owns credentials/readiness checks, Copilot CLI launch and JSONL processing,
+// session handling, and attachment to the deterministic MCP tool gateway.
 //
 // Auth model: dual — OAuth state managed by the copilot CLI itself, or
 // a fine-grained PAT in the environment. Resolution order:
@@ -28,13 +19,10 @@
 // We never invoke the device-flow ourselves.
 //
 // Pricing model: subscription quota (premium requests × per-model
-// multiplier), NOT per-token. Cost-tier routing is documented as a
-// Phase 5 follow-up; until then, expect the rate-limiter to trip when
-// the daily/monthly quota is exhausted and provider selection to fall
-// through to the next provider in the provider_<role> account setting.
+// multiplier), NOT per-token. Quota exhaustion trips the rate limiter;
+// provider selection can fall through to the next configured role provider.
 
 import { spawn } from "child_process";
-import { MCP_TOOL_DEADLINE_MODES } from "../../../../catalog/provider.js";
 import { buildRuntimeEnv } from "../../../runtime/functions/paths.js";
 import { appendBoundedText } from "../../../../shared/format/functions/bounded-text.js";
 import { providerRuntimeState } from "../../classes/runtime-state-singleton.js";
@@ -50,15 +38,11 @@ import { buildCopilotCloseStats, resolveCopilotStallTimeoutMs } from "./close-st
 import { terminateSpawnedProcess, trackSpawnedProcess } from "../shared/windows-spawn.js";
 import { providerStallPaused } from "../shared/stall-timeout.js";
 import { buildDeterministicReadMcpServerConfigAsync } from "../../../integrations/functions/deterministic-mcp.js";
-import {
-  consumeCopilotLine,
-  createAccumulator,
-  finalOutput as copilotFinalOutput,
-} from "./events.js";
+import { consumeCopilotLine, createAccumulator, finalOutput as copilotFinalOutput } from "./events.js";
 
 // The Copilot CLI documents no per-call MCP tool timeout, so long-blocking
 // tool calls (agent dispatch) are not routed to it until one is verified.
-export const capabilities = Object.freeze({ images: false, sessionResume: false, toolAttachment: "mcp", mcpToolDeadline: MCP_TOOL_DEADLINE_MODES.UNKNOWN });
+export const capabilities = PROVIDER_CAPABILITIES["copilot"];
 
 const LINE_BUF_MAX = 16 * 1024 * 1024;
 
@@ -119,16 +103,11 @@ function requestCopilotChildTermination(proc, { platform = process.platform, sch
 // through the adapter, and resolve with `{ output, stats }` mirroring
 // the codex contract.
 //
-// PHASE 2 SCOPE: spawn + JSONL pipeline + error classification. NOT
-// included yet:
-//   - ATLAS v2 MCP attachment (Phase 3)
-//   - Scope/policy enforcement on tool surfaces (Phase 4)
-//   - Quota-aware cost routing — beyond tripping the rate limit when
-//     we see a quota error (Phase 5)
-//
-// We intentionally accept (and silently ignore) the full Codex opts
-// surface so the worker call site doesn't need provider-specific
-// branching. Options that have no Copilot equivalent stay no-ops.
+// The issued MCP gate is required and configured before launch. It provides
+// the role's current tools and scope/policy enforcement, including ATLAS.
+// Subscription quota failures update provider rate-limit state for routing.
+// Common provider options are accepted at this boundary; options without a
+// Copilot equivalent remain no-ops.
 
 /**
  * @param {string} promptText

@@ -1,6 +1,9 @@
+import { VERIFICATION_PLAN_SCHEMA_VERSION, VERIFICATION_PLAN_CONFIG, STAGES, INTENTS, CHECK_ID_RE } from "../../../catalog/verification-plan.js";
+export { VERIFICATION_PLAN_SCHEMA_VERSION, VERIFICATION_PLAN_CONFIG } from "../../../catalog/verification-plan.js";
 // Versioned repository verification plans. The repository, not the planner,
 // owns executable commands; planner input may only select optional check IDs.
 
+import { canonicalJsonNullFallback } from "../../../shared/format/functions/canonical-json.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -9,8 +12,7 @@ import { adminGitExec } from "../../git/functions/admin-git-exec.js";
 import { detectNodePackageManager } from "../../../shared/tools/functions/node-package-manager.js";
 import { PACKAGE_MANIFEST_FALLBACK_SCRIPTS } from "../../../catalog/verification.js";
 
-export const VERIFICATION_PLAN_SCHEMA_VERSION = 1;
-export const VERIFICATION_PLAN_CONFIG = "posse.verification.json";
+
 
 export function verificationPlanSnapshot(plan) {
   return {
@@ -43,19 +45,9 @@ export function plannedRepositoryVerificationSnapshot({ projectDir, validateComm
   return verificationPlanSnapshot(plan);
 }
 
-const STAGES = Object.freeze(["fast", "required", "canonical"]);
-const INTENTS = new Set(["test", "lint", "typecheck", "contract"]);
-const CHECK_ID_RE = /^[a-z0-9][a-z0-9._:-]{0,79}$/;
 
-function stableJson(value) {
-  if (value === null) return "null";
-  if (["string", "number", "boolean"].includes(typeof value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
-  }
-  return "null";
-}
+
+
 
 function sha256(value) {
   return crypto.createHash("sha256").update(String(value || ""), "utf8").digest("hex");
@@ -280,6 +272,6 @@ export function resolveRepositoryVerificationPlan({
   return {
     ...identity,
     status: "ready",
-    plan_id: sha256(stableJson(identity)),
+    plan_id: sha256(canonicalJsonNullFallback(identity)),
   };
 }

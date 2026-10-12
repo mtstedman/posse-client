@@ -1,3 +1,4 @@
+import { ledgerSupportsViewMeta } from "../ledger/view-meta-support.js";
 // @ts-check
 //
 // Conductor-side retrieval dispatch: runs read-only ATLAS v2 tool calls in
@@ -701,15 +702,6 @@ async function openReadOnlyLedger(dbPath) {
   }
 }
 
-function ledgerSupportsViewMeta(ledger, viewMeta) {
-  const branch = typeof viewMeta?.branch === "string" && viewMeta.branch ? viewMeta.branch : null;
-  if (!ledger || !branch || typeof ledger.getBranch !== "function") return true;
-  try {
-    return !!ledger.getBranch(branch);
-  } catch {
-    return false;
-  }
-}
 
 function baselineBranchForRepo(repoRoot) {
   try {

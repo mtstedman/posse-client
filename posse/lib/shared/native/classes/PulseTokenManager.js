@@ -1,5 +1,7 @@
+import { abortable } from "../../concurrency/functions/abortable.js";
 // @ts-check
 
+import { canonicalJsonNullFallback } from "../../format/functions/canonical-json.js";
 import { createHash } from "node:crypto";
 
 import { heartbeatAuthManager } from "./HeartbeatAuthManager.js";
@@ -667,7 +669,7 @@ export class PulseTokenManager {
 function pulseCacheKey(rawKey, policy) {
   const keyIdentity = createHash("sha256").update(rawKey, "utf8").digest("hex");
   const policyIdentity = createHash("sha256")
-    .update(stableJson({
+    .update(canonicalJsonNullFallback({
       origin: policy.origin,
       developmentMode: policy.developmentMode,
       envelope: policy.envelope,
@@ -722,7 +724,7 @@ function jwtExpiryMs(token) {
 function exactPulseRoutes(body, token) {
   const responseRoutes = normalizedRoutes(body?.routes ?? body?.capabilities);
   const signedRoutes = normalizedRoutes(jwtClaims(token)?.routes ?? jwtClaims(token)?.capabilities);
-  if (responseRoutes.length === 0 || stableJson(responseRoutes) !== stableJson(signedRoutes)) {
+  if (responseRoutes.length === 0 || canonicalJsonNullFallback(responseRoutes) !== canonicalJsonNullFallback(signedRoutes)) {
     throw pulseError(
       "POSSE_PULSE_ROUTE_DENIED",
       "heartbeat response routes do not match the signed pulse routes",
@@ -752,7 +754,7 @@ function exactNativeArtifactVersions(body, token) {
   const signedVersions = normalizedNativeArtifactVersions(
     jwtClaims(token)?.native_artifacts ?? jwtClaims(token)?.nativeArtifacts,
   );
-  if (stableJson(responseVersions) !== stableJson(signedVersions)) {
+  if (canonicalJsonNullFallback(responseVersions) !== canonicalJsonNullFallback(signedVersions)) {
     throw pulseError(
       "POSSE_PULSE_INVALID_RESPONSE",
       "heartbeat response and signed native artifact versions do not match",
@@ -880,32 +882,7 @@ function heartbeatErrorCode(text) {
   }
 }
 
-function abortable(promise, signal) {
-  if (signal.aborted) return Promise.reject(abortError());
-  return new Promise((resolve, reject) => {
-    const onAbort = () => reject(abortError());
-    signal.addEventListener("abort", onAbort, { once: true });
-    Promise.resolve(promise).then(resolve, reject).finally(() => {
-      signal.removeEventListener("abort", onAbort);
-    });
-  });
-}
 
-function abortError() {
-  const err = new Error("operation aborted");
-  err.name = "AbortError";
-  return err;
-}
-
-function stableJson(value) {
-  if (value === null) return "null";
-  if (["string", "number", "boolean"].includes(typeof value)) return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
-  }
-  return "null";
-}
 
 function positiveNumber(value, fallback) {
   const parsed = Number(value);

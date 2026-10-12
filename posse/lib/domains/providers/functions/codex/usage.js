@@ -1,8 +1,9 @@
+import { readCodexLimitSetting } from "../shared/usage-limit-setting.js";
 // lib/domains/providers/functions/codex/usage.js
 
 import { spawn } from "child_process";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
-import { getSetting } from "../../../queue/functions/index.js";
+import "../../../queue/functions/index.js";
 import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { appendBoundedText } from "../../../../shared/format/functions/bounded-text.js";
 import { CodexUsageState } from "../../classes/codex/CodexUsageState.js";
@@ -28,18 +29,6 @@ function codexUsageBackoffMs() {
   return readPositiveMsSetting(SETTING_KEYS.CODEX_USAGE_BACKOFF_MS, DEFAULT_CODEX_USAGE_BACKOFF_MS);
 }
 
-function readCodexLimitSetting(key) {
-  try {
-    const stored = getSetting(key);
-    if (stored != null && String(stored).trim() !== "") {
-      const parsed = parseInt(String(stored).trim(), 10);
-      if (!Number.isNaN(parsed) && parsed > 0) return parsed;
-    }
-  } catch {
-    // Ignore DB-read failures and fall back to null.
-  }
-  return null;
-}
 
 function getCodexUsageLimits() {
   return {

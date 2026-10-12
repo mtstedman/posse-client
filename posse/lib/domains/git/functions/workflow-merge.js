@@ -1,3 +1,5 @@
+import { recordTargetDebt, resolveTargetDebtEntries } from "./merge-target-debt-store.js";
+export { recordTargetDebt } from "./merge-target-debt-store.js";
 import { mergeTestWaiverCovers } from "./merge-test-waiver.js";
 // lib/domains/git/functions/workflow-merge.js
 // Merge workflow helpers for WI branches and target branch advancement.
@@ -5,84 +7,26 @@ import { mergeTestWaiverCovers } from "./merge-test-waiver.js";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import {
-  finalizeApprovedWorkItemMerge,
-  getSetting,
-  getWorkItem,
-  getWorkItemMergeDependencies,
-  listJobsByWorkItem,
-  listWorkItems,
-  listCrossWiMergeBlockers,
-  logEvent,
-  mergeVerificationDebtWaiver,
-  mergeVerificationDebtWaiverCovers,
-  currentMergeVerificationApproval,
-  rebindMergeVerificationReviewAfterRefresh,
-  updateWorkItemMetadata,
-} from "../../queue/functions/index.js";
+import { finalizeApprovedWorkItemMerge, getSetting, getWorkItem, getWorkItemMergeDependencies, listJobsByWorkItem, listWorkItems, listCrossWiMergeBlockers, logEvent, mergeVerificationDebtWaiver, mergeVerificationDebtWaiverCovers, currentMergeVerificationApproval, rebindMergeVerificationReviewAfterRefresh, updateWorkItemMetadata } from "../../queue/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
-import { runHook } from "./hooks.js";
+import "./hooks.js";
 import { warmAtlasMergedToMainNow } from "../../integrations/functions/atlas.js";
-import {
-  emitEmbeddingsResume as emitAtlasV2EmbeddingsResume,
-  emitMainAdvanced as emitAtlasV2MainAdvanced,
-  emitMergedToMain as emitAtlasV2MergedToMain,
-  isAtlasV2EmissionEnabled,
-} from "../../atlas/classes/v2/PipelineHooks.js";
+import { emitEmbeddingsResume as emitAtlasV2EmbeddingsResume, emitMainAdvanced as emitAtlasV2MainAdvanced, emitMergedToMain as emitAtlasV2MergedToMain, isAtlasV2EmissionEnabled } from "../../atlas/classes/v2/PipelineHooks.js";
 import { GIT_OPERATION_TIMEOUT_MS } from "./utils.js";
-import {
-  findLegacyWorktreeForWi as nativeFindLegacyWorktreeForWi,
-  preserveDirtyWorktreeSnapshot as nativePreserveDirtyWorktreeSnapshot,
-  snapshotAndResetDirtyWorktree,
-  worktreePath as nativeWorktreePath,
-  withWorktreeLock as nativeWithWorktreeLock,
-} from "./worktree.js";
+import { findLegacyWorktreeForWi as nativeFindLegacyWorktreeForWi, preserveDirtyWorktreeSnapshot as nativePreserveDirtyWorktreeSnapshot, worktreePath as nativeWorktreePath, withWorktreeLock as nativeWithWorktreeLock } from "./worktree.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { GIT_WORKFLOW_TASK_TIMEOUT_MS } from "./workflow-context.js";
-import { GIT_MERGE_TIMEOUT_MS, firstGitLine, timedOutMergeCommitLanded } from "./workflow-git-utils.js";
-import {
-  DETERMINISTIC_MERGE_FAILURE_KEY,
-  mergeFailureHeadsUnchanged,
-  mergeConflictSummary,
-  resolveHandoffSquashConflicts,
-} from "./handoff-conflict-resolution.js";
-import {
-  CLOSEOUT_TEST_TIMEOUT_MS,
-  closeoutTestCommandFromJobs,
-  droppableHandoffSyncJobIds,
-  refreshBranchForCloseout,
-  runCloseoutTestCommandSync,
-} from "./merge-closeout.js";
+import { GIT_MERGE_TIMEOUT_MS, timedOutMergeCommitLanded } from "./workflow-git-utils.js";
+import { DETERMINISTIC_MERGE_FAILURE_KEY, mergeFailureHeadsUnchanged, mergeConflictSummary, resolveHandoffSquashConflicts } from "./handoff-conflict-resolution.js";
+import { CLOSEOUT_TEST_TIMEOUT_MS, closeoutTestCommandFromJobs, droppableHandoffSyncJobIds, refreshBranchForCloseout, runCloseoutTestCommandSync } from "./merge-closeout.js";
 import { conflictFilesFromMergeError, parkedMergeGuidance } from "./merge-park-guidance.js";
-import {
-  mergeCandidateRegisteredTests,
-  registryMergeCheckFailureKind,
-  runRegisteredTest,
-  runRegisteredTestsForMergeCandidate,
-} from "../../../shared/tools/functions/toolkit/registered-tests.js";
-import {
-  declaredMergeCandidateCommands,
-  runDeclaredMergeCandidateChecks,
-  withTemporaryMergeCandidateCheckout,
-} from "./merge-candidate-checks.js";
+import { mergeCandidateRegisteredTests, registryMergeCheckFailureKind, runRegisteredTest, runRegisteredTestsForMergeCandidate } from "../../../shared/tools/functions/toolkit/registered-tests.js";
+import { declaredMergeCandidateCommands, runDeclaredMergeCandidateChecks, withTemporaryMergeCandidateCheckout } from "./merge-candidate-checks.js";
 import { classifyMergeTargetDebt, classifyUnavailableMergeCheck, mergeCheckFailureFingerprint } from "./merge-target-debt.js";
 import { boundMergeGateEvidence, mergeGateOutputTail } from "./merge-failure-diagnostics.js";
-import {
-  MERGE_CLOSEOUT_WORKTREE_PREFIX,
-  MERGE_GATE_STORED_RESULTS,
-  MERGE_GATE_TASK_RESERVE_MS,
-  MERGE_GATE_WALL_BUDGET_MS,
-  MERGE_TARGET_COMPARISON_OUTCOMES,
-  MERGE_TARGET_DEBT_OUTCOMES,
-  MERGE_TARGET_PROCEEDING_OUTCOMES,
-} from "../../../catalog/verification.js";
-import {
-  readMergeInProgressMarker,
-  recoverInterruptedSquash as recoverInterruptedSquashIn,
-  removeMergeInProgressMarker,
-  writeMergeInProgressMarker,
-} from "./merge-interrupted-squash.js";
+import { MERGE_CLOSEOUT_WORKTREE_PREFIX, MERGE_GATE_STORED_RESULTS, MERGE_GATE_TASK_RESERVE_MS, MERGE_GATE_WALL_BUDGET_MS, MERGE_TARGET_COMPARISON_OUTCOMES, MERGE_TARGET_DEBT_OUTCOMES, MERGE_TARGET_PROCEEDING_OUTCOMES } from "../../../catalog/verification.js";
+import { readMergeInProgressMarker, recoverInterruptedSquash as recoverInterruptedSquashIn, removeMergeInProgressMarker, writeMergeInProgressMarker } from "./merge-interrupted-squash.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { passingReceiptCommits, postChangeReceiptsAtCommit } from "../../queue/functions/verification-receipts.js";
@@ -102,63 +46,7 @@ function reservedRuntimeMergeError(paths = []) {
   return error;
 }
 
-/**
- * Append a failing check to a work item's target_debt (the work item whose
- * merge commit introduced it), or extend the matching entry's blocked work
- * items. Returns the stored entry, or null when the work item is gone.
- */
-export function recordTargetDebt(workItemId, record) {
-  let stored = null;
-  getDb().transaction(() => {
-    const row = getWorkItem(workItemId);
-    if (!row) return;
-    let metadata;
-    try { metadata = JSON.parse(row.metadata_json || "{}"); } catch { metadata = {}; }
-    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) metadata = {};
-    const existing = Array.isArray(metadata.target_debt) ? metadata.target_debt : [];
-    const prior = existing.find((item) => item.command === record.command
-      && (item.failure_fingerprint || null) === (record.failure_fingerprint || null) && item.commit === record.commit);
-    if (prior) {
-      prior.blocked_work_item_ids = [...new Set([...(prior.blocked_work_item_ids || []), ...(record.blocked_work_item_ids || [])])];
-      stored = prior;
-    } else {
-      stored = { ...record, blocked_work_item_ids: record.blocked_work_item_ids || [], recorded_at: new Date().toISOString() };
-      existing.push(stored);
-    }
-    updateWorkItemMetadata(workItemId, { ...metadata, target_debt: existing });
-  })();
-  return stored;
-}
 
-/**
- * A merge whose candidate passed `command` (in `cwdRelative`) clears the
- * open target_debt entries for that check: the target no longer fails it.
- */
-function resolveTargetDebtEntries({ command, cwdRelative = null, workItemId, mergeHash }) {
-  const resolved = [];
-  getDb().transaction(() => {
-    const rows = getDb().prepare(`
-      SELECT id FROM work_items
-      WHERE json_valid(metadata_json) AND json_extract(metadata_json, '$.target_debt') IS NOT NULL
-    `).all();
-    for (const { id } of rows) {
-      const row = getWorkItem(id);
-      let metadata;
-      try { metadata = JSON.parse(row?.metadata_json || "{}"); } catch { continue; }
-      const entries = Array.isArray(metadata?.target_debt) ? metadata.target_debt : [];
-      let changed = false;
-      for (const entry of entries) {
-        if (entry.resolved_by || entry.command !== command || (entry.cwd_relative || null) !== (cwdRelative || null)) continue;
-        if (entry.commit === mergeHash) continue;
-        entry.resolved_by = { work_item_id: workItemId, commit: mergeHash, resolved_at: new Date().toISOString() };
-        changed = true;
-        resolved.push({ work_item_id: Number(id), command, commit: entry.commit });
-      }
-      if (changed) updateWorkItemMetadata(id, { ...metadata, target_debt: entries });
-    }
-  })();
-  return resolved;
-}
 
 export function createMergeWorkflowHelpers(context, {
   ensureCleanTargetBranch,

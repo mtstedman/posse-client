@@ -170,7 +170,7 @@ export class DisplayOverlayRenderer {
     const boxH = content.length + 2;
     const col = Math.max(1, Math.floor((this.cols - boxW) / 2) + 1);
     const row = Math.max(2, Math.floor((this.rows - boxH) / 2) + 1);
-    const pad = " ".repeat(innerW);
+    (" ".repeat(innerW));
     let out = buf + `\x1b[${row};${col}H${C.yellow}${C.bold}\u250c${"\u2500".repeat(innerW)}\u2510${C.reset}`;
     for (let i = 0; i < content.length; i++) {
       out += `\x1b[${row + i + 1};${col}H${C.yellow}${C.bold}\u2502${C.reset}${fit(content[i], innerW)}${C.yellow}${C.bold}\u2502${C.reset}`;

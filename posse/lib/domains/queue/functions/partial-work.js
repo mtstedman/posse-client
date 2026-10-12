@@ -6,22 +6,10 @@
 // require an explicit "merge partial work" confirmation first.
 
 import { FAILED_JOB_STATUSES, MUTATING_JOB_TYPES } from "../../../catalog/job.js";
-import { buildJobsByParent, isSuggestionJob } from "./failure-actionability.js";
+import { isSuggestionJob } from "./failure-actionability.js";
+import { buildJobRecoveryGraph, hasSucceededRecoveryDescendant } from "./job-recovery-graph.js";
 
 const FAILURE_STATUSES = new Set(FAILED_JOB_STATUSES);
-
-function hasSucceededDescendant(jobId, byParent) {
-  const stack = [...(byParent.get(jobId) || [])];
-  const seen = new Set();
-  while (stack.length > 0) {
-    const current = stack.pop();
-    if (!current || seen.has(current.id)) continue;
-    seen.add(current.id);
-    if (current.status === "succeeded" && current.job_type !== "human_input") return true;
-    stack.push(...(byParent.get(current.id) || []));
-  }
-  return false;
-}
 
 /**
  * Implementation jobs (dev, fix, artificer, promote) that failed, dead-lettered
@@ -33,7 +21,7 @@ function hasSucceededDescendant(jobId, byParent) {
  */
 export function listPartialWorkJobs(jobs = []) {
   const rows = (Array.isArray(jobs) ? jobs : []).filter(Boolean);
-  const byParent = buildJobsByParent(rows);
+  const byOriginal = buildJobRecoveryGraph(rows);
   const latestSucceededPlanId = rows.reduce((latest, job) => (
     job.job_type === "plan" && job.status === "succeeded"
       ? Math.max(latest, Number(job.id) || 0)
@@ -43,7 +31,7 @@ export function listPartialWorkJobs(jobs = []) {
     if (!MUTATING_JOB_TYPES.has(job.job_type)) return false;
     if (job.status !== "canceled" && !FAILURE_STATUSES.has(job.status)) return false;
     if (isSuggestionJob(job)) return false;
-    if (hasSucceededDescendant(job.id, byParent)) return false;
+    if (hasSucceededRecoveryDescendant(job.id, byOriginal)) return false;
     return !(Number(job.id) < latestSucceededPlanId);
   });
 }

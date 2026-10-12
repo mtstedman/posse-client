@@ -1,89 +1,29 @@
+import { hasOwn, parseEditJsonPath, setJsonPathValue, splitReplacementLines, joinEditableLines, detectJsonIndent } from "./edit-json.js";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
-import { execSync, spawnSync } from "child_process";
+import { spawnSync } from "child_process";
 import { StringDecoder } from "string_decoder";
 
 import { guardToolWriteLock, restoreMissingMaterializedFile } from "../../../../domains/queue/functions/write-lock-guard.js";
 import { createInspectFileExecutor } from "../../../../domains/worker/functions/helpers/file-inspector.js";
 import { createGitHistoryExecutor } from "../../../../domains/git/functions/history.js";
 import { createPullBriefExecutor, createGetBriefExecutor } from "./brief.js";
-import { createBashExecutor } from "./bash-executor.js";
+import "./bash-executor.js";
 import { createHashRefTool, fetchHashRefTool } from "../hash-adder.js";
-import {
-  convertImageToPng,
-  convertImageToJpeg,
-  decodePngToRgba,
-  detectImageFormat,
-  encodeRgbaToPng,
-  PNG_SIGNATURE,
-  readJpegDimensions,
-  resizeRgbaNearest,
-  stripPngMetadataChunks,
-} from "./image-codec.js";
-import {
-  addAgentHiddenRipgrepGlobs,
-  addRipgrepSkipGlobs,
-  compactRipgrepStderr,
-  formatRipgrepRequirementError,
-  globToRegex,
-  isWorkspaceRootIgnoredByGit,
-  makeGitIgnoreChecker,
-  parseRipgrepJsonMatches,
-  regexPatternNeedsMultiline,
-  resolveRipgrepCommand,
-  ripgrepIncludeGlob,
-} from "./ripgrep.js";
+import { convertImageToPng, convertImageToJpeg, decodePngToRgba, detectImageFormat, encodeRgbaToPng, PNG_SIGNATURE, readJpegDimensions, resizeRgbaNearest, stripPngMetadataChunks } from "./image-codec.js";
+import { addAgentHiddenRipgrepGlobs, addRipgrepSkipGlobs, compactRipgrepStderr, formatRipgrepRequirementError, isWorkspaceRootIgnoredByGit, makeGitIgnoreChecker, parseRipgrepJsonMatches, regexPatternNeedsMultiline, resolveRipgrepCommand, ripgrepIncludeGlob } from "./ripgrep.js";
 import { sanitizeAbsolutePathsInText, toDisplayPath } from "../../../format/functions/display-paths.js";
-import {
-  agentHiddenPathError,
-  agentHiddenPathReasonForAbsolute,
-  buildScopePredicates,
-  DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
-  isSensitiveEnvFileOrTargetPath,
-  isSensitiveEnvFilePath,
-  isUnreadablePath,
-  resolveDeterministicReadableFile,
-  safePath,
-  splitShellSubcommands,
-} from "./path-policy.js";
+import { agentHiddenPathError, agentHiddenPathReasonForAbsolute, buildScopePredicates, DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES, isSensitiveEnvFileOrTargetPath, isSensitiveEnvFilePath, isUnreadablePath, resolveDeterministicReadableFile, safePath, splitShellSubcommands } from "./path-policy.js";
 import { createTestExecutionExecutors } from "./test-execution.js";
 import { createObservationWrapper } from "./factory.js";
 import { boundedSearchRows, renderSearchContentRows } from "./search-results.js";
 import { createTextMutationHelpers } from "./edits-mutations.js";
 import { applyAtomicEdits, ambiguousExactMatchMessage, EMPTY_OLD_STRING_ERROR } from "./edit-spans.js";
-import {
-  buildStructuredReadResult as buildStructuredReadResultFromModule,
-  formatNumberedLines as formatNumberedLinesFromModule,
-  hasStructuredReadOptions as hasStructuredReadOptionsFromModule,
-  looksReDosProne as looksReDosProneFromModule,
-  splitEditableLines as splitEditableLinesFromModule,
-} from "./structured-read.js";
-import {
-  TOOL_CLEAN_IMAGE,
-  TOOL_EDIT_FILE,
-  TOOL_EXTRACT_IMAGE_TEXT,
-  TOOL_HASH_FILE,
-  TOOL_LIST_FILES,
-  TOOL_OPTIMIZE_IMAGE,
-  TOOL_PRUNE_ARTIFACT_OUTPUT,
-  TOOL_READ_FILE,
-  TOOL_READ_IMAGE_METADATA,
-  TOOL_REQUEST_SCOPE,
-  TOOL_REENCODE_IMAGE,
-  TOOL_RESIZE_IMAGE,
-  TOOL_RUN_SCOPED_CHECKS,
-  TOOL_RUN_UNIT_TEST,
-  TOOL_SEARCH_FILES,
-  TOOL_VALIDATE_ARTIFACT_OUTPUT,
-  TOOL_WRITE_FILE,
-} from "../../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
+import { buildStructuredReadResult as buildStructuredReadResultFromModule, formatNumberedLines as formatNumberedLinesFromModule, hasStructuredReadOptions as hasStructuredReadOptionsFromModule, looksReDosProne as looksReDosProneFromModule, splitEditableLines as splitEditableLinesFromModule } from "./structured-read.js";
+import "../../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { createWorkspaceSkipDirs } from "../../../../domains/runtime/functions/workspace-skip.js";
-import {
-  buildManifest,
-  getArtifactProtocol,
-  validateManifestAgainstContract,
-} from "../../../../domains/artifacts/functions/index.js";
+import { buildManifest, getArtifactProtocol, validateManifestAgainstContract } from "../../../../domains/artifacts/functions/index.js";
 import { normPath, resolvePathWithin } from "../../../scope/functions/path.js";
 
 const READ_FILE_DEFAULT_LIMIT = 2000;
@@ -99,8 +39,8 @@ const HASH_FILE_MAX_SIZE_BYTES = 512 * 1024 * 1024;
 const EDIT_FILE_MAX_PATTERN_CHARS = 500;
 const EDIT_FILE_REPLACE_PATTERN_TIMEOUT_MS = 2000;
 const EDIT_FILE_MAX_PATTERN_MATCHES = 10000;
-const EDIT_FILE_MAX_JSON_PATH_CHARS = 200;
-const EDIT_FILE_BLOCKED_JSON_PATH_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
+
+
 const REPLACE_PATTERN_WORKER_SCRIPT = `
 const fs = require("fs");
 try {
@@ -138,74 +78,11 @@ function toPositiveInt(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-function hasOwn(value, key) {
-  return Object.prototype.hasOwnProperty.call(Object(value), key);
-}
 
-function parseEditJsonPath(jsonPath) {
-  const raw = String(jsonPath || "").trim();
-  if (!raw) return { ok: false, message: "jsonPath mode requires jsonPath." };
-  if (raw.length > EDIT_FILE_MAX_JSON_PATH_CHARS) {
-    return { ok: false, message: `jsonPath exceeds ${EDIT_FILE_MAX_JSON_PATH_CHARS} characters.` };
-  }
-  const segments = raw.split(".").map((segment) => segment.trim()).filter(Boolean);
-  if (segments.length === 0) return { ok: false, message: "jsonPath mode requires at least one path segment." };
-  const unsafe = segments.find((segment) => EDIT_FILE_BLOCKED_JSON_PATH_SEGMENTS.has(segment));
-  if (unsafe) return { ok: false, message: `jsonPath contains unsafe segment: ${unsafe}` };
-  return { ok: true, segments };
-}
 
-function setJsonPathValue(root, segments, value) {
-  let cursor = root;
-  for (let i = 0; i < segments.length - 1; i += 1) {
-    const segment = segments[i];
-    if (cursor == null || typeof cursor !== "object") {
-      return { ok: false, message: `jsonPath segment does not resolve to an object: ${segment}` };
-    }
-    if (Array.isArray(cursor)) {
-      if (!/^\d+$/.test(segment)) return { ok: false, message: `jsonPath array segment must be a non-negative integer: ${segment}` };
-      const index = Number(segment);
-      if (index < 0 || index >= cursor.length) return { ok: false, message: `jsonPath array index is out of range: ${segment}` };
-      cursor = cursor[index];
-    } else {
-      if (!hasOwn(cursor, segment)) return { ok: false, message: `jsonPath segment was not found: ${segment}` };
-      cursor = cursor[segment];
-    }
-  }
 
-  const leaf = segments[segments.length - 1];
-  if (cursor == null || typeof cursor !== "object") {
-    return { ok: false, message: `jsonPath parent does not resolve to an object: ${leaf}` };
-  }
-  if (Array.isArray(cursor)) {
-    if (!/^\d+$/.test(leaf)) return { ok: false, message: `jsonPath array leaf must be a non-negative integer: ${leaf}` };
-    const index = Number(leaf);
-    if (index < 0 || index >= cursor.length) return { ok: false, message: `jsonPath array index is out of range: ${leaf}` };
-    cursor[index] = value;
-    return { ok: true };
-  }
-  cursor[leaf] = value;
-  return { ok: true };
-}
 
-function splitReplacementLines(value) {
-  const normalized = String(value ?? "").replace(/\r\n/g, "\n");
-  const body = normalized.endsWith("\n") ? normalized.slice(0, -1) : normalized;
-  return body.length > 0 ? body.split("\n") : [];
-}
 
-function joinEditableLines(lines, eol, hadFinalEol) {
-  return lines.join(eol) + (hadFinalEol ? eol : "");
-}
-
-function detectJsonIndent(content) {
-  const lines = String(content || "").split(/\r?\n/);
-  for (const line of lines) {
-    const match = /^([ \t]+)(?:"|[{[]|[-\dtnf])/.exec(line);
-    if (match) return match[1].slice(0, 10);
-  }
-  return "  ";
-}
 
 function applyReplacePatternWithBudget({ content, pattern, replacement, global, spawnSyncImpl }) {
   const input = JSON.stringify({
@@ -302,7 +179,7 @@ export { globToRegex, resolveRipgrepCommand } from "./ripgrep.js";
 
 export const DEFAULT_SKIP_DIRS = createWorkspaceSkipDirs();
 const SEARCH_MAX_FILE_BYTES = 5 * 1024 * 1024;
-const SEARCH_BINARY_SNIFF_BYTES = 8 * 1024;
+(8 * 1024);
 const SEARCH_DEFAULT_HEAD_LIMIT = 100;
 const SEARCH_MAX_HEAD_LIMIT = 500;
 const SEARCH_RIPGREP_MAX_BUFFER = 32 * 1024 * 1024;
@@ -323,10 +200,7 @@ function toNonNegativeInt(value, fallback = 0) {
   return Math.max(0, Math.floor(parsed));
 }
 
-function isSuccessfulToolResult(result) {
-  const text = typeof result === "string" ? result : String(result ?? "");
-  return !/^(?:Error:|AUDIT ERROR:)/i.test(text);
-}
+
 
 function readLargeFilePage(filePath, { offset, limit, maxBytes = DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES }) {
   const firstLine = offset + 1;

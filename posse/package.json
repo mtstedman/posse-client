@@ -1,7 +1,7 @@
 {
   "name": "claude-org",
   "version": "4.0.0",
-  "description": "SQLite-backed orchestrator for Claude Code with job queue: Researcher + Planner + Dev + Assessor",
+  "description": "SQLite-backed orchestrator for repository work with provider routing, isolated worktrees, verification, and assessment",
   "type": "module",
   "bin": {
     "claude-org": "./orchestrator.js",
@@ -23,23 +23,9 @@
     "go": "node orchestrator.js go",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json",
-    "benchmark:atlas:comprehensive": "node scripts/atlas-comprehensive-benchmark.mjs",
-    "benchmark:atlas:quality": "node scripts/atlas-quality-benchmark.mjs --cold-boot --repo requests --repo streaming --repo mike --repo express --repo flask --repo monolog",
-    "benchmark:atlas:quality:streaming": "node scripts/atlas-quality-benchmark.mjs --cold-boot --repo streaming",
     "posse-shared-trunk-smoke": "node orchestrator.js shared-trunk-smoke --json",
     "check:protocol": "node scripts/check-control-protocol-drift.mjs",
-    "contract:agent-tools:check": "node scripts/generate-agent-tool-contract.mjs --check",
-    "contract:agent-tools:write": "node scripts/generate-agent-tool-contract.mjs --write",
-    "contract:remote-agent-tools:check": "node scripts/generate-remote-agent-tool-definitions.mjs --check",
-    "contract:remote-agent-tools:write": "node scripts/generate-remote-agent-tool-definitions.mjs --write",
-    "contract:posse-remote:check": "node scripts/verify-posse-remote-tool-policy.mjs",
-    "smoke:provider-tools": "node scripts/provider-tool-smoke.mjs --check",
-    "check:log-secrets": "node scripts/check-log-secrets.mjs",
-    "pull:native": "node scripts/pull-native-artifacts.mjs",
-    "compile:native:encoder": "node scripts/rebuild-rust-binaries.mjs --platform windows --binary atlas,git,remote",
-    "compile:native:vector": "node scripts/rebuild-rust-binaries.mjs --platform windows --binary vector",
-    "rebuild:rust-binaries": "node scripts/rebuild-rust-binaries.mjs",
-    "rebuild:rust-binaries:all": "node scripts/rebuild-rust-binaries.mjs --platform all"
+    "pull:native": "node scripts/pull-native-artifacts.mjs"
   },
   "engines": {
     "node": ">=24"

@@ -45,3 +45,14 @@ export function sanitizeAtlasSymbolIdList(values = [], maxItems = 30, fieldName 
   }
   return out;
 }
+
+// Storage compatibility accepts the historical numeric local-id grammar.
+export function parseLedgerSymbolId(id) {
+  if (typeof id !== "string") return null;
+  const idx = id.indexOf(":");
+  if (idx <= 0 || idx === id.length - 1) return null;
+  const ch = id.slice(0, idx);
+  const lid = Number(id.slice(idx + 1));
+  if (!/^[0-9a-f]{64}$/.test(ch) || !Number.isInteger(lid) || lid < 0) return null;
+  return { content_hash: ch, local_id: lid };
+}

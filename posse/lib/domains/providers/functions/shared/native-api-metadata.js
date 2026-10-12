@@ -1,4 +1,5 @@
-import { getSetting } from "../../../queue/functions/index.js";
+import { readModelSetting } from "./setting-read.js";
+import "../../../queue/functions/index.js";
 import { getProviderTierDefaults } from "../model-catalog.js";
 import { selectExecutionModel } from "./model-selection.js";
 import { escalateModelTier } from "./turns.js";
@@ -13,9 +14,7 @@ export function nativeApiMetadata(provider, credential) {
   const MODEL_TIERS = Object.fromEntries([
     ["cheap", "$ CHEAP", "dim", "low"], ["standard", "STANDARD", "cyan", "medium"], ["strong", "STRONG", "magenta", "high"],
   ].map(([tier, label, color, effort]) => [tier, { model: defaults[tier].model, thinking: false, label, color, effort }]));
-  const setting = key => {
-    try { return String(getSetting(key) || "").trim() || null; } catch { return null; }
-  };
+  const setting = readModelSetting;
   const getModelTierConfig = (tier = "standard") => {
     const key = tier in MODEL_TIERS ? tier : "standard";
     return { ...MODEL_TIERS[key], model: setting(`${provider}_model_${key}`) || MODEL_TIERS[key].model };

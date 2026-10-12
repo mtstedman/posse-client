@@ -8,66 +8,25 @@
 // Uses the alternate screen buffer so the TUI never pollutes scrollback.
 // Supports raw stdin keypress input for questions, inject, kill commands.
 
-import readline from "readline";
 import { C } from "../../../../shared/format/functions/colors.js";
-import { tierModelName } from "../../../providers/functions/provider.js";
-import { FAILED_JOB_STATUSES } from "../../../queue/functions/common.js";
-import {
-  listWorkItems,
-  listJobs,
-} from "../../../queue/functions/index.js";
-import {
-  stripAnsi,
-  fit,
-  formatConsoleArg,
-  _fmtTokens,
-  _fmtUsd,
-  _wrapQuestionBodyLines,
-  _sanitizeDisplayLine,
-  _colorizeAssessorVerdictWords,
-  _isNoisyStructuredStderr,
-  _isLowSignalStructuredMarker,
-} from "../../functions/display/helpers/formatters.js";
-import {
-  JOB_TYPE_ABBR,
-  JOB_TYPE_COLORS_KEY,
-  jobLabel,
-  jobReportStatus,
-  jobDisplayStatus,
-  jobIsDisplayFailure,
-  jobIsDisplaySuccess,
-  workItemDisplayStatus,
-} from "../../functions/display/helpers/job-status.js";
-import {
-  PROVIDER_USAGE_REFRESH_MS,
-  getProviderUsageSummaryCache,
-  _refreshProviderUsageSummaryCacheIfChanged,
-  _taskProviderBudgetLines,
-  _buildQueueProviderUsageLines,
-} from "../../functions/display/helpers/provider-usage.js";
+import "../../../providers/functions/provider.js";
+import "../../../queue/functions/index.js";
+import { _fmtTokens, _fmtUsd, _wrapQuestionBodyLines, _sanitizeDisplayLine, _colorizeAssessorVerdictWords, _isNoisyStructuredStderr, _isLowSignalStructuredMarker } from "../../functions/display/helpers/formatters.js";
+import { jobLabel, jobReportStatus, workItemDisplayStatus } from "../../functions/display/helpers/job-status.js";
+import { _refreshProviderUsageSummaryCacheIfChanged, _taskProviderBudgetLines, _buildQueueProviderUsageLines } from "../../functions/display/helpers/provider-usage.js";
 import { getReviewDirtyState } from "../../functions/display/helpers/review-dirty-state.js";
 import { partialWorkToMerge } from "../../../queue/functions/partial-work.js";
-import { resolveCanonicalCallAccounting } from "../../../billing/functions/usage-segments.js";
+import "../../../billing/functions/usage-segments.js";
 
 export { jobLabel, jobReportStatus, workItemDisplayStatus };
 
-function computeRenderMinGap({ force = false, reason = "general", pendingInput = false } = {}) {
-  if (force) return 16;
-  if (pendingInput) return 24;
-  if (reason === "stream") return 33;
-  if (reason === "event") return 40;
-  return 48;
-}
 
-const WORKER_BOOT_SLOW_MS = 15_000;
-const WORKER_BOOT_STALLED_MS = 45_000;
 
-const JOB_FAILURE_STATUSES = new Set(FAILED_JOB_STATUSES);
 
-function resolvedCallCostUsd(call) {
-  const accounting = resolveCanonicalCallAccounting(call);
-  return Number.isFinite(accounting.costUsd) ? accounting.costUsd : 0;
-}
+
+
+
+
 
 function keyName(key) {
   return typeof key?.name === "string" ? key.name.toLowerCase() : "";

@@ -2,133 +2,31 @@
 // rendering, and the inline editors. Methods run with the AdminTUI instance as
 // `this` (AdminTUI delegates to them).
 
-import readline from "readline";
-import {
-  buildProviderUsageWindowMap,
-  clipPlainTail,
-  correspondingLimitSettingKey,
-  fit,
-  fmtDate,
-  formatModelSettingDisplayValue,
-  formatProviderSettingValue,
-  formatProviderUsageHeader,
-  formatProviderUsageWindow,
-  getPrintableInput,
-  getProviderUsageSettingHint,
-  isBackspaceKey,
-  isBooleanSettingValue,
-  isEnterKey,
-  loadIndexedReport,
-  loadReportIndex,
-  loadReports,
-  matchesHotkey,
-  normalizeRawInput,
-  parseProviderList,
-  parseProviderUsageSettingKey,
-  parseReportTimestamp,
-  resolveEffectiveImageModelSetting,
-  resolveEffectiveModelSetting,
-  renderUsageBar,
-  runtimeDbLooksBusyOrCorrupt,
-  toDisplaySettingEntry,
-  visibleLength,
-} from "../../functions/admin/shared-helpers.js";
-import fs from "fs";
+import { clipPlainTail, correspondingLimitSettingKey, fit, formatModelSettingDisplayValue, formatProviderSettingValue, getPrintableInput, isBackspaceKey, isBooleanSettingValue, isEnterKey, parseProviderList, parseProviderUsageSettingKey, resolveEffectiveImageModelSetting, resolveEffectiveModelSetting, runtimeDbLooksBusyOrCorrupt, toDisplaySettingEntry, visibleLength } from "../../functions/admin/shared-helpers.js";
 import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
-import { getDb } from "../../../../shared/storage/functions/index.js";
-import {
-  listWorkItems,
-  listJobs,
-  getAgentCallStats,
-  getScopeContextHealthMetrics,
-  listSettings,
-  getSetting,
-  setSetting,
-  listWorkItemsWithCallRollups,
-  getAgentCallsWithToolCountsByWorkItem,
-  getAgentCallById,
-  getToolInvocationsForAgentCall,
-  getJob,
-} from "../../../queue/functions/index.js";
-import {
-  getConfiguredImageModel,
-  getConfiguredImageProviders,
-} from "../../../artifacts/functions/index.js";
-import { getConfiguredProviderUsage, inferProviderWindowLimit } from "../../../providers/functions/provider.js";
-import { getRuntimeDbPath, getRuntimeLogDir, getRuntimeReportsDir } from "../../../runtime/functions/paths.js";
-import { jobReportStatus, workItemDisplayStatus } from "../display/Display.js";
-import { getAccountSetting, getAccountSettingsPathForDisplay } from "../../../settings/functions/account-settings.js";
-import { closePromptLog, promptPreviewText, readRecentPrompts } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
-import { closeOutputLog, readRecentOutputs } from "../../../../shared/telemetry/functions/logging/output-log.js";
-import { closeLog } from "../../../../shared/telemetry/functions/logging/logger.js";
-import { buildCurrentRoleContract } from "../../../worker/functions/role-contract-view.js";
+import "../../../../shared/storage/functions/index.js";
+import { listSettings, getSetting, setSetting } from "../../../queue/functions/index.js";
+import { getConfiguredImageModel, getConfiguredImageProviders } from "../../../artifacts/functions/index.js";
+import { inferProviderWindowLimit } from "../../../providers/functions/provider.js";
+import { getRuntimeDbPath } from "../../../runtime/functions/paths.js";
+import "../display/Display.js";
+import "../../../settings/functions/account-settings.js";
+import "../../../../shared/telemetry/functions/logging/prompt-log.js";
+import "../../../../shared/telemetry/functions/logging/output-log.js";
+import "../../../../shared/telemetry/functions/logging/logger.js";
+import "../../../worker/functions/role-contract-view.js";
 import { getCatalogEntry, isAdminVisibleCatalogKey } from "../../../settings/functions/catalog.js";
-import {
-  loadSkillManifests,
-  parseSkillIds,
-  setSkillEnabled,
-} from "../../../../shared/skills/functions/registry.js";
-import {
-  IMAGE_PROVIDER_OPTIONS,
-  MODEL_SETTING_DEFS,
-  PROVIDER_LABELS,
-  PROVIDER_OPTIONS,
-  getImageModelOptions,
-  getProviderTierDefaults,
-} from "../../../providers/functions/model-catalog.js";
+import { loadSkillManifests, parseSkillIds, setSkillEnabled } from "../../../../shared/skills/functions/registry.js";
+import { IMAGE_PROVIDER_OPTIONS, MODEL_SETTING_DEFS, PROVIDER_LABELS, PROVIDER_OPTIONS, getImageModelOptions } from "../../../providers/functions/model-catalog.js";
 import { PROVIDER_ROLE_NAMES } from "../../../providers/functions/roles.js";
-import { fit as fitAnsi, stripAnsi } from "../../../../shared/format/functions/ansi.js";
-import {
-  formatDuration as fmtDuration,
-  formatRelativeTime as fmtRelativeTime,
-  formatSignedTokens as fmtSignedTokens,
-  formatTokens as fmtTokens,
-  formatUsd as fmtUsd,
-} from "../../../../shared/format/functions/units.js";
-import {
-  ADMIN_DEFAULT_SETTINGS_PANE,
-  ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS,
-  ADMIN_AGENT_SETTING_SECTIONS as AGENT_SETTING_SECTIONS,
-  ADMIN_CREDENTIAL_SETTING_DEFS,
-  ADMIN_IMAGE_SETTING_SECTIONS as IMAGE_SETTING_SECTIONS,
-  ADMIN_PROVIDER_CATALOG_SETTING_KEYS as PROVIDER_CATALOG_SETTING_KEYS,
-  ADMIN_PROVIDER_SETTING_SECTIONS as PROVIDER_SETTING_SECTIONS,
-  BOOLEAN_SETTING_KEYS,
-  DEFAULT_ACCOUNT_SETTING_ROWS,
-  ENUM_SETTING_OPTIONS,
-  HIDDEN_SETTING_KEYS,
-  MULTI_SETTING_KEYS,
-  MULTI_SETTING_OPTIONS,
-  MULTI_SETTING_VALUES,
-  NUMERIC_SETTING_RULES,
-  PROVIDER_SETTING_KEYS,
-  PROJECT_DB_SETTING_KEYS,
-  PROJECT_DB_TYPE_OPTIONS,
-  PROJECT_DB_PERMISSION_OPTIONS,
-  REPO_SCOPED_DISPLAY_KEYS,
-  SETTINGS_GROUPS,
-  SETTINGS_PANES,
-  adminUnsetValueLabel,
-  formatAdminSettingValue,
-  getAdminSettingPresentation,
-  settingsPaneForKey,
-  SKILL_SETTING_PREFIX,
-  toDisplaySettingKey,
-  toStorageSettingKey,
-} from "../../../settings/functions/admin-catalog.js";
-import {
-  getModelChoicesForEntry,
-  getSelectableImageProviders,
-  isAdminProviderOption,
-  validateAdminSettingValue,
-} from "../../../settings/functions/admin-validation.js";
+import { stripAnsi } from "../../../../shared/format/functions/ansi.js";
+import "../../../../shared/format/functions/units.js";
+import { ADMIN_DEFAULT_SETTINGS_PANE, ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS, ADMIN_AGENT_SETTING_SECTIONS as AGENT_SETTING_SECTIONS, ADMIN_CREDENTIAL_SETTING_DEFS, ADMIN_IMAGE_SETTING_SECTIONS as IMAGE_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS as PROVIDER_CATALOG_SETTING_KEYS, ADMIN_PROVIDER_SETTING_SECTIONS as PROVIDER_SETTING_SECTIONS, BOOLEAN_SETTING_KEYS, DEFAULT_ACCOUNT_SETTING_ROWS, ENUM_SETTING_OPTIONS, HIDDEN_SETTING_KEYS, MULTI_SETTING_KEYS, MULTI_SETTING_OPTIONS, MULTI_SETTING_VALUES, PROVIDER_SETTING_KEYS, PROJECT_DB_SETTING_KEYS, PROJECT_DB_TYPE_OPTIONS, PROJECT_DB_PERMISSION_OPTIONS, REPO_SCOPED_DISPLAY_KEYS, SETTINGS_GROUPS, SETTINGS_PANES, adminUnsetValueLabel, formatAdminSettingValue, getAdminSettingPresentation, settingsPaneForKey, SKILL_SETTING_PREFIX, toDisplaySettingKey, toStorageSettingKey } from "../../../settings/functions/admin-catalog.js";
+import { getModelChoicesForEntry, getSelectableImageProviders, isAdminProviderOption, validateAdminSettingValue } from "../../../settings/functions/admin-validation.js";
 export { validateAdminSettingValue };
-import {
-  readProjectDbConfig,
-  writeProjectDbConfig,
-} from "../../../../shared/tools/functions/toolkit/project-db/config.js";
+import { readProjectDbConfig, writeProjectDbConfig } from "../../../../shared/tools/functions/toolkit/project-db/config.js";
 import { installScipLanguageDependencies } from "../../../atlas/functions/v2/scip/dependencies.js";
 import { brandRule } from "../../functions/display/helpers/brand.js";
 const PROVIDER_USAGE_SETTING_DEFS = [
@@ -144,84 +42,13 @@ function setSettingWithRuntimeSync(settingKey, value, projectDir = null) {
   setSetting(settingKey, value, { projectDir });
 }
 
-function getHistoryJobPresentation(job, jobs = []) {
-  const rawStatus = job?.status || "unknown";
-  const attemptCount = Number(job?.attempts || job?.attempt_count || 0) || 0;
-  const displayStatus = jobReportStatus(job, jobs);
 
-  if ((rawStatus === "queued" || rawStatus === "leased" || rawStatus === "running") && attemptCount > 1) {
-    return {
-      displayStatus: "retrying",
-      icon: `${C.yellow}\u21bb`,
-      label: `retrying after ${attemptCount - 1} failed attempt${attemptCount - 1 === 1 ? "" : "s"}`,
-      attemptTag: `${attemptCount} attempts so far`,
-    };
-  }
 
-  if (rawStatus === "succeeded" && attemptCount > 1) {
-    return {
-      displayStatus: "recovered",
-      icon: `${C.yellow}\u21bb`,
-      label: `recovered after retry`,
-      attemptTag: `${attemptCount} attempts`,
-    };
-  }
 
-  if (displayStatus === "recovered") {
-    return {
-      displayStatus,
-      icon: `${C.yellow}\u21bb`,
-      label: "recovered",
-      attemptTag: attemptCount > 0 ? `${attemptCount} attempts` : null,
-    };
-  }
-
-  if (displayStatus === "succeeded") {
-    return {
-      displayStatus,
-      icon: `${C.green}\u2713`,
-      label: "succeeded",
-      attemptTag: attemptCount > 0 ? `${attemptCount} attempt${attemptCount === 1 ? "" : "s"}` : null,
-    };
-  }
-
-  if (displayStatus === "failed" || displayStatus === "dead_letter") {
-    return {
-      displayStatus,
-      icon: `${C.red}\u2717`,
-      label: displayStatus,
-      attemptTag: attemptCount > 0 ? `${attemptCount} attempt${attemptCount === 1 ? "" : "s"}` : null,
-    };
-  }
-
-  if (rawStatus === "running") {
-    return { displayStatus: rawStatus, icon: `${C.yellow}\u25b6`, label: "running", attemptTag: attemptCount > 0 ? `${attemptCount} attempt${attemptCount === 1 ? "" : "s"}` : null };
-  }
-
-  return {
-    displayStatus: rawStatus,
-    icon: `${C.dim}\u00b7`,
-    label: rawStatus,
-    attemptTag: attemptCount > 0 ? `${attemptCount} attempt${attemptCount === 1 ? "" : "s"}` : null,
-  };
-}
-
-function canUseAdminTui({ stdin = process.stdin, stdout = process.stdout } = {}) {
-  return !!(
-    stdin?.isTTY &&
-    stdout?.isTTY &&
-    typeof stdin?.setRawMode === "function"
-  );
-}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function normalizeAdminLine(str) {
-  return String(str ?? "")
-    .replace(/\u00c3\u00a2\u201d\u20ac/g, "\u2500")
-    .replace(/\u00e2\u201d\u20ac/g, "\u2500")
-    .replace(/\u00e2\u20ac\u201d/g, "\u2014");
-}
+
 
 // Key column width budget — clamped so very long catalog keys
 // (e.g. context_expand_file_budget_per_attempt, 38 chars) still get
@@ -278,11 +105,7 @@ function getEffectiveImageModelSetting(def) {
   return resolveEffectiveImageModelSetting(def, safeGetSetting(def.key));
 }
 
-function getProviderUsageStoredValue(settingKey) {
-  const globalValue = getAccountSetting(settingKey);
-  if (globalValue != null && String(globalValue).trim() !== "") return String(globalValue);
-  return safeGetSetting(settingKey);
-}
+
 
 function setProviderUsageStoredValue(settingKey, value) {
   setSettingWithRuntimeSync(settingKey, value);

@@ -1,3 +1,4 @@
+import { orderedUniquePaths as uniqueBytewiseRepoPaths } from "../ordered-paths.js";
 // @ts-check
 //
 // SCIP staging producer. Warmers consume `.scip` files from
@@ -1641,17 +1642,6 @@ function positiveBatchLimit(value, fallback) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
-function uniqueBytewiseRepoPaths(paths) {
-  const seen = new Set();
-  const values = [];
-  for (const rawPath of Array.isArray(paths) ? paths : []) {
-    const repoRelPath = String(rawPath || "");
-    if (!repoRelPath || seen.has(repoRelPath)) continue;
-    seen.add(repoRelPath);
-    values.push(repoRelPath);
-  }
-  return values.sort((left, right) => Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")));
-}
 
 function normalizedFileKey(file) {
   const normalized = path.resolve(String(file || "")).replace(/\\/g, "/");

@@ -6,56 +6,17 @@
 
 import path from "path";
 import fs from "fs";
-import os from "os";
-import crypto from "crypto";
 import { performance } from "node:perf_hooks";
-import { isInsideRoot, isUnderRoot, normPath, normalizeRoots, resolvePathWithin } from "../../../shared/scope/functions/path.js";
+import "../../../shared/scope/functions/path.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 
-import {
-  getWorkItem,
-  getJob,
-  incrementAndCreateAttempt,
-  completeAttempt,
-  setAttemptCommitHash,
-  setAttemptSession,
-  updateJobStatus,
-  setJobResult,
-  setJobError,
-  setJobContext,
-  storeArtifact,
-  getArtifacts,
-  getArtifactsByWorkItem,
-  logEvent,
-  releaseLease,
-  releaseLeaseWithoutAttemptPenalty,
-  renewLease,
-  isLeaseValid,
-  refreshWorkItemStatus,
-  updateJobPayload,
-  createJob,
-  storeInsight,
-  updateJobProvider,
-  addDependency,
-  removeDependency,
-  rewireDependency,
-  getDependents,
-  getDependencies,
-  getAttempts,
-  applyDelegation,
-  listJobsByWorkItem,
-  getEvents,
-  getEventsByWorkItem,
-  getSetting,
-  listActiveFileLocks,
-  sessionLeaseTtlSec,
-} from "../../queue/functions/index.js";
+import { getJob, setAttemptSession, updateJobStatus, setJobResult, setJobError, setJobContext, logEvent, releaseLease, releaseLeaseWithoutAttemptPenalty, renewLease, refreshWorkItemStatus, updateJobPayload, updateJobProvider, getDependents, getDependencies, sessionLeaseTtlSec } from "../../queue/functions/index.js";
 
-import { getProvider, getProviderName, getAvailableProviders, getProviderRateLimitState, isProviderReady, selectProviderName, tierModelName } from "../../providers/functions/provider.js";
+import { getProvider, getAvailableProviders, getProviderRateLimitState, isProviderReady, selectProviderName } from "../../providers/functions/provider.js";
 import { workerRoleForJobType } from "../../providers/functions/roles.js";
 import { Job } from "../../queue/classes/job/Job.js";
-import { AssessmentSession } from "../../assessment/classes/AssessmentSession.js";
-import { processVerdict } from "./roles/assessor.js";
+import "../../assessment/classes/AssessmentSession.js";
+import "./roles/assessor.js";
 import { PlanSession } from "../../planning/classes/PlanSession.js";
 import { TrackedProviderClient } from "./TrackedProviderClient.js";
 import { Agent } from "./Agent.js";
@@ -67,229 +28,63 @@ import { WorkerExecutionCoordinator } from "./execution/WorkerExecutionCoordinat
 import { PartialWorkCoordinator } from "./execution/PartialWorkCoordinator.js";
 import { runHumanInputHandler } from "../functions/helpers/human-input.js";
 import { ROLE_CLASSES_BY_JOB_TYPE } from "./role-classes.js";
-import { handoff, parseMissingContext, parseFileRequest, splitFileRequestsByRisk, parseResearcherStructuredOutput, researcherOutputNeedsHuman, _parseFunctions, applyDeterministicDeletes, attachAssessmentDiffContextAsync, hasWritableScope, renderAtlasHandoffSections } from "../../handoff/functions/index.js";
-import { injectArtifactScope, normalizeArtifactCreateFiles, isArtifactMode, isValidTaskMode, buildManifest, wiScopeId, artifactsDir, workspaceDir, inputsDir, contextDir, getWiModeConfig, validateManifestAgainstContract, getArtifactProtocol, getResolvedImageProtocol, getConfiguredImageProviders, getConfiguredImageModel } from "../../artifacts/functions/index.js";
+import { _parseFunctions } from "../../handoff/functions/index.js";
+import "../../artifacts/functions/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
-import { roleBrandColor } from "../../ui/functions/display/helpers/brand.js";
+import "../../ui/functions/display/helpers/brand.js";
 import { extractJson } from "../../../shared/format/functions/json.js";
-import { runHookAsync } from "../../git/functions/hooks.js";
+import "../../git/functions/hooks.js";
 import { log, jobLog } from "../../../shared/telemetry/functions/logging/logger.js";
 import { getRuntimeRoot } from "../../runtime/functions/paths.js";
-import { validateMutableRepoPath } from "../../runtime/functions/protected-paths.js";
+import "../../runtime/functions/protected-paths.js";
 import { yieldNow } from "../../runtime/functions/yield.js";
-import { recordObservation, runWithObservationContext } from "../../observability/functions/observations.js";
-import {
-  checkAtlasMainFreshnessGate,
-  reindexAtlasAfterCommit,
-  getAtlasIntegrationConfig,
-} from "../../integrations/functions/atlas.js";
-import { clearAtlasJobCache } from "../../integrations/functions/atlas-embedded.js";
-import { emitAtlasAutoFeedbackForJob } from "../../integrations/functions/atlas-auto-feedback.js";
-import { getWorkItemIntakeHints, buildResearchIntakePreload, buildIntakeHintsBlock } from "../../intake/functions/hints.js";
-import {
-  countInternalAssessmentRetries,
-  getAssessmentInternalRetryLimit,
-} from "../functions/helpers/assessment-shared.js";
-import { refreshAndExtractInsights as refreshAndExtractInsightsFromModule } from "../functions/helpers/insights.js";
-import { isTransientMcpInfraBlock, MAX_MCP_INFRA_BLOCK_RETRIES, MCP_INFRA_BLOCK_BACKOFF_MS } from "../functions/helpers/block-reason.js";
+import { recordObservation } from "../../observability/functions/observations.js";
+import { checkAtlasMainFreshnessGate, reindexAtlasAfterCommit, getAtlasIntegrationConfig } from "../../integrations/functions/atlas.js";
+import "../../integrations/functions/atlas-embedded.js";
+import "../../integrations/functions/atlas-auto-feedback.js";
+import "../../intake/functions/hints.js";
+import "../functions/helpers/assessment-shared.js";
+import "../functions/helpers/insights.js";
+import "../functions/helpers/block-reason.js";
 import { isLongProviderPause } from "../functions/helpers/provider-quota-pause.js";
-import {
-  gitCommitAll as gitCommitAllFromModule,
-  gitCommitAllAsync as gitCommitAllAsyncFromModule,
-  repairWebAssetCreateScope as repairWebAssetCreateScopeFromModule,
-} from "../../git/functions/commit-scope.js";
-import {
-  gcWorktreesAsync as gcWorktreesAsyncFromModule,
-  preserveDirtyWorktreeSnapshot as preserveDirtyWorktreeSnapshotFromModule,
-  snapshotAndResetDirtyWorktree as snapshotAndResetDirtyWorktreeFromModule,
-  snapshotAndResetDirtyWorktreeAsync as snapshotAndResetDirtyWorktreeAsyncFromModule,
-  worktreeRoot as worktreeRootFromModule,
-} from "../../git/functions/worktree.js";
-import {
-  gitCurrentHashAsync,
-  gitExecAsync,
-  gitHasChangesAsync,
-  gitStash,
-} from "../../git/functions/utils.js";
-import {
-  applyStallStash as applyStallStashFromModule,
-  applyStallStashAsync as applyStallStashAsyncFromModule,
-  detectDrift as detectDriftFromModule,
-} from "../functions/helpers/stall-resume.js";
-import {
-  retryOrFail as retryOrFailFromModule,
-  spawnDeadLetterRecoveryForDependents as spawnDeadLetterRecoveryForDependentsFromModule,
-} from "../functions/helpers/dead-letter.js";
-import {
-  isTransientCommitInfraFailure,
-} from "../functions/helpers/commit-infra.js";
+import { repairWebAssetCreateScope as repairWebAssetCreateScopeFromModule } from "../../git/functions/commit-scope.js";
+import { gcWorktreesAsync as gcWorktreesAsyncFromModule, preserveDirtyWorktreeSnapshot as preserveDirtyWorktreeSnapshotFromModule, snapshotAndResetDirtyWorktree as snapshotAndResetDirtyWorktreeFromModule, snapshotAndResetDirtyWorktreeAsync as snapshotAndResetDirtyWorktreeAsyncFromModule, worktreeRoot as worktreeRootFromModule } from "../../git/functions/worktree.js";
+import { gitExecAsync, gitStash } from "../../git/functions/utils.js";
+import { applyStallStash as applyStallStashFromModule, applyStallStashAsync as applyStallStashAsyncFromModule, detectDrift as detectDriftFromModule } from "../functions/helpers/stall-resume.js";
+import { retryOrFail as retryOrFailFromModule } from "../functions/helpers/dead-letter.js";
+import { isTransientCommitInfraFailure } from "../functions/helpers/commit-infra.js";
 export { isTransientCommitInfraFailure };
-import {
-  clearActiveWorktreeSentinel as clearActiveWorktreeSentinelFromModule,
-  cleanupWorktreeIfDoneAsync as cleanupWorktreeIfDoneAsyncFromModule,
-  primeCreatableFiles as primeCreatableFilesFromModule,
-  readActiveWorktreeSentinel as readActiveWorktreeSentinelFromModule,
-  setUpWorktreeForJob as setUpWorktreeForJobFromModule,
-} from "../functions/helpers/worktree-lifecycle.js";
+import { cleanupWorktreeIfDoneAsync as cleanupWorktreeIfDoneAsyncFromModule, primeCreatableFiles as primeCreatableFilesFromModule, readActiveWorktreeSentinel as readActiveWorktreeSentinelFromModule } from "../functions/helpers/worktree-lifecycle.js";
 import { isSentinelProcessAlive } from "../functions/helpers/worktree-sentinel.js";
-import {
-  gateWaitingLanePlannerReadiness as gateWaitingLanePlannerReadinessFromModule,
-} from "../functions/helpers/waiting-lane-planner-readiness.js";
-import {
-  extractResearcherQuestions as extractResearcherQuestionsFromModule,
-  spawnFileRequestFollowUp as spawnFileRequestFollowUpFromModule,
-  spawnPlanAfterResearch as spawnPlanAfterResearchFromModule,
-  spawnResearchAfterPreflight as spawnResearchAfterPreflightFromModule,
-} from "../functions/helpers/pipeline-continuation.js";
-import {
-  handleCatastrophicExecuteError as handleCatastrophicExecuteErrorFromModule,
-  handleDeterministicInterruption as handleDeterministicInterruptionFromModule,
-  handleExecuteAttemptError as handleExecuteAttemptErrorFromModule,
-} from "../functions/helpers/attempt-errors.js";
-import {
-  runPostExecutionAssessment as runPostExecutionAssessmentFromModule,
-} from "../functions/helpers/assessment-pipeline.js";
-import {
-  createJobsFromPlan as createJobsFromPlanFromModule,
-} from "../../planning/functions/plan-compiler.js";
-import {
-  ASSESSABLE_JOB_TYPES,
-  FAILED_JOB_STATUSES,
-  MUTATING_JOB_TYPES,
-  TERMINAL_JOB_STATUSES,
-} from "../../../catalog/job.js";
-import {
-  effectiveArtifactTaskMode as effectiveArtifactTaskModeFromModule,
-  isImageOnlyModelName as isImageOnlyModelNameFromModule,
-  requiresGitNoopCheck as requiresGitNoopCheckFromModule,
-  resolveExecutionProviderFromSettings as resolveExecutionProviderFromModule,
-  resolveImageExecutionProvider as resolveImageExecutionProviderFromModule,
-  resolvePrimaryExecutionModelName as resolvePrimaryExecutionModelNameFromModule,
-  sanitizeExecutionHintsForRole as sanitizeExecutionHintsForRoleFromModule,
-  shouldPreservePinnedProvider as shouldPreservePinnedProviderFromModule,
-} from "../../providers/functions/execution-routing.js";
-import {
-  buildDeterministicDelegations as buildDeterministicDelegationsFromModule,
-  delegationRoleForJobType as delegationRoleForJobTypeFromModule,
-  selectFallbackProvider as selectFallbackProviderFromModule,
-} from "../../providers/functions/delegation-routing.js";
-import {
-  activeSiblingWriteLocks,
-  findActiveSiblingLockForPath,
-} from "../../queue/functions/sibling-locks.js";
-import {
-  artifactOutputClaimsReusableComplete as artifactOutputClaimsReusableCompleteFromModule,
-  filterNewOrChangedManifestFiles as filterNewOrChangedManifestFilesFromModule,
-  materializeFallbackArtifactOutput as materializeFallbackArtifactOutputFromModule,
-} from "../functions/helpers/artifact-output.js";
-import {
-  buildFailureDiagnosticsArtifact as buildFailureDiagnosticsArtifactFromModule,
-  extractResearchRetryContext as extractResearchRetryContextFromModule,
-  getErrorDetails as getErrorDetailsFromModule,
-} from "../functions/helpers/diagnostics.js";
-import {
-  finishNoWriteAttempt as finishNoWriteAttemptFromModule,
-  shouldShortCircuitNoWriteAssessment as shouldShortCircuitNoWriteAssessmentFromModule,
-} from "../functions/helpers/no-write-retry.js";
-import {
-  collectPartialWorkStateAsync as collectPartialWorkStateAsyncFromModule,
-  commitScopedPartialWorkAsync as commitScopedPartialWorkAsyncFromModule,
-  recordPartialWorkDetected as recordPartialWorkDetectedFromModule,
-  revertPartialWork as revertPartialWorkFromModule,
-  setPartialWorkError as setPartialWorkErrorFromModule,
-  shouldOfferPartialTurnExtension as shouldOfferPartialTurnExtensionFromModule,
-  spawnPartialWorkReviewJob as spawnPartialWorkReviewJobFromModule,
-  stashPartialWorkForExtensionAsync as stashPartialWorkForExtensionAsyncFromModule,
-} from "../functions/helpers/partial-work.js";
-import {
-  buildStructuredDataPromotePlan as buildStructuredDataPromotePlanFromModule,
-  getExplicitIntakeBindings as getExplicitIntakeBindingsFromModule,
-  inferPromoteTask as inferPromoteTaskFromModule,
-  looksLikeArtifactGenerationTask as looksLikeArtifactGenerationTaskFromModule,
-  looksLikeRepoCodeCreationTask as looksLikeRepoCodeCreationTaskFromModule,
-  looksLikeRepoDesignTask as looksLikeRepoDesignTaskFromModule,
-  looksLikeFileDestination as looksLikeFileDestinationFromModule,
-  looksLikeStructuredDataRepoTransformTask as looksLikeStructuredDataRepoTransformTaskFromModule,
-  normalizePromoteMappings as normalizePromoteMappingsFromModule,
-  validatePlannedTask as validatePlannedTaskFromModule,
-} from "../../planning/functions/plan-routing.js";
-import {
-  extractCheckpointFromOutput as extractCheckpointFromOutputFromModule,
-  inferDeletionTargets as inferDeletionTargetsFromModule,
-  isDeleteNoopSatisfied as isDeleteNoopSatisfiedFromModule,
-  isFilePlacementNoopSatisfied as isFilePlacementNoopSatisfiedFromModule,
-  parseAgentCompletionLog as parseAgentCompletionLogFromModule,
-  scopedDeleteTargets as scopedDeleteTargetsFromModule,
-} from "../functions/helpers/mutation-guards.js";
-import {
-  isDeepthinkTask as isDeepthinkTaskFromModule,
-  shortJobTitle as shortJobTitleFromModule,
-} from "../../../shared/policies/functions/role-utils.js";
-import {
-  buildDeadLetterRetryPayload as _buildDeadLetterRetryPayload,
-  classifyApprovalAnswer as _classifyApprovalAnswer,
-  classifyDeadLetterRecoveryAnswer as _classifyDeadLetterRecoveryAnswer,
-  classifyReviewAnswer as _classifyReviewAnswer,
-  extractHumanAnswerText as _extractHumanAnswerText,
-  extractHumanAnswers as _extractHumanAnswers,
-  incomingDependenciesForRecoveryRetry as _incomingDependenciesForRecoveryRetry,
-} from "../functions/execution/human-review.js";
-import {
-  runHumanInputJob as runHumanInputJobFromModule,
-} from "../functions/execution/human-input-job.js";
-import {
-  runPromoteJob as runPromoteJobFromModule,
-} from "../functions/execution/promote-job.js";
-import {
-  runAtlasWarmJob as runAtlasWarmJobFromModule,
-} from "../functions/execution/atlas-warm-job.js";
-import {
-  emitDevCommitted as emitAtlasV2DevCommitted,
-  getAtlasWarmJobCompletion,
-  isAtlasV2EmissionEnabled,
-} from "../../atlas/classes/v2/PipelineHooks.js";
-import {
-  logAttemptSkippedStaleLease as _logAttemptSkippedStaleLease,
-} from "../functions/execution/attempt-logging.js";
-import {
-  assessmentRetryFallbackReads as _assessmentRetryFallbackReads,
-  buildPriorAssessmentFindings as _buildPriorAssessmentFindings,
-  isAssessorParseRetryBudgetExceeded as _isAssessorParseRetryBudgetExceeded,
-  shouldFastPassArtifactAssessment,
-  shouldOverrideArtifactMissingFail,
-} from "../functions/execution/assessment-policy.js";
-import {
-  artifactTaskSlug as _artifactTaskSlug,
-  buildIntermediateReportTask as _buildIntermediateReportTask,
-  isBogusResearchPlaceholderPayload as _isBogusResearchPlaceholderPayload,
-  isProviderError as _isProviderError,
-  latestArtifactText as _latestArtifactText,
-  loadNudges as _loadNudges,
-  normalizePlannerScore as _normalizePlannerScore,
-  resolveCallCostEstimate as _resolveCallCostEstimate,
-} from "../functions/execution/job-helpers.js";
-import {
-  syncAssessorWorkerDisplay as syncAssessorWorkerDisplayFromModule,
-} from "../functions/execution/display-sync.js";
-import {
-  logBadInputFailure as _logBadInputFailure,
-} from "../functions/execution/bad-input.js";
-import {
-  validateDeclaredOutputContract,
-  filterFileRequestsToOutOfScope,
-} from "../functions/execution/declared-output-contract.js";
-import {
-  worktreeLockTimeoutInfo,
-} from "../functions/execution/commit-diagnostics.js";
-import {
-  JOB_SCRATCH_GC_INTERVAL_MS,
-  cleanupOldJobScratchDirs,
-  cleanupOldJobScratchDirsAsync,
-  jobScratchDirForJob,
-  jobScratchRootForProject,
-  readIntegerSetting,
-  writeJobScratchSentinel,
-} from "../functions/execution/job-scratch.js";
+import { gateWaitingLanePlannerReadiness as gateWaitingLanePlannerReadinessFromModule } from "../functions/helpers/waiting-lane-planner-readiness.js";
+import { extractResearcherQuestions as extractResearcherQuestionsFromModule, spawnFileRequestFollowUp as spawnFileRequestFollowUpFromModule, spawnPlanAfterResearch as spawnPlanAfterResearchFromModule, spawnResearchAfterPreflight as spawnResearchAfterPreflightFromModule } from "../functions/helpers/pipeline-continuation.js";
+import { handleDeterministicInterruption as handleDeterministicInterruptionFromModule } from "../functions/helpers/attempt-errors.js";
+import "../functions/helpers/assessment-pipeline.js";
+import "../../planning/functions/plan-compiler.js";
+import { ASSESSABLE_JOB_TYPES, FAILED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
+import { effectiveArtifactTaskMode as effectiveArtifactTaskModeFromModule, requiresGitNoopCheck as requiresGitNoopCheckFromModule, resolveExecutionProviderFromSettings as resolveExecutionProviderFromModule, resolveImageExecutionProvider as resolveImageExecutionProviderFromModule, resolvePrimaryExecutionModelName as resolvePrimaryExecutionModelNameFromModule, sanitizeExecutionHintsForRole as sanitizeExecutionHintsForRoleFromModule } from "../../providers/functions/execution-routing.js";
+import { buildDeterministicDelegations as buildDeterministicDelegationsFromModule, delegationRoleForJobType as delegationRoleForJobTypeFromModule, selectFallbackProvider as selectFallbackProviderFromModule } from "../../providers/functions/delegation-routing.js";
+import "../../queue/functions/sibling-locks.js";
+import { artifactOutputClaimsReusableComplete as artifactOutputClaimsReusableCompleteFromModule, filterNewOrChangedManifestFiles as filterNewOrChangedManifestFilesFromModule, materializeFallbackArtifactOutput as materializeFallbackArtifactOutputFromModule } from "../functions/helpers/artifact-output.js";
+import "../functions/helpers/diagnostics.js";
+import "../functions/helpers/no-write-retry.js";
+import "../functions/helpers/partial-work.js";
+import "../../planning/functions/plan-routing.js";
+import { inferDeletionTargets as inferDeletionTargetsFromModule, isFilePlacementNoopSatisfied as isFilePlacementNoopSatisfiedFromModule } from "../functions/helpers/mutation-guards.js";
+import { isDeepthinkTask as isDeepthinkTaskFromModule, shortJobTitle as shortJobTitleFromModule } from "../../../shared/policies/functions/role-utils.js";
+import { buildDeadLetterRetryPayload as _buildDeadLetterRetryPayload, classifyApprovalAnswer as _classifyApprovalAnswer, classifyDeadLetterRecoveryAnswer as _classifyDeadLetterRecoveryAnswer, classifyReviewAnswer as _classifyReviewAnswer, extractHumanAnswerText as _extractHumanAnswerText, extractHumanAnswers as _extractHumanAnswers, incomingDependenciesForRecoveryRetry as _incomingDependenciesForRecoveryRetry } from "../functions/execution/human-review.js";
+import "../functions/execution/human-input-job.js";
+import "../functions/execution/promote-job.js";
+import "../functions/execution/atlas-warm-job.js";
+import { emitDevCommitted as emitAtlasV2DevCommitted, getAtlasWarmJobCompletion, isAtlasV2EmissionEnabled } from "../../atlas/classes/v2/PipelineHooks.js";
+import { logAttemptSkippedStaleLease as _logAttemptSkippedStaleLease } from "../functions/execution/attempt-logging.js";
+import { assessmentRetryFallbackReads as _assessmentRetryFallbackReads, buildPriorAssessmentFindings as _buildPriorAssessmentFindings, isAssessorParseRetryBudgetExceeded as _isAssessorParseRetryBudgetExceeded, shouldFastPassArtifactAssessment, shouldOverrideArtifactMissingFail } from "../functions/execution/assessment-policy.js";
+import { artifactTaskSlug as _artifactTaskSlug, buildIntermediateReportTask as _buildIntermediateReportTask, isBogusResearchPlaceholderPayload as _isBogusResearchPlaceholderPayload, isProviderError as _isProviderError, latestArtifactText as _latestArtifactText, loadNudges as _loadNudges, normalizePlannerScore as _normalizePlannerScore, resolveCallCostEstimate as _resolveCallCostEstimate } from "../functions/execution/job-helpers.js";
+import "../functions/execution/display-sync.js";
+import { logBadInputFailure as _logBadInputFailure } from "../functions/execution/bad-input.js";
+import { validateDeclaredOutputContract, filterFileRequestsToOutOfScope } from "../functions/execution/declared-output-contract.js";
+import { worktreeLockTimeoutInfo } from "../functions/execution/commit-diagnostics.js";
+import { JOB_SCRATCH_GC_INTERVAL_MS, cleanupOldJobScratchDirs, cleanupOldJobScratchDirsAsync, jobScratchDirForJob, jobScratchRootForProject, readIntegerSetting, writeJobScratchSentinel } from "../functions/execution/job-scratch.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 
@@ -307,10 +102,7 @@ export {
 
 // --- Constants --------------------------------------------------------------
 
-import {
-  NON_PROVIDER_JOB_TYPES as NON_PROVIDER_TYPES,
-  DECLARED_OUTPUT_CONTRACT_JOB_TYPES,
-} from "../../../catalog/job.js";
+import { NON_PROVIDER_JOB_TYPES as NON_PROVIDER_TYPES } from "../../../catalog/job.js";
 
 export function __testDelegationRoleForJobType(jobType) {
   return delegationRoleForJobTypeFromModule(jobType);
@@ -377,9 +169,7 @@ export function __testAssessmentRetryFallbackReads(modelTier, retryCount) {
  * @param {string[]} [scope.createRoots] - Directories where any file may be created/edited
  * @returns {{ hash: string, reverted: string[] }} - Commit hash and any reverted files
  */
-function gitCommitAll(message, cwd, scope = null, opts = null) {
-  return gitCommitAllFromModule(message, cwd, scope, opts);
-}
+
 
 // --- Worktree Helpers -------------------------------------------------------
 

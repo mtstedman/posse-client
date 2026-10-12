@@ -1,34 +1,14 @@
+import { detectNodePackageManager } from "../node-package-manager.js";
+import { ROOT_MARKERS, PACKAGE_DISCOVERY_SKIP_DIRS, MAX_DISCOVERED_PACKAGE_ROOTS, JS_PROJECT_EXTENSIONS } from "../../../../catalog/verification-readiness.js";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { commandSpawnSpec } from "../../../platform/functions/command-launch.js";
 
-const ROOT_MARKERS = Object.freeze([
-  "package.json",
-  "pyproject.toml",
-  "setup.cfg",
-  "Cargo.toml",
-  "go.mod",
-  "composer.json",
-]);
 
-const PACKAGE_MANAGER_LOCKS = Object.freeze([
-  ["pnpm", ["pnpm-lock.yaml"]],
-  ["yarn", ["yarn.lock"]],
-  ["bun", ["bun.lock", "bun.lockb"]],
-  ["npm", ["npm-shrinkwrap.json", "package-lock.json"]],
-]);
 
-const PACKAGE_DISCOVERY_SKIP_DIRS = new Set([
-  ".git",
-  ".posse",
-  ".posse-test-suites",
-  ".posse-worktrees",
-  "node_modules",
-  "vendor",
-]);
-const MAX_DISCOVERED_PACKAGE_ROOTS = 64;
-const JS_PROJECT_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"]);
+
+
 
 function fileExists(filePath) {
   try { return fs.statSync(filePath).isFile(); } catch { return false; }
@@ -165,17 +145,10 @@ function siblingPackageRoot(projectRoot, file, packageRoots) {
 }
 
 function packageManagerFromManifest(root) {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-    const declared = String(pkg?.packageManager || "").split("@")[0].trim().toLowerCase();
-    if (["npm", "pnpm", "yarn", "bun"].includes(declared)) return declared;
-  } catch {
-    // Lockfile precedence below is deterministic when packageManager is absent.
-  }
-  for (const [manager, locks] of PACKAGE_MANAGER_LOCKS) {
-    if (locks.some((lock) => fileExists(path.join(root, lock)))) return manager;
-  }
-  return fileExists(path.join(root, "package.json")) ? "npm" : null;
+  return detectNodePackageManager(root, {
+    allowUnversioned: true,
+    defaultManager: fileExists(path.join(root, "package.json")) ? "npm" : null,
+  }).manager;
 }
 
 export function executableReady(command, root, {

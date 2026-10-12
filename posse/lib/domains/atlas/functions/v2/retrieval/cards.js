@@ -1,3 +1,4 @@
+export { parseLedgerSymbolId as parseSymbolId } from "../symbol-id.js";
 // @ts-check
 //
 // Translation between ViewSymbol/ViewEdge rows and the tool-result shapes
@@ -31,22 +32,6 @@ export function symbolIdOf({ content_hash, local_id }) {
   return `${content_hash}:${local_id}`;
 }
 
-/**
- * Inverse of symbolIdOf. Returns null for malformed IDs rather than
- * throwing — callers can decide whether to error or skip.
- *
- * @param {string} id
- * @returns {{ content_hash: string, local_id: number } | null}
- */
-export function parseSymbolId(id) {
-  if (typeof id !== "string") return null;
-  const idx = id.indexOf(":");
-  if (idx <= 0 || idx === id.length - 1) return null;
-  const ch = id.slice(0, idx);
-  const lid = Number(id.slice(idx + 1));
-  if (!/^[0-9a-f]{64}$/.test(ch) || !Number.isInteger(lid) || lid < 0) return null;
-  return { content_hash: ch, local_id: lid };
-}
 
 /**
  * Build a SymbolLocation from a ViewSymbol's persisted byte and line

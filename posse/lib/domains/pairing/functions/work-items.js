@@ -1,3 +1,5 @@
+import { PAIRING_WORK_ITEM_LIMIT, PAIRING_JOB_LIMIT, PAIRING_PEER_SNAPSHOT_MAX_AGE_MS, PAIRING_PEER_SNAPSHOT_PROTOCOL, SESSION_JOB_TYPES, SESSION_IDENTITIES_MAX } from "../../../catalog/pairing-presence.js";
+export { PAIRING_WORK_ITEM_LIMIT, PAIRING_JOB_LIMIT, PAIRING_PEER_SNAPSHOT_MAX_AGE_MS } from "../../../catalog/pairing-presence.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../catalog/work-item.js";
 import { BACKGROUND_JOB_TYPES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import {
@@ -21,16 +23,13 @@ import {
   writeRuntimeStatus,
 } from "../../queue/functions/runtime-status.js";
 
-export const PAIRING_WORK_ITEM_LIMIT = 50;
-export const PAIRING_JOB_LIMIT = 100;
-export const PAIRING_PEER_SNAPSHOT_MAX_AGE_MS = 20_000;
-const PAIRING_PEER_SNAPSHOT_PROTOCOL = "posse.pairing_peers.v1";
+
+
+
 
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
-const SESSION_JOB_TYPES = Object.freeze([
-  "research", "plan", "dev", "assess", "fix", "summarize", "artificer",
-]);
+
 
 function configuredSessionProviders() {
   const providers = new Set();
@@ -228,7 +227,6 @@ export function writePairingPeerSnapshot(status, { at = new Date().toISOString()
   return snapshot;
 }
 
-const SESSION_IDENTITIES_MAX = 256;
 
 function recordSessionIdentities(snapshot) {
   const sessionId = snapshot.session_id;

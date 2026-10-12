@@ -5,7 +5,7 @@ import { fit, stripAnsi, visiblePad, _sanitizeDisplayLine } from "../../function
 import { posseWordmark, roleBrandColor } from "../../functions/display/helpers/brand.js";
 import { jobLabel, jobIsBackgroundAtlasWarm } from "../../functions/display/helpers/job-status.js";
 import { BRIDGE_OPEN_GATE_STATUSES } from "../../../../catalog/bridge.js";
-import { TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
+import { ACTIVE_LEASE_STATUSES, TERMINAL_JOB_STATUSES } from "../../../../catalog/job.js";
 import { humanGateStateAllowsAnswer } from "../../../../catalog/human-input.js";
 import { getAgentActivityEvents, getHumanGate, listActiveAgentGuidanceForJob, listAgentInteractions, listWorkItems } from "../../../queue/functions/index.js";
 import { buildAdminGitDiffSnapshot, buildAdminGitDiffFileDetail } from "../../functions/admin/git-diff-review.js";
@@ -30,7 +30,7 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
-const MONITOR_ACTIVE_JOB_STATUSES = new Set(["leased", "running", "awaiting_assessment"]);
+const MONITOR_ACTIVE_JOB_STATUSES = new Set(ACTIVE_LEASE_STATUSES);
 const MONITOR_HUMAN_GATE_STATUSES = new Set(BRIDGE_OPEN_GATE_STATUSES);
 const MONITOR_TERMINAL_JOB_STATUSES = new Set(TERMINAL_JOB_STATUSES);
 function monitorHumanGateIsOpen(job) {

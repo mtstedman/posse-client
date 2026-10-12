@@ -1,3 +1,4 @@
+import { REQUIRED_PROMPT_ROLES, REQUIRED_PROMPT_CONTRACTS } from "../../../catalog/remote-readiness.js";
 import { RemotePromptClient } from "../classes/RemotePromptClient.js";
 import { getPosseRemoteTimeoutMs, getPosseRemoteUrl } from "./mode.js";
 import {
@@ -229,12 +230,12 @@ export function validateRemotePromptBundleReadinessResponse(bundle) {
   }
 
   const roles = bundle?.roles;
-  for (const role of ["researcher", "planner", "dev", "assessor", "preflight"]) {
+  for (const role of REQUIRED_PROMPT_ROLES) {
     if (!roles?.has?.(role)) errors.push(`role prompt missing: ${role}`);
   }
 
   const contracts = bundle?.contracts;
-  for (const contract of ["rule-priority", "file-scope", "task-modes", "researcher-output"]) {
+  for (const contract of REQUIRED_PROMPT_CONTRACTS) {
     if (!contracts?.has?.(contract)) errors.push(`contract missing: ${contract}`);
   }
 

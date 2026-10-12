@@ -1,7 +1,8 @@
 import { getProvider, getProviderName } from "../../providers/functions/provider-selection.js";
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
+import { PROVIDER_OPTIONS } from "../../../catalog/provider.js";
 
-const PROVIDERS = new Set(["claude", "anthropic", "openai", "codex", "grok", "copilot", "posse-local"]);
+const PROVIDERS = new Set(PROVIDER_OPTIONS);
 const MODEL_TIERS = new Map([
   ["fable", "cheap"], ["haiku", "cheap"], ["cheap", "cheap"],
   ["sonnet", "standard"], ["standard", "standard"],

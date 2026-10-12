@@ -28,25 +28,10 @@ import { HANDOFF_TRAVERSAL_COMPLETION_CHECK_OBSERVATION_TYPE } from "../../../ca
 
 import fs from "fs";
 import path from "path";
-import {
-  getAttempts,
-  getAgentCallById,
-  getDependencies,
-  getIntSetting,
-  getJob,
-  getSetting,
-  logEvent,
-} from "../../queue/functions/index.js";
-import {
-  HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES,
-} from "../../settings/functions/catalog.js";
-import { extractJson } from "../../../shared/format/functions/json.js";
-import {
-  getSkillById,
-  isSkillsEnabled,
-  parseSkillIds,
-  validateSkillIds,
-} from "../../../shared/skills/functions/registry.js";
+import { getAttempts, getAgentCallById, getDependencies, getIntSetting, getJob, getSetting, logEvent } from "../../queue/functions/index.js";
+import { HANDOFF_PRELOAD_EDITABLE_FILE_BODIES_VALUES } from "../../settings/functions/catalog.js";
+import "../../../shared/format/functions/json.js";
+import { getSkillById, isSkillsEnabled, parseSkillIds, validateSkillIds } from "../../../shared/skills/functions/registry.js";
 import { ASSESSABLE_JOB_TYPES, MUTATING_JOB_TYPES } from "../../../catalog/job.js";
 import { attachDiffNarrative, attachDiffNarrativeAsync } from "../../git/functions/diff-narrator.js";
 import { buildMergeResolutionEvidenceAsync } from "../../git/functions/attempt-committed-files.js";
@@ -54,52 +39,13 @@ import { gitExec, gitExecAsync } from "../../git/functions/utils.js";
 import { validateMutableRepoPath } from "../../runtime/functions/protected-paths.js";
 import { assertTestContext } from "../../runtime/functions/test-context.js";
 import { resolvePathWithin } from "../../../shared/scope/functions/path.js";
-import {
-  INDEXABLE_EXTENSIONS as INDEXABLE_EXTENSIONS_FROM_MODULE,
-  buildSmartPreload as buildSmartPreloadFromModule,
-  parseFunctions as parseFunctionsFromModule,
-} from "./helpers/fn-index.js";
-import {
-  classifyFileRisk as classifyFileRiskFromModule,
-  isHighRiskPath as isHighRiskPathFromModule,
-  looksLikeConcreteRequestedFile,
-  parseFileRequest as parseFileRequestFromModule,
-  splitFileRequestsByRisk as splitFileRequestsByRiskFromModule,
-} from "./helpers/file-request.js";
-import {
-  extractResearcherFiles as extractResearcherFilesFromModule,
-  normalizeResearcherCitationTriage as normalizeResearcherCitationTriageFromModule,
-  normalizeResearcherFilePriorities as normalizeResearcherFilePrioritiesFromModule,
-  normalizeResearcherKeySymbols as normalizeResearcherKeySymbolsFromModule,
-  parseResearcherStructuredOutput as parseResearcherStructuredOutputFromModule,
-  researcherOutputNeedsHuman as researcherOutputNeedsHumanFromModule,
-  sanitizeResearcherStructuredOutput as sanitizeResearcherStructuredOutputFromModule,
-  researcherPacketToStructuredOutput as researcherPacketToStructuredOutputFromModule,
-} from "./helpers/researcher-output.js";
+import { INDEXABLE_EXTENSIONS as INDEXABLE_EXTENSIONS_FROM_MODULE, buildSmartPreload as buildSmartPreloadFromModule, parseFunctions as parseFunctionsFromModule } from "./helpers/fn-index.js";
+import { classifyFileRisk as classifyFileRiskFromModule, isHighRiskPath as isHighRiskPathFromModule, looksLikeConcreteRequestedFile, parseFileRequest as parseFileRequestFromModule, splitFileRequestsByRisk as splitFileRequestsByRiskFromModule } from "./helpers/file-request.js";
+import { extractResearcherFiles as extractResearcherFilesFromModule, normalizeResearcherCitationTriage as normalizeResearcherCitationTriageFromModule, normalizeResearcherFilePriorities as normalizeResearcherFilePrioritiesFromModule, normalizeResearcherKeySymbols as normalizeResearcherKeySymbolsFromModule, parseResearcherStructuredOutput as parseResearcherStructuredOutputFromModule, researcherOutputNeedsHuman as researcherOutputNeedsHumanFromModule, sanitizeResearcherStructuredOutput as sanitizeResearcherStructuredOutputFromModule, researcherPacketToStructuredOutput as researcherPacketToStructuredOutputFromModule } from "./helpers/researcher-output.js";
 import { detectPendingMergeAsync as detectPendingMergeAsyncFromModule } from "./helpers/merge-state.js";
-import {
-  buildMemoryPrefetchNotice as buildMemoryPrefetchNoticeFromModule,
-  buildStep0Context as buildStep0ContextFromModule,
-  loadMemorySurfaceAsync as loadMemorySurfaceAsyncFromModule,
-  loadRelevantInsightsAsync as loadRelevantInsightsAsyncFromModule,
-  loadRelevantInsights as loadRelevantInsightsFromModule,
-} from "./helpers/insights-step0.js";
-import {
-  assertHandoffScopePreflight as assertHandoffScopePreflightFromModule,
-  hasWritableScope as hasWritableScopeFromModule,
-  isZeroEditCodeTask as isZeroEditCodeTaskFromModule,
-} from "./helpers/scope-preflight.js";
-import {
-  attachAtlasAssessorPrefetch as attachAtlasAssessorPrefetchFromModule,
-  attachAtlasDbPrefetch as attachAtlasDbPrefetchFromModule,
-  attachAtlasPlannerSlice as attachAtlasPlannerSliceFromModule,
-  attachAtlasResearcherPrefetch as attachAtlasResearcherPrefetchFromModule,
-  classifyAtlasPrefetchRelevance as classifyAtlasPrefetchRelevanceFromModule,
-  classifyAtlasPrefetchCoverage as classifyAtlasPrefetchCoverageFromModule,
-  collectAtlasCoveredFiles as collectAtlasCoveredFilesFromModule,
-  renderAtlasHandoffSectionsWithMeta as renderAtlasHandoffSectionsWithMetaFromModule,
-  resolveAtlasHandoffState as resolveAtlasHandoffStateFromModule,
-} from "./helpers/atlas-context.js";
+import { buildMemoryPrefetchNotice as buildMemoryPrefetchNoticeFromModule, buildStep0Context as buildStep0ContextFromModule, loadMemorySurfaceAsync as loadMemorySurfaceAsyncFromModule, loadRelevantInsightsAsync as loadRelevantInsightsAsyncFromModule, loadRelevantInsights as loadRelevantInsightsFromModule } from "./helpers/insights-step0.js";
+import { assertHandoffScopePreflight as assertHandoffScopePreflightFromModule, hasWritableScope as hasWritableScopeFromModule, isZeroEditCodeTask as isZeroEditCodeTaskFromModule } from "./helpers/scope-preflight.js";
+import { attachAtlasAssessorPrefetch as attachAtlasAssessorPrefetchFromModule, attachAtlasDbPrefetch as attachAtlasDbPrefetchFromModule, attachAtlasPlannerSlice as attachAtlasPlannerSliceFromModule, attachAtlasResearcherPrefetch as attachAtlasResearcherPrefetchFromModule, classifyAtlasPrefetchRelevance as classifyAtlasPrefetchRelevanceFromModule, classifyAtlasPrefetchCoverage as classifyAtlasPrefetchCoverageFromModule, collectAtlasCoveredFiles as collectAtlasCoveredFilesFromModule, renderAtlasHandoffSectionsWithMeta as renderAtlasHandoffSectionsWithMetaFromModule, resolveAtlasHandoffState as resolveAtlasHandoffStateFromModule } from "./helpers/atlas-context.js";
 import { materializeRenderedLifecycleCoverage } from "./helpers/lifecycle-prefetch.js";
 import { handoffPrefetchObservationContext } from "./helpers/observation-context.js";
 import { classifyAtlasFailure } from "../../integrations/functions/atlas-embedded.js";
@@ -108,34 +54,12 @@ import { runWithObservationContext, getObservationContext, recordObservation } f
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { createWorkspaceSkipDirs } from "../../runtime/functions/workspace-skip.js";
 import { getAtlasHandoffPrefetchTimeoutMs, getFixScopeHandoffGuardMode } from "../../settings/functions/tunables.js";
-import {
-  issueHandoffTraversalRefsForCurrentCall,
-  packetToContextString as packetToContextStringFromModule,
-  packetToDynamicContextString as packetToDynamicContextStringFromModule,
-} from "./helpers/context-render.js";
-import {
-  expandHashRefHandoffPacketForDevBrief,
-} from "./helpers/hash-ref-packet.js";
-import {
-  DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS,
-  buildTraversalCompletionCheck as buildTraversalCompletionCheckFromModule,
-} from "./helpers/traversal-completeness.js";
-import {
-  buildAtlasShadowGuardrails as buildAtlasShadowGuardrailsFromModule,
-} from "./helpers/atlas-shadow-guardrails.js";
-import {
-  attachCreatableFiles as attachCreatableFilesFromModule,
-  attachDirectoryTree as attachDirectoryTreeFromModule,
-  attachEditableFiles as attachEditableFilesFromModule,
-  attachRelatedFiles as attachRelatedFilesFromModule,
-  attachSourcePreload as attachSourcePreloadFromModule,
-  collectSourceFiles as collectSourceFilesFromModule,
-  directoryTree as directoryTreeFromModule,
-  readFile as readFileFromModule,
-} from "./helpers/file-attach.js";
-import {
-  materializeWritingScope as materializeWritingScopeFromModule,
-} from "./helpers/file-materialization.js";
+import { issueHandoffTraversalRefsForCurrentCall, packetToContextString as packetToContextStringFromModule, packetToDynamicContextString as packetToDynamicContextStringFromModule } from "./helpers/context-render.js";
+import { expandHashRefHandoffPacketForDevBrief } from "./helpers/hash-ref-packet.js";
+import { DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS, buildTraversalCompletionCheck as buildTraversalCompletionCheckFromModule } from "./helpers/traversal-completeness.js";
+import { buildAtlasShadowGuardrails as buildAtlasShadowGuardrailsFromModule } from "./helpers/atlas-shadow-guardrails.js";
+import { attachCreatableFiles as attachCreatableFilesFromModule, attachDirectoryTree as attachDirectoryTreeFromModule, attachEditableFiles as attachEditableFilesFromModule, attachRelatedFiles as attachRelatedFilesFromModule, attachSourcePreload as attachSourcePreloadFromModule, collectSourceFiles as collectSourceFilesFromModule, directoryTree as directoryTreeFromModule, readFile as readFileFromModule } from "./helpers/file-attach.js";
+import { materializeWritingScope as materializeWritingScopeFromModule } from "./helpers/file-materialization.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { getDefaultRemoteComposer } from "../../remote/classes/RemoteComposer.js";
 import { getPosseRemoteMode, getPosseRemoteTimeoutMs } from "../../remote/functions/mode.js";

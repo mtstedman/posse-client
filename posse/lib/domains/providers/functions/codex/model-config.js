@@ -1,17 +1,12 @@
+import { PROVIDER_CAPABILITIES } from "../../../../catalog/provider-capabilities.js";
 // lib/domains/providers/functions/codex/model-config.js
 
 import { CODEX_OAUTH_SUPPORTED_MODELS, getProviderTierDefaults } from "../model-catalog.js";
-import { MCP_TOOL_DEADLINE_MODES } from "../../../../catalog/provider.js";
 import { getMaxTurnsForProvider } from "../shared/turns.js";
 import { getConfiguredCodexAuthMode, resolveCodexAuthModeInternal } from "./auth.js";
 import { readModelSetting } from "./settings.js";
 
-export const capabilities = Object.freeze({
-  images: false,
-  sessionResume: true,
-  toolAttachment: "deterministic-bridge",
-  mcpToolDeadline: MCP_TOOL_DEADLINE_MODES.SERVER_CONFIG,
-});
+export const capabilities = PROVIDER_CAPABILITIES["codex"];
 
 export const MODEL_TIERS = {
   cheap: {

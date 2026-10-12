@@ -419,16 +419,7 @@ function feedbackStatsFromRows(rows) {
 /**
  * @param {SymbolCard} card
  */
-function cardToHit(card) {
-  return {
-    symbolId: card.symbolId,
-    name: card.name,
-    qualifiedName: card.qualifiedName,
-    kind: card.kind,
-    lang: card.lang,
-    location: card.location,
-  };
-}
+
 
 /**
  * @param {{ taskText: string, taskType?: string, cards: SymbolCard[], memories?: any[] }} args

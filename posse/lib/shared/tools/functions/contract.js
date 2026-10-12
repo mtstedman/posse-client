@@ -1,5 +1,5 @@
 import { ATLAS_READ_GUIDANCE_TOKEN } from "../../../catalog/tool-references.js";
-import { WEB_TOOL_ROLES } from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
+import "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { ToolCatalog } from "../classes/ToolCatalog.js";
 import { ToolContract } from "../classes/ToolContract.js";
 import { projectDbEffectivePermissions } from "./toolkit/project-db/config.js";

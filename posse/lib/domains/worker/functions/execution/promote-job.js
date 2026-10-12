@@ -1,3 +1,4 @@
+import { PROMOTION_IMAGE_ARTIFACT_EXTENSIONS as IMAGE_ARTIFACT_EXTENSIONS } from "../../../../catalog/files.js";
 import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
@@ -131,7 +132,7 @@ export function assertPromoteOverwritePolicy(preview, { allowOverwrite = false, 
   throw err;
 }
 
-const IMAGE_ARTIFACT_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif"]);
+
 
 function isImageArtifactName(name) {
   return IMAGE_ARTIFACT_EXTENSIONS.has(path.posix.extname(String(name || "")).toLowerCase());

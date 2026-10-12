@@ -1,3 +1,4 @@
+import { costPrecision } from "./cost-precision.js";
 // lib/cost.js
 //
 // Cost aggregator for agent_calls. Reads token counts per call, resolves a
@@ -116,12 +117,6 @@ function attributeCostRows(rows, db) {
   });
 }
 
-function costPrecision({ callCount, exactCostCalls, estimatedCostCalls, unknownCostCalls }) {
-  if (callCount > 0 && unknownCostCalls === callCount) return "unknown";
-  if (unknownCostCalls > 0) return "partial";
-  if (estimatedCostCalls > 0) return "estimated";
-  return "exact";
-}
 
 function exposedCostUsd(knownCostUsd, precision) {
   return precision === "unknown" ? null : knownCostUsd;

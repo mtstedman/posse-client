@@ -1,36 +1,23 @@
+import { SKIP_DIRS, TEST_HELPER_DIRS, MAX_OUTPUT_CHARS, MAX_SOURCE_SNIFF_BYTES, DEFAULT_TIMEOUT_MS, PHPUNIT_CONFIG_NAMES, OUTCOME_STATUS } from "../../../../catalog/unit-test-runner.js";
 import { missingNodeTestDependency } from "./node-test-failure.js";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { spawn, spawnSync } from "child_process";
+import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { TEST_SUBPROCESS_ENV_KEYS } from "../../../../catalog/process.js";
-import { TEST_DIRECTORY_NAME_PATTERN, TEST_HELPER_DIRECTORIES } from "../../../../catalog/verification.js";
+import { TEST_DIRECTORY_NAME_PATTERN } from "../../../../catalog/verification.js";
 import { filterProcessEnv } from "../../../platform/functions/process-env.js";
 import { testExecutionCounts } from "./test-output-counts.js";
 import { pythonExecutable, repositoryTestRunner } from "./repository-test-runner.js";
 import { gitExec } from "../../../../domains/git/functions/utils.js";
 
-const SKIP_DIRS = new Set([
-  ".git", ".hg", ".svn", ".idea", ".vscode", ".cache", ".next", ".nuxt",
-  ".posse", ".posse-worktrees", ".posse-test-suites", "build", "coverage", "dist",
-  "node_modules", "target", "vendor", "venv", ".venv",
-]);
-const TEST_HELPER_DIRS = new Set(TEST_HELPER_DIRECTORIES);
-const MAX_OUTPUT_CHARS = 128 * 1024;
-const MAX_SOURCE_SNIFF_BYTES = 256 * 1024;
-const DEFAULT_TIMEOUT_MS = 120_000;
-const PHPUNIT_CONFIG_NAMES = Object.freeze(["phpunit.xml", "phpunit.xml.dist", "phpunit.dist.xml"]);
 
-// Outcome -> legacy wire status. `ok` stays true only for a real pass, false
-// for a real product failure or timeout, and null when nothing was verified.
-const OUTCOME_STATUS = Object.freeze({
-  passed: "passed",
-  product_failed: "failed",
-  timed_out: "timed_out",
-  infrastructure_error: "infrastructure_error",
-  unavailable: "unavailable",
-});
+
+
+
+
+
 
 const ADAPTERS = Object.freeze({
   ".cjs": { language: "javascript", runner: "node_test", executable: () => "node", argv: (relative) => ["--test", relative] },
@@ -98,7 +85,7 @@ function nodeBootstrapFailure(invocation, output) {
 const PYTEST_SOURCE_RE = /^\s*(?:async\s+)?def\s+test\w*\s*\(|^\s*class\s+Test\w*|^\s*(?:import|from)\s+(?:pytest|unittest)\b/m;
 const PYTHON_MAIN_RE = /^if\s+__name__\s*==\s*["']__main__["']\s*:/m;
 const PHPUNIT_SOURCE_RE = /\bPHPUnit\\/;
-const PHP_CLASS_EXTENDS_RE = /^\s*(?:(?:final|abstract|readonly)\s+)*class\s+\w+\s+extends\s+([\\\w]+)/gm;
+const PHP_CLASS_EXTENDS_RE = /\bclass(?:\s+\w+)?\s+extends\s+([\\\w]+)/gi;
 
 function readSourceHead(absolute) {
   let fd;
@@ -186,11 +173,32 @@ function phpUnitConfigDeclares(root, config, relative) {
   });
 }
 
+function phpSourceCode(source) {
+  return source.replace(/"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|\/\*[\s\S]*?\*\/|\/\/[^\n]*|#[^\n]*/g, " ")
+    .replace(/<\?(?:php\b|=)?|\?>/gi, ";");
+}
+
+function hasTopLevelPhpAssertion(code) {
+  // Do not infer an entry point from strings, comments, or assertion methods
+  // inside a class/function. Unhandled heredocs stay conservative.
+  if (code.includes("<<<") || /\bfunction\s+test\w*\s*\(/i.test(code)) return false;
+  let depth = 0;
+  let topLevel = "";
+  for (const character of code) {
+    if (character === "{") depth++;
+    if (depth === 0) topLevel += character;
+    if (character === "}") {
+      depth--;
+      if (depth < 0) return false;
+      if (depth === 0) topLevel += ";";
+    }
+  }
+  return depth === 0 && /(?:^|;)\s*\\?assert\s*\(/i.test(topLevel);
+}
+
 // A PHPUnit class only defines a class; `php <file>` runs nothing (or dies on
-// the missing base class). It needs vendor/bin/phpunit and the config that
-// names its bootstrap. A class extending a framework base (Laravel's
-// Tests\TestCase) is PHPUnit's only when the repository's own config declares
-// it. Plain assertion scripts run directly.
+// the missing base class). Custom bases need a declared runner unless the
+// file positively identifies its own standalone assertion entry point.
 function phpRunner(root, relative, source) {
   const phpunit = nearestUpward(root, relative, ["vendor/bin/phpunit"]);
   const config = nearestUpward(root, relative, PHPUNIT_CONFIG_NAMES);
@@ -199,11 +207,13 @@ function phpRunner(root, relative, source) {
     if (!phpunit) return { reason: "phpunit_unavailable" };
     return invocation();
   }
-  const bases = [...source.matchAll(PHP_CLASS_EXTENDS_RE)].map((match) => match[1]);
+  const code = phpSourceCode(source);
+  const bases = [...code.matchAll(PHP_CLASS_EXTENDS_RE)].map((match) => match[1]);
   if (bases.length > 0 && config && phpUnitConfigDeclares(root, config, relative)) {
     return phpunit ? invocation() : { reason: "phpunit_unavailable" };
   }
-  if (bases.some((base) => /(?:TestCase|TestBase|BaseTest)$/i.test(base))) return { reason: "php_runner_unidentified" };
+  if (bases.length > 0 && (bases.some((base) => /(?:TestCase|TestBase|BaseTest)$/i.test(base))
+    || !hasTopLevelPhpAssertion(code))) return { reason: "php_runner_unidentified" };
   return { runner: "php_script", executable: "php", args: [relative] };
 }
 

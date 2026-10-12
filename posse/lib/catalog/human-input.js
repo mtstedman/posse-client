@@ -1,3 +1,4 @@
+import { readonlySet } from "./readonly-collections.js";
 // Human-input action catalogue.
 //
 // `review_type` predates typed human-input gates, so some coordination and
@@ -640,7 +641,7 @@ export const HUMAN_INPUT_COORDINATION_REVIEW_TYPES = Object.freeze([
   ...WORK_ITEM_DISPOSITION_REVIEW_TYPES,
 ]);
 
-const COORDINATION_REVIEW_TYPE_SET = new Set(HUMAN_INPUT_COORDINATION_REVIEW_TYPES);
+const COORDINATION_REVIEW_TYPE_SET = readonlySet(HUMAN_INPUT_COORDINATION_REVIEW_TYPES);
 const HUMAN_INPUT_CHOICE_ALIASES = Object.freeze({
   approve: /\b(approve|approved|yes|allow|allowed|ok|okay|proceed|ship)\b/i,
   deny: /\b(deny|denied|reject|rejected|no|decline|declined|cancel|canceled|cancelled|block|blocked)\b/i,
@@ -751,7 +752,7 @@ const NON_INTERACTIVE_REVIEW_ACTIONS = Object.freeze({
 // discarded the work item and its verdict (a fix its assessor passed was
 // failed on a pre-existing broken test suite), while a parked gate costs
 // nothing and is answered later from the app, the phone or `posse gate answer`.
-const OPERATOR_OWNED_REVIEW_TYPES = new Set([
+const OPERATOR_OWNED_REVIEW_TYPES = readonlySet([
   "blocked_recovery",
   "assessment",
   "needs_review",
