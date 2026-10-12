@@ -25,7 +25,7 @@ import { isVerificationInfrastructureOutcome, verificationOutcome } from "./veri
 import { resolveRepositoryVerificationPlan, VERIFICATION_PLAN_CONFIG, VERIFICATION_PLAN_SCHEMA_VERSION, verificationPlanSnapshot } from "../../../verification/functions/verification-plan.js";
 import { withLineagePathsRestored } from "../../../verification/functions/lineage-tree.js";
 import { TEST_EXECUTION_RECEIPT_KIND, TEST_EXECUTION_RECEIPT_MIME_TYPE, TEST_EXECUTION_REUSE_KIND, TEST_FILE_INVOKED_COVERAGE_STATUS, SINGLE_FILE_TEST_RUNNERS, REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID, UNESTABLISHED_COVERAGE_STATUSES, DIRTY_INPUT_FINGERPRINT_LIMITS, VERIFICATION_ENVIRONMENT_FILES, TEST_SCRIPT_NO_VERIFICATION_REASON, VERIFICATION_DEPENDENCY_LOCK_INVALID } from "../../../../catalog/verification.js";
-import { checkRunFailureFingerprint, checkRunsFailureFingerprint, comparableTestFailureFingerprint, renderTestFailureSummary, testFailureFingerprint } from "./test-failure-evidence.js";
+import { checkRunFailureFingerprint, checkRunsFailureFingerprint, comparableTestFailureFingerprint, isBaselineTestFailure, renderTestFailureSummary, testFailureFingerprint, testFailureInventory } from "./test-failure-evidence.js";
 import { discoverUnitTestCapability, resolveUnitTestInvocation, runUnitTestFiles } from "../../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { testExecutionCounts } from "../../../../shared/tools/functions/toolkit/test-output-counts.js";
 export { normalizeFailureFingerprintText } from "./test-failure-evidence.js";
@@ -1794,9 +1794,11 @@ async function attributeDeclaredTestFailure(result, plan, { base, scopePaths, po
     delta, debt_only: delta === "persistent_failure",
     baseline_test_counts: baseline.test_counts || null,
     baseline_failure_fingerprint: comparableTestFailureFingerprint(comparableBaseline),
+    baseline_failure_inventory: testFailureInventory(comparableBaseline),
     ...(Array.isArray(baseline.check_runs) ? { baseline_check_runs: baseline.check_runs.map((check) => ({
       check_id: check.check_id, intent: check.intent, status: check.status,
       test_counts: check.test_counts || null, failure_fingerprint: check.failure_fingerprint ?? null,
+      failure_inventory: check.failure_inventory || null,
     })) } : {}) };
 }
 
@@ -1940,6 +1942,7 @@ async function runVerificationChecks(plan, { cwd, policy, phase = null } = {}) {
       status: run.status, ok: run.ok, reason: run.reason, exit_code: run.code,
       duration_ms: run.duration_ms, test_counts: run.test_counts || null,
       coverage_status: run.coverage_status || "unknown", failure_fingerprint: checkRunFailureFingerprint(run, { executionRoot: cwd }),
+      failure_inventory: testFailureInventory(run, { executionRoot: cwd }),
       ...(run.timeout_kind ? { timeout_kind: run.timeout_kind } : {}) })),
     coverage_status: aggregateCheckCoverageStatus(runs),
     file_results: runs.flatMap((run) => run.file_results || []),
@@ -2250,6 +2253,8 @@ async function executeReceipt({
     ...(siblingPaths.size > 0 ? { tree_state: "mixed" } : {}),
     duration_ms: result.duration_ms,
     failure_fingerprint: (hasExecutionChecks && checkRunsFailureFingerprint(result.check_runs)) || testFailureFingerprint(result, { executionRoot: cwd }),
+    failure_inventory: testFailureInventory(result, { executionRoot: cwd }),
+    execution_root: cwd,
     reason: cleanupError || (siblingPaths.size > 0 ? "concurrent_sibling_writes" : null)
       || (noTestsExecuted ? "no_tests_executed" : result.reason) || null,
     missing_executable: result.missing_executable || null,
@@ -2736,9 +2741,7 @@ export function testExecutionDelta(baseline, postChange) {
   if (baseline.status === "passed" && failed(postChange)) return "regression";
   if (failed(baseline) && postChange.status === "passed") return "fixed";
   if (failed(baseline) && failed(postChange)) {
-    const baselineFingerprint = comparableTestFailureFingerprint(baseline);
-    return baselineFingerprint
-      && baselineFingerprint === comparableTestFailureFingerprint(postChange)
+    return isBaselineTestFailure(postChange, baseline)
       ? "persistent_failure"
       : "changed_failure";
   }
@@ -2892,7 +2895,7 @@ function baselineAttributionSummary(attribution) {
   const introduced = Array.isArray(attribution?.introduced_paths) ? attribution.introduced_paths : [];
   return [
     attribution?.comparison === "scoped_change_removed"
-      ? `the declared command ${attribution.debt_only ? "fails identically" : "does not fail identically"} with this job's scoped changes removed and sibling commits retained` : null,
+      ? `the declared command ${attribution.debt_only ? "reports only failures also present" : "does not establish the same failures"} with this job's scoped changes removed and sibling commits retained` : null,
     debt.length > 0 ? `${debt.join(", ")} already failed the same way at the pre-change commit ${commit}, so that failure is not this change's` : null,
     introduced.length > 0 ? `${introduced.join(", ")} fail${introduced.length === 1 ? "s" : ""} because of this change` : null,
     attribution?.error ? `the pre-change run could not complete (${attribution.error})` : null,
@@ -2947,6 +2950,9 @@ export function renderTestExecutionEvidence({
       ? `repository_plan_ignored: ${plan.repository_plan_ignored.source || "repository"} plan not run (${plan.repository_plan_ignored.reason})`
       : null,
     `delta: ${delta}`,
+    delta === "persistent_failure"
+      ? "baseline_debt: every remaining comparable failure was already present before this change; some earlier failures may now be fixed. This is not a new regression or a passing suite. Judge the task criteria and coverage separately."
+      : null,
     scopeAttribution
       ? `scope_attribution: ${scopeAttribution.in_scope_count} error(s) in this task's files, ${scopeAttribution.attributable_outside_count} new error(s) elsewhere attributable to this change, ${scopeAttribution.unattributed_outside_count} error(s) in files this task does not own (pre-existing or owned by unfinished sibling tasks).${scopeAttribution.attributable ? "" : " The typecheck failure is not attributable to this task: judge it by its own files, which are clean."}`
       : null,

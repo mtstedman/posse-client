@@ -101,6 +101,7 @@ import { drainPostMergeAtlasWarmJobs } from "./post-merge-closeout.js";
 import { operationalRunJobs } from "./run-session.js";
 import { planQueuedWorkItemsUnlessStartupBlocked, selectQueuedWorkItemsToPlan } from "./queued-work-item-planning.js";
 import { recordStartupDirtyTreeBlock } from "../../git/functions/startup-dirty-tree-block.js";
+import { resolveStartupDirtyTreeBlock } from "./startup-dirty-tree-prompt.js";
 import { classifyResearchForRouting as classifyResearchForRoutingImpl, createInitialResearchOrPlanJob as createInitialResearchOrPlanJobImpl } from "../../research/functions/intake-routing.js";
 import { applyIterativeWorkflowProfile as applyIterativeWorkflowProfileImpl, shouldUseRedTeamPlanForWorkItem as shouldUseRedTeamPlanForWorkItemImpl, persistIterativeRedTeamPlanIfRequested as persistIterativeRedTeamPlanIfRequestedImpl, processIterativeWrapUp as processIterativeWrapUpImpl } from "../../planning/functions/orchestration.js";
 import { ITERATIVE_WORKFLOW_PROFILES, getIterativeWorkflowProfile, parseWorkItemMetadata, isIterativeWorkItemActive, shouldAutoApproveIterativeWorkItem, hasMergedHistory } from "../../planning/functions/state.js";
@@ -1542,7 +1543,15 @@ async function cmdGo() {
   // run's startup dirty-tree guard will let it boot, so a blocked run leaves
   // the queue untouched.
   const planning = await planQueuedWorkItemsUnlessStartupBlocked(queued, {
-    checkStartupDirtyTree: async () => (await getGitWorkflowHelpers()).checkStartupDirtyTreeAsync({ reason: "run start" }),
+    checkStartupDirtyTree: async () => {
+      const helpers = await getGitWorkflowHelpers();
+      const result = await helpers.checkStartupDirtyTreeAsync({ reason: "run start" });
+      return resolveStartupDirtyTreeBlock(result, {
+        projectDir: PROJECT_DIR,
+        guardStartupDirtyTree: helpers.guardStartupDirtyTreeInWorker,
+        nonInteractive: NON_INTERACTIVE,
+      });
+    },
     plan: (toPlan) => {
       console.log(`\n${C.bold}  Pipeline — ${toPlan.length} work item(s)${C.reset}\n`);
       for (const wi of toPlan) {
@@ -1567,7 +1576,7 @@ async function cmdGo() {
   if (planning.blocked) {
     recordStartupDirtyTreeBlock(planning.blocked, { reason: "run start", logEvent, log });
     console.log(`\n  ${C.yellow}Run blocked: ${planning.blocked.message}${C.reset}\n`);
-    process.exitCode = 2;
+    process.exitCode = planning.blocked.userExited ? 0 : 2;
     return;
   }
 

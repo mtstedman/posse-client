@@ -586,6 +586,12 @@ history and are never executable cache hits. Passing and known-baseline-debt
 receipts may be reused across jobs only for the same repository, commit, plan,
 tree, policy, and toolchain; the new receipt points back to its source artifact.
 
+Complete Node spec and PHPUnit failure reports are compared by individual
+failure identity. Fixing some existing failures or changing their report order
+leaves the remaining failures classified as baseline debt. New failures and
+changed diagnostics remain actionable. Debt does not count as a passing suite
+or waive missing test coverage; incomplete reports retain conservative handling.
+
 Without a legacy planner `test_command`, Posse derives a versioned ordered plan
 from known `package.json` test/lint/typecheck scripts. Repositories can instead
 commit `posse.verification.json`:

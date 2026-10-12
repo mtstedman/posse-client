@@ -36,6 +36,7 @@ import { checkPosseUpdateAvailabilityCached, formatPosseUpdateAvailableWarning }
 import { BossyLocalStream } from "../../bridge/classes/BossyLocalStream.js";
 import { readHumanGateResnoozeSec } from "../../scheduler/functions/config.js";
 import { recordStartupDirtyTreeBlock } from "../../git/functions/startup-dirty-tree-block.js";
+import { resolveStartupDirtyTreeBlock } from "../functions/startup-dirty-tree-prompt.js";
 
 const OPEN_WORK_ITEM_STATUSES = Object.freeze(
   WORK_ITEM_STATUSES.filter((status) => !TERMINAL_WORK_ITEM_STATUSES.includes(status)),
@@ -143,6 +144,7 @@ export class RunSession {
       ensureGitReady,
       guardStartupDirtyTree,
       checkStartupDirtyTree,
+      resolveStartupDirtyTreeBlock: resolveDirtyTreeBlock = resolveStartupDirtyTreeBlock,
       checkPosseUpdateAvailability: checkPosseUpdateAvailabilityForRun = checkPosseUpdateAvailabilityCached,
       formatPosseUpdateAvailableWarning: formatPosseUpdateAvailableWarningForRun = formatPosseUpdateAvailableWarning,
       ensureBootDependenciesInWorker: runBootDependencySync = ensureBootDependenciesInWorker,
@@ -360,10 +362,15 @@ export class RunSession {
   if (typeof checkStartupDirtyTree === "function") {
     let startupCheck = null;
     try { startupCheck = await checkStartupDirtyTree({ reason: "run start" }); } catch { /* the boot guard reports it */ }
+    if (startupCheck?.blocked) {
+      startupCheck = await resolveDirtyTreeBlock(startupCheck, {
+        projectDir: PROJECT_DIR, guardStartupDirtyTree, nonInteractive,
+      });
+    }
     if (startupCheck?.ok === false && startupCheck?.blocked === true) {
       recordStartupDirtyTreeBlock(startupCheck, { reason: "run start", logEvent, log });
       console.log(`\n  ${C.yellow}Run blocked: ${startupCheck.message || "the target work tree has uncommitted changes."}${C.reset}\n`);
-      process.exitCode = 2;
+      process.exitCode = startupCheck.userExited ? 0 : 2;
       return startupCheck;
     }
   }
@@ -1073,7 +1080,7 @@ export class RunSession {
   if (typeof guardStartupDirtyTree === "function") {
     updateBootStep("startup work tree", { section: "workspace", status: "running", force: true });
     try {
-      const guardResult = await Promise.resolve(guardStartupDirtyTree({
+      let guardResult = await Promise.resolve(guardStartupDirtyTree({
         reason: "run start",
         onPhase: (event = {}) => {
           if (event.detail) {
@@ -1087,6 +1094,12 @@ export class RunSession {
           }
         },
       }));
+      if (guardResult?.blocked) {
+        // Release the boot panel's output/input ownership before asking.
+        guardResult = await boot.runWithTerminalPassthrough(() => resolveDirtyTreeBlock(guardResult, {
+          projectDir: PROJECT_DIR, guardStartupDirtyTree, nonInteractive,
+        }));
+      }
       if (guardResult?.ok === false && guardResult?.blocked === true) {
         const message = guardResult.message || "Run blocked because the target work tree has uncommitted changes.";
         updateBootStep("startup work tree", {
@@ -1099,7 +1112,7 @@ export class RunSession {
         try { stopBootMonitor({ final: true }); } catch { /* observational */ }
         recordStartupDirtyTreeBlock(guardResult, { reason: "run start", logEvent, log });
         console.log(`\n  ${C.yellow}Run blocked: ${message}${C.reset}\n`);
-        process.exitCode = 2;
+        process.exitCode = guardResult.userExited ? 0 : 2;
         return guardResult;
       }
       updateBootStep("startup work tree", { section: "workspace", status: "ok", force: true });

@@ -44,7 +44,9 @@ export function verificationOutcome(value = {}, {
   evidence = null,
 } = {}) {
   const type = comparison === "regressed" && value?.status === "timed_out"
-    ? "product_failed" : outcomeType(value);
+    ? "product_failed"
+    : comparison === "persistent" && value?.status === "failed"
+      ? "baseline_debt" : outcomeType(value);
   const infrastructure = INFRASTRUCTURE_OUTCOMES.has(type);
   const actionability = type === "side_effect_detected"
     ? "repository_cleanup"

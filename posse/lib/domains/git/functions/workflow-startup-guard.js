@@ -828,17 +828,20 @@ export function createStartupDirtyGuardHelpers(context) {
       gitExec(["commit", "-m", String(message || "chore: preserve startup work before posse boot")], projectDir, { timeoutMs: GIT_OPERATION_TIMEOUT_MS });
     } catch (err) {
       const detail = firstGitLine(err);
-      throw new Error(`Startup dirty tree guard could not commit current work before ${reason}: ${detail}`);
+      return {
+        ...dirtyTreeBlockedResult({ reason, dirtyLines, policy: mode }),
+        message: `Could not commit startup work: ${detail}`,
+      };
     }
 
     emitPhase("verifying clean tree");
     const remaining = startupDirtyLines();
     if (remaining.length) {
-      throw new Error(dirtyTreeGuardMessage({
+      return dirtyTreeBlockedResult({
         reason: `${reason} after auto-commit`,
         dirtyLines: remaining,
         policy: "block",
-      }));
+      });
     }
 
     const commit = gitShortHead();
@@ -938,18 +941,27 @@ export function createStartupDirtyGuardHelpers(context) {
     } catch (err) {
       if (isAbortError(err)) throw err;
       const detail = firstGitLine(err);
-      throw new Error(`Startup dirty tree guard could not commit current work before ${reason}: ${detail}`);
+      return {
+        ...dirtyTreeBlockedResult({ reason, dirtyLines, policy: mode }),
+        message: `Could not commit startup work: ${detail}`,
+        waitingLaneFilesystemRecovery,
+        sharedTrunkRecovery,
+      };
     }
 
     throwIfAborted(signal);
     emitPhase("verifying clean tree");
     const remaining = await startupDirtyLinesAsync({ signal });
     if (remaining.length) {
-      throw new Error(dirtyTreeGuardMessage({
-        reason: `${reason} after auto-commit`,
-        dirtyLines: remaining,
-        policy: "block",
-      }));
+      return {
+        ...dirtyTreeBlockedResult({
+          reason: `${reason} after auto-commit`,
+          dirtyLines: remaining,
+          policy: "block",
+        }),
+        waitingLaneFilesystemRecovery,
+        sharedTrunkRecovery,
+      };
     }
 
     throwIfAborted(signal);

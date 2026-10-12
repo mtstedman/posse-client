@@ -227,6 +227,64 @@ export function comparableTestFailureFingerprint(receipt) {
   return receipt.failure_fingerprint || null;
 }
 
+// Keep individual identities for complete reports so fixing one old failure
+// (or changing report order) does not turn the remaining debt into a regression.
+// Compact check receipts retain this inventory instead of duplicating output.
+export function testFailureInventory(result = {}, { executionRoot = result.execution_root || null } = {}) {
+  if (result.status !== "failed" || result.stdout_truncated || result.stderr_truncated) return null;
+  const report = structuredFailureReport(relativeExecutionPaths(result.stdout, executionRoot));
+  if (!report) return null;
+  const hash = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  return {
+    schema_version: 1,
+    context: hash([report.framework || "node", result.code ?? result.exit_code ?? "unknown",
+      result.signal ?? null, normalizeFailureFingerprintText(relativeExecutionPaths(result.stderr, executionRoot))]),
+    failures: report.failures.map((failure) => hash(failure)).sort(),
+  };
+}
+
+function failureInventory(receipt) {
+  if (receipt?.stdout_truncated || receipt?.stderr_truncated) return null;
+  // Raw evidence takes precedence, including a report that no longer parses.
+  if (receipt?.stdout) return testFailureInventory(receipt);
+  const inventory = receipt?.failure_inventory;
+  return inventory?.schema_version === 1 && typeof inventory.context === "string"
+    && Array.isArray(inventory.failures) && inventory.failures.length > 0
+    && inventory.failures.every((identity) => typeof identity === "string") ? inventory : null;
+}
+
+export function isBaselineTestFailure(post, baseline) {
+  if (post?.status !== "failed" || baseline?.status !== "failed") return false;
+  const hasCheckIdentities = (receipt) => receipt.check_runs?.some((check) =>
+    Object.hasOwn(check, "failure_fingerprint") || check.failure_inventory != null);
+  if (hasCheckIdentities(post) || hasCheckIdentities(baseline)) {
+    if (!Array.isArray(post.check_runs) || !Array.isArray(baseline.check_runs)) return false;
+    const key = (check) => check.check_id || check.command;
+    const before = new Map(baseline.check_runs.map((check) => [key(check), check]));
+    const afterKeys = post.check_runs.map(key);
+    if (before.size !== baseline.check_runs.length || new Set(afterKeys).size !== afterKeys.length
+      || afterKeys.some((id) => !id || !before.has(id)) || afterKeys.length !== before.size) return false;
+    return post.check_runs.some((check) => check.status === "failed")
+      && post.check_runs.every((check) => check.status === "passed"
+        || isBaselineTestFailure(check, before.get(key(check))));
+  }
+  const previous = failureInventory(baseline);
+  const current = failureInventory(post);
+  if (previous && current) {
+    if (previous.context !== current.context) return false;
+    // A multiset preserves duplicate failures; an extra occurrence is new.
+    const remaining = [...previous.failures];
+    return current.failures.every((identity) => {
+      const index = remaining.indexOf(identity);
+      if (index < 0) return false;
+      remaining.splice(index, 1);
+      return true;
+    });
+  }
+  const fingerprint = comparableTestFailureFingerprint(baseline);
+  return !!fingerprint && fingerprint === comparableTestFailureFingerprint(post);
+}
+
 function coversBaselineCases(postCounts, baselineCounts) {
   const post = Number(postCounts?.total);
   const baseline = Number(baselineCounts?.total);
@@ -240,10 +298,7 @@ function coversBaselineCases(postCounts, baselineCounts) {
  * its first failure, or output without a case count, establishes nothing.
  */
 export function debtCoverageEstablished(post, baselineCheck) {
-  if (post?.status !== "failed" || baselineCheck?.status !== "failed") return false;
-  const identity = comparableTestFailureFingerprint(post);
-  return !!identity
-    && identity === comparableTestFailureFingerprint(baselineCheck)
+  return isBaselineTestFailure(post, baselineCheck)
     && coversBaselineCases(post.test_counts, baselineCheck.test_counts);
 }
 
@@ -263,6 +318,7 @@ export function attributedDebtCoverageEstablished(post) {
     status: attribution.baseline_status,
     test_counts: attribution.baseline_test_counts,
     failure_fingerprint: attribution.baseline_failure_fingerprint,
+    failure_inventory: attribution.baseline_failure_inventory,
   });
 }
 
