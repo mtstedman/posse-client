@@ -11,6 +11,7 @@ export { CODEX_OAUTH_SUPPORTED_MODELS, CODEX_VALIDATION_KNOWN_MODELS } from "../
 // Text models and image models are intentionally split to prevent cross-use.
 
 import { PROVIDER_OPTIONS, PROVIDER_LABELS } from "../../../catalog/provider.js";
+import { LOCAL_MODEL_IDS } from "../../../catalog/local-model.js";
 import { MODEL_TIERS } from "../../../catalog/model.js";
 import { getRemoteProviderCatalog } from "./model-catalog-store.js";
 
@@ -174,7 +175,15 @@ export const MODEL_SETTING_DEFS = Object.freeze([
 function remoteModelsForProvider(provider, kind) {
   const remote = getRemoteProviderCatalog(provider);
   if (!remote) return [];
-  return (kind === "image" ? remote.imageModels : remote.textModels) || [];
+  const models = (kind === "image" ? remote.imageModels : remote.textModels) || [];
+  // Local execution requires an installed, client-supported profile. Older
+  // remote catalogs must not restore suspended models or aliases.
+  if (String(provider).trim().toLowerCase() === "posse-local" && kind === "text") {
+    return models.filter(model => LOCAL_MODEL_IDS.includes(model.id)).map(model => ({
+      ...model, aliases: (model.aliases || []).filter(alias => LOCAL_MODEL_IDS.includes(alias)),
+    }));
+  }
+  return models;
 }
 
 function builtinModelsForProvider(provider, kind) {

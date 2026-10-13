@@ -100,7 +100,7 @@ export function buildNativeDispatchRequest(provider, promptText, {
   const stallMs = positiveInteger(stallTimeoutMs, 1_000, MAX_WALL_TIMEOUT_MS);
   const tools = [...new Set(stringList(issuedToolIds))].sort();
   const api = ["anthropic", "openai", "grok"].includes(provider);
-  if (decision != null && !api) throw new Error("Decision turns require an API provider");
+  if (decision != null && !api && provider !== "posse-local") throw new Error("Decision turns require an API or local provider");
   if (image != null && (!["openai", "grok"].includes(provider) || decision != null || tools.length)) {
     throw new Error("Image turns require a tool-free image provider");
   }

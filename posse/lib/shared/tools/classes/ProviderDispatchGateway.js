@@ -7,6 +7,7 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import { sortAgentToolDefinitions } from "../functions/agent-schema.js";
+import { validateToolArguments } from "../functions/schema-validation.js";
 
 import {
   PROVIDER_TOOL_GATEWAY_MAX_REQUEST_BYTES,
@@ -119,6 +120,7 @@ export class ProviderDispatchGateway {
     cwd = null,
     leaseTtlMs,
     maxResponseBytes = PROVIDER_TOOL_GATEWAY_MAX_RESPONSE_BYTES,
+    validateArguments = false,
   } = {}) {
     if (!validId(dispatchId, 120)) throw new Error("Provider dispatch gateway requires a valid dispatch id");
     if (!mcpGate || typeof mcpGate.callToolResult !== "function"
@@ -157,6 +159,7 @@ export class ProviderDispatchGateway {
     this.endpoint = null;
     this.active = new Set();
     this.closed = false;
+    this.validateArguments = validateArguments;
   }
 
   async start() {
@@ -277,7 +280,11 @@ export class ProviderDispatchGateway {
     };
     res.once("close", disconnected);
     try {
-      const result = await this.mcpGate.callToolResult(body.name, body.arguments, {
+      const descriptor = this.toolDescriptors.find(tool => tool.name === body.name);
+      const validation = this.validateArguments ? validateToolArguments(descriptor, body.arguments) : null;
+      const result = validation && !validation.ok
+        ? { isError: true, content: [{ type: "text", text: `Error: Invalid tool arguments: ${validation.message}. No tool ran.` }] }
+        : await this.mcpGate.callToolResult(body.name, body.arguments, {
         signal: controller.signal,
       });
       if (controller.signal.aborted || this.closed) return;

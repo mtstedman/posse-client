@@ -652,7 +652,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
   "symbol.callers": {
     type: "function",
     name: "atlas_symbol_callers",
-    description: "List the symbols that directly call a known symbol: one level up, grouped by file with each caller's ID and name, without bodies or call-site lines. Use it to find what invokes a function or to trace a call chain up toward its entry points, one level per call; read a listed caller by its returned ID.",
+    description: "Find who calls or references a known symbol. Use when you have an implementation and need upstream entry points, wrappers, consumers, or callers affected by a change. Mode caller (default) lists direct calls; reference lists indexed non-call references; all lists both. Returns one hop of symbols grouped by file with IDs and names, without bodies or call-site lines. Read relevant results with symbol.get using their returned IDs; repeat upstream as needed to trace error handling, state changes, or ownership. Re-export edges are excluded; dynamic or unresolved relationships may be absent.",
     parameters: {
       type: "object",
       properties: {

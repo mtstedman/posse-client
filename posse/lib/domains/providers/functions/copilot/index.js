@@ -1,399 +1,61 @@
+// Copilot prompt/model projection. Rust owns discovery, launch and event decoding.
 import { PROVIDER_CAPABILITIES } from "../../../../catalog/provider-capabilities.js";
-// lib/domains/providers/functions/copilot/index.js
-//
-// GitHub Copilot CLI provider for the posse orchestrator.
-//
-// Owns credentials/readiness checks, Copilot CLI launch and JSONL processing,
-// session handling, and attachment to the deterministic MCP tool gateway.
-//
-// Auth model: dual — OAuth state managed by the copilot CLI itself, or
-// a fine-grained PAT in the environment. Resolution order:
-//   1. OAuth — `~/.copilot/config.json` lists at least one logged-in
-//      user. The CLI handles token refresh and request signing on its
-//      own; posse just spawns and lets it talk to GitHub.
-//   2. PAT — `GH_TOKEN`, then `GITHUB_TOKEN`. Used as a fallback for CI
-//      environments where the operator can't run `copilot login`
-//      interactively. Token needs the "Copilot Requests" fine-grained
-//      permission.
-// Interactive `copilot login` should be done OUT of band, not by Posse.
-// We never invoke the device-flow ourselves.
-//
-// Pricing model: subscription quota (premium requests × per-model
-// multiplier), NOT per-token. Quota exhaustion trips the rate limiter;
-// provider selection can fall through to the next configured role provider.
-
-import { spawn } from "child_process";
-import { buildRuntimeEnv } from "../../../runtime/functions/paths.js";
-import { appendBoundedText } from "../../../../shared/format/functions/bounded-text.js";
+import { verifyProviderDispatchCapabilitiesSync } from "../../../../shared/native/functions/engagement-client.js";
 import { providerRuntimeState } from "../../classes/runtime-state-singleton.js";
 import { selectExecutionModel } from "../shared/model-selection.js";
 import { getMaxOutputTokensForProvider } from "../shared/turns.js";
 import { normalizeMaxOutputTokens } from "../shared/output-limits.js";
+import { resolveProviderStallTimeout } from "../shared/stall-timeout.js";
+import { buildNativeDispatchRequest, rejectRawCliControlOptions, runNativeDispatch } from "../shared/native-dispatch.js";
+import { nativeIssuedToolIds } from "../shared/native-tool-catalog.js";
+import { buildDeterministicReadMcpServerConfigAsync, releaseDeterministicMcpServerSession } from "../../../integrations/functions/deterministic-mcp.js";
 import { MODEL_TIERS, escalateTier, getModelOverride, getModelTierConfig } from "./model-config.js";
-import { getCopilotInfo } from "./cli-discovery.js";
 import { getAuthMethod, hasCredentials, resolveCopilotAuth } from "./auth-state.js";
-import { buildCopilotArgs, buildCopilotChildEnv, buildCopilotSpawn } from "./launch.js";
-import { classifyCopilotFailure, parseCopilotErrorBackoff } from "./failure-classification.js";
-import { buildCopilotCloseStats, resolveCopilotStallTimeoutMs } from "./close-stats.js";
-import { terminateSpawnedProcess, trackSpawnedProcess } from "../shared/windows-spawn.js";
-import { providerStallPaused } from "../shared/stall-timeout.js";
-import { buildDeterministicReadMcpServerConfigAsync } from "../../../integrations/functions/deterministic-mcp.js";
-import { consumeCopilotLine, createAccumulator, finalOutput as copilotFinalOutput } from "./events.js";
+import { parseCopilotErrorBackoff } from "./failure-classification.js";
 
-// The Copilot CLI documents no per-call MCP tool timeout, so long-blocking
-// tool calls (agent dispatch) are not routed to it until one is verified.
-export const capabilities = PROVIDER_CAPABILITIES["copilot"];
-
-const LINE_BUF_MAX = 16 * 1024 * 1024;
-
-export { MODEL_TIERS, escalateTier, getAuthMethod, getCopilotInfo, getModelTierConfig, hasCredentials };
+export const capabilities = PROVIDER_CAPABILITIES.copilot;
+export { MODEL_TIERS, escalateTier, getAuthMethod, getModelTierConfig, hasCredentials };
 
 export function isReady() {
-  const info = getCopilotInfo();
-  if (!info.cmd) return { ready: false, reason: info.error || "Copilot CLI not found on PATH" };
-  const auth = resolveCopilotAuth();
-  if (!auth) {
-    return {
-      ready: false,
-      reason: "Copilot CLI is installed but no credential is set. Run `copilot login` interactively (preferred), or export GH_TOKEN/GITHUB_TOKEN with the \"Copilot Requests\" fine-grained permission.",
-    };
-  }
+  try { verifyProviderDispatchCapabilitiesSync("copilot"); }
+  catch (error) { return { ready: false, reason: String(error?.message || error) }; }
+  if (!resolveCopilotAuth()) return { ready: false, reason: "Run copilot login, or configure COPILOT_GITHUB_TOKEN, GH_TOKEN or GITHUB_TOKEN." };
   return { ready: true, reason: null };
 }
-export function getRateLimitState() {
-  return providerRuntimeState.getRateLimitState("copilot");
-}
+export function getRateLimitState() { return providerRuntimeState.getRateLimitState("copilot"); }
+export function tripRateLimit(backoffSec = 60, reason = "") { providerRuntimeState.tripRateLimit("copilot", backoffSec, reason || "Copilot rate limited"); }
+export function parseErrorBackoff(error) { return parseCopilotErrorBackoff(error); }
 
-export function tripRateLimit(backoffSec = 60, reason = "") {
-  providerRuntimeState.tripRateLimit("copilot", backoffSec, reason || "Copilot rate limited");
-}
-
-export function parseErrorBackoff(err) {
-  return parseCopilotErrorBackoff(err);
-}
-
-function buildCopilotAdditionalMcpConfig(mcpConfig = {}) {
-  const env = { ...(mcpConfig.env || {}) };
-  for (const key of Object.keys(mcpConfig.providerChildEnv || {}).sort()) {
-    if (/^[A-Z_][A-Z0-9_]*$/u.test(key)) env[key] = `\${${key}}`;
-  }
-  return JSON.stringify({
-    mcpServers: {
-      [mcpConfig.name]: {
-        command: mcpConfig.command,
-        args: mcpConfig.args || [],
-        cwd: mcpConfig.cwd || undefined,
-        env,
-        tools: ["*"],
-      },
-    },
-  });
-}
-
-function requestCopilotChildTermination(proc, { platform = process.platform, scheduleForceKill = null } = {}) {
-  terminateSpawnedProcess(proc, { force: false, platform });
-  if (typeof scheduleForceKill === "function") scheduleForceKill();
-}
-
-// ---------------------------------------------------------------------------
-// callProvider
-// ---------------------------------------------------------------------------
-//
-// Spawn the Copilot CLI in non-interactive mode, stream JSONL events
-// through the adapter, and resolve with `{ output, stats }` mirroring
-// the codex contract.
-//
-// The issued MCP gate is required and configured before launch. It provides
-// the role's current tools and scope/policy enforcement, including ATLAS.
-// Subscription quota failures update provider rate-limit state for routing.
-// Common provider options are accepted at this boundary; options without a
-// Copilot equivalent remain no-ops.
-
-/**
- * @param {string} promptText
- * @param {Record<string, any>} [opts]
- * @returns {Promise<{ output: string, stats: ReturnType<typeof buildCopilotCloseStats> }>}
- */
 export async function callProvider(promptText, opts = {}) {
-  const readiness = isReady();
-  if (!readiness.ready) {
-    return Promise.reject(buildNotReadyError(readiness.reason));
-  }
-
-  const {
-    role = "planner",
-    modelTier = "standard",
-    modelName = null,
-    reasoningEffort = "medium",
-    silent = false,
-    onLine = null,
-    cwd = null,
-    projectDir = null,
-    abortSignal = null,
-    stallTimeout = null,
-    maxOutputTokens = null,
-    mcpGate = null,
-    jobId = null,
-    agentCallId = null,
-  } = opts || {};
-
-  if (!mcpGate) {
-    const error = new Error("Copilot agent requires an MCP gate dependency");
-    error.code = "POSSE_AGENT_MCP_GATE_REQUIRED";
-    throw error;
-  }
-  const mcpConfig = await buildDeterministicReadMcpServerConfigAsync(role, {
-    ...opts,
-    providerName: "copilot",
-    mcpGate,
-    remoteToolSurface: mcpGate.remoteToolSurface,
-  });
-  if (!mcpConfig?.ready) {
-    const error = new Error(`Copilot MCP gate is not ready: ${mcpConfig?.reason || "unknown"}`);
-    error.code = "POSSE_AGENT_MCP_GATE_NOT_READY";
-    throw error;
-  }
-  const additionalMcpConfig = buildCopilotAdditionalMcpConfig(mcpConfig);
-
-  return new Promise((resolve, reject) => {
-    const workingDir = String(cwd || projectDir || process.cwd());
-    const tierConfig = getModelTierConfig(modelTier);
-    const resolvedModel = selectExecutionModel({
-      jobModelName: modelName,
-      globalModelOverride: getModelOverride(),
-      tierModel: tierConfig.model,
-    });
-    const outputTokenLimit = normalizeMaxOutputTokens(maxOutputTokens)
-      || getMaxOutputTokensForProvider("copilot", { role });
-
-    const argv = buildCopilotArgs({
-      prompt: promptText,
-      model: resolvedModel,
-      reasoningEffort,
-      workingDir,
-      additionalMcpConfig,
-      disableBuiltinMcps: true,
-      allowAllTools: false,
-      allowAllPaths: false,
-      availableTools: [mcpConfig.name],
-      allowTools: [mcpConfig.name],
-    });
-
-    const env = buildCopilotChildEnv(
-      buildRuntimeEnv(projectDir || workingDir, workingDir, process.env),
-      resolveCopilotAuth(),
-    );
-    Object.assign(env, mcpConfig.providerChildEnv || {});
-    // COPILOT_ALLOW_ALL is also accepted in lieu of --allow-all-tools;
-    // belt-and-braces in case future versions tighten the flag set.
-    delete env.COPILOT_ALLOW_ALL;
-
-    /** @type {ReturnType<typeof spawn> | null} */
-    let child;
-    try {
-      const launch = buildCopilotSpawn(getCopilotInfo().cmd, argv);
-      const processGroup = process.platform !== "win32";
-      child = spawn(launch.command, launch.args, {
-        cwd: workingDir,
-        env,
-        shell: false,
-        windowsHide: true,
-        windowsVerbatimArguments: launch.windowsVerbatimArguments,
-        detached: processGroup,
+  rejectRawCliControlOptions("copilot", opts);
+  const role = opts.role || "planner";
+  const cwd = opts.cwd || opts.projectDir || process.cwd();
+  const modelTier = opts.modelTier || "standard";
+  const modelName = selectExecutionModel({ jobModelName: opts.modelName, globalModelOverride: getModelOverride(), tierModel: getModelTierConfig(modelTier).model });
+  let owner = null;
+  try {
+    let issuedToolIds = [];
+    if (opts.disableAgentTools === true) {
+      if (opts.allowWrite) throw new Error("A tool-free Copilot turn cannot have write access");
+    } else {
+      if (!opts.mcpGate) throw Object.assign(new Error("Copilot agent requires an MCP gate dependency"), { code: "POSSE_AGENT_MCP_GATE_REQUIRED" });
+      owner = await buildDeterministicReadMcpServerConfigAsync(role, {
+        ...opts, cwd, providerName: "copilot", isolateProviderHome: false,
+        remoteToolSurface: opts.mcpGate.remoteToolSurface,
       });
-      trackSpawnedProcess(child, launch.command, {
-        label: `copilot:${role || "provider"}`,
-        cwd: workingDir,
-        processGroup,
-      });
-    } catch (spawnErr) {
-      const err = new Error(`Failed to spawn copilot: ${spawnErr?.message || spawnErr}`);
-      err.code = "COPILOT_SPAWN_FAILED";
-      reject(err);
-      return;
+      if (!owner?.ready) throw Object.assign(new Error(`Copilot MCP gate is not ready: ${owner?.reason || "unknown"}`), { code: "POSSE_AGENT_MCP_GATE_NOT_READY" });
+      issuedToolIds = await nativeIssuedToolIds(opts.mcpGate);
     }
-
-    if (!child || !child.stdout || !child.stderr) {
-      requestCopilotChildTermination(child, {
-        scheduleForceKill: () => terminateSpawnedProcess(child, { force: true }),
-      });
-      reject(new Error("Copilot child process did not start cleanly (no stdio handles)"));
-      return;
-    }
-
-    const acc = createAccumulator();
-    const startTime = Date.now();
-    let stdout = "";
-    let stderr = "";
-    let stdoutLineBuffer = "";
-    let killedByStall = false;
-    let killedByAbort = false;
-    /** @type {NodeJS.Timeout | null} */
-    let stallTimer = null;
-    const forceKillTimers = new Set();
-    const stallTimeoutMs = resolveCopilotStallTimeoutMs(stallTimeout);
-    const scheduleForceKill = () => {
-      const timer = setTimeout(() => {
-        forceKillTimers.delete(timer);
-        terminateSpawnedProcess(child, { force: true });
-      }, 3000);
-      timer.unref?.();
-      forceKillTimers.add(timer);
-    };
-    const clearForceKillTimers = () => {
-      for (const timer of forceKillTimers) clearTimeout(timer);
-      forceKillTimers.clear();
-    };
-
-    const resetStallTimer = () => {
-      if (stallTimer) clearTimeout(stallTimer);
-      if (stallTimeoutMs > 0) {
-        stallTimer = setTimeout(() => {
-          if (providerStallPaused({ jobId, agentCallId })) {
-            resetStallTimer();
-            return;
-          }
-          killedByStall = true;
-          requestCopilotChildTermination(child, { scheduleForceKill });
-        }, stallTimeoutMs);
-      }
-    };
-    resetStallTimer();
-
-    const onAbort = () => {
-      killedByAbort = true;
-      requestCopilotChildTermination(child, { scheduleForceKill });
-    };
-    if (abortSignal) {
-      if (abortSignal.aborted) onAbort();
-      else abortSignal.addEventListener("abort", onAbort, { once: true });
-    }
-
-    const handleStdoutLine = (rawLine) => {
-      resetStallTimer();
-      const consumed = consumeCopilotLine(rawLine, acc);
-      if (!silent && typeof onLine === "function") {
-        try { onLine(rawLine); } catch { /* listener should not break the stream */ }
-      }
-      return consumed;
-    };
-
-    child.stdout.setEncoding("utf-8");
-    child.stdout.on("data", (chunk) => {
-      stdout = appendBoundedText(stdout, chunk);
-      stdoutLineBuffer += chunk;
-      if (stdoutLineBuffer.length > LINE_BUF_MAX) {
-        stdoutLineBuffer = "";
-        resetStallTimer();
-        return;
-      }
-      let idx;
-      while ((idx = stdoutLineBuffer.indexOf("\n")) >= 0) {
-        const line = stdoutLineBuffer.slice(0, idx).replace(/\r$/, "");
-        stdoutLineBuffer = stdoutLineBuffer.slice(idx + 1);
-        if (line) handleStdoutLine(line);
-      }
+    const systemPrompt = opts.remoteSystemPrompt || null;
+    opts.recordFinalPrompt?.(promptText, { systemPrompt, systemPromptFiles: [] });
+    const request = buildNativeDispatchRequest("copilot", promptText, {
+      ...opts, role, cwd, modelTier, modelName, systemPrompt, issuedToolIds,
+      maxTurns: opts.maxTurns || 256,
+      maxOutputTokens: normalizeMaxOutputTokens(opts.maxOutputTokens) || getMaxOutputTokensForProvider("copilot", { role }),
+      stallTimeoutMs: resolveProviderStallTimeout(opts.stallTimeout) * 1000,
     });
-
-    child.stderr.setEncoding("utf-8");
-    child.stderr.on("data", (chunk) => { stderr = appendBoundedText(stderr, chunk); });
-
-    child.on("error", (err) => {
-      if (stallTimer) clearTimeout(stallTimer);
-      clearForceKillTimers();
-      const wrapped = new Error(`Copilot child process error: ${err?.message || err}`);
-      wrapped.code = "COPILOT_CHILD_ERROR";
-      wrapped.stdout = stdout;
-      wrapped.stderr = stderr;
-      reject(wrapped);
-    });
-
-    child.on("close", (code) => {
-      if (stallTimer) clearTimeout(stallTimer);
-      clearForceKillTimers();
-      if (abortSignal) {
-        try { abortSignal.removeEventListener("abort", onAbort); } catch { /* ignore */ }
-      }
-      // Flush any line left in the buffer.
-      if (stdoutLineBuffer.trim()) {
-        handleStdoutLine(stdoutLineBuffer.trim());
-        stdoutLineBuffer = "";
-      }
-      const durationMs = Date.now() - startTime;
-      const finalText = copilotFinalOutput(acc);
-      const stats = buildCopilotCloseStats({
-        role,
-        modelTier,
-        reasoningEffort,
-        modelName: resolvedModel,
-        acc,
-        durationMs,
-        finalOutputText: finalText,
-        stdout,
-        code,
-        sessionHandle: acc.sessionId,
-        priorSessionHandle: null,
-        maxOutputTokens: outputTokenLimit,
-        outputTruncated: false,
-        outputLimitReason: null,
-      });
-
-      if (code === 0 && !killedByStall && !killedByAbort) {
-        resolve({ output: finalText || stdout.trim(), stats });
-        return;
-      }
-
-      if (killedByStall) {
-        const err = new Error(`Copilot CLI stalled after ${(durationMs / 1000).toFixed(1)}s and was killed`);
-        err.code = "COPILOT_STALLED";
-        // The main attempt path keys on `err.stallKill` to route to the
-        // penalty-free stall path + stall cap (claude/codex/openai/grok all set
-        // it). Without this flag, dev/planner/researcher stalls take a full
-        // attempt penalty instead. (B15)
-        err.stallKill = true;
-        err.stats = stats;
-        err.stdout = stdout;
-        err.stderr = stderr;
-        reject(err);
-        return;
-      }
-      if (killedByAbort) {
-        const err = new Error("Copilot CLI run was aborted by the caller");
-        err.code = "COPILOT_ABORTED";
-        err.stats = stats;
-        err.stdout = stdout;
-        err.stderr = stderr;
-        reject(err);
-        return;
-      }
-
-      const classified = classifyCopilotFailure({ stdout, stderr, exit: code, acc });
-      if (classified.tripRateLimit) {
-        tripRateLimit(classified.tripRateLimit.backoffSec, classified.tripRateLimit.reason);
-      }
-      const err = new Error(classified.message);
-      err.code = classified.code;
-      err.exitCode = code;
-      err.stats = stats;
-      err.stdout = stdout;
-      err.stderr = stderr;
-      reject(err);
-    });
-  });
+    return await runNativeDispatch(request, { ...opts, projectDir: opts.projectDir || cwd });
+  } finally {
+    if (owner?.ownerSession) releaseDeterministicMcpServerSession(owner, { reason: "provider_cleanup", context: { provider: "copilot", role, jobId: opts.jobId, workItemId: opts.workItemId, attemptId: opts.attemptId } });
+  }
 }
-
-function buildNotReadyError(reason) {
-  const err = new Error(`Copilot provider is not ready: ${reason}`);
-  err.code = "COPILOT_NOT_READY";
-  return err;
-}
-
-// Exposed for tests.
-export const __testClassifyCopilotFailure = classifyCopilotFailure;
-export const __testBuildCopilotArgs = buildCopilotArgs;
-export const __testBuildCopilotCloseStats = buildCopilotCloseStats;
-export const __testBuildCopilotChildEnv = buildCopilotChildEnv;
-export const __testBuildCopilotAdditionalMcpConfig = buildCopilotAdditionalMcpConfig;
-export const __testBuildCopilotSpawn = buildCopilotSpawn;
-export const __testResolveCopilotStallTimeoutMs = resolveCopilotStallTimeoutMs;
-export const __testRequestCopilotChildTermination = requestCopilotChildTermination;

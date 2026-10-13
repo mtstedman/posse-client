@@ -19,7 +19,7 @@ import { createTestExecutionExecutors } from "./test-execution.js";
 import { createObservationWrapper } from "./factory.js";
 import { boundedSearchRows, renderSearchContentRows } from "./search-results.js";
 import { createTextMutationHelpers } from "./edits-mutations.js";
-import { applyAtomicEdits, ambiguousExactMatchMessage, EMPTY_OLD_STRING_ERROR } from "./edit-spans.js";
+import { applyAtomicEdits, ambiguousExactMatchMessage, EMPTY_FIND_ERROR } from "./edit-spans.js";
 import { buildStructuredReadResult as buildStructuredReadResultFromModule, formatNumberedLines as formatNumberedLinesFromModule, hasStructuredReadOptions as hasStructuredReadOptionsFromModule, looksReDosProne as looksReDosProneFromModule, splitEditableLines as splitEditableLinesFromModule } from "./structured-read.js";
 import "../../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { createWorkspaceSkipDirs } from "../../../../domains/runtime/functions/workspace-skip.js";
@@ -401,7 +401,7 @@ export function createDeterministicToolkit({
     const originalContent = fs.readFileSync(filePath, "utf-8");
     let content = originalContent;
 
-    const exactRequested = args.old_string !== undefined || args.new_string !== undefined;
+    const exactRequested = args.find !== undefined || args.replace !== undefined;
     const replaceLines = args.replaceLines;
     const edits = args.edits;
     const replacePattern = args.replacePattern;
@@ -411,7 +411,7 @@ export function createDeterministicToolkit({
     const jsonValueProvided = hasOwn(args, "jsonValue");
     const executableRequested = args.executable !== undefined;
     const modes = [
-      exactRequested && "old_string/new_string",
+      exactRequested && "find/replace",
       replaceLines !== undefined && "replaceLines",
       edits !== undefined && "edits",
       replacePattern !== undefined && "replacePattern",
@@ -421,7 +421,7 @@ export function createDeterministicToolkit({
       executableRequested && "executable",
     ].filter(Boolean);
     if (modes.length === 0) {
-      return "Error: edit_file requires exactly one edit mode: old_string/new_string, replaceLines, edits, replacePattern, insertAt, append, jsonPath/jsonValue, or executable.";
+      return "Error: edit_file requires exactly one edit mode: find/replace, replaceLines, edits, replacePattern, insertAt, append, jsonPath/jsonValue, or executable.";
     }
     if (modes.length > 1) {
       return `Error: edit_file accepts only one edit mode per call; received ${modes.join(", ")}.`;
@@ -536,18 +536,18 @@ export function createDeterministicToolkit({
       return `File edited: ${displayPath} (jsonPath ${String(jsonPath)})`;
     }
 
-    if (typeof args.old_string !== "string" || typeof args.new_string !== "string") {
-      return "Error: old_string/new_string mode requires both old_string and new_string.";
+    if (typeof args.find !== "string" || typeof args.replace !== "string") {
+      return "Error: find/replace mode requires both find and replace.";
     }
-    if (!args.old_string) return `Error: ${EMPTY_OLD_STRING_ERROR}.`;
-    const exactCount = content.split(args.old_string).length - 1;
+    if (!args.find) return `Error: ${EMPTY_FIND_ERROR}.`;
+    const exactCount = content.split(args.find).length - 1;
     if (exactCount > 1) {
-      return `Error: ${ambiguousExactMatchMessage(content, args.old_string)} in ${displayPath}.`;
+      return `Error: ${ambiguousExactMatchMessage(content, args.find)} in ${displayPath}.`;
     }
     if (exactCount === 1) {
-      content = content.replace(args.old_string, () => args.new_string);
+      content = content.replace(args.find, () => args.replace);
       if (content === originalContent) {
-        return `Error: edit_file made no changes in ${displayPath}. old_string/new_string resolved to identical content.`;
+        return `Error: edit_file made no changes in ${displayPath}. find/replace resolved to identical content.`;
       }
       writeTextFileAtomic(filePath, content);
       return `File edited: ${displayPath}`;
@@ -555,11 +555,11 @@ export function createDeterministicToolkit({
 
     const fileEol = content.includes("\r\n") ? "\r\n" : "\n";
     const normalizeEol = (value) => String(value || "").replace(/\r\n/g, "\n");
-    const oldWithFileEol = normalizeEol(args.old_string).replace(/\n/g, fileEol);
-    const newWithFileEol = normalizeEol(args.new_string).replace(/\n/g, fileEol);
+    const oldWithFileEol = normalizeEol(args.find).replace(/\n/g, fileEol);
+    const newWithFileEol = normalizeEol(args.replace).replace(/\n/g, fileEol);
     const normalizedCount = content.split(oldWithFileEol).length - 1;
     if (normalizedCount === 0) {
-      return `Error: old_string not found in ${displayPath}. Make sure it matches exactly (including whitespace/indentation); line-ending mismatch may be the cause.`;
+      return `Error: find not found in ${displayPath}. Make sure it matches exactly (including whitespace/indentation); line-ending mismatch may be the cause.`;
     }
     if (normalizedCount > 1) {
       return `Error: ${ambiguousExactMatchMessage(content, oldWithFileEol)} in ${displayPath} after normalizing line endings.`;
@@ -567,7 +567,7 @@ export function createDeterministicToolkit({
 
     content = content.replace(oldWithFileEol, () => newWithFileEol);
     if (content === originalContent) {
-      return `Error: edit_file made no changes in ${displayPath}. old_string/new_string resolved to identical content after line-ending normalization.`;
+      return `Error: edit_file made no changes in ${displayPath}. find/replace resolved to identical content after line-ending normalization.`;
     }
     writeTextFileAtomic(filePath, content);
     return `File edited: ${displayPath}`;

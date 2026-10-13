@@ -10,6 +10,7 @@ import {
   ML_MODEL_PACKAGE_INSTALL_METHOD,
   ML_NATIVE_PROTOCOL,
   ML_NATIVE_ROUTE,
+  ML_PROVIDER_DISPATCH_METHOD,
 } from "../../../catalog/binary.js";
 import { nativeBinaries } from "../../tools/classes/BinaryManager.js";
 
@@ -72,10 +73,10 @@ export async function runMlNativeMethodAsync(method, payload, opts) {
     signal: opts.signal,
     worker: useWorker,
     ...(useWorker ? { workerArgs: ["worker", "--stdio", ...modelArgs] } : {}),
-    workerFallback: true,
+    workerFallback: method !== ML_PROVIDER_DISPATCH_METHOD,
     idempotent: opts.idempotent !== false,
     onProgress: opts.onProgress,
-    retireWorkerOnAbort: method === "ml.generate",
+    retireWorkerOnAbort: method === "ml.generate" || method === ML_PROVIDER_DISPATCH_METHOD,
     requiredRoute: ML_NATIVE_ROUTE,
   };
   const res = await manager.binary("ml").run(

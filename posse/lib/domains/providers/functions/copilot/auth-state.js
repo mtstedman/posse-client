@@ -3,6 +3,8 @@ import os from "os";
 import path from "path";
 
 function readCopilotToken() {
+  const copilot = process.env.COPILOT_GITHUB_TOKEN;
+  if (typeof copilot === "string" && copilot.trim()) return { token: copilot.trim(), source: "COPILOT_GITHUB_TOKEN" };
   const gh = process.env.GH_TOKEN;
   if (typeof gh === "string" && gh.trim()) return { token: gh.trim(), source: "GH_TOKEN" };
   const github = process.env.GITHUB_TOKEN;
@@ -12,7 +14,7 @@ function readCopilotToken() {
 
 function readCopilotOauthLogin() {
   try {
-    const cfgPath = path.join(os.homedir(), ".copilot", "config.json");
+    const cfgPath = path.join(process.env.COPILOT_HOME || path.join(os.homedir(), ".copilot"), "config.json");
     if (!fs.existsSync(cfgPath)) return null;
     const raw = fs.readFileSync(cfgPath, "utf-8");
     const stripped = raw.replace(/^\s*\/\/.*$/gm, "");
@@ -27,10 +29,10 @@ function readCopilotOauthLogin() {
 }
 
 export function resolveCopilotAuth() {
-  const oauth = readCopilotOauthLogin();
-  if (oauth) return { mode: "oauth", source: `~/.copilot (login=${oauth.login})` };
   const pat = readCopilotToken();
   if (pat) return { mode: "pat", source: pat.source };
+  const oauth = readCopilotOauthLogin();
+  if (oauth) return { mode: "oauth", source: `~/.copilot (login=${oauth.login})` };
   return null;
 }
 

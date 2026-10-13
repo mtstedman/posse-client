@@ -487,19 +487,19 @@ Remote roles: `artificer`, `dev`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Edit an existing file within the allowed scope. Provide exactly one mode: exact old_string/new_string, replaceLines, atomic edits[], replacePattern, insertAt, append, jsonPath/jsonValue, or executable. For several edits to one file, send edits[] once: every item resolves against the original file, and overlaps reject the whole batch.
+Edit an existing file within the allowed scope. Provide exactly one mode: exact find/replace, replaceLines, atomic edits[], replacePattern, insertAt, append, jsonPath/jsonValue, or executable. For several edits to one file, send edits[] once: every item resolves against the original file, and overlaps reject the whole batch.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `append` | `string` | Conditional |  | Content to append to the file. |
-| `edits` | `array<any>` | Conditional | min items 1 | Atomic edits to one file. Use when several changes are known; all line numbers and old_string values refer to the file before this call. A failed or overlapping item writes nothing. |
+| `edits` | `array<any>` | Conditional | min items 1 | Atomic edits to one file. Use when several changes are known; all line numbers and find values refer to the file before this call. A failed or overlapping item writes nothing. |
 | `executable` | `boolean` | Conditional |  | Set or clear the file's executable permission bits without changing its content. |
+| `find` | `string` | Conditional |  | Exact existing text copied from a recent read, preserving whitespace. Must occur exactly once; zero or multiple matches leave the file unchanged. |
 | `insertAt` | `object` | Conditional |  | Insert content before a 1-based line number. Use line_count + 1 to insert after the last line. |
 | `jsonPath` | `string` | Conditional |  | Dot-separated JSON path to update. |
 | `jsonValue` | `any` | Conditional |  | Value to write when jsonPath is used. |
-| `new_string` | `string` | Conditional |  | Replacement text |
-| `old_string` | `string` | Conditional |  | Exact existing text copied from a recent read, preserving whitespace. Must occur exactly once; zero or multiple matches leave the file unchanged. |
 | `path` | `string` | Required |  | File path to edit |
+| `replace` | `string` | Conditional |  | Replacement text |
 | `replaceLines` | `object` | Conditional |  | Replace a 1-based inclusive line range [start, end] with content. Line numbers use the numbered-file output convention. |
 | `replacePattern` | `object` | Conditional |  | Replace a regex match. Patterns are case-sensitive; global=false requires a unique match. Patterns longer than 500 characters or with unsafe nested quantifiers are rejected. Replacement uses JavaScript replacement syntax ($1, $$). |
 
@@ -1128,7 +1128,7 @@ Remote roles: `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-List the symbols that directly call a known symbol: one level up, grouped by file with each caller's ID and name, without bodies or call-site lines. Use it to find what invokes a function or to trace a call chain up toward its entry points, one level per call; read a listed caller by its returned ID.
+Find who calls or references a known symbol. Use when you have an implementation and need upstream entry points, wrappers, consumers, or callers affected by a change. Mode caller (default) lists direct calls; reference lists indexed non-call references; all lists both. Returns one hop of symbols grouped by file with IDs and names, without bodies or call-site lines. Read relevant results with symbol.get using their returned IDs; repeat upstream as needed to trace error handling, state changes, or ownership. Re-export edges are excluded; dynamic or unresolved relationships may be absent.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

@@ -1,36 +1,36 @@
 // Resolve a batch against one immutable file snapshot. All spans use offsets
 // in that snapshot, so a replacement cannot shift a later edit's coordinates.
 
-// An empty old_string matches between every character: never a span.
-export const EMPTY_OLD_STRING_ERROR = "old_string/new_string requires a nonempty old_string and a new_string";
+// An empty find matches between every character: never a span.
+export const EMPTY_FIND_ERROR = "find/replace requires a nonempty find and a replace";
 
 export function ambiguousExactMatchMessage(content, oldText) {
-  if (!oldText) return EMPTY_OLD_STRING_ERROR;
+  if (!oldText) return EMPTY_FIND_ERROR;
   const lines = [];
   let count = 0;
   for (let at = content.indexOf(oldText); at >= 0; at = content.indexOf(oldText, at + oldText.length)) {
     count++;
     if (lines.length < 8) lines.push(1 + (content.slice(0, at).match(/\n/g)?.length || 0));
   }
-  return `old_string matches ${count} times at line${lines.length === 1 ? "" : "s"} ${lines.join(", ")}${count > lines.length ? ", ..." : ""}; include more surrounding context or use replaceLines`;
+  return `find matches ${count} times at line${lines.length === 1 ? "" : "s"} ${lines.join(", ")}${count > lines.length ? ", ..." : ""}; include more surrounding context or use replaceLines`;
 }
 
 function exactSpan(content, item) {
-  if (typeof item.old_string !== "string" || !item.old_string || typeof item.new_string !== "string") {
-    return { error: EMPTY_OLD_STRING_ERROR };
+  if (typeof item.find !== "string" || !item.find || typeof item.replace !== "string") {
+    return { error: EMPTY_FIND_ERROR };
   }
   const eol = content.includes("\r\n") ? "\r\n" : "\n";
-  const variants = [[item.old_string, item.new_string]];
-  const normalizedOld = item.old_string.replace(/\r\n/g, "\n").replace(/\n/g, eol);
-  const normalizedNew = item.new_string.replace(/\r\n/g, "\n").replace(/\n/g, eol);
-  if (normalizedOld !== item.old_string) variants.push([normalizedOld, normalizedNew]);
+  const variants = [[item.find, item.replace]];
+  const normalizedOld = item.find.replace(/\r\n/g, "\n").replace(/\n/g, eol);
+  const normalizedNew = item.replace.replace(/\r\n/g, "\n").replace(/\n/g, eol);
+  if (normalizedOld !== item.find) variants.push([normalizedOld, normalizedNew]);
   for (const [oldText, newText] of variants) {
     const at = content.indexOf(oldText);
     if (at < 0) continue;
     if (content.indexOf(oldText, at + oldText.length) >= 0) return { error: ambiguousExactMatchMessage(content, oldText) };
     return { start: at, end: at + oldText.length, replacement: newText };
   }
-  return { error: "old_string not found" };
+  return { error: "find not found" };
 }
 
 function lineSpan(content, item) {
@@ -79,8 +79,8 @@ export function applyAtomicEdits(original, edits) {
     if (!item || typeof item !== "object" || Array.isArray(item)) return { error: `edits[${index}]: expected an edit object` };
     const keys = Object.keys(item);
     const lineMode = keys.includes("replaceLines");
-    const allowed = lineMode ? ["replaceLines"] : ["old_string", "new_string"];
-    const unknown = keys.find((key) => !["replaceLines", "old_string", "new_string"].includes(key));
+    const allowed = lineMode ? ["replaceLines"] : ["find", "replace"];
+    const unknown = keys.find((key) => !["replaceLines", "find", "replace"].includes(key));
     if (unknown) return { error: `arguments.edits[${index}].${unknown} is not allowed` };
     if (keys.some((key) => !allowed.includes(key)) || !keys.length) return { error: `edits[${index}]: use exactly one supported edit mode without path` };
     const span = lineMode ? lineSpan(content, item) : exactSpan(content, item);

@@ -3,7 +3,7 @@ import { EDIT_FILE_MODES } from "../../../catalog/native-tools.js";
 const PREVIEW_LIMIT = 6000;
 // Fields shown as JSON when no textual rendering applies: every catalog mode
 // field except the ones rendered as diffs below.
-const STRUCTURED_EDIT_FIELDS = EDIT_FILE_MODES.flat().filter((key) => !["old_string", "new_string", "edits"].includes(key));
+const STRUCTURED_EDIT_FIELDS = EDIT_FILE_MODES.flat().filter((key) => !["find", "replace", "edits"].includes(key));
 
 function excerpt(value, limit = 3000) {
   const text = String(value ?? "");
@@ -20,8 +20,8 @@ function exactDiff(oldText, newText) {
 
 function batchItemPreview(item, index) {
   const label = `edits[${index}]`;
-  if (item && typeof item.old_string === "string" && typeof item.new_string === "string") {
-    return `${label}\n${exactDiff(item.old_string, item.new_string)}`;
+  if (item && typeof item.find === "string" && typeof item.replace === "string") {
+    return `${label}\n${exactDiff(item.find, item.replace)}`;
   }
   const lines = item?.replaceLines;
   if (lines && typeof lines === "object" && typeof lines.content === "string") {
@@ -34,8 +34,8 @@ function batchItemPreview(item, index) {
 /** Describe the attempted edit without applying it or reading extra files. */
 export function editScopeRequestReason(args = {}) {
   let preview;
-  if (typeof args.old_string === "string" && typeof args.new_string === "string") {
-    preview = exactDiff(args.old_string, args.new_string);
+  if (typeof args.find === "string" && typeof args.replace === "string") {
+    preview = exactDiff(args.find, args.replace);
   } else if (Array.isArray(args.edits)) {
     preview = excerpt(args.edits.map(batchItemPreview).join("\n"), PREVIEW_LIMIT);
   } else {

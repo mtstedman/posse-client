@@ -83,7 +83,7 @@ export const TOOL_WRITE_FILE = {
 // edit_file's mutually exclusive modes, as the fields each one takes. The
 // schema's oneOf and the scope-request preview both derive from this list.
 export const EDIT_FILE_MODES = Object.freeze([
-  Object.freeze(["old_string", "new_string"]),
+  Object.freeze(["find", "replace"]),
   Object.freeze(["replaceLines"]),
   Object.freeze(["edits"]),
   Object.freeze(["replacePattern"]),
@@ -107,15 +107,15 @@ export const TOOL_EDIT_FILE = {
   type: "function",
   name: "edit_file",
   description:
-    "Edit an existing file within the allowed scope. Provide exactly one mode: exact old_string/new_string, " +
+    "Edit an existing file within the allowed scope. Provide exactly one mode: exact find/replace, " +
     "replaceLines, atomic edits[], replacePattern, insertAt, append, jsonPath/jsonValue, or executable. " +
     "For several edits to one file, send edits[] once: every item resolves against the original file, and overlaps reject the whole batch.",
   parameters: {
     type: "object",
     properties: {
       path: { type: "string", description: "File path to edit" },
-      old_string: { type: "string", description: "Exact existing text copied from a recent read, preserving whitespace. Must occur exactly once; zero or multiple matches leave the file unchanged." },
-      new_string: { type: "string", description: "Replacement text" },
+      find: { type: "string", description: "Exact existing text copied from a recent read, preserving whitespace. Must occur exactly once; zero or multiple matches leave the file unchanged." },
+      replace: { type: "string", description: "Replacement text" },
       replaceLines: {
         type: "object",
         description: "Replace a 1-based inclusive line range [start, end] with content. Line numbers use the numbered-file output convention.",
@@ -130,12 +130,12 @@ export const TOOL_EDIT_FILE = {
       edits: {
         type: "array",
         minItems: 1,
-        description: "Atomic edits to one file. Use when several changes are known; all line numbers and old_string values refer to the file before this call. A failed or overlapping item writes nothing.",
+        description: "Atomic edits to one file. Use when several changes are known; all line numbers and find values refer to the file before this call. A failed or overlapping item writes nothing.",
         items: {
           type: "object",
           properties: {
-            old_string: { type: "string", description: "Exact existing text copied from a recent read, preserving whitespace. Must occur exactly once; zero or multiple matches leave the file unchanged." },
-            new_string: { type: "string", description: "Replacement text for the exact unique match" },
+            find: { type: "string", description: "Exact existing text copied from a recent read, preserving whitespace. Must occur exactly once; zero or multiple matches leave the file unchanged." },
+            replace: { type: "string", description: "Replacement text for the exact unique match" },
             replaceLines: {
               type: "object",
               properties: {
@@ -148,7 +148,7 @@ export const TOOL_EDIT_FILE = {
             },
           },
           oneOf: [
-            { required: ["old_string", "new_string"] },
+            { required: ["find", "replace"] },
             { required: ["replaceLines"] },
           ],
           additionalProperties: false,

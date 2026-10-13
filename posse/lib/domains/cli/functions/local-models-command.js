@@ -3,6 +3,7 @@
 import { C } from "../../../shared/format/functions/colors.js";
 import path from "node:path";
 
+import { LOCAL_MODEL_IDS } from "../../../catalog/local-model.js";
 import { ML_MODEL_PACKAGE_INSTALL_METHOD } from "../../../catalog/binary.js";
 import { runMlNativeMethodAsync } from "../../../shared/native/functions/ml-invoke.js";
 import {
@@ -37,7 +38,11 @@ export async function runLocalModelsCommand(argv = [], {
   }
 
   const client = await prepareClient();
-  const catalog = await fetchCatalog(client);
+  const signedCatalog = await fetchCatalog(client);
+  const catalog = {
+    ...signedCatalog,
+    artifacts: signedCatalog.artifacts.filter(artifact => LOCAL_MODEL_IDS.includes(artifact.artifactId)),
+  };
   if (json) {
     if (action === "download") {
       throw new Error("Local model downloads require an interactive confirmation and do not support --json.");

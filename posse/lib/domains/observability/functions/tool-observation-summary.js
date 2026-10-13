@@ -158,7 +158,8 @@ export function summarizeCatalogToolUse(tool, input = {}, cwdNorm = null, rel = 
     const rawPath = _pathTarget(input, spec);
     const filePath = rel(rawPath);
     if (!filePath && spec.requireTarget) return null;
-    const changed = _truncate(input.old_string || "", 60);
+    // Provider-owned Edit events and historical logs retain their wire names.
+    const changed = _truncate(input.find ?? input.old_string ?? "", 60);
     const editCount = Array.isArray(input.edits) ? input.edits.length : null;
     return {
       observation_type: spec.type,
