@@ -12,6 +12,7 @@ import {
   listActiveFileLocks,
 } from "../../queue/functions/index.js";
 import { parseFileScope, scopeToSchedulerLocks } from "../functions/file-scope.js";
+import { hasReviewedReservation } from "../../queue/functions/reviewed-handoff-records.js";
 
 const WORKTREE_TYPES = WORKTREE_JOB_TYPES;
 const ROOT_LOCKING_JOB_TYPES = WORKTREE_JOB_TYPES;
@@ -36,6 +37,7 @@ const FULL_REFRESH_WAKE_REASONS = new Set([
 
 function jobContributesQueueLock(job = {}) {
   if (!job || !jobNeedsWriteLocks(job)) return false;
+  if (hasReviewedReservation(job)) return true;
   if (jobNeedsAssessmentBarrier(job)) {
     return ACTIVE_ASSESSMENT_BARRIER_STATUSES.has(job.status);
   }
@@ -66,7 +68,7 @@ function lockRowsForJob(job = {}) {
       job_type: job.job_type,
       job_status: job.status,
     }));
-  return rows.map((row) => ({ ...row, lock_tier: "job" }));
+  return rows.map((row) => ({ ...row, lock_tier: "job", assessment_barrier: jobNeedsAssessmentBarrier(job) }));
 }
 
 function workItemLockRowsForJob(job = {}, scope = null) {
@@ -280,6 +282,10 @@ export class HeldQueueLockIndex {
 
   applyWake(payload = {}, { readJob = null } = {}) {
     const reason = String(payload.reason || "");
+    if (reason.startsWith("reviewed_handoff_") || (payload.jobId && typeof readJob === "function" && hasReviewedReservation(readJob(payload.jobId)))) {
+      this.refreshFromDb();
+      return;
+    }
     if (payload.jobId != null) {
       const jobStatus = reason.startsWith("job_status_") ? reason.slice("job_status_".length) : null;
       const leaseStatus = reason.startsWith("lease_released_") ? reason.slice("lease_released_".length) : null;

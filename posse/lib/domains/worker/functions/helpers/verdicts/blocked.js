@@ -46,6 +46,7 @@ export function handle(job, verdict, ctx) {
     && queueInternalAssessmentRetry(job, verdict, retryReason, {
       leaseToken: ctx.leaseToken,
       recordAssessorVerdict: ctx.recordAssessorVerdict,
+      assessmentModelTier: ctx.assessmentModelTier,
     })
   ) {
     log(`${C.yellow}[assessor] BLOCKED WITHOUT NEW OPERATOR QUESTION${C.reset} WI#${job.work_item_id} job #${job.id}: retrying assessment at a stronger tier before failing closed${reasonBrief}`);

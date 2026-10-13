@@ -3,6 +3,7 @@
 import { logEvent, releaseWorkItemFileLockForPath, updateJobPayload, getJob, getWorkItem, crossWiMergeDependencyWouldCycle, crossWiSyncSourceRejection, collectCrossWiPathProvenance, describeWorkItemMergeParking, workItemMergeParking, workItemWaitsOnWorkItem, workItemCanReleaseFileLock, recordFileLaneWait, parseJobPayload, runImmediateTransaction } from "../../queue/functions/index.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isSequenceAllocationPath } from "../../../catalog/sequence-allocation.js";
+import { REVIEWED_HANDOFF_REASONS } from "../../../catalog/reviewed-handoffs.js";
 import { handoffCandidateCoversPath, normalizeHandoffPath } from "./lock-timing.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
@@ -122,7 +123,9 @@ export function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   // Work items whose pending edits to the path the holder's content lacks
   // (they released the path to it bare). Taking the path now would edit it
   // without those edits, which then conflict with them at merge.
-  const outstanding = collectCrossWiPathProvenance(sourceWiId, path).outstanding
+  const provenance = collectCrossWiPathProvenance(sourceWiId, path);
+  if (provenance.complete === false) return recordBlocked(`Cross-WI handoff held for ${path}; provenance walk is incomplete`, { reason: REVIEWED_HANDOFF_REASONS.INCOMPLETE });
+  const outstanding = provenance.outstanding
     .filter((entry) => entry.source_work_item_id !== requesterWiId);
 
   // Holds until merge: a sequence-allocation file (version pin, migration
@@ -201,6 +204,7 @@ export function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
   let holderWaitPath = null;
   if (!existingOrder) {
     const holderWaits = workItemWaitsOnWorkItem(sourceWiId, requesterWiId);
+    if ("complete" in holderWaits && holderWaits.complete === false) return recordBlocked(`Cross-WI handoff held for ${path}; dependency walk is incomplete`, { reason: REVIEWED_HANDOFF_REASONS.INCOMPLETE });
     if (!holderWaits.waits) {
       if (holderParking && !releaseRejectedParkedLock) {
         return recordBlocked(

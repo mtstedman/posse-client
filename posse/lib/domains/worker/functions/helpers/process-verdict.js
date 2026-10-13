@@ -20,6 +20,7 @@ import { handle as handleNeedsReplan } from "./verdicts/needs_replan.js";
 import { handle as handlePass } from "./verdicts/pass.js";
 import { spawnFromRole } from "../../../queue/functions/spawn-guard.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { persistReviewedFileCompletion } from "../../../assessment/functions/reviewed-file-completion.js";
 
 const ASSESSOR_SPAWN_ROLE = Object.freeze({
   role: "assessor",
@@ -39,8 +40,10 @@ export function processVerdict(job, verdict, {
   humanApprovedReplan = false,
   replanTrigger = null,
   assessedCommitHash = undefined,
+  assessmentModelTier = null,
   reviewEvidence = null,
   projectDir = null,
+  reviewedCompletion = null,
 } = {}) {
   const emitLog = emit || ((msg) => console.log(`  ${msg}`));
   const spawnedJobs = [];
@@ -97,6 +100,7 @@ export function processVerdict(job, verdict, {
   let partialStatusClaimed = false;
   const ctx = {
     autoApprove,
+    assessmentModelTier,
     desiredOutputs: prepared.desiredOutputs,
     emitLog,
     isFromSuggestion,
@@ -115,6 +119,11 @@ export function processVerdict(job, verdict, {
       return partialStatusClaimed;
     },
     updateJobStatus: (status) => runInTransaction(() => {
+      if (status === "succeeded" && verdict.verdict === "pass" && reviewedCompletion) {
+        // Publication is part of the same transaction as the lease-guarded
+        // success transition. Never emit eligibility at provider completion.
+        if (!persistReviewedFileCompletion(job.id, reviewedCompletion, leaseToken)) return false;
+      }
       const changed = (partialStatusClaimed && status === "succeeded") || updateJobStatus(
         job.id,
         status,

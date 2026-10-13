@@ -2,6 +2,8 @@ import { parentPort, workerData } from "worker_threads";
 import { createGitWorkflowHelpers } from "./workflows.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { HeartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
+import { REVIEWED_REFRESH_TASK } from "../../../catalog/reviewed-handoffs.js";
+import { prepareReviewedTargetRefresh } from "./reviewed-target-refresh.js";
 import {
   computeWorktreeStatus,
   commitInScopeChanges,
@@ -30,6 +32,7 @@ async function main() {
     nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
   }
   nativeBinaries.installWorkerRuntime(workerData?.nativeRuntime);
+  if (workerData?.task === REVIEWED_REFRESH_TASK) return prepareReviewedTargetRefresh(workerData.args);
   const {
     task,
     args = {},

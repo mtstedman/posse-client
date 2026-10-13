@@ -410,6 +410,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     "target_branch",
     "git_commit_style",
     "db_task_pre_merge_policy",
+    "scheduler_reviewed_file_handoffs",
   ]),
   group("repo_verification", "repo", "Verification", [
     "test_strictness",

@@ -742,6 +742,16 @@ Mutating jobs run in per-work-item git worktrees. Successful dev/fix/promote
 jobs are committed on the work-item branch. Failed or interrupted work is
 snapshotted before cleanup when possible.
 
+Reviewed-file handoffs are enabled by default. Eligible jobs with exact file
+scopes can receive successfully committed, final-reviewed changes before the
+source work item finishes its unrelated work. The receiving work item still
+waits for its upstream dependencies before merging.
+
+To disable new handoffs for the current repository, run
+`posse admin set scheduler_reviewed_file_handoffs off --json`. Existing transfers
+continue to reconcile safely. Run
+`posse admin clear scheduler_reviewed_file_handoffs --json` to restore the default.
+
 The Admin **Repo → git & merge → git_commit_style** setting controls generated
 commit subjects. **off** preserves the original message. **conventional** and
 **gitmoji** each make exactly one narrow classification call over the scoped

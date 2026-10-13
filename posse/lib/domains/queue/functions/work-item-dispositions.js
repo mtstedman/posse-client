@@ -40,7 +40,9 @@ import {
   QUEUE_LOCKING_JOB_TYPES,
   TERMINAL_JOB_STATUSES_SQL,
 } from "../../../catalog/job.js";
-import { getWorkItemMergeDependencies } from "./cross-wi-deps.js";
+import { getWorkItemMergeDependencies, reviewedDependencyGenerationMismatch } from "./cross-wi-deps.js";
+import { isReviewedTransfer, reviewedSourceMergeProof, workItemBranchGeneration } from "./reviewed-handoff-records.js";
+import { REVIEWED_HANDOFF_REASONS } from "../../../catalog/reviewed-handoffs.js";
 import { parseJobPayload } from "./payload.js";
 import {
   POST_MERGE_DB_SUPERSEDED_KEY,
@@ -503,18 +505,21 @@ export function hasWorkItemFailureGateForEpisode(workItem) {
 export function staleCrossWiUpstreams(workItem) {
   if (!workItem) return [];
   const db = getDb();
-  const readSource = db.prepare(`SELECT id, title, status, merge_state, branch_name, completed_at FROM work_items WHERE id = ?`);
+  const readSource = db.prepare(`SELECT id, title, status, merge_state, branch_name, completed_at, metadata_json FROM work_items WHERE id = ?`);
   const bySource = new Map();
   for (const dep of getWorkItemMergeDependencies(workItem)) {
     const sourceId = Number(dep.source_work_item_id);
     if (!Number.isSafeInteger(sourceId) || sourceId <= 0 || sourceId === Number(workItem.id)) continue;
     if (!bySource.has(sourceId)) {
       const source = readSource.get(sourceId);
-      if (!source || source.merge_state === "merged" || !["failed", "canceled"].includes(source.status)) continue;
+      const generationChanged = reviewedDependencyGenerationMismatch(dep, source);
+      const mergeUnproven = source?.merge_state === "merged" && isReviewedTransfer(dep) && !reviewedSourceMergeProof(source, dep);
+      if (!source || (!generationChanged && !mergeUnproven && (source.merge_state === "merged" || !["failed", "canceled"].includes(source.status)))) continue;
       bySource.set(sourceId, {
         source_work_item_id: sourceId,
         title: String(source.title || "").slice(0, 120),
-        status: source.status,
+        status: generationChanged ? REVIEWED_HANDOFF_REASONS.GENERATION : mergeUnproven ? REVIEWED_HANDOFF_REASONS.INCOMPLETE : source.status,
+        ...(generationChanged || mergeUnproven ? { source_generation: workItemBranchGeneration(source), expected_source_generation: dep.source_generation } : {}),
         completed_at: source.completed_at || null,
         source_branch: dep.source_branch || source.branch_name || null,
         paths: [],
@@ -527,7 +532,7 @@ export function staleCrossWiUpstreams(workItem) {
 }
 
 export function crossWiUpstreamEpisode(upstream) {
-  return `${upstream.source_work_item_id}:${upstream.status}:${upstream.completed_at || ""}`;
+  return `${upstream.source_work_item_id}:${upstream.status}:${upstream.completed_at || ""}${upstream.expected_source_generation ? `:${upstream.expected_source_generation}:${upstream.source_generation}` : ""}`;
 }
 
 /** The upstream episodes a cross-WI upstream gate asks about. */

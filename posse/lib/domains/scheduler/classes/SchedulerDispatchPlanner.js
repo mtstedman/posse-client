@@ -1,4 +1,7 @@
-import { findRunnableJob, expireStaleSessionLeases } from "../../queue/functions/index.js";
+import { expireStaleSessionLeases } from "../../queue/functions/index.js";
+import { RunnableCandidateScan } from "./RunnableCandidateScan.js";
+import { resolveReviewedCircularOwnership } from "../functions/reviewed-circular-release.js";
+import { MAX_RUNNABLE_SCAN_PER_TICK } from "../functions/config.js";
 import { WAITING_LANE_JOB_TYPE } from "../../../catalog/waiting-lane.js";
 
 const ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES = new Set([
@@ -13,9 +16,10 @@ const ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES = new Set([
 export class SchedulerDispatchPlanner {
   constructor(scheduler) {
     this.scheduler = scheduler;
+    this.scan = new RunnableCandidateScan();
   }
 
-  nextJob() {
+  prepare() {
     const scheduler = this.scheduler;
     scheduler._refreshRuntimeSettings();
     const requeued = scheduler.leaseManager.requeueExpired();
@@ -24,25 +28,44 @@ export class SchedulerDispatchPlanner {
     if (expiredSessionLeases > 0) scheduler._log(`Released ${expiredSessionLeases} stale session lease(s)`);
     scheduler._cancelDeadlockedJobs();
     const atlasIndexingHold = scheduler._atlasIndexingDispatchHold();
-    const job = findRunnableJob();
-    if (!job) return null;
-    if (atlasIndexingHold && !ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES.has(job.job_type)) return null;
-    return job;
+    this.scan.beginPass();
+    return atlasIndexingHold;
+  }
+
+  *candidates() {
+    const hold = this.prepare();
+    const seen = new Set();
+    for (let batch = 0; batch < 4; batch++) {
+      const jobs = this.scan.next(MAX_RUNNABLE_SCAN_PER_TICK, {
+        excludeJobIds: [...seen], onlyWorkItemIds: this.scheduler.onlyWorkItemIds || [],
+        onlyJobTypes: hold ? [...ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES] : [],
+      });
+      if (!jobs.length) break;
+      for (const job of jobs) { seen.add(job.id); yield job; }
+    }
+  }
+
+  nextJob() {
+    return this.candidates().next().value || null;
   }
 
   tick() {
     const scheduler = this.scheduler;
-    const job = this.nextJob();
-    if (!job) return null;
-    const lease = scheduler.leaseManager.acquireWithLocks(job, scheduler.ownerId, null, scheduler.leaseSec);
-    return lease ? { ...job, _leaseToken: lease.leaseToken } : null;
+    for (const job of this.candidates()) {
+      if (resolveReviewedCircularOwnership(job, scheduler.ownerId).conflict) continue;
+      const lease = scheduler.leaseManager.acquireWithLocks(job, scheduler.ownerId, null, scheduler.leaseSec);
+      if (lease) return { ...job, _leaseToken: lease.leaseToken };
+    }
+    return null;
   }
 
   async tickAsync() {
     const scheduler = this.scheduler;
-    const job = this.nextJob();
-    if (!job) return null;
-    const lease = await scheduler.leaseManager.acquireWithLocksAsync(job, scheduler.ownerId, null, scheduler.leaseSec);
-    return lease ? { ...job, _leaseToken: lease.leaseToken } : null;
+    for (const job of this.candidates()) {
+      if (resolveReviewedCircularOwnership(job, scheduler.ownerId).conflict) continue;
+      const lease = await scheduler.leaseManager.acquireWithLocksAsync(job, scheduler.ownerId, null, scheduler.leaseSec);
+      if (lease) return { ...job, _leaseToken: lease.leaseToken };
+    }
+    return null;
   }
 }

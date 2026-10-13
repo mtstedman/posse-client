@@ -54,7 +54,8 @@ import { classifyIgnoredPathOnlyAssessmentFailure, ignoredPathReviewVerdict, rec
 import { killShellCommandProcessTree as killShellCommandProcessTreeImpl, runShellCommandAsync as runShellCommandAsyncImpl } from "./assessment-runner.js";
 import { assessorCallBudgetStatus, getAssessorMaxToolCalls, isAssessorParseRetryBudgetExceeded as assessorTokenBudgetStatus, raiseAssessmentFallbackReadsForScope } from "../execution/assessment-policy.js";
 import { ensureAssessmentScopedCheckEvidence } from "../../../assessment/functions/scoped-check-evidence.js";
-import { assessmentWorktreeDirtySummary, inspectAssessmentWorktreeReadiness } from "./assessment-worktree-readiness.js";
+import { prepareReviewedFileCompletion } from "../../../assessment/functions/reviewed-file-completion.js";
+import { assessmentWorktreeDirtySummary, inspectAssessmentWorktreeReadiness, recordAssessmentWorktreeReadiness } from "./assessment-worktree-readiness.js";
 import { ensureConfiguredVerification, renderConfiguredVerificationEvidence } from "./configured-verification.js";
 import { repairTestDependencies } from "./test-dependency-repair.js";
 import { renderTestStrictness } from "../../../settings/functions/test-strictness.js";
@@ -2056,6 +2057,12 @@ export async function runPostExecutionAssessment(worker, {
     const readiness = (committedHash || verifiedNoChange)
       ? await inspectAssessmentWorktreeReadiness(wtPath)
       : { ready: true };
+    const readinessOutcome = recordAssessmentWorktreeReadiness(job, leaseToken, readiness, attempt.id);
+    if (readinessOutcome.leaseLost) {
+      completeAttempt(attempt.id, { status: "interrupted", duration_ms: Date.now() - startTime,
+        error_text: "Lease expired during assessment worktree inspection" });
+      return;
+    }
     if (!readiness.ready) {
       setAssessmentLifecycle(job.id, ASSESSMENT_LIFECYCLE.IMPLEMENTATION_COMPLETE);
       markAssessmentRetryAssessOnly(job, pendingFileRequests);
@@ -2081,9 +2088,13 @@ export async function runPostExecutionAssessment(worker, {
           dirty_paths: readiness.dirty_paths.slice(0, 100),
         }),
       });
-      worker._releaseLease(job, leaseToken, "queued", {
-        readyAt: new Date(Date.now() + 2_000).toISOString(),
-      });
+      if (readinessOutcome.recoveryError) {
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken, readinessOutcome.recoveryError, { pendingFileRequests });
+      } else {
+        worker._releaseLease(job, leaseToken, "queued", {
+          readyAt: new Date(Date.now() + 2_000).toISOString(),
+        });
+      }
       refreshAndExtractInsights(job.work_item_id);
       return;
     }
@@ -2749,8 +2760,20 @@ export async function runPostExecutionAssessment(worker, {
       }
 
       const emitFn = (msg) => worker.emit(job.id, msg);
+      let reviewedCompletion = null;
+      if (verdict.verdict === "pass" && wtPath && !filesCommittedUnknown) {
+        try {
+          reviewedCompletion = await prepareReviewedFileCompletion(getJob(job.id) || job, wtPath, {
+            committedHash: assessedCommitHash, commitBaseHash, filesCommitted, verifiedNoChange,
+          });
+        } catch (error) {
+          worker.emit(job.id, `[system] Reviewed handoff unavailable: ${error.message}`);
+        }
+      }
       const { effectiveVerdict } = processVerdict(job, verdict, {
+        reviewedCompletion,
         projectDir: worker.projectDir,
+        assessmentModelTier: lastAssessmentTier,
         emit: emitFn,
         autoApprove: worker.autoApprove,
         leaseToken,

@@ -1,6 +1,7 @@
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { classifyAutoApprovableScopeRequest } from "../../../shared/policies/functions/scope-auto-approval.js";
+import { acquireAdditionalJobWritePaths } from "./file-locks.js";
 import {
   dependentSiblingScopeApproval,
   LIVE_SCOPE_WAIT_TIMEOUT_MS,
@@ -254,6 +255,8 @@ export function createScopeExpansionOperations({
         })
         : null;
       if (autoClass) {
+        const ownership = acquireAdditionalJobWritePaths(current.id, [normalizedPath]);
+        if (!ownership.ok) return ownership;
         const field = normalizedAccess === "modify" ? "files_to_modify" : "files_to_create";
         const nextPayload = { ...payload };
         nextPayload[field] = [...new Set([
@@ -729,9 +732,13 @@ export function createScopeExpansionOperations({
           );
         }
 
+        const entries = scopeRequestBatchEntries(freshPending);
+        if (freshPending.decision === "approved") {
+          const ownership = acquireAdditionalJobWritePaths(freshJob.id, entries.map((entry) => entry.path));
+          if (!ownership.ok) return ownership;
+        }
         delete freshPayload._pending_scope_request;
         updateJobPayload(freshJob.id, JSON.stringify(freshPayload));
-        const entries = scopeRequestBatchEntries(freshPending);
         if (freshPending.decision === "approved") {
           return {
             ok: true,

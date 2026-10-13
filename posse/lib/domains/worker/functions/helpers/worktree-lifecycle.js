@@ -12,7 +12,7 @@ import { slugify } from "../../../../shared/format/functions/slug.js";
 import { recordWaitingLaneTelemetry } from "../../../observability/functions/waiting-lane-telemetry.js";
 import { cleanupArtifactDirsAsync, isArtifactMode, contextDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { TERMINAL_WORK_ITEM_STATUSES } from "../../../queue/functions/common.js";
-import { clearWaitingLanePreparedAssetProof, completeAttempt, crossWiSyncSourceRejection, getJob, getWaitingLanePreparation, getWorkItem, incrementAndCreateAttempt, logEvent, setJobError, setWorkItemBranch, poisonWaitingLanePreparation, retireWaitingLanePreparation, rollbackPendingCrossWiSyncHandoffsForJob, storeArtifact, updateJobPayload } from "../../../queue/functions/index.js";
+import { clearWaitingLanePreparedAssetProof, completeAttempt, crossWiSyncSourceRejection, getJob, getWaitingLanePreparation, getWorkItem, incrementAndCreateAttempt, logEvent, setJobError, recordWorkItemBranchReset, setWorkItemBranch, poisonWaitingLanePreparation, retireWaitingLanePreparation, rollbackPendingCrossWiSyncHandoffsForJob, storeArtifact, updateJobPayload } from "../../../queue/functions/index.js";
 
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
 const SETUP_DEFER_NOTICE_INTERVAL_MS = 30_000;
@@ -44,6 +44,10 @@ import { classifyIgnorableSetupDirty, inspectIgnorableSetupDirty, isRuntimeResid
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
 import { jobHasSetupCleanupPrecedence, nextTransientSetupRetryPayload, transientSetupRetryCountFromPayload } from "./worktree-setup-policy.js";
 import { pendingCrossWiFileSyncs } from "./cross-wi-sync.js";
+import { isReviewedTransfer, reviewedTransfers } from "../../../queue/functions/reviewed-handoff-records.js";
+import { applyReviewedFileTransfers, guardReviewedTransferSetup, guardReviewedWorktreeReuse } from "./reviewed-file-sync.js";
+import { retireSettledReviewedRefs } from "../../../git/functions/reviewed-source-merge.js";
+import { refreshSettledReviewedTargetAsync } from "./reviewed-target-refresh.js";
 import { tryActivateWaitingLaneForJobAsync } from "./waiting-lane-activation.js";
 
 // Re-exported for external importers (Worker.js, tests) that previously
@@ -218,7 +222,7 @@ function markCrossWiSyncsApplied(job, payload, appliedSyncs) {
       applied_at: new Date().toISOString(),
     });
   }
-  payload._cross_wi_file_syncs_applied = [...appliedByIdentity.values()].slice(-100);
+  payload._cross_wi_file_syncs_applied = [...appliedByIdentity.values()];
   const payloadJson = JSON.stringify(payload);
   updateJobPayload(job.id, payloadJson);
   job.payload_json = payloadJson;
@@ -404,7 +408,7 @@ function dropRejectedCrossWiFileSyncs(worker, job) {
     if (mergesTarget && getWorkItem(sync.source_work_item_id)?.merge_state === "merged") return "upstream_merged";
     return crossWiSyncSourceRejection(sync.source_work_item_id, sync.path, sync.lock_kind);
   };
-  const rejected = pendingCrossWiFileSyncs(worker.parsePayload(fresh))
+  const rejected = pendingCrossWiFileSyncs(worker.parsePayload(fresh)).filter((entry) => !isReviewedTransfer(entry))
     .map((sync) => ({ sync, reason: syncSourceReason(sync) }))
     .filter((entry) => entry.reason);
   if (rejected.length === 0) return;
@@ -424,9 +428,10 @@ function dropRejectedCrossWiFileSyncs(worker, job) {
 
 export async function applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal = null } = {}) {
   if (!wtPath) return;
+  await applyReviewedFileTransfers(worker, job, wtPath, { signal });
   dropRejectedCrossWiFileSyncs(worker, job);
   const payload = worker.parsePayload(job);
-  const syncs = pendingCrossWiFileSyncs(payload);
+  const syncs = pendingCrossWiFileSyncs(payload).filter((entry) => !isReviewedTransfer(entry));
   if (syncs.length === 0) return;
   if (await isMergeInProgressAsync(wtPath, { signal })) {
     throw new Error("Cannot apply cross-WI file sync while merge conflicts are pending");
@@ -651,6 +656,10 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       const actual = String(currentBranch || "").trim();
       const expected = String(expectedBranch || "").trim();
       if (actual && expected && actual !== expected) return false;
+      // Resume the journal before generic reused-worktree recovery inspects
+      // or resets its partial materialization. The later guard preserves any
+      // unexplained destination edits as a named blocker.
+      if (reviewedTransfers(getJob(job.id) || job).length) return true;
       const siblingLocks = activeLiveSiblingWriteLocks(job);
       const dirty = await inspectIgnorableSetupDirty(candidatePath, earlyPayload, siblingLocks, { signal });
       const recoveryPaths = [...(dirty.blockingEntries || []), ...(dirty.residualEntries || [])]
@@ -763,14 +772,17 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
               return false;
             },
             shouldDeferBranchMismatchRecovery: () => {
+              guardReviewedWorktreeReuse(job, leaseToken, "branch mismatch recovery");
               deferSetupIfLiveSiblingLocks(worker, job, wi, "branch-mismatch");
               return false;
             },
             shouldDeferHeadReset: () => {
+              guardReviewedWorktreeReuse(job, leaseToken, "stale HEAD reset");
               deferSetupIfLiveSiblingLocks(worker, job, wi, "stale-head-reset");
               return false;
             },
             shouldSkipDirtyRecovery: shouldSkipReusedDirtyRecovery,
+            shouldDeferCorruptRecovery: () => guardReviewedWorktreeReuse(job, leaseToken, "corrupt worktree recovery"),
             onDirtySnapshot: (snapshotDir) => {
               if (snapshotDir) {
                 worker.emit(job.id, `${C.dim}[system] WI#${wi.id} preserved dirty worktree snapshot: ${snapshotDir}${C.reset}`);
@@ -793,14 +805,18 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
               return false;
             },
             shouldDeferBranchMismatchRecovery: () => {
+              guardReviewedWorktreeReuse(job, leaseToken, "branch mismatch recovery");
               deferSetupIfLiveSiblingLocks(worker, job, wi, "branch-mismatch");
               return false;
             },
             shouldDeferHeadReset: () => {
+              guardReviewedWorktreeReuse(job, leaseToken, "stale HEAD reset");
               deferSetupIfLiveSiblingLocks(worker, job, wi, "stale-head-reset");
               return false;
             },
             shouldSkipDirtyRecovery: shouldSkipReusedDirtyRecovery,
+            shouldDeferCorruptRecovery: () => guardReviewedWorktreeReuse(job, leaseToken, "corrupt worktree recovery"),
+            shouldDeferBranchCreation: () => guardReviewedWorktreeReuse(job, leaseToken, "missing branch recreation"),
             onDirtySnapshot: (snapshotDir) => {
               if (snapshotDir) {
                 worker.emit(job.id, `${C.dim}[system] WI#${wi.id} preserved dirty worktree snapshot: ${snapshotDir}${C.reset}`);
@@ -834,6 +850,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
           return { base, recreatedMissingBranch };
         });
         if (recreatedMergeBase.recreatedMissingBranch) {
+          recordWorkItemBranchReset(wi.id, { reason: "missing_branch_recreated", branch: branchName });
           setWorkItemBranch(wi.id, branchName, recreatedMergeBase.base);
           worker.emit(job.id, `${C.yellow}[system] WI#${wi.id} recreated missing branch: ${branchName} (base: ${recreatedMergeBase.base.slice(0, 8)})${C.reset}`);
           logEvent({
@@ -853,6 +870,14 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
 
     await yieldNow({ signal });
     let dirtyState = { dirtyPost: "", ignoredDirty: false, ignoredPost: "", mergeInProgress: false };
+    // Recover an import whose Git outcome is unknown before ordinary dirty
+    // setup recovery can snapshot/reset its materialized paths. A brand-new
+    // reservation still runs after the target refresh below.
+    if (reviewedTransfers(getJob(job.id) || job).some((entry) => entry.applying_at)) {
+      await applyReviewedFileTransfers(worker, { ...job, _leaseToken: leaseToken }, wtPath, { signal });
+      job.payload_json = getJob(job.id)?.payload_json || job.payload_json;
+    }
+    await guardReviewedTransferSetup(worker, { ...job, _leaseToken: leaseToken }, wtPath, { signal });
     await withWorktreeLockAsync(wtPath, worker.projectDir, async () => {
       dirtyState = await withPhase("dirty_detect", prepTrace, async () => {
         const [dirtyPost, ignoredPost, mergeInProgress] = await Promise.all([
@@ -1032,7 +1057,9 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
             if (siblingLocks.length > 0 && staleness?.needs_rebase) {
               deferSetupIfLiveSiblingLocks(worker, job, wi, "target-merge", siblingLocks);
             }
-            const result = await mergeTargetIntoWorktreeAsync(wtPath, worker.projectDir, targetBranch, {
+            const result = (staleness?.needs_rebase
+              ? await refreshSettledReviewedTargetAsync(worker, job, leaseToken, wtPath, targetBranch, { signal })
+              : null) || await mergeTargetIntoWorktreeAsync(wtPath, worker.projectDir, targetBranch, {
               leaveOnConflict: true,
               initialMergeInProgress: dirtyState.mergeInProgress,
               signal,
@@ -1045,6 +1072,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
                 event_type: EVENT_TYPES.JOB_REBASE_APPLIED,
                 actor_type: EVENT_ACTORS.WORKER,
                 message: `Merged ${targetBranch} into WI branch before job start`,
+                event_json: result.reviewedRefresh ? JSON.stringify({ reviewed_handoff_refresh: true, dropped_sync_commits: result.dropped }) : null,
               });
             } else if (!result.ok && result.abortFailed) {
               const conflictList = (result.conflicts || []).slice(0, 10).join(", ");
@@ -1063,13 +1091,19 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
               const conflictList = (result.conflicts || []).slice(0, 10).join(", ");
               const more = (result.conflicts || []).length > 10 ? " …" : "";
               const reason = result.alreadyInProgress ? "prior merge still in progress" : "rebase hit conflicts";
-              worker.emit(job.id, `${C.yellow}[system] WI#${wi.id} ${reason}; handing merge to dev (conflicts: ${conflictList}${more})${C.reset}`);
+              const pendingReviewedImport = reviewedTransfers(getJob(job.id) || job).length > 0;
+              const resolution = pendingReviewedImport
+                ? "reviewed import paused; resolve or abort the merge before retrying"
+                : "handing merge to dev";
+              worker.emit(job.id, `${C.yellow}[system] WI#${wi.id} ${reason}; ${resolution} (conflicts: ${conflictList}${more})${C.reset}`);
               logEvent({
                 work_item_id: job.work_item_id,
                 job_id: job.id,
                 event_type: EVENT_TYPES.JOB_REBASE_CONFLICT,
                 actor_type: EVENT_ACTORS.WORKER,
-                message: `Rebase onto ${targetBranch} left conflicts in worktree for dev to resolve: ${conflictList}${more}`,
+                message: pendingReviewedImport
+                  ? `Rebase onto ${targetBranch} blocked reviewed import; resolve or abort the merge before retrying: ${conflictList}${more}`
+                  : `Rebase onto ${targetBranch} left conflicts in worktree for dev to resolve: ${conflictList}${more}`,
               });
             } else if (!result.ok) {
               worker.emit(job.id, `${C.dim}[system] WI#${job.work_item_id} rebase-on-lease skipped: ${result.error || "unknown"}${C.reset}`);
@@ -1080,6 +1114,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
             // which requeues without an attempt penalty; swallowing it here
             // ran the job on the stale branch instead.
             if (rebaseErr?.code === "WORKTREE_ACTIVE_SIBLING_LOCKS") throw rebaseErr;
+            if (rebaseErr?.reviewedHandoffDeferred) throw rebaseErr;
             worker.emit(job.id, `${C.dim}[system] WI#${job.work_item_id} rebase-on-lease skipped: ${rebaseErr.message.split("\n")[0]}${C.reset}`);
           }
         }, { signal });
@@ -1087,7 +1122,10 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     }
 
     await withPhase("cross_wi_sync", prepTrace, async () => {
-      if (!pendingTargetMerge) await applyPendingCrossWiFileSyncsAsync(worker, job, wtPath, { signal });
+      if (pendingTargetMerge && reviewedTransfers(getJob(job.id) || job).length) {
+        await applyReviewedFileTransfers(worker, { ...job, _leaseToken: leaseToken }, wtPath, { signal });
+      }
+      if (!pendingTargetMerge) await applyPendingCrossWiFileSyncsAsync(worker, Object.assign(job, { _leaseToken: leaseToken }), wtPath, { signal });
     });
 
     job._worktreePath = wtPath;
@@ -1193,6 +1231,11 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     if (isAbortError(gitErr)) {
       worker.emit(job.id, `${C.dim}[system] WI#${job.work_item_id} worktree setup aborted${C.reset}`);
       throw gitErr;
+    }
+    if (gitErr?.reviewedHandoffDeferred) {
+      worker.emit(job.id, `[system] Reviewed file handoff deferred: ${gitErr.message}`);
+      worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date(Date.now() + SETUP_DEFER_RETRY_DELAY_MS).toISOString() });
+      return { ok: false, wtPath: null, branchName: null, sentinelPath: job._activeWorktreeSentinel || null };
     }
     if (gitErr?.code === "WORKTREE_ACTIVE_SIBLING_LOCKS") {
       const readyAt = new Date(Date.now() + SETUP_DEFER_RETRY_DELAY_MS).toISOString();
@@ -1644,6 +1687,7 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
     }
 
     const ctxDir = contextDir(wiScopeId(wi.id), worker.projectDir);
+    await retireSettledReviewedRefs(worker.projectDir, { signal });
     try {
       await fs.promises.rm(ctxDir, { recursive: true, force: true });
     } catch {

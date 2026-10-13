@@ -442,6 +442,9 @@ export function refreshBranchForCloseout({
   worktreePath,
   ownsWorktree = false,
   droppableSyncJobIds = new Set(),
+  droppableSyncCommits = null,
+  cleanReplayOnly = false,
+  publishBranch = true,
   testCommand = null,
   runTestCommand = runCloseoutTestCommandSync,
   isIgnorableStatusLine = null,
@@ -449,6 +452,7 @@ export function refreshBranchForCloseout({
   if (typeof exec !== "function" || !cwd || !branch || !targetBranch || !worktreePath) {
     return { attempted: false, refreshed: false, infrastructureFailure: true, reason: "missing_arguments" };
   }
+  if (!publishBranch && !ownsWorktree) throw new Error("Unpublished replay requires a private worktree");
   let mergeBase;
   let targetHead;
   let branchHead;
@@ -475,7 +479,10 @@ export function refreshBranchForCloseout({
   for (const commit of commits) {
     const isHandoffCopy = HANDOFF_SYNC_SUBJECT_RE.test(commit.subject);
     const syncJobId = isHandoffCopy ? handoffSyncJobIdFromSubject(commit.subject) : null;
-    if (syncJobId != null && droppableSyncJobIds.has(syncJobId)) {
+    if (droppableSyncCommits != null) {
+      if (isHandoffCopy && droppableSyncCommits.has(commit.hash)) dropped.push({ ...commit, reason: "verified_settled_transfer" });
+      else replay.push(commit);
+    } else if (syncJobId != null && droppableSyncJobIds.has(syncJobId)) {
       dropped.push({ ...commit, reason: "source_merged" });
     } else if (isHandoffCopy && handoffCopyLandedOnTarget(exec, cwd, { commit: commit.hash, mergeBase, targetHead })) {
       dropped.push({ ...commit, reason: "content_landed_on_target" });
@@ -542,7 +549,8 @@ export function refreshBranchForCloseout({
             ...heads,
           };
         }
-        const resolution = resolveConflictedFiles(exec, worktreePath, conflicted);
+        const resolution = cleanReplayOnly ? { resolved: false, reason: "clean_replay_required" }
+          : resolveConflictedFiles(exec, worktreePath, conflicted);
         if (!resolution.resolved) {
           restore();
           return {
@@ -607,7 +615,7 @@ export function refreshBranchForCloseout({
     const carried = mergeCarriedPaths(exec, cwd, tempDir, {
       mergeBase,
       branchHead,
-      candidates: new Set(targetChanged.filter((file) => !droppedPaths.has(file))),
+      candidates: new Set(targetChanged.filter((file) => cleanReplayOnly || !droppedPaths.has(file))),
     });
     const conflicts = [];
     for (const file of carried) {
@@ -678,7 +686,10 @@ export function refreshBranchForCloseout({
       restore();
       return { attempted: true, refreshed: false, infrastructureFailure: true, reason: "branch_moved_during_closeout", ...heads };
     }
-    if (ownsWorktree) {
+    if (!publishBranch) {
+      // The caller will integrate this private result only after rechecking
+      // live ownership. The receiver branch and its history remain untouched.
+    } else if (ownsWorktree) {
       exec(["update-ref", `refs/heads/${branch}`, refreshedHead, branchHead], cwd);
     } else {
       exec(["checkout", "-B", branch], worktreePath);

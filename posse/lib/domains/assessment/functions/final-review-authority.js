@@ -25,6 +25,10 @@ export function finalReviewContractIdentity(cwd, payload) {
 }
 
 export async function finalReviewIdentity(cwd, payload, { jobId = null } = {}) {
+  return (await finalReviewIdentityEvidence(cwd, payload, { jobId })).identity;
+}
+
+export async function finalReviewIdentityEvidence(cwd, payload, { jobId = null } = {}) {
   const placeholders = new Set(await emptyMaterializedPathsForJob(jobId, payload?.scope_generation ?? payload?._materialization_generation ?? 1, cwd));
   const scope = finalReviewScope(payload);
   const readPaths = (Array.isArray(payload?.dev_brief?.key_files) ? payload.dev_brief.key_files : [])
@@ -55,7 +59,8 @@ export async function finalReviewIdentity(cwd, payload, { jobId = null } = {}) {
     return [file, stat.mode & 0o111, digest(fs.readFileSync(absolute))];
   });
   const contract = reviewContract(payload);
-  return digest(JSON.stringify({ contract, states, test_strictness: getTestStrictness({ projectDir: cwd }) }));
+  return { identity: digest(JSON.stringify({ contract, states, test_strictness: getTestStrictness({ projectDir: cwd }) })),
+    states, readPaths, scoped: [...scoped] };
 }
 
 export function latestFinalReview(jobId, db = getDb()) {

@@ -11,6 +11,9 @@ import { now, runImmediateTransaction, TERMINAL_JOB_STATUSES_SQL } from "./commo
 import { logDurableEvent, logEvent, flushEventsNow } from "./events.js";
 import { parseJobPayload } from "./payload.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { isReviewedTransfer, workItemBranchGeneration, reviewedSourceMergeProof } from "./reviewed-handoff-records.js";
+import { REVIEWED_HANDOFF_REASONS } from "../../../catalog/reviewed-handoffs.js";
+import { cancelUnusedReviewedTransfers } from "./reviewed-handoff-journal.js";
 
 const CROSS_WI_MERGE_DEPENDENCIES_KEY = "cross_wi_merge_dependencies";
 // Work-item metadata key: { at, reason, branch } of the last time the work
@@ -55,6 +58,11 @@ function normalizeCrossWiMergeDependency(dep = {}) {
   const sourceId = Number(dep.source_work_item_id ?? dep.work_item_id ?? dep.id);
   if (!Number.isFinite(sourceId) || sourceId <= 0) return null;
   return {
+    ...(isReviewedTransfer(dep) ? {
+      version: dep.version, transfer_id: dep.transfer_id, receipt_id: dep.receipt_id,
+      source_generation: dep.source_generation, source_commit: dep.source_commit,
+      required_provenance: dep.required_provenance || [],
+    } : {}),
     source_work_item_id: sourceId,
     path: normalizeRepoPath(dep.path) || null,
     ...(dep.lock_kind === "root" || dep.lock_kind === "file" ? { lock_kind: dep.lock_kind } : {}),
@@ -303,7 +311,7 @@ export function collectCrossWiPathProvenance(workItemId, path, { maxWorkItems = 
     .map((id) => live(id, { allowFailed: true }))
     .filter(Boolean)
     .map(describe);
-  return { carried, outstanding };
+  return { carried, outstanding, ...(queue.length ? { complete: false } : {}) };
 }
 
 /**
@@ -357,7 +365,7 @@ export function workItemWaitsOnWorkItem(fromWorkItemId, toWorkItemId, { maxWorkI
       queue.push({ id, path: nextPath });
     }
   }
-  return { waits: false, path: [] };
+  return { waits: false, path: [], ...(queue.length ? { complete: false } : {}) };
 }
 
 export function crossWiMergeDependencyWouldCycle(targetWorkItemId, sourceWorkItemId) {
@@ -408,6 +416,8 @@ export function addCrossWiMergeDependency(targetWorkItemId, sourceWorkItemId, de
     const existing = deps.find((dep) =>
       Number(dep.source_work_item_id) === sourceId
       && normalizeRepoPath(dep.path) === normalizeRepoPath(nextDep.path)
+      && (dep.source_generation ?? null) === (nextDep.source_generation ?? null)
+      && (dep.transfer_id ?? null) === (nextDep.transfer_id ?? null)
     );
     if (existing) {
       // Backfill lock_kind on rows persisted before kinds were recorded so a
@@ -431,7 +441,7 @@ export function addCrossWiMergeDependency(targetWorkItemId, sourceWorkItemId, de
   return db.inTransaction ? execute() : runImmediateTransaction(db, execute);
 }
 
-export function removeCrossWiMergeDependency(targetWorkItemId, sourceWorkItemId, { path = null, reason = "dependency_removed" } = {}) {
+export function removeCrossWiMergeDependency(targetWorkItemId, sourceWorkItemId, { path = null, reason = "dependency_removed", legacyOnly = false } = {}) {
   const db = getDb();
   const execute = () => {
     const targetId = Number(targetWorkItemId);
@@ -447,6 +457,7 @@ export function removeCrossWiMergeDependency(targetWorkItemId, sourceWorkItemId,
       : [];
     const normalizedPath = normalizeRepoPath(path);
     const kept = deps.filter((dep) => {
+      if (legacyOnly && isReviewedTransfer(dep)) return true;
       if (Number(dep.source_work_item_id) !== sourceId) return true;
       if (normalizedPath && normalizeRepoPath(dep.path) !== normalizedPath) return true;
       return false;
@@ -555,10 +566,15 @@ export function rollbackPendingCrossWiSyncHandoffsForJob(jobOrId, reason = "job_
   const execute = () => {
     const inputJob = typeof jobOrId === "object" && jobOrId !== null ? jobOrId : null;
     const jobId = Number(inputJob?.id ?? jobOrId);
-    const job = Number.isFinite(jobId) ? (readJob(jobId) || inputJob) : inputJob;
+    let job = Number.isFinite(jobId) ? (readJob(jobId) || inputJob) : inputJob;
     if (!job?.id) return { ok: false, rolled_back: 0, reason: "missing_job" };
+    cancelUnusedReviewedTransfers(job.id);
+    job = readJob(job.id) || job;
     const pending = pendingCrossWiFileSyncsForJob(job);
-    const syncs = typeof filter === "function" ? pending.filter(filter) : pending;
+    // SQLite cannot prove that an interrupted Git operation made no commit.
+    // Versioned reservations are settled by the journal under branch locks.
+    const legacy = pending.filter((entry) => !isReviewedTransfer(entry));
+    const syncs = typeof filter === "function" ? legacy.filter(filter) : legacy;
     if (syncs.length === 0) return { ok: true, rolled_back: 0, reason: "none" };
     let rolledBack = 0;
     for (const sync of syncs) {
@@ -567,6 +583,7 @@ export function rollbackPendingCrossWiSyncHandoffsForJob(jobOrId, reason = "job_
       const removed = removeCrossWiMergeDependency(job.work_item_id, sync.source_work_item_id, {
         path: sync.path,
         reason,
+        legacyOnly: true,
       });
       if (removed.ok && removed.removed > 0) rolledBack += removed.removed;
       // Dependencies this handoff added for work items whose edits travel in
@@ -576,6 +593,7 @@ export function rollbackPendingCrossWiSyncHandoffsForJob(jobOrId, reason = "job_
         const carriedRemoved = removeCrossWiMergeDependency(job.work_item_id, carriedId, {
           path: sync.path,
           reason,
+          legacyOnly: true,
         });
         if (carriedRemoved.ok && carriedRemoved.removed > 0) rolledBack += carriedRemoved.removed;
       }
@@ -594,7 +612,7 @@ export function rollbackPendingCrossWiSyncHandoffsForJob(jobOrId, reason = "job_
     const syncKey = (entry) => `${Number(entry?.source_work_item_id)}:${normalizeRepoPath(entry?.path)}`;
     const rolledBackKeys = new Set(syncs.map(syncKey));
     const kept = (Array.isArray(payload._cross_wi_file_syncs) ? payload._cross_wi_file_syncs : [])
-      .filter((entry) => !rolledBackKeys.has(syncKey(entry)));
+      .filter((entry) => isReviewedTransfer(entry) || !rolledBackKeys.has(syncKey(entry)));
     if (kept.length > 0) payload._cross_wi_file_syncs = kept;
     else delete payload._cross_wi_file_syncs;
     db.prepare(`UPDATE jobs SET payload_json = ?, updated_at = ? WHERE id = ?`)
@@ -629,8 +647,9 @@ export function listCrossWiMergeBlockers(workItemOrId) {
     const sourceId = Number(dep.source_work_item_id);
     if (!Number.isFinite(sourceId)) continue;
     if (!bySource.has(sourceId)) {
-      bySource.set(sourceId, { source_work_item_id: sourceId, paths: [], dependency: dep });
+      bySource.set(sourceId, { source_work_item_id: sourceId, paths: [], dependency: dep, dependencies: [] });
     }
+    bySource.get(sourceId).dependencies.push(dep);
     if (dep.path) bySource.get(sourceId).paths.push(dep.path);
   }
 
@@ -643,11 +662,14 @@ export function listCrossWiMergeBlockers(workItemOrId) {
     if (source?.status === "failed" && !hasUnresolvedJobsForWorkItem(source.id)) {
       logStaleCrossWiDependencyOnce(workItem.id, entry.source_work_item_id, "upstream_failed", source);
     }
-    if (!source || source.merge_state !== "merged") {
+    const generationChanged = entry.dependencies.some((dep) => reviewedDependencyGenerationMismatch(dep, source));
+    const mergeUnproven = source?.merge_state === "merged" && entry.dependencies.some((dep) => isReviewedTransfer(dep) && !reviewedSourceMergeProof(source, dep));
+    if (generationChanged) logStaleCrossWiDependencyOnce(workItem.id, entry.source_work_item_id, REVIEWED_HANDOFF_REASONS.GENERATION, source);
+    if (!source || source.merge_state !== "merged" || generationChanged || mergeUnproven) {
       blockers.push({
         ...entry,
         source_work_item: source || null,
-        reason: !source
+        reason: generationChanged ? REVIEWED_HANDOFF_REASONS.GENERATION : mergeUnproven ? REVIEWED_HANDOFF_REASONS.INCOMPLETE : !source
           ? "upstream_missing"
           : source.status === "canceled"
             ? "upstream_canceled"
@@ -679,11 +701,16 @@ export function pendingCrossWiMergeUpstreamIds(workItemOrId, { includeStale = fa
   const ids = new Set();
   for (const dep of getWorkItemMergeDependencies(workItem)) {
     const source = readWorkItem(dep.source_work_item_id);
-    if (!source || source.merge_state === "merged") continue;
+    if (!source || (source.merge_state === "merged" && !reviewedDependencyGenerationMismatch(dep, source)
+        && (!isReviewedTransfer(dep) || reviewedSourceMergeProof(source, dep)))) continue;
     if (!includeStale && (source.status === "failed" || source.status === "canceled")) continue;
     ids.add(Number(source.id));
   }
   return [...ids];
+}
+
+export function reviewedDependencyGenerationMismatch(dep, source) {
+  return isReviewedTransfer(dep) && dep.source_generation !== workItemBranchGeneration(source);
 }
 
 export function getWorkItemRecycleOverride(workItemOrId) {

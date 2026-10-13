@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { reviewedTransfers } from "./reviewed-handoff-records.js";
 import { PIPELINE_BOOTSTRAP_JOB_TYPES, parseWorkItemMetadataRecord, missingExecutionReason, isActiveIterativeWorkItemRecord } from "./work-item-execution-contract.js";
 import { refreshHumanGateContract } from "./human-gates.js";
 import { registerAttemptStartHook } from "./attempts.js";
@@ -605,9 +607,15 @@ export function updateWorkItemStatus(id, status, {
 
 export function setWorkItemBranch(id, branchName, mergeBaseHash) {
   const db = getDb();
-  db.prepare(`
-    UPDATE work_items SET branch_name = ?, merge_base_hash = ?, updated_at = ? WHERE id = ?
-  `).run(branchName, mergeBaseHash, now(), id);
+  return runImmediateTransaction(db, () => {
+    const current = db.prepare("SELECT branch_name, merge_state FROM work_items WHERE id = ?").get(id);
+    if (current?.branch_name && branchName && current.branch_name !== branchName && current.merge_state !== "merged") {
+      recordWorkItemBranchReset(id, { reason: "branch_replaced", branch: current.branch_name });
+    }
+    db.prepare(`
+      UPDATE work_items SET branch_name = ?, merge_base_hash = ?, updated_at = ? WHERE id = ?
+    `).run(branchName, mergeBaseHash, now(), id);
+  });
 }
 
 function reviewGateOriginalJobId(job) {
@@ -1602,6 +1610,7 @@ function writeWorkItemMetadataKey(workItemId, key, value) {
  */
 export function recordWorkItemBranchReset(workItemId, { reason = "branch_discarded", branch = null } = {}) {
   return writeWorkItemMetadataKey(workItemId, WORK_ITEM_BRANCH_RESET_KEY, {
+    generation: randomUUID(),
     at: now(),
     reason: String(reason || "branch_discarded"),
     branch: branch ? String(branch) : null,
@@ -1625,8 +1634,14 @@ export function discardCrossWiSyncRecordsForWorkItem(workItemId, reason = "branc
     if (Array.isArray(pending) && pending.length > 0) rollbackPendingCrossWiSyncHandoffsForJob(job.id, reason);
     const fresh = getJob(job.id) || job;
     const payload = parseJobPayload(fresh);
-    const applied = Array.isArray(payload._cross_wi_file_syncs_applied) ? payload._cross_wi_file_syncs_applied : [];
+    const applied = [
+      ...(Array.isArray(payload._cross_wi_file_syncs_applied) ? payload._cross_wi_file_syncs_applied : []),
+      ...reviewedTransfers(fresh),
+    ];
     if (applied.length === 0) continue;
+    // This lifecycle runs only after the owning branch was actually discarded.
+    // Its generation no longer contains either committed or partial imports.
+    payload._cross_wi_file_syncs = (payload._cross_wi_file_syncs || []).filter((entry) => !entry.transfer_id);
     const priorDropped = Array.isArray(payload._cross_wi_file_syncs_dropped) ? payload._cross_wi_file_syncs_dropped : [];
     payload._cross_wi_file_syncs_dropped = [
       ...priorDropped,
@@ -1974,7 +1989,10 @@ export function reopenWorkItemForFollowUp(id, { status = "planning", reason = "f
     // branch, so it still merges only after those upstreams (or gets their
     // gate). The pass releases its old file locks by design.
     const keepsUnmergedBranch = !!String(current.branch_name || "").trim() && current.merge_state !== "merged";
-    if (!keepsUnmergedBranch) clearCrossWiMergeDependenciesForWorkItem(id, releaseReason);
+    if (!keepsUnmergedBranch) {
+      clearCrossWiMergeDependenciesForWorkItem(id, releaseReason);
+      recordWorkItemBranchReset(id, { reason: releaseReason, branch: current.branch_name });
+    }
     invalidateSessionLanesForWorkItemInternal(id, releaseReason);
     // Startup reconciliation treats this event as queue state, not optional
     // telemetry. Persist it in the same transaction that clears merge_state
@@ -3551,7 +3569,7 @@ export function requeueExpiredLeases() {
  * Find the next runnable job: status=queued, ready_at<=now, all hard deps succeeded.
  * Ordered by priority then creation time.
  */
-export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], excludeJobIds = [], onlyJobTypes = [], onlyWorkItemIds = [] } = {}) {
+export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], excludeJobIds = [], onlyJobTypes = [], onlyWorkItemIds = [], after = null, changedAfter = null } = {}) {
   const db = getDb();
   const ts = now();
 
@@ -3627,6 +3645,18 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
     ))`);
   params.push(new Date(Date.now() - ATLAS_FRESHNESS_PRELEASE_FENCE_MS).toISOString());
 
+  if (after) {
+    conditions.push(`(CASE j.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+      CASE WHEN json_valid(j.payload_json) AND json_extract(j.payload_json, '$._assess_only') IN (1, '1', true) THEN 0
+        WHEN j.job_type = 'fix' THEN 1 WHEN j.job_type = 'promote' THEN 2 ELSE 3 END,
+      j.created_at, j.id) > (?, ?, ?, ?)`);
+    params.push(after.priority, after.kind, after.created_at, after.id);
+  }
+  if (changedAfter) {
+    conditions.push("(j.updated_at >= ? OR j.created_at >= ? OR j.ready_at >= ?)");
+    params.push(changedAfter, changedAfter, changedAfter);
+  }
+
   const safeLimit = Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 1);
   params.push(safeLimit);
 
@@ -3649,7 +3679,7 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
         WHEN j.job_type = 'promote' THEN 2
         ELSE 3
       END,
-      j.created_at ASC
+      j.created_at ASC, j.id ASC
     LIMIT ?
   `).all(...params);
 }

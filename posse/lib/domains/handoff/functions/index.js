@@ -1032,6 +1032,9 @@ export function buildHandoffPacket(job, opts) {
     cross_wi_deletions_applied: (Array.isArray(sanitizedPayload._cross_wi_file_syncs_applied)
       ? sanitizedPayload._cross_wi_file_syncs_applied
       : [])
+      .flatMap((entry) => entry?.transfer_id && Array.isArray(entry.deleted_paths)
+        ? entry.deleted_paths.map((path) => ({ ...entry, path, change_kind: "delete", reconciled_fields: entry.reconciled_fields_by_path?.[path] || [] }))
+        : [entry])
       .filter((entry) => entry?.change_kind === "delete" && entry?.path)
       .map((entry) => ({
         path: entry.path,

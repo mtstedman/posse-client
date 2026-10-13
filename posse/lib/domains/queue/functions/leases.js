@@ -9,6 +9,7 @@
 // from the same source.
 
 import crypto from "crypto";
+import { hasReviewedReservation } from "./reviewed-handoff-records.js";
 import { LeaseManager } from "../classes/LeaseManager.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { LEASE_HOLDING_STATUSES_SQL, PARKED_JOB_STATUSES, TERMINAL_JOB_STATUSES_SQL, now, runImmediateTransaction } from "./common.js";
@@ -353,7 +354,8 @@ export function releaseLeaseWithoutAttemptPenalty(jobId, leaseToken, finalStatus
   const db = getDb();
   const execute = () => {
     const released = releaseLeaseInternal(db, jobId, leaseToken, finalStatus, { readyAt });
-    if (released && finalStatus === "queued" && attemptId == null) {
+    if (released && finalStatus === "queued" && attemptId == null
+        && !hasReviewedReservation(db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId))) {
       // A freshness deferral has no implementation attempt. Remove only
       // work-item locks inserted by this lease; an older attempt may own the
       // same work item's other paths and must keep them through the retry.

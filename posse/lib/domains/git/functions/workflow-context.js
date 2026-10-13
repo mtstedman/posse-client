@@ -6,11 +6,13 @@ import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { nativeBinaries } from "../../../shared/tools/classes/BinaryManager.js";
 import { gitExec as nativeGitExec, gitExecAsync as nativeGitExecAsync } from "./utils.js";
+import { REVIEWED_REFRESH_TASK } from "../../../catalog/reviewed-handoffs.js";
 
 const GIT_WORKFLOW_WORKER_URL = new URL("./git-workflow-worker.js", import.meta.url);
 const GIT_WORKFLOW_THREAD_MANAGER = new ThreadManager();
 export const GIT_WORKFLOW_TASK_TIMEOUT_MS = 15 * 60 * 1000;
 const MUTATING_GIT_WORKFLOW_TASKS = new Set([
+  REVIEWED_REFRESH_TASK,
   // The publication gate reads, but through git.exec (a mutate-route method)
   // and the repository's pre-push hook. With only a read pulse its worker
   // failed every conflict-marker check, deferring every shared-trunk

@@ -90,6 +90,7 @@ export function handle(job, verdict, ctx) {
     && queueInternalAssessmentRetry(job, verdict, retryReason, {
       leaseToken: ctx.leaseToken,
       recordAssessorVerdict: ctx.recordAssessorVerdict,
+      assessmentModelTier: ctx.assessmentModelTier,
     })
   ) {
     log(`${C.yellow}[assessor] NEEDS REVIEW${C.reset} WI#${job.work_item_id} job #${job.id}: retrying assessment at a stronger tier before asking the operator${reasonBrief}`);
@@ -179,6 +180,7 @@ export function handleParseError(job, verdict, ctx) {
   if (!verdict?._disable_internal_retry && queueInternalAssessmentRetry(job, verdict, retryReason, {
     leaseToken: ctx.leaseToken,
     recordAssessorVerdict: ctx.recordAssessorVerdict,
+    assessmentModelTier: ctx.assessmentModelTier,
   })) {
     return;
   }

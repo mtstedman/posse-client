@@ -109,6 +109,7 @@ export const SETTING_DEFINITIONS = [
 
   // ── Scheduler ────────────────────────────────────────────────────────────
   { key: "scheduler_concurrency", default: "", runtimeFallback: "3", numeric: { integer: true, min: 1 }, description: "Default number of worker slots when --concurrency is not passed (empty = 3)" },
+  { key: "scheduler_reviewed_file_handoffs", default: "on", scope: "repo", options: ["off", "on"], description: "Allow exact-scope jobs to acquire successfully closed, final-reviewed files before the source work item merges; existing transfers reconcile in either mode" },
   { key: "scheduler_max_active_worktrees", default: "", numeric: { integer: true, min: 1 }, description: "Maximum number of active work-item worktrees the scheduler may run at once (empty = no cap)" },
   { key: "scheduler_implementation_reserved_slots", default: "1", numeric: { integer: true, min: 0 }, description: "Agent slots plan jobs leave for ready dev/fix/artificer/promote jobs: once plans hold all but this many slots, the rest go to that work first (0 = off)" },
   { key: "waiting_lane_shadow_mode", default: "off", options: WAITING_LANE_SHADOW_MODE_VALUES, description: "Waiting-lane eligibility observation: off records nothing; shadow records decisions without creating a detached worktree or parked view" },

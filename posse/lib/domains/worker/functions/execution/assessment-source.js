@@ -25,11 +25,21 @@ export function resolveAssessmentSource({
     : null;
 
   for (const attempt of [...implementationAttempts].reverse()) {
+    const commitHash = String(attempt?.commit_hash || "").trim() || null;
     const response = matchingResponse(attempt, responseArtifacts, legacyResponse);
     const output = artifactText(response);
+    // A later commit supersedes earlier candidates even if its terminal
+    // response was lost. Pairing an older review with the current worktree
+    // can repeat stale findings (or approve work that was never assessed).
+    if (commitHash && !output) {
+      return {
+        ok: false,
+        kind: "evidence_missing",
+        reason: `Implementation attempt #${attempt.id} has a commit but no matching response.`,
+      };
+    }
     if (!output) continue;
 
-    const commitHash = String(attempt?.commit_hash || "").trim() || null;
     if (commitHash) {
       return {
         ok: true,

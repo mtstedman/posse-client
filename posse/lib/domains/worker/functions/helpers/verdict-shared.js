@@ -1347,8 +1347,11 @@ function _queueInternalAssessmentRetry(
     maxRetries = getAssessmentInternalRetryLimit(),
     leaseToken = null,
     recordAssessorVerdict = null,
+    assessmentModelTier = null,
   } = {},
 ) {
+  const freshJob = getJob(job.id) || job;
+  if (Number(freshJob.assessment_attempt_count || 0) >= Math.max(1, Number(freshJob.assessment_max_attempts || 3))) return false;
   const retryCount = countInternalAssessmentRetries(job.id);
   if (retryCount >= maxRetries) return false;
   let payload = {};
@@ -1372,7 +1375,9 @@ function _queueInternalAssessmentRetry(
     });
     return false;
   }
-  const requestedPreviousTier = payload._assess_model_tier || "cheap";
+  // Inline parse recovery and provider escalation can already have used the
+  // top tier while the planned payload still says cheap.
+  const requestedPreviousTier = assessmentModelTier || payload._assess_model_tier || "cheap";
   // Strong is a legacy/planner-only value for assessment. Normalize it before
   // deciding whether another tier exists; otherwise the standard cap looks
   // like a bogus strong -> standard "retry" and can loop old queued jobs.

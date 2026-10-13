@@ -2,6 +2,8 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { ASSESSMENT_LIFECYCLE, ASSESSMENT_LIFECYCLE_STATES } from "../../../catalog/job.js";
 import { LEASE_HOLDING_STATUSES, now, runImmediateTransaction } from "./common.js";
 import { leaseNowMs } from "./lease-clock.js";
+import { REVIEWED_COMPLETION_KEY } from "../../../catalog/reviewed-handoffs.js";
+import { isReviewedTransfer } from "./reviewed-handoff-records.js";
 
 let _attemptStartHook = null;
 export function registerAttemptStartHook(fn) { _attemptStartHook = fn; }
@@ -47,6 +49,10 @@ export function incrementAndCreateAttempt(jobId, leaseToken, workerType, modelNa
     if (!job.lease_expires_at || job.lease_expires_at < leaseNowIso()) return null;
 
     _attemptStartHook?.(jobId);
+    // Attempt counters can later be refunded; remove the old authority now
+    // so a reopened implementation can never resurrect an earlier receipt.
+    db.prepare(`UPDATE jobs SET payload_json = json_remove(payload_json, ?) WHERE id = ? AND json_valid(payload_json)`)
+      .run(`$.${REVIEWED_COMPLETION_KEY}`, jobId);
 
     // Derive next attempt number from actual rows, not the counter - the counter
     // can drift when requeueExpiredLeases/decrementAttemptCount undo increments
@@ -207,6 +213,12 @@ export function beginJobRetryGeneration(jobId, {
   `).get(jobId)?.mx || 0);
   nextPayload._retry_generation = marker;
   delete nextPayload._pre_attempt_repeat_key;
+  // The attempt boundary can stay unchanged across pre-provider failures.
+  // Every explicit retry still permits one fresh reviewed-import check.
+  if (Array.isArray(nextPayload._cross_wi_file_syncs)) {
+    nextPayload._cross_wi_file_syncs = nextPayload._cross_wi_file_syncs.map((entry) =>
+      isReviewedTransfer(entry) && entry.state === "blocked" ? { ...entry, blocked_key: null } : entry);
+  }
   const budget = Math.max(1, Math.floor(Number(attemptBudget) || 3));
   const plannedTier = String(row.model_tier || "standard") === "cheap" ? "cheap" : "standard";
   db.prepare(`

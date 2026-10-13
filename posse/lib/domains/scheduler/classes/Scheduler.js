@@ -1,5 +1,7 @@
 import { ATLAS_INDEXING_HOLD_MAX_MS, ATLAS_INDEXING_PAUSE_OFF_VALUES, ATLAS_INDEXING_HOLD_EXEMPT_JOB_TYPES, RUN_BACKGROUND_JOB_TYPES, ATLAS_BACKGROUND_JOB_CONCURRENCY, RUN_LOOP_KEEPALIVE_INTERVAL_MS, RUNTIME_KILL_RETRY_MS, RUNTIME_KILL_WEDGED_MS, PARKED_UPSTREAM_STALL_GRACE_MS, AUTO_MERGE_STALL_GRACE_MS, STALE_MERGE_AUTHORIZATION_MS, SYSTEM_HOLD_HOLDER_TYPES } from "../../../catalog/scheduler-lifecycle.js";
 import { prepareCrossWiFileSyncHandoff } from "../functions/cross-wi-file-sync.js";
+import { resolveReviewedCircularOwnership } from "../functions/reviewed-circular-release.js";
+import { normPath } from "../../../shared/scope/functions/path.js";
 import { releaseUnusedCompletedWorkItemLocks } from "../functions/unused-planned-locks.js";
 // lib/scheduler.js — Job scheduler with lease-based execution
 //
@@ -14,7 +16,7 @@ import { releaseUnusedCompletedWorkItemLocks } from "../functions/unused-planned
 
 import crypto from "crypto";
 import { spawn } from "child_process";
-import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, findRunnableJobsBatch, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, findWorkItemOrderConflict, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, getQueueWakeGeneration, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgePresenceFresh, isMergeVerificationReviewJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, isWorkItemDispositionGateJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
+import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, getQueueWakeGeneration, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgePresenceFresh, isMergeVerificationReviewJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, isWorkItemDispositionGateJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
 import { WORK_ITEM_ORDER_WAIT_REASON } from "../../queue/functions/work-item-order.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { reapOrphanedDaemons } from "../../../shared/tools/classes/daemon/index.js";
@@ -52,6 +54,10 @@ import { getLivePairingState } from "../../pairing/functions/state.js";
 import { pairingPeerTrunkHints } from "../../pairing/functions/work-items.js";
 import { readWaitingLanePreparationConcurrency, reconcileWaitingLaneJobCompletion, reconcileWaitingLanePreparationsOnBoot, scheduleWaitingLaneBacklog } from "../functions/waiting-lane-coordinator.js";
 import { SchedulerLockLease } from "./SchedulerLockLease.js";
+import { RunnableCandidateScan } from "./RunnableCandidateScan.js";
+import { reconcileReviewedHandoffsOnBoot } from "../../worker/functions/helpers/reviewed-handoff-recovery.js";
+import { reviewedAdmissionForJob, getJobWriteScope } from "../../queue/functions/file-locks.js";
+import { reviewedAdmissionRequested, usesReviewedAdmission } from "../../queue/functions/reviewed-handoff-admission.js";
 import { SchedulerDispatchPlanner } from "./SchedulerDispatchPlanner.js";
 import { SchedulerLockController } from "./SchedulerLockController.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -139,6 +145,7 @@ function mergeLockHeld(nowMs = Date.now()) {
 
 export class Scheduler {
   constructor(opts = {}) {
+    this._runnableCandidateScan = new RunnableCandidateScan();
     this.ownerId = opts.ownerId || `scheduler-${crypto.randomUUID().slice(0, 8)}`;
     this.projectDir = opts.projectDir || process.cwd();
     this._pollMsExplicit = opts.pollMs != null;
@@ -1060,6 +1067,7 @@ export class Scheduler {
       lockName: this.schedulerLock?.lockName || "main",
     });
     const orphaned = Number(bootMaintenance?.orphaned || 0);
+    await reconcileReviewedHandoffsOnBoot(this.projectDir);
     if (orphaned > 0) {
       this._log(`Boot: recovered ${orphaned} orphaned job(s) from previous run`);
     }
@@ -1983,6 +1991,7 @@ export class Scheduler {
 
         // Batched lookahead keeps each query bounded while allowing the
         // scheduler to scan past a blocked head-of-queue batch.
+        this._runnableCandidateScan.beginPass();
         const scanExcludeJobIds = new Set();
         const maxCandidateScan = MAX_RUNNABLE_SCAN_PER_TICK * 4;
         let candidateCount = 0;
@@ -2026,7 +2035,7 @@ export class Scheduler {
                 ...(preparationFull ? [] : [WAITING_LANE_JOB_TYPE]),
               ]
             : implementationPass ? [...RESERVED_SLOT_IMPLEMENTATION_JOB_TYPES] : [];
-          const candidates = findRunnableJobsBatch(fetchLimit, {
+          const candidates = this._runnableCandidateScan.next(fetchLimit, {
             excludeJobIds: [...scanExcludeJobIds],
             onlyJobTypes,
             onlyWorkItemIds: this.onlyWorkItemIds,
@@ -2166,7 +2175,12 @@ export class Scheduler {
               // (and unmerged commits) between them. The order is one total
               // order rebuilt per pass, so these waits cannot cycle.
               workItemOrder ??= loadWorkItemOrder(undefined, { runnableWorkItemIds: this.onlyWorkItemIds });
-              const orderConflict = findWorkItemOrderConflict(job, workItemOrder);
+              const ownership = resolveReviewedCircularOwnership(job, this.ownerId, workItemOrder);
+              const orderConflict = ownership.conflict;
+              if (ownership.released) {
+                workItemOrder = ownership.order;
+                ({ lockedFiles, lockedRoots, activeWorktreeWIs, heldLocks } = queueLockIndex.snapshot());
+              }
               if (orderConflict) {
                 rememberBlockedLock({
                   job_id: job.id,
@@ -2187,6 +2201,10 @@ export class Scheduler {
               // Cross-WI conflict check: file scope overlap. Write paths are
               // cached in queueLockIndex and updated by queue-state wakeups.
               const jobScope = queueLockIndex.scopeForJob(job);
+              const reviewedScope = reviewedAdmissionRequested(job) ? getJobWriteScope(job) : null;
+              const reviewedAdmission = usesReviewedAdmission(job, reviewedScope)
+                ? reviewedAdmissionForJob(job, reviewedScope, { order: workItemOrder }) : null;
+              const proposedDonors = reviewedAdmission?.conflict ? [] : reviewedAdmission?.transfers || [];
               // Allow ancestors + queued cohort siblings (same parent_job_id) so
               // sibling fix jobs spawned from one assessment don't phantom-lock
               // each other into deadlock. Cohort siblings serialize via hard
@@ -2219,7 +2237,10 @@ export class Scheduler {
                       lock?.lock_tier === "job"
                       && Number(lock?.work_item_id) === Number(job.work_item_id)
                     ))
-                    : heldLocks;
+                    : heldLocks.filter((lock) => !(reviewedAdmission && lock.assessment_barrier && lock.work_item_id !== job.work_item_id)
+                      && !proposedDonors.some((transfer) =>
+                      lock.lock_tier === "work_item" && lock.work_item_id === transfer.source_work_item_id
+                      && transfer.files.some((file) => normPath(file.path) === lock.path)));
                   const conflict = findFileConflict(jobScope, candidateHeldLocks, { allowJobIds });
                   if (!conflict) break;
                   const conflictType = conflict.lock?.lock_tier === "work_item" ? "work_item" : "job";

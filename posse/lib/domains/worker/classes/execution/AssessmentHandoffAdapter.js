@@ -21,8 +21,11 @@ import {
 } from "../../../handoff/functions/index.js";
 import { isRetryableTerminalHandoffError } from "../../../handoff/functions/agent-handoff.js";
 import {
+  buildManifest,
   isArtifactMode,
+  validateManifestAgainstContract,
 } from "../../../artifacts/functions/index.js";
+import { effectiveArtifactTaskMode } from "../../../providers/functions/execution-routing.js";
 import { ASSESSABLE_JOB_TYPES } from "../../../../catalog/job.js";
 import { ASSESSMENT_FAILURE_CLASSES } from "../../../../catalog/human-input.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
@@ -83,6 +86,7 @@ import { ensureAssessmentScopedCheckEvidence } from "../../../assessment/functio
 import {
   assessmentWorktreeDirtySummary,
   inspectAssessmentWorktreeReadiness,
+  recordAssessmentWorktreeReadiness,
 } from "../../functions/helpers/assessment-worktree-readiness.js";
 import {
   ensureConfiguredVerification,
@@ -227,7 +231,7 @@ export class AssessmentHandoffAdapter {
     }
 
     const assessStart = Date.now();
-    const cleanPayload = worker.parsePayload(job);
+    let cleanPayload = worker.parsePayload(job);
     const pendingFileRequests = readPendingAssessmentFileRequests(cleanPayload);
     const assessModelTierOverride = typeof cleanPayload?._assess_model_tier === "string"
       ? cleanPayload._assess_model_tier
@@ -298,6 +302,8 @@ export class AssessmentHandoffAdapter {
     const readiness = (assessmentSource.kind === "commit" || assessmentSource.kind === "verified_no_change")
       ? await inspectAssessmentWorktreeReadiness(wtPath)
       : { ready: true };
+    const readinessOutcome = recordAssessmentWorktreeReadiness(job, leaseToken, readiness, assessmentSource.attempt.id);
+    if (readinessOutcome.leaseLost) return { handled: true };
     if (!readiness.ready) {
       const detail = assessmentWorktreeDirtySummary(readiness);
       setAssessmentLifecycle(job.id, "implementation_complete");
@@ -316,12 +322,26 @@ export class AssessmentHandoffAdapter {
           dirty_paths: readiness.dirty_paths.slice(0, 100),
         }),
       });
-      worker._releaseLease(job, leaseToken, "queued", {
-        readyAt: new Date(Date.now() + 2_000).toISOString(),
-      });
+      if (readinessOutcome.recoveryError) {
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken, readinessOutcome.recoveryError, { pendingFileRequests });
+      } else {
+        worker._releaseLease(job, leaseToken, "queued", {
+          readyAt: new Date(Date.now() + 2_000).toISOString(),
+        });
+      }
       return { handled: true };
     }
 
+    // A clean readiness check may have cleared a persisted deferral streak.
+    cleanPayload = worker.parsePayload(job);
+    // Lease recovery can requeue an interrupted assessment without producing
+    // a verdict or an infrastructure error. Enforce its budget at entry too.
+    const freshAssessmentJob = getJob(job.id) || job;
+    if (Number(freshAssessmentJob.assessment_attempt_count || 0) >= Math.max(1, Number(freshAssessmentJob.assessment_max_attempts || 3))) {
+      routeAssessmentInfrastructureFailure(worker, job, leaseToken,
+        new Error("Assessment retry budget exhausted before another attempt could start"), { pendingFileRequests });
+      return { handled: true };
+    }
     const assessAttempt = incrementAndCreateAssessmentAttempt(
       job.id,
       leaseToken,
@@ -334,50 +354,53 @@ export class AssessmentHandoffAdapter {
       return { handled: true };
     }
 
-    // Re-run assessment with the stored output (reuse the existing attempt).
-    const { role, provider, providerName } = await resolveAssessmentOnlyProvider(worker.agentDispatcher);
-    const assessAttemptCount = assessAttempt.attemptCount || (Number(assessmentSource.attempt?.attempt_number || 0) + 1);
-    const resolveAssessModel = (tier) => tierModelName(tier, { role, providerName });
-    const escalatedTier = provider.escalateTier(
-      assessModelTierOverride || getDefaultModelTierForRole("assessor"),
-      assessAttemptCount,
-      { resolveModel: resolveAssessModel },
-    );
-    const effectiveTier = escalatedTier === "strong" ? "standard" : escalatedTier;
-    const internalAssessRetries = countInternalAssessmentRetries(job.id);
-    // Tool/transport failures requeue assessment without producing the
-    // `job.assessment_internal_retry` event used by verdict escalation. Count
-    // prior assessment attempts too, otherwise those retries receive the same
-    // read allowance and deterministically hit the same ceiling again.
-    const fallbackRetryCount = assessmentFallbackRetryCount({
-      assessmentAttemptCount: assessAttempt.assessmentAttemptCount,
-      internalRetryCount: internalAssessRetries,
-    });
-    const priorAssessmentFindings = _buildPriorAssessmentFindings(job.id);
-    // Keep _assess_only set until acquireAssessmentBarrier atomically moves the
-    // job into awaiting_assessment. Clearing it earlier opens an unprotected
-    // window where a sibling writer can lease into this assessment.
-    // The planner's tier and effort hints stay on the payload: an assessment
-    // requeued after a harness budget error re-derives its tier from them,
-    // and dropping them sent the retry to the default tier and effort.
-    if (cleanPayload && (
-      Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_only") ||
-      Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_model_name")
-    )) {
-      delete cleanPayload._assess_only;
-      delete cleanPayload._assess_model_name;
-      job.payload_json = JSON.stringify(cleanPayload);
-      updateJobPayload(job.id, job.payload_json);
-    }
-    _syncAssessorWorkerDisplay(worker.display, job, {
-      tier: effectiveTier,
-      effort: assessmentReasoningEffort,
-      attempt: assessAttemptCount,
-    });
     try {
+      // Setup failures belong to this assessment attempt too. Letting them
+      // escape consumed implementation retries and left this row running.
+      const { role, provider, providerName } = await resolveAssessmentOnlyProvider(worker.agentDispatcher);
+      if (!isLeaseValid(job.id, leaseToken)) throw new Error("Lease expired during assess-only provider routing");
+      const assessAttemptCount = assessAttempt.attemptCount || (Number(assessmentSource.attempt?.attempt_number || 0) + 1);
+      const resolveAssessModel = (tier) => tierModelName(tier, { role, providerName });
+      const escalatedTier = provider.escalateTier(
+        assessModelTierOverride || getDefaultModelTierForRole("assessor"),
+        assessAttemptCount,
+        { resolveModel: resolveAssessModel },
+      );
+      const effectiveTier = escalatedTier === "strong" ? "standard" : escalatedTier;
+      const internalAssessRetries = countInternalAssessmentRetries(job.id);
+      // Tool/transport failures requeue assessment without producing the
+      // `job.assessment_internal_retry` event used by verdict escalation. Count
+      // prior assessment attempts too, otherwise those retries receive the same
+      // read allowance and deterministically hit the same ceiling again.
+      const fallbackRetryCount = assessmentFallbackRetryCount({
+        assessmentAttemptCount: assessAttempt.assessmentAttemptCount,
+        internalRetryCount: internalAssessRetries,
+      });
+      const priorAssessmentFindings = _buildPriorAssessmentFindings(job.id);
+      // Keep _assess_only set until acquireAssessmentBarrier atomically moves the
+      // job into awaiting_assessment. Clearing it earlier opens an unprotected
+      // window where a sibling writer can lease into this assessment.
+      // The planner's tier and effort hints stay on the payload: an assessment
+      // requeued after a harness budget error re-derives its tier from them,
+      // and dropping them sent the retry to the default tier and effort.
+      if (cleanPayload && (
+        Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_only") ||
+        Object.prototype.hasOwnProperty.call(cleanPayload, "_assess_model_name")
+      )) {
+        delete cleanPayload._assess_only;
+        delete cleanPayload._assess_model_name;
+        job.payload_json = JSON.stringify(cleanPayload);
+        updateJobPayload(job.id, job.payload_json);
+      }
+      _syncAssessorWorkerDisplay(worker.display, job, {
+        tier: effectiveTier,
+        effort: assessmentReasoningEffort,
+        attempt: assessAttemptCount,
+      });
       const jobPayloadForAssess = worker.parsePayload(job);
       const assessAc = worker._abortControllers.get(job.id);
-      const assessmentCwd = (isArtifactMode(jobPayloadForAssess.task_mode || "code") && jobPayloadForAssess.output_root)
+      const taskMode = effectiveArtifactTaskMode(job, jobPayloadForAssess);
+      const assessmentCwd = (isArtifactMode(taskMode) && jobPayloadForAssess.output_root)
         ? path.resolve(worker.projectDir, jobPayloadForAssess.output_root)
         : (wtPath || worker.projectDir);
       const assessedCommitHash = assessmentSource.commitHash
@@ -470,9 +493,16 @@ export class AssessmentHandoffAdapter {
           filesCommittedError = error?.message || String(error);
         }
       }
+      const manifest = isArtifactMode(taskMode) && jobPayloadForAssess.output_root
+        ? buildManifest(assessmentCwd, assessmentCwd)
+        : null;
+      const contract = manifest ? validateManifestAgainstContract(manifest, taskMode) : null;
       const assessmentContext = await attachAssessmentDiffContextAsync({
-        task_mode: jobPayloadForAssess.task_mode || "code",
-        manifest: null,
+        job_id: job.id,
+        task_mode: taskMode,
+        manifest,
+        contract_violations: contract?.violations || null,
+        contract_warnings: contract?.warnings || null,
         commit_hash: assessmentSource.commitHash,
         commit_base_hash: commitBaseHash,
         output_root: jobPayloadForAssess.output_root || null,
@@ -536,6 +566,7 @@ export class AssessmentHandoffAdapter {
           cwd: assessmentCwd,
           projectDir: worker.projectDir,
           assessmentContext,
+          allowMutatingRunners: !!wtPath,
         },
       });
       const verdict = await assessmentSession.assess();
@@ -551,7 +582,7 @@ export class AssessmentHandoffAdapter {
         return { handled: true, currentAttemptId: assessAttempt.attempt.id };
       }
       const emitFn = (msg) => worker.emit(job.id, msg);
-      processVerdict(job, verdict, { emit: emitFn, projectDir: worker.projectDir, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
+      processVerdict(job, verdict, { emit: emitFn, projectDir: worker.projectDir, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash, assessmentModelTier: effectiveTier });
       const freshJob = getJob(job.id);
       if (freshJob?.status === "succeeded") {
         setAssessmentLifecycle(job.id, "assessment_passed", { completed: true });

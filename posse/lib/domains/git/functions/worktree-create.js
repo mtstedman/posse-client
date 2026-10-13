@@ -244,6 +244,7 @@ export async function gitWorktreeAddAsync(wtPath, branchName, mainCwd, opts = {}
         // metadata — reclassifying it here would answer "refusing to reset"
         // with a lossy copy plus force-removal.
         if (err?.code === "SNAPSHOT_REFUSED_RESET") throw err;
+        deferWorktreeReuseMutationIfRequested(opts, "shouldDeferCorruptRecovery", { wtPath, branchName }, "Corrupt worktree recovery deferred");
         const fileSnapshot = preserveCorruptWorktreeContents(wtPath, mainCwd, {
           wiId: opts.wiId || null,
           branchName,
@@ -270,6 +271,7 @@ export async function gitWorktreeAddAsync(wtPath, branchName, mainCwd, opts = {}
     }
     const worktree = Worktree.at(mainCwd, wtPath, { branchName });
     const branchExists = await gitBranchExistsAsync(branchName, mainCwd, { signal, nativeParity });
+    if (!branchExists) deferWorktreeReuseMutationIfRequested(opts, "shouldDeferBranchCreation", { wtPath, branchName }, "Missing branch recreation deferred");
     await worktree.addAsync({ createBranch: !branchExists, signal, nativeParity });
     if (!branchExists) {
       if (opts.onBranchCreated) opts.onBranchCreated({ branchName, wtPath });

@@ -575,6 +575,9 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
   const activeFileLocks = activeFileLocksForCommit(opts);
   let headAtScopeStart = null;
   try { headAtScopeStart = gitCurrentHash(cwd, commitNativeParity); } catch { headAtScopeStart = null; }
+  if (opts.expectedHead && headAtScopeStart !== opts.expectedHead) {
+    throw Object.assign(new Error("Branch HEAD moved before scoped commit setup"), { code: "BRANCH_HEAD_MOVED" });
+  }
   let snapshotRestoreFailed = false;
   let snapshotRestoreError = null;
   let snapshotRestoreRef = null;

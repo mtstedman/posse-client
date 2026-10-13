@@ -35,6 +35,7 @@ import { SHARED_TRUNK_SESSION_USER_TRAILER } from "../../../catalog/shared-trunk
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
 import { isAbortError } from "../../runtime/functions/yield.js";
+import { recordReviewedSourceMerge, reviewedSourceMergeTrailer } from "./reviewed-source-merge.js";
 
 function reservedRuntimeMergeError(paths = []) {
   const blocked = filterPosseRuntimePaths(paths);
@@ -152,6 +153,7 @@ export function createMergeWorkflowHelpers(context, {
       const evidence = await canonicalSquashMergeEvidence(workItem, cwd, { targetBranch });
       if (!evidence) continue;
       try {
+        recordReviewedSourceMerge({ workItemId: workItem.id, mergeHash: evidence.mergeHash, cwd, git: gitMergeExec });
         const settled = finalizeApprovedWorkItemMerge(workItem.id);
         if (!settled?.ok) {
           result.failures.push({ work_item_id: workItem.id, reason: settled?.reason || "queue_settlement_failed" });
@@ -179,6 +181,8 @@ export function createMergeWorkflowHelpers(context, {
 
   function squashCommitArgs(subject, sharedTrunkOperationId = null, wiId = null, source = null) {
     const args = ["commit", "-m", subject];
+    const reviewedSource = reviewedSourceMergeTrailer(wiId, source?.sourceHead);
+    if (reviewedSource) args.push("-m", reviewedSource);
     if (source) {
       // Keep the recovery subject stable, but preserve the work's descriptive
       // commit subjects in the squash body instead of losing them on main.
@@ -796,6 +800,7 @@ export function createMergeWorkflowHelpers(context, {
     preMergeHead = null,
     sharedTrunkOperationId = null,
     wiId = null,
+    sourceHead = null,
   } = {}) {
     const canRecover = step === "commit" || step === "postcommit";
     if (!canRecover) return null;
@@ -858,7 +863,7 @@ export function createMergeWorkflowHelpers(context, {
       });
       try {
         emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch, retry: true });
-        gitMergeExec(squashCommitArgs(subject, sharedTrunkOperationId, wiId), cwd);
+        gitMergeExec(squashCommitArgs(subject, sharedTrunkOperationId, wiId, { branch, targetBranch, cwd, sourceHead }), cwd);
         const mergeHash = gitMergeExec(["rev-parse", "HEAD"], cwd);
         cleanupSquashMessage(cwd);
         log(`Merge timeout retry succeeded: ${branch} into ${targetBranch} at ${mergeHash}`, {
@@ -1415,6 +1420,7 @@ export function createMergeWorkflowHelpers(context, {
       let mergeHash = null;
       let mergeStep = "merge";
       let mergeCreated = false;
+      let acceptedSourceHead = null;
       // Evidence the gate leaves for after the commit: checks merged under an
       // operator waiver or proceeding as target_unavailable (recorded on this
       // work item at the merge commit), and checks that passed (they resolve
@@ -1641,9 +1647,10 @@ export function createMergeWorkflowHelpers(context, {
       // HEAD. Extracted so the untracked-overwrite recovery path can re-run
       // the same body after snapshotting and cleaning blockers.
       const attemptSquashMerge = (label = "merge") => {
+        acceptedSourceHead = gitMergeExec(["rev-parse", branch], cwd);
         mergeStep = "runtime-path-preflight";
         const branchPaths = String(gitMergeExec([
-          "-c", "core.quotePath=false", "ls-tree", "-rz", "--name-only", branch,
+          "-c", "core.quotePath=false", "ls-tree", "-rz", "--name-only", acceptedSourceHead,
         ], cwd, { trim: false }) || "").split("\0").filter(Boolean);
         const branchRuntimePaths = filterPosseRuntimePaths(branchPaths);
         if (branchRuntimePaths.length > 0) throw reservedRuntimeMergeError(branchRuntimePaths);
@@ -1658,7 +1665,7 @@ export function createMergeWorkflowHelpers(context, {
           subject: expectedSquashSubject(branch, targetBranch),
         });
         mergeMarkerWritten = true;
-        gitMergeExec(["merge", "--squash", branch], cwd);
+        gitMergeExec(["merge", "--squash", acceptedSourceHead], cwd);
         mergeStep = "diff";
         const staged = gitMergeExec(["diff", "--cached", "--name-only"], cwd);
         const stagedFiles = staged.split("\n").map((line) => line.trim()).filter(Boolean);
@@ -1676,7 +1683,7 @@ export function createMergeWorkflowHelpers(context, {
           });
           emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch });
           mergeStep = "commit";
-          gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId, wiId, { branch, targetBranch, cwd }), cwd);
+          gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId, wiId, { branch, targetBranch, cwd, sourceHead: acceptedSourceHead }), cwd);
           mergeCreated = true;
           mergeStep = "postcommit";
         } else {
@@ -1780,7 +1787,7 @@ export function createMergeWorkflowHelpers(context, {
               if (stagedFiles.length > 0) runProjectedCandidateGate(stagedFiles);
               emitMergePhase(onPhase, "commit", `Committing squash merge of ${branch}`, { branch, target: targetBranch });
               mergeStep = "commit";
-              gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId, wiId, { branch, targetBranch, cwd }), cwd);
+              gitMergeExec(squashCommitArgs(expectedSquashSubject(branch, targetBranch), sharedTrunkOperationId, wiId, { branch, targetBranch, cwd, sourceHead: acceptedSourceHead }), cwd);
               mergeCreated = true;
               mergeStep = "postcommit";
               mergeHash = gitMergeExec(["rev-parse", "HEAD"], cwd);
@@ -1824,8 +1831,10 @@ export function createMergeWorkflowHelpers(context, {
             preMergeHead,
             sharedTrunkOperationId,
             wiId,
+            sourceHead: acceptedSourceHead,
           });
           if (recovered?.ok) {
+            recordReviewedSourceMerge({ workItemId: wiId, sourceHead: acceptedSourceHead, mergeHash: recovered.mergeHash, cwd, git: gitMergeExec });
             recordMergeGateOutcome({ wiId, mergeHash: recovered.mergeHash, targetBranch, outcome: gateOutcome });
             if (!suppressPostMergeEffects) {
               emitAtlasMainAdvancedAfterMerge({
@@ -1906,6 +1915,7 @@ export function createMergeWorkflowHelpers(context, {
       }
 
       log(`Merged ${branch} into ${targetBranch} at ${mergeHash}`, { json: { branch, target: targetBranch, merge_hash: mergeHash } });
+      recordReviewedSourceMerge({ workItemId: wiId, sourceHead: acceptedSourceHead, mergeHash, cwd, git: gitMergeExec });
       clearDeterministicMergeFailure(wiId);
       if (mergeCreated) recordMergeGateOutcome({ wiId, mergeHash, targetBranch, outcome: gateOutcome });
       if (!suppressPostMergeEffects && (mergeCreated || (preMergeHead && mergeHash && mergeHash !== preMergeHead))) {
@@ -2045,6 +2055,9 @@ export function createMergeWorkflowHelpers(context, {
       validateCandidate: validatePushCandidateAsync,
       mergeLockAlreadyHeld,
     });
+    if (result?.ok && result.mergeHash) {
+      recordReviewedSourceMerge({ workItemId: wiId, mergeHash: result.mergeHash, cwd, git: gitMergeExec });
+    }
     // Every merge route ends here, so the runtime log records the outcome even
     // when the events table is later purged.
     try {

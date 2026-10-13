@@ -1,4 +1,7 @@
 import crypto from "crypto";
+import { usesReviewedAdmission, reviewedAdmissionRequested, reviewedHandoffAdmission, reserveReviewedHandoffs } from "./reviewed-handoff-admission.js";
+import { hasReviewedReservation, reviewedTransfers } from "./reviewed-handoff-records.js";
+import { blockedReviewedReservation } from "./reviewed-handoff-journal.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import {
   UNMERGED_WORK_ITEM_MERGE_STATES,
@@ -6,7 +9,7 @@ import {
 } from "../../../catalog/work-item.js";
 import { Scope } from "../../../shared/scope/classes/Scope.js";
 import { DEADLOCK_TERMINAL_STATUSES, MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
-import { isUnderRoot, rootsOverlap } from "../../../shared/scope/functions/path.js";
+import { isUnderRoot, rootsOverlap, normPath } from "../../../shared/scope/functions/path.js";
 import { parseJobPayload } from "./payload.js";
 import {
   ACTIVE_LEASE_STATUSES,
@@ -497,7 +500,8 @@ function locksConflict(scope, locks, {
       && lock.work_item_id != null
       && Number(lock.work_item_id) === Number(allowWorkItemId);
     if (ignoreSameWorkItemLocks && sameWorkItem) continue;
-    if (lock.job_id != null && allowedJobIds.has(Number(lock.job_id))) continue;
+    if (allowJobId != null && Number(lock.job_id) === Number(allowJobId)) continue;
+    if (!lock.reviewed_reservation && lock.job_id != null && allowedJobIds.has(Number(lock.job_id))) continue;
     const hit = candidates.find((candidate) => conflict(lock, candidate));
     if (hit) return { lock, candidate: hit };
   }
@@ -807,6 +811,7 @@ function activeJobLocks(db, {
   `).all(...QUEUE_LOCKING_JOB_TYPES_LIST, ...(scopedToWorkItem ? [wiId] : []));
 
   const isActiveInnerLockJob = (job) => {
+    if (hasReviewedReservation(job)) return true;
     if (!jobNeedsWriteLocks(job)) return false;
     // An assess-only retry owns the WI barrier from lease acquisition through
     // assessment. Parked states do not execute and must not freeze the WI.
@@ -825,6 +830,7 @@ function activeJobLocks(db, {
     const scope = usePathTouchScope
       ? getJobPathTouchScope(job)
       : getJobWriteScope(job);
+    scope.files = [...new Set([...scope.files, ...reviewedTransfers(job).flatMap((entry) => entry.files.map((file) => normPath(file.path)))])];
     if (!hasWriteScope(scope)) continue;
     for (const lock of scopeToLockRows(scope)) {
       rows.push({
@@ -841,6 +847,8 @@ function activeJobLocks(db, {
         job_title: job.title,
         job_status: job.status,
         job_type: job.job_type,
+        reviewed_reservation: hasReviewedReservation(job),
+        assessment_barrier: jobNeedsAssessmentBarrier(job),
       });
     }
   }
@@ -969,6 +977,10 @@ export function loadWorkItemOrder(db = getDb(), { workItemLocks = null, runnable
  */
 export function findWorkItemOrderConflict(job, order = null) {
   if (!jobNeedsWriteLocks(job) || jobNeedsAssessmentBarrier(job)) return null;
+  const candidateScope = reviewedAdmissionRequested(job) ? getJobWriteScope(job) : null;
+  if (usesReviewedAdmission(job, candidateScope)) {
+    return reviewedAdmissionForJob(job, candidateScope, { order }).conflict;
+  }
   const resolved = order || loadWorkItemOrder();
   const ownScope = getJobPathTouchScope(job);
   const hit = findWorkItemOrderUpstream(
@@ -1001,7 +1013,32 @@ export function findWorkItemOrderConflict(job, order = null) {
   };
 }
 
-export function findWriteLockConflict(job, scope = getJobWriteScope(job), snapshot = null, {
+export function reviewedAdmissionForJob(job, scope = getJobWriteScope(job), {
+  order = null, runnableWorkItemIds = null, snapshot = null, ignoreHardDependencyPredecessors = false,
+} = {}) {
+  const db = getDb();
+  const locks = snapshot || listActiveFileLocks();
+  const sameWorkItemConflict = findOrdinaryWriteLockConflict(job, scope, { work_items: [], jobs: locks.jobs }, {
+    workItemOrder: false, ignoreHardDependencyPredecessors,
+  });
+  return reviewedHandoffAdmission(job, scope, {
+    order: order || snapshot?.work_item_order || loadWorkItemOrder(db, { workItemLocks: locks.work_items, runnableWorkItemIds }),
+    workItemLocks: locks.work_items, jobLocks: locks.jobs, sameWorkItemConflict,
+    canRelease: workItemCanReleaseFileLock, sourceRejection: crossWiSyncSourceRejection,
+  });
+}
+
+export function findWriteLockConflict(job, scope = getJobWriteScope(job), snapshot = null, opts = {}) {
+  const blocked = blockedReviewedReservation(job);
+  if (blocked) return { type: "work_item", lock: { work_item_id: blocked.source_work_item_id, path: blocked.path, lock_kind: "file" },
+    candidate: { path: blocked.path, lock_kind: "file" }, wait_state: { reason: blocked.reason } };
+  if (opts.workItemOrder !== false && usesReviewedAdmission(job, scope)) {
+    return reviewedAdmissionForJob(job, scope, { ...opts, snapshot }).conflict;
+  }
+  return findOrdinaryWriteLockConflict(job, scope, snapshot, opts);
+}
+
+function findOrdinaryWriteLockConflict(job, scope = getJobWriteScope(job), snapshot = null, {
   workItemOrder = true,
   runnableWorkItemIds = null,
   ignoreHardDependencyPredecessors = false,
@@ -1025,6 +1062,12 @@ export function findWriteLockConflict(job, scope = getJobWriteScope(job), snapsh
   const sameWorkItemJobLocks = snapshot
     ? snapshot.jobs.filter((lock) => Number(lock.work_item_id) === Number(job.work_item_id))
     : activeJobLocks(db, { workItemId: job.work_item_id });
+  // A pending import survives cancellation/expiry even when the ordinary WI
+  // lock projection no longer includes its failed or canceled work item.
+  const reservations = (snapshot?.jobs || activeJobLocks(db)).filter((lock) => Number(lock.work_item_id) !== Number(job.work_item_id)
+    && lock.reviewed_reservation);
+  const reservationConflict = locksConflict(scope, reservations, { allowJobId: job.id });
+  if (reservationConflict) return { type: "job", ...reservationConflict };
   const allowJobIds = new Set([
     ...ancestorJobIdsForJob(job, db),
     ...(ignoreHardDependencyPredecessors ? unmetHardDependencyPredecessorJobIdsForJob(job, db) : []),
@@ -1433,6 +1476,31 @@ export function verifyOrAcquireJobWriteLockForPath(jobId, filePath, { source = "
   });
 }
 
+export function acquireAdditionalJobWritePaths(jobId, paths, { source = "scope_expansion" } = {}) {
+  const db = getDb();
+  const execute = () => {
+    const job = db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId);
+    if (!job || !jobNeedsWriteLocks(job)) return { ok: true };
+    // A queued continuation reacquires its complete authorized scope at lease
+    // time. Approval alone does not turn it into an active writer.
+    if (!job.lease_token || !ACTIVE_INNER_LOCK_STATUSES.has(job.status)) return { ok: true, deferred: true };
+    const scope = { files: [...new Set(paths.map(normalizeLockPath).filter(Boolean))], roots: [] };
+    if (scope.files.length !== new Set(paths).size) return { ok: false, code: "scope_write_lock_blocked" };
+    const admission = usesReviewedAdmission(job, scope)
+      ? reviewedAdmissionForJob(job, scope) : null;
+    const conflict = admission?.conflict || findOrdinaryWriteLockConflict(job, scope, null, { workItemOrder: false });
+    if (conflict || admission?.transfers.length) {
+      if (conflict) recordFileLaneConflict(job, conflict);
+      return { ok: false, approved: false, live: false, paused: false, code: "scope_write_lock_blocked",
+        message: "The requested paths are owned by other work. Preserve the current candidate and retry through a queued continuation.", conflict };
+    }
+    insertMissingWiLocks(db, job, scope, now(), source, job.lease_token);
+    insertJobLocks(db, job, scope, now(), source);
+    return { ok: true };
+  };
+  return db.inTransaction ? execute() : runImmediateTransaction(db, execute);
+}
+
 function lockConflictMessage(job, conflict) {
   if (!conflict) return null;
   const path = conflict.candidate?.path || conflict.lock?.path || "unknown";
@@ -1482,16 +1550,23 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
     leaseDurationSec = scopeOrLeaseDurationSec;
     opts = {};
   }
-  const needsWriteLocks = jobNeedsWriteLocks(job);
-  const scope = needsWriteLocks
+  let needsWriteLocks = jobNeedsWriteLocks(job);
+  let scope = needsWriteLocks
     ? (hasExplicitScope
       ? normalizeScopeInput(scopeOrLeaseDurationSec)
       : getJobWriteScope(job))
     : null;
-  const hasScope = hasWriteScope(scope);
+  let hasScope = hasWriteScope(scope);
   return runImmediateTransaction(db, () => {
     const fresh = db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(job.id);
     if (!fresh || fresh.status !== "queued") return null;
+    if (String(fresh.ready_at || "") > now() || unmetHardDependencyPredecessorJobIdsForJob(fresh, db).size > 0) return null;
+    // Re-read the authoritative payload inside the lease transaction. A
+    // scheduler's cached scope is not authority for newly expanded paths.
+    needsWriteLocks = jobNeedsWriteLocks(fresh);
+    scope = needsWriteLocks ? getJobWriteScope(fresh) : null;
+    hasScope = hasWriteScope(scope);
+    let reviewedAdmission = null;
 
     const assessmentBarrier = jobNeedsAssessmentBarrier(fresh);
     // The in-memory scheduler scan is advisory. Recheck transactionally even
@@ -1514,6 +1589,12 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
       }
     }
 
+    // Cleanup above may remove a stale competing lock. Recompute the full
+    // proposal now, so an earlier blocked result cannot skip its transfers.
+    if (usesReviewedAdmission(fresh, scope)) {
+      reviewedAdmission = reviewedAdmissionForJob(fresh, scope, { runnableWorkItemIds: opts?.runnableWorkItemIds });
+      if (reviewedAdmission.conflict) return null;
+    }
     const leaseToken = crypto.randomUUID();
     const expiresAt = new Date(leaseNowMs() + leaseDurationSec * 1000).toISOString();
     const ts = now();
@@ -1527,6 +1608,8 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
       WHERE id = ? AND status = 'queued'
     `).run(ownerId, leaseToken, expiresAt, ts, fresh.id);
     if (result.changes === 0) return null;
+
+    reserveReviewedHandoffs(fresh, reviewedAdmission?.transfers || [], leaseToken);
 
     clearFileLaneWaitsForJob(fresh.id, "lane_acquired");
 
@@ -1576,6 +1659,7 @@ export async function acquireLeaseWithWriteLocksAsync(job, ownerId, scopeOrLease
 
 export function releaseJobFileLocks(jobId, reason = "job_done") {
   const db = getDb();
+  if (hasReviewedReservation(db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId))) return 0;
   const ts = now();
   const released = db.prepare(`
     UPDATE job_file_locks
