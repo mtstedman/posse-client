@@ -1,3 +1,4 @@
+import { COMPACT_RELATIONSHIP_PROJECTION } from "./atlas-presentation.js";
 // ATLAS v2 tool action schema definitions (pure data).
 //
 // The raw, undecorated ATLAS action surface. Per the catalog contract this
@@ -660,7 +661,7 @@ export const ATLAS_TOOL_DEFS_RAW = Object.freeze({
         limit: { type: "integer", minimum: 1, maximum: 100, description: "Maximum returned type/file/symbol entries; default 20." },
         offset: { type: "integer", minimum: 0, maximum: 100000, description: "Entry offset within the current index generation." },
         minConfidence: { type: "number", minimum: 0, maximum: 100, description: "Legacy minimum resolved-edge confidence, 0..1 or 0..100.", internalOnly: true },
-        projection: { type: "string", enum: ["compact-v1"], description: "Issued compact response projection selected by the runtime.", internalOnly: true },
+        projection: { type: "string", enum: [COMPACT_RELATIONSHIP_PROJECTION], description: "Issued compact response projection selected by the runtime.", internalOnly: true },
         indexVersion: { type: "string", description: "Expected index generation for a continued page.", internalOnly: true },
       },
       required: ["symbolId"],

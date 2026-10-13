@@ -67,6 +67,30 @@ imports. An empty static inbound-reference count is insufficient. Keep an
 intentional wrapper when it preserves a public API, formatting contract, or
 separate lifecycle; deduplicate the mechanism behind it instead.
 
+Handoff source lineage, exact server slices, and disjoint source-window
+coordinates are owned by `handoff/functions/helpers/evidence-provenance.js`.
+Packet materialization and validation stay behind `agent-handoff.js`.
+Observation recording keeps its existing `observations.js` entry point;
+tool summaries live in `tool-observation-summary.js`, and both projection and
+recording share the `ObservationContextScope` async-context owner. Research
+membership and tool outcomes come from the observation and unit-test catalogs.
+
+Atlas retrieval's `request-values.js` owns its permissive query-path cleanup
+and finite-number clamping. Those helpers preserve their existing query
+semantics; filesystem authority checks use the scope/path-policy owners.
+Artifact execution and assessment share `artifacts/functions/expected-file-path.js`
+for manifest-target mapping.
+
+Frozen test receipts keep lineage, persistence, reuse, and worktree cleanup in
+the worker. `frozen-test-plan.js` resolves inherited selections and repository
+obligations; `frozen-test-execution.js` runs bounded checks and shares file-result
+projection; `test-receipt-evidence.js` owns comparison, attribution, and rendering.
+Verification owns `planner-test-command.js`, `test-runner-failure.js`, and
+`receipt-fingerprint.js`, so planning and merge checks can use validation without
+importing the receipt coordinator. Existing receipt exports remain compatible.
+Command flags, receipt policy, dependency network modes, and compact Atlas
+projection identities are registered in the catalog.
+
 Run `node scripts/check-installation-policy.mjs` from the package to verify
 bootstrap projections, including installer literals needed before Node exists.
 When the native workspace is available, run

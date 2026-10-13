@@ -269,10 +269,11 @@ export function renderChangedFileChecks(checks) {
 
 /**
  * Findings the deterministic evidence proves on its own, attributed in
- * process: a check failure on a line the change added, and a failing or
- * timed-out test file the change added (`addedTestPaths`, addedTestFiles)
+ * process: a check failure on a line the change added, and a failing
+ * test file the change added (`addedTestPaths`, addedTestFiles)
  * that its runner ran on its own. They stand even when the reviewer passes
- * the change. A failure in an edited, pre-existing test or elsewhere in a
+ * the change. A timeout alone does not prove a product defect. A failure in
+ * an edited, pre-existing test or elsewhere in a
  * changed file may predate the change, so the reviewer judges it instead.
  */
 export function finalReviewCheckFindings({ checks = null, changedTestRun = null, addedTestPaths = [] } = {}) {

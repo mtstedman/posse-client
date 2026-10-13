@@ -12,7 +12,7 @@ import { pulseTokenManager } from "../../../shared/native/classes/PulseTokenMana
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { repositoryFingerprint } from "../../pairing/functions/git.js";
 import { getSharedTrunkNativeCapabilities } from "../../git/functions/shared-trunk-native.js";
-import { diffPairingMembers } from "../../pairing/functions/session-console.js";
+import { SessionAdvisoryRefresh } from "./SessionAdvisoryRefresh.js";
 import {
   createPairingRemoteClient,
   validatePairingRemoteResponse,
@@ -103,15 +103,14 @@ export class SessionMonitor {
     this._nextDueAt = 0;
     this._client = null;
     this._stateId = null;
+    this._sessionKey = null;
+    this._generation = 0;
     this._inFlight = null;
     this._consecutiveFailures = 0;
     this._lastStatus = null;
     this._unavailable = false;
     this._scopeCapabilityConfirmed = null;
-    this._teamSubmissionSignature = null;
-    this._lastRoster = null;
-    this._seenMembers = new Map();
-    this._membersPrimed = false;
+    this._advisories = new SessionAdvisoryRefresh({ nowMs });
   }
 
   delayUntilDueMs() {
@@ -142,17 +141,28 @@ export class SessionMonitor {
       this._nextDueAt = 0;
       this._client = null;
       this._stateId = null;
+      this._sessionKey = null;
       this._consecutiveFailures = 0;
       this._scopeCapabilityConfirmed = null;
-      this._teamSubmissionSignature = null;
-      this._resetRoster();
+      this._advisories.reset();
       this._tokenManager.setSessionContext(null);
       this._clearPeers();
       return { attempted: false, skipped: "no_active_session" };
     }
+    const sessionKey = this._identity(state);
+    if (this._sessionKey !== sessionKey) {
+      this._sessionKey = sessionKey;
+      this._nextDueAt = 0;
+      this._client = null;
+      this._lastStatus = null;
+      this._advisories.reset();
+    }
+    const generation = this._generation;
+    const isCurrent = () => generation === this._generation && sessionKey === this._identity(this._getState());
+    const stale = () => ({ attempted: false, unavailable: true, skipped: "session_changed" });
     const now = this._nowMs();
     if (!force && now < this._nextDueAt) {
-      return { attempted: false, skipped: "cadence", status: this._lastStatus, unavailable: this._unavailable };
+      return this._withAdvisories({ attempted: false, skipped: "cadence", status: this._lastStatus, unavailable: this._unavailable });
     }
     this._nextDueAt = now + SESSION_HEARTBEAT_MS;
     if (this._stateId !== state.id) {
@@ -160,8 +170,7 @@ export class SessionMonitor {
       this._stateId = state.id;
       this._consecutiveFailures = 0;
       this._scopeCapabilityConfirmed = null;
-      this._teamSubmissionSignature = null;
-      this._resetRoster();
+      this._advisories.reset();
       this._adoptProcess(state.id, process.pid);
     }
     const instanceId = state.instance_id || ensureBridgeInstanceId(this.projectDir);
@@ -174,6 +183,7 @@ export class SessionMonitor {
     try {
       if (this._scopeCapabilityConfirmed == null) {
         const capabilities = await this._capabilityCheck(this.projectDir);
+        if (!isCurrent()) return stale();
         this._scopeCapabilityConfirmed = capabilities?.available === true
           && capabilities.result?.scopeEnforcement === true;
         this._tokenManager.confirmNativeScopeEnforcement(this._scopeCapabilityConfirmed);
@@ -182,6 +192,7 @@ export class SessionMonitor {
       const raw = this._heartbeat
         ? await this._heartbeat(state, this._collectPresence(this.projectDir))
         : await this._client.heartbeat(state.relay_token, this._collectPresence(this.projectDir));
+      if (!isCurrent()) return stale();
       const status = this._validate("heartbeat", raw);
       assertStatusMatches(state, status);
       const priorPolicyRevision = Number(state.submission_approval_revision) || 0;
@@ -198,54 +209,7 @@ export class SessionMonitor {
       // Changing the policy changes the pulse cache key and clears the native
       // scope proof, even when the same binary was verified earlier this run.
       this._tokenManager.confirmNativeScopeEnforcement(this._scopeCapabilityConfirmed);
-      let teamSubmissionChanged = false;
-      let teamSubmissionWorkItemIds = [];
-      if (teamPolicyEnabled && typeof this._client?.teamSubmissions === "function") {
-        try {
-          const listing = await this._client.teamSubmissions(state.relay_token, state.remote_session_id);
-          if (listing?.contract_version === 1 && listing.session_id === state.remote_session_id
-            && Array.isArray(listing.submissions)) {
-            const projection = listing.submissions
-              .filter((row) => ["pending", "approved", "denied"].includes(String(row.state || "").toLowerCase()))
-              .map((row) => ({
-                submission_id: row.id ?? row.submission_id ?? null,
-                work_item_id: row.work_item_id,
-                state: row.state,
-                grant_revision: row.grant_revision ?? null,
-                policy_revision: row.policy_revision ?? null,
-                decision_action_id: row.decision_action_id ?? null,
-                decision_at: row.decision_at ?? null,
-                candidate_oid: row.candidate_oid ?? null,
-              }))
-              .sort((left, right) => String(left.submission_id).localeCompare(String(right.submission_id)));
-            const signature = JSON.stringify(projection);
-            teamSubmissionChanged = this._teamSubmissionSignature != null
-              && signature !== this._teamSubmissionSignature;
-            if (teamSubmissionChanged) {
-              teamSubmissionWorkItemIds = projection.map((row) => row.work_item_id).filter(Boolean).slice(0, 64);
-            }
-            this._teamSubmissionSignature = signature;
-          }
-        } catch { /* A re-drive hint must not turn a healthy heartbeat fatal. */ }
-      } else {
-        this._teamSubmissionSignature = null;
-      }
-      // The roster is display-only: a failed listing keeps the last one and
-      // never turns a successful heartbeat into an unavailable session.
-      let memberEvents = [];
-      if (state.role === "host" && typeof this._client?.members === "function") {
-        try {
-          const listed = await this._client.members(state.relay_token);
-          if (Array.isArray(listed?.members)) {
-            this._lastRoster = listed.members;
-            const events = diffPairingMembers(listed.members, this._seenMembers);
-            // The first listing is the baseline, not news.
-            memberEvents = this._membersPrimed ? events : [];
-            this._membersPrimed = true;
-          }
-        } catch { /* keep the last roster */ }
-      }
-      const roster = this._lastRoster;
+      this._advisories.poll({ state, status, client: this._client, force });
       const nextScope = status.scope_set || {};
       const scopeChanged = JSON.stringify(nextScope) !== JSON.stringify(state.scopeSet || {});
       this._updateEnrollment(state.id, {
@@ -274,6 +238,7 @@ export class SessionMonitor {
           || policyRevisionChanged || publicationChanged) {
         this._tokenManager.clearAuthentication();
         const { invalidateVerifiedTeamGrantCache } = await import("../../pairing/functions/team-submissions.js");
+        if (!isCurrent()) return stale();
         invalidateVerifiedTeamGrantCache();
       }
       this._touch(state.id);
@@ -284,20 +249,16 @@ export class SessionMonitor {
         leaseSec: sessionLeaseSec(state.role),
         nowMs: this._nowMs(),
       });
-      const projectedStatus = roster ? { ...status, members: roster } : status;
-      this._writePeers(projectedStatus);
-      this._lastStatus = projectedStatus;
+      this._lastStatus = status;
       this._consecutiveFailures = 0;
       this._unavailable = false;
-      return {
+      return this._withAdvisories({
         attempted: true,
-        status: projectedStatus,
-        memberEvents,
-        teamSubmissionChanged,
-        teamSubmissionWorkItemIds,
+        status,
         requestsDrain: status.status !== "active",
-      };
+      });
     } catch (error) {
+      if (!isCurrent()) return stale();
       this._consecutiveFailures += 1;
       this._unavailable = true;
       this._recordLinkFailure({
@@ -320,16 +281,28 @@ export class SessionMonitor {
     }
   }
 
-  _resetRoster() {
-    this._lastRoster = null;
-    this._seenMembers = new Map();
-    this._membersPrimed = false;
+  _withAdvisories(result) {
+    const { roster, ...hints } = this._advisories.takeSnapshot();
+    const status = result.status && roster && result.status.members !== roster
+      ? { ...result.status, members: roster } : result.status;
+    if (status) {
+      this._lastStatus = status;
+      if (result.attempted || status !== result.status) this._writePeers(status);
+    }
+    return { ...result, status, ...hints };
+  }
+
+  _identity(state) {
+    if (state?.phase !== "active") return null;
+    return JSON.stringify([state.id, state.remote_session_id, state.relay_token, state.role, state.remote_url, state.shared_branch]);
   }
 
   stop() {
+    this._generation++;
     this._client = null;
     this._stateId = null;
-    this._resetRoster();
+    this._sessionKey = null;
+    this._advisories.reset();
     this._lastStatus = null;
     this._unavailable = false;
     this._scopeCapabilityConfirmed = null;

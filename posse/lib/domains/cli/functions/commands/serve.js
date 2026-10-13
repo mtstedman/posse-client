@@ -1,8 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
+import { setTimeout as delay } from "node:timers/promises";
 
+import { abortable } from "../../../../shared/concurrency/functions/abortable.js";
 import { scrubSecrets } from "../../../../shared/telemetry/classes/logging/secret-scrub.js";
+import { requestBridgePair } from "../../../bridge/functions/pair-request.js";
 import { Bridge } from "../../../bridge/classes/Bridge.js";
 import {
   getBridgeConfig,
@@ -35,18 +38,9 @@ function bridgePairUrl(relayHttpBase, endpoint) {
   return new URL(`v1/bridge-pair/${endpoint}`, relayHttpBase);
 }
 
-async function readJsonResponse(res) {
-  const text = await res.text();
-  try {
-    return text ? JSON.parse(text) : {};
-  } catch {
-    return { raw: text };
-  }
-}
-
 function promptForConfirmationCode(
   prompt = "  Enter the 4-character code shown on your phone: ",
-  { signal } = {},
+  { signal, onCancel } = {},
 ) {
   const rl = readline.createInterface({
     input: process.stdin,
@@ -63,6 +57,12 @@ function promptForConfirmationCode(
     };
     const abort = () => finish();
     signal?.addEventListener("abort", abort, { once: true });
+    // readline owns Ctrl-C while its terminal prompt is active; Node does
+    // not emit process SIGINT for that keypress.
+    rl.once("SIGINT", () => {
+      onCancel?.();
+      finish();
+    });
     rl.once("close", () => finish());
     if (signal?.aborted) {
       finish();
@@ -139,6 +139,7 @@ export async function runPairCommand(
     projectDir = process.cwd(),
     processRef = process,
     cancelTimeoutMs = 2_000,
+    requestTimeoutMs = 15_000,
   } = {},
 ) {
   const resolvedPosseKey = posseKey === undefined ? resolvePosseKey() : String(posseKey || "").trim();
@@ -175,35 +176,10 @@ export async function runPairCommand(
     };
   };
 
-  // Step 1: ask the relay to mint a QR token.
-  const startUrl = bridgePairUrl(pairHttpBase, "start");
-  let startRes;
-  try {
-    pairPulseTokens.assertTrustedResourceUrl(startUrl, "bridge pair start");
-    startRes = await fetchImpl(startUrl, {
-      method: "POST",
-      headers: await pairAuthHeaders(),
-      body: JSON.stringify({ instance_label: config.label }),
-      redirect: "error",
-    });
-  } catch (err) {
-    console.log(`\n  ${C.red}Network error contacting relay:${C.reset} ${err?.message || err}\n`);
-    return { ok: false, reason: "network_error" };
-  }
-  const startBody = await readJsonResponse(startRes);
-  if (!startRes.ok) {
-    const message =
-      startBody?.error?.message || startBody?.message || `HTTP ${startRes.status}`;
-    console.log(`\n  ${C.red}Relay rejected pair-start:${C.reset} ${message}\n`);
-    return { ok: false, reason: "pair_start_failed", status: startRes.status, body: startBody };
-  }
-  const qrToken = startBody?.qr_token;
-  if (!qrToken) {
-    console.log(`\n  ${C.red}Relay returned no qr_token.${C.reset}\n`);
-    return { ok: false, reason: "missing_qr_token", body: startBody };
-  }
-
   const cancelUrl = bridgePairUrl(pairHttpBase, "cancel");
+  let qrToken = null;
+  let expiryTimer = null;
+  let expiresAt = Infinity;
   let relayConsumed = false;
   let cancelRequested = false;
   const ceremonyAbort = new AbortController();
@@ -214,194 +190,223 @@ export async function runPairCommand(
     cancelRequested = true;
     ceremonyAbort.abort();
   };
-  for (const signal of cancellationSignals) processRef.once?.(signal, cancelFromSignal);
+  for (const signal of cancellationSignals) processRef.on?.(signal, cancelFromSignal);
 
   const cancelRelayPair = async () => {
-    const timeout = new AbortController();
-    const timeoutId = setTimeout(() => timeout.abort(), Math.max(1, Number(cancelTimeoutMs) || 2_000));
     try {
       pairPulseTokens.assertTrustedResourceUrl(cancelUrl, "bridge pair cancel");
-      const cancelRes = await fetchImpl(cancelUrl, {
-        method: "POST",
-        headers: await pairAuthHeaders(),
-        body: JSON.stringify({ qr_token: qrToken }),
-        redirect: "error",
-        signal: timeout.signal,
+      const { response: cancelRes, body: cancelBody } = await requestBridgePair(cancelUrl, {
+        fetchImpl, authHeaders: pairAuthHeaders, body: { qr_token: qrToken }, timeoutMs: cancelTimeoutMs,
       });
-      if (cancelRes.ok) return;
-      const cancelBody = await readJsonResponse(cancelRes);
-      if (cancelBody?.error?.code === "already_consumed") return;
+      if (cancelRes.ok || cancelBody?.error?.code === "already_consumed") return;
       const message = cancelBody?.error?.message || cancelBody?.message || `HTTP ${cancelRes.status}`;
       console.log(`  ${C.yellow}Pair cleanup did not complete:${C.reset} ${message}. The QR will expire automatically.\n`);
     } catch (err) {
       console.log(`  ${C.yellow}Pair cleanup did not complete:${C.reset} ${err?.message || err}. The QR will expire automatically.\n`);
-    } finally {
-      clearTimeout(timeoutId);
     }
   };
 
-  try {
-
-  // Step 2: render the QR for the phone to scan.
-  const payloadUrl = `posse://pair?token=${encodeURIComponent(qrToken)}`;
-  const qrArt = await renderTerminalQr(payloadUrl);
-  console.log("");
-  console.log(qrArt);
-  console.log(`  ${C.dim}1.${C.reset} On the Posse phone app, tap "Pair an instance" → "Scan QR".`);
-  console.log(`  ${C.dim}2.${C.reset} Scan the QR above with your phone's camera.`);
-  console.log(`  ${C.dim}3.${C.reset} The phone will display a 4-character confirmation code.`);
-  console.log(`  ${C.dim}4.${C.reset} Type that code below to finish pairing.\n`);
-  if (startBody?.expires_at) {
-    console.log(`  ${C.dim}QR expires at:${C.reset} ${startBody.expires_at}\n`);
-  }
-
-  // Step 3: prompt for the confirmation code (or take it from a flag for scripting).
-  const scriptedCode =
-    flagValue(argv, "--confirmation-code") || flagValue(argv, "--pair-code") || "";
-  const scripted = normalizeConfirmationCode(scriptedCode) !== "";
-  let confirmationCode = normalizeConfirmationCode(scriptedCode);
-  const confirmUrl = bridgePairUrl(pairHttpBase, "confirm");
-  const expiresAt = qrExpiresAtMs(startBody?.expires_at);
-  let body;
-  let confirmed = false;
-  let transientConfirmFailures = 0;
-
-  while (Date.now() < expiresAt) {
-    if (!confirmationCode) {
-      confirmationCode = normalizeConfirmationCode(await promptCode(
-        "  Enter the 4-character code shown on your phone: ",
-        { signal: ceremonyAbort.signal },
-      ));
-    }
-    if (!confirmationCode) {
-      console.log(`\n  ${C.red}Pairing cancelled (no confirmation code).${C.reset}\n`);
-      return { ok: false, reason: cancelRequested ? "canceled" : "no_confirmation_code" };
-    }
-    if (!isValidConfirmationCode(confirmationCode)) {
-      console.log(`\n  ${C.red}Invalid confirmation code.${C.reset} Use 4 characters A-Z or 2-9, without 0/O/1/I/L.\n`);
-      if (scripted) return { ok: false, reason: "invalid_confirmation_code" };
-      confirmationCode = "";
-      continue;
-    }
-    if (Date.now() >= expiresAt) break;
-
-    let confirmRes;
+  const completePairing = async () => {
+    // Step 1: ask the relay to mint a QR token. Cancellation is installed
+    // before auth or network work, including on the first request.
+    const startUrl = bridgePairUrl(pairHttpBase, "start");
+    let startRes;
+    let startBody;
     try {
-      pairPulseTokens.assertTrustedResourceUrl(confirmUrl, "bridge pair confirm");
-      confirmRes = await fetchImpl(confirmUrl, {
-        method: "POST",
-        headers: await pairAuthHeaders(),
-        body: JSON.stringify({
-          qr_token: qrToken,
-          confirmation_code: confirmationCode,
-        }),
-        redirect: "error",
-        signal: ceremonyAbort.signal,
-      });
+      pairPulseTokens.assertTrustedResourceUrl(startUrl, "bridge pair start");
+      ({ response: startRes, body: startBody } = await requestBridgePair(startUrl, {
+        fetchImpl, authHeaders: pairAuthHeaders, body: { instance_label: config.label },
+        signal: ceremonyAbort.signal, timeoutMs: requestTimeoutMs,
+      }));
     } catch (err) {
-      if (cancelRequested) {
-        console.log(`\n  ${C.red}Pairing cancelled.${C.reset}\n`);
-        return { ok: false, reason: "canceled" };
-      }
-      transientConfirmFailures += 1;
-      if (transientConfirmFailures < Math.max(1, Number(confirmRetryLimit) || 1)) {
-        console.log(`\n  ${C.yellow}Relay confirmation response was interrupted; retrying the same pair safely.${C.reset}\n`);
-        const remainingMs = expiresAt - Date.now();
-        if (remainingMs > 0) await sleep(Math.min(retryDelayMs, remainingMs));
-        continue;
-      }
+      if (cancelRequested) throw err;
       console.log(`\n  ${C.red}Network error contacting relay:${C.reset} ${err?.message || err}\n`);
       return { ok: false, reason: "network_error" };
     }
+    if (!startRes.ok) {
+      const message = startBody?.error?.message || startBody?.message || `HTTP ${startRes.status}`;
+      console.log(`\n  ${C.red}Relay rejected pair-start:${C.reset} ${message}\n`);
+      return { ok: false, reason: "pair_start_failed", status: startRes.status, body: startBody };
+    }
+    qrToken = startBody?.qr_token;
+    if (!qrToken) {
+      console.log(`\n  ${C.red}Relay returned no qr_token.${C.reset}\n`);
+      return { ok: false, reason: "missing_qr_token", body: startBody };
+    }
+    expiresAt = qrExpiresAtMs(startBody?.expires_at);
+    expiryTimer = setTimeout(() => ceremonyAbort.abort(), Math.max(0, expiresAt - Date.now()));
 
-    if (confirmRes.ok) {
-      relayConsumed = true;
+    // Step 2: render the QR for the phone to scan.
+    const payloadUrl = `posse://pair?token=${encodeURIComponent(qrToken)}`;
+    const qrArt = await abortable(renderTerminalQr(payloadUrl), ceremonyAbort.signal);
+    console.log("");
+    console.log(qrArt);
+    console.log(`  ${C.dim}1.${C.reset} On the Posse phone app, tap "Pair an instance" → "Scan QR".`);
+    console.log(`  ${C.dim}2.${C.reset} Scan the QR above with your phone's camera.`);
+    console.log(`  ${C.dim}3.${C.reset} The phone will display a 4-character confirmation code.`);
+    console.log(`  ${C.dim}4.${C.reset} Type that code below to finish pairing.\n`);
+    if (startBody?.expires_at) {
+      console.log(`  ${C.dim}QR expires at:${C.reset} ${startBody.expires_at}\n`);
     }
-    body = await readJsonResponse(confirmRes);
-    if (confirmRes.ok) {
-      confirmed = true;
-      break;
-    }
-    if (confirmRes.status >= 500) {
-      transientConfirmFailures += 1;
-      if (transientConfirmFailures < Math.max(1, Number(confirmRetryLimit) || 1)) {
-        console.log(`\n  ${C.yellow}Relay confirmation failed transiently; retrying the same pair safely.${C.reset}\n`);
-        const remainingMs = expiresAt - Date.now();
-        if (remainingMs > 0) await sleep(Math.min(retryDelayMs, remainingMs));
+
+    // Step 3: prompt for the confirmation code (or take it from a flag for scripting).
+    const scriptedCode =
+      flagValue(argv, "--confirmation-code") || flagValue(argv, "--pair-code") || "";
+    const scripted = normalizeConfirmationCode(scriptedCode) !== "";
+    let confirmationCode = normalizeConfirmationCode(scriptedCode);
+    const confirmUrl = bridgePairUrl(pairHttpBase, "confirm");
+    let body;
+    let confirmed = false;
+    let transientConfirmFailures = 0;
+
+    while (Date.now() < expiresAt) {
+      if (!confirmationCode) {
+        confirmationCode = normalizeConfirmationCode(await abortable(promptCode(
+          "  Enter the 4-character code shown on your phone: ",
+          { signal: ceremonyAbort.signal, onCancel: cancelFromSignal },
+        ), ceremonyAbort.signal));
+        ceremonyAbort.signal.throwIfAborted();
+      }
+      if (!confirmationCode) {
+        console.log(`\n  ${C.red}Pairing cancelled (no confirmation code).${C.reset}\n`);
+        return { ok: false, reason: cancelRequested ? "canceled" : "no_confirmation_code" };
+      }
+      if (!isValidConfirmationCode(confirmationCode)) {
+        console.log(`\n  ${C.red}Invalid confirmation code.${C.reset} Use 4 characters A-Z or 2-9, without 0/O/1/I/L.\n`);
+        if (scripted) return { ok: false, reason: "invalid_confirmation_code" };
+        confirmationCode = "";
         continue;
       }
+      if (Date.now() >= expiresAt) break;
+
+      let confirmRes;
+      try {
+        pairPulseTokens.assertTrustedResourceUrl(confirmUrl, "bridge pair confirm");
+        ({ response: confirmRes, body } = await requestBridgePair(confirmUrl, {
+          fetchImpl, authHeaders: pairAuthHeaders,
+          body: { qr_token: qrToken, confirmation_code: confirmationCode },
+          signal: ceremonyAbort.signal,
+          timeoutMs: Math.min(requestTimeoutMs, Math.max(1, expiresAt - Date.now())),
+          onResponse: (response) => { if (response.ok) relayConsumed = true; },
+        }));
+      } catch (err) {
+        if (cancelRequested || Date.now() >= expiresAt) throw err;
+        transientConfirmFailures += 1;
+        if (transientConfirmFailures < Math.max(1, Number(confirmRetryLimit) || 1)) {
+          console.log(`\n  ${C.yellow}Relay confirmation response was interrupted; retrying the same pair safely.${C.reset}\n`);
+          const remainingMs = expiresAt - Date.now();
+          if (remainingMs > 0) await delay(Math.min(retryDelayMs, remainingMs), undefined, { signal: ceremonyAbort.signal });
+          continue;
+        }
+        console.log(`\n  ${C.red}Network error contacting relay:${C.reset} ${err?.message || err}\n`);
+        return { ok: false, reason: "network_error" };
+      }
+
+      if (confirmRes.ok) {
+        confirmed = true;
+        break;
+      }
+      if (confirmRes.status >= 500) {
+        transientConfirmFailures += 1;
+        if (transientConfirmFailures < Math.max(1, Number(confirmRetryLimit) || 1)) {
+          console.log(`\n  ${C.yellow}Relay confirmation failed transiently; retrying the same pair safely.${C.reset}\n`);
+          const remainingMs = expiresAt - Date.now();
+          if (remainingMs > 0) await delay(Math.min(retryDelayMs, remainingMs), undefined, { signal: ceremonyAbort.signal });
+          continue;
+        }
+      }
+
+      const code = body?.error?.code;
+      const message = body?.error?.message || body?.message || `HTTP ${confirmRes.status}`;
+      const friendly = PAIR_CONFIRM_FRIENDLY[code] || message;
+      if (code === "confirmation_pending") {
+        console.log(`\n  ${C.yellow}Pair not confirmed yet:${C.reset} ${friendly}\n`);
+        if (scripted) return { ok: false, reason: code, status: confirmRes.status, body };
+        const remainingMs = expiresAt - Date.now();
+        if (remainingMs > 0) await delay(Math.min(retryDelayMs, remainingMs), undefined, { signal: ceremonyAbort.signal });
+        continue;
+      }
+      if (code === "confirmation_mismatch") {
+        console.log(`\n  ${C.yellow}Pair not confirmed yet:${C.reset} ${friendly}\n`);
+        if (scripted) return { ok: false, reason: code, status: confirmRes.status, body };
+        confirmationCode = "";
+        continue;
+      }
+      console.log(`\n  ${C.red}Pair failed:${C.reset} ${friendly}\n`);
+      return { ok: false, reason: code || "pair_failed", status: confirmRes.status, body };
     }
 
-    const code = body?.error?.code;
-    const message = body?.error?.message || body?.message || `HTTP ${confirmRes.status}`;
-    const friendly = PAIR_CONFIRM_FRIENDLY[code] || message;
-    if (code === "confirmation_pending") {
-      console.log(`\n  ${C.yellow}Pair not confirmed yet:${C.reset} ${friendly}\n`);
-      if (scripted) return { ok: false, reason: code, status: confirmRes.status, body };
-      const remainingMs = expiresAt - Date.now();
-      if (remainingMs > 0) await sleep(Math.min(retryDelayMs, remainingMs));
-      continue;
+    if (!confirmed) {
+      console.log(`\n  ${C.red}QR expired before pairing completed.${C.reset} Run \`posse serve --pair\` again.\n`);
+      return { ok: false, reason: "qr_token_expired" };
     }
-    if (code === "confirmation_mismatch") {
-      console.log(`\n  ${C.yellow}Pair not confirmed yet:${C.reset} ${friendly}\n`);
-      if (scripted) return { ok: false, reason: code, status: confirmRes.status, body };
-      confirmationCode = "";
-      continue;
+
+    const token = body?.bridge_token;
+    if (!token) {
+      console.log(`\n  ${C.red}Relay accepted code but returned no bridge_token.${C.reset}\n`);
+      return { ok: false, reason: "missing_bridge_token", body };
     }
-    console.log(`\n  ${C.red}Pair failed:${C.reset} ${friendly}\n`);
-    return { ok: false, reason: code || "pair_failed", status: confirmRes.status, body };
-  }
+    const instanceId = String(body?.instance?.id || "").trim();
+    if (!instanceId) {
+      console.log(`\n  ${C.red}Relay accepted code but returned no instance id.${C.reset}\n`);
+      return { ok: false, reason: "missing_instance_id", body };
+    }
 
-  if (!confirmed) {
-    console.log(`\n  ${C.red}QR expired before pairing completed.${C.reset} Run \`posse serve --pair\` again.\n`);
-    return { ok: false, reason: "qr_token_expired" };
-  }
-
-  const token = body?.bridge_token;
-  if (!token) {
-    console.log(`\n  ${C.red}Relay accepted code but returned no bridge_token.${C.reset}\n`);
-    return { ok: false, reason: "missing_bridge_token", body };
-  }
-  const instanceId = String(body?.instance?.id || "").trim();
-  if (!instanceId) {
-    console.log(`\n  ${C.red}Relay accepted code but returned no instance id.${C.reset}\n`);
-    return { ok: false, reason: "missing_instance_id", body };
-  }
-
-  const instanceLabel = body?.instance?.label || config.label;
-  // Repo-scoped: adopt the relay-minted identity as one unit. Keeping the
-  // pre-pair local UUID here makes the socket authenticate successfully but
-  // causes every event to be rejected by the relay as instance_mismatch.
-  // The relay has already committed the pair at this point, so a persist
-  // failure here silently strands the repo as "paired but never online" —
-  // verify the write landed before claiming success.
+    const instanceLabel = body?.instance?.label || config.label;
+    // Repo-scoped: adopt the relay-minted identity as one unit. Keeping the
+    // pre-pair local UUID here makes the socket authenticate successfully but
+    // causes every event to be rejected by the relay as instance_mismatch.
+    // The relay has already committed the pair at this point, so a persist
+    // failure here silently strands the repo as "paired but never online" —
+    // verify the write landed before claiming success.
+    try {
+      setBridgeRelayIdentity(
+        { instanceId, label: instanceLabel, token },
+        projectDir,
+      );
+    } catch (err) {
+      console.log(`\n  ${C.red}Pair confirmed on the relay but storing the identity locally FAILED:${C.reset} ${err?.message || err}`);
+      console.log(`  ${C.dim}Nothing was persisted — this repo will look paired on the phone but stay offline.`);
+      console.log(`  Retry \`posse serve --pair\` before the QR expires (the same confirm is replay-safe), or after expiry re-pair from scratch.${C.reset}\n`);
+      return { ok: false, reason: "persist_failed", error: err?.message || String(err) };
+    }
+    const persisted = getBridgeConfig(projectDir);
+    if (!persisted.relayToken || persisted.instanceId !== instanceId) {
+      console.log(`\n  ${C.red}Pair confirmed on the relay but the stored identity does not read back.${C.reset}`);
+      console.log(`  ${C.dim}Expected instance ${instanceId}; read ${persisted.instanceId || "nothing"} (token ${persisted.relayToken ? "present" : "missing"}).`);
+      console.log(`  Re-run \`posse serve --pair\` — the phone-side pairing already exists and will be replaced.${C.reset}\n`);
+      return { ok: false, reason: "persist_verify_failed" };
+    }
+    console.log(`  ${C.green}Paired.${C.reset}`);
+    console.log(`  ${C.dim}Instance:${C.reset} ${instanceLabel} (${instanceId})`);
+    console.log(`  ${C.dim}Relay identity stored for this repo.${C.reset}`);
+    console.log(`  ${C.dim}Next:${C.reset} run \`posse serve\`, or enable the bridge from Bossy's Remote tab.\n`);
+    return { ok: true, paired: true, instance: body.instance };
+  };
+  let result;
   try {
-    setBridgeRelayIdentity(
-      { instanceId, label: instanceLabel, token },
-      projectDir,
-    );
+    result = await completePairing();
   } catch (err) {
-    console.log(`\n  ${C.red}Pair confirmed on the relay but storing the identity locally FAILED:${C.reset} ${err?.message || err}`);
-    console.log(`  ${C.dim}Nothing was persisted — this repo will look paired on the phone but stay offline.`);
-    console.log(`  Retry \`posse serve --pair\` before the QR expires (the same confirm is replay-safe), or after expiry re-pair from scratch.${C.reset}\n`);
-    return { ok: false, reason: "persist_failed", error: err?.message || String(err) };
-  }
-  const persisted = getBridgeConfig(projectDir);
-  if (!persisted.relayToken || persisted.instanceId !== instanceId) {
-    console.log(`\n  ${C.red}Pair confirmed on the relay but the stored identity does not read back.${C.reset}`);
-    console.log(`  ${C.dim}Expected instance ${instanceId}; read ${persisted.instanceId || "nothing"} (token ${persisted.relayToken ? "present" : "missing"}).`);
-    console.log(`  Re-run \`posse serve --pair\` — the phone-side pairing already exists and will be replaced.${C.reset}\n`);
-    return { ok: false, reason: "persist_verify_failed" };
-  }
-  console.log(`  ${C.green}Paired.${C.reset}`);
-  console.log(`  ${C.dim}Instance:${C.reset} ${instanceLabel} (${instanceId})`);
-  console.log(`  ${C.dim}Relay identity stored for this repo.${C.reset}`);
-  console.log(`  ${C.dim}Next:${C.reset} run \`posse serve\`, or enable the bridge from Bossy's Remote tab.\n`);
-  return { ok: true, paired: true, instance: body.instance };
+    if (cancelRequested) {
+      console.log(`\n  ${C.red}Pairing cancelled.${C.reset}\n`);
+      result = { ok: false, reason: "canceled" };
+    } else if (Date.now() >= expiresAt) {
+      console.log(`\n  ${C.red}QR expired before pairing completed.${C.reset} Run \`posse serve --pair\` again.\n`);
+      result = { ok: false, reason: "qr_token_expired" };
+    } else {
+      throw err;
+    }
   } finally {
-    for (const signal of cancellationSignals) processRef.off?.(signal, cancelFromSignal);
-    if (!relayConsumed) await cancelRelayPair();
+    clearTimeout(expiryTimer);
+    try {
+      if (qrToken && !relayConsumed) await cancelRelayPair();
+    } finally {
+      for (const signal of cancellationSignals) processRef.off?.(signal, cancelFromSignal);
+    }
   }
+  // Cleanup is bounded but asynchronous. A stop received during that wait
+  // must not turn an earlier Enter/skip result into permission to serve.
+  return cancelRequested ? { ok: false, reason: "canceled" } : result;
 }
 
 /**
@@ -530,13 +535,13 @@ export function installServeCrashGuard(bridge, {
     if (released || restarting) return;
     restarting = true;
     restartQueued = false;
-    try { await bridge.stop(); } catch { /* stop() is defensive */ }
+    try { await bridge.stop({ restarting: true }); } catch { /* stop() is defensive */ }
     if (released) {
       restarting = false;
       return;
     }
     try {
-      await bridge.start();
+      await bridge.start({ restarting: true });
       lastStartAt = Date.now();
     } catch (err) {
       restarting = false;
@@ -634,7 +639,7 @@ export async function runServeCommand(argv = [], {
   let config = getBridgeConfig(projectDir);
 
   if (hasFlag(argv, "--pair")) {
-    const result = await runPairCommand(config, { C, argv, projectDir });
+    const result = await pair(config, { C, argv, projectDir });
     if (!result.ok) process.exitCode = 1;
     return result;
   }
@@ -671,10 +676,11 @@ export async function runServeCommand(argv = [], {
       console.log(`\n  ${C.red}Pairing failed:${C.reset} ${err?.message || err}\n`);
     }
     if (paired?.ok) config = getBridgeConfig(projectDir);
-    return paired?.ok === true;
+    return paired;
   };
   if (interactive && !config.relayToken) {
-    await linkPhone("This repo is not linked to the relay yet.");
+    const paired = await linkPhone("This repo is not linked to the relay yet.");
+    if (paired?.reason === "canceled") return paired;
   }
 
   const startBridge = async () => {
@@ -703,11 +709,17 @@ export async function runServeCommand(argv = [], {
     let relay = await waitForRelayOutcome(bridge);
     // A revoked or stale pairing needs a fresh QR, not another command. The
     // bridge keeps serving LAN clients until the new identity replaces it.
-    if (relay.state === "unauthorized" && interactive
-      && await linkPhone(`Relay REJECTED this bridge credential${relay.last_error ? ` (${relay.last_error})` : ""}.`)) {
-      await bridge.stop();
-      ({ bridge, info } = await startBridge());
-      relay = await waitForRelayOutcome(bridge);
+    if (relay.state === "unauthorized" && interactive) {
+      const paired = await linkPhone(`Relay REJECTED this bridge credential${relay.last_error ? ` (${relay.last_error})` : ""}.`);
+      if (paired?.reason === "canceled") {
+        await bridge.stop();
+        return paired;
+      }
+      if (paired?.ok) {
+        await bridge.stop();
+        ({ bridge, info } = await startBridge());
+        relay = await waitForRelayOutcome(bridge);
+      }
     }
     if (relay.state === "online") {
       console.log(`  ${C.green}Relay connected${C.reset} — this repo is ONLINE for phones and the web portal.\n`);

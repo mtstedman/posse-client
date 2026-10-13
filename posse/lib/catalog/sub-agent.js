@@ -116,3 +116,28 @@ const SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOL_SET = readonlySet(SUB_AGENT_EVIDENCE_SA
 export function isSubAgentEvidenceSafeAtlasTool(name) {
   return SUB_AGENT_EVIDENCE_SAFE_ATLAS_TOOL_SET.has(String(name || ""));
 }
+
+// Routing accounting subsets: these count parent reads and invalidate prior
+// delegated selections after writes. Evidence authorization stays in the
+// independent safe-tool catalogs above.
+export const SUB_AGENT_ROUTING_MIN_EVIDENCE_CALLS = 2;
+
+export const SUB_AGENT_ROUTING_MIN_TARGETS = 2;
+
+export const SUB_AGENT_ROUTING_MIN_MATERIALIZED_CHARS = 3000;
+
+export const SUB_AGENT_ROUTING_EVIDENCE_TOOLS = readonlySet([
+  "tools.read_file",
+  "tools.search_files",
+  "tools.chain_read",
+  "atlas.code.window",
+  "atlas.code.survey",
+  "atlas.code.structure",
+]);
+
+export const SUB_AGENT_ROUTING_WRITE_TOOLS = readonlySet([
+  "tools.write_file",
+  "tools.edit_file",
+  "tools.apply_patch",
+  "atlas.edit.apply",
+]);

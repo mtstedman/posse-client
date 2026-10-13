@@ -6,8 +6,8 @@ import path from "node:path";
 import { sanitizeAbsolutePathsInText } from "../../format/functions/display-paths.js";
 import { toolSchemaTelemetry } from "./tool-schema-telemetry.js";
 
-export const JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
-export const MCP_FRAME_TOO_LARGE_CODE = "POSSE_MCP_FRAME_TOO_LARGE";
+import { MCP_JSONL_STDOUT_BUFFER_MAX_BYTES as JSONL_STDOUT_BUFFER_MAX_BYTES, MCP_FRAME_TOO_LARGE_CODE } from "../../../catalog/mcp.js";
+export { MCP_JSONL_STDOUT_BUFFER_MAX_BYTES as JSONL_STDOUT_BUFFER_MAX_BYTES, MCP_FRAME_TOO_LARGE_CODE } from "../../../catalog/mcp.js";
 
 export { capString } from "./mcp-diagnostics.js";
 export { errorSummary as ownerErrorSummary } from "./mcp-diagnostics.js";
@@ -145,4 +145,15 @@ export function jsonlParseBuffer(buffer, onMessage, { onParseError = null, maxBu
     return Buffer.alloc(0);
   }
   return next;
+}
+
+export function hashRefToolContext(session) {
+  const boot = session?.bootConfig || {};
+  return {
+    cwd: boot.cwd || null,
+    work_item_id: boot.workItemId ?? null,
+    job_id: boot.jobId ?? null,
+    attempt_id: boot.attemptId ?? null,
+    agent_call_id: boot.agentCallId ?? null,
+  };
 }

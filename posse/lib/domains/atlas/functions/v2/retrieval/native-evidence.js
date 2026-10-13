@@ -1,3 +1,4 @@
+import { normalizeRetrievalRepoPath as normalizeRepoPath, clampRetrievalInteger as clampInt } from "./request-values.js";
 // @ts-check
 //
 // Thin JS adapter for Rust-owned deterministic evidence helpers. JS gathers
@@ -122,21 +123,4 @@ function normalizePathList(values) {
  */
 function normalizeStringList(values) {
   return [...new Set(values.map((value) => String(value ?? "").trim()).filter(Boolean))].sort();
-}
-
-function normalizeRepoPath(value) {
-  const text = String(value ?? "")
-    .trim()
-    .replace(/\\/g, "/")
-    .replace(/^\.\/+/, "")
-    .replace(/^\/+/, "")
-    .replace(/\/+$/, "");
-  if (!text || text === "." || text.startsWith("../") || text.includes("/../") || /^[a-zA-Z]:\//.test(text)) return "";
-  return text;
-}
-
-function clampInt(value, fallback, min, max) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(n)));
 }

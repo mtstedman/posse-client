@@ -8,6 +8,7 @@ import { gitCurrentHash } from "../../../../domains/git/functions/utils.js";
 import { groupVerificationFiles, packageManagerRun, verificationReadinessManifest } from "./verification-readiness.js";
 import { sanitizeAbsolutePathsInText, toRepoRelativePath } from "../../../format/functions/display-paths.js";
 import { commandSpawnSpec } from "../../../platform/functions/command-launch.js";
+import { SpawnedProcessTerminator } from "../../../platform/classes/SpawnedProcessTerminator.js";
 
 
 
@@ -958,7 +959,7 @@ export function parseTypecheckDiagnostics(text) {
   return diagnostics;
 }
 
-function runProcessAsync(command, args, cwd, { timeoutMs = 120000, signal = null } = {}) {
+export function runProcessAsync(command, args, cwd, { timeoutMs = 120000, signal = null } = {}) {
   const startedAt = Date.now();
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
@@ -969,19 +970,17 @@ function runProcessAsync(command, args, cwd, { timeoutMs = 120000, signal = null
     let stderr = "";
     let settled = false;
     let timedOut = false;
+    let aborted = false;
     let timer = null;
     let child = null;
-    const kill = () => {
-      if (!child?.pid) return;
-      try {
-        // npm runs the checker as a grandchild; stop the whole group.
-        if (detached) process.kill(-child.pid, "SIGTERM");
-        else child.kill("SIGTERM");
-      } catch {
-        // Already exited.
-      }
+    let terminator = null;
+    const terminate = () => {
+      if (settled) return;
+      void terminator.terminateAndWait().then((result) => {
+        finish(1, result.confirmed ? null : "typecheck termination was not confirmed", result.signal);
+      });
     };
-    const onAbort = () => kill();
+    const onAbort = () => { aborted = true; terminate(); };
     const finish = (exitCode, error = null, signalName = null) => {
       if (settled) return;
       settled = true;
@@ -992,12 +991,18 @@ function runProcessAsync(command, args, cwd, { timeoutMs = 120000, signal = null
         exitCode,
         signal: signalName,
         timedOut,
+        aborted,
         stdout,
         stderr,
         error,
         durationMs: Date.now() - startedAt,
       });
     };
+    if (signal?.aborted) {
+      aborted = true;
+      finish(1, "typecheck canceled before launch");
+      return;
+    }
     try {
       child = spawn(spawnSpec.command, spawnSpec.args, {
         cwd,
@@ -1011,6 +1016,7 @@ function runProcessAsync(command, args, cwd, { timeoutMs = 120000, signal = null
       finish(1, error?.message || String(error));
       return;
     }
+    terminator = new SpawnedProcessTerminator(child, { processGroup: detached });
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk) => {
@@ -1020,12 +1026,15 @@ function runProcessAsync(command, args, cwd, { timeoutMs = 120000, signal = null
       if (stderr.length < MAX_ASYNC_CAPTURE_CHARS) stderr += chunk;
     });
     child.on("error", (error) => finish(1, error?.message || String(error)));
-    child.on("close", (code, signalName) => finish(code ?? 1, null, signalName || null));
+    child.on("close", (code, signalName) => {
+      terminator.noteClose();
+      finish(code ?? 1, null, signalName || null);
+    });
     timer = setTimeout(() => {
       timedOut = true;
-      kill();
+      terminate();
     }, timeoutMs);
-    if (signal?.aborted) kill();
+    if (signal?.aborted) onAbort();
     else signal?.addEventListener?.("abort", onAbort, { once: true });
   });
 }
@@ -1062,6 +1071,10 @@ export async function collectTypecheckDiagnosticsAsync({
     const invocation = packageManagerRun(group.package_manager, "typecheck");
     const result = await runProcessAsync(invocation.command, invocation.args, group.root, { timeoutMs, signal });
     durationMs += result.durationMs;
+    if (result.aborted) {
+      roots.push({ root: rootLabel, status: "unavailable", reason: "typecheck canceled", command: result.command });
+      break;
+    }
     const missingTooling = result.exitCode !== 0 ? missingToolingReason(result) : null;
     if (missingTooling || result.timedOut) {
       roots.push({

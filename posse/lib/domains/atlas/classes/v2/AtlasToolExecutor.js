@@ -5,6 +5,7 @@ import { stripAtlasPrefix } from "../../../../shared/tools/functions/atlas-tool-
 // providers, prefetch) should route ATLAS tool calls through this object so
 // queueing, dedupe, telemetry, and conductor ownership stay in one place.
 
+import { COMPACT_RELATIONSHIP_PROJECTION } from "../../../../catalog/atlas-presentation.js";
 import { AsyncResourceGate } from "../../../../shared/concurrency/classes/AsyncGate.js";
 import { ATLAS_MUTATION_PATH_FIELDS } from "../../../../catalog/tools/filesystem-mutations.js";
 import { getSharedConductor } from "../../functions/v2/parse/conductor.js";
@@ -299,7 +300,7 @@ function conductorEnvelopeToToolResult(envelope) {
 }
 
 function compactRelationshipEnvelope(envelope, args = {}) {
-  if (args.projection !== "compact-v1" || envelope?.ok === false || envelope?.error) return envelope;
+  if (args.projection !== COMPACT_RELATIONSHIP_PROJECTION || envelope?.ok === false || envelope?.error) return envelope;
   let input = envelope?.data;
   if (!Array.isArray(input?.entries)) {
     if ((args.mode || "caller") !== "caller" || !Array.isArray(input?.callers)) {
@@ -1110,9 +1111,10 @@ export class AtlasToolExecutor {
               if (!batchPaths.includes(dirtyPath)) batchPaths.push(dirtyPath);
             }
             if (workItemId != null) {
-              seedWorkItemEmbeddingStore({
+              await seedWorkItemEmbeddingStore({
                 mainRepoRoot: repoRootFromLedgerPath(refreshLedgerPath, repoRoot),
                 worktreeRoot: refreshRoot,
+                signal: request.signal,
               });
             }
             const conductor = this.#conductorFactory();
@@ -1709,9 +1711,10 @@ export class AtlasToolExecutor {
       || (action === "slice.build" && args.taskText && args.semantic !== false)
       || ((action === "context" || action === "context.summary" || action === "tree.scope") && args.taskText);
     if (wantsSemantic && workItemKeyForRequest(request) && context.readRoot && context.ledgerPath) {
-      seedWorkItemEmbeddingStore({
+      await seedWorkItemEmbeddingStore({
         mainRepoRoot: repoRootFromLedgerPath(context.ledgerPath, context.readRoot),
         worktreeRoot: context.readRoot,
+        signal: request.signal,
       });
     }
     const boot = request.session?.bootConfig || request.session || {};

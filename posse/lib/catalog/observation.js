@@ -35,3 +35,41 @@ const INTERNAL_BACKGROUND_OBSERVATION_TYPE_SET = readonlySet(INTERNAL_BACKGROUND
 export function isInternalBackgroundObservationType(value) {
   return INTERNAL_BACKGROUND_OBSERVATION_TYPE_SET.has(String(value || ""));
 }
+
+// Observation types that contribute to the local research exploration ledger.
+export const RESEARCH_EXPLORATION_OBSERVATION_TYPES = Object.freeze([
+  "tool.atlas",
+  "tool.read",
+  "tool.chain_verdict",
+  "tool.list",
+  "tool.search",
+  "tool.git_history",
+  "tool.inspect",
+  "tool.hash",
+]);
+
+export const RESEARCH_ATTEMPT_SCOPED_OBSERVATION_TYPES = readonlySet([
+  "research.source_selection",
+  "research.exploration_blocked",
+  "research.ceiling_grace",
+  "source.coverage",
+  "context.headroom_decision",
+  "context.headroom_actual",
+]);
+
+export const RESEARCH_INFRASTRUCTURE_FAILURE_CODES = readonlySet([
+  "repo_root_unavailable",
+  "repository_unavailable",
+  "file_unreadable",
+  "file_read_failed",
+  "native_unavailable",
+  "native_transport_error",
+  "atlas_storage_error",
+  "indexed_file_missing",
+  "code_response_too_large",
+  "code_window_response_too_large",
+]);
+
+export const RESEARCH_INFRASTRUCTURE_REFUND_LIMIT = 2;
+
+export const TOOL_OBSERVATION_OUTCOMES = readonlySet(["succeeded", "rejected", "failed"]);

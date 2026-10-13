@@ -382,7 +382,7 @@ export function createPairingRemoteClient({
     throw error;
   }
 
-  async function request(endpoint, { method = "POST", body = null, token = null, path = endpoint } = {}) {
+  async function request(endpoint, { method = "POST", body = null, token = null, path = endpoint, signal = null } = {}) {
     const url = new URL(`v1/pairing/${path}`, new URL("/", origin));
     pulseTokens.assertTrustedResourceUrl(url, `Posse pairing ${endpoint}`);
     const authorization = token || await pulseTokens.getPulseToken({
@@ -406,7 +406,7 @@ export function createPairingRemoteClient({
           },
           ...(body == null ? {} : { body: JSON.stringify(body) }),
           redirect: "error",
-          signal: controller.signal,
+          signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
         });
       } catch (cause) {
         throw transportError(cause);
@@ -459,9 +459,10 @@ export function createPairingRemoteClient({
       body: { countersign },
       path: "members/admit",
     }),
-    members: (token, { pendingOnly = false } = {}) => validatedRequest("members", {
+    members: (token, { pendingOnly = false, signal = null } = {}) => validatedRequest("members", {
       method: "GET",
       token,
+      signal,
       path: pendingOnly ? "members/pending" : "members",
     }),
     kick: (token, memberId) => validatedRequest("status", {
@@ -514,8 +515,8 @@ export function createPairingRemoteClient({
     setTeamPublicationMode: (token, body) => request("team_publication_mode", {
       token, body, path: "team-publication-mode",
     }),
-    teamSubmissions: (token, sessionId) => request("team_submissions", {
-      method: "GET", token, path: `submissions?session_id=${encodeURIComponent(String(sessionId))}`,
+    teamSubmissions: (token, sessionId, { signal = null } = {}) => request("team_submissions", {
+      method: "GET", token, signal, path: `submissions?session_id=${encodeURIComponent(String(sessionId))}`,
     }),
     submitTeamWorkbranch: (token, body) => request("team_submit", {
       token, body, path: "submissions",

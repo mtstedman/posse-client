@@ -1,3 +1,4 @@
+import { clampRetrievalInteger as clampInt } from "./request-values.js";
 // @ts-check
 //
 // Narrow in-process cache for DB access facts discovered by code.db. Symbol
@@ -263,10 +264,4 @@ function oneLine(value, max) {
   if (value == null) return "";
   const text = String(value).replace(/\s+/g, " ").trim();
   return text.length > max ? `${text.slice(0, Math.max(0, max - 3))}...` : text;
-}
-
-function clampInt(value, fallback, min, max) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(n)));
 }

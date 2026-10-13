@@ -8,11 +8,21 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { gitExecAsync } from "../../git/functions/utils.js";
+import { listIgnoredRepoPaths } from "../../git/functions/ignored-paths.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { FINAL_REVIEW_OBSERVATIONS, FINAL_REVIEW_REVIEW_MODES } from "../../../catalog/final-review.js";
+import { FINAL_REVIEW_CONTRACT_FIELDS, FINAL_REVIEW_OBSERVATIONS, FINAL_REVIEW_REVIEW_MODES } from "../../../catalog/final-review.js";
 import { finalReviewScope } from "./final-review-snapshot.js";
+import { finalReviewFindingCorrection } from "./final-review-boundaries.js";
 
 const digest = (value) => createHash("sha256").update(value).digest("hex");
+
+function reviewContract(payload) {
+  return Object.fromEntries(FINAL_REVIEW_CONTRACT_FIELDS.map((key) => [key, payload?.[key] ?? null]));
+}
+
+export function finalReviewContractIdentity(cwd, payload) {
+  return digest(JSON.stringify({ contract: reviewContract(payload), test_strictness: getTestStrictness({ projectDir: cwd }) }));
+}
 
 export async function finalReviewIdentity(cwd, payload, { jobId = null } = {}) {
   const placeholders = new Set(await emptyMaterializedPathsForJob(jobId, payload?.scope_generation ?? payload?._materialization_generation ?? 1, cwd));
@@ -23,8 +33,12 @@ export async function finalReviewIdentity(cwd, payload, { jobId = null } = {}) {
     .filter((value) => value && !path.posix.isAbsolute(value)
       && !value.split("/").some((part) => !part || part === "." || part === ".."));
   const listed = String(await gitExecAsync(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd, { trim: false })).split("\0").filter(Boolean);
+  const ignored = new Set((await listIgnoredRepoPaths(cwd, [...scope.files])).map((entry) => entry.path));
   const scoped = new Set([...listed.filter((file) => !scope.declared || scope.files.has(file)
-    || scope.roots.some((root) => file === root || file.startsWith(`${root}/`))), ...scope.files]);
+    || scope.roots.some((root) => file === root || file.startsWith(`${root}/`))),
+  ...[...scope.files].filter((file) => !ignored.has(file))]);
+  // Ignored outputs cannot be committed. Explicit read dependencies still bind
+  // their bytes, even when ignored, because they are inputs to the contract.
   const files = [...new Set([...scoped, ...readPaths])].sort();
   const root = fs.realpathSync(cwd);
   const states = files.map((file) => {
@@ -40,22 +54,26 @@ export async function finalReviewIdentity(cwd, payload, { jobId = null } = {}) {
     if (!fs.realpathSync(absolute).startsWith(`${root}${path.sep}`) || !stat.isFile()) throw new Error("Review path is not a workspace file");
     return [file, stat.mode & 0o111, digest(fs.readFileSync(absolute))];
   });
-  const contract = Object.fromEntries([
-    "task_spec", "instructions", "root_task_spec", "original_task_spec", "fix_instructions",
-    "success_criteria", "root_success_criteria", "constraints", "test_command", "tests_to_run", "verification_contract",
-    "files_to_modify", "files_to_create", "files_to_delete", "create_roots",
-  ].map((key) => [key, payload?.[key] ?? null]));
+  const contract = reviewContract(payload);
   return digest(JSON.stringify({ contract, states, test_strictness: getTestStrictness({ projectDir: cwd }) }));
 }
 
 export function latestFinalReview(jobId, db = getDb()) {
-  const issued = db.prepare("SELECT detail_json FROM final_review_records WHERE job_id = ? AND observation_type = ? ORDER BY id DESC LIMIT 1")
+  const issued = db.prepare("SELECT attempt_id, detail_json FROM final_review_records WHERE job_id = ? AND observation_type = ? ORDER BY id DESC LIMIT 1")
     .get(jobId, FINAL_REVIEW_OBSERVATIONS.ISSUED);
   if (!issued) return null;
   const callId = JSON.parse(issued.detail_json).agent_call_id;
   const result = db.prepare("SELECT detail_json FROM final_review_records WHERE job_id = ? AND observation_type = ? AND agent_call_id = ? ORDER BY id DESC LIMIT 1")
     .get(jobId, FINAL_REVIEW_OBSERVATIONS.RESULT, callId);
-  return result ? JSON.parse(result.detail_json) : {};
+  if (result) return JSON.parse(result.detail_json);
+  // Provider fallback can replace the developer within an attempt. Its retry
+  // budgets survive, so unresolved evidence must survive too. Never borrow a
+  // pass or cross an attempt boundary: a new call needs its own acceptance.
+  const inherited = issued.attempt_id == null ? null : db.prepare(
+    "SELECT detail_json FROM final_review_records WHERE job_id = ? AND attempt_id = ? AND observation_type = ? ORDER BY id DESC LIMIT 1",
+  ).get(jobId, issued.attempt_id, FINAL_REVIEW_OBSERVATIONS.RESULT);
+  const review = inherited ? JSON.parse(inherited.detail_json) : null;
+  return review && review.outcome !== "pass" ? review : {};
 }
 
 export async function authoritativeFinalReview(job, payload, cwd) {
@@ -78,6 +96,8 @@ export async function authoritativeFinalReview(job, payload, cwd) {
     return unresolved(review.reason || "Final review is missing, blocked, or has unresolved findings; no second assessor will be dispatched.");
   }
   if (review.outcome === "findings") {
+    const correction = await finalReviewFindingCorrection(review, { job, payload, cwd });
+    if (correction) return unresolved(correction);
     const reasons = (review.findings || []).map((finding) => [finding.criterion,
       ...(finding.paths || []), ...(finding.refs || []), finding.evidence,
       finding.suggested_verification].filter(Boolean).join(" — "));

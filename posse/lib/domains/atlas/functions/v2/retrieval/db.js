@@ -1,3 +1,4 @@
+import { normalizeRetrievalRepoPath as normalizeRepoPath, clampRetrievalInteger as clampInt } from "./request-values.js";
 // @ts-check
 //
 // code.db - deterministic first-pass inventory of database SQL query sites.
@@ -85,23 +86,6 @@ function normalizeRequested(raw) {
   return (Array.isArray(raw) ? raw : [raw])
     .map(normalizeRepoPath)
     .filter(Boolean);
-}
-
-function normalizeRepoPath(value) {
-  const text = String(value ?? "")
-    .trim()
-    .replace(/\\/g, "/")
-    .replace(/^\.\/+/, "")
-    .replace(/^\/+/, "")
-    .replace(/\/+$/, "");
-  if (!text || text === "." || text.startsWith("../") || text.includes("/../") || /^[a-zA-Z]:\//.test(text)) return "";
-  return text;
-}
-
-function clampInt(value, fallback, min, max) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
 /**

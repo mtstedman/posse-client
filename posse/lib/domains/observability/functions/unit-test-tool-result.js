@@ -1,4 +1,5 @@
 import { parseResult } from "./tool-result-object.js";
+import { UNIT_TEST_OUTCOMES } from "../../../catalog/unit-test-runner.js";
 import "../../../shared/tools/functions/ref-surface.js";
 // Project a run_unit_test result into its tool observation: what ran, what it
 // proved, at which commit, and enough of the failure output to act on. The
@@ -6,7 +7,6 @@ import "../../../shared/tools/functions/ref-surface.js";
 // puts stdout last, so without this the failure message never reached the log.
 
 const MAX_OUTPUT_EXCERPT_CHARS = 4000;
-const UNIT_TEST_OUTCOMES = new Set(["passed", "product_failed", "infrastructure_error", "unavailable", "timed_out"]);
 
 
 function nonNegativeIntegerOrNull(value) {

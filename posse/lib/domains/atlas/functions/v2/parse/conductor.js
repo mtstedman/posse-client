@@ -12,6 +12,7 @@
 // pool: both bridge ports share one posse-atlas daemon, whose Rust executor and
 // Atlas gate own parallel read/write admission.
 
+import { abortable } from "../../../../../shared/concurrency/functions/abortable.js";
 import { Daemon, ThreadTransport, daemonSupervisor } from "../../../../../shared/tools/classes/daemon/index.js";
 import { heartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
 import { log } from "../../../../../shared/telemetry/functions/logging/logger.js";
@@ -77,6 +78,10 @@ export function createConductorDaemon(opts = {}) {
     label: "atlas-conductor",
   }), "atlas-conductor");
 
+  // Reset a timed-out writer without unregistering its reusable supervisor
+  // entry. Daemon.dispose waits for host teardown; the next call may restart.
+  const disposeWriterHost = Daemon.prototype.dispose.bind(daemon);
+
   /** @type {Array<{ slot: number, daemon: Daemon, inFlight: number } | null>} */
   const readerEntries = Array.from({ length: READER_POOL_SIZE }, () => null);
   let readerCursor = 0;
@@ -126,8 +131,9 @@ export function createConductorDaemon(opts = {}) {
     return [...new Set(keys)];
   };
 
-  const beginReaderAdmission = async (keys) => {
+  const beginReaderAdmission = async (keys, signal) => {
     while (true) {
+      signal.throwIfAborted();
       const waits = keys.map((key) => readerWriteAdmissions.get(key)?.idle).filter(Boolean);
       // Claim the read synchronously with the no-writer observation. Awaiting
       // an already-resolved admission check leaves a microtask gap in which a
@@ -136,7 +142,7 @@ export function createConductorDaemon(opts = {}) {
         noteReaderStart(keys);
         return;
       }
-      await Promise.all(waits);
+      await abortable(Promise.all(waits), signal);
     }
   };
 
@@ -223,13 +229,26 @@ export function createConductorDaemon(opts = {}) {
     // serializes reads against WI-B.
     const admissionKeys = readerAdmissionKeys(payload);
     const admissionStarted = performance.now();
-    await beginReaderAdmission(admissionKeys);
-    const admissionMs = Math.max(0, performance.now() - admissionStarted);
-    const roundTripStarted = performance.now();
-    const entry = pickReaderEntry();
-    entry.inFlight++;
+    const requestedMs = Number(reqOpts?.timeoutMs);
+    const timeoutMs = Number.isFinite(requestedMs) && requestedMs > 0
+      ? Math.min(requestedMs, 2_147_483_647) : RETRIEVE_TIMEOUT_MS;
+    const deadline = admissionStarted + timeoutMs;
+    const budget = new AbortController();
+    const timer = setTimeout(() => budget.abort(), timeoutMs);
+    const signal = reqOpts?.signal ? AbortSignal.any([reqOpts.signal, budget.signal]) : budget.signal;
+    let admitted = false;
+    let entry = null;
     try {
-      const result = await call(entry.daemon, payload, reqOpts);
+      await beginReaderAdmission(admissionKeys, signal);
+      admitted = true;
+      signal.throwIfAborted();
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) { budget.abort(); signal.throwIfAborted(); }
+      const admissionMs = Math.max(0, performance.now() - admissionStarted);
+      const roundTripStarted = performance.now();
+      entry = pickReaderEntry();
+      entry.inFlight++;
+      const result = await call(entry.daemon, payload, { ...reqOpts, signal, timeoutMs: Math.max(1, remaining) });
       if (payload.op === "retrieve" && result && typeof result === "object") {
         const roundTripMs = Math.max(0, performance.now() - roundTripStarted);
         const diagnostics = result._retrievalDiagnostics || {};
@@ -242,10 +261,16 @@ export function createConductorDaemon(opts = {}) {
       return result;
     } catch (err) {
       if (err?.code === "DAEMON_TRANSPORT_GONE") await disposeReaderEntry(entry);
+      if (signal.aborted) {
+        throw Object.assign(new Error(reqOpts?.signal?.aborted ? "Atlas read aborted" : "Atlas read timed out"), {
+          code: reqOpts?.signal?.aborted ? "DAEMON_ABORTED" : "DAEMON_TIMEOUT",
+        });
+      }
       throw err;
     } finally {
-      entry.inFlight = Math.max(0, entry.inFlight - 1);
-      noteReaderEnd(admissionKeys);
+      clearTimeout(timer);
+      if (entry) entry.inFlight = Math.max(0, entry.inFlight - 1);
+      if (admitted) noteReaderEnd(admissionKeys);
     }
   };
 
@@ -422,13 +447,25 @@ export function createConductorDaemon(opts = {}) {
   };
 
   const writesWithReaderHold = (fn, holdOpts = {}) => async (/** @type {any[]} */ ...args) => {
-    const held = await beginReaderWrite(/** @type {any} */ (args[0]) || {}, holdOpts);
-    try {
-      return await fn(...args);
-    } finally {
-      if (holdOpts.invalidateReaders !== false) await invalidateReaders();
-      await endReaderWrite(held);
-    }
+    const request = args[1] || {};
+    request.signal?.throwIfAborted();
+    const operation = (async () => {
+      const held = await beginReaderWrite(/** @type {any} */ (args[0]) || {}, holdOpts);
+      try {
+        request.signal?.throwIfAborted();
+        // Daemon abort only stops waiting. Keep the hold until the writer's
+        // actual response; cancellation of the caller must not expose a DB
+        // that the host is still changing.
+        return await fn(args[0], { ...request, signal: undefined });
+      } catch (error) {
+        if (error?.code === "DAEMON_TIMEOUT") await disposeWriterHost();
+        throw error;
+      } finally {
+        if (holdOpts.invalidateReaders !== false) await invalidateReaders();
+        await endReaderWrite(held);
+      }
+    })();
+    return request.signal ? abortable(operation, request.signal) : operation;
   };
 
   const stage = (opts, reqOpts) => call(daemon, { op: "stage", ...opts }, reqOpts);

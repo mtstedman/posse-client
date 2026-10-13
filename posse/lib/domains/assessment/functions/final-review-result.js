@@ -10,6 +10,7 @@ import { getAgentCallById } from "../../queue/functions/agent-calls.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import {
   FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
+  FINAL_REVIEW_MAX_DETERMINISTIC_ROUNDS,
   FINAL_REVIEW_MAX_FINDINGS,
   FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS,
   FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS,
@@ -181,6 +182,11 @@ export function finalReviewInfrastructureRetriesLeft(results = []) {
   return Math.max(0, FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS - finalReviewInfrastructureRounds(results));
 }
 
+export function finalReviewDeterministicRetriesLeft(results = []) {
+  return Math.max(0, FINAL_REVIEW_MAX_DETERMINISTIC_ROUNDS
+    - results.filter((result) => result.review_mode === FINAL_REVIEW_REVIEW_MODES.DETERMINISTIC).length);
+}
+
 /**
  * Bound repeated deterministic failures without charging a semantic review.
  * With `reviewIdentity` (the runtime's short-circuit), the rounds must be on
@@ -196,13 +202,8 @@ export function repeatedDeterministicReview(results = [], reviewIdentity = null)
     findings: (result.findings || []).map((finding) => ({
       criterion: normalizeFailureFingerprintText(finding.criterion), paths: finding.paths || [],
     })),
-    checks: [result.declared_tests, result.changed_tests].map((check) => check && ({
-      command: check.command, status: check.status, reason: check.reason,
-      failure_summary: normalizeFailureFingerprintText(check.failure_summary),
-      stdout: normalizeFailureFingerprintText(check.stdout),
-      stderr: normalizeFailureFingerprintText(check.stderr),
-    })),
-    changed_file_checks_status: result.changed_file_checks_status,
+    // Only the actionable findings identify this failure. Successful suites,
+    // runner timing and unrelated diagnostics cannot reset the retry guard.
   });
   const last = recent.at(-1);
   if (!last.review_identity || (reviewIdentity && last.review_identity !== reviewIdentity)
@@ -247,6 +248,7 @@ export function finalReviewHandoffHold({ jobId, attemptId, agentCallId, db = get
   if (!latest) {
     return "Call tools_final_review before a COMPLETE handoff: it runs the task's declared tests and an independent review of the change.";
   }
+  if (finalReviewDeterministicRetriesLeft(results) === 0) return null;
   if (latest.review_mode === FINAL_REVIEW_REVIEW_MODES.INFRASTRUCTURE) {
     // No reviewer verdict was obtained. Once the retries are spent, the
     // ordinary assessment verifies the change after handoff.

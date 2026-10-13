@@ -94,6 +94,7 @@ import {
   verifyWiSource,
   wiCommitTree,
   wiPathsDifferingFromCommit,
+  wiLivePaths,
 } from "../../functions/v2/wi-source-proof.js";
 import { ATLAS_SCIP_WARM_PURPOSES, ATLAS_WI_REFRESH_MAX_SOURCE_PASSES } from "../../../../catalog/atlas.js";
 import { ATLAS_EVENTS } from "../../functions/v2/contracts/events.js";
@@ -1356,6 +1357,17 @@ export class ParseEngine {
             await verifyWiSource({ repoRoot: this.#repoRoot,
               worktreePath: sourceRoot, commitSha: indexedCommit });
             base.wi_source_commit = indexedCommit;
+            // Pin committed proof before restoring the agent-facing live
+            // overlay. The latest branch head is allowed to contain edits;
+            // consumers needing committed evidence use this exact sequence.
+            base.wi_source_seq = this.#ledger.headSeq(branch);
+            const livePaths = await wiLivePaths(sourceRoot, indexedCommit);
+            if (livePaths.length > 0) {
+              await this.#indexPaths({ paths: livePaths, branch, base, sourceRoot });
+              if (base.skipped.some((skip) => !ACCOUNTED_EXCLUSION_REASONS.has(skip.reason))) {
+                throw new Error("WI live overlay did not index every eligible path");
+              }
+            }
             await this.#warmWi(payload, base);
             const mounted = await this.mountForWorktreeAsync({ workItemId: payload.work_item_id, ledgerBranch: branch, worktreePath: sourceRoot });
             base.view_written = mounted.viewPath;

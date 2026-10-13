@@ -7,9 +7,10 @@ import { ledgerBranchForWi } from "./runtime-paths.js";
 const WI_COMMIT_TREE_MAX_BUFFER = 64 * 1024 * 1024;
 
 /** Reconcile a mounted WI from its checkout, never from the storage root. */
-export async function reconcileWiSource({ repoRoot, worktreePath, workItemId, ledgerPath, viewPath, config, warm }) {
-  const commitSha = String(await gitExecAsync(["rev-parse", "HEAD"], worktreePath)).trim();
-  await verifyWiSource({ repoRoot, worktreePath, commitSha });
+export async function reconcileWiSource({ repoRoot, worktreePath, workItemId, ledgerPath, viewPath, config, warm, signal = null }) {
+  signal?.throwIfAborted();
+  const commitSha = String(await gitExecAsync(["rev-parse", "HEAD"], worktreePath, { signal })).trim();
+  await verifyWiSource({ repoRoot, worktreePath, commitSha, signal });
   const branch = ledgerBranchForWi(workItemId);
   const result = await warm({
     repoRoot, ledgerPath, dbPath: viewPath, branch, config,
@@ -18,11 +19,12 @@ export async function reconcileWiSource({ repoRoot, worktreePath, workItemId, le
       worktree_path: worktreePath, commit_sha: commitSha,
       out_view_path: viewPath,
     },
-  });
+  }, { signal });
+  signal?.throwIfAborted();
   if (result?.wi_source_verified !== true) {
     throw new Error(`WI source reconciliation failed: ${JSON.stringify(result?.skipped || [])}`);
   }
-  await verifyWiSource({ repoRoot, worktreePath, commitSha });
+  await verifyWiSource({ repoRoot, worktreePath, commitSha, signal });
   return result;
 }
 
@@ -38,7 +40,8 @@ export async function reconcileWiSource({ repoRoot, worktreePath, workItemId, le
  *
  * @returns {Promise<{ sourceRoot: string, head: string }>}
  */
-export async function verifyWiSource({ repoRoot, worktreePath, commitSha }) {
+export async function verifyWiSource({ repoRoot, worktreePath, commitSha, signal = null }) {
+  signal?.throwIfAborted();
   if (!worktreePath || !/^[0-9a-f]{40,64}$/u.test(String(commitSha || ""))) {
     throw new Error("WI refresh requires a worktree path and exact commit SHA");
   }
@@ -46,22 +49,24 @@ export async function verifyWiSource({ repoRoot, worktreePath, commitSha }) {
   const source = fs.realpathSync(worktreePath);
   if (root === source) throw new Error("WI refresh cannot index the trunk checkout");
   const commonDir = async (cwd) => fs.realpathSync(path.resolve(cwd,
-    String(await gitExecAsync(["rev-parse", "--git-common-dir"], cwd)).trim()));
+    String(await gitExecAsync(["rev-parse", "--git-common-dir"], cwd, { signal })).trim()));
   if (await commonDir(root) !== await commonDir(source)) {
     throw new Error("WI refresh worktree belongs to a different repository");
   }
-  const head = String(await gitExecAsync(["rev-parse", "HEAD"], source)).trim();
-  if (head !== commitSha && !(await isAncestorCommit(source, commitSha, head))) {
+  const head = String(await gitExecAsync(["rev-parse", "HEAD"], source, { signal })).trim();
+  if (head !== commitSha && !(await isAncestorCommit(source, commitSha, head, signal))) {
     throw new Error("WI refresh source no longer contains the committed revision");
   }
+  signal?.throwIfAborted();
   return { sourceRoot: source, head };
 }
 
-async function isAncestorCommit(cwd, ancestor, descendant) {
+async function isAncestorCommit(cwd, ancestor, descendant, signal) {
   try {
-    await gitExecAsync(["merge-base", "--is-ancestor", ancestor, descendant], cwd);
+    await gitExecAsync(["merge-base", "--is-ancestor", ancestor, descendant], cwd, { signal });
     return true;
   } catch {
+    signal?.throwIfAborted();
     // Not an ancestor, or unresolvable: fail closed.
     return false;
   }
@@ -133,4 +138,12 @@ export async function materializeWiCommitPaths({ worktreePath, tree, paths, over
     sources.set(repoRelPath, overlayPath);
   }
   return sources;
+}
+
+/** Include new untracked source files as well as tracked edits/deletions. */
+export async function wiLivePaths(worktreePath, commitSha) {
+  const paths = await wiPathsDifferingFromCommit(worktreePath, commitSha);
+  const untracked = await gitExecAsync(["ls-files", "--others", "--exclude-standard", "-z"], worktreePath);
+  for (const file of String(untracked).split("\0").filter(Boolean)) paths.add(file);
+  return [...paths];
 }

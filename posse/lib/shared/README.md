@@ -73,3 +73,19 @@ Tool contracts, deterministic toolkit helpers, native binary owners, daemon
 supervisors, MCP owners, and hash-ref tool context stores are shared
 infrastructure. Keep stateful owners under `lib/shared/tools/classes/` and
 stateless tool/toolkit helpers under `lib/shared/tools/functions/`.
+
+`PersistentMcpOwner` keeps transport and session lifecycle ownership. Its
+`tools/functions/mcp-owner-*` modules own tool admission policy, sub-agent
+routing, Atlas argument repair, symbol-handle mapping, source transport,
+evidence identities, and observation projection. Session state remains with
+the session; these helpers do not import the owner or create transport owners.
+Existing owner exports remain available for compatibility.
+
+Atlas routing, result presentation, and issued-tool surface observations have
+separate `mcp-owner-atlas-routing`, `mcp-owner-atlas-presentation`, and
+`mcp-owner-tool-surface` helpers. The owner retains paging, argument-cap, and
+research-policy caches; surface recording receives its policy resolver from the
+owner. Catalogs register compact projection identities and transport bounds.
+
+Prompt and output log classes keep their own recording and lifecycle APIs and
+share attribution queries through `telemetry/functions/logging/agent-log-query.js`.

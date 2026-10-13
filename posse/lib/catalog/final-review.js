@@ -22,6 +22,9 @@ export const FINAL_REVIEW_DEFAULT_MODE = "on";
 // existing findings without spending a review. Once spent, handoff proceeds and
 // the persisted review remains unresolved; no second assessor is dispatched.
 export const FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT = 3;
+// Even changing diagnostics or distinct failures cannot keep deterministic
+// verification in the developer session forever. Exhaustion is not approval.
+export const FINAL_REVIEW_MAX_DETERMINISTIC_ROUNDS = 3;
 export const FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS = 2;
 export const FINAL_REVIEW_CONTINUATION_NEXT_ACTION = "verify_preserved_candidate";
 
@@ -64,8 +67,8 @@ export const FINAL_REVIEW_CHECKS = Object.freeze(["lint", "typecheck"]);
 export const FINAL_REVIEW_CHECK_MAX_FILES = 250;
 
 // Only a failure attributable to the change in process is a finding without
-// the reviewer: a check failure on a line the change added, or a failing or
-// timed-out test file the change added that its runner ran on its own (a
+// the reviewer: a check failure on a line the change added, or a failing
+// test file the change added that its runner ran on its own (a
 // repository script runs one shared suite for every file it covers). Every
 // other failure may predate the change; the reviewer judges it as evidence.
 // The labels head each attribution in the reviewer's evidence.
@@ -74,8 +77,14 @@ export const FINAL_REVIEW_CHECK_ATTRIBUTION_LABELS = Object.freeze({
   inChanged: "Elsewhere in the changed files (may predate this change; judge whether the change caused it):",
   elsewhere: "Elsewhere in the project (may predate this change; a caller this change broke is still its defect):",
 });
-export const FINAL_REVIEW_PROVEN_TEST_STATUSES = Object.freeze(["failed", "timed_out"]);
+export const FINAL_REVIEW_PROVEN_TEST_STATUSES = Object.freeze(["failed"]);
 export const FINAL_REVIEW_SHARED_TEST_RUNNERS = Object.freeze(["repository_script"]);
+
+export const FINAL_REVIEW_CONTRACT_FIELDS = Object.freeze([
+  "task_spec", "instructions", "root_task_spec", "original_task_spec", "fix_instructions",
+  "success_criteria", "root_success_criteria", "constraints", "test_command", "tests_to_run", "verification_contract",
+  "files_to_modify", "files_to_create", "files_to_delete", "create_roots",
+]);
 
 // The reviewer gets the scoped diff inline up to this size, plus the full
 // changed-file list; it reads whatever does not fit with its read tools.

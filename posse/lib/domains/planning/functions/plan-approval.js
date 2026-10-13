@@ -50,7 +50,7 @@ import {
 } from "../../../shared/policies/functions/role-utils.js";
 import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { operationalCommandApprovalRequest } from "../../worker/functions/helpers/test-execution-receipt.js";
+import { operationalCommandApprovalRequest } from "../../verification/functions/planner-test-command.js";
 
 // Document allowed plan_approval_state values. The DB column is untyped for
 // migration simplicity; this set is the authoritative list.

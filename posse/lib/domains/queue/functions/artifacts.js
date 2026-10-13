@@ -180,3 +180,10 @@ export function getArtifact(id) {
   const db = getDb();
   return hydrateArtifactRow(db.prepare(`SELECT * FROM artifacts WHERE id = ?`).get(id));
 }
+
+export function getRecentArtifactsByMimeType(mimeType, limit = 2048) {
+  const count = Math.max(0, Math.min(2048, Math.trunc(Number(limit) || 0)));
+  return hydrateArtifactRows(getDb().prepare(`
+    SELECT * FROM artifacts WHERE mime_type = ? ORDER BY id DESC LIMIT ?
+  `).all(mimeType, count));
+}

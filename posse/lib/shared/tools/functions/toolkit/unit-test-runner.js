@@ -3,6 +3,7 @@ import { missingNodeTestDependency } from "./node-test-failure.js";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { spawn } from "child_process";
+import { SpawnedProcessTerminator } from "../../../platform/classes/SpawnedProcessTerminator.js";
 import fs from "fs";
 import path from "path";
 import { TEST_SUBPROCESS_ENV_KEYS } from "../../../../catalog/process.js";
@@ -424,7 +425,8 @@ function unitTestResult(outcome, fields = {}) {
   };
 }
 
-export async function runUnitTestFile({ projectDir, path: requestedPath, capability = null, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function runUnitTestFile({ projectDir, path: requestedPath, capability = null, timeoutMs = DEFAULT_TIMEOUT_MS, signal: abortSignal = null } = {}) {
+  abortSignal?.throwIfAborted();
   const invocation = resolveUnitTestInvocation(projectDir, requestedPath, capability);
   if (!invocation) {
     return unitTestResult("unavailable", { reason: "unit_test_path_unavailable", path: String(requestedPath || "") });
@@ -435,7 +437,7 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
   const root = path.resolve(projectDir);
   const command = [path.basename(invocation.executable), ...invocation.args].join(" ");
   const startedAt = Date.now();
-  return await new Promise((resolve) => {
+  const result = await new Promise((resolve) => {
     let child;
     let stdout = "";
     let stderr = "";
@@ -443,10 +445,14 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
     let stderrTruncated = false;
     let settled = false;
     let timer = null;
+    let terminator = null;
+    let timedOut = false;
     const finish = (code, signal = null, error = null, timedOut = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      terminator?.cancel();
+      abortSignal?.removeEventListener("abort", cancel);
       const { outcome, reason } = timedOut
         ? { outcome: "timed_out", reason: "test_timed_out" }
         : error
@@ -475,6 +481,7 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
     try {
       child = spawn(invocation.executable, invocation.args, {
         cwd: root,
+        detached: process.platform !== "win32",
         shell: false,
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
@@ -492,6 +499,7 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
       }));
       return;
     }
+    terminator = new SpawnedProcessTerminator(child, { processGroup: process.platform !== "win32" });
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk) => {
@@ -503,26 +511,53 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
       stderr = appendBounded(stderr, chunk);
     });
     child.on("error", (error) => finish(null, null, error));
-    child.on("close", (code, signal) => finish(code, signal));
-    timer = setTimeout(() => {
-      try { child.kill("SIGKILL"); } catch { /* best effort */ }
-      finish(124, null, null, true);
-    }, Math.max(1000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS));
+    child.on("close", (code, signal) => {
+      terminator.noteClose();
+      finish(timedOut ? 124 : code, signal, null, timedOut);
+    });
+    const terminate = () => {
+      if (settled || timedOut) return;
+      timedOut = true;
+      // Wait for the existing graceful/forced process-tree terminator. A
+      // failed cleanup is infrastructure trouble, never a product failure.
+      void terminator.terminateAndWait().then(({ confirmed, signal }) => {
+        finish(124, signal, confirmed ? null : new Error("Test process termination was not confirmed."), confirmed);
+      });
+    };
+    const cancel = () => terminate();
+    timer = setTimeout(terminate, Math.max(1, Number(timeoutMs) || DEFAULT_TIMEOUT_MS));
+    abortSignal?.addEventListener("abort", cancel, { once: true });
+    if (abortSignal?.aborted) cancel();
     timer.unref?.();
   });
+  abortSignal?.throwIfAborted();
+  return result;
 }
 
-export async function runUnitTestFiles({ projectDir, paths = [], capability = null, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function runUnitTestFiles({ projectDir, paths = [], capability = null, timeoutMs = DEFAULT_TIMEOUT_MS, signal: abortSignal = null } = {}) {
+  abortSignal?.throwIfAborted();
+  const deadline = Date.now() + Math.max(1, Number(timeoutMs) || DEFAULT_TIMEOUT_MS);
   const discovered = capability || discoverUnitTestCapability({ projectDir });
   const results = [];
   const repositoryRuns = new Map();
   for (const testPath of paths) {
+    abortSignal?.throwIfAborted();
     const invocation = resolveUnitTestInvocation(projectDir, testPath, discovered);
     const key = invocation?.runner === "repository_script"
       ? JSON.stringify([invocation.executable, invocation.args]) : null;
     const reused = key && repositoryRuns.has(key);
-    const result = (key && repositoryRuns.get(key))
-      || await runUnitTestFile({ projectDir, path: testPath, capability: discovered, timeoutMs });
+    let result = (key && repositoryRuns.get(key))
+      || (Date.now() >= deadline
+        ? unitTestResult("unavailable", { path: testPath, reason: "verification_plan_wall_budget_exhausted", duration_ms: 0 })
+        : await runUnitTestFile({ projectDir, path: testPath, capability: discovered,
+          timeoutMs: Math.max(1, deadline - Date.now()), signal: abortSignal }));
+    // A later file received only the remaining plan budget. Cutting it short
+    // does not establish that it would time out with its own full wall.
+    if (!reused && results.length > 0 && result.status === "timed_out") {
+      result = unitTestResult("unavailable", { ...result, ok: null, passed: null,
+        outcome: "unavailable", status: "unavailable", timed_out: false,
+        reason: "verification_plan_wall_budget_exhausted" });
+    }
     if (key) repositoryRuns.set(key, result);
     results.push({ ...result, path: testPath, ...(reused ? { reused: true, duration_ms: 0 } : {}) });
   }

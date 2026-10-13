@@ -151,3 +151,9 @@ export const MCP_CONCURRENT_ATLAS_ACTIONS = Object.freeze([
   "policy.get",
   "usage.stats",
 ]);
+
+// Owner transport admission and Atlas argument ceilings.
+export const MCP_OWNER_MAX_BODY_BYTES = 16 * 1024 * 1024;
+export const MCP_JSONL_STDOUT_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
+export const MCP_FRAME_TOO_LARGE_CODE = "POSSE_MCP_FRAME_TOO_LARGE";
+export const MCP_ATLAS_SOFT_CAP_FIELDS = Object.freeze(["identifiersToFind", "symbols", "paths"]);

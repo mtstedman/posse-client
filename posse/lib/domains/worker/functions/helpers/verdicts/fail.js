@@ -48,7 +48,7 @@ import {
   providerForAffinityRoute,
 } from "../../../../../shared/policies/functions/provider-affinity.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
-import { operationalCommandApprovalRequest } from "../test-execution-receipt.js";
+import { operationalCommandApprovalRequest } from "../../../../verification/functions/planner-test-command.js";
 
 function _positiveFixEditTargets(instructions = "", paths = []) {
   const source = String(instructions || "").toLowerCase();

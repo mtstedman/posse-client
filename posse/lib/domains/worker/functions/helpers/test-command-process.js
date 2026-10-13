@@ -56,14 +56,16 @@ export function killProcessTree(child, {
 }
 
 /** @param {string} command
- * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean}} options
+ * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal}} options
  */
 export async function runCommand(command, {
   cwd,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   idleTimeoutMs = null,
   trustedShell = false,
+  signal: abortSignal = null,
 } = {}) {
+  abortSignal?.throwIfAborted();
   const startedAt = Date.now();
   const idleLimitMs = Number(idleTimeoutMs) > 0 ? Math.max(1000, Number(idleTimeoutMs)) : null;
   let pulseBroker = null;
@@ -88,7 +90,11 @@ export async function runCommand(command, {
       reason: "verification_capability_broker_unavailable",
     };
   }
-  return await new Promise((resolve) => {
+  if (abortSignal?.aborted) {
+    await pulseBroker?.close();
+    abortSignal.throwIfAborted();
+  }
+  const result = await new Promise((resolve) => {
     let child;
     const env = filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS });
     if (pulseBroker) env[VERIFICATION_PULSE_CAPABILITY_ENV] = JSON.stringify(pulseBroker.capability());
@@ -164,6 +170,7 @@ export async function runCommand(command, {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      abortSignal?.removeEventListener("abort", cancel);
       if (forceTimer) clearTimeout(forceTimer);
       if (settleTimer) clearTimeout(settleTimer);
       if (idleTimer) clearTimeout(idleTimer);
@@ -199,7 +206,7 @@ export async function runCommand(command, {
     };
 
     const terminate = (kind) => {
-      if (timedOut) return;
+      if (timedOut || settled) return;
       timedOut = true;
       timeoutKind = kind;
       if (idleTimer) clearTimeout(idleTimer);
@@ -219,6 +226,7 @@ export async function runCommand(command, {
       settleTimer.unref?.();
     };
 
+    const cancel = () => terminate("canceled");
     const timer = setTimeout(() => terminate("wall"), Math.max(1000, Number(timeoutMs) || DEFAULT_TIMEOUT_MS));
     // The idle limit restarts on every byte of output. A harness that is
     // silent while healthy must leave it disabled (see verification-policy.js).
@@ -245,5 +253,9 @@ export async function runCommand(command, {
     });
     child.on("error", (error) => finish({ code: (/** @type {NodeJS.ErrnoException} */ (error))?.code ?? null, error, timedOut }));
     child.on("close", (code, signal) => finish({ code: timedOut ? 124 : code, signal, timedOut }));
+    abortSignal?.addEventListener("abort", cancel, { once: true });
+    if (abortSignal?.aborted) cancel();
   });
+  abortSignal?.throwIfAborted();
+  return result;
 }

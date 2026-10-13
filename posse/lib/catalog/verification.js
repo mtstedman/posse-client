@@ -1,3 +1,5 @@
+import { readonlySet } from "./readonly-collections.js";
+
 // Stable repository verification admission diagnostics.
 export const TEST_SCRIPT_NO_VERIFICATION_REASON = "test_script_has_no_verification";
 export const VERIFICATION_DEPENDENCY_LOCK_INVALID = "verification_dependency_lock_invalid";
@@ -195,3 +197,20 @@ export const TEST_DIRECTORY_NAME_PATTERN = /^tests?(?:[-_.].*)?$/i;
 export const TEST_HELPER_DIRECTORIES = Object.freeze([
   "support", "helpers", "fixtures", "__fixtures__", "testdata", "mocks", "__mocks__", "stubs", "snapshots", "__snapshots__",
 ]);
+
+// Frozen receipt compatibility, reuse eligibility, and compact evidence bounds.
+export const TEST_EXECUTION_RECEIPT_SCHEMA_VERSION = 1;
+export const TEST_RECEIPT_MAX_EVIDENCE_OUTPUT_CHARS = 1600;
+// Timeouts are not reusable; a completed pass/fail is still subject to the
+// receipt consumer's policy, toolchain, tree, and environment identity checks.
+export const REUSABLE_RECEIPT_STATUSES = readonlySet(["passed", "failed"]);
+export const SCOPE_ATTRIBUTABLE_DELTAS = readonlySet([
+  "changed_failure",
+  "regression",
+  "post_only",
+  "persistent_failure",
+  "infrastructure_unavailable",
+]);
+
+// Shared by setting options and lock-backed dependency repair.
+export const VERIFICATION_DEPENDENCY_NETWORK_POLICIES = Object.freeze(["cache_only", "allow", "disabled"]);

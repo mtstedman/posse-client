@@ -4,7 +4,7 @@ import { RESEARCH_CLAIM_REVIEW } from "./research-claim-review.js";
 import { DEFAULT_STARTUP_UPDATE_MODE, STARTUP_UPDATE_MODE_VALUES } from "./setting-policy.js";
 import { FINAL_REVIEW_DEFAULT_MODE, FINAL_REVIEW_MODES } from "./final-review.js";
 import { PLANNER_DISPATCH_SETTINGS } from "./planner-dispatch.js";
-import { DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY, DEFAULT_TEST_STRICTNESS, TEST_STRICTNESS_VALUES } from "./verification.js";
+import { DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY, VERIFICATION_DEPENDENCY_NETWORK_POLICIES, DEFAULT_TEST_STRICTNESS, TEST_STRICTNESS_VALUES } from "./verification.js";
 import { PROVIDER_OPTIONS, PROVIDER_LABELS } from "./provider.js";
 import { MODEL_TIERS as MODEL_TIER_NAMES } from "./model.js";
 import { IMAGE_PROVIDER_OPTIONS, getBuiltinDefaultTierModel as getDefaultTierModel } from "./provider-model-defaults.js";
@@ -197,7 +197,7 @@ export const SETTING_DEFINITIONS = [
   { key: "verification_idle_timeout_ms", default: "", scope: "repo", numeric: { integer: true, min: 1000 }, description: "Milliseconds a verification command may stay silent before Posse treats it as hung (empty = disabled). Enable only for harnesses that print progress while healthy." },
   { key: "verification_wall_timeout_max_ms", default: "1800000", numeric: { integer: true, min: 1000 }, description: "Administrator ceiling on any repository verification timeout (default 30 minutes)" },
   { key: "pre_dev_typecheck", default: "true", valueType: "boolean", scope: "repo", description: "Before a dev or fix job edits files, run the repository's typecheck script and show the agent the existing type errors in the files it may edit, so it fixes them in passing" },
-  { key: "verification_dependency_network_policy", default: DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY, scope: "repo", options: Object.freeze(["cache_only", "allow", "disabled"]), description: "Network policy for lock-backed verification dependency repair: allow (default), cache_only, or disabled" },
+  { key: "verification_dependency_network_policy", default: DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY, scope: "repo", options: VERIFICATION_DEPENDENCY_NETWORK_POLICIES, description: "Network policy for lock-backed verification dependency repair: allow (default), cache_only, or disabled" },
   { key: "posse_log_scrub_secrets", default: "true", valueType: "boolean", description: "Scrub secret-looking values from prompt and output logs" },
   { key: "posse_log_level",        default: "info", options: LOG_LEVEL_VALUES, description: "Minimum runtime file-log level: debug, info, warn, or error" },
   { key: "skip_hooks",           default: "false", valueType: "boolean", description: "Skip all deterministic safety hooks" },

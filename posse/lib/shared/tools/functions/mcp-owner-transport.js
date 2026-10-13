@@ -4,7 +4,8 @@ import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
-export const MAX_OWNER_BODY_BYTES = 16 * 1024 * 1024;
+import { MCP_OWNER_MAX_BODY_BYTES as MAX_OWNER_BODY_BYTES } from "../../../catalog/mcp.js";
+export { MCP_OWNER_MAX_BODY_BYTES as MAX_OWNER_BODY_BYTES } from "../../../catalog/mcp.js";
 
 export function randomToken() {
   return crypto.randomBytes(32).toString("base64url");

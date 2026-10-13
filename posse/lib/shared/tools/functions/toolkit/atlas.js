@@ -1,3 +1,4 @@
+import { COMPACT_RELATIONSHIP_PROJECTION } from "../../../../catalog/atlas-presentation.js";
 import path from "path";
 import { recordToolInvocation } from "../../../../domains/observability/functions/observations.js";
 import {
@@ -565,7 +566,7 @@ export function prepareAtlasDeterministicPayload(action, args = {}, {
         limit: clampInt(payload.limit, 1, 100, 20),
         offset: clampInt(payload.offset, 0, 100_000, 0),
         ...(payload.minConfidence == null ? {} : { minConfidence: Number(payload.minConfidence) }),
-        projection: "compact-v1",
+        projection: COMPACT_RELATIONSHIP_PROJECTION,
       },
     };
   }

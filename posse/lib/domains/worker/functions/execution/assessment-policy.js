@@ -1,9 +1,8 @@
-import path from "path";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getAgentCalls, getArtifacts, getSetting } from "../../../queue/functions/index.js";
 import { getObservationsByJob } from "../../../observability/functions/observations.js";
 import { isArtifactMode } from "../../../artifacts/functions/index.js";
-import { isInsideRoot } from "../../../runtime/functions/fs-safety.js";
+import { resolveExpectedFilePath } from "../../../artifacts/functions/expected-file-path.js";
 
 export function shouldOverrideArtifactMissingFail(verdict, { taskMode = "code", manifest = null, contractViolations = null, outputRoot = null } = {}) {
   if (!verdict || verdict.verdict !== "fail" || !isArtifactMode(taskMode)) return false;
@@ -32,12 +31,7 @@ export function shouldFastPassArtifactAssessment({
   const required = (Array.isArray(expectedFiles) ? expectedFiles : [])
     .map((file) => String(file || "").replace(/\\/g, "/"))
     .filter(Boolean)
-    .map((file) => {
-      const rootAbs = path.resolve(outputRoot);
-      const fileAbs = path.resolve(file);
-      const rel = path.relative(rootAbs, fileAbs).replace(/\\/g, "/");
-      return isInsideRoot(fileAbs, rootAbs, { allowEqual: false }) ? rel : path.posix.basename(file);
-    });
+    .map((file) => resolveExpectedFilePath(outputRoot, file));
   if (required.length === 0) return taskMode === "report" && manifestPaths.size > 0;
 
   return required.every((relPath) => manifestPaths.has(relPath));

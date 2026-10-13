@@ -87,6 +87,11 @@ export const SESSION_LEASE_SEC = Object.freeze({
   member: 60,
 });
 
+export const SESSION_ADVISORY_POLICY = Object.freeze({
+  INTERVAL_MS: 5_000,
+  MAX_BACKOFF_MS: 60_000,
+});
+
 /** The Remote membership lease for `role`; unknown roles get the shorter one. */
 export function sessionLeaseSec(role) {
   return SESSION_LEASE_SEC[role] ?? SESSION_LEASE_SEC.member;

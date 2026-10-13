@@ -1,4 +1,5 @@
 // @ts-check
+import { COMPACT_RELATIONSHIP_PROJECTION } from "../../../../../catalog/atlas-presentation.js";
 import { parseSymbolId, symbolIdOf } from "./cards.js";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
 import { projectCompactSymbolRelationships } from "./compact-presentation.js";
@@ -11,7 +12,7 @@ export async function symbolCallers({ view, versionId, params }) {
   const action = "symbol.callers";
   const parsed = parseSymbolId(params.symbolId);
   if (!parsed) return errorEnvelope({ action, versionId, code: "invalid_symbol_id", message: "symbol.callers requires a valid symbolId" });
-  if (params.projection === "compact-v1"
+  if (params.projection === COMPACT_RELATIONSHIP_PROJECTION
     && params.indexVersion
     && params.indexVersion !== versionId) {
     return errorEnvelope({
@@ -25,7 +26,7 @@ export async function symbolCallers({ view, versionId, params }) {
   if (!target) return errorEnvelope({ action, versionId, code: "symbol_not_found", message: `No symbol found for ${params.symbolId}` });
   const confidence = Number(params.minConfidence || 0);
   const minimum = Math.ceil(Math.max(0, Math.min(100, confidence)));
-  if (params.projection === "compact-v1") {
+  if (params.projection === COMPACT_RELATIONSHIP_PROJECTION) {
     const mode = params.mode || "caller";
     const kinds = /** @type {("calls" | "references")[]} */ (mode === "all"
       ? ["calls", "references"]

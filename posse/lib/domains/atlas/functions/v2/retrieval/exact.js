@@ -1,3 +1,4 @@
+import { clampRetrievalInteger as clampInt } from "./request-values.js";
 // @ts-check
 //
 // code.structure orchestration. Node materializes view rows and attaches
@@ -147,10 +148,4 @@ function structureEdgeInput(edge, from, to) {
     sitePath: edge.repo_rel_path || from.repo_rel_path,
     siteLine: edge.range_start_line,
   };
-}
-
-function clampInt(value, fallback, min, max) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(n)));
 }

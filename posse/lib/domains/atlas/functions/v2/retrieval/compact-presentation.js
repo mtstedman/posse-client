@@ -1,11 +1,10 @@
 // @ts-check
+import { COMPACT_RELATIONSHIP_DEFAULT_LIMIT, COMPACT_RELATIONSHIP_MAX_LIMIT, COMPACT_RELATIONSHIP_DEFAULT_MAX_CHARS, COMPACT_STRUCTURE_PROJECTION, COMPACT_STRUCTURE_DEFAULT_MAX_CHARS } from "../../../../../catalog/atlas-presentation.js";
+export { COMPACT_RELATIONSHIP_DEFAULT_LIMIT, COMPACT_RELATIONSHIP_MAX_LIMIT, COMPACT_RELATIONSHIP_DEFAULT_MAX_CHARS, COMPACT_STRUCTURE_PROJECTION, COMPACT_STRUCTURE_DEFAULT_MAX_FILES, COMPACT_STRUCTURE_DEFAULT_MAX_CHARS, COMPACT_STRUCTURE_ENVELOPE_RESERVE_CHARS } from "../../../../../catalog/atlas-presentation.js";
 
 const RELATIONSHIP_ORDER = Object.freeze(["caller", "reference"]);
 const RELATIONSHIP_SET = new Set(RELATIONSHIP_ORDER);
 
-export const COMPACT_RELATIONSHIP_DEFAULT_LIMIT = 20;
-export const COMPACT_RELATIONSHIP_MAX_LIMIT = 100;
-export const COMPACT_RELATIONSHIP_DEFAULT_MAX_CHARS = 4_000;
 
 /** @typedef {"caller" | "reference"} CompactRelationship */
 /** @typedef {CompactRelationship | "all"} CompactRelationshipMode */
@@ -289,12 +288,6 @@ export async function presentSymbolGetAmbiguityChoices(candidates, options) {
 // emitted only when edges were computed, so "edges disabled" never reads as
 // "zero relationships".
 
-export const COMPACT_STRUCTURE_PROJECTION = "compact-structure-v1";
-export const COMPACT_STRUCTURE_DEFAULT_MAX_FILES = 12;
-export const COMPACT_STRUCTURE_DEFAULT_MAX_CHARS = 4_000;
-// Space reserved on the inline page for the evidence/traversal stamps and the
-// owner envelope that wrap the model-visible payload after projection.
-export const COMPACT_STRUCTURE_ENVELOPE_RESERVE_CHARS = 700;
 const STRUCTURE_FILE_REPRESENTED_KINDS = new Set(["module", "namespace"]);
 const STRUCTURE_DEFAULT_VISIBILITY = "public";
 const STRUCTURE_EDGE_SCOPES = Object.freeze(["internal", "inbound", "outbound"]);

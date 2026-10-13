@@ -1,8 +1,10 @@
+import { runChangedFileChecksAsync } from "../functions/final-review-checks-async.js";
 import { emptyMaterializedPathsForJob } from "../../handoff/functions/helpers/file-materialization.js";
 import { isAdvisoryTestResult } from "../../worker/functions/helpers/verification-outcome.js";
 import { renderTestStrictness } from "../../settings/functions/test-strictness.js";
 import { testRunDiagnostics } from "../../worker/functions/helpers/test-failure-evidence.js";
-import { finalReviewIdentity } from "../functions/final-review-authority.js";
+import { finalReviewContractIdentity, finalReviewIdentity } from "../functions/final-review-authority.js";
+import { finalReviewFindingCorrection } from "../functions/final-review-boundaries.js";
 import { completeFinalReview } from "../functions/final-review-completion.js";
 import { finalReviewLogSummary } from "../functions/final-review-log-summary.js";
 // FinalReviewRuntime — both sides of final_review.
@@ -25,6 +27,7 @@ import { parseJobPayload } from "../../queue/functions/payload.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import {
   FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
+  FINAL_REVIEW_MAX_DETERMINISTIC_ROUNDS,
   FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS,
   FINAL_REVIEW_MAX_INVALID_REPORTS,
   FINAL_REVIEW_OBSERVATIONS,
@@ -55,9 +58,9 @@ import {
   finalReviewCheckFindings,
   lineageTestFiles,
   mergeCheckFindings,
-  runChangedFileChecks,
 } from "../functions/final-review-checks.js";
 import {
+  finalReviewDeterministicRetriesLeft,
   finalReviewInfrastructureRetriesLeft,
   finalReviewResultFromReport,
   finalReviewResultFromVerdict,
@@ -110,12 +113,13 @@ export class FinalReviewRuntime {
     snapshotFiles = snapshotReviewedFiles,
     lookupReviewerParent = finalReviewParentOf,
     record = recordObservation,
-    runChecks = runChangedFileChecks,
+    runChecks = runChangedFileChecksAsync,
     lineageTests = lineageTestFiles,
     reviewerParkMs = FINAL_REVIEW_REVIEWER_PARK_MS,
     reviewerWallMs = FINAL_REVIEW_REVIEWER_WALL_MS,
     reviewTimeoutMs = FINAL_REVIEW_TIMEOUT_MS,
     completePass = completeFinalReview,
+    checkFindingBoundary = finalReviewFindingCorrection,
   } = {}) {
     this.parents = new Map();
     this.identify = identify;
@@ -133,6 +137,7 @@ export class FinalReviewRuntime {
     this.reviewerWallMs = reviewerWallMs;
     this.reviewTimeoutMs = reviewTimeoutMs;
     this.completePass = completePass;
+    this.checkFindingBoundary = checkFindingBoundary;
   }
 
   /**
@@ -269,6 +274,15 @@ export class FinalReviewRuntime {
         reviews_remaining: 0,
       };
     }
+    if (finalReviewDeterministicRetriesLeft(prior) === 0) {
+      this.#release(parent);
+      return {
+        outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
+        findings: [],
+        reason: `This attempt's ${FINAL_REVIEW_MAX_DETERMINISTIC_ROUNDS} deterministic verification rounds are used; hand off for assessment of the current candidate. Existing failures are not approved.`,
+        reviews_remaining: finalReviewReviewsRemaining(prior),
+      };
+    }
     if (finalReviewInfrastructureRetriesLeft(prior) === 0) {
       this.#release(parent);
       return {
@@ -292,6 +306,7 @@ export class FinalReviewRuntime {
       const job = getJob(parent.jobId);
       if (!job) throw finalReviewError("FINAL_REVIEW_CONTEXT_MISSING", `Job #${parent.jobId} no longer exists`);
       const payload = parseJobPayload(job);
+      const contractIdentity = finalReviewContractIdentity(parent.cwd, payload);
       // A changed runner transcript is not an implementation revision. Compare
       // the full scoped bytes and task contract before spending another check
       // or reviewer call, including when the first submission had no diff.
@@ -300,8 +315,13 @@ export class FinalReviewRuntime {
       try { reviewIdentity = await this.identify(parent.cwd, payload, { jobId: job.id }); } catch { /* ordinary review reports unavailable identity */ }
       signal.throwIfAborted();
       if (!reviewIdentity) throw finalReviewError("FINAL_REVIEW_CONTEXT_MISSING", "Cannot bind final review to the scoped workspace; verification is blocked.");
+      const currentCandidateIdentity = async () => {
+        const currentJob = getJob(parent.jobId);
+        if (!currentJob) throw finalReviewError("FINAL_REVIEW_CONTEXT_MISSING", "The reviewed job no longer exists.");
+        return this.identify(parent.cwd, parseJobPayload(currentJob), { jobId: job.id });
+      };
       const assertCandidateUnchanged = async () => {
-        const current = await this.identify(parent.cwd, payload, { jobId: job.id });
+        const current = await currentCandidateIdentity();
         signal.throwIfAborted();
         if (current !== reviewIdentity) throw finalReviewError("FINAL_REVIEW_CANDIDATE_CHANGED", "Scoped files changed during verification; review the current candidate again.");
       };
@@ -314,6 +334,7 @@ export class FinalReviewRuntime {
       testRun = await this.runTestPlan(declaredPlan, {
         cwd: parent.cwd,
         timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS,
+        signal,
       });
       signal.throwIfAborted();
       await assertCandidateUnchanged();
@@ -333,10 +354,10 @@ export class FinalReviewRuntime {
       });
       signal.throwIfAborted();
       changedTestRun = changedPlan
-        ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS })
+        ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS, signal })
         : null;
       signal.throwIfAborted();
-      checks = this.runChecks(parent.cwd, change);
+      checks = await this.runChecks(parent.cwd, change, { signal });
       await assertCandidateUnchanged();
       signal.throwIfAborted();
       // Only failures the change provably introduced skip the reviewer; any
@@ -350,6 +371,12 @@ export class FinalReviewRuntime {
         result = { outcome: FINAL_REVIEW_OUTCOMES.FINDINGS, findings: deterministicFindings };
       } else {
         let session = parent.reviewer;
+        if (session && session.contractIdentity !== contractIdentity) {
+          // A delta assumes the old contract. Scope approvals and changed
+          // requirements need a newly composed reviewer with current policy.
+          this.#release(parent);
+          session = null;
+        }
         if (session && !session.ended && session.waitingForRevision
           && (session.startedAt ?? 0) + this.reviewerWallMs - Date.now() < FINAL_REVIEW_REVISION_MIN_REMAINING_MS) {
           // Too little of the parked reviewer's wall is left to judge a
@@ -387,6 +414,7 @@ export class FinalReviewRuntime {
             instructions: finalReviewCoreInstructions(),
             evidence,
             snapshot: this.snapshotFiles(parent.cwd, payload, change),
+            contractIdentity,
           });
           outcome = this.#awaitReport(fresh);
         }
@@ -397,8 +425,17 @@ export class FinalReviewRuntime {
           mode = MODES.INFRASTRUCTURE;
           result = reported.result;
         } else {
-          verdictObtained = true;
-          result = mergeCheckFindings(reported.result, deterministicFindings);
+          // Terminal-only reviewers cannot correct a report in-session. Treat
+          // an unserviceable report as bounded reviewer infrastructure failure.
+          const correction = reported.validated ? null
+            : await this.checkFindingBoundary(reported.result, { job, payload, cwd: parent.cwd });
+          if (correction) {
+            mode = MODES.INFRASTRUCTURE;
+            result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: correction };
+          } else {
+            verdictObtained = true;
+            result = mergeCheckFindings(reported.result, deterministicFindings);
+          }
         }
       }
       if (mode !== MODES.INFRASTRUCTURE) {
@@ -410,7 +447,7 @@ export class FinalReviewRuntime {
         }
         if (!reviewIdentity) {
           result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Cannot bind final review to the scoped workspace; verification is blocked." };
-        } else if (reviewIdentity !== await this.identify(parent.cwd, payload, { jobId: job.id })) {
+        } else if (reviewIdentity !== await currentCandidateIdentity()) {
           result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Scoped files changed during review; review the current change again." };
         }
       }
@@ -426,6 +463,10 @@ export class FinalReviewRuntime {
     }
     const recorded = [...prior, { review_mode: mode }];
     const reviewsRemaining = finalReviewReviewsRemaining(recorded);
+    if (mode === MODES.DETERMINISTIC && finalReviewDeterministicRetriesLeft(recorded) === 0) {
+      result = { ...result, reason: "This attempt's deterministic verification rounds are used; hand off for assessment. These findings remain unresolved." };
+      this.#release(parent);
+    }
     if (mode === MODES.INFRASTRUCTURE) {
       this.#release(parent);
       // The handoff waits for a bounded number of these rounds, then proceeds
@@ -494,6 +535,7 @@ export class FinalReviewRuntime {
         // retains this exact result for a bounded save retry, not a new model.
         this.completePass({ agentCallId: parent.agentCallId,
           reviewerAgentCallId: observation.detail.reviewer_agent_call_id,
+          verifiedNoChange: observation.detail.changed_file_count === 0,
           cwd: parent.cwd, summary: response.summary, recordResult });
         parent.completed = true;
         this.#release(parent);
@@ -526,7 +568,7 @@ export class FinalReviewRuntime {
     return this.#saveReview(parent, { response: result, observation, failures: 0 });
   }
 
-  #startReviewer(parent, { instructions, evidence, snapshot }) {
+  #startReviewer(parent, { instructions, evidence, snapshot, contractIdentity }) {
     const session = {
       controller: new AbortController(),
       agentCallId: null,
@@ -543,6 +585,8 @@ export class FinalReviewRuntime {
       pendingSnapshot: snapshot,
       revision: 0,
       invalidReports: 0,
+      validatingReport: false,
+      contractIdentity,
       run: null,
       wallTimer: null,
     };
@@ -654,21 +698,41 @@ export class FinalReviewRuntime {
       if (session.waitingForRevision) return this.#parkReviewer(session, { signal });
       return { status: "not_waiting", error: "Your report was already delivered; wait in final_review for the developer's revision." };
     }
+    if (session.validatingReport) {
+      return { status: "not_waiting", error: "A review report is already being validated; wait for that call to return." };
+    }
     const mapped = finalReviewResultFromReport(args);
-    if (mapped.error) {
+    let reportError = mapped.error;
+    if (!reportError && mapped.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS) {
+      session.validatingReport = true;
+      try {
+        const job = getJob(parent.jobId);
+        reportError = await this.checkFindingBoundary(mapped, { job, payload: parseJobPayload(job), cwd: parent.cwd });
+      } catch (error) {
+        // An unavailable guard cannot turn an unvalidated report into repair
+        // authority, nor leave the developer waiting without a bounded exit.
+        if (parent.reviewer === session) this.#release(parent, `review finding validation could not run (${String(error?.message || error).slice(0, 200)})`);
+      } finally {
+        session.validatingReport = false;
+      }
+      if (session.released || session.ended || parent.reviewer !== session) {
+        return { status: FINAL_REVIEW_REVIEWER_STATUS.DONE, instruction: REVIEWER_DONE_INSTRUCTION };
+      }
+    }
+    if (reportError) {
       session.invalidReports++;
       if (session.invalidReports >= FINAL_REVIEW_MAX_INVALID_REPORTS) {
         this.#release(parent, "the reviewer repeatedly returned an invalid report");
-        return { status: FINAL_REVIEW_REVIEWER_STATUS.DONE, instruction: REVIEWER_DONE_INSTRUCTION, error: mapped.error };
+        return { status: FINAL_REVIEW_REVIEWER_STATUS.DONE, instruction: REVIEWER_DONE_INSTRUCTION, error: reportError };
       }
-      return { status: "invalid_report", error: mapped.error };
+      return { status: "invalid_report", error: reportError };
     }
     session.invalidReports = 0;
     session.awaitingReport = null;
     session.snapshot = session.pendingSnapshot;
     session.pendingSnapshot = null;
     session.waitingForRevision = true;
-    waiting.resolve({ result: mapped, reviewerCallId: callId });
+    waiting.resolve({ result: mapped, reviewerCallId: callId, validated: true });
     return this.#parkReviewer(session, { signal });
   }
 

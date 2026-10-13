@@ -130,10 +130,10 @@ export class Bridge {
     }
   }
 
-  async start() {
+  async start({ restarting = false } = {}) {
     if (this.localServer) return this.info();
     this.stopping = false;
-    this.stopped = new Promise((resolve) => { this.resolveStopped = resolve; });
+    if (!restarting) this.stopped = new Promise((resolve) => { this.resolveStopped = resolve; });
     try {
       this.changeStream = new ChangeStream({
         dbPath: getRuntimeDbPath(this.projectDir),
@@ -183,7 +183,7 @@ export class Bridge {
       this.startPresenceHeartbeat();
       return this.info(address);
     } catch (err) {
-      await this.stop();
+      await this.stop({ restarting });
       throw err;
     }
   }
@@ -284,7 +284,7 @@ export class Bridge {
    * component that throws mid-teardown must never leave a stale ref behind —
    * a later restart would then return early against a half-dead bridge.
    */
-  async stop() {
+  async stop({ restarting = false } = {}) {
     this.stopping = true;
     if (this.bossyLocalStreamRetryTimer) {
       clearTimeout(this.bossyLocalStreamRetryTimer);
@@ -305,6 +305,8 @@ export class Bridge {
     try { await bossyLocalStream?.close(); } catch { /* already torn down */ }
     try { changeStream?.close(); } catch { /* already torn down */ }
     try { await localServer?.close(); } catch { /* already torn down */ }
-    this.resolveStopped?.("local management");
+    // Recovery tears down resources but retains the serve owner's shutdown
+    // subscription. Only a terminal stop tells that owner to exit.
+    if (!restarting) this.resolveStopped?.("local management");
   }
 }

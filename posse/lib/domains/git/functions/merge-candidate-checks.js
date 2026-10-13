@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { installedNodeRoots } from "../../verification/functions/prerequisite-adapters.js";
-import { classifyNestedRunnerInfrastructureFailure, validatePlannerTestCommandForRepository } from "../../worker/functions/helpers/test-execution-receipt.js";
+import { classifyNestedRunnerInfrastructureFailure } from "../../verification/functions/test-runner-failure.js";
+import { validatePlannerTestCommandForRepository } from "../../verification/functions/planner-test-command.js";
 import { runCloseoutTestCommandSync } from "./merge-closeout.js";
 
 /** Create one disposable checkout of the staged candidate for merge checks. */

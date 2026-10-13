@@ -1,4 +1,5 @@
 // @ts-check
+import { COMPACT_RELATIONSHIP_PROJECTION } from "../../../../../catalog/atlas-presentation.js";
 //
 // Runtime parameter schemas for native ATLAS v2 tools.
 //
@@ -405,7 +406,7 @@ export const ATLAS_TOOL_PARAM_SCHEMAS = Object.freeze({
     limit: i({ minimum: 1, maximum: 100 }),
     offset: i({ minimum: 0, maximum: 100_000 }),
     minConfidence: n({ minimum: 0, maximum: 100 }),
-    projection: s({ enum: ["compact-v1"] }),
+    projection: s({ enum: [COMPACT_RELATIONSHIP_PROJECTION] }),
     indexVersion: s({ minLength: 1, maxLength: 512 }),
   }, ["symbolId"]),
   "symbol.get": o({

@@ -1,10 +1,9 @@
 import "../../../../shared/platform/functions/process-liveness.js";
 export { isProcessAlive } from "../../../../shared/platform/functions/process-liveness.js";
-import path from "path";
 import { buildOperatorGuidanceForAttempt, getArtifacts } from "../../../queue/functions/index.js";
 import { slugify } from "../../../../shared/format/functions/slug.js";
 import { estimateCallCost } from "../../../billing/functions/pricing.js";
-import { isInsideRoot } from "../../../runtime/functions/fs-safety.js";
+export { resolveExpectedFilePath } from "../../../artifacts/functions/expected-file-path.js";
 import { isProviderInfrastructureError } from "./provider-error.js";
 
 export function loadNudges(jobId, { attemptId = null, agentCallId = null } = {}) {
@@ -105,11 +104,4 @@ export function latestArtifactText(jobId, types = []) {
     }
   }
   return "";
-}
-
-export function resolveExpectedFilePath(outputRoot, file) {
-  const rootAbs = path.resolve(outputRoot);
-  const fileAbs = path.resolve(file);
-  const rel = path.relative(rootAbs, fileAbs).replace(/\\/g, "/");
-  return isInsideRoot(fileAbs, rootAbs, { allowEqual: false }) ? rel : path.posix.basename(file);
 }

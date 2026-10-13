@@ -289,6 +289,7 @@ export function finalReviewCoreInstructions() {
     "Judge the current workspace change, which is not committed yet, against the task contract in the attached snapshot.",
     "Check the actual files: the snapshot lists every changed file and inlines the diff up to its size limit; read any changed file it does not show.",
     "Use the declared test, changed test file and changed-file check results as evidence. A failure on a line this change added, or in a test file it added, is its defect; any other failure, including one elsewhere in a changed file or in an edited existing test, may predate the change, so report it only when the change caused it.",
+    "A test timeout alone does not establish a code defect. Treat it as incomplete verification unless the available evidence demonstrates a defect in the implementation.",
     "Treat a developer completion report in the snapshot as the delivery report. Check its factual claims; a report-only requirement does not require a source-file comment.",
   ].join("\n");
 }

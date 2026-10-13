@@ -1673,6 +1673,8 @@ function v2WorkItemContext({
 }
 
 async function v2JoinResultAsync(args = {}) {
+  const signal = args.signal;
+  signal?.throwIfAborted();
   const config = args.config || getAtlasIntegrationConfig();
   if (!config?.enabled) return { attempted: false, skipped: "atlas_disabled", disableAtlas: false, backend: "atlas-v2" };
   if (!isAtlasIndexMaintenanceEnabled(config)) return { attempted: false, skipped: "phase_not_enabled", disableAtlas: false, backend: "atlas-v2" };
@@ -1683,7 +1685,9 @@ async function v2JoinResultAsync(args = {}) {
   const baselineBranch = await resolveAtlasBaselineBranchAsync(ctx.repoRoot);
   let ledger = null;
   try {
+    signal?.throwIfAborted();
     ledger = await Ledger.open({ dbPath: ctx.ledgerDbPath });
+    signal?.throwIfAborted();
     if (!ledger.getBranch(baselineBranch)) {
       await ledger.ensureRootBranch(baselineBranch, { label: "atlas.ensureBaselineBranch" });
     }
@@ -1696,25 +1700,16 @@ async function v2JoinResultAsync(args = {}) {
     // checkout after any handoff/rebase, before publishing a readable view.
     await ledger.closeNative();
     ledger = null;
-    await reconcileWiSource({
+    const refreshed = await reconcileWiSource({
       repoRoot: ctx.repoRoot, worktreePath: args.worktreePath,
       workItemId, ledgerPath: ctx.ledgerDbPath, viewPath: ctx.viewDbPath,
-      config: ctx.config, warm: (request) => getSharedConductor().warm(request),
+      config: ctx.config, signal, warm: (request, options) => getSharedConductor().warm(request, options),
     });
+    signal?.throwIfAborted();
     getSharedAtlasToolExecutor().clearReadContext({ workItemId });
-    getSharedAtlasToolExecutor().clearWriteRefreshFailure({ workItemId });
-    ledger = await Ledger.open({ dbPath: ctx.ledgerDbPath });
-    const warmer = new ParseEngine({
-      ledger,
-      repoRoot: ctx.repoRoot,
-      defaultBranch: baselineBranch,
-      config: ctx.config,
-    });
-    const mount = await warmer.mountForWorktreeAsync({
-      workItemId: workItemId ?? "unknown",
-      ledgerBranch: ledgerBranch || undefined,
-      worktreePath: args.worktreePath || process.cwd(),
-    }, { label: "atlas.mountForWorktree" });
+    // Reconciliation already mounted the live view under the conductor's
+    // write hold. Mounting again here races the next sibling refresh.
+    const mount = { from: "warmed", viewPath: refreshed.view_written || ctx.viewDbPath };
     const mounted = !!(mount.viewPath && fs.existsSync(mount.viewPath));
     return {
       attempted: true,
@@ -1734,6 +1729,8 @@ async function v2JoinResultAsync(args = {}) {
       view: openMountedView(mount.viewPath || ctx.viewDbPath),
     };
   } catch (err) {
+    signal?.throwIfAborted();
+    if (isAbortLikeAtlasError(err)) throw err;
     logAtlasError(`[atlas] async mount failed (workItemId=${args?.workItemId}):`, err);
     if (isVerboseAtlasErrors()) throw err;
     return {
@@ -1754,7 +1751,7 @@ async function v2JoinResultAsync(args = {}) {
       view: null,
     };
   } finally {
-    try { ledger?.close?.(); } catch { /* ignore */ }
+    try { await ledger?.closeNative?.(); } catch { /* ignore */ }
   }
 }
 

@@ -2,6 +2,7 @@
 // adapters are intentionally narrower than the interactive dependency doctor:
 // they never invent dependencies, update a lockfile, or run lifecycle scripts.
 
+import { NODE_PACKAGE_MANAGER_EXECUTABLES } from "../../../catalog/node-package-managers.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -18,14 +19,11 @@ import { inspectManagedPythonTestToolchain } from "../../environments/functions/
 import { nodePrerequisiteContext, nodePrerequisiteReady } from "./node-prerequisite-context.js";
 import {
   DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY,
+  VERIFICATION_DEPENDENCY_NETWORK_POLICIES,
   VERIFICATION_DEPENDENCY_LOCK_INVALID,
 } from "../../../catalog/verification.js";
 
-export const VERIFICATION_DEPENDENCY_NETWORK_POLICIES = Object.freeze([
-  "cache_only",
-  "allow",
-  "disabled",
-]);
+export { VERIFICATION_DEPENDENCY_NETWORK_POLICIES } from "../../../catalog/verification.js";
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const TERMINATION_GRACE_MS = 250;
@@ -137,7 +135,7 @@ function selectedEcosystems({ projectDir, command, receipt }) {
   const executable = executableName(command);
   const output = combinedOutput(receipt);
   const selected = new Set();
-  if (["npm", "npm.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "bun", "bun.exe", "node", "node.exe"].includes(executable)) {
+  if (NODE_PACKAGE_MANAGER_EXECUTABLES.includes(executable) || ["node", "node.exe"].includes(executable)) {
     selected.add("node");
   }
   if (/^(?:python(?:\d+(?:\.\d+)*)?|py|pytest(?:-\d+(?:\.\d+)*)?)(?:\.exe)?$/.test(executable)

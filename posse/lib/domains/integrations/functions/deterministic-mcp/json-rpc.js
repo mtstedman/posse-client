@@ -1,5 +1,6 @@
 // @ts-check
 import { stripHashRefSurfaceSuffix } from "../../../../shared/tools/functions/ref-surface.js";
+import { OUTCOME_TOOL_OBSERVATION as UNIT_TEST_TOOL_OUTCOMES } from "../../../../catalog/unit-test-runner.js";
 //
 // Pure JSON-RPC envelope + param helpers for the deterministic MCP gateway.
 //
@@ -44,13 +45,6 @@ const MCP_TOOL_REJECTION_TEXT_RE = /\b(?:not allowed|not permitted|denied|reject
 
 // run_unit_test reports what actually happened. A test that never ran is not
 // a successful call, even though it is not a product failure either.
-const UNIT_TEST_TOOL_OUTCOMES = Object.freeze({
-  passed: "succeeded",
-  product_failed: "failed",
-  timed_out: "failed",
-  infrastructure_error: "failed",
-  unavailable: "rejected",
-});
 
 function structuredToolOutcome(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;

@@ -110,6 +110,7 @@ export async function ensureWaitingLanePlannerAtlasReadView({
       source: plannerRead.atlasSource,
     };
   } catch (error) {
+    signal?.throwIfAborted();
     return {
       required: true,
       mounted: false,
@@ -137,6 +138,7 @@ export async function ensureAtlasReadRootMounted({
   ensureJoin = ensureWorkItemAtlasJoinAsync,
   config = getAtlasIntegrationConfig(),
 } = {}) {
+  signal?.throwIfAborted();
   const projectRoot = path.resolve(String(projectDir || process.cwd()));
   const targetRoot = path.resolve(String(readRoot || projectRoot));
   if (targetRoot === projectRoot) {
@@ -184,6 +186,7 @@ export async function ensureAtlasReadRootMounted({
       config: joined?.config || null,
     };
   } catch (error) {
+    signal?.throwIfAborted();
     return {
       required: true,
       mounted: false,

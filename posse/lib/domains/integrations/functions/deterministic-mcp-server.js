@@ -1,3 +1,4 @@
+import { COMPACT_RELATIONSHIP_PROJECTION, COMPACT_STRUCTURE_PROJECTION } from "../../../catalog/atlas-presentation.js";
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 import { applyPlannerSchemaDiet } from "../../../shared/tools/functions/planner-schema-diet.js";
 import crypto from "node:crypto";
@@ -3287,7 +3288,7 @@ async function handleRequest(msg) {
         atlas_catalog_source: atlasAllowedActions && atlasAllowedActions !== _atlasAllowedActions ? "remote" : "local",
       },
       projections: researcherDirect
-        ? { "symbol.callers": "compact-v1", "code.structure": "compact-structure-v1" }
+        ? { "symbol.callers": COMPACT_RELATIONSHIP_PROJECTION, "code.structure": COMPACT_STRUCTURE_PROJECTION }
         : {},
     });
     sendMessage(jsonRpcSuccess(id, { tools }));

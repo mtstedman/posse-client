@@ -9,7 +9,7 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 // A validated pass owns close-out. Save the ordinary completion packets before
 // stopping either provider, so the worker keeps its existing handoff/assessment
 // path without asking either model for another turn.
-export function completeFinalReview({ agentCallId, reviewerAgentCallId, cwd, summary, recordResult = () => {} }) {
+export function completeFinalReview({ agentCallId, reviewerAgentCallId, cwd, summary, verifiedNoChange = false, recordResult = () => {} }) {
   const receipts = runImmediateTransaction(getDb(), () => {
     recordResult();
     const saved = [];
@@ -26,7 +26,11 @@ export function completeFinalReview({ agentCallId, reviewerAgentCallId, cwd, sum
       }, { context: { agentCallId: reviewerAgentCallId }, role: "assessor", projectDir: cwd });
       saved.push({ agentCallId: reviewerAgentCallId, receipt });
     }
-    saved.push({ agentCallId, receipt: stageAgentHandoff({ status: "COMPLETE" }, {
+    const completion = verifiedNoChange ? {
+      status: "VERIFIED_NO_CHANGE",
+      no_change_rationale: String(summary || "Final review verified that the current scoped files already satisfy the task contract.").slice(0, 1000),
+    } : { status: "COMPLETE" };
+    saved.push({ agentCallId, receipt: stageAgentHandoff(completion, {
       context: { agentCallId }, role: "dev", projectDir: cwd,
     }) });
     return saved;

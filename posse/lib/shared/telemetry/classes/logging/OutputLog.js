@@ -1,3 +1,4 @@
+import { readRecentAgentLogEntries } from "../../functions/logging/agent-log-query.js";
 import { DatedRotatingLog } from "./DatedRotatingLog.js";
 import { scrubSecrets } from "./secret-scrub.js";
 import { appendRunTelemetry } from "../../functions/run-telemetry.js";
@@ -62,16 +63,7 @@ export class OutputLog extends DatedRotatingLog {
   }
 
   readRecent({ limit = 50, jobId = null, role = null, agentCallId = null } = {}) {
-    return this.readRecentEntries({
-      limit,
-      parseLine: JSON.parse,
-      predicate: (rec) => {
-        if (agentCallId != null && rec.agent_call_id !== agentCallId) return false;
-        if (jobId != null && rec.job_id !== jobId) return false;
-        if (role && rec.role !== role) return false;
-        return true;
-      },
-    });
+    return readRecentAgentLogEntries(this, { limit, jobId, role, agentCallId });
   }
 
   tail(count = 50) {

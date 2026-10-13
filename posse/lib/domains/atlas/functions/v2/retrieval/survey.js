@@ -1,3 +1,4 @@
+import { clampRetrievalInteger as clampInt } from "./request-values.js";
 // @ts-check
 //
 // code.survey — bulk cross-file intake: per-file skeletons plus a call map
@@ -281,10 +282,4 @@ export async function collectSurveyPaths({ view, requested, maxFiles, symbols = 
     prefixTruncated,
     ...(symbolFilterFallback ? { symbolFilterFallback: true } : {}),
   };
-}
-
-function clampInt(value, fallback, min, max) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(n)));
 }

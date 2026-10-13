@@ -25,3 +25,15 @@ export const OUTCOME_STATUS = Object.freeze({
   infrastructure_error: "infrastructure_error",
   unavailable: "unavailable",
 });
+
+export const UNIT_TEST_OUTCOMES = readonlySet(Object.keys(OUTCOME_STATUS));
+
+// Observation outcomes describe execution; the wire status above retains the
+// verifier's specific result. An unavailable test did not execute.
+export const OUTCOME_TOOL_OBSERVATION = Object.freeze({
+  passed: "succeeded",
+  product_failed: "failed",
+  timed_out: "failed",
+  infrastructure_error: "failed",
+  unavailable: "rejected",
+});
