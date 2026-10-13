@@ -1,5 +1,4 @@
 export { operatorFeedbackDeliveryForJob, operatorFeedbackDeliveryText } from "./operator-feedback-delivery.js";
-export { parseToolArgs, createStandardToolHandlerMap, executeToolWithMap } from "./legacy-embedded-tools.js";
 import { stripPosseMcpGatewayPrefix } from "../../../integrations/functions/mcp-gateway.js";
 import { ToolCatalog } from "../../../../shared/tools/classes/ToolCatalog.js";
 import { OPERATOR_FEEDBACK_DELIVERY_MARKER } from "../../../../catalog/operator-feedback.js";

@@ -53,7 +53,6 @@ export const CODEX_AUTH_MODE_OPTIONS = Object.freeze([
   Object.freeze({ value: "auto", label: "auto (oauth only)" }),
 ]);
 
-export const ASSESSMENT_SCOPE_MODE_VALUES = Object.freeze(["off", "shadow"]);
 export const AGENT_COORDINATION_MODE_VALUES = Object.freeze(["off", "handoff", "subagents"]);
 export const CONTEXT_COMPACTION_MODE_VALUES = Object.freeze(["off", "shadow", "inject", "enforce"]);
 // A database (task_mode "db") task that depends on file changes still only on
@@ -78,8 +77,6 @@ export const PLANNER_UNDER_SCOPED_BROAD_GATE_VALUES = Object.freeze(["off", "war
 export const RESEARCH_FANOUT_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
 export const RESEARCH_TRAVERSAL_COMPLETION_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
 export const RESEARCH_BUDGET_VISIBILITY_VALUES = Object.freeze(["countdown", "always"]);
-export const RESEARCH_EVIDENCE_REUSE_MODE_VALUES = Object.freeze(["off", "shadow"]);
-export const ATLAS_SHADOW_GUARDRAILS_MODE_VALUES = Object.freeze(["off", "shadow"]);
 export const ATLAS_HANDOFF_PREFETCH_MODE_VALUES = Object.freeze(["on", "off"]);
 export const ATLAS_RESEARCH_PREFETCH_FOCUS_MODE_VALUES = Object.freeze(["off", "shadow", "on"]);
 export const ATLAS_MEMORY_SURFACE_MODE_VALUES = Object.freeze(["auto", "off", "on"]);

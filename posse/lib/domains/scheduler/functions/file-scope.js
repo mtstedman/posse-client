@@ -96,28 +96,6 @@ export function hasFileConflict(jobScope, lockedFiles, lockedRoots) {
   return false;
 }
 
-function strictRootOverlaps(a, b) {
-  if (!a || !b || a === "*" || b === "*") return false;
-  const aNorm = a.endsWith("/") ? a.slice(0, -1) : a;
-  const bNorm = b.endsWith("/") ? b.slice(0, -1) : b;
-  if (!aNorm || !bNorm || aNorm === bNorm) return false;
-  return rootsOverlap(aNorm, bNorm);
-}
-
-export function collectStrictOnlyRootConflicts(jobScope, lockedRoots) {
-  if (!Array.isArray(jobScope?.createRoots) || jobScope.createRoots.length === 0) return [];
-  if (!lockedRoots || lockedRoots.size === 0) return [];
-  const overlaps = [];
-  for (const root of jobScope.createRoots) {
-    for (const lockedRoot of lockedRoots) {
-      if (strictRootOverlaps(root, lockedRoot)) {
-        overlaps.push({ root, lockedRoot });
-      }
-    }
-  }
-  return overlaps;
-}
-
 export function lockConflictNotice(job, conflict) {
   if (!conflict) return null;
   const path = conflict.candidate?.path || conflict.lock?.path || "unknown";

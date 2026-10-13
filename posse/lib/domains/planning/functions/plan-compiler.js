@@ -45,7 +45,6 @@ import { broadNarrowScopedCodeTaskSignal, parseUnderScopedBroadGateMode } from "
 import { reconcilePlannerFileKinds } from "./scope-reconciliation.js";
 import { dependencyIndexesAfterSplit, rewriteDependenciesAfterSplit, rewriteDependenciesAroundPostMergeDbTasks } from "./dependency-rewrite.js";
 import { cancelSupersededPlanChildren } from "./plan-cleanup.js";
-import { deriveAndRecordAssessmentScopes } from "./assessment-scopes.js";
 import { normalizeExplicitImageGenerationTask, resolvePromoteSourceDir, rewriteTaskImageOutputPaths, routePromoteTaskByOutputDir, splitTaskByCreateFileKind } from "./task-splitting.js";
 import { ASSESSABLE_JOB_TYPES, TERMINAL_JOB_STATUSES, WORKTREE_JOB_TYPES } from "../../../catalog/job.js";
 import { normPath } from "../../../shared/scope/functions/path.js";
@@ -279,7 +278,6 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         : null;
       const jobMap = new Map(); // dependency target by planner task index
       const pendingDependencyLinks = [];
-      const wiredPlannerDependencyEdges = [];
       const duplicateTaskClaims = new Map(); // semantic planner task -> first job created for it
       const humanInputGateIds = []; // planner human_input gates, in creation order
       const allCreatedJobIds = new Set(); // every job spawned by this compilation
@@ -825,11 +823,6 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               cancelCompiledTaskForDroppedDependency(link.taskIndex, [depIdx]);
               break;
             }
-            wiredPlannerDependencyEdges.push({
-              upstreamTaskIndex: depIdx,
-              dependentTaskIndex: link.taskIndex,
-              dependentJobId: link.jobId,
-            });
           }
         }
       };
@@ -2501,17 +2494,6 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           reason: "planner_compiled_without_dev",
         });
       }
-
-      deriveAndRecordAssessmentScopes({
-        worker,
-        planJob,
-        tasks,
-        jobMap,
-        plannerDependencyEdges: wiredPlannerDependencyEdges,
-        allCreatedJobIds,
-        compiledTaskJobIds,
-        droppedTaskIndexes,
-      });
 
       // ── Provider assignment for multi-provider roles ──
       // Deterministic: only dev/fix/artificer jobs need an assignment; promote

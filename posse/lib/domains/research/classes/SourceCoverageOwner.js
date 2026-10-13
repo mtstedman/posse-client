@@ -11,10 +11,6 @@ import { splitEditableLines } from "../../../shared/tools/functions/toolkit/stru
 import { normalizeAtlasIdentifierList } from "../../atlas/functions/v2/contracts/identifiers.js";
 import { contiguousSourceReuse } from "../functions/contiguous-source-reuse.js";
 import { redactSecrets } from "../../atlas/functions/v2/retrieval/redaction.js";
-import {
-  normalizeResearchEvidenceReuseMode,
-  recordSourceCoverageReuseShadow,
-} from "../functions/evidence-reuse-telemetry.js";
 
 const COVERAGE_OBSERVATION = "source.coverage";
 const activeReservations = new Map();
@@ -171,17 +167,14 @@ function releaseReservation(reservation, outcome) {
 }
 
 export class SourceCoverageOwner {
-  /** @param {{cwd?: string, workItemId?: number | null, jobId?: number | null, attemptId?: number | null, agentCallId?: number | null, repositoryIdentity?: string | null, evidenceReuseMode?: "off" | "shadow" | null, db?: any}} [options] */
-  constructor({ cwd, workItemId, jobId, attemptId, agentCallId, repositoryIdentity = null, evidenceReuseMode = null, db = getDb() } = {}) {
+  /** @param {{cwd?: string, workItemId?: number | null, jobId?: number | null, attemptId?: number | null, agentCallId?: number | null, repositoryIdentity?: string | null, db?: any}} [options] */
+  constructor({ cwd, workItemId, jobId, attemptId, agentCallId, repositoryIdentity = null, db = getDb() } = {}) {
     this.cwd = path.resolve(cwd || process.cwd());
     this.workItemId = Number(workItemId) || null;
     this.jobId = Number(jobId) || null;
     this.attemptId = Number(attemptId) || null;
     this.agentCallId = Number(agentCallId) || null;
     this.repositoryIdentity = String(repositoryIdentity || this.cwd);
-    this.evidenceReuseMode = evidenceReuseMode == null
-      ? null
-      : normalizeResearchEvidenceReuseMode(evidenceReuseMode);
     this.db = db;
     this.missingWorkItemObservationRecorded = false;
   }
@@ -264,9 +257,6 @@ export class SourceCoverageOwner {
   }
 
   #coveredResult(row, coverage, reason, {
-    fresh = null,
-    requestedStartLine = null,
-    requestedEndLine = null,
     selectorArgs = null,
   } = {}) {
     if (selectorArgs && !coverageMatchesRequestedSelector(coverage, selectorArgs, reason)) return null;
@@ -284,17 +274,6 @@ export class SourceCoverageOwner {
       job_id: Number(row.job_id),
       attempt_id: Number(row.attempt_id),
     };
-    recordSourceCoverageReuseShadow({
-      owner: this,
-      coverage,
-      stored,
-      fresh,
-      reason,
-      requestedStartLine,
-      requestedEndLine,
-      coverageScope,
-      mode: this.evidenceReuseMode,
-    });
     const authorization = this.#authorization({ ...coverage, observationId: row.id });
     return {
       covered: true,
@@ -333,11 +312,7 @@ export class SourceCoverageOwner {
         if (normalizePath(coverage.repo_rel_path) !== requestedFile) continue;
         const fresh = this.#freshSource(requestedFile);
         if (!fresh || fresh.sourceVersion !== coverage.source_version) continue;
-        const result = this.#coveredResult(row, coverage, "complete_file", {
-          fresh,
-          requestedStartLine: 1,
-          requestedEndLine: splitEditableLines(fresh.source).lines.length,
-        });
+        const result = this.#coveredResult(row, coverage, "complete_file");
         if (result) return result;
       }
     }
@@ -388,13 +363,7 @@ export class SourceCoverageOwner {
     // pages may reuse their validated refs together once no tail is unseen.
     if (delivered.size === 1) {
       const [{ row, coverage, selectorMatch }] = delivered.values();
-      const fresh = this.#freshSource(coverage.repo_rel_path);
-      const result = this.#coveredResult(row, coverage, selectorMatch, {
-        fresh,
-        requestedStartLine: coverage.start_line,
-        requestedEndLine: coverage.end_line,
-        selectorArgs: args,
-      });
+      const result = this.#coveredResult(row, coverage, selectorMatch, { selectorArgs: args });
       if (result) return result;
     }
     if (delivered.size > 1) {
@@ -402,12 +371,7 @@ export class SourceCoverageOwner {
         return { covered: false, reason: "multiple_regions_fail_open" };
       }
       const combined = contiguousSourceReuse([...delivered.values()].map(({ row, coverage, selectorMatch }) => (
-        this.#coveredResult(row, coverage, selectorMatch, {
-          fresh: this.#freshSource(coverage.repo_rel_path),
-          requestedStartLine: coverage.start_line,
-          requestedEndLine: coverage.end_line,
-          selectorArgs: args,
-        })
+        this.#coveredResult(row, coverage, selectorMatch, { selectorArgs: args })
       )));
       return combined || { covered: false, reason: "multiple_regions_fail_open" };
     }
@@ -432,11 +396,7 @@ export class SourceCoverageOwner {
       if (Number(coverage.start_line) > requestedStart || Number(coverage.end_line) < requestedEnd) continue;
       const fresh = this.#freshSource(relative);
       if (!fresh || fresh.sourceVersion !== coverage.source_version) continue;
-      const result = this.#coveredResult(row, coverage, "contained_interval", {
-        fresh,
-        requestedStartLine: requestedStart,
-        requestedEndLine: requestedEnd,
-      });
+      const result = this.#coveredResult(row, coverage, "contained_interval");
       if (result) {
         // Interval admission happens after the native selector has resolved.
         // Surface the interval that this call resolved, not the potentially

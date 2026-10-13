@@ -57,7 +57,6 @@ import { getAtlasHandoffPrefetchTimeoutMs, getFixScopeHandoffGuardMode } from ".
 import { issueHandoffTraversalRefsForCurrentCall, packetToContextString as packetToContextStringFromModule, packetToDynamicContextString as packetToDynamicContextStringFromModule } from "./helpers/context-render.js";
 import { expandHashRefHandoffPacketForDevBrief } from "./helpers/hash-ref-packet.js";
 import { DEFAULT_TRAVERSAL_COMPLETION_MAX_CHARS, buildTraversalCompletionCheck as buildTraversalCompletionCheckFromModule } from "./helpers/traversal-completeness.js";
-import { buildAtlasShadowGuardrails as buildAtlasShadowGuardrailsFromModule } from "./helpers/atlas-shadow-guardrails.js";
 import { attachCreatableFiles as attachCreatableFilesFromModule, attachDirectoryTree as attachDirectoryTreeFromModule, attachEditableFiles as attachEditableFilesFromModule, attachRelatedFiles as attachRelatedFilesFromModule, attachSourcePreload as attachSourcePreloadFromModule, collectSourceFiles as collectSourceFilesFromModule, directoryTree as directoryTreeFromModule, readFile as readFileFromModule } from "./helpers/file-attach.js";
 import { materializeWritingScope as materializeWritingScopeFromModule } from "./helpers/file-materialization.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
@@ -1830,7 +1829,6 @@ export async function handoff(input, { providerName = null, reviewerChildIdentit
   // Step 7: Tool policy + budgets
   await timeHandoffStep(packet, "skills.attach", () => _attachSkills(packet));
   await timeHandoffStep(packet, "traversal_completion.resolve", () => _applyTraversalCompletionCheck(packet));
-  await timeHandoffStep(packet, "atlas_shadow_guardrails.resolve", () => _applyAtlasShadowGuardrails(packet));
   await timeHandoffStep(packet, "hash_refs.proof_expand", () => _expandHashRefProofs(packet));
   await timeHandoffStep(packet, "tool_policy.apply", () => _applyToolPolicy(recipient, packet, { reviewerChildIdentity }));
   await timeHandoffStep(packet, "drop_telemetry.emit", () => _emitHandoffDropTelemetry(packet));
@@ -1908,45 +1906,6 @@ function _applyTraversalCompletionCheck(packet) {
   }
 
   return check;
-}
-
-function _applyAtlasShadowGuardrails(packet) {
-  const mode = getSetting(SETTING_KEYS.ATLAS_SHADOW_GUARDRAILS) || "shadow";
-  const guardrails = buildAtlasShadowGuardrailsFromModule(packet, { mode });
-  packet.atlas_shadow_guardrails = guardrails;
-
-  if (guardrails.mode === "off" || !guardrails.triggered) return guardrails;
-
-  try {
-    const ctx = getObservationContext() || {};
-    const lanes = guardrails.lanes.map((lane) => lane.id).join(",") || "none";
-    recordObservation({
-      work_item_id: packet.work_item_id ?? ctx.work_item_id ?? null,
-      job_id: packet.job_id ?? ctx.job_id ?? null,
-      attempt_id: ctx.attempt_id ?? null,
-      observation_type: "handoff.atlas_shadow_guardrails",
-      summary: `ATLAS shadow guardrails matched ${lanes}`,
-      detail: {
-        kind: "atlas_shadow_guardrails",
-        mode: guardrails.mode,
-        status: "shadowed",
-        lanes: guardrails.lanes,
-        matched_terms: guardrails.matched_terms,
-        recommendations: guardrails.recommendations,
-        task_text_chars: guardrails.task_text_chars,
-        recipient: packet.recipient || null,
-        job_type: packet.job_type || null,
-        atlas_prefetch_status: packet.atlas?.prefetchStatus || null,
-        atlas_prefetch_delivery_status: packet.atlas?.prefetchDeliveryStatus || null,
-        atlas_prefetch_relevance_status: packet.atlas?.prefetchRelevanceStatus || null,
-        atlas_prefetch_coverage_status: packet.atlas?.prefetchCoverageStatus || null,
-      },
-    });
-  } catch {
-    // Shadow telemetry must never affect handoff assembly.
-  }
-
-  return guardrails;
 }
 
 // Keep ordinary application changes deterministic and model-visible. The old

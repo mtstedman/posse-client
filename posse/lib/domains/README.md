@@ -50,14 +50,10 @@ Compatibility utilities remain available through their original import paths:
   work-item language inference delegate to explicitly named `legacy/` owners.
   Native Atlas remains the production parse/query owner. Import-context and
   language-adapter registration are live utilities, outside that quarantine.
-  The semaphore-backed parse pipeline remains a test/debug orchestration
-  utility; the live ParseEngine uses its own intake/conductor path.
-- The synchronous `ToolExecutor` and provider handler-map API are compatibility
-  and test utilities. Production execution uses the async MCP owner/server.
-  Live feedback delivery has a separate module; it does not import the embedded
-  handlers. Compatibility callers own their returned handler registry's
-  lifetime. Shared scope waits and the tool gate belong to
-  `LegacyEmbeddedToolState`.
+  ParseEngine owns the live intake/conductor path.
+- Production tool execution uses the async MCP owner/server. Historical
+  synchronous executor and handler-map regression helpers live only under
+  `test/support/legacy-tools/`; production modules do not export them.
 - Persisted Atlas `shadow`/`preferred` settings still normalize to the native
   enabled mode. They no longer expose dual-backend operational switches.
 

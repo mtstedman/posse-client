@@ -4,7 +4,6 @@ import { truncateUtf8String as _truncateUtf8String } from "../../../../shared/fo
 // ATLAS handoff-state resolution, planner slice prefetch, and context rendering.
 
 import fs from "node:fs";
-import { identifierRoutingShadowDetail } from "./identifier-routing-observation.js";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { extractJson } from "../../../../shared/format/functions/json.js";
@@ -57,10 +56,6 @@ import {
 } from "./research-prefetch-policy.js";
 import { isAtlasSymbolId } from "../../../atlas/functions/v2/symbol-id.js";
 import { atlasSymbolRefFromResearchSeed } from "./research-symbols.js";
-import {
-  executeResearchEvidenceReusePrefetch,
-  recordPlannerEvidenceReuseContext,
-} from "../../../research/functions/evidence-reuse-telemetry.js";
 
 const ATLAS_EXACT_PREFETCH_MAX_FILES = 6;
 const ATLAS_EXACT_PREFETCH_MAX_BYTES = 96 * 1024;
@@ -81,11 +76,8 @@ const LIFECYCLE_SURVEY_MAX_BODIES = 3;
 const LIFECYCLE_SURVEY_TOTAL_MAX_TOKENS = 2400;
 const LIFECYCLE_SURVEY_ITEM_MAX_TOKENS = 800;
 
-function _executeAtlasPrefetchForReuse(packet, action, payload, options, telemetry = {}) {
-  return executeResearchEvidenceReusePrefetch(packet, action, payload, options, {
-    ...telemetry,
-    execute: executeEmbeddedAtlasTool,
-  });
+function _executeAtlasPrefetch(packet, action, payload, options) {
+  return executeEmbeddedAtlasTool(action, payload, options);
 }
 
 const ATLAS_DB_PREFETCH_RG_PATTERN = [
@@ -1572,12 +1564,11 @@ function _memoizedSkeletonFetch(packet, file, perFileTimeoutMs) {
   const memo = packet._atlasSkeletonPrefetchMemo;
   const key = String(file);
   if (memo.has(key)) return memo.get(key);
-  const promise = _executeAtlasPrefetchForReuse(
+  const promise = _executeAtlasPrefetch(
     packet,
     "code.skeleton",
     { file },
-    { cwd: packet.cwd, config: packet.atlas_config || undefined, timeoutMs: perFileTimeoutMs, origin: "prefetch" },
-    { retrievalClass: "exact_gap", gapReason: "prefetch_skeleton" },
+    { cwd: packet.cwd, config: packet.atlas_config || undefined, timeoutMs: perFileTimeoutMs, origin: "prefetch" }
   );
   memo.set(key, promise);
   return promise;
@@ -1970,14 +1961,9 @@ export function rankAtlasTreeScopeCandidates(candidates, {
 // + compressed-tree seed annotations). When usable, this IS the handoff
 // prefetch; the graph slice only runs as a fallback when the tree is
 // unavailable or empty.
-async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, action = "tree.scope", prefetchMode = null, atlasConfig = null, execute = _executeAtlasPrefetchForReuse }) {
-  let shadowEnabled = false;
-  let shadow = null;
-  let rankedFiles = [];
-  let shadowError = null;
+async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, action = "tree.scope", prefetchMode = null, atlasConfig = null, execute = _executeAtlasPrefetch }) {
   try {
     const effectiveAtlasConfig = atlasConfig || packet.atlas_config || getAtlasIntegrationConfig();
-    shadowEnabled = effectiveAtlasConfig?.treeIdentifierRoutingShadow === true;
     const entrypointRank = effectiveAtlasConfig?.prefetchEntrypointRank === true && prefetchMode === "broad";
     const treePayload = {
       ...(taskText ? { taskText } : {}),
@@ -1992,27 +1978,19 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
         ? {
           ...effectiveAtlasConfig,
           prefetchEntrypointRank: entrypointRank,
-          identifierRoutingShadowCapture: effectiveAtlasConfig.treeIdentifierRoutingShadow === true,
         }
         : undefined,
       origin: "prefetch",
-    }, {
-      retrievalClass: prefetchMode === "broad" ? "broad" : "seeded",
-      gapReason: prefetchMode === "broad" ? "task_scope_discovery" : "research_seed_expansion",
     });
     if (String(raw || "").startsWith("Error:")) {
-      shadowError = String(raw).slice(0, 300);
-      return { ok: false, action, error: shadowError };
+      return { ok: false, action, error: String(raw).slice(0, 300) };
     }
     const parsed = extractAtlasJsonPayload(raw);
     if (!parsed) {
-      shadowError = `ATLAS returned non-JSON ${action} payload.`;
-      return { ok: false, action, error: shadowError };
+      return { ok: false, action, error: `ATLAS returned non-JSON ${action} payload.` };
     }
     const data = atlasResultData(action, parsed) || {};
-    shadow = data.identifierRoutingShadow || null;
     if (data.available === false) {
-      shadowError = String(data.reason || `${action}_unavailable`);
       return { ok: false, action, error: String(data.reason || `${action}_unavailable`).slice(0, 300) };
     }
     const rawCandidates = atlasResultField(action, parsed, "candidateFiles");
@@ -2021,31 +1999,6 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
       entrypointRank,
       taskText,
     });
-    const rawIdentifierShadow = data?.identifierRoutingShadow;
-    let identifierRoutingShadow = rawIdentifierShadow && typeof rawIdentifierShadow === "object"
-      ? { ...rawIdentifierShadow }
-      : null;
-    if (identifierRoutingShadow?.available && Array.isArray(identifierRoutingShadow.shadowCandidates)) {
-      const liveByPath = new Map((Array.isArray(rawCandidates) ? rawCandidates : [])
-        .filter((entry) => entry && typeof entry.path === "string")
-        .map((entry) => [entry.path, entry]));
-      const shadowRankPool = identifierRoutingShadow.shadowCandidates.map((entry) => ({
-        ...(liveByPath.get(entry.path) || {}),
-        ...entry,
-      }));
-      const handoffShadow = rankAtlasTreeScopeCandidates(shadowRankPool, {
-        prefetchMode,
-        entrypointRank,
-        taskText,
-      });
-      identifierRoutingShadow = {
-        ...identifierRoutingShadow,
-        handoffCandidatePaths: handoffShadow.map((entry) => entry.path),
-        handoffTopChanged: candidates[0]?.path !== handoffShadow[0]?.path,
-      };
-    }
-    shadow = identifierRoutingShadow;
-    rankedFiles = candidates.map(entry => entry.path);
     const candidateFiles = _uniqueAtlasPaths(
       candidates.map((entry) => entry.path),
       ATLAS_TREE_SCOPE_MAX_FILES,
@@ -2080,28 +2033,10 @@ async function _prefetchAtlasTreeScope(packet, { taskText = null, seedFiles, act
       compressionSeeds: Array.isArray(compression?.matchedSeeds) ? compression.matchedSeeds.slice(0, 6) : [],
       areaMap: Array.isArray(compression?.areaMap) ? compression.areaMap.slice(0, 16) : [],
       scopeWidening,
-      identifierRoutingShadow,
       structuralFiles: candidates.filter(_atlasStructuralPriorCandidate).map((entry) => entry.path),
     };
   } catch (err) {
-    shadowError = String(err?.message || err).slice(0, 300);
-    return { ok: false, action, error: shadowError };
-  } finally {
-    if (shadowEnabled) {
-      try {
-        const context = getObservationContext() || {};
-        recordObservation({
-          work_item_id: context.work_item_id ?? packet?.work_item_id ?? null,
-          job_id: context.job_id ?? packet?.job_id ?? null,
-          attempt_id: context.attempt_id ?? null,
-          observation_type: "atlas.prefetch.identifier_routing_shadow",
-          summary: "ATLAS prefetch identifier routing counterfactual",
-          detail: identifierRoutingShadowDetail({ shadow, rankedFiles, error: shadowError }),
-        });
-      } catch {
-        // Diagnostic persistence must never change handoff selection or success.
-      }
-    }
+    return { ok: false, action, error: String(err?.message || err).slice(0, 300) };
   }
 }
 
@@ -2115,7 +2050,7 @@ export function atlasAreaMapFromTreeScope(treeScope) {
 // discard a usable scope result if tree.overview stalls on a very large tree.
 async function _prefetchAtlasAreaMap(packet) {
   try {
-    const raw = await _executeAtlasPrefetchForReuse(packet, "tree.overview", {
+    const raw = await _executeAtlasPrefetch(packet, "tree.overview", {
       maxDepth: 0,
       limit: 1,
       includeLatestRun: false,
@@ -2124,9 +2059,6 @@ async function _prefetchAtlasAreaMap(packet) {
       config: packet.atlas_config || undefined,
       origin: "prefetch",
       timeoutMs: ATLAS_AREA_MAP_PREFETCH_TIMEOUT_MS,
-    }, {
-      retrievalClass: "broad",
-      gapReason: "tree_scope_unavailable",
     });
     if (String(raw || "").startsWith("Error:")) return [];
     const parsed = extractAtlasJsonPayload(raw);
@@ -2146,16 +2078,13 @@ async function _prefetchSeedSymbolCards(packet, { symbolSeeds }) {
     const symbolRefs = symbolSeeds
       .map(atlasSymbolRefFromResearchSeed)
       .filter(Boolean);
-    const raw = await _executeAtlasPrefetchForReuse(packet, "symbol.card", {
+    const raw = await _executeAtlasPrefetch(packet, "symbol.card", {
       ...(symbolIds.length > 0 ? { symbolIds } : {}),
       ...(symbolRefs.length > 0 ? { symbolRefs } : {}),
     }, {
       cwd: packet.cwd,
       config: packet.atlas_config || undefined,
       origin: "prefetch",
-    }, {
-      retrievalClass: "seeded",
-      gapReason: "research_symbol_seed",
     });
     if (String(raw || "").startsWith("Error:")) return [];
     const parsed = extractAtlasJsonPayload(raw);
@@ -2190,7 +2119,6 @@ export async function attachAtlasPlannerSlice(packet) {
       ? (focusState.focus.focusText || legacyTaskText)
       : legacyTaskText;
     if (!taskText) return;
-    recordPlannerEvidenceReuseContext(packet);
 
     // Role-graded inputs: consume the strongest data this tier holds (see
     // resolveAtlasPrefetchPlan). Tree-first: when the tree pass is usable it
@@ -2467,14 +2395,10 @@ async function _prefetchAtlasSurvey(packet, {
     }
     const args = { paths: scope.paths, maxFiles: MAX_SURVEY_FILES };
     if (scope.symbols) args.symbols = scope.symbols;
-    const surveyClass = scope.source === "seeds" || scope.source === "explicit-path" ? "seeded" : "broad";
     const { raw, retries, retryReason } = await _executeAtlasSurveyWithRetry(packet, args, {
       cwd: packet.cwd,
       config: packet.atlas_config || undefined,
       origin: "prefetch",
-    }, {
-      retrievalClass: surveyClass,
-      gapReason: surveyClass === "broad" ? "area_discovery" : "ranked_file_survey",
     });
     const effectiveScope = retryReason === "empty_symbol_filter"
       ? { ...scope, symbols: null, reason: "empty_symbol_filter_retry" }
@@ -2556,7 +2480,7 @@ async function _resolveLifecycleSurveySymbolIds(packet, targets) {
   const symbols = [...new Set(unresolved.map((target) => target.surveyName || target.symbol).filter(Boolean))];
   if (paths.length === 0 || symbols.length === 0) return targets;
   try {
-    const raw = await _executeAtlasPrefetchForReuse(packet, "code.survey", {
+    const raw = await _executeAtlasPrefetch(packet, "code.survey", {
       paths,
       symbols,
       maxFiles: Math.min(MAX_SURVEY_FILES, paths.length),
@@ -2564,9 +2488,6 @@ async function _resolveLifecycleSurveySymbolIds(packet, targets) {
       cwd: packet.cwd,
       config: packet.atlas_config || undefined,
       origin: "prefetch",
-    }, {
-      retrievalClass: "exact_gap",
-      gapReason: "missing_symbol_identity",
     });
     if (String(raw || "").startsWith("Error:")) return targets;
     const parsed = extractAtlasJsonPayload(raw);
@@ -2618,13 +2539,10 @@ async function _prefetchLifecycleSurveyBodies(packet, { taskText, files, focusAd
   try {
     const results = await Promise.all(items.map(async (args) => {
       if (!args) return null;
-      const raw = await _executeAtlasPrefetchForReuse(packet, "code.window", args, {
+      const raw = await _executeAtlasPrefetch(packet, "code.window", args, {
         cwd: packet.cwd,
         config: packet.atlas_config || undefined,
         origin: "prefetch",
-      }, {
-        retrievalClass: "exact_gap",
-        gapReason: "missing_body",
       });
       if (String(raw || "").startsWith("Error:")) return null;
       const parsed = extractAtlasJsonPayload(raw);
@@ -2646,17 +2564,14 @@ async function _prefetchLifecycleSurveyBodies(packet, { taskText, files, focusAd
   }
 }
 
-async function _executeAtlasSurveyWithRetry(packet, args, opts, telemetry = {}) {
-  let raw = await _executeAtlasPrefetchForReuse(packet, "code.survey", args, opts, telemetry);
+async function _executeAtlasSurveyWithRetry(packet, args, opts) {
+  let raw = await _executeAtlasPrefetch(packet, "code.survey", args, opts);
   const retry = atlasSurveyRetryDecision(raw, args);
   if (!retry) return { raw, retries: 0, retryReason: null };
   if (retry.reason === "transient_error") {
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
-  raw = await _executeAtlasPrefetchForReuse(packet, "code.survey", retry.args, opts, {
-    ...telemetry,
-    gapReason: `${telemetry.gapReason || "survey"}_${retry.reason}`,
-  });
+  raw = await _executeAtlasPrefetch(packet, "code.survey", retry.args, opts);
   return { raw, retries: 1, retryReason: retry.reason };
 }
 
@@ -2724,7 +2639,7 @@ function _manifestEntryHitPaths(raw) {
 // Resolve the repository's declared entry points to indexed files: declared
 // files directly, declared Python console-script functions through one exact
 // name search each, kept only when a single non-test file declares the name.
-async function _resolveManifestEntryFiles(packet, { execute = _executeAtlasPrefetchForReuse } = {}) {
+async function _resolveManifestEntryFiles(packet, { execute = _executeAtlasPrefetch } = {}) {
   const root = packet?.cwd;
   if (!root) return [];
   if (manifestEntryCache.has(root)) return manifestEntryCache.get(root);
@@ -2734,8 +2649,7 @@ async function _resolveManifestEntryFiles(packet, { execute = _executeAtlasPrefe
     try {
       const raw = await execute(packet, "symbol.search",
         { query: entry.name, scope: "name", semantic: false, limit: MANIFEST_ENTRY_SEARCH_LIMIT },
-        { cwd: root, origin: "prefetch" },
-        { retrievalClass: "broad", gapReason: "manifest_entry_point" });
+        { cwd: root, origin: "prefetch" });
       const paths = [...new Set(_manifestEntryHitPaths(raw)
         .filter((filePath) => !/(?:^|\/)(?:tests?|testing)\/|(?:^|\/)test_[^/]*\.py$/i.test(filePath)))];
       if (paths.length === 1) resolved.push(paths[0]);
@@ -3100,13 +3014,10 @@ async function _attachAtlasSlicePrefetchContext(packet, {
   };
 
   packet.atlas_slice_prefetch_attempted = true;
-  const raw = await _executeAtlasPrefetchForReuse(packet, "slice.build", sliceArgs, {
+  const raw = await _executeAtlasPrefetch(packet, "slice.build", sliceArgs, {
     cwd: packet.cwd,
     config: packet.atlas_config || undefined,
     origin: "prefetch",
-  }, {
-    retrievalClass: seedFiles.length > 0 ? "seeded" : "broad",
-    gapReason: seedFiles.length > 0 ? "research_seed_expansion" : "tree_scope_unavailable",
   });
 
   if (String(raw || "").startsWith("Error:")) {

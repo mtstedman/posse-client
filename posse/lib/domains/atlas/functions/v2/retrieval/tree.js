@@ -10,7 +10,6 @@ import { readTreeBuildResult } from "../tree-derived.js";
 import { readLatestTreeCompressionSnapshot } from "../tree-compression.js";
 import { runAtlasNativeMethodAsync } from "../native/invoke.js";
 import { isCanonicalRepoPath, normalizeRepoPath } from "../paths.js";
-import { collectTreeIdentifierShadowEvidence } from "./tree-identifier-shadow.js";
 
 const TREE_RUN_KIND = "tree-derived";
 const TREE_TABLES = Object.freeze(["atlas_tree_nodes", "atlas_tree_refs", "derived_state_runs"]);
@@ -222,11 +221,6 @@ async function runTreeScope({ view, versionId, params = {}, action, config = {},
   }
   const widened = action === "tree.scope" ? await collectScopeWidenedPaths({ view, params }) : [];
   const widenedPaths = widened.map((w) => w.path);
-  const identifierRoutingShadow = action === "tree.scope"
-    && config?.identifierRoutingShadowCapture === true;
-  const identifierEvidence = identifierRoutingShadow
-    ? await collectTreeIdentifierShadowEvidence({ db, taskText: params.taskText, planner })
-    : {};
   const result = /** @type {Record<string, unknown>} */ (await runAtlasNativeMethodAsync("tree-scope", {
     tree: readTreeBuildResult(db, { for: "scope" }),
     taskText: params.taskText,
@@ -244,8 +238,6 @@ async function runTreeScope({ view, versionId, params = {}, action, config = {},
     refMatchLimit: params.refMatchLimit,
     siblingNumericFamilyCap: params.siblingNumericFamilyCap,
     taskType: params.taskType,
-    identifierRoutingShadow,
-    ...identifierEvidence,
     compressionSnapshot: readOptionalCompressionSnapshot(db),
   }));
   if (widenedPaths.length > 0) {

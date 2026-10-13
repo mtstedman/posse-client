@@ -568,7 +568,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
       prefetchCacheTtlMs: 600000,
       prefetchEntrypointRank: false,
       researchPrefetchFocusMode: "off",
-      treeIdentifierRoutingShadow: false,
       surveyBriefEdgeCount: 8,
       surveyEdgeCap: 0,
       corruptionCooldownMs: 120000,
@@ -640,7 +639,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const dbPrefetchCacheTtlMs = useLiveSettings ? readDbSetting("atlas_prefetch_cache_ttl_ms") : null;
   const dbPrefetchEntrypointRank = useLiveSettings ? readDbSettingBool("atlas_prefetch_entrypoint_rank") : null;
   const dbResearchPrefetchFocus = useLiveSettings ? readDbSetting("atlas_research_prefetch_focus") : null;
-  const dbTreeIdentifierRoutingShadow = useLiveSettings ? readDbSettingBool("atlas_tree_identifier_routing_shadow") : null;
   const dbSurveyBriefEdgeCount = useLiveSettings ? readDbSetting("atlas_survey_brief_edge_count") : null;
   const dbSurveyEdgeCap = useLiveSettings ? readDbSetting("atlas_survey_edge_cap") : null;
   const dbCorruptionCooldownMs = useLiveSettings ? readDbSetting("atlas_corruption_cooldown_ms") : null;
@@ -783,10 +781,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const researchPrefetchFocusMode = ["off", "shadow", "on"].includes(rawResearchPrefetchFocusMode)
     ? rawResearchPrefetchFocusMode
     : "on";
-  const explicitTreeIdentifierRoutingShadow = explicitValue("treeIdentifierRoutingShadow", "atlas_tree_identifier_routing_shadow");
-  const treeIdentifierRoutingShadow = provided(explicitTreeIdentifierRoutingShadow) && String(explicitTreeIdentifierRoutingShadow).trim() !== ""
-    ? parseBool(explicitTreeIdentifierRoutingShadow)
-    : (dbTreeIdentifierRoutingShadow === true);
   const surveyBriefEdgeCount = Math.max(0, Math.min(32, parseIntOrNull(firstProvided(
     explicitValue("surveyBriefEdgeCount", "atlas_survey_brief_edge_count"),
     dbSurveyBriefEdgeCount,
@@ -861,7 +855,6 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     prefetchCacheTtlMs,
     prefetchEntrypointRank,
     researchPrefetchFocusMode,
-    treeIdentifierRoutingShadow,
     surveyBriefEdgeCount,
     surveyEdgeCap,
     corruptionCooldownMs,

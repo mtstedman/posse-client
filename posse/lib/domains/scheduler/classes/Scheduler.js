@@ -36,8 +36,8 @@ import { DEADLOCK_TERMINAL_STATUSES, LOCK_HOLDING_JOB_STATUSES, RESERVED_SLOT_IM
 import { WAITING_LANE_JOB_TYPE } from "../../../catalog/waiting-lane.js";
 import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atlas.js";
 import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
-import { DEFAULT_LEASE_SEC, DEFAULT_CONCURRENCY, DEFAULT_POLL_MS, DEFAULT_REPAIR_POLL_MS, LOCK_RENEW_SEC, MAX_RUNNABLE_SCAN_PER_TICK, PROGRESS_TIMEOUT_SEC, maxJobRuntimeSecFor, readActiveWorktreeCap, readAtlasDriftCheckIntervalMs, readBoolSetting, readHeadlessHumanTimeoutSec, readHumanGateResnoozeSec, readImplementationReservedSlots, readPositiveIntSetting, readRuntimeWriteCeilingMultiplier, readRuntimeWriteGraceSec } from "../functions/config.js";
-import { collectStrictOnlyRootConflicts, findFileConflict } from "../functions/file-scope.js";
+import { DEFAULT_LEASE_SEC, DEFAULT_CONCURRENCY, DEFAULT_POLL_MS, DEFAULT_REPAIR_POLL_MS, LOCK_RENEW_SEC, MAX_RUNNABLE_SCAN_PER_TICK, PROGRESS_TIMEOUT_SEC, maxJobRuntimeSecFor, readActiveWorktreeCap, readAtlasDriftCheckIntervalMs, readHeadlessHumanTimeoutSec, readHumanGateResnoozeSec, readImplementationReservedSlots, readPositiveIntSetting, readRuntimeWriteCeilingMultiplier, readRuntimeWriteGraceSec } from "../functions/config.js";
+import { findFileConflict } from "../functions/file-scope.js";
 import { RUNTIME_NO_ESCALATION_BACKSTOP_MULTIPLIER, runtimeKillCanEscalate, runtimeWriteExtensionActive } from "../functions/runtime-escalation.js";
 import { jobWriteActivity } from "./JobWriteActivity.js";
 import { WORKTREE_TYPES, createHeldQueueLockIndex } from "../functions/held-locks.js";
@@ -1507,9 +1507,6 @@ export class Scheduler {
             }
           }
         }
-        // Read once per tick: the candidate scan below can touch ~100 jobs
-        // per lap, and each readBoolSetting call is a synchronous DB read.
-        const shadowConflictMetricsEnabled = readBoolSetting("scheduler_shadow_conflict_metrics", true);
 
         // Periodic safety-rebuild of the queue snapshot. State-change
         // emission is the primary path; this catches the rare case where
@@ -2102,7 +2099,6 @@ export class Scheduler {
               skipJobIds.add(job.id);
               continue;
             }
-            let strictShadowOverlaps = [];
             const warmKey = atlasWarmConcurrencyKey(job);
             if (warmKey && activeAtlasWarmKeys.has(warmKey)) {
               rememberBlockedLock({
@@ -2251,9 +2247,6 @@ export class Scheduler {
                   break;
                 }
                 if (blockedByLock) continue;
-                if (shadowConflictMetricsEnabled) {
-                  strictShadowOverlaps = collectStrictOnlyRootConflicts(jobScope, lockedRoots);
-                }
               } else if (lockedFiles.size > 0 || lockedRoots.size > 0) {
                 // Empty scope on a queue-locking job means "we don't know what it
                 // will touch." Serialize it against held repo mutations.
@@ -2327,20 +2320,6 @@ export class Scheduler {
           } // race, try next
 
           clearFileLaneWaitsForJob(job.id, "lane_acquired");
-
-          if (strictShadowOverlaps.length > 0) {
-            logEvent({
-              work_item_id: job.work_item_id,
-              job_id: job.id,
-              event_type: EVENT_TYPES.SCHEDULER_SCOPE_WOULD_HAVE_CONFLICTED,
-              actor_type: EVENT_ACTORS.SCHEDULER,
-              message: `Relaxed root overlap allowed; strict mode would block (${strictShadowOverlaps.length} overlap${strictShadowOverlaps.length === 1 ? "" : "s"})`,
-              event_json: JSON.stringify({
-                overlaps: strictShadowOverlaps.slice(0, 8),
-                overlap_count: strictShadowOverlaps.length,
-              }),
-            });
-          }
 
           // Track file scope AFTER successful lease — prevents polluting
           // the lock set when lease acquisition fails (race with another scheduler).
@@ -2776,10 +2755,6 @@ export class Scheduler {
   get onEvent() {
     return this._onEvent;
   }
-}
-
-export function __testCollectStrictOnlyRootConflicts(jobScope, lockedRoots = new Set()) {
-  return collectStrictOnlyRootConflicts(jobScope, lockedRoots);
 }
 
 export function __testPrepareCrossWiFileSyncHandoff(job, conflict, ownerId = "test-scheduler") {

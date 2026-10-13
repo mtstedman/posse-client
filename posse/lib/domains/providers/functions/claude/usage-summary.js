@@ -35,12 +35,10 @@ const CLAUDE_USAGE_DISK_CACHE_DIR = path.join("cache", "posse");
 const CLAUDE_USAGE_DISK_CACHE_FILE = "claude-oauth-usage.json";
 const CLAUDE_USAGE_LOG_SCAN_CACHE_FILE = "claude-usage-log-scan.jsonl";
 
-let usageSummaryCache = null;
 let usageApiCache = null;
 let usageLogScanner = null;
 
 export function resetClaudeUsageSummaryCache() {
-  usageSummaryCache = null;
   usageApiCache = null;
   usageLogScanner = null;
 }
@@ -69,10 +67,6 @@ function claudeUsageCacheMs() {
 
 function claudeUsageBackoffMs() {
   return readPositiveMsSetting(SETTING_KEYS.CLAUDE_USAGE_BACKOFF_MS, DEFAULT_CLAUDE_USAGE_BACKOFF_MS);
-}
-
-function isDeprecatedClaudeLogUsageEnabled() {
-  return false;
 }
 
 function getClaudeUsageCachePath(configDir = getClaudeConfigDir()) {
@@ -506,22 +500,6 @@ function getCachedClaudeUsageSummary(configDir, nowMs, opts = {}) {
   return null;
 }
 
-function getCachedDeprecatedClaudeUsageSummary(configDir, nowMs, limits, forceRefresh = false) {
-  if (
-    !forceRefresh &&
-    usageSummaryCache &&
-    usageSummaryCache.configDir === configDir &&
-    nowMs - usageSummaryCache.cachedAt <= claudeUsageCacheMs()
-  ) {
-    return {
-      ...usageSummaryCache.summary,
-      windows: summarizeClaudeUsageEntries(usageSummaryCache.entries, nowMs, limits),
-    };
-  }
-
-  return null;
-}
-
 export async function refreshUsageSummary({ nowMs = Date.now(), forceRefresh = false, ignoreBackoff = false, timeoutMs = 8_000 } = {}) {
   const configDir = getClaudeConfigDir();
   const limits = getClaudeUsageLimits();
@@ -566,43 +544,11 @@ export async function refreshUsageSummary({ nowMs = Date.now(), forceRefresh = f
       };
       writeClaudeUsageDiskCache(configDir, usageApiCache);
 
-      if (!isDeprecatedClaudeLogUsageEnabled()) return cloneUsageSummary(fallbackSummary);
+      return cloneUsageSummary(fallbackSummary);
     }
   }
 
-  if (!isDeprecatedClaudeLogUsageEnabled()) {
-    return buildClaudeOauthUnavailableSummary(credentials, nowMs);
-  }
-
-  const cachedDeprecated = getCachedDeprecatedClaudeUsageSummary(configDir, nowMs, limits, forceRefresh);
-  if (cachedDeprecated) return cachedDeprecated;
-
-  const entries = (await loadClaudeUsageEntriesAsync(configDir, nowMs)) || [];
-  const summary = {
-    provider: "claude",
-    source: "claude-local-project-logs-deprecated",
-    subscriptionType: credentials.subscriptionType,
-    rateLimitTier: credentials.rateLimitTier,
-    windows: summarizeClaudeUsageEntries(entries, nowMs, limits),
-    deprecatedFallbackAvailable: true,
-    deprecatedFallbackEnabled: true,
-  };
-
-  usageSummaryCache = {
-    cachedAt: nowMs,
-    configDir,
-    entries,
-    summary: {
-      provider: summary.provider,
-      source: summary.source,
-      subscriptionType: summary.subscriptionType,
-      rateLimitTier: summary.rateLimitTier,
-      deprecatedFallbackAvailable: true,
-      deprecatedFallbackEnabled: true,
-    },
-  };
-
-  return cloneUsageSummary(summary);
+  return buildClaudeOauthUnavailableSummary(credentials, nowMs);
 }
 
 function buildUsageFallbackSummary({ configDir, credentials, nowMs, rateLimited, message }) {
@@ -695,41 +641,9 @@ export function getUsageSummary({ nowMs = Date.now(), forceRefresh = false, igno
       };
       writeClaudeUsageDiskCache(configDir, usageApiCache);
 
-      if (!isDeprecatedClaudeLogUsageEnabled()) {
-        return cloneUsageSummary(fallbackSummary);
-      }
+      return cloneUsageSummary(fallbackSummary);
     }
   }
 
-  if (!isDeprecatedClaudeLogUsageEnabled()) {
-    return buildClaudeOauthUnavailableSummary(credentials, nowMs);
-  }
-
-  const cachedDeprecated = getCachedDeprecatedClaudeUsageSummary(configDir, nowMs, limits, forceRefresh);
-  if (cachedDeprecated) return cachedDeprecated;
-
-  const entries = loadClaudeUsageEntries(configDir, nowMs) || [];
-  const summary = {
-    provider: "claude",
-    source: "claude-local-project-logs-deprecated",
-    subscriptionType: credentials.subscriptionType,
-    rateLimitTier: credentials.rateLimitTier,
-    windows: summarizeClaudeUsageEntries(entries, nowMs, limits),
-    deprecatedFallbackAvailable: true,
-    deprecatedFallbackEnabled: true,
-  };
-
-  usageSummaryCache = {
-    cachedAt: nowMs,
-    configDir,
-    entries,
-    summary: {
-      provider: summary.provider,
-      source: summary.source,
-      subscriptionType: summary.subscriptionType,
-      rateLimitTier: summary.rateLimitTier,
-    },
-  };
-
-  return summary;
+  return buildClaudeOauthUnavailableSummary(credentials, nowMs);
 }
