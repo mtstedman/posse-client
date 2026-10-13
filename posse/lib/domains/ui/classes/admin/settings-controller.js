@@ -469,7 +469,7 @@ export class AdminSettingsController {
   }
 
   _cycleSettingsPane(direction) {
-    const paneIds = SETTINGS_PANES.map((pane) => pane.id);
+    const paneIds = SETTINGS_PANES.filter((pane) => !pane.advanced).map((pane) => pane.id);
     const currentIndex = paneIds.indexOf(this._settingsPane || ADMIN_DEFAULT_SETTINGS_PANE);
     const nextIndex = ((currentIndex >= 0 ? currentIndex : 0) + direction + paneIds.length) % paneIds.length;
     this._settingsPane = paneIds[nextIndex];
@@ -1033,12 +1033,15 @@ export class AdminSettingsController {
     lines.push("");
     lines.push(brandRule({ label: "settings", color: C.cyan, width: ruleWidth }));
     if (settingsPane !== "all") {
-      const paneBar = SETTINGS_PANES.map((pane) => (
+      const paneBar = SETTINGS_PANES.filter((pane) => settingsPane === "debug" ? pane.id === settingsPane : !pane.advanced).map((pane) => (
         pane.id === settingsPane
           ? `${C.bold}${C.cyan}[${pane.label}]${C.reset}`
           : `${C.dim}${pane.label}${C.reset}`
       )).join(` ${C.dim}|${C.reset} `);
-      lines.push(` ${paneBar}  ${C.dim}←/→ switch pane${C.reset}`);
+      lines.push(` ${paneBar}${settingsPane === "debug" ? "" : `  ${C.dim}←/→ switch pane${C.reset}`}`);
+    }
+    if (settingsPane === "debug") {
+      lines.push(` ${C.dim}Advanced tuning, experiments, and rollback controls. [Esc] Back to settings${C.reset}`);
     }
     lines.push(` ${C.magenta}default${C.reset} ${C.dim}·${C.reset} ${C.cyan}changed${C.reset} ${C.dim}· select a row to read its full description below${C.reset}`);
 
@@ -1125,7 +1128,8 @@ export class AdminSettingsController {
   // full description (the table truncates it), its ID, default, and scope.
   _buildSettingsFooterLines(fullW, navLabel) {
     const lines = [
-      ` ${C.dim}[←→] Pane  [↑↓] Select  [PgUp/PgDn] Section  [Enter] Edit  [${navLabel}] Tab  [Esc] Exit${C.reset}`,
+      ` ${C.dim}[←→] Pane  [↑↓] Select  [PgUp/PgDn] Section  [Enter] Edit${C.reset}`,
+      ` ${C.dim}[Ctrl+A] ${this._settingsPane === "debug" ? "Back" : "Advanced"}  [${navLabel}] Tab  [Esc] ${this._settingsPane === "debug" ? "Back" : "Exit"}${C.reset}`,
     ];
     const selected = this._getSelectedEditableSetting();
     if (selected) {

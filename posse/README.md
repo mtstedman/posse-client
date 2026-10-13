@@ -403,6 +403,12 @@ finite, unlimited, and unknown capacity windows, budget configured-vs-unset
 state (including numeric zero), and measured-vs-unavailable spend without raw
 provider responses or credentials. Human `posse usage` output is unchanged.
 
+The interactive admin has four sections: Settings, Dashboard, Work, and Changes.
+Use `Tab` or `1`–`4` to switch. Dashboard opens first; press `r` there for saved
+report analytics and `Esc` to return. Settings keeps everyday controls in General,
+Agents, Providers, ATLAS, and Repository. Press `Ctrl+A` for advanced tuning and
+experiments; `Esc` returns to the settings pane you came from.
+
 `posse admin describe --json` emits the generated `posse.admin.v1` settings
 catalog, including type, scope, numeric/options metadata, editability, and
 source/default state. Sensitive rows expose presence only. Mutations use

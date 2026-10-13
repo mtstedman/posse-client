@@ -1,8 +1,8 @@
 // AdminTUI.js — Admin TUI for stats, work-item history, and settings.
 //
 // Standalone TUI that uses alternate screen + raw mode.
-// Tabs: Settings | Dashboard | Work | Changes | Reports
-// Navigation: 1-5 or Tab to switch, ↑↓ to scroll/select, Enter to drill in or
+// Tabs: Settings | Dashboard | Work | Changes (Reports lives under Dashboard)
+// Navigation: 1-4 or Tab to switch, ↑↓ to scroll/select, Enter to drill in or
 // edit, Esc/Bksp to back up, ←→ to switch settings panes.
 
 import readline from "readline";
@@ -40,6 +40,7 @@ import { ADMIN_DEFAULT_SETTINGS_PANE, SETTINGS_PANES, formatAdminSettingValue, g
 
 // Keep Settings on shortcut 1, but start on Dashboard so the first screen shows
 // the operational agent/work summary instead of configuration controls.
+// Saved report analytics live inside Dashboard rather than a separate tab.
 // Prompts and outputs are read per call from Work Items; the raw log browser
 // and the ATLAS A/B report were debug-only pages and are gone.
 const ADMIN_TABS = Object.freeze([
@@ -47,7 +48,6 @@ const ADMIN_TABS = Object.freeze([
   Object.freeze({ id: "overview", name: "Dashboard" }),
   Object.freeze({ id: "work_items", name: "Work" }),
   Object.freeze({ id: "diff_review", name: "Changes" }),
-  Object.freeze({ id: "reports", name: "Reports" }),
 ]);
 const ADMIN_TAB_COUNT = ADMIN_TABS.length;
 const ADMIN_TAB_KEYS = new Set(ADMIN_TABS.map((_, index) => String(index + 1)));
@@ -81,6 +81,10 @@ export class AdminTUI {
     this.projectDir = projectDir;
     this._tab = ADMIN_INITIAL_TAB_INDEX; // index into ADMIN_TABS — starts on Dashboard
     this._scroll = 0;
+    this._dashboardReports = false;
+    this._dashboardScroll = 0;
+    this._reportsScroll = 0;
+    this._settingsReturnPane = ADMIN_DEFAULT_SETTINGS_PANE;
     this._tabScrolls = Array.from({ length: ADMIN_TAB_COUNT }, () => 0);
     this._purgeLogsConfirm = false;
     this._purgeLogsMessage = "";
@@ -164,6 +168,26 @@ export class AdminTUI {
 
     this.cols = process.stdout.columns || 120;
     this.rows = process.stdout.rows || 40;
+  }
+
+  _toggleDashboardReports() {
+    if (this._dashboardReports) this._reportsScroll = this._scroll;
+    else this._dashboardScroll = this._scroll;
+    this._dashboardReports = !this._dashboardReports;
+    this._scroll = this._dashboardReports ? this._reportsScroll : this._dashboardScroll;
+    this._tabScrolls[this._tab] = this._scroll;
+  }
+
+  _toggleAdvancedSettings() {
+    if (this._settingsPane === "debug") {
+      this._settingsPane = this._settingsReturnPane;
+    } else {
+      this._settingsReturnPane = this._settingsPane || ADMIN_DEFAULT_SETTINGS_PANE;
+      this._settingsPane = "debug";
+    }
+    this._settingsIndex = 0;
+    this._scroll = 0;
+    this._tabScrolls[this._tab] = 0;
   }
 
   _tabId() {
@@ -768,7 +792,11 @@ export class AdminTUI {
 
     const tabId = this._tabId();
     if (key && key.name === "escape") {
-      if (tabId === "diff_review" && this._diffFocus === "diff") {
+      if (tabId === "overview" && this._dashboardReports) {
+        this._toggleDashboardReports();
+      } else if (tabId === "settings" && this._settingsPane === "debug") {
+        this._toggleAdvancedSettings();
+      } else if (tabId === "diff_review" && this._diffFocus === "diff") {
         this._diffFocus = "nav";
       } else if (tabId === "work_items" && this._selectedCall != null) {
         this._selectedCall = null;
@@ -779,6 +807,10 @@ export class AdminTUI {
       } else {
         this._exit();
       }
+    } else if (tabId === "overview" && matchesHotkey(str, key, "r")) {
+      this._toggleDashboardReports();
+    } else if (tabId === "settings" && key?.ctrl && key.name === "a") {
+      this._toggleAdvancedSettings();
     } else if (matchesHotkey(str, key, "q") && tabId !== "settings") {
       // On the settings tab printable keys (including q) fall through to the
       // type-to-edit fallback below instead of quitting.
@@ -1099,17 +1131,19 @@ export class AdminTUI {
 
     const builders = {
       settings: () => this._buildSettings(fullW),
-      overview: () => this._buildOverview(fullW),
+      overview: () => [
+        ` ${C.bold}Dashboard / ${this._dashboardReports ? "Reports" : "Overview"}${C.reset}  ${C.dim}[r] ${this._dashboardReports ? "Overview" : "Reports"}${C.reset}`,
+        ...(this._dashboardReports ? this._buildReports(fullW) : this._buildOverview(fullW)),
+      ],
       work_items: () => this._buildWorkItemsTab(fullW),
       diff_review: () => this._buildGitDiffReview(fullW),
-      reports: () => this._buildReports(fullW),
     };
     const tabId = this._tabId();
     const content = builders[tabId]().map(normalizeAdminLine);
 
     // Tab bar
     const tabBar = ADMIN_TABS.map((tab, i) => {
-      const body = `${i + 1} ${tab.name}`.padEnd(10);
+      const body = `${i + 1} ${tab.name}`;
       return i === this._tab
         ? `${C.bold}${C.cyan}▌${body}▐${C.reset}`
         : `${C.dim} ${body} ${C.reset}`;
@@ -1158,6 +1192,8 @@ export class AdminTUI {
       } else {
         navLines.push(` ${C.dim}[↑↓] Select file  [→/Enter] Diff pane  [PgUp/PgDn] Page files  [r] Refresh  [${ADMIN_TAB_NAV_LABEL}] Section  [q/Esc] Exit${C.reset}`);
       }
+    } else if (tabId === "overview") {
+      navLines.push(` ${C.dim}[r] ${this._dashboardReports ? "Overview" : "Reports"}  [${ADMIN_TAB_NAV_LABEL}] Section  [↑↓] Scroll  ${this._dashboardReports ? "[Esc] Back  [q] Exit" : "[q/Esc] Exit"}${C.reset}`);
     } else if (tabId === "settings") {
       navLines.push(...this._buildSettingsFooterLines(fullW, ADMIN_TAB_NAV_LABEL));
     } else {

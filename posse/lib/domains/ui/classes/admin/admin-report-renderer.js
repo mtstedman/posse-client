@@ -152,7 +152,7 @@ export function renderAdminReportDashboardSummary(reports, width) {
   if (data.fallbackPricedUsd > 0) lines.push(fit(` ${C.dim}Fallback-priced subtotal: ${fmtUsd(data.fallbackPricedUsd)}${C.reset}`, inner));
   lines.push(fit(` ${C.green}${data.merged} merged${C.reset}  ·  ${success}  ·  ${fmtDuration(data.duration)} agent time  ·  ${data.toolCalls} tool calls`, inner));
   const recent = data.runs.slice(0, 10).reverse();
-  lines.push(fit(` ${C.dim}Recent token trend${C.reset}  ${C.cyan}${sparkline(recent.map((run) => run.tokens))}${C.reset}  ${C.dim}latest ${data.latest?.timestamp || "unknown"}  ·  [5] Reports for detail${C.reset}`, inner));
+  lines.push(fit(` ${C.dim}Recent token trend${C.reset}  ${C.cyan}${sparkline(recent.map((run) => run.tokens))}${C.reset}  ${C.dim}latest ${data.latest?.timestamp || "unknown"}  ·  [r] Reports for detail${C.reset}`, inner));
   lines.push("");
   return lines;
 }

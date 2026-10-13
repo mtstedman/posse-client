@@ -597,7 +597,8 @@ export const ADMIN_ROLE_PURPOSES = Object.freeze({
 //
 // The admin TUI settings tab is split into panes (switched with ←/→), ordered
 // by how often operators reach for them: everyday workflow first, internals
-// last. Each group below belongs to exactly one pane and renders its `keys`
+// last. Advanced is opened explicitly rather than included in normal pane
+// rotation. Each group below belongs to exactly one pane and renders its `keys`
 // (display-keys, matching what the settings snapshot returns) in the listed
 // order. Debug holds experiments, rollbacks, and tuning; its groups carry a
 // short `hint` naming what kind of knob they are.
@@ -611,7 +612,7 @@ export const SETTINGS_PANES = Object.freeze([
   Object.freeze({ id: "providers", label: "Providers" }),
   Object.freeze({ id: "atlas", label: "ATLAS" }),
   Object.freeze({ id: "repo", label: "Repository" }),
-  Object.freeze({ id: "debug", label: "Debug" }),
+  Object.freeze({ id: "debug", label: "Advanced", advanced: true }),
 ]);
 
 export const ADMIN_DEFAULT_SETTINGS_PANE = "general";
