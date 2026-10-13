@@ -207,7 +207,7 @@ function requeueForRecovery(job, { ts, gateJobId, note, key }) {
   return true;
 }
 
-function reopenFailedWorkItem(workItemId, status, reason) {
+export function reopenFailedWorkItem(workItemId, status, reason) {
   const ts = now();
   const result = getDb().prepare(`
     UPDATE work_items

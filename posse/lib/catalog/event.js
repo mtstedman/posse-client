@@ -297,6 +297,7 @@ export const EVENT_TYPES = Object.freeze({
   JOB_REVIEW_RESOLVED: "job.review_resolved",
   JOB_REVIEW_RETRY_ASSESSMENT: "job.review_retry_assessment",
   JOB_REVIEW_RETRY_LIMIT: "job.review_retry_limit",
+  JOB_OPERATOR_REPAIR: "job.operator_repair",
   JOB_REVIEW_SKIPPED: "job.review_skipped",
   JOB_RUNTIME_ESCALATION_SKIPPED: "job.runtime_escalation_skipped",
   JOB_RUNTIME_EXCEEDED: "job.runtime_exceeded",

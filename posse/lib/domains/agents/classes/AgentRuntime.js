@@ -65,7 +65,9 @@ export function buildAgentToolInstructions(tools, definition, { callerOwned = fa
     ...(batching ? [
       `For multiple independent, ready calls, return one JSON array of up to ${TOOL_BATCH_MAX_CALLS} tool-call objects instead. Wait for results before making dependent calls.`,
     ] : []),
-    `The runtime permits at most ${definition.limits.calls} completed tool calls in this turn.`,
+    callerOwned
+      ? "This response may request one tool call. After its result arrives, you may request another call to continue the same user task. The caller enforces the overall task budget."
+      : `The runtime permits at most ${definition.limits.calls} completed tool calls in this turn.`,
     callerOwned ? "The caller owns tool execution and confirmation. Request a tool and wait for its real result; requesting an action never proves it executed."
       : writeMode === "confirm" ? "A write tool pauses for operator confirmation. Request it normally, then wait for the runtime result."
       : writeMode === "allow" ? "The operator has explicitly allowed this persona to run its listed write tools without per-call confirmation."

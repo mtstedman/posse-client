@@ -1,4 +1,4 @@
-import { AGENT_DISPATCH_PROTOCOL } from "../../../catalog/agent.js";
+import { AGENT_DISPATCH_PROTOCOL, AGENT_DISPATCH_PROTOCOL_ERROR } from "../../../catalog/agent.js";
 import { buildAgentToolInstructions } from "../classes/AgentRuntime.js";
 import { agentProviderUsesNativeTools, callAgentProvider, resolveAgentProvider } from "./provider-route.js";
 import { dispatchTranscript, renderConversation, toolCallId } from "./transcript.js";
@@ -43,8 +43,19 @@ export async function dispatchAgentTurn(request, dependencies = {}) {
   const content = String(generated?.output || "").trim();
   const nativeCalls = generated?.toolCalls || (generated?.toolCall ? [generated.toolCall] : null);
   const parsed = parseAgentToolTurn(content);
-  demand(!(nativeCalls ? (!nativeCalls.length && (parsed.malformed || parsed.calls.length)) : parsed.malformed),
-    "Provider simulated a tool result; no tool executed");
+  const stats = generated?.stats || {};
+  const priced = estimateCallCost({ provider: route.provider, modelName: stats.modelName || route.modelName,
+    modelTier: "standard", inputTokens: stats.inputTokens, outputTokens: stats.outputTokens,
+    cachedInputTokens: stats.cachedInputTokens, cacheCreationInputTokens: stats.cacheCreationInputTokens,
+    knownCostUsd: stats.costUsd, longContextInputTokens: stats.longContextInputTokens });
+  const usage = { ...stats, costUsd: priced.source === "none" ? null : priced.costUsd };
+  if (nativeCalls ? (!nativeCalls.length && (parsed.malformed || parsed.calls.length)) : parsed.malformed) {
+    // The caller owns correction attempts and must charge this failed response
+    // against its normal turn/spend budget before asking the provider again.
+    throw Object.assign(new Error("Provider returned a malformed tool response; no tool executed"), {
+      code: AGENT_DISPATCH_PROTOCOL_ERROR, stats: usage,
+    });
+  }
   const calls = (nativeCalls || parsed.calls).map((call, index) => ({
     id: toolCallId(call, request.messages.length, index), name: call.name, arguments: call.arguments,
   }));
@@ -53,13 +64,8 @@ export async function dispatchAgentTurn(request, dependencies = {}) {
   const message = { role: "assistant", content: nativeCalls || !calls.length ? content : "",
     ...(calls.length ? { tool_calls: calls, raw: JSON.stringify({ name: calls[0].name, arguments: calls[0].arguments }) } : {}),
     ...(generated?.providerContent ? { provider_content: generated.providerContent } : {}) };
-  const stats = generated?.stats || {};
-  const priced = estimateCallCost({ provider: route.provider, modelName: stats.modelName || route.modelName,
-    modelTier: "standard", inputTokens: stats.inputTokens, outputTokens: stats.outputTokens,
-    cachedInputTokens: stats.cachedInputTokens, cacheCreationInputTokens: stats.cacheCreationInputTokens,
-    knownCostUsd: stats.costUsd, longContextInputTokens: stats.longContextInputTokens });
   return { protocol: AGENT_DISPATCH_PROTOCOL, provider: route.provider, model: route.modelName,
-    message, stats: { ...stats, costUsd: priced.source === "none" ? null : priced.costUsd } };
+    message, stats: usage };
 }
 
 export async function runAgentDispatchCli(argv, io = {}) {
@@ -78,7 +84,7 @@ export async function runAgentDispatchCli(argv, io = {}) {
     stdout.write(`${JSON.stringify(result)}\n`);
     return 0;
   } catch (error) {
-    stdout.write(`${JSON.stringify({ protocol: AGENT_DISPATCH_PROTOCOL,
+    stdout.write(`${JSON.stringify({ protocol: AGENT_DISPATCH_PROTOCOL, ...(error?.stats ? { stats: error.stats } : {}),
       error: { code: error?.code || "dispatch_failed", message: error?.message || String(error) } })}\n`);
     return 1;
   }

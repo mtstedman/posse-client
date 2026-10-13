@@ -58,6 +58,8 @@ export const BRIDGE_COMMANDS = Object.freeze({
   WORK_ITEMS_TAIL: "work_items.tail",
   QUESTION_ANSWER: "question.answer",
   AGENT_NUDGE: "agent.nudge",
+  REPAIR_INSPECT: "repair.inspect",
+  REPAIR_APPLY: "repair.apply",
   ASK: "ask",
   REVIEW_APPROVE: "review.approve",
   REVIEW_REJECT: "review.reject",

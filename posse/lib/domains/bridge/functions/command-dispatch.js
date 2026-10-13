@@ -39,6 +39,7 @@ import {
   resolveReviewGateJob,
 } from "./review-decision.js";
 import { executeGitPushGate } from "./git-push-gate.js";
+import { inspectRepair, applyRepair } from "./operator-repair.js";
 import { answerWorkItemQuestion, nudgeWorkItemAgent } from "./work-item-actions.js";
 import { projectWorkItemHistory, projectWorkItemTail } from "./work-item-history.js";
 import { projectWorkItemOverview } from "./work-item-overview.js";
@@ -98,6 +99,7 @@ const MUTATING_COMMAND_SET = new Set([
   BRIDGE_COMMANDS.GIT_PUSH,
   BRIDGE_COMMANDS.QUESTION_ANSWER,
   BRIDGE_COMMANDS.AGENT_NUDGE,
+  BRIDGE_COMMANDS.REPAIR_APPLY,
   BRIDGE_COMMANDS.TEAM_SUBMISSION_DECIDE,
   BRIDGE_COMMANDS.TEAM_POLICY_SET,
   BRIDGE_COMMANDS.TEAM_GRANT_REQUEST,
@@ -412,6 +414,12 @@ async function executeAllowedCommand(name, args = {}, context = {}) {
 
     case BRIDGE_COMMANDS.QUESTION_ANSWER:
       return answerWorkItemQuestion(args, context);
+
+    case BRIDGE_COMMANDS.REPAIR_INSPECT:
+      return inspectRepair(args, context);
+
+    case BRIDGE_COMMANDS.REPAIR_APPLY:
+      return applyRepair(args, context);
 
     case BRIDGE_COMMANDS.AGENT_NUDGE:
       return nudgeWorkItemAgent(args, context);

@@ -1489,7 +1489,7 @@ export function finalizeApprovedWorkItemMerge(id) {
   return db.inTransaction ? execute() : runImmediateTransaction(db, execute);
 }
 
-function effectiveMergedEvidence(db, current) {
+export function effectiveMergedEvidence(db, current) {
   if (!current) return false;
   if (current.merge_state === "merged") return true;
   return !!db.prepare(`
