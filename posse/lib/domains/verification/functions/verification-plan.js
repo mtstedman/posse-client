@@ -1,3 +1,4 @@
+import { isUnrunnableTestReason } from "./test-capability-reasons.js";
 import { VERIFICATION_PLAN_SCHEMA_VERSION, VERIFICATION_PLAN_CONFIG, STAGES, INTENTS, CHECK_ID_RE } from "../../../catalog/verification-plan.js";
 export { VERIFICATION_PLAN_SCHEMA_VERSION, VERIFICATION_PLAN_CONFIG } from "../../../catalog/verification-plan.js";
 // Versioned repository verification plans. The repository, not the planner,
@@ -143,7 +144,8 @@ function normalizeCheck(raw, index, validateCommand) {
   if (!STAGES.includes(stage)) return { error: `verification_check_stage_invalid:${id}` };
   const displayCommand = cwd === "." ? command : `cd ${cwd} && ${command}`;
   const validation = validateCommand(displayCommand);
-  if (!validation?.ok) return { error: `${validation?.reason || "verification_check_command_invalid"}:${id}` };
+  const unavailable = !validation?.ok && isUnrunnableTestReason(validation?.reason);
+  if (!validation?.ok && !unavailable) return { error: `${validation?.reason || "verification_check_command_invalid"}:${id}` };
   return {
     check: {
       id,
@@ -153,7 +155,8 @@ function normalizeCheck(raw, index, validateCommand) {
       cwd_relative: validation.cwd_relative !== undefined ? validation.cwd_relative : (cwd === "." ? null : cwd),
       intent,
       stage,
-      required: raw?.required !== false && stage !== "fast",
+      required: !unavailable && raw?.required !== false && stage !== "fast",
+      ...(unavailable ? { unavailable_reason: validation.reason } : {}),
       depends_on: dependencies,
       timeout_policy: String(raw?.timeout_policy || "repository"),
       evidence: {

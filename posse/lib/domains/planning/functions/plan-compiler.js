@@ -1969,7 +1969,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           if (declaredTestCommand) {
             const testCommandValidation = validatePlannerTestCommand(declaredTestCommand);
             const repositoryValidation = testCommandValidation.ok
-              ? validatePlannerTestCommandForRepository(declaredTestCommand, planReadRoot)
+              ? validatePlannerTestCommandForRepository(declaredTestCommand, planReadRoot, { filesToCreate: t.files_to_create || [] })
               : testCommandValidation;
             plannerTestCommandValid = repositoryValidation.ok;
             if (testCommandValidation.ok && !repositoryValidation.ok) {

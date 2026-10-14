@@ -19,7 +19,7 @@ import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { latestTestReceiptDelta } from "./test-execution-receipt.js";
 import { attributedDebtCoverageEstablished, debtCoverageEstablished, renderTestFailureSummary } from "./test-failure-evidence.js";
-import { verificationOutcome, isAdvisoryTestResult } from "./verification-outcome.js";
+import { verificationOutcome, isAdvisoryTestResult, isUnrunnableTestResult } from "./verification-outcome.js";
 import { requiresTestVerification } from "../../../settings/functions/test-strictness.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { getMaxFixChainDepth, getWiFailureThreshold } from "../../../settings/functions/tunables.js";
@@ -160,7 +160,7 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
   // Strict mode requires a runnable verification plan at every risk level.
   // The planner can replan its own command; only the repository can fix its
   // committed registry. Permissive mode retains these as diagnostics.
-  if (strict && verdict?.verdict === "pass" && ["rejected", "invalid_test_plan"].includes(post?.status)) {
+  if (strict && verdict?.verdict === "pass" && !isUnrunnableTestResult(post) && ["rejected", "invalid_test_plan"].includes(post?.status)) {
     const detail = post.validation_error || post.reason || post.status;
     if (rejectedByRepositoryPlan(post)) {
       return {
@@ -211,7 +211,7 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
   const singleCheckDebt = post?.status === "failed" && !Array.isArray(post?.check_runs)
     && testRun?.delta !== "out_of_scope_failure"
     && (testRun?.debt_only === true || testRun?.delta === "persistent_failure" || post?.baseline_attribution?.debt_only === true);
-  if (verdict?.verdict === "pass" && singleCheckDebt
+  if (verdict?.verdict === "pass" && singleCheckDebt && !isUnrunnableTestResult(post)
     && !debtCoverageEstablished(post, testRun?.baseline) && !attributedDebtCoverageEstablished(post)) {
     return {
       ...verdict,
@@ -259,6 +259,7 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
 
 export function capVerdictForDeterministicTestRegression(verdict, testRun = null) {
   const postChange = testRun?.postChange || testRun?.post_change || null;
+  if (isUnrunnableTestResult(postChange)) return verdict;
   if (testRun?.debt_only === true && postChange?.status === "failed") {
     return {
       ...verdict,
@@ -312,6 +313,7 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
 export function capVerdictForChangedTestFailure(verdict, testRun = null) {
   const postChange = testRun?.postChange || testRun?.post_change || null;
   const changed = postChange?.changed_tests || null;
+  if (isUnrunnableTestResult(changed)) return verdict;
   const attribution = changed?.baseline_attribution || null;
   // A timeout keeps its uncertainty unless the base run shows that same file
   // passing before the change (delta "regression"); a new file that hangs has
@@ -361,6 +363,7 @@ export function capVerdictForChangedTestFailure(verdict, testRun = null) {
 // plan problem at every risk level, not a pass.
 export function capVerdictForNonDiscriminatingTestFailure(verdict, testRun = null) {
   const postChange = testRun?.postChange || testRun?.post_change || null;
+  if (isUnrunnableTestResult(postChange)) return verdict;
   if (verdict?.verdict !== "pass"
     || testRun?.delta !== "indeterminate"
     || testRun?.debt_only === true
@@ -747,7 +750,8 @@ export function capVerdictForHighRiskVerificationGap(
     };
   }
 
-  if (!strict) return verdict;
+  if (!strict || isUnrunnableTestResult(postChange)
+    || (!postChange && payload?._pruned_tests?.length && !payload.test_command && !payload.tests_to_run?.length)) return verdict;
 
   // When the verification gap is structural (no runner for the changed files,
   // no toolchain in the repository), a stronger assessor cannot close it: it

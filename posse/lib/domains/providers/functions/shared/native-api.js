@@ -13,9 +13,10 @@ import { LIVE_CHANNEL_TOOL_NAMES } from "../../../../shared/tools/functions/tool
 import { buildDisabledAtlasAttachment, resolveAtlasAssignmentUnit, resolveAtlasExecutionAttachment, withAtlasExecutionPolicySnapshot, logAtlasAttachment } from "../../../integrations/functions/atlas.js";
 import { buildDeterministicReadMcpServerConfigAsync, releaseDeterministicMcpServerSession } from "../../../integrations/functions/deterministic-mcp.js";
 import { resolveAtlasToolGateEnabled } from "../../../integrations/functions/deterministic-mcp/gate-settings.js";
+import { copyProviderOptions } from "./provider-options.js";
 
 export async function callNativeApiProvider(provider, promptText, options = {}) {
-  let opts = { role: "planner", modelTier: "standard", reasoningEffort: "medium", allowTests: true, projectDbCapability: "none", ...options };
+  let opts = copyProviderOptions(options, { role: "planner", modelTier: "standard", reasoningEffort: "medium", allowTests: true, projectDbCapability: "none", ...options });
   const cwd = opts.mcpCwd || opts.cwd || process.cwd();
   if (opts.disableSystemTools === false) throw new Error("Native API providers require issued MCP tools only");
   const attachment = opts.disableAtlas
@@ -31,9 +32,9 @@ export async function callNativeApiProvider(provider, promptText, options = {}) 
     });
     if (composed) {
       promptText = composed.promptText;
-      opts = { ...opts, ...narrowProviderOptionsToRemoteIssuance({ ...opts, sessionPacket: composed.packet }),
+      opts = copyProviderOptions(opts, { ...narrowProviderOptionsToRemoteIssuance({ ...opts, sessionPacket: composed.packet }),
         stableContext: composed.stableContext || opts.stableContext,
-        remoteSystemPrompt: composed.remoteSystemPrompt || opts.remoteSystemPrompt, skipRolePrompt: true };
+        remoteSystemPrompt: composed.remoteSystemPrompt || opts.remoteSystemPrompt, skipRolePrompt: true });
     }
   }
   const maxTurns = opts.maxTurns || getMaxTurnsForProvider(provider, opts);
@@ -45,14 +46,14 @@ export async function callNativeApiProvider(provider, promptText, options = {}) 
     if (opts.disableAgentTools === true) {
       if (opts.allowWrite) throw new Error("A tool-free native turn cannot have write access");
     } else {
-      owner = await buildDeterministicReadMcpServerConfigAsync(opts.role, {
+      owner = await buildDeterministicReadMcpServerConfigAsync(opts.role, copyProviderOptions(opts, {
         ...opts, cwd, providerName: provider, promptChars: String(promptText || "").length,
         disableSystemTools: true, isolateProviderHome: false,
         atlasAvailable: !opts.disableAtlas && attachment.active,
         atlasGateEnabled: resolveAtlasToolGateEnabled(),
         atlasConfig: withAtlasExecutionPolicySnapshot(opts.atlasConfig, attachment),
         remoteToolSurface: opts._remoteToolSurface,
-      });
+      }));
       if (!owner?.ready) throw new Error(`Native ${provider} requires a ready MCP gateway`);
       issuedToolIds = await nativeIssuedToolIds(opts.mcpGate);
     }
@@ -84,7 +85,7 @@ export async function callNativeApiProvider(provider, promptText, options = {}) 
       ...opts, cwd, systemPrompt, stableContext: null, maxTurns, maxOutputTokens, stallTimeoutMs,
       issuedToolIds, budgetExemptToolIds: issuedToolIds.filter(id => LIVE_CHANNEL_TOOL_NAMES.has(id.replace(/^tools\./u, ""))),
     });
-    const result = await runNativeDispatch(request, { ...opts, projectDir: opts.projectDir || cwd });
+    const result = await runNativeDispatch(request, copyProviderOptions(opts, { projectDir: opts.projectDir || cwd }));
     result.stats.atlasMethod = opts.disableAtlas ? null : attachment.method || "baseline";
     result.stats.toolUsesLoggedByToolkit = true;
     return result;

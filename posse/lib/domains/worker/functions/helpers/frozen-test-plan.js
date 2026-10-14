@@ -168,7 +168,31 @@ function withUnresolvedTestSelection(plan, unresolved) {
     }] };
 }
 
-export function resolveFrozenTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
+// A durable replacement for an obsolete obligation, including when intake
+// pruned it before assessment began. This never reintroduces the command as
+// runnable work and never rewrites its historical failure receipts.
+export function prunedTestPlan(payload = {}) {
+  const pruned = Array.isArray(payload._pruned_tests) ? payload._pruned_tests : [];
+  if (!pruned.length) return null;
+  const planId = sha256(JSON.stringify(pruned));
+  return {
+    schema_version: RECEIPT_SCHEMA_VERSION, plan_id: planId, source: "planner",
+    command: "pruned test selection", execution_command: "pruned test selection",
+    check_id: `legacy:${planId.slice(0, 16)}`, intent: "test", verification_eligible: false,
+    execution_checks: pruned.map((entry) => ({
+      id: `legacy:${sha256(entry.command || entry.path).slice(0, 16)}`,
+      command: entry.command || entry.path, intent: "test", required: false, unavailable_reason: entry.reason,
+    })),
+  };
+}
+
+export function resolveFrozenTestPlan(job = {}, payload = {}, options = {}) {
+  const plan = resolveTestPlan(job, payload, options);
+  const base = payload._test_capability_base_commit || payload.root_base_commit || payload.commit_base_hash;
+  return plan && base ? { ...plan, capability_base_commit: base } : plan;
+}
+
+function resolveTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
   if (!["dev", "fix"].includes(String(job?.job_type || ""))) return null;
   if (String(payload?.task_mode || "code") !== "code") return null;
   const declaredCommand = typeof payload?.test_command === "string"
@@ -332,6 +356,7 @@ export function frozenTestPlanFromReceipt(receipt = {}) {
     cwd_relative: cwdRelative,
     source,
     plan_id: planId,
+    ...(receipt.capability_base_commit ? { capability_base_commit: receipt.capability_base_commit } : {}),
     check_id: receipt.check_id || null,
     intent: receipt.intent || "test",
     verification_plan: receipt.verification_plan || null,

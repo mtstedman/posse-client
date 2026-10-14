@@ -11,7 +11,7 @@ import { validatePlannerTestCommandForRepository } from "../../../verification/f
 export { validatePlannerTestCommand, validatePlannerTestCommandForRepository, operationalCommandApprovalRequest } from "../../../verification/functions/planner-test-command.js";
 import { classifyNestedRunnerInfrastructureFailure, classifyPackageManagerTestPlanFailure } from "../../../verification/functions/test-runner-failure.js";
 export { classifyNestedRunnerInfrastructureFailure } from "../../../verification/functions/test-runner-failure.js";
-import { resolveFrozenTestPlan, frozenTestPlanFromReceipt } from "./frozen-test-plan.js";
+import { resolveFrozenTestPlan, frozenTestPlanFromReceipt, prunedTestPlan } from "./frozen-test-plan.js";
 export { resolveFrozenTestPlan } from "./frozen-test-plan.js";
 import { currentCommit, currentHeadRef, repositoryFingerprint, worktreeFingerprint, dirtyPathDigests, dirtyFingerprintFromDigests, environmentFilesFingerprint, isAncestorCommit, porcelain, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
 export { dirtyWorktreeFingerprint, environmentFilesFingerprint, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
@@ -23,7 +23,8 @@ import { runCommand, MAX_STREAM_CHARS } from "./test-command-process.js";
 import { withBaselineCheckout } from "../../../verification/functions/baseline-checkout.js";
 import fs from "fs";
 import path from "path";
-import { getArtifact, getArtifacts, storeArtifact } from "../../../queue/functions/index.js";
+import { getArtifact, getArtifacts, storeArtifact, updateJobPayload } from "../../../queue/functions/index.js";
+import { pruneTestHandoff, testCommandCapability } from "../../../verification/functions/test-capability.js";
 import { getRecentArtifactsByMimeType } from "../../../queue/functions/artifacts.js";
 import { knownRedCommandsFromReceipts } from "./known-red-test-history.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
@@ -643,7 +644,9 @@ async function executeReceipt({
   // An unavailable registry obligation has no command of its own to validate.
   if (!["task_ab_acceptance", "operator_approved_operation", "planner_unit_tests"].includes(plan.source)
     && plan.check_id !== REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID && phase === "baseline") {
-    const repositoryValidation = validatePlannerTestCommandForRepository(plan.command, cwd);
+    const repositoryValidation = validatePlannerTestCommandForRepository(plan.command, cwd, {
+      filesToCreate: JSON.parse(job?.payload_json || "{}").files_to_create || [],
+    });
     if (!repositoryValidation.ok) {
       return storeReceipt(job, attemptId, {
         kind: RECEIPT_KIND,
@@ -731,19 +734,22 @@ async function executeReceipt({
     : cwd;
   const hasExecutionChecks = Array.isArray(plan.execution_checks) && plan.execution_checks.length > 0;
   const rawResult = hasExecutionChecks
-    ? await runVerificationChecks(plan, { cwd, policy: effectivePolicy, phase })
+    ? await runVerificationChecks(plan, { cwd, policy: effectivePolicy, phase,
+        baselineCommit: plan.capability_base_commit || (baselineReceipt?.status === "passed" ? baselineReceipt.commit_hash : null) || "HEAD" })
     : Array.isArray(plan.unit_test_paths)
     ? await runUnitTestFiles({
         projectDir: cwd,
         paths: plan.unit_test_paths,
         capability: discoverUnitTestCapability({ projectDir: cwd }),
         timeoutMs: effectivePolicy.wall_timeout_ms,
-      }).then(unitTestCommandResult)
+      }).then((aggregate) => unitTestCommandResult(aggregate, { cwd,
+        baselineCommit: plan.capability_base_commit || (baselineReceipt?.status === "passed" ? baselineReceipt.commit_hash : null) || "HEAD" }))
     : await runCommand(executionCommand, {
         cwd: executionCwd,
         timeoutMs: effectivePolicy.wall_timeout_ms,
         idleTimeoutMs: effectivePolicy.idle_timeout_ms,
         trustedShell: plan.source === "task_ab_acceptance",
+        baselineCommit: plan.capability_base_commit || (baselineReceipt?.status === "passed" ? baselineReceipt.commit_hash : null) || "HEAD",
       });
   const plannerClassifiedResult = !hasExecutionChecks && !["task_ab_acceptance", "operator_approved_operation"].includes(plan.source) && phase === "baseline"
     ? classifyPackageManagerTestPlanFailure(executionCommand, rawResult)
@@ -796,6 +802,7 @@ async function executeReceipt({
     execution_command: executionCommand,
     cwd_relative: plan.cwd_relative || null,
     source: plan.source,
+    ...(plan.capability_base_commit ? { capability_base_commit: plan.capability_base_commit } : {}),
     ...(Array.isArray(plan.unit_test_paths) ? { unit_test_paths: plan.unit_test_paths } : {}),
     ...(Array.isArray(plan.covered_unit_test_paths) ? { covered_unit_test_paths: plan.covered_unit_test_paths } : {}),
     ...(Array.isArray(plan.execution_checks) ? { execution_checks: plan.execution_checks } : {}),
@@ -909,6 +916,25 @@ export async function __testRetryAfterDependencyRepair(receipt, repairDependenci
   return retryAfterDependencyRepair(receipt, repairDependencies, rerun);
 }
 
+function pruneJobTests(job, payload, cwd) {
+  payload ||= {};
+  const baseline = job?.id ? findLatestFrozenTestBaseline(job.id) : null;
+  const withBaseline = baseline?.status === "passed" && baseline.commit_hash
+    && baseline.commit_hash !== payload._test_capability_base_commit
+    ? { ...payload, _test_capability_base_commit: baseline.commit_hash } : payload;
+  const pruned = pruneTestHandoff(withBaseline, cwd, { jobId: job?.id });
+  if (pruned !== payload) {
+    // Persist before dev/assessment handoff so fix and replan descendants do
+    // not inherit the discarded command. Historical receipts stay intact.
+    Object.assign(payload, pruned);
+    if (job?.id) {
+      job.payload_json = JSON.stringify(payload);
+      updateJobPayload(job.id, job.payload_json);
+    }
+  }
+  return payload;
+}
+
 export async function ensurePreDevelopmentTestBaseline({
   job,
   payload,
@@ -925,6 +951,7 @@ export async function ensurePreDevelopmentTestBaseline({
     return legacy ? { ...legacy, reused: true } : null;
   }
   const effectivePolicy = effectiveVerificationPolicy({ cwd, policy, timeoutMs, idleTimeoutMs });
+  payload = pruneJobTests(job, payload, cwd);
   const plan = resolveFrozenTestPlan(job, payload, { cwd });
   if (!plan) return null;
   const existing = findFrozenTestBaseline(job?.id, { policy: effectivePolicy, projectDir: cwd, planId: plan.plan_id });
@@ -1143,12 +1170,20 @@ export async function ensurePostChangeTestReceipt({
   repairDependencies = null,
 } = {}) {
   if (!cwd) return null;
+  payload = pruneJobTests(job, payload, cwd);
   const effectivePolicy = effectiveVerificationPolicy({ cwd, policy, timeoutMs, idleTimeoutMs });
   const baseline = findFrozenTestBaseline(job?.id, { policy: effectivePolicy, projectDir: cwd });
   const assessedCommit = commitHash || await currentCommit(cwd);
   let plan = baseline
     ? frozenTestPlanFromReceipt(baseline)
     : resolveFrozenTestPlan(job, payload, { cwd });
+  // An in-flight job may already have failed receipts for the discarded
+  // selection. Record its current unavailable result rather than leaving a
+  // historical failure as the latest evidence for this same candidate.
+  if (!plan && payload._pruned_tests?.length) {
+    plan = prunedTestPlan(payload);
+  }
+  if (plan && payload._test_capability_base_commit) plan = { ...plan, capability_base_commit: payload._test_capability_base_commit };
   const lineageBase = lineageBaseCommit(job, payload);
   // Every discovered test file the change creates or edits runs in the
   // post-change receipt, whether or not the task was asked to write tests. The
@@ -1227,7 +1262,8 @@ export async function ensurePostChangeTestReceipt({
     policy: effectivePolicy,
     projectDir: cwd,
     treeFingerprint: reusableTreeFingerprint,
-    accept: (receipt) => coverageEstablished(receipt) && (changedTestPaths === "[]" || (
+    accept: (receipt) => ![plan, ...(plan.execution_checks || [])].some((check) => testCommandCapability(check.command, cwd))
+      && coverageEstablished(receipt) && (changedTestPaths === "[]" || (
       REUSABLE_RECEIPT_STATUSES.has(receipt.changed_tests?.status)
       && JSON.stringify(receipt.changed_tests.paths || []) === changedTestPaths
     )),

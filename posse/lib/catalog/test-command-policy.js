@@ -1,5 +1,12 @@
 import { readonlySet } from "./readonly-collections.js";
 
+export const NODE_TEST_VALUE_FLAGS = readonlySet([
+  "-r", "--require", "--import", "--loader", "--experimental-loader", "--conditions", "-C",
+  "--test-reporter", "--test-name-pattern", "--test-skip-pattern", "--test-timeout",
+  "--test-concurrency", "--test-shard", "--input-type",
+]);
+export const PHP_TEST_VALUE_FLAGS = readonlySet(["-d", "--define", "-c", "--php-ini"]);
+
 // Flags rejected in planner commands and their declared package scripts.
 export const MUTATING_TEST_FLAGS = readonlySet([
   "-u", "--accept", "--bless", "--coverage", "--cov", "--fix", "--record",

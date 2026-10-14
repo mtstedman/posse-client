@@ -1,7 +1,7 @@
 import { TEST_RECEIPT_MAX_EVIDENCE_OUTPUT_CHARS as MAX_EVIDENCE_OUTPUT_CHARS, REUSABLE_RECEIPT_STATUSES } from "../../../../catalog/verification.js";
 import path from "path";
 import { parseTypecheckDiagnostics } from "../../../../shared/tools/functions/toolkit/scoped-runners.js";
-import { isVerificationInfrastructureOutcome, verificationOutcome } from "./verification-outcome.js";
+import { isVerificationInfrastructureOutcome, verificationOutcome, isUnrunnableTestResult } from "./verification-outcome.js";
 import { isBaselineTestFailure, renderTestFailureSummary } from "./test-failure-evidence.js";
 
 function statusLabel(receipt) {
@@ -176,6 +176,9 @@ export function renderTestExecutionEvidence({
     `source: ${plan.source}`,
     `baseline: ${statusLabel(baseline)} (exit ${baseline?.exit_code ?? "unknown"}, ${baseline?.duration_ms ?? 0}ms)`,
     `post_change: ${statusLabel(postChange)} (exit ${postChange?.exit_code ?? "unknown"}, ${postChange?.duration_ms ?? 0}ms)`,
+    [postChange, changedTests, ...(postChange?.check_runs || [])].some(isUnrunnableTestResult)
+      ? "Unavailable harness checks are pruned from required verification. They are not passing tests or product failures and must not cause a fix, replan, or review request. Assess the implementation and the runnable checks."
+      : null,
     postChange?.coverage_status ? `post_change_coverage: ${postChange.coverage_status}` : null,
     ...(Array.isArray(postChange?.check_runs) ? postChange.check_runs.map((check) =>
       `check ${check.check_id || check.command}: ${String(check.status || "unknown").toUpperCase()} [coverage: ${check.coverage_status || "unknown"}]${check.reason ? ` (${check.reason})` : ""}`) : []),

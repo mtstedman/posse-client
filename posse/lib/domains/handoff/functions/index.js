@@ -1,3 +1,4 @@
+import { pruneTestHandoff } from "../../verification/functions/test-capability.js";
 // Handoff context builder + deterministic context enrichment.
 //
 // Two entry points:
@@ -950,7 +951,7 @@ export function buildHandoffPacket(job, opts) {
     projectContext = "",
     mode = "build",
   } = opts;
-  const sanitizedPayload = _sanitizePayloadForRecipient(role, payload);
+  const sanitizedPayload = _sanitizePayloadForRecipient(role, pruneTestHandoff(payload, cwd, { jobId: job.id }));
   const contextHints = opts.context_hints || opts.contextHints || {};
   const atlasDisabled = !!(
     opts.disableAtlas ||
@@ -1466,6 +1467,14 @@ export async function handoff(input, { providerName = null, reviewerChildIdentit
     ?? null;
 
   const recipient = packet.recipient;
+  const runnableTests = pruneTestHandoff(packet, packet.cwd, { jobId: packet.job_id });
+  if (runnableTests !== packet) {
+    packet.test_command = runnableTests.test_command;
+    packet.tests_to_run = runnableTests.tests_to_run;
+    packet._pruned_tests = runnableTests._pruned_tests;
+    packet._raw_payload = { ...packet._raw_payload, test_command: packet.test_command,
+      tests_to_run: packet.tests_to_run, _pruned_tests: packet._pruned_tests };
+  }
 
   // Fix jobs often originate from assessor instructions that name the actual
   // file to repair. Make that named file writable before the zero-scope

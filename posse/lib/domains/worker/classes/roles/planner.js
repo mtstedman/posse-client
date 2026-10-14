@@ -1,3 +1,4 @@
+import { pruneTestHandoff } from "../../../verification/functions/test-capability.js";
 // lib/domains/worker/classes/roles/planner.js
 //
 // Planner role handler that builds per-work-item task plans, prepares planner
@@ -299,7 +300,7 @@ export class PlannerRole extends BaseRole {
     } = this.roleDeps();
 
     const workItem = getWorkItem(job.work_item_id);
-    const payload = worker.parsePayload(job);
+    let payload = worker.parsePayload(job);
     const assessmentReplan = payload._assessment_replan === true;
     const assessmentEvidenceSelectors = assessmentReplan && Array.isArray(payload.assessment_evidence_selectors)
       ? payload.assessment_evidence_selectors.map((value) => String(value || "").trim()).filter(Boolean)
@@ -318,6 +319,7 @@ export class PlannerRole extends BaseRole {
       plannerReadRoot = replanCwd.cwd;
       ctx.assessmentReplanCwd = replanCwd;
     }
+    payload = pruneTestHandoff(payload, plannerReadRoot, { jobId: job.id });
     const assessmentReplanContext = assessmentReplan
       ? buildPlannerAssessmentReplanContext(payload, {
           readRoot: plannerReadRoot,

@@ -6,6 +6,9 @@ import { parseCommandArguments } from "../../../../shared/scope/functions/test-c
 import { TEST_SUBPROCESS_ENV_KEYS, VERIFICATION_PULSE_CAPABILITY_ENV } from "../../../../catalog/process.js";
 import { parentSecretValues, redactExactValues } from "../../../../shared/platform/functions/subprocess-output.js";
 import { filterProcessEnv } from "../../../../shared/platform/functions/process-env.js";
+import { testCommandCapability } from "../../../verification/functions/test-capability.js";
+import { TEST_CAPABILITY_PRUNED_REASON, TEST_RUNNER_REMOVED_REASON } from "../../../../catalog/verification.js";
+import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 
 export const MAX_STREAM_CHARS = 256 * 1024;
 
@@ -56,7 +59,7 @@ export function killProcessTree(child, {
 }
 
 /** @param {string} command
- * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal}} options
+ * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal, baselineCommit?: string}} options
  */
 export async function runCommand(command, {
   cwd,
@@ -64,8 +67,21 @@ export async function runCommand(command, {
   idleTimeoutMs = null,
   trustedShell = false,
   signal: abortSignal = null,
+  baselineCommit = "HEAD",
 } = {}) {
   abortSignal?.throwIfAborted();
+  const unavailable = !trustedShell && testCommandCapability(command, cwd, { baselineCommit });
+  if (unavailable === TEST_RUNNER_REMOVED_REASON) {
+    return { status: "failed", ok: false, code: 1, signal: null, timed_out: false,
+      duration_ms: 0, stdout: "", stderr: "The candidate removed a test script present at its verification baseline.",
+      stdout_truncated: false, stderr_truncated: false, timeout_kind: null, reason: unavailable };
+  }
+  if (unavailable) {
+    log.warn("verification", "Pruned unavailable test execution", { command, cwd, reason: unavailable });
+    return { status: "skipped", ok: null, code: null, signal: null, timed_out: false,
+      duration_ms: 0, stdout: "", stderr: "", stdout_truncated: false, stderr_truncated: false,
+      timeout_kind: null, reason: TEST_CAPABILITY_PRUNED_REASON, capability_reason: unavailable };
+  }
   const startedAt = Date.now();
   const idleLimitMs = Number(idleTimeoutMs) > 0 ? Math.max(1000, Number(idleTimeoutMs)) : null;
   let pulseBroker = null;

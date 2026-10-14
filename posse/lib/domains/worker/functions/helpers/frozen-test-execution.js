@@ -7,12 +7,22 @@ import { discoverUnitTestCapability, runUnitTestFiles } from "../../../../shared
 import { testExecutionCounts } from "../../../../shared/tools/functions/toolkit/test-output-counts.js";
 import { exactDeclaredTestInvocation } from "./frozen-test-plan.js";
 import { classifyPackageManagerTestPlanFailure, classifyNestedRunnerInfrastructureFailure } from "../../../verification/functions/test-runner-failure.js";
+import { isUnrunnableTestResult } from "./verification-outcome.js";
+import { testCommandCapability, testFileRemovedSinceBaseline } from "../../../verification/functions/test-capability.js";
+import { TEST_RUNNER_REMOVED_REASON } from "../../../../catalog/verification.js";
 
 // Project file-runner output into the command-result shape shared by receipts
 // and final review. Final review exposes the detailed outcome label and the
 // runner's aggregate reason; stored checks retain their historical status text.
-export function unitTestCommandResult(aggregate, { finalReview = false } = {}) {
-  const results = aggregate.results;
+export function unitTestCommandResult(aggregate, { finalReview = false, cwd = null, baselineCommit = "HEAD" } = {}) {
+  const results = cwd ? aggregate.results.map((result) => {
+    if (!cwd || !testFileRemovedSinceBaseline(result.path, cwd, baselineCommit)) return result;
+    return { ...result, status: "failed", ok: false, reason: TEST_RUNNER_REMOVED_REASON,
+      stderr: "The candidate removed a test file present at its verification baseline." };
+  }) : aggregate.results;
+  if (results.some((result) => result.reason === TEST_RUNNER_REMOVED_REASON)) {
+    aggregate = { ...aggregate, status: "failed", ok: false, reason: TEST_RUNNER_REMOVED_REASON };
+  }
   return {
     status: aggregate.status,
     ok: aggregate.ok,
@@ -25,7 +35,7 @@ export function unitTestCommandResult(aggregate, { finalReview = false } = {}) {
       return `[${result.path}] ${String(label)}\n${String(result.stdout || "")}`.trim();
     }).join("\n\n"),
     stderr: results.map((result) => String(result.stderr || "")).filter(Boolean).join("\n\n"),
-    reason: finalReview ? aggregate.reason || null
+    reason: aggregate.reason === TEST_RUNNER_REMOVED_REASON ? aggregate.reason : finalReview ? aggregate.reason || null
       : aggregate.ok == null ? results.find((result) => result.ok == null)?.reason || "unit_test_unavailable" : null,
     stdout_truncated: results.some((result) => result.stdout_truncated === true),
     stderr_truncated: results.some((result) => result.stderr_truncated === true),
@@ -56,7 +66,7 @@ export function effectiveVerificationPolicy({ cwd, policy = null, timeoutMs = nu
   return { ...effective, fingerprint: verificationPolicyFingerprint(effective) };
 }
 
-async function runVerificationCheck(check, { cwd, policy, phase = null, signal = null } = {}) {
+async function runVerificationCheck(check, { cwd, policy, phase = null, signal = null, baselineCommit = "HEAD" } = {}) {
   const executionCommand = check.execution_command || check.command;
   const raw = Array.isArray(check.unit_test_paths)
     ? await runUnitTestFiles({
@@ -65,13 +75,14 @@ async function runVerificationCheck(check, { cwd, policy, phase = null, signal =
         capability: discoverUnitTestCapability({ projectDir: cwd }),
         timeoutMs: policy.wall_timeout_ms,
         signal,
-      }).then(unitTestCommandResult)
+      }).then((aggregate) => unitTestCommandResult(aggregate, { cwd, baselineCommit }))
     : await runCommand(executionCommand, {
         cwd: check.cwd_relative ? path.resolve(cwd, check.cwd_relative) : cwd,
         timeoutMs: policy.wall_timeout_ms,
         signal,
         idleTimeoutMs: policy.idle_timeout_ms,
         trustedShell: check.source === "task_ab_acceptance",
+        baselineCommit,
       });
   const classified = check.source !== "task_ab_acceptance" && check.source !== "operator_approved_operation" && phase === "baseline"
     ? classifyPackageManagerTestPlanFailure(executionCommand, raw) : raw;
@@ -123,7 +134,7 @@ export function aggregateCheckCoverageStatus(checkRuns = []) {
   return "unknown";
 }
 
-export async function runVerificationChecks(plan, { cwd, policy, phase = null, signal = null } = {}) {
+export async function runVerificationChecks(plan, { cwd, policy, phase = null, signal = null, baselineCommit = plan.capability_base_commit || "HEAD" } = {}) {
   const checks = Array.isArray(plan.execution_checks) && plan.execution_checks.length > 0
     ? plan.execution_checks : [{ ...plan, id: plan.check_id }];
   // Each check gets the policy's full wall. The plan as a whole is bounded by
@@ -141,7 +152,7 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
   const runs = [];
   for (const check of checks) {
     signal?.throwIfAborted();
-    if (check.unavailable_reason) {
+    if (check.unavailable_reason && testCommandCapability(check.command, cwd, { baselineCommit }) !== TEST_RUNNER_REMOVED_REASON) {
       runs.push({ check_id: check.id || null, command: check.command, intent: check.intent || "test",
         status: "unavailable", ok: null, reason: check.unavailable_reason,
         coverage_status: check.intent && check.intent !== "test" ? "not_applicable" : "unknown",
@@ -155,7 +166,7 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
     }
     const checkWall = Math.min(wall, remaining);
     const run = await runVerificationCheck(check, { cwd,
-      policy: { ...policy, wall_timeout_ms: checkWall, idle_timeout_ms: policy.idle_timeout_ms == null
+      baselineCommit, policy: { ...policy, wall_timeout_ms: checkWall, idle_timeout_ms: policy.idle_timeout_ms == null
         ? null : Math.min(policy.idle_timeout_ms, checkWall) }, phase, signal });
     runs.push(run.status === "timed_out" && run.timeout_kind !== "idle" && checkWall < wall
       ? budgetExhausted(check, { timeout_kind: "plan_budget", duration_ms: run.duration_ms || 0,
@@ -181,8 +192,9 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
     // A check's own cut output, or the joined output cut here, is partial.
     stdout_truncated: runs.some((run) => run.stdout_truncated === true) || stdout.length > MAX_STREAM_CHARS,
     stderr_truncated: runs.some((run) => run.stderr_truncated === true) || stderr.length > MAX_STREAM_CHARS,
-    reason: runs.find((run) => run.status !== "passed")?.reason || null,
+    reason: (runs.find((run) => run.status === status) || runs.find((run) => run.status !== "passed"))?.reason || null,
     check_runs: runs.map((run) => ({ check_id: run.check_id, command: run.command, intent: run.intent,
+      ...(isUnrunnableTestResult(run) ? { required: false } : {}),
       status: run.status, ok: run.ok, reason: run.reason, exit_code: run.code,
       duration_ms: run.duration_ms, test_counts: run.test_counts || null,
       coverage_status: run.coverage_status || "unknown", failure_fingerprint: checkRunFailureFingerprint(run, { executionRoot: cwd }),
@@ -216,12 +228,13 @@ export async function runFrozenTestPlanOnce(plan, { cwd, timeoutMs = null, signa
         capability: discoverUnitTestCapability({ projectDir: cwd }),
         timeoutMs: policy.wall_timeout_ms,
         signal,
-      }).then((aggregate) => unitTestCommandResult(aggregate, { finalReview: true }))
+      }).then((aggregate) => unitTestCommandResult(aggregate, { finalReview: true, cwd, baselineCommit: plan.capability_base_commit || "HEAD" }))
     : await runCommand(plan.execution_command || plan.command, {
         cwd: plan.cwd_relative ? path.resolve(cwd, plan.cwd_relative) : cwd,
         timeoutMs: policy.wall_timeout_ms,
         signal,
         idleTimeoutMs: policy.idle_timeout_ms,
+        baselineCommit: plan.capability_base_commit || "HEAD",
       });
   const result = hasExecutionChecks ? raw
     : classifyNestedRunnerInfrastructureFailure(plan.execution_command || plan.command, raw, { projectRoot: cwd });

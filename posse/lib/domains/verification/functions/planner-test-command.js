@@ -1,3 +1,4 @@
+import { testCommandScriptPaths } from "./test-command-script-paths.js";
 import { NODE_PACKAGE_MANAGER_EXECUTABLES } from "../../../catalog/node-package-managers.js";
 import { MUTATING_TEST_FLAGS, INTERACTIVE_TEST_FLAGS } from "../../../catalog/test-command-policy.js";
 import { declaredNodeTestCommand } from "../../../shared/tools/functions/toolkit/repository-test-runner.js";
@@ -479,10 +480,16 @@ function declaredScriptValidation(definitions = []) {
     : { ok: false, reason: TEST_SCRIPT_NO_VERIFICATION_REASON };
 }
 
-export function validatePlannerTestCommandForRepository(command, cwd) {
+export function validatePlannerTestCommandForRepository(command, cwd, { filesToCreate = [] } = {}) {
   const shape = validatePlannerTestCommand(command);
   if (!shape.ok) return shape;
-  if (shape.direct_script_relative) {
+  // Admission proves test intent, not that an interpreter's script exists.
+  // Keep the original argv casing and resolve against the command's cwd.
+  const interpreterScripts = testCommandScriptPaths(shape.execution_command, commandExecutable(shape.execution_command));
+  const scripts = interpreterScripts.length ? interpreterScripts
+    : shape.direct_script_relative ? [shape.direct_script_relative] : [];
+  if (interpreterScripts.length) shape.direct_script_interpreter = true;
+  if (scripts.length) {
     const projectRoot = path.resolve(cwd);
     const root = shape.cwd_relative
       ? path.resolve(projectRoot, shape.cwd_relative)
@@ -490,28 +497,36 @@ export function validatePlannerTestCommandForRepository(command, cwd) {
     if (root !== projectRoot && !root.startsWith(`${projectRoot}${path.sep}`)) {
       return { ok: false, reason: "test_command_contains_unsafe_working_directory" };
     }
-    const scriptPath = path.resolve(root, shape.direct_script_relative);
-    if (scriptPath !== projectRoot && !scriptPath.startsWith(`${projectRoot}${path.sep}`)) {
-      return { ok: false, reason: "test_command_contains_unsafe_path" };
+    for (const script of scripts) {
+      const scriptPath = path.resolve(root, script);
+      if (scriptPath !== projectRoot && !scriptPath.startsWith(`${projectRoot}${path.sep}`)) {
+        return { ok: false, reason: "test_command_contains_unsafe_path" };
+      }
+      let stat;
+      try {
+        stat = fs.lstatSync(scriptPath);
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          // Only an exact declared creation can justify a not-yet-existing
+          // runner. Modify scopes and unrelated new files are not evidence.
+          if (filesToCreate.some((file) => typeof file === "string"
+            && path.resolve(projectRoot, file) === scriptPath)) continue;
+          return { ok: false, reason: "test_script_missing", missing_script: path.relative(projectRoot, scriptPath).replace(/\\/g, "/") };
+        }
+        return { ok: false, reason: "test_script_unreadable" };
+      }
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        return { ok: false, reason: "test_script_not_regular" };
+      }
+      if (!shape.direct_script_interpreter && process.platform !== "win32" && (stat.mode & 0o111) === 0) {
+        return { ok: false, reason: "test_script_not_executable" };
+      }
     }
-    let stat;
-    try {
-      stat = fs.lstatSync(scriptPath);
-    } catch (error) {
-      if (error?.code === "ENOENT") return { ok: false, reason: "test_script_missing" };
-      return { ok: false, reason: "test_script_unreadable" };
-    }
-    if (!stat.isFile() || stat.isSymbolicLink()) {
-      return { ok: false, reason: "test_script_not_regular" };
-    }
-    if (!shape.direct_script_interpreter && process.platform !== "win32" && (stat.mode & 0o111) === 0) {
-      return { ok: false, reason: "test_script_not_executable" };
-    }
-    return {
+    return declaredNodeTestCommand(cwd, {
       ...shape,
       repository_validated: true,
-      script_relative: path.relative(projectRoot, scriptPath).replace(/\\/g, "/"),
-    };
+      script_relative: path.relative(projectRoot, path.resolve(root, scripts[0])).replace(/\\/g, "/"),
+    });
   }
   const packageInvocation = packageManagerScriptInvocation(command);
   if (!packageInvocation) return declaredNodeTestCommand(cwd, shape);

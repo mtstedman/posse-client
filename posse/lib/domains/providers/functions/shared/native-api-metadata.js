@@ -6,6 +6,7 @@ import { escalateModelTier } from "./turns.js";
 import { classifyProviderError } from "./api-resilience.js";
 import { providerRuntimeState } from "../../classes/runtime-state-singleton.js";
 import { callNativeApiProvider, callNativeApiAgentTurn } from "./native-api.js";
+import { copyProviderOptions } from "./provider-options.js";
 import { providerDispatchPromptFieldSupportedSync } from "../../../../shared/native/functions/engagement-client.js";
 
 // Selection and cross-provider scheduling remain Node responsibilities.
@@ -19,7 +20,7 @@ export function nativeApiMetadata(provider, credential) {
     const key = tier in MODEL_TIERS ? tier : "standard";
     return { ...MODEL_TIERS[key], model: setting(`${provider}_model_${key}`) || MODEL_TIERS[key].model };
   };
-  const select = options => ({ ...options, modelName: selectExecutionModel({
+  const select = options => copyProviderOptions(options, { modelName: selectExecutionModel({
     jobModelName: options.modelName, globalModelOverride: setting(`${provider}_model`),
     tierModel: getModelTierConfig(options.modelTier).model,
   }) });

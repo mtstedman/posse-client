@@ -4,6 +4,17 @@
 // regression.
 import { requiresTestVerification } from "../../../settings/functions/test-strictness.js";
 import { PERMISSIVE_TEST_OUTCOMES } from "../../../../catalog/verification.js";
+import { isUnrunnableTestReason } from "../../../verification/functions/test-capability-reasons.js";
+
+export function isUnrunnableTestResult(value) {
+  if (!value) return false;
+  const children = value.check_runs || value.file_results || value.results;
+  if (Array.isArray(children) && children.length) {
+    return children.some(isUnrunnableTestResult)
+      && children.every((child) => child.status === "passed" || isUnrunnableTestResult(child));
+  }
+  return value.status !== "passed" && isUnrunnableTestReason(value.reason || value.validation_error);
+}
 
 export const VERIFICATION_OUTCOME_SCHEMA_VERSION = 1;
 
@@ -80,6 +91,10 @@ export function isVerificationInfrastructureOutcome(value) {
 }
 
 export function isAdvisoryTestResult(value, options = {}) {
+  // Strictness can require available verification, never an absent harness.
+  if (isUnrunnableTestResult(value)) return true;
+  const children = value?.check_runs || value?.file_results || value?.results;
+  if (Array.isArray(children) && children.some((child) => child.status === "failed" && !isUnrunnableTestResult(child))) return false;
   if (requiresTestVerification(options)) return false;
   const type = value?.verification_outcome?.type || verificationOutcome(value).type;
   return PERMISSIVE_TEST_OUTCOMES.includes(type);

@@ -12,6 +12,6 @@ export function requiresTestVerification(options = {}) {
 
 export function renderTestStrictness(options = {}) {
   return requiresTestVerification(options)
-    ? "Repository test strictness: strict. Missing test execution requires verification recovery. Unknown case counts alone do not invalidate a successful run."
+    ? "Repository test strictness: strict. Runnable checks require verification. Unavailable test harnesses are pruned from requirements and must not trigger fixes, replans, or review requests. Unknown case counts alone do not invalidate a successful run."
     : "Repository test strictness: permissive. Missing, unavailable, unconfigured, or zero tests and unknown coverage are advisory, not reasons to fail, replan, lower confidence, or request human review. Judge the implementation using the available evidence. Actual test failures and demonstrated product defects remain actionable.";
 }
