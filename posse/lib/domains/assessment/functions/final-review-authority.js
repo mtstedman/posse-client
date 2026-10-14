@@ -1,5 +1,4 @@
 import { emptyMaterializedPathsForJob } from "../../handoff/functions/helpers/file-materialization.js";
-import { isAdvisoryTestResult } from "../../worker/functions/helpers/verification-outcome.js";
 import { getTestStrictness } from "../../settings/functions/test-strictness.js";
 // A final review authorizes the scoped bytes, named read dependencies, and
 // task contract it saw.
@@ -15,6 +14,12 @@ import { finalReviewScope } from "./final-review-snapshot.js";
 import { finalReviewFindingCorrection } from "./final-review-boundaries.js";
 
 const digest = (value) => createHash("sha256").update(value).digest("hex");
+// In-process authority cannot be manufactured by a model's JSON response.
+// Recovered jobs obtain a fresh authorization by verifying the durable review.
+const acceptedPasses = new WeakMap();
+export function isAuthoritativeFinalReviewPass(job, verdict) {
+  return verdict?.verdict === "pass" && acceptedPasses.get(verdict) === job.id;
+}
 
 function reviewContract(payload) {
   return Object.fromEntries(FINAL_REVIEW_CONTRACT_FIELDS.map((key) => [key, payload?.[key] ?? null]));
@@ -114,10 +119,8 @@ export async function authoritativeFinalReview(job, payload, cwd) {
         instructions: [...reasons, review.repair, ...diagnostics].filter(Boolean).join("\n\n"),
       } }], _final_reviewer_agent_call_id: review.reviewer_agent_call_id };
   }
-  if (!isAdvisoryTestResult(review.changed_tests, { projectDir: cwd })
-    && ["unavailable", "infrastructure_error", "invalid", "timed_out", "skipped"].includes(review.changed_tests?.status)) {
-    return unresolved(`Changed test verification is incomplete (${review.changed_tests.reason || review.changed_tests.status}); a passing review cannot establish execution of those tests.`);
-  }
-  return { verdict: "pass", confidence: "high", reasons: [review.summary || "Final review passed for the exact committed change and task contract."],
+  const verdict = { verdict: "pass", confidence: "high", reasons: [review.summary || "Final review passed for the exact committed change and task contract."],
     spawn_jobs: [], human_questions: [], _final_reviewer_agent_call_id: review.reviewer_agent_call_id };
+  acceptedPasses.set(verdict, job.id);
+  return verdict;
 }

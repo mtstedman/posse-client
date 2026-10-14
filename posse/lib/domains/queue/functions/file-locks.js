@@ -1088,8 +1088,10 @@ function findOrdinaryWriteLockConflict(job, scope = getJobWriteScope(job), snaps
  * writers also widen to the WI-local assessment barrier; queued and parked
  * siblings may remain, but another live same-WI writer makes acquisition fail.
  * DB-only and non-worktree jobs transition without creating a file barrier.
+ * Final-review completion can acquire the same ownership barrier while
+ * preserving the execution status, without entering assessment.
  */
-export function acquireAssessmentBarrier(jobId, leaseToken) {
+export function acquireAssessmentBarrier(jobId, leaseToken, { preserveStatus = false } = {}) {
   const db = getDb();
   const id = Number(jobId);
   const result = runImmediateTransaction(db, () => {
@@ -1118,26 +1120,26 @@ export function acquireAssessmentBarrier(jobId, leaseToken) {
     const ts = now();
     const updated = db.prepare(`
       UPDATE jobs
-      SET status = 'awaiting_assessment',
+      SET status = ?,
           updated_at = ?,
           state_version = state_version + 1
       WHERE id = ?
         AND lease_token = ?
         AND status IN (${LEASE_HOLDING_STATUSES.map(() => "?").join(",")})
-    `).run(ts, id, leaseToken, ...LEASE_HOLDING_STATUSES);
+    `).run(preserveStatus ? fresh.status : "awaiting_assessment", ts, id, leaseToken, ...LEASE_HOLDING_STATUSES);
     if (updated.changes !== 1) {
       return { ok: false, reason: "lease_invalid", blockers: [] };
     }
     if (needsBarrier) {
       insertJobLocks(
         db,
-        { ...fresh, status: "awaiting_assessment" },
+        { ...fresh, status: preserveStatus ? fresh.status : "awaiting_assessment" },
         { files: [], roots: ["*"] },
         ts,
         "assessment_barrier",
       );
     }
-    logEvent({
+    if (!preserveStatus) logEvent({
       work_item_id: fresh.work_item_id,
       job_id: id,
       event_type: EVENT_TYPES.JOB_STATUS_CHANGED,
@@ -1146,7 +1148,7 @@ export function acquireAssessmentBarrier(jobId, leaseToken) {
     });
     return { ok: true, reason: null, blockers: [], barrier: needsBarrier };
   });
-  if (result.ok) {
+  if (result.ok && !preserveStatus) {
     notifyQueueStateChanged({
       reason: "job_status_awaiting_assessment",
       jobId: id,

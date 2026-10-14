@@ -1,5 +1,9 @@
 import fs from "fs";
 import path from "path";
+import { randomUUID } from "node:crypto";
+import { prepareQueueClear } from "../../queue/functions/clear-preparation.js";
+import { acquireSchedulerLock, renewSchedulerLock, releaseSchedulerLock, getSchedulerLockInfo } from "../../queue/functions/locks.js";
+import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import { initArtifactRoots, pruneEmptyArtifactDirs } from "../../artifacts/functions/index.js";
 import { buildInventory, inventoryIsEmpty, inventorySummary } from "../../cleanup/functions/survey.js";
 import { triageInventory, buildItemIndex } from "../../cleanup/functions/triage.js";
@@ -80,17 +84,45 @@ export function createMaintenanceCommands({
 
   async function clear() {
     if (refuseIfSchedulerLive("clear")) return;
-    const confirm = await ask(`\n  ${C.red}This will delete all work items, jobs, and git branches/worktrees. Artifacts and logs are preserved. Continue? (yes/n): ${C.reset}`);
+    const confirm = await ask(`\n  Queue: ${getRuntimeDbPath(projectDir)}\n  ${C.red}This will delete all work items and jobs and clean their git branches/worktrees. Artifacts, logs, and any failed Git cleanup recovery data are preserved. Continue? (yes/n): ${C.reset}`);
     if (confirm !== "yes") {
       console.log("  Cancelled.");
       return;
     }
     if (refuseIfSchedulerLive("clear")) return;
 
+    const owner = `clear-${process.pid}-${randomUUID()}`;
+    if (!acquireSchedulerLock("main", owner, 120)) {
+      console.log("Clear refused: another scheduler or maintenance command acquired the queue lock.");
+      process.exitCode = 1;
+      return;
+    }
+    let lockLost = false;
+    const renewal = setInterval(() => {
+      try { if (!renewSchedulerLock("main", owner, 120)) lockLost = true; }
+      catch { lockLost = true; }
+    }, 15_000);
+    renewal.unref?.();
+    const assertOwnership = () => {
+      if (lockLost || getSchedulerLockInfo("main")?.owner_id !== owner) {
+        throw new Error("Clear lost its queue lock; canceled work and recovery metadata were preserved. Retry clear after stopping the other scheduler.");
+      }
+    };
+    try { await clearConfirmed(assertOwnership); }
+    finally {
+      clearInterval(renewal);
+      releaseSchedulerLock("main", owner);
+    }
+  }
+
+  async function clearConfirmed(assertOwnership) {
+    assertOwnership();
+    const { workItems, recovery } = prepareQueueClear();
+
     let cleanupFailures = 0;
     try {
-      const workItems = listWorkItems();
       for (const wi of workItems) {
+        assertOwnership();
         if (wi.branch_name) {
           try {
             if (!await Promise.resolve(cleanupBranch(wi, { clearMergeState: true }))) cleanupFailures += 1;
@@ -100,17 +132,17 @@ export function createMaintenanceCommands({
         }
       }
     } catch {
-      // best effort cleanup
+      cleanupFailures += 1;
     }
 
     if (cleanupFailures > 0) {
-      console.log(`\n  ${C.red}Clear aborted:${C.reset} ${cleanupFailures} branch cleanup(s) failed, so DB branch metadata was preserved.\n`);
-      process.exitCode = 1;
-      return;
+      console.log(`\n  ${C.yellow}Git cleanup incomplete:${C.reset} ${cleanupFailures} branch cleanup(s) failed. Remaining branches/worktrees are preserved; recovery metadata is in artifact #${recovery.id}. The queue will still be cleared.\n`);
     }
 
-    const wtRoot = await resolveWorktreeRoot(projectDir);
-    if (fs.existsSync(wtRoot)) {
+    let wtRoot = null;
+    try { wtRoot = await resolveWorktreeRoot(projectDir); }
+    catch { cleanupFailures += 1; }
+    if (!cleanupFailures && wtRoot && fs.existsSync(wtRoot)) {
       try {
         gitExec(["worktree", "prune"], projectDir);
       } catch {
@@ -119,17 +151,18 @@ export function createMaintenanceCommands({
       try {
         fs.rmSync(wtRoot, { recursive: true, force: true });
       } catch {
-        // best effort
+        cleanupFailures += 1;
       }
     }
 
+    assertOwnership();
     clearAll();
-    const prunedLocks = clearWorktreeLockFiles(projectDir);
+    const prunedLocks = cleanupFailures ? 0 : clearWorktreeLockFiles(projectDir);
     const pruned = pruneEmptyArtifactDirs(projectDir);
     initArtifactRoots(projectDir);
     const pruneMsg = pruned > 0 ? `; ${pruned} empty dir(s) pruned` : "";
     const lockMsg = prunedLocks > 0 ? `; ${prunedLocks} stale lock file(s) removed` : "";
-    console.log(`\n  ${C.green}Session cleared.${C.reset} ${C.dim}(artifact files, event log, and agent call history preserved; git branches cleaned${pruneMsg}${lockMsg})${C.reset}\n`);
+    console.log(`\n  ${C.green}Queue cleared.${C.reset} ${getRuntimeDbPath(projectDir)}\n  ${C.dim}(artifact files, event log, and agent call history preserved; ${cleanupFailures ? `Git cleanup incomplete, recovery artifact #${recovery.id}` : "git branches cleaned"}${pruneMsg}${lockMsg})${C.reset}\n`);
   }
 
   async function prune(argv = process.argv) {

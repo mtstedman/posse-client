@@ -19,10 +19,11 @@ import { assertTestContext } from "../../../runtime/functions/test-context.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { latestTestReceiptDelta } from "./test-execution-receipt.js";
 import { attributedDebtCoverageEstablished, debtCoverageEstablished, renderTestFailureSummary } from "./test-failure-evidence.js";
-import { verificationOutcome, isAdvisoryTestResult, isUnrunnableTestResult } from "./verification-outcome.js";
+import { verificationOutcome, isAdvisoryTestResult, isUnrunnableTestResult, isVerificationInfrastructureOutcome } from "./verification-outcome.js";
 import { requiresTestVerification } from "../../../settings/functions/test-strictness.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { getMaxFixChainDepth, getWiFailureThreshold } from "../../../settings/functions/tunables.js";
+import { isAuthoritativeFinalReviewPass } from "../../../assessment/functions/final-review-authority.js";
 
 const ASSESSMENT_RETRY_TIER_ORDER = ["cheap", "standard"];
 const ASSESSOR_CONFIDENCE_VALUES = new Set(["low", "medium", "high"]);
@@ -144,7 +145,8 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
     && UNESTABLISHED_COVERAGE_STATUSES.includes(run.coverage_status);
   if (verdict?.verdict === "pass" && changed?.paths?.length > 0
     && !isAdvisoryTestResult(changed, options)
-    && ["infrastructure_error", "unavailable", "invalid", "timed_out", "skipped"].includes(changed.status)) {
+    && (isVerificationInfrastructureOutcome(changed)
+      || ["infrastructure_error", "unavailable", "invalid", "timed_out", "skipped"].includes(changed.status))) {
     return {
       ...verdict,
       verdict: "needs_review",
@@ -229,7 +231,8 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
   const unverifiedCoverage = post?.status === "passed"
     && knownCoverageGap(post);
   const unavailablePost = post && !isAdvisoryTestResult(post, options)
-    && ["infrastructure_error", "unavailable", "invalid", "skipped", "timed_out"].includes(post.status);
+    && (isVerificationInfrastructureOutcome(post)
+      || ["infrastructure_error", "unavailable", "invalid", "skipped", "timed_out"].includes(post.status));
   if (verdict?.verdict === "pass" && (unverifiedCoverage || incompleteChecks.length > 0
     || unavailablePost || (strict && declaredCommand && !post))) {
     const detail = incompleteChecks.length > 0
@@ -260,6 +263,11 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
 export function capVerdictForDeterministicTestRegression(verdict, testRun = null) {
   const postChange = testRun?.postChange || testRun?.post_change || null;
   if (isUnrunnableTestResult(postChange)) return verdict;
+  // Legacy runners can report failed alongside a typed infrastructure result.
+  // Never turn that harness failure into a product repair. A demonstrated
+  // pass-to-timeout regression remains actionable.
+  if (postChange && isVerificationInfrastructureOutcome(postChange)
+    && !(postChange.status === "timed_out" && testRun?.delta === "regression")) return verdict;
   if (testRun?.debt_only === true && postChange?.status === "failed") {
     return {
       ...verdict,
@@ -323,6 +331,7 @@ export function capVerdictForChangedTestFailure(verdict, testRun = null) {
       .filter((file) => file?.status === "timed_out" && file?.delta === "regression" && file?.path)
       .map((file) => file.path)
     : [];
+  if (changed && isVerificationInfrastructureOutcome(changed) && regressedTimeouts.length === 0) return verdict;
   if (["fail", "needs_replan"].includes(verdict?.verdict)
     || (changed?.status !== "failed" && regressedTimeouts.length === 0)
     || attribution?.debt_only === true) return verdict;
@@ -364,6 +373,7 @@ export function capVerdictForChangedTestFailure(verdict, testRun = null) {
 export function capVerdictForNonDiscriminatingTestFailure(verdict, testRun = null) {
   const postChange = testRun?.postChange || testRun?.post_change || null;
   if (isUnrunnableTestResult(postChange)) return verdict;
+  if (postChange && isVerificationInfrastructureOutcome(postChange)) return verdict;
   if (verdict?.verdict !== "pass"
     || testRun?.delta !== "indeterminate"
     || testRun?.debt_only === true
@@ -1025,6 +1035,9 @@ function _shouldReplanForDesiredOutputs(job, verdict) {
 export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: currentAssessedCommitHash, projectDir = null } = {}) {
   const workItem = getWorkItem(job.work_item_id);
   const desiredOutputs = _getDesiredOutputs(workItem);
+  // The reviewer already judged this exact candidate and contract. Completion
+  // must not submit it to legacy test, risk, confidence, or replan policies.
+  if (isAuthoritativeFinalReviewPass(job, verdict)) return { verdict, desiredOutputs };
   const payload = parseJobPayload(job);
   let prepared = {
     ...verdict,

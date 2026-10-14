@@ -16,13 +16,13 @@ export function finalReviewLogSummary({ input = {}, result = null, reviewer = fa
     // Ending the child session is transport cleanup, not a review verdict.
     // Keep its report identifiable; the developer's result is authoritative.
     if (result?.status === FINAL_REVIEW_REVIEWER_STATUS.DONE) return result.error
-      ? `Reviewer report rejected: ${line(result.error)}` : report;
+      ? `Reviewer report rejected: ${line(result.error)}` : lifecycle ? "Reviewer session closed" : report;
     if (result?.status === FINAL_REVIEW_REVIEWER_STATUS.WAITING) return "Reviewer waiting for developer revision";
     return lifecycle ? "Reviewer submits report" : report;
   }
   if (!result) return "Developer requests review";
   const reason = line(result.reason || result.summary || result.findings?.[0]?.criterion);
-  if (result.outcome === FINAL_REVIEW_OUTCOMES.PASS) return "PASS";
+  if (result.outcome === FINAL_REVIEW_OUTCOMES.PASS) return lifecycle ? "Developer session closed" : "PASS";
   if (result.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS) {
     return `FAILED: ${reason || "Changes are required"}`;
   }

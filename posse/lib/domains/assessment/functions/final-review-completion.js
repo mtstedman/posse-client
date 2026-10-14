@@ -7,8 +7,8 @@ import { runImmediateTransaction } from "../../queue/functions/common.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 
 // A validated pass owns close-out. Save the ordinary completion packets before
-// stopping either provider, so the worker keeps its existing handoff/assessment
-// path without asking either model for another turn.
+// stopping either provider. The worker completes directly from the saved review
+// without asking either model for another turn or dispatching an assessor.
 export function completeFinalReview({ agentCallId, reviewerAgentCallId, cwd, summary, verifiedNoChange = false, recordResult = () => {} }) {
   const receipts = runImmediateTransaction(getDb(), () => {
     recordResult();

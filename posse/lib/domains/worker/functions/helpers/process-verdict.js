@@ -21,6 +21,7 @@ import { handle as handlePass } from "./verdicts/pass.js";
 import { spawnFromRole } from "../../../queue/functions/spawn-guard.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { persistReviewedFileCompletion } from "../../../assessment/functions/reviewed-file-completion.js";
+import { isAuthoritativeFinalReviewPass } from "../../../assessment/functions/final-review-authority.js";
 
 const ASSESSOR_SPAWN_ROLE = Object.freeze({
   role: "assessor",
@@ -46,6 +47,7 @@ export function processVerdict(job, verdict, {
   reviewedCompletion = null,
 } = {}) {
   const emitLog = emit || ((msg) => console.log(`  ${msg}`));
+  const finalReviewAccepted = isAuthoritativeFinalReviewPass(job, verdict);
   const spawnedJobs = [];
   const spawnFromAssessor = (outcome, jobType, payload) =>
     spawnFromRole(ASSESSOR_SPAWN_ROLE, outcome, jobType, payload);
@@ -99,6 +101,7 @@ export function processVerdict(job, verdict, {
 
   let partialStatusClaimed = false;
   const ctx = {
+    finalReviewAccepted,
     autoApprove,
     assessmentModelTier,
     desiredOutputs: prepared.desiredOutputs,

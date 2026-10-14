@@ -742,6 +742,18 @@ Mutating jobs run in per-work-item git worktrees. Successful dev/fix/promote
 jobs are committed on the work-item branch. Failed or interrupted work is
 snapshotted before cleanup when possible.
 
+A saved final-review pass stops the developer and reviewer calls. Once the
+reviewed bytes are committed, the job completes directly from that review,
+including after restart. It does not run another assessor or reapply the old
+assessment test/confidence policies. Changed code or a changed task contract
+requires fresh verification. The accepted pass is announced once.
+
+`clear` prints the queue database it resets and cancels pending work before Git
+cleanup. Failed branch/worktree cleanup no longer leaves runnable jobs behind:
+the queue is cleared, while remaining files and a recovery artifact are kept.
+A live scheduler prevents clearing, and a maintenance lock prevents startup
+during the reset. Separate worktree directories can have separate queues.
+
 Reviewed-file handoffs are enabled by default. Eligible jobs with exact file
 scopes can receive successfully committed, final-reviewed changes before the
 source work item finishes its unrelated work. The receiving work item still

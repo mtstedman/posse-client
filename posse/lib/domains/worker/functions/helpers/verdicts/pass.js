@@ -73,7 +73,7 @@ export function handle(job, verdict, ctx) {
     }
     for (const lineageId of lineageIds) cancelPendingReviewGatesForOriginal(lineageId);
   }
-  log(`${C.yellow}[assessor] PASS${C.reset} WI#${job.work_item_id} job #${job.id}: ${job.title}`);
+  if (!ctx.finalReviewAccepted) log(`${C.yellow}[assessor] PASS${C.reset} WI#${job.work_item_id} job #${job.id}: ${job.title}`);
 
   // Store improvement suggestions as artifacts only. The end-of-run review
   // presents them in batch, which avoids recursive suggestion chains.
