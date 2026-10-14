@@ -7,6 +7,7 @@ import { gitPushWithGitHubCliFallback } from "../../git/functions/git-push-auth.
 import { isPosseRuntimeOnlyGitignoreContent } from "../../runtime/functions/ignore.js";
 import { EMPTY_JOIN_FOLDER_ENTRIES } from "./join-folder.js";
 import { pairingCommandError } from "./environment-errors.js";
+import { pairingGitTimeoutMs } from "./git-timeout.js";
 
 const NETWORK_SCHEMES = new Set(["https:", "http:", "ssh:", "git:"]);
 // Build the git environment without GIT_SSH_COMMAND: an inherited value
@@ -25,12 +26,12 @@ export function noninteractiveGitEnv() {
 const NONINTERACTIVE_GIT_ENV = Object.freeze(noninteractiveGitEnv());
 
 function git(args, projectDir, options = {}) {
-  const timeoutMs = options.timeoutMs ?? 60_000;
+  const timeoutMs = pairingGitTimeoutMs(args[0], options.timeoutMs ?? 60_000);
   try {
     return adminGitExec(args, projectDir, {
-      timeoutMs: 60_000,
       env: NONINTERACTIVE_GIT_ENV,
       ...options,
+      timeoutMs,
     });
   } catch (error) {
     throw pairingCommandError("git", error, { timeoutMs, operation: args[0] });
@@ -85,7 +86,10 @@ export function listUntrackedPairingPaths(projectDir) {
     return git(["ls-files", "--others", "--exclude-standard", "--directory", "-z"], projectDir, {
       timeoutMs: 10_000,
     }).split("\0").filter(Boolean);
-  } catch {
+  } catch (error) {
+    // An incomplete before-snapshot must not make a later scan exclude
+    // pre-existing user files as dependency-repair output.
+    if (error?.code === "pairing_environment_command_timeout") throw error;
     return [];
   }
 }
@@ -111,7 +115,7 @@ export function assertCleanPairingCheckout(projectDir) {
   // Porcelain v2 lines never start with whitespace, so the trimmed output
   // still parses: "1"/"2"/"u" changed entries end with the path, "?" is
   // untracked (renames carry "path\toriginal").
-  const status = git(["status", "--porcelain=v2", "--untracked-files=normal"], projectDir, {
+  const status = git(["status", "--porcelain=v2", "--untracked-files=normal", "--no-renames"], projectDir, {
     timeoutMs: 10_000,
   });
   const pathFields = { 1: 8, 2: 9, u: 10 };
@@ -146,7 +150,8 @@ function headIsUnborn(projectDir) {
   try {
     git(["rev-parse", "--verify", "--quiet", "HEAD"], projectDir, { timeoutMs: 5_000 });
     return false;
-  } catch {
+  } catch (error) {
+    if (error?.code === "pairing_environment_command_timeout") throw error;
     return true;
   }
 }
@@ -155,7 +160,8 @@ export function currentCheckout(projectDir, { allowUnborn = false } = {}) {
   let branch;
   try {
     branch = git(["symbolic-ref", "--quiet", "--short", "HEAD"], projectDir, { timeoutMs: 5_000 });
-  } catch {
+  } catch (cause) {
+    if (cause?.code === "pairing_environment_command_timeout") throw cause;
     const error = new Error("Pairing requires a named branch; detached HEAD is not supported.");
     error.code = "pairing_detached_head";
     throw error;
@@ -596,7 +602,8 @@ export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, 
   if (!headIsUnborn(projectDir)) {
     try {
       git(["merge-base", "HEAD", remoteOid], projectDir, { timeoutMs: 5_000 });
-    } catch {
+    } catch (error) {
+      if (error?.code === "pairing_environment_command_timeout") throw error;
       throw Object.assign(new Error("This checkout does not share Git history with the paired repository"), {
         code: "pairing_repository_history_mismatch",
       });
@@ -612,7 +619,8 @@ export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, 
   if (localOid && localOid !== remoteOid) {
     try {
       git(["merge-base", "--is-ancestor", localOid, remoteOid], projectDir, { timeoutMs: 5_000 });
-    } catch {
+    } catch (error) {
+      if (error?.code === "pairing_environment_command_timeout") throw error;
       throw Object.assign(new Error(`Local branch ${branch} has diverged from the paired branch`), {
         code: "pairing_local_branch_diverged",
       });

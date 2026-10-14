@@ -948,6 +948,14 @@ Readiness checks have a two-minute worker limit; installation keeps its normal
 repair budget. Optional dependency failures still allow pairing with a warning;
 run `posse doctor` for a detailed repair report.
 
+Pairing allows 15 minutes for Git fetch/push, five minutes for checkout, and
+two minutes for worktree scans and history traversal. Clean checks include
+untracked files but skip expensive rename detection. For unusually large
+repositories or slow disks/networks, set `POSSE_PAIR_GIT_TIMEOUT_MS=1800000`
+in the terminal before starting Posse to allow 30 minutes per Git operation
+(maximum 60 minutes). This only extends Git budgets; tool-version probes keep
+their ten-second limit, and dirty-checkout and history checks still apply.
+
 Successful WI and iterative merges are published automatically to the exact
 side branch. Posse still runs committed-conflict checks and `pre_push_gate`, but
 does not create a human push-offer gate for that automatic publication.
