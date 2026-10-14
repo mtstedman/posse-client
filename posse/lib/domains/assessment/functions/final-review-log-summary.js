@@ -22,7 +22,7 @@ export function finalReviewLogSummary({ input = {}, result = null, reviewer = fa
   }
   if (!result) return "Developer requests review";
   const reason = line(result.reason || result.summary || result.findings?.[0]?.criterion);
-  if (result.outcome === FINAL_REVIEW_OUTCOMES.PASS) return lifecycle ? "Developer session closed" : "PASS";
+  if (result.outcome === FINAL_REVIEW_OUTCOMES.PASS) return "final_review PASSED";
   if (result.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS) {
     return `FAILED: ${reason || "Changes are required"}`;
   }

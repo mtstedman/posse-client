@@ -163,6 +163,7 @@ export class Scheduler {
     this._stopRequested = false;
     this._stopMarked = false;
     this._sleepResolves = new Set(); // for interrupting any pending scheduler sleeps on shutdown
+    this._wakeGeneration = 0; // retain wakes that arrive while a scheduling lap is still running
     this._activeRunWorkers = null;
     this._runLoopKeepAliveTimer = null;
     this._runLoopKeepAliveIntervalMs = Math.max(1_000, Number(opts.runLoopKeepAliveIntervalMs) || RUN_LOOP_KEEPALIVE_INTERVAL_MS);
@@ -601,6 +602,7 @@ export class Scheduler {
   }
 
   _wakeSleeps() {
+    this._wakeGeneration += 1;
     for (const wake of [...this._sleepResolves]) wake();
   }
 
@@ -689,7 +691,10 @@ export class Scheduler {
     return delays.length > 0 ? Math.max(1, Math.min(...delays)) : repairMs;
   }
 
-  async _sleepUntilQueueWakeOrRepair(generation) {
+  async _sleepUntilQueueWakeOrRepair(generation, wakeGeneration = this._wakeGeneration) {
+    // Releasing an in-process worker slot may not mutate the queue. If it
+    // happened during this lap, rescan instead of losing the wake before sleep.
+    if (wakeGeneration !== this._wakeGeneration) return { reason: "local_wake", generation };
     const sleepMs = this._idleSleepMs();
     if (sleepMs <= 0) return { reason: "ready_at" };
     const controller = new AbortController();
@@ -1440,6 +1445,7 @@ export class Scheduler {
       while (this._running) {
         try {
         const lapStartQueueGeneration = getQueueWakeGeneration();
+        const lapStartWakeGeneration = this._wakeGeneration;
         // This durable generation also observes writers in other processes.
         this._invokeCallback("onQueueStateChange", onQueueStateChange, { generation: lapStartQueueGeneration });
         this._refreshRuntimeSettings();
@@ -2636,7 +2642,7 @@ export class Scheduler {
           continue;
         }
 
-        const sleepResult = await this._sleepUntilQueueWakeOrRepair(lapEndQueueGeneration);
+        const sleepResult = await this._sleepUntilQueueWakeOrRepair(lapEndQueueGeneration, lapStartWakeGeneration);
         // Repair-timer ticks are our defense-in-depth path: if a wake was
         // dropped (listener exception, deferred-emit flush skipped, etc.)
         // the index can drift. Reconciling against the DB on every idle
