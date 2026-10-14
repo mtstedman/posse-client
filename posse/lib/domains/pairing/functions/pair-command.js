@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { DependencyProgress } from "../../cli/classes/DependencyProgress.js";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { PAIRING_ACTION_ARITY } from "../../../catalog/pairing-command.js";
@@ -1020,49 +1021,36 @@ async function closeClaimedHostSession(root, remoteClient, state, {
   return { ...promoted, cleanup };
 }
 
-// The run gate's dependency repair, before a session opens or a member goes
-// active. Quiet while the check passes; a repair streams its progress, since
-// it can take minutes.
+// Keep enrollment alive separately from the compact dependency display.
 async function preparePairingEnvironment(root, environment, {
-  C, json, before, stateId = null, progressIntervalMs = PAIRING_ENVIRONMENT_PROGRESS_INTERVAL_MS,
+  json, before, stateId = null, progressIntervalMs = PAIRING_ENVIRONMENT_PROGRESS_INTERVAL_MS,
 }) {
-  if (!json) console.log(`  ${C.dim}Checking runtime dependencies before ${before}...${C.reset}`);
-  let lastProgress = "";
+  const progress = new DependencyProgress({ silent: json });
   const untrackedBefore = listUntrackedPairingPaths(root);
-  const startedAt = Date.now();
-  // Member dependency repair can take longer than the owner-staleness window.
-  // Keep local enrollment alive even in JSON mode, before relay activation.
   const touchEnrollment = () => {
     if (stateId) touchPairingState(stateId, undefined, ["enrolling"]);
   };
   touchEnrollment();
-  const heartbeat = json && !stateId ? null : setInterval(() => {
-    touchEnrollment();
-    if (!json) console.log(`  ${C.dim}[deps] Still working: ${lastProgress || "checking repository dependencies"} (${Math.floor((Date.now() - startedAt) / 1000)}s elapsed)${C.reset}`);
-  }, progressIntervalMs);
+  const heartbeat = stateId ? setInterval(touchEnrollment, progressIntervalMs) : null;
   heartbeat?.unref?.();
-  let result;
+  progress.start(`checking runtime dependencies before ${before}`);
   try {
-    result = await environment.prepare(root, {
-      onRepair: () => {
-        if (!json) console.log(`  ${C.dim}Installing what is missing (the same repair posse go runs)...${C.reset}`);
-      },
-      onProgress: json ? null : (event = {}) => {
-        const text = String(event?.message || "").split(/\r?\n/u)[0].trim();
-        if (!text || text === lastProgress) return;
-        lastProgress = text;
-        console.log(`  ${C.dim}[deps] ${text}${C.reset}`);
-      },
+    const result = await environment.prepare(root, {
+      onRepair: () => progress.update("installing missing dependencies"),
+      onProgress: json ? null : (event) => progress.update(event),
     });
+    const warning = pairingEnvironmentWarning(result);
+    progress.finish(warning || "ready", warning ? "warning" : "ok");
+    return result;
+  } catch (error) {
+    progress.finish(safeError(error), "failed");
+    throw error;
   } finally {
+    progress.stop();
     if (heartbeat) clearInterval(heartbeat);
     // Also when it throws: the restore that follows needs a clean checkout.
     excludeGeneratedPairingPaths(root, untrackedBefore);
   }
-  const warning = pairingEnvironmentWarning(result);
-  if (warning && !json) console.log(`  ${C.yellow}${warning}${C.reset}`);
-  if (!warning && !json) console.log(`  ${C.green}Runtime dependencies ready.${C.reset}`);
-  return result;
 }
 
 async function runHost({
@@ -1450,6 +1438,10 @@ async function runJoinInCheckout({
       }
       markPairingPhase(state.id, "enrolling");
     }
+    if (!json) {
+      console.log(`\n  ${C.green}Host admitted you.${C.reset} Preparing your session checkout...`);
+      console.log(`  ${C.dim}[pair setup] Waiting for repository access...${C.reset}`);
+    }
     pulseTokenManager.setSessionContext({ instanceId, sessionId: joined.session_id });
     let pairingRemote = existingRemote;
     let baselineOid = null;
@@ -1483,8 +1475,12 @@ async function runJoinInCheckout({
         remote: pairingRemote.remote,
         branch: sharedBranch,
         expectedUrl: metadata.url,
+        onProgress: (message) => {
+          if (!json) console.log(`  ${C.dim}[pair setup] ${message}${C.reset}`);
+        },
       }), { onWait: onKeyWait });
       configurePairingSettings(root, { remote: pairingRemote.remote, branch: sharedBranch });
+      if (!json) console.log(`  ${C.dim}[pair setup] Checking shared-trunk access and permissions...${C.reset}`);
       await retryWhileSessionKeyPropagates(async () => {
         const preflight = await runSharedTrunkAccessPreflight(root, {
           sessionCredentials: true,
@@ -2049,8 +2045,18 @@ export async function runPairingCommand(argv = [], {
 } = {}) {
   const args = parsePairArgs(argv);
   if (["host", "join"].includes(args.action)) {
-    await pairingRuntimeCheck(projectDir, { host: args.action === "host",
-      onProgress: args.json ? () => {} : (event) => console.log(`  ${C.dim}[pair check] ${event.message}${C.reset}`) });
+    const progress = new DependencyProgress({ title: "Session prerequisites", silent: args.json });
+    progress.start("checking Git and session tools");
+    try {
+      await pairingRuntimeCheck(projectDir, { host: args.action === "host",
+        onProgress: (event) => progress.update(event) });
+      progress.finish("ready");
+    } catch (error) {
+      progress.finish(safeError(error), "failed");
+      throw error;
+    } finally {
+      progress.stop();
+    }
   }
   let client = remoteClient;
   if (!client && !["status", "integrate", "abandon-integration", "hold", "resume", "merge", "deploy", "auto"]

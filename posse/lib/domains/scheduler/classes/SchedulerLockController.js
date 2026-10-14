@@ -45,6 +45,7 @@ export class SchedulerLockController {
     scheduler._log(message, "red");
     scheduler._lockLost = true;
     scheduler._running = false;
+    scheduler._sessionMonitor?.stopHeartbeat();
     scheduler.schedulerLock.stopRenewal();
     if (eventType) {
       logEvent({

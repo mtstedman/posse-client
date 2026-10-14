@@ -7,6 +7,7 @@ import { C } from "../../../shared/format/functions/colors.js";
 import { DEFAULT_POSSE_ROOT } from "../../runtime/functions/python-runtime.js";
 import { adminGitExecAsync } from "../../git/functions/admin-git-exec.js";
 import { isPosseProjectInitialized } from "./project-init-state.js";
+import { DependencyProgress } from "../classes/DependencyProgress.js";
 import { PosseUpdateWork } from "../classes/PosseUpdateWork.js";
 import { STARTUP_UPDATE_FLAGS } from "../../../catalog/cli-flags.js";
 
@@ -730,6 +731,7 @@ export async function updatePosseClient({
         : (atlasConfig.scipMode ?? atlasConfig.atlas_scip_mode ?? null),
       scipLanguages: atlasConfig.scipLanguages ?? atlasConfig.atlas_scip_languages ?? null,
       onProgress: (message) => u.note("deps", firstLine(message)),
+      onEvent: (event) => u.note("deps", event),
     });
     const depsOk = dependencies?.ok !== false;
     const depsSummary = firstLine(dependencies?.doctor?.summary || dependencies?.summary || dependencies?.message || "")
@@ -820,6 +822,7 @@ function createUpdateRenderer({ colors, log, stream = process.stdout }) {
   const labelFor = (key) => (STEP_LABELS[key] || key).padEnd(STEP_LABEL_W);
   const startedAt = new Map();
   let spin = null;
+  const dependencies = new DependencyProgress({ stream, log });
 
   const clearSpinLine = () => {
     if (live) stream.write("\r\x1b[2K");
@@ -841,6 +844,7 @@ function createUpdateRenderer({ colors, log, stream = process.stdout }) {
 
   return {
     start(key, text) {
+      if (key === "deps") { stopSpin(); dependencies.start(text); return; }
       startedAt.set(key, Date.now());
       if (!live) {
         log(`  ${glyphs.info} ${labelFor(key)} ${colors.dim}${text}${colors.reset}`);
@@ -853,6 +857,7 @@ function createUpdateRenderer({ colors, log, stream = process.stdout }) {
       renderSpin();
     },
     note(key, text) {
+      if (key === "deps") { dependencies.update(text); return; }
       const line = firstLine(text);
       if (!line) return;
       if (live && spin?.key === key) {
@@ -863,6 +868,7 @@ function createUpdateRenderer({ colors, log, stream = process.stdout }) {
       log(`      ${colors.dim}${line}${colors.reset}`);
     },
     done(key, status, text) {
+      if (key === "deps") { dependencies.finish(text, status); return; }
       stopSpin();
       const since = startedAt.get(key);
       const elapsed = Number.isFinite(since) && Date.now() - since >= 1_000
@@ -870,7 +876,7 @@ function createUpdateRenderer({ colors, log, stream = process.stdout }) {
         : "";
       log(`  ${glyphs[status] || glyphs.info} ${labelFor(key)} ${text}${elapsed}`);
     },
-    stop: stopSpin,
+    stop: () => { dependencies.stop(); stopSpin(); },
   };
 }
 

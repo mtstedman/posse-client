@@ -1397,6 +1397,32 @@ export class Scheduler {
     let pairingDrainRequested = false;
     let pairingDrainStartedAt = null;
 
+    this._sessionMonitor.start({
+      canPoll: () => this._lockController.canDispatch(),
+      onError: (error) => this._log(`Session heartbeat failed: ${error?.message || error}`, "yellow"),
+      onPoll: (sessionPoll) => {
+        if (!this._running || this._lockLost) return;
+        if (sessionPoll?.teamSubmissionChanged && onTeamSubmissionChange) {
+          this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, {
+            workItemIds: sessionPoll.teamSubmissionWorkItemIds || [],
+          });
+        }
+        this._sessionRoutingUnavailable = sessionPoll?.unavailable === true;
+        if (!pairingDrainRequested && (sessionPoll?.requestsDrain || sessionPoll?.fatal)) {
+          pairingDrainRequested = true;
+          this._log(
+            sessionPoll?.requestsDrain
+              ? `Session ${sessionPoll.status?.status || "closed"}; draining active workers`
+              : `Session authorization or identity invalidated; draining active workers`,
+            "yellow",
+          );
+        }
+        for (const event of sessionEventFeed?.collect({ sessionPoll }) || []) {
+          this._invokeCallback("onSessionEvent", onSessionEvent, event);
+        }
+      },
+    });
+
     try {
       let idleCount = 0;
       let lastProgressTime = Date.now(); // progress watchdog
@@ -1424,21 +1450,6 @@ export class Scheduler {
         // cached envelope before its first session heartbeat.
         const sessionPoll = await this._sessionMonitor.poll();
         if (!this._lockController.canDispatch()) break;
-        if (sessionPoll?.teamSubmissionChanged && onTeamSubmissionChange) {
-          this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, {
-            workItemIds: sessionPoll.teamSubmissionWorkItemIds || [],
-          });
-        }
-        this._sessionRoutingUnavailable = sessionPoll?.unavailable === true;
-        if (sessionPoll?.requestsDrain || sessionPoll?.fatal) {
-          pairingDrainRequested = true;
-          this._log(
-            sessionPoll?.requestsDrain
-              ? `Session ${sessionPoll.status?.status || "closed"}; draining active workers`
-              : `Session authorization or identity invalidated; draining active workers`,
-            "yellow",
-          );
-        }
         // Fetch before candidate selection. When due, every mutating job in
         // this lap therefore sees a trunk no older than the configured
         // cadence. Transport failures are explicitly fail-open inside the
@@ -1449,7 +1460,7 @@ export class Scheduler {
         const trunkHints = sessionPoll?.status
           ? pairingPeerTrunkHints(sessionPoll.status.peers || [])
           : (sessionPoll?.skipped === "no_active_session" ? [] : undefined);
-        const trunkPoll = await this._sharedTrunkPoller.poll({
+        const trunkPoll = pairingDrainRequested ? null : await this._sharedTrunkPoller.poll({
           idle: activeWorkers.size === 0 && idleCount > 0,
           ...(trunkHints ? { hints: trunkHints } : {}),
         });
@@ -1462,16 +1473,16 @@ export class Scheduler {
         // a child and returns, so a long push never holds up dispatch.
         void tickSessionAutoPublish({
           projectDir: this.projectDir,
-          sessionActive: sessionPoll?.status?.status === "active" && !sessionPoll?.unavailable
-            && !sessionPoll?.requestsDrain && !sessionPoll?.fatal,
+          sessionActive: this._sessionMonitor.currentStatus()?.status === "active"
+            && !this._sessionRoutingUnavailable && !pairingDrainRequested,
           report: (text, { ok, action }) => this._log(`[auto ${action}] ${text}`, ok ? "green" : "yellow"),
         });
         // Member joins/leaves and sync-state transitions for the run feed,
         // read after this lap's heartbeat and fetch.
-        for (const event of sessionEventFeed?.collect({ sessionPoll }) || []) {
+        for (const event of sessionEventFeed?.collect() || []) {
           this._invokeCallback("onSessionEvent", onSessionEvent, event);
         }
-        if (!sessionPoll?.unavailable) await this._sessionJobRouter.poll();
+        if (!this._sessionRoutingUnavailable && !pairingDrainRequested) await this._sessionJobRouter.poll();
         if (!this._lockController.canDispatch()) break;
 
         // Honor a bridge-issued run.stop. Owner-gated so a request written
@@ -2017,7 +2028,7 @@ export class Scheduler {
             });
           }
         };
-        while (this._running && !stopCandidateScan && candidateCount < maxCandidateScan) {
+        while (this._running && !pairingDrainRequested && !stopCandidateScan && candidateCount < maxCandidateScan) {
           const fetchLimit = Math.min(MAX_RUNNABLE_SCAN_PER_TICK, maxCandidateScan - candidateCount);
           // When agent compute slots are full, only scan the lanes that can still
           // launch: human gates (always) and background warm (if its own budget
@@ -2054,7 +2065,7 @@ export class Scheduler {
           // when the last fetch is already fresh enough.
           if (candidateCount === 0) {
             const activeTrunkPoll = await this._sharedTrunkPoller.poll({ idle: false });
-            if (!this._lockController.canDispatch()) break;
+            if (!this._lockController.canDispatch() || pairingDrainRequested) break;
             if (activeTrunkPoll?.advanced && onTeamSubmissionChange) {
               this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, { workItemIds: [] });
             }
@@ -2062,7 +2073,7 @@ export class Scheduler {
 
           let yieldToImplementation = false;
           for (const job of candidates) {
-            if (!this._running) break;
+            if (!this._running || pairingDrainRequested) break;
             // A plan about to take a reserved slot waits (unscanned) until
             // ready implementation work has had first pick of it.
             if (!implementationPass
@@ -2082,8 +2093,8 @@ export class Scheduler {
               skipJobIds.add(job.id);
               continue;
             }
-            const sessionRoute = sessionPoll?.unavailable ? null : await this._sessionJobRouter.offer(job);
-            if (!this._lockController.canDispatch()) break;
+            const sessionRoute = this._sessionRoutingUnavailable ? null : await this._sessionJobRouter.offer(job);
+            if (!this._lockController.canDispatch() || pairingDrainRequested) break;
             if (sessionRoute?.delegated) {
               skipJobIds.add(job.id);
               continue;
@@ -2327,7 +2338,7 @@ export class Scheduler {
               }
             }
 
-          if (!this._lockController.canDispatch()) break;
+          if (!this._lockController.canDispatch() || pairingDrainRequested) break;
           const leaseScope = jobNeedsWriteLocks(job)
             ? queueLockIndex.scopeForJob(job)
             : null;
@@ -2361,9 +2372,9 @@ export class Scheduler {
           // activeWorkers entry, leaving the job stuck until lease expiry.
           const workerPromise = Promise.resolve()
             .then(() => {
-              if (this._lockController.canDispatch()) {
+              if (!pairingDrainRequested && this._lockController.canDispatch()) {
                 this._invokeCallback("onJobStart", onJobStart, leasedJob);
-                if (this._lockController.canDispatch()) return workerCallback(leasedJob);
+                if (!pairingDrainRequested && this._lockController.canDispatch()) return workerCallback(leasedJob);
               }
               // No worker started, so this token can safely return to the queue.
               this.leaseManager.releaseWithoutAttemptPenalty(
@@ -2699,6 +2710,7 @@ export class Scheduler {
    * Stop the scheduler loop and release the lock.
    */
   stop(options = {}) {
+    this._sessionMonitor?.stopHeartbeat();
     return coordinateSchedulerStop(this, options);
   }
 
@@ -2712,6 +2724,7 @@ export class Scheduler {
    * orphans. Records no clean-shutdown marker. Synchronous; never throws.
    */
   releaseForForcedExit({ reason = "Forced shutdown" } = {}) {
+    this._sessionMonitor?.stopHeartbeat();
     const result = { requeued: 0, interruptedAttempts: 0, jobIds: [], lockReleased: false };
     try {
       Object.assign(result, requeueOwnedJobsForForcedExit(this.ownerId, { reason }));

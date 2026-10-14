@@ -10,19 +10,23 @@ export function finalReviewLogSummary({ input = {}, result = null, reviewer = fa
   if (reviewer) {
     if (result?.status === "invalid_report") return `Reviewer report rejected: ${line(result.error)}`;
     const detail = line(input.summary || input.findings?.[0]?.criterion);
-    const report = verdict ? `Reviewer says: ${verdict}${detail ? ` — ${detail}` : ""}` : "Reviewer waits for revisions";
+    const reportVerdict = verdict === "pass" ? "PASS" : `FAILED: ${detail || "No passing verdict"}`;
+    const report = verdict ? `Reviewer says: ${reportVerdict}` : "Reviewer waits for revisions";
     if (result?.status === FINAL_REVIEW_REVIEWER_STATUS.REVISED) return "Reviewer received developer revision";
-    if (result?.status === FINAL_REVIEW_REVIEWER_STATUS.DONE) return "Reviewer session ended";
+    // Ending the child session is transport cleanup, not a review verdict.
+    // Keep its report identifiable; the developer's result is authoritative.
+    if (result?.status === FINAL_REVIEW_REVIEWER_STATUS.DONE) return result.error
+      ? `Reviewer report rejected: ${line(result.error)}` : report;
     if (result?.status === FINAL_REVIEW_REVIEWER_STATUS.WAITING) return "Reviewer waiting for developer revision";
     return lifecycle ? "Reviewer submits report" : report;
   }
   if (!result) return "Developer requests review";
-  if (lifecycle) return "Developer received review result";
   const reason = line(result.reason || result.summary || result.findings?.[0]?.criterion);
-  if (result.outcome === FINAL_REVIEW_OUTCOMES.PASS) return `Review passed${reason ? `: ${reason}` : ""}`;
+  if (result.outcome === FINAL_REVIEW_OUTCOMES.PASS) return "PASS";
   if (result.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS) {
-    return `Review needs changes${reason ? `: ${reason}` : ""}`;
+    return `FAILED: ${reason || "Changes are required"}`;
   }
-  if (result.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED) return `Review blocked${reason ? `: ${reason}` : ""}`;
+  if (result.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED) return `FAILED: ${reason || "Review could not complete"}`;
+  if (lifecycle) return "Developer received review result";
   return "Developer requests review";
 }

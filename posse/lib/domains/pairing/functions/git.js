@@ -557,7 +557,7 @@ export function findOrAddPairingRemote(projectDir, { remoteUrl: expectedUrl, ses
   return addPairingRemote(projectDir, remote, expectedUrl);
 }
 
-export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, expectedUrl = null }) {
+export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, expectedUrl = null, onProgress = () => {} }) {
   const normalizedRemote = validateRemoteName(remote);
   if (expectedUrl != null) assertPairingRemoteTargets(projectDir, normalizedRemote, expectedUrl);
   validateBranchName(projectDir, branch);
@@ -572,6 +572,7 @@ export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, 
     });
   }
   const remoteRef = `refs/remotes/${normalizedRemote}/${branch}`;
+  onProgress("Downloading the session repository...");
   git([
     "fetch",
     "--no-tags",
@@ -582,6 +583,7 @@ export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, 
   // Only a member's join runs this, and the session deploy key is its only
   // credential: the gh fallback in push() would read the member's own GitHub
   // token for a repository that account can never reach.
+  onProgress("Download complete. Checking repository write access...");
   git([
     "push",
     "--dry-run",
@@ -620,12 +622,14 @@ export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, 
     // the shared-trunk FF-mirror invariant without blocking a later rejoin.
     git(["branch", "--force", branch, remoteOid], projectDir, { timeoutMs: 5_000 });
   }
+  onProgress("Checking out the session branch...");
   if (localOid) {
     git(["switch", branch], projectDir);
     git(["branch", "--set-upstream-to", `${normalizedRemote}/${branch}`, branch], projectDir, { timeoutMs: 5_000 });
   } else {
     git(["switch", "--create", branch, "--track", `${normalizedRemote}/${branch}`], projectDir);
   }
+  onProgress("Session checkout ready.");
   return remoteOid;
 }
 

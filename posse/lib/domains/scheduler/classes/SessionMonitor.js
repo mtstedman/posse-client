@@ -1,7 +1,7 @@
 // Scheduler-owned shared-session heartbeat collaborator. It deliberately owns
 // no terminal input: the run TUI is the sole raw-stdin owner, while this class
 // keeps membership, scope revocation, presence, and close/drain transitions
-// current from inside the scheduler loop.
+// current independently of slow work in the scheduler loop.
 
 import {
   SESSION_LINK_OWNERS,
@@ -111,6 +111,28 @@ export class SessionMonitor {
     this._unavailable = false;
     this._scopeCapabilityConfirmed = null;
     this._advisories = new SessionAdvisoryRefresh({ nowMs });
+    this._heartbeatTimer = null;
+    this._onPoll = null;
+  }
+
+  // Git synchronization and routing can wait longer than the relay lease.
+  // Renew independently of those scheduler awaits, sharing poll's single flight.
+  start({ onPoll, onError = () => {}, canPoll = () => true } = {}) {
+    this.stopHeartbeat();
+    this._onPoll = onPoll;
+    this._heartbeatTimer = setInterval(() => {
+      void Promise.resolve().then(() => {
+        if (this._heartbeatTimer && canPoll()) return this.poll();
+      }).catch(onError);
+    }, SESSION_HEARTBEAT_MS);
+    this._heartbeatTimer.unref?.();
+  }
+
+  stopHeartbeat() {
+    this._generation++;
+    clearInterval(this._heartbeatTimer);
+    this._heartbeatTimer = null;
+    this._onPoll = null;
   }
 
   delayUntilDueMs() {
@@ -125,7 +147,10 @@ export class SessionMonitor {
 
   poll({ force = false } = {}) {
     if (this._inFlight) return this._inFlight;
-    const run = this._pollOnce({ force });
+    const run = this._pollOnce({ force }).then((result) => {
+      this._onPoll?.(result);
+      return result;
+    });
     const tracked = run.finally(() => {
       if (this._inFlight === tracked) this._inFlight = null;
     });
@@ -298,7 +323,7 @@ export class SessionMonitor {
   }
 
   stop() {
-    this._generation++;
+    this.stopHeartbeat();
     this._client = null;
     this._stateId = null;
     this._sessionKey = null;
