@@ -95,7 +95,7 @@ const COMMAND_USAGE = {
     console.log(`    posse session abandon-integration`);
     console.log(`\n  Opens or joins a shared Posse collaboration session.`);
     console.log(`  Joiners wait for the host to confirm their four-character countersign.`);
-    console.log(`  A join typed outside an empty folder runs in ~/posse-sessions/<CODE>; --here joins in this clone instead.`);
+    console.log(`  A join runs in ~/posse-sessions/<CODE>; --here explicitly joins in this clone instead.`);
     console.log(`  hold keeps this checkout where it is (fetches continue) until resume or 30 minutes pass.`);
     console.log(`  merge squashes the team's work into your branch and deploy pushes it to origin; the session keeps running.`);
     console.log(`  Each asks for your approval unless you turn it on with auto (trusted teams).\n`);

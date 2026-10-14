@@ -36,10 +36,9 @@ import {
   excludeGeneratedPairingPaths,
   listUntrackedPairingPaths,
   deletePublishedPairingBranch,
-  adoptPosseInitializedCheckout,
   discardFreshPairingCheckout,
   findPairingRemote,
-  initializeFreshPairingCheckout,
+  preparePairingJoinCheckout,
   localBranchHead,
   pairingBranchHasOwnCommits,
   pairingTemporaryRemoteName,
@@ -1313,20 +1312,7 @@ async function runJoin({ projectDir, remoteClient, code, C, json, environment })
       code: "pairing_code_required",
     });
   }
-  // Outside any Git checkout the member joins from an empty folder and takes
-  // the session repository's history once admitted.
-  let root;
-  let freshCheckout = false;
-  try {
-    root = repositoryRoot(projectDir);
-    // `posse add` or `posse go` typed here before the join left a repository
-    // with no commits and Posse's own staged ignore file: still an empty folder.
-    freshCheckout = adoptPosseInitializedCheckout(root);
-  } catch (error) {
-    if (String(error?.code || "").startsWith("pairing_environment_command_")) throw error;
-    root = initializeFreshPairingCheckout(projectDir);
-    freshCheckout = true;
-  }
+  const { root, freshCheckout } = preparePairingJoinCheckout(projectDir);
   try {
     return await runJoinInCheckout({
       root, freshCheckout, remoteClient, code, C, json, environment,

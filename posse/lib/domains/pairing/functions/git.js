@@ -206,6 +206,22 @@ export function initializeFreshPairingCheckout(projectDir) {
   return root;
 }
 
+// Git discovers ancestor repositories, including an accidental ~/.git. The
+// selected join folder is the boundary: never adopt or mutate its ancestor.
+export function preparePairingJoinCheckout(projectDir) {
+  let root;
+  try {
+    root = repositoryRoot(projectDir);
+  } catch (error) {
+    if (String(error?.code || "").startsWith("pairing_environment_command_")) throw error;
+  }
+  if (!root || fs.realpathSync(root) !== fs.realpathSync(projectDir)) {
+    return { root: initializeFreshPairingCheckout(projectDir), freshCheckout: true };
+  }
+  // A prior `posse add` may have initialized this folder without user work.
+  return { root, freshCheckout: adoptPosseInitializedCheckout(root) };
+}
+
 // Entries a folder may hold after `posse add` or `posse go` ran in it before
 // the join: Posse's state, the repository those commands initialized, the
 // runtime ignore file they staged for an initial commit, and the worktree

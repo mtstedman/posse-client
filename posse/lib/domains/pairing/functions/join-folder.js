@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 // `posse session join CODE` works from any folder. A join needs a folder of
-// its own: an empty one, or the member's clone of the project (`--here`).
-// Started anywhere else, the join runs again in ~/posse-sessions/<CODE>
+// its own, or the member's clone of the project explicitly selected with
+// `--here`. By default the join runs again in ~/posse-sessions/<CODE>
 // before Posse writes anything (its run log, its database) into the folder it
 // was typed in. The session's work stays in that folder after the session, so
 // it is not a temporary directory. The same code always maps to the same
@@ -64,24 +64,14 @@ export function sessionJoinFolderName(code) {
   return token.toUpperCase().replace(/[^A-Z0-9-]/gu, "").slice(0, 64) || "session";
 }
 
-function folderIsEmpty(directory) {
-  try {
-    return fs.readdirSync(directory).every((entry) => EMPTY_JOIN_FOLDER_ENTRIES.has(entry));
-  } catch {
-    return false;
-  }
-}
-
 /** Where a join typed in `cwd` runs, or null when it runs in `cwd` itself. */
 export function sessionJoinFolder({
   argv = process.argv.slice(2),
   cwd = process.cwd(),
-  env = process.env,
   homeDir = os.homedir(),
 } = {}) {
   const request = sessionJoinRequest(argv);
-  if (!request || request.here || env[SESSION_JOIN_FOLDER_ENV]) return null;
-  if (folderIsEmpty(cwd)) return null;
+  if (!request || request.here) return null;
   const target = path.join(homeDir, SESSION_JOIN_FOLDERS_DIRECTORY, sessionJoinFolderName(request.code));
   return path.resolve(cwd) === path.resolve(target) ? null : target;
 }
@@ -110,7 +100,7 @@ export async function relocateSessionJoinIfNeeded({
   stderr = process.stderr,
   signalTarget = process,
 } = {}) {
-  const target = sessionJoinFolder({ argv: argv.slice(2), cwd, env, homeDir });
+  const target = sessionJoinFolder({ argv: argv.slice(2), cwd, homeDir });
   if (!target) return null;
   // --json keeps stdout for the join's own JSON lines.
   const json = argv.includes("--json");

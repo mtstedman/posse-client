@@ -805,9 +805,11 @@ posse session join ABCDE-FG234
 posse session join 'posse://session?token=ABCDE-FG234'
 ```
 
-Joining initializes Posse automatically. From a nonempty folder, the command
-runs in `~/posse-sessions/<CODE>`; use `--here` to join in an existing clean
-clone. An empty folder takes the session repository's history after admission.
+Joining initializes Posse automatically in `~/posse-sessions/<CODE>` regardless
+of the terminal's starting folder. A new session folder gets its own fresh
+checkout and takes the session repository's history after admission. Retrying
+the same code reuses that session folder. Use `--here` only to explicitly join
+in an existing clean clone or a chosen empty folder.
 A folder where `posse add` or `posse go` already ran, with nothing committed,
 still counts as empty.
 
