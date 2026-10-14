@@ -86,7 +86,7 @@ async function runVerificationCheck(check, { cwd, policy, phase = null, signal =
       });
   const classified = check.source !== "task_ab_acceptance" && check.source !== "operator_approved_operation" && phase === "baseline"
     ? classifyPackageManagerTestPlanFailure(executionCommand, raw) : raw;
-  const result = classifyNestedRunnerInfrastructureFailure(executionCommand, classified, { projectRoot: cwd });
+  const result = classifyNestedRunnerInfrastructureFailure(executionCommand, classified, { projectRoot: check.cwd_relative ? path.resolve(cwd, check.cwd_relative) : cwd });
   const counts = check.intent === "test" ? testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`) : null;
   const fileInvoked = (check.intent || "test") === "test"
     && didInvokeTestFile(result, executionCommand, cwd, check.cwd_relative, counts);

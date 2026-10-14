@@ -1,3 +1,4 @@
+import { latestWorkerPulses } from "../../native/functions/worker-pulse.js";
 // @ts-check
 //
 // NativeBinary — a thin, OS/arch-aware wrapper around one Rust-compiled helper
@@ -232,6 +233,7 @@ export class NativeBinary {
     this._pulseManagerAuth = null;
     /** Parent-minted, route-scoped pulse envelopes for child thread runtimes. */
     this._runtimePulseEnvelopes = new Map();
+    this.workerPulsePort = null;
     /**
      * Per-route pulse state delivered to the live persistent worker: the last
      * envelope sent, the scheduled refresh timer, and whether an expired
@@ -1059,7 +1061,7 @@ export class NativeBinary {
     const fullArgs = this.#buildArgs(subcommand, args);
     const inputWithAuth = this.#inputWithNativeAuthSync(opts.input, opts.requiredRoute, opts.workItemContext);
     if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
-      this.#retireWorkerAfterAuthFailure();
+      this.#retireWorkerAfterAuthFailure({ preserveRuntimePulses: true });
       return inputWithAuth.pulseCold
         ? this.#nativePulseColdResult(inputWithAuth.route)
         : this.#nativeAuthUnavailableResult();
@@ -1169,7 +1171,7 @@ export class NativeBinary {
         return this.#nativeVersionUnsupportedResult(inputWithAuth.error);
       }
       if (this.#shouldFailMissingNativeAuth(inputWithAuth.request)) {
-        this.#retireWorkerAfterAuthFailure();
+        this.#retireWorkerAfterAuthFailure({ preserveRuntimePulses: true });
         return this.#nativeAuthUnavailableResult();
       }
       if (opts.signal?.aborted) {
@@ -1709,6 +1711,8 @@ export class NativeBinary {
   }
 
   #runtimePulseFor(route, workItemContext = null) {
+    const refreshed = latestWorkerPulses(this.workerPulsePort);
+    if (refreshed) this.installWorkerPulseCapability(refreshed);
     // Legacy workers may use their route-scoped runtime pulse. A WI-scoped
     // mutation must mint a separate grant-bound pulse for that exact WI.
     if (route === GIT_MUTATE_ROUTE && workItemContext) return null;
@@ -1870,9 +1874,11 @@ export class NativeBinary {
     for (const route of [...this._workerAuthState.keys()]) this.#clearWorkerAuthRoute(route);
   }
 
-  #retireWorkerAfterAuthFailure() {
+  #retireWorkerAfterAuthFailure({ preserveRuntimePulses = false } = {}) {
     this.#clearWorkerAuthState();
-    this._runtimePulseEnvelopes.clear();
+    // A local cache miss on one route is not a rejection of the parent's
+    // still-valid grants on other routes. Native auth rejections clear all.
+    if (!preserveRuntimePulses) this._runtimePulseEnvelopes.clear();
     try {
       if (this._daemon?.isHostAlive?.()) this._daemon.retire({ graceMs: 0 });
     } catch { /* best effort */ }

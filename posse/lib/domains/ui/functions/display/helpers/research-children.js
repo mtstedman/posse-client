@@ -95,15 +95,18 @@ export function appendResearchChildMonitorRows(parents, {
       const researchOutcome = childResearchOutcome(call, { handoffForCall, explorationStatus: call.child_kind === "final_review" ? () => null : explorationStatus });
       if (call.child_kind === "final_review") {
         researchOutcome.budget = null;
-        if (Number(finalReview?.reviewer_agent_call_id) === Number(call.id)) researchOutcome.outcome = finalReview.outcome;
+        researchOutcome.outcome = Number(finalReview?.reviewer_agent_call_id) === Number(call.id)
+          ? finalReview.outcome : null;
       }
       const outcomeLabel = researchOutcomeLabel(researchOutcome);
       const baseActivity = activityRows[0]?.body || call.activity || (call.child_kind === "final_review" ? "Reviewing" : "Researching");
+      const reviewState = researchOutcome.outcome === "pass" ? "done"
+        : ["fail", "findings"].includes(researchOutcome.outcome) ? "failed" : "partial";
       return {
         ...parent, agentCallId: Number(call.id), parentAgentCallId: call.parent_agent_call_id,
         role: `↳ ${call.child_kind === "final_review" ? "final reviewer" : call.child_kind === "web_research" ? "web researcher" : call.child_kind === "research" ? "code researcher" : "citation child"}`,
         researchQuestion: call.activity, activity: outcomeLabel ? `${outcomeLabel} · ${baseActivity}` : baseActivity,
-        state: running ? pending.length ? "nudge" : "live" : call.status === "succeeded" ? researchOutcome.outcome === "partial" ? "partial" : "done" : call.status === "canceled" ? "canceled" : "failed", status: call.status,
+        state: running ? pending.length ? "nudge" : "live" : call.status === "succeeded" ? call.child_kind === "final_review" ? reviewState : researchOutcome.outcome === "partial" ? "partial" : "done" : call.status === "canceled" ? "canceled" : "failed", status: call.status,
         researchOutcome,
         provider: call.provider, modelName: call.model_name, effort: call.reasoning_effort, tier: call.model_tier,
         elapsed: `${Math.round((call.duration_ms ?? (Date.now() - Date.parse(call.started_at))) / 1000)}s`,

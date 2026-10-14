@@ -130,7 +130,8 @@ export function classifyUnavailableMergeCheck({ candidateResult, candidateCommit
   try {
     reset(targetHead);
     const target = runCurrent(Math.min(checkTimeoutMs, remaining()));
-    if (target?.status === "unavailable" && target.failure_kind === candidateResult.failure_kind) {
+    if (target?.status === "unavailable" && target.failure_kind === candidateResult.failure_kind
+      && JSON.stringify(target.missing_runtime_capabilities || []) === JSON.stringify(candidateResult.missing_runtime_capabilities || [])) {
       return { outcome: OUTCOMES.TARGET_UNAVAILABLE, target_status: "unavailable", candidate_status: "unavailable",
         failure_kind: target.failure_kind };
     }

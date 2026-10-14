@@ -1,6 +1,7 @@
 // lib/domains/git/functions/workflow-context.js
 // Shared context for git workflow helper factories.
 
+import { WorkerPulseLease } from "../../../shared/native/classes/WorkerPulseLease.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
@@ -87,26 +88,32 @@ export function createGitWorkflowContext({
     const nativeRuntime = await nativeBinaries.prepareWorkerRuntime(["git"], {
       routesByBinary: { git: routes },
     });
-    return GIT_WORKFLOW_THREAD_MANAGER.run(GIT_WORKFLOW_WORKER_URL, {
-      label: `git workflow ${task}`,
-      timeoutMs: effectiveTimeoutMs,
-      signal,
-      workerData: {
-        task,
-        args,
-        projectDir,
-        targetBranch: currentTargetBranch(),
-        autoMerge,
-        nonInteractive,
-        nativeAuth: heartbeatAuthManager.getCapability(),
-        nativeRuntime,
-      },
-      onProgress: (event = {}) => {
-        if (typeof onPhase === "function") {
-          try { onPhase(event || {}); } catch { /* display callback only */ }
-        }
-      },
-    });
+    const lease = new WorkerPulseLease(nativeBinaries.binary("git"), routes);
+    lease.start(nativeRuntime.binaries.git?.pulses);
+    try {
+      return await GIT_WORKFLOW_THREAD_MANAGER.run(GIT_WORKFLOW_WORKER_URL, {
+        label: `git workflow ${task}`,
+        timeoutMs: effectiveTimeoutMs,
+        signal,
+        workerData: {
+          task,
+          args,
+          projectDir,
+          targetBranch: currentTargetBranch(),
+          autoMerge,
+          nonInteractive,
+          nativeAuth: heartbeatAuthManager.getCapability(),
+          nativeRuntime,
+          nativePulsePort: lease.workerPort,
+        },
+        workerOptions: { transferList: [lease.workerPort] },
+        onProgress: (event = {}) => {
+          if (typeof onPhase === "function") {
+            try { onPhase(event || {}); } catch { /* display callback only */ }
+          }
+        },
+      });
+    } finally { lease.close(); }
   }
 
 

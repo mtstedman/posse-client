@@ -32,6 +32,8 @@ async function main() {
     nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
   }
   nativeBinaries.installWorkerRuntime(workerData?.nativeRuntime);
+  nativeBinaries.binary("git").workerPulsePort = workerData?.nativePulsePort || null;
+  workerData?.nativePulsePort?.unref();
   if (workerData?.task === REVIEWED_REFRESH_TASK) return prepareReviewedTargetRefresh(workerData.args);
   const {
     task,

@@ -757,7 +757,7 @@ async function executeReceipt({
   const result = hasExecutionChecks ? plannerClassifiedResult : classifyNestedRunnerInfrastructureFailure(
     executionCommand,
     plannerClassifiedResult,
-    { projectRoot: cwd },
+    { projectRoot: executionCwd },
   );
   const cleanupOptions = { cwd, siblingOwnedPaths, cleanupWorktree, cleanupPaths, allowProjectedBaseline };
   let { cleanupStatus, cleanupError, siblingPaths } = await restoreAfterTest({

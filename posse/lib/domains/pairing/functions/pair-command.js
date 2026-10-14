@@ -1225,7 +1225,7 @@ async function runHost({
       console.log(`  Others join with: ${C.cyan}posse session join ${started.code}${C.reset}`);
       console.log(`  Join requests appear below. Type a member's countersign and press Enter to admit them.`);
       if (autoMerge || autoDeploy) {
-        console.log(`  ${C.yellow}Trusted team:${C.reset} Posse ${[autoMerge && "merges the team's work into your branch", autoDeploy && `deploys it to ${remote || "origin"}`].filter(Boolean).join(" and ")} as it lands, without asking (\`auto merge off\` / \`auto deploy off\` to stop).`);
+        console.log(`  ${C.yellow}Trusted team:${C.reset} Posse ${[autoMerge && "merges the team's work into your branch", autoDeploy && `pushes it to ${remote || "origin"}`].filter(Boolean).join(" and ")} as it lands, without asking (\`auto merge off\` / \`auto deploy off\` to stop).`);
       }
       console.log(`  ${C.dim}This screen stays open for the whole session and keeps this folder in sync. Queue work with add, run it with go, type help for more.${C.reset}\n`);
     }
@@ -1703,7 +1703,10 @@ async function runStatus({
         deploy_mode: state.deploy_mode,
         auto_paused_reason: state.auto_paused_reason || null,
         last_merge_oid: state.last_merge_oid || null,
+        // Legacy field records a Git publication, never an application receipt.
         last_deploy_oid: state.last_deploy_oid || null,
+        last_push_oid: state.last_deploy_oid || null,
+        application_deployment: "unknown",
       },
     } : {}),
   };
@@ -1896,7 +1899,7 @@ function runSessionAutoCommand({ which = null, value = null, C, json }) {
     if (json) console.log(JSON.stringify({ ok: true, which: result.which, mode: result.mode }));
     else {
       console.log(`  ${C.green}[session]${C.reset} ${result.mode === "auto"
-        ? `auto ${which} is on: Posse ${which === "merge" ? "merges the team's work into your branch" : "deploys merged work to origin"} as it lands, without asking`
+        ? `auto ${which} is on: Posse ${which === "merge" ? "merges the team's work into your branch" : "pushes merged work to origin"} as it lands, without asking`
         : `auto ${which} is off: ${which} waits for your approval`}`);
     }
     return { ok: true, which: result.which, mode: result.mode };

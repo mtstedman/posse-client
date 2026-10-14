@@ -89,7 +89,7 @@ function spawnUnattended(action, { cwd }) {
 export function describeUnattendedResult(action, result) {
   if (!result || result.skipped || result.nothing) return null;
   if (result.ok && result.deployed) {
-    return { ok: true, text: `deployed ${String(result.deployOid || "").slice(0, 8)}${result.merged ? " (merged the team's latest work first)" : ""}` };
+    return { ok: true, text: `pushed ${String(result.pushOid || result.deployOid || "").slice(0, 8)} to origin; application deployment unconfirmed${result.merged ? " (merged the team's latest work first)" : ""}` };
   }
   if (result.ok && result.merged) {
     return { ok: true, text: `merged the team's latest work into your branch (${String(result.mergeOid || "").slice(0, 8)})` };

@@ -75,7 +75,7 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
       const classified = classifyNestedRunnerInfrastructureFailure(validation.execution_command || command, {
         status: result.error_code === "ENOENT" ? "infrastructure_error" : result.ok ? "passed" : "failed",
         code: result.error_code || result.status, stdout: result.stdout ?? result.output, stderr: result.stderr ?? "",
-      }, { projectRoot: checkout });
+      }, { projectRoot: cwdRelative ? path.resolve(checkout, cwdRelative) : checkout });
       const missingRunner = [127, 9009].includes(result.status)
         && /not found|not recognized as an internal or external command/i.test(result.output);
       const counts = testExecutionCounts(result.output);
@@ -94,6 +94,7 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
                 : !result.ok ? MERGE_CHECK_FAILURE_KINDS.TEST_FAILURE : null;
       return { ok: !unavailable && result.ok && !abnormal, status: unavailable ? "unavailable" : result.ok && !abnormal ? "passed" : "failed",
         ...(failureKind ? { failure_kind: failureKind } : {}),
+        ...(classified.missing_runtime_capabilities ? { missing_runtime_capabilities: classified.missing_runtime_capabilities } : {}),
         test: { name: command }, cwd_relative: cwdRelative, timeout_ms: timeoutMs, ...(unavailable ? { note: result.output } : {}),
         stdout: result.stdout ?? result.output ?? "", stderr: result.stderr ?? "",
         exit_code: result.status, signal: result.signal ?? null,

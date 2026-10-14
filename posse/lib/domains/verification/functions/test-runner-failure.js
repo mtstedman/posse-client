@@ -1,3 +1,4 @@
+import { missingPhpRuntimeCapabilities } from "./php-runtime-capability.js";
 import { NODE_PACKAGE_MANAGER_EXECUTABLES } from "../../../catalog/node-package-managers.js";
 import { missingNodeTestDependency } from "../../../shared/tools/functions/toolkit/node-test-failure.js";
 import fs from "fs";
@@ -69,6 +70,11 @@ export function classifyNestedRunnerInfrastructureFailure(command, result, { pro
     .map((value) => String(value || ""))
     .filter(Boolean)
     .join("\n");
+  const missingCapabilities = missingPhpRuntimeCapabilities(command, result, { projectRoot });
+  if (missingCapabilities) return {
+    ...result, status: "infrastructure_error", ok: null,
+    reason: "test_task_dependency_unavailable", missing_runtime_capabilities: missingCapabilities,
+  };
   const packageManager = NODE_PACKAGE_MANAGER_EXECUTABLES
     .includes(executable);
   const nestedExecutableMissing = packageManager && (

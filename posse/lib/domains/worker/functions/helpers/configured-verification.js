@@ -1,3 +1,4 @@
+import { classifyNestedRunnerInfrastructureFailure } from "../../../verification/functions/test-runner-failure.js";
 import { readSettingText, readSettingBool } from "../../../settings/functions/safe-setting-read.js";
 import { diffPorcelainEntries, parsePorcelainZ } from "../../../git/functions/porcelain-diff.js";
 import { getWorkItem, logEvent } from "../../../queue/functions/index.js";
@@ -363,9 +364,15 @@ export async function ensureConfiguredVerification(worker, {
     // Preserve its kind so retry policy and operators can distinguish a hard
     // wall limit from an explicitly configured idle watchdog.
     const timedOut = ["ETIMEDOUT", "EIDLETIMEOUT"].includes(String(error?.code || ""));
+    const classified = classifyNestedRunnerInfrastructureFailure(plan.command, {
+      status: timedOut ? "timed_out" : error?.code === "ENOENT" ? "infrastructure_error" : "failed",
+      code: error?.code, stdout: error?.stdout || "", stderr: error?.stderr || "",
+    }, { projectRoot: wtPath });
     const timeoutKind = error?.timeout_kind || "wall";
     const timeoutLimit = timeoutKind === "idle" ? plan.idle_timeout_ms : plan.timeout_ms;
-    const message = timedOut
+    const message = classified.status === "infrastructure_error"
+      ? `Pre-assessment hook unavailable: ${classified.reason || "runtime dependency unavailable"}`
+      : timedOut
       ? `Pre-assessment hook ${timeoutKind === "idle" ? "produced no output" : "timed out"} after ${timeoutLimit}ms (${timeoutKind} policy): ${plan.command}`
       : `Pre-assessment hook failed: ${String(error?.message || error).split("\n")[0]}`;
     worker.emit(job.id, `${C.red}[pre-assess] ${message}${C.reset}`);
@@ -374,8 +381,8 @@ export async function ensureConfiguredVerification(worker, {
       verification_eligible: currentBinding.verification_eligible === true && !error?.verification_git_state,
       command: plan.command,
       cwd: wtPath,
-      status: timedOut ? "timed_out" : "failed",
-      reason: timedOut ? `verification_${timeoutKind}_timeout` : null,
+      status: classified.status,
+      reason: timedOut ? `verification_${timeoutKind}_timeout` : classified.reason || null,
       timeout_ms: plan.timeout_ms,
       idle_timeout_ms: plan.idle_timeout_ms,
       timeout_kind: timedOut ? timeoutKind : null,
@@ -383,8 +390,8 @@ export async function ensureConfiguredVerification(worker, {
       policy_fingerprint: plan.policy_fingerprint,
       toolchain_fingerprint: plan.toolchain_fingerprint,
       verification_outcome: verificationOutcome({
-        status: timedOut ? "timed_out" : "failed",
-        reason: timedOut ? `verification_${timeoutKind}_timeout` : null,
+        status: classified.status,
+        reason: timedOut ? `verification_${timeoutKind}_timeout` : classified.reason || null,
         phase: "post_change",
         code: error?.code ?? null,
       }),
@@ -395,14 +402,14 @@ export async function ensureConfiguredVerification(worker, {
         : {}),
     });
     const result = {
-      status: timedOut ? "timed_out" : "failed",
+      status: classified.status,
       timed_out: timedOut,
-      reason: timedOut ? "verification_wall_timeout" : null,
+      reason: timedOut ? "verification_wall_timeout" : classified.reason || null,
       error,
       message,
       ...plan,
     };
-    result.reason = timedOut ? `verification_${timeoutKind}_timeout` : null;
+    result.reason = timedOut ? `verification_${timeoutKind}_timeout` : classified.reason || null;
     result.verification_outcome = verificationOutcome({ ...result, phase: "post_change", code: error?.code ?? null });
     return result;
   }

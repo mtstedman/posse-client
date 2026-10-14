@@ -371,8 +371,9 @@ export async function runSessionPublish({
     }
     state = updateSessionPublishSettings(state.id, { lastDeployOid: tip });
     if (unattended) writeAutoRecord(sessionId, { ...(trunk ? { evaluated_trunk: trunk } : {}), failures: 0, retry_after: null });
-    say(`Deployed ${shortSha(tip)} to ${remote}/${targetBranch}; the session keeps running.`);
-    return { ok: true, action, deployed: true, deployOid: tip, merged: Boolean(built && !built.empty), trunk };
+    say(`Pushed ${shortSha(tip)} to ${remote}/${targetBranch}; application deployment is unconfirmed. The session keeps running.`);
+    // Compatibility aliases deployed/deployOid describe Git publication only.
+    return { ok: true, action, deployed: true, deployOid: tip, pushed: true, pushOid: tip, applicationDeployment: "unknown", merged: Boolean(built && !built.empty), trunk };
   }
   throw publishError("session_publish_target_moved", `${remote}/${targetBranch} or local ${targetBranch} kept moving; try again`);
 }
@@ -521,7 +522,7 @@ export function describeSessionPublishModes(state) {
   if (!state || state.role !== "host") return null;
   const label = (mode) => (mode === SESSION_PUBLISH_MODES.AUTO ? "auto" : "you approve");
   const parts = [`merge: ${label(state.merge_mode)}`, `deploy: ${label(state.deploy_mode)}`];
-  if (state.last_deploy_oid) parts.push(`last deploy ${shortSha(state.last_deploy_oid)}`);
+  if (state.last_deploy_oid) parts.push(`last push ${shortSha(state.last_deploy_oid)} · application deployment unknown`);
   else if (state.last_merge_oid) parts.push(`last merge ${shortSha(state.last_merge_oid)}`);
   return parts.join(" · ");
 }

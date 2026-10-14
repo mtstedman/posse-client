@@ -1,3 +1,4 @@
+import { isNativePulseColdError } from "./native/invoke.js";
 import { recordTargetDebt, resolveTargetDebtEntries } from "./merge-target-debt-store.js";
 export { recordTargetDebt } from "./merge-target-debt-store.js";
 import { mergeTestWaiverCovers } from "./merge-test-waiver.js";
@@ -1881,6 +1882,7 @@ export function createMergeWorkflowHelpers(context, {
         const guidance = deterministicConflict ? `. ${parkGuidance(wiId, branch, targetBranch, conflictFiles)}` : "";
         return {
           ok: false,
+          ...(isNativePulseColdError(finalMergeErr) ? { deferred: true, infrastructureFailure: true, reason: finalMergeErr.code } : {}),
           timedOut,
           runtimePathBlocked: finalMergeErr?.code === "GIT_RESERVED_RUNTIME_PATH",
           runtimePaths: finalMergeErr?.runtimePaths || [],
@@ -1947,7 +1949,7 @@ export function createMergeWorkflowHelpers(context, {
       const restoreWarning = autoStash
         ? restoreAutoStash(cwd, autoStash, log, `setup failure for ${branch}`)
         : null;
-      return { ok: false, message: `Merge failed: ${firstGitLine(err)}${restoreWarning ? `; ${restoreWarning}` : ""}`, stashPopWarning: restoreWarning, targetBranch };
+      return { ok: false, ...(isNativePulseColdError(err) ? { deferred: true, infrastructureFailure: true, reason: err.code } : {}), message: `Merge failed: ${firstGitLine(err)}${restoreWarning ? `; ${restoreWarning}` : ""}`, stashPopWarning: restoreWarning, targetBranch };
     } finally {
       // Every exit that reaches here committed or aborted the squash. Keep the
       // marker only if the squash is somehow still staged, so the next merge or
@@ -2027,6 +2029,10 @@ export function createMergeWorkflowHelpers(context, {
           { onPhase, signal, timeoutMs },
         );
       } catch (error) {
+        if (isNativePulseColdError(error) || error?.code === "POSSE_NATIVE_HEARTBEAT_UNAVAILABLE") {
+          return { ok: false, deferred: true, infrastructureFailure: true, reason: error.code,
+            message: `Merge waiting for native authorization: ${firstGitLine(error)}` };
+        }
         // The terminated worker ran no finally blocks: unstage its squash and
         // remove its temporary checkouts before reporting the timeout.
         if (["THREAD_TIMEOUT", "THREAD_ABORTED"].includes(error?.code) || isAbortError(error)) {
