@@ -229,9 +229,7 @@ export function gitPushWithGitHubCliFallback(args, cwd, {
   const remoteName = String(remote || "").trim();
   if (!remoteName) throw new TypeError("gitPushWithGitHubCliFallback requires a remote name");
 
-  try {
-    return gitExecFn(args, cwd, gitOptions);
-  } catch (initialError) {
+  const recover = (initialError) => {
     if (!isGitPushAuthenticationFailure(initialError)) throw initialError;
 
     const fallbackOptions = nonInteractiveOptions(gitOptions);
@@ -268,14 +266,20 @@ export function gitPushWithGitHubCliFallback(args, cwd, {
     }
     retryArgs.push(...args);
 
-    try {
-      return fallbackGitExecFn(retryArgs, cwd, fallbackOptions);
-    } catch (fallbackError) {
+    const fail = (fallbackError) => {
       if (fallbackError && typeof fallbackError === "object") {
         if (fallbackError.cause == null) fallbackError.cause = initialError;
         fallbackError.gitAuthFallback = "gh";
       }
       throw fallbackError;
-    }
-  }
+    };
+    try {
+      const result = fallbackGitExecFn(retryArgs, cwd, fallbackOptions);
+      return result?.catch ? result.catch(fail) : result;
+    } catch (error) { return fail(error); }
+  };
+  try {
+    const result = gitExecFn(args, cwd, gitOptions);
+    return result?.catch ? result.catch(recover) : result;
+  } catch (error) { return recover(error); }
 }

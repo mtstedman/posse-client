@@ -1,3 +1,4 @@
+import { runPairingGitTransfer } from "./git-transfer.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -44,6 +45,19 @@ function push(args, projectDir, remote, options = {}) {
     gitExecFn: git,
     fallbackGitExecFn: git,
     gitOptions: options,
+  });
+}
+
+function transfer(args, projectDir, { onProgress = () => {}, operation = args[0], ...options } = {}) {
+  return runPairingGitTransfer(args, projectDir, { env: NONINTERACTIVE_GIT_ENV, ...options, operation, onProgress });
+}
+
+function pushWithProgress(args, projectDir, remote, onProgress) {
+  return gitPushWithGitHubCliFallback(args, projectDir, {
+    remote,
+    gitExecFn: (argv, cwd) => transfer(argv, cwd, { operation: "push", onProgress }),
+    fallbackGitExecFn: (argv, cwd, options) => argv[0] === "remote" ? git(argv, cwd, options)
+      : transfer(argv, cwd, { ...options, operation: "push", onProgress }),
   });
 }
 
@@ -443,7 +457,7 @@ export function validateBranchName(projectDir, branch) {
 // default branch.
 export async function createAndPublishPairingBranch(projectDir, {
   remote, branch, expectedUrl = null, baseBranch = null,
-}, { retryNetwork = (operation) => operation() } = {}) {
+}, { retryNetwork = (operation) => operation(), onProgress = () => {} } = {}) {
   const normalizedRemote = validateRemoteName(remote);
   if (expectedUrl != null) assertPairingRemoteTargets(projectDir, normalizedRemote, expectedUrl);
   validateBranchName(projectDir, branch);
@@ -476,9 +490,9 @@ export async function createAndPublishPairingBranch(projectDir, {
   if (baseBranch != null) {
     const baseRef = `refs/heads/${baseBranch}`;
     const baseExisting = (await retryNetwork(() => git(["ls-remote", "--heads", normalizedRemote, baseRef], projectDir))).trim();
-    if (!baseExisting) await retryNetwork(() => push(["push", normalizedRemote, `${oid}:${baseRef}`], projectDir, normalizedRemote));
+    if (!baseExisting) await retryNetwork(() => pushWithProgress(["push", "--progress", normalizedRemote, `${oid}:${baseRef}`], projectDir, normalizedRemote, onProgress));
   }
-  await retryNetwork(() => push(["push", "--set-upstream", normalizedRemote, `${oid}:${remoteRef}`], projectDir, normalizedRemote));
+  await retryNetwork(() => pushWithProgress(["push", "--progress", "--set-upstream", normalizedRemote, `${oid}:${remoteRef}`], projectDir, normalizedRemote, onProgress));
   // Pushing an object id sets no upstream. The shared branch must track the
   // session remote (as a member's does): session-scoped commits on it are
   // matched to the session repository through that remote.
@@ -563,7 +577,7 @@ export function findOrAddPairingRemote(projectDir, { remoteUrl: expectedUrl, ses
   return addPairingRemote(projectDir, remote, expectedUrl);
 }
 
-export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, expectedUrl = null, onProgress = () => {} }) {
+export async function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, expectedUrl = null, onProgress = () => {} }) {
   const normalizedRemote = validateRemoteName(remote);
   if (expectedUrl != null) assertPairingRemoteTargets(projectDir, normalizedRemote, expectedUrl);
   validateBranchName(projectDir, branch);
@@ -579,24 +593,26 @@ export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, 
   }
   const remoteRef = `refs/remotes/${normalizedRemote}/${branch}`;
   onProgress("Downloading the session repository...");
-  git([
+  await transfer([
     "fetch",
+    "--progress",
     "--no-tags",
     normalizedRemote,
     `+refs/heads/${branch}:${remoteRef}`,
-  ], projectDir);
+  ], projectDir, { onProgress });
   const remoteOid = git(["rev-parse", "--verify", remoteRef], projectDir, { timeoutMs: 5_000 }).trim();
   // Only a member's join runs this, and the session deploy key is its only
   // credential: the gh fallback in push() would read the member's own GitHub
   // token for a repository that account can never reach.
   onProgress("Download complete. Checking repository write access...");
-  git([
+  await transfer([
     "push",
+    "--progress",
     "--dry-run",
     `--force-with-lease=refs/heads/${branch}:${remoteOid}`,
     normalizedRemote,
     `${remoteOid}:refs/heads/${branch}`,
-  ], projectDir);
+  ], projectDir, { onProgress });
   // A checkout created empty for this join has no history yet; it takes the
   // session's history as its own.
   if (!headIsUnborn(projectDir)) {
@@ -632,10 +648,10 @@ export function preflightAndCheckoutPairingBranch(projectDir, { remote, branch, 
   }
   onProgress("Checking out the session branch...");
   if (localOid) {
-    git(["switch", branch], projectDir);
+    await transfer(["switch", "--progress", branch], projectDir, { onProgress });
     git(["branch", "--set-upstream-to", `${normalizedRemote}/${branch}`, branch], projectDir, { timeoutMs: 5_000 });
   } else {
-    git(["switch", "--create", branch, "--track", `${normalizedRemote}/${branch}`], projectDir);
+    await transfer(["switch", "--progress", "--create", branch, "--track", `${normalizedRemote}/${branch}`], projectDir, { onProgress });
   }
   onProgress("Session checkout ready.");
   return remoteOid;

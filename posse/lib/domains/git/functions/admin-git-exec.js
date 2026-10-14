@@ -66,6 +66,7 @@ export function adminGitExecAsync(args, cwd, {
   encoding = "utf8",
   signal = undefined,
   env = undefined,
+  onStderr = undefined,
 } = {}) {
   const argv = normalizeArgs(args);
   return new Promise((resolve, reject) => {
@@ -91,6 +92,7 @@ export function adminGitExecAsync(args, cwd, {
       const text = String(stdout ?? "");
       resolve(trim ? text.trim() : text);
     });
+    if (typeof onStderr === "function") child.stderr?.on("data", onStderr);
     if (input != null && child.stdin) child.stdin.end(input);
   });
 }

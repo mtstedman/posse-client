@@ -1168,7 +1168,9 @@ async function runHost({
         branch: sharedBranch,
         expectedUrl: sessionUrl,
         baseBranch: provisioned ? defaultBranch : null,
-      }, { retryNetwork });
+      }, { retryNetwork, onProgress: (message) => {
+        if (!json) console.log(`  ${C.dim}[pair setup] ${message}${C.reset}`);
+      } });
       // The session repository's default is the trunk it was cut from; the
       // shared branch stays a side branch, as shared-trunk preflight requires.
       if (provisioned) setGitHubDefaultBranch(provisioned.repository, defaultBranch, { cwd: root });

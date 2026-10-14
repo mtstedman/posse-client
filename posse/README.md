@@ -954,7 +954,13 @@ untracked files but skip expensive rename detection. For unusually large
 repositories or slow disks/networks, set `POSSE_PAIR_GIT_TIMEOUT_MS=1800000`
 in the terminal before starting Posse to allow 30 minutes per Git operation
 (maximum 60 minutes). This only extends Git budgets; tool-version probes keep
-their ten-second limit, and dirty-checkout and history checks still apply.
+their ten-second limit, and dirty-checkout and history checks still apply. Uploads and
+downloads show live Git phase progress, object counts, bytes, and transfer
+speed; checkout shows Git's file-count progress. Git transfers packed objects,
+so it does not expose a current filename during upload/download. A quiet
+operation reports elapsed time every 15 seconds. Interrupted fetches/pushes
+retry up to twice within the operation's original timeout budget; authentication,
+history, and branch-protection failures are not transport retries.
 
 Successful WI and iterative merges are published automatically to the exact
 side branch. Posse still runs committed-conflict checks and `pre_push_gate`, but

@@ -230,6 +230,8 @@ export function prepareSessionSshIdentity(projectDir, sessionId, options = {}) {
     "  StrictHostKeyChecking yes",
     // A network that drops port 22 then fails in seconds, not the OS TCP timeout.
     "  ConnectTimeout 15",
+    "  ServerAliveInterval 15",
+    "  ServerAliveCountMax 4",
     "",
   ].join("\n"), { mode: 0o600 });
   return {
