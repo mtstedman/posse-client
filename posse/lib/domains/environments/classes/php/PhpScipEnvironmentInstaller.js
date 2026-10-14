@@ -5,7 +5,9 @@ import path from "path";
 import { ScipLanguageEnvironmentInstaller } from "../ScipLanguageEnvironmentInstaller.js";
 import { commandOnPath, fileExists, runCommand, scipDependencyInstallEnv } from "../../functions/scip-install-runtime.js";
 import { PHP_SCIP_ENV_INPUTS, PHP_SCIP_TRACKS, PHP_SCIP_TRACK_ORDER, describePhpScipSelection, parsePhpCliVersion, phpScipEnvInputHash, phpScipUpstreamCommand, readPhpScipEnvStamp, removePhpScipEnvStamp, resolvePhpScipRuntime, selectPhpScipTrack, writePhpScipEnvStamp } from "../../functions/php-scip-tracks.js";
-import { ensureComposer } from "../../functions/composer-bootstrap.js";
+import { ensureComposer, enablePhpComposerExtensions } from "../../functions/composer-bootstrap.js";
+import { selectPhpUnitRelease } from "../../functions/phpunit-runtime.js";
+import { installManagedPhpUnit, managedPhpUnitInstalled } from "../../functions/phpunit-install.js";
 
 /** @typedef {import("../../functions/php-scip-tracks.js").PhpScipTrackId} PhpScipTrackId */
 
@@ -73,7 +75,24 @@ export class PhpScipEnvironmentInstaller extends ScipLanguageEnvironmentInstalle
   }
 
   async install() {
-    const selection = selectPhpScipTrack(await this.detectPhpVersion());
+    const phpVersion = await this.detectPhpVersion();
+    const scip = await this.installScip(phpVersion);
+    if (!scip?.ok || !selectPhpUnitRelease(phpVersion)) return scip;
+    const phpunit = await this.installPhpUnit(phpVersion);
+    if (!phpunit.ok) return this.failed(`${scip.message}; ${phpunit.message}`);
+    return this.ok(phpunit.status === "installed" ? "installed" : scip.status, `${scip.message}; ${phpunit.message}`);
+  }
+
+  async installPhpUnit(phpVersion) {
+    if (this.platform === "win32" && !this.dryRun) {
+      const extensions = await enablePhpComposerExtensions("php", { extensions: ["mbstring"], requiredExtensions: ["mbstring"] });
+      if (!extensions.ok) return { ok: false, status: "failed", message: extensions.message };
+    }
+    return installManagedPhpUnit({ installRoot: this.installRoot, release: selectPhpUnitRelease(phpVersion), dryRun: this.dryRun });
+  }
+
+  async installScip(phpVersion) {
+    const selection = selectPhpScipTrack(phpVersion);
     const track = selection.track;
     const reuse = track ? this.reuseDecision(track) : null;
     const totalSteps = !reuse ? 1 : reuse.reuse ? 2 : (this.dryRun ? 3 : this.installPlan().length);
@@ -192,12 +211,13 @@ export class PhpScipEnvironmentInstaller extends ScipLanguageEnvironmentInstalle
     const runtime = resolvePhpScipRuntime({ scipRoots: [path.join(this.installRoot, "scip")] });
     if (!runtime) return this.failed(`missing ${this.expectedCommandPath(this.commandSegments, "scip-php")}`);
     const current = phpScipEnvInputHash(this.sourceTrackDir(runtime.track));
-    if (!runtime.stamp || runtime.stamp.input_hash !== current) {
+    if (!runtime.stamp || runtime.stamp.input_hash !== current
+      || !managedPhpUnitInstalled(this.installRoot, selectPhpUnitRelease(runtime.stamp.php_version))) {
       return {
         language: this.language,
         ok: false,
         status: "needs-install",
-        message: `scip-php ${runtime.track} track is out of date; posse doctor reinstalls it`,
+        message: `PHP tooling (${runtime.track} track) needs repair; posse doctor installs SCIP and PHPUnit`,
       };
     }
     const php = runtime.stamp.php_version ? ` for PHP ${runtime.stamp.php_version}` : "";

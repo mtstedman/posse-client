@@ -75,3 +75,24 @@ export function parseCommandArguments(command) {
   if (tokens.length === 0) throw new Error("test command is empty");
   return tokens;
 }
+
+// Quoted metacharacters are literal argv data under direct spawn (for example
+// PHPUnit's --filter 'FirstTest|SecondTest'), not shell operators.
+export function hasUnquotedShellOperators(command) {
+  let quote = null;
+  const value = String(command || "");
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index];
+    if (quote) {
+      if (char === quote) quote = null;
+      else if (char === "\\" && quote === '"' && ['"', "\\"].includes(value[index + 1])) index++;
+    } else if (char === "\\" && /[\s'"\\]/.test(value[index + 1] || "")) {
+      index++;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (/[;&|<>]/.test(char)) {
+      return true;
+    }
+  }
+  return false;
+}

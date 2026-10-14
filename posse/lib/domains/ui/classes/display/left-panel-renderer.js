@@ -1,3 +1,4 @@
+import { DETERMINISTIC_AUDIT_ROLE } from "../../../../catalog/worker-display.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { tierModelName } from "../../../providers/functions/provider.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
@@ -237,6 +238,8 @@ export class DisplayLeftPanelRenderer {
         : `${C.dim}${wiPlain}${C.reset}`;
       if (isWaiting) {
         workers.push(`${accent} ${C.yellow}${spin}${C.reset} ${this._roleTag(w.role)} ${wiCol} ${C.yellow}\u26a0 waiting${C.reset}`);
+      } else if (w.role === DETERMINISTIC_AUDIT_ROLE) {
+        workers.push(`${accent} ${c}${spin}${C.reset} ${this._roleTag(w.role)} ${wiCol} ${C.dim}deterministic ${elapsed}s${C.reset}`);
       } else {
         const tierColors = { cheap: C.dim, standard: C.cyan, strong: C.magenta };
         const effortAbbr = { low: "low", medium: "med", high: "high" };

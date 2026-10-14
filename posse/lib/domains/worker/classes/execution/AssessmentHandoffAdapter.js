@@ -1,3 +1,4 @@
+import { assessmentDisplayMessage } from "../../functions/execution/display-sync.js";
 import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole } from "../../../settings/functions/repository-settings.js";
 import path from "path";
 import { completeReviewedJob } from "../../functions/helpers/complete-reviewed-job.js";
@@ -220,7 +221,7 @@ export class AssessmentHandoffAdapter {
       reason: `assessment-scoped-check-side-effects-wi-${job.work_item_id}-job-${job.id}`,
       branchName: getWorkItem(job.work_item_id)?.branch_name || null,
       wiId: job.work_item_id,
-      onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-checks] ${message}${C.reset}`),
+      onMsg: (message) => worker.emit(job.id, `${C.dim}[audit-checks] ${message}${C.reset}`),
     });
   }
 
@@ -423,7 +424,7 @@ export class AssessmentHandoffAdapter {
               reason: `test-post-change-side-effects-wi-${job.work_item_id}-job-${job.id}`,
               branchName: getWorkItem(job.work_item_id)?.branch_name || null,
               wiId: job.work_item_id,
-              onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-test] ${message}${C.reset}`),
+              onMsg: (message) => worker.emit(job.id, `${C.dim}[audit-test] ${message}${C.reset}`),
             })
           : null,
         siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
@@ -440,7 +441,7 @@ export class AssessmentHandoffAdapter {
         const logSummary = postChangeTestLogSummary(postReceipt);
         worker.emit(
           job.id,
-          `${logSummary.tone === "passed" ? C.green : logSummary.tone === "failed" ? C.red : C.yellow}[assessor-test] ${postReceipt.reused ? "Reused" : "Ran"} frozen command: ${logSummary.text}${C.reset}`,
+          `${logSummary.tone === "passed" ? C.green : logSummary.tone === "failed" ? C.red : C.yellow}[audit-test] ${postReceipt.reused ? "Reused" : "Ran"} frozen command: ${logSummary.text}${C.reset}`,
         );
         recordObservation({
           work_item_id: job.work_item_id,
@@ -547,7 +548,7 @@ export class AssessmentHandoffAdapter {
         assessmentContext.scoped_check_result = scopedCheckReceipt.result;
         worker.emit(
           job.id,
-          `${C.dim}[assessor-checks] ${scopedCheckReceipt.reused ? "Reused" : "Ran"} changed-file lint/typecheck: ${scopedCheckReceipt.result.status}${C.reset}`,
+          `${C.dim}[audit-checks] ${scopedCheckReceipt.reused ? "Reused" : "Ran"} changed-file lint/typecheck: ${scopedCheckReceipt.result.status}${C.reset}`,
         );
       }
       const assessmentSession = new AssessmentSession({
@@ -586,7 +587,7 @@ export class AssessmentHandoffAdapter {
         worker._cleanupWorktreeIfDone(job.work_item_id);
         return { handled: true, currentAttemptId: assessAttempt.attempt.id };
       }
-      const emitFn = (msg) => worker.emit(job.id, msg);
+      const emitFn = (msg) => worker.emit(job.id, assessmentDisplayMessage(msg, assessmentSession.modelCalled));
       processVerdict(job, verdict, { emit: emitFn, projectDir: worker.projectDir, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash, assessmentModelTier: effectiveTier });
       const freshJob = getJob(job.id);
       if (freshJob?.status === "succeeded") {

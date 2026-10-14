@@ -12,6 +12,7 @@ import { filterProcessEnv } from "../../../platform/functions/process-env.js";
 import { testExecutionCounts } from "./test-output-counts.js";
 import { pythonExecutable, repositoryTestRunner } from "./repository-test-runner.js";
 import { gitExec } from "../../../../domains/git/functions/utils.js";
+import { resolveManagedPhpUnit } from "../../../../domains/environments/functions/phpunit-runtime.js";
 
 
 
@@ -190,18 +191,22 @@ function hasTopLevelPhpAssertion(code) {
 // A PHPUnit class only defines a class; `php <file>` runs nothing (or dies on
 // the missing base class). Custom bases need a declared runner unless the
 // file positively identifies its own standalone assertion entry point.
-function phpRunner(root, relative, source) {
-  const phpunit = nearestUpward(root, relative, ["vendor/bin/phpunit"]);
+function phpRunner(root, relative, source, options = {}) {
+  const localPhpunit = nearestUpward(root, relative, ["vendor/bin/phpunit"]);
   const config = nearestUpward(root, relative, PHPUNIT_CONFIG_NAMES);
-  const invocation = () => ({ runner: "phpunit", executable: "php", args: [phpunit, ...(config ? ["-c", config] : []), relative] });
+  const invocation = () => {
+    const phpunit = localPhpunit || resolveManagedPhpUnit(options.posseRoot);
+    return phpunit
+      ? { runner: "phpunit", executable: "php", args: [phpunit, ...(config ? ["-c", config] : []), relative] }
+      : { reason: "phpunit_unavailable" };
+  };
   if (PHPUNIT_SOURCE_RE.test(source)) {
-    if (!phpunit) return { reason: "phpunit_unavailable" };
     return invocation();
   }
   const code = phpSourceCode(source);
   const bases = [...code.matchAll(PHP_CLASS_EXTENDS_RE)].map((match) => match[1]);
   if (bases.length > 0 && config && phpUnitConfigDeclares(root, config, relative)) {
-    return phpunit ? invocation() : { reason: "phpunit_unavailable" };
+    return invocation();
   }
   if (bases.length > 0 && (bases.some((base) => /(?:TestCase|TestBase|BaseTest)$/i.test(base))
     || !hasTopLevelPhpAssertion(code))) return { reason: "php_runner_unidentified" };
@@ -304,7 +309,7 @@ export function discoverUnitTestCapability({ projectDir, scipAvailable = true } 
  * with no positively identified runner resolves with `runner: null` and a
  * `reason`, so callers report it as unavailable instead of guessing.
  */
-export function resolveUnitTestInvocation(projectDir, requestedPath, capability = null) {
+export function resolveUnitTestInvocation(projectDir, requestedPath, capability = null, options = {}) {
   const root = path.resolve(String(projectDir || ""));
   const raw = String(requestedPath || "").trim().replace(/\\/g, "/");
   if (!raw || raw.includes("\0") || path.posix.isAbsolute(raw) || /^[A-Za-z]:\//.test(raw)) return null;
@@ -322,7 +327,7 @@ export function resolveUnitTestInvocation(projectDir, requestedPath, capability 
   const resolved = repositoryTestRunner(root, normalized) || (["javascript", "typescript"].includes(adapter.language)
     ? javascriptTestRunner(root, normalized, readSourceHead(real))
     : adapter.resolve
-    ? adapter.resolve(root, normalized, readSourceHead(real))
+    ? adapter.resolve(root, normalized, readSourceHead(real), options)
     : { runner: adapter.runner, executable: adapter.executable(), args: adapter.argv(normalized) });
   if (!resolved.runner) {
     return Object.freeze({ path: normalized, language: adapter.language, runner: null, reason: resolved.reason });
@@ -417,9 +422,9 @@ function unitTestResult(outcome, fields = {}) {
   };
 }
 
-export async function runUnitTestFile({ projectDir, path: requestedPath, capability = null, timeoutMs = DEFAULT_TIMEOUT_MS, signal: abortSignal = null } = {}) {
+export async function runUnitTestFile({ projectDir, path: requestedPath, capability = null, timeoutMs = DEFAULT_TIMEOUT_MS, signal: abortSignal = null, posseRoot = undefined } = {}) {
   abortSignal?.throwIfAborted();
-  const invocation = resolveUnitTestInvocation(projectDir, requestedPath, capability);
+  const invocation = resolveUnitTestInvocation(projectDir, requestedPath, capability, { posseRoot });
   if (!invocation) {
     return unitTestResult("unavailable", { reason: "unit_test_path_unavailable", path: String(requestedPath || "") });
   }

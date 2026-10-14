@@ -45,6 +45,8 @@ Key behavior:
 - Handoff-owned creation materialization: planners declare exact
   `files_to_create`, but writing providers receive existing
   `files_to_modify` paths and no generic creation authority.
+- Deterministic checks display as `audit` without model or reasoning-effort badges.
+  Actual model assessments retain the `assessor` label.
 - Manifest-root-aware verification readiness with explicit `passed`,
   `failed`, and `unavailable` outcomes.
 
@@ -569,6 +571,15 @@ run manifest's measured duration instead of the former aggregate estimates.
 Posse runs a repository's frozen test command and its canonical verification
 command under a declared time policy instead of a fixed 120-second cap:
 
+One-shot `vitest run`, `node_modules/.bin/vitest run`, and `npx vitest run`
+commands are standard verification commands. Explicit test-file selections
+use the existing `run_unit_test` Vitest adapter and per-file results. Suite
+filters or explicit CLI options use the repository's installed Vitest through
+the frozen-command runner; `npx` never downloads a package. Missing dependencies
+are reported as unavailable. Watch mode, snapshot updates, and output-writing
+flags remain excluded. Quoted PHPUnit filters such as
+`phpunit --filter 'FirstTest|SecondTest'` preserve their literal regex argument.
+
 **Test strictness** is a repository setting under **Repository → Verification**
 in the admin settings. `test_strictness=permissive` is the default: missing,
 unavailable, unconfigured, and zero-test runs are recorded as diagnostics and
@@ -597,6 +608,15 @@ failure identity. Fixing some existing failures or changing their report order
 leaves the remaining failures classified as baseline debt. New failures and
 changed diagnostics remain actionable. Debt does not count as a passing suite
 or waive missing test coverage; incomplete reports retain conservative handling.
+
+PHP unit-test discovery uses the nearest repository `vendor/bin/phpunit`, then
+falls back to Posse's managed `scip/bin/phpunit.phar`. PHP setup (`posse doctor`
+with PHP selected) installs the checksum-pinned PHAR suitable for the host PHP,
+including when SCIP is already installed. PHPUnit need not be declared in the
+repository's `composer.json`. The fallback keeps the repository's configuration,
+bootstrap and test path; application dependencies still belong to the repository.
+Repositories that require another PHPUnit version can install it locally. Test
+execution itself never downloads PHPUnit or changes Composer files.
 
 Without a legacy planner `test_command`, Posse derives a versioned ordered plan
 from known `package.json` test/lint/typecheck scripts. Repositories can instead

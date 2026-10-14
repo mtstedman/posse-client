@@ -2895,7 +2895,7 @@ export const TOOL_DOWNLOAD_FILE = {
   type: "function",
   name: "download_file",
   description:
-    "Download external files byte-exact into your writable output scope: PNG, JPEG, WebP, or GIF images, JSON, "
+    "Download external files byte-exact into your writable output scope: PNG, JPEG, WebP, or GIF images, PDF, JSON, "
     + "plain text, CSV, or an HTML page to read for links. Public HTTPS URLs only; redirects are followed and "
     + "re-checked, and no headers or body can be sent. "
     + `Up to ${DOWNLOAD_FILE_LIMITS.maxItemsPerCall} files per call, ${DOWNLOAD_FILE_LIMITS.maxBytesPerItem / MIB} MB per file, `

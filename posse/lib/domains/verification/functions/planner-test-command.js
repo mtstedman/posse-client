@@ -4,7 +4,8 @@ import { MUTATING_TEST_FLAGS, INTERACTIVE_TEST_FLAGS } from "../../../catalog/te
 import { declaredNodeTestCommand } from "../../../shared/tools/functions/toolkit/repository-test-runner.js";
 import fs from "fs";
 import path from "path";
-import { isSafeDirectNodeTestScriptArgs, parseCommandArguments } from "../../../shared/scope/functions/test-command.js";
+import { hasUnquotedShellOperators, isSafeDirectNodeTestScriptArgs, parseCommandArguments } from "../../../shared/scope/functions/test-command.js";
+import { resolveLocalVitestCommand, vitestCommandArgs } from "./vitest-command.js";
 import { TEST_SCRIPT_NO_VERIFICATION_REASON } from "../../../catalog/verification.js";
 import { sha256 } from "../../../shared/format/functions/sha256.js";
 
@@ -85,7 +86,7 @@ export function validatePlannerTestCommand(command) {
     return { ok: false, reason: "test_command_contains_unsafe_working_directory" };
   }
   const executableCommand = invocation.command;
-  if (/&&|\|\||[;|<>`]|\$\(/.test(executableCommand)) {
+  if (hasUnquotedShellOperators(executableCommand) || /`|\$\(/.test(executableCommand)) {
     return { ok: false, reason: "test_command_contains_shell_composition" };
   }
   if (/%/.test(executableCommand)) {
@@ -93,6 +94,10 @@ export function validatePlannerTestCommand(command) {
   }
 
   const executable = commandExecutable(executableCommand);
+  let vitestArgs;
+  try { vitestArgs = vitestCommandArgs(executableCommand); } catch {
+    return { ok: false, reason: "test_command_invalid_quoting" };
+  }
   let directShellScript = null;
   let directShellInterpreter = false;
   try {
@@ -105,11 +110,10 @@ export function validatePlannerTestCommand(command) {
     directShellScript = null;
     directShellInterpreter = false;
   }
-  const normalized = executableCommand.toLowerCase();
-  const words = normalized.match(/(?:"[^"]*"|'[^']*'|[^\s]+)/g) || [];
-  const args = words.slice(1).map((word) => word.replace(/^['"]|['"]$/g, ""));
+  const args = parseCommandArguments(executableCommand).slice(1).map((word) => word.toLowerCase());
   const flagName = (arg) => String(arg || "").toLowerCase().split("=", 1)[0];
-  if (args.some((arg) => MUTATING_TEST_FLAGS.has(flagName(arg)))) {
+  if (args.some((arg) => MUTATING_TEST_FLAGS.has(flagName(arg))
+    || (vitestArgs && MUTATING_TEST_FLAGS.has(flagName(arg).split(".", 1)[0])))) {
     return { ok: false, reason: "test_command_contains_mutating_output_flag" };
   }
   if (args.some((arg) => INTERACTIVE_TEST_FLAGS.has(flagName(arg)))) {
@@ -135,7 +139,12 @@ export function validatePlannerTestCommand(command) {
   const safeTaskPattern = /^(?:test|tests|check|typecheck|lint|verify|spec)(?::|$)/;
 
   let ok = false;
-  if (NODE_PACKAGE_MANAGER_EXECUTABLES.includes(executable)) {
+  if (vitestArgs) {
+    if (args.some((arg) => arg === "-w")) {
+      return { ok: false, reason: "test_command_contains_interactive_flag" };
+    }
+    ok = vitestArgs[0] === "run";
+  } else if (NODE_PACKAGE_MANAGER_EXECUTABLES.includes(executable)) {
     const manager = executable.replace(/\.(?:cmd|exe)$/i, "");
     const taskArgs = packageManagerTaskArgs(args, manager);
     ok = safeTaskPattern.test(taskArgs[0] || "")
@@ -483,6 +492,7 @@ function declaredScriptValidation(definitions = []) {
 export function validatePlannerTestCommandForRepository(command, cwd, { filesToCreate = [] } = {}) {
   const shape = validatePlannerTestCommand(command);
   if (!shape.ok) return shape;
+  if (vitestCommandArgs(shape.execution_command)) return resolveLocalVitestCommand(cwd, shape);
   // Admission proves test intent, not that an interpreter's script exists.
   // Keep the original argv casing and resolve against the command's cwd.
   const interpreterScripts = testCommandScriptPaths(shape.execution_command, commandExecutable(shape.execution_command));

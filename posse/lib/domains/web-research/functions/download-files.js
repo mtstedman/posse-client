@@ -33,7 +33,7 @@ import { isLocalHostName, isPublicAddress } from "./source-snapshots.js";
 const TOOL_NAME = "download_file";
 const REQUEST_HEADERS = Object.freeze({
   "user-agent": DOWNLOAD_FILE_USER_AGENT,
-  accept: "image/png, image/jpeg, image/webp, image/gif, application/json, text/csv, text/plain, text/html;q=0.9",
+  accept: "image/png, image/jpeg, image/webp, image/gif, application/pdf, application/json, text/csv, text/plain, text/html;q=0.9",
   "accept-encoding": "identity",
 });
 const ALL_EXTENSIONS = new Set(Object.values(DOWNLOAD_FILE_MEDIA_TYPES).flatMap((entry) => entry.extensions));
@@ -376,6 +376,9 @@ async function saveResponse(item, response, { finalUrl, status, signal, budget }
     if (bytes === 0) throw new ItemError("response body is empty");
     if (policy.imageFormat && detectImageFormat(head) !== policy.imageFormat) {
       throw new ItemError(`bytes are not a ${policy.imageFormat.toUpperCase()} image although the server said ${mediaType}`);
+    }
+    if (policy.signature && !head.subarray(0, policy.signature.length).equals(Buffer.from(policy.signature))) {
+      throw new ItemError(`bytes do not have the required ${mediaType} file signature`);
     }
     const sha256 = hash.digest("hex");
     if (item.sha256 && item.sha256 !== sha256) throw new ItemError(`sha256 mismatch: got ${sha256}`);

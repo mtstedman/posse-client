@@ -1,3 +1,5 @@
+import { DETERMINISTIC_AUDIT_ROLE } from "../../../../catalog/worker-display.js";
+import { assessmentDisplayMessage } from "../execution/display-sync.js";
 import { diffPorcelainEntries } from "../../../git/functions/porcelain-diff.js";
 import { authoritativeFinalReview, latestFinalReview } from "../../../assessment/functions/final-review-authority.js";
 import { reserveFinalReviewContinuation } from "../../../assessment/functions/final-review-continuation.js";
@@ -2118,7 +2120,7 @@ export async function runPostExecutionAssessment(worker, {
       attempt: attempt.attempt_number || job.attempt_count || 1,
     });
     const passMsg = "Deterministic no-op pass: the scoped end state was already satisfied, so no commit was required.";
-    worker.emit(job.id, `${C.green}[assessor]${C.reset} WI#${job.work_item_id} job #${job.id}: deterministic no-op pass`);
+    worker.emit(job.id, `${C.green}[${DETERMINISTIC_AUDIT_ROLE}]${C.reset} WI#${job.work_item_id} job #${job.id}: deterministic no-op pass`);
     const verdict = {
       verdict: "pass",
       confidence: "high",
@@ -2138,9 +2140,9 @@ export async function runPostExecutionAssessment(worker, {
       worker._cleanupWorktreeIfDone(job.work_item_id);
       return;
     }
-    const emitFn = (msg) => worker.emit(job.id, msg);
+    const emitFn = (msg) => worker.emit(job.id, assessmentDisplayMessage(msg));
     const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, projectDir: worker.projectDir, autoApprove: worker.autoApprove, leaseToken });
-    log.info("assessor", `Verdict: ${effectiveVerdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: effectiveVerdict.verdict, confidence: effectiveVerdict.confidence, reasons: effectiveVerdict.reasons });
+    log.info(DETERMINISTIC_AUDIT_ROLE, `Verdict: ${effectiveVerdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: effectiveVerdict.verdict, confidence: effectiveVerdict.confidence, reasons: effectiveVerdict.reasons });
     jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}) — ${passMsg.slice(0, 100)}` });
     recordObservation({
       work_item_id: job.work_item_id,
@@ -2178,8 +2180,8 @@ export async function runPostExecutionAssessment(worker, {
     // for worktree writers it also atomically proved there were no live sibling
     // writers and installed the WI-local assessment barrier.
     const reviewed = latestFinalReview(job.id);
-    worker.emit(job.id, `${C.yellow}[${reviewed ? "verification" : "assessor"}]${C.reset} WI#${job.work_item_id} job #${job.id}: ${reviewed ? "verifying final review" : "assessing"} ${shortJobTitle(job).slice(0, 50)}`);
-    if (!reviewed) syncAssessorWorkerDisplay(worker.display, job, {
+    worker.emit(job.id, `${C.yellow}[${DETERMINISTIC_AUDIT_ROLE}]${C.reset} WI#${job.work_item_id} job #${job.id}: ${reviewed ? "verifying final review" : "auditing"} ${shortJobTitle(job).slice(0, 50)}`);
+    syncAssessorWorkerDisplay(worker.display, job, {
       tier: "cheap",
       effort: job.reasoning_effort || "medium",
       attempt: attempt.attempt_number || job.attempt_count || 1,
@@ -2204,7 +2206,7 @@ export async function runPostExecutionAssessment(worker, {
               reason: `test-post-change-side-effects-wi-${job.work_item_id}-job-${job.id}`,
               branchName: getWorkItem(job.work_item_id)?.branch_name || null,
               wiId: job.work_item_id,
-              onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-test] ${message}${C.reset}`),
+              onMsg: (message) => worker.emit(job.id, `${C.dim}[audit-test] ${message}${C.reset}`),
             })
           : null,
         siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
@@ -2230,7 +2232,7 @@ export async function runPostExecutionAssessment(worker, {
       const logSummary = postChangeTestLogSummary(postReceipt);
       worker.emit(
         job.id,
-        `${logSummary.tone === "passed" ? C.green : logSummary.tone === "failed" ? C.red : C.yellow}[assessor-test] ${postReceipt.reused ? "Reused" : "Ran"} frozen command: ${logSummary.text}${C.reset}`,
+        `${logSummary.tone === "passed" ? C.green : logSummary.tone === "failed" ? C.red : C.yellow}[audit-test] ${postReceipt.reused ? "Reused" : "Ran"} frozen command: ${logSummary.text}${C.reset}`,
       );
       recordObservation({
         work_item_id: job.work_item_id,
@@ -2406,7 +2408,7 @@ export async function runPostExecutionAssessment(worker, {
 
       if (deterministicArtifactPass) {
         const passMsg = `Artifact manifest verified ${manifest.count} file(s) and all expected deliverables under ${jobPayloadForAssess.output_root}`;
-        worker.emit(job.id, `${C.green}[assessor]${C.reset} WI#${job.work_item_id} job #${job.id}: deterministic artifact pass`);
+        worker.emit(job.id, `${C.green}[${DETERMINISTIC_AUDIT_ROLE}]${C.reset} WI#${job.work_item_id} job #${job.id}: deterministic artifact pass`);
         logEvent({
           work_item_id: job.work_item_id,
           job_id: job.id,
@@ -2433,9 +2435,9 @@ export async function runPostExecutionAssessment(worker, {
           worker._cleanupWorktreeIfDone(job.work_item_id);
           return;
         }
-        const emitFn = (msg) => worker.emit(job.id, msg);
+        const emitFn = (msg) => worker.emit(job.id, assessmentDisplayMessage(msg));
         const { action, effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, projectDir: worker.projectDir, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash });
-        log.info("assessor", `Verdict: ${effectiveVerdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: effectiveVerdict.verdict, confidence: effectiveVerdict.confidence, reasons: effectiveVerdict.reasons });
+        log.info(DETERMINISTIC_AUDIT_ROLE, `Verdict: ${effectiveVerdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: effectiveVerdict.verdict, confidence: effectiveVerdict.confidence, reasons: effectiveVerdict.reasons });
         jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}) — ${passMsg.slice(0, 100)}` });
         recordObservation({
           work_item_id: job.work_item_id,
@@ -2533,7 +2535,7 @@ export async function runPostExecutionAssessment(worker, {
             branchName: getWorkItem(job.work_item_id)?.branch_name || null,
             wiId: job.work_item_id,
             expectedHead,
-            onMsg: (message) => worker.emit(job.id, `${C.dim}[assessor-checks] ${message}${C.reset}`),
+            onMsg: (message) => worker.emit(job.id, `${C.dim}[audit-checks] ${message}${C.reset}`),
           },
         ),
       });
@@ -2542,7 +2544,7 @@ export async function runPostExecutionAssessment(worker, {
         assessmentContext.scoped_check_result = scopedCheckReceipt.result;
         worker.emit(
           job.id,
-          `${C.dim}[assessor-checks] ${scopedCheckReceipt.reused ? "Reused" : "Ran"} changed-file lint/typecheck: ${scopedCheckReceipt.result.status}${C.reset}`,
+          `${C.dim}[audit-checks] ${scopedCheckReceipt.reused ? "Reused" : "Ran"} changed-file lint/typecheck: ${scopedCheckReceipt.result.status}${C.reset}`,
         );
       }
       const assessOpts = {
@@ -2557,7 +2559,12 @@ export async function runPostExecutionAssessment(worker, {
         attemptId: attempt.id,
         allowMutatingRunners: !!wtPath,
       };
-      const rawTrackedCall = getWorkerProviderCall(worker);
+      let assessorModelCalled = false;
+      const providerCall = getWorkerProviderCall(worker);
+      const rawTrackedCall = (...args) => {
+        assessorModelCalled = true;
+        return providerCall(...args);
+      };
       const usesProjectDirCwd = !wtPath
         && taskMode === "code"
         && path.resolve(assessmentCwd) === path.resolve(worker.projectDir);
@@ -2766,7 +2773,7 @@ export async function runPostExecutionAssessment(worker, {
         return;
       }
 
-      const emitFn = (msg) => worker.emit(job.id, msg);
+      const emitFn = (msg) => worker.emit(job.id, assessmentDisplayMessage(msg, assessorModelCalled));
       let reviewedCompletion = null;
       if (verdict.verdict === "pass" && wtPath && !filesCommittedUnknown) {
         try {
@@ -2790,7 +2797,7 @@ export async function runPostExecutionAssessment(worker, {
           scoped_checks: scopedCheckReceipt || null,
         },
       });
-      log.info("assessor", `Verdict: ${effectiveVerdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: effectiveVerdict.verdict, confidence: effectiveVerdict.confidence, reasons: effectiveVerdict.reasons?.slice(0, 3) });
+      log.info(assessorModelCalled ? "assessor" : DETERMINISTIC_AUDIT_ROLE, `Verdict: ${effectiveVerdict.verdict}`, { jobId: job.id, wiId: job.work_item_id, verdict: effectiveVerdict.verdict, confidence: effectiveVerdict.confidence, reasons: effectiveVerdict.reasons?.slice(0, 3) });
       jobLog("ASSESSED", { wi: job.work_item_id, job: job.id, detail: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"})${effectiveVerdict.reasons?.length ? ` — ${effectiveVerdict.reasons[0].slice(0, 100)}` : ""}` });
 
       recordObservation({

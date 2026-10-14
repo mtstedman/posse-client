@@ -112,15 +112,24 @@ export class ArtificerRole extends BaseRole {
     const workItem = getWorkItem(job.work_item_id);
     const payload = parsePayload(worker, job);
     const rawOutputRoot = payload.output_root || artifactsDir(wiScopeId(job.work_item_id), projectDir);
-    const artCwd = rawOutputRoot ? resolveContainedArtifactRoot(projectDir, rawOutputRoot, "output_root") : projectDir;
-    const outputRoot = rawOutputRoot ? normalizeDisplaySlashes(artCwd) : null;
-    if (rawOutputRoot) fs.mkdirSync(artCwd, { recursive: true });
+    const resolvedOutputRoot = resolveContainedArtifactRoot(projectDir, rawOutputRoot, "output_root");
+    const outputRoot = normalizeDisplaySlashes(resolvedOutputRoot);
+    fs.mkdirSync(resolvedOutputRoot, { recursive: true });
     if (!payload.output_root) {
       emit(worker, job.id, `${C.yellow}[artificer]${C.reset} WI#${job.work_item_id} job #${job.id}: missing output_root - defaulting to ${outputRoot}`);
     }
 
     const createRoots = resolveContainedArtifactRoots(projectDir, payload.create_roots || [], "create_roots");
     const inputRoots = resolveContainedArtifactRoots(projectDir, payload.input_roots || [], "input_roots");
+    // A task may place its output in a subdirectory while holding creation
+    // scope over its WI artifacts. Native dispatch anchors writable paths to
+    // cwd, so use the WI root without broadening the declared write roots.
+    const wiArtifactRoot = artifactsDir(wiScopeId(job.work_item_id), projectDir);
+    const usesWiArtifactScope = isWithinRoot(wiArtifactRoot, resolvedOutputRoot);
+    if (usesWiArtifactScope && createRoots.some((root) => !isWithinRoot(wiArtifactRoot, root))) {
+      throw new Error("create_roots must stay inside this work item's artifact scope");
+    }
+    const artCwd = usesWiArtifactScope ? wiArtifactRoot : resolvedOutputRoot;
     // One read-only root on the work item's checkout, so existing art, styles
     // and markup can be matched; writes stay confined to the artifact roots.
     const checkoutReadRoot = normalizeDisplaySlashes(workItemCheckoutReadRoot(projectDir, job.work_item_id));

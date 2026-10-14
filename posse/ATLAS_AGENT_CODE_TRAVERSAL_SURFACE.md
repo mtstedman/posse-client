@@ -33,31 +33,31 @@ agent call. Prefetch support does not remove its callable definition.
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.clean_image`, `tools.compose_sprite_sheet`, `tools.custom_tools`, `tools.download_file`, `tools.edit_file`, `tools.extract_image_text`, `tools.generate_image`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`, `tools.write_file`.
 
-Atlas: `atlas.traverse_ref`.
+Atlas: `atlas.fetch_ref`, `atlas.traverse_ref`.
 
 ### `assessor`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.final_review`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.run_unit_test`, `tools.search_files`, `tools.validate_artifact_output`, `tools.view_image`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.run_unit_test`, `tools.search_files`, `tools.validate_artifact_output`, `tools.view_image`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.store`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `dev`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.final_review`, `tools.git_history`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.run_unit_test`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.run_unit_test`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `planner`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.run_unit_test`, `tools.search_files`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.run_unit_test`, `tools.search_files`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.create_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `researcher`
 
 Deterministic: `tools.ack_operator_feedback`, `tools.agent_claim`, `tools.agent_handoff`, `tools.chain_read`, `tools.chain_verdict`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.read_file`, `tools.search_files`, `tools.sub_agent`, `tools.web_research_handoff`.
 
-Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
+Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.create_ref`, `atlas.fetch_ref`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `subagent`
 
@@ -467,7 +467,7 @@ Remote roles: `artificer`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Download external files byte-exact into your writable output scope: PNG, JPEG, WebP, or GIF images, JSON, plain text, CSV, or an HTML page to read for links. Public HTTPS URLs only; redirects are followed and re-checked, and no headers or body can be sent. Up to 100 files per call, 20 MB per file, 100 MB per call, and 500 MB per job. Each destination extension must match the type the server returns. Items succeed or fail independently; each result reports the final URL, status, type, size, SHA-256, and path, or the reason it failed.
+Download external files byte-exact into your writable output scope: PNG, JPEG, WebP, or GIF images, PDF, JSON, plain text, CSV, or an HTML page to read for links. Public HTTPS URLs only; redirects are followed and re-checked, and no headers or body can be sent. Up to 100 files per call, 20 MB per file, 100 MB per call, and 500 MB per job. Each destination extension must match the type the server returns. Items succeed or fail independently; each result reports the final URL, status, type, size, SHA-256, and path, or the reason it failed.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -527,7 +527,7 @@ Extract text from an image (OCR) using the local tesseract CLI. Use this when yo
 
 ### `atlas.fetch_ref`
 
-Remote roles: `researcher`.
+Remote roles: `artificer`, `assessor`, `dev`, `researcher`.
 
 | Contract field | Value |
 |---|---|
@@ -549,29 +549,6 @@ Compatibility traversal for unseen stored #ref content. Batch every independentl
 | `ref` | `string | array` | Optional | max length 512; max items 100 | One hash ref alias such as #a3f9, or every independently needed alias as one array batch. |
 | `search` | `string` | Optional | max length 512 | Optional case-insensitive search within materialized ref text. Auto mode tries a literal match first, then regex/OR syntax when no literal match exists. The result contains matching numbered lines. |
 | `search_mode` | `string` | Optional | values "auto", "literal", "regex" | Search interpretation. Default: auto (literal first, then regex when the query contains regex syntax). |
-
-### `tools.final_review`
-
-Remote roles: `assessor`, `dev`.
-
-| Contract field | Value |
-|---|---|
-| Canonical name | `final_review` |
-| Tool reference token | `tools.final_review` |
-| Provider callable name | Resolved from this token against the actual issued surface. |
-| Access | `coordination` |
-| Batchable input | No |
-| Parallel calls | No |
-| System-prefetch capable | No |
-
-Developer: call to close out the finished change; include completion_report when the task requests a delivery report. It runs the task's declared tests on the current workspace, then an independent reviewer checks the change against the task contract. An accepted pass saves completion and ends both agent sessions immediately, with no further tool turns. Findings return to the developer to fix before calling it again. Reviewer: report your verdict and findings with this tool; after findings it waits while the developer works and returns either the changes since your report or status done.
-
-| Parameter | Type | Requirement | Constraints | Description |
-|---|---|---|---|---|
-| `blocker` | `string` | Optional | min length 1; max length 1000 | Developer only. Report why work cannot continue. Saves a BLOCKED result and ends both sessions without running tests or another review. Omit to request review of completed work. |
-| `completion_report` | `object` | Optional |  | Developer only. Delivery facts for the final reviewer, kept with the final-review record; report-only criteria belong here rather than in a source-file comment. |
-| `findings` | `array<object>` | Optional | max items 12 | Reviewer only. Every defect, most severe first. |
-| `verdict` | `string` | Optional | values "pass", "fail", "needs_review" | Reviewer only. pass, fail with findings, or needs_review when the contract itself cannot be judged. |
 
 ### `tools.generate_image`
 
@@ -643,7 +620,7 @@ Inspect git history deterministically (log, show, blame, diff) without shell acc
 
 ### `tools.hash_file`
 
-Remote roles: `artificer`, `assessor`, `researcher`.
+Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 
 | Contract field | Value |
 |---|---|
@@ -767,6 +744,31 @@ Read memory bodies relevant to known paths, symbols, or domains. Verify their cl
 | `domains` | `array<string>` | Optional | max items 5 | Optional strict domain whitelist. General is a distinct domain, not a wildcard; omit this field to disable domain filtering. |
 | `fileRelPaths` | `array<string>` | Optional | max items 500 | Files whose attached memories should be fetched. |
 | `symbolIds` | `array<string>` | Optional | max items 500 | Symbols whose attached memories should be fetched. |
+
+### `atlas.memory.store`
+
+Remote roles: `assessor`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `memory.store` |
+| Tool reference token | `atlas.memory.store` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `atlas` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Durable repository memory. Stores one verified, non-obvious lesson linked to exact symbols or files. Titles accept up to 120 characters and content up to 1200 characters.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `content` | `string` | Required | min length 1; max length 1200 | Memory content, max 1200 chars. Capture why the decision/context matters. |
+| `domains` | `array<string>` | Optional | max items 4 | Domain tags for scoped retrieval. An absent value files the memory under the general category. |
+| `fileRelPaths` | `array<string>` | Optional | max items 100 | Optional linked repo-relative files. |
+| `memoryId` | `string` | Optional | max length 120 | Optional existing memory ID to update. |
+| `symbolIds` | `array<string>` | Optional | max items 100 | Optional linked ATLAS symbol IDs. |
+| `title` | `string` | Required | min length 1; max length 120 | Short memory title, max 120 chars. |
 
 ### `atlas.memory.surface`
 
@@ -1311,8 +1313,8 @@ posse-remote role ceiling, so remote agents do not currently receive them:
 - `atlas.agent`
 - `atlas.code`
 - `atlas.file.read`
+- `tools.final_review`
 - `atlas.manual`
-- `atlas.memory.store`
 - `atlas.query`
 - `atlas.repo`
 

@@ -19,6 +19,7 @@ export class AssessmentSession {
     this.options = options || {};
     this._history = [];
     this._last = null;
+    this.modelCalled = false;
   }
 
   async assess() {
@@ -26,7 +27,10 @@ export class AssessmentSession {
     const result = await assessResult(this.job, this.output, {
       ...this.options,
       attemptId: this.attemptId,
-      ...(typeof trackedCall === "function" ? { trackedCall: trackedCall.bind(this.providerClient) } : {}),
+      ...(typeof trackedCall === "function" ? { trackedCall: (...args) => {
+        this.modelCalled = true;
+        return trackedCall.apply(this.providerClient, args);
+      } } : {}),
     });
     this._last = result;
     this._history.push({

@@ -956,6 +956,9 @@ github-cli|gh|gh
 EOT
       if scip_language_selected php; then cat <<'EOT'
 php|php|php-cli,php
+php-mbstring|php_ext_mbstring|php-mbstring
+php-xml|php_ext_dom|php-xml
+php-xmlwriter|php_ext_xmlwriter|php-xml
 composer|composer|composer
 EOT
       fi
@@ -972,6 +975,9 @@ github-cli|gh|gh
 EOT
       if scip_language_selected php; then cat <<'EOT'
 php|php|php-cli,php
+php-mbstring|php_ext_mbstring|php-mbstring
+php-xml|php_ext_dom|php-xml
+php-xmlwriter|php_ext_xmlwriter|php-xml
 composer|composer|composer,php-composer
 EOT
       fi
@@ -987,6 +993,9 @@ github-cli|gh|github-cli
 EOT
       if scip_language_selected php; then cat <<'EOT'
 php|php|php
+php-mbstring|php_ext_mbstring|php
+php-xml|php_ext_dom|php
+php-xmlwriter|php_ext_xmlwriter|php
 composer|composer|composer
 EOT
       fi
@@ -1002,6 +1011,9 @@ github-cli|gh|gh
 EOT
       if scip_language_selected php; then cat <<'EOT'
 php|php|php8-cli,php-cli,php8,php7
+php-mbstring|php_ext_mbstring|php8-mbstring,php-mbstring,php7-mbstring
+php-xml|php_ext_dom|php8-dom,php-dom,php7-dom
+php-xmlwriter|php_ext_xmlwriter|php8-xmlwriter,php-xmlwriter,php7-xmlwriter
 composer|composer|php-composer,composer
 EOT
       fi
@@ -1015,6 +1027,7 @@ EOT
 
 tool_available() {
   case "$1" in
+    php_ext_*) php -r 'exit(extension_loaded($argv[1]) ? 0 : 1);' -- "${1#php_ext_}" >/dev/null 2>&1 ;;
     magick_or_convert) command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1 ;;
     *) command -v "$1" >/dev/null 2>&1 ;;
   esac

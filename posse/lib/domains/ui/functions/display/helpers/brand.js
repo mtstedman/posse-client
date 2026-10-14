@@ -1,3 +1,4 @@
+import { DETERMINISTIC_AUDIT_ROLE } from "../../../../../catalog/worker-display.js";
 // lib/domains/ui/functions/display/helpers/brand.js
 //
 // Shared visual primitives for the brand-tinted runtime UX:
@@ -24,6 +25,7 @@ const PROVIDER_BRAND_COLORS = Object.freeze({
 });
 
 const ROLE_BRAND_COLORS = Object.freeze({
+  [DETERMINISTIC_AUDIT_ROLE]: C.cyan,
   research: C.magenta,
   researcher: C.magenta,
   preflight: C.blue,
@@ -46,6 +48,7 @@ const ROLE_BRAND_COLORS = Object.freeze({
 });
 
 const ROLE_BRAND_ICONS = Object.freeze({
+  [DETERMINISTIC_AUDIT_ROLE]: "audit",
   research: "R",
   researcher: "R",
   preflight: "L",
@@ -68,6 +71,7 @@ const ROLE_BRAND_ICONS = Object.freeze({
 });
 
 const ROLE_BRAND_LABELS = Object.freeze({
+  [DETERMINISTIC_AUDIT_ROLE]: "audit",
   dev: "developer",
   developer: "developer",
   research: "researcher",

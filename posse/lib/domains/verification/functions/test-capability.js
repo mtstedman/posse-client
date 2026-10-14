@@ -29,15 +29,24 @@ export function testCommandCapability(command, cwd, { filesToCreate = [], findCo
     if (testFileRemovedSinceBaseline(validation.missing_script, cwd, baselineCommit)) return TEST_RUNNER_REMOVED_REASON;
     return isUnrunnableTestReason(validation.reason) ? validation.reason : null;
   }
+  if (Array.isArray(validation.unit_test_paths)) {
+    const capability = discoverUnitTestCapability({ projectDir: cwd });
+    for (const file of validation.unit_test_paths) {
+      if (filesToCreate.includes(file) && !fs.existsSync(path.resolve(cwd, file))) continue;
+      const reason = testFileCapability(file, cwd, capability, { findCommand, baselineCommit });
+      if (reason) return reason;
+    }
+    return null;
+  }
   const [executable] = parseCommandArguments(validation.execution_command || command);
   const root = path.resolve(cwd, validation.cwd_relative || ".");
   const candidate = /[/\\]/.test(executable) ? path.resolve(root, executable) : executable;
   return findCommand(candidate) ? null : "test_executable_unavailable";
 }
 
-export function testFileCapability(file, cwd, capability, { findCommand = findCommandOnPath, baselineCommit = "HEAD" } = {}) {
+export function testFileCapability(file, cwd, capability, { findCommand = findCommandOnPath, baselineCommit = "HEAD", posseRoot = undefined } = {}) {
   if (testFileRemovedSinceBaseline(file, cwd, baselineCommit)) return TEST_RUNNER_REMOVED_REASON;
-  const invocation = resolveUnitTestInvocation(cwd, file, capability);
+  const invocation = resolveUnitTestInvocation(cwd, file, capability, { posseRoot });
   if (!invocation?.runner) return invocation?.reason || capability?.reason || "unit_test_path_unavailable";
   const executable = /[/\\]/.test(invocation.executable)
     ? path.resolve(cwd, invocation.executable) : invocation.executable;
@@ -46,7 +55,7 @@ export function testFileCapability(file, cwd, capability, { findCommand = findCo
 
 // Recomputed at each handoff, including old queued/fix jobs. Telemetry retains
 // the discarded selections; the agent receives only runnable obligations.
-export function pruneTestHandoff(payload, cwd, { jobId = null, findCommand = findCommandOnPath } = {}) {
+export function pruneTestHandoff(payload, cwd, { jobId = null, findCommand = findCommandOnPath, posseRoot = undefined } = {}) {
   if (!cwd) return payload;
   const next = { ...payload };
   const pruned = [];
@@ -71,7 +80,7 @@ export function pruneTestHandoff(payload, cwd, { jobId = null, findCommand = fin
   if (Array.isArray(payload.tests_to_run) && payload.tests_to_run.length) {
     const capability = discoverUnitTestCapability({ projectDir: cwd });
     next.tests_to_run = payload.tests_to_run.filter((file) => {
-      const reason = testFileCapability(file, cwd, capability, { findCommand, baselineCommit });
+      const reason = testFileCapability(file, cwd, capability, { findCommand, baselineCommit, posseRoot });
       if (!reason || reason === TEST_RUNNER_REMOVED_REASON) return true;
       pruned.push({ path: file, reason });
       return false;

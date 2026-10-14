@@ -87,13 +87,14 @@ export const DOWNLOAD_FILE_LIMITS = Object.freeze({
 export const DOWNLOAD_FILE_USER_AGENT = "posse-artificer-download/1";
 
 // Accepted response media types and the destination extensions each may be
-// saved under. Images must also carry the matching file signature. No SVG,
+// saved under. Images and PDFs must also carry the matching file signature. No SVG,
 // archives, or executables.
 export const DOWNLOAD_FILE_MEDIA_TYPES = Object.freeze({
   "image/png": Object.freeze({ extensions: Object.freeze([".png"]), imageFormat: "png" }),
   "image/jpeg": Object.freeze({ extensions: Object.freeze([".jpg", ".jpeg"]), imageFormat: "jpeg" }),
   "image/webp": Object.freeze({ extensions: Object.freeze([".webp"]), imageFormat: "webp" }),
   "image/gif": Object.freeze({ extensions: Object.freeze([".gif"]), imageFormat: "gif" }),
+  "application/pdf": Object.freeze({ extensions: Object.freeze([".pdf"]), signature: "%PDF-" }),
   "application/json": Object.freeze({ extensions: Object.freeze([".json"]) }),
   // Raw file hosts serve data files as text/plain.
   "text/plain": Object.freeze({ extensions: Object.freeze([".txt", ".json", ".csv", ".tsv", ".md"]) }),

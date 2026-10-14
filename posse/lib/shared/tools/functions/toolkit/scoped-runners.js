@@ -1,3 +1,4 @@
+import { missingDeclaredNodeDependency } from "./node-test-failure.js";
 import { JS_SOURCE_EXTENSIONS, PHP_SOURCE_EXTENSIONS, PYTHON_SOURCE_EXTENSIONS, GO_SOURCE_EXTENSIONS, RUST_SOURCE_EXTENSIONS, CPP_SOURCE_EXTENSIONS, RUBY_SOURCE_EXTENSIONS, SHELL_SOURCE_EXTENSIONS, CLANG_SOURCE_EXTENSIONS, SOURCE_EXTENSIONS, MAX_SCOPE_ROOT_FILES, MAX_FAILURES, MAX_OUTPUT_CHARS, MISSING_TOOLING_RE, ESM_SYNTAX_RE } from "../../../../catalog/scoped-verification.js";
 import fs from "fs";
 import path from "path";
@@ -291,10 +292,12 @@ function parseEslintFindings(stdout, stderr, cwd) {
 }
 
 
-function missingToolingReason(result) {
+function missingToolingReason(result, cwd) {
   const text = `${result?.stderr || ""}\n${result?.stdout || ""}\n${result?.error || ""}`;
   const match = text.match(MISSING_TOOLING_RE);
-  return match ? `dependency_unavailable: ${compact(match[0].trim(), 200)}` : null;
+  if (match) return `dependency_unavailable: ${compact(match[0].trim(), 200)}`;
+  const dependency = missingDeclaredNodeDependency(text, cwd);
+  return dependency ? `dependency_unavailable: declared package ${dependency} is not installed` : null;
 }
 
 
@@ -382,7 +385,7 @@ function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
   const result = eslint
     ? runProcess(process.execPath, [eslint, "--format", "json", ...targets], cwd)
     : runProcess(invocation.command, invocation.args, cwd);
-  const missingTooling = result.exitCode !== 0 ? missingToolingReason(result) : null;
+  const missingTooling = result.exitCode !== 0 ? missingToolingReason(result, cwd) : null;
   if (missingTooling) {
     return {
       name: "eslint",
@@ -899,7 +902,7 @@ function runTypecheck(cwd, {
   }
   const invocation = packageManagerRun(packageManager, "typecheck");
   const result = runProcess(invocation.command, invocation.args, cwd, { timeoutMs: 180000 });
-  const missingTooling = result.exitCode !== 0 ? missingToolingReason(result) : null;
+  const missingTooling = result.exitCode !== 0 ? missingToolingReason(result, cwd) : null;
   if (missingTooling) {
     return {
       name: "typecheck",
@@ -1075,7 +1078,7 @@ export async function collectTypecheckDiagnosticsAsync({
       roots.push({ root: rootLabel, status: "unavailable", reason: "typecheck canceled", command: result.command });
       break;
     }
-    const missingTooling = result.exitCode !== 0 ? missingToolingReason(result) : null;
+    const missingTooling = result.exitCode !== 0 ? missingToolingReason(result, group.root) : null;
     if (missingTooling || result.timedOut) {
       roots.push({
         root: rootLabel,

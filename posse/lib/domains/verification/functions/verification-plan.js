@@ -151,6 +151,7 @@ function normalizeCheck(raw, index, validateCommand) {
       id,
       command: displayCommand,
       execution_command: validation.execution_command || command,
+      ...(validation.unit_test_paths ? { unit_test_paths: validation.unit_test_paths } : {}),
       ...(raw?.definition_sha256 ? { definition_sha256: raw.definition_sha256 } : {}),
       cwd_relative: validation.cwd_relative !== undefined ? validation.cwd_relative : (cwd === "." ? null : cwd),
       intent,

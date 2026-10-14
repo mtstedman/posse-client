@@ -198,20 +198,20 @@ export async function ensureComposer({
  * bundled template.
  *
  * @param {string} php
- * @param {{ env?: NodeJS.ProcessEnv }} [options]
+ * @param {{ env?: NodeJS.ProcessEnv, extensions?: string[], requiredExtensions?: string[] }} [options]
  * @returns {Promise<{ ok: boolean, changed: boolean, message: string }>}
  */
-export async function enablePhpComposerExtensions(php, { env = process.env } = {}) {
-  const missing = await missingPhpExtensions(php, env);
+export async function enablePhpComposerExtensions(php, { env = process.env, extensions = COMPOSER_PHP_EXTENSIONS, requiredExtensions = COMPOSER_REQUIRED_EXTENSIONS } = {}) {
+  const missing = await missingPhpExtensions(php, env, extensions);
   if (missing === null) return { ok: false, changed: false, message: `${php} did not run` };
-  if (!missing.some((name) => COMPOSER_REQUIRED_EXTENSIONS.includes(name))) {
+  if (!missing.some((name) => requiredExtensions.includes(name))) {
     return { ok: true, changed: false, message: "PHP has the extensions Composer needs" };
   }
 
   const { phpDir, iniPath } = await phpIniLocation(php, env);
   const extDir = path.join(phpDir, "ext");
   const available = missing.filter((name) => fs.existsSync(path.join(extDir, `php_${name}.dll`)));
-  const missingRequired = COMPOSER_REQUIRED_EXTENSIONS.filter((name) => missing.includes(name) && !available.includes(name));
+  const missingRequired = requiredExtensions.filter((name) => missing.includes(name) && !available.includes(name));
   if (missingRequired.length > 0) {
     return { ok: false, changed: false, message: `this PHP build has no ${missingRequired.join(", ")} extension; install the official PHP for Windows build` };
   }
@@ -224,11 +224,12 @@ export async function enablePhpComposerExtensions(php, { env = process.env } = {
       // Drop active copies so the block below is authoritative; the template's
       // commented examples stay as documentation.
       if (!keepDir) contents = contents.replace(/^[ \t]*extension_dir[ \t]*=.*(?:\r?\n)?/gimu, "");
-      contents = contents.replace(/^[ \t]*extension[ \t]*=[ \t]*(?:php_)?(?:openssl|curl|zip)(?:\.dll)?[ \t]*(?:;.*)?(?:\r?\n)?/gimu, "");
+      const names = extensions.map((name) => name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|");
+      contents = contents.replace(new RegExp(`^[ \\t]*extension[ \\t]*=[ \\t]*(?:php_)?(?:${names})(?:\\.dll)?[ \\t]*(?:;.*)?(?:\\r?\\n)?`, "gimu"), "");
       return {
         contents,
         lines: [
-          "; Posse: secure and fast Composer package downloads.",
+          "; Posse: PHP tool extensions.",
           ...(keepDir ? [] : [`extension_dir = "${extDir.replaceAll("\\", "/")}"`]),
           ...available.map((name) => `extension=${name}`),
         ],
@@ -238,8 +239,8 @@ export async function enablePhpComposerExtensions(php, { env = process.env } = {
   } catch (err) {
     return { ok: false, changed: false, message: `could not enable PHP's Composer extensions in ${iniPath}: ${err?.message || err}` };
   }
-  const still = await missingPhpExtensions(php, env);
-  const stillRequired = still === null ? COMPOSER_REQUIRED_EXTENSIONS : still.filter((name) => COMPOSER_REQUIRED_EXTENSIONS.includes(name));
+  const still = await missingPhpExtensions(php, env, extensions);
+  const stillRequired = still === null ? requiredExtensions : still.filter((name) => requiredExtensions.includes(name));
   if (stillRequired.length > 0) {
     return { ok: false, changed: true, message: `PHP still cannot load ${stillRequired.join(", ")} after configuring ${iniPath}` };
   }
@@ -333,11 +334,11 @@ function editPhpIni(iniPath, phpDir, edit) {
   return true;
 }
 
-async function missingPhpExtensions(php, env) {
-  const code = `foreach (${JSON.stringify(COMPOSER_PHP_EXTENSIONS)} as $e) { if (!extension_loaded($e)) { echo $e, PHP_EOL; } }`;
+async function missingPhpExtensions(php, env, extensions) {
+  const code = `foreach (${JSON.stringify(extensions)} as $e) { if (!extension_loaded($e)) { echo $e, PHP_EOL; } }`;
   const output = await phpOutput(php, ["-r", code], env);
   if (output === null) return null;
-  return output.split(/\r?\n/u).map((line) => line.trim()).filter((line) => COMPOSER_PHP_EXTENSIONS.includes(line));
+  return output.split(/\r?\n/u).map((line) => line.trim()).filter((line) => extensions.includes(line));
 }
 
 /**

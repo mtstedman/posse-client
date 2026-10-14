@@ -2,6 +2,7 @@ import { TEST_EXECUTION_RECEIPT_SCHEMA_VERSION as RECEIPT_SCHEMA_VERSION } from 
 import { declaredNodeTestCommand } from "../../../../shared/tools/functions/toolkit/repository-test-runner.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { parseCommandArguments } from "../../../../shared/scope/functions/test-command.js";
+import { resolveLocalVitestCommand } from "../../../verification/functions/vitest-command.js";
 import { resolveRepositoryVerificationPlan, VERIFICATION_PLAN_CONFIG, VERIFICATION_PLAN_SCHEMA_VERSION, verificationPlanSnapshot } from "../../../verification/functions/verification-plan.js";
 import { REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID } from "../../../../catalog/verification.js";
 import { discoverUnitTestCapability, resolveUnitTestInvocation } from "../../../../shared/tools/functions/toolkit/unit-test-runner.js";
@@ -308,7 +309,7 @@ function resolveTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
           execution_command: approvalRequest.execution_command,
           cwd_relative: approvalRequest.cwd_relative,
         }
-      : declaredNodeTestCommand(cwd, validatePlannerTestCommand(command));
+      : resolveLocalVitestCommand(cwd, declaredNodeTestCommand(cwd, validatePlannerTestCommand(command)));
   const coveredFile = validation.ok && source !== "operator_approved_operation"
     ? exactDeclaredTestFile(validation.execution_command || command, cwd, validation.cwd_relative || null)
     : null;
@@ -326,6 +327,7 @@ function resolveTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
     verification_plan: null,
     validation_error: validation.ok ? null : validation.reason,
     verification_eligible: source !== "operator_approved_operation",
+    ...(validation.unit_test_paths ? { unit_test_paths: validation.unit_test_paths } : {}),
     ...(coveredFile ? { covered_unit_test_paths: [coveredFile] } : {}),
   }, repositoryPlan), unresolvedSelection);
 }
