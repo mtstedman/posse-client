@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { withPairingGitProgress } from "./git-progress.js";
 import { DependencyProgress } from "../../cli/classes/DependencyProgress.js";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
@@ -1158,19 +1159,19 @@ async function runHost({
     }
     await withWorktreeLockAsync(root, root, async () => {
       assertPairingSchedulerStopped();
-      const retryNetwork = (operation) => retryWhileSessionKeyPropagates(operation, {
-        onWait: (_attempt, waitMs) => {
-          if (!json) console.log(`  ${C.dim}Waiting for GitHub to accept this host's session key (retry in ${Math.round(waitMs / 1000)}s)...${C.reset}`);
-        },
-      });
-      publishedOid = await createAndPublishPairingBranch(root, {
+      const retryNetwork = (operation, onWait = (_attempt, waitMs) => {
+        if (!json) console.log(`  ${C.dim}Waiting for GitHub to accept this host's session key (retry in ${Math.round(waitMs / 1000)}s)...${C.reset}`);
+      }) => retryWhileSessionKeyPropagates(operation, { onWait });
+      publishedOid = await withPairingGitProgress((onProgress) => createAndPublishPairingBranch(root, {
         remote: sessionRemote,
         branch: sharedBranch,
         expectedUrl: sessionUrl,
         baseBranch: provisioned ? defaultBranch : null,
-      }, { retryNetwork, onProgress: (message) => {
-        if (!json) console.log(`  ${C.dim}[pair setup] ${message}${C.reset}`);
-      } });
+      }, {
+        retryNetwork: (operation) => retryNetwork(operation, (_attempt, waitMs) =>
+          onProgress(`Waiting for GitHub to accept this host's session key (retry in ${Math.round(waitMs / 1000)}s)...`)),
+        onProgress,
+      }), { silent: json });
       // The session repository's default is the trunk it was cut from; the
       // shared branch stays a side branch, as shared-trunk preflight requires.
       if (provisioned) setGitHubDefaultBranch(provisioned.repository, defaultBranch, { cwd: root });
@@ -1473,14 +1474,12 @@ async function runJoinInCheckout({
           console.log(`  ${C.dim}still waiting (retry in ${Math.round(waitMs / 1000)}s)${C.reset}`);
         }
       };
-      baselineOid = await retryWhileSessionKeyPropagates(() => preflightAndCheckoutPairingBranch(root, {
+      baselineOid = await withPairingGitProgress((onProgress) => retryWhileSessionKeyPropagates(() => preflightAndCheckoutPairingBranch(root, {
         remote: pairingRemote.remote,
         branch: sharedBranch,
         expectedUrl: metadata.url,
-        onProgress: (message) => {
-          if (!json) console.log(`  ${C.dim}[pair setup] ${message}${C.reset}`);
-        },
-      }), { onWait: onKeyWait });
+        onProgress,
+      }), { onWait: (_attempt, waitMs) => onProgress(`Waiting for GitHub to accept this clone's session key (retry in ${Math.round(waitMs / 1000)}s)...`) }), { silent: json });
       configurePairingSettings(root, { remote: pairingRemote.remote, branch: sharedBranch });
       if (!json) console.log(`  ${C.dim}[pair setup] Checking shared-trunk access and permissions...${C.reset}`);
       await retryWhileSessionKeyPropagates(async () => {
