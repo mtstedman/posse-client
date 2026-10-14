@@ -65,7 +65,7 @@ import {
   finalReviewResultFromReport,
   finalReviewResultFromVerdict,
   finalReviewResultsForAttempt,
-  finalReviewPassedForCall,
+  finalReviewCompletedForCall,
   finalReviewReviewsRemaining,
   repeatedDeterministicReview,
   semanticFinalReviewResults,
@@ -181,8 +181,8 @@ export class FinalReviewRuntime {
   async execute({ agentCallId, args = {}, signal = null } = {}) {
     const callId = Number(agentCallId);
     const parent = this.parents.get(callId);
-    if (parent?.completed || finalReviewPassedForCall(callId)) {
-      throw finalReviewError("FINAL_REVIEW_TERMINAL", "Final review passed; this agent call is complete and cannot run more tools.");
+    if (parent?.completed || finalReviewCompletedForCall(callId)) {
+      throw finalReviewError("FINAL_REVIEW_TERMINAL", "Final review completed; this agent call is complete and cannot run more tools.");
     }
     if (parent) {
       if (parent.inFlight) {
@@ -190,6 +190,34 @@ export class FinalReviewRuntime {
       }
       // Own the entire round, including identity reads and durable recording.
       parent.inFlight = true;
+      if (Object.hasOwn(args, "blocker")) {
+        try {
+          signal?.throwIfAborted();
+          if (typeof args.blocker !== "string" || !args.blocker.trim() || args.blocker.length > 1000) {
+            throw finalReviewError("FINAL_REVIEW_INVALID_REPORT", "blocker must be a non-empty string of at most 1000 characters.");
+          }
+          if (Object.hasOwn(args, "verdict") || Object.hasOwn(args, "findings")) {
+            throw finalReviewError("FINAL_REVIEW_INVALID_REPORT", "A developer blocker cannot include a reviewer verdict or findings.");
+          }
+          const blocker = args.blocker.trim();
+          const response = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, reason: blocker, findings: [], developer_blocked: true };
+          this.completePass({ agentCallId: parent.agentCallId, reviewerAgentCallId: parent.reviewer?.agentCallId,
+            cwd: parent.cwd, blocker, recordResult: () => {
+              if (this.record({ job_id: parent.jobId, work_item_id: parent.workItemId ?? null,
+                attempt_id: parent.attemptId, observation_type: FINAL_REVIEW_OBSERVATIONS.RESULT,
+                summary: `final_review BLOCKED: ${blocker}`, detail: { ...response, agent_call_id: parent.agentCallId,
+                  attempt_id: parent.attemptId, reviewer_agent_call_id: parent.reviewer?.agentCallId ?? null,
+                  review_identity: null } }) === false) {
+                throw new Error("Could not persist the blocked final-review result");
+              }
+            } });
+          parent.completed = true;
+          parent.pendingReview = null;
+          parent.reviewer?.controller.abort();
+          this.#release(parent);
+          return response;
+        } finally { parent.inFlight = false; }
+      }
       const reviewSignal = AbortSignal.any([parent.controller.signal,
         AbortSignal.timeout(this.reviewTimeoutMs), ...(signal ? [signal] : [])]);
       const cancel = () => this.#release(parent);

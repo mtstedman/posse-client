@@ -2786,6 +2786,10 @@ export const TOOL_FINAL_REVIEW = {
   parameters: {
     type: "object",
     properties: {
+      blocker: {
+        type: "string", minLength: 1, maxLength: 1000,
+        description: "Developer only. Report why work cannot continue. Saves a BLOCKED result and ends both sessions without running tests or another review. Omit to request review of completed work.",
+      },
       completion_report: {
         type: "object",
         description: "Developer only. Delivery facts for the final reviewer, kept with the final-review record; report-only criteria belong here rather than in a source-file comment.",
@@ -2837,10 +2841,13 @@ export const TOOL_FINAL_REVIEW_ASSESSOR = {
 
 export const TOOL_FINAL_REVIEW_DEV = {
   ...TOOL_FINAL_REVIEW,
-  description: "Request review of the finished change. Include completion_report when a delivery report is required. An accepted pass saves completion and ends both agent sessions immediately, with no further tool turns. Fix returned findings and call again.",
+  description: "Request review of the finished change, or report blocker when work cannot continue. A blocker saves BLOCKED and ends both sessions without running another review. Include completion_report when a delivery report is required. An accepted pass saves completion and ends both agent sessions immediately, with no further tool turns. Fix returned findings and call again. No separate agent_handoff is needed for PASS or BLOCKED.",
   parameters: {
     type: "object",
-    properties: { completion_report: TOOL_FINAL_REVIEW.parameters.properties.completion_report },
+    properties: {
+      completion_report: TOOL_FINAL_REVIEW.parameters.properties.completion_report,
+      blocker: TOOL_FINAL_REVIEW.parameters.properties.blocker,
+    },
     additionalProperties: false,
   },
 };

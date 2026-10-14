@@ -26,7 +26,7 @@ export function finalReviewLogSummary({ input = {}, result = null, reviewer = fa
   if (result.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS) {
     return `FAILED: ${reason || "Changes are required"}`;
   }
-  if (result.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED) return `FAILED: ${reason || "Review could not complete"}`;
+  if (result.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED) return `final_review BLOCKED: ${reason || "Review could not complete"}`;
   if (lifecycle) return "Developer received review result";
   return "Developer requests review";
 }

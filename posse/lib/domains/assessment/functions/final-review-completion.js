@@ -6,10 +6,10 @@ import { getAgentCallById } from "../../queue/functions/agent-calls.js";
 import { runImmediateTransaction } from "../../queue/functions/common.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 
-// A validated pass owns close-out. Save the ordinary completion packets before
+// A final-review terminal report owns close-out. Save completion packets before
 // stopping either provider. The worker completes directly from the saved review
 // without asking either model for another turn or dispatching an assessor.
-export function completeFinalReview({ agentCallId, reviewerAgentCallId, cwd, summary, verifiedNoChange = false, recordResult = () => {} }) {
+export function completeFinalReview({ agentCallId, reviewerAgentCallId, cwd, summary, blocker = null, verifiedNoChange = false, recordResult = () => {} }) {
   const receipts = runImmediateTransaction(getDb(), () => {
     recordResult();
     const saved = [];
@@ -19,14 +19,15 @@ export function completeFinalReview({ agentCallId, reviewerAgentCallId, cwd, sum
       const existing = getAgentHandoffRecord(reviewerAgentCallId);
       // A one-shot reviewer may have already committed its terminal report.
       // Preserve that accepted packet instead of replacing its proof.
-      const receipt = existing?.status === "committed" && existing.packet?.outcome === "pass"
+      const receipt = existing?.status === "committed" && (blocker || existing.packet?.outcome === "pass")
         ? { digest: existing.packet_digest }
         : stageAgentHandoff({
-        verdict: "pass", confidence: "high", proof: String(summary || "The change meets the task contract.").slice(0, 500),
+        verdict: blocker ? "needs_review" : "pass", confidence: blocker ? "low" : "high",
+        proof: String(blocker || summary || "The change meets the task contract.").slice(0, 500),
       }, { context: { agentCallId: reviewerAgentCallId }, role: "assessor", projectDir: cwd });
       saved.push({ agentCallId: reviewerAgentCallId, receipt });
     }
-    const completion = verifiedNoChange ? {
+    const completion = blocker ? { status: "BLOCKED", blocker } : verifiedNoChange ? {
       status: "VERIFIED_NO_CHANGE",
       no_change_rationale: String(summary || "Final review verified that the current scoped files already satisfy the task contract.").slice(0, 1000),
     } : { status: "COMPLETE" };

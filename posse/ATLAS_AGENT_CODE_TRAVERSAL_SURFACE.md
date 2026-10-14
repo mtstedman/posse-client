@@ -568,6 +568,7 @@ Developer: call to close out the finished change; include completion_report when
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
+| `blocker` | `string` | Optional | min length 1; max length 1000 | Developer only. Report why work cannot continue. Saves a BLOCKED result and ends both sessions without running tests or another review. Omit to request review of completed work. |
 | `completion_report` | `object` | Optional |  | Developer only. Delivery facts for the final reviewer, kept with the final-review record; report-only criteria belong here rather than in a source-file comment. |
 | `findings` | `array<object>` | Optional | max items 12 | Reviewer only. Every defect, most severe first. |
 | `verdict` | `string` | Optional | values "pass", "fail", "needs_review" | Reviewer only. pass, fail with findings, or needs_review when the contract itself cannot be judged. |

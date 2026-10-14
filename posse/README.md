@@ -747,6 +747,9 @@ reviewed bytes are committed, the job completes directly from that review,
 including after restart. It does not run another assessor or reapply the old
 assessment test/confidence policies. Changed code or a changed task contract
 requires fresh verification. The accepted pass is announced once.
+Developers report an unrecoverable blocker with `final_review({ blocker: "..." })`.
+This saves BLOCKED and stops both sessions without running another review or
+requiring a separate handoff call.
 
 `clear` prints the queue database it resets and cancels pending work before Git
 cleanup. Failed branch/worktree cleanup no longer leaves runnable jobs behind:

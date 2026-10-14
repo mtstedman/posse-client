@@ -152,6 +152,14 @@ export function finalReviewResultsForAttempt({ jobId, attemptId, db = getDb() })
 
 /** A passing review ends its developer and the reviewer that reported it. */
 export function finalReviewPassedForCall(agentCallId) {
+  return finalReviewTerminalForCall(agentCallId, false);
+}
+
+export function finalReviewCompletedForCall(agentCallId) {
+  return finalReviewTerminalForCall(agentCallId, true);
+}
+
+function finalReviewTerminalForCall(agentCallId, includeBlocked) {
   if (!agentCallId) return false;
   const call = getAgentCallById(agentCallId);
   if (!call) return false;
@@ -159,7 +167,8 @@ export function finalReviewPassedForCall(agentCallId) {
   const parentId = reviewer ? call.parent_agent_call_id : call.id;
   return finalReviewResultsForAttempt({ jobId: call.job_id, attemptId: call.attempt_id })
     .some((result) => result.agent_call_id === parentId
-      && result.outcome === FINAL_REVIEW_OUTCOMES.PASS
+      && (result.outcome === FINAL_REVIEW_OUTCOMES.PASS
+        || (includeBlocked && result.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED && result.developer_blocked === true))
       && (!reviewer || result.reviewer_agent_call_id === call.id));
 }
 

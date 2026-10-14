@@ -43,7 +43,7 @@ import { AGENT_HANDOFF_RECEIPT_NOTIFICATION } from "../../../catalog/handoff.js"
 import { agentHandoffTerminator } from "../../../domains/handoff/classes/AgentHandoffTerminator.js";
 import { acknowledgeWebResearchHandoffReceipt } from "../../../domains/web-research/classes/WebResearchRuntime.js";
 import { teamManagedToolAdmitted } from "../../../domains/pairing/functions/team-managed-write.js";
-import { finalReviewPassedForCall } from "../../../domains/assessment/functions/final-review-result.js";
+import { finalReviewCompletedForCall } from "../../../domains/assessment/functions/final-review-result.js";
 import { executeFinalReview, finalReviewRuntime } from "../../../domains/assessment/classes/FinalReviewRuntime.js";
 import { assessorToolBudgetApplies, assessorToolCallCeilingDecision } from "../functions/assessor-tool-budget.js";
 import { assessorFallbackReadKey, isAssessorFallbackReadKey } from "../../../domains/assessment/functions/fallback-read-tools.js";
@@ -2124,10 +2124,10 @@ export class PersistentMcpOwner {
         const toolName = routedTool.toolName;
         const toolArgs = routedTool.toolArgs;
         const callId = session?.bootConfig?.agentCallId;
-        if (finalReviewPassedForCall(callId)) {
+        if (finalReviewCompletedForCall(callId)) {
           sendResponse(res, 200, { ok: true, bootId: this.bootId, sessionId: id,
             message: mcpToolResultMessage(message, mcpToolErrorPayload(
-              "Final review passed; this agent call is complete and cannot run more tools.",
+              "Final review completed; this agent call is complete and cannot run more tools.",
             )) });
           return;
         }
