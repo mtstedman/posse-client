@@ -2,7 +2,7 @@ import { ADMIN_SETTING_LABEL_OVERRIDES, ADMIN_SETTING_DESCRIPTION_OVERRIDES, ADM
 export { PROVIDER_SETTING_KEYS, ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS, SKILL_SETTING_PREFIX, PROJECT_DB_TYPE_OPTIONS, PROJECT_DB_PERMISSION_OPTIONS, PROJECT_DB_SETTING_DEFS, PROJECT_DB_SETTING_KEYS, ADMIN_AGENT_SETTING_SECTIONS, ADMIN_PROVIDER_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS, ADMIN_IMAGE_SETTING_SECTIONS, ADMIN_CREDENTIAL_SETTING_DEFS, TURN_BASE_KEY_MAP, TURN_BASE_KEY_REVERSE_MAP, SETTINGS_PANES, ADMIN_DEFAULT_SETTINGS_PANE } from "../../../catalog/admin-settings.js";
 import { PLANNER_DISPATCH_SETTING_KEYS, PLANNER_DISPATCH_MODES } from "../../../catalog/planner-dispatch.js";
 import { PROVIDER_ROLE_NAMES } from "../../providers/functions/roles.js";
-import { SETTINGS_CATALOG, getCatalogNumericRule, getCatalogOptions, getCatalogRuntimeFallback, isCatalogBooleanSetting } from "./catalog.js";
+import { SETTINGS_CATALOG, getCatalogEntry, getCatalogNumericRule, getCatalogOptions, getCatalogRuntimeFallback, isCatalogBooleanSetting } from "./catalog.js";
 
 
 
@@ -194,6 +194,7 @@ export function adminUnsetValueLabel(settingKey = "") {
  */
 export function formatAdminSettingValue(settingKey = "", value = null) {
   const stored = value == null ? "" : String(value);
+  if (value != null && stored.trim() === "" && getCatalogEntry(toStorageSettingKey(settingKey))?.preserveEmpty) return "none";
   const text = stored.trim() === "" ? adminUnsetValueLabel(settingKey) : stored;
   if (!text) return "not set";
   const option = ENUM_SETTING_OPTIONS[toStorageSettingKey(settingKey)]

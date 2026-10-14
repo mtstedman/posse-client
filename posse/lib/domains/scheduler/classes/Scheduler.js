@@ -2366,7 +2366,7 @@ export class Scheduler {
             ({ lockedFiles, lockedRoots, activeWorktreeWIs, heldLocks } = queueLockIndex.snapshot());
           }
 
-          const leasedJob = { ...(getJob(job.id) || job), _leaseToken: lease.leaseToken, _leaseAcquiredAtMs: Date.now() };
+          const leasedJob = { ...(getJob(job.id) || job), ...(job._scheduling ? { _scheduling: job._scheduling } : {}), _leaseToken: lease.leaseToken, _leaseAcquiredAtMs: Date.now() };
           if (warmKey) activeAtlasWarmKeys.add(warmKey);
           launched = true;
           idleCount = 0;

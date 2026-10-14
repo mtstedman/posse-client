@@ -1365,17 +1365,28 @@ function assertRequiredTreeMaterialization({ db, treeDerived, treeCompression, m
  *
  * @param {string} outPath
  */
-function prepareCanonicalViewForReplacement(outPath) {
-  const existing = new Database(outPath, { fileMustExist: true });
+export function prepareCanonicalViewForReplacement(outPath) {
+  if (sqliteSidecars(outPath).length === 0) return;
+  let existing;
+  let corrupt = false;
   try {
+    existing = new Database(outPath, { fileMustExist: true });
     existing.pragma("busy_timeout = 5000");
     const checkpoint = existing.pragma("wal_checkpoint(TRUNCATE)");
     const busy = Array.isArray(checkpoint) ? Number(checkpoint[0]?.busy || 0) : 0;
     if (busy !== 0) {
       throw new Error(`ViewBuilder.buildFrom: existing view checkpoint remained busy (${busy})`);
     }
+  } catch (error) {
+    // The replacement has already been staged and closed by the caller.
+    // An irrecoverably invalid cache cannot checkpoint; detach its obsolete
+    // family so it cannot contaminate the replacement. Lock contention and
+    // I/O/permission failures are not evidence of corruption and must fail
+    // closed, retaining the current generation for its readers.
+    if (error?.code !== "SQLITE_NOTADB" && error?.code !== "SQLITE_CORRUPT") throw error;
+    corrupt = true;
   } finally {
-    existing.close();
+    existing?.close();
   }
   // A successful TRUNCATE checkpoint proves the old WAL contains no frames
   // needed by the primary database. SQLite can nevertheless leave an empty
@@ -1383,7 +1394,7 @@ function prepareCanonicalViewForReplacement(outPath) {
   // open in this process. Detach those old-family names before the atomic
   // primary-file replacement; on platforms that prohibit unlinking an open
   // sidecar this throws and preserves the prior canonical view.
-  for (const suffix of ["-wal", "-shm"]) {
+  for (const suffix of corrupt ? ["-wal", "-shm", "-journal"] : ["-wal", "-shm"]) {
     try {
       fs.unlinkSync(outPath + suffix);
     } catch (error) {

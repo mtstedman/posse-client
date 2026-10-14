@@ -1,3 +1,4 @@
+import { coordinateContractOwnerRepair } from "../../../../queue/functions/contract-owner-repair.js";
 import { repairInstructions } from "../test-failure-evidence.js";
 // lib/domains/worker/functions/helpers/verdicts/fail.js
 
@@ -1080,6 +1081,8 @@ function _spawnRecoveryJobsForVerdict({
       root_success_criteria: originalSuccessCriteria,
       ...(rootBaseCommit ? { root_base_commit: rootBaseCommit } : {}),
       fix_instructions: fixInstructions,
+      ...(currentPayload._plan_task_id ? { _plan_task_id: currentPayload._plan_task_id } : {}),
+      ...(currentPayload._shared_contracts?.length ? { _shared_contracts: currentPayload._shared_contracts } : {}),
       assessor_feedback: verdict.reasons,
       original_task_spec: originalTaskSpec,
       ...(fixDevBrief ? { dev_brief: fixDevBrief } : {}),
@@ -1160,6 +1163,14 @@ function _spawnRecoveryJobsForVerdict({
     }
 
     if (requiredScopeExpansion.length > 0) {
+      const coordinated = coordinateContractOwnerRepair({ job, paths: requiredScopeExpansion, proposedFix,
+        spawn: (spec) => spawnFromAssessor("failed", "fix", spec) });
+      if (coordinated) {
+        spawnedJobs.push(coordinated.repair, coordinated.continuation);
+        dependencyReplacementJobs.push({ job: coordinated.continuation, label: "contract consumer repair" });
+        log(`${C.yellow}[assessor]${C.reset} producer #${coordinated.repair.id} repairs its contract before consumer #${coordinated.continuation.id}`);
+        continue;
+      }
       const scopeGate = spawnFromAssessor("failed", "human_input", {
         work_item_id: job.work_item_id,
         title: `Approve fix scope: ${requiredScopeExpansion.slice(0, 3).join(", ")}${requiredScopeExpansion.length > 3 ? ` (+${requiredScopeExpansion.length - 3})` : ""}`,

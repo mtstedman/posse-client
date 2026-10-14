@@ -59,5 +59,7 @@ export function reviewedSourceMergeProof(workItem, receipt) {
   const proof = metadata[REVIEWED_SOURCE_MERGE_KEY];
   return proof?.source_generation === receipt.source_generation
     && proof.source_generation === workItemBranchGeneration(workItem)
-    && proof.accepted_receipt_ids?.includes(receipt.receipt_id) ? proof : null;
+    && (proof.accepted_receipt_ids?.includes(receipt.receipt_id)
+      || ((receipt.source_transfer_id || receipt.transfer_id)
+        && proof.accepted_transfer_ids?.includes(receipt.source_transfer_id || receipt.transfer_id))) ? proof : null;
 }

@@ -258,3 +258,13 @@ reported issue; existing usable installations are reused.
 Keys are plaintext with restricted access, not encrypted. Keep `.env` and the
 legacy provider files private. Installer reconfiguration repairs file ACLs;
 secrets are written to a restricted temporary file before replacing the old file.
+
+If selected PHP cannot be installed or run, setup exits with failure and a recovery
+message. Install PHP 8.2+ from <https://windows.php.net/download/>, enable its
+OpenSSL, cURL and ZIP extensions, add its real directory to PATH, open a new
+terminal, verify `php -v`, and rerun setup with the same language selection.
+With App Installer available, `winget install --id PHP.PHP.8.4 --exact` is another
+recovery path. PHP remains optional: `-ScipLanguages 'typescript,python'` excludes
+it, and `-ScipLanguages 'none'` disables all optional language toolchains. Accepted
+defaults replace the saved language selection; `-SkipSettings` provisions the
+saved account selection instead.

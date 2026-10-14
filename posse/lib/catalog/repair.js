@@ -17,3 +17,6 @@ export const REPAIR_REJECTIONS = Object.freeze([
   "job_already_terminal", "gate_resolution_in_progress", "unsupported_related_gate",
   "cross_work_item_dependents", "implementation_not_complete_use_skip_job", "dependency_rewire_refused",
 ]);
+
+// Automatic contract repair is bounded independently of ordinary fix chains.
+export const CONTRACT_OWNER_REPAIR_LIMIT = 2;

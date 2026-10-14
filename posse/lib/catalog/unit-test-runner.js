@@ -37,3 +37,14 @@ export const OUTCOME_TOOL_OBSERVATION = Object.freeze({
   infrastructure_error: "failed",
   unavailable: "rejected",
 });
+
+// Framework imports are authoritative for mixed JS/TS repositories. Unsupported
+// frameworks stay discoverable and require an explicit repository runner.
+export const JAVASCRIPT_TEST_FRAMEWORK_IMPORTS = Object.freeze({
+  "node:test": "node:test", vitest: "vitest", "@jest/globals": "jest",
+  mocha: "mocha", ava: "ava", "@playwright/test": "playwright", "bun:test": "bun",
+});
+export const VITEST_SELECTION_OPTIONS = Object.freeze({
+  "--config": true, "-c": true, "--environment": true, "--pool": true,
+  "--globals": false, "--no-globals": false, "--isolate": false, "--no-isolate": false,
+});

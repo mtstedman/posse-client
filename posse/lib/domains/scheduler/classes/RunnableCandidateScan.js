@@ -1,3 +1,4 @@
+import { compareRunnableRank } from "../../queue/functions/unlock-ranking.js";
 import { findRunnableJobsBatch } from "../../queue/functions/queue-store.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 
@@ -33,12 +34,12 @@ export class RunnableCandidateScan {
     if (head) {
       const freshIds = new Set(rows.map((job) => job.id));
       rows = [...rows, ...this.read(limit, { ...options, after: null }).filter((job) => !freshIds.has(job.id))]
-        .sort((a, b) => cursor(a).priority - cursor(b).priority).slice(0, limit);
-    } else rows = this.read(limit, { ...options, after: this.positions.get(key) || null });
+        .sort((a, b) => a._scheduling && b._scheduling ? compareRunnableRank(a, b) : cursor(a).priority - cursor(b).priority).slice(0, limit);
+    } else rows = this.read(limit, { ...options, after: this.positions.get(key) || null, rankByUnlock: false });
     if (!head) {
       if (rows.length < limit) this.positions.delete(key);
       else this.positions.set(key, cursor(rows[rows.length - 1]));
-    } else if (!this.positions.has(key) && rows.length) this.positions.set(key, cursor(rows[rows.length - 1]));
+    }
     return rows;
   }
 }

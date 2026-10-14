@@ -54,12 +54,15 @@ export function mergeFailureDiagnostics(result = {}, { targetBranch = null } = {
   const failureKind = result?.integrationGateFailed || integrationGate?.ok === false
     ? MERGE_FAILURE_KINDS.INTEGRATION_TEST
     : result?.timedOut ? MERGE_FAILURE_KINDS.TIMEOUT
+      : result?.dirty || result?.dirtyFiles?.length ? MERGE_FAILURE_KINDS.DIRTY_TREE
       : reason === "branch_missing" ? MERGE_FAILURE_KINDS.BRANCH_MISSING
         : result?.runtimePathBlocked || /runtime.?path|reserved.?path/i.test(reason) ? MERGE_FAILURE_KINDS.RUNTIME_PATH
           : (result?.deterministicConflict || result?.conflictFiles?.length || /conflict/i.test(reason)) ? MERGE_FAILURE_KINDS.CONFLICT
             : MERGE_FAILURE_KINDS.UNKNOWN;
   return {
     failureKind,
+    dirtyFiles: Array.isArray(result?.dirtyFiles) ? result.dirtyFiles.slice(0, 50) : [],
+    repairProvenance: result?.repairProvenance || null,
     targetBranch: targetBranch || result?.targetBranch || null,
     targetHead: integrationGate?.target_head || result?.targetHead || null,
     integrationGate,

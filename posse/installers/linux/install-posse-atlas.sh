@@ -145,7 +145,7 @@ while [[ $# -gt 0 ]]; do
     --repo-path) REPO_PATH="${2:?missing value for --repo-path}"; shift 2 ;;
     --smoke-query) SMOKE_QUERY="${2:?missing value for --smoke-query}"; shift 2 ;;
     --smoke-provider) SMOKE_PROVIDER="${2:?missing value for --smoke-provider}"; shift 2 ;;
-    --scip-languages|--scip-langs) POSSE_SCIP_LANGUAGES="${2:?missing value for --scip-languages}"; POSSE_SCIP_LANGUAGES_SUPPLIED="true"; shift 2 ;;
+    --scip-languages|--scip-langs) POSSE_SCIP_LANGUAGES="${2?missing value for --scip-languages}"; POSSE_SCIP_LANGUAGES_SUPPLIED="true"; shift 2 ;;
     --scip-languages=*|--scip-langs=*) POSSE_SCIP_LANGUAGES="${1#*=}"; POSSE_SCIP_LANGUAGES_SUPPLIED="true"; shift ;;
     --no-smoke) RUN_SMOKE="false"; shift ;;
     --no-persist-env) PERSIST_ENV="false"; shift ;;
@@ -344,9 +344,9 @@ scip_language_alias() {
 normalize_scip_languages() {
   local raw="${1:-}" token canonical selected="" invalid=()
   raw="${raw//,/ }"
-  if [[ -z "${raw//[[:space:]]/}" ]]; then
-    printf '%s\n' "no SCIP languages selected"
-    return 1
+  if [[ -z "${raw//[[:space:]]/}" || "$raw" == "none" ]]; then
+    printf '%s\n' "none"
+    return 0
   fi
   for token in $raw; do
     if ! canonical="$(scip_language_alias "$token")"; then
@@ -404,6 +404,7 @@ prompt_scip_languages_if_needed() {
   fi
 
   if [[ "$NON_INTERACTIVE" == "true" || "$DRY_RUN" == "true" || "$SETUP_ONLY" == "true" ]] || ! ( : </dev/tty ) 2>/dev/null; then
+    SCIP_LANGUAGES_CHOSEN="true"
     SCIP_LANGUAGE_STEP_NOTE="selected ${POSSE_SCIP_LANGUAGES} (default; no interactive terminal)"
     info "no interactive terminal for SCIP language selection; using default: ${POSSE_SCIP_LANGUAGES}"
     return 0
@@ -421,11 +422,13 @@ prompt_scip_languages_if_needed() {
       printf "      %d) [%s] %s (%s)\n" "$((i + 1))" "$mark" "${SCIP_LANGUAGE_LABELS[i]}" "$value" >/dev/tty
     done
     if ! read -r -p "      Languages (numbers/names, comma-separated, or all): " answer </dev/tty; then
+      SCIP_LANGUAGES_CHOSEN="true"
       SCIP_LANGUAGE_STEP_NOTE="selected ${POSSE_SCIP_LANGUAGES} (default; prompt unavailable)"
       info "SCIP language prompt unavailable; using default: ${POSSE_SCIP_LANGUAGES}"
       return 0
     fi
     if [[ -z "${answer//[[:space:]]/}" ]]; then
+      SCIP_LANGUAGES_CHOSEN="true"
       SCIP_LANGUAGE_STEP_NOTE="selected ${POSSE_SCIP_LANGUAGES} (default)"
       info "initial SCIP languages: ${POSSE_SCIP_LANGUAGES}"
       return 0
@@ -1415,6 +1418,15 @@ ensure_core_packages() {
 }
 
 step_packages() {
+  if [[ "$SEED_SETTINGS" != "true" && "$DRY_RUN" != "true" ]]; then
+    if ! POSSE_SCIP_LANGUAGES="$("$NODE_BIN" "$POSSE_DIR/lib/domains/cli/functions/installer-scip-languages.js")"; then
+      step_begin packages
+      step_end failed "Cannot read preserved account SCIP languages; repair account.db or rerun without --skip-settings"
+      CRITICAL_FAILED="true"
+      return 1
+    fi
+    info "using preserved account SCIP languages: $POSSE_SCIP_LANGUAGES"
+  fi
   step_begin packages
   detect_pkg_manager
   [[ "$WITH_MEDIA_TOOLS" == "true" ]] || info "media tools (tesseract, ImageMagick, ffmpeg) not requested; --with-media-tools adds them"
@@ -1988,7 +2000,7 @@ const seed = {
   atlas_phases: process.env.POSSE_SEED_PHASES,
   atlas_live_funnel: process.env.POSSE_SEED_FUNNEL,
   atlas_scip_mode: process.env.POSSE_SEED_SCIP_MODE,
-  atlas_scip_languages: process.env.POSSE_SEED_SCIP_LANGUAGES,
+  atlas_scip_languages: process.env.POSSE_SEED_SCIP_LANGUAGES === "none" ? "" : process.env.POSSE_SEED_SCIP_LANGUAGES,
 };
 // Keys named in POSSE_SEED_REPLACE (a language choice the user just made)
 // overwrite a saved value; every other key only fills a missing one.
@@ -2015,7 +2027,7 @@ const upsert = db.prepare(`
 `);
 const tx = db.transaction((entries) => {
   for (const [k, v] of entries) {
-    if (v == null || String(v).trim() === "") { skipped++; continue; }
+    if (v == null || (k !== "atlas_scip_languages" && String(v).trim() === "")) { skipped++; continue; }
     const current = get.get(k);
     if (!current || current.setting_value == null || String(current.setting_value).trim() === "") {
       upsert.run(k, String(v));

@@ -18,6 +18,7 @@ function questionContextSourceLines(context) {
 
 function questionContextPriority(line) {
   const clean = String(line || "").trim().toLowerCase();
+  if (/^previous answer was not applied:/.test(clean)) return -1;
   if (/^(task|block reason|summary|notes):/.test(clean)) return 0;
   if (/^(files_touched|file_requests|criteria_check|status):/.test(clean)) return 1;
   if (/^-\s+/.test(clean)) return 2;

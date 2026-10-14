@@ -548,6 +548,13 @@ export function noteHumanGateAnswerNotApplied(gateJobId, reason) {
     SET resolution_error = ?, updated_at = ?
     WHERE gate_job_id = ? AND gate_state = 'open'
   `).run(String(reason || "answer not applied").slice(0, 2000), now(), gateJobId);
+  if (result.changes === 1) {
+    // Rejection is a new actionable presentation, including after restart.
+    // Preserve the error on the contract; never record an accepted answer.
+    getDb().prepare(`UPDATE jobs SET payload_json = json_remove(payload_json,
+      '$._human_prompt_last_presented_signature', '$._human_prompt_last_presented_at')
+      WHERE id = ? AND json_valid(payload_json)`).run(gateJobId);
+  }
   return result.changes === 1;
 }
 

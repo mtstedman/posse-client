@@ -2084,6 +2084,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           ? JSON.stringify(normalizedPromotePayload)
           : JSON.stringify({
               task_spec: compiledTaskSpec,
+              ...(t._plan_task_id ? { _plan_task_id: t._plan_task_id } : {}),
+              ...(t._shared_contracts?.length ? { _shared_contracts: t._shared_contracts } : {}),
               deepthink_budget: deepthinkBudget,
               deepthink,
               task_mode: taskMode,

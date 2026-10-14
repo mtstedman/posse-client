@@ -629,7 +629,7 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | Yes |
 | System-prefetch capable | No |
 
-Inspect git history deterministically (log, show, blame, diff) without shell access.
+Inspect git history deterministically (log, show, blame, diff) without shell access. show accepts a commit revision and reports commit changes; it does not return file contents. Revision:path selectors (for example HEAD:src/app.js) are unsupported. Use path to filter history/diffs, and the issued read_file/chain_read tool or code.window for current source. Historical file blobs are not exposed by this tool.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -637,8 +637,8 @@ Inspect git history deterministically (log, show, blame, diff) without shell acc
 | `grep` | `string` | Optional |  | log-only --grep commit-message filter. |
 | `limit` | `integer` | Optional |  | log-only result cap. Default: 20, max: 100. |
 | `op` | `string` | Required | values "log", "show", "blame", "diff" | Git history operation to run. |
-| `path` | `string` | Conditional | min length 1 | Optional file path filter. Required for blame. |
-| `ref` | `string` | Optional |  | Optional git ref/revision selector (e.g. HEAD~5). For diff, two safe refs separated by whitespace are normalized to A..B. |
+| `path` | `string` | Conditional | min length 1 | Optional history/diff path filter, not a file-content request. Required for blame. |
+| `ref` | `string` | Optional |  | Optional commit ref/revision selector (e.g. HEAD~5); revision:path and blob objects are unsupported. For diff, two safe refs separated by whitespace are normalized to A..B. |
 | `since` | `string` | Optional |  | log-only --since value (e.g. 2025-01-01). |
 
 ### `tools.hash_file`

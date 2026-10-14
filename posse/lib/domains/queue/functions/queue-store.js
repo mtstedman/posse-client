@@ -1,3 +1,4 @@
+import { rankRunnableJobs } from "./unlock-ranking.js";
 import { randomUUID } from "node:crypto";
 import { reviewedTransfers } from "./reviewed-handoff-records.js";
 import { PIPELINE_BOOTSTRAP_JOB_TYPES, parseWorkItemMetadataRecord, missingExecutionReason, isActiveIterativeWorkItemRecord } from "./work-item-execution-contract.js";
@@ -1364,7 +1365,7 @@ export function releaseWorkItemAutoMergeAuthorization(id, previousMergeState = n
 }
 
 export function markWorkItemMergeFailed(id, { message = null, targetBranch = null, targetHead = null,
-  integrationGate = null, failureKind = null } = {}) {
+  integrationGate = null, failureKind = null, dirtyFiles = [], repairProvenance = null } = {}) {
   const db = getDb();
   const execute = () => {
     const result = db.prepare(`
@@ -1399,6 +1400,8 @@ export function markWorkItemMergeFailed(id, { message = null, targetBranch = nul
       failureKind: preservePrior ? prior.failure_kind : incomingKind,
       retryCount: prior ? Number(prior.retry_count || 0) + 1 : 0,
       previousFailures,
+      dirtyFiles,
+      repairProvenance,
       allowWaive: preservePrior
         ? !!incomingHead && incomingHead === prior.integration_gate?.target_head
         : !!integrationGate?.candidate_tree && !!integrationGate?.target_head,
@@ -2415,6 +2418,7 @@ export function updateJobStatus(id, status, { expectedStatuses = null, leaseToke
   const shouldClearLease = !leaseStatuses.has(status);
 
   const execute = () => {
+    const resolvedError = status === "succeeded" ? getJob(id)?.last_error : null;
     const updates = {};
     if (status === "running") {
       updates.started_at = now();
@@ -2441,6 +2445,7 @@ export function updateJobStatus(id, status, { expectedStatuses = null, leaseToke
     const result = db.prepare(`
       UPDATE jobs
       SET status = ?, updated_at = ?,
+          last_error = ${status === "succeeded" ? "NULL" : "last_error"},
           state_version = state_version + 1,
           started_at = COALESCE(?, started_at),
           finished_at = ${isTerminal ? "COALESCE(?, finished_at)" : "NULL"},
@@ -2481,6 +2486,7 @@ export function updateJobStatus(id, status, { expectedStatuses = null, leaseToke
       event_type: EVENT_TYPES.JOB_STATUS_CHANGED,
       actor_type: EVENT_ACTORS.SYSTEM,
       message: `Status -> ${status}`,
+      ...(resolvedError ? { event_json: JSON.stringify({ resolved_error: resolvedError }) } : {}),
     });
     if (status === "dead_letter" || status === "canceled") {
       rollbackPendingCrossWiSyncHandoffsForJob(job || id, `job_${status}`);
@@ -3567,9 +3573,10 @@ export function requeueExpiredLeases() {
 
 /**
  * Find the next runnable job: status=queued, ready_at<=now, all hard deps succeeded.
- * Ordered by priority then creation time.
+ * Rank ready work by priority, downstream unlock impact and starvation aging.
+ * Tail scans can request the stable priority/type/creation keyset order.
  */
-export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], excludeJobIds = [], onlyJobTypes = [], onlyWorkItemIds = [], after = null, changedAfter = null } = {}) {
+export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], excludeJobIds = [], onlyJobTypes = [], onlyWorkItemIds = [], after = null, changedAfter = null, rankByUnlock = true } = {}) {
   const db = getDb();
   const ts = now();
 
@@ -3658,9 +3665,9 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
   }
 
   const safeLimit = Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 1);
-  params.push(safeLimit);
+  params.push(rankByUnlock ? -1 : safeLimit);
 
-  return db.prepare(`
+  const candidates = db.prepare(`
     SELECT j.* FROM jobs j
     WHERE ${conditions.join("\n        AND ")}
     ORDER BY
@@ -3682,6 +3689,7 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
       j.created_at ASC, j.id ASC
     LIMIT ?
   `).all(...params);
+  return rankByUnlock ? rankRunnableJobs(candidates, { db }).slice(0, safeLimit) : candidates;
 }
 
 export function findRunnableJob(opts = {}) {

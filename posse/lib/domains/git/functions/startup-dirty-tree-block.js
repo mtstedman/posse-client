@@ -32,6 +32,7 @@ export function recordStartupDirtyTreeBlock(result = {}, {
     block_reason: result?.blockReason ?? null,
     dirty_count: dirtyCount,
     dirty_lines: dirtyLines,
+    ...(result?.repairProvenance ? { repair_provenance: result.repairProvenance } : {}),
   };
   try {
     logEvent?.({

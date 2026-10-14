@@ -25,15 +25,17 @@ export function recordReviewedSourceMerge({ workItemId, sourceHead, mergeHash, c
   for (const job of db.prepare("SELECT * FROM jobs").all()) {
     const receipt = parseJobPayload(job)[REVIEWED_COMPLETION_KEY];
     for (const entry of [receipt, ...reviewedTransfers(job), ...reviewedTransfers(job, { applied: true })]) {
-      if (entry?.source_work_item_id === workItemId && entry.source_generation === generation) receipts.set(entry.receipt_id, entry);
+      if (entry?.source_work_item_id === workItemId && entry.source_generation === generation) receipts.set(entry.transfer_id || entry.receipt_id, entry);
     }
   }
   if (!receipts.size) return;
   const accepted = [];
+  const acceptedTransfers = [];
+  const accept = (receipt) => (receipt.transfer_id ? acceptedTransfers : accepted).push(receipt.transfer_id || receipt.receipt_id);
   for (const receipt of receipts.values()) {
     try {
       git(["merge-base", "--is-ancestor", receipt.source_commit, sourceHead], cwd);
-      accepted.push(receipt.receipt_id);
+      accept(receipt);
     } catch {
       // Closeout may replay the source onto the target and drop its own
       // settled imports. Exact scoped objects and bound inputs still prove
@@ -44,7 +46,7 @@ export function recordReviewedSourceMerge({ workItemId, sourceHead, mergeHash, c
           sameReviewedObject(file.object, parseReviewedTreeObject(String(git([
             "ls-tree", "--full-name", "-z", sourceHead, "--", `:(top,literal)${file.repo_path}`,
           ], cwd, { trim: false })), file.repo_path)));
-        if (preserved) accepted.push(receipt.receipt_id);
+        if (preserved) accept(receipt);
       } catch { /* Incomplete proof retains the generation-specific blocker. */ }
     }
   }
@@ -53,7 +55,7 @@ export function recordReviewedSourceMerge({ workItemId, sourceHead, mergeHash, c
     if (workItemBranchGeneration(current) !== generation) return;
     const metadata = JSON.parse(current.metadata_json || "{}");
     metadata[REVIEWED_SOURCE_MERGE_KEY] = { source_generation: generation, source_commit: sourceHead,
-      merge_commit: mergeHash, accepted_receipt_ids: accepted, accepted_at: now() };
+      merge_commit: mergeHash, accepted_receipt_ids: accepted, accepted_transfer_ids: acceptedTransfers, accepted_at: now() };
     db.prepare("UPDATE work_items SET metadata_json = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(metadata), now(), workItemId);
   };
   if (db.inTransaction) execute(); else runImmediateTransaction(db, execute);

@@ -306,7 +306,7 @@ function Test-ScipLanguageSelected {
 function Normalize-ScipLanguages {
   param([string]$Value)
   $tokens = @($Value -split "[,\s]+" | Where-Object { $_ -and $_.Trim() })
-  if ($tokens.Count -eq 0) { throw "no SCIP languages selected" }
+  if ($tokens.Count -eq 0 -or $Value.Trim().ToLowerInvariant() -eq "none") { return "none" }
 
   $selected = New-Object System.Collections.Generic.List[string]
   $invalid = @()
@@ -369,6 +369,7 @@ function Resolve-ScipLanguageSelection {
   }
 
   if (-not (Test-InteractiveInput)) {
+    $script:ScipLanguagesChosen = $true
     $script:ScipLanguageStepNote = "selected $script:PosseScipLanguages (default; no interactive terminal)"
     Write-Info "no interactive terminal for SCIP language selection; using default: $script:PosseScipLanguages"
     return $true
@@ -378,7 +379,7 @@ function Resolve-ScipLanguageSelection {
     Write-Host ""
     Write-Host ("  {0}Initial SCIP language environments{1}" -f $script:BOLD, $script:R)
     Write-Host ("    Select one or more languages for first-run indexing. Press Enter for defaults [{0}]." -f $script:PosseScipLanguages)
-    Write-Host "    Use numbers, names, comma-separated values, or 'all'."
+    Write-Host "    Use numbers, names, comma-separated values, or 'all' / 'none'."
     for ($i = 0; $i -lt $script:ScipLanguageOptions.Count; $i++) {
       $option = $script:ScipLanguageOptions[$i]
       $mark = if ((",$script:PosseScipLanguages,").Contains("," + $option.Value + ",")) { "*" } else { " " }
@@ -386,6 +387,7 @@ function Resolve-ScipLanguageSelection {
     }
     $answer = Read-Host "      Languages (numbers/names, comma-separated, or all)"
     if (-not $answer -or -not $answer.Trim()) {
+      $script:ScipLanguagesChosen = $true
       $script:ScipLanguageStepNote = "selected $script:PosseScipLanguages (default)"
       Write-Info "initial SCIP languages: $script:PosseScipLanguages"
       return $true
@@ -1747,8 +1749,26 @@ function Install-HostTool {
   return [PSCustomObject]@{ Installed = $installed; Reason = $reason }
 }
 
+function Fail-SelectedPhp {
+  param([string]$Reason)
+  $recovery = "PHP was selected but is unavailable: $Reason. Install PHP 8.2+ from https://windows.php.net/download/ (include openssl, curl and zip), add the real PHP directory to PATH, open a new terminal and verify php -v, then rerun this installer with -ScipLanguages '$script:PosseScipLanguages'. Alternatively install App Installer and run winget install --id PHP.PHP.8.4 --exact. To exclude PHP rerun with -ScipLanguages 'typescript,python'."
+  Write-Warn2 $recovery
+  $script:InstallFailed = $true
+  Step-End "failed" $recovery
+}
+
 function Step-Packages {
   Step-Begin "packages"
+  if ($SkipSettings -and -not $DryRun) {
+    $policy = Get-NativeOutput $script:NodeBin @((Join-Path $script:PosseDirResolved "lib\domains\cli\functions\installer-scip-languages.js"))
+    if (-not $policy -or $policy.ExitCode -ne 0) {
+      $script:CriticalFailed = $true
+      Step-End "failed" "Cannot read preserved account SCIP languages; repair account.db or rerun without -SkipSettings"
+      return
+    }
+    $script:PosseScipLanguages = ([string]$policy.StdOut).Trim()
+    Write-Info "using preserved account SCIP languages: $script:PosseScipLanguages"
+  }
 
   # Each tool says what counts as "already installed": its executable, the
   # oldest version Posse works with (when it matters), how to ask for that
@@ -1811,6 +1831,10 @@ function Step-Packages {
   foreach ($tool in $missing) { Write-Info ("missing: {0} ({1})" -f $tool.Label, $tool.Reason) }
   if ($missing.Count -gt 0) {
     if ($SkipHostTools) {
+      if ((Test-ScipLanguageSelected "php") -and -not $satisfied["PHP"] -and -not $DryRun) {
+        Fail-SelectedPhp "-SkipHostTools prevents provisioning"
+        return
+      }
       Step-End "skipped" ("-SkipHostTools; missing: " + (($missing | ForEach-Object { $_.Label }) -join ", "))
       return
     }
@@ -1836,6 +1860,10 @@ function Step-Packages {
     }
   }
 
+  if ((Test-ScipLanguageSelected "php") -and -not $satisfied["PHP"] -and -not $DryRun) {
+    Fail-SelectedPhp ($failed -join ", ")
+    return
+  }
   $pathNote = if ($pathNotes.Count -gt 0) { "; PATH set for " + ($pathNotes -join ", ") } else { "" }
   if ($failed.Count -eq 0) {
     $message = if ($missing.Count -eq 0) { "all selected tools already present" } else { "missing tools installed" }
@@ -2074,16 +2102,17 @@ function Step-Composer {
     }
     if ($phpExtensions.Changed) { Write-Info $phpExtensions.Message }
   }
-  if (Test-Path $pharPath) { Step-End "ok" ("composer.phar already present in {0}" -f $pharPath); return }
-  if (-not $php) {
-    Write-Warn2 "PHP is not installed, so Composer was skipped - SCIP PHP indexing stays disabled until both exist"
-    Step-End "skipped" "php not available"
-    return
-  }
   if ($DryRun) {
     Step-End "dry-run" ("would configure PHP Composer extensions and download signature-verified composer.phar into {0}" -f $pharPath)
     return
   }
+  if (-not $php) {
+    Write-Warn2 "PHP is not installed, so Composer was skipped - SCIP PHP indexing stays disabled until both exist"
+    Fail-SelectedPhp "Composer requires a usable PHP runtime on PATH"
+    return
+  }
+  if (Test-Path $pharPath) { Step-End "ok" ("composer.phar already present in {0}" -f $pharPath); return }
+
 
   $binDir = Split-Path $pharPath -Parent
   $setupPath = Join-Path ([System.IO.Path]::GetTempPath()) ("composer-setup-" + [Guid]::NewGuid().ToString("N") + ".php")
@@ -2431,7 +2460,7 @@ const seed = {
   atlas_phases: process.env.POSSE_SEED_PHASES,
   atlas_live_funnel: process.env.POSSE_SEED_FUNNEL,
   atlas_scip_mode: process.env.POSSE_SEED_SCIP_MODE,
-  atlas_scip_languages: process.env.POSSE_SEED_SCIP_LANGUAGES,
+  atlas_scip_languages: process.env.POSSE_SEED_SCIP_LANGUAGES === "none" ? "" : process.env.POSSE_SEED_SCIP_LANGUAGES,
 };
 // Keys named in POSSE_SEED_REPLACE (a language choice the user just made)
 // overwrite a saved value; every other key only fills a missing one.
@@ -2458,7 +2487,7 @@ const upsert = db.prepare(`
 `);
 const tx = db.transaction((entries) => {
   for (const [k, v] of entries) {
-    if (v == null || String(v).trim() === "") { skipped++; continue; }
+    if (v == null || (k !== "atlas_scip_languages" && String(v).trim() === "")) { skipped++; continue; }
     const current = get.get(k);
     if (!current || current.setting_value == null || String(current.setting_value).trim() === "") {
       upsert.run(k, String(v));

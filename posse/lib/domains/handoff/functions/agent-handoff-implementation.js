@@ -2274,12 +2274,26 @@ export function normalizePlannerAgentHandoffArgs(args, { role = "" } = {}) {
     }
     return {
       id: task.id ?? `task-${index + 1}`,
-      depends_on: task.depends_on ?? [],
+      depends_on: [...new Set([...(task.depends_on ?? []), ...(additions.dependsOn ?? [])])],
       target: { kind: targetKind, role: taskRole },
       intent: task.intent ?? String(task.summary || "").trim().split(/\r?\n/)[0].slice(0, 200),
       report,
     };
   });
+  // Producer dependencies are semantic edges, never file-order guesses. Reject
+  // a conflicting plan before any jobs or ownership reservations materialize.
+  const byId = new Map(handoffs.map((entry) => [entry.id, entry]));
+  for (const entry of handoffs) {
+    const pending = [...entry.depends_on];
+    const visited = new Set();
+    while (pending.length) {
+      const id = pending.pop();
+      if (id === entry.id) fail("AGENT_HANDOFF_SEMANTIC_INVALID", `Shared contract dependencies create a cycle for task ${entry.id}`);
+      if (visited.has(id)) continue;
+      visited.add(id);
+      pending.push(...(byId.get(id)?.depends_on || []));
+    }
+  }
   return {
     protocol: AGENT_HANDOFF_PROTOCOL,
     profile: AGENT_HANDOFF_PROFILES.PLANNER_PLAN,

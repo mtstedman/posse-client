@@ -113,7 +113,7 @@ export const ATLAS_SCIP_LANGUAGE_OPTIONS = Object.freeze([
   Object.freeze({ value: "clang", label: "C / C++ (scip-clang)" }),
 ]);
 export const ATLAS_SCIP_LANGUAGE_VALUES = Object.freeze(ATLAS_SCIP_LANGUAGE_OPTIONS.map((entry) => entry.value));
-export const ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES = Object.freeze(["typescript", "python", "php"]);
+export const ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES = Object.freeze(["typescript", "python"]);
 export const VALID_ATLAS_SCIP_LANGUAGES = readonlySet(ATLAS_SCIP_LANGUAGE_VALUES);
 
 // Installation-level runners made available to the deterministic test tool

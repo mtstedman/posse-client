@@ -60,6 +60,7 @@ function normalizeCrossWiMergeDependency(dep = {}) {
   return {
     ...(isReviewedTransfer(dep) ? {
       version: dep.version, transfer_id: dep.transfer_id, receipt_id: dep.receipt_id,
+      source_transfer_id: dep.source_transfer_id || dep.transfer_id,
       source_generation: dep.source_generation, source_commit: dep.source_commit,
       required_provenance: dep.required_provenance || [],
     } : {}),
@@ -418,6 +419,7 @@ export function addCrossWiMergeDependency(targetWorkItemId, sourceWorkItemId, de
       && normalizeRepoPath(dep.path) === normalizeRepoPath(nextDep.path)
       && (dep.source_generation ?? null) === (nextDep.source_generation ?? null)
       && (dep.transfer_id ?? null) === (nextDep.transfer_id ?? null)
+      && (dep.source_transfer_id ?? null) === (nextDep.source_transfer_id ?? null)
     );
     if (existing) {
       // Backfill lock_kind on rows persisted before kinds were recorded so a

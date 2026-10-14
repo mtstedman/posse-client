@@ -42,8 +42,8 @@ const LANGUAGE_ALIASES = Object.freeze({
 });
 
 /**
- * Normalize user/admin-provided SCIP languages. Empty input means the default
- * enabled language set; callers that need "no fallback" or "all languages"
+ * Normalize user/admin-provided SCIP languages. Unset input means the default
+ * enabled set; explicit empty values disable all languages. Callers may
  * pass an explicit defaultLanguages list.
  *
  * @param {string[] | string | null | undefined} value
@@ -51,6 +51,7 @@ const LANGUAGE_ALIASES = Object.freeze({
  * @returns {string[]}
  */
 export function normalizeScipLanguages(value, { defaultLanguages = ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES } = {}) {
+  if (value == null) return Array.from(defaultLanguages);
   const raw = Array.isArray(value)
     ? value
     : String(value ?? "")
@@ -63,7 +64,7 @@ export function normalizeScipLanguages(value, { defaultLanguages = ATLAS_SCIP_DE
     if (!VALID_ATLAS_SCIP_LANGUAGES.has(normalized)) continue;
     if (!picked.includes(normalized)) picked.push(normalized);
   }
-  return picked.length > 0 ? picked : Array.from(defaultLanguages);
+  return picked;
 }
 
 /**

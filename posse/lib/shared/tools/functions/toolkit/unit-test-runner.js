@@ -1,6 +1,6 @@
 import { SKIP_DIRS, TEST_HELPER_DIRS, MAX_OUTPUT_CHARS, MAX_SOURCE_SNIFF_BYTES, DEFAULT_TIMEOUT_MS, PHPUNIT_CONFIG_NAMES, OUTCOME_STATUS } from "../../../../catalog/unit-test-runner.js";
 import { missingNodeTestDependency } from "./node-test-failure.js";
-import { createRequire } from "node:module";
+import { javascriptTestRunner } from "./javascript-test-runner.js";
 import { fileURLToPath } from "node:url";
 import { spawn } from "child_process";
 import { SpawnedProcessTerminator } from "../../../platform/classes/SpawnedProcessTerminator.js";
@@ -26,6 +26,8 @@ const ADAPTERS = Object.freeze({
   ".mjs": { language: "javascript", runner: "node_test", executable: () => "node", argv: (relative) => ["--test", relative] },
   ".cts": { language: "typescript", runner: "node_test", executable: () => "node", argv: (relative) => ["--experimental-strip-types", "--test", relative] },
   ".mts": { language: "typescript", runner: "node_test", executable: () => "node", argv: (relative) => ["--experimental-strip-types", "--test", relative] },
+  ".jsx": { language: "javascript", executable: () => "node" },
+  ".tsx": { language: "typescript", executable: () => "node" },
   ".ts": { language: "typescript", runner: "node_test", executable: () => "node", argv: (relative) => ["--experimental-strip-types", "--test", relative] },
   // Python and PHP files are not self-running: the runner is chosen per file.
   ".py": { language: "python", executable: pythonExecutable, resolve: pythonRunner },
@@ -45,26 +47,11 @@ const ADAPTERS = Object.freeze({
   },
 });
 
-// Resolve the repository's installed loader, never download one or infer that
-// Node's type stripping implements the project's TypeScript resolution rules.
-function nodeRunner(root, relative) {
-  let pkg = {};
-  try { pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")); } catch { /* no package */ }
-  const script = String(pkg.scripts?.test || "").trim();
-  if (/^(?:tsx\s+--test|node\s+--import(?:=|\s+)tsx\s+--test)(?:\s|$)/u.test(script)) {
-    try {
-      const cli = createRequire(path.join(root, "package.json")).resolve("tsx/cli");
-      return { runner: "node_test", executable: "node", args: [cli, "--test", relative] };
-    } catch { return { reason: "typescript_test_loader_unavailable" }; }
-  }
-  if (script && /\b(?:vitest|jest|mocha|ava)\b/u.test(script)) return { reason: "project_test_runner_requires_declared_command" };
-  const typed = /\.[cm]?ts$/u.test(relative);
-  return { runner: "node_test", executable: "node", args: [...(typed ? ["--experimental-strip-types"] : []), "--test", relative] };
-}
-
 function nodeBootstrapFailure(invocation, output) {
-  if (invocation.runner !== "node_test"
+  if (invocation.runner !== "node_test" && invocation.runner !== "vitest"
     && !(invocation.runner === "repository_script" && invocation.executable === process.execPath)) return null;
+  if (output.includes("Posse Vitest adapter unavailable:")) return "test_loader_resolution_mismatch";
+  if (/MISSING DEPENDENCY.*Cannot find dependency/u.test(output)) return "test_dependency_unavailable";
   if (missingNodeTestDependency(output)) return "test_dependency_unavailable";
   // Vitest imports under node:test fail before collecting any product tests.
   // Keep that runner/bootstrap mismatch out of product-failure remediation.
@@ -333,7 +320,7 @@ export function resolveUnitTestInvocation(projectDir, requestedPath, capability 
   const adapter = ADAPTERS[path.extname(normalized).toLowerCase()];
   if (!adapter) return null;
   const resolved = repositoryTestRunner(root, normalized) || (["javascript", "typescript"].includes(adapter.language)
-    ? nodeRunner(root, normalized)
+    ? javascriptTestRunner(root, normalized, readSourceHead(real))
     : adapter.resolve
     ? adapter.resolve(root, normalized, readSourceHead(real))
     : { runner: adapter.runner, executable: adapter.executable(), args: adapter.argv(normalized) });
@@ -346,6 +333,7 @@ export function resolveUnitTestInvocation(projectDir, requestedPath, capability 
     runner: resolved.runner,
     executable: resolved.executable,
     args: Object.freeze(resolved.args),
+    ...(resolved.cwd ? { cwd: resolved.cwd } : {}),
   });
 }
 
@@ -371,6 +359,7 @@ function classifyCompletedRun(invocation, { code, stdout, stderr }, root) {
   const counts = testExecutionCounts(output);
   const zeroTests = !!counts && (counts.total === 0 || counts.skipped === counts.total);
   const noTests = { outcome: "unavailable", reason: "no_tests_executed" };
+  if (invocation.runner === "vitest" && /No test files found/u.test(output)) return noTests;
   switch (invocation.runner) {
     case "repository_script":
       if (code === 0) return zeroTests || !stdout.trim() ? noTests : { outcome: "passed", reason: null };
@@ -483,7 +472,7 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
     };
     try {
       child = spawn(invocation.executable, invocation.args, {
-        cwd: root,
+        cwd: invocation.cwd || root,
         detached: process.platform !== "win32",
         shell: false,
         windowsHide: true,

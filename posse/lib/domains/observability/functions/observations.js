@@ -1246,9 +1246,9 @@ export function reconcileProviderToolUseReplay({
       SELECT observation_type, summary, detail_json
       FROM job_observations
       WHERE job_id = ? AND observation_type LIKE 'tool.%'
+        AND COALESCE(json_extract(detail_json, '$.agent_call_id'), json_extract(detail_json, '$.parent_agent_call_id')) = ?
       ORDER BY id DESC
-      LIMIT 5000
-    `).all(normalizedJobId);
+    `).all(normalizedJobId, callId);
   } catch {
     persistedRows = [];
   }
@@ -1488,6 +1488,7 @@ export function recordToolUseObservations({
   const resolvedAttemptId = attempt_id ?? context.attempt_id ?? null;
   const resolvedAgentCallId = agent_call_id ?? context.agent_call_id ?? null;
   const seen = new Set();
+  const archivedIdentities = new Map();
   const now = Date.now();
   const replayBucketKey = resolvedJobId == null ? "__global__" : String(resolvedJobId);
   for (const toolUse of tool_uses) {
@@ -1511,27 +1512,63 @@ export function recordToolUseObservations({
       ...(outcome ? { outcome, ok: outcome === "succeeded" } : {}),
       ...(error ? { error: error.slice(0, 200) } : {}),
       ...(rejection ? { rejection_reason: rejection.slice(0, 200) } : {}),
-      ...(resolvedAgentCallId != null ? { agent_call_id: resolvedAgentCallId } : {}),
+      ...(observationDetail.agent_call_id == null && resolvedAgentCallId != null ? { agent_call_id: resolvedAgentCallId } : {}),
+      ...(toolUse.id && observationDetail.provider_call_id == null ? { provider_call_id: String(toolUse.id) } : {}),
     };
-    const key = `${summary.observation_type}|${summary.summary}`;
+    // Stable provider identity distinguishes equal calls and survives process
+    // restart; never attribute a replay to the current ambient attempt.
+    const durableCall = detail.agent_call_id == null ? null : getDb().prepare(
+      "SELECT job_id, work_item_id, attempt_id FROM agent_calls WHERE id = ?",
+    ).get(detail.agent_call_id);
+    const originalJobId = durableCall?.job_id ?? resolvedJobId;
+    const originalAttemptId = durableCall ? durableCall.attempt_id : resolvedAttemptId;
+    const identity = detail.provider_call_id && detail.agent_call_id != null
+      ? `${detail.agent_call_id}:${detail.provider_call_id}` : null;
+    const key = identity || `${summary.observation_type}|${summary.summary}`;
     if (seen.has(key)) continue;
     seen.add(key);
     if (
-      dedupe_replays
+      dedupe_replays && !identity
       && TOOL_REPLAY_DEDUPE_WINDOW_MS > 0
       && summary.observation_type.startsWith("tool.")
     ) {
       const fingerprint = `${summary.observation_type}|${JSON.stringify(detail)}`;
       if (!_rememberToolReplayFingerprint(replayBucketKey, fingerprint, now)) continue;
     }
-    recordObservation({
-      work_item_id: resolvedWorkItemId,
-      job_id: resolvedJobId,
-      attempt_id: resolvedAttemptId,
-      observation_type: summary.observation_type,
-      summary: summary.summary,
-      detail,
-    });
+    const persist = () => {
+      if (dedupe_replays && identity && getDb().prepare(`
+        SELECT 1 FROM job_observations WHERE job_id = ? AND observation_type = ?
+          AND json_extract(detail_json, '$.agent_call_id') = ?
+          AND json_extract(detail_json, '$.provider_call_id') = ?
+      `).get(originalJobId, summary.observation_type, detail.agent_call_id, detail.provider_call_id)) return;
+      if (dedupe_replays && identity && observationDetail.recovered_from_provider_rollout) {
+        const scopeKey = `${originalJobId}:${detail.agent_call_id}`;
+        if (!archivedIdentities.has(scopeKey)) {
+          // Recovery may run after terminal-tail pruning or process restart.
+          const archived = readRunTelemetryEntries("observations", {
+            limit: null, currentEpochOnly: false,
+            predicate: (entry) => Number(entry.job_id ?? entry.job) === Number(originalJobId)
+              && Number(_rowDetailObject(entry)?.agent_call_id) === Number(detail.agent_call_id),
+          });
+          archivedIdentities.set(scopeKey, new Set(archived.map(entry => {
+            const evidence = _rowDetailObject(entry);
+            return `${entry.observation_type ?? entry.type}|${evidence?.provider_call_id}`;
+          })));
+        }
+        if (archivedIdentities.get(scopeKey).has(`${summary.observation_type}|${detail.provider_call_id}`)) return;
+      }
+      recordObservation({
+        work_item_id: durableCall?.work_item_id ?? resolvedWorkItemId,
+        job_id: originalJobId,
+        attempt_id: originalAttemptId,
+        observation_type: summary.observation_type,
+        summary: summary.summary,
+        detail,
+      });
+    };
+    const db = getDb();
+    if (db.inTransaction) persist();
+    else db.transaction(persist).immediate();
   }
 }
 

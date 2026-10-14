@@ -105,6 +105,7 @@ export const MERGE_VERIFICATION_REVIEW_TYPE = "merge_verification_review";
 // with the merge-failure payload key; their pass/fail mean merge/send_back.
 export const MERGE_FAILURE_RECOVERY_REVIEW_TYPE = "merge_failure_recovery";
 export const MERGE_FAILURE_KINDS = Object.freeze({
+  DIRTY_TREE: "dirty_tree",
   INTEGRATION_TEST: "integration_test",
   CONFLICT: "conflict",
   RUNTIME_PATH: "runtime_path",
@@ -231,7 +232,7 @@ export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   shared_trunk_provenance: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance),
   [POST_MERGE_DB_TASK_REVIEW_TYPE]: freezeChoices(["run", "skip"]),
   [MERGE_VERIFICATION_REVIEW_TYPE]: freezeChoices(["pass", "fail"]),
-  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: freezeChoices(["merge", "commit", "waive_tests", "send_back"]),
+  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.merge_failure_recovery),
   [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: freezeChoices(["retry", "accept", "abandon"]),
   [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: freezeChoices(["wait", "rebuild", "abandon"]),
 });
@@ -371,7 +372,7 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
   },
   [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: {
     gate_kind: MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
-    allowed_actions: ["merge", "commit", "waive_tests", "send_back"],
+    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.merge_failure_recovery],
     allowed_source_states: ["succeeded"],
   },
   [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: {
@@ -678,6 +679,16 @@ export function humanInputChoicesForReviewType(reviewType) {
   return choices ? [...choices] : [];
 }
 
+// Creation, presentation and answer dispatch share this eligibility rule.
+// An explicit narrower offer (e.g. after the target moved) cannot regain a
+// waiver just because historical candidate evidence remains in the payload.
+export function mergeFailureRecoveryChoices({ integrationGate = null, allowWaive = null, choices = null } = {}) {
+  const canWaive = allowWaive !== false && !!integrationGate?.candidate_tree && !!integrationGate?.target_head
+    && (!Array.isArray(choices) || choices.length === 0 || choices.includes("waive_tests"));
+  return humanInputChoicesForReviewType(MERGE_FAILURE_RECOVERY_REVIEW_TYPE)
+    .filter((choice) => choice !== "waive_tests" || canWaive);
+}
+
 // A work-item disposition gate may offer fewer than its review type's
 // actions (a merge deferred on a canceled upstream cannot "wait"). Its
 // persisted choices narrow that closed contract; they never widen it. A
@@ -700,10 +711,11 @@ function narrowedReviewChoices(payload, reviewChoices) {
     && offered.every((action, index) => index === 0 || reviewChoices.indexOf(action) > reviewChoices.indexOf(offered[index - 1]))) {
     return offered;
   }
-  if (payload?.review_type === MERGE_FAILURE_RECOVERY_REVIEW_TYPE
-    && (!payload?.merge_failure_recovery?.integration_gate?.candidate_tree
-      || !payload?.merge_failure_recovery?.integration_gate?.target_head)) {
-    return reviewChoices.filter((choice) => choice !== "waive_tests");
+  if (reviewType === MERGE_FAILURE_RECOVERY_REVIEW_TYPE) {
+    return mergeFailureRecoveryChoices({
+      integrationGate: payload?.merge_failure_recovery?.integration_gate,
+      choices: offered,
+    });
   }
   if (!WORK_ITEM_DISPOSITION_REVIEW_TYPES.includes(reviewType)) return reviewChoices;
   const acceptUnavailable = reviewType === WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE

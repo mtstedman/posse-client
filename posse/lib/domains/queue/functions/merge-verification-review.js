@@ -47,6 +47,7 @@ import {
   MERGE_FAILURE_KINDS,
   MERGE_VERIFICATION_REVIEW_TYPE,
   humanInputChoicesForReviewType,
+  mergeFailureRecoveryChoices,
 } from "../../../catalog/human-input.js";
 import {
   BASELINE_TEST_DEBT_PAYLOAD_KEY,
@@ -464,13 +465,14 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
   failureKind = MERGE_FAILURE_KINDS.UNKNOWN,
   retryCount = 0,
   previousFailures = [],
+  dirtyFiles = [],
+  repairProvenance = null,
   allowWaive = null,
 } = {}) {
   const label = `WI#${workItem.id}${workItem.title ? ` "${String(workItem.title).slice(0, 80)}"` : ""}`;
   const detail = String(message || "Git could not merge the work-item branch").trim().slice(0, 1000);
-  const canWaive = allowWaive == null
-    ? !!integrationGate?.candidate_tree && !!integrationGate?.target_head
-    : !!allowWaive;
+  const choices = mergeFailureRecoveryChoices({ integrationGate, allowWaive });
+  const canWaive = choices.includes("waive_tests");
   const lineTail = (text) => {
     const value = String(text ?? "");
     return value.length > MERGE_GATE_PROMPT_LINE_CHARS ? `...${value.slice(-MERGE_GATE_PROMPT_LINE_CHARS)}` : value;
@@ -499,6 +501,7 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
     integrationGate ? (integrationGate.source === "job_test_command"
       ? "These checks were declared by development or repair jobs."
       : "These checks came from the repository test registry.") : null,
+    dirtyFiles.length ? `Uncommitted files: ${dirtyFiles.join(", ")}` : null,
     ...failedChecks,
     ...attribution,
   ].filter(Boolean).join(" ");
@@ -510,7 +513,7 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
     max_attempts: 1,
     payload_json: JSON.stringify({
       review_type: MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
-      choices: humanInputChoicesForReviewType(MERGE_FAILURE_RECOVERY_REVIEW_TYPE).filter((choice) => choice !== "waive_tests" || canWaive),
+      choices,
       questions: [question],
       prompt: question,
       context: [detail, ...attribution].join(" ").slice(0, 1000),
@@ -522,6 +525,8 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
         target_branch: targetBranch || null,
         target_head: targetHead || integrationGate?.target_head || null,
         failure_kind: failureKind,
+        dirty_files: dirtyFiles,
+        repair_provenance: repairProvenance,
         retry_count: retryCount,
         previous_failures: previousFailures.slice(-3),
         message: detail,

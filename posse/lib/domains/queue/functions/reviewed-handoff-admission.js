@@ -112,7 +112,9 @@ export function reviewedHandoffAdmission(job, scope, { order, workItemLocks, job
       .sort((a, b) => b.completed_at.localeCompare(a.completed_at));
     const receipt = receipts[0];
     if (!receipt) return wait(job, holder, row.path, REASONS.SOURCE);
-    const boundPaths = [...receipt.files, ...receipt.read_inputs].map((entry) => ({ path: normPath(entry.path), lock_kind: "file" }));
+    const selectedFiles = receipt.files.filter((file) => scope.files.includes(normPath(file.path))
+      && workItemLocks.some((lock) => lock.work_item_id === source.id && lock.lock_kind === "file" && lock.path === normPath(file.path)));
+    const boundPaths = [...selectedFiles, ...receipt.read_inputs].map((entry) => ({ path: normPath(entry.path), lock_kind: "file" }));
     for (const candidate of sourceJobs) {
       if (candidate.id === receipt.source_job_id || !["dev", "fix", "promote"].includes(candidate.job_type)) continue;
       const writerScope = finalReviewScope(parseJobPayload(candidate));
@@ -125,17 +127,17 @@ export function reviewedHandoffAdmission(job, scope, { order, workItemLocks, job
         return wait(job, holder, row.path, REASONS.SOURCE);
       }
     }
-    if (receipt.files.some((file) => file.object?.mode === "120000"
+    if (selectedFiles.some((file) => file.object?.mode === "120000"
         || isSequenceAllocationPath(file.path) || !canRelease(holder.work_item_id, file.path).ok)) return wait(job, holder, row.path, REASONS.SCOPE);
-    // Do not divide the reviewed change. The setup consumer can validate
-    // already-present files, but this initial producer acquires its full scope.
-    if (receipt.files.some((file) => !scope.files.includes(normPath(file.path)))) return wait(job, holder, row.path, REASONS.SCOPE);
+    // Ownership is per-file. Preserve the complete review as evidence, while
+    // importing only authorized files. All declared read inputs remain freshness
+    // requirements: older receipts do not record per-output read dependencies.
     for (const input of receipt.read_inputs) {
       if (sourceJobs.some((candidate) => !TERMINAL_JOB_STATUSES.includes(candidate.status)
           && finalReviewScope(parseJobPayload(candidate)).files.has(input.path))) return wait(job, holder, row.path, REASONS.INPUT);
     }
     const required = [];
-    for (const file of receipt.files) {
+    for (const file of selectedFiles) {
       const provenance = collectCrossWiPathProvenance(source.id, file.path);
       if (provenance.complete === false) return wait(job, holder, row.path, REASONS.INCOMPLETE);
       if (provenance.outstanding.length) return wait(job, holder, row.path, "outstanding_content_claim");
@@ -145,11 +147,11 @@ export function reviewedHandoffAdmission(job, scope, { order, workItemLocks, job
       }
     }
     if (required.some((dep) => !dep.source_generation)) return wait(job, holder, row.path, REASONS.INCOMPLETE);
-    transfers.set(receipt.receipt_id, { ...receipt, path: receipt.files[0].path,
+    transfers.set(receipt.receipt_id, { ...receipt, review_receipt: receipt, files: selectedFiles, path: selectedFiles[0].path,
       receiver_job_id: job.id, receiver_work_item_id: job.work_item_id,
       receiver_generation: workItemBranchGeneration(receiver), required_provenance: required,
       state: "reserved", donor_lock_ids: workItemLocks.filter((lock) => lock.work_item_id === source.id
-        && receipt.files.some((file) => normPath(file.path) === lock.path)).map((lock) => lock.id) });
+        && selectedFiles.some((file) => normPath(file.path) === lock.path)).map((lock) => lock.id) });
   }
   const proof = reviewedDependencyProof(job.work_item_id, [...transfers.values()].flatMap((entry) =>
     [entry.source_work_item_id, ...entry.required_provenance.map((dep) => dep.source_work_item_id)]));
@@ -178,9 +180,13 @@ export function reserveReviewedHandoffs(job, transfers, leaseToken) {
   const reserved = transfers.map((proposal) => ({ ...proposal, transfer_id: randomUUID(), reserved_at: now(), lease_token: leaseToken }));
   for (const entry of reserved) {
     for (const file of entry.files) {
-      for (const source of [{ ...entry, source_work_item_id: entry.source_work_item_id }, ...entry.required_provenance]) {
+      for (const source of [{ ...entry, source_work_item_id: entry.source_work_item_id }, ...entry.required_provenance.filter((dep) => !dep.path || dep.path === file.path)]) {
         const result = addCrossWiMergeDependency(job.work_item_id, source.source_work_item_id, {
-          ...source, version: entry.version, transfer_id: entry.transfer_id, path: file.path, via_job_id: job.id,
+          ...source, version: entry.version, transfer_id: entry.transfer_id,
+          // The downstream reservation owns rollback; source proof continues
+          // to name the upstream subset accepted by its source merge.
+          source_transfer_id: source.source_transfer_id || source.transfer_id || entry.transfer_id,
+          path: file.path, via_job_id: job.id,
         });
         if (!result.ok) throw new Error(`Reviewed handoff dependency rejected: ${result.reason}`);
       }

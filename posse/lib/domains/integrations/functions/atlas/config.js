@@ -1,3 +1,4 @@
+import { normalizeScipLanguages } from "../../../atlas/functions/v2/scip/languages.js";
 import { settingsChangeNotifier } from "../../../settings/classes/SettingsChangeNotifier.js";
 import { getSetting, getSettingsDataVersion } from "../../../queue/functions/index.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
@@ -215,10 +216,10 @@ export function getAtlasModeState(rawMode, {
   };
 }
 
-export function readDbSetting(key) {
+export function readDbSetting(key, preserveEmpty = false) {
   try {
     const value = getSetting(key);
-    return value == null || String(value).trim() === "" ? null : String(value).trim();
+    return value == null || (!preserveEmpty && String(value).trim() === "") ? null : String(value).trim();
   } catch {
     return null;
   }
@@ -605,7 +606,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const dbAtlasV2Mode = useLiveSettings ? readDbSetting("atlas_v2") : null;
   const dbUsageTelemetry = useLiveSettings ? readDbSetting("atlas_usage_telemetry") : null;
   const dbScipMode = useLiveSettings ? readDbSetting("atlas_scip_mode") : null;
-  const dbScipLanguages = useLiveSettings ? readDbSetting("atlas_scip_languages") : null;
+  const dbScipLanguages = useLiveSettings ? readDbSetting("atlas_scip_languages", true) : null;
   const dbScipIndexCommand = useLiveSettings ? readDbSetting("atlas_scip_index_command") : null;
   const dbScipIndexArgs = useLiveSettings ? readDbSetting("atlas_scip_index_args") : null;
   const dbScipIndexTimeoutMs = useLiveSettings ? readDbSetting("atlas_scip_index_timeout_ms") : null;
@@ -656,11 +657,9 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
   const scipMode = rawScipMode === "consume"
     ? "on"
     : (VALID_ATLAS_SCIP_MODES.has(rawScipMode) ? rawScipMode : "off");
-  const rawScipLanguageList = parseList(firstProvided(explicitValue("scipLanguages", "atlas_scip_languages", "POSSE_ATLAS_SCIP_LANGUAGES"), dbScipLanguages, ""))
-    .map((value) => value.toLowerCase());
-  const scipLanguages = rawScipLanguageList
-    .filter((value) => VALID_ATLAS_SCIP_LANGUAGES.has(value))
-    .filter((value, index) => rawScipLanguageList.indexOf(value) === index);
+  const scipLanguages = normalizeScipLanguages(
+    explicitValue("scipLanguages", "atlas_scip_languages", "POSSE_ATLAS_SCIP_LANGUAGES") ?? dbScipLanguages,
+  );
   const scipIndexCommand = String(firstProvided(explicitValue("scipIndexCommand", "atlas_scip_index_command", "POSSE_ATLAS_SCIP_INDEX_COMMAND"), dbScipIndexCommand, "")).trim() || null;
   const scipIndexArgs = parseArgString(firstProvided(explicitValue("scipIndexArgs", "atlas_scip_index_args", "POSSE_ATLAS_SCIP_INDEX_ARGS"), dbScipIndexArgs, ""));
   const scipIndexTimeoutMs = parseIntOrNull(firstProvided(explicitValue("scipIndexTimeoutMs", "atlas_scip_index_timeout_ms", "POSSE_ATLAS_SCIP_INDEX_TIMEOUT_MS"), dbScipIndexTimeoutMs)) ?? 120000;
@@ -809,7 +808,7 @@ export function getAtlasIntegrationConfig(env = null, { repoKey = null } = {}) {
     atlasV2Mode,
     usageTelemetryEnabled,
     scipMode,
-    scipLanguages: scipLanguages.length > 0 ? scipLanguages : [...ATLAS_SCIP_DEFAULT_LANGUAGE_VALUES],
+    scipLanguages,
     scipIndexCommand,
     scipIndexArgs,
     scipIndexTimeoutMs,

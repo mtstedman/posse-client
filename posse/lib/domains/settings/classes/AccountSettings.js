@@ -227,7 +227,7 @@ export class AccountSettings {
       .prepare(`SELECT setting_value FROM account_settings WHERE setting_key = ?`)
       .get(String(key));
     const value = row?.setting_value;
-    return value == null || value === "" ? null : String(value);
+    return value == null || (value === "" && !getCatalogEntry(String(key))?.preserveEmpty) ? null : String(value);
   }
 
   get(key) {
@@ -243,7 +243,7 @@ export class AccountSettings {
       return null;
     }
     const value = row.setting_value;
-    if (value == null || value === "") {
+    if (value == null || (value === "" && !getCatalogEntry(String(key))?.preserveEmpty)) {
       if (!db.inTransaction) this._cache.set(cacheKey, null);
       return null;
     }
@@ -263,7 +263,7 @@ export class AccountSettings {
     const validated = validateCatalogSettingValue(normalizedKey, value);
     if (!validated.ok) throw new Error(validated.error);
     const normalizedValue = validated.value;
-    const isEmpty = normalizedValue == null || String(normalizedValue).trim() === "";
+    const isEmpty = value == null || (String(normalizedValue).trim() === "" && !getCatalogEntry(normalizedKey)?.preserveEmpty);
     let cacheValue = null;
 
     if (isEmpty) {
@@ -338,7 +338,7 @@ export class AccountSettings {
       return null;
     }
     const value = row.setting_value;
-    if (value == null || value === "") {
+    if (value == null || (value === "" && !getCatalogEntry(String(key))?.preserveEmpty)) {
       if (!db.inTransaction) this._cache.set(cacheKey, null);
       return null;
     }
@@ -356,7 +356,7 @@ export class AccountSettings {
     const validated = validateCatalogSettingValue(normalizedKey, value);
     if (!validated.ok) throw new Error(validated.error);
     const normalizedValue = validated.value;
-    const isEmpty = normalizedValue == null || String(normalizedValue).trim() === "";
+    const isEmpty = value == null || (String(normalizedValue).trim() === "" && !getCatalogEntry(normalizedKey)?.preserveEmpty);
 
     if (isEmpty) {
       db.prepare(`DELETE FROM repo_settings WHERE repo_path = ? AND setting_key = ?`).run(normalizedRepoPath, normalizedKey);
@@ -395,7 +395,7 @@ export class AccountSettings {
         const validated = validateCatalogSettingValue(normalizedKey, value);
         if (!validated.ok) throw new Error(validated.error);
         const normalizedValue = validated.value;
-        const isEmpty = normalizedValue == null || String(normalizedValue).trim() === "";
+        const isEmpty = value == null || (String(normalizedValue).trim() === "" && !getCatalogEntry(normalizedKey)?.preserveEmpty);
         if (isEmpty) {
           const catalog = getCatalogEntry(normalizedKey);
           if (catalog) {

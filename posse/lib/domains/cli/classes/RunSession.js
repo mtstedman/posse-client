@@ -834,6 +834,7 @@ export class RunSession {
 
   // Required gate: inspect, run the doctor repair engine when unhealthy, then
   // verify. Await after Git cleanup and before scheduler/ATLAS startup.
+  const dependencyRepairProvenance = { phase: "startup dependency repair", attempted: false, entries: [] };
   const guardBootDependencies = async () => {
     if (frozenResearchFixture) {
       verifyFrozenResearchFixture({ cwd: PROJECT_DIR });
@@ -872,7 +873,14 @@ export class RunSession {
       const result = await ensureBootDependencyGuard({
         signal: bootAbortController.signal,
         check: () => runBootDependencySync({ ...input, dryRun: true }, workerOptions),
-        repair: () => runBootDependencySync({ ...input, doctor: true, dryRun: false }, workerOptions),
+        repair: async () => {
+          dependencyRepairProvenance.attempted = true;
+          const repaired = await runBootDependencySync({ ...input, doctor: true, dryRun: false }, workerOptions);
+          dependencyRepairProvenance.entries = ["node", "python", "composer"].flatMap(manager =>
+            (repaired?.[manager] || []).map(entry => ({ manager, root: entry.root, action: entry.action,
+              status: entry.status, manifest_hash: entry.manifest_hash || null })));
+          return repaired;
+        },
         onRepair: () => updateBootStep("dependencies", {
           section: "workspace", status: "running", detail: "running posse doctor repair; waiting for a healthy environment", showDetail: true, force: true,
         }),
@@ -1179,6 +1187,33 @@ export class RunSession {
   }
 
   await guardBootDependencies();
+  // Repair can create source-controlled lockfiles after the initial guard.
+  // Preserve them and stop before scheduling; committing automatically could
+  // bless a lock resolved against the old target manifest.
+  if (typeof guardStartupDirtyTree === "function" && !frozenResearchFixture) {
+    let repairedTree;
+    try {
+      repairedTree = await guardStartupDirtyTree({ reason: "dependency repair", policy: "block" });
+    } catch (err) {
+      updateBootStep("startup work tree", {
+        section: "workspace",
+        status: "failed",
+        detail: err?.message || String(err),
+        showDetail: true,
+        force: true,
+      });
+      try { stopBootMonitor({ final: true }); } catch { /* observational */ }
+      throw err;
+    }
+    if (repairedTree?.blocked) {
+      const result = { ...repairedTree, repairProvenance: dependencyRepairProvenance };
+      try { stopBootMonitor({ final: true }); } catch { /* observational */ }
+      recordStartupDirtyTreeBlock(result, { reason: "dependency repair", logEvent, log });
+      console.log(`\n  ${C.yellow}Dependency repair left source changes. Review and reconcile these files with the intended manifest before restarting: ${(result.dirtyLines || []).join(", ")}${C.reset}\n`);
+      process.exitCode = 2;
+      return result;
+    }
+  }
 
   for (const wiId of wiIds) {
     const wi = getWorkItem(wiId);

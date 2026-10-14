@@ -1,9 +1,10 @@
+import { gateQuestionChoiceEntries, validQuestionChoiceEntries } from "../../../catalog/question-choices.js";
 import crypto from "node:crypto";
 import path from "node:path";
 
 import { WORK_ITEM_BOUNDS, WORK_ITEM_FEED_EVENT_PROTOCOL } from "../../../catalog/bridge.js";
 import { FAILED_JOB_STATUSES, OPEN_HUMAN_GATE_JOB_STATUSES, PENDING_HUMAN_GATE_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
-import { LEGACY_REVIEW_CHOICE_IDS, validReviewChoiceIDs } from "../../../catalog/gate-actions.js";
+import { LEGACY_REVIEW_CHOICE_IDS } from "../../../catalog/gate-actions.js";
 import { questionKindForReviewType } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
@@ -166,25 +167,7 @@ function storedChoiceRecord(entry) {
 }
 
 function validStoredChoiceEntries(kind, entries) {
-  if (!Array.isArray(entries) || entries.length === 0 || entries.length > 32) return false;
-  const ids = entries.map(choiceIdFromEntry);
-  if (ids.some((id) => !id) || new Set(ids).size !== ids.length) return false;
-  if (kind === "one_shot_file_scope") {
-    if (ids.length < 3 || ids.at(-2) !== "plan" || ids.at(-1) !== "cancel") return false;
-    return ids.slice(0, -2).every((id) => /^candidate:sha256:[0-9a-f]{64}$/.test(id));
-  }
-  const allowed = QUESTION_CHOICE_IDS[kind] || [];
-  if (Object.hasOwn(LEGACY_REVIEW_CHOICE_IDS, kind)) return validReviewChoiceIDs(kind, ids, allowed);
-  if (["dead_letter_recovery", "work_item_failure_disposition", "cross_wi_upstream_disposition"].includes(kind)) {
-    let previous = -1;
-    return ids.every((id) => {
-      const index = allowed.indexOf(id);
-      if (index <= previous) return false;
-      previous = index;
-      return true;
-    });
-  }
-  return ids.length === allowed.length && ids.every((id, index) => id === allowed[index]);
+  return validQuestionChoiceEntries(kind, entries);
 }
 
 function storedQuestionKind(payload) {
@@ -208,7 +191,7 @@ function storedQuestionChoices(kind, payload) {
   if (kind === "legacy_unstructured") return [];
   const entries = kind === "one_shot_file_scope"
     ? payload?.selector?.options
-    : payload?.choices;
+    : gateQuestionChoiceEntries(kind, payload);
   if ((!Array.isArray(entries) || entries.length === 0) && LIVE_OWNER_DELIVERY_QUESTION_KINDS.has(kind)) {
     return (QUESTION_CHOICE_IDS[kind] || []).map(storedChoiceRecord).filter(Boolean);
   }

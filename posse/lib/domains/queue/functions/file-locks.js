@@ -1627,6 +1627,7 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
       actor_type: EVENT_ACTORS.SCHEDULER,
       actor_id: ownerId,
       message: `Leased until ${expiresAt}`,
+      ...(job._scheduling ? { event_json: JSON.stringify({ scheduling: job._scheduling }) } : {}),
     });
     if (needsWriteLocks && hasScope) {
       logEvent({

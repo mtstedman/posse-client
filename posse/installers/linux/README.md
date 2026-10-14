@@ -219,3 +219,8 @@ installation completed; it does not mean the runtime is ready.
 | `invalid posse_key` with a known valid key | Check host clock synchronization as well as key status; containers share the host clock |
 | Native addon ABI error | Rerun installer with `--force`, or `posse doctor` |
 | Boot reports dependency repair failure | Read the doctor failure, fix the requirement, then retry; work does not start while the dependency guard is failing |
+
+The default indexing languages are TypeScript/JavaScript and Python; PHP is
+optional. Accepting defaults saves that selection, including on an existing
+account. Use `--scip-languages none` for no optional language toolchains. With
+`--skip-settings`, provisioning uses the saved account language selection.

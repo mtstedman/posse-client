@@ -15,7 +15,7 @@ function errorPayload(err) {
 async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
   const { setRuntimePathOverrides } = await import("../../runtime/functions/paths.js");
   setRuntimePathOverrides({ projectDir, dbPath });
-  const { listWorkItems, listJobsByWorkItem } = await import("../../queue/functions/index.js");
+  const { listWorkItems, listJobsByWorkItem, getHumanGate } = await import("../../queue/functions/index.js");
   const { getArtifacts } = await import("../../queue/functions/artifacts.js");
   const { parseJobPayload } = await import("../../queue/functions/payload.js");
   const { BACKGROUND_JOB_TYPES } = await import("../../../catalog/job.js");
@@ -62,6 +62,10 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
           handoff.push(`\u2192 assessor: ${job.assessor_verdict}`);
         }
       } else if (job.job_type === "human_input") {
+        const gate = getHumanGate(job.id);
+        if (gate?.gate_state === "open" && gate.resolution_error) {
+          handoff.push(`Answer not applied: ${gate.resolution_error}`);
+        }
         const answers = getArtifacts(job.id, "response");
         if (answers.length > 0) {
           const answer = (answers[answers.length - 1].content_long || "").split("\n")[0].slice(0, 60);

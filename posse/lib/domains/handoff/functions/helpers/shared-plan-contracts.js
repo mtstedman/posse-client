@@ -188,6 +188,7 @@ export function sharedPlanContractAdditions(tasks, rawContracts) {
     const selected = task.refs.map((ref) => contracts.get(ref));
     const kept = selected.filter((contract) => !degraded.has(contract.id));
     return [index, {
+      dependsOn: kept.filter((contract) => contract.ownerTaskId !== task.id).map((contract) => contract.ownerTaskId),
       constraints: selected.flatMap((contract) => (degraded.has(contract.id)
         ? contract.declarations
         : [

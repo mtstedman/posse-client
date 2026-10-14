@@ -12,6 +12,7 @@ import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider } from "../
 import {
   createOperatorNudge,
   getHumanGate as getHumanGateContract,
+  noteHumanGateAnswerNotApplied,
   requeueWaitingHumanInputJobs as requeueWaitingHumanInputJobsFromStore,
 } from "../../queue/functions/index.js";
 import { answerWorkItemQuestionChoice as answerQuestionChoice } from "../../queue/functions/interaction-contract.js";
@@ -191,8 +192,8 @@ export class RunDisplayActions {
     this.liveReviewPromise = null;
     this.humanGatePrompts = new Map();
     this.humanGatePromptSignatures = new Map();
-    // A rejected/invalid prompt must not recursively reopen on every scheduler
-    // snapshot. The signature is cleared by an explicit Answer action, a gate
+    // A broken renderer must not recursively reopen on every scheduler
+    // snapshot; rejected answers remain actionable. The signature is cleared by an explicit Answer action, a gate
     // generation change, or the bounded resurface policy incrementing its
     // durable counter.
     this.humanGatePromptSuppressions = new Map();
@@ -307,6 +308,18 @@ export class RunDisplayActions {
     return gate.status === "queued";
   }
 
+  noteRejectedGateAnswer(gate, reason) {
+    try { noteHumanGateAnswerNotApplied(gate.id, reason); } catch { /* diagnostics only */ }
+    this.logEvent?.({
+      work_item_id: gate.work_item_id, job_id: gate.id,
+      event_type: EVENT_TYPES.JOB_HUMAN_ANSWER_NOT_APPLIED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `Answer to gate #${gate.id} was not applied: ${reason}`,
+      event_json: JSON.stringify({ reason, source: "tui" }),
+    });
+    this.refreshDisplaySnapshotsForQueue?.();
+  }
+
   surfaceActionableHumanGates(activeJobs = [], { authoritative = true, explicit = false } = {}) {
     if (!this.display?.askQuestions) return [];
     const candidates = (Array.isArray(activeJobs) ? activeJobs : [])
@@ -351,8 +364,10 @@ export class RunDisplayActions {
       const questions = payloadQuestions.length > 0
         ? [payloadQuestions.join("\n\n")]
         : [String(payload.prompt || gate.title || "Human input requested")];
-      const context = humanGateContext(workItem, gate, payload);
       const gateContract = this.getHumanGate?.(gate.id);
+      const context = [humanGateContext(workItem, gate, payload),
+        gateContract?.resolution_error ? `Previous answer was not applied: ${gateContract.resolution_error}` : null,
+      ].filter(Boolean).join("\n\n");
       const generation = String(gateContract?.generation || 1);
       const resurfaceCount = Math.max(
         0,
@@ -399,6 +414,7 @@ export class RunDisplayActions {
       // Enter the promise chain before asking the display so a synchronous
       // renderer/input failure follows the same bounded suppression path as
       // an asynchronously rejected prompt.
+      let answerSubmitted = false;
       const prompt = Promise.resolve().then(() => this.display.askQuestions(
         gate.id,
         questions,
@@ -427,13 +443,15 @@ export class RunDisplayActions {
           },
         },
       )).then(async (answers) => {
+        answerSubmitted = true;
         const answer = firstPromptAnswer(answers);
         const action = choices.find((choice) => choice === answer)
           || choices.find((choice) => choice.toLowerCase() === answer.toLowerCase());
         const freshGate = this.getJob?.(gate.id);
         if (!freshGate || freshGate.status !== "waiting_on_human") return null;
         if (!action) {
-          this.humanGatePromptSuppressions.set(gate.id, promptSignature);
+          this.noteRejectedGateAnswer(gate, `Choose ${choices.join(" or ")}`);
+          this.humanGatePromptSuppressions.delete(gate.id);
           this.display.addEvent?.(`${this.C.yellow}Gate #${gate.id} was not resolved: choose ${choices.join(" or ")}. It remains parked; press Answer to retry.${this.C.reset}`);
           return { ok: false, reason: "invalid_human_gate_answer" };
         }
@@ -453,7 +471,8 @@ export class RunDisplayActions {
         const accepted = result?.outcome === "accepted" || result?.ok === true;
         if (!accepted) {
           if (this.getJob?.(gate.id)?.status === "waiting_on_human") {
-            this.humanGatePromptSuppressions.set(gate.id, promptSignature);
+            this.noteRejectedGateAnswer(gate, result?.safe_reason || result?.reason || result?.outcome || "Answer was not applied");
+            this.humanGatePromptSuppressions.delete(gate.id);
           }
           this.display.addEvent?.(`${this.C.yellow}Gate #${gate.id} could not be resolved: ${result?.safe_reason || result?.reason || result?.outcome || "unknown error"}. It remains parked; press Answer to retry.${this.C.reset}`);
           return result;
@@ -467,7 +486,9 @@ export class RunDisplayActions {
         const message = String(err?.message || err || "");
         if (!/Prompt withdrawn|Display aborted/i.test(message)) {
           if (this.getJob?.(gate.id)?.status === "waiting_on_human") {
-            this.humanGatePromptSuppressions.set(gate.id, promptSignature);
+            this.noteRejectedGateAnswer(gate, message);
+            if (answerSubmitted) this.humanGatePromptSuppressions.delete(gate.id);
+            else this.humanGatePromptSuppressions.set(gate.id, promptSignature);
           }
           this.display.addEvent?.(`${this.C.red}Gate #${gate.id} prompt failed: ${message}${this.C.reset}`);
         }

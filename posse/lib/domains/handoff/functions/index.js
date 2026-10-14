@@ -264,6 +264,9 @@ export function applyFixScopeHandoffGuard(packet) {
   if (mode === "off") return [];
   const rawPayload = packet._raw_payload || {};
   if (!packet._raw_payload) packet._raw_payload = rawPayload;
+  // Coordinated contract repairs already split authority between producer and
+  // consumer. References to the other party are evidence, never new grants.
+  if (rawPayload._contract_owner_repair || rawPayload._contract_owner_repair_request || rawPayload._contract_consumer_repair) return [];
   const instructionText = [
     rawPayload.fix_instructions,
     rawPayload.instructions,

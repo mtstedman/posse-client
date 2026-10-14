@@ -130,7 +130,13 @@ export function plannerCompatibilityTasks(packet) {
         .filter((key) => handoff.report[key] != null)
         .map((key) => [key, handoff.report[key]]),
     );
+    const sharedContracts = handoff.report.constraints.flatMap((line) => {
+      const match = /^\[shared contract ([a-z][a-z0-9-]*)\] owner task: (.+)$/.exec(line);
+      return match ? [{ id: match[1], owner_task_id: match[2] }] : [];
+    });
     const task = {
+        _plan_task_id: handoff.id,
+        ...(sharedContracts.length ? { _shared_contracts: sharedContracts } : {}),
         title: handoff.intent,
         task_spec: taskSpec,
         success_criteria: handoff.report.success_criteria.length ? handoff.report.success_criteria : [handoff.intent],

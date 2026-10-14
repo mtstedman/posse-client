@@ -1,3 +1,4 @@
+import { gateQuestionChoiceEntries, validQuestionChoiceEntries } from "../../../catalog/question-choices.js";
 import { CHOICE_COPY } from "../../../catalog/work-item-interaction-copy.js";
 import { ACTION_METADATA_KEY, QUESTION_CAPABILITY, MAX_QUESTIONS, MAX_NUDGES, MAX_FEEDBACK, MAX_PROMPT_CHARS, MAX_CONTEXT_CHARS, MAX_FEEDBACK_SUMMARY_CHARS, MAX_FEEDBACK_DETAIL_CHARS, MAX_NUDGE_BODY_CHARS, MAX_ACTION_ID_BYTES, DIRECT_ACTION_RESERVATION_STALE_MS, LIVE_OWNER_DELIVERY_HANDLERS, LIVE_OWNER_DELIVERY_HANDLERS_SQL, FEEDBACK_PHASES, FEEDBACK_STATUSES, LEGACY_PIPELINE_HEAD_REVIEW_TYPES, HANDLER_BY_KIND } from "../../../catalog/work-item-interactions.js";
 import { JOB_TYPE_ROLE_REGISTRY } from "../../../catalog/provider.js";
@@ -19,7 +20,7 @@ import {
   questionKindForReviewType,
 } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
-import { LEGACY_REVIEW_CHOICE_IDS, legacyReviewChoiceAction, validReviewChoiceIDs } from "../../../catalog/gate-actions.js";
+import { LEGACY_REVIEW_CHOICE_IDS, legacyReviewChoiceAction } from "../../../catalog/gate-actions.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { scrubSecrets } from "../../../shared/telemetry/classes/logging/secret-scrub.js";
 import { now, runImmediateTransaction } from "./common.js";
@@ -317,11 +318,6 @@ export function typedKindForGate(payload) {
   return reviewKind || "legacy_unstructured";
 }
 
-function normalizedCandidateId(value) {
-  const id = String(value ?? "").trim();
-  return /^candidate:sha256:[0-9a-f]{64}$/.test(id) ? id : null;
-}
-
 function choiceIdFromEntry(entry) {
   if (typeof entry === "string") return entry;
   if (!entry || typeof entry !== "object") return "";
@@ -329,25 +325,7 @@ function choiceIdFromEntry(entry) {
 }
 
 function validChoiceEntries(kind, entries) {
-  if (!Array.isArray(entries) || entries.length === 0) return false;
-  const ids = entries.map(choiceIdFromEntry);
-  if (ids.some((id) => !id) || new Set(ids).size !== ids.length) return false;
-  if (kind === "one_shot_file_scope") {
-    if (ids.length < 3 || ids.at(-2) !== "plan" || ids.at(-1) !== "cancel") return false;
-    return ids.slice(0, -2).every((id) => normalizedCandidateId(id));
-  }
-  const allowed = WORK_ITEM_QUESTION_CHOICE_IDS[kind] || [];
-  if (Object.hasOwn(LEGACY_REVIEW_CHOICE_IDS, kind)) return validReviewChoiceIDs(kind, ids, allowed);
-  if (["dead_letter_recovery", "work_item_failure_disposition", "cross_wi_upstream_disposition"].includes(kind)) {
-    let previous = -1;
-    return ids.every((id) => {
-      const index = allowed.indexOf(id);
-      if (index <= previous) return false;
-      previous = index;
-      return true;
-    });
-  }
-  return ids.length === allowed.length && ids.every((id, index) => id === allowed[index]);
+  return validQuestionChoiceEntries(kind, entries);
 }
 
 function gateChoiceRecords(kind, payload) {
@@ -358,7 +336,7 @@ function gateChoiceRecords(kind, payload) {
     return options.map((option) => choiceRecord(choiceIdFromEntry(option), option));
   }
 
-  const explicit = Array.isArray(payload?.choices) ? payload.choices : null;
+  const explicit = gateQuestionChoiceEntries(kind, payload);
   if (!explicit || explicit.length === 0) {
     return liveOwnerDeliveryHandler(HANDLER_BY_KIND.get(kind))
       ? (WORK_ITEM_QUESTION_CHOICE_IDS[kind] || []).map((choiceId) => choiceRecord(choiceId))

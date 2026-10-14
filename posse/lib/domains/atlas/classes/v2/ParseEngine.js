@@ -26,7 +26,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
-import { ViewBuilder, viewFingerprintForOptions } from "./ViewBuilder.js";
+import { ViewBuilder, viewFingerprintForOptions, prepareCanonicalViewForReplacement } from "./ViewBuilder.js";
 import { View } from "./View.js";
 import { OrderedDocumentIntake } from "./OrderedDocumentIntake.js";
 import {
@@ -346,6 +346,7 @@ function publishClonedView(builder, sourcePath, destPath, meta = null) {
     if (sidecars.length > 0) {
       throw new Error(`staged view clone retained SQLite sidecars: ${sidecars.join(", ")}`);
     }
+    if (fs.existsSync(destPath)) prepareCanonicalViewForReplacement(destPath);
     fs.renameSync(stagedPath, destPath);
   } catch (error) {
     try { removeSqliteFile(stagedPath); } catch { /* preserve clone failure */ }
@@ -413,6 +414,7 @@ async function publishForkedBaselineView(builder, ledger, {
     if (sidecars.length > 0) {
       throw new Error(`staged view clone retained SQLite sidecars: ${sidecars.join(", ")}`);
     }
+    if (fs.existsSync(outViewPath)) prepareCanonicalViewForReplacement(outViewPath);
     fs.renameSync(stagedPath, outViewPath);
     published = true;
     return { seeded: true, parent_branch: parentBranch, parent_seq: parentSeq };
@@ -1590,10 +1592,8 @@ export class ParseEngine {
           return { from: "none", viewPath: dest };
         }
       }
-      // The worktree cache is disposable. If it exists but cannot pass
-      // View.meta() or is stale for this branch, drop it so the normal
-      // warm/main/ledger fallback path can produce a usable view.
-      removeSqliteFile(dest);
+      // Keep the previous generation readable throughout refresh. Every
+      // fallback stages a closed SQLite snapshot before atomic publication.
     }
 
     if (fs.existsSync(warmed)) {
@@ -1669,7 +1669,7 @@ export class ParseEngine {
       branch: targetBranch,
       atSeq,
       outPath: dest,
-      options: this.#viewBuildOptions(),
+      options: { ...this.#viewBuildOptions(), replaceExisting: true },
     });
     return { from: "ledger-build", viewPath: dest };
   }
