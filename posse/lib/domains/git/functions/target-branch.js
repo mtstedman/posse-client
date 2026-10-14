@@ -166,11 +166,9 @@ export function resolveTargetBranchForAdmin(projectDir) {
  * Resolve the merge target branch from the persisted target_branch setting,
  * known work-item branches, and native Git branch state.
  *
- * The sync form has exactly two legitimate roots (audited 2026-07): the
- * orchestrator-app `getTargetBranch` callback (createGitWorkflowHelpers
- * requires a SYNCHRONOUS getTargetBranch — see workflow-context.js) and
- * `deleteBranchPreservingTip`'s default param (sync CLI cleanup lane). Every
- * other caller must use resolveTargetBranchAsync.
+ * This compatibility form requires an already-live native pulse and cannot
+ * await a refresh. Main-loop native callers must use resolveTargetBranchAsync;
+ * synchronous operator callbacks use resolveTargetBranchForAdmin.
  */
 export function resolveTargetBranch(projectDir, nativeParity = {}) {
   return normalizeResolvedTargetBranch(

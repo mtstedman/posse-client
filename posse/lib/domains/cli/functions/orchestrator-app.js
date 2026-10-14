@@ -117,7 +117,7 @@ import { closePromptLog } from "../../../shared/telemetry/functions/logging/prom
 import { loadRemotePromptBundle } from "../../remote/functions/prompt-bundle.js";
 import "../../git/functions/policy.js";
 import { adminDeleteBranchPreservingTip, adminGitExec, adminGitExecAsync, adminPreserveDirtyWorktreeSnapshot, adminWorktreePath, adminWorktreeRoot, findAdminLegacyWorktree } from "../../git/functions/admin-git.js";
-import { resolveTargetBranch, resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
+import { resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
 import { mergeFailureDiagnostics } from "../../git/functions/merge-failure-diagnostics.js";
 import { hasExplicitOneshotIntent, normalizeIntakeHints, rebaseIntakeHintsForMode } from "../../intake/functions/hints.js";
 import "../../planning/functions/suggestions.js";
@@ -221,13 +221,12 @@ let _pairCommandModulePromise = null;
 let _concurrency = null;
 let _stallTimeout = undefined;
 
-// Explicit merge target branch. resolveTargetBranch() is shared with worker
-// worktree/rebase code, so settings and auto-detect stay in one order for the
-// whole run. Deliberately SYNC: this is passed as the getTargetBranch callback
-// into createGitWorkflowHelpers, whose contract rejects promise-returning
-// callbacks (workflow-context.js currentTargetBranch).
+// This synchronous CLI callback reads local branch metadata through the
+// operator adapter. A native pulse warmed at startup can expire while the
+// operator waits; sync native dispatch cannot await its refresh. Actual native
+// workflow operations still establish their own route authorization.
 function getTargetBranch() {
-  return resolveTargetBranch(PROJECT_DIR);
+  return resolveTargetBranchForAdmin(PROJECT_DIR);
 }
 
 function getAdminTargetBranch() {
