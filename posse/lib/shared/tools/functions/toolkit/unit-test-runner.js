@@ -66,6 +66,9 @@ function nodeBootstrapFailure(invocation, output) {
   if (invocation.runner !== "node_test"
     && !(invocation.runner === "repository_script" && invocation.executable === process.execPath)) return null;
   if (missingNodeTestDependency(output)) return "test_dependency_unavailable";
+  // Vitest imports under node:test fail before collecting any product tests.
+  // Keep that runner/bootstrap mismatch out of product-failure remediation.
+  if (/Vitest failed to access its internal state/u.test(output)) return "test_loader_resolution_mismatch";
   if (/browserType\.launch: Executable doesn't exist|browserType\.launch:[^\n]*Host system is missing dependencies/u.test(output)) {
     return "test_browser_unavailable";
   }

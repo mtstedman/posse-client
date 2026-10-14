@@ -1,3 +1,4 @@
+import { completeReviewedJob } from "../../functions/helpers/complete-reviewed-job.js";
 import { DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js";
 import { parkDirtyWorktreeRecovery } from "../../functions/helpers/dirty-worktree-recovery.js";
 import crypto from "crypto";
@@ -1627,6 +1628,21 @@ export async function handlePostExecutionForWorker({
             job.payload_json = JSON.stringify(payload);
             updateJobPayload(job.id, job.payload_json);
           }
+        }
+
+        // A durable final review outranks legacy output/no-op heuristics. Its
+        // compatibility receipt is deliberately deterministic, including when
+        // a repair changed files or a retry verified the existing end state.
+        if (await completeReviewedJob(this, {
+          job, leaseToken, wtPath, attempt, committedHash, commitBaseHash, filesCommitted,
+          filesCommittedUnknown, verifiedNoChange, startTime,
+          onSucceeded: () => {
+            if (hasPendingFileRequests()) this._spawnFileRequestFollowUp(job, pendingFileRequests, attempt.id);
+          },
+        })) {
+          if (getJob(job.id)?.status === "succeeded") this._finalizeSessionRecycleForJob(job, attempt);
+          else this._releasePendingSessionRecycleForJob(job.id);
+          return;
         }
 
         // -- Idempotency check --

@@ -3668,8 +3668,8 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     const constraints = report.constraints == null ? [] : stringArray(
       report.constraints,
       `handoffs[${index}].report.constraints`,
-      reportListMaxItems,
-      reportListMaxChars,
+      profile === AGENT_HANDOFF_PROFILES.PLANNER_PLAN ? AGENT_HANDOFF_LIMITS.maxCallBytes : reportListMaxItems,
+      profile === AGENT_HANDOFF_PROFILES.PLANNER_PLAN ? AGENT_HANDOFF_LIMITS.maxCallBytes : reportListMaxChars,
       reportListOptions,
     );
     const successCriteria = report.success_criteria == null ? [] : stringArray(

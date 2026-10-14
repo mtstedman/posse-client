@@ -1,8 +1,8 @@
-import { authoritativeFinalReview } from "../../../assessment/functions/final-review-authority.js";
+import { listAttemptCommittedFilesAsync } from "../../../git/functions/attempt-committed-files.js";
+import { authoritativeFinalReview, finalReviewedFilesCommitted, latestFinalReview } from "../../../assessment/functions/final-review-authority.js";
 import { prepareReviewedFileCompletion } from "../../../assessment/functions/reviewed-file-completion.js";
-import { acquireAssessmentBarrier, completeAttempt, getJob, isLeaseValid, setAssessmentLifecycle } from "../../../queue/functions/index.js";
+import { completeAttempt, getAttempts, getJob, isLeaseValid, setAssessmentLifecycle } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
-import { inspectAssessmentWorktreeReadiness } from "./assessment-worktree-readiness.js";
 import { processVerdict } from "./process-verdict.js";
 import { refreshAndExtractInsights } from "./insights.js";
 import { ASSESSMENT_LIFECYCLE } from "../../../../catalog/job.js";
@@ -16,19 +16,22 @@ export async function completeReviewedJob(worker, { job, leaseToken, wtPath,
   if (!wtPath || worker.dryRun) return false;
   let verdict = await authoritativeFinalReview(job, parseJobPayload(getJob(job.id) || job), wtPath);
   if (verdict?.verdict !== "pass") return false;
-  const barrier = acquireAssessmentBarrier(job.id, leaseToken, { preserveStatus: true });
-  if (!barrier.ok) {
-    if (barrier.reason !== "lease_invalid") {
-      worker._releaseLease(job, leaseToken, "queued", { readyAt: new Date(Date.now() + 1000).toISOString() });
-    }
-    if (attempt) completeAttempt(attempt.id, { status: "interrupted", duration_ms: Date.now() - startTime,
-      error_text: "Final-review completion deferred until the workspace is exclusively owned." });
-    return true;
-  }
-  if (!(await inspectAssessmentWorktreeReadiness(wtPath)).ready) return false;
+  if (!(await finalReviewedFilesCommitted(job, parseJobPayload(getJob(job.id) || job), wtPath))) return false;
   let reviewedCompletion = null;
-  if (committedHash && !filesCommittedUnknown) {
+  if (!filesCommittedUnknown) {
     try {
+      // A process may stop after the scoped commit but before success. Recover
+      // its recorded commit so closeout still publishes the reviewed receipt.
+      if (!committedHash) {
+        const reviewedAttempt = getAttempts(job.id).find((entry) => entry.id === latestFinalReview(job.id)?.attempt_id);
+        if (reviewedAttempt?.commit_hash) {
+          committedHash = reviewedAttempt.commit_hash;
+          commitBaseHash = reviewedAttempt.commit_base_hash;
+          ({ files: filesCommitted } = await listAttemptCommittedFilesAsync({
+            cwd: wtPath, commitHash: committedHash, baseHash: commitBaseHash, projectDir: worker.projectDir,
+          }));
+        }
+      }
       reviewedCompletion = await prepareReviewedFileCompletion(getJob(job.id) || job, wtPath, {
         committedHash, commitBaseHash, filesCommitted, verifiedNoChange,
       });

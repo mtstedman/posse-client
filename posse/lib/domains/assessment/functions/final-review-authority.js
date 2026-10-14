@@ -68,6 +68,16 @@ export async function finalReviewIdentityEvidence(cwd, payload, { jobId = null }
     states, readPaths, scoped: [...scoped] };
 }
 
+// Completion requires the reviewed files to be committed, not an idle shared
+// worktree. Unrelated siblings retain their own leases and uncommitted work.
+export async function finalReviewedFilesCommitted(job, payload, cwd) {
+  const evidence = await finalReviewIdentityEvidence(cwd, payload, { jobId: job.id });
+  const paths = evidence.states.filter((state) => state[1] !== "non_file").map((state) => state[0]);
+  if (paths.length === 0) return true;
+  return !String(await gitExecAsync(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--",
+    ...paths.map((file) => `:(literal)${file}`)], cwd, { trim: false }));
+}
+
 export function latestFinalReview(jobId, db = getDb()) {
   const issued = db.prepare("SELECT attempt_id, detail_json FROM final_review_records WHERE job_id = ? AND observation_type = ? ORDER BY id DESC LIMIT 1")
     .get(jobId, FINAL_REVIEW_OBSERVATIONS.ISSUED);

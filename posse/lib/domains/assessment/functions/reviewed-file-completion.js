@@ -12,7 +12,7 @@ import { REVIEWED_COMPLETION_KEY, REVIEWED_HANDOFF_VERSION, REVIEWED_HANDOFF_REF
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { logDurableEvent } from "../../queue/functions/events.js";
 
-// Compute under the worker's assessment barrier, after all post-commit checks.
+// Compute while the worker owns its scoped write lease, after post-commit checks.
 // The synchronous publication below rechecks the database facts in closeout's
 // transaction. A review pass on its own never publishes a receipt.
 export async function prepareReviewedFileCompletion(job, cwd, {

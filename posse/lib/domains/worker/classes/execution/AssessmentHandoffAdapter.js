@@ -227,7 +227,7 @@ export class AssessmentHandoffAdapter {
   async runIfNeeded({ job, leaseToken, wtPath = null } = {}) {
     const worker = this.worker;
     const assessOnly = worker.parsePayload(job)._assess_only;
-    if (!assessOnly || !ASSESSABLE_JOB_TYPES.has(job.job_type)) {
+    if (!ASSESSABLE_JOB_TYPES.has(job.job_type)) {
       return { handled: false };
     }
 
@@ -237,6 +237,7 @@ export class AssessmentHandoffAdapter {
     if (await completeReviewedJob(worker, { job, leaseToken, wtPath,
       onSucceeded: (freshJob) => spawnDeferredAssessmentFileRequestFollowUp(worker, job, freshJob, pendingFileRequests, null),
     })) return { handled: true };
+    if (!assessOnly) return { handled: false };
     const assessModelTierOverride = typeof cleanPayload?._assess_model_tier === "string"
       ? cleanPayload._assess_model_tier
       : null;

@@ -1,3 +1,4 @@
+import { emptyMaterializedPathsForJob } from "../../../handoff/functions/helpers/file-materialization.js";
 // lib/domains/worker/functions/helpers/stall-resume.js
 //
 // Drift detection and stall-resume stash recovery helpers extracted from
@@ -40,7 +41,10 @@ export async function detectDrift(worker, job, files, cwd) {
   const payload = parseJobPayload(job);
   if (payload._plan_base_commit && payload._plan_file_sha256) {
     try {
-      const drift = await planAnchorDrift(payload, files, cwd, job.work_item_id);
+      const placeholders = new Set(await emptyMaterializedPathsForJob(job.id,
+        payload.scope_generation ?? payload._materialization_generation ?? 1, cwd));
+      const plannedFiles = files.filter((file) => !(payload._plan_file_sha256[file] === null && placeholders.has(file)));
+      const drift = await planAnchorDrift(payload, plannedFiles, cwd, job.work_item_id);
       if (!drift?.entries?.length) return "";
       const detail = drift.entries.map((entry) => {
         const source = entry.ancestry_known

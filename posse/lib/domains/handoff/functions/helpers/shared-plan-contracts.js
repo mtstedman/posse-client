@@ -1,4 +1,4 @@
-import { AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY } from "../../../../catalog/handoff.js";
+import { AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_SHARED_PLAN_CONTRACT_POLICY } from "../../../../catalog/handoff.js";
 import { recordHandoffSoftening } from "./field-diagnostics.js";
 import { truncateCompletionProse } from "./shape-normalizer.js";
 
@@ -120,7 +120,9 @@ export function sharedPlanContractAdditions(tasks, rawContracts) {
     }
     const declarations = stringList(contract.declarations, `${label}.declarations`, {
       maxItems: MAX_DECLARATIONS,
-      maxLength: 500,
+      // Declarations contain exact signatures and data shapes, not summary prose.
+      // The complete packet is bounded separately; never cut a field in half.
+      maxLength: AGENT_HANDOFF_LIMITS.maxCallBytes,
       required: true,
     });
     contracts.set(id, { id, index, ownerTaskId, declarations, users: [], counted: [], nonDevRefs: [] });
