@@ -48,6 +48,7 @@ export const FLAG_DESCRIPTORS = Object.freeze([
   { name: "--max-review-rate", takesValue: true, category: "filter-value" },
   { name: "--first-plan-min", takesValue: true, category: "filter-value" },
   { name: "--feedback", takesValue: true, category: "filter-value" },
+  { name: "--note", takesValue: true, category: "filter-value" },
   { name: "--job", takesValue: true, category: "filter-value" },
   { name: "-j", takesValue: true, category: "filter-value" },
   { name: "--role", takesValue: true, category: "filter-value" },

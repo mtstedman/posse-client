@@ -1,3 +1,4 @@
+import { DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js";
 import { parkDirtyWorktreeRecovery } from "../../functions/helpers/dirty-worktree-recovery.js";
 import crypto from "crypto";
 import fs from "node:fs";
@@ -1113,6 +1114,11 @@ export async function handlePostExecutionForWorker({
                     job,
                     payload: this.parsePayload(job),
                     filesCommitted,
+                    priorAttempts: [
+                      ...getAttempts(job.id).filter(prior => prior.id !== attempt.id && prior.worker_type !== "assessor"),
+                      ...(this.parsePayload(job)[DIRTY_WORKTREE_RECOVERY_KEY]?.commits || []),
+                    ],
+                    projectDir: this.projectDir,
                     cwd: wtPath,
                   });
               if (!outputContract.ok) {

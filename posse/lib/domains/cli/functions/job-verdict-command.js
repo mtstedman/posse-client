@@ -3,7 +3,7 @@ import { PARKED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { createJob, getJob, listJobsByWorkItem, runInTransaction, updateJobStatus } from "../../queue/functions/index.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
-import { runGateCommand } from "./gate-command.js";
+import { resolveGateCliAction, runGateCommand } from "./gate-command.js";
 
 /** Operator dispositions use the same durable resolver as TUI answers. */
 export async function runJobVerdictCommand(argv = [], { projectDir } = {}) {
@@ -23,7 +23,8 @@ export async function runJobVerdictCommand(argv = [], { projectDir } = {}) {
       && !TERMINAL_JOB_STATUSES.includes(entry.status)
       && (entry.parent_job_id === job.id || Number(parseJobPayload(entry).original_job_id) === job.id));
     if (gates.length > 0) {
-      if (gates.length !== 1 || !humanInputChoicesForPayload(parseJobPayload(gates[0])).includes(action)) {
+      const payload = gates.length === 1 ? parseJobPayload(gates[0]) : null;
+      if (!payload || !resolveGateCliAction(action, humanInputChoicesForPayload(payload), payload)) {
         return { ok: false, reason: "existing_gate", message: `Answer the existing gate first: ${gates.map((gate) => `#${gate.id}`).join(", ")}.` };
       }
       return { ok: true, gateId: gates[0].id };

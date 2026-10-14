@@ -168,7 +168,8 @@ function finalReviewTerminalForCall(agentCallId, includeBlocked) {
   return finalReviewResultsForAttempt({ jobId: call.job_id, attemptId: call.attempt_id })
     .some((result) => result.agent_call_id === parentId
       && (result.outcome === FINAL_REVIEW_OUTCOMES.PASS
-        || (includeBlocked && result.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED && result.developer_blocked === true))
+        || (includeBlocked && result.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED
+          && (result.developer_blocked === true || result.verification_blocked === true)))
       && (!reviewer || result.reviewer_agent_call_id === call.id));
 }
 

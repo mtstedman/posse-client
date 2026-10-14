@@ -269,13 +269,15 @@ export class FinalReviewRuntime {
     signal.throwIfAborted();
     if (parent.pendingReview) {
       const pending = parent.pendingReview;
-      if (pending.response.outcome === FINAL_REVIEW_OUTCOMES.PASS
+      if ((pending.response.outcome === FINAL_REVIEW_OUTCOMES.PASS || pending.verificationBlocked)
         && (!currentIdentity || currentIdentity !== pending.observation.detail.review_identity
           || !sameCompletionReport(completionReport, pending.response.completion_report))) {
         const reason = "The candidate changed before its passing review could be saved; review the current change again.";
         pending.observation.summary = reason;
         pending.response = { ...pending.response, outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, reason };
         pending.observation.detail = { ...pending.observation.detail, outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, reason };
+        pending.verificationBlocked = false;
+        delete pending.observation.detail.verification_blocked;
       }
       return this.#saveReview(parent, pending);
     }
@@ -330,6 +332,7 @@ export class FinalReviewRuntime {
     let reviewIdentity = null;
     let mode = MODES.FRESH;
     let verdictObtained = false;
+    let verificationCandidateValid = false;
     try {
       const job = getJob(parent.jobId);
       if (!job) throw finalReviewError("FINAL_REVIEW_CONTEXT_MISSING", `Job #${parent.jobId} no longer exists`);
@@ -477,7 +480,7 @@ export class FinalReviewRuntime {
           result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Cannot bind final review to the scoped workspace; verification is blocked." };
         } else if (reviewIdentity !== await currentCandidateIdentity()) {
           result = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "Scoped files changed during review; review the current change again." };
-        }
+        } else verificationCandidateValid = true;
       }
       signal.throwIfAborted();
     } catch (error) {
@@ -542,7 +545,9 @@ export class FinalReviewRuntime {
         duration_ms: Date.now() - startedAt,
       },
     };
-    return this.#saveReview(parent, { response, observation, failures: 0 });
+    return this.#saveReview(parent, { response, observation, failures: 0,
+      verificationBlocked: response.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED && verdictObtained && verificationCandidateValid
+        && [MODES.FRESH, MODES.REVISION].includes(mode) });
   }
 
   #saveReview(parent, pending) {
@@ -558,12 +563,18 @@ export class FinalReviewRuntime {
       if (this.record(observation) === false) throw new Error("Could not persist the final-review result");
     };
     try {
-      if (response.outcome === FINAL_REVIEW_OUTCOMES.PASS) {
+      const verificationBlocked = pending.verificationBlocked === true;
+      if (response.outcome === FINAL_REVIEW_OUTCOMES.PASS || verificationBlocked) {
         // Pass authority and completion must commit together. A failed write
         // retains this exact result for a bounded save retry, not a new model.
+        // A semantic block also ends this implementation attempt. Save its
+        // COMPLETE delivery and needs_review verdict before stopping either
+        // model; the authoritative assessment then opens the operator gate.
+        if (verificationBlocked) observation.detail.verification_blocked = true;
         this.completePass({ agentCallId: parent.agentCallId,
           reviewerAgentCallId: observation.detail.reviewer_agent_call_id,
-          verifiedNoChange: observation.detail.changed_file_count === 0,
+          verifiedNoChange: !verificationBlocked && observation.detail.changed_file_count === 0,
+          verificationBlocked: verificationBlocked ? response.reason || "Required verification is unavailable." : null,
           cwd: parent.cwd, summary: response.summary, recordResult });
         parent.completed = true;
         this.#release(parent);

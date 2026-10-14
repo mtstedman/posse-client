@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   SESSION_AUTO_PUBLISH_POLICY,
+  SESSION_PUBLISH_AUTHORITY_CHANGED,
   SESSION_OWNER_CHILD_ENV,
   SESSION_PUBLISH_MODES,
 } from "../../../catalog/session-sync.js";
@@ -96,6 +97,7 @@ export function describeUnattendedResult(action, result) {
   }
   if (result.ok) return null;
   const message = String(result.message || result.reason || "failed").split("\n")[0];
+  if (result.reason === SESSION_PUBLISH_AUTHORITY_CHANGED) return { ok: false, text: message };
   return {
     ok: false,
     text: result.paused
@@ -251,7 +253,7 @@ async function tickOnce({
     try {
       if (finishRunRecord({ preserveRetry: true })) recordFailure(action, Object.assign(new Error(error?.message || String(error)), {
         code: "session_publish_run_lost",
-      }));
+      }), { expectedState: state });
     } catch { /* the reservation still bounds retries if storage is unavailable */ }
     reportOutcome(`could not start auto ${action}: ${error?.message || error}`, { ok: false, action });
     return null;
@@ -294,7 +296,7 @@ async function tickOnce({
           : `stopped without a result (exit ${code})`;
         let handled = { paused: false };
         try {
-          handled = recordFailure(action, Object.assign(new Error(message), { code: "session_publish_run_lost" }));
+          handled = recordFailure(action, Object.assign(new Error(message), { code: "session_publish_run_lost" }), { expectedState: state });
         } catch { /* the backoff row is best effort */ }
         result = { ok: false, message, paused: handled?.paused === true };
       }

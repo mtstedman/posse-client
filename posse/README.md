@@ -965,6 +965,15 @@ Readiness checks have a two-minute worker limit; installation keeps its normal
 repair budget. Optional dependency failures still allow pairing with a warning;
 run `posse doctor` for a detailed repair report.
 
+Session Git traffic connects directly to `ssh.github.com` on TCP port 443 using
+GitHub's supported SSH-over-443 endpoint, with strict pinned host-key checking.
+It does not probe port 22 first. This is SSH on port 443, not HTTPS: networks
+that restrict protocols as well as ports may still need an administrator to
+allow this endpoint. Posse generates a separate session SSH config, so changes
+to `~/.ssh/config` do not override this connection. Existing sessions retain
+their generated config until recreated; this change applies to new sessions.
+The host's original repository uses its existing transport outside that config.
+
 Pairing allows 15 minutes for Git fetch/push, five minutes for checkout, and
 two minutes for worktree scans and history traversal. Clean checks include
 untracked files but skip expensive rename detection. For unusually large

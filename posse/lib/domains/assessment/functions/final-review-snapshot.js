@@ -290,6 +290,9 @@ export function finalReviewCoreInstructions() {
     "Check the actual files: the snapshot lists every changed file and inlines the diff up to its size limit; read any changed file it does not show.",
     "Use the declared test, changed test file and changed-file check results as evidence. A failure on a line this change added, or in a test file it added, is its defect; any other failure, including one elsewhere in a changed file or in an edited existing test, may predate the change, so report it only when the change caused it.",
     "A test timeout alone does not establish a code defect. Treat it as incomplete verification unless the available evidence demonstrates a defect in the implementation.",
+    "HARNESS BOUNDARY: the harness, not the developer or reviewer, executes the declared verification. A command in the task, README, or your findings does not grant either agent a command tool, authorization, credentials, or access to deployment infrastructure.",
+    "If explicitly required build, test, browser, deployment, or other execution evidence is missing and no issued authorized tool can establish it, report blocked testing with the exact check and missing capability. Use the blocked reporting route below; do not return a code-defect finding, demand that DEV execute it, or request another implementation attempt for this evidence gap alone.",
+    "Absent generated output before its generator has run is not proof of an implementation defect. A passing typecheck is not a build receipt. Judge actual source defects separately; do not require optional unissued checks or new verification artifacts that the task did not ask for.",
     "Treat a developer completion report in the snapshot as the delivery report. Check its factual claims; a report-only requirement does not require a source-file comment.",
   ].join("\n");
 }
@@ -298,8 +301,8 @@ export function finalReviewCoreInstructions() {
 export function finalReviewModeInstructions({ reportAndWait = false } = {}) {
   return [
     reportAndWait
-      ? "Report by calling final_review with your verdict (pass when the change meets the contract; fail with your findings; needs_review only when the contract itself cannot be judged). The call then waits while the developer works."
-      : "Report your verdict in the terminal assessor handoff (pass when the change meets the contract; fail with your findings; needs_review only when the contract itself cannot be judged).",
+      ? "Report by calling final_review with your verdict (pass when the change meets the contract; fail only for concrete implementation defects; needs_review when required evidence or a contract decision is unavailable). For blocked testing, use needs_review and name the unavailable check and missing capability in findings[].criterion; this is a blocker reason, not a code defect. The call then waits while the developer works."
+      : "Report your verdict in the terminal assessor handoff (pass when the change meets the contract; fail only for concrete implementation defects; blocked when required verification lacks a tool, authorization, credential, or environment; needs_review for a contract decision). Name the unavailable check and missing capability without prescribing a code repair.",
     ...(reportAndWait ? ["When it returns a revision, check your findings against the diff since your report, review only what changed, and call final_review again. An accepted pass saves completion and ends both agent sessions immediately. When it returns status done without an accepted pass, end with your terminal handoff carrying your latest verdict."] : []),
   ].join("\n");
 }

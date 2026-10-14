@@ -238,3 +238,22 @@ export async function buildMergeResolutionEvidenceAsync({
     missingLineCount,
   };
 }
+
+/** Prior output counts only while its recorded commit is on this checkout and
+ * the path still has that commit's content. Never credit an entire WI range:
+ * that would include sibling work and changes imported from the target. */
+export async function listRetainedAttemptFilesAsync({ cwd, attempts = [], projectDir = null } = {}) {
+  const retained = new Set();
+  const seen = new Set();
+  for (const attempt of attempts) {
+    const head = String(attempt?.commit_hash || "").trim();
+    const base = String(attempt?.commit_base_hash || "").trim();
+    if (!head || !base || head === base || seen.has(`${base}:${head}`)) continue;
+    seen.add(`${base}:${head}`);
+    if (!(await isAncestorAsync(cwd, head, "HEAD")) || !(await isAncestorAsync(cwd, base, head))) continue;
+    const { files } = await listAttemptCommittedFilesAsync({ cwd, commitHash: head, baseHash: base, projectDir });
+    const changedSince = new Set(await diffNamesAsync(cwd, [head]));
+    for (const file of files) if (!changedSince.has(file)) retained.add(file);
+  }
+  return [...retained];
+}

@@ -363,7 +363,7 @@ export async function worktreesWithBranch(projectDir, branch, { exec = adminGitE
  * never moved behind its working tree's back.
  */
 export async function moveLocalTarget(projectDir, {
-  targetBranch, next, expected, sessionId, exec = adminGitExecAsync,
+  targetBranch, next, expected, sessionId, exec = adminGitExecAsync, assertAllowed = () => {},
 }) {
   const checkedOut = await worktreesWithBranch(projectDir, targetBranch, { exec });
   if (checkedOut.length > 0) {
@@ -371,6 +371,8 @@ export async function moveLocalTarget(projectDir, {
       `${targetBranch} is checked out in ${checkedOut[0]}; switch that checkout to another branch first`);
   }
   const replacing = Boolean(expected) && !(await isAncestor(projectDir, expected, next, exec));
+  // The inspections above yield; approval may have been revoked meanwhile.
+  assertAllowed();
   try {
     // An empty old value means "must not exist yet", in SHA-1 and SHA-256
     // repositories alike.

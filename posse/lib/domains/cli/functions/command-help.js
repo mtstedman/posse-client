@@ -47,6 +47,7 @@ const COMMAND_USAGE = {
   },
   job: () => {
     console.log("Usage: posse job pass|fail <job-id> [--note \"reason\"]");
+    console.log("Passing blocked recovery records an operator waiver and preserves the verification gap.");
   },
   gate: () => {
     console.log(`\n  Usage: posse gate answer <gate-job-id> <action> [--feedback "details"]`);
@@ -55,6 +56,7 @@ const COMMAND_USAGE = {
     console.log(`  Resolve a parked human gate without starting the scheduler, or show its question,`);
     console.log(`  choices and, for a verdict on code, the diff it judges.`);
     console.log(`  ${C.dim}Common actions: pass, fail, retry, replan, skip. The gate's catalogued choices remain authoritative.${C.reset}\n`);
+    console.log("  On blocked recovery, pass uses the offered explicit waiver and preserves the verification gap.");
   },
   serve: () => {
     console.log(`\n  Usage: posse serve [--show-token] [--pair]`);

@@ -1,4 +1,5 @@
 import path from "path";
+import { listRetainedAttemptFilesAsync } from "../../../git/functions/attempt-committed-files.js";
 import fs from "fs";
 import { normPath, normalizeRoots, isUnderRoot } from "../../../../shared/scope/functions/path.js";
 import { validateMutableRepoPath } from "../../../runtime/functions/protected-paths.js";
@@ -44,6 +45,8 @@ export async function validateDeclaredOutputContract({
   job,
   payload = {},
   filesCommitted = [],
+  priorAttempts = [],
+  projectDir = null,
   cwd = process.cwd(),
 } = {}) {
   if (!DECLARED_OUTPUT_CONTRACT_JOB_TYPES.has(job?.job_type)) return { ok: true };
@@ -78,6 +81,13 @@ export async function validateDeclaredOutputContract({
 
   const mustModify = new Set(uniqueNormalizedPaths(payload.must_modify, cwd));
   const committed = new Set(uniqueNormalizedPaths(filesCommitted, cwd));
+  // Resolve history only when this delta is insufficient. Existing files by
+  // themselves never satisfy the contract.
+  const required = [...declaredCreates, ...mustModify];
+  if (required.some(file => !committed.has(file)) && priorAttempts.length) {
+    const retained = await listRetainedAttemptFilesAsync({ cwd, attempts: priorAttempts, projectDir });
+    for (const file of uniqueNormalizedPaths(retained, cwd)) committed.add(file);
+  }
   // Check all declared paths in parallel. This is in the post-commit hot
   // path so a synchronous loop of fs.existsSync over N declared files
   // would block the event loop and starve other workers' progress.

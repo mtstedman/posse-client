@@ -866,8 +866,11 @@ export async function runHumanInputJob(worker, job, {
 
     if (payload.review_type === DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE) {
       handledReviewDecision = true;
+      // Choosing an action alone is not a request for another developer turn.
+      // Keep explicit empty feedback empty, including replies from the UI.
       await applyDirtyWorktreeRecovery({ worker, job, payload, action: selectedAction,
-        feedback: resolutionMetadata?.operator_feedback || resolutionMetadata?.feedback || resolutionAnswer,
+        feedback: resolutionMetadata?.operator_feedback ?? resolutionMetadata?.feedback
+          ?? (String(resolutionAnswer).trim().toLowerCase() === selectedAction ? "" : resolutionAnswer),
         operationKey: `${resolutionClaim.idempotency_key}:resume_original` });
     }
 

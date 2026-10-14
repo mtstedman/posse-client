@@ -9,7 +9,8 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 // A final-review terminal report owns close-out. Save completion packets before
 // stopping either provider. The worker completes directly from the saved review
 // without asking either model for another turn or dispatching an assessor.
-export function completeFinalReview({ agentCallId, reviewerAgentCallId, cwd, summary, blocker = null, verifiedNoChange = false, recordResult = () => {} }) {
+export function completeFinalReview({ agentCallId, reviewerAgentCallId, cwd, summary, blocker = null, verificationBlocked = null, verifiedNoChange = false, recordResult = () => {} }) {
+  const reviewBlocker = blocker || verificationBlocked;
   const receipts = runImmediateTransaction(getDb(), () => {
     recordResult();
     const saved = [];
@@ -19,11 +20,11 @@ export function completeFinalReview({ agentCallId, reviewerAgentCallId, cwd, sum
       const existing = getAgentHandoffRecord(reviewerAgentCallId);
       // A one-shot reviewer may have already committed its terminal report.
       // Preserve that accepted packet instead of replacing its proof.
-      const receipt = existing?.status === "committed" && (blocker || existing.packet?.outcome === "pass")
+      const receipt = existing?.status === "committed" && (reviewBlocker || existing.packet?.outcome === "pass")
         ? { digest: existing.packet_digest }
         : stageAgentHandoff({
-        verdict: blocker ? "needs_review" : "pass", confidence: blocker ? "low" : "high",
-        proof: String(blocker || summary || "The change meets the task contract.").slice(0, 500),
+        verdict: reviewBlocker ? "needs_review" : "pass", confidence: reviewBlocker ? "low" : "high",
+        proof: String(reviewBlocker || summary || "The change meets the task contract.").slice(0, 500),
       }, { context: { agentCallId: reviewerAgentCallId }, role: "assessor", projectDir: cwd });
       saved.push({ agentCallId: reviewerAgentCallId, receipt });
     }

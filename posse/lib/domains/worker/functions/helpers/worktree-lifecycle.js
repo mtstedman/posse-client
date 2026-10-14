@@ -40,7 +40,7 @@ import { removePreparedWorktreeIfSafeAsync } from "../../../git/functions/prepar
 import { tombstoneWaitingLanePreparationForCleanup } from "../../../git/functions/waiting-lane-cleanup.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { clearActiveWorktreeSentinel, isSentinelProcessAlive, readActiveWorktreeSentinel, sentinelHasOtherLiveJob, sentinelJobStillActive, writeActiveWorktreeSentinel } from "./worktree-sentinel.js";
-import { classifyIgnorableSetupDirty, inspectIgnorableSetupDirty, isRuntimeResidualPath, normalizeRepoPath, parsePorcelainEntries, payloadExplicitlyClaimsPath, snapshotAndResetSetupBlockingPathsAsync, targetedSetupDirtyRecoveryEligible } from "./worktree-dirty-classification.js";
+import { classifyIgnorableSetupDirty, inspectIgnorableSetupDirty, isRuntimeResidualPath, normalizeRepoPath, parsePorcelainEntries, payloadExplicitlyClaimsPath, snapshotAndResetSetupBlockingPathsAsync, targetedSetupDirtyRecoveryEligible, unfinishedSiblingDirtyLocks } from "./worktree-dirty-classification.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
 import { jobHasSetupCleanupPrecedence, nextTransientSetupRetryPayload, transientSetupRetryCountFromPayload } from "./worktree-setup-policy.js";
 import { pendingCrossWiFileSyncs } from "./cross-wi-sync.js";
@@ -662,9 +662,13 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       if (reviewedTransfers(getJob(job.id) || job).length) return true;
       const siblingLocks = activeLiveSiblingWriteLocks(job);
       const dirty = await inspectIgnorableSetupDirty(candidatePath, earlyPayload, siblingLocks, { signal });
-      const recoveryPaths = [...(dirty.blockingEntries || []), ...(dirty.residualEntries || [])]
+      const candidatePaths = [...(dirty.blockingEntries || []), ...(dirty.residualEntries || [])]
         .filter(entry => entry.status !== "!!")
         .map(entry => entry.path);
+      const preservedLocks = unfinishedSiblingDirtyLocks(job, candidatePaths);
+      const siblingPaths = new Set(preservedLocks.map(lock => lock.path));
+      const recoveryPaths = candidatePaths.filter(file => !siblingPaths.has(file));
+      if (!recoveryPaths.length && preservedLocks.length) throw activeSiblingSetupError(preservedLocks);
       if (recoveryPaths.length) {
         throw Object.assign(new Error("Dirty worktree needs an operator recovery choice"), {
           code: DIRTY_WORKTREE_RECOVERY_ERROR, paths: recoveryPaths, deferWorktreeCleanup: true,
@@ -881,8 +885,8 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     await withWorktreeLockAsync(wtPath, worker.projectDir, async () => {
       dirtyState = await withPhase("dirty_detect", prepTrace, async () => {
         const [dirtyPost, ignoredPost, mergeInProgress] = await Promise.all([
-          gitExecAsync(["status", "--porcelain", "--untracked-files=all"], wtPath, { signal }),
-          gitExecAsync(["status", "--porcelain", "--ignored=matching", "--untracked-files=all"], wtPath, { signal }),
+          gitExecAsync(["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"], wtPath, { signal, trim: false }),
+          gitExecAsync(["status", "--porcelain", "-z", "--no-renames", "--ignored=matching", "--untracked-files=all"], wtPath, { signal, trim: false }),
           isMergeInProgressAsync(wtPath, { signal }),
         ]);
         return {
@@ -897,8 +901,12 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
         const ignorableDirty = earlyPayload
           ? classifyIgnorableSetupDirty(earlyPayload, dirtyState.dirtyPost, dirtyState.ignoredPost, siblingLocks)
           : { tolerated: false, residualEntries: [], siblingEntries: [] };
-        const recoveryPaths = [...(ignorableDirty.blockingEntries || []), ...(ignorableDirty.residualEntries || [])]
+        const candidatePaths = [...(ignorableDirty.blockingEntries || []), ...(ignorableDirty.residualEntries || [])]
           .filter(entry => entry.status !== "!!").map(entry => entry.path);
+        const preservedLocks = unfinishedSiblingDirtyLocks(job, candidatePaths);
+        const siblingPaths = new Set(preservedLocks.map(lock => lock.path));
+        const recoveryPaths = candidatePaths.filter(file => !siblingPaths.has(file));
+        if (!recoveryPaths.length && preservedLocks.length) throw activeSiblingSetupError(preservedLocks);
         if (earlyPayload && recoveryPaths.length) {
           throw Object.assign(new Error("Dirty worktree needs an operator recovery choice"), {
             code: DIRTY_WORKTREE_RECOVERY_ERROR, paths: recoveryPaths, deferWorktreeCleanup: true,
@@ -1217,7 +1225,9 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     }
     if (earlyPayload?.[DIRTY_WORKTREE_RECOVERY_KEY]) {
       const payload = worker.parsePayload(getJob(job.id) || job);
-      delete payload[DIRTY_WORKTREE_RECOVERY_KEY];
+      const commits = payload[DIRTY_WORKTREE_RECOVERY_KEY]?.commits || [];
+      if (commits.length) payload[DIRTY_WORKTREE_RECOVERY_KEY] = { commits };
+      else delete payload[DIRTY_WORKTREE_RECOVERY_KEY];
       job.payload_json = JSON.stringify(payload);
       updateJobPayload(job.id, job.payload_json);
     }

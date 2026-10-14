@@ -8,10 +8,13 @@ import { DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js"
 // paths during setup recovery.
 
 import path from "path";
+import { siblingJobScopeOwners } from "../../../queue/functions/file-locks.js";
+import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
-import { logEvent } from "../../../queue/functions/index.js";
+import { getAttempts, logEvent } from "../../../queue/functions/index.js";
 import { preserveDirtyWorktreeSnapshotAsync } from "../../../git/functions/worktree.js";
 import { gitExecAsync } from "../../../git/functions/utils.js";
+import { parsePorcelainZ } from "../../../git/functions/porcelain-diff.js";
 import { isAbortError } from "../../../runtime/functions/yield.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 
@@ -63,6 +66,14 @@ export function siblingLockCoversPath(lock, repoPath) {
 }
 
 export function parsePorcelainEntries(raw = "") {
+  if (String(raw).includes("\0")) {
+    return parsePorcelainZ(raw).flatMap(entry => {
+      // Renames dirty both paths; ownership of the destination cannot confer
+      // ownership of a sibling's source file.
+      const paths = entry.old_path && entry.status.includes("R") ? [entry.path, entry.old_path] : [entry.path];
+      return paths.map(file => ({ status: entry.status, path: normalizeRepoPath(file), raw: `${entry.status} ${file}` }));
+    }).filter(entry => entry.path);
+  }
   return String(raw || "")
     .split("\n")
     .map((line) => line.trimEnd())
@@ -153,8 +164,8 @@ export function isRuntimeResidualPath(repoPath = "") {
 }
 
 export async function inspectIgnorableSetupDirty(wtPath, payload = {}, siblingLocks = [], { signal = null } = {}) {
-  const dirtyPorcelain = await gitExecAsync(["status", "--porcelain", "--untracked-files=all"], wtPath, { signal });
-  const ignoredPorcelain = await gitExecAsync(["status", "--porcelain", "--ignored=matching", "--untracked-files=all"], wtPath, { signal });
+  const dirtyPorcelain = await gitExecAsync(["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"], wtPath, { signal, trim: false });
+  const ignoredPorcelain = await gitExecAsync(["status", "--porcelain", "-z", "--no-renames", "--ignored=matching", "--untracked-files=all"], wtPath, { signal, trim: false });
   return {
     dirtyPorcelain,
     ignoredPorcelain,
@@ -213,8 +224,8 @@ export async function snapshotAndResetSetupBlockingPathsAsync(worker, job, wi, w
     await gitExecAsync(["clean", "-fd", "--", ...uniqueUntracked], wtPath, { signal });
   }
 
-  const post = await gitExecAsync(["status", "--porcelain", "--untracked-files=all", "--", ...paths], wtPath, { signal });
-  const ignoredPost = await gitExecAsync(["status", "--porcelain", "--ignored=matching", "--untracked-files=all", "--", ...paths], wtPath, { signal });
+  const post = await gitExecAsync(["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all", "--", ...paths], wtPath, { signal, trim: false });
+  const ignoredPost = await gitExecAsync(["status", "--porcelain", "-z", "--no-renames", "--ignored=matching", "--untracked-files=all", "--", ...paths], wtPath, { signal, trim: false });
   const remaining = dedupePorcelainEntries([
     ...parsePorcelainEntries(post),
     ...parsePorcelainEntries(ignoredPost).filter((entry) => entry.status === "!!"),
@@ -238,4 +249,19 @@ export async function snapshotAndResetSetupBlockingPathsAsync(worker, job, wi, w
     }),
   });
   return snapshotDir;
+}
+
+// A released lease is not a transfer of unfinished work. These are ownership
+// hints for preservation only, never authority to write or acquire a lease.
+export function unfinishedSiblingDirtyLocks(job, paths = []) {
+  const payload = parseJobPayload(job);
+  const candidates = paths.filter(file => !payloadExplicitlyClaimsPath(payload, file));
+  const owners = siblingJobScopeOwners(job.id, candidates);
+  // A future task's planned scope is not evidence that it left these edits.
+  // Otherwise its predecessor could wait forever for a job it blocks.
+  const attempted = new Set([...owners.values()].flatMap(ids => [...ids])
+    .filter(id => getAttempts(id).some(attempt => attempt.worker_type !== "assessor")));
+  return [...owners].flatMap(([file, ids]) => [...ids].filter(id => attempted.has(id)).map(id => ({
+    path: file, lock_kind: "file", job_id: id, work_item_id: job.work_item_id,
+  })));
 }

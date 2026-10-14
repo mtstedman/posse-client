@@ -149,6 +149,9 @@ export const SESSION_OWNER_CHILD_ENV = "POSSE_SESSION_OWNER_PID";
 // The one-time token of a posse go the console opened in a new window.
 export const SESSION_OWNER_LAUNCH_ENV = "POSSE_SESSION_OWNER_LAUNCH";
 
+// A publication must stop when its session or approval policy changes.
+export const SESSION_PUBLISH_AUTHORITY_CHANGED = "session_publish_authority_changed";
+
 export const SESSION_AUTO_PUBLISH_POLICY = Object.freeze({
   // A burst of work-item merges becomes one run: act once the trunk has been
   // quiet this long, but never wait longer than MAX_WAIT_MS behind a steady

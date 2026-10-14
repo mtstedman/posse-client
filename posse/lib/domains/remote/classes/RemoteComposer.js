@@ -559,7 +559,7 @@ function renderLocalPolicyOverlay(packet, { localPolicy = null } = {}) {
       "- Do not spend turns requesting test permission or retrying an unavailable test route.",
       role === "dev"
         ? "- Complete finished product work as COMPLETE and use verification_unavailable to report the exact unrun check; unavailable tests alone must not degrade the result to PARTIAL or BLOCKED."
-        : "- Assess the available code and deterministic evidence. Missing test authority alone is not a defect and must not force a blocked verdict.",
+        : "- Assess the available code and deterministic evidence. Missing test authority alone is not a defect. Optional checks do not block otherwise proven work; explicitly required verification with no authorized route is blocked testing. Report the exact check and missing capability through the issued review schema, without a code-fix request or retry.",
     ].join("\n"));
   }
   return sections.join("\n\n");

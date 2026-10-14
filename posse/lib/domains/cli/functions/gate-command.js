@@ -53,6 +53,8 @@ function positionalArgs(argv = []) {
  * The gate choice an operator's CLI action names. `skip` reaches the waiver
  * only on the gate kinds whose legacy list spelled the waiver "skip"; on a
  * blocked_recovery gate it meant cancel, so it never waives there.
+ * An explicit operator `pass` on blocked recovery accepts the work through
+ * its existing waiver action, preserving the unavailable verification record.
  */
 export function resolveGateCliAction(requestedAction, choices = [], payload = {}) {
   const requested = String(requestedAction || "").trim().toLowerCase();
@@ -60,6 +62,8 @@ export function resolveGateCliAction(requestedAction, choices = [], payload = {}
   if (!requested) return null;
   const exact = allowed.find((choice) => choice.toLowerCase() === requested);
   if (exact) return exact;
+  if (requested === "pass" && typedKindForGate(payload || {}) === "blocked_recovery"
+      && allowed.includes("explicit_waiver")) return "explicit_waiver";
   const aliases = requested === "skip" && LEGACY_SKIP_WAIVER_KINDS.includes(typedKindForGate(payload || {}))
     ? [...ACTION_ALIASES.skip, "explicit_waiver"]
     : ACTION_ALIASES[requested] || [];

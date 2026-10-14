@@ -644,7 +644,7 @@ function sessionKeyNotYetAccepted(error) {
 
 // A connection that never reached GitHub (a blocked port, no route, no DNS)
 // also ends with "Could not read from remote repository", but no wait for the
-// session key fixes it, and each retry is one more port-22 connection for the
+// session key fixes it, and each retry is one more failed connection for the
 // network's scan detector to count. A connection GitHub opened and then
 // dropped or reset ("kex_exchange_identification", "Connection closed by") is
 // left out: GitHub drops connections briefly, and the retry rides that out.
@@ -669,8 +669,9 @@ function sshBlockedError(line, cause) {
   const advice = /Could not resolve hostname/iu.test(line)
     ? "This computer could not look up github.com; check its internet connection and try again. "
       + "If it keeps failing, the network may be blocking GitHub."
-    : "A firewall or security tool on this network blocked the SSH connection to GitHub; this is not "
-      + "a problem with the session key. Join from another network.";
+    : "The SSH connection to GitHub could not open; a firewall or security tool on this network may be blocking it. "
+      + "New sessions use ssh.github.com on TCP port 443 (SSH, not HTTPS). "
+      + "Ask your network administrator to allow that endpoint, or try another network.";
   return Object.assign(new Error(`Could not connect to GitHub over SSH (${line}). ${advice}`), {
     code: "pairing_github_ssh_blocked", cause,
   });
@@ -1857,13 +1858,14 @@ function runSessionHoldCommand({ action, reason = null, C, json }) {
 }
 
 async function runSessionPublishCommand({ action, projectDir, C, json, unattended = false }) {
+  const expectedState = getLivePairingState();
   let result;
   try {
     result = await runSessionPublish({ action, projectDir, unattended, C, json });
   } catch (error) {
     // An unattended run reports to the session owner through its output and
     // exit code; a failure that will not clear by itself pauses auto mode.
-    const handled = unattended ? recordUnattendedFailure(action, error) : null;
+    const handled = unattended && expectedState ? recordUnattendedFailure(action, error, { expectedState }) : null;
     if (json) {
       console.log(JSON.stringify({ ok: false, action, reason: error?.code || "session_publish_failed",
         message: safeError(error), paused: handled?.paused === true }));

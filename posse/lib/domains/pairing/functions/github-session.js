@@ -218,17 +218,20 @@ export function prepareSessionSshIdentity(projectDir, sessionId, options = {}) {
     ], { cwd: projectDir, ...options });
   }
   fs.chmodSync(privateKey, 0o600);
-  fs.writeFileSync(knownHostsFile, GITHUB_SSH_HOST_KEYS.map((key) => `github.com ${key}\n`).join(""), { mode: 0o600 });
+  fs.writeFileSync(knownHostsFile, GITHUB_SSH_HOST_KEYS.map((key) => `github.com,[ssh.github.com]:443 ${key}\n`).join(""), { mode: 0o600 });
   fs.writeFileSync(configFile, [
     "Host github.com",
-    "  HostName github.com",
+    // Use GitHub's supported SSH endpoint on 443 directly. Session -F config
+    // replaces the user's config, including any port-22 firewall workaround.
+    "  HostName ssh.github.com",
+    "  Port 443",
     `  IdentityFile ${sshConfigQuotedPath(privateKey, platform)}`,
     "  IdentitiesOnly yes",
     // The pinned keys come first. The user's own file stays a fallback, so a
     // GitHub key rotation they have already accepted keeps working.
     `  UserKnownHostsFile ${sshConfigQuotedPath(knownHostsFile, platform)} ~/.ssh/known_hosts`,
     "  StrictHostKeyChecking yes",
-    // A network that drops port 22 then fails in seconds, not the OS TCP timeout.
+    // Networks that block SSH itself still fail promptly on this endpoint.
     "  ConnectTimeout 15",
     "  ServerAliveInterval 15",
     "  ServerAliveCountMax 4",

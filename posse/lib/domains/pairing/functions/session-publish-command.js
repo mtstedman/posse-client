@@ -9,10 +9,12 @@
 // can never stall the console's heartbeat. Nothing here writes the close
 // promotion journal, so crash recovery never mistakes a merge for a close.
 
-import { SESSION_AUTO_PUBLISH_POLICY, SESSION_PUBLISH_MODES } from "../../../catalog/session-sync.js";
+import { SESSION_AUTO_PUBLISH_POLICY, SESSION_PUBLISH_MODES, SESSION_PUBLISH_AUTHORITY_CHANGED } from "../../../catalog/session-sync.js";
 import { SHARED_TRUNK_MERGE_LOCK_OWNERS } from "../../../catalog/shared-trunk.js";
 import { adminGitExecAsync } from "../../git/functions/admin-git.js";
 import { syncSharedTrunkFromOrigin } from "../../git/functions/shared-trunk.js";
+import { runImmediateTransaction } from "../../queue/functions/common.js";
+import { getDb } from "../../../shared/storage/functions/index.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
 import { readRuntimeStatus, RUNTIME_STATUS_KEYS, writeRuntimeStatus } from "../../queue/functions/runtime-status.js";
 import { askToPublishPromotion, printPromotionForApproval } from "./approval-prompt.js";
@@ -139,12 +141,35 @@ async function takeVerifiedTrunk(root, state, { sync, delays = LOCK_RETRY_DELAYS
   }
 }
 
+function samePublicationSession(expected, current) {
+  return current?.role === "host"
+    && ["id", "remote_session_id", "original_branch", "original_head", "shared_branch",
+      "origin_remote_name", "origin_remote_url", "original_ssh_command", "close_action"]
+      .every(key => current[key] === expected[key]);
+}
+
+function samePublicationAuthority(expected, current) {
+  return current?.phase === "active" && samePublicationSession(expected, current)
+    && current.merge_mode === expected.merge_mode && current.deploy_mode === expected.deploy_mode;
+}
+
+function recordPublicationResult(state, values) {
+  return runImmediateTransaction(getDb(), () => {
+    if (!samePublicationSession(state, getPairingState(state.id))) return state;
+    return updateSessionPublishSettings(state.id, values);
+  });
+}
+
 function checkStillOpen(state) {
   if (activeSessionCloseClaim({ stateId: state.id })) {
     throw publishError("session_close_in_progress", "The session started closing; its close integrates this work instead");
   }
   if (readPairingPromotionJournal()) {
     throw publishError("session_publish_close_pending", "A close integration started; its close integrates this work instead");
+  }
+  if (!samePublicationAuthority(state, getLivePairingState())) {
+    throw publishError(SESSION_PUBLISH_AUTHORITY_CHANGED,
+      "The session or its merge/deploy approval settings changed while this ran; publication stopped. Run merge or deploy again under the current settings.");
   }
 }
 
@@ -176,7 +201,10 @@ function autoRecord(sessionId) {
 }
 
 function writeAutoRecord(sessionId, values) {
-  writeRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_AUTO_PUBLISH, { ...autoRecord(sessionId), ...values, session_id: sessionId });
+  return runImmediateTransaction(getDb(), () => {
+    if (getLivePairingState()?.remote_session_id !== sessionId) return false;
+    return writeRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_AUTO_PUBLISH, { ...autoRecord(sessionId), ...values, session_id: sessionId });
+  });
 }
 
 /**
@@ -203,6 +231,10 @@ export async function runSessionPublish({
   if (!["merge", "deploy"].includes(action)) throw publishError("session_publish_action_invalid", `Unknown action ${action}`);
   const deploy = action === "deploy";
   let state = sessionForPublish();
+  // Keep the original approval identity even when result bookkeeping refreshes
+  // state later. Turning auto off during validation revokes that run.
+  const authority = state;
+  const assertCurrent = () => checkStillOpen(authority);
   const mode = deploy ? state.deploy_mode : state.merge_mode;
   if (unattended && mode !== SESSION_PUBLISH_MODES.AUTO) return { ok: true, skipped: "not_auto", action };
   const mayMerge = !unattended || !deploy || state.merge_mode === SESSION_PUBLISH_MODES.AUTO;
@@ -248,6 +280,7 @@ export async function runSessionPublish({
         `${remote}/${targetBranch} moved under the session's undeployed merge, which must be merged again with your approval: run deploy`);
     }
 
+    assertCurrent();
     if (!deploy) {
       if (built.empty) {
         if (plan.relation === "diverged") {
@@ -255,8 +288,8 @@ export async function runSessionPublish({
           // follows origin (the replaced tip is kept) so a later close or
           // `session host` does not trip over it.
           await withPublishLock(async () => {
-            checkStillOpen(state);
-            await moveLocalTarget(root, { targetBranch, next: originSha, expected: localSha, sessionId, exec });
+            assertCurrent();
+            await moveLocalTarget(root, { targetBranch, next: originSha, expected: localSha, sessionId, exec, assertAllowed: assertCurrent });
           });
         }
         if (unattended) writeAutoRecord(sessionId, { evaluated_trunk: trunk, failures: 0, retry_after: null });
@@ -283,14 +316,14 @@ export async function runSessionPublish({
       }
       try {
         await withPublishLock(async () => {
-          checkStillOpen(state);
-          await moveLocalTarget(root, { targetBranch, next: tip, expected: localSha, sessionId, exec });
+          assertCurrent();
+          await moveLocalTarget(root, { targetBranch, next: tip, expected: localSha, sessionId, exec, assertAllowed: assertCurrent });
         });
       } catch (error) {
         if (error?.code === "session_publish_target_moved" && attempt + 1 < attempts) continue;
         throw error;
       }
-      state = updateSessionPublishSettings(state.id, { lastMergeOid: tip });
+      state = recordPublicationResult(state, { lastMergeOid: tip });
       if (unattended) writeAutoRecord(sessionId, { evaluated_trunk: trunk, failures: 0, retry_after: null });
       say(`Merged ${built.commits.length} session commit(s) into local ${targetBranch} (${shortSha(tip)}). Run deploy to push it to ${remote}.`);
       return { ok: true, action, merged: true, mergeOid: tip, trunk };
@@ -301,21 +334,21 @@ export async function runSessionPublish({
       if (localSha && localSha !== originSha && plan.relation === "diverged") {
         // The undeployed merge's content reached origin another way.
         await withPublishLock(async () => {
-          checkStillOpen(state);
-          await moveLocalTarget(root, { targetBranch, next: originSha, expected: localSha, sessionId, exec });
+          assertCurrent();
+          await moveLocalTarget(root, { targetBranch, next: originSha, expected: localSha, sessionId, exec, assertAllowed: assertCurrent });
         });
       }
       // A deploy whose push was reported lost but landed is recorded now, so
       // the deploy tripwire knows origin holds this session's work.
       const onOrigin = await findSessionSquash(root, originSha, sessionId, { exec, since: state.original_head });
       if (onOrigin && state.last_deploy_oid !== onOrigin.commit) {
-        state = updateSessionPublishSettings(state.id, { lastDeployOid: onOrigin.commit });
+        state = recordPublicationResult(state, { lastDeployOid: onOrigin.commit });
       }
       if (unattended && trunk) writeAutoRecord(sessionId, { evaluated_trunk: trunk, failures: 0, retry_after: null });
       say(`Nothing to deploy: ${remote}/${targetBranch} already has the session's work.`);
       return { ok: true, action, nothing: true, trunk };
     }
-    checkStillOpen(state);
+    assertCurrent();
     const validation = await gate(root, { candidate: tip, originSha, exec, onProgress: say });
     if (!validation?.ok) {
       const detail = validation?.files?.length ? `: ${validation.files.slice(0, 5).join(", ")}` : validation?.output ? `\n${validation.output}` : "";
@@ -338,23 +371,38 @@ export async function runSessionPublish({
     if (tip !== localSha) {
       try {
         await withPublishLock(async () => {
-          checkStillOpen(state);
-          await moveLocalTarget(root, { targetBranch, next: tip, expected: localSha, sessionId, exec });
+          assertCurrent();
+          await moveLocalTarget(root, { targetBranch, next: tip, expected: localSha, sessionId, exec, assertAllowed: assertCurrent });
         });
       } catch (error) {
         if (error?.code === "session_publish_target_moved" && attempt + 1 < attempts) continue;
         throw error;
       }
-      if (built && !built.empty) state = updateSessionPublishSettings(state.id, { lastMergeOid: tip });
+      if (built && !built.empty) state = recordPublicationResult(state, { lastMergeOid: tip });
     }
-    checkStillOpen(state);
-    if (!(await isSessionAncestor(root, originSha, tip, { exec }))) {
-      throw publishError("session_publish_not_fast_forward", `${shortSha(tip)} does not extend ${remote}/${targetBranch}; refusing to push`);
-    }
-    say(`Pushing ${shortSha(tip)} to ${remote}/${targetBranch}`);
+    let pushing = false;
     try {
-      push(root, { remote, targetBranch, candidate: tip, sshCommand });
+      await withPublishLock(async () => {
+        assertCurrent();
+        if (!(await isSessionAncestor(root, originSha, tip, { exec }))) {
+          throw publishError("session_publish_not_fast_forward", `${shortSha(tip)} does not extend ${remote}/${targetBranch}; refusing to push`);
+        }
+        // Validation and approval yield. The host or another publisher may
+        // have replaced the local candidate in the meantime, even when this
+        // run did not need to move the target itself.
+        if (await localBranchSha(root, targetBranch, { exec }) !== tip) {
+          throw publishError("session_publish_target_moved", `Local ${targetBranch} changed before the push; reevaluate its current tip`);
+        }
+        assertCurrent();
+        say(`Pushing ${shortSha(tip)} to ${remote}/${targetBranch}`);
+        pushing = true;
+        push(root, { remote, targetBranch, candidate: tip, sshCommand });
+      });
     } catch (error) {
+      if (!pushing) {
+        if (error?.code === "session_publish_target_moved" && attempt + 1 < attempts) continue;
+        throw error;
+      }
       let observed = null;
       try { observed = await fetchSessionOrigin(root, { remote, targetBranch, sshCommand, exec }); } catch { /* reported below */ }
       const landed = observed === tip
@@ -369,7 +417,7 @@ export async function runSessionPublish({
         throw pushFailure(error, { remote, targetBranch });
       }
     }
-    state = updateSessionPublishSettings(state.id, { lastDeployOid: tip });
+    state = recordPublicationResult(state, { lastDeployOid: tip });
     if (unattended) writeAutoRecord(sessionId, { ...(trunk ? { evaluated_trunk: trunk } : {}), failures: 0, retry_after: null });
     say(`Pushed ${shortSha(tip)} to ${remote}/${targetBranch}; application deployment is unconfirmed. The session keeps running.`);
     // Compatibility aliases deployed/deployOid describe Git publication only.
@@ -393,24 +441,28 @@ function pushFailure(error, { remote, targetBranch }) {
  * later with backoff, until too many in a row; any other pauses that action
  * back to `ask` and says why.
  */
-export function recordUnattendedFailure(action, error, { nowMs = Date.now(), policy = SESSION_AUTO_PUBLISH_POLICY } = {}) {
-  const state = getLivePairingState();
-  if (!state?.remote_session_id) return { paused: false };
-  const record = autoRecord(state.remote_session_id);
-  const failures = (Number(record.failures) || 0) + 1;
-  if (TRANSIENT_CODES.has(error?.code) && failures < policy.MAX_CONSECUTIVE_FAILURES) {
-    const delay = Math.min(policy.RETRY_MAX_MS, policy.RETRY_BASE_MS * 2 ** (failures - 1));
-    writeAutoRecord(state.remote_session_id, { failures, retry_after: new Date(nowMs + delay).toISOString() });
-    return { paused: false, retryInMs: delay };
-  }
-  writeAutoRecord(state.remote_session_id, { failures: 0, retry_after: null });
-  const repeated = TRANSIENT_CODES.has(error?.code) ? ` (failed ${failures} times in a row)` : "";
-  const reason = `${action}: ${String(error?.message || error).split("\n")[0]}${repeated}`.slice(0, 500);
-  updateSessionPublishSettings(state.id, {
-    ...(action === "deploy" ? { deployMode: SESSION_PUBLISH_MODES.ASK } : { mergeMode: SESSION_PUBLISH_MODES.ASK }),
-    autoPausedReason: reason,
+export function recordUnattendedFailure(action, error, { nowMs = Date.now(), policy = SESSION_AUTO_PUBLISH_POLICY, expectedState = null } = {}) {
+  return runImmediateTransaction(getDb(), () => {
+    const state = getLivePairingState();
+    if (!state?.remote_session_id || state.phase !== "active" || state.role !== "host"
+      || error?.code === SESSION_PUBLISH_AUTHORITY_CHANGED
+      || (expectedState && !samePublicationAuthority(expectedState, state))) return { paused: false, ignored: true };
+    const record = autoRecord(state.remote_session_id);
+    const failures = (Number(record.failures) || 0) + 1;
+    if (TRANSIENT_CODES.has(error?.code) && failures < policy.MAX_CONSECUTIVE_FAILURES) {
+      const delay = Math.min(policy.RETRY_MAX_MS, policy.RETRY_BASE_MS * 2 ** (failures - 1));
+      writeAutoRecord(state.remote_session_id, { failures, retry_after: new Date(nowMs + delay).toISOString() });
+      return { paused: false, retryInMs: delay };
+    }
+    writeAutoRecord(state.remote_session_id, { failures: 0, retry_after: null });
+    const repeated = TRANSIENT_CODES.has(error?.code) ? ` (failed ${failures} times in a row)` : "";
+    const reason = `${action}: ${String(error?.message || error).split("\n")[0]}${repeated}`.slice(0, 500);
+    updateSessionPublishSettings(state.id, {
+      ...(action === "deploy" ? { deployMode: SESSION_PUBLISH_MODES.ASK } : { mergeMode: SESSION_PUBLISH_MODES.ASK }),
+      autoPausedReason: reason,
+    });
+    return { paused: true, reason };
   });
-  return { paused: true, reason };
 }
 
 /** `auto merge on`, `auto deploy off`: the host's trust setting for each step. */
