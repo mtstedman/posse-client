@@ -1,4 +1,5 @@
 import { TEST_EXECUTION_RECEIPT_SCHEMA_VERSION as RECEIPT_SCHEMA_VERSION } from "../../../../catalog/verification.js";
+import { normPath } from "../../../../shared/scope/functions/path.js";
 import { declaredNodeTestCommand } from "../../../../shared/tools/functions/toolkit/repository-test-runner.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { parseCommandArguments } from "../../../../shared/scope/functions/test-command.js";
@@ -188,6 +189,8 @@ export function prunedTestPlan(payload = {}) {
 }
 
 export function resolveFrozenTestPlan(job = {}, payload = {}, options = {}) {
+  payload = { ...payload, files_to_create: (payload.files_to_create || []).map(normPath),
+    ...(Array.isArray(payload.tests_to_run) ? { tests_to_run: payload.tests_to_run.map(normPath) } : {}) };
   const plan = resolveTestPlan(job, payload, options);
   const base = payload._test_capability_base_commit || payload.root_base_commit || payload.commit_base_hash;
   return plan ? { ...plan, files_to_create: payload.files_to_create || [], ...(base ? { capability_base_commit: base } : {}) } : plan;

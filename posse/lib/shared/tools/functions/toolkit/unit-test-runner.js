@@ -53,7 +53,10 @@ function nodeBootstrapFailure(invocation, output, root) {
     && !(invocation.runner === "repository_script" && invocation.executable === process.execPath)) return null;
   if (output.includes("Posse Vitest adapter unavailable:")) return "test_loader_resolution_mismatch";
   if (/MISSING DEPENDENCY.*Cannot find dependency/u.test(output)) return "test_dependency_unavailable";
-  if (missingDeclaredNodeDependency(output, invocation.cwd || root)) return "test_dependency_unavailable";
+  const manifest = root && invocation.path && invocation.runner !== "repository_script"
+    ? nearestUpward(root, invocation.path, ["package.json"]) : null;
+  const packageRoot = manifest ? path.dirname(path.resolve(root, manifest)) : invocation.cwd || root;
+  if (missingDeclaredNodeDependency(output, packageRoot)) return "test_dependency_unavailable";
   // Vitest imports under node:test fail before collecting any product tests.
   // Keep that runner/bootstrap mismatch out of product-failure remediation.
   if (/Vitest failed to access its internal state/u.test(output)) return "test_loader_resolution_mismatch";

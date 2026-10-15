@@ -12,6 +12,11 @@ import { isUnrunnableTestResult } from "./verification-outcome.js";
 import { testCommandCapability, testFileRemovedSinceBaseline } from "../../../verification/functions/test-capability.js";
 import { TEST_RUNNER_REMOVED_REASON, TEST_REQUIRED_FILE_MISSING_REASON } from "../../../../catalog/verification.js";
 
+function requiredTestFailureReason(results) {
+  return [TEST_REQUIRED_FILE_MISSING_REASON, TEST_RUNNER_REMOVED_REASON]
+    .find((reason) => results.some((result) => result.reason === reason));
+}
+
 // Project file-runner output into the command-result shape shared by receipts
 // and final review. Final review exposes the detailed outcome label and the
 // runner's aggregate reason; stored checks retain their historical status text.
@@ -25,8 +30,9 @@ export function unitTestCommandResult(aggregate, { finalReview = false, cwd = nu
     return { ...result, status: "failed", ok: false, reason: TEST_RUNNER_REMOVED_REASON,
       stderr: "The candidate removed a test file present at its verification baseline." };
   }) : aggregate.results;
-  if (results.some((result) => [TEST_RUNNER_REMOVED_REASON, TEST_REQUIRED_FILE_MISSING_REASON].includes(result.reason))) {
-    aggregate = { ...aggregate, status: "failed", ok: false, reason: results.find((result) => result.status === "failed").reason };
+  const requiredFailure = requiredTestFailureReason(results);
+  if (requiredFailure) {
+    aggregate = { ...aggregate, status: "failed", ok: false, reason: requiredFailure };
   }
   return {
     status: aggregate.status,
@@ -197,7 +203,7 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
     // A check's own cut output, or the joined output cut here, is partial.
     stdout_truncated: runs.some((run) => run.stdout_truncated === true) || stdout.length > MAX_STREAM_CHARS,
     stderr_truncated: runs.some((run) => run.stderr_truncated === true) || stderr.length > MAX_STREAM_CHARS,
-    reason: (runs.find((run) => run.status === status) || runs.find((run) => run.status !== "passed"))?.reason || null,
+    reason: requiredTestFailureReason(runs) || (runs.find((run) => run.status === status) || runs.find((run) => run.status !== "passed"))?.reason || null,
     check_runs: runs.map((run) => ({ check_id: run.check_id, command: run.command, intent: run.intent,
       ...(isUnrunnableTestResult(run) ? { required: false } : {}),
       status: run.status, ok: run.ok, reason: run.reason, exit_code: run.code,

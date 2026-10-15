@@ -831,7 +831,7 @@ export function isHumanInputReviewPayload(payload = {}) {
 }
 
 export function humanInputChoiceFromAnswer(answer, choices = []) {
-  const text = String(answer || "").trim().toLowerCase();
+  const text = String(answer || "").trim().toLowerCase().replace(/[‘’]/g, "'");
   if (!text) return null;
   const normalizedChoices = normalizeHumanInputChoices(choices, { limit: Number.POSITIVE_INFINITY });
   if (/\b(?:no|not|never|don't|dont|cannot|can't|won't)\b[\s\S]{0,20}\b(?:pass|passed|approve|approved|accept|accepted|allow|allowed|mark done|succeed|succeeded)\b/.test(text)) {
@@ -849,17 +849,18 @@ export function humanInputChoiceFromAnswer(answer, choices = []) {
   // and the durable resolution loses the operator's selected route.
   const exact = normalizedChoices.find((choice) => choice.toLowerCase() === text);
   if (exact) return exact;
-  for (const choice of normalizedChoices) {
+  // Decorations are free text too: a leading choice name cannot authorize
+  // a negated, deferred, or contradictory instruction after the separator.
+  if (/\b(?:no|not|never|don't|dont|cannot|can't|won't|defer|later|wait)\b/.test(text)) return null;
+  const matches = normalizedChoices.filter((choice) => HUMAN_INPUT_CHOICE_ALIASES[choice.toLowerCase()]?.test(text));
+  for (const choice of [...normalizedChoices].sort((a, b) => b.length - a.length)) {
     const normalizedChoice = choice.toLowerCase();
     if (
       text.startsWith(`${normalizedChoice}:`)
       || text.startsWith(`${normalizedChoice} -`)
       || text.startsWith(`${normalizedChoice} —`)
-    ) return choice;
+    ) return matches.some((match) => match !== choice && !choice.startsWith(`${match}:`)) ? null : choice;
   }
-  // Free text must not turn a negation or a request to defer into a write.
-  if (/\b(?:no|not|never|don't|dont|cannot|can't|won't|defer|later|wait)\b/.test(text)) return null;
-  const matches = normalizedChoices.filter((choice) => HUMAN_INPUT_CHOICE_ALIASES[choice.toLowerCase()]?.test(text));
   if (matches.length !== 1) return null;
   for (const choice of matches) {
     if (HUMAN_INPUT_CHOICE_ALIASES[choice.toLowerCase()]?.test(text)) return choice;

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { normPath } from "../../../shared/scope/functions/path.js";
 import fs from "node:fs";
 import { gitExec } from "../../git/functions/utils.js";
 import { TEST_RUNNER_REMOVED_REASON } from "../../../catalog/verification.js";
@@ -80,7 +81,7 @@ export function pruneTestHandoff(payload, cwd, { jobId = null, findCommand = fin
   if (Array.isArray(payload.tests_to_run) && payload.tests_to_run.length) {
     const capability = discoverUnitTestCapability({ projectDir: cwd });
     next.tests_to_run = payload.tests_to_run.filter((file) => {
-      if ((payload.files_to_create || []).includes(file)) return true;
+      if ((payload.files_to_create || []).some((created) => normPath(created) === normPath(file))) return true;
       const reason = testFileCapability(file, cwd, capability, { findCommand, baselineCommit, posseRoot });
       if (!reason || reason === TEST_RUNNER_REMOVED_REASON) return true;
       pruned.push({ path: file, reason });

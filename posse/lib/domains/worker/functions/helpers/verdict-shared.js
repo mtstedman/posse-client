@@ -264,7 +264,8 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
   const postChange = testRun?.postChange || testRun?.post_change || null;
   // Creating a required test is part of the task even when the baseline had
   // no runnable suite. Its absence cannot be inherited as baseline debt.
-  const requiredMissing = postChange?.reason === TEST_REQUIRED_FILE_MISSING_REASON;
+  const requiredMissing = [postChange, ...(postChange?.check_runs || []), ...(postChange?.file_results || [])]
+    .some((result) => result?.reason === TEST_REQUIRED_FILE_MISSING_REASON);
   if (isUnrunnableTestResult(postChange)) return verdict;
   // Legacy runners can report failed alongside a typed infrastructure result.
   // Never turn that harness failure into a product repair. A demonstrated

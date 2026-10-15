@@ -1,6 +1,7 @@
 // @ts-check
 
 import { spawn, spawnSync } from "child_process";
+import path from "node:path";
 import { buildWindowsSpawn } from "../../../providers/functions/shared/windows-spawn.js";
 import { parseCommandArguments } from "../../../../shared/scope/functions/test-command.js";
 import { TEST_SUBPROCESS_ENV_KEYS, VERIFICATION_PULSE_CAPABILITY_ENV } from "../../../../catalog/process.js";
@@ -74,7 +75,7 @@ export async function runCommand(command, {
   abortSignal?.throwIfAborted();
   const validation = !trustedShell && filesToCreate.length && cwd
     ? validatePlannerTestCommandForRepository(command, cwd) : null;
-  if (validation?.missing_script && filesToCreate.includes(validation.missing_script)) {
+  if (validation?.missing_script && filesToCreate.some((file) => path.resolve(cwd, file) === path.resolve(cwd, validation.missing_script))) {
     return { status: "failed", ok: false, code: 1, signal: null, timed_out: false,
       duration_ms: 0, stdout: "", stderr: "The candidate did not create a required test script.",
       stdout_truncated: false, stderr_truncated: false, timeout_kind: null, reason: TEST_REQUIRED_FILE_MISSING_REASON };

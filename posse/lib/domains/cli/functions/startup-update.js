@@ -23,8 +23,24 @@ export function readStartupUpdateMode({ cwd = process.cwd(), env = process.env }
 }
 
 async function runStartupChild(args, { cwd, env, signalTarget = process }) {
-  const child = spawn(process.execPath, args, { cwd, env, stdio: "inherit", windowsHide: false });
-  const handlers = new Map(["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => [signal, () => {}]));
+  // A separate POSIX group lets this parent forward both terminal-group and
+  // parent-only signals exactly once, including to the child's subprocesses.
+  const separateGroup = process.platform !== "win32";
+  const child = spawn(process.execPath, args, { cwd, env, stdio: "inherit", windowsHide: false, detached: separateGroup });
+  const signals = ["SIGINT", "SIGTERM", "SIGHUP", ...(separateGroup ? ["SIGWINCH", "SIGTSTP", "SIGCONT"] : [])];
+  const handlers = new Map(signals.map((signal) => [signal, () => {
+    if (!child.pid) return;
+    try {
+      if (separateGroup) {
+        // Detached groups cannot rely on terminal job-control delivery.
+        process.kill(-child.pid, signal === "SIGTSTP" ? "SIGSTOP" : signal);
+        if (signal === "SIGTSTP") process.kill(process.pid, "SIGSTOP");
+      }
+      // Windows console Ctrl-C already reaches both processes. child.kill
+      // would terminate the child before its graceful console handler runs.
+      else if (signal !== "SIGINT") child.kill(signal);
+    } catch (error) { if (error.code !== "ESRCH") throw error; }
+  }]));
   for (const [signal, handler] of handlers) signalTarget.on(signal, handler);
   try {
     return await new Promise((resolve, reject) => {

@@ -60,12 +60,15 @@ function runSelectedTests(paths, checkout, run, timeoutMs) {
     if (!invocation?.runner) return { ok: false, status: null, error_code: "ENOENT", output: `Selected test unavailable: ${file}` };
     const remaining = deadline - Date.now();
     if (remaining < 1) return { ok: false, status: null, timed_out: true, error_code: "ETIMEDOUT", output: "Selected tests exceeded merge budget" };
-    results.push(run([invocation.executable, ...invocation.args].map(quote).join(" "), {
+    const result = run([invocation.executable, ...invocation.args].map(quote).join(" "), {
       cwd: invocation.cwd || checkout, timeoutMs: remaining,
-    }));
+    });
+    const counts = testExecutionCounts(result.output);
+    results.push({ ...result, no_tests: result.ok && counts && (counts.total === 0 || counts.total === counts.skipped) });
   }
   const failure = results.find((result) => !result.ok);
   return { ...(failure || results[0]), ok: !failure,
+    no_tests: results.some((result) => result.no_tests),
     stdout: results.map((result) => result.stdout || result.output || "").join("\n"),
     stderr: results.map((result) => result.stderr || "").join("\n"),
     output: results.map((result) => result.output || "").join("\n") };
@@ -102,7 +105,7 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
       const missingRunner = [127, 9009].includes(result.status)
         && /not found|not recognized as an internal or external command/i.test(result.output);
       const counts = testExecutionCounts(result.output);
-      const noTests = result.ok && counts && (counts.total === 0 || counts.total === counts.skipped);
+      const noTests = result.ok && (result.no_tests || counts && (counts.total === 0 || counts.total === counts.skipped));
       const abnormal = result.timed_out || result.error_code === "ETIMEDOUT" || result.signal
         || result.error_code === "ENOBUFS" || (result.error_code && result.error_code !== "ENOENT")
         || result.status == null && result.error_code !== "ENOENT";
