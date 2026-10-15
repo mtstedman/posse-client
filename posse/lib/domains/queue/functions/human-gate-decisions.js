@@ -1,3 +1,4 @@
+import { isReleasedPostMergeDbJob } from "./post-merge-db-tasks.js";
 import {
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
   MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
@@ -8,7 +9,10 @@ import {
 
 // Reconciliation transition table. A live resolver is excluded by the SQL
 // lease predicate before these decisions are used.
-export function shouldRetireTerminalWorkItemGate(job, payload) {
+export function shouldRetireTerminalWorkItemGate(job, payload, originalJob = null) {
+  if (isReleasedPostMergeDbJob(originalJob, {
+    id: job.work_item_id, status: job.work_item_status, merge_state: job.work_item_merge_state,
+  })) return false;
   if (payload.review_type === WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE
     && job.work_item_status === "failed") return false;
   if (payload.review_type === CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE

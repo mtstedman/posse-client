@@ -785,7 +785,12 @@ export function reconcileHumanGates() {
           j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
           OR hg.gate_state IN ('open','resolving')
         )
-    `).all().filter((job) => shouldRetireTerminalWorkItemGate(job, asPayload(job.payload_json)));
+    `).all().filter((job) => {
+      const payload = asPayload(job.payload_json);
+      const original = payload.original_job_id == null ? null
+        : db.prepare("SELECT * FROM jobs WHERE id = ?").get(payload.original_job_id);
+      return shouldRetireTerminalWorkItemGate(job, payload, original);
+    });
     for (const job of terminalWorkItemGates) {
       if (retireGateJob(job.id, "Owning work item is terminal")) {
         retired += 1;

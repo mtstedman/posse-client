@@ -80,6 +80,15 @@ export function isPostMergeDbTaskJob(job) {
   return isDbTaskJob(job) && postMergeDbHoldRecord(job) != null;
 }
 
+/** A live post-merge DB task retains authority under its completed, merged owner. */
+export function isReleasedPostMergeDbJob(job, workItem) {
+  return workItem?.status === "complete"
+    && workItem?.merge_state === "merged"
+    && Number(job?.work_item_id) === Number(workItem?.id)
+    && isDbTaskJob(job)
+    && !!postMergeDbHoldRecord(job)?.released_at;
+}
+
 export function normalizeDbTaskPreMergePolicy(value) {
   const policy = String(value ?? "").trim().toLowerCase();
   return DB_TASK_PRE_MERGE_POLICY_VALUES.includes(policy) ? policy : DB_TASK_PRE_MERGE_POLICIES.HOLD;

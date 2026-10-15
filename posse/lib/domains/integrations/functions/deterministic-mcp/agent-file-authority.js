@@ -11,6 +11,7 @@ import {
   getJob,
   getWorkItem,
 } from "../../../queue/functions/index.js";
+import { isReleasedPostMergeDbJob } from "../../../queue/functions/post-merge-db-tasks.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { workItemCheckoutReadRoot } from "../../../../shared/scope/functions/checkout-read-root.js";
 
@@ -237,7 +238,8 @@ export function resolveAgentFileAuthority(attachment = {}, deps = {}) {
       `Work item #${attachedWorkItemId} no longer exists`,
     );
   }
-  if (TERMINAL_WORK_ITEM_STATUS_SET.has(String(workItem.status || ""))) {
+  if (TERMINAL_WORK_ITEM_STATUS_SET.has(String(workItem.status || ""))
+    && !isReleasedPostMergeDbJob(job, workItem)) {
     throw authorityError(
       "POSSE_AGENT_AUTHORITY_INACTIVE",
       `Work item #${attachedWorkItemId} is terminal`,
@@ -250,7 +252,7 @@ export function resolveAgentFileAuthority(attachment = {}, deps = {}) {
   const cwd = requiredPath(attachment.cwd, "runtime cwd");
   const roots = authorityRoots({ projectRoot, resourcesRoot, workItemId: attachedWorkItemId });
   const runtime = assertRuntimeCwd({ cwd, job, payload, role: attachedRole, roots });
-  const allowFileWrites = attachment.allowWrite === true;
+  const allowFileWrites = attachment.allowWrite === true && payload.task_mode !== "db";
   const scopedFiles = allowFileWrites ? stringList(payload.files_to_modify, "files_to_modify") : [];
   const createFiles = allowFileWrites ? stringList(payload.files_to_create, "files_to_create") : [];
   const deleteFiles = allowFileWrites ? stringList(payload.files_to_delete, "files_to_delete") : [];
