@@ -212,6 +212,7 @@ export function beginJobRetryGeneration(jobId, {
     SELECT MAX(attempt_number) AS mx FROM job_attempts WHERE job_id = ?
   `).get(jobId)?.mx || 0);
   nextPayload._retry_generation = marker;
+  delete nextPayload.skip_assessment;
   delete nextPayload._pre_attempt_repeat_key;
   // The attempt boundary can stay unchanged across pre-provider failures.
   // Every explicit retry still permits one fresh reviewed-import check.

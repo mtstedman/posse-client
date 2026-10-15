@@ -1,5 +1,5 @@
 import { SKIP_DIRS, TEST_HELPER_DIRS, MAX_OUTPUT_CHARS, MAX_SOURCE_SNIFF_BYTES, DEFAULT_TIMEOUT_MS, PHPUNIT_CONFIG_NAMES, OUTCOME_STATUS } from "../../../../catalog/unit-test-runner.js";
-import { missingNodeTestDependency } from "./node-test-failure.js";
+import { missingDeclaredNodeDependency } from "./node-test-failure.js";
 import { javascriptTestRunner } from "./javascript-test-runner.js";
 import { fileURLToPath } from "node:url";
 import { spawn } from "child_process";
@@ -48,12 +48,12 @@ const ADAPTERS = Object.freeze({
   },
 });
 
-function nodeBootstrapFailure(invocation, output) {
+function nodeBootstrapFailure(invocation, output, root) {
   if (invocation.runner !== "node_test" && invocation.runner !== "vitest"
     && !(invocation.runner === "repository_script" && invocation.executable === process.execPath)) return null;
   if (output.includes("Posse Vitest adapter unavailable:")) return "test_loader_resolution_mismatch";
   if (/MISSING DEPENDENCY.*Cannot find dependency/u.test(output)) return "test_dependency_unavailable";
-  if (missingNodeTestDependency(output)) return "test_dependency_unavailable";
+  if (missingDeclaredNodeDependency(output, invocation.cwd || root)) return "test_dependency_unavailable";
   // Vitest imports under node:test fail before collecting any product tests.
   // Keep that runner/bootstrap mismatch out of product-failure remediation.
   if (/Vitest failed to access its internal state/u.test(output)) return "test_loader_resolution_mismatch";
@@ -69,7 +69,7 @@ function nodeBootstrapFailure(invocation, output) {
         if (!path.extname(missing) && [".ts", ".tsx", ".js"].some((ext) => fs.existsSync(missing + ext))) return "test_loader_resolution_mismatch";
       } catch { /* malformed diagnostic */ }
     }
-    if (/Cannot find package ['"]/u.test(output)) return "test_dependency_unavailable";
+
   }
   return null;
 }
@@ -256,7 +256,7 @@ function walkTestFiles(root, current, inTestDirectory, output) {
       walkTestFiles(root, absolute, inTestDirectory || isTestDirectoryName(entry.name), output);
       continue;
     }
-    if (!inTestDirectory || !entry.isFile()) continue;
+    if (!entry.isFile() || (!inTestDirectory && !/\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(entry.name))) continue;
     const extension = path.extname(entry.name).toLowerCase();
     if (!ADAPTERS[extension]) continue;
     output.push(path.relative(root, absolute).replace(/\\/g, "/"));
@@ -359,7 +359,7 @@ function missingExternalPythonModule(root, output) {
 
 function classifyCompletedRun(invocation, { code, stdout, stderr }, root) {
   const output = `${stdout}\n${stderr}`;
-  const bootstrapFailure = nodeBootstrapFailure(invocation, output);
+  const bootstrapFailure = nodeBootstrapFailure(invocation, output, root);
   if (bootstrapFailure) return { outcome: "infrastructure_error", reason: bootstrapFailure };
   const counts = testExecutionCounts(output);
   const zeroTests = !!counts && (counts.total === 0 || counts.skipped === counts.total);

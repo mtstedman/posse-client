@@ -1190,7 +1190,7 @@ export class RunSession {
   // Repair can create source-controlled lockfiles after the initial guard.
   // Preserve them and stop before scheduling; committing automatically could
   // bless a lock resolved against the old target manifest.
-  if (typeof guardStartupDirtyTree === "function" && !frozenResearchFixture) {
+  if (dependencyRepairProvenance.attempted && typeof guardStartupDirtyTree === "function" && !frozenResearchFixture) {
     let repairedTree;
     try {
       repairedTree = await guardStartupDirtyTree({ reason: "dependency repair", policy: "block" });

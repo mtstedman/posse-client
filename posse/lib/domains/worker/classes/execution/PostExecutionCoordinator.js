@@ -1,4 +1,5 @@
-import { completeReviewedJob } from "../../functions/helpers/complete-reviewed-job.js";
+import { authoritativeFinalReview } from "../../../assessment/functions/final-review-authority.js";
+import { parsePorcelainEntries, unfinishedSiblingDirtyLocks } from "../../functions/helpers/worktree-dirty-classification.js";
 import { DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js";
 import { parkDirtyWorktreeRecovery } from "../../functions/helpers/dirty-worktree-recovery.js";
 import crypto from "crypto";
@@ -727,6 +728,8 @@ export async function handlePostExecutionForWorker({
               materializedCreatePaths = materializedCreatePaths.filter((entry) => !dropped.has(entry));
             }
             const activeLocksForCommit = listActiveFileLocks();
+            const dirtyPaths = parsePorcelainEntries(await gitExecAsync(["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"], wtPath, { trim: false })).map((entry) => entry.path);
+            activeLocksForCommit.jobs.push(...unfinishedSiblingDirtyLocks(job, dirtyPaths));
             const headBefore = await gitCurrentHashAsync(wtPath);
             commitBaseHash = headBefore;
             const commitMsg = `posse: ${job.job_type} job #${job.id} - ${job.title}`;
@@ -1630,27 +1633,15 @@ export async function handlePostExecutionForWorker({
           }
         }
 
-        // A durable final review outranks legacy output/no-op heuristics. Its
-        // compatibility receipt is deliberately deterministic, including when
-        // a repair changed files or a retry verified the existing end state.
-        if (await completeReviewedJob(this, {
-          job, leaseToken, wtPath, attempt, committedHash, commitBaseHash, filesCommitted,
-          filesCommittedUnknown, verifiedNoChange, startTime,
-          onSucceeded: () => {
-            if (hasPendingFileRequests()) this._spawnFileRequestFollowUp(job, pendingFileRequests, attempt.id);
-          },
-        })) {
-          if (getJob(job.id)?.status === "succeeded") this._finalizeSessionRecycleForJob(job, attempt);
-          else this._releasePendingSessionRecycleForJob(job.id);
-          return;
-        }
-
+        // The final-review completion packet is intentionally deterministic;
+        // repeated text does not replace verification of the current candidate.
+        const reviewedCandidate = wtPath && (await authoritativeFinalReview(job, this.parsePayload(job), wtPath))?.verdict === "pass";
         // -- Idempotency check --
         const outputHash = crypto.createHash("sha256").update(output).digest("hex").slice(0, 16);
         const prevResultJson = job.result_json;
         await wrappedJob.setResult({ output_length: output.length, attempt: attemptCount, output_hash: outputHash });
 
-        if (attemptCount > 1 && prevResultJson) {
+        if (!reviewedCandidate && attemptCount > 1 && prevResultJson) {
           // Narrow the try to JSON.parse only. Wrapping the whole dead-letter
           // block meant a synchronous DB throw after completeAttempt() skipped
           // the `return` and fell through to a full (duplicate) assessment,

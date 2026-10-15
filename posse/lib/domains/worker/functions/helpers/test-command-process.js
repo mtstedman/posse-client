@@ -6,8 +6,9 @@ import { parseCommandArguments } from "../../../../shared/scope/functions/test-c
 import { TEST_SUBPROCESS_ENV_KEYS, VERIFICATION_PULSE_CAPABILITY_ENV } from "../../../../catalog/process.js";
 import { parentSecretValues, redactExactValues } from "../../../../shared/platform/functions/subprocess-output.js";
 import { filterProcessEnv } from "../../../../shared/platform/functions/process-env.js";
+import { validatePlannerTestCommandForRepository } from "../../../verification/functions/planner-test-command.js";
 import { testCommandCapability } from "../../../verification/functions/test-capability.js";
-import { TEST_CAPABILITY_PRUNED_REASON, TEST_RUNNER_REMOVED_REASON } from "../../../../catalog/verification.js";
+import { TEST_CAPABILITY_PRUNED_REASON, TEST_RUNNER_REMOVED_REASON, TEST_REQUIRED_FILE_MISSING_REASON } from "../../../../catalog/verification.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 
 export const MAX_STREAM_CHARS = 256 * 1024;
@@ -59,7 +60,7 @@ export function killProcessTree(child, {
 }
 
 /** @param {string} command
- * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal, baselineCommit?: string}} options
+ * @param {{cwd?: string, timeoutMs?: number, idleTimeoutMs?: number, trustedShell?: boolean, signal?: AbortSignal, baselineCommit?: string, filesToCreate?: string[]}} options
  */
 export async function runCommand(command, {
   cwd,
@@ -68,9 +69,17 @@ export async function runCommand(command, {
   trustedShell = false,
   signal: abortSignal = null,
   baselineCommit = "HEAD",
+  filesToCreate = [],
 } = {}) {
   abortSignal?.throwIfAborted();
-  const unavailable = !trustedShell && testCommandCapability(command, cwd, { baselineCommit });
+  const validation = !trustedShell && filesToCreate.length && cwd
+    ? validatePlannerTestCommandForRepository(command, cwd) : null;
+  if (validation?.missing_script && filesToCreate.includes(validation.missing_script)) {
+    return { status: "failed", ok: false, code: 1, signal: null, timed_out: false,
+      duration_ms: 0, stdout: "", stderr: "The candidate did not create a required test script.",
+      stdout_truncated: false, stderr_truncated: false, timeout_kind: null, reason: TEST_REQUIRED_FILE_MISSING_REASON };
+  }
+  const unavailable = !trustedShell && testCommandCapability(command, cwd, { baselineCommit, filesToCreate });
   if (unavailable === TEST_RUNNER_REMOVED_REASON) {
     return { status: "failed", ok: false, code: 1, signal: null, timed_out: false,
       duration_ms: 0, stdout: "", stderr: "The candidate removed a test script present at its verification baseline.",

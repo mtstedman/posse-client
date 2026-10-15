@@ -116,6 +116,7 @@ import {
   githubSessionRepositoryName,
   provisionGitHubSessionRepository,
   readLocalSshCommand,
+  readOriginSshCommand,
   removeGitHubMemberDeployKeys,
   removeSessionCredentialDirectory,
   restoreRepositorySsh,
@@ -1118,7 +1119,7 @@ async function runHost({
     sharedBranch,
     originalBranch: original.branch,
     originalHead: original.head,
-    originalSettings: snapshotPairingSettings(root),
+    originalSettings: { ...snapshotPairingSettings(root), origin_ssh_command: readOriginSshCommand(root) },
     instanceId: ensureBridgeInstanceId(root),
     originalSshCommand: readLocalSshCommand(root),
   });

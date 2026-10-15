@@ -82,6 +82,12 @@ export function latestFinalReview(jobId, db = getDb()) {
   const issued = db.prepare("SELECT attempt_id, detail_json FROM final_review_records WHERE job_id = ? AND observation_type = ? ORDER BY id DESC LIMIT 1")
     .get(jobId, FINAL_REVIEW_OBSERVATIONS.ISSUED);
   if (!issued) return null;
+  const payload = JSON.parse(db.prepare("SELECT payload_json FROM jobs WHERE id = ?").get(jobId)?.payload_json || "{}");
+  if (issued.attempt_id != null && Number(issued.attempt_id) <= Number(payload._final_review_invalidated_attempt_id || 0)) return null;
+  const attempt = issued.attempt_id == null ? null : db.prepare("SELECT status, error_text FROM job_attempts WHERE id = ?").get(issued.attempt_id);
+  // Failed implementation attempts cannot authorize a later retry, even when
+  // their bytes still match the review. Interrupted recovery remains eligible.
+  if (attempt && (attempt.status === "failed" || attempt.error_text && attempt.status !== "running" && attempt.status !== "interrupted")) return null;
   const callId = JSON.parse(issued.detail_json).agent_call_id;
   const result = db.prepare("SELECT detail_json FROM final_review_records WHERE job_id = ? AND observation_type = ? AND agent_call_id = ? ORDER BY id DESC LIMIT 1")
     .get(jobId, FINAL_REVIEW_OBSERVATIONS.RESULT, callId);

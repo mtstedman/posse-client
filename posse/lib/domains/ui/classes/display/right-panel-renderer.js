@@ -259,10 +259,10 @@ export class DisplayRightPanelRenderer {
   // from visible content rather than threading a type all the way through.
   _classifyEvent(text) {
     const lower = stripAnsi(String(text || "")).toLowerCase();
-    if (/\[assessor\]\s*pass\b/.test(lower)) {
+    if (/\[(?:assessor|audit)\]\s*pass\b/.test(lower)) {
       return { glyph: "✓", color: C.green };
     }
-    if (/\[assessor\]\s*fail\b/.test(lower)) {
+    if (/\[(?:assessor|audit)\]\s*fail\b/.test(lower)) {
       return { glyph: "✗", color: C.red };
     }
     if (/\b(failed|rejected|killed|aborted|✗|✖)\b/.test(lower) || /\berror\s*[:=-]/.test(lower)) {

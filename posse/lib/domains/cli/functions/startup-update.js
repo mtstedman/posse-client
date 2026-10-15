@@ -24,7 +24,7 @@ export function readStartupUpdateMode({ cwd = process.cwd(), env = process.env }
 
 async function runStartupChild(args, { cwd, env, signalTarget = process }) {
   const child = spawn(process.execPath, args, { cwd, env, stdio: "inherit", windowsHide: false });
-  const handlers = new Map(["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => [signal, () => child.kill(signal)]));
+  const handlers = new Map(["SIGINT", "SIGTERM", "SIGHUP"].map((signal) => [signal, () => {}]));
   for (const [signal, handler] of handlers) signalTarget.on(signal, handler);
   try {
     return await new Promise((resolve, reject) => {

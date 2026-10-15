@@ -113,7 +113,7 @@ export function beginPairingPromotion(state, {
     source_branch: validateBranchName(projectDir, state?.shared_branch),
     target_remote: targetRemote,
     target_branch: validateBranchName(projectDir, state?.original_branch),
-    target_ssh_command: state?.original_ssh_command || null,
+    target_ssh_command: state?.origin_ssh_command || state?.original_ssh_command || null,
     temporary_repository: state?.temporary_repository || null,
     // In-session merges (posse session merge|deploy): close squashes only what
     // the trunk gained since the last one, from the session's starting point

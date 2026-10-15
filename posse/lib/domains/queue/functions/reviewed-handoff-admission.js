@@ -41,6 +41,15 @@ function wait(job, lock, path, reason) {
     wait_state: { reason, upstream_work_item_id: lock.work_item_id, waiter_job_id: job.id } } };
 }
 
+function orderWait(job, upstream, hit) {
+  const result = wait(job, { work_item_id: upstream.id, job_id: null, lock_tier: "work_item_order",
+    path: hit.right.path, lock_kind: hit.right.lock_kind }, hit.left.path, "work_item_order");
+  result.conflict.work_item_order = true;
+  result.conflict.candidate.lock_kind = hit.left.lock_kind;
+  if (hit.left.job_id && hit.left.job_id !== job.id) result.conflict.wait_state.via_job_id = hit.left.job_id;
+  return result;
+}
+
 // Prove the complete proposed graph, including hard job prerequisites and
 // existing content edges. Exhaustion is a blocker, never proof of acyclicity.
 export function reviewedDependencyProof(targetId, sourceIds, { maxNodes = 256, db = getDb() } = {}) {
@@ -80,16 +89,12 @@ export function reviewedHandoffAdmission(job, scope, { order, workItemLocks, job
   if (blocked) return wait(job, { work_item_id: job.work_item_id }, blocked.path, blocked.reason || REASONS.RECOVERY);
   // Every earlier planned writer remains a reservation. Only a completed
   // path, with no further writer in its source WI, can be exported.
+  const wiRows = [...(order.byId.get(job.work_item_id)?.planned || []), ...rows];
   const rank = order.rank.get(job.work_item_id) ?? order.ordered.length;
   for (const id of order.ordered.slice(0, rank)) {
     const upstream = order.byId.get(id);
-    const hit = findLockRowOverlap(rows, upstream.planned);
-    if (hit) {
-      const result = wait(job, { work_item_id: id, job_id: null, lock_tier: "work_item_order",
-        path: hit.right.path, lock_kind: hit.right.lock_kind }, hit.left.path, "work_item_order");
-      result.conflict.work_item_order = true;
-      return result;
-    }
+    const hit = findLockRowOverlap(wiRows, upstream.planned);
+    if (hit) return orderWait(job, upstream, hit);
   }
   const transfers = new Map();
   for (const row of rows) {
@@ -152,6 +157,14 @@ export function reviewedHandoffAdmission(job, scope, { order, workItemLocks, job
       receiver_generation: workItemBranchGeneration(receiver), required_provenance: required,
       state: "reserved", donor_lock_ids: workItemLocks.filter((lock) => lock.work_item_id === source.id
         && selectedFiles.some((file) => normPath(file.path) === lock.path)).map((lock) => lock.id) });
+  }
+  // A receipt authorizes only its transferred paths. Sibling scopes still
+  // wait for earlier held files so the WI cannot start on a divergent base.
+  for (const id of order.ordered.slice(0, rank)) {
+    const held = order.byId.get(id).held.filter((lock) => ![...transfers.values()].some((transfer) =>
+      transfer.source_work_item_id === id && lock.lock_kind === "file" && transfer.files.some((file) => normPath(file.path) === lock.path)));
+    const hit = findLockRowOverlap(wiRows, held);
+    if (hit) return orderWait(job, order.byId.get(id), hit);
   }
   const proof = reviewedDependencyProof(job.work_item_id, [...transfers.values()].flatMap((entry) =>
     [entry.source_work_item_id, ...entry.required_provenance.map((dep) => dep.source_work_item_id)]));

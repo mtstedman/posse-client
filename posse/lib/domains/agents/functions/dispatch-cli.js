@@ -59,8 +59,10 @@ export async function dispatchAgentTurn(request, dependencies = {}) {
   const calls = (nativeCalls || parsed.calls).map((call, index) => ({
     id: toolCallId(call, request.messages.length, index), name: call.name, arguments: call.arguments,
   }));
-  demand(calls.length <= 1, "Provider returned an unsupported tool batch");
-  for (const call of calls) demand(names.has(call.name), `Provider requested unissued tool ${call.name}`);
+  try {
+    demand(calls.length <= 1, "Provider returned an unsupported tool batch");
+    for (const call of calls) demand(names.has(call.name), `Provider requested unissued tool ${call.name}`);
+  } catch (error) { throw Object.assign(error, { stats: usage }); }
   const message = { role: "assistant", content: nativeCalls || !calls.length ? content : "",
     ...(calls.length ? { tool_calls: calls, raw: JSON.stringify({ name: calls[0].name, arguments: calls[0].arguments }) } : {}),
     ...(generated?.providerContent ? { provider_content: generated.providerContent } : {}) };

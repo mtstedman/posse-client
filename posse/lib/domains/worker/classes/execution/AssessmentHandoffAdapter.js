@@ -1,7 +1,6 @@
 import { assessmentDisplayMessage } from "../../functions/execution/display-sync.js";
 import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole } from "../../../settings/functions/repository-settings.js";
 import path from "path";
-import { completeReviewedJob } from "../../functions/helpers/complete-reviewed-job.js";
 import {
   acquireAssessmentBarrier,
   completeAttempt,
@@ -235,9 +234,6 @@ export class AssessmentHandoffAdapter {
     const assessStart = Date.now();
     let cleanPayload = worker.parsePayload(job);
     const pendingFileRequests = readPendingAssessmentFileRequests(cleanPayload);
-    if (await completeReviewedJob(worker, { job, leaseToken, wtPath,
-      onSucceeded: (freshJob) => spawnDeferredAssessmentFileRequestFollowUp(worker, job, freshJob, pendingFileRequests, null),
-    })) return { handled: true };
     if (!assessOnly) return { handled: false };
     const assessModelTierOverride = typeof cleanPayload?._assess_model_tier === "string"
       ? cleanPayload._assess_model_tier

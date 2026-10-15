@@ -16,7 +16,7 @@ const GATE_SHOW_CONTEXT_MAX_LINES = 20;
 // target is offered ("run" is the post-merge database gate's go-ahead).
 const ACTION_ALIASES = Object.freeze({
   retry: Object.freeze(["retry", "retry_assessment", "retry_with_changes", "run"]),
-  pass: Object.freeze(["pass", "run"]),
+  pass: Object.freeze(["pass"]),
   skip: Object.freeze(["skip"]),
 });
 

@@ -15,7 +15,7 @@ import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import { buildPromptAsync, buildHandoffPacket, extractResearcherFiles as defaultExtractResearcherFiles, handoff, packetToDynamicContextString, parseMissingContext } from "../../../handoff/functions/index.js";
 import { getAvailableProviders, getProviderName } from "../../../providers/functions/provider.js";
-import { artifactsDir, getConfiguredImageModel, wiScopeId } from "../../../artifacts/functions/index.js";
+import { artifactsDir, workspaceDir, getConfiguredImageModel, wiScopeId } from "../../../artifacts/functions/index.js";
 import { imageModelNativeFormats } from "../../../providers/functions/model-catalog.js";
 import { COMMON_WEB_ROOTS, WEB_IMAGE_DESTINATION_PHRASES } from "../../../../catalog/skill-inference.js";
 import { BaseRole, projectPromptPacketForProvider } from "../BaseRole.js";
@@ -126,7 +126,7 @@ export class ArtificerRole extends BaseRole {
     // cwd, so use the WI root without broadening the declared write roots.
     const wiArtifactRoot = artifactsDir(wiScopeId(job.work_item_id), projectDir);
     const usesWiArtifactScope = isWithinRoot(wiArtifactRoot, resolvedOutputRoot);
-    if (usesWiArtifactScope && createRoots.some((root) => !isWithinRoot(wiArtifactRoot, root))) {
+    if (usesWiArtifactScope && createRoots.some((root) => !isWithinRoot(wiArtifactRoot, root) && !isWithinRoot(workspaceDir(wiScopeId(job.work_item_id), projectDir), root))) {
       throw new Error("create_roots must stay inside this work item's artifact scope");
     }
     const artCwd = usesWiArtifactScope ? wiArtifactRoot : resolvedOutputRoot;

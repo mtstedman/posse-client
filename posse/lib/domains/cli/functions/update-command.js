@@ -209,6 +209,7 @@ export async function checkPosseUpdateAvailability({
       });
     }
     let remoteAlreadyContained = false;
+    let canFastForward = true;
     if (localSha !== remoteSha) {
       const ancestor = await callGit(git, ["merge-base", "--is-ancestor", remoteSha, localSha], {
         cwd: repoRoot,
@@ -216,12 +217,20 @@ export async function checkPosseUpdateAvailability({
         allowFailure: true,
       });
       remoteAlreadyContained = ancestor.ok;
+      if (!remoteAlreadyContained) {
+        // ls-remote gives an identity, but ancestry needs the fetched object.
+        await gitOutput(git, ["fetch", "--no-tags", remote, targetBranch], { cwd: repoRoot, timeoutMs });
+        const forward = await callGit(git, ["merge-base", "--is-ancestor", localSha, remoteSha], {
+          cwd: repoRoot, timeoutMs, allowFailure: true,
+        });
+        canFastForward = forward.ok;
+      }
     }
-    const available = localSha !== remoteSha && !remoteAlreadyContained;
+    const available = localSha !== remoteSha && !remoteAlreadyContained && canFastForward;
     return {
       ok: true,
       available,
-      status: available ? "available" : (remoteAlreadyContained ? "ahead" : "up-to-date"),
+      status: !canFastForward ? "diverged" : available ? "available" : (remoteAlreadyContained ? "ahead" : "up-to-date"),
       repo_root: repoRoot,
       remote,
       branch: targetBranch,

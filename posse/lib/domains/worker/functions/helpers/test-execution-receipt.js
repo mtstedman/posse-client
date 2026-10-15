@@ -742,13 +742,14 @@ async function executeReceipt({
         paths: plan.unit_test_paths,
         capability: discoverUnitTestCapability({ projectDir: cwd }),
         timeoutMs: effectivePolicy.wall_timeout_ms,
-      }).then((aggregate) => unitTestCommandResult(aggregate, { cwd,
+      }).then((aggregate) => unitTestCommandResult(aggregate, { cwd, filesToCreate: phase === "baseline" ? [] : plan.files_to_create || [],
         baselineCommit: plan.capability_base_commit || (baselineReceipt?.status === "passed" ? baselineReceipt.commit_hash : null) || "HEAD" }))
     : await runCommand(executionCommand, {
         cwd: executionCwd,
         timeoutMs: effectivePolicy.wall_timeout_ms,
         idleTimeoutMs: effectivePolicy.idle_timeout_ms,
         trustedShell: plan.source === "task_ab_acceptance",
+        filesToCreate: (phase === "baseline" ? [] : plan.files_to_create || []).map((file) => path.relative(executionCwd, path.resolve(cwd, file))),
         baselineCommit: plan.capability_base_commit || (baselineReceipt?.status === "passed" ? baselineReceipt.commit_hash : null) || "HEAD",
       });
   const plannerClassifiedResult = !hasExecutionChecks && !["task_ab_acceptance", "operator_approved_operation"].includes(plan.source) && phase === "baseline"
@@ -803,6 +804,7 @@ async function executeReceipt({
     cwd_relative: plan.cwd_relative || null,
     source: plan.source,
     ...(plan.capability_base_commit ? { capability_base_commit: plan.capability_base_commit } : {}),
+    files_to_create: plan.files_to_create || [],
     ...(Array.isArray(plan.unit_test_paths) ? { unit_test_paths: plan.unit_test_paths } : {}),
     ...(Array.isArray(plan.covered_unit_test_paths) ? { covered_unit_test_paths: plan.covered_unit_test_paths } : {}),
     ...(Array.isArray(plan.execution_checks) ? { execution_checks: plan.execution_checks } : {}),

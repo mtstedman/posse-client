@@ -17,6 +17,23 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { logDurableEvent } from "../../../queue/functions/events.js";
 import { reviewedTransferTelemetry, recordReviewedHandoffOperation } from "../../../observability/functions/reviewed-handoff-telemetry.js";
 
+function recordRecoveryError(jobId, transferId, error) {
+  const db = getDb();
+  runImmediateTransaction(db, () => {
+    const job = db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId);
+    if (!job || job.lease_token) return;
+    const payload = parseJobPayload(job);
+    payload._cross_wi_file_syncs = (payload._cross_wi_file_syncs || []).map((entry) =>
+      entry.transfer_id && (!transferId || entry.transfer_id === transferId)
+        ? transitionReviewedTransfer(entry, "blocked", { reason: REVIEWED_HANDOFF_REASONS.RECOVERY,
+          recovery_error: String(error.message || error), recovery_required_at: now() }) : entry);
+    db.prepare("UPDATE jobs SET payload_json = ? WHERE id = ?").run(JSON.stringify(payload), jobId);
+    logDurableEvent({ job_id: jobId, work_item_id: job.work_item_id,
+      event_type: EVENT_TYPES.WORK_ITEM_REVIEWED_TRANSFER_RECOVERY, actor_type: EVENT_ACTORS.WORKER,
+      message: `Reviewed transfer needs operator recovery: ${error.message || error}` });
+  });
+}
+
 async function restoreUncommittedImport(cwd, transfer, options) {
   if (!transfer.target_head || String(await gitExecAsync(["rev-parse", "HEAD"], cwd, options)).trim() !== transfer.target_head) return false;
   const prefix = String(await gitExecAsync(["rev-parse", "--show-prefix"], cwd, options));
@@ -61,7 +78,13 @@ export async function reconcileCanceledReviewedImports(jobId, cwd, projectDir, {
       await withBranchLockAsync(cwd, branch, projectDir, async () => {
         timing.branch_lock_wait_ms = performance.now() - branchWait;
         for (const transfer of reviewedTransfers(readJob())) {
-          const commit = await recoverReviewedTransferCommit(cwd, transfer, { signal });
+          let commit;
+          try { commit = await recoverReviewedTransferCommit(cwd, transfer, { signal }); }
+          catch (error) {
+            if (signal?.aborted) throw error;
+            recordRecoveryError(jobId, transfer.transfer_id, error);
+            continue;
+          }
           const initialWi = db.prepare("SELECT * FROM work_items WHERE id = ?").get(readJob()?.work_item_id);
           if (!eligible(readJob()) || initialWi?.branch_name !== branch || workItemBranchGeneration(initialWi) !== transfer.receiver_generation) continue;
           const restored = !commit && await restoreUncommittedImport(cwd, transfer, { signal });
@@ -103,7 +126,9 @@ export async function reconcileCanceledReviewedImports(jobId, cwd, projectDir, {
   } catch (error) {
     timing.outcome = "failed";
     timing.reason = signal?.aborted ? "aborted" : error.code || "other";
-    throw error;
+    if (signal?.aborted) throw error;
+    recordRecoveryError(jobId, null, error);
+    return recovered;
   } finally {
     try {
       timing.pending_count = reviewedTransfers(readJob()).length;
@@ -146,7 +171,8 @@ export async function reconcileReviewedHandoffsOnBoot(projectDir, { signal = nul
   for (const job of canceled) {
     const wi = db.prepare("SELECT * FROM work_items WHERE id = ?").get(job.work_item_id);
     const worktree = branches.get(wi?.branch_name);
-    if (worktree) recovered += await reconcileCanceledReviewedImports(job.id, path.join(worktree, prefix), projectDir, { signal });
+    if (worktree && fs.existsSync(path.join(worktree, prefix))) recovered += await reconcileCanceledReviewedImports(job.id, path.join(worktree, prefix), projectDir, { signal });
+    else recordRecoveryError(job.id, null, new Error("Receiver worktree is unavailable; restore it to reconcile the pending transfer"));
   }
   return { recovered };
 }

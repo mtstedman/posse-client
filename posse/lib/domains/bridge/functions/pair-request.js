@@ -26,7 +26,10 @@ export async function requestBridgePair(url, {
     }), requestSignal);
     onResponse?.(response);
     const text = await abortable(response.text(), requestSignal);
-    return { response, body: text ? JSON.parse(text) : {} };
+    let parsed;
+    try { parsed = text ? JSON.parse(text) : {}; }
+    catch { parsed = { error: { message: `HTTP ${response.status}: relay returned a non-JSON response` } }; }
+    return { response, body: parsed };
   } catch (error) {
     if (timeout.signal.aborted && !signal?.aborted) {
       throw new Error("Pairing relay request timed out", { cause: error });

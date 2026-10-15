@@ -57,6 +57,7 @@ export function coordinateContractOwnerRepair({ job, paths, proposedFix, spawn }
     const updatedPayload = { ...ownerPayload, original_task_spec: ownerPayload.original_task_spec || producerTaskSpec,
       task_spec: repairTaskSpec, fix_instructions: repairInstructions,
       _contract_owner_repair_request: { consumer_job_id: job.id, paths, fingerprint } };
+    delete updatedPayload._assess_only;
     updateJobPayload(owner.id, JSON.stringify(updatedPayload));
     repair = { ...owner, payload_json: JSON.stringify(updatedPayload) };
   }

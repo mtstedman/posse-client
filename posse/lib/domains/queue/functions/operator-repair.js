@@ -3,13 +3,13 @@ import { REPAIR_ACTIONS, REPAIR_MAX_RELATED, REPAIR_RECOVERY_KINDS, REPAIR_REJEC
 import { questionKindForReviewType } from "../../../catalog/human-input.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { getJob, getWorkItem, forceUpdateJobStatus, effectiveMergedEvidence, refreshWorkItemStatus, runInTransaction, updateJobPayload } from "./queue-store.js";
+import { getJob, getWorkItem, forceUpdateJobStatus, effectiveMergedEvidence, refreshWorkItemStatus, reholdPostMergeDbTasksForWorkItem, runInTransaction, updateJobPayload } from "./queue-store.js";
 import { beginJobRetryGeneration, setAssessmentLifecycle } from "./attempts.js";
 import { parseJobPayload } from "./payload.js";
 import { rewireDependency } from "./dependencies.js";
 import { clearFileLaneWaitsForJob } from "./file-locks.js";
 import { clearPeerClaimDeferralsForJob } from "./cross-instance-claims.js";
-import { reopenFailedWorkItem } from "./work-item-recovery.js";
+import { reopenFailedWorkItem, restoreCanceledDependents } from "./work-item-recovery.js";
 import { logDurableEvent } from "./events.js";
 
 function snapshot(workItemId, jobId) {
@@ -81,8 +81,8 @@ export function applyOperatorRepair(args) {
       }
       if (action === REPAIR_ACTIONS.WAIVE_ASSESSMENT && ["not_started", null, undefined].includes(s.job.assessment_state) && s.job.job_type !== "assess") throw new Error("implementation_not_complete_use_skip_job");
       const payload = parseJobPayload(s.job);
-      if (settingOnly || action === REPAIR_ACTIONS.WAIVE_ASSESSMENT) {
-        payload.skip_assessment = settingOnly ? enabled : true;
+      if (settingOnly) {
+        payload.skip_assessment = enabled;
         updateJobPayload(id, JSON.stringify(payload));
       }
       if (settingOnly) {
@@ -126,6 +126,8 @@ export function applyOperatorRepair(args) {
             event_json: JSON.stringify({ human_resolution: "explicit_waiver", assessor_verdict_preserved: s.job.assessor_verdict,
               assessor_state_version: getJob(id).state_version, execution_waived: action === REPAIR_ACTIONS.SKIP_JOB }) });
         }
+        restoreCanceledDependents(wi, [id], { ts: new Date().toISOString(), gateJobId: null, supersededGates: s.gates });
+        reholdPostMergeDbTasksForWorkItem(wi);
         refreshWorkItemStatus(wi);
       }
       logDurableEvent({ work_item_id: wi, job_id: id, event_type: EVENT_TYPES.JOB_OPERATOR_REPAIR,

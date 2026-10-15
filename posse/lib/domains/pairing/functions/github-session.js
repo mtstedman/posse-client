@@ -147,6 +147,16 @@ export function assertGitHubCliReady(projectDir, options = {}) {
   return { owner };
 }
 
+// Capture operator transport before session bootstrap removes its environment
+// override. Local config is separately saved for exact restoration on leave.
+const operatorSshCommand = process.env.GIT_SSH_COMMAND || (process.env.GIT_SSH
+  ? `'${process.env.GIT_SSH.replaceAll("'", "'\\''")}'` : null);
+export function readOriginSshCommand(projectDir, options = {}) {
+  if (operatorSshCommand) return operatorSshCommand;
+  try { return run("git", ["config", "--get", "core.sshCommand"], { cwd: projectDir, ...options }) || null; }
+  catch { return null; }
+}
+
 export function readLocalSshCommand(projectDir, options = {}) {
   try {
     return run("git", ["config", "--local", "--get", "core.sshCommand"], {

@@ -98,7 +98,7 @@ export function _sanitizeDisplayLine(text) {
 export function _colorizeAssessorVerdictWords(text) {
   const raw = String(text ?? "");
   const normalized = stripAnsi(raw).toLowerCase();
-  if (!normalized.includes("assessor")) return raw;
+  if (!/\b(?:assessor|audit)\b/.test(normalized)) return raw;
   return raw
     .replace(/\bPASS\b/g, `${C.green}PASS${C.reset}`)
     .replace(/\bFAIL\b/g, `${C.red}FAIL${C.reset}`);
@@ -130,22 +130,22 @@ export function _isNoisyStructuredStderr(text) {
 export function _isLowSignalStructuredMarker(text) {
   const normalized = String(text || "").trim();
   return /^\[(thread|turn|item)\.(started|completed)\]$/i.test(normalized)
-    || /^\[(?:assessor|planner)\]\s*(?:success|completed)\s*:/i.test(normalized);
+    || /^\[(?:assessor|audit|planner)\]\s*(?:success|completed)\s*:/i.test(normalized);
 }
 
 export function _isLowSignalAssessorMarker(text) {
   const normalized = String(text || "").trim();
-  return /^(?:\[assessor\]\s*)?(?:success|completed|start|finish)\s*:/i.test(normalized);
+  return /^(?:\[(?:assessor|audit)\]\s*)?(?:success|completed|start|finish)\s*:/i.test(normalized);
 }
 
 export function _isLowSignalWorkerCompletionMarker(text, role = null) {
   const normalized = String(text || "").trim();
   const workerRole = String(role || "").toLowerCase();
-  if (workerRole === "assessor") {
+  if (["assessor", "audit"].includes(workerRole)) {
     return _isLowSignalAssessorMarker(normalized);
   }
   if (workerRole === "planner") {
     return /^(?:\[planner\]\s*)?(?:success|completed)\s*:/i.test(normalized);
   }
-  return /^\[(?:assessor|planner)\]\s*(?:success|completed)\s*:/i.test(normalized);
+  return /^\[(?:assessor|audit|planner)\]\s*(?:success|completed)\s*:/i.test(normalized);
 }

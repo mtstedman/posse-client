@@ -230,7 +230,8 @@ export function validateManifestAgainstContract(manifest, taskMode) {
     // not satisfy the "must contain at least one allowed-format file"
     // requirement — a manifest-only output still fails.
     const nonManifestFiles = manifest.files.filter((f) => !isManifestFile(f));
-    const disallowed = nonManifestFiles.filter((f) => !allowedSet.has(f.ext));
+    const supportingSet = new Set(protocol.supporting_formats || []);
+    const disallowed = nonManifestFiles.filter((f) => !allowedSet.has(f.ext) && !supportingSet.has(f.ext));
     const hasAllowed = nonManifestFiles.some((f) => allowedSet.has(f.ext));
     if (!hasAllowed) {
       violations.push(`No files with allowed formats [${protocol.allowed_formats.join(", ")}] — found: [${[...new Set(manifest.files.map(f => f.ext))].join(", ")}]`);

@@ -133,7 +133,8 @@ function assertRuntimeCwd({ cwd, job, payload, role, roots }) {
       );
     }
     const mustUseOutputRoot = job.job_type === "artificer" || role === "assessor";
-    if (mustUseOutputRoot && !samePath(cwd, outputRoot)) {
+    if (mustUseOutputRoot && !samePath(cwd, outputRoot)
+        && !(job.job_type === "artificer" && samePath(cwd, roots.wiResources.artifacts) && isInsideRoot(outputRoot, cwd))) {
       throw authorityError(
         "POSSE_AGENT_AUTHORITY_ROOT_MISMATCH",
         `Job #${job.id} must execute in its persisted output_root`,
@@ -271,7 +272,7 @@ export function resolveAgentFileAuthority(attachment = {}, deps = {}) {
     allowedRoots: writeRoots,
     label: "create_roots",
     rejectBroadRoot: true,
-    artifactRoot: runtime.artifactMode ? runtime.outputRoot : null,
+    artifactRoot: runtime.artifactMode ? (samePath(cwd, roots.wiResources.artifacts) ? cwd : runtime.outputRoot) : null,
   });
   for (const entry of readRoots) {
     const target = path.resolve(cwd, entry);
@@ -294,6 +295,7 @@ export function resolveAgentFileAuthority(attachment = {}, deps = {}) {
     job,
     workItem,
     scope: Object.freeze({
+      ...(runtime.artifactMode ? { artifactOutputRoot: runtime.outputRoot } : {}),
       scopedFiles: Object.freeze(scopedFiles),
       createFiles: Object.freeze(createFiles),
       deleteFiles: Object.freeze(deleteFiles),

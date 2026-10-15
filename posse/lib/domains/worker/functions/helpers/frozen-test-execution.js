@@ -1,5 +1,6 @@
 import { runCommand, MAX_STREAM_CHARS } from "./test-command-process.js";
 import path from "path";
+import fs from "node:fs";
 import { resolveVerificationPolicy, verificationPolicyFingerprint } from "../../../settings/functions/verification-policy.js";
 import { TEST_FILE_INVOKED_COVERAGE_STATUS, SINGLE_FILE_TEST_RUNNERS } from "../../../../catalog/verification.js";
 import { checkRunFailureFingerprint, testFailureInventory } from "./test-failure-evidence.js";
@@ -9,19 +10,23 @@ import { exactDeclaredTestInvocation } from "./frozen-test-plan.js";
 import { classifyPackageManagerTestPlanFailure, classifyNestedRunnerInfrastructureFailure } from "../../../verification/functions/test-runner-failure.js";
 import { isUnrunnableTestResult } from "./verification-outcome.js";
 import { testCommandCapability, testFileRemovedSinceBaseline } from "../../../verification/functions/test-capability.js";
-import { TEST_RUNNER_REMOVED_REASON } from "../../../../catalog/verification.js";
+import { TEST_RUNNER_REMOVED_REASON, TEST_REQUIRED_FILE_MISSING_REASON } from "../../../../catalog/verification.js";
 
 // Project file-runner output into the command-result shape shared by receipts
 // and final review. Final review exposes the detailed outcome label and the
 // runner's aggregate reason; stored checks retain their historical status text.
-export function unitTestCommandResult(aggregate, { finalReview = false, cwd = null, baselineCommit = "HEAD" } = {}) {
+export function unitTestCommandResult(aggregate, { finalReview = false, cwd = null, baselineCommit = "HEAD", filesToCreate = [] } = {}) {
   const results = cwd ? aggregate.results.map((result) => {
+    if (filesToCreate.includes(result.path) && !fs.existsSync(path.resolve(cwd, result.path))) {
+      return { ...result, status: "failed", ok: false, reason: TEST_REQUIRED_FILE_MISSING_REASON,
+        stderr: "The candidate did not create a required test file." };
+    }
     if (!cwd || !testFileRemovedSinceBaseline(result.path, cwd, baselineCommit)) return result;
     return { ...result, status: "failed", ok: false, reason: TEST_RUNNER_REMOVED_REASON,
       stderr: "The candidate removed a test file present at its verification baseline." };
   }) : aggregate.results;
-  if (results.some((result) => result.reason === TEST_RUNNER_REMOVED_REASON)) {
-    aggregate = { ...aggregate, status: "failed", ok: false, reason: TEST_RUNNER_REMOVED_REASON };
+  if (results.some((result) => [TEST_RUNNER_REMOVED_REASON, TEST_REQUIRED_FILE_MISSING_REASON].includes(result.reason))) {
+    aggregate = { ...aggregate, status: "failed", ok: false, reason: results.find((result) => result.status === "failed").reason };
   }
   return {
     status: aggregate.status,
@@ -35,7 +40,7 @@ export function unitTestCommandResult(aggregate, { finalReview = false, cwd = nu
       return `[${result.path}] ${String(label)}\n${String(result.stdout || "")}`.trim();
     }).join("\n\n"),
     stderr: results.map((result) => String(result.stderr || "")).filter(Boolean).join("\n\n"),
-    reason: aggregate.reason === TEST_RUNNER_REMOVED_REASON ? aggregate.reason : finalReview ? aggregate.reason || null
+    reason: [TEST_RUNNER_REMOVED_REASON, TEST_REQUIRED_FILE_MISSING_REASON].includes(aggregate.reason) ? aggregate.reason : finalReview ? aggregate.reason || null
       : aggregate.ok == null ? results.find((result) => result.ok == null)?.reason || "unit_test_unavailable" : null,
     stdout_truncated: results.some((result) => result.stdout_truncated === true),
     stderr_truncated: results.some((result) => result.stderr_truncated === true),
@@ -66,7 +71,7 @@ export function effectiveVerificationPolicy({ cwd, policy = null, timeoutMs = nu
   return { ...effective, fingerprint: verificationPolicyFingerprint(effective) };
 }
 
-async function runVerificationCheck(check, { cwd, policy, phase = null, signal = null, baselineCommit = "HEAD" } = {}) {
+async function runVerificationCheck(check, { cwd, policy, phase = null, signal = null, baselineCommit = "HEAD", filesToCreate = [] } = {}) {
   const executionCommand = check.execution_command || check.command;
   const raw = Array.isArray(check.unit_test_paths)
     ? await runUnitTestFiles({
@@ -75,14 +80,14 @@ async function runVerificationCheck(check, { cwd, policy, phase = null, signal =
         capability: discoverUnitTestCapability({ projectDir: cwd }),
         timeoutMs: policy.wall_timeout_ms,
         signal,
-      }).then((aggregate) => unitTestCommandResult(aggregate, { cwd, baselineCommit }))
+      }).then((aggregate) => unitTestCommandResult(aggregate, { cwd, baselineCommit, filesToCreate: phase === "baseline" ? [] : filesToCreate }))
     : await runCommand(executionCommand, {
         cwd: check.cwd_relative ? path.resolve(cwd, check.cwd_relative) : cwd,
         timeoutMs: policy.wall_timeout_ms,
         signal,
         idleTimeoutMs: policy.idle_timeout_ms,
         trustedShell: check.source === "task_ab_acceptance",
-        baselineCommit,
+        baselineCommit, filesToCreate: (phase === "baseline" ? [] : filesToCreate).map((file) => path.relative(check.cwd_relative ? path.resolve(cwd, check.cwd_relative) : cwd, path.resolve(cwd, file))),
       });
   const classified = check.source !== "task_ab_acceptance" && check.source !== "operator_approved_operation" && phase === "baseline"
     ? classifyPackageManagerTestPlanFailure(executionCommand, raw) : raw;
@@ -166,7 +171,7 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
     }
     const checkWall = Math.min(wall, remaining);
     const run = await runVerificationCheck(check, { cwd,
-      baselineCommit, policy: { ...policy, wall_timeout_ms: checkWall, idle_timeout_ms: policy.idle_timeout_ms == null
+      baselineCommit, filesToCreate: plan.files_to_create || [], policy: { ...policy, wall_timeout_ms: checkWall, idle_timeout_ms: policy.idle_timeout_ms == null
         ? null : Math.min(policy.idle_timeout_ms, checkWall) }, phase, signal });
     runs.push(run.status === "timed_out" && run.timeout_kind !== "idle" && checkWall < wall
       ? budgetExhausted(check, { timeout_kind: "plan_budget", duration_ms: run.duration_ms || 0,
@@ -228,13 +233,14 @@ export async function runFrozenTestPlanOnce(plan, { cwd, timeoutMs = null, signa
         capability: discoverUnitTestCapability({ projectDir: cwd }),
         timeoutMs: policy.wall_timeout_ms,
         signal,
-      }).then((aggregate) => unitTestCommandResult(aggregate, { finalReview: true, cwd, baselineCommit: plan.capability_base_commit || "HEAD" }))
+      }).then((aggregate) => unitTestCommandResult(aggregate, { finalReview: true, filesToCreate: plan.files_to_create || [], cwd, baselineCommit: plan.capability_base_commit || "HEAD" }))
     : await runCommand(plan.execution_command || plan.command, {
         cwd: plan.cwd_relative ? path.resolve(cwd, plan.cwd_relative) : cwd,
         timeoutMs: policy.wall_timeout_ms,
         signal,
         idleTimeoutMs: policy.idle_timeout_ms,
         baselineCommit: plan.capability_base_commit || "HEAD",
+        filesToCreate: (plan.files_to_create || []).map((file) => path.relative(plan.cwd_relative ? path.resolve(cwd, plan.cwd_relative) : cwd, path.resolve(cwd, file))),
       });
   const result = hasExecutionChecks ? raw
     : classifyNestedRunnerInfrastructureFailure(plan.execution_command || plan.command, raw, { projectRoot: cwd });

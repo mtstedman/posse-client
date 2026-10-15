@@ -284,7 +284,7 @@ function nudgeActionResult(baseArgs, {
 }
 
 function choiceDanger(choiceId) {
-  if (["fail", "revert", "abandon"].includes(choiceId)) return "destructive";
+  if (["fail", "revert", "abandon", "waive_tests"].includes(choiceId)) return "destructive";
   if (["reject", "skip", "replan", "cancel", "decline", "rebuild"].includes(choiceId)) return "caution";
   return "normal";
 }
@@ -361,6 +361,12 @@ function gateChoiceRecords(kind, payload) {
         consequence: "Accept the current work under the recorded waiver.",
       });
     }
+    if (kind === "merge_failure_recovery" && choiceId === "commit") return choiceRecord(choiceId, {
+      label: "Commit and merge", consequence: "Commit pending branch and target edits, then retry the merge.", danger: "destructive",
+    });
+    if (kind === "merge_verification_review" && choiceId === "fail") return choiceRecord(choiceId, {
+      label: "Send back for rework", consequence: "Retain the branch and return the implementation for repair and reassessment.",
+    });
     return choiceRecord(choiceId, entry);
   });
 }

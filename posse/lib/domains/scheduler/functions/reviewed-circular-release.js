@@ -12,7 +12,7 @@ export function resolveReviewedCircularOwnership(job, ownerId, order = null) {
   const scope = reviewedHandoffsEnabled() ? getJobWriteScope(job) : null;
   if (scope && supportsReviewedAdmission(job, scope)) {
     for (let remaining = scope.files.length; conflict && remaining > 0; remaining--) {
-      if (!conflict.lock?.id || !prepareCrossWiFileSyncHandoff(job, conflict, ownerId)) break;
+      if (!conflict.lock?.id || !prepareCrossWiFileSyncHandoff(job, conflict, ownerId, { recordWait: false })) break;
       released = true;
       order = loadWorkItemOrder();
       conflict = findWorkItemOrderConflict(job, order);

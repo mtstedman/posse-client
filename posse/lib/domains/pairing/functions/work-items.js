@@ -208,6 +208,7 @@ export function writePairingPeerSnapshot(status, { at = new Date().toISOString()
     enrollment_open: status?.enrollment_open === true,
     compute_policy: boundedText(status?.compute_policy, 40),
     integration_policy: boundedText(status?.integration_policy, 40),
+    provenance_member_ids: (Array.isArray(status?.provenance_member_ids) ? status.provenance_member_ids : []).map((id) => boundedText(id, 160)).filter(Boolean),
     members: (Array.isArray(status?.members) ? status.members : [])
       .slice(0, 100)
       .map((member) => ({
@@ -233,6 +234,7 @@ function recordSessionIdentities(snapshot) {
   if (!sessionId) return;
   const seen = snapshot.peers.flatMap((peer) => peer.git_identities || []);
   const seenMembers = [
+    ...(snapshot.provenance_member_ids || []),
     ...snapshot.peers.map((peer) => peer.instance_id),
     ...snapshot.members.map((member) => member.instance_id),
   ].filter(Boolean);
@@ -252,6 +254,7 @@ function recordSessionIdentities(snapshot) {
 export function sessionProvenanceMembers(sessionId, { snapshot = readPairingPeerSnapshot() } = {}) {
   const live = snapshot?.session_id === String(sessionId)
     ? [
+        ...(snapshot.provenance_member_ids || []),
         ...(snapshot.peers || []).map((peer) => peer.instance_id),
         ...(snapshot.members || []).map((member) => member.instance_id),
       ].filter(Boolean)

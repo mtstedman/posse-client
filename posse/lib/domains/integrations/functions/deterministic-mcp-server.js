@@ -2339,7 +2339,7 @@ mcpToolRegistry.attach("ack_operator_feedback", (args) => ackOperatorFeedback(ar
 if (writeEnabled) {
   mcpToolRegistry.attach("write_file", (args) => writeFileWithinScope(args || {}));
   mcpToolRegistry.attach("edit_file", (args) => editFileWithinScope(args || {}));
-  mcpToolRegistry.attach("prune_artifact_output", (args) => execPruneArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
+  mcpToolRegistry.attach("prune_artifact_output", (args) => execPruneArtifactOutput({ output_root: bootConfig.artifactOutputRoot, ...args }, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("move_file", (args) => moveFileWithinScope(args || {}));
   mcpToolRegistry.attach("copy_file", (args) => copyFileWithinScope(args || {}));
   mcpToolRegistry.attach("make_dir", (args) => makeDirWithinScope(args || {}));
@@ -2353,7 +2353,7 @@ if (ownerHotGateway || roleName === "dev" || roleName === "assessor" || roleName
 }
 if (allowImageHelpers) {
   mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
-  mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
+  mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput({ output_root: bootConfig.artifactOutputRoot, ...args }, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
   // view_image is assessor-only; owner-hot attaches every executor and the
   // remote token gates each call.
@@ -2563,7 +2563,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
   if (writeEnabled) {
     mcpToolRegistry.attach("write_file", (args) => writeFileWithinScope(args || {}));
     mcpToolRegistry.attach("edit_file", (args) => editFileWithinScope(args || {}));
-    mcpToolRegistry.attach("prune_artifact_output", (args) => execPruneArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
+    mcpToolRegistry.attach("prune_artifact_output", (args) => execPruneArtifactOutput({ output_root: bootConfig.artifactOutputRoot, ...args }, workspaceCwd, effectiveScopePredicates));
     mcpToolRegistry.attach("move_file", (args) => moveFileWithinScope(args || {}));
     mcpToolRegistry.attach("copy_file", (args) => copyFileWithinScope(args || {}));
     mcpToolRegistry.attach("make_dir", (args) => makeDirWithinScope(args || {}));
@@ -2577,7 +2577,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
   }
   if (allowImageHelpers) {
     mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
-    mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput(args || {}, workspaceCwd, effectiveScopePredicates));
+    mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput({ output_root: bootConfig.artifactOutputRoot, ...args }, workspaceCwd, effectiveScopePredicates));
     mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
     if (ownerHotGateway || roleName === "assessor") {
       mcpToolRegistry.attach("view_image", (args) => viewImageForCurrentScope(args || {}));

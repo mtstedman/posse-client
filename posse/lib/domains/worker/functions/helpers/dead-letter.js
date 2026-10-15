@@ -549,6 +549,13 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     return;
   }
 
+  const failedPayload = parseJobPayload(freshJob);
+  const failedAttemptId = attemptId || getAttempts(job.id).findLast((entry) => entry.worker_type !== "assessor")?.id;
+  if (failedAttemptId) {
+    failedPayload._final_review_invalidated_attempt_id = failedAttemptId;
+    freshJob.payload_json = JSON.stringify(failedPayload);
+    updateJobPayload(job.id, freshJob.payload_json);
+  }
   const retryGeneration = Math.max(0, Number(parseJobPayload(freshJob)?._retry_generation) || 0);
   const generationAttempts = getAttempts(job.id).filter((entry) => (
     ["implementation", "human"].includes(String(entry.attempt_kind || "implementation"))

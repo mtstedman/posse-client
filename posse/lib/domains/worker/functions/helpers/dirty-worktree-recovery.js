@@ -51,10 +51,9 @@ export async function applyDirtyWorktreeRecovery({ worker, job, payload, action,
   const priorRecovery = next[DIRTY_WORKTREE_RECOVERY_KEY];
   const continuingRecovery = priorRecovery?.gate_id === job.id;
   const priorCommits = priorRecovery?.commits || [];
-  const paths = (payload.dirty_paths || []).map(normalizeRepoPath).filter(Boolean);
-  if (unfinishedSiblingDirtyLocks(original, paths).length) {
-    throw new Error("Recovery paths belong to an unfinished sibling job; let that job recover its own work");
-  }
+  const requestedPaths = (payload.dirty_paths || []).map(normalizeRepoPath).filter(Boolean);
+  const siblingPaths = new Set(unfinishedSiblingDirtyLocks(original, requestedPaths).map((lock) => lock.path));
+  const paths = requestedPaths.filter((file) => !siblingPaths.has(file));
   const requiresDevelopment = (continuingRecovery && priorRecovery.requires_development === true)
     || Boolean(feedback) || paths.some(file => !payloadExplicitlyClaimsPath(next, file));
   const untracked = new Set(String(await gitExecAsync(["ls-files", "--others", "--exclude-standard", "-z"], cwd)).split("\0"));

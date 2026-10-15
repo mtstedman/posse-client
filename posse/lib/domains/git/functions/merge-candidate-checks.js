@@ -1,3 +1,4 @@
+import { resolveUnitTestInvocation } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { testExecutionCounts } from "../../../shared/tools/functions/toolkit/test-output-counts.js";
 import { MERGE_CANDIDATE_CHECKOUT_PREFIX, MERGE_CHECK_FAILURE_KINDS } from "../../../catalog/verification.js";
 import fs from "node:fs";
@@ -50,6 +51,26 @@ export function declaredMergeCandidateCommands(jobs = []) {
     .map((job) => String(parseJobPayload(job).test_command || "").trim()).filter(Boolean))];
 }
 
+function runSelectedTests(paths, checkout, run, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  const results = [];
+  const quote = (arg) => `"${String(arg).replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  for (const file of paths) {
+    const invocation = resolveUnitTestInvocation(checkout, file);
+    if (!invocation?.runner) return { ok: false, status: null, error_code: "ENOENT", output: `Selected test unavailable: ${file}` };
+    const remaining = deadline - Date.now();
+    if (remaining < 1) return { ok: false, status: null, timed_out: true, error_code: "ETIMEDOUT", output: "Selected tests exceeded merge budget" };
+    results.push(run([invocation.executable, ...invocation.args].map(quote).join(" "), {
+      cwd: invocation.cwd || checkout, timeoutMs: remaining,
+    }));
+  }
+  const failure = results.find((result) => !result.ok);
+  return { ...(failure || results[0]), ok: !failure,
+    stdout: results.map((result) => result.stdout || result.output || "").join("\n"),
+    stderr: results.map((result) => result.stderr || "").join("\n"),
+    output: results.map((result) => result.output || "").join("\n") };
+}
+
 /** Verify the staged tree without letting test side effects alter the merge. */
 export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = runCloseoutTestCommandSync, candidate = null, deadlineMs = null }) {
   const commands = declaredMergeCandidateCommands(jobs);
@@ -65,7 +86,9 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
         test: { name: command }, note: validation.reason };
       const cwdRelative = validation.cwd_relative || null;
       const timeoutMs = Math.min(10 * 60_000, remainingMs);
-      const result = run(validation.execution_command || command, {
+      const result = Array.isArray(validation.unit_test_paths)
+        ? runSelectedTests(validation.unit_test_paths, checkout, run, timeoutMs)
+        : run(validation.execution_command || command, {
         cwd: validation.cwd_relative ? path.resolve(checkout, validation.cwd_relative) : checkout,
         dependencySourceDir: validation.cwd_relative ? path.resolve(cwd, validation.cwd_relative) : cwd,
         timeoutMs,

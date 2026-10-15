@@ -190,7 +190,7 @@ export function prunedTestPlan(payload = {}) {
 export function resolveFrozenTestPlan(job = {}, payload = {}, options = {}) {
   const plan = resolveTestPlan(job, payload, options);
   const base = payload._test_capability_base_commit || payload.root_base_commit || payload.commit_base_hash;
-  return plan && base ? { ...plan, capability_base_commit: base } : plan;
+  return plan ? { ...plan, files_to_create: payload.files_to_create || [], ...(base ? { capability_base_commit: base } : {}) } : plan;
 }
 
 function resolveTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
@@ -219,7 +219,7 @@ function resolveTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
     ? discoverUnitTestCapability({ projectDir: cwd })
     : null;
   const unitTestPaths = Array.isArray(testsToRun)
-    ? selectedPaths.filter((value) => capability?.available && capability.files.includes(value))
+    ? selectedPaths.filter((value) => (capability?.available && capability.files.includes(value) || (payload.files_to_create || []).includes(value)))
       .slice(0, 24)
     : [];
   const unresolvedSelection = selectedPaths.filter((value) => !unitTestPaths.includes(value));
@@ -357,6 +357,7 @@ export function frozenTestPlanFromReceipt(receipt = {}) {
     execution_command: executionCommand,
     cwd_relative: cwdRelative,
     source,
+    files_to_create: receipt.files_to_create || [],
     plan_id: planId,
     ...(receipt.capability_base_commit ? { capability_base_commit: receipt.capability_base_commit } : {}),
     check_id: receipt.check_id || null,

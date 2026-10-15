@@ -1,3 +1,4 @@
+import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { parkDirtyWorktreeRecovery } from "./dirty-worktree-recovery.js";
 import { DIRTY_WORKTREE_RECOVERY_ERROR, DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js";
 // lib/domains/worker/functions/helpers/worktree-lifecycle.js
@@ -668,7 +669,10 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       const preservedLocks = unfinishedSiblingDirtyLocks(job, candidatePaths);
       const siblingPaths = new Set(preservedLocks.map(lock => lock.path));
       const recoveryPaths = candidatePaths.filter(file => !siblingPaths.has(file));
-      if (!recoveryPaths.length && preservedLocks.length) throw activeSiblingSetupError(preservedLocks);
+      if (!recoveryPaths.length && preservedLocks.length) {
+        if (earlyPayload._assess_only) throw activeSiblingSetupError(preservedLocks);
+        return true;
+      }
       if (recoveryPaths.length) {
         throw Object.assign(new Error("Dirty worktree needs an operator recovery choice"), {
           code: DIRTY_WORKTREE_RECOVERY_ERROR, paths: recoveryPaths, deferWorktreeCleanup: true,
@@ -906,7 +910,10 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
         const preservedLocks = unfinishedSiblingDirtyLocks(job, candidatePaths);
         const siblingPaths = new Set(preservedLocks.map(lock => lock.path));
         const recoveryPaths = candidatePaths.filter(file => !siblingPaths.has(file));
-        if (!recoveryPaths.length && preservedLocks.length) throw activeSiblingSetupError(preservedLocks);
+        if (!recoveryPaths.length && preservedLocks.length) {
+          if (earlyPayload?._assess_only) throw activeSiblingSetupError(preservedLocks);
+          return;
+        }
         if (earlyPayload && recoveryPaths.length) {
           throw Object.assign(new Error("Dirty worktree needs an operator recovery choice"), {
             code: DIRTY_WORKTREE_RECOVERY_ERROR, paths: recoveryPaths, deferWorktreeCleanup: true,
@@ -1697,7 +1704,6 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
     }
 
     const ctxDir = contextDir(wiScopeId(wi.id), worker.projectDir);
-    await retireSettledReviewedRefs(worker.projectDir, { signal });
     try {
       await fs.promises.rm(ctxDir, { recursive: true, force: true });
     } catch {
@@ -1716,6 +1722,8 @@ export async function cleanupWorktreeIfDoneAsync(worker, workItemId, { signal = 
         event_json: JSON.stringify({ dirs: artifactCleanup.removed }),
       });
     }
+    try { await retireSettledReviewedRefs(worker.projectDir, { signal }); }
+    catch (error) { log.warn("worker", "Reviewed ref retirement failed", { error: error.message, workItemId }); }
   } catch (err) {
     const message = err?.message || String(err);
     logEvent({

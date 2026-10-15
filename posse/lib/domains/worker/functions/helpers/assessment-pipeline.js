@@ -3,7 +3,6 @@ import { assessmentDisplayMessage } from "../execution/display-sync.js";
 import { diffPorcelainEntries } from "../../../git/functions/porcelain-diff.js";
 import { authoritativeFinalReview, latestFinalReview } from "../../../assessment/functions/final-review-authority.js";
 import { reserveFinalReviewContinuation } from "../../../assessment/functions/final-review-continuation.js";
-import { completeReviewedJob } from "./complete-reviewed-job.js";
 // lib/domains/worker/functions/helpers/assessment-pipeline.js
 //
 // Post-execution assessment pipeline extracted from worker.js.
@@ -1963,12 +1962,6 @@ export async function runPostExecutionAssessment(worker, {
     spawnedFileRequestFollowUp = true;
     return true;
   };
-
-  if (await completeReviewedJob(worker, {
-    job, leaseToken, wtPath, attempt, committedHash, commitBaseHash, filesCommitted,
-    filesCommittedUnknown, verifiedNoChange, startTime,
-    onSucceeded: () => { spawnPendingFileRequestsOnce(); },
-  })) return;
 
   // A commit warm is emitted before this function runs. Park this job as
   // assess-only until the worker has inspected that exact warm. The worker

@@ -69,11 +69,14 @@ export function sessionJoinFolder({
   argv = process.argv.slice(2),
   cwd = process.cwd(),
   homeDir = os.homedir(),
+  env = process.env,
 } = {}) {
   const request = sessionJoinRequest(argv);
   if (!request || request.here) return null;
   const target = path.join(homeDir, SESSION_JOIN_FOLDERS_DIRECTORY, sessionJoinFolderName(request.code));
-  return path.resolve(cwd) === path.resolve(target) ? null : target;
+  const canonical = (value) => { try { return fs.realpathSync.native(value); } catch { return path.resolve(value); } };
+  if (env[SESSION_JOIN_FOLDER_ENV] === target && canonical(cwd) === canonical(env[SESSION_JOIN_FOLDER_ENV])) return null;
+  return canonical(cwd) === canonical(target) ? null : target;
 }
 
 // The child joins in its own folder, so an inherited project directory must
@@ -100,7 +103,7 @@ export async function relocateSessionJoinIfNeeded({
   stderr = process.stderr,
   signalTarget = process,
 } = {}) {
-  const target = sessionJoinFolder({ argv: argv.slice(2), cwd, homeDir });
+  const target = sessionJoinFolder({ argv: argv.slice(2), cwd, homeDir, env });
   if (!target) return null;
   // --json keeps stdout for the join's own JSON lines.
   const json = argv.includes("--json");

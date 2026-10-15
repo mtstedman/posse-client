@@ -20,7 +20,7 @@ export function parseLockMetadata(value) {
   }
 }
 
-export function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
+export function prepareCrossWiFileSyncHandoff(job, conflict, ownerId, { recordWait = true } = {}) {
   if (!job || conflict?.type !== "work_item") return false;
   const lockKind = conflict.lock?.lock_kind;
   if (lockKind !== "file" && lockKind !== "root") return false;
@@ -49,6 +49,7 @@ export function prepareCrossWiFileSyncHandoff(job, conflict, ownerId) {
     && Date.now() - parkedAtMs >= OPERATOR_PARKED_REJECTED_LOCK_RELEASE_MS;
 
   const recordBlocked = (message, eventDetail) => {
+    if (!recordWait) return false;
     const normalizedBlockers = Array.isArray(eventDetail?.blockers)
       ? eventDetail.blockers.slice(0, 10).map((blocker) => ({
           job_id: blocker.job_id ?? blocker.id ?? null,

@@ -28,6 +28,7 @@ export const ARTIFACT_PROTOCOLS = Object.freeze({
     provider: "grok",
     model: "grok-imagine-image",
     allowed_formats: Object.freeze([".png", ".jpg", ".jpeg", ".webp"]),
+    supporting_formats: Object.freeze([".pdf"]),
     allowed_manifest_files: MANIFEST_FILES,
     default_format: ".png",
     max_outputs: 4,
@@ -40,7 +41,7 @@ export const ARTIFACT_PROTOCOLS = Object.freeze({
   report: Object.freeze({
     provider: null,
     model: null,
-    allowed_formats: Object.freeze([".md", ".txt", ".json", ".csv", ".html"]),
+    allowed_formats: Object.freeze([".md", ".txt", ".json", ".csv", ".html", ".pdf"]),
     allowed_manifest_files: MANIFEST_FILES,
     default_format: ".md",
     max_outputs: 10,

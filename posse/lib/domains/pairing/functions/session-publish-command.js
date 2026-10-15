@@ -246,7 +246,7 @@ export async function runSessionPublish({
   const remote = validateRemoteName(state.origin_remote_name || "origin");
   const targetBranch = state.original_branch;
   const sessionId = state.remote_session_id;
-  const sshCommand = state.original_ssh_command;
+  const sshCommand = state.origin_ssh_command ?? state.original_ssh_command;
   const attempts = unattended ? 2 : 3;
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {

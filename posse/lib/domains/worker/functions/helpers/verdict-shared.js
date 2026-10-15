@@ -4,7 +4,7 @@
 
 import path from "path";
 import { INFERRED_SCOPE_BARE_EXTENSIONS } from "../../../../catalog/files.js";
-import { RECEIPT_CONFIDENCE_POLICY, REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID, UNESTABLISHED_COVERAGE_STATUSES } from "../../../../catalog/verification.js";
+import { RECEIPT_CONFIDENCE_POLICY, REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID, UNESTABLISHED_COVERAGE_STATUSES, TEST_REQUIRED_FILE_MISSING_REASON } from "../../../../catalog/verification.js";
 import { inferGeneratedArtifactDeletionTargets } from "../../../../shared/scope/classes/MutationPolicy.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
 import { countFailedJobs, getAttempts, getDependents, getEventsByWorkItem, getJob, getWorkItem, listJobsByWorkItem, logEvent, runInTransaction, updateJobPayload, updateJobStatus, updateWorkItemMetadata } from "../../../queue/functions/index.js";
@@ -262,13 +262,16 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
 
 export function capVerdictForDeterministicTestRegression(verdict, testRun = null) {
   const postChange = testRun?.postChange || testRun?.post_change || null;
+  // Creating a required test is part of the task even when the baseline had
+  // no runnable suite. Its absence cannot be inherited as baseline debt.
+  const requiredMissing = postChange?.reason === TEST_REQUIRED_FILE_MISSING_REASON;
   if (isUnrunnableTestResult(postChange)) return verdict;
   // Legacy runners can report failed alongside a typed infrastructure result.
   // Never turn that harness failure into a product repair. A demonstrated
   // pass-to-timeout regression remains actionable.
   if (postChange && isVerificationInfrastructureOutcome(postChange)
     && !(postChange.status === "timed_out" && testRun?.delta === "regression")) return verdict;
-  if (testRun?.debt_only === true && postChange?.status === "failed") {
+  if (!requiredMissing && testRun?.debt_only === true && postChange?.status === "failed") {
     return {
       ...verdict,
       verification_status: "frozen_test_debt_only",
@@ -282,7 +285,7 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
     };
   }
   if (["fail", "needs_replan"].includes(verdict?.verdict)
-    || !["regression", "changed_failure", "post_only", "infrastructure_unavailable"].includes(testRun?.delta)
+    || (!requiredMissing && !["regression", "changed_failure", "post_only", "infrastructure_unavailable"].includes(testRun?.delta))
     || !["failed", "timed_out"].includes(postChange?.status)
     || (postChange?.status === "timed_out" && testRun?.delta !== "regression")) return verdict;
   const outputTail = [postChange?.stdout, postChange?.stderr]
@@ -1035,9 +1038,9 @@ function _shouldReplanForDesiredOutputs(job, verdict) {
 export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: currentAssessedCommitHash, projectDir = null } = {}) {
   const workItem = getWorkItem(job.work_item_id);
   const desiredOutputs = _getDesiredOutputs(workItem);
-  // The reviewer already judged this exact candidate and contract. Completion
-  // must not submit it to legacy test, risk, confidence, or replan policies.
-  if (isAuthoritativeFinalReviewPass(job, verdict)) return { verdict, desiredOutputs };
+  // Preserve the reviewer decision only after deterministic verification and
+  // scope checks. Model confidence policies do not supersede that review.
+  const reviewedPass = isAuthoritativeFinalReviewPass(job, verdict);
   const payload = parseJobPayload(job);
   let prepared = {
     ...verdict,
@@ -1128,6 +1131,9 @@ export function prepareVerdictForDispatch(job, verdict, { assessedCommitHash: cu
   prepared = capVerdictForFailedUnitTestRuns(prepared, failedUnitTestRunsAtCommit(job.id, assessedCommitHash));
   prepared = replanFailedBlockedRecoveryRetry(job, prepared, payload);
   prepared = replanExhaustedFixChain(job, prepared, payload);
+
+  // Semantic review authority never bypasses deterministic verification.
+  if (reviewedPass) return { verdict: prepared, desiredOutputs };
 
   const normalizedPassConfidence = normalizeAssessorConfidence(prepared.confidence, {
     fallback: "medium",

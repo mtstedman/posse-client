@@ -259,8 +259,10 @@ export async function runPairCommand(
     let confirmed = false;
     let transientConfirmFailures = 0;
 
-    while (Date.now() < expiresAt) {
+    while (Date.now() < expiresAt || transientConfirmFailures > 0) {
       if (!confirmationCode) {
+        clearTimeout(expiryTimer);
+        expiryTimer = setTimeout(() => ceremonyAbort.abort(), Math.max(0, expiresAt - Date.now()));
         confirmationCode = normalizeConfirmationCode(await abortable(promptCode(
           "  Enter the 4-character code shown on your phone: ",
           { signal: ceremonyAbort.signal, onCancel: cancelFromSignal },
@@ -277,8 +279,11 @@ export async function runPairCommand(
         confirmationCode = "";
         continue;
       }
-      if (Date.now() >= expiresAt) break;
+      if (Date.now() >= expiresAt && transientConfirmFailures === 0) break;
 
+      // QR expiry limits admission, not an already-issued confirmation.
+      // Once sent, allow its full response deadline to persist relay success.
+      clearTimeout(expiryTimer);
       let confirmRes;
       try {
         pairPulseTokens.assertTrustedResourceUrl(confirmUrl, "bridge pair confirm");
@@ -286,11 +291,11 @@ export async function runPairCommand(
           fetchImpl, authHeaders: pairAuthHeaders,
           body: { qr_token: qrToken, confirmation_code: confirmationCode },
           signal: ceremonyAbort.signal,
-          timeoutMs: Math.min(requestTimeoutMs, Math.max(1, expiresAt - Date.now())),
+          timeoutMs: requestTimeoutMs,
           onResponse: (response) => { if (response.ok) relayConsumed = true; },
         }));
       } catch (err) {
-        if (cancelRequested || Date.now() >= expiresAt) throw err;
+        if (cancelRequested || ceremonyAbort.signal.aborted) throw err;
         transientConfirmFailures += 1;
         if (transientConfirmFailures < Math.max(1, Number(confirmRetryLimit) || 1)) {
           console.log(`\n  ${C.yellow}Relay confirmation response was interrupted; retrying the same pair safely.${C.reset}\n`);
@@ -316,6 +321,7 @@ export async function runPairCommand(
         }
       }
 
+      transientConfirmFailures = 0;
       const code = body?.error?.code;
       const message = body?.error?.message || body?.message || `HTTP ${confirmRes.status}`;
       const friendly = PAIR_CONFIRM_FRIENDLY[code] || message;

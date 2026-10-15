@@ -89,9 +89,10 @@ export async function retireSettledReviewedRefs(cwd, { signal = null } = {}) {
       if (wi?.merge_state !== "merged" && workItemBranchGeneration(wi) === transfer.receiver_generation) live.add(transfer.receipt_id);
     }
   }
+  const existing = new Set(String(await gitExecAsync(["for-each-ref", "--format=%(refname)", REVIEWED_HANDOFF_REF_PREFIX], cwd, { signal })).split("\n"));
   let retired = 0;
   for (const [id, commit] of known) {
-    if (live.has(id) || !/^[a-f0-9]{64}$/.test(id)) continue;
+    if (live.has(id) || !/^[a-f0-9]{64}$/.test(id) || !existing.has(`${REVIEWED_HANDOFF_REF_PREFIX}${id}`)) continue;
     // Compare-and-delete cannot remove an independently replaced ref.
     await gitExecAsync(["update-ref", "-d", `${REVIEWED_HANDOFF_REF_PREFIX}${id}`, commit], cwd, { signal });
     retired++;

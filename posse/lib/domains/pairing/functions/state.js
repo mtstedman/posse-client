@@ -25,6 +25,7 @@ function parseState(row) {
   return {
     ...row,
     originalSettings,
+    origin_ssh_command: originalSettings.origin_ssh_command || row.original_ssh_command || null,
     scopeSet,
   };
 }

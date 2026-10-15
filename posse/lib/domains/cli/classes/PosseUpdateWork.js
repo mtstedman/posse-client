@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isProcessAlive } from "../../../shared/platform/functions/process-liveness.js";
+import { acquireWorktreeLockAsync } from "../../git/functions/worktree-locks.js";
 import { randomUUID } from "node:crypto";
 
 // Owns the preservation window for an opt-in update of a dirty installation.
@@ -15,16 +17,28 @@ export class PosseUpdateWork {
   async acquire() {
     const result = await this.git(["rev-parse", "--git-path", "posse-update.lock"], { cwd: this.repoRoot });
     const lockPath = path.resolve(this.repoRoot, String(result.stdout).trim());
+    // The established file lock serializes directory creation and stale-owner
+    // recovery, including a reclaimer that itself dies midway through cleanup.
+    const guard = await acquireWorktreeLockAsync(`${lockPath}.guard`, { waitMs: 1000 });
+    if (!guard.acquired) throw new Error(`Another preserving update owns ${lockPath}`);
     try {
-      fs.mkdirSync(lockPath);
-    } catch (error) {
-      if (error.code === "EEXIST") {
-        throw new Error(`Another preserving update owns ${lockPath}; inspect it before removing a stale lock`);
+      let owner;
+      try { owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8")); } catch { /* a legacy lock without metadata remains protected */ }
+      if (owner && isProcessAlive(owner.pid) === false) fs.rmSync(lockPath, { recursive: true, force: true });
+      try {
+        fs.mkdirSync(lockPath);
+      } catch (error) {
+        if (error.code === "EEXIST") throw new Error(`Another preserving update owns ${lockPath}; inspect it before removing a stale lock`);
+        throw error;
       }
-      throw error;
-    }
-    this.lockPath = lockPath;
-    fs.writeFileSync(path.join(lockPath, "owner.json"), `${JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() })}\n`);
+      this.lockPath = lockPath;
+      try {
+        fs.writeFileSync(path.join(lockPath, "owner.json"), `${JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() })}\n`);
+      } catch (error) {
+        this.release();
+        throw error;
+      }
+    } finally { await guard.releaseAsync(); }
   }
 
   async save() {

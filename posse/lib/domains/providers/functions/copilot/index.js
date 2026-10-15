@@ -1,4 +1,5 @@
 // Copilot prompt/model projection. Rust owns discovery, launch and event decoding.
+import { copyProviderOptions } from "../shared/provider-options.js";
 import { PROVIDER_CAPABILITIES } from "../../../../catalog/provider-capabilities.js";
 import { verifyProviderDispatchCapabilitiesSync } from "../../../../shared/native/functions/engagement-client.js";
 import { providerRuntimeState } from "../../classes/runtime-state-singleton.js";
@@ -39,10 +40,10 @@ export async function callProvider(promptText, opts = {}) {
       if (opts.allowWrite) throw new Error("A tool-free Copilot turn cannot have write access");
     } else {
       if (!opts.mcpGate) throw Object.assign(new Error("Copilot agent requires an MCP gate dependency"), { code: "POSSE_AGENT_MCP_GATE_REQUIRED" });
-      owner = await buildDeterministicReadMcpServerConfigAsync(role, {
+      owner = await buildDeterministicReadMcpServerConfigAsync(role, copyProviderOptions(opts, {
         ...opts, cwd, providerName: "copilot", isolateProviderHome: false,
         remoteToolSurface: opts.mcpGate.remoteToolSurface,
-      });
+      }));
       if (!owner?.ready) throw Object.assign(new Error(`Copilot MCP gate is not ready: ${owner?.reason || "unknown"}`), { code: "POSSE_AGENT_MCP_GATE_NOT_READY" });
       issuedToolIds = await nativeIssuedToolIds(opts.mcpGate);
     }
@@ -54,7 +55,7 @@ export async function callProvider(promptText, opts = {}) {
       maxOutputTokens: normalizeMaxOutputTokens(opts.maxOutputTokens) || getMaxOutputTokensForProvider("copilot", { role }),
       stallTimeoutMs: resolveProviderStallTimeout(opts.stallTimeout) * 1000,
     });
-    return await runNativeDispatch(request, { ...opts, projectDir: opts.projectDir || cwd });
+    return await runNativeDispatch(request, copyProviderOptions(opts, { projectDir: opts.projectDir || cwd }));
   } finally {
     if (owner?.ownerSession) releaseDeterministicMcpServerSession(owner, { reason: "provider_cleanup", context: { provider: "copilot", role, jobId: opts.jobId, workItemId: opts.workItemId, attemptId: opts.attemptId } });
   }

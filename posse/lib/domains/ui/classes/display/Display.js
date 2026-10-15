@@ -616,7 +616,7 @@ export class Display {
     if (this._isLowSignalPromoteEvent(plainText)) return true;
     const lifecycleStartKey = this._lifecycleStartEventKey(plainText);
     if (lifecycleStartKey) return true;
-    if (/^\[(?:developer|dev|researcher|research|planner|assessor|artificer|human|system)\]\s+(?:(?:WI#\d+\s+)?job\s+#\d+:\s*)?(?:succeeded|done|completed|finished)\s*(?:\([\d.]+s\))?$/i.test(plainText)) return true;
+    if (/^\[(?:developer|dev|researcher|research|planner|assessor|audit|artificer|human|system)\]\s+(?:(?:WI#\d+\s+)?job\s+#\d+:\s*)?(?:succeeded|done|completed|finished)\s*(?:\([\d.]+s\))?$/i.test(plainText)) return true;
     return false;
   }
 
@@ -632,7 +632,7 @@ export class Display {
 
   _lifecycleStartEventKey(plainText) {
     const match = String(plainText || "").match(
-      /^\[(?:developer|dev|researcher|research|planner|assessor|artificer|human|system)\]\s+(?:WI#\d+\s+)?job\s+#(\d+):\s*started\b/i,
+      /^\[(?:developer|dev|researcher|research|planner|assessor|audit|artificer|human|system)\]\s+(?:WI#\d+\s+)?job\s+#(\d+):\s*started\b/i,
     );
     if (!match) return null;
     return `job:${Number(match[1])}`;
@@ -1036,7 +1036,7 @@ export class Display {
     // Pass through system/structured messages unfiltered (no tag — they already have a prefix)
     const clean = stripAnsi(this._normalizeAtlasEventText(line)).trim();
     if (clean) this._markWorkerProviderActivity(jobId);
-    const isStructured = clean.startsWith("[") && /^\[(git|planner|assessor|researcher|delegation|dev|developer|artificer|human|pre-assess|auto-approve|plan-validate|dry-run|idempotency|skip-assess|stale-lease|stderr|worker|escalation|merge|atlas(?:[^\]]*)?|system|mcp)\]/.test(clean);
+    const isStructured = clean.startsWith("[") && /^\[(git|planner|assessor|audit|researcher|delegation|dev|developer|artificer|human|pre-assess|auto-approve|plan-validate|dry-run|idempotency|skip-assess|stale-lease|stderr|worker|escalation|merge|atlas(?:[^\]]*)?|system|mcp)\]/.test(clean);
     const isStructuredStderr = /^\[stderr\]/.test(clean);
     if (this._isNoisyStructuredWorkerEvent(clean)) {
       return;

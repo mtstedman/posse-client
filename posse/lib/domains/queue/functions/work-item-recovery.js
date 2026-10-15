@@ -158,7 +158,7 @@ function applyRestorationRewires(rewires, { ts }) {
  * Requeue what failedWorkItemRestorationPlan restores after `rerunJobIds`.
  * A job whose rewire was refused stays canceled.
  */
-function restoreCanceledDependents(workItemId, rerunJobIds, { ts, gateJobId, supersededGates, restoreHeldDependents = true }) {
+export function restoreCanceledDependents(workItemId, rerunJobIds, { ts, gateJobId, supersededGates, restoreHeldDependents = true }) {
   const plan = failedWorkItemRestorationPlan(workItemId, rerunJobIds, { supersededGates, restoreHeldDependents });
   const refused = applyRestorationRewires(plan.rewires, { ts });
   const restored = [];
