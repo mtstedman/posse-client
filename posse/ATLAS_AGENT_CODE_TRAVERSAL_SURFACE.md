@@ -487,12 +487,12 @@ Remote roles: `artificer`, `dev`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Edit an existing file within the allowed scope. Provide exactly one mode: exact find/replace, replaceLines, atomic edits[], replacePattern, insertAt, append, jsonPath/jsonValue, or executable. For several edits to one file, send edits[] once: every item resolves against the original file, and overlaps reject the whole batch.
+Edit an existing file within the allowed scope. Provide exactly one mode: exact find/replace, replaceLines, edits[], replacePattern, insertAt, append, jsonPath/jsonValue, or executable. For several edits to one file, send edits[] once: every item resolves against the original file. Valid non-overlapping edits apply; failures are reported by index. Retry only failed items after rereading the changed file.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `append` | `string` | Conditional |  | Content to append to the file. |
-| `edits` | `array<any>` | Conditional | min items 1 | Atomic edits to one file. Use when several changes are known; all line numbers and find values refer to the file before this call. A failed or overlapping item writes nothing. |
+| `edits` | `array<any>` | Conditional | min items 1 | Independent edits to one file, resolved against its original contents. Valid items apply even when others fail. Both sides of an overlap fail; unrelated edits still apply. Results identify each index. |
 | `executable` | `boolean` | Conditional |  | Set or clear the file's executable permission bits without changing its content. |
 | `find` | `string` | Conditional |  | Exact existing text copied from a recent read, preserving whitespace. Must occur exactly once; zero or multiple matches leave the file unchanged. |
 | `insertAt` | `object` | Conditional |  | Insert content before a 1-based line number. Use line_count + 1 to insert after the last line. |
@@ -653,7 +653,7 @@ Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Structured metadata for one file path or an array of paths, including existence, size, extension, timestamps, and basic PNG, JPEG, or WebP dimensions. A string returns one flat result; an array returns ordered results whose loc fields identify their inputs.
+Structured metadata for one file path or an array of paths, including existence, size, extension, timestamps, and basic PNG, JPEG, or WebP dimensions. A string returns one flat result; an array returns ordered results with input indexes and loc fields. Invalid or blocked paths fail individually; valid siblings still return metadata.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

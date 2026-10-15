@@ -324,7 +324,7 @@ export class AgentRuntime {
       const checkedCalls = calls.map(call => {
         const tool = state.tools.find(item => item.name === call.name);
         if (!tool) return { call, error: `Tool ${call.name} is not authorized by this agent's pinned allowlist.` };
-        const checked = validateToolArguments(tool, call.arguments);
+        const checked = validateToolArguments(tool, call.arguments, { deferBatchItems: true });
         return { call, tool, error: checked.ok ? null : `Invalid ${call.name} arguments: ${checked.message}. No tool ran.` };
       });
       if (state.usage.calls + checkedCalls.filter(item => !item.error).length > state.definition.limits.calls)

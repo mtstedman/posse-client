@@ -59,3 +59,14 @@ export function getToolBatchingClass(name) {
   if (SERIAL_PROTOCOL_TOOLS.has(canonicalName)) return TOOL_BATCHING_CLASSES.SERIAL_PROTOCOL;
   return TOOL_BATCHING_CLASSES.ORDERED;
 }
+
+// These independent batch executors validate each item and retain successes.
+// Gateway validation still checks the envelope, bounds, and scalar fields.
+export const PARTIAL_RESULT_BATCH_FIELDS = Object.freeze({
+  edit_file: Object.freeze(["edits"]),
+  inspect_file: Object.freeze(["path"]),
+  download_file: Object.freeze(["items"]),
+  create_ref: Object.freeze(["chunks"]),
+  sub_agent: Object.freeze(["requests"]),
+  dispatch_agent: Object.freeze(["requests"]),
+});

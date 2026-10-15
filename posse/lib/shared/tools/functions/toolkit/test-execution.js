@@ -1,3 +1,4 @@
+import { TestFailureGuidance } from "../../classes/TestFailureGuidance.js";
 import { gitCurrentHashAsync, gitHasChangesAsync } from "../../../../domains/git/functions/utils.js";
 import { runScopedChecks } from "./scoped-runners.js";
 import { discoverUnitTestCapability, runUnitTestFile } from "./unit-test-runner.js";
@@ -19,6 +20,7 @@ async function cleanExecutedCommit(cwd) {
 }
 
 export function createTestExecutionExecutors() {
+  const failureGuidance = new TestFailureGuidance();
   return {
     execRunScopedChecks(args, cwd, _scopePredicates, declaredScope = {}) {
       return jsonResult("run_scoped_checks", () => runScopedChecks({ args: args || {}, cwd, declaredScope }));
@@ -31,7 +33,11 @@ export function createTestExecutionExecutors() {
       try {
         const executedCommitHash = await cleanExecutedCommit(cwd);
         const result = await runUnitTestFile({ projectDir: cwd, path: args?.path, capability });
-        return JSON.stringify({ ...result, executed_commit_hash: executedCommitHash }, null, 2);
+        const guidance = failureGuidance.forResult(result, options.agentCallId);
+        return JSON.stringify({
+          ...(guidance ? { failure_guidance: guidance } : {}),
+          ...result, executed_commit_hash: executedCommitHash,
+        }, null, 2);
       } catch (err) {
         return `Error: run_unit_test failed - ${err?.message || String(err)}`;
       }

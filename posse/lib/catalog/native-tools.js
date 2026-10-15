@@ -108,8 +108,8 @@ export const TOOL_EDIT_FILE = {
   name: "edit_file",
   description:
     "Edit an existing file within the allowed scope. Provide exactly one mode: exact find/replace, " +
-    "replaceLines, atomic edits[], replacePattern, insertAt, append, jsonPath/jsonValue, or executable. " +
-    "For several edits to one file, send edits[] once: every item resolves against the original file, and overlaps reject the whole batch.",
+    "replaceLines, edits[], replacePattern, insertAt, append, jsonPath/jsonValue, or executable. " +
+    "For several edits to one file, send edits[] once: every item resolves against the original file. Valid non-overlapping edits apply; failures are reported by index. Retry only failed items after rereading the changed file.",
   parameters: {
     type: "object",
     properties: {
@@ -130,7 +130,7 @@ export const TOOL_EDIT_FILE = {
       edits: {
         type: "array",
         minItems: 1,
-        description: "Atomic edits to one file. Use when several changes are known; all line numbers and find values refer to the file before this call. A failed or overlapping item writes nothing.",
+        description: "Independent edits to one file, resolved against its original contents. Valid items apply even when others fail. Both sides of an overlap fail; unrelated edits still apply. Results identify each index.",
         items: {
           type: "object",
           properties: {

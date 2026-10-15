@@ -406,7 +406,7 @@ function deliverableResearchPacket(entry, compact, childAgentCallId) {
 // bounded research allowance; only children that actually ran count.
 function entryCountsTowardResearchLimit(entry) {
   if (entry.status !== "failed") return true;
-  return !["admission", "control"].includes(String(entry.error?.stage || ""));
+  return !["admission", "control", "validation"].includes(String(entry.error?.stage || ""));
 }
 
 function delay(ms) {
@@ -1118,8 +1118,8 @@ function publicBatch(batch, { includeResults = false } = {}) {
     batch_id: batch.id,
     mode: batch.mode,
     status: batch.status,
-    requests: batch.entries.map((entry) => ({ id: entry.id, handle: entry.handle, status: entry.status })),
-    ...(includeResults ? { results: batch.entries.map(publicEntry) } : {}),
+    requests: batch.entries.map((entry) => ({ id: entry.id, input_index: entry.inputIndex, handle: entry.handle, status: entry.status })),
+    ...(includeResults ? { results: batch.entries.map((entry) => ({ input_index: entry.inputIndex, ...publicEntry(entry) })) } : {}),
     ...(includeResults && batch.researchExpansion ? { research_expansion: batch.researchExpansion } : {}),
     ...(batch.repairs?.length > 0 ? { repairs: batch.repairs } : {}),
     ...(!includeResults ? {
@@ -1743,14 +1743,14 @@ export class SubAgentRuntime {
       throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "completion.mode must be async or wait_all", { stage: "validation" });
     }
     const digest = requestDigest(input);
-    const researchRequest = input.requests.every((item) => item.profile === RESEARCH_CHILD_PROFILE);
-    const existingBatch = this.#priorBatch(parentCallId, registration, digest, researchRequest, input.requests.length);
-    if (existingBatch) return await this.#replayBatch(existingBatch);
+    const researchRequest = input.requests.some((item) => item?.profile === RESEARCH_CHILD_PROFILE);
+    const replay = [...this.batches.values()].find((batch) => batch.parentCallId === parentCallId && batch.requestDigest === digest);
+    if (replay) return await this.#replayBatch(replay);
 
     const seenRequests = new Set();
     const repairs = [];
     const intentOverages = [];
-    const normalized = input.requests.map((raw, requestIndex) => {
+    const normalizeRequest = (raw, requestIndex) => {
       const request = exactObject(raw, ["id", "profile", "intent", "inputs", "anchors", "budget", "agent_type"], `requests[${requestIndex}]`);
       const id = boundedString(request.id, `requests[${requestIndex}].id`, 40);
       if (seenRequests.has(id)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "request ids must be unique", { stage: "validation" });
@@ -1761,8 +1761,8 @@ export class SubAgentRuntime {
         }
         if (!RESEARCH_AGENT_TYPES.includes(request.agent_type)) throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Invalid research agent_type", { stage: "validation" });
         const policy = registration.researchPolicy;
-        if (completion.mode !== "wait_all" || input.requests.length > policy.maxChildren
-          || input.requests.some((item) => item.profile !== RESEARCH_CHILD_PROFILE)) {
+        if (completion.mode !== "wait_all"
+          || input.requests.some((item) => item?.profile === AGENT_HANDOFF_PROFILES.CITATION_SYNTHESIS)) {
           throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "Research requires one bounded wait_all batch of research requests", { stage: "validation" });
         }
         exactObject(request, ["id", "profile", "intent", "anchors", "budget", "agent_type"], `requests[${requestIndex}]`);
@@ -1847,7 +1847,18 @@ export class SubAgentRuntime {
         parentContext: { ...context },
         executeInput: registration.executeInput,
       };
+    };
+    const normalized = input.requests.map((raw, inputIndex) => {
+      try { return { ...normalizeRequest(raw, inputIndex), inputIndex }; }
+      catch (error) {
+        if (input.requests.length === 1) throw error;
+        return { id: typeof raw?.id === "string" ? raw.id : `invalid-${inputIndex}`,
+          inputIndex, profile: raw?.profile, inputs: [], maxInputs: 0, validationError: safeError(error) };
+      }
     });
+    const runnable = normalized.filter((request) => !request.validationError);
+    const existingBatch = this.#priorBatch(parentCallId, registration, digest, researchRequest, runnable.length);
+    if (existingBatch) return await this.#replayBatch(existingBatch);
 
     if (intentOverages.length > 0) {
       recordResearchChildObservation(
@@ -1858,11 +1869,11 @@ export class SubAgentRuntime {
       );
     }
 
-    // Requests are validated before any wait, so a malformed batch fails fast.
-    const waiting = this.#reserveCapacity(normalized.length, {
+    // Only valid requests consume capacity; invalid siblings retain their errors.
+    const waiting = runnable.length > 0 && this.#reserveCapacity(runnable.length, {
       registration,
       parentCallId,
-      waitMs: admissionWaitBudgetMs(normalized, completion.mode, registration, this.admissionWaitMs),
+      waitMs: admissionWaitBudgetMs(runnable, completion.mode, registration, this.admissionWaitMs),
       signal: admissionSignal,
     });
     if (waiting) {
@@ -1874,13 +1885,13 @@ export class SubAgentRuntime {
         if (!registration.accepting) {
           throw runtimeError("SUB_AGENT_PARENT_UNAVAILABLE", "The parent provider call cannot dispatch citation children", { stage: "admission" });
         }
-        replay = this.#priorBatch(parentCallId, registration, digest, researchRequest, input.requests.length);
+        replay = this.#priorBatch(parentCallId, registration, digest, researchRequest, runnable.length);
       } catch (error) {
-        this.#releaseCapacity(normalized.length);
+        this.#releaseCapacity(runnable.length);
         throw error;
       }
       if (replay) {
-        this.#releaseCapacity(normalized.length);
+        this.#releaseCapacity(runnable.length);
         return await this.#replayBatch(replay);
       }
     }
@@ -1891,7 +1902,7 @@ export class SubAgentRuntime {
       const priorEntries = [...this.batches.values()]
         .filter((prior) => prior.parentCallId === parentCallId)
         .flatMap((prior) => prior.entries);
-      capStrongResearchChildren(normalized, priorEntries, registration.researchPolicy, repairs);
+      capStrongResearchChildren(runnable, priorEntries, registration.researchPolicy, repairs);
     }
 
     const batch = {
@@ -1908,12 +1919,12 @@ export class SubAgentRuntime {
       entries: normalized.map((request) => ({
         ...request,
         handle: `sad_${crypto.randomUUID().replaceAll("-", "")}`,
-        status: "admitted",
+        status: request.validationError ? "failed" : "admitted",
         controller: new AbortController(),
         packet: null,
         coverage: null,
         usage: null,
-        error: null,
+        error: request.validationError || null,
         cursorPosition: 0,
         cursorAttempts: 0,
         cursorClaim: null,
@@ -1929,7 +1940,7 @@ export class SubAgentRuntime {
     this.batches.set(batch.id, batch);
     this.batchByParent.set(parentCallId, batch.id);
 
-    const tasks = batch.entries.map((entry) => this.#runEntry(batch, entry, entry.profile === RESEARCH_CHILD_PROFILE ? registration.runResearchChild : registration.runChild));
+    const tasks = batch.entries.filter((entry) => !entry.validationError).map((entry) => this.#runEntry(batch, entry, entry.profile === RESEARCH_CHILD_PROFILE ? registration.runResearchChild : registration.runChild));
     batch.settledPromise = Promise.allSettled(tasks).then(() => {
       batch.status = batch.entries.every((entry) => entry.status === "timed_out")
         ? "timed_out"

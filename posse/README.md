@@ -452,6 +452,26 @@ Supported selectors are `typescript`, `python`, `php`, `go`, and `rust`.
 bundled Composer setup, `go` installs `scip-go` into `scip/bin`, and `rust`
 creates a `scip-rust` wrapper around `rust-analyzer scip`.
 
+## Independent tool batches
+
+`edit_file.edits` resolves each item against the original file snapshot and
+applies valid, non-overlapping edits. The response identifies every input index
+as successful or failed; overlapping edits both fail while unrelated edits
+still apply. Retry only failed items after rereading affected ranges, since
+successful edits can move line numbers. The resulting file is written atomically.
+
+File inspections, downloads, reference creation, and child-request batches also
+retain successful siblings when an item is invalid or fails. Authorization,
+batch limits, and whole-request validation still apply. Operations that build
+one inseparable output, such as a sprite sheet or a dependency graph, retain
+their transactional validation.
+
+The first non-passing `run_unit_test` result in each agent call includes failure
+handling guidance. It asks the agent to identify the assertion or startup
+error, distinguish environment failures from product defects, make a justified
+minimal fix, and reassess after two unsuccessful targeted fixes. Later test
+responses in that call omit the guidance; it is not added to the base prompt.
+
 ## Testing
 
 Run the default regression suite:

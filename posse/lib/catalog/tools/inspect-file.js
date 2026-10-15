@@ -8,7 +8,7 @@ export const TOOL_INSPECT_FILE = {
   description:
     "Structured metadata for one file path or an array of paths, including existence, size, " +
     "extension, timestamps, and basic PNG, JPEG, or WebP dimensions. A string returns one flat " +
-    "result; an array returns ordered results whose loc fields identify their inputs.",
+    "result; an array returns ordered results with input indexes and loc fields. Invalid or blocked paths fail individually; valid siblings still return metadata.",
   parameters: {
     type: "object",
     properties: {

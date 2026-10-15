@@ -70,26 +70,46 @@ export function resolveLineSpan(content, item) {
   return lineSpan(String(content), item);
 }
 
-export function applyAtomicEdits(original, edits) {
+export function applyBatchEdits(original, edits) {
   if (!Array.isArray(edits) || edits.length === 0) return { error: "edits requires a nonempty array" };
   const content = String(original);
   const spans = [];
-  for (let index = 0; index < edits.length; index++) {
-    const item = edits[index];
-    if (!item || typeof item !== "object" || Array.isArray(item)) return { error: `edits[${index}]: expected an edit object` };
+  const results = edits.map((item, index) => {
+    const fail = (error) => ({ index, ok: false, error });
+    if (!item || typeof item !== "object" || Array.isArray(item)) return fail(`edits[${index}]: expected an edit object`);
     const keys = Object.keys(item);
     const lineMode = keys.includes("replaceLines");
     const allowed = lineMode ? ["replaceLines"] : ["find", "replace"];
     const unknown = keys.find((key) => !["replaceLines", "find", "replace"].includes(key));
-    if (unknown) return { error: `arguments.edits[${index}].${unknown} is not allowed` };
-    if (keys.some((key) => !allowed.includes(key)) || !keys.length) return { error: `edits[${index}]: use exactly one supported edit mode without path` };
+    if (unknown) return fail(`arguments.edits[${index}].${unknown} is not allowed`);
+    if (keys.some((key) => !allowed.includes(key)) || !keys.length) return fail(`edits[${index}]: use exactly one supported edit mode without path`);
     const span = lineMode ? lineSpan(content, item) : exactSpan(content, item);
-    if (span.error) return { error: `edits[${index}]: ${span.error}` };
+    if (span.error) return fail(`edits[${index}]: ${span.error}`);
     spans.push({ ...span, index, line: lineMode ? item.replaceLines : null });
+    return { index, ok: true };
+  });
+  // Reject both sides of a conflict, never unrelated items or an arbitrary
+  // winner. Adjacent line edits are compatible even when EOF deletion takes
+  // their shared newline; coalescing below resolves that separator once.
+  for (let i = 0; i < spans.length; i++) {
+    for (let j = i + 1; j < spans.length; j++) {
+      const a = spans[i], b = spans[j];
+      const overlaps = a.line && b.line
+        ? a.line.start <= b.line.end && b.line.start <= a.line.end
+        : a.start === b.start || (a.start < b.end && b.start < a.end);
+      if (!overlaps) continue;
+      for (const [left, right] of [[a, b], [b, a]]) {
+        const result = results[left.index];
+        result.ok = false;
+        result.error = `${result.error ? `${result.error}; ` : ""}edits[${left.index}]: overlaps edits[${right.index}]`;
+      }
+    }
+  }
+  for (let i = spans.length - 1; i >= 0; i--) {
+    if (!results[spans[i].index].ok) spans.splice(i, 1);
   }
   // Coalesce line items whose ranges touch and resolve each run once, so an
   // EOF deletion cannot claim the separator its neighbour's span ends on.
-  // A run reports errors under its first item's index.
   const lineItems = spans.filter((span) => span.line).sort((a, b) => a.line.start - b.line.start);
   const runs = [];
   for (const span of lineItems) {
@@ -100,21 +120,22 @@ export function applyAtomicEdits(original, edits) {
   for (const run of runs.filter((items) => items.length > 1)) {
     const text = run.map((span) => span.line.content.replace(/\r\n/g, "\n").replace(/\n$/, "")).filter(Boolean).join("\n");
     const merged = lineSpan(content, { replaceLines: { start: run[0].line.start, end: run[run.length - 1].line.end, content: text } });
-    if (merged.error) return { error: `edits[${run[0].index}]: ${merged.error}` };
+    if (merged.error) {
+      for (const span of run) results[span.index] = { index: span.index, ok: false, error: `edits[${span.index}]: ${merged.error}` };
+      for (const span of run) spans.splice(spans.indexOf(span), 1);
+      continue;
+    }
     for (const span of run) spans.splice(spans.indexOf(span), 1);
     spans.push({ ...merged, index: run[0].index, line: null });
   }
   const ascending = [...spans].sort((a, b) => a.start - b.start || a.end - b.end);
-  for (let index = 1; index < ascending.length; index++) {
-    if (ascending[index].start < ascending[index - 1].end
-      || ascending[index].start === ascending[index - 1].start) {
-      return { error: `edits[${ascending[index].index}]: overlaps edits[${ascending[index - 1].index}]` };
-    }
-  }
   let result = content;
   for (const span of ascending.reverse()) {
     result = result.slice(0, span.start) + span.replacement + result.slice(span.end);
   }
-  if (result === content) return { error: "edits made no changes" };
-  return { content: result, editCount: edits.length };
+  const editCount = results.filter((item) => item.ok).length;
+  return {
+    ...(editCount ? { content: result } : { error: results.map((item) => item.error).join("; ") }),
+    editCount, failed: edits.length - editCount, results,
+  };
 }

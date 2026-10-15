@@ -281,7 +281,7 @@ export class ProviderDispatchGateway {
     res.once("close", disconnected);
     try {
       const descriptor = this.toolDescriptors.find(tool => tool.name === body.name);
-      const validation = this.validateArguments ? validateToolArguments(descriptor, body.arguments) : null;
+      const validation = this.validateArguments ? validateToolArguments(descriptor, body.arguments, { deferBatchItems: true }) : null;
       const result = validation && !validation.ok
         ? { isError: true, content: [{ type: "text", text: `Error: Invalid tool arguments: ${validation.message}. No tool ran.` }] }
         : await this.mcpGate.callToolResult(body.name, body.arguments, {

@@ -9,6 +9,8 @@ import { firstMissingAncestor } from "../../../shared/platform/functions/transac
 // redirect hop is re-checked. The connection is pinned to the address that
 // passed the public-address check, so a second DNS answer cannot redirect it.
 
+import { TOOL_DOWNLOAD_FILE } from "../../../catalog/native-tools.js";
+import { validateToolArguments } from "../../../shared/tools/functions/schema-validation.js";
 import crypto from "node:crypto";
 import dns from "node:dns";
 import fs from "node:fs";
@@ -187,6 +189,8 @@ function prepareItem(raw, { cwd, scopePredicates, writeGuard }) {
   const url = typeof raw?.url === "string" ? raw.url.trim() : "";
   const displayPath = typeof raw?.path === "string" ? raw.path.trim() : "";
   const base = { url, path: displayPath };
+  const validation = validateToolArguments({ parameters: TOOL_DOWNLOAD_FILE.parameters.properties.items.items }, raw);
+  if (!validation.ok) return { ...base, error: validation.message };
   if (!url) return { ...base, error: "url is required" };
   if (url.length > DOWNLOAD_FILE_LIMITS.maxUrlChars) {
     return { ...base, error: `url exceeds ${DOWNLOAD_FILE_LIMITS.maxUrlChars} characters` };
@@ -471,7 +475,9 @@ export async function downloadFilesWithinScope(args, {
 
   const seen = new Set();
   const prepared = requested.map((raw) => {
-    const item = prepareItem(raw, { cwd, scopePredicates, writeGuard });
+    let item;
+    try { item = prepareItem(raw, { cwd, scopePredicates, writeGuard }); }
+    catch (error) { return { url: typeof raw?.url === "string" ? raw.url : "", path: typeof raw?.path === "string" ? raw.path : "", error: String(error?.message || error) }; }
     if (item.error) return item;
     if (seen.has(item.absolute)) return { url: item.url, path: item.path, error: "duplicate destination path in this call" };
     seen.add(item.absolute);

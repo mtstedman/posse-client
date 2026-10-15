@@ -1,3 +1,5 @@
+import { ATLAS_TOOL_DEFS_RAW } from "../../../catalog/atlas-tools.js";
+import { validateToolArguments } from "./schema-validation.js";
 import crypto from "crypto";
 import { CODE_CONTENT_KINDS, RAW_SOURCE_LINES_ENCODING, SKELETON_PAGE_POLICY } from "../../../catalog/source-display.js";
 import { retainSkeletonPages } from "./skeleton-pages.js";
@@ -2807,17 +2809,20 @@ export function createHashRefResult(args = {}, {
     if (batch.length > CREATE_REF_MAX_BATCH) {
       return createRefError(`too_many_chunks (${batch.length}, max ${CREATE_REF_MAX_BATCH})`);
     }
-    const results = batch.map((item) => createOneHashRef(hashContext, item && typeof item === "object" ? item : {}));
+    const results = batch.map((item, index) => {
+      const validation = validateToolArguments({ parameters: ATLAS_TOOL_DEFS_RAW.create_ref.parameters.properties.chunks.items }, item);
+      if (!validation.ok) return { index, ...createRefError(validation.message) };
+      try { return { index, ...createOneHashRef(hashContext, item) }; }
+      catch (error) { return { index, ...createRefError(String(error?.message || error), { code: "create_failed", status: "failed" }) }; }
+    });
     const created = results.filter((entry) => entry.ok).length;
     const failed = results.length - created;
     const executionFailure = results.some((entry) => entry?.code === "create_failed");
     return {
-      ok: created === results.length,
+      ok: created > 0,
       ...(failed > 0 ? { code: created > 0 ? "create_ref_partial" : "create_ref_batch_failed" } : {}),
-      ...(failed > 0 ? { status: created > 0 || executionFailure ? "failed" : "rejected" } : {}),
-      ...(failed > 0 ? { error: created > 0
-        ? `create_ref partially completed (${created} created, ${failed} failed)`
-        : `create_ref batch failed (${failed} failed)` } : {}),
+      ...(failed > 0 ? { status: created > 0 ? "partial" : executionFailure ? "failed" : "rejected" } : {}),
+      ...(failed > 0 && created === 0 ? { error: `create_ref batch failed (${failed} failed)` } : {}),
       count: results.length,
       created,
       failed,

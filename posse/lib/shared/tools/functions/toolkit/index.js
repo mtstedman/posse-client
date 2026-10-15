@@ -19,7 +19,7 @@ import { createTestExecutionExecutors } from "./test-execution.js";
 import { createObservationWrapper } from "./factory.js";
 import { boundedSearchRows, renderSearchContentRows } from "./search-results.js";
 import { createTextMutationHelpers } from "./edits-mutations.js";
-import { applyAtomicEdits, ambiguousExactMatchMessage, EMPTY_FIND_ERROR } from "./edit-spans.js";
+import { applyBatchEdits, ambiguousExactMatchMessage, EMPTY_FIND_ERROR } from "./edit-spans.js";
 import { buildStructuredReadResult as buildStructuredReadResultFromModule, formatNumberedLines as formatNumberedLinesFromModule, hasStructuredReadOptions as hasStructuredReadOptionsFromModule, looksReDosProne as looksReDosProneFromModule, splitEditableLines as splitEditableLinesFromModule } from "./structured-read.js";
 import "../../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import { createWorkspaceSkipDirs } from "../../../../domains/runtime/functions/workspace-skip.js";
@@ -436,10 +436,17 @@ export function createDeterministicToolkit({
       if (Object.keys(args).some((key) => !["path", "edits"].includes(key))) {
         return "Error: edits mode accepts only path and edits.";
       }
-      const applied = applyAtomicEdits(originalContent, edits);
-      if (applied.error) return `Error: ${applied.error}.`;
-      writeTextFileAtomic(filePath, applied.content);
-      return `File edited: ${displayPath} (${applied.editCount} atomic edits)`;
+      const applied = applyBatchEdits(originalContent, edits);
+      if (!applied.results) return `Error: ${applied.error}.`;
+      if (applied.editCount > 0 && applied.content !== originalContent) writeTextFileAtomic(filePath, applied.content);
+      return JSON.stringify({
+        ok: applied.editCount > 0,
+        path: displayPath,
+        applied: applied.editCount,
+        failed: applied.failed,
+        results: applied.results,
+        ...(applied.failed > 0 ? { retry: "Only retry failed indexes. Successful edits are already applied; reread affected ranges before retrying because line numbers may have changed." } : {}),
+      }, null, 2);
     }
 
     if (modes[0] === "replaceLines") {

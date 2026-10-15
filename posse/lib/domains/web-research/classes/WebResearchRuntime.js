@@ -729,32 +729,42 @@ export async function executeDispatchAgent(args, options = {}) {
     if (!Array.isArray(args.requests) || args.requests.length < 2 || args.requests.length > 3) {
       throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", "dispatch_agent.requests must contain two to three entries", { stage: "validation" });
     }
+    const itemErrors = new Map();
     const requests = args.requests.map((raw, index) => {
-      const request = knownKeysObject(raw, ["id", "agent_type", "question", "anchors", "budget"], `requests[${index}]`);
-      if (!RESEARCH_AGENT_TYPES.includes(request.agent_type)) {
-        throw runtimeError("RESEARCH_AGENT_TYPE_INVALID", "agent_type must be code or web", { stage: "validation" });
+      try {
+        const request = knownKeysObject(raw, ["id", "agent_type", "question", "anchors", "budget"], `requests[${index}]`);
+        if (!RESEARCH_AGENT_TYPES.includes(request.agent_type)) {
+          throw runtimeError("RESEARCH_AGENT_TYPE_INVALID", "agent_type must be code or web", { stage: "validation" });
+        }
+        const id = boundedString(request.id, `requests[${index}].id`, 40);
+        // A question over the sub-agent intent size is a soft cap: the
+        // sub-agent runtime dispatches it as written and records the overage.
+        // Refusing the batch (live 2026-10-01: a 2042-character web question)
+        // made the planner regenerate the whole call to save ~40 input tokens.
+        const question = typeof request.question === "string" ? request.question.trim() : "";
+        if (!question) {
+          throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", `requests[${index}].question is required`, { stage: "validation" });
+        }
+        return {
+          id,
+          profile: RESEARCH_CHILD_PROFILE,
+          agent_type: request.agent_type,
+          intent: question,
+          ...(request.anchors == null ? {} : { anchors: request.anchors }),
+          ...(request.budget ? { budget: request.budget } : {}),
+        };
+      } catch (error) {
+        itemErrors.set(index, { code: error.code, message: error.message, stage: error.stage, retryable: false });
+        return { id: typeof raw?.id === "string" ? raw.id : `invalid-${index}`, profile: RESEARCH_CHILD_PROFILE, intent: "", agent_type: "code" };
       }
-      const id = boundedString(request.id, `requests[${index}].id`, 40);
-      // A question over the sub-agent intent size is a soft cap: the
-      // sub-agent runtime dispatches it as written and records the overage.
-      // Refusing the batch (live 2026-10-01: a 2042-character web question)
-      // made the planner regenerate the whole call to save ~40 input tokens.
-      const question = typeof request.question === "string" ? request.question.trim() : "";
-      if (!question) {
-        throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", `requests[${index}].question is required`, { stage: "validation" });
-      }
-      return {
-        id,
-        profile: RESEARCH_CHILD_PROFILE,
-        agent_type: request.agent_type,
-        intent: question,
-        ...(request.anchors == null ? {} : { anchors: request.anchors }),
-        ...(request.budget ? { budget: request.budget } : {}),
-      };
     });
-    return withFoldRepair(await subAgentRuntime.execute({
+    const result = await subAgentRuntime.execute({
       protocol: SUB_AGENT_PROTOCOL, op: "dispatch", completion: { mode: "wait_all" }, requests,
-    }, options));
+    }, options);
+    for (const entry of result.results || []) {
+      if (itemErrors.has(entry.input_index)) entry.error = itemErrors.get(entry.input_index);
+    }
+    return withFoldRepair(result);
   }
   if (research && args?.agent_type == null) throw runtimeError("RESEARCH_AGENT_TYPE_REQUIRED", "dispatch_agent requires agent_type code or web", { stage: "validation" });
   if (args?.agent_type != null && research) {

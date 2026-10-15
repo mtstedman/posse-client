@@ -140,10 +140,14 @@ export function createInspectFileExecutor(safePath) {
       ? args.path
       : (Array.isArray(args?.paths) ? args.paths : null);
     if (batchPaths) {
-      if (batchPaths.length === 0 || batchPaths.some((value) => typeof value !== "string" || !value.trim())) {
+      if (batchPaths.length === 0) {
         return "Error: inspect_file `path` arrays must contain at least one non-empty string.";
       }
-      const results = batchPaths.map((p) => inspectOne(p, cwd, scopePredicates, safePath, { includeLoc: true }));
+      const results = batchPaths.map((p, index) => {
+        if (typeof p !== "string" || !p.trim()) return { index, exists: false, error: "path must be a non-empty string" };
+        try { return { index, ...inspectOne(p, cwd, scopePredicates, safePath, { includeLoc: true }) }; }
+        catch (err) { return { index, loc: p, exists: false, error: sanitizeAbsolutePathsInText(err.message, cwd) }; }
+      });
       return JSON.stringify({ results }, null, 2);
     }
     if (typeof args?.path !== "string" || !args.path.trim()) {

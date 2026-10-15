@@ -1,3 +1,4 @@
+import { canonicalToolNameForBatching, PARTIAL_RESULT_BATCH_FIELDS } from "../../../catalog/tool-surface/batching.js";
 import Ajv from "ajv";
 
 const validator = new Ajv({
@@ -65,8 +66,40 @@ export function formatSchemaValidationError(error = {}) {
   return `${path} ${String(error?.message || "is invalid")}`;
 }
 
-export function validateToolArguments(definition, args) {
-  const validate = compiledValidator(schemaForDefinition(definition));
+const batchEnvelopeSchemas = new WeakMap();
+
+function runtimeBatchSchema(definition) {
+  const schema = schemaForDefinition(definition);
+  const fields = PARTIAL_RESULT_BATCH_FIELDS[canonicalToolNameForBatching(definition?.name).replaceAll(".", "_")];
+  if (!fields) return schema;
+  let variants = batchEnvelopeSchemas.get(schema);
+  if (!variants) { variants = new Map(); batchEnvelopeSchemas.set(schema, variants); }
+  const key = fields.join(",");
+  if (!variants.has(key)) {
+    const copy = structuredClone(schema);
+    const relaxItems = (node) => {
+      for (const field of fields) {
+        const relaxField = (value) => {
+          if (!value || typeof value !== "object") return;
+          if (value.items) value.items = {};
+          for (const operator of ["oneOf", "anyOf", "allOf"]) {
+            for (const child of value[operator] || []) relaxField(child);
+          }
+        };
+        relaxField(node.properties?.[field]);
+      }
+      for (const operator of ["oneOf", "anyOf", "allOf"]) {
+        for (const child of node[operator] || []) relaxItems(child);
+      }
+    };
+    relaxItems(copy);
+    variants.set(key, copy);
+  }
+  return variants.get(key);
+}
+
+export function validateToolArguments(definition, args, { deferBatchItems = false } = {}) {
+  const validate = compiledValidator(deferBatchItems ? runtimeBatchSchema(definition) : schemaForDefinition(definition));
   const ok = validate(args);
   const errors = ok ? [] : (validate.errors || []).map((error) => ({ ...error, params: { ...(error.params || {}) } }));
   return {
