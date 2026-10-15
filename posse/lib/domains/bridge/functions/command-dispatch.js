@@ -599,6 +599,13 @@ async function maybeKickRunAfterGateResolution(result, context = {}) {
 }
 
 export async function dispatchBridgeCommandFrame(frame, context = {}) {
+  const isRecord = (value) => value != null && typeof value === "object" && !Array.isArray(value);
+  if (!isRecord(frame)) return createErrorAck(null, "invalid_args");
+  if ((frame.command != null && !isRecord(frame.command))
+    || (frame.args != null && !isRecord(frame.args))
+    || (frame.command?.args != null && !isRecord(frame.command.args))) {
+    return createErrorAck(commandIdFromFrame(frame), "invalid_args");
+  }
   const { commandId, name, args } = normalizeCommandFrame(frame);
   if (Number(frame?.v) !== BRIDGE_PROTOCOL_VERSION) {
     return createErrorAck(commandId, "unsupported_version");

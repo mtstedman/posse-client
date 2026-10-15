@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import http from "node:http";
+import { isUtf8 } from "node:buffer";
 
 import {
   BRIDGE_EVENT_KINDS,
@@ -32,6 +33,11 @@ const DEFAULT_WS_HELLO_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_WS_BUFFERED_BYTES = 2 * DEFAULT_MAX_WS_FRAME_BYTES;
 const WS_CLOSE_REASON_MAX_BYTES = 123;
 
+function localHttpUrl(host, port) {
+  const hostname = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `http://${hostname}:${port}`;
+}
+
 function sendJson(res, status, body) {
   const text = JSON.stringify(body);
   res.writeHead(status, {
@@ -53,10 +59,14 @@ async function readJsonBody(req) {
     if (total > MAX_BODY_BYTES) throw new Error("request_body_too_large");
     chunks.push(chunk);
   }
-  const text = Buffer.concat(chunks).toString("utf8").trim();
+  const bytes = Buffer.concat(chunks);
+  if (!isUtf8(bytes)) throw new Error("invalid_json");
+  const text = bytes.toString("utf8").trim();
   if (!text) return {};
   try {
-    return JSON.parse(text);
+    const value = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid_json");
+    return value;
   } catch {
     throw new Error("invalid_json");
   }
@@ -200,43 +210,52 @@ export class LocalServer {
     );
     this.wsHelloTimeoutMs = Math.max(1000, Number(wsHelloTimeoutMs) || DEFAULT_WS_HELLO_TIMEOUT_MS);
     this.server = null;
+    this.startPromise = null;
     this.clients = new Set();
   }
 
   start() {
+    if (this.startPromise) return this.startPromise;
     if (this.server) return Promise.resolve(this.address());
-    this.server = http.createServer((req, res) => {
+    const server = http.createServer((req, res) => {
       this.handleRequest(req, res).catch((err) => {
         const status = err.message === "request_body_too_large" ? 413 : err.message === "invalid_json" ? 400 : 500;
         sendJson(res, status, { error: status === 500 ? "internal" : err.message || String(err) });
       });
     });
-    this.server.on("upgrade", (req, socket, head) => this.handleUpgrade(req, socket, head));
-    return new Promise((resolve, reject) => {
+    this.server = server;
+    server.on("upgrade", (req, socket, head) => this.handleUpgrade(req, socket, head));
+    const pending = new Promise((resolve, reject) => {
       const onError = (err) => {
-        this.server?.off("listening", onListening);
+        server.off("listening", onListening);
+        server.off("error", onError);
+        if (this.server === server) this.server = null;
         reject(err);
       };
       const onListening = () => {
-        this.server?.off("error", onError);
+        server.off("error", onError);
         resolve(this.address());
       };
-      this.server.once("error", onError);
-      this.server.once("listening", onListening);
-      this.server.listen(this.port, this.host);
+      server.once("error", onError);
+      server.once("listening", onListening);
+      try { server.listen(this.port, this.host); } catch (err) { onError(err); }
     });
+    this.startPromise = pending.finally(() => {
+      this.startPromise = null;
+    });
+    return this.startPromise;
   }
 
   address() {
     const address = this.server?.address?.();
     if (address && typeof address === "object") {
-      return { host: address.address, port: address.port, url: `http://${address.address}:${address.port}` };
+      return { host: address.address, port: address.port, url: localHttpUrl(address.address, address.port) };
     }
-    return { host: this.host, port: this.port, url: `http://${this.host}:${this.port}` };
+    return { host: this.host, port: this.port, url: localHttpUrl(this.host, this.port) };
   }
 
   async handleRequest(req, res) {
-    const url = new URL(req.url || "/", `http://${this.host}:${this.port}`);
+    const url = new URL(req.url || "/", localHttpUrl(this.host, this.port));
     if (url.pathname === "/healthz") {
       const body = {
         ok: true,
@@ -272,6 +291,7 @@ export class LocalServer {
       sendJson(res, 401, { error: "unauthorized" });
       return;
     }
+    this.noteOperatorActivity();
 
     if (req.method === "GET" && url.pathname === "/v1/instance") {
       sendJson(res, 200, {
@@ -354,7 +374,7 @@ export class LocalServer {
   handleUpgrade(req, socket, head) {
     let url;
     try {
-      url = new URL(req.url || "/", `http://${this.host}:${this.port}`);
+      url = new URL(req.url || "/", localHttpUrl(this.host, this.port));
     } catch {
       socket.destroy();
       return;
@@ -421,10 +441,11 @@ export class LocalServer {
       return;
     }
     for (const frame of decoded.frames) {
+      if (client.closing || client.socket.destroyed) break;
       if (frame.opcode === 0x8) {
         this.closeWs(client, "");
       } else if (frame.opcode === 0x9) {
-        client.socket.write(encodeWsFrame(frame.payload, 0xA));
+        this.sendWs(client, frame.payload, 0xA);
       } else if (frame.opcode === 0xA) {
         continue;
       } else if (frame.opcode === 0x0) {
@@ -448,7 +469,7 @@ export class LocalServer {
       return;
     }
     if (frame.fin) {
-      void this.handleWsText(client, frame.payload.toString("utf8"));
+      this.handleWsTextPayload(client, frame.payload);
       return;
     }
     client.fragment = {
@@ -475,8 +496,18 @@ export class LocalServer {
     client.fragment = null;
     const payload = Buffer.concat(fragment.chunks, fragment.length);
     if (fragment.opcode === 0x1) {
-      void this.handleWsText(client, payload.toString("utf8"));
+      this.handleWsTextPayload(client, payload);
     }
+  }
+
+  handleWsTextPayload(client, payload) {
+    // Validate the complete message: a multibyte character may cross frames.
+    // Buffer.toString otherwise silently replaces malformed command bytes.
+    if (!isUtf8(payload)) {
+      this.failWsProtocol(client, "invalid_json");
+      return;
+    }
+    void this.handleWsText(client, payload.toString("utf8"));
   }
 
   dispatchContext() {
@@ -493,6 +524,7 @@ export class LocalServer {
   }
 
   async handleWsText(client, text) {
+    if (client.closing || client.socket.destroyed) return;
     let frame;
     try {
       frame = JSON.parse(text);
@@ -512,10 +544,14 @@ export class LocalServer {
       return;
     }
     if (!client.authenticated) {
-      this.handleHelloFrame(client, frame);
+      // Snapshot collection can fail (for example while SQLite is locked).
+      // This async handler is called from a socket event; an escaped rejection
+      // would otherwise terminate the whole bridge instead of just this peer.
+      try { this.handleHelloFrame(client, frame); }
+      catch { this.failWsProtocol(client, "internal"); }
       return;
     }
-    this.onOperatorActivity?.();
+    this.noteOperatorActivity();
     if (frame.type === BRIDGE_FRAME_TYPES.PING) {
       this.sendWs(client, { v: BRIDGE_PROTOCOL_VERSION, type: BRIDGE_FRAME_TYPES.PONG });
       return;
@@ -545,7 +581,7 @@ export class LocalServer {
       return;
     }
     client.authenticated = true;
-    this.onOperatorActivity?.();
+    this.noteOperatorActivity();
     if (client.helloTimer) {
       clearTimeout(client.helloTimer);
       client.helloTimer = null;
@@ -559,6 +595,10 @@ export class LocalServer {
       ...(this.getBridgeEpoch?.() ? { bridge_epoch: this.getBridgeEpoch() } : {}),
     });
     this.sendSnapshot(client);
+  }
+
+  noteOperatorActivity() {
+    try { this.onOperatorActivity?.(); } catch { /* presence is advisory */ }
   }
 
   authenticatedClientCount() {
@@ -577,11 +617,11 @@ export class LocalServer {
     this.sendWs(client, frame);
   }
 
-  sendWs(client, frame) {
+  sendWs(client, frame, opcode = 0x1) {
     if (!client?.socket || client.socket.destroyed || client.closing) return false;
     let encoded;
     try {
-      encoded = encodeWsFrame(frame);
+      encoded = encodeWsFrame(frame, opcode);
     } catch {
       this.closeWs(client, "internal");
       return false;
@@ -632,7 +672,10 @@ export class LocalServer {
     client.closeDestroyTimer.unref?.();
   }
 
-  close() {
+  async close() {
+    // Node can finish a DNS/bind callback after close() on a not-yet-listening
+    // server. Wait for startup to settle so shutdown cannot leak that listener.
+    try { await this.startPromise; } catch { /* failed bind has no listener */ }
     for (const client of this.clients) {
       this.closeWs(client, "");
       try { client.socket.destroy(); } catch {}
@@ -644,6 +687,10 @@ export class LocalServer {
     return new Promise((resolve) => {
       try {
         server.close(() => resolve());
+        // Active HTTP bodies can otherwise hold shutdown open indefinitely.
+        // Upgraded WebSockets were closed above; stop accepting before
+        // retiring the remaining HTTP connections.
+        server.closeAllConnections();
       } catch {
         resolve();
       }

@@ -347,12 +347,12 @@ export async function runPairCommand(
       return { ok: false, reason: "qr_token_expired" };
     }
 
-    const token = body?.bridge_token;
+    const token = typeof body?.bridge_token === "string" ? body.bridge_token.trim() : "";
     if (!token) {
       console.log(`\n  ${C.red}Relay accepted code but returned no bridge_token.${C.reset}\n`);
       return { ok: false, reason: "missing_bridge_token", body };
     }
-    const instanceId = String(body?.instance?.id || "").trim();
+    const instanceId = typeof body?.instance?.id === "string" ? body.instance.id.trim() : "";
     if (!instanceId) {
       console.log(`\n  ${C.red}Relay accepted code but returned no instance id.${C.reset}\n`);
       return { ok: false, reason: "missing_instance_id", body };

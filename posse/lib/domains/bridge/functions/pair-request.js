@@ -1,4 +1,5 @@
 import { abortable } from "../../../shared/concurrency/functions/abortable.js";
+import { readResponseTextWithLimit } from "../../remote/functions/client.js";
 
 // One deadline covers pulse acquisition, HTTP headers, and the complete body.
 // Racing auth also prevents a late pulse from issuing a request after cancel.
@@ -25,10 +26,20 @@ export async function requestBridgePair(url, {
       signal: requestSignal,
     }), requestSignal);
     onResponse?.(response);
-    const text = await abortable(response.text(), requestSignal);
+    const text = await abortable(readResponseTextWithLimit(response, {
+      operation: "Bridge pairing",
+      url: "trusted pairing relay",
+    }), requestSignal);
     let parsed;
-    try { parsed = text ? JSON.parse(text) : {}; }
-    catch { parsed = { error: { message: `HTTP ${response.status}: relay returned a non-JSON response` } }; }
+    try { parsed = JSON.parse(text); }
+    catch {
+      const message = `HTTP ${response.status}: relay returned a non-JSON response`;
+      // A successful confirmation may already be committed on the relay.
+      // Treat a missing/truncated body like an interrupted read so the caller
+      // can recover the identity by replaying the same confirmation.
+      if (response.ok) throw new Error(message);
+      parsed = { error: { message } };
+    }
     return { response, body: parsed };
   } catch (error) {
     if (timeout.signal.aborted && !signal?.aborted) {

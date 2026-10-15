@@ -79,7 +79,7 @@ function isSensitiveKey(key) {
   const normalized = String(key || "").trim().toLowerCase();
   const canonical = canonicalKey(key);
   if (!normalized || SAFE_TOKEN_KEYS.has(normalized) || SAFE_TOKEN_KEYS.has(canonical)) return false;
-  if (SENSITIVE_KEY_RE.test(normalized)) return true;
+  if (SENSITIVE_KEY_RE.test(canonical)) return true;
   const segments = keySegments(key);
   if (segments.some((segment) => SENSITIVE_KEY_SEGMENTS.has(segment))) return true;
   for (let i = 0; i < segments.length - 1; i += 1) {
@@ -116,33 +116,28 @@ export function redactString(value) {
     .replace(GOOGLE_API_KEY_RE, "[REDACTED]");
 }
 
+function redactEntries(entries) {
+  // fromEntries creates own data properties, including for __proto__.
+  return Object.fromEntries(entries.map(([key, entry]) => {
+    const stringKey = String(key);
+    return [stringKey, isSensitiveKey(stringKey) ? REDACTED : redactBridgeValue(entry)];
+  }));
+}
+
 export function redactBridgeValue(value) {
   if (value == null) return value;
   if (typeof value === "string") return redactString(value);
   if (Array.isArray(value)) return value.map((entry) => redactBridgeValue(entry));
   if (isBinaryLike(value)) return REDACTED;
   if (value instanceof Map) {
-    const redacted = {};
-    for (const [key, entry] of value.entries()) {
-      const stringKey = String(key);
-      redacted[stringKey] = isSensitiveKey(stringKey) ? REDACTED : redactBridgeValue(entry);
-    }
-    return redacted;
+    return redactEntries([...value.entries()]);
   }
   if (value instanceof Set) return [...value].map((entry) => redactBridgeValue(entry));
   if (!isPlainObject(value)) {
     const entries = Object.entries(value);
     if (entries.length === 0) return value;
-    const redacted = {};
-    for (const [key, entry] of entries) {
-      redacted[key] = isSensitiveKey(key) ? REDACTED : redactBridgeValue(entry);
-    }
-    return redacted;
+    return redactEntries(entries);
   }
 
-  const redacted = {};
-  for (const [key, entry] of Object.entries(value)) {
-    redacted[key] = isSensitiveKey(key) ? REDACTED : redactBridgeValue(entry);
-  }
-  return redacted;
+  return redactEntries(Object.entries(value));
 }

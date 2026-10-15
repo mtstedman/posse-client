@@ -114,6 +114,7 @@ function readEventFileRows({
   sinceId = null,
   limit = 100,
   order = "desc",
+  predicate = () => true,
 } = {}) {
   const minId = sinceId == null ? null : Number(sinceId) || 0;
   return readRunTelemetryEntries("events", {
@@ -124,7 +125,7 @@ function readEventFileRows({
       if (!rowMatchesNumber(entry.work_item_id, workItemId)) return false;
       if (eventType != null && String(entry.event_type || "") !== String(eventType)) return false;
       if (minId != null && Number(entry.id || 0) <= minId) return false;
-      return true;
+      return predicate(entry);
     },
 }).map(normalizeEventRow).filter(Boolean);
 }
@@ -459,24 +460,32 @@ export function getEvents(jobId = null, limit = 100) {
 // Read the canonical activity stream from both the live DB tail and its JSONL
 // archive. Monitor consumers need both: routine telemetry pruning keeps only a
 // small global tail, so a quiet agent's latest update may already be archived.
-export function getAgentActivityEvents(jobId, limit = 60) {
+export function getAgentActivityEvents(jobId, limit = 60, { excludeCallIds = [] } = {}) {
   flushEventsNow();
   const normalizedJobId = Number(jobId);
   if (!Number.isFinite(normalizedJobId) || normalizedJobId <= 0) return [];
   const cappedLimit = Math.min(500, Math.max(0, Number(limit) || 0));
+  const excludedCallIds = excludeCallIds.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0);
+  const excluded = new Set(excludedCallIds);
   const fileRows = readEventFileRows({
     jobId: normalizedJobId,
     eventType: EVENT_TYPES.AGENT_ACTIVITY,
     limit: cappedLimit,
     order: "desc",
+    predicate: (row) => !excluded.has(Number(parseAgentActivityEnvelope(row.event_json)?.agent_call_id)),
   });
+  const callFilter = excludedCallIds.length > 0
+    ? `AND COALESCE(json_extract(CASE WHEN json_valid(event_json) THEN event_json ELSE '{}' END, '$.agent_call_id'), 0)
+        NOT IN (${excludedCallIds.map(() => "?").join(",")})`
+    : "";
   const dbRows = getDb().prepare(`
     SELECT *
     FROM events
     WHERE job_id = ? AND event_type = ?
+      ${callFilter}
     ORDER BY created_at DESC, id DESC
     LIMIT ?
-  `).all(normalizedJobId, EVENT_TYPES.AGENT_ACTIVITY, cappedLimit);
+  `).all(normalizedJobId, EVENT_TYPES.AGENT_ACTIVITY, ...excludedCallIds, cappedLimit);
   return mergeEventRows([...fileRows, ...dbRows], "desc", cappedLimit)
     .map((row) => ({ ...row, activity: parseAgentActivityEnvelope(row.event_json) }))
     .filter((row) => row.activity != null);

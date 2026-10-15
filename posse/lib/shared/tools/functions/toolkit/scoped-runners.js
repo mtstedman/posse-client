@@ -683,7 +683,8 @@ function runScopedClangLint(cwd, targets) {
 }
 
 function parsePhpLintFinding(result, cwd, file) {
-  const text = compact(`${result.stdout}\n${result.stderr}`) || result.error || `php -l exited ${result.exitCode}`;
+  const text = compact(`${result.stdout}\n${result.stderr}`) || result.error
+    || (result.signal ? `php -l terminated by ${result.signal}` : `php -l exited ${result.exitCode}`);
   const lineMatch = text.match(/\bon\s+line\s+(\d+)\b/i);
   return {
     file: toRepoRelativePath(cwd, file) || file,
@@ -701,16 +702,28 @@ function runScopedPhpLint(cwd, targets) {
   }
 
   const failures = [];
-  let unavailable = false;
+  let unavailable = null;
   let durationMs = 0;
   for (const file of targets) {
     const result = runProcess("php", ["-l", file], cwd);
     durationMs += result.durationMs;
     if (commandUnavailable(result)) {
-      unavailable = true;
+      unavailable = "php executable not available";
       break;
     }
-    if (result.exitCode !== 0) {
+    if (result.exitCode !== 0 || result.signal || result.error || result.timedOut) {
+      // A runtime/extension startup failure can repeat on every source file.
+      // Confirm it on valid stdin with the same executable, configuration,
+      // environment and cwd before attributing it to the edited PHP source.
+      // Do not use -n: that would hide the broken configuration we must report.
+      const probe = runProcess("php", ["-l"], cwd, { input: "<?php\n", timeoutMs: 5000 });
+      durationMs += probe.durationMs;
+      if (probe.exitCode !== 0 || probe.signal || probe.error || probe.timedOut) {
+        const detail = compact(`${probe.stdout}\n${probe.stderr}`, 1000) || probe.error
+          || (probe.signal ? `signal ${probe.signal}` : `exit ${probe.exitCode}`);
+        unavailable = `PHP runtime could not lint valid input (${detail}). Check php -v and php --ini, repair PHP or run posse doctor, then retry verification.`;
+        break;
+      }
       failures.push(parsePhpLintFinding(result, cwd, file));
       if (failures.length >= MAX_FAILURES) break;
     }
@@ -719,10 +732,13 @@ function runScopedPhpLint(cwd, targets) {
   if (unavailable) {
     return {
       name: "php-lint",
-      status: "unavailable",
-      reason: "php executable not available",
+      // An outage on a later file must not erase an earlier verified defect.
+      status: failures.length > 0 ? "failed" : "unavailable",
+      reason: unavailable,
+      command: "php -l",
       targets,
       durationMs,
+      failures,
     };
   }
 

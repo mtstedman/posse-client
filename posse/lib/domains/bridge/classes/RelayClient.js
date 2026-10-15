@@ -252,6 +252,7 @@ export class RelayClient extends EventEmitter {
       const ack = await this.dispatch(frame, {
         projectDir: this.projectDir,
         actor: "bridge-relay",
+        instanceId: this.instanceId,
         bridgeInstanceId: this.instanceId,
         tailBridgeEvents: this.tailBridgeEvents,
         getHeadEventId: this.getHeadEventId,
@@ -259,9 +260,11 @@ export class RelayClient extends EventEmitter {
         getProviderUsage: this.getProviderUsage,
         startPosse: this.startPosse,
       });
-      this.send(ack);
+      if (this.ownsSocket(ws, generation)) this.send(ack);
     } catch (err) {
-      this.send(createErrorAck(frame.id ?? frame.command_id ?? null, "internal"));
+      if (this.ownsSocket(ws, generation)) {
+        this.send(createErrorAck(frame.id ?? frame.command_id ?? null, "internal"));
+      }
     }
   }
 

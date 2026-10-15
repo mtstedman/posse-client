@@ -1,4 +1,5 @@
-import { getAgentCalls, listAgentInteractions } from "../../../../queue/functions/index.js";
+import { getAgentActivityEvents, getAgentCalls, listAgentInteractions } from "../../../../queue/functions/index.js";
+import { mergeMonitorAgentActivityEvents } from "../monitor-presentation.js";
 import { getAgentHandoffRecord } from "../../../../handoff/functions/agent-handoff-records.js";
 import { researchExplorationObservationStatus } from "../../../../observability/functions/observations.js";
 import { latestFinalReview } from "../../../../assessment/functions/final-review-authority.js";
@@ -59,6 +60,7 @@ function researchOutcomeLabel(outcome) {
 export function appendResearchChildMonitorRows(parents, {
   callsForJob = getAgentCalls,
   interactionsForJob = listAgentInteractions,
+  activityEventsForJob = getAgentActivityEvents,
   handoffForCall = getAgentHandoffRecord,
   explorationStatus = researchExplorationObservationStatus,
   finalReviewForJob = latestFinalReview,
@@ -72,10 +74,20 @@ export function appendResearchChildMonitorRows(parents, {
     if (calls.some((call) => call.child_kind === "final_review")) {
       try { finalReview = finalReviewForJob(parent.jobId); } catch { /* historical review may be unavailable */ }
     }
-    const parentRows = (parent.interactionRows || []).filter((row) => !childIds.has(Number(row.agent_call_id)));
+    let parentRows = (parent.interactionRows || []).filter((row) => !childIds.has(Number(row.agent_call_id)));
+    if (calls.length) {
+      // The job-wide tail can consist entirely of child updates. Scope before
+      // limiting so a quiet parent's dialogue survives busy research children.
+      try {
+        parentRows = mergeMonitorAgentActivityEvents(
+          interactionsForJob({ job_id: parent.jobId, exclude_agent_call_ids: [...childIds], limit: 60 }),
+          activityEventsForJob(parent.jobId, 60, { excludeCallIds: [...childIds] }),
+        );
+      } catch { /* keep the available snapshot during DB churn */ }
+    }
     const parentTools = toolRows.filter((row) => Number(row.job_id) === parent.jobId && !childIds.has(Number(row.agent_call_id)));
     const cleanParent = { ...parent, excludeCallIds: [...childIds], interactionRows: parentRows,
-      activityRows: (parent.activityRows || []).filter((row) => !childIds.has(Number(row.agent_call_id))),
+      activityRows: parentRows.filter((row) => row.direction === "agent_to_user" && row.kind === "activity"),
       guidance: (parent.guidance || []).filter((row) => !childIds.has(Number(row.agent_call_id))),
       pendingGuidance: (parent.pendingGuidance || []).filter((row) => !childIds.has(Number(row.agent_call_id))),
       inFlightTool: !!parentTools[0]?.in_flight,

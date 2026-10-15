@@ -505,10 +505,20 @@ export class PairingMonitor {
           continue;
         }
         let status;
+        // A CLI close or scheduler adoption can finish while the heartbeat is
+        // in flight. Its result belongs only to the owner that requested it.
+        const ownsHeartbeat = () => {
+          const current = getPairingState(stateId);
+          return current?.phase === "active" && Number(current.process_pid) === process.pid
+            && current.remote_session_id === state.remote_session_id
+            && current.relay_token === state.relay_token;
+        };
         try {
+          const response = await remoteClient.heartbeat(state.relay_token, collectPairingPresence(projectDir));
+          if (!ownsHeartbeat()) continue;
           status = validatePairingRemoteResponse(
             "heartbeat",
-            await remoteClient.heartbeat(state.relay_token, collectPairingPresence(projectDir)),
+            response,
           );
           assertPairingStatusMatches(state, status);
           const nextScope = status.scope_set || {};
@@ -538,6 +548,7 @@ export class PairingMonitor {
           if (scopeChanged || teamPolicyChanged) {
             pulseTokenManager.clearAuthentication();
             const { invalidateVerifiedTeamGrantCache } = await import("../functions/team-submissions.js");
+            if (!ownsHeartbeat()) continue;
             invalidateVerifiedTeamGrantCache();
           }
           touchPairingState(stateId);
@@ -563,14 +574,18 @@ export class PairingMonitor {
           printPeerActivityChanges(C, status, seenPeerActivity, { json, log });
           latestStatus = status;
           await refreshHostMembers(state);
+          if (!ownsHeartbeat()) continue;
           if (status.status === "active") pollTrunk(status);
           if (landingAfterHeartbeat) {
             landingAfterHeartbeat = false;
             printLanding(state);
           }
         } catch (error) {
+          if (!ownsHeartbeat()) continue;
           recordSessionLinkFailure({ stateId, owner: SESSION_LINK_OWNERS.CONSOLE, leaseSec, error, nowMs: nowMs() });
-          if ([401, 403].includes(Number(error?.status))) {
+          if ([401, 403].includes(Number(error?.status))
+            || error?.code === "pairing_session_changed"
+            || error?.code === "pairing_team_policy_regressed") {
             pulseTokenManager.clearAuthentication();
             throw error;
           }

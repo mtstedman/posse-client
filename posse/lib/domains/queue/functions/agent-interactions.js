@@ -1010,6 +1010,7 @@ export function listAgentInteractions({
   job_id = null,
   work_item_id = null,
   agent_call_id = null,
+  exclude_agent_call_ids = [],
   limit = 50,
 } = {}) {
   const clauses = [];
@@ -1025,6 +1026,11 @@ export function listAgentInteractions({
   if (agent_call_id != null) {
     clauses.push("agent_call_id = ?");
     params.push(normalizePositiveInt(agent_call_id, 0));
+  }
+  const excludedCallIds = exclude_agent_call_ids.map((id) => normalizePositiveInt(id)).filter((id) => id != null);
+  if (excludedCallIds.length > 0) {
+    clauses.push(`(agent_call_id IS NULL OR agent_call_id NOT IN (${excludedCallIds.map(() => "?").join(",")}))`);
+    params.push(...excludedCallIds);
   }
   const safeLimit = Math.min(500, Math.max(1, Number.parseInt(String(limit), 10) || 50));
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";

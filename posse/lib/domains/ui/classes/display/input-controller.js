@@ -789,7 +789,7 @@ export class DisplayInputController {
         catch (err) { this.addEvent(`${C.red}Review failed: ${err.message}${C.reset}`); }
         this.requestRender({ force: true });
       } else if (matchesHotkey(str, key, "t") && this.getToolData) {
-        if (this._rightMode !== "tools") this._toolsTab = 1;
+        if (this._rightMode !== "tools") this._toolsTab = 0;
         this._rightMode = "tools";
         this.requestRender({ force: true });
       } else if (key && key.name === "up" && this._rightMode === "pipeline") {

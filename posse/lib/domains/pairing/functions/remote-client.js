@@ -3,6 +3,7 @@ export { PAIRING_AUTH_ROUTE, PAIRING_PROTOCOL } from "../../../catalog/pairing-w
 import { heartbeatAuthManager } from "../../../shared/native/classes/HeartbeatAuthManager.js";
 import { pulseTokenManager } from "../../../shared/native/classes/PulseTokenManager.js";
 import { readResponseTextWithLimit } from "../../remote/functions/client.js";
+import { abortable } from "../../../shared/concurrency/functions/abortable.js";
 import { TEAM_PUBLICATION_MODES } from "../../../catalog/team.js";
 import { SESSION_COMPUTE_POLICY_VALUES, SESSION_SYNC_POLICY, TRUNK_HEAD_PATTERN } from "../../../catalog/session-sync.js";
 
@@ -385,20 +386,31 @@ export function createPairingRemoteClient({
   async function request(endpoint, { method = "POST", body = null, token = null, path = endpoint, signal = null } = {}) {
     const url = new URL(`v1/pairing/${path}`, new URL("/", origin));
     pulseTokens.assertTrustedResourceUrl(url, `Posse pairing ${endpoint}`);
-    const authorization = token || await pulseTokens.getPulseToken({
-      requiredRoute: PAIRING_AUTH_ROUTE,
-    });
-    if (!authorization) {
-      const error = new Error("Pairing authentication is unavailable");
-      error.code = "pairing_auth_unavailable";
-      throw error;
-    }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+    const timer = setTimeout(() => controller.abort(), Math.max(1, Number(timeoutMs) || DEFAULT_TIMEOUT_MS));
     try {
+      // Authentication shares the HTTP deadline. A late pulse must never start
+      // enrollment after the caller has already timed out or stopped.
+      let authorization;
+      try {
+        requestSignal.throwIfAborted();
+        authorization = token || await abortable(pulseTokens.getPulseToken({
+          requiredRoute: PAIRING_AUTH_ROUTE,
+        }), requestSignal);
+        requestSignal.throwIfAborted();
+      } catch (cause) {
+        if (requestSignal.aborted) throw transportError({ name: "AbortError", cause });
+        throw cause;
+      }
+      if (!authorization) {
+        const error = new Error("Pairing authentication is unavailable");
+        error.code = "pairing_auth_unavailable";
+        throw error;
+      }
       let response;
       try {
-        response = await fetchImpl(url, {
+        response = await abortable(fetchImpl(url, {
           method,
           headers: {
             authorization: `Bearer ${authorization}`,
@@ -406,14 +418,14 @@ export function createPairingRemoteClient({
           },
           ...(body == null ? {} : { body: JSON.stringify(body) }),
           redirect: "error",
-          signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
-        });
+          signal: requestSignal,
+        }), requestSignal);
       } catch (cause) {
         throw transportError(cause);
       }
       let payload;
       try {
-        payload = await readJson(response, endpoint);
+        payload = await abortable(readJson(response, endpoint), requestSignal);
       } catch (cause) {
         if (cause?.code === "pairing_invalid_response") throw cause;
         throw transportError(cause);

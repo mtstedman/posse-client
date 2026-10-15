@@ -42,6 +42,8 @@ export class Bridge {
     this.presenceTimer = null;
     this.lastOperatorActivityAt = 0;
     this.stopping = false;
+    this.startPromise = null;
+    this.stopPromise = null;
     this.stopped = new Promise((resolve) => { this.resolveStopped = resolve; });
   }
 
@@ -130,10 +132,18 @@ export class Bridge {
     }
   }
 
-  async start({ restarting = false } = {}) {
-    if (this.localServer) return this.info();
+  start({ restarting = false } = {}) {
+    if (this.stopPromise) return this.stopPromise.then(() => this.start({ restarting }));
+    if (this.startPromise) return this.startPromise;
+    if (this.localServer) return Promise.resolve(this.info());
     this.stopping = false;
     if (!restarting) this.stopped = new Promise((resolve) => { this.resolveStopped = resolve; });
+    const pending = this.startResources({ restarting });
+    this.startPromise = pending.finally(() => { this.startPromise = null; });
+    return this.startPromise;
+  }
+
+  async startResources({ restarting }) {
     try {
       this.changeStream = new ChangeStream({
         dbPath: getRuntimeDbPath(this.projectDir),
@@ -148,7 +158,9 @@ export class Bridge {
       // A concurrently running scheduler may already own the endpoint; that
       // producer remains authoritative until its normal teardown.
       await this.startBossyLocalFeed();
+      if (this.stopping) throw new Error("Bridge startup canceled");
       const address = await this.startLocalServer();
+      if (this.stopping) throw new Error("Bridge startup canceled");
       if (this.config.relayToken) {
         this.relayClient = new RelayClient({
           url: this.config.relayUrl,
@@ -183,7 +195,7 @@ export class Bridge {
       this.startPresenceHeartbeat();
       return this.info(address);
     } catch (err) {
-      await this.stop({ restarting });
+      await this.stopResources({ restarting });
       throw err;
     }
   }
@@ -284,7 +296,24 @@ export class Bridge {
    * component that throws mid-teardown must never leave a stale ref behind —
    * a later restart would then return early against a half-dead bridge.
    */
-  async stop({ restarting = false } = {}) {
+  stop({ restarting = false } = {}) {
+    this.stopping = true;
+    if (this.stopPromise) {
+      return this.stopPromise.then(() => {
+        if (!restarting) this.resolveStopped?.("local management");
+      });
+    }
+    const pending = (async () => {
+      // A bind may still be in flight. Retire it before declaring shutdown
+      // complete, and serialize restart against the entire teardown.
+      try { await this.startPromise; } catch { /* startup already cleaned up */ }
+      await this.stopResources({ restarting });
+    })();
+    this.stopPromise = pending.finally(() => { this.stopPromise = null; });
+    return this.stopPromise;
+  }
+
+  async stopResources({ restarting }) {
     this.stopping = true;
     if (this.bossyLocalStreamRetryTimer) {
       clearTimeout(this.bossyLocalStreamRetryTimer);
