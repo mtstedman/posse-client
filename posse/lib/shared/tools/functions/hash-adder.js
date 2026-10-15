@@ -129,7 +129,12 @@ function refInputs(args = {}) {
   };
   const addMany = (value) => {
     if (Array.isArray(value)) {
-      for (const entry of value) push(entry);
+      for (const entry of value) {
+        // Keep malformed siblings as explicit failed results. Never coerce a
+        // non-string selector into a potentially valid stored identity.
+        if (typeof entry !== "string" || !entry.trim()) out.push("");
+        else push(entry);
+      }
       return;
     }
     if (typeof value === "string" && /[\s,;]+/.test(value.trim())) {
@@ -2536,7 +2541,10 @@ export function fetchHashRefTool(args = {}, {
     return rendered;
   }
 
-  const results = refs.map((ref) => parseFetchPayload(fetchOne(ref)));
+  const results = refs.map((ref) => {
+    try { return parseFetchPayload(fetchOne(ref)); }
+    catch (error) { return { ok: false, ref, code: "fetch_ref_failed", error: String(error?.message || error) }; }
+  });
   const found = results.filter((entry) => entry?.ok === true).length;
   const rejected = results.filter((entry) => entry?.retryable === false && entry?.classification).length;
   const complete = found === refs.length;

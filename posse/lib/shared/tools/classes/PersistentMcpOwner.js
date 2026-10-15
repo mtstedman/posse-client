@@ -535,7 +535,7 @@ function researcherTypedArgumentRepair(session, toolName, toolArgs = {}) {
   const schema = atlasDescriptorSchemaForAction(requested.name);
   if (!schema) return null;
   softCapArrayArguments(schema, toolArgs);
-  const validation = validateToolArguments({ parameters: schema }, toolArgs);
+  const validation = validateToolArguments({ name: requested.name, parameters: schema }, toolArgs, { deferBatchItems: true });
   if (validation.ok) return null;
   const failure = requested.name === "code.window"
     ? validationFailureForAction(

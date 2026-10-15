@@ -67,6 +67,9 @@ export const PARTIAL_RESULT_BATCH_FIELDS = Object.freeze({
   inspect_file: Object.freeze(["path"]),
   download_file: Object.freeze(["items"]),
   create_ref: Object.freeze(["chunks"]),
+  fetch_ref: Object.freeze(["ref", "refs", "hashes"]),
+  traverse_ref: Object.freeze(["traversal_ref", "traversal_refs"]),
+  symbol_get: Object.freeze(["items", "symbols"]),
   sub_agent: Object.freeze(["requests"]),
   dispatch_agent: Object.freeze(["requests"]),
 });

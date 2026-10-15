@@ -460,7 +460,8 @@ as successful or failed; overlapping edits both fail while unrelated edits
 still apply. Retry only failed items after rereading affected ranges, since
 successful edits can move line numbers. The resulting file is written atomically.
 
-File inspections, downloads, reference creation, and child-request batches also
+File inspections, downloads, reference creation and fetching, ATLAS symbol retrieval,
+and child-request batches also
 retain successful siblings when an item is invalid or fails. Authorization,
 batch limits, and whole-request validation still apply. Operations that build
 one inseparable output, such as a sprite sheet or a dependency graph, retain
