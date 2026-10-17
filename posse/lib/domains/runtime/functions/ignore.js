@@ -93,37 +93,60 @@ function relativeDirectoryPattern(anchorDir, targetDir) {
   return asDirectoryPattern(rel);
 }
 
-function appendMissingLines(filePath, entries) {
+// Older excludes had no ownership header. Repair only a complete generated
+// sequence, leaving isolated/user-authored rules and surrounding text intact.
+function repairLegacyRuntimeExcludes(content, entries) {
+  const legacy = entries.map((entry) => entry.startsWith("/") ? entry.slice(1) : entry);
+  const lines = content.split("\n");
+  for (let start = 0; start <= lines.length - legacy.length; start += 1) {
+    if (!legacy.every((entry, offset) => lines[start + offset].trim() === entry)) continue;
+    for (let offset = 0; offset < legacy.length; offset += 1) {
+      if (legacy[offset] === entries[offset]) continue;
+      lines[start + offset] = lines[start + offset].replace(legacy[offset], entries[offset]);
+    }
+  }
+  return lines.join("\n");
+}
+
+function appendMissingLines(filePath, entries, { repairLegacyExclude = false } = {}) {
   const wanted = entries.filter(Boolean);
   if (wanted.length === 0) return { changed: false, missing: [] };
 
   let existing = "";
   try { existing = fs.readFileSync(filePath, "utf-8"); } catch { /* file may not exist yet */ }
+  const original = existing;
+  if (repairLegacyExclude) existing = repairLegacyRuntimeExcludes(existing, wanted);
 
   const existingLines = new Set(existing.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
   const missing = wanted.filter((entry) => !existingLines.has(entry));
-  if (missing.length === 0) return { changed: false, missing: [] };
+  if (missing.length === 0 && existing === original) return { changed: false, missing: [] };
 
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-  fs.appendFileSync(filePath, `${prefix}${missing.join("\n")}\n`, "utf-8");
+  const suffix = missing.length > 0 ? `${prefix}${missing.join("\n")}\n` : "";
+  if (existing !== original) fs.writeFileSync(filePath, existing + suffix, "utf-8");
+  else fs.appendFileSync(filePath, suffix, "utf-8");
   return { changed: true, missing };
 }
 
-async function appendMissingLinesAsync(filePath, entries) {
+async function appendMissingLinesAsync(filePath, entries, { repairLegacyExclude = false } = {}) {
   const wanted = entries.filter(Boolean);
   if (wanted.length === 0) return { changed: false, missing: [] };
 
   let existing = "";
   try { existing = await fs.promises.readFile(filePath, "utf-8"); } catch { /* file may not exist yet */ }
+  const original = existing;
+  if (repairLegacyExclude) existing = repairLegacyRuntimeExcludes(existing, wanted);
 
   const existingLines = new Set(existing.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
   const missing = wanted.filter((entry) => !existingLines.has(entry));
-  if (missing.length === 0) return { changed: false, missing: [] };
+  if (missing.length === 0 && existing === original) return { changed: false, missing: [] };
 
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
   const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-  await fs.promises.appendFile(filePath, `${prefix}${missing.join("\n")}\n`, "utf-8");
+  const suffix = missing.length > 0 ? `${prefix}${missing.join("\n")}\n` : "";
+  if (existing !== original) await fs.promises.writeFile(filePath, existing + suffix, "utf-8");
+  else await fs.promises.appendFile(filePath, suffix, "utf-8");
   return { changed: true, missing };
 }
 
@@ -142,16 +165,18 @@ export function buildPosseRuntimeIgnoreEntries(projectDir, {
     runtimeRoot,
     path.join(projectRoot, ".posse-worktrees"),
     path.join(projectRoot, ".posse-test-suites"),
-    // Legacy runtime locations used by older repos/runs. Keep ignoring them so
-    // upgraded projects do not accidentally commit stale DBs or artifacts.
-    path.join(projectRoot, "db"),
-    path.join(projectRoot, "resources"),
-    path.join(projectRoot, "logs"),
   ];
 
   for (const target of directoryTargets) {
     const rel = relativeDirectoryPattern(anchor, target);
     if (rel) entries.push(rel);
+  }
+
+  // These legacy runtime directories belong to this project root. Unanchored
+  // basename rules also hide legitimate source such as src/db/schema.ts.
+  for (const name of ["db", "resources", "logs"]) {
+    const rel = relativeDirectoryPattern(anchor, path.join(projectRoot, name));
+    if (rel) entries.push(`/${rel}`);
   }
 
   entries.push(...RUNTIME_DB_GLOBS);
@@ -299,6 +324,7 @@ async function fastInfoExcludePathAsync(projectRoot) {
 function allEntriesPresent(excludeFile, entries) {
   let existing;
   try { existing = fs.readFileSync(excludeFile, "utf-8"); } catch { return false; }
+  if (repairLegacyRuntimeExcludes(existing, entries) !== existing) return false;
   const existingLines = new Set(existing.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
   return entries.every((entry) => existingLines.has(entry));
 }
@@ -306,6 +332,7 @@ function allEntriesPresent(excludeFile, entries) {
 async function allEntriesPresentAsync(excludeFile, entries) {
   let existing;
   try { existing = await fs.promises.readFile(excludeFile, "utf-8"); } catch { return false; }
+  if (repairLegacyRuntimeExcludes(existing, entries) !== existing) return false;
   const existingLines = new Set(existing.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
   return entries.every((entry) => existingLines.has(entry));
 }
@@ -339,7 +366,7 @@ export function ensurePosseGitInfoExclude(projectDir) {
       anchorDir: repoRoot,
       includeHeader: false,
     });
-    return appendMissingLines(excludeFile, entries);
+    return appendMissingLines(excludeFile, entries, { repairLegacyExclude: true });
   } catch (err) {
     return { changed: false, missing: [], skipped: err?.message || String(err) };
   }
@@ -372,7 +399,7 @@ export async function ensurePosseGitInfoExcludeAsync(projectDir) {
       anchorDir: repoRoot,
       includeHeader: false,
     });
-    return await appendMissingLinesAsync(excludeFile, entries);
+    return await appendMissingLinesAsync(excludeFile, entries, { repairLegacyExclude: true });
   } catch (err) {
     return { changed: false, missing: [], skipped: err?.message || String(err) };
   }

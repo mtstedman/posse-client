@@ -22,6 +22,7 @@ import { repositoryRoot, validateRemoteName } from "./git.js";
 import { readPairingPromotionJournal } from "./promotion.js";
 import { activeSessionCloseClaim } from "./session-close-claim.js";
 import {
+  assertSessionOriginTargets,
   buildSessionSquash,
   describeSessionPublish,
   fetchSessionOrigin,
@@ -250,6 +251,7 @@ export async function runSessionPublish({
   const attempts = unattended ? 2 : 3;
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await assertSessionOriginTargets(root, { remote, expectedUrl: state.origin_remote_url, exec });
     const trunk = mayMerge ? await takeVerifiedTrunk(root, state, { sync }) : null;
     let originSha;
     try {
@@ -283,10 +285,10 @@ export async function runSessionPublish({
     assertCurrent();
     if (!deploy) {
       if (built.empty) {
-        if (plan.relation === "diverged") {
-          // The undeployed merge's content reached origin another way; local
-          // follows origin (the replaced tip is kept) so a later close or
-          // `session host` does not trip over it.
+        if (localSha !== plan.onto) {
+          // Follow origin even when the content needs no new squash. This
+          // also recreates a missing target or catches up a behind target;
+          // replaced undeployed merges retain their recovery ref.
           await withPublishLock(async () => {
             assertCurrent();
             await moveLocalTarget(root, { targetBranch, next: originSha, expected: localSha, sessionId, exec, assertAllowed: assertCurrent });
@@ -331,7 +333,7 @@ export async function runSessionPublish({
 
     // Deploy.
     if (tip === originSha) {
-      if (localSha && localSha !== originSha && plan.relation === "diverged") {
+      if (localSha !== originSha) {
         // The undeployed merge's content reached origin another way.
         await withPublishLock(async () => {
           assertCurrent();
@@ -387,9 +389,11 @@ export async function runSessionPublish({
         if (!(await isSessionAncestor(root, originSha, tip, { exec }))) {
           throw publishError("session_publish_not_fast_forward", `${shortSha(tip)} does not extend ${remote}/${targetBranch}; refusing to push`);
         }
+        await assertSessionOriginTargets(root, { remote, expectedUrl: state.origin_remote_url, exec });
         // Validation and approval yield. The host or another publisher may
         // have replaced the local candidate in the meantime, even when this
-        // run did not need to move the target itself.
+        // run did not need to move the target itself. Inspect it after the
+        // asynchronous remote checks too, so they cannot hide a withdrawal.
         if (await localBranchSha(root, targetBranch, { exec }) !== tip) {
           throw publishError("session_publish_target_moved", `Local ${targetBranch} changed before the push; reevaluate its current tip`);
         }

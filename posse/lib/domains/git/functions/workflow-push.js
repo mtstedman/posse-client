@@ -345,7 +345,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     return runGitWorkflowTaskOffMainThread("validatePushCandidate", { pushBranch }, workerOptions);
   }
 
-  function executePush({ effectiveRemote, pushBranch, mergedCount = 0 }) {
+  function executePush({ effectiveRemote, pushBranch, mergedCount = 0, expectedHead = null }) {
     const pushBranchWorkItem = workItemForBranch(pushBranch);
     if (pushBranchWorkItem) {
       return {
@@ -364,11 +364,31 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       };
     }
 
+    // Hooks inspect and verify the current checkout. It must represent the
+    // authorized target, and that target must not advance while hooks run.
+    // Pin the eventual refspec too: another process can still move a branch
+    // after the last check, without taking Posse's merge lock.
+    const readCommit = (ref) => gitExec(["rev-parse", "--verify", `${ref}^{commit}`], projectDir, { nativeParity }).trim();
+    let candidate;
+    try {
+      candidate = readCommit(`refs/heads/${pushBranch}`);
+      if (expectedHead && candidate !== expectedHead) {
+        return { ok: false, reason: "stale_offer", output: "The push target changed after approval; refresh the offer before pushing" };
+      }
+      if (readCommit("HEAD") !== candidate) {
+        return { ok: false, reason: "push_state_unverifiable", output: `Check out ${pushBranch} before pushing so validation checks the published commit` };
+      }
+    } catch (err) {
+      return { ok: false, reason: "push_state_unverifiable", output: String(err?.message || err) };
+    }
     const validation = validatePushCandidate({ pushBranch });
     if (!validation.ok) return validation;
 
     try {
-      gitPushWithGitHubCliFallback(["push", effectiveRemote, pushBranch], projectDir, {
+      if (readCommit(`refs/heads/${pushBranch}`) !== candidate || readCommit("HEAD") !== candidate) {
+        return { ok: false, reason: "stale_offer", output: "The push target or validation checkout changed during verification; refresh the offer before pushing" };
+      }
+      gitPushWithGitHubCliFallback(["push", effectiveRemote, `${candidate}:refs/heads/${pushBranch}`], projectDir, {
         remote: effectiveRemote,
         gitExecFn: gitExec,
         // The normal attempt remains on the native Git route. The one-shot gh
@@ -543,7 +563,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
 
     console.log(`  ${C.dim}Pushing ${pushBranch} to ${effectiveRemote}...${C.reset}`);
     const pushOutcome = await withMergeLock(async () => {
-      const result = await executePushAsync({ effectiveRemote, pushBranch, mergedCount }).catch((err) => ({
+      const result = await executePushAsync({ effectiveRemote, pushBranch, mergedCount, expectedHead: state.pushHeadHash }).catch((err) => ({
         ok: false,
         reason: "push_failed",
         output: err?.message || String(err),

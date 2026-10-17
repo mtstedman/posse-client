@@ -422,11 +422,13 @@ export async function runPairCommand(
  */
 async function waitForRelayOutcome(bridge, timeoutMs = 10_000, pollMs = 250) {
   const deadline = Date.now() + timeoutMs;
+  const stopped = bridge.stopped?.then(() => ({ state: "stopped" }));
   let status = bridge.relayStatus?.() ?? { state: "disabled" };
   while (Date.now() < deadline) {
     status = bridge.relayStatus?.() ?? { state: "disabled" };
-    if (status.state === "online" || status.state === "unauthorized") return status;
-    await sleep(pollMs);
+    if (["online", "unauthorized", "stopped", "disabled"].includes(status.state)) return status;
+    const outcome = await (stopped ? Promise.race([sleep(pollMs), stopped]) : sleep(pollMs));
+    if (outcome?.state === "stopped") return outcome;
   }
   return status;
 }
@@ -732,7 +734,7 @@ export async function runServeCommand(argv = [], {
     } else if (relay.state === "unauthorized") {
       console.log(`  ${C.red}Relay REJECTED this bridge credential${relay.last_error ? ` (${relay.last_error})` : ""}.${C.reset}`);
       console.log(`  ${C.dim}The pairing is stale or revoked — run \`posse serve --pair\` to re-pair.${C.reset}\n`);
-    } else {
+    } else if (relay.state !== "stopped") {
       console.log(`  ${C.yellow}Relay not connected yet${C.reset} (${relay.state}${relay.last_error ? ` — ${relay.last_error}` : ""}). Retrying in the background; phones see this repo as offline until it connects.\n`);
     }
   }

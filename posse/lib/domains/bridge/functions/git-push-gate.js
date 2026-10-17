@@ -167,6 +167,7 @@ export async function executeGitPushGate(jobId, args = {}, context = {}, deps = 
       const pushResult = await runPush({
         effectiveRemote: state.effectiveRemote,
         pushBranch: state.pushBranch,
+        expectedHead: currentHead,
         mergedCount: Number(gatePayload?.merged_count) || 0,
       });
       if (!pushResult?.ok) return pushResult;

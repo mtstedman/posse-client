@@ -54,7 +54,9 @@ function queryObject(url) {
 async function readJsonBody(req) {
   const chunks = [];
   let total = 0;
-  for await (const chunk of req) {
+  // Leaving the default iterator early destroys IncomingMessage and can
+  // reset the socket before the HTTP 413 response reaches the client.
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     total += chunk.length;
     if (total > MAX_BODY_BYTES) throw new Error("request_body_too_large");
     chunks.push(chunk);
@@ -220,6 +222,8 @@ export class LocalServer {
     const server = http.createServer((req, res) => {
       this.handleRequest(req, res).catch((err) => {
         const status = err.message === "request_body_too_large" ? 413 : err.message === "invalid_json" ? 400 : 500;
+        // Do not reuse a connection whose oversized body remains unread.
+        if (status === 413) res.setHeader("connection", "close");
         sendJson(res, status, { error: status === 500 ? "internal" : err.message || String(err) });
       });
     });

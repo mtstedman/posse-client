@@ -200,9 +200,15 @@ export class RelayClient extends EventEmitter {
 
   async handleMessage(data, ws = this.socket, generation = this.connectionGeneration) {
     if (!this.ownsSocket(ws, generation)) return;
+    // The bridge wire uses JSON text frames. Node delivers binary frames as
+    // Blob by default; attempting Buffer.from(Blob) would escape this async
+    // event handler as an unhandled rejection and take down serve.
+    if (typeof data !== "string") {
+      this.failSocket(ws, generation, new Error("relay websocket expected a text frame"));
+      return;
+    }
     this.lastFrameAt = Date.now();
-    const text = typeof data === "string" ? data : Buffer.from(data || "").toString("utf8");
-    const frame = safeJsonParse(text);
+    const frame = safeJsonParse(data);
     if (!frame || typeof frame !== "object") {
       this.send(createErrorAck(null, "invalid_json"));
       return;

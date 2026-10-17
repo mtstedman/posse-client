@@ -10,12 +10,14 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { adminGitExec, adminGitExecAsync, adminWorktreeRoot } from "../../git/functions/admin-git.js";
 import { gitPushWithGitHubCliFallback } from "../../git/functions/git-push-auth.js";
 import { runHookAsync } from "../../git/functions/hooks.js";
 import { getSetting } from "../../queue/functions/index.js";
 import { repairVerificationPrerequisites } from "../../verification/functions/prerequisite-adapters.js";
+import { canonicalRepositoryLocator } from "./git.js";
 
 export const SESSION_TRAILER = "Posse-Session";
 export const SESSION_TRUNK_TRAILER = "Posse-Session-Trunk";
@@ -322,6 +324,28 @@ function originGitArgs(sshCommand, args) {
   return ["-c", `core.sshCommand=${sshCommand || "ssh"}`, ...args];
 }
 
+/** Bind both fetch and every push destination to the enrolled origin. */
+export async function assertSessionOriginTargets(projectDir, { remote, expectedUrl, exec = adminGitExecAsync }) {
+  const urls = async (push) => String(await exec([
+    "remote", "get-url", "--all", ...(push ? ["--push"] : []), remote,
+  ], projectDir)).split(/\r?\n/u).map((url) => url.trim()).filter(Boolean);
+  const fetchUrls = await urls(false);
+  const pushUrls = await urls(true);
+  const expected = String(expectedUrl || fetchUrls[0] || "").trim();
+  const matches = (url) => {
+    // Local Git origins retain their exact enrolled path. Network origins
+    // may legitimately use HTTPS for fetching and SSH for pushing.
+    if (url === expected) return true;
+    try { return canonicalRepositoryLocator(url) === canonicalRepositoryLocator(expected); }
+    catch { return false; }
+  };
+  if (!expected || fetchUrls.length === 0 || pushUrls.length === 0
+    || ![...fetchUrls, ...pushUrls].every(matches)) {
+    throw publishError("pairing_remote_target_mismatch",
+      `Git remote ${remote} no longer uses the enrolled repository for every fetch and push URL; publication stopped`);
+  }
+}
+
 /** Fetches origin's target with the host's credentials; returns its tip. */
 export async function fetchSessionOrigin(projectDir, {
   remote, targetBranch, sshCommand, exec = adminGitExecAsync,
@@ -408,7 +432,7 @@ async function removeStaleGateWorktrees(projectDir, root, exec) {
   let entries = [];
   try { entries = fs.readdirSync(root); } catch { return; }
   for (const name of entries) {
-    const match = /^session-deploy-(\d+)$/u.exec(name);
+    const match = /^session-deploy-(\d+)(?:-[0-9a-f-]+)?$/u.exec(name);
     if (match && !processAlive(Number(match[1]))) await removeGateWorktree(projectDir, path.join(root, name), exec);
   }
   try { await exec(["worktree", "prune"], projectDir); } catch { /* best effort */ }
@@ -437,7 +461,7 @@ export async function validateSessionPushCandidate(projectDir, {
   }
   const root = adminWorktreeRoot(projectDir);
   await removeStaleGateWorktrees(projectDir, root, exec);
-  const dir = path.join(root, `session-deploy-${process.pid}`);
+  const dir = path.join(root, `session-deploy-${process.pid}-${randomUUID()}`);
   fs.mkdirSync(root, { recursive: true });
   await removeGateWorktree(projectDir, dir, exec);
   await exec(["worktree", "add", "--detach", "--quiet", dir, candidate], projectDir, { timeoutMs: 10 * 60_000 });
