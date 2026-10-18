@@ -1,3 +1,4 @@
+import { TOOL_SETUP_ENVIRONMENT, TOOL_INSPECT_ENVIRONMENT, TOOL_INSTALL_DEPENDENCIES, TOOL_SETUP_DATABASE } from "../../../catalog/tools/environment-setup.js";
 import { stripAtlasPrefixUntrimmed as stripAtlasPrefix } from "./atlas-tool-name.js";
 // @ts-check
 import { TOOL_ROLE_LIBRARY, ROLE_TOOL_ALLOWLISTS, DETERMINISTIC_READ_TOOLS, DETERMINISTIC_WRITE_TOOLS, DETERMINISTIC_IMAGE_HELPER_TOOLS, DETERMINISTIC_IMAGE_MUTATION_TOOLS, DETERMINISTIC_IMAGE_TOOLS, DETERMINISTIC_OCR_TOOLS, DETERMINISTIC_IMAGE_VIEW_TOOLS, DETERMINISTIC_ASSET_DOWNLOAD_TOOLS, HIDDEN_ATLAS_SURFACE_ACTIONS, CATALOG_SCHEMA_OVERRIDE_KEYS, SYSTEM_PREFETCH_CAPABLE_ATLAS_ACTIONS, ATLAS_MUTATING_ACTIONS, ATLAS_FALLBACK_ONLY_ACTIONS, ATLAS_PREFETCH_ONLY_ACTIONS } from "../../../catalog/tool-surface/roles.js";
@@ -242,6 +243,26 @@ export const TOOL_CATALOG = {
     access: "read",
     summary: "Load the pre-staged research brief bundle (analysis, structured data, file priorities, function index, source manifest) for this work item in one call.",
     observation: { type: "tool.get_brief", label: "GetBrief", format: "generic", targetKeys: [] },
+  },
+  inspect_environment: {
+    schema: TOOL_INSPECT_ENVIRONMENT, access: "read",
+    summary: TOOL_INSPECT_ENVIRONMENT.description,
+    observation: { type: "tool.inspect_environment", label: "InspectEnvironment", format: "generic", targetKeys: ["path"] },
+  },
+  setup_environment: {
+    schema: TOOL_SETUP_ENVIRONMENT, access: "write",
+    summary: TOOL_SETUP_ENVIRONMENT.description,
+    observation: { type: "tool.setup_environment", label: "SetupEnvironment", format: "generic", targetKeys: [] },
+  },
+  install_dependencies: {
+    schema: TOOL_INSTALL_DEPENDENCIES, access: "write",
+    summary: TOOL_INSTALL_DEPENDENCIES.description,
+    observation: { type: "tool.install_dependencies", label: "InstallDependencies", format: "generic", targetKeys: ["path"] },
+  },
+  setup_database: {
+    schema: TOOL_SETUP_DATABASE, access: "write",
+    summary: TOOL_SETUP_DATABASE.description,
+    observation: { type: "tool.setup_database", label: "SetupDatabase", format: "generic", targetKeys: ["path"] },
   },
   project_db_query: {
     schema: TOOL_PROJECT_DB_QUERY,
@@ -686,7 +707,9 @@ export function getDeterministicMcpToolNames(role, {
   if (role === "dev" || role === "artificer" || role === "assessor") tools.push(...DETERMINISTIC_OCR_TOOLS);
   if (role === "assessor") tools.push(...DETERMINISTIC_IMAGE_VIEW_TOOLS);
   if (roleUsesDeterministicAssetDownload(role)) tools.push(...DETERMINISTIC_ASSET_DOWNLOAD_TOOLS);
-  if (["planner", "dev", "assessor"].includes(role)) tools.push("run_unit_test");
+  if (["planner", "dev", "assessor"].includes(role)) tools.push("run_unit_test", "inspect_environment");
+  if (role === "planner") tools.push("setup_environment");
+  if (role === "dev") tools.push("install_dependencies", "setup_database");
   // Scoped lint/typecheck belongs to the assessor.
   if (role === "assessor") {
     tools.push("run_scoped_checks");

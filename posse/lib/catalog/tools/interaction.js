@@ -5,6 +5,7 @@
 export const WORK_ITEM_QUESTION_CHOICE_IDS = Object.freeze({
   plan_approval: Object.freeze(["approve", "reject"]),
   file_scope_approval: Object.freeze(["approve", "reject"]),
+  environment_setup: Object.freeze(["approve", "reject"]),
   assessment_review: Object.freeze(["send_back", "retry_assessment", "replan", "pass", "fail", "explicit_waiver"]),
   assessment_transport_recovery: Object.freeze(["send_back", "retry_assessment", "retry", "replan", "pass", "fail", "explicit_waiver"]),
   assessment_retry_limit: Object.freeze(["send_back", "retry_assessment", "replan", "pass", "fail", "explicit_waiver"]),

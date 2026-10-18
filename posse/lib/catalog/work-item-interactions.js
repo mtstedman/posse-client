@@ -47,6 +47,7 @@ export const LEGACY_PIPELINE_HEAD_REVIEW_TYPES = readonlySet([
 export const HANDLER_BY_KIND = readonlyMap([
   ["plan_approval", "plan"],
   ["file_scope_approval", "scope"],
+  ["environment_setup", "human_input"],
   ["assessment_review", "review"],
   ["assessment_transport_recovery", "review"],
   ["assessment_retry_limit", "review"],

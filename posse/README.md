@@ -1091,3 +1091,67 @@ That creates a versioned tarball under `dist/` containing:
 - installer README with usage
 
 Installer source lives in `installers/linux/install-posse-atlas.sh`.
+
+### Application environment setup
+
+For a greenfield application, the planner can use `inspect_environment` and
+`setup_environment` before handing off development. The latter proposes one
+ordered batch of npm and/or Composer steps. Each step names a package directory,
+packages and version constraints, whether they are development dependencies,
+and whether scripts or Composer plugins are needed. An omitted package list
+installs the dependencies already declared in the manifest.
+
+The **Approve / Reject** question shows the entire batch, commands, environment
+overrides, current manifests, proposed initialization/ignore changes, and local
+commit scope. Nothing installs before approval. Automatic scope approval and
+unattended mode never authorize these requests. Scripts and Composer plugins
+are disabled unless explicitly requested in the approved step. A canceled or
+expired attempt, rejection, or changed inputs prevents execution. Each approval
+can be used once; batches stop at the first failed command and preserve partial
+changes for inspection. A retry needs new approval.
+
+Planning setup runs in the primary checkout, initializes missing manifests,
+adds anchored ignore rules for dependency directories, and commits only the
+setup manifests, locks, and `.gitignore` locally. It does not push or deploy.
+Development is blocked until setup succeeds and that commit is clean. New dev
+worktrees reuse the approved installation with matching manifests and lockfiles
+before development checks or providers run. This batch tool is available during
+initial ordinary planning, before the work-item development branch exists;
+red-team/review passes and assessment replans cannot run it.
+
+For local SQLite storage, include `database` in that same planning batch. Supply
+the new database `path`, optional existing CREATE TABLE/INDEX `schema_path`,
+and application `env_files` (default `[".env"]`). Use `steps: []` when no package
+installation is needed. Setup adds `DATABASE_URL` (a file URL), `DB_DATABASE`
+(an absolute local path), and `DB_CONNECTION=sqlite`, preserves unrelated
+environment values, and commits portable `database.env.example` files. It adds
+ignore rules for live `.env`, the database, and SQLite sidecars. Existing data,
+conflicting database variables, tracked `.env`, and an existing Posse database
+registration are never replaced automatically.
+
+The same approval lists Posse's database `permissions`: default `["read"]`, or
+explicit `["read", "write"]` when development needs schema/data changes. After
+the setup commit succeeds, Posse creates the SQLite file and registers it with
+its project database tools. Subsequent jobs receive only their permitted tools;
+an existing agent token is not widened. Development worktrees get the generated
+database variables pointing to the same primary-checkout local database, without
+copying other secrets. Applications must load their `.env` using their framework
+or dotenv support. The portable example is suitable for configuring a fresh
+clone; runtime data and machine-specific environment files are never committed.
+
+On an existing development branch, `install_dependencies` remains available
+for standalone npm manifests within writable scope. Declare dependencies in
+`package.json`, include `package.json` and `package-lock.json` in scope, and
+ignore `node_modules/`. This separate installer also requires explicit approval
+and leaves its lockfile for the ordinary developer commit.
+
+`setup_database` creates a **new local SQLite file** at an ignored path, optionally
+applying a SQL file containing CREATE TABLE/INDEX statements. It requires a
+separate user approval, never overwrites existing data, and never grants
+`project_db_query` permission. Keep the schema and repeatable initialization in
+source control; runtime databases remain local to their worktree.
+
+Supported dependency managers are standalone npm and Composer, using toolchains
+already installed on the machine (including Windows command shims). npm
+workspaces, OS toolchain installation, existing-database migrations, and external
+database services require separate setup.

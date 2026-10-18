@@ -1,3 +1,4 @@
+import { ENVIRONMENT_SETUP_REVIEW_TYPE, ENVIRONMENT_SETUP_ACTIONS } from "./tools/environment-setup.js";
 import { readonlySet } from "./readonly-collections.js";
 // Human-input action catalogue.
 //
@@ -25,6 +26,7 @@ export const HUMAN_GATE_STATES = Object.freeze(["open", "resolving", "resolved",
 // Legacy review types are projected into the same typed question kind by the
 // queue and the bridge. Keep the mapping in one catalog so both agree.
 export const QUESTION_KIND_BY_REVIEW_TYPE = Object.freeze({
+  [ENVIRONMENT_SETUP_REVIEW_TYPE]: "environment_setup",
   needs_review: "assessment_review",
   assessment_parse_error: "assessment_review",
   assessment_evidence_missing: "assessment_transport_recovery",
@@ -210,6 +212,7 @@ const DEFAULT_HUMAN_GATE_SOURCE_STATES = Object.freeze(
 );
 
 export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
+  [ENVIRONMENT_SETUP_REVIEW_TYPE]: ENVIRONMENT_SETUP_ACTIONS,
   scope_expansion_request: freezeChoices(["approve", "deny"]),
   scope_expansion_required: freezeChoices(["approve", "reject"]),
   [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE]: freezeChoices(["commit", "send_back", "fail"]),
@@ -238,6 +241,7 @@ export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
 });
 
 export const HUMAN_GATE_RECOVERY_KINDS = Object.freeze([
+  ENVIRONMENT_SETUP_REVIEW_TYPE,
   "developer_blocked",
   "assessor_evidence_unavailable",
   "blocked_cycle_exhausted",
@@ -253,6 +257,11 @@ export const HUMAN_GATE_RECOVERY_KINDS = Object.freeze([
 export const CANONICAL_HUMAN_GATE_ACTIONS = GATE_ACTION_ORDER;
 
 const HUMAN_GATE_CONTRACTS = Object.freeze({
+  [ENVIRONMENT_SETUP_REVIEW_TYPE]: {
+    gate_kind: ENVIRONMENT_SETUP_REVIEW_TYPE,
+    allowed_actions: ENVIRONMENT_SETUP_ACTIONS,
+    allowed_source_states: ["running"],
+  },
   [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE]: {
     gate_kind: "developer_blocked",
     allowed_actions: ["commit", "send_back", "fail"],
@@ -398,6 +407,12 @@ const HUMAN_GATE_ACTION_ALIASES = Object.freeze({
 });
 
 const HUMAN_GATE_ACTIONABILITY_PROFILES = Object.freeze({
+  [ENVIRONMENT_SETUP_REVIEW_TYPE]: {
+    unresolved_fact: "Whether this exact installer or database initializer may run on the user machine.",
+    human_contribution: "authority",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "Only explicit user approval authorizes environment setup.",
+  },
   scope_expansion_request: {
     unresolved_fact: "Whether the work item may mutate files outside its current scope.",
     human_contribution: "authority",
@@ -626,6 +641,7 @@ export function humanGateContractForPayload(payload = {}, {
 }
 
 export const HUMAN_INPUT_COORDINATION_REVIEW_TYPES = Object.freeze([
+  ENVIRONMENT_SETUP_REVIEW_TYPE,
   "scope_expansion_request",
   "scope_expansion_required",
   DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE,
@@ -797,6 +813,7 @@ export function scopeModeHumanInputAnswerForPayload(payload = {}, scopeMode = SC
  * or fabricating a pass.
  */
 export function nonInteractiveHumanInputAnswerForPayload(payload = {}) {
+  if (payload.requires_interactive_approval === true) return null;
   if (payload.subtype === "push_offer" || payload.subtype === "plan_approval") return null;
   if (
     payload.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE

@@ -1,3 +1,4 @@
+import { prepareDevelopmentEnvironment } from "../../../system/functions/planning-environment-state.js";
 import path from "path";
 import { isLeaseValid, logEvent, updateJobPayload } from "../../../queue/functions/index.js";
 import { logAttemptSkippedStaleLease } from "../../functions/execution/attempt-logging.js";
@@ -197,6 +198,8 @@ export class WorkerExecutionCoordinator {
       });
       if (assessOnly.currentAttemptId) currentAttemptId = assessOnly.currentAttemptId;
       if (assessOnly.handled) return;
+
+      await prepareDevelopmentEnvironment(job, wtPath);
 
       // Brief DEV/FIX on the type errors already present in the files it may
       // edit. The job holds its write locks and its worktree is ready here.

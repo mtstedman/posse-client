@@ -703,6 +703,12 @@ export class PlannerRole extends BaseRole {
     Object.assign(plannerPacket, plannerRolePolicy, {
       agent_coordination: { ...plannerPacket.agent_coordination, ...plannerRolePolicy.agent_coordination },
     });
+    plannerPacket.capabilities = {
+      ...(plannerPacket.capabilities || {}),
+      tools: { ...(plannerPacket.capabilities?.tools || {}),
+        environment_setup_batch_v1: !worker.dryRun && plannerRoleMode === "normal" && !assessmentReplan && !workItem?.branch_name,
+      },
+    };
     const plannerAttempts = getAttempts(job.id);
     Object.assign(plannerPacket, {
       job_type: job.job_type,

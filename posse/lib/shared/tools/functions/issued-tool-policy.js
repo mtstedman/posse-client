@@ -1,4 +1,5 @@
 import { deepFreezeJson } from "../../format/functions/freeze-json.js";
+import { ENVIRONMENT_SETUP_TOOLS } from "../../../catalog/tools/environment-setup.js";
 // @ts-check
 //
 // Monotonic consumer for Posse Remote tool capability decisions.
@@ -27,6 +28,7 @@ const TEST_TOOL_NAMES = new Set([
   "run_unit_test",
 ]);
 const WRITE_TOOL_NAMES = new Set([
+  ...ENVIRONMENT_SETUP_TOOLS,
   "write_file",
   "edit_file",
   "move_file",
@@ -213,6 +215,8 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
   if (tool.suite === "tools" && tool.name === "ack_operator_feedback" && coordination.webResearchHandoff === true) return true;
   if (!policy.allow_read) return false;
   if (tool.suite === "atlas") return atlasAvailable !== false;
+  if (tool.name === "setup_environment") return policy.allow_read && coordination.role === "planner";
+  if (ENVIRONMENT_SETUP_TOOLS.includes(tool.name)) return policy.allow_write && coordination.role === "dev";
   if (tool.name === "project_db_query") return projectDbCapability !== "none";
   if (TEST_TOOL_NAMES.has(tool.name)) return policy.allow_tests;
   if (tool.name === "bash") return policy.allow_shell;

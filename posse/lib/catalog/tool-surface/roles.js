@@ -87,12 +87,12 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
       // allowWrite:false): read/inspect tools plus project_db_query — whose
       // write capability comes from the projectDbWrite override, not the
       // file-write grant. No file mutation tools on this lane.
-      read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "project_db_query"],
+      read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "project_db_query", "inspect_environment"],
       // Exact files_to_create are materialized as empty files before a code
       // dev/fix provider starts, then moved into files_to_modify. write_file
       // remains registered for compatibility/artificer output but must not be
       // issued on this surface; edit_file can populate the empty file.
-      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "request_scope", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_unit_test", "project_db_query"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "request_scope", "edit_file", "move_file", "make_dir", "prune_artifact_output", "read_image_metadata", "validate_artifact_output", "extract_image_text", "run_unit_test", "project_db_query", "inspect_environment", "install_dependencies", "setup_database"],
     }),
     artificer: Object.freeze({
       read: ["ack_operator_feedback"],
@@ -104,8 +104,8 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     // execution capability cap keeps it read-only regardless of the operator
     // grant, and the contract gate drops the tool when no read grant exists.
     assessor: Object.freeze({
-      read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "view_image", "run_scoped_checks", "run_unit_test", "bash", "project_db_query"],
-      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "view_image", "run_scoped_checks", "run_unit_test", "bash", "project_db_query"],
+      read: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "view_image", "run_scoped_checks", "run_unit_test", "bash", "project_db_query", "inspect_environment"],
+      write: ["ack_operator_feedback", "read_file", "list_files", "search_files", "git_history", "inspect_file", "hash_file", "read_image_metadata", "validate_artifact_output", "extract_image_text", "view_image", "run_scoped_checks", "run_unit_test", "bash", "project_db_query", "inspect_environment"],
     }),
     researcher: Object.freeze({
       read: ["ack_operator_feedback", "read_file", "chain_read", "chain_verdict", "list_files", "search_files", "git_history", "inspect_file", "hash_file"],
@@ -116,8 +116,8 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     // item itself; the issued capability and operator grant decide whether
     // that is read-only or read/write.
     planner: Object.freeze({
-      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "run_unit_test", "project_db_query"],
-      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "run_unit_test", "project_db_query"],
+      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "run_unit_test", "project_db_query", "inspect_environment", "setup_environment"],
+      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "run_unit_test", "project_db_query", "inspect_environment", "setup_environment"],
     }),
     // Internal one-turn JSON model passes are not Jobs and therefore cannot
     // possess an Agent-bound MCP gate. Their prompts explicitly prohibit tool

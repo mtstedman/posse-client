@@ -227,6 +227,10 @@ function linkNodeModulesEntries(source, target) {
     try { fs.lstatSync(to); continue; } catch { /* absent */ }
     if (entry.isDirectory() || (entry.isSymbolicLink() && directoryExists(from))) {
       fs.symlinkSync(from, to, kind);
+    } else if (process.platform === "win32") {
+      // Directory junctions work without Windows developer mode, file
+      // symlinks do not. Copy the small root metadata/bin proxy files.
+      fs.copyFileSync(from, to);
     } else {
       // pnpm state files and similar are read, never written, by checks.
       fs.symlinkSync(from, to, "file");
@@ -291,7 +295,7 @@ function linkComposerVendorEntries(source, target, { depth = 0 } = {}) {
       linkComposerVendorEntries(from, to, { depth: 1 });
     } else if (isDir) {
       fs.symlinkSync(from, to, kind);
-    } else if (depth === 1 || COMPOSER_GENERATED_VENDOR_FILES.has(entry.name)) {
+    } else if (process.platform === "win32" || depth === 1 || COMPOSER_GENERATED_VENDOR_FILES.has(entry.name)) {
       // verbatimSymlinks keeps legacy relative bin links inside this vendor/.
       fs.cpSync(from, to, { verbatimSymlinks: true });
     } else {
@@ -461,6 +465,7 @@ function killProcessTree(child, { force = false } = {}) {
 
 export function runVerificationPrerequisiteCommand(command, args, {
   cwd,
+  windowsVerbatimArguments = false,
   env = {},
   signal = null,
   timeoutMs = 10 * 60 * 1000,
@@ -512,6 +517,7 @@ export function runVerificationPrerequisiteCommand(command, args, {
         env: { ...process.env, ...env },
         shell: false,
         windowsHide: true,
+        windowsVerbatimArguments,
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error) {

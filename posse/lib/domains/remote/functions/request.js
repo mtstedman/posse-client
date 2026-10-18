@@ -106,6 +106,8 @@ function capabilitiesFromPacket(packet = {}, providerName = null, customToolsAva
       ...(tools.integrity_verification === true ? { integrity_verification: true } : {}),
       project_db: ["read", "write"].includes(projectDbCapability) ? projectDbCapability : "none",
       // Only the local owner probe may establish availability; payload flags narrow it.
+      environment_setup_v1: tools.environment_setup_v1 !== false,
+      environment_setup_batch_v1: tools.environment_setup_batch_v1 !== false,
       custom_tools_v1: narrowBoolCapability(tools.custom_tools_v1, customToolsAvailable),
       custom_tools_available: narrowBoolCapability(tools.custom_tools_available, customToolsAvailable),
     },
@@ -138,6 +140,8 @@ function capabilitiesFromPacket(packet = {}, providerName = null, customToolsAva
       tests: false,
       image_generation: false,
       project_db: "none",
+      environment_setup_v1: false,
+      environment_setup_batch_v1: false,
       custom_tools_v1: false,
       custom_tools_available: false,
     },

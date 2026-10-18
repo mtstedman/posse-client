@@ -37,19 +37,19 @@ Atlas: `atlas.traverse_ref`.
 
 ### `assessor`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.final_review`, `tools.git_history`, `tools.hash_file`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.run_unit_test`, `tools.search_files`, `tools.validate_artifact_output`, `tools.view_image`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.bash`, `tools.custom_tools`, `tools.extract_image_text`, `tools.final_review`, `tools.git_history`, `tools.hash_file`, `tools.inspect_environment`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.read_image_metadata`, `tools.run_scoped_checks`, `tools.run_unit_test`, `tools.search_files`, `tools.validate_artifact_output`, `tools.view_image`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.review.analyze`, `atlas.review.delta`, `atlas.review.risk`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `dev`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.final_review`, `tools.git_history`, `tools.inspect_file`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.run_unit_test`, `tools.search_files`, `tools.sub_agent`, `tools.validate_artifact_output`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.edit_file`, `tools.extract_image_text`, `tools.final_review`, `tools.git_history`, `tools.inspect_environment`, `tools.inspect_file`, `tools.install_dependencies`, `tools.list_files`, `tools.make_dir`, `tools.move_file`, `tools.project_db_query`, `tools.prune_artifact_output`, `tools.read_file`, `tools.read_image_metadata`, `tools.request_scope`, `tools.run_unit_test`, `tools.search_files`, `tools.setup_database`, `tools.sub_agent`, `tools.validate_artifact_output`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.code.window`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
 ### `planner`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.run_unit_test`, `tools.search_files`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.inspect_environment`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.run_unit_test`, `tools.search_files`, `tools.setup_environment`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
@@ -662,6 +662,26 @@ Calculate a deterministic file hash for verification, up to 512 MiB. Returns str
 | `algorithm` | `string` | Optional | values "sha256", "sha1", "md5" | Hash algorithm. Default: sha256. |
 | `path` | `string` | Required |  | File path (absolute or relative to working directory) |
 
+### `tools.inspect_environment`
+
+Remote roles: `assessor`, `dev`, `planner`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `inspect_environment` |
+| Tool reference token | `tools.inspect_environment` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `read` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Inspect local Node/npm and PHP/Composer availability, manifests, dependencies, lockfiles and installation state without installing anything. Planner inspection targets the primary checkout used for dependency batches.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `path` | `string` | Optional |  | Repository-relative package directory; defaults to the job worktree root. |
+
 ### `tools.inspect_file`
 
 Remote roles: `artificer`, `assessor`, `dev`, `planner`, `researcher`.
@@ -681,6 +701,28 @@ Structured metadata for one file path or an array of paths, including existence,
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `path` | `string | array` | Required | min length 1; min items 1 | One file path or an array of file paths, absolute or relative to the working directory. |
+
+### `tools.install_dependencies`
+
+Remote roles: `dev`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `install_dependencies` |
+| Tool reference token | `tools.install_dependencies` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `write` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Request explicit user approval to install the dependencies declared in package.json in this job's worktree. Edit package.json first and include package.json/package-lock.json in writable scope. Every invocation needs its own approval; scope auto-approval does not apply. Returns after approval and execution, rejection, or expiry. Accepts structured options for standalone npm packages.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `lifecycle_scripts` | `boolean` | Optional |  | Allow package lifecycle scripts (including native builds). Default false. The user must explicitly approve this in the installer proposal. |
+| `path` | `string` | Optional |  | Repository-relative package directory; defaults to the job worktree root. |
+| `reason` | `string` | Required | min length 1; max length 1000 |  |
 
 ### `tools.list_files`
 
@@ -1068,6 +1110,50 @@ Search file contents deterministically with ripgrep (rg), using regex or literal
 | `output_mode` | `string` | Optional | values "content", "files_with_matches", "count" | Result format. Default: content. |
 | `path` | `string` | Optional |  | File or directory to search in. Default: working directory |
 | `pattern` | `string` | Required |  | Search pattern. Interpreted as a regex unless literal is true. |
+
+### `tools.setup_database`
+
+Remote roles: `dev`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `setup_database` |
+| Tool reference token | `tools.setup_database` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `write` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Request explicit user approval to create a new local SQLite database at an ignored repo-relative path, optionally from a committed/scoped SQL schema file. Preserves existing databases and leaves Posse database permissions unchanged. Every invocation requires user approval. Keep the schema and application database path configuration in source control; runtime database files are local to this worktree.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `path` | `string` | Required | min length 1 | New local SQLite file, e.g. data/app.sqlite. Must be ignored by Git and outside Posse internals. |
+| `reason` | `string` | Required | min length 1; max length 1000 |  |
+| `schema_path` | `string` | Optional |  | Optional repo-relative SQL file containing CREATE TABLE/INDEX statements. No external database access or destructive migrations. |
+
+### `tools.setup_environment`
+
+Remote roles: `planner`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `setup_environment` |
+| Tool reference token | `tools.setup_environment` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `write` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Before development, propose an ordered npm/Composer batch and optional local SQLite database for explicit user approval. Initializes manifests, installs packages, creates database environment variables and portable examples, registers approved Posse database permissions, and commits setup source files in the primary checkout. Live .env/database files remain ignored. Scripts/plugins default off. Wait for a successful setup commit before handing off development. No arbitrary shell commands. Installed manifests are authoritative and must not be planned as files_to_create.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `database` | `object` | Optional |  | Optional new local SQLite database, shared by application development worktrees. Use steps: [] for database-only setup. Creates DATABASE_URL, DB_DATABASE and DB_CONNECTION in ignored .env files and registers Posse access after approval. Preserves existing databases and connection registrations. |
+| `reason` | `string` | Required | min length 1; max length 1000 |  |
+| `steps` | `array<object>` | Required | min items 0; max items 12 |  |
 
 ### `tools.sub_agent`
 

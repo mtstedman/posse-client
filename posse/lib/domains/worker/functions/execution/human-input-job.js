@@ -1,3 +1,4 @@
+import { ENVIRONMENT_SETUP_REVIEW_TYPE } from "../../../../catalog/tools/environment-setup.js";
 import { applyDirtyWorktreeRecovery } from "../helpers/dirty-worktree-recovery.js";
 import { DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE } from "../../../../catalog/human-input.js";
 import { processVerdict } from "../helpers/process-verdict.js";
@@ -723,6 +724,17 @@ export async function runHumanInputJob(worker, job, {
       } else {
         worker.emit(job.id, `${C.yellow}[human] One-shot scope answer was not actionable; no plan or dev job was queued${C.reset}`);
       }
+    }
+
+    if (payload.review_type === ENVIRONMENT_SETUP_REVIEW_TYPE) {
+      // The waiting tool consumes the durable resolution. Do not resume/replan
+      // the source job or cancel its other human questions.
+      handledReviewDecision = true;
+      pendingReviewGatesAlreadyCanceled = true;
+      if (outputEnvelope.unattended === true || (outputEnvelope.source && outputEnvelope.source !== "human")) {
+        throw new Error("Environment installers require explicit user approval.");
+      }
+      worker.emit(job.id, `[human] Environment setup ${selectedAction === "approve" ? "approved" : "rejected"}; returning the decision to the waiting tool.`);
     }
 
     if (payload.review_type === "scope_expansion_request" && payload.scope_request) {

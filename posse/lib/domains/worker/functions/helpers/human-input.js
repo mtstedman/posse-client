@@ -3,6 +3,7 @@
 // Human-input handler for interactive questions surfaced through the display.
 // Manages waiting state, timeout behavior, and abort-aware answer collection.
 
+import { ENVIRONMENT_SETUP_REVIEW_TYPE } from "../../../../catalog/tools/environment-setup.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import {
   HUMAN_INPUT_BEST_JUDGMENT_ANSWER,
@@ -52,6 +53,7 @@ function normalizePromptQuestions(questions, fallback, { collapseForChoices = fa
 }
 
 function isSecuritySensitivePrompt(payload = {}) {
+  if (payload.review_type === ENVIRONMENT_SETUP_REVIEW_TYPE) return true;
   if (payload.subtype === "plan_approval" || payload.subtype === "push_offer") return true;
   if (payload.subtype === "oneshot_scope_selection" || payload.review_type === "oneshot_scope_selection") return true;
   if (payload.review_type === "scope_expansion_request") return true;
@@ -63,6 +65,7 @@ function isSecuritySensitivePrompt(payload = {}) {
 export function unattendedHarnessAnswerForPayload(payload = {}, {
   autoApprove = false,
 } = {}) {
+  if (payload.requires_interactive_approval === true) return null;
   if (payload.subtype === "push_offer" || payload.subtype === "plan_approval") return null;
   if (payload.subtype === "oneshot_scope_selection" || payload.review_type === "oneshot_scope_selection") {
     return "plan";
@@ -101,7 +104,7 @@ export function resolveHumanInputPrompt(job, payload = {}) {
     { collapseForChoices: choices.length > 0 },
   );
   const genericPrompt = !payload.review_type && !payload.subtype;
-  const securitySensitive = isSecuritySensitivePrompt(payload);
+  const securitySensitive = payload.requires_interactive_approval === true || isSecuritySensitivePrompt(payload);
   const allowsBestJudgment = choices.length === 0
     && !securitySensitive
     && (payload.allow_best_judgment === true

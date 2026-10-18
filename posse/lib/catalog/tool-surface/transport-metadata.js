@@ -59,6 +59,10 @@ export const TOOLS_SUITE = [
   { name: "run_scoped_checks", mutatesWorktree: false, advertise: ["function", "mcp"] },
   // One path-only unit-test runner. Runtime discovery hides it unless SCIP and
   // every language adapter required by test* directories are available.
+  { name: "inspect_environment", mutatesWorktree: false, advertise: ["mcp"] },
+  { name: "setup_environment", mutatesWorktree: true, advertise: ["mcp"] },
+  { name: "install_dependencies", mutatesWorktree: true, advertise: ["mcp"] },
+  { name: "setup_database", mutatesWorktree: true, advertise: ["mcp"] },
   { name: "run_unit_test", mutatesWorktree: false, advertise: ["mcp"] },
   // Dev/fix agents may proactively consolidate exact scope requests. The
   // ordinary write/edit boundary still invokes the same executor internally.

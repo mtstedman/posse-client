@@ -1,3 +1,4 @@
+import { planningEnvironmentReadiness } from "../../system/functions/planning-environment-state.js";
 import { plannedTaskDedupeKey } from "./planned-task-dedupe.js";
 // lib/domains/planning/functions/plan-compiler.js
 //
@@ -266,6 +267,22 @@ export function createJobsFromPlan(worker, planJob, tasks, {
   planAttemptId = null,
 } = {}) {
       const plannerRole = worker?.roleRegistry?.get?.("plan");
+      const environment = planningEnvironmentReadiness(planJob.work_item_id);
+      if (!environment.ok) {
+        const gate = spawnFromRole(plannerRole, "succeeded", "human_input", {
+          work_item_id: planJob.work_item_id, parent_job_id: planJob.id, job_type: "human_input",
+          title: "Resolve dependency setup before development", priority: planJob.priority || "normal", model_tier: "cheap",
+          payload_json: JSON.stringify({ questions: [environment.message + " Retry setup with a revised batch, or pause this work item?"],
+            context: environment.message, allow_best_judgment: false, requires_interactive_approval: true }),
+        });
+        spawnPlanAfterHumanInputDeferral(worker, planJob, [gate.id], { deferralRound: 1 });
+        worker.emit(planJob.id, environment.message);
+        return;
+      }
+      // The approved setup is committed in the primary checkout. Prepared
+      // planner read views may still point to the pre-install commit.
+      if (environment.receipt) planReadRoot = environment.receipt.cwd;
+
       // The plan as the planner submitted it, before compilation splits or
       // drops tasks: a planner-executed claim is only valid as the whole plan.
       const submittedTaskCount = Array.isArray(tasks) ? tasks.length : 0;
@@ -2100,6 +2117,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               files_to_modify: t.files_to_modify || [],
               files_to_create: t.files_to_create || [],
               files_to_delete: t.files_to_delete || [],
+              ...(environment.gateId && finalJobType === "dev" ? { _environment_setup_gate_id: environment.gateId } : {}),
               ...(planAnchor ? {
                 _plan_base_commit: planAnchor.base_commit,
                 _plan_file_sha256: planAnchor.file_sha256,

@@ -18,7 +18,10 @@ export function assertMutationRoleSafety(registry) {
   const violations = [];
   for (const entry of registry.all()) {
     if (!entry.mutatesWorktree) continue;
-    const bad = entry.roles.filter((role) => READ_ONLY_ROLES.includes(role));
+    // This one planner capability proposes a durable human-approved batch.
+    // It does not grant the planner general file or shell writes.
+    const bad = entry.roles.filter((role) => READ_ONLY_ROLES.includes(role)
+      && !(role === "planner" && entry.name === "setup_environment"));
     if (bad.length) {
       violations.push(`${entry.id} mutates the worktree but is allowed for read-only role(s): ${bad.join(", ")}`);
     }

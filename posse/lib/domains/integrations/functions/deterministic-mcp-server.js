@@ -1,3 +1,6 @@
+import { ENVIRONMENT_SETUP_REVIEW_TYPE, ENVIRONMENT_SETUP_TOOLS } from "../../../catalog/tools/environment-setup.js";
+import { inspectEnvironment } from "../../system/functions/project-environment.js";
+import { requestEnvironmentSetup, awaitEnvironmentSetupDecision, executeApprovedEnvironmentSetup } from "../../system/functions/environment-approval.js";
 import { COMPACT_RELATIONSHIP_PROJECTION, COMPACT_STRUCTURE_PROJECTION } from "../../../catalog/atlas-presentation.js";
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 import { applyPlannerSchemaDiet } from "../../../shared/tools/functions/planner-schema-diet.js";
@@ -1183,6 +1186,28 @@ const {
   execEditFile,
 });
 
+function environmentContext() {
+  return { cwd: workspaceCwd, role: roleName, scope: effectiveScopePredicates, jobId: mcpJobId, attemptId: mcpAttemptId };
+}
+
+async function requestEnvironmentWithinJob(tool, args = {}) {
+  if (tool === "setup_environment" ? roleName !== "planner" : (!writeEnabled || roleName !== "dev")) throw new Error("Batched setup requires a planner; other installers require a writable dev job.");
+  const context = environmentContext();
+  const request = await requestEnvironmentSetup(tool, args, context);
+  return { [LIVE_SCOPE_WAIT]: true, request, operation: tool, args, environmentContext: context };
+}
+
+function attachEnvironmentTools() {
+  if (ownerHotGateway || ["planner", "dev", "assessor"].includes(roleName)) {
+    mcpToolRegistry.attach("inspect_environment", (args) => JSON.stringify(inspectEnvironment(args || {}, environmentContext())));
+  }
+  for (const tool of ENVIRONMENT_SETUP_TOOLS) {
+    if (ownerHotGateway || (tool === "setup_environment" ? roleName === "planner" : roleName === "dev" && writeEnabled)) {
+      mcpToolRegistry.attach(tool, (args) => requestEnvironmentWithinJob(tool, args));
+    }
+  }
+}
+
 function _normalizeReadRange(argVal, fallback) {
   const n = Number.parseInt(String(argVal ?? ""), 10);
   if (!Number.isFinite(n) || n <= 0) return fallback;
@@ -1435,6 +1460,9 @@ function legacyToolNamesForUnscopedRole() {
 }
 
 function runtimeToolAvailable(toolName) {
+  if (toolName === "setup_environment") return (ownerHotGateway && !mcpMessageSessionScoped) || roleName === "planner";
+  if (ENVIRONMENT_SETUP_TOOLS.includes(toolName)) return writeEnabled && ((ownerHotGateway && !mcpMessageSessionScoped) || roleName === "dev");
+  if (toolName === "inspect_environment") return (ownerHotGateway && !mcpMessageSessionScoped) || ["planner", "dev", "assessor"].includes(roleName);
   if (toolName === "custom_tools") return ownerHotGateway || bootConfig.customTools === true;
   if (WRITE_TOOL_NAMES.has(toolName)) return writeEnabled;
   if (toolName === "download_file" || toolName === "compose_sprite_sheet") return writeEnabled;
@@ -1575,6 +1603,7 @@ addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
 addToolSchema(TOOL_GET_BRIEF);
 addToolSchema(projectDbQuerySchemaForCurrentBoot());
 addToolSchema(TOOL_CUSTOM_TOOLS);
+for (const name of ["inspect_environment", ...ENVIRONMENT_SETUP_TOOLS]) addToolSchema(getToolSchemaForRole(name, roleName));
 if (writeEnabled) {
   for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_DOWNLOAD_FILE, TOOL_COMPOSE_SPRITE_SHEET]) {
     addToolSchema(schema.name === "request_scope" ? getToolSchemaForRole("request_scope", roleName) : schema);
@@ -2381,6 +2410,8 @@ if (projectDbAccessEnabled) {
   mcpToolRegistry.attach("project_db_query", (args) => execProjectDbQuery(args || {}, { projectDir: workspaceCwd, capability: projectDbCapability(), observationContext: { job_id: mcpJobId, work_item_id: mcpWorkItemId, attempt_id: mcpAttemptId } }));
 }
 
+attachEnvironmentTools();
+
 let TOOL_EXECUTORS = new Map(Object.entries(mcpToolRegistry.handlerMap()));
 for (const toolName of [...TOOL_EXECUTORS.keys()]) {
   if (!TOOL_SCHEMA_MAP.has(toolName)) TOOL_EXECUTORS.delete(toolName);
@@ -2518,6 +2549,7 @@ function rebuildNativeToolSchemas() {
   addToolSchema(TOOL_GET_BRIEF);
   addToolSchema(projectDbQuerySchemaForCurrentBoot());
   addToolSchema(TOOL_CUSTOM_TOOLS);
+  for (const name of ["inspect_environment", ...ENVIRONMENT_SETUP_TOOLS]) addToolSchema(getToolSchemaForRole(name, roleName));
   if (writeEnabled) {
     for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_DOWNLOAD_FILE, TOOL_COMPOSE_SPRITE_SHEET]) {
       addToolSchema(schema.name === "request_scope" ? getToolSchemaForRole("request_scope", roleName) : schema);
@@ -2539,6 +2571,7 @@ function rebuildNativeToolSchemas() {
 
 function attachToolExecutorsForCurrentBoot() {
   mcpToolRegistry = declareToolSuites(new ToolRegistry());
+  attachEnvironmentTools();
   mcpToolRegistry.attach("custom_tools", (args) => executeCustomToolsTool(args || {}));
   mcpToolRegistry.attach("request_scope", (args) => requestScopeWithinJob(args || {}));
   mcpToolRegistry.attach("agent_handoff", (args) => executeAgentHandoff(args || {}));
@@ -2810,6 +2843,7 @@ function applyRuntimeBootConfig(nextConfig = {}, {
 }
 
 const BLOCKING_NATIVE_TOOL_NAMES = new Set([
+  ...ENVIRONMENT_SETUP_TOOLS,
   "bash",
   "chain_read",
   "chain_verdict",
@@ -3825,7 +3859,7 @@ function liveScopeDecisionKey(runtime, request) {
   return `${Number(runtime?.observation?.job_id) || 0}:${String(request?.request_id || "")}`;
 }
 
-function sharedLiveScopeDecision(runtime, request) {
+function sharedLiveScopeDecision(runtime, request, environment = null) {
   const key = liveScopeDecisionKey(runtime, request);
   const existing = sharedLiveScopeDecisionWaits.get(key);
   if (existing) {
@@ -3838,7 +3872,14 @@ function sharedLiveScopeDecision(runtime, request) {
     sessionIds: new Set(runtime?.sessionId ? [runtime.sessionId] : []),
     promise: null,
   };
-  record.promise = awaitJobScopeExpansionDecision({
+  record.promise = (request?.kind === ENVIRONMENT_SETUP_REVIEW_TYPE
+    ? runWithObservationContext(runtime.observation, async () => {
+      const decision = await awaitEnvironmentSetupDecision({ request, context: environment, signal: controller.signal, timeoutMs: liveScopeWaitTimeoutMs() });
+      return decision.approved
+        ? executeApprovedEnvironmentSetup(request, environment, { signal: controller.signal })
+        : decision;
+    })
+    : awaitJobScopeExpansionDecision({
     jobId: runtime?.observation?.job_id,
     requestId: request?.request_id,
     attemptId: runtime?.observation?.attempt_id,
@@ -3847,7 +3888,7 @@ function sharedLiveScopeDecision(runtime, request) {
     // The MCP process has its own memory space, so only durable queue reads
     // can observe the human answer.
     useQueueWake: false,
-  }).finally(() => {
+  })).finally(() => {
     if (sharedLiveScopeDecisionWaits.get(key) === record) {
       sharedLiveScopeDecisionWaits.delete(key);
     }
@@ -3879,7 +3920,7 @@ function abortAllLiveScopeWaits() {
 async function resumeDeferredLiveScopeTool(call) {
   let decision;
   try {
-    decision = await sharedLiveScopeDecision(call.runtime, call.marker.request).promise;
+    decision = await sharedLiveScopeDecision(call.runtime, call.marker.request, call.marker.environmentContext).promise;
   } catch (err) {
     decision = {
       ok: false,
@@ -3904,7 +3945,9 @@ async function resumeDeferredLiveScopeTool(call) {
           effectiveScopePredicates?.policy?.grantWritePath?.(grantedPath);
         }
         let result;
-        if (decision?.approved === true) {
+        if (call.marker.request?.kind === ENVIRONMENT_SETUP_REVIEW_TYPE) {
+          result = JSON.stringify(decision, null, 2);
+        } else if (decision?.approved === true) {
           grantApprovedScopeEntries(decision, effectiveScopePredicates);
           if (call.marker.operation === "write_file") {
             result = await runWithTeamManagedToolGrant({
