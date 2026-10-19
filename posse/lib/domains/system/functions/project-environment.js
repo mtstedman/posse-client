@@ -93,6 +93,7 @@ export async function prepareEnvironmentSetup(tool, args, context) {
     if (!command) throw new Error(`${manager.label} is unavailable on this machine. Install ${manager.toolchain}, restart Posse, then request dependency installation.`);
     const scripts = manager.scripts === "always" || (manager.scripts === "flag" && args.lifecycle_scripts === true);
     const options = { dir: directory, manifest, command, scripts, plugins: false };
+    manager.validateInstall(options);
     proposal.manager = manager.name;
     proposal.directory = directory;
     proposal.commands = packageCommands(manager, manager.install(options), options);
@@ -158,6 +159,7 @@ export async function executeEnvironmentSetup(proposal, context, { signal, befor
     if (signal?.aborted) throw new Error("Environment setup canceled.");
     beforeExecute();
     if (proposal.tool === "install_dependencies") {
+      PACKAGE_MANAGERS[proposal.manager].prepareInstall(proposal.directory);
       // Commands run in order and stop at the first failure, inside one budget.
       const results = [];
       const deadline = Date.now() + ENVIRONMENT_SETUP_INSTALL_BUDGET_MS;

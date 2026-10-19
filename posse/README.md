@@ -1205,10 +1205,20 @@ local install directory. The manager is detected from the manifest, the
 several, such as `composer.json` beside `package.json`. Asking npm to install a
 package that has another manager's lockfile is refused with the manager to use.
 Composer honors an existing lock and resolves only the packages it lacks, with
-scripts off unless approved and plugins always off. pip creates `.venv` and
+incompatible root requirements also resolved using Composer's own constraint
+validation. Unrelated locked packages keep their versions. Before installing,
+shared Composer vendor links are copied into an independent worktree-local
+installation so package changes cannot modify the primary checkout.
+Scripts are off unless approved and plugins are always off. pip creates `.venv` and
 installs `requirements.txt` (plus `requirements-dev.txt` or
 `dev-requirements.txt` when present) from wheels only unless source builds are
-approved. This separate installer also requires explicit approval and leaves its
+approved. Without that approval, requirements must name registry distributions;
+local/direct source references and build-control overrides are refused.
+Local `-r`/`--requirement` and `-c`/`--constraint` includes are shown and
+fingerprinted recursively. Includes must stay inside the package directory;
+remote/dynamic includes, cycles, and graphs over 32 files or 32 KB are refused.
+Changing an included file invalidates the approval.
+This separate installer also requires explicit approval and leaves its
 lockfile for the ordinary developer commit.
 
 `setup_database` creates a **new local SQLite file** at an ignored path, optionally

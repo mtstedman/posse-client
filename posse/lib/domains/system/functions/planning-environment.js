@@ -106,6 +106,7 @@ export async function preparePlanningEnvironment(args, context) {
       proposal.writes[manifestPath] = manager.editManifest(proposal.writes[manifestPath] ?? manifest, specs);
       entries = manager.install(options);
     } else entries = manager.add(options, specs);
+    manager.validateInstall({ ...options, manifest: proposal.writes[manifestPath] ?? manifest });
     for (const dir of dependencyDirs) {
       const ignoreRule = `/${dir.replace(/[\[\]*? ]/gu, "\\$&")}/`;
       if (!ignore.split(/\r?\n/u).includes(ignoreRule)) ignore = `${ignore}${ignore && !ignore.endsWith("\n") ? "\n" : ""}${ignoreRule}\n`;
@@ -192,6 +193,7 @@ export async function executePlanningEnvironment(proposal, context, { signal, be
           return { ok: false, status: "failed", results, message: "Setup exceeded its installer time budget before every step ran. Setup files were restored. Development is blocked; split the batch and request new approval." };
         }
         fs.mkdirSync(step.directory, { recursive: true });
+        PACKAGE_MANAGERS[step.manager].prepareInstall(step.directory);
         for (const entry of step.commands) {
           const remaining = installDeadline - Date.now();
           const spec = commandSpawnSpec(entry.command, entry.argv);

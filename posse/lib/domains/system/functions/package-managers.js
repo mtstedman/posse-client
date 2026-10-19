@@ -10,6 +10,8 @@ import { NODE_LOCKS } from "../../../catalog/node-package-managers.js";
 import { ENVIRONMENT_PACKAGE_MANAGERS } from "../../../catalog/tools/environment-setup.js";
 import { findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 import { readManifest } from "./environment-paths.js";
+import { inspectPipRequirements, PIP_REQUIREMENT_FILES } from "./pip-requirements.js";
+import { composerLockRepairNames, materializeComposerVendor } from "./composer-install.js";
 
 const has = (dir, name) => fs.existsSync(path.join(dir, name));
 const readText = (file) => { try { return fs.readFileSync(file, "utf8"); } catch { return ""; } };
@@ -73,7 +75,6 @@ function pep508({ name, version }) {
 
 const venvPython = (dir) => (process.platform === "win32" ? path.join(dir, ".venv", "Scripts", "python.exe") : path.join(dir, ".venv", "bin", "python"));
 const verifyVenv = (label) => (dir) => (has(dir, ".venv/pyvenv.cfg") ? null : `${label} did not create .venv`);
-const PIP_REQUIREMENT_FILES = ["requirements.txt", "requirements-dev.txt", "dev-requirements.txt"];
 const requirementName = (line) => line.trim().match(/^([A-Za-z0-9][A-Za-z0-9._-]*)/u)?.[1]?.toLowerCase().replace(/[-_.]+/gu, "-");
 
 // Poetry 2 keeps locked versions on `poetry lock`; Poetry 1 needs --no-update.
@@ -134,15 +135,10 @@ const REGISTRY = {
     env: (dir) => ({ COMPOSER: path.join(dir, "composer.json"), COMPOSER_VENDOR_DIR: path.join(dir, "vendor"), COMPOSER_BIN_DIR: path.join(dir, "vendor", "bin"), COMPOSER_NO_DEV: "0" }),
     flags: ({ dir, scripts, plugins }) => ["--working-dir", dir, "--no-interaction", "--no-progress", ...(scripts ? [] : ["--no-scripts"]), ...(plugins ? [] : ["--no-plugins"])],
     install(context) {
-      // An existing lock is honored; only packages the manifest declares but
-      // the lock lacks are resolved, so unrelated locked versions do not move.
-      const lockFile = path.join(context.dir, "composer.lock");
-      const locked = fs.existsSync(lockFile) ? readManifest(lockFile) : null;
-      const lockedNames = new Set([...(locked?.packages || []), ...(locked?.["packages-dev"] || [])].map((entry) => String(entry?.name || "").toLowerCase()));
-      const missing = locked ? Object.keys({ ...context.manifest.require, ...context.manifest["require-dev"] })
-        .filter((name) => name.includes("/") && !lockedNames.has(name.toLowerCase())) : [];
+      const missing = composerLockRepairNames(context, this.env(context.dir));
       return [{ argv: missing.length ? ["update", ...this.flags(context), "--with-dependencies", "--", ...missing] : ["install", ...this.flags(context)] }];
     },
+    prepareInstall: materializeComposerVendor,
     add(context, specs) {
       return [{ argv: ["require", ...this.flags(context), ...(context.dev ? ["--dev"] : []), "--", ...specs] }];
     },
@@ -156,9 +152,10 @@ const REGISTRY = {
     // Setup commits refuse empty new files.
     initialManifest: () => "# Python dependencies (pip requirements format)\n",
     lockfile: () => null,
-    inputs: () => PIP_REQUIREMENT_FILES.slice(1),
+    inputs: (dir) => [...new Set([...PIP_REQUIREMENT_FILES.slice(1), ...inspectPipRequirements(dir).keys()])].filter((name) => name !== "requirements.txt"),
     // pip installs these too, so approval shows their requirements.
-    shownInputs: (dir) => PIP_REQUIREMENT_FILES.slice(1).filter((name) => has(dir, name)),
+    shownInputs: (dir) => [...inspectPipRequirements(dir).keys()].filter((name) => name !== "requirements.txt"),
+    validateInstall: ({ dir, manifest, scripts }) => inspectPipRequirements(dir, { manifest, scripts }),
     dependencyDirs: () => [".venv"],
     install: ({ dir, scripts }) => [
       ...(has(dir, ".venv/pyvenv.cfg") ? [] : [{ argv: ["-m", "venv", path.join(dir, ".venv")] }]),
@@ -257,6 +254,7 @@ const REGISTRY = {
 
 export const PACKAGE_MANAGERS = Object.freeze(Object.fromEntries(ENVIRONMENT_PACKAGE_MANAGERS.map((name) => [name, Object.freeze({
   configFiles: [], writesManifest: false, inputs: () => [], shownInputs: () => [], env: () => ({}), validate: () => {}, verify: () => null,
+  validateInstall: () => {}, prepareInstall: () => {},
   command: () => findCommandOnPath(name), ...REGISTRY[name],
 })])));
 
