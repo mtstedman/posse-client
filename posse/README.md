@@ -495,11 +495,9 @@ npm run check
 ## Continuous Integration and Deployment
 
 Operator deployment definitions live in
-`/home/mason/repos/deployment/posse/CI`. The repository-root
-`.github/workflows/ci.yml` is the GitHub-required mirror of the canonical
-workflow there. Run
-`/home/mason/repos/deployment/shared/CI/sync-workflow-mirrors.sh --check` to
-verify that every repository mirror is current.
+`/home/mason/repos/deployment/posse/CI`. Publication uses the local validation
+gate in `publish-posse.mjs`. GitHub Actions CI is disabled for Posse and the
+public client; hosted check results are not publication requirements.
 
 Native deployment and clean-client synchronization run directly from the
 centralized `CI/` directory; there are no repository-local deployment
@@ -585,11 +583,9 @@ sweeps run full Node validation because native and Remote dependencies change
 outside the Node commit range. See the centralized deployment index for state
 locations and publication commands.
 
-GitHub runs the `ci_portable` partition in two stable shards on pull requests,
-main pushes, and nightly; the required `Node checks` job depends on both.
-Windows runs `ci_windows`. Portable receipts do not claim full/native
-validation. The canonical workflow in the deployment repository must match
-`.github/workflows/ci.yml`.
+The `ci_portable` and `ci_windows` catalog names identify test partitions;
+they do not require GitHub Actions. Portable receipts do not claim Windows or
+full/native validation.
 
 Full suite timing depends on native binaries, host load, and storage. Use the
 run manifest's measured duration instead of the former aggregate estimates.
