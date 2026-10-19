@@ -14,6 +14,8 @@ import { readProjectDbConfig } from "../../../shared/tools/functions/toolkit/pro
 import { ENVIRONMENT_PACKAGE_MANAGERS, ENVIRONMENT_SETUP_INSTALL_BUDGET_MS, ENVIRONMENT_SETUP_LOCK_WAIT_MS, ENVIRONMENT_SETUP_STEP_TIMEOUT_MS } from "../../../catalog/tools/environment-setup.js";
 import { PACKAGE_MANAGERS, detectPackageManagers, packageCommands, packageScriptsLine, readPackageManifest, resolvePackageManager, shownPackageInputs } from "./package-managers.js";
 import { prepareDatabaseConnectionFile } from "./database-connection-file.js";
+import { PROJECT_DB_TYPES } from "../../../catalog/project-db.js";
+import { prepareServerDatabase, serverDatabaseQuestion, executeServerDatabase } from "./server-database-setup.js";
 
 export function inspectEnvironment(args = {}, { cwd, role = null }) {
   if (role === "planner") cwd = planningEnvironmentRoot(cwd);
@@ -42,7 +44,7 @@ export function inspectEnvironment(args = {}, { cwd, role = null }) {
         installed: installDirs.length ? installDirs.every((dir) => fs.existsSync(path.join(directory, dir))) : null, available: !!manager.command() };
     }),
     supported_package_managers: ENVIRONMENT_PACKAGE_MANAGERS,
-    sqlite_setup_available: true, project_database: readProjectDbConfig({ projectDir: cwd }), approval_required: ["setup_environment", "install_dependencies", "setup_database"],
+    sqlite_setup_available: true, database_setup_types: PROJECT_DB_TYPES, project_database: readProjectDbConfig({ projectDir: cwd }), approval_required: ["setup_environment", "install_dependencies", "setup_database"],
     note: "An install directory's presence does not prove dependencies are current; installed is null for managers that use a shared cache. Installers require explicit user approval. OS toolchains and services are not installed by these tools.",
   };
 }
@@ -102,7 +104,15 @@ export async function prepareEnvironmentSetup(tool, args, context) {
     proposal.config_files = configFiles;
     proposal.changes = [...(lock ? [relative(lock)] : []), ...dependencyDirs.map((dir) => `${dir}/`)];
     proposal.lifecycle_scripts = scripts;
+  } else if (tool === "setup_database" && args.type && args.type !== "sqlite") {
+    proposal.writes = {};
+    proposal.server_database = await prepareServerDatabase(args, cwd, capture, proposal.writes, { planning: false, assertWritable: (file) => assertWritable(file, context, tool) });
+    proposal.changes = Object.keys(proposal.writes);
+    for (const entry of proposal.server_database.env) {
+      if (!(await listIgnoredRepoPaths(cwd, [entry.path])).length) throw new Error("Ignore all .env destinations before requesting server setup.");
+    }
   } else if (tool === "setup_database") {
+    if (args.server || args.env_files || args.permissions) throw new Error("SQLite worktree setup uses path/schema_path and leaves database registration unchanged. Use planning setup for shared configuration.");
     const database = capture(args.path);
     if (fs.existsSync(database)) throw new Error("Database already exists; this tool only creates new databases and never overwrites data.");
     if (!(await listIgnoredRepoPaths(cwd, [args.path])).length) throw new Error("Add the runtime database path to .gitignore before requesting setup; keep the SQL schema in source control.");
@@ -126,7 +136,7 @@ export async function prepareEnvironmentSetup(tool, args, context) {
       reservedPaths: Object.keys(proposal.inputs),
       assertWritable: (file) => assertWritable(file, context, tool),
     });
-    if (proposal.connection_file) proposal.changes.push(proposal.connection_file.path);
+    if (!proposal.connection_file.existing) proposal.changes.push(proposal.connection_file.path);
   } else throw new Error("Unknown environment setup tool.");
   proposal.digest = crypto.createHash("sha256").update(JSON.stringify(proposal)).digest("hex");
   return proposal;
@@ -134,6 +144,7 @@ export async function prepareEnvironmentSetup(tool, args, context) {
 
 export function environmentSetupQuestion(proposal) {
   if (proposal.tool === "setup_environment") return planningEnvironmentQuestion(proposal);
+  if (proposal.server_database) return ["Approve this server database setup?", `Reason: ${proposal.reason}`, ...serverDatabaseQuestion(proposal.server_database), `Create scoped source files: ${JSON.stringify(proposal.writes, null, 2)}`, "Approval is for this request only; rejection makes no changes."].join("\n\n");
   const operation = proposal.tool === "install_dependencies"
     ? [...proposal.commands.map((entry) => `Command: ${JSON.stringify([entry.command, ...entry.argv])}${Object.keys(entry.env).length ? `\nEnvironment overrides: ${JSON.stringify(entry.env)}` : ""}`),
       ...packageScriptsLine(PACKAGE_MANAGERS[proposal.manager], proposal.lifecycle_scripts),
@@ -141,7 +152,9 @@ export function environmentSetupQuestion(proposal) {
       `Manifest: ${typeof proposal.manifest === "string" ? proposal.manifest || "(empty)" : JSON.stringify(proposal.manifest, null, 2)}`,
       ...Object.entries(proposal.other_manifests).map(([file, text]) => `Also installed from ${file}:\n${text || "(empty)"}`)]
     : ["Operation: create a new local SQLite database (no existing data is modified).", `Database: ${proposal.database}`, `SQL schema:\n${proposal.sql || "(empty database)"}`,
-      ...(proposal.connection_file ? [`New connection module (review source; setup does not execute it):\n${JSON.stringify(proposal.connection_file, null, 2)}\nCommit this source with the application; configuration values stay local.`] : [])];
+      ...(proposal.connection_file ? [proposal.connection_file.existing
+        ? `Reuse application connector: ${proposal.connection_file.path}. Existing source is preserved.`
+        : `New connection module (review source; setup does not execute it):\n${JSON.stringify(proposal.connection_file, null, 2)}\nCommit this source with the application; configuration values stay local.`] : [])];
   return [`Approve this environment setup?`, `Reason: ${proposal.reason}`, `Worktree: ${proposal.cwd}`, ...operation, `Changes: ${proposal.changes.join(", ")}`, "Approval is for this request only. Rejection makes no setup changes."].join("\n\n");
 }
 
@@ -174,6 +187,17 @@ export async function executeEnvironmentSetup(proposal, context, { signal, befor
       const ok = results.length === proposal.commands.length && results.every((result) => result.ok);
       return { ...results.at(-1), ok, ...(results.length > 1 ? { results } : {}), changes: proposal.changes, message: ok ? "Dependencies installed. Commit the scoped manifest and lockfile with the implementation." : "Installation did not complete; partial dependency/lockfile changes may remain. A retry requires new approval." };
     }
+    if (proposal.server_database) {
+      for (const [relative, content] of Object.entries(proposal.writes)) {
+        const file = localPath(context.cwd, relative);
+        // Existing examples were validated byte-for-byte and remain unchanged.
+        if (fs.existsSync(file)) continue;
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content, { flag: "wx" });
+      }
+      const database = await executeServerDatabase(proposal.server_database, context.cwd, signal);
+      return { ok: true, status: "configured", database, changes: proposal.changes, message: "Server database configured. Commit and test the application connector and portable examples. Existing data was preserved." };
+    }
     fs.mkdirSync(path.dirname(proposal.database), { recursive: true });
     fs.closeSync(fs.openSync(proposal.database, "wx"));
     let db;
@@ -184,7 +208,7 @@ export async function executeEnvironmentSetup(proposal, context, { signal, befor
         db.exec("PRAGMA user_version = 0");
         for (const statement of splitSqlStatements(proposal.sql)) db.prepare(statement).run();
       })();
-      if (proposal.connection_file) {
+      if (proposal.connection_file && !proposal.connection_file.existing) {
         const file = localPath(context.cwd, proposal.connection_file.path);
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(file, proposal.connection_file.content, { flag: "wx" });

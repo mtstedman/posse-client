@@ -17,6 +17,7 @@
 import fs from "fs";
 import path from "path";
 import Database from "better-sqlite3";
+import crypto from "node:crypto";
 import {
   PROJECT_DB_CONFIG_TABLE,
   PROJECT_DB_LEGACY_MUTATING_PERMISSIONS,
@@ -180,6 +181,15 @@ export function readProjectDbConfig({ projectDir = null } = {}) {
   };
 }
 
+function connectionFingerprint(connection) {
+  return crypto.createHash("sha256").update(JSON.stringify(connection)).digest("hex");
+}
+
+// Approval may refer to this opaque digest, never to credentials themselves.
+export function projectDbConnectionFingerprint(options = {}) {
+  return connectionFingerprint(readProjectDbConnection(options));
+}
+
 /**
  * Cap a granted permission set to a job capability lane. Read-lane jobs
  * (researcher/planner, or any job running without write permission) only ever
@@ -207,52 +217,57 @@ export function projectDbEffectivePermissions({ projectDir = null, capability = 
  * left untouched. Pass enabled:false to disable without discarding stored
  * connection details, or use clearProjectDbConfig() to wipe the row entirely.
  */
-export function writeProjectDbConfig(patch = {}, { projectDir = null } = {}) {
+export function writeProjectDbConfig(patch = {}, { projectDir = null, expectedFingerprint = null } = {}) {
   const dbPath = resolveDbPath(projectDir);
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   try {
     db.pragma("busy_timeout = 10000");
     ensureTable(db);
-    const current = db.prepare(`SELECT * FROM ${PROJECT_DB_CONFIG_TABLE} WHERE id = 1`).get() || {};
-    const next = {
-      enabled: patch.enabled == null ? (current.enabled || 0) : (patch.enabled ? 1 : 0),
-      db_type: patch.dbType === undefined ? (current.db_type ?? null) : (patch.dbType || null),
-      host: patch.host === undefined ? (current.host ?? null) : (patch.host || null),
-      port: patch.port === undefined ? (current.port ?? null) : (patch.port == null ? null : Number(patch.port)),
-      database: patch.database === undefined ? (current.database ?? null) : (patch.database || null),
-      username: patch.username === undefined ? (current.username ?? null) : (patch.username || null),
-      password: patch.password === undefined ? (current.password ?? null) : (patch.password || null),
-      permissions: patch.permissions === undefined
-        ? (current.permissions ?? "")
-        : normalizePermissions(patch.permissions).join(","),
-      // Saving permissions is the operator's opt-in to the current scheme; any
-      // other edit leaves the row on the scheme it was granted under.
-      permissions_version: patch.permissions === undefined
-        ? Number(current.permissions_version || 1)
-        : PROJECT_DB_PERMISSIONS_VERSION,
-    };
-    if (next.db_type != null && !PROJECT_DB_TYPES.includes(next.db_type)) {
-      throw new Error(`Unknown project DB type: ${next.db_type}`);
-    }
-    db.prepare(`
-      INSERT INTO ${PROJECT_DB_CONFIG_TABLE}
-        (id, enabled, db_type, host, port, database, username, password, permissions, permissions_version, updated_at)
-      VALUES
-        (1, @enabled, @db_type, @host, @port, @database, @username, @password, @permissions, @permissions_version,
-         strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-      ON CONFLICT(id) DO UPDATE SET
-        enabled = excluded.enabled,
-        db_type = excluded.db_type,
-        host = excluded.host,
-        port = excluded.port,
-        database = excluded.database,
-        username = excluded.username,
-        password = excluded.password,
-        permissions = excluded.permissions,
-        permissions_version = excluded.permissions_version,
-        updated_at = excluded.updated_at
-    `).run(next);
+    db.transaction(() => {
+      const current = db.prepare(`SELECT * FROM ${PROJECT_DB_CONFIG_TABLE} WHERE id = 1`).get() || {};
+      if (expectedFingerprint !== null && connectionFingerprint(rowToConnection(Object.keys(current).length ? current : null)) !== expectedFingerprint) {
+        throw new Error("Posse database settings changed after approval; existing registration was preserved.");
+      }
+      const next = {
+        enabled: patch.enabled == null ? (current.enabled || 0) : (patch.enabled ? 1 : 0),
+        db_type: patch.dbType === undefined ? (current.db_type ?? null) : (patch.dbType || null),
+        host: patch.host === undefined ? (current.host ?? null) : (patch.host || null),
+        port: patch.port === undefined ? (current.port ?? null) : (patch.port == null ? null : Number(patch.port)),
+        database: patch.database === undefined ? (current.database ?? null) : (patch.database || null),
+        username: patch.username === undefined ? (current.username ?? null) : (patch.username || null),
+        password: patch.password === undefined ? (current.password ?? null) : (patch.password || null),
+        permissions: patch.permissions === undefined
+          ? (current.permissions ?? "")
+          : normalizePermissions(patch.permissions).join(","),
+        // Saving permissions is the operator's opt-in to the current scheme; any
+        // other edit leaves the row on the scheme it was granted under.
+        permissions_version: patch.permissions === undefined
+          ? Number(current.permissions_version || 1)
+          : PROJECT_DB_PERMISSIONS_VERSION,
+      };
+      if (next.db_type != null && !PROJECT_DB_TYPES.includes(next.db_type)) {
+        throw new Error(`Unknown project DB type: ${next.db_type}`);
+      }
+      db.prepare(`
+        INSERT INTO ${PROJECT_DB_CONFIG_TABLE}
+          (id, enabled, db_type, host, port, database, username, password, permissions, permissions_version, updated_at)
+        VALUES
+          (1, @enabled, @db_type, @host, @port, @database, @username, @password, @permissions, @permissions_version,
+           strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        ON CONFLICT(id) DO UPDATE SET
+          enabled = excluded.enabled,
+          db_type = excluded.db_type,
+          host = excluded.host,
+          port = excluded.port,
+          database = excluded.database,
+          username = excluded.username,
+          password = excluded.password,
+          permissions = excluded.permissions,
+          permissions_version = excluded.permissions_version,
+          updated_at = excluded.updated_at
+      `).run(next);
+    }).immediate();
     return readProjectDbConfig({ projectDir });
   } finally {
     try { db.close(); } catch { /* best effort */ }

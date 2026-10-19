@@ -69,7 +69,7 @@ import {
 import { viewCanServeBranch } from "../../functions/v2/view-can-serve.js";
 import { sourceStatRecord, sourceStatMatches } from "../../functions/v2/source-stats.js";
 import { languageTagForExtension } from "../../functions/v2/language-tag.js";
-import { isMergeAlreadyReflected } from "../../functions/v2/merge-reflection.js";
+import { isMergeAlreadyReflected, partiallyReflectedMergePaths, isMergeReflectedInSource } from "../../functions/v2/merge-reflection.js";
 import {
   recordStaleEmbeddingHash,
   staleEmbeddingHashes,
@@ -1266,8 +1266,9 @@ export class ParseEngine {
       sourceProof: mainPayload?.source_proof || null,
       sourceLockHeld: mainPayload?.source_lock_held === true,
       treeCompressionMode: this.#treeCompressionMode,
-      run: ({ intake }) => this.#handleWarmJobUnpinned({
+      run: ({ intake, sourceProof }) => this.#handleWarmJobUnpinned({
         ...payload,
+        source_proof: sourceProof,
         resume_paths: Array.isArray(intake?.resume?.paths) ? intake.resume.paths : [],
         resume_repository_recheck: intake?.resume?.repository_recheck === true,
         resume_paths_truncated: intake?.resume?.paths_truncated === true,
@@ -1902,12 +1903,22 @@ export class ParseEngine {
     let replayedEntries = 0;
     try {
       await this.#emitStage("merge", `replaying ${sourceBranch} onto ${ontoBranch}`);
+      // A clean Git pin is not proof that the WI ledger contains those bytes.
+      // Validate before even a successful replay can append stale source.
+      if (payload.source_proof?.ok === true && !await isMergeReflectedInSource({
+        ledger: this.#ledger, branch: sourceBranch, ontoBranch, fromSeq: Number(payload.from_seq || 0),
+        sourceProof: payload.source_proof, repoRoot: this.#repoRoot,
+      })) throw new Error("Merge replay source differs from the proven target source");
       const entries = await this.#ledger.replayPartition(
         sourceBranch,
         ontoBranch,
         Number(payload.from_seq || 0),
         { label: "ParseEngine.replayMerge" },
       );
+      if (entries.length === 0 && payload.source_proof && !await isMergeReflectedInSource({
+        ledger: this.#ledger, branch: sourceBranch, ontoBranch, fromSeq: Number(payload.from_seq || 0),
+        sourceProof: payload.source_proof, repoRoot: this.#repoRoot,
+      })) throw new Error("Merge replay cannot reuse ledger content that differs from the proven target source");
       const rec = this.#ledger.getBranch(sourceBranch);
       if (rec && rec.status === "active") {
         await this.#emitStage("merge", `marking ${sourceBranch} merged`);
@@ -1926,12 +1937,20 @@ export class ParseEngine {
       base.paths_indexed = out.entries.length;
       replayedEntries = out.entries.length;
     } catch (err) {
-      if (!isMergeAlreadyReflected({
-        ledger: this.#ledger,
-        branch: sourceBranch,
-        ontoBranch,
-        fromSeq: Number(payload.from_seq || 0),
-      })) {
+      const reflection = { ledger: this.#ledger, branch: sourceBranch, ontoBranch, fromSeq: Number(payload.from_seq || 0) };
+      if (!isMergeAlreadyReflected(reflection) && this.#parser) {
+        const paths = await partiallyReflectedMergePaths({
+          ...reflection, sourceProof: payload.source_proof, repoRoot: this.#repoRoot,
+        });
+        if (paths.length > 0) {
+          await this.#emitStage("merge", `reconciling ${paths.length} unreflected committed paths onto ${ontoBranch}`);
+          base.paths_considered += paths.length;
+          await this.#indexPaths({ paths, branch: ontoBranch, base });
+        }
+      }
+      if (!isMergeAlreadyReflected(reflection) || (payload.source_proof && !await isMergeReflectedInSource({
+        ...reflection, sourceProof: payload.source_proof, repoRoot: this.#repoRoot,
+      }))) {
         logAtlasError(`[ParseEngine.#mergeToMain] ${sourceBranch} -> ${ontoBranch} threw:`, err);
         base.skipped = [{
           repo_rel_path: ".",
@@ -4009,18 +4028,29 @@ export class ParseEngine {
    * @returns {Promise<void>}
    */
   async #maybeReseedTreeCompression({ viewPath, base, purpose, triggerEvent = null }) {
-    const decision = shouldRunMlTreeCompressionReseed({
-      purpose,
-      mode: this.#treeCompressionMode,
-      triggerEvent,
-    });
-    if (!decision.run) {
-      if (decision.reason === "ml_reseed_boot_only") {
-        base.tree_compression_reseed = { ok: true, skipped: decision.reason };
-      }
-      return;
-    }
     try {
+      const policy = { purpose, mode: this.#treeCompressionMode, triggerEvent };
+      let decision = shouldRunMlTreeCompressionReseed(policy);
+      if (decision.reason === "ml_reseed_boot_only") {
+        const view = View.mount({ dbPath: viewPath, mode: "readonly" });
+        try {
+          decision = shouldRunMlTreeCompressionReseed({
+            ...policy,
+            materialization: inspectViewMaterialization(view._unsafeDb(), {
+              treeCompressionMode: this.#treeCompressionMode,
+              allowCarriedMlLabels: true,
+            }),
+          });
+        } finally {
+          view.close();
+        }
+      }
+      if (!decision.run) {
+        if (decision.reason === "ml_reseed_boot_only") {
+          base.tree_compression_reseed = { ok: true, skipped: decision.reason };
+        }
+        return;
+      }
       await this.#emitStage("tree-compression", `reseeding tree compression for ${path.basename(viewPath)}`);
       const { runAtlasTreeCompressionModelPass } = await import(
         "../../../integrations/functions/atlas/tree-compression.js"

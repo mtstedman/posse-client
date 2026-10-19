@@ -375,6 +375,15 @@ export function linkComposerVendorFromPrimaryCheckout(root) {
   if (!exists(primaryLock) || hashFile(primaryLock) !== hashFile(worktreeLock)) {
     return { ok: false, reason: "primary_lockfile_mismatch", primary };
   }
+  // Root autoload mappings and configuration are not fully represented by
+  // composer.lock. Generated autoloaders from a different manifest can load
+  // the wrong classes even when every package version still matches.
+  const primaryManifest = path.join(primary, "composer.json");
+  const worktreeManifest = path.join(root, "composer.json");
+  if (exists(primaryManifest) !== exists(worktreeManifest)
+    || (exists(primaryManifest) && hashFile(primaryManifest) !== hashFile(worktreeManifest))) {
+    return { ok: false, reason: "primary_manifest_mismatch", primary };
+  }
   const source = path.join(primary, "vendor");
   if (!exists(path.join(source, "autoload.php"))) return { ok: false, reason: "primary_vendor_missing", primary };
   if (installedDependenciesMatchLockfile(source, fs.readFileSync(primaryLock, "utf8")) === false) {

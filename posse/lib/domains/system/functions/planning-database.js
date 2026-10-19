@@ -13,6 +13,7 @@ import { splitSqlStatements } from "../../../shared/tools/functions/toolkit/proj
 import { PROJECT_DB_PERMISSIONS } from "../../../catalog/project-db.js";
 import { DATABASE_ENV_KEYS } from "../../../catalog/tools/environment-setup.js";
 import { prepareDatabaseConnectionFile } from "./database-connection-file.js";
+import { prepareServerDatabase, serverDatabaseQuestion, executeServerDatabase, prepareServerDatabaseEnvironment } from "./server-database-setup.js";
 
 function envValues(database) {
   return { DATABASE_URL: pathToFileURL(database).href, DB_DATABASE: database.replaceAll(path.sep, "/"), DB_CONNECTION: "sqlite" };
@@ -40,12 +41,14 @@ function envAdditions(file, values, { keepExisting = false } = {}) {
 }
 
 export function databaseIgnoreRules(database) {
-  return [database.path, `${database.path}-wal`, `${database.path}-shm`, `${database.path}-journal`, ...database.env.map((entry) => entry.path)]
+  return [...(database.type && database.type !== "sqlite" ? [database.server.env_file] : [database.path, `${database.path}-wal`, `${database.path}-shm`, `${database.path}-journal`]), ...database.env.map((entry) => entry.path)]
     .map((relative) => `/${relative.replace(/[\[\]*? #!]/gu, "\\$&")}`);
 }
 
 export async function preparePlanningDatabase(args, cwd, capture, writes) {
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Provide a local SQLite database setup object.");
+  if (args.type && args.type !== "sqlite") return prepareServerDatabase(args, cwd, capture, writes);
+  if (args.server) throw new Error("SQLite setup uses path, not a server connection.");
   const file = localPath(cwd, args.path);
   if (!/\.(?:sqlite3?|db)$/iu.test(file)) throw new Error("Use a .sqlite, .sqlite3, or .db database filename.");
   if (fs.existsSync(file)) throw new Error("Database already exists. Planning setup only creates a new database; it never replaces application data.");
@@ -85,23 +88,32 @@ export async function preparePlanningDatabase(args, cwd, capture, writes) {
   database.connection_file = await prepareDatabaseConnectionFile(args.connection_file, cwd, capture, {
     reservedPaths: [database.path, ".gitignore", ...Object.keys(writes), ...(args.schema_path ? [args.schema_path] : [])],
   });
-  if (database.connection_file) writes[database.connection_file.path] = database.connection_file.content;
+  if (database.connection_file.existing) {
+    const connector = database.connection_file.path;
+    if (!tracked.includes(connector) || (await gitExecAsync(["status", "--porcelain", "--", connector], cwd)).trim()) {
+      throw new Error("Commit the existing application connector before reusing it in planning setup.");
+    }
+  } else writes[database.connection_file.path] = database.connection_file.content;
   return database;
 }
 
 export function planningDatabaseQuestion(database) {
   if (!database) return [];
+  if (database.type && database.type !== "sqlite") return serverDatabaseQuestion(database);
   return [
     `Create SQLite database: ${database.file}. All development worktrees use this same local database. Existing data is never overwritten.`,
     `Initialize schema: ${database.sql || "empty database; developers create the application schema"}`,
     `Register with Posse database tools. Approved permissions: ${database.permissions.join(", ")}. Current agent tokens do not gain new permissions; subsequent jobs receive their permitted database tools.`,
-    ...(database.connection_file ? [`Create and commit connection module: ${database.connection_file.path}. The complete source is included in the proposed writes for review; setup does not execute it.`] : []),
+    ...(database.connection_file ? [database.connection_file.existing
+      ? `Reuse committed application connector: ${database.connection_file.path}. Existing source is preserved.`
+      : `Create and commit connection module: ${database.connection_file.path}. The complete source is included in the proposed writes for review; setup does not execute it.`] : []),
     `Add these generated database variables to ignored environment files (preserving other values): ${JSON.stringify(database.env.map(({ path: envPath, additions }) => ({ path: envPath, additions })), null, 2)}. Commit database.env.example files only; never commit .env or database contents.`,
   ];
 }
 
 export async function executePlanningDatabase(database, cwd, signal) {
   if (!database) return null;
+  if (database.type && database.type !== "sqlite") return executeServerDatabase(database, cwd, signal);
   if (signal?.aborted) throw new Error("Database setup canceled; development remains blocked.");
   if (JSON.stringify(readProjectDbConfig({ projectDir: cwd })) !== JSON.stringify(database.config)) throw new Error("Posse database settings changed after approval.");
   for (const entry of database.env) {
@@ -136,7 +148,13 @@ export async function executePlanningDatabase(database, cwd, signal) {
 // primary checkout's .env are the operator's to make.
 export function assertPlanningDatabaseReady(database, cwd) {
   if (!database) return;
-  if (!fs.existsSync(localPath(cwd, database.path))) throw new Error("The approved local database is missing.");
+  if ((!database.type || database.type === "sqlite") && !fs.existsSync(localPath(cwd, database.path))) throw new Error("The approved local database is missing.");
+  if (database.connection_file) {
+    const connector = localPath(cwd, database.connection_file);
+    if (!fs.existsSync(connector) || !fs.statSync(connector).isFile() || !fs.statSync(connector).size) {
+      throw new Error("The approved application connector is missing or empty.");
+    }
+  }
 }
 
 // Development worktrees get the generated settings once and own their .env
@@ -145,6 +163,10 @@ export function assertPlanningDatabaseReady(database, cwd) {
 // could commit it.
 export async function prepareDevelopmentDatabase(database, source, cwd) {
   if (!database) return [];
+  if (database.type && database.type !== "sqlite") {
+    try { return await prepareServerDatabaseEnvironment(database, source, cwd); }
+    catch { return ["The server database configuration could not be copied from the primary checkout; check its local .env connection reference."]; }
+  }
   if (!fs.existsSync(localPath(source, database.path))) {
     return [`The approved local database ${database.path} is missing from the primary checkout, so database settings were not added to this worktree.`];
   }

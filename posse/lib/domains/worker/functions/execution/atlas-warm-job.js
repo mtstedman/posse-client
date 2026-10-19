@@ -84,7 +84,8 @@ export function shouldSettleWaitingLaneAtlasPurpose(purpose) {
 }
 
 export function atlasWarmCompletionStatus(result) {
-  return result?.generation_proof_reason === "durable_generation_publication_failed" ? "failed" : "succeeded";
+  return result?.generation_proof_reason === "durable_generation_publication_failed"
+    || result?.intake?.status === "failed" ? "failed" : "succeeded";
 }
 
 function nowMs() {
@@ -541,7 +542,10 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
 
     const completionStatus = atlasWarmCompletionStatus(result);
     const publicationError = completionStatus === "failed"
-      ? `ATLAS generation publication failed: ${result.generation_publish_error?.code || result.generation_proof_reason}` : null;
+      ? result.intake?.status === "failed"
+        ? `ATLAS main intake failed: ${result.skipped?.find((row) => row.reason === "parse_error")?.message || result.generation_proof_reason}`
+        : `ATLAS generation publication failed: ${result.generation_publish_error?.code || result.generation_proof_reason}`
+      : null;
     if (publicationError) setJobError(job.id, publicationError);
     completeAttempt(attempt.attempt.id, {
       status: completionStatus,

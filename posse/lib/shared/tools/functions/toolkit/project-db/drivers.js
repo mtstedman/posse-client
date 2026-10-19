@@ -80,7 +80,9 @@ async function executePostgres({ connection, statement, parameters, isRead, read
     port: connection.port || undefined,
     database: connection.database || undefined,
     user: connection.username || undefined,
-    password: connection.password || undefined,
+    // An approved passwordless connection must not silently use PGPASSWORD
+    // or ~/.pgpass credentials belonging to the Posse host process.
+    password: connection.password || (() => ""),
   });
   await client.connect();
   try {

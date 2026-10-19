@@ -10,17 +10,25 @@ import { ATLAS_EVENTS } from "./contracts/events.js";
 /**
  * ML labeling normally runs at boot. A bounded self-repair warm may also
  * reseed it after readiness detects a failed compression layer. Ordinary
- * re-warms can use carried-forward labels until the next boot.
+ * re-warms can use carried-forward labels until the next boot, unless the
+ * carried snapshot is unusable for the current source (for example an empty
+ * boot snapshot after the first source files are added).
  *
- * @param {{ purpose?: string | null, mode?: string | null, triggerEvent?: string | null }} args
+ * @param {{ purpose?: string | null, mode?: string | null, triggerEvent?: string | null, materialization?: { ok: boolean, reason?: string | null } | null }} args
  * @returns {{ run: boolean, reason: string | null }}
  */
-export function shouldRunMlTreeCompressionReseed({ purpose, mode, triggerEvent } = {}) {
+export function shouldRunMlTreeCompressionReseed({ purpose, mode, triggerEvent, materialization = null } = {}) {
   const isMainPurpose = purpose === "main-incremental"
     || purpose === "main-full"
     || purpose === "main-merge";
   if (!isMainPurpose) return { run: false, reason: "not_main_purpose" };
   if (mode !== "ml") return { run: false, reason: "mode_not_ml" };
+  const compressionNeedsRepair = materialization?.ok === false && [
+    "tree_compression_empty",
+    "tree_compression_not_ready",
+    "tree_compression_ml_not_ready",
+  ].includes(String(materialization.reason || ""));
+  if (compressionNeedsRepair) return { run: true, reason: null };
   if (triggerEvent !== "boot" && triggerEvent !== ATLAS_EVENTS.SELF_REPAIR) {
     return { run: false, reason: "ml_reseed_boot_only" };
   }

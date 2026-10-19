@@ -252,12 +252,13 @@ export function capVerdictForVerificationInfrastructure(verdict, testRun = null,
       ],
     };
   }
-  const failedRunner = [post, changed, ...(post?.check_runs || [])].find((run) => run && isAdvisoryTestResult(run, options));
-  if (!failedRunner) return verdict;
-  return { ...verdict, verification_notes: [
+  const unavailableRuns = [post, changed, ...(post?.check_runs || [])]
+    .filter((run) => run && run.status !== "passed" && isAdvisoryTestResult(run, options));
+  if (!unavailableRuns.length) return verdict;
+  return { ...verdict, verification_notes: [...new Set([
     ...(verdict?.verification_notes || []),
-    `Verification unavailable (${failedRunner.reason || failedRunner.status}); the reviewer verdict is retained.`,
-  ] };
+    ...unavailableRuns.map((run) => `Verification unavailable (${run.reason || run.status})${run.paths?.length ? `: ${run.paths.join(", ")}` : ""}; the reviewer verdict is retained.`),
+  ])] };
 }
 
 export function capVerdictForDeterministicTestRegression(verdict, testRun = null) {
@@ -623,6 +624,17 @@ export function capVerdictForHighRiskVerificationGap(
         ...(Array.isArray(verdict?.reasons) ? verdict.reasons : []),
       ],
     };
+  }
+
+  if (scopedVerification && (scopedOutcome?.actionability === "infrastructure"
+    || scopedStatus === "incomplete" || scopedVerification.coverage_complete === false)) {
+    const details = (scopedVerification.checks || [])
+      .filter((check) => check.status === "unavailable" || check.status === "incomplete")
+      .map((check) => check.reason || check.name).filter(Boolean).join("; ");
+    verdict = { ...verdict, verification_notes: [...new Set([
+      ...(verdict.verification_notes || []),
+      `Changed-file verification incomplete: ${scopedVerification.summary || scopedStatus}${details ? ` (${details})` : ""}.`,
+    ])] };
   }
 
   if (!Number.isFinite(riskScore) || riskScore < 4) return verdict;

@@ -75,6 +75,10 @@ export function handle(job, verdict, ctx) {
   }
   if (!ctx.finalReviewAccepted) log(`${C.yellow}[assessor] PASS${C.reset} WI#${job.work_item_id} job #${job.id}: ${job.title}`);
 
+  for (const note of [...new Set(verdict.verification_notes || [])]) {
+    log(`${C.yellow}[system] Verification incomplete${C.reset} WI#${job.work_item_id} job #${job.id}: ${note}`);
+  }
+
   // Store improvement suggestions as artifacts only. The end-of-run review
   // presents them in batch, which avoids recursive suggestion chains.
   const MAX_SUGGESTIONS = 2;

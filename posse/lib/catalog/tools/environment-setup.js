@@ -1,5 +1,5 @@
 // Human authorization for local application setup is independent of file scope.
-import { PROJECT_DB_PERMISSIONS } from "../project-db.js";
+import { PROJECT_DB_PERMISSIONS, PROJECT_DB_TYPES } from "../project-db.js";
 export const ENVIRONMENT_SETUP_REVIEW_TYPE = "environment_setup";
 export const ENVIRONMENT_SETUP_ACTIONS = Object.freeze(["approve", "reject"]);
 export const ENVIRONMENT_SETUP_TOOLS = Object.freeze(["install_dependencies", "setup_database", "setup_environment"]);
@@ -7,11 +7,21 @@ export const ENVIRONMENT_PACKAGE_MANAGERS = Object.freeze(["npm", "pnpm", "yarn"
 export const DATABASE_ENV_KEYS = Object.freeze(["DATABASE_URL", "DB_DATABASE", "DB_CONNECTION"]);
 
 export const DATABASE_CONNECTION_FILE_SCHEMA = {
-  type: "object", additionalProperties: false, required: ["path", "content"],
-  description: "Optional new application connection module in the project's language. Supply complete minimal source that reads configuration through environment variables or the framework's config loader. Include its driver/loader dependencies in the approved installation. Contains no credentials, copied .env values, machine-specific paths, configuration logging, migrations or setup commands. Reuse an existing connector by omitting this field. Source is reviewed and written, not executed by setup.",
+  type: "object", additionalProperties: false, required: ["path"],
+  description: "Required application connector in the project's language. Supply path and complete minimal content for a new module, or path alone to reuse an existing nonempty source file. Read configuration through environment variables or the framework's config loader. Include driver/loader dependencies in the approved installation. Contains no credentials, copied .env values, machine-specific paths, configuration logging, migrations or setup commands. New source is reviewed and written, not executed by setup. Planning requires a reused connector to be committed and unchanged.",
   properties: {
-    path: { type: "string", minLength: 1, description: "New committable source file, e.g. src/db/connection.ts, src/Database.php or app/database.py. Existing files are preserved." },
+    path: { type: "string", minLength: 1, description: "Committable source file, e.g. src/db/connection.ts, src/Database.php or app/database.py. Omit content to preserve and reuse an existing connector." },
     content: { type: "string", minLength: 1, maxLength: 16384, description: "Complete connection module source; reference variable names without substituting their values. Export a reusable connection function and document its import/use. Validate it with the application's normal checks." },
+  },
+};
+
+export const DATABASE_SERVER_SCHEMA = {
+  type: "object", additionalProperties: false, required: ["url_env"],
+  description: "Postgres/MySQL server connection reference. Reference the connection URL by variable name; its value and credentials stay in the ignored local .env file. The server must already be running. URL query options are not supported by the project database driver.",
+  properties: {
+    env_file: { type: "string", description: "Repo-relative ignored .env containing the URL; default .env." },
+    url_env: { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]*$", description: "Name of the variable containing the connection URL, e.g. DATABASE_URL." },
+    create_database: { type: "boolean", description: "Default false: verify and configure an existing database. True: create the URL's named database on the existing server; fails if it already exists. Requires server creation privileges. No service installation or migrations." },
   },
 };
 
@@ -35,7 +45,7 @@ export const ENVIRONMENT_SETUP_RUNTIME_CREDIT_CAP_MS = 2 * ENVIRONMENT_SETUP_LIV
 
 export const TOOL_SETUP_ENVIRONMENT = {
   type: "function", name: "setup_environment",
-  description: "Before development, propose an ordered package-manager batch (npm, pnpm, yarn, bun, Composer, pip, uv, Poetry, Bundler, Cargo or Go) and optional local SQLite database for explicit user approval. Initializes missing npm-family, Composer, pip, uv and Bundler manifests, installs packages, creates database environment variables and portable examples, registers approved Posse database permissions, and commits setup source files in the primary checkout. Live .env/database files remain ignored. Scripts/plugins default off where the manager can disable them; the approval shows when it cannot. Wait for a successful setup commit before handing off development. No arbitrary shell commands. Installed manifests are authoritative and must not be planned as files_to_create.",
+  description: "Before development, propose an ordered package-manager batch (npm, pnpm, yarn, bun, Composer, pip, uv, Poetry, Bundler, Cargo or Go) and optional SQLite/Postgres/MySQL database for explicit user approval. Initializes missing manifests, installs packages, creates database environment variables and portable examples, registers approved Posse database permissions, and commits setup source files including an application connector in the primary checkout. Server engines use an existing running server. Live .env/database files remain ignored. Scripts/plugins default off where the manager can disable them. Wait for a successful setup commit before handing off development. No arbitrary shell commands. Installed manifests are authoritative and must not be planned as files_to_create.",
   parameters: {
     type: "object", additionalProperties: false, required: ["reason", "steps"],
     properties: {
@@ -58,9 +68,11 @@ export const TOOL_SETUP_ENVIRONMENT = {
         },
       },
       database: {
-        type: "object", additionalProperties: false, required: ["path"],
-        description: "Optional new local SQLite database, shared by application development worktrees. Use steps: [] for database-only setup. Creates DATABASE_URL, DB_DATABASE and DB_CONNECTION in ignored .env files and registers Posse access after approval. Preserves existing databases and connection registrations.",
+        type: "object", additionalProperties: false, required: ["connection_file"],
+        description: "Database configuration shared by development worktrees. Use steps: [] for database-only setup. Defaults to a new local SQLite database (path required); postgres/mysql require server instead. Creates DATABASE_URL, DB_DATABASE and DB_CONNECTION in ignored .env files and registers Posse access after approval. Preserves existing data and registrations.",
         properties: {
+          type: { type: "string", enum: PROJECT_DB_TYPES, description: "Default sqlite. All registered project database engines are supported." },
+          server: DATABASE_SERVER_SCHEMA,
           path: { type: "string", minLength: 1, description: "Repo-relative .sqlite/.sqlite3/.db file, e.g. data/app.sqlite. Ignored automatically." },
           schema_path: { type: "string", description: "Optional existing CREATE TABLE/INDEX SQL file to initialize and commit. Otherwise developers create the schema using approved DB access or application migrations." },
           env_files: { type: "array", minItems: 1, maxItems: 8, uniqueItems: true, items: { type: "string" }, description: "Repo-relative .env destinations, default [.env]. Preserve other variables; conflicting DB values block setup. Each gets a committed database.env.example." },
@@ -97,15 +109,19 @@ export const TOOL_INSTALL_DEPENDENCIES = {
 export const TOOL_SETUP_DATABASE = {
   type: "function",
   name: "setup_database",
-  description: "Request explicit user approval to create a new local SQLite database at an ignored repo-relative path, optionally from a committed/scoped SQL schema file. Preserves existing databases and leaves Posse database permissions unchanged. Every invocation requires user approval. Keep the schema and application database path configuration in source control; runtime database files are local to this worktree.",
+  description: "Request explicit approval for SQLite/Postgres/MySQL setup with a reusable application connector. SQLite creates a new ignored worktree-local file and leaves Posse grants unchanged. Server engines verify an existing database or create one on an existing server, write ignored environment settings and scoped portable examples, and register explicitly approved permissions. Existing data and registrations are preserved. Every invocation requires approval; no server software or migrations are run.",
   parameters: {
     type: "object",
     properties: {
+      type: { type: "string", enum: PROJECT_DB_TYPES, description: "Default sqlite; postgres/mysql use server; path/schema_path are SQLite-only." },
+      server: DATABASE_SERVER_SCHEMA,
+      env_files: { type: "array", minItems: 1, maxItems: 8, uniqueItems: true, items: { type: "string" }, description: "Server setup only: already ignored .env destinations, default [.env]. Corresponding database.env.example files need writable scope." },
+      permissions: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", enum: PROJECT_DB_PERMISSIONS }, description: "Server setup only: explicit Posse grants, default [read]." },
       path: { type: "string", minLength: 1, description: "New local SQLite file, e.g. data/app.sqlite. Must be ignored by Git and outside Posse internals." },
       schema_path: { type: "string", description: "Optional repo-relative SQL file containing CREATE TABLE/INDEX statements. No external database access or destructive migrations." },
       connection_file: DATABASE_CONNECTION_FILE_SCHEMA,
       reason: { type: "string", minLength: 1, maxLength: 1000 },
     },
-    required: ["path", "reason"], additionalProperties: false,
+    required: ["reason", "connection_file"], additionalProperties: false,
   },
 };

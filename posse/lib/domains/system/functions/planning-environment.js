@@ -214,6 +214,10 @@ export async function executePlanningEnvironment(proposal, context, { signal, be
         const problem = manager.verify(step.directory, installed, step.install_dirs);
         if (problem) throw new Error(`${problem}; development is blocked.`);
       }
+      const connector = proposal.database?.connection_file;
+      if (connector?.existing && fingerprint(localPath(proposal.cwd, connector.path)) !== proposal.inputs[connector.path]) {
+        throw new Error("The reused application connector changed during installation; request new approval.");
+      }
       const files = proposal.changes.filter((relative) => fs.existsSync(localPath(proposal.cwd, relative)));
       const result = await commit("posse: approved planning dependency setup", proposal.cwd, { modifyFiles: files, createFiles: files, deleteFiles: [], createRoots: [] }, {
         jobId: context.jobId, wiId: proposal.work_item_id, projectDir: proposal.cwd, expectedHead: proposal.head,

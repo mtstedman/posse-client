@@ -415,9 +415,14 @@ export function __testBuildDisabledRequiredTestsVerdict(options = {}) {
 function _assessorVerdictDelta(verdict, effectiveVerdict) {
   const assessorVerdict = verdict?.verdict ?? null;
   const assessorConfidence = verdict?.confidence ?? null;
+  const verification = {
+    ...(effectiveVerdict?.verification_status ? { verification_status: effectiveVerdict.verification_status } : {}),
+    ...(effectiveVerdict?.verification_commit_hash ? { verification_commit_hash: effectiveVerdict.verification_commit_hash } : {}),
+    ...(effectiveVerdict?.verification_notes?.length ? { verification_notes: effectiveVerdict.verification_notes } : {}),
+  };
   if (assessorVerdict === (effectiveVerdict?.verdict ?? null)
-    && assessorConfidence === (effectiveVerdict?.confidence ?? null)) return {};
-  return { assessor_verdict: assessorVerdict, assessor_confidence: assessorConfidence };
+    && assessorConfidence === (effectiveVerdict?.confidence ?? null)) return verification;
+  return { ...verification, assessor_verdict: assessorVerdict, assessor_confidence: assessorConfidence };
 }
 
 function _looksLikeAssessorVerdictObject(value) {
@@ -2178,7 +2183,7 @@ export async function runPostExecutionAssessment(worker, {
       job_id: job.id,
       attempt_id: attempt.id,
       observation_type: ASSESSMENT_VERDICT_OBSERVATION_TYPE,
-      summary: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}): ${passMsg}`,
+      summary: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}): ${passMsg}${effectiveVerdict.verification_notes?.length ? " — verification incomplete" : ""}`,
       detail: {
         verdict: effectiveVerdict.verdict,
         confidence: effectiveVerdict.confidence,
@@ -2517,7 +2522,7 @@ export async function runPostExecutionAssessment(worker, {
           job_id: job.id,
           attempt_id: attempt.id,
           observation_type: ASSESSMENT_VERDICT_OBSERVATION_TYPE,
-          summary: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}): ${passMsg}`,
+          summary: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"}): ${passMsg}${effectiveVerdict.verification_notes?.length ? " — verification incomplete" : ""}`,
           detail: {
             verdict: effectiveVerdict.verdict,
             confidence: effectiveVerdict.confidence,
@@ -2878,7 +2883,7 @@ export async function runPostExecutionAssessment(worker, {
         job_id: job.id,
         attempt_id: attempt.id,
         observation_type: ASSESSMENT_VERDICT_OBSERVATION_TYPE,
-        summary: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"})`,
+        summary: `${effectiveVerdict.verdict} (${effectiveVerdict.confidence || "?"})${effectiveVerdict.verification_notes?.length ? " — verification incomplete" : ""}`,
         detail: {
           verdict: effectiveVerdict.verdict,
           confidence: effectiveVerdict.confidence,

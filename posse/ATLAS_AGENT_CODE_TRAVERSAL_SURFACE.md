@@ -1126,14 +1126,18 @@ Remote roles: `dev`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Request explicit user approval to create a new local SQLite database at an ignored repo-relative path, optionally from a committed/scoped SQL schema file. Preserves existing databases and leaves Posse database permissions unchanged. Every invocation requires user approval. Keep the schema and application database path configuration in source control; runtime database files are local to this worktree.
+Request explicit approval for SQLite/Postgres/MySQL setup with a reusable application connector. SQLite creates a new ignored worktree-local file and leaves Posse grants unchanged. Server engines verify an existing database or create one on an existing server, write ignored environment settings and scoped portable examples, and register explicitly approved permissions. Existing data and registrations are preserved. Every invocation requires approval; no server software or migrations are run.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `connection_file` | `object` | Optional |  | Optional new application connection module in the project's language. Supply complete minimal source that reads configuration through environment variables or the framework's config loader. Include its driver/loader dependencies in the approved installation. Contains no credentials, copied .env values, machine-specific paths, configuration logging, migrations or setup commands. Reuse an existing connector by omitting this field. Source is reviewed and written, not executed by setup. |
-| `path` | `string` | Required | min length 1 | New local SQLite file, e.g. data/app.sqlite. Must be ignored by Git and outside Posse internals. |
+| `connection_file` | `object` | Required |  | Required application connector in the project's language. Supply path and complete minimal content for a new module, or path alone to reuse an existing nonempty source file. Read configuration through environment variables or the framework's config loader. Include driver/loader dependencies in the approved installation. Contains no credentials, copied .env values, machine-specific paths, configuration logging, migrations or setup commands. New source is reviewed and written, not executed by setup. Planning requires a reused connector to be committed and unchanged. |
+| `env_files` | `array<string>` | Optional | min items 1; max items 8 | Server setup only: already ignored .env destinations, default [.env]. Corresponding database.env.example files need writable scope. |
+| `path` | `string` | Optional | min length 1 | New local SQLite file, e.g. data/app.sqlite. Must be ignored by Git and outside Posse internals. |
+| `permissions` | `array<string>` | Optional | min items 1 | Server setup only: explicit Posse grants, default [read]. |
 | `reason` | `string` | Required | min length 1; max length 1000 |  |
 | `schema_path` | `string` | Optional |  | Optional repo-relative SQL file containing CREATE TABLE/INDEX statements. No external database access or destructive migrations. |
+| `server` | `object` | Optional |  | Postgres/MySQL server connection reference. Reference the connection URL by variable name; its value and credentials stay in the ignored local .env file. The server must already be running. URL query options are not supported by the project database driver. |
+| `type` | `string` | Optional | values "sqlite", "postgres", "mysql" | Default sqlite; postgres/mysql use server; path/schema_path are SQLite-only. |
 
 ### `tools.setup_environment`
 
@@ -1149,11 +1153,11 @@ Remote roles: `planner`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Before development, propose an ordered package-manager batch (npm, pnpm, yarn, bun, Composer, pip, uv, Poetry, Bundler, Cargo or Go) and optional local SQLite database for explicit user approval. Initializes missing npm-family, Composer, pip, uv and Bundler manifests, installs packages, creates database environment variables and portable examples, registers approved Posse database permissions, and commits setup source files in the primary checkout. Live .env/database files remain ignored. Scripts/plugins default off where the manager can disable them; the approval shows when it cannot. Wait for a successful setup commit before handing off development. No arbitrary shell commands. Installed manifests are authoritative and must not be planned as files_to_create.
+Before development, propose an ordered package-manager batch (npm, pnpm, yarn, bun, Composer, pip, uv, Poetry, Bundler, Cargo or Go) and optional SQLite/Postgres/MySQL database for explicit user approval. Initializes missing manifests, installs packages, creates database environment variables and portable examples, registers approved Posse database permissions, and commits setup source files including an application connector in the primary checkout. Server engines use an existing running server. Live .env/database files remain ignored. Scripts/plugins default off where the manager can disable them. Wait for a successful setup commit before handing off development. No arbitrary shell commands. Installed manifests are authoritative and must not be planned as files_to_create.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `database` | `object` | Optional |  | Optional new local SQLite database, shared by application development worktrees. Use steps: [] for database-only setup. Creates DATABASE_URL, DB_DATABASE and DB_CONNECTION in ignored .env files and registers Posse access after approval. Preserves existing databases and connection registrations. |
+| `database` | `object` | Optional |  | Database configuration shared by development worktrees. Use steps: [] for database-only setup. Defaults to a new local SQLite database (path required); postgres/mysql require server instead. Creates DATABASE_URL, DB_DATABASE and DB_CONNECTION in ignored .env files and registers Posse access after approval. Preserves existing data and registrations. |
 | `reason` | `string` | Required | min length 1; max length 1000 |  |
 | `steps` | `array<object>` | Required | min items 0; max items 12 |  |
 

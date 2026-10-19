@@ -4,6 +4,7 @@ import { getJob, listJobs, listJobsByWorkItem } from "../../queue/functions/inde
 import { localPath } from "./environment-paths.js";
 import { listIgnoredRepoPaths } from "../../git/functions/ignored-paths.js";
 import { linkNodeDependenciesFromPrimaryCheckout, linkComposerVendorFromPrimaryCheckout } from "../../verification/functions/prerequisite-adapters.js";
+import { linkPrimaryTestDependencies } from "../../verification/functions/test-capability.js";
 import { prepareDevelopmentDatabase } from "./planning-database.js";
 import { PACKAGE_MANAGERS } from "./package-managers.js";
 
@@ -43,15 +44,16 @@ function pathPresent(file) {
 // Installed trees are ignored by Git. Materialize the approved installation
 // before pre-dev checks or providers run, without launching another installer.
 // A work item that changed its manifests owns its dependencies from then on:
-// a mismatch is reported to the operator and the developer, never fatal.
+// incompatible primary installs are left alone, without blocking development.
 export async function prepareDevelopmentEnvironment(job, cwd) {
   const gateId = payload(job)._environment_setup_gate_id;
-  if (!gateId || !["dev", "fix"].includes(job.job_type)) return { notices: [] };
-  const gate = getJob(gateId);
-  if (!completedSetupGate(gate) || !cwd) throw new Error("Approved dependency setup is incomplete; development cannot start.");
-  const receipt = payload(gate).execution.result;
+  if (!["dev", "fix"].includes(job.job_type)) return { notices: [] };
+  const gate = gateId ? getJob(gateId) : null;
+  if (gateId && (!completedSetupGate(gate) || !cwd)) throw new Error("Approved dependency setup is incomplete; development cannot start.");
+  if (!cwd) return { notices: [] };
+  const receipt = gate ? payload(gate).execution.result : null;
   const notices = [];
-  for (const entry of receipt.packages) {
+  for (const entry of receipt?.packages || []) {
     // Managers with a shared download cache have nothing to link.
     if (path.resolve(cwd) === path.resolve(receipt.cwd) || !entry.dependency_path) continue;
     // A preceding job in this worktree linked or installed it already.
@@ -70,6 +72,11 @@ export async function prepareDevelopmentEnvironment(job, cwd) {
     const result = link === "node" ? linkNodeDependenciesFromPrimaryCheckout(directory) : linkComposerVendorFromPrimaryCheckout(directory);
     if (!result.ok) notices.push(`The approved ${entry.manager} installation for ${entry.path} was not linked (${result.reason}); its installed packages are not available in this worktree yet.`);
   }
-  notices.push(...await prepareDevelopmentDatabase(receipt.database, receipt.cwd, cwd));
+  // Existing projects and database-only batches may have no package receipt.
+  // Reuse their primary install too, under the same ignore, lock-match, and
+  // installed-version checks used by verification. This never installs.
+  try { linkPrimaryTestDependencies(cwd); }
+  catch (error) { notices.push(`Existing primary dependencies could not be linked: ${error.message}`); }
+  if (receipt) notices.push(...await prepareDevelopmentDatabase(receipt.database, receipt.cwd, cwd));
   return { notices };
 }
