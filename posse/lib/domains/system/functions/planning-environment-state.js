@@ -5,6 +5,7 @@ import { localPath } from "./environment-paths.js";
 import { listIgnoredRepoPaths } from "../../git/functions/ignored-paths.js";
 import { linkNodeDependenciesFromPrimaryCheckout, linkComposerVendorFromPrimaryCheckout } from "../../verification/functions/prerequisite-adapters.js";
 import { prepareDevelopmentDatabase } from "./planning-database.js";
+import { PACKAGE_MANAGERS } from "./package-managers.js";
 
 function payload(job) { return JSON.parse(job?.payload_json || "{}"); }
 
@@ -51,7 +52,8 @@ export async function prepareDevelopmentEnvironment(job, cwd) {
   const receipt = payload(gate).execution.result;
   const notices = [];
   for (const entry of receipt.packages) {
-    if (path.resolve(cwd) === path.resolve(receipt.cwd)) continue;
+    // Managers with a shared download cache have nothing to link.
+    if (path.resolve(cwd) === path.resolve(receipt.cwd) || !entry.dependency_path) continue;
     // A preceding job in this worktree linked or installed it already.
     if (pathPresent(path.join(cwd, entry.dependency_path))) continue;
     if (!(await listIgnoredRepoPaths(cwd, [`${entry.dependency_path}/.posse-setup-probe`])).length) {
@@ -59,7 +61,13 @@ export async function prepareDevelopmentEnvironment(job, cwd) {
       continue;
     }
     const directory = localPath(cwd, entry.path);
-    const result = entry.manager === "npm" ? linkNodeDependenciesFromPrimaryCheckout(directory) : linkComposerVendorFromPrimaryCheckout(directory);
+    const link = PACKAGE_MANAGERS[entry.manager]?.link;
+    if (!link) {
+      // Virtualenvs and bundle paths record absolute paths of the checkout that built them.
+      notices.push(`The approved ${entry.manager} installation for ${entry.path} lives in the primary checkout and is not shared; call install_dependencies with manager ${entry.manager} if this worktree needs it.`);
+      continue;
+    }
+    const result = link === "node" ? linkNodeDependenciesFromPrimaryCheckout(directory) : linkComposerVendorFromPrimaryCheckout(directory);
     if (!result.ok) notices.push(`The approved ${entry.manager} installation for ${entry.path} was not linked (${result.reason}); its installed packages are not available in this worktree yet.`);
   }
   notices.push(...await prepareDevelopmentDatabase(receipt.database, receipt.cwd, cwd));

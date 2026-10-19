@@ -4,9 +4,10 @@ import crypto from "node:crypto";
 import { FAILED_JOB_STATUSES } from "../../../catalog/job.js";
 import { ENVIRONMENT_PACKAGE_MANAGERS, ENVIRONMENT_SETUP_INSTALL_BUDGET_MS, ENVIRONMENT_SETUP_LOCK_WAIT_MS, ENVIRONMENT_SETUP_STEP_TIMEOUT_MS } from "../../../catalog/tools/environment-setup.js";
 import { localPath, fingerprint, readManifest } from "./environment-paths.js";
+import { PACKAGE_MANAGERS, packageCommands, packageScriptsLine, packageSpecs, readPackageManifest, shownPackageInputs } from "./package-managers.js";
 import { getJob, getWorkItem, listJobsByWorkItem } from "../../queue/functions/index.js";
 import { primaryCheckoutFor, runVerificationPrerequisiteCommand } from "../../verification/functions/prerequisite-adapters.js";
-import { findCommandOnPath, commandSpawnSpec } from "../../../shared/platform/functions/command-launch.js";
+import { commandSpawnSpec } from "../../../shared/platform/functions/command-launch.js";
 import { withDependencyInstallLock } from "../../../shared/concurrency/functions/dependency-install-lock.js";
 import { gitCurrentHashAsync, gitExecAsync } from "../../git/functions/utils.js";
 import { gitCommitAllAsync } from "../../git/functions/commit-scope.js";
@@ -29,15 +30,6 @@ function assertPlanning(context) {
     throw new Error("Batched environment setup requires initial planning, before development starts. Use a writable developer installer for an existing work-item branch.");
   }
   return job;
-}
-
-function packageArgument(pkg, manager) {
-  const namePattern = manager === "npm" ? /^(?:@[a-z0-9._-]+\/)?[a-z0-9][a-z0-9._-]*$/u : /^[a-z0-9][a-z0-9_.-]*\/[a-z0-9][a-z0-9_.-]*$/u;
-  const version = pkg?.version || "*";
-  if (!namePattern.test(pkg?.name || "") || typeof version !== "string" || !/^[a-zA-Z0-9.*~^+<>= -]{1,100}$/u.test(version)) {
-    throw new Error("Use registry package names and version constraints, not flags, paths, URLs, or shell syntax.");
-  }
-  return `${pkg.name}${manager === "npm" ? "@" : ":"}${version}`;
 }
 
 export async function preparePlanningEnvironment(args, context) {
@@ -77,52 +69,51 @@ export async function preparePlanningEnvironment(args, context) {
   let ignore = fs.existsSync(ignorePath) ? fs.readFileSync(ignorePath, "utf8") : "";
   if (ignore.length > 32 * 1024) throw new Error("Ignore-file approval is limited to 32 KB.");
   for (const step of args.steps) {
-    if (!ENVIRONMENT_PACKAGE_MANAGERS.includes(step?.manager)) throw new Error("Only npm and Composer package installers are supported.");
+    const manager = PACKAGE_MANAGERS[step?.manager];
+    if (!manager) throw new Error(`Use one of these package managers: ${ENVIRONMENT_PACKAGE_MANAGERS.join(", ")}.`);
     const directory = localPath(cwd, step.path || ".");
     const rel = (name) => path.relative(cwd, path.join(directory, name)).replaceAll(path.sep, "/");
-    const npm = step.manager === "npm";
-    const manifestName = npm ? "package.json" : "composer.json";
-    const lockName = npm ? "package-lock.json" : "composer.lock";
-    const dependencyName = npm ? "node_modules" : "vendor";
-    let npmrc = null;
-    const manifestFile = capture(rel(manifestName), { writable: true });
-    const manifest = fs.existsSync(manifestFile) && fs.statSync(manifestFile).size > 0 ? readManifest(manifestFile) : npm ? { private: true } : { require: {} };
-    if (JSON.stringify(manifest).length > 32 * 1024) throw new Error("Manifest approval is limited to 32 KB.");
-    if (!fs.existsSync(manifestFile) || fs.statSync(manifestFile).size === 0) proposal.writes[rel(manifestName)] = `${JSON.stringify(manifest, null, 2)}\n`;
-    capture(rel(lockName), { writable: true });
-    localPath(cwd, rel(dependencyName), { dependencyDirectory: true });
-    if (npm) {
-      if (manifest.workspaces || (manifest.packageManager && !String(manifest.packageManager).startsWith("npm@"))) throw new Error("Batched npm setup supports standalone npm packages; use the repository's declared package manager for workspaces.");
-      for (let parent = path.dirname(directory); parent !== path.dirname(parent); parent = path.dirname(parent)) {
-        if (fs.existsSync(path.join(parent, "package.json")) && readManifest(path.join(parent, "package.json")).workspaces) throw new Error("Nested npm workspace installs are not supported.");
-      }
-      if (fs.existsSync(capture(rel(".npmrc")))) npmrc = rel(".npmrc");
-      for (const name of ["pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "npm-shrinkwrap.json"]) {
-        if (fs.existsSync(capture(rel(name)))) throw new Error(`Resolve the existing ${name} package-manager contract first.`);
-      }
-    } else {
-      // Keep both installed packages and generated executable proxies inside
-      // the reviewed directory even when the project has custom config.
-      if ((manifest.config?.["vendor-dir"] && manifest.config["vendor-dir"] !== "vendor")
-        || (manifest.config?.["bin-dir"] && manifest.config["bin-dir"] !== "vendor/bin")) throw new Error("Composer setup requires the standard vendor/ and vendor/bin paths.");
+    const manifestPath = rel(manager.manifest);
+    const manifestFile = capture(manifestPath, { writable: true });
+    let manifest;
+    if (fs.existsSync(manifestFile) && fs.statSync(manifestFile).size > 0) {
+      if (fs.statSync(manifestFile).size > 32 * 1024) throw new Error("Manifest approval is limited to 32 KB.");
+      manifest = readPackageManifest(manager, manifestFile);
+    } else if (proposal.writes[manifestPath] === undefined) {
+      const initial = manager.initialManifest(directory);
+      if (initial == null) throw new Error(`${manager.label} setup needs an existing ${manifestPath}. Let development create the project, then install with install_dependencies.`);
+      proposal.writes[manifestPath] = initial;
     }
-    const packages = step.packages || [];
-    if (!Array.isArray(packages) || packages.length > 50) throw new Error("Each step accepts at most 50 packages.");
-    const packageArgs = packages.map((pkg) => packageArgument(pkg, step.manager));
-    const command = findCommandOnPath(step.manager);
-    if (!command) throw new Error(`${step.manager} is unavailable. Install its toolchain and restart Posse before requesting setup.`);
-    const scripts = step.lifecycle_scripts === true;
-    const plugins = !npm && step.plugins === true;
-    const argv = npm
-      ? ["install", "--prefix", directory, "--global=false", "--workspaces=false", "--package-lock=true", "--package-lock-only=false", "--dry-run=false", "--include=prod", "--include=dev", "--include=optional", "--no-audit", "--no-fund", `--ignore-scripts=${!scripts}`, ...(packageArgs.length ? [step.dev ? "--save-dev" : "--save-prod", "--", ...packageArgs] : [])]
-      : [packageArgs.length ? "require" : "install", "--working-dir", directory, "--no-interaction", "--no-progress", ...(!scripts ? ["--no-scripts"] : []), ...(!plugins ? ["--no-plugins"] : []), ...(step.dev && packageArgs.length ? ["--dev"] : []), ...(packageArgs.length ? ["--", ...packageArgs] : [])];
-    const ignoreRule = `/${rel(dependencyName).replace(/[\[\]*? ]/gu, "\\$&")}/`;
-    if (!ignore.split(/\r?\n/u).includes(ignoreRule)) ignore = `${ignore}${ignore && !ignore.endsWith("\n") ? "\n" : ""}${ignoreRule}\n`;
-    const env = npm ? {} : {
-      COMPOSER: path.join(directory, "composer.json"), COMPOSER_VENDOR_DIR: path.join(directory, "vendor"),
-      COMPOSER_BIN_DIR: path.join(directory, "vendor", "bin"), COMPOSER_NO_DEV: "0",
-    };
-    proposal.steps.push({ env, manager: step.manager, path: step.path || ".", directory, command, argv, scripts, plugins, manifest, dependency_path: rel(dependencyName), ...(npmrc ? { npmrc } : {}) });
+    // An earlier step in this batch may already have written the manifest.
+    if (proposal.writes[manifestPath] !== undefined) manifest = manager.format === "json" ? JSON.parse(proposal.writes[manifestPath]) : proposal.writes[manifestPath];
+    manager.validate(directory, manifest);
+    for (const name of manager.inputs(directory)) capture(rel(name));
+    const lock = manager.lockfile(directory);
+    if (lock) capture(rel(lock), { writable: true });
+    const installDirs = manager.dependencyDirs(directory, manifest);
+    const dependencyDirs = installDirs.map(rel);
+    for (const dir of dependencyDirs) localPath(cwd, dir, { dependencyDirectory: true });
+    const configFiles = manager.configFiles.filter((name) => fs.existsSync(capture(rel(name)))).map(rel);
+    const specs = packageSpecs(manager, step.packages || []);
+    const command = manager.command();
+    if (!command) throw new Error(`${manager.label} is unavailable. Install ${manager.toolchain} and restart Posse before requesting setup.`);
+    const scripts = manager.scripts === "always" || (manager.scripts === "flag" && step.lifecycle_scripts === true);
+    const plugins = manager.name === "composer" && step.plugins === true;
+    const options = { dir: directory, manifest, command, scripts, plugins, dev: step.dev === true };
+    let entries;
+    if (!specs.length) entries = manager.install(options);
+    else if (manager.editManifest) {
+      proposal.writes[manifestPath] = manager.editManifest(proposal.writes[manifestPath] ?? manifest, specs);
+      entries = manager.install(options);
+    } else entries = manager.add(options, specs);
+    for (const dir of dependencyDirs) {
+      const ignoreRule = `/${dir.replace(/[\[\]*? ]/gu, "\\$&")}/`;
+      if (!ignore.split(/\r?\n/u).includes(ignoreRule)) ignore = `${ignore}${ignore && !ignore.endsWith("\n") ? "\n" : ""}${ignoreRule}\n`;
+    }
+    proposal.steps.push({ manager: manager.name, path: step.path || ".", directory, commands: packageCommands(manager, entries, options), scripts, plugins,
+      manifest: proposal.writes[manifestPath] !== undefined && manager.format === "text" ? proposal.writes[manifestPath] : manifest,
+      other_manifests: shownPackageInputs(manager, directory, rel),
+      install_dirs: installDirs, dependency_paths: dependencyDirs, dependency_path: dependencyDirs[0] || null, config_files: configFiles });
   }
   if (args.database) {
     proposal.database = await preparePlanningDatabase(args.database, cwd, capture, proposal.writes);
@@ -143,11 +134,12 @@ export async function preparePlanningEnvironment(args, context) {
 
 export function planningEnvironmentQuestion(proposal) {
   return ["Approve this complete dependency setup batch before development?", `Reason: ${proposal.reason}`, `Primary checkout: ${proposal.cwd}`, ...proposal.steps.map((step, i) => [
-    `${i + 1}. ${JSON.stringify([step.command, ...step.argv])}`,
-    `Scripts: ${step.scripts ? "ENABLED (run with your user permissions)" : "disabled"}; Composer plugins: ${step.plugins ? "ENABLED" : "disabled"}.`,
-    `Environment overrides: ${JSON.stringify(step.env)}`,
-    ...(step.npmrc ? [`npm configuration: ${step.npmrc} applies to this install (registry, authentication and git settings). Review it before approving; changing it invalidates this approval.`] : []),
-    `Current manifest: ${JSON.stringify(step.manifest, null, 2)}`,
+    `${i + 1}. ${step.manager} in ${step.path}:`,
+    ...step.commands.map((entry) => `${JSON.stringify([entry.command, ...entry.argv])}${Object.keys(entry.env).length ? ` with environment ${JSON.stringify(entry.env)}` : ""}`),
+    ...packageScriptsLine(PACKAGE_MANAGERS[step.manager], step.scripts, { plugins: step.plugins }),
+    ...step.config_files.map((file) => `${PACKAGE_MANAGERS[step.manager].label} configuration: ${file} applies to this install (registry, authentication and install settings). Review it before approving; changing it invalidates this approval.`),
+    `Current manifest: ${typeof step.manifest === "string" ? step.manifest || "(empty)" : JSON.stringify(step.manifest, null, 2)}`,
+    ...Object.entries(step.other_manifests).map(([file, text]) => `Also installed from ${file}:\n${text || "(empty)"}`),
   ].join("\n")), ...planningDatabaseQuestion(proposal.database), `Create/update before installing: ${JSON.stringify(proposal.writes, null, 2)}`,
   `Commit only these setup files locally on ${proposal.branch}: ${proposal.changes.join(", ")}. No push or deployment.`,
   "Steps run in order and stop on the first failure. Partial changes are preserved for inspection. Rejection runs nothing; any retry requires new approval."].join("\n\n");
@@ -183,8 +175,10 @@ export async function executePlanningEnvironment(proposal, context, { signal, be
         fs.writeFileSync(file, content);
       }
       for (const step of proposal.steps) {
-        if (!(await listIgnoredRepoPaths(proposal.cwd, [`${step.dependency_path}/.posse-setup-probe`])).length) {
-          throw new Error(`Repository policy must ignore ${step.dependency_path}/. Check nested ignore overrides before approving another batch.`);
+        for (const dir of step.dependency_paths) {
+          if (!(await listIgnoredRepoPaths(proposal.cwd, [`${dir}/.posse-setup-probe`])).length) {
+            throw new Error(`Repository policy must ignore ${dir}/. Check nested ignore overrides before approving another batch.`);
+          }
         }
       }
       const results = [];
@@ -198,23 +192,25 @@ export async function executePlanningEnvironment(proposal, context, { signal, be
           return { ok: false, status: "failed", results, message: "Setup exceeded its installer time budget before every step ran. Setup files were restored. Development is blocked; split the batch and request new approval." };
         }
         fs.mkdirSync(step.directory, { recursive: true });
-        const spec = commandSpawnSpec(step.command, step.argv);
-        const result = await runCommand(spec.command, spec.args, { cwd: step.directory, env: step.env, signal, windowsVerbatimArguments: spec.windowsVerbatimArguments, timeoutMs: Math.min(ENVIRONMENT_SETUP_STEP_TIMEOUT_MS, remainingMs) });
-        results.push(result);
-        if (!result.ok) {
-          restore();
-          return { ok: false, status: "failed", results, message: "Setup stopped at the first failed installer. Setup files were restored. Development is blocked; a retry requires new approval." };
+        for (const entry of step.commands) {
+          const remaining = installDeadline - Date.now();
+          const spec = commandSpawnSpec(entry.command, entry.argv);
+          const result = remaining <= 0 ? { ok: false, status: "blocked", reason: "setup_budget_exhausted" }
+            : await runCommand(spec.command, spec.args, { cwd: step.directory, env: entry.env, signal, windowsVerbatimArguments: spec.windowsVerbatimArguments, timeoutMs: Math.min(ENVIRONMENT_SETUP_STEP_TIMEOUT_MS, remaining) });
+          results.push(result);
+          if (!result.ok) {
+            restore();
+            return { ok: false, status: "failed", results, message: "Setup stopped at the first failed installer. Setup files were restored. Development is blocked; a retry requires new approval." };
+          }
         }
       }
       if (signal?.aborted) throw new Error("Environment setup canceled before commit; development is blocked.");
       for (const step of proposal.steps) {
-        const dependencyPath = localPath(proposal.cwd, step.dependency_path, { dependencyDirectory: true });
-        if (step.manager === "npm" && !fs.existsSync(dependencyPath)) {
-          const manifest = readManifest(path.join(step.directory, "package.json"));
-          if (Object.keys({ ...manifest.dependencies, ...manifest.devDependencies }).length) throw new Error("npm returned success without installing the declared dependencies; development is blocked.");
-          fs.mkdirSync(dependencyPath, { recursive: true });
-        }
-        if (step.manager === "composer" && !fs.existsSync(path.join(dependencyPath, "autoload.php"))) throw new Error("Composer did not produce an autoloader; development is blocked.");
+        const manager = PACKAGE_MANAGERS[step.manager];
+        for (const dir of step.dependency_paths) localPath(proposal.cwd, dir, { dependencyDirectory: true });
+        const installed = manager.format === "json" ? readManifest(path.join(step.directory, manager.manifest)) : null;
+        const problem = manager.verify(step.directory, installed, step.install_dirs);
+        if (problem) throw new Error(`${problem}; development is blocked.`);
       }
       const files = proposal.changes.filter((relative) => fs.existsSync(localPath(proposal.cwd, relative)));
       const result = await commit("posse: approved planning dependency setup", proposal.cwd, { modifyFiles: files, createFiles: files, deleteFiles: [], createRoots: [] }, {

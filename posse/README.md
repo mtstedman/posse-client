@@ -181,7 +181,8 @@ preserves the existing `scope_auto_approval` policy and interactive or
 non-interactive behavior. That policy already grants developers and fixes test
 files, lockfiles, paths inside an approved create root, and project manifests
 (`package.json`, `composer.json`, `tsconfig*.json`, `.gitignore`,
-`pyproject.toml`, `requirements.txt`, `Cargo.toml`, `go.mod`, `Gemfile`)
+`pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, `Cargo.toml`,
+`go.mod`, `Gemfile`)
 without a gate; installing new dependencies still needs its own approval. Scope mode does not change plan approval, publication,
 assessment, or clarification decisions. Approved paths still pass the normal
 scope validation, protected-path, and file-lock checks. This flag does not
@@ -1110,7 +1111,8 @@ Installer source lives in `installers/linux/install-posse-atlas.sh`.
 
 For a greenfield application, the planner can use `inspect_environment` and
 `setup_environment` before handing off development. The latter proposes one
-ordered batch of npm and/or Composer steps. Each step names a package directory,
+ordered batch of package-manager steps (the supported managers are listed at the
+end of this section). Each step names a package manager and directory,
 packages and version constraints, whether they are development dependencies,
 and whether scripts or Composer plugins are needed. An omitted package list
 installs the dependencies already declared in the manifest.
@@ -1118,10 +1120,14 @@ installs the dependencies already declared in the manifest.
 The **Approve / Reject** question shows the entire batch, commands, environment
 overrides, current manifests, proposed initialization/ignore changes, and local
 commit scope. Nothing installs before approval. Automatic scope approval and
-unattended mode never authorize these requests. Scripts and Composer plugins
-are disabled unless explicitly requested in the approved step. A project
-`.npmrc` is named in the question (its contents are not shown) because it
-controls the registry and authentication. A canceled attempt, rejection,
+unattended mode never authorize these requests. Lifecycle scripts, pip/uv
+source builds and Composer plugins are disabled unless explicitly requested in
+the approved step. Poetry and Bundler cannot disable package build code, and
+Cargo and Go downloads run none; the question states which applies. Project
+configuration such as `.npmrc`, `.yarnrc.yml`, `bunfig.toml`, Composer
+`auth.json`, `uv.toml`, `poetry.toml` or `.cargo/config.toml` is named in the
+question (its contents are not shown) because it controls the registry and
+authentication. A canceled attempt, rejection,
 changed inputs, or no answer within 10 minutes prevents execution. Each approval
 can be used once; batches stop at the first failed command and restore the
 setup files they changed, so the primary checkout stays mergeable (installed
@@ -1132,8 +1138,10 @@ share a 30-minute budget (10 minutes per step). The job's runtime watchdog
 does not count the approval wait or the approved installers, up to a capped
 credit per dispatch, and other jobs keep using their tools meanwhile.
 
-Planning setup runs in the primary checkout, initializes missing manifests,
-adds anchored ignore rules for dependency directories, and commits only the
+Planning setup runs in the primary checkout, initializes missing npm-family,
+Composer, pip, uv and Bundler manifests (Poetry, Cargo and Go need an existing
+project manifest), adds anchored ignore rules for local install directories
+(`node_modules/`, `vendor/`, `.venv/`, `vendor/bundle/` and `.bundle/`), and commits only the
 setup manifests, locks, and `.gitignore` locally. It does not push or deploy.
 The plan that requested setup cannot start development until setup succeeds and
 that commit is clean. If you reject the request, the plan continues without
@@ -1144,8 +1152,11 @@ development checks or providers run, including worktrees of later work items
 that ran no setup of their own. Once a work
 item changes its manifests or lockfile, its worktrees keep their own
 dependencies; a worktree without them is reported to the operator and the
-developer. With `package.json` and `package-lock.json` in its writable scope,
-a developer can request `install_dependencies`. This batch tool is available during initial ordinary
+developer. Only npm-family and Composer installations are linked; a Python
+virtualenv or Bundler path records the checkout that built it, so its worktree is
+told to request its own install, and Cargo and Go share the user's download
+cache. With the lockfile in its writable scope, a developer can request
+`install_dependencies`. This batch tool is available during initial ordinary
 planning, before the work-item development branch exists; red-team/review
 passes and assessment replans cannot run it.
 
@@ -1187,14 +1198,18 @@ or dotenv support. The portable example is suitable for configuring a fresh
 clone; runtime data and machine-specific environment files are never committed.
 
 On an existing development branch, `install_dependencies` remains available
-for standalone npm manifests and Composer projects within writable scope. For
-npm, declare dependencies in `package.json`, include `package.json` and
-`package-lock.json` in scope, and ignore `node_modules/`. For Composer
-(`manager: "composer"`), declare them in `composer.json`, include
-`composer.lock` in scope, and ignore `vendor/`; an existing lock is honored and
-only packages it lacks are resolved, with Composer scripts off unless approved
-and plugins always off. This separate installer also requires explicit approval
-and leaves its lockfile for the ordinary developer commit.
+within writable scope. Declare dependencies in the package directory's manifest,
+include its lockfile in scope (npm and Go also need the manifest), and ignore its
+local install directory. The manager is detected from the manifest, the
+`packageManager` field and the lockfile; pass `manager` when a directory has
+several, such as `composer.json` beside `package.json`. Asking npm to install a
+package that has another manager's lockfile is refused with the manager to use.
+Composer honors an existing lock and resolves only the packages it lacks, with
+scripts off unless approved and plugins always off. pip creates `.venv` and
+installs `requirements.txt` (plus `requirements-dev.txt` or
+`dev-requirements.txt` when present) from wheels only unless source builds are
+approved. This separate installer also requires explicit approval and leaves its
+lockfile for the ordinary developer commit.
 
 `setup_database` creates a **new local SQLite file** at an ignored path, optionally
 applying a SQL file containing CREATE TABLE/INDEX statements. It requires a
@@ -1205,7 +1220,12 @@ It also accepts `connection_file` in the same shape. On a developer branch the
 new file must be in writable scope, reads the application's existing environment
 configuration, and is committed and tested with the ordinary developer changes.
 
-Supported dependency managers are standalone npm and Composer, using toolchains
-already installed on the machine (including Windows command shims). npm
-workspaces, OS toolchain installation, existing-database migrations, and external
-database services require separate setup.
+Supported package managers are npm, pnpm, yarn (classic and Berry), bun,
+Composer, pip, uv, Poetry, Bundler, Cargo and Go, using toolchains already
+installed on the machine (including Windows command shims). Posse builds every
+command itself from registry package names and version constraints; a manager
+outside this list needs a registry entry in
+`lib/domains/system/functions/package-managers.js`. JavaScript workspaces, Cargo
+workspace members, vendored Go modules, OS toolchain installation,
+existing-database migrations, and external database services require separate
+setup.

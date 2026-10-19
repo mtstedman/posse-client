@@ -3,7 +3,7 @@ import { PROJECT_DB_PERMISSIONS } from "../project-db.js";
 export const ENVIRONMENT_SETUP_REVIEW_TYPE = "environment_setup";
 export const ENVIRONMENT_SETUP_ACTIONS = Object.freeze(["approve", "reject"]);
 export const ENVIRONMENT_SETUP_TOOLS = Object.freeze(["install_dependencies", "setup_database", "setup_environment"]);
-export const ENVIRONMENT_PACKAGE_MANAGERS = Object.freeze(["npm", "composer"]);
+export const ENVIRONMENT_PACKAGE_MANAGERS = Object.freeze(["npm", "pnpm", "yarn", "bun", "composer", "pip", "uv", "poetry", "bundler", "cargo", "go"]);
 export const DATABASE_ENV_KEYS = Object.freeze(["DATABASE_URL", "DB_DATABASE", "DB_CONNECTION"]);
 
 export const DATABASE_CONNECTION_FILE_SCHEMA = {
@@ -35,7 +35,7 @@ export const ENVIRONMENT_SETUP_RUNTIME_CREDIT_CAP_MS = 2 * ENVIRONMENT_SETUP_LIV
 
 export const TOOL_SETUP_ENVIRONMENT = {
   type: "function", name: "setup_environment",
-  description: "Before development, propose an ordered npm/Composer batch and optional local SQLite database for explicit user approval. Initializes manifests, installs packages, creates database environment variables and portable examples, registers approved Posse database permissions, and commits setup source files in the primary checkout. Live .env/database files remain ignored. Scripts/plugins default off. Wait for a successful setup commit before handing off development. No arbitrary shell commands. Installed manifests are authoritative and must not be planned as files_to_create.",
+  description: "Before development, propose an ordered package-manager batch (npm, pnpm, yarn, bun, Composer, pip, uv, Poetry, Bundler, Cargo or Go) and optional local SQLite database for explicit user approval. Initializes missing npm-family, Composer, pip, uv and Bundler manifests, installs packages, creates database environment variables and portable examples, registers approved Posse database permissions, and commits setup source files in the primary checkout. Live .env/database files remain ignored. Scripts/plugins default off where the manager can disable them; the approval shows when it cannot. Wait for a successful setup commit before handing off development. No arbitrary shell commands. Installed manifests are authoritative and must not be planned as files_to_create.",
   parameters: {
     type: "object", additionalProperties: false, required: ["reason", "steps"],
     properties: {
@@ -49,10 +49,10 @@ export const TOOL_SETUP_ENVIRONMENT = {
             path: { type: "string", description: "Package directory relative to the primary checkout, default ." },
             packages: { type: "array", maxItems: 50, items: {
               type: "object", additionalProperties: false, required: ["name"],
-              properties: { name: { type: "string" }, version: { type: "string", description: "Registry version/constraint; default *. No URLs or local paths." } },
+              properties: { name: { type: "string", description: "Registry package name: npm name, Composer vendor/name, PyPI name, gem, crate or Go module path." }, version: { type: "string", description: "Version or constraint in the manager's syntax; default latest. No URLs or local paths." } },
             } },
             dev: { type: "boolean", description: "Save these packages as development dependencies." },
-            lifecycle_scripts: { type: "boolean", description: "Enable project/dependency scripts in this step; requires explicit approval. Default false." },
+            lifecycle_scripts: { type: "boolean", description: "Enable project/dependency scripts (pip and uv: source builds) in this step; requires explicit approval. Default false." },
             plugins: { type: "boolean", description: "Composer only: enable plugins allowed by Composer configuration. Default false." },
           },
         },
@@ -76,19 +76,19 @@ const projectPath = { type: "string", description: "Repository-relative package 
 export const TOOL_INSPECT_ENVIRONMENT = {
   type: "function",
   name: "inspect_environment",
-  description: "Inspect local Node/npm and PHP/Composer availability, manifests, dependencies, lockfiles and installation state without installing anything. Planner inspection targets the primary checkout used for dependency batches.",
+  description: "Inspect the package managers a directory uses (detected from manifests and lockfiles), their availability, lockfiles and installation state without installing anything. Planner inspection targets the primary checkout used for dependency batches.",
   parameters: { type: "object", properties: { path: projectPath }, additionalProperties: false },
 };
 export const TOOL_INSTALL_DEPENDENCIES = {
   type: "function",
   name: "install_dependencies",
-  description: "Request explicit user approval to install the dependencies declared in package.json (npm) or composer.json (Composer) in this job's worktree. Edit the manifest first and include it and its lockfile (package-lock.json or composer.lock) in writable scope. Every invocation needs its own approval; scope auto-approval does not apply. Returns after approval and execution, rejection, or expiry. Accepts structured options for standalone npm packages and Composer projects.",
+  description: "Request explicit user approval to install the dependencies declared in a package directory's manifest in this job's worktree, with its package manager (npm, pnpm, yarn, bun, Composer, pip, uv, Poetry, Bundler, Cargo or Go). The manager is detected from the manifest and lockfile; pass manager when several apply. Edit the manifest first and include its lockfile in writable scope (npm and Go also need the manifest). Every invocation needs its own approval; scope auto-approval does not apply. Returns after approval and execution, rejection, or expiry.",
   parameters: {
     type: "object",
     properties: {
       path: projectPath,
-      manager: { type: "string", enum: [...ENVIRONMENT_PACKAGE_MANAGERS], description: "Package manager whose manifest to install from. Default npm; use composer for composer.json." },
-      lifecycle_scripts: { type: "boolean", description: "Allow package lifecycle scripts (npm scripts and native builds, or Composer scripts). Default false. The user must explicitly approve this in the installer proposal. Composer plugins stay disabled." },
+      manager: { type: "string", enum: [...ENVIRONMENT_PACKAGE_MANAGERS], description: "Package manager to run. Default: detected from the directory's manifests and lockfiles." },
+      lifecycle_scripts: { type: "boolean", description: "Allow package scripts and builds (npm-family lifecycle scripts, Composer scripts, pip/uv source builds). Default false. The user must explicitly approve this in the installer proposal. Composer plugins stay disabled. Poetry and Bundler always run build code; Cargo and Go run none." },
       reason: { type: "string", minLength: 1, maxLength: 1000 },
     },
     required: ["reason"], additionalProperties: false,

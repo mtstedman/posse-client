@@ -267,7 +267,7 @@ function indexMatchesHead(exec, cwd) {
   }
 }
 
-const LOCKFILE_NAMES = new Set(["package-lock.json", "npm-shrinkwrap.json", "composer.lock", "yarn.lock", "pnpm-lock.yaml", "bun.lock"]);
+const LOCKFILE_NAMES = new Set(["package-lock.json", "npm-shrinkwrap.json", "composer.lock", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb", "uv.lock", "poetry.lock", "Gemfile.lock", "Cargo.lock"]);
 
 // All-or-nothing: compute every file's resolution before writing any.
 function resolveConflictedFiles(exec, cwd, files) {

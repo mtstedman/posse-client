@@ -44,6 +44,8 @@ const PROJECT_MANIFEST_BASENAMES = new Set([
   ".gitignore",
   "pyproject.toml",
   "requirements.txt",
+  "requirements-dev.txt",
+  "dev-requirements.txt",
   "cargo.toml",
   "go.mod",
   "gemfile",

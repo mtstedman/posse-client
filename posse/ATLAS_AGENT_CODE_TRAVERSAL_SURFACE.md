@@ -676,7 +676,7 @@ Remote roles: `assessor`, `dev`, `planner`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Inspect local Node/npm and PHP/Composer availability, manifests, dependencies, lockfiles and installation state without installing anything. Planner inspection targets the primary checkout used for dependency batches.
+Inspect the package managers a directory uses (detected from manifests and lockfiles), their availability, lockfiles and installation state without installing anything. Planner inspection targets the primary checkout used for dependency batches.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -716,12 +716,12 @@ Remote roles: `dev`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Request explicit user approval to install the dependencies declared in package.json (npm) or composer.json (Composer) in this job's worktree. Edit the manifest first and include it and its lockfile (package-lock.json or composer.lock) in writable scope. Every invocation needs its own approval; scope auto-approval does not apply. Returns after approval and execution, rejection, or expiry. Accepts structured options for standalone npm packages and Composer projects.
+Request explicit user approval to install the dependencies declared in a package directory's manifest in this job's worktree, with its package manager (npm, pnpm, yarn, bun, Composer, pip, uv, Poetry, Bundler, Cargo or Go). The manager is detected from the manifest and lockfile; pass manager when several apply. Edit the manifest first and include its lockfile in writable scope (npm and Go also need the manifest). Every invocation needs its own approval; scope auto-approval does not apply. Returns after approval and execution, rejection, or expiry.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
-| `lifecycle_scripts` | `boolean` | Optional |  | Allow package lifecycle scripts (npm scripts and native builds, or Composer scripts). Default false. The user must explicitly approve this in the installer proposal. Composer plugins stay disabled. |
-| `manager` | `string` | Optional | values "npm", "composer" | Package manager whose manifest to install from. Default npm; use composer for composer.json. |
+| `lifecycle_scripts` | `boolean` | Optional |  | Allow package scripts and builds (npm-family lifecycle scripts, Composer scripts, pip/uv source builds). Default false. The user must explicitly approve this in the installer proposal. Composer plugins stay disabled. Poetry and Bundler always run build code; Cargo and Go run none. |
+| `manager` | `string` | Optional | values "npm", "pnpm", "yarn", "bun", "composer", "pip", "uv", "poetry", "bundler", "cargo", "go" | Package manager to run. Default: detected from the directory's manifests and lockfiles. |
 | `path` | `string` | Optional |  | Repository-relative package directory; defaults to the job worktree root. |
 | `reason` | `string` | Required | min length 1; max length 1000 |  |
 
@@ -1149,7 +1149,7 @@ Remote roles: `planner`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Before development, propose an ordered npm/Composer batch and optional local SQLite database for explicit user approval. Initializes manifests, installs packages, creates database environment variables and portable examples, registers approved Posse database permissions, and commits setup source files in the primary checkout. Live .env/database files remain ignored. Scripts/plugins default off. Wait for a successful setup commit before handing off development. No arbitrary shell commands. Installed manifests are authoritative and must not be planned as files_to_create.
+Before development, propose an ordered package-manager batch (npm, pnpm, yarn, bun, Composer, pip, uv, Poetry, Bundler, Cargo or Go) and optional local SQLite database for explicit user approval. Initializes missing npm-family, Composer, pip, uv and Bundler manifests, installs packages, creates database environment variables and portable examples, registers approved Posse database permissions, and commits setup source files in the primary checkout. Live .env/database files remain ignored. Scripts/plugins default off where the manager can disable them; the approval shows when it cannot. Wait for a successful setup commit before handing off development. No arbitrary shell commands. Installed manifests are authoritative and must not be planned as files_to_create.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

@@ -11,7 +11,8 @@ import { withDependencyInstallLock } from "../../../shared/concurrency/functions
 import { runVerificationPrerequisiteCommand } from "../../verification/functions/prerequisite-adapters.js";
 import { splitSqlStatements } from "../../../shared/tools/functions/toolkit/project-db/permissions.js";
 import { readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
-import { ENVIRONMENT_SETUP_LOCK_WAIT_MS, ENVIRONMENT_SETUP_STEP_TIMEOUT_MS } from "../../../catalog/tools/environment-setup.js";
+import { ENVIRONMENT_PACKAGE_MANAGERS, ENVIRONMENT_SETUP_INSTALL_BUDGET_MS, ENVIRONMENT_SETUP_LOCK_WAIT_MS, ENVIRONMENT_SETUP_STEP_TIMEOUT_MS } from "../../../catalog/tools/environment-setup.js";
+import { PACKAGE_MANAGERS, detectPackageManagers, packageCommands, packageScriptsLine, readPackageManifest, resolvePackageManager, shownPackageInputs } from "./package-managers.js";
 import { prepareDatabaseConnectionFile } from "./database-connection-file.js";
 
 export function inspectEnvironment(args = {}, { cwd, role = null }) {
@@ -31,8 +32,18 @@ export function inspectEnvironment(args = {}, { cwd, role = null }) {
     dependencies: manifest?.dependencies || {}, dev_dependencies: manifest?.devDependencies || {},
     package_lock: fs.existsSync(localPath(cwd, path.relative(cwd, path.join(directory, "package-lock.json")).replaceAll(path.sep, "/"))),
     node_modules_present: fs.existsSync(modules),
+    package_managers: detectPackageManagers(directory).map((name) => {
+      const manager = PACKAGE_MANAGERS[name];
+      const lock = manager.lockfile(directory);
+      let parsed = {};
+      try { parsed = readPackageManifest(manager, path.join(directory, manager.manifest)); } catch { /* reported by the installer */ }
+      const installDirs = manager.dependencyDirs(directory, parsed);
+      return { manager: name, manifest: manager.manifest, lockfile: lock && fs.existsSync(path.join(directory, lock)) ? lock : null,
+        installed: installDirs.length ? installDirs.every((dir) => fs.existsSync(path.join(directory, dir))) : null, available: !!manager.command() };
+    }),
+    supported_package_managers: ENVIRONMENT_PACKAGE_MANAGERS,
     sqlite_setup_available: true, project_database: readProjectDbConfig({ projectDir: cwd }), approval_required: ["setup_environment", "install_dependencies", "setup_database"],
-    note: "node_modules presence does not prove dependencies are current. Installers require explicit user approval. OS toolchains and services are not installed by these tools.",
+    note: "An install directory's presence does not prove dependencies are current; installed is null for managers that use a shared cache. Installers require explicit user approval. OS toolchains and services are not installed by these tools.",
   };
 }
 
@@ -54,75 +65,42 @@ export async function prepareEnvironmentSetup(tool, args, context) {
     proposal.inputs[relative] = fingerprint(file);
     return file;
   };
-  if (tool === "install_dependencies" && (args.manager || "npm") === "composer") {
+  if (tool === "install_dependencies") {
     const directory = localPath(cwd, args.path || ".");
     if (!fs.statSync(directory).isDirectory()) throw new Error("Package path must be a directory.");
     const relative = (name) => path.relative(cwd, path.join(directory, name)).replaceAll(path.sep, "/");
-    const manifestFile = capture(relative("composer.json"));
-    if (!fs.existsSync(manifestFile)) throw new Error("Declare the Composer dependencies in composer.json before requesting installation.");
+    const manager = resolvePackageManager(directory, args.manager, args.path || ".");
+    const manifestFile = capture(relative(manager.manifest));
+    if (!fs.existsSync(manifestFile)) throw new Error(`Declare the dependencies in ${manager.manifest} before requesting installation.`);
     if (fs.statSync(manifestFile).size > 32 * 1024) throw new Error("Manifest approval is limited to 32 KB.");
-    const manifest = readManifest(manifestFile);
-    // Keep installed packages and executable proxies inside the reviewed directory.
-    if ((manifest.config?.["vendor-dir"] && manifest.config["vendor-dir"] !== "vendor")
-      || (manifest.config?.["bin-dir"] && manifest.config["bin-dir"] !== "vendor/bin")) throw new Error("Composer installation requires the standard vendor/ and vendor/bin paths.");
-    const lockFile = capture(relative("composer.lock"));
-    assertWritable(lockFile, context);
-    localPath(cwd, relative("vendor"), { dependencyDirectory: true });
-    const ignored = await listIgnoredRepoPaths(cwd, [relative("composer.json"), relative("composer.lock"), `${relative("vendor")}/.posse-setup-probe`]);
-    if (ignored.some((item) => item.path === relative("composer.json") || item.path === relative("composer.lock"))) throw new Error("Composer manifests and lockfiles must be committable; fix repository ignore rules first.");
-    if (!ignored.some((item) => item.path.endsWith("/.posse-setup-probe"))) throw new Error("Ignore vendor/ in repository policy before requesting installation.");
-    const composer = findCommandOnPath("composer");
-    if (!composer) throw new Error("Composer is unavailable on this machine. Install PHP and Composer, restart Posse, then request dependency installation.");
-    // An existing lock is honored; only packages the manifest declares but the
-    // lock lacks are resolved, so unrelated locked versions do not move.
-    const locked = fs.existsSync(lockFile) ? readManifest(lockFile) : null;
-    const lockedNames = new Set([...(locked?.packages || []), ...(locked?.["packages-dev"] || [])].map((entry) => String(entry?.name || "").toLowerCase()));
-    const missing = locked ? Object.keys({ ...manifest.require, ...manifest["require-dev"] })
-      .filter((name) => name.includes("/") && !lockedNames.has(name.toLowerCase())) : [];
-    const scripts = args.lifecycle_scripts === true;
-    proposal.manager = "composer";
+    const manifest = readPackageManifest(manager, manifestFile);
+    manager.validate(directory, manifest);
+    for (const name of manager.inputs(directory)) capture(relative(name));
+    const lock = manager.lockfile(directory);
+    const lockFile = lock ? capture(relative(lock)) : null;
+    const configFiles = manager.configFiles.filter((name) => fs.existsSync(capture(relative(name)))).map(relative);
+    if (manager.writesManifest) assertWritable(manifestFile, context);
+    if (lockFile) assertWritable(lockFile, context);
+    const dependencyDirs = manager.dependencyDirs(directory, manifest).map(relative);
+    for (const dir of dependencyDirs) localPath(cwd, dir, { dependencyDirectory: true });
+    const committable = [relative(manager.manifest), ...(lock ? [relative(lock)] : [])];
+    const probes = dependencyDirs.map((dir) => `${dir}/.posse-setup-probe`);
+    const ignored = new Set((await listIgnoredRepoPaths(cwd, [...committable, ...probes])).map((item) => item.path));
+    if (committable.some((file) => ignored.has(file))) throw new Error("Package manifests and lockfiles must be committable; fix repository ignore rules first.");
+    const exposed = dependencyDirs.find((dir, index) => !ignored.has(probes[index]));
+    if (exposed) throw new Error(`Ignore ${exposed}/ in repository policy before requesting installation.`);
+    const command = manager.command();
+    if (!command) throw new Error(`${manager.label} is unavailable on this machine. Install ${manager.toolchain}, restart Posse, then request dependency installation.`);
+    const scripts = manager.scripts === "always" || (manager.scripts === "flag" && args.lifecycle_scripts === true);
+    const options = { dir: directory, manifest, command, scripts, plugins: false };
+    proposal.manager = manager.name;
     proposal.directory = directory;
-    proposal.command = composer;
-    proposal.argv = [missing.length ? "update" : "install", "--working-dir", directory, "--no-interaction", "--no-progress",
-      ...(!scripts ? ["--no-scripts"] : []), "--no-plugins", ...(missing.length ? ["--with-dependencies", "--", ...missing] : [])];
-    proposal.env = { COMPOSER: manifestFile, COMPOSER_VENDOR_DIR: path.join(directory, "vendor"), COMPOSER_BIN_DIR: path.join(directory, "vendor", "bin"), COMPOSER_NO_DEV: "0" };
+    proposal.commands = packageCommands(manager, manager.install(options), options);
     proposal.manifest = manifest;
-    proposal.changes = [relative("composer.lock"), `${relative("vendor")}/`];
+    proposal.other_manifests = shownPackageInputs(manager, directory, relative);
+    proposal.config_files = configFiles;
+    proposal.changes = [...(lock ? [relative(lock)] : []), ...dependencyDirs.map((dir) => `${dir}/`)];
     proposal.lifecycle_scripts = scripts;
-  } else if (tool === "install_dependencies") {
-    if (!["npm", undefined].includes(args.manager)) throw new Error("Use manager npm or composer.");
-    const directory = localPath(cwd, args.path || ".");
-    if (!fs.statSync(directory).isDirectory()) throw new Error("Package path must be a directory.");
-    const relative = (name) => path.relative(cwd, path.join(directory, name)).replaceAll(path.sep, "/");
-    const manifestFile = capture(relative("package.json"));
-    const manifest = readManifest(manifestFile);
-    if (fs.statSync(manifestFile).size > 32 * 1024) throw new Error("Manifest approval is limited to 32 KB.");
-    if (manifest.workspaces) throw new Error("Workspace installs need a workspace-wide setup plan; this installer supports standalone npm packages.");
-    // npm may otherwise discover an enclosing workspace and mutate its lock.
-    for (let parent = path.dirname(directory); parent !== path.dirname(parent); parent = path.dirname(parent)) {
-      const file = path.join(parent, "package.json");
-      if (fs.existsSync(file) && readManifest(file).workspaces) throw new Error("Nested npm workspace installs are not supported.");
-    }
-    if (manifest.packageManager && !String(manifest.packageManager).startsWith("npm@")) throw new Error("This package declares a different package manager; npm installation is unavailable.");
-    for (const name of ["yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb", "npm-shrinkwrap.json"]) {
-      if (fs.existsSync(capture(relative(name)))) throw new Error(`Resolve the existing ${name} package-manager contract before using npm setup.`);
-    }
-    const lockFile = capture(relative("package-lock.json"));
-    if (fs.existsSync(capture(relative(".npmrc")))) proposal.npmrc = relative(".npmrc");
-    assertWritable(manifestFile, context);
-    assertWritable(lockFile, context);
-    localPath(cwd, relative("node_modules"), { dependencyDirectory: true });
-    const ignored = await listIgnoredRepoPaths(cwd, [relative("package.json"), relative("package-lock.json"), `${relative("node_modules")}/.posse-setup-probe`]);
-    if (ignored.some((item) => item.path === relative("package.json") || item.path === relative("package-lock.json"))) throw new Error("Package manifests and lockfiles must be committable; fix repository ignore rules first.");
-    if (!ignored.some((item) => item.path.endsWith("/.posse-setup-probe"))) throw new Error("Ignore node_modules/ in repository policy before requesting installation.");
-    const npm = findCommandOnPath("npm");
-    if (!npm) throw new Error("npm is unavailable on this machine. Install Node.js/npm, restart Posse, then request dependency installation.");
-    proposal.directory = directory;
-    proposal.command = npm;
-    proposal.argv = ["install", "--prefix", directory, "--global=false", "--workspaces=false", "--package-lock=true", "--include=dev", "--no-audit", "--no-fund", `--ignore-scripts=${args.lifecycle_scripts !== true}`];
-    proposal.manifest = manifest;
-    proposal.changes = [relative("package-lock.json"), `${relative("node_modules")}/`];
-    proposal.lifecycle_scripts = args.lifecycle_scripts === true;
   } else if (tool === "setup_database") {
     const database = capture(args.path);
     if (fs.existsSync(database)) throw new Error("Database already exists; this tool only creates new databases and never overwrites data.");
@@ -156,10 +134,11 @@ export async function prepareEnvironmentSetup(tool, args, context) {
 export function environmentSetupQuestion(proposal) {
   if (proposal.tool === "setup_environment") return planningEnvironmentQuestion(proposal);
   const operation = proposal.tool === "install_dependencies"
-    ? [`Command: ${JSON.stringify([proposal.command, ...proposal.argv])}`, `${proposal.manager === "composer" ? "Composer scripts" : "Lifecycle scripts"}: ${proposal.lifecycle_scripts ? "ENABLED — dependency and project scripts execute with your user permissions" : "disabled"}.`,
-      ...(proposal.manager === "composer" ? ["Composer plugins: disabled."] : []),
-      ...(proposal.npmrc ? [`npm configuration: ${proposal.npmrc} applies to this install (registry, authentication and git settings). Review it before approving; changing it invalidates this approval.`] : []),
-      `Manifest: ${JSON.stringify(proposal.manifest, null, 2)}`]
+    ? [...proposal.commands.map((entry) => `Command: ${JSON.stringify([entry.command, ...entry.argv])}${Object.keys(entry.env).length ? `\nEnvironment overrides: ${JSON.stringify(entry.env)}` : ""}`),
+      ...packageScriptsLine(PACKAGE_MANAGERS[proposal.manager], proposal.lifecycle_scripts),
+      ...proposal.config_files.map((file) => `${PACKAGE_MANAGERS[proposal.manager].label} configuration: ${file} applies to this install (registry, authentication and install settings). Review it before approving; changing it invalidates this approval.`),
+      `Manifest: ${typeof proposal.manifest === "string" ? proposal.manifest || "(empty)" : JSON.stringify(proposal.manifest, null, 2)}`,
+      ...Object.entries(proposal.other_manifests).map(([file, text]) => `Also installed from ${file}:\n${text || "(empty)"}`)]
     : ["Operation: create a new local SQLite database (no existing data is modified).", `Database: ${proposal.database}`, `SQL schema:\n${proposal.sql || "(empty database)"}`,
       ...(proposal.connection_file ? [`New connection module (review source; setup does not execute it):\n${JSON.stringify(proposal.connection_file, null, 2)}\nCommit this source with the application; configuration values stay local.`] : [])];
   return [`Approve this environment setup?`, `Reason: ${proposal.reason}`, `Worktree: ${proposal.cwd}`, ...operation, `Changes: ${proposal.changes.join(", ")}`, "Approval is for this request only. Rejection makes no setup changes."].join("\n\n");
@@ -179,9 +158,19 @@ export async function executeEnvironmentSetup(proposal, context, { signal, befor
     if (signal?.aborted) throw new Error("Environment setup canceled.");
     beforeExecute();
     if (proposal.tool === "install_dependencies") {
-      const spec = commandSpawnSpec(proposal.command, proposal.argv);
-      const result = await runCommand(spec.command, spec.args, { cwd: proposal.directory, ...(proposal.env ? { env: proposal.env } : {}), signal, windowsVerbatimArguments: spec.windowsVerbatimArguments, timeoutMs: ENVIRONMENT_SETUP_STEP_TIMEOUT_MS });
-      return { ...result, changes: proposal.changes, message: result.ok ? "Dependencies installed. Commit the scoped manifest and lockfile with the implementation." : "Installation did not complete; partial dependency/lockfile changes may remain. A retry requires new approval." };
+      // Commands run in order and stop at the first failure, inside one budget.
+      const results = [];
+      const deadline = Date.now() + ENVIRONMENT_SETUP_INSTALL_BUDGET_MS;
+      for (const entry of proposal.commands) {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) { results.push({ ok: false, status: "blocked", reason: "setup_budget_exhausted" }); break; }
+        const spec = commandSpawnSpec(entry.command, entry.argv);
+        const result = await runCommand(spec.command, spec.args, { cwd: proposal.directory, env: entry.env, signal, windowsVerbatimArguments: spec.windowsVerbatimArguments, timeoutMs: Math.min(ENVIRONMENT_SETUP_STEP_TIMEOUT_MS, remainingMs) });
+        results.push(result);
+        if (!result.ok) break;
+      }
+      const ok = results.length === proposal.commands.length && results.every((result) => result.ok);
+      return { ...results.at(-1), ok, ...(results.length > 1 ? { results } : {}), changes: proposal.changes, message: ok ? "Dependencies installed. Commit the scoped manifest and lockfile with the implementation." : "Installation did not complete; partial dependency/lockfile changes may remain. A retry requires new approval." };
     }
     fs.mkdirSync(path.dirname(proposal.database), { recursive: true });
     fs.closeSync(fs.openSync(proposal.database, "wx"));
