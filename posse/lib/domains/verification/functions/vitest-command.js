@@ -1,21 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { parseCommandArguments } from "../../../shared/scope/functions/test-command.js";
 import { javascriptTestRunner } from "../../../shared/tools/functions/toolkit/javascript-test-runner.js";
+import { nodeRunnerCommand } from "./node-runner-command.js";
 
 // npx is recognized as syntax only. Verification must never install a runner
 // or resolve a different version from the network.
 export function vitestCommandArgs(command) {
-  const words = parseCommandArguments(command);
-  const executable = words[0].replaceAll("\\", "/");
-  if (/^(?:npx|npx\.cmd|npx\.exe)$/i.test(executable)) {
-    words.shift();
-    if (words[0] === "--no-install") words.shift();
-    return words[0] === "vitest" ? words.slice(1) : null;
-  }
-  return /^(?:vitest(?:\.cmd)?|(?:\.\/)?node_modules\/\.bin\/vitest(?:\.cmd)?)$/i.test(executable)
-    ? words.slice(1) : null;
+  const invocation = nodeRunnerCommand(command);
+  return invocation?.runner === "vitest" ? invocation.args : null;
 }
 
 export function resolveLocalVitestCommand(cwd, validation) {

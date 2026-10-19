@@ -2,8 +2,13 @@
 import { IMAGE_GENERATION_TIMEOUT_MS } from "./artifact.js";
 import { SUB_AGENT_LIMITS } from "./sub-agent.js";
 import { FINAL_REVIEW_TIMEOUT_MS } from "./final-review.js";
+import { ENVIRONMENT_SETUP_LIVE_MAX_MS } from "./tools/environment-setup.js";
 
 export const MCP_SESSION_RELEASED_NOTIFICATION = "posse/sessionReleased";
+// Sent by an owner-hot child when a call parks on a human answer. The owner
+// frees its serial slot for other sessions; the answer arrives later under the
+// same request id.
+export const MCP_REQUEST_DEFERRED_NOTIFICATION = "posse/requestDeferred";
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
 
 export const POSSE_MCP_GATEWAY_SERVER_NAME = "posse-gateway";
@@ -40,6 +45,8 @@ export const MCP_TOOL_DEADLINE_CLASSES = Object.freeze({
   IMAGE_GENERATION: "image_generation",
   // Declared tests plus a reviewer agent call, run before the result returns.
   FINAL_REVIEW: "final_review",
+  // A human approval, then the approved installers, in one call.
+  ENVIRONMENT_SETUP: "environment_setup",
 });
 
 // A live scope request parks the tool call on a human answer. The queue's
@@ -56,6 +63,7 @@ export const MCP_TOOL_DEADLINE_MS = Object.freeze({
   // separately.
   [MCP_TOOL_DEADLINE_CLASSES.IMAGE_GENERATION]: 2 * IMAGE_GENERATION_TIMEOUT_MS,
   [MCP_TOOL_DEADLINE_CLASSES.FINAL_REVIEW]: FINAL_REVIEW_TIMEOUT_MS,
+  [MCP_TOOL_DEADLINE_CLASSES.ENVIRONMENT_SETUP]: ENVIRONMENT_SETUP_LIVE_MAX_MS,
 });
 
 export const MCP_TOOL_DEADLINE_CLASS_BY_TOOL = Object.freeze({
@@ -66,6 +74,9 @@ export const MCP_TOOL_DEADLINE_CLASS_BY_TOOL = Object.freeze({
   dispatch_agent: MCP_TOOL_DEADLINE_CLASSES.AGENT_DISPATCH,
   generate_image: MCP_TOOL_DEADLINE_CLASSES.IMAGE_GENERATION,
   final_review: MCP_TOOL_DEADLINE_CLASSES.FINAL_REVIEW,
+  setup_environment: MCP_TOOL_DEADLINE_CLASSES.ENVIRONMENT_SETUP,
+  install_dependencies: MCP_TOOL_DEADLINE_CLASSES.ENVIRONMENT_SETUP,
+  setup_database: MCP_TOOL_DEADLINE_CLASSES.ENVIRONMENT_SETUP,
 });
 
 // Headroom for owner scheduling and result transfer on top of the owner's own

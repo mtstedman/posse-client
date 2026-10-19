@@ -3,7 +3,7 @@ import {
   createJob, getJob, getLatestAttempt, getHumanGate, listJobsByWorkItem,
   runInTransaction, updateJobPayload, supersedeHumanGate, forceUpdateJobStatus,
 } from "../../queue/functions/index.js";
-import { ENVIRONMENT_SETUP_REVIEW_TYPE } from "../../../catalog/tools/environment-setup.js";
+import { ENVIRONMENT_SETUP_REVIEW_TYPE, ENVIRONMENT_SETUP_APPROVAL_TIMEOUT_MS, ENVIRONMENT_SETUP_LIVE_MAX_MS } from "../../../catalog/tools/environment-setup.js";
 import { environmentSetupQuestion, executeEnvironmentSetup, prepareEnvironmentSetup } from "./project-environment.js";
 
 function payload(job) { return JSON.parse(job?.payload_json || "{}"); }
@@ -18,17 +18,21 @@ function assertActive(context) {
 }
 
 export async function requestEnvironmentSetup(tool, args, context) {
-  const source = assertActive(context);
-  if (tool === "setup_environment" && source.job_type === "plan") {
-    updateJobPayload(source.id, JSON.stringify({ ...payload(source), _environment_setup_pending: true }));
-  }
+  assertActive(context);
   const proposal = await prepareEnvironmentSetup(tool, args, context);
   return runInTransaction(() => {
     const job = assertActive(context);
-    const pending = listJobsByWorkItem(job.work_item_id).find((entry) => entry.job_type === "human_input"
+    const open = listJobsByWorkItem(job.work_item_id).filter((entry) => entry.job_type === "human_input"
       && payload(entry).review_type === ENVIRONMENT_SETUP_REVIEW_TYPE
       && Number(payload(entry).original_job_id) === job.id
       && ["open", "resolving"].includes(getHumanGate(entry.id)?.gate_state));
+    // An earlier attempt's approval can never run; retire it instead of making
+    // the user answer a question nobody is waiting on.
+    for (const stale of open.filter((entry) => Number(payload(entry).attempt_id) !== Number(context.attemptId))) {
+      supersedeHumanGate(stale.id, "A newer attempt of the requesting job replaced this setup request.");
+      forceUpdateJobStatus(stale.id, "canceled");
+    }
+    const pending = open.find((entry) => Number(payload(entry).attempt_id) === Number(context.attemptId));
     if (pending) throw new Error(`Environment setup approval #${pending.id} is already pending. Wait for its result before requesting another installer.`);
     const gate = createJob({
       work_item_id: job.work_item_id, parent_job_id: job.id, job_type: "human_input",
@@ -41,6 +45,19 @@ export async function requestEnvironmentSetup(tool, args, context) {
         context: "An installer is waiting for your decision. This approval is separate from file-scope approval and cannot be granted automatically.",
       }),
     });
+    // Only a proposal the user can actually decide makes planning wait for
+    // setup; a rejected request leaves the caller free to revise or continue.
+    const requestedAt = Date.now();
+    updateJobPayload(job.id, JSON.stringify({
+      ...payload(job),
+      ...(tool === "setup_environment" && job.job_type === "plan" ? { _environment_setup_pending: true } : {}),
+      _environment_setup_live: {
+        approval_job_id: gate.id,
+        attempt_id: context.attemptId,
+        requested_at: new Date(requestedAt).toISOString(),
+        deadline_at: new Date(requestedAt + ENVIRONMENT_SETUP_LIVE_MAX_MS).toISOString(),
+      },
+    }));
     return { kind: ENVIRONMENT_SETUP_REVIEW_TYPE, request_id: `environment-${gate.id}`, approval_job_id: gate.id, digest: proposal.digest };
   });
 }
@@ -68,7 +85,7 @@ function requireHumanApproval(request, context) {
   return record;
 }
 
-export async function awaitEnvironmentSetupDecision({ request, context, signal, timeoutMs = 60 * 60 * 1000, pollMs = 200 }) {
+export async function awaitEnvironmentSetupDecision({ request, context, signal, timeoutMs = ENVIRONMENT_SETUP_APPROVAL_TIMEOUT_MS, pollMs = 200 }) {
   const deadline = Date.now() + timeoutMs;
   try {
     while (true) {
@@ -77,8 +94,11 @@ export async function awaitEnvironmentSetupDecision({ request, context, signal, 
       const { job, gate } = approvedRequest(request, context);
       if (gate?.gate_state === "resolved") {
         const resolution = JSON.parse(gate.resolution_payload_json || "{}");
-        if (gate.resolution_action !== "approve" || resolution.unattended === true || resolution.source !== "human") {
-          return { ok: false, approved: false, status: "rejected", message: "No installer ran. Explicit user approval is required." };
+        const explicit = resolution.source === "human" && resolution.unattended !== true;
+        if (gate.resolution_action !== "approve" || !explicit) {
+          return explicit
+            ? { ok: false, approved: false, status: "rejected", explicit: true, message: "The user rejected this setup; no installer ran. Plan without it, or propose a revised batch." }
+            : { ok: false, approved: false, status: "rejected", message: "No installer ran. Explicit user approval is required." };
         }
         return { ok: true, approved: true };
       }
@@ -123,4 +143,29 @@ export async function executeApprovedEnvironmentSetup(request, context, { execut
   } catch (error) {
     return { ok: false, status: "blocked", message: error.message };
   } finally { clearInterval(timer); }
+}
+
+function clearLiveEnvironmentSetup(jobId, approvalJobId, { declined = false } = {}) {
+  runInTransaction(() => {
+    const job = getJob(jobId);
+    const data = payload(job);
+    if (!job || Number(data._environment_setup_live?.approval_job_id) !== Number(approvalJobId)) return;
+    const { _environment_setup_live: _settled, ...rest } = data;
+    // The user's explicit rejection is an answer: the plan proceeds without
+    // that setup instead of asking again before development.
+    updateJobPayload(job.id, JSON.stringify(declined && rest._environment_setup_pending === true ? { ...rest, _environment_setup_pending: false } : rest));
+  });
+}
+
+// One live setup call: wait for the user's decision, then run the approved
+// request. The waiting job stops earning watchdog exemption when it settles.
+export async function runEnvironmentSetupRequest(request, context, { signal = null, approvalTimeoutMs = ENVIRONMENT_SETUP_APPROVAL_TIMEOUT_MS } = {}) {
+  let declined = false;
+  try {
+    const decision = await awaitEnvironmentSetupDecision({ request, context, signal, timeoutMs: approvalTimeoutMs });
+    declined = decision.explicit === true;
+    return decision.approved ? await executeApprovedEnvironmentSetup(request, context, { signal }) : decision;
+  } finally {
+    try { clearLiveEnvironmentSetup(context.jobId, request.approval_job_id, { declined }); } catch { /* the marker's deadline bounds it */ }
+  }
 }

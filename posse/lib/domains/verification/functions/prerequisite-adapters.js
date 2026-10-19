@@ -131,11 +131,20 @@ export function activateManagedPythonRuntimeFromPrimary(root, { env = process.en
   return { ok: true, primary: runtime.primary, runtime_dir: runtime.runtimeDir, python: runtime.python };
 }
 
+// A package runner or a project's installed bin resolves its tool from
+// node_modules, as a package manager script does.
+function nodeModulesBinCommand(command) {
+  const match = String(command || "").trim().match(/^(?:"([^"]+)"|'([^']+)'|([^\s]+))/);
+  return /(?:^|\/)node_modules\/\.bin\/[^/]+$/i.test((match?.[1] || match?.[2] || match?.[3] || "").replace(/\\/g, "/"));
+}
+
 function selectedEcosystems({ projectDir, command, receipt }) {
   const executable = executableName(command);
   const output = combinedOutput(receipt);
   const selected = new Set();
-  if (NODE_PACKAGE_MANAGER_EXECUTABLES.includes(executable) || ["node", "node.exe"].includes(executable)) {
+  if (NODE_PACKAGE_MANAGER_EXECUTABLES.includes(executable)
+    || ["node", "node.exe", "npx", "npx.cmd", "pnpx", "pnpx.cmd", "bunx"].includes(executable)
+    || nodeModulesBinCommand(command)) {
     selected.add("node");
   }
   if (/^(?:python(?:\d+(?:\.\d+)*)?|py|pytest(?:-\d+(?:\.\d+)*)?)(?:\.exe)?$/.test(executable)
@@ -246,6 +255,43 @@ function linkNodeModulesEntries(source, target) {
  * when the lockfiles match. The caller's repository-state guard still fails
  * closed if the repository does not ignore node_modules.
  */
+function readJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
+}
+
+function lockedVersions(dependencyDir, lock) {
+  if (path.basename(dependencyDir) === "vendor") {
+    return new Map([...(lock?.packages || []), ...(lock?.["packages-dev"] || [])].map((entry) => [entry?.name, entry?.version]));
+  }
+  return new Map(Object.entries(lock?.packages || {}).filter(([key]) => key.startsWith("node_modules/")).map(([key, entry]) => [key, entry?.version]));
+}
+
+/**
+ * Whether an installed node_modules or vendor directory holds exactly the
+ * packages a lockfile pins, from the record each package manager writes on
+ * install. Null when that record is missing or unreadable.
+ */
+export function installedDependenciesMatchLockfile(dependencyDir, lockfileText) {
+  let lock;
+  try { lock = JSON.parse(lockfileText); } catch { return null; }
+  const vendor = path.basename(dependencyDir) === "vendor";
+  const record = readJson(path.join(dependencyDir, vendor ? "composer/installed.json" : ".package-lock.json"));
+  // A v1 npm lockfile has no per-path package map to compare.
+  if (!record || (!vendor && (!lock?.packages || typeof lock.packages !== "object"))) return null;
+  const installed = vendor
+    ? new Map((Array.isArray(record) ? record : record.packages || []).map((entry) => [entry?.name, entry?.version]))
+    : lockedVersions(dependencyDir, record);
+  const wanted = lockedVersions(dependencyDir, lock);
+  // npm skips optional packages built for other platforms (esbuild, rollup)
+  // and leaves them out of its install record.
+  const optional = (name) => !vendor && Boolean(lock.packages[name]?.optional || lock.packages[name]?.devOptional);
+  for (const name of installed.keys()) if (!wanted.has(name)) return false;
+  for (const [name, version] of wanted) {
+    if (installed.has(name) ? installed.get(name) !== version : !optional(name)) return false;
+  }
+  return true;
+}
+
 export function linkNodeDependenciesFromPrimaryCheckout(root) {
   const detected = nodeDetection(root);
   if (!detected) return { ok: false, reason: "node_lockfile_missing" };
@@ -256,10 +302,19 @@ export function linkNodeDependenciesFromPrimaryCheckout(root) {
   if (!exists(primaryLock) || hashFile(primaryLock) !== hashFile(worktreeLock)) {
     return { ok: false, reason: "primary_lockfile_mismatch", primary };
   }
+  // The primary's install is synced only at run boot. A merge since then can
+  // change its lockfile without reinstalling; install here instead.
+  if (installedDependenciesMatchLockfile(path.join(primary, "node_modules"), fs.readFileSync(primaryLock, "utf8")) === false) {
+    return { ok: false, reason: "primary_install_stale", primary };
+  }
   const linked = [];
+  const realRoot = fs.realpathSync(root);
   for (const rel of installedNodeRoots(primary)) {
     const targetDir = rel === "." ? root : path.join(root, rel);
     if (!directoryExists(targetDir)) continue;
+    // A tracked symlinked package directory must not carry links outside this checkout.
+    const realTarget = path.relative(realRoot, fs.realpathSync(targetDir));
+    if (realTarget === ".." || realTarget.startsWith(`..${path.sep}`) || path.isAbsolute(realTarget)) continue;
     const target = path.join(targetDir, "node_modules");
     let present = false;
     try { fs.lstatSync(target); present = true; } catch { present = false; }
@@ -322,6 +377,9 @@ export function linkComposerVendorFromPrimaryCheckout(root) {
   }
   const source = path.join(primary, "vendor");
   if (!exists(path.join(source, "autoload.php"))) return { ok: false, reason: "primary_vendor_missing", primary };
+  if (installedDependenciesMatchLockfile(source, fs.readFileSync(primaryLock, "utf8")) === false) {
+    return { ok: false, reason: "primary_install_stale", primary };
+  }
   const target = path.join(root, "vendor");
   let present = false;
   try { fs.lstatSync(target); present = true; } catch { present = false; }

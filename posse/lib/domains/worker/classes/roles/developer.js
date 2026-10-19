@@ -156,6 +156,10 @@ export class DeveloperRole extends BaseRole {
     const needsImageGeneration = !!payload.needs_image_generation;
     const editableScope = uniqueScopeFiles(files);
     const typecheckContext = renderPreDevTypecheckContext(job._preDevTypecheck, uniqueScopeFiles(editableScope, createFiles));
+    const environmentNotices = Array.isArray(job._environmentSetupNotices) ? job._environmentSetupNotices : [];
+    const environmentContext = environmentNotices.length
+      ? ["ENVIRONMENT SETUP:", ...environmentNotices.map((notice) => `  ${notice}`), ""].join("\n")
+      : null;
     const deleteOnlyTask = editableScope.length === 0 && createFiles.length === 0 && createRoots.length === 0 && deleteFiles.length > 0;
     if (Array.isArray(packet.materialized_files) && packet.materialized_files.length > 0) {
       worker.emit(job.id, `${C.cyan}[scope]${C.reset} WI#${job.work_item_id} job #${job.id}: materialized ${packet.materialized_files.length} planned file(s) before provider handoff`);
@@ -224,6 +228,7 @@ export class DeveloperRole extends BaseRole {
       continuationContext ? continuationContext + "\n" : null,
       driftContext ? driftContext + "\n" : null,
       typecheckContext ? typecheckContext + "\n" : null,
+      environmentContext,
       nudgeContext || null,
       atlasHandoffBlock || null,
       withheldEvidenceNotice,

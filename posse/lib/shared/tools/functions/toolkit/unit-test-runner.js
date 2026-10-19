@@ -70,6 +70,10 @@ function nodeBootstrapFailure(invocation, output, root) {
       try {
         const missing = fileURLToPath(url);
         if (!path.extname(missing) && [".ts", ".tsx", ".js"].some((ext) => fs.existsSync(missing + ext))) return "test_loader_resolution_mismatch";
+        // NodeNext sources import `./x.js` for `x.ts`; Node's type stripping
+        // never maps the specifier to the TypeScript source.
+        const stem = missing.replace(/\.[cm]?js$/u, "");
+        if (stem !== missing && [".ts", ".tsx", ".mts", ".cts"].some((ext) => fs.existsSync(stem + ext))) return "test_loader_resolution_mismatch";
       } catch { /* malformed diagnostic */ }
     }
 
@@ -81,6 +85,8 @@ const PYTEST_SOURCE_RE = /^\s*(?:async\s+)?def\s+test\w*\s*\(|^\s*class\s+Test\w
 const PYTHON_MAIN_RE = /^if\s+__name__\s*==\s*["']__main__["']\s*:/m;
 const PHPUNIT_SOURCE_RE = /\bPHPUnit\\/;
 const PHP_CLASS_EXTENDS_RE = /\bclass(?:\s+\w+)?\s+extends\s+([\\\w]+)/gi;
+// Named class declarations with their modifiers; never `Foo::class` or `new class`.
+const PHP_CLASS_DECLARATION_RE = /(?<![:$\w])((?:(?:abstract|final|readonly)\s+)*)class\s+(?!extends\b|implements\b)\w+/gi;
 
 function readSourceHead(absolute) {
   let fd;
@@ -203,13 +209,19 @@ function phpRunner(root, relative, source, options = {}) {
       ? { runner: "phpunit", executable: "php", args: [phpunit, ...(config ? ["-c", config] : []), relative] }
       : { reason: "phpunit_unavailable" };
   };
-  if (PHPUNIT_SOURCE_RE.test(source)) {
-    return invocation();
-  }
   const code = phpSourceCode(source);
+  // PHPUnit runs a file only as a concrete test class named for it; a
+  // bootstrap, an abstract base TestCase or a trait beside the tests makes
+  // it exit 1.
+  const concreteClass = [...code.matchAll(PHP_CLASS_DECLARATION_RE)].some((match) => !/\babstract\b/i.test(match[1]));
+  const declared = () => Boolean(config && phpUnitConfigDeclares(root, config, relative));
+  if (PHPUNIT_SOURCE_RE.test(source)) {
+    return concreteClass && (path.posix.basename(relative).endsWith("Test.php") || declared())
+      ? invocation() : { reason: "php_runner_unidentified" };
+  }
   const bases = [...code.matchAll(PHP_CLASS_EXTENDS_RE)].map((match) => match[1]);
-  if (bases.length > 0 && config && phpUnitConfigDeclares(root, config, relative)) {
-    return invocation();
+  if (bases.length > 0 && declared()) {
+    return concreteClass ? invocation() : { reason: "php_runner_unidentified" };
   }
   if (bases.length > 0 && (bases.some((base) => /(?:TestCase|TestBase|BaseTest)$/i.test(base))
     || !hasTopLevelPhpAssertion(code))) return { reason: "php_runner_unidentified" };
@@ -386,6 +398,11 @@ function classifyCompletedRun(invocation, { code, stdout, stderr }, root) {
       return { outcome: "infrastructure_error", reason: "pytest_runner_error" };
     case "phpunit":
       if (code === 0) return zeroTests || /No tests executed/i.test(output) ? noTests : { outcome: "passed", reason: null };
+      // A file that holds no runnable test class (a helper a suite directory
+      // declares) ran no tests; it did not fail any.
+      if (code === 1 && !(counts?.total > 0) && /\bClass ["']?[\\\w]+["']? (?:cannot|could not) be found in\b|\bClass ["']?[\\\w]+["']? declared in [^\n]+ is abstract\b|\bNo tests executed\b/i.test(output)) {
+        return noTests;
+      }
       if (code === 1) return { outcome: "product_failed", reason: "tests_failed" };
       // Dying before PHPUnit prints its banner is bootstrap/autoload trouble.
       if (!/PHPUnit \d+\.\d+/.test(output)) return { outcome: "infrastructure_error", reason: "phpunit_bootstrap_failed" };

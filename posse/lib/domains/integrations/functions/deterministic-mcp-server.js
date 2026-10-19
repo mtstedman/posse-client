@@ -1,6 +1,6 @@
 import { ENVIRONMENT_SETUP_REVIEW_TYPE, ENVIRONMENT_SETUP_TOOLS } from "../../../catalog/tools/environment-setup.js";
 import { inspectEnvironment } from "../../system/functions/project-environment.js";
-import { requestEnvironmentSetup, awaitEnvironmentSetupDecision, executeApprovedEnvironmentSetup } from "../../system/functions/environment-approval.js";
+import { requestEnvironmentSetup, runEnvironmentSetupRequest } from "../../system/functions/environment-approval.js";
 import { COMPACT_RELATIONSHIP_PROJECTION, COMPACT_STRUCTURE_PROJECTION } from "../../../catalog/atlas-presentation.js";
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 import { applyPlannerSchemaDiet } from "../../../shared/tools/functions/planner-schema-diet.js";
@@ -23,7 +23,7 @@ import { viewImageWithinScope } from "../../../shared/tools/functions/toolkit/vi
 import { asMcpContentResult } from "../../../shared/tools/functions/mcp-content-result.js";
 import { resolveWebToolsEnabled } from "../../providers/functions/shared/tool-policy-settings.js";
 import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS, TOOL_CUSTOM_TOOLS } from "../../../catalog/custom-tools.js";
-import { MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
+import { MCP_REQUEST_DEFERRED_NOTIFICATION, MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { IMAGE_GENERATION_MAX_CALLS_PER_JOB } from "../../../catalog/artifact.js";
 import { TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 import { discoverUnitTestCapability } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
@@ -3736,6 +3736,9 @@ async function handleRequest(msg) {
       }
       const result = await handler(args);
       if (result?.[LIVE_SCOPE_WAIT] === true) {
+        // The owner serializes every session through this child; a call parked
+        // on a human answer must not hold other jobs' tools behind it.
+        if (ownerHotProcess && id != null) sendMessage({ jsonrpc: "2.0", method: MCP_REQUEST_DEFERRED_NOTIFICATION, params: { id } });
         scheduleDeferredLiveScopeTool({
           marker: result,
           id,
@@ -3873,12 +3876,7 @@ function sharedLiveScopeDecision(runtime, request, environment = null) {
     promise: null,
   };
   record.promise = (request?.kind === ENVIRONMENT_SETUP_REVIEW_TYPE
-    ? runWithObservationContext(runtime.observation, async () => {
-      const decision = await awaitEnvironmentSetupDecision({ request, context: environment, signal: controller.signal, timeoutMs: liveScopeWaitTimeoutMs() });
-      return decision.approved
-        ? executeApprovedEnvironmentSetup(request, environment, { signal: controller.signal })
-        : decision;
-    })
+    ? runWithObservationContext(runtime.observation, () => runEnvironmentSetupRequest(request, environment, { signal: controller.signal }))
     : awaitJobScopeExpansionDecision({
     jobId: runtime?.observation?.job_id,
     requestId: request?.request_id,

@@ -1,3 +1,4 @@
+import path from "path";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getAgentCalls, getArtifacts, getSetting } from "../../../queue/functions/index.js";
 import { getObservationsByJob } from "../../../observability/functions/observations.js";
@@ -11,6 +12,20 @@ export function shouldOverrideArtifactMissingFail(verdict, { taskMode = "code", 
   const reasons = Array.isArray(verdict.reasons) ? verdict.reasons : [];
   if (reasons.length === 0) return false;
   return reasons.every((reason) => /\b(missing|not found|no .*file|without the actual .*file|cannot be confirmed)\b/i.test(String(reason || "")));
+}
+
+// Expected deliverables with no file (or directory) of that name anywhere
+// under the output root (promote matches source files by name). A truncated
+// or depth-limited manifest cannot prove absence, so it reports nothing.
+export function missingArtifactDeliverables({ manifest = null, expectedFiles = [] } = {}) {
+  if (!manifest || manifest.truncated) return [];
+  if ((manifest.errors || []).some((error) => String(error).startsWith("max_depth"))) return [];
+  const names = new Set((Array.isArray(manifest.files) ? manifest.files : [])
+    .flatMap((file) => String(file.path || "").replace(/\\/g, "/").split("/").filter(Boolean)));
+  const missing = (Array.isArray(expectedFiles) ? expectedFiles : [])
+    .map((file) => path.posix.basename(String(file || "").replace(/\\/g, "/").trim()))
+    .filter((name) => name && !names.has(name));
+  return [...new Set(missing)];
 }
 
 export function shouldFastPassArtifactAssessment({

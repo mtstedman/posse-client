@@ -163,7 +163,7 @@ export function createGitReadiness({ projectDir, command, nonInteractive, ask })
         if (!result.ok) throw result.error;
         return result.stdout;
       };
-      await stagePosseRuntimeGitignoreForInitialCommit(projectDir, { git });
+      await stagePosseRuntimeGitignoreForInitialCommit(projectDir, { git, includeAppendedBlock: true });
       const commitResult = await tryGit([
         "commit",
         "--allow-empty",
@@ -256,7 +256,7 @@ export function createGitReadiness({ projectDir, command, nonInteractive, ask })
       // instead of prompting.
       console.log(`\n  ${C.yellow}Repo has no commits yet — creating an initial commit so worktrees can branch from HEAD.${C.reset}`);
       try {
-        await stagePosseRuntimeGitignoreForInitialCommit(projectDir, { git: runGit });
+        await stagePosseRuntimeGitignoreForInitialCommit(projectDir, { git: runGit, includeAppendedBlock: true });
         await runGit(["commit", "--allow-empty", "-m", "chore: initial commit (posse bootstrap)"]);
         console.log(`  ${C.green}Initial commit created.${C.reset}\n`);
       } catch (err) {

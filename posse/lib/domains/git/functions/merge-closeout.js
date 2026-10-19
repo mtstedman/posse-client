@@ -267,6 +267,8 @@ function indexMatchesHead(exec, cwd) {
   }
 }
 
+const LOCKFILE_NAMES = new Set(["package-lock.json", "npm-shrinkwrap.json", "composer.lock", "yarn.lock", "pnpm-lock.yaml", "bun.lock"]);
+
 // All-or-nothing: compute every file's resolution before writing any.
 function resolveConflictedFiles(exec, cwd, files) {
   const resolutions = [];
@@ -292,6 +294,12 @@ function resolveConflictedFiles(exec, cwd, files) {
       if (merged == null) return { resolved: false, reason: `merge_file_failed: ${relPath}` };
       const resolution = resolveOrderingConflictsDiff3(merged.merged, merged.labels);
       if (!resolution.safe) return { resolved: false, reason: `${resolution.reason}: ${relPath}` };
+      // Line ordering cannot merge structured files: two additions to one JSON
+      // object lose their separator, and a lockfile must match its manifest.
+      if (LOCKFILE_NAMES.has(path.basename(relPath))) return { resolved: false, reason: `lockfile_conflict: ${relPath}` };
+      if (/\.json$/iu.test(relPath)) {
+        try { JSON.parse(resolution.content); } catch { return { resolved: false, reason: `invalid_json: ${relPath}` }; }
+      }
       resolutions.push({ relPath, content: resolution.content });
       rules.push(...resolution.rules);
     }

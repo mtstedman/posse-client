@@ -5,6 +5,7 @@ import {
   MCP_CONTROL_METHODS,
   MCP_TERMINAL_HANDOFF_TOOLS,
   MCP_TOOL_DEADLINE_MS,
+  MCP_REQUEST_DEFERRED_NOTIFICATION,
   mcpToolDeadlineClass,
 } from "../../../catalog/mcp.js";
 import { stripPosseMcpGatewayPrefix } from "../../../domains/integrations/functions/mcp-gateway.js";
@@ -374,6 +375,7 @@ export class PersistentMcpSession {
         // owner processes its actual result instead of refunding active work
         // as a transport failure merely because the HTTP client disconnected.
         if (this._activeRequestId === internalId) return;
+        clearTimeout(this._pending.get(internalId)?.timer);
         this._pending.delete(internalId);
         reject(signal.reason || new Error("MCP request aborted"));
       };
@@ -393,8 +395,10 @@ export class PersistentMcpSession {
   }
 
   _startNextRequest() {
-    if (this._activeRequestId || this._pending.size === 0) return;
-    const [id, entry] = this._pending.entries().next().value;
+    if (this._activeRequestId) return;
+    const next = [...this._pending.entries()].find(([, queued]) => !queued.deferred);
+    if (!next) return;
+    const [id, entry] = next;
     this._activeRequestId = id;
     const tool = stripPosseMcpGatewayPrefix(entry.outbound?.params?.name);
     // A tool's registered deadline may extend the default watchdog, never
@@ -404,6 +408,13 @@ export class PersistentMcpSession {
       MCP_TOOL_DEADLINE_MS[mcpToolDeadlineClass(tool)] || 0,
     );
     const onTimeout = () => {
+      if (entry.deferred) {
+        // The child answered by parking this call, so it is not wedged; the
+        // caller's deadline simply passed.
+        this._pending.delete(id);
+        entry.reject(new Error(`MCP session request timed out after ${timeoutMs}ms`));
+        return;
+      }
       // Retain the active entry after rejecting its caller: a late response
       // releases the serial child and resets the watchdog. Queued requests
       // cannot create additional strikes against that same slow operation.
@@ -521,11 +532,15 @@ export class PersistentMcpSession {
   }
 
   _handleMessage(message) {
+    if (message?.method === MCP_REQUEST_DEFERRED_NOTIFICATION) {
+      this._deferActiveRequest(message.params?.id);
+      return;
+    }
     const id = String(message?.id ?? "");
     const entry = this._pending.get(id);
     if (!entry) return;
     this._pending.delete(id);
-    this._activeRequestId = null;
+    if (this._activeRequestId === id) this._activeRequestId = null;
     clearTimeout(entry.timer);
     // The child answered — it is alive and responsive, so clear any accumulated
     // timeout strikes and crash-loop history.
@@ -533,6 +548,19 @@ export class PersistentMcpSession {
     this._crashesSinceHealthy = 0;
     const restored = { ...message, id: entry.originalId };
     entry.resolve(restored);
+    this._startNextRequest();
+  }
+
+  // The child parked the active call on a human answer and keeps serving other
+  // sessions meanwhile. Free the serial slot; the parked call keeps its own
+  // deadline and resolves when its response arrives.
+  _deferActiveRequest(requestId) {
+    const id = String(requestId ?? "");
+    const entry = id && this._activeRequestId === id ? this._pending.get(id) : null;
+    if (!entry) return;
+    entry.deferred = true;
+    this._activeRequestId = null;
+    this._consecutiveTimeouts = 0;
     this._startNextRequest();
   }
 

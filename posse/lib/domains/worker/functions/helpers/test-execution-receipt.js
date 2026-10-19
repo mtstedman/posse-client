@@ -24,7 +24,7 @@ import { withBaselineCheckout } from "../../../verification/functions/baseline-c
 import fs from "fs";
 import path from "path";
 import { getArtifact, getArtifacts, storeArtifact, updateJobPayload } from "../../../queue/functions/index.js";
-import { pruneTestHandoff, testCommandCapability } from "../../../verification/functions/test-capability.js";
+import { linkPrimaryTestDependencies, pruneTestHandoff, testCommandCapability } from "../../../verification/functions/test-capability.js";
 import { getRecentArtifactsByMimeType } from "../../../queue/functions/artifacts.js";
 import { knownRedCommandsFromReceipts } from "./known-red-test-history.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
@@ -924,7 +924,9 @@ function pruneJobTests(job, payload, cwd) {
   const withBaseline = baseline?.status === "passed" && baseline.commit_hash
     && baseline.commit_hash !== payload._test_capability_base_commit
     ? { ...payload, _test_capability_base_commit: baseline.commit_hash } : payload;
-  const pruned = pruneTestHandoff(withBaseline, cwd, { jobId: job?.id });
+  // The persisted prune links the primary checkout's lock-matched install
+  // first, so its descendants do not inherit a runner the link would supply.
+  const pruned = pruneTestHandoff(withBaseline, cwd, { jobId: job?.id, linkDependencies: linkPrimaryTestDependencies });
   if (pruned !== payload) {
     // Persist before dev/assessment handoff so fix and replan descendants do
     // not inherit the discarded command. Historical receipts stay intact.

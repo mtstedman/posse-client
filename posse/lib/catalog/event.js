@@ -168,6 +168,7 @@ export const EVENT_TYPES = Object.freeze({
   // ── job lifecycle & assessment ──────────────────────────────────────────
   JOB_ARTIFACT_EXISTING_OUTPUT_REUSED: "job.artifact_existing_output_reused",
   JOB_ARTIFACT_FAST_PASS: "job.artifact_fast_pass",
+  JOB_ARTIFACT_MISSING_DELIVERABLES: "job.artifact_missing_deliverables",
   JOB_ARTIFACT_REUSED: "job.artifact_reused",
   JOB_ARTIFACT_SCOPE_WARNING: "job.artifact_scope_warning",
   JOB_ASSESSED: "job.assessed",

@@ -42,6 +42,7 @@ import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
 import { DAEMON_HOST_RETIRED_MESSAGE } from "../../../../shared/tools/classes/daemon/Daemon.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { WAITING_LANE_ATLAS_PURPOSE_VALUES } from "../../../../catalog/waiting-lane.js";
+import { TERMINAL_WORK_ITEM_STATUSES } from "../../../../catalog/work-item.js";
 import { ATLAS_EVENTS } from "../../../atlas/functions/v2/contracts/events.js";
 import {
   isAtlasMainGenerationPurpose,
@@ -249,7 +250,7 @@ export function atlasWarmGatePriority(purpose) {
   return (purpose === "wi" || purpose === "wi-cleanup" || WAITING_LANE_PURPOSE_SET.has(purpose)) ? 1 : 0;
 }
 
-function atlasRuntimeDisabledReasonForRepo(repoRoot) {
+export function atlasRuntimeDisabledReasonForRepo(repoRoot) {
   return getAtlasRuntimeDisabledReason()
     || getAtlasRuntimeDisabledReason(repoRoot)
     || getAtlasRuntimeDisabledReason(path.basename(String(repoRoot || "")))
@@ -299,6 +300,15 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
       worker.emit(job.id, `${C.dim}[atlas] canceled obsolete ${purpose} warm for merged WI#${job.work_item_id}${C.reset}`);
       return;
     }
+    // A commit refresh reads its WI checkout. Terminal cleanup removes that
+    // worktree, after which the refresh can never verify its source.
+    const sourceWorktree = typeof payload.worktree_path === "string" ? payload.worktree_path.trim() : "";
+    if (purpose === "wi" && sourceWorktree && TERMINAL_WORK_ITEM_STATUSES.includes(workItem?.status)
+      && !fs.existsSync(sourceWorktree)) {
+      worker._releaseLease(job, leaseToken, "canceled");
+      worker.emit(job.id, `${C.dim}[atlas] canceled obsolete ${purpose} warm for ${workItem.status} WI#${job.work_item_id}: its worktree was removed${C.reset}`);
+      return;
+    }
     const repoRoot = resolveAtlasRepoRoot(worker);
     const clamped = clampPaths(payload.paths);
     // A truncated path list must not silently narrow reindex coverage: for
@@ -318,12 +328,26 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
     // jobs.attempt_count, but the next attempt number still came from the
     // attempt table, so disabled warms could exceed maxAttempts=1 on paper.
     if (disabledReason) {
+      // Parked warms stay queued for the next boot, but jobs fenced on one
+      // must not wait for it: the marker lets them lease, and the worker's
+      // evidence gate binds them without ATLAS.
+      if (payload._atlas_parked_until_boot !== true) {
+        job.payload_json = JSON.stringify({ ...(parseJobPayload(job) || {}), _atlas_parked_until_boot: true });
+        updateJobPayload(job.id, job.payload_json);
+      }
       const released = worker._releaseLease(job, leaseToken, "queued", {
         readyAt: new Date(Date.now() + ATLAS_WARM_DISABLED_REQUEUE_DELAY_MS).toISOString(),
       });
       if (released && job.work_item_id) refreshWorkItemStatus(job.work_item_id);
       worker.emit(job.id, `${C.dim}[atlas] warm (${purpose}) deferred: ATLAS disabled for this run (${disabledReason}) — left queued for next boot${C.reset}`);
       return;
+    }
+    if (payload._atlas_parked_until_boot === true) {
+      const unparked = { ...(parseJobPayload(job) || {}) };
+      delete unparked._atlas_parked_until_boot;
+      job.payload_json = JSON.stringify(unparked);
+      updateJobPayload(job.id, job.payload_json);
+      delete payload._atlas_parked_until_boot;
     }
 
     worker._throwIfKilled?.(job.id);
@@ -975,7 +999,7 @@ function emitAtlasWarmProgress(worker, jobId, event = {}) {
  * @param {any} worker
  * @returns {string}
  */
-function resolveAtlasRepoRoot(worker) {
+export function resolveAtlasRepoRoot(worker) {
   if (worker && typeof worker.repoRoot === "string" && worker.repoRoot) return worker.repoRoot;
   if (worker && typeof worker.projectDir === "string" && worker.projectDir) return worker.projectDir;
   if (worker && typeof worker?.context?.repoRoot === "string") return worker.context.repoRoot;

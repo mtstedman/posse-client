@@ -1129,6 +1129,7 @@ Request explicit user approval to create a new local SQLite database at an ignor
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
+| `connection_file` | `object` | Optional |  | Optional new application connection module in the project's language. Supply complete minimal source that reads configuration through environment variables or the framework's config loader. Include its driver/loader dependencies in the approved installation. Contains no credentials, copied .env values, machine-specific paths, configuration logging, migrations or setup commands. Reuse an existing connector by omitting this field. Source is reviewed and written, not executed by setup. |
 | `path` | `string` | Required | min length 1 | New local SQLite file, e.g. data/app.sqlite. Must be ignored by Git and outside Posse internals. |
 | `reason` | `string` | Required | min length 1; max length 1000 |  |
 | `schema_path` | `string` | Optional |  | Optional repo-relative SQL file containing CREATE TABLE/INDEX statements. No external database access or destructive migrations. |

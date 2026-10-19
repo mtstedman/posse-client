@@ -86,8 +86,10 @@ export function imageProviderBlockDisposition({ job, payload, attemptId, attempt
     .filter((entry) => Number(entry?.attempt_number || 0) > generation)
     .length;
   // Requeued blocks never reached a gate, so they do not count toward the
-  // blocked-recovery gate's dead letter.
-  const requeuedBlocks = requeuedAttempts.filter((entry) => entry?.status === "blocked").length;
+  // blocked-recovery gate's dead letter, which counts this generation only.
+  const requeuedBlocks = requeuedAttempts
+    .filter((entry) => entry?.status === "blocked" && Number(entry?.attempt_number || 0) > generation)
+    .length;
   const readiness = unreadyImageProviderReadiness(attemptId, { db });
   const attemptLeft = Number(job?.attempt_count || 0) < Number(job?.max_attempts || 0);
   return {

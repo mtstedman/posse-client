@@ -12,18 +12,22 @@ import { readProjectDbConfig, writeProjectDbConfig } from "../../../shared/tools
 import { splitSqlStatements } from "../../../shared/tools/functions/toolkit/project-db/permissions.js";
 import { PROJECT_DB_PERMISSIONS } from "../../../catalog/project-db.js";
 import { DATABASE_ENV_KEYS } from "../../../catalog/tools/environment-setup.js";
+import { prepareDatabaseConnectionFile } from "./database-connection-file.js";
 
 function envValues(database) {
   return { DATABASE_URL: pathToFileURL(database).href, DB_DATABASE: database.replaceAll(path.sep, "/"), DB_CONNECTION: "sqlite" };
 }
 
-function envAdditions(file, values) {
+// keepExisting: a development worktree that already has database settings
+// keeps them as they are, including ones a developer removed on purpose.
+function envAdditions(file, values, { keepExisting = false } = {}) {
   const content = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
   if (Buffer.byteLength(content) > 32 * 1024) throw new Error("Database environment files must be smaller than 32 KB.");
   const present = new Set();
   for (const line of content.split(/\r?\n/u)) {
     const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/u);
     if (!match || !DATABASE_ENV_KEYS.includes(match[1])) continue;
+    if (keepExisting) { present.add(match[1]); continue; }
     const raw = match[2];
     let value;
     try { value = raw.startsWith('"') && raw.endsWith('"') ? JSON.parse(raw) : raw.startsWith("'") && raw.endsWith("'") ? raw.slice(1, -1) : raw; }
@@ -31,6 +35,7 @@ function envAdditions(file, values) {
     if (present.has(match[1]) || value !== values[match[1]]) throw new Error(`Existing ${match[1]} conflicts with the proposed local database. Resolve it before requesting setup.`);
     present.add(match[1]);
   }
+  if (keepExisting && present.size) return "";
   return Object.entries(values).filter(([key]) => !present.has(key)).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join("\n");
 }
 
@@ -77,6 +82,10 @@ export async function preparePlanningDatabase(args, cwd, capture, writes) {
     const probe = new Database(":memory:");
     try { if (database.sql.trim()) probe.exec(database.sql); } finally { probe.close(); }
   }
+  database.connection_file = await prepareDatabaseConnectionFile(args.connection_file, cwd, capture, {
+    reservedPaths: [database.path, ".gitignore", ...Object.keys(writes), ...(args.schema_path ? [args.schema_path] : [])],
+  });
+  if (database.connection_file) writes[database.connection_file.path] = database.connection_file.content;
   return database;
 }
 
@@ -86,6 +95,7 @@ export function planningDatabaseQuestion(database) {
     `Create SQLite database: ${database.file}. All development worktrees use this same local database. Existing data is never overwritten.`,
     `Initialize schema: ${database.sql || "empty database; developers create the application schema"}`,
     `Register with Posse database tools. Approved permissions: ${database.permissions.join(", ")}. Current agent tokens do not gain new permissions; subsequent jobs receive their permitted database tools.`,
+    ...(database.connection_file ? [`Create and commit connection module: ${database.connection_file.path}. The complete source is included in the proposed writes for review; setup does not execute it.`] : []),
     `Add these generated database variables to ignored environment files (preserving other values): ${JSON.stringify(database.env.map(({ path: envPath, additions }) => ({ path: envPath, additions })), null, 2)}. Commit database.env.example files only; never commit .env or database contents.`,
   ];
 }
@@ -105,7 +115,9 @@ export async function executePlanningDatabase(database, cwd, signal) {
   fs.closeSync(fs.openSync(file, "wx", 0o600));
   const db = new Database(file);
   try {
-    db.pragma("user_version = 1");
+    // Materialize the SQLite header without claiming an application schema
+    // version; migration runners keyed on user_version must start from zero.
+    db.pragma("user_version = 0");
     if (database.sql.trim()) db.transaction(() => db.exec(database.sql))();
   } finally { db.close(); }
   const env = [];
@@ -117,29 +129,38 @@ export async function executePlanningDatabase(database, cwd, signal) {
     env.push({ path: entry.path });
   }
   const config = writeProjectDbConfig({ enabled: true, dbType: "sqlite", database: file, host: null, port: null, username: null, password: null, permissions: database.permissions }, { projectDir: cwd });
-  return { path: database.path, file, env, config };
+  return { path: database.path, file, env, config, ...(database.connection_file ? { connection_file: database.connection_file.path } : {}) };
 }
 
+// Later operator changes to the database's Posse registration or to the
+// primary checkout's .env are the operator's to make.
 export function assertPlanningDatabaseReady(database, cwd) {
   if (!database) return;
   if (!fs.existsSync(localPath(cwd, database.path))) throw new Error("The approved local database is missing.");
-  if (JSON.stringify(readProjectDbConfig({ projectDir: cwd })) !== JSON.stringify(database.config)) throw new Error("The approved Posse database registration changed.");
-  for (const entry of database.env) {
-    if (envAdditions(localPath(cwd, entry.path, { environmentFile: true }), envValues(database.file))) throw new Error("The approved database environment is incomplete.");
-  }
 }
 
+// Development worktrees get the generated settings once and own their .env
+// afterwards. A missing database or an unignored .env is reported, not fatal:
+// development continues, and nothing machine-specific is written where Git
+// could commit it.
 export async function prepareDevelopmentDatabase(database, source, cwd) {
-  if (!database) return;
-  assertPlanningDatabaseReady(database, source);
+  if (!database) return [];
+  if (!fs.existsSync(localPath(source, database.path))) {
+    return [`The approved local database ${database.path} is missing from the primary checkout, so database settings were not added to this worktree.`];
+  }
+  const notices = [];
   const values = envValues(database.file);
   for (const entry of database.env) {
     const file = localPath(cwd, entry.path, { environmentFile: true });
-    if (!(await listIgnoredRepoPaths(cwd, [entry.path])).length) throw new Error("Development .env files must be ignored.");
-    const additions = envAdditions(file, values);
+    if (!(await listIgnoredRepoPaths(cwd, [entry.path])).length) {
+      notices.push(`${entry.path} is not ignored in this checkout, so database settings were not written to it.`);
+      continue;
+    }
+    const additions = envAdditions(file, values, { keepExisting: true });
     if (!additions) continue;
     const existing = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.appendFileSync(file, `${existing && !existing.endsWith("\n") ? "\n" : ""}${additions}\n`, { mode: 0o600 });
   }
+  return notices;
 }

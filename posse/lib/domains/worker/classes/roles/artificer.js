@@ -9,13 +9,14 @@ import path from "path";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { normalizeDisplaySlashes } from "../../../../shared/format/functions/display-paths.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
-import { getArtifactsByWorkItem, getAttempts, getIntSetting, getJob, getWorkItem, storeArtifact } from "../../../queue/functions/index.js";
+import { getArtifactsByWorkItem, getAttempts, getIntSetting, getJob, getWorkItem, logEvent, storeArtifact } from "../../../queue/functions/index.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
+import { EVENT_ACTORS, EVENT_TYPES } from "../../../../catalog/event.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 import { buildPromptAsync, buildHandoffPacket, extractResearcherFiles as defaultExtractResearcherFiles, handoff, packetToDynamicContextString, parseMissingContext } from "../../../handoff/functions/index.js";
 import { getAvailableProviders, getProviderName } from "../../../providers/functions/provider.js";
-import { artifactsDir, workspaceDir, getConfiguredImageModel, wiScopeId } from "../../../artifacts/functions/index.js";
+import { artifactsDir, workspaceDir, getConfiguredImageModel, getResourcesDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { imageModelNativeFormats } from "../../../providers/functions/model-catalog.js";
 import { COMMON_WEB_ROOTS, WEB_IMAGE_DESTINATION_PHRASES } from "../../../../catalog/skill-inference.js";
 import { BaseRole, projectPromptPacketForProvider } from "../BaseRole.js";
@@ -61,6 +62,21 @@ function isWithinRoot(root, target) {
   const rootCmp = normalizePathForCompare(root);
   const targetCmp = normalizePathForCompare(target);
   return targetCmp === rootCmp || targetCmp.startsWith(rootCmp + path.sep);
+}
+
+// The deepest directory containing every root, never above the project.
+function commonAncestorDir(projectDir, roots) {
+  const project = path.resolve(projectDir);
+  let common = null;
+  for (const root of roots) {
+    const target = path.resolve(root);
+    if (common == null) {
+      common = target;
+      continue;
+    }
+    while (!isWithinRoot(common, target) && path.dirname(common) !== common) common = path.dirname(common);
+  }
+  return common && isWithinRoot(project, common) ? common : project;
 }
 
 function resolveContainedArtifactRoot(projectDir, value, label) {
@@ -119,17 +135,40 @@ export class ArtificerRole extends BaseRole {
       emit(worker, job.id, `${C.yellow}[artificer]${C.reset} WI#${job.work_item_id} job #${job.id}: missing output_root - defaulting to ${outputRoot}`);
     }
 
-    const createRoots = resolveContainedArtifactRoots(projectDir, payload.create_roots || [], "create_roots");
+    let createRoots = resolveContainedArtifactRoots(projectDir, payload.create_roots || [], "create_roots");
     const inputRoots = resolveContainedArtifactRoots(projectDir, payload.input_roots || [], "input_roots");
     // A task may place its output in a subdirectory while holding creation
     // scope over its WI artifacts. Native dispatch anchors writable paths to
     // cwd, so use the WI root without broadening the declared write roots.
     const wiArtifactRoot = artifactsDir(wiScopeId(job.work_item_id), projectDir);
     const usesWiArtifactScope = isWithinRoot(wiArtifactRoot, resolvedOutputRoot);
-    if (usesWiArtifactScope && createRoots.some((root) => !isWithinRoot(wiArtifactRoot, root) && !isWithinRoot(workspaceDir(wiScopeId(job.work_item_id), projectDir), root))) {
-      throw new Error("create_roots must stay inside this work item's artifact scope");
+    if (usesWiArtifactScope) {
+      const wiWorkspaceRoot = workspaceDir(wiScopeId(job.work_item_id), projectDir);
+      const outOfScope = createRoots.filter((root) => !isWithinRoot(wiArtifactRoot, root) && !isWithinRoot(wiWorkspaceRoot, root));
+      if (outOfScope.some((root) => isWithinRoot(getResourcesDir(projectDir), root))) {
+        throw new Error("create_roots must stay inside this work item's artifact scope");
+      }
+      // A repository root here belongs to the promote that installs this
+      // output; the artificer writes only into its WI artifact scope.
+      if (outOfScope.length > 0) {
+        createRoots = createRoots.filter((root) => !outOfScope.includes(root));
+        const warning = `Dropped repository create_roots outside this work item's artifact scope (promote installs them): ${outOfScope.join(", ")}`;
+        emit(worker, job.id, `${C.yellow}[artificer]${C.reset} WI#${job.work_item_id} job #${job.id}: ${warning}`);
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          attempt_id: ctx.attemptId ?? null,
+          event_type: EVENT_TYPES.JOB_ARTIFACT_SCOPE_WARNING,
+          actor_type: EVENT_ACTORS.WORKER,
+          message: warning,
+          event_json: JSON.stringify({ dropped_create_roots: outOfScope }),
+        });
+      }
     }
-    const artCwd = usesWiArtifactScope ? wiArtifactRoot : resolvedOutputRoot;
+    // Native dispatch rejects a create root outside cwd, so cwd is the
+    // deepest directory holding the output root and every create root;
+    // writes stay confined to those roots.
+    const artCwd = commonAncestorDir(projectDir, [usesWiArtifactScope ? wiArtifactRoot : resolvedOutputRoot, ...createRoots]);
     // One read-only root on the work item's checkout, so existing art, styles
     // and markup can be matched; writes stay confined to the artifact roots.
     const checkoutReadRoot = normalizeDisplaySlashes(workItemCheckoutReadRoot(projectDir, job.work_item_id));

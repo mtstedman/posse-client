@@ -722,6 +722,40 @@ export function normalizePromoteMappings(task, artifactDirAbs, { projectDir = nu
   };
 }
 
+/**
+ * Exact repo creation files are the complete authority granted to a
+ * code-writing dev task. Planner models often redundantly include the files'
+ * parent directories in create_roots; retaining those roots makes the
+ * downstream materializer reject an otherwise precise plan. Strip only the
+ * roots that cover a declared file, in place, and return them.
+ */
+export function stripRedundantCodeCreateRoots(task, { jobType = task?.job_type, taskMode = task?.task_mode } = {}) {
+  if (String(jobType || "dev").trim().toLowerCase() !== "dev") return [];
+  if (String(taskMode || "code").trim().toLowerCase() !== "code") return [];
+  if (!Array.isArray(task.files_to_create) || task.files_to_create.length === 0) return [];
+  if (!Array.isArray(task.create_roots) || task.create_roots.length === 0) return [];
+  const normalizeCreateScopePath = (value) => String(value || "")
+    .replace(/\\/g, "/")
+    .replace(/\/+$/, "")
+    .replace(/^\.\/+/, "");
+  const exactCreateFiles = task.files_to_create
+    .map(normalizeCreateScopePath)
+    .filter(Boolean);
+  const redundantRoots = [];
+  task.create_roots = task.create_roots.filter((value) => {
+    const root = normalizeCreateScopePath(value);
+    const isWildcardRoot = root === "." || root === "*";
+    const isAbsoluteRoot = /^(?:\/|[a-z]:\/)/i.test(root);
+    const coversExactFile = !isAbsoluteRoot && exactCreateFiles.some((file) => (
+      isWildcardRoot || file === root || file.startsWith(`${root}/`)
+    ));
+    if (!coversExactFile) return true;
+    redundantRoots.push(value);
+    return false;
+  });
+  return redundantRoots;
+}
+
 export function validatePlannedTask(task, index, taskCount) {
   const errors = [];
   if (!task || typeof task !== "object") {

@@ -20,8 +20,10 @@ import { isAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
 import {
   buildPosseRuntimeIgnoreEntries,
   filterPosseRuntimePaths,
+  hasPosseRuntimeIgnoreBlock,
   isPosseRuntimePath,
   isPosseRuntimeOnlyGitignoreContent,
+  RETIRED_RUNTIME_DIRECTORY_RULES,
 } from "../../runtime/functions/ignore.js";
 import { GIT_OPERATION_TIMEOUT_MS, isGitCommandFailure } from "./utils.js";
 import {
@@ -361,6 +363,27 @@ export function createStartupDirtyGuardHelpers(context) {
     return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : normalized;
   }
 
+  // Only git reporting that HEAD does not resolve means an unborn repository;
+  // a probe that could not run keeps the rules for a repository with history.
+  function repositoryHasNoCommits(cwd) {
+    try {
+      gitExec(["rev-parse", "--verify", "--quiet", "HEAD"], cwd, { timeoutMs: 5000 });
+      return false;
+    } catch (err) {
+      return isGitCommandFailure(err);
+    }
+  }
+
+  async function repositoryHasNoCommitsAsync(cwd, { signal = null } = {}) {
+    try {
+      await gitExecAsync(["rev-parse", "--verify", "--quiet", "HEAD"], cwd, { timeoutMs: 5000, signal });
+      return false;
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      return isGitCommandFailure(err);
+    }
+  }
+
   function isRuntimePorcelainLine(line, cwd = projectDir) {
     const filePath = projectRelativePorcelainPath(porcelainPath(line));
     if (isPosseRuntimePath(filePath)) {
@@ -376,7 +399,18 @@ export function createStartupDirtyGuardHelpers(context) {
     if (code.startsWith("??")) {
       try {
         const content = fs.readFileSync(path.join(cwd, ".gitignore"), "utf-8");
-        return isPosseRuntimeOnlyGitignoreContent(cwd, content);
+        return isPosseRuntimeOnlyGitignoreContent(cwd, content)
+          || (hasPosseRuntimeIgnoreBlock(content) && repositoryHasNoCommits(cwd));
+      } catch {
+        return false;
+      }
+    }
+    // Before the first commit Posse stages its own .gitignore, and the
+    // bootstrap commit records any .gitignore carrying Posse's block. With no
+    // history to protect (and stash impossible), it is not user work to guard.
+    if (code.startsWith("A") && repositoryHasNoCommits(cwd)) {
+      try {
+        return hasPosseRuntimeIgnoreBlock(fs.readFileSync(path.join(cwd, ".gitignore"), "utf-8"));
       } catch {
         return false;
       }
@@ -405,9 +439,17 @@ export function createStartupDirtyGuardHelpers(context) {
       try {
         const content = await fs.promises.readFile(path.join(cwd, ".gitignore"), "utf-8");
         throwIfAborted(signal);
-        return isPosseRuntimeOnlyGitignoreContent(cwd, content);
+        return isPosseRuntimeOnlyGitignoreContent(cwd, content)
+          || (hasPosseRuntimeIgnoreBlock(content) && await repositoryHasNoCommitsAsync(cwd, { signal }));
       } catch (err) {
         if (isAbortError(err)) throw err;
+        return false;
+      }
+    }
+    if (code.startsWith("A") && await repositoryHasNoCommitsAsync(cwd, { signal })) {
+      try {
+        return hasPosseRuntimeIgnoreBlock(await fs.promises.readFile(path.join(cwd, ".gitignore"), "utf-8"));
+      } catch {
         return false;
       }
     }
@@ -418,7 +460,8 @@ export function createStartupDirtyGuardHelpers(context) {
   }
 
   function runtimeGitignorePatterns(cwd) {
-    return new Set(buildPosseRuntimeIgnoreEntries(cwd, { anchorDir: cwd }));
+    // Blocks an older Posse wrote may still carry the retired root rules.
+    return new Set([...buildPosseRuntimeIgnoreEntries(cwd, { anchorDir: cwd }), ...RETIRED_RUNTIME_DIRECTORY_RULES]);
   }
 
   function gitignoreDiffIsRuntimeOnly(cwd) {

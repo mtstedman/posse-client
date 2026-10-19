@@ -239,6 +239,31 @@ export async function buildMergeResolutionEvidenceAsync({
   };
 }
 
+/** Which of `paths` hold a non-empty blob in `commit`'s tree. Read failures
+ * yield an empty list, so callers fall back to their stricter check. */
+export async function listNonEmptyFilesAtCommitAsync({ cwd, commit, paths = [] } = {}) {
+  const rev = String(commit || "").trim();
+  if (!cwd || !rev || paths.length === 0) return [];
+  let raw = "";
+  try {
+    raw = String(await gitExecAsync(
+      ["--literal-pathspecs", "ls-tree", "-r", "-l", "-z", rev, "--", ...paths],
+      cwd,
+      { trim: false },
+    ) || "");
+  } catch {
+    return [];
+  }
+  const files = [];
+  for (const entry of raw.split("\0")) {
+    const tab = entry.indexOf("\t");
+    if (tab < 0) continue;
+    const [, type, , size] = entry.slice(0, tab).trim().split(/\s+/);
+    if (type === "blob" && Number(size) > 0) files.push(entry.slice(tab + 1).replace(/\\/g, "/"));
+  }
+  return files;
+}
+
 /** Prior output counts only while its recorded commit is on this checkout and
  * the path still has that commit's content. Never credit an entire WI range:
  * that would include sibling work and changes imported from the target. */

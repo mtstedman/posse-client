@@ -415,9 +415,11 @@ export async function dispatchProvider(request, {
       }
       if (!terminal) {
         const diagnostic = stderr.toString("utf8").trim();
+        // `started: false` means the dispatcher refused the start frame Posse
+        // built (it validates before dispatch.started): no model turn ran.
         finishReject(protocolError(
           `Provider dispatch exited without a terminal event${diagnostic ? `: ${diagnostic}` : ""}`,
-          { code, signal: closeSignal },
+          { code, signal: closeSignal, started: sawStarted },
         ));
         return;
       }

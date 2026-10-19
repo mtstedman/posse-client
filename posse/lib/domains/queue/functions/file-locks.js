@@ -9,6 +9,7 @@ import {
 } from "../../../catalog/work-item.js";
 import { Scope } from "../../../shared/scope/classes/Scope.js";
 import { DEADLOCK_TERMINAL_STATUSES, MUTATING_JOB_TYPES, QUEUE_LOCKING_JOB_TYPES } from "../../../catalog/job.js";
+import { AUTHORIZATION_GATE_KINDS } from "../../../catalog/human-input.js";
 import { isUnderRoot, rootsOverlap, normPath } from "../../../shared/scope/functions/path.js";
 import { parseJobPayload } from "./payload.js";
 import {
@@ -55,6 +56,7 @@ const OPERATOR_PARKING_GATE_KINDS = new Set([
   "fix_chain_exhausted",
   "developer_blocked",
 ]);
+const AWAITING_OPERATOR_GATE_KINDS = new Set([...OPERATOR_PARKING_GATE_KINDS, ...AUTHORIZATION_GATE_KINDS]);
 const UNRESOLVED_SCOPE_STATUSES = new Set([
   "queued",
   ...LOCK_HOLDING_JOB_STATUSES,
@@ -650,8 +652,13 @@ function readWorkItemRow(db, id) {
  * any non-terminal job can still make progress without that gate. Recovery
  * gates themselves may be leased by the interactive waiter; they remain
  * operator-owned, not executable work for scheduling purposes.
+ *
+ * `awaitingOperator` (a run deciding it needs action; never lock release or
+ * work-item order) also counts authorization gates and the parked job each
+ * open gate holds, which waits on it without a dependency edge (a live scope
+ * request, a blocked job).
  */
-export function workItemOperatorParking(workItemOrId, { db = getDb() } = {}) {
+export function workItemOperatorParking(workItemOrId, { db = getDb(), awaitingOperator = false } = {}) {
   const workItem = workItemOrId && typeof workItemOrId === "object"
     ? workItemOrId
     : readWorkItemRow(db, workItemOrId);
@@ -670,9 +677,16 @@ export function workItemOperatorParking(workItemOrId, { db = getDb() } = {}) {
     WHERE j.work_item_id = ?
       AND hg.gate_state IN ('open','resolving')
     ORDER BY hg.gate_job_id
-  `).all(Number(workItem.id)).filter((gate) => OPERATOR_PARKING_GATE_KINDS.has(String(gate.gate_kind || "")));
+  `).all(Number(workItem.id)).filter((gate) => (awaitingOperator ? AWAITING_OPERATOR_GATE_KINDS : OPERATOR_PARKING_GATE_KINDS)
+    .has(String(gate.gate_kind || "")));
   if (gates.length === 0) return null;
   const gateIds = new Set(gates.map((gate) => Number(gate.gate_job_id)));
+  if (awaitingOperator) {
+    const parkedIds = new Set(jobs.filter((job) => PARKED_JOB_STATUS_SET.has(job.status)).map((job) => Number(job.id)));
+    for (const gate of gates) {
+      if (parkedIds.has(Number(gate.original_job_id))) gateIds.add(Number(gate.original_job_id));
+    }
+  }
   const dependencies = db.prepare(`
     SELECT jd.job_id, jd.depends_on_job_id
     FROM job_dependencies jd

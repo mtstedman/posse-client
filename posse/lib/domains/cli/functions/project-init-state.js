@@ -7,6 +7,18 @@ export function isPosseProjectInitialized(projectDir = process.cwd()) {
   return fs.existsSync(path.join(path.resolve(projectDir), ".posse", "db", "orchestrator.db"));
 }
 
+// add, go, and admin init (Bossy's "set up Posse in a folder") create a
+// project's Posse state, and its Git repository when the folder has none.
+// `admin init --provider-clis-only` skips repository setup, and `--json` is
+// the admin settings contract rather than setup.
+export function commandInitializesProject(command, positionalArgs = [], argv = []) {
+  if (command === "add" || command === "go") return true;
+  return command === "admin"
+    && String(positionalArgs[0] || "").toLowerCase() === "init"
+    && !argv.includes("--provider-clis-only")
+    && !argv.includes("--json");
+}
+
 export function uninitializedProjectMessage(projectDir = process.cwd()) {
   return `${path.resolve(projectDir)} has not been initialized by Posse. Run posse add or posse go there first.`;
 }

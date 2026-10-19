@@ -15,7 +15,7 @@ function pathEntryExists(target) {
 }
 
 function scopePathKey(value) {
-  const normalized = String(value || "").trim().replace(/\\/g, "/");
+  const normalized = String(value || "").trim().replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
@@ -276,13 +276,38 @@ function scopeListWithout(list, filePath) {
   return (Array.isArray(list) ? list : []).filter((entry) => scopePathKey(entry) !== key);
 }
 
+// The one other task that creates `filePath`, provided making
+// `handoffs[index]` depend on it cannot close a cycle. Modifying a sibling's
+// new file needs that file to exist first, so ordering the two keeps the
+// planner's scope where trimming would drop it.
+function dependableSiblingCreator(handoffs, index, filePath) {
+  const key = scopePathKey(filePath);
+  const creators = handoffs.filter((candidate, candidateIndex) => candidateIndex !== index
+    && uniqueScopePaths(candidate?.report?.scope?.files_to_create).some((entry) => scopePathKey(entry) === key));
+  if (creators.length !== 1) return null;
+  const dependentId = handoffs[index]?.id;
+  const creatorId = creators[0]?.id;
+  if (dependentId == null || creatorId == null) return null;
+  const byId = new Map(handoffs.map((handoff) => [handoff.id, handoff]));
+  const seen = new Set();
+  const pending = [creatorId];
+  while (pending.length > 0) {
+    const id = pending.pop();
+    if (id === dependentId) return null;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    pending.push(...(byId.get(id)?.depends_on || []));
+  }
+  return creatorId;
+}
+
 /**
  * Repair planner scope file kinds in place rather than rejecting the plan.
  * A rejection sends the planner back for another full-context turn; the dev
  * can request any scope it turns out to need, so a trimmed or re-pointed path
  * is the cheaper outcome. Each repair is returned for the caller to record.
  */
-export function repairPlannerPacketFileKinds(packet, projectDir, { maxPasses = 3 } = {}) {
+export function repairPlannerPacketFileKinds(packet, projectDir, { maxPasses = 3, addDependencies = true } = {}) {
   const repairs = [];
   if (packet?.profile !== AGENT_HANDOFF_PROFILES.PLANNER_PLAN || packet?.outcome !== "success") return repairs;
   for (let pass = 0; pass < maxPasses; pass += 1) {
@@ -303,6 +328,15 @@ export function repairPlannerPacketFileKinds(packet, projectDir, { maxPasses = 3
         else scope.files_to_modify = scopeListWithout(scope.files_to_modify, issue.path);
         action = exists ? "file_kind_kept_modify" : "file_kind_kept_create";
       } else if (issue.declaredKind === "files_to_modify" && /does not exist/.test(issue.reason)) {
+        const creatorId = addDependencies ? dependableSiblingCreator(packet.handoffs, issue.taskIndex, issue.path) : null;
+        if (creatorId != null) {
+          if (!(handoff.depends_on || []).includes(creatorId)) {
+            handoff.depends_on = [...(handoff.depends_on || []), creatorId];
+          }
+          repairs.push({ ...issue, action: "file_kind_dependency_added", dependsOn: creatorId });
+          changed = true;
+          continue;
+        }
         const resolved = fuzzyResolveRepoScopePath(projectDir, issue.path);
         scope.files_to_modify = scopeListWithout(scope.files_to_modify, issue.path);
         if (resolved && !scope.files_to_modify.some((entry) => scopePathKey(entry) === scopePathKey(resolved))) {

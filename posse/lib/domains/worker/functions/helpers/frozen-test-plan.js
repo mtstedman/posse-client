@@ -4,6 +4,7 @@ import { declaredNodeTestCommand } from "../../../../shared/tools/functions/tool
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { parseCommandArguments } from "../../../../shared/scope/functions/test-command.js";
 import { resolveLocalVitestCommand } from "../../../verification/functions/vitest-command.js";
+import { resolveLocalNodeRunnerCommand } from "../../../verification/functions/node-runner-command.js";
 import { resolveRepositoryVerificationPlan, VERIFICATION_PLAN_CONFIG, VERIFICATION_PLAN_SCHEMA_VERSION, verificationPlanSnapshot } from "../../../verification/functions/verification-plan.js";
 import { REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID } from "../../../../catalog/verification.js";
 import { discoverUnitTestCapability, resolveUnitTestInvocation } from "../../../../shared/tools/functions/toolkit/unit-test-runner.js";
@@ -312,7 +313,8 @@ function resolveTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
           execution_command: approvalRequest.execution_command,
           cwd_relative: approvalRequest.cwd_relative,
         }
-      : resolveLocalVitestCommand(cwd, declaredNodeTestCommand(cwd, validatePlannerTestCommand(command)));
+      : resolveLocalNodeRunnerCommand(cwd,
+        resolveLocalVitestCommand(cwd, declaredNodeTestCommand(cwd, validatePlannerTestCommand(command))));
   const coveredFile = validation.ok && source !== "operator_approved_operation"
     ? exactDeclaredTestFile(validation.execution_command || command, cwd, validation.cwd_relative || null)
     : null;

@@ -360,6 +360,10 @@ export function buildImageArtifactRecoveryPayload(options) {
   return _buildImageArtifactRecoveryPayload(options);
 }
 
+export function buildArtifactRecoveryPayload(options) {
+  return _buildGenericArtifactRecoveryPayload(options);
+}
+
 const IMAGE_FILE_NAME_RE = /[A-Za-z0-9_][A-Za-z0-9_.\/-]*\.(?:png|jpe?g|gif|webp|svg|avif)\b/giu;
 
 export function imageFileBasenames(text) {

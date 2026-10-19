@@ -138,8 +138,10 @@ export function isPermanentProviderConfigError(errorDetailsOrErr = null) {
 // the outcome, so a retry only delays the operator gate. Promote overwrite
 // refusals are the canonical case — the conflicting file will still be there
 // 30 seconds later (wowiekowie run 2026-08-13 promote #304 burned its retry
-// on this before dead-lettering).
-const DETERMINISTIC_POLICY_CONFLICT_RE = /\bPromote would overwrite \d+ existing file\(s\)/;
+// on this before dead-lettering). A dispatch scope whose writable roots leave
+// its cwd is rebuilt identically on retry (dnd-dissy job 202 burned two
+// attempts on "scope.createRoots escapes scope.cwd").
+const DETERMINISTIC_POLICY_CONFLICT_RE = /\bPromote would overwrite \d+ existing file\(s\)|\bscope\.[A-Za-z]+ escapes scope\.cwd\b/;
 
 export function isDeterministicPolicyConflict(errorDetailsOrErr = null) {
   const errorDetails = errorDetailsOrErr && typeof errorDetailsOrErr === "object"

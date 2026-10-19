@@ -1,5 +1,5 @@
 import path from "path";
-import { listRetainedAttemptFilesAsync } from "../../../git/functions/attempt-committed-files.js";
+import { listNonEmptyFilesAtCommitAsync, listRetainedAttemptFilesAsync } from "../../../git/functions/attempt-committed-files.js";
 import fs from "fs";
 import { normPath, normalizeRoots, isUnderRoot } from "../../../../shared/scope/functions/path.js";
 import { validateMutableRepoPath } from "../../../runtime/functions/protected-paths.js";
@@ -48,6 +48,7 @@ export async function validateDeclaredOutputContract({
   priorAttempts = [],
   projectDir = null,
   cwd = process.cwd(),
+  baseHash = null,
 } = {}) {
   if (!DECLARED_OUTPUT_CONTRACT_JOB_TYPES.has(job?.job_type)) return { ok: true };
   if (declaredOutputContractDisabled(payload)) return { ok: true, skipped: true };
@@ -96,7 +97,16 @@ export async function validateDeclaredOutputContract({
     Promise.all(declaredModifies.map((filePath) => pathExistsInWorktreeAsync(cwd, filePath))),
   ]);
   const missingCreates = declaredCreates.filter((_, i) => !createsExist[i]);
-  const untouchedCreates = declaredCreates.filter((filePath) => !committed.has(filePath));
+  const uncommittedCreates = declaredCreates.filter((filePath) => !committed.has(filePath));
+  // A create target that already held committed content before this attempt
+  // (a sibling, an earlier wave or an operator checkpoint wrote it) cannot be
+  // created again: the handoff reclassifies it as modify scope, and leaving
+  // declared modify scope unchanged is a legitimate outcome.
+  const committedAtBase = new Set(uniqueNormalizedPaths(
+    await listNonEmptyFilesAtCommitAsync({ cwd, commit: baseHash, paths: display(uncommittedCreates) }),
+    cwd,
+  ));
+  const untouchedCreates = uncommittedCreates.filter((filePath) => !committedAtBase.has(filePath));
   // files_to_modify is allowed scope, not a work order: a dev that correctly
   // judges a declared file needs no change must not fail the attempt. Only
   // paths the planner explicitly listed in must_modify stay hard-required;

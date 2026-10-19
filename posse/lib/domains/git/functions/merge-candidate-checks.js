@@ -5,13 +5,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseJobPayload } from "../../queue/functions/payload.js";
-import { installedNodeRoots } from "../../verification/functions/prerequisite-adapters.js";
+import { installedDependenciesMatchLockfile, installedNodeRoots } from "../../verification/functions/prerequisite-adapters.js";
 import { classifyNestedRunnerInfrastructureFailure } from "../../verification/functions/test-runner-failure.js";
 import { validatePlannerTestCommandForRepository } from "../../verification/functions/planner-test-command.js";
 import { runCloseoutTestCommandSync } from "./merge-closeout.js";
 
 /** Create one disposable checkout of the staged candidate for merge checks. */
-export function withTemporaryMergeCandidateCheckout({ cwd, git }, use) {
+export function withTemporaryMergeCandidateCheckout({ cwd, git, dependencySources = [] }, use) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), MERGE_CANDIDATE_CHECKOUT_PREFIX));
   const checkout = path.join(root, "candidate");
   let added = false;
@@ -21,17 +21,27 @@ export function withTemporaryMergeCandidateCheckout({ cwd, git }, use) {
     const commit = git(["commit-tree", tree, "-p", head, "-m", "Temporary merge verification candidate"], cwd);
     git(["worktree", "add", "--detach", checkout, commit], cwd);
     added = true;
+    // The target checkout's install predates a candidate that changed its
+    // lockfile; the work item's worktree may hold the install that matches.
+    const dependencyOwner = (relative) => {
+      const sources = [cwd, ...dependencySources].filter((source) => source && fs.existsSync(path.join(source, relative)));
+      let lockfile = null;
+      try { lockfile = fs.readFileSync(path.join(checkout, path.dirname(relative), path.basename(relative) === "vendor" ? "composer.lock" : "package-lock.json"), "utf8"); } catch { /* no lockfile */ }
+      return (lockfile && sources.find((source) => installedDependenciesMatchLockfile(path.join(source, relative), lockfile) === true)) || sources[0] || null;
+    };
     const reset = (revision = commit) => {
       git(["reset", "--hard", revision], checkout);
       git(["clean", "-fdx"], checkout);
+      const sources = [cwd, ...dependencySources.filter(Boolean)];
       const dependencyDirs = new Set(["node_modules", "vendor",
-        ...installedNodeRoots(cwd).map((nodeRoot) => path.relative(cwd, path.join(nodeRoot, "node_modules"))),
+        ...sources.flatMap((source) => installedNodeRoots(source).map((nodeRoot) => path.relative(source, path.join(source, nodeRoot, "node_modules")))),
       ]);
       for (const relative of dependencyDirs) {
         if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
-        const source = path.join(cwd, relative);
+        const owner = dependencyOwner(relative);
         const destination = path.join(checkout, relative);
-        if (!fs.existsSync(source) || fs.existsSync(destination) || !fs.existsSync(path.dirname(destination))) continue;
+        if (!owner || fs.existsSync(destination) || !fs.existsSync(path.dirname(destination))) continue;
+        const source = path.join(owner, relative);
         fs.symlinkSync(source, destination, process.platform === "win32" ? "junction" : "dir");
       }
     };

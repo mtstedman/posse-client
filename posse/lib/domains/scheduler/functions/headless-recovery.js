@@ -11,6 +11,8 @@
 // concurrency state (activeWorkers / lease / lock / dispatch) is touched.
 
 import {
+  AUTHORIZATION_GATE_KINDS,
+  humanGateContractForPayload,
   humanGateStateAllowsAnswer,
   humanGateStateIsActive,
 } from "../../../catalog/human-input.js";
@@ -20,7 +22,8 @@ import {
  *
  * If no display is available, waiting_on_human jobs will sit forever. After the
  * configured headless human timeout, fail them and cancel gated dependents so
- * an unanswered decision never becomes implicit authorization.
+ * an unanswered decision never becomes implicit authorization. Authorization
+ * gates (AUTHORIZATION_GATE_KINDS) are left open for the operator instead.
  *
  * Mutates `headlessNonHumanWaitingLogged` (per-run "logged once" Set) the same
  * way the inline loop did.
@@ -112,6 +115,13 @@ export function recoverHeadlessHumanTimeouts({
       // reconciliation state machine, not the unanswered-gate timeout path.
       const gateContract = getHumanGate(hj.id);
       if (!humanGateStateAllowsAnswer(gateContract?.gate_state)) continue;
+      // Plan, scope, installer and clarification gates withhold authority;
+      // nothing failed. Timing one out failed its work and canceled every
+      // dependent (a whole work item behind its plan approval), so it stays
+      // open: the run ends as needs-action and the answer resumes the work.
+      const gateKind = gateContract?.gate_kind
+        || humanGateContractForPayload(parseJobPayload(hj), { parentJobId: hj.parent_job_id }).gate_kind;
+      if (AUTHORIZATION_GATE_KINDS.includes(gateKind)) continue;
       const age = (Date.now() - new Date(hj.updated_at).getTime()) / 1000;
       if (age > readHeadlessHumanTimeoutSec()) {
         // A live lease means a bridge answer is resolving this gate right

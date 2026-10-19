@@ -54,7 +54,7 @@ import { testRunScopeAttribution, ensurePostChangeTestReceipt, renderTestExecuti
 import { buildAssessmentTaskBoundary, classifySiblingOnlyAssessmentFailure, recordAssessmentBoundaryEvent, renderAssessmentTaskBoundary } from "./assessment-task-boundary.js";
 import { classifyIgnoredPathOnlyAssessmentFailure, ignoredPathReviewVerdict, recordAssessmentIgnoredPathEvent, renderIgnoredPathCorrection } from "./assessment-ignored-paths.js";
 import { killShellCommandProcessTree as killShellCommandProcessTreeImpl, runShellCommandAsync as runShellCommandAsyncImpl } from "./assessment-runner.js";
-import { assessorCallBudgetStatus, getAssessorMaxToolCalls, isAssessorParseRetryBudgetExceeded as assessorTokenBudgetStatus, raiseAssessmentFallbackReadsForScope } from "../execution/assessment-policy.js";
+import { assessorCallBudgetStatus, getAssessorMaxToolCalls, isAssessorParseRetryBudgetExceeded as assessorTokenBudgetStatus, missingArtifactDeliverables, raiseAssessmentFallbackReadsForScope } from "../execution/assessment-policy.js";
 import { ensureAssessmentScopedCheckEvidence } from "../../../assessment/functions/scoped-check-evidence.js";
 import { prepareReviewedFileCompletion } from "../../../assessment/functions/reviewed-file-completion.js";
 import { assessmentWorktreeDirtySummary, inspectAssessmentWorktreeReadiness, recordAssessmentWorktreeReadiness } from "./assessment-worktree-readiness.js";
@@ -1781,6 +1781,23 @@ export function buildEmptyArtifactOutputMessage({
   return `Artifact mode (${taskMode}) ${action} in output_root: ${outputRoot}${existingDetail}${errDetail}`;
 }
 
+// The files an artificer must leave in its output root. An assessor-spawned
+// artifact repair declares none of its own, but the deliverable it repairs
+// (same output root) still owes its original job's files.
+export function expectedArtifactDeliverables(payload = {}) {
+  let current = payload;
+  for (let depth = 0; depth < 5; depth++) {
+    if (Array.isArray(current?.files_to_create) && current.files_to_create.length > 0) return current.files_to_create;
+    if (current?._artifact_recovery !== true || !current.original_job_id) break;
+    const original = getJob(current.original_job_id);
+    const originalPayload = original ? parseJobPayload(original) : null;
+    if (!originalPayload?.output_root || !payload.output_root
+      || path.resolve(String(originalPayload.output_root)) !== path.resolve(String(payload.output_root))) break;
+    current = originalPayload;
+  }
+  return [];
+}
+
 function getWorkerProviderCall(worker) {
   const call = worker?.providerClient?.call;
   if (typeof call !== "function") {
@@ -2389,6 +2406,49 @@ export async function runPostExecutionAssessment(worker, {
           contractViolations = contractResult.violations;
           worker.emit(job.id, `${C.yellow}[contract]${C.reset} WI#${job.work_item_id} job #${job.id}: ${contractViolations.length} violation(s) — ${contractViolations[0]}`);
         }
+      }
+
+      // A declared deliverable that was never written cannot carry assessor
+      // evidence, so asking the assessor only opens a review gate (dnd-dissy
+      // job 237). Fail it deterministically into the normal artificer retry,
+      // which hands the missing names back as the last error.
+      const outputRootAbs = path.resolve(worker.projectDir, jobPayloadForAssess.output_root || "");
+      const expectedDeliverables = job.job_type === "artificer" && fullManifest
+        ? [...new Set(expectedArtifactDeliverables(jobPayloadForAssess)
+          .map((file) => String(file || "").replace(/\\/g, "/").trim())
+          .filter((file) => file && !file.endsWith("/") && path.resolve(worker.projectDir, file) !== outputRootAbs)
+          .map((file) => path.posix.basename(file)))]
+        : [];
+      const missingDeliverables = missingArtifactDeliverables({ manifest: fullManifest, expectedFiles: expectedDeliverables });
+      if (missingDeliverables.length > 0) {
+        const presentCount = expectedDeliverables.length - missingDeliverables.length;
+        const missingMsg = `Artifact output is missing expected deliverable(s) under ${jobPayloadForAssess.output_root}: ${missingDeliverables.join(", ")}`
+          + (presentCount > 0 ? `; the other ${presentCount} expected file(s) are present, so produce only the missing ones` : "");
+        worker.emit(job.id, `${C.red}[manifest]${C.reset} WI#${job.work_item_id} job #${job.id}: ${missingMsg}`);
+        logBadInputFailure(job, {
+          attemptId: attempt.id,
+          layer: "artificer",
+          upstream: "artificer_output",
+          classification: "missing_expected_files",
+          detail: missingMsg,
+        });
+        logEvent({
+          work_item_id: job.work_item_id,
+          job_id: job.id,
+          attempt_id: attempt.id,
+          event_type: EVENT_TYPES.JOB_ARTIFACT_MISSING_DELIVERABLES,
+          actor_type: EVENT_ACTORS.WORKER,
+          message: missingMsg,
+          event_json: JSON.stringify({ output_root: jobPayloadForAssess.output_root, missing: missingDeliverables }),
+        });
+        setJobError(job.id, missingMsg);
+        completeAttempt(attempt.id, {
+          status: "failed",
+          duration_ms: Date.now() - startTime,
+          error_text: missingMsg,
+        });
+        worker._retryOrFail(job, leaseToken, missingMsg, { attemptId: attempt.id });
+        return;
       }
 
       const deterministicArtifactPass = shouldFastPassArtifactAssessment({

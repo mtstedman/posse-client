@@ -238,7 +238,7 @@ posse admin
 posse go
 ```
 
-`posse add`, `posse go`, and session joins initialize the project. Other repository commands
+`posse add`, `posse go`, `posse admin init`, and session joins initialize the project. Other repository commands
 require that initialization. `posse doctor` and `posse update` skip repository
 dependency installation when run elsewhere. The installer explicitly provisions
 shared tools from Posse's own checkout.
@@ -600,6 +600,16 @@ the frozen-command runner; `npx` never downloads a package. Missing dependencies
 are reported as unavailable. Watch mode, snapshot updates, and output-writing
 flags remain excluded. Quoted PHPUnit filters such as
 `phpunit --filter 'FirstTest|SecondTest'` preserve their literal regex argument.
+
+Jest, Mocha, `playwright test`, and `tsx --test` are standard verification
+commands when named bare, through `node_modules/.bin`, or through `npx`,
+`pnpm [exec]`, `yarn`, or `bunx`; Vitest accepts the same launchers, and
+`npx tsc --noEmit` and `npx eslint` follow the bare typecheck and lint rules.
+A launcher is syntax only: verification runs the repository's installed
+package bin under Node and reports a missing package as unavailable.
+`vendor/bin/pest`, `php artisan test`, and `deno test` are standard commands
+like PHPUnit and `go test`. Scaffolding, watch, debug, and output-writing
+options remain excluded.
 
 **Test strictness** is a repository setting under **Repository → Verification**
 in the admin settings. `test_strictness=permissive` is the default: missing,
@@ -1105,19 +1115,35 @@ The **Approve / Reject** question shows the entire batch, commands, environment
 overrides, current manifests, proposed initialization/ignore changes, and local
 commit scope. Nothing installs before approval. Automatic scope approval and
 unattended mode never authorize these requests. Scripts and Composer plugins
-are disabled unless explicitly requested in the approved step. A canceled or
-expired attempt, rejection, or changed inputs prevents execution. Each approval
-can be used once; batches stop at the first failed command and preserve partial
-changes for inspection. A retry needs new approval.
+are disabled unless explicitly requested in the approved step. A project
+`.npmrc` is named in the question (its contents are not shown) because it
+controls the registry and authentication. A canceled attempt, rejection,
+changed inputs, or no answer within 10 minutes prevents execution. Each approval
+can be used once; batches stop at the first failed command and restore the
+setup files they changed, so the primary checkout stays mergeable (installed
+packages remain in their ignored directories). A retry needs new approval.
+Work-item merges into the primary checkout wait while an approved installer is
+running there instead of failing on its uncommitted manifests. Installers in one batch
+share a 30-minute budget (10 minutes per step). The job's runtime watchdog
+does not count the approval wait or the approved installers, up to a capped
+credit per dispatch, and other jobs keep using their tools meanwhile.
 
 Planning setup runs in the primary checkout, initializes missing manifests,
 adds anchored ignore rules for dependency directories, and commits only the
 setup manifests, locks, and `.gitignore` locally. It does not push or deploy.
-Development is blocked until setup succeeds and that commit is clean. New dev
-worktrees reuse the approved installation with matching manifests and lockfiles
-before development checks or providers run. This batch tool is available during
-initial ordinary planning, before the work-item development branch exists;
-red-team/review passes and assessment replans cannot run it.
+The plan that requested setup cannot start development until setup succeeds and
+that commit is clean. If you reject the request, the plan continues without
+it. If setup expires or fails, Posse asks how the next plan should proceed:
+retry with a revised batch, continue without setup, or pause. New dev worktrees
+reuse the approved installation with matching manifests and lockfiles before
+development checks or providers run, including worktrees of later work items
+that ran no setup of their own. Once a work
+item changes its manifests or lockfile, its worktrees keep their own
+dependencies; a worktree without them is reported to the operator and the
+developer. With `package.json` and `package-lock.json` in its writable scope,
+a developer can request `install_dependencies`. This batch tool is available during initial ordinary
+planning, before the work-item development branch exists; red-team/review
+passes and assessment replans cannot run it.
 
 For local SQLite storage, include `database` in that same planning batch. Supply
 the new database `path`, optional existing CREATE TABLE/INDEX `schema_path`,
@@ -1129,13 +1155,30 @@ ignore rules for live `.env`, the database, and SQLite sidecars. Existing data,
 conflicting database variables, tracked `.env`, and an existing Posse database
 registration are never replaced automatically.
 
+When the application does not already have a connection module, include
+`database.connection_file: { "path": "src/db/connection.ts", "content": "..." }`.
+The planner supplies complete, small source in the project's language and
+framework. It should expose a reusable connection function, load configuration
+through the existing environment/framework mechanism, and avoid logging
+connection values. Include its driver and environment-loader packages in the
+same approved dependency batch. Reuse an existing framework connector instead
+of creating a second one.
+
+The full proposed module is shown for approval and committed with setup. Posse
+does not substitute `.env` values into its source, execute the module during
+setup, or overwrite an existing file. Developers import it and validate it with
+the application's normal checks. The source limit is 16 KB; live credentials
+and machine-specific configuration belong only in the local environment.
+
 The same approval lists Posse's database `permissions`: default `["read"]`, or
 explicit `["read", "write"]` when development needs schema/data changes. After
 the setup commit succeeds, Posse creates the SQLite file and registers it with
 its project database tools. Subsequent jobs receive only their permitted tools;
 an existing agent token is not widened. Development worktrees get the generated
 database variables pointing to the same primary-checkout local database, without
-copying other secrets. Applications must load their `.env` using their framework
+copying other secrets. Each worktree then keeps database values its developers
+change; a missing database or unignored `.env` is reported to the developer
+instead of stopping development. Applications must load their `.env` using their framework
 or dotenv support. The portable example is suitable for configuring a fresh
 clone; runtime data and machine-specific environment files are never committed.
 
@@ -1150,6 +1193,9 @@ applying a SQL file containing CREATE TABLE/INDEX statements. It requires a
 separate user approval, never overwrites existing data, and never grants
 `project_db_query` permission. Keep the schema and repeatable initialization in
 source control; runtime databases remain local to their worktree.
+It also accepts `connection_file` in the same shape. On a developer branch the
+new file must be in writable scope, reads the application's existing environment
+configuration, and is committed and tested with the ordinary developer changes.
 
 Supported dependency managers are standalone npm and Composer, using toolchains
 already installed on the machine (including Windows command shims). npm

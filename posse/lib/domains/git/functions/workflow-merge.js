@@ -37,6 +37,7 @@ import { getLivePairingState } from "../../pairing/functions/state.js";
 import { filterPosseRuntimePaths } from "../../runtime/functions/ignore.js";
 import { isAbortError } from "../../runtime/functions/yield.js";
 import { recordReviewedSourceMerge, reviewedSourceMergeTrailer } from "./reviewed-source-merge.js";
+import { dependencyInstallLockHeld } from "../../../shared/concurrency/functions/dependency-install-lock.js";
 
 function reservedRuntimeMergeError(paths = []) {
   const blocked = filterPosseRuntimePaths(paths);
@@ -328,6 +329,13 @@ export function createMergeWorkflowHelpers(context, {
     if (fs.existsSync(canonical)) return canonical;
     const legacy = findLegacyWorktreeForWi(projectDir, wiId);
     return legacy && fs.existsSync(legacy) ? legacy : null;
+  }
+
+  // A work item that added packages installed them in its own worktree; merge
+  // checks use that install when the target's predates the candidate lockfile.
+  function workItemDependencySources(wiId) {
+    if (wiId == null) return [];
+    try { return [canonicalWorktreePath(projectDir, wiId)]; } catch { return []; }
   }
 
   function parkGuidance(wiId, branch, targetBranch, files) {
@@ -1328,6 +1336,13 @@ export function createMergeWorkflowHelpers(context, {
         .map((line) => line.trim())
         .filter(Boolean)
         .filter((line) => !isRuntimePorcelainLine(line, cwd));
+      if (dirtyFiles.length > 0 && dependencyInstallLockHeld(cwd)) {
+        // An approved installer is changing this checkout's manifests; its
+        // commit or restore cleans the tree, so the merge waits for it.
+        const message = `Merge deferred: an approved dependency installer is updating ${targetBranch}; ${branch} merges after it finishes`;
+        log(message, { json: { branch, target: targetBranch, deferred: true, dirty_count: dirtyFiles.length, original_branch: currentBranch } });
+        return { ok: false, deferred: true, reason: "dependency_install_in_progress", message, dirtyFiles: dirtyFiles.slice(0, 50) };
+      }
       if (dirtyFiles.length > 0) {
         const message = `Merge refused: target worktree has ${dirtyFiles.length} uncommitted change(s) before merging ${branch}`;
         log(message, {
@@ -1459,7 +1474,7 @@ export function createMergeWorkflowHelpers(context, {
           ? { ok: true, matched: 0, passed: 0, failed: 0, results: [],
             summary: registered.scopeFiles.length === 0 ? "merge candidate has no changed files"
               : "no active registered tests match the merge candidate" }
-          : withTemporaryMergeCandidateCheckout({ cwd, git: gitMergeExec }, (candidate) => {
+          : withTemporaryMergeCandidateCheckout({ cwd, git: gitMergeExec, dependencySources: workItemDependencySources(wiId) }, (candidate) => {
             let tests = registered.tests.length > 0
               ? runRegisteredTestsForMergeCandidate({
                 cwd: candidate.checkout,

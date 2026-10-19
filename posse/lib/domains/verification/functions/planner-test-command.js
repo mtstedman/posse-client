@@ -5,7 +5,8 @@ import { declaredNodeTestCommand } from "../../../shared/tools/functions/toolkit
 import fs from "fs";
 import path from "path";
 import { hasUnquotedShellOperators, isSafeDirectNodeTestScriptArgs, parseCommandArguments } from "../../../shared/scope/functions/test-command.js";
-import { resolveLocalVitestCommand, vitestCommandArgs } from "./vitest-command.js";
+import { resolveLocalVitestCommand } from "./vitest-command.js";
+import { nodeRunnerCommand, resolveLocalNodeRunnerCommand } from "./node-runner-command.js";
 import { TEST_SCRIPT_NO_VERIFICATION_REASON } from "../../../catalog/verification.js";
 import { sha256 } from "../../../shared/format/functions/sha256.js";
 
@@ -94,10 +95,13 @@ export function validatePlannerTestCommand(command) {
   }
 
   const executable = commandExecutable(executableCommand);
-  let vitestArgs;
-  try { vitestArgs = vitestCommandArgs(executableCommand); } catch {
+  let nodeRunner;
+  try { nodeRunner = nodeRunnerCommand(executableCommand); } catch {
     return { ok: false, reason: "test_command_invalid_quoting" };
   }
+  const vitestArgs = nodeRunner?.runner === "vitest" ? nodeRunner.args : null;
+  // A launcher is syntax: admission applies the named runner's own rules.
+  const runner = nodeRunner?.runner || executable;
   let directShellScript = null;
   let directShellInterpreter = false;
   try {
@@ -111,6 +115,7 @@ export function validatePlannerTestCommand(command) {
     directShellInterpreter = false;
   }
   const args = parseCommandArguments(executableCommand).slice(1).map((word) => word.toLowerCase());
+  const runnerArgs = nodeRunner ? nodeRunner.args.map((word) => word.toLowerCase()) : args;
   const flagName = (arg) => String(arg || "").toLowerCase().split("=", 1)[0];
   if (args.some((arg) => MUTATING_TEST_FLAGS.has(flagName(arg))
     || (vitestArgs && MUTATING_TEST_FLAGS.has(flagName(arg).split(".", 1)[0])))) {
@@ -123,7 +128,9 @@ export function validatePlannerTestCommand(command) {
     ? new Set(["-o", "-coverprofile", "-cpuprofile", "-memprofile", "-mutexprofile", "-blockprofile", "-trace", "-outputdir"])
     : executable === "dotnet" || executable === "dotnet.exe"
       ? new Set(["-o"])
-      : new Set();
+      : executable === "deno" || executable === "deno.exe"
+        ? new Set(["--junit-path"])
+        : new Set();
   if (args.some((arg) => runnerSpecificMutatingFlags.has(flagName(arg)))) {
     return { ok: false, reason: "test_command_contains_mutating_output_flag" };
   }
@@ -144,7 +151,23 @@ export function validatePlannerTestCommand(command) {
       return { ok: false, reason: "test_command_contains_interactive_flag" };
     }
     ok = vitestArgs[0] === "run";
-  } else if (NODE_PACKAGE_MANAGER_EXECUTABLES.includes(executable)) {
+  } else if (runner === "jest") {
+    if (runnerArgs.some((arg) => ["--init", "--clearcache", "--collectcoverage"].includes(flagName(arg)))) {
+      return { ok: false, reason: "test_command_contains_mutating_output_flag" };
+    }
+    ok = true;
+  } else if (runner === "mocha") {
+    if (runnerArgs.includes("-w")) return { ok: false, reason: "test_command_contains_interactive_flag" };
+    ok = runnerArgs[0] !== "init";
+  } else if (runner === "playwright") {
+    if (runnerArgs.some((arg) => ["--debug", "--ui-host", "--ui-port"].includes(flagName(arg)))) {
+      return { ok: false, reason: "test_command_contains_interactive_flag" };
+    }
+    ok = runnerArgs[0] === "test";
+  } else if (runner === "tsx") {
+    // Only Node's test runner: `tsx script.ts` runs an arbitrary script.
+    ok = runnerArgs[0] === "--test";
+  } else if (NODE_PACKAGE_MANAGER_EXECUTABLES.includes(executable) && !nodeRunner) {
     const manager = executable.replace(/\.(?:cmd|exe)$/i, "");
     const taskArgs = packageManagerTaskArgs(args, manager);
     ok = safeTaskPattern.test(taskArgs[0] || "")
@@ -156,21 +179,25 @@ export function validatePlannerTestCommand(command) {
   } else if (/^(?:python(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?$/.test(executable)) {
     const moduleIndex = args.indexOf("-m");
     ok = moduleIndex >= 0 && ["pytest", "unittest"].includes(args[moduleIndex + 1]);
-  } else if (/^eslint(?:\.cmd)?$/.test(executable)) {
-    ok = !args.some((arg) => ["--output-file", "-o", "--cache"].includes(flagName(arg)));
-  } else if (/^(?:tsc|vue-tsc)(?:\.cmd)?$/.test(executable)) {
-    const noEmit = args.indexOf("--noemit");
-    ok = noEmit >= 0 && args[noEmit + 1] !== "false"
-      && !args.some((arg) => ["--build", "-b", "--incremental", "--composite"].includes(flagName(arg)));
+  } else if (/^eslint(?:\.cmd)?$/.test(runner)) {
+    ok = !runnerArgs.some((arg) => ["--output-file", "-o", "--cache"].includes(flagName(arg)));
+  } else if (/^(?:tsc|vue-tsc)(?:\.cmd)?$/.test(runner)) {
+    const noEmit = runnerArgs.indexOf("--noemit");
+    ok = noEmit >= 0 && runnerArgs[noEmit + 1] !== "false"
+      && !runnerArgs.some((arg) => ["--build", "-b", "--incremental", "--composite"].includes(flagName(arg)));
   } else if (/^pytest(?:-\d+(?:\.\d+)*)?(?:\.exe)?$/.test(executable)) {
     ok = true;
   } else if (["cargo", "cargo.exe"].includes(executable)) {
     ok = args[0] === "test";
-  } else if (["go", "go.exe", "dotnet", "dotnet.exe"].includes(executable)) {
+  } else if (["go", "go.exe", "dotnet", "dotnet.exe", "deno", "deno.exe"].includes(executable)) {
     ok = args[0] === "test";
   } else if (/^(?:mvn|mvnw|mvnw\.cmd|gradle|gradlew|gradlew\.bat)$/.test(executable)) {
     ok = args.some((arg) => /^(?:test|check|verify)$/.test(arg) || /:test$/.test(arg));
-  } else if (/^(?:phpunit|phpunit\.bat)$/.test(executable)) {
+  } else if (/^(?:phpunit|pest)(?:\.bat)?$/.test(executable)) {
+    // Pest runs PHPUnit suites; its --init scaffolds files instead.
+    if (executable.startsWith("pest") && args.includes("--init")) {
+      return { ok: false, reason: "test_command_contains_mutating_output_flag" };
+    }
     ok = true;
   } else if (["php", "php.exe"].includes(executable)) {
     // Accept a test-named script anywhere, or any .php script under a
@@ -178,7 +205,8 @@ export function validatePlannerTestCommand(command) {
     // tests/api-smoke.php or tests/chess-rules.php; the directory conveys
     // the same intent as a "test" filename, and rejecting them starves the
     // assessor of the executable evidence the confidence policy assumes.
-    ok = args.some((arg) => (
+    // Laravel's `php artisan test` wraps PHPUnit or Pest.
+    ok = (args[0] === "artisan" && args[1] === "test") || args.some((arg) => (
       /(?:^|[/\\])(?:phpunit|[^/\\]*tests?[^/\\]*)\.php$/.test(arg)
       || /(?:^|[/\\])(?:run[-_.])?(?:checks?|verify|lint|typecheck|spec)(?:[-_.][^/\\]*)?\.php$/.test(arg)
       || (/(?:^|[/\\])tests?[/\\][^\s]*\.php$/.test(arg)
@@ -492,7 +520,9 @@ function declaredScriptValidation(definitions = []) {
 export function validatePlannerTestCommandForRepository(command, cwd, { filesToCreate = [] } = {}) {
   const shape = validatePlannerTestCommand(command);
   if (!shape.ok) return shape;
-  if (vitestCommandArgs(shape.execution_command)) return resolveLocalVitestCommand(cwd, shape);
+  if (nodeRunnerCommand(shape.execution_command)) {
+    return resolveLocalNodeRunnerCommand(cwd, resolveLocalVitestCommand(cwd, shape));
+  }
   // Admission proves test intent, not that an interpreter's script exists.
   // Keep the original argv casing and resolve against the command's cwd.
   const interpreterScripts = testCommandScriptPaths(shape.execution_command, commandExecutable(shape.execution_command));

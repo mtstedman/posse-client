@@ -22,6 +22,7 @@ import { siblingJobScopePaths } from "../../../queue/functions/file-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { processVerdict } from "./process-verdict.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
+import { harnessSetupFaultCode, settleHarnessSetupFault } from "./harness-setup-fault.js";
 import { isLongProviderPause, isProviderQuotaBackoff, MAX_PROVIDER_ERROR_REQUEUES, MAX_PROVIDER_PAUSED_BOUNCES, MAX_PROVIDER_QUOTA_PAUSES, planProviderPausedRequeue, planProviderQuotaPause, PROVIDER_ERROR_PREFIX, PROVIDER_PAUSED_PREFIX, PROVIDER_QUOTA_PAUSE_PREFIX, providerInterruptionStreak } from "./provider-quota-pause.js";
 
 export const MAX_LIVE_SCOPE_WAIT_INTERRUPTIONS = 3;
@@ -728,6 +729,14 @@ export async function handleExecuteAttemptError(worker, {
     worker.emit(job.id, escalates
       ? `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} runtime exceeded — requeuing with model escalation${hasStash ? " (will resume from stash)" : ""}${C.reset}`
       : `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id} runtime backstop exceeded — runaway attempt killed; requeuing on the same model${hasStash ? " (will resume from stash)" : ""}${C.reset}`);
+    return;
+  }
+
+  // Posse's own provider setup was rejected before a model turn ran. Charging
+  // it would dead-letter the job on the same-error rule after two tries.
+  const harnessFaultCode = harnessSetupFaultCode(err);
+  if (harnessFaultCode) {
+    settleHarnessSetupFault(worker, { attempt, err, faultCode: harnessFaultCode, job, leaseToken, startTime });
     return;
   }
 

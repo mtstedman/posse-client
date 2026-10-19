@@ -40,7 +40,7 @@ import { mergeResearchReportDraftClaims } from "./research-report-claim-drafts.j
 import { serializeStoredAgentHandoffPacket, parseStoredAgentHandoffPacket } from "./helpers/packet-storage.js";
 import { handoffRow } from "./agent-handoff-records.js";
 import { recordAtlasTrunkHitRate } from "./atlas-prefetch-terminal-telemetry.js";
-import { validatePlannedTask } from "../../planning/functions/plan-routing.js";
+import { stripRedundantCodeCreateRoots, validatePlannedTask } from "../../planning/functions/plan-routing.js";
 import { sourceLineage, sourceLineSlice, deliveredSourceExcerptMatches, disjointSourceMaterialization, coalescedSourceContentWindows, refRelativeCoordinates, payloadSourceContentWindows, evidenceProvenance } from "./helpers/evidence-provenance.js";
 
 
@@ -1958,11 +1958,15 @@ function validatePlannerPacketSemantics(packet, { context = null } = {}) {
     } else if (writablePaths.length === 0) {
       const inferred = inferWritableScopeForTask(handoff, context);
       if (inferred.length === 0) {
+        // Dev tasks may not declare create_roots, so never suggest them there.
+        const scopeFields = handoff.target?.role === "dev"
+          ? "scope.files_to_modify (existing files, or files a depends_on task creates), "
+            + "scope.files_to_create (new files), or scope.files_to_delete"
+          : "scope.files_to_modify, scope.files_to_create, scope.files_to_delete, or scope.create_roots";
         fail(
           "AGENT_HANDOFF_SEMANTIC_INVALID",
           `planner success handoffs[${index}] task_mode ${taskMode} requires non-empty writable scope; `
-            + "add at least one exact repository path to scope.files_to_modify, scope.files_to_create, "
-            + "scope.files_to_delete, or scope.create_roots, then retry agent_handoff",
+            + `add at least one exact repository path to ${scopeFields}, then retry agent_handoff`,
         );
       }
       const sources = [...new Set(inferred.map((entry) => entry.source))].join(", ");
@@ -2158,6 +2162,19 @@ function plannerContractFromWorkItem(workItem) {
     exactExecutableHandoffs: hasExactExecutableHandoffs ? exactExecutableHandoffs : null,
     dependencyEdges: hasDependencyEdges ? dependencyEdges : "unconstrained",
   };
+}
+
+// File-kind repair may order a task after the sibling that creates its file;
+// a work item whose planner contract forbids dependency edges keeps trimming.
+function plannerForbidsDependencyEdges(context) {
+  if (!context?.db || !context?.workItemId) return false;
+  try {
+    const workItem = context.db.prepare("SELECT metadata_json FROM work_items WHERE id = ?").get(context.workItemId);
+    return plannerContractFromWorkItem(workItem)?.dependencyEdges === "none";
+  } catch {
+    // A malformed contract is reported by the post-materialization check.
+    return false;
+  }
 }
 
 function validatePlannerPacketAgainstWorkItem(packet, workItem) {
@@ -3753,14 +3770,30 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   });
   validateDependencyGraph(handoffs);
   const semanticPacket = { profile, outcome, handoffs };
+  if (profile === AGENT_HANDOFF_PROFILES.PLANNER_PLAN && outcome === "success") {
+    // The compiler strips the same redundant roots; without this the
+    // downstream-validity check rejects an otherwise exact dev plan.
+    for (const [index, handoff] of handoffs.entries()) {
+      if (handoff.target?.kind !== "agent") continue;
+      const stripped = stripRedundantCodeCreateRoots(handoff.report.scope, { jobType: handoff.target.role });
+      if (stripped.length > 0) {
+        recordHandoffSoftening(`handoffs[${index}].report.scope.create_roots`, "create_roots_redundant_stripped", {
+          roots: stripped,
+        });
+      }
+    }
+  }
   // File-kind repair runs before the semantic pass so a scope left empty by
   // trimming can still be inferred from context.
   if (materializationContext.projectDir) {
-    for (const repair of repairPlannerPacketFileKinds(semanticPacket, materializationContext.projectDir)) {
+    for (const repair of repairPlannerPacketFileKinds(semanticPacket, materializationContext.projectDir, {
+      addDependencies: !plannerForbidsDependencyEdges(materializationContext),
+    })) {
       recordHandoffSoftening(`handoffs[${repair.taskIndex}].report.scope.${repair.declaredKind}`, repair.action, {
         path: repair.path,
         reason: repair.reason,
         ...(repair.resolved ? { resolved: repair.resolved } : {}),
+        ...(repair.dependsOn ? { depends_on: repair.dependsOn } : {}),
       });
     }
   }

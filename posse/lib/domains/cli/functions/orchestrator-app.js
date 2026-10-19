@@ -1,5 +1,5 @@
 import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
-import { isPosseProjectInitialized, uninitializedProjectMessage } from "./project-init-state.js";
+import { commandInitializesProject, isPosseProjectInitialized, uninitializedProjectMessage } from "./project-init-state.js";
 import { sessionJoinRequest } from "../../pairing/functions/join-folder.js";
 import { applyPairingGitEnvironment } from "../../pairing/functions/git-environment.js";
 import { collectSessionView, formatSessionViewLines } from "../../pairing/functions/session-view.js";
@@ -593,7 +593,9 @@ async function init({ requireWritableArtifacts = true, allowGitInit = false, ref
         return active;
       });
     }
-    if (requireWritableArtifacts) {
+    // admin init writes no artifacts but initializes Git before the database,
+    // so a folder whose Git setup fails is not left looking initialized.
+    if (requireWritableArtifacts || allowGitInit) {
       await readiness.step("Git repository", () => allowGitInit
         ? ensureGitRepositoryInitialized({ verbose: !showReadiness })
         : assertGitRepositoryExists());
@@ -2331,6 +2333,10 @@ async function cmdGate() {
     const feedbackLabel = result.feedback ? " with feedback" : "";
     const answerLabel = result.answer_text != null ? "your answer" : result.action;
     console.log(`\n  ${C.green}Resolved gate job #${result.job_id}${wiLabel} with ${answerLabel}${feedbackLabel}.${C.reset}\n`);
+    if (result.queued_without_run?.length > 0) {
+      const queued = result.queued_without_run.map((id) => `#${id}`).join(", ");
+      console.log(`  ${C.yellow}No Posse run is active: queued ${queued}${wiLabel} — run \`posse go\` to continue.${C.reset}\n`);
+    }
     return result;
   }
   if (result.reason === "usage") {
@@ -2419,10 +2425,15 @@ export async function main() {
     await dispatchResolvedCommand(command);
     return;
   }
+  const commandArgs = process.argv.slice(3);
+  const initializesProject = commandInitializesProject(command, getCommandPositionalArgs(commandArgs), commandArgs);
   // A join bootstraps its database here; the pairing domain then creates an
   // empty Git checkout and fetches the host's history after admission.
-  if (!["add", "go"].includes(command) && !sessionJoinRequest()
+  if (!initializesProject && !sessionJoinRequest()
       && !isPosseProjectInitialized(PROJECT_DIR)) {
+    // Refusing must not leave runtime state behind: exit teardown would
+    // otherwise open a .posse/logs/runs telemetry directory here.
+    configureRunTelemetry({ enabled: false });
     console.error(`\n${C.red}${uninitializedProjectMessage(PROJECT_DIR)}${C.reset}\n`);
     process.exitCode = 1;
     return;
@@ -2430,7 +2441,7 @@ export async function main() {
   const runBootPanelOwnsReadiness = commandPolicy.name === "run" || commandPolicy.name === "go";
   await init({
     requireWritableArtifacts: commandPolicy.requiresWritableArtifacts,
-    allowGitInit: ["add", "go"].includes(command),
+    allowGitInit: initializesProject,
     refreshStartupContext: commandPolicy.refreshContextAfter,
     showReadiness: !runBootPanelOwnsReadiness
       && (commandPolicy.requiresProvider || commandPolicy.requiresNativeGit || commandPolicy.refreshContextAfter),

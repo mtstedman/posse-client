@@ -11,6 +11,8 @@ import { withDependencyInstallLock } from "../../../shared/concurrency/functions
 import { runVerificationPrerequisiteCommand } from "../../verification/functions/prerequisite-adapters.js";
 import { splitSqlStatements } from "../../../shared/tools/functions/toolkit/project-db/permissions.js";
 import { readProjectDbConfig } from "../../../shared/tools/functions/toolkit/project-db/config.js";
+import { ENVIRONMENT_SETUP_LOCK_WAIT_MS, ENVIRONMENT_SETUP_STEP_TIMEOUT_MS } from "../../../catalog/tools/environment-setup.js";
+import { prepareDatabaseConnectionFile } from "./database-connection-file.js";
 
 export function inspectEnvironment(args = {}, { cwd, role = null }) {
   if (role === "planner") cwd = planningEnvironmentRoot(cwd);
@@ -34,10 +36,10 @@ export function inspectEnvironment(args = {}, { cwd, role = null }) {
   };
 }
 
-function assertWritable(file, context) {
+function assertWritable(file, context, tool = "install_dependencies") {
   const allowed = fs.existsSync(file) ? context.scope?.canEdit(file) : context.scope?.canCreate(file);
-  if (!allowed) throw new Error(`Request writable scope for ${path.relative(context.cwd, file)} before installing dependencies.`);
-  const error = guardToolWriteLock("install_dependencies", path.relative(context.cwd, file), context.cwd);
+  if (!allowed) throw new Error(`Request writable scope for ${path.relative(context.cwd, file)} before environment setup.`);
+  const error = guardToolWriteLock(tool, path.relative(context.cwd, file), context.cwd);
   if (error) throw new Error(error);
 }
 
@@ -70,7 +72,7 @@ export async function prepareEnvironmentSetup(tool, args, context) {
       if (fs.existsSync(capture(relative(name)))) throw new Error(`Resolve the existing ${name} package-manager contract before using npm setup.`);
     }
     const lockFile = capture(relative("package-lock.json"));
-    capture(relative(".npmrc"));
+    if (fs.existsSync(capture(relative(".npmrc")))) proposal.npmrc = relative(".npmrc");
     assertWritable(manifestFile, context);
     assertWritable(lockFile, context);
     localPath(cwd, relative("node_modules"), { dependencyDirectory: true });
@@ -105,6 +107,11 @@ export async function prepareEnvironmentSetup(tool, args, context) {
       }
     }
     proposal.changes = [args.path];
+    proposal.connection_file = await prepareDatabaseConnectionFile(args.connection_file, cwd, capture, {
+      reservedPaths: Object.keys(proposal.inputs),
+      assertWritable: (file) => assertWritable(file, context, tool),
+    });
+    if (proposal.connection_file) proposal.changes.push(proposal.connection_file.path);
   } else throw new Error("Unknown environment setup tool.");
   proposal.digest = crypto.createHash("sha256").update(JSON.stringify(proposal)).digest("hex");
   return proposal;
@@ -113,8 +120,11 @@ export async function prepareEnvironmentSetup(tool, args, context) {
 export function environmentSetupQuestion(proposal) {
   if (proposal.tool === "setup_environment") return planningEnvironmentQuestion(proposal);
   const operation = proposal.tool === "install_dependencies"
-    ? [`Command: ${JSON.stringify([proposal.command, ...proposal.argv])}`, `Lifecycle scripts: ${proposal.lifecycle_scripts ? "ENABLED — dependency and project scripts execute with your user permissions" : "disabled"}.`, `Manifest: ${JSON.stringify(proposal.manifest, null, 2)}`]
-    : ["Operation: create a new local SQLite database (no existing data is modified).", `Database: ${proposal.database}`, `SQL schema:\n${proposal.sql || "(empty database)"}`];
+    ? [`Command: ${JSON.stringify([proposal.command, ...proposal.argv])}`, `Lifecycle scripts: ${proposal.lifecycle_scripts ? "ENABLED — dependency and project scripts execute with your user permissions" : "disabled"}.`,
+      ...(proposal.npmrc ? [`npm configuration: ${proposal.npmrc} applies to this install (registry, authentication and git settings). Review it before approving; changing it invalidates this approval.`] : []),
+      `Manifest: ${JSON.stringify(proposal.manifest, null, 2)}`]
+    : ["Operation: create a new local SQLite database (no existing data is modified).", `Database: ${proposal.database}`, `SQL schema:\n${proposal.sql || "(empty database)"}`,
+      ...(proposal.connection_file ? [`New connection module (review source; setup does not execute it):\n${JSON.stringify(proposal.connection_file, null, 2)}\nCommit this source with the application; configuration values stay local.`] : [])];
   return [`Approve this environment setup?`, `Reason: ${proposal.reason}`, `Worktree: ${proposal.cwd}`, ...operation, `Changes: ${proposal.changes.join(", ")}`, "Approval is for this request only. Rejection makes no setup changes."].join("\n\n");
 }
 
@@ -133,7 +143,7 @@ export async function executeEnvironmentSetup(proposal, context, { signal, befor
     beforeExecute();
     if (proposal.tool === "install_dependencies") {
       const spec = commandSpawnSpec(proposal.command, proposal.argv);
-      const result = await runCommand(spec.command, spec.args, { cwd: proposal.directory, signal, windowsVerbatimArguments: spec.windowsVerbatimArguments, timeoutMs: 10 * 60 * 1000 });
+      const result = await runCommand(spec.command, spec.args, { cwd: proposal.directory, signal, windowsVerbatimArguments: spec.windowsVerbatimArguments, timeoutMs: ENVIRONMENT_SETUP_STEP_TIMEOUT_MS });
       return { ...result, changes: proposal.changes, message: result.ok ? "Dependencies installed. Commit the scoped manifest and lockfile with the implementation." : "Installation did not complete; partial dependency/lockfile changes may remain. A retry requires new approval." };
     }
     fs.mkdirSync(path.dirname(proposal.database), { recursive: true });
@@ -146,11 +156,18 @@ export async function executeEnvironmentSetup(proposal, context, { signal, befor
         db.exec("PRAGMA user_version = 0");
         for (const statement of splitSqlStatements(proposal.sql)) db.prepare(statement).run();
       })();
-      return { ok: true, status: "created", path: proposal.args.path, message: "Local SQLite database created in this worktree. Keep the schema and app path configuration in source control. project_db_query grants are unchanged." };
+      if (proposal.connection_file) {
+        const file = localPath(context.cwd, proposal.connection_file.path);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, proposal.connection_file.content, { flag: "wx" });
+      }
+      return { ok: true, status: "created", path: proposal.args.path,
+        ...(proposal.connection_file ? { connection_file: proposal.connection_file.path } : {}),
+        message: "Local SQLite database created in this worktree. Keep the schema and app path configuration in source control. Commit and test any generated connection module with the application. project_db_query grants are unchanged." };
     } catch (error) {
       db?.close(); db = null;
       fs.rmSync(proposal.database, { force: true });
       throw error;
     } finally { db?.close(); }
-  }, { waitMs: 30_000 });
+  }, { waitMs: ENVIRONMENT_SETUP_LOCK_WAIT_MS });
 }

@@ -199,7 +199,12 @@ export class WorkerExecutionCoordinator {
       if (assessOnly.currentAttemptId) currentAttemptId = assessOnly.currentAttemptId;
       if (assessOnly.handled) return;
 
-      await prepareDevelopmentEnvironment(job, wtPath);
+      const environment = await prepareDevelopmentEnvironment(job, wtPath);
+      // DEV is briefed on setup it cannot rely on, as it is on type errors.
+      job._environmentSetupNotices = environment.notices;
+      for (const notice of environment.notices) {
+        worker.emit(job.id, `${C.yellow}[setup] WI#${job.work_item_id}: ${notice}${C.reset}`);
+      }
 
       // Brief DEV/FIX on the type errors already present in the files it may
       // edit. The job holds its write locks and its worktree is ready here.

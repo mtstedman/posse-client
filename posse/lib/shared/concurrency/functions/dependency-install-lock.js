@@ -117,6 +117,12 @@ export function dependencyInstallLockPath(posseRoot) {
   return path.join(managedInstallStateRoot(posseRoot), "deps", "dependency-install.lock");
 }
 
+/** Whether a live installer currently holds this checkout's install lock. */
+export function dependencyInstallLockHeld(posseRoot) {
+  const lockPath = dependencyInstallLockPath(posseRoot);
+  return fs.existsSync(lockPath) && !lockIsStale(lockPath);
+}
+
 export async function withDependencyInstallLock(posseRoot, fn, {
   dryRun = false,
   waitMs = null,

@@ -5,8 +5,10 @@ import { TOOL_REFS, formatToolReference } from "../../../../catalog/tool-referen
 const SETUP_TIMEOUT_MS = 35_000;
 const MAX_CATALOG_BYTES = 16 * 1024 * 1024;
 
+export const CODEX_CORE_DECLARATIONS_INVALID = "POSSE_CODEX_CORE_DECLARATIONS_INVALID";
+
 function catalogError(message) {
-  return Object.assign(new Error(message), { code: "POSSE_CODEX_CORE_DECLARATIONS_INVALID" });
+  return Object.assign(new Error(message), { code: CODEX_CORE_DECLARATIONS_INVALID });
 }
 
 export async function prepareCodexResearchMcpSurface(attachment, { mcpGate } = {}) {

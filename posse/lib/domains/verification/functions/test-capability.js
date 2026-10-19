@@ -9,6 +9,39 @@ import { discoverUnitTestCapability, resolveUnitTestInvocation } from "../../../
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { isUnrunnableTestReason } from "./test-capability-reasons.js";
 import { validatePlannerTestCommandForRepository } from "./planner-test-command.js";
+import {
+  installedNodeRoots,
+  linkComposerVendorFromPrimaryCheckout,
+  linkNodeDependenciesFromPrimaryCheckout,
+  primaryCheckoutFor,
+} from "./prerequisite-adapters.js";
+
+// Reasons a worktree's absent install explains: its runner or package lives
+// under the ignored vendor/ or node_modules/ that it never checks out.
+const PRIMARY_INSTALL_REASONS = new Set(["test_executable_unavailable", "test_dependency_unavailable"]);
+
+/**
+ * Link the primary checkout's lock-matched install into a worktree (no
+ * network, no installer) so a declared runner is not pruned before
+ * dependency repair could supply it. Like development start, it links only
+ * into directories the repository ignores. True when a link succeeded.
+ */
+export function linkPrimaryTestDependencies(cwd, { git = gitExec } = {}) {
+  const primary = cwd ? primaryCheckoutFor(cwd) : null;
+  if (!primary) return false;
+  const ignored = (directory) => {
+    try { git(["check-ignore", "-q", "--", `${directory}/.posse-setup-probe`], cwd); return true; } catch { return false; }
+  };
+  let linked = false;
+  if (fs.existsSync(path.join(cwd, "composer.lock")) && ignored("vendor")) {
+    linked = linkComposerVendorFromPrimaryCheckout(cwd).ok;
+  }
+  const nodeDirectories = installedNodeRoots(primary).map((root) => (root === "." ? "node_modules" : `${root}/node_modules`));
+  if (nodeDirectories.length > 0 && nodeDirectories.every(ignored)) {
+    linked = linkNodeDependenciesFromPrimaryCheckout(cwd).ok || linked;
+  }
+  return linked;
+}
 
 export function testFileRemovedSinceBaseline(file, cwd, baselineCommit) {
   if (!file || !/^(?:HEAD|[a-f0-9]{40,64})$/i.test(baselineCommit || "")) return false;
@@ -56,11 +89,18 @@ export function testFileCapability(file, cwd, capability, { findCommand = findCo
 
 // Recomputed at each handoff, including old queued/fix jobs. Telemetry retains
 // the discarded selections; the agent receives only runnable obligations.
-export function pruneTestHandoff(payload, cwd, { jobId = null, findCommand = findCommandOnPath, posseRoot = undefined } = {}) {
+export function pruneTestHandoff(payload, cwd, { jobId = null, findCommand = findCommandOnPath, posseRoot = undefined, linkDependencies = null } = {}) {
   if (!cwd) return payload;
   const next = { ...payload };
   const pruned = [];
   const baselineCommit = payload._test_capability_base_commit || payload.root_base_commit || payload.commit_base_hash || "HEAD";
+  // One link attempt per handoff, then the selection is evaluated again.
+  let linkAttempted = false;
+  const linkedInstall = (reason) => {
+    if (linkAttempted || typeof linkDependencies !== "function" || !PRIMARY_INSTALL_REASONS.has(reason)) return false;
+    linkAttempted = true;
+    try { return linkDependencies(cwd) === true; } catch { return false; }
+  };
   const rejected = payload._verification_plan_invalid;
   if (rejected?.command && isUnrunnableTestReason(rejected.reason)
     && !(payload._pruned_tests || []).some((entry) => entry.command === rejected.command && entry.reason === rejected.reason)) {
@@ -68,9 +108,11 @@ export function pruneTestHandoff(payload, cwd, { jobId = null, findCommand = fin
     if (!Array.isArray(next.tests_to_run)) next.tests_to_run = [];
   }
   if (payload.test_command) {
-    const reason = testCommandCapability(payload.test_command, cwd, {
+    const evaluate = () => testCommandCapability(payload.test_command, cwd, {
       filesToCreate: Array.isArray(payload.files_to_create) ? payload.files_to_create : [], findCommand, baselineCommit,
     });
+    let reason = evaluate();
+    if (linkedInstall(reason)) reason = evaluate();
     if (reason && reason !== TEST_RUNNER_REMOVED_REASON) {
       pruned.push({ command: payload.test_command, reason });
       next.test_command = null;
@@ -82,7 +124,8 @@ export function pruneTestHandoff(payload, cwd, { jobId = null, findCommand = fin
     const capability = discoverUnitTestCapability({ projectDir: cwd });
     next.tests_to_run = payload.tests_to_run.filter((file) => {
       if ((payload.files_to_create || []).some((created) => normPath(created) === normPath(file))) return true;
-      const reason = testFileCapability(file, cwd, capability, { findCommand, baselineCommit, posseRoot });
+      let reason = testFileCapability(file, cwd, capability, { findCommand, baselineCommit, posseRoot });
+      if (linkedInstall(reason)) reason = testFileCapability(file, cwd, capability, { findCommand, baselineCommit, posseRoot });
       if (!reason || reason === TEST_RUNNER_REMOVED_REASON) return true;
       pruned.push({ path: file, reason });
       return false;

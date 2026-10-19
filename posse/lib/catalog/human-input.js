@@ -254,6 +254,18 @@ export const HUMAN_GATE_RECOVERY_KINDS = Object.freeze([
   "scope_expansion_required",
 ]);
 
+// Gates that withhold authority or a requirement instead of recovering failed
+// work: plan approval, file-scope approval, installer approval, and an untyped
+// clarification (including the planner's dependency-setup question). The work
+// behind them is not yet authorized, not failed, so an unanswered one stays
+// open for the operator and never times out in a headless run.
+export const AUTHORIZATION_GATE_KINDS = Object.freeze([
+  "plan_approval",
+  "scope_expansion_required",
+  ENVIRONMENT_SETUP_REVIEW_TYPE,
+  "clarification",
+]);
+
 export const CANONICAL_HUMAN_GATE_ACTIONS = GATE_ACTION_ORDER;
 
 const HUMAN_GATE_CONTRACTS = Object.freeze({

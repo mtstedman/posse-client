@@ -45,16 +45,27 @@ export function nodePrerequisiteContext(projectDir, command, receipt = null) {
     if (cursor === root) break;
     cursor = path.dirname(cursor);
   }
+  const output = `${receipt?.stdout || ""}\n${receipt?.stderr || ""}`;
+  const missingPackage = missingNodeTestDependency(output);
+  // Scoped checks and typecheck name the declared package whose directory
+  // they found absent. Type-only packages never resolve at runtime, so that
+  // directory is what readiness checks for them.
+  const declaredPackage = missingPackage ? null : /\bdeclared package (\S+) is not installed\b/.exec(output)?.[1] || null;
   return {
     projectDir: installRoot,
     importer,
-    missingPackage: missingNodeTestDependency(`${receipt?.stdout || ""}\n${receipt?.stderr || ""}`),
+    missingPackage: missingPackage || declaredPackage,
+    ...(declaredPackage ? { packageDirectoryOnly: true } : {}),
   };
 }
 
 export function nodePrerequisiteReady(context) {
   if (!context?.missingPackage) {
     try { return fs.statSync(path.join(context.projectDir, "node_modules")).isDirectory(); } catch { return false; }
+  }
+  if (context.packageDirectoryOnly) {
+    return (createRequire(context.importer).resolve.paths(context.missingPackage) || [])
+      .some((directory) => fileExists(path.join(directory, context.missingPackage, "package.json")));
   }
   try {
     createRequire(context.importer).resolve(context.missingPackage);

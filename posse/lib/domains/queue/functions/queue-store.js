@@ -3629,6 +3629,8 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
   // required/degraded policy can run. While the referenced warm is active,
   // however, keep the consumer out of the lease pool entirely. Leasing it only
   // to have the worker release and requeue it creates avoidable queue churn.
+  // A warm parked until the next boot (ATLAS disabled for this run) is not
+  // active: its consumers lease and the worker binds them without ATLAS.
   conditions.push(`NOT EXISTS (
       SELECT 1 FROM jobs evidence_warm
       WHERE j.payload_json IS NOT NULL
@@ -3636,6 +3638,8 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
         AND evidence_warm.id = CAST(json_extract(j.payload_json, '$._atlas_evidence_warm_job_id') AS INTEGER)
         AND evidence_warm.job_type = 'atlas_warm'
         AND evidence_warm.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+        AND COALESCE(CASE WHEN json_valid(evidence_warm.payload_json)
+          THEN json_extract(evidence_warm.payload_json, '$._atlas_parked_until_boot') END, 0) != 1
     )`);
 
   // A recently queued main refresh can be identified without leasing the

@@ -2,7 +2,7 @@ import { LEGACY_SKIP_WAIVER_KINDS } from "../../../catalog/gate-actions.js";
 import { humanInputChoicesForPayload } from "../../../catalog/human-input.js";
 import { typedKindForGate } from "../../queue/functions/interaction-contract.js";
 import { answerHumanInput } from "../../bridge/functions/human-input-answer.js";
-import { getHumanGate, getJob } from "../../queue/functions/index.js";
+import { getHumanGate, getJob, getLiveSchedulerBlockMessage, listJobsByWorkItem } from "../../queue/functions/index.js";
 import { resolveGateReviewDiffTarget } from "../../queue/functions/gate-review-target.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import {
@@ -116,6 +116,16 @@ export function formatGateShowLines({ gateJob, payload = {}, choices = [], gateS
   return out;
 }
 
+// An answer only requeues the work it releases; a run executes it. With no
+// live scheduler (the run that opened the gate already exited) nothing will,
+// so name the queued work instead of implying it runs now. A detached run is
+// not launched here: the bridge's `go --non-interactive` would also approve
+// every other pending plan and scope gate, authority this answer never gave.
+function queuedWithoutRun(workItemId, { liveSchedulerFn, listJobsFn }) {
+  if (workItemId == null || liveSchedulerFn("main")) return [];
+  return listJobsFn(workItemId).filter((job) => job.status === "queued").map((job) => Number(job.id));
+}
+
 function loadGateJob(rawId, getJobFn) {
   const gateJobId = Number(rawId);
   if (!Number.isSafeInteger(gateJobId) || gateJobId <= 0) {
@@ -169,6 +179,8 @@ export async function runGateCommand(argv = [], {
   getHumanGateFn = getHumanGate,
   resolveReviewDiffTargetFn = resolveGateReviewDiffTarget,
   buildReviewDiffFn = buildGateReviewDiff,
+  liveSchedulerFn = getLiveSchedulerBlockMessage,
+  listJobsFn = listJobsByWorkItem,
 } = {}) {
   const args = positionalArgs(argv);
   if (["show", "diff"].includes(args[0]) && args.length === 2) {
@@ -202,7 +214,8 @@ export async function runGateCommand(argv = [], {
       allowChoiceFeedback: false,
     });
     return result?.ok
-      ? { ...result, action: "answer", answer_text: answer, exitCode: 0 }
+      ? { ...result, action: "answer", answer_text: answer, exitCode: 0,
+        queued_without_run: result.pending ? [] : queuedWithoutRun(gateJob.work_item_id, { liveSchedulerFn, listJobsFn }) }
       : { ...(result || {}), ok: false, action: "answer", answer_text: answer, exitCode: 1 };
   }
   if (args.length !== 3 && !text) return { ok: false, reason: "usage", exitCode: 2 };
@@ -225,6 +238,7 @@ export async function runGateCommand(argv = [], {
     allowChoiceFeedback: Boolean(feedback),
   });
   return result?.ok
-    ? { ...result, action, feedback, exitCode: 0 }
+    ? { ...result, action, feedback, exitCode: 0,
+      queued_without_run: result.pending ? [] : queuedWithoutRun(gateJob.work_item_id, { liveSchedulerFn, listJobsFn }) }
     : { ...(result || {}), ok: false, action, feedback, exitCode: 1 };
 }

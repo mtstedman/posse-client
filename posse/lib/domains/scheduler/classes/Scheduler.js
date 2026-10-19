@@ -16,7 +16,7 @@ import { releaseUnusedCompletedWorkItemLocks } from "../functions/unused-planned
 
 import crypto from "crypto";
 import { spawn } from "child_process";
-import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, getQueueWakeGeneration, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgePresenceFresh, isMergeVerificationReviewJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, isWorkItemDispositionGateJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
+import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, workItemOperatorParking, getQueueWakeGeneration, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, jobHasLiveEnvironmentSetup, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgePresenceFresh, isMergeVerificationReviewJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, isWorkItemDispositionGateJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
 import { WORK_ITEM_ORDER_WAIT_REASON } from "../../queue/functions/work-item-order.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { reapOrphanedDaemons } from "../../../shared/tools/classes/daemon/index.js";
@@ -38,6 +38,7 @@ import { DEADLOCK_TERMINAL_STATUSES, LOCK_HOLDING_JOB_STATUSES, RESERVED_SLOT_IM
 import { WAITING_LANE_JOB_TYPE } from "../../../catalog/waiting-lane.js";
 import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atlas.js";
 import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
+import { ENVIRONMENT_SETUP_RUNTIME_CREDIT_CAP_MS } from "../../../catalog/tools/environment-setup.js";
 import { DEFAULT_LEASE_SEC, DEFAULT_CONCURRENCY, DEFAULT_POLL_MS, DEFAULT_REPAIR_POLL_MS, LOCK_RENEW_SEC, MAX_RUNNABLE_SCAN_PER_TICK, PROGRESS_TIMEOUT_SEC, maxJobRuntimeSecFor, readActiveWorktreeCap, readAtlasDriftCheckIntervalMs, readHeadlessHumanTimeoutSec, readHumanGateResnoozeSec, readImplementationReservedSlots, readPositiveIntSetting, readRuntimeWriteCeilingMultiplier, readRuntimeWriteGraceSec } from "../functions/config.js";
 import { findFileConflict } from "../functions/file-scope.js";
 import { RUNTIME_NO_ESCALATION_BACKSTOP_MULTIPLIER, runtimeKillCanEscalate, runtimeWriteExtensionActive } from "../functions/runtime-escalation.js";
@@ -375,7 +376,10 @@ export class Scheduler {
     const workItemIds = [...new Set(live.map((job) => Number(job.work_item_id)).filter((id) => id > 0))];
     const holders = [];
     for (const workItemId of workItemIds) {
-      const parking = workItemMergeParking(workItemId);
+      // Plan, scope, installer and clarification gates park their work too:
+      // the headless sweep leaves them open, so the run ends as needs-action.
+      const parking = workItemMergeParking(workItemId)
+        || workItemOperatorParking(workItemId, { awaitingOperator: true });
       if (parking?.reason !== "operator_gate") return null;
       holders.push({ work_item_id: workItemId, status: getWorkItem(workItemId)?.status || null, parking });
     }
@@ -2526,8 +2530,10 @@ export class Scheduler {
           // operator would idle forever (finding 1, run 1250b: an order wait
           // on WI 169, parked behind its upstream gate). After a grace period
           // the run finishes as needs-action, naming those work items.
+          // A job parked on its own gate (a scope request, a block) holds its
+          // locks without running; only operator parking can end the run then.
           const stall = hasActive
-            ? null
+            ? this._describeDirectOperatorParking({ trackedJobs: trackedJobsForCloseout })
             : (this._describeParkedUpstreamStall({
               scannedJobIds: scanExcludeJobIds,
               scanCapped: candidateCount >= maxCandidateScan,
@@ -2830,22 +2836,34 @@ function runtimeWatchdogElapsedMs(entry, job, nowMs = Date.now()) {
     entry.startTime += Math.max(0, nowMs - entry.humanGateExemptSince);
     entry.humanGateExemptSince = null;
   }
-  const creditUsedMs = entry.runtimeExemptCreditMs || 0;
-  if (__testRuntimeWatchdogExempt(job, { nowMs })) {
-    if (entry.runtimeExemptSince == null) entry.runtimeExemptSince = nowMs;
-    const accruingMs = creditUsedMs + Math.max(0, nowMs - entry.runtimeExemptSince);
-    // Exemption is honored only while cumulative credit remains; past the
-    // ceiling the wait counts as runtime again so the cap still binds.
-    if (accruingMs < RUNTIME_EXEMPT_CREDIT_CAP_MS) return null;
-  }
-  if (entry.runtimeExemptSince != null) {
-    const pauseMs = Math.max(0, nowMs - entry.runtimeExemptSince);
-    const appliedMs = Math.min(pauseMs, Math.max(0, RUNTIME_EXEMPT_CREDIT_CAP_MS - creditUsedMs));
-    entry.startTime += appliedMs;
-    entry.runtimeExemptCreditMs = creditUsedMs + appliedMs;
-    entry.runtimeExemptSince = null;
-  }
+  if (creditedRuntimeExemption(entry, __testRuntimeWatchdogExempt(job, { nowMs }), nowMs, {
+    sinceKey: "runtimeExemptSince", creditKey: "runtimeExemptCreditMs", capMs: RUNTIME_EXEMPT_CREDIT_CAP_MS,
+  })) return null;
+  // A setup tool call blocks on the user and then on approved installers.
+  // Its marker carries its own deadline; the separate credit keeps repeated
+  // setup requests from exempting a runaway job indefinitely.
+  if (creditedRuntimeExemption(entry, jobHasLiveEnvironmentSetup(job, { nowMs }), nowMs, {
+    sinceKey: "environmentSetupExemptSince", creditKey: "environmentSetupExemptCreditMs", capMs: ENVIRONMENT_SETUP_RUNTIME_CREDIT_CAP_MS,
+  })) return null;
   return Math.max(0, nowMs - entry.startTime);
+}
+
+// Exemption is honored only while cumulative credit remains; past the ceiling
+// the wait counts as runtime again so the cap still binds. Credited time moves
+// startTime forward when the exemption ends.
+function creditedRuntimeExemption(entry, exempt, nowMs, { sinceKey, creditKey, capMs }) {
+  const creditUsedMs = entry[creditKey] || 0;
+  if (exempt) {
+    if (entry[sinceKey] == null) entry[sinceKey] = nowMs;
+    if (creditUsedMs + Math.max(0, nowMs - entry[sinceKey]) < capMs) return true;
+  }
+  if (entry[sinceKey] != null) {
+    const appliedMs = Math.min(Math.max(0, nowMs - entry[sinceKey]), Math.max(0, capMs - creditUsedMs));
+    entry.startTime += appliedMs;
+    entry[creditKey] = creditUsedMs + appliedMs;
+    entry[sinceKey] = null;
+  }
+  return false;
 }
 
 export function __testRuntimeWatchdogElapsedMs(entry, job, nowMs) {

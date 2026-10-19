@@ -93,9 +93,27 @@ function relativeDirectoryPattern(anchorDir, targetDir) {
   return asDirectoryPattern(rel);
 }
 
+// Runtime state once lived in root db/, resources/ and logs/ directories; it
+// is all under .posse/ now. Those rules hid application source such as
+// Laravel's resources/views and db/migrations, so they are retired. Only the
+// generated run directly after the runtime directories is removed.
+export const RETIRED_RUNTIME_DIRECTORY_RULES = new Set(["db/", "resources/", "logs/", "/db/", "/resources/", "/logs/"]);
+
+function removeRetiredRuntimeDirectoryRules(content) {
+  const lines = content.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index].trim() !== ".posse-test-suites/") continue;
+    let end = index + 1;
+    while (end < lines.length && RETIRED_RUNTIME_DIRECTORY_RULES.has(lines[end].trim())) end += 1;
+    if (end > index + 1) lines.splice(index + 1, end - index - 1);
+  }
+  return lines.join("\n");
+}
+
 // Older excludes had no ownership header. Repair only a complete generated
 // sequence, leaving isolated/user-authored rules and surrounding text intact.
 function repairLegacyRuntimeExcludes(content, entries) {
+  content = removeRetiredRuntimeDirectoryRules(content);
   const legacy = entries.map((entry) => entry.startsWith("/") ? entry.slice(1) : entry);
   const lines = content.split("\n");
   for (let start = 0; start <= lines.length - legacy.length; start += 1) {
@@ -172,13 +190,6 @@ export function buildPosseRuntimeIgnoreEntries(projectDir, {
     if (rel) entries.push(rel);
   }
 
-  // These legacy runtime directories belong to this project root. Unanchored
-  // basename rules also hide legitimate source such as src/db/schema.ts.
-  for (const name of ["db", "resources", "logs"]) {
-    const rel = relativeDirectoryPattern(anchor, path.join(projectRoot, name));
-    if (rel) entries.push(`/${rel}`);
-  }
-
   entries.push(...RUNTIME_DB_GLOBS);
   entries.push(...GENERATED_CACHE_GLOBS);
   return [...new Set(entries)];
@@ -227,8 +238,16 @@ export function isPosseRuntimeOnlyGitignoreContent(projectDir, content, {
     .filter(Boolean);
   if (lines.length === 0 || !lines.includes(POSSE_RUNTIME_IGNORE_HEADER)) return false;
 
-  const allowed = new Set(buildPosseRuntimeIgnoreEntries(projectDir, { anchorDir }));
+  const allowed = new Set([...buildPosseRuntimeIgnoreEntries(projectDir, { anchorDir }), ...RETIRED_RUNTIME_DIRECTORY_RULES]);
   return lines.every((line) => allowed.has(line));
+}
+
+// True when Posse wrote its managed block into the file, whether it created
+// the file or appended the block to a user's existing rules.
+export function hasPosseRuntimeIgnoreBlock(content) {
+  return String(content || "")
+    .split(/\r?\n/)
+    .some((line) => line.trim() === POSSE_RUNTIME_IGNORE_HEADER);
 }
 
 export async function ensurePosseRuntimeGitignoreAsync(projectDir, {
@@ -269,8 +288,11 @@ async function gitOutputAsync(args, cwd) {
   return String(await gitExecAsync(args, cwd, { timeoutMs: 30_000 }) || "").trim();
 }
 
+// The bootstrap commit passes includeAppendedBlock: with no history to protect,
+// it also records a user .gitignore that Posse appended its block to.
 export async function stagePosseRuntimeGitignoreForInitialCommit(projectDir, {
   git = gitOutputAsync,
+  includeAppendedBlock = false,
 } = {}) {
   const projectRoot = path.resolve(projectDir || process.cwd());
   try {
@@ -294,7 +316,8 @@ export async function stagePosseRuntimeGitignoreForInitialCommit(projectDir, {
     return { staged: false, skipped: "missing" };
   }
 
-  if (!isPosseRuntimeOnlyGitignoreContent(projectRoot, content)) {
+  if (!isPosseRuntimeOnlyGitignoreContent(projectRoot, content)
+    && !(includeAppendedBlock && hasPosseRuntimeIgnoreBlock(content))) {
     return { staged: false, skipped: "not_posse_runtime_only" };
   }
 

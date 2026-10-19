@@ -23,7 +23,7 @@ import {
   storeArtifact,
 } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
-import { buildImageArtifactRecoveryPayload } from "../helpers/verdicts/fail.js";
+import { buildArtifactRecoveryPayload, buildImageArtifactRecoveryPayload } from "../helpers/verdicts/fail.js";
 import { refreshAndExtractInsights } from "../helpers/insights.js";
 import { looksLikeFileDestination, normalizeRootRelativePromoteDest, validatePromoteDestinationPath } from "../../../planning/functions/plan-routing.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
@@ -207,37 +207,41 @@ export function selectPromoteSourceFiles(files, { sourceDir, projectDir = null, 
   return selected;
 }
 
-// The artificer that produced this promote's source directory, when one
-// sibling in the WI wrote there and named the missing files in its brief;
-// its task and criteria give the repair the deck's style and constraints.
+// The artificer that produced this promote's source directory (its output
+// root is that directory or contains it), preferring the one whose brief
+// names the missing files; its task and criteria give the repair the set's
+// style and constraints.
 function findSourceArtificer(job, sourceDir, missingNames) {
   const candidates = [];
   for (const sibling of listJobsByWorkItem(job.work_item_id)) {
     if (sibling.job_type !== "artificer" || sibling.id === job.id) continue;
     const payload = parseJobPayload(sibling);
     const outputRoot = String(payload?.output_root || "").trim();
-    if (!outputRoot || path.resolve(outputRoot) !== path.resolve(sourceDir)) continue;
-    const text = `${payload.task_spec || ""}\n${(payload.success_criteria || []).join("\n")}`;
+    if (!outputRoot || !resolvePathWithin(path.resolve(outputRoot), sourceDir)) continue;
+    const exact = path.resolve(outputRoot) === path.resolve(sourceDir);
+    const text = `${payload.task_spec || ""}\n${(payload.success_criteria || []).join("\n")}\n${(payload.files_to_create || []).join("\n")}`;
     const mentions = missingNames.filter((name) => text.includes(name)).length;
-    candidates.push({ sibling, payload, mentions });
+    candidates.push({ sibling, payload, mentions, exact });
   }
-  candidates.sort((left, right) => right.mentions - left.mentions || left.sibling.id - right.sibling.id);
+  candidates.sort((left, right) => right.mentions - left.mentions
+    || Number(right.exact) - Number(left.exact)
+    || left.sibling.id - right.sibling.id);
   return candidates[0] || null;
 }
 
 // A repair that has not finished: waiting to run, or holding a lease.
 const PENDING_REPAIR_STATUSES = new Set(["queued", ...LEASE_HOLDING_STATUSES]);
 
-// Image names an unfinished repair job in this WI is regenerating into the
+// File names an unfinished repair job in this WI is producing into the
 // source directory: the assessor's partial-deliverable repair, or an earlier
 // promote's own repair. Those files are deferred to that job rather than
-// installed now (possibly defective) or regenerated twice.
-function pendingImageRepairs(job, sourceDir) {
+// installed now (possibly defective) or produced twice.
+function pendingMissingFileRepairs(job, sourceDir) {
   const byName = new Map();
   for (const sibling of listJobsByWorkItem(job.work_item_id)) {
     if (sibling.job_type !== "artificer" || !PENDING_REPAIR_STATUSES.has(sibling.status)) continue;
     const payload = parseJobPayload(sibling);
-    const names = Array.isArray(payload?._repair_image_names) ? payload._repair_image_names : [];
+    const names = [payload?._repair_image_names, payload?._repair_file_names].flatMap((list) => (Array.isArray(list) ? list : []));
     const outputRoot = String(payload?.output_root || "").trim();
     if (names.length === 0 || !outputRoot || path.resolve(outputRoot) !== path.resolve(sourceDir)) continue;
     for (const name of names) if (!byName.has(name)) byName.set(name, sibling);
@@ -245,7 +249,13 @@ function pendingImageRepairs(job, sourceDir) {
   return byName;
 }
 
-function spawnFollowupPromote(worker, job, payload, { mappings, repairJob, attemptId }) {
+// How many missing-file repairs this promote's chain has already spawned.
+function promoteMissingRepairRound(payload) {
+  const round = Number(payload?._promote_missing_repair_round);
+  return Number.isInteger(round) && round > 0 ? round : 0;
+}
+
+function spawnFollowupPromote(worker, job, payload, { mappings, repairJob, attemptId, extraPayload = {} }) {
   const followupJob = createJob({
     work_item_id: job.work_item_id,
     job_type: "promote",
@@ -253,7 +263,7 @@ function spawnFollowupPromote(worker, job, payload, { mappings, repairJob, attem
     parent_job_id: job.parent_job_id || job.id,
     priority: job.priority,
     model_tier: job.model_tier,
-    payload_json: JSON.stringify({ ...payload, mappings, _promote_followup_of: job.id }),
+    payload_json: JSON.stringify({ ...payload, mappings, ...extraPayload, _promote_followup_of: job.id }),
   });
   addDependency(followupJob.id, repairJob.id, "hard");
   const rewired = [];
@@ -267,55 +277,79 @@ function spawnFollowupPromote(worker, job, payload, { mappings, repairJob, attem
 }
 
 /**
- * A promote whose explicit image mappings partly exist installs what is
- * there and hands the rest to a repair scoped to exactly the missing files:
- * an artificer job for those names, then a promote of only those mappings.
- * Jobs that waited on this promote also wait on the follow-up, so the WI
- * still converges on the full set without regenerating what was good.
+ * A promote whose named source files are partly or wholly missing installs
+ * what is there and hands the rest to a repair scoped to exactly the missing
+ * files: an artificer job for those names, then a promote of only those
+ * mappings. Jobs that waited on this promote also wait on the follow-up, so
+ * the WI still converges on the full set without redoing what was good.
  */
-function spawnMissingImageRepair(worker, job, payload, { sourceDir, missingMappings, attemptId }) {
+function spawnMissingFileRepair(worker, job, payload, { sourceDir, missingMappings, source, attemptId, copied = true }) {
   const missingNames = missingMappings.map((mapping) => mapping.pattern);
-  const source = findSourceArtificer(job, sourceDir, missingNames);
   const outputRoot = path.relative(worker.projectDir, sourceDir).replace(/\\/g, "/");
-  const existing = listSourceFiles(sourceDir).filter((file) => isImageArtifactName(file.name))
+  const images = missingNames.every(isImageArtifactName);
+  const existing = listSourceFiles(sourceDir).filter((file) => !images || isImageArtifactName(file.name))
     .map((file) => file.relative);
-  const fixInstructions = [
-    `Generate exactly these missing image files into the output root, with these exact filenames: ${missingNames.join(", ")}.`,
-    `The other files of this set already exist in the output root (${existing.length} file(s)${existing.length > 0 ? `: ${existing.slice(0, 12).join(", ")}${existing.length > 12 ? ", …" : ""}` : ""}); match their style, dimensions and border, and do not regenerate or modify them.`,
-  ].join("\n");
-  const repairPayload = buildImageArtifactRecoveryPayload({
-    job: source?.sibling || job,
-    fixInstructions,
-    assessorFeedback: [],
-    originalCreateFiles: [],
-    originalCreateRoots: [outputRoot],
-    originalFiles: [],
-    originalOutputRoot: outputRoot,
-    originalSuccessCriteria: [
-      `Each of ${missingNames.join(", ")} exists in the output root as a valid image.`,
-      ...(source?.payload?.success_criteria || []).filter((criterion) => !/^exactly \d+ /iu.test(String(criterion))),
-    ],
-    originalTaskSpec: source?.payload?.task_spec || null,
-  });
+  const existingNote = `${existing.length} file(s)${existing.length > 0 ? `: ${existing.slice(0, 12).join(", ")}${existing.length > 12 ? ", …" : ""}` : ""}`;
+  const sourceCriteria = (source?.payload?.success_criteria || []).filter((criterion) => !/^exactly \d+ /iu.test(String(criterion)));
+  const repairPayload = images
+    ? {
+      ...buildImageArtifactRecoveryPayload({
+        job: source?.sibling || job,
+        fixInstructions: [
+          `Generate exactly these missing image files into the output root, with these exact filenames: ${missingNames.join(", ")}.`,
+          `The other files of this set already exist in the output root (${existingNote}); match their style, dimensions and border, and do not regenerate or modify them.`,
+        ].join("\n"),
+        assessorFeedback: [],
+        originalCreateFiles: [],
+        originalCreateRoots: [outputRoot],
+        originalFiles: [],
+        originalOutputRoot: outputRoot,
+        originalSuccessCriteria: [`Each of ${missingNames.join(", ")} exists in the output root as a valid image.`, ...sourceCriteria],
+        originalTaskSpec: source?.payload?.task_spec || null,
+      }),
+      _repair_image_names: missingNames,
+    }
+    : {
+      ...buildArtifactRecoveryPayload({
+        job: source?.sibling || job,
+        fixInstructions: [
+          `Produce exactly these missing files in the output root, with these exact filenames: ${missingNames.join(", ")}.`,
+          `The other files of this deliverable already exist in the output root (${existingNote}); keep the new files consistent with them, and do not regenerate or modify them.`,
+        ].join("\n"),
+        assessorFeedback: [],
+        originalOutputRoot: outputRoot,
+        originalSuccessCriteria: [`Each of ${missingNames.join(", ")} exists in the output root.`, ...sourceCriteria],
+        originalTaskSpec: source?.payload?.task_spec || null,
+        originalTaskMode: source?.payload?.task_mode || "content",
+      }),
+      files_to_create: missingNames.map((name) => path.join(sourceDir, name).replace(/\\/g, "/")),
+      _repair_file_names: missingNames,
+    };
+  const noun = images ? "images" : "files";
   const repairJob = createJob({
     work_item_id: job.work_item_id,
     job_type: "artificer",
-    title: `Generate missing images (${missingNames.length}): ${missingNames.slice(0, 3).join(", ")}${missingNames.length > 3 ? ", …" : ""}`,
+    title: `${images ? "Generate" : "Produce"} missing ${noun} (${missingNames.length}): ${missingNames.slice(0, 3).join(", ")}${missingNames.length > 3 ? ", …" : ""}`,
     parent_job_id: job.id,
     priority: job.priority,
     model_tier: source?.sibling?.model_tier || "standard",
     reasoning_effort: source?.sibling?.reasoning_effort || "medium",
     skills: source?.sibling?.skills || null,
-    payload_json: JSON.stringify({ ...repairPayload, _repair_image_names: missingNames, _promote_missing_repair_for: job.id }),
+    payload_json: JSON.stringify({ ...repairPayload, _promote_missing_repair_for: job.id }),
   });
-  const { followupJob, rewired } = spawnFollowupPromote(worker, job, payload, { mappings: missingMappings, repairJob, attemptId });
+  const { followupJob, rewired } = spawnFollowupPromote(worker, job, payload, {
+    mappings: missingMappings,
+    repairJob,
+    attemptId,
+    extraPayload: { _promote_missing_repair_round: promoteMissingRepairRound(payload) + 1 },
+  });
   logEvent({
     work_item_id: job.work_item_id,
     job_id: job.id,
     attempt_id: attemptId,
     event_type: EVENT_TYPES.JOB_PROMOTE_PARTIAL,
     actor_type: EVENT_ACTORS.WORKER,
-    message: `Promoted the existing files; ${missingNames.length} missing image(s) routed to repair #${repairJob.id} and follow-up promote #${followupJob.id}: ${missingNames.join(", ")}`,
+    message: `${copied ? "Promoted the existing files; " : ""}${missingNames.length} missing ${noun} routed to repair #${repairJob.id} and follow-up promote #${followupJob.id}: ${missingNames.join(", ")}`,
     event_json: JSON.stringify({
       missing: missingNames,
       repair_job_id: repairJob.id,
@@ -324,7 +358,7 @@ function spawnMissingImageRepair(worker, job, payload, { sourceDir, missingMappi
       dependents_rewired: rewired,
     }),
   });
-  worker.emit(job.id, `${C.yellow}[promote]${C.reset} WI#${job.work_item_id} job #${job.id}: ${missingNames.length} image(s) missing; spawned repair #${repairJob.id} -> promote #${followupJob.id}`);
+  worker.emit(job.id, `${C.yellow}[promote]${C.reset} WI#${job.work_item_id} job #${job.id}: ${missingNames.length} ${noun} missing; spawned repair #${repairJob.id} -> promote #${followupJob.id}`);
   return { repairJob, followupJob, rewired };
 }
 
@@ -384,7 +418,7 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
 
     const plannedCopies = [];
     const missingMappings = [];
-    const pendingRepairs = pendingImageRepairs(job, sourceDir);
+    const pendingRepairs = pendingMissingFileRepairs(job, sourceDir);
     const deferredByRepair = new Map();
     for (const mapping of mappings) {
       worker._throwIfKilled(job.id);
@@ -439,10 +473,9 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
 
       if (sourceFiles.length === 0) {
         if (deferredWildcard) continue;
-        // An explicit image file that was never produced is a gap in the
-        // set, not a reason to discard the files that were: it is promoted
-        // partially below and the gap goes to a scoped repair.
-        if (!wildcard && explicitFileDest && isImageArtifactName(pattern)) {
+        // A named file that was never produced is a gap in the set, not a
+        // reason to discard the files that were: decided below.
+        if (!wildcard) {
           missingMappings.push(mapping);
           continue;
         }
@@ -488,27 +521,49 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
       }
     }
 
-    if (plannedCopies.length === 0 && (missingMappings.length > 0 || deferredByRepair.size > 0)) {
-      if (missingMappings.length === 0) {
-        // Everything this promote covers is still being repaired; the
-        // follow-ups will install it. Nothing to promote now.
-        for (const group of deferredByRepair.values()) {
-          spawnFollowupPromote(worker, job, payload, { mappings: group.mappings, repairJob: group.repairJob, attemptId: attempt.attempt.id });
-        }
-        worker.emit(job.id, `${C.yellow}[promote]${C.reset} WI#${job.work_item_id} job #${job.id}: every mapping awaits a pending repair; deferred to follow-up promote(s)`);
-        completeAttempt(attempt.attempt.id, { status: "succeeded", duration_ms: Date.now() - startTime, output_chars: 0 });
-        worker._releaseLease(job, leaseToken, "succeeded");
-        refreshAndExtractInsights(job.work_item_id);
-        worker._cleanupWorktreeIfDone(job.work_item_id);
-        return;
+    // The files that exist are promoted and the missing ones go to a repair
+    // of the artificer that wrote the source directory (image sets fall back
+    // to the image route without one). A follow-up promote after a repair
+    // must install something to repair again, so a repair that never
+    // produces its files ends at the dead-letter gate instead of looping.
+    let missingRepairSource = null;
+    if (missingMappings.length > 0) {
+      const missingNames = missingMappings.map((mapping) => mapping.pattern);
+      missingRepairSource = findSourceArtificer(job, sourceDir, missingNames);
+      const madeProgress = promoteMissingRepairRound(payload) === 0 || plannedCopies.length > 0;
+      const repairable = madeProgress && (!!missingRepairSource
+        || (plannedCopies.length > 0 && missingNames.every(isImageArtifactName)));
+      if (!repairable) {
+        worker.display?.updateWorkerTier(job.id, "standard", attempt.attempt_number || job.attempt_count || 1);
+        logBadInputFailure(job, {
+          layer: "promote",
+          upstream: "artifact_output",
+          classification: "missing_expected_files",
+          detail: plannedCopies.length === 0
+            ? `None of the ${missingMappings.length} promote mapping(s) matched a file in ${sourceDir}`
+            : `Promote mapping "${missingNames[0]}" matched no files in ${sourceDir}`,
+        });
+        throw new Error(plannedCopies.length === 0
+          ? `No files matching any mapping in ${sourceDir}: ${missingNames.join(", ")}`
+          : `No files matching "${missingNames[0]}" in ${sourceDir}`);
       }
-      logBadInputFailure(job, {
-        layer: "promote",
-        upstream: "artifact_output",
-        classification: "missing_expected_files",
-        detail: `None of the ${missingMappings.length} promote mapping(s) matched a file in ${sourceDir}`,
-      });
-      throw new Error(`No files matching any mapping in ${sourceDir}: ${missingMappings.map((mapping) => mapping.pattern).join(", ")}`);
+    }
+
+    if (plannedCopies.length === 0 && (missingMappings.length > 0 || deferredByRepair.size > 0)) {
+      // Nothing to promote now: the repairs produce every mapped file and
+      // their follow-up promotes install them.
+      const repair = missingMappings.length > 0
+        ? spawnMissingFileRepair(worker, job, payload, { sourceDir, missingMappings, source: missingRepairSource, attemptId: attempt.attempt.id, copied: false })
+        : null;
+      for (const group of deferredByRepair.values()) {
+        spawnFollowupPromote(worker, job, payload, { mappings: group.mappings, repairJob: group.repairJob, attemptId: attempt.attempt.id });
+      }
+      if (!repair) worker.emit(job.id, `${C.yellow}[promote]${C.reset} WI#${job.work_item_id} job #${job.id}: every mapping awaits a pending repair; deferred to follow-up promote(s)`);
+      completeAttempt(attempt.attempt.id, { status: "succeeded", duration_ms: Date.now() - startTime, output_chars: 0 });
+      worker._releaseLease(job, leaseToken, "succeeded");
+      refreshAndExtractInsights(job.work_item_id);
+      worker._cleanupWorktreeIfDone(job.work_item_id);
+      return;
     }
     assertPromoteCopyPlan(plannedCopies, { cwd: promCwd });
     const conflictPreview = buildPromoteConflictPreview({ copies: plannedCopies, cwd: promCwd });
@@ -592,7 +647,7 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
       message: `Promoted ${copiedFiles.length} file(s): ${copiedFiles.join(", ")}`,
     });
     const partial = missingMappings.length > 0
-      ? spawnMissingImageRepair(worker, job, payload, { sourceDir, missingMappings, attemptId: attempt.attempt.id })
+      ? spawnMissingFileRepair(worker, job, payload, { sourceDir, missingMappings, source: missingRepairSource, attemptId: attempt.attempt.id })
       : null;
     const deferred = [];
     for (const group of deferredByRepair.values()) {

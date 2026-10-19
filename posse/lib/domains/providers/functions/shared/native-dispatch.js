@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import { sortAgentToolDefinitions } from "../../../../shared/tools/functions/agent-schema.js";
 import path from "node:path";
 import { mcpClientToolDeadlineMs } from "../../../../catalog/mcp.js";
@@ -33,6 +34,40 @@ function taskModeFor({ taskMode, roleMode, projectDbCapability }) {
   if (String(projectDbCapability || "none") !== "none") return "db";
   if (String(roleMode || "").trim().toLowerCase() === "web") return "research";
   return "code";
+}
+
+function isWithinDir(dir, target) {
+  const relative = path.relative(dir, target);
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+// Mirrors the native protocol's scope rule: every writable scope path stays
+// under the canonical cwd, lexically and through symlinks. The native
+// rejection surfaces as a dispatch exit that reads like a provider failure
+// and is retried; this check fails the same request up front instead.
+export function assertDispatchScopeWithinCwd(cwd, { createRoots = [], scopedFiles = [], createFiles = [], deleteFiles = [] } = {}) {
+  let canonicalCwd;
+  try {
+    canonicalCwd = fs.realpathSync(cwd);
+  } catch {
+    return; // native dispatch reports an unavailable cwd itself
+  }
+  for (const [label, values] of [["createRoots", createRoots], ["scopedFiles", scopedFiles], ["createFiles", createFiles], ["deleteFiles", deleteFiles]]) {
+    for (const value of stringList(values)) {
+      if (!value) continue;
+      const resolved = path.resolve(canonicalCwd, value);
+      let existing = resolved;
+      while (!fs.existsSync(existing) && path.dirname(existing) !== existing) existing = path.dirname(existing);
+      let canonical = existing;
+      try { canonical = fs.realpathSync(existing); } catch { /* lexical check below still applies */ }
+      if (!isWithinDir(canonicalCwd, resolved) || !isWithinDir(canonicalCwd, canonical)) {
+        const err = new Error(`Dispatch scope.${label} escapes scope.cwd: ${value} is outside ${canonicalCwd}`);
+        err.code = "POSSE_DISPATCH_SCOPE_ESCAPE";
+        err.classification = "configuration";
+        throw err;
+      }
+    }
+  }
 }
 
 // A caller that still asks for a raw CLI control would otherwise get an
@@ -95,6 +130,7 @@ export function buildNativeDispatchRequest(provider, promptText, {
     throw new Error("Unsupported provider base instructions");
   }
   const resolvedCwd = path.resolve(cwd || process.cwd());
+  assertDispatchScopeWithinCwd(resolvedCwd, { createRoots, scopedFiles, createFiles, deleteFiles });
   const turns = positiveInteger(maxTurns, 1, 256);
   const outputTokens = positiveInteger(maxOutputTokens, 1, 2_000_000);
   const stallMs = positiveInteger(stallTimeoutMs, 1_000, MAX_WALL_TIMEOUT_MS);

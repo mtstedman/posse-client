@@ -20,3 +20,21 @@ export const MUTATING_TEST_FLAGS = readonlySet([
 export const INTERACTIVE_TEST_FLAGS = readonlySet([
   "--inspect", "--inspect-brk", "--open", "--ui", "--watch", "--watchall", "--watch-all",
 ]);
+
+// Node test runners admitted bare or through npx, pnpm, yarn or bunx, mapped
+// to the packages that may provide their bin. A launcher is syntax only:
+// verification runs the repository's installed bin and never downloads one.
+export const LOCAL_NODE_TEST_RUNNER_PACKAGES = Object.freeze({
+  vitest: Object.freeze(["vitest"]),
+  jest: Object.freeze(["jest"]),
+  mocha: Object.freeze(["mocha"]),
+  playwright: Object.freeze(["@playwright/test", "playwright"]),
+  tsx: Object.freeze(["tsx"]),
+});
+// Bare lint and typecheck executables keep their direct spawn; only their
+// launcher spellings resolve through the installed package.
+export const LAUNCHED_NODE_CHECK_PACKAGES = Object.freeze({
+  eslint: Object.freeze(["eslint"]),
+  tsc: Object.freeze(["typescript"]),
+  "vue-tsc": Object.freeze(["vue-tsc"]),
+});

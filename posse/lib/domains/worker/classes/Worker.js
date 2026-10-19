@@ -75,7 +75,7 @@ import { isDeepthinkTask as isDeepthinkTaskFromModule, shortJobTitle as shortJob
 import { buildDeadLetterRetryPayload as _buildDeadLetterRetryPayload, classifyApprovalAnswer as _classifyApprovalAnswer, classifyDeadLetterRecoveryAnswer as _classifyDeadLetterRecoveryAnswer, classifyReviewAnswer as _classifyReviewAnswer, extractHumanAnswerText as _extractHumanAnswerText, extractHumanAnswers as _extractHumanAnswers, incomingDependenciesForRecoveryRetry as _incomingDependenciesForRecoveryRetry } from "../functions/execution/human-review.js";
 import "../functions/execution/human-input-job.js";
 import "../functions/execution/promote-job.js";
-import "../functions/execution/atlas-warm-job.js";
+import { atlasRuntimeDisabledReasonForRepo, resolveAtlasRepoRoot } from "../functions/execution/atlas-warm-job.js";
 import { emitDevCommitted as emitAtlasV2DevCommitted, getAtlasWarmJobCompletion, isAtlasV2EmissionEnabled } from "../../atlas/classes/v2/PipelineHooks.js";
 import { logAttemptSkippedStaleLease as _logAttemptSkippedStaleLease } from "../functions/execution/attempt-logging.js";
 import { assessmentRetryFallbackReads as _assessmentRetryFallbackReads, buildPriorAssessmentFindings as _buildPriorAssessmentFindings, isAssessorParseRetryBudgetExceeded as _isAssessorParseRetryBudgetExceeded, shouldFastPassArtifactAssessment, shouldOverrideArtifactMissingFail } from "../functions/execution/assessment-policy.js";
@@ -1140,7 +1140,22 @@ export class Worker {
       });
       const missingWarm = ["missing_warm_job_id", "warm_job_missing"].includes(evidenceWarm.skipped);
       const warmLabel = hasEvidenceWarmJob ? `#${evidenceWarmJobId}` : "(missing)";
-      if (!evidenceWarm.completed && !missingWarm) {
+      // A warm parked while ATLAS is disabled for this repo cannot complete
+      // this run, and a fence that keeps deferring has no bound: both take the
+      // degraded path below instead of waiting.
+      const pending = !evidenceWarm.completed && !missingWarm;
+      const atlasDisabledReason = pending ? atlasRuntimeDisabledReasonForRepo(resolveAtlasRepoRoot(this)) : null;
+      const storedEvidenceDeferrals = Number(payload?._atlas_evidence_warm_deferrals || 0);
+      const priorEvidenceDeferrals = Number(payload?._atlas_evidence_warm_deferral_job_id) === evidenceWarmJobId
+        && Number.isFinite(storedEvidenceDeferrals) && storedEvidenceDeferrals > 0
+        ? Math.floor(storedEvidenceDeferrals)
+        : 0;
+      const evidenceDeferralsExhausted = pending && priorEvidenceDeferrals >= ATLAS_FRESHNESS_GATE_MAX_DEFERRALS;
+      if (pending && !atlasDisabledReason && !evidenceDeferralsExhausted) {
+        payload._atlas_evidence_warm_deferral_job_id = evidenceWarmJobId;
+        payload._atlas_evidence_warm_deferrals = priorEvidenceDeferrals + 1;
+        job.payload_json = JSON.stringify(payload);
+        updateJobPayload(job.id, job.payload_json);
         const config = getAtlasIntegrationConfig();
         const delayMs = Math.max(100, Math.min(1000, atlasFreshnessGateDelayMs(config)));
         const readyAt = new Date(Date.now() + delayMs).toISOString();
@@ -1163,6 +1178,8 @@ export class Worker {
             action: "defer",
             pending_warm_job_ids: hasEvidenceWarmJob ? [evidenceWarmJobId] : [],
             warm_status: evidenceWarm.status || null,
+            deferrals: priorEvidenceDeferrals + 1,
+            max_deferrals: ATLAS_FRESHNESS_GATE_MAX_DEFERRALS,
           }),
         });
         this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
@@ -1170,7 +1187,10 @@ export class Worker {
       }
       if (!evidenceWarm.ok) {
         const requireAtlas = atlasRequiredByAbHarness();
-        const reason = missingWarm ? "atlas_evidence_warm_missing" : "atlas_evidence_warm_failed";
+        const reason = missingWarm ? "atlas_evidence_warm_missing"
+          : atlasDisabledReason ? "atlas_evidence_warm_atlas_disabled"
+            : evidenceDeferralsExhausted ? "atlas_evidence_warm_deferrals_exhausted"
+              : "atlas_evidence_warm_failed";
         const message = requireAtlas
           ? `Stopped ${job.job_type} because required ATLAS evidence warm ${warmLabel} did not succeed`
           : `Disabled ATLAS for ${job.job_type}; evidence warm ${warmLabel} did not succeed`;
@@ -1422,6 +1442,9 @@ export class Worker {
     // companion warm job. A branch-local warm is still useful while a completed
     // WI waits for review or a cross-WI blocker before merge-to-main replay.
     if (job && commitHash && isAtlasV2EmissionEnabled()) {
+      // ATLAS disabled for this repo parks every warm until the next boot, so
+      // a commit warm would only fence this job's assessment behind it.
+      const atlasDisabledForRepo = !!atlasRuntimeDisabledReasonForRepo(resolveAtlasRepoRoot(this));
       try {
         let branchName = job._branchName || null;
         if (!branchName) {
@@ -1449,7 +1472,7 @@ export class Worker {
             paths,
             job_id: Number(job.id),
           },
-          enqueueWarmJob: !suppressTerminalWiRefresh,
+          enqueueWarmJob: !suppressTerminalWiRefresh && !atlasDisabledForRepo,
           onError: (err) => {
             this.emit(jobId, `${C.dim}[atlas-v2] outbox emit failed: ${err.message.split("\n")[0]}${C.reset}`);
           },

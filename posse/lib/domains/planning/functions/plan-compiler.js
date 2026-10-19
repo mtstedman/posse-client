@@ -29,7 +29,7 @@ import { normalizeRiskTags, resolveTaskExecutionPolicy } from "../../handoff/fun
 import { operationalCommandApprovalRequest, validatePlannerTestCommand, validatePlannerTestCommandForRepository } from "../../verification/functions/planner-test-command.js";
 import { validateSkillIds } from "../../../shared/skills/functions/registry.js";
 import { discoverUnitTestCapability } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
-import { buildStructuredDataPromotePlan as buildStructuredDataPromotePlanFromModule, getExplicitIntakeBindings as getExplicitIntakeBindingsFromModule, getCreateFileKindSummary as getCreateFileKindSummaryFromModule, inferPromoteTask as inferPromoteTaskFromModule, looksLikeArtifactGenerationTask as looksLikeArtifactGenerationTaskFromModule, looksLikeRepoCodeCreationTask as looksLikeRepoCodeCreationTaskFromModule, createsRepoPathFiles as createsRepoPathFilesFromModule, declaresOnlyArtifactScope as declaresOnlyArtifactScopeFromModule, looksLikeRepoDesignTask as looksLikeRepoDesignTaskFromModule, looksLikeStructuredDataRepoTransformTask as looksLikeStructuredDataRepoTransformTaskFromModule, normalizePromoteMappings as normalizePromoteMappingsFromModule, validatePlannedTask as validatePlannedTaskFromModule } from "./plan-routing.js";
+import { buildStructuredDataPromotePlan as buildStructuredDataPromotePlanFromModule, getExplicitIntakeBindings as getExplicitIntakeBindingsFromModule, getCreateFileKindSummary as getCreateFileKindSummaryFromModule, inferPromoteTask as inferPromoteTaskFromModule, looksLikeArtifactGenerationTask as looksLikeArtifactGenerationTaskFromModule, looksLikeRepoCodeCreationTask as looksLikeRepoCodeCreationTaskFromModule, createsRepoPathFiles as createsRepoPathFilesFromModule, declaresOnlyArtifactScope as declaresOnlyArtifactScopeFromModule, looksLikeRepoDesignTask as looksLikeRepoDesignTaskFromModule, looksLikeStructuredDataRepoTransformTask as looksLikeStructuredDataRepoTransformTaskFromModule, normalizePromoteMappings as normalizePromoteMappingsFromModule, stripRedundantCodeCreateRoots, validatePlannedTask as validatePlannedTaskFromModule } from "./plan-routing.js";
 import { getWorkItemIntakeHints } from "../../intake/functions/hints.js";
 import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider as resolveImageExecutionProviderFromModule } from "../../providers/functions/execution-routing.js";
 import { isValidDevMode, normalizeDevMode } from "../../../shared/policies/functions/dev-modes.js";
@@ -267,21 +267,21 @@ export function createJobsFromPlan(worker, planJob, tasks, {
   planAttemptId = null,
 } = {}) {
       const plannerRole = worker?.roleRegistry?.get?.("plan");
-      const environment = planningEnvironmentReadiness(planJob.work_item_id);
+      const environment = planningEnvironmentReadiness(planJob);
       if (!environment.ok) {
         const gate = spawnFromRole(plannerRole, "succeeded", "human_input", {
           work_item_id: planJob.work_item_id, parent_job_id: planJob.id, job_type: "human_input",
           title: "Resolve dependency setup before development", priority: planJob.priority || "normal", model_tier: "cheap",
-          payload_json: JSON.stringify({ questions: [environment.message + " Retry setup with a revised batch, or pause this work item?"],
+          payload_json: JSON.stringify({ questions: [environment.message + " How should the next plan proceed: retry setup with a revised batch, continue without it, or pause this work item?"],
             context: environment.message, allow_best_judgment: false, requires_interactive_approval: true }),
         });
         spawnPlanAfterHumanInputDeferral(worker, planJob, [gate.id], { deferralRound: 1 });
         worker.emit(planJob.id, environment.message);
         return;
       }
-      // The approved setup is committed in the primary checkout. Prepared
-      // planner read views may still point to the pre-install commit.
-      if (environment.receipt) planReadRoot = environment.receipt.cwd;
+      // This plan's own setup is committed in the primary checkout, while its
+      // prepared read view may predate it. Later plans read their own views.
+      if (environment.ownSetup) planReadRoot = environment.receipt.cwd;
 
       // The plan as the planner submitted it, before compilation splits or
       // drops tasks: a planner-executed claim is only valid as the whole plan.
@@ -1042,46 +1042,14 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           tasks,
           taskIndex: i,
         });
-        // Exact repo creation files are the complete authority granted to a
-        // code-writing handoff. Planner models often redundantly include the
-        // files' parent directories in create_roots; retaining those roots
-        // makes the downstream materializer reject an otherwise precise plan.
-        // Strip only the redundant dev/code shape before schema validation.
-        const preValidationJobType = String(t.job_type || "dev").trim().toLowerCase();
-        const preValidationTaskMode = String(t.task_mode || "code").trim().toLowerCase();
-        if (
-          preValidationJobType === "dev"
-          && preValidationTaskMode === "code"
-          && Array.isArray(t.files_to_create)
-          && t.files_to_create.length > 0
-          && Array.isArray(t.create_roots)
-          && t.create_roots.length > 0
-        ) {
-          const normalizeCreateScopePath = (value) => String(value || "")
-            .replace(/\\/g, "/")
-            .replace(/\/+$/, "")
-            .replace(/^\.\/+/, "");
-          const exactCreateFiles = t.files_to_create
-            .map(normalizeCreateScopePath)
-            .filter(Boolean);
-          const redundantRoots = [];
-          t.create_roots = t.create_roots.filter((value) => {
-            const root = normalizeCreateScopePath(value);
-            const isWildcardRoot = root === "." || root === "*";
-            const isAbsoluteRoot = /^(?:\/|[a-z]:\/)/i.test(root);
-            const coversExactFile = !isAbsoluteRoot && exactCreateFiles.some((file) => (
-              isWildcardRoot || file === root || file.startsWith(`${root}/`)
-            ));
-            if (!coversExactFile) return true;
-            redundantRoots.push(value);
-            return false;
-          });
-          if (redundantRoots.length > 0) {
-            worker.emit(
-              planJob.id,
-              `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: stripped ${redundantRoots.length} redundant create root(s) from exact-file code task "${t.title}"`,
-            );
-          }
+        // Strip only the redundant dev/code create_roots shape before schema
+        // validation.
+        const redundantRoots = stripRedundantCodeCreateRoots(t);
+        if (redundantRoots.length > 0) {
+          worker.emit(
+            planJob.id,
+            `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: stripped ${redundantRoots.length} redundant create root(s) from exact-file code task "${t.title}"`,
+          );
         }
         const preValidationWi = getWorkItem(planJob.work_item_id);
         const preValidationWiMode = preValidationWi?.mode || "build";
@@ -1681,6 +1649,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             const webAssetScopeRepair = repairWebAssetCreateScope(t);
             if (webAssetScopeRepair.changed) {
               worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: repaired web asset create scope for task "${t.title}" → ${webAssetScopeRepair.files.join(", ")}`);
+              // The repair runs after schema validation and grants a root over
+              // the files it re-pointed; the writing handoff rejects any root.
+              stripRedundantCodeCreateRoots(t, { jobType: finalJobType, taskMode });
             }
           }
 

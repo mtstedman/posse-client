@@ -80,8 +80,17 @@ export async function dropEmptyInferredMaterializations(gitErr, jobPayload, wtPa
   return unwritten;
 }
 
+// Blocked attempts since the operator's last retry. Each retry starts a new
+// generation, so blocks the operator already resolved (a different environment
+// gap each time) do not add up to the third-block dead letter.
+function blockedAttemptsInGeneration(attempts, payload) {
+  const generation = Math.max(0, Number(payload?._retry_generation) || 0);
+  return attempts.filter((entry) => entry.status === "blocked" && Number(entry.attempt_number || 0) > generation).length;
+}
+
 // Park a blocked mutating job behind a blocked_recovery human_input gate. The
-// third block dead-letters the job and rewires its dependents to the gate.
+// third block in a retry generation dead-letters the job and rewires its
+// dependents to the gate.
 function parkBlockedRecoveryGate(worker, job, leaseToken, attempt, {
   blockedCount,
   blockReason,
@@ -514,7 +523,7 @@ export async function handlePostExecutionForWorker({
           }
 
           const allAttempts = getAttempts(job.id);
-          const blockedCount = allAttempts.filter(a => a.status === "blocked").length;
+          const blockedCount = blockedAttemptsInGeneration(allAttempts, this.parsePayload(job));
           const permanentProviderRuntimeBlock = isPermanentProviderRuntimeBlock(blockReason);
           completeAttempt(attempt.id, {
             status: permanentProviderRuntimeBlock ? "failed" : "blocked",
@@ -1124,6 +1133,7 @@ export async function handlePostExecutionForWorker({
                     ],
                     projectDir: this.projectDir,
                     cwd: wtPath,
+                    baseHash: headBefore,
                   });
               if (!outputContract.ok) {
                 const contractMsg = [
@@ -1511,7 +1521,7 @@ export async function handlePostExecutionForWorker({
             if (selfDeclaredUnwritten.length > 0) {
               const blockReason = `Agent reported PARTIAL and did not write ${selfDeclaredUnwritten.join(", ")}. Remaining work: ${partialRemainingWork.join("; ")}`;
               const blockMsg = `${AGENT_BLOCKED_ERROR_PREFIX} ${blockReason}`;
-              const blockedCount = getAttempts(job.id).filter((a) => a.status === "blocked").length;
+              const blockedCount = blockedAttemptsInGeneration(getAttempts(job.id), this.parsePayload(job));
               this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: PARTIAL left ${selfDeclaredUnwritten.join(", ")} unwritten as reported — asking the operator instead of retrying${C.reset}`);
               completeAttempt(attempt.id, {
                 status: "blocked",
@@ -1637,11 +1647,17 @@ export async function handlePostExecutionForWorker({
         // repeated text does not replace verification of the current candidate.
         const reviewedCandidate = wtPath && (await authoritativeFinalReview(job, this.parsePayload(job), wtPath))?.verdict === "pass";
         // -- Idempotency check --
+        // Structured completions render one fixed text per status, so an equal
+        // hash means "stuck" only when this attempt wrote nothing. An operator
+        // retry starts a new generation and is never compared with the output
+        // it was asked to fix.
         const outputHash = crypto.createHash("sha256").update(output).digest("hex").slice(0, 16);
         const prevResultJson = job.result_json;
-        await wrappedJob.setResult({ output_length: output.length, attempt: attemptCount, output_hash: outputHash });
+        const retryGeneration = Math.max(0, Number(this.parsePayload(job)?._retry_generation) || 0);
+        await wrappedJob.setResult({ output_length: output.length, attempt: attemptCount, output_hash: outputHash, retry_generation: retryGeneration });
+        const attemptWroteChanges = hasFileChanges || !!committedHash;
 
-        if (!reviewedCandidate && attemptCount > 1 && prevResultJson) {
+        if (!reviewedCandidate && !attemptWroteChanges && attemptCount > 1 && prevResultJson) {
           // Narrow the try to JSON.parse only. Wrapping the whole dead-letter
           // block meant a synchronous DB throw after completeAttempt() skipped
           // the `return` and fell through to a full (duplicate) assessment,
@@ -1651,7 +1667,8 @@ export async function handlePostExecutionForWorker({
             prevResult = JSON.parse(prevResultJson);
           } catch { prevResult = null; }
           if (prevResult) {
-            if (prevResult.output_hash === outputHash) {
+            if (prevResult.output_hash === outputHash
+              && Math.max(0, Number(prevResult.retry_generation) || 0) === retryGeneration) {
               // Don't dead-letter if file requests are pending — the output is
               // deterministically the same because the task genuinely needs those
               // files, not because the model is stuck.
@@ -1773,7 +1790,7 @@ export async function handlePostExecutionForWorker({
             // -- BLOCKED cycle cap: prevent infinite block?human?block loops --
             const MAX_BLOCKED_CYCLES = 2;
             const allAttempts = getAttempts(job.id);
-            const blockedCount = allAttempts.filter(a => a.status === "blocked").length;
+            const blockedCount = blockedAttemptsInGeneration(allAttempts, this.parsePayload(job));
             const permanentProviderRuntimeBlock = isPermanentProviderRuntimeBlock(blockReason);
 
             completeAttempt(attempt.id, {
