@@ -19,7 +19,7 @@ import { listHashRefTraversalsForContext } from "../../../domains/queue/function
 import { atlasDescriptorSchemaForAction } from "../../../domains/atlas/functions/v2/contracts/tool-schemas.js";
 import { hashRefToolContext, capString, cloneJson, gatewayGateBindingKey, mcpToolErrorPayload, ownerErrorSummary, toolsListCount, jsonlParseBuffer } from "../functions/mcp-owner-session-support.js";
 import crypto from "node:crypto";
-import { getAgentHandoffRecord, getTraversalCompletionSnapshotForCall, recordAgentHandoffRejection, rejectAgentHandoffForLaterTool } from "../../../domains/handoff/functions/agent-handoff.js";
+import { getAgentHandoffRecord, getTraversalCompletionSnapshotForCall, rejectAgentHandoffForLaterTool } from "../../../domains/handoff/functions/agent-handoff.js";
 import { validateToolArguments } from "../functions/schema-validation.js";
 import { validationFailureForAction } from "../../../domains/atlas/functions/v2/retrieval/dispatch.js";
 import { appendResearchWorkBudget, researchWorkBudget } from "../../../domains/research/functions/work-budget.js";
@@ -2344,7 +2344,6 @@ export class PersistentMcpOwner {
               toolArgs,
             );
           } catch (error) {
-            recordAgentHandoffRejection(session?.bootConfig?.agentCallId, error);
             const result = {
               content: [{ type: "text", text: `Error executing agent_handoff: ${String(error?.message || error).slice(0, 500)}` }],
               isError: true,
@@ -2356,6 +2355,7 @@ export class PersistentMcpOwner {
               result,
               via: "agent_handoff_owner",
               rejectionCode: String(error?.code || "AGENT_HANDOFF_REJECTED"),
+              rejectionError: error,
             });
             sendResponse(res, 200, {
               ok: true,

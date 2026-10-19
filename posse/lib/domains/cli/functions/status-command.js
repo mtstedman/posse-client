@@ -14,6 +14,7 @@ import { listPersistedProviderPauses } from "../../providers/functions/provider-
 import { formatProviderPause } from "./admin-provider-pause.js";
 import { providerRoleForJobType } from "../../providers/functions/roles.js";
 import { collectSessionView, formatSessionViewLines } from "../../pairing/functions/session-view.js";
+import { collectPricingCoverage } from "../../billing/functions/pricing-coverage.js";
 
 const DEFAULT_STATUS_DETAIL_LIMIT = 25;
 const TERMINAL_WORK_ITEM_STATUS_SET = new Set(TERMINAL_WORK_ITEM_STATUSES);
@@ -155,6 +156,7 @@ export function collectStatusData({ targetBranch, args = [] } = {}) {
     delivery: getPublicationTelemetry(),
     session,
     provider_pauses: providerPauses,
+    pricing: collectPricingCoverage({ active: options.active }),
     filter: {
       active: options.active,
       json: options.json,
@@ -186,6 +188,7 @@ function renderJsonStatus(data) {
     generated_at: data.generated_at,
     target_branch: data.target_branch,
     delivery: data.delivery,
+    pricing: data.pricing,
     provider_pauses: data.provider_pauses.map((row) => ({
       provider: row.provider,
       until: new Date(row.untilMs).toISOString(),
@@ -262,6 +265,12 @@ function renderHumanStatus(data, { C }) {
 
   const publication = data.delivery || {};
   write(`  ${C.bold}Delivery:${C.reset} local=${C.green}tracked${C.reset}  remote=${publication.publication_state || "unknown"}  deployed=${publication.deployment_state || "unverified"}`);
+  if (data.pricing.non_exact_calls > 0) {
+    write(`  ${C.yellow}Pricing warning: ${data.pricing.non_exact_calls}/${data.pricing.total_calls} completed calls lack exact recorded model pricing; cost comparisons are not reliable.${C.reset}`);
+    for (const row of data.pricing.non_exact) {
+      write(`    ${row.provider || "unknown"}:${row.model_name || "unknown"}: ${row.call_count} call(s), ${row.pricing_basis || "unrecorded"}`);
+    }
+  }
   if (publication.remote || publication.branch) {
     write(`  ${C.dim}${publication.remote || "remote"}/${publication.branch || data.target_branch}${publication.ahead_count != null ? ` · ${publication.ahead_count} ahead` : ""}${C.reset}`);
   }

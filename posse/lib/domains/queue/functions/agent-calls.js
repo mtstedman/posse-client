@@ -16,7 +16,7 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { DEADLOCK_TERMINAL_STATUSES } from "../../../catalog/job.js";
 import { appendRunTelemetry, readRunTelemetryEntries } from "../../../shared/telemetry/functions/run-telemetry.js";
 import { discardHashRefTraversalsForAgentCall } from "./hash-refs.js";
-import { isAgentCallChildKind } from "../../../catalog/agent-call.js";
+import { AGENT_CALL_CHILD_KINDS, isAgentCallChildKind } from "../../../catalog/agent-call.js";
 import { providerTurnLimitMode } from "../../../catalog/provider.js";
 import { pricingBasis } from "../../billing/functions/pricing.js";
 
@@ -142,6 +142,19 @@ export function createAgentCall({
     throw new Error(`unknown agent call child_kind: ${normalizedChildKind}`);
   }
   const db = getDb();
+  if (normalizedChildKind === AGENT_CALL_CHILD_KINDS.FINAL_REVIEW) {
+    const parent = db.prepare("SELECT work_item_id, job_id, attempt_id FROM agent_calls WHERE id = ?")
+      .get(parentAgentCallId);
+    if (!parent?.job_id) throw new Error("final reviewer requires an attributed parent agent call");
+    for (const [key, supplied] of Object.entries({ work_item_id, job_id, attempt_id })) {
+      if (supplied != null && (parent[key] == null || Number(supplied) !== Number(parent[key]))) {
+        throw new Error(`final reviewer ${key} must match its parent agent call`);
+      }
+    }
+    work_item_id = parent.work_item_id;
+    job_id = parent.job_id;
+    attempt_id = parent.attempt_id;
+  }
   let delegation = null;
   if (job_id != null) {
     try {

@@ -108,6 +108,9 @@ function finishToolInvocation(invocation, opts) {
 // pair. Record it as rejected and not executed, or provider-replay
 // reconciliation files it as an executed call and research counts it as a step.
 function recordRejectedToolCall({ toolName, args, text, reason }) {
+  if (toolName === "agent_handoff") {
+    recordAgentHandoffRejection(mcpAgentCallId, { code: reason, message: text }, { args });
+  }
   const invocation = beginToolInvocation({ tool: toolName, input: args, cwd: workspaceCwd });
   finishToolInvocation(invocation, {
     tool: toolName,
@@ -3718,6 +3721,10 @@ async function handleRequest(msg) {
     const toolInvocation = beginToolInvocation({ tool: toolName, input: recordInput, cwd: workspaceCwd });
     try {
       if (toolName === "agent_handoff" && countPendingOperatorFeedbackForJob(mcpJobId, mcpAgentCallId) > 0) {
+        recordAgentHandoffRejection(mcpAgentCallId, {
+          code: "pending_operator_feedback",
+          message: "agent_handoff paused: acknowledge pending operator feedback before terminal handoff.",
+        }, { args });
         await completeNativeToolCall({
           id,
           requestedToolName,
@@ -3771,7 +3778,7 @@ async function handleRequest(msg) {
       });
     } catch (err) {
       if (toolName === "agent_handoff") {
-        recordAgentHandoffRejection(mcpAgentCallId, err);
+        recordAgentHandoffRejection(mcpAgentCallId, err, { args });
       }
       const handoffIssues = toolName === "agent_handoff" && Array.isArray(err?.issues)
         ? err.issues.slice(0, 24).map((issue) => ({

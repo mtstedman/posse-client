@@ -1,5 +1,6 @@
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
+import { agentHandoffSchema } from "../../classes/AgentHandoffSchema.js";
 
 export function positiveInt(value) {
   const number = Number(value);
@@ -32,18 +33,27 @@ function boundedHandoffRejection(error) {
   return { code, message, issues, failing_selectors };
 }
 
-export function recordAgentHandoffRejection(agentCallId, error, { db = getDb() } = {}) {
+export function recordAgentHandoffRejection(agentCallId, error, { db = getDb(), args = null } = {}) {
   const id = positiveInt(agentCallId);
   if (!id) return false;
   try {
     const call = db.prepare(`
-      SELECT work_item_id, job_id, attempt_id
+      SELECT work_item_id, job_id, attempt_id, role
       FROM agent_calls
       WHERE id = ?
     `).get(id);
     if (!call) return false;
     const rejection = boundedHandoffRejection(error);
-    return recordObservation({
+    let inputChars = null;
+    try { if (args != null) inputChars = JSON.stringify(args).length; } catch { /* unavailable input size */ }
+    agentHandoffSchema.ensure(db);
+    db.prepare(`
+      INSERT INTO agent_handoff_rejections
+        (agent_call_id, work_item_id, job_id, attempt_id, role, code, input_chars, detail_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, positiveInt(call.work_item_id), positiveInt(call.job_id), positiveInt(call.attempt_id),
+      call.role, rejection.code, inputChars, JSON.stringify(rejection));
+    recordObservation({
       db,
       work_item_id: positiveInt(call.work_item_id),
       job_id: positiveInt(call.job_id),
@@ -60,6 +70,7 @@ export function recordAgentHandoffRejection(agentCallId, error, { db = getDb() }
           : {}),
       },
     });
+    return true;
   } catch {
     return false;
   }
@@ -69,7 +80,12 @@ export function latestAgentHandoffRejection(agentCallId, db = getDb()) {
   const id = positiveInt(agentCallId);
   if (!id) return null;
   try {
-    const row = db.prepare(`
+    agentHandoffSchema.ensure(db);
+    const durable = db.prepare(`
+      SELECT detail_json FROM agent_handoff_rejections
+      WHERE agent_call_id = ? ORDER BY id DESC LIMIT 1
+    `).get(id);
+    const row = durable || db.prepare(`
       SELECT detail_json
       FROM job_observations
       WHERE observation_type = 'agent_handoff.rejected'

@@ -675,6 +675,24 @@ export function createHashRefStoreTables(db) {
 
 export function createAgentHandoffPacketTable(db) {
   db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_handoff_rejections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_call_id INTEGER NOT NULL,
+      work_item_id INTEGER,
+      job_id INTEGER,
+      attempt_id INTEGER,
+      role TEXT NOT NULL,
+      code TEXT NOT NULL,
+      input_chars INTEGER CHECK (input_chars IS NULL OR input_chars >= 0),
+      detail_json TEXT NOT NULL CHECK (json_valid(detail_json)),
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      FOREIGN KEY (agent_call_id) REFERENCES agent_calls(id) ON DELETE CASCADE,
+      FOREIGN KEY (work_item_id) REFERENCES work_items(id) ON DELETE SET NULL,
+      FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+      FOREIGN KEY (attempt_id) REFERENCES job_attempts(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_handoff_rejections_call
+      ON agent_handoff_rejections(agent_call_id, id);
     CREATE TABLE IF NOT EXISTS agent_handoff_packets (
       agent_call_id INTEGER PRIMARY KEY,
       work_item_id INTEGER,

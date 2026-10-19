@@ -9,6 +9,7 @@ import { ownerAtlasEvidenceIdentities, ownerSourceRangeEvidence, ownerWindowResp
 import { requestedToolPolicyName } from "./mcp-owner-tool-policy.js";
 import { rememberAtlasSymbolSourcePaths } from "./mcp-owner-symbol-handles.js";
 import { admissionMaxPhysicalCalls } from "./mcp-owner-research-budget.js";
+import { recordAgentHandoffRejection } from "../../../domains/handoff/functions/helpers/rejection-store.js";
 
 function mcpToolResultErrorText(result = null) {
   const structured = result?.structuredContent?.error?.message || result?._meta?.atlasError?.message || "";
@@ -241,8 +242,15 @@ export function recordOwnerAnsweredToolCall({
   startedAt = null,
   via,
   rejectionCode = null,
+  rejectionError = null,
   observationDetail = null,
 } = {}) {
+  const requested = rejectionCode ? requestedToolPolicyName(toolName, toolArgs) : null;
+  if (requested?.suite === "tools" && requested.name === "agent_handoff") {
+    recordAgentHandoffRejection(session?.bootConfig?.agentCallId, rejectionError || {
+      code: rejectionCode, message: mcpToolResultErrorText(result),
+    }, { args: toolArgs });
+  }
   try {
     recordOwnerToolObservation({
       session,

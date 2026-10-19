@@ -737,6 +737,19 @@ readers continue to combine the SQLite tail with JSONL history. Batch event
 flushes defer during open transactions so rollback cannot leave phantom mirror
 entries.
 
+`posse status` warns when completed calls lack exact recorded model pricing;
+`--json` includes the counts and affected provider/model/basis groups under
+`pricing`. `--active` limits these counts to active work items, including those
+awaiting merge review or recovery. Missing historical pricing provenance stays
+unknown even after the price book is updated.
+
+Terminal handoff rejections are retained in `agent_handoff_rejections`, one
+row per rejected submission, with call/job/attempt attribution, role, error code,
+serialized input character count, and bounded error details. Raw handoff
+arguments are not copied into this ledger. Observation pruning does not remove
+these rows; queue reset detaches their job/attempt/work-item links while keeping
+their agent-call link. Deleting the agent call removes its rejection history.
+
 A successful implementation commit is recorded before cross-WI synchronization.
 If required synchronization fails, the attempt retains its commit hash and fails
 with the sync diagnostic; the provider is not automatically rerun. The branch
