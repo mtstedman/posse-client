@@ -1,7 +1,10 @@
 import {
+  getJob,
   runInTransaction,
   setAssessorVerdict,
+  setJobError,
   logEvent,
+  updateJobPayload,
   updateJobStatus,
 } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
@@ -20,6 +23,7 @@ import { handle as handleNeedsReplan } from "./verdicts/needs_replan.js";
 import { handle as handlePass } from "./verdicts/pass.js";
 import { spawnFromRole } from "../../../queue/functions/spawn-guard.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { ASSESSMENT_FAILURE_CLASSES } from "../../../../catalog/human-input.js";
 import { persistReviewedFileCompletion } from "../../../assessment/functions/reviewed-file-completion.js";
 import { isAuthoritativeFinalReviewPass } from "../../../assessment/functions/final-review-authority.js";
 
@@ -135,6 +139,22 @@ export function processVerdict(job, verdict, {
       if (!changed) return false;
       if (!recordAssessorVerdict()) {
         throw new Error(`Unable to record assessor verdict for job #${job.id} after status ${status}`);
+      }
+      if (status === "failed" && verdict._assessment_infrastructure_review === true) {
+        // A terminal harness verdict failed the assessment, not the completed
+        // implementation. Retain the same recovery contract as transport
+        // failures so an explicit retry reassesses the preserved candidate.
+        const payload = parseJobPayload(getJob(job.id));
+        const diagnostic = verdict.reasons.join("; ") || "Assessment infrastructure exhausted";
+        payload._assess_only = true;
+        payload._verification_blocked = {
+          schema_version: 1,
+          type: "verification_blocked",
+          failure_class: ASSESSMENT_FAILURE_CLASSES.INFRASTRUCTURE,
+          diagnostic,
+        };
+        updateJobPayload(job.id, JSON.stringify(payload));
+        setJobError(job.id, diagnostic);
       }
       return true;
     }),

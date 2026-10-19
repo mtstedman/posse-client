@@ -9,6 +9,7 @@ import {
   incrementAndCreateAssessmentAttempt,
   isLeaseValid,
   logEvent,
+  runInTransaction,
   setAssessmentLifecycle,
   updateJobPayload,
 } from "../../../queue/functions/index.js";
@@ -255,16 +256,20 @@ export class AssessmentHandoffAdapter {
         delete recoveryPayload._assess_model_name;
         recoveryPayload._assessment_source_recovery_count = recoveryCount + 1;
         recoveryPayload._assessment_source_recovery_reason = missing.message.slice(0, 1000);
-        updateJobPayload(job.id, JSON.stringify(recoveryPayload));
-        setAssessmentLifecycle(job.id, "assessment_unavailable", { error: missing.message });
-        worker.emit(job.id, `${C.yellow}[assess-only] Missing bound source; resuming implementation once to repair terminal evidence${C.reset}`);
-        if (typeof worker._releaseWithoutAttemptPenalty === "function") {
-          worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", {
-            readyAt: new Date().toISOString(),
-          });
-        } else {
-          worker._releaseLease(job, leaseToken, "queued");
-        }
+        const recovered = runInTransaction(() => {
+          // Missing-source recovery runs before the assessment barrier. A
+          // stale worker must not clear the new owner's assess-only payload
+          // or replay implementation after its lease has expired.
+          if (!isLeaseValid(job.id, leaseToken)) return false;
+          const released = typeof worker._releaseWithoutAttemptPenalty === "function"
+            ? worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() })
+            : worker._releaseLease(job, leaseToken, "queued");
+          if (!released) return false;
+          updateJobPayload(job.id, JSON.stringify(recoveryPayload));
+          setAssessmentLifecycle(job.id, "assessment_unavailable", { error: missing.message });
+          return true;
+        });
+        if (recovered) worker.emit(job.id, `${C.yellow}[assess-only] Missing bound source; resuming implementation once to repair terminal evidence${C.reset}`);
       } else {
         missing.assessmentGateImmediately = true;
         // Restoring a runner cannot recover lost evidence. Automatic repair
