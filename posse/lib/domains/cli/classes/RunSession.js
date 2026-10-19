@@ -1244,6 +1244,7 @@ export class RunSession {
     isIterativeWorkItemActive,
   });
   scheduler = new Scheduler({
+    dryRun: DRY_RUN,
     concurrency: CONCURRENCY,
     hasDisplay: useTui,
     onQueueSnapshot: handleQueueSnapshot,
@@ -2744,7 +2745,13 @@ export class RunSession {
     display.addEvent(`${C.green}Boot complete — entering main loop${C.reset}`);
   }
 
-  worker = new Worker({ autoApprove: AUTO_APPROVE, projectDir: PROJECT_DIR, display, dryRun: DRY_RUN, nonInteractive, scopeMode, stallTimeout: STALL_TIMEOUT, leaseSec: scheduler.leaseSec });
+  let providerEnvironmentError = null;
+  worker = new Worker({ autoApprove: AUTO_APPROVE, projectDir: PROJECT_DIR, display, dryRun: DRY_RUN, nonInteractive, scopeMode, stallTimeout: STALL_TIMEOUT, leaseSec: scheduler.leaseSec,
+    onProviderUnavailable: (error) => {
+      providerEnvironmentError ||= error;
+      scheduler.requestStop();
+    },
+  });
   this._activeWorker = worker;
 
   // Heal gate/job drift before reviving prompts: without this, a gate left
@@ -2898,6 +2905,7 @@ export class RunSession {
   // rollback reference; exceptions retain it so RunSession's finally can
   // release a lock when failure happened before runLoop installed its guard.
   if (this._activeScheduler === scheduler) this._activeScheduler = null;
+  if (providerEnvironmentError) throw providerEnvironmentError;
   try {
     recordRunDiagnostic("scheduler.run_loop_returned", {
       owner_id: scheduler.ownerId || null,

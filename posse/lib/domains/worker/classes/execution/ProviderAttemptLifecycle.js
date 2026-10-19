@@ -1,15 +1,14 @@
 import fs from "fs";
+import { jobProviderPool } from "../../../providers/functions/job-provider-pool.js";
 import {
   completeAttempt,
   getAttempts,
-  getJob,
   incrementAndCreateAttempt,
   setAttemptModelName,
   updateJobProvider,
 } from "../../../queue/functions/index.js";
 import {
   getProvider,
-  getAvailableProviders,
   isProviderReady,
   tierModelName,
 } from "../../../providers/functions/provider.js";
@@ -72,32 +71,7 @@ export class ProviderAttemptLifecycle {
       worker.emit(job.id, `${C.cyan}[image]${C.reset} WI#${job.work_item_id} job #${job.id}: generate_image will use ${imageRoute.provider}/${imageRoute.model || "<settings>"} at tool-call time`);
       job._imageRoute = { provider: imageRoute.provider, model: imageRoute.model || null };
     }
-    const configuredProviderPool = getAvailableProviders(role);
-    const recovery = executionPayload?._dead_letter_recovery;
-    const recoveryProvider = String(recovery?.provider_override || "").trim().toLowerCase();
-    const recoveryJobId = Number(recovery?.recovery_job_id);
-    const recoveryJob = Number.isInteger(recoveryJobId) && recoveryJobId > 0 ? getJob(recoveryJobId) : null;
-    let recoveryJobPayload = null;
-    try {
-      recoveryJobPayload = JSON.parse(recoveryJob?.payload_json || "{}");
-    } catch {
-      recoveryJobPayload = null;
-    }
-    const explicitRecoveryProvider = recoveryProvider
-      && recoveryProvider === String(job.provider || "").trim().toLowerCase()
-      && recoveryJob?.job_type === "human_input"
-      && ["running", "succeeded"].includes(recoveryJob.status)
-      && Number(recoveryJobPayload?.original_job_id) === Number(job.parent_job_id)
-      && Array.isArray(recoveryJobPayload?.choices)
-      && recoveryJobPayload.choices.includes(`retry:${recoveryProvider}`)
-      ? recoveryProvider
-      : null;
-    // A provider-specific human recovery decision is a bounded authorization
-    // for this replacement job. Keep its pool exact so later routing cannot
-    // silently substitute the role default and violate the operator's choice.
-    const executionProviderPool = explicitRecoveryProvider
-      ? [explicitRecoveryProvider]
-      : configuredProviderPool;
+    const { providers: executionProviderPool, explicitRecoveryProvider, configuredProviderPool } = jobProviderPool(job, role, executionPayload);
     const providerResolution = resolveExecutionProviderFromModule(job.provider || null, executionProviderPool, role);
     let executionProvider = providerResolution.provider;
     if (worker._isProviderCircuitOpen(executionProvider)) {
@@ -128,21 +102,17 @@ export class ProviderAttemptLifecycle {
         job.model_name = null;
         updateJobProvider(job.id, executionProvider, null);
       } else {
-        const errMsg = `Provider auth liveness failed for ${executionProvider}: ${providerReadiness.reason || "provider not ready"}`;
-        const livenessAttempt = incrementAndCreateAttempt(job.id, leaseToken, role, null, job.reasoning_effort);
-        if (!livenessAttempt) {
-          _logAttemptSkippedStaleLease(job, role, "Skipped provider-auth liveness failure because the lease was stale or expired");
-          worker.emit(job.id, `${C.red}[stale-lease] WI#${job.work_item_id} job #${job.id} — lease lost before provider-auth liveness handling${C.reset}`);
+        const errMsg = `Provider environment check failed for ${executionProvider}: ${providerReadiness.reason || "provider not ready"}. Work remains queued; repair the provider and run posse go.`;
+        // Readiness is an environment condition, not a model attempt. This
+        // guard also covers a provider disappearing after startup or new work
+        // injected into the running scheduler.
+        if (!worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() })) {
           return { ok: false };
         }
-        onAttemptCreated?.(livenessAttempt.attempt.id);
-        completeAttempt(livenessAttempt.attempt.id, {
-          status: "failed",
-          error_text: errMsg,
-        });
         await wrappedJob.setError(errMsg);
-        worker._retryOrFail(job, leaseToken, errMsg, { attemptId: livenessAttempt.attempt.id });
-        return { ok: false, currentAttemptId: livenessAttempt.attempt.id };
+        worker.emit(job.id, `${C.red}[environment]${C.reset} ${errMsg}`);
+        worker.onProviderUnavailable?.(new Error(errMsg));
+        return { ok: false };
       }
     }
     job._executionProvider = executionProvider;

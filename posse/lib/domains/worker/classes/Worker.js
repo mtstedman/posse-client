@@ -223,6 +223,7 @@ export class Worker {
     this.display = opts.display || null;
     this.silent = opts.silent || false;
     this.dryRun = opts.dryRun || false;
+    this.onProviderUnavailable = opts.onProviderUnavailable || null;
     this.stallTimeout = opts.stallTimeout || null;
     this.leaseSec = opts.leaseSec || 900;
     this.renewLease = opts.renewLease || renewLease;

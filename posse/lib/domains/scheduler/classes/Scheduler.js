@@ -32,6 +32,7 @@ import { maybeExpireStuckFanoutChildren } from "../../research/functions/fanout.
 import { yieldNow } from "../../runtime/functions/yield.js";
 import { runSchedulerBootMaintenanceInWorker } from "../functions/boot-maintenance.js";
 import { coordinateSchedulerBoot } from "../functions/boot-coordination.js";
+import { providerEnvironmentProbe, formatProviderEnvironmentFailure } from "../../system/functions/provider-environment.js";
 import { awaitSchedulerWorkersForShutdown, awaitSessionStopDrain, coordinateSchedulerStop } from "../functions/shutdown-coordination.js";
 import { formatProviderAuthLivenessProbe, formatWorkspaceHealthCriticalDetail, formatWorkspaceHealthProbe, providerAuthLivenessProbe, workspaceHealthProbeAsync } from "../../system/functions/preflight-probes.js";
 import { DEADLOCK_TERMINAL_STATUSES, LOCK_HOLDING_JOB_STATUSES, RESERVED_SLOT_IMPLEMENTATION_JOB_TYPES, SLOT_CAPPED_PLANNING_JOB_TYPES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
@@ -149,6 +150,7 @@ export class Scheduler {
     this._runnableCandidateScan = new RunnableCandidateScan();
     this.ownerId = opts.ownerId || `scheduler-${crypto.randomUUID().slice(0, 8)}`;
     this.projectDir = opts.projectDir || process.cwd();
+    this.dryRun = opts.dryRun === true;
     this._pollMsExplicit = opts.pollMs != null;
     this._repairPollMsExplicit = opts.repairPollMs != null;
     this._leaseSecExplicit = opts.leaseSec != null;
@@ -1242,6 +1244,16 @@ export class Scheduler {
         .catch(() => { /* non-fatal; liveness read already proceeded */ });
     }
     const providerLiveness = await this.probeProviderLiveness({ onBootEvent });
+    const environment = providerEnvironmentProbe(
+      listJobs(["queued", "awaiting_assessment"]).filter((job) => this._isJobInRunScope(job)),
+      { dryRun: this.dryRun },
+    );
+    if (!environment.ok) {
+      const message = formatProviderEnvironmentFailure(environment);
+      log.error("scheduler", message, environment);
+      try { onBootEvent?.({ label: "provider environment", section: "providers", status: "failed", detail: message, showDetail: true }); } catch { /* observational */ }
+      throw new Error(message);
+    }
     return { workspaceHealth, providerLiveness };
   }
 
