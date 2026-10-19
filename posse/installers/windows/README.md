@@ -133,10 +133,20 @@ Each selected indexing language gets the toolchain `posse doctor` needs:
 |---|---|
 | TypeScript / JavaScript | Node.js (always installed) |
 | Python | Python 3 (winget) |
-| PHP | PHP (winget) and Composer; enables PHP's OpenSSL, cURL, and ZIP extensions |
+| PHP | PHP (winget) and Composer; enables the standard PHP application extensions listed below |
 | Go | Go from the official go.dev zip, checked against its published SHA-256 and installed per user (no approval prompt). An existing Go must be 1.21+ |
 | Rust | Rust via rustup with the GNU toolchain and rust-analyzer; the download is checked against its published SHA-256 before it runs |
 | C / C++ | Not available on Windows (no Windows build of scip-clang) |
+
+When PHP is selected, setup enables OpenSSL and Sodium; cURL and ZIP;
+mbstring, intl, fileinfo and BCMath; GD and EXIF; and MySQL, SQLite and
+PostgreSQL drivers (`mysqli`, `pdo_mysql`, `pdo_sqlite`, `sqlite3`, `pdo_pgsql`,
+`pgsql`). Built-in modules are detected without adding DLL directives.
+This runs even when Composer is already installed. Setup backs up an existing
+`php.ini` once, preserves its extension directory and loaded modules, and
+verifies that the defaults load. Missing DLLs or a read-only configuration are
+reported with the affected extensions/path. No database server is installed
+by enabling these PHP drivers.
 
 The selected-language installation also owns the approved deterministic test
 runner. Python therefore has one shared Posse-managed Python + pytest runtime;
@@ -261,7 +271,7 @@ secrets are written to a restricted temporary file before replacing the old file
 
 If selected PHP cannot be installed or run, setup exits with failure and a recovery
 message. Install PHP 8.2+ from <https://windows.php.net/download/>, enable its
-OpenSSL, cURL and ZIP extensions, add its real directory to PATH, open a new
+bundled application extensions listed above, add its real directory to PATH, open a new
 terminal, verify `php -v`, and rerun setup with the same language selection.
 With App Installer available, `winget install --id PHP.PHP.8.4 --exact` is another
 recovery path. PHP remains optional: `-ScipLanguages 'typescript,python'` excludes

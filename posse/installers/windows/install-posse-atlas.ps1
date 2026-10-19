@@ -168,6 +168,9 @@ $PosseScipMode      = "on"
 $ScipLanguagesSupplied = $PSBoundParameters.ContainsKey("ScipLanguages")
 $PosseScipLanguages = if ($ScipLanguagesSupplied) { $ScipLanguages } else { "typescript,python" }
 $NodeMinMajor       = 24
+# Checked projection of INSTALLATION_POLICY.windowsPhpExtensions. Built-in
+# modules are detected before looking for a bundled DLL.
+$script:WindowsPhpExtensions = @("openssl", "sodium", "curl", "zip", "mbstring", "intl", "fileinfo", "gd", "exif", "mysqli", "pdo_mysql", "pdo_sqlite", "sqlite3", "pdo_pgsql", "pgsql", "bcmath")
 $localAppDataRoot   = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE "AppData\Local" }
 $script:ManagedStateRoot = Join-Path $localAppDataRoot "Posse"
 
@@ -1601,22 +1604,23 @@ function Invoke-WingetInstall {
   return $rc
 }
 
-function Get-MissingPhpComposerExtensions {
+function Get-MissingPhpExtensions {
   param([string]$PhpPath)
   # One probe through redirected streams: a PHP that prints startup warnings
   # (common with dev setups) must not read as "extension missing".
-  $code = 'foreach (["openssl", "curl", "zip"] as $e) { if (!extension_loaded($e)) { echo $e, PHP_EOL; } }'
+  $names = ConvertTo-Json -InputObject @($script:WindowsPhpExtensions) -Compress
+  $code = 'foreach (' + $names + ' as $e) { if (!extension_loaded($e)) { echo $e, PHP_EOL; } }'
   $probe = Get-NativeOutput $PhpPath @("-r", $code)
-  if (-not $probe -or $probe.ExitCode -ne 0) { return @("openssl", "curl", "zip") }
-  return @(([string]$probe.StdOut -split "\r?\n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -in @("openssl", "curl", "zip") })
+  if (-not $probe -or $probe.ExitCode -ne 0) { return @($script:WindowsPhpExtensions) }
+  return @(([string]$probe.StdOut -split "\r?\n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -in $script:WindowsPhpExtensions })
 }
 
-function Enable-PhpComposerExtensions {
+function Enable-PhpExtensions {
   param([string]$PhpPath)
 
-  $missingBefore = @(Get-MissingPhpComposerExtensions $PhpPath)
+  $missingBefore = @(Get-MissingPhpExtensions $PhpPath)
   if ($missingBefore.Count -eq 0) {
-    return [PSCustomObject]@{ Ok = $true; Changed = $false; IniPath = ""; Message = "PHP Composer extensions already enabled" }
+    return [PSCustomObject]@{ Ok = $true; Changed = $false; IniPath = ""; Message = "PHP application extensions already enabled" }
   }
 
   $phpBinary = ""
@@ -1630,18 +1634,22 @@ function Enable-PhpComposerExtensions {
   # that holds ext\ and php.ini.
   $phpBinary = Resolve-RealExecutable $phpBinary
   $phpDir = Split-Path $phpBinary -Parent
-  if (-not (Test-DirectoryWriteAccess $phpDir)) {
-    return [PSCustomObject]@{
-      Ok = $false; Changed = $false; IniPath = ""
-      Message = ("PHP directory is not writable by the current user: {0}" -f $phpDir)
-    }
-  }
   $extDir = Join-Path $phpDir "ext"
-  $missingDlls = @($missingBefore | Where-Object { -not (Test-Path -LiteralPath (Join-Path $extDir ("php_{0}.dll" -f $_))) })
+  $directoryProbe = Get-NativeOutput $phpBinary @("-r", 'echo ini_get("extension_dir");')
+  $configuredDir = if ($directoryProbe -and $directoryProbe.ExitCode -eq 0) { ([string]$directoryProbe.StdOut).Trim() } else { "" }
+  if ($configuredDir -and -not [IO.Path]::IsPathRooted($configuredDir)) { $configuredDir = Join-Path $phpDir $configuredDir }
+  $extensionFiles = [ordered]@{}
+  foreach ($name in $missingBefore) {
+    $dll = "php_{0}.dll" -f $name
+    $candidate = if ($configuredDir) { Join-Path $configuredDir $dll } else { "" }
+    if (-not $candidate -or -not (Test-Path -LiteralPath $candidate -PathType Leaf)) { $candidate = Join-Path $extDir $dll }
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $extensionFiles[$name] = $candidate }
+  }
+  $missingDlls = @($missingBefore | Where-Object { -not $extensionFiles.Contains($_) })
   if ($missingDlls.Count -gt 0) {
     return [PSCustomObject]@{
       Ok = $false; Changed = $false; IniPath = ""
-      Message = ("the PHP distribution is missing extension DLL(s): {0}" -f ($missingDlls -join ", "))
+      Message = ("the PHP distribution is missing extension DLL(s): {0}; use the official PHP for Windows build" -f ($missingDlls -join ", "))
     }
   }
 
@@ -1674,29 +1682,33 @@ function Enable-PhpComposerExtensions {
 
     $contents = [System.IO.File]::ReadAllText($iniPath)
     $newline = if ($contents.Contains("`r`n")) { "`r`n" } else { "`n" }
-    # Remove active copies before appending a final authoritative block. The
-    # stock templates keep their commented examples as documentation.
-    $contents = [regex]::Replace($contents, '(?im)^[ \t]*extension_dir[ \t]*=.*(?:\r?\n)?', '')
-    $contents = [regex]::Replace($contents, '(?im)^[ \t]*extension[ \t]*=[ \t]*(?:php_)?(?:openssl|curl|zip)(?:\.dll)?[ \t]*(?:;.*)?(?:\r?\n)?', '')
-    $extIniPath = $extDir.Replace('\', '/')
-    $posseBlock = @(
-      "; Posse installer: secure and fast Composer package downloads.",
-      ('extension_dir = "{0}"' -f $extIniPath),
-      "extension=openssl",
-      "extension=curl",
-      "extension=zip"
-    ) -join $newline
-    $contents = $contents.TrimEnd([char[]]"`r`n") + $newline + $newline + $posseBlock + $newline
+    # Keep extension_dir and already-loaded extensions, including those loaded
+    # through PHP_INI_SCAN_DIR. Absolute DLL paths let bundled additions coexist
+    # with a custom extension directory. Repair only missing modules' directives.
+    $section = [regex]::Match($contents, '(?im)^[ \t]*\[(?:PATH|HOST)=')
+    $suffix = if ($section.Success) { $contents.Substring($section.Index) } else { "" }
+    if ($section.Success) { $contents = $contents.Substring(0, $section.Index) }
+    $contents = [regex]::Replace($contents, '(?im)^[ \t]*extension[ \t]*=[ \t]*(?:"([^"\r\n]+)"|''([^''\r\n]+)''|([^;\r\n]+))[ \t]*(?:;[^\r\n]*)?(?:\r?\n|$)', [System.Text.RegularExpressions.MatchEvaluator]{
+      param($match)
+      $value = ($match.Groups[1].Value + $match.Groups[2].Value + $match.Groups[3].Value).Trim()
+      $name = ($value.Replace('\', '/') -split '/')[-1] -replace '^php_', '' -replace '\.dll$', ''
+      if ($missingBefore -contains $name) { return "" }
+      return $match.Value
+    })
+    $lines = @("; Posse installer: standard PHP application extensions.")
+    foreach ($file in $extensionFiles.Values) { $lines += ('extension="{0}"' -f $file.Replace('\', '/')) }
+    $posseBlock = $lines -join $newline
+    $contents = $contents.TrimEnd([char[]]"`r`n") + $newline + $newline + $posseBlock + $newline + $suffix
     [System.IO.File]::WriteAllText($iniPath, $contents, (New-Object System.Text.UTF8Encoding($false)))
   }
   catch {
     return [PSCustomObject]@{
       Ok = $false; Changed = $created; IniPath = $iniPath
-      Message = ("could not configure PHP Composer extensions: {0}" -f $_.Exception.Message)
+      Message = ("could not configure PHP application extensions: {0}" -f $_.Exception.Message)
     }
   }
 
-  $missingAfter = @(Get-MissingPhpComposerExtensions $phpBinary)
+  $missingAfter = @(Get-MissingPhpExtensions $phpBinary)
   if ($missingAfter.Count -gt 0) {
     return [PSCustomObject]@{
       Ok = $false; Changed = $true; IniPath = $iniPath
@@ -1705,7 +1717,7 @@ function Enable-PhpComposerExtensions {
   }
   return [PSCustomObject]@{
     Ok = $true; Changed = $true; IniPath = $iniPath
-    Message = ("enabled PHP OpenSSL, cURL, and ZIP in {0}" -f $iniPath)
+    Message = ("enabled PHP {0} in {1}" -f ($missingBefore -join ", "), $iniPath)
   }
 }
 
@@ -1751,7 +1763,7 @@ function Install-HostTool {
 
 function Fail-SelectedPhp {
   param([string]$Reason)
-  $recovery = "PHP was selected but is unavailable: $Reason. Install PHP 8.2+ from https://windows.php.net/download/ (include openssl, curl and zip), add the real PHP directory to PATH, open a new terminal and verify php -v, then rerun this installer with -ScipLanguages '$script:PosseScipLanguages'. Alternatively install App Installer and run winget install --id PHP.PHP.8.4 --exact. To exclude PHP rerun with -ScipLanguages 'typescript,python'."
+  $recovery = "PHP was selected but is unavailable: $Reason. Install PHP 8.2+ from https://windows.php.net/download/ (include the bundled extension DLLs), add the real PHP directory to PATH, open a new terminal and verify php -v, then rerun this installer with -ScipLanguages '$script:PosseScipLanguages'. Alternatively install App Installer and run winget install --id PHP.PHP.8.4 --exact. To exclude PHP rerun with -ScipLanguages 'typescript,python'."
   Write-Warn2 $recovery
   $script:InstallFailed = $true
   Step-End "failed" $recovery
@@ -2081,8 +2093,21 @@ function Step-Composer {
     return
   }
   $pharPath = Join-Path $script:ManagedStateRoot "scip\bin\composer.phar"
-  # A Composer 2 you already have is used as-is: nothing to install, and no
-  # changes to your php.ini.
+  $php = Get-Command php -ErrorAction SilentlyContinue
+  if ($php -and -not $DryRun) {
+    $phpExtensions = Enable-PhpExtensions $php.Source
+    if (-not $phpExtensions.Ok) {
+      Write-Warn2 ("PHP application extension setup failed: {0}" -f $phpExtensions.Message)
+      Step-End "partial" ("Composer skipped: {0}" -f $phpExtensions.Message)
+      return
+    }
+    if ($phpExtensions.Changed) { Write-Info $phpExtensions.Message }
+  }
+  if ($DryRun) {
+    Step-End "dry-run" ("would configure standard PHP application extensions and reuse Composer 2 or install signature-verified composer.phar into {0}" -f $pharPath)
+    return
+  }
+  # Reuse an existing Composer after checking the PHP application defaults.
   $existing = Get-Command composer -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($existing -and $existing.Source) {
     $version = Get-NativeOutput $existing.Source @("--version", "--no-ansi") 60000
@@ -2091,20 +2116,6 @@ function Step-Composer {
       Write-Info ("found Composer {0}.{1} at {2}; Posse needs Composer 2, so setup adds its own" -f $Matches[1], $Matches[2], $existing.Source)
     }
     else { Write-Info ("found {0}, but it did not run; setup adds its own Composer" -f $existing.Source) }
-  }
-  $php = Get-Command php -ErrorAction SilentlyContinue
-  if ($php -and -not $DryRun) {
-    $phpExtensions = Enable-PhpComposerExtensions $php.Source
-    if (-not $phpExtensions.Ok) {
-      Write-Warn2 ("PHP Composer extension setup failed: {0}" -f $phpExtensions.Message)
-      Step-End "partial" ("Composer skipped: {0}" -f $phpExtensions.Message)
-      return
-    }
-    if ($phpExtensions.Changed) { Write-Info $phpExtensions.Message }
-  }
-  if ($DryRun) {
-    Step-End "dry-run" ("would configure PHP Composer extensions and download signature-verified composer.phar into {0}" -f $pharPath)
-    return
   }
   if (-not $php) {
     Write-Warn2 "PHP is not installed, so Composer was skipped - SCIP PHP indexing stays disabled until both exist"
