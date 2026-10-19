@@ -34,8 +34,11 @@ export function isLeaseValid(jobId, leaseToken) {
  * Atomically increment attempt count AND create the attempt record.
  * Validates the lease token first - if the lease was requeued (stale worker),
  * returns null instead of risking a UNIQUE constraint violation.
+ * setupOnly records infrastructure work without retiring scope/verification
+ * evidence or resetting the assessment budget for an implementation that has
+ * not actually restarted. Its attempt charge can still be refunded normally.
  */
-export function incrementAndCreateAttempt(jobId, leaseToken, workerType, modelName = null, reasoningEffort = null) {
+export function incrementAndCreateAttempt(jobId, leaseToken, workerType, modelName = null, reasoningEffort = null, { setupOnly = false } = {}) {
   const db = getDb();
   return runImmediateTransaction(db, () => {
     // Validate lease is still ours before touching attempt data
@@ -48,11 +51,13 @@ export function incrementAndCreateAttempt(jobId, leaseToken, workerType, modelNa
     if (!LEASE_HOLDING_STATUSES.includes(job.status)) return null;
     if (!job.lease_expires_at || job.lease_expires_at < leaseNowIso()) return null;
 
-    _attemptStartHook?.(jobId);
-    // Attempt counters can later be refunded; remove the old authority now
-    // so a reopened implementation can never resurrect an earlier receipt.
-    db.prepare(`UPDATE jobs SET payload_json = json_remove(payload_json, ?) WHERE id = ? AND json_valid(payload_json)`)
-      .run(`$.${REVIEWED_COMPLETION_KEY}`, jobId);
+    if (!setupOnly) {
+      _attemptStartHook?.(jobId);
+      // Attempt counters can later be refunded; remove the old authority now
+      // so a reopened implementation can never resurrect an earlier receipt.
+      db.prepare(`UPDATE jobs SET payload_json = json_remove(payload_json, ?) WHERE id = ? AND json_valid(payload_json)`)
+        .run(`$.${REVIEWED_COMPLETION_KEY}`, jobId);
+    }
 
     // Derive next attempt number from actual rows, not the counter - the counter
     // can drift when requeueExpiredLeases/decrementAttemptCount undo increments
@@ -63,11 +68,11 @@ export function incrementAndCreateAttempt(jobId, leaseToken, workerType, modelNa
     db.prepare(`
       UPDATE jobs
       SET attempt_count = ?,
-          assessment_attempt_count = 0,
+          assessment_attempt_count = CASE WHEN ? THEN assessment_attempt_count ELSE 0 END,
           state_version = state_version + 1,
           updated_at = ?
       WHERE id = ?
-    `).run(newCount, now(), jobId);
+    `).run(newCount, setupOnly ? 1 : 0, now(), jobId);
 
     const info = db.prepare(`
       INSERT INTO job_attempts (

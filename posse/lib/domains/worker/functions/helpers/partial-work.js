@@ -84,7 +84,7 @@ export function collectPartialWorkState(job, wtPath) {
   if (!job?.id || !wtPath) return { hasChanges: false, paths: [], inScopePaths: [], outOfScopePaths: [], siblingPaths: [] };
   let raw = "";
   try {
-    raw = gitExec(["-c", "core.quotePath=false", "status", "--porcelain"], wtPath);
+    raw = gitExec(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all"], wtPath);
   } catch {
     return { hasChanges: false, paths: [], inScopePaths: [], outOfScopePaths: [], siblingPaths: [] };
   }
@@ -138,7 +138,7 @@ export async function collectPartialWorkStateAsync(job, wtPath, { signal = null 
   if (!job?.id || !wtPath) return { hasChanges: false, paths: [], inScopePaths: [], outOfScopePaths: [], siblingPaths: [] };
   let raw = "";
   try {
-    raw = await gitExecAsync(["-c", "core.quotePath=false", "status", "--porcelain"], wtPath, {
+    raw = await gitExecAsync(["-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all"], wtPath, {
       signal,
       nativeParity: { disabled: true },
     });
@@ -530,6 +530,22 @@ export async function commitScopedPartialWorkAsync(worker, job, attempt, wtPath,
     state,
     result,
   };
+}
+
+// The recovery answer consumes the stall stash before attempting its commit.
+// Restore that checkpoint on rejection so commit, extend, and revert remain
+// usable on the next explicit answer, including after a process restart.
+export async function commitRestoredPartialWorkAsync(worker, job, attempt, wtPath, options = {}) {
+  try {
+    return await commitScopedPartialWorkAsync(worker, job, attempt, wtPath, options);
+  } catch (commitError) {
+    try {
+      await stashPartialWorkForExtensionAsync(job, wtPath, { projectDir: worker.projectDir });
+    } catch (preserveError) {
+      throw new Error(`${commitError.message}\nCould not re-save partial work: ${preserveError.message}. The remaining work is in ${wtPath}.`, { cause: commitError });
+    }
+    throw commitError;
+  }
 }
 
 export async function revertPartialWork(worker, job, wtPath, {

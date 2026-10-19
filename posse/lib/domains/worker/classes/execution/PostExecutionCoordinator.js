@@ -2,6 +2,7 @@ import { authoritativeFinalReview } from "../../../assessment/functions/final-re
 import { parsePorcelainEntries, unfinishedSiblingDirtyLocks } from "../../functions/helpers/worktree-dirty-classification.js";
 import { DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js";
 import { parkDirtyWorktreeRecovery } from "../../functions/helpers/dirty-worktree-recovery.js";
+import { settleWorktreeLockTimeout } from "../../functions/helpers/worktree-lock-recovery.js";
 import crypto from "crypto";
 import fs from "node:fs";
 import { completeAttempt, createJob, getAttempts, getDependents, getJob, getWorkItem, isLeaseValid, abandonJobScopeExpansionRequest, listActiveFileLocks, logEvent, rewireDependency, runInTransaction, settleJobScopeExpansionAttempt, setAttemptCommitHash, setJobResult, storeArtifact, updateJobPayload, updateJobProvider } from "../../../queue/functions/index.js";
@@ -1604,8 +1605,8 @@ export async function handlePostExecutionForWorker({
                 : `Git commit failed: ${gitFailureDetail}`,
             });
             if (lockTimeout.timeout) {
-              const readyAt = new Date(Date.now() + 5000).toISOString();
-              this._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt.id, readyAt });
+              settleWorktreeLockTimeout(this, job, leaseToken, { attemptId: attempt.id, phase: "commit",
+                message: `Git commit blocked by worktree lock timeout: ${gitFailureDetail}` });
               return;
             }
             this._retryOrFail(job, leaseToken, `Git commit failed: ${gitFailureDetail}`, { attemptId: attempt.id });

@@ -4,7 +4,7 @@ import { linkFailedAttemptSnapshot } from "./failed-attempt-recovery.js";
 // Execute-attempt error taxonomy extracted from worker.js:
 // deterministic interruptions, retryable interruptions, and catastrophic errors.
 
-import { abandonJobScopeExpansionRequest, completeAttempt, decrementAttemptCount, flagStallResume, getAttempts, getJob, getWorkItem, incrementAttemptCount, logEvent, listJobsByWorkItem, setJobError, settleJobScopeExpansionAttempt, storeArtifact, updateJobPayload, updateJobProvider } from "../../../queue/functions/index.js";
+import { abandonJobScopeExpansionRequest, completeAttempt, decrementAttemptCount, flagStallResume, getAttempts, getJob, getWorkItem, incrementAndCreateAttempt, incrementAttemptCount, logEvent, listJobsByWorkItem, setJobError, settleJobScopeExpansionAttempt, storeArtifact, updateJobPayload, updateJobProvider } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { getProviderBackoff, getProviderName, getProviderRateLimitState, pauseProvider } from "../../../providers/functions/provider.js";
@@ -283,8 +283,16 @@ function handlePreAttemptInterruption(worker, { job, leaseToken, outerErr }) {
     return true;
   }
 
-  if (killReason === "shutdown" || isLeaseInterruption(killReason) || isOtherAbortInterruption(outerErr)
-    || killReason === "runtime_exceeded") {
+  if (killReason === "runtime_exceeded") {
+    // A setup that repeatedly exceeds its runtime allowance is a harness
+    // failure. Unlike shutdown/lease handoff, repeating it is not progress.
+    const created = incrementAndCreateAttempt(job.id, leaseToken, "system", "worktree-setup", null, { setupOnly: true });
+    if (created) settleHarnessSetupFault(worker, { job, leaseToken, attempt: created.attempt,
+      err: outerErr, faultCode: killReason, startTime: Date.now() });
+    return true;
+  }
+
+  if (killReason === "shutdown" || isLeaseInterruption(killReason) || isOtherAbortInterruption(outerErr)) {
     const reason = interruptionLabel(killReason);
     logEvent({
       work_item_id: job.work_item_id,

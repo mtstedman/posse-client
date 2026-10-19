@@ -49,7 +49,7 @@ import { acquireWorktreeLockAsync, gitStashLockPath } from "../../../git/functio
 import { dropStashByHashAsync, findStallStashEntryAsync } from "../../../git/functions/utils.js";
 import {
   applyPartialWorkTurnExtension,
-  commitScopedPartialWorkAsync,
+  commitRestoredPartialWorkAsync,
 } from "../helpers/partial-work.js";
 import {
   createOneshotDevJob,
@@ -573,6 +573,11 @@ export async function runHumanInputJob(worker, job, {
       if (reviewAction !== "unknown") selectedAction = reviewAction;
     }
     selectedAction ||= "respond";
+    // A valid commit answer cannot repair a rejected Git operation. Keep the
+    // gate available for an explicit retry after repair or a different action,
+    // instead of immediately presenting the same failing commit prompt again.
+    const reaskAfterActionFailure = liveOperator && !(selectedAction === "commit"
+      && [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE, "partial_work_recovery"].includes(payload.review_type));
     if (
       selectedAction === "retry_assessment"
       && (
@@ -918,7 +923,7 @@ export async function runHumanInputJob(worker, job, {
             "",
             restored,
           ].join("\n");
-          const partialCommit = await commitScopedPartialWorkAsync(worker, origJob, latestOrigAttempt ? { id: latestOrigAttempt.id } : null, wtPath, {
+          const partialCommit = await commitRestoredPartialWorkAsync(worker, origJob, latestOrigAttempt ? { id: latestOrigAttempt.id } : null, wtPath, {
             reason: `human partial-work recovery #${job.id}: commit`,
             output: partialOutput,
           });
@@ -946,6 +951,10 @@ export async function runHumanInputJob(worker, job, {
             };
             updateJobPayload(origJob.id, JSON.stringify(origPayload));
             extendJobMaxAttempts(origJob.id, Number(freshOrigJob.attempt_count || origJob.attempt_count || 0) + 1);
+            // The operator committed a new candidate for assessment. Its
+            // first assessment must not be rejected by an older candidate's
+            // exhausted budget, nor does this grant unlimited retries.
+            extendAssessmentMaxAttempts(origJob.id, Number(freshOrigJob.assessment_attempt_count || 0) + 1);
             await worker._setJobRowStatus(origJob, "queued");
             worker.emit(job.id, `${C.cyan}[human] Partial work for job #${origJob.id} committed ${partialCommit.committedHash.slice(0, 8)} and queued for assessment${C.reset}`);
           }
@@ -1660,10 +1669,7 @@ export async function runHumanInputJob(worker, job, {
         leaseToken,
         error: failureMessage,
       });
-      // A reopened gate is asked again at once when a live operator answered
-      // it, its reason leading the prompt, like any answer that could not
-      // apply (keepGateOpenForUnappliedAnswer); otherwise it parks.
-      const askedAgain = Boolean(reopened && liveOperator);
+      const askedAgain = Boolean(reopened && reaskAfterActionFailure);
       if (reopened) {
         worker.emit(job.id, `${C.yellow}[human] ${failureMessage} The original work is still parked, so the gate remains open.${askedAgain ? " Asking again." : ""}${C.reset}`);
         worker._releaseWithoutAttemptPenalty(job, leaseToken, askedAgain ? "queued" : "waiting_on_human", { attemptId: attempt.attempt.id });
@@ -1749,7 +1755,7 @@ export async function runHumanInputJob(worker, job, {
         leaseToken,
         error: `Post-answer resolution failed: ${message}`,
       });
-      const askedAgain = Boolean(reopened && liveOperator);
+      const askedAgain = Boolean(reopened && reaskAfterActionFailure);
       if (reopened) {
         worker.emit(job.id, `${C.yellow}[human] Post-answer resolution failed before the original work changed; the gate remains open for retry: ${message}${askedAgain ? " Asking again." : ""}${C.reset}`);
       } else {

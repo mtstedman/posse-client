@@ -2080,9 +2080,21 @@ export async function runPostExecutionAssessment(worker, {
       refreshAndExtractInsights(job.work_item_id);
       return;
     }
-    const readiness = (committedHash || verifiedNoChange)
-      ? await inspectAssessmentWorktreeReadiness(wtPath)
-      : { ready: true };
+    let readiness;
+    try {
+      readiness = (committedHash || verifiedNoChange)
+        ? await inspectAssessmentWorktreeReadiness(wtPath)
+        : { ready: true };
+    } catch (error) {
+      // Implementation already produced its candidate. Charge inspection
+      // failures to assessment and retain that candidate for bounded recovery.
+      if (recordAssessmentInfrastructureAttempt(job, leaseToken, attempt.id, startTime, error.message)) {
+        beginAttachedAssessmentAttempt(job.id, leaseToken);
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken, error, { pendingFileRequests });
+      }
+      refreshAndExtractInsights(job.work_item_id);
+      return;
+    }
     const readinessOutcome = recordAssessmentWorktreeReadiness(job, leaseToken, readiness, attempt.id);
     if (readinessOutcome.leaseLost) {
       completeAttempt(attempt.id, { status: "interrupted", duration_ms: Date.now() - startTime,

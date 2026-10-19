@@ -37,6 +37,11 @@ export const RUNTIME_KILL_RETRY_MS = 60_000;
 
 export const RUNTIME_KILL_WEDGED_MS = 5 * 60_000;
 
+// A filesystem lock already waits for its own acquisition timeout. Bound
+// whole-job retries too, including transitions between setup and commit.
+export const WORKTREE_LOCK_MAX_REQUEUES = 2;
+export const WORKTREE_LOCK_REQUEUE_DELAY_MS = 5_000;
+
 // When nothing runs and every job that could start waits on a work item that
 // cannot progress without an operator, the run finishes as needs-action after
 // this long instead of idling forever (finding 1, run 1250b). The grace spans

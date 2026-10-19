@@ -1,5 +1,6 @@
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { parkDirtyWorktreeRecovery } from "./dirty-worktree-recovery.js";
+import { settleWorktreeLockTimeout } from "./worktree-lock-recovery.js";
 import { DIRTY_WORKTREE_RECOVERY_ERROR, DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js";
 // lib/domains/worker/functions/helpers/worktree-lifecycle.js
 //
@@ -295,7 +296,7 @@ async function crossWiSyncTargetGuardAsync(wtPath, sync, { signal = null } = {})
 }
 
 function recordWorktreeSetupFailureAttempt(job, leaseToken, message) {
-  const created = incrementAndCreateAttempt(job.id, leaseToken, "system", "worktree-setup", null);
+  const created = incrementAndCreateAttempt(job.id, leaseToken, "system", "worktree-setup", null, { setupOnly: true });
   if (!created?.attempt?.id) return null;
   completeAttempt(created.attempt.id, {
     status: "failed",
@@ -1282,8 +1283,6 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
     }
     const lockTimeout = worktreeLockTimeoutInfo(gitErr);
     if (lockTimeout.timeout) {
-      const readyAt = new Date(Date.now() + 5000).toISOString();
-      worker.emit(job.id, `${C.yellow}[system] WI#${job.work_item_id} worktree setup waiting on a stale lock; retrying shortly${C.reset}`);
       logEvent({
         work_item_id: job.work_item_id,
         job_id: job.id,
@@ -1296,8 +1295,8 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
           lock_stat: lockTimeout.lockStat,
         }),
       });
-      setJobError(job.id, `Git worktree setup blocked by worktree lock timeout: ${gitErr.message}`);
-      worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt });
+      settleWorktreeLockTimeout(worker, job, leaseToken, { phase: "worktree_setup",
+        message: `Git worktree setup blocked by worktree lock timeout: ${gitErr.message}` });
       return { ok: false, wtPath: null, branchName: null, sentinelPath: job._activeWorktreeSentinel || null };
     }
     if (isTransientCommitInfraFailure(gitErr)) {

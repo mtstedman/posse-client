@@ -306,9 +306,27 @@ export class AssessmentHandoffAdapter {
       return { handled: true };
     }
 
-    const readiness = (assessmentSource.kind === "commit" || assessmentSource.kind === "verified_no_change")
-      ? await inspectAssessmentWorktreeReadiness(wtPath)
-      : { ready: true };
+    // Enforce the budget before Git inspection as well as provider execution:
+    // an unavailable worktree is an assessment failure, not another dev turn.
+    const freshAssessmentJob = getJob(job.id) || job;
+    if (Number(freshAssessmentJob.assessment_attempt_count || 0) >= Math.max(1, Number(freshAssessmentJob.assessment_max_attempts || 3))) {
+      routeAssessmentInfrastructureFailure(worker, job, leaseToken,
+        new Error("Assessment retry budget exhausted before another attempt could start"), { pendingFileRequests });
+      return { handled: true };
+    }
+    let readiness;
+    try {
+      readiness = (assessmentSource.kind === "commit" || assessmentSource.kind === "verified_no_change")
+        ? await inspectAssessmentWorktreeReadiness(wtPath)
+        : { ready: true };
+    } catch (error) {
+      const failedInspection = incrementAndCreateAssessmentAttempt(job.id, leaseToken, null, assessmentReasoningEffort);
+      if (!failedInspection) return { handled: true };
+      completeAttempt(failedInspection.attempt.id, { status: "failed",
+        duration_ms: Date.now() - assessStart, error_text: error.message });
+      routeAssessmentInfrastructureFailure(worker, job, leaseToken, error, { pendingFileRequests });
+      return { handled: true, currentAttemptId: failedInspection.attempt.id };
+    }
     const readinessOutcome = recordAssessmentWorktreeReadiness(job, leaseToken, readiness, assessmentSource.attempt.id);
     if (readinessOutcome.leaseLost) return { handled: true };
     if (!readiness.ready) {
@@ -341,14 +359,6 @@ export class AssessmentHandoffAdapter {
 
     // A clean readiness check may have cleared a persisted deferral streak.
     cleanPayload = worker.parsePayload(job);
-    // Lease recovery can requeue an interrupted assessment without producing
-    // a verdict or an infrastructure error. Enforce its budget at entry too.
-    const freshAssessmentJob = getJob(job.id) || job;
-    if (Number(freshAssessmentJob.assessment_attempt_count || 0) >= Math.max(1, Number(freshAssessmentJob.assessment_max_attempts || 3))) {
-      routeAssessmentInfrastructureFailure(worker, job, leaseToken,
-        new Error("Assessment retry budget exhausted before another attempt could start"), { pendingFileRequests });
-      return { handled: true };
-    }
     const assessAttempt = incrementAndCreateAssessmentAttempt(
       job.id,
       leaseToken,

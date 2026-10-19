@@ -1,5 +1,5 @@
-// Posse-side provider setup faults: the tool catalog or the dispatch request
-// Posse built was rejected before any model turn ran. They are not the job's
+// Posse-side setup faults: the tool catalog or dispatch request was rejected,
+// or setup exhausted its watchdog before any model turn ran. They are not the job's
 // failure, so the attempt is refunded rather than charged toward the same-error
 // dead letter. Keep the set narrow (by code) so real provider failures count.
 
@@ -49,7 +49,8 @@ function priorFaultInGeneration(job, attemptId, faultCode) {
 /**
  * Refund a harness setup fault: requeue once with backoff, then fail a repeat
  * in the same retry generation with a durable infrastructure diagnostic.
- * Task guidance cannot repair Posse's provider setup; do not open a human gate.
+ * Task guidance cannot repair Posse's setup; do not ask for a task answer.
+ * Terminal work-item reconciliation may still offer explicit recovery actions.
  * @returns {"requeued"|"failed"|"lease_lost"}
  */
 export function settleHarnessSetupFault(worker, { attempt, err, faultCode, job, leaseToken, startTime }) {
@@ -75,7 +76,7 @@ export function settleHarnessSetupFault(worker, { attempt, err, faultCode, job, 
       event_type: EVENT_TYPES.JOB_PROVIDER_ERROR,
       actor_type: EVENT_ACTORS.SYSTEM,
       message: repeated
-        ? `Harness setup fault repeated (${faultCode}); failed without an operator gate (attempt not consumed)`
+        ? `Harness setup fault repeated (${faultCode}); stopped automatic retries (attempt not consumed)`
         : `Harness setup fault (${faultCode}); requeuing in ${Math.round(HARNESS_SETUP_FAULT_BACKOFF_MS / 1000)}s (attempt not consumed)`,
       event_json: JSON.stringify({ harness_fault: true, harness_fault_code: faultCode, exhausted: repeated, operator_actionable: false, detail: detail.slice(0, 500) }),
     });
@@ -86,7 +87,7 @@ export function settleHarnessSetupFault(worker, { attempt, err, faultCode, job, 
     worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: harness setup fault ${faultCode} — requeuing in ${Math.round(HARNESS_SETUP_FAULT_BACKOFF_MS / 1000)}s (attempt not consumed)${C.reset}`);
     return "requeued";
   }
-  worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: harness setup fault ${faultCode} repeated — failed without an operator gate (attempt not consumed)${C.reset}`);
+  worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: harness setup fault ${faultCode} repeated — stopped automatic retries (attempt not consumed)${C.reset}`);
   refreshAndExtractInsights(job.work_item_id);
   return "failed";
 }
