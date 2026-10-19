@@ -178,7 +178,11 @@ the same approval policy.
 
 The flag applies only to that run. Omitting it, or using `--scope-mode=default`,
 preserves the existing `scope_auto_approval` policy and interactive or
-non-interactive behavior. Scope mode does not change plan approval, publication,
+non-interactive behavior. That policy already grants developers and fixes test
+files, lockfiles, paths inside an approved create root, and project manifests
+(`package.json`, `composer.json`, `tsconfig*.json`, `.gitignore`,
+`pyproject.toml`, `requirements.txt`, `Cargo.toml`, `go.mod`, `Gemfile`)
+without a gate; installing new dependencies still needs its own approval. Scope mode does not change plan approval, publication,
 assessment, or clarification decisions. Approved paths still pass the normal
 scope validation, protected-path, and file-lock checks. This flag does not
 enable the proposed one-shot claim/release workflow.
@@ -1183,9 +1187,13 @@ or dotenv support. The portable example is suitable for configuring a fresh
 clone; runtime data and machine-specific environment files are never committed.
 
 On an existing development branch, `install_dependencies` remains available
-for standalone npm manifests within writable scope. Declare dependencies in
-`package.json`, include `package.json` and `package-lock.json` in scope, and
-ignore `node_modules/`. This separate installer also requires explicit approval
+for standalone npm manifests and Composer projects within writable scope. For
+npm, declare dependencies in `package.json`, include `package.json` and
+`package-lock.json` in scope, and ignore `node_modules/`. For Composer
+(`manager: "composer"`), declare them in `composer.json`, include
+`composer.lock` in scope, and ignore `vendor/`; an existing lock is honored and
+only packages it lacks are resolved, with Composer scripts off unless approved
+and plugins always off. This separate installer also requires explicit approval
 and leaves its lockfile for the ordinary developer commit.
 
 `setup_database` creates a **new local SQLite file** at an ignored path, optionally

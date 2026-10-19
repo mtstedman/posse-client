@@ -14,6 +14,10 @@
 //    files; the diff still goes through assessment.
 //  - generated_file: lockfiles and generated snapshots that follow
 //    mechanically from an in-scope change.
+//  - project_manifest: package/build manifests and ignore rules for dev/fix
+//    jobs. Adding a dependency, script, or compiler option is ordinary
+//    development; installing still needs its own approval, and the write
+//    lock guard still keeps another work item's edits out.
 //
 // Everything else still routes to the human gate. The operator can disable
 // the whole tier with the `scope_auto_approval` setting.
@@ -33,6 +37,18 @@ const GENERATED_BASENAMES = new Set([
   "gemfile.lock",
   "go.sum",
 ]);
+
+const PROJECT_MANIFEST_BASENAMES = new Set([
+  "package.json",
+  "composer.json",
+  ".gitignore",
+  "pyproject.toml",
+  "requirements.txt",
+  "cargo.toml",
+  "go.mod",
+  "gemfile",
+]);
+const PROJECT_MANIFEST_RE = /^(?:tsconfig|jsconfig)(?:\.[^/]+)?\.json$/i;
 
 const TEST_SEGMENT_RE = /(?:^|\/)(?:tests?|__tests__|__snapshots__|specs?|testdata|fixtures)\//i;
 const TEST_FILENAME_RE = /(?:^|\/)(?:test_[^/]+|conftest\.py|[^/]+(?:\.test|\.spec|_test|_spec|-test|-spec)\.[a-z0-9]+)$/i;
@@ -56,6 +72,11 @@ export function isTestCollateralPath(relPath) {
   return TEST_SEGMENT_RE.test(normalized)
     || TEST_FILENAME_RE.test(normalized)
     || SNAPSHOT_RE.test(normalized);
+}
+
+export function isProjectManifestPath(relPath) {
+  const base = normalizeScopePath(relPath).split("/").filter(Boolean).at(-1) || "";
+  return PROJECT_MANIFEST_BASENAMES.has(base.toLowerCase()) || PROJECT_MANIFEST_RE.test(base);
 }
 
 export function isGeneratedScopePath(relPath) {
@@ -90,6 +111,9 @@ export function classifyAutoApprovableScopeRequest({
   }
   if (isGeneratedScopePath(relPath)) {
     return { reason: "generated_file" };
+  }
+  if (isProjectManifestPath(relPath)) {
+    return { reason: "project_manifest" };
   }
   return null;
 }

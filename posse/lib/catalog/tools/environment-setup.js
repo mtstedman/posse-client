@@ -82,12 +82,13 @@ export const TOOL_INSPECT_ENVIRONMENT = {
 export const TOOL_INSTALL_DEPENDENCIES = {
   type: "function",
   name: "install_dependencies",
-  description: "Request explicit user approval to install the dependencies declared in package.json in this job's worktree. Edit package.json first and include package.json/package-lock.json in writable scope. Every invocation needs its own approval; scope auto-approval does not apply. Returns after approval and execution, rejection, or expiry. Accepts structured options for standalone npm packages.",
+  description: "Request explicit user approval to install the dependencies declared in package.json (npm) or composer.json (Composer) in this job's worktree. Edit the manifest first and include it and its lockfile (package-lock.json or composer.lock) in writable scope. Every invocation needs its own approval; scope auto-approval does not apply. Returns after approval and execution, rejection, or expiry. Accepts structured options for standalone npm packages and Composer projects.",
   parameters: {
     type: "object",
     properties: {
       path: projectPath,
-      lifecycle_scripts: { type: "boolean", description: "Allow package lifecycle scripts (including native builds). Default false. The user must explicitly approve this in the installer proposal." },
+      manager: { type: "string", enum: [...ENVIRONMENT_PACKAGE_MANAGERS], description: "Package manager whose manifest to install from. Default npm; use composer for composer.json." },
+      lifecycle_scripts: { type: "boolean", description: "Allow package lifecycle scripts (npm scripts and native builds, or Composer scripts). Default false. The user must explicitly approve this in the installer proposal. Composer plugins stay disabled." },
       reason: { type: "string", minLength: 1, maxLength: 1000 },
     },
     required: ["reason"], additionalProperties: false,
