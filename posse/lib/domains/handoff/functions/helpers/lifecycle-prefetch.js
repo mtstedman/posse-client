@@ -119,7 +119,24 @@ export function lifecycleBodyRenderBudget(trim = 0) {
   };
 }
 
-export function exactPrefetchFileRenderBudget(trim = 0) {
+// Developer and fix handoffs render their in-scope files whole. The developer
+// edits exactly these files, so a 120-line preview only forces a re-read
+// before the first edit (2026-10-19). The per-file and total allowances are
+// rendered chars; the total is added to the ATLAS section cap for those
+// recipients, and the trim ladder shrinks the bodies before dropping them.
+export const ATLAS_SCOPED_BODY_MAX_CHARS_PER_FILE = 32000;
+export const ATLAS_SCOPED_BODY_MAX_LINES = 1200;
+export const ATLAS_SCOPED_BODY_TOTAL_CHARS = 64000;
+
+function scopedBodyRenderBudget(trim = 0) {
+  if (trim >= 3) return { maxChars: 0, maxLines: MAX_INLINE_BODY_LINES };
+  if (trim >= 2) return { maxChars: 3200, maxLines: MAX_INLINE_BODY_LINES };
+  if (trim >= 1) return { maxChars: 8000, maxLines: 400 };
+  return { maxChars: ATLAS_SCOPED_BODY_MAX_CHARS_PER_FILE, maxLines: ATLAS_SCOPED_BODY_MAX_LINES };
+}
+
+export function exactPrefetchFileRenderBudget(trim = 0, { scoped = false } = {}) {
+  if (scoped) return scopedBodyRenderBudget(trim);
   if (trim >= 3) return { maxChars: 0, maxLines: MAX_INLINE_BODY_LINES };
   return {
     maxChars: trim >= 2 ? 1000 : trim >= 1 ? 1800 : 3200,
@@ -127,12 +144,36 @@ export function exactPrefetchFileRenderBudget(trim = 0) {
   };
 }
 
-export function exactPrefetchFileInlineDecision(item, { trim = 0 } = {}) {
+function normalizedScopedPath(value) {
+  const text = String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  return text ? text.toLowerCase() : "";
+}
+
+// Lowercased repo-relative paths whose whole body a dev or fix handoff renders:
+// the planner's write scope plus the files it ranked as key context. Other
+// recipients get the preview budget.
+export function devScopedBodyPaths(packet) {
+  if (!packet || typeof packet !== "object") return new Set();
+  if (packet.recipient !== "dev" && packet.job_type !== "fix") return new Set();
+  const raw = packet._raw_payload && typeof packet._raw_payload === "object" ? packet._raw_payload : {};
+  const brief = packet.dev_brief && typeof packet.dev_brief === "object"
+    ? packet.dev_brief
+    : (raw.dev_brief && typeof raw.dev_brief === "object" ? raw.dev_brief : {});
+  const priorities = Array.isArray(brief.planner_file_priorities) ? brief.planner_file_priorities : [];
+  const paths = [
+    ...(Array.isArray(packet.files_to_modify) ? packet.files_to_modify : []),
+    ...(Array.isArray(brief.key_files) ? brief.key_files : []),
+    ...priorities.map((entry) => entry?.path),
+  ].map(normalizedScopedPath).filter(Boolean);
+  return new Set(paths);
+}
+
+export function exactPrefetchFileInlineDecision(item, { trim = 0, scoped = false } = {}) {
   if (!item?.ok || item.kind !== "read_file" || typeof item.content !== "string" || !item.content) {
     return { inline: false, reason: "unavailable" };
   }
   if (item.truncated === true) return { inline: false, reason: "truncated" };
-  const budget = exactPrefetchFileRenderBudget(trim);
+  const budget = exactPrefetchFileRenderBudget(trim, { scoped });
   const lineCount = item.content.split(/\r?\n/u).length;
   if (lineCount > budget.maxLines) return { inline: false, reason: "line_budget", lineCount };
   if (item.content.length > budget.maxChars) return { inline: false, reason: "character_budget", lineCount };
@@ -198,8 +239,17 @@ export function materializeRenderedLifecycleCoverage(packet, { deliveredPrompt =
   // too. Register only literal read_file payloads whose entire body survives
   // the selected render trim. Skeletons and clipped files remain navigation,
   // never line-level custody.
+  const renderedBodies = packet?.atlas_render_exact_bodies && typeof packet.atlas_render_exact_bodies === "object"
+    ? packet.atlas_render_exact_bodies
+    : null;
   for (const item of (Array.isArray(exactFiles) ? exactFiles : [])) {
-    if (!exactPrefetchFileInlineDecision(item, { trim: rendered.trim }).inline) continue;
+    // The renderer records whether each body survived the delivered trim
+    // whole (scoped bodies share a total allowance, so the budget alone
+    // cannot say). Fall back to the preview decision when nothing was recorded.
+    const recorded = renderedBodies ? renderedBodies[normalizedScopedPath(item?.file)] : null;
+    const inline = recorded ? recorded.complete === true
+      : exactPrefetchFileInlineDecision(item, { trim: rendered.trim }).inline;
+    if (!inline) continue;
     const endLine = Math.max(1, Number(item.sourceLines ?? item.totalLines ?? item.returnedLines) || 1);
     const result = owner.materializeData({
       repo_rel_path: item.file,

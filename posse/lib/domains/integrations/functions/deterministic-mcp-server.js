@@ -1513,24 +1513,20 @@ function addToolSchema(schema) {
 function readFileSchemaForCurrentBoot() {
   if (!atlasAvailable) return TOOL_READ_FILE;
   if (atlasNativeToolIsComplementary("read_file", roleName)) {
-    const maxLines = roleName === "researcher"
-      ? ATLAS_RESEARCHER_READ_MAX_LINES
-      : ATLAS_CHAIN_READ_MAX_LINES;
-    const limitDescription = roleName === "researcher"
-      ? `Maximum lines to return; indexed source defaults to ${ATLAS_RESEARCHER_READ_MAX_LINES}, while non-indexed files remain capped at ${ATLAS_CHAIN_READ_MAX_LINES}.`
-      : `Maximum lines to return; defaults to ${maxLines}.`;
+    // Roles that keep read_file beside Atlas (researcher, dev, fix) read
+    // indexed source at the wider allowance; non-indexed files keep the
+    // chain-read cap.
+    const maxLines = ATLAS_RESEARCHER_READ_MAX_LINES;
     return {
       ...TOOL_READ_FILE,
-      description: roleName === "researcher"
-        ? `Read source or text from a known file as numbered lines. Use offset and limit for a precise range; indexed source returns at most ${ATLAS_RESEARCHER_READ_MAX_LINES} lines per call and non-indexed files at most ${ATLAS_CHAIN_READ_MAX_LINES}.`
-        : `Read source or text from a known file as numbered lines. Use offset and limit for a precise range; returns at most ${maxLines} lines per call.`,
+      description: `Read source or text from a known file as numbered lines. Use offset and limit for a precise range; indexed source returns at most ${ATLAS_RESEARCHER_READ_MAX_LINES} lines per call and non-indexed files at most ${ATLAS_CHAIN_READ_MAX_LINES}.`,
       parameters: {
         ...TOOL_READ_FILE.parameters,
         properties: {
           path: TOOL_READ_FILE.parameters.properties.path,
           offset: TOOL_READ_FILE.parameters.properties.offset,
           limit: { type: "integer", minimum: 1, maximum: maxLines,
-            description: limitDescription },
+            description: `Maximum lines to return; indexed source defaults to ${ATLAS_RESEARCHER_READ_MAX_LINES}, while non-indexed files remain capped at ${ATLAS_CHAIN_READ_MAX_LINES}.` },
         },
       },
     };
@@ -2909,7 +2905,7 @@ function boundForwardedReadArgs(toolName, args = {}) {
 }
 
 function nativeReadMaxLines(args = {}) {
-  return roleName === "researcher"
+  return atlasNativeToolIsComplementary("read_file", roleName)
     && isIndexableSourcePath(args?.path, { cwd: workspaceCwd })
     ? ATLAS_RESEARCHER_READ_MAX_LINES
     : ATLAS_CHAIN_READ_MAX_LINES;

@@ -28,6 +28,8 @@ import {
 } from "./lifecycle-survey.js";
 import {
   exactPrefetchFileRenderBudget,
+  devScopedBodyPaths,
+  ATLAS_SCOPED_BODY_TOTAL_CHARS,
   lifecycleBodyInlineDecision,
   lifecycleBodyRenderBudget,
   normalizeLifecyclePrefetchBody,
@@ -3486,19 +3488,37 @@ function _truncatePrefetchText(value, maxChars) {
   return { text: text.slice(0, max - 32), truncated: true };
 }
 
-function _renderIndentedPrefetchContent(value, { maxChars = 2200, startLine = 1 } = {}) {
+function _renderIndentedPrefetchContent(value, { maxChars = 2200, startLine = 1, maxLines = 120 } = {}) {
   const clipped = _truncatePrefetchText(value, maxChars);
-  const lines = clipped.text.split(/\r?\n/).slice(0, 120);
+  const allLines = clipped.text.split(/\r?\n/);
+  const lines = allLines.slice(0, Math.max(1, Number(maxLines) || 120));
   const rendered = lines.map((line, index) => `  ${String(startLine + index).padStart(4, " ")} | ${line}`);
-  if (clipped.truncated) rendered.push("  ... (ATLAS exact-file prefetch truncated)");
+  if (clipped.truncated || lines.length < allLines.length) rendered.push("  ... (ATLAS exact-file prefetch truncated)");
   return rendered;
 }
 
-function _renderExactFileBlock(item, trim) {
-  if (!item) return [];
+// Whether the whole read body fits the render budget. A read that the prefetch
+// itself truncated is never complete.
+function _exactBodyFitsBudget(item, budget) {
+  if (item?.truncated === true || typeof item?.content !== "string") return false;
+  const lineCount = item.content.split(/\r?\n/).length;
+  return item.content.length <= budget.maxChars && lineCount <= budget.maxLines;
+}
+
+// Renders one prefetched file. `scoped` bodies (the dev's own write scope and
+// the planner's key files) get the whole-file budget while `charsLeft` of the
+// shared allowance remains; the rest get the preview budget. Returns the lines
+// plus the body chars spent and whether the body was rendered whole, so the
+// section loop can meter the allowance and coverage can record delivery.
+function _renderExactFileBlock(item, trim, { scoped = false, charsLeft = Infinity } = {}) {
+  if (!item) return { lines: [], bodyChars: 0, complete: false };
   const file = item.file || ATLAS_MISSING_VALUE;
   if (!item.ok) {
-    return [`- ${file} (${item.kind || "ATLAS exact read"} failed: ${item.error || "unknown error"})`];
+    return {
+      lines: [`- ${file} (${item.kind || "ATLAS exact read"} failed: ${item.error || "unknown error"})`],
+      bodyChars: 0,
+      complete: false,
+    };
   }
 
   const meta = [];
@@ -3510,20 +3530,34 @@ function _renderExactFileBlock(item, trim) {
   if (item.estimatedTokens != null) meta.push(`~${item.estimatedTokens} tokens`);
   if (item.truncated) meta.push("truncated");
 
-  const lines = [`- ${file}${meta.length > 0 ? ` (${meta.join(", ")})` : ""}`];
-  if (_sliceShouldDropExactFileBodies(trim)) return lines;
+  const bodiesDropped = _sliceShouldDropExactFileBodies(trim);
+  const scopedBudget = scoped && !bodiesDropped && item.kind === "read_file"
+    ? exactPrefetchFileRenderBudget(trim, { scoped: true })
+    : null;
+  const useScoped = !!scopedBudget && Math.min(item.content?.length ?? 0, scopedBudget.maxChars) <= charsLeft;
+  const budget = useScoped ? scopedBudget : exactPrefetchFileRenderBudget(trim);
+  const complete = !bodiesDropped && item.kind === "read_file" && _exactBodyFitsBudget(item, budget);
+  if (!bodiesDropped && item.kind === "read_file") {
+    meta.push(complete ? "complete file inline" : "partial inline; read_file for the rest");
+  }
 
+  const lines = [`- ${file}${meta.length > 0 ? ` (${meta.join(", ")})` : ""}`];
+  if (bodiesDropped) return { lines, bodyChars: 0, complete: false };
+
+  let bodyChars = 0;
   if (item.kind === "read_file") {
-    const budget = exactPrefetchFileRenderBudget(trim);
-    lines.push(..._renderIndentedPrefetchContent(item.content, {
+    const body = _renderIndentedPrefetchContent(item.content, {
       maxChars: budget.maxChars,
-    }));
+      maxLines: budget.maxLines,
+    });
+    bodyChars = body.reduce((sum, line) => sum + line.length + 1, 0);
+    lines.push(...body);
   } else if (item.kind === "code.skeleton") {
     lines.push(..._renderIndentedPrefetchContent(item.skeleton, {
       maxChars: trim >= 2 ? 1000 : trim >= 1 ? 1600 : 2600,
     }));
   }
-  return lines;
+  return { lines, bodyChars: useScoped ? bodyChars : 0, complete };
 }
 
 function _surveyRefStub(traversalRef) {
@@ -3822,9 +3856,19 @@ function renderAtlasSliceSection(packet, { trim = 0 } = {}) {
 
   if (Array.isArray(slice.exactFiles) && slice.exactFiles.length > 0) {
     lines.push(`Scoped ${label} prefetch evidence:`);
+    const scopedPaths = devScopedBodyPaths(packet);
+    let charsLeft = ATLAS_SCOPED_BODY_TOTAL_CHARS;
+    const renderedBodies = {};
     for (const item of slice.exactFiles) {
-      lines.push(..._renderExactFileBlock(item, trim));
+      const key = String(item?.file || "").replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+      const scoped = !!key && scopedPaths.has(key);
+      const rendered = _renderExactFileBlock(item, trim, { scoped, charsLeft });
+      lines.push(...rendered.lines);
+      charsLeft = Math.max(0, charsLeft - rendered.bodyChars);
+      if (key) renderedBodies[key] = { complete: rendered.complete, scoped, trim };
     }
+    // The last render in the trim loop is the delivered one; coverage reads it.
+    packet.atlas_render_exact_bodies = renderedBodies;
   }
 
   if (Array.isArray(slice.cards) && slice.cards.length > 0) {
@@ -4091,10 +4135,15 @@ function _buildAtlasSections(packet, trim) {
 // ATLAS_MAX_TRIM_LEVEL (whose output is always emitted, even if still over cap —
 // we never drop ATLAS content entirely, just shed detail).
 export function renderAtlasHandoffSectionsWithMeta(packet) {
+  // Dev and fix handoffs carry their in-scope file bodies whole, so their
+  // section cap grows by the shared body allowance; the trim ladder still
+  // shrinks those bodies before dropping them.
+  const sectionCap = ATLAS_SECTION_CHAR_CAP
+    + (devScopedBodyPaths(packet).size > 0 ? ATLAS_SCOPED_BODY_TOTAL_CHARS : 0);
   let text = _buildAtlasSections(packet, 0);
   let trimLevel = 0;
   const originalLength = text.length;
-  while (text.length > ATLAS_SECTION_CHAR_CAP && trimLevel < ATLAS_MAX_TRIM_LEVEL) {
+  while (text.length > sectionCap && trimLevel < ATLAS_MAX_TRIM_LEVEL) {
     trimLevel += 1;
     text = _buildAtlasSections(packet, trimLevel);
   }
@@ -4108,7 +4157,7 @@ export function renderAtlasHandoffSectionsWithMeta(packet) {
     originalLength,
     trimLevel,
     truncated: trimLevel > 0,
-    cap: ATLAS_SECTION_CHAR_CAP,
+    cap: sectionCap,
   };
 }
 
