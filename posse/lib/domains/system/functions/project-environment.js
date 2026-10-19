@@ -15,6 +15,7 @@ import { ENVIRONMENT_PACKAGE_MANAGERS, ENVIRONMENT_SETUP_INSTALL_BUDGET_MS, ENVI
 import { PACKAGE_MANAGERS, detectPackageManagers, packageCommands, packageScriptsLine, readPackageManifest, resolvePackageManager, shownPackageInputs } from "./package-managers.js";
 import { prepareDatabaseConnectionFile } from "./database-connection-file.js";
 import { PROJECT_DB_TYPES } from "../../../catalog/project-db.js";
+import { LOCAL_DATABASE_PLATFORMS, LOCAL_DATABASE_ENGINES } from "../../../catalog/local-database-provisioning.js";
 import { prepareServerDatabase, serverDatabaseQuestion, executeServerDatabase } from "./server-database-setup.js";
 
 export function inspectEnvironment(args = {}, { cwd, role = null }) {
@@ -45,7 +46,8 @@ export function inspectEnvironment(args = {}, { cwd, role = null }) {
     }),
     supported_package_managers: ENVIRONMENT_PACKAGE_MANAGERS,
     sqlite_setup_available: true, database_setup_types: PROJECT_DB_TYPES, project_database: readProjectDbConfig({ projectDir: cwd }), approval_required: ["setup_environment", "install_dependencies", "setup_database"],
-    note: "An install directory's presence does not prove dependencies are current; installed is null for managers that use a shared cache. Installers require explicit user approval. OS toolchains and services are not installed by these tools.",
+    local_database_provisioning: { platform: process.platform, distributions: LOCAL_DATABASE_PLATFORMS, engines: Object.keys(LOCAL_DATABASE_ENGINES), root: (process.geteuid?.() ?? process.getuid?.()) === 0, sudo_available: !!findCommandOnPath("sudo"), requires: "Ubuntu/Debian APT packages and root or non-interactive sudo; explicit local_server approval" },
+    note: "An install directory's presence does not prove dependencies are current; installed is null for managers that use a shared cache. Installers require explicit user approval. Local database system provisioning is available only through an explicit local_server request; ordinary dependency installation remains project-local.",
   };
 }
 
@@ -112,7 +114,7 @@ export async function prepareEnvironmentSetup(tool, args, context) {
       if (!(await listIgnoredRepoPaths(cwd, [entry.path])).length) throw new Error("Ignore all .env destinations before requesting server setup.");
     }
   } else if (tool === "setup_database") {
-    if (args.server || args.env_files || args.permissions) throw new Error("SQLite worktree setup uses path/schema_path and leaves database registration unchanged. Use planning setup for shared configuration.");
+    if (args.server || args.local_server || args.env_files || args.permissions) throw new Error("SQLite worktree setup uses path/schema_path and leaves database registration unchanged. Use planning setup for shared configuration.");
     const database = capture(args.path);
     if (fs.existsSync(database)) throw new Error("Database already exists; this tool only creates new databases and never overwrites data.");
     if (!(await listIgnoredRepoPaths(cwd, [args.path])).length) throw new Error("Add the runtime database path to .gitignore before requesting setup; keep the SQL schema in source control.");

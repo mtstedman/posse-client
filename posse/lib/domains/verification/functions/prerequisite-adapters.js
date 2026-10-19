@@ -534,9 +534,12 @@ export function runVerificationPrerequisiteCommand(command, args, {
   cwd,
   windowsVerbatimArguments = false,
   env = {},
+  inheritEnv = true,
+  input = null,
   signal = null,
   timeoutMs = 10 * 60 * 1000,
 } = {}) {
+  if (signal?.aborted) return Promise.resolve({ ok: false, status: "cancelled", code: null, reason: "cancelled", stdout: "", stderr: "" });
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
@@ -581,11 +584,11 @@ export function runVerificationPrerequisiteCommand(command, args, {
       child = spawn(command, args, {
         cwd,
         detached: process.platform !== "win32",
-        env: { ...process.env, ...env },
+        env: inheritEnv ? { ...process.env, ...env } : { ...env },
         shell: false,
         windowsHide: true,
         windowsVerbatimArguments,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [input == null ? "ignore" : "pipe", "pipe", "pipe"],
       });
     } catch (error) {
       resolve({ ok: false, status: "blocked", code: null, reason: error?.code || "spawn_failed", stdout, stderr });
@@ -606,6 +609,10 @@ export function runVerificationPrerequisiteCommand(command, args, {
     child.on("close", (code) => {
       if (!terminationResult) finish({ ok: code === 0, status: code === 0 ? "passed" : "blocked", code, reason: code === 0 ? null : "dependency_repair_failed" });
     });
+    if (input != null) {
+      child.stdin?.on("error", () => {}); // a command may exit before consuming input
+      child.stdin?.end(input);
+    }
     if (signal?.aborted) onAbort();
     else signal?.addEventListener?.("abort", onAbort, { once: true });
   });

@@ -1200,8 +1200,8 @@ The planner supplies complete, small source in the project's language and
 framework. It should expose a reusable connection function, load configuration
 through the existing environment/framework mechanism, and avoid logging
 connection values. Include its driver and environment-loader packages in the
-same approved dependency batch. Reuse an existing framework connector instead
-of creating a second one.
+same approved dependency batch. Reuse an existing framework connector with `connection_file: { "path": "..." }`.
+Every database setup requires an explicit new or existing connector.
 
 The full proposed module is shown for approval and committed with setup. Posse
 does not substitute `.env` values into its source, execute the module during
@@ -1220,6 +1220,32 @@ change; a missing database or unignored `.env` is reported to the developer
 instead of stopping development. Applications must load their `.env` using their framework
 or dotenv support. The portable example is suitable for configuring a fresh
 clone; runtime data and machine-specific environment files are never committed.
+
+PostgreSQL and MySQL use the same database setup flow. For an existing server,
+supply `type: "postgres"` or `"mysql"` and
+`server: { "env_file": ".env", "url_env": "DATABASE_URL" }`. Put the connection
+URL in that ignored local file; tool arguments and source contain no credentials.
+Optional `server.create_database: true` creates a new database using the supplied
+account's privileges. Setup verifies connectivity before registering it.
+
+To provision a local server, replace `server` with
+`local_server: { "database": "app", "username": "app_user" }`; the username is
+optional. On Ubuntu/Debian, this explicitly approved action installs missing
+`postgresql` or `mysql-server` packages from configured APT repositories, starts
+the service, and creates a dedicated application account and database. It needs
+root or non-interactive sudo; Posse does not collect sudo passwords. Debian
+requires a configured repository providing `mysql-server`; MariaDB is not
+substituted. Other operating systems use the existing-server connection flow.
+
+Local provisioning uses the default local socket and TCP port (5432 or 3306),
+preserves existing server configuration, and requires socket administration by
+the system administrator. Existing database/account names stop setup without
+replacement. The generated password is passed to the administrator client over
+stdin and saved in ignored `.env` files and Posse's local credential store.
+Posse verifies the application connection before registering it and retains the
+required connector and portable examples in source. Package installation and
+resource creation can leave partial state on failure; retries require another
+approval, and existing data is never removed to make a retry succeed.
 
 On an existing development branch, `install_dependencies` remains available
 within writable scope. Declare dependencies in the package directory's manifest,
@@ -1245,12 +1271,13 @@ Changing an included file invalidates the approval.
 This separate installer also requires explicit approval and leaves its
 lockfile for the ordinary developer commit.
 
-`setup_database` creates a **new local SQLite file** at an ignored path, optionally
+`setup_database` supports the same PostgreSQL/MySQL connection and local-server
+options. For SQLite it creates a **new local file** at an ignored path, optionally
 applying a SQL file containing CREATE TABLE/INDEX statements. It requires a
 separate user approval, never overwrites existing data, and never grants
 `project_db_query` permission. Keep the schema and repeatable initialization in
 source control; runtime databases remain local to their worktree.
-It also accepts `connection_file` in the same shape. On a developer branch the
+It requires `connection_file` in the same shape. On a developer branch the
 new file must be in writable scope, reads the application's existing environment
 configuration, and is committed and tested with the ordinary developer changes.
 
@@ -1261,5 +1288,5 @@ command itself from registry package names and version constraints; a manager
 outside this list needs a registry entry in
 `lib/domains/system/functions/package-managers.js`. JavaScript workspaces, Cargo
 workspace members, vendored Go modules, OS toolchain installation,
-existing-database migrations, and external database services require separate
-setup.
+and existing-database migrations require separate setup. Local PostgreSQL/MySQL
+server provisioning is the explicit system-installation capability described above.

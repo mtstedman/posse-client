@@ -48,7 +48,7 @@ export function databaseIgnoreRules(database) {
 export async function preparePlanningDatabase(args, cwd, capture, writes) {
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("Provide a local SQLite database setup object.");
   if (args.type && args.type !== "sqlite") return prepareServerDatabase(args, cwd, capture, writes);
-  if (args.server) throw new Error("SQLite setup uses path, not a server connection.");
+  if (args.server || args.local_server) throw new Error("SQLite setup uses path, not a server connection.");
   const file = localPath(cwd, args.path);
   if (!/\.(?:sqlite3?|db)$/iu.test(file)) throw new Error("Use a .sqlite, .sqlite3, or .db database filename.");
   if (fs.existsSync(file)) throw new Error("Database already exists. Planning setup only creates a new database; it never replaces application data.");

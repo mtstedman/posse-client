@@ -8,6 +8,7 @@ import { PROJECT_DB_PERMISSIONS } from "../../../catalog/project-db.js";
 import { readProjectDbConfig, writeProjectDbConfig, projectDbConnectionFingerprint } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { prepareDatabaseConnectionFile } from "./database-connection-file.js";
 import { configureServerDatabase } from "./server-database-driver.js";
+import { prepareLocalDatabase, localDatabaseQuestion, provisionLocalDatabase } from "./local-database-provisioning.js";
 
 // Connection values stay local. Proposals contain only a reference, a hash,
 // and the non-secret endpoint the operator is authorizing.
@@ -50,9 +51,11 @@ function target(connection) {
   return { ...endpoint, hasPassword: !!password };
 }
 
-export async function prepareServerDatabase(args, cwd, capture, writes, { assertWritable, planning = true } = {}) {
+export async function prepareServerDatabase(args, cwd, capture, writes, { assertWritable, planning = true, prepareLocal = prepareLocalDatabase } = {}) {
   if (!["postgres", "mysql"].includes(args.type) || args.path || args.schema_path) throw new Error("Server setup requires postgres or mysql and a server reference, without SQLite path/schema_path. Apply application migrations separately.");
-  const server = args.server;
+  if (args.server && args.local_server) throw new Error("Choose either an existing server reference or local server provisioning.");
+  const local = args.local_server ? await prepareLocal(args.local_server, args.type, cwd) : null;
+  const server = local ? { env_file: args.env_files?.[0] || ".env", url_env: "DATABASE_URL" } : args.server;
   if (!server || typeof server !== "object" || typeof server.url_env !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(server.url_env)
     || (server.create_database !== undefined && typeof server.create_database !== "boolean")) throw new Error("Reference a connection URL variable using server.url_env; do not supply credentials in tool arguments.");
   const config = readProjectDbConfig({ projectDir: cwd });
@@ -61,12 +64,14 @@ export async function prepareServerDatabase(args, cwd, capture, writes, { assert
   if (!Array.isArray(permissions) || !permissions.length || permissions.some((entry) => !PROJECT_DB_PERMISSIONS.includes(entry))) throw new Error("Choose explicit Posse database permissions: read and/or write.");
   const database = { type: args.type, server: { env_file: server.env_file || ".env", url_env: server.url_env, create_database: server.create_database === true }, config,
     config_input: projectDbConnectionFingerprint({ projectDir: cwd }), permissions: PROJECT_DB_PERMISSIONS.filter((entry) => permissions.includes(entry)), env: [] };
+  if (local) database.local_server = local;
   const source = localPath(cwd, database.server.env_file, { environmentFile: true });
   if (path.basename(source) !== ".env") throw new Error("Server credentials must be referenced from a local .env file.");
   database.server.env_file = path.relative(cwd, source).replaceAll(path.sep, "/");
   const tracked = (await gitExecAsync(["ls-files", "-z"], cwd)).split("\0");
-  if (tracked.includes(database.server.env_file) || !(await listIgnoredRepoPaths(cwd, [database.server.env_file])).length) throw new Error("Ignore the server credential .env file and remove it from Git tracking before requesting setup.");
-  const { connection, values } = connectionFromEnvironment(database, cwd);
+  if (tracked.includes(database.server.env_file) || (!local && !(await listIgnoredRepoPaths(cwd, [database.server.env_file])).length)) throw new Error("Ignore the server credential .env file and remove it from Git tracking before requesting setup.");
+  const { connection, values } = local ? { connection: { dbType: args.type, host: "127.0.0.1", port: local.port, database: local.database, username: local.username, password: true }, values: null }
+    : connectionFromEnvironment(database, cwd);
   database.target = target(connection);
   database.source_input = fingerprint(source);
   const envFiles = args.env_files ?? [".env"];
@@ -76,7 +81,8 @@ export async function prepareServerDatabase(args, cwd, capture, writes, { assert
   for (const relative of normalized) {
     const file = localPath(cwd, relative, { environmentFile: true });
     if (path.basename(file) !== ".env" || tracked.includes(relative)) throw new Error("Database environment destinations must be untracked .env files.");
-    additions(file, values);
+    if (local) assertUnconfiguredEnvironment(file);
+    else additions(file, values);
     database.env.push({ path: relative, input: fingerprint(file) });
     const example = path.posix.join(path.posix.dirname(relative), "database.env.example");
     const exampleFile = capture(example, { writable: true });
@@ -96,21 +102,30 @@ export async function prepareServerDatabase(args, cwd, capture, writes, { assert
 
 export function serverDatabaseQuestion(database) {
   return [
+    ...(database.local_server ? localDatabaseQuestion(database.local_server) : [
     `${database.server.create_database ? "Create a new" : "Connect to an existing"} ${database.type} database: ${JSON.stringify(database.target)}. Existing databases are never overwritten; no existing data is migrated.`,
     `Read the connection URL only from ${database.server.env_file}, variable ${database.server.url_env}. No server software is installed.`,
+    ]),
     `Write DATABASE_URL, DB_DATABASE and DB_CONNECTION into ignored files: ${database.env.map((entry) => entry.path).join(", ")}. Credentials stay local; examples contain placeholders.`,
     `Register Posse permissions: ${database.permissions.join(", ")}. ${database.connection_file.existing ? "Reuse" : "Create"} application connector: ${database.connection_file.path}.`,
   ];
 }
 
-export async function executeServerDatabase(database, cwd, signal, { configure = configureServerDatabase } = {}) {
+function assertUnconfiguredEnvironment(file) {
+  const text = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  if (Buffer.byteLength(text) > 32 * 1024) throw new Error("Database environment files must be smaller than 32 KB.");
+  const parsed = parseEnv(text);
+  if (["DATABASE_URL", "DB_DATABASE", "DB_CONNECTION"].some((key) => Object.hasOwn(parsed, key))) throw new Error("Existing database environment settings were preserved. Use existing-server configuration or an unconfigured .env destination for new local provisioning.");
+}
+
+export async function executeServerDatabase(database, cwd, signal, { configure = configureServerDatabase, provision = provisionLocalDatabase } = {}) {
   if (signal?.aborted) throw new Error("Database setup canceled.");
   if (projectDbConnectionFingerprint({ projectDir: cwd }) !== database.config_input) throw new Error("Posse database settings changed after approval.");
   const source = localPath(cwd, database.server.env_file, { environmentFile: true });
   if (fingerprint(source) !== database.source_input) throw new Error("Database credentials changed after approval; request new approval.");
   const paths = [...new Set([database.server.env_file, ...database.env.map((entry) => entry.path)])];
   if ((await listIgnoredRepoPaths(cwd, paths)).length !== paths.length) throw new Error("Database environment files must be ignored before setup.");
-  const { connection, values } = connectionFromEnvironment(database, cwd);
+  let { connection, values } = database.local_server ? { connection: null, values: null } : connectionFromEnvironment(database, cwd);
   const assertConnector = () => {
     const file = localPath(cwd, database.connection_file.path);
     if (!fs.existsSync(file) || (database.connection_file.existing
@@ -121,11 +136,18 @@ export async function executeServerDatabase(database, cwd, signal, { configure =
   for (const entry of database.env) {
     const file = localPath(cwd, entry.path, { environmentFile: true });
     if (fingerprint(file) !== entry.input) throw new Error("Database environment inputs changed after approval.");
-    additions(file, values);
+    if (database.local_server) assertUnconfiguredEnvironment(file);
+    else additions(file, values);
   }
   if (fingerprint(source) !== database.source_input) throw new Error("Database credentials changed after approval; request new approval.");
   if (projectDbConnectionFingerprint({ projectDir: cwd }) !== database.config_input) throw new Error("Posse database settings changed after approval.");
-  await configure(connection, { create: database.server.create_database, signal });
+  if (database.local_server) {
+    connection = await provision(database.local_server, { signal });
+    const url = new URL(`${database.type}://127.0.0.1:${connection.port}/${connection.database}`);
+    url.username = connection.username;
+    url.password = connection.password;
+    values = { DATABASE_URL: url.href, DB_DATABASE: connection.database, DB_CONNECTION: database.type };
+  } else await configure(connection, { create: database.server.create_database, signal });
   if (signal?.aborted) throw new Error("Database setup canceled; a newly created database may remain.");
   // Revalidate after network I/O too, before writing local configuration.
   if (fingerprint(source) !== database.source_input) throw new Error("Database credentials changed during setup; local registration was not changed.");
@@ -135,15 +157,15 @@ export async function executeServerDatabase(database, cwd, signal, { configure =
     const file = localPath(cwd, entry.path, { environmentFile: true });
     if (fingerprint(file) !== entry.input) throw new Error("Database environment inputs changed during setup.");
   }
-  await prepareServerDatabaseEnvironment(database, cwd, cwd);
+  await prepareServerDatabaseEnvironment(database, cwd, cwd, { values });
   const config = writeProjectDbConfig({ ...connection, enabled: true, permissions: database.permissions }, { projectDir: cwd, expectedFingerprint: database.config_input });
   return { type: database.type, server: database.server, target: database.target, env: database.env.map(({ path: envPath }) => ({ path: envPath })), config, connection_file: database.connection_file.path };
 }
 
-export async function prepareServerDatabaseEnvironment(database, source, cwd) {
+export async function prepareServerDatabaseEnvironment(database, source, cwd, { values: suppliedValues = null } = {}) {
   const sourceFile = localPath(source, database.server.env_file, { environmentFile: true });
   const sourceInput = fingerprint(sourceFile);
-  const { values } = connectionFromEnvironment(database, source);
+  const values = suppliedValues || connectionFromEnvironment(database, source).values;
   const notices = [];
   const destinations = [];
   for (const entry of database.env) {
@@ -166,6 +188,7 @@ export async function prepareServerDatabaseEnvironment(database, source, cwd) {
     if (!added) continue;
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const existing = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+    if (process.platform !== "win32" && fs.existsSync(file)) fs.chmodSync(file, 0o600);
     fs.appendFileSync(file, `${existing && !existing.endsWith("\n") ? "\n" : ""}${added}\n`, { mode: 0o600 });
   }
   return notices;
