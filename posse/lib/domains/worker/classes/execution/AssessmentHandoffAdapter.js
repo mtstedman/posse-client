@@ -176,15 +176,16 @@ export async function resolveAssessmentOnlyProvider(agentDispatcher) {
 }
 
 // Assess-only failures share the attached path's owner: retry within the
-// assessment budget, then preserve the committed candidate behind a
-// blocked_recovery gate. Failing closed here failed the job with no gate and
-// let the deadlock sweep cancel its hard dependents.
+// assessment budget, then fail with the committed candidate and assess-only
+// recovery state retained. Provider faults cannot be answered by a human gate.
 function parkAssessmentFailure(worker, job, leaseToken, error, {
   delayMs = 2_000,
   pendingFileRequests = readPendingAssessmentFileRequests(worker.parsePayload(job)),
+  operatorActionable = false,
 } = {}) {
   return routeAssessmentInfrastructureFailure(worker, job, leaseToken, error, {
     pendingFileRequests,
+    operatorActionable,
     readyAt: new Date(Date.now() + delayMs).toISOString(),
   });
 }
@@ -266,14 +267,13 @@ export class AssessmentHandoffAdapter {
         }
       } else {
         missing.assessmentGateImmediately = true;
-        // Restoring a runner cannot recover lost evidence; retry resumes the
-        // implementation that regenerates it.
+        // Restoring a runner cannot recover lost evidence. Automatic repair
+        // already failed, so retain diagnostics without inventing a decision.
         routeAssessmentInfrastructureFailure(worker, job, leaseToken, missing, {
           pendingFileRequests,
           failureClass: ASSESSMENT_FAILURE_CLASSES.SOURCE_MISSING,
-          question: `Assessment evidence for job #${job.id} is still missing after automatic repair. Choose retry to resume the implementation and regenerate it; or choose replan, explicit_waiver, or fail.`,
         });
-        worker.emit(job.id, `${C.yellow}[assess-only] Missing bound source after automatic repair; completed work preserved for recovery${C.reset}`);
+        worker.emit(job.id, `${C.yellow}[assess-only] Missing bound source after automatic repair; failed without an operator gate${C.reset}`);
       }
       return { handled: true };
     }
@@ -325,7 +325,7 @@ export class AssessmentHandoffAdapter {
         }),
       });
       if (readinessOutcome.recoveryError) {
-        routeAssessmentInfrastructureFailure(worker, job, leaseToken, readinessOutcome.recoveryError, { pendingFileRequests });
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken, readinessOutcome.recoveryError, { pendingFileRequests, operatorActionable: true });
       } else {
         worker._releaseLease(job, leaseToken, "queued", {
           readyAt: new Date(Date.now() + 2_000).toISOString(),
@@ -356,6 +356,7 @@ export class AssessmentHandoffAdapter {
       return { handled: true };
     }
 
+    let operatorActionableFailure = false;
     try {
       // Setup failures belong to this assessment attempt too. Letting them
       // escape consumed implementation retries and left this row running.
@@ -451,6 +452,7 @@ export class AssessmentHandoffAdapter {
           },
         });
         if (isBlockingVerificationInfrastructureOutcome(postReceipt, { projectDir: worker.projectDir })) {
+          operatorActionableFailure = true;
           // Typed like the attached path, so the recovery gate carries the
           // rerun command and the verification outcome.
           throw verificationInfrastructureError(postReceipt, "Deterministic post-change test execution unavailable");
@@ -466,6 +468,7 @@ export class AssessmentHandoffAdapter {
         wtPath: wtPath || worker.projectDir,
       });
       if (isBlockingVerificationInfrastructureOutcome(configuredVerification, { projectDir: worker.projectDir })) {
+        operatorActionableFailure = true;
         throw configuredVerification.error
           || new Error(configuredVerification.message || "Pre-assessment hook failed");
       }
@@ -630,8 +633,8 @@ export class AssessmentHandoffAdapter {
       worker.emit(job.id, `${C.red}[assess-only] Assessment failed: ${assessErr.message.split("\n")[0]}${C.reset}`);
       // The developer's committed output remains authoritative. Transport,
       // tool and terminal-protocol failures share the assessment retry
-      // budget; once it is spent the job waits behind a recovery gate.
-      parkAssessmentFailure(worker, job, leaseToken, assessErr, { pendingFileRequests });
+      // budget; once it is spent the job fails with assess-only state retained.
+      parkAssessmentFailure(worker, job, leaseToken, assessErr, { pendingFileRequests, operatorActionable: operatorActionableFailure });
     }
     return { handled: true, currentAttemptId: assessAttempt.attempt.id };
   }

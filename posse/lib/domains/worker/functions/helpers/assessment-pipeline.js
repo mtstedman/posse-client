@@ -174,6 +174,7 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
   readyAt = null,
   failureClass = ASSESSMENT_FAILURE_CLASSES.INFRASTRUCTURE,
   question = null,
+  operatorActionable = false,
 } = {}) {
   // A delayed provider or runner result must not rewrite recovery state after
   // cancellation or another worker has taken ownership of this job.
@@ -187,20 +188,26 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
   if (count >= max || gateImmediately) {
     const terminalProtocolFailure = isRetryableTerminalHandoffError(error);
     const diagnostic = `Assessment infrastructure exhausted after ${count}/${max} attempts: ${message}`;
-    const gated = runImmediateTransaction(getDb(), () => {
-      if (!worker._releaseLease(job, leaseToken, "waiting_on_human")) return false;
+    // Provider transport, protocol, and evidence-budget failures have no task
+    // decision for a human to answer. Only callers enforcing an explicit
+    // verification or worktree-integrity requirement may request a gate.
+    const settled = runImmediateTransaction(getDb(), () => {
+      if (!worker._releaseLease(job, leaseToken, operatorActionable ? "waiting_on_human" : "failed")) return false;
       const recoveryPayload = parseJobPayload(job);
       recoveryPayload._verification_blocked = {
         schema_version: 1,
         type: "verification_blocked",
+        failure_class: failureClass,
         diagnostic,
         rerun_command: String(error?.rerun_command || "").trim() || null,
         verification_outcome: error?.verification_outcome || null,
       };
       updateJobPayload(job.id, JSON.stringify(recoveryPayload));
-      setAssessmentLifecycle(job.id, ASSESSMENT_LIFECYCLE.NEEDS_HUMAN, { error: diagnostic });
+      setAssessmentLifecycle(job.id, operatorActionable ? ASSESSMENT_LIFECYCLE.NEEDS_HUMAN : ASSESSMENT_LIFECYCLE.FAILED, {
+        error: diagnostic, completed: !operatorActionable,
+      });
       setJobError(job.id, diagnostic);
-      createJob({
+      if (operatorActionable) createJob({
         work_item_id: job.work_item_id,
         job_type: "human_input",
         title: `Verification blocked: ${job.title.slice(0, 80)}`,
@@ -219,26 +226,26 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
       });
       return true;
     });
-    if (!gated) return { gated: false, infrastructureFailure: true, leaseLost: true };
+    if (!settled) return { gated: false, infrastructureFailure: true, leaseLost: true };
     logEvent({
       work_item_id: job.work_item_id,
       job_id: job.id,
       event_type: EVENT_TYPES.JOB_ASSESSMENT_INFRASTRUCTURE_EXHAUSTED,
       actor_type: EVENT_ACTORS.WORKER,
-      message: `Assessment infrastructure exhausted after ${count}/${max} attempts; preserved the job for operator recovery`,
+      message: `Assessment infrastructure exhausted after ${count}/${max} attempts; ${operatorActionable ? "preserved the job for operator recovery" : "failed closed without an operator gate"}`,
       event_json: JSON.stringify({
         attempts: count,
         max_attempts: max,
         terminal_protocol_failure: terminalProtocolFailure,
         error: message.slice(0, 2000),
-        operator_actionable: true,
+        operator_actionable: operatorActionable,
         gated_immediately: gateImmediately,
         failure_class: failureClass,
       }),
     });
-    worker.emit(job.id, `${C.yellow}[assessor] Assessment infrastructure exhausted; job preserved for recovery${C.reset}`);
+    worker.emit(job.id, `${C.yellow}[assessor] Assessment infrastructure exhausted; ${operatorActionable ? "job preserved for recovery" : "failed closed without an operator gate"}${C.reset}`);
     return {
-      gated: true,
+      gated: operatorActionable,
       infrastructureFailure: true,
       terminalProtocolFailure,
     };
@@ -2108,7 +2115,7 @@ export async function runPostExecutionAssessment(worker, {
         }),
       });
       if (readinessOutcome.recoveryError) {
-        routeAssessmentInfrastructureFailure(worker, job, leaseToken, readinessOutcome.recoveryError, { pendingFileRequests });
+        routeAssessmentInfrastructureFailure(worker, job, leaseToken, readinessOutcome.recoveryError, { pendingFileRequests, operatorActionable: true });
       } else {
         worker._releaseLease(job, leaseToken, "queued", {
           readyAt: new Date(Date.now() + 2_000).toISOString(),
@@ -2262,6 +2269,7 @@ export async function runPostExecutionAssessment(worker, {
         routeAssessmentInfrastructureFailure(worker, job, leaseToken,
           verificationInfrastructureError(postReceipt, "Deterministic post-change test execution unavailable"), {
           pendingFileRequests,
+          operatorActionable: true,
         });
         return;
       }
@@ -2284,7 +2292,7 @@ export async function runPostExecutionAssessment(worker, {
         job,
         leaseToken,
         configuredVerification.error || new Error(failureMessage),
-        { pendingFileRequests },
+        { pendingFileRequests, operatorActionable: true },
       );
       return;
     }

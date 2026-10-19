@@ -18,6 +18,7 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import {
+  ASSESSMENT_FAILURE_CLASSES,
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
   WORK_ITEM_DISPOSITION_REVIEW_TYPES,
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
@@ -28,7 +29,7 @@ import {
   NON_COMPLETION_BLOCKING_JOB_TYPES,
   TERMINAL_JOB_STATUSES_SQL,
 } from "../../../catalog/job.js";
-import { beginJobRetryGeneration, setAssessmentLifecycle } from "./attempts.js";
+import { beginJobRetryGeneration, extendAssessmentMaxAttempts, setAssessmentLifecycle } from "./attempts.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { now } from "./common.js";
 import { rewireDependency } from "./dependencies.js";
@@ -177,8 +178,15 @@ export function restoreCanceledDependents(workItemId, rerunJobIds, { ts, gateJob
 function requeueForRecovery(job, { ts, gateJobId, note, key }) {
   const fresh = getJob(job.id) || job;
   const payload = parseJobPayload(fresh);
-  delete payload._assess_only;
-  if (note) {
+  const verificationFailure = payload._verification_blocked;
+  const sourceMissing = verificationFailure?.failure_class === ASSESSMENT_FAILURE_CLASSES.SOURCE_MISSING;
+  const retryAssessment = payload._assess_only === true
+    && verificationFailure?.type === "verification_blocked"
+    && !sourceMissing;
+  if (!retryAssessment) delete payload._assess_only;
+  if (sourceMissing) delete payload._assessment_source_recovery_count;
+  delete payload._verification_blocked;
+  if (note && !retryAssessment) {
     const instructionKey = fresh.job_type === "fix" && String(payload.fix_instructions || "").trim()
       ? "fix_instructions"
       : "task_spec";
@@ -187,11 +195,18 @@ function requeueForRecovery(job, { ts, gateJobId, note, key }) {
       `OPERATOR RECOVERY NOTE:\n${note}`,
     ].filter(Boolean).join("\n\n");
   }
-  payload[key] = { at: ts, gate_job_id: gateJobId, prior_status: fresh.status };
-  beginJobRetryGeneration(fresh.id, {
-    payload,
-    attemptBudget: getIntSetting(SETTING_KEYS.DEFAULT_MAX_ATTEMPTS, 3),
-  });
+  payload[key] = { at: ts, gate_job_id: gateJobId, prior_status: fresh.status, ...(note ? { note } : {}) };
+  if (retryAssessment) {
+    // The candidate already exists. An explicit retry grants one fresh
+    // assessment slot, without replaying implementation or changing its task.
+    extendAssessmentMaxAttempts(fresh.id, Number(fresh.assessment_attempt_count || 0) + 1);
+    updateJobPayload(fresh.id, JSON.stringify(payload));
+  } else {
+    beginJobRetryGeneration(fresh.id, {
+      payload,
+      attemptBudget: getIntSetting(SETTING_KEYS.DEFAULT_MAX_ATTEMPTS, 3),
+    });
+  }
   if (!forceUpdateJobStatus(fresh.id, "queued", { expectedStatuses: [fresh.status] })) return false;
   getDb().prepare(`
     UPDATE jobs

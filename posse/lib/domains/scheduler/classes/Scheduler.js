@@ -1444,7 +1444,6 @@ export class Scheduler {
       const autoMergeAwaitedSince = new Map();
       let autoMergeRetried = false;
       const headlessNonHumanWaitingLogged = new Set();
-      const headlessOrphanedReviewParkedLogged = new Set();
 
       while (this._running) {
         try {
@@ -1666,11 +1665,10 @@ export class Scheduler {
             },
           });
 
-          // Also check for orphaned waiting_on_review jobs whose human_input
-          // child has already failed/timed out — these are permanent traps.
+          // Recover review and human-wait jobs whose question disappeared;
+          // neither a heartbeat nor an old answer can release those waits.
           recoverOrphanedReviewJobs({
             hasDisplay: this._hasDisplay,
-            headlessOrphanedReviewParkedLogged,
             log: (msg, color) => this._log(msg, color),
             eventTypes: EVENT_TYPES,
             eventActors: EVENT_ACTORS,
@@ -1682,6 +1680,7 @@ export class Scheduler {
               listJobsByWorkItem,
               getJob,
               getHumanGate,
+              isPostMergeDbTaskJob,
               runInTransaction: (fn) => runImmediateTransaction(getDb(), fn),
               updateJobStatus,
               updateJobPayload,

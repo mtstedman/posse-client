@@ -229,16 +229,17 @@ export function recoverHeadlessHumanTimeouts({
 }
 
 /**
- * Orphaned waiting_on_review recovery.
+ * Orphaned review and human-wait recovery.
  *
  * Checks for waiting_on_review jobs whose human_input child has already
- * failed/timed out — these are permanent traps. A live remote operator keeps a
- * headless review parked; otherwise recovery either reconstructs one gate in
- * assessment-only mode or fails the review closed.
+ * failed/timed out — these are permanent traps. With a local or remote
+ * resolver, reconstruct one gate in assessment-only mode. Otherwise fail the
+ * review closed; a heartbeat alone cannot make a closed gate answerable.
+ * A non-human job awaiting human input without a gate fails closed after the
+ * same grace period. Reassessment cannot reconstruct a missing task decision.
  *
  * @param {object} deps
  * @param {boolean} deps.hasDisplay
- * @param {Set<number>} deps.headlessOrphanedReviewParkedLogged
  * @param {(msg: string, color?: string) => void} deps.log
  * @param {object} deps.eventTypes - EVENT_TYPES catalog
  * @param {object} deps.eventActors - EVENT_ACTORS catalog
@@ -250,7 +251,6 @@ export function recoverHeadlessHumanTimeouts({
  */
 export function recoverOrphanedReviewJobs({
   hasDisplay,
-  headlessOrphanedReviewParkedLogged,
   log,
   eventTypes: EVENT_TYPES,
   eventActors: EVENT_ACTORS,
@@ -262,6 +262,7 @@ export function recoverOrphanedReviewJobs({
     listJobsByWorkItem,
     getJob,
     getHumanGate,
+    isPostMergeDbTaskJob = () => false,
     runInTransaction,
     updateJobStatus,
     updateJobPayload,
@@ -271,7 +272,8 @@ export function recoverOrphanedReviewJobs({
 }) {
   const orphanState = (reviewJob) => {
     const children = listJobsByWorkItem(reviewJob.work_item_id).filter(j =>
-      j.parent_job_id === reviewJob.id && j.job_type === "human_input"
+      j.job_type === "human_input" && (j.parent_job_id === reviewJob.id
+        || getHumanGate(j.id)?.original_job_id === reviewJob.id)
     );
     // A failed/canceled job row is not necessarily a dead gate. Reconciliation
     // deliberately reopens terminal children whose durable contract is still
@@ -282,15 +284,25 @@ export function recoverOrphanedReviewJobs({
       const gate = getHumanGate(child.id);
       return gate != null && humanGateStateIsActive(gate.gate_state);
     });
-    const allChildrenDead = children.length > 0 && children.every(j =>
-      DEADLOCK_TERMINAL_STATUSES.includes(j.status)
-    ) && !hasRepairableContract;
-    const reviewAge = (Date.now() - new Date(reviewJob.updated_at).getTime()) / 1000;
+    // Earlier answered clarifications do not keep a later wait alive. A
+    // successful child completed before the current park cannot answer its
+    // missing next question. Preserve answers completed during this park:
+    // their settlement may still be releasing the original worker's lease.
+    const latestChild = children.reduce((latest, child) =>
+      !latest || child.id > latest.id ? child : latest, null);
+    const parkedAt = Date.parse(reviewJob.updated_at);
+    const answeredBeforePark = latestChild?.status === "succeeded"
+      && Date.parse(latestChild.finished_at) < parkedAt;
+    const allChildrenDead = latestChild != null
+      && (DEADLOCK_TERMINAL_STATUSES.includes(latestChild.status) || answeredBeforePark)
+      && children.every(j => j.status === "succeeded" || DEADLOCK_TERMINAL_STATUSES.includes(j.status))
+      && !hasRepairableContract;
+    const reviewAge = (Date.now() - parkedAt) / 1000;
     return {
       children,
       orphaned: children.length === 0
         ? reviewAge > 120
-        : (allChildrenDead && reviewAge > 30),
+        : (allChildrenDead && reviewAge > (answeredBeforePark ? 120 : 30)),
     };
   };
   const payloadState = (job) => {
@@ -316,8 +328,9 @@ export function recoverOrphanedReviewJobs({
 
   // Also check for orphaned waiting_on_review jobs whose human_input
   // child has already failed/timed out — these are permanent traps.
-  if (hasJobs(["waiting_on_review"])) {
-    const stuckReview = listJobs(["waiting_on_review"]);
+  if (hasJobs(["waiting_on_review", "waiting_on_human"])) {
+    const stuckReview = listJobs(["waiting_on_review", "waiting_on_human"])
+      .filter((job) => job.job_type !== "human_input" && !isPostMergeDbTaskJob(job));
     for (const rj of stuckReview) {
       // A waiting_on_review job should have a human_input child keeping it alive.
       // If all human_input children are terminal-failed, the review job is orphaned.
@@ -328,51 +341,43 @@ export function recoverOrphanedReviewJobs({
       // longer grace there so an in-flight child creation isn't misread.
       const { orphaned } = orphanState(rj);
       if (orphaned) {
+        let remoteOperatorPresent = false;
         if (!hasDisplay) {
-          let remoteOperatorPresent = false;
           try { remoteOperatorPresent = isRemoteOperatorPresent?.() === true; } catch { /* fail closed below */ }
-          if (remoteOperatorPresent && !headlessOrphanedReviewParkedLogged.has(rj.id)) {
-            headlessOrphanedReviewParkedLogged.add(rj.id);
-            log(`WI#${rj.work_item_id} job #${rj.id} review remains parked for the remote operator (all review children terminal)`, "yellow");
-            logEvent({
-              work_item_id: rj.work_item_id,
-              job_id: rj.id,
-              event_type: EVENT_TYPES.JOB_ORPHANED_REVIEW_PARKED,
-              actor_type: EVENT_ACTORS.SCHEDULER,
-              message: "Left in waiting_on_review because a remote operator is present",
-            });
-          } else if (!remoteOperatorPresent) {
-            let failed = false;
-            try {
-              failed = runInTransaction(() => {
-                const current = getJob(rj.id);
-                if (current?.status !== "waiting_on_review" || current.lease_token || !orphanState(current).orphaned) {
-                  return false;
-                }
-                const currentPayload = payloadState(current);
-                if (!currentPayload.valid) preserveInvalidPayload(current);
-                const changed = updateJobStatus(current.id, "failed", {
-                  expectedStatuses: ["waiting_on_review"],
-                });
-                if (!changed) throw new Error("orphaned review changed during no-resolver recovery");
-                logEvent({
-                  work_item_id: current.work_item_id,
-                  job_id: current.id,
-                  event_type: EVENT_TYPES.JOB_ORPHANED_REVIEW_RECOVERY_EXHAUSTED,
-                  actor_type: EVENT_ACTORS.SCHEDULER,
-                  message: "Orphaned review had no local or remote resolver; failed closed",
-                  event_json: JSON.stringify({ reason: "no_resolver" }),
-                });
-                refreshWorkItemStatus(current.work_item_id);
-                return true;
+        }
+        if (rj.status === "waiting_on_human" || (!hasDisplay && !remoteOperatorPresent)) {
+          let failed = false;
+          try {
+            failed = runInTransaction(() => {
+              const current = getJob(rj.id);
+              if (current?.status !== rj.status || current.lease_token || !orphanState(current).orphaned) {
+                return false;
+              }
+              const currentPayload = payloadState(current);
+              if (!currentPayload.valid) preserveInvalidPayload(current);
+              const changed = updateJobStatus(current.id, "failed", {
+                expectedStatuses: [rj.status],
               });
-            } catch (err) {
-              log(`WI#${rj.work_item_id} job #${rj.id} orphaned review recovery deferred: ${err?.message || String(err)}`, "yellow");
-              continue;
-            }
-            if (failed) {
-              log(`WI#${rj.work_item_id} job #${rj.id} orphaned review has no local or remote resolver — failing closed`, "yellow");
-            }
+              if (!changed) throw new Error("orphaned review changed during no-resolver recovery");
+              logEvent({
+                work_item_id: current.work_item_id,
+                job_id: current.id,
+                event_type: EVENT_TYPES.JOB_ORPHANED_REVIEW_RECOVERY_EXHAUSTED,
+                actor_type: EVENT_ACTORS.SCHEDULER,
+                message: current.status === "waiting_on_human"
+                  ? "Human wait had no answerable gate; failed closed"
+                  : "Orphaned review had no local or remote resolver; failed closed",
+                event_json: JSON.stringify({ reason: "no_resolver", original_status: current.status }),
+              });
+              refreshWorkItemStatus(current.work_item_id);
+              return true;
+            });
+          } catch (err) {
+            log(`WI#${rj.work_item_id} job #${rj.id} orphaned review recovery deferred: ${err?.message || String(err)}`, "yellow");
+            continue;
+          }
+          if (failed) {
+            log(`WI#${rj.work_item_id} job #${rj.id} orphaned ${rj.status} has no answerable decision — failing closed`, "yellow");
           }
         } else {
           let outcome;

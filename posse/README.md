@@ -722,6 +722,21 @@ backoff up to twice without consuming an implementation attempt, then fails
 closed with a `verification_blocked` diagnostic and rerun command. It never
 opens a human gate.
 
+Provider setup, assessment transport/protocol errors, and exhausted assessment
+evidence budgets also have bounded automatic retries. Exhaustion ends the job
+with an infrastructure diagnostic instead of a blocking human question. Failed
+work items retain their normal recovery actions. Retrying a preserved assessment
+candidate grants a fresh assessment slot without rerunning implementation;
+missing bound source instead requires implementation to regenerate the evidence.
+Strict verification requirements and unresolved worktree changes retain their
+explicit recovery gates.
+
+An orphaned review with no answerable gate gets at most one assessment-only
+reconstruction when a local or remote operator is present. A human-input wait
+whose gate is missing fails after a grace period; live gate contracts, worker
+leases, and post-merge database holds retain their normal owners. An answered
+gate from before the current wait does not hide a missing new gate.
+
 Child test processes do not receive `POSSE_KEY`. The verifier instead starts
 a per-command local capability broker and passes its locator in
 `POSSE_VERIFICATION_PULSE_CAPABILITY`, so key-gated native routes still work

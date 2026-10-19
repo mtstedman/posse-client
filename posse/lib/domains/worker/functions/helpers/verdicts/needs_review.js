@@ -82,7 +82,8 @@ export function handle(job, verdict, ctx) {
   const visualAcceptanceReview = verdict?._assessment_visual_review === true;
   const unsupportedClaimReview = verdict?._assessment_unsupported_claim_review === true;
   const asksForClarification = hasOperatorOnlyQuestion && priorClarifications.length === 0;
-  const asksForOperatorReview = visualAcceptanceReview || unsupportedClaimReview || asksForClarification;
+  const asksForOperatorReview = !harnessOwnedReview
+    && (visualAcceptanceReview || unsupportedClaimReview || asksForClarification);
   const retryReason = verdict.reasons?.[0] || "assessment could not reach a confident terminal verdict";
   const retryEligible = !asksForOperatorReview && !verdict?._disable_internal_retry;
   if (
@@ -97,8 +98,11 @@ export function handle(job, verdict, ctx) {
     return;
   }
 
-  const confidenceReview = verdict?._assessment_confidence_review === true
-    || verdict?._verification_blocked === true;
+  // Continuation exhaustion also carries _verification_blocked. That
+  // diagnostic must not override the harness-owned disposition and reopen a
+  // human gate after automatic recovery has already exhausted its budget.
+  const confidenceReview = !harnessOwnedReview && (verdict?._assessment_confidence_review === true
+    || verdict?._verification_blocked === true);
   // An evidence-free assessor fail and a repeated sibling-boundary or
   // ignored-path fail suppress automatic repair and retry, but the claim
   // itself is a defect question the operator can answer. Failing them closed

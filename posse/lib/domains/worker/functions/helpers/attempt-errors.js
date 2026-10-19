@@ -736,7 +736,8 @@ export async function handleExecuteAttemptError(worker, {
   // it would dead-letter the job on the same-error rule after two tries.
   const harnessFaultCode = harnessSetupFaultCode(err);
   if (harnessFaultCode) {
-    settleHarnessSetupFault(worker, { attempt, err, faultCode: harnessFaultCode, job, leaseToken, startTime });
+    const outcome = settleHarnessSetupFault(worker, { attempt, err, faultCode: harnessFaultCode, job, leaseToken, startTime });
+    if (outcome === "failed") await worker._cleanupWorktreeIfDone(job.work_item_id);
     return;
   }
 
