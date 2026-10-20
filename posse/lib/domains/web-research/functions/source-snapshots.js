@@ -253,7 +253,10 @@ export async function downloadWebSource(url, {
         method: "GET",
         redirect: "manual",
         signal: combined,
-        headers: { accept: "application/json, text/csv, text/plain, application/xml;q=0.9, */*;q=0.1" },
+        headers: {
+          accept: "application/json, text/csv, text/plain, application/xml;q=0.9, */*;q=0.1",
+          "user-agent": "Posse-Source-Snapshot/1.0",
+        },
       });
     } catch (error) {
       if (signal?.aborted) throw signal.reason || failed("aborted");

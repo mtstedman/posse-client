@@ -10,6 +10,7 @@ import { groupVerificationFiles, packageManagerRun, verificationReadinessManifes
 import { sanitizeAbsolutePathsInText, toRepoRelativePath } from "../../../format/functions/display-paths.js";
 import { commandSpawnSpec } from "../../../platform/functions/command-launch.js";
 import { SpawnedProcessTerminator } from "../../../platform/classes/SpawnedProcessTerminator.js";
+import { typecheckCommand, cleanTypecheckOutput } from "./typecheck-command.js";
 
 
 
@@ -831,7 +832,7 @@ function runScopedShellSyntax(cwd, targets) {
 function runScopedLint(cwd, files, { typecheckFallback = null } = {}) {
   const targets = lintableFiles(cwd, files);
   if (targets.length === 0) {
-    return { name: "lint", status: "skipped", reason: "no lintable scoped files", targets: [] };
+    return { name: "lint", status: "not_applicable", reason: "no lintable scoped files", targets: [] };
   }
 
   const subchecks = [
@@ -895,29 +896,11 @@ function runTypecheck(cwd, {
   packageManager = null,
   packageManagerReady = null,
 } = {}) {
-  // A project with no typecheck configured (no package.json, or no typecheck
-  // script) has nothing to run: that is not a verification gap, so it must not
-  // turn the passing checks that did run into an unavailable result.
-  if (!packageScript(cwd, "typecheck")) {
-    return {
-      name: "typecheck",
-      status: "not_applicable",
-      reason: fs.existsSync(path.join(cwd, "package.json"))
-        ? "package.json has no typecheck script"
-        : "no package.json; not a Node project",
-    };
-  }
-  if (!packageManager || packageManagerReady === false) {
-    return {
-      name: "typecheck",
-      status: "unavailable",
-      reason: packageManager
-        ? `${packageManager} executable is not available`
-        : "package manager could not be resolved",
-    };
-  }
-  const invocation = packageManagerRun(packageManager, "typecheck");
-  const result = runProcess(invocation.command, invocation.args, cwd, { timeoutMs: 180000 });
+  const invocation = typecheckCommand(cwd, { packageManager, packageManagerReady });
+  if (invocation.status !== "ready") return { name: "typecheck", ...invocation };
+  let result;
+  try { result = runProcess(invocation.command, invocation.args, cwd, { timeoutMs: 180000 }); }
+  finally { cleanTypecheckOutput(invocation); }
   const missingTooling = result.exitCode !== 0 ? missingToolingReason(result, cwd) : null;
   if (missingTooling) {
     return {
@@ -1073,22 +1056,17 @@ export async function collectTypecheckDiagnosticsAsync({
   let durationMs = 0;
   for (const group of groups) {
     const rootLabel = group.root_relative || ".";
-    if (!packageScript(group.root, "typecheck")) {
-      roots.push({ root: rootLabel, status: "not_applicable" });
+    const invocation = typecheckCommand(group.root, {
+      packageManager: group.package_manager,
+      packageManagerReady: group.package_manager_ready,
+    });
+    if (invocation.status !== "ready") {
+      roots.push({ root: rootLabel, ...invocation });
       continue;
     }
-    if (!group.package_manager || group.package_manager_ready === false) {
-      roots.push({
-        root: rootLabel,
-        status: "unavailable",
-        reason: group.package_manager
-          ? `${group.package_manager} executable is not available`
-          : "package manager could not be resolved",
-      });
-      continue;
-    }
-    const invocation = packageManagerRun(group.package_manager, "typecheck");
-    const result = await runProcessAsync(invocation.command, invocation.args, group.root, { timeoutMs, signal });
+    let result;
+    try { result = await runProcessAsync(invocation.command, invocation.args, group.root, { timeoutMs, signal }); }
+    finally { cleanTypecheckOutput(invocation); }
     durationMs += result.durationMs;
     if (result.aborted) {
       roots.push({ root: rootLabel, status: "unavailable", reason: "typecheck canceled", command: result.command });

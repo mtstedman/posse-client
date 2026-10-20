@@ -13,6 +13,8 @@ import {
 import { MutationPolicy, splitShellSubcommands as policySplitShellSubcommands } from "../../../scope/classes/MutationPolicy.js";
 import { agentHiddenReadablePathReason } from "../../../scope/functions/agent-hidden-paths.js";
 import { primaryCheckoutAlias } from "../../../scope/functions/primary-checkout-alias.js";
+import { primaryCheckoutFor } from "../../../../domains/verification/functions/prerequisite-adapters.js";
+import { LINKED_DEPENDENCY_READ_DIRS } from "../../../../catalog/verification-policy.js";
 
 const PRIVATE_WORKSPACE_DOT_DIRS = new Set([".git", ".claude", ".codex", ".posse-worktrees", ".posse-test-suites"]);
 const PRIVATE_POSSE_ROOTS = new Set(["agent-loaders", "db", "logs", "mcp", "research-state", "atlas"]);
@@ -44,6 +46,38 @@ export function safePath(cwd, filePath, scopePredicates = null) {
   return resolved;
 }
 
+// Only the corresponding dependency tree of this worktree's primary checkout
+// may be read through a link. A package-internal link to source, secrets, another
+// checkout, or an external store must still pass the normal boundary instead.
+function linkedDependencyReadPath(cwd, filePath) {
+  const primary = primaryCheckoutFor(cwd);
+  if (!primary) return null;
+  const resolved = primaryCheckoutAlias(cwd, filePath)?.aliased || path.resolve(cwd, filePath);
+  if (!isInsideRoot(resolved, path.resolve(cwd), { followSymlinks: false })) return null;
+  if (isPrivateWorkspacePath(path.resolve(cwd), resolved)) return null;
+  const parts = path.relative(cwd, resolved).split(path.sep);
+  const index = parts.findIndex((part) => LINKED_DEPENDENCY_READ_DIRS.has(part));
+  if (index < 0) return null;
+  const dependencyRoot = path.join(primary, ...parts.slice(0, index + 1));
+  const realRoot = realpathExistingPrefix(dependencyRoot);
+  // Do not turn a primary dependency-root symlink into authority over its target.
+  if (realRoot !== path.join(realpathExistingPrefix(primary), ...parts.slice(0, index + 1))) return null;
+  const target = realpathExistingPrefix(resolved);
+  if (isPrivateWorkspacePath(realpathExistingPrefix(primary), target)) return null;
+  if (!isInsideRoot(target, realRoot, { followSymlinks: false })) return null;
+  if (target !== realpathExistingPrefix(path.join(primary, ...parts))) return null;
+  return resolved;
+}
+
+export function safeReadPath(cwd, filePath, scopePredicates = null) {
+  try { return safePath(cwd, filePath, scopePredicates); }
+  catch (error) {
+    const dependency = linkedDependencyReadPath(cwd, filePath);
+    if (dependency) return dependency;
+    throw error;
+  }
+}
+
 // A read-only checkout root (an artificer's work item checkout) admits a path
 // by both its spelling and its symlink-resolved target. When that root is a
 // linked worktree, `<primary checkout>/x` names the same repo path in it.
@@ -65,7 +99,7 @@ function checkoutReadRootPath(filePath, resolved, realResolved, scopePredicates)
  */
 export function isUnreadablePath(cwd, absPath, scopePredicates = null) {
   try {
-    return safePath(cwd, absPath, scopePredicates) !== path.resolve(absPath);
+    return safeReadPath(cwd, absPath, scopePredicates) !== path.resolve(absPath);
   } catch {
     return true;
   }
@@ -127,7 +161,7 @@ function startsWithVeryLongLine(filePath) {
 
 export function resolveDeterministicReadableFile(cwd, displayPath, scopePredicates = null, {
   maxSizeBytes = DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
-  safePathImpl = safePath,
+  safePathImpl = safeReadPath,
 } = {}) {
   let filePath;
   try {

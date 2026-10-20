@@ -612,6 +612,13 @@ package bin under Node and reports a missing package as unavailable.
 like PHPUnit and `go test`. Scaffolding, watch, debug, and output-writing
 options remain excluded.
 
+Automatic scoped checks prefer a package's `typecheck` script. When none exists,
+a package with `tsconfig.json` uses its installed TypeScript compiler with
+`--noEmit`; temporary incremental metadata is removed after the check. Posse
+does not run an arbitrary build script or download a compiler for this fallback.
+Missing TypeScript is reported as unavailable. Projects with TypeScript project
+references need an explicit `typecheck` script to cover their referenced projects.
+
 **Test strictness** is a repository setting under **Repository → Verification**
 in the admin settings. `test_strictness=permissive` is the default: missing,
 unavailable, unconfigured, and zero-test runs are recorded as diagnostics and

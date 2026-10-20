@@ -14,7 +14,7 @@ import { createHashRefTool, fetchHashRefTool } from "../hash-adder.js";
 import { convertImageToPng, convertImageToJpeg, decodePngToRgba, detectImageFormat, encodeRgbaToPng, PNG_SIGNATURE, readJpegDimensions, resizeRgbaNearest, stripPngMetadataChunks } from "./image-codec.js";
 import { addAgentHiddenRipgrepGlobs, addRipgrepSkipGlobs, compactRipgrepStderr, formatRipgrepRequirementError, isWorkspaceRootIgnoredByGit, makeGitIgnoreChecker, parseRipgrepJsonMatches, regexPatternNeedsMultiline, resolveRipgrepCommand, ripgrepIncludeGlob } from "./ripgrep.js";
 import { sanitizeAbsolutePathsInText, toDisplayPath } from "../../../format/functions/display-paths.js";
-import { agentHiddenPathError, agentHiddenPathReasonForAbsolute, buildScopePredicates, DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES, isSensitiveEnvFileOrTargetPath, isSensitiveEnvFilePath, isUnreadablePath, resolveDeterministicReadableFile, safePath, splitShellSubcommands } from "./path-policy.js";
+import { agentHiddenPathError, agentHiddenPathReasonForAbsolute, buildScopePredicates, DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES, isSensitiveEnvFileOrTargetPath, isSensitiveEnvFilePath, isUnreadablePath, resolveDeterministicReadableFile, safePath, safeReadPath, splitShellSubcommands } from "./path-policy.js";
 import { createTestExecutionExecutors } from "./test-execution.js";
 import { createObservationWrapper } from "./factory.js";
 import { boundedSearchRows, renderSearchContentRows } from "./search-results.js";
@@ -288,6 +288,7 @@ export function createDeterministicToolkit({
   if (typeof spawnSyncImpl !== "function") {
     throw new Error("createDeterministicToolkit requires a spawnSync function");
   }
+  const readPath = safePathImpl === safePath ? safeReadPath : safePathImpl;
   const testExecution = createTestExecutionExecutors();
   const { writeTextFileAtomic, setFileExecutable } = createTextMutationHelpers();
 
@@ -302,7 +303,7 @@ export function createDeterministicToolkit({
         : explicitPage
           ? READ_FILE_LARGE_MAX_SIZE_BYTES
           : DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES,
-      safePathImpl,
+      safePathImpl: readPath,
     });
     if (!readable.ok) return `Error: ${readable.error}`;
     const filePath = readable.path;
@@ -584,7 +585,7 @@ export function createDeterministicToolkit({
     let dir;
     try {
       const requestedDir = args.path ?? args.directory;
-      dir = requestedDir ? safePathImpl(cwd, requestedDir, scopePredicates) : cwd;
+      dir = requestedDir ? readPath(cwd, requestedDir, scopePredicates) : cwd;
       const hiddenErr = agentHiddenPathError(cwd, dir, requestedDir || ".");
       if (hiddenErr) return `Error: ${hiddenErr}`;
     } catch (err) {
@@ -597,7 +598,7 @@ export function createDeterministicToolkit({
     const results = [];
     const maxResults = 200;
     let truncated = false;
-    const isGitIgnored = makeGitIgnoreChecker(cwd);
+    const isGitIgnored = isWorkspaceRootIgnoredByGit(dir) ? () => false : makeGitIgnoreChecker(cwd);
 
     function walk(currentDir) {
       if (truncated) return;
@@ -710,7 +711,7 @@ export function createDeterministicToolkit({
     try {
       let searchPath;
       try {
-        searchPath = args.path ? safePathImpl(cwd, args.path, scopePredicates) : cwd;
+        searchPath = args.path ? readPath(cwd, args.path, scopePredicates) : cwd;
       } catch (err) {
         return `Error: ${err.message}`;
       }
@@ -1995,7 +1996,7 @@ export function createDeterministicToolkit({
       "git_history",
       createGitHistoryExecutor(safePathImpl, { nativeParity: gitNativeParity }),
     ),
-    execInspectFile: wrapDeterministicExecutor("inspect_file", createInspectFileExecutor(safePathImpl)),
+    execInspectFile: wrapDeterministicExecutor("inspect_file", createInspectFileExecutor(readPath)),
     execHashFile: wrapDeterministicExecutor("hash_file", execHashFile),
     execTraverseRef: wrapDeterministicExecutor("traverse_ref", execTraverseRef),
     execFetchRef: wrapDeterministicExecutor("fetch_ref", execFetchRef),

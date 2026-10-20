@@ -14,6 +14,7 @@ import { gitCommitAllAsync } from "../../git/functions/commit-scope.js";
 import { listIgnoredRepoPaths } from "../../git/functions/ignored-paths.js";
 import { guardToolWriteLock } from "../../queue/functions/write-lock-guard.js";
 import { preparePlanningDatabase, databaseIgnoreRules, planningDatabaseQuestion, executePlanningDatabase, assertPlanningDatabaseReady } from "./planning-database.js";
+import { ensureGeneratedDirectoryIgnored } from "./dependency-sync.js";
 
 export function planningEnvironmentRoot(cwd) {
   return fs.realpathSync(primaryCheckoutFor(cwd) || cwd);
@@ -166,6 +167,14 @@ export async function executePlanningEnvironment(proposal, context, { signal, be
     const restore = () => {
       for (const [file, content] of originals) {
         try { if (content == null) fs.rmSync(file, { force: true }); else fs.writeFileSync(file, content); } catch { /* the failure result still reports it */ }
+      }
+      // Restoring .gitignore can expose packages installed by an earlier step.
+      // Keep retained caches out of Git through the same local exclude policy
+      // used by dependency sync, without retaining tracked setup-file changes.
+      for (const dir of new Set(proposal.steps.flatMap((step) => step.dependency_paths))) {
+        localPath(proposal.cwd, dir, { dependencyDirectory: true });
+        const result = ensureGeneratedDirectoryIgnored(proposal.cwd, dir);
+        if (result?.warning) throw new Error(`Setup rollback: ${result.warning}`);
       }
     };
     let committed = false;

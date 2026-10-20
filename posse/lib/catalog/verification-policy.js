@@ -5,6 +5,10 @@ import { readonlySet } from "./readonly-collections.js";
 
 export const VERIFICATION_POLICY_SCHEMA_VERSION = 1;
 
+// Dependency trees shared by the primary checkout's package installers.
+// Read access never grants mutation authority over these linked trees.
+export const LINKED_DEPENDENCY_READ_DIRS = readonlySet(["node_modules", "vendor"]);
+
 export const DEFAULT_VERIFICATION_WALL_TIMEOUT_MS = 120_000;
 
 export const DEFAULT_VERIFICATION_WALL_TIMEOUT_MAX_MS = 1_800_000;
