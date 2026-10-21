@@ -9,7 +9,7 @@
 // has merged, and resolves only conflicts whose shape proves ordering was the
 // cause. Anything else is a real overlapping edit and stays parked.
 
-import { installedNodeRoots } from "../../verification/functions/prerequisite-adapters.js";
+import { installedComposerRoots, installedNodeRoots, linkComposerVendorFromCheckout } from "../../verification/functions/prerequisite-adapters.js";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -168,12 +168,17 @@ export function runCloseoutTestCommandSync(command, {
     if (dependencySourceDir) {
       const dependencyDirs = new Set([...CLOSEOUT_DEPENDENCY_DIRS,
         ...installedNodeRoots(dependencySourceDir).map((root) => path.join(root, "node_modules")),
+        ...installedComposerRoots(dependencySourceDir).map((root) => path.join(root, "vendor")),
       ]);
       for (const dir of dependencyDirs) {
         const source = path.join(dependencySourceDir, dir);
         const destination = path.join(cwd, dir);
         if (!fs.existsSync(source) || fs.existsSync(destination) || !fs.existsSync(path.dirname(destination))) continue;
-        fs.symlinkSync(source, destination, process.platform === "win32" ? "junction" : "dir");
+        if (path.basename(dir) === "vendor") {
+          if (!linkComposerVendorFromCheckout(path.dirname(destination), path.dirname(source)).ok) continue;
+        } else {
+          fs.symlinkSync(source, destination, process.platform === "win32" ? "junction" : "dir");
+        }
         linked.push(destination);
       }
     }
@@ -210,7 +215,7 @@ export function runCloseoutTestCommandSync(command, {
       output: redactExactValues(error?.message || error, secrets) };
   } finally {
     for (const destination of linked) {
-      try { fs.unlinkSync(destination); } catch { /* best effort */ }
+      try { fs.rmSync(destination, { recursive: true, force: true }); } catch { /* best effort */ }
     }
   }
 }

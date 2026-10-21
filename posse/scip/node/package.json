@@ -13,6 +13,11 @@
   "type": "commonjs",
   "dependencies": {
     "@sourcegraph/scip-python": "^0.6.6",
-    "@sourcegraph/scip-typescript": "^0.4.0"
+    "@sourcegraph/scip-typescript": "^0.4.0",
+    "@typescript-eslint/parser": "8.72.0",
+    "eslint": "10.3.0",
+    "semver": "7.7.3",
+    "typescript": "5.9.3",
+    "typescript6": "npm:typescript@6.0.3"
   }
 }

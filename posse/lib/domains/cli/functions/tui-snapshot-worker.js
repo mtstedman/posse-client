@@ -21,8 +21,13 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
   const { BACKGROUND_JOB_TYPES } = await import("../../../catalog/job.js");
   const { pairingPeerPipelineRows, pairingSessionSummary } = await import("../../pairing/functions/work-items.js");
 
-  const active = listWorkItems(["queued", "planning", "running", "complete", "failed"]);
-  const localRows = active.slice(0, 20).map((wi) => {
+  const active = listWorkItems(["queued", "planning", "running", "waiting_on_human", "complete", "failed"]);
+  // Waiting work needs an operator action. Keep it ahead of history and keep
+  // every active item visible even when there are more than twenty old runs.
+  const pending = active.filter((wi) => !["complete", "failed"].includes(wi.status));
+  pending.sort((a, b) => Number(b.status === "waiting_on_human") - Number(a.status === "waiting_on_human") || b.id - a.id);
+  const history = active.filter((wi) => ["complete", "failed"].includes(wi.status)).reverse();
+  const localRows = [...pending, ...history.slice(0, Math.max(0, 20 - pending.length))].map((wi) => {
     // The pipeline is agent work only — background maintenance (atlas_warm)
     // never appears here even when it is scoped to this work item.
     const jobs = listJobsByWorkItem(wi.id)
@@ -100,13 +105,15 @@ async function buildToolData({ projectDir = null, dbPath = null } = {}) {
   };
 }
 
-async function main() {
-  const { task, args = {} } = workerData || {};
+async function main(task) {
+  const { args = {} } = workerData || {};
   if (task === "pipeline") return buildPipelineData(args);
   if (task === "tools") return buildToolData(args);
   throw new Error(`Unknown TUI snapshot task: ${task}`);
 }
 
-main()
-  .then((result) => post({ type: "result", result }))
-  .catch((err) => post({ type: "error", error: errorPayload(err) }));
+parentPort.on("message", ({ id, task }) => {
+  main(task)
+    .then((result) => post({ id, type: "result", result }))
+    .catch((err) => post({ id, type: "error", error: errorPayload(err) }));
+});

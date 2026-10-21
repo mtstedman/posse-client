@@ -87,7 +87,7 @@ export class RunSession {
     try { await bossyLocalStream?.close?.(); } catch { /* best effort */ }
     const stopDisplaySnapshots = this._stopRunDisplaySnapshots;
     this._stopRunDisplaySnapshots = null;
-    try { stopDisplaySnapshots?.(); } catch { /* best effort */ }
+    try { await stopDisplaySnapshots?.(); } catch { /* best effort */ }
     const humanAnswerRelay = this._humanAnswerRelay;
     this._humanAnswerRelay = null;
     try { humanAnswerRelay?.stop?.(); } catch { /* best effort */ }
@@ -2973,7 +2973,7 @@ export class RunSession {
       nextAction = await wrapUp();
     }
     if (nextAction?.rerun) {
-      stopDisplaySnapshotCaches();
+      await stopDisplaySnapshotCaches();
       if (display) display.stop();
       process.off("SIGINT", wrapUpSigintCleanup);
       process.off("SIGTERM", wrapUpSigtermCleanup);
@@ -3007,7 +3007,7 @@ export class RunSession {
     await flushCloseoutStatus();
   } finally {
     // Ensure display is always stopped — some wrapUpTui paths missed this
-    stopDisplaySnapshotCaches();
+    await stopDisplaySnapshotCaches();
     if (display) display.stop();
     process.off("SIGINT", wrapUpSigintCleanup);
     process.off("SIGTERM", wrapUpSigtermCleanup);

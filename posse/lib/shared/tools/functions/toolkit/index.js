@@ -34,6 +34,9 @@ const READ_FILE_LARGE_MAX_SIZE_BYTES = 512 * 1024 * 1024;
 // (2026-10-01) could not be read at all, by line paging or structured modes.
 const READ_FILE_STRUCTURED_MAX_SIZE_BYTES = 64 * 1024 * 1024;
 const READ_FILE_LARGE_STRUCTURED_CONTENT_BYTES = 2 * 1024;
+// Bound the rendered response before observation/context accounting. File-size
+// limits alone do not bound a page of minified text or structured match output.
+const READ_FILE_MAX_RESULT_BYTES = 256 * 1024;
 const LONG_LINE_READ_HINT = "use read_file with jsonPath to extract a JSON value, search to get match snippets with their columns, or maxBytes to read the first bytes";
 const HASH_FILE_MAX_SIZE_BYTES = 512 * 1024 * 1024;
 const EDIT_FILE_MAX_PATTERN_CHARS = 500;
@@ -202,7 +205,13 @@ function toNonNegativeInt(value, fallback = 0) {
 
 
 
-function readLargeFilePage(filePath, { offset, limit, maxBytes = DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES }) {
+function boundedReadResult(result) {
+  return Buffer.byteLength(result, "utf8") <= READ_FILE_MAX_RESULT_BYTES
+    ? result
+    : `Error: Requested read result exceeds the ${READ_FILE_MAX_RESULT_BYTES}-byte response limit; request fewer lines, or ${LONG_LINE_READ_HINT}.`;
+}
+
+function readLargeFilePage(filePath, { offset, limit, maxBytes = READ_FILE_MAX_RESULT_BYTES }) {
   const firstLine = offset + 1;
   const endLine = firstLine + limit;
   const selected = [];
@@ -319,7 +328,7 @@ export function createDeterministicToolkit({
         }
         const remaining = page.totalLines - offset - limit;
         const numbered = formatNumberedLinesFromModule(page.selected, offset + 1);
-        return numbered + (remaining > 0 ? `\n... (${remaining} more lines)` : "");
+        return boundedReadResult(numbered + (remaining > 0 ? `\n... (${remaining} more lines)` : ""));
       } catch (err) {
         return `Error: ${err?.message || String(err)}`;
       }
@@ -333,7 +342,7 @@ export function createDeterministicToolkit({
     }
     const remaining = lines.length - offset - limit;
     if (structured) {
-      return buildStructuredReadResultFromModule({
+      return boundedReadResult(buildStructuredReadResultFromModule({
         args,
         displayPath: args.path,
         content,
@@ -342,15 +351,15 @@ export function createDeterministicToolkit({
         totalBytes: stat.size,
         totalLines: lines.length,
         truncated: remaining > 0,
-        // Above the plain-read limit the structured result carries a bounded
+        // Above the response limit the structured result carries a bounded
         // content excerpt; the jsonPath value or search matches are the answer.
-        defaultMaxBytes: stat.size > DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES
+        defaultMaxBytes: stat.size > READ_FILE_MAX_RESULT_BYTES
           ? READ_FILE_LARGE_STRUCTURED_CONTENT_BYTES
           : null,
-      });
+      }));
     }
     const numbered = formatNumberedLinesFromModule(selected, offset + 1);
-    return numbered + (remaining > 0 ? `\n... (${remaining} more lines)` : "");
+    return boundedReadResult(numbered + (remaining > 0 ? `\n... (${remaining} more lines)` : ""));
   }
 
   function execWriteFile(args, cwd, scopePredicates) {

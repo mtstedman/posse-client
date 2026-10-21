@@ -457,6 +457,17 @@ Supported selectors are `typescript`, `python`, `php`, `go`, and `rust`.
 bundled Composer setup, `go` installs `scip-go` into `scip/bin`, and `rust`
 creates a `scip-rust` wrapper around `rust-analyzer scip`.
 
+The shared Node environment also installs pinned TypeScript 5/6 compilers,
+ESLint, and a TypeScript parser for verification. Project-installed tools take
+precedence. When a compiler is absent, Posse selects a managed version matching
+the project's declared TypeScript range and checks its `tsconfig.json` without
+emitting files. Without a lint configuration, Posse runs baseline defect rules
+for JavaScript and TypeScript; compatible project ESLint configurations can use
+the managed executable. Custom scripts, plugins, and application dependencies
+still require their project environment. Verification never installs packages
+into the target repository. Re-running the setup command above upgrades older
+central environments even when their SCIP indexers already work.
+
 ## Independent tool batches
 
 `edit_file.edits` resolves each item against the original file snapshot and

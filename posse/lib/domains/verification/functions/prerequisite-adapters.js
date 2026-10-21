@@ -206,11 +206,19 @@ const LINK_SCAN_SKIP = new Set(["node_modules", ".git", ".posse", ".posse-worktr
 // dependencies: the repository root plus workspace packages up to three
 // levels deep, which covers pnpm/yarn/npm workspaces without parsing globs.
 export function installedNodeRoots(primary, { maxDepth = 3, maxRoots = 32 } = {}) {
+  return installedPackageRoots(primary, "package.json", "node_modules", { maxDepth, maxRoots });
+}
+
+export function installedComposerRoots(primary, { maxDepth = 3, maxRoots = 32 } = {}) {
+  return installedPackageRoots(primary, "composer.json", "vendor", { maxDepth, maxRoots });
+}
+
+function installedPackageRoots(primary, manifest, dependencies, { maxDepth, maxRoots }) {
   const out = [];
   const stack = [{ dir: primary, depth: 0 }];
   while (stack.length > 0 && out.length < maxRoots) {
     const { dir, depth } = stack.pop();
-    if (exists(path.join(dir, "package.json")) && directoryExists(path.join(dir, "node_modules"))) {
+    if (exists(path.join(dir, manifest)) && directoryExists(path.join(dir, dependencies))) {
       out.push(path.relative(primary, dir).replace(/\\/g, "/") || ".");
     }
     if (depth >= maxDepth) continue;
@@ -292,7 +300,7 @@ export function installedDependenciesMatchLockfile(dependencyDir, lockfileText) 
   return true;
 }
 
-export function linkNodeDependenciesFromPrimaryCheckout(root) {
+export function linkNodeDependenciesFromPrimaryCheckout(root, { allowDirectory = () => true } = {}) {
   const detected = nodeDetection(root);
   if (!detected) return { ok: false, reason: "node_lockfile_missing" };
   const primary = primaryCheckoutFor(root);
@@ -316,6 +324,7 @@ export function linkNodeDependenciesFromPrimaryCheckout(root) {
     const realTarget = path.relative(realRoot, fs.realpathSync(targetDir));
     if (realTarget === ".." || realTarget.startsWith(`..${path.sep}`) || path.isAbsolute(realTarget)) continue;
     const target = path.join(targetDir, "node_modules");
+    if (!allowDirectory(target)) continue;
     let present = false;
     try { fs.lstatSync(target); present = true; } catch { present = false; }
     if (present) continue;
@@ -367,10 +376,15 @@ function linkComposerVendorEntries(source, target, { depth = 0 } = {}) {
  * closed if the repository does not ignore vendor/.
  */
 export function linkComposerVendorFromPrimaryCheckout(root) {
-  const worktreeLock = path.join(root, "composer.lock");
-  if (!exists(worktreeLock)) return { ok: false, reason: "composer_lockfile_missing" };
+  if (!exists(path.join(root, "composer.lock"))) return { ok: false, reason: "composer_lockfile_missing" };
   const primary = primaryCheckoutFor(root);
   if (!primary) return { ok: false, reason: "no_primary_checkout" };
+  return linkComposerVendorFromCheckout(root, primary);
+}
+
+export function linkComposerVendorFromCheckout(root, primary) {
+  const worktreeLock = path.join(root, "composer.lock");
+  if (!exists(worktreeLock)) return { ok: false, reason: "composer_lockfile_missing" };
   const primaryLock = path.join(primary, "composer.lock");
   if (!exists(primaryLock) || hashFile(primaryLock) !== hashFile(worktreeLock)) {
     return { ok: false, reason: "primary_lockfile_mismatch", primary };

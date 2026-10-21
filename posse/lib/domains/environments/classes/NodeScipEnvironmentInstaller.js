@@ -3,6 +3,7 @@
 import fs from "fs";
 import path from "path";
 import { ScipLanguageEnvironmentInstaller } from "./ScipLanguageEnvironmentInstaller.js";
+import { managedNodeVerifiersReady } from "../functions/node-verification-runtime.js";
 import {
   npmCommand,
   runCommand,
@@ -49,7 +50,8 @@ export class NodeScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
   async install() {
     const packageJson = path.join(this.nodeDir, "package.json");
     const existingCommand = this.findCommandPath(this.commandSegments, this.commandName);
-    const reuseExisting = !this.force && Boolean(existingCommand);
+    const reuseExisting = !this.force && Boolean(existingCommand)
+      && managedNodeVerifiersReady(this.nodeDir, this.sourceNodeDir);
     const totalSteps = reuseExisting ? 2 : (this.dryRun ? 3 : this.installPlan().length);
     const manifest = await this.runStep(1, "check managed Node package root", async () => {
       const sourcePackageJson = path.join(this.sourceNodeDir, "package.json");
@@ -90,10 +92,16 @@ export class NodeScipEnvironmentInstaller extends ScipLanguageEnvironmentInstall
   }
 
   status() {
+    if (!managedNodeVerifiersReady(this.nodeDir, this.sourceNodeDir)) {
+      return this.failed("managed Node verification tools need installation; run posse doctor");
+    }
     return this.statusForInstalledCommand(this.commandSegments, this.commandName);
   }
 
   async validateCommand() {
+    if (!managedNodeVerifiersReady(this.nodeDir, this.sourceNodeDir)) {
+      return { ok: false, message: "managed Node verification tools are missing or stale" };
+    }
     const command = this.findCommandPath(this.commandSegments, this.commandName);
     if (!command) {
       return {

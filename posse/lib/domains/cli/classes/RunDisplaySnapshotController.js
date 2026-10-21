@@ -2,10 +2,10 @@ import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 import {
   EMPTY_TOOL_SNAPSHOT,
   createAsyncSnapshotCache,
-  runTuiSnapshotTask,
 } from "../functions/run-session.js";
 import { pipelineHasSession } from "../functions/run-display-pipeline.js";
 import { registeredToolCatalogSnapshot } from "../functions/run-display-tools.js";
+import { TuiSnapshotWorker } from "./TuiSnapshotWorker.js";
 
 export class RunDisplaySnapshotController {
   constructor({
@@ -35,6 +35,8 @@ export class RunDisplaySnapshotController {
       projectDir: this.projectDir,
       dbPath: getRuntimeDbPath(this.projectDir),
     };
+    const snapshotWorker = new TuiSnapshotWorker(snapshotArgs);
+    this.snapshotWorker = snapshotWorker;
     const requestPaneRender = (...modes) => {
       if (modes.includes(this.getDisplay()?._rightMode)) {
         this.getDisplay()?.requestRender?.({ reason: "queue-snapshot" });
@@ -52,7 +54,7 @@ export class RunDisplaySnapshotController {
     const pipeline = createAsyncSnapshotCache({
       initialValue: [],
       minIntervalMs: 750,
-      load: () => runTuiSnapshotTask("pipeline", snapshotArgs),
+      load: () => snapshotWorker.run("pipeline"),
       onUpdate: () => requestPaneRender("pipeline", "log", "monitor"),
       onError: (err) => {
         this.log?.debug?.("display", "Pipeline snapshot refresh failed", { error: String(err?.message || err) });
@@ -61,7 +63,7 @@ export class RunDisplaySnapshotController {
     const tools = createAsyncSnapshotCache({
       initialValue: this.buildLocalToolSnapshot(),
       minIntervalMs: 750,
-      load: () => this.loadToolSnapshot(snapshotArgs),
+      load: () => this.loadToolSnapshot(snapshotWorker),
       onUpdate: () => requestPaneRender("tools", "monitor"),
       onError: (err) => {
         this.log?.debug?.("display", "Tool snapshot refresh failed", { error: String(err?.message || err) });
@@ -112,6 +114,9 @@ export class RunDisplaySnapshotController {
     this.caches?.pipeline?.stop?.();
     this.caches?.tools?.stop?.();
     this.caches = null;
+    const worker = this.snapshotWorker;
+    this.snapshotWorker = null;
+    return worker?.stop();
   }
 
   trackTimer(timer) {
@@ -144,9 +149,9 @@ export class RunDisplaySnapshotController {
     return snapshot;
   }
 
-  async loadToolSnapshot(snapshotArgs) {
+  async loadToolSnapshot(snapshotWorker) {
     try {
-      const snapshot = await runTuiSnapshotTask("tools", snapshotArgs);
+      const snapshot = await snapshotWorker.run("tools");
       if (snapshot?.activeLocks) return snapshot;
       const local = this.buildLocalToolSnapshot();
       return { ...local, ...(snapshot || {}), activeLocks: local.activeLocks };

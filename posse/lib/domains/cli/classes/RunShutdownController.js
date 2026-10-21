@@ -285,7 +285,7 @@ export class RunShutdownController {
         this.uninstall();
         let display = null;
         try { display = this.getDisplay?.(); } catch { /* observational */ }
-        try { this.stopDisplaySnapshotCaches?.(); } catch { /* best effort */ }
+        try { await this.stopDisplaySnapshotCaches?.(); } catch { /* best effort */ }
         try { display?.stop?.(); } catch { /* best effort */ }
         if (display) {
           try { console.log(`\n  ${this.C.green}Graceful shutdown complete.${this.C.reset}\n`); } catch { /* observational */ }

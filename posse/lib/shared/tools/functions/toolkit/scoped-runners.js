@@ -11,6 +11,8 @@ import { sanitizeAbsolutePathsInText, toRepoRelativePath } from "../../../format
 import { commandSpawnSpec } from "../../../platform/functions/command-launch.js";
 import { SpawnedProcessTerminator } from "../../../platform/classes/SpawnedProcessTerminator.js";
 import { typecheckCommand, cleanTypecheckOutput } from "./typecheck-command.js";
+import { fileURLToPath } from "node:url";
+import { managedBaselineLintInvocation } from "../../../../domains/environments/functions/node-verification-runtime.js";
 
 
 
@@ -152,9 +154,9 @@ function compact(value, max = MAX_OUTPUT_CHARS) {
   return `${text.slice(0, max)}\n... (truncated ${text.length - max} chars)`;
 }
 
-function runProcess(command, args, cwd, { timeoutMs = 120000, input = undefined } = {}) {
+function runProcess(command, args, cwd, { timeoutMs = 120000, input = undefined, env: extraEnv = {} } = {}) {
   const startedAt = Date.now();
-  const env = { ...process.env };
+  const env = { ...process.env, ...extraEnv };
   delete env.NODE_TEST_CONTEXT;
   const spawnSpec = commandSpawnSpec(command, args, { env });
   const result = spawnSync(spawnSpec.command, spawnSpec.args, {
@@ -183,6 +185,24 @@ function runProcess(command, args, cwd, { timeoutMs = 120000, input = undefined 
 function eslintBin(cwd) {
   const bin = path.join(cwd, "node_modules", "eslint", "bin", "eslint.js");
   return fs.existsSync(bin) ? bin : null;
+}
+
+function hasProjectLintConfig(cwd) {
+  for (let dir = cwd; ; dir = path.dirname(dir)) {
+    if (["eslint.config.js", "eslint.config.mjs", "eslint.config.cjs", "eslint.config.ts", "eslint.config.mts", "eslint.config.cts", ".eslintrc", ".eslintrc.js", ".eslintrc.cjs", ".eslintrc.json", ".eslintrc.yml", ".eslintrc.yaml"].some((name) => fs.existsSync(path.join(dir, name)))) return true;
+    try { if (JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")).eslintConfig) return true; } catch { /* no manifest */ }
+    if (path.dirname(dir) === dir) return false;
+  }
+}
+
+function sharedLintRoot(cwd, targets) {
+  let root = path.resolve(cwd);
+  const outside = (file) => {
+    const relative = path.relative(root, path.resolve(cwd, file));
+    return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+  };
+  while (targets.some(outside) && path.dirname(root) !== root) root = path.dirname(root);
+  return root;
 }
 
 function packageScript(cwd, name) {
@@ -332,11 +352,15 @@ function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
   }
   const eslint = eslintBin(cwd);
   const lintScript = packageScript(cwd, "lint");
+  const projectConfig = hasProjectLintConfig(cwd);
+  const plainEslint = !lintScript || /^eslint(?:\s+\.)?$/u.test(lintScript.trim());
+  const managed = plainEslint && (!projectConfig || !eslint)
+    ? managedBaselineLintInvocation({ projectConfigRoot: projectConfig ? cwd : null }) : null;
   const packageManager = (() => {
     const group = groupVerificationFiles(cwd, targets)[0];
     return group?.package_manager_ready ? group.package_manager : null;
   })();
-  if (!eslint && (!lintScript || !packageManager)) {
+  if (!managed && !eslint && (!lintScript || !packageManager)) {
     const onlyTypeScript = targets.every((file) => [".ts", ".tsx"].includes(path.extname(file).toLowerCase()));
     if (onlyTypeScript && typecheckFallback?.status === "passed") {
       return {
@@ -383,10 +407,17 @@ function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
   const invocation = packageManager
     ? packageManagerRun(packageManager, "lint", ["--format", "json", ...targets.map((file) => path.resolve(cwd, file))])
     : null;
-  const result = eslint
+  const result = managed
+    ? runProcess(process.execPath, [managed.eslint,
+        ...(!projectConfig ? ["--no-config-lookup", "--no-inline-config", "--config", fileURLToPath(new URL("../../../../domains/environments/functions/node-baseline-eslint.config.js", import.meta.url))] : []),
+        "--format", "json", ...targets.map((file) => path.resolve(cwd, file))],
+      projectConfig ? cwd : sharedLintRoot(cwd, targets), { env: { POSSE_NODE_VERIFICATION_ROOT: managed.root } })
+    : eslint
     ? runProcess(process.execPath, [eslint, "--format", "json", ...targets], cwd)
     : runProcess(invocation.command, invocation.args, cwd);
-  const missingTooling = result.exitCode !== 0 ? missingToolingReason(result, cwd) : null;
+  const missingTooling = result.exitCode !== 0
+    ? missingToolingReason(result, cwd) || (managed && /Cannot find (?:package|module)|ERR_MODULE_NOT_FOUND/u.test(result.stderr) ? "dependency_unavailable: project ESLint configuration dependency is not installed" : null)
+    : null;
   if (missingTooling) {
     return {
       name: "eslint",
@@ -408,6 +439,7 @@ function runScopedJsLint(cwd, targets, { typecheckFallback = null } = {}) {
     .filter((finding) => finding.severity === "error");
   return {
     name: "eslint",
+    ...(managed ? { tool_source: "managed", reason: projectConfig ? "project rules with Posse-managed ESLint" : "Posse baseline defect rules" } : {}),
     status: result.exitCode === 0 && findings.length === 0 ? "passed" : "failed",
     targets,
     command: result.command,
@@ -888,6 +920,7 @@ function runScopedLint(cwd, files, { typecheckFallback = null } = {}) {
       reason: check.reason || null,
       target_count: check.targets?.length ?? null,
       command: check.command || null,
+      ...(check.tool_source ? { tool_source: check.tool_source } : {}),
     })),
   };
 }
@@ -916,6 +949,7 @@ function runTypecheck(cwd, {
   return {
     name: "typecheck",
     status: result.exitCode === 0 ? "passed" : "failed",
+    ...(invocation.tool_source ? { tool_source: invocation.tool_source } : {}),
     command: result.command,
     durationMs: result.durationMs,
     output: result.exitCode === 0 ? null : failureOutput,
@@ -1181,6 +1215,7 @@ function combineRootChecks(name, projectCwd, entries) {
             reason: check.reason || null,
             target_count: check.targets?.length ?? null,
             command: check.command || null,
+            ...(check.tool_source ? { tool_source: check.tool_source } : {}),
           }]
     )),
   };

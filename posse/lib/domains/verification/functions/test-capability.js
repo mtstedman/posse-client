@@ -11,6 +11,7 @@ import { isUnrunnableTestReason } from "./test-capability-reasons.js";
 import { validatePlannerTestCommandForRepository } from "./planner-test-command.js";
 import {
   installedNodeRoots,
+  installedComposerRoots,
   linkComposerVendorFromPrimaryCheckout,
   linkNodeDependenciesFromPrimaryCheckout,
   primaryCheckoutFor,
@@ -33,12 +34,15 @@ export function linkPrimaryTestDependencies(cwd, { git = gitExec } = {}) {
     try { git(["check-ignore", "-q", "--", `${directory}/.posse-setup-probe`], cwd); return true; } catch { return false; }
   };
   let linked = false;
-  if (fs.existsSync(path.join(cwd, "composer.lock")) && ignored("vendor")) {
-    linked = linkComposerVendorFromPrimaryCheckout(cwd).ok;
+  for (const root of installedComposerRoots(primary)) {
+    const directory = root === "." ? "vendor" : `${root}/vendor`;
+    if (ignored(directory)) linked = linkComposerVendorFromPrimaryCheckout(path.resolve(cwd, root)).ok || linked;
   }
-  const nodeDirectories = installedNodeRoots(primary).map((root) => (root === "." ? "node_modules" : `${root}/node_modules`));
-  if (nodeDirectories.length > 0 && nodeDirectories.every(ignored)) {
-    linked = linkNodeDependenciesFromPrimaryCheckout(cwd).ok || linked;
+  for (const root of installedNodeRoots(primary)) {
+    const directory = root === "." ? "node_modules" : `${root}/node_modules`;
+    if (ignored(directory)) linked = linkNodeDependenciesFromPrimaryCheckout(path.resolve(cwd, root), {
+      allowDirectory: (target) => ignored(path.relative(cwd, target).replace(/\\/g, "/")),
+    }).ok || linked;
   }
   return linked;
 }

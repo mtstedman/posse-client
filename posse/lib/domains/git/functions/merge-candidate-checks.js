@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseJobPayload } from "../../queue/functions/payload.js";
-import { installedDependenciesMatchLockfile, installedNodeRoots } from "../../verification/functions/prerequisite-adapters.js";
+import { installedComposerRoots, installedDependenciesMatchLockfile, installedNodeRoots, linkComposerVendorFromCheckout } from "../../verification/functions/prerequisite-adapters.js";
 import { classifyNestedRunnerInfrastructureFailure } from "../../verification/functions/test-runner-failure.js";
 import { validatePlannerTestCommandForRepository } from "../../verification/functions/planner-test-command.js";
 import { runCloseoutTestCommandSync } from "./merge-closeout.js";
@@ -35,9 +35,16 @@ export function withTemporaryMergeCandidateCheckout({ cwd, git, dependencySource
       const sources = [cwd, ...dependencySources.filter(Boolean)];
       const dependencyDirs = new Set(["node_modules", "vendor",
         ...sources.flatMap((source) => installedNodeRoots(source).map((nodeRoot) => path.relative(source, path.join(source, nodeRoot, "node_modules")))),
+        ...sources.flatMap((source) => installedComposerRoots(source).map((root) => path.join(root, "vendor"))),
       ]);
       for (const relative of dependencyDirs) {
         if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+        if (path.basename(relative) === "vendor") {
+          for (const source of sources) {
+            if (linkComposerVendorFromCheckout(path.dirname(path.join(checkout, relative)), path.dirname(path.join(source, relative))).ok) break;
+          }
+          continue;
+        }
         const owner = dependencyOwner(relative);
         const destination = path.join(checkout, relative);
         if (!owner || fs.existsSync(destination) || !fs.existsSync(path.dirname(destination))) continue;

@@ -2,6 +2,8 @@
 import fs from "fs";
 import path from "path";
 import { TOOL_REFS } from "../../../../catalog/tool-references.js";
+import { WEB_TOOL_ROLES } from "../../../../catalog/tool-surface/roles.js";
+import { resolveWebToolsEnabled } from "../shared/tool-policy-settings.js";
 import { ProviderToolRenderer } from "../../../../shared/tools/classes/ProviderToolRenderer.js";
 import { adaptExecutionContractForProvider, appendExecutionTools, buildExecutionContract, renderExecutionContractBlock, renderProviderPromptContracts } from "../../../../shared/tools/functions/contract.js";
 import { issuedToolSurfaceForProviderPolicy } from "../../../../shared/tools/functions/issued-tool-policy.js";
@@ -285,6 +287,7 @@ export async function callProvider(promptText, {
           systemPrompt: developerInstructionRoute.developerInstructions,
           modelTier, modelName: modelToUse, reasoningEffort, role, roleMode,
           allowWrite, allowTests, projectDbCapability,
+          allowWeb: !disableAgentTools && WEB_TOOL_ROLES.has(role) && resolveWebToolsEnabled(),
           issuedToolIds: deterministicReadMcp.issuedToolIds || [],
           cwd: mcpWorkspaceCwd, readRoots, createRoots, scopedFiles, createFiles, deleteFiles,
           maxTurns: turnLimit, maxOutputTokens: outputTokenLimit,

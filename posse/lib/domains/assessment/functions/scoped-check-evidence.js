@@ -1,8 +1,6 @@
 import { lineageChangedTestPaths } from "../../worker/functions/helpers/test-execution-receipt.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import crypto from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
 
 import {
   getArtifacts,
@@ -207,10 +205,10 @@ async function attributeFailuresToBaseline({
       cwd,
       baseCommit: baselineCommit,
       paths: files,
-      run: () => {
-        const baselineFiles = files.filter((file) => fs.existsSync(path.join(cwd, file)));
-        return baselineFiles.length > 0 ? runChecks(baselineFiles) : null;
-      },
+      // Keep removed/new paths as package-root anchors. Lint filters absent
+      // files itself; a project typecheck must still run when every task file
+      // is new, since imported shared code can already fail at the baseline.
+      run: () => runChecks(files),
     });
   } catch (error) {
     baseline = { error: error?.message || String(error) };
@@ -253,7 +251,7 @@ async function attributeFailuresToBaseline({
     attribution.checks[check.name] = {
       baseline_status: baseCheck?.status || "not_run",
       novel_failure_count: novelCount,
-      attributable: baseCheck?.status !== "failed" || novelCount > 0,
+      attributable: baseCheck?.status === "passed" || (baseCheck?.status === "failed" && novelCount > 0),
     };
     if (baseCheck?.status === "failed" && novelCount === 0) unattributable.add(check.name);
   }

@@ -26,7 +26,6 @@ import { closePromptLog } from "../../../shared/telemetry/functions/logging/prom
 import { closeObservationLog } from "../../observability/functions/observations.js";
 import "../../../shared/telemetry/functions/run-diagnostics.js";
 import "../../system/functions/dependency-sync.js";
-import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import "../../runtime/functions/paths.js";
 import "../../../shared/format/functions/ansi.js";
 import "../../../shared/tools/classes/BinaryManager.js";
@@ -36,8 +35,6 @@ import "../../../shared/tools/classes/PersistentMcpOwner.js";
 export const PROVIDER_AUTH_WARMUP_TIMEOUT_MS = 30_000;
 export const PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS = 1_200;
 
-export const TUI_SNAPSHOT_WORKER_URL = new URL("./tui-snapshot-worker.js", import.meta.url);
-export const TUI_SNAPSHOT_THREAD_MANAGER = new ThreadManager();
 export const EMPTY_TOOL_SNAPSHOT = { jobs: [], recent: [], activeLocks: { work_items: [], jobs: [] } };
 
 export function operationalRunJobs(jobs = []) {
@@ -258,17 +255,6 @@ export function createTerminalOutputIntercept({ stdout = process.stdout, stderr 
     get active() { return stdoutActive || stderrActive; },
     get bufferedCount() { return buffer.length; },
   };
-}
-
-export function runTuiSnapshotTask(task, { projectDir, dbPath }) {
-  return TUI_SNAPSHOT_THREAD_MANAGER.run(TUI_SNAPSHOT_WORKER_URL, {
-    label: `TUI ${task} snapshot`,
-    timeoutMs: 5_000,
-    workerData: {
-      task,
-      args: { projectDir, dbPath },
-    },
-  });
 }
 
 export function createAsyncSnapshotCache({

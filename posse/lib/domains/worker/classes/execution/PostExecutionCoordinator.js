@@ -376,8 +376,17 @@ export async function handlePostExecutionForWorker({
         const scopePauseJob = getJob(job.id);
         const scopePausePayload = scopePauseJob ? this.parsePayload(scopePauseJob) : {};
         const pendingScopeRequest = scopePausePayload?._pending_scope_request;
+        const agentCompletionLog = MUTATING_JOB_TYPES.has(job.job_type)
+          ? parseAgentCompletionLogFromModule(output)
+          : { found: false, status: null, body: "", blockReason: null, verifiedNoChange: false };
+        // A live wait timing out does not invalidate the requested fix. Keep
+        // its exact-path approval actionable after a BLOCKED handoff instead
+        // of replacing it with a generic recovery question.
+        const parkLiveRequest = agentCompletionLog.status === "BLOCKED"
+          && pendingScopeRequest?.live_wait === true && !pendingScopeRequest.decision
+          && ["queued", "waiting_on_human"].includes(getJob(Number(pendingScopeRequest.approval_job_id))?.status);
         if (
-          scopePauseJob?.status === "waiting_on_human"
+          (scopePauseJob?.status === "waiting_on_human" || (scopePauseJob?.status === "running" && parkLiveRequest))
           && pendingScopeRequest
           && (!pendingScopeRequest.attempt_id || Number(pendingScopeRequest.attempt_id) === Number(attempt.id))
         ) {
@@ -409,7 +418,7 @@ export async function handlePostExecutionForWorker({
             duration_ms: Date.now() - startTime,
             error_text: `Paused for scope approval: ${pendingScopeRequest.path}`,
           });
-          const settled = settleJobScopeExpansionAttempt({ jobId: job.id, attemptId: attempt.id });
+          const settled = settleJobScopeExpansionAttempt({ jobId: job.id, attemptId: attempt.id, parkLiveRequest });
           this.emit(
             job.id,
             `${C.yellow}[scope] WI#${job.work_item_id} job #${job.id}: provider call paused for ${pendingScopeRequest.path}${settled.finalized ? `; human decision ${settled.decision}` : "; awaiting human decision"}${C.reset}`,
@@ -433,9 +442,6 @@ export async function handlePostExecutionForWorker({
             message: "The provider call finished without consuming the pending scope request; closing its approval gate.",
           });
         }
-        const agentCompletionLog = MUTATING_JOB_TYPES.has(job.job_type)
-          ? parseAgentCompletionLogFromModule(output)
-          : { found: false, status: null, body: "", blockReason: null, verifiedNoChange: false };
         // The rendered block cuts notes to 30 words; the committed packet keeps
         // the agent's full blocker and remaining_work.
         const committedCompletion = MUTATING_JOB_TYPES.has(job.job_type)

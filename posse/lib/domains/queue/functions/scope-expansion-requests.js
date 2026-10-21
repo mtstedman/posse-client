@@ -901,7 +901,7 @@ export function createScopeExpansionOperations({
    * A fast human answer may arrive while the old provider process is still
    * unwinding; only this boundary is allowed to requeue/fail the original job.
    */
-  function settleJobScopeExpansionAttempt({ jobId, attemptId = null } = {}) {
+  function settleJobScopeExpansionAttempt({ jobId, attemptId = null, parkLiveRequest = false } = {}) {
     return runInTransaction(() => {
       const original = getJob(Number(jobId));
       if (!original) return { ok: false, code: "scope_request_job_missing" };
@@ -915,6 +915,23 @@ export function createScopeExpansionOperations({
 
       const nextPayload = { ...payload };
       const settled = { ...pending, execution_settled: true, settled_at: now() };
+      if (parkLiveRequest && pending.live_wait === true && original.status === "running") {
+        const gate = getJob(Number(pending.approval_job_id));
+        if (!pending.decision && (!gate || !["queued", "waiting_on_human"].includes(gate.status))) {
+          return { ok: false, code: "scope_request_gate_closed", job: original };
+        }
+        settled.live_wait = false;
+        if (updateJobStatus(original.id, "waiting_on_human", { expectedStatuses: ["running"], force: true })) {
+          decrementAttemptCount(original.id);
+        }
+        if (!pending.decision) {
+          updateJobPayload(gate.id, JSON.stringify({
+            ...parseJobPayloadObject(gate),
+            scope_request: settled,
+            questions: [scopeGateQuestionText(original, settled)],
+          }));
+        }
+      }
       if (settled.decision === "approved") {
         delete nextPayload._pending_scope_request;
         updateJobPayload(original.id, JSON.stringify(nextPayload));
