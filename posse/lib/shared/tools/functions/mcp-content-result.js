@@ -31,3 +31,30 @@ export function asMcpContentResult(value) {
   // @ts-ignore checked brand
   return value;
 }
+
+// Match native string accounting, including every image and metadata string.
+export function toolResultStringChars(value) {
+  if (typeof value === "string") {
+    let count = 0;
+    for (const _character of value) count++;
+    return count;
+  }
+  if (!value || typeof value !== "object") return 0;
+  return Object.values(value).reduce((total, item) => total + toolResultStringChars(item), 0);
+}
+
+export function boundToolResult(result, maxChars) {
+  let reason = null;
+  for (const block of result?.content || []) {
+    if (block?.type === "image" && (typeof block.data !== "string" || !block.data.length
+      || block.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(block.data))) {
+      reason = "Error: image delivery failed: invalid base64 image content.";
+    }
+  }
+  if (toolResultStringChars(result) > maxChars) {
+    reason = "Error: tool result delivery failed: content exceeds the dispatch character limit. Request a smaller preview or response.";
+  }
+  if (!reason) return result;
+  return { isError: true, content: maxChars > 4
+    ? [{ type: "text", text: reason.slice(0, maxChars - 4) }] : [] };
+}

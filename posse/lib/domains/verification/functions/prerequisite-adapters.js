@@ -742,6 +742,10 @@ export async function repairVerificationPrerequisites({
   }
 
   const nodeContext = ecosystems.includes("node") ? nodePrerequisiteContext(root, command, receipt) : null;
+  if (nodeContext?.reason) {
+    return { ok: false, status: "blocked", reason: nodeContext.reason, network_policy: policy,
+      results: [verificationResult("node", "blocked", { reason: nodeContext.reason })] };
+  }
   return withDependencyInstallLock(nodeContext?.projectDir || root, async () => {
     const before = await gitStatus(root);
     if (before == null) {

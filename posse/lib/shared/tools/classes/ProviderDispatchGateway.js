@@ -4,6 +4,8 @@
 // McpGate. Every call therefore crosses the same signed session, scope,
 // budget, and tool-policy checks as a provider-owned MCP shim.
 
+import { DEFAULT_MAX_TOOL_RESULT_CHARS } from "../../../catalog/tool-result.js";
+import { boundToolResult } from "../functions/mcp-content-result.js";
 import crypto from "node:crypto";
 import http from "node:http";
 import { sortAgentToolDefinitions } from "../functions/agent-schema.js";
@@ -119,6 +121,7 @@ export class ProviderDispatchGateway {
     provider = null,
     cwd = null,
     leaseTtlMs,
+    maxToolResultChars = DEFAULT_MAX_TOOL_RESULT_CHARS,
     maxResponseBytes = PROVIDER_TOOL_GATEWAY_MAX_RESPONSE_BYTES,
     validateArguments = false,
   } = {}) {
@@ -150,6 +153,8 @@ export class ProviderDispatchGateway {
       Math.min(MAX_LEASE_TTL_MS, Number(leaseTtlMs) || MIN_LEASE_TTL_MS),
     );
     this.expiresAt = null;
+    this.maxToolResultChars = Number.isSafeInteger(maxToolResultChars) && maxToolResultChars > 0
+      ? maxToolResultChars : DEFAULT_MAX_TOOL_RESULT_CHARS;
     this.maxResponseBytes = Math.max(1024, Math.min(
       PROVIDER_TOOL_GATEWAY_MAX_RESPONSE_BYTES,
       Number(maxResponseBytes) || PROVIDER_TOOL_GATEWAY_MAX_RESPONSE_BYTES,
@@ -295,7 +300,7 @@ export class ProviderDispatchGateway {
         type: "tool.completed",
         dispatchId: this.dispatchId,
         toolCallId: body.toolCallId,
-        result,
+        result: boundToolResult(result, this.maxToolResultChars),
       }, this.maxResponseBytes);
     } catch (error) {
       if (controller.signal.aborted || this.closed) return;

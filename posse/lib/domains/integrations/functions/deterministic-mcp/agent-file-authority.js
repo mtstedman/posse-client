@@ -295,7 +295,11 @@ export function resolveAgentFileAuthority(attachment = {}, deps = {}) {
     job,
     workItem,
     scope: Object.freeze({
-      ...(runtime.artifactMode ? { artifactOutputRoot: runtime.outputRoot } : {}),
+      ...(runtime.artifactMode ? {
+        artifactOutputRoot: runtime.outputRoot,
+        imageProvider: typeof payload.image_provider === "string" ? payload.image_provider : null,
+        imageModel: typeof payload.image_model === "string" ? payload.image_model : null,
+      } : {}),
       scopedFiles: Object.freeze(scopedFiles),
       createFiles: Object.freeze(createFiles),
       deleteFiles: Object.freeze(deleteFiles),

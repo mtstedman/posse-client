@@ -174,6 +174,7 @@ export async function dispatchProvider(request, {
     try {
       toolGateway = new ProviderDispatchGateway({
         dispatchId: request.id,
+        maxToolResultChars: request.limits?.maxToolResultChars,
         issuedToolIds,
         surfaceDigest: request.execution?.issuedToolSurfaceDigest || null,
         mcpGate,

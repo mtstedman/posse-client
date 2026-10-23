@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_TOOL_RESULT_CHARS } from "../../../../catalog/tool-result.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { sortAgentToolDefinitions } from "../../../../shared/tools/functions/agent-schema.js";
@@ -11,7 +12,6 @@ import { dispatchProvider } from "../../../../shared/native/functions/provider-d
 import { PROVIDER_DISPATCH_PROVIDERS, PROVIDER_DISPATCH_AUTH_MODES } from "../../../../catalog/binary.js";
 
 const MAX_WALL_TIMEOUT_MS = 4 * 60 * 60 * 1_000;
-const DEFAULT_MAX_TOOL_RESULT_CHARS = 1_000_000;
 const TASK_MODES = new Set(["code", "db", "artifact", "research"]);
 
 function sha256Json(value) {

@@ -69,6 +69,7 @@ export async function dispatchLocalProvider(request, {
         dispatchId: request.id, issuedToolIds: ids, mcpGate, identity: request.identity, validateArguments: true,
         role: request.execution.role, provider: request.provider, cwd: request.scope.cwd,
         leaseTtlMs: request.limits.wallTimeoutMs + 5_000,
+        maxToolResultChars: request.limits.maxToolResultChars,
       });
       ({ digest } = await owner.prepareSurface());
       gateway = await owner.start();

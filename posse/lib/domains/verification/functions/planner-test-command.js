@@ -7,7 +7,7 @@ import path from "path";
 import { hasUnquotedShellOperators, isSafeDirectNodeTestScriptArgs, parseCommandArguments } from "../../../shared/scope/functions/test-command.js";
 import { resolveLocalVitestCommand } from "./vitest-command.js";
 import { nodeRunnerCommand, resolveLocalNodeRunnerCommand } from "./node-runner-command.js";
-import { TEST_SCRIPT_NO_VERIFICATION_REASON } from "../../../catalog/verification.js";
+import { TEST_SCRIPT_NO_VERIFICATION_REASON, TEST_PACKAGE_CONTEXT_AMBIGUOUS, TEST_PACKAGE_CONTEXT_UNAVAILABLE, TEST_WORKSPACE_CONTEXT_UNAVAILABLE } from "../../../catalog/verification.js";
 import { sha256 } from "../../../shared/format/functions/sha256.js";
 
 export function commandExecutable(command) {
@@ -21,7 +21,7 @@ export function safeRelativeTestDirectory(value) {
   if (!raw || raw.includes("\0") || raw.startsWith("/") || /^[A-Za-z]:/.test(raw)) return null;
   const segments = raw.split("/").filter((segment) => segment !== ".");
   if (segments.length === 0 || segments.some((segment) => !segment || segment === "..")) return null;
-  if (segments.some((segment) => !/^[A-Za-z0-9._@+-]+$/.test(segment))) return null;
+  if (segments.some((segment) => !/^[A-Za-z0-9 ._@+-]+$/.test(segment))) return null;
   return segments.join("/");
 }
 
@@ -38,7 +38,7 @@ function directRepositoryShellTestScript(value) {
     : null;
 }
 
-function splitPlannerTestInvocation(command) {
+export function splitPlannerTestInvocation(command) {
   const value = String(command || "").trim();
   const match = value.match(/^cd\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))\s*&&\s*(.+)$/i);
   if (!match) {
@@ -271,25 +271,34 @@ function packageManagerScriptInvocation(command) {
         ? new Set(["--dir", "-c"])
         : new Set(["--cwd"]);
   const taskArgs = [];
+  let directorySelectors = 0;
+  let workspaceSelectors = 0;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
+    if (arg === "--") break;
     const lower = String(arg).toLowerCase();
     const equalFlag = [...cwdFlags].find((flag) => lower.startsWith(`${flag}=`));
     if (equalFlag) {
+      if (++directorySelectors > 1 || invocation.cwd_relative) return { invalid: TEST_PACKAGE_CONTEXT_AMBIGUOUS };
       cwdRelative = safeRelativeTestDirectory(arg.slice(equalFlag.length + 1));
       if (!cwdRelative) return { invalid: "test_command_contains_unsafe_working_directory" };
       continue;
     }
     if (cwdFlags.has(lower)) {
+      if (++directorySelectors > 1 || invocation.cwd_relative) return { invalid: TEST_PACKAGE_CONTEXT_AMBIGUOUS };
       cwdRelative = safeRelativeTestDirectory(args[index + 1]);
       if (!cwdRelative) return { invalid: "test_command_contains_unsafe_working_directory" };
       index++;
       continue;
     }
+    if (["--prefix", "--cwd", "--dir", "-c", "--workspace-dir", "--config-dir", "--global", "-g", "--location"].includes(lower.split("=", 1)[0])) {
+      return { invalid: TEST_PACKAGE_CONTEXT_UNAVAILABLE };
+    }
     // Workspace/filter/config flags do not change the manifest root. Skip
     // their values so they cannot be mistaken for a script name.
     if (["--filter", "-f", "--workspace", "-w", "--config-dir", "--store-dir", "--virtual-store-dir", "--workspace-dir"].includes(lower)) {
       if (["--filter", "-f", "--workspace", "-w"].includes(lower)) {
+        if (++workspaceSelectors > 1) return { invalid: TEST_PACKAGE_CONTEXT_AMBIGUOUS };
         workspaceScoped = true;
         workspaceSelector = String(args[index + 1] || "").trim() || null;
       }
@@ -297,6 +306,7 @@ function packageManagerScriptInvocation(command) {
       continue;
     }
     if (lower.startsWith("--filter=") || lower.startsWith("-f=") || lower.startsWith("--workspace=") || lower.startsWith("-w=")) {
+      if (++workspaceSelectors > 1) return { invalid: TEST_PACKAGE_CONTEXT_AMBIGUOUS };
       workspaceScoped = true;
       workspaceSelector = String(arg.slice(arg.indexOf("=") + 1) || "").trim() || null;
       continue;
@@ -435,6 +445,33 @@ function workspaceScriptValidation(projectRoot, rootManifest, invocation) {
       scripts: entry.manifest.scripts,
     })),
   };
+}
+
+// Prerequisite repair needs the admitted command's package context, without
+// requiring its test script to exist in an older baseline manifest. Share the
+// admission parser; never guess an importer for multi-workspace invocations.
+export function resolvePackageManagerContext(command, cwd) {
+  const shape = validatePlannerTestCommand(command);
+  if (!shape.ok) return shape;
+  const invocation = packageManagerScriptInvocation(command);
+  if (!invocation) return { ok: false, reason: TEST_PACKAGE_CONTEXT_UNAVAILABLE };
+  if (invocation.invalid) return { ok: false, reason: invocation.invalid };
+  const root = path.resolve(cwd, invocation.cwd_relative || ".");
+  let manifest;
+  try { manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")); }
+  catch { return { ok: false, reason: "test_manifest_missing" }; }
+  let importer = path.join(root, "package.json");
+  if (invocation.workspace_scoped) {
+    const selector = String(invocation.workspace_selector || "").replace(/^\.\//, "").replace(/\/$/, "");
+    if (invocation.all_workspaces || !selector || /[*!?[\]{}]/.test(selector) || selector.includes("...")) {
+      return { ok: false, reason: TEST_PACKAGE_CONTEXT_AMBIGUOUS };
+    }
+    const selected = declaredWorkspaceManifests(root, manifest)
+      .filter(entry => entry.manifest?.name === selector || entry.relative_dir === selector);
+    if (selected.length !== 1) return { ok: false, reason: TEST_WORKSPACE_CONTEXT_UNAVAILABLE };
+    importer = selected[0].manifest_path;
+  }
+  return { ok: true, importer };
 }
 
 function referencedPackageScripts(command, scripts = {}) {

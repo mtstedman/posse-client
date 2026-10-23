@@ -1,3 +1,5 @@
+import { DEFAULT_MAX_TOOL_RESULT_CHARS } from "./tool-result.js";
+
 import { readonlySet } from "./readonly-collections.js";
 // Artifact-domain catalogue.
 //
@@ -67,7 +69,8 @@ export const VIEW_IMAGE_LIMITS = Object.freeze({
   maxInputSide: 8192,
   maxInputPixels: 4096 * 4096,
   maxOutputSide: 1568,
-  maxOutputBytes: 3 * 1024 * 1024,
+  // Base64 expands bytes by 4/3; reserve space for text and block metadata.
+  maxOutputBytes: Math.floor((DEFAULT_MAX_TOOL_RESULT_CHARS - 8192) / 4) * 3,
   maxPathChars: 1_024,
   maxDownscaleAttempts: 3,
   callTimeoutMs: 60_000,

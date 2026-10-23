@@ -1089,7 +1089,7 @@ export function spawnPlanAfterHumanInputDeferral(worker, planJob, gateJobIds, { 
   const planPayload = parsePayload(worker, planJob);
   const budget = getResearchBudget(wi, planPayload);
   const wiTitle = String(wi?.title || planJob.title || "").slice(0, 60);
-  const dispatchPolicy = readPlannerDispatchPolicy();
+  const dispatchPolicy = readPlannerDispatchPolicy({ projectDir: worker.projectDir });
   return runInTransaction(() => {
     const followUp = createContinuationJob({
       work_item_id: planJob.work_item_id,
@@ -1102,6 +1102,9 @@ export function spawnPlanAfterHumanInputDeferral(worker, planJob, gateJobIds, { 
         : roleExecutionForBudget("plan", budget)),
       payload_json: JSON.stringify({
         ...replanPayloadFields(planPayload),
+        ...(typeof planPayload.planner_dispatch === "boolean" ? { planner_dispatch: planPayload.planner_dispatch } : {}),
+        ...(planPayload.planning_mode ? { planning_mode: planPayload.planning_mode } : {}),
+        ...(planPayload.planner_role_mode ? { planner_role_mode: planPayload.planner_role_mode } : {}),
         deepthink_budget: budget,
         deepthink: isResearchBudgetDeep(budget),
         _planner_human_input_deferral_round: deferralRound,

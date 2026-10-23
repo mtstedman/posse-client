@@ -43,7 +43,7 @@ import { declareToolSuites, registeredToolNames } from "../../../shared/tools/fu
 import { appendHashRefIfMajor } from "../../../shared/tools/functions/hash-adder.js";
 import { ContextMeter } from "../../../shared/classes/ContextMeter.js";
 import { normalizeProjectDbCapability } from "../../../shared/tools/functions/issued-tool-policy.js";
-import { execGenerateImageInternal } from "../../providers/functions/shared/image-generate-internal.js";
+import { generateImageWithAllowance } from "./deterministic-mcp/image-generation.js";
 import { operatorFeedbackDeliveryForJob, operatorFeedbackDeliveryText } from "../../providers/functions/shared/operator-feedback-delivery.js";
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, researchExplorationObservationStatus, runWithObservationContext } from "../../observability/functions/observations.js";
 import { scopedCheckToolResultObservation } from "../../observability/functions/scoped-check-tool-result.js";
@@ -1322,19 +1322,15 @@ function describeTasksShape(tasks) {
 }
 
 async function generateImageWithinScope(args = {}) {
-  const state = gatewayScopeState(gateScopeKey);
-  if (state.imageGenerationCallCount >= imageGenerationMaxCalls) {
-    return `Error: generate_image call limit reached for this job (${imageGenerationMaxCalls}). Ask for operator guidance before generating more images.`;
-  }
-  state.imageGenerationCallCount += 1;
-  const result = await execGenerateImageInternal(args, {
+  return generateImageWithAllowance(args, {
+    state: gatewayScopeState(gateScopeKey),
+    maxCalls: imageGenerationMaxCalls,
     cwd: workspaceCwd,
     scopePredicates: effectiveScopePredicates,
+    outputRoot: bootConfig.artifactOutputRoot,
+    imageProvider: bootConfig.imageProvider,
+    imageModel: bootConfig.imageModel,
   });
-  if (typeof result === "string" && result.startsWith("Error:")) {
-    state.imageGenerationCallCount = Math.max(0, state.imageGenerationCallCount - 1);
-  }
-  return result;
 }
 
 // The artificer's external download lane. The operator web-tools switch is a

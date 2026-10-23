@@ -138,8 +138,7 @@ export class ArtificerRole extends BaseRole {
     let createRoots = resolveContainedArtifactRoots(projectDir, payload.create_roots || [], "create_roots");
     const inputRoots = resolveContainedArtifactRoots(projectDir, payload.input_roots || [], "input_roots");
     // A task may place its output in a subdirectory while holding creation
-    // scope over its WI artifacts. Native dispatch anchors writable paths to
-    // cwd, so use the WI root without broadening the declared write roots.
+    // scope over its WI artifacts. Keep that authority inside this WI.
     const wiArtifactRoot = artifactsDir(wiScopeId(job.work_item_id), projectDir);
     const usesWiArtifactScope = isWithinRoot(wiArtifactRoot, resolvedOutputRoot);
     if (usesWiArtifactScope) {
@@ -168,7 +167,7 @@ export class ArtificerRole extends BaseRole {
     // Native dispatch rejects a create root outside cwd, so cwd is the
     // deepest directory holding the output root and every create root;
     // writes stay confined to those roots.
-    const artCwd = commonAncestorDir(projectDir, [usesWiArtifactScope ? wiArtifactRoot : resolvedOutputRoot, ...createRoots]);
+    const artCwd = commonAncestorDir(projectDir, [resolvedOutputRoot, ...createRoots]);
     // One read-only root on the work item's checkout, so existing art, styles
     // and markup can be matched; writes stay confined to the artifact roots.
     const checkoutReadRoot = normalizeDisplaySlashes(workItemCheckoutReadRoot(projectDir, job.work_item_id));

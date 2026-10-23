@@ -1,8 +1,9 @@
 import fs from "fs";
 import path from "path";
+import { isPathInside, realpathExistingPrefix } from "../../../runtime/functions/fs-safety.js";
 import { IMAGE_GENERATION_TIMEOUT_MS } from "../../../../catalog/artifact.js";
 import { getArtifactProtocol, getResolvedImageProtocol } from "../../../artifacts/functions/index.js";
-import { getDefaultImageModel, getDefaultImageProvider, normalizeGrokImageModelName } from "../model-catalog.js";
+import { getDefaultImageModel, getDefaultImageProvider, normalizeGrokImageModelName, imageModelNativeFormats } from "../model-catalog.js";
 import {
   convertImageToJpeg,
   convertImageToPng,
@@ -292,6 +293,10 @@ async function _checkReadinessWithOneRecheck(check, isReady, waitBeforeRecheck) 
 export async function execGenerateImageInternal(args = {}, {
   cwd = process.cwd(),
   scopePredicates,
+  outputRoot = null,
+  imageProvider = null,
+  imageModel = null,
+  onProviderRequest = () => {},
   buildImageClient = _buildImageClient,
   fetchImpl = globalThis.fetch,
   imageTimeoutMs = DEFAULT_IMAGE_GENERATION_TIMEOUT_MS,
@@ -327,12 +332,28 @@ export async function execGenerateImageInternal(args = {}, {
     return `Error: filename must end in one of ${allowedFormats.join(", ")} - got "${ext}".`;
   }
 
-  const outputPath = path.join(path.resolve(cwd), filename);
-  if (!scopePredicates?.canCreate(outputPath)) {
+  const root = path.resolve(cwd);
+  const destination = path.resolve(root, outputRoot || ".");
+  const relative = path.relative(root, destination);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    return "Error: image output root must stay inside the dispatch directory.";
+  }
+  const outputPath = path.join(destination, filename);
+  // Check both spellings, including dangling links and an existing output
+  // file link. Recheck after the asynchronous provider request as well.
+  const canWriteOutput = () => isPathInside(root, outputPath)
+    && scopePredicates?.canCreate(outputPath)
+    && scopePredicates?.canCreate(realpathExistingPrefix(outputPath));
+  if (!canWriteOutput()) {
     return `Error: generate_image blocked - ${filename} is outside the allowed creation scope.`;
   }
 
-  const providerOverride = args.provider ? String(args.provider).trim().toLowerCase() : null;
+  const requestedProvider = args.provider ? String(args.provider).trim().toLowerCase() : null;
+  const pinnedProvider = imageProvider ? String(imageProvider).trim().toLowerCase() : null;
+  if (pinnedProvider && requestedProvider && pinnedProvider !== requestedProvider) {
+    return "Error: image provider conflicts with the job's pinned route.";
+  }
+  const providerOverride = pinnedProvider || requestedProvider;
   if (enforceProviderAvailability && !providerOverride) {
     const imageRoute = await _checkReadinessWithOneRecheck(
       () => _resolveImageExecutionProvider({ needs_image_generation: true }),
@@ -343,25 +364,26 @@ export async function execGenerateImageInternal(args = {}, {
       return _noImageProvidersError(imageRoute.readiness.failures);
     }
     const provider = imageRoute.provider;
-    const model = imageRoute.model || getDefaultImageModel(provider);
+    const model = imageModel || imageRoute.model || getDefaultImageModel(provider);
     return await _executeGenerateImageWithRoute({
       args,
       ext,
       filename,
       outputPath,
-      scopePredicates,
+      canWriteOutput,
       provider,
       model,
       buildImageClient,
       fetchImpl,
       imageTimeoutMs,
       imageDownloadMaxBytes,
+      onProviderRequest,
     });
   }
 
   const resolved = getResolvedImageProtocol(providerOverride);
   const provider = String(resolved.provider || getDefaultImageProvider()).toLowerCase();
-  const model = resolved.model
+  const model = imageModel || resolved.model
     || getDefaultImageModel(provider);
 
   if (enforceProviderAvailability) {
@@ -380,13 +402,14 @@ export async function execGenerateImageInternal(args = {}, {
     ext,
     filename,
     outputPath,
-    scopePredicates,
+    canWriteOutput,
     provider,
     model,
     buildImageClient,
     fetchImpl,
     imageTimeoutMs,
     imageDownloadMaxBytes,
+    onProviderRequest,
   });
 }
 
@@ -395,14 +418,20 @@ async function _executeGenerateImageWithRoute({
   ext,
   filename,
   outputPath,
-  scopePredicates,
+  canWriteOutput,
   provider,
   model,
   buildImageClient,
   fetchImpl,
   imageTimeoutMs,
   imageDownloadMaxBytes,
+  onProviderRequest,
 }) {
+  const format = ext === ".jpg" ? "jpeg" : ext.slice(1);
+  const nativeFormats = imageModelNativeFormats(model);
+  if (nativeFormats?.length > 0 && !nativeFormats.includes(format)) {
+    return `Error: image model ${model} does not natively produce ${format}; supported formats: ${nativeFormats.join(", ")}. Choose an authorized compatible route or revise the deliverable before generation.`;
+  }
   const startedAt = Date.now();
   try {
     const client = await buildImageClient(provider);
@@ -416,6 +445,7 @@ async function _executeGenerateImageWithRoute({
       cwd: path.dirname(outputPath),
     };
 
+    onProviderRequest();
     const response = await _generateImageWithTimeout(client, params, { timeoutMs: imageTimeoutMs });
     if (!Array.isArray(response?.data) || response.data.length === 0) {
       await _recordImageGenerationTelemetry({
@@ -454,7 +484,7 @@ async function _executeGenerateImageWithRoute({
       throw new Error(`Generated image exceeds the ${imageDownloadMaxBytes}-byte limit.`);
     }
 
-    if (!scopePredicates?.canCreate(outputPath)) {
+    if (!canWriteOutput()) {
       throw new Error("Image creation scope was revoked during generation.");
     }
     _writeImageInRequestedFormat(outputPath, imageBytes, ext);
@@ -480,12 +510,12 @@ async function _executeGenerateImageWithRoute({
       error: err?.message || String(err),
     });
     if (err?.imageGenerationTimeout) {
-      return `Error generating image: ${err.message}.`;
+      return `Error: image generation failed: ${err.message}.`;
     }
     const msg = err?.message || String(err);
     if (err?.status === 400 && /content.?policy|safety|moderation/i.test(msg)) {
       return `Error: Image generation rejected by content policy: ${msg.slice(0, 300)}`;
     }
-    return `Error generating image (${err?.status || "unknown"}): ${msg.slice(0, 500)}`;
+    return `Error: image generation failed (${err?.status || "unknown"}): ${msg.slice(0, 500)}`;
   }
 }

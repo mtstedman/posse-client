@@ -486,7 +486,8 @@ function _buildImageArtifactRecoveryPayload({
   const safeFeedback = Array.isArray(assessorFeedback) ? assessorFeedback : [];
   const safeInstructions = String(fixInstructions || safeFeedback.join("\n") || "Repair the image artifact output.");
   const outputRootLine = originalOutputRoot ? `Output root: ${originalOutputRoot}` : "Output root: use the configured output_root.";
-  const repairNames = parseJobPayload(job)._repair_image_names;
+  const sourcePayload = parseJobPayload(job);
+  const repairNames = sourcePayload._repair_image_names;
   return {
     original_job_id: job.id,
     original_title: job.title,
@@ -498,7 +499,7 @@ function _buildImageArtifactRecoveryPayload({
       outputRootLine,
       "",
       "IMAGE ROUTE REQUIREMENT:",
-      "- Use the built-in `generate_image` tool for each PNG that must be created or replaced.",
+      "- Use the built-in `generate_image` tool for each required image that must be created or replaced.",
       "- Do not create Python/Pillow scripts, JavaScript/canvas helpers, shell scripts, SVG source files, Markdown notes, disabled helpers, or any other sidecar files in output_root.",
       "- output_root must contain only the final image deliverables when the job finishes.",
       "- If `generate_image` is unavailable or cannot complete the requested assets, report BLOCKED or PARTIAL in ARTIFICER RESULT instead of synthesizing images with code.",
@@ -524,6 +525,8 @@ function _buildImageArtifactRecoveryPayload({
       ? specPayload.success_criteria
       : originalSuccessCriteria,
     _image_artifact_recovery: true,
+    ...(sourcePayload.image_provider ? { image_provider: sourcePayload.image_provider } : {}),
+    ...(sourcePayload.image_model ? { image_model: sourcePayload.image_model } : {}),
     ...(Array.isArray(repairNames) ? { _repair_image_names: repairNames } : {}),
   };
 }

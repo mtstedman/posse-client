@@ -2,6 +2,9 @@ import { readonlySet } from "./readonly-collections.js";
 
 // Stable repository verification admission diagnostics.
 export const TEST_SCRIPT_NO_VERIFICATION_REASON = "test_script_has_no_verification";
+export const TEST_PACKAGE_CONTEXT_AMBIGUOUS = "test_command_ambiguous_package_context";
+export const TEST_PACKAGE_CONTEXT_UNAVAILABLE = "test_command_package_context_unavailable";
+export const TEST_WORKSPACE_CONTEXT_UNAVAILABLE = "test_command_workspace_context_unavailable";
 export const VERIFICATION_DEPENDENCY_LOCK_INVALID = "verification_dependency_lock_invalid";
 export const DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY = "allow";
 export const TEST_STRICTNESS = Object.freeze({ PERMISSIVE: "permissive", STRICT: "strict" });

@@ -1,3 +1,5 @@
+import { resolvePackageManagerContext, splitPlannerTestInvocation } from "./planner-test-command.js";
+import { NODE_PACKAGE_MANAGER_EXECUTABLES } from "../../../catalog/node-package-managers.js";
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -21,14 +23,31 @@ function within(root, candidate) {
 // arbitrary sibling packages or use a path supplied by stderr as authority.
 export function nodePrerequisiteContext(projectDir, command, receipt = null) {
   const root = path.resolve(projectDir);
+  const invocation = splitPlannerTestInvocation(command);
+  if (invocation.invalid_directory) return { projectDir: root, reason: "test_command_contains_unsafe_working_directory" };
   let args = [];
-  try { args = parseCommandArguments(command); } catch { /* retain the execution root */ }
+  try { args = parseCommandArguments(invocation.command); }
+  catch { return { projectDir: root, reason: "test_command_invalid_quoting" }; }
   const executable = path.basename(args[0] || "").toLowerCase();
-  let importer = path.join(root, "package.json");
+  const executionRoot = path.resolve(root, invocation.cwd_relative || ".");
+  let importer = path.join(executionRoot, "package.json");
+  if (NODE_PACKAGE_MANAGER_EXECUTABLES.includes(executable)) {
+    const validation = resolvePackageManagerContext(command, root);
+    if (!validation.ok) return { projectDir: root, reason: validation.reason };
+    const candidate = validation.importer;
+    try {
+      if (!within(root, candidate) || !within(fs.realpathSync(root), fs.realpathSync(candidate))) {
+        return { projectDir: root, reason: "test_command_contains_unsafe_working_directory" };
+      }
+      importer = candidate;
+    } catch {
+      return { projectDir: root, reason: "test_manifest_missing" };
+    }
+  }
   if (["node", "node.exe"].includes(executable)) {
     const positional = args.slice(1).filter((arg) => !arg.startsWith("-"));
     if (positional.length === 1 && /\.[cm]?[jt]s$/i.test(positional[0])) {
-      const candidate = path.resolve(root, positional[0]);
+      const candidate = path.resolve(executionRoot, positional[0]);
       try {
         if (within(root, candidate) && within(fs.realpathSync(root), fs.realpathSync(candidate))
           && fileExists(candidate)) importer = candidate;
