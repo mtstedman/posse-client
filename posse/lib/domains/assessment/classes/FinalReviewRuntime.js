@@ -1,3 +1,4 @@
+import { finalReviewVerificationIdentity } from "../functions/final-review-verification.js";
 import { runChangedFileChecksAsync } from "../functions/final-review-checks-async.js";
 import { emptyMaterializedPathsForJob } from "../../handoff/functions/helpers/file-materialization.js";
 import { isAdvisoryTestResult } from "../../worker/functions/helpers/verification-outcome.js";
@@ -108,6 +109,7 @@ export class FinalReviewRuntime {
   constructor({
     collectChange = collectScopedChange,
     identify = finalReviewIdentity,
+    verificationIdentity = finalReviewVerificationIdentity,
     resolveTestPlan = resolveFrozenTestPlan,
     runTestPlan = runFrozenTestPlanOnce,
     snapshotFiles = snapshotReviewedFiles,
@@ -123,6 +125,7 @@ export class FinalReviewRuntime {
   } = {}) {
     this.parents = new Map();
     this.identify = identify;
+    this.verificationIdentity = verificationIdentity;
     this.collectChange = collectChange;
     this.resolveTestPlan = resolveTestPlan;
     this.runTestPlan = runTestPlan;
@@ -325,6 +328,9 @@ export class FinalReviewRuntime {
     const startedAt = Date.now();
     let result;
     let testRun = null;
+    let declaredPlan = null;
+    let changedPlan = null;
+    let verificationIdentity = null;
     let changedTestRun = null;
     let checks = null;
     let change = null;
@@ -361,7 +367,8 @@ export class FinalReviewRuntime {
         && sameCompletionReport(completionReport, review.completion_report)) : null;
       if (rejected) return this.#returnUnchangedReview(parent, rejected, prior);
       const workItem = getWorkItem(job.work_item_id);
-      const declaredPlan = this.resolveTestPlan(job, payload, { cwd: parent.cwd });
+      declaredPlan = this.resolveTestPlan(job, payload, { cwd: parent.cwd });
+      verificationIdentity = await this.verificationIdentity(parent.cwd);
       testRun = await this.runTestPlan(declaredPlan, {
         cwd: parent.cwd,
         timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS,
@@ -378,7 +385,7 @@ export class FinalReviewRuntime {
       // files its root committed.
       const lineage = await this.lineageTests(job, payload, parent.cwd);
       const lineagePaths = Array.isArray(lineage) ? lineage : Array.isArray(lineage?.paths) ? lineage.paths : [];
-      const changedPlan = changedTestPlan(job, payload, change, declaredPlan, {
+      changedPlan = changedTestPlan(job, payload, change, declaredPlan, {
         cwd: parent.cwd,
         resolvePlan: this.resolveTestPlan,
         lineagePaths: lineagePaths.filter((file) => !placeholders.has(file)),
@@ -492,6 +499,7 @@ export class FinalReviewRuntime {
         reason: `The final review could not run (${String(error?.message || error).slice(0, 300)})`,
       };
     }
+    if (verificationIdentity && verificationIdentity !== await this.verificationIdentity(parent.cwd)) verificationIdentity = null;
     const recorded = [...prior, { review_mode: mode }];
     const reviewsRemaining = finalReviewReviewsRemaining(recorded);
     if (mode === MODES.DETERMINISTIC && finalReviewDeterministicRetriesLeft(recorded) === 0) {
@@ -527,6 +535,10 @@ export class FinalReviewRuntime {
         attempt_id: parent.attemptId ?? null,
         outcome: result.outcome,
         review_identity: reviewIdentity,
+        verification_evidence: verificationIdentity ? {
+          identity: verificationIdentity, declared_plan: declaredPlan, declared_tests: testRun,
+          changed_plan: changedPlan, changed_tests: changedTestRun, scoped_checks: checks,
+        } : null,
         completion_report: completionReport,
         summary: result.summary || null,
         finding_count: result.findings?.length || 0,

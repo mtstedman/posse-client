@@ -1,5 +1,6 @@
 // @ts-check
 
+import { resolveInterpreterTestCommand } from "../../../verification/functions/interpreter-test-runner.js";
 import { NodeTestEvidence } from "../../../../shared/tools/classes/NodeTestEvidence.js";
 import { exactDeclaredTestInvocation } from "./frozen-test-plan.js";
 import { spawn, spawnSync } from "child_process";
@@ -93,6 +94,12 @@ export async function runCommand(command, {
     return { status: "skipped", ok: null, code: null, signal: null, timed_out: false,
       duration_ms: 0, stdout: "", stderr: "", stdout_truncated: false, stderr_truncated: false,
       timeout_kind: null, reason: TEST_CAPABILITY_PRUNED_REASON, capability_reason: unavailable };
+  }
+  if (!trustedShell) {
+    const resolved = resolveInterpreterTestCommand(cwd, { ok: true, execution_command: command });
+    if (!resolved.ok) return { status: "unavailable", ok: null, code: null, reason: resolved.reason,
+      duration_ms: 0, stdout: "", stderr: "", timed_out: false };
+    command = resolved.execution_command;
   }
   const startedAt = Date.now();
   const idleLimitMs = Number(idleTimeoutMs) > 0 ? Math.max(1000, Number(idleTimeoutMs)) : null;

@@ -108,6 +108,7 @@ function capabilitiesFromPacket(packet = {}, providerName = null, customToolsAva
       // Only the local owner probe may establish availability; payload flags narrow it.
       environment_setup_v1: tools.environment_setup_v1 !== false,
       environment_setup_batch_v1: tools.environment_setup_batch_v1 !== false,
+      planner_clarification_v1: tools.planner_clarification_v1 === true,
       custom_tools_v1: narrowBoolCapability(tools.custom_tools_v1, customToolsAvailable),
       custom_tools_available: narrowBoolCapability(tools.custom_tools_available, customToolsAvailable),
     },
@@ -142,6 +143,7 @@ function capabilitiesFromPacket(packet = {}, providerName = null, customToolsAva
       project_db: "none",
       environment_setup_v1: false,
       environment_setup_batch_v1: false,
+      planner_clarification_v1: false,
       custom_tools_v1: false,
       custom_tools_available: false,
     },

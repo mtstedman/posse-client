@@ -116,8 +116,8 @@ export const TOOL_ROLE_LIBRARY = Object.freeze({
     // item itself; the issued capability and operator grant decide whether
     // that is read-only or read/write.
     planner: Object.freeze({
-      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "run_unit_test", "project_db_query", "inspect_environment", "setup_environment"],
-      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "run_unit_test", "project_db_query", "inspect_environment", "setup_environment"],
+      read: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "run_unit_test", "project_db_query", "inspect_environment", "setup_environment", "request_clarification"],
+      write: ["ack_operator_feedback", "get_brief", "read_file", "list_files", "search_files", "git_history", "inspect_file", "run_unit_test", "project_db_query", "inspect_environment", "setup_environment", "request_clarification"],
     }),
     // Internal one-turn JSON model passes are not Jobs and therefore cannot
     // possess an Agent-bound MCP gate. Their prompts explicitly prohibit tool

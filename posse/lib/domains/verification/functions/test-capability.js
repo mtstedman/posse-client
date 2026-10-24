@@ -19,7 +19,7 @@ import {
 
 // Reasons a worktree's absent install explains: its runner or package lives
 // under the ignored vendor/ or node_modules/ that it never checks out.
-const PRIMARY_INSTALL_REASONS = new Set(["test_executable_unavailable", "test_dependency_unavailable"]);
+const PRIMARY_INSTALL_REASONS = new Set(["test_executable_unavailable", "test_dependency_unavailable", "phpunit_unavailable"]);
 
 /**
  * Link the primary checkout's lock-matched install into a worktree (no
@@ -60,9 +60,9 @@ export function testFileRemovedSinceBaseline(file, cwd, baselineCommit) {
   catch { return false; }
 }
 
-export function testCommandCapability(command, cwd, { filesToCreate = [], findCommand = findCommandOnPath, baselineCommit = "HEAD" } = {}) {
+export function testCommandCapability(command, cwd, { filesToCreate = [], findCommand = findCommandOnPath, baselineCommit = "HEAD", posseRoot } = {}) {
   if (!cwd || !command) return null;
-  const validation = validatePlannerTestCommandForRepository(command, cwd, { filesToCreate });
+  const validation = validatePlannerTestCommandForRepository(command, cwd, { filesToCreate, posseRoot });
   if (!validation.ok) {
     if (testFileRemovedSinceBaseline(validation.missing_script, cwd, baselineCommit)) return TEST_RUNNER_REMOVED_REASON;
     return isUnrunnableTestReason(validation.reason) ? validation.reason : null;
@@ -113,7 +113,7 @@ export function pruneTestHandoff(payload, cwd, { jobId = null, findCommand = fin
   }
   if (payload.test_command) {
     const evaluate = () => testCommandCapability(payload.test_command, cwd, {
-      filesToCreate: Array.isArray(payload.files_to_create) ? payload.files_to_create : [], findCommand, baselineCommit,
+      filesToCreate: Array.isArray(payload.files_to_create) ? payload.files_to_create : [], findCommand, baselineCommit, posseRoot,
     });
     let reason = evaluate();
     if (linkedInstall(reason)) reason = evaluate();

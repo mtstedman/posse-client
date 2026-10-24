@@ -2,6 +2,7 @@ import { testCommandScriptPaths } from "./test-command-script-paths.js";
 import { NODE_PACKAGE_MANAGER_EXECUTABLES } from "../../../catalog/node-package-managers.js";
 import { MUTATING_TEST_FLAGS, INTERACTIVE_TEST_FLAGS } from "../../../catalog/test-command-policy.js";
 import { declaredNodeTestCommand } from "../../../shared/tools/functions/toolkit/repository-test-runner.js";
+import { interpreterTestRunner, resolveInterpreterTestCommand } from "./interpreter-test-runner.js";
 import fs from "fs";
 import path from "path";
 import { hasUnquotedShellOperators, isSafeDirectNodeTestScriptArgs, parseCommandArguments } from "../../../shared/scope/functions/test-command.js";
@@ -101,7 +102,8 @@ export function validatePlannerTestCommand(command) {
   }
   const vitestArgs = nodeRunner?.runner === "vitest" ? nodeRunner.args : null;
   // A launcher is syntax: admission applies the named runner's own rules.
-  const runner = nodeRunner?.runner || executable;
+  const interpreterRunner = interpreterTestRunner(executableCommand);
+  const runner = nodeRunner?.runner || interpreterRunner?.runner || executable;
   let directShellScript = null;
   let directShellInterpreter = false;
   try {
@@ -115,7 +117,7 @@ export function validatePlannerTestCommand(command) {
     directShellInterpreter = false;
   }
   const args = parseCommandArguments(executableCommand).slice(1).map((word) => word.toLowerCase());
-  const runnerArgs = nodeRunner ? nodeRunner.args.map((word) => word.toLowerCase()) : args;
+  const runnerArgs = (nodeRunner?.args || interpreterRunner?.args || args).map((word) => word.toLowerCase());
   const flagName = (arg) => String(arg || "").toLowerCase().split("=", 1)[0];
   if (args.some((arg) => MUTATING_TEST_FLAGS.has(flagName(arg))
     || (vitestArgs && MUTATING_TEST_FLAGS.has(flagName(arg).split(".", 1)[0])))) {
@@ -172,6 +174,11 @@ export function validatePlannerTestCommand(command) {
     const taskArgs = packageManagerTaskArgs(args, manager);
     ok = safeTaskPattern.test(taskArgs[0] || "")
       || (taskArgs[0] === "run" && safeTaskPattern.test(taskArgs[1] || ""));
+  } else if (interpreterRunner) {
+    if (runner === "pest" && runnerArgs.includes("--init")) {
+      return { ok: false, reason: "test_command_contains_mutating_output_flag" };
+    }
+    ok = runner !== "rake" || runnerArgs.some((arg) => /^(?:test|tests|check|spec)$/.test(arg));
   } else if (["node", "node.exe"].includes(executable)) {
     ok = hasArg("--test")
       || args.some((arg) => arg.startsWith("--test="))
@@ -571,11 +578,14 @@ function declaredScriptValidation(definitions = []) {
     : { ok: false, reason: TEST_SCRIPT_NO_VERIFICATION_REASON };
 }
 
-export function validatePlannerTestCommandForRepository(command, cwd, { filesToCreate = [] } = {}) {
+export function validatePlannerTestCommandForRepository(command, cwd, { filesToCreate = [], posseRoot } = {}) {
   const shape = validatePlannerTestCommand(command);
   if (!shape.ok) return shape;
   if (nodeRunnerCommand(shape.execution_command)) {
     return resolveLocalNodeRunnerCommand(cwd, resolveLocalVitestCommand(cwd, shape));
+  }
+  if (interpreterTestRunner(shape.execution_command)?.runner === "phpunit") {
+    return resolveInterpreterTestCommand(cwd, shape, { posseRoot });
   }
   // Admission proves test intent, not that an interpreter's script exists.
   // Keep the original argv casing and resolve against the command's cwd.

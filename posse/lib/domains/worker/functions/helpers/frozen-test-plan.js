@@ -1,3 +1,4 @@
+import { resolveInterpreterTestCommand } from "../../../verification/functions/interpreter-test-runner.js";
 import { TEST_EXECUTION_RECEIPT_SCHEMA_VERSION as RECEIPT_SCHEMA_VERSION } from "../../../../catalog/verification.js";
 import { normPath } from "../../../../shared/scope/functions/path.js";
 import { declaredNodeTestCommand } from "../../../../shared/tools/functions/toolkit/repository-test-runner.js";
@@ -346,8 +347,8 @@ function resolveTestPlan(job = {}, payload = {}, { cwd = null } = {}) {
           execution_command: approvalRequest.execution_command,
           cwd_relative: approvalRequest.cwd_relative,
         }
-      : resolveLocalNodeRunnerCommand(cwd,
-        resolveLocalVitestCommand(cwd, declaredNodeTestCommand(cwd, validatePlannerTestCommand(command))));
+      : resolveInterpreterTestCommand(cwd, resolveLocalNodeRunnerCommand(cwd,
+        resolveLocalVitestCommand(cwd, declaredNodeTestCommand(cwd, validatePlannerTestCommand(command)))));
   const coveredFile = validation.ok && source !== "operator_approved_operation"
     ? exactDeclaredTestFile(validation.execution_command || command, cwd, validation.cwd_relative || null)
     : null;

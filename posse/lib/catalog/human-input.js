@@ -1,3 +1,4 @@
+import { PLANNER_CLARIFICATION_REVIEW_TYPE } from "./tools/planner-clarification.js";
 import { ENVIRONMENT_SETUP_REVIEW_TYPE, ENVIRONMENT_SETUP_ACTIONS } from "./tools/environment-setup.js";
 import { readonlySet } from "./readonly-collections.js";
 // Human-input action catalogue.
@@ -269,6 +270,7 @@ export const AUTHORIZATION_GATE_KINDS = Object.freeze([
 export const CANONICAL_HUMAN_GATE_ACTIONS = GATE_ACTION_ORDER;
 
 const HUMAN_GATE_CONTRACTS = Object.freeze({
+  [PLANNER_CLARIFICATION_REVIEW_TYPE]: { gate_kind: "clarification", allowed_actions: ["respond"], allowed_source_states: ["running"] },
   [ENVIRONMENT_SETUP_REVIEW_TYPE]: {
     gate_kind: ENVIRONMENT_SETUP_REVIEW_TYPE,
     allowed_actions: ENVIRONMENT_SETUP_ACTIONS,
@@ -653,6 +655,7 @@ export function humanGateContractForPayload(payload = {}, {
 }
 
 export const HUMAN_INPUT_COORDINATION_REVIEW_TYPES = Object.freeze([
+  PLANNER_CLARIFICATION_REVIEW_TYPE,
   ENVIRONMENT_SETUP_REVIEW_TYPE,
   "scope_expansion_request",
   "scope_expansion_required",

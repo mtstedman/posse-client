@@ -139,6 +139,7 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
         integrity_verification: bootConfig.toolAllowlist?.tools?.includes("hash_file") === true,
         project_db: bootConfig.projectDbCapability || (bootConfig.projectDbWrite === true ? "write" : "none"),
         environment_setup_v1: true,
+        planner_clarification_v1: bootConfig.toolAllowlist?.tools?.includes("request_clarification") === true,
         environment_setup_batch_v1: bootConfig.toolAllowlist?.tools?.includes("setup_environment") === true,
         custom_tools_v1: bootConfig.customTools === true,
         custom_tools_available: bootConfig.customTools === true,

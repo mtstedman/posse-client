@@ -707,6 +707,7 @@ export class PlannerRole extends BaseRole {
     plannerPacket.capabilities = {
       ...(plannerPacket.capabilities || {}),
       tools: { ...(plannerPacket.capabilities?.tools || {}),
+        planner_clarification_v1: !worker.dryRun && !worker.nonInteractive,
         environment_setup_batch_v1: !worker.dryRun && plannerRoleMode === "normal" && !assessmentReplan && !workItem?.branch_name,
       },
     };

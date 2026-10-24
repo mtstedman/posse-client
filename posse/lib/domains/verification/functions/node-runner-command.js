@@ -11,6 +11,9 @@ const RUNNER_PACKAGES = { ...LOCAL_NODE_TEST_RUNNER_PACKAGES, ...LAUNCHED_NODE_C
 // and `pnpm dlx` stay unrecognized.
 export function nodeRunnerCommand(command) {
   const words = parseCommandArguments(command);
+  if (!words.length) return null;
+  if (/^(?:.*[/\\])?node(?:\.exe)?$/i.test(words[0])
+    && /^(?:\.\/)?(?:[^/]+\/)*node_modules\/\.bin\/[^/]+$/i.test(words[1] || "")) words.shift();
   const launcher = words[0].match(/^(npx|pnpm|yarn|bunx)(?:\.cmd|\.exe)?$/i)?.[1].toLowerCase();
   if (launcher) {
     words.shift();
@@ -18,7 +21,7 @@ export function nodeRunnerCommand(command) {
     return Object.hasOwn(RUNNER_PACKAGES, words[0] || "") ? { runner: words[0], args: words.slice(1) } : null;
   }
   const runner = words[0].replaceAll("\\", "/")
-    .match(/^(?:(?:\.\/)?node_modules\/\.bin\/)?([^/]+?)(?:\.cmd)?$/i)?.[1].toLowerCase();
+    .match(/^(?:(?:\.\/)?(?:[^/]+\/)*node_modules\/\.bin\/)?([^/]+?)(?:\.cmd)?$/i)?.[1].toLowerCase();
   return runner && Object.hasOwn(LOCAL_NODE_TEST_RUNNER_PACKAGES, runner) ? { runner, args: words.slice(1) } : null;
 }
 

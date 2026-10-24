@@ -95,7 +95,7 @@ function isRequiredRunBackgroundJob(job) {
 
 function atlasIndexingPauseEnabledFromEnv() {
   const raw = String(process.env.POSSE_SCHEDULER_PAUSE_ON_ATLAS_INDEXING ?? "").trim().toLowerCase();
-  return !(raw && ATLAS_INDEXING_PAUSE_OFF_VALUES.has(raw));
+  return !!raw && !ATLAS_INDEXING_PAUSE_OFF_VALUES.has(raw);
 }
 
 function terminateSchedulerChild(child, { force = false } = {}) {
@@ -251,11 +251,10 @@ export class Scheduler {
     this._waitingLaneMaintenanceInFlight = null;
     this._waitingLaneMaintenanceController = null;
 
-    // Incremental-warm dispatch hold (see ATLAS_INDEXING_HOLD_MAX_MS above).
-    // Complements the cold-boot gate: this one reacts to live conductor
-    // indexing activity during the run rather than the one-shot boot build.
-    this._pauseDispatchDuringAtlasIndexing = opts.pauseDispatchDuringAtlasIndexing !== false
-      && atlasIndexingPauseEnabledFromEnv();
+    // Per-job freshness admission owns safe attachment. A global warm hold
+    // adds its entire delay before that gate; retain it only as an opt-in.
+    this._pauseDispatchDuringAtlasIndexing = opts.pauseDispatchDuringAtlasIndexing
+      ?? atlasIndexingPauseEnabledFromEnv();
     this._isAtlasIndexingInFlight = typeof opts.isAtlasIndexingInFlight === "function"
       ? opts.isAtlasIndexingInFlight
       : isConductorIndexingInFlight;
@@ -1969,7 +1968,8 @@ export class Scheduler {
         // run gate, and a full restage can take tens of minutes — jobs that
         // become runnable mid-restage must dispatch after the grace window.
         if (
-          atlasDriftReindexInFlight
+          this._pauseDispatchDuringAtlasIndexing
+          && atlasDriftReindexInFlight
           && activeWorkers.size === 0
           && Date.now() - atlasDriftReindexStartedAt < this._atlasIndexingHoldMaxMs
         ) {

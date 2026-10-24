@@ -9,6 +9,10 @@ import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
 export function cancelSupersededPlanChildren(worker, planJob) {
   if (!planJob?.id || !planJob?.work_item_id || planJob.job_type !== "plan") return 0;
+  // Clarification continuations extend the approved plan. Their prompt asks
+  // for only the missing work, so absence from this response is not revocation.
+  const payload = JSON.parse(planJob.payload_json || "{}");
+  if (payload._planner_human_input_origin_plan_id) return 0;
   const allJobs = listJobsByWorkItem(planJob.work_item_id);
   const currentPlanId = Number(planJob.id);
   const olderPlanIds = new Set(allJobs

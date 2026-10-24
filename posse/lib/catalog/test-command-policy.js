@@ -38,3 +38,10 @@ export const LAUNCHED_NODE_CHECK_PACKAGES = Object.freeze({
   tsc: Object.freeze(["typescript"]),
   "vue-tsc": Object.freeze(["vue-tsc"]),
 });
+
+// Interpreter wrappers preserve runner identity; flags still belong to the runner.
+export const INTERPRETER_TEST_RUNNERS = Object.freeze({
+  php: Object.freeze({ phpunit: "phpunit", "phpunit.phar": "phpunit", pest: "pest" }),
+  python: Object.freeze({ pytest: "pytest" }),
+  ruby: Object.freeze({ rspec: "rspec", rake: "rake" }),
+});

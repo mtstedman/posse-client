@@ -60,6 +60,7 @@ export const TOOLS_SUITE = [
   // One path-only unit-test runner. Runtime discovery hides it unless SCIP and
   // every language adapter required by test* directories are available.
   { name: "inspect_environment", mutatesWorktree: false, advertise: ["mcp"] },
+  { name: "request_clarification", mutatesWorktree: false, advertise: ["mcp"] },
   { name: "setup_environment", mutatesWorktree: true, advertise: ["mcp"] },
   { name: "install_dependencies", mutatesWorktree: true, advertise: ["mcp"] },
   { name: "setup_database", mutatesWorktree: true, advertise: ["mcp"] },

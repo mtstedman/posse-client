@@ -1,3 +1,4 @@
+import { resolveInterpreterTestCommand } from "../../verification/functions/interpreter-test-runner.js";
 // Close-out refresh for final work-item merges.
 //
 // Parallel work items that touch the same lines conflict only because of the
@@ -182,7 +183,9 @@ export function runCloseoutTestCommandSync(command, {
         linked.push(destination);
       }
     }
-    const [executable, ...args] = parseCommandArguments(command);
+    const resolved = resolveInterpreterTestCommand(cwd, { ok: true, execution_command: command });
+    if (!resolved.ok) throw new Error(`Test runner unavailable: ${resolved.reason}`);
+    const [executable, ...args] = parseCommandArguments(resolved.execution_command);
     const spec = commandSpawnSpec(executable, args);
     const result = spawnSyncImpl(spec.command, spec.args, {
       cwd,

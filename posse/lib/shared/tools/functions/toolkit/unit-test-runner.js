@@ -13,7 +13,7 @@ import { filterProcessEnv } from "../../../platform/functions/process-env.js";
 import { testExecutionCounts } from "./test-output-counts.js";
 import { pythonExecutable, repositoryTestRunner } from "./repository-test-runner.js";
 import { gitExec } from "../../../../domains/git/functions/utils.js";
-import { resolveManagedPhpUnit } from "../../../../domains/environments/functions/phpunit-runtime.js";
+import { resolvePhpUnitInvocation } from "../../../../domains/environments/functions/phpunit-runtime.js";
 
 
 
@@ -205,10 +205,9 @@ function phpRunner(root, relative, source, options = {}) {
   const localPhpunit = nearestUpward(root, relative, ["vendor/bin/phpunit"]);
   const config = nearestUpward(root, relative, PHPUNIT_CONFIG_NAMES);
   const invocation = () => {
-    const phpunit = localPhpunit || resolveManagedPhpUnit(options.posseRoot);
-    return phpunit
-      ? { runner: "phpunit", executable: "php", args: [phpunit, ...(config ? ["-c", config] : []), relative] }
-      : { reason: "phpunit_unavailable" };
+    return resolvePhpUnitInvocation({ cwd: root, script: localPhpunit || "vendor/bin/phpunit",
+      args: [...(config ? ["-c", config] : []), relative], posseRoot: options.posseRoot })
+      || { reason: "phpunit_unavailable" };
   };
   const code = phpSourceCode(source);
   // PHPUnit runs a file only as a concrete test class named for it; a

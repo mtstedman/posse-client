@@ -3,7 +3,8 @@ import { readonlySet } from "./readonly-collections.js";
 
 import { WAITING_LANE_JOB_TYPE } from "./waiting-lane.js";
 
-// While the ATLAS conductor is actively indexing (warm/merge/reindex), new
+// Optional compatibility hold (normal dispatch uses per-job freshness):
+// while the ATLAS conductor is actively indexing (warm/merge/reindex), new
 // non-warm jobs are held back instead of leased: agents attaching mid-warm
 // all pound the half-built index and pile up on the conductor queue. Jobs
 // that don't touch ATLAS (the warm itself, human gates) still dispatch. The

@@ -1,3 +1,5 @@
+import { PLANNER_CLARIFICATION_TOOL, PLANNER_CLARIFICATION_REVIEW_TYPE } from "../../../catalog/tools/planner-clarification.js";
+import { requestPlannerClarification, runPlannerClarification } from "../../planning/functions/planner-clarification.js";
 import { ENVIRONMENT_SETUP_REVIEW_TYPE, ENVIRONMENT_SETUP_TOOLS } from "../../../catalog/tools/environment-setup.js";
 import { inspectEnvironment } from "../../system/functions/project-environment.js";
 import { requestEnvironmentSetup, runEnvironmentSetupRequest } from "../../system/functions/environment-approval.js";
@@ -1201,6 +1203,13 @@ async function requestEnvironmentWithinJob(tool, args = {}) {
 }
 
 function attachEnvironmentTools() {
+  if (ownerHotGateway || roleName === "planner") {
+    mcpToolRegistry.attach(PLANNER_CLARIFICATION_TOOL, (args) => {
+      const context = environmentContext();
+      const request = requestPlannerClarification(args, context);
+      return { [LIVE_SCOPE_WAIT]: true, request, operation: PLANNER_CLARIFICATION_TOOL, args, environmentContext: context };
+    });
+  }
   if (ownerHotGateway || ["planner", "dev", "assessor"].includes(roleName)) {
     mcpToolRegistry.attach("inspect_environment", (args) => JSON.stringify(inspectEnvironment(args || {}, environmentContext())));
   }
@@ -1459,6 +1468,7 @@ function legacyToolNamesForUnscopedRole() {
 }
 
 function runtimeToolAvailable(toolName) {
+  if (toolName === PLANNER_CLARIFICATION_TOOL) return (ownerHotGateway && !mcpMessageSessionScoped) || roleName === "planner";
   if (toolName === "setup_environment") return (ownerHotGateway && !mcpMessageSessionScoped) || roleName === "planner";
   if (ENVIRONMENT_SETUP_TOOLS.includes(toolName)) return writeEnabled && ((ownerHotGateway && !mcpMessageSessionScoped) || roleName === "dev");
   if (toolName === "inspect_environment") return (ownerHotGateway && !mcpMessageSessionScoped) || ["planner", "dev", "assessor"].includes(roleName);
@@ -1598,7 +1608,7 @@ addToolSchema(TOOL_ACK_OPERATOR_FEEDBACK);
 addToolSchema(TOOL_GET_BRIEF);
 addToolSchema(projectDbQuerySchemaForCurrentBoot());
 addToolSchema(TOOL_CUSTOM_TOOLS);
-for (const name of ["inspect_environment", ...ENVIRONMENT_SETUP_TOOLS]) addToolSchema(getToolSchemaForRole(name, roleName));
+for (const name of ["inspect_environment", PLANNER_CLARIFICATION_TOOL, ...ENVIRONMENT_SETUP_TOOLS]) addToolSchema(getToolSchemaForRole(name, roleName));
 if (writeEnabled) {
   for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_DOWNLOAD_FILE, TOOL_COMPOSE_SPRITE_SHEET]) {
     addToolSchema(schema.name === "request_scope" ? getToolSchemaForRole("request_scope", roleName) : schema);
@@ -2544,7 +2554,7 @@ function rebuildNativeToolSchemas() {
   addToolSchema(TOOL_GET_BRIEF);
   addToolSchema(projectDbQuerySchemaForCurrentBoot());
   addToolSchema(TOOL_CUSTOM_TOOLS);
-  for (const name of ["inspect_environment", ...ENVIRONMENT_SETUP_TOOLS]) addToolSchema(getToolSchemaForRole(name, roleName));
+  for (const name of ["inspect_environment", PLANNER_CLARIFICATION_TOOL, ...ENVIRONMENT_SETUP_TOOLS]) addToolSchema(getToolSchemaForRole(name, roleName));
   if (writeEnabled) {
     for (const schema of [TOOL_REQUEST_SCOPE, TOOL_WRITE_FILE, TOOL_EDIT_FILE, TOOL_PRUNE_ARTIFACT_OUTPUT, TOOL_MOVE_FILE, TOOL_COPY_FILE, TOOL_MAKE_DIR, TOOL_DOWNLOAD_FILE, TOOL_COMPOSE_SPRITE_SHEET]) {
       addToolSchema(schema.name === "request_scope" ? getToolSchemaForRole("request_scope", roleName) : schema);
@@ -2838,6 +2848,7 @@ function applyRuntimeBootConfig(nextConfig = {}, {
 }
 
 const BLOCKING_NATIVE_TOOL_NAMES = new Set([
+  PLANNER_CLARIFICATION_TOOL,
   ...ENVIRONMENT_SETUP_TOOLS,
   "bash",
   "chain_read",
@@ -3874,7 +3885,9 @@ function sharedLiveScopeDecision(runtime, request, environment = null) {
     sessionIds: new Set(runtime?.sessionId ? [runtime.sessionId] : []),
     promise: null,
   };
-  record.promise = (request?.kind === ENVIRONMENT_SETUP_REVIEW_TYPE
+  record.promise = (request?.kind === PLANNER_CLARIFICATION_REVIEW_TYPE
+    ? runWithObservationContext(runtime.observation, () => runPlannerClarification(request, environment, { signal: controller.signal }))
+    : request?.kind === ENVIRONMENT_SETUP_REVIEW_TYPE
     ? runWithObservationContext(runtime.observation, () => runEnvironmentSetupRequest(request, environment, { signal: controller.signal }))
     : awaitJobScopeExpansionDecision({
     jobId: runtime?.observation?.job_id,
@@ -3942,7 +3955,7 @@ async function resumeDeferredLiveScopeTool(call) {
           effectiveScopePredicates?.policy?.grantWritePath?.(grantedPath);
         }
         let result;
-        if (call.marker.request?.kind === ENVIRONMENT_SETUP_REVIEW_TYPE) {
+        if ([ENVIRONMENT_SETUP_REVIEW_TYPE, PLANNER_CLARIFICATION_REVIEW_TYPE].includes(call.marker.request?.kind)) {
           result = JSON.stringify(decision, null, 2);
         } else if (decision?.approved === true) {
           grantApprovedScopeEntries(decision, effectiveScopePredicates);

@@ -119,6 +119,7 @@ function collectText(task = {}) {
   // such as Authenticated without making the task an authentication change.
   return prose
     .replace(/`[^`\r\n]*`/g, " ")
+    .replace(NO_NEW_WORK_CLAUSE_RE, " ")
     .replace(NEGATED_CLAUSE_RE, (clause) => /\b(?:in|as|to|with|without)\b/i.test(clause) ? clause : " ")
     .replace(/\b(?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*\b/g, " ")
     .replace(/\b[A-Za-z_$]*[a-z][A-Z][A-Za-z0-9_$]*\b/g, " ");
@@ -133,6 +134,10 @@ const NEGATED_CLAUSE_RE = new RegExp(
   + "[^.;!?\\r\\n]*?(?=[.;!?\\r\\n]|,\\s*(?:implement|add|fix|enable|allow|ensure|require|replace|introduce)\\b|\\s+(?:but|however|instead)\\b|$)",
   "gi",
 );
+
+// Only absence of new work is excluded. "No authentication is required" and
+// "no secrets in logs" are security requirements and must retain their risk.
+const NO_NEW_WORK_CLAUSE_RE = /\bno\s+(?:new|additional)\s+[^.;!?\r\n]*?(?:\b(?:is|are|will be)\s+(?:needed|required|introduced|added)|(?=[.;!?\r\n]|,\s*(?:implement|add|fix|enable|allow|ensure|require|replace|introduce|migrate)\b|\s+(?:but|however|instead)\b|$))/gi;
 
 export function inferRiskTagsFromTask(task = {}) {
   const text = collectText(task);
@@ -262,7 +267,10 @@ function resolveDevPolicy({
   // Execution roles are deliberately capped at standard. Strong remains a
   // planner-only routing choice; a planner hint must not promote development
   // onto the premium tier.
-  if (modelTier === "strong") modelTier = "standard";
+  if (modelTier === "strong") {
+    modelTier = "standard";
+    reasons.push("execution roles are capped at standard");
+  }
   if (currentReasoningEffort === "high") reasoningEffort = "high";
 
   let maxTurnsOverride = null;

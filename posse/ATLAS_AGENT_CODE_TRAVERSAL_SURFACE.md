@@ -49,7 +49,7 @@ Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.
 
 ### `planner`
 
-Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.inspect_environment`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.run_unit_test`, `tools.search_files`, `tools.setup_environment`.
+Deterministic: `tools.ack_operator_feedback`, `tools.agent_handoff`, `tools.custom_tools`, `tools.dispatch_agent`, `tools.get_brief`, `tools.git_history`, `tools.inspect_environment`, `tools.inspect_file`, `tools.list_files`, `tools.project_db_query`, `tools.read_file`, `tools.request_clarification`, `tools.run_unit_test`, `tools.search_files`, `tools.setup_environment`.
 
 Atlas: `atlas.code.lens`, `atlas.code.skeleton`, `atlas.code.structure`, `atlas.code.survey`, `atlas.memory.feedback`, `atlas.memory.get`, `atlas.memory.surface`, `atlas.symbol.callers`, `atlas.symbol.get`, `atlas.symbol.search`, `atlas.traverse_ref`.
 
@@ -947,6 +947,27 @@ Read basic image metadata (format, dimensions, byte size).
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
 | `path` | `string` | Required |  | Image file path. |
+
+### `tools.request_clarification`
+
+Remote roles: `planner`.
+
+| Contract field | Value |
+|---|---|
+| Canonical name | `request_clarification` |
+| Tool reference token | `tools.request_clarification` |
+| Provider callable name | Resolved from this token against the actual issued surface. |
+| Access | `read` |
+| Batchable input | No |
+| Parallel calls | No |
+| System-prefetch capable | No |
+
+Ask the user to resolve a planning ambiguity and wait for their answer in this session. The compute slot is released while waiting. Continue planning from the returned answer; this does not finish or replace the plan. Use only for requirements that repository evidence cannot resolve.
+
+| Parameter | Type | Requirement | Constraints | Description |
+|---|---|---|---|---|
+| `context` | `string` | Required | min length 1; max length 2000 |  |
+| `questions` | `array<string>` | Required | min items 1; max items 3 |  |
 
 ### `tools.request_scope`
 

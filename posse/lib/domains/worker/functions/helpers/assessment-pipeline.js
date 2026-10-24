@@ -1,3 +1,6 @@
+import { TEST_EXECUTION_RECEIPT_MIME_TYPE } from "../../../../catalog/verification.js";
+import { runInTransaction } from "../../../queue/functions/index.js";
+import { prepareFinalReviewWrapUp } from "../../../assessment/functions/final-review-wrap-up.js";
 import { renderUnresolvedScopeRequests } from "../../../queue/functions/scope-expansion.js";
 import { DETERMINISTIC_AUDIT_ROLE } from "../../../../catalog/worker-display.js";
 import { assessmentDisplayMessage } from "../execution/display-sync.js";
@@ -1993,6 +1996,34 @@ export async function runPostExecutionAssessment(worker, {
     spawnedFileRequestFollowUp = true;
     return true;
   };
+
+  if (!hasPendingFileRequests() && !worker.dryRun) {
+    const wrapped = await prepareFinalReviewWrapUp({ job: getJob(job.id) || job, cwd: wtPath,
+      committedHash, commitBaseHash, filesCommitted, filesCommittedUnknown, verifiedNoChange,
+      leaseToken, projectDir: worker.projectDir, preAssessAlreadyVerified });
+    if (wrapped) {
+      const { effectiveVerdict } = runInTransaction(() => {
+        if (!isLeaseValid(job.id, leaseToken)) throw new Error("Lease expired during final-review wrap-up");
+        storeArtifact({ work_item_id: job.work_item_id, job_id: job.id, attempt_id: attempt.id,
+          artifact_type: "log", mime_type: TEST_EXECUTION_RECEIPT_MIME_TYPE, content_json: wrapped.receipt });
+        return processVerdict(job, wrapped.verdict, {
+          leaseToken, assessedCommitHash: wrapped.receipt.commit_hash, projectDir: worker.projectDir,
+          autoApprove: worker.autoApprove, emit: (message) => worker.emit(job.id, message),
+          reviewedCompletion: wrapped.reviewedCompletion,
+          reviewEvidence: { post_change: wrapped.receipt, scoped_checks: wrapped.receipt.scoped_checks },
+        });
+      });
+      const freshJob = getJob(job.id);
+      const outcome = updateAssessmentLifecycleFromVerdict(job.id, freshJob, effectiveVerdict);
+      if (["waiting_on_human", "waiting_on_review"].includes(freshJob?.status)) worker._releaseLease(job, leaseToken, freshJob.status);
+      completeAttempt(attempt.id, { status: freshJob?.status === "succeeded" ? "succeeded" : "interrupted",
+        duration_ms: Date.now() - startTime, output_chars: output.length, error_text: outcome.error || null });
+      worker.emit(job.id, `[review] Committed final-reviewed work; reused verification on ${wrapped.receipt.commit_hash.slice(0, 8)}.`);
+      refreshAndExtractInsights(job.work_item_id);
+      worker._cleanupWorktreeIfDone(job.work_item_id);
+      return;
+    }
+  }
 
   // A commit warm is emitted before this function runs. Park this job as
   // assess-only until the worker has inspected that exact warm. The worker

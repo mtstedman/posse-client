@@ -1,3 +1,4 @@
+import { PLANNER_CLARIFICATION_REVIEW_TYPE } from "../../../../catalog/tools/planner-clarification.js";
 import { ENVIRONMENT_SETUP_REVIEW_TYPE } from "../../../../catalog/tools/environment-setup.js";
 import { applyDirtyWorktreeRecovery } from "../helpers/dirty-worktree-recovery.js";
 import { DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE } from "../../../../catalog/human-input.js";
@@ -731,6 +732,11 @@ export async function runHumanInputJob(worker, job, {
       }
     }
 
+    if (payload.review_type === PLANNER_CLARIFICATION_REVIEW_TYPE) {
+      handledReviewDecision = true;
+      pendingReviewGatesAlreadyCanceled = true;
+      worker.emit(job.id, "[human] Clarification answered; returning it to the waiting planner session.");
+    }
     if (payload.review_type === ENVIRONMENT_SETUP_REVIEW_TYPE) {
       // The waiting tool consumes the durable resolution. Do not resume/replan
       // the source job or cancel its other human questions.

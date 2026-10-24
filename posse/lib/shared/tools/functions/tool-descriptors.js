@@ -1,3 +1,4 @@
+import { TOOL_REQUEST_CLARIFICATION } from "../../../catalog/tools/planner-clarification.js";
 import { TOOL_SETUP_ENVIRONMENT, TOOL_INSPECT_ENVIRONMENT, TOOL_INSTALL_DEPENDENCIES, TOOL_SETUP_DATABASE } from "../../../catalog/tools/environment-setup.js";
 import { stripAtlasPrefixUntrimmed as stripAtlasPrefix } from "./atlas-tool-name.js";
 // @ts-check
@@ -248,6 +249,10 @@ export const TOOL_CATALOG = {
     schema: TOOL_INSPECT_ENVIRONMENT, access: "read",
     summary: TOOL_INSPECT_ENVIRONMENT.description,
     observation: { type: "tool.inspect_environment", label: "InspectEnvironment", format: "generic", targetKeys: ["path"] },
+  },
+  request_clarification: {
+    schema: TOOL_REQUEST_CLARIFICATION, access: "read", summary: TOOL_REQUEST_CLARIFICATION.description,
+    observation: { type: "tool.request_clarification", label: "Clarification", format: "generic", targetKeys: [] },
   },
   setup_environment: {
     schema: TOOL_SETUP_ENVIRONMENT, access: "write",
