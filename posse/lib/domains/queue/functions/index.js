@@ -6,7 +6,13 @@
 // scheduler can depend on Queue's facade instead of private implementation
 // files during its extraction.
 export { parseJobPayload } from "./payload.js";
-export { jobHasLiveEnvironmentSetup } from "./environment-setup-wait.js";
+export {
+  jobHasLiveEnvironmentSetup,
+  environmentSetupParking,
+  requestEnvironmentSetupResume,
+  grantEnvironmentSetupResume,
+  environmentSetupResumeGranted,
+} from "./environment-setup-wait.js";
 export { isPushOfferJob, runImmediateTransaction } from "./common.js";
 export {
   RUNTIME_STATUS_KEYS,

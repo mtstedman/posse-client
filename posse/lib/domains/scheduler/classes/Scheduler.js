@@ -16,7 +16,7 @@ import { releaseUnusedCompletedWorkItemLocks } from "../functions/unused-planned
 
 import crypto from "crypto";
 import { spawn } from "child_process";
-import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, workItemOperatorParking, getQueueWakeGeneration, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, jobHasLiveEnvironmentSetup, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgePresenceFresh, isMergeVerificationReviewJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, isWorkItemDispositionGateJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
+import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, workItemOperatorParking, getQueueWakeGeneration, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, jobHasLiveEnvironmentSetup, environmentSetupParking, grantEnvironmentSetupResume, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgePresenceFresh, isMergeVerificationReviewJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, isWorkItemDispositionGateJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
 import { WORK_ITEM_ORDER_WAIT_REASON } from "../../queue/functions/work-item-order.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { reapOrphanedDaemons } from "../../../shared/tools/classes/daemon/index.js";
@@ -2003,8 +2003,29 @@ export class Scheduler {
         // human_input only waits on user I/O (unmetered). Atlas and repository
         // preparation each have an independent background budget, so neither
         // consumes an agent slot and Git preparation cannot starve Atlas.
+        // An agent inside a live setup tool call is waiting on the user or on
+        // approved installers and holds no model compute: it is parked and its
+        // slot serves other work. It takes a slot back through a resume grant
+        // before its tool call returns, and resuming parents come before new
+        // launches because their context is already paid for.
+        const parkedJobIds = new Set();
+        const resumeRequests = [];
+        for (const entry of activeWorkers.values()) {
+          if (entry.job.job_type === "human_input" || isRunBackgroundJob(entry.job)) continue;
+          const parking = environmentSetupParking(getJob(entry.job.id) || entry.job);
+          if (!parking || parking.resume_granted) continue;
+          parkedJobIds.add(entry.job.id);
+          if (parking.resume_requested) resumeRequests.push({ jobId: entry.job.id, approvalJobId: parking.approval_job_id });
+        }
         let computeWorkerCount = [...activeWorkers.values()]
-          .filter(e => e.job.job_type !== "human_input" && !isRunBackgroundJob(e.job)).length;
+          .filter(e => e.job.job_type !== "human_input" && !isRunBackgroundJob(e.job) && !parkedJobIds.has(e.job.id)).length;
+        for (const request of resumeRequests) {
+          if (computeWorkerCount >= this.concurrency) break;
+          if (grantEnvironmentSetupResume(request.jobId, request.approvalJobId)) {
+            parkedJobIds.delete(request.jobId);
+            computeWorkerCount++;
+          }
+        }
         let atlasBackgroundWorkerCount = [...activeWorkers.values()]
           .filter(e => isAtlasBackgroundJob(e.job)).length;
         let preparationWorkerCount = [...activeWorkers.values()]
@@ -2016,7 +2037,7 @@ export class Scheduler {
         // a plan still takes the slot if no implementation job could start.
         const implementationReservedSlots = Math.min(this.concurrency, readImplementationReservedSlots());
         let planningWorkerCount = [...activeWorkers.values()]
-          .filter(e => SLOT_CAPPED_PLANNING_JOB_TYPES.has(e.job.job_type)).length;
+          .filter(e => SLOT_CAPPED_PLANNING_JOB_TYPES.has(e.job.job_type) && !parkedJobIds.has(e.job.id)).length;
         let implementationPassDone = implementationReservedSlots <= 0;
         const planSlotCapReached = () => !implementationPassDone
           && planningWorkerCount >= this.concurrency - implementationReservedSlots;

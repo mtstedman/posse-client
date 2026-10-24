@@ -50,6 +50,22 @@ Key behavior:
 - Manifest-root-aware verification readiness with explicit `passed`,
   `failed`, and `unavailable` outcomes.
 
+## Planner research
+
+Planners can dispatch code and web researchers together with one
+`dispatch_agent({ requests: [...] })` call. Independent children run concurrently;
+the call returns all results after they settle. The account setting
+`planner_research_max_children` defaults to 5 and accepts 1–8. It counts children
+across the entire planner call, including follow-up batches. Explicit account
+settings continue to override the default. The shared child runtime admits up
+to 8 active children and queues batches when capacity is occupied.
+
+Each research batch collects child reports and evidence selectors in one
+response. Code evidence is deduplicated into a bounded source brief for that
+batch; web findings, reports, and nominated source snapshots have durable refs.
+The planner reconciles findings and carries supporting refs into its plan.
+There is no separate automatic synthesis pass across batches.
+
 ## Repository Map
 
 - `orchestrator.js`: CLI entry point and command bootstrap.

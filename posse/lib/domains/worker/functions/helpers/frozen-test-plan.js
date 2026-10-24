@@ -9,7 +9,8 @@ import { resolveRepositoryVerificationPlan, VERIFICATION_PLAN_CONFIG, VERIFICATI
 import { REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID } from "../../../../catalog/verification.js";
 import { discoverUnitTestCapability, resolveUnitTestInvocation } from "../../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { sha256 } from "../../../../shared/format/functions/sha256.js";
-import { validatePlannerTestCommand, validatePlannerTestCommandForRepository, operationalCommandApprovalRequest, safeRelativeTestDirectory } from "../../../verification/functions/planner-test-command.js";
+import path from "node:path";
+import { validatePlannerTestCommand, validatePlannerTestCommandForRepository, operationalCommandApprovalRequest, safeRelativeTestDirectory, packageManagerScriptForwardedArgs } from "../../../verification/functions/planner-test-command.js";
 
 // A fix job's payload (verdicts/fail.js) carries its root task's test_command
 // but not the planner's tests_to_run. A fix without its own list verifies with
@@ -53,6 +54,38 @@ export function exactDeclaredTestInvocation(command, cwd, cwdRelative = null) {
 
 function exactDeclaredTestFile(command, cwd, cwdRelative = null) {
   return exactDeclaredTestInvocation(command, cwd, cwdRelative)?.path || null;
+}
+
+// The one discovered test file a package-manager test script is handed
+// (`npm --prefix web test -- src/x.test.ts`, `pnpm test src/x.test.ts`). The
+// script decides how the file runs, so unlike exactDeclaredTestFile this names
+// the file without proving the runner; callers pair it with a run that
+// reported executed tests before treating the file as covered.
+export function packageScriptForwardedTestFile(command, cwd, cwdRelative = null) {
+  if (!cwd || !command) return null;
+  const invocation = packageManagerScriptForwardedArgs(command);
+  if (!invocation || !/^test(?:$|[:.-])/i.test(String(invocation.script || ""))) return null;
+  const positional = invocation.forwarded.filter((arg) => !String(arg).startsWith("-"));
+  if (positional.length !== 1) return null;
+  const root = path.resolve(cwd, invocation.cwd_relative || cwdRelative || ".");
+  const relative = path.relative(cwd, path.resolve(root, positional[0])).replace(/\\/g, "/");
+  if (!relative || relative === ".." || relative.startsWith("../") || path.isAbsolute(relative)) return null;
+  const capability = discoverUnitTestCapability({ projectDir: cwd });
+  return capability.available && capability.files.includes(relative) ? relative : null;
+}
+
+// Every test file a frozen plan names: explicit runner selections, the exact
+// single-file invocation, and a package-script forwarded file.
+export function declaredTestFilesForPlan(plan, cwd) {
+  const declared = new Set([
+    ...(Array.isArray(plan?.unit_test_paths) ? plan.unit_test_paths : []),
+    ...(Array.isArray(plan?.covered_unit_test_paths) ? plan.covered_unit_test_paths : []),
+  ]);
+  for (const command of new Set([plan?.execution_command, plan?.command].filter(Boolean))) {
+    const forwarded = packageScriptForwardedTestFile(command, cwd, plan?.cwd_relative || null);
+    if (forwarded) declared.add(forwarded);
+  }
+  return [...declared];
 }
 
 // A planner command is an additional selection, never a replacement for

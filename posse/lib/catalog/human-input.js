@@ -884,11 +884,17 @@ export function humanInputChoiceFromAnswer(answer, choices = []) {
   const matches = normalizedChoices.filter((choice) => HUMAN_INPUT_CHOICE_ALIASES[choice.toLowerCase()]?.test(text));
   for (const choice of [...normalizedChoices].sort((a, b) => b.length - a.length)) {
     const normalizedChoice = choice.toLowerCase();
-    if (
-      text.startsWith(`${normalizedChoice}:`)
-      || text.startsWith(`${normalizedChoice} -`)
-      || text.startsWith(`${normalizedChoice} —`)
-    ) return matches.some((match) => match !== choice && !choice.startsWith(`${match}:`)) ? null : choice;
+    const separator = [":", " -", " —"].find((mark) => text.startsWith(`${normalizedChoice}${mark}`));
+    if (separator == null) continue;
+    // The decoration is free text. An instruction that opens with another
+    // choice ("merge: send back instead") contradicts the leading selection;
+    // an incidental word later on ("send_back: fix the failed tests") does not.
+    const decoration = text.slice(normalizedChoice.length + separator.length).trim();
+    const contradiction = normalizedChoices.some((other) => other !== choice
+      && !choice.startsWith(`${other}:`)
+      && (decoration.startsWith(other.toLowerCase())
+        || HUMAN_INPUT_CHOICE_ALIASES[other.toLowerCase()]?.exec(decoration)?.index === 0));
+    return contradiction ? null : choice;
   }
   if (matches.length !== 1) return null;
   for (const choice of matches) {

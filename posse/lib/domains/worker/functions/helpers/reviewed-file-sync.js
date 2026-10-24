@@ -163,6 +163,12 @@ export async function applyReviewedFileTransfers(worker, job, cwd, { signal = nu
               continue;
             }
             if (!await verifyObjects(cwd, head, transfer.read_inputs, options)) throw deferred(REASONS.INPUT, "Receiver read inputs differ from the accepted review");
+            // Reviewed outputs this subset leaves behind must already be here
+            // in their reviewed form; otherwise the import waits for the
+            // source merge instead of seeding a baseline the review never saw.
+            if (!await verifyObjects(cwd, head, Array.isArray(transfer.omitted_outputs) ? transfer.omitted_outputs : [], options)) {
+              throw deferred(REASONS.INPUT, "Receiver lacks reviewed outputs omitted from this transfer");
+            }
             for (const input of transfer.read_inputs) {
               if (String(await gitExecAsync(["status", "--porcelain", "--untracked-files=all", "--ignored", "--", `:(literal)${input.path}`], cwd, options))
                   || !sameReviewedObject(await reviewedWorkingObject(cwd, input, options), input.object)) throw deferred(REASONS.INPUT, "Receiver read inputs have uncommitted changes");

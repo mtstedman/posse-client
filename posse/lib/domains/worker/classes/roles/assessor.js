@@ -6,7 +6,7 @@
 import { getDefaultReasoningEffortForRole } from "../../../settings/functions/repository-settings.js";
 import {
   getWorkItem,
-  getAttempts,
+  currentAttemptNumber,
 } from "../../../queue/functions/index.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
 import { buildHandoffPacket, composePromptRemoteAware, handoff, renderAtlasHandoffSections } from "../../../handoff/functions/index.js";
@@ -84,7 +84,7 @@ export class AssessorRole extends BaseRole {
       payload,
       role: this.getRole(),
       effectiveTier: ctx.tier,
-      attemptCount: getAttempts(job.id).length + 1,
+      attemptCount: currentAttemptNumber(job.id),
       maxAttempts: job.max_attempts || 3,
       lastError: job.last_error || null,
       cwd: job._worktreePath || worker.projectDir,

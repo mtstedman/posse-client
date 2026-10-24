@@ -308,6 +308,21 @@ export function getAttempts(jobId) {
 }
 
 /**
+ * The attempt number of the attempt that is executing now. The coordinator
+ * creates the current attempt row before any role assembles its packet, so
+ * `getAttempts(jobId).length + 1` counts that row as a previous try and
+ * presents every first attempt as a retry. The running row's own number is
+ * authoritative; without one (packet assembled before the row exists), the
+ * next number after the settled rows is.
+ */
+export function currentAttemptNumber(jobId) {
+  const attempts = getAttempts(jobId);
+  const running = attempts.filter((attempt) => attempt.status === "running").at(-1);
+  if (running) return Number(running.attempt_number) || attempts.length;
+  return attempts.length + 1;
+}
+
+/**
  * True when the job has at least one implementation attempt row. Use this —
  * not jobs.attempt_count — to decide whether work ever executed: the counter
  * is decremented when a job parks for scope approval, so it can read 0 after

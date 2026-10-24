@@ -12,6 +12,7 @@ import { getRetrievalCache } from "../../../classes/v2/RetrievalCache.js";
 import { embeddingModelDirName } from "../../../classes/v2/RustEmbeddingIndex.js";
 import { embeddingsRoot, ledgerDbPath, mainViewPath, memoryDbPathForLedgerDb } from "../runtime-paths.js";
 import { refresh as systemAtlasRefresh } from "../../../../system/functions/atlas.js";
+import { ensureLedgerBranchForWrite } from "../ledger-branch-bootstrap.js";
 import { supportedLanguageTags } from "../parser/languages/index.js";
 import { nativeBinaries } from "../../../../../shared/tools/classes/BinaryManager.js";
 import { __atlasNativeManagerForTests } from "../native/invoke.js";
@@ -92,8 +93,11 @@ export async function repoRegister({ versionId, params, repoRoot, repoId = "defa
   const ledger = await Ledger.open({ dbPath: ledgerPath });
   try {
     const branch = String(params.branch || defaultBranchForRepo(root)).trim() || "main";
-    if (typeof ledger.ensureRootBranch === "function" && !ledger.getBranch(branch)) {
-      await ledger.ensureRootBranch(branch);
+    if (!ledger.getBranch(branch)) {
+      await ensureLedgerBranchForWrite(ledger, branch, {
+        baselineBranch: String(defaultBranchForRepo(root) || "").trim() || "main",
+        label: "repo.register.ensureBranch",
+      });
     }
     const seq = ledger.headSeq(branch);
     let viewProbe = null;

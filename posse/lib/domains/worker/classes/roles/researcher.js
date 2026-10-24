@@ -11,7 +11,7 @@ import { atlasMemoryEnabled } from "../../../../shared/policies/functions/memory
 import { getAccountSetting } from "../../../settings/functions/account-settings.js";
 import { BaseRole } from "../BaseRole.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
-import { getArtifacts, getArtifactsByWorkItem, getAttempts, getJob, getWorkItem, storeArtifact } from "../../../queue/functions/index.js";
+import { currentAttemptNumber, getArtifacts, getArtifactsByWorkItem, getAttempts, getJob, getWorkItem, storeArtifact } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { persistResearcherMemories } from "../../functions/helpers/research-memories.js";
 import "../../../artifacts/functions/index.js";
@@ -498,7 +498,7 @@ export class ResearcherRole extends BaseRole {
       && payload.verify_child_citations === true;
     const shouldRenderAtlasHandoff = (roleMode !== "synth" && !webOnlyAnswer && !focusedFanoutChild) || synthNeedsVerificationHandoff;
     const researcherExecProvider = ctx.providerName || currentExecutionProvider(job);
-    const researcherAttempts = getAttempts(job.id);
+    const researcherAttempts = getAttempts(job.id).filter((attempt) => attempt.status !== "running");
     const packetFields = {
       job_type: job.job_type,
       work_item_id: job.work_item_id,
@@ -526,7 +526,7 @@ export class ResearcherRole extends BaseRole {
         : null,
       governance_tier: workItem?.governance_tier || "mvp",
       attempt: {
-        count: researcherAttempts.length + 1,
+        count: currentAttemptNumber(job.id),
         max: job.max_attempts || 3,
         last_error: job.last_error || researcherAttempts.at(-1)?.error_text || null,
         escalated: ctx.tier && ctx.tier !== job.model_tier,

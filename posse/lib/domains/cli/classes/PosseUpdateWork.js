@@ -1,8 +1,34 @@
 import fs from "node:fs";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { isProcessAlive } from "../../../shared/platform/functions/process-liveness.js";
-import { acquireWorktreeLockAsync } from "../../git/functions/worktree-locks.js";
 import { randomUUID } from "node:crypto";
+
+// A directory lock with a recorded owner, reclaimed only once that owner has
+// exited. The update parent must stay free of the SQLite addon (Windows
+// cannot replace a loaded better-sqlite3 binding while it updates), so the
+// SQLite-backed worktree lock is not usable here; the filesystem gives the
+// same serialization for the short creation window.
+async function acquireDirectoryGuard(guardPath, { waitMs = 1000, pollMs = 25 } = {}) {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      fs.mkdirSync(guardPath);
+      fs.writeFileSync(path.join(guardPath, "owner.json"), `${JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() })}\n`);
+      return { acquired: true, release: () => fs.rmSync(guardPath, { recursive: true, force: true }) };
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    let owner;
+    try { owner = JSON.parse(fs.readFileSync(path.join(guardPath, "owner.json"), "utf8")); } catch { /* a guard without metadata is in creation or legacy */ }
+    if (owner && isProcessAlive(owner.pid) === false) {
+      fs.rmSync(guardPath, { recursive: true, force: true });
+      continue;
+    }
+    if (Date.now() >= deadline) return { acquired: false, release: () => {} };
+    await sleep(pollMs);
+  }
+}
 
 // Owns the preservation window for an opt-in update of a dirty installation.
 // Saved work stays in Git; it is never reapplied over the fresh installation.
@@ -17,9 +43,9 @@ export class PosseUpdateWork {
   async acquire() {
     const result = await this.git(["rev-parse", "--git-path", "posse-update.lock"], { cwd: this.repoRoot });
     const lockPath = path.resolve(this.repoRoot, String(result.stdout).trim());
-    // The established file lock serializes directory creation and stale-owner
-    // recovery, including a reclaimer that itself dies midway through cleanup.
-    const guard = await acquireWorktreeLockAsync(`${lockPath}.guard`, { waitMs: 1000 });
+    // The guard serializes directory creation and stale-owner recovery,
+    // including a reclaimer that itself dies midway through cleanup.
+    const guard = await acquireDirectoryGuard(`${lockPath}.guard`, { waitMs: 1000 });
     if (!guard.acquired) throw new Error(`Another preserving update owns ${lockPath}`);
     try {
       let owner;
@@ -38,7 +64,7 @@ export class PosseUpdateWork {
         this.release();
         throw error;
       }
-    } finally { await guard.releaseAsync(); }
+    } finally { guard.release(); }
   }
 
   async save() {

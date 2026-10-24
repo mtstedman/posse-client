@@ -11,6 +11,7 @@ import { ParseEngine } from "../../atlas/classes/v2/ParseEngine.js";
 import { ViewBuilder } from "../../atlas/classes/v2/ViewBuilder.js";
 import { sharedParserAdapter } from "../../atlas/classes/v2/ParserAdapter.js";
 import { ledgerDbPath, mainViewPath, warmedViewPath } from "../../atlas/functions/v2/runtime-paths.js";
+import { ensureLedgerBranchForWrite } from "../../atlas/functions/v2/ledger-branch-bootstrap.js";
 import { ingestScipFile } from "../../atlas/functions/v2/scip/ingester.js";
 import { createAtlasPortableSnapshot } from "../../atlas/functions/v2/portable-snapshot.js";
 import { resolveTargetBranchAsync } from "../../git/functions/target-branch.js";
@@ -49,8 +50,13 @@ async function openEngine(opts) {
   const branch = await defaultBranchFor(repoRoot, opts.branch);
   const ownsLedger = !opts.ledger;
   const ledger = /** @type {Ledger} */ (opts.ledger || await Ledger.open({ dbPath: ledgerDbPath(repoRoot) }));
-  if (typeof ledger.ensureRootBranch === "function" && !ledger.getBranch(branch)) {
-    await ledger.ensureRootBranch(branch);
+  if (!ledger.getBranch(branch)) {
+    // An explicit non-baseline branch (a WI partition reached first by an
+    // edit refresh) forks from the baseline; only the baseline is a root.
+    await ensureLedgerBranchForWrite(ledger, branch, {
+      baselineBranch: await defaultBranchFor(repoRoot, null),
+      label: "system.atlas.openEngine",
+    });
   }
   const engine = new ParseEngine({
     ledger,

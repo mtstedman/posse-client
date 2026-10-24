@@ -19,6 +19,7 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
   const { getArtifacts } = await import("../../queue/functions/artifacts.js");
   const { parseJobPayload } = await import("../../queue/functions/payload.js");
   const { BACKGROUND_JOB_TYPES } = await import("../../../catalog/job.js");
+  const { humanGateStateAllowsAnswer } = await import("../../../catalog/human-input.js");
   const { pairingPeerPipelineRows, pairingSessionSummary } = await import("../../pairing/functions/work-items.js");
 
   const active = listWorkItems(["queued", "planning", "running", "waiting_on_human", "complete", "failed"]);
@@ -68,7 +69,7 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
         }
       } else if (job.job_type === "human_input") {
         const gate = getHumanGate(job.id);
-        if (gate?.gate_state === "open" && gate.resolution_error) {
+        if (gate && humanGateStateAllowsAnswer(gate.gate_state) && gate.resolution_error) {
           handoff.push(`Answer not applied: ${gate.resolution_error}`);
         }
         const answers = getArtifacts(job.id, "response");

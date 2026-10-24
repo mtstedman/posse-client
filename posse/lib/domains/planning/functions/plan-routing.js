@@ -48,14 +48,17 @@ export const IMAGE_EXTS = new Set([
   ".bmp", ".tif", ".tiff", ".ico",
 ]);
 
-const AUTHORED_MEDIA_NOUN = "(?:images?|photos?|illustrations?|artwork|visuals?|graphics?|logos?|icons?|favicons?|banners?)";
+// A media noun joined by a hyphen on either side is a compound modifier
+// ("original-image coordinates", "image-space offsets"), describing software
+// behavior rather than naming an authored deliverable.
+const AUTHORED_MEDIA_NOUN = "(?<!-)\\b(?:images?|photos?|illustrations?|artwork|visuals?|graphics?|logos?|icons?|favicons?|banners?)\\b(?!-)";
 const EXPLICIT_MEDIA_DELIVERABLE_RE = new RegExp(
-  `\\b(?:create|generate|produce|supply|design|render|illustrate)\\b[^.\\n]{0,80}\\b${AUTHORED_MEDIA_NOUN}\\b`
-  + `|\\b(?:add|include)\\s+(?:[\\w-]+\\s+){0,3}(?:rich|custom|original|generated|marketing)\\s+${AUTHORED_MEDIA_NOUN}\\b`,
+  `\\b(?:create|generate|produce|supply|design|render|illustrate)\\b[^.\\n]{0,80}${AUTHORED_MEDIA_NOUN}`
+  + `|\\b(?:add|include)\\s+(?:[\\w-]+\\s+){0,3}(?:rich|custom|original|generated|marketing)\\s+${AUTHORED_MEDIA_NOUN}`,
   "i",
 );
 const MEDIA_DELIVERABLE_NEGATION_RE = new RegExp(
-  `\\b(?:do not|don't|without|no need to|must not)\\s+(?:create|generate|produce|add|include|supply|design|render|illustrate)\\b[^.\\n]{0,80}\\b${AUTHORED_MEDIA_NOUN}\\b`,
+  `\\b(?:do not|don't|without|no need to|must not)\\s+(?:create|generate|produce|add|include|supply|design|render|illustrate)\\b[^.\\n]{0,80}${AUTHORED_MEDIA_NOUN}`,
   "i",
 );
 const MEDIA_CODE_CONTEXT_RE = /\b(?:upload|loading|lazy\s+load|resiz(?:e|ing)|thumbnails?|srcset|dimensions?|urls?|tables?|migrations?|caches?|sitemaps?|director(?:y|ies)|tests?|placeholders?|carousels?|components?|resolvers?|foreign\s+keys?)\b/i;

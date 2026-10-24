@@ -10,6 +10,7 @@ import { C } from "../../../../shared/format/functions/colors.js";
 import { extractJson } from "../../../../shared/format/functions/json.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
 import {
+  currentAttemptNumber,
   getArtifactsByWorkItem,
   getAttempts,
   getIntSetting,
@@ -709,7 +710,7 @@ export class PlannerRole extends BaseRole {
         environment_setup_batch_v1: !worker.dryRun && plannerRoleMode === "normal" && !assessmentReplan && !workItem?.branch_name,
       },
     };
-    const plannerAttempts = getAttempts(job.id);
+    const plannerAttempts = getAttempts(job.id).filter((attempt) => attempt.status !== "running");
     Object.assign(plannerPacket, {
       job_type: job.job_type,
       work_item_id: job.work_item_id,
@@ -720,7 +721,7 @@ export class PlannerRole extends BaseRole {
       reasoning_effort: job.reasoning_effort || getDefaultReasoningEffortForRole("plan"),
       governance_tier: workItem?.governance_tier || "mvp",
       attempt: {
-        count: plannerAttempts.length + 1,
+        count: currentAttemptNumber(job.id),
         max: job.max_attempts || 3,
         last_error: job.last_error || plannerAttempts.at(-1)?.error_text || null,
         escalated: ctx.tier && ctx.tier !== job.model_tier,

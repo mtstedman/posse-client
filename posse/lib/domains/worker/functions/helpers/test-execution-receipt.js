@@ -11,7 +11,7 @@ import { validatePlannerTestCommandForRepository } from "../../../verification/f
 export { validatePlannerTestCommand, validatePlannerTestCommandForRepository, operationalCommandApprovalRequest } from "../../../verification/functions/planner-test-command.js";
 import { classifyNestedRunnerInfrastructureFailure, classifyPackageManagerTestPlanFailure } from "../../../verification/functions/test-runner-failure.js";
 export { classifyNestedRunnerInfrastructureFailure } from "../../../verification/functions/test-runner-failure.js";
-import { resolveFrozenTestPlan, frozenTestPlanFromReceipt, prunedTestPlan } from "./frozen-test-plan.js";
+import { resolveFrozenTestPlan, frozenTestPlanFromReceipt, prunedTestPlan, declaredTestFilesForPlan } from "./frozen-test-plan.js";
 export { resolveFrozenTestPlan } from "./frozen-test-plan.js";
 import { currentCommit, currentHeadRef, repositoryFingerprint, worktreeFingerprint, dirtyPathDigests, dirtyFingerprintFromDigests, environmentFilesFingerprint, isAncestorCommit, porcelain, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
 export { dirtyWorktreeFingerprint, environmentFilesFingerprint, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
@@ -421,6 +421,24 @@ async function runChangedUnitTests(paths, policy, cleanupOptions, { base = null,
   };
 }
 
+// Changed test files whose execution the plan run already proved on this tree:
+// the plan passed with reported executed tests (or a recognized single-file
+// invocation), and the plan command names the file.
+function changedTestPathsCoveredByPlan(changedTestPaths, plan, result, testCounts, { cwd, fileInvoked = false } = {}) {
+  if (result?.status !== "passed") return [];
+  const executed = (testCounts && testCounts.total > 0 && testCounts.skipped !== testCounts.total) || fileInvoked;
+  if (!executed) return [];
+  const declared = new Set(declaredTestFilesForPlan(plan, cwd));
+  return changedTestPaths.filter((candidate) => declared.has(candidate));
+}
+
+function changedTestsCoveredByPlanResult(cwd) {
+  return {
+    paths: [], status: "passed", ok: true, exit_code: null, duration_ms: 0, test_counts: null,
+    execution_root: cwd, failure_fingerprint: null, reason: null, cleanup_status: "not_needed", stdout: "", stderr: "",
+  };
+}
+
 // A changed test file has no pre-development baseline: the plan was frozen
 // before anyone knew which test files the change would touch. When one fails,
 // each failing file the base tree already has runs again with the change's
@@ -782,13 +800,28 @@ async function executeReceipt({
     cleanupStatus = planAttribution.cleanup_status;
     cleanupError = planAttribution.error;
   }
-  const changedTests = changedTestPaths.length > 0 && ["not_needed", "completed"].includes(cleanupStatus)
-    ? await runChangedUnitTests(changedTestPaths, effectivePolicy, cleanupOptions, changedTestsBase)
-    : null;
-
   const testCounts = testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`);
   const fileInvoked = (plan.intent || "test") === "test"
     && didInvokeTestFile(result, executionCommand, cwd, plan.cwd_relative, testCounts);
+  // A changed test file the plan command itself names, which the plan's
+  // passing run on this same tree demonstrably executed, already has its
+  // proof; the changed-test window would only repeat it. A failed or
+  // count-less plan run proves nothing about any one file, so then every
+  // changed file runs for its own attribution. The receipt keeps the full path
+  // list as its identity and records which paths the plan covered.
+  const coveredByPlan = changedTestPaths.length > 0
+    ? changedTestPathsCoveredByPlan(changedTestPaths, plan, result, testCounts, { cwd, fileInvoked })
+    : [];
+  const changedTestsToRun = changedTestPaths.filter((candidate) => !coveredByPlan.includes(candidate));
+  let changedTests = null;
+  if (changedTestPaths.length > 0 && ["not_needed", "completed"].includes(cleanupStatus)) {
+    changedTests = changedTestsToRun.length > 0
+      ? await runChangedUnitTests(changedTestsToRun, effectivePolicy, cleanupOptions, changedTestsBase)
+      : changedTestsCoveredByPlanResult(cwd);
+    if (coveredByPlan.length > 0) {
+      changedTests = { ...changedTests, paths: changedTestPaths, executed_paths: changedTestsToRun, covered_by_plan: coveredByPlan };
+    }
+  }
   const noTestsExecuted = result.status === "passed" && testCounts
     && (testCounts.total === 0 || testCounts.skipped === testCounts.total);
   const coverageStatus = hasExecutionChecks

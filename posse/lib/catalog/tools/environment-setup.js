@@ -47,6 +47,15 @@ export const ENVIRONMENT_SETUP_LOCK_WAIT_MS = 5 * 60_000;
 // Re-validation, the setup commit (its worker allows five minutes), and
 // database provisioning after the installers.
 export const ENVIRONMENT_SETUP_FINALIZE_SLACK_MS = 6 * 60_000 + LOCAL_DATABASE_PROVISION_TIMEOUT_MS;
+// While the call waits on the user and then on installers, the requesting
+// agent holds no model compute; the scheduler parks it and hands its slot to
+// other work. Before the call returns, the agent takes a slot back through a
+// scheduler grant, waiting at most this long so concurrency is restored
+// rather than exceeded on resumption. The wait spends the live window's
+// remaining time (it is not added to it: the whole call must still fit the
+// MCP transport), and without a live scheduler to grant (stale heartbeat)
+// the call returns at once.
+export const ENVIRONMENT_SETUP_RESUME_WAIT_MAX_MS = 15 * 60_000;
 export const ENVIRONMENT_SETUP_LIVE_MAX_MS = ENVIRONMENT_SETUP_APPROVAL_TIMEOUT_MS + ENVIRONMENT_SETUP_LOCK_WAIT_MS
   + ENVIRONMENT_SETUP_INSTALL_BUDGET_MS + ENVIRONMENT_SETUP_FINALIZE_SLACK_MS;
 // Watchdog credit for live setup calls in one dispatch: an initial batch and

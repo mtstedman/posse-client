@@ -59,6 +59,7 @@ export {
   beginJobRetryGeneration,
   completeAttempt,
   extendAssessmentMaxAttempts,
+  currentAttemptNumber,
   getAttempts,
   getLatestAttempt,
   hasImplementationAttempts,

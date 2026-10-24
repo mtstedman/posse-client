@@ -7,17 +7,17 @@ import "./review-report.js";
 import "./memory-feedback.js";
 
 export const RUN_WRAP_UP_STEPS = Object.freeze([
-  { id: "agents", label: "Settle agent call state" },
-  { id: "iterate", label: "Process iterative follow-ups" },
+  { id: "agents", label: "Finish agent calls" },
+  { id: "iterate", label: "Prepare follow-up work" },
   { id: "target", label: "Check target branch" },
-  { id: "auto-merge", label: "Auto-merge completed work items" },
-  { id: "merge", label: "Merge status" },
-  { id: "atlas", label: "ATLAS replay and main view" },
-  { id: "tree", label: "ATLAS tree work" },
-  { id: "onnx", label: "ONNX vector catch-up" },
-  { id: "cleanup", label: "Branch and worktree cleanup" },
-  { id: "review-data", label: "Check manual review items" },
-  { id: "review-report", label: "Build review reports" },
+  { id: "auto-merge", label: "Merge completed work" },
+  { id: "merge", label: "Check merge results" },
+  { id: "atlas", label: "Update Atlas index" },
+  { id: "tree", label: "Update Atlas tree" },
+  { id: "onnx", label: "Update search vectors" },
+  { id: "cleanup", label: "Clean up branches and worktrees" },
+  { id: "review-data", label: "Check review queue" },
+  { id: "review-report", label: "Save review reports" },
 ]);
 
 export function createTuiWrapUpTracker(display, {
@@ -90,7 +90,7 @@ export function createTuiWrapUpTracker(display, {
 export function createRunWrapUpTracker(display, options = {}) {
   return createTuiWrapUpTracker(display, {
     title: "Run wrap-up",
-    subtitle: "Closing the run. Merge state is finished here; ATLAS/ONNX catch-up can be left queued.",
+    subtitle: "Saving results and preparing Atlas for the next run.",
     layout: "screen",
     allowEarlyExit: true,
     earlyExitRequested: display?.isWrapUpEarlyExitRequested?.() === true,

@@ -5,7 +5,7 @@ import {
 } from "../../../catalog/planner-dispatch.js";
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 import { subAgentRuntime } from "../../sub-agent/classes/SubAgentRuntime.js";
-import { RESEARCH_CHILD_PROFILE, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
+import { RESEARCH_CHILD_PROFILE, SUB_AGENT_LIMITS, SUB_AGENT_PROTOCOL } from "../../../catalog/sub-agent.js";
 // @ts-check
 
 import crypto from "node:crypto";
@@ -726,8 +726,8 @@ export async function executeDispatchAgent(args, options = {}) {
   }
   if (Object.hasOwn(args || {}, "requests")) {
     if (!research) throw runtimeError("RESEARCH_BATCH_DISABLED", "Research batches require an eligible planner", { stage: "admission" });
-    if (!Array.isArray(args.requests) || args.requests.length < 2 || args.requests.length > 3) {
-      throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", "dispatch_agent.requests must contain two to three entries", { stage: "validation" });
+    if (!Array.isArray(args.requests) || args.requests.length < 2 || args.requests.length > SUB_AGENT_LIMITS.maxResearchBatch) {
+      throw runtimeError("WEB_RESEARCH_SCHEMA_INVALID", `dispatch_agent.requests must contain two to ${SUB_AGENT_LIMITS.maxResearchBatch} entries`, { stage: "validation" });
     }
     const itemErrors = new Map();
     const requests = args.requests.map((raw, index) => {

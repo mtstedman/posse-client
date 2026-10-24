@@ -335,12 +335,29 @@ function packageManagerScriptInvocation(command) {
     manager,
     cwd_relative: cwdRelative || null,
     script: script || null,
+    // Positional words beyond the script name (`pnpm test <file>`).
+    script_args: taskArgs.slice(first.toLowerCase() === "run" ? 2 : 1),
     workspace_scoped: workspaceScoped,
     workspace_selector: workspaceSelector,
     all_workspaces: allWorkspaces,
     if_present: args.some((arg) => String(arg).toLowerCase() === "--if-present"),
     built_in: manager === "bun" && script === "test",
   };
+}
+
+// The arguments a package-manager script invocation forwards to its script:
+// positional words after the script name and everything after `--`
+// (`npm --prefix web test -- src/x.test.ts`). Null unless the command is a
+// recognized, unambiguous script invocation.
+export function packageManagerScriptForwardedArgs(command) {
+  const invocation = packageManagerScriptInvocation(command);
+  if (!invocation || invocation.invalid || !invocation.script) return null;
+  let words;
+  try { words = parseCommandArguments(splitPlannerTestInvocation(command).command); } catch { return null; }
+  const separator = words.indexOf("--");
+  const trailing = separator >= 0 ? words.slice(separator + 1) : [];
+  return { manager: invocation.manager, cwd_relative: invocation.cwd_relative, script: invocation.script,
+    forwarded: [...invocation.script_args, ...trailing] };
 }
 
 function workspacePatterns(projectRoot, rootManifest = {}) {

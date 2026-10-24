@@ -9,6 +9,7 @@ import path from "path";
 import { View } from "../../../classes/v2/View.js";
 import { ViewBuilder } from "../../../classes/v2/ViewBuilder.js";
 import { okEnvelope, errorEnvelope } from "./envelope.js";
+import { ensureLedgerBranchForWrite } from "../ledger-branch-bootstrap.js";
 import { decodeScipIndex } from "../scip/decode.js";
 import { buildScipIndexCache } from "../scip/cache.js";
 import { ingestScipFile } from "../scip/ingester.js";
@@ -98,8 +99,13 @@ export async function scipIngest({ versionId, params, ledger, repoRoot }) {
     repoRoot: root,
   });
   try {
-    if (typeof /** @type {any} */ (ledger).ensureRootBranch === "function" && !ledger.getBranch(branch)) {
-      await /** @type {any} */ (ledger).ensureRootBranch(branch);
+    if (!ledger.getBranch(branch)) {
+      // An explicit branch other than the repo's own is a fork of it, never a
+      // second root (see ledger-branch-bootstrap.js).
+      await ensureLedgerBranchForWrite(/** @type {any} */ (ledger), branch, {
+        baselineBranch: resolveScipIngestBranch({ explicitBranch: null, ledger, repoRoot: root }),
+        label: "scip.ingest.ensureBranch",
+      });
     }
     const events = [];
     const result = await ingestScipFile({

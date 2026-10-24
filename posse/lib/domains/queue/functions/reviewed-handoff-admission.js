@@ -119,6 +119,20 @@ export function reviewedHandoffAdmission(job, scope, { order, workItemLocks, job
     if (!receipt) return wait(job, holder, row.path, REASONS.SOURCE);
     const selectedFiles = receipt.files.filter((file) => scope.files.includes(normPath(file.path))
       && workItemLocks.some((lock) => lock.work_item_id === source.id && lock.lock_kind === "file" && lock.path === normPath(file.path)));
+    // The review proved its outputs together. An output that changed in the
+    // source but is not exported here (not requested by this receiver, or
+    // still reserved by a later source writer) is a freshness requirement of
+    // the exported subset: before source integration the receiver must
+    // already hold that exact reviewed object, or the sync defers. Without it
+    // a test arrives ahead of the implementation it was reviewed against and
+    // the receiver's baseline fails before any developer edit. Ownership and
+    // merge proof are unaffected: after integration the receiver takes the
+    // source's final state whole.
+    const omittedOutputs = receipt.files
+      .filter((file) => file.change_kind !== "unchanged"
+        && !selectedFiles.some((selected) => normPath(selected.path) === normPath(file.path))
+        && !receipt.read_inputs.some((input) => normPath(input.path) === normPath(file.path)))
+      .map((file) => ({ path: file.path, repo_path: file.repo_path, object: file.object }));
     const boundPaths = [...selectedFiles, ...receipt.read_inputs].map((entry) => ({ path: normPath(entry.path), lock_kind: "file" }));
     for (const candidate of sourceJobs) {
       if (candidate.id === receipt.source_job_id || !["dev", "fix", "promote"].includes(candidate.job_type)) continue;
@@ -152,7 +166,7 @@ export function reviewedHandoffAdmission(job, scope, { order, workItemLocks, job
       }
     }
     if (required.some((dep) => !dep.source_generation)) return wait(job, holder, row.path, REASONS.INCOMPLETE);
-    transfers.set(receipt.receipt_id, { ...receipt, review_receipt: receipt, files: selectedFiles, path: selectedFiles[0].path,
+    transfers.set(receipt.receipt_id, { ...receipt, review_receipt: receipt, files: selectedFiles, omitted_outputs: omittedOutputs, path: selectedFiles[0].path,
       receiver_job_id: job.id, receiver_work_item_id: job.work_item_id,
       receiver_generation: workItemBranchGeneration(receiver), required_provenance: required,
       state: "reserved", donor_lock_ids: workItemLocks.filter((lock) => lock.work_item_id === source.id

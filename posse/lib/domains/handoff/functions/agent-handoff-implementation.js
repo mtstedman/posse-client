@@ -12,7 +12,7 @@ import path from "node:path";
 import { HANDOFF_IMAGE_EVIDENCE_EXTENSIONS as IMAGE_EVIDENCE_EXTENSIONS } from "../../../catalog/files.js";
 import fs from "node:fs";
 import { positiveInt, latestAgentHandoffRejection } from "./helpers/rejection-store.js";
-import { resolveDeterministicReadableFile } from "../../../shared/tools/functions/toolkit/path-policy.js";
+import { DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES, resolveDeterministicReadableFile } from "../../../shared/tools/functions/toolkit/path-policy.js";
 import crypto from "crypto";
 import { hashRefModelVisibility, hashRefModelVisibleScope } from "../../../shared/tools/functions/fetch-ref-policy.js";
 import { splitEditableLines } from "../../../shared/tools/functions/toolkit/structured-read.js";
@@ -537,7 +537,29 @@ function mergedLineRanges(ranges = []) {
   return out;
 }
 
+// The surfaced-path candidate set is built from the agent call's delivered
+// coverage, tool reads, artifact inspections and visible hash refs: several
+// DB scans plus hash-ref metadata for every visible entry. It is immutable
+// for the duration of one handoff materialization except where the handoff
+// itself surfaces a ref (artifact path selectors), so a packet with dozens of
+// path selectors must not rebuild it per selector. Cache only on a
+// materialization context (marked by its cleanup ledger); a caller-owned
+// context may outlive this handoff and must never carry a stale set.
+const SURFACED_PATH_CANDIDATES = Symbol("agent_handoff_surfaced_path_candidates");
+
 function surfacedPathCandidates(context) {
+  const cacheable = !!(context && typeof context === "object" && Array.isArray(context[EVIDENCE_CLEANUP]));
+  if (cacheable && context[SURFACED_PATH_CANDIDATES]) return context[SURFACED_PATH_CANDIDATES];
+  const candidates = computeSurfacedPathCandidates(context);
+  if (cacheable) context[SURFACED_PATH_CANDIDATES] = candidates;
+  return candidates;
+}
+
+function invalidateSurfacedPathCandidates(context) {
+  if (context && typeof context === "object") delete context[SURFACED_PATH_CANDIDATES];
+}
+
+function computeSurfacedPathCandidates(context) {
   const byPath = new Map();
   const upgradeProvenance = (existing, candidate) => {
     if (!existing.repository_identity && candidate.repository_identity) {
@@ -722,6 +744,49 @@ function resolveSurfacedEvidencePath(requestedPath, context) {
   );
 }
 
+// Bytes a ranged path selector may read while looking for its last line. The
+// same ceiling read_file applies to a whole file; a cited range that needs
+// more source than that before it even starts is not a citation.
+const RANGE_READ_MAX_BYTES = DETERMINISTIC_READ_FILE_MAX_SIZE_BYTES;
+const RANGE_READ_CHUNK_BYTES = 64 * 1024;
+
+// Read the first `maxLines` lines of a file without loading the rest. With
+// `complete` the file ended first and `lines` is every line (final EOL
+// stripped like splitEditableLines); otherwise `lines` holds only the
+// complete lines seen before the line or byte budget ran out.
+function readLeadingLines(filePath, maxLines, maxBytes) {
+  const chunks = [];
+  let total = 0;
+  let newlines = 0;
+  let complete = false;
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, "r");
+    while (newlines < maxLines && total < maxBytes) {
+      const chunk = Buffer.allocUnsafe(Math.min(RANGE_READ_CHUNK_BYTES, maxBytes - total));
+      const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, total);
+      if (bytesRead === 0) {
+        complete = true;
+        break;
+      }
+      const view = chunk.subarray(0, bytesRead);
+      chunks.push(view);
+      total += bytesRead;
+      for (let index = view.indexOf(10); index !== -1; index = view.indexOf(10, index + 1)) newlines += 1;
+    }
+    if (!complete && newlines < maxLines && total < maxBytes) complete = true;
+  } finally {
+    if (fd != null) fs.closeSync(fd);
+  }
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (complete) return { complete: true, lines: splitEditableLines(text).lines };
+  const parts = text.split(/\r?\n/);
+  // The final element is a partial line unless the budget ended exactly on
+  // an EOL; either way only whole lines are citable.
+  parts.pop();
+  return { complete: false, lines: parts.slice(0, maxLines) };
+}
+
 function materializeWorktreeEvidenceSelector(selector, context) {
   const projectDir = String(context?.projectDir || context?.cwd || "").trim();
   if (!projectDir) {
@@ -781,6 +846,8 @@ function materializeWorktreeEvidenceSelector(selector, context) {
         }),
       },
     }, { ownerScope: "work_item", db: context?.db || getDb() });
+    // This handoff just surfaced a ref of its own; later selectors see it.
+    invalidateSurfacedPathCandidates(context);
     if (!surfaced?.ok || !surfaced.entry?.ref) {
       fail(
         "AGENT_HANDOFF_EVIDENCE_NOT_MATERIALIZED",
@@ -797,10 +864,16 @@ function materializeWorktreeEvidenceSelector(selector, context) {
       source_selector: resolved.path,
     };
   }
+  // A bounded selector is read_file's own offset/limit contract: the
+  // whole-file size ceiling guards unbounded reads, not a cited range inside
+  // a large delivered source (a bundled asset, a generated fixture). Path,
+  // hidden-path, scope and sensitive-file checks still apply unchanged; the
+  // bytes actually read are bounded below instead.
   const readable = resolveDeterministicReadableFile(
     projectDir,
     resolved.path,
     context?.scopePredicates || null,
+    { maxSizeBytes: Infinity },
   );
   if (!readable.ok) {
     const missing = /^File not found:/i.test(readable.error);
@@ -809,8 +882,14 @@ function materializeWorktreeEvidenceSelector(selector, context) {
       `Evidence path ${resolved.path} is not readable: ${readable.error}`,
     );
   }
-  const content = fs.readFileSync(readable.path, "utf8");
-  const lines = splitEditableLines(content).lines;
+  const leading = readLeadingLines(readable.path, selector.end, RANGE_READ_MAX_BYTES);
+  if (!leading.complete && leading.lines.length < selector.end) {
+    fail(
+      "AGENT_HANDOFF_EVIDENCE_TOO_LARGE",
+      `Evidence ${resolved.path}:${selector.start}-${selector.end} lies beyond ${(RANGE_READ_MAX_BYTES / 1024 / 1024).toFixed(0)} MB of source; cite a range nearer the start or a delivered ref`,
+    );
+  }
+  const lines = leading.lines;
   if (selector.start > lines.length) {
     fail(
       "AGENT_HANDOFF_EVIDENCE_RANGE_INVALID",
@@ -3830,7 +3909,15 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
         count: cleanupItems.length,
         items: Object.freeze(cleanupItems),
         omitted_cleanup_records: materializationContext[EVIDENCE_CLEANUP_OVERFLOW],
-        dropped_selectors: cleanupItems.filter((item) => item.outcome === "dropped").length,
+        // A demoted claim is recorded with the dropped outcome because its
+        // evidence left the packet, but it is a claim-level decision, not a
+        // dropped selector. Count the two separately so telemetry can tell
+        // "six selectors failed" from "three claims lost their support".
+        dropped_selectors: cleanupItems.filter((item) => item.outcome === "dropped"
+          && item.action !== AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.DEMOTE_UNVERIFIED_CLAIM_TO_SUMMARY).length,
+        demoted_claims: cleanupItems.filter((item) => (
+          item.action === AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS.DEMOTE_UNVERIFIED_CLAIM_TO_SUMMARY
+        )).length,
         // Legacy telemetry field counts omitted records, not selectors.
         dropped: materializationContext[EVIDENCE_CLEANUP_OVERFLOW],
       }),

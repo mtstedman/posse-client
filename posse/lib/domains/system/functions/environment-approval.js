@@ -2,8 +2,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import {
   createJob, getJob, getLatestAttempt, getHumanGate, listJobsByWorkItem,
   runInTransaction, updateJobPayload, supersedeHumanGate, forceUpdateJobStatus,
+  requestEnvironmentSetupResume, environmentSetupResumeGranted, readRuntimeStatus, RUNTIME_STATUS_KEYS,
 } from "../../queue/functions/index.js";
-import { ENVIRONMENT_SETUP_REVIEW_TYPE, ENVIRONMENT_SETUP_APPROVAL_TIMEOUT_MS, ENVIRONMENT_SETUP_LIVE_MAX_MS } from "../../../catalog/tools/environment-setup.js";
+import { ENVIRONMENT_SETUP_REVIEW_TYPE, ENVIRONMENT_SETUP_APPROVAL_TIMEOUT_MS, ENVIRONMENT_SETUP_LIVE_MAX_MS, ENVIRONMENT_SETUP_RESUME_WAIT_MAX_MS } from "../../../catalog/tools/environment-setup.js";
 import { environmentSetupQuestion, executeEnvironmentSetup, prepareEnvironmentSetup } from "./project-environment.js";
 
 function payload(job) { return JSON.parse(job?.payload_json || "{}"); }
@@ -157,14 +158,51 @@ function clearLiveEnvironmentSetup(jobId, approvalJobId, { declined = false } = 
   });
 }
 
+// The scheduler heartbeat is written about every ten seconds; a heartbeat
+// older than this means no scheduler is running to grant a resume.
+const SCHEDULER_HEARTBEAT_FRESH_MS = 60_000;
+
+function schedulerHeartbeatFresh(nowMs = Date.now()) {
+  try {
+    const status = readRuntimeStatus(RUNTIME_STATUS_KEYS.SCHEDULER);
+    const heartbeat = Date.parse(String(status?.heartbeat_at || ""));
+    return Number.isFinite(heartbeat) && nowMs - heartbeat <= SCHEDULER_HEARTBEAT_FRESH_MS;
+  } catch {
+    return false;
+  }
+}
+
+// The call parked its agent's compute slot while it waited; before the agent
+// resumes it takes a slot back from the scheduler, which grants one per free
+// slot. The wait is bounded by the resume budget and by the marker's own
+// deadline, and skipped when no scheduler is alive to grant, so a missing
+// scheduler never deadlocks the call: the agent then resumes over
+// concurrency by one until a worker finishes, as it always did.
+export async function awaitComputeSlotForResume(request, context, { signal = null, timeoutMs = ENVIRONMENT_SETUP_RESUME_WAIT_MAX_MS, pollMs = 250 } = {}) {
+  const started = Date.now();
+  if (!requestEnvironmentSetupResume(context.jobId, request.approval_job_id)) return { granted: false, waited_ms: 0, reason: "marker_missing" };
+  const live = payload(getJob(context.jobId))._environment_setup_live;
+  const deadline = Math.min(started + timeoutMs, Date.parse(String(live?.deadline_at || "")) - 30_000 || Infinity);
+  while (true) {
+    if (environmentSetupResumeGranted(getJob(context.jobId), request.approval_job_id)) return { granted: true, waited_ms: Date.now() - started, reason: null };
+    if (signal?.aborted) return { granted: false, waited_ms: Date.now() - started, reason: "aborted" };
+    if (Date.now() >= deadline) return { granted: false, waited_ms: Date.now() - started, reason: "timeout" };
+    if (!schedulerHeartbeatFresh()) return { granted: false, waited_ms: Date.now() - started, reason: "scheduler_inactive" };
+    try { await delay(pollMs, undefined, { signal }); } catch { /* aborted: reported on the next check */ }
+  }
+}
+
 // One live setup call: wait for the user's decision, then run the approved
-// request. The waiting job stops earning watchdog exemption when it settles.
-export async function runEnvironmentSetupRequest(request, context, { signal = null, approvalTimeoutMs = ENVIRONMENT_SETUP_APPROVAL_TIMEOUT_MS } = {}) {
+// request, then wait for a compute slot. The waiting job stops earning
+// watchdog exemption when it settles.
+export async function runEnvironmentSetupRequest(request, context, { signal = null, approvalTimeoutMs = ENVIRONMENT_SETUP_APPROVAL_TIMEOUT_MS, resumeWaitMs = ENVIRONMENT_SETUP_RESUME_WAIT_MAX_MS } = {}) {
   let declined = false;
   try {
     const decision = await awaitEnvironmentSetupDecision({ request, context, signal, timeoutMs: approvalTimeoutMs });
     declined = decision.explicit === true;
-    return decision.approved ? await executeApprovedEnvironmentSetup(request, context, { signal }) : decision;
+    const result = decision.approved ? await executeApprovedEnvironmentSetup(request, context, { signal }) : decision;
+    const resume = await awaitComputeSlotForResume(request, context, { signal, timeoutMs: resumeWaitMs });
+    return { ...result, compute_resume: resume };
   } finally {
     try { clearLiveEnvironmentSetup(context.jobId, request.approval_job_id, { declined }); } catch { /* the marker's deadline bounds it */ }
   }

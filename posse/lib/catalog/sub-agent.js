@@ -25,8 +25,9 @@ export const SUB_AGENT_EVIDENCE_OUTCOMES = Object.freeze({
 });
 export const SUB_AGENT_LIMITS = Object.freeze({
   maxBatch: 3,
+  maxResearchBatch: 8,
   maxInputs: 3,
-  maxActiveChildren: 3,
+  maxActiveChildren: 8,
   // The child lane is shared by every concurrent parent. A batch that does not
   // fit waits in FIFO order for this long (further bounded by what its tool
   // deadline leaves after the children's own timeout) before it is refused.

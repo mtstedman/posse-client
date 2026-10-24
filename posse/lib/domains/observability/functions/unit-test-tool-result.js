@@ -8,6 +8,28 @@ import "../../../shared/tools/functions/ref-surface.js";
 
 const MAX_OUTPUT_EXCERPT_CHARS = 4000;
 
+// Runners print the failing case and its assertion where the failure happens
+// and a summary at the end; a verbose passing-test listing in between can push
+// the failure out of a plain tail. The excerpt starts at the first failure
+// marker when one exists and still ends with the tail, so the observation
+// carries what failed and how the run finished.
+const FAILURE_MARKER_RE = /^.*(?:\bFAIL(?:ED|URES?)?\b|\bERRORS?\b|✗|✕|×|●|\bnot ok\b|\bAssertion(?:Error|FailedError)\b|\bError:|\bexpected\b|\bFatal error\b).*$/im;
+const FAILURE_LEAD_MIN_CHARS = 1200;
+
+function failureFocusedExcerpt(output) {
+  if (output.length <= MAX_OUTPUT_EXCERPT_CHARS) return output;
+  const match = FAILURE_MARKER_RE.exec(output);
+  const tailStart = output.length - MAX_OUTPUT_EXCERPT_CHARS;
+  if (!match || match.index >= tailStart) return output.slice(-MAX_OUTPUT_EXCERPT_CHARS);
+  const lead = output.slice(match.index, match.index + Math.max(FAILURE_LEAD_MIN_CHARS, Math.floor(MAX_OUTPUT_EXCERPT_CHARS / 2)));
+  const tail = output.slice(-(MAX_OUTPUT_EXCERPT_CHARS - lead.length - 1));
+  // The tail may begin inside the lead when the two windows overlap; then the
+  // lead already runs to the end and the tail adds nothing.
+  if (match.index + lead.length >= output.length - tail.length) {
+    return output.slice(match.index, match.index + MAX_OUTPUT_EXCERPT_CHARS);
+  }
+  return `${lead}\n…\n${tail}`.slice(0, MAX_OUTPUT_EXCERPT_CHARS + 3);
+}
 
 function nonNegativeIntegerOrNull(value) {
   const number = Number(value);
@@ -24,7 +46,7 @@ export function unitTestToolResultObservation({ tool, resultText = "" } = {}) {
     .map((value) => String(value || "").trim())
     .filter(Boolean)
     .join("\n");
-  const excerpt = payload.outcome === "passed" ? null : output.slice(-MAX_OUTPUT_EXCERPT_CHARS) || null;
+  const excerpt = payload.outcome === "passed" ? null : failureFocusedExcerpt(output) || null;
   const exitCode = Number.isInteger(payload.exit_code) ? payload.exit_code : null;
   const executedCommitHash = /^[0-9a-f]{40,64}$/i.test(String(payload.executed_commit_hash || ""))
     ? String(payload.executed_commit_hash).toLowerCase()

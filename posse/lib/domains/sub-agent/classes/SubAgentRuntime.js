@@ -1735,15 +1735,17 @@ export class SubAgentRuntime {
     if (!registration?.accepting) {
       throw runtimeError("SUB_AGENT_PARENT_UNAVAILABLE", "The parent provider call cannot dispatch citation children", { stage: "admission" });
     }
-    if (!Array.isArray(input.requests) || input.requests.length < 1 || input.requests.length > SUB_AGENT_LIMITS.maxBatch) {
-      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "requests must contain one to three entries", { stage: "validation" });
+    const researchRequest = Array.isArray(input.requests) && input.requests.some((item) => item?.profile === RESEARCH_CHILD_PROFILE);
+    const researchOnly = researchRequest && input.requests.every((item) => item?.profile === RESEARCH_CHILD_PROFILE);
+    const maxBatch = researchOnly ? SUB_AGENT_LIMITS.maxResearchBatch : SUB_AGENT_LIMITS.maxBatch;
+    if (!Array.isArray(input.requests) || input.requests.length < 1 || input.requests.length > maxBatch) {
+      throw runtimeError("SUB_AGENT_SCHEMA_INVALID", `requests must contain one to ${maxBatch} entries`, { stage: "validation" });
     }
     const completion = exactObject(input.completion, ["mode"], "completion");
     if (!["async", "wait_all"].includes(completion.mode)) {
       throw runtimeError("SUB_AGENT_SCHEMA_INVALID", "completion.mode must be async or wait_all", { stage: "validation" });
     }
     const digest = requestDigest(input);
-    const researchRequest = input.requests.some((item) => item?.profile === RESEARCH_CHILD_PROFILE);
     const replay = [...this.batches.values()].find((batch) => batch.parentCallId === parentCallId && batch.requestDigest === digest);
     if (replay) return await this.#replayBatch(replay);
 
