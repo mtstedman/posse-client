@@ -713,7 +713,7 @@ export function getDeterministicMcpToolNames(role, {
   if (role === "assessor") tools.push(...DETERMINISTIC_IMAGE_VIEW_TOOLS);
   if (roleUsesDeterministicAssetDownload(role)) tools.push(...DETERMINISTIC_ASSET_DOWNLOAD_TOOLS);
   if (["planner", "dev", "assessor"].includes(role)) tools.push("run_unit_test", "inspect_environment");
-  if (role === "planner") tools.push("setup_environment");
+  if (role === "planner") tools.push("setup_environment", TOOL_REQUEST_CLARIFICATION.name);
   if (role === "dev") tools.push("install_dependencies", "setup_database");
   // Scoped lint/typecheck belongs to the assessor.
   if (role === "assessor") {

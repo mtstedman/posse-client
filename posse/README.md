@@ -249,6 +249,60 @@ Important defaults:
 Older slugged worktree directories are detected and migrated to the canonical
 `wi-{id}` path when possible.
 
+### Incremental run monitoring for agents
+
+From this package directory, check the latest scheduler run in a target project:
+
+```bash
+node tools/monitor-run.mjs --project /path/to/project
+```
+
+Repeat the same command to see only new signals. The first check starts at the
+beginning of the run; each check emits at most 40 signals, and `backlog remains`
+means another check will continue draining unread data. The monitor reads only
+new telemetry bytes (at most 8 MiB per stream per check) and saves its cursor
+under `$XDG_STATE_HOME/posse/run-monitor`, or `~/.local/state/posse/run-monitor`.
+
+Signals include human questions and gate state changes, selected answers/actions
+and their outcomes, job/work-item transitions, assessments, merges, retries,
+warnings/errors, shutdown, and stale heartbeat changes. Gate snapshots include
+automatic-decision provenance when recorded. They use the live database in
+read-only mode, scoped to work items observed in the run (or `--work-item`).
+Gate state reflects the latest database state; the event stream retains emitted
+question/answer history, including gates opened and resolved between checks.
+Unchanged gates are not repeated. Heartbeat staleness is a warning, not proof of
+a dead process. Missing/unreadable gate data is reported explicitly.
+
+Routine context/indexing logs, raw prompts, tool payloads, and stacks are omitted;
+indexing warnings/errors remain visible. Text is bounded and secret-scrubbed.
+Output includes IDs for deeper investigation in the original logs and database.
+
+```bash
+# Continuous polling; idle checks are silent. Stop with Ctrl-C.
+node tools/monitor-run.mjs --project /path/to/project --watch --poll-ms 2000
+
+# Machine-readable checks for one work item, with an independent agent cursor.
+node tools/monitor-run.mjs --project /path/to/project --work-item 42 \
+  --state job-42 --json
+
+# Pin a specific run rather than selecting the latest scheduler run.
+node tools/monitor-run.mjs --project /path/to/project --run <run-id>
+```
+
+Use `--run-dir` for an explicit telemetry directory and `--db` for a nonstandard
+gate database. Watch mode stays on its selected run; a new one-shot invocation
+selects the latest run again. `--state <job>` names a cursor; the monitor manages
+its storage automatically. Names are scoped to the selected run and work-item
+filter, so the same name can be reused safely across projects, runs, and filters.
+The name does not select a job: use `--work-item` to filter the monitored work.
+Names accept 1–80 letters, digits, dots, underscores, or hyphens, starting with
+a letter or digit. Omit the option to use `default`; choose a new name to replay
+history or maintain an independent observer.
+The cursor is locked against simultaneous consumers and saved after successful
+output; a crash between output and saving can replay the last batch. If a hard
+kill leaves a `.lock` file beside the cursor, verify its recorded PID has stopped
+before removing it. The monitor never starts a scheduler or mutates the run DB.
+
 ## Install, sign up, and start
 
 Follow the [installation walkthrough](installers/README.md) for obtaining a
