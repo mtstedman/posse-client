@@ -3,7 +3,7 @@ import { errorSummary, safeRemoteOrigin, remoteSurfaceSummary } from "../functio
 import path from "path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "url";
-import { withToolExecutionAliases } from "../../../catalog/tool-surface/compatibility.js";
+import { supportedMcpToolNames, assertSupportedMcpTools } from "../functions/runtime-tool-capabilities.js";
 import {
   DEFAULT_MCP_OAUTH_TTL_SECONDS,
   POSSE_MCP_GATEWAY_SERVER_NAME,
@@ -14,11 +14,7 @@ import {
   getRuntimeResourcesDir,
 } from "../../../domains/runtime/functions/paths.js";
 import {
-  getDeterministicMcpToolNames,
-  roleUsesDeterministicImageHelpers,
-  roleUsesDeterministicImageMcp,
   roleUsesDeterministicReadMcp,
-  roleUsesDeterministicWriteMcp,
 } from "../../../domains/integrations/functions/deterministic-mcp/tool-descriptors.js";
 import {
   getPosseRemoteMode,
@@ -276,25 +272,6 @@ function boolEnv(value) {
   return value ? "true" : "false";
 }
 
-function expectedMcpToolNames(role, bootPayload = {}) {
-  try {
-    return getDeterministicMcpToolNames(role, {
-      needsImageGeneration: bootPayload.allowImageGeneration === true,
-      agentHandoff: bootPayload.agentHandoff === true,
-      subAgent: bootPayload.subAgent === true,
-      dispatchAgent: bootPayload.dispatchAgent === true,
-      webResearchHandoff: bootPayload.webResearchHandoff === true,
-      finalReview: bootPayload.finalReview === true,
-      atlasAvailable: bootPayload.atlasAvailable === true,
-      disableSystemTools: bootPayload.disableSystemTools === true,
-      researchInvestigation: bootPayload.researchInvestigation === true,
-      customTools: bootPayload.customTools === true,
-    });
-  } catch {
-    return [];
-  }
-}
-
 function canonicalProjectionNames(allowlist = {}) {
   const normalized = normalizeSuiteToolAllowlist(allowlist);
   return [
@@ -322,14 +299,6 @@ function validateAgentToolProjection(role, requestedBootPayload = {}, projectedB
   if (requestedBootPayload.coordinationChild === true) {
     for (const name of requestedTools) {
       if (!projectedTools.has(name)) missingRequirements.push(`tools.${name}`);
-    }
-  } else {
-    if (requestedBootPayload.allowWrite === true) {
-      if (String(role || "").trim().toLowerCase() === "dev") {
-        if (requestedTools.includes("edit_file") && !projectedTools.has("edit_file")) {
-          missingRequirements.push("tools.edit_file");
-        }
-      }
     }
   }
 
@@ -451,7 +420,7 @@ function recordJobHandoffContractDrift(role, bootPayload = {}, gate = null, jobS
 
 function logMcpBootTelemetry(kind, role, bootPayload = {}, extra = {}) {
   const remoteCatalog = bootPayload.remoteCatalog || {};
-  const expectedTools = expectedMcpToolNames(role, bootPayload);
+  const expectedTools = bootPayload.toolAllowlist?.tools || [];
   appendRunTelemetry("diagnostics", {
     kind,
     component: "deterministic_mcp",
@@ -628,10 +597,8 @@ function buildDeterministicMcpBootPayload(role, {
   atlasAvailable = null,
   atlasGateEnabled = true,
   atlasConfig = null,
-  // Caller override for the role-derived write capability (null = role
-  // default). db-mode dev jobs pass allowWrite:false + projectDbWrite:true:
-  // file tools off, project_db_query on the write lane. The override can only
-  // narrow — it is ANDed with the role capability, never widens it.
+  // Explicit local execution restriction. Remote still must authorize writes;
+  // DB-only jobs disable file writes independently of SQL authorization.
   allowWrite = null,
   projectDbWrite = false,
   projectDbCapability = null,
@@ -650,28 +617,16 @@ function buildDeterministicMcpBootPayload(role, {
   const atlasEnabled = (typeof atlasAvailable === "boolean")
     ? atlasAvailable
     : resolvedAtlasConfig.enabled;
-  const allowImageGeneration = roleUsesDeterministicImageMcp(role) && !!needsImageGeneration;
-  const expectedTools = getDeterministicMcpToolNames(role, {
-    needsImageGeneration: allowImageGeneration,
-    agentHandoff: agentHandoff === true,
-    subAgent: subAgent === true,
-    dispatchAgent: dispatchAgent === true,
-    webResearchHandoff: webResearchHandoff === true,
-    finalReview: finalReview === true,
-    atlasAvailable: atlasEnabled,
-    disableSystemTools: disableSystemTools === true,
-    researchInvestigation: researchInvestigation === true,
-    customTools,
-  });
-  const allowShell = expectedTools.includes("bash");
+  const allowImageGeneration = !!needsImageGeneration;
+  // Advertise installed implementations, never a second role policy. Remote
+  // determines the authorized subset. Explicit local constraints only narrow it.
+  const supportedTools = supportedMcpToolNames();
+  const allowShell = coordinationChild !== true;
   const requestedProjectDbCapability = normalizeProjectDbCapability(
     projectDbCapability || (projectDbWrite === true ? "write" : "none"),
   );
   const agentLifetimeContract = scopeBindingMode === "dispatcher";
-  const allowTests = (agentLifetimeContract || requestedProjectDbCapability !== "write") && expectedTools.some((name) => [
-    "run_scoped_checks",
-    "run_unit_test",
-  ].includes(name));
+  const allowTests = (agentLifetimeContract || requestedProjectDbCapability !== "write") && coordinationChild !== true;
   const remoteCatalogMode = getPosseRemoteMode();
   const remoteCatalogEnabled = remoteCatalogMode !== "off";
   return {
@@ -686,12 +641,12 @@ function buildDeterministicMcpBootPayload(role, {
       deleteFiles: Array.isArray(deleteFiles) ? deleteFiles : [],
       createRoots: Array.isArray(createRoots) ? createRoots : [],
       readRoots: Array.isArray(readRoots) ? readRoots : [],
-      allowWrite: roleUsesDeterministicWriteMcp(role) && allowWrite !== false,
+      allowWrite: coordinationChild !== true && allowWrite !== false,
       allowShell,
       allowTests,
       projectDbCapability: requestedProjectDbCapability,
       projectDbWrite: projectDbWrite === true && requestedProjectDbCapability === "write",
-      allowImageHelpers: roleUsesDeterministicImageHelpers(role),
+      allowImageHelpers: coordinationChild !== true,
       allowImageGeneration,
       agentHandoff: agentHandoff === true,
       agentHandoffReportOnly: agentHandoff === true && agentHandoffReportOnly === true && role === "researcher",
@@ -750,22 +705,16 @@ function buildDeterministicMcpBootPayload(role, {
           ? { ...resolvedAtlasConfig.codeWindowPolicy }
           : null,
       },
-      // Remote issuance is authoritative but may only narrow this local role
-      // projection. Persist the local tools lane so a stale remote catalog
-      // cannot reintroduce a tool (notably deprecated code write_file) that
-      // this runtime no longer exposes.
-      toolAllowlist: {
-        tools: coordinationChild === true
-          ? ["sub_agent_next_input", "agent_handoff"]
-          : withToolExecutionAliases(expectedTools),
-        ...(coordinationChild === true ? { atlas: [] } : {}),
-      },
+      supportedTools,
+      ...(coordinationChild === true ? {
+        toolAllowlist: { tools: ["sub_agent_next_input", "agent_handoff"], atlas: [] },
+      } : {}),
       remoteCatalog: {
         enabled: remoteCatalogEnabled,
         mode: remoteCatalogMode,
         baseUrl: remoteCatalogEnabled ? getPosseRemoteUrl() : "",
         timeoutMs: remoteCatalogEnabled ? getPosseRemoteTimeoutMs() : "",
-        requestMcpOAuth: expectedTools.length > 0,
+        requestMcpOAuth: role !== "preflight" && role !== "summary",
         requestedSuites: [
           "tools",
           ...(atlasEnabled ? ["atlas"] : []),
@@ -1130,6 +1079,11 @@ export class McpServerConfig {
     if (opts.coordinationChild === true) {
       bootPayload.toolAllowlist = { tools: ["sub_agent_next_input", "agent_handoff"], atlas: [] };
     }
+    const issuedPolicy = normalizeRemoteIssuedPolicy(issuedSurface, { expectedRole: role, expectedProvider: opts.providerName || null });
+    assertSupportedMcpTools(issuedToolNamesForSuite(issuedSurface.tool_surface || issuedSurface.tools || [], "tools"));
+    // Start with Remote's grant, then subtract operator exclusions. This is
+    // the only tools allowlist we sign; implementation inventory is not a grant.
+    if (opts.coordinationChild !== true) bootPayload.toolAllowlist = issuedPolicy.toolAllowlist;
     const disabledAgentTools = resolveAgentDisabledTools({ role });
     const disabledAtlasTools = new Set([...resolveAtlasDisabledTools(), ...disabledAgentTools.atlas]);
     if (!resolveAtlasCodeLensCallable()) disabledAtlasTools.add("code.lens");
@@ -1138,9 +1092,7 @@ export class McpServerConfig {
         ? issuedSurface.tool_surface
         : (Array.isArray(issuedSurface?.tools) ? issuedSurface.tools : []);
       bootPayload.toolAllowlist = {
-        // The local role projection stays the upper bound for deterministic
-        // tools; the testing toggle only narrows it.
-        tools: (bootPayload.toolAllowlist?.tools || expectedMcpToolNames(role, bootPayload))
+        tools: bootPayload.toolAllowlist.tools
           .filter((name) => !disabledAgentTools.tools.has(String(name || "").toLowerCase())),
         atlas: issuedToolNamesForSuite(issuedEntries, "atlas")
           .filter((name) => !disabledAtlasTools.has(String(name || "").toLowerCase())),

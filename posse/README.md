@@ -102,14 +102,30 @@ policy. Posse treats that response as a ceiling. Runtime availability, task
 mode, file scope, and operator settings may remove capabilities but never add
 them.
 
-Missing or mismatched issuance fails closed. Provider contracts intersect base
-and attached tools with the exact remote list; MCP owner tokens carry the same
+Missing or mismatched issuance fails closed. Provider contracts intersect signed
+agent and attached job grants with the exact remote list; MCP owner tokens carry the same
 suite-scoped allowlist and server-derived policy facts. Unsigned boot payloads
 cannot widen signed claims. `project_db_query` additionally requires the issued
 `read` or `write` capability and the repository's configured SQL grants. Web
 tools require both the issued role grant and the operator kill switch. Internal
 ATLAS orchestration actions, including `edit.plan` and `workflow`, are excluded
 from provider and MCP surfaces even if a caller asserts them.
+
+Gate and prompt requests advertise runtime support, not a second local role
+permission table. The authenticated Remote catalog supplies the tool list;
+`agent_tools_disabled` and the Atlas exclusions subtract from it. An installed
+handler is not a grant. Unsupported tools fail before an agent token is minted.
+Authenticated MCP execution preserves Remote role assignments while enforcing
+the signed capabilities, current job binding, file scope, and runtime prerequisites.
+Legacy role tables remain compatibility metadata for older internal callers;
+they do not cap the authenticated agent surface.
+
+The local owner signs a transport credential derived from the Remote grant; it
+does not independently choose role permissions. Gates and operator exclusions
+are frozen at mint time. Remote policy changes apply to newly minted gates;
+expanding an existing token is rejected and requires a fresh gate. Job attachment
+can narrow a grant but cannot widen it. The cross-repository tool compatibility
+check verifies installed definitions rather than requiring matching role lists.
 
 ## Codex provider dispatch
 

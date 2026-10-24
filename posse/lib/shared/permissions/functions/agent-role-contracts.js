@@ -4,13 +4,8 @@ import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
 import { atlasMemoryEnabled } from "../../policies/functions/memory-mode.js";
 
 const PROVIDER_ROLE_SET = new Set(PROVIDER_ROLE_NAMES);
-const WRITE_ROLES = new Set(["dev", "artificer"]);
-const WRITE_DB_ROLES = new Set(["dev", "planner"]);
-const READ_DB_ROLES = new Set(["assessor"]);
-const HANDOFF_ROLES = new Set(["researcher", "planner", "dev", "artificer", "assessor"]);
-
 /**
- * Return the dispatcher-owned maximum tool contract for a provider agent.
+ * Return the runtime capabilities for Remote to authorize for a provider agent.
  * No Job/WI values are accepted here: those belong exclusively to the live
  * owner-side scope binding and may only narrow this role contract.
  *
@@ -23,38 +18,30 @@ export function resolveAgentRoleContract({ role, providerName = null, agentHando
     throw new Error(`Unknown provider agent role: ${normalizedRole || "<empty>"}`);
   }
   const child = coordinationChild === true;
-  // This contract is the role's maximum; the per-Job remote issuance narrows
-  // it at attach time. The remote planner role carries a "requested" project
-  // DB policy (it may execute a database-only work item itself), so its
-  // maximum is write: a reusable gate minted at "none" refused every planner
-  // Job in a DB-mode repository as exceeding the gate.
-  const projectDbCapability = child
-    ? "none"
-    : WRITE_DB_ROLES.has(normalizedRole)
-    ? "write"
-    : (READ_DB_ROLES.has(normalizedRole) ? "read" : "none");
+  // These describe runtime support. Remote owns role-specific permission;
+  // the signed response and the live Job scope supply execution authority.
+  const projectDbCapability = child ? "none" : "write";
   return Object.freeze({
     role: normalizedRole,
     providerName: normalizedProvider,
-    allowWrite: !child && WRITE_ROLES.has(normalizedRole),
+    allowWrite: !child,
     projectDbCapability,
     projectDbWrite: projectDbCapability === "write",
-    needsImageGeneration: !child && normalizedRole === "artificer",
+    needsImageGeneration: !child,
     atlasAvailable: !child && atlasAvailable !== false,
     atlasGateEnabled: true,
     disableSystemTools: child,
     memoryEnabled: !child && atlasMemoryEnabled(),
-    agentHandoff: agentHandoff === true && HANDOFF_ROLES.has(normalizedRole),
+    agentHandoff: agentHandoff === true,
     agentHandoffReportOnly: agentHandoff === true
-      && agentHandoffReportOnly === true
-      && normalizedRole === "researcher",
-    subAgent: !child && subAgent === true && HANDOFF_ROLES.has(normalizedRole),
-    dispatchAgent: !child && dispatchAgent === true && ["researcher", "planner"].includes(normalizedRole),
-    webResearchHandoff: !child && webResearchHandoff === true && normalizedRole === "researcher",
+      && agentHandoffReportOnly === true,
+    subAgent: !child && subAgent === true,
+    dispatchAgent: !child && dispatchAgent === true,
+    webResearchHandoff: !child && webResearchHandoff === true,
     // The developer requests reviews; its reviewer (an assessor call flagged
     // with final_review_v1) reports and waits with the same tool.
-    finalReview: !child && finalReview === true && agentHandoff === true && ["dev", "assessor"].includes(normalizedRole),
-    researchInvestigation: !child && researchInvestigation === true && ["researcher", "planner"].includes(normalizedRole),
+    finalReview: !child && finalReview === true && agentHandoff === true,
+    researchInvestigation: !child && researchInvestigation === true,
     coordinationChild: child,
   });
 }

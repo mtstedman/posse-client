@@ -10,7 +10,6 @@ import { ENVIRONMENT_SETUP_TOOLS } from "../../../catalog/tools/environment-setu
 // authority above the remote response.
 
 import { INTERNAL_ATLAS_SURFACE_ACTION_SET } from "../../../catalog/internal-tools.js";
-import { atlasReplacesNativeTool } from "../../../catalog/tools/source-navigation.js";
 import { isRemotePromptClientIssuance } from "../../../domains/remote/classes/RemotePromptClient.js";
 
 const KNOWN_ISSUED_ROLES = new Set([
@@ -205,18 +204,12 @@ function toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvaila
   if (tool.suite === "tools" && tool.name === "sub_agent_next_input") return coordination.subAgentNextInput === true;
   if (tool.suite === "tools" && tool.name === "dispatch_agent") return coordination.dispatchAgent === true;
   if (tool.suite === "tools" && tool.name === "web_research_handoff") return coordination.webResearchHandoff === true;
-  // The developer requests reviews on a writable lane; its read-only reviewer
-  // (an assessor child the client flags) reports and waits with the same tool.
-  // Mirrors posse-remote final_review_issued_to.
-  if (tool.suite === "tools" && tool.name === "final_review") {
-    return coordination.finalReview === true
-      && ((policy.allow_write === true && coordination.role === "dev") || coordination.role === "assessor");
-  }
+  if (tool.suite === "tools" && tool.name === "final_review") return coordination.finalReview === true;
   if (tool.suite === "tools" && tool.name === "ack_operator_feedback" && coordination.webResearchHandoff === true) return true;
   if (!policy.allow_read) return false;
   if (tool.suite === "atlas") return atlasAvailable !== false;
-  if (tool.name === "setup_environment") return policy.allow_read && coordination.role === "planner";
-  if (ENVIRONMENT_SETUP_TOOLS.includes(tool.name)) return policy.allow_write && coordination.role === "dev";
+  if (tool.name === "setup_environment") return policy.allow_read;
+  if (ENVIRONMENT_SETUP_TOOLS.includes(tool.name)) return policy.allow_write;
   if (tool.name === "project_db_query") return projectDbCapability !== "none";
   if (TEST_TOOL_NAMES.has(tool.name)) return policy.allow_tests;
   if (tool.name === "bash") return policy.allow_shell;
@@ -252,16 +245,10 @@ export function normalizeIssuedToolSurface(value, {
   finalReviewAvailable = false,
 } = {}) {
   const entries = Array.isArray(value) ? value : [];
-  const hasAtlasSurface = atlasAvailable === true
-    && entries.some((entry) => canonicalToolEntry(entry)?.suite === "atlas");
   const out = [];
   for (const entry of entries) {
     const tool = canonicalToolEntry(entry);
     const normalizedRole = normalizeIssuedRole(role);
-    if (hasAtlasSurface
-      && tool?.suite === "tools"
-      && !(normalizedRole === "planner" && tool.name === "read_file")
-      && atlasReplacesNativeTool(tool.name, normalizedRole)) continue;
     if (!toolAllowedByIssuedFacts(tool, policy, projectDbCapability, atlasAvailable, {
       agentHandoff: coordinationAvailable,
       subAgent: subAgentAvailable,

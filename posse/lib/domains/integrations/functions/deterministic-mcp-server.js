@@ -792,6 +792,10 @@ function tokenToolAllowlistForSuite(suiteName) {
   return new Set(names.map((name) => String(name || "").trim()).filter(Boolean));
 }
 
+function hasVerifiedToolContract() {
+  return bootConfig?.mcpOAuth?.verified === true && hasTokenToolAllowlist();
+}
+
 function hasTokenToolAllowlist() {
   return !!(bootConfig?.toolAllowlist && typeof bootConfig.toolAllowlist === "object" && !Array.isArray(bootConfig.toolAllowlist));
 }
@@ -1196,25 +1200,28 @@ function environmentContext() {
 }
 
 async function requestEnvironmentWithinJob(tool, args = {}) {
-  if (tool === "setup_environment" ? roleName !== "planner" : (!writeEnabled || roleName !== "dev")) throw new Error("Batched setup requires a planner; other installers require a writable dev job.");
+  if (tool !== "setup_environment" && !writeEnabled) throw new Error("Installer requires write permission.");
+  if (!hasVerifiedToolContract() && (tool === "setup_environment" ? roleName !== "planner" : roleName !== "dev")) {
+    throw new Error("Batched setup requires a planner; other installers require a writable dev job.");
+  }
   const context = environmentContext();
   const request = await requestEnvironmentSetup(tool, args, context);
   return { [LIVE_SCOPE_WAIT]: true, request, operation: tool, args, environmentContext: context };
 }
 
 function attachEnvironmentTools() {
-  if (ownerHotGateway || roleName === "planner") {
+  if (ownerHotGateway || hasVerifiedToolContract() || roleName === "planner") {
     mcpToolRegistry.attach(PLANNER_CLARIFICATION_TOOL, (args) => {
       const context = environmentContext();
       const request = requestPlannerClarification(args, context);
       return { [LIVE_SCOPE_WAIT]: true, request, operation: PLANNER_CLARIFICATION_TOOL, args, environmentContext: context };
     });
   }
-  if (ownerHotGateway || ["planner", "dev", "assessor"].includes(roleName)) {
+  if (ownerHotGateway || hasVerifiedToolContract() || ["planner", "dev", "assessor"].includes(roleName)) {
     mcpToolRegistry.attach("inspect_environment", (args) => JSON.stringify(inspectEnvironment(args || {}, environmentContext())));
   }
   for (const tool of ENVIRONMENT_SETUP_TOOLS) {
-    if (ownerHotGateway || (tool === "setup_environment" ? roleName === "planner" : roleName === "dev" && writeEnabled)) {
+    if (ownerHotGateway || hasVerifiedToolContract() || (tool === "setup_environment" ? roleName === "planner" : roleName === "dev" && writeEnabled)) {
       mcpToolRegistry.attach(tool, (args) => requestEnvironmentWithinJob(tool, args));
     }
   }
@@ -1468,10 +1475,10 @@ function legacyToolNamesForUnscopedRole() {
 }
 
 function runtimeToolAvailable(toolName) {
-  if (toolName === PLANNER_CLARIFICATION_TOOL) return (ownerHotGateway && !mcpMessageSessionScoped) || roleName === "planner";
-  if (toolName === "setup_environment") return (ownerHotGateway && !mcpMessageSessionScoped) || roleName === "planner";
-  if (ENVIRONMENT_SETUP_TOOLS.includes(toolName)) return writeEnabled && ((ownerHotGateway && !mcpMessageSessionScoped) || roleName === "dev");
-  if (toolName === "inspect_environment") return (ownerHotGateway && !mcpMessageSessionScoped) || ["planner", "dev", "assessor"].includes(roleName);
+  if (toolName === PLANNER_CLARIFICATION_TOOL) return (ownerHotGateway && !mcpMessageSessionScoped) || hasVerifiedToolContract() || roleName === "planner";
+  if (toolName === "setup_environment") return (ownerHotGateway && !mcpMessageSessionScoped) || hasVerifiedToolContract() || roleName === "planner";
+  if (ENVIRONMENT_SETUP_TOOLS.includes(toolName)) return writeEnabled && ((ownerHotGateway && !mcpMessageSessionScoped) || hasVerifiedToolContract() || roleName === "dev");
+  if (toolName === "inspect_environment") return (ownerHotGateway && !mcpMessageSessionScoped) || hasVerifiedToolContract() || ["planner", "dev", "assessor"].includes(roleName);
   if (toolName === "custom_tools") return ownerHotGateway || bootConfig.customTools === true;
   if (WRITE_TOOL_NAMES.has(toolName)) return writeEnabled;
   if (toolName === "download_file" || toolName === "compose_sprite_sheet") return writeEnabled;
@@ -1485,9 +1492,9 @@ function runtimeToolAvailable(toolName) {
   }
   if (IMAGE_HELPER_TOOL_NAMES.has(toolName)) return allowImageHelpers;
   if (OCR_TOOL_NAMES.has(toolName)) return allowImageHelpers;
-  // Assessor-only even when a token or role list would carry it elsewhere.
+  // Remote chooses recipients; image runtime support still bounds execution.
   if (IMAGE_VIEW_TOOL_NAMES.has(toolName)) {
-    return allowImageHelpers && ((ownerHotGateway && !mcpMessageSessionScoped) || roleName === "assessor");
+    return allowImageHelpers && ((ownerHotGateway && !mcpMessageSessionScoped) || hasVerifiedToolContract() || roleName === "assessor");
   }
   if (IMAGE_GENERATION_TOOL_NAMES.has(toolName)) return allowImageGeneration;
   if (toolName === "bash") return allowBash;
@@ -1589,7 +1596,7 @@ addToolSchema(getToolSchemaForRole("final_review", roleName));
 // chain ledger remains available only when Atlas is absent.
 // Owner-hot mode keeps every tool implementation loaded; per-session shims/owner
 // gates decide which of these schemas an agent sees and may call.
-if (ownerHotGateway) {
+if (ownerHotGateway || hasVerifiedToolContract()) {
   addToolSchema(readFileSchemaForCurrentBoot());
   addToolSchema(TOOL_CHAIN_READ);
   addToolSchema(TOOL_CHAIN_VERDICT);
@@ -1617,10 +1624,10 @@ if (writeEnabled) {
 if (allowBash) {
   addToolSchema(TOOL_BASH);
 }
-if (ownerHotGateway || roleName === "assessor") {
+if (ownerHotGateway || hasVerifiedToolContract() || roleName === "assessor") {
   addToolSchema(getToolSchemaForRole("run_scoped_checks", roleName));
 }
-if (unitTestCapability.available && (ownerHotGateway || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
+if (unitTestCapability.available && (ownerHotGateway || hasVerifiedToolContract() || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
 
 function recordAtlasLiveObservation(entry = {}) {
   const observationType = String(entry.observation_type || "").trim();
@@ -2381,7 +2388,7 @@ if (writeEnabled) {
 if (allowBash && execBash) {
   mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd, effectiveScopePredicates));
 }
-if (ownerHotGateway || roleName === "dev" || roleName === "assessor" || roleName === "planner") {
+if (ownerHotGateway || hasVerifiedToolContract() || roleName === "dev" || roleName === "assessor" || roleName === "planner") {
   mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
   mcpToolRegistry.attach("run_unit_test", (args) => execRunUnitTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, { unitTestCapability, scipAvailable: atlasAvailable, agentCallId: mcpAgentCallId }));
 }
@@ -2389,9 +2396,9 @@ if (allowImageHelpers) {
   mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput({ output_root: bootConfig.artifactOutputRoot, ...args }, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
-  // view_image is assessor-only; owner-hot attaches every executor and the
-  // remote token gates each call.
-  if (ownerHotGateway || roleName === "assessor") {
+  // Authenticated sessions use the issued grant; the role fallback is only
+  // for legacy internal boots without a signed contract.
+  if (ownerHotGateway || hasVerifiedToolContract() || roleName === "assessor") {
     mcpToolRegistry.attach("view_image", (args) => viewImageForCurrentScope(args || {}));
   }
 }
@@ -2399,7 +2406,7 @@ if (allowImageHelpers) {
 // artificer-only. Owner-hot attaches every executor (the remote token gates per
 // call); scoped boots attach them only for the artificer role so a read-only
 // assessor cannot reach them in a no-token boot.
-if (ownerHotGateway || roleName === "artificer") {
+if (ownerHotGateway || hasVerifiedToolContract() || roleName === "artificer") {
   mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
   mcpToolRegistry.attach("compose_sprite_sheet", (args) => composeSpriteSheetForCurrentScope(args || {}));
   mcpToolRegistry.attach("download_file", (args) => downloadFilesForCurrentScope(args || {}));
@@ -2407,7 +2414,7 @@ if (ownerHotGateway || roleName === "artificer") {
 if (allowImageGeneration) {
   mcpToolRegistry.attach("generate_image", (args) => generateImageWithinScope(args || {}));
 }
-if (ownerHotGateway || isResearcherRole) {
+if (ownerHotGateway || hasVerifiedToolContract() || isResearcherRole) {
   mcpToolRegistry.attach("chain_read", (args) => chainRead(args || {}));
   mcpToolRegistry.attach("chain_verdict", (args) => chainVerdict(args || {}));
 }
@@ -2535,7 +2542,7 @@ function rebuildNativeToolSchemas() {
   }));
   addToolSchema(TOOL_WEB_RESEARCH_HANDOFF);
   addToolSchema(getToolSchemaForRole("final_review", roleName));
-  if (ownerHotGateway) {
+  if (ownerHotGateway || hasVerifiedToolContract()) {
     addToolSchema(readFileSchemaForCurrentBoot());
     addToolSchema(TOOL_CHAIN_READ);
     addToolSchema(TOOL_CHAIN_VERDICT);
@@ -2561,10 +2568,10 @@ function rebuildNativeToolSchemas() {
     }
   }
   if (allowBash) addToolSchema(TOOL_BASH);
-  if (ownerHotGateway || roleName === "assessor") {
+  if (ownerHotGateway || hasVerifiedToolContract() || roleName === "assessor") {
     addToolSchema(getToolSchemaForRole("run_scoped_checks", roleName));
   }
-  if (unitTestCapability.available && (ownerHotGateway || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
+  if (unitTestCapability.available && (ownerHotGateway || hasVerifiedToolContract() || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
   if (allowImageHelpers) {
     for (const schema of [TOOL_READ_IMAGE_METADATA, TOOL_VALIDATE_ARTIFACT_OUTPUT, TOOL_CLEAN_IMAGE, TOOL_EXTRACT_IMAGE_TEXT, TOOL_VIEW_IMAGE]) {
       addToolSchema(schema);
@@ -2609,7 +2616,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
   if (allowBash && execBash) {
     mcpToolRegistry.attach("bash", (args) => execBash(args || {}, workspaceCwd, effectiveScopePredicates));
   }
-  if (ownerHotGateway || roleName === "dev" || roleName === "assessor" || roleName === "planner") {
+  if (ownerHotGateway || hasVerifiedToolContract() || roleName === "dev" || roleName === "assessor" || roleName === "planner") {
     mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
     mcpToolRegistry.attach("run_unit_test", (args) => execRunUnitTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, { unitTestCapability, scipAvailable: atlasAvailable, agentCallId: mcpAgentCallId }));
   }
@@ -2617,14 +2624,12 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
     mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
     mcpToolRegistry.attach("validate_artifact_output", (args) => execValidateArtifactOutput({ output_root: bootConfig.artifactOutputRoot, ...args }, workspaceCwd, effectiveScopePredicates));
     mcpToolRegistry.attach("extract_image_text", (args) => execExtractImageText(args || {}, workspaceCwd, effectiveScopePredicates));
-    if (ownerHotGateway || roleName === "assessor") {
+    if (ownerHotGateway || hasVerifiedToolContract() || roleName === "assessor") {
       mcpToolRegistry.attach("view_image", (args) => viewImageForCurrentScope(args || {}));
     }
   }
-  // clean_image, compose_sprite_sheet, and download_file are artificer-only
-  // mutations; owner-hot attaches all executors (remote token gates per call),
-  // scoped boots only for the artificer role.
-  if (ownerHotGateway || roleName === "artificer") {
+  // Remote authorizes these handlers; each call retains its mutation scope.
+  if (ownerHotGateway || hasVerifiedToolContract() || roleName === "artificer") {
     mcpToolRegistry.attach("clean_image", (args) => execCleanImage(args || {}, workspaceCwd, effectiveScopePredicates));
     mcpToolRegistry.attach("compose_sprite_sheet", (args) => composeSpriteSheetForCurrentScope(args || {}));
     mcpToolRegistry.attach("download_file", (args) => downloadFilesForCurrentScope(args || {}));
@@ -2632,7 +2637,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
   if (allowImageGeneration) {
     mcpToolRegistry.attach("generate_image", (args) => generateImageWithinScope(args || {}));
   }
-  if (ownerHotGateway || isResearcherRole) {
+  if (ownerHotGateway || hasVerifiedToolContract() || isResearcherRole) {
     mcpToolRegistry.attach("chain_read", (args) => chainRead(args || {}));
     mcpToolRegistry.attach("chain_verdict", (args) => chainVerdict(args || {}));
   }

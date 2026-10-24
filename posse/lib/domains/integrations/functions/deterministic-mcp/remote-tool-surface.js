@@ -1,3 +1,4 @@
+import { supportedMcpToolNames } from "../../../../shared/tools/functions/runtime-tool-capabilities.js";
 // @ts-check
 //
 // Remote-issued deterministic MCP tool surface helpers.
@@ -86,6 +87,9 @@ function requestedRemoteToolSuites(bootConfig = {}) {
 }
 
 export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
+  const supportedTools = new Set(bootConfig.supportedTools || supportedMcpToolNames());
+  const permitsTool = (name) => supportedTools.has(name)
+    && (!Array.isArray(bootConfig.toolAllowlist?.tools) || bootConfig.toolAllowlist.tools.includes(name));
   const claims = buildMcpOAuthClaimsFromBootConfig(bootConfig);
   const capabilities = claims.capabilities && typeof claims.capabilities === "object"
     ? claims.capabilities
@@ -134,13 +138,13 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
         shell: bootConfig.allowShell === true,
         tests: bootConfig.allowTests === true,
         image_generation: bootConfig.allowImageGeneration === true,
-        image_inspection: bootConfig.toolAllowlist?.tools?.includes("read_image_metadata") === true,
-        artifact_validation: bootConfig.toolAllowlist?.tools?.includes("validate_artifact_output") === true,
-        integrity_verification: bootConfig.toolAllowlist?.tools?.includes("hash_file") === true,
+        image_inspection: permitsTool("read_image_metadata"),
+        artifact_validation: permitsTool("validate_artifact_output"),
+        integrity_verification: permitsTool("hash_file"),
         project_db: bootConfig.projectDbCapability || (bootConfig.projectDbWrite === true ? "write" : "none"),
         environment_setup_v1: true,
-        planner_clarification_v1: bootConfig.toolAllowlist?.tools?.includes("request_clarification") === true,
-        environment_setup_batch_v1: bootConfig.toolAllowlist?.tools?.includes("setup_environment") === true,
+        planner_clarification_v1: permitsTool("request_clarification"),
+        environment_setup_batch_v1: permitsTool("setup_environment"),
         custom_tools_v1: bootConfig.customTools === true,
         custom_tools_available: bootConfig.customTools === true,
       },

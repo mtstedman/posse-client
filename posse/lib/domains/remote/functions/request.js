@@ -96,10 +96,12 @@ function capabilitiesFromPacket(packet = {}, providerName = null, customToolsAva
 
   const capabilities = {
     tools: {
-      read: narrowBoolCapability(tools.read, packet?.tool_policy?.allow_read === true),
-      write: narrowBoolCapability(tools.write, packet?.tool_policy?.allow_write === true),
-      shell: narrowBoolCapability(tools.shell, packet?.tool_policy?.allow_shell === true),
-      tests: narrowBoolCapability(tools.tests, packet?.tool_policy?.allow_tests === true),
+      // Implementation support, not the packet's legacy role policy. Remote
+      // selects permissions; explicit runtime restrictions remain narrowing.
+      read: tools.read !== false,
+      write: tools.write !== false && taskMode !== "db",
+      shell: tools.shell !== false,
+      tests: tools.tests !== false && taskMode !== "db",
       image_generation: narrowBoolCapability(tools.image_generation, imageGenerationAvailable),
       ...(imageInspection && tools.image_inspection !== false ? { image_inspection: true } : {}),
       ...(artifactValidation && tools.artifact_validation !== false ? { artifact_validation: true } : {}),
