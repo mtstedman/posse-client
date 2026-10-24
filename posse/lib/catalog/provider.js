@@ -135,3 +135,6 @@ export const JOB_TYPE_TO_PROVIDER_ROLE = Object.freeze(Object.fromEntries(
 // Eligibility ceilings, distinct from runtime availability or credentials.
 export const NATIVE_API_PROVIDERS = Object.freeze(["anthropic", "openai", "grok"]);
 export const DEAD_LETTER_RECOVERY_PROVIDERS = Object.freeze(["claude", "anthropic", "openai", "codex", "grok"]);
+
+// Native dispatch currently grants live web access only to Codex.
+export const LIVE_WEB_PROVIDERS = Object.freeze(["codex"]);

@@ -9,13 +9,34 @@ function statusLabel(receipt) {
   return String(receipt.status || "unknown").toUpperCase();
 }
 
-function compactOutput(receipt) {
+export function compactTestFailureOutput(receipt) {
   if (!receipt) return "";
-  return [receipt.stdout, receipt.stderr]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean)
-    .join("\n")
-    .slice(-MAX_EVIDENCE_OUTPUT_CHARS);
+  const checks = [...(receipt.check_runs || []), ...(receipt.file_results || [])];
+  const failed = checks.filter((check) => check.status !== "passed");
+  const blocks = failed.map((check) => [
+    `[${check.path || check.check_id || "check"}] ${check.status}: ${check.reason || ""}`,
+    `Command: ${check.command || receipt.command || "unknown"}`,
+    `Working directory: ${check.execution_root || check.cwd_relative || receipt.execution_root || "."}`,
+    ...[check.stderr, check.stdout].filter(Boolean).map((value) => String(value).slice(0,
+      Math.max(300, Math.floor(MAX_EVIDENCE_OUTPUT_CHARS / Math.max(1, failed.length) / 2)))),
+  ].join("\n"));
+  // Preserve the start of failures before spending the remaining budget on
+  // successful output. Separate checks retain their diagnostic and invocation.
+  return (blocks.length ? blocks.join("\n\n") : [receipt.stderr, receipt.stdout]
+    .filter(Boolean).map(String).join("\n")).slice(0, MAX_EVIDENCE_OUTPUT_CHARS);
+}
+
+// Carry compiler locations with the command directory that gives them meaning.
+export function testReceiptDiagnosticPaths(receipt) {
+  if (!receipt) return [];
+  const checks = receipt.check_runs?.length ? receipt.check_runs : [receipt];
+  return checks.flatMap((check) => parseTypecheckDiagnostics(`${check.stdout || ""}\n${check.stderr || ""}`)
+    .map((diagnostic) => {
+      const file = diagnostic.file.replace(/\\/g, "/");
+      return { reported_path: diagnostic.file,
+        path: path.posix.isAbsolute(file) || path.win32.isAbsolute(file) ? file
+          : path.posix.normalize(path.posix.join(check.cwd_relative || "", file)) };
+    }));
 }
 
 export function testExecutionDelta(baseline, postChange) {
@@ -157,12 +178,12 @@ export function renderTestExecutionEvidence({
   const plan = baseline || postChange;
   const rawDelta = testExecutionDelta(baseline, postChange);
   const delta = scopeAttribution && !scopeAttribution.attributable ? "out_of_scope_failure" : rawDelta;
-  const postOutput = postChange?.status === "passed" ? "" : compactOutput(postChange);
+  const postOutput = postChange?.status === "passed" ? "" : compactTestFailureOutput(postChange);
   const baselineOutput = ["failed", "timed_out"].includes(baseline?.status)
-    ? compactOutput(baseline)
+    ? compactTestFailureOutput(baseline)
     : "";
   const changedTests = postChange?.changed_tests || null;
-  const changedTestsOutput = changedTests && changedTests.status !== "passed" ? compactOutput(changedTests) : "";
+  const changedTestsOutput = changedTests && changedTests.status !== "passed" ? compactTestFailureOutput(changedTests) : "";
   const rejected = [baseline?.status, postChange?.status]
     .some((status) => ["rejected", "invalid_test_plan"].includes(status));
   const operational = plan.source === "operator_approved_operation";

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "child_process";
 import { SpawnedProcessTerminator } from "../../../platform/classes/SpawnedProcessTerminator.js";
 import fs from "fs";
+import { NodeTestEvidence } from "../../classes/NodeTestEvidence.js";
 import path from "path";
 import { TEST_SUBPROCESS_ENV_KEYS } from "../../../../catalog/process.js";
 import { TEST_DIRECTORY_NAME_PATTERN } from "../../../../catalog/verification.js";
@@ -372,17 +373,23 @@ function missingExternalPythonModule(root, output) {
     }));
 }
 
-function classifyCompletedRun(invocation, { code, stdout, stderr }, root) {
+function classifyCompletedRun(invocation, { code, stdout, stderr, executionCounts = null }, root) {
   const output = `${stdout}\n${stderr}`;
   const bootstrapFailure = nodeBootstrapFailure(invocation, output, root);
   if (bootstrapFailure) return { outcome: "infrastructure_error", reason: bootstrapFailure };
-  const counts = testExecutionCounts(output);
+  const counts = invocation.runner === "node_test" ? executionCounts : testExecutionCounts(output);
   const zeroTests = !!counts && (counts.total === 0 || counts.skipped === counts.total);
   const noTests = { outcome: "unavailable", reason: "no_tests_executed" };
   if (invocation.runner === "vitest" && /No test files found/u.test(output)) return noTests;
   switch (invocation.runner) {
+    case "node_test":
+      if (code !== 0) return { outcome: "product_failed", reason: "tests_failed" };
+      if (!counts || zeroTests) return noTests;
+      if (counts.skipped > 0) return { outcome: "unavailable", reason: "tests_skipped" };
+      return { outcome: "passed", reason: null };
     case "repository_script":
-      if (code === 0) return zeroTests || !stdout.trim() ? noTests : { outcome: "passed", reason: null };
+      if (code === 0) return zeroTests || !counts ? noTests
+        : counts.skipped > 0 ? { outcome: "unavailable", reason: "tests_skipped" } : { outcome: "passed", reason: null };
       return { outcome: "product_failed", reason: "tests_failed" };
     case "pytest":
       if (/No module named pytest\b/.test(output)) return { outcome: "infrastructure_error", reason: "pytest_unavailable" };
@@ -458,6 +465,7 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
     let child;
     let stdout = "";
     let stderr = "";
+    const evidence = invocation.runner === "node_test" ? new NodeTestEvidence(root, invocation.path) : null;
     let stdoutTruncated = false;
     let stderrTruncated = false;
     let settled = false;
@@ -470,13 +478,15 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
       clearTimeout(timer);
       terminator?.cancel();
       abortSignal?.removeEventListener("abort", cancel);
+      const executionCounts = evidence?.counts() || null;
+      evidence?.close();
       const { outcome, reason } = timedOut
         ? { outcome: "timed_out", reason: "test_timed_out" }
         : error
           ? { outcome: "infrastructure_error", reason: error?.code === "ENOENT" ? "test_runner_missing" : "test_runner_spawn_failed" }
           : signal
             ? { outcome: "infrastructure_error", reason: "test_runner_killed" }
-            : classifyCompletedRun(invocation, { code, stdout, stderr }, root);
+            : classifyCompletedRun(invocation, { code, stdout, stderr, executionCounts }, root);
       const combinedStderr = error ? [stderr, error.message || String(error)].filter(Boolean).join("\n") : stderr;
       resolve(unitTestResult(outcome, {
         reason,
@@ -488,7 +498,9 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
         signal,
         timed_out: timedOut,
         duration_ms: Date.now() - startedAt,
-        test_counts: testExecutionCounts(`${stdout}\n${stderr}`),
+        test_counts: invocation.runner === "node_test" ? executionCounts || { total: 0, skipped: 0 } : testExecutionCounts(`${stdout}\n${stderr}`),
+        execution_evidence: invocation.runner === "node_test" ? { registered_tests: executionCounts !== null } : null,
+        execution_root: invocation.cwd || root,
         stdout_truncated: stdoutTruncated,
         stderr_truncated: stderrTruncated,
         stdout,
@@ -496,15 +508,18 @@ export async function runUnitTestFile({ projectDir, path: requestedPath, capabil
       }));
     };
     try {
-      child = spawn(invocation.executable, invocation.args, {
+      const args = evidence ? evidence.args(invocation.args) : invocation.args;
+      child = spawn(invocation.executable, args, {
         cwd: invocation.cwd || root,
         detached: process.platform !== "win32",
         shell: false,
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
-        env: filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS }),
+        env: { ...filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS }),
+          ...evidence?.env() },
       });
     } catch (error) {
+      evidence?.close();
       settled = true;
       resolve(unitTestResult("infrastructure_error", {
         reason: "test_runner_spawn_failed",

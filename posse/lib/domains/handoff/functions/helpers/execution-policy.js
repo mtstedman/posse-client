@@ -119,21 +119,18 @@ function collectText(task = {}) {
   // such as Authenticated without making the task an authentication change.
   return prose
     .replace(/`[^`\r\n]*`/g, " ")
-    .replace(NEGATED_CLAUSE_RE, " ")
+    .replace(NEGATED_CLAUSE_RE, (clause) => /\b(?:in|as|to|with|without)\b/i.test(clause) ? clause : " ")
     .replace(/\b(?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*\b/g, " ")
     .replace(/\b[A-Za-z_$]*[a-z][A-Z][A-Za-z0-9_$]*\b/g, " ");
 }
 
-// Risk inference reads work intent. A clause that excludes an operation
-// ("Do not access the database, change OAuth, or persist credentials") names
-// exactly the operations the task will not perform; matching it tags the
-// task with the risks it was told to stay away from and raises every
-// downstream budget. The clause is dropped from the matched text up to its
-// end (sentence punctuation, newline, or a contrasting conjunction).
-// Planner-declared risk_tags are structured and never pass through here.
+// Exclude only explicit prohibitions on performing/touching work. Negative
+// requirements ("without authentication", "never store secrets in plaintext")
+// still describe sensitive behavior. A comma followed by an affirmative verb
+// ends a prohibition; comma-separated prohibited operations remain together.
 const NEGATED_CLAUSE_RE = new RegExp(
-  "\\b(?:(?:do|does|did|must|should|shall|will|would|need|needs|may)\\s+not|don't|doesn't|didn't|mustn't|shouldn't|won't|never|avoid(?:s|ed|ing)?|without|out of scope:?)\\b"
-  + "[^.;!?\\r\\n]*?(?=[.;!?\\r\\n]|\\s+(?:but|however|instead)\\b|$)",
+  "\\b(?:(?:(?:do|must|should|shall|will)\\s+not|don't|mustn't|shouldn't|won't|never)\\s+(?:access|touch|change|modify|edit|run|persist)\\b|avoid\\s+(?:touching|changing|modifying|editing|running)\\b|out of scope:)"
+  + "[^.;!?\\r\\n]*?(?=[.;!?\\r\\n]|,\\s*(?:implement|add|fix|enable|allow|ensure|require|replace|introduce)\\b|\\s+(?:but|however|instead)\\b|$)",
   "gi",
 );
 

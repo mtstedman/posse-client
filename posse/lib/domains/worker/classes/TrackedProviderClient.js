@@ -1,3 +1,5 @@
+import { selectWebResearchProvider } from "../../web-research/functions/provider-selection.js";
+import { resolveWebToolsEnabled } from "../../providers/functions/shared/tool-policy-settings.js";
 import { expireUnackedOperatorFeedbackForJob } from "../../queue/functions/agent-interactions.js";
 import { recordResearchDispatchAudit } from "../../planning/functions/research-dispatch-telemetry.js";
 import { providerHonorsMcpToolDeadline } from "../../../catalog/provider.js";
@@ -1977,6 +1979,9 @@ export class TrackedProviderClient {
           agentCallId,
           projectDir: cwd || this.worker?.projectDir || null,
           runChild: async ({ dispatchId, question, signal, budget }) => {
+            const childProvider = selectWebResearchProvider({ parentProvider: providerName,
+              availableProviders: this.deps.getAvailableProviders("researcher"),
+              allowedProviders: opts.allowedProviders || null, webEnabled: resolveWebToolsEnabled() });
             const childSessionPacket = {
               recipient: "researcher",
               job_type: "research",
@@ -2019,7 +2024,7 @@ export class TrackedProviderClient {
                 ...(budgetLine ? [`Budget: ${budgetLine}; if it runs low, submit partial findings and name the gap.`] : []),
                 ...(Number.isSafeInteger(budget?.resultChars) ? [`Compact report character target: ${budget.resultChars} (longer reports are delivered in full and consume more planner context).`] : []),
               ].join("\n"),
-              { providerName },
+              { providerName: childProvider },
             );
             const childSignal = combinedAbortSignal(abortSignal, signal);
             return await this.call(
@@ -2049,7 +2054,7 @@ export class TrackedProviderClient {
                 stableContext: childSessionPacket.stable_context || null,
                 sessionPacket: childSessionPacket,
                 remoteSystemPrompt: childSessionPacket.remote_system_prompt || null,
-                allowedProviders: [providerName],
+                allowedProviders: [childProvider],
                 abortSignal: childSignal,
                 _webResearchChild: true,
                 _parentAgentCallId: agentCallId,
@@ -2062,7 +2067,7 @@ export class TrackedProviderClient {
                 work_item_id,
                 attempt_id: observationContext?.attempt_id ?? null,
                 cwd,
-                jobProvider: providerName,
+                jobProvider: childProvider,
                 // Model selection prefers the job-level model over the tier's
                 // model; passing the planner's here ran web children on Fable.
                 jobModelName: null,

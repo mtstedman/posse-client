@@ -4,30 +4,51 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { isProcessAlive } from "../../../shared/platform/functions/process-liveness.js";
 import { randomUUID } from "node:crypto";
 
-// A directory lock with a recorded owner, reclaimed only once that owner has
-// exited. The update parent must stay free of the SQLite addon (Windows
-// cannot replace a loaded better-sqlite3 binding while it updates), so the
-// SQLite-backed worktree lock is not usable here; the filesystem gives the
-// same serialization for the short creation window.
+// Publish a nonempty owner directory atomically. Stale recovery only unlinks
+// the observed owner's unique filename; a concurrent replacement is nonempty
+// and cannot be removed by rmdir. No SQLite binding is loaded by the updater.
 async function acquireDirectoryGuard(guardPath, { waitMs = 1000, pollMs = 25 } = {}) {
   const deadline = Date.now() + waitMs;
-  for (;;) {
-    try {
-      fs.mkdirSync(guardPath);
-      fs.writeFileSync(path.join(guardPath, "owner.json"), `${JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() })}\n`);
-      return { acquired: true, release: () => fs.rmSync(guardPath, { recursive: true, force: true }) };
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
+  const token = `owner-${process.pid}-${randomUUID()}.json`;
+  const candidate = `${guardPath}.${token}.pending`;
+  fs.mkdirSync(candidate);
+  try {
+    fs.writeFileSync(path.join(candidate, token), JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }), { flag: "wx" });
+    for (;;) {
+      let entries = null;
+      try { entries = fs.readdirSync(guardPath); } catch (error) { if (error.code !== "ENOENT") throw error; }
+      if (entries?.length === 0) {
+        // Legacy mkdir-before-metadata locks have no identity. Give an active
+        // legacy writer time to publish; new acquisitions have no empty window.
+        try { if (Date.now() - fs.statSync(guardPath).mtimeMs < 5000) entries = ["initializing"]; }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+      }
+      if (entries === null || entries.length === 0) {
+        try {
+          // Windows does not replace even an empty directory on rename.
+          // A replacement owner is nonempty, so rmdir cannot remove it.
+          if (entries?.length === 0) fs.rmdirSync(guardPath);
+          fs.renameSync(candidate, guardPath);
+          return { acquired: true, release: () => {
+            try { fs.unlinkSync(path.join(guardPath, token)); } catch (error) { if (error.code !== "ENOENT") throw error; }
+            try { fs.rmdirSync(guardPath); } catch (error) { if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error.code)) throw error; }
+          } };
+        } catch (error) { if (!["ENOENT", "EEXIST", "ENOTEMPTY", "EPERM", "EACCES"].includes(error.code)) throw error; }
+      } else if (!entries.includes("initializing")) {
+        for (const entry of entries) {
+          if (entry !== "owner.json" && !/^owner-\d+-[a-f0-9-]+\.json$/.test(entry)) continue;
+          let owner;
+          try { owner = JSON.parse(fs.readFileSync(path.join(guardPath, entry), "utf8")); } catch { continue; }
+          if (isProcessAlive(owner.pid) !== false) continue;
+          try { fs.unlinkSync(path.join(guardPath, entry)); } catch (error) { if (error.code !== "ENOENT") throw error; }
+        }
+        try { fs.rmdirSync(guardPath); } catch (error) { if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error.code)) throw error; }
+      }
+      if (entries?.some((entry) => entry.startsWith("owner")) && !fs.existsSync(guardPath)) continue;
+      if (Date.now() >= deadline) return { acquired: false, release: () => {} };
+      await sleep(pollMs);
     }
-    let owner;
-    try { owner = JSON.parse(fs.readFileSync(path.join(guardPath, "owner.json"), "utf8")); } catch { /* a guard without metadata is in creation or legacy */ }
-    if (owner && isProcessAlive(owner.pid) === false) {
-      fs.rmSync(guardPath, { recursive: true, force: true });
-      continue;
-    }
-    if (Date.now() >= deadline) return { acquired: false, release: () => {} };
-    await sleep(pollMs);
-  }
+  } finally { fs.rmSync(candidate, { recursive: true, force: true }); }
 }
 
 // Owns the preservation window for an opt-in update of a dirty installation.
@@ -48,22 +69,10 @@ export class PosseUpdateWork {
     const guard = await acquireDirectoryGuard(`${lockPath}.guard`, { waitMs: 1000 });
     if (!guard.acquired) throw new Error(`Another preserving update owns ${lockPath}`);
     try {
-      let owner;
-      try { owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8")); } catch { /* a legacy lock without metadata remains protected */ }
-      if (owner && isProcessAlive(owner.pid) === false) fs.rmSync(lockPath, { recursive: true, force: true });
-      try {
-        fs.mkdirSync(lockPath);
-      } catch (error) {
-        if (error.code === "EEXIST") throw new Error(`Another preserving update owns ${lockPath}; inspect it before removing a stale lock`);
-        throw error;
-      }
+      const lock = await acquireDirectoryGuard(lockPath, { waitMs: 0 });
+      if (!lock.acquired) throw new Error(`Another preserving update owns ${lockPath}`);
       this.lockPath = lockPath;
-      try {
-        fs.writeFileSync(path.join(lockPath, "owner.json"), `${JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() })}\n`);
-      } catch (error) {
-        this.release();
-        throw error;
-      }
+      this.releaseLock = lock.release;
     } finally { guard.release(); }
   }
 
@@ -85,7 +94,7 @@ export class PosseUpdateWork {
 
   release() {
     if (!this.lockPath) return;
-    fs.rmSync(this.lockPath, { recursive: true, force: true });
+    this.releaseLock?.();
     this.lockPath = null;
   }
 }

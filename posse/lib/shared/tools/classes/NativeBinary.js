@@ -1,3 +1,4 @@
+import { NATIVE_AUTH_CONTEXT_MISSING_CODE, NATIVE_AUTH_CONTEXT_MISSING_DIAGNOSTIC_KIND } from "../../../catalog/binary.js";
 import { latestWorkerPulses } from "../../native/functions/worker-pulse.js";
 // @ts-check
 //
@@ -197,6 +198,7 @@ function isUnsupportedNativeVersionError(error) {
  */
 
 export class NativeBinary {
+  _missingContextReported = false;
   /**
    * @param {{
    *   name: string,
@@ -1693,14 +1695,20 @@ export class NativeBinary {
    * include token material.
    */
   #recordBackgroundMintFailure(route, error) {
+    const missingContext = !error && this.#authManager().getLaunchKey?.() === null;
+    if (missingContext && this._missingContextReported) return;
+    if (missingContext) this._missingContextReported = true;
     appendRunTelemetry("diagnostics", {
-      kind: NATIVE_HEARTBEAT_FAILURE_DIAGNOSTIC_KIND,
+      kind: missingContext ? NATIVE_AUTH_CONTEXT_MISSING_DIAGNOSTIC_KIND : NATIVE_HEARTBEAT_FAILURE_DIAGNOSTIC_KIND,
+      process_id: process.pid,
+      call_path: "NativeBinary.warmPulse",
       component: "native_pulse_mint",
       binary: this.name,
       route,
       background: true,
       thread: onMainThread ? "main thread" : "worker",
-      detail: error ? "background pulse mint failed" : "background pulse mint returned no pulse",
+      detail: missingContext ? "native authorization context missing; no usable launch or delegated capability"
+        : error ? "background pulse mint failed" : "background pulse mint returned no pulse",
       error: error ? {
         name: error?.name || null,
         code: error?.code || null,
@@ -1918,7 +1926,10 @@ export class NativeBinary {
     const error = /** @type {NativeBinaryError} */ (
       new Error(`native pulse token heartbeat auth unavailable for ${this.name}; refusing to start key-gated binary`)
     );
-    error.code = "POSSE_NATIVE_HEARTBEAT_UNAVAILABLE";
+    if (this.#authManager().getLaunchKey?.() === null) {
+      error.code = NATIVE_AUTH_CONTEXT_MISSING_CODE;
+      error.message = `native authorization context missing for ${this.name}; provide an authorized parent capability`;
+    } else error.code = "POSSE_NATIVE_HEARTBEAT_UNAVAILABLE";
     return {
       ok: false,
       code: null,

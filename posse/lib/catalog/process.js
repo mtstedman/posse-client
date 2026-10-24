@@ -80,3 +80,6 @@ export const TEST_SUBPROCESS_ENV_KEYS = Object.freeze([
 export const REPOSITORY_TEST_SCRIPT_RUNTIMES = Object.freeze({
   node: ".(?:c|m)?js", php: ".php", python: ".py",
 });
+
+// Private reporter output path; contains execution counts, never credentials.
+export const NODE_TEST_EVIDENCE_FILE_ENV = "POSSE_NODE_TEST_EVIDENCE_FILE";

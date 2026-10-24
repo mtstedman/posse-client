@@ -1,3 +1,4 @@
+import { compactTestFailureOutput, testReceiptDiagnosticPaths } from "./test-receipt-evidence.js";
 // lib/domains/worker/functions/helpers/verdict-shared.js
 //
 // Shared helpers for assessor verdict handlers.
@@ -290,11 +291,7 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
     || (!requiredMissing && !["regression", "changed_failure", "post_only", "infrastructure_unavailable"].includes(testRun?.delta))
     || !["failed", "timed_out"].includes(postChange?.status)
     || (postChange?.status === "timed_out" && testRun?.delta !== "regression")) return verdict;
-  const outputTail = [postChange?.stdout, postChange?.stderr]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean)
-    .join("\n")
-    .slice(-1600);
+  const outputTail = compactTestFailureOutput(postChange);
   const failureSummary = renderTestFailureSummary(postChange);
   return {
     ...verdict,
@@ -305,6 +302,9 @@ export function capVerdictForDeterministicTestRegression(verdict, testRun = null
     _deterministic_failure_identity: postChange?.failure_fingerprint || failureSummary || null,
     _deterministic_evidence: {
       kind: "frozen_test_failure",
+      diagnostic_paths: testReceiptDiagnosticPaths(postChange),
+      cwd_relative: postChange.cwd_relative || null,
+      execution_root: postChange.execution_root || null,
       status: postChange.status,
       delta: testRun.delta,
       failure_summary: failureSummary || null,
@@ -345,11 +345,7 @@ export function capVerdictForChangedTestFailure(verdict, testRun = null) {
     : Array.isArray(attribution?.introduced_paths)
       ? attribution.introduced_paths
       : Array.isArray(changed.paths) ? changed.paths : [];
-  const outputTail = [changed.stdout, changed.stderr]
-    .map((value) => String(value || "").trim())
-    .filter(Boolean)
-    .join("\n")
-    .slice(-1600);
+  const outputTail = compactTestFailureOutput(changed);
   const failureSummary = renderTestFailureSummary(changed);
   return {
     ...verdict,
@@ -1573,12 +1569,13 @@ export function _extractScopedPathsFromInstructions(text = "") {
     const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const optionalWrappedPath = `[ \\t"'\\x60]*${escaped}[ \\t"'\\x60]*`;
     const createRe = new RegExp(`(?:create|write|generate)(?:\\s+(?:a\\s+new\\s+file|the\\s+file|file))?\\s+${optionalWrappedPath}`, "i");
-    const createAfterRe = new RegExp(`${optionalWrappedPath}.*(?:must\\s+be\\s+created|should\\s+be\\s+created|does\\s+not\\s+exist|missing)`, "i");
+    const createAfterRe = new RegExp(`${optionalWrappedPath}(?:\\s+|:\\s*)(?:must\\s+be\\s+created|should\\s+be\\s+created|does\\s+not\\s+exist|is\\s+missing)\\b`, "i");
     const modifyRe = new RegExp(`(?:add|remove|delete|revert|rollback|undo|update|modify|edit|resize|cleanup|clean\\s+up)(?:\\s+(?:any\\s+changes\\s+made\\s+to|the\\s+file|file|tests?\\s+in))?\\s+${optionalWrappedPath}`, "i");
     const modifyAfterRe = new RegExp(`${optionalWrappedPath}.*(?:must\\s+be\\s+deleted|should\\s+be\\s+deleted|must\\s+be\\s+removed|should\\s+be\\s+removed|must\\s+be\\s+restored|should\\s+be\\s+restored|rollback|revert|deleted|removed)`, "i");
 
     let inferredCreate = createRe.test(source) || createAfterRe.test(source);
-    let inferredModify = modifyRe.test(source) || modifyAfterRe.test(source);
+    let inferredModify = modifyRe.test(source) || modifyAfterRe.test(source)
+      || new RegExp(`${escaped}(?:\\(\\d+,\\d+\\)|:\\d+:\\d+).*\\berror\\b`, "i").test(source);
 
     if (!inferredCreate && !inferredModify) {
       const lowerSource = source.toLowerCase();
@@ -1591,7 +1588,7 @@ export function _extractScopedPathsFromInstructions(text = "") {
         const windowStart = Math.max(lineStart, idx - 80);
         const windowEnd = Math.min(lineEnd, idx + lowerCandidate.length + 80);
         const context = lowerSource.slice(windowStart, windowEnd);
-        inferredCreate = /\b(create|new file|write|generate|missing|does not exist)\b/.test(context);
+        inferredCreate = /\b(create|new file|write|generate)\b/.test(context) && !/\b(?:property|member|symbol|export)\b/.test(context);
         inferredModify = /\b(add|remove|delete|revert|rollback|undo|update|modify|edit|resize|cleanup|clean up|deleted|removed)\b/.test(context);
       }
     }

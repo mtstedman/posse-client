@@ -1,3 +1,4 @@
+import { TEST_EXECUTION_EVIDENCE_VERSION } from "../../../catalog/verification.js";
 import { VERIFICATION_POLICY_SCHEMA_VERSION, DEFAULT_VERIFICATION_WALL_TIMEOUT_MS, DEFAULT_VERIFICATION_WALL_TIMEOUT_MAX_MS, MIN_VERIFICATION_TIMEOUT_MS, VERIFICATION_CHECK_CLASSES, VERIFICATION_IDENTITY_FILES, VERIFICATION_IDENTITY_SKIP_DIRS } from "../../../catalog/verification-policy.js";
 export { VERIFICATION_POLICY_SCHEMA_VERSION, DEFAULT_VERIFICATION_WALL_TIMEOUT_MS, DEFAULT_VERIFICATION_WALL_TIMEOUT_MAX_MS, MIN_VERIFICATION_TIMEOUT_MS, VERIFICATION_CHECK_CLASSES } from "../../../catalog/verification-policy.js";
 // Verification time policy: how long a deterministic verification command may
@@ -146,6 +147,7 @@ export function describeToolchain({
   runtimes.node = String(nodeVersion || "");
   return {
     schema_version: 2,
+    verification_evidence_version: TEST_EXECUTION_EVIDENCE_VERSION,
     platform: String(platform || ""),
     arch: String(arch || ""),
     node_version: String(nodeVersion || ""),

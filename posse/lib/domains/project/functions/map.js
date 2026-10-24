@@ -1,3 +1,4 @@
+import { adminGitExec } from "../../git/functions/admin-git-exec.js";
 import fs from "fs";
 import path from "path";
 import crypto from "node:crypto";
@@ -570,7 +571,12 @@ export async function ensureProjectMapRebuildHookAsync({
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : null;
 if (invokedPath && invokedPath === fileURLToPath(import.meta.url)) {
   try {
-    ensureProjectMap(process.argv[2] || process.cwd(), { force: true });
+    // A managed hook has no launch key. Its sole Git query is this bounded
+    // administrative read; normal application calls retain native dispatch.
+    ensureProjectMap(process.argv[2] || process.cwd(), { force: true,
+      execImpl: (args, options) => adminGitExec(args, options.cwd, { timeoutMs: 5000,
+        env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "POSSE_KEY")) }),
+    });
   } catch {
     process.exitCode = 0;
   }

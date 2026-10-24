@@ -726,8 +726,15 @@ expansion. Each file must match at most one runner. A declaration promises
 that the command executes every matching test; use narrow patterns reflecting
 the runner's real discovery rules. A suite shared by several changed files
 runs once per batch. Empty output or an explicit zero-test summary does not
-count as executed tests. Changed tests with an unavailable runner or missing
-dependency remain explicit diagnostics; strict test mode requires their
+count as executed tests. Node file checks require registered `node:test` cases;
+a successful file exit alone is unavailable coverage. Registered skips retain
+their counts and reason, including when other cases pass. Repository script
+runners must emit a recognized test summary. A forwarded filename in a package
+script is selection metadata, so it cannot suppress changed-file verification.
+Changed tests with an unavailable runner or missing
+dependency remain explicit diagnostics; repository-declared required checks retain
+their obligation when unavailable, and optional checks keep their skipped/unavailable
+status. Strict test mode requires their
 verification before completion.
 
 Use the same declaration for browser tests that need a setup wrapper. The

@@ -214,6 +214,8 @@ export const TEST_HELPER_DIRECTORIES = Object.freeze([
 
 // Frozen receipt compatibility, reuse eligibility, and compact evidence bounds.
 export const TEST_EXECUTION_RECEIPT_SCHEMA_VERSION = 1;
+// Execution semantics, independent of the persisted receipt shape.
+export const TEST_EXECUTION_EVIDENCE_VERSION = 2;
 export const TEST_RECEIPT_MAX_EVIDENCE_OUTPUT_CHARS = 1600;
 // Timeouts are not reusable; a completed pass/fail is still subject to the
 // receipt consumer's policy, toolchain, tree, and environment identity checks.

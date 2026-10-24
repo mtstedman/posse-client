@@ -162,6 +162,8 @@ export function _resolveInferredFixScope(inferred = {}, {
   jobId = null,
   inherited = [],
   projectDir = null,
+  diagnosticCwd = null,
+  diagnosticPaths = [],
   siblingScopePaths = siblingJobScopePaths,
 } = {}) {
   const isInternalPath = (value) => {
@@ -185,10 +187,39 @@ export function _resolveInferredFixScope(inferred = {}, {
   let root = projectDir;
   try { root ||= normalizeProjectDir(); } catch { root = null; }
   const dropped = [];
+  const resolveHint = (entry) => {
+    if (!root) return entry.startsWith("../") || path.isAbsolute(entry) ? null : entry;
+    const matches = [...new Set(diagnosticPaths.filter((hint) => _normalizeScopePath(hint.reported_path) === entry).map((hint) => hint.path))];
+    if (matches.length > 1) { dropped.push({ path: entry, reason: "ambiguous_diagnostic_path" }); return null; }
+    const target = matches[0] || entry;
+    if (path.win32.isAbsolute(target) && !path.isAbsolute(target)) {
+      dropped.push({ path: entry, reason: "outside_repository" }); return null;
+    }
+    const absolute = matches.length === 1 ? path.resolve(root, target) : path.resolve(root, diagnosticCwd || ".", target);
+    const relative = path.relative(root, absolute).replace(/\\/g, "/");
+    if (!relative || relative === ".." || relative.startsWith("../") || path.isAbsolute(relative)) {
+      dropped.push({ path: entry, reason: "outside_repository" }); return null;
+    }
+    // Existing symlinks (including parents of proposed files) cannot confer
+    // write scope outside the repository.
+    let ancestor = absolute;
+    while (!fs.existsSync(ancestor) && path.dirname(ancestor) !== ancestor) ancestor = path.dirname(ancestor);
+    try {
+      const realRelative = path.relative(fs.realpathSync(root), fs.realpathSync(ancestor));
+      if (realRelative === ".." || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) {
+        dropped.push({ path: entry, reason: "outside_repository" }); return null;
+      }
+    } catch { dropped.push({ path: entry, reason: "unresolved_path" }); return null; }
+    return relative;
+  };
   const keep = (entry) => {
     if (isInternalPath(entry)) {
       dropped.push({ path: entry, reason: "internal_runtime_path" });
       return false;
+    }
+    if (!entry.includes("/") && !inheritedSet.has(entry)
+      && [...inheritedSet].filter((candidate) => path.posix.basename(candidate) === entry).length > 1) {
+      dropped.push({ path: entry, reason: "ambiguous_basename" }); return false;
     }
     if (inheritedSet.has(entry) || entry.includes("/") || inheritedBasenames.has(entry)) return true;
     if (qualifiedBasenames.has(entry)) {
@@ -199,8 +230,8 @@ export function _resolveInferredFixScope(inferred = {}, {
     dropped.push({ path: entry, reason: "unresolved_bare_filename" });
     return false;
   };
-  let files_to_modify = modifyIn.filter(keep);
-  let files_to_create = createIn.filter(keep);
+  let files_to_modify = modifyIn.map(resolveHint).filter(Boolean).filter(keep);
+  let files_to_create = createIn.map(resolveHint).filter(Boolean).filter(keep);
   if (root) {
     const existingCreates = new Set(files_to_create.filter((entry) => {
       try { return fs.existsSync(path.resolve(root, entry)); } catch { return false; }
@@ -888,7 +919,9 @@ function _spawnRecoveryJobsForVerdict({
       _extractScopedPathsFromInstructions(fixInstructions),
       inheritedEditableScope,
       fixInstructions,
-    ), { jobId: job.id, inherited: inheritedEditableScope });
+    ), { jobId: job.id, inherited: inheritedEditableScope,
+      projectDir: verdict?._deterministic_evidence?.execution_root || null,
+      diagnosticPaths: verdict?._deterministic_evidence?.diagnostic_paths || [] });
     if (inferredFixScope.dropped.length > 0) {
       log(`${C.yellow}[assessor]${C.reset} WI#${job.work_item_id} job #${job.id}: fix scope ignored ${inferredFixScope.dropped.length} inferred path(s): ${inferredFixScope.dropped.slice(0, 6).map((entry) => `${entry.path} (${entry.reason})`).join(", ")}`);
     }

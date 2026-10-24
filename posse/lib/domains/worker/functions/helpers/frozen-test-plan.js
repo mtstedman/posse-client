@@ -59,8 +59,8 @@ function exactDeclaredTestFile(command, cwd, cwdRelative = null) {
 // The one discovered test file a package-manager test script is handed
 // (`npm --prefix web test -- src/x.test.ts`, `pnpm test src/x.test.ts`). The
 // script decides how the file runs, so unlike exactDeclaredTestFile this names
-// the file without proving the runner; callers pair it with a run that
-// reported executed tests before treating the file as covered.
+// the file without proving the runner. This is selection metadata only;
+// aggregate counts cannot establish execution of this file.
 export function packageScriptForwardedTestFile(command, cwd, cwdRelative = null) {
   if (!cwd || !command) return null;
   const invocation = packageManagerScriptForwardedArgs(command);

@@ -68,3 +68,22 @@ export function dependentSiblingScopeApproval(current, requestedPath, access, jo
     && MUTATING_JOB_TYPES.has(job.job_type))) return null;
   return { reason: "dependent_sibling_scope", sibling_job_ids: owners.map((job) => job.id) };
 }
+
+// A timed-out scope wait does not prove that the requested integration became
+// unnecessary. Preserve it as assessment evidence without granting any path.
+export function unresolvedScopeRequests(payload = {}) {
+  const allowed = new Set([...(payload.files_to_modify || []), ...(payload.files_to_create || [])]);
+  return [payload._pending_scope_request, ...(payload._scope_request_abandonments || [])]
+    .filter((request) => request && !request.decision)
+    .flatMap(scopeRequestBatchEntries)
+    .filter((entry) => !allowed.has(entry.path))
+    .map(({ path, access, reason }) => ({ path, access, reason }));
+}
+
+export function renderUnresolvedScopeRequests(payload = {}) {
+  const requests = unresolvedScopeRequests(payload);
+  return requests.length ? ["Unresolved scope requests (no write authorization):",
+    ...requests.map((entry) => `${entry.path} (${entry.access}): ${entry.reason || "reason not recorded"}`),
+    "Determine whether each requested integration is still necessary for the task. A timeout or abandoned gate is not evidence that it was implemented; report any required missing integration as remaining work.",
+  ].join("\n") : "";
+}

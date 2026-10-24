@@ -1,3 +1,5 @@
+import { compactTestFailureOutput, testReceiptDiagnosticPaths } from "../../worker/functions/helpers/test-receipt-evidence.js";
+import { unresolvedScopeRequests } from "../../queue/functions/scope-expansion.js";
 import { emptyMaterializedPathsForJob } from "../../handoff/functions/helpers/file-materialization.js";
 import { getTestStrictness } from "../../settings/functions/test-strictness.js";
 // A final review authorizes the scoped bytes, named read dependencies, and
@@ -22,7 +24,8 @@ export function isAuthoritativeFinalReviewPass(job, verdict) {
 }
 
 function reviewContract(payload) {
-  return Object.fromEntries(FINAL_REVIEW_CONTRACT_FIELDS.map((key) => [key, payload?.[key] ?? null]));
+  return { ...Object.fromEntries(FINAL_REVIEW_CONTRACT_FIELDS.map((key) => [key, payload?.[key] ?? null])),
+    unresolved_scope_requests: unresolvedScopeRequests(payload) };
 }
 
 export function finalReviewContractIdentity(cwd, payload) {
@@ -129,8 +132,10 @@ export async function authoritativeFinalReview(job, payload, cwd) {
       finding.suggested_verification].filter(Boolean).join(" — "));
     if (!reasons.length) return unresolved("Final review reported findings without their details; an operator must resolve the review.");
     const diagnostics = [review.declared_tests, review.changed_tests].filter(Boolean)
-      .map((run) => [run.command, run.status, run.failure_summary, run.stdout, run.stderr].filter(Boolean).join("\n"));
+      .map((run) => [run.command, run.status, run.failure_summary, compactTestFailureOutput(run)].filter(Boolean).join("\n"));
     return { verdict: "fail", confidence: "high", reasons, human_questions: [],
+      _deterministic_evidence: { execution_root: cwd,
+        diagnostic_paths: [review.declared_tests, review.changed_tests].flatMap(testReceiptDiagnosticPaths) },
       spawn_jobs: [{ job_type: "fix", title: "Fix final review findings", payload: {
         instructions: [...reasons, review.repair, ...diagnostics].filter(Boolean).join("\n\n"),
       } }], _final_reviewer_agent_call_id: review.reviewer_agent_call_id };

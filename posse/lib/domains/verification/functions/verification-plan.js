@@ -156,7 +156,7 @@ function normalizeCheck(raw, index, validateCommand) {
       cwd_relative: validation.cwd_relative !== undefined ? validation.cwd_relative : (cwd === "." ? null : cwd),
       intent,
       stage,
-      required: !unavailable && raw?.required !== false && stage !== "fast",
+      required: raw?.required !== false && stage !== "fast",
       ...(unavailable ? { unavailable_reason: validation.reason } : {}),
       depends_on: dependencies,
       timeout_policy: String(raw?.timeout_policy || "repository"),

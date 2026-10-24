@@ -7,7 +7,7 @@ import { PERMISSIVE_TEST_OUTCOMES } from "../../../../catalog/verification.js";
 import { isUnrunnableTestReason } from "../../../verification/functions/test-capability-reasons.js";
 
 export function isUnrunnableTestResult(value) {
-  if (!value) return false;
+  if (!value || value.required === true) return false;
   const children = value.check_runs || value.file_results || value.results;
   if (Array.isArray(children) && children.length) {
     return children.some(isUnrunnableTestResult)
@@ -91,7 +91,12 @@ export function isVerificationInfrastructureOutcome(value) {
 }
 
 export function isAdvisoryTestResult(value, options = {}) {
-  // Strictness can require available verification, never an absent harness.
+  // A repository-declared required check remains an obligation even when its
+  // environment is unavailable. Optional absence remains visible/advisory.
+  if (value?.required === false && !["failed", "timed_out"].includes(value.status)) return true;
+  if (value?.required === true && value.status !== "passed") return false;
+  if ((value?.check_runs || []).some((child) => child.required === true && child.status !== "passed")) return false;
+  // Undeclared unavailable harnesses retain the existing permissive policy.
   if (isUnrunnableTestResult(value)) return true;
   const children = value?.check_runs || value?.file_results || value?.results;
   if (Array.isArray(children) && children.some((child) => child.status === "failed" && !isUnrunnableTestResult(child))) return false;

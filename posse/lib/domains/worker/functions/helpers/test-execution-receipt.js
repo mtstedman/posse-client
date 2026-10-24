@@ -11,7 +11,7 @@ import { validatePlannerTestCommandForRepository } from "../../../verification/f
 export { validatePlannerTestCommand, validatePlannerTestCommandForRepository, operationalCommandApprovalRequest } from "../../../verification/functions/planner-test-command.js";
 import { classifyNestedRunnerInfrastructureFailure, classifyPackageManagerTestPlanFailure } from "../../../verification/functions/test-runner-failure.js";
 export { classifyNestedRunnerInfrastructureFailure } from "../../../verification/functions/test-runner-failure.js";
-import { resolveFrozenTestPlan, frozenTestPlanFromReceipt, prunedTestPlan, declaredTestFilesForPlan } from "./frozen-test-plan.js";
+import { resolveFrozenTestPlan, frozenTestPlanFromReceipt, prunedTestPlan } from "./frozen-test-plan.js";
 export { resolveFrozenTestPlan } from "./frozen-test-plan.js";
 import { currentCommit, currentHeadRef, repositoryFingerprint, worktreeFingerprint, dirtyPathDigests, dirtyFingerprintFromDigests, environmentFilesFingerprint, isAncestorCommit, porcelain, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
 export { dirtyWorktreeFingerprint, environmentFilesFingerprint, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
@@ -411,6 +411,7 @@ async function runChangedUnitTests(paths, policy, cleanupOptions, { base = null,
     exit_code: run.code ?? null,
     duration_ms: run.duration_ms ?? 0,
     test_counts: run.test_counts || null,
+    file_results: run.file_results || [],
     execution_root: cwd,
     failure_fingerprint: cleanupFailed ? null : testFailureFingerprint(run, { executionRoot: cwd }),
     reason: cleanupError || run.reason || null,
@@ -421,15 +422,14 @@ async function runChangedUnitTests(paths, policy, cleanupOptions, { base = null,
   };
 }
 
-// Changed test files whose execution the plan run already proved on this tree:
-// the plan passed with reported executed tests (or a recognized single-file
-// invocation), and the plan command names the file.
-function changedTestPathsCoveredByPlan(changedTestPaths, plan, result, testCounts, { cwd, fileInvoked = false } = {}) {
+// Only per-file runner results can suppress a changed-file execution. Command
+// arguments and aggregate counts cannot prove what a repository wrapper ran.
+function changedTestPathsCoveredByPlan(changedTestPaths, _plan, result) {
   if (result?.status !== "passed") return [];
-  const executed = (testCounts && testCounts.total > 0 && testCounts.skipped !== testCounts.total) || fileInvoked;
-  if (!executed) return [];
-  const declared = new Set(declaredTestFilesForPlan(plan, cwd));
-  return changedTestPaths.filter((candidate) => declared.has(candidate));
+  const proven = new Set((result.file_results || []).filter((file) => file.status === "passed"
+    && file.test_counts?.total > 0 && file.test_counts.skipped === 0
+    && ["node_test", "vitest", "pytest", "phpunit"].includes(file.runner)).map((file) => file.path));
+  return changedTestPaths.filter((candidate) => proven.has(candidate));
 }
 
 function changedTestsCoveredByPlanResult(cwd) {
@@ -800,7 +800,7 @@ async function executeReceipt({
     cleanupStatus = planAttribution.cleanup_status;
     cleanupError = planAttribution.error;
   }
-  const testCounts = testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`);
+  const testCounts = result.test_counts || testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`);
   const fileInvoked = (plan.intent || "test") === "test"
     && didInvokeTestFile(result, executionCommand, cwd, plan.cwd_relative, testCounts);
   // A changed test file the plan command itself names, which the plan's
@@ -859,6 +859,7 @@ async function executeReceipt({
       ? null
       : noTestsExecuted ? null : result.ok,
     test_counts: testCounts,
+    file_results: result.file_results || [],
     coverage_status: coverageStatus,
     exit_code: result.code,
     signal: result.signal,
@@ -1234,7 +1235,7 @@ export async function ensurePostChangeTestReceipt({
         cwd,
         head: assessedCommit,
         fallbackBase: baseline?.commit_hash,
-        exclude: [...(plan?.unit_test_paths || []), ...(plan?.covered_unit_test_paths || [])],
+        exclude: [],
       })
     : { base: null, paths: [], scopePaths: [], addedPaths: [] };
   const changedPaths = changed.paths;

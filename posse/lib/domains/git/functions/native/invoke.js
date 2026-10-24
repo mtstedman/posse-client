@@ -1,3 +1,4 @@
+import { NATIVE_AUTH_CONTEXT_MISSING_CODE } from "../../../../catalog/binary.js";
 import { GIT_READ_ONLY_METHODS, GIT_EXEC_READ_ONLY_COMMANDS, GIT_EXEC_GLOBAL_OPTIONS_WITH_VALUE, GIT_EXEC_GLOBAL_FLAGS, GIT_EXEC_GLOBAL_OPTIONS_WITH_EQUALS, GIT_EXEC_BRANCH_MUTATING_FLAGS, GIT_EXEC_BRANCH_READ_FLAGS, GIT_EXEC_BRANCH_READ_OPTIONS_WITH_VALUE, GIT_EXEC_CONFIG_READ_FLAGS, GIT_EXEC_CONFIG_WRITE_FLAGS, GIT_EXEC_CONFIG_OPTIONS_WITH_VALUE, GIT_EXEC_READ_ONLY_UNSAFE_OPTIONS } from "../../../../catalog/git-native-policy.js";
 // @ts-check
 //
@@ -108,7 +109,7 @@ function isPersistentNativeAuthError(err) {
 }
 
 export function shouldRetryNativeHeartbeat(err) {
-  if (isAbortError(err)) return false;
+  if (isAbortError(err) || err?.code === NATIVE_AUTH_CONTEXT_MISSING_CODE || err?.cause?.code === NATIVE_AUTH_CONTEXT_MISSING_CODE) return false;
   if (!isHeartbeatFailureText(err?.message || String(err || ""))) return false;
   if (isPersistentNativeAuthError(err)) return false;
   return true;

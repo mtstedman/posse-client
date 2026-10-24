@@ -350,3 +350,6 @@ export function nativeBinaryRequiresIssuedVersion(name) {
 export function nativeBinaryExactVersion(name) {
   return nativeBinaryEntry(name)?.exactVersion || null;
 }
+
+export const NATIVE_AUTH_CONTEXT_MISSING_CODE = "POSSE_NATIVE_AUTH_CONTEXT_MISSING";
+export const NATIVE_AUTH_CONTEXT_MISSING_DIAGNOSTIC_KIND = "native.auth.context_missing";

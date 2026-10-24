@@ -1,5 +1,7 @@
 // @ts-check
 
+import { NodeTestEvidence } from "../../../../shared/tools/classes/NodeTestEvidence.js";
+import { exactDeclaredTestInvocation } from "./frozen-test-plan.js";
 import { spawn, spawnSync } from "child_process";
 import path from "node:path";
 import { buildWindowsSpawn } from "../../../providers/functions/shared/windows-spawn.js";
@@ -120,9 +122,17 @@ export async function runCommand(command, {
     await pulseBroker?.close();
     abortSignal.throwIfAborted();
   }
+  const fileInvocation = !trustedShell && exactDeclaredTestInvocation(command, cwd);
+  const argv = trustedShell ? [] : parseCommandArguments(command);
+  const directNodeTests = path.basename(argv[0] || "").replace(/\.exe$/i, "") === "node" && argv.includes("--test")
+    && !argv.some((arg) => arg.startsWith("--test-reporter"));
+  let evidence = null;
+  try {
+    if (fileInvocation?.runner === "node_test" || directNodeTests) evidence = new NodeTestEvidence(cwd, fileInvocation?.path);
+  } catch (error) { await pulseBroker?.close(); throw error; }
   const result = await new Promise((resolve) => {
     let child;
-    const env = filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS });
+    const env = { ...filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS }), ...evidence?.env() };
     if (pulseBroker) env[VERIFICATION_PULSE_CAPABILITY_ENV] = JSON.stringify(pulseBroker.capability());
     const secrets = [
       ...parentSecretValues(process.env),
@@ -150,7 +160,7 @@ export async function runCommand(command, {
         });
       } else {
         const [executable, ...args] = parseCommandArguments(command);
-        const invocation = buildWindowsSpawn(executable, args);
+        const invocation = buildWindowsSpawn(executable, evidence ? evidence.args(args) : args);
         child = spawn(invocation.command, invocation.args, {
           cwd,
           detached: process.platform !== "win32",
@@ -282,6 +292,14 @@ export async function runCommand(command, {
     abortSignal?.addEventListener("abort", cancel, { once: true });
     if (abortSignal?.aborted) cancel();
   });
+  const counts = evidence?.counts();
+  evidence?.close();
   abortSignal?.throwIfAborted();
-  return result;
+  if (!evidence) return result;
+  const incomplete = result.status === "passed" && (!counts || counts.total === 0 || counts.skipped > 0);
+  const classified = { ...result, ...(incomplete ? { status: "unavailable", ok: null,
+    reason: counts?.skipped > 0 && counts.skipped < counts.total ? "tests_skipped" : "no_tests_executed" } : {}),
+    test_counts: counts || { total: 0, skipped: 0 } };
+  return { ...classified, ...(fileInvocation ? { file_results: [{ ...classified, path: fileInvocation.path, runner: "node_test",
+    execution_root: cwd, command, execution_evidence: { registered_tests: counts != null } }] } : {}) };
 }

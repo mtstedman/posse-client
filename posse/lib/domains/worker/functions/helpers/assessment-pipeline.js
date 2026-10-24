@@ -1,3 +1,4 @@
+import { renderUnresolvedScopeRequests } from "../../../queue/functions/scope-expansion.js";
 import { DETERMINISTIC_AUDIT_ROLE } from "../../../../catalog/worker-display.js";
 import { assessmentDisplayMessage } from "../execution/display-sync.js";
 import { diffPorcelainEntries } from "../../../git/functions/porcelain-diff.js";
@@ -810,6 +811,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   let parsedJobPayload = parseJobPayload(job);
   const visibleJobPayload = stripInternalAssessmentPolicyPayload(parsedJobPayload);
   const verificationCapabilityBlock = _buildVerificationCapabilityBlock(visibleJobPayload, projectDir || cwd);
+  const scopeRequestEvidence = renderUnresolvedScopeRequests(visibleJobPayload);
   const workItem = getWorkItem(job.work_item_id);
   // Assessment retries can re-enter through an assess-only path with the
   // developer tier in their payload. Re-apply the task A/B pin at the final
@@ -894,7 +896,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       files_reverted = [],
       files_requested = [],
     } = assessmentContext;
-    const sections = [];
+    const sections = [scopeRequestEvidence].filter(Boolean);
     // Git never commits a declared path the repository ignores, so it is
     // absent from files_actually_committed by design.
     const ignoredScope = task_mode === "code" && cwd

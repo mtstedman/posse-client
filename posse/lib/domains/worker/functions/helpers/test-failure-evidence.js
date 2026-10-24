@@ -360,6 +360,9 @@ export function testRunDiagnostics(run) {
   };
   return {
     command: run.command || null,
+    cwd_relative: run.cwd_relative || null,
+    execution_root: run.execution_root || null,
+    file_results: run.file_results || [],
     status: run.status || null,
     reason: run.reason || null,
     ...(Array.isArray(run.check_runs) ? { check_runs: run.check_runs } : {}),

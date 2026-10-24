@@ -1,3 +1,4 @@
+import { renderUnresolvedScopeRequests } from "../../queue/functions/scope-expansion.js";
 // The immutable snapshot a final review judges: the task contract from the job
 // row (never from the agent's arguments), the declared tests' result on the
 // current workspace, and the job's own uncommitted change. A work item's
@@ -247,6 +248,7 @@ export function renderFinalReviewEvidence({ job, workItem, payload = {}, change,
   const ignored = Array.isArray(change?.ignored) ? change.ignored : [];
   return [
     "═══ FINAL REVIEW SNAPSHOT ═══",
+    renderUnresolvedScopeRequests(payload),
     "TASK CONTRACT:",
     `Work item: ${workItem?.title || "(untitled)"}`,
     workItem?.description ? `Work item description: ${workItem.description}` : null,

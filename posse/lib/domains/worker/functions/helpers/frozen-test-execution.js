@@ -50,6 +50,10 @@ export function unitTestCommandResult(aggregate, { finalReview = false, cwd = nu
       : aggregate.ok == null ? results.find((result) => result.ok == null)?.reason || "unit_test_unavailable" : null,
     stdout_truncated: results.some((result) => result.stdout_truncated === true),
     stderr_truncated: results.some((result) => result.stderr_truncated === true),
+    test_counts: results.every((result) => result.test_counts) ? {
+      total: results.filter((result) => !result.reused).reduce((n, result) => n + result.test_counts.total, 0),
+      skipped: results.filter((result) => !result.reused).reduce((n, result) => n + result.test_counts.skipped, 0),
+    } : null,
     file_results: results,
   };
 }
@@ -98,18 +102,23 @@ async function runVerificationCheck(check, { cwd, policy, phase = null, signal =
   const classified = check.source !== "task_ab_acceptance" && check.source !== "operator_approved_operation" && phase === "baseline"
     ? classifyPackageManagerTestPlanFailure(executionCommand, raw) : raw;
   const result = classifyNestedRunnerInfrastructureFailure(executionCommand, classified, { projectRoot: check.cwd_relative ? path.resolve(cwd, check.cwd_relative) : cwd });
-  const counts = check.intent === "test" ? testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`) : null;
+  const counts = check.intent === "test" ? result.test_counts || testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`) : null;
   const fileInvoked = (check.intent || "test") === "test"
     && didInvokeTestFile(result, executionCommand, cwd, check.cwd_relative, counts);
   const empty = result.status === "passed" && counts && (counts.total === 0 || counts.skipped === counts.total);
-  return { ...result, status: empty ? "skipped" : result.status,
-    ok: empty ? null : result.ok,
-    reason: empty ? "no_tests_executed" : result.reason || null,
+  const partial = result.status === "passed" && counts?.skipped > 0;
+  const status = empty ? "skipped" : partial ? "unavailable" : result.status;
+  return { ...result, status,
+    ok: empty || partial ? null : result.ok,
+    reason: empty ? "no_tests_executed" : partial ? "tests_skipped" : result.reason || null,
     check_id: check.id || check.check_id || null,
     command: check.command,
+    cwd_relative: check.cwd_relative || null,
+    execution_root: check.cwd_relative ? path.resolve(cwd, check.cwd_relative) : cwd,
+    required: check.required !== false,
     intent: check.intent || "test",
     test_counts: counts,
-    coverage_status: testCoverageStatus(result, check.intent || "test", counts, { fileInvoked }) };
+    coverage_status: testCoverageStatus({ ...result, status }, check.intent || "test", counts, { fileInvoked }) };
 }
 
 // Without a case count, only a runner that executes exactly the named file
@@ -135,7 +144,7 @@ export function testCoverageStatus(result, intent, counts, { fileInvoked = false
 }
 
 export function aggregateCheckCoverageStatus(checkRuns = []) {
-  const tests = checkRuns.filter((run) => run.intent === "test");
+  const tests = checkRuns.filter((run) => run.intent === "test" && (run.required !== false || run.status === "passed"));
   if (tests.length === 0) return "not_applicable";
   if (tests.every((run) => run.coverage_status === "reported_executed")) return "reported_executed";
   if (tests.some((run) => run.coverage_status === "none_executed")) return "none_executed";
@@ -157,7 +166,7 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
   const ceiling = Number(policy.wall_timeout_max_ms) > 0 ? Number(policy.wall_timeout_max_ms) : Infinity;
   const deadline = Date.now() + Math.max(wall, Math.min(wall * Math.max(1, runnable), ceiling));
   const budgetExhausted = (check, extra = {}) => ({ check_id: check.id || null, command: check.command,
-    intent: check.intent || "test", status: "unavailable", ok: null, reason: "verification_plan_wall_budget_exhausted",
+    intent: check.intent || "test", required: check.required !== false, status: "unavailable", ok: null, reason: "verification_plan_wall_budget_exhausted",
     coverage_status: check.intent && check.intent !== "test" ? "not_applicable" : "unknown",
     stdout: "", stderr: "", duration_ms: 0, code: null, ...extra });
   const runs = [];
@@ -165,7 +174,7 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
     signal?.throwIfAborted();
     if (check.unavailable_reason && testCommandCapability(check.command, cwd, { baselineCommit }) !== TEST_RUNNER_REMOVED_REASON) {
       runs.push({ check_id: check.id || null, command: check.command, intent: check.intent || "test",
-        status: "unavailable", ok: null, reason: check.unavailable_reason,
+        status: "unavailable", ok: null, required: check.required !== false, reason: check.unavailable_reason,
         coverage_status: check.intent && check.intent !== "test" ? "not_applicable" : "unknown",
         stdout: "", stderr: "", duration_ms: 0, code: null });
       continue;
@@ -186,10 +195,11 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
   }
   const stdout = runs.map((run) => `[${run.check_id || run.command}] ${run.status}\n${run.stdout || ""}`.trim()).join("\n\n");
   const stderr = runs.map((run) => `[${run.check_id || run.command}] ${run.status}\n${run.stderr || ""}`.trim()).join("\n\n");
-  const status = runs.some((run) => run.status === "failed") ? "failed"
-    : runs.some((run) => run.status === "timed_out") ? "timed_out"
-      : runs.some((run) => run.status === "infrastructure_error") ? "infrastructure_error"
-        : runs.some((run) => run.status !== "passed") ? "unavailable" : "passed";
+  const requiredRuns = runs.filter((run) => run.required !== false || ["failed", "timed_out"].includes(run.status));
+  const status = requiredRuns.some((run) => run.status === "failed") ? "failed"
+    : requiredRuns.some((run) => run.status === "timed_out") ? "timed_out"
+      : requiredRuns.some((run) => run.status === "infrastructure_error") ? "infrastructure_error"
+        : requiredRuns.some((run) => run.status !== "passed") || (requiredRuns.length === 0 && runs.every((run) => run.status !== "passed")) ? "unavailable" : "passed";
   return {
     status,
     ok: status === "passed" ? true : status === "failed" || status === "timed_out" ? false : null,
@@ -205,7 +215,10 @@ export async function runVerificationChecks(plan, { cwd, policy, phase = null, s
     stderr_truncated: runs.some((run) => run.stderr_truncated === true) || stderr.length > MAX_STREAM_CHARS,
     reason: requiredTestFailureReason(runs) || (runs.find((run) => run.status === status) || runs.find((run) => run.status !== "passed"))?.reason || null,
     check_runs: runs.map((run) => ({ check_id: run.check_id, command: run.command, intent: run.intent,
-      ...(isUnrunnableTestResult(run) ? { required: false } : {}),
+      cwd_relative: run.cwd_relative || null, execution_root: run.execution_root || cwd,
+      stdout: String(run.stdout || "").slice(0, MAX_STREAM_CHARS), stderr: String(run.stderr || "").slice(0, MAX_STREAM_CHARS),
+      file_results: run.file_results || [],
+      ...(run.required != null ? { required: run.required } : isUnrunnableTestResult(run) ? { required: false } : {}),
       status: run.status, ok: run.ok, reason: run.reason, exit_code: run.code,
       duration_ms: run.duration_ms, test_counts: run.test_counts || null,
       coverage_status: run.coverage_status || "unknown", failure_fingerprint: checkRunFailureFingerprint(run, { executionRoot: cwd }),
@@ -250,12 +263,13 @@ export async function runFrozenTestPlanOnce(plan, { cwd, timeoutMs = null, signa
       });
   const result = hasExecutionChecks ? raw
     : classifyNestedRunnerInfrastructureFailure(plan.execution_command || plan.command, raw, { projectRoot: cwd });
-  const counts = testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`);
+  const counts = result.test_counts || testExecutionCounts(`${result.stdout || ""}\n${result.stderr || ""}`);
   const fileInvoked = (plan.intent || "test") === "test"
     && didInvokeTestFile(result, plan.execution_command || plan.command, cwd, plan.cwd_relative, counts);
   return {
     ...result,
     command: plan.command,
+    cwd_relative: plan.cwd_relative || null,
     test_counts: counts,
     execution_root: cwd,
     coverage_status: hasExecutionChecks ? aggregateCheckCoverageStatus(result.check_runs)
