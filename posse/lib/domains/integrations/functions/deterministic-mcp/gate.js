@@ -272,17 +272,11 @@ export function unlockForAtlasPrefetch({ reason = "prefetch_ok", scopeKey = null
   return false;
 }
 
-export function isRelevantAtlasPrefetchStatus(status) {
-  const normalized = String(status || "").trim().toLowerCase();
-  return normalized === "ok" || normalized === "ok_relevant" || normalized === "prefetch_ok_relevant";
-}
-
 export function isFallbackAtlasPrefetchStatus(status) {
   const normalized = String(status || "").trim().toLowerCase();
-  if (!normalized || normalized === "skipped") return false;
-  if (isRelevantAtlasPrefetchStatus(normalized)) return false;
-  if (normalized === "ok_unhelpful" || normalized === "prefetch_ok_unhelpful") return false;
-  return true;
+  // Only delivery failures enable fallback. Unknown or historical relevance
+  // labels must never change tool availability.
+  return normalized === "failed" || normalized === "partial";
 }
 
 export function buildLockedToolError(toolName, { args = {}, cwd = null, scopeKey = null, atlasNameStyle = "dotted", issuedAtlasActions = null } = {}) {

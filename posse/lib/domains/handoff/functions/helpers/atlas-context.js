@@ -3224,19 +3224,6 @@ function atlasMemoryStoreEmpty(atlas = {}) {
   return Number(stats.memories || 0) <= 0;
 }
 
-export function isAtlasPrefetchStatusRelevant(status) {
-  const normalized = String(status || "").trim().toLowerCase();
-  return normalized === "ok" || normalized === "ok_relevant" || normalized === "prefetch_ok_relevant";
-}
-
-function _collectSliceEvidencePaths(slice) {
-  const paths = [];
-  if (!slice || typeof slice !== "object") return paths;
-  for (const filePath of slice.filePaths || []) paths.push(filePath);
-  for (const filePath of _collectSliceConcreteEvidencePaths(slice)) paths.push(filePath);
-  return _uniqueAtlasPaths(paths);
-}
-
 function _collectSliceConcreteEvidencePaths(slice) {
   const paths = [];
   if (!slice || typeof slice !== "object") return paths;
@@ -3248,118 +3235,6 @@ function _collectSliceConcreteEvidencePaths(slice) {
     if (item?.ok) paths.push(item.file);
   }
   return _uniqueAtlasPaths(paths);
-}
-
-function _intersectsPathSet(paths, expectedSet) {
-  if (!(expectedSet instanceof Set) || expectedSet.size === 0) return false;
-  for (const filePath of _uniqueAtlasPaths(paths)) {
-    if (expectedSet.has(filePath.toLowerCase())) return true;
-  }
-  return false;
-}
-
-const ATLAS_RELEVANCE_STOP_WORDS = new Set([
-  "about",
-  "after",
-  "before",
-  "build",
-  "change",
-  "code",
-  "debug",
-  "from",
-  "into",
-  "issue",
-  "make",
-  "need",
-  "path",
-  "repo",
-  "task",
-  "test",
-  "that",
-  "the",
-  "this",
-  "trace",
-  "with",
-]);
-
-function _tokenizeAtlasRelevanceText(value) {
-  const expanded = String(value || "")
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/[^A-Za-z0-9]+/g, " ")
-    .toLowerCase();
-  return expanded
-    .split(/\s+/)
-    .filter((token) => token.length >= 4 && !ATLAS_RELEVANCE_STOP_WORDS.has(token));
-}
-
-function _sliceEvidenceMatchesTask(slice, packet) {
-  const taskTokens = [...new Set(_tokenizeAtlasRelevanceText(buildPlannerAtlasTaskText(packet)))];
-  if (taskTokens.length === 0) return false;
-  const evidenceText = [
-    ...(Array.isArray(slice?.filePaths) ? slice.filePaths : []),
-    ...(Array.isArray(slice?.rankedFiles) ? slice.rankedFiles : []),
-    ...(Array.isArray(slice?.cards) ? slice.cards.flatMap((card) => [
-      card?.name,
-      card?.qualifiedName,
-      card?.file,
-      card?.filePath,
-      card?.summary,
-    ]) : []),
-  ].filter(Boolean).join(" ");
-  const evidenceTokens = new Set(_tokenizeAtlasRelevanceText(evidenceText));
-  let overlap = 0;
-  for (const token of taskTokens) {
-    if (evidenceTokens.has(token)) overlap += 1;
-  }
-  const requiredOverlap = taskTokens.length === 1 ? 1 : 2;
-  return overlap >= requiredOverlap;
-}
-
-export function classifyAtlasPrefetchRelevance(packet, recipient = packet?.recipient) {
-  if (!packet?.atlas?.active || packet.atlas?.prefetchFailed) return false;
-  const role = String(recipient || packet?.recipient || "").trim().toLowerCase();
-  const scopedFiles = _collectExplicitAtlasPrefetchFiles(packet);
-  const scopedSet = _pathSet(scopedFiles);
-
-  if (packet.atlas_db_context?.ok && _looksLikeDatabasePrefetchTask(packet)) {
-    return true;
-  }
-
-  if ((role === "planner" || role === "dev") && packet.atlas_slice_context?.ok) {
-    const slice = packet.atlas_slice_context;
-    const evidencePaths = _collectSliceEvidencePaths(slice);
-    const concreteEvidencePaths = _collectSliceConcreteEvidencePaths(slice);
-    const hasExactScopedEvidence = Array.isArray(slice.exactFiles)
-      && slice.exactFiles.some((item) => {
-        if (!item?.ok) return false;
-        const normalized = _normalizeAtlasRelativePath(item.file);
-        return !!normalized && scopedSet.has(normalized.toLowerCase());
-      });
-    if (scopedSet.size > 0) {
-      return hasExactScopedEvidence
-        || _intersectsPathSet(concreteEvidencePaths, scopedSet);
-    }
-    return evidencePaths.length > 0 && _sliceEvidenceMatchesTask(slice, packet);
-  }
-
-  if (role === "researcher" && packet.atlas_research_context?.ok) {
-    const research = packet.atlas_research_context;
-    if (research.agentContext?.ok || research.agentContext?.raw) return true;
-  }
-
-  if (role === "assessor" && packet.atlas_assessment_baseline?.ok) {
-    return true;
-  }
-
-  if (packet.atlas_slice_context?.ok) {
-    const evidencePaths = _collectSliceEvidencePaths(packet.atlas_slice_context);
-    if (scopedSet.size > 0) {
-      return _intersectsPathSet(_collectSliceConcreteEvidencePaths(packet.atlas_slice_context), scopedSet);
-    }
-    return evidencePaths.length > 0 && _sliceEvidenceMatchesTask(packet.atlas_slice_context, packet);
-  }
-
-  return false;
 }
 
 export function classifyAtlasPrefetchCoverage(packet, recipient = packet?.recipient) {
@@ -3377,18 +3252,6 @@ export function classifyAtlasPrefetchCoverage(packet, recipient = packet?.recipi
   if (covered === requested.size) return "scoped_exact";
   if (covered > 0) return "scoped_partial";
   return "scoped_none";
-}
-
-function renderRequiredRetrievalOrderLine(packet) {
-  const label = atlasBackendLabel(packet?.atlas);
-  const prefetchStatus = String(packet?.atlas?.prefetchStatus || "").toLowerCase();
-  if (isAtlasPrefetchStatusRelevant(prefetchStatus)) {
-    return `${label} PREFETCH RELEVANT: task-relevant repository context is supplied below.`;
-  }
-  if (prefetchStatus === "ok_unhelpful" || prefetchStatus === "prefetch_ok_unhelpful") {
-    return `${label} PREFETCH UNHELPFUL: the supplied repository context did not match the requested scope.`;
-  }
-  return null;
 }
 
 function renderAtlasContextSection(packet) {
@@ -3428,7 +3291,6 @@ function renderAtlasContextSection(packet) {
     hasCallableTools
       ? atlasField("Tools", callableTools.map((toolName) => displayAtlasToolName(toolName, packet.atlas)).join(", "))
       : null,
-    hasCallableTools ? renderRequiredRetrievalOrderLine(packet) : null,
   ].filter(Boolean).join("\n");
 }
 

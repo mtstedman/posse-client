@@ -46,7 +46,7 @@ import { extractResearcherFiles as extractResearcherFilesFromModule, normalizeRe
 import { detectPendingMergeAsync as detectPendingMergeAsyncFromModule } from "./helpers/merge-state.js";
 import { buildMemoryPrefetchNotice as buildMemoryPrefetchNoticeFromModule, buildStep0Context as buildStep0ContextFromModule, loadMemorySurfaceAsync as loadMemorySurfaceAsyncFromModule, loadRelevantInsightsAsync as loadRelevantInsightsAsyncFromModule, loadRelevantInsights as loadRelevantInsightsFromModule } from "./helpers/insights-step0.js";
 import { assertHandoffScopePreflight as assertHandoffScopePreflightFromModule, hasWritableScope as hasWritableScopeFromModule, isZeroEditCodeTask as isZeroEditCodeTaskFromModule } from "./helpers/scope-preflight.js";
-import { attachAtlasAssessorPrefetch as attachAtlasAssessorPrefetchFromModule, attachAtlasDbPrefetch as attachAtlasDbPrefetchFromModule, attachAtlasPlannerSlice as attachAtlasPlannerSliceFromModule, attachAtlasResearcherPrefetch as attachAtlasResearcherPrefetchFromModule, classifyAtlasPrefetchRelevance as classifyAtlasPrefetchRelevanceFromModule, classifyAtlasPrefetchCoverage as classifyAtlasPrefetchCoverageFromModule, collectAtlasCoveredFiles as collectAtlasCoveredFilesFromModule, renderAtlasHandoffSectionsWithMeta as renderAtlasHandoffSectionsWithMetaFromModule, resolveAtlasHandoffState as resolveAtlasHandoffStateFromModule } from "./helpers/atlas-context.js";
+import { attachAtlasAssessorPrefetch as attachAtlasAssessorPrefetchFromModule, attachAtlasDbPrefetch as attachAtlasDbPrefetchFromModule, attachAtlasPlannerSlice as attachAtlasPlannerSliceFromModule, attachAtlasResearcherPrefetch as attachAtlasResearcherPrefetchFromModule, classifyAtlasPrefetchCoverage as classifyAtlasPrefetchCoverageFromModule, collectAtlasCoveredFiles as collectAtlasCoveredFilesFromModule, renderAtlasHandoffSectionsWithMeta as renderAtlasHandoffSectionsWithMetaFromModule, resolveAtlasHandoffState as resolveAtlasHandoffStateFromModule } from "./helpers/atlas-context.js";
 import { materializeRenderedLifecycleCoverage } from "./helpers/lifecycle-prefetch.js";
 import { handoffPrefetchObservationContext } from "./helpers/observation-context.js";
 import { classifyAtlasFailure } from "../../integrations/functions/atlas-embedded.js";
@@ -1768,9 +1768,7 @@ export async function handoff(input, { providerName = null, reviewerChildIdentit
   }
   const atlasContextUsable = !!packet.atlas?.active && !atlasFallbackActive;
 
-  // Plan 2: Compute a single prefetch-status label for telemetry. We derive it
-  // from the pre-nulled blocks above by remembering whether prefetch was even
-  // attempted (packet.atlas.active) and whether all/some/none succeeded.
+  // Report delivery only. Context usefulness is not a handoff/schema verdict.
   if (packet.atlas) {
     const sliceAttempted = (recipient === "planner" || recipient === "dev" || recipient === "researcher") && packet.atlas.active
       && (packet.atlas_slice_prefetch_attempted === true || !!packet.atlas_slice_context);
@@ -1783,34 +1781,27 @@ export async function handoff(input, { providerName = null, reviewerChildIdentit
     if (!anyAttempted) {
       status = "skipped";
     } else if (!atlasPrefetchFailed) {
-      status = classifyAtlasPrefetchRelevanceFromModule(packet, recipient)
-        ? "ok_relevant"
-        : "ok_unhelpful";
+      status = "ok";
     } else if (researchAttempted) {
       status = researchError
         ? "failed"
-        : (sliceError ? "partial" : (classifyAtlasPrefetchRelevanceFromModule(packet, recipient) ? "ok_relevant" : "ok_unhelpful"));
+        : (sliceError ? "partial" : "ok");
     } else if (sliceAttempted && baselineAttempted && sliceError && baselineError) {
       status = "failed";
     } else if (sliceAttempted && !baselineAttempted) {
       status = sliceError
         ? "failed"
-        : (classifyAtlasPrefetchRelevanceFromModule(packet, recipient) ? "ok_relevant" : "ok_unhelpful");
+        : "ok";
     } else if (baselineAttempted && !sliceAttempted) {
       status = baselineError
         ? "failed"
-        : (classifyAtlasPrefetchRelevanceFromModule(packet, recipient) ? "ok_relevant" : "ok_unhelpful");
+        : "ok";
     } else {
       // One of two prefetches failed; classify as partial.
       status = "partial";
     }
     packet.atlas.prefetchStatus = status;
-    packet.atlas.prefetchDeliveryStatus = status === "skipped"
-      ? "skipped"
-      : (status === "failed" ? "failed" : (status === "partial" ? "partial" : "ok"));
-    packet.atlas.prefetchRelevanceStatus = status === "ok_relevant"
-      ? "relevant"
-      : (status === "ok_unhelpful" ? "unhelpful" : "unknown");
+    packet.atlas.prefetchDeliveryStatus = status;
     packet.atlas.prefetchCoverageStatus = classifyAtlasPrefetchCoverageFromModule(packet, recipient);
   }
 
@@ -1912,7 +1903,6 @@ function _applyTraversalCompletionCheck(packet) {
         job_type: packet.job_type || null,
         atlas_prefetch_status: packet.atlas?.prefetchStatus || null,
         atlas_prefetch_delivery_status: packet.atlas?.prefetchDeliveryStatus || null,
-        atlas_prefetch_relevance_status: packet.atlas?.prefetchRelevanceStatus || null,
         atlas_prefetch_coverage_status: packet.atlas?.prefetchCoverageStatus || null,
       },
     });
