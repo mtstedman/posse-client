@@ -1758,6 +1758,7 @@ async function refreshSkippedStagerMetadata(rows, currentHead, onProgress = null
  *   args?: string[] | string | null,
  *   timeoutMs?: number | null,
  *   posseRoot?: string | null,
+ *   head?: string | null, // Already observed commit; undefined probes Git.
  * }} args
  * @returns {Promise<{ policy: string, currentHead: string | null, rows: Array<Record<string, any>> }>}
  */
@@ -1769,6 +1770,7 @@ export async function describeScipStagingState({
   args = null,
   timeoutMs = null,
   posseRoot = null,
+  head = undefined,
 } = {}) {
   const root = path.resolve(String(repoRoot || process.cwd()));
   const dir = path.resolve(String(scipDir || config?.scipDir || path.join(root, ".posse", "atlas", "scip")));
@@ -1787,7 +1789,7 @@ export async function describeScipStagingState({
   const maxAgeHours = normalizeMaxAgeHours(config?.scipMaxAgeHours ?? config?.atlas_scip_max_age_hours);
   const normalTimeoutMs = normalizeTimeoutMs(timeoutMs ?? config?.scipIndexTimeoutMs ?? config?.atlas_scip_index_timeout_ms, null);
   const coldTimeoutMs = normalizeColdTimeoutMs(config?.scipColdIndexTimeoutMs ?? config?.atlas_scip_cold_index_timeout_ms, normalTimeoutMs);
-  const currentHead = await resolveCurrentHead(root);
+  const currentHead = head === undefined ? await resolveCurrentHead(root) : head;
   const rows = [];
   for (const plan of lookup.plans) {
     const exists = stagedOutputs.has(path.resolve(plan.outputPath).toLowerCase());

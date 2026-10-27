@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { RUN_MONITOR_STREAMS } from "../../../catalog/run-monitor.js";
-import { monitorText, projectMonitorEntry, readMonitorGates } from "../functions/run-monitor.js";
+import { monitorText, monitorEntryScope, projectMonitorEntry, readMonitorGates } from "../functions/run-monitor.js";
 
 const CHUNK_BYTES = 64 * 1024;
 const MAX_LINE_BYTES = 1024 * 1024;
@@ -131,7 +131,7 @@ export class RunMonitor {
           // Bound the retry window rather than retaining every event forever.
           if (row.export_id && cursor.seen_exports.includes(row.export_id)) continue;
           if (row.export_id) cursor.seen_exports = [...cursor.seen_exports.slice(-2047), row.export_id];
-          const wi = row.work_item_id ?? row.wi;
+          const wi = monitorEntryScope(row).work_item_id;
           if (wi != null && (this.workItemId == null || Number(wi) === this.workItemId)) workItems.add(Number(wi));
           if (this.workItemId != null && wi != null && Number(wi) !== this.workItemId) continue;
           const projected = projectMonitorEntry(stream, row);

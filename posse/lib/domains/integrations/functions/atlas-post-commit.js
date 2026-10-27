@@ -194,7 +194,9 @@ async function emitPostCommitScipRestageIfNeeded({
   if (!shouldConsiderScipRestage(config)) return { attempted: false, skipped: "policy" };
   let staging;
   try {
-    staging = await describeScipStagingState({ repoRoot: cwd, config });
+    // The hook already read HEAD through its bounded administrative probe.
+    // Reuse that snapshot: this fresh process has no native Git authorization.
+    staging = await describeScipStagingState({ repoRoot: cwd, config, head: headFull });
   } catch (err) {
     writePostCommitStatus(cwd, "warn", "ATLAS SCIP post-commit restage check failed", {
       error: err?.message || String(err),

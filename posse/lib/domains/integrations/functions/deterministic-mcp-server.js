@@ -1440,13 +1440,10 @@ const TEST_TOOL_NAMES = new Set([
   "run_unit_test",
 ]);
 
-// Freeze adapter discovery for each runtime session. A runner cannot appear or
-// disappear halfway through an agent turn, but a persistent owner serves later
-// sessions in other worktrees, where tests merged since boot must resolve.
-let unitTestCapability = discoverUnitTestCapability({
-  projectDir: workspaceCwd,
-  scipAvailable: atlasAvailable,
-});
+// Discovery invokes synchronous Git. Defer it until authorization is ready,
+// then freeze it within the runtime session; session switches invalidate it.
+/** @type {ReturnType<typeof discoverUnitTestCapability> | null} */
+let unitTestCapability = null;
 let unitTestCapabilityKey = `${workspaceCwd}\0${atlasAvailable}`;
 
 // Owner-hot declaration must follow the canonical registry. A hand-maintained
@@ -1488,7 +1485,7 @@ function runtimeToolAvailable(toolName) {
     const permitted = (ownerHotGateway && !mcpMessageSessionScoped)
       || bootConfig.allowTests === true
       || legacyRoleAllowsTests;
-    return toolName === "run_scoped_checks" ? permitted : permitted && unitTestCapability.available;
+    return toolName === "run_scoped_checks" ? permitted : permitted && unitTestCapability?.available === true;
   }
   if (IMAGE_HELPER_TOOL_NAMES.has(toolName)) return allowImageHelpers;
   if (OCR_TOOL_NAMES.has(toolName)) return allowImageHelpers;
@@ -1627,7 +1624,7 @@ if (allowBash) {
 if (ownerHotGateway || hasVerifiedToolContract() || roleName === "assessor") {
   addToolSchema(getToolSchemaForRole("run_scoped_checks", roleName));
 }
-if (unitTestCapability.available && (ownerHotGateway || hasVerifiedToolContract() || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
+if (unitTestCapability?.available && (ownerHotGateway || hasVerifiedToolContract() || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
 
 function recordAtlasLiveObservation(entry = {}) {
   const observationType = String(entry.observation_type || "").trim();
@@ -2571,7 +2568,7 @@ function rebuildNativeToolSchemas() {
   if (ownerHotGateway || hasVerifiedToolContract() || roleName === "assessor") {
     addToolSchema(getToolSchemaForRole("run_scoped_checks", roleName));
   }
-  if (unitTestCapability.available && (ownerHotGateway || hasVerifiedToolContract() || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
+  if (unitTestCapability?.available && (ownerHotGateway || hasVerifiedToolContract() || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
   if (allowImageHelpers) {
     for (const schema of [TOOL_READ_IMAGE_METADATA, TOOL_VALIDATE_ARTIFACT_OUTPUT, TOOL_CLEAN_IMAGE, TOOL_EXTRACT_IMAGE_TEXT, TOOL_VIEW_IMAGE]) {
       addToolSchema(schema);
@@ -2843,7 +2840,7 @@ function applyRuntimeBootConfig(nextConfig = {}, {
   }, { promptChars: mcpPromptChars });
   const nextUnitTestCapabilityKey = `${workspaceCwd}\0${atlasAvailable}`;
   if (sessionChanged || nextUnitTestCapabilityKey !== unitTestCapabilityKey) {
-    unitTestCapability = discoverUnitTestCapability({ projectDir: workspaceCwd, scipAvailable: atlasAvailable });
+    unitTestCapability = null;
     unitTestCapabilityKey = nextUnitTestCapabilityKey;
   }
   rebuildNativeToolSchemas();
@@ -3226,6 +3223,7 @@ async function handleRequest(msg) {
       }));
       return;
     }
+    await prepareUnitTestCapability();
     let nativeAllowedToolNames;
     let atlasAllowedActions;
     try {
@@ -3347,7 +3345,7 @@ async function handleRequest(msg) {
       }));
       return;
     }
-    await nativeGitAuthReady();
+    await prepareUnitTestCapability();
     const requestedToolName = String(params?.name || "");
     const normalizedRequestToolName = _normalizeGatewayToolRequestName(requestedToolName);
     const requestedAtlasTool = normalizedRequestToolName.startsWith("atlas.") || normalizedRequestToolName.startsWith("atlas_");
@@ -3861,6 +3859,13 @@ let nativeGitAuthPrewarm = null;
 function nativeGitAuthReady() {
   nativeGitAuthPrewarm ||= prewarmNativeGitAuth();
   return nativeGitAuthPrewarm;
+}
+
+async function prepareUnitTestCapability() {
+  await nativeGitAuthReady();
+  if (unitTestCapability) return;
+  unitTestCapability = discoverUnitTestCapability({ projectDir: workspaceCwd, scipAvailable: atlasAvailable });
+  rebuildNativeToolSchemas();
 }
 const sharedLiveScopeDecisionWaits = new Map();
 const pendingLiveScopeTasks = new Set();

@@ -265,7 +265,12 @@ under `$XDG_STATE_HOME/posse/run-monitor`, or `~/.local/state/posse/run-monitor`
 
 Signals include human questions and gate state changes, selected answers/actions
 and their outcomes, job/work-item transitions, assessments, merges, retries,
-warnings/errors, shutdown, and stale heartbeat changes. Gate snapshots include
+model starts/completions, agent progress, failed tool calls, warnings/errors,
+shutdown, and stale heartbeat changes. Runtime warnings retain nested work-item
+and job IDs, phase labels, and durations. Replayed tool failures are labeled
+`Recovered historical failure` and retain error severity; a later successful
+retry does not erase them. Their timestamp is the observation's recording time,
+not necessarily the original tool-call time. Gate snapshots include
 automatic-decision provenance when recorded. They use the live database in
 read-only mode, scoped to work items observed in the run (or `--work-item`).
 Gate state reflects the latest database state; the event stream retains emitted
