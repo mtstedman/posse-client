@@ -51,19 +51,35 @@ function summarizeActiveWorkers(activeWorkers) {
     value = null;
   }
   if (!value) return { count: 0, jobs: [] };
+  let count;
+  let jobs;
   if (value instanceof Map) {
-    const jobs = Array.from(value.entries()).slice(0, 20).map(([jobId, item]) => ({
+    count = value.size;
+    jobs = Array.from(value.entries()).slice(0, 20).map(([jobId, item]) => ({
       job_id: Number(jobId),
       work_item_id: item?.job?.work_item_id ?? null,
       job_type: item?.job?.job_type ?? null,
-      status: item?.job?.status ?? null,
       started_at_ms: Number.isFinite(item?.startTime) ? item.startTime : null,
       running_ms: Number.isFinite(item?.startTime) ? Math.max(0, Date.now() - item.startTime) : null,
     }));
-    return { count: value.size, jobs };
+  } else if (Array.isArray(value)) {
+    count = value.length;
+    jobs = value.slice(0, 20);
+  } else {
+    return { count: 0, jobs: [] };
   }
-  if (Array.isArray(value)) return { count: value.length, jobs: value.slice(0, 20) };
-  return { count: 0, jobs: [] };
+  // Worker entries retain the launch-time job snapshot. Read current statuses
+  // by ID: the separate active-job tail can omit a worker or its completed job.
+  // Missing/unreadable rows are unknown, never a stale "running" assertion.
+  let statuses = new Map();
+  const ids = jobs.map((job) => Number(job.job_id)).filter((id) => Number.isSafeInteger(id) && id > 0);
+  if (ids.length) {
+    try {
+      statuses = new Map(all(getDb(), `SELECT id, status FROM jobs WHERE id IN (${ids.map(() => "?").join(",")})`, ids)
+        .map((row) => [row.id, row.status]));
+    } catch { /* Diagnostics remain available when the database is unavailable. */ }
+  }
+  return { count, jobs: jobs.map((job) => ({ ...job, status: statuses.get(Number(job.job_id)) ?? null })) };
 }
 
 function collectDbHeartbeat() {
