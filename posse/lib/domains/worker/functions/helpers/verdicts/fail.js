@@ -178,8 +178,9 @@ export function _resolveInferredFixScope(inferred = {}, {
   const modifyIn = (Array.isArray(inferred.files_to_modify) ? inferred.files_to_modify : []).map(_normalizeScopePath).filter(Boolean);
   const createIn = (Array.isArray(inferred.files_to_create) ? inferred.files_to_create : []).map(_normalizeScopePath).filter(Boolean);
   // Only a qualified path in the same text proves a bare name abbreviates it.
-  // A bare name matching inherited scope stays for the existing ambiguity
-  // handling (one match canonicalizes, several gate for the operator).
+  // A bare name matching exactly one inherited path canonicalizes to it; one
+  // matching several inherited paths is dropped as ambiguous so the fix keeps
+  // the whole inherited scope instead of guessing or materializing a root file.
   const qualifiedBasenames = new Set([...modifyIn, ...createIn]
     .filter((entry) => entry.includes("/"))
     .map((entry) => path.posix.basename(entry)));

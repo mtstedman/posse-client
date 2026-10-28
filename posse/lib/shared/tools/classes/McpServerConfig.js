@@ -30,7 +30,6 @@ import { resolveRemoteMcpToolSurfaceForBootConfig } from "../../../domains/integ
 import {
   nativeToolGrantForSurface,
 } from "../functions/native-tool-grant-registry.js";
-import { PROVIDER_TOOL_GRANT_REQUIRED } from "../../../catalog/binary.js";
 import { AutomationOwnerClient } from "../../../domains/automation/classes/AutomationOwnerClient.js";
 import { repositoryID } from "../../../domains/automation/functions/paths.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
@@ -1084,8 +1083,10 @@ export class McpServerConfig {
       );
     }
     const nativeToolGrant = remoteResolution.nativeToolGrant || null;
-    if (PROVIDER_TOOL_GRANT_REQUIRED && !nativeToolGrant
-      && bootPayload.remoteCatalog?.requestMcpOAuth !== false) {
+    // Roles that resolve an operational surface dispatch only under a Remote
+    // grant; coordination-only roles (preflight, summary) issue no tools and
+    // request none. There is no local fallback authority.
+    if (!nativeToolGrant && bootPayload.remoteCatalog?.requestMcpOAuth !== false) {
       const error = new Error(`Remote did not issue a native tool grant for ${role || "unknown-role"}; agent tools cannot be dispatched without one`);
       error.code = "POSSE_AGENT_NATIVE_GRANT_MISSING";
       throw error;

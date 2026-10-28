@@ -148,10 +148,10 @@ and `posse-ml`) verify the grant against compiled trust before any provider or
 tool activity and refuse a dispatch whose issued tools or capabilities exceed
 it with a terminal `authorization` denial, which Posse treats as permanent
 rather than retrying or falling back to another provider. A Posse that holds a
-grant refuses to dispatch through a native runtime that cannot verify it.
-While the migration switch (`PROVIDER_TOOL_GRANT_REQUIRED`, mirrored from the
-native catalog) is off, a dispatch without a grant still runs under the
-legacy Node-owned allowlist and the native attestation says so.
+grant refuses to dispatch through a native runtime that cannot verify it, and
+a tool-bearing or web-enabled dispatch without a grant never starts: there is
+no local fallback authority. Tool-free turns (decision-only agent turns, model
+probes, image generation already authorized through its tool) need no grant.
 
 ### Planner dispatch
 

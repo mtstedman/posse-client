@@ -8,7 +8,6 @@ import {
   PROVIDER_DISPATCH_PROVIDERS,
   PROVIDER_TOOL_GRANT_PROTOCOL,
   PROVIDER_TOOL_GRANT_REQUEST_FIELD,
-  PROVIDER_TOOL_GRANT_REQUIRED,
 } from "../../../catalog/binary.js";
 import {
   grantedToolIdsFromToken,
@@ -82,45 +81,41 @@ function validateStart(request, allowTestAdapter) {
 }
 
 /**
- * What the installed native runtime says about Remote tool grants. `null`
+ * Whether the installed native runtime verifies Remote tool grants. `null`
  * capabilities (verification skipped) are treated as supporting the field.
  */
 export function toolGrantContractFrom(dispatchCapabilities) {
-  if (!isObject(dispatchCapabilities)) return { supported: true, required: false, legacyAuthority: true };
+  if (!isObject(dispatchCapabilities)) return { supported: true };
   const fields = Array.isArray(dispatchCapabilities.requestFields) ? dispatchCapabilities.requestFields : [];
   const contract = isObject(dispatchCapabilities.toolGrant) ? dispatchCapabilities.toolGrant : null;
-  const supported = fields.includes(PROVIDER_TOOL_GRANT_REQUEST_FIELD)
-    && contract?.protocol === PROVIDER_TOOL_GRANT_PROTOCOL;
   return {
-    supported,
-    required: supported && contract?.required === true,
-    legacyAuthority: !supported || contract?.legacyAuthority !== false,
+    supported: fields.includes(PROVIDER_TOOL_GRANT_REQUEST_FIELD)
+      && contract?.protocol === PROVIDER_TOOL_GRANT_PROTOCOL,
   };
 }
 
 /**
  * Decide the `grant` field for one start frame, failing closed before any
  * gateway is opened or process spawned. Node relays the opaque token; the
- * native host verifies it and intersects it with the issued surface.
+ * native host verifies it and intersects it with the issued surface. A
+ * tool-bearing or web-enabled dispatch without a grant never starts; there is
+ * no Node-owned fallback authority.
  */
 export function resolveDispatchGrant({
   grant = null,
   issuedToolIds = [],
   request = {},
-  contract = { supported: true, required: false, legacyAuthority: true },
+  contract = { supported: true },
 } = {}) {
   if (request.grant != null) {
     throw protocolError("Provider dispatch grants must come from the agent gate, not the request");
   }
   const normalized = normalizeNativeToolGrant(grant);
   const execution = isObject(request.execution) ? request.execution : {};
-  const needsAuthority = request.decision == null && (
-    issuedToolIds.length > 0
-    || execution.allowWeb === true
-    || execution.allowWrite === true
-    || request.image != null
-    || String(execution.projectDbCapability || "none") !== "none"
-  );
+  // Decision-only turns execute nothing natively. Image and write flags
+  // without an issued tool reach no executor, so only an issued surface or
+  // provider-hosted web access needs a grant.
+  const needsAuthority = request.decision == null && (issuedToolIds.length > 0 || execution.allowWeb === true);
   if (normalized) {
     if (!contract.supported) {
       throw new ProviderDispatchError(
@@ -138,7 +133,7 @@ export function resolveDispatchGrant({
     }
     return { grant: { token: normalized.token } };
   }
-  if (needsAuthority && (PROVIDER_TOOL_GRANT_REQUIRED || contract.required)) {
+  if (needsAuthority) {
     throw new ProviderDispatchError(
       "Tool-bearing dispatch requires a Remote-issued tool grant",
       { code: "grant_missing", classification: "authorization" },
