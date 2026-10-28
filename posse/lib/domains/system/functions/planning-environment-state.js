@@ -49,7 +49,11 @@ export async function prepareDevelopmentEnvironment(job, cwd) {
   const gateId = payload(job)._environment_setup_gate_id;
   if (!["dev", "fix"].includes(job.job_type)) return { notices: [] };
   const gate = gateId ? getJob(gateId) : null;
-  if (gateId && (!completedSetupGate(gate) || !cwd)) throw new Error("Approved dependency setup is incomplete; development cannot start.");
+  if (gateId && !completedSetupGate(gate)) throw new Error("Approved dependency setup is incomplete; development cannot start.");
+  // A task without a worktree of its own (a database task runs in the primary
+  // checkout, where the approved installation already lives) has nothing to
+  // materialize. Reading a missing path as incomplete setup sent a post-merge
+  // database task to dead letter.
   if (!cwd) return { notices: [] };
   const receipt = gate ? payload(gate).execution.result : null;
   const notices = [];
