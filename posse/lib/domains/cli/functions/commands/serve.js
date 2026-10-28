@@ -245,6 +245,10 @@ export async function runPairCommand(
     console.log(`  ${C.dim}2.${C.reset} Scan the QR above with your phone's camera.`);
     console.log(`  ${C.dim}3.${C.reset} The phone will display a 4-character confirmation code.`);
     console.log(`  ${C.dim}4.${C.reset} Type that code below to finish pairing.\n`);
+    // The phone's "Enter token manually" takes the bare token or the
+    // posse://pair URL; a camera that cannot read the terminal needs it in text.
+    console.log(`  ${C.dim}Can't scan?${C.reset} On the phone tap "Enter token manually" and type this token:`);
+    console.log(`  ${C.bold}${qrToken}${C.reset}\n`);
     if (startBody?.expires_at) {
       console.log(`  ${C.dim}QR expires at:${C.reset} ${startBody.expires_at}\n`);
     }
