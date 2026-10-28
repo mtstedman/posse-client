@@ -1022,6 +1022,13 @@ export class McpServerConfig {
   }
 
   static async mintAgentGate(role, opts = {}) {
+    const renewalGate = opts.renewalGate || null;
+    if (renewalGate && (!MINTED_AGENT_GATES.has(renewalGate)
+      || renewalGate.role !== role || renewalGate.providerName !== opts.providerName
+      || renewalGate.id !== String(opts.agentId || opts.key || "")
+      || renewalGate.binding || renewalGate.contractBootConfig?.coordinationChild === true)) {
+      throw new Error("Native grant renewal requires an unbound, matching parent agent gate");
+    }
     let childPermit = null;
     if (opts.coordinationChild === true) {
       childPermit = consumeCitationChildPermit(opts.remoteToolSurface, {
@@ -1047,6 +1054,12 @@ export class McpServerConfig {
       projectRoot: agentRuntimeCwd,
       customTools,
     });
+    if (renewalGate) {
+      // Reissue through Remote using the old immutable contract as the local
+      // ceiling. A fresh catalog response may remove authority, never add it.
+      Object.assign(bootPayload, JSON.parse(JSON.stringify(renewalGate.contractBootConfig)));
+      bootPayload.customTools = bootPayload.customTools === true && customTools;
+    }
     let remoteResolution = null;
     let remoteResolutionError = null;
     try {
@@ -1057,7 +1070,7 @@ export class McpServerConfig {
       const suppliedSurfaceMatchesAgent = isRegisteredRemoteToolSurface(opts.remoteToolSurface)
         && suppliedPolicy.valid
         && (customTools || !suppliedPolicy.toolAllowlist.tools.includes("custom_tools"));
-      remoteResolution = opts.coordinationChild === true || suppliedSurfaceMatchesAgent
+      remoteResolution = !renewalGate && (opts.coordinationChild === true || suppliedSurfaceMatchesAgent)
         ? {
             surface: opts.remoteToolSurface,
             mcpOAuthToken: String(opts.remoteMcpOAuthToken || ""),
@@ -1104,18 +1117,19 @@ export class McpServerConfig {
     assertSupportedMcpTools(issuedToolNamesForSuite(issuedSurface.tool_surface || issuedSurface.tools || [], "tools"));
     // Start with Remote's grant, then subtract operator exclusions. This is
     // the only tools allowlist we sign; implementation inventory is not a grant.
-    if (opts.coordinationChild !== true) bootPayload.toolAllowlist = issuedPolicy.toolAllowlist;
+    if (opts.coordinationChild !== true) {
+      bootPayload.toolAllowlist = intersectSuiteToolAllowlists(issuedPolicy.toolAllowlist, bootPayload.toolAllowlist);
+    }
     const disabledAgentTools = resolveAgentDisabledTools({ role });
+    for (const name of renewalGate?.operatorDisabledTools?.tools || []) disabledAgentTools.tools.add(name);
+    for (const name of renewalGate?.operatorDisabledTools?.atlas || []) disabledAgentTools.atlas.add(name);
     const disabledAtlasTools = new Set([...resolveAtlasDisabledTools(), ...disabledAgentTools.atlas]);
     if (!resolveAtlasCodeLensCallable()) disabledAtlasTools.add("code.lens");
     if (disabledAtlasTools.size > 0 || disabledAgentTools.tools.size > 0) {
-      const issuedEntries = Array.isArray(issuedSurface?.tool_surface)
-        ? issuedSurface.tool_surface
-        : (Array.isArray(issuedSurface?.tools) ? issuedSurface.tools : []);
       bootPayload.toolAllowlist = {
         tools: bootPayload.toolAllowlist.tools
           .filter((name) => !disabledAgentTools.tools.has(String(name || "").toLowerCase())),
-        atlas: issuedToolNamesForSuite(issuedEntries, "atlas")
+        atlas: bootPayload.toolAllowlist.atlas
           .filter((name) => !disabledAtlasTools.has(String(name || "").toLowerCase())),
       };
     }

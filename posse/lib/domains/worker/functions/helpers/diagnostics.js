@@ -58,7 +58,7 @@ export function getErrorDetails(errOrMsg) {
   const partialLine = firstMeaningfulLine(partialOutput);
   let summary = prefix;
   let repeatKey = prefix;
-  let classification = null;
+  let classification = typeof errOrMsg?.classification === "string" ? errOrMsg.classification : null;
   const invalidClientLine = findInvalidClientLine([
     fullText,
     stderr,
@@ -85,6 +85,7 @@ export function getErrorDetails(errOrMsg) {
     partialOutput,
     partialLine,
     classification,
+    code: typeof errOrMsg?.code === "string" ? errOrMsg.code : null,
     summary: summary.slice(0, 240),
     repeatKey: repeatKey.slice(0, 320),
     toolUses: Array.isArray(errOrMsg?.toolUses) ? errOrMsg.toolUses : [],

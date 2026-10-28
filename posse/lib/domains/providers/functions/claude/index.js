@@ -25,6 +25,7 @@ import { buildClaudeAtlasAttachmentAsync, buildClaudeNativeMcpAttachmentAsync } 
 import { classifyClaudeCliFailure, __testClassifyClaudeCliFailure } from "./failure-classification.js";
 import { warmOauthSessionAsync } from "./oauth-warmup.js";
 import { buildNativeDispatchRequest, rejectRawCliControlOptions, runNativeDispatch } from "../shared/native-dispatch.js";
+import { providerWebAccessEnabled } from "../shared/tool-policy-settings.js";
 
 export { __testClassifyClaudeCliFailure, getClaudeReadiness, getUsageSummary, isReady, refreshUsageSummary, warmOauthSessionAsync };
 
@@ -314,6 +315,7 @@ export async function callProvider(promptText, {
         taskMode,
         allowWrite,
         allowTests,
+        allowWeb: providerWebAccessEnabled({ role, disableAgentTools, remoteIssuedPolicy: _remoteIssuedPolicy }),
         projectDbCapability,
         issuedToolIds,
         resolvedSkillIds: skillsAttached,

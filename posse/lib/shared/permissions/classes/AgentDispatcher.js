@@ -395,6 +395,8 @@ export class AgentDispatcher {
     try {
       await agent.whenReady();
       if (signal?.aborted) throw dispatchAbortError(signal);
+      await this.#refreshExpiredNativeGrant(agent);
+      if (signal?.aborted) throw dispatchAbortError(signal);
       const lease = agent.attachJob(attachment);
       reservation.agent = agent;
       reservation.leaseId = lease.id;
@@ -508,6 +510,8 @@ export class AgentDispatcher {
       if (agent.disposed) {
         throw dispatchError("POSSE_AGENT_DISPOSED", "AgentDispatcher selected a disposed Agent");
       }
+      await this.#refreshExpiredNativeGrant(agent);
+      if (signal?.aborted) throw dispatchAbortError(signal);
       const lease = agent.attachJob(attachment);
       reservation.agent = agent;
       reservation.leaseId = lease.id;
@@ -573,6 +577,44 @@ export class AgentDispatcher {
     } finally {
       reservation?.release();
     }
+  }
+
+  async #refreshExpiredNativeGrant(agent) {
+    const gate = agent.mcpGate;
+    const expiresAt = gate?.nativeToolGrant?.expiresAt;
+    if (expiresAt == null || !Number.isFinite(expiresAt) || expiresAt > Date.now() / 1000) return;
+    // Both dispatch paths hold their reservation here. Never rotate authority
+    // beneath a live Job or renew a child's inherited ceiling independently.
+    if (gate.contractBootConfig?.coordinationChild === true) {
+      throw Object.assign(dispatchError("grant_expired", "The parent's native tool grant has expired"), {
+        classification: "authorization",
+      });
+    }
+    const preparation = this.preparationSpecs.get(agent);
+    const binding = { providerName: agent.providerName, provider: agent.provider };
+    agent.evictProvider({ reason: "native_tool_grant_expired" });
+    const mcpGatePromise = Promise.resolve().then(() => this.gateFactory({
+      key: agent.key,
+      logicalKey: preparation?.logicalKey || agent.key,
+      ...this.toolContractFor({ ...preparation, role: agent.role, providerName: binding.providerName }),
+      renewalGate: gate,
+    })).then((nextGate) => {
+      if (this.closed) {
+        nextGate?.dispose?.({ reason: "dispatcher_closed_during_gate_mint" });
+        throw dispatchError("POSSE_AGENT_DISPATCHER_CLOSED", "AgentDispatcher closed while renewing an MCP gate");
+      }
+      const renewedExpiry = nextGate?.nativeToolGrant?.expiresAt;
+      if (renewedExpiry != null && renewedExpiry <= Date.now() / 1000) {
+        nextGate?.dispose?.({ reason: "renewed_native_tool_grant_expired" });
+        throw Object.assign(dispatchError("grant_expired", "Remote returned an expired native tool grant"), {
+          classification: "authorization",
+        });
+      }
+      return nextGate;
+    });
+    // Keep the logical Agent, provider and handoff; only the gate is replaced.
+    agent.beginPreparation({ providerPromise: Promise.resolve(binding), mcpGatePromise });
+    await agent.whenReady();
   }
 
   #beginAgentPreparation(agent, preparation) {

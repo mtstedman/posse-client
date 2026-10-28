@@ -135,7 +135,7 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
     requested_suites: requestedRemoteToolSuites(bootConfig),
     local_capabilities: {
       tools: {
-        read: bootConfig.coordinationChild !== true,
+        read: bootConfig.coordinationChild !== true && bootConfig.issuedToolPolicy?.allow_read !== false,
         write: bootConfig.allowWrite === true,
         shell: bootConfig.allowShell === true,
         tests: bootConfig.allowTests === true,

@@ -153,6 +153,17 @@ a tool-bearing or web-enabled dispatch without a grant never starts: there is
 no local fallback authority. Tool-free turns (decision-only agent turns, model
 probes, image generation already authorized through its tool) need no grant.
 
+Before attaching another job, an agent with an expired grant gets a new gate
+issued through Remote, bounded by its previous tool contract. Renewal preserves
+the logical agent, provider, and handoff and never interrupts an active job.
+Citation children retain their parent's ceiling and cannot renew it themselves.
+
+Claude and Codex use the same issued tool and capability ceilings. Hosted web
+access also requires the issued web policy and local web-tools setting: Claude
+exposes `WebFetch`/`WebSearch`, and Codex exposes its hosted web search. Local
+file, test, and shell operations remain behind the Posse MCP gateway. Publish
+native support before updating the client to enable Claude web dispatch.
+
 ### Planner dispatch
 
 Planner-led intake is the default account setting (`planner_dispatch_mode=planner`).
