@@ -537,6 +537,7 @@ export function _buildQueueProviderUsageLines(width, maxLines, summaries = [], o
       const windows = [session, week];
       const gaugeLayout = _providerGaugeLayout(rowWidth, windows, nowMs);
       for (const [label, window] of [["S", session], ["W", week]]) {
+        if (label === "S" && window?.unlimited === true) continue;
         const pct = _windowPct(window);
         const gauge = window?.unlimited === true
           ? unlimitedCapacityGauge({ width: gaugeLayout.gaugeWidth })

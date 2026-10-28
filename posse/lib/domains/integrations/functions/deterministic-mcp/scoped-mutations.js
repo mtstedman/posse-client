@@ -1,10 +1,13 @@
+import { markScopeGrantUsed } from "../../../queue/functions/scope-grant-usage.js";
+import { materializeScopeCreates } from "../../../queue/functions/scope-create-grant.js";
+import { installScopeCreateMaterializer } from "../../../queue/functions/scope-create-materializer.js";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { editScopeRequestReason } from "../../../../shared/tools/functions/edit-scope-preview.js";
 import { listIgnoredRepoPaths } from "../../../git/functions/ignored-paths.js";
 import { isSensitiveEnvFileOrTargetPath, safePath } from "../../../../shared/tools/functions/toolkit/index.js";
-import { grantApprovedScopeEntries, requestJobScopeExpansion } from "../../../queue/functions/index.js";
+import { getJob, updateJobPayload, runInTransaction, grantApprovedScopeEntries, requestJobScopeExpansion } from "../../../queue/functions/index.js";
 import { guardToolWriteLock } from "../../../queue/functions/write-lock-guard.js";
 import { protectedMutablePathReason, relativePathFromCwd } from "../../../runtime/functions/protected-paths.js";
 import { toRepoRelativePath } from "../../../../shared/format/functions/display-paths.js";
@@ -12,6 +15,7 @@ import { toRepoRelativePath } from "../../../../shared/format/functions/display-
 // The executable supplies live boot/session fields through getters. This owner
 // keeps the scope decision, path guard, and mutation transaction together.
 export function createScopedMutationTools(ctx) {
+  installScopeCreateMaterializer(materializeScopeCreates);
   function protectedMutationError(toolName, displayPath, absolutePath) {
     const relPath = relativePathFromCwd(ctx.workspaceCwd, absolutePath);
     const reason = protectedMutablePathReason(relPath);
@@ -24,6 +28,22 @@ export function createScopedMutationTools(ctx) {
     } catch (err) {
       return { error: `Error: ${toolName} blocked - ${err?.message || String(err)}` };
     }
+  }
+
+  function recordMutationPaths(files) {
+    if (!ctx.mcpJobId) return;
+    runInTransaction(() => {
+      for (const file of files) {
+        const relative = path.relative(ctx.workspaceCwd, path.resolve(ctx.workspaceCwd, file)).replace(/\\/g, "/");
+        markScopeGrantUsed(getJob(ctx.mcpJobId), relative, updateJobPayload);
+      }
+    });
+  }
+
+  async function recordMutationUse(result, file) {
+    const resolved = await result;
+    if (typeof resolved === "string" && !resolved.startsWith("Error:")) recordMutationPaths([file]);
+    return resolved;
   }
 
   const LIVE_SCOPE_WAIT = Symbol("posse.mcp-live-scope-wait");
@@ -45,6 +65,7 @@ export function createScopedMutationTools(ctx) {
       const [ignoredByRepository = null] = await listIgnoredRepoPaths(ctx.workspaceCwd, [entry.path]);
       const result = requestJobScopeExpansion({
         jobId: ctx.mcpJobId,
+        workspaceCwd: ctx.workspaceCwd,
         workItemId: ctx.mcpWorkItemId,
         attemptId: ctx.mcpAttemptId,
         agentCallId: ctx.mcpAgentCallId,
@@ -115,7 +136,7 @@ export function createScopedMutationTools(ctx) {
       }
       // Approved: complete the original write in the same call.
     }
-    return ctx.execWriteFile(args || {}, ctx.workspaceCwd, ctx.effectiveScopePredicates);
+    return recordMutationUse(ctx.execWriteFile(args || {}, ctx.workspaceCwd, ctx.effectiveScopePredicates), args.path);
   }
 
   async function editFileWithinScope(args = {}) {
@@ -124,6 +145,13 @@ export function createScopedMutationTools(ctx) {
     if (resolved.error) return resolved.error;
     const protectedErr = protectedMutationError("edit_file", args.path, resolved.path);
     if (protectedErr) return protectedErr;
+    const missing = !fs.existsSync(resolved.path);
+    const emptyCreate = !missing && args.find === "" && fs.statSync(resolved.path).isFile() && fs.statSync(resolved.path).size === 0;
+    if ((missing || emptyCreate) && ctx.effectiveScopePredicates.canCreate(resolved.path)) {
+      if (args.find !== "" || typeof args.replace !== "string") return "Error: Missing file: use write_file to create it, or edit_file with empty find and replacement text.";
+      if (Object.keys(args).some((key) => !["path", "find", "replace"].includes(key))) return "Error: Creation edit accepts only path, find and replace; use write_file.";
+      return recordMutationUse(ctx.execWriteFile({ path: args.path, content: args.replace }, ctx.workspaceCwd, ctx.effectiveScopePredicates), args.path);
+    }
     if (!ctx.effectiveScopePredicates.canEdit(resolved.path)) {
       if (!ctx.mcpJobId) {
         return `Error: edit_file blocked - ${args.path} is outside the allowed edit scope.`;
@@ -143,7 +171,7 @@ export function createScopedMutationTools(ctx) {
       }
       // Approved: complete the original edit in the same call.
     }
-    return ctx.execEditFile(args || {}, ctx.workspaceCwd, ctx.effectiveScopePredicates);
+    return recordMutationUse(ctx.execEditFile(args || {}, ctx.workspaceCwd, ctx.effectiveScopePredicates), args.path);
   }
 
   function pathsReferToSameExistingFile(a, b) {
@@ -253,6 +281,7 @@ export function createScopedMutationTools(ctx) {
       }
     }
 
+    recordMutationPaths([args.source, args.destination]);
     return JSON.stringify({
       ok: true,
       source: path.relative(ctx.workspaceCwd, sourcePath).replace(/\\/g, "/"),
@@ -301,6 +330,7 @@ export function createScopedMutationTools(ctx) {
       const reason = err?.code ? ` (${err.code})` : "";
       return `Error: copy_file failed for ${args.source} -> ${args.destination}${reason}.`;
     }
+    recordMutationPaths([args.destination]);
     return JSON.stringify({
       ok: true,
       source: path.relative(ctx.workspaceCwd, sourcePath).replace(/\\/g, "/"),

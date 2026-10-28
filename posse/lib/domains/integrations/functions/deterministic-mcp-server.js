@@ -1,3 +1,4 @@
+import { runLiveScopeHold } from "../../queue/functions/live-scope-hold.js";
 import { PLANNER_CLARIFICATION_TOOL, PLANNER_CLARIFICATION_REVIEW_TYPE } from "../../../catalog/tools/planner-clarification.js";
 import { requestPlannerClarification, runPlannerClarification } from "../../planning/functions/planner-clarification.js";
 import { ENVIRONMENT_SETUP_REVIEW_TYPE, ENVIRONMENT_SETUP_TOOLS } from "../../../catalog/tools/environment-setup.js";
@@ -50,7 +51,7 @@ import { operatorFeedbackDeliveryForJob, operatorFeedbackDeliveryText } from "..
 import { recordToolInvocation as _recordToolInvocation, recordObservation as _recordObservation, beginToolInvocation as _beginToolInvocation, finishToolInvocation as _finishToolInvocation, enterObservationContext, nativeReadResultStats, researchExplorationObservationStatus, runWithObservationContext } from "../../observability/functions/observations.js";
 import { scopedCheckToolResultObservation } from "../../observability/functions/scoped-check-tool-result.js";
 import { unitTestToolResultObservation } from "../../observability/functions/unit-test-tool-result.js";
-import { acknowledgeOperatorFeedback, awaitJobScopeExpansionDecision, countPendingOperatorFeedbackForJob, getIntSetting, getOperatorFeedbackForJob, grantApprovedScopeEntries, LIVE_SCOPE_WAIT_TIMEOUT_MS, recordAgentActivity } from "../../queue/functions/index.js";
+import { acknowledgeOperatorFeedback, countPendingOperatorFeedbackForJob, getIntSetting, getOperatorFeedbackForJob, grantApprovedScopeEntries, LIVE_SCOPE_WAIT_TIMEOUT_MS, recordAgentActivity } from "../../queue/functions/index.js";
 import { runWithTeamManagedToolGrant } from "../../pairing/functions/team-managed-write.js";
 import { getAtlasIntegrationConfig, getAtlasRouteForRole } from "./atlas/config.js";
 import "./atlas-v2-mode.js";
@@ -3645,7 +3646,8 @@ async function handleRequest(msg) {
       return;
     }
 
-    if (nativeAllowedToolNames && !nativeAllowedToolNames.has(toolName)) {
+    if ((nativeAllowedToolNames && !nativeAllowedToolNames.has(toolName))
+      || (ALL_NATIVE_TOOL_NAMES.includes(toolName) && !runtimeToolAvailable(toolName))) {
       appendToolLog({
         event: "native_call_denied",
         requestId: id ?? null,
@@ -3866,6 +3868,7 @@ async function prepareUnitTestCapability() {
   if (unitTestCapability) return;
   unitTestCapability = discoverUnitTestCapability({ projectDir: workspaceCwd, scipAvailable: atlasAvailable });
   rebuildNativeToolSchemas();
+  rebuildToolExecutors();
 }
 const sharedLiveScopeDecisionWaits = new Map();
 const pendingLiveScopeTasks = new Set();
@@ -3899,16 +3902,16 @@ function sharedLiveScopeDecision(runtime, request, environment = null) {
     ? runWithObservationContext(runtime.observation, () => runPlannerClarification(request, environment, { signal: controller.signal }))
     : request?.kind === ENVIRONMENT_SETUP_REVIEW_TYPE
     ? runWithObservationContext(runtime.observation, () => runEnvironmentSetupRequest(request, environment, { signal: controller.signal }))
-    : awaitJobScopeExpansionDecision({
+    : runWithObservationContext(runtime.observation, () => runLiveScopeHold(request, {
     jobId: runtime?.observation?.job_id,
-    requestId: request?.request_id,
     attemptId: runtime?.observation?.attempt_id,
+  }, {
     signal: controller.signal,
     timeoutMs: liveScopeWaitTimeoutMs(),
     // The MCP process has its own memory space, so only durable queue reads
     // can observe the human answer.
     useQueueWake: false,
-  })).finally(() => {
+  }))).finally(() => {
     if (sharedLiveScopeDecisionWaits.get(key) === record) {
       sharedLiveScopeDecisionWaits.delete(key);
     }

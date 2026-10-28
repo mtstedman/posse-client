@@ -829,10 +829,7 @@ export class Display {
   }
 
   _flushDroppedEvents() {
-    const dropped = this._eventRate.dropped;
-    if (!dropped) return;
     this._eventRate.dropped = 0;
-    this._appendEvent(`${C.dim}... ${dropped} log events suppressed to keep input responsive${C.reset}`);
   }
 
   _workerActivityLabel(activity, { jobId = null, workItemId = null } = {}) {

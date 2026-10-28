@@ -382,7 +382,7 @@ export async function handlePostExecutionForWorker({
         // A live wait timing out does not invalidate the requested fix. Keep
         // its exact-path approval actionable after a BLOCKED handoff instead
         // of replacing it with a generic recovery question.
-        const parkLiveRequest = agentCompletionLog.status === "BLOCKED"
+        const parkLiveRequest = (agentCompletionLog.status === "BLOCKED" || pendingScopeRequest?.hold_expired === true)
           && pendingScopeRequest?.live_wait === true && !pendingScopeRequest.decision
           && ["queued", "waiting_on_human"].includes(getJob(Number(pendingScopeRequest.approval_job_id))?.status);
         if (

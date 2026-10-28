@@ -1,3 +1,4 @@
+import { PINNED_APPROVAL_GATES, approvalPolicyKey } from "../../../catalog/approval-policies.js";
 import { IMAGE_PROVIDER_OPTIONS, MODEL_SETTING_DEFS, PROVIDER_LABELS, getDefaultImageModel, getDefaultImageProvider, getDefaultTierModel } from "../../providers/functions/model-catalog.js";
 import { ADMIN_AGENT_SETTING_SECTIONS, ADMIN_CREDENTIAL_SETTING_DEFS, ADMIN_IMAGE_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS, ADMIN_PROVIDER_SETTING_SECTIONS, ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS, HIDDEN_SETTING_KEYS, PROJECT_DB_SETTING_DEFS, PROVIDER_SETTING_KEYS, SETTINGS_GROUPS, SETTINGS_PANES, SKILL_SETTING_PREFIX, getAdminSettingPresentation, settingsGroupForKey, settingsPaneForKey, toDisplaySettingKey } from "./admin-catalog.js";
 import { ADMIN_MAX_OPTIONS_PER_SETTING, ADMIN_MAX_SETTINGS, ADMIN_MAX_TEXT_CHARS, ADMIN_MAX_VALUE_CHARS, ADMIN_PROTOCOL } from "../../../catalog/settings.js";
@@ -73,6 +74,9 @@ function createRow({
   unavailableReason = null,
   origin = "catalog",
 }) {
+  if (PINNED_APPROVAL_GATES.map(approvalPolicyKey).includes(key)) {
+    editable = false; unavailableReason = "interactive_required";
+  }
   let options = normalizeOptions(definition.options || []);
   const valueType = settingValueType({ ...definition, sensitive });
   if (options.length > ADMIN_MAX_OPTIONS_PER_SETTING) {
@@ -282,6 +286,7 @@ export function projectAdminDescription({
   // Push order fixes the row order within each section; the section order
   // itself follows SETTINGS_PANES.
   pushCatalogPane("general");
+  pushCatalogPane("approvals");
   for (const skill of skills) {
     const enabled = !disabledSkills.has(String(skill.id));
     const presentation = getAdminSettingPresentation(`skill:${skill.id}`, {
@@ -357,9 +362,10 @@ export function projectAdminDescription({
     const hasStoredValue = sensitive
       ? projectDbConfig.hasPassword === true
       : currentValue !== defaultValue;
-    sectionById.get("repo").settings.push(createRow({
+    const section = definition.key === "project_db_permissions" ? "approvals" : "repo";
+    sectionById.get(section).settings.push(createRow({
       key: definition.key,
-      section: "repo",
+      section,
       group: "project_database",
       label: presentation.label,
       description: presentation.description,

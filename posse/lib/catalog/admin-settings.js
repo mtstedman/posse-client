@@ -1,3 +1,4 @@
+import { APPROVAL_POLICY_SETTINGS } from "./approval-policies.js";
 // @ts-check
 import { readonlySet } from "./readonly-collections.js";
 
@@ -101,6 +102,7 @@ export const TURN_BASE_KEY_REVERSE_MAP = Object.freeze(
 // presents a separate operator-facing label so changing the wording never
 // breaks persisted settings, environment overrides, or automation.
 export const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
+  ...Object.fromEntries(APPROVAL_POLICY_SETTINGS.map(({ key }) => [key, key.slice("approval_policy_".length).replaceAll("_", " ")])),
   // General
   plan_approval_mode: "Plan approval",
   auto_merge_completed: "Auto-merge approved work",
@@ -112,6 +114,7 @@ export const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   startup_update_mode: "Startup update mode",
   session_recycle_mode: "Reuse agent sessions",
   web_tools_enabled: "Web research tools",
+  advanced_logging: "Advanced logging",
   scope_auto_approval: "Auto-approve routine file requests",
   fix_scope_handoff_guard: "Fix scope expansion",
   file_request_low_risk_extensions: "Low-risk file extensions",
@@ -610,6 +613,7 @@ export const ADMIN_ROLE_PURPOSES = Object.freeze({
 // a missed placement stays visible instead of disappearing.
 export const SETTINGS_PANES = Object.freeze([
   Object.freeze({ id: "general", label: "General" }),
+  Object.freeze({ id: "approvals", label: "Approvals" }),
   Object.freeze({ id: "agents", label: "Agents" }),
   Object.freeze({ id: "providers", label: "Providers" }),
   Object.freeze({ id: "atlas", label: "ATLAS" }),

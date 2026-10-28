@@ -1,3 +1,4 @@
+import { completeTaskScope, plannerDependencyKind } from "./plan-scope-dependencies.js";
 import { planningEnvironmentReadiness } from "../../system/functions/planning-environment-state.js";
 import { plannedTaskDedupeKey } from "./planned-task-dedupe.js";
 // lib/domains/planning/functions/plan-compiler.js
@@ -834,7 +835,12 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               break;
             }
             const targetJobId = jobMap.get(depIdx);
-            const dependencyAdded = addDependency(link.jobId, targetJobId, "hard");
+            const kind = plannerDependencyKind(tasks[link.taskIndex], tasks[depIdx], depIdx);
+            const dependencyAdded = addDependency(link.jobId, targetJobId, kind);
+            if (kind === "soft") logEvent({ work_item_id: planJob.work_item_id, job_id: link.jobId,
+              event_type: EVENT_TYPES.PLAN_DEPENDENCY_SOFTENED, actor_type: EVENT_ACTORS.SYSTEM,
+              message: `Independent file tasks ${link.taskIndex} -> ${depIdx}: dependency is soft`,
+              event_json: JSON.stringify({ task_index: link.taskIndex, upstream_index: depIdx, depends_on_job_id: targetJobId }) });
             if (!dependencyAdded) {
               logMissingPlannerDependency({ ...link, depIdx, reason: "cycle_or_self_dependency" });
               cancelCompiledTaskForDroppedDependency(link.taskIndex, [depIdx]);
@@ -1031,6 +1037,11 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           droppedTaskIndexes.add(i);
           continue;
         }
+        const completedScope = completeTaskScope(t, planReadRoot);
+        if (completedScope.length) logEvent({ work_item_id: planJob.work_item_id, job_id: planJob.id,
+          event_type: EVENT_TYPES.PLAN_SCOPE_COMPLETED, actor_type: EVENT_ACTORS.SYSTEM,
+          message: `Completed scope for task ${i}: ${completedScope.join(", ")}`,
+          event_json: JSON.stringify({ task_index: i, paths: completedScope }) });
         const protectedScopeOmissions = stripSensitiveEnvTaskScope(t);
         if (protectedScopeOmissions.length > 0) {
           worker.emit(
@@ -2512,7 +2523,6 @@ export function createJobsFromPlan(worker, planJob, tasks, {
                 reasoning_effort: a.reasoning_effort || null,
                 priority: a.priority || null,
               });
-              worker.emit(planJob.id, `${C.magenta}[delegation]${C.reset} job #${a.job_id}: ${a.provider || "default"}${a.model_tier ? `/${a.model_tier}` : ""} - ${(a.reason || "").slice(0, 60)}`);
             }
           }
         }

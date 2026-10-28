@@ -1,3 +1,5 @@
+import { approvalPolicyForPayload } from "../../../../catalog/approval-policies.js";
+import { getSetting } from "../../../settings/functions/repository-settings.js";
 // lib/domains/worker/functions/helpers/human-input.js
 //
 // Human-input handler for interactive questions surfaced through the display.
@@ -9,9 +11,6 @@ import {
   HUMAN_INPUT_BEST_JUDGMENT_ANSWER,
   humanGateStateAllowsAnswer,
   humanInputChoicesForPayload,
-  nonInteractiveHumanInputAnswerForPayload,
-  scopeModeHumanInputAnswerForPayload,
-  SCOPE_MODE_APPROVAL_SOURCE,
 } from "../../../../catalog/human-input.js";
 import {
   getHumanGate,
@@ -40,9 +39,6 @@ const HARNESS_REVIEW_ANSWERS = Object.freeze({
   artifact_routing_admin: "acknowledge",
 });
 
-function isAbHarnessEnvironment(env = process.env) {
-  return Boolean(env.POSSE_AB_HARNESS || env.POSSE_AB_CELL || env.POSSE_AB_ARM);
-}
 
 function normalizePromptQuestions(questions, fallback, { collapseForChoices = false } = {}) {
   const normalized = (Array.isArray(questions) ? questions : [questions])
@@ -191,36 +187,15 @@ export async function runHumanInputHandler(worker, job, abortSignal = null, { le
   const promptIdentity = buildHumanPromptIdentity(job, payload);
   promptOptions.promptIdentity = promptIdentity;
 
-  const scopeAnswer = scopeModeHumanInputAnswerForPayload(payload, worker.scopeMode);
-  if (scopeAnswer) {
-    worker.emit(job.id, `${C.cyan}[human] Scope mode auto approved requested file scope${C.reset}`);
-    return JSON.stringify({
-      questions,
-      answers: questions.map((question) => ({ question, answer: scopeAnswer })),
-      prompt_identity: promptIdentity,
-      unattended: true,
-      source: SCOPE_MODE_APPROVAL_SOURCE,
-    });
+  const policy = approvalPolicyForPayload(payload, { getSetting, scopeMode: worker.scopeMode,
+    autoApprove: worker.autoApprove, autoApprovePlan: process.argv.includes("--auto-approve-plan") });
+  if (policy.answer) {
+    worker.emit(job.id, `${C.cyan}[human] ${policy.gate} resolved with "${policy.answer}" (${policy.source})${C.reset}`);
+    return JSON.stringify({ questions, answers: questions.map((question) => ({ question, answer: policy.answer })),
+      prompt_identity: promptIdentity, unattended: true, source: policy.source });
   }
-
-  if (worker.nonInteractive) {
-    const harness = isAbHarnessEnvironment();
-    const answer = harness
-      ? unattendedHarnessAnswerForPayload(payload, { autoApprove: worker.autoApprove || worker.nonInteractive })
-      : nonInteractiveHumanInputAnswerForPayload(payload);
-    if (answer) {
-      worker.emit(
-        job.id,
-        `${C.cyan}[human] ${harness ? "Harness" : "Non-interactive policy"} resolved unattended input with "${answer}"${C.reset}`,
-      );
-      return JSON.stringify({
-        questions,
-        answers: questions.map((question) => ({ question, answer })),
-        prompt_identity: promptIdentity,
-        unattended: true,
-        source: harness ? "ab_harness" : "non_interactive_policy",
-      });
-    }
+  if (worker.nonInteractive && policy.policy === "fail_closed") {
+    throw new Error(`Approval policy fail_closed: ${policy.gate} requires an operator in this unattended run.`);
   }
 
   if (worker.display && worker.display.askQuestions) {

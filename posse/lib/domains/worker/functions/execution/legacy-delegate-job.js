@@ -1,3 +1,4 @@
+import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnostic-logging.js";
 // legacy-delegate-job.js — close a `delegate` job left in an older database.
 //
 // Provider assignment now happens deterministically when the plan compiles, so
@@ -66,7 +67,7 @@ export async function runLegacyDelegateJob(worker, job, wrappedJob, {
     if (worker._releaseLease(job, leaseToken, "succeeded") && job.work_item_id) {
       refreshWorkItemStatus(job.work_item_id);
     }
-    worker.emit(job.id, `${C.magenta}[delegation]${C.reset} WI#${job.work_item_id} legacy delegate job #${job.id}: assigned ${assignments.length} of ${pendingJobs.length} job(s) deterministically`);
+    emitDiagnostic(worker, job.id, `${C.magenta}[delegation]${C.reset} WI#${job.work_item_id} legacy delegate job #${job.id}: assigned ${assignments.length} of ${pendingJobs.length} job(s) deterministically`);
   } catch (error) {
     const message = error?.message || String(error);
     if (attempt) {

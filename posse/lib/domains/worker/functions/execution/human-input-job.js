@@ -1,3 +1,6 @@
+import { materializeScopeCreates } from "../../../queue/functions/scope-create-grant.js";
+import { installScopeCreateMaterializer } from "../../../queue/functions/scope-create-materializer.js";
+installScopeCreateMaterializer(materializeScopeCreates);
 import { PLANNER_CLARIFICATION_REVIEW_TYPE } from "../../../../catalog/tools/planner-clarification.js";
 import { ENVIRONMENT_SETUP_REVIEW_TYPE } from "../../../../catalog/tools/environment-setup.js";
 import { applyDirtyWorktreeRecovery } from "../helpers/dirty-worktree-recovery.js";

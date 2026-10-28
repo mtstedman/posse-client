@@ -1,3 +1,4 @@
+import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnostic-logging.js";
 // ATLAS v2 warm-job executor.
 //
 // Workstream E provides the scheduling seam: this function is called by
@@ -298,7 +299,7 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
       // Main refresh and WI cleanup still matter after merge. A WI-local view
       // refresh cannot help a branch that has already closed.
       worker._releaseLease(job, leaseToken, "canceled");
-      worker.emit(job.id, `${C.dim}[atlas] canceled obsolete ${purpose} warm for merged WI#${job.work_item_id}${C.reset}`);
+      emitDiagnostic(worker, job.id, `${C.dim}[atlas] canceled obsolete ${purpose} warm for merged WI#${job.work_item_id}${C.reset}`);
       return;
     }
     // A commit refresh reads its WI checkout. Terminal cleanup removes that
@@ -307,7 +308,7 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
     if (purpose === "wi" && sourceWorktree && TERMINAL_WORK_ITEM_STATUSES.includes(workItem?.status)
       && !fs.existsSync(sourceWorktree)) {
       worker._releaseLease(job, leaseToken, "canceled");
-      worker.emit(job.id, `${C.dim}[atlas] canceled obsolete ${purpose} warm for ${workItem.status} WI#${job.work_item_id}: its worktree was removed${C.reset}`);
+      emitDiagnostic(worker, job.id, `${C.dim}[atlas] canceled obsolete ${purpose} warm for ${workItem.status} WI#${job.work_item_id}: its worktree was removed${C.reset}`);
       return;
     }
     const repoRoot = resolveAtlasRepoRoot(worker);
@@ -340,7 +341,7 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
         readyAt: new Date(Date.now() + ATLAS_WARM_DISABLED_REQUEUE_DELAY_MS).toISOString(),
       });
       if (released && job.work_item_id) refreshWorkItemStatus(job.work_item_id);
-      worker.emit(job.id, `${C.dim}[atlas] warm (${purpose}) deferred: ATLAS disabled for this run (${disabledReason}) — left queued for next boot${C.reset}`);
+      emitDiagnostic(worker, job.id, `${C.dim}[atlas] warm (${purpose}) deferred: ATLAS disabled for this run (${disabledReason}) — left queued for next boot${C.reset}`);
       return;
     }
     if (payload._atlas_parked_until_boot === true) {
@@ -516,7 +517,7 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
               ? payload.max_symbols
               : null,
           });
-          worker.emit(job.id, `${C.dim}[atlas] embeddings resume: ${remaining} symbols remaining — next slice queued${C.reset}`);
+          emitDiagnostic(worker, job.id, `${C.dim}[atlas] embeddings resume: ${remaining} symbols remaining — next slice queued${C.reset}`);
         } catch { /* best effort — readiness self-repair re-detects the gap */ }
       }
     }
@@ -536,7 +537,7 @@ export async function runAtlasWarmJob(worker, job, wrappedJob, {
           },
           jobId: job.id,
         });
-        worker.emit(job.id, `${C.dim}[atlas] scip restage staged fresh artifacts — main intake warm queued${C.reset}`);
+        emitDiagnostic(worker, job.id, `${C.dim}[atlas] scip restage staged fresh artifacts — main intake warm queued${C.reset}`);
       } catch { /* best effort — the next main warm ingests staged scip anyway */ }
     }
 
@@ -726,7 +727,7 @@ export function deferAtlasWarmAfterGateBusy(worker, job, attemptId, startTime, l
   const released = worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId, readyAt });
   if (released && job.work_item_id) refreshWorkItemStatus(job.work_item_id);
   try {
-    worker.emit(job.id, `${C.yellow}[atlas] warm #${job.id} (${purpose}) deferred — ledger write gate busy after ${gateWaitMs}ms; ${released ? `requeued (${deferrals}/${ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS})` : "lease already released"}; view left STALE until it runs${C.reset}`);
+    emitDiagnostic(worker, job.id, `${C.yellow}[atlas] warm #${job.id} (${purpose}) deferred — ledger write gate busy after ${gateWaitMs}ms; ${released ? `requeued (${deferrals}/${ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS})` : "lease already released"}; view left STALE until it runs${C.reset}`);
   } catch { /* emit is best-effort */ }
   return true;
 }
@@ -993,7 +994,7 @@ function emitAtlasWarmProgress(worker, jobId, event = {}) {
   if (!text) return;
   const stage = typeof event?.stage === "string" && event.stage.trim() ? ` ${event.stage.trim()}` : "";
   try {
-    worker?.emit?.(jobId, `${C.dim}[atlas] warm${stage}: ${text}${C.reset}`);
+    emitDiagnostic(worker, jobId, `${C.dim}[atlas] warm${stage}: ${text}${C.reset}`);
   } catch {
     // Progress is observational.
   }

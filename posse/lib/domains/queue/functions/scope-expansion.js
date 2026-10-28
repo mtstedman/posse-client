@@ -1,9 +1,10 @@
+import { ENVIRONMENT_SETUP_APPROVAL_TIMEOUT_MS, ENVIRONMENT_SETUP_RESUME_WAIT_MAX_MS } from "../../../catalog/tools/environment-setup.js";
 import { MUTATING_JOB_TYPES } from "../../../catalog/job.js";
 import { parseJobPayload } from "./payload.js";
 
-export const LIVE_SCOPE_WAIT_TIMEOUT_MS = 110_000;
+export const LIVE_SCOPE_WAIT_TIMEOUT_MS = ENVIRONMENT_SETUP_APPROVAL_TIMEOUT_MS;
 export const LIVE_SCOPE_WAIT_EXEMPTION_SLACK_MS = 40_000;
-export const LIVE_SCOPE_WAIT_MAX_EXEMPTION_MS = LIVE_SCOPE_WAIT_TIMEOUT_MS + LIVE_SCOPE_WAIT_EXEMPTION_SLACK_MS;
+export const LIVE_SCOPE_WAIT_MAX_EXEMPTION_MS = LIVE_SCOPE_WAIT_TIMEOUT_MS + ENVIRONMENT_SETUP_RESUME_WAIT_MAX_MS + LIVE_SCOPE_WAIT_EXEMPTION_SLACK_MS;
 
 export function scopeRequestBatchEntries(request = {}) {
   const batch = Array.isArray(request?.batch)

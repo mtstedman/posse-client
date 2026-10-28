@@ -20,6 +20,7 @@ export const STARTUP_UPDATE_FLAGS = Object.freeze({
 });
 
 export const FLAG_DESCRIPTORS = Object.freeze([
+  { name: "--advanced-logging", takesValue: false, category: "boolean" },
   // Global value flags (affect work-item creation, mode, scope).
   { name: "--mode", takesValue: true, category: "value" },
   { name: "--scope-mode", takesValue: true, category: "value" },

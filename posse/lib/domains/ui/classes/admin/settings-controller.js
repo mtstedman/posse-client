@@ -1,3 +1,4 @@
+import { PINNED_APPROVAL_GATES, approvalPolicyKey } from "../../../../catalog/approval-policies.js";
 // settings-controller.js — Settings tab of the admin TUI: pane layout,
 // rendering, and the inline editors. Methods run with the AdminTUI instance as
 // `this` (AdminTUI delegates to them).
@@ -314,7 +315,13 @@ export class AdminSettingsController {
     const pushGroups = (skip = new Set()) => {
       for (const group of SETTINGS_GROUPS) {
         if (group.pane !== paneId) continue;
-        const rows = dbRows(group.keys.filter((key) => !skip.has(key)));
+        const pinnedKeys = new Set(PINNED_APPROVAL_GATES.map(approvalPolicyKey));
+        const allRows = dbRows(group.keys.filter((key) => !skip.has(key)));
+        const pinned = allRows.filter((row) => pinnedKeys.has(row.setting_key));
+        for (const row of pinned) placed.add(row.setting_key);
+        if (pinned.length) sections.push({ id: "pinned-approvals", title: "Always ask", rows: [],
+          lines: pinned.map((row) => `  ${row.setting_key.slice("approval_policy_".length)}: ask (requires operator)` ) });
+        const rows = allRows.filter((row) => !pinnedKeys.has(row.setting_key));
         for (const row of rows) placed.add(row.setting_key);
         if (group.id === "skills") {
           rows.push(...snapshot.skillSettings);
@@ -337,6 +344,9 @@ export class AdminSettingsController {
     if (paneId === "general") {
       // Per-skill toggles are the readable form of the disabled-skill list.
       pushGroups(new Set([SETTING_KEYS.SKILLS_DISABLED_IDS]));
+    } else if (paneId === "approvals") {
+      pushGroups();
+      sections.push({ id: "database-permissions", title: "Database permissions", rows: snapshot.projectDbSettings.filter((row) => row.setting_key === "project_db_permissions") });
     } else if (paneId === "agents") {
       const providerByRole = new Map(snapshot.providerSettings.map((entry) => [entry.role, entry]));
       for (const section of AGENT_SETTING_SECTIONS) {
@@ -385,7 +395,7 @@ export class AdminSettingsController {
         id: "project_database",
         title: "Project Database",
         hint: "opt-in agent SQL access; stored in this repo's .posse/db",
-        rows: snapshot.projectDbSettings,
+        rows: snapshot.projectDbSettings.filter((row) => row.setting_key !== "project_db_permissions"),
       });
       const dbPath = getRuntimeDbPath(this.projectDir);
       sections.push({

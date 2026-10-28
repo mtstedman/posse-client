@@ -375,7 +375,7 @@ export class RunSession {
     }
   }
   if (nonInteractive && typeof prepareNonInteractiveHumanInputGates === "function") {
-    const prepared = prepareNonInteractiveHumanInputGates({ workItemIds: scopedWorkItemIds });
+    const prepared = prepareNonInteractiveHumanInputGates({ workItemIds: scopedWorkItemIds, autoApprove: AUTO_APPROVE, autoApprovePlan: process.argv.includes("--auto-approve-plan") });
     const approvedPlans = prepared?.approvedPlanGateIds?.length || 0;
     const requeuedGates = prepared?.requeued?.length || 0;
     if (approvedPlans + requeuedGates > 0) {

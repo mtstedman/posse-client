@@ -1,3 +1,4 @@
+import { emitDiagnostic } from "../../../shared/telemetry/functions/diagnostic-logging.js";
 // lib/domains/worker/classes/Worker.js — Job execution engine
 //
 // Dispatches jobs by type, manages attempts, model escalation on retry,
@@ -1161,7 +1162,7 @@ export class Worker {
         const delayMs = Math.max(100, Math.min(1000, atlasFreshnessGateDelayMs(config)));
         const readyAt = new Date(Date.now() + delayMs).toISOString();
         const message = `Deferred ${job.job_type} job until ATLAS evidence warm ${warmLabel} fully completes`;
-        this.emit(
+        emitDiagnostic(this,
           job.id,
           `${C.dim}[atlas] WI#${job.work_item_id} job #${job.id}: evidence warm ${warmLabel} is ${evidenceWarm.status || "pending"}; retrying in ${delayMs}ms${C.reset}`,
         );
@@ -1256,7 +1257,7 @@ export class Worker {
       const delayMs = atlasFreshnessGateDelayMs(config);
       const readyAt = new Date(Date.now() + delayMs).toISOString();
       const message = `Deferred ${job.job_type} job behind ATLAS main refresh (${pendingIds.length || 1} warm job${pendingIds.length === 1 ? "" : "s"} pending)`;
-      this.emit(
+      emitDiagnostic(this,
         job.id,
         `${C.dim}[atlas] WI#${job.work_item_id} job #${job.id}: main refresh pending; retrying in ${delayMs}ms${C.reset}`,
       );
@@ -1496,7 +1497,7 @@ export class Worker {
     }
     const shortHash = commitHash ? String(commitHash).slice(0, 8) : "";
     if (suppressTerminalWiRefresh) {
-      this.emit(jobId, `${C.dim}[atlas] reindex skipped after ${shortHash} (commit warm explicitly suppressed)${C.reset}`);
+      emitDiagnostic(this, jobId, `${C.dim}[atlas] reindex skipped after ${shortHash} (commit warm explicitly suppressed)${C.reset}`);
       return { emission, skipped: "commit_warm_suppressed" };
     }
     const reindexCwd = job?._worktreePath || this.projectDir;
@@ -1504,7 +1505,7 @@ export class Worker {
     const nowMs = Date.now();
     const lastKickAt = Number(this._lastAtlasReindexKickAtByRepo.get(repoKey) || 0);
     if (lastKickAt > 0 && nowMs - lastKickAt < 60_000) {
-      this.emit(jobId, `${C.dim}[atlas] reindex skipped after ${shortHash} (cooldown; latest commit will be picked up by the next refresh)${C.reset}`);
+      emitDiagnostic(this, jobId, `${C.dim}[atlas] reindex skipped after ${shortHash} (cooldown; latest commit will be picked up by the next refresh)${C.reset}`);
       return { emission, skipped: "reindex_cooldown" };
     }
     this._lastAtlasReindexKickAtByRepo.set(repoKey, nowMs);
@@ -1513,7 +1514,7 @@ export class Worker {
       config: atlasConfig,
       onStatus: ({ ok, error, status }) => {
         if (ok) {
-          this.emit(jobId, `${C.dim}[atlas] reindex complete after ${shortHash}${C.reset}`);
+          emitDiagnostic(this, jobId, `${C.dim}[atlas] reindex complete after ${shortHash}${C.reset}`);
         } else {
           const detail = error || (status != null ? `exit ${status}` : "unknown");
           this.emit(jobId, `${C.yellow}[atlas] reindex failed after ${shortHash}: ${detail}${C.reset}`);
@@ -1521,9 +1522,9 @@ export class Worker {
       },
     });
     if (result.attempted) {
-      this.emit(jobId, `${C.dim}[atlas] reindex kicked off after ${shortHash}${C.reset}`);
+      emitDiagnostic(this, jobId, `${C.dim}[atlas] reindex kicked off after ${shortHash}${C.reset}`);
     } else if (result.skipped === "reindex_in_progress") {
-      this.emit(jobId, `${C.dim}[atlas] reindex queued (in-progress run will replay)${C.reset}`);
+      emitDiagnostic(this, jobId, `${C.dim}[atlas] reindex queued (in-progress run will replay)${C.reset}`);
     }
     return { emission, reindex: result };
   }

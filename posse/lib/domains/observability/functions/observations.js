@@ -1,3 +1,5 @@
+import { isDiagnosticObservation } from "../../../catalog/diagnostic-logging.js";
+import { advancedLoggingEnabled } from "../../../shared/telemetry/functions/diagnostic-logging.js";
 import { TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
 export { RESEARCH_INFRASTRUCTURE_REFUND_LIMIT } from "../../../catalog/observation.js";
 import { RESEARCH_EXPLORATION_OBSERVATION_TYPES, RESEARCH_ATTEMPT_SCOPED_OBSERVATION_TYPES, RESEARCH_INFRASTRUCTURE_FAILURE_CODES, RESEARCH_INFRASTRUCTURE_REFUND_LIMIT } from "../../../catalog/observation.js";
@@ -470,6 +472,8 @@ export function recordObservation({
   db: suppliedDb = null,
 } = {}) {
   if (!observation_type || !summary) return false;
+  if (isDiagnosticObservation(observation_type) && !advancedLoggingEnabled()
+    && detail?.ok !== false && !detail?.error && !["error", "failed", "warning"].includes(detail?.status)) return false;
 
   _emitAttemptScopeCompatibilityDiagnostic({
     requestedScope: { work_item_id, job_id, attempt_id },

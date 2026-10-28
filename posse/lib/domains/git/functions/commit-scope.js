@@ -1159,12 +1159,13 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
       modifyRoots: [],
       createRoots: [],
       deleteRoots: [],
+      allowEmptyCreatePaths: (opts?.allowEmptyCreatePaths || []).map(repoRelativePath),
       requiredPaths: expectedToCommit.map((entry) => repoRelativePath(entry.path)),
       // Rust applies this only to paths that are creations relative to
       // expectedHead, so a legitimately empty file already in history remains
       // editable while an unfilled handoff placeholder fails closed.
       nonEmptyCreatePaths: [...new Set([
-        ...createFilesRaw,
+        ...createFilesRaw.filter((file) => !opts?.allowEmptyCreatePaths?.includes(file)),
         ...(Array.isArray(opts?.nonEmptyCreatePaths) ? opts.nonEmptyCreatePaths : []),
       ].map(scopeCompatiblePath).filter(Boolean).map(resolveScopedPath))]
         .map(repoRelativePath),

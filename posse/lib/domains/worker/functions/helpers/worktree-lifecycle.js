@@ -1,3 +1,4 @@
+import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnostic-logging.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { parkDirtyWorktreeRecovery } from "./dirty-worktree-recovery.js";
 import { settleWorktreeLockTimeout } from "./worktree-lock-recovery.js";
@@ -1166,9 +1167,9 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       try {
         if (await isMergeInProgressAsync(wtPath, { signal })) {
           disableWorkItemAtlas(job);
-          worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} join check skipped while merge is in progress${C.reset}`);
+          emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} join check skipped while merge is in progress${C.reset}`);
         } else {
-          worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} preparing worktree graph before dev join${C.reset}`);
+          emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} preparing worktree graph before dev join${C.reset}`);
           let joined = null;
           try {
             joined = await ensureWorkItemAtlasJoinAsync({
@@ -1179,7 +1180,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
               signal,
               onStatus: ({ ok, error, status }) => {
                 if (ok) {
-                  worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph refresh complete${C.reset}`);
+                  emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph refresh complete${C.reset}`);
                 } else {
                   const detail = error || (status != null ? `exit ${status}` : "unknown");
                   worker.emit(job.id, `${C.yellow}[atlas] WI#${wi.id} worktree graph refresh failed: ${detail}${C.reset}`);
@@ -1190,23 +1191,23 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
             job._atlasGraphDbPath = joined.graphDbPath || null;
             job._atlasDisabledForWorkItem = !!job._atlasDisabledForWorkItem || !!joined.disableAtlas;
             if (joined.state === "up_to_date") {
-              worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph up to date${C.reset}`);
+              emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph up to date${C.reset}`);
             } else if (joined.state === "seeded_refresh") {
               const refreshReady = joined.refreshWait?.completed && joined.refreshWait?.ok !== false;
               let refreshState = joined.attempted ? "started" : "queued/skipped";
               if (refreshReady) refreshState = "complete";
               else if (joined.refreshWait?.skipped === "refresh_wait_timeout") refreshState = "still running after wait";
-              worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} seeded worktree graph; refresh ${refreshState}${C.reset}`);
+              emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} seeded worktree graph; refresh ${refreshState}${C.reset}`);
             } else if (joined.state === "refresh") {
               const refreshReady = joined.refreshWait?.completed && joined.refreshWait?.ok !== false;
               let refreshState = joined.attempted ? "started" : "queued/skipped";
               if (refreshReady) refreshState = "complete";
               else if (joined.refreshWait?.skipped === "refresh_wait_timeout") refreshState = "still running after wait";
-              worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph refresh ${refreshState}${C.reset}`);
+              emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} worktree graph refresh ${refreshState}${C.reset}`);
             } else if (joined.state === "primary_graph_absent") {
-              worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} no primary graph available; ATLAS disabled for this worktree join${C.reset}`);
+              emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} no primary graph available; ATLAS disabled for this worktree join${C.reset}`);
             } else if (joined.state === "seed_busy") {
-              worker.emit(job.id, `${C.dim}[atlas] WI#${wi.id} graph seed busy; ATLAS disabled for this worktree join${C.reset}`);
+              emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${wi.id} graph seed busy; ATLAS disabled for this worktree join${C.reset}`);
             }
           } finally {
             try { joined?.view?.close?.(); } catch { /* best effort */ }

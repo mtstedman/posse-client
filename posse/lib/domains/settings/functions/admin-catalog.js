@@ -1,3 +1,4 @@
+import { APPROVAL_POLICY_SETTINGS } from "../../../catalog/approval-policies.js";
 import { ADMIN_SETTING_LABEL_OVERRIDES, ADMIN_SETTING_DESCRIPTION_OVERRIDES, ADMIN_UNSET_VALUE_LABELS, ADMIN_SETTING_UNIT_OVERRIDES, ADMIN_LABEL_WORDS, ADMIN_ROLE_PURPOSES, ADMIN_AGENT_SETTING_SECTIONS, ADMIN_PROVIDER_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS, ADMIN_IMAGE_SETTING_SECTIONS, TURN_BASE_KEY_MAP, TURN_BASE_KEY_REVERSE_MAP } from "../../../catalog/admin-settings.js";
 export { PROVIDER_SETTING_KEYS, ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS, SKILL_SETTING_PREFIX, PROJECT_DB_TYPE_OPTIONS, PROJECT_DB_PERMISSION_OPTIONS, PROJECT_DB_SETTING_DEFS, PROJECT_DB_SETTING_KEYS, ADMIN_AGENT_SETTING_SECTIONS, ADMIN_PROVIDER_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS, ADMIN_IMAGE_SETTING_SECTIONS, ADMIN_CREDENTIAL_SETTING_DEFS, TURN_BASE_KEY_MAP, TURN_BASE_KEY_REVERSE_MAP, SETTINGS_PANES, ADMIN_DEFAULT_SETTINGS_PANE } from "../../../catalog/admin-settings.js";
 import { PLANNER_DISPATCH_SETTING_KEYS, PLANNER_DISPATCH_MODES } from "../../../catalog/planner-dispatch.js";
@@ -324,10 +325,11 @@ const group = (id, pane, label, keys, hint = null) => Object.freeze({
 });
 
 export const SETTINGS_GROUPS = Object.freeze([
+  group("gate-policies", "approvals", "Gate policies", ["plan_approval_mode", ...APPROVAL_POLICY_SETTINGS.map(({ key }) => key)]),
+  group("approval-controls", "approvals", "Merge and scope controls", ["auto_merge_completed", "scope_auto_approval", "fix_scope_handoff_guard", "file_request_low_risk_extensions", "posse_max_file_request_depth", "db_task_pre_merge_policy", "headless_human_timeout_sec"]),
   // ── General ──
+  group("logging", "general", "Logging", ["advanced_logging"]),
   group("workflow", "general", "Workflow", [
-    "plan_approval_mode",
-    "auto_merge_completed",
     "scheduler_concurrency",
     "scheduler_max_active_worktrees",
     "scheduler_implementation_reserved_slots",
@@ -337,9 +339,6 @@ export const SETTINGS_GROUPS = Object.freeze([
     "web_tools_enabled",
   ]),
   group("safety", "general", "Approvals & Safety", [
-    "scope_auto_approval",
-    "fix_scope_handoff_guard",
-    "file_request_low_risk_extensions",
     "posse_log_scrub_secrets",
   ]),
   group("limits", "general", "Limits & Retries", [
@@ -347,12 +346,10 @@ export const SETTINGS_GROUPS = Object.freeze([
     "posse_wi_failure_threshold",
     "posse_max_fix_chain_depth",
     "posse_max_replans",
-    "posse_max_file_request_depth",
     "stall_timeout",
     "max_job_runtime_sec",
     "runtime_write_grace_sec",
     "runtime_write_ceiling_multiplier",
-    "headless_human_timeout_sec",
   ]),
   group("skills", "general", "Skills", [
     "skills_enabled",
@@ -410,7 +407,6 @@ export const SETTINGS_GROUPS = Object.freeze([
   group("repo_git", "repo", "Git", [
     "target_branch",
     "git_commit_style",
-    "db_task_pre_merge_policy",
     "scheduler_reviewed_file_handoffs",
   ]),
   group("repo_verification", "repo", "Verification", [

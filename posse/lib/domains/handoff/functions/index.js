@@ -1,3 +1,4 @@
+import { advancedLoggingEnabled } from "../../../shared/telemetry/functions/diagnostic-logging.js";
 import { pruneTestHandoff } from "../../verification/functions/test-capability.js";
 // Handoff context builder + deterministic context enrichment.
 //
@@ -134,7 +135,7 @@ async function timeHandoffStep(packet, label, fn, {
     if (timer) clearTimeout(timer);
     if (graceTimer) clearTimeout(graceTimer);
     const durationMs = Date.now() - startedAt;
-    if (durationMs >= warnMs) {
+    if (durationMs >= warnMs && advancedLoggingEnabled()) {
       log.warn("handoff", "Handoff step was slow", {
         role: packet?.recipient || null,
         label,
@@ -398,7 +399,7 @@ const TOOL_POLICIES = {
 
 function _sanitizePayloadForRecipient(recipient, payload = {}) {
   if (!payload || typeof payload !== "object") return payload;
-  let sanitized = payload;
+  let sanitized = Object.fromEntries(Object.entries(payload).filter(([key]) => !key.startsWith("_plan_")));
   const internalPolicyKeys = [
     "_assess_model_tier",
     "_assess_model_name",

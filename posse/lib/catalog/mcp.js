@@ -52,7 +52,7 @@ export const MCP_TOOL_DEADLINE_CLASSES = Object.freeze({
 // A live scope request parks the tool call on a human answer. The queue's
 // wait plus exemption slack (`scope-expansion.js`) must stay inside this bound;
 // a test pins that relationship.
-export const MCP_LIVE_SCOPE_WAIT_DEADLINE_MS = 150_000;
+export const MCP_LIVE_SCOPE_WAIT_DEADLINE_MS = ENVIRONMENT_SETUP_LIVE_MAX_MS;
 
 export const MCP_TOOL_DEADLINE_MS = Object.freeze({
   [MCP_TOOL_DEADLINE_CLASSES.DEFAULT]: MCP_REQUEST_TIMEOUT_MS,

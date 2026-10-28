@@ -1,3 +1,4 @@
+import { recordUnusedScopeGrants } from "./scope-grant-usage.js";
 import { rankRunnableJobs } from "./unlock-ranking.js";
 import { randomUUID } from "node:crypto";
 import { reviewedTransfers } from "./reviewed-handoff-records.js";
@@ -2458,6 +2459,7 @@ export function updateJobStatus(id, status, { expectedStatuses = null, leaseToke
     if (result.changes === 0) return false;
 
     const job = getJob(id);
+    if (status === "succeeded") recordUnusedScopeGrants(job, logEvent, updateJobPayload);
     if (job?.job_type === "human_input" && status === "succeeded") {
       db.prepare(`
         UPDATE human_gates

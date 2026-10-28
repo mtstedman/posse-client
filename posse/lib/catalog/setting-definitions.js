@@ -1,3 +1,4 @@
+import { APPROVAL_POLICY_SETTINGS } from "./approval-policies.js";
 // @ts-check
 // Canonical setting definitions. Pure data, derived role/model rows, and defaults only.
 import { RESEARCH_CLAIM_REVIEW } from "./research-claim-review.js";
@@ -37,6 +38,8 @@ export function buildModelSelectionSettings() {
 export const MODEL_SELECTION_SETTINGS = Object.freeze(buildModelSelectionSettings());
 
 export const SETTING_DEFINITIONS = [
+  ...APPROVAL_POLICY_SETTINGS,
+  { key: "advanced_logging", default: "false", valueType: "boolean", description: "Record Atlas, context, tool-start and memory diagnostics" },
   // ── Provider routing ─────────────────────────────────────────────────────
   // Provider keys default empty so admin code falls through persisted setting
   // before using the hardcoded default.

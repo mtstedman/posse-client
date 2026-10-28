@@ -1,3 +1,4 @@
+import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnostic-logging.js";
 import { TEST_EXECUTION_RECEIPT_MIME_TYPE } from "../../../../catalog/verification.js";
 import { runInTransaction } from "../../../queue/functions/index.js";
 import { prepareFinalReviewWrapUp } from "../../../assessment/functions/final-review-wrap-up.js";
@@ -2055,7 +2056,7 @@ export async function runPostExecutionAssessment(worker, {
         output_chars: output.length,
       });
       const warmLabel = hasEvidenceWarmJob ? `#${evidenceWarmJobId}` : "(missing)";
-      worker.emit(job.id, `${C.dim}[atlas] WI#${job.work_item_id} job #${job.id}: commit warm ${warmLabel} is ${evidenceWarm.status || evidenceWarm.skipped || "pending"}; deferring evidence binding to assess-only retry${C.reset}`);
+      emitDiagnostic(worker, job.id, `${C.dim}[atlas] WI#${job.work_item_id} job #${job.id}: commit warm ${warmLabel} is ${evidenceWarm.status || evidenceWarm.skipped || "pending"}; deferring evidence binding to assess-only retry${C.reset}`);
       worker._releaseLease(job, leaseToken, "queued");
       refreshAndExtractInsights(job.work_item_id);
       return;

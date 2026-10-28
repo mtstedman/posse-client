@@ -1,3 +1,5 @@
+import { approvalPolicyForPayload } from "../../../catalog/approval-policies.js";
+import { getSetting } from "../../settings/functions/repository-settings.js";
 // CLI session factories: wire the ReviewSession and RunSession
 // constructor dependencies. These are the glue layer between the
 // orchestrator CLI's module-scoped state (PROJECT_DIR, argv flags,
@@ -72,7 +74,7 @@ import {
 } from "./review-report.js";
 import { jobsNeedGitWorktree } from "../../git/functions/policy.js";
 import { inferWiMode } from "../../intake/functions/mode-inference.js";
-import { nonInteractiveHumanInputAnswerForPayload, scopeModeHumanInputAnswerForPayload, SCOPE_APPROVAL_MODES } from "../../../catalog/human-input.js";
+import { scopeModeHumanInputAnswerForPayload, SCOPE_APPROVAL_MODES } from "../../../catalog/human-input.js";
 import { researchBudgetMetadata, researchPayload } from "../../research/functions/payload.js";
 import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import {
@@ -81,7 +83,7 @@ import {
 } from "../../remote/functions/readiness.js";
 import { drainPostMergeAtlasWarmJobs } from "./post-merge-closeout.js";
 
-export function prepareNonInteractiveHumanInputGates({ workItemIds = [] } = {}) {
+export function prepareNonInteractiveHumanInputGates({ workItemIds = [], autoApprove = false, autoApprovePlan = false } = {}) {
   const scopedIds = new Set(
     (Array.isArray(workItemIds) ? workItemIds : [])
       .map((id) => Number(id))
@@ -101,7 +103,7 @@ export function prepareNonInteractiveHumanInputGates({ workItemIds = [] } = {}) 
     // Exact operational-command authorization is human-owned. Headless and
     // non-interactive policy may approve ordinary plans, but must leave these
     // gates parked until an operator reviews the command text.
-    if (gatePayload?.requires_interactive_approval === true) continue;
+    if (approvalPolicyForPayload(gatePayload, { getSetting, autoApprove, autoApprovePlan }).answer !== "approve") continue;
     const approved = approvePlan(item.id, {
       actor: "non_interactive_policy",
       actorType: EVENT_ACTORS.SYSTEM,
@@ -113,7 +115,8 @@ export function prepareNonInteractiveHumanInputGates({ workItemIds = [] } = {}) 
       if (!eligibleWorkItemIds.has(Number(job.work_item_id))) return false;
       let payload = {};
       try { payload = JSON.parse(job.payload_json || "{}"); } catch { return false; }
-      return nonInteractiveHumanInputAnswerForPayload(payload) != null;
+      const policy = approvalPolicyForPayload(payload, { getSetting, autoApprove, autoApprovePlan });
+      return policy.answer != null || policy.policy === "fail_closed";
     },
     reason: "non-interactive automatic-resolution policy became available",
   });

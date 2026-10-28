@@ -16,7 +16,7 @@ import {
   JOB_STATUSES,
   ONESHOT_SCOPE_SELECTION_SUBTYPE,
 } from "./job.js";
-import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./native-tools.js";
+import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./tools/interaction.js";
 import { orderedGateActions } from "./gate-actions.js";
 
 const freezeChoices = (choices) => Object.freeze([...choices]);
@@ -222,6 +222,10 @@ const DEFAULT_HUMAN_GATE_SOURCE_STATES = Object.freeze(
  * takes free text as `respond`.
  */
 export const HUMAN_GATE_ACTIONS = Object.freeze({
+  clarification: freezeChoices(["respond"]),
+  [ONESHOT_SCOPE_SELECTION_SUBTYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.one_shot_file_scope),
+  plan_approval: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.plan_approval),
+  push_offer: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.push_offer),
   [PLANNER_CLARIFICATION_REVIEW_TYPE]: freezeChoices(["respond"]),
   [ENVIRONMENT_SETUP_REVIEW_TYPE]: ENVIRONMENT_SETUP_ACTIONS,
   scope_expansion_request: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.file_scope_approval),
@@ -576,7 +580,7 @@ export function validateHumanGateActionabilityContract(contract = {}) {
   return { ok: true, reason: null };
 }
 
-function gateSource(payload = {}) {
+export function humanGateNameForPayload(payload = {}) {
   if (payload?.subtype === "plan_approval") return "plan_approval";
   if (payload?.subtype === "push_offer") return "push_offer";
   if (
@@ -594,7 +598,7 @@ function gateSource(payload = {}) {
 export function humanGateContractForPayload(payload = {}, {
   parentJobId = null,
 } = {}) {
-  const source = gateSource(payload);
+  const source = humanGateNameForPayload(payload);
   const registered = HUMAN_GATE_CONTRACTS[source];
   const explicitChoices = humanInputChoicesForPayload(payload);
   const originalJobId = Number(
@@ -714,7 +718,7 @@ export function humanInputChoicesForPayload(payload = {}) {
   // from older jobs must not reintroduce an action that the resolver does not
   // handle. A gate whose only action is `respond` offers no choices: it takes
   // free text.
-  const reviewChoices = humanInputChoicesForReviewType(payload.review_type)
+  const reviewChoices = humanInputChoicesForReviewType(payload.subtype || payload.review_type)
     .filter((choice) => choice !== "respond");
   if (reviewChoices.length > 0) return narrowedReviewChoices(payload, reviewChoices);
 
@@ -737,30 +741,6 @@ export function humanInputReviewDiffPolicyForPayload(payload = {}) {
   return policy;
 }
 
-const NON_INTERACTIVE_REVIEW_ACTIONS = Object.freeze({
-  scope_expansion_request: "approve",
-  scope_expansion_required: "approve",
-  partial_work_recovery: "commit",
-  artifact_routing_admin: "acknowledge",
-});
-
-// Reviews an unattended run leaves open for an operator. Answering them "fail"
-// discarded the work item and its verdict (a fix its assessor passed was
-// failed on a pre-existing broken test suite), while a parked gate costs
-// nothing and is answered later from the app, the phone or `posse gate answer`.
-const OPERATOR_OWNED_REVIEW_TYPES = readonlySet([
-  "blocked_recovery",
-  "assessment",
-  "needs_review",
-  "assessment_parse_error",
-  "assessment_evidence_missing",
-  "unknown_verdict",
-  "assessment_transport_error",
-  "assessment_retry_limit",
-  "replan_limit",
-  "unexecuted_replan_limit",
-]);
-
 // A scope-only run override uses the existing gate resolver and audit trail.
 // Only known file-scope gates qualify; unrelated reviews remain interactive.
 export function scopeModeHumanInputAnswerForPayload(payload = {}, scopeMode = SCOPE_APPROVAL_MODES.DEFAULT) {
@@ -773,33 +753,12 @@ export function scopeModeHumanInputAnswerForPayload(payload = {}, scopeMode = SC
   return null;
 }
 
-/**
- * Return the bounded action a production non-interactive run may take without
- * inventing human judgment. Approval gates proceed and partial work is
- * preserved for assessment. Assessment, capability, recovery and limit reviews
- * return null: they stay open for an operator instead of failing the work item
- * or fabricating a pass.
- */
-export function nonInteractiveHumanInputAnswerForPayload(payload = {}) {
-  if (payload.requires_interactive_approval === true) return null;
-  if (payload.subtype === "push_offer" || payload.subtype === "plan_approval") return null;
-  if (
-    payload.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
-    || payload.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE
-  ) return "plan";
-
-  const reviewType = String(payload.review_type || "").trim();
-  const reviewAction = NON_INTERACTIVE_REVIEW_ACTIONS[reviewType];
-  if (reviewAction) return reviewAction;
-  if (OPERATOR_OWNED_REVIEW_TYPES.has(reviewType)) return null;
-
-  if (Array.isArray(payload.file_requests) && payload.file_requests.length > 0) return "approve";
-
-  // Unknown closed-choice contracts are deliberately not guessed. Generic
-  // clarification prompts can safely resume the agent with an explicit
-  // best-judgment instruction because no privileged action is selected.
-  if (humanInputChoicesForPayload(payload).length > 0 || reviewType) return null;
-  return HUMAN_INPUT_BEST_JUDGMENT_ANSWER;
+// An unattended policy may select only an action offered by this gate.
+// With the default ask policy the gate remains open for the operator.
+export function nonInteractiveHumanInputAnswerForPayload(payload = {}, policy = "ask") {
+  if (payload.requires_interactive_approval === true || ["push_offer", "environment_setup"].includes(payload.subtype || payload.review_type)) return null;
+  const action = String(policy).startsWith("auto:") ? policy.slice(5) : null;
+  return action && humanInputChoicesForPayload(payload).includes(action) ? action : null;
 }
 
 export function isHumanInputCoordinationPayload(payload = {}) {

@@ -1,3 +1,6 @@
+import { approvalPolicyKey } from "../../../catalog/approval-policies.js";
+import { materializeScopeCreates } from "./scope-create-materializer.js";
+import { protectedMutablePathReason, isSensitiveEnvRepoPath } from "../../runtime/functions/protected-paths.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import { classifyAutoApprovableScopeRequest } from "../../../shared/policies/functions/scope-auto-approval.js";
@@ -5,6 +8,7 @@ import { acquireAdditionalJobWritePaths } from "./file-locks.js";
 import {
   dependentSiblingScopeApproval,
   LIVE_SCOPE_WAIT_TIMEOUT_MS,
+  LIVE_SCOPE_WAIT_MAX_EXEMPTION_MS,
   scopeRequestBatchEntries,
 } from "./scope-expansion.js";
 
@@ -137,6 +141,7 @@ export function createScopeExpansionOperations({
     source = "internal_tool",
     liveWait = false,
     ignoredByRepository = null,
+    workspaceCwd = null,
   } = {}) {
     const normalizedJobId = Number(jobId);
     const normalizedPath = normalizeRequestedScopePath(path);
@@ -147,6 +152,9 @@ export function createScopeExpansionOperations({
     }
     if (!normalizedPath) {
       return { ok: false, code: "invalid_scope_path", paused: false, message: "Scope requests require one repository-relative file path." };
+    }
+    if (protectedMutablePathReason(normalizedPath) || isSensitiveEnvRepoPath(normalizedPath)) {
+      return { ok: false, approved: false, code: "scope_path_protected", message: `Protected path: ${normalizedPath}` };
     }
     if (!new Set(["modify", "create"]).has(normalizedAccess)) {
       return { ok: false, code: "invalid_scope_access", paused: false, message: "Scope request access must be modify or create." };
@@ -244,7 +252,9 @@ export function createScopeExpansionOperations({
       // same attempt instead of costing a pause → gate → re-run cycle.
       let autoApprovalEnabled = true;
       try {
-        autoApprovalEnabled = String(getSetting(SETTING_KEYS.SCOPE_AUTO_APPROVAL) ?? "true") !== "false";
+        const policy = getSetting(approvalPolicyKey("scope_expansion_request")) || "ask";
+        autoApprovalEnabled = ["ask", "auto:approve"].includes(policy)
+          && String(getSetting(SETTING_KEYS.SCOPE_AUTO_APPROVAL) ?? "true") !== "false";
       } catch { /* default on */ }
       const autoClass = autoApprovalEnabled
         ? dependentSiblingScopeApproval(current, normalizedPath, normalizedAccess,
@@ -257,6 +267,7 @@ export function createScopeExpansionOperations({
       if (autoClass) {
         const ownership = acquireAdditionalJobWritePaths(current.id, [normalizedPath]);
         if (!ownership.ok) return ownership;
+        const createdFiles = materializeScopeCreates(workspaceCwd, [{ path: normalizedPath, access: normalizedAccess }], { jobId: current.id });
         const field = normalizedAccess === "modify" ? "files_to_modify" : "files_to_create";
         const nextPayload = { ...payload };
         nextPayload[field] = [...new Set([
@@ -287,6 +298,7 @@ export function createScopeExpansionOperations({
             access: normalizedAccess,
             operation: normalizedOperation,
             auto: true,
+            unattended: true, source: "routine_scope_policy",
             reason: autoClass.reason,
             ...(autoClass.sibling_job_ids ? { sibling_job_ids: autoClass.sibling_job_ids } : {}),
           }),
@@ -294,6 +306,7 @@ export function createScopeExpansionOperations({
         return {
           ok: true,
           code: "scope_auto_approved",
+          created_files: createdFiles,
           paused: false,
           approved: true,
           auto: true,
@@ -301,7 +314,7 @@ export function createScopeExpansionOperations({
           access: normalizedAccess,
           operation: normalizedOperation,
           reason: autoClass.reason,
-          message: `Scope auto-approved (${autoClass.reason}) for ${normalizedPath}. Retry the ${normalizedOperation} now.`,
+          message: `Scope auto-approved (${autoClass.reason}) for ${normalizedPath}.${createdFiles.length ? " File now exists and is committed." : ""} Retry the ${normalizedOperation} now.`,
         };
       }
 
@@ -401,6 +414,7 @@ export function createScopeExpansionOperations({
         attempt_id: Number(attemptId) || null,
         agent_call_id: Number(agentCallId) || null,
         live_wait: liveWait === true,
+        workspace_cwd: workspaceCwd,
       };
       request.batch = [{
         path: normalizedPath,
@@ -427,6 +441,11 @@ export function createScopeExpansionOperations({
       updateJobPayload(current.id, JSON.stringify({
         ...payload,
         _pending_scope_request: request,
+        ...(request.live_wait ? { _environment_setup_live: {
+          approval_job_id: humanJob.id, attempt_id: request.attempt_id,
+          requested_at: request.requested_at,
+          deadline_at: new Date(Date.now() + LIVE_SCOPE_WAIT_MAX_EXEMPTION_MS).toISOString(),
+        } } : {}),
       }));
       if (request.live_wait !== true) {
         const parked = updateJobStatus(current.id, "waiting_on_human", {
@@ -567,6 +586,16 @@ export function createScopeExpansionOperations({
         // batch contents: appends update it in the same transaction as the
         // gate payload, and it reflects every path the answer covers.
         const entries = scopeRequestBatchEntries(pending);
+        if (pending.workspace_cwd && original.status !== "succeeded") {
+          const ownership = acquireAdditionalJobWritePaths(original.id, entries.map((entry) => entry.path));
+          if (!ownership.ok) return ownership;
+        }
+        const createdFiles = original.status === "succeeded" ? []
+          : materializeScopeCreates(pending.workspace_cwd, entries, { jobId: original.id, gateId: humanJob.id });
+        nextPayload._pending_scope_request.created_files = createdFiles;
+        nextPayload._scope_grants = [...(payload._scope_grants || []).filter((grant) => grant.approval_job_id !== humanJob.id),
+          { approval_job_id: humanJob.id, paths: entries.map((entry) => entry.path), used: false,
+            unused_recorded: original.status === "succeeded" }];
         for (const entry of entries) {
           const field = entry.access === "modify" ? "files_to_modify" : "files_to_create";
           nextPayload[field] = [...new Set([
@@ -589,6 +618,12 @@ export function createScopeExpansionOperations({
           requeued = updateJobStatus(original.id, "queued", { expectedStatuses: ["failed"], force: true });
           if (requeued) setJobError(original.id, null);
         }
+        if (original.status === "succeeded") logEvent({
+          work_item_id: original.work_item_id, job_id: original.id,
+          event_type: EVENT_TYPES.JOB_SCOPE_GRANT_UNUSED, actor_type: actorType,
+          message: `Scope grant from gate #${humanJob.id} arrived after job completion and was not used.`,
+          event_json: JSON.stringify({ approval_job_id: humanJob.id, paths: entries.map((entry) => entry.path) }),
+        });
         logEvent({
           work_item_id: original.work_item_id,
           job_id: original.id,
@@ -746,11 +781,12 @@ export function createScopeExpansionOperations({
             live: true,
             paused: false,
             code: "scope_approved_live",
+            created_files: freshPending.created_files || [],
             path: freshPending.path || null,
             access: freshPending.access || null,
             operation: freshPending.operation || null,
             batch: entries,
-            message: `Writable scope approved for ${entries.map((entry) => entry.path).join(", ")}; continuing the active agent session.`,
+            message: `Writable scope approved for ${entries.map((entry) => entry.path).join(", ")}${freshPending.created_files?.length ? "; created files now exist and are committed" : ""}; continuing the active agent session.`,
           };
         }
         return {
@@ -869,10 +905,17 @@ export function createScopeExpansionOperations({
         // consumed by the attempt-end settle path (requeue-with-grant), and
         // the watchdog exemption ages out via the pending's requested_at, so
         // nothing leaks if no answer ever comes.
-        return stopResult(
-          "scope_wait_timeout",
-          `The active scope wait timed out after ${Math.ceil(Number(timeoutMs) / 1000)}s; the approval gate stays open and a later decision is applied when the job retries.`,
-        );
+        const expired = runInTransaction(() => {
+          const fresh = getJob(normalizedJobId);
+          const data = parseJobPayloadObject(fresh);
+          if (data._pending_scope_request?.id !== normalizedRequestId || data._pending_scope_request.decision) return false;
+          data._pending_scope_request.hold_expired = true;
+          updateJobPayload(fresh.id, JSON.stringify(data));
+          return true;
+        });
+        if (!expired) continue;
+        return { ok: false, approved: false, live: true, paused: true, code: "scope_approval_pending",
+          message: "Awaiting scope approval. End this attempt as BLOCKED; the open gate will resume the job without spending an attempt." };
       }
 
       const remainingMs = deadline == null ? delayMs : Math.max(1, deadline - Date.now());

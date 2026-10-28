@@ -1,3 +1,4 @@
+import { advancedLoggingEnabled } from "./diagnostic-logging.js";
 import { appendRunTelemetry } from "./run-telemetry.js";
 
 function nowIso() {
@@ -28,6 +29,7 @@ export function collectMemorySnapshot(extra = {}) {
 }
 
 export function recordMemorySample(phase, data = {}) {
+  if (!advancedLoggingEnabled()) return false;
   try {
     return appendRunTelemetry("memory", collectMemorySnapshot({
       phase: String(phase || "unknown"),

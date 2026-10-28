@@ -1,3 +1,4 @@
+import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnostic-logging.js";
 import { pruneTestHandoff } from "../../../verification/functions/test-capability.js";
 // lib/domains/worker/classes/roles/planner.js
 //
@@ -525,7 +526,7 @@ export class PlannerRole extends BaseRole {
       }
 
       if (fastFileCount > 0 || fullCount > 0) {
-        emit(worker, job.id, `${C.cyan}[context]${C.reset} WI#${job.work_item_id}: fast/ ${fastFileCount} ref file(s), full/ ${fullCount} source file(s)`);
+        emitDiagnostic(worker, job.id, `${C.cyan}[context]${C.reset} WI#${job.work_item_id}: fast/ ${fastFileCount} ref file(s), full/ ${fullCount} source file(s)`);
       }
     } catch (ctxErr) {
       emit(worker, job.id, `${C.yellow}[context]${C.reset} WI#${job.work_item_id}: context dir build failed (${ctxErr.message?.split("\n")[0]?.slice(0, 80)}) - planner will use tools`);
@@ -939,7 +940,7 @@ export class PlannerRole extends BaseRole {
       if (fullReads > 0) parts.push(`${C.yellow}full: ${fullReads}${C.reset}`);
       if (projectReads > 0) parts.push(`${C.yellow}project: ${projectReads}${C.reset}`);
       if (parts.length > 0) {
-        emit(worker, job.id, `${C.cyan}[context]${C.reset} WI#${job.work_item_id} planner reads: ${parts.join(", ")} (${plannerStats.numTurns || "?"} turns)`);
+        emitDiagnostic(worker, job.id, `${C.cyan}[context]${C.reset} WI#${job.work_item_id} planner reads: ${parts.join(", ")} (${plannerStats.numTurns || "?"} turns)`);
       }
       storeArtifact({
         work_item_id: job.work_item_id,
