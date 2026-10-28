@@ -23,9 +23,15 @@ import {
   getPosseRemoteResponseSigningSecret,
 } from "../functions/mode.js";
 import { runRemoteNativeRequestJson } from "../functions/native-client.js";
+import {
+  normalizeNativeToolGrant,
+  registerNativeToolGrant,
+  withoutNativeToolGrantField,
+} from "../../../shared/tools/functions/native-tool-grant-registry.js";
 
 const DEFAULT_REMOTE_PROMPT_TIMEOUT_MS = 60_000;
 const TRUSTED_COMPILE_ISSUANCES = new WeakSet();
+const COMPILE_GRANTS = new WeakMap();
 const AGENT_FLOW_AUTH = new HeartbeatAuthManager({
   env: process.env,
   developmentMode: true,
@@ -108,10 +114,18 @@ export class RemotePromptClient {
       operation: "remote prompt compile",
     }, isRetryableRemoteRequestError);
     if (response && typeof response === "object") {
-      const issuance = response.issuance && typeof response.issuance === "object"
-        ? deepFreezeJson(response.issuance)
+      const rawIssuance = response.issuance && typeof response.issuance === "object"
+        ? response.issuance
         : null;
+      // The native tool grant is an opaque credential for the native hosts.
+      // It never stays on the response object, which callers spread into
+      // persisted packets and telemetry; it is held beside the receipt and
+      // handed to the agent gate when the issuance is consumed.
+      const grant = normalizeNativeToolGrant(rawIssuance?.native_tool_grant);
+      if (rawIssuance) response.issuance = withoutNativeToolGrantField(rawIssuance);
+      const issuance = rawIssuance ? deepFreezeJson(response.issuance) : null;
       this.#compileIssuances.set(response, issuance);
+      if (issuance && grant) COMPILE_GRANTS.set(issuance, grant);
     }
     return response;
   }
@@ -122,6 +136,11 @@ export class RemotePromptClient {
     this.#compileIssuances.delete(response);
     if (!issuance) return null;
     TRUSTED_COMPILE_ISSUANCES.add(issuance);
+    const grant = COMPILE_GRANTS.get(issuance);
+    if (grant) {
+      COMPILE_GRANTS.delete(issuance);
+      registerNativeToolGrant(issuance, grant);
+    }
     return issuance;
   }
 

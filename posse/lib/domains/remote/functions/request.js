@@ -5,6 +5,7 @@ import {
   normalizeHashRefAlias,
 } from "../../../catalog/hash-store.js";
 import { localModelProfile } from "../../../catalog/local-model.js";
+import { DEFAULT_NATIVE_TOOL_GRANT_TTL_SECONDS } from "../../../catalog/binary.js";
 import { atlasMemoryEnabled } from "../../../shared/policies/functions/memory-mode.js";
 import { isResearchBudgetDeep } from "../../../shared/policies/functions/role-utils.js";
 
@@ -686,6 +687,12 @@ export function buildRemoteCompileRequest(packet, instructions, {
     }),
     skills: selectedSkills,
     requested_skills: Array.isArray(packet?.requested_skills) ? packet.requested_skills : [],
+    // The native dispatch hosts verify this Remote-signed ceiling before any
+    // tool is exposed; Node only relays it. Preflight/summary compiles issue
+    // no tools, and Remote refuses to sign an empty surface.
+    ...(!["preflight", "summary"].includes(String(role || "").trim().toLowerCase())
+      ? { native_grant: { requested: true, ttl_seconds: DEFAULT_NATIVE_TOOL_GRANT_TTL_SECONDS } }
+      : {}),
     limits: {
       max_prompt_chars: boundedMaxPromptChars,
       max_context_chars: boundedMaxContextChars,

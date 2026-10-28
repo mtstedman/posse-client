@@ -27,6 +27,10 @@ import {
   verifyMcpOAuthToken,
 } from "../../../domains/integrations/functions/deterministic-mcp/oauth-token.js";
 import { resolveRemoteMcpToolSurfaceForBootConfig } from "../../../domains/integrations/functions/deterministic-mcp/remote-tool-surface.js";
+import {
+  nativeToolGrantForSurface,
+} from "../functions/native-tool-grant-registry.js";
+import { PROVIDER_TOOL_GRANT_REQUIRED } from "../../../catalog/binary.js";
 import { AutomationOwnerClient } from "../../../domains/automation/classes/AutomationOwnerClient.js";
 import { repositoryID } from "../../../domains/automation/functions/paths.js";
 import { appendRunTelemetry } from "../../telemetry/functions/run-telemetry.js";
@@ -253,6 +257,8 @@ function sanitizeRemoteToolSurfaceForBoot(surface = null) {
   if (!surface || typeof surface !== "object") return null;
   const out = JSON.parse(JSON.stringify(surface));
   delete out.mcp_oauth_token;
+  delete out.native_tool_grant;
+  delete out.nativeToolGrant;
   delete out.mcpOAuthToken;
   delete out.oauth_token;
   delete out.access_token;
@@ -1017,13 +1023,14 @@ export class McpServerConfig {
   }
 
   static async mintAgentGate(role, opts = {}) {
+    let childPermit = null;
     if (opts.coordinationChild === true) {
-      const permit = consumeCitationChildPermit(opts.remoteToolSurface, {
+      childPermit = consumeCitationChildPermit(opts.remoteToolSurface, {
         role,
         providerName: opts.providerName,
         permitId: opts.coordinationChildPermitId,
       });
-      if (!permit) {
+      if (!childPermit) {
         const error = new Error("Citation-child MCP gates require a live parent-issued, single-use tool permit");
         error.code = "POSSE_AGENT_CHILD_ISSUANCE_UNTRUSTED";
         throw error;
@@ -1055,6 +1062,12 @@ export class McpServerConfig {
         ? {
             surface: opts.remoteToolSurface,
             mcpOAuthToken: String(opts.remoteMcpOAuthToken || ""),
+            // A child inherits its parent's signed ceiling through the permit;
+            // a prompt-issued surface carries the grant Remote signed beside
+            // the compile. Neither path can mint a broader grant locally.
+            nativeToolGrant: opts.coordinationChild === true
+              ? childPermit?.parentNativeToolGrant || null
+              : nativeToolGrantForSurface(opts.remoteToolSurface),
           }
         : await resolveRemoteMcpToolSurfaceWithRetry(bootPayload, {
             attempts: opts.remoteToolSurfaceAttempts || 3,
@@ -1069,6 +1082,13 @@ export class McpServerConfig {
         remoteResolutionError,
         "did not include a remote-issued agent tool contract",
       );
+    }
+    const nativeToolGrant = remoteResolution.nativeToolGrant || null;
+    if (PROVIDER_TOOL_GRANT_REQUIRED && !nativeToolGrant
+      && bootPayload.remoteCatalog?.requestMcpOAuth !== false) {
+      const error = new Error(`Remote did not issue a native tool grant for ${role || "unknown-role"}; agent tools cannot be dispatched without one`);
+      error.code = "POSSE_AGENT_NATIVE_GRANT_MISSING";
+      throw error;
     }
     const resolvedSurface = opts.coordinationChild === true
       ? projectCitationChildRemoteSurface(remoteResolution.surface)
@@ -1149,6 +1169,8 @@ export class McpServerConfig {
       owner_boot_id: registration?.bootId || ownerEndpoint?.bootId || null,
       remote_surface_present: true,
       remote_oauth_present: !!remoteResolution?.mcpOAuthToken,
+      remote_native_grant_present: !!nativeToolGrant,
+      remote_native_grant_id: nativeToolGrant?.grantId || null,
       oauth_source: "local-agent",
       session_count: persistentMcpOwner.status()?.sessionCount ?? null,
     });
@@ -1160,6 +1182,7 @@ export class McpServerConfig {
       claims,
       contractBootConfig: contractBootPayload,
       remoteToolSurface: contractBootPayload.remoteToolSurface,
+      nativeToolGrant,
       operatorDisabledTools: { tools: disabledAgentTools.tools, atlas: disabledAtlasTools },
       owner: persistentMcpOwner,
       ownerSession: registration,
@@ -1201,6 +1224,7 @@ export class McpServerConfig {
       parentGate,
       parentSessionId: parentGate.ownerSession?.sessionId || null,
       parentBinding: parentGate.binding,
+      parentNativeToolGrant: parentGate.nativeToolGrant || null,
       permitId: normalizedPermitId,
       role: String(role || "").trim().toLowerCase(),
       providerName: String(providerName || "").trim().toLowerCase(),

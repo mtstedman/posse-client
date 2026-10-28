@@ -105,6 +105,20 @@ export const PROVIDER_TOOL_GATEWAY_PATH = "/v1/provider-tools/call";
 export const PROVIDER_TOOL_GATEWAY_MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 export const PROVIDER_TOOL_GATEWAY_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 export const PROVIDER_BREAKER_STORE_VERSION = 1;
+// Remote-issued native tool grant: the asymmetric ceiling a native dispatch
+// host verifies before exposing or forwarding any agent tool. Mirrors
+// posse-bin `crates/catalog/src/auth.rs` and posse-remote
+// `rust/catalog/tool_grant.rs`; Node relays the token and never interprets it
+// as authority of its own.
+export const PROVIDER_TOOL_GRANT_PROTOCOL = "posse.native.tool-grant.v1";
+export const PROVIDER_TOOL_GRANT_AUDIENCE = "posse-native-tool-authority";
+export const PROVIDER_TOOL_GRANT_REQUEST_FIELD = "grant";
+// Migration switch mirrored from the native catalog's
+// NATIVE_TOOL_GRANT_REQUIRED. While false, a tool-bearing dispatch without a
+// Remote grant may still run under the legacy Node-owned authority when the
+// installed native runtime also allows it.
+export const PROVIDER_TOOL_GRANT_REQUIRED = false;
+export const DEFAULT_NATIVE_TOOL_GRANT_TTL_SECONDS = 8 * 60 * 60;
 export const PROVIDER_DISPATCH_EVENTS = Object.freeze([
   "dispatch.started",
   "surface.attested",

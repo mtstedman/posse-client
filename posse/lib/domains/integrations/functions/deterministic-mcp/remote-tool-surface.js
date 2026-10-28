@@ -23,6 +23,8 @@ import { errorSummary, safeRemoteOrigin, remoteSurfaceSummary } from "../../../.
 import {
   buildMcpOAuthClaimsFromBootConfig,
 } from "./oauth-token.js";
+import { DEFAULT_NATIVE_TOOL_GRANT_TTL_SECONDS } from "../../../../catalog/binary.js";
+import { normalizeNativeToolGrant } from "../../../../shared/tools/functions/native-tool-grant-registry.js";
 
 function numberOrNull(value) {
   if (value == null || value === "") return null;
@@ -172,7 +174,19 @@ export function buildRemoteToolSurfaceRequestFromBootConfig(bootConfig = {}) {
       subject: claims.sub || null,
       capabilities: oauthIdentityCapabilities,
     },
+    // The native dispatch hosts verify this Remote-signed ceiling. It shares
+    // the OAuth opt-out: coordination-only roles resolve an empty surface,
+    // which Remote refuses to sign.
+    native_grant: {
+      requested: bootConfig.remoteCatalog?.requestMcpOAuth !== false,
+      ttl_seconds: DEFAULT_NATIVE_TOOL_GRANT_TTL_SECONDS,
+    },
   };
+}
+
+/** @param {Record<string, any>} [surface] */
+export function extractRemoteNativeToolGrant(surface = {}) {
+  return normalizeNativeToolGrant(surface?.native_tool_grant || surface?.nativeToolGrant || null);
 }
 
 export function extractRemoteMcpOAuthToken(surface = {}) {
@@ -228,12 +242,16 @@ export async function resolveRemoteMcpToolSurfaceForBootConfig(bootConfig = {}, 
   try {
     const surface = await promptClient.resolveToolSurface(request);
     const mcpOAuthToken = extractRemoteMcpOAuthToken(surface);
+    const nativeToolGrant = extractRemoteNativeToolGrant(surface);
+    // The grant never rides on the surface object the owner persists and logs.
+    if (surface && typeof surface === "object") delete surface.native_tool_grant;
     logRemoteGatewayTelemetry("mcp.remote_gateway.call_result", bootConfig, {
       outcome: surface && typeof surface === "object" ? "ok" : "empty",
       duration_ms: Date.now() - startedAt,
       remote_catalog_origin: safeRemoteOrigin(baseUrl),
       remote_surface_present: !!(surface && typeof surface === "object"),
       remote_oauth_present: !!mcpOAuthToken,
+      remote_native_grant_present: !!nativeToolGrant,
       remote_surface: remoteSurfaceSummary(surface),
       ...runtime,
     });
@@ -241,6 +259,7 @@ export async function resolveRemoteMcpToolSurfaceForBootConfig(bootConfig = {}, 
       request,
       surface,
       mcpOAuthToken,
+      nativeToolGrant,
     } : null;
   } catch (err) {
     logRemoteGatewayTelemetry("mcp.remote_gateway.call_result", bootConfig, {

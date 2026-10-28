@@ -8,6 +8,7 @@ import { MCP_TRANSPORT_TIMEOUT_MS, MCP_OWNER_LIVENESS_TIMEOUT_MS, MCP_OWNER_PROG
 const DEFAULT_RPC_TIMEOUT_MS = MCP_TRANSPORT_TIMEOUT_MS;
 const DEFAULT_RPC_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const gateTokens = new WeakMap();
+const gateGrants = new WeakMap();
 const gateState = new WeakMap();
 
 function freezeJson(value) {
@@ -30,6 +31,7 @@ function gateError(code, message) {
  * @property {Record<string, any>} [claims]
  * @property {Record<string, any>} [contractBootConfig]
  * @property {Record<string, any> | null} [remoteToolSurface]
+ * @property {{ token: string, grantId?: string, expiresAt?: number | null } | null} [nativeToolGrant]
  * @property {{ tools?: Iterable<string>, atlas?: Iterable<string> } | null} [operatorDisabledTools]
  * @property {any} [owner]
  * @property {Record<string, any>} [ownerSession]
@@ -116,6 +118,15 @@ export class McpGate {
   /** @type {string | undefined} */
   token;
 
+  /**
+   * Remote-signed native tool grant relayed to native dispatch hosts. Frozen
+   * with the gate: like the role contract it cannot change for the gate's
+   * lifetime, and it is never enumerable so option spreads and JSON cannot
+   * leak it.
+   * @type {Readonly<{ token: string, grantId: string, expiresAt: number | null }> | null}
+   */
+  nativeToolGrant;
+
   /** @type {boolean} */
   disposed;
 
@@ -131,6 +142,7 @@ export class McpGate {
     claims,
     contractBootConfig,
     remoteToolSurface = null,
+    nativeToolGrant = null,
     operatorDisabledTools = null,
     owner,
     ownerSession,
@@ -149,6 +161,14 @@ export class McpGate {
     const frozenClaims = freezeJson(claims);
     const frozenContract = freezeJson(contractBootConfig);
     const frozenSurface = remoteToolSurface ? freezeJson(remoteToolSurface) : null;
+    const grantToken = String(nativeToolGrant?.token || "").trim();
+    const frozenGrant = grantToken
+      ? Object.freeze({
+          token: grantToken,
+          grantId: String(nativeToolGrant?.grantId || ""),
+          expiresAt: Number.isFinite(Number(nativeToolGrant?.expiresAt)) ? Number(nativeToolGrant.expiresAt) : null,
+        })
+      : null;
     const frozenDisabled = Object.freeze({
       tools: Object.freeze([...new Set([...(operatorDisabledTools?.tools || [])].map(String))].sort()),
       atlas: Object.freeze([...new Set([...(operatorDisabledTools?.atlas || [])].map(String))].sort()),
@@ -175,6 +195,11 @@ export class McpGate {
         enumerable: false,
         configurable: false,
       },
+      nativeToolGrant: {
+        get: () => gateGrants.get(this) || null,
+        enumerable: false,
+        configurable: false,
+      },
       disposed: {
         get: () => gateState.get(this)?.disposed !== false,
         enumerable: true,
@@ -187,6 +212,7 @@ export class McpGate {
       },
     });
     gateTokens.set(this, String(token));
+    if (frozenGrant) gateGrants.set(this, frozenGrant);
     gateState.set(this, { disposed: false, binding: null });
   }
 

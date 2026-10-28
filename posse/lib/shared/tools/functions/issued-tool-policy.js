@@ -11,6 +11,7 @@ import { ENVIRONMENT_SETUP_TOOLS } from "../../../catalog/tools/environment-setu
 
 import { INTERNAL_ATLAS_SURFACE_ACTION_SET } from "../../../catalog/internal-tools.js";
 import { isRemotePromptClientIssuance } from "../../../domains/remote/classes/RemotePromptClient.js";
+import { inheritNativeToolGrant } from "./native-tool-grant-registry.js";
 
 const KNOWN_ISSUED_ROLES = new Set([
   "researcher",
@@ -554,9 +555,12 @@ export function sanitizeRemoteToolSurfaceResponse(value, opts = {}) {
       final_review_v1: issued.coordination.finalReviewV1 === true,
     },
   };
+  // The native grant token is never carried as a field of a surface copy.
+  delete sanitized.native_tool_grant;
   if (!isRegisteredRemoteToolSurface(source)) return sanitized;
   const frozen = deepFreezeJson(sanitized);
   TRUSTED_REMOTE_SURFACE_OBJECTS.add(frozen);
+  inheritNativeToolGrant(source, frozen);
   return frozen;
 }
 
@@ -608,6 +612,9 @@ export function deriveRemoteToolSurfaceNarrowing(authorityValue, candidateValue,
   if (!sanitized) return null;
   const frozen = deepFreezeJson(sanitized);
   TRUSTED_REMOTE_SURFACE_OBJECTS.add(frozen);
+  // A narrowed surface relays the authority's grant: narrowing can remove
+  // tools from the projection but never mints or widens a ceiling.
+  inheritNativeToolGrant(authorityValue, frozen);
   return frozen;
 }
 

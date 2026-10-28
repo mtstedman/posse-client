@@ -116,6 +116,14 @@ export function isPermanentProviderConfigError(errorDetailsOrErr = null) {
   ].filter(Boolean);
   const text = (primaryTextParts.length > 0 ? primaryTextParts : [errorDetails.summary || ""]).join("\n");
   if (errorDetails.classification === "invalid_client") return true;
+  // A native authority denial (Remote tool grant missing, expired, or not
+  // covering the issued surface) is a policy fact: retrying, bumping tiers,
+  // or falling back to another provider cannot widen the grant.
+  const nativeClassification = String(errorDetailsOrErr?.classification || errorDetails.classification || "");
+  const nativeCode = String(errorDetailsOrErr?.code || "");
+  if (nativeClassification === "authorization"
+    || /^grant_[a-z_]+$/.test(nativeCode)
+    || /\b(?:grant_missing|grant_tool_not_granted|grant_capability_not_granted|grant_expired|grant_invalid_signature|grant_untrusted_key|grant_wrong_(?:purpose|audience|issuer)|grant_role_mismatch|grant_provider_mismatch)\b/.test(text)) return true;
   if (isPermanentProviderRuntimeBlock(text)) return true;
   // A provider adapter refused by the Team approval boundary is a
   // configuration fact: no retry, tier bump or runtime fallback of the same

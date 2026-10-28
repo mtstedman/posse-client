@@ -6,7 +6,14 @@ import {
   PROVIDER_DISPATCH_MAX_START_BYTES,
   PROVIDER_DISPATCH_PROTOCOL,
   PROVIDER_DISPATCH_PROVIDERS,
+  PROVIDER_TOOL_GRANT_PROTOCOL,
+  PROVIDER_TOOL_GRANT_REQUEST_FIELD,
+  PROVIDER_TOOL_GRANT_REQUIRED,
 } from "../../../catalog/binary.js";
+import {
+  grantedToolIdsFromToken,
+  normalizeNativeToolGrant,
+} from "../../tools/functions/native-tool-grant-registry.js";
 import { buildRuntimeEnv } from "../../../domains/runtime/functions/paths.js";
 import {
   terminateSpawnedProcessTree,
@@ -74,6 +81,72 @@ function validateStart(request, allowTestAdapter) {
   }
 }
 
+/**
+ * What the installed native runtime says about Remote tool grants. `null`
+ * capabilities (verification skipped) are treated as supporting the field.
+ */
+export function toolGrantContractFrom(dispatchCapabilities) {
+  if (!isObject(dispatchCapabilities)) return { supported: true, required: false, legacyAuthority: true };
+  const fields = Array.isArray(dispatchCapabilities.requestFields) ? dispatchCapabilities.requestFields : [];
+  const contract = isObject(dispatchCapabilities.toolGrant) ? dispatchCapabilities.toolGrant : null;
+  const supported = fields.includes(PROVIDER_TOOL_GRANT_REQUEST_FIELD)
+    && contract?.protocol === PROVIDER_TOOL_GRANT_PROTOCOL;
+  return {
+    supported,
+    required: supported && contract?.required === true,
+    legacyAuthority: !supported || contract?.legacyAuthority !== false,
+  };
+}
+
+/**
+ * Decide the `grant` field for one start frame, failing closed before any
+ * gateway is opened or process spawned. Node relays the opaque token; the
+ * native host verifies it and intersects it with the issued surface.
+ */
+export function resolveDispatchGrant({
+  grant = null,
+  issuedToolIds = [],
+  request = {},
+  contract = { supported: true, required: false, legacyAuthority: true },
+} = {}) {
+  if (request.grant != null) {
+    throw protocolError("Provider dispatch grants must come from the agent gate, not the request");
+  }
+  const normalized = normalizeNativeToolGrant(grant);
+  const execution = isObject(request.execution) ? request.execution : {};
+  const needsAuthority = request.decision == null && (
+    issuedToolIds.length > 0
+    || execution.allowWeb === true
+    || execution.allowWrite === true
+    || request.image != null
+    || String(execution.projectDbCapability || "none") !== "none"
+  );
+  if (normalized) {
+    if (!contract.supported) {
+      throw new ProviderDispatchError(
+        "The installed posse-remote does not verify Remote tool grants; update the native artifact before dispatching granted tools",
+        { code: "provider_dispatch_incompatible", classification: "incompatible_native_version" },
+      );
+    }
+    const granted = grantedToolIdsFromToken(normalized.token);
+    const ungranted = granted ? issuedToolIds.filter((id) => !granted.has(id)) : [];
+    if (ungranted.length > 0) {
+      throw new ProviderDispatchError(
+        `Issued tool ${ungranted[0]} is outside the Remote tool grant`,
+        { code: "grant_tool_not_granted", classification: "authorization" },
+      );
+    }
+    return { grant: { token: normalized.token } };
+  }
+  if (needsAuthority && (PROVIDER_TOOL_GRANT_REQUIRED || contract.required)) {
+    throw new ProviderDispatchError(
+      "Tool-bearing dispatch requires a Remote-issued tool grant",
+      { code: "grant_missing", classification: "authorization" },
+    );
+  }
+  return {};
+}
+
 function resultFromTerminal(frame) {
   if (frame.type === "dispatch.completed") {
     if (typeof frame.output !== "string" || !isObject(frame.stats)) {
@@ -119,6 +192,8 @@ export async function dispatchProvider(request, {
   forceKillGraceMs = FORCE_KILL_GRACE_MS,
   allowTestAdapter = false,
   mcpGate = null,
+  nativeToolGrant = null,
+  toolGrantContract = null,
   baseEnv = process.env,
 } = {}) {
   validateStart(request, allowTestAdapter);
@@ -150,6 +225,13 @@ export async function dispatchProvider(request, {
   // Native adapters attest descriptors against this list in order. Match the
   // sorted gateway surface before calculating or transmitting its digest.
   const issuedToolIds = [...requestedToolIds].sort();
+  // Authority is settled before any gateway listens or any process spawns.
+  const grantField = resolveDispatchGrant({
+    grant: nativeToolGrant ?? mcpGate?.nativeToolGrant ?? null,
+    issuedToolIds,
+    request,
+    contract: toolGrantContract || toolGrantContractFrom(dispatchCapabilities),
+  });
   let toolGateway = null;
   let gateway = null;
   let observedSurfaceDigest = providerDispatchSurfaceDigest([]);
@@ -216,7 +298,7 @@ export async function dispatchProvider(request, {
       issuedToolSurfaceDigest: observedSurfaceDigest,
     },
   };
-  const start = { ...request, gateway, protocol: PROVIDER_DISPATCH_PROTOCOL, type: "start" };
+  const start = { ...request, ...grantField, gateway, protocol: PROVIDER_DISPATCH_PROTOCOL, type: "start" };
   const encodedStart = Buffer.from(`${JSON.stringify(start)}\n`, "utf8");
   if (encodedStart.length > PROVIDER_DISPATCH_MAX_START_BYTES) {
     await toolGateway?.close();

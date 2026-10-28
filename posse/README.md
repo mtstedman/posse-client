@@ -132,9 +132,26 @@ check verifies installed definitions rather than requiring matching role lists.
 Codex turns use the Rust `posse-remote` adapter. Posse assembles the issued
 execution contract, model choice, and prompt before dispatch; the native
 adapter owns CLI launch, stream handling, session resume, and usage accounting.
-The deterministic MCP gateway remains the authority for scoped tools. The
+The deterministic MCP gateway remains the executor for scoped tools. The
 installed `posse-remote` must advertise a compatible Codex adapter before a
 Codex turn can run.
+
+### Native tool grant
+
+Remote signs the resolved agent tool ceiling as a native tool grant
+(`posse.native.tool-grant.v1`) beside every prompt compile and agent tool
+surface it issues. Posse relays that opaque token from issuance to the agent's
+MCP gate and into each native dispatch; it never interprets the token as
+authority, never writes it into packets, telemetry, or boot payloads, and can
+only narrow the surface beneath it. The native dispatch hosts (`posse-remote`
+and `posse-ml`) verify the grant against compiled trust before any provider or
+tool activity and refuse a dispatch whose issued tools or capabilities exceed
+it with a terminal `authorization` denial, which Posse treats as permanent
+rather than retrying or falling back to another provider. A Posse that holds a
+grant refuses to dispatch through a native runtime that cannot verify it.
+While the migration switch (`PROVIDER_TOOL_GRANT_REQUIRED`, mirrored from the
+native catalog) is off, a dispatch without a grant still runs under the
+legacy Node-owned allowlist and the native attestation says so.
 
 ### Planner dispatch
 

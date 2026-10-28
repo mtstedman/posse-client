@@ -5,13 +5,14 @@ import {
 } from "../../../catalog/binary.js";
 import { ProviderDispatchGateway, providerDispatchSurfaceDigest } from "../../tools/classes/ProviderDispatchGateway.js";
 import { runMlNativeMethodAsync } from "./ml-invoke.js";
+import { resolveDispatchGrant, toolGrantContractFrom } from "./provider-dispatch-client.js";
 
 function protocolError(message) {
   return Object.assign(new Error(message), { code: "provider_dispatch_protocol", classification: "native_protocol" });
 }
 
 export async function dispatchLocalProvider(request, {
-  manager, modelRoot, runtimeRoot, signal, mcpGate, onEvent,
+  manager, modelRoot, runtimeRoot, signal, mcpGate, onEvent, nativeToolGrant = null,
 } = {}) {
   if (request.provider !== "posse-local" || request.gateway != null) throw protocolError("Invalid local provider dispatch");
   const controller = new AbortController();
@@ -24,6 +25,14 @@ export async function dispatchLocalProvider(request, {
     throw Object.assign(new Error("The installed posse-ml does not support local provider dispatch; update the native ML artifact."), { code: "provider_dispatch_unavailable" });
   }
   const ids = [...request.execution.issuedToolIds].sort();
+  // The ML host shares the native authority: the same grant decision applies
+  // before its gateway opens.
+  const grantField = resolveDispatchGrant({
+    grant: nativeToolGrant ?? mcpGate?.nativeToolGrant ?? null,
+    issuedToolIds: ids,
+    request,
+    contract: toolGrantContractFrom(contract),
+  });
   let owner = null;
   let digest = providerDispatchSurfaceDigest([]);
   let gateway = null;
@@ -75,7 +84,7 @@ export async function dispatchLocalProvider(request, {
       gateway = await owner.start();
     }
     const result = await runMlNativeMethodAsync(ML_PROVIDER_DISPATCH_METHOD, {
-      ...request, protocol: PROVIDER_DISPATCH_PROTOCOL, type: "start", gateway,
+      ...request, ...grantField, protocol: PROVIDER_DISPATCH_PROTOCOL, type: "start", gateway,
       execution: { ...request.execution, issuedToolIds: ids, issuedToolSurfaceDigest: digest },
     }, {
       ...options, idempotent: false,
