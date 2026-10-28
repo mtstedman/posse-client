@@ -12,15 +12,12 @@ import {
   TERMINAL_JOB_STATUSES_SQL,
 } from "../../../catalog/job.js";
 import {
-  canonicalHumanGateAction,
   HUMAN_INPUT_FREE_TEXT_CHOICE_ID,
   HUMAN_INPUT_FREE_TEXT_MAX_CHARS,
-  humanInputChoiceFromAnswer,
   humanInputChoicesForPayload,
   questionKindForReviewType,
 } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
-import { LEGACY_REVIEW_CHOICE_IDS, legacyReviewChoiceAction } from "../../../catalog/gate-actions.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { scrubSecrets } from "../../../shared/telemetry/classes/logging/secret-scrub.js";
 import { now, runImmediateTransaction } from "./common.js";
@@ -354,13 +351,6 @@ function gateChoiceRecords(kind, payload) {
   }
   return explicit.map((entry) => {
     const choiceId = choiceIdFromEntry(entry);
-    if (kind !== "blocked_recovery" && Object.hasOwn(LEGACY_REVIEW_CHOICE_IDS, kind) && choiceId === "skip") {
-      return choiceRecord(choiceId, {
-        ...(typeof entry === "object" && entry !== null ? entry : {}),
-        label: "Explicit waiver (legacy skip)",
-        consequence: "Accept the current work under the recorded waiver.",
-      });
-    }
     if (kind === "merge_failure_recovery" && choiceId === "commit") return choiceRecord(choiceId, {
       label: "Commit and merge", consequence: "Commit pending branch and target edits, then retry the merge.", danger: "destructive",
     });
@@ -879,10 +869,8 @@ function storedHumanGateCompletion(db, action) {
     };
   }
   if (row.gate_state === "resolved") {
-    const selected = canonicalHumanGateAction(
-      action.descriptor?.owner_action || action.target?.choice_id,
-    );
-    const resolved = canonicalHumanGateAction(row.resolution_action);
+    const selected = String(action.descriptor?.owner_action || action.target?.choice_id || "") || null;
+    const resolved = String(row.resolution_action || "") || null;
     return selected && selected === resolved
       ? { state: "answered", accepted: true, safeReasonCode: null }
       : { state: "closed", accepted: false, safeReasonCode: "question_answer_lost_race" };
@@ -1062,17 +1050,7 @@ export async function answerWorkItemQuestionChoice(args = {}, { executeTransitio
       // Only Decline carries the flag; Push omits it (the transition
       // validator rejects a decline key on any other choice).
       ...(question.handler === "git_push" && choiceId === "decline" ? { decline: true } : {}),
-      ...(question.owner_delivery ? {
-        owner_action: canonicalHumanGateAction(
-          humanInputChoiceFromAnswer(choiceId, humanInputChoicesForPayload(question.payload)) || choiceId,
-        ),
-      } : {}),
-      // A legacy list's "skip" is not among the owner prompt's current
-      // choices; carry what the prompt needs to translate it.
-      ...(question.owner_delivery && legacyReviewChoiceAction(question.kind, question.payload?.choices, choiceId) ? {
-        question_kind: question.kind,
-        stored_choice_ids: question.payload.choices.map(choiceIdFromEntry),
-      } : {}),
+      ...(question.owner_delivery ? { owner_action: choiceId } : {}),
     };
     const reservationId = insertActionReservation(db, {
       actionId,
@@ -1285,9 +1263,6 @@ function ownerDeliveryDescriptor(row) {
     choice_id: choiceId,
     ...(choiceId === HUMAN_INPUT_FREE_TEXT_CHOICE_ID && typeof descriptor.answer_text === "string"
       ? { answer_text: descriptor.answer_text }
-      : {}),
-    ...(typeof descriptor.question_kind === "string" && Array.isArray(descriptor.stored_choice_ids)
-      ? { question_kind: descriptor.question_kind, stored_choice_ids: descriptor.stored_choice_ids.map(String) }
       : {}),
   };
 }

@@ -4,7 +4,6 @@ import path from "node:path";
 
 import { WORK_ITEM_BOUNDS, WORK_ITEM_FEED_EVENT_PROTOCOL } from "../../../catalog/bridge.js";
 import { FAILED_JOB_STATUSES, OPEN_HUMAN_GATE_JOB_STATUSES, PENDING_HUMAN_GATE_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
-import { LEGACY_REVIEW_CHOICE_IDS } from "../../../catalog/gate-actions.js";
 import { questionKindForReviewType } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
@@ -205,17 +204,7 @@ function storedQuestionChoices(kind, payload) {
     }
     return [];
   }
-  return entries.map((entry) => {
-    if (kind !== "blocked_recovery" && Object.hasOwn(LEGACY_REVIEW_CHOICE_IDS, kind) && choiceIdFromEntry(entry) === "skip") {
-      return storedChoiceRecord({
-        ...(typeof entry === "object" && entry !== null ? entry : {}),
-        choice_id: "skip",
-        label: "Explicit waiver (legacy skip)",
-        consequence: "Accept the current work under the recorded waiver.",
-      });
-    }
-    return storedChoiceRecord(entry);
-  }).filter(Boolean);
+  return entries.map((entry) => storedChoiceRecord(entry)).filter(Boolean);
 }
 
 function questionStateForJob(job) {

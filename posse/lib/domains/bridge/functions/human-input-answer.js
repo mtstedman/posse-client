@@ -9,10 +9,7 @@ import { jobHasLiveLeaseAt } from "../../queue/functions/lease-state.js";
 import {
   answerWorkItemQuestionChoice,
   answerWorkItemQuestionText,
-  projectWorkItemInteractions,
-  typedKindForGate,
 } from "../../queue/functions/interaction-contract.js";
-import { legacyReviewChoiceAction } from "../../../catalog/gate-actions.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { isReviewGateJob } from "./review-decision.js";
 import {
@@ -22,12 +19,6 @@ import {
 } from "../../../catalog/human-input.js";
 
 const DEFAULT_BRIDGE_LEASE_SECONDS = 300;
-const STRUCTURED_CHOICE_ALIASES = Object.freeze({
-  retry_assessment: Object.freeze(["retry"]),
-  retry_with_changes: Object.freeze(["retry"]),
-  explicit_waiver: Object.freeze(["skip"]),
-  deny: Object.freeze(["reject"]),
-});
 
 function normalizeAnswers(questions, args = {}) {
   if (Array.isArray(args.answers)) return args.answers;
@@ -185,18 +176,27 @@ export async function answerHumanInput(jobId, args = {}, {
   if (answers.length === 0 || answers.every((answer) => String(answer?.answer ?? answer ?? "").trim() === "")) {
     return { ok: false, reason: "empty_answer" };
   }
-  // A gate parked under a legacy review list still shows "skip" as its
-  // waiver; the current choices spell it explicit_waiver.
-  const legacyAction = choices.includes("skip")
-    ? null
-    : legacyReviewChoiceAction(typedKindForGate(payload), payload?.choices, latestAnswerText(answers));
-  if (legacyAction) {
-    answers = answers.map((answer) => (answerText(answer) !== "skip" ? answer
-      : typeof answer === "string" ? legacyAction : { ...answer, answer: legacyAction }));
+  // A caller that already resolved the action (the CLI's validated command)
+  // names it in answer_metadata.selected_action. It is honored only when the
+  // gate offers it and the answer text does not name a different choice;
+  // metadata never widens what the text alone could select.
+  const typedChoice = String(args.answer_metadata?.selected_action ?? "").trim() || null;
+  if (typedChoice && choices.length > 0) {
+    const exactText = exactHumanInputChoiceFromAnswer(latestAnswerText(answers), choices);
+    if (!choices.includes(typedChoice) || (exactText && exactText !== typedChoice)) {
+      return {
+        ok: false,
+        reason: "invalid_choice",
+        choices,
+        message: `Selected action must be one of: ${choices.join(", ")}`,
+      };
+    }
   }
-  const selectedChoice = allowChoiceFeedback
-    ? humanInputChoiceFromAnswer(latestAnswerText(answers), choices)
-    : exactHumanInputChoiceFromAnswer(latestAnswerText(answers), choices);
+  const selectedChoice = typedChoice && choices.includes(typedChoice)
+    ? typedChoice
+    : allowChoiceFeedback
+      ? humanInputChoiceFromAnswer(latestAnswerText(answers), choices)
+      : exactHumanInputChoiceFromAnswer(latestAnswerText(answers), choices);
   if (choices.length > 0 && !selectedChoice) {
     return {
       ok: false,
@@ -204,6 +204,12 @@ export async function answerHumanInput(jobId, args = {}, {
       choices,
       message: `Answer must select one of: ${choices.join(", ")}`,
     };
+  }
+  if (selectedChoice) {
+    // Normalized once here: the worker's resolver takes the selection as typed.
+    answers = answers.map((answer, index) => (typeof answer === "string"
+      ? { question: questions[index] ?? questions[0], answer, metadata: { selected_action: selectedChoice } }
+      : { ...answer, metadata: { ...(answer?.metadata || {}), selected_action: selectedChoice } }));
   }
 
   const claim = claimHumanInputJob(id, { leaseSeconds: args.lease_seconds });
@@ -231,14 +237,7 @@ export async function answerHumanInput(jobId, args = {}, {
           .digest("hex")}`);
         reserved = answerWorkItemQuestionText({ ...target, action_id: actionId, answer_text: text });
       } else {
-        const projected = projectWorkItemInteractions({ work_item_id: fresh.work_item_id || current.work_item_id });
-        const question = projected.questions.find((entry) => entry.question_id === `gate:${id}:0`);
-        const structuredChoices = new Set((question?.choices || []).map((choice) => choice.choice_id));
-        const requestedChoice = selectedChoice || latestAnswerText(answers);
-        const choiceId = structuredChoices.has(requestedChoice)
-          ? requestedChoice
-          : (STRUCTURED_CHOICE_ALIASES[requestedChoice] || []).find((choice) => structuredChoices.has(choice))
-            || requestedChoice;
+        const choiceId = selectedChoice || latestAnswerText(answers);
         actionId = String(args.action_id || `gate-answer:${crypto.createHash("sha256")
           .update(`${id}:${generation}:${choiceId}`)
           .digest("hex")}`);

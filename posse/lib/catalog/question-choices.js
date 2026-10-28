@@ -1,9 +1,16 @@
 // Shared validation of structured question vocabulary and conditional choices.
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./tools/interaction.js";
-import { LEGACY_REVIEW_CHOICE_IDS, validReviewChoiceIDs } from "./gate-actions.js";
 import { MERGE_FAILURE_RECOVERY_REVIEW_TYPE, mergeFailureRecoveryChoices } from "./human-input.js";
 
+// Review kinds may persist an ordered subset of their vocabulary (a gate
+// narrowed to the actions that can still apply); their order never changes.
 const CHOICE_SET_POLICIES = Object.freeze({
+  assessment_review: Object.freeze({ orderedSubset: true }),
+  assessment_transport_recovery: Object.freeze({ orderedSubset: true }),
+  assessment_retry_limit: Object.freeze({ orderedSubset: true }),
+  unexecuted_replan_recovery: Object.freeze({ orderedSubset: true }),
+  blocked_recovery: Object.freeze({ orderedSubset: true }),
+  pipeline_head_recovery: Object.freeze({ orderedSubset: true }),
   dead_letter_recovery: Object.freeze({ orderedSubset: true }),
   work_item_failure_disposition: Object.freeze({ orderedSubset: true }),
   cross_wi_upstream_disposition: Object.freeze({ orderedSubset: true }),
@@ -25,7 +32,6 @@ export function validQuestionChoiceEntries(kind, entries) {
       && ids.slice(0, -2).every((id) => /^candidate:sha256:[0-9a-f]{64}$/.test(id));
   }
   const allowed = WORK_ITEM_QUESTION_CHOICE_IDS[kind] || [];
-  if (Object.hasOwn(LEGACY_REVIEW_CHOICE_IDS, kind)) return validReviewChoiceIDs(kind, ids, allowed);
   const policy = CHOICE_SET_POLICIES[kind];
   if (policy?.orderedSubset || policy?.optional) {
     let previous = -1;

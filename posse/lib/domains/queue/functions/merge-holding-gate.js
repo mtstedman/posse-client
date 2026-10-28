@@ -17,7 +17,6 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import {
   MERGE_RELEASING_RETRY_REVIEW_TYPES,
   MERGE_VERIFICATION_REVIEW_TYPE,
-  canonicalHumanGateAction,
 } from "../../../catalog/human-input.js";
 import { MERGE_VERIFICATION_REJECTION_KEY } from "./merge-verification-review.js";
 
@@ -26,11 +25,13 @@ import { MERGE_VERIFICATION_REJECTION_KEY } from "./merge-verification-review.js
 // with nothing left for an operator to decide, or fails into the ordinary
 // repair flow. It used to hold forever (fiscal-wizard WI 3, gate #77: refused
 // automatic merge 52 times in one run after its retry had passed).
+// retry_with_changes and deny are spellings older gates recorded for retry
+// and reject; they are matched here only because resolved rows carry them.
 export const MERGE_HOLDING_GATE_ACTIONS = Object.freeze([
-  "fail", "replan", "retry_with_changes",
+  "fail", "replan", "retry", "retry_with_changes",
   "reject", "deny", "revert", "extend",
 ]);
-const RECOVERY_RETRY_ACTION = canonicalHumanGateAction("retry");
+const RECOVERY_RETRY_ACTION = "retry";
 
 /**
  * The gate that holds `workItemId` out of automatic merge, or null: an open
@@ -66,7 +67,7 @@ export function findMergeHoldingGate(workItemId, db = getDb()) {
             THEN json_extract(gate_job.payload_json, '$.review_type') = ?
               AND json_extract(gate_job.payload_json, '$.${MERGE_VERIFICATION_REJECTION_KEY}') IS NOT NULL
             ELSE 0 END)
-          AND NOT (hg.resolution_action = ? AND (CASE WHEN json_valid(gate_job.payload_json)
+          AND NOT (hg.resolution_action IN (?, 'retry_with_changes') AND (CASE WHEN json_valid(gate_job.payload_json)
             THEN json_extract(gate_job.payload_json, '$.review_type')
               IN (${MERGE_RELEASING_RETRY_REVIEW_TYPES.map(() => "?").join(",")})
             ELSE 0 END))

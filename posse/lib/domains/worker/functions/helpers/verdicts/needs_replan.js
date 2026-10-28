@@ -32,7 +32,7 @@ import { describeCompilerRewrites } from "../../../../planning/functions/planner
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
 import { collectBaselineTestDebt } from "../baseline-test-debt.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
-import { HUMAN_INPUT_ACTION_ENUMS } from "../../../../../catalog/human-input.js";
+import { HUMAN_GATE_ACTIONS } from "../../../../../catalog/human-input.js";
 
 function isLoopbackReplanJob(job) {
   if (!["research", "plan"].includes(job?.job_type)) return false;
@@ -100,7 +100,7 @@ export function handle(job, verdict, ctx) {
           question_kind: originalNeverExecuted ? "unexecuted_replan_recovery" : "assessment_review",
           choices: originalNeverExecuted
             ? WORK_ITEM_QUESTION_CHOICE_IDS.unexecuted_replan_recovery
-            : HUMAN_INPUT_ACTION_ENUMS.replan_limit,
+            : HUMAN_GATE_ACTIONS.replan_limit,
         }),
       });
       spawnedJobs.push(escJob);

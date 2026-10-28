@@ -67,14 +67,13 @@ import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import {
   ASSESSMENT_FAILURE_CLASSES,
   BLOCKED_RECOVERY_RETRY_SCOPES,
-  BLOCKED_RECOVERY_SKIP_INTENT_WORDS,
-  BLOCKED_RECOVERY_WAIVER_WORDS,
   POST_MERGE_DB_TASK_REVIEW_TYPE,
-  exactHumanInputChoiceFromAnswer,
-  humanInputChoiceFromAnswer,
-  humanInputChoicesForPayload,
-  isHumanInputReviewPayload,
+  humanInputChoiceFeedback,
 } from "../../../../catalog/human-input.js";
+import {
+  blockedRecoveryDecisionForAction,
+  resolveHumanGateAction,
+} from "./human-gate-action.js";
 
 const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 const REVIEW_DECISION_ORIGINAL_STATUS_SET = new Set([
@@ -110,11 +109,7 @@ import { refreshAndExtractInsights } from "../helpers/insights.js";
 import { logAttemptSkippedStaleLease } from "./attempt-logging.js";
 import {
   buildDeadLetterRetryPayload,
-  classifyApprovalAnswer,
-  classifyBlockedRecoveryAnswer,
-  classifyDeadLetterRecoveryAnswer,
-  classifyPartialWorkRecoveryAnswer,
-  classifyReviewAnswer,
+  collectedHumanAnswerText,
   extractHumanAnswers,
   extractLatestActionableHumanAnswerText,
   incomingDependenciesForRecoveryRetry,
@@ -153,54 +148,6 @@ function blockedRecoveryReplanContext(payload) {
   return bounded.retained
     ? bounded.text
     : `${bounded.text}\n[truncated from ${bounded.originalChars} chars]`;
-}
-
-function hasUnnegatedMatch(text, pattern) {
-  for (const match of text.matchAll(new RegExp(pattern.source, "g"))) {
-    if (!/\b(?:do not|don't|dont|not|never|no)\s+(?:want\s+to\s+)?$/.test(text.slice(0, match.index))) return true;
-  }
-  return false;
-}
-
-/**
- * One reading of a blocked_recovery answer, shared by answer validation, the
- * gate's recorded action and the transition. Only the waiver's own words
- * waive (the exact choice, an `explicit_waiver:` prefix, or waive/waiver).
- * A skip/cancel/ignore/bypass/unblock intent keeps its legacy cancel meaning
- * where the stored list offers "skip" and is invalid everywhere else, so the
- * gate stays open and names the offered actions.
- * @returns {{ decision: "retry"|"replan"|"skip"|"waive"|"fail"|"pass"|"invalid"|"unknown", action: string|null }}
- */
-export function blockedRecoveryDecision(answer, choices = []) {
-  const text = String(answer || "").trim().toLowerCase();
-  const offers = (id) => choices.includes(id);
-  const decide = (decision) => {
-    if (decision === "skip") return offers("skip") ? { decision, action: "skip" } : { decision: "invalid", action: null };
-    if (decision === "waive") {
-      return offers("explicit_waiver") ? { decision, action: "explicit_waiver" } : { decision: "invalid", action: null };
-    }
-    if (decision === "retry") {
-      return { decision, action: offers("retry") ? "retry" : (offers("retry_with_changes") ? "retry_with_changes" : null) };
-    }
-    if (["replan", "fail", "pass"].includes(decision)) return { decision, action: offers(decision) ? decision : null };
-    return { decision: "unknown", action: null };
-  };
-  if (!text || text === "(skipped)") return decide("unknown");
-  const matched = humanInputChoiceFromAnswer(text, choices);
-  const namedWaiver = text === "explicit_waiver"
-    || /^explicit_waiver\s*(?::|-|—)/.test(text)
-    || hasUnnegatedMatch(text, BLOCKED_RECOVERY_WAIVER_WORDS);
-  if (matched === "explicit_waiver") {
-    // The waiver alias also matches skip/cancel-style words; they never waive.
-    if (namedWaiver) return decide("waive");
-    return decide(hasUnnegatedMatch(text, BLOCKED_RECOVERY_SKIP_INTENT_WORDS) ? "skip" : "unknown");
-  }
-  if (matched === "retry_with_changes") return decide("retry");
-  // Waiver words are never free-form retry guidance, even negated.
-  if (!matched && (namedWaiver || BLOCKED_RECOVERY_WAIVER_WORDS.test(text))) {
-    return decide(namedWaiver ? "waive" : "unknown");
-  }
-  return decide(classifyBlockedRecoveryAnswer(text));
 }
 
 function isOneshotScopeSelectionPayload(payload) {
@@ -533,47 +480,23 @@ export async function runHumanInputJob(worker, job, {
       refreshAndExtractInsights(job.work_item_id);
       worker._cleanupWorktreeIfDone(job.work_item_id);
     };
-    const actionChoices = humanInputChoicesForPayload(payload);
-    const uncataloguedReview = isHumanInputReviewPayload(payload) && actionChoices.length === 0;
-    if (actionChoices.length > 0 || uncataloguedReview) {
-      const answers = extractHumanAnswers(output);
-      const lastAnswer = extractLatestActionableHumanAnswerText(answers);
-      // Blocked recovery deliberately accepts free-form operational guidance
-      // as an implicit retry; its dedicated reading below preserves that
-      // long-standing contract while still recognizing explicit actions. An
-      // answer it cannot apply (skip/cancel where no skip is offered, pass
-      // where pass is not offered, an unreadable action) keeps the gate open.
-      const blockedDecision = payload.review_type === "blocked_recovery"
-        ? blockedRecoveryDecision(lastAnswer, actionChoices)
-        : null;
-      const invalidClosedChoice = actionChoices.length > 0
-        && payload.review_type !== "blocked_recovery"
-        && !humanInputChoiceFromAnswer(lastAnswer, actionChoices);
-      const invalidBlockedAnswer = blockedDecision != null
-        && (["invalid", "unknown"].includes(blockedDecision.decision) || !blockedDecision.action);
-      const invalidUncataloguedReview = uncataloguedReview
-        && classifyReviewAnswer(lastAnswer) === "unknown";
-      if (invalidClosedChoice || invalidUncataloguedReview || invalidBlockedAnswer) {
-        const choiceMessage = actionChoices.length > 0
-          ? `Human input did not select one of: ${actionChoices.join(", ")}`
-          : `Human input did not provide a recognized action for review type ${payload.review_type}`;
-        keepGateOpenForUnappliedAnswer(choiceMessage, `${choiceMessage}; keeping the gate open.`);
-        return;
-      }
-    }
     const resolutionAnswers = extractHumanAnswers(output);
     const resolutionAnswer = extractLatestActionableHumanAnswerText(resolutionAnswers);
     const resolutionMetadata = [...resolutionAnswers].reverse().find((answer) => (
       answer && typeof answer === "object" && answer.metadata && typeof answer.metadata === "object"
     ))?.metadata || null;
-    let selectedAction = payload.review_type === "blocked_recovery"
-      ? blockedRecoveryDecision(resolutionAnswer, actionChoices).action
-      : humanInputChoiceFromAnswer(resolutionAnswer, actionChoices);
-    if (!selectedAction && payload.review_type) {
-      const reviewAction = classifyReviewAnswer(resolutionAnswer);
-      if (reviewAction !== "unknown") selectedAction = reviewAction;
+    // The gate contract decides the action (human-gate-action.js): a text gate
+    // is `respond` whatever its words, a closed gate is one of its choices (the
+    // typed selection an input surface carried, or the one the text names).
+    // An answer that selects nothing valid keeps the gate open with the reason
+    // and no effect; the words of the answer are never read as a verdict.
+    const resolution = resolveHumanGateAction({ payload, answers: resolutionAnswers });
+    const actionChoices = resolution.choices;
+    if (!resolution.ok) {
+      keepGateOpenForUnappliedAnswer(resolution.message, `${resolution.message}; keeping the gate open.`);
+      return;
     }
-    selectedAction ||= "respond";
+    const selectedAction = resolution.action;
     // A valid commit answer cannot repair a rejected Git operation. Keep the
     // gate available for an explicit retry after repair or a different action,
     // instead of immediately presenting the same failing commit prompt again.
@@ -635,9 +558,13 @@ export async function runHumanInputJob(worker, job, {
         refreshAndExtractInsights(job.work_item_id);
         return;
       }
+      // Name the contract that refused, not the answer text.
+      const contractDetail = resolutionClaim.reason === "action_not_allowed"
+        ? ` (gate kind ${durableGate?.gate_kind || payload.gate_kind || payload.review_type || "clarification"}; action ${selectedAction}; allowed: ${(resolutionClaim.allowed_actions || []).join(", ") || "none"})`
+        : "";
       keepGateOpenForUnappliedAnswer(
-        `Human gate resolution rejected: ${resolutionClaim.reason}`,
-        `Answer was not applied (${resolutionClaim.reason}); keeping the gate open.`,
+        `Human gate resolution rejected: ${resolutionClaim.reason}${contractDetail}`,
+        `Answer was not applied (${resolutionClaim.reason}${contractDetail}); keeping the gate open.`,
       );
       return;
     }
@@ -752,8 +679,7 @@ export async function runHumanInputJob(worker, job, {
       handledReviewDecision = true;
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
-      const decision = classifyApprovalAnswer(lastAnswer);
-      const approved = decision === "approved";
+      const approved = selectedAction === "approve";
       const resolved = resolveJobScopeExpansion({
         approvalJobId: job.id,
         approved,
@@ -798,9 +724,9 @@ export async function runHumanInputJob(worker, job, {
       && payload.review_type !== "blocked_recovery"
     ) {
       handledReviewDecision = true;
-      const answers = extractHumanAnswers(output);
-      const lastAnswer = extractLatestActionableHumanAnswerText(answers);
-      const decision = classifyApprovalAnswer(lastAnswer);
+      const decision = selectedAction === "approve"
+        ? "approved"
+        : selectedAction === "reject" ? "rejected" : "unknown";
       const dependents = getDependents(job.id);
 
       if (decision === "rejected") {
@@ -893,7 +819,7 @@ export async function runHumanInputJob(worker, job, {
       // Keep explicit empty feedback empty, including replies from the UI.
       await applyDirtyWorktreeRecovery({ worker, job, payload, action: selectedAction,
         feedback: resolutionMetadata?.operator_feedback ?? resolutionMetadata?.feedback
-          ?? (String(resolutionAnswer).trim().toLowerCase() === selectedAction ? "" : resolutionAnswer),
+          ?? humanInputChoiceFeedback(resolutionAnswer, actionChoices),
         operationKey: `${resolutionClaim.idempotency_key}:resume_original` });
     }
 
@@ -901,7 +827,7 @@ export async function runHumanInputJob(worker, job, {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
-      const decision = classifyPartialWorkRecoveryAnswer(lastAnswer);
+      const decision = selectedAction;
       handledReviewDecision = true;
 
       if (!origJob) {
@@ -909,7 +835,7 @@ export async function runHumanInputJob(worker, job, {
         worker.emit(job.id, `${C.yellow}[human] Partial-work recovery could not find original job #${payload.original_job_id}${C.reset}`);
       } else if (decision === "extend") {
         const extension = applyPartialWorkTurnExtension(origJob, {
-          humanAnswer: lastAnswer,
+          humanAnswer: humanInputChoiceFeedback(lastAnswer, actionChoices),
           maxTurnsOverride: payload.suggested_max_turns || null,
           recoveryJobId: job.id,
         });
@@ -992,9 +918,7 @@ export async function runHumanInputJob(worker, job, {
 
     if (payload.original_job_id && payload.review_type === "artifact_routing_admin") {
       const origJob = getJob(payload.original_job_id);
-      const answers = extractHumanAnswers(output);
-      const lastAnswer = extractLatestActionableHumanAnswerText(answers);
-      const decision = humanInputChoiceFromAnswer(lastAnswer, actionChoices);
+      const decision = selectedAction;
       handledReviewDecision = true;
       if (!origJob) {
         finalHumanStatus = "failed";
@@ -1139,7 +1063,7 @@ export async function runHumanInputJob(worker, job, {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
-      const { decision } = blockedRecoveryDecision(lastAnswer, actionChoices);
+      const decision = blockedRecoveryDecisionForAction(selectedAction);
       handledReviewDecision = true;
       const restoreGateDependentsToOriginal = () => {
         if (!origJob) return 0;
@@ -1169,13 +1093,13 @@ export async function runHumanInputJob(worker, job, {
           delete origPayload._assessment_source_recovery_count;
         }
         // A bare choice ("retry") is a decision, not guidance: say so instead
-        // of pasting the word into the task as if it were instructions.
-        const answerText = String(lastAnswer || "").trim();
-        const bareRetry = !answerText
-          || exactHumanInputChoiceFromAnswer(answerText.toLowerCase().replace(/[.!\s]+$/, ""), actionChoices) != null;
+        // of pasting the word into the task as if it were instructions. The
+        // guidance is what follows the choice ("retry: fix the import path").
+        const guidance = humanInputChoiceFeedback(lastAnswer, actionChoices);
+        const bareRetry = !guidance;
         const recoveryNote = [
           `Blocked recovery from human_input job #${job.id}:`,
-          bareRetry ? "The operator chose retry without new instructions." : answerText,
+          bareRetry ? "The operator chose retry without new instructions." : guidance,
         ].join("\n");
         // A restored runner needs a fresh bounded verification attempt, not
         // a rewrite of an implementation task that never started. Operator
@@ -1230,7 +1154,7 @@ export async function runHumanInputJob(worker, job, {
         processVerdict(origJob, {
           verdict: "needs_replan",
           confidence: "high",
-          reasons: [`Human requested replan for blocked job via recovery job #${job.id}: ${lastAnswer || "(no details)"}`],
+          reasons: [`Human requested replan for blocked job via recovery job #${job.id}: ${humanInputChoiceFeedback(lastAnswer, actionChoices) || "(no details)"}`],
           spawn_jobs: [],
           human_questions: [],
           ...(blockContext ? { _replan_block_context: blockContext } : {}),
@@ -1295,12 +1219,11 @@ export async function runHumanInputJob(worker, job, {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
-      const exactRecoveryAction = humanInputChoiceFromAnswer(lastAnswer, actionChoices);
-      const decision = exactRecoveryAction === "explicit_waiver"
-        ? { action: "skip", provider: null }
-        : (exactRecoveryAction === "retry_with_changes"
-          ? { ...classifyDeadLetterRecoveryAnswer(lastAnswer), action: "retry" }
-          : classifyDeadLetterRecoveryAnswer(lastAnswer));
+      // The gate's action is the decision; a provider route is its own choice
+      // (`retry:claude`), never a word found in the text.
+      const decision = selectedAction === "skip" || selectedAction === "fail"
+        ? { action: selectedAction, provider: null }
+        : { action: "retry", provider: selectedAction.startsWith("retry:") ? selectedAction.slice("retry:".length) : null };
       handledReviewDecision = true;
 
       if (decision.action === "skip") {
@@ -1318,7 +1241,7 @@ export async function runHumanInputJob(worker, job, {
         });
       } else if (decision.action === "retry" && origJob) {
         const origPayload = worker.parsePayload(origJob);
-        const retryPayload = buildDeadLetterRetryPayload(origJob, origPayload, lastAnswer, job.id, worker.projectDir, {
+        const retryPayload = buildDeadLetterRetryPayload(origJob, origPayload, humanInputChoiceFeedback(lastAnswer, actionChoices), job.id, worker.projectDir, {
           recoveryType: payload.review_type,
           providerOverride: decision.provider || null,
           failureRepeatKey: payload.failure_repeat_key || null,
@@ -1403,14 +1326,12 @@ export async function runHumanInputJob(worker, job, {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
-      const exactAction = humanInputChoiceFromAnswer(lastAnswer, actionChoices);
-      const reviewDecision = exactAction === "send_back"
-        ? "send_back"
-        : exactAction === "retry_assessment"
+      const exactAction = selectedAction;
+      const reviewDecision = exactAction === "retry_assessment"
         ? "retry"
         : (exactAction === "explicit_waiver"
           ? "skip"
-          : classifyReviewAnswer(lastAnswer));
+          : exactAction);
       const assessmentReview = ASSESSMENT_REVIEW_TYPES.has(payload.review_type);
       if (origJob && !REVIEW_DECISION_ORIGINAL_STATUS_SET.has(origJob.status)) {
         handledReviewDecision = true;
@@ -1511,7 +1432,7 @@ export async function runHumanInputJob(worker, job, {
           delete next._assess_only;
           next.instructions = [next.instructions || next.task_spec || origJob.title,
             `Review gate #${job.id} returned this job for fixes:`, payload.context,
-            resolutionMetadata?.operator_feedback || resolutionMetadata?.feedback || lastAnswer,
+            resolutionMetadata?.operator_feedback || resolutionMetadata?.feedback || humanInputChoiceFeedback(lastAnswer, actionChoices),
           ].filter(Boolean).join("\n\n");
           beginJobRetryGeneration(origJob.id, { payload: next });
           const resumed = requestParkedJobResumeAfterGate({ gateJobId: job.id, originalJobId: origJob.id,
@@ -1722,7 +1643,9 @@ export async function runHumanInputJob(worker, job, {
       leaseToken,
       resolution: {
         action: resolutionClaim.action,
-        answer: String(resolutionAnswer || "").slice(0, 4000),
+        // A text gate's resolution carries every collected answer; a closed
+        // gate's carries the answer that selected its action.
+        answer: String((selectedAction === "respond" ? collectedHumanAnswerText(resolutionAnswers) : resolutionAnswer) || "").slice(0, 4000),
         attempt_id: attempt.attempt.id,
         unattended: outputEnvelope.unattended === true,
         source: outputEnvelope.source || "human",

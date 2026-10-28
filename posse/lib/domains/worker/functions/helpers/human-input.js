@@ -75,7 +75,7 @@ export function unattendedHarnessAnswerForPayload(payload = {}, {
   if (["scope_expansion_request", "scope_expansion_required"].includes(payload.review_type)) {
     return autoApprove
       ? "approve"
-      : payload.review_type === "scope_expansion_required" ? "reject" : "deny";
+      : "reject";
   }
   if (
     payload.review_type !== "blocked_recovery"

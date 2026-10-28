@@ -79,9 +79,9 @@ export function createScopeExpansionOperations({
       `Job #${job.id} (${job.title}) attempted to write outside its writable scope:`,
       ...entries.map((entry) => `  ${entry.path} (${entry.access})${entry.reason ? ` — ${entry.reason}` : ""}`),
       entries.length === 1
-        ? `Approve to add this exact path to ${entries[0].access === "modify" ? "files_to_modify" : "files_to_create"} and ${approvalAction}, or deny to ${denialAction}.`
-        : `Approve to add these ${entries.length} exact paths to the job's writable scope and ${approvalAction}, or deny to ${denialAction}.`,
-      `Reply with "approve" or "deny".`,
+        ? `Approve to add this exact path to ${entries[0].access === "modify" ? "files_to_modify" : "files_to_create"} and ${approvalAction}, or reject to ${denialAction}.`
+        : `Approve to add these ${entries.length} exact paths to the job's writable scope and ${approvalAction}, or reject to ${denialAction}.`,
+      `Reply with "approve" or "reject".`,
     ].join("\n");
   }
 

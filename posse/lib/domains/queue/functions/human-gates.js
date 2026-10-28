@@ -3,7 +3,6 @@ import {
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
   HUMAN_GATE_RECONCILE_REASONS,
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
-  canonicalHumanGateAction,
   humanGateContractForPayload,
   validateHumanGateActionabilityContract,
 } from "../../../catalog/human-input.js";
@@ -92,7 +91,7 @@ export function humanGateIdempotencyKey({
     return String(requestKey).trim().slice(0, 240);
   }
   return createHash("sha256")
-    .update(`${Number(gateJobId) || 0}:${Number(generation) || 1}:${canonicalHumanGateAction(action) || "respond"}`)
+    .update(`${Number(gateJobId) || 0}:${Number(generation) || 1}:${String(action || "").trim() || "respond"}`)
     .digest("hex");
 }
 
@@ -152,8 +151,7 @@ export function registerHumanGate({
       throw new Error(`Human gate actionability contract invalid: ${actionability.reason}`);
     }
     const gateJob = db.prepare(`SELECT work_item_id FROM jobs WHERE id = ?`).get(gateJobId);
-    const persistedActions = [...new Set(contract.allowed_actions
-      .map((action) => canonicalHumanGateAction(action) || action))];
+    const persistedActions = [...new Set(contract.allowed_actions)];
     const singletonWorkItemIdCandidate = !contract.original_job_id
       && WORK_ITEM_SINGLETON_GATE_KINDS.has(contract.gate_kind)
       ? Number(gateJob?.work_item_id)
@@ -335,7 +333,7 @@ export function claimHumanGatePromptPresentation(gateJobId) {
 /** Refresh a recovery prompt after its attempted operation produced new evidence. */
 export function refreshHumanGateContract(gateJobId, payload) {
   const contract = humanGateContractForPayload(payload);
-  const actions = [...new Set(contract.allowed_actions.map((action) => canonicalHumanGateAction(action) || action))];
+  const actions = [...new Set(contract.allowed_actions)];
   return getDb().prepare(`
     UPDATE human_gates SET allowed_actions_json = ?, generation = generation + 1, updated_at = ?
     WHERE gate_job_id = ? AND gate_state IN ('open', 'resolving') AND gate_kind = ?
@@ -389,7 +387,6 @@ export function beginHumanGateResolution({
     const decision = beginResolutionDecision({
       gate: row,
       action,
-      canonicalAction: canonicalHumanGateAction,
       idempotencyKey: (resolvedAction) => humanGateIdempotencyKey({
         gateJobId,
         generation: row.generation,
@@ -913,6 +910,45 @@ export function reconcileHumanGates() {
           countReason(HUMAN_GATE_RECONCILE_REASONS.INVALID_LEGACY_CONTRACT);
         }
       }
+    }
+
+    // A gate persisted under an older action list (a claim-time alias such as
+    // retry_with_changes for retry, a legacy "skip" waiver spelling, a choice
+    // the catalog no longer offers) is rewritten to the current contract once,
+    // here, instead of being translated at every surface forever. The
+    // generation advances so a prompt rendered from the old list cannot answer
+    // the new one. A resolving gate is left to its resolver.
+    const driftedContracts = db.prepare(`
+      SELECT hg.gate_job_id, hg.allowed_actions_json, hg.generation,
+             j.work_item_id, j.parent_job_id, j.payload_json
+      FROM human_gates hg
+      JOIN jobs j ON j.id = hg.gate_job_id
+      WHERE hg.gate_state = 'open'
+        AND j.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+    `).all();
+    for (const row of driftedContracts) {
+      const payload = asPayload(row.payload_json);
+      let contract;
+      try {
+        contract = humanGateContractForPayload(payload, { parentJobId: row.parent_job_id });
+      } catch {
+        continue;
+      }
+      const current = [...new Set(contract.allowed_actions)];
+      if (JSON.stringify(jsonArray(row.allowed_actions_json)) === JSON.stringify(current)) continue;
+      const ts = now();
+      const refreshed = db.prepare(`
+        UPDATE human_gates
+        SET allowed_actions_json = ?, generation = generation + 1, updated_at = ?
+        WHERE gate_job_id = ? AND gate_state = 'open' AND generation = ?
+      `).run(JSON.stringify(current), ts, row.gate_job_id, row.generation);
+      if (refreshed.changes !== 1) continue;
+      if (Array.isArray(payload.choices) && !(current.length === 1 && current[0] === "respond")) {
+        db.prepare(`UPDATE jobs SET payload_json = ?, updated_at = ? WHERE id = ?`)
+          .run(JSON.stringify({ ...payload, choices: current }), ts, row.gate_job_id);
+      }
+      countReason(HUMAN_GATE_RECONCILE_REASONS.CONTRACT_REFRESHED);
+      noteGateMutation(row.work_item_id);
     }
 
     // An open gate whose gate job row (or whole work item) no longer exists

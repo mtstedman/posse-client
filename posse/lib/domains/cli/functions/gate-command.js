@@ -1,6 +1,4 @@
-import { LEGACY_SKIP_WAIVER_KINDS } from "../../../catalog/gate-actions.js";
 import { humanInputChoicesForPayload } from "../../../catalog/human-input.js";
-import { typedKindForGate } from "../../queue/functions/interaction-contract.js";
 import { answerHumanInput } from "../../bridge/functions/human-input-answer.js";
 import { getHumanGate, getJob, getLiveSchedulerBlockMessage, listJobsByWorkItem } from "../../queue/functions/index.js";
 import { resolveGateReviewDiffTarget } from "../../queue/functions/gate-review-target.js";
@@ -11,14 +9,6 @@ import {
 } from "../../ui/functions/admin/gate-review-diff.js";
 
 const GATE_SHOW_CONTEXT_MAX_LINES = 20;
-
-// Resolved against the gate's own choices, so an alias only applies where its
-// target is offered ("run" is the post-merge database gate's go-ahead).
-const ACTION_ALIASES = Object.freeze({
-  retry: Object.freeze(["retry", "retry_assessment", "retry_with_changes", "run"]),
-  pass: Object.freeze(["pass"]),
-  skip: Object.freeze(["skip"]),
-});
 
 const VALUE_FLAGS = Object.freeze(["--feedback", "--text"]);
 
@@ -50,28 +40,16 @@ function positionalArgs(argv = []) {
 }
 
 /**
- * The gate choice an operator's CLI action names. `skip` reaches the waiver
- * only on the gate kinds whose legacy list spelled the waiver "skip"; on a
- * blocked_recovery gate it meant cancel, so it never waives there.
- * An explicit operator `pass` on blocked recovery accepts the work through
- * its existing waiver action, preserving the unavailable verification record.
+ * The gate choice an operator's CLI action names: exactly one of the gate's
+ * offered ids (case-insensitive), or null. There are no friendly aliases;
+ * `posse gate show` prints the ids and a miss lists them.
  */
-export function resolveGateCliAction(requestedAction, choices = [], payload = {}) {
+export function resolveGateCliAction(requestedAction, choices = []) {
   const requested = String(requestedAction || "").trim().toLowerCase();
-  const allowed = (Array.isArray(choices) ? choices : []).map((choice) => String(choice || "").trim());
   if (!requested) return null;
-  const exact = allowed.find((choice) => choice.toLowerCase() === requested);
-  if (exact) return exact;
-  if (requested === "pass" && typedKindForGate(payload || {}) === "blocked_recovery"
-      && allowed.includes("explicit_waiver")) return "explicit_waiver";
-  const aliases = requested === "skip" && LEGACY_SKIP_WAIVER_KINDS.includes(typedKindForGate(payload || {}))
-    ? [...ACTION_ALIASES.skip, "explicit_waiver"]
-    : ACTION_ALIASES[requested] || [];
-  for (const candidate of aliases) {
-    const match = allowed.find((choice) => choice.toLowerCase() === candidate);
-    if (match) return match;
-  }
-  return null;
+  return (Array.isArray(choices) ? choices : [])
+    .map((choice) => String(choice || "").trim())
+    .find((choice) => choice.toLowerCase() === requested) || null;
 }
 
 function textLines(value) {
@@ -219,7 +197,7 @@ export async function runGateCommand(argv = [], {
       : { ...(result || {}), ok: false, action: "answer", answer_text: answer, exitCode: 1 };
   }
   if (args.length !== 3 && !text) return { ok: false, reason: "usage", exitCode: 2 };
-  const action = text ? null : resolveGateCliAction(args[2], choices, payload);
+  const action = text ? null : resolveGateCliAction(args[2], choices);
   if (!action) {
     return {
       ok: false,
@@ -232,7 +210,9 @@ export async function runGateCommand(argv = [], {
 
   const feedback = feedbackFromArgs(argv);
   const answer = feedback ? `${action}: ${feedback}` : action;
-  const result = await answerHumanInputFn(gateJobId, { answer }, {
+  // The resolved action travels beside the text so feedback that happens to
+  // contain another action word cannot change the selection downstream.
+  const result = await answerHumanInputFn(gateJobId, { answer, answer_metadata: { selected_action: action } }, {
     projectDir,
     allowReviewGateAnswer: true,
     allowChoiceFeedback: Boolean(feedback),

@@ -29,56 +29,26 @@ export function extractLatestActionableHumanAnswerText(answers) {
   return "";
 }
 
-export function classifyApprovalAnswer(answer) {
-  const text = String(answer || "").trim().toLowerCase();
-  if (!text || text === "(skipped)") return "unknown";
-  if (/\b(reject|rejected|no|n|deny|denied|decline|declined|cancel|canceled|cancelled|block|blocked)\b/.test(text)) return "rejected";
-  if (/\b(no|not|never|do not|don't|dont|cannot|can't|wont|won't)\b[\s\S]{0,20}\b(approve|approved|allow|allowed|yes|y|ok|okay|proceed|ship)\b/.test(text)) {
-    return "rejected";
+/**
+ * The whole collected response of a text gate: the one answer when every
+ * question got the same (or a single) answer, else each question with its
+ * answer, skipped ones omitted. A multi-question clarification answered one
+ * question at a time used to reach its planner as the last answer alone.
+ */
+export function collectedHumanAnswerText(answers) {
+  if (!Array.isArray(answers)) return "";
+  const answered = answers
+    .map((answer) => ({
+      question: String(answer && typeof answer === "object" ? answer.question || "" : "").trim(),
+      answer: extractHumanAnswerText(answer).trim(),
+    }))
+    .filter((entry) => entry.answer && entry.answer.toLowerCase() !== "(skipped)");
+  if (new Set(answered.map((entry) => entry.answer)).size <= 1) {
+    return extractLatestActionableHumanAnswerText(answers);
   }
-  if (/\b(approve|approved|yes|y|allow|allowed|ok|okay|proceed|ship)\b/.test(text)) return "approved";
-  return "unknown";
-}
-
-export function classifyReviewAnswer(answer) {
-  const text = String(answer || "").trim().toLowerCase();
-  if (!text || text === "(skipped)") return "unknown";
-  if (/\b(?:no|not|never|don't|dont|cannot|can't|won't)\b[\s\S]{0,20}\b(?:pass|passed|approve|approved|accept|accepted|mark done|succeed|succeeded)\b/.test(text)) return "fail";
-  const prefixed = text.match(/^(retry|re-run|rerun|reassess|re-assess|try again|replan|skip|skipped|pass|passed|approve|approved|yes|y|fail|failed|reject|rejected|no|n)\s*:/);
-  if (prefixed) {
-    const verb = prefixed[1];
-    if (/^(retry|re-run|rerun|reassess|re-assess|try again)$/.test(verb)) return "retry";
-    if (verb === "replan") return "replan";
-    if (/^(skip|skipped)$/.test(verb)) return "skip";
-    if (/^(pass|passed|approve|approved|yes|y)$/.test(verb)) return "pass";
-    if (/^(fail|failed|reject|rejected|no|n)$/.test(verb)) return "fail";
-  }
-  if (/\b(retry|re-run|rerun|reassess|re-assess|try again)\b/.test(text)) return "retry";
-  if (/\b(replan)\b/.test(text)) return "replan";
-  if (/\b(skip|skipped)\b/.test(text)) return "skip";
-  if (/\b(pass|passed|approve|approved|yes|y)\b/.test(text)) return "pass";
-  if (/\b(fail|failed|reject|rejected|no|n)\b/.test(text)) return "fail";
-  return "unknown";
-}
-
-export function classifyBlockedRecoveryAnswer(answer) {
-  const text = String(answer || "").trim().toLowerCase();
-  if (!text || text === "(skipped)") return "unknown";
-  const negated = (wordPattern) => new RegExp(`\\b(do not|don't|dont|not|never)\\s+(?:want\\s+to\\s+)?(?:${wordPattern})\\b`, "i").test(text);
-  const hasActionWord = /\b(replan|re-plan|split|narrow|change plan|skip|skipped|ignore|bypass|cancel|canceled|cancelled|retry|re-try|rerun|re-run|try again|continue|unblock|resume|pass|passed|approve|approved|accept|accepted|mark done|succeed|succeeded|fail|failed|reject|rejected|dead[- ]?letter|deadletter|abandon|stop)\b/.test(text);
-  if (/\b(replan|re-plan|split|narrow|change plan)\b/.test(text) && !negated("replan|re-plan|split|narrow")) return "replan";
-  if (/\b(skip|skipped|ignore|bypass|cancel|canceled|cancelled)\b/.test(text) && !negated("skip|ignore|bypass|cancel|canceled|cancelled")) return "skip";
-  if (/\b(retry|re-try|rerun|re-run|try again|continue|unblock|resume)\b/.test(text) && !negated("retry|re-try|rerun|re-run|try again|continue|unblock|resume")) return "retry";
-  if (/\b(pass|passed|approve|approved|accept|accepted|mark done|succeed|succeeded)\b/.test(text) && !negated("pass|approve|accept|mark done|succeed")) return "pass";
-  if (/\b(fail|failed|reject|rejected|dead[- ]?letter|deadletter|abandon|stop)\b/.test(text) && !negated("fail|reject|dead[- ]?letter|deadletter|abandon|stop")) return "fail";
-  if (hasActionWord) return "unknown";
-  return "retry";
-}
-
-function providerFromRecoveryAnswer(answer) {
-  const text = String(answer || "").toLowerCase();
-  const match = text.match(/\b(claude|anthropic|openai|codex|grok)\b/);
-  return match ? match[1] : null;
+  return answered
+    .map((entry) => (entry.question ? `Q: ${entry.question}\nA: ${entry.answer}` : entry.answer))
+    .join("\n\n");
 }
 
 function parsePayloadValue(value) {
@@ -202,30 +172,6 @@ function repairPromoteRetryPayload(origJob, retryPayload, projectDir, origPayloa
       repaired_source_dir: selected,
     },
   };
-}
-
-export function classifyDeadLetterRecoveryAnswer(answer) {
-  const text = String(answer || "").trim().toLowerCase();
-  if (!text || text === "(skipped)") return { action: "unknown", provider: null };
-  const provider = providerFromRecoveryAnswer(text);
-  const skipRequested = /\b(skip|skipped|unblock|ignore|bypass)\b/.test(text);
-  const skipNegated = /\b(do not|don't|dont|not|never)\s+(skip|unblock|ignore|bypass)\b/.test(text);
-  if (skipRequested && !skipNegated) return { action: "skip", provider };
-  if (/\b(cancel|canceled|cancelled|abandon|fail|failed|stop)\b/.test(text)) return { action: "fail", provider };
-  if (/\b(replan|re-plan|simplify|split|narrow)\b/.test(text)) return { action: "retry", provider };
-  if (/\b(retry|rertry|re-try|rerun|re-run|try again|run again)\b/.test(text) || provider) {
-    return { action: "retry", provider };
-  }
-  return { action: "retry", provider };
-}
-
-export function classifyPartialWorkRecoveryAnswer(answer) {
-  const text = String(answer || "").trim().toLowerCase();
-  if (!text || text === "(skipped)") return "unknown";
-  if (/\b(extend|resume|continue|more turns?|larger turn|increase turn|retry)\b/.test(text)) return "extend";
-  if (/\b(commit|assess|assessment|keep|preserve|save)\b/.test(text)) return "commit";
-  if (/\b(revert|discard|drop|dead[- ]?letter|deadletter|abandon|kill|fail)\b/.test(text)) return "revert";
-  return "unknown";
 }
 
 export function buildDeadLetterRetryPayload(origJob, origPayload, humanAnswer, recoveryJobId, projectDir = process.cwd(), {

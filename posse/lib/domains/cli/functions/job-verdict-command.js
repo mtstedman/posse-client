@@ -24,7 +24,7 @@ export async function runJobVerdictCommand(argv = [], { projectDir } = {}) {
       && (entry.parent_job_id === job.id || Number(parseJobPayload(entry).original_job_id) === job.id));
     if (gates.length > 0) {
       const payload = gates.length === 1 ? parseJobPayload(gates[0]) : null;
-      if (!payload || !resolveGateCliAction(action, humanInputChoicesForPayload(payload), payload)) {
+      if (!payload || !resolveGateCliAction(action, humanInputChoicesForPayload(payload))) {
         return { ok: false, reason: "existing_gate", message: `Answer the existing gate first: ${gates.map((gate) => `#${gate.id}`).join(", ")}.` };
       }
       return { ok: true, gateId: gates[0].id };

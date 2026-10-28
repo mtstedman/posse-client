@@ -5,8 +5,11 @@ import { readonlySet } from "./readonly-collections.js";
 //
 // `review_type` predates typed human-input gates, so some coordination and
 // recovery prompts still carry that field even though they are not binary
-// assessor reviews. Keep their action enums and bridge classification here so
-// the TUI, bridge snapshots, and bridge answer validation cannot drift.
+// assessor reviews. HUMAN_GATE_ACTIONS is the one table of what each gate
+// offers and accepts: the prompt, the bridge projection, answer validation and
+// the durable gate contract all read it, so none of them can drift. An action
+// has one spelling (the structured question vocabulary's); nothing here maps
+// one word to another, and free text is an answer, never an action.
 
 import {
   FAILED_JOB_STATUSES,
@@ -14,7 +17,7 @@ import {
   ONESHOT_SCOPE_SELECTION_SUBTYPE,
 } from "./job.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./native-tools.js";
-import { GATE_ACTION_ORDER, orderedGateActions, validReviewChoiceIDs } from "./gate-actions.js";
+import { orderedGateActions } from "./gate-actions.js";
 
 const freezeChoices = (choices) => Object.freeze([...choices]);
 export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment using the available evidence and explicit assumptions.";
@@ -65,6 +68,7 @@ export const HUMAN_GATE_RECONCILE_REASONS = Object.freeze({
   REGISTERED_LEGACY: "registered_legacy",
   DUPLICATE_LEGACY: "duplicate_legacy",
   INVALID_LEGACY_CONTRACT: "invalid_legacy_contract",
+  CONTRACT_REFRESHED: "contract_refreshed",
   ORPHANED_GATE: "orphaned_gate",
   FAILED_RESOLUTION: "failed_resolution",
   ABANDONED_RESOLVER: "abandoned_resolver",
@@ -84,10 +88,7 @@ export const BLOCKED_RECOVERY_RETRY_SCOPES = Object.freeze({
   IMPLEMENTATION: "implementation",
 });
 // A blocked job's verification is waived only by the waiver's own words.
-// Skip/cancel-style words cancel the job on a legacy list that offers "skip"
 // and are refused on every other list; they never waive.
-export const BLOCKED_RECOVERY_WAIVER_WORDS = /\b(?:waive[sd]?|waiver)\b/;
-export const BLOCKED_RECOVERY_SKIP_INTENT_WORDS = /\b(?:skip|skipped|ignore|ignored|bypass|bypassed|cancel|canceled|cancelled|unblock)\b/;
 export const SCOPE_APPROVAL_MODES = Object.freeze({ DEFAULT: "default", AUTO: "auto" });
 export const SCOPE_APPROVAL_MODE_VALUES = Object.freeze(Object.values(SCOPE_APPROVAL_MODES));
 export const SCOPE_MODE_APPROVAL_SOURCE = "scope_mode_auto";
@@ -129,8 +130,8 @@ export const WORK_ITEM_DISPOSITION_REVIEW_TYPES = Object.freeze([
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
 ]);
 
-// Recovery gates whose "retry" (canonical retry_with_changes, with or
-// without operator guidance) re-runs the failed or blocked work through the
+// Recovery gates whose "retry" (bare, or with ":" guidance) re-runs the
+// failed or blocked work through the
 // ordinary assessed pipeline. The answer requeues or creates the retried jobs
 // while the gate is still resolving, and they block completion until they
 // pass, so once resolved the retry leaves nothing for an operator to decide
@@ -212,12 +213,21 @@ const DEFAULT_HUMAN_GATE_SOURCE_STATES = Object.freeze(
   JOB_STATUSES.filter((status) => !["leased", "awaiting_assessment", "canceled"].includes(status)),
 );
 
-export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
+/**
+ * What each gate offers and accepts, keyed by gate name (the payload's
+ * review_type). One list per gate: the prompt shows it, the bridge projects
+ * it, an answer must select from it and the persisted gate contract is
+ * written from it. A gate named here with ["respond"] takes free text; a
+ * gate not named here offers its payload's explicit choices or, with none,
+ * takes free text as `respond`.
+ */
+export const HUMAN_GATE_ACTIONS = Object.freeze({
+  [PLANNER_CLARIFICATION_REVIEW_TYPE]: freezeChoices(["respond"]),
   [ENVIRONMENT_SETUP_REVIEW_TYPE]: ENVIRONMENT_SETUP_ACTIONS,
-  scope_expansion_request: freezeChoices(["approve", "deny"]),
-  scope_expansion_required: freezeChoices(["approve", "reject"]),
+  scope_expansion_request: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.file_scope_approval),
+  scope_expansion_required: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.file_scope_approval),
   [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE]: freezeChoices(["commit", "send_back", "fail"]),
-  partial_work_recovery: freezeChoices(["extend", "commit", "revert"]),
+  partial_work_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.partial_work_recovery),
   blocked_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery),
   dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
   research_dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
@@ -232,13 +242,13 @@ export const HUMAN_INPUT_ACTION_ENUMS = Object.freeze({
   assessment_retry_limit: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_retry_limit),
   replan_limit: orderedGateActions(["replan", "pass", "fail", "explicit_waiver"]),
   unexecuted_replan_limit: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.unexecuted_replan_recovery),
-  artifact_routing_admin: freezeChoices(["acknowledge"]),
+  artifact_routing_admin: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.artifact_routing_admin),
   shared_trunk_provenance: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance),
-  [POST_MERGE_DB_TASK_REVIEW_TYPE]: freezeChoices(["run", "skip"]),
-  [MERGE_VERIFICATION_REVIEW_TYPE]: freezeChoices(["pass", "fail"]),
+  [POST_MERGE_DB_TASK_REVIEW_TYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.post_merge_db_task),
+  [MERGE_VERIFICATION_REVIEW_TYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.merge_verification_review),
   [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.merge_failure_recovery),
-  [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: freezeChoices(["retry", "accept", "abandon"]),
-  [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: freezeChoices(["wait", "rebuild", "abandon"]),
+  [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.work_item_failure_disposition),
+  [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.cross_wi_upstream_disposition),
 });
 
 export const HUMAN_GATE_RECOVERY_KINDS = Object.freeze([
@@ -267,43 +277,36 @@ export const AUTHORIZATION_GATE_KINDS = Object.freeze([
   "clarification",
 ]);
 
-export const CANONICAL_HUMAN_GATE_ACTIONS = GATE_ACTION_ORDER;
-
+// Gate kind and source-state contract per gate name. Actions are not here:
+// HUMAN_GATE_ACTIONS is their one source.
 const HUMAN_GATE_CONTRACTS = Object.freeze({
-  [PLANNER_CLARIFICATION_REVIEW_TYPE]: { gate_kind: "clarification", allowed_actions: ["respond"], allowed_source_states: ["running"] },
+  [PLANNER_CLARIFICATION_REVIEW_TYPE]: { gate_kind: "clarification", allowed_source_states: ["running"] },
   [ENVIRONMENT_SETUP_REVIEW_TYPE]: {
     gate_kind: ENVIRONMENT_SETUP_REVIEW_TYPE,
-    allowed_actions: ENVIRONMENT_SETUP_ACTIONS,
     allowed_source_states: ["running"],
   },
   [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE]: {
     gate_kind: "developer_blocked",
-    allowed_actions: ["commit", "send_back", "fail"],
     allowed_source_states: ["waiting_on_human", "waiting_on_review", "blocked"],
   },
   scope_expansion_request: {
     gate_kind: "scope_expansion_required",
-    allowed_actions: ["approve", "deny", "reject"],
     allowed_source_states: ["running", "blocked", "waiting_on_human", "waiting_on_review", "succeeded"],
   },
   scope_expansion_required: {
     gate_kind: "scope_expansion_required",
-    allowed_actions: ["approve", "reject", "deny"],
     allowed_source_states: ["failed", "blocked", "waiting_on_human", "waiting_on_review"],
   },
   partial_work_recovery: {
     gate_kind: "blocked_cycle_exhausted",
-    allowed_actions: ["extend", "commit", "revert"],
     allowed_source_states: ["running", "blocked", "waiting_on_human"],
   },
   blocked_recovery: {
     gate_kind: "developer_blocked",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery],
     allowed_source_states: ["blocked", "waiting_on_human", "waiting_on_review", ...FAILED_JOB_STATUSES],
   },
   dead_letter_recovery: {
     gate_kind: "dead_letter_recovery",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery],
     allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
   },
   failure_threshold_exhausted: {
@@ -320,104 +323,80 @@ const HUMAN_GATE_CONTRACTS = Object.freeze({
   },
   research_dead_letter_recovery: {
     gate_kind: "dead_letter_recovery",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery],
     allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
   },
   oneshot_dead_letter_recovery: {
     gate_kind: "dead_letter_recovery",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery],
     allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
   },
   stall_exhausted_recovery: {
     gate_kind: "failure_threshold_exhausted",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery],
     allowed_source_states: [...FAILED_JOB_STATUSES, "blocked", "waiting_on_human"],
   },
   assessment_transport_error: {
     gate_kind: "assessment_transport_unavailable",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_transport_recovery],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   assessment_retry_limit: {
     gate_kind: "assessment_retry_exhausted",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_retry_limit],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   assessment_parse_error: {
     gate_kind: "assessment_review",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   assessment_evidence_missing: {
     gate_kind: "assessor_evidence_unavailable",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_transport_recovery],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   unknown_verdict: {
     gate_kind: "assessment_review",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   needs_review: {
     gate_kind: "assessment_review",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
   replan_limit: {
     gate_kind: "fix_chain_exhausted",
-    allowed_actions: [...HUMAN_INPUT_ACTION_ENUMS.replan_limit],
     allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
   },
   unexecuted_replan_limit: {
     gate_kind: "fix_chain_exhausted",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.unexecuted_replan_recovery],
     allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
   },
   artifact_routing_admin: {
     gate_kind: "artifact_routing_unavailable",
-    allowed_actions: ["acknowledge"],
     allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
   },
   shared_trunk_provenance: {
     gate_kind: "repository_recovery",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance],
     allowed_source_states: ["waiting_on_human", "succeeded"],
   },
   [POST_MERGE_DB_TASK_REVIEW_TYPE]: {
     gate_kind: POST_MERGE_DB_TASK_REVIEW_TYPE,
-    allowed_actions: ["run", "skip"],
     allowed_source_states: ["waiting_on_human"],
   },
   [MERGE_VERIFICATION_REVIEW_TYPE]: {
     gate_kind: MERGE_VERIFICATION_REVIEW_TYPE,
-    allowed_actions: ["pass", "fail"],
     allowed_source_states: ["succeeded"],
   },
   [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: {
     gate_kind: MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.merge_failure_recovery],
     allowed_source_states: ["succeeded"],
   },
   [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: {
     gate_kind: WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
-    allowed_actions: ["retry", "accept", "abandon"],
     allowed_source_states: ["waiting_on_human"],
   },
   [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: {
     gate_kind: CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
-    allowed_actions: ["wait", "rebuild", "abandon"],
     allowed_source_states: ["waiting_on_human"],
   },
   assessment: {
     gate_kind: "assessment_review",
-    allowed_actions: [...WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review],
     allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
   },
-});
-
-const HUMAN_GATE_ACTION_ALIASES = Object.freeze({
-  retry: "retry_with_changes",
-  skip: "explicit_waiver",
 });
 
 const HUMAN_GATE_ACTIONABILITY_PROFILES = Object.freeze({
@@ -550,7 +529,7 @@ const HUMAN_GATE_ACTIONABILITY_PROFILES = Object.freeze({
 });
 
 function actionTransition(action) {
-  const canonical = canonicalHumanGateAction(action);
+  const canonical = String(action || "").trim();
   const transitions = {
     approve: "grant_scope_and_resume",
     deny: "deny_scope_and_fail_request",
@@ -559,7 +538,9 @@ function actionTransition(action) {
     commit: "preserve_partial_work_and_assess",
     revert: "discard_partial_work_and_dead_letter",
     retry_assessment: "queue_new_assessment_attempt",
-    retry_with_changes: "queue_recovery_attempt",
+    retry: "queue_recovery_attempt",
+    skip: "cancel_original_job_and_release_dependents",
+    acknowledge: "record_operator_acknowledgement",
     replan: "queue_new_research_and_plan",
     pass: "record_human_acceptance",
     fail: "record_terminal_rejection",
@@ -603,16 +584,11 @@ function gateSource(payload = {}) {
     || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE
   ) return ONESHOT_SCOPE_SELECTION_SUBTYPE;
   const reviewType = String(payload?.review_type || "").trim();
-  if (HUMAN_GATE_CONTRACTS[reviewType]) return reviewType;
+  if (HUMAN_GATE_CONTRACTS[reviewType] || HUMAN_GATE_ACTIONS[reviewType]) return reviewType;
   if (Array.isArray(payload?.file_requests) && payload.file_requests.length > 0) {
     return "scope_expansion_request";
   }
   return String(payload?.gate_kind || payload?.review_type || "clarification");
-}
-
-export function canonicalHumanGateAction(action) {
-  const normalized = String(action || "").trim();
-  return HUMAN_GATE_ACTION_ALIASES[normalized] || normalized || null;
 }
 
 export function humanGateContractForPayload(payload = {}, {
@@ -633,8 +609,8 @@ export function humanGateContractForPayload(payload = {}, {
   // generic developer block and could reuse an unrelated open prompt.
   const explicitGateKind = String(payload?.gate_kind || "").trim();
   const gateKind = explicitGateKind || registered?.gate_kind || source;
-  const registeredActions = registered?.allowed_actions
-    ? narrowedReviewChoices(payload, [...registered.allowed_actions])
+  const registeredActions = HUMAN_GATE_ACTIONS[source]
+    ? narrowedReviewChoices(payload, [...HUMAN_GATE_ACTIONS[source]])
     : null;
   const allowedActions = [...new Set(registeredActions || fallbackActions)];
   const profile = HUMAN_GATE_ACTIONABILITY_PROFILES[gateKind]
@@ -674,26 +650,6 @@ export const HUMAN_INPUT_COORDINATION_REVIEW_TYPES = Object.freeze([
 ]);
 
 const COORDINATION_REVIEW_TYPE_SET = readonlySet(HUMAN_INPUT_COORDINATION_REVIEW_TYPES);
-const HUMAN_INPUT_CHOICE_ALIASES = Object.freeze({
-  approve: /\b(approve|approved|yes|allow|allowed|ok|okay|proceed|ship)\b/i,
-  deny: /\b(deny|denied|reject|rejected|no|decline|declined|cancel|canceled|cancelled|block|blocked)\b/i,
-  reject: /\b(reject|rejected|deny|denied|no|decline|declined|cancel|canceled|cancelled|block|blocked)\b/i,
-  retry: /\b(retry|rertry|re-try|rerun|re-run|reassess|re-assess|try again|run again|replan|re-plan|simplify|split|narrow)\b/i,
-  skip: /\b(skip|skipped|unblock|ignore|bypass)\b/i,
-  retry_assessment: /\b(retry|rertry|re-try|rerun|re-run|reassess|re-assess|try again|run again)\b/i,
-  retry_with_changes: /\b(retry|rertry|re-try|rerun|re-run|try again|run again|simplify|split|narrow|claude|anthropic|openai|codex|grok)\b/i,
-  explicit_waiver: /\b(waive|waiver)\b/i,
-  replan: /\b(replan|re-plan|split|narrow|change plan)\b/i,
-  pass: /\b(pass|passed|approve|approved|accept|accepted|mark done|succeed|succeeded)\b/i,
-  fail: /\b(fail|failed|reject|rejected|dead[- ]?letter|deadletter|abandon|stop)\b/i,
-  extend: /\b(extend|resume|continue|more turns?|larger turn|increase turn)\b/i,
-  commit: /\b(commit|assess|assessment|keep|preserve|save)\b/i,
-  revert: /\b(revert|discard|drop|dead[- ]?letter|deadletter|abandon|kill)\b/i,
-  acknowledge: /\b(acknowledge|acknowledged|understood|noted|ok|okay)\b/i,
-  merge: /\b(merge|merge now|retry merge|retry the merge)\b/i,
-  send_back: /\b(send[ _-]?back|rework|return it|fix|repair)\b/i,
-});
-
 export function normalizeHumanInputChoices(choices, { limit = 9 } = {}) {
   if (!Array.isArray(choices)) return [];
   const normalized = choices
@@ -706,7 +662,7 @@ export function normalizeHumanInputChoices(choices, { limit = 9 } = {}) {
 }
 
 export function humanInputChoicesForReviewType(reviewType) {
-  const choices = HUMAN_INPUT_ACTION_ENUMS[String(reviewType || "").trim()];
+  const choices = HUMAN_GATE_ACTIONS[String(reviewType || "").trim()];
   return choices ? [...choices] : [];
 }
 
@@ -729,12 +685,6 @@ export function mergeFailureRecoveryChoices({ integrationGate = null, allowWaive
 function narrowedReviewChoices(payload, reviewChoices) {
   const reviewType = String(payload?.review_type || "").trim();
   const offered = normalizeHumanInputChoices(payload?.choices);
-  if (reviewType === "blocked_recovery"
-    && validReviewChoiceIDs("blocked_recovery", offered, WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery)) {
-    // Legacy skip cancels a blocked job. It must not become a waiver when an
-    // old saved gate is answered after the new catalog is installed.
-    return offered;
-  }
   if (["assessment", "needs_review", "assessment_parse_error", "assessment_evidence_missing",
     "unknown_verdict", "assessment_transport_error", "assessment_retry_limit", "replan_limit",
     "unexecuted_replan_limit"].includes(reviewType)
@@ -760,9 +710,12 @@ function narrowedReviewChoices(payload, reviewChoices) {
 }
 
 export function humanInputChoicesForPayload(payload = {}) {
-  // Known review types are closed contracts. Persisted `choices` from older
-  // jobs must not reintroduce an action that the resolver does not handle.
-  const reviewChoices = humanInputChoicesForReviewType(payload.review_type);
+  // Known gates are closed contracts (HUMAN_GATE_ACTIONS). Persisted `choices`
+  // from older jobs must not reintroduce an action that the resolver does not
+  // handle. A gate whose only action is `respond` offers no choices: it takes
+  // free text.
+  const reviewChoices = humanInputChoicesForReviewType(payload.review_type)
+    .filter((choice) => choice !== "respond");
   if (reviewChoices.length > 0) return narrowedReviewChoices(payload, reviewChoices);
 
   const explicit = normalizeHumanInputChoices(payload.choices);
@@ -862,48 +815,39 @@ export function isHumanInputReviewPayload(payload = {}) {
   return true;
 }
 
+const HUMAN_INPUT_CHOICE_FEEDBACK_SEPARATOR = ":";
+
+/**
+ * The offered choice an answer selects: the choice id itself, or the id
+ * followed by ":" and feedback ("pass: the frozen tests passed"). Nothing else
+ * selects a choice; "yes", "looks good" or "do not approve" are human text and
+ * select nothing, so the gate stays open and names its choices. Matching is
+ * case-insensitive on the id only.
+ */
 export function humanInputChoiceFromAnswer(answer, choices = []) {
-  const text = String(answer || "").trim().toLowerCase().replace(/[‘’]/g, "'");
+  const text = String(answer || "").trim();
   if (!text) return null;
+  const lowered = text.toLowerCase();
   const normalizedChoices = normalizeHumanInputChoices(choices, { limit: Number.POSITIVE_INFINITY });
-  if (/\b(?:no|not|never|don't|dont|cannot|can't|won't)\b[\s\S]{0,20}\b(?:pass|passed|approve|approved|accept|accepted|allow|allowed|mark done|succeed|succeeded)\b/.test(text)) {
-    // A negated approval can accompany an explicit recovery action. Parse
-    // that action without letting the negated word match an approval alias.
-    for (const recoveryMatch of text.matchAll(/\b(?:retry(?::[a-z0-9_-]+)?|skip)\b/g)) {
-      if (/\b(?:no|not|never|don't|dont|cannot|can't|won't)\s+$/.test(text.slice(0, recoveryMatch.index))) continue;
-      const explicitRecovery = normalizedChoices.find(choice => choice.toLowerCase() === recoveryMatch[0]);
-      if (explicitRecovery) return explicitRecovery;
-    }
-    return normalizedChoices.find((choice) => ["fail", "deny", "reject"].includes(choice.toLowerCase())) || null;
-  }
-  // Resolve an exact provider-qualified choice before testing decorated
-  // prefixes. Otherwise the earlier `retry` entry captures `retry:claude`
-  // and the durable resolution loses the operator's selected route.
-  const exact = normalizedChoices.find((choice) => choice.toLowerCase() === text);
+  const exact = normalizedChoices.find((choice) => choice.toLowerCase() === lowered);
   if (exact) return exact;
-  // Decorations are free text too: a leading choice name cannot authorize
-  // a negated, deferred, or contradictory instruction after the separator.
-  if (/\b(?:no|not|never|don't|dont|cannot|can't|won't|defer|later|wait)\b/.test(text)) return null;
-  const matches = normalizedChoices.filter((choice) => HUMAN_INPUT_CHOICE_ALIASES[choice.toLowerCase()]?.test(text));
+  // The longest id first, so `retry:codex: ...` is not read as `retry`.
   for (const choice of [...normalizedChoices].sort((a, b) => b.length - a.length)) {
-    const normalizedChoice = choice.toLowerCase();
-    const separator = [":", " -", " —"].find((mark) => text.startsWith(`${normalizedChoice}${mark}`));
-    if (separator == null) continue;
-    // The decoration is free text. An instruction that opens with another
-    // choice ("merge: send back instead") contradicts the leading selection;
-    // an incidental word later on ("send_back: fix the failed tests") does not.
-    const decoration = text.slice(normalizedChoice.length + separator.length).trim();
-    const contradiction = normalizedChoices.some((other) => other !== choice
-      && !choice.startsWith(`${other}:`)
-      && (decoration.startsWith(other.toLowerCase())
-        || HUMAN_INPUT_CHOICE_ALIASES[other.toLowerCase()]?.exec(decoration)?.index === 0));
-    return contradiction ? null : choice;
-  }
-  if (matches.length !== 1) return null;
-  for (const choice of matches) {
-    if (HUMAN_INPUT_CHOICE_ALIASES[choice.toLowerCase()]?.test(text)) return choice;
+    if (lowered.startsWith(`${choice.toLowerCase()}${HUMAN_INPUT_CHOICE_FEEDBACK_SEPARATOR}`)) return choice;
   }
   return null;
+}
+
+/**
+ * The feedback an answer carries beside its selected choice ("pass: the
+ * frozen tests passed" → "the frozen tests passed"), or "" for a bare choice
+ * or an answer that selects none.
+ */
+export function humanInputChoiceFeedback(answer, choices = []) {
+  const text = String(answer || "").trim();
+  const choice = humanInputChoiceFromAnswer(text, choices);
+  if (!choice || text.toLowerCase() === choice.toLowerCase()) return "";
+  return text.slice(choice.length + HUMAN_INPUT_CHOICE_FEEDBACK_SEPARATOR.length).trim();
 }
 
 export function exactHumanInputChoiceFromAnswer(answer, choices = []) {

@@ -19,7 +19,6 @@ import { DisplayLeftPanelRenderer } from "./left-panel-renderer.js";
 import { DisplayRightPanelRenderer } from "./right-panel-renderer.js";
 import { DisplayMonitorRenderer } from "./monitor-renderer.js";
 import { C } from "../../../../shared/format/functions/colors.js";
-import { legacyReviewChoiceAction } from "../../../../catalog/gate-actions.js";
 import {
   STALE_CANCELABLE_JOB_STATUSES,
   TERMINAL_WORK_ITEM_STATUSES,
@@ -1273,12 +1272,7 @@ export class Display {
     const freeText = choices.length === 0 && typeof delivery.answer_text === "string"
       ? delivery.answer_text.trim()
       : "";
-    // A gate parked under a legacy review list shows "skip" as its waiver;
-    // the prompt offers the current spelling.
-    const legacyAction = choices.includes(choiceId)
-      ? null
-      : legacyReviewChoiceAction(delivery.question_kind, delivery.stored_choice_ids, choiceId);
-    const answerChoice = legacyAction && choices.includes(legacyAction) ? legacyAction : choiceId;
+    const answerChoice = choiceId;
     if (choices.length > 0 ? !choices.includes(answerChoice) : !freeText) {
       return { delivered: false, reason: "choice_not_allowed" };
     }
@@ -1302,6 +1296,9 @@ export class Display {
       idempotency_key: String(delivery.action_id || ""),
       reservation_id: Number(delivery.reservation_id),
       source: "reserved_owner_delivery",
+      // The selection validated above travels as itself; the worker's action
+      // resolver reads it instead of re-parsing the answer text.
+      selected_action: freeText ? "respond" : answerChoice,
     };
     // Free text answers every remaining question, as it does for a parked
     // gate (answerHumanInput gives each question the same answer).

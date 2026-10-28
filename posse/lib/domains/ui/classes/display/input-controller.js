@@ -235,7 +235,7 @@ export class DisplayInputController {
     if (idx !== -1) this._questionQueue.splice(idx, 1);
   }
 
-  _submitAnswer() {
+  _submitAnswer(selectedAction = null) {
     if (!this._activeQ) return;
     const q = this._activeQ;
     const answer = this._inputBuf.trim();
@@ -243,6 +243,9 @@ export class DisplayInputController {
     q.answers.push({
       question: q.questions[q.currentIdx],
       answer: answer || "(skipped)",
+      // A numbered choice is a typed selection; the worker's action resolver
+      // takes it as such rather than reading the word again.
+      ...(selectedAction ? { metadata: { selected_action: selectedAction, source: "tui_choice" } } : {}),
     });
 
     this._inputBuf = "";
@@ -270,7 +273,7 @@ export class DisplayInputController {
     const choice = choices[choiceIndex];
     if (typeof choice !== "string" || !choice.trim()) return false;
     this._inputBuf = choice.trim();
-    this._submitAnswer();
+    this._submitAnswer(choice.trim());
     return true;
   }
 

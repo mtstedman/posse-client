@@ -36,13 +36,11 @@ export function terminalGateDecision({ jobStatus, headlessTimedOut = false }) {
   return "reopen";
 }
 
-export function beginResolutionDecision({ gate, action, canonicalAction, idempotencyKey }) {
-  const accepted = new Set([
-    ...gate.allowed_actions,
-    ...gate.allowed_actions.map((value) => canonicalAction(value)),
-  ]);
-  const resolvedAction = canonicalAction(action) || "respond";
-  if (!accepted.has(action) && !accepted.has(resolvedAction)) {
+export function beginResolutionDecision({ gate, action, idempotencyKey }) {
+  // The persisted list is the whole contract: an action is accepted exactly
+  // as offered, never through an alias.
+  const resolvedAction = String(action || "").trim() || "respond";
+  if (!gate.allowed_actions.includes(resolvedAction)) {
     return { ok: false, reason: "action_not_allowed", allowed_actions: gate.allowed_actions };
   }
   const key = idempotencyKey(resolvedAction);
