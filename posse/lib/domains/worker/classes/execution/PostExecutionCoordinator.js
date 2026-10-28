@@ -382,7 +382,7 @@ export async function handlePostExecutionForWorker({
         // A live wait timing out does not invalidate the requested fix. Keep
         // its exact-path approval actionable after a BLOCKED handoff instead
         // of replacing it with a generic recovery question.
-        const parkLiveRequest = (agentCompletionLog.status === "BLOCKED" || pendingScopeRequest?.hold_expired === true)
+        const parkLiveRequest = agentCompletionLog.status === "BLOCKED"
           && pendingScopeRequest?.live_wait === true && !pendingScopeRequest.decision
           && ["queued", "waiting_on_human"].includes(getJob(Number(pendingScopeRequest.approval_job_id))?.status);
         if (
@@ -434,13 +434,28 @@ export async function handlePostExecutionForWorker({
         // the gate surfaced to the operator against a dead attempt. The
         // decided guard inside abandon keeps a racing human answer intact.
         if (pendingScopeRequest && !pendingScopeRequest.decision) {
-          abandonJobScopeExpansionRequest({
-            jobId: job.id,
-            requestId: pendingScopeRequest.id,
-            force: true,
-            code: "scope_request_job_finished",
-            message: "The provider call finished without consuming the pending scope request; closing its approval gate.",
-          });
+          const expiredGateOpen = pendingScopeRequest.hold_expired === true
+            && ["queued", "waiting_on_human"].includes(getJob(Number(pendingScopeRequest.approval_job_id))?.status);
+          if (expiredGateOpen) {
+            // The operator may still be answering a hold that aged out. Keep
+            // the gate open and settle the request against this finished
+            // attempt: approving a succeeded job records job.scope_grant_unused
+            // and a failed job is requeued with the grant. Finished work is
+            // never reset or re-run on the operator's late answer.
+            settleJobScopeExpansionAttempt({ jobId: job.id, attemptId: attempt.id });
+            this.emit(
+              job.id,
+              `${C.yellow}[scope] WI#${job.work_item_id} job #${job.id}: finished with scope gate #${pendingScopeRequest.approval_job_id} still open for ${pendingScopeRequest.path}; a later decision is recorded against this attempt${C.reset}`,
+            );
+          } else {
+            abandonJobScopeExpansionRequest({
+              jobId: job.id,
+              requestId: pendingScopeRequest.id,
+              force: true,
+              code: "scope_request_job_finished",
+              message: "The provider call finished without consuming the pending scope request; closing its approval gate.",
+            });
+          }
         }
         // The rendered block cuts notes to 30 words; the committed packet keeps
         // the agent's full blocker and remaining_work.

@@ -136,7 +136,7 @@ export function createScopedMutationTools(ctx) {
       }
       // Approved: complete the original write in the same call.
     }
-    return recordMutationUse(ctx.execWriteFile(args || {}, ctx.workspaceCwd, ctx.effectiveScopePredicates), args.path);
+    return recordMutationUse(ctx.execWriteFile(args || {}, ctx.workspaceCwd, ctx.effectiveScopePredicates), resolved.path);
   }
 
   async function editFileWithinScope(args = {}) {
@@ -150,7 +150,7 @@ export function createScopedMutationTools(ctx) {
     if ((missing || emptyCreate) && ctx.effectiveScopePredicates.canCreate(resolved.path)) {
       if (args.find !== "" || typeof args.replace !== "string") return "Error: Missing file: use write_file to create it, or edit_file with empty find and replacement text.";
       if (Object.keys(args).some((key) => !["path", "find", "replace"].includes(key))) return "Error: Creation edit accepts only path, find and replace; use write_file.";
-      return recordMutationUse(ctx.execWriteFile({ path: args.path, content: args.replace }, ctx.workspaceCwd, ctx.effectiveScopePredicates), args.path);
+      return recordMutationUse(ctx.execWriteFile({ path: args.path, content: args.replace }, ctx.workspaceCwd, ctx.effectiveScopePredicates), resolved.path);
     }
     if (!ctx.effectiveScopePredicates.canEdit(resolved.path)) {
       if (!ctx.mcpJobId) {
@@ -171,7 +171,7 @@ export function createScopedMutationTools(ctx) {
       }
       // Approved: complete the original edit in the same call.
     }
-    return recordMutationUse(ctx.execEditFile(args || {}, ctx.workspaceCwd, ctx.effectiveScopePredicates), args.path);
+    return recordMutationUse(ctx.execEditFile(args || {}, ctx.workspaceCwd, ctx.effectiveScopePredicates), resolved.path);
   }
 
   function pathsReferToSameExistingFile(a, b) {

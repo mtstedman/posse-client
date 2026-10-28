@@ -1,6 +1,9 @@
 import { HUMAN_GATE_ACTIONS, SCOPE_MODE_APPROVAL_SOURCE, humanGateContractForPayload, humanGateNameForPayload, humanInputChoicesForPayload } from "./human-input.js";
 
 export const PINNED_APPROVAL_GATES = Object.freeze(["environment_setup", "push_offer"]);
+// Thrown by the unattended human-input handler; the human-input job turns it
+// into a closed gate and a failed parked original instead of reopening the gate.
+export const APPROVAL_POLICY_FAIL_CLOSED_CODE = "APPROVAL_POLICY_FAIL_CLOSED";
 export const approvalPolicyKey = (gate) => `approval_policy_${gate}`;
 export const APPROVAL_POLICY_SETTINGS = Object.freeze(Object.entries(HUMAN_GATE_ACTIONS).filter(([gate]) => gate !== "plan_approval").map(([gate, actions]) => ({
   key: approvalPolicyKey(gate), default: "ask",
@@ -16,9 +19,16 @@ export function approvalPolicyForPayload(payload, { getSetting = () => null, sco
     ? (getSetting("plan_approval_mode") === "auto_approve" ? "auto:approve" : "ask")
     : getSetting(approvalPolicyKey(gate)) || "ask";
   let source = "approval_policy";
+  // A saved row other than the default is the operator's standing decision for
+  // this gate. `--scope-mode auto` and `--auto-approve-plan` name their gate
+  // and override it for the run; `--auto-approve` is also implied by
+  // `--non-interactive`, so it only fills the default and never turns a saved
+  // `auto:reject` or `fail_closed` into an approval.
+  const savedPolicy = policy !== "ask";
   if (scopeMode === "auto" && ["scope_expansion_request", "scope_expansion_required"].includes(gate)) {
     policy = "auto:approve"; source = SCOPE_MODE_APPROVAL_SOURCE;
-  } else if ((autoApprovePlan && gate === "plan_approval") || (autoApprove && HUMAN_GATE_ACTIONS[gate]?.includes("approve"))) {
+  } else if ((autoApprovePlan && gate === "plan_approval")
+    || (autoApprove && !savedPolicy && HUMAN_GATE_ACTIONS[gate]?.includes("approve"))) {
     policy = "auto:approve"; source = "cli_auto_approve";
   }
   const action = policy.startsWith("auto:") ? policy.slice(5) : null;

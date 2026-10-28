@@ -1,5 +1,6 @@
-import { approvalPolicyForPayload } from "../../../../catalog/approval-policies.js";
+import { APPROVAL_POLICY_FAIL_CLOSED_CODE, approvalPolicyForPayload } from "../../../../catalog/approval-policies.js";
 import { getSetting } from "../../../settings/functions/repository-settings.js";
+import { EVENT_ACTORS, EVENT_TYPES } from "../../../../catalog/event.js";
 // lib/domains/worker/functions/helpers/human-input.js
 //
 // Human-input handler for interactive questions surfaced through the display.
@@ -15,6 +16,10 @@ import {
 import {
   getHumanGate,
   getJob,
+  logEvent,
+  runInTransaction,
+  setJobError,
+  supersedeHumanGate,
   updateJobStatus,
 } from "../../../queue/functions/index.js";
 import { resolveGateReviewDiffTarget } from "../../../queue/functions/gate-review-target.js";
@@ -90,6 +95,32 @@ export function unattendedHarnessAnswerForPayload(payload = {}, {
   if (payload.review_type) return "fail";
   if (!isSecuritySensitivePrompt(payload)) return HUMAN_INPUT_BEST_JUDGMENT_ANSWER;
   return null;
+}
+
+// fail_closed in an unattended run stops the gated work instead of parking it
+// as `ask` would: the gate contract closes, a parked original job fails with
+// the policy as its error, and the event names the gate for the operator.
+export function failClosedUnattendedGate(gateJob, payload = {}, { message = "" } = {}) {
+  const originalId = Number(payload?.original_job_id || gateJob?.parent_job_id) || null;
+  const text = String(message || `Approval policy fail_closed: gate #${gateJob?.id} requires an operator.`).slice(0, 2000);
+  return runInTransaction(() => {
+    supersedeHumanGate(gateJob.id, text);
+    const original = originalId ? getJob(originalId) : null;
+    let failedOriginalId = null;
+    if (original && ["waiting_on_human", "waiting_on_review", "blocked"].includes(original.status)) {
+      setJobError(original.id, text);
+      if (updateJobStatus(original.id, "failed", { expectedStatuses: [original.status], force: true })) failedOriginalId = original.id;
+    }
+    logEvent({
+      work_item_id: gateJob.work_item_id,
+      job_id: gateJob.id,
+      event_type: EVENT_TYPES.JOB_APPROVAL_POLICY_FAIL_CLOSED,
+      actor_type: EVENT_ACTORS.SYSTEM,
+      message: `${text}${failedOriginalId ? ` Failed parked job #${failedOriginalId}.` : ""}`,
+      event_json: JSON.stringify({ original_job_id: originalId, failed_original_job_id: failedOriginalId }),
+    });
+    return { failedOriginalId };
+  });
 }
 
 export function resolveHumanInputPrompt(job, payload = {}) {
@@ -195,7 +226,9 @@ export async function runHumanInputHandler(worker, job, abortSignal = null, { le
       prompt_identity: promptIdentity, unattended: true, source: policy.source });
   }
   if (worker.nonInteractive && policy.policy === "fail_closed") {
-    throw new Error(`Approval policy fail_closed: ${policy.gate} requires an operator in this unattended run.`);
+    const error = new Error(`Approval policy fail_closed: ${policy.gate} requires an operator in this unattended run.`);
+    error.code = APPROVAL_POLICY_FAIL_CLOSED_CODE;
+    throw error;
   }
 
   if (worker.display && worker.display.askQuestions) {

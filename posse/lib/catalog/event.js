@@ -230,6 +230,8 @@ export const EVENT_TYPES = Object.freeze({
   PLAN_SCOPE_COMPLETED: "plan.scope_completed",
   PLAN_DEPENDENCY_SOFTENED: "plan.dependency_softened",
   JOB_SCOPE_GRANT_UNUSED: "job.scope_grant_unused",
+  JOB_SCOPE_CREATE_FAILED: "job.scope_create_failed",
+  JOB_APPROVAL_POLICY_FAIL_CLOSED: "job.approval_policy_fail_closed",
   JOB_SCOPE_REQUEST_APPROVED: "job.scope_request_approved",
   JOB_SCOPE_REQUEST_ABANDONED: "job.scope_request_abandoned",
   JOB_SCOPE_REQUEST_IGNORED_PATH: "job.scope_request_ignored_path",

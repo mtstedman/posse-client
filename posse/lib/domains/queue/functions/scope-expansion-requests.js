@@ -119,6 +119,29 @@ export function createScopeExpansionOperations({
     };
   }
 
+  // Placeholder commits run after the decision transaction: git and the
+  // worktree lock must never run under the queue's write lock, and a failed
+  // commit leaves the grant in force (the agent can still write_file the path)
+  // with an event the operator can see.
+  function materializeApprovedCreates({ jobId, gateId = null, workspaceCwd, entries, actorType = EVENT_ACTORS.SYSTEM }) {
+    const creates = (entries || []).filter((entry) => entry?.access === "create");
+    if (!creates.length || !workspaceCwd) return { created: [], error: null };
+    try {
+      return { created: materializeScopeCreates(workspaceCwd, creates, { jobId, gateId }), error: null };
+    } catch (error) {
+      const message = String(error?.message || error);
+      logEvent({
+        work_item_id: getJob(jobId)?.work_item_id ?? null,
+        job_id: jobId,
+        event_type: EVENT_TYPES.JOB_SCOPE_CREATE_FAILED,
+        actor_type: actorType,
+        message: `Create scope was granted but the placeholder commit failed for ${creates.map((entry) => entry.path).join(", ")}: ${message}`,
+        event_json: JSON.stringify({ approval_job_id: gateId, paths: creates.map((entry) => entry.path), error: message.slice(0, 500) }),
+      });
+      return { created: [], error: message };
+    }
+  }
+
   /**
    * Persist one exact-path scope expansion. Legacy callers park the active job;
    * live-wait callers leave its lease and provider session active while the
@@ -163,7 +186,7 @@ export function createScopeExpansionOperations({
       return { ok: false, code: "invalid_scope_operation", paused: false, message: "Scope request operation must be write_file or edit_file." };
     }
 
-    return runInTransaction(() => {
+    const result = runInTransaction(() => {
       const current = getJob(normalizedJobId);
       if (!current) {
         return { ok: false, code: "scope_request_job_missing", paused: false, message: `Job #${normalizedJobId} no longer exists.` };
@@ -267,7 +290,6 @@ export function createScopeExpansionOperations({
       if (autoClass) {
         const ownership = acquireAdditionalJobWritePaths(current.id, [normalizedPath]);
         if (!ownership.ok) return ownership;
-        const createdFiles = materializeScopeCreates(workspaceCwd, [{ path: normalizedPath, access: normalizedAccess }], { jobId: current.id });
         const field = normalizedAccess === "modify" ? "files_to_modify" : "files_to_create";
         const nextPayload = { ...payload };
         nextPayload[field] = [...new Set([
@@ -306,7 +328,7 @@ export function createScopeExpansionOperations({
         return {
           ok: true,
           code: "scope_auto_approved",
-          created_files: createdFiles,
+          created_files: [],
           paused: false,
           approved: true,
           auto: true,
@@ -314,7 +336,7 @@ export function createScopeExpansionOperations({
           access: normalizedAccess,
           operation: normalizedOperation,
           reason: autoClass.reason,
-          message: `Scope auto-approved (${autoClass.reason}) for ${normalizedPath}.${createdFiles.length ? " File now exists and is committed." : ""} Retry the ${normalizedOperation} now.`,
+          message: `Scope auto-approved (${autoClass.reason}) for ${normalizedPath}. Retry the ${normalizedOperation} now.`,
         };
       }
 
@@ -469,6 +491,15 @@ export function createScopeExpansionOperations({
       });
       return scopeRequestResult({ request, humanJobId: humanJob.id });
     });
+    if (result?.code === "scope_auto_approved" && result.access === "create") {
+      const outcome = materializeApprovedCreates({
+        jobId: normalizedJobId, workspaceCwd, entries: [{ path: normalizedPath, access: "create" }],
+      });
+      result.created_files = outcome.created;
+      if (outcome.created.length) result.message = `${result.message} File now exists and is committed.`;
+      else if (outcome.error) result.message = `${result.message} The empty placeholder was not committed (${outcome.error.slice(0, 160)}); create the file with write_file.`;
+    }
+    return result;
   }
 
   function abandonJobScopeExpansionRequest({
@@ -563,7 +594,7 @@ export function createScopeExpansionOperations({
     if (!humanJob || humanPayload.review_type !== SCOPE_REQUEST_REVIEW_TYPE) {
       return { ok: false, code: "scope_request_gate_missing" };
     }
-    return runInTransaction(() => {
+    const resolved = runInTransaction(() => {
       const original = getJob(Number(humanPayload.original_job_id));
       if (!original) return { ok: false, code: "scope_request_job_missing" };
       const payload = parseJobPayloadObject(original);
@@ -590,9 +621,7 @@ export function createScopeExpansionOperations({
           const ownership = acquireAdditionalJobWritePaths(original.id, entries.map((entry) => entry.path));
           if (!ownership.ok) return ownership;
         }
-        const createdFiles = original.status === "succeeded" ? []
-          : materializeScopeCreates(pending.workspace_cwd, entries, { jobId: original.id, gateId: humanJob.id });
-        nextPayload._pending_scope_request.created_files = createdFiles;
+        nextPayload._pending_scope_request.created_files = [];
         nextPayload._scope_grants = [...(payload._scope_grants || []).filter((grant) => grant.approval_job_id !== humanJob.id),
           { approval_job_id: humanJob.id, paths: entries.map((entry) => entry.path), used: false,
             unused_recorded: original.status === "succeeded" }];
@@ -640,6 +669,10 @@ export function createScopeExpansionOperations({
           remains_failed: original.status === "failed" && !requeued,
           job: getJob(original.id),
           request: pending,
+          created_files: [],
+          materialize: original.status === "succeeded" || !pending.workspace_cwd
+            ? null
+            : { workspaceCwd: pending.workspace_cwd, entries },
         };
       }
 
@@ -679,6 +712,25 @@ export function createScopeExpansionOperations({
         error,
       };
     });
+    if (resolved?.ok && resolved.approved && resolved.materialize) {
+      const { workspaceCwd, entries } = resolved.materialize;
+      const outcome = materializeApprovedCreates({
+        jobId: resolved.job.id, gateId: humanJob.id, workspaceCwd, entries, actorType,
+      });
+      if (outcome.created.length) {
+        runInTransaction(() => {
+          const fresh = getJob(resolved.job.id);
+          const data = parseJobPayloadObject(fresh);
+          if (data._pending_scope_request?.id !== resolved.request.id) return;
+          data._pending_scope_request.created_files = outcome.created;
+          updateJobPayload(fresh.id, JSON.stringify(data));
+        });
+      }
+      resolved.created_files = outcome.created;
+      resolved.job = getJob(resolved.job.id);
+    }
+    if (resolved && typeof resolved === "object") delete resolved.materialize;
+    return resolved;
   }
 
   /**

@@ -727,7 +727,7 @@ export function deferAtlasWarmAfterGateBusy(worker, job, attemptId, startTime, l
   const released = worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId, readyAt });
   if (released && job.work_item_id) refreshWorkItemStatus(job.work_item_id);
   try {
-    emitDiagnostic(worker, job.id, `${C.yellow}[atlas] warm #${job.id} (${purpose}) deferred — ledger write gate busy after ${gateWaitMs}ms; ${released ? `requeued (${deferrals}/${ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS})` : "lease already released"}; view left STALE until it runs${C.reset}`);
+    worker.emit(job.id, `${C.yellow}[atlas] warm #${job.id} (${purpose}) deferred — ledger write gate busy after ${gateWaitMs}ms; ${released ? `requeued (${deferrals}/${ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS})` : "lease already released"}; view left STALE until it runs${C.reset}`);
   } catch { /* emit is best-effort */ }
   return true;
 }

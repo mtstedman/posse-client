@@ -4,6 +4,8 @@ installScopeCreateMaterializer(materializeScopeCreates);
 import { PLANNER_CLARIFICATION_REVIEW_TYPE } from "../../../../catalog/tools/planner-clarification.js";
 import { ENVIRONMENT_SETUP_REVIEW_TYPE } from "../../../../catalog/tools/environment-setup.js";
 import { applyDirtyWorktreeRecovery } from "../helpers/dirty-worktree-recovery.js";
+import { APPROVAL_POLICY_FAIL_CLOSED_CODE } from "../../../../catalog/approval-policies.js";
+import { failClosedUnattendedGate } from "../helpers/human-input.js";
 import { DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE } from "../../../../catalog/human-input.js";
 import { processVerdict } from "../helpers/process-verdict.js";
 import { C } from "../../../../shared/format/functions/colors.js";
@@ -1729,12 +1731,21 @@ export async function runHumanInputJob(worker, job, {
       duration_ms: Date.now() - startTime,
       error_text: err.message,
     });
-    reopenHumanGateResolution({
-      gateJobId: job.id,
-      leaseToken,
-      error: err.message,
-    });
-    worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
+    if (err?.code === APPROVAL_POLICY_FAIL_CLOSED_CODE) {
+      let gatePayload = {};
+      try { gatePayload = JSON.parse(job.payload_json || "{}"); } catch { /* legacy payload */ }
+      const closed = failClosedUnattendedGate(job, gatePayload, { message: err.message });
+      worker._releaseLease(job, leaseToken, "failed");
+      worker.emit(job.id, `${C.red}[human] ${err.message}${closed.failedOriginalId ? ` Failed parked job #${closed.failedOriginalId}.` : ""}${C.reset}`);
+      refreshAndExtractInsights(job.work_item_id);
+    } else {
+      reopenHumanGateResolution({
+        gateJobId: job.id,
+        leaseToken,
+        error: err.message,
+      });
+      worker._releaseWithoutAttemptPenalty(job, leaseToken, "waiting_on_human", { attemptId: attempt.attempt.id });
+    }
   } finally {
     if (deliveredAnswerReservation) {
       try {

@@ -3,15 +3,28 @@ import path from "node:path";
 import { safePath, isSensitiveEnvFileOrTargetPath } from "../../../shared/tools/functions/toolkit/index.js";
 import { protectedMutablePathReason } from "../../runtime/functions/protected-paths.js";
 import { gitCommitAll } from "../../git/functions/commit-scope.js";
-import { gitExec } from "../../git/functions/utils.js";
+import { gitExec, gitExecSafe } from "../../git/functions/utils.js";
 import { withWorktreeLock } from "../../git/functions/worktree.js";
 
+// The worktree lock is keyed by the primary checkout's runtime root, where
+// review commits, merges and dirty-worktree resets take theirs for the same
+// checkout. A lock keyed by the linked worktree itself excludes none of them.
+function scopeCreateProjectDir(workspaceCwd) {
+  const commonDir = gitExecSafe(["rev-parse", "--path-format=absolute", "--git-common-dir"], workspaceCwd);
+  if (commonDir && path.basename(commonDir) === ".git") return path.dirname(commonDir);
+  return workspaceCwd;
+}
+
 // workspaceCwd comes from the executing host, never from tool arguments. Keep
-// file creation and the scoped commit under the same worktree lock.
+// file creation and the scoped commit under the same worktree lock. Callers run
+// this outside the queue's write transaction and treat a throw as "grant stands,
+// placeholder missing" (see materializeApprovedCreates).
 export function materializeScopeCreates(workspaceCwd, entries, { jobId, gateId = null } = {}) {
   const creates = entries.filter((entry) => entry.access === "create");
   if (!creates.length || !workspaceCwd) return [];
-  return withWorktreeLock(workspaceCwd, workspaceCwd, () => {
+  if (!fs.existsSync(workspaceCwd)) throw new Error(`Scope create skipped: checkout no longer exists at ${workspaceCwd}`);
+  const projectDir = scopeCreateProjectDir(workspaceCwd);
+  return withWorktreeLock(workspaceCwd, projectDir, () => {
     const candidates = creates.map((entry) => {
       const target = safePath(workspaceCwd, entry.path);
       const reason = protectedMutablePathReason(entry.path);
@@ -33,7 +46,7 @@ export function materializeScopeCreates(workspaceCwd, entries, { jobId, gateId =
       fs.writeFileSync(entry.target, "", { flag: "wx" });
       try {
         const result = gitCommitAll(`posse: scope grant create ${entry.path}${gateId ? ` (gate #${gateId})` : ""}`, workspaceCwd,
-          { createFiles: [entry.path], modifyFiles: [] }, { jobId, worktreeLock: false, allowEmptyCreatePaths: [entry.path] });
+          { createFiles: [entry.path], modifyFiles: [] }, { jobId, projectDir, worktreeLock: false, allowEmptyCreatePaths: [entry.path] });
         if (!result.createdCommit) throw new Error(`Scope create was not committed: ${entry.path}`);
         created.push(entry.path);
       } catch (error) {
