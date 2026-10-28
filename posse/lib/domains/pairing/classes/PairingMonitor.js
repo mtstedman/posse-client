@@ -40,7 +40,12 @@ import {
   schedulerLockHolderLive,
   sessionCloseInProgress,
 } from "../functions/monitor-ownership.js";
-import { openPosseInNewWindow, SESSION_OWNER_LAUNCH_TTL_MS } from "../functions/session-owner-launch.js";
+import {
+  GO_WINDOW_MARKER_GRACE_MS,
+  openPosseInNewWindow,
+  readGoWindowMarker,
+  SESSION_OWNER_LAUNCH_TTL_MS,
+} from "../functions/session-owner-launch.js";
 import {
   createSessionConsole,
   describeSessionWriteScope,
@@ -138,6 +143,42 @@ export class PairingMonitor {
       // the child token itself accepts, rather than allowing a duplicate go or a
       // session close while that repair is still running.
       return nowMs() - goWindowOpenedAt < SESSION_OWNER_LAUNCH_TTL_MS;
+    };
+    // Whether the window's shell reports on itself (see goWindowMarkerPath).
+    let goWindowHasMarker = false;
+    // What became of the window once it opened. A go that acknowledged its pid
+    // or holds the scheduler lock is running. Otherwise the window's own marker
+    // decides: an exit code means go ended in a window that stayed open; a
+    // shell pid that is gone, or no marker at all past the grace, means the
+    // window closed before go could run (a Windows failure seen in the field:
+    // the window opens and closes at once), and go runs here instead so the
+    // queue is not left waiting on a window nobody can see.
+    const settleGoWindow = () => {
+      if (!goWindowToken || observing || foreground || stopping) return;
+      const launch = readRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_OWNER_LAUNCH);
+      if (launch?.token !== goWindowToken) {
+        goWindowToken = null;
+        return;
+      }
+      if (schedulerLockHolderLive(kill)) return;
+      const childPid = Number(launch.child_pid);
+      if (Number.isSafeInteger(childPid) && childPid > 0 && !pidProvablyDead(childPid, kill)) return;
+      const marker = readGoWindowMarker(projectDir);
+      const own = marker?.token === goWindowToken ? marker : null;
+      if (own && own.exit_code !== undefined) {
+        goWindowToken = null;
+        if (own.exit_code !== 0) {
+          log(`  ${C.yellow}[session]${C.reset} posse go ended with exit code ${own.exit_code ?? "unknown"} in its window; its output is still there.`);
+        }
+        return;
+      }
+      const windowGone = own?.pid
+        ? pidProvablyDead(own.pid, kill)
+        : goWindowHasMarker && nowMs() - goWindowOpenedAt >= GO_WINDOW_MARKER_GRACE_MS;
+      if (!windowGone) return;
+      goWindowToken = null;
+      log(`  ${C.yellow}[session]${C.reset} the posse go window closed before posse go could run; running posse go here instead.`);
+      commandChain = commandChain.then(() => runForeground(["go"]));
     };
     // A posse command (`add`, `go`) this console handed the terminal to. Ctrl+C
     // then belongs to that command, never to the session.
@@ -351,13 +392,15 @@ export class PairingMonitor {
           }
           // On Windows the run gets its own PowerShell window and this screen
           // stays: the host keeps watching members, admissions, and sync, and
-          // takes the session back when that run ends. Elsewhere it runs here.
-          if (platform === "win32" && sessionConsole?.interactive) {
+          // takes the session back when that run ends. Elsewhere, and for
+          // `go here`, it runs here.
+          if (platform === "win32" && sessionConsole?.interactive && !parsed.here) {
             try {
               const opened = await openPosseWindow(["go"], { cwd: projectDir });
               goWindowToken = opened?.token || null;
               goWindowOpenedAt = nowMs();
-              log(`  ${C.cyan}[session]${C.reset} posse go opened in a new PowerShell window; this screen stays here.`);
+              goWindowHasMarker = !!opened?.markerPath;
+              log(`  ${C.cyan}[session]${C.reset} posse go opened in a new PowerShell window; this screen stays here (type \`go here\` to run it in this window instead).`);
               return;
             } catch (error) {
               log(`  ${C.yellow}[session]${C.reset} could not open a new window (${safeError(error)}); running posse go here instead.`);
@@ -456,6 +499,7 @@ export class PairingMonitor {
     };
     try {
       while (!forceRequested && !gracefulRequested && !pairingProcessShouldStop(stateId)) {
+        settleGoWindow();
         let state = getPairingState(stateId);
         let ownership = consoleSessionOwnership(state, kill, nowMs());
         if (ownership === "vacant") {

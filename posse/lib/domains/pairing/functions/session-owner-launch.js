@@ -1,24 +1,80 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { SESSION_OWNER_CHILD_ENV, SESSION_OWNER_LAUNCH_ENV } from "../../../catalog/session-sync.js";
 import { readRuntimeStatus, RUNTIME_STATUS_KEYS, writeRuntimeStatus } from "../../queue/functions/runtime-status.js";
 
 // A token is good for go's boot, which checks it within seconds of launch.
 export const SESSION_OWNER_LAUNCH_TTL_MS = 10 * 60_000;
 
+// The window's shell writes its marker within a moment of opening; a window
+// still silent after this long never ran the script (it closed on startup).
+export const GO_WINDOW_MARKER_GRACE_MS = 20_000;
+
 // PowerShell ends a single-quoted string at ' and at the typographic quotes
 // U+2018-U+201B (a path like C:\Users\O’Brien); doubling escapes each.
 const powershellQuoted = (value) => `'${String(value).replace(/['\u2018\u2019\u201A\u201B]/gu, "$&$&")}'`;
 
+/**
+ * Where the window's shell reports on itself: its pid and start time before
+ * posse go runs, and go's exit code after. The console reads it to tell a
+ * window that died (nothing posse wrote, or a pid that is gone) from a go that
+ * is still booting, and to say how go ended when the window closed on its own.
+ */
+export function goWindowMarkerPath(projectDir) {
+  return path.join(projectDir, ".posse", "run", "session-go-window.txt");
+}
+
+/** Parse the marker: `key=value` lines. Null when there is none yet. */
+export function readGoWindowMarker(projectDir) {
+  let text;
+  try {
+    text = fs.readFileSync(goWindowMarkerPath(projectDir), "utf8");
+  } catch {
+    return null;
+  }
+  const marker = { token: null, pid: null, started_at: null, exit_code: undefined };
+  for (const raw of String(text).split(/\r?\n/u)) {
+    const line = raw.replace(/^\uFEFF/u, "").trim();
+    const separator = line.indexOf("=");
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (key === "token") marker.token = value || null;
+    else if (key === "pid") marker.pid = /^\d+$/u.test(value) ? Number(value) : null;
+    else if (key === "started_at") marker.started_at = value || null;
+    else if (key === "exit") marker.exit_code = /^-?\d+$/u.test(value) ? Number(value) : null;
+  }
+  return marker;
+}
+
 // The PowerShell the new window runs: the command with the owner pid and
 // launch token set for that one command only, not for whatever the user types
-// in the window afterwards (-NoExit keeps it open to read the wrap-up).
-export function posseWindowScript(command, { ownerPid, token }) {
-  return [
+// in the window afterwards (-NoExit keeps it open to read the wrap-up). With a
+// marker path, the shell records its pid before the command and go's exit code
+// after it, so the console can see what became of the window.
+export function posseWindowScript(command, { ownerPid, token, markerPath = null }) {
+  const marker = markerPath ? powershellQuoted(markerPath) : null;
+  const lines = [
     `$env:${SESSION_OWNER_CHILD_ENV} = '${Number(ownerPid)}'`,
     `$env:${SESSION_OWNER_LAUNCH_ENV} = ${powershellQuoted(token)}`,
-    `try { & ${command.map(powershellQuoted).join(" ")} } finally { Remove-Item Env:${SESSION_OWNER_CHILD_ENV}, Env:${SESSION_OWNER_LAUNCH_ENV} -ErrorAction SilentlyContinue }`,
+    // Older libuv Node builds abort in a console whose title is empty; the
+    // `start` title covers conhost, this covers hosts that reset it.
+    `try { $Host.UI.RawUI.WindowTitle = 'Posse go' } catch { }`,
+  ];
+  if (marker) {
+    lines.push(
+      `Set-Content -LiteralPath ${marker} -Value @(${powershellQuoted(`token=${token}`)}, ('pid=' + $PID), ('started_at=' + [DateTime]::UtcNow.ToString('o'))) -ErrorAction SilentlyContinue`,
+    );
+  }
+  const cleanup = [
+    `Remove-Item Env:${SESSION_OWNER_CHILD_ENV}, Env:${SESSION_OWNER_LAUNCH_ENV} -ErrorAction SilentlyContinue`,
+    ...(marker ? [`Add-Content -LiteralPath ${marker} -Value ('exit=' + $posseExit) -ErrorAction SilentlyContinue`] : []),
   ].join("; ");
+  lines.push(`$posseExit = $null`);
+  lines.push(`try { & ${command.map(powershellQuoted).join(" ")}; $posseExit = $LASTEXITCODE } finally { ${cleanup} }`);
+  return lines.join("; ");
 }
 
 /**
@@ -37,9 +93,23 @@ export async function openPosseInNewWindow(args, { cwd } = {}) {
   });
   // Without the token, go's recovery could not tell this console is alive.
   if (!recorded) throw new Error("could not record the launch token");
+  // A fresh marker per window: a stale one from the last window must not
+  // pass for this one. Losing the marker only costs the console its view of
+  // the window, so neither step may stop the launch.
+  let markerPath = null;
+  if (cwd) {
+    markerPath = goWindowMarkerPath(cwd);
+    try {
+      fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+      fs.rmSync(markerPath, { force: true });
+    } catch {
+      markerPath = null;
+    }
+  }
   const script = posseWindowScript([process.execPath, ...process.execArgv, process.argv[1], ...args], {
     ownerPid: process.pid,
     token,
+    markerPath,
   });
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   // `start` needs a non-empty title: older libuv Node builds crash in a
@@ -60,7 +130,7 @@ export async function openPosseInNewWindow(args, { cwd } = {}) {
     });
   });
   child.unref?.();
-  return { token };
+  return { token, markerPath };
 }
 
 /**

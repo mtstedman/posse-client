@@ -13,6 +13,7 @@ const LEAVE_COMMANDS = new Set(["leave", "quit", "exit", "disconnect"]);
 const WORK_HELP = Object.freeze([
   "add [task]    queue a task here (the same questions as `posse add`)",
   "go            run your queue (`posse go`): a new window on Windows, here elsewhere",
+  "go here       run your queue in this window (when the new window will not stay open)",
 ]);
 
 const SHARED_HELP = Object.freeze([
@@ -78,6 +79,7 @@ export function parseSessionConsoleLine(line, { role = "host" } = {}) {
     return task ? { kind: "add", task } : { kind: "add" };
   }
   if (command === "go" && rest.length === 0) return { kind: "go" };
+  if (command === "go" && rest.length === 1 && ["here", "inline"].includes(rest[0].toLowerCase())) return { kind: "go", here: true };
   if (LEAVE_COMMANDS.has(command) && rest.length === 0) {
     return host
       ? { kind: "invalid", message: "You are hosting: type close to end the session for everyone (you approve its work before it is published), or Ctrl+C to force it." }
