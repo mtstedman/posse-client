@@ -29,7 +29,7 @@ import {
 } from "../../../classes/v2/UsageTelemetry.js";
 
 if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
-  nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
+  nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth, { trustedPolicy: workerData.nativeTrustedPolicy }));
 }
 installNativeThreadBridge(workerData?.nativeBridgePort);
 installAtlasUsageTelemetryPort(workerData?.usageTelemetryPort);

@@ -1,3 +1,4 @@
+import { nativeWorkerSettings } from "../../../shared/native/functions/worker-settings.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 
@@ -9,6 +10,7 @@ export function runSchedulerBootMaintenanceInWorker({ ownerId = null, lockName =
     label: "Scheduler boot DB maintenance",
     timeoutMs: 120_000,
     workerData: {
+      ...nativeWorkerSettings(process.cwd()),
       dbPath: getRuntimeDbPath(),
       // The worker checks lock ownership again under queue recovery's writer
       // transaction before it can force-requeue active leases.

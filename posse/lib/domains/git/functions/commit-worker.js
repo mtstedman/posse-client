@@ -52,7 +52,7 @@ async function runCommit() {
   let outcome;
   try {
     if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
-      nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
+      nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth, { trustedPolicy: workerData.nativeTrustedPolicy }));
     }
     nativeBinaries.installWorkerRuntime(workerData?.nativeRuntime);
     const { message, cwd, scope, opts } = workerData || {};

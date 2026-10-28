@@ -1,3 +1,4 @@
+import { nativeWorkerSettings } from "../../../shared/native/functions/worker-settings.js";
 import fs from "fs";
 import path from "path";
 import { Worker as NodeWorker } from "worker_threads";
@@ -395,6 +396,7 @@ export function refreshProjectContextAsync(projectDir, { writeDigest = true, tim
     const worker = new NodeWorker(new URL("./context-worker.js", import.meta.url), {
       execArgv: sanitizeWorkerExecArgv(),
       workerData: {
+        ...nativeWorkerSettings(projectDir),
         projectDir,
         writeDigest,
         runtimePathOverrides: {

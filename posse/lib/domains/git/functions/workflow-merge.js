@@ -1555,7 +1555,7 @@ export function createMergeWorkflowHelpers(context, {
               };
               const allowProvenDebt = getSetting(SETTING_KEYS.MERGE_TARGET_DEBT_AUTO_PROCEED) !== "false";
               tests.ok = allowProvenDebt && tests.results.every((result) => result.ok
-                || !result.implicit_typecheck && MERGE_TARGET_PROCEEDING_OUTCOMES.includes(result.target_debt_classification?.outcome));
+                || MERGE_TARGET_PROCEEDING_OUTCOMES.includes(result.target_debt_classification?.outcome));
               const outcomes = tests.results.filter((result) => !result.ok)
                 .map((result) => result.target_debt_classification?.outcome || MERGE_TARGET_COMPARISON_OUTCOMES.UNVERIFIED);
               tests.summary = `${tests.summary}; target comparison: ${outcomes.join(", ")}`;

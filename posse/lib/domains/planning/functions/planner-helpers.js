@@ -112,6 +112,18 @@ export function buildProjectDbRoutingLines(projectDir, { capability = null, comm
     : [];
 }
 
+// A small repository routed to the direct path tells the planner to read the
+// whole inventory; the planner-owned read allowance (2 reads per budgeted
+// turn) must cover it, or the planner is blocked on its own brief.
+export function widenPlannerTriageForWholeRepo(rolePolicy, structuredData) {
+  const sourceFiles = structuredData?.whole_repo_brief?.source_files;
+  if (!rolePolicy?.planner_dispatch_policy || !Array.isArray(sourceFiles) || sourceFiles.length === 0) return rolePolicy;
+  const neededTurns = Math.ceil((sourceFiles.length + 4) / 2);
+  if (neededTurns <= Number(rolePolicy.planner_dispatch_policy.triageMaxTurns || 0)) return rolePolicy;
+  return { ...rolePolicy, planner_dispatch_policy: { ...rolePolicy.planner_dispatch_policy,
+    triageMaxTurns: neededTurns, triageMaxTurnsReason: "small_repository" } };
+}
+
 export function normalizePlannerRoleMode(value) {
   const raw = String(value || "normal").trim().toLowerCase();
   return ["normal", "primary", "redteam", "synth"].includes(raw) ? raw : "normal";

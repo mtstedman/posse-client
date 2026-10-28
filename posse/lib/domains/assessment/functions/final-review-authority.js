@@ -61,7 +61,28 @@ export async function finalReviewIdentityEvidence(cwd, payload, { jobId = null, 
   // their bytes, even when ignored, because they are inputs to the contract.
   const files = [...new Set([...scoped, ...readPaths])].sort();
   const root = fs.realpathSync(cwd);
+  // Read-only inputs (key_files, tests_to_run) that the job does not own are
+  // pinned to the plan base commit: a sibling's uncommitted or later-committed
+  // edit to a shared read path must not change what this job's review bound.
+  const planBase = /^[a-f0-9]{40,64}$/.test(String(payload?._plan_base_commit || "")) ? String(payload._plan_base_commit) : null;
+  const readOnly = new Set(readPaths.filter((file) => !scoped.has(file)));
+  const baseObjects = new Map();
+  if (planBase && readOnly.size > 0) {
+    try {
+      for (const row of String(await gitExecAsync(["ls-tree", "-rz", planBase, "--", ...readOnly], cwd, { trim: false })).split("\0").filter(Boolean)) {
+        const match = row.match(/^(\d+) (\w+) ([a-f0-9]+)\t([\s\S]+)$/);
+        if (match) baseObjects.set(match[4], { mode: match[1], type: match[2], hash: match[3] });
+      }
+    } catch { /* unknown base: fall back to the live bytes below */ }
+  }
+  const basePrefix = planBase && readOnly.size > 0 ? String(await gitExecAsync(["rev-parse", "--show-prefix"], cwd)) : "";
   const states = await Promise.all(files.map(async (file) => {
+    if (readOnly.has(file) && baseObjects.has(file)) {
+      const object = baseObjects.get(file);
+      if (object.type !== "blob") return [file, "non_file"];
+      const bytes = await gitExecBufferAsync(["cat-file", "blob", `${planBase}:${basePrefix}${file}`], cwd);
+      return [file, object.mode === "120000" ? "symlink" : object.mode === "100755" ? 0o111 : 0, digest(bytes)];
+    }
     if (commit) {
       const object = objects.get(file);
       if (!object) return [file, null];

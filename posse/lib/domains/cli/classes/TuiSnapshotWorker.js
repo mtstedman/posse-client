@@ -1,3 +1,4 @@
+import { nativeWorkerSettings } from "../../../shared/native/functions/worker-settings.js";
 import { Worker } from "node:worker_threads";
 import { threadLifetimeRegistry } from "../../../shared/concurrency/classes/ThreadLifetimeRegistry.js";
 import { errorFromThreadPayload } from "../../../shared/concurrency/classes/ThreadManager.js";
@@ -50,7 +51,8 @@ export class TuiSnapshotWorker {
     try {
       worker = new this.WorkerClass(this.workerUrl, {
         execArgv: sanitizeWorkerExecArgv(),
-        workerData: { args: this.args, posseThreadLifetime: lifetime },
+        workerData: {
+        ...nativeWorkerSettings(this.args?.projectDir || process.cwd()), args: this.args, posseThreadLifetime: lifetime },
       });
     } catch (err) {
       threadLifetimeRegistry.retire(lifetime);

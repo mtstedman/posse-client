@@ -3,6 +3,7 @@
 // Git scope helpers for staged commit boundaries, scoped asset repair, and
 // commit-time hook integration inside worker-managed worktrees.
 
+import { nativeWorkerSettings } from "../../../shared/native/functions/worker-settings.js";
 import fs from "fs";
 import path from "path";
 import { isMainThread } from "node:worker_threads";
@@ -406,6 +407,7 @@ export async function gitCommitAllAsync(message, cwd, scope = null, opts = {}) {
       label: "git commit worker",
       timeoutMs: gitCommitTimeoutBudget().processTimeoutMs + GIT_COMMIT_WORKER_OVERHEAD_MS,
       workerData: {
+        ...nativeWorkerSettings(opts?.projectDir || cwd),
         message, cwd, scope, opts: workerOpts,
         nativeAuth: heartbeatAuthManager.getCapability(), nativeRuntime,
         runtimePathOverrides: {

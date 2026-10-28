@@ -12,6 +12,7 @@
 // pool: both bridge ports share one posse-atlas daemon, whose Rust executor and
 // Atlas gate own parallel read/write admission.
 
+import { nativeWorkerSettings } from "../../../../../shared/native/functions/worker-settings.js";
 import { abortable } from "../../../../../shared/concurrency/functions/abortable.js";
 import { Daemon, ThreadTransport, daemonSupervisor } from "../../../../../shared/tools/classes/daemon/index.js";
 import { heartbeatAuthManager } from "../../../../../shared/native/classes/HeartbeatAuthManager.js";
@@ -50,11 +51,12 @@ function registerAtlasThreadDaemon(kind, daemon, label) {
   return daemon;
 }
 
-function atlasThreadTransport(moduleUrl, { nativeAuth, retirePayload }) {
+function atlasThreadTransport(moduleUrl, { nativeAuth, retirePayload, repoRoot = null }) {
   const usageChannel = createAtlasUsageTelemetryWorkerChannel();
   return ThreadTransport({
     moduleUrl,
-    workerData: { nativeAuth, usageTelemetryPort: usageChannel.port },
+    // Threads never read settings; the parent resolves the trust policy once.
+    workerData: { ...nativeWorkerSettings(repoRoot || process.cwd()), nativeAuth, usageTelemetryPort: usageChannel.port },
     transferList: usageChannel.transferList,
     nativeBridge: true,
     retirePayload,
@@ -73,7 +75,7 @@ export function createConductorDaemon(opts = {}) {
     ? Math.max(1, Number(opts.readerWriteOpTimeoutMs))
     : READER_WRITE_OP_TIMEOUT_MS;
   const daemon = registerAtlasThreadDaemon("atlas-conductor", new Daemon({
-    transportFactory: () => atlasThreadTransport(hostUrl, { nativeAuth, retirePayload: { op: "close" } }),
+    transportFactory: () => atlasThreadTransport(hostUrl, { nativeAuth, retirePayload: { op: "close" }, repoRoot: opts?.repoRoot || null }),
     timeoutMs: STAGE_TIMEOUT_MS,
     label: "atlas-conductor",
   }), "atlas-conductor");
@@ -174,7 +176,7 @@ export function createConductorDaemon(opts = {}) {
     slot,
     inFlight: 0,
     daemon: registerAtlasThreadDaemon(`atlas-reader-${slot + 1}`, new Daemon({
-        transportFactory: () => atlasThreadTransport(readerHostUrl, { nativeAuth, retirePayload: { op: "close" } }),
+        transportFactory: () => atlasThreadTransport(readerHostUrl, { nativeAuth, retirePayload: { op: "close" }, repoRoot: opts?.repoRoot || null }),
         timeoutMs: RETRIEVE_TIMEOUT_MS,
         label: `atlas-reader-${slot + 1}`,
         onLifecycle: (event) => {

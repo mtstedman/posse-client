@@ -1,3 +1,4 @@
+import { nativeWorkerSettings } from "../../../shared/native/functions/worker-settings.js";
 import { shouldConsiderScipRestage as shouldAutoRestageScip } from "./atlas-restage-policy.js";
 import { isAbortLikeError as isAbortLikeAtlasError } from "../../../shared/concurrency/functions/abort-classification.js";
 // @ts-check
@@ -107,7 +108,7 @@ function inspectMainViewForBootInWorker({
     label: "ATLAS boot view inspect",
     timeoutMs,
     signal,
-    workerData: { viewPath, branch, ledgerDbPath, layerMerge, treeCompressionMode },
+    workerData: { ...nativeWorkerSettings(process.cwd()), viewPath, branch, ledgerDbPath, layerMerge, treeCompressionMode },
   });
 }
 
@@ -148,7 +149,7 @@ export async function enqueueAtlasSelfRepairInWorker({
     readiness = await ATLAS_BOOT_THREAD_MANAGER.run(ATLAS_READINESS_WORKER_URL, {
       label: "ATLAS readiness inspect",
       timeoutMs,
-      workerData: { repoRoot, config },
+      workerData: { ...nativeWorkerSettings(repoRoot), repoRoot, config },
     });
   } catch {
     readiness = null; // worker unavailable — fall back to the inline scan
@@ -766,6 +767,7 @@ async function runAtlasV2BootWarmWorkerThread({
       execArgv: sanitizeWorkerExecArgv(),
       stderr: true,
       workerData: {
+        ...nativeWorkerSettings(repoRoot),
         ledgerDbPath,
         repoRoot,
         defaultBranch,
@@ -1276,7 +1278,7 @@ async function inspectExactAtlasLayerReadiness({ repoRoot, config, signal = null
     label: "ATLAS exact boot readiness inspect",
     timeoutMs: 120_000,
     signal,
-    workerData: { repoRoot, config },
+    workerData: { ...nativeWorkerSettings(repoRoot), repoRoot, config },
   });
   return classifyExactAtlasLayerReadiness(readiness);
 }

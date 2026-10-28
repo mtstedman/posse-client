@@ -255,7 +255,9 @@ function tail(text, max) {
 /** The reviewer's view of the changed-file checks; null when none ran. */
 export function renderChangedFileChecks(checks) {
   if (!checks) return null;
-  const implicit = (checks.implicit_typechecks || []).map(check => `Required typecheck: ${check.command}: ${check.status}\n${check.output}`).join("\n");
+  const implicit = (checks.implicit_typechecks || []).map(check => check.status === "pre_existing"
+    ? `Required typecheck: ${check.command}: ${check.diagnostic_count} pre-existing error(s) outside the change (not introduced by it)`
+    : `Required typecheck: ${check.command}: ${check.status}\n${check.output}`).join("\n");
   const head = implicit + `\nCHANGED-FILE CHECKS (${FINAL_REVIEW_CHECKS.join(", ")} on ${checks.files.length} changed file(s)): ${checks.status.toUpperCase()}${checks.summary ? `, ${checks.summary}` : ""}.`;
   if (checks.status !== "failed") return head;
   const block = (entries) => `\`\`\`text\n${tail(entries.map((entry) => `[${entry.check}] ${entry.text}`).join("\n"), FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS)}\n\`\`\``;

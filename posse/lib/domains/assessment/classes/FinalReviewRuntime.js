@@ -395,7 +395,7 @@ export class FinalReviewRuntime {
         ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS, signal })
         : null;
       signal.throwIfAborted();
-      checks = await this.runChecks(parent.cwd, change, { signal });
+      checks = await this.runChecks(parent.cwd, change, { signal, jobId: job.id });
       await assertCandidateUnchanged();
       signal.throwIfAborted();
       // Only failures the change provably introduced skip the reviewer; any

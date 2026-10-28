@@ -5,6 +5,7 @@
 // may carry an envelope, but cannot replace the local origin, audience, or
 // verification pins.
 
+import { isMainThread, workerData } from "node:worker_threads";
 import {
   createNativeAuthTrustedPolicy,
   freezeEnvelope,
@@ -145,6 +146,10 @@ export class HeartbeatAuthManager {
 }
 
 function defaultRuntimeTrustedPolicy() {
+  if (!isMainThread) {
+    if (workerData?.nativeTrustedPolicy) return createNativeAuthTrustedPolicy(workerData.nativeTrustedPolicy);
+    throw new Error("Native trust policy must be passed to worker threads (workerData.nativeTrustedPolicy); settings are main-thread only");
+  }
   const developmentMode = isIsolatedTestContext();
   return createNativeAuthTrustedPolicy({
     envelope: nativeHeartbeatAuthFromSettings({ allowDevelopmentOverrides: developmentMode }),

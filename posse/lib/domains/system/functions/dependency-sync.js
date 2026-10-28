@@ -1,3 +1,4 @@
+import { nativeWorkerSettings } from "../../../shared/native/functions/worker-settings.js";
 import { NODE_LOCKS } from "../../../catalog/node-package-managers.js";
 import { DEPENDENCY_SCAN_SKIP_DIRS } from "../../../catalog/dependency-discovery.js";
 // @ts-check
@@ -1816,7 +1817,7 @@ export function ensureBootDependenciesInWorker(input = {}, {
     label: "Boot dependency sync",
     timeoutMs,
     signal,
-    workerData: input,
+    workerData: { ...nativeWorkerSettings(input?.projectDir || process.cwd()), ...(input || {}) },
     onProgress,
   });
 }
@@ -1830,7 +1831,7 @@ export function doctorRepoDependenciesInWorker(input = {}, {
     label: "Dependency doctor",
     timeoutMs,
     signal,
-    workerData: { ...(input || {}), doctor: true },
+    workerData: { ...nativeWorkerSettings(input?.projectDir || process.cwd()), ...(input || {}), doctor: true },
     onProgress,
   });
 }

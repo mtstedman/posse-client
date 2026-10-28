@@ -86,7 +86,7 @@ import {
 } from "../../../../shared/policies/functions/spawn-policy.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { IMAGE_GENERATION_MAX_CALLS_PER_JOB } from "../../../../catalog/artifact.js";
-import {
+import { widenPlannerTriageForWholeRepo,
   emit,
   applyPlannerRoleModePolicy,
   normalizePlannerRoleMode,
@@ -665,7 +665,8 @@ export class PlannerRole extends BaseRole {
     // Resolve ATLAS handoff state for this planner job so ATLAS CONTEXT / ATLAS SLICE
     // PRUNING sections can be injected into the prompt for every provider.
     const plannerExecProvider = currentExecutionProvider(job);
-    const plannerRolePolicy = applyPlannerRoleModePolicy({}, { planningMode, roleMode: plannerRoleMode, assessmentReplan, plannerDispatch: payload.planner_dispatch === true, projectDir: worker.projectDir });
+    const plannerRolePolicyBase = applyPlannerRoleModePolicy({}, { planningMode, roleMode: plannerRoleMode, assessmentReplan, plannerDispatch: payload.planner_dispatch === true, projectDir: worker.projectDir });
+    const plannerRolePolicy = widenPlannerTriageForWholeRepo(plannerRolePolicyBase, structuredData);
     const plannerPacket = await handoff({
       recipient: "planner",
       data: {
