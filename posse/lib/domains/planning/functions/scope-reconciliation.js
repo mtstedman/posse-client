@@ -372,6 +372,33 @@ export function repairPlannerPacketFileKinds(packet, projectDir, { maxPasses = 3
  * where each repair is recorded for the planner and the dev. Callers here
  * must still reject `issues`.
  */
+/**
+ * Drop git-ignored paths from a task's files_to_modify before validation and
+ * return what was dropped. An ignored file (vendor/, a sqlite database, a
+ * build output) never exists in an isolated worktree, so a dev could not edit
+ * it anyway; it reaches the scope because the planner named it, or because
+ * scope completion picked the path out of a task spec that merely mentions
+ * it ("require vendor/autoload.php"). Rejecting the whole task for such a
+ * path, and every task that depends on it, threw away a complete plan in the
+ * field. Removing the path is the repair; validation still rejects what is
+ * left when it is wrong.
+ */
+export function pruneIgnoredModifyScope(task, projectDir) {
+  if (!task || !Array.isArray(task.files_to_modify) || task.files_to_modify.length === 0) return [];
+  if (!isRepository(projectDir)) return [];
+  const ignoredKeys = ignoredUntrackedPathKeys(projectDir, task.files_to_modify);
+  if (ignoredKeys.size === 0) return [];
+  const removed = [];
+  const kept = [];
+  for (const value of task.files_to_modify) {
+    const key = scopePathKey(value);
+    if (key && ignoredKeys.has(key) && resolveRepoScopePath(projectDir, value)) removed.push(value);
+    else kept.push(value);
+  }
+  if (removed.length > 0) task.files_to_modify = kept;
+  return removed;
+}
+
 export function reconcilePlannerFileKinds(task, projectDir, { tasks = [task], taskIndex = 0 } = {}) {
   const allIssues = validatePlannerTaskFileKinds(tasks, projectDir);
   const issues = allIssues.filter((issue) => issue.taskIndex === taskIndex);

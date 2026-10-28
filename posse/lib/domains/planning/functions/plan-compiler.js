@@ -45,7 +45,7 @@ import { sanitizePlannerDevBrief } from "./planner-helpers.js";
 import { compilerRewriteRecord, plannerTaskSnapshot } from "./planner-task-provenance.js";
 import { normalizeHashRefHandoffPacket, reissueHashRefHandoffPacket } from "../../handoff/functions/helpers/hash-ref-packet.js";
 import { broadNarrowScopedCodeTaskSignal, parseUnderScopedBroadGateMode } from "./scope-gates.js";
-import { reconcilePlannerFileKinds } from "./scope-reconciliation.js";
+import { pruneIgnoredModifyScope, reconcilePlannerFileKinds } from "./scope-reconciliation.js";
 import { dependencyIndexesAfterSplit, rewriteDependenciesAfterSplit, rewriteDependenciesAroundPostMergeDbTasks } from "./dependency-rewrite.js";
 import { cancelSupersededPlanChildren } from "./plan-cleanup.js";
 import { normalizeExplicitImageGenerationTask, resolvePromoteSourceDir, rewriteTaskImageOutputPaths, routePromoteTaskByOutputDir, splitTaskByCreateFileKind } from "./task-splitting.js";
@@ -1043,6 +1043,24 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           event_type: EVENT_TYPES.PLAN_SCOPE_COMPLETED, actor_type: EVENT_ACTORS.SYSTEM,
           message: `Completed scope for task ${i}: ${completedScope.join(", ")}`,
           event_json: JSON.stringify({ task_index: i, paths: completedScope }) });
+        // An ignored path (vendor/, a sqlite file) cannot be edited in a
+        // worktree; dropping the path keeps the task, where rejecting the
+        // task would also drop everything that depends on it.
+        const ignoredScopeOmissions = pruneIgnoredModifyScope(t, planReadRoot);
+        if (ignoredScopeOmissions.length > 0) {
+          worker.emit(
+            planJob.id,
+            `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: removed ${ignoredScopeOmissions.length} git-ignored files_to_modify path(s) from task "${t.title}": ${ignoredScopeOmissions.join(", ")}`,
+          );
+          logEvent({
+            work_item_id: planJob.work_item_id,
+            job_id: planJob.id,
+            event_type: EVENT_TYPES.PLAN_TASK_SCOPE_WARNING,
+            actor_type: EVENT_ACTORS.SYSTEM,
+            message: `Removed git-ignored files_to_modify path(s) from task ${i}: ${ignoredScopeOmissions.join(", ")}`,
+            event_json: JSON.stringify({ task_index: i, reason: "ignored_path_pruned", paths: ignoredScopeOmissions }),
+          });
+        }
         const protectedScopeOmissions = stripSensitiveEnvTaskScope(t);
         if (protectedScopeOmissions.length > 0) {
           worker.emit(

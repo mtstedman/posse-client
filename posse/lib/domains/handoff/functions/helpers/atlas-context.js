@@ -62,6 +62,8 @@ import { atlasSymbolRefFromResearchSeed } from "./research-symbols.js";
 const ATLAS_EXACT_PREFETCH_MAX_FILES = 6;
 const ATLAS_EXACT_PREFETCH_MAX_BYTES = 96 * 1024;
 const ATLAS_EXACT_PREFETCH_MAX_LINES = 1200;
+// A NUL in the first 8 KiB marks a binary body; text files never carry one.
+const ATLAS_EXACT_PREFETCH_BINARY_SNIFF_BYTES = 8 * 1024;
 const ATLAS_PARALLEL_ENTRY_LITERAL_MAX_FILES = 8;
 const ATLAS_PARALLEL_ENTRY_LITERAL_MAX_BYTES = 3200;
 const ATLAS_SLICE_FILE_DISPLAY_MAX = 8;
@@ -1679,7 +1681,14 @@ async function _prefetchExactScopedFiles(filePaths, {
       // event loop — which the scheduler's lock-renewal timer shares — is not
       // blocked. The previous readFileSync froze the loop ~2-3s per prefetch
       // batch (measured), stacking into the lock-renewal "starved" warnings.
-      const source = await fs.promises.readFile(absolute, "utf8");
+      const raw = await fs.promises.readFile(absolute);
+      // A binary body (a sqlite database the task text named, an image) has
+      // no lines to show, and its NUL bytes make the dispatcher refuse the
+      // whole prompt. Only the name reaches the prompt.
+      if (raw.subarray(0, ATLAS_EXACT_PREFETCH_BINARY_SNIFF_BYTES).includes(0)) {
+        return { file, ok: false, kind: "read_file", error: "binary file skipped" };
+      }
+      const source = raw.toString("utf8");
       const totalBytes = Buffer.byteLength(source, "utf8");
       const allLines = source.split(/\r?\n/);
       const sourceLines = source.length === 0

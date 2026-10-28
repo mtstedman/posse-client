@@ -10,6 +10,38 @@ import { readPlannerDispatchPolicy } from "../../../planning/functions/planner-d
 import { dispatchProvider } from "../../../../shared/native/functions/provider-dispatch-client.js";
 
 import { PROVIDER_DISPATCH_PROVIDERS, PROVIDER_DISPATCH_AUTH_MODES } from "../../../../catalog/binary.js";
+import { recordObservation } from "../../../observability/functions/observations.js";
+
+// The dispatcher validates every prompt field before dispatch.started and
+// refuses one holding a NUL byte ("prompt.text is invalid"). That fails the
+// attempt before any model turn and, once repeated, fails the work item. A
+// NUL carries nothing a model can use, so it is dropped here, and where it sat
+// is recorded so the source (a binary file read, a bad render) can be found.
+function dispatchSafeText(value, label, findings) {
+  const text = String(value ?? "");
+  if (!text.includes("\0")) return text;
+  const samples = [];
+  for (let at = text.indexOf("\0"); at >= 0 && samples.length < 5; at = text.indexOf("\0", at + 1)) {
+    samples.push({ at, context: text.slice(Math.max(0, at - 80), at + 80).replace(/\0/g, "␀") });
+  }
+  findings.push({ label, count: text.split("\0").length - 1, chars: text.length, samples });
+  return text.replace(/\0/g, "");
+}
+
+function recordStrippedNulBytes(findings, { jobId, workItemId, agentCallId }) {
+  if (findings.length === 0) return;
+  try {
+    recordObservation({
+      work_item_id: workItemId ?? null,
+      job_id: jobId ?? null,
+      observation_type: "dispatch.prompt_nul_stripped",
+      summary: `Stripped ${findings.reduce((sum, finding) => sum + finding.count, 0)} NUL byte(s) from ${findings.map((finding) => finding.label).join(", ")} before provider dispatch`,
+      detail: { agent_call_id: agentCallId ?? null, findings },
+    });
+  } catch {
+    // Telemetry only; the sanitized request is what matters.
+  }
+}
 
 const MAX_WALL_TIMEOUT_MS = 4 * 60 * 60 * 1_000;
 const TASK_MODES = new Set(["code", "db", "artifact", "research"]);
@@ -155,6 +187,17 @@ export function buildNativeDispatchRequest(provider, promptText, {
     MAX_WALL_TIMEOUT_MS,
   );
   const skills = [...new Set(stringList(resolvedSkillIds))].sort();
+  const nulFindings = [];
+  const safeSystemPrompt = systemPrompt == null ? null : dispatchSafeText(systemPrompt, "prompt.system", nulFindings);
+  const prompt = {
+    text: dispatchSafeText(promptText || "", "prompt.text", nulFindings),
+    ...(provider === "anthropic" && promptCache ? { cache: true } : {}),
+    ...(baseInstructions == null ? {} : { baseInstructions: dispatchSafeText(baseInstructions, "prompt.baseInstructions", nulFindings) }),
+    stableContext: stableContext == null ? null : dispatchSafeText(stableContext, "prompt.stableContext", nulFindings),
+    system: safeSystemPrompt,
+    ...(Array.isArray(transcript) && transcript.length ? { transcript } : {}),
+  };
+  recordStrippedNulBytes(nulFindings, { jobId, workItemId, agentCallId });
   return {
     id: String(dispatchId || `${provider}-${crypto.randomUUID()}`),
     provider,
@@ -162,14 +205,7 @@ export function buildNativeDispatchRequest(provider, promptText, {
     ...(image == null ? {} : { image }),
     ...(authMode == null ? {} : { authMode }),
     identity: { jobId, workItemId, attemptId, agentCallId },
-    prompt: {
-      text: String(promptText || ""),
-      ...(provider === "anthropic" && promptCache ? { cache: true } : {}),
-      ...(baseInstructions == null ? {} : { baseInstructions: String(baseInstructions) }),
-      stableContext: stableContext == null ? null : String(stableContext),
-      system: systemPrompt == null ? null : String(systemPrompt),
-      ...(Array.isArray(transcript) && transcript.length ? { transcript } : {}),
-    },
+    prompt,
     model: {
       tier: String(modelTier || "standard"),
       name: modelName == null ? null : String(modelName),
@@ -194,7 +230,7 @@ export function buildNativeDispatchRequest(provider, promptText, {
         // Skill bodies are already part of the finalized system prompt. Bind
         // the digest to that delivered text so an ID-stable content change is
         // still visible at the native boundary.
-        systemPrompt: systemPrompt == null ? null : String(systemPrompt),
+        systemPrompt: safeSystemPrompt,
       }),
     },
     scope: {
