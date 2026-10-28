@@ -1288,6 +1288,14 @@ export async function runHumanInputJob(worker, job, {
           },
         });
         const dependents = getDependents(retryJob.id);
+        // The retry carries the work from here; its dependents were rewired
+        // above. Left in dead letter, the original reads as a failed job on
+        // every surface (the phone shows "failed") after the retry succeeded.
+        if (origJob.status === "dead_letter") {
+          await worker._setJobRowStatus(origJob, "canceled");
+          getDb().prepare(`UPDATE jobs SET last_error = ?, updated_at = ? WHERE id = ?`)
+            .run(`Superseded by retry job #${retryJob.id}`, new Date().toISOString(), origJob.id);
+        }
         worker.emit(job.id, `${C.cyan}[human] Dead-letter recovery ${reusedRetryJob ? "reused" : "spawned"} retry job #${retryJob.id}${decision.provider ? ` on ${decision.provider}` : ""}; rewired ${dependents.length} dependent(s)${C.reset}`);
         logEvent({
           work_item_id: job.work_item_id,
