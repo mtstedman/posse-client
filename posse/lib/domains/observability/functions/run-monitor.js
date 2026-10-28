@@ -1,3 +1,4 @@
+import { isReadNotFoundProbe } from "./read-not-found.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -89,7 +90,8 @@ export function projectMonitorEntry(stream, row) {
     message = `${monitorText(detail.catalog_name || detail.tool_name || type, 100)} ${monitorText(outcome || status, 40) || "failed"}`;
     if (detail.recovered_from_provider_rollout === true) message = `Recovered historical failure: ${message}`;
   } else if (!["boot.start", "scheduler.shutdown"].includes(type) && !trouble.test(type) && !error && !failed) return null;
-  if (level !== "fatal" && (failure.test(type) || failed || error)) level = "error";
+  if (isReadNotFoundProbe(row)) level = "info";
+  else if (level !== "fatal" && (failure.test(type) || failed || error)) level = "error";
   else if (level === "info" && trouble.test(type)) level = "warn";
   // Deliberately project scalar decisions, never prompts, tool bodies, context or stacks.
   const decisions = {};

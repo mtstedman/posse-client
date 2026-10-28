@@ -258,10 +258,12 @@ export function summarizeCatalogToolUse(tool, input = {}, cwdNorm = null, rel = 
   }
 
   if (spec.format === "generic") {
-    const target = _firstInputValue(input, spec.targetKeys || []);
+    const firstQuestion = Array.isArray(input.questions) ? input.questions[0] : null;
+    const question = typeof firstQuestion === "string" ? firstQuestion : firstQuestion?.question || firstQuestion?.text || firstQuestion?.title;
+    const target = catalogName === "request_clarification" ? question : _firstInputValue(input, spec.targetKeys || []);
     return {
       observation_type: spec.type,
-      summary: `${spec.label}: ${_truncate(target || ".", 140)}`,
+      summary: `${spec.label}: ${_truncate(target || ".", catalogName === "request_clarification" ? 120 : 140)}`,
       detail: _catalogDetail({ spec, input, cwdNorm, tool, catalogName, extra: { input: _summarizeAtlasArgs(input) } }),
     };
   }

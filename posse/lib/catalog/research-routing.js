@@ -48,3 +48,5 @@ export const FILE_MENTION_RE = new RegExp(
   `(?:^|[\\s\`"'(\\[])((?:\\.{1,2}[\\\\/])?(?:[A-Za-z0-9_.-]+[\\\\/])*[A-Za-z0-9_.-]+\\.(?:${FILE_EXTENSIONS.join("|")}))(?=$|\\.(?=\\s|$)|[^A-Za-z0-9_.-])`,
   "gi",
 );
+
+export const RESEARCH_DIRECT_PATH_MAX_SOURCE_BYTES = 128 * 1024;

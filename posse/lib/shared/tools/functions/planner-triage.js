@@ -166,7 +166,9 @@ export function reservePlannerRead(session, policy, requested) {
     return null;
   }
   return mcpToolErrorPayload(
-    `Planner read allowance exhausted (${threshold.calls} calls, including reads after child research). `
+    `Planner read allowance exhausted (${threshold.calls} calls${state.dispatched ? ", including reads after child research" : ""}). `
+      + `Counted: ${[...RESEARCH_NATIVE_PHYSICAL_WORK_TOOLS].join(", ")}, Atlas exploration and citation reads. `
+      + "Clarification, dispatch, handoff, feedback, environment inspection and unit tests do not count. "
       + "Use the evidence already returned to finish the plan. If evidence is insufficient, report the specific gap or ask a focused clarification; do not claim an unverified conclusion.",
     { code: "planner_read_budget_exhausted" },
   );

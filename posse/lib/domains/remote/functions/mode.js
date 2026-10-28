@@ -1,7 +1,8 @@
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getSetting } from "../../queue/functions/index.js";
 
-export const POSSE_REMOTE_DEFAULT_URL = "https://api.yourposseai.com";
+import { POSSE_REMOTE_DEFAULT_URL } from "../../../catalog/remote.js";
+export { POSSE_REMOTE_DEFAULT_URL } from "../../../catalog/remote.js";
 export const POSSE_REMOTE_DEFAULT_TIMEOUT_MS = 60_000;
 export const POSSE_REMOTE_MODE = "required";
 const AGENT_FLOW_REMOTE_FLAG = "POSSE_AGENT_FLOW_HARNESS";

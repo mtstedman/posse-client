@@ -105,6 +105,28 @@ function strictIdentifierMatches(symbol, requested, normalize = normalizedQualif
  * tail to an unrelated bearer. Tail candidates provide ambiguity diagnostics
  * only; a sole different owner is still not the requested declaration.
  */
+export function outerDeclarationForNestedNames(symbols, identifier, { caseSensitive = false } = {}) {
+  const normalize = value => normalizedQualifiedIdentifier(value, { caseSensitive });
+  const requested = normalize(identifier);
+  if (!requested || requested.includes(".") || symbols.length < 2) return null;
+  const outer = symbols.filter(symbol => normalize(symbol.qualified_name) === requested);
+  if (outer.length !== 1) return null;
+  const owner = outer[0];
+  const span = symbol => Number.isFinite(symbol.range_start) && Number.isFinite(symbol.range_end)
+    ? [symbol.range_start, symbol.range_end, "bytes"]
+    : [symbol.range_start_line, symbol.range_end_line, "lines"];
+  const [start, end, units] = span(owner);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+  return symbols.every(symbol => {
+    if (symbol === owner) return true;
+    const [childStart, childEnd, childUnits] = span(symbol);
+    return symbol.repo_rel_path === owner.repo_rel_path
+      && normalize(symbol.qualified_name).startsWith(`${requested}.`)
+      && units === childUnits && Number.isFinite(childStart) && Number.isFinite(childEnd)
+      && childStart >= start && childEnd <= end && childEnd >= childStart;
+  }) ? owner : null;
+}
+
 export function resolveRequestedIdentifierSymbols(symbols, identifier, { allowNamespacePrefix = true, caseSensitive = false, traitImplAlias = false } = {}) {
   const normalize = value => normalizedQualifiedIdentifier(value, { caseSensitive });
   const requested = normalize(identifier);
@@ -112,7 +134,8 @@ export function resolveRequestedIdentifierSymbols(symbols, identifier, { allowNa
   const candidates = uniqueResolutionSymbols(symbols);
   const exact = candidates.filter((symbol) => strictIdentifierMatches(symbol, requested, normalize, traitImplAlias));
   if (exact.length > 0) {
-    return { matches: exact, ambiguousBearers: [], matchKind: "qualified" };
+    const outer = outerDeclarationForNestedNames(exact, identifier, { caseSensitive });
+    return { matches: outer ? [outer] : exact, ambiguousBearers: [], matchKind: "qualified" };
   }
   // Some producers omit an outer package namespace. Preserve that existing
   // spelling compatibility only when the complete indexed owner AND member

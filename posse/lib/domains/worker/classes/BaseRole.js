@@ -6,7 +6,7 @@
 import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { usesResearcherReportOnlyHandoff } from "../../../catalog/handoff.js";
 
-const SLOW_ROLE_PHASE_MS = 1000;
+const SLOW_ROLE_PHASE_MS = 5000;
 const SLOW_PROVIDER_CALL_MS = 45000;
 
 function dispatchPacketFromContext(ctx = {}) {
@@ -62,7 +62,7 @@ async function timeRolePhase(role, label, job, fn, { warnMs = SLOW_ROLE_PHASE_MS
     return await fn();
   } finally {
     const durationMs = Date.now() - startedAt;
-    if (durationMs >= warnMs) {
+    if (label !== "providerClient.call" && durationMs >= warnMs) {
       log.warn("worker", "Role phase was slow", {
         role,
         label,

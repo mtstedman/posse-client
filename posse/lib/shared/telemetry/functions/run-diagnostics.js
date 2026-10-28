@@ -138,14 +138,20 @@ export function recordBootCrashResumeMarker(data = {}) {
   const previousManifest = lifecycle?.previousManifest?.lifecycle_began_at
     ? lifecycle.previousManifest
     : previous?.manifest || null;
+  const shellCode = previousManifest?.shell_exit_code;
+  const exitMismatch = Number.isInteger(shellCode) && shellCode !== previousManifest?.exit_code;
+  if (exitMismatch) recordRunDiagnostic("run.exit_mismatch", {
+    previous_run_id: previousManifest.run_id || previous?.run_id || null,
+    exit_code: previousManifest.exit_code ?? null,
+    shell_exit_code: shellCode,
+  });
   const entry = recordRunDiagnostic("boot.start", {
     owner_id: ownerId,
     previous_run: previousManifest ? {
       run_id: previousManifest.run_id || previous?.run_id || null,
       started_at: previousManifest.started_at || null,
       ended_at: previousManifest.ended_at || null,
-      clean_exit: previousManifest.clean_exit === true
-        || Boolean(previousManifest.scheduler_clean_shutdown_at),
+      clean_exit: previousManifest.clean_exit === true && (!exitMismatch || shellCode === 0),
       last_heartbeat_at: previousManifest.last_heartbeat_at || null,
       scheduler_clean_shutdown_at: previousManifest.scheduler_clean_shutdown_at || null,
       lifecycle_iteration: previousManifest.lifecycle_iteration ?? null,

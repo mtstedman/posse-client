@@ -1,3 +1,4 @@
+import { mergeEvidenceCatalog } from "./merged-packet-evidence.js";
 import { AGENT_HANDOFF_LIMITS } from "../../../../catalog/handoff.js";
 
 export function packetEvidence(packet) {
@@ -19,7 +20,7 @@ export function packetEvidence(packet) {
 }
 
 export function packetEvidenceMetrics(packet) {
-  const evidence = packetEvidence(packet);
+  const evidence = mergeEvidenceCatalog(packetEvidence(packet)).catalog;
   const selectedLineCount = (item) => {
     const windows = item?.selector === item?.ref
       && Array.isArray(item?.provenance?.source_windows)

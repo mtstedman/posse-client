@@ -64,7 +64,37 @@ function abortReasonToError(signal, label) {
   return err;
 }
 
+// Process-local registry spans every manager instance. Producers must be stopped
+// before draining; workers created during the drain are included on the next pass.
+const liveWorkers = new Map();
+
 export class ThreadManager {
+  static get liveWorkerCount() { return liveWorkers.size; }
+
+  static async drainAll({ timeoutMs = 5000 } = {}) {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (liveWorkers.size) {
+      const entries = [...liveWorkers.entries()];
+      let timer;
+      try {
+        await Promise.race([
+          Promise.all(entries.map(([, entry]) => entry.exited)),
+          new Promise((resolve) => { timer = setTimeout(resolve, Math.max(0, deadline - Date.now())); }),
+        ]);
+      } finally { clearTimeout(timer); }
+      if (Date.now() >= deadline) {
+        // terminate() resolves only after Node has finished tearing down the
+        // environment, including a synchronous module import in progress.
+        await Promise.all([...liveWorkers].map(async ([worker, entry]) => {
+          await worker.terminate();
+          entry.retire();
+        }));
+      }
+    }
+  }
+
+  drainAll(options) { return ThreadManager.drainAll(options); }
+
   /**
    * @param {{ WorkerClass?: typeof NodeWorker }} [opts]
    */
@@ -151,7 +181,15 @@ export class ThreadManager {
         threadLifetimeRegistry.retire(lifetime);
         throw error;
       }
-      worker.once("exit", () => threadLifetimeRegistry.retire(lifetime));
+      let resolveExit;
+      const exited = new Promise((resolve) => { resolveExit = resolve; });
+      const retire = () => {
+        threadLifetimeRegistry.retire(lifetime);
+        liveWorkers.delete(worker);
+        resolveExit();
+      };
+      liveWorkers.set(worker, { exited, retire });
+      worker.once("exit", retire);
       emitLifecycle(onLifecycle, {
         kind: "start",
         label,
@@ -165,6 +203,7 @@ export class ThreadManager {
       }
 
       const cleanup = () => {
+        retire();
         if (timer) clearTimeout(timer);
         timer = null;
         signal?.removeEventListener?.("abort", onAbort);

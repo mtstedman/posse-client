@@ -315,6 +315,7 @@ export function recordWaitingLaneTelemetry(event, detail = {}) {
   try {
     const record = buildWaitingLaneTelemetryRecord(event, detail);
     if (!record) return null;
+    if (event === "planner_fallback" && detail.reason === "missing_preparation") record.level = "debug";
     telemetryWriter("diagnostics", record);
     return record;
   } catch {

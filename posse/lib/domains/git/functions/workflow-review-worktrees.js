@@ -11,11 +11,11 @@ import {
 } from "./worktree.js";
 
 export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine }) {
-  const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, gitExec } = context;
+  const { projectDir, currentTargetBranch, gitExecAsync, gitExec } = context;
   const canonicalWorktreePath = context.worktreePath || nativeWorktreePath;
   const findLegacyWorktreeForWi = context.findLegacyWorktree || nativeFindLegacyWorktreeForWi;
 
-  function auditWorktreeState() {
+  function* auditWorktreeReads() {
     const targetBranch = currentTargetBranch();
     const results = [];
     const allWIs = listWorkItems();
@@ -34,7 +34,7 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
       // Check for dirty worktree (uncommitted changes)
       if (wtExists) {
         try {
-          const status = gitExec(["status", "--porcelain"], wtDir, { timeoutMs: 5000 }).trim();
+          const status = (yield [["status", "--porcelain"], wtDir, { timeoutMs: 5000 }]).trim();
           const userStatus = status
             .split("\n")
             .map((line) => line.trim())
@@ -59,14 +59,14 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
       // Check if branch has commits not yet merged into target
       if (wi.merge_state !== "merged") {
         try {
-          const ahead = gitExec(["rev-list", `${targetBranch}..${wi.branch_name}`, "--count"], projectDir, { timeoutMs: 5000 }).trim();
+          const ahead = (yield [["rev-list", `${targetBranch}..${wi.branch_name}`, "--count"], projectDir, { timeoutMs: 5000 }]).trim();
           if (parseInt(ahead) > 0) {
             issues.push({ type: "unmerged", message: `${ahead} commit(s) not merged into ${targetBranch}` });
           }
         } catch {
           // Branch referenced in DB but doesn't exist in git — orphaned record
           try {
-            gitExec(["rev-parse", "--verify", wi.branch_name], projectDir, { timeoutMs: 3000 });
+            yield [["rev-parse", "--verify", wi.branch_name], projectDir, { timeoutMs: 3000 }];
           } catch {
             issues.push({ type: "orphan_ref", message: `Branch ${wi.branch_name} no longer exists in git (DB record is stale)` });
           }
@@ -110,6 +110,31 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
     return results;
   }
 
+  // One audit contract for synchronous review callers and async display reads.
+  function auditWorktreeState() {
+    const reads = auditWorktreeReads();
+    let next = reads.next();
+    while (!next.done) {
+      let value;
+      try { value = gitExec(...next.value); }
+      catch (error) { next = reads.throw(error); continue; }
+      next = reads.next(value);
+    }
+    return next.value;
+  }
+
+  async function auditWorktreeStateAsync() {
+    const reads = auditWorktreeReads();
+    let next = reads.next();
+    while (!next.done) {
+      let value;
+      try { value = await gitExecAsync(...next.value); }
+      catch (error) { next = reads.throw(error); continue; }
+      next = reads.next(value);
+    }
+    return next.value;
+  }
+
   function collectDirtyState() {
     const targetBranch = currentTargetBranch();
     const dirtyItems = auditWorktreeState();
@@ -127,8 +152,14 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
     };
   }
 
-  function collectDirtyStateAsync(workerOptions = {}) {
-    return runGitWorkflowTaskOffMainThread("collectDirtyState", {}, workerOptions);
+  async function collectDirtyStateAsync() {
+    const targetBranch = currentTargetBranch();
+    const dirtyItems = await auditWorktreeStateAsync();
+    let targetStatus = "";
+    try {
+      targetStatus = String(await gitExecAsync(["status", "--porcelain"], projectDir, { timeoutMs: 5000 })).trim();
+    } catch { /* unavailable status remains empty, matching the review audit */ }
+    return { targetBranch, dirtyItems, targetStatus, targetDirty: !!targetStatus };
   }
 
   function sourceWorktreeDirtyState(wiId) {

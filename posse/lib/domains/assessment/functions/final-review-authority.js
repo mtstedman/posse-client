@@ -8,7 +8,7 @@ import { getTestStrictness } from "../../settings/functions/test-strictness.js";
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { gitExecAsync } from "../../git/functions/utils.js";
+import { gitExecAsync, gitExecBufferAsync } from "../../git/functions/utils.js";
 import { listIgnoredRepoPaths } from "../../git/functions/ignored-paths.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { FINAL_REVIEW_CONTRACT_FIELDS, FINAL_REVIEW_OBSERVATIONS, FINAL_REVIEW_REVIEW_MODES } from "../../../catalog/final-review.js";
@@ -32,20 +32,28 @@ export function finalReviewContractIdentity(cwd, payload) {
   return digest(JSON.stringify({ contract: reviewContract(payload), test_strictness: getTestStrictness({ projectDir: cwd }) }));
 }
 
-export async function finalReviewIdentity(cwd, payload, { jobId = null } = {}) {
-  return (await finalReviewIdentityEvidence(cwd, payload, { jobId })).identity;
+export async function finalReviewIdentity(cwd, payload, { jobId = null, commit = null } = {}) {
+  return (await finalReviewIdentityEvidence(cwd, payload, { jobId, commit })).identity;
 }
 
-export async function finalReviewIdentityEvidence(cwd, payload, { jobId = null } = {}) {
-  const placeholders = new Set(await emptyMaterializedPathsForJob(jobId, payload?.scope_generation ?? payload?._materialization_generation ?? 1, cwd));
+export async function finalReviewIdentityEvidence(cwd, payload, { jobId = null, commit = null } = {}) {
+  if (commit && !/^[a-f0-9]{40,64}$/.test(commit)) throw new Error("Invalid reviewed commit");
+  const placeholders = new Set(commit ? [] : await emptyMaterializedPathsForJob(jobId, payload?.scope_generation ?? payload?._materialization_generation ?? 1, cwd));
   const scope = finalReviewScope(payload);
-  const readPaths = (Array.isArray(payload?.dev_brief?.key_files) ? payload.dev_brief.key_files : [])
+  const readPaths = [...(Array.isArray(payload?.dev_brief?.key_files) ? payload.dev_brief.key_files : []),
+    ...(Array.isArray(payload?.tests_to_run) ? payload.tests_to_run : [])]
     .slice(0, 64)
     .map((value) => String(value || "").trim().replace(/\\/g, "/"))
     .filter((value) => value && !path.posix.isAbsolute(value)
       && !value.split("/").some((part) => !part || part === "." || part === ".."));
-  const listed = String(await gitExecAsync(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd, { trim: false })).split("\0").filter(Boolean);
-  const ignored = new Set((await listIgnoredRepoPaths(cwd, [...scope.files])).map((entry) => entry.path));
+  const prefix = commit ? String(await gitExecAsync(["rev-parse", "--show-prefix"], cwd)) : "";
+  const objects = new Map();
+  if (commit) for (const row of String(await gitExecAsync(["ls-tree", "-rz", commit], cwd, { trim: false })).split("\0").filter(Boolean)) {
+    const match = row.match(/^(\d+) (\w+) ([a-f0-9]+)\t([\s\S]+)$/);
+    if (match) objects.set(match[4], { mode: match[1], type: match[2], hash: match[3] });
+  }
+  const listed = commit ? [...objects.keys()] : String(await gitExecAsync(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd, { trim: false })).split("\0").filter(Boolean);
+  const ignored = new Set(commit ? [] : (await listIgnoredRepoPaths(cwd, [...scope.files])).map((entry) => entry.path));
   const scoped = new Set([...listed.filter((file) => !scope.declared || scope.files.has(file)
     || scope.roots.some((root) => file === root || file.startsWith(`${root}/`))),
   ...[...scope.files].filter((file) => !ignored.has(file))]);
@@ -53,7 +61,14 @@ export async function finalReviewIdentityEvidence(cwd, payload, { jobId = null }
   // their bytes, even when ignored, because they are inputs to the contract.
   const files = [...new Set([...scoped, ...readPaths])].sort();
   const root = fs.realpathSync(cwd);
-  const states = files.map((file) => {
+  const states = await Promise.all(files.map(async (file) => {
+    if (commit) {
+      const object = objects.get(file);
+      if (!object) return [file, null];
+      if (object.type !== "blob") return [file, "non_file"];
+      const bytes = await gitExecBufferAsync(["cat-file", "blob", `${commit}:${prefix}${file}`], cwd);
+      return [file, object.mode === "120000" ? "symlink" : object.mode === "100755" ? 0o111 : 0, digest(bytes)];
+    }
     if (placeholders.has(file)) return [file, null];
     const absolute = path.resolve(cwd, file);
     if (!absolute.startsWith(`${path.resolve(cwd)}${path.sep}`)) throw new Error("Review path escapes workspace");
@@ -65,7 +80,7 @@ export async function finalReviewIdentityEvidence(cwd, payload, { jobId = null }
     if (!scoped.has(file) && !stat.isFile()) return [file, "non_file"];
     if (!fs.realpathSync(absolute).startsWith(`${root}${path.sep}`) || !stat.isFile()) throw new Error("Review path is not a workspace file");
     return [file, stat.mode & 0o111, digest(fs.readFileSync(absolute))];
-  });
+  }));
   const contract = reviewContract(payload);
   return { identity: digest(JSON.stringify({ contract, states, test_strictness: getTestStrictness({ projectDir: cwd }) })),
     states, readPaths, scoped: [...scoped] };
@@ -120,7 +135,21 @@ export async function authoritativeFinalReview(job, payload, cwd) {
   // A repair after the last semantic review needs fresh verification. Let the
   // ordinary assessment run on that candidate; the old result stays in the
   // durable review ledger as historical context, not an approval or a gate.
-  if (review.review_identity && identity !== review.review_identity) return null;
+  let reviewedCommit = null;
+  if (review.review_identity && identity !== review.review_identity) {
+    // Only the implementation attempt's immutable commit can recover a PASS.
+    // Never certify current HEAD just because an older review passed.
+    const attempt = getDb().prepare("SELECT commit_hash FROM job_attempts WHERE id = ? AND job_id = ?")
+      .get(review.attempt_id, job.id);
+    reviewedCommit = attempt?.commit_hash;
+    if (review.outcome !== "pass" || !reviewedCommit) return null;
+    try {
+      await gitExecAsync(["merge-base", "--is-ancestor", reviewedCommit, "HEAD"], cwd);
+      if (!await finalReviewedFilesCommitted(job, payload, cwd)) return null;
+      identity = await finalReviewIdentity(cwd, payload, { jobId: job.id, commit: reviewedCommit });
+    } catch { return null; }
+    if (identity !== review.review_identity) return null;
+  }
   if (!["pass", "findings"].includes(review.outcome) || !review.review_identity) {
     return unresolved(review.reason || "Final review is missing, blocked, or has unresolved findings; no second assessor will be dispatched.");
   }
@@ -142,6 +171,7 @@ export async function authoritativeFinalReview(job, payload, cwd) {
   }
   const verdict = { verdict: "pass", confidence: "high", reasons: [review.summary || "Final review passed for the exact committed change and task contract."],
     spawn_jobs: [], human_questions: [], _final_reviewer_agent_call_id: review.reviewer_agent_call_id };
+  if (reviewedCommit) verdict._final_review_commit = reviewedCommit;
   acceptedPasses.set(verdict, job.id);
   return verdict;
 }

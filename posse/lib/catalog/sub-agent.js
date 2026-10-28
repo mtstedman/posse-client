@@ -15,6 +15,7 @@ export const SUB_AGENT_PROTOCOL = "posse.sub_agent.v1";
 export const SUB_AGENT_OBSERVATION_TYPES = Object.freeze({
   RESULT_OVER_TARGET: "sub_agent.result_over_target",
   RESEARCH_UNCITED_REPORT: "sub_agent.research_uncited_report",
+  BRIEF_OVERLAP: "research.brief_overlap",
   INTENT_OVERSIZED: "sub_agent.intent_oversized",
 });
 export const SUB_AGENT_EVIDENCE_OUTCOMES = Object.freeze({

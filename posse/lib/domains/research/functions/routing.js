@@ -1,3 +1,4 @@
+import { RESEARCH_DIRECT_PATH_MAX_SOURCE_BYTES } from "../../../catalog/research-routing.js";
 import { WEB_VENDOR_HINTS, FILE_MENTION_RE } from "../../../catalog/research-routing.js";
 import { normalizeResearchBudget } from "../../../shared/policies/functions/role-utils.js";
 import { slugify } from "../../../shared/format/functions/slug.js";
@@ -506,6 +507,9 @@ export function buildSyntheticResearchBrief(routingOrReason = null, { plannerDis
       },
     } : {}),
     key_files: keyFiles,
+    ...(routingOrReason?.whole_repo_brief ? { whole_repo_brief: routingOrReason.whole_repo_brief,
+      direct_path_note: "The complete repository source inventory is available in this brief. Read it directly; check commands below were discovered from repository manifests." } : {}),
+    candidate_check_commands: routingOrReason?.candidate_check_commands || [],
     related_files: [],
     constraints: [plannerDispatch
       ? "No upfront researcher ran; the work item and intake route are the initial planning context."
@@ -531,6 +535,7 @@ export function classifyResearchTask({
   projectMap = null,
   mode = null,
   disallowOneshot = false,
+  directPathMaxSourceBytes = RESEARCH_DIRECT_PATH_MAX_SOURCE_BYTES,
 } = {}) {
   const taskTitle = normalizeText(title);
   const taskDescription = normalizeText(description);
@@ -721,6 +726,16 @@ export function classifyResearchTask({
     };
   }
 
+  if (!["oneshot", "oneshot_candidate", "web_only_answer"].includes(result?.bucket)
+    && !webLookupRequested && !webFanoutCandidate && lowerMode !== "question" && Number.isFinite(projectMap?.eligible_source_bytes)
+    && projectMap.source_files?.length > 0 && directPathMaxSourceBytes > 0
+    && projectMap.eligible_source_bytes <= directPathMaxSourceBytes) {
+    result = { bucket: "no_research", route: "solo/direct", reason: "small_repository",
+      eligible_source_bytes: projectMap.eligible_source_bytes,
+      key_files: projectMap.source_files, whole_repo_brief: { source_files: projectMap.source_files,
+        source_bytes: projectMap.eligible_source_bytes }, candidate_check_commands: projectMap.candidate_check_commands || [] };
+  }
+
   if (!result) {
     const fanoutTriggered = FANOUT_TRIGGER_RE.test(text);
     const broadStructuredRequest = fanoutTriggered && (
@@ -795,6 +810,7 @@ export function classifyResearchTask({
     : determineBudget({ text, intakeHints, mentionedModules, fileMentions, noResearch });
   const finalResult = {
     ...result,
+    candidate_check_commands: projectMap?.candidate_check_commands || [],
     web_targets: result.web_targets || (result.branches || []).filter((branch) => branch.kind === "web"),
     budget,
   };

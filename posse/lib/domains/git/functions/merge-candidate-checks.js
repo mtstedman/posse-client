@@ -1,3 +1,4 @@
+import { implicitTypechecks } from "../../verification/functions/implicit-typechecks.js";
 import { resolveUnitTestInvocation } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { testExecutionCounts } from "../../../shared/tools/functions/toolkit/test-output-counts.js";
 import { MERGE_CANDIDATE_CHECKOUT_PREFIX, MERGE_CHECK_FAILURE_KINDS } from "../../../catalog/verification.js";
@@ -92,11 +93,16 @@ function runSelectedTests(paths, checkout, run, timeoutMs) {
 }
 
 /** Verify the staged tree without letting test side effects alter the merge. */
-export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = runCloseoutTestCommandSync, candidate = null, deadlineMs = null }) {
-  const commands = declaredMergeCandidateCommands(jobs);
-  if (commands.length === 0) return null;
+export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = runCloseoutTestCommandSync, candidate = null, deadlineMs = null, includeDeclared = true, scopeFiles = null }) {
+  const commands = includeDeclared ? declaredMergeCandidateCommands(jobs) : [];
+  const files = scopeFiles || jobs.filter(job => job.status === "succeeded" && ["dev", "fix"].includes(job.job_type))
+    .flatMap(job => { const payload = parseJobPayload(job); return [...(payload.files_to_modify || []), ...(payload.files_to_create || [])]; });
   const runInCheckout = ({ checkout, reset }) => {
-    const results = commands.map((command) => {
+    reset();
+    const implicit = new Set(implicitTypechecks(checkout, files).map(check => check.declared_command));
+    const required = [...new Set([...commands, ...implicit])];
+    if (!required.length) return null;
+    const results = required.map((command) => {
       const remainingMs = deadlineMs == null ? 10 * 60_000 : deadlineMs - Date.now();
       if (remainingMs < 1000) return { ok: false, status: "failed", failure_kind: MERGE_CHECK_FAILURE_KINDS.TIMEOUT,
         test: { name: command }, failure: { message: "merge gate wall budget expired before this declared check" } };
@@ -122,7 +128,7 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
       const missingRunner = [127, 9009].includes(result.status)
         && /not found|not recognized as an internal or external command/i.test(result.output);
       const counts = testExecutionCounts(result.output);
-      const noTests = result.ok && (result.no_tests || counts && (counts.total === 0 || counts.total === counts.skipped));
+      const noTests = !implicit.has(command) && result.ok && (result.no_tests || counts && (counts.total === 0 || counts.total === counts.skipped));
       const abnormal = result.timed_out || result.error_code === "ETIMEDOUT" || result.signal
         || result.error_code === "ENOBUFS" || (result.error_code && result.error_code !== "ENOENT")
         || result.status == null && result.error_code !== "ENOENT";
@@ -138,12 +144,17 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
       return { ok: !unavailable && result.ok && !abnormal, status: unavailable ? "unavailable" : result.ok && !abnormal ? "passed" : "failed",
         ...(failureKind ? { failure_kind: failureKind } : {}),
         ...(classified.missing_runtime_capabilities ? { missing_runtime_capabilities: classified.missing_runtime_capabilities } : {}),
+        source: "job_test_command", implicit_typecheck: implicit.has(command),
         test: { name: command }, cwd_relative: cwdRelative, timeout_ms: timeoutMs, ...(unavailable ? { note: result.output } : {}),
         stdout: result.stdout ?? result.output ?? "", stderr: result.stderr ?? "",
         exit_code: result.status, signal: result.signal ?? null,
         ...(!unavailable && (!result.ok || abnormal) ? { failure: { message: result.output || `merge check ended without a result (${failureKind})` } } : {}),
       };
     });
+    for (const result of results) {
+      result.source = "job_test_command";
+      result.implicit_typecheck = implicit.has(result.test.name);
+    }
     const passed = results.filter((result) => result.status === "passed").length;
     const failed = results.filter((result) => result.status === "failed").length;
     const unavailable = results.filter((result) => result.status === "unavailable").length;
@@ -152,4 +163,16 @@ export function runDeclaredMergeCandidateChecks({ cwd, jobs = [], git, run = run
     };
   };
   return candidate ? runInCheckout(candidate) : withTemporaryMergeCandidateCheckout({ cwd, git }, runInCheckout);
+}
+
+// Registered tests and implicit scripts are independent merge obligations.
+export function appendRequiredMergeTypechecks(primary, options) {
+  const required = runDeclaredMergeCandidateChecks({ ...options, includeDeclared: false });
+  if (!required) return primary;
+  return { ...primary, ok: primary.ok && required.ok,
+    matched: (primary.matched || 0) + required.matched,
+    passed: (primary.passed || 0) + required.passed,
+    failed: (primary.failed || 0) + required.failed,
+    unavailable: (primary.unavailable || 0) + required.unavailable,
+    results: [...primary.results, ...required.results], summary: `${primary.summary}; ${required.summary}` };
 }

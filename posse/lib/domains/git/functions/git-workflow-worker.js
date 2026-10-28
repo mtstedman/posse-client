@@ -29,7 +29,7 @@ function errorPayload(err) {
 
 async function main() {
   if (workerData?.nativeAuth?.envelope && typeof workerData.nativeAuth.envelope === "object") {
-    nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth));
+    nativeBinaries.setNativeAuthManager(HeartbeatAuthManager.fromCapability(workerData.nativeAuth, { trustedPolicy: workerData.nativeTrustedPolicy }));
   }
   nativeBinaries.installWorkerRuntime(workerData?.nativeRuntime);
   nativeBinaries.binary("git").workerPulsePort = workerData?.nativePulsePort || null;

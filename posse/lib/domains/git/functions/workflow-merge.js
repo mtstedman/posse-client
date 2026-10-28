@@ -1,3 +1,4 @@
+import { implicitTypechecks } from "../../verification/functions/implicit-typechecks.js";
 import { isNativePulseColdError } from "./native/invoke.js";
 import { recordTargetDebt, resolveTargetDebtEntries } from "./merge-target-debt-store.js";
 export { recordTargetDebt } from "./merge-target-debt-store.js";
@@ -23,7 +24,7 @@ import { DETERMINISTIC_MERGE_FAILURE_KEY, mergeFailureHeadsUnchanged, mergeConfl
 import { CLOSEOUT_TEST_TIMEOUT_MS, closeoutTestCommandFromJobs, droppableHandoffSyncJobIds, refreshBranchForCloseout, runCloseoutTestCommandSync } from "./merge-closeout.js";
 import { conflictFilesFromMergeError, parkedMergeGuidance } from "./merge-park-guidance.js";
 import { mergeCandidateRegisteredTests, registryMergeCheckFailureKind, runRegisteredTest, runRegisteredTestsForMergeCandidate } from "../../../shared/tools/functions/toolkit/registered-tests.js";
-import { declaredMergeCandidateCommands, runDeclaredMergeCandidateChecks, withTemporaryMergeCandidateCheckout } from "./merge-candidate-checks.js";
+import { appendRequiredMergeTypechecks, declaredMergeCandidateCommands, runDeclaredMergeCandidateChecks, withTemporaryMergeCandidateCheckout } from "./merge-candidate-checks.js";
 import { classifyMergeTargetDebt, classifyUnavailableMergeCheck, mergeCheckFailureFingerprint } from "./merge-target-debt.js";
 import { boundMergeGateEvidence, mergeGateOutputTail } from "./merge-failure-diagnostics.js";
 import { MERGE_CLOSEOUT_WORKTREE_PREFIX, MERGE_GATE_STORED_RESULTS, MERGE_GATE_TASK_RESERVE_MS, MERGE_GATE_WALL_BUDGET_MS, MERGE_TARGET_COMPARISON_OUTCOMES, MERGE_TARGET_DEBT_OUTCOMES, MERGE_TARGET_PROCEEDING_OUTCOMES } from "../../../catalog/verification.js";
@@ -1470,7 +1471,7 @@ export function createMergeWorkflowHelpers(context, {
         const registered = mergeCandidateRegisteredTests({ cwd, workItemId: wiId, scopeFiles: stagedFiles });
         const declaredCommands = wiId == null || registered.tests.length > 0
           ? [] : declaredMergeCandidateCommands(listJobsByWorkItem(wiId));
-        let candidateTests = registered.tests.length === 0 && declaredCommands.length === 0
+        let candidateTests = registered.tests.length === 0 && declaredCommands.length === 0 && implicitTypechecks(cwd, stagedFiles).length === 0
           ? { ok: true, matched: 0, passed: 0, failed: 0, results: [],
             summary: registered.scopeFiles.length === 0 ? "merge candidate has no changed files"
               : "no active registered tests match the merge candidate" }
@@ -1489,11 +1490,14 @@ export function createMergeWorkflowHelpers(context, {
                 },
               })
               : runDeclaredMergeCandidateChecks({ cwd, jobs: listJobsByWorkItem(wiId), git: gitMergeExec, candidate,
-                deadlineMs: gateDeadlineMs });
+                deadlineMs: gateDeadlineMs, scopeFiles: stagedFiles });
+            if (registered.tests.length > 0) tests = appendRequiredMergeTypechecks(tests, {
+              cwd, candidate, git: gitMergeExec, scopeFiles: stagedFiles, deadlineMs: gateDeadlineMs,
+            });
             if (!tests.ok && wiId != null) {
               const workItem = getWorkItem(wiId);
               const runCurrent = (initial, timeoutMs) => {
-                if (tests.source === "job_test_command") {
+                if (initial.source === "job_test_command" || tests.source === "job_test_command") {
                   const one = runDeclaredMergeCandidateChecks({
                     cwd, git: gitMergeExec,
                     jobs: [{ status: "succeeded", job_type: "dev", payload_json: JSON.stringify({ test_command: initial.test.name }) }],
@@ -1535,7 +1539,7 @@ export function createMergeWorkflowHelpers(context, {
                       candidateResult: result,
                       candidateCommit: candidate.candidateCommit,
                       targetHead: candidate.targetHead,
-                      rangeStart: tests.source === "job_test_command"
+                      rangeStart: result.source === "job_test_command" || tests.source === "job_test_command"
                         ? attributionRangeStart(result, candidate, workItem?.merge_base_hash)
                         : workItem?.merge_base_hash,
                       targetBranch,
@@ -1551,7 +1555,7 @@ export function createMergeWorkflowHelpers(context, {
               };
               const allowProvenDebt = getSetting(SETTING_KEYS.MERGE_TARGET_DEBT_AUTO_PROCEED) !== "false";
               tests.ok = allowProvenDebt && tests.results.every((result) => result.ok
-                || MERGE_TARGET_PROCEEDING_OUTCOMES.includes(result.target_debt_classification?.outcome));
+                || !result.implicit_typecheck && MERGE_TARGET_PROCEEDING_OUTCOMES.includes(result.target_debt_classification?.outcome));
               const outcomes = tests.results.filter((result) => !result.ok)
                 .map((result) => result.target_debt_classification?.outcome || MERGE_TARGET_COMPARISON_OUTCOMES.UNVERIFIED);
               tests.summary = `${tests.summary}; target comparison: ${outcomes.join(", ")}`;

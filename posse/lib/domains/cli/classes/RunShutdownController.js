@@ -1,3 +1,4 @@
+import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { closeRuntimeStateForExit } from "../functions/run-session.js";
 
 export class RunShutdownController {
@@ -77,7 +78,7 @@ export class RunShutdownController {
     } catch { /* forced shutdown continues */ }
   }
 
-  forceExit(label) {
+  async forceExit(label) {
     if (this.forceExitIssued) return;
     this.forceExitIssued = true;
     if (this.shutdownForceExitTimer) {
@@ -85,16 +86,18 @@ export class RunShutdownController {
       this.shutdownForceExitTimer = null;
     }
     this.uninstall();
-    try { this.stopDisplaySnapshotCaches?.(); } catch { /* best effort */ }
+    const snapshotsStopped = Promise.resolve().then(() => this.stopDisplaySnapshotCaches?.()).catch(() => {});
     try { this.getDisplay()?.stop?.(); } catch { /* best effort */ }
     try { this.scheduler?.requestStop?.(); } catch { /* best effort */ }
     // Workers never reach their graceful requeue once we exit, so hand this
     // owner's in-flight jobs and the scheduler lock back synchronously.
     try { this.scheduler?.releaseForForcedExit?.({ reason: label }); } catch { /* boot recovery remains */ }
-    this.observeAtlasCleanup(label);
+    const atlasStopped = Promise.resolve().then(() => this.cleanupAtlasForSession?.({ label })).catch(() => {});
     // The exit code must be set before the runtime state is closed so the
     // final shutdown record reflects this forced, non-zero exit.
     this.process.exitCode = 1;
+    await Promise.all([snapshotsStopped, atlasStopped, ThreadManager.drainAll({ timeoutMs: 0 })]);
+    await ThreadManager.drainAll({ timeoutMs: 0 });
     try { this.closeRuntimeState?.({ forced: true, reason: label }); } catch { /* best effort */ }
     this.exitProcess?.(1);
   }
@@ -173,8 +176,7 @@ export class RunShutdownController {
   cleanup() {
     this.sigintCount++;
     if (this.sigintCount >= 2) {
-      this.forceExit("Forced shutdown");
-      return;
+      return this.forceExit("Forced shutdown");
     }
 
     if (this.shutdownInProgress) return;
@@ -290,8 +292,9 @@ export class RunShutdownController {
         if (display) {
           try { console.log(`\n  ${this.C.green}Graceful shutdown complete.${this.C.reset}\n`); } catch { /* observational */ }
         }
-        try { this.closeRuntimeState?.(); } catch { /* best effort */ }
+        await ThreadManager.drainAll({ timeoutMs: 5000 });
         this.process.exitCode = 0;
+        try { this.closeRuntimeState?.(); } catch { /* best effort */ }
         this.exitProcess?.(0);
       }
     }

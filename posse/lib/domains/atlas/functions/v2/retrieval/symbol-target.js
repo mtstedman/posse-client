@@ -4,6 +4,7 @@ import { parseSymbolId } from "./cards.js";
 import { isCanonicalRepoPath } from "../paths.js";
 import {
   normalizedQualifiedIdentifier,
+  outerDeclarationForNestedNames,
   requestedIdentifierCandidates,
   resolveRequestedIdentifierSymbols,
   uniqueResolutionSymbols,
@@ -318,6 +319,8 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
       targets: recoveryTargets.sort(compareSymbolTargets),
     };
   }
+  const outer = outerDeclarationForNestedNames(matches, name, { caseSensitive: true });
+  if (outer) return { status: "selected", target: outer };
   const bearers = distinctQualifiedBearers(matches);
   if (bearers.size > 1) {
     return {
@@ -334,6 +337,8 @@ export async function selectSymbolRefTarget({ view, symbolRef, file }) {
   if (requestedFile) {
     const inFile = declarationsOverContainers(matches.filter((symbol) => symbol.repo_rel_path === requestedFile));
     const distinct = new Map(inFile.map((symbol) => [symbolTargetIdentity(symbol), symbol]));
+    const outerInFile = outerDeclarationForNestedNames([...distinct.values()], name, { caseSensitive: true });
+    if (outerInFile) return { status: "selected", target: outerInFile };
     if (distinct.size === 1) return { status: "selected", target: [...distinct.values()][0] };
     if (distinct.size > 1) {
       return {

@@ -368,7 +368,7 @@ export class FinalReviewRuntime {
       if (rejected) return this.#returnUnchangedReview(parent, rejected, prior);
       const workItem = getWorkItem(job.work_item_id);
       declaredPlan = this.resolveTestPlan(job, payload, { cwd: parent.cwd });
-      verificationIdentity = await this.verificationIdentity(parent.cwd);
+      verificationIdentity = await this.verificationIdentity(parent.cwd, { payload: parseJobPayload(getJob(parent.jobId)) });
       testRun = await this.runTestPlan(declaredPlan, {
         cwd: parent.cwd,
         timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS,
@@ -499,7 +499,7 @@ export class FinalReviewRuntime {
         reason: `The final review could not run (${String(error?.message || error).slice(0, 300)})`,
       };
     }
-    if (verificationIdentity && verificationIdentity !== await this.verificationIdentity(parent.cwd)) verificationIdentity = null;
+    if (verificationIdentity && verificationIdentity !== await this.verificationIdentity(parent.cwd, { payload: parseJobPayload(getJob(parent.jobId)) })) verificationIdentity = null;
     const recorded = [...prior, { review_mode: mode }];
     const reviewsRemaining = finalReviewReviewsRemaining(recorded);
     if (mode === MODES.DETERMINISTIC && finalReviewDeterministicRetriesLeft(recorded) === 0) {

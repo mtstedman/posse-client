@@ -227,6 +227,7 @@ export const EVENT_TYPES = Object.freeze({
   JOB_FILE_REQUEST_PARSED: "job.file_request_parsed",
   JOB_FILE_REQUEST_REJECTED: "job.file_request_rejected",
   JOB_FILE_REQUEST_SANITIZED_EMPTY: "job.file_request_sanitized_empty",
+  PLAN_SCOPE_OVERLAP: "plan.scope_overlap",
   PLAN_SCOPE_COMPLETED: "plan.scope_completed",
   PLAN_DEPENDENCY_SOFTENED: "plan.dependency_softened",
   JOB_SCOPE_GRANT_UNUSED: "job.scope_grant_unused",

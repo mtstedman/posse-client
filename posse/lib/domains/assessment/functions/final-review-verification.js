@@ -1,3 +1,4 @@
+import { finalReviewIdentityEvidence } from "./final-review-authority.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -9,8 +10,17 @@ import { effectiveVerificationPolicy } from "../../worker/functions/helpers/froz
 // Hash the effective source tree rather than HEAD or porcelain status: staging
 // and committing identical bytes do not invalidate verification. Dirty sibling
 // files are included, so changing test inputs cannot borrow the earlier run.
-export async function finalReviewVerificationIdentity(cwd) {
+export async function finalReviewVerificationIdentity(cwd, { payload = null, commit = null } = {}) {
   try {
+    if (payload) {
+      const evidence = await finalReviewIdentityEvidence(cwd, payload, { commit });
+      return createHash("sha256").update(JSON.stringify({
+        scope: evidence.identity,
+        environment: environmentFilesFingerprint(cwd),
+        toolchain: toolchainFingerprint(describeToolchain({ projectDir: cwd })),
+        policy: effectiveVerificationPolicy({ cwd }).fingerprint,
+      })).digest("hex");
+    }
     const index = String(await gitExecAsync(["ls-files", "--stage", "-z"], cwd, { trim: false }));
     const entries = new Map();
     for (const row of index.split("\0").filter(Boolean)) {

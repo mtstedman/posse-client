@@ -1,5 +1,6 @@
 // @ts-check
 // Owns the remote catalog, pricing cache, persistence state and lazy settings load.
+import { isMainThread } from "node:worker_threads";
 import { normalizeName, reviveStoredCatalog, MODEL_CATALOG_SETTING_KEY, MODEL_CATALOG_FETCHED_AT_SETTING_KEY, MAX_PERSISTED_JSON_BYTES } from "../functions/model-catalog-normalize.js";
 
 export class ModelCatalogStore {
@@ -10,6 +11,7 @@ export class ModelCatalogStore {
   _settingsApiPromise = null;
 
   ensureSettingsApiLoading() {
+    if (!isMainThread) return null;
     if (this._settingsApi || this._settingsApiPromise) return this._settingsApiPromise;
     this._settingsApiPromise = import("../../settings/functions/account-settings.js")
       .then((mod) => {

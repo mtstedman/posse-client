@@ -1,3 +1,4 @@
+import { nativeWorkerSettings } from "../../../shared/native/functions/worker-settings.js";
 // lib/domains/git/functions/workflow-context.js
 // Shared context for git workflow helper factories.
 
@@ -96,6 +97,7 @@ export function createGitWorkflowContext({
         timeoutMs: effectiveTimeoutMs,
         signal,
         workerData: {
+          ...nativeWorkerSettings(projectDir),
           task,
           args,
           projectDir,

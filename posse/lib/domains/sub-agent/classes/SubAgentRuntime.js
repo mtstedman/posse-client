@@ -1,3 +1,4 @@
+import { mergeOverlappingResearchBriefs } from "../functions/research-brief-overlap.js";
 import { expandResearchChildHandoff, researchChildHandoffMismatch } from "../../handoff/functions/helpers/runtime-handoff-input.js";
 import { RESEARCH_CHILD_PROFILE, RESEARCH_REPORT_OBJECT_TYPE, SUB_AGENT_OBSERVATION_TYPES } from "../../../catalog/sub-agent.js";
 import {
@@ -1118,7 +1119,8 @@ function publicBatch(batch, { includeResults = false } = {}) {
     batch_id: batch.id,
     mode: batch.mode,
     status: batch.status,
-    requests: batch.entries.map((entry) => ({ id: entry.id, input_index: entry.inputIndex, handle: entry.handle, status: entry.status })),
+    requests: batch.entries.map((entry) => ({ id: entry.id, input_index: entry.inputIndex, handle: entry.handle, status: entry.status,
+      ...(entry.mergedRequestIds?.length > 1 ? { merged_request_ids: entry.mergedRequestIds } : {}) })),
     ...(includeResults ? { results: batch.entries.map((entry) => ({ input_index: entry.inputIndex, ...publicEntry(entry) })) } : {}),
     ...(includeResults && batch.researchExpansion ? { research_expansion: batch.researchExpansion } : {}),
     ...(batch.repairs?.length > 0 ? { repairs: batch.repairs } : {}),
@@ -1850,7 +1852,7 @@ export class SubAgentRuntime {
         executeInput: registration.executeInput,
       };
     };
-    const normalized = input.requests.map((raw, inputIndex) => {
+    let normalized = input.requests.map((raw, inputIndex) => {
       try { return { ...normalizeRequest(raw, inputIndex), inputIndex }; }
       catch (error) {
         if (input.requests.length === 1) throw error;
@@ -1858,6 +1860,8 @@ export class SubAgentRuntime {
           inputIndex, profile: raw?.profile, inputs: [], maxInputs: 0, validationError: safeError(error) };
       }
     });
+    normalized = mergeOverlappingResearchBriefs(normalized, (overlap) => recordResearchChildObservation(
+      context, SUB_AGENT_OBSERVATION_TYPES.BRIEF_OVERLAP, "Merged overlapping research briefs", overlap));
     const runnable = normalized.filter((request) => !request.validationError);
     const existingBatch = this.#priorBatch(parentCallId, registration, digest, researchRequest, runnable.length);
     if (existingBatch) return await this.#replayBatch(existingBatch);

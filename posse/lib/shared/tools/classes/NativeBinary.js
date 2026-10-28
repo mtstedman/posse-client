@@ -1673,6 +1673,7 @@ export class NativeBinary {
 
   /** Fire-and-forget background mint so a later sync call finds a cached pulse. */
   #warmPulse(route, workItemContext = null) {
+    if (process.env.POSSE_HOOK_CONTEXT) return;
     try {
       void Promise.resolve(
         this.#pulseManager().getPulseEnvelope({

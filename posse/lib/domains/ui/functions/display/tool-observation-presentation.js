@@ -1,3 +1,4 @@
+import { isReadNotFoundProbe } from "../../../observability/functions/read-not-found.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { _sanitizeDisplayLine } from "./helpers/formatters.js";
 import { canonicalAtlasActionName } from "../../../../shared/tools/functions/mcp-surface.js";
@@ -13,6 +14,7 @@ import { canonicalAtlasActionName } from "../../../../shared/tools/functions/mcp
 // as a fallback for rows that never recorded an outcome (ok == null): legacy
 // observation logs and replay rows, where the summary text is the only signal.
 function monitorToolMeta(row = {}) {
+  if (isReadNotFoundProbe(row)) return { glyph: "·", color: C.dim, label: "not found", outcome: row.outcome || "rejected" };
   const outcome = String(row.outcome || "").trim().toLowerCase();
   if (outcome === "rejected") return { glyph: "\u2298", color: C.yellow, label: "rejected", outcome };
   if (outcome === "failed") return { glyph: "\u2715", color: C.red, label: "failed", outcome };

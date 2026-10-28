@@ -1064,9 +1064,10 @@ export async function ensurePreDevelopmentTestBaseline({
       typeof repairDependencies === "function" ? (unavailable) => repairDependencies(unavailable, executionCwd) : null,
       (dependencyRepair) => runBaseline(dependencyRepair));
   };
-  // A sibling placeholder is one instance of dirty shared state. Test HEAD
-  // in isolation rather than special-casing filenames or ignoring dirty bytes.
-  return headPorcelain && headCommit && !useLineageProjection
+  // Always pin the baseline before execution: a clean shared tree can become
+  // dirty between this check and the test runner starting. Lineage projections
+  // also run in the detached checkout and never restore over sibling edits.
+  return headCommit
     ? withBaselineCheckout({ cwd, commit: headCommit, run: runAt })
     : runAt(cwd, cleanupWorktree);
 }

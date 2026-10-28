@@ -1,3 +1,6 @@
+import { repositorySourceInventory } from "./repository-source-size.js";
+import { discoverCheckCommands } from "../../verification/functions/check-command-discovery.js";
+import { RESEARCH_DIRECT_PATH_MAX_SOURCE_BYTES } from "../../../catalog/research-routing.js";
 import { readPlannerDispatchPolicy } from "../../planning/functions/planner-dispatch-policy.js";
 import { providerHonorsMcpToolDeadline } from "../../../catalog/provider.js";
 import { getDefaultModelTierForRole, getProviderPoolForRole, roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
@@ -12,7 +15,7 @@ import { getDefaultModelTierForRole, getProviderPoolForRole, roleExecutionForBud
 import fs from "node:fs";
 import path from "path";
 
-import { createJob, logEvent, refreshWorkItemStatus, storeArtifact, updateWorkItemMetadata, updateWorkItemResearchSkip } from "../../queue/functions/index.js";
+import { getSetting, createJob, logEvent, refreshWorkItemStatus, storeArtifact, updateWorkItemMetadata, updateWorkItemResearchSkip } from "../../queue/functions/index.js";
 import { ensureProjectMap, getCachedProjectMap } from "../../project/functions/map.js";
 import { gitExec } from "../../git/functions/utils.js";
 import { parseWorkItemMetadata } from "../../planning/functions/state.js";
@@ -322,7 +325,8 @@ export function classifyResearchForRouting({
 } = {}) {
   const metadata = workItem ? parseWorkItemMetadata(workItem) : {};
   const hints = intakeHints ?? metadata.intake_hints ?? {};
-  const projectMap = metadata.research_project_map || getProjectMapForResearchRouting(projectDir);
+  const projectMap = { ...(metadata.research_project_map || getProjectMapForResearchRouting(projectDir) || {}),
+    ...repositorySourceInventory(projectDir), candidate_check_commands: discoverCheckCommands(projectDir) };
   if (live && workItem?.id && projectMap && !metadata.research_project_map) {
     try {
       updateWorkItemMetadata(workItem.id, { ...metadata, research_project_map: projectMap });
@@ -335,6 +339,7 @@ export function classifyResearchForRouting({
     description: description ?? workItem?.description ?? "",
     intakeHints: hints,
     projectMap,
+    directPathMaxSourceBytes: Number(getSetting("research_direct_path_max_source_bytes") ?? RESEARCH_DIRECT_PATH_MAX_SOURCE_BYTES),
     mode: mode ?? workItem?.mode ?? metadata.mode ?? null,
   });
 

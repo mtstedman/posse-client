@@ -20,11 +20,13 @@ export async function prepareFinalReviewWrapUp({ job, cwd, committedHash, commit
   if (payload.task_mode && payload.task_mode !== "code") return null;
   const review = latestFinalReview(job.id);
   const evidence = review?.verification_evidence;
+  if (!evidence?.declared_tests && !evidence?.changed_tests && !evidence?.scoped_checks) return null;
+  const revision = committedHash || await currentCommit(cwd);
+  const verificationIdentity = () => finalReviewVerificationIdentity(cwd, { payload, commit: revision });
   if (review?.outcome !== "pass" || !evidence?.identity || !Object.hasOwn(evidence, "scoped_checks")
-    || evidence.identity !== await finalReviewVerificationIdentity(cwd)) return null;
+    || evidence.identity !== await verificationIdentity()) return null;
   const verdict = await authoritativeFinalReview(job, payload, cwd);
   if (verdict?.verdict !== "pass" || !await finalReviewedFilesCommitted(job, payload, cwd)) return null;
-  const revision = committedHash || await currentCommit(cwd);
   const reviewedCompletion = await prepareReviewedFileCompletion(job, cwd, {
     committedHash: revision, commitBaseHash, filesCommitted, verifiedNoChange,
   });
@@ -43,6 +45,6 @@ export async function prepareFinalReviewWrapUp({ job, cwd, committedHash, commit
     changed_tests: evidence.changed_tests, scoped_checks: evidence.scoped_checks,
     verification_eligible: plan.verification_eligible !== false,
     reused: true, reuse_source: "final_review", created_at: new Date().toISOString() };
-  if (!isLeaseValid(job.id, leaseToken) || evidence.identity !== await finalReviewVerificationIdentity(cwd)) return null;
+  if (!isLeaseValid(job.id, leaseToken) || evidence.identity !== await verificationIdentity()) return null;
   return { verdict, reviewedCompletion, receipt };
 }

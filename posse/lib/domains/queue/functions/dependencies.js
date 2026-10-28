@@ -57,8 +57,10 @@ export function addDependency(jobId, dependsOnId, kind = "hard") {
       return false;
     }
     const result = db.prepare(`
-      INSERT OR IGNORE INTO job_dependencies (job_id, depends_on_job_id, dependency_kind)
+      INSERT INTO job_dependencies (job_id, depends_on_job_id, dependency_kind)
       VALUES (?, ?, ?)
+      ON CONFLICT(job_id, depends_on_job_id) DO UPDATE SET dependency_kind = 'hard'
+      WHERE excluded.dependency_kind = 'hard' AND job_dependencies.dependency_kind = 'soft'
     `).run(jobId, dependsOnId, kind);
     if ((result?.changes || 0) > 0) {
       const job = readJob(jobId);

@@ -27,7 +27,7 @@ export async function prepareReviewedFileCompletion(job, cwd, {
   const review = latestFinalReview(job.id);
   if (review?.outcome !== "pass" || !review.review_identity || !review.agent_call_id || !review.attempt_id) return null;
   if ((await authoritativeFinalReview(job, payload, cwd))?.verdict !== "pass") return null;
-  const evidence = await finalReviewIdentityEvidence(cwd, payload, { jobId: job.id });
+  const evidence = await finalReviewIdentityEvidence(cwd, payload, { jobId: job.id, commit: committedHash });
   if (evidence.identity !== review.review_identity) return null;
   // Ignored/non-file inputs cannot be represented by a pinned Git object.
   if (evidence.scoped.length !== scope.files.size
@@ -53,9 +53,8 @@ export async function prepareReviewedFileCompletion(job, cwd, {
     const repoPath = `${prefix}${file}`;
     const object = await reviewedFileObject(cwd, revision, repoPath);
     if (object?.mode === "120000" || (object == null && evidence.states.find((state) => state[0] === file)?.[1] != null)) return null;
-    // A sibling may have committed elsewhere since closeout's commit. Only
-    // the bound paths must still match; never substitute its mutable HEAD.
-    if (!sameReviewedObject(object, await reviewedFileObject(cwd, head, repoPath))) return null;
+    // The receipt binds the reviewed revision. Sibling commits are verified
+    // by their own receipts and by the eventual WI merge gate.
     if (scope.files.has(file)) {
       const before = await reviewedFileObject(cwd, base, repoPath);
       entries.push({ path: file, repo_path: repoPath, base: before, object,

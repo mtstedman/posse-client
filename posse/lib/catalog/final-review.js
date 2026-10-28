@@ -120,6 +120,10 @@ export const FINAL_REVIEW_OBSERVATIONS = Object.freeze({
   // The agent call was issued the tool; the handoff gate applies to it.
   ISSUED: "final_review.issued",
   RESULT: "final_review.result",
+  SOURCE_READS: "review.source_reads",
 });
 
 export const FINAL_REVIEW_CHILD_KIND = "final_review";
+
+export const FINAL_REVIEW_SOURCE_READ_TYPES = Object.freeze(["tool.read", "tool.chain_read", "tool.read.not_found"]);
+export const FINAL_REVIEW_SOURCE_READ_ACTIONS = Object.freeze(["symbol.get", "fetch_ref", "code.window", "code.lens", "code.skeleton"]);

@@ -1,3 +1,5 @@
+import { readNotFoundProbe } from "./read-not-found.js";
+import { READ_NOT_FOUND_OBSERVATION } from "../../../catalog/observation.js";
 import { isDiagnosticObservation } from "../../../catalog/diagnostic-logging.js";
 import { advancedLoggingEnabled } from "../../../shared/telemetry/functions/diagnostic-logging.js";
 import { TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
@@ -1157,6 +1159,19 @@ export function finishToolInvocation(invocation, {
       ...(rejection ? { rejection_reason: String(rejection).slice(0, 200) } : {}),
       ...(agentCallId != null ? { agent_call_id: agentCallId } : {}),
     };
+    if (summary.observation_type === "tool.read" && /File not found/i.test(String(error || rejection || resultSummary || ""))) {
+      const jobId = job_id ?? context.job_id;
+      const row = jobId ? getDb().prepare("SELECT payload_json FROM jobs WHERE id = ?").get(jobId) : null;
+      let payload = null;
+      try { payload = jobId ? row && JSON.parse(row.payload_json || "{}") : {}; } catch { /* unknown scope remains an error */ }
+      if (readNotFoundProbe({ type: summary.observation_type, error: error || rejection || resultSummary,
+        file: summary.detail?.path, cwd, payload })) {
+        summary.observation_type = READ_NOT_FOUND_OBSERVATION;
+        detail.severity = "info";
+        detail.reason = "not_found";
+        detail.declared_scope = false;
+      }
+    }
     recordObservation({
       work_item_id: work_item_id ?? context.work_item_id ?? null,
       job_id: job_id ?? context.job_id ?? null,

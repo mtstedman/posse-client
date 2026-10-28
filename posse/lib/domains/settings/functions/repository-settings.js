@@ -1,3 +1,4 @@
+import { isMainThread, workerData } from "node:worker_threads";
 import path from "path";
 
 import { gitExec } from "../../git/functions/utils.js";
@@ -67,6 +68,7 @@ function catalogDefaultFor(key) {
 
 export function getSetting(key, options = {}) {
   const normalizedKey = String(key);
+  if (!isMainThread && workerData?.settingsSnapshot) return workerData.settingsSnapshot[normalizedKey] ?? null;
   const opts = normalizeOptions(options);
   if (REPO_SCOPED_SETTING_KEYS.has(normalizedKey)) {
     const repoValue = getAccountRepoSetting(normalizedKey, resolveRepoSettingPath(opts.projectDir));

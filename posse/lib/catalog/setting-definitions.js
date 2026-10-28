@@ -213,6 +213,8 @@ export const SETTING_DEFINITIONS = [
   { key: "snapshot_max_refs", default: "500", numeric: { integer: true, min: 0 }, description: "Maximum recovered snapshot refs to retain" },
   { key: "snapshot_dedup", default: "true", valueType: "boolean", description: "Reuse duplicate recovered dirty-worktree snapshots" },
   { key: "web_tools_enabled",    default: "true", valueType: "boolean", description: "Allow web research tools (Claude WebSearch/WebFetch, Codex web_search) for researcher, assessor, dev (fallback for missing external facts), and native-team roles, and the artificer's download_file tool" },
+  { key: "research_direct_path_max_source_bytes", default: "131072", numeric: { integer: true, min: 0 }, description: "Source/test byte ceiling for direct planning without research children (0 disables)" },
+  { key: "final_reviewer_provider", default: "claude", options: PROVIDER_OPTIONS, description: "Provider for final review, independent of the developer provider" },
   { key: "research_fanout",      default: "off", options: RESEARCH_FANOUT_MODE_VALUES, description: "Research fanout mode for preflight fanout-clear decisions (off, shadow, on)" },
   { key: "final_review_mode", default: FINAL_REVIEW_DEFAULT_MODE, scope: "repo", options: FINAL_REVIEW_MODES, description: "Dev/fix close-out: before a COMPLETE handoff the agent calls final_review, which runs the declared tests and an independent read-only review and returns findings to fix" },
   { key: "research_claim_review", default: "off", scope: "repo", options: RESEARCH_CLAIM_REVIEW.modes, description: "Bounded source-backed review of committed research claims; shadow records findings and usage without changing the report" },

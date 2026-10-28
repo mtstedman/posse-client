@@ -1,3 +1,4 @@
+import { mergeEvidenceCatalog } from "./merged-packet-evidence.js";
 import { packetEvidence } from "./packet-evidence.js";
 
 function failStoredPacket(message) {
@@ -33,12 +34,9 @@ function mapStoredPacketEvidence(packet, mapEvidence) {
 }
 
 export function serializeStoredAgentHandoffPacket(packet) {
-  const evidenceCatalog = packetEvidence(packet);
+  const { catalog: evidenceCatalog, pointers } = mergeEvidenceCatalog(packetEvidence(packet));
   if (evidenceCatalog.length === 0) return JSON.stringify(packet);
-  const evidenceIds = new Map(evidenceCatalog.map((evidence, index) => [evidence.selector, index]));
-  const stored = mapStoredPacketEvidence(packet, (evidence) => ({
-    evidence_id: evidenceIds.get(evidence.selector),
-  }));
+  const stored = mapStoredPacketEvidence(packet, (evidence) => pointers.get(evidence.selector));
   stored.evidence_catalog = evidenceCatalog;
   return JSON.stringify(stored);
 }
@@ -61,6 +59,12 @@ export function parseStoredAgentHandoffPacket(materializedJson) {
       : null;
     if (!evidence) {
       failStoredPacket("Stored agent_handoff evidence pointer is missing");
+    }
+    if (pointer.original) {
+      const offset = pointer.excerpt_offset, count = pointer.excerpt_lines;
+      if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(count) || count < 1
+        || offset + count > evidence.excerpt.split("\n").length) failStoredPacket("Invalid merged evidence range");
+      return { ...pointer.original, excerpt: evidence.excerpt.split("\n").slice(offset, offset + count).join("\n") };
     }
     return evidence;
   });

@@ -67,7 +67,7 @@ function ensureExitHook() {
 export function closeRunTelemetryForProcessExit(code = process.exitCode) {
   const parsed = Number(code ?? 0);
   const exitCode = Number.isInteger(parsed) ? parsed : 1;
-  closeRunTelemetry({ cleanExit: exitCode === 0, exitCode });
+  closeRunTelemetry({ cleanExit: exitCode === 0, exitCode, processExit: true });
 }
 
 export function getRunTelemetryId() {
@@ -260,7 +260,7 @@ export function appendRunTelemetry(stream, entry = {}, { runId = RUN_ID } = {}) 
   }
 }
 
-export function closeRunTelemetry({ cleanExit = true, exitCode = undefined } = {}) {
+export function closeRunTelemetry({ cleanExit = false, exitCode = undefined, processExit = false } = {}) {
   const dirs = new Set(_manifestDirs);
   for (const stream of _streams.values()) {
     if (stream?.runDir === getRunTelemetryDir()) dirs.add(stream.runDir);
@@ -269,7 +269,7 @@ export function closeRunTelemetry({ cleanExit = true, exitCode = undefined } = {
     }
   }
   _streams.clear();
-  _manifestDirs.clear();
+  if (processExit || !cleanExit) _manifestDirs.clear();
   if (isMainThread && !INHERITED_RUN_ID) {
     for (const runDir of dirs) {
       const manifest = readManifest(runDir);
@@ -280,13 +280,13 @@ export function closeRunTelemetry({ cleanExit = true, exitCode = undefined } = {
       }
       updateManifest(runDir, {
         ended_at: nowIso(),
-        clean_exit: !!cleanExit,
+        clean_exit: processExit && !!cleanExit,
         ...(exitCode !== undefined ? { exit_code: exitCode } : {}),
       }, _activeLifecycleOwnerToken
         ? { expectedLifecycleOwnerToken: _activeLifecycleOwnerToken }
         : {});
     }
-    _activeLifecycleOwnerToken = null;
+    if (processExit || !cleanExit) _activeLifecycleOwnerToken = null;
   }
 }
 

@@ -1181,6 +1181,10 @@ function _skillBudgetChars() {
 }
 
 function _logSkillEvent(packet, eventType, message, eventJson = {}) {
+  if ([EVENT_TYPES.SKILL_ATTACHED, EVENT_TYPES.SKILL_SKIPPED_DISABLED].includes(eventType)) {
+    log.debug("handoff", message, { ...eventJson, job_id: packet.job_id || null });
+    return;
+  }
   try {
     logEvent({
       work_item_id: packet.work_item_id || null,

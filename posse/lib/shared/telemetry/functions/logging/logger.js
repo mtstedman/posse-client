@@ -1,3 +1,4 @@
+import { isMainThread, workerData } from "node:worker_threads";
 // lib/logger.js — Structured file logger for post-mortem debugging
 //
 // Writes JSON-lines to logs/posse-{date}.log. Supplements the DB event log
@@ -22,7 +23,7 @@ const DEFAULT_MIN_LEVEL = LEVELS.info;
 
 function minLevel() {
   try {
-    const level = String(getAccountSetting("posse_log_level") || "info").trim().toLowerCase();
+    const level = String((isMainThread ? getAccountSetting("posse_log_level") : workerData?.posse_log_level) || "info").trim().toLowerCase();
     if (LEVELS[level] != null) return LEVELS[level];
   } catch {
     // Account settings may not be ready during early boot.

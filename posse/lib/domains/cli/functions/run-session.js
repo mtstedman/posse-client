@@ -298,7 +298,7 @@ export function createAsyncSnapshotCache({
   return {
     get: () => value,
     refresh,
-    stop: () => { stopped = true; },
+    stop: () => { stopped = true; return inFlight || Promise.resolve(value); },
   };
 }
 
@@ -340,7 +340,7 @@ export function closeRuntimeStateForExit({ forced = false, reason = null } = {})
   // Last line of a run: without it a clean exit and a crash look the same.
   try {
     if (forced) log.warn("run", "Forced shutdown recorded", { exitCode: process.exitCode ?? 1, reason });
-    else log.info("run", "Clean shutdown recorded", { exitCode: process.exitCode ?? 0 });
+    else log.info("run", "Runtime shutdown recorded", { exitCode: process.exitCode ?? 0 });
   } catch { /* best effort */ }
   try { flushEventsNow(); } catch { /* best effort */ }
   try { closePromptLog(); } catch { /* best effort */ }

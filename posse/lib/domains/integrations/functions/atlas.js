@@ -235,7 +235,7 @@ function buildAtlasPostCommitHookBlock(repoCwd) {
     `    if command -v "$NODE_BIN" >/dev/null 2>&1; then POSSE_ATLAS_NODE_BIN="$NODE_BIN"; else POSSE_ATLAS_NODE_BIN=${shQuote(process.execPath)}; fi`,
     `    {`,
     `      echo "--- $(date -u +%FT%TZ) commit=$(git rev-parse --short HEAD 2>/dev/null) ---"`,
-    `      "$POSSE_ATLAS_NODE_BIN" ${shQuote(modulePath)} ${shQuote(repoCwd)} --merge-only`,
+    `      POSSE_HOOK_CONTEXT=1 "$POSSE_ATLAS_NODE_BIN" ${shQuote(modulePath)} ${shQuote(repoCwd)} --merge-only`,
     `      echo "[exit=$?]"`,
     `    } >> "$POSSE_ATLAS_LOG" 2>&1`,
     `  ) || true`,

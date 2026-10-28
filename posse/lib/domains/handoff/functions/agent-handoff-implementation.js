@@ -1,3 +1,4 @@
+import { mergeEvidenceCatalog } from "./helpers/merged-packet-evidence.js";
 import { AGENT_HANDOFF_ALIAS_POLICY, AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY, AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES, AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS, AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PLANNER_CONTRACT_KEYS, AGENT_HANDOFF_PLANNER_CONTRACT_VERSION, AGENT_HANDOFF_PLANNER_DEPENDENCY_EDGE_POLICIES, AGENT_HANDOFF_PLANNER_REPORT_KEYS, AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS, AGENT_HANDOFF_PROFILE_POLICY, AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_PROTOCOL, AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY, AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES, AGENT_HANDOFF_RESEARCH_PROSE_FIELDS, AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES, AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR } from "../../../catalog/handoff.js";
 import { parseAgentHandoffEvidenceSelector, normalizedLines } from "./helpers/evidence-selector.js";
 import { fetchHashRefForContext, findFetchedHashRefViewsForContext, findVisibleHashRefSourceWindowsForContext, materializeHashRefEvidenceForContext, surfaceHashRefForContext } from "../../queue/functions/hash-refs.js";
@@ -3879,7 +3880,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   validatePlannerPacketSemantics(semanticPacket, { context: materializationContext });
   validatePlannerCompatibilityTasks(semanticPacket);
   validateCitationChildPacketSemantics({ profile, outcome, handoffs });
-  const uniqueEvidence = packetEvidence({ handoffs });
+  const uniqueEvidence = mergeEvidenceCatalog(packetEvidence({ handoffs })).catalog;
   const evidenceChars = uniqueEvidence.reduce(
     (total, evidence) => total + String(evidence?.excerpt || "").length,
     0,

@@ -8,8 +8,8 @@
 import { isLoopbackHostname } from "../../platform/functions/hostname.js";
 export { isLoopbackHostname } from "../../platform/functions/hostname.js";
 
-import { getSetting } from "../../../domains/queue/functions/index.js";
-import { POSSE_REMOTE_DEFAULT_URL } from "../../../domains/remote/functions/mode.js";
+import { getAccountSetting as getSetting } from "../../../domains/settings/functions/account-settings.js";
+import { POSSE_REMOTE_DEFAULT_URL } from "../../../catalog/remote.js";
 
 export const NATIVE_HEARTBEAT_SETTING_KEYS = Object.freeze({
   heartbeatUrl: "posse_native_heartbeat_url",

@@ -1,3 +1,4 @@
+import { isMainThread } from "node:worker_threads";
 import { settingsChangeNotifier } from "./SettingsChangeNotifier.js";
 import fs from "fs";
 import os from "os";
@@ -669,6 +670,7 @@ export class AccountSettings {
 let _defaultAccountSettings = null;
 
 export function getDefaultAccountSettings() {
+  if (!isMainThread) throw new Error("Account settings are owned by the main thread; pass resolved settings to workers");
   if (!_defaultAccountSettings) _defaultAccountSettings = new AccountSettings();
   return _defaultAccountSettings;
 }

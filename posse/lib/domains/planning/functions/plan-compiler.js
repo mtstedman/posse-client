@@ -1,3 +1,4 @@
+import { serializePlanScopeOverlaps } from "./plan-scope-overlap.js";
 import { completeTaskScope, plannerDependencyKind } from "./plan-scope-dependencies.js";
 import { planningEnvironmentReadiness } from "../../system/functions/planning-environment-state.js";
 import { plannedTaskDedupeKey } from "./planned-task-dedupe.js";
@@ -2434,6 +2435,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       routeDependentsAroundPostMergeDbTasks();
       wirePlannerDependencies();
       propagateDroppedPlannerDependencies();
+      serializePlanScopeOverlaps([...allCreatedJobIds].map((id) => getJob(id)).filter((job) => job && job.status !== "canceled"));
 
       if (createdCount === 0) {
         if (underScopedDroppedTitles.length > 0) {

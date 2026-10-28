@@ -217,13 +217,13 @@ function splitFailures(failures, changed, added = new Map()) {
  * The assessment harness's changed-file lint/typecheck, run on the current
  * workspace. Null when no changed file exists to check.
  */
-export function runChangedFileChecks(cwd, change, { runChecks = runScopedChecks } = {}) {
+export function runChangedFileChecks(cwd, change, { runChecks = runScopedChecks, checkKinds = FINAL_REVIEW_CHECKS } = {}) {
   if (!cwd) return null;
   const files = existingChangedFiles(cwd, change).slice(0, FINAL_REVIEW_CHECK_MAX_FILES);
   if (files.length === 0) return null;
   let result;
   try {
-    result = runChecks({ cwd, args: { checks: [...FINAL_REVIEW_CHECKS], scope: { files } } });
+    result = runChecks({ cwd, args: { checks: [...checkKinds], scope: { files } } });
   } catch (error) {
     return {
       status: "unavailable",
@@ -255,7 +255,8 @@ function tail(text, max) {
 /** The reviewer's view of the changed-file checks; null when none ran. */
 export function renderChangedFileChecks(checks) {
   if (!checks) return null;
-  const head = `CHANGED-FILE CHECKS (${FINAL_REVIEW_CHECKS.join(", ")} on ${checks.files.length} changed file(s)): ${checks.status.toUpperCase()}${checks.summary ? `, ${checks.summary}` : ""}.`;
+  const implicit = (checks.implicit_typechecks || []).map(check => `Required typecheck: ${check.command}: ${check.status}\n${check.output}`).join("\n");
+  const head = implicit + `\nCHANGED-FILE CHECKS (${FINAL_REVIEW_CHECKS.join(", ")} on ${checks.files.length} changed file(s)): ${checks.status.toUpperCase()}${checks.summary ? `, ${checks.summary}` : ""}.`;
   if (checks.status !== "failed") return head;
   const block = (entries) => `\`\`\`text\n${tail(entries.map((entry) => `[${entry.check}] ${entry.text}`).join("\n"), FINAL_REVIEW_TEST_OUTPUT_MAX_CHARS)}\n\`\`\``;
   return [
@@ -277,7 +278,9 @@ export function renderChangedFileChecks(checks) {
  * changed file may predate the change, so the reviewer judges it instead.
  */
 export function finalReviewCheckFindings({ checks = null, changedTestRun = null, addedTestPaths = [] } = {}) {
-  const findings = [];
+  const findings = (checks?.implicit_typechecks || []).filter(check => check.status === "failed").map(check => ({
+    severity: "high", criterion: `Required typecheck fails (${check.command}):\n${check.output}`.slice(0, 1000),
+  }));
   const byCheck = new Map();
   for (const entry of checks?.introduced || []) {
     const prior = byCheck.get(entry.check) || { texts: [], files: [] };

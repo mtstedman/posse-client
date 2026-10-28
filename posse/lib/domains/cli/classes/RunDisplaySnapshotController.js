@@ -107,16 +107,14 @@ export class RunDisplaySnapshotController {
     return pipelineHasSession(pipeline.get()) || this.monitorPipelineTicks % 10 === 0;
   }
 
-  stop() {
+  async stop() {
     for (const timer of this.timers) clearInterval(timer);
     this.timers.clear();
-    this.caches?.dirty?.stop?.();
-    this.caches?.pipeline?.stop?.();
-    this.caches?.tools?.stop?.();
+    const pending = Object.values(this.caches || {}).map((cache) => cache.stop());
     this.caches = null;
     const worker = this.snapshotWorker;
     this.snapshotWorker = null;
-    return worker?.stop();
+    await Promise.all([...pending, worker?.stop()]);
   }
 
   trackTimer(timer) {

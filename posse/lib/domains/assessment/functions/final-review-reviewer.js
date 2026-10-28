@@ -1,3 +1,5 @@
+import { recordReviewSourceReads } from "./review-source-reads.js";
+import { SETTING_KEYS } from "../../../catalog/settings.js";
 // Run the final review's reviewer: a fresh, read-only assessor child call of
 // the developer's agent call. Its prompt is the remote assessor composition
 // for the job plus the local snapshot; it reads files with its issued read
@@ -6,7 +8,7 @@
 // handoff, subject to deterministic scope, identity, and verification checks.
 
 import { getJob, getWorkItem } from "../../queue/functions/index.js";
-import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole } from "../../settings/functions/repository-settings.js";
+import { getSetting, getDefaultReasoningEffortForRole } from "../../settings/functions/repository-settings.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { buildHandoffPacket, handoff } from "../../handoff/functions/index.js";
 import { getAgentHandoffRecord } from "../../handoff/functions/agent-handoff-records.js";
@@ -53,7 +55,8 @@ async function runFinalReviewerInContext({
   if (!job) throw new Error(`Job #${jobId} no longer exists`);
   const payload = parseJobPayload(job);
   const assessorPolicy = payload._execution_policy?.assessor;
-  const tier = payload._assess_model_tier || assessorPolicy?.model_tier || getDefaultModelTierForRole("assessor");
+  providerName = finalReviewerProvider(cwd);
+  const tier = "cheap";
   const effort = payload._assess_reasoning_effort || assessorPolicy?.reasoning_effort || getDefaultReasoningEffortForRole("assessor");
   const packet = buildHandoffPacket(job, {
     workItem: getWorkItem(workItemId),
@@ -92,6 +95,7 @@ async function runFinalReviewerInContext({
   const wallExpired = () => wallSignal.aborted && !abortSignal?.aborted;
   const wallError = () => Object.assign(new Error("the reviewer reached its time limit before reporting"),
     { code: "FINAL_REVIEW_REVIEWER_WALL" });
+  let reviewerCallId = null;
   const result = await call([composed, modeInstructions, evidence].filter(Boolean).join("\n\n"), {
     role: "assessor",
     modelTier: tier === "strong" ? "standard" : tier,
@@ -112,7 +116,7 @@ async function runFinalReviewerInContext({
     remoteSystemPrompt: packet.remote_system_prompt || null,
     abortSignal: reviewerSignal,
     cwd,
-    _onAgentCallCreated: onAgentCallCreated,
+    _onAgentCallCreated: (id) => { reviewerCallId = id; onAgentCallCreated?.(id); },
     _parentAgentCallId: parentAgentCallId,
     _childKind: AGENT_CALL_CHILD_KINDS.FINAL_REVIEW,
     _agentCallRole: AGENT_CALL_ROLE_LABELS.FINAL_REVIEWER,
@@ -125,7 +129,9 @@ async function runFinalReviewerInContext({
     jobModelName: null,
     // The reviewer must not move the developer job's provider/model pin.
     persistJobProvider: false,
-  }).catch((error) => { throw wallExpired() ? wallError() : error; });
+  }).then(result => { reviewerCallId ??= result?.agentCallId; return result; })
+    .catch((error) => { throw wallExpired() ? wallError() : error; })
+    .finally(() => recordReviewSourceReads({ agentCallId: reviewerCallId, jobId, workItemId, attemptId, provider: providerName }));
   if (wallExpired()) throw wallError();
   const { _normalizeAssessorVerdictShape } = await import("../../worker/functions/helpers/assessment-pipeline.js");
   let parsed = extractJsonResult(result?.output || "").value;
@@ -148,4 +154,8 @@ export async function runFinalReviewer(input) {
     attempt_id: input.attemptId,
     role: "assessor",
   }, () => runFinalReviewerInContext(input));
+}
+
+export function finalReviewerProvider(cwd) {
+  return getSetting(SETTING_KEYS.FINAL_REVIEWER_PROVIDER, { projectDir: cwd }) || "claude";
 }

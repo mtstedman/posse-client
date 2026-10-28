@@ -1,3 +1,4 @@
+import { nativeWorkerSettings } from "../../../shared/native/functions/worker-settings.js";
 // Worktree status surfaced inside the review/approval flow.
 //
 // Computes per-WI worktree dirt (in-scope vs out-of-scope vs untracked) plus
@@ -43,6 +44,7 @@ async function runWorktreeStatusTaskOffMainThread(task, args = {}) {
       ? WORKTREE_COMMIT_WORKER_TIMEOUT_MS
       : WORKTREE_STATUS_WORKER_TIMEOUT_MS,
     workerData: {
+      ...nativeWorkerSettings(args.projectDir || args.wtDir || process.cwd()),
       task,
       args,
       projectDir: args.projectDir || args.wtDir || process.cwd(),

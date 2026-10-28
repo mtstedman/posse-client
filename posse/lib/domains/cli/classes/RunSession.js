@@ -1,3 +1,4 @@
+import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { formatNativeDownloadMiB, summarizeNativeArtifactResults } from "../functions/native-artifact-summary.js";
 // Runtime session orchestration for the run command.
 // Keeps the CLI entry point thin while preserving the existing command behavior.
@@ -2429,17 +2430,19 @@ export class RunSession {
   let bootSignalCount = 0;
   let bootShutdownRequested = false;
   let bootCleanupPromise = null;
-  const cleanupDuringBoot = (signal = "SIGINT") => {
+  const cleanupDuringBoot = async (signal = "SIGINT") => {
     bootSignalCount++;
     if (bootSignalCount >= 2) {
       try { scheduler.requestStop?.(); } catch { /* best-effort */ }
       try { scheduler.releaseForForcedExit?.({ reason: "Forced shutdown" }); } catch { /* boot recovery remains */ }
       try {
         const cleanup = cleanupAtlasForSession({ label: "Forced shutdown" });
-        if (cleanup && typeof cleanup.then === "function") void Promise.resolve(cleanup).catch(() => {});
+        if (cleanup && typeof cleanup.then === "function") await Promise.resolve(cleanup).catch(() => {});
       } catch { /* forced shutdown continues */ }
       // Exit code first so the final shutdown record reflects the forced exit.
       process.exitCode = 1;
+      await stopDisplaySnapshotCaches();
+      await ThreadManager.drainAll({ timeoutMs: 0 });
       try { closeRuntimeStateForExit({ forced: true, reason: "Forced shutdown" }); } catch { /* best-effort */ }
       exitProcess?.(1);
       return;
@@ -2549,8 +2552,11 @@ export class RunSession {
     // restarted instance on the index DBs. Mirror the natural-completion and
     // signal-driven exit paths. (exitProcess is stubbed in tests, so callers
     // still observe the `return true`.)
-    try { closeRuntimeStateForExit(); } catch { /* best-effort */ }
+    await stopDisplaySnapshotCaches();
+    await cleanupAtlasForSession({ label: "Boot interrupted" });
+    await ThreadManager.drainAll({ timeoutMs: 5000 });
     process.exitCode = 0;
+    try { closeRuntimeStateForExit(); } catch { /* best-effort */ }
     exitProcess?.(0);
     return true;
   };
@@ -3088,6 +3094,7 @@ export class RunSession {
   // Set the exit code first so the shutdown record logs the real one.
   process.exitCode = completion.exitCode;
   if (completion.incomplete.length === 0) completeRunCohort?.();
+  await ThreadManager.drainAll({ timeoutMs: 5000 });
   closeRuntimeStateForExit();
   exitProcess?.(completion.exitCode);
 
