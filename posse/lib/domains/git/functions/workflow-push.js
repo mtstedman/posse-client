@@ -345,7 +345,11 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     return runGitWorkflowTaskOffMainThread("validatePushCandidate", { pushBranch }, workerOptions);
   }
 
-  function executePush({ effectiveRemote, pushBranch, mergedCount = 0, expectedHead = null }) {
+  // `sharedTrunkChecked` says the caller already settled the shared-trunk
+  // question on the main thread (executePushAsync does, before offloading).
+  // The check reads account settings, which a worker thread may not touch:
+  // the bridge's push from the phone died on exactly that read.
+  function executePush({ effectiveRemote, pushBranch, mergedCount = 0, expectedHead = null, sharedTrunkChecked = false }) {
     const pushBranchWorkItem = workItemForBranch(pushBranch);
     if (pushBranchWorkItem) {
       return {
@@ -355,7 +359,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
         pushBranch,
       };
     }
-    if (isConfiguredSharedTrunkPushTarget(effectiveRemote, pushBranch)) {
+    if (sharedTrunkChecked !== true && isConfiguredSharedTrunkPushTarget(effectiveRemote, pushBranch)) {
       return {
         ok: false,
         reason: "shared_trunk_automatic_publication",
@@ -419,7 +423,9 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       );
       return { ok: false, reason: "shared_trunk_automatic_publication" };
     }
-    return runGitWorkflowTaskOffMainThread("executePush", args, workerOptions);
+    // The enrollment check above is the shared-trunk decision; the worker
+    // must not repeat it, since it cannot read account settings.
+    return runGitWorkflowTaskOffMainThread("executePush", { ...args, sharedTrunkChecked: true }, workerOptions);
   }
 
   async function offerPush(mergedCount) {
