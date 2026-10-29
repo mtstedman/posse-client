@@ -85,11 +85,11 @@ export function isCrossWiUpstreamDispositionGateJob(job) {
     && parseJobPayload(job).review_type === CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE;
 }
 
-/** A failed work item is worth a recovery gate while it owns a branch or implementation work. */
+/** Planning failures also need recovery before a branch or implementation exists. */
 export function workItemFailureIsRecoverable(workItem, jobs = []) {
   if (!workItem || workItem.status !== "failed") return false;
   if (String(workItem.branch_name || "").trim()) return true;
-  return jobs.some((job) => QUEUE_LOCKING_JOB_TYPES.has(job?.job_type));
+  return jobs.some((job) => job?.job_type === "plan" || QUEUE_LOCKING_JOB_TYPES.has(job?.job_type));
 }
 
 /** The job a gate decides about (payload original_job_id), or null for a standalone question. */

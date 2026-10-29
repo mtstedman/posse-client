@@ -2,6 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 
+// A browser bootstrap failure is a missing verification prerequisite, even
+// when a repository script launches Playwright through a package manager.
+export function missingBrowserTestRuntime(output) {
+  return /browserType\.launch: Executable doesn't exist|browserType\.launch:[^\n]*Host system is missing dependencies/u.test(String(output || ""));
+}
+
 // Missing external packages are verification prerequisites; missing relative
 // application modules remain product failures.
 export function missingNodeTestDependency(output) {

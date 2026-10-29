@@ -1,5 +1,5 @@
 import { SKIP_DIRS, TEST_HELPER_DIRS, MAX_OUTPUT_CHARS, MAX_SOURCE_SNIFF_BYTES, DEFAULT_TIMEOUT_MS, PHPUNIT_CONFIG_NAMES, OUTCOME_STATUS } from "../../../../catalog/unit-test-runner.js";
-import { missingDeclaredNodeDependency } from "./node-test-failure.js";
+import { missingBrowserTestRuntime, missingDeclaredNodeDependency } from "./node-test-failure.js";
 import { javascriptTestRunner } from "./javascript-test-runner.js";
 import { fileURLToPath } from "node:url";
 import { spawn } from "child_process";
@@ -61,7 +61,7 @@ function nodeBootstrapFailure(invocation, output, root) {
   // Vitest imports under node:test fail before collecting any product tests.
   // Keep that runner/bootstrap mismatch out of product-failure remediation.
   if (/Vitest failed to access its internal state/u.test(output)) return "test_loader_resolution_mismatch";
-  if (/browserType\.launch: Executable doesn't exist|browserType\.launch:[^\n]*Host system is missing dependencies/u.test(output)) {
+  if (missingBrowserTestRuntime(output)) {
     return "test_browser_unavailable";
   }
   if (/ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX|ERR_UNKNOWN_FILE_EXTENSION/u.test(output)) return "typescript_test_loader_unavailable";

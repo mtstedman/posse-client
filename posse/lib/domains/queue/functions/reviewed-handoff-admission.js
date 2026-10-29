@@ -99,6 +99,13 @@ export function reviewedHandoffAdmission(job, scope, { order, workItemLocks, job
   const transfers = new Map();
   for (const row of rows) {
     const active = jobLocks.find((lock) => lock.work_item_id !== job.work_item_id
+      // Queued repairs reserve their paths, but cannot invert the established
+      // work-item order. A later repair has not leased yet and must wait for
+      // this work item; counting it here makes both sides wait forever.
+      // Keep actual writers and durable reviewed reservations authoritative.
+      && !(lock.job_status === "queued" && !lock.reviewed_reservation
+        && order.rank.has(lock.work_item_id) && order.rank.has(job.work_item_id)
+        && order.rank.get(lock.work_item_id) > rank)
       && (!lock.assessment_barrier || lock.reviewed_reservation)
       && findLockRowOverlap([row], [lock]));
     if (active) return wait(job, active, row.path, "active_job_lock");
