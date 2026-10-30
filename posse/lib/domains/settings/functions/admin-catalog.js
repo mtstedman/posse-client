@@ -337,6 +337,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     "startup_update_mode",
     "session_recycle_mode",
     "web_tools_enabled",
+    "node_package_manager",
   ]),
   group("safety", "general", "Approvals & Safety", [
     "posse_log_scrub_secrets",

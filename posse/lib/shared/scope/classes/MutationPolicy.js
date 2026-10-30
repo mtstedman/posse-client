@@ -4,6 +4,8 @@ import fs from "fs";
 import path from "path";
 import { agentHiddenReadablePathReason } from "../functions/agent-hidden-paths.js";
 import { primaryCheckoutAlias } from "../functions/primary-checkout-alias.js";
+import { isSensitiveEnvRepoPath } from "../../../domains/runtime/functions/protected-paths.js";
+import { isSensitiveEnvFileOrTargetPath } from "../../../domains/runtime/functions/sensitive-paths.js";
 import {
   checkoutReadRootContains,
   checkoutReadRootForms,
@@ -48,7 +50,6 @@ const GREP_COMMAND_FLAGS = new Set(["--filter", "--filter-magic-label"]);
 const GIT_UNSAFE_READ_FLAGS = new Set(["-c", "--config-env", "--ext-diff", "--textconv", "--output"]);
 const FILE_MUTATING_FLAGS = new Set(["-c", "--compile"]);
 const FIXER_FLAGS = new Set(["--fix", "--write"]);
-const SENSITIVE_ENV_BASENAME_RE = /^\.env(?:\.|$)/i;
 const SHELL_VARIABLE_EXPANSION_RE = /(?:%[A-Za-z_][A-Za-z0-9_]*%|\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*))/;
 const INFERRED_DELETE_FILE_EXTENSIONS = new Set([
   "bmp", "c", "cc", "cfg", "conf", "cpp", "cs", "css", "csv", "cts",
@@ -403,6 +404,9 @@ function readonlyBashPathReason(policy, command) {
       const absolute = path.isAbsolute(value);
       const lexical = absolute ? path.resolve(value) : path.resolve(policy.cwd, value);
       const exists = fs.existsSync(lexical);
+      if (isSensitiveEnvFileOrTargetPath(lexical)) {
+        return `protected environment file: ${value}`;
+      }
       // Private path parts are checked RELATIVE to the cwd when the absolute
       // path lands inside the cwd, so the agent's own worktree segments (its
       // `.posse-worktrees/wi-N` cwd) do not trip the private-part filter while
@@ -417,6 +421,7 @@ function readonlyBashPathReason(policy, command) {
       if (!absolute && /[*?\[\]{}]/.test(value) && typeof fs.globSync === "function") {
         for (const match of fs.globSync(value, { cwd: policy.cwd })) {
           const expanded = path.resolve(policy.cwd, match);
+          if (isSensitiveEnvFileOrTargetPath(expanded)) return `shell glob resolves to a protected environment file: ${value}`;
           const expandedParts = String(match).replace(/\\/g, "/").split("/").filter(Boolean).map((part) => part.toLowerCase());
           if (expandedParts.some((part) => part.startsWith("-"))) {
             return `shell glob expands to an option-like path: ${value}`;
@@ -705,7 +710,7 @@ export function isSensitiveEnvCommand(command) {
   if (parts.length === 0) return false;
   return parts.some((part) => {
     const cleaned = part.replace(/^['"]|['"]$/g, "").replace(/\\/g, "/");
-    return cleaned.split("/").some((segment) => SENSITIVE_ENV_BASENAME_RE.test(segment));
+    return isSensitiveEnvRepoPath(cleaned);
   });
 }
 

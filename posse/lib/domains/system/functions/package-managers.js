@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { NODE_LOCKS } from "../../../catalog/node-package-managers.js";
+import { detectNodePackageManager, preferredNodePackageManager } from "../../../shared/tools/functions/node-package-manager.js";
 import { ENVIRONMENT_PACKAGE_MANAGERS } from "../../../catalog/tools/environment-setup.js";
 import { findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 import { readManifest } from "./environment-paths.js";
@@ -37,6 +38,12 @@ function assertNodePackage(name, dir, manifest) {
   if (declared && declared !== name) throw new Error(`package.json declares packageManager ${manifest.packageManager}; use manager ${declared}.`);
   const foreign = NODE_LOCKS.find(([manager, lock]) => manager !== name && has(dir, lock));
   if (foreign) throw new Error(`This package has ${foreign[1]}; use manager ${foreign[0]}, or resolve that lockfile first.`);
+  // Both installer tools validate here before creating an approval, and again
+  // before execution. An explicit tool argument cannot override account policy.
+  if (!declared && !NODE_LOCKS.some(([, lock]) => has(dir, lock))) {
+    const required = preferredNodePackageManager();
+    if (name !== required) throw new Error(`Node package manager policy requires ${required} for packages without a declaration or lockfile; requested ${name}. Use ${required}, or change Node package manager in Admin before requesting setup.`);
+  }
 }
 
 function yarnBerry(dir, manifest) {
@@ -262,10 +269,7 @@ export const PACKAGE_MANAGERS = Object.freeze(Object.fromEntries(ENVIRONMENT_PAC
 export function detectPackageManagers(dir) {
   const found = [];
   if (has(dir, "package.json")) {
-    let declared = "";
-    try { declared = readManifest(path.join(dir, "package.json")).packageManager; } catch { /* the installer reports it */ }
-    found.push(String(declared || "").trim().toLowerCase().match(/^(npm|pnpm|yarn|bun)(?:@|$)/u)?.[1]
-      || NODE_LOCKS.find(([, lock]) => has(dir, lock))?.[0] || "npm");
+    found.push(detectNodePackageManager(dir, { allowUnversioned: true }).manager);
   }
   if (has(dir, "composer.json")) found.push("composer");
   if (has(dir, "uv.lock")) found.push("uv");

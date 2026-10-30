@@ -886,6 +886,11 @@ missing bound source instead requires implementation to regenerate the evidence.
 Strict verification requirements and unresolved worktree changes retain their
 explicit recovery gates.
 
+Interactive runs keep the TUI open while a human gate needs an answer, even
+when it is the only remaining job for the only work item. Answering the gate
+resumes work or allows the run to finish. Headless runs can still return with
+operator action required; optional push offers do not keep a run open.
+
 An orphaned review with no answerable gate gets at most one assessment-only
 reconstruction when a local or remote operator is present. A human-input wait
 whose gate is missing fails after a grace period; live gate contracts, worker
@@ -1287,6 +1292,25 @@ That creates a versioned tarball under `dist/` containing:
 Installer source lives in `installers/linux/install-posse-atlas.sh`.
 
 ### Application environment setup
+
+Choose **Node package manager** under **Admin → General → Workflow** to set
+your account-wide preference: npm (the default), pnpm, yarn, or bun. The CLI
+equivalent is `posse admin set node_package_manager pnpm`. Planning, dependency
+installation, and generated verification commands use that choice when the
+project has no package-manager declaration or lockfile. Existing project choices
+take precedence; this setting does not migrate lockfiles or install the manager
+itself. Both `install_dependencies` and the planner's `setup_environment` tool
+reject an explicit manager that conflicts with this setting for a package
+without a declaration or lockfile, before creating an approval. To choose a
+different manager, change the Admin setting first. The installer revalidates
+the policy before execution, so changing it can invalidate an outstanding approval.
+
+The exact `.env.example` filename is an ordinary source template and is
+available to agents within their normal file scope. Other `.env` files remain
+blocked, including symlinks to them. Plan compilation removes requirements that
+explicitly name policy-blocked files, records the omissions, and applies the
+same filter when older jobs enter execution or assessment. Requirements for
+`.env.example` remain verifiable.
 
 For a greenfield application, the planner can use `inspect_environment` and
 `setup_environment` before handing off development. The latter proposes one

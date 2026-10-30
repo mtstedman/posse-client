@@ -1,4 +1,5 @@
 import { assessmentDisplayMessage } from "../../functions/execution/display-sync.js";
+import { providerFailureDiagnosticText } from "../../functions/helpers/diagnostics.js";
 import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole } from "../../../settings/functions/repository-settings.js";
 import path from "path";
 import {
@@ -625,13 +626,14 @@ export class AssessmentHandoffAdapter {
       refreshAndExtractInsightsFromModule(job.work_item_id);
       worker._cleanupWorktreeIfDone(job.work_item_id);
     } catch (assessErr) {
+      const diagnostic = providerFailureDiagnosticText(assessErr);
       // A late failure after another owner took the lease must not rewrite
       // that owner's job; only this execution's own attempt row is closed.
       if (!isLeaseValid(job.id, leaseToken)) {
         completeAttempt(assessAttempt.attempt.id, {
           status: "interrupted",
           duration_ms: Date.now() - assessStart,
-          error_text: `Lease expired before assess-only failure was recorded: ${assessErr.message}`.slice(0, 4000),
+          error_text: `Lease expired before assess-only failure was recorded: ${diagnostic}`.slice(0, 4000),
         });
         worker.emit(job.id, `${C.yellow}[lease] WI#${job.work_item_id} job #${job.id} - lease expired before assess-only failure; result discarded${C.reset}`);
         return { handled: true, currentAttemptId: assessAttempt.attempt.id };
@@ -639,9 +641,9 @@ export class AssessmentHandoffAdapter {
       completeAttempt(assessAttempt.attempt.id, {
         status: "failed",
         duration_ms: Date.now() - assessStart,
-        error_text: assessErr.message,
+        error_text: diagnostic,
       });
-      worker.emit(job.id, `${C.red}[assess-only] Assessment failed: ${assessErr.message.split("\n")[0]}${C.reset}`);
+      worker.emit(job.id, `${C.red}[assess-only] Assessment failed: ${diagnostic.split("\n")[0]}${C.reset}`);
       // The developer's committed output remains authoritative. Transport,
       // tool and terminal-protocol failures share the assessment retry
       // budget; once it is spent the job fails with assess-only state retained.

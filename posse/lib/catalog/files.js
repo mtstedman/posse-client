@@ -1,4 +1,6 @@
 import { readonlySet } from "./readonly-collections.js";
+// A source template, not a runtime environment or a wildcard exemption.
+export const ENV_EXAMPLE_BASENAME = ".env.example";
 // Central file-extension catalogs shared by handoff, ATLAS gates, and toolkit
 // helpers. Keep this module pure: catalog modules must not import runtime helpers.
 

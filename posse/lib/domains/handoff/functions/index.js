@@ -1,5 +1,6 @@
 import { advancedLoggingEnabled } from "../../../shared/telemetry/functions/diagnostic-logging.js";
 import { pruneTestHandoff } from "../../verification/functions/test-capability.js";
+import { pruneBlockedFileRequirements } from "../../runtime/functions/blocked-file-requirements.js";
 // Handoff context builder + deterministic context enrichment.
 //
 // Two entry points:
@@ -422,7 +423,8 @@ function _sanitizePayloadForRecipient(recipient, payload = {}) {
     sanitized = { ...sanitized };
     delete sanitized.hash_ref_packet;
   }
-  return sanitized;
+  delete sanitized._blocked_file_requirements;
+  return pruneBlockedFileRequirements(sanitized).payload;
 }
 
 function _resolveFallbackReadBudget(recipient, baseFallbackReads, hints = {}) {
@@ -1462,6 +1464,11 @@ export async function handoff(input, { providerName = null, reviewerChildIdentit
   } else {
     throw new Error("handoff: expected a handoff context packet or { recipient, data }");
   }
+
+  // Raw handoffs and saved packets must use the same executable requirements
+  // as freshly compiled plans.
+  Object.assign(packet, pruneBlockedFileRequirements(packet).payload);
+  packet._raw_payload = _sanitizePayloadForRecipient(packet.recipient, packet._raw_payload || {});
 
   // Normalize identity once so every phase timer and observation sees the
   // same durable keys regardless of which caller-style constructed the packet.

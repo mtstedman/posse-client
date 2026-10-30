@@ -9,6 +9,7 @@ import { C } from "../../../../shared/format/functions/colors.js";
 import { promptLiteral } from "../../../../shared/format/functions/prompt-literals.js";
 import { isGeneratedArtifactDirectoryPath, isGeneratedArtifactPath } from "../../../../shared/scope/classes/MutationPolicy.js";
 import { getArtifacts, getAttempts, getWorkItem, storeArtifact, updateJobPayload } from "../../../queue/functions/index.js";
+import { pruneBlockedFileRequirements } from "../../../runtime/functions/blocked-file-requirements.js";
 import {
   applyDeterministicDeletes,
   buildPromptAsync,
@@ -166,7 +167,7 @@ export class FixRole extends BaseRole {
     } = this.roleDeps();
 
     const workItem = getWorkItem(job.work_item_id);
-    const payload = worker.parsePayload(job);
+    const payload = pruneBlockedFileRequirements(worker.parsePayload(job)).payload;
     const fixCwd = job._worktreePath || worker.projectDir;
     let payloadDirty = false;
     const generatedArtifactDeletes = inferGeneratedArtifactDeletionTargets(job, payload);

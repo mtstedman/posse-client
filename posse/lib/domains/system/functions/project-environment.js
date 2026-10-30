@@ -16,6 +16,7 @@ import { PACKAGE_MANAGERS, detectPackageManagers, packageCommands, packageScript
 import { prepareDatabaseConnectionFile } from "./database-connection-file.js";
 import { PROJECT_DB_TYPES } from "../../../catalog/project-db.js";
 import { LOCAL_DATABASE_PLATFORMS, LOCAL_DATABASE_ENGINES } from "../../../catalog/local-database-provisioning.js";
+import { detectNodePackageManager, preferredNodePackageManager } from "../../../shared/tools/functions/node-package-manager.js";
 import { prepareServerDatabase, serverDatabaseQuestion, executeServerDatabase } from "./server-database-setup.js";
 
 export function inspectEnvironment(args = {}, { cwd, role = null }) {
@@ -32,6 +33,8 @@ export function inspectEnvironment(args = {}, { cwd, role = null }) {
     vendor_present: fs.existsSync(localPath(cwd, path.relative(cwd, path.join(directory, "vendor")).replaceAll(path.sep, "/"), { dependencyDirectory: true })),
     path: args.path || ".", platform: process.platform, node: process.version,
     npm_available: !!findCommandOnPath("npm"), package_json: !!manifest,
+    preferred_node_package_manager: preferredNodePackageManager(),
+    node_package_manager: detectNodePackageManager(directory, { allowUnversioned: true }).manager,
     dependencies: manifest?.dependencies || {}, dev_dependencies: manifest?.devDependencies || {},
     package_lock: fs.existsSync(localPath(cwd, path.relative(cwd, path.join(directory, "package-lock.json")).replaceAll(path.sep, "/"))),
     node_modules_present: fs.existsSync(modules),

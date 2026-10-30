@@ -81,6 +81,8 @@ export const SETTINGS_DEFAULTS = Object.freeze(
 );
 
 const OPTION_LABEL_OVERRIDES = Object.freeze({
+  npm: "npm",
+  pnpm: "pnpm",
   js: "JavaScript",
   ml: "ML",
   scip: "SCIP",

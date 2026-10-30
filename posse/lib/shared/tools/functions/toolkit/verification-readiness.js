@@ -147,7 +147,7 @@ function siblingPackageRoot(projectRoot, file, packageRoots) {
 function packageManagerFromManifest(root) {
   return detectNodePackageManager(root, {
     allowUnversioned: true,
-    defaultManager: fileExists(path.join(root, "package.json")) ? "npm" : null,
+    defaultManager: fileExists(path.join(root, "package.json")) ? undefined : null,
   }).manager;
 }
 

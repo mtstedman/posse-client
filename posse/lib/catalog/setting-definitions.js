@@ -1,4 +1,5 @@
 import { APPROVAL_POLICY_SETTINGS } from "./approval-policies.js";
+import { NODE_PACKAGE_MANAGER_OPTIONS } from "./node-package-managers.js";
 // @ts-check
 // Canonical setting definitions. Pure data, derived role/model rows, and defaults only.
 import { RESEARCH_CLAIM_REVIEW } from "./research-claim-review.js";
@@ -38,6 +39,7 @@ export function buildModelSelectionSettings() {
 export const MODEL_SELECTION_SETTINGS = Object.freeze(buildModelSelectionSettings());
 
 export const SETTING_DEFINITIONS = [
+  { key: "node_package_manager", default: "npm", options: NODE_PACKAGE_MANAGER_OPTIONS, label: "Node package manager", description: "Required package manager for new Node projects: npm, pnpm, yarn, or bun. Installer requests cannot override it. Existing packageManager declarations and lockfiles take precedence. Also used for planning and verification commands." },
   ...APPROVAL_POLICY_SETTINGS,
   { key: "advanced_logging", default: "false", valueType: "boolean", description: "Record Atlas, context, tool-start and memory diagnostics" },
   // ── Provider routing ─────────────────────────────────────────────────────

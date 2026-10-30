@@ -57,6 +57,7 @@ import { adoptPlannedRepoRouting, correctInferredRoutingToRepo } from "../../int
 import { MAX_CONSECUTIVE_HUMAN_INPUT_DEFERRALS, evaluatePlanModality } from "./plan-modality.js";
 import { spawnPlanAfterHumanInputDeferral } from "../../worker/functions/helpers/pipeline-continuation.js";
 import { isSensitiveEnvRepoPath, normalizeRepoRelativePath } from "../../runtime/functions/protected-paths.js";
+import { pruneBlockedFileRequirements } from "../../runtime/functions/blocked-file-requirements.js";
 
 const FRONTEND_DESIGN_SKILL_ID = "frontend-design";
 const REPORT_DELIVERABLE_EXTENSIONS = "md|txt|json|csv|html";
@@ -1084,6 +1085,16 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           });
         }
         const protectedScopeOmissions = stripSensitiveEnvTaskScope(t);
+        const requirements = pruneBlockedFileRequirements(t);
+        Object.assign(t, requirements.payload);
+        if (requirements.omissions.length > 0) {
+          logEvent({
+            work_item_id: planJob.work_item_id, job_id: planJob.id,
+            event_type: EVENT_TYPES.PLAN_TASK_SCOPE_WARNING, actor_type: EVENT_ACTORS.SYSTEM,
+            message: `Removed ${requirements.omissions.length} blocked-file requirement(s) from task ${i}`,
+            event_json: JSON.stringify({ task_index: i, omissions: requirements.omissions }),
+          });
+        }
         if (protectedScopeOmissions.length > 0) {
           worker.emit(
             planJob.id,
@@ -2142,6 +2153,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               create_roots: t.create_roots || [],
               ...(Array.isArray(t.must_modify) && t.must_modify.length > 0 ? { must_modify: t.must_modify } : {}),
               ...(protectedScopeOmissions.length > 0 ? { protected_scope_omissions: protectedScopeOmissions } : {}),
+              ...(requirements.omissions.length > 0 ? { _blocked_file_requirements: requirements.omissions } : {}),
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
               test_command: compiledTestCommand,
               tests_to_run: compiledTestsToRun,

@@ -1,4 +1,6 @@
 import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnostic-logging.js";
+import { providerFailureDiagnosticText } from "./diagnostics.js";
+import { pruneBlockedFileRequirements } from "../../../runtime/functions/blocked-file-requirements.js";
 import { TEST_EXECUTION_RECEIPT_MIME_TYPE } from "../../../../catalog/verification.js";
 import { runInTransaction } from "../../../queue/functions/index.js";
 import { prepareFinalReviewWrapUp } from "../../../assessment/functions/final-review-wrap-up.js";
@@ -184,7 +186,7 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
   // A delayed provider or runner result must not rewrite recovery state after
   // cancellation or another worker has taken ownership of this job.
   if (!isLeaseValid(job.id, leaseToken)) return { gated: false, infrastructureFailure: true, leaseLost: true };
-  const message = String(error?.message || error || "Assessment unavailable");
+  const message = providerFailureDiagnosticText(error || "Assessment unavailable");
   markAssessmentRetryAssessOnly(job, pendingFileRequests);
   const fresh = getJob(job.id) || job;
   const count = Number(fresh.assessment_attempt_count || 0);
@@ -628,6 +630,7 @@ function stripInternalAssessmentPolicyPayload(payload = {}) {
   delete stripped._assess_reasoning_effort;
   delete stripped._assess_pass_confidence_floor;
   delete stripped._execution_policy;
+  delete stripped._blocked_file_requirements;
   return stripped;
 }
 
@@ -636,6 +639,7 @@ function _buildAssessmentBoundaryBlock(job) {
   return [
     `ASSESSMENT BOUNDARY:`,
     `Judge this job against the assigned TASK SPECIFICATION and its success criteria.`,
+    `Requirements involving policy-blocked files are omitted and are not assessment criteria, even if mentioned in historical context or the original objective. The exact .env.example source template is allowed under normal file scope.`,
     `Use the original work-item objective to interpret and constrain the assigned task, but do not require this job to complete work assigned to other planned tasks.`,
     `Do not fail, block, or lower confidence because pending sibling or downstream jobs have not completed.`,
     `Only spawn a fix for a defect in the assigned task; missing work owned by other planned tasks is not this job's fix scope.`,
@@ -812,7 +816,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   }
   // Gather context: the task spec (from payload or artifact)
   let taskSpec = "";
-  let parsedJobPayload = parseJobPayload(job);
+  let parsedJobPayload = pruneBlockedFileRequirements(parseJobPayload(job)).payload;
   const visibleJobPayload = stripInternalAssessmentPolicyPayload(parsedJobPayload);
   const verificationCapabilityBlock = _buildVerificationCapabilityBlock(visibleJobPayload, projectDir || cwd);
   const scopeRequestEvidence = renderUnresolvedScopeRequests(visibleJobPayload);
@@ -836,6 +840,8 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     const latest = specArtifacts[specArtifacts.length - 1];
     taskSpec = latest.content_long || latest.content_json || taskSpec;
   }
+  // Older attempts may have saved the unfiltered task as an artifact.
+  taskSpec = pruneBlockedFileRequirements({ task_spec: taskSpec }).payload.task_spec;
 
   const assessmentScopedDiff = assessmentContext?.scoped_git_diff
     ? `\nSCOPED GIT DIFF (COMPLETE FULL DIFF FOR ASSESSED TASK SCOPE — DO NOT RE-FETCH OR RECONSTRUCT):\n${assessmentContext.scoped_git_diff}\n`

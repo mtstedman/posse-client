@@ -10,6 +10,7 @@ import { promptLiteral } from "../../../../shared/format/functions/prompt-litera
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getArtifacts, getAttempts, getIntSetting, getWorkItem, storeArtifact } from "../../../queue/functions/index.js";
 import { applyDeterministicDeletes, buildPromptAsync, buildHandoffPacket, handoff, attachRequestedContext, parseMissingContext, renderAtlasHandoffSections } from "../../../handoff/functions/index.js";
+import { pruneBlockedFileRequirements } from "../../../runtime/functions/blocked-file-requirements.js";
 import { BaseRole, projectPromptPacketForProvider } from "../BaseRole.js";
 import { currentExecutionProvider as defaultCurrentExecutionProvider } from "../../functions/helpers/diagnostics.js";
 import { extractCheckpointFromOutput as defaultExtractCheckpointFromOutput, loadCheckpoint as defaultLoadCheckpoint, parseAgentCompletionLog as defaultParseAgentCompletionLog, scopedDeleteTargets as defaultScopedDeleteTargets } from "../../functions/helpers/mutation-guards.js";
@@ -54,7 +55,7 @@ export class DeveloperRole extends BaseRole {
     } = this.roleDeps();
 
     const workItem = getWorkItem(job.work_item_id);
-    const payload = worker.parsePayload(job);
+    const payload = pruneBlockedFileRequirements(worker.parsePayload(job)).payload;
     // db-mode jobs own no worktree; they read the work-item branch through
     // the worktree resolved by the execution gate (_dbReadRoot) until merge.
     const devCwd = job._worktreePath || job._dbReadRoot || worker.projectDir;

@@ -30,6 +30,17 @@ export function getErrorText(errOrMsg) {
   return "unknown error";
 }
 
+// Only for recorded/displayed failures. Keep the original error message
+// unchanged: retry classifiers must not interpret words in an adapter's
+// protocol diagnostic (for example, an invalid rate-limit event) as a cause.
+export function providerFailureDiagnosticText(error) {
+  const message = getErrorText(error);
+  const reason = typeof error?.providerDiagnostic === "string"
+    ? error.providerDiagnostic.trim().slice(0, 300)
+    : "";
+  return reason ? `${message}: ${reason}` : message;
+}
+
 const TURN_BUDGET_EXHAUSTED_RE = /(?:exhausted turn budget|turn budget exhausted)/i;
 const TOOL_BUDGET_EXHAUSTED_RE = /(?:(?:tool|tools|tool use|tool call|tool calls).{0,40}(?:exhausted|limit|max|budget)|(?:exhausted|hit|reached).{0,40}(?:tool|tools|tool use|tool call|tool calls))/i;
 

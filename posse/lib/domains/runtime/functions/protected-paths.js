@@ -4,6 +4,7 @@
 // a planner, assessor, or file-request block puts them in nominal write scope.
 
 import path from "node:path";
+import { ENV_EXAMPLE_BASENAME } from "../../../catalog/files.js";
 
 // Guard-side relativization: preserves "../" escapes so segment checks still
 // see paths under authorized external scope roots (e.g. ../ext/node_modules/x
@@ -35,7 +36,9 @@ const SENSITIVE_ENV_BASENAME_RE = /^\.env(?:\.|$)/i;
 
 export function isSensitiveEnvRepoPath(value) {
   const normalized = normalizeRepoRelativePath(value);
-  return !!normalized && pathParts(normalized).some((part) => SENSITIVE_ENV_BASENAME_RE.test(part));
+  const parts = pathParts(normalized);
+  return parts.some((part, index) => SENSITIVE_ENV_BASENAME_RE.test(part)
+    && !(index === parts.length - 1 && part.toLowerCase() === ENV_EXAMPLE_BASENAME));
 }
 
 const POSSE_ROLE_PROMPT_FILES = new Set([

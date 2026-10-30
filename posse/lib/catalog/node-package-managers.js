@@ -1,5 +1,6 @@
 // @ts-check
 
+export const NODE_PACKAGE_MANAGER_OPTIONS = Object.freeze(["npm", "pnpm", "yarn", "bun"]);
 
 
 export const NODE_LOCKS = Object.freeze([

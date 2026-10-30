@@ -1,5 +1,6 @@
 import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnostic-logging.js";
 import { pruneTestHandoff } from "../../../verification/functions/test-capability.js";
+import { detectNodePackageManager } from "../../../../shared/tools/functions/node-package-manager.js";
 // lib/domains/worker/classes/roles/planner.js
 //
 // Planner role handler that builds per-work-item task plans, prepares planner
@@ -636,6 +637,7 @@ export class PlannerRole extends BaseRole {
     const plannerRoutingContext = [
       "PLANNING CAPABILITIES (authoritative for this work item):",
       availableSkillsBlock,
+      `Node package manager: ${detectNodePackageManager(plannerReadRoot, { allowUnversioned: true }).manager}. Installer tools enforce the Admin selection for new Node packages, including explicit manager arguments. Existing packageManager declarations and lockfiles in each package directory take precedence; do not migrate an existing project just to match the account preference. To choose a different manager for a new package, the user must change Node package manager in Admin before setup.`,
       "One-time test intake for code tasks:",
       "- Identify one narrow existing repository-declared test command per dev/fix task and set test_command on that task.",
       // A skipped research phase leaves no brief to supply verification_targets.

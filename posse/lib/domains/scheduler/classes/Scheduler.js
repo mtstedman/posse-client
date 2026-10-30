@@ -63,6 +63,7 @@ import { reviewedAdmissionRequested, usesReviewedAdmission } from "../../queue/f
 import { SchedulerDispatchPlanner } from "./SchedulerDispatchPlanner.js";
 import { SchedulerLockController } from "./SchedulerLockController.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
+import { humanGateStateIsActive } from "../../../catalog/human-input.js";
 
 
 
@@ -1777,19 +1778,31 @@ export class Scheduler {
         this._cancelDeadlockedJobs();
 
         const trackedStatusesForCloseout = ["queued", ...LOCK_HOLDING_JOB_STATUSES];
-        const trackedJobsForCloseout = listJobs(trackedStatusesForCloseout)
-          .filter((job) => this._isJobInRunScope(job))
+        const scopedTrackedJobs = listJobs(trackedStatusesForCloseout)
+          .filter((job) => this._isJobInRunScope(job));
+        // A local operator must be able to answer the last question even
+        // when its work item has no executable jobs left. Include recovery
+        // and review gates that headless closeout deliberately leaves parked.
+        const interactiveGateIds = new Set(this._hasDisplay
+          ? scopedTrackedJobs.filter((job) => job.job_type === "human_input"
+            && !isPushOfferJob(job)
+            && humanGateStateIsActive(getHumanGate(job.id)?.gate_state)).map((job) => job.id)
+          : []);
+        const trackedJobsForCloseout = scopedTrackedJobs
           // Publication offers survive run closeout for later Bridge/manual
           // action, but they are not executable work and must not keep the
           // scheduler in an idle/waiting loop. Neither may a database task
           // held for its work item's merge, its post-merge gate, or a merge
           // verification review: the merge happens at closeout or a later
-          // review, never inside this loop. Nor a work-item disposition gate:
-          // its work item is already failed or complete, and the gate stays
-          // parked for the phone or CLI.
-          .filter((job) => !isPushOfferJob(job) && !isMergeVerificationReviewJob(job))
-          .filter((job) => !isPostMergeHeldDbJob(job) && !isPostMergeDbGateJob(job))
-          .filter((job) => !isWorkItemDispositionGateJob(job));
+          // review, never inside this loop. Headless runs also leave work-item
+          // disposition gates parked for the phone or CLI. Interactive runs
+          // retain active gates so the TUI can present and resolve them.
+          .filter((job) => !isPushOfferJob(job))
+          .filter((job) => interactiveGateIds.has(job.id) || (
+            !isMergeVerificationReviewJob(job)
+            && !isPostMergeHeldDbJob(job) && !isPostMergeDbGateJob(job)
+            && !isWorkItemDispositionGateJob(job)
+          ));
         const activeBackgroundJobs = [...activeWorkers.values()]
           .map((entry) => entry.job)
           .filter(isRunBackgroundJob);
@@ -2596,7 +2609,7 @@ export class Scheduler {
             job.job_type !== "human_input" && LOCK_HOLDING_JOB_STATUSES.includes(job.status)
           ));
           const hasQueued = trackedJobsForCloseout.some((job) => job.status === "queued");
-          const canProgress = runnableNow || hasActive || hasQueued;
+          const canProgress = runnableNow || hasActive || hasQueued || interactiveGateIds.size > 0;
           if (!canProgress) {
             this._invokeCallback("onDone", onDone);
             break;

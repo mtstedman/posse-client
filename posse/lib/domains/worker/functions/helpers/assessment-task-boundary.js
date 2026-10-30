@@ -6,6 +6,7 @@ import {
   logEvent,
 } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
+import { pruneBlockedFileRequirements } from "../../../runtime/functions/blocked-file-requirements.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../../catalog/event.js";
 
 const SCOPE_KEYS = Object.freeze([
@@ -64,6 +65,7 @@ function taskRootAndPlan(job) {
 }
 
 function taskText(job, payload = parseJobPayload(job)) {
+  payload = pruneBlockedFileRequirements(payload).payload;
   return [
     job?.title,
     payload?.task_spec,

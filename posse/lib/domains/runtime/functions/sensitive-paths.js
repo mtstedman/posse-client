@@ -2,11 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { realpathExistingPrefix } from "./fs-safety.js";
-
-const SENSITIVE_ENV_BASENAME_RE = /^\.env(?:\.|$)/i;
+import { isSensitiveEnvRepoPath } from "./protected-paths.js";
 
 export function isSensitiveEnvFilePath(filePath) {
-  return SENSITIVE_ENV_BASENAME_RE.test(path.basename(String(filePath || "")));
+  return isSensitiveEnvRepoPath(filePath);
 }
 
 export function isSensitiveEnvFileOrTargetPath(filePath) {
