@@ -13,7 +13,7 @@ import { providerErrorSource } from "../../../providers/functions/shared/api-res
 import { runtimeKillCanEscalate } from "../../../scheduler/functions/runtime-escalation.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { isAbortError } from "../../../runtime/functions/yield.js";
-import { buildFailureDiagnosticsArtifact, currentExecutionProvider, getErrorDetails, isPermanentProviderConfigError, retryingAttemptWording } from "./diagnostics.js";
+import { buildFailureDiagnosticsArtifact, currentExecutionProvider, getErrorDetails, isPermanentProviderConfigError, providerFailureDiagnosticText, retryingAttemptWording } from "./diagnostics.js";
 import { refreshAndExtractInsights } from "./insights.js";
 import { gitHasChangesAsync } from "../../../git/functions/utils.js";
 import { snapshotAndResetDirtyWorktreeAsync, stashDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
@@ -1060,12 +1060,17 @@ export async function handleExecuteAttemptError(worker, {
     && attemptCount > 0
     && attemptCount <= 2
     && attemptCount < (Number(job?.max_attempts || 3) || 3);
+  // The attempt row feeds the dead-letter gate's ATTEMPT HISTORY and the
+  // repeat-failure key, so it carries the adapter's contract reason the same
+  // way the job error and the agent-call row already do; the thrown message
+  // itself stays generic for the retry classifiers.
+  const recordedErrorText = providerFailureDiagnosticText(err);
   completeAttempt(attempt.id, {
     status: softBudgetExhausted ? "interrupted" : "failed",
     duration_ms: Date.now() - startTime,
-    error_text: err.message,
+    error_text: recordedErrorText,
   });
-  setJobError(job.id, err.providerDiagnostic ? `${err.message}: ${err.providerDiagnostic}` : err.message);
+  setJobError(job.id, recordedErrorText);
 
   await stashWorktreeForFailure(job, wtPath, worker?.projectDir);
 

@@ -209,16 +209,51 @@ function isLikelySpawnFailureMessage(message) {
   );
 }
 
+const FAST_FAILURE_MS = 1000;
+// A native adapter's contract failure ends after the provider has booted and
+// emitted its first events, so it takes seconds, not milliseconds, and two
+// identical ones already say the setup, not the task, is what fails.
+const INCOMPATIBLE_FAILURE_MS = 15_000;
+const PROVIDER_INCOMPATIBLE_RE = /provider stream or tool surface is incompatible|incompatible_provider_version/i;
+const PROVIDER_CLI_VERSION_COMMANDS = Object.freeze({
+  claude: "claude --version",
+  codex: "codex --version",
+  copilot: "copilot --version",
+});
+
+function buildIncompatibleProviderHint(job, latestError) {
+  const provider = currentProviderSettingSummary(job);
+  const executionProvider = String(job?.provider || provider.effective || "").toLowerCase();
+  const firstLine = String(latestError || "").split(/\r?\n/)[0] || "";
+  const reason = firstLine.replace(PROVIDER_INCOMPATIBLE_RE, "").replace(/^[\s:\u2014-]+/, "").trim();
+  const cliCheck = PROVIDER_CLI_VERSION_COMMANDS[executionProvider];
+  return [
+    "Every attempt ended within seconds with the native adapter's contract failure: the provider's event stream or tool inventory did not match what Posse issued. This is a client/provider mismatch, not a task failure, and retrying the same setup repeats it.",
+    reason
+      ? `Adapter reason: ${reason}`
+      : "The adapter recorded no reason; the attempt's failure diagnostics artifact (its Stderr section) is the next place to look.",
+    `Current setting: ${provider.key}=${provider.effective} (effective source: ${provider.source}); this job ran on ${executionProvider || "its default provider"}.`,
+    cliCheck
+      ? `Compare the provider CLI (${cliCheck}) with the installed posse-remote (posse native-binaries) and update whichever is stale, then retry.`
+      : "Check that the installed posse-remote (posse native-binaries) is current, then retry.",
+    "If both are current, the provider emitted an event or tool this Posse release does not accept yet: keep the adapter reason and report it.",
+  ].join("\n");
+}
+
 function buildFastFailureProviderHint(job, attempts = []) {
   const failed = Array.isArray(attempts) ? attempts.filter((attempt) => attempt?.status === "failed") : [];
-  if (failed.length < 3) return "";
-  const recent = failed.slice(-3);
-  if (!recent.every((attempt) => Number.isFinite(Number(attempt?.duration_ms)) && Number(attempt.duration_ms) < 1000)) return "";
+  const latestError = String(failed[failed.length - 1]?.error_text || "");
+  const incompatible = PROVIDER_INCOMPATIBLE_RE.test(latestError);
+  const window = incompatible ? 2 : 3;
+  if (failed.length < window) return "";
+  const recent = failed.slice(-window);
+  const ceiling = incompatible ? INCOMPATIBLE_FAILURE_MS : FAST_FAILURE_MS;
+  if (!recent.every((attempt) => Number.isFinite(Number(attempt?.duration_ms)) && Number(attempt.duration_ms) < ceiling)) return "";
   const repeatKeys = recent
     .map((attempt) => getErrorDetails(attempt?.error_text || "").repeatKey)
     .filter(Boolean);
-  if (repeatKeys.length !== 3 || new Set(repeatKeys).size !== 1) return "";
-  const latestError = String(recent[recent.length - 1]?.error_text || "");
+  if (repeatKeys.length !== window || new Set(repeatKeys).size !== 1) return "";
+  if (incompatible) return buildIncompatibleProviderHint(job, latestError);
   if (!isLikelySpawnFailureMessage(latestError)) return "";
 
   const provider = currentProviderSettingSummary(job);

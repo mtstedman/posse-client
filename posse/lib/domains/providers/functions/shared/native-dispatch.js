@@ -412,6 +412,13 @@ export async function runNativeDispatch(request, {
       ? details.diagnostic.reason.trim().slice(0, 300)
       : "";
     if (reason) error.providerDiagnostic = reason;
+    // The adapter's bounded, redacted stderr tail (an exit's diagnostic, or a
+    // transport/parser failure's) rides on `error.stderr` so the failure
+    // diagnostics artifact renders it and model-rejection scans can see it.
+    const stderrTail = typeof details.diagnostic?.diagnostic === "string"
+      ? details.diagnostic.diagnostic.trim()
+      : "";
+    if (stderrTail && !error.stderr) error.stderr = stderrTail;
     // The adapter reports a stalled model stream as code "provider_stall".
     // Downstream classification (attempt errors, assessment recovery, the
     // handoff-rejection race) keys on `stallKill`, which the CLI paths set
