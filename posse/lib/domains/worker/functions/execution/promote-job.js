@@ -5,7 +5,8 @@ import { createHash } from "crypto";
 import { resolvePathWithin } from "../../../../shared/scope/functions/path.js";
 import { artifactsDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { gitCommitAllAsync } from "../../../git/functions/commit-scope.js";
-import { gitHasChangesAsync } from "../../../git/functions/utils.js";
+import { listIgnoredRepoPaths } from "../../../git/functions/ignored-paths.js";
+import { gitExecAsync, gitHasChangesAsync } from "../../../git/functions/utils.js";
 import { snapshotAndResetDirtyWorktreeAsync } from "../../../git/functions/worktree.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
@@ -60,9 +61,13 @@ export function buildPromoteConflictPreview({ copies = [], cwd = process.cwd() }
     let targetStat = null;
     try { sourceStat = fs.statSync(source); } catch { sourceStat = null; }
     try { targetStat = fs.statSync(destination); } catch { targetStat = null; }
-    const sourceHash = sourceStat?.isFile() ? fileDigest(source) : null;
-    const targetHash = targetStat?.isFile() ? fileDigest(destination) : null;
     const targetExists = !!targetStat?.isFile();
+    // Digests only decide "identical", and files of different sizes never
+    // are; hash both only when the sizes agree so a large overwrite costs two
+    // stats, not two full reads.
+    const compareContent = targetExists && sourceStat?.isFile() && sourceStat.size === targetStat.size;
+    const sourceHash = compareContent ? fileDigest(source) : null;
+    const targetHash = compareContent ? fileDigest(destination) : null;
     planned.push({
       source: path.relative(cwd, source).replace(/\\/g, "/") || source,
       destination: destinationRel,
@@ -181,11 +186,23 @@ export function selectPromoteSourceFiles(files, { sourceDir, projectDir = null, 
       selected.push(matches[0]);
       continue;
     }
-    const byContent = new Map();
+    // Identical content implies identical size: a file whose size is unique
+    // among its namesakes is its own content group without being read.
+    const bySize = new Map();
     for (const file of matches) {
-      const sha = createHash("sha256").update(fs.readFileSync(file.full)).digest("hex");
-      if (!byContent.has(sha)) byContent.set(sha, []);
-      byContent.get(sha).push(file);
+      const size = fs.statSync(file.full).size;
+      if (!bySize.has(size)) bySize.set(size, []);
+      bySize.get(size).push(file);
+    }
+    const byContent = new Map();
+    for (const [size, sameSize] of bySize) {
+      for (const file of sameSize) {
+        const sha = sameSize.length === 1
+          ? `size:${size}:${file.relative}`
+          : createHash("sha256").update(fs.readFileSync(file.full)).digest("hex");
+        if (!byContent.has(sha)) byContent.set(sha, []);
+        byContent.get(sha).push(file);
+      }
     }
     const candidates = [...byContent.values()].map((copies) => (
       copies.find(isDeclared) || copies.find((file) => file.relative === name) || copies[0]
@@ -362,7 +379,7 @@ function spawnMissingFileRepair(worker, job, payload, { sourceDir, missingMappin
   return { repairJob, followupJob, rewired };
 }
 
-export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}) {
+export async function runPromoteJob(worker, job, wrappedJob, { leaseToken, abortSignal = null } = {}) {
   const attempt = incrementAndCreateAttempt(job.id, leaseToken, "system", "system", null);
   if (!attempt) {
     logAttemptSkippedStaleLease(job, "system", "Skipped promote attempt because the lease was stale or expired");
@@ -420,6 +437,8 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
     const missingMappings = [];
     const pendingRepairs = pendingMissingFileRepairs(job, sourceDir);
     const deferredByRepair = new Map();
+    // One walk per promote: nothing below writes into the source directory.
+    const allSourceFiles = listSourceFiles(sourceDir);
     for (const mapping of mappings) {
       worker._throwIfKilled(job.id);
       const { pattern, dest } = mapping;
@@ -468,7 +487,7 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
           deferredWildcard = true;
         }
       }
-      const sourceFiles = listSourceFiles(sourceDir)
+      const sourceFiles = allSourceFiles
         .filter((file) => matchFile(file.name) && !(wildcard && pendingRepairs.has(file.name)));
 
       if (sourceFiles.length === 0) {
@@ -530,6 +549,21 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
     if (missingMappings.length > 0) {
       const missingNames = missingMappings.map((mapping) => mapping.pattern);
       missingRepairSource = findSourceArtificer(job, sourceDir, missingNames);
+      if (missingNames.every(isImageArtifactName)) {
+        const sourcePayload = missingRepairSource?.payload;
+        const nonImages = allSourceFiles.filter((file) => !isImageArtifactName(file.name));
+        const declaredNonImages = (sourcePayload?.files_to_create || []).filter((file) => !isImageArtifactName(file));
+        if ((sourcePayload && sourcePayload.task_mode !== "image" && sourcePayload.needs_image_generation !== true)
+          || nonImages.length > 0 || declaredNonImages.length > 0) {
+          logBadInputFailure(job, {
+            layer: "promote",
+            upstream: "plan_routing",
+            classification: "image_repair_source_not_exclusive",
+            detail: `Promote source ${sourceDir} holds non-image artifacts; image repair refused`,
+          });
+          throw new Error(`Cannot start image repair in ${sourceDir}: the source is not an exclusive image output directory. Correct the promote source routing; preserve its non-image artifacts.`);
+        }
+      }
       const madeProgress = promoteMissingRepairRound(payload) === 0 || plannedCopies.length > 0;
       const repairable = madeProgress && (!!missingRepairSource
         || (plannedCopies.length > 0 && missingNames.every(isImageArtifactName)));
@@ -566,6 +600,21 @@ export async function runPromoteJob(worker, job, wrappedJob, { leaseToken } = {}
       return;
     }
     assertPromoteCopyPlan(plannedCopies, { cwd: promCwd });
+    // A kill during the probe surfaces as an AbortError (no exit status), which
+    // strict mode rethrows into the interruption handler below.
+    const ignoredDestinations = await listIgnoredRepoPaths(promCwd, plannedCopies.map((copy) => copy.destinationRel), {
+      strict: true,
+      git: (args, cwd, opts) => gitExecAsync(args, cwd, { ...opts, signal: abortSignal || undefined }),
+    });
+    if (ignoredDestinations.length > 0) {
+      logBadInputFailure(job, {
+        layer: "promote",
+        upstream: "plan_routing",
+        classification: "ignored_destination",
+        detail: `Promote destination(s) ignored by git: ${ignoredDestinations.map((entry) => entry.path).join(", ")}`,
+      });
+      throw new Error(`Promote destinations are ignored by git and cannot be integrated through a commit: ${ignoredDestinations.map((entry) => entry.path).join(", ")}. Use tracked asset destinations or the project's runtime media installation route.`);
+    }
     const conflictPreview = buildPromoteConflictPreview({ copies: plannedCopies, cwd: promCwd });
     if (conflictPreview.existing_count > 0) {
       const previewText = formatPromoteConflictPreview(conflictPreview);

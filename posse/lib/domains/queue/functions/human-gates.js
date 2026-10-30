@@ -13,6 +13,7 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { now, runImmediateTransaction } from "./common.js";
 import { flushEventsNow } from "./events.js";
 import { jobHasLiveLeaseAt } from "./lease-state.js";
+import { graceCutoff } from "./lease-clock.js";
 import {
   abandonedResolverDecision,
   beginResolutionDecision,
@@ -23,7 +24,7 @@ import {
 
 const ACTIVE_GATE_STATES = Object.freeze(["open", "resolving"]);
 const WORK_ITEM_SINGLETON_GATE_KINDS = new Set([
-  "oneshot_scope_selection",
+  "one_shot_file_scope",
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
   CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
 ]);
@@ -413,7 +414,9 @@ export function beginHumanGateResolution({
       && (
         !leaseToken
         || gateJob.lease_token !== leaseToken
-        || !jobHasLiveLeaseAt(gateJob, now())
+        // Same grace window the lease sweeps honor: a resolver whose lease
+        // the scheduler has not reclaimed is still live.
+        || !jobHasLiveLeaseAt(gateJob, graceCutoff())
       )
     ) {
       return { ok: false, reason: "stale_gate_lease" };
@@ -473,7 +476,7 @@ export function completeHumanGateResolution({
       const gateJob = db.prepare(
         `SELECT lease_token, lease_expires_at FROM jobs WHERE id = ?`
       ).get(gateJobId);
-      if (gateJob?.lease_token !== leaseToken || !jobHasLiveLeaseAt(gateJob, now())) {
+      if (gateJob?.lease_token !== leaseToken || !jobHasLiveLeaseAt(gateJob, graceCutoff())) {
         return { ok: false, reason: "stale_gate_lease" };
       }
     }
@@ -609,7 +612,7 @@ export function claimHeadlessHumanGateTimeout(
       observedAt,
       observedAt,
       gateJobId,
-      observedAt,
+      graceCutoff(),
     );
     return result.changes === 1;
   });
@@ -1047,7 +1050,7 @@ export function reconcileHumanGates() {
           OR julianday(j.lease_expires_at) IS NULL
           OR julianday(j.lease_expires_at) < julianday(?)
         )
-    `).all(now());
+    `).all(graceCutoff());
     for (const row of abandoned) {
       const payload = asPayload(row.payload_json);
       const referencedId = Number(

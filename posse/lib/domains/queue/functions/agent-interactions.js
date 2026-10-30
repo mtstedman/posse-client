@@ -534,28 +534,33 @@ export function answerAgentQuestion({
   author = "operator",
 } = {}) {
   const db = getDb();
-  const question = normalizeRow(db.prepare(`SELECT * FROM agent_interactions WHERE id = ?`).get(normalizePositiveInt(question_id, 0)));
-  if (!question || question.kind !== "question") return null;
-  const answer = createAgentInteraction({
-    work_item_id: question.work_item_id,
-    job_id: question.job_id,
-    parent_id: question.id,
-    direction: USER_TO_AGENT,
-    kind: "answer",
-    blocking_policy: "checkpoint",
-    status: "active",
-    source,
-    author,
-    body,
-    metadata_json: { question_id: question.id },
+  return runImmediateTransaction(db, () => {
+    const question = normalizeRow(db.prepare(`SELECT * FROM agent_interactions WHERE id = ?`).get(normalizePositiveInt(question_id, 0)));
+    if (!question || question.kind !== "question" || question.status !== "active") return null;
+    // CAS on the question row: a concurrent answer loses here instead of
+    // recording a second answer against an already-answered question.
+    const closed = db.prepare(`
+      UPDATE agent_interactions
+      SET status = 'answered', answered_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'active'
+    `).run(now(), now(), question.id);
+    if (closed.changes !== 1) return null;
+    const answer = createAgentInteraction({
+      work_item_id: question.work_item_id,
+      job_id: question.job_id,
+      parent_id: question.id,
+      direction: USER_TO_AGENT,
+      kind: "answer",
+      blocking_policy: "checkpoint",
+      status: "active",
+      source,
+      author,
+      body,
+      metadata_json: { question_id: question.id },
+    });
+    notifyQueueStateChanged({ reason: "agent_question_answered", jobId: question.job_id, workItemId: question.work_item_id });
+    return answer;
   });
-  db.prepare(`
-    UPDATE agent_interactions
-    SET status = 'answered', answered_at = ?, updated_at = ?
-    WHERE id = ?
-  `).run(now(), now(), question.id);
-  notifyQueueStateChanged({ reason: "agent_question_answered", jobId: question.job_id, workItemId: question.work_item_id });
-  return answer;
 }
 
 export function applyActiveAgentInteractionsForAttempt({

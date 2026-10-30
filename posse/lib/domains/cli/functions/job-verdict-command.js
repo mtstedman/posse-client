@@ -31,7 +31,7 @@ export async function runJobVerdictCommand(argv = [], { projectDir } = {}) {
     }
     const gate = createJob({ work_item_id: job.work_item_id, job_type: "human_input", parent_job_id: job.id,
       title: `Operator review: ${job.title}`, payload_json: JSON.stringify({ original_job_id: job.id,
-        review_type: "needs_review", question_kind: "assessment_review",
+        review_type: "assessment_review", question_kind: "assessment_review",
         questions: ["Should this work pass or fail?"], context: [note],
         choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
       }),

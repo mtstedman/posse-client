@@ -136,6 +136,10 @@ export class SessionMonitor {
   }
 
   delayUntilDueMs() {
+    // While the heartbeat interval is installed it polls on its own cadence;
+    // the scheduler's idle sleep then has no reason to wake for the heartbeat
+    // (each such wake was a full lap whose poll returned skipped: "cadence").
+    if (this._heartbeatTimer) return null;
     const state = this._getState();
     if (!state || state.phase !== "active") return null;
     return Math.max(0, this._nextDueAt - this._nowMs());

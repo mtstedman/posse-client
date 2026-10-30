@@ -732,7 +732,9 @@ export async function refreshUsageSummary({
 export function getUsageSummary({ nowMs = Date.now(), forceRefresh = false, ignoreBackoff = false } = {}) {
   const cached = codexUsageState.getCachedSummary(nowMs, { forceRefresh, ignoreBackoff });
   if (cached) return cached;
-  return buildCodexLocalUsageSummary(nowMs);
+  // No network summary yet (headless runs never refresh): serve the local
+  // agent_calls rollup, memoised so back-to-back capacity checks run one query.
+  return codexUsageState.getLocalSummary(nowMs, (at) => buildCodexLocalUsageSummary(at));
 }
 
 export const __testParseCodexStatusText = parseCodexStatusText;

@@ -1,6 +1,7 @@
 // @ts-check
 
 import { resolveAgentRoleContract } from "../functions/agent-role-contracts.js";
+import { NATIVE_TOOL_GRANT_RENEWAL_LEAD_SECONDS } from "../../../catalog/binary.js";
 
 function dispatchError(code, message, { name = "Error", reason = null } = {}) {
   const error = /** @type {Error & { code: string, reason?: unknown }} */ (new Error(message));
@@ -582,10 +583,17 @@ export class AgentDispatcher {
   async #refreshExpiredNativeGrant(agent) {
     const gate = agent.mcpGate;
     const expiresAt = gate?.nativeToolGrant?.expiresAt;
-    if (expiresAt == null || !Number.isFinite(expiresAt) || expiresAt > Date.now() / 1000) return;
+    // Renew ahead of expiry by the longest dispatch: a grant that lapses
+    // mid-call fails the call as "authorization", which is permanent.
+    if (expiresAt == null || !Number.isFinite(expiresAt)) return;
+    const remainingSeconds = expiresAt - Date.now() / 1000;
+    if (remainingSeconds >= NATIVE_TOOL_GRANT_RENEWAL_LEAD_SECONDS) return;
     // Both dispatch paths hold their reservation here. Never rotate authority
     // beneath a live Job or renew a child's inherited ceiling independently.
     if (gate.contractBootConfig?.coordinationChild === true) {
+      // A child cannot renew; its inherited ceiling stays usable until it
+      // actually lapses.
+      if (remainingSeconds > 0) return;
       throw Object.assign(dispatchError("grant_expired", "The parent's native tool grant has expired"), {
         classification: "authorization",
       });

@@ -54,7 +54,7 @@ const QUEUED_REPAIR_LOCK_JOB_TYPES = new Set(["fix", "promote"]);
 const OPERATOR_PARKING_GATE_KINDS = new Set([
   "dead_letter_recovery",
   "fix_chain_exhausted",
-  "developer_blocked",
+  "blocked_recovery",
 ]);
 const AWAITING_OPERATOR_GATE_KINDS = new Set([...OPERATOR_PARKING_GATE_KINDS, ...AUTHORIZATION_GATE_KINDS]);
 const UNRESOLVED_SCOPE_STATUSES = new Set([
@@ -308,6 +308,10 @@ export function recordFileLaneWait(detail = {}) {
     : existing.state_fingerprint !== state.fingerprint
       ? "changed"
       : "unchanged";
+  // Unchanged polling has nothing to persist: the stored row already carries
+  // this fingerprint and detail, and no event fires below for an existing
+  // wait. Skip the write (one per blocked candidate per lap otherwise).
+  if (transition === "unchanged") return { ...existing, transition };
   const ts = now();
   db.prepare(`
     INSERT INTO file_lane_waits (
@@ -424,8 +428,24 @@ export function listFileLaneWaits({ workItemId = null } = {}) {
 export function reconcileFileLaneWaits() {
   const db = getDb();
   if (!db.inTransaction) return runImmediateTransaction(db, () => reconcileFileLaneWaits());
-  const locks = listActiveFileLocks();
-  const snapshot = { ...locks, work_item_order: loadWorkItemOrder(db, { workItemLocks: locks.work_items }) };
+  // This runs on every lock release. Active locks are only needed once a
+  // queued locking job exists, and the work-item order (per-WI merge-parking
+  // queries + a jobs×WIs join) only once a candidate actually reaches the
+  // order gate, so both load lazily; a release with nothing queued skips them.
+  let snapshot = null;
+  const conflictSnapshot = () => {
+    if (snapshot) return snapshot;
+    const locks = listActiveFileLocks();
+    let order = null;
+    snapshot = {
+      ...locks,
+      get work_item_order() {
+        order ??= loadWorkItemOrder(db, { workItemLocks: locks.work_items });
+        return order;
+      },
+    };
+    return snapshot;
+  };
   const desired = new Map();
   let lastId = 0;
   for (;;) {
@@ -440,7 +460,7 @@ export function reconcileFileLaneWaits() {
     if (jobs.length === 0) break;
     for (const job of jobs) {
       lastId = Number(job.id);
-      const descriptor = waitDescriptorForConflict(job, findWriteLockConflict(job, getJobWriteScope(job), snapshot,
+      const descriptor = waitDescriptorForConflict(job, findWriteLockConflict(job, getJobWriteScope(job), conflictSnapshot(),
         { ignoreHardDependencyPredecessors: true }));
       if (!descriptor) continue;
       desired.set(`${descriptor.waiter_job_id}|${descriptor.lane_id}|${descriptor.holder_key}`, descriptor);

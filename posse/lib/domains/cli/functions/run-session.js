@@ -19,6 +19,7 @@ import { resolveGateReviewDiffTarget } from "../../queue/functions/gate-review-t
 import { CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE, MERGE_FAILURE_RECOVERY_REVIEW_TYPE, MERGE_VERIFICATION_REVIEW_TYPE, WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE, humanGateStateAllowsAnswer, humanInputChoicesForPayload } from "../../../catalog/human-input.js";
 import { getHumanGate, listJobs } from "../../queue/functions/index.js";
 import { closeDb } from "../../../shared/storage/functions/index.js";
+import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
 import { flushEventsNow } from "../../queue/functions/events.js";
 import { closeLog, log } from "../../../shared/telemetry/functions/logging/logger.js";
 import { closeOutputLog } from "../../../shared/telemetry/functions/logging/output-log.js";
@@ -358,16 +359,47 @@ export function handleWrapUpSignal({
   closeRuntimeState = closeRuntimeStateForExit,
   exit = process.exit,
   forceExitMs = 10000,
+  threadManager = ThreadManager,
+  drainTimeoutMs = 5000,
+  hardExitGraceMs = 5000,
 } = {}) {
   if (display) display.stop();
   const code = signal === "SIGTERM" ? 143 : 130;
   process.exitCode = code;
   let finished = false;
+  let exited = false;
+  const closeAndExit = () => {
+    if (exited) return;
+    exited = true;
+    clearTimeout(hardExitTimer);
+    try { closeRuntimeState?.(); } finally { exit(code); }
+  };
+  // Last line of defence: a worker inside a synchronous git call cannot be
+  // pre-empted by terminate(), so the drain below could otherwise hold the
+  // exit open indefinitely. This timer exits regardless of drain progress.
+  const hardExitTimer = setTimeout(closeAndExit, forceExitMs + hardExitGraceMs);
+  hardExitTimer.unref?.();
   const finish = () => {
     if (finished) return;
     finished = true;
     clearTimeout(forceTimer);
-    try { closeRuntimeState?.(); } finally { exit(code); }
+    // Wrap-up can leave git-workflow worker threads live (push/merge/startup
+    // guard). Exiting while one is mid-import of a native module aborts the
+    // process (SIGABRT) instead of exiting 130/143, so drain first — but only
+    // when workers exist, keeping the no-worker path fully synchronous.
+    let liveWorkers = 0;
+    try { liveWorkers = Number(threadManager?.liveWorkerCount) || 0; } catch { liveWorkers = 0; }
+    if (liveWorkers <= 0) {
+      closeAndExit();
+      return;
+    }
+    let drained;
+    try {
+      drained = Promise.resolve(threadManager.drainAll({ timeoutMs: drainTimeoutMs }));
+    } catch {
+      drained = Promise.resolve();
+    }
+    return drained.then(closeAndExit, closeAndExit);
   };
   const forceTimer = setTimeout(finish, forceExitMs);
   forceTimer.unref?.();
@@ -378,7 +410,7 @@ export function handleWrapUpSignal({
     } catch {
       // Best-effort shutdown still needs to close local state and exit.
     }
-    finish();
+    return finish();
   };
   try {
     const stopResult = cleanupAtlasForSession?.({ label: "Interrupted wrap-up" });

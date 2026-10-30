@@ -39,6 +39,10 @@ export const DEFAULT_REPAIR_POLL_MS = getCatalogRuntimeFallbackInt("scheduler_re
 export const DEFAULT_LEASE_SEC = getCatalogRuntimeFallbackInt("default_lease_seconds", 120);
 export const DEFAULT_CONCURRENCY = getCatalogRuntimeFallbackInt("scheduler_concurrency", 3);
 export const LOCK_RENEW_SEC = 30;
+// Idle repair ticks rebuild the held-lock index from the DB only when the
+// durable wake generation moved, plus one unconditional rebuild per interval
+// as defense-in-depth against a dropped wake.
+export const QUEUE_LOCK_INDEX_UNCONDITIONAL_REFRESH_MS = 60_000;
 export const PROGRESS_TIMEOUT_SEC = 300;
 export const MAX_RUNNABLE_SCAN_PER_TICK = 25;
 export const HEADLESS_HUMAN_TIMEOUT_SEC = getCatalogRuntimeFallbackInt("headless_human_timeout_sec", 600);

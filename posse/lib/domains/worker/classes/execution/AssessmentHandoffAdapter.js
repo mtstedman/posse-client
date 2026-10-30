@@ -96,7 +96,7 @@ import {
 } from "../../functions/helpers/configured-verification.js";
 import { repairTestDependencies } from "../../functions/helpers/test-dependency-repair.js";
 import { isBlockingVerificationInfrastructureOutcome, verificationInfrastructureError } from "../../functions/helpers/verification-outcome.js";
-import { routeAssessmentInfrastructureFailure } from "../../functions/helpers/assessment-pipeline.js";
+import { routeAssessmentInfrastructureFailure, updateAssessmentLifecycleFromVerdict } from "../../functions/helpers/assessment-pipeline.js";
 
 function _syncAssessorWorkerDisplay(display, job, {
   tier = "cheap",
@@ -602,22 +602,18 @@ export class AssessmentHandoffAdapter {
         return { handled: true, currentAttemptId: assessAttempt.attempt.id };
       }
       const emitFn = (msg) => worker.emit(job.id, assessmentDisplayMessage(msg, assessmentSession.modelCalled));
-      processVerdict(job, verdict, { emit: emitFn, projectDir: worker.projectDir, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash, assessmentModelTier: effectiveTier });
+      const { effectiveVerdict } = processVerdict(job, verdict, { emit: emitFn, projectDir: worker.projectDir, autoApprove: worker.autoApprove, leaseToken, assessedCommitHash, assessmentModelTier: effectiveTier });
       const freshJob = getJob(job.id);
-      if (freshJob?.status === "succeeded") {
-        setAssessmentLifecycle(job.id, "assessment_passed", { completed: true });
-      } else if (freshJob?.status === "failed") {
-        setAssessmentLifecycle(job.id, "assessment_failed", { completed: true });
-      } else if (["waiting_on_human", "waiting_on_review"].includes(freshJob?.status)) {
-        setAssessmentLifecycle(job.id, "assessment_needs_human");
-      }
+      const assessmentOutcome = updateAssessmentLifecycleFromVerdict(job.id, freshJob, effectiveVerdict);
       if (["waiting_on_human", "waiting_on_review"].includes(freshJob?.status)) {
         worker._releaseLease(job, leaseToken, freshJob.status);
       }
+      const finalStatus = ATTEMPT_STATUS_MAP[freshJob?.status] || "failed";
       completeAttempt(assessAttempt.attempt.id, {
-        status: ATTEMPT_STATUS_MAP[freshJob?.status] || "failed",
+        status: finalStatus,
         duration_ms: Date.now() - assessStart,
         output_chars: assessmentSource.output.length,
+        error_text: finalStatus === "failed" ? assessmentOutcome.error : null,
       });
       spawnDeferredAssessmentFileRequestFollowUp(
         worker,

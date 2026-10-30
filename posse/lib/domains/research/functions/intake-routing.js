@@ -305,6 +305,13 @@ function oneshotSourceForPayload(routing, source) {
   return source === "preflight" ? "preflight" : "intake";
 }
 
+// One accessor for the direct-route source ceiling: routing.js decides the
+// small-repository route on it, and the inventory keeps its file list only
+// under it, so the two can never read different numbers.
+export function researchDirectPathMaxSourceBytes() {
+  return Number(getSetting("research_direct_path_max_source_bytes") ?? RESEARCH_DIRECT_PATH_MAX_SOURCE_BYTES);
+}
+
 export function getProjectMapForResearchRouting(projectDir) {
   try {
     return getCachedProjectMap(projectDir) || ensureProjectMap(projectDir);
@@ -325,9 +332,17 @@ export function classifyResearchForRouting({
 } = {}) {
   const metadata = workItem ? parseWorkItemMetadata(workItem) : {};
   const hints = intakeHints ?? metadata.intake_hints ?? {};
-  const projectMap = { ...(metadata.research_project_map || getProjectMapForResearchRouting(projectDir) || {}),
-    ...repositorySourceInventory(projectDir), candidate_check_commands: discoverCheckCommands(projectDir) };
-  if (live && workItem?.id && projectMap && !metadata.research_project_map) {
+  const directPathMaxSourceBytes = researchDirectPathMaxSourceBytes();
+  const persistedMap = metadata.research_project_map || null;
+  // The source inventory (git ls-files + one lstat per file) is a repository
+  // walk; a persisted map that already carries it is reused as-is, so the
+  // walk runs once per work item rather than on every classify call.
+  const inventory = Number.isFinite(persistedMap?.eligible_source_bytes)
+    ? null
+    : repositorySourceInventory(projectDir, { sourceListMaxBytes: directPathMaxSourceBytes });
+  const projectMap = { ...(persistedMap || getProjectMapForResearchRouting(projectDir) || {}),
+    ...inventory, candidate_check_commands: discoverCheckCommands(projectDir) };
+  if (live && workItem?.id && projectMap && !persistedMap) {
     try {
       updateWorkItemMetadata(workItem.id, { ...metadata, research_project_map: projectMap });
     } catch {
@@ -339,7 +354,7 @@ export function classifyResearchForRouting({
     description: description ?? workItem?.description ?? "",
     intakeHints: hints,
     projectMap,
-    directPathMaxSourceBytes: Number(getSetting("research_direct_path_max_source_bytes") ?? RESEARCH_DIRECT_PATH_MAX_SOURCE_BYTES),
+    directPathMaxSourceBytes,
     mode: mode ?? workItem?.mode ?? metadata.mode ?? null,
   });
 

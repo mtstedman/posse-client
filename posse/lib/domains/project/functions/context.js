@@ -140,7 +140,7 @@ function _recentHumanAnswers(jobs, limit = 5) {
       result: _safeJson(job.result_json),
     }))
     .filter(({ payload }) => {
-      if (payload.review_type || ["plan_approval", "push_offer", "oneshot_scope_selection"].includes(payload.subtype)) {
+      if ((payload.review_type && payload.review_type !== "clarification") || ["plan_approval", "push_offer", "one_shot_file_scope"].includes(payload.subtype)) {
         return false;
       }
       if (Array.isArray(payload.file_requests) && payload.file_requests.length > 0) return false;

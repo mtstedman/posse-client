@@ -8,8 +8,13 @@ export function namedTaskPaths(task = {}) {
   return [...new Set([...String(task.task_spec || "").matchAll(/(?:^|[\s`"'(\[{:])((?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+)/g)].map((match) => match[1]))];
 }
 
+// Only a code task edits the files its spec names. A report, content or image
+// task that cites an existing repo file as its subject must stay file-free:
+// completing its scope would route it to dev as a code change (H4).
+const CODE_TASK_MODES = new Set(["code", "dev"]);
+
 export function completeTaskScope(task, root) {
-  if (!root || !["dev", "fix", undefined].includes(task.job_type) || task.task_mode === "db") return [];
+  if (!root || !["dev", "fix", undefined].includes(task.job_type) || !CODE_TASK_MODES.has(task.task_mode ?? "code")) return [];
   const declared = new Set([...(task.files_to_modify || []), ...(task.files_to_create || []), ...(task.files_to_delete || [])]);
   const added = namedTaskPaths(task).filter((file) => {
     if (declared.has(file) || file.split("/").includes("..") || protectedMutablePathReason(file) || isSensitiveEnvRepoPath(file)) return false;
@@ -30,7 +35,9 @@ export function plannerDependencyKind(task = {}, upstream = {}) {
   const upstreamFiles = [...(upstream.files_to_modify || []), ...(upstream.files_to_create || []), ...(upstream.files_to_delete || [])];
   if (!downstream.size || !upstreamFiles.length || task.create_roots?.length || upstream.create_roots?.length) return "hard";
   if (upstreamFiles.some((file) => downstream.has(file))) return "hard";
+  // A spec that names an upstream file verbatim depends on that file's final
+  // shape whether the upstream creates, modifies or deletes it.
   const named = new Set(namedTaskPaths(task));
-  if ((upstream.files_to_create || []).some((file) => named.has(file))) return "hard";
+  if (upstreamFiles.some((file) => named.has(file))) return "hard";
   return "soft";
 }

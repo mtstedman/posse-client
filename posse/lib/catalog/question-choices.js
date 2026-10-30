@@ -5,6 +5,11 @@ import { MERGE_FAILURE_RECOVERY_REVIEW_TYPE, mergeFailureRecoveryChoices } from 
 // Review kinds may persist an ordered subset of their vocabulary (a gate
 // narrowed to the actions that can still apply); their order never changes.
 const CHOICE_SET_POLICIES = Object.freeze({
+  assessment_evidence_missing: Object.freeze({ orderedSubset: true }),
+  stall_exhausted_recovery: Object.freeze({ orderedSubset: true }),
+  failure_threshold_exhausted: Object.freeze({ orderedSubset: true }),
+  fix_chain_exhausted: Object.freeze({ orderedSubset: true }),
+
   assessment_review: Object.freeze({ orderedSubset: true }),
   assessment_transport_recovery: Object.freeze({ orderedSubset: true }),
   assessment_retry_limit: Object.freeze({ orderedSubset: true }),

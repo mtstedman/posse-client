@@ -34,7 +34,7 @@ import {
 } from "./table-definitions.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 23;
+export const HOST_SCHEMA_VERSION = 24;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);

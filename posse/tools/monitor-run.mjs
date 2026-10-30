@@ -54,19 +54,15 @@ async function main() {
   const statePath = monitorStatePath({ runDir, workItemId: args.workItemId, name: args.state });
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   const lockPath = `${statePath}.lock`;
-  let lock;
-  try { lock = fs.openSync(lockPath, "wx", 0o600); }
-  catch (error) {
-    if (error.code === "EEXIST") throw new Error(`Cursor locked: ${lockPath}. Use another --state for an independent observer. Remove a stale lock only after its process has stopped.`);
-    throw error;
-  }
+  const lock = acquireCursorLock(lockPath);
   fs.writeFileSync(lock, `${process.pid}\n`);
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
+  let monitor = null;
   try {
-    const monitor = new RunMonitor({ runDir, statePath, dbPath: path.resolve(args.db || getRuntimeDbPath(project)), workItemId: args.workItemId ?? null, limit: args.limit, staleMs: args.staleMs });
+    monitor = new RunMonitor({ runDir, statePath, dbPath: path.resolve(args.db || getRuntimeDbPath(project)), workItemId: args.workItemId ?? null, limit: args.limit, staleMs: args.staleMs });
     let first = true;
     do {
       const report = monitor.check();
@@ -84,9 +80,36 @@ async function main() {
   } finally {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
+    monitor?.dispose();
     fs.closeSync(lock);
     fs.unlinkSync(lockPath);
   }
+}
+
+// The lock file records its owner's pid. A watcher that was SIGKILLed leaves
+// the file behind; reclaim it only when that pid is provably gone (ESRCH).
+// EPERM means a live process we may not signal, so the cursor stays locked.
+function acquireCursorLock(lockPath) {
+  for (let attempt = 0; ; attempt++) {
+    try { return fs.openSync(lockPath, "wx", 0o600); }
+    catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (attempt === 0 && reclaimDeadCursorLock(lockPath)) continue;
+      throw new Error(`Cursor locked: ${lockPath}. Use another --state for an independent observer. Remove a stale lock only after its process has stopped.`);
+    }
+  }
+}
+
+function reclaimDeadCursorLock(lockPath) {
+  let pid;
+  try { pid = Number.parseInt(fs.readFileSync(lockPath, "utf8").trim(), 10); }
+  catch (error) { return error.code === "ENOENT"; }
+  // An empty or foreign lock body (owner still between open and write) is not evidence of death.
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return false; }
+  catch (error) { if (error.code !== "ESRCH") return false; }
+  try { fs.unlinkSync(lockPath); return true; }
+  catch (error) { return error.code === "ENOENT"; }
 }
 
 process.stdout.on("error", () => { /* write callback reports output failure */ });

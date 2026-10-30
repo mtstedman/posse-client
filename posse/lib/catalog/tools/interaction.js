@@ -3,6 +3,13 @@
 // @catalog-sync id=posse.work_item.question_vocabulary role=authority relation=strict compare=values extract=js-question-vocabulary symbol=WORK_ITEM_QUESTION_CHOICE_IDS projection_source=posse
 // @linked_repos posse:posse/test/fixtures/work-item-overview/protocol/question-vocabulary-v1.json#kinds posse-bossy:catalog/work_item_overview.go#QUESTION_VOCABULARY posse-bossy:catalog/testdata/repository_work_item_overview/question-vocabulary-v1.json#kinds
 export const WORK_ITEM_QUESTION_CHOICE_IDS = Object.freeze({
+  clarification: Object.freeze([]),
+  planner_clarification: Object.freeze([]),
+  dirty_worktree_recovery: Object.freeze(["commit", "send_back", "fail"]),
+  assessment_evidence_missing: Object.freeze(["send_back", "retry_assessment", "retry", "replan", "pass", "fail", "explicit_waiver"]),
+  stall_exhausted_recovery: Object.freeze(["retry", "retry:claude", "retry:anthropic", "retry:openai", "retry:codex", "retry:grok", "skip", "fail"]),
+  failure_threshold_exhausted: Object.freeze(["retry", "replan", "fail", "explicit_waiver"]),
+  fix_chain_exhausted: Object.freeze(["retry", "replan", "fail", "explicit_waiver"]),
   plan_approval: Object.freeze(["approve", "reject"]),
   file_scope_approval: Object.freeze(["approve", "reject"]),
   environment_setup: Object.freeze(["approve", "reject"]),
@@ -19,6 +26,10 @@ export const WORK_ITEM_QUESTION_CHOICE_IDS = Object.freeze({
   artifact_routing_admin: Object.freeze(["acknowledge"]),
   one_shot_file_scope: Object.freeze(["plan", "cancel"]),
   push_offer: Object.freeze(["push", "decline"]),
+  shared_trunk_publication_unprovable: Object.freeze(["acknowledge"]),
+  shared_trunk_fast_forward_blocked: Object.freeze(["acknowledge"]),
+  shared_trunk_push_refused: Object.freeze(["acknowledge"]),
+  shared_trunk_push_remote_error: Object.freeze(["acknowledge"]),
   shared_trunk_provenance: Object.freeze(["accept", "reject"]),
   // @linked +posse:posse/lib/domains/bridge/functions/work-item-feed.js#validStoredChoiceEntries +posse:posse/lib/domains/queue/functions/interaction-contract.js#validChoiceEntries (ordered subsets)
   work_item_failure_disposition: Object.freeze(["retry", "accept", "abandon"]),

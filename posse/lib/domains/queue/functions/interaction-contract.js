@@ -1,6 +1,6 @@
 import { gateQuestionChoiceEntries, validQuestionChoiceEntries } from "../../../catalog/question-choices.js";
 import { CHOICE_COPY } from "../../../catalog/work-item-interaction-copy.js";
-import { ACTION_METADATA_KEY, QUESTION_CAPABILITY, MAX_QUESTIONS, MAX_NUDGES, MAX_FEEDBACK, MAX_PROMPT_CHARS, MAX_CONTEXT_CHARS, MAX_FEEDBACK_SUMMARY_CHARS, MAX_FEEDBACK_DETAIL_CHARS, MAX_NUDGE_BODY_CHARS, MAX_ACTION_ID_BYTES, DIRECT_ACTION_RESERVATION_STALE_MS, LIVE_OWNER_DELIVERY_HANDLERS, LIVE_OWNER_DELIVERY_HANDLERS_SQL, FEEDBACK_PHASES, FEEDBACK_STATUSES, LEGACY_PIPELINE_HEAD_REVIEW_TYPES, HANDLER_BY_KIND } from "../../../catalog/work-item-interactions.js";
+import { ACTION_BEARING_INTERACTION_KINDS_SQL, ACTION_ID_LOOKUP_EXPRESSION_SQL, ACTION_METADATA_KEY, QUESTION_CAPABILITY, MAX_QUESTIONS, MAX_NUDGES, MAX_FEEDBACK, MAX_PROMPT_CHARS, MAX_CONTEXT_CHARS, MAX_FEEDBACK_SUMMARY_CHARS, MAX_FEEDBACK_DETAIL_CHARS, MAX_NUDGE_BODY_CHARS, MAX_ACTION_ID_BYTES, DIRECT_ACTION_RESERVATION_STALE_MS, LIVE_OWNER_DELIVERY_HANDLERS, LIVE_OWNER_DELIVERY_HANDLERS_SQL, FEEDBACK_PHASES, FEEDBACK_STATUSES, HANDLER_BY_KIND } from "../../../catalog/work-item-interactions.js";
 import { JOB_TYPE_ROLE_REGISTRY } from "../../../catalog/provider.js";
 import { WORK_ITEM_ACTION_PROTOCOL } from "../../../catalog/bridge.js";
 import {
@@ -15,7 +15,7 @@ import {
   HUMAN_INPUT_FREE_TEXT_CHOICE_ID,
   HUMAN_INPUT_FREE_TEXT_MAX_CHARS,
   humanInputChoicesForPayload,
-  questionKindForReviewType,
+  humanGateNameForPayload,
 } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -143,14 +143,20 @@ function parseStoredAction(row) {
   return action && typeof action === "object" && !Array.isArray(action) ? action : null;
 }
 
-function findActionById(db, actionId) {
-  const row = db.prepare(`
+// Kind predicate first so idx_agent_interactions_kind_status can prune, and
+// the expression text matches idx_agent_interactions_action_id verbatim so
+// SQLite serves the lookup from that partial index. Exported for the plan
+// assertions in the storage tests.
+export const FIND_ACTION_BY_ID_SQL = `
     SELECT *
     FROM agent_interactions
-    WHERE json_extract(metadata_json, '$.${ACTION_METADATA_KEY}.action_id') = ?
+    WHERE kind IN (${ACTION_BEARING_INTERACTION_KINDS_SQL}) AND ${ACTION_ID_LOOKUP_EXPRESSION_SQL} = ?
     ORDER BY id DESC
     LIMIT 1
-  `).get(actionId);
+  `;
+
+function findActionById(db, actionId) {
+  const row = db.prepare(FIND_ACTION_BY_ID_SQL).get(actionId);
   return row ? { row, action: parseStoredAction(row) } : null;
 }
 
@@ -299,20 +305,7 @@ function choiceRecord(choiceId, overrides = {}) {
 }
 
 export function typedKindForGate(payload) {
-  const reviewKind = questionKindForReviewType(payload?.review_type);
-  // Older pipeline-head recovery rows persisted a question vocabulary that
-  // never matched their dead-letter runtime handler. Prefer the corrected
-  // review contract so those already-open gates become actionable too.
-  if (reviewKind === "dead_letter_recovery") return reviewKind;
-  const explicit = String(payload?.question_kind || "").trim();
-  if (Object.hasOwn(WORK_ITEM_QUESTION_CHOICE_IDS, explicit)) return explicit;
-  if (payload?.subtype === "plan_approval") return "plan_approval";
-  if (payload?.subtype === "push_offer") return "push_offer";
-  if (payload?.subtype === "oneshot_scope_selection" || payload?.review_type === "oneshot_scope_selection") {
-    return "one_shot_file_scope";
-  }
-  if (Array.isArray(payload?.file_requests) && payload.file_requests.length > 0) return "file_scope_approval";
-  return reviewKind || "legacy_unstructured";
+  try { return humanGateNameForPayload(payload); } catch { return "legacy_unstructured"; }
 }
 
 function choiceIdFromEntry(entry) {
@@ -340,13 +333,6 @@ function gateChoiceRecords(kind, payload) {
       : [];
   }
   if (!validChoiceEntries(kind, explicit)) {
-    if (
-      kind === "dead_letter_recovery"
-      && payload?.question_kind === "pipeline_head_recovery"
-      && LEGACY_PIPELINE_HEAD_REVIEW_TYPES.has(String(payload?.review_type || ""))
-    ) {
-      return WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery.map((choiceId) => choiceRecord(choiceId));
-    }
     return [];
   }
   return explicit.map((entry) => {

@@ -7,6 +7,12 @@ import { pipelineHasSession } from "../functions/run-display-pipeline.js";
 import { registeredToolCatalogSnapshot } from "../functions/run-display-tools.js";
 import { TuiSnapshotWorker } from "./TuiSnapshotWorker.js";
 
+// The dirty-tree glyph costs a `git status` on the project and on every live
+// WI worktree plus a `rev-list` per unmerged WI, all of which contend with
+// merges and commits. It is a review hint, not a live view: refresh it at most
+// every 30 s whether the trigger is the timer or a queue change.
+export const DIRTY_STATE_REFRESH_MS = 30_000;
+
 export class RunDisplaySnapshotController {
   constructor({
     getDisplay = () => null,
@@ -44,8 +50,12 @@ export class RunDisplaySnapshotController {
     };
     const dirty = createAsyncSnapshotCache({
       initialValue: null,
-      minIntervalMs: 2500,
-      load: typeof this.collectDirtyStateAsync === "function" ? () => this.collectDirtyStateAsync() : null,
+      minIntervalMs: DIRTY_STATE_REFRESH_MS,
+      // Display path: skip git reads for terminal WIs (the wrap-up review audit
+      // still covers them in full).
+      load: typeof this.collectDirtyStateAsync === "function"
+        ? () => this.collectDirtyStateAsync({ activeOnly: true })
+        : null,
       onUpdate: (state) => this.getDisplay()?.acceptDirtyStateSnapshot?.(state),
       onError: (err) => {
         this.log?.debug?.("display", "Dirty-state snapshot refresh failed", { error: String(err?.message || err) });
@@ -76,7 +86,7 @@ export class RunDisplaySnapshotController {
     void dirty.refresh({ force: true });
     void pipeline.refresh({ force: true });
     void tools.refresh({ force: true });
-    this.trackTimer(setInterval(() => void dirty.refresh(), 5000));
+    this.trackTimer(setInterval(() => void dirty.refresh(), DIRTY_STATE_REFRESH_MS));
     this.trackTimer(setInterval(() => {
       const currentDisplay = this.getDisplay();
       // The log and monitor views include a compact paired-work lane. Refresh

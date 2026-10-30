@@ -247,6 +247,7 @@ export const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   // Debug · planner-led intake tuning
   planner_research_effort_ceiling: "Research helper effort ceiling",
   planner_research_max_children: "Research helpers per plan",
+  planner_research_max_active_children: "Research helpers running at once",
   planner_research_child_timeout_ms: "Research helper timeout",
   planner_research_child_max_turns: "Research helper turn limit",
   planner_research_result_chars: "Research helper result target",
@@ -461,6 +462,7 @@ export const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   // Debug · planner-led intake tuning
   planner_research_effort_ceiling: "Highest reasoning effort the planner may request for a research helper.",
   planner_research_max_children: "Most research helpers one planner call may start.",
+  planner_research_max_active_children: "Most research helpers that may run at the same time across every planner on this instance; raise it when several plans run in parallel.",
   planner_research_child_timeout_ms: "How long one research helper may run, in milliseconds. The dispatch tool timeout also bounds it.",
   planner_research_child_max_turns: "Turn budget for each research helper.",
   planner_research_result_chars: "Target characters per research helper; longer reports are delivered in full and use more planner context.",

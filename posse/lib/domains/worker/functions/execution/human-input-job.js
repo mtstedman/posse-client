@@ -1,3 +1,5 @@
+import { BLOCKED_RECOVERY_GATE_KINDS } from "../../../../catalog/human-input.js";
+import { refreshHumanGateContract } from "../../../queue/functions/human-gates.js";
 import { materializeScopeCreates } from "../../../queue/functions/scope-create-grant.js";
 import { installScopeCreateMaterializer } from "../../../queue/functions/scope-create-materializer.js";
 installScopeCreateMaterializer(materializeScopeCreates);
@@ -74,6 +76,7 @@ import {
   BLOCKED_RECOVERY_RETRY_SCOPES,
   POST_MERGE_DB_TASK_REVIEW_TYPE,
   humanInputChoiceFeedback,
+  humanGateContractForPayload,
 } from "../../../../catalog/human-input.js";
 import {
   blockedRecoveryDecisionForAction,
@@ -89,20 +92,15 @@ const REVIEW_DECISION_ORIGINAL_STATUS_SET = new Set([
 ]);
 const DEAD_LETTER_RECOVERY_REVIEW_TYPES = new Set([
   "dead_letter_recovery",
-  "research_dead_letter_recovery",
-  "oneshot_dead_letter_recovery",
   "stall_exhausted_recovery",
 ]);
 const ASSESSMENT_REVIEW_TYPES = new Set([
-  "assessment",
-  "needs_review",
-  "assessment_parse_error",
+  "assessment_review",
   "assessment_evidence_missing",
-  "unknown_verdict",
-  "assessment_transport_error",
+  "assessment_transport_recovery",
   "assessment_retry_limit",
-  "replan_limit",
-  "unexecuted_replan_limit",
+  "pipeline_head_recovery",
+  "unexecuted_replan_recovery",
 ]);
 const TERMINAL_HUMAN_GATE_CLAIM_FAILURES = new Set([
   "gate_already_resolved",
@@ -301,7 +299,14 @@ export async function prepareOneshotScopeSelection(worker, job, payload, {
       atlas_error: resolution.atlas_error || null,
     },
   };
-  updateJobPayload(job.id, JSON.stringify(nextPayload));
+  runInTransaction(() => {
+    updateJobPayload(job.id, JSON.stringify(nextPayload));
+    const gate = getHumanGate(job.id);
+    const choices = humanGateContractForPayload(nextPayload).allowed_actions;
+    if (gate && JSON.stringify(gate.allowed_actions) !== JSON.stringify(choices)) {
+      refreshHumanGateContract(job.id, nextPayload);
+    }
+  });
   const refreshedJob = getJob(job.id) || { ...job, payload_json: JSON.stringify(nextPayload) };
 
   if (scope.status !== "ready") {
@@ -511,7 +516,7 @@ export async function runHumanInputJob(worker, job, {
       selectedAction === "retry_assessment"
       && (
         payload.review_type === "assessment_evidence_missing"
-        || payload.gate_kind === "assessor_evidence_unavailable"
+        || payload.gate_kind === "assessment_evidence_missing"
       )
     ) {
       const assessmentSource = loadAssessmentSource(payload.original_job_id);
@@ -680,7 +685,7 @@ export async function runHumanInputJob(worker, job, {
       worker.emit(job.id, `[human] Environment setup ${selectedAction === "approve" ? "approved" : "rejected"}; returning the decision to the waiting tool.`);
     }
 
-    if (payload.review_type === "scope_expansion_request" && payload.scope_request) {
+    if (payload.review_type === "file_scope_approval" && payload.scope_request) {
       handledReviewDecision = true;
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
@@ -726,7 +731,7 @@ export async function runHumanInputJob(worker, job, {
     if (
       Array.isArray(payload.file_requests)
       && payload.file_requests.length > 0
-      && payload.review_type !== "blocked_recovery"
+      && !BLOCKED_RECOVERY_GATE_KINDS.includes(payload.review_type)
     ) {
       handledReviewDecision = true;
       const decision = selectedAction === "approve"
@@ -1064,7 +1069,7 @@ export async function runHumanInputJob(worker, job, {
       }
     }
 
-    if (payload.original_job_id && payload.review_type === "blocked_recovery") {
+    if (payload.original_job_id && BLOCKED_RECOVERY_GATE_KINDS.includes(payload.review_type)) {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
@@ -1335,7 +1340,7 @@ export async function runHumanInputJob(worker, job, {
         });
       }
     }
-    if (!handledReviewDecision && payload.original_job_id && payload.review_type) {
+    if (!handledReviewDecision && payload.original_job_id && payload.review_type && payload.review_type !== "clarification") {
       const origJob = getJob(payload.original_job_id);
       const answers = extractHumanAnswers(output);
       const lastAnswer = extractLatestActionableHumanAnswerText(answers);
@@ -1545,7 +1550,7 @@ export async function runHumanInputJob(worker, job, {
     // free-form input. Typed review/recovery gates must resolve through an
     // explicit action branch above; silently requeueing an unknown action is
     // what turns a malformed or stale review contract into a human-input loop.
-    if (payload.original_job_id && !handledReviewDecision && !payload.review_type) {
+    if (payload.original_job_id && !handledReviewDecision && payload.review_type === "clarification") {
       const origJob = getJob(payload.original_job_id);
       const unblockable = new Set(["waiting_on_human", "waiting_on_review", "blocked", "awaiting_assessment"]);
       if (origJob && unblockable.has(origJob.status)) {

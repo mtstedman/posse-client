@@ -653,15 +653,7 @@ export function buildManifest(dir, relBase = null, opts = {}) {
   const errors = [];
   let totalSize = 0;
   const base = relBase || dir;
-  const maxDepth = Number.isFinite(Number(opts.maxDepth))
-    ? Math.max(0, Math.floor(Number(opts.maxDepth)))
-    : DEFAULT_MANIFEST_MAX_DEPTH;
-  const maxFiles = Number.isFinite(Number(opts.maxFiles))
-    ? Math.max(0, Math.floor(Number(opts.maxFiles)))
-    : DEFAULT_MANIFEST_MAX_FILES;
-  const maxErrors = Number.isFinite(Number(opts.maxErrors))
-    ? Math.max(0, Math.floor(Number(opts.maxErrors)))
-    : DEFAULT_MANIFEST_MAX_ERRORS;
+  const { maxDepth, maxFiles, maxErrors } = manifestLimits(opts);
   let truncated = false;
   let suppressedErrors = 0;
 
@@ -728,6 +720,133 @@ export function buildManifest(dir, relBase = null, opts = {}) {
   }
 
   walk(dir);
+  if (suppressedErrors > 0) errors.push(`... ${suppressedErrors} manifest scan errors suppressed`);
+  return { files, totalSize, count: files.length, truncated, errors: errors.length > 0 ? errors : undefined };
+}
+
+function manifestLimits(opts = {}) {
+  const limit = (value, fallback) => (Number.isFinite(Number(value))
+    ? Math.max(0, Math.floor(Number(value)))
+    : fallback);
+  return {
+    maxDepth: limit(opts.maxDepth, DEFAULT_MANIFEST_MAX_DEPTH),
+    maxFiles: limit(opts.maxFiles, DEFAULT_MANIFEST_MAX_FILES),
+    maxErrors: limit(opts.maxErrors, DEFAULT_MANIFEST_MAX_ERRORS),
+  };
+}
+
+// Files per directory whose stats are in flight at once in buildManifestAsync.
+const MANIFEST_ASYNC_STAT_CONCURRENCY = 32;
+
+/**
+ * `buildManifest` off the main thread: same output (file order, limits,
+ * error text and order) for the same tree, so a pre-dispatch snapshot taken
+ * here compares cleanly with a post-dispatch `buildManifest`. Directories are
+ * walked in order; only the stats within a directory run concurrently.
+ */
+export async function buildManifestAsync(dir, relBase = null, opts = {}) {
+  if (relBase && typeof relBase === "object" && !Array.isArray(relBase)) {
+    opts = relBase;
+    relBase = null;
+  }
+  const files = [];
+  const errors = [];
+  let totalSize = 0;
+  const base = relBase || dir;
+  const { maxDepth, maxFiles, maxErrors } = manifestLimits(opts);
+  let truncated = false;
+  let suppressedErrors = 0;
+
+  function recordError(message) {
+    if (errors.length < maxErrors) {
+      errors.push(message);
+      return;
+    }
+    suppressedErrors++;
+  }
+
+  function noteTruncated(message) {
+    if (!truncated) recordError(message);
+    truncated = true;
+  }
+
+  function relativeManifestPath(fullPath) {
+    return path.relative(base, fullPath).replace(/\\/g, "/");
+  }
+
+  function isNestedRuntimeDir(fullPath) {
+    const relPath = relativeManifestPath(fullPath);
+    if (!relPath || relPath.startsWith("..")) return false;
+    return relPath.split("/").filter(Boolean).includes(".posse");
+  }
+
+  // Stat a batch concurrently but record it in entry order.
+  async function statBatch(batch) {
+    const results = await Promise.all(batch.map(async (item) => {
+      try {
+        return { ...item, stat: await fs.promises.stat(item.full) };
+      } catch (err) {
+        return { ...item, err };
+      }
+    }));
+    for (const result of results) {
+      if (result.err) {
+        recordError(`stat ${result.full}: ${result.err.code || result.err.message}`);
+        continue;
+      }
+      files.push({
+        path: relativeManifestPath(result.full),
+        size: result.stat.size,
+        ext: path.extname(result.name).toLowerCase(),
+        mtimeMs: result.stat.mtimeMs,
+      });
+      totalSize += result.stat.size;
+    }
+  }
+
+  async function walk(d, depth = 0) {
+    if (depth > maxDepth) {
+      recordError(`max_depth ${d}: ${maxDepth}`);
+      return;
+    }
+    let entries;
+    try { entries = await fs.promises.readdir(d, { withFileTypes: true }); } catch (err) {
+      recordError(`readdir ${d}: ${err.code || err.message}`);
+      return;
+    }
+    let pending = [];
+    const flush = async () => {
+      if (pending.length === 0) return;
+      const batch = pending;
+      pending = [];
+      await statBatch(batch);
+    };
+    for (const entry of entries) {
+      if (files.length + pending.length >= maxFiles) {
+        // A pending stat can still fail, so settle before deciding.
+        await flush();
+        if (files.length >= maxFiles) {
+          noteTruncated(`max_files ${maxFiles} reached`);
+          return;
+        }
+      }
+      const full = path.join(d, entry.name);
+      if (entry.isSymbolicLink()) {
+        await flush();
+        recordError(`symlink ${full}: skipped`);
+      } else if (entry.isDirectory()) {
+        if (isNestedRuntimeDir(full)) continue;
+        await flush();
+        await walk(full, depth + 1);
+      } else if (entry.isFile()) {
+        pending.push({ full, name: entry.name });
+        if (pending.length >= MANIFEST_ASYNC_STAT_CONCURRENCY) await flush();
+      }
+    }
+    await flush();
+  }
+
+  await walk(dir);
   if (suppressedErrors > 0) errors.push(`... ${suppressedErrors} manifest scan errors suppressed`);
   return { files, totalSize, count: files.length, truncated, errors: errors.length > 0 ? errors : undefined };
 }

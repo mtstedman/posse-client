@@ -165,7 +165,7 @@ export function handle(job, verdict, ctx) {
         : {}),
       ...(assessmentReview
         ? {
-            review_type: "needs_review",
+            review_type: "assessment_review",
             question_kind: "assessment_review",
             choices: WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review,
             ...(visualAcceptanceReview ? { visual_acceptance_review: true } : {}),

@@ -18,12 +18,11 @@ import { SETTING_KEYS, STARTUP_DIRTY_TREE_POLICY_VALUES } from "../../../catalog
 import { WAITING_LANE_NONTERMINAL_STATES } from "../../../catalog/waiting-lane.js";
 import { isAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
 import {
-  buildPosseRuntimeIgnoreEntries,
   filterPosseRuntimePaths,
   hasPosseRuntimeIgnoreBlock,
   isPosseRuntimePath,
   isPosseRuntimeOnlyGitignoreContent,
-  RETIRED_RUNTIME_DIRECTORY_RULES,
+  posseRuntimeIgnoreBlockLines,
 } from "../../runtime/functions/ignore.js";
 import { GIT_OPERATION_TIMEOUT_MS, isGitCommandFailure } from "./utils.js";
 import {
@@ -459,56 +458,34 @@ export function createStartupDirtyGuardHelpers(context) {
     return false;
   }
 
-  function runtimeGitignorePatterns(cwd) {
-    // Blocks an older Posse wrote may still carry the retired root rules.
-    return new Set([...buildPosseRuntimeIgnoreEntries(cwd, { anchorDir: cwd }), ...RETIRED_RUNTIME_DIRECTORY_RULES]);
+  // The rules Posse's managed block gained since HEAD, with their
+  // multiplicity: the block's rules in the working .gitignore less the
+  // block's rules in HEAD's. A diff hunk cannot say which block an added line
+  // sits in, so additions are charged against this instead: `logs/` added
+  // inside the block is a rule an older Posse wrote, the same text added
+  // anywhere else (or added again when the block already held it) is the
+  // user's.
+  function runtimeGitignoreBlockAdditions(cwd, workingContent, headContent) {
+    const counts = new Map();
+    for (const rule of posseRuntimeIgnoreBlockLines(cwd, workingContent, { anchorDir: cwd })) {
+      counts.set(rule, (counts.get(rule) || 0) + 1);
+    }
+    for (const rule of posseRuntimeIgnoreBlockLines(cwd, headContent, { anchorDir: cwd })) {
+      counts.set(rule, (counts.get(rule) || 0) - 1);
+    }
+    return counts;
   }
 
-  function gitignoreDiffIsRuntimeOnly(cwd) {
-    let diff;
-    try {
-      diff = gitExec(["diff", "--no-color", "--no-ext-diff", "HEAD", "--", ".gitignore"], cwd, { timeoutMs: 5000, trim: false });
-    } catch {
-      return false;
-    }
-    if (!diff || !diff.trim()) return false;
-    // Walk hunk bodies. Lines beginning with '+' (but not '+++') are
-    // additions; lines beginning with '-' (but not '---') are deletions.
-    // Any deletion fails the check immediately — a real user edit might
-    // remove a runtime entry, but we don't try to be clever about that.
-    let sawRuntimeAddition = false;
-    const allowedRuntimePatterns = runtimeGitignorePatterns(cwd);
-    for (const rawLine of diff.split("\n")) {
-      if (!rawLine || rawLine.startsWith("diff ") || rawLine.startsWith("index ")
-        || rawLine.startsWith("@@") || rawLine.startsWith("+++") || rawLine.startsWith("---")) {
-        continue;
-      }
-      if (rawLine.startsWith("-")) return false;
-      if (!rawLine.startsWith("+")) continue;
-      const addition = rawLine.slice(1).trim();
-      if (!addition) continue;                                  // blank line
-      if (addition.startsWith("#")) continue;                    // any comment is fine
-      if (allowedRuntimePatterns.has(addition)) {
-        sawRuntimeAddition = true;
-        continue;
-      }
-      return false;                                              // unrecognized real change
-    }
-    return sawRuntimeAddition;
-  }
-
-  async function gitignoreDiffIsRuntimeOnlyAsync(cwd, { signal = null } = {}) {
-    throwIfAborted(signal);
-    let diff;
-    try {
-      diff = await gitExecAsync(["diff", "--no-color", "--no-ext-diff", "HEAD", "--", ".gitignore"], cwd, { timeoutMs: 5000, signal, trim: false });
-    } catch (err) {
-      if (isAbortError(err)) throw err;
-      return false;
-    }
+  // Walk hunk bodies. Lines beginning with '+' (but not '+++') are
+  // additions; lines beginning with '-' (but not '---') are deletions.
+  // Any deletion fails the check immediately — a real user edit might
+  // remove a runtime entry, but we don't try to be clever about that.
+  // Every addition must be funded by a rule Posse's block gained; one more
+  // `logs/` than the block gained is a user rule riding on the same text.
+  function diffAddsOnlyRuntimeBlockRules(diff, blockAdditions, { signal = null } = {}) {
     if (!diff || !diff.trim()) return false;
     let sawRuntimeAddition = false;
-    const allowedRuntimePatterns = runtimeGitignorePatterns(cwd);
+    const remaining = new Map(blockAdditions);
     for (const rawLine of diff.split("\n")) {
       throwIfAborted(signal);
       if (!rawLine || rawLine.startsWith("diff ") || rawLine.startsWith("index ")
@@ -518,15 +495,56 @@ export function createStartupDirtyGuardHelpers(context) {
       if (rawLine.startsWith("-")) return false;
       if (!rawLine.startsWith("+")) continue;
       const addition = rawLine.slice(1).trim();
-      if (!addition) continue;
-      if (addition.startsWith("#")) continue;
-      if (allowedRuntimePatterns.has(addition)) {
+      if (!addition) continue;                                  // blank line
+      if (addition.startsWith("#")) continue;                    // any comment is fine
+      const funded = remaining.get(addition) || 0;
+      if (funded > 0) {
+        remaining.set(addition, funded - 1);
         sawRuntimeAddition = true;
         continue;
       }
-      return false;
+      return false;                                              // unrecognized real change, or a runtime rule outside the block
     }
     return sawRuntimeAddition;
+  }
+
+  const GITIGNORE_DIFF_ARGS = ["diff", "--no-color", "--no-ext-diff", "HEAD", "--", ".gitignore"];
+  // HEAD's .gitignore; empty when HEAD has none (the file was just added).
+  const GITIGNORE_HEAD_ARGS = ["show", "HEAD:.gitignore"];
+
+  function gitignoreDiffIsRuntimeOnly(cwd) {
+    let diff;
+    let working;
+    try {
+      diff = gitExec(GITIGNORE_DIFF_ARGS, cwd, { timeoutMs: 5000, trim: false });
+      working = fs.readFileSync(path.join(cwd, ".gitignore"), "utf-8");
+    } catch {
+      return false;
+    }
+    let head = "";
+    try { head = gitExec(GITIGNORE_HEAD_ARGS, cwd, { timeoutMs: 5000, trim: false }); } catch { /* not in HEAD */ }
+    return diffAddsOnlyRuntimeBlockRules(diff, runtimeGitignoreBlockAdditions(cwd, working, head));
+  }
+
+  async function gitignoreDiffIsRuntimeOnlyAsync(cwd, { signal = null } = {}) {
+    throwIfAborted(signal);
+    let diff;
+    let working;
+    try {
+      diff = await gitExecAsync(GITIGNORE_DIFF_ARGS, cwd, { timeoutMs: 5000, signal, trim: false });
+      working = await fs.promises.readFile(path.join(cwd, ".gitignore"), "utf-8");
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      return false;
+    }
+    throwIfAborted(signal);
+    let head = "";
+    try {
+      head = await gitExecAsync(GITIGNORE_HEAD_ARGS, cwd, { timeoutMs: 5000, signal, trim: false });
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+    }
+    return diffAddsOnlyRuntimeBlockRules(diff, runtimeGitignoreBlockAdditions(cwd, working, head), { signal });
   }
 
   function porcelainPathsForGitAdd(line) {

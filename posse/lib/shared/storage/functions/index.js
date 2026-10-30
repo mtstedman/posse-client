@@ -26,6 +26,8 @@ import {
   createHashRefStoreTables,
   createAgentHandoffPacketTable,
   createResearchReportClaimDraftTable,
+  ensureAgentCallsProviderUsageIndex,
+  ensureAgentInteractionsActionIdIndex,
 } from "./table-definitions.js";
 import {
   needsAgentCallsExtendedThinkingRepair,
@@ -111,6 +113,11 @@ export function getDb() {
       needsAgentCallsInterruptedStatusRepair, repairAgentCallsInterruptedStatusSchema,
     });
     installBridgeChangeTracking(_db);
+    // Additive, idempotent index for the provider usage summary read; runs
+    // after the agent_calls repairs so rebuilt tables get it too.
+    ensureAgentCallsProviderUsageIndex(_db);
+    // Additive, idempotent partial index for the operator action lookup.
+    ensureAgentInteractionsActionIdIndex(_db);
     ensureHostSchemaVersion(_db, HOST_SCHEMA_VERSION);
 
     createHashRefStoreTables(_db);

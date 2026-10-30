@@ -81,7 +81,10 @@ export function openUnverifiedMergeGates({ unpushedCommits = new Set(), pushBran
 }
 
 export function createPushWorkflowHelpers(context, { auditWorktreeState, askSingleKeyYesNo }) {
-  const { projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, nonInteractive, askFn, nativeParity } = context;
+  const {
+    projectDir, currentTargetBranch, runGitWorkflowTaskOffMainThread, nonInteractive, askFn, nativeParity,
+    resolveSharedTrunkConfigRuntime: resolveSharedTrunkRuntime = resolveSharedTrunkConfigRuntime,
+  } = context;
 
   function workItemForBranch(branchName) {
     const branch = String(branchName || "").trim();
@@ -225,7 +228,7 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
     // the actionable configuration or native-contract failure.
     let config;
     try {
-      config = await resolveSharedTrunkConfigRuntime(projectDir, {
+      config = await resolveSharedTrunkRuntime(projectDir, {
         nativeCapabilityPreflight: async ({ projectDir: root }) => {
           const { getSharedTrunkNativeCapabilities } = await import("./shared-trunk-native.js");
           return getSharedTrunkNativeCapabilities(root);
@@ -245,9 +248,12 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
       }
       return isConfiguredSharedTrunkPushTarget(remote, branch);
     }
-    return config.enabled
-      && String(remote || "") === config.remote
-      && String(branch || "") === config.branch;
+    if (!config.enabled || String(branch || "") !== config.branch) return false;
+    if (String(remote || "") === config.remote) return true;
+    // A differently named remote for the same URL is the same trunk: match
+    // by URL as the configured check does, failing closed on an unreadable
+    // one, so the publication journal is not bypassed by a plain push.
+    return isConfiguredSharedTrunkPushTarget(remote, branch);
   }
 
   async function refreshPushOfferGate(mergedCount = 0, { createdBy = "post_merge_closeout" } = {}) {

@@ -9,7 +9,7 @@ import { readPlannerDispatchPolicy } from "../../../planning/functions/planner-d
 
 import { dispatchProvider } from "../../../../shared/native/functions/provider-dispatch-client.js";
 
-import { PROVIDER_DISPATCH_PROVIDERS, PROVIDER_DISPATCH_AUTH_MODES } from "../../../../catalog/binary.js";
+import { PROVIDER_DISPATCH_PROVIDERS, PROVIDER_DISPATCH_AUTH_MODES, PROVIDER_DISPATCH_MAX_WALL_TIMEOUT_MS } from "../../../../catalog/binary.js";
 import { recordObservation } from "../../../observability/functions/observations.js";
 
 // The dispatcher validates every prompt field before dispatch.started and
@@ -17,33 +17,68 @@ import { recordObservation } from "../../../observability/functions/observations
 // attempt before any model turn and, once repeated, fails the work item. A
 // NUL carries nothing a model can use, so it is dropped here, and where it sat
 // is recorded so the source (a binary file read, a bad render) can be found.
+// A lone UTF-16 surrogate (a `.slice(0, N)` that split a surrogate pair) is
+// refused the same way: serde_json rejects the `\udXXX` escape. The lone half
+// becomes U+FFFD, which the model reads as the truncation it is.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
 function dispatchSafeText(value, label, findings) {
-  const text = String(value ?? "");
+  let text = String(value ?? "");
+  if (!text.isWellFormed()) {
+    const samples = [];
+    for (const match of text.matchAll(LONE_SURROGATE)) {
+      if (samples.length >= 5) break;
+      samples.push({ at: match.index, context: text.slice(Math.max(0, match.index - 80), match.index + 80).toWellFormed() });
+    }
+    findings.push({ label, kind: "surrogate", count: [...text.matchAll(LONE_SURROGATE)].length, chars: text.length, samples });
+    text = text.toWellFormed();
+  }
   if (!text.includes("\0")) return text;
   const samples = [];
   for (let at = text.indexOf("\0"); at >= 0 && samples.length < 5; at = text.indexOf("\0", at + 1)) {
     samples.push({ at, context: text.slice(Math.max(0, at - 80), at + 80).replace(/\0/g, "␀") });
   }
-  findings.push({ label, count: text.split("\0").length - 1, chars: text.length, samples });
+  findings.push({ label, kind: "nul", count: text.split("\0").length - 1, chars: text.length, samples });
   return text.replace(/\0/g, "");
 }
 
-function recordStrippedNulBytes(findings, { jobId, workItemId, agentCallId }) {
+// The Rust validator checks transcript entries' string fields like the prompt
+// fields; a NUL or lone surrogate in a replayed turn fails the start the same.
+function dispatchSafeTranscript(transcript, findings) {
+  return transcript.map((entry, index) => {
+    if (!entry || typeof entry !== "object") return entry;
+    const safe = { ...entry };
+    for (const field of ["text", "content"]) {
+      if (typeof safe[field] === "string") safe[field] = dispatchSafeText(safe[field], `prompt.transcript[${index}].${field}`, findings);
+    }
+    return safe;
+  });
+}
+
+function recordRepairedPromptText(findings, { jobId, workItemId, agentCallId }) {
   if (findings.length === 0) return;
-  try {
-    recordObservation({
-      work_item_id: workItemId ?? null,
-      job_id: jobId ?? null,
-      observation_type: "dispatch.prompt_nul_stripped",
-      summary: `Stripped ${findings.reduce((sum, finding) => sum + finding.count, 0)} NUL byte(s) from ${findings.map((finding) => finding.label).join(", ")} before provider dispatch`,
-      detail: { agent_call_id: agentCallId ?? null, findings },
-    });
-  } catch {
-    // Telemetry only; the sanitized request is what matters.
+  const byKind = (kind) => findings.filter((finding) => finding.kind === kind);
+  for (const [kind, observationType, describe] of [
+    ["nul", "dispatch.prompt_nul_stripped", (count) => `Stripped ${count} NUL byte(s)`],
+    ["surrogate", "dispatch.prompt_surrogate_repaired", (count) => `Replaced ${count} lone surrogate(s)`],
+  ]) {
+    const matched = byKind(kind);
+    if (matched.length === 0) continue;
+    try {
+      recordObservation({
+        work_item_id: workItemId ?? null,
+        job_id: jobId ?? null,
+        observation_type: observationType,
+        summary: `${describe(matched.reduce((sum, finding) => sum + finding.count, 0))} from ${matched.map((finding) => finding.label).join(", ")} before provider dispatch`,
+        detail: { agent_call_id: agentCallId ?? null, findings: matched },
+      });
+    } catch {
+      // Telemetry only; the sanitized request is what matters.
+    }
   }
 }
 
-const MAX_WALL_TIMEOUT_MS = 4 * 60 * 60 * 1_000;
+const MAX_WALL_TIMEOUT_MS = PROVIDER_DISPATCH_MAX_WALL_TIMEOUT_MS;
 const TASK_MODES = new Set(["code", "db", "artifact", "research"]);
 
 function sha256Json(value) {
@@ -187,17 +222,17 @@ export function buildNativeDispatchRequest(provider, promptText, {
     MAX_WALL_TIMEOUT_MS,
   );
   const skills = [...new Set(stringList(resolvedSkillIds))].sort();
-  const nulFindings = [];
-  const safeSystemPrompt = systemPrompt == null ? null : dispatchSafeText(systemPrompt, "prompt.system", nulFindings);
+  const textFindings = [];
+  const safeSystemPrompt = systemPrompt == null ? null : dispatchSafeText(systemPrompt, "prompt.system", textFindings);
   const prompt = {
-    text: dispatchSafeText(promptText || "", "prompt.text", nulFindings),
+    text: dispatchSafeText(promptText || "", "prompt.text", textFindings),
     ...(provider === "anthropic" && promptCache ? { cache: true } : {}),
-    ...(baseInstructions == null ? {} : { baseInstructions: dispatchSafeText(baseInstructions, "prompt.baseInstructions", nulFindings) }),
-    stableContext: stableContext == null ? null : dispatchSafeText(stableContext, "prompt.stableContext", nulFindings),
+    ...(baseInstructions == null ? {} : { baseInstructions: dispatchSafeText(baseInstructions, "prompt.baseInstructions", textFindings) }),
+    stableContext: stableContext == null ? null : dispatchSafeText(stableContext, "prompt.stableContext", textFindings),
     system: safeSystemPrompt,
-    ...(Array.isArray(transcript) && transcript.length ? { transcript } : {}),
+    ...(Array.isArray(transcript) && transcript.length ? { transcript: dispatchSafeTranscript(transcript, textFindings) } : {}),
   };
-  recordStrippedNulBytes(nulFindings, { jobId, workItemId, agentCallId });
+  recordRepairedPromptText(textFindings, { jobId, workItemId, agentCallId });
   return {
     id: String(dispatchId || `${provider}-${crypto.randomUUID()}`),
     provider,
@@ -377,6 +412,12 @@ export async function runNativeDispatch(request, {
       ? details.diagnostic.reason.trim().slice(0, 300)
       : "";
     if (reason) error.providerDiagnostic = reason;
+    // The adapter reports a stalled model stream as code "provider_stall".
+    // Downstream classification (attempt errors, assessment recovery, the
+    // handoff-rejection race) keys on `stallKill`, which the CLI paths set
+    // and nothing set after the native cutover. Classification "timeout" is
+    // shared with the wall timeout, so only the code decides.
+    if (error.code === "provider_stall") error.stallKill = true;
     error.stats = {
       ...commonStats,
       ...(details.stats || error.stats || {}),

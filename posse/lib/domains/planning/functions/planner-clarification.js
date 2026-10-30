@@ -37,7 +37,7 @@ export function requestPlannerClarification(args, context) {
     }
     const gate = createJob({ work_item_id: job.work_item_id, parent_job_id: job.id, job_type: "human_input",
       title: `Clarify: ${job.title}`.slice(0, 180), priority: "high", model_tier: "cheap",
-      payload_json: JSON.stringify({ review_type: PLANNER_CLARIFICATION_REVIEW_TYPE, gate_kind: "clarification",
+      payload_json: JSON.stringify({ review_type: PLANNER_CLARIFICATION_REVIEW_TYPE, gate_kind: PLANNER_CLARIFICATION_REVIEW_TYPE,
         original_job_id: job.id, attempt_id: context.attemptId, questions: args.questions, context: args.context }),
     });
     const now = Date.now();

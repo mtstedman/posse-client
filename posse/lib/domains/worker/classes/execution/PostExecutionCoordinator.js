@@ -294,6 +294,17 @@ export function scopedCommitCreated(commitResult, headBefore) {
   return String(commitResult?.hash || "") !== String(headBefore || "");
 }
 
+// Backoff between in-place commit retries. A kill during the wait rejects
+// with the worker's AbortError (and kill reason) at once instead of after the
+// full delay, and the timer is cleared so it cannot outlive the job.
+export function commitInfraRetryDelay(worker, jobId, ms, abortSignal = null) {
+  const aborted = worker._abortPromise(jobId, abortSignal);
+  if (!aborted) return new Promise((resolve) => setTimeout(resolve, ms));
+  let timer = null;
+  const delay = new Promise((resolve) => { timer = setTimeout(resolve, ms); });
+  return Promise.race([delay, aborted]).finally(() => clearTimeout(timer));
+}
+
 export class PostExecutionCoordinator {
   constructor(worker) {
     this.worker = worker;
@@ -305,6 +316,7 @@ export class PostExecutionCoordinator {
 }
 
 export async function handlePostExecutionForWorker({
+  abortSignal = null,
   attempt,
   attemptCount,
   branchName,
@@ -835,7 +847,7 @@ export async function handlePostExecutionForWorker({
                     error: formatCommitFailureSummary(commitErr).slice(0, 500),
                   }),
                 });
-                await new Promise((resolve) => setTimeout(resolve, (commitInfraRetries + 1) * 2000));
+                await commitInfraRetryDelay(this, job.id, (commitInfraRetries + 1) * 2000, abortSignal);
               }
             }
             // A merge left for the developer can defer upstream file syncs.
@@ -1143,15 +1155,16 @@ export async function handlePostExecutionForWorker({
                 updateJobPayload(job.id, job.payload_json);
               }
 
+              const contractPayload = this.parsePayload(job);
               const outputContract = filesCommittedUnknown
                 ? { ok: true }
                 : await validateDeclaredOutputContract({
                     job,
-                    payload: this.parsePayload(job),
+                    payload: contractPayload,
                     filesCommitted,
                     priorAttempts: [
                       ...getAttempts(job.id).filter(prior => prior.id !== attempt.id && prior.worker_type !== "assessor"),
-                      ...(this.parsePayload(job)[DIRTY_WORKTREE_RECOVERY_KEY]?.commits || []),
+                      ...(contractPayload[DIRTY_WORKTREE_RECOVERY_KEY]?.commits || []),
                     ],
                     projectDir: this.projectDir,
                     cwd: wtPath,
@@ -1665,9 +1678,12 @@ export async function handlePostExecutionForWorker({
           }
         }
 
+        // The last in-function payload write is the Atlas warm marker above;
+        // every read from here to assessment sees this same snapshot.
+        const postCommitPayload = this.parsePayload(job);
         // The final-review completion packet is intentionally deterministic;
         // repeated text does not replace verification of the current candidate.
-        const reviewedCandidate = wtPath && (await authoritativeFinalReview(job, this.parsePayload(job), wtPath))?.verdict === "pass";
+        const reviewedCandidate = wtPath && (await authoritativeFinalReview(job, postCommitPayload, wtPath))?.verdict === "pass";
         // -- Idempotency check --
         // Structured completions render one fixed text per status, so an equal
         // hash means "stuck" only when this attempt wrote nothing. An operator
@@ -1675,7 +1691,7 @@ export async function handlePostExecutionForWorker({
         // it was asked to fix.
         const outputHash = crypto.createHash("sha256").update(output).digest("hex").slice(0, 16);
         const prevResultJson = job.result_json;
-        const retryGeneration = Math.max(0, Number(this.parsePayload(job)?._retry_generation) || 0);
+        const retryGeneration = Math.max(0, Number(postCommitPayload?._retry_generation) || 0);
         await wrappedJob.setResult({ output_length: output.length, attempt: attemptCount, output_hash: outputHash, retry_generation: retryGeneration });
         const attemptWroteChanges = hasFileChanges || !!committedHash;
 
@@ -1697,7 +1713,7 @@ export async function handlePostExecutionForWorker({
               if (hasPendingFileRequests()) {
                 this.emit(job.id, `${C.yellow}[idempotency] WI#${job.work_item_id} job #${job.id}: identical output, but file requests pending — allowing through${C.reset}`);
                 // Fall through to no-op guard / assessment with file-request spawning
-              } else if (isArtifactMode(this.parsePayload(job)?.task_mode || "code")) {
+              } else if (isArtifactMode(postCommitPayload?.task_mode || "code")) {
                 // An artifact producer re-run over deliverables that already
                 // exist reports the same result; that is idempotence, and the
                 // assessment of those deliverables is what the retry is for.
@@ -1737,7 +1753,7 @@ export async function handlePostExecutionForWorker({
         }
 
         // -- No-op guard (git-based — code tasks only; artifact tasks use manifest check) --
-        const noOpPayload = this.parsePayload(job);
+        const noOpPayload = postCommitPayload;
         if (
           wtPath
           && MUTATING_JOB_TYPES.has(job.job_type)
@@ -1986,7 +2002,7 @@ export async function handlePostExecutionForWorker({
               message: verifiedMsg,
             });
             verifiedNoChange = true;
-          } else if (isDeleteNoopSatisfiedFromModule(job, this.parsePayload(job), wtPath || job._worktreePath || this.projectDir)) {
+          } else if (isDeleteNoopSatisfiedFromModule(job, noOpPayload, wtPath || job._worktreePath || this.projectDir)) {
             const noopDeleteMsg = `Cleanup task already satisfied — scoped files are absent, so there was nothing left to delete`;
             this.emit(job.id, `${C.cyan}[worker] WI#${job.work_item_id} job #${job.id}: ${noopDeleteMsg}${C.reset}`);
             logEvent({
@@ -1999,7 +2015,7 @@ export async function handlePostExecutionForWorker({
             });
             hasFileChanges = true;
             satisfiedNoop = true;
-          } else if (devStatus === "COMPLETE" && isFilePlacementNoopSatisfiedFromModule(job, this.parsePayload(job), wtPath || job._worktreePath || this.projectDir, output)) {
+          } else if (devStatus === "COMPLETE" && isFilePlacementNoopSatisfiedFromModule(job, noOpPayload, wtPath || job._worktreePath || this.projectDir, output)) {
             // Placement-noop rests on the dev's own "already exists" claim
             // plus destination existence — weaker evidence than a verified
             // deletion, and the placement classifier is keyword-based (a
@@ -2022,7 +2038,7 @@ export async function handlePostExecutionForWorker({
             // requeue without assessment; the final budgeted attempt fails.
             // Build a diagnostic message so the retry knows what went wrong and
             // which files are actually in scope.
-            const noopPayload = this.parsePayload(job);
+            const noopPayload = noOpPayload;
             const scopeFiles = scopedDeleteTargetsFromModule(job, noopPayload);
             const scopeCreate = noopPayload.files_to_create || [];
             let noopMsg = `Dev produced no file changes - nothing to assess`;
@@ -2056,7 +2072,7 @@ export async function handlePostExecutionForWorker({
           satisfiedNoop,
           verifiedNoChange,
         })) {
-          const noopPayload = this.parsePayload(job);
+          const noopPayload = noOpPayload;
           const scopeFiles = scopedDeleteTargetsFromModule(job, noopPayload);
           const scopeCreate = noopPayload.files_to_create || [];
           let noopMsg = `Dev produced no file changes - nothing to assess`;

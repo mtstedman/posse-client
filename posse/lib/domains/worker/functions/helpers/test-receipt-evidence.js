@@ -9,17 +9,34 @@ function statusLabel(receipt) {
   return String(receipt.status || "unknown").toUpperCase();
 }
 
+// Output a failed check keeps even when many checks share the evidence cap;
+// its header lines are never cut by the per-check budget, only the final cap.
+const MIN_CHECK_OUTPUT_CHARS = 120;
+
 export function compactTestFailureOutput(receipt) {
   if (!receipt) return "";
   const checks = [...(receipt.check_runs || []), ...(receipt.file_results || [])];
   const failed = checks.filter((check) => check.status !== "passed");
-  const blocks = failed.map((check) => [
-    `[${check.path || check.check_id || "check"}] ${check.status}: ${check.reason || ""}`,
-    `Command: ${check.command || receipt.command || "unknown"}`,
-    `Working directory: ${check.execution_root || check.cwd_relative || receipt.execution_root || "."}`,
-    ...[check.stderr, check.stdout].filter(Boolean).map((value) => String(value).slice(0,
-      Math.max(300, Math.floor(MAX_EVIDENCE_OUTPUT_CHARS / Math.max(1, failed.length) / 2)))),
-  ].join("\n"));
+  // The cap is shared by every failed check's block (headers and output), so
+  // a later check is not pushed out by the earlier ones' output; within a
+  // block stderr is kept first and stdout takes what remains.
+  const blockBudget = Math.floor((MAX_EVIDENCE_OUTPUT_CHARS - 2 * Math.max(0, failed.length - 1)) / Math.max(1, failed.length));
+  const blocks = failed.map((check) => {
+    const header = [
+      `[${check.path || check.check_id || "check"}] ${check.status}: ${check.reason || ""}`,
+      `Command: ${check.command || receipt.command || "unknown"}`,
+      `Working directory: ${check.execution_root || check.cwd_relative || receipt.execution_root || "."}`,
+    ].join("\n");
+    let remaining = Math.max(MIN_CHECK_OUTPUT_CHARS, blockBudget - header.length - 1);
+    const output = [];
+    for (const value of [check.stderr, check.stdout]) {
+      if (!value || remaining <= 0) continue;
+      const text = String(value).slice(0, remaining);
+      remaining -= text.length + 1;
+      output.push(text);
+    }
+    return [header, ...output].join("\n");
+  });
   // Preserve the start of failures before spending the remaining budget on
   // successful output. Separate checks retain their diagnostic and invocation.
   return (blocks.length ? blocks.join("\n\n") : [receipt.stderr, receipt.stdout]

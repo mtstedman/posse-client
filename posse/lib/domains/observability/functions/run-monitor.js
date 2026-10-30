@@ -119,33 +119,48 @@ export function projectMonitorEntry(stream, row) {
   };
 }
 
-export function readMonitorGates(dbPath, workItems, startedAt) {
-  if (!fs.existsSync(dbPath)) throw new Error(`Gate database missing: ${dbPath}`);
+// Read-only gate handle for a monitor's lifetime. The caller owns closing it;
+// `identity` lets it notice a replaced database file and reopen.
+export function openMonitorGateDb(dbPath) {
+  let stat;
+  try { stat = fs.statSync(dbPath); }
+  catch (error) {
+    if (error.code === "ENOENT") throw new Error(`Gate database missing: ${dbPath}`);
+    throw error;
+  }
   const db = new Database(dbPath, { readonly: true, fileMustExist: true, timeout: 1000 });
-  try {
-    // Bind the run's work-item membership as one JSON parameter, even for large runs.
-    return db.prepare(`SELECT hg.*, j.work_item_id, j.title, j.payload_json
-      FROM human_gates hg JOIN jobs j ON j.id = hg.gate_job_id
-      WHERE j.work_item_id IN (SELECT value FROM json_each(?))
-        AND (hg.gate_state IN ('open', 'resolving') OR hg.updated_at >= ?)
-      ORDER BY hg.updated_at, hg.gate_job_id`).all(JSON.stringify(workItems), startedAt || "").map((row) => {
-      const payload = monitorObject(row.payload_json);
-      const resolution = monitorObject(row.resolution_payload_json);
-      return {
-        source: "gates", type: "human_gate", time: row.updated_at,
-        work_item_id: row.work_item_id, job_id: row.gate_job_id,
-        generation: row.generation, state: row.gate_state,
-        message: monitorText(payload.question || payload.prompt || row.title),
-        action: monitorText(row.resolution_action || resolution.action, 100),
-        answer: monitorText(resolution.answer || resolution.answer_text || resolution.choice_id || resolution.decision),
-        resolved_by: monitorText(resolution.source, 100),
-        ...(resolution.unattended != null ? { unattended: resolution.unattended === true } : {}),
-        error: monitorText(row.resolution_error),
-        choices: Array.isArray(monitorObject(row.allowed_actions_json))
-          ? monitorObject(row.allowed_actions_json).slice(0, 12).map((choice) => monitorText(choice, 80)) : [],
-      };
-    });
-  } finally { db.close(); }
+  return { db, identity: `${stat.dev}:${stat.ino}` };
+}
+
+export function readMonitorGates(dbPath, workItems, startedAt) {
+  const { db } = openMonitorGateDb(dbPath);
+  try { return queryMonitorGates(db, workItems, startedAt); }
+  finally { db.close(); }
+}
+
+export function queryMonitorGates(db, workItems, startedAt) {
+  // Bind the run's work-item membership as one JSON parameter, even for large runs.
+  return db.prepare(`SELECT hg.*, j.work_item_id, j.title, j.payload_json
+    FROM human_gates hg JOIN jobs j ON j.id = hg.gate_job_id
+    WHERE j.work_item_id IN (SELECT value FROM json_each(?))
+      AND (hg.gate_state IN ('open', 'resolving') OR hg.updated_at >= ?)
+    ORDER BY hg.updated_at, hg.gate_job_id`).all(JSON.stringify(workItems), startedAt || "").map((row) => {
+    const payload = monitorObject(row.payload_json);
+    const resolution = monitorObject(row.resolution_payload_json);
+    return {
+      source: "gates", type: "human_gate", time: row.updated_at,
+      work_item_id: row.work_item_id, job_id: row.gate_job_id,
+      generation: row.generation, state: row.gate_state,
+      message: monitorText(payload.question || payload.prompt || row.title),
+      action: monitorText(row.resolution_action || resolution.action, 100),
+      answer: monitorText(resolution.answer || resolution.answer_text || resolution.choice_id || resolution.decision),
+      resolved_by: monitorText(resolution.source, 100),
+      ...(resolution.unattended != null ? { unattended: resolution.unattended === true } : {}),
+      error: monitorText(row.resolution_error),
+      choices: Array.isArray(monitorObject(row.allowed_actions_json))
+        ? monitorObject(row.allowed_actions_json).slice(0, 12).map((choice) => monitorText(choice, 80)) : [],
+    };
+  });
 }
 
 export function selectMonitorRun(runsRoot, runId = null) {

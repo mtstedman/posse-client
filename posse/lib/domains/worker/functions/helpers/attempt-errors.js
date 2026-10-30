@@ -206,6 +206,23 @@ function isOtherAbortInterruption(err) {
       "runtime_exceeded", "post_merge_closeout_budget"].includes(reason));
 }
 
+export const LEASE_LOST_BEFORE_FINALIZATION = "lease lost before finalization";
+
+// Closes this attempt as interrupted only while its row is still `running`;
+// a row the normal path already finalized is left untouched. Returns whether
+// this call closed it.
+function closeRunningAttemptAsLeaseLost(job, attempt, startTime) {
+  if (attempt?.id == null) return false;
+  const row = getAttempts(job.id).find((candidate) => Number(candidate.id) === Number(attempt.id));
+  if (row?.status !== "running") return false;
+  completeAttempt(attempt.id, {
+    status: "interrupted",
+    duration_ms: Date.now() - startTime,
+    error_text: LEASE_LOST_BEFORE_FINALIZATION,
+  });
+  return true;
+}
+
 export async function handlePendingScopeApprovalPause(worker, {
   attempt,
   job,
@@ -430,6 +447,17 @@ export async function handleExecuteAttemptError(worker, {
   // A release is the durable boundary. Cleanup errors after it must not
   // rewrite the attempt or repeat retry/dead-letter side effects.
   if (currentJob?.lease_token !== leaseToken) {
+    // The lease can also be reclaimed under a live attempt
+    // (requeueExpiredLeases nulls the token but never touches job_attempts).
+    // Then the attempt row is still `running` and only boot's orphan sweep
+    // would close it, as `failed`. Close it here as interrupted — only while
+    // it is still running, so a finalized row is never rewritten — and keep
+    // the dirty worktree for the next attempt when nobody else owns the job.
+    // No lease release: that boundary is already behind us.
+    if (closeRunningAttemptAsLeaseLost(job, attempt, startTime)) {
+      const queuedAndUnowned = currentJob?.status === "queued" && currentJob?.lease_owner == null;
+      if (queuedAndUnowned) await stashInterruptedWork(job, wtPath, "lease-lost", worker?.projectDir);
+    }
     worker.emit(job.id, `${C.yellow}[worker] job #${job.id} lease already released; finalization failed: ${err?.message || err}${C.reset}`);
     return;
   }

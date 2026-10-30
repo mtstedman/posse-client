@@ -1,3 +1,4 @@
+import { migrateLegacyGatePolicies } from "../../../shared/storage/functions/legacy-gate-identities.js";
 import { isMainThread } from "node:worker_threads";
 import { settingsChangeNotifier } from "./SettingsChangeNotifier.js";
 import fs from "fs";
@@ -139,6 +140,7 @@ export class AccountSettings {
       CREATE INDEX IF NOT EXISTS idx_repo_settings_key ON repo_settings(setting_key);
     `);
     try {
+      migrateLegacyGatePolicies(this._db);
       this._seedDefaults();
       this._openPath = targetPath;
       this.invalidate();

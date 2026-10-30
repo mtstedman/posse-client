@@ -1,3 +1,4 @@
+import { migrateLegacyGateIdentities } from "./legacy-gate-identities.js";
 import * as host from "./migrations.js";
 
 // Ordered host migrations run after the legacy schema repairs and before
@@ -116,4 +117,10 @@ export function runRegisteredHostMigrations(db, {
     needs: host.needsWaitingLanePreparationSchema,
     migrate: host.repairWaitingLanePreparationSchema,
   });
+  host.runHostMigration(db, {
+    version: 24,
+    name: "canonical_gate_identities",
+    migrate: migrateLegacyGateIdentities,
+  });
+
 }

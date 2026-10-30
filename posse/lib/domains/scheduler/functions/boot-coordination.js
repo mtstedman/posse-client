@@ -2,7 +2,7 @@ import { log } from "../../../shared/telemetry/functions/logging/logger.js";
 
 // Own the boot phase race and its lock-release decisions while Scheduler
 // retains the public lifecycle facade.
-export async function coordinateSchedulerBoot(scheduler, { onBeforeLoop, onBeforeLoopFatal = false, onBootEvent = null, onBootAbort = null } = {}) {
+export async function coordinateSchedulerBoot(scheduler, { onBeforeLoop, onBeforeLoopFatal = false, onBootEvent = null, onBootAbort = null, signal = null } = {}) {
   const emitBootEvent = (label, patch) => {
     if (typeof onBootEvent !== "function") return;
     try { onBootEvent({ label, ...patch }); } catch { /* observational */ }
@@ -16,7 +16,7 @@ export async function coordinateSchedulerBoot(scheduler, { onBeforeLoop, onBefor
   // per-language indexers from waiting on orphan recovery to finish.
   /** @type {Error | null} */
   let preLoopErr = null;
-  const recoverP = scheduler.recoverOrphans({ onBootEvent }).catch((err) => {
+  const recoverP = scheduler.recoverOrphans({ onBootEvent, signal }).catch((err) => {
     scheduler._log(`Boot: orphan recovery failed: ${err?.message || err}`, "red");
     throw err;
   });

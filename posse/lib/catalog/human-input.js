@@ -1,5 +1,5 @@
 import { PLANNER_CLARIFICATION_REVIEW_TYPE } from "./tools/planner-clarification.js";
-import { ENVIRONMENT_SETUP_REVIEW_TYPE, ENVIRONMENT_SETUP_ACTIONS } from "./tools/environment-setup.js";
+import { ENVIRONMENT_SETUP_REVIEW_TYPE } from "./tools/environment-setup.js";
 import { readonlySet } from "./readonly-collections.js";
 // Human-input action catalogue.
 //
@@ -17,7 +17,6 @@ import {
   ONESHOT_SCOPE_SELECTION_SUBTYPE,
 } from "./job.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "./tools/interaction.js";
-import { orderedGateActions } from "./gate-actions.js";
 
 const freezeChoices = (choices) => Object.freeze([...choices]);
 export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment using the available evidence and explicit assumptions.";
@@ -27,37 +26,11 @@ export const HUMAN_INPUT_BEST_JUDGMENT_ANSWER = "Continue with best judgment usi
 export const HUMAN_INPUT_FREE_TEXT_CHOICE_ID = "free_text";
 export const HUMAN_INPUT_FREE_TEXT_MAX_CHARS = 8000;
 export const HUMAN_GATE_STATES = Object.freeze(["open", "resolving", "resolved", "superseded"]);
-// Legacy review types are projected into the same typed question kind by the
-// queue and the bridge. Keep the mapping in one catalog so both agree.
-export const QUESTION_KIND_BY_REVIEW_TYPE = Object.freeze({
-  [ENVIRONMENT_SETUP_REVIEW_TYPE]: "environment_setup",
-  needs_review: "assessment_review",
-  assessment_parse_error: "assessment_review",
-  assessment_evidence_missing: "assessment_transport_recovery",
-  unknown_verdict: "assessment_review",
-  replan_limit: "assessment_review",
-  assessment_transport_error: "assessment_transport_recovery",
-  assessment_retry_limit: "assessment_retry_limit",
-  unexecuted_replan_limit: "unexecuted_replan_recovery",
-  blocked_recovery: "blocked_recovery",
-  partial_work_recovery: "partial_work_recovery",
-  dead_letter_recovery: "dead_letter_recovery",
-  stall_exhausted_recovery: "dead_letter_recovery",
-  research_dead_letter_recovery: "dead_letter_recovery",
-  oneshot_dead_letter_recovery: "dead_letter_recovery",
-  artifact_routing_admin: "artifact_routing_admin",
-  shared_trunk_provenance: "shared_trunk_provenance",
-  work_item_failure_disposition: "work_item_failure_disposition",
-  cross_wi_upstream_disposition: "cross_wi_upstream_disposition",
-  merge_verification_review: "merge_verification_review",
-  merge_failure_recovery: "merge_failure_recovery",
-  post_merge_db_task: "post_merge_db_task",
-  scope_expansion_request: "file_scope_approval",
-});
+// Gate IDs are also the structured question IDs. No runtime name translation.
 export function questionKindForReviewType(value) {
   const reviewType = String(value || "");
-  return Object.hasOwn(QUESTION_KIND_BY_REVIEW_TYPE, reviewType)
-    ? QUESTION_KIND_BY_REVIEW_TYPE[reviewType]
+  return Object.hasOwn(WORK_ITEM_QUESTION_CHOICE_IDS, reviewType)
+    ? reviewType
     : null;
 }
 export const HUMAN_GATE_RECONCILE_REASONS = Object.freeze({
@@ -143,12 +116,14 @@ export const WORK_ITEM_DISPOSITION_REVIEW_TYPES = Object.freeze([
 // blocked-recovery retry #2205 would have held it the same way).
 // Assessment-review answers replan and fail still hold; retry_assessment
 // does not (merge-holding-gate.js).
+export const BLOCKED_RECOVERY_GATE_KINDS = Object.freeze(["blocked_recovery", "failure_threshold_exhausted", "fix_chain_exhausted"]);
+
 export const MERGE_RELEASING_RETRY_REVIEW_TYPES = Object.freeze([
+  "failure_threshold_exhausted",
+  "fix_chain_exhausted",
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
   "blocked_recovery",
   "dead_letter_recovery",
-  "research_dead_letter_recovery",
-  "oneshot_dead_letter_recovery",
   "stall_exhausted_recovery",
 ]);
 
@@ -178,17 +153,15 @@ const COMMITTED_ATTEMPT_REVIEW_DIFF = Object.freeze({
 });
 const WORK_ITEM_REVIEW_DIFF = Object.freeze({ scope: HUMAN_INPUT_REVIEW_DIFF_SCOPES.WORK_ITEM });
 const HUMAN_INPUT_REVIEW_DIFF_POLICIES = Object.freeze({
-  assessment: ATTEMPT_REVIEW_DIFF,
-  needs_review: ATTEMPT_REVIEW_DIFF,
-  assessment_parse_error: ATTEMPT_REVIEW_DIFF,
+  assessment_review: ATTEMPT_REVIEW_DIFF,
   assessment_evidence_missing: ATTEMPT_REVIEW_DIFF,
-  unknown_verdict: ATTEMPT_REVIEW_DIFF,
-  assessment_transport_error: ATTEMPT_REVIEW_DIFF,
+  assessment_transport_recovery: ATTEMPT_REVIEW_DIFF,
   assessment_retry_limit: ATTEMPT_REVIEW_DIFF,
-  replan_limit: ATTEMPT_REVIEW_DIFF,
+  pipeline_head_recovery: ATTEMPT_REVIEW_DIFF,
   blocked_recovery: ATTEMPT_REVIEW_DIFF,
+  failure_threshold_exhausted: ATTEMPT_REVIEW_DIFF,
+  fix_chain_exhausted: ATTEMPT_REVIEW_DIFF,
   dead_letter_recovery: COMMITTED_ATTEMPT_REVIEW_DIFF,
-  oneshot_dead_letter_recovery: COMMITTED_ATTEMPT_REVIEW_DIFF,
   stall_exhausted_recovery: COMMITTED_ATTEMPT_REVIEW_DIFF,
   partial_work_recovery: WORK_ITEM_REVIEW_DIFF,
   [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE]: WORK_ITEM_REVIEW_DIFF,
@@ -218,318 +191,264 @@ const DEFAULT_HUMAN_GATE_SOURCE_STATES = Object.freeze(
  * review_type). One list per gate: the prompt shows it, the bridge projects
  * it, an answer must select from it and the persisted gate contract is
  * written from it. A gate named here with ["respond"] takes free text; a
- * gate not named here offers its payload's explicit choices or, with none,
- * takes free text as `respond`.
+ * gate not named here is rejected at creation.
  */
-export const HUMAN_GATE_ACTIONS = Object.freeze({
-  clarification: freezeChoices(["respond"]),
-  [ONESHOT_SCOPE_SELECTION_SUBTYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.one_shot_file_scope),
-  plan_approval: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.plan_approval),
-  push_offer: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.push_offer),
-  [PLANNER_CLARIFICATION_REVIEW_TYPE]: freezeChoices(["respond"]),
-  [ENVIRONMENT_SETUP_REVIEW_TYPE]: ENVIRONMENT_SETUP_ACTIONS,
-  scope_expansion_request: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.file_scope_approval),
-  scope_expansion_required: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.file_scope_approval),
-  [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE]: freezeChoices(["commit", "send_back", "fail"]),
-  partial_work_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.partial_work_recovery),
-  blocked_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery),
-  dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
-  research_dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
-  oneshot_dead_letter_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
-  stall_exhausted_recovery: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.dead_letter_recovery),
-  assessment: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review),
-  needs_review: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review),
-  assessment_parse_error: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review),
-  assessment_evidence_missing: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_transport_recovery),
-  unknown_verdict: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_review),
-  assessment_transport_error: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_transport_recovery),
-  assessment_retry_limit: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.assessment_retry_limit),
-  replan_limit: orderedGateActions(["replan", "pass", "fail", "explicit_waiver"]),
-  unexecuted_replan_limit: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.unexecuted_replan_recovery),
-  artifact_routing_admin: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.artifact_routing_admin),
-  shared_trunk_provenance: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.shared_trunk_provenance),
-  [POST_MERGE_DB_TASK_REVIEW_TYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.post_merge_db_task),
-  [MERGE_VERIFICATION_REVIEW_TYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.merge_verification_review),
-  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.merge_failure_recovery),
-  [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.work_item_failure_disposition),
-  [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: freezeChoices(WORK_ITEM_QUESTION_CHOICE_IDS.cross_wi_upstream_disposition),
-});
+export const HUMAN_GATE_ACTIONS = Object.freeze(Object.fromEntries(
+  Object.entries(WORK_ITEM_QUESTION_CHOICE_IDS)
+    .filter(([kind]) => kind !== "legacy_unstructured")
+    .map(([kind, choices]) => [kind, freezeChoices(choices.length > 0 ? choices : ["respond"])]),
+));
 
 export const HUMAN_GATE_RECOVERY_KINDS = Object.freeze([
   ENVIRONMENT_SETUP_REVIEW_TYPE,
-  "developer_blocked",
-  "assessor_evidence_unavailable",
-  "blocked_cycle_exhausted",
+  "blocked_recovery",
+  "assessment_evidence_missing",
+  "partial_work_recovery",
   "failure_threshold_exhausted",
   "fix_chain_exhausted",
-  "assessment_transport_unavailable",
-  "assessment_retry_exhausted",
+  "assessment_transport_recovery",
+  "assessment_retry_limit",
   "dead_letter_recovery",
-  "artifact_routing_unavailable",
-  "scope_expansion_required",
+  "artifact_routing_admin",
+  "file_scope_approval",
 ]);
 
 // Gates that withhold authority or a requirement instead of recovering failed
-// work: plan approval, file-scope approval, installer approval, and an untyped
+// work: plan approval, file-scope approval, installer approval, and a
 // clarification (including the planner's dependency-setup question). The work
 // behind them is not yet authorized, not failed, so an unanswered one stays
 // open for the operator and never times out in a headless run.
 export const AUTHORIZATION_GATE_KINDS = Object.freeze([
   "plan_approval",
-  "scope_expansion_required",
+  "file_scope_approval",
   ENVIRONMENT_SETUP_REVIEW_TYPE,
   "clarification",
+  PLANNER_CLARIFICATION_REVIEW_TYPE,
 ]);
 
 // Gate kind and source-state contract per gate name. Actions are not here:
 // HUMAN_GATE_ACTIONS is their one source.
 const HUMAN_GATE_CONTRACTS = Object.freeze({
-  [PLANNER_CLARIFICATION_REVIEW_TYPE]: { gate_kind: "clarification", allowed_source_states: ["running"] },
-  [ENVIRONMENT_SETUP_REVIEW_TYPE]: {
-    gate_kind: ENVIRONMENT_SETUP_REVIEW_TYPE,
-    allowed_source_states: ["running"],
-  },
-  [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE]: {
-    gate_kind: "developer_blocked",
-    allowed_source_states: ["waiting_on_human", "waiting_on_review", "blocked"],
-  },
-  scope_expansion_request: {
-    gate_kind: "scope_expansion_required",
-    allowed_source_states: ["running", "blocked", "waiting_on_human", "waiting_on_review", "succeeded"],
-  },
-  scope_expansion_required: {
-    gate_kind: "scope_expansion_required",
-    allowed_source_states: ["failed", "blocked", "waiting_on_human", "waiting_on_review"],
-  },
-  partial_work_recovery: {
-    gate_kind: "blocked_cycle_exhausted",
-    allowed_source_states: ["running", "blocked", "waiting_on_human"],
-  },
-  blocked_recovery: {
-    gate_kind: "developer_blocked",
-    allowed_source_states: ["blocked", "waiting_on_human", "waiting_on_review", ...FAILED_JOB_STATUSES],
-  },
-  dead_letter_recovery: {
-    gate_kind: "dead_letter_recovery",
-    allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
-  },
-  failure_threshold_exhausted: {
-    unresolved_fact: "Which authorized disposition should follow repeated pipeline failure.",
-    human_contribution: "recovery_choice",
-    headless_behavior: "fail_closed",
-    diagnostic_insufficient_reason: "Automatic retry and replan limits are exhausted.",
-  },
-  blocked_cycle_exhausted: {
-    unresolved_fact: "Whether partial blocked work should receive more budget, be preserved, or be discarded.",
-    human_contribution: "recovery_choice",
-    headless_behavior: "preserve_and_fail_closed",
-    diagnostic_insufficient_reason: "The available actions intentionally produce different durable outcomes.",
-  },
-  research_dead_letter_recovery: {
-    gate_kind: "dead_letter_recovery",
-    allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
-  },
-  oneshot_dead_letter_recovery: {
-    gate_kind: "dead_letter_recovery",
-    allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"],
-  },
-  stall_exhausted_recovery: {
-    gate_kind: "failure_threshold_exhausted",
-    allowed_source_states: [...FAILED_JOB_STATUSES, "blocked", "waiting_on_human"],
-  },
-  assessment_transport_error: {
-    gate_kind: "assessment_transport_unavailable",
-    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
-  },
-  assessment_retry_limit: {
-    gate_kind: "assessment_retry_exhausted",
-    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
-  },
-  assessment_parse_error: {
-    gate_kind: "assessment_review",
-    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
-  },
-  assessment_evidence_missing: {
-    gate_kind: "assessor_evidence_unavailable",
-    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
-  },
-  unknown_verdict: {
-    gate_kind: "assessment_review",
-    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
-  },
-  needs_review: {
-    gate_kind: "assessment_review",
-    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
-  },
-  replan_limit: {
-    gate_kind: "fix_chain_exhausted",
-    allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
-  },
-  unexecuted_replan_limit: {
-    gate_kind: "fix_chain_exhausted",
-    allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
-  },
-  artifact_routing_admin: {
-    gate_kind: "artifact_routing_unavailable",
-    allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES],
-  },
-  shared_trunk_provenance: {
-    gate_kind: "repository_recovery",
-    allowed_source_states: ["waiting_on_human", "succeeded"],
-  },
-  [POST_MERGE_DB_TASK_REVIEW_TYPE]: {
-    gate_kind: POST_MERGE_DB_TASK_REVIEW_TYPE,
-    allowed_source_states: ["waiting_on_human"],
-  },
-  [MERGE_VERIFICATION_REVIEW_TYPE]: {
-    gate_kind: MERGE_VERIFICATION_REVIEW_TYPE,
-    allowed_source_states: ["succeeded"],
-  },
-  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: {
-    gate_kind: MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
-    allowed_source_states: ["succeeded"],
-  },
-  [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: {
-    gate_kind: WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
-    allowed_source_states: ["waiting_on_human"],
-  },
-  [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: {
-    gate_kind: CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE,
-    allowed_source_states: ["waiting_on_human"],
-  },
-  assessment: {
-    gate_kind: "assessment_review",
-    allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"],
-  },
+  clarification: { allowed_source_states: DEFAULT_HUMAN_GATE_SOURCE_STATES },
+  one_shot_file_scope: { allowed_source_states: DEFAULT_HUMAN_GATE_SOURCE_STATES },
+  plan_approval: { allowed_source_states: DEFAULT_HUMAN_GATE_SOURCE_STATES },
+  push_offer: { allowed_source_states: DEFAULT_HUMAN_GATE_SOURCE_STATES },
+  planner_clarification: { allowed_source_states: ["running"] },
+  environment_setup: { allowed_source_states: ["running"] },
+  file_scope_approval: { allowed_source_states: ["running", "blocked", "waiting_on_human", "waiting_on_review", "succeeded", "failed"] },
+  dirty_worktree_recovery: { allowed_source_states: ["waiting_on_human", "waiting_on_review", "blocked"] },
+  partial_work_recovery: { allowed_source_states: ["running", "blocked", "waiting_on_human"] },
+  blocked_recovery: { allowed_source_states: ["blocked", "waiting_on_human", "waiting_on_review", ...FAILED_JOB_STATUSES] },
+  dead_letter_recovery: { allowed_source_states: [...FAILED_JOB_STATUSES, "waiting_on_human"] },
+  stall_exhausted_recovery: { allowed_source_states: [...FAILED_JOB_STATUSES, "blocked", "waiting_on_human"] },
+  assessment_review: { allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"] },
+  assessment_evidence_missing: { allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"] },
+  assessment_transport_recovery: { allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"] },
+  assessment_retry_limit: { allowed_source_states: ["awaiting_assessment", "waiting_on_review", "waiting_on_human", "succeeded"] },
+  pipeline_head_recovery: { allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES] },
+  unexecuted_replan_recovery: { allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES] },
+  artifact_routing_admin: { allowed_source_states: ["waiting_on_review", "waiting_on_human", ...FAILED_JOB_STATUSES] },
+  shared_trunk_publication_unprovable: { allowed_source_states: DEFAULT_HUMAN_GATE_SOURCE_STATES },
+  shared_trunk_fast_forward_blocked: { allowed_source_states: DEFAULT_HUMAN_GATE_SOURCE_STATES },
+  shared_trunk_push_refused: { allowed_source_states: DEFAULT_HUMAN_GATE_SOURCE_STATES },
+  shared_trunk_push_remote_error: { allowed_source_states: DEFAULT_HUMAN_GATE_SOURCE_STATES },
+  shared_trunk_provenance: { allowed_source_states: ["waiting_on_human", "succeeded"] },
+  post_merge_db_task: { allowed_source_states: ["waiting_on_human"] },
+  merge_verification_review: { allowed_source_states: ["succeeded"] },
+  merge_failure_recovery: { allowed_source_states: ["succeeded"] },
+  work_item_failure_disposition: { allowed_source_states: ["waiting_on_human"] },
+  cross_wi_upstream_disposition: { allowed_source_states: ["waiting_on_human"] },
+  failure_threshold_exhausted: { allowed_source_states: ["blocked", "waiting_on_human", "waiting_on_review", ...FAILED_JOB_STATUSES] },
+  fix_chain_exhausted: { allowed_source_states: ["blocked", "waiting_on_human", "waiting_on_review", ...FAILED_JOB_STATUSES] },
 });
 
 const HUMAN_GATE_ACTIONABILITY_PROFILES = Object.freeze({
-  [ENVIRONMENT_SETUP_REVIEW_TYPE]: {
-    unresolved_fact: "Whether this exact installer or database initializer may run on the user machine.",
-    human_contribution: "authority",
-    headless_behavior: "fail_closed",
-    diagnostic_insufficient_reason: "Only explicit user approval authorizes environment setup.",
+  "clarification": {
+    "unresolved_fact": "A task requirement cannot be derived from repository and work-item evidence.",
+    "human_contribution": "ambiguity_resolution",
+    "headless_behavior": "continue_with_best_judgment",
+    "diagnostic_insufficient_reason": "Continuing without an answer requires an explicit best-judgment assumption."
   },
-  scope_expansion_request: {
-    unresolved_fact: "Whether the work item may mutate files outside its current scope.",
-    human_contribution: "authority",
-    headless_behavior: "fail_closed",
-    diagnostic_insufficient_reason: "Only the operator can grant additional mutation authority.",
+  "one_shot_file_scope": {
+    "unresolved_fact": "Which candidate file or scope the one-shot request intends to modify.",
+    "human_contribution": "ambiguity_resolution",
+    "headless_behavior": "use_deterministic_best_scope_or_fail_closed",
+    "diagnostic_insufficient_reason": "Multiple plausible mutation scopes remain after automatic inference."
   },
-  scope_expansion_required: {
-    unresolved_fact: "Whether the required out-of-scope files may be added to mutation authority.",
-    human_contribution: "authority",
-    headless_behavior: "fail_closed",
-    diagnostic_insufficient_reason: "Repository evidence cannot expand the operator-approved scope.",
+  "plan_approval": {
+    "unresolved_fact": "Whether the proposed implementation plan is authorized to execute.",
+    "human_contribution": "authority",
+    "headless_behavior": "use_configured_plan_approval_policy",
+    "diagnostic_insufficient_reason": "Plan approval grants execution authority rather than supplying a discoverable fact."
   },
-  partial_work_recovery: {
-    unresolved_fact: "Whether partial work should receive more budget, be preserved, or be discarded.",
+  "push_offer": {
+    "unresolved_fact": "Whether committed work may be pushed to the configured remote.",
+    "human_contribution": "merge_push_choice",
+    "headless_behavior": "do_not_push",
+    "diagnostic_insufficient_reason": "Remote publication requires an explicit operator choice."
+  },
+  "planner_clarification": {
+    "unresolved_fact": "A task requirement cannot be derived from repository and work-item evidence.",
+    "human_contribution": "ambiguity_resolution",
+    "headless_behavior": "continue_with_best_judgment",
+    "diagnostic_insufficient_reason": "Continuing without an answer requires an explicit best-judgment assumption."
+  },
+  "environment_setup": {
+    "unresolved_fact": "Whether this exact installer or database initializer may run on the user machine.",
+    "human_contribution": "authority",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "Only explicit user approval authorizes environment setup."
+  },
+  "file_scope_approval": {
+    "unresolved_fact": "Whether the required out-of-scope files may be added to mutation authority.",
+    "human_contribution": "authority",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "Repository evidence cannot expand the operator-approved scope."
+  },
+  "dirty_worktree_recovery": {
+    "unresolved_fact": "Which authorized recovery path should follow the developer block.",
+    "human_contribution": "recovery_choice",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "The available recovery choices spend different authority and budget."
+  },
+  "partial_work_recovery": {
+    "unresolved_fact": "Whether partial work should receive more budget, be preserved, or be discarded.",
+    "human_contribution": "recovery_choice",
+    "headless_behavior": "preserve_and_fail_closed",
+    "diagnostic_insufficient_reason": "Each action intentionally changes ownership or preservation state."
+  },
+  "blocked_recovery": {
+    "unresolved_fact": "Which authorized recovery path should follow the developer block.",
+    "human_contribution": "recovery_choice",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "The available recovery choices spend different authority and budget."
+  },
+  "dead_letter_recovery": {
+    "unresolved_fact": "Whether terminal work should be retried through a selected provider, waived, or failed.",
+    "human_contribution": "recovery_choice",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "Recovering terminal work spends authority and execution budget."
+  },
+  "stall_exhausted_recovery": {
+    "unresolved_fact": "A task requirement cannot be derived from repository and work-item evidence.",
+    "human_contribution": "ambiguity_resolution",
+    "headless_behavior": "continue_with_best_judgment",
+    "diagnostic_insufficient_reason": "Continuing without an answer requires an explicit best-judgment assumption."
+  },
+  "assessment_review": {
+    "unresolved_fact": "Whether available evidence justifies acceptance, rejection, waiver, or another assessment.",
+    "human_contribution": "semantic_judgment",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "The bounded automatic assessment path has already exhausted its evidence or judgment budget."
+  },
+  "assessment_evidence_missing": {
+    "unresolved_fact": "Whether to retry evidence acquisition, reject, replan, or explicitly waive missing evidence.",
+    "human_contribution": "authority",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "Only an explicit waiver may substitute for required evidence."
+  },
+  "assessment_transport_recovery": {
+    "unresolved_fact": "Whether to authorize another assessment attempt or choose a terminal disposition.",
+    "human_contribution": "recovery_choice",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "Automatic assessment transport retries are exhausted."
+  },
+  "assessment_retry_limit": {
+    "unresolved_fact": "Whether to spend more assessment budget, replan, reject, or explicitly waive verification.",
+    "human_contribution": "authority",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "The configured automatic assessment budget is exhausted."
+  },
+  "pipeline_head_recovery": {
+    "unresolved_fact": "Whether to authorize a new strategy, reject the work, or waive the remaining defect.",
+    "human_contribution": "authority",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "The configured automatic repair strategy budget is exhausted."
+  },
+  "unexecuted_replan_recovery": {
+    "unresolved_fact": "Whether to authorize a new strategy, reject the work, or waive the remaining defect.",
+    "human_contribution": "authority",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "The configured automatic repair strategy budget is exhausted."
+  },
+  "artifact_routing_admin": {
+    "unresolved_fact": "A task requirement cannot be derived from repository and work-item evidence.",
+    "human_contribution": "ambiguity_resolution",
+    "headless_behavior": "continue_with_best_judgment",
+    "diagnostic_insufficient_reason": "Continuing without an answer requires an explicit best-judgment assumption."
+  },
+  shared_trunk_publication_unprovable: {
+    unresolved_fact: "Whether the operator has inspected and repaired the shared-trunk condition.",
     human_contribution: "recovery_choice",
-    headless_behavior: "preserve_and_fail_closed",
-    diagnostic_insufficient_reason: "Each action intentionally changes ownership or preservation state.",
+    headless_behavior: "fail_closed",
+    diagnostic_insufficient_reason: "Acknowledgement records an operator decision before shared-trunk recovery resumes.",
   },
-  blocked_recovery: {
-    unresolved_fact: "Which authorized recovery path should own an exhausted blocked job.",
+  shared_trunk_fast_forward_blocked: {
+    unresolved_fact: "Whether the operator has inspected and repaired the shared-trunk condition.",
     human_contribution: "recovery_choice",
     headless_behavior: "fail_closed",
-    diagnostic_insufficient_reason: "Retry, replan, waiver, and failure have materially different state transitions.",
+    diagnostic_insufficient_reason: "Acknowledgement records an operator decision before shared-trunk recovery resumes.",
   },
-  dead_letter_recovery: {
-    unresolved_fact: "Whether terminal work should be retried through a selected provider, waived, or failed.",
+  shared_trunk_push_refused: {
+    unresolved_fact: "Whether the operator has inspected and repaired the shared-trunk condition.",
     human_contribution: "recovery_choice",
     headless_behavior: "fail_closed",
-    diagnostic_insufficient_reason: "Recovering terminal work spends authority and execution budget.",
+    diagnostic_insufficient_reason: "Acknowledgement records an operator decision before shared-trunk recovery resumes.",
   },
-  assessment_review: {
-    unresolved_fact: "Whether available evidence justifies acceptance, rejection, waiver, or another assessment.",
-    human_contribution: "semantic_judgment",
-    headless_behavior: "fail_closed",
-    diagnostic_insufficient_reason: "The bounded automatic assessment path has already exhausted its evidence or judgment budget.",
-  },
-  assessor_evidence_unavailable: {
-    unresolved_fact: "Whether to retry evidence acquisition, reject, replan, or explicitly waive missing evidence.",
-    human_contribution: "authority",
-    headless_behavior: "fail_closed",
-    diagnostic_insufficient_reason: "Only an explicit waiver may substitute for required evidence.",
-  },
-  assessment_transport_unavailable: {
-    unresolved_fact: "Whether to authorize another assessment attempt or choose a terminal disposition.",
+  shared_trunk_push_remote_error: {
+    unresolved_fact: "Whether the operator has inspected and repaired the shared-trunk condition.",
     human_contribution: "recovery_choice",
     headless_behavior: "fail_closed",
-    diagnostic_insufficient_reason: "Automatic assessment transport retries are exhausted.",
+    diagnostic_insufficient_reason: "Acknowledgement records an operator decision before shared-trunk recovery resumes.",
   },
-  assessment_retry_exhausted: {
-    unresolved_fact: "Whether to spend more assessment budget, replan, reject, or explicitly waive verification.",
-    human_contribution: "authority",
-    headless_behavior: "fail_closed",
-    diagnostic_insufficient_reason: "The configured automatic assessment budget is exhausted.",
+  "shared_trunk_provenance": {
+    "unresolved_fact": "A task requirement cannot be derived from repository and work-item evidence.",
+    "human_contribution": "ambiguity_resolution",
+    "headless_behavior": "continue_with_best_judgment",
+    "diagnostic_insufficient_reason": "Continuing without an answer requires an explicit best-judgment assumption."
   },
-  fix_chain_exhausted: {
-    unresolved_fact: "Whether to authorize a new strategy, reject the work, or waive the remaining defect.",
-    human_contribution: "authority",
-    headless_behavior: "fail_closed",
-    diagnostic_insufficient_reason: "The configured automatic repair strategy budget is exhausted.",
+  "post_merge_db_task": {
+    "unresolved_fact": "Whether the merged change is deployed, so its deferred task may write the project database.",
+    "human_contribution": "authority",
+    "headless_behavior": "do_not_run",
+    "diagnostic_insufficient_reason": "Posse cannot observe when the operator deploys the merged change."
   },
-  developer_blocked: {
-    unresolved_fact: "Which authorized recovery path should follow the developer block.",
-    human_contribution: "recovery_choice",
-    headless_behavior: "fail_closed",
-    diagnostic_insufficient_reason: "The available recovery choices spend different authority and budget.",
+  "merge_verification_review": {
+    "unresolved_fact": "Whether work whose planned verification could not run may merge on review alone.",
+    "human_contribution": "authority",
+    "headless_behavior": "do_not_merge",
+    "diagnostic_insufficient_reason": "The planned test already failed before the change, so no executed check shows the risky change works."
   },
-  clarification: {
-    unresolved_fact: "A task requirement cannot be derived from repository and work-item evidence.",
-    human_contribution: "ambiguity_resolution",
-    headless_behavior: "continue_with_best_judgment",
-    diagnostic_insufficient_reason: "Continuing without an answer requires an explicit best-judgment assumption.",
+  "merge_failure_recovery": {
+    "unresolved_fact": "Whether the repository condition that stopped the merge is resolved, so the work item can merge now, or the work must go back for rework.",
+    "human_contribution": "recovery_choice",
+    "headless_behavior": "do_not_merge",
+    "diagnostic_insufficient_reason": "Git refused the merge; only the operator can resolve the conflict or repository condition behind it."
   },
-  plan_approval: {
-    unresolved_fact: "Whether the proposed implementation plan is authorized to execute.",
-    human_contribution: "authority",
-    headless_behavior: "use_configured_plan_approval_policy",
-    diagnostic_insufficient_reason: "Plan approval grants execution authority rather than supplying a discoverable fact.",
+  "work_item_failure_disposition": {
+    "unresolved_fact": "Whether a failed work item's branch should be retried, accepted despite assessment-only failures, or abandoned.",
+    "human_contribution": "recovery_choice",
+    "headless_behavior": "leave_parked",
+    "diagnostic_insufficient_reason": "Each choice spends execution budget, overrides an assessor verdict, or discards committed work."
   },
-  [POST_MERGE_DB_TASK_REVIEW_TYPE]: {
-    unresolved_fact: "Whether the merged change is deployed, so its deferred task may write the project database.",
-    human_contribution: "authority",
-    headless_behavior: "do_not_run",
-    diagnostic_insufficient_reason: "Posse cannot observe when the operator deploys the merged change.",
+  "cross_wi_upstream_disposition": {
+    "unresolved_fact": "Whether a completed work item should wait for its failed upstream, be rebuilt without the inherited edits, or be abandoned.",
+    "human_contribution": "recovery_choice",
+    "headless_behavior": "leave_parked",
+    "diagnostic_insufficient_reason": "Only the operator knows whether the failed upstream work item will be recovered."
   },
-  [MERGE_FAILURE_RECOVERY_REVIEW_TYPE]: {
-    unresolved_fact: "Whether the repository condition that stopped the merge is resolved, so the work item can merge now, or the work must go back for rework.",
-    human_contribution: "recovery_choice",
-    headless_behavior: "do_not_merge",
-    diagnostic_insufficient_reason: "Git refused the merge; only the operator can resolve the conflict or repository condition behind it.",
+  "failure_threshold_exhausted": {
+    "unresolved_fact": "Which authorized recovery path should follow the developer block.",
+    "human_contribution": "recovery_choice",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "The available recovery choices spend different authority and budget."
   },
-  [MERGE_VERIFICATION_REVIEW_TYPE]: {
-    unresolved_fact: "Whether work whose planned verification could not run may merge on review alone.",
-    human_contribution: "authority",
-    headless_behavior: "do_not_merge",
-    diagnostic_insufficient_reason: "The planned test already failed before the change, so no executed check shows the risky change works.",
-  },
-  [WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE]: {
-    unresolved_fact: "Whether a failed work item's branch should be retried, accepted despite assessment-only failures, or abandoned.",
-    human_contribution: "recovery_choice",
-    headless_behavior: "leave_parked",
-    diagnostic_insufficient_reason: "Each choice spends execution budget, overrides an assessor verdict, or discards committed work.",
-  },
-  [CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE]: {
-    unresolved_fact: "Whether a completed work item should wait for its failed upstream, be rebuilt without the inherited edits, or be abandoned.",
-    human_contribution: "recovery_choice",
-    headless_behavior: "leave_parked",
-    diagnostic_insufficient_reason: "Only the operator knows whether the failed upstream work item will be recovered.",
-  },
-  push_offer: {
-    unresolved_fact: "Whether committed work may be pushed to the configured remote.",
-    human_contribution: "merge_push_choice",
-    headless_behavior: "do_not_push",
-    diagnostic_insufficient_reason: "Remote publication requires an explicit operator choice.",
-  },
-  oneshot_scope_selection: {
-    unresolved_fact: "Which candidate file or scope the one-shot request intends to modify.",
-    human_contribution: "ambiguity_resolution",
-    headless_behavior: "use_deterministic_best_scope_or_fail_closed",
-    diagnostic_insufficient_reason: "Multiple plausible mutation scopes remain after automatic inference.",
-  },
+  "fix_chain_exhausted": {
+    "unresolved_fact": "Which authorized recovery path should follow the developer block.",
+    "human_contribution": "recovery_choice",
+    "headless_behavior": "fail_closed",
+    "diagnostic_insufficient_reason": "The available recovery choices spend different authority and budget."
+  }
 });
 
 function actionTransition(action) {
@@ -581,18 +500,18 @@ export function validateHumanGateActionabilityContract(contract = {}) {
 }
 
 export function humanGateNameForPayload(payload = {}) {
-  if (payload?.subtype === "plan_approval") return "plan_approval";
-  if (payload?.subtype === "push_offer") return "push_offer";
-  if (
-    payload?.subtype === ONESHOT_SCOPE_SELECTION_SUBTYPE
-    || payload?.review_type === ONESHOT_SCOPE_SELECTION_SUBTYPE
-  ) return ONESHOT_SCOPE_SELECTION_SUBTYPE;
-  const reviewType = String(payload?.review_type || "").trim();
-  if (HUMAN_GATE_CONTRACTS[reviewType] || HUMAN_GATE_ACTIONS[reviewType]) return reviewType;
-  if (Array.isArray(payload?.file_requests) && payload.file_requests.length > 0) {
-    return "scope_expansion_request";
-  }
-  return String(payload?.gate_kind || payload?.review_type || "clarification");
+  const identities = [payload.gate_kind, payload.review_type, payload.subtype, payload.question_kind]
+    .filter((value) => typeof value === "string" && value.trim()).map((value) => value.trim());
+  const name = identities[0] || (Array.isArray(payload.file_requests) && payload.file_requests.length > 0
+    ? "file_scope_approval" : "clarification");
+  if (!Object.hasOwn(HUMAN_GATE_ACTIONS, name)) throw new Error(`Unknown canonical gate ID: ${name}`);
+  if (identities.some((value) => value !== name)) throw new Error(`Gate identity mismatch: ${identities.join(" != ")}`);
+  return name;
+}
+
+export function canonicalHumanGatePayload(payload = {}) {
+  const gate = humanGateNameForPayload(payload);
+  return { ...payload, review_type: gate, gate_kind: gate, question_kind: gate };
 }
 
 export function humanGateContractForPayload(payload = {}, {
@@ -606,22 +525,11 @@ export function humanGateContractForPayload(payload = {}, {
     ?? payload?.plan_job_id
     ?? parentJobId
   );
-  const fallbackActions = explicitChoices.length > 0 ? explicitChoices : ["respond"];
-  // review_type selects the action/source-state contract, while an explicit
-  // gate_kind identifies the concrete recovery condition for deduplication.
-  // Conflating them made fix-chain and failure-threshold gates look like a
-  // generic developer block and could reuse an unrelated open prompt.
-  const explicitGateKind = String(payload?.gate_kind || "").trim();
-  const gateKind = explicitGateKind || registered?.gate_kind || source;
-  const registeredActions = HUMAN_GATE_ACTIONS[source]
-    ? narrowedReviewChoices(payload, [...HUMAN_GATE_ACTIONS[source]])
-    : null;
-  const allowedActions = [...new Set(registeredActions || fallbackActions)];
-  const profile = HUMAN_GATE_ACTIONABILITY_PROFILES[gateKind]
-    || HUMAN_GATE_ACTIONABILITY_PROFILES[source]
-    || HUMAN_GATE_ACTIONABILITY_PROFILES.clarification;
+  const allowedActions = [...new Set(source === "one_shot_file_scope" ? explicitChoices
+    : narrowedReviewChoices(payload, [...HUMAN_GATE_ACTIONS[source]]))];
+  const profile = HUMAN_GATE_ACTIONABILITY_PROFILES[source];
   return {
-    gate_kind: gateKind,
+    gate_kind: source,
     contract_version: 2,
     original_job_id: Number.isInteger(originalJobId) && originalJobId > 0 ? originalJobId : null,
     allowed_source_states: [...(registered?.allowed_source_states || DEFAULT_HUMAN_GATE_SOURCE_STATES)],
@@ -635,18 +543,22 @@ export function humanGateContractForPayload(payload = {}, {
 }
 
 export const HUMAN_INPUT_COORDINATION_REVIEW_TYPES = Object.freeze([
+  "clarification",
+  "failure_threshold_exhausted",
+  "fix_chain_exhausted",
   PLANNER_CLARIFICATION_REVIEW_TYPE,
   ENVIRONMENT_SETUP_REVIEW_TYPE,
-  "scope_expansion_request",
-  "scope_expansion_required",
+  "file_scope_approval",
   DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE,
   "partial_work_recovery",
   "blocked_recovery",
   "dead_letter_recovery",
-  "research_dead_letter_recovery",
-  "oneshot_dead_letter_recovery",
   "stall_exhausted_recovery",
   "artifact_routing_admin",
+  "shared_trunk_publication_unprovable",
+  "shared_trunk_fast_forward_blocked",
+  "shared_trunk_push_refused",
+  "shared_trunk_push_remote_error",
   "shared_trunk_provenance",
   POST_MERGE_DB_TASK_REVIEW_TYPE,
   MERGE_FAILURE_RECOVERY_REVIEW_TYPE,
@@ -689,9 +601,8 @@ export function mergeFailureRecoveryChoices({ integrationGate = null, allowWaive
 function narrowedReviewChoices(payload, reviewChoices) {
   const reviewType = String(payload?.review_type || "").trim();
   const offered = normalizeHumanInputChoices(payload?.choices);
-  if (["assessment", "needs_review", "assessment_parse_error", "assessment_evidence_missing",
-    "unknown_verdict", "assessment_transport_error", "assessment_retry_limit", "replan_limit",
-    "unexecuted_replan_limit"].includes(reviewType)
+  if (["assessment_review", "assessment_evidence_missing", "assessment_transport_recovery", "assessment_retry_limit", "pipeline_head_recovery",
+    "unexecuted_replan_recovery"].includes(reviewType)
     && offered.length > 0 && offered.every((action) => reviewChoices.includes(action))
     && offered.every((action, index) => index === 0 || reviewChoices.indexOf(action) > reviewChoices.indexOf(offered[index - 1]))) {
     return offered;
@@ -718,7 +629,14 @@ export function humanInputChoicesForPayload(payload = {}) {
   // from older jobs must not reintroduce an action that the resolver does not
   // handle. A gate whose only action is `respond` offers no choices: it takes
   // free text.
-  const reviewChoices = humanInputChoicesForReviewType(payload.subtype || payload.review_type)
+  const kind = humanGateNameForPayload(payload);
+  if (kind === "one_shot_file_scope" && Array.isArray(payload.selector?.options)) {
+    const choices = payload.selector.options.map((option) => option.value);
+    if (choices.length >= 3 && choices.length <= 12 && new Set(choices).size === choices.length
+      && choices.at(-2) === "plan" && choices.at(-1) === "cancel"
+      && choices.slice(0, -2).every((value) => /^candidate:sha256:[0-9a-f]{64}$/.test(value))) return choices;
+  }
+  const reviewChoices = humanInputChoicesForReviewType(kind)
     .filter((choice) => choice !== "respond");
   if (reviewChoices.length > 0) return narrowedReviewChoices(payload, reviewChoices);
 
@@ -748,7 +666,7 @@ export function scopeModeHumanInputAnswerForPayload(payload = {}, scopeMode = SC
   if (scopeMode !== SCOPE_APPROVAL_MODES.AUTO || payload.requires_interactive_approval === true) return null;
   if (payload.subtype) return null;
   const reviewType = String(payload.review_type || "").trim();
-  if (["scope_expansion_request", "scope_expansion_required"].includes(reviewType)) return "approve";
+  if (reviewType === "file_scope_approval") return "approve";
   if (!reviewType && Array.isArray(payload.file_requests) && payload.file_requests.length > 0) return "approve";
   return null;
 }

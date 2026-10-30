@@ -1,5 +1,5 @@
 import { serializePlanScopeOverlaps } from "./plan-scope-overlap.js";
-import { completeTaskScope, plannerDependencyKind } from "./plan-scope-dependencies.js";
+import { completeTaskScope, namedTaskPaths, plannerDependencyKind } from "./plan-scope-dependencies.js";
 import { planningEnvironmentReadiness } from "../../system/functions/planning-environment-state.js";
 import { plannedTaskDedupeKey } from "./planned-task-dedupe.js";
 // lib/domains/planning/functions/plan-compiler.js
@@ -24,7 +24,7 @@ import { C } from "../../../shared/format/functions/colors.js";
 import { artifactTaskOutputRoot, contextDir, getResourcesDir, getWiModeConfig, isValidTaskMode, normalizeArtifactCreateFiles, workItemArtifactRoot, wiScopeId } from "../../artifacts/functions/index.js";
 import { hasWritableScope, normalizeResearcherCitationTriage } from "../../handoff/functions/index.js";
 import { resolveResearchContextForWorkItem } from "../../research/functions/research-context.js";
-import { movedOutputPathReplacements, rewriteTaskTextPaths } from "./task-text-paths.js";
+import { movedOutputPathReplacements, rewriteArtifactReferences, rewriteDownstreamArtifactReferences } from "./task-text-paths.js";
 import { projectDbEffectivePermissions } from "../../../shared/tools/functions/toolkit/project-db/config.js";
 import { listProjectDbWrites, verifiedProjectDbExecution } from "../../../shared/tools/functions/toolkit/project-db/write-evidence.js";
 import { normalizeRiskTags, resolveTaskExecutionPolicy } from "../../handoff/functions/helpers/execution-policy.js";
@@ -464,6 +464,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       let createdCount = 0;
       const underScopedDroppedTitles = [];
       const researchCandidateFiles = new Set();
+      // Paths the researcher named as material (key_files, ranked files): the
+      // one-ref fallback packet only applies to tasks touching one of them.
+      const researchMaterialPaths = new Set();
       const projectRootAbs = path.resolve(worker.projectDir).replace(/\\/g, "/").replace(/\/+$/, "");
       const broadPlannerRoot = (value) => {
         const raw = String(value ?? "").trim();
@@ -633,11 +636,17 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             : [];
         for (const priorityEntry of plannerFilePriorities) {
           const filePath = typeof priorityEntry === "string" ? priorityEntry : priorityEntry?.path;
-          if (typeof filePath === "string" && filePath.trim()) researchCandidateFiles.add(filePath.trim());
+          if (typeof filePath === "string" && filePath.trim()) {
+            researchCandidateFiles.add(filePath.trim());
+            researchMaterialPaths.add(normPath(filePath));
+          }
         }
         const keyFiles = Array.isArray(parsed.key_files) ? parsed.key_files : [];
         for (const filePath of keyFiles) {
-          if (typeof filePath === "string" && filePath.trim()) researchCandidateFiles.add(filePath.trim());
+          if (typeof filePath === "string" && filePath.trim()) {
+            researchCandidateFiles.add(filePath.trim());
+            researchMaterialPaths.add(normPath(filePath));
+          }
         }
         const relatedFiles = Array.isArray(parsed.related_files) ? parsed.related_files : [];
         for (const related of relatedFiles) {
@@ -645,6 +654,19 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           if (typeof filePath === "string" && filePath.trim()) researchCandidateFiles.add(filePath.trim());
         }
       }
+      // The fallback ref carries no path of its own, so a task qualifies when
+      // its declared or verbatim-named files intersect the researcher's material
+      // paths. A researcher output that names no paths keeps today's behaviour:
+      // every brief-less code task is offered the one ref.
+      const researchFallbackCoversTask = (task) => {
+        if (researchMaterialPaths.size === 0) return true;
+        return [
+          ...(task.files_to_modify || []),
+          ...(task.files_to_create || []),
+          ...(task.files_to_delete || []),
+          ...namedTaskPaths(task),
+        ].some((filePath) => researchMaterialPaths.has(normPath(filePath)));
+      };
       const researchCandidateCount = researchCandidateFiles.size;
       const underScopedBroadGateMode = parseUnderScopedBroadGateMode(getSetting(SETTING_KEYS.PLANNER_UNDER_SCOPED_BROAD_GATE));
       cancelSupersededPlanChildren(worker, planJob);
@@ -1761,16 +1783,10 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               fromRoot: plannedOutputRoot,
               toRoot: t.output_root || defaultRoot,
             });
-            const rewrittenTextFields = [];
-            for (const field of ["task_spec", "instructions"]) {
-              const rewritten = rewriteTaskTextPaths(t[field], movedOutputPaths);
-              if (rewritten !== t[field]) {
-                t[field] = rewritten;
-                rewrittenTextFields.push(field);
-              }
-            }
-            if (rewrittenTextFields.length > 0) {
-              worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: rewrote moved output path mention(s) in ${rewrittenTextFields.join(", ")} for task "${t.title}"`);
+            if (movedOutputPaths.length > 0) {
+              Object.assign(t, rewriteArtifactReferences(t, movedOutputPaths));
+              rewriteDownstreamArtifactReferences(tasks, i, movedOutputPaths);
+              worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: rewrote moved output file references for task "${t.title}" and its consumers`);
             }
           }
 
@@ -2077,7 +2093,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: dropped ${droppedCount} ATLAS dev_brief item(s) in task "${t.title}"`);
         }
         let activeHashRefPacket = devBriefResult.hashRefPacket || null;
-        if (!activeHashRefPacket && finalJobType === "dev" && taskMode === "code" && researchMaterialFallbackPacket) {
+        if (!activeHashRefPacket && finalJobType === "dev" && taskMode === "code" && researchMaterialFallbackPacket && researchFallbackCoversTask(t)) {
           activeHashRefPacket = researchMaterialFallbackPacket;
           worker.emit(planJob.id, `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: filled missing ATLAS hash_ref_packet for task "${t.title}" from the researcher's highest-priority material ref`);
         }
@@ -2424,16 +2440,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               ...(activeHashRefPacketDropped.length > 0 ? { dropped_hash_ref_packet_refs: activeHashRefPacketDropped } : {}),
             }, null, 2), "utf-8");
 
-            // Copy only this job's scoped source files
-            for (const fp of (t.files_to_modify || [])) {
-              try {
-                const src = path.resolve(worker.projectDir, fp);
-                if (!fs.existsSync(src)) continue;
-                const dest = path.join(jobCtxDir, fp);
-                fs.mkdirSync(path.dirname(dest), { recursive: true });
-                fs.copyFileSync(src, dest);
-              } catch { /* skip */ }
-            }
+            // The scoped source files are not copied here: nothing reads the
+            // copies (the dev role works in its worktree), and copying every
+            // files_to_modify per job was pure I/O per plan compile.
 
             // Thread context_dir into the payload for the dev handler
             const existingPayload = parseJobPayload(getJob(job.id) || job);

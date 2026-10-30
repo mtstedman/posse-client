@@ -3,7 +3,7 @@ import path from "path";
 import { isLeaseValid, logEvent, updateJobPayload } from "../../../queue/functions/index.js";
 import { logAttemptSkippedStaleLease } from "../../functions/execution/attempt-logging.js";
 import { getProviderName } from "../../../providers/functions/provider.js";
-import { injectArtifactScope, isArtifactMode, buildManifest, wiScopeId } from "../../../artifacts/functions/index.js";
+import { injectArtifactScope, isArtifactMode, buildManifestAsync, wiScopeId } from "../../../artifacts/functions/index.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { yieldNow } from "../../../runtime/functions/yield.js";
@@ -161,7 +161,10 @@ export class WorkerExecutionCoordinator {
 
       // -- Short-circuit: promote is deterministic - no provider needed --
       if (job.job_type === "promote") {
-        await runPromoteJobFromModule(worker, job, wrappedJob, { leaseToken });
+        await runPromoteJobFromModule(worker, job, wrappedJob, {
+          leaseToken,
+          abortSignal: executeAbortController?.signal || null,
+        });
         return;
       }
 
@@ -387,7 +390,7 @@ export class WorkerExecutionCoordinator {
           const preTaskMode = prePayload.task_mode || "code";
           if (isArtifactMode(preTaskMode) && prePayload.output_root) {
             const absRoot = path.resolve(worker.projectDir, prePayload.output_root);
-            const pre = buildManifest(absRoot, absRoot);
+            const pre = await buildManifestAsync(absRoot, absRoot);
             preManifestState = new Map(pre.files.map((file) => [file.path, {
               size: file.size,
               mtimeMs: file.mtimeMs,
@@ -436,6 +439,7 @@ export class WorkerExecutionCoordinator {
         );
 
         return await this.postExecution.handle({
+          abortSignal: executeAbortController?.signal || null,
           attempt,
           attemptCount,
           branchName,

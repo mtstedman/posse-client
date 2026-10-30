@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { RUN_MONITOR_STREAMS } from "../../../catalog/run-monitor.js";
-import { monitorText, monitorEntryScope, projectMonitorEntry, readMonitorGates } from "../functions/run-monitor.js";
+import { monitorText, monitorEntryScope, openMonitorGateDb, projectMonitorEntry, queryMonitorGates } from "../functions/run-monitor.js";
 
 const CHUNK_BYTES = 64 * 1024;
 const MAX_LINE_BYTES = 1024 * 1024;
@@ -66,6 +66,7 @@ export class RunMonitor {
     this.workItemId = workItemId;
     this.limit = limit;
     this.staleMs = staleMs;
+    this.gate = null;
     this.state = {
       version: 1, run_dir: this.runDir, work_item_id: workItemId,
       streams: {}, gates: {}, work_items: [], notices: {}, next_stream: 0,
@@ -146,7 +147,7 @@ export class RunMonitor {
     state.work_items = [...workItems];
     if (this.workItemId != null) workItems.add(this.workItemId);
     try {
-      const gates = readMonitorGates(this.dbPath, [...workItems], manifest.started_at);
+      const gates = queryMonitorGates(this.gateDb(), [...workItems], manifest.started_at);
       if (state.notices.gate_source) notice("gate_source", "Gate database available", "info");
       for (const gate of gates) {
         const { time: _time, ...meaning } = gate;
@@ -156,8 +157,32 @@ export class RunMonitor {
         items.push(gate);
         state.gates[gate.job_id] = fingerprint;
       }
-    } catch (error) { notice("gate_source", `Gate state unavailable: ${monitorText(error.message)}`); }
+    } catch (error) {
+      // Drop the handle so the next check reopens once the database is back.
+      this.dispose();
+      notice("gate_source", `Gate state unavailable: ${monitorText(error.message)}`);
+    }
     return { run_id: manifest.run_id || path.basename(this.runDir), run_dir: this.runDir, items, more };
+  }
+
+  // One read-only gate handle for the monitor's lifetime, opened lazily so a
+  // missing database stays a per-check notice. A replaced database file (new
+  // inode) is reopened rather than read through the stale handle.
+  gateDb() {
+    if (this.gate) {
+      let stat = null;
+      try { stat = fs.statSync(this.dbPath); } catch { /* fall through to reopen */ }
+      if (stat && `${stat.dev}:${stat.ino}` === this.gate.identity) return this.gate.db;
+      this.dispose();
+    }
+    this.gate = openMonitorGateDb(this.dbPath);
+    return this.gate.db;
+  }
+
+  dispose() {
+    const gate = this.gate;
+    this.gate = null;
+    if (gate) try { gate.db.close(); } catch { /* already closed */ }
   }
 
   save() {

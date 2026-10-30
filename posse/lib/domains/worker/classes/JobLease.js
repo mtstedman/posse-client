@@ -108,6 +108,10 @@ export class JobLease {
   }
 }
 
+// Shared with the worker's session-lease renewal timer so both renewal paths
+// tolerate the same SQLITE_BUSY/LOCKED budget before aborting a job.
+export { DEFAULT_MAX_TRANSIENT_LEASE_RENEW_ERRORS, isTransientLeaseRenewalError, readMaxTransientLeaseRenewErrors };
+
 function readMaxTransientLeaseRenewErrors() {
   try {
     const raw = getSetting(SETTING_KEYS.WORKER_LEASE_RENEW_MAX_TRANSIENT_ERRORS);

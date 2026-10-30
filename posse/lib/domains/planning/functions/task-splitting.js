@@ -116,10 +116,14 @@ export function resolvePromoteSourceDir(task, tasks, artifactDirAbs) {
     && (!normalizedSource || normalizedSource === normalizedArtifactRoot);
   if (!shouldInfer) return task?.source_dir || null;
 
-  for (const idx of [...new Set(candidateIndexes)]) {
-    const sourceTask = tasks?.[idx];
-    if (sourceTask?.output_root) return sourceTask.output_root;
+  const sources = artifactSourceCandidates(task, tasks);
+  const mappings = Array.isArray(task?.mappings) ? task.mappings : [];
+  if (mappings.length > 0) {
+    const selected = mappings.map((mapping) => bestSourceForMapping(mapping, sources));
+    if (selected.every((source) => source && source.sourceDir === selected[0]?.sourceDir)) return selected[0].sourceDir;
+    return task?.source_dir || null;
   }
+  if (sources.length > 0) return sources[0].sourceDir;
   return task?.source_dir || null;
 }
 
@@ -146,17 +150,24 @@ function artifactSourceCandidates(task, tasks) {
   }
 
   const seen = new Set();
+  const depths = new Map(indexes.map((index) => [index, 0]));
   const candidates = [];
   for (const index of indexes) {
     if (seen.has(index)) continue;
     seen.add(index);
     const sourceTask = tasks?.[index];
+    // Completion dependencies can point at the last piece of a split. Walk
+    // through that piece to find the task that actually declares each file.
+    for (const upstream of sourceTask?.depends_on_index || []) {
+      if (Number.isInteger(upstream) && !depths.has(upstream)) {
+        depths.set(upstream, depths.get(index) + 1);
+        indexes.push(upstream);
+      }
+    }
     const sourceDir = normalizePromotePath(sourceTask?.output_root);
     if (!sourceDir) continue;
-    const files = [
-      ...(Array.isArray(sourceTask?.files_to_create) ? sourceTask.files_to_create : []),
-      ...collectRequestedImageOutputs(sourceTask || {}),
-    ];
+    const declaredFiles = Array.isArray(sourceTask?.files_to_create) ? sourceTask.files_to_create : [];
+    const files = declaredFiles.length > 0 ? declaredFiles : collectRequestedImageOutputs(sourceTask || {});
     const declaredBasenames = new Set(files
       .map((file) => path.posix.basename(String(file || "").replace(/\\/g, "/")))
       .filter(Boolean));
@@ -168,8 +179,11 @@ function artifactSourceCandidates(task, tasks) {
     ].join("\n").toLowerCase();
     candidates.push({
       index,
+      pinned: index === task._split_promote_source_index,
+      depth: depths.get(index),
       sourceDir,
       declaredBasenames,
+      hasDeclaredFiles: declaredFiles.length > 0,
       text,
     });
   }
@@ -178,30 +192,42 @@ function artifactSourceCandidates(task, tasks) {
 
 function scoreMappingForSource(mapping, source) {
   const basename = mappingBasename(mapping);
-  if (!basename) return 0;
+  if (!basename) {
+    const pattern = String(mapping?.pattern || "");
+    if (pattern.startsWith("*.")) {
+      return [...source.declaredBasenames].some((name) => name.endsWith(pattern.slice(1))) ? 100 : 0;
+    }
+    return 0;
+  }
   const lowered = basename.toLowerCase();
   if (source.declaredBasenames.has(basename)) return 100;
   for (const declared of source.declaredBasenames) {
     if (declared.toLowerCase() === lowered) return 100;
   }
-  return source.text.includes(lowered) ? 60 : 0;
+  // A manifest can mention all its input images without producing any.
+  return !source.hasDeclaredFiles && source.text.includes(lowered) ? 60 : 0;
 }
 
 function bestSourceForMapping(mapping, sources) {
-  if (!mappingBasename(mapping)) return sources[0] || null;
   let best = null;
   let bestScore = 0;
   for (const source of sources) {
     const score = scoreMappingForSource(mapping, source);
     if (
       score > bestScore
-      || (score === bestScore && best && source.index < best.index)
+      || (score === bestScore && best && (
+        Number(source.pinned) > Number(best.pinned)
+        || (source.pinned === best.pinned && (source.depth < best.depth
+          || (source.depth === best.depth && source.index < best.index)))
+      ))
     ) {
       best = source;
       bestScore = score;
     }
   }
-  return best;
+  // Older plans can leave filenames to the producer. Retain that inference
+  // only when it cannot contradict a declared output contract.
+  return best || (sources.length === 1 && !sources[0].hasDeclaredFiles ? sources[0] : null);
 }
 
 function promoteSplitTitle(title, group, offset) {
@@ -220,20 +246,13 @@ export function routePromoteTaskByOutputDir(task, index, tasks, artifactDirAbs) 
 
   const sources = artifactSourceCandidates(task, tasks);
   if (sources.length === 0) return null;
-  if (sources.length === 1) {
-    const currentSource = normalizePromotePath(task.source_dir);
+  if (sources.length === 1 && (!sources[0].hasDeclaredFiles || mappings.some((mapping) => scoreMappingForSource(mapping, sources[0]) > 0))) {
     const sourceDir = sources[0].sourceDir;
-    if (sourceDir && currentSource !== sourceDir) {
-      return {
-        normalizedTask: {
-          ...task,
-          source_dir: sourceDir,
-          _split_promote_by_output_dir_done: true,
-        },
-        reason: `scoped promote task "${task.title}" to artifact output ${sourceDir}`,
-      };
-    }
-    return null;
+    if (sourceDir === normalizePromotePath(task.source_dir)) return null;
+    return {
+      normalizedTask: { ...task, source_dir: sourceDir, _split_promote_by_output_dir_done: true },
+      reason: `scoped promote task "${task.title}" to artifact output ${sourceDir}`,
+    };
   }
 
   const groupsBySourceIndex = new Map();
@@ -515,15 +534,17 @@ export function splitTaskByCreateFileKind(task, index, artifactDirAbs, { taskMod
 
   if (hasDownstreamCodeSplit) {
     const devCreateFiles = nonImageCreateFiles;
+    const artifactOnly = !hasRepoEdits && devCreateFiles.length > 0
+      && devCreateFiles.every((file) => isArtifactScopedPath(file, artifactDirAbs));
     const devTask = {
       ...routedTask,
       title: `Code changes for: ${routedTask.title}`.slice(0, 120),
-      job_type: "dev",
-      task_mode: "code",
+      job_type: artifactOnly ? "artificer" : "dev",
+      task_mode: artifactOnly ? "report" : "code",
       needs_image_generation: false,
-      output_root: null,
+      output_root: artifactOnly ? (routedTask.output_root || artifactDirAbs) : null,
       files_to_create: devCreateFiles,
-      create_roots: [],
+      create_roots: artifactOnly ? [routedTask.output_root || artifactDirAbs] : [],
       depends_on_index: [...new Set([...originalDependencies, finalDependencyIndex])],
       task_spec: [
         routedTask.task_spec || routedTask.instructions || "",

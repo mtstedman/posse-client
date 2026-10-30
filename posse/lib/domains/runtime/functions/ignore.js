@@ -250,6 +250,29 @@ export function hasPosseRuntimeIgnoreBlock(content) {
     .some((line) => line.trim() === POSSE_RUNTIME_IGNORE_HEADER);
 }
 
+// The rules inside Posse's managed block(s): every non-blank line after a
+// marker header that Posse writes today or wrote before (retired root rules),
+// up to the first blank or foreign line. A rule spelled like a runtime rule
+// anywhere else in the file is the user's, so a caller judging a .gitignore
+// diff must look here rather than at the rule text alone. Repeated rules are
+// kept so callers can count them.
+export function posseRuntimeIgnoreBlockLines(projectDir, content, {
+  anchorDir = projectDir,
+} = {}) {
+  const lines = String(content || "").split(/\r?\n/).map((line) => line.trim());
+  if (!lines.includes(POSSE_RUNTIME_IGNORE_HEADER)) return [];
+  const allowed = new Set([...buildPosseRuntimeIgnoreEntries(projectDir, { anchorDir }), ...RETIRED_RUNTIME_DIRECTORY_RULES]);
+  const block = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (lines[index] !== POSSE_RUNTIME_IGNORE_HEADER) continue;
+    for (index += 1; index < lines.length && lines[index] && allowed.has(lines[index]); index += 1) {
+      block.push(lines[index]);
+    }
+    index -= 1;
+  }
+  return block;
+}
+
 export async function ensurePosseRuntimeGitignoreAsync(projectDir, {
   updateManagedBlock = false,
 } = {}) {

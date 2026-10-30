@@ -1006,15 +1006,19 @@ export async function ensurePreDevelopmentTestBaseline({
     }
   }
   const headCommit = await currentCommit(cwd);
-  const headPorcelain = await porcelain(cwd);
-  const repositoryBaseline = headPorcelain === ""
+  // With a commit the baseline runs in a pinned clean checkout of it (below),
+  // so another job's baseline for the same commit and plan is the same run
+  // whatever the shared tree's dirt; isReusableReceipt still requires the
+  // same policy, toolchain, and environment files. Without a commit there is
+  // no pinned run to reuse.
+  const repositoryBaseline = headCommit
     ? await findRepositoryFrozenTestBaseline({
         jobId: job?.id,
         planId: plan.plan_id,
         commitHash: headCommit,
         policy: effectivePolicy,
         projectDir: cwd,
-        treeFingerprint: worktreeFingerprint(headCommit, headPorcelain),
+        treeFingerprint: worktreeFingerprint(headCommit, ""),
       })
     : null;
   if (repositoryBaseline) return storeRepositoryBaselineReference(job, repositoryBaseline);

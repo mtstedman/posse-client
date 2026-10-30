@@ -3,6 +3,7 @@ import { expandResearchChildHandoff, researchChildHandoffMismatch } from "../../
 import { RESEARCH_CHILD_PROFILE, RESEARCH_REPORT_OBJECT_TYPE, SUB_AGENT_OBSERVATION_TYPES } from "../../../catalog/sub-agent.js";
 import {
   PLANNER_DISPATCH_RETURN_MARGIN_MS,
+  PLANNER_DISPATCH_SETTINGS,
   PLANNER_RESEARCH_EFFORT_VALUES,
   RESEARCH_AGENT_TYPES,
   RESEARCH_CHILD_DEFAULT_MODEL_TIERS,
@@ -80,11 +81,12 @@ const FORBIDDEN_CURSOR_TOOLS = new Set([
   "atlas.memory.feedback",
 ].map(canonicalToolName));
 
-function runtimeError(code, message, { retryable = false, stage = "runtime" } = {}) {
-  const error = /** @type {Error & { code: string, retryable: boolean, stage: string, inputTool?: string }} */ (new Error(message));
+function runtimeError(code, message, { retryable = false, stage = "runtime", detail = null } = {}) {
+  const error = /** @type {Error & { code: string, retryable: boolean, stage: string, inputTool?: string, detail?: object }} */ (new Error(message));
   error.code = code;
   error.retryable = retryable;
   error.stage = stage;
+  if (detail && typeof detail === "object") error.detail = detail;
   return error;
 }
 
@@ -1121,7 +1123,12 @@ function publicBatch(batch, { includeResults = false } = {}) {
     status: batch.status,
     requests: batch.entries.map((entry) => ({ id: entry.id, input_index: entry.inputIndex, handle: entry.handle, status: entry.status,
       ...(entry.mergedRequestIds?.length > 1 ? { merged_request_ids: entry.mergedRequestIds } : {}) })),
-    ...(includeResults ? { results: batch.entries.map((entry) => ({ input_index: entry.inputIndex, ...publicEntry(entry) })) } : {}),
+    ...(includeResults ? { results: [
+      ...batch.entries.map((entry) => ({ input_index: entry.inputIndex, ...publicEntry(entry) })),
+      // One row per original request: an absorbed brief points at the survivor
+      // instead of duplicating its result (one handle, one status/cancel owner).
+      ...(batch.mergedRequests || []).map((merged) => ({ input_index: merged.inputIndex, id: merged.id, status: "merged", merged_into: merged.mergedInto })),
+    ].sort((left, right) => left.input_index - right.input_index) } : {}),
     ...(includeResults && batch.researchExpansion ? { research_expansion: batch.researchExpansion } : {}),
     ...(batch.repairs?.length > 0 ? { repairs: batch.repairs } : {}),
     ...(!includeResults ? {
@@ -1153,13 +1160,16 @@ export function buildCitationChildPrompt(input = {}) {
 export class SubAgentRuntime {
   constructor({
     readSetting = getSetting,
-    maxActiveChildren = SUB_AGENT_LIMITS.maxActiveChildren,
+    maxActiveChildren = null,
     admissionWaitMs = SUB_AGENT_LIMITS.admissionWaitMs,
     registryTtlMs = DEFAULT_REGISTRY_TTL_MS,
     settledBatchRetentionMs = DEFAULT_SETTLED_BATCH_RETENTION_MS,
   } = {}) {
     this.readSetting = readSetting;
-    this.maxActiveChildren = maxActiveChildren;
+    // An explicit constructor value pins the lane; otherwise the admin
+    // setting is consulted on every admission so operators can resize the
+    // shared lane without restarting the instance.
+    this._maxActiveChildrenOverride = Number.isInteger(maxActiveChildren) && maxActiveChildren > 0 ? maxActiveChildren : null;
     const configuredAdmissionWaitMs = Number(admissionWaitMs);
     this.admissionWaitMs = Number.isFinite(configuredAdmissionWaitMs) && configuredAdmissionWaitMs >= 0
       ? configuredAdmissionWaitMs
@@ -1180,6 +1190,20 @@ export class SubAgentRuntime {
     this.activeChildren = 0;
     // Batches waiting for lane capacity, oldest first, across all parents.
     this.admissionQueue = [];
+  }
+
+  // Shared child lane size: the constructor override (tests, embedded
+  // runtimes) wins; otherwise the account setting, clamped to the catalog
+  // range, with the catalog default when the store is unavailable or unset.
+  get maxActiveChildren() {
+    if (this._maxActiveChildrenOverride != null) return this._maxActiveChildrenOverride;
+    const entry = PLANNER_DISPATCH_SETTINGS.find((candidate) => candidate.key === SETTING_KEYS.PLANNER_RESEARCH_MAX_ACTIVE_CHILDREN);
+    const fallback = Number(entry?.default) || SUB_AGENT_LIMITS.maxActiveChildren;
+    let raw;
+    try { raw = this.readSetting(SETTING_KEYS.PLANNER_RESEARCH_MAX_ACTIVE_CHILDREN); } catch { return fallback; }
+    const parsed = typeof raw === "number" || (typeof raw === "string" && raw.trim() !== "") ? Number(raw) : NaN;
+    if (!Number.isSafeInteger(parsed) || !entry?.numeric) return fallback;
+    return Math.max(entry.numeric.min, Math.min(entry.numeric.max, parsed));
   }
 
   registerParent({ agentCallId, runChild, runResearchChild = null, researchPolicy = null, executeInput = null, authorizedToolSurface = [], projectDir = null }) {
@@ -1638,8 +1662,19 @@ export class SubAgentRuntime {
     const existingBatch = researchRequest
       ? priorBatches.find((batch) => batch.requestDigest === digest)
       : existingBatchId ? this.batches.get(existingBatchId) : null;
-    if (researchRequest && !existingBatch && priorBatches.reduce((sum, batch) => sum + batch.entries.filter(entryCountsTowardResearchLimit).length, 0) + requestCount > (registration.researchPolicy?.maxChildren || 0)) {
-      throw runtimeError("SUB_AGENT_BATCH_LIMIT", "Planner research child limit reached", { stage: "admission" });
+    if (researchRequest && !existingBatch) {
+      const limit = registration.researchPolicy?.maxChildren || 0;
+      const used = priorBatches.reduce((sum, batch) => sum + batch.entries.filter(entryCountsTowardResearchLimit).length, 0);
+      const remaining = Math.max(0, limit - used);
+      if (used + requestCount > limit) {
+        // Admission stays all-or-nothing; the refusal names the headroom so
+        // the planner can resubmit a batch that fits instead of guessing.
+        throw runtimeError(
+          "SUB_AGENT_BATCH_LIMIT",
+          `Planner research child limit reached: ${requestCount} requested, ${remaining} of ${limit} remaining`,
+          { stage: "admission", detail: { limit, used, requested: requestCount, remaining } },
+        );
+      }
     }
     if (existingBatch && existingBatch.requestDigest !== digest) {
       throw runtimeError("SUB_AGENT_BATCH_LIMIT", "Only one sub_agent batch is allowed per parent agent call", { stage: "admission" });
@@ -1860,8 +1895,27 @@ export class SubAgentRuntime {
           inputIndex, profile: raw?.profile, inputs: [], maxInputs: 0, validationError: safeError(error) };
       }
     });
-    normalized = mergeOverlappingResearchBriefs(normalized, (overlap) => recordResearchChildObservation(
-      context, SUB_AGENT_OBSERVATION_TYPES.BRIEF_OVERLAP, "Merged overlapping research briefs", overlap));
+    const unmergedRequests = normalized;
+    normalized = mergeOverlappingResearchBriefs(normalized, (overlap) => {
+      recordResearchChildObservation(context, SUB_AGENT_OBSERVATION_TYPES.BRIEF_OVERLAP, "Merged overlapping research briefs", overlap);
+      // The merged child runs at the strongest requested budget; tell the
+      // planner which briefs were raised so the cost is not a surprise.
+      for (const raised of overlap.budget?.raised || []) {
+        repairs.push({ request_id: raised.request_id, field: "budget", action: overlap.budget.action,
+          reason: overlap.budget.reason, from: raised.from, to: overlap.budget.to, merged_request_ids: overlap.request_ids });
+      }
+    });
+    // A merged brief keeps only the survivor's entry; every absorbed request
+    // still gets its own result row so the planner can match results to its
+    // input_index without noticing merged_request_ids.
+    const survivingRequestIds = new Set(normalized.map((request) => request.id));
+    const mergedRequests = unmergedRequests
+      .filter((request) => !survivingRequestIds.has(request.id))
+      .map((request) => ({
+        inputIndex: request.inputIndex,
+        id: request.id,
+        mergedInto: normalized.find((survivor) => survivor.mergedRequestIds?.includes(request.id))?.id ?? null,
+      }));
     const runnable = normalized.filter((request) => !request.validationError);
     const existingBatch = this.#priorBatch(parentCallId, registration, digest, researchRequest, runnable.length);
     if (existingBatch) return await this.#replayBatch(existingBatch);
@@ -1921,6 +1975,7 @@ export class SubAgentRuntime {
       acknowledged: false,
       requestDigest: digest,
       repairs,
+      mergedRequests,
       parentClosed: false,
       entries: normalized.map((request) => ({
         ...request,

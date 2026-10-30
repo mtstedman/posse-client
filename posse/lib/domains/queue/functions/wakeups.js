@@ -55,9 +55,12 @@ function ensureWakeRow(db) {
   `).run(now());
 }
 
+// Read-only: a missing row reads as generation 0, which is what the first
+// notifyQueueStateChanged seeds and bumps to 1, so waiters comparing against a
+// fresh DB still observe the change. Seeding here would take the WAL writer
+// lock on every lap-start/lap-end/idle read.
 export function getQueueWakeGeneration() {
   const db = getDb();
-  ensureWakeRow(db);
   const row = db.prepare(`SELECT generation FROM scheduler_wakeups WHERE id = 1`).get();
   return Number(row?.generation || 0);
 }

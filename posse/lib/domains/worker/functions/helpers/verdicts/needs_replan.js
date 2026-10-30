@@ -96,11 +96,11 @@ export function handle(job, verdict, ctx) {
               : "The task may be fundamentally blocked or poorly scoped. How should we proceed?"),
           ],
           context: "Replan depth limit hit. Previous approaches keep failing assessment.",
-          review_type: originalNeverExecuted ? "unexecuted_replan_limit" : "replan_limit",
-          question_kind: originalNeverExecuted ? "unexecuted_replan_recovery" : "assessment_review",
+          review_type: originalNeverExecuted ? "unexecuted_replan_recovery" : "pipeline_head_recovery",
+          question_kind: originalNeverExecuted ? "unexecuted_replan_recovery" : "pipeline_head_recovery",
           choices: originalNeverExecuted
             ? WORK_ITEM_QUESTION_CHOICE_IDS.unexecuted_replan_recovery
-            : HUMAN_GATE_ACTIONS.replan_limit,
+            : HUMAN_GATE_ACTIONS.pipeline_head_recovery,
         }),
       });
       spawnedJobs.push(escJob);

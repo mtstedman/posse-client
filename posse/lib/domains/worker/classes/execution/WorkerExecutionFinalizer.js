@@ -30,7 +30,12 @@ export class WorkerExecutionFinalizer {
     const worker = this.worker;
     try {
       const cleanupWtPath = wtPath || job?._worktreePath || null;
-      if (cleanupWtPath) clearActiveWorktreeSentinelFromModule(cleanupWtPath, { jobId: job.id ?? null });
+      if (cleanupWtPath) {
+        clearActiveWorktreeSentinelFromModule(cleanupWtPath, {
+          jobId: job.id ?? null,
+          sentinelPath: job?._activeWorktreeSentinel || null,
+        });
+      }
     } catch (err) {
       worker._logFinalizerFailure(job, "worktree_sentinel", err);
     }
@@ -42,10 +47,20 @@ export class WorkerExecutionFinalizer {
       worker._activeWorktrees.delete(job.id);
     }
 
+    // One row read serves every status check below: nothing in this
+    // finalizer changes the job's status (tool_mix merges result fields only).
+    let freshJob = null;
+    if (job.id != null) {
+      try {
+        freshJob = getJob(job.id);
+      } catch (err) {
+        worker._logFinalizerFailure(job, "job_row", err);
+      }
+    }
+
     // Clean up sandbox on success; keep on failure for debugging.
     if (job._jobDir) {
       try {
-        const freshJob = getJob(job.id);
         if (freshJob && freshJob.status === "succeeded") {
           await fs.promises.rm(job._jobDir, { recursive: true, force: true });
         }
@@ -57,7 +72,6 @@ export class WorkerExecutionFinalizer {
 
     if (job.id != null) {
       try {
-        const freshJob = getJob(job.id);
         // Succeeded jobs only: "useful" is a permanent positive ranking
         // boost, and the feedback store has no outcome column — emitting for
         // failed jobs bakes their context in as equally trustworthy signal.
@@ -75,7 +89,6 @@ export class WorkerExecutionFinalizer {
         worker._logFinalizerFailure(job, "atlas_feedback", err);
       }
       try {
-        const freshJob = getJob(job.id);
         // Persist a compact per-job tool-usage profile before the observation
         // tail prune reclaims this job's rows (10-min grace). Runs for
         // parked and terminal jobs — this is measurement, not the
@@ -89,7 +102,6 @@ export class WorkerExecutionFinalizer {
         worker._logFinalizerFailure(job, "tool_mix", err);
       }
       try {
-        const freshJob = getJob(job.id);
         // Unacked operator guidance on a terminal job is undeliverable —
         // expire it loudly so the operator sees the nudge never landed,
         // instead of a forever-pending row no surface renders.

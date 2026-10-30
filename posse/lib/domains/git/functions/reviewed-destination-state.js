@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { gitExecAsync } from "./utils.js";
 import { exactReviewedPath } from "./reviewed-file-objects.js";
 
-function fingerprint(paths) {
+// Exported for other "cache invalidator, never evidence" callers (unused-planned-locks).
+export function fingerprint(paths) {
   const states = paths.map((file) => {
     try {
       const stat = fs.lstatSync(file, { bigint: true });

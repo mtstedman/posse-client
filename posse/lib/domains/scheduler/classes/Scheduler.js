@@ -40,7 +40,7 @@ import { WAITING_LANE_JOB_TYPE } from "../../../catalog/waiting-lane.js";
 import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atlas.js";
 import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
 import { ENVIRONMENT_SETUP_RUNTIME_CREDIT_CAP_MS } from "../../../catalog/tools/environment-setup.js";
-import { DEFAULT_LEASE_SEC, DEFAULT_CONCURRENCY, DEFAULT_POLL_MS, DEFAULT_REPAIR_POLL_MS, LOCK_RENEW_SEC, MAX_RUNNABLE_SCAN_PER_TICK, PROGRESS_TIMEOUT_SEC, maxJobRuntimeSecFor, readActiveWorktreeCap, readAtlasDriftCheckIntervalMs, readHeadlessHumanTimeoutSec, readHumanGateResnoozeSec, readImplementationReservedSlots, readPositiveIntSetting, readRuntimeWriteCeilingMultiplier, readRuntimeWriteGraceSec } from "../functions/config.js";
+import { DEFAULT_LEASE_SEC, DEFAULT_CONCURRENCY, DEFAULT_POLL_MS, DEFAULT_REPAIR_POLL_MS, LOCK_RENEW_SEC, MAX_RUNNABLE_SCAN_PER_TICK, PROGRESS_TIMEOUT_SEC, QUEUE_LOCK_INDEX_UNCONDITIONAL_REFRESH_MS, maxJobRuntimeSecFor, readActiveWorktreeCap, readAtlasDriftCheckIntervalMs, readHeadlessHumanTimeoutSec, readHumanGateResnoozeSec, readImplementationReservedSlots, readPositiveIntSetting, readRuntimeWriteCeilingMultiplier, readRuntimeWriteGraceSec } from "../functions/config.js";
 import { findFileConflict } from "../functions/file-scope.js";
 import { RUNTIME_NO_ESCALATION_BACKSTOP_MULTIPLIER, runtimeKillCanEscalate, runtimeWriteExtensionActive } from "../functions/runtime-escalation.js";
 import { jobWriteActivity } from "./JobWriteActivity.js";
@@ -167,6 +167,7 @@ export class Scheduler {
     this._stopMarked = false;
     this._sleepResolves = new Set(); // for interrupting any pending scheduler sleeps on shutdown
     this._wakeGeneration = 0; // retain wakes that arrive while a scheduling lap is still running
+    this._lastQueueLockIndexRefreshMs = 0; // last repair-tick refreshFromDb; 0 forces one on the first tick
     this._activeRunWorkers = null;
     this._runLoopKeepAliveTimer = null;
     this._runLoopKeepAliveIntervalMs = Math.max(1_000, Number(opts.runLoopKeepAliveIntervalMs) || RUN_LOOP_KEEPALIVE_INTERVAL_MS);
@@ -699,7 +700,12 @@ export class Scheduler {
   async _sleepUntilQueueWakeOrRepair(generation, wakeGeneration = this._wakeGeneration) {
     // Releasing an in-process worker slot may not mutate the queue. If it
     // happened during this lap, rescan instead of losing the wake before sleep.
-    if (wakeGeneration !== this._wakeGeneration) return { reason: "local_wake", generation };
+    // Yield a macrotask first: a caller that wakes sleeps on every lap would
+    // otherwise re-enter the loop on microtasks alone and starve timers.
+    if (wakeGeneration !== this._wakeGeneration) {
+      await yieldNow();
+      return { reason: "local_wake", generation };
+    }
     const sleepMs = this._idleSleepMs();
     if (sleepMs <= 0) return { reason: "ready_at" };
     const controller = new AbortController();
@@ -1052,10 +1058,14 @@ export class Scheduler {
    * orchestrator after worktree cleanup so requeued jobs land on validated
    * worktree state.
    *
-   * @param {{ onBootEvent?: ((evt: any) => void) | null }} opts
+   * @param {{
+   *   onBootEvent?: ((evt: any) => void) | null,
+   *   signal?: AbortSignal | null,
+   *   runBootMaintenance?: typeof runSchedulerBootMaintenanceInWorker,
+   * }} opts
    * @returns {Promise<{orphaned: number, reconciledAttempts: number, reconciledAgentCalls: number, staleLocks: Record<string,number>, awaitingAssessmentCount: number} | null>}
    */
-  async recoverOrphans({ onBootEvent = null } = {}) {
+  async recoverOrphans({ onBootEvent = null, signal = null, runBootMaintenance = runSchedulerBootMaintenanceInWorker } = {}) {
     const emitBootEvent = (label, patch) => {
       if (typeof onBootEvent !== "function") return;
       try { onBootEvent({ label, ...patch }); } catch { /* observational */ }
@@ -1072,12 +1082,28 @@ export class Scheduler {
     // This SQLite maintenance is intentionally run in a worker thread. The DB
     // library is synchronous, so doing this on the parent event loop can freeze
     // boot indicators, signal handling, and scheduler-lock renewal.
-    const bootMaintenance = await runSchedulerBootMaintenanceInWorker({
-      ownerId: this.ownerId,
-      lockName: this.schedulerLock?.lockName || "main",
-    });
-    const orphaned = Number(bootMaintenance?.orphaned || 0);
-    await reconcileReviewedHandoffsOnBoot(this.projectDir);
+    let bootMaintenance;
+    let orphaned = 0;
+    try {
+      bootMaintenance = await runBootMaintenance({
+        ownerId: this.ownerId,
+        lockName: this.schedulerLock?.lockName || "main",
+        signal,
+      });
+      orphaned = Number(bootMaintenance?.orphaned || 0);
+      await reconcileReviewedHandoffsOnBoot(this.projectDir);
+    } catch (err) {
+      // Terminal panel status for the failure path (a worker timeout or boot
+      // abort used to leave this row at "running"). The caller still owns
+      // the failure: boot-coordination logs and rethrows it.
+      emitBootEvent("orphan recovery", {
+        section: "scheduler",
+        status: "failed",
+        detail: String(err?.message || err).split(/\r?\n/)[0] || "orphan recovery failed",
+        showDetail: true,
+      });
+      throw err;
+    }
     if (orphaned > 0) {
       this._log(`Boot: recovered ${orphaned} orphaned job(s) from previous run`);
     }
@@ -1469,7 +1495,13 @@ export class Scheduler {
         // where a scheduler could otherwise fetch/mutate with an unscoped
         // cached envelope before its first session heartbeat.
         const sessionPoll = await this._sessionMonitor.poll();
-        if (!this._lockController.canDispatch()) break;
+        if (!this._lockController.canDispatch()) {
+          // A transient SQLITE_BUSY/LOCKED on the lock read is not a loss:
+          // stopForLoss clears _running for a real loss, so only that breaks.
+          if (!this._running) break;
+          await this._interruptibleSleep(this.pollMs, { requireRunning: true });
+          continue;
+        }
         // Fetch before candidate selection. When due, every mutating job in
         // this lap therefore sees a trunk no older than the configured
         // cadence. Transport failures are explicitly fail-open inside the
@@ -1484,7 +1516,11 @@ export class Scheduler {
           idle: activeWorkers.size === 0 && idleCount > 0,
           ...(trunkHints ? { hints: trunkHints } : {}),
         });
-        if (!this._lockController.canDispatch()) break;
+        if (!this._lockController.canDispatch()) {
+          if (!this._running) break;
+          await this._interruptibleSleep(this.pollMs, { requireRunning: true });
+          continue;
+        }
         if (trunkPoll?.advanced && onTeamSubmissionChange) {
           this._invokeCallback("onTeamSubmissionChange", onTeamSubmissionChange, { workItemIds: [] });
         }
@@ -1503,7 +1539,11 @@ export class Scheduler {
           this._invokeCallback("onSessionEvent", onSessionEvent, event);
         }
         if (!this._sessionRoutingUnavailable && !pairingDrainRequested) await this._sessionJobRouter.poll();
-        if (!this._lockController.canDispatch()) break;
+        if (!this._lockController.canDispatch()) {
+          if (!this._running) break;
+          await this._interruptibleSleep(this.pollMs, { requireRunning: true });
+          continue;
+        }
 
         // Honor a bridge-issued run.stop. Owner-gated so a request written
         // for another scheduler cannot stop this one; consumed either way so
@@ -1897,7 +1937,10 @@ export class Scheduler {
             blockedByLock: 0,
             blockedLockDetails: [{ message: "Pairing is closing; active jobs are draining" }],
           });
-          await this._interruptibleSleep(this.pollMs, { requireRunning: true });
+          // Worker completion wakes sleeps (.finally -> _wakeSleeps), so hold
+          // until then or the repair poll instead of re-running housekeeping
+          // every pollMs. The drain timeout is checked at repair granularity.
+          await this._sleepUntilQueueWakeOrRepair(getQueueWakeGeneration(), lapStartWakeGeneration);
           continue;
         }
         if (
@@ -1922,7 +1965,7 @@ export class Scheduler {
             blockedByLock: 0,
             blockedLockDetails: [{ message: "Background accelerator work is finishing" }],
           });
-          await this._interruptibleSleep(this.pollMs, { requireRunning: true });
+          await this._sleepUntilQueueWakeOrRepair(getQueueWakeGeneration(), lapStartWakeGeneration);
           continue;
         }
 
@@ -1978,7 +2021,9 @@ export class Scheduler {
             blockedByLock: 0,
             blockedLockDetails: [{ message: "ATLAS drift reindex is running" }],
           });
-          await this._interruptibleSleep(this.pollMs, { requireRunning: true });
+          // The restage's onStatus callback wakes sleeps when it settles; the
+          // hold ceiling is otherwise re-checked at repair-poll granularity.
+          await this._sleepUntilQueueWakeOrRepair(getQueueWakeGeneration(), lapStartWakeGeneration);
           continue;
         }
 
@@ -2639,9 +2684,17 @@ export class Scheduler {
               isWorkerIdle: () => activeWorkers.size === 0,
               onStatus: ({ ok, error, repoId, staged }) => {
                 statusReported = true;
+                // End the dispatch hold promptly: the hold branch sleeps until
+                // a wake or the repair poll. Only a background settle (the
+                // in-flight tracking was armed after the call returned) holds
+                // anything; a synchronous report inside this lap must not bump
+                // the wake generation, or the lap-end sleep would return at
+                // once every lap and starve the event loop.
+                const wasHolding = atlasDriftReindexInFlight;
                 atlasDriftReindexInFlight = false;
                 atlasDriftReindexStartedAt = 0;
                 atlasDriftReindexChild = null;
+                if (wasHolding) this._wakeSleeps();
                 if (!ok) {
                   log.warn("atlas", "Drift reindex failed", { repoId: repoId || null, error: error || null });
                 } else if (staged?.staged === true) {
@@ -2683,10 +2736,17 @@ export class Scheduler {
         const sleepResult = await this._sleepUntilQueueWakeOrRepair(lapEndQueueGeneration, lapStartWakeGeneration);
         // Repair-timer ticks are our defense-in-depth path: if a wake was
         // dropped (listener exception, deferred-emit flush skipped, etc.)
-        // the index can drift. Reconciling against the DB on every idle
-        // timeout is cheap and bounds drift to one repair interval.
+        // the index can drift. A generation that moved during the sleep
+        // always reconciles (deferred emits flushed by an unrelated commit
+        // rely on this); otherwise rebuild at most once per
+        // QUEUE_LOCK_INDEX_UNCONDITIONAL_REFRESH_MS instead of every tick.
         if (sleepResult?.reason === "repair_timer") {
-          queueLockIndex.refreshFromDb();
+          const nowMs = Date.now();
+          const generationMoved = sleepResult.generation == null || sleepResult.generation !== lapEndQueueGeneration;
+          if (generationMoved || nowMs - this._lastQueueLockIndexRefreshMs >= QUEUE_LOCK_INDEX_UNCONDITIONAL_REFRESH_MS) {
+            queueLockIndex.refreshFromDb();
+            this._lastQueueLockIndexRefreshMs = nowMs;
+          }
         }
         } catch (loopErr) {
           const msg = loopErr?.stack || loopErr?.message || String(loopErr);

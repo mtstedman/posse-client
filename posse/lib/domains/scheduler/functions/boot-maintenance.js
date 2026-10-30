@@ -5,10 +5,13 @@ import { getRuntimeDbPath } from "../../runtime/functions/paths.js";
 const WORKER_URL = new URL("./boot-maintenance-worker.js", import.meta.url);
 const THREAD_MANAGER = new ThreadManager();
 
-export function runSchedulerBootMaintenanceInWorker({ ownerId = null, lockName = "main" } = {}) {
+export function runSchedulerBootMaintenanceInWorker({ ownerId = null, lockName = "main", signal = null } = {}) {
   return THREAD_MANAGER.run(WORKER_URL, {
     label: "Scheduler boot DB maintenance",
     timeoutMs: 120_000,
+    // Boot abort (Ctrl+C during boot) terminates the worker instead of
+    // letting it run to its own timeout.
+    signal,
     workerData: {
       ...nativeWorkerSettings(process.cwd()),
       dbPath: getRuntimeDbPath(),

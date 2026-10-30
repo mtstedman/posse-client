@@ -280,8 +280,15 @@ export class HeldQueueLockIndex {
     }
   }
 
-  applyWake(payload = {}, { readJob = null } = {}) {
+  applyWake(payload = {}, { readJob: readJobOnce = null } = {}) {
     const reason = String(payload.reason || "");
+    // The reservation probe and reconcileJob read the same job; read it once.
+    let jobRead = false;
+    let jobRow;
+    const readJob = typeof readJobOnce === "function" ? (jobId) => {
+      if (!jobRead) { jobRow = readJobOnce(jobId); jobRead = true; }
+      return jobRow;
+    } : readJobOnce;
     if (reason.startsWith("reviewed_handoff_") || (payload.jobId && typeof readJob === "function" && hasReviewedReservation(readJob(payload.jobId)))) {
       this.refreshFromDb();
       return;

@@ -4,7 +4,7 @@ export const PINNED_APPROVAL_GATES = Object.freeze(["environment_setup", "push_o
 // Thrown by the unattended human-input handler; the human-input job turns it
 // into a closed gate and a failed parked original instead of reopening the gate.
 export const APPROVAL_POLICY_FAIL_CLOSED_CODE = "APPROVAL_POLICY_FAIL_CLOSED";
-export const approvalPolicyKey = (gate) => `approval_policy_${gate}`;
+export const approvalPolicyKey = (gate) => `approval_policy_${humanGateNameForPayload({ gate_kind: gate })}`;
 export const APPROVAL_POLICY_SETTINGS = Object.freeze(Object.entries(HUMAN_GATE_ACTIONS).filter(([gate]) => gate !== "plan_approval").map(([gate, actions]) => ({
   key: approvalPolicyKey(gate), default: "ask",
   options: PINNED_APPROVAL_GATES.includes(gate) ? ["ask"]
@@ -25,7 +25,7 @@ export function approvalPolicyForPayload(payload, { getSetting = () => null, sco
   // `--non-interactive`, so it only fills the default and never turns a saved
   // `auto:reject` or `fail_closed` into an approval.
   const savedPolicy = policy !== "ask";
-  if (scopeMode === "auto" && ["scope_expansion_request", "scope_expansion_required"].includes(gate)) {
+  if (scopeMode === "auto" && gate === "file_scope_approval") {
     policy = "auto:approve"; source = SCOPE_MODE_APPROVAL_SOURCE;
   } else if ((autoApprovePlan && gate === "plan_approval")
     || (autoApprove && !savedPolicy && HUMAN_GATE_ACTIONS[gate]?.includes("approve"))) {

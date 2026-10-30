@@ -1653,15 +1653,7 @@ export class ReviewSession {
           success_criteria: suggestionPayload.success_criteria,
         }, null, 2), "utf-8");
 
-        for (const fp of suggestionPayload.files_to_modify) {
-          try {
-            const src = path.resolve(PROJECT_DIR, fp);
-            if (!fs.existsSync(src)) continue;
-            const dest = path.join(jobCtxDir, fp);
-            fs.mkdirSync(path.dirname(dest), { recursive: true });
-            fs.copyFileSync(src, dest);
-          } catch { /* best effort */ }
-        }
+        // No per-file copies: nothing reads them (parity with plan-compiler).
 
         updateJobPayload(devJob.id, JSON.stringify({
           ...suggestionPayload,

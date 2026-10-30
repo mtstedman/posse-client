@@ -35,21 +35,57 @@ function resolveWorktreeRoot(wtPath) {
   }
 }
 
-function activeWorktreeSentinelPath(wtPath, { ensureDir = false } = {}) {
-  const root = resolveWorktreeRoot(wtPath);
-  if (!root) return null;
-  // Defense one: make a newly-created runtime sentinel invisible to every
-  // worktree's broad `git add`. This is repository-local and never changes a
-  // project-owned .gitignore.
-  if (ensureDir) ensurePosseGitInfoExclude(root);
+// Per root: the worktree's index path (resolved once; a Git dir never moves
+// during a session) plus the last "is .posse/active-job tracked" decision
+// keyed on that index file's identity. The decision alone is not safe to
+// cache — an agent can `git add .posse/active-job` mid-job — but any such
+// change rewrites the index, so an unchanged (ino, mtime, size) signature
+// means the cached answer still holds and a resolution costs one stat
+// instead of a synchronous `git ls-files` spawn. Plain temporary directories
+// (no repository) are never cached: the next touch may be a real worktree.
+const _sentinelTrackedCache = new Map();
+const _sentinelTrackedStats = { lsFilesCalls: 0 };
 
-  let sentinelPath = path.join(root, ".posse", "active-job");
+function sentinelIndexSignature(indexPath) {
+  try {
+    const st = fs.statSync(indexPath);
+    return `${st.ino}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    // No index yet (fresh repository) — nothing can be tracked, and a later
+    // `git add` creates the file, which changes this signature.
+    return "absent";
+  }
+}
+
+function sentinelTrackedIn(root, { isRepository = true } = {}) {
+  const cached = _sentinelTrackedCache.get(root);
+  if (cached && sentinelIndexSignature(cached.indexPath) === cached.signature) {
+    return { tracked: cached.tracked, trackedPath: cached.trackedPath };
+  }
+  // Snapshot the index identity before asking Git so a write that lands
+  // during the check invalidates this entry rather than being hidden by it.
+  // The path is re-resolved on every miss: a worktree re-added under a new
+  // gitdir would otherwise leave a stale path that stats "absent" forever.
+  let indexPath = null;
+  let signature = null;
+  if (isRepository) {
+    try {
+      const raw = gitExec(["rev-parse", "--git-path", "index"], root).trim();
+      indexPath = path.isAbsolute(raw) ? raw : path.resolve(root, raw);
+    } catch {
+      indexPath = null;
+    }
+  }
+  if (indexPath) signature = sentinelIndexSignature(indexPath);
+
   let tracked = false;
+  let notARepository = false;
   try {
     // Legacy repositories can already have the sentinel tracked. Never mutate
     // that project file: doing so makes every scoped job dirty before it can
     // commit. Keep the live sentinel in this worktree's private Git directory
     // until the repository removes the historical path from its index.
+    _sentinelTrackedStats.lsFilesCalls++;
     gitExec(["ls-files", "--error-unmatch", "--", ".posse/active-job"], root);
     tracked = true;
   } catch (error) {
@@ -58,15 +94,40 @@ function activeWorktreeSentinelPath(wtPath, { ensureDir = false } = {}) {
     // write through a tracked project file. Lifecycle unit helpers also use
     // this sentinel in plain temporary directories; those have no index to
     // contaminate, so preserve the filesystem-only behavior there.
-    const notARepository = isGitCommandFailure(error)
+    notARepository = isGitCommandFailure(error)
       && Number(error?.status) === 128
       && /not a git repository/i.test(`${error?.stderr || ""}\n${error?.message || ""}`);
     if (!notARepository && (!isGitCommandFailure(error) || Number(error?.status) !== 1)) throw error;
   }
+  let trackedPath = null;
   if (tracked) {
     const gitPath = gitExec(["rev-parse", "--git-path", "posse/active-job"], root).trim();
-    sentinelPath = path.isAbsolute(gitPath) ? gitPath : path.resolve(root, gitPath);
+    trackedPath = path.isAbsolute(gitPath) ? gitPath : path.resolve(root, gitPath);
   }
+  if (indexPath && !notARepository) {
+    _sentinelTrackedCache.set(root, { indexPath, signature, tracked, trackedPath });
+  }
+  return { tracked, trackedPath };
+}
+
+export function __testSentinelTrackedStats() {
+  return { ..._sentinelTrackedStats };
+}
+
+function activeWorktreeSentinelPath(wtPath, { ensureDir = false } = {}) {
+  const root = resolveWorktreeRoot(wtPath);
+  if (!root) return null;
+  // Defense one: make a newly-created runtime sentinel invisible to every
+  // worktree's broad `git add`. This is repository-local and never changes a
+  // project-owned .gitignore.
+  if (ensureDir) ensurePosseGitInfoExclude(root);
+
+  // Only successful `rev-parse` roots are cached, so a hit means this is a
+  // real repository and its index is worth locating.
+  const { tracked, trackedPath } = sentinelTrackedIn(root, {
+    isRepository: _worktreeRootCache.get(path.resolve(wtPath)) === root,
+  });
+  const sentinelPath = tracked ? trackedPath : path.join(root, ".posse", "active-job");
   if (ensureDir) fs.mkdirSync(path.dirname(sentinelPath), { recursive: true });
   return sentinelPath;
 }
@@ -87,12 +148,14 @@ export function writeActiveWorktreeSentinel(wtPath, payload = {}) {
   return sentinelPath;
 }
 
-export function readActiveWorktreeSentinel(wtPath) {
+export function readActiveWorktreeSentinel(wtPath, { sentinelPath: knownPath = null } = {}) {
   // Terminal cleanup commonly runs after a worktree has already disappeared.
   // There cannot be a live sentinel in that case, and asking native Git to
   // inspect the missing directory turns the harmless absence into ENOENT.
   if (!wtPath || !fs.existsSync(wtPath)) return null;
-  const sentinelPath = activeWorktreeSentinelPath(wtPath, { ensureDir: false });
+  // A caller that already holds the path this job wrote (or read) skips the
+  // root/tracked resolution entirely.
+  const sentinelPath = knownPath || activeWorktreeSentinelPath(wtPath, { ensureDir: false });
   if (!sentinelPath || !fs.existsSync(sentinelPath)) return null;
   try {
     const raw = fs.readFileSync(sentinelPath, "utf-8");
@@ -121,8 +184,8 @@ export function isSentinelProcessAlive(payload = {}) {
   return unknown ? null : false;
 }
 
-export function clearActiveWorktreeSentinel(wtPath, { jobId = null } = {}) {
-  const current = readActiveWorktreeSentinel(wtPath);
+export function clearActiveWorktreeSentinel(wtPath, { jobId = null, sentinelPath = null } = {}) {
+  const current = readActiveWorktreeSentinel(wtPath, { sentinelPath });
   if (!current?.sentinelPath) return false;
   const entries = sentinelEntries(current.payload);
   if (jobId != null) {

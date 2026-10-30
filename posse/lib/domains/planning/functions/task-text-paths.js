@@ -67,3 +67,29 @@ export function rewriteTaskTextPaths(text, replacements = []) {
   const pattern = new RegExp(`(?<![\\w./-])(?:${alternatives.join("|")})(?![\\w-]|[./][\\w-])`, "g");
   return text.replace(pattern, (match) => map.get(match) ?? match);
 }
+
+// Only file references move. Shared directory names and a consumer's own
+// output destinations must not be rebound to one of several producers.
+export function rewriteArtifactReferences(task, replacements) {
+  const rewritten = { ...task };
+  for (const field of ["title", "task_spec", "instructions", "success_criteria", "input_roots", "files_to_modify"]) {
+    if (Array.isArray(task[field])) rewritten[field] = task[field].map((value) => rewriteTaskTextPaths(value, replacements));
+    else if (typeof task[field] === "string") rewritten[field] = rewriteTaskTextPaths(task[field], replacements);
+  }
+  if (Array.isArray(task.mappings)) {
+    rewritten.mappings = task.mappings.map((mapping) => ({ ...mapping, pattern: rewriteTaskTextPaths(mapping.pattern, replacements) }));
+  }
+  return rewritten;
+}
+
+export function rewriteDownstreamArtifactReferences(tasks, sourceIndex, replacements) {
+  const dependsOnSource = (index, seen = new Set()) => {
+    if (index === sourceIndex) return true;
+    if (seen.has(index)) return false;
+    seen.add(index);
+    return (tasks[index]?.depends_on_index || []).some((dep) => Number.isInteger(dep) && dependsOnSource(dep, seen));
+  };
+  for (let index = sourceIndex + 1; index < tasks.length; index += 1) {
+    if (dependsOnSource(index)) tasks[index] = rewriteArtifactReferences(tasks[index], replacements);
+  }
+}

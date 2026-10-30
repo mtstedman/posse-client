@@ -732,7 +732,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     if (!suppressOperatorRecovery && !recovery.capReached && !recovery.spawned && dependents.length === 0 && !isRecoveryJob && (job.job_type === "research" || isOneshotLeaf || isMutatingLeaf)) {
       if (recoveryIsUnattended(worker)) {
         emitUnattendedRecoverySkipped(worker, job, isMutatingLeaf ? (job.job_type === "fix" ? "Fix" : "Dev") : (isOneshotLeaf ? "One-shot" : "Research"), {
-          recovery_kind: isMutatingLeaf ? "dead_letter_recovery" : (isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery"),
+          recovery_kind: isMutatingLeaf ? "dead_letter_recovery" : ("dead_letter_recovery"),
           provider_hint: providerHint,
         });
       } else if (isMutatingLeaf) {
@@ -777,7 +777,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
           model_tier: "cheap",
           payload_json: JSON.stringify({
             original_job_id: job.id,
-            review_type: isOneshotLeaf ? "oneshot_dead_letter_recovery" : "research_dead_letter_recovery",
+            review_type: "dead_letter_recovery",
             question_kind: "dead_letter_recovery",
             choices: deadLetterRecoveryChoices(job),
             failure_repeat_key: errRepeatKey,
@@ -834,7 +834,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
               ],
               context: `This job repeatedly stalled and exhausted the stall retry budget. It has no downstream dependents, so explicit operator guidance is needed before retrying.`,
               review_type: "stall_exhausted_recovery",
-              question_kind: "dead_letter_recovery",
+              question_kind: "stall_exhausted_recovery",
               choices: deadLetterRecoveryChoices(job),
               failure_repeat_key: errRepeatKey,
             }),

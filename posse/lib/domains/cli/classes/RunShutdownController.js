@@ -2,6 +2,11 @@ import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager
 import { closeRuntimeStateForExit } from "../functions/run-session.js";
 
 export class RunShutdownController {
+  // Upper bound on a forced exit's cleanup awaits. A merge worker inside a
+  // long synchronous git call survives terminate(), so without this the
+  // second Ctrl+C would hang until SIGKILL.
+  static FORCED_EXIT_HARD_MS = 4000;
+
   constructor({
     getDisplay = () => null,
     worker,
@@ -19,9 +24,13 @@ export class RunShutdownController {
     finalizeRuntimeResources = null,
     exitProcess = process.exit,
     processRef = process,
+    threadManager = ThreadManager,
+    forceExitHardMs = RunShutdownController.FORCED_EXIT_HARD_MS,
   } = {}) {
     this.getDisplay = getDisplay;
     this.worker = worker;
+    this.threadManager = threadManager;
+    this.forceExitHardMs = forceExitHardMs;
     this.scheduler = scheduler;
     this.scheduleSchedulerStop = scheduleSchedulerStop;
     this.stopDisplaySnapshotCaches = stopDisplaySnapshotCaches;
@@ -79,13 +88,37 @@ export class RunShutdownController {
   }
 
   async forceExit(label) {
-    if (this.forceExitIssued) return;
+    if (this.forceExitIssued) {
+      // A third signal means the forced exit is still waiting on cleanup
+      // (typically a worker wedged in a synchronous git call). Exit now.
+      this.process.exitCode = 1;
+      try { this.closeRuntimeState?.({ forced: true, reason: label }); } catch { /* best effort */ }
+      this.exitProcess?.(1);
+      return;
+    }
     this.forceExitIssued = true;
     if (this.shutdownForceExitTimer) {
       clearTimeout(this.shutdownForceExitTimer);
       this.shutdownForceExitTimer = null;
     }
     this.uninstall();
+    // The exit code must be set before the runtime state is closed so the
+    // final shutdown record reflects this forced, non-zero exit.
+    this.process.exitCode = 1;
+    let exited = false;
+    const closeAndExit = () => {
+      if (exited) return;
+      exited = true;
+      try { this.closeRuntimeState?.({ forced: true, reason: label }); } catch { /* best effort */ }
+      this.exitProcess?.(1);
+    };
+    // Hard-exit timer: the cleanup awaits below have no bound of their own
+    // (worker.terminate() cannot pre-empt a synchronous spawnSync git call).
+    let hardExitTimer = null;
+    const hardExitFired = new Promise((resolve) => {
+      hardExitTimer = setTimeout(resolve, this.forceExitHardMs);
+      hardExitTimer.unref?.();
+    });
     const snapshotsStopped = Promise.resolve().then(() => this.stopDisplaySnapshotCaches?.()).catch(() => {});
     try { this.getDisplay()?.stop?.(); } catch { /* best effort */ }
     try { this.scheduler?.requestStop?.(); } catch { /* best effort */ }
@@ -93,13 +126,14 @@ export class RunShutdownController {
     // owner's in-flight jobs and the scheduler lock back synchronously.
     try { this.scheduler?.releaseForForcedExit?.({ reason: label }); } catch { /* boot recovery remains */ }
     const atlasStopped = Promise.resolve().then(() => this.cleanupAtlasForSession?.({ label })).catch(() => {});
-    // The exit code must be set before the runtime state is closed so the
-    // final shutdown record reflects this forced, non-zero exit.
-    this.process.exitCode = 1;
-    await Promise.all([snapshotsStopped, atlasStopped, ThreadManager.drainAll({ timeoutMs: 0 })]);
-    await ThreadManager.drainAll({ timeoutMs: 0 });
-    try { this.closeRuntimeState?.({ forced: true, reason: label }); } catch { /* best effort */ }
-    this.exitProcess?.(1);
+    const threadManager = this.threadManager;
+    const drained = Promise.all([snapshotsStopped, atlasStopped, threadManager.drainAll({ timeoutMs: 0 })])
+      // Workers created during the first drain are included on the next pass.
+      .then(() => threadManager.drainAll({ timeoutMs: 0 }))
+      .catch(() => {});
+    await Promise.race([drained, hardExitFired]);
+    if (hardExitTimer) clearTimeout(hardExitTimer);
+    closeAndExit();
   }
 
   emptySweepSummary() {

@@ -2432,19 +2432,45 @@ export class RunSession {
   let bootCleanupPromise = null;
   const cleanupDuringBoot = async (signal = "SIGINT") => {
     bootSignalCount++;
+    if (bootSignalCount > 2) {
+      // Third signal: the forced exit below is still waiting on cleanup
+      // (typically a worker wedged in a synchronous git call). Exit now.
+      process.exitCode = 1;
+      try { closeRuntimeStateForExit({ forced: true, reason: "Forced shutdown" }); } catch { /* best-effort */ }
+      exitProcess?.(1);
+      return;
+    }
     if (bootSignalCount >= 2) {
       try { scheduler.requestStop?.(); } catch { /* best-effort */ }
       try { scheduler.releaseForForcedExit?.({ reason: "Forced shutdown" }); } catch { /* boot recovery remains */ }
-      try {
-        const cleanup = cleanupAtlasForSession({ label: "Forced shutdown" });
-        if (cleanup && typeof cleanup.then === "function") await Promise.resolve(cleanup).catch(() => {});
-      } catch { /* forced shutdown continues */ }
       // Exit code first so the final shutdown record reflects the forced exit.
       process.exitCode = 1;
-      await stopDisplaySnapshotCaches();
-      await ThreadManager.drainAll({ timeoutMs: 0 });
-      try { closeRuntimeStateForExit({ forced: true, reason: "Forced shutdown" }); } catch { /* best-effort */ }
-      exitProcess?.(1);
+      let exited = false;
+      const closeAndExit = () => {
+        if (exited) return;
+        exited = true;
+        try { closeRuntimeStateForExit({ forced: true, reason: "Forced shutdown" }); } catch { /* best-effort */ }
+        exitProcess?.(1);
+      };
+      // Hard-exit timer (twin of RunShutdownController.forceExit): the awaits
+      // below have no bound of their own, and worker.terminate() cannot
+      // pre-empt a worker inside a synchronous git call.
+      let hardExitTimer = null;
+      const hardExitFired = new Promise((resolve) => {
+        hardExitTimer = setTimeout(resolve, RunShutdownController.FORCED_EXIT_HARD_MS);
+        hardExitTimer.unref?.();
+      });
+      const cleaned = (async () => {
+        try {
+          const cleanup = cleanupAtlasForSession({ label: "Forced shutdown" });
+          if (cleanup && typeof cleanup.then === "function") await Promise.resolve(cleanup).catch(() => {});
+        } catch { /* forced shutdown continues */ }
+        try { await stopDisplaySnapshotCaches(); } catch { /* best-effort */ }
+        try { await ThreadManager.drainAll({ timeoutMs: 0 }); } catch { /* best-effort */ }
+      })();
+      await Promise.race([cleaned, hardExitFired]);
+      if (hardExitTimer) clearTimeout(hardExitTimer);
+      closeAndExit();
       return;
     }
 
@@ -2507,6 +2533,9 @@ export class RunSession {
       onBootAbort: (reason) => {
         if (!bootAbortController.signal.aborted) bootAbortController.abort(reason);
       },
+      // Lets a boot interrupt terminate the DB maintenance worker instead of
+      // waiting out its own 120 s timeout.
+      signal: bootAbortController.signal,
     });
   } finally {
     if (!booted) {

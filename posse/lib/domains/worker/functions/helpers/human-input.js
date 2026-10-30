@@ -1,3 +1,4 @@
+import { BLOCKED_RECOVERY_GATE_KINDS } from "../../../../catalog/human-input.js";
 import { APPROVAL_POLICY_FAIL_CLOSED_CODE, approvalPolicyForPayload } from "../../../../catalog/approval-policies.js";
 import { getSetting } from "../../../settings/functions/repository-settings.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../../catalog/event.js";
@@ -30,17 +31,12 @@ const HARNESS_REVIEW_ANSWERS = Object.freeze({
   partial_work_recovery: "commit",
   blocked_recovery: "fail",
   dead_letter_recovery: "skip",
-  research_dead_letter_recovery: "skip",
-  oneshot_dead_letter_recovery: "skip",
   stall_exhausted_recovery: "skip",
-  assessment: "fail",
-  needs_review: "fail",
-  assessment_parse_error: "fail",
+  assessment_review: "fail",
   assessment_evidence_missing: "fail",
-  unknown_verdict: "fail",
-  assessment_transport_error: "fail",
+  assessment_transport_recovery: "fail",
   assessment_retry_limit: "fail",
-  replan_limit: "fail",
+  pipeline_head_recovery: "fail",
   artifact_routing_admin: "acknowledge",
 });
 
@@ -56,11 +52,11 @@ function normalizePromptQuestions(questions, fallback, { collapseForChoices = fa
 function isSecuritySensitivePrompt(payload = {}) {
   if (payload.review_type === ENVIRONMENT_SETUP_REVIEW_TYPE) return true;
   if (payload.subtype === "plan_approval" || payload.subtype === "push_offer") return true;
-  if (payload.subtype === "oneshot_scope_selection" || payload.review_type === "oneshot_scope_selection") return true;
-  if (payload.review_type === "scope_expansion_request") return true;
+  if (payload.subtype === "one_shot_file_scope" || payload.review_type === "one_shot_file_scope") return true;
+  if (payload.review_type === "file_scope_approval") return true;
   return Array.isArray(payload.file_requests)
     && payload.file_requests.length > 0
-    && payload.review_type !== "blocked_recovery";
+    && !BLOCKED_RECOVERY_GATE_KINDS.includes(payload.review_type);
 }
 
 export function unattendedHarnessAnswerForPayload(payload = {}, {
@@ -68,18 +64,18 @@ export function unattendedHarnessAnswerForPayload(payload = {}, {
 } = {}) {
   if (payload.requires_interactive_approval === true) return null;
   if (payload.subtype === "push_offer" || payload.subtype === "plan_approval") return null;
-  if (payload.subtype === "oneshot_scope_selection" || payload.review_type === "oneshot_scope_selection") {
+  if (payload.subtype === "one_shot_file_scope" || payload.review_type === "one_shot_file_scope") {
     return "plan";
   }
 
   const choices = humanInputChoicesForPayload(payload);
-  if (["scope_expansion_request", "scope_expansion_required"].includes(payload.review_type)) {
+  if (payload.review_type === "file_scope_approval") {
     return autoApprove
       ? "approve"
       : "reject";
   }
   if (
-    payload.review_type !== "blocked_recovery"
+    !BLOCKED_RECOVERY_GATE_KINDS.includes(payload.review_type)
     && Array.isArray(payload.file_requests)
     && payload.file_requests.length > 0
   ) {
@@ -92,7 +88,7 @@ export function unattendedHarnessAnswerForPayload(payload = {}, {
   // a newly-added ["approve", "reject"] or ["delete", "cancel"] contract
   // silently perform the unsafe action before the harness learned its policy.
   if (choices.length > 0) return null;
-  if (payload.review_type) return "fail";
+  if (payload.review_type && payload.review_type !== "clarification") return "fail";
   if (!isSecuritySensitivePrompt(payload)) return HUMAN_INPUT_BEST_JUDGMENT_ANSWER;
   return null;
 }
@@ -130,7 +126,7 @@ export function resolveHumanInputPrompt(job, payload = {}) {
     `Human input needed for: ${job.title}`,
     { collapseForChoices: choices.length > 0 },
   );
-  const genericPrompt = !payload.review_type && !payload.subtype;
+  const genericPrompt = payload.review_type === "clarification" || (!payload.review_type && !payload.subtype);
   const securitySensitive = payload.requires_interactive_approval === true || isSecuritySensitivePrompt(payload);
   const allowsBestJudgment = choices.length === 0
     && !securitySensitive

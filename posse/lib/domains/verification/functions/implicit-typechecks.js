@@ -18,11 +18,24 @@ export function implicitTypechecks(cwd, files = []) {
 }
 
 // A repository may carry pre-existing type errors. The review fails only on
-// diagnostics the change introduced: errors in a changed file, or more errors
-// elsewhere than the pre-development baseline recorded for this job.
-export async function runImplicitTypechecks(cwd, files, { baselineProjectDiagnosticCount = null, ...options } = {}) {
+// diagnostics the change introduced, judged against the pre-development
+// typecheck recorded for this job (worker/functions/helpers/pre-dev-typecheck.js):
+//  - in a changed file, every error counts: the pre_dev_typecheck briefing
+//    showed the developer that file's existing errors so it fixes them in
+//    passing (`baselineByFile` is the per-file count of those errors);
+//  - elsewhere, more errors than the baseline project count less the changed
+//    files' own baseline errors (the project count includes them), so fixing
+//    a touched file's errors never masks a new error in a caller.
+export async function runImplicitTypechecks(cwd, files, { baselineProjectDiagnosticCount = null, baselineByFile = null, ...options } = {}) {
   const results = [];
-  const changed = new Set((files || []).map(file => String(file).replace(/\\/g, "/")));
+  const normalize = file => String(file).replace(/\\/g, "/");
+  const changed = new Set((files || []).map(normalize));
+  const baselineFiles = baselineByFile && typeof baselineByFile === "object"
+    ? new Map(Object.entries(baselineByFile).map(([file, count]) => [normalize(file), Number.isInteger(count) ? count : 0]))
+    : null;
+  const changedBaseline = baselineFiles ? [...changed].reduce((sum, file) => sum + (baselineFiles.get(file) || 0), 0) : 0;
+  const baselineElsewhere = Number.isInteger(baselineProjectDiagnosticCount)
+    ? Math.max(0, baselineProjectDiagnosticCount - changedBaseline) : null;
   for (const check of implicitTypechecks(cwd, files)) {
     const result = await runProcessAsync(check.command, check.args, check.cwd, options);
     options.signal?.throwIfAborted();
@@ -30,17 +43,29 @@ export async function runImplicitTypechecks(cwd, files, { baselineProjectDiagnos
       throw new Error(`Required typecheck unavailable: ${check.declared_command}: ${result.error || result.stderr || "process interrupted"}`);
     }
     const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
-    const diagnostics = parseTypecheckDiagnostics(output).map(diagnostic => ({ ...diagnostic,
-      file: String(diagnostic.file || "").replace(/\\/g, "/") }));
+    const diagnostics = parseTypecheckDiagnostics(output).map(diagnostic => ({ ...diagnostic, file: normalize(diagnostic.file || "") }));
     const rootRelative = file => check.root && check.root !== "." ? `${check.root}/${file}` : file;
-    const inChanged = diagnostics.filter(diagnostic => changed.has(rootRelative(diagnostic.file)) || changed.has(diagnostic.file));
+    const changedFileOf = diagnostic => changed.has(rootRelative(diagnostic.file)) ? rootRelative(diagnostic.file)
+      : changed.has(diagnostic.file) ? diagnostic.file : null;
+    const inChangedByFile = new Map();
+    for (const diagnostic of diagnostics) {
+      const file = changedFileOf(diagnostic);
+      if (!file) continue;
+      if (!inChangedByFile.has(file)) inChangedByFile.set(file, []);
+      inChangedByFile.get(file).push(diagnostic);
+    }
+    const inChanged = [...inChangedByFile.values()].flat();
+    const introducedCount = inChanged.length;
     const elsewhere = diagnostics.length - inChanged.length;
-    const grew = Number.isInteger(baselineProjectDiagnosticCount) ? elsewhere > baselineProjectDiagnosticCount : result.exitCode !== 0 && inChanged.length === 0 && diagnostics.length === 0;
-    const introduced = inChanged.length > 0 || grew;
+    const grew = baselineElsewhere !== null ? elsewhere > baselineElsewhere : result.exitCode !== 0 && inChanged.length === 0 && diagnostics.length === 0;
+    const introduced = introducedCount > 0 || grew;
+    const introducedOutput = inChanged
+      .map(diagnostic => diagnostic.text || `${diagnostic.file}(${diagnostic.line ?? "?"}): ${diagnostic.code || ""} ${diagnostic.message || ""}`).join("\n");
     results.push({ command: check.declared_command, status: result.exitCode === 0 ? "passed" : introduced ? "failed" : "pre_existing",
-      exit_code: result.exitCode, diagnostic_count: diagnostics.length, introduced_count: inChanged.length,
+      exit_code: result.exitCode, diagnostic_count: diagnostics.length, introduced_count: introducedCount,
       baseline_project_diagnostic_count: baselineProjectDiagnosticCount,
-      output: (introduced ? inChanged.map(diagnostic => diagnostic.text || `${diagnostic.file}(${diagnostic.line ?? "?"}): ${diagnostic.code || ""} ${diagnostic.message || ""}`).join("\n") || output : output).slice(-6000) });
+      baseline_elsewhere_diagnostic_count: baselineElsewhere,
+      output: (introduced ? introducedOutput || output : output).slice(-6000) });
   }
   return results;
 }

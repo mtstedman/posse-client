@@ -621,8 +621,8 @@ function _escalateWiFailureThreshold({ job, verdict, failedCount, threshold, log
     payload_json: JSON.stringify({
       original_job_id: job.id,
       gate_kind: "failure_threshold_exhausted",
-      review_type: "blocked_recovery",
-      question_kind: "blocked_recovery",
+      review_type: "failure_threshold_exhausted",
+      question_kind: "failure_threshold_exhausted",
       choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
       verification_failure_class: verdict._verification_failure_class || null,
       questions: [
@@ -661,8 +661,8 @@ function _escalateFixChainDepth({ job, verdict, fixChainDepth, maxFixChainDepth,
     payload_json: JSON.stringify({
       original_job_id: job.id,
       gate_kind: "fix_chain_exhausted",
-      review_type: "blocked_recovery",
-      question_kind: "blocked_recovery",
+      review_type: "fix_chain_exhausted",
+      question_kind: "fix_chain_exhausted",
       choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
       verification_failure_class: verdict._verification_failure_class || null,
       questions: [
@@ -1010,7 +1010,7 @@ function _spawnRecoveryJobsForVerdict({
       specPayload: spec.payload || {},
     })) {
       const diagnostic = {
-        failure_class: "artifact_routing_unavailable",
+        failure_class: "artifact_routing_admin",
         actionability: "infrastructure",
         task_mode: origTaskMode,
         command: "posse admin",
@@ -1186,8 +1186,8 @@ function _spawnRecoveryJobsForVerdict({
         payload_json: JSON.stringify({
           original_job_id: job.id,
           gate_kind: "fix_chain_exhausted",
-          review_type: "blocked_recovery",
-          question_kind: "blocked_recovery",
+          review_type: "fix_chain_exhausted",
+          question_kind: "fix_chain_exhausted",
           choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
           questions: [
             `The same failure/scope fingerprint (${fixFingerprint.slice(0, 12)}) already occurred in this fix lineage.`,
@@ -1220,8 +1220,8 @@ function _spawnRecoveryJobsForVerdict({
         model_tier: "cheap",
         payload_json: JSON.stringify({
           original_job_id: job.id,
-          gate_kind: "scope_expansion_required",
-          review_type: "scope_expansion_required",
+          gate_kind: "file_scope_approval",
+          review_type: "file_scope_approval",
           questions: [
             [
               `The assessor's proposed fix requires existing path(s) outside the current writable scope:`,

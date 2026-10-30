@@ -1,16 +1,13 @@
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { ASSESSMENT_LIFECYCLE, ASSESSMENT_LIFECYCLE_STATES } from "../../../catalog/job.js";
 import { LEASE_HOLDING_STATUSES, now, runImmediateTransaction } from "./common.js";
-import { leaseNowMs } from "./lease-clock.js";
+import { graceCutoff } from "./lease-clock.js";
 import { REVIEWED_COMPLETION_KEY } from "../../../catalog/reviewed-handoffs.js";
 import { isReviewedTransfer } from "./reviewed-handoff-records.js";
 
 let _attemptStartHook = null;
 export function registerAttemptStartHook(fn) { _attemptStartHook = fn; }
 
-function leaseNowIso() {
-  return new Date(leaseNowMs()).toISOString();
-}
 
 /**
  * Check whether a lease token is still valid for a given job.
@@ -27,7 +24,9 @@ export function isLeaseValid(jobId, leaseToken) {
   if (row.lease_token !== leaseToken) return false;
   if (!LEASE_HOLDING_STATUSES.includes(row.status)) return false;
   if (!row.lease_expires_at) return false;
-  return row.lease_expires_at >= leaseNowIso();
+  // Same grace window as renewLease/requeueExpiredLeases: a lease the
+  // scheduler has not yet reclaimed is still the worker's to act on.
+  return row.lease_expires_at >= graceCutoff();
 }
 
 /**
@@ -49,7 +48,7 @@ export function incrementAndCreateAttempt(jobId, leaseToken, workerType, modelNa
     `).get(jobId);
     if (!job || job.lease_token !== leaseToken) return null;
     if (!LEASE_HOLDING_STATUSES.includes(job.status)) return null;
-    if (!job.lease_expires_at || job.lease_expires_at < leaseNowIso()) return null;
+    if (!job.lease_expires_at || job.lease_expires_at < graceCutoff()) return null;
 
     if (!setupOnly) {
       _attemptStartHook?.(jobId);
@@ -103,7 +102,7 @@ export function incrementAndCreateAssessmentAttempt(
   reasoningEffort = null,
 ) {
   const db = getDb();
-  return db.transaction(() => {
+  return runImmediateTransaction(db, () => {
     const job = db.prepare(`
       SELECT lease_token, lease_expires_at, status, assessment_attempt_count
       FROM jobs
@@ -111,7 +110,7 @@ export function incrementAndCreateAssessmentAttempt(
     `).get(jobId);
     if (!job || job.lease_token !== leaseToken) return null;
     if (!LEASE_HOLDING_STATUSES.includes(job.status)) return null;
-    if (!job.lease_expires_at || job.lease_expires_at < leaseNowIso()) return null;
+    if (!job.lease_expires_at || job.lease_expires_at < graceCutoff()) return null;
 
     const maxRow = db.prepare(
       `SELECT MAX(attempt_number) AS mx FROM job_attempts WHERE job_id = ?`
@@ -134,7 +133,7 @@ export function incrementAndCreateAssessmentAttempt(
     `).run(jobId, attemptNumber, modelName, reasoningEffort);
     const attempt = db.prepare(`SELECT * FROM job_attempts WHERE id = ?`).get(info.lastInsertRowid);
     return { attemptCount: assessmentCount, assessmentAttemptCount: assessmentCount, attempt };
-  })();
+  });
 }
 
 /**

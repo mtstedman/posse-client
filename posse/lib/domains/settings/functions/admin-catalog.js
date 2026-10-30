@@ -417,6 +417,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     "verification_dependency_network_policy",
     "pre_dev_typecheck",
     "final_review_mode",
+    "final_reviewer_provider",
   ]),
   group("bridge", "repo", "Phone Bridge", [
     "bridge_port",
@@ -449,6 +450,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     "context_compaction_session_reset_input_tokens",
     "context_compaction_recent_target_tokens",
     "research_fanout",
+    "research_direct_path_max_source_bytes",
     "research_claim_review",
     "research_traversal_completion_check",
     "research_traversal_completion_max_chars",

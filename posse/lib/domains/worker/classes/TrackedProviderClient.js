@@ -1929,8 +1929,11 @@ export class TrackedProviderClient {
               buildCitationChildPrompt({ intent, manifest, maxInputs }),
               {
                 role: childRole,
-                modelTier: tier,
-                modelName,
+                // Never the parent's model or tier: a citation child runs on
+                // the configured child tier and lets the provider pick that
+                // tier's model, as research children do.
+                modelTier: researchPolicy?.childModelTier || RESEARCH_CHILD_FALLBACK_MODEL_TIER,
+                modelName: null,
                 reasoningEffort: "low",
                 activity: `citation child ${requestId}`,
                 allowWrite: false,
@@ -1964,7 +1967,9 @@ export class TrackedProviderClient {
                 attempt_id: observationContext?.attempt_id ?? null,
                 cwd,
                 jobProvider: providerName,
-                jobModelName: modelName,
+                // The job-level model name wins model selection outright, so
+                // it must not carry the parent's model either.
+                jobModelName: null,
                 complexity: "low",
               },
             );

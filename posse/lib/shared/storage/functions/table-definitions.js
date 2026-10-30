@@ -28,6 +28,10 @@ import {
   EVENT_ACTOR_TYPE_LIST_SQL,
 } from "../../../catalog/event.js";
 import {
+  ACTION_BEARING_INTERACTION_KINDS_SQL,
+  ACTION_ID_LOOKUP_EXPRESSION_SQL,
+} from "../../../catalog/work-item-interactions.js";
+import {
   HASH_REF_ENTRY_KIND_LIST_SQL,
 } from "../../../catalog/hash-store.js";
 import {
@@ -401,6 +405,20 @@ export function createAgentCallsIndexes(db) {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_calls_work_item ON agent_calls(work_item_id, created_at)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_calls_atlas_prefetch ON agent_calls(role, atlas_prefetch_status)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_calls_parent ON agent_calls(parent_agent_call_id, created_at)`);
+  ensureAgentCallsProviderUsageIndex(db);
+}
+
+// Expression index matching the provider usage summary predicate verbatim
+// (`LOWER(TRIM(provider)) = ? AND created_at >= ?`): Codex stores mixed-case /
+// whitespace provider values, so a plain (provider, created_at) index would
+// not serve that read. Idempotent, and safe on any agent_calls shape that
+// already carries both columns, so the connection owner can run it on every
+// open without a schema-version bump.
+export function ensureAgentCallsProviderUsageIndex(db) {
+  const columns = new Set(getTableColumnNames(db, "agent_calls"));
+  if (!columns.has("provider") || !columns.has("created_at")) return false;
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_calls_provider_created ON agent_calls(LOWER(TRIM(provider)), created_at)`);
+  return true;
 }
 
 export function agentInteractionsCreateSql(tableName = "agent_interactions") {
@@ -469,6 +487,21 @@ export function createAgentInteractionIndexes(db) {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_interactions_kind_status ON agent_interactions(kind, status, created_at)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_interaction_applications_attempt ON agent_interaction_applications(attempt_id, applied_at)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_interaction_applications_interaction ON agent_interaction_applications(interaction_id, applied_at)`);
+  ensureAgentInteractionsActionIdIndex(db);
+}
+
+// Partial expression index matching the operator action lookup predicate
+// verbatim (`kind IN ('approval', 'nudge') AND json_extract(metadata_json,
+// '$.work_item_action.action_id') = ?`): every operator approval, answer and
+// nudge replays through that lookup under BEGIN IMMEDIATE, and the table is
+// never pruned. Idempotent and safe on any agent_interactions shape carrying
+// both columns, so the connection owner runs it on every open without a
+// schema-version bump.
+export function ensureAgentInteractionsActionIdIndex(db) {
+  const columns = new Set(getTableColumnNames(db, "agent_interactions"));
+  if (!columns.has("kind") || !columns.has("metadata_json")) return false;
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_interactions_action_id ON agent_interactions(${ACTION_ID_LOOKUP_EXPRESSION_SQL}) WHERE kind IN (${ACTION_BEARING_INTERACTION_KINDS_SQL})`);
+  return true;
 }
 
 export function createRunInsightsIndexes(db) {

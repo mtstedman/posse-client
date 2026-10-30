@@ -236,6 +236,17 @@ high-risk file requests, and fix scope gates that spawn the proposed fix.
 Existing waiting scope gates for the selected work items are resumed through
 the same approval policy.
 
+Every gate uses its canonical ID from `WORK_ITEM_QUESTION_CHOICE_IDS` for its
+stored contract, payload identity, client question kind, and approval policy.
+Scope approval is `file_scope_approval`, with the setting
+`approval_policy_file_scope_approval`. Runtime callers cannot use aliases or
+change a registered gate's identity. On upgrade, the storage migration converts
+older gate names and policy keys while preserving gate decisions and generations.
+Policy migration retains explicit settings over `ask` defaults; conflicting
+explicit settings become `fail_closed` and their previous values are audited.
+If two open gates would acquire the same identity, migration rolls back instead
+of discarding either decision.
+
 The flag applies only to that run. Omitting it, or using `--scope-mode=default`,
 preserves the existing `scope_auto_approval` policy and interactive or
 non-interactive behavior. That policy already grants developers and fixes test

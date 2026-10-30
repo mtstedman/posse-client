@@ -2044,7 +2044,7 @@ export const TOOL_DISPATCH_AGENT = {
 
 export const TOOL_DISPATCH_AGENT_PLANNER = {
   ...TOOL_DISPATCH_AGENT,
-  description: "Dispatch one focused researcher or a batch of independent researchers. Batch children run concurrently; the call returns after every child settles. Give each child a self-contained question; code requests may add bounded repository anchors. For bulk external data, ask a web child to nominate the raw source file; findings, source snapshots, and reports return as durable refs that tasks cite directly. Use a concise question and at most eight starting anchors. The administrator bounds child count, effort, turns, and duration.",
+  description: "Dispatch one focused researcher or a batch of independent researchers. Batch children run concurrently; the call returns after every child settles. Give each child a self-contained question; code requests may add bounded repository anchors. Code requests whose anchors overlap run as one child: the surviving request lists merged_request_ids, and each absorbed request returns a result row with status merged and merged_into naming the survivor whose result answers it. For bulk external data, ask a web child to nominate the raw source file; findings, source snapshots, and reports return as durable refs that tasks cite directly. Use a concise question and at most eight starting anchors. The administrator bounds child count, effort, turns, and duration.",
   parameters: {
     type: "object",
     properties: {

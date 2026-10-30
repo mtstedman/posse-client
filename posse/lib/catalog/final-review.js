@@ -58,6 +58,13 @@ export const FINAL_REVIEW_MAX_INVALID_REPORTS = 2;
 // provider client's per-call deadline (catalog/mcp.js).
 export const FINAL_REVIEW_TIMEOUT_MS = 40 * 60 * 1000;
 export const FINAL_REVIEW_TEST_TIMEOUT_MS = 15 * 60 * 1000;
+// The reviewer's floor within one round. Each stage before it (declared
+// tests, changed tests, changed-file checks) is capped at
+// FINAL_REVIEW_TEST_TIMEOUT_MS and at what remains of the round above this
+// floor, so three slow stages cannot leave the reviewer no time to report. A
+// stage the remaining budget cannot fund ends the round as infrastructure
+// instead of running into the wall.
+export const FINAL_REVIEW_REVIEWER_MIN_ROUND_MS = 10 * 60 * 1000;
 
 // Before the reviewer starts, final_review also runs the changed-file checks
 // the assessment harness runs after handoff and the unit test files the

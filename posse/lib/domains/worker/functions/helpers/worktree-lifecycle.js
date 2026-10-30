@@ -587,7 +587,7 @@ function deferTerminalCleanupIfActiveWork(wi, wtDir) {
     // so pid liveness cannot distinguish "job still using the worktree" from
     // "job finished but its finally block has not cleared the sentinel yet".
     // The queue is authoritative: a terminal job no longer owns the worktree.
-    clearActiveWorktreeSentinel(wtDir, { jobId: sentinel.payload.jobId });
+    clearActiveWorktreeSentinel(wtDir, { jobId: sentinel.payload.jobId, sentinelPath: sentinel.sentinelPath });
     sentinelBlocks = false;
   }
   if (siblingLocks.length === 0 && !sentinelBlocks) return false;

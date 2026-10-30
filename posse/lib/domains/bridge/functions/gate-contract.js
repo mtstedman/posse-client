@@ -1,13 +1,14 @@
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 import {
   humanInputChoicesForPayload,
+  humanGateNameForPayload,
   isHumanInputCoordinationPayload,
   isHumanInputReviewPayload,
 } from "../../../catalog/human-input.js";
 import { BRIDGE_COMMANDS } from "../../../catalog/bridge.js";
 
 export function bridgeGateKindForJob(job, payload = {}) {
-  if (payload?.subtype === "shared_trunk_provenance") return "repository_recovery";
+  if (payload?.subtype === "shared_trunk_provenance") return "shared_trunk_provenance";
   if (payload?.subtype === "push_offer") return "push";
   if (payload?.subtype === "plan_approval") return "plan";
   if (
@@ -21,6 +22,8 @@ export function bridgeGateKindForJob(job, payload = {}) {
 }
 
 export function bridgeGateAnswerContract(payload = {}) {
+  const kind = humanGateNameForPayload(payload);
+  if (["plan_approval", "push_offer"].includes(kind)) return {};
   const choices = humanInputChoicesForPayload(payload);
   if (choices.length > 0) {
     return {
@@ -38,9 +41,7 @@ export function bridgeGateAnswerContract(payload = {}) {
   // review with no registered choices is an invalid/legacy closed contract,
   // not a free-form question, so do not advertise `ask` for it either.
   if (
-    payload?.subtype === "plan_approval"
-    || payload?.subtype === "push_offer"
-    || String(payload?.review_type || "").trim()
+    !["clarification", "planner_clarification"].includes(kind)
   ) return {};
 
   // Untyped human-input gates are agent/operator clarifications. Make their

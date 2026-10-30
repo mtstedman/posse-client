@@ -4,8 +4,23 @@ import { createRequire } from "node:module";
 
 // A browser bootstrap failure is a missing verification prerequisite, even
 // when a repository script launches Playwright through a package manager.
+const BROWSER_LAUNCH_FAILURE = /browserType\.launch: Executable doesn't exist|browserType\.launch:[^\n]*Host system is missing dependencies/u;
 export function missingBrowserTestRuntime(output) {
-  return /browserType\.launch: Executable doesn't exist|browserType\.launch:[^\n]*Host system is missing dependencies/u.test(String(output || ""));
+  return BROWSER_LAUNCH_FAILURE.test(String(output || ""));
+}
+
+// A run whose only failures are browser launches ran no test; a run that also
+// passed tests, or failed more tests than it printed launch failures for, has
+// product evidence the missing browser must not hide. Playwright's summary
+// prints `N passed (4.2s)` and `N failed`, on separate lines or one line.
+export function browserLaunchFailuresExplainTestOutput(output) {
+  const text = String(output || "");
+  const launchFailures = text.split("\n").filter((line) => BROWSER_LAUNCH_FAILURE.test(line)).length;
+  if (launchFailures === 0) return false;
+  const counts = (pattern) => [...text.matchAll(pattern)].map((match) => Number(match[1]));
+  if (counts(/(?:^|[^\w.])(\d+)\s+passed\b/gmu).some((count) => count > 0)) return false;
+  const failed = counts(/(?:^|[^\w.])(\d+)\s+failed\b/gmu);
+  return failed.length === 0 || Math.max(...failed) <= launchFailures;
 }
 
 // Missing external packages are verification prerequisites; missing relative

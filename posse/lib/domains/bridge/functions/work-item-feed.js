@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { WORK_ITEM_BOUNDS, WORK_ITEM_FEED_EVENT_PROTOCOL } from "../../../catalog/bridge.js";
 import { FAILED_JOB_STATUSES, OPEN_HUMAN_GATE_JOB_STATUSES, PENDING_HUMAN_GATE_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
-import { questionKindForReviewType } from "../../../catalog/human-input.js";
+import { humanGateNameForPayload } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -55,10 +55,7 @@ const NUDGE_STATES = new Set([
 const ACKNOWLEDGEMENT_DECISIONS = new Set(["accepted", "rejected", "deferred"]);
 const QUESTION_CHOICE_IDS = WORK_ITEM_QUESTION_CHOICE_IDS;
 
-const LEGACY_PIPELINE_HEAD_REVIEW_TYPES = new Set([
-  "research_dead_letter_recovery",
-  "oneshot_dead_letter_recovery",
-]);
+
 const QUESTION_CHOICE_COPY = Object.freeze({
   approve: ["Approve", "Allow the exact requested transition."],
   reject: ["Reject", "Reject the exact requested transition."],
@@ -170,20 +167,7 @@ function validStoredChoiceEntries(kind, entries) {
 }
 
 function storedQuestionKind(payload) {
-  const reviewKind = questionKindForReviewType(payload?.review_type);
-  // Project legacy pipeline-head rows through the handler they actually use.
-  // This prevents bridges from offering pass/replan actions that the worker
-  // can only reject or reinterpret as a retry.
-  if (reviewKind === "dead_letter_recovery") return reviewKind;
-  const explicit = String(payload?.question_kind || "").trim();
-  if (QUESTION_KINDS.has(explicit)) return explicit;
-  if (payload?.subtype === "plan_approval") return "plan_approval";
-  if (payload?.subtype === "push_offer") return "push_offer";
-  if (payload?.subtype === "oneshot_scope_selection" || payload?.review_type === "oneshot_scope_selection") {
-    return "one_shot_file_scope";
-  }
-  if (Array.isArray(payload?.file_requests) && payload.file_requests.length > 0) return "file_scope_approval";
-  return reviewKind || "legacy_unstructured";
+  try { return humanGateNameForPayload(payload); } catch { return "legacy_unstructured"; }
 }
 
 function storedQuestionChoices(kind, payload) {
@@ -195,13 +179,7 @@ function storedQuestionChoices(kind, payload) {
     return (QUESTION_CHOICE_IDS[kind] || []).map(storedChoiceRecord).filter(Boolean);
   }
   if (!validStoredChoiceEntries(kind, entries)) {
-    if (
-      kind === "dead_letter_recovery"
-      && payload?.question_kind === "pipeline_head_recovery"
-      && LEGACY_PIPELINE_HEAD_REVIEW_TYPES.has(String(payload?.review_type || ""))
-    ) {
-      return QUESTION_CHOICE_IDS.dead_letter_recovery.map(storedChoiceRecord).filter(Boolean);
-    }
+
     return [];
   }
   return entries.map((entry) => storedChoiceRecord(entry)).filter(Boolean);

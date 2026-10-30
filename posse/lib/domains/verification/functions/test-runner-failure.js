@@ -1,6 +1,6 @@
 import { missingPhpRuntimeCapabilities } from "./php-runtime-capability.js";
 import { NODE_PACKAGE_MANAGER_EXECUTABLES } from "../../../catalog/node-package-managers.js";
-import { missingBrowserTestRuntime, missingDeclaredNodeDependency } from "../../../shared/tools/functions/toolkit/node-test-failure.js";
+import { browserLaunchFailuresExplainTestOutput, missingBrowserTestRuntime, missingDeclaredNodeDependency } from "../../../shared/tools/functions/toolkit/node-test-failure.js";
 import fs from "fs";
 import path from "path";
 import { commandExecutable } from "./planner-test-command.js";
@@ -70,10 +70,15 @@ export function classifyNestedRunnerInfrastructureFailure(command, result, { pro
     .map((value) => String(value || ""))
     .filter(Boolean)
     .join("\n");
-  if (missingBrowserTestRuntime(output)) return {
-    ...result, status: "infrastructure_error", ok: null,
-    reason: "test_browser_unavailable",
-  };
+  if (missingBrowserTestRuntime(output)) {
+    if (browserLaunchFailuresExplainTestOutput(output)) return {
+      ...result, status: "infrastructure_error", ok: null,
+      reason: "test_browser_unavailable",
+    };
+    // Another project's tests failed on their own: the run stays a product
+    // failure, and the receipt still records the browser it could not launch.
+    result = { ...result, infrastructure_notes: [...(result.infrastructure_notes || []), "test_browser_unavailable"] };
+  }
   const missingCapabilities = missingPhpRuntimeCapabilities(command, result, { projectRoot });
   if (missingCapabilities) return {
     ...result, status: "infrastructure_error", ok: null,

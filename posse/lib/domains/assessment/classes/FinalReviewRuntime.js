@@ -34,6 +34,7 @@ import {
   FINAL_REVIEW_OBSERVATIONS,
   FINAL_REVIEW_OUTCOMES,
   FINAL_REVIEW_REVIEW_MODES,
+  FINAL_REVIEW_REVIEWER_MIN_ROUND_MS,
   FINAL_REVIEW_REVIEWER_PARK_MS,
   FINAL_REVIEW_REVIEWER_STATUS,
   FINAL_REVIEW_REVIEWER_WALL_MS,
@@ -120,8 +121,10 @@ export class FinalReviewRuntime {
     reviewerParkMs = FINAL_REVIEW_REVIEWER_PARK_MS,
     reviewerWallMs = FINAL_REVIEW_REVIEWER_WALL_MS,
     reviewTimeoutMs = FINAL_REVIEW_TIMEOUT_MS,
+    reviewerMinRoundMs = FINAL_REVIEW_REVIEWER_MIN_ROUND_MS,
     completePass = completeFinalReview,
     checkFindingBoundary = finalReviewFindingCorrection,
+    now = Date.now,
   } = {}) {
     this.parents = new Map();
     this.identify = identify;
@@ -139,8 +142,13 @@ export class FinalReviewRuntime {
     // close to it is not handed a revision.
     this.reviewerWallMs = reviewerWallMs;
     this.reviewTimeoutMs = reviewTimeoutMs;
+    // The reviewer's floor within a round, never more than a quarter of the
+    // round so a shortened round still funds its stages (catalog: 10 of 40 min).
+    this.reviewerMinRoundMs = Math.min(reviewerMinRoundMs, Math.floor(reviewTimeoutMs / 4));
     this.completePass = completePass;
     this.checkFindingBoundary = checkFindingBoundary;
+    // The round clock; tests inject one to drive stage budgets.
+    this.now = now;
   }
 
   /**
@@ -325,7 +333,19 @@ export class FinalReviewRuntime {
         reviews_remaining: finalReviewReviewsRemaining(prior),
       };
     }
-    const startedAt = Date.now();
+    const startedAt = this.now();
+    // Each stage before the reviewer draws its timeout from what remains of
+    // the round above the reviewer's floor, capped at the per-stage limit. A
+    // stage the budget cannot fund ends the round as infrastructure rather
+    // than running into the round wall with the reviewer unstarted.
+    const stageTimeoutMs = (stage) => {
+      const remainingMs = this.reviewTimeoutMs - (this.now() - startedAt) - this.reviewerMinRoundMs;
+      if (remainingMs <= 0) {
+        throw finalReviewError("FINAL_REVIEW_ROUND_BUDGET",
+          `the round budget cannot fund ${stage} and still leave the reviewer ${Math.ceil(this.reviewerMinRoundMs / 1000)} s`);
+      }
+      return Math.min(FINAL_REVIEW_TEST_TIMEOUT_MS, remainingMs);
+    };
     let result;
     let testRun = null;
     let declaredPlan = null;
@@ -371,7 +391,7 @@ export class FinalReviewRuntime {
       verificationIdentity = await this.verificationIdentity(parent.cwd, { payload: parseJobPayload(getJob(parent.jobId)) });
       testRun = await this.runTestPlan(declaredPlan, {
         cwd: parent.cwd,
-        timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS,
+        timeoutMs: stageTimeoutMs("the declared tests"),
         signal,
       });
       signal.throwIfAborted();
@@ -392,10 +412,10 @@ export class FinalReviewRuntime {
       });
       signal.throwIfAborted();
       changedTestRun = changedPlan
-        ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: FINAL_REVIEW_TEST_TIMEOUT_MS, signal })
+        ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: stageTimeoutMs("the changed tests"), signal })
         : null;
       signal.throwIfAborted();
-      checks = await this.runChecks(parent.cwd, change, { signal, jobId: job.id });
+      checks = await this.runChecks(parent.cwd, change, { signal, jobId: job.id, timeoutMs: stageTimeoutMs("the changed-file checks") });
       await assertCandidateUnchanged();
       signal.throwIfAborted();
       // Only failures the change provably introduced skip the reviewer; any
@@ -554,7 +574,7 @@ export class FinalReviewRuntime {
         changed_file_checks_status: checks?.status || null,
         change_digest: change?.digest || null,
         changed_file_count: Array.isArray(change?.files) ? change.files.length : 0,
-        duration_ms: Date.now() - startedAt,
+        duration_ms: this.now() - startedAt,
       },
     };
     return this.#saveReview(parent, { response, observation, failures: 0,
@@ -722,8 +742,19 @@ export class FinalReviewRuntime {
               : "the reviewer ended before receiving the revised candidate" },
           reviewerCallId,
         };
+        // Unparsable or empty reviewer output is no verdict on the work: a
+        // bounded infrastructure round, not a semantic block that ends the
+        // developer's attempt. A parsed needs_review remains semantic.
+        const verdict = ended.review?.verdict;
+        const decision = verdict && typeof verdict === "object" && !Array.isArray(verdict)
+          ? String(verdict.verdict || "").trim() : "";
+        if (!decision) return {
+          infrastructure: true,
+          result: { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, findings: [], reason: "the reviewer returned no verdict" },
+          reviewerCallId,
+        };
         return {
-          result: finalReviewResultFromVerdict(ended.review?.verdict, { claims: ended.review?.claims || [] }),
+          result: finalReviewResultFromVerdict(verdict, { claims: ended.review?.claims || [] }),
           reviewerCallId,
         };
       }),

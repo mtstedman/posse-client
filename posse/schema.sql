@@ -21,7 +21,7 @@ PRAGMA foreign_keys = ON;
 --  20 = + Team submission approval policy and publication mode state.
 -- 21 = terminal abandoned shared-trunk merge operations
 -- 22 = interrupted agent-call terminal state
-PRAGMA user_version = 23;
+PRAGMA user_version = 24;
 
 CREATE TABLE IF NOT EXISTS bridge_command_results (
   command_id TEXT PRIMARY KEY,
@@ -784,6 +784,11 @@ CREATE INDEX IF NOT EXISTS idx_agent_calls_atlas_prefetch
 CREATE INDEX IF NOT EXISTS idx_agent_calls_parent
   ON agent_calls(parent_agent_call_id, created_at);
 
+-- Serves the provider usage summary read, whose predicate is written exactly
+-- as LOWER(TRIM(provider)) = ? AND created_at >= ?.
+CREATE INDEX IF NOT EXISTS idx_agent_calls_provider_created
+  ON agent_calls(LOWER(TRIM(provider)), created_at);
+
 CREATE TABLE IF NOT EXISTS provider_usage_segments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_call_id INTEGER NOT NULL,
@@ -917,6 +922,12 @@ CREATE INDEX IF NOT EXISTS idx_agent_interactions_parent
 
 CREATE INDEX IF NOT EXISTS idx_agent_interactions_kind_status
   ON agent_interactions(kind, status, created_at);
+
+-- Serves the operator action lookup, whose predicate is written exactly as
+-- kind IN ('approval', 'nudge') AND json_extract(metadata_json, '$.work_item_action.action_id') = ?.
+CREATE INDEX IF NOT EXISTS idx_agent_interactions_action_id
+  ON agent_interactions(json_extract(metadata_json, '$.work_item_action.action_id'))
+  WHERE kind IN ('approval', 'nudge');
 
 CREATE TABLE IF NOT EXISTS agent_interaction_applications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

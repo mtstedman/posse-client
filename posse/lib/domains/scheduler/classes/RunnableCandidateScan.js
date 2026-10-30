@@ -18,6 +18,9 @@ export class RunnableCandidateScan {
     this.positions = new Map();
     this.heads = new Set();
     this.passStartedAt = null;
+    // Unlock-ranking graph shared by every ranked head read while the queue
+    // wake generation is unchanged (see rankRunnableJobs).
+    this.rankingMemo = {};
   }
 
   beginPass() {
@@ -30,10 +33,11 @@ export class RunnableCandidateScan {
     const key = JSON.stringify([options.onlyJobTypes || [], options.onlyWorkItemIds || []]);
     const head = !this.heads.has(key);
     this.heads.add(key);
-    let rows = head && this.changedAfter ? this.read(limit, { ...options, changedAfter: this.changedAfter }) : [];
+    const ranked = { ...options, rankingMemo: this.rankingMemo };
+    let rows = head && this.changedAfter ? this.read(limit, { ...ranked, changedAfter: this.changedAfter }) : [];
     if (head) {
       const freshIds = new Set(rows.map((job) => job.id));
-      rows = [...rows, ...this.read(limit, { ...options, after: null }).filter((job) => !freshIds.has(job.id))]
+      rows = [...rows, ...this.read(limit, { ...ranked, after: null }).filter((job) => !freshIds.has(job.id))]
         .sort((a, b) => a._scheduling && b._scheduling ? compareRunnableRank(a, b) : cursor(a).priority - cursor(b).priority).slice(0, limit);
     } else rows = this.read(limit, { ...options, after: this.positions.get(key) || null, rankByUnlock: false });
     if (!head) {

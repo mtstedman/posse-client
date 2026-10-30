@@ -5,7 +5,11 @@ import { ATLAS_INDEXABLE_SOURCE_EXTENSIONS } from "../../../catalog/files.js";
 import { WORKSPACE_TRAVERSAL_PROFILES } from "../../../catalog/workspace-traversal.js";
 
 // Repository property only: no task text, repository names, or corpus flags.
-export function repositorySourceInventory(projectDir) {
+// The sorted file list is included only while the repository is small enough
+// for the direct route (the sole reader, routing.js, gates on the same
+// threshold); a larger repository carries its file count instead, so the
+// persisted project map and the preflight payload stay bounded.
+export function repositorySourceInventory(projectDir, { sourceListMaxBytes = Infinity } = {}) {
   if (!projectDir) return null;
   try {
     const listed = String(adminGitExec(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], projectDir));
@@ -19,6 +23,8 @@ export function repositorySourceInventory(projectDir) {
       bytes += stat.size;
       files.push(file);
     }
-    return { eligible_source_bytes: bytes, source_files: files.sort() };
+    return bytes <= sourceListMaxBytes
+      ? { eligible_source_bytes: bytes, source_files: files.sort() }
+      : { eligible_source_bytes: bytes, source_file_count: files.length };
   } catch { return null; } // Unknown size never becomes a small-repository decision.
 }

@@ -24,7 +24,7 @@ import { Agent } from "./Agent.js";
 import { RoleRegistry } from "./RoleRegistry.js";
 import { AgentDispatcher } from "../../../shared/permissions/classes/AgentDispatcher.js";
 import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
-import { JobLease } from "./JobLease.js";
+import { JobLease, isTransientLeaseRenewalError, readMaxTransientLeaseRenewErrors } from "./JobLease.js";
 import { WorkerExecutionCoordinator } from "./execution/WorkerExecutionCoordinator.js";
 import { PartialWorkCoordinator } from "./execution/PartialWorkCoordinator.js";
 import { runHumanInputHandler } from "../functions/helpers/human-input.js";
@@ -453,9 +453,14 @@ export class Worker {
 
     const leaseSec = sessionLeaseTtlSec();
     const renewMs = JobLease.renewalIntervalMs(leaseSec);
+    // Same transient-error budget as JobLease: a busy/locked database must
+    // not abort a healthy job on the first SQLITE_BUSY.
+    const maxTransientErrors = Math.max(0, Math.floor(Number(readMaxTransientLeaseRenewErrors()) || 0));
+    const transientRetryMs = Math.max(500, Math.min(5000, Math.floor(renewMs / 4)));
     const entry = {
       timer: null,
       stopped: false,
+      transientErrors: 0,
       stop: () => {
         entry.stopped = true;
         if (entry.timer) {
@@ -470,25 +475,37 @@ export class Worker {
             jobId,
             leaseTtlSec: leaseSec,
           });
-          if (renewed) return "renewed";
+          if (renewed) {
+            entry.transientErrors = 0;
+            return "renewed";
+          }
           entry.stop();
           this._invalidatePendingSessionRecycleForJob({ id: jobId, work_item_id: meta.workItemId }, "session_lease_expired");
           this.killJob(jobId, "session_lease_expired");
           return "failed";
         } catch (err) {
-          entry.stop();
           const message = err?.message || String(err || "unknown error");
+          if (isTransientLeaseRenewalError(err)) {
+            entry.transientErrors += 1;
+            if (entry.transientErrors <= maxTransientErrors) {
+              this.emit(jobId, `${C.yellow}[session]${C.reset} WI#${meta.workItemId ?? "?"} job #${jobId}: transient session lease renewal error (${entry.transientErrors}/${maxTransientErrors}): ${message}; retrying`);
+              return "retrying";
+            }
+          }
+          entry.stop();
           this.emit(jobId, `${C.red}[session]${C.reset} WI#${meta.workItemId ?? "?"} job #${jobId}: session lease renewal threw: ${message}`);
           this.killJob(jobId, "session_lease_renew_failed");
           return "error";
         }
       },
-      schedule: () => {
+      schedule: (delayMs = renewMs) => {
         if (entry.stopped || entry.timer) return;
         entry.timer = setTimeout(() => {
           entry.timer = null;
-          if (entry.renewNow() === "renewed") entry.schedule();
-        }, renewMs);
+          const result = entry.renewNow();
+          if (result === "renewed") entry.schedule();
+          else if (result === "retrying") entry.schedule(transientRetryMs);
+        }, delayMs);
         entry.timer?.unref?.();
       },
     };
@@ -753,18 +770,23 @@ export class Worker {
   }
 
   killJob(jobId, reason) {
-    if (reason) this._killReasons.set(jobId, reason);
     const ac = this._abortControllers.get(jobId);
-    if (ac) {
-      const err = new Error("Job aborted");
-      err.name = "AbortError";
-      err.code = "ABORT_ERR";
-      const killReason = reason || this._killReasons.get(jobId);
-      if (killReason) err._killReason = killReason;
-      ac.abort(err);
-      return true;
+    if (!ac) {
+      // Nothing is running under this id (the finalizer already dropped the
+      // controller, or execution never registered one). A reason recorded
+      // here would outlive this lease and rename the next attempt's first
+      // ordinary provider error to an abort, so drop any stale entry instead.
+      this._killReasons.delete(jobId);
+      return false;
     }
-    return false;
+    if (reason) this._killReasons.set(jobId, reason);
+    const err = new Error("Job aborted");
+    err.name = "AbortError";
+    err.code = "ABORT_ERR";
+    const killReason = reason || this._killReasons.get(jobId);
+    if (killReason) err._killReason = killReason;
+    ac.abort(err);
+    return true;
   }
 
   /**
@@ -1008,7 +1030,13 @@ export class Worker {
    */
   _registerAbortController(jobId) {
     const ac = new AbortController();
-    if (jobId) this._abortControllers.set(jobId, ac);
+    if (jobId) {
+      // A fresh lease starts with no kill reason: one left by a kill that
+      // landed between the previous finalizer and onJobEnd belongs to that
+      // lease, not this one.
+      this._killReasons.delete(jobId);
+      this._abortControllers.set(jobId, ac);
+    }
     return ac;
   }
 

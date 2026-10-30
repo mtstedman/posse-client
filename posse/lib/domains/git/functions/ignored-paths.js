@@ -4,7 +4,7 @@
 // never commits an untracked ignored path (scoped commit staging skips it), so
 // a reviewer or assessor that finds one in a job's scope must be told that its
 // workspace copy is local, uncommitted state and not part of the change.
-// Advisory: when git cannot answer, nothing is reported.
+// Advisory by default; strict callers propagate failures when git cannot answer.
 
 import { gitExecAsync } from "./utils.js";
 
@@ -26,10 +26,10 @@ function repoRelativePath(value) {
  *
  * @param {string} cwd repository working directory the paths are relative to
  * @param {string[]} paths repository-relative paths
- * @param {{ git?: typeof gitExecAsync }} [options]
+ * @param {{ git?: typeof gitExecAsync, strict?: boolean }} [options]
  * @returns {Promise<Array<{ path: string, source: string }>>} sorted by path; source is `<ignore file>:<line>`
  */
-export async function listIgnoredRepoPaths(cwd, paths, { git = gitExecAsync } = {}) {
+export async function listIgnoredRepoPaths(cwd, paths, { git = gitExecAsync, strict = false } = {}) {
   const candidates = [...new Set((Array.isArray(paths) ? paths : []).map(repoRelativePath).filter(Boolean))];
   if (!cwd || candidates.length === 0) return [];
   let output;
@@ -39,8 +39,9 @@ export async function listIgnoredRepoPaths(cwd, paths, { git = gitExecAsync } = 
       trim: false,
       timeoutMs: CHECK_IGNORE_TIMEOUT_MS,
     });
-  } catch {
-    // Exit 1: no path is ignored. Any other failure leaves the paths unmarked.
+  } catch (error) {
+    if (strict && error?.status !== 1) throw error;
+    // Exit 1: no path is ignored. Advisory callers also ignore probe failures.
     return [];
   }
   // -v -z: "<source>\0<line>\0<pattern>\0<path>\0" per matched path.

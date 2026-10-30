@@ -36,16 +36,73 @@ export async function finalReviewIdentity(cwd, payload, { jobId = null, commit =
   return (await finalReviewIdentityEvidence(cwd, payload, { jobId, commit })).identity;
 }
 
+// Commit contents are immutable: one PASS wrap-up asks for the same
+// commit-mode identity several times, so the blob-derived states for one
+// (cwd, commit, plan base, contract, read list) are kept. Live states never are.
+const COMMIT_STATES_MEMO_LIMIT = 64;
+const commitStatesMemo = new Map();
+
+function rememberCommitStates(key, evidence) {
+  if (commitStatesMemo.size >= COMMIT_STATES_MEMO_LIMIT) commitStatesMemo.delete(commitStatesMemo.keys().next().value);
+  commitStatesMemo.set(key, evidence);
+}
+
+function blobModeState(mode) {
+  return mode === "120000" ? "symlink" : mode === "100755" ? 0o111 : 0;
+}
+
+// Digests of pinned blobs (`<rev>:<path>`), read with one `cat-file --batch`:
+// `<sha> blob <size>\n<bytes>\n` per name, in input order.
+async function blobDigests(cwd, specs) {
+  const digests = new Map();
+  // A name containing a newline cannot be framed as a batch line.
+  const batch = specs.filter((spec) => !spec.includes("\n"));
+  if (batch.length > 0) {
+    const out = await gitExecBufferAsync(["cat-file", "--batch"], cwd, { input: `${batch.join("\n")}\n` });
+    let offset = 0;
+    for (const spec of batch) {
+      const end = out.indexOf(0x0a, offset);
+      const match = end < 0 ? null : out.subarray(offset, end).toString("utf8").match(/^[a-f0-9]+ blob (\d+)$/);
+      if (!match) throw new Error(`Unreadable review object ${spec}`);
+      const start = end + 1;
+      const size = Number(match[1]);
+      if (start + size + 1 > out.length) throw new Error(`Truncated review object ${spec}`);
+      digests.set(spec, digest(out.subarray(start, start + size)));
+      offset = start + size + 1;
+    }
+  }
+  for (const spec of specs) {
+    if (spec.includes("\n")) digests.set(spec, digest(await gitExecBufferAsync(["cat-file", "blob", spec], cwd)));
+  }
+  return digests;
+}
+
 export async function finalReviewIdentityEvidence(cwd, payload, { jobId = null, commit = null } = {}) {
   if (commit && !/^[a-f0-9]{40,64}$/.test(commit)) throw new Error("Invalid reviewed commit");
-  const placeholders = new Set(commit ? [] : await emptyMaterializedPathsForJob(jobId, payload?.scope_generation ?? payload?._materialization_generation ?? 1, cwd));
-  const scope = finalReviewScope(payload);
+  const contract = reviewContract(payload);
   const readPaths = [...(Array.isArray(payload?.dev_brief?.key_files) ? payload.dev_brief.key_files : []),
     ...(Array.isArray(payload?.tests_to_run) ? payload.tests_to_run : [])]
     .slice(0, 64)
     .map((value) => String(value || "").trim().replace(/\\/g, "/"))
     .filter((value) => value && !path.posix.isAbsolute(value)
       && !value.split("/").some((part) => !part || part === "." || part === ".."));
+  // Read-only inputs (key_files, tests_to_run) that the job does not own are
+  // pinned to the plan base commit: a sibling's uncommitted or later-committed
+  // edit to a shared read path must not change what this job's review bound.
+  const planBase = /^[a-f0-9]{40,64}$/.test(String(payload?._plan_base_commit || "")) ? String(payload._plan_base_commit) : null;
+  const memoKey = commit ? digest(JSON.stringify({ cwd, commit, planBase, contract, readPaths })) : null;
+  const remembered = memoKey ? commitStatesMemo.get(memoKey) : null;
+  const evidence = remembered
+    ? structuredClone(remembered)
+    : await reviewedFileStates(cwd, payload, { jobId, commit, readPaths, planBase });
+  if (memoKey && !remembered) rememberCommitStates(memoKey, structuredClone(evidence));
+  return { identity: digest(JSON.stringify({ contract, states: evidence.states, test_strictness: getTestStrictness({ projectDir: cwd }) })),
+    ...evidence };
+}
+
+async function reviewedFileStates(cwd, payload, { jobId, commit, readPaths, planBase }) {
+  const placeholders = new Set(commit ? [] : await emptyMaterializedPathsForJob(jobId, payload?.scope_generation ?? payload?._materialization_generation ?? 1, cwd));
+  const scope = finalReviewScope(payload);
   const prefix = commit ? String(await gitExecAsync(["rev-parse", "--show-prefix"], cwd)) : "";
   const objects = new Map();
   if (commit) for (const row of String(await gitExecAsync(["ls-tree", "-rz", commit], cwd, { trim: false })).split("\0").filter(Boolean)) {
@@ -61,10 +118,6 @@ export async function finalReviewIdentityEvidence(cwd, payload, { jobId = null, 
   // their bytes, even when ignored, because they are inputs to the contract.
   const files = [...new Set([...scoped, ...readPaths])].sort();
   const root = fs.realpathSync(cwd);
-  // Read-only inputs (key_files, tests_to_run) that the job does not own are
-  // pinned to the plan base commit: a sibling's uncommitted or later-committed
-  // edit to a shared read path must not change what this job's review bound.
-  const planBase = /^[a-f0-9]{40,64}$/.test(String(payload?._plan_base_commit || "")) ? String(payload._plan_base_commit) : null;
   const readOnly = new Set(readPaths.filter((file) => !scoped.has(file)));
   const baseObjects = new Map();
   if (planBase && readOnly.size > 0) {
@@ -76,19 +129,22 @@ export async function finalReviewIdentityEvidence(cwd, payload, { jobId = null, 
     } catch { /* unknown base: fall back to the live bytes below */ }
   }
   const basePrefix = planBase && readOnly.size > 0 ? String(await gitExecAsync(["rev-parse", "--show-prefix"], cwd)) : "";
-  const states = await Promise.all(files.map(async (file) => {
+  // Pinned blobs (base-pinned read inputs, and every file in commit mode) are
+  // read together after the live states; `pinned` holds [index, spec].
+  const pinned = [];
+  const states = files.map((file, index) => {
     if (readOnly.has(file) && baseObjects.has(file)) {
       const object = baseObjects.get(file);
       if (object.type !== "blob") return [file, "non_file"];
-      const bytes = await gitExecBufferAsync(["cat-file", "blob", `${planBase}:${basePrefix}${file}`], cwd);
-      return [file, object.mode === "120000" ? "symlink" : object.mode === "100755" ? 0o111 : 0, digest(bytes)];
+      pinned.push([index, `${planBase}:${basePrefix}${file}`]);
+      return [file, blobModeState(object.mode), null];
     }
     if (commit) {
       const object = objects.get(file);
       if (!object) return [file, null];
       if (object.type !== "blob") return [file, "non_file"];
-      const bytes = await gitExecBufferAsync(["cat-file", "blob", `${commit}:${prefix}${file}`], cwd);
-      return [file, object.mode === "120000" ? "symlink" : object.mode === "100755" ? 0o111 : 0, digest(bytes)];
+      pinned.push([index, `${commit}:${prefix}${file}`]);
+      return [file, blobModeState(object.mode), null];
     }
     if (placeholders.has(file)) return [file, null];
     const absolute = path.resolve(cwd, file);
@@ -100,11 +156,13 @@ export async function finalReviewIdentityEvidence(cwd, payload, { jobId = null, 
     // and must never make every review and its authority unavailable.
     if (!scoped.has(file) && !stat.isFile()) return [file, "non_file"];
     if (!fs.realpathSync(absolute).startsWith(`${root}${path.sep}`) || !stat.isFile()) throw new Error("Review path is not a workspace file");
-    return [file, stat.mode & 0o111, digest(fs.readFileSync(absolute))];
-  }));
-  const contract = reviewContract(payload);
-  return { identity: digest(JSON.stringify({ contract, states, test_strictness: getTestStrictness({ projectDir: cwd }) })),
-    states, readPaths, scoped: [...scoped] };
+    // Git records one executable mode (100755) for any executable bit; the
+    // live identity must match the commit-mode identity for a 0744 file.
+    return [file, stat.mode & 0o111 ? 0o111 : 0, digest(fs.readFileSync(absolute))];
+  });
+  const digests = await blobDigests(cwd, pinned.map((entry) => entry[1]));
+  for (const [index, spec] of pinned) states[index][2] = digests.get(spec);
+  return { states, readPaths, scoped: [...scoped] };
 }
 
 // Completion requires the reviewed files to be committed, not an idle shared

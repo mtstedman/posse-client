@@ -24,6 +24,11 @@ export const PLANNER_DISPATCH_SETTINGS = Object.freeze([
   { key: "planner_dispatch_mode", default: PLANNER_DISPATCH_MODES.PLANNER, options: PLANNER_DISPATCH_MODE_VALUES, description: "Planner-led intake for every repository on this account. Planner is the default: eligible nontrivial intake skips upfront research and preflight while the planner dispatches bounded code or web research children. Router restores the upfront research/preflight flow." },
   { key: "planner_research_effort_ceiling", default: "high", options: PLANNER_RESEARCH_EFFORT_VALUES, description: "Maximum requested reasoning effort for investigating research children." },
   { key: "planner_research_max_children", default: "5", numeric: { integer: true, min: 1, max: SUB_AGENT_LIMITS.maxResearchBatch }, description: "Maximum research children across one planner call, dispatched together or across follow-up batches." },
+  // The child lane is shared by every concurrent planner on this instance; at
+  // the defaults (5 children x 3 scheduler slots) a third planner's batch
+  // would wait behind the first two, so operators running more planners in
+  // parallel raise this rather than lowering per-plan research.
+  { key: "planner_research_max_active_children", default: String(SUB_AGENT_LIMITS.maxActiveChildren), numeric: { integer: true, min: 1, max: 32 }, description: "Research children that may run at the same time across every concurrent planner call on this instance (one shared lane)." },
   { key: "planner_research_child_timeout_ms", default: "1200000", numeric: { integer: true, min: 5000, max: MCP_TRANSPORT_TIMEOUT_MS - PLANNER_DISPATCH_RETURN_MARGIN_MS - 1000 }, description: "Research child timeout ceiling in milliseconds, further bounded by the dispatch tool timeout with time reserved for returning results." },
   { key: "planner_research_child_max_turns", default: "24", numeric: { integer: true, min: 1, max: 64 }, description: "Maximum tool/reasoning turns assigned to a research child." },
   { key: "planner_research_result_chars", default: "12000", numeric: { integer: true, min: 1000, max: 48000 }, description: "Maximum compact research result characters returned per child." },

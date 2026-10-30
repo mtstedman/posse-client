@@ -133,11 +133,12 @@ export class ProviderAttemptLifecycle {
       : job.model_tier;
 
     const retryGeneration = Math.max(0, Number(executionPayload?._retry_generation) || 0);
-    const generationAttempts = () => getAttempts(job.id).filter((entry) => (
+    const countsTowardGeneration = (entry) => (
       ["implementation", "human"].includes(String(entry.attempt_kind || "implementation"))
       && Number(entry.attempt_number || 0) > retryGeneration
-    )).length;
-    const prelimCount = generationAttempts() + 1;
+    );
+    const priorGenerationAttempts = getAttempts(job.id).filter(countsTowardGeneration).length;
+    const prelimCount = priorGenerationAttempts + 1;
     let effectiveTier = preserveExecutionProfile
       ? baseModelTier
       : (researchRetrySynthesisTier || provider.escalateTier(baseModelTier, prelimCount, { resolveModel: resolveTierModel }));
@@ -155,7 +156,9 @@ export class ProviderAttemptLifecycle {
 
     const { attemptCount, attempt } = result;
     onAttemptCreated?.(attempt.id);
-    const effectiveAttemptCount = generationAttempts();
+    // The only row added since the count above is the attempt just created,
+    // so the drift check reads it instead of re-querying the table.
+    const effectiveAttemptCount = priorGenerationAttempts + (countsTowardGeneration(attempt) ? 1 : 0);
 
     // Recalculate tier if attempt drifted (provider already resolved above with job.provider).
     if (effectiveAttemptCount !== prelimCount && !researchRetrySynthesisTier && !preserveExecutionProfile) {

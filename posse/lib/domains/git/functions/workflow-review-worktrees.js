@@ -15,7 +15,10 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
   const canonicalWorktreePath = context.worktreePath || nativeWorktreePath;
   const findLegacyWorktreeForWi = context.findLegacyWorktree || nativeFindLegacyWorktreeForWi;
 
-  function* auditWorktreeReads() {
+  // `activeOnly` is the display path: git reads (status, rev-list) run only for
+  // non-terminal WIs; terminal WIs keep the filesystem-only terminal_unmerged
+  // check so the queue flag survives. The review audit always reads in full.
+  function* auditWorktreeReads({ activeOnly = false } = {}) {
     const targetBranch = currentTargetBranch();
     const results = [];
     const allWIs = listWorkItems();
@@ -30,9 +33,10 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
 
       // Check if worktree directory exists
       const wtExists = fs.existsSync(wtDir);
+      const readGit = !activeOnly || !TERMINAL_WORK_ITEM_STATUSES.includes(wi.status);
 
       // Check for dirty worktree (uncommitted changes)
-      if (wtExists) {
+      if (wtExists && readGit) {
         try {
           const status = (yield [["status", "--porcelain"], wtDir, { timeoutMs: 5000 }]).trim();
           const userStatus = status
@@ -57,7 +61,7 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
       }
 
       // Check if branch has commits not yet merged into target
-      if (wi.merge_state !== "merged") {
+      if (wi.merge_state !== "merged" && readGit) {
         try {
           const ahead = (yield [["rev-list", `${targetBranch}..${wi.branch_name}`, "--count"], projectDir, { timeoutMs: 5000 }]).trim();
           if (parseInt(ahead) > 0) {
@@ -123,8 +127,8 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
     return next.value;
   }
 
-  async function auditWorktreeStateAsync() {
-    const reads = auditWorktreeReads();
+  async function auditWorktreeStateAsync({ activeOnly = false } = {}) {
+    const reads = auditWorktreeReads({ activeOnly });
     let next = reads.next();
     while (!next.done) {
       let value;
@@ -152,9 +156,9 @@ export function createReviewWorktreeHelpers(context, { isRuntimePorcelainLine })
     };
   }
 
-  async function collectDirtyStateAsync() {
+  async function collectDirtyStateAsync({ activeOnly = false } = {}) {
     const targetBranch = currentTargetBranch();
-    const dirtyItems = await auditWorktreeStateAsync();
+    const dirtyItems = await auditWorktreeStateAsync({ activeOnly });
     let targetStatus = "";
     try {
       targetStatus = String(await gitExecAsync(["status", "--porcelain"], projectDir, { timeoutMs: 5000 })).trim();

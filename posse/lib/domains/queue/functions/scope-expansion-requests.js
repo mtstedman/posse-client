@@ -35,7 +35,7 @@ export function createScopeExpansionOperations({
 }) {
   const TERMINAL_JOB_STATUS_SET = terminalJobStatuses;
 
-  const SCOPE_REQUEST_REVIEW_TYPE = "scope_expansion_request";
+  const SCOPE_REQUEST_REVIEW_TYPE = "file_scope_approval";
 
   function normalizeRequestedScopePath(value) {
     const raw = String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
@@ -275,7 +275,7 @@ export function createScopeExpansionOperations({
       // same attempt instead of costing a pause → gate → re-run cycle.
       let autoApprovalEnabled = true;
       try {
-        const policy = getSetting(approvalPolicyKey("scope_expansion_request")) || "ask";
+        const policy = getSetting(approvalPolicyKey("file_scope_approval")) || "ask";
         autoApprovalEnabled = ["ask", "auto:approve"].includes(policy)
           && String(getSetting(SETTING_KEYS.SCOPE_AUTO_APPROVAL) ?? "true") !== "false";
       } catch { /* default on */ }

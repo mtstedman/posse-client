@@ -96,7 +96,14 @@ export const PROVIDER_DISPATCH_COMMAND = "engagement.dispatch";
 // share it. An unusable answer (no binary, another contract, an adapter not
 // advertised) is re-probed sooner: adapters such as Codex depend on host CLI
 // state that the binary identity does not capture.
-export const PROVIDER_DISPATCH_CAPABILITIES_TTL_MS = 30_000;
+// The positive TTL bounds how long a stale "advertised" answer can hide an
+// adapter the host lost (a CLI logout, an uninstalled provider), while a
+// replaced binary invalidates the answer at once through its identity. The
+// probe blocks the event loop for up to its 10 s spawn timeout, so the TTL is
+// minutes, not seconds: one spawn per two minutes per process is the ceiling
+// a busy dispatcher pays. The negative TTL stays short so a host that just
+// gained the adapter is picked up within one retry cadence.
+export const PROVIDER_DISPATCH_CAPABILITIES_TTL_MS = 120_000;
 export const PROVIDER_DISPATCH_CAPABILITIES_NEGATIVE_TTL_MS = 10_000;
 export const PROVIDER_DISPATCH_MAX_START_BYTES = 8 * 1024 * 1024;
 export const PROVIDER_DISPATCH_MAX_EVENT_BYTES = 2 * 1024 * 1024;
@@ -114,6 +121,12 @@ export const PROVIDER_TOOL_GRANT_PROTOCOL = "posse.native.tool-grant.v1";
 export const PROVIDER_TOOL_GRANT_AUDIENCE = "posse-native-tool-authority";
 export const PROVIDER_TOOL_GRANT_REQUEST_FIELD = "grant";
 export const DEFAULT_NATIVE_TOOL_GRANT_TTL_SECONDS = 8 * 60 * 60;
+// Longest wall clock one native dispatch may run (limits.wallTimeoutMs cap).
+export const PROVIDER_DISPATCH_MAX_WALL_TIMEOUT_MS = 4 * 60 * 60 * 1_000;
+// A grant that would expire inside the longest possible dispatch is renewed
+// before the dispatch starts: an expiry mid-call is an authorization failure,
+// which is permanent and dead-letters the job.
+export const NATIVE_TOOL_GRANT_RENEWAL_LEAD_SECONDS = PROVIDER_DISPATCH_MAX_WALL_TIMEOUT_MS / 1_000 + 15 * 60;
 export const PROVIDER_DISPATCH_EVENTS = Object.freeze([
   "dispatch.started",
   "surface.attested",

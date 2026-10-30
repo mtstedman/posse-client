@@ -27,6 +27,10 @@ import { sortAgentToolDefinitions } from "../../tools/functions/agent-schema.js"
 import { verifyProviderDispatchCapabilitiesSync } from "./engagement-client.js";
 
 const MAX_STDERR_BYTES = 64 * 1024;
+// The full stderr capture rides on `error.stderr` (diagnostics render it as a
+// "### Stderr" section); the message itself carries only its tail, since it is
+// copied into jobs.error, attempt error_text, event rows and the TUI.
+const MAX_MESSAGE_STDERR_CHARS = 2 * 1024;
 const CANCEL_GRACE_MS = 2_000;
 const FORCE_KILL_GRACE_MS = 1_000;
 const TERMINAL_EVENTS = new Set([
@@ -493,12 +497,17 @@ export async function dispatchProvider(request, {
       }
       if (!terminal) {
         const diagnostic = stderr.toString("utf8").trim();
+        const excerpt = diagnostic.length > MAX_MESSAGE_STDERR_CHARS
+          ? `… ${diagnostic.slice(-MAX_MESSAGE_STDERR_CHARS)}`
+          : diagnostic;
         // `started: false` means the dispatcher refused the start frame Posse
         // built (it validates before dispatch.started): no model turn ran.
-        finishReject(protocolError(
-          `Provider dispatch exited without a terminal event${diagnostic ? `: ${diagnostic}` : ""}`,
+        const error = protocolError(
+          `Provider dispatch exited without a terminal event${excerpt ? `: ${excerpt}` : ""}`,
           { code, signal: closeSignal, started: sawStarted },
-        ));
+        );
+        if (diagnostic) error.stderr = diagnostic;
+        finishReject(error);
         return;
       }
       if (code !== 0) {

@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { BASELINE_CHECKOUT_PREFIX, VERIFICATION_ENVIRONMENT_FILES } from "../../../catalog/verification.js";
 import { gitExecAsync } from "../../git/functions/utils.js";
+import { log } from "../../../shared/telemetry/functions/logging/logger.js";
+import { linkPrimaryTestDependencies } from "./test-capability.js";
 
 async function copyIgnoredEnvironmentFiles(cwd, checkout) {
   const ignored = new Set(String(await gitExecAsync([
@@ -30,6 +32,15 @@ export async function withBaselineCheckout({ cwd, commit, run }) {
   try {
     await gitExecAsync(["worktree", "add", "--detach", checkout, commit], cwd);
     added = true;
+    // A detached checkout has no ignored installs. Link the primary's
+    // lock-matched node_modules/vendor before the first run so a Node or
+    // Composer baseline does not fail on a missing runner only to be repaired
+    // and rerun. Any failure here leaves that repair path to supply them.
+    try {
+      linkPrimaryTestDependencies(checkout);
+    } catch (error) {
+      log.debug("verification", "Baseline checkout dependency link skipped", { checkout, error: error?.message || String(error) });
+    }
     // Receipts compare ignored environment files as well as tracked source.
     // A detached checkout must see the same environment without importing dirt.
     await copyIgnoredEnvironmentFiles(cwd, checkout);

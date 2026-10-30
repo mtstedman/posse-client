@@ -4,9 +4,9 @@ import { TERMINAL_JOB_STATUSES_SQL } from "./common.js";
 import { finalReviewScope } from "../../assessment/functions/final-review-snapshot.js";
 import { parseJobPayload } from "./payload.js";
 import { findLockRowOverlap } from "./work-item-order.js";
+import { getQueueWakeGeneration } from "./wakeups.js";
 
-function scopeRows(job) {
-  const payload = parseJobPayload(job);
+function scopeRows(job, payload) {
   if (!["dev", "fix", "promote"].includes(job.job_type) || ![undefined, "code"].includes(payload.task_mode) || payload._assess_only) return [];
   const scope = finalReviewScope(payload);
   return scope.declared ? [
@@ -15,14 +15,21 @@ function scopeRows(job) {
   ] : [{ path: "*", lock_kind: "root" }];
 }
 
+// Strict-equality bucket key: `1` and `"1"`, `null` and `undefined` stay apart
+// exactly as the original `===` owner filter kept them.
+const strictKey = (...values) => values.map((value) => `${typeof value}:${String(value)}`).join("|");
+
 // One snapshot combines explicit prerequisites with observed and latent file
 // waits. Inferred edges affect rank only: they never authorize a lease or write.
-export function rankRunnableJobs(candidates, { db = getDb(), nowMs = Date.now() } = {}) {
+function buildUnlockGraph(db) {
   const jobs = db.prepare(`SELECT * FROM jobs WHERE status NOT IN (${TERMINAL_JOB_STATUSES_SQL})`).all();
   const byId = new Map(jobs.map((job) => [job.id, job]));
+  // Parse each payload once; the contract and scope passes below used to
+  // re-parse per consumer×contract×owner.
+  const payloads = new Map(jobs.map((job) => [job.id, parseJobPayload(job)]));
   const needs = new Map(jobs.map((job) => [job.id, new Set()]));
   const outgoing = new Map(jobs.map((job) => [job.id, new Map()]));
-  const scopes = new Map(jobs.map((job) => [job.id, scopeRows(job)]));
+  const scopes = new Map(jobs.map((job) => [job.id, scopeRows(job, payloads.get(job.id))]));
   function edge(producer, consumer, kind, file = null) {
     if (producer === consumer || !byId.has(consumer)) return;
     needs.get(consumer).add(producer);
@@ -35,11 +42,17 @@ export function rankRunnableJobs(candidates, { db = getDb(), nowMs = Date.now() 
     WHERE d.dependency_kind = 'hard' AND producer.status != 'succeeded'`).all()) {
     edge(dep.depends_on_job_id, dep.job_id, POLICY.edgeKinds.dependency);
   }
+  // Owners indexed by (work_item_id, parent_job_id, _plan_task_id). A contract
+  // only yields an edge when exactly one owner matches (ambiguity rule kept).
+  const ownersByTask = new Map();
+  for (const owner of jobs) {
+    const key = strictKey(owner.work_item_id, owner.parent_job_id, payloads.get(owner.id)._plan_task_id);
+    const bucket = ownersByTask.get(key);
+    if (bucket) bucket.push(owner); else ownersByTask.set(key, [owner]);
+  }
   for (const consumer of jobs) {
-    for (const contract of parseJobPayload(consumer)._shared_contracts || []) {
-      const owners = jobs.filter((owner) => owner.work_item_id === consumer.work_item_id
-        && owner.parent_job_id === consumer.parent_job_id
-        && parseJobPayload(owner)._plan_task_id === contract.owner_task_id);
+    for (const contract of payloads.get(consumer.id)._shared_contracts || []) {
+      const owners = ownersByTask.get(strictKey(consumer.work_item_id, consumer.parent_job_id, contract.owner_task_id)) || [];
       if (owners.length === 1) edge(owners[0].id, consumer.id, POLICY.edgeKinds.contract);
     }
   }
@@ -68,6 +81,27 @@ export function rankRunnableJobs(candidates, { db = getDb(), nowMs = Date.now() 
     const waiter = byId.get(wait.waiter_job_id);
     if (waiter?.status === "queued") fileOwners(waiter, wait.holder_work_item_id, wait.path, wait.lock_kind, wait.holder_job_id);
   }
+  return { needs, outgoing };
+}
+
+// `memo` is an optional caller-owned object ({ generation, graph }). The graph
+// is rebuilt only when the durable queue wake generation moved since it was
+// stored: every lease, status change, lock release and dependency write bumps
+// that generation, so a memo can never outlive the queue state it describes.
+// One scheduler lap's head reads (two per head key, several keys) share it.
+export function rankRunnableJobs(candidates, { db = getDb(), nowMs = Date.now(), memo = null } = {}) {
+  let graph;
+  if (memo) {
+    const generation = getQueueWakeGeneration();
+    if (!memo.graph || memo.generation !== generation) {
+      memo.graph = buildUnlockGraph(db);
+      memo.generation = generation;
+    }
+    graph = memo.graph;
+  } else {
+    graph = buildUnlockGraph(db);
+  }
+  const { needs, outgoing } = graph;
   return candidates.map((job) => {
     const descendants = new Set();
     const files = new Set();

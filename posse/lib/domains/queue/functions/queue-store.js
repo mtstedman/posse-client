@@ -1,3 +1,4 @@
+import { canonicalHumanGatePayload } from "../../../catalog/human-input.js";
 import { recordUnusedScopeGrants } from "./scope-grant-usage.js";
 import { rankRunnableJobs } from "./unlock-ranking.js";
 import { randomUUID } from "node:crypto";
@@ -2281,9 +2282,10 @@ export function createJob({
   const resolvedModelTier = model_tier == null
     ? getDefaultModelTierForRole(job_type)
     : model_tier;
-  const serializedPayload = typeof payload_json === "object" && payload_json !== null
-    ? JSON.stringify(payload_json)
-    : payload_json;
+  const serializedPayload = job_type === "human_input"
+    ? JSON.stringify(canonicalHumanGatePayload(typeof payload_json === "object" && payload_json !== null
+      ? payload_json : JSON.parse(payload_json || "{}")))
+    : typeof payload_json === "object" && payload_json !== null ? JSON.stringify(payload_json) : payload_json;
   const execute = () => {
     if (job_type === "human_input") {
       const active = findActiveHumanGateForPayload(serializedPayload, {
@@ -2791,6 +2793,14 @@ export function incrementAttemptCount(id) {
 
 export function updateJobPayload(id, payloadJson) {
   const db = getDb();
+  if (getJob(id)?.job_type === "human_input") {
+    const payload = canonicalHumanGatePayload(typeof payloadJson === "string" ? JSON.parse(payloadJson) : payloadJson);
+    const gate = getHumanGate(id);
+    if (gate && gate.gate_kind !== payload.gate_kind) {
+      throw new Error(`Cannot change gate identity: ${gate.gate_kind} != ${payload.gate_kind}`);
+    }
+    payloadJson = JSON.stringify(payload);
+  }
   const result = db.prepare(`UPDATE jobs SET payload_json = ?, updated_at = ? WHERE id = ?`).run(payloadJson, now(), id);
   if ((result?.changes || 0) > 0) {
     const job = getJob(id);
@@ -2848,7 +2858,7 @@ export {
 export function requeueForShutdown(jobId, { label = "graceful shutdown" } = {}) {
   const db = getDb();
   const ts = now();
-  const requeueOne = db.transaction(() => {
+  const requeueOne = () => runImmediateTransaction(db, () => {
     const row = db.prepare(`
       SELECT status
       FROM jobs
@@ -3029,7 +3039,7 @@ export function requeueWaitingHumanInputJobs({
           OR julianday(j.lease_expires_at) < julianday(?)
         )
         AND (hg.gate_job_id IS NULL OR hg.gate_state = 'open')
-    `).all(ts)
+    `).all(_graceCutoff())
       .filter((job) => !isPushOfferJob(job))
       .filter((job) => parseJobPayload(job).subtype !== "plan_approval")
       .map((job) => {
@@ -3061,7 +3071,7 @@ export function requeueWaitingHumanInputJobs({
           OR julianday(lease_expires_at) IS NULL
           OR julianday(lease_expires_at) < julianday(?)
         )
-    `).run(ts, ...parked.map((job) => job.id), ts);
+    `).run(ts, ...parked.map((job) => job.id), _graceCutoff());
 
     for (const job of parked) {
       const nextResurfaceCount = trackResurface ? job.resurfaceCount + 1 : job.resurfaceCount;
@@ -3134,7 +3144,7 @@ export function resurfaceParkedHumanGates({ snoozeSec = 600, maxResurfaces = nul
           OR julianday(j.lease_expires_at) < julianday(?)
         )
         AND (hg.gate_job_id IS NULL OR hg.gate_state = 'open')
-    `).all(ts)
+    `).all(_graceCutoff())
       .filter((job) => !isPushOfferJob(job))
       .filter((job) => parseJobPayload(job).subtype !== "plan_approval")
       .map((job) => {
@@ -3171,7 +3181,7 @@ export function resurfaceParkedHumanGates({ snoozeSec = 600, maxResurfaces = nul
           OR julianday(lease_expires_at) IS NULL
           OR julianday(lease_expires_at) < julianday(?)
         )
-    `).run(now(), ...parked.map((job) => job.id), now());
+    `).run(now(), ...parked.map((job) => job.id), _graceCutoff());
 
     for (const job of parked) {
       const nextResurfaceCount = job.resurfaceCount + 1;
@@ -3579,7 +3589,9 @@ export function requeueExpiredLeases() {
  * Rank ready work by priority, downstream unlock impact and starvation aging.
  * Tail scans can request the stable priority/type/creation keyset order.
  */
-export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], excludeJobIds = [], onlyJobTypes = [], onlyWorkItemIds = [], after = null, changedAfter = null, rankByUnlock = true } = {}) {
+// `rankingMemo` is an optional caller-owned object that lets rankRunnableJobs
+// reuse its dependency/lock graph across reads within one queue wake generation.
+export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], excludeJobIds = [], onlyJobTypes = [], onlyWorkItemIds = [], after = null, changedAfter = null, rankByUnlock = true, rankingMemo = null } = {}) {
   const db = getDb();
   const ts = now();
 
@@ -3626,6 +3638,17 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
       WHERE jd.job_id = j.id
         AND jd.dependency_kind = 'hard'
         AND dep.status != 'succeeded'
+    )`);
+  // Soft edges are advisory ordering, not prerequisites: a failed or
+  // canceled upstream never blocks the dependent (findDeadlockedJobs only
+  // reads hard edges), but while the upstream is still live the dependent
+  // stays out of the lease pool so the two do not run concurrently.
+  conditions.push(`NOT EXISTS (
+      SELECT 1 FROM job_dependencies jd
+      JOIN jobs dep ON dep.id = jd.depends_on_job_id
+      WHERE jd.job_id = j.id
+        AND jd.dependency_kind = 'soft'
+        AND dep.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
     )`);
   // Research/commit evidence warms are soft pipeline fences rather than hard
   // dependencies: a failed or missing warm must still reach the worker so its
@@ -3696,7 +3719,7 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
       j.created_at ASC, j.id ASC
     LIMIT ?
   `).all(...params);
-  return rankByUnlock ? rankRunnableJobs(candidates, { db }).slice(0, safeLimit) : candidates;
+  return rankByUnlock ? rankRunnableJobs(candidates, { db, memo: rankingMemo }).slice(0, safeLimit) : candidates;
 }
 
 export function findRunnableJob(opts = {}) {
@@ -3918,6 +3941,13 @@ export { getJobStats, getWorkItemJobStats } from "./stats.js";
 export function cancelDeadlockedJobsAtomic(actorId = null, { workItemId = null } = {}) {
   const db = getDb();
   const ts = now();
+  // Every scheduler lap calls this; the common case is "nothing deadlocked".
+  // Check with a plain read first so the idle lap never takes BEGIN IMMEDIATE.
+  // The in-transaction loop below re-reads, so a deadlock appearing between
+  // this probe and the next lap is still caught then.
+  if (findDeadlockedJobs({ workItemId }).length === 0) {
+    return { canceled: [], affectedWorkItemIds: [] };
+  }
   return runImmediateTransaction(db, () => {
     const cancelStmt = db.prepare(`
       UPDATE jobs

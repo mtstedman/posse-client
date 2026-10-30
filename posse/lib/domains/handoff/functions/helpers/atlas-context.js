@@ -64,6 +64,11 @@ const ATLAS_EXACT_PREFETCH_MAX_BYTES = 96 * 1024;
 const ATLAS_EXACT_PREFETCH_MAX_LINES = 1200;
 // A NUL in the first 8 KiB marks a binary body; text files never carry one.
 const ATLAS_EXACT_PREFETCH_BINARY_SNIFF_BYTES = 8 * 1024;
+// The exact-file prefetch never reads more than this window from disk. The
+// window is the delivery cap plus slack: a file inside it is read whole, so
+// its line counts are exact; a larger file (a dump the task text named) only
+// yields the window, and its total line count becomes a lower bound.
+const ATLAS_EXACT_PREFETCH_READ_WINDOW_BYTES = ATLAS_EXACT_PREFETCH_MAX_BYTES * 4;
 const ATLAS_PARALLEL_ENTRY_LITERAL_MAX_FILES = 8;
 const ATLAS_PARALLEL_ENTRY_LITERAL_MAX_BYTES = 3200;
 const ATLAS_SLICE_FILE_DISPLAY_MAX = 8;
@@ -1654,6 +1659,30 @@ function _countReturnedLines(content, requestedLines) {
   return String(content).split(/\r?\n/u).length;
 }
 
+// Stat first, then read at most the prefetch window through one descriptor.
+// `totalBytes` is the file's real size; `complete` says whether `raw` is the
+// whole file. Non-regular files (directories, sockets, FIFOs) are refused
+// before any read.
+async function _readExactPrefetchWindow(absolute, windowBytes = ATLAS_EXACT_PREFETCH_READ_WINDOW_BYTES) {
+  const stat = await fs.promises.stat(absolute);
+  if (!stat.isFile()) return { ok: false, error: "not a regular file" };
+  const totalBytes = stat.size;
+  const wanted = Math.min(totalBytes, windowBytes);
+  const raw = Buffer.allocUnsafe(wanted);
+  let filled = 0;
+  const handle = await fs.promises.open(absolute, "r");
+  try {
+    while (filled < wanted) {
+      const { bytesRead } = await handle.read(raw, filled, wanted - filled, filled);
+      if (bytesRead === 0) break;
+      filled += bytesRead;
+    }
+  } finally {
+    await handle.close();
+  }
+  return { ok: true, raw: filled === wanted ? raw : raw.subarray(0, filled), totalBytes, complete: totalBytes <= windowBytes };
+}
+
 async function _prefetchExactScopedFiles(filePaths, {
   packet,
   toolsAvailable,
@@ -1677,11 +1706,14 @@ async function _prefetchExactScopedFiles(filePaths, {
       if (isSensitiveEnvFileOrTargetPath(absolute)) {
         return { file, ok: false, kind: "read_file", error: "sensitive_env file skipped" };
       }
-      // Async read: keeps the disk wait on the libuv threadpool so the worker's
-      // event loop — which the scheduler's lock-renewal timer shares — is not
-      // blocked. The previous readFileSync froze the loop ~2-3s per prefetch
-      // batch (measured), stacking into the lock-renewal "starved" warnings.
-      const raw = await fs.promises.readFile(absolute);
+      // Async, stat-first, window-bounded read (file-attach.js pattern): the
+      // disk wait stays on the libuv threadpool so the worker's event loop —
+      // which the scheduler's lock-renewal timer shares — is not blocked, and
+      // a huge file the task text named costs at most one read window of heap
+      // instead of its whole body.
+      const window = await _readExactPrefetchWindow(absolute);
+      if (!window.ok) return { file, ok: false, kind: "read_file", error: window.error };
+      const { raw, totalBytes, complete } = window;
       // A binary body (a sqlite database the task text named, an image) has
       // no lines to show, and its NUL bytes make the dispatcher refuse the
       // whole prompt. Only the name reaches the prompt.
@@ -1689,14 +1721,16 @@ async function _prefetchExactScopedFiles(filePaths, {
         return { file, ok: false, kind: "read_file", error: "binary file skipped" };
       }
       const source = raw.toString("utf8");
-      const totalBytes = Buffer.byteLength(source, "utf8");
-      const allLines = source.split(/\r?\n/);
+      let allLines = source.split(/\r?\n/);
+      // A partial window ends mid-line (or mid-character): that tail is not a
+      // line of the file, so it is dropped from both the count and the body.
+      if (!complete && allLines.length > 1) allLines = allLines.slice(0, -1);
       const sourceLines = source.length === 0
         ? 0
-        : (source.endsWith("\n") ? Math.max(0, allLines.length - 1) : allLines.length);
+        : (complete && source.endsWith("\n") ? Math.max(0, allLines.length - 1) : allLines.length);
       const limitedLines = allLines.slice(0, ATLAS_EXACT_PREFETCH_MAX_LINES);
       let content = limitedLines.join("\n");
-      let truncated = limitedLines.length < allLines.length;
+      let truncated = limitedLines.length < allLines.length || !complete;
       const capped = _truncateUtf8AtLineBoundary(content, ATLAS_EXACT_PREFETCH_MAX_BYTES);
       content = capped.content;
       if (capped.truncated) truncated = true;
@@ -1709,7 +1743,10 @@ async function _prefetchExactScopedFiles(filePaths, {
         content,
         bytes,
         totalBytes,
+        // Exact when the whole file fit the read window; otherwise the lines
+        // seen in the window, a lower bound flagged by totalLinesComplete.
         totalLines: allLines.length,
+        totalLinesComplete: complete,
         sourceLines,
         returnedLines,
         truncated,
@@ -3394,7 +3431,9 @@ function _renderExactFileBlock(item, trim, { scoped = false, charsLeft = Infinit
 
   const meta = [];
   if (item.kind) meta.push(item.kind);
-  if (item.totalLines != null) meta.push(`${item.totalLines} total lines`);
+  if (item.totalLines != null) {
+    meta.push(item.totalLinesComplete === false ? `${item.totalLines}+ total lines (read window)` : `${item.totalLines} total lines`);
+  }
   if (item.returnedLines != null) meta.push(`${item.returnedLines} returned`);
   if (item.bytes != null) meta.push(`${item.bytes} bytes`);
   if (item.originalLines != null) meta.push(`${item.originalLines} source lines`);
