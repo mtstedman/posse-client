@@ -36,7 +36,7 @@ export async function readLocalPrompt(args, input, maxBytes) {
 
 export async function checkLocalOutput(destination, format, stdout) {
   if (!destination || destination === "-") {
-    if (format === "png" && stdout.isTTY) throw new Error("PNG output needs --output FILE or redirected stdout.");
+    if (["png", "avi"].includes(format) && stdout.isTTY) throw new Error(`${format.toUpperCase()} output needs --output FILE or redirected stdout.`);
     return;
   }
   try { await fs.lstat(destination); } catch (error) {
@@ -52,7 +52,7 @@ export async function checkLocalOutput(destination, format, stdout) {
 
 export function encodeLocalOutput(result, model, format) {
   if (!result || result.modelId !== model.modelId) throw new Error("Native response model does not match the request.");
-  let png;
+  let png, avi;
   if (model.kind === "image") {
     const image = result.image;
     if (image?.mimeType !== "image/png" || typeof image.base64 !== "string") throw new Error("Native response is missing PNG output.");
@@ -64,9 +64,24 @@ export function encodeLocalOutput(result, model, format) {
       || png.length !== image.bytes || createHash("sha256").update(png).digest("hex") !== image.sha256) {
       throw new Error("Native PNG failed integrity validation.");
     }
+  } else if (model.kind === "video") {
+    const video = result.video;
+    if (video?.mimeType !== "video/x-msvideo" || typeof video.base64 !== "string" || video.base64.length > Math.ceil(40 * 1024 ** 2 / 3) * 4) throw new Error("Native response is missing or exceeds bounded AVI output.");
+    avi = Buffer.from(video.base64, "base64");
+    if (avi.toString("base64") !== video.base64 || avi.length < 12
+      || avi.subarray(0, 4).toString() !== "RIFF" || avi.subarray(8, 12).toString() !== "AVI "
+      || avi.readUInt32LE(4) + 8 !== avi.length || avi.length !== video.bytes
+      || video.fps !== 24 || ![5,22,39,56,73,90].includes(video.frames)
+      || !Number.isInteger(video.width) || video.width < 64 || video.width > 1024 || video.width % 32
+      || !Number.isInteger(video.height) || video.height < 64 || video.height > 1024 || video.height % 32
+      || video.audio?.sampleRate !== 32000 || video.audio?.channels !== 2 || video.audio?.codec !== "pcm_s16le"
+      || createHash("sha256").update(avi).digest("hex") !== video.sha256) {
+      throw new Error("Native AVI failed integrity validation.");
+    }
   } else if (typeof result.content !== "string") throw new Error("Native response is missing generated text.");
   if (format === "json") return Buffer.from(JSON.stringify(result) + "\n");
   if (format === "png") return png;
+  if (format === "avi") return avi;
   return Buffer.from(result.content + (result.content.endsWith("\n") ? "" : "\n"));
 }
 

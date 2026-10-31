@@ -568,8 +568,8 @@ printf 'Explain Rust ownership' | posse local --model qwen-code --format json --
 posse local --model qwen-image --prompt 'A red robot holding a POSSE sign' --format png --output robot.png --steps 20
 ```
 
-The slugs are `qwen-code` (`qwen2.5-coder-3b-instruct`) and `qwen-image`
-(`qwen-image-2512`); either slug or full ID works with `--model`.
+The slugs are `qwen-code` (`qwen2.5-coder-3b-instruct`), `qwen-image`
+(`qwen-image-2512`), and `minimax-h3` (video with stereo audio); either slug or full ID works with `--model`.
 `--input FILE` reads a prompt from a UTF-8 file. `--model-root DIR` selects an
 existing model store; the default is `~/.posse/models`.
 `--runtime-root DIR` selects the ONNX runtime cache, defaulting to
@@ -607,14 +607,36 @@ With multiple GPUs, `--gpu` opens an interactive selector; scripts must supply
 IDs are preferred; IDs labelled `enumeration` should be looked up again after
 hardware, visibility, or driver changes. Operations exceeding the selected GPU’s
 tensor limits run on CPU. The engine automatically balances weights between the
-selected GPU and RAM, streaming work in segments. It reserves at least 512 MiB or
-20% of free VRAM for driver/desktop headroom and never borrows another GPU.
+selected GPU and RAM, streaming work in segments. It reserves 5% of free VRAM,
+bounded to 512 MiB..1 GiB, for driver/desktop headroom and never borrows another
+GPU. Opportunistic weight prefetch uses spare capacity without evicting cached
+weights; unsupported CPU-only weights do not consume the GPU allocation estimate.
 Use `--gpu-memory-gb 4` to cap GPU use at 4 GiB; this also enables GPU execution
 and can only lower the automatic budget. Progress shows the planned budget,
 and `--format json` includes the effective budget under `runtime.memory`.
 The client requires a runtime advertising GPU memory budgeting before generation.
 Worker failures include their exit status and recent native stderr.
-Use `posse local --help` for image dimensions, steps, seed and text-token limits.
+MiniMax H3 uses the same native engine and GPU controls for text-to-video with
+stereo sound. Its pinned quantized profile downloads approximately 33.02 GiB;
+inference also needs additional RAM. Install it explicitly, then generate:
+
+```bash
+posse local install minimax-h3
+posse local gpus --model minimax-h3
+posse local --model minimax-h3 --gpu --prompt "A little robot waves and beeps cheerfully" --frames 56 --steps 20 --output robot.avi
+```
+
+H3 defaults to 384×384, 56 frames at 24 fps (about 2.33 seconds), and 20 steps.
+Dimensions must be divisible by 32; `--frames` accepts 5, 22, 39, 56, 73 or 90.
+The initial profile takes text only, with guidance fixed to 1. `--format avi`
+(the default) writes MJPEG video and 32 kHz stereo PCM audio; `--format json`
+includes the video as base64 and generation metadata. No Python or FFmpeg
+installation is needed. AVI output is limited to 40 MiB; reduce dimensions or
+frame count if it exceeds that limit. For a small execution check, use
+`--width 64 --height 64 --frames 5 --steps 1`; this is not a quality test.
+The model uses the [MiniMax H3 community license](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE).
+
+Use `posse local --help` for all generation controls.
 
 Run `posse local-models` for an interactive selector, or use
 `posse local-models list` to inspect the verified catalog without downloading.

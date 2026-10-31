@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import { defaultLocalGenerationModelRoot, defaultLocalGenerationRuntimeRoot } from "../../../shared/native/functions/local-model-paths.js";
 import path from "node:path";
 import { LOCAL_BRIDGE_MODELS } from "../../../catalog/local-model.js";
-import { ML_CAPABILITIES_METHOD, ML_GENERATE_METHOD, ML_GENERATE_IMAGE_METHOD, ML_INSTALL_IMAGE_MODEL_METHOD } from "../../../catalog/binary.js";
+import { ML_CAPABILITIES_METHOD, ML_GENERATE_METHOD, ML_GENERATE_IMAGE_METHOD, ML_INSTALL_IMAGE_MODEL_METHOD, ML_GENERATE_VIDEO_METHOD, ML_INSTALL_VIDEO_MODEL_METHOD } from "../../../catalog/binary.js";
 import { LocalModelProgress } from "../classes/LocalModelProgress.js";
 import { LOCAL_USAGE, numericOption, parseLocalOptions } from "./local-options.js";
 import { checkLocalOutput, encodeLocalOutput, readLocalPrompt, writeLocalOutput } from "./local-output.js";
@@ -35,7 +35,7 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
   const model = args.action === "gpus" && !args.model ? LOCAL_BRIDGE_MODELS.find(m => m.kind === "image")
     : LOCAL_BRIDGE_MODELS.find(m => m.slug === args.model || m.modelId === args.model);
   if (!model) throw new Error("Choose a model with --model <slug>. Run posse local list for available slugs.");
-  if (args.action === "gpus" && model.kind !== "image") throw new Error("GPU discovery currently applies to image models.");
+  if (args.action === "gpus" && model.kind === "text") throw new Error("GPU discovery currently applies to image and video models.");
   let payload, format;
   if (args.action === "generate") {
     format = args.format || model.formats[0];
@@ -43,7 +43,7 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
     await checkLocalOutput(args.output, format, stdout);
     payload = await generationPayload(model, args, stdin);
   } else if (model.kind === "text" && args.source) {
-    throw new Error("--source is only supported for image model files; text models use signed packages.");
+    throw new Error("--source is only supported for image/video model files; text models use signed packages.");
   }
   const progress = new LocalModelProgress(stderr, { quiet: args.quiet });
   const controller = new AbortController();
@@ -66,7 +66,7 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
     const caps = (await invoke(ML_CAPABILITIES_METHOD, {}, options))?.capabilities;
     if (args.action === "gpus") {
       progress.stop();
-      writeImageGpuInventory(caps?.imageGeneration, available.version, stdout, args.json || args.format === "json");
+      writeImageGpuInventory(model.kind === "video" ? caps?.videoGeneration : caps?.imageGeneration, available.version, stdout, args.json || args.format === "json");
       return 0;
     }
     const capability = requireLocalModelCapability(model, caps, { version: available.version });
@@ -113,7 +113,7 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
         }
         signal.throwIfAborted();
         progress.start();
-        await invoke(ML_INSTALL_IMAGE_MODEL_METHOD, request, options);
+        await invoke(model.kind === "video" ? ML_INSTALL_VIDEO_MODEL_METHOD : ML_INSTALL_IMAGE_MODEL_METHOD, request, options);
         progress.stop();
         stderr.write(`${model.slug} installed and SHA-256 verified.\n`);
       }
@@ -122,7 +122,7 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
     progress.update({ stage: `Loading ${model.slug}` });
     let result;
     try {
-      result = await invoke(model.kind === "image" ? ML_GENERATE_IMAGE_METHOD : ML_GENERATE_METHOD, payload, options);
+      result = await invoke(model.kind === "video" ? ML_GENERATE_VIDEO_METHOD : model.kind === "image" ? ML_GENERATE_IMAGE_METHOD : ML_GENERATE_METHOD, payload, options);
     } catch (error) {
       if (error?.name !== "AbortError" && /inspect directory|not installed|No such file/i.test(error?.message || "")) {
         throw new Error(`${model.slug} is not installed or its files are incomplete. Run: posse local install ${model.slug} --model-root ${JSON.stringify(modelRoot)}`, { cause: error });
@@ -146,17 +146,22 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
 async function generationPayload(model, args, input) {
   const imageFlags = ["steps", "width", "height", "threads", "cfg-scale", "negative-prompt", "gpu", "gpu-id", "gpu-memory-gb"];
   const textFlags = ["max-tokens", "system"];
-  for (const flag of model.kind === "image" ? textFlags : imageFlags) if (args[flag] !== undefined) throw new Error(`--${flag} does not apply to ${model.kind} models.`);
-  const prompt = await readLocalPrompt(args, input, model.kind === "image" ? 8192 : 262144);
-  if (model.kind === "image") {
+  const invalidFlags = model.kind === "text" ? [...imageFlags, "frames"] : model.kind === "video" ? [...textFlags, "cfg-scale", "negative-prompt"] : [...textFlags, "frames"];
+  for (const flag of invalidFlags) if (args[flag] !== undefined) throw new Error(`--${flag} does not apply to ${model.kind} models.`);
+  const prompt = await readLocalPrompt(args, input, model.kind !== "text" ? 8192 : 262144);
+  if (model.kind !== "text") {
     if (args["gpu-id"] !== undefined && !/^[A-Za-z0-9:_.-]{1,256}$/.test(args["gpu-id"])) throw new Error("--gpu-id must be an exact ID from posse local gpus.");
     const negativePrompt = args["negative-prompt"] || "";
     if (negativePrompt.includes("\0") || Buffer.byteLength(negativePrompt) > 8192) throw new Error("Negative prompt must be NUL-free and at most 8192 bytes.");
-    return { modelId: model.modelId, prompt, negativePrompt,
+    const video = model.kind === "video";
+    const frames = video ? numericOption(args, "frames", 56, 5, 90) : undefined;
+    if (video && (frames - 5) % 17) throw new Error("H3 --frames must be 5, 22, 39, 56, 73 or 90.");
+    return { modelId: model.modelId, prompt,
+      ...(video ? { frames } : { negativePrompt, cfgScale: numericOption(args, "cfg-scale", 2.5, 1, 10, 0) }),
       ...(args["gpu-memory-gb"] !== undefined ? { gpuMemoryGiB: numericOption(args, "gpu-memory-gb", undefined, 0.25, 1024, 0) } : {}),
-      width: numericOption(args, "width", 384, 64, 1024, 16), height: numericOption(args, "height", 384, 64, 1024, 16),
+      width: numericOption(args, "width", 384, 64, 1024, video ? 32 : 16), height: numericOption(args, "height", 384, 64, 1024, video ? 32 : 16),
       steps: numericOption(args, "steps", 20, 1, 50), threads: numericOption(args, "threads", 8, 1, 32),
-      seed: numericOption(args, "seed", 42, 0, 4294967295), cfgScale: numericOption(args, "cfg-scale", 2.5, 1, 10, 0) };
+      seed: numericOption(args, "seed", 42, 0, 4294967295) };
   }
   if (args.seed !== undefined) throw new Error("Text generation currently uses deterministic greedy decoding; --seed applies to images.");
   if (args.system && (Buffer.byteLength(args.system) > 262144 || args.system.includes("\0"))) throw new Error("System prompt is too large or contains NUL.");

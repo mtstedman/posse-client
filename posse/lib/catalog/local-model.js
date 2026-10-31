@@ -34,6 +34,7 @@ export function localModelProfile(modelId = null, tier = "standard") {
 
 // Operator CLI inventory. This does not widen agent/provider model selection.
 export const QWEN_IMAGE_MODEL_ID = "qwen-image-2512";
+export const MINIMAX_H3_MODEL_ID = "minimax-h3";
 export const LOCAL_BRIDGE_MODELS = Object.freeze([
   Object.freeze({ slug: "qwen-code", modelId: QWEN_LOCAL_MODEL_ID, kind: "text",
     directory: LOCAL_MODEL_PROFILES[QWEN_LOCAL_MODEL_ID].profileId,
@@ -43,4 +44,9 @@ export const LOCAL_BRIDGE_MODELS = Object.freeze([
     directory: QWEN_IMAGE_MODEL_ID, formats: Object.freeze(["png", "json"]),
     platforms: Object.freeze(["linux-x64", "linux-arm64", "win32-x64", "darwin-arm64"]), installation: "pinned-files",
     requirements: "x64: AVX2, FMA, F16C; ARM64: NEON; approximately 19 GiB RAM for the tested 384x384 profile" }),
+  Object.freeze({ slug: "minimax-h3", modelId: MINIMAX_H3_MODEL_ID, kind: "video",
+    directory: MINIMAX_H3_MODEL_ID, formats: Object.freeze(["avi", "json"]),
+    platforms: Object.freeze(["linux-x64", "linux-arm64", "win32-x64", "darwin-arm64"]), installation: "pinned-files",
+    requirements: "33.02 GiB model download; additional RAM for inference; x64: AVX2, FMA, F16C; ARM64: NEON",
+    licenseUrl: "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE" }),
 ]);
