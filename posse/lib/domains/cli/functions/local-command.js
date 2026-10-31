@@ -6,6 +6,7 @@ import { ML_CAPABILITIES_METHOD, ML_GENERATE_METHOD, ML_GENERATE_IMAGE_METHOD, M
 import { LocalModelProgress } from "../classes/LocalModelProgress.js";
 import { LOCAL_USAGE, numericOption, parseLocalOptions } from "./local-options.js";
 import { checkLocalOutput, encodeLocalOutput, readLocalPrompt, writeLocalOutput } from "./local-output.js";
+import { requireLocalModelCapability } from "./local-capabilities.js";
 
 export { LOCAL_USAGE };
 const LONG_TIMEOUT_MS = 24 * 60 * 60 * 1000;
@@ -60,11 +61,7 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
       runtimeRoot: path.resolve(args["runtime-root"] || defaultLocalGenerationRuntimeRoot()),
       onProgress: event => progress.update(event) };
     const caps = (await invoke(ML_CAPABILITIES_METHOD, {}, options))?.capabilities;
-    const capability = model.kind === "image" ? caps?.imageGeneration : caps?.generation;
-    if (!(model.kind === "image" ? capability?.supported : capability?.runtime?.supported)
-      || !capability?.models?.some(m => m.id === model.modelId)) {
-      throw new Error(`${model.slug} is unavailable in this native runtime/platform. Install an updated posse-ml artifact supporting this model.`);
-    }
+    const capability = requireLocalModelCapability(model, caps, { version: available.version });
     if (args.action === "install") {
       progress.stop();
       if (model.kind === "text") {

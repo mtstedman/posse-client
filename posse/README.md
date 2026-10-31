@@ -591,7 +591,8 @@ Model downloads require interactive size confirmation. To install image files
 already on disk, use `posse local install qwen-image --source /absolute/files`.
 The image installer uses the native catalog's immutable URLs and SHA-256 pins;
 callers cannot substitute download URLs or hashes. Qwen image generation is
-currently Linux x64 CPU-only with AVX2, FMA and F16C, and can take tens of minutes.
+CPU-only on Linux x64 and Windows x64 (AVX2, FMA and F16C), and Linux ARM64 and
+macOS Apple Silicon (NEON), and can take tens of minutes.
 Use `posse local --help` for image dimensions, steps, seed and text-token limits.
 
 Run `posse local-models` for an interactive selector, or use

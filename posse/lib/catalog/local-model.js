@@ -41,6 +41,6 @@ export const LOCAL_BRIDGE_MODELS = Object.freeze([
     installation: "signed-package" }),
   Object.freeze({ slug: "qwen-image", modelId: QWEN_IMAGE_MODEL_ID, kind: "image",
     directory: QWEN_IMAGE_MODEL_ID, formats: Object.freeze(["png", "json"]),
-    platforms: Object.freeze(["linux-x64"]), installation: "pinned-files",
-    requirements: "AVX2, FMA, F16C; approximately 19 GiB RAM for the tested 384x384 profile" }),
+    platforms: Object.freeze(["linux-x64", "linux-arm64", "win32-x64", "darwin-arm64"]), installation: "pinned-files",
+    requirements: "x64: AVX2, FMA, F16C; ARM64: NEON; approximately 19 GiB RAM for the tested 384x384 profile" }),
 ]);
