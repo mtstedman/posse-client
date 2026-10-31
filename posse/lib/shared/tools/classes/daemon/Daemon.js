@@ -277,15 +277,15 @@ export class Daemon {
     this._transport = null;
     this.#trackDetachedTransport(transport);
     this._lastExitAt = this._now();
-    this.#failPending("daemon transport exited");
+    this.#failPending("daemon transport exited", transport?.exitDetails?.());
   }
 
   /** Fail every request owned by the transport being detached. */
-  #failPending(message) {
+  #failPending(message, transportExit = null) {
     const waiters = [...this._pending.values()];
     this._pending.clear();
     for (const entry of waiters) {
-      entry.finish({ ok: false, error: { message }, _transportGone: true });
+      entry.finish({ ok: false, error: { message }, _transportGone: true, ...(transportExit ? { transportExit } : {}) });
     }
   }
 

@@ -70,7 +70,7 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
       return 0;
     }
     const capability = requireLocalModelCapability(model, caps, { version: available.version });
-    if (args.action === "generate" && (args.gpu || args["gpu-id"] !== undefined)) {
+    if (args.action === "generate" && (args.gpu || args["gpu-id"] !== undefined || args["gpu-memory-gb"] !== undefined)) {
       progress.stop();
       const device = await selectImageGpu(capability, args, { version: available.version, stdin, stderr, askChoice: io.askChoice });
       signal.throwIfAborted();
@@ -144,7 +144,7 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
 }
 
 async function generationPayload(model, args, input) {
-  const imageFlags = ["steps", "width", "height", "threads", "cfg-scale", "negative-prompt", "gpu", "gpu-id"];
+  const imageFlags = ["steps", "width", "height", "threads", "cfg-scale", "negative-prompt", "gpu", "gpu-id", "gpu-memory-gb"];
   const textFlags = ["max-tokens", "system"];
   for (const flag of model.kind === "image" ? textFlags : imageFlags) if (args[flag] !== undefined) throw new Error(`--${flag} does not apply to ${model.kind} models.`);
   const prompt = await readLocalPrompt(args, input, model.kind === "image" ? 8192 : 262144);
@@ -153,6 +153,7 @@ async function generationPayload(model, args, input) {
     const negativePrompt = args["negative-prompt"] || "";
     if (negativePrompt.includes("\0") || Buffer.byteLength(negativePrompt) > 8192) throw new Error("Negative prompt must be NUL-free and at most 8192 bytes.");
     return { modelId: model.modelId, prompt, negativePrompt,
+      ...(args["gpu-memory-gb"] !== undefined ? { gpuMemoryGiB: numericOption(args, "gpu-memory-gb", undefined, 0.25, 1024, 0) } : {}),
       width: numericOption(args, "width", 384, 64, 1024, 16), height: numericOption(args, "height", 384, 64, 1024, 16),
       steps: numericOption(args, "steps", 20, 1, 50), threads: numericOption(args, "threads", 8, 1, 32),
       seed: numericOption(args, "seed", 42, 0, 4294967295), cfgScale: numericOption(args, "cfg-scale", 2.5, 1, 10, 0) };

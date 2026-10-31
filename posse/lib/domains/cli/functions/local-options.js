@@ -9,7 +9,7 @@ export const LOCAL_USAGE = `Usage:
               [--model-root DIR] [--runtime-root DIR]
 
 Image options: --steps 20 --width 384 --height 384 --seed 42 --threads 8 --cfg-scale 2.5
-               --negative-prompt TEXT --gpu [--gpu-id ID]
+               --negative-prompt TEXT --gpu [--gpu-id ID] [--gpu-memory-gb GiB]
 Text options:  --max-tokens 512 --system TEXT
 
 Slugs: qwen-code (text), qwen-image (image); full model IDs also work.
@@ -20,11 +20,12 @@ Network model installs require interactive size confirmation. --source installs
 already-downloaded image files without a download. Generation never installs models.
 CPU is the default. --gpu-id also enables GPU execution. Run gpus to copy an ID.
 With multiple GPUs, --gpu opens a selector in a terminal; scripts need --gpu-id.
-GPU selection uses one device; weights remain in system RAM.
+GPU selection uses one device with automatic GPU/RAM offloading and VRAM headroom.
+--gpu-memory-gb caps VRAM use (GiB) and implies --gpu; it never raises the automatic budget.
 Ctrl+C cancels generation and retires the native worker.`;
 
 const stringFlags = ["model", "prompt", "input", "format", "output", "model-root", "runtime-root", "source",
-  "steps", "width", "height", "seed", "threads", "cfg-scale", "negative-prompt", "max-tokens", "system", "gpu-id"];
+  "steps", "width", "height", "seed", "threads", "cfg-scale", "negative-prompt", "max-tokens", "system", "gpu-id", "gpu-memory-gb"];
 const booleanFlags = ["help", "json", "quiet", "non-interactive", "gpu"];
 export function parseLocalOptions(argv) {
   const { values, positionals } = parseArgs({ args: argv, strict: true, allowPositionals: true,

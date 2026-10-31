@@ -32,6 +32,7 @@ export function writeImageGpuInventory(capability, version, stdout, json) {
 
 export async function selectImageGpu(capability, args, { version, stdin, stderr, askChoice }) {
   const gpu = imageGpuInventory(capability, version);
+  if (gpu.memoryPolicy?.mode !== "auto-fit" || gpu.memoryPolicy?.capGiB !== true) throw new Error(`posse-ml ${version} does not provide GPU memory budgeting. Update the native runtime before GPU generation.`);
   if (args["gpu-id"] !== undefined) {
     const matches = gpu.devices.filter(device => device.id === args["gpu-id"]);
     if (matches.length !== 1) throw new Error(`GPU ID ${JSON.stringify(args["gpu-id"])} is ${matches.length ? "ambiguous" : "unavailable"}. Run posse local gpus again.`);

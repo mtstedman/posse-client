@@ -605,8 +605,15 @@ posse local --model qwen-image --gpu --prompt "A red robot" --format png --outpu
 With multiple GPUs, `--gpu` opens an interactive selector; scripts must supply
 `--gpu-id`. Unavailable IDs fail instead of falling back to the CPU. Hardware
 IDs are preferred; IDs labelled `enumeration` should be looked up again after
-hardware, visibility, or driver changes. Selection uses one GPU, with model
-weights in system RAM; it does not combine the VRAM of multiple cards.
+hardware, visibility, or driver changes. Operations exceeding the selected GPU’s
+tensor limits run on CPU. The engine automatically balances weights between the
+selected GPU and RAM, streaming work in segments. It reserves at least 512 MiB or
+20% of free VRAM for driver/desktop headroom and never borrows another GPU.
+Use `--gpu-memory-gb 4` to cap GPU use at 4 GiB; this also enables GPU execution
+and can only lower the automatic budget. Progress shows the planned budget,
+and `--format json` includes the effective budget under `runtime.memory`.
+The client requires a runtime advertising GPU memory budgeting before generation.
+Worker failures include their exit status and recent native stderr.
 Use `posse local --help` for image dimensions, steps, seed and text-token limits.
 
 Run `posse local-models` for an interactive selector, or use

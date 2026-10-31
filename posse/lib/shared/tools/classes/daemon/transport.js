@@ -40,6 +40,7 @@ import { sanitizeWorkerExecArgv } from "../../../../domains/runtime/functions/wo
 // much without a newline is broken — kill it (see the overflow branch) so
 // pending requests fail over immediately instead of dying by timeout.
 const JSONL_BUFFER_MAX_CHARS = 256 * 1024 * 1024;
+const STDERR_TAIL_MAX_CHARS = 16 * 1024;
 
 function killProcessTree(proc, { force = true, platform = process.platform, spawnImpl = spawn } = {}) {
   if (!proc || proc.exitCode != null || proc.killed) return false;
@@ -80,6 +81,7 @@ function killProcessTree(proc, { force = true, platform = process.platform, spaw
  * @property {(opts?: { graceMs?: number, waitMs?: number }) => Promise<void>} [dispose]
  * @property {() => Promise<void>} [whenTerminated]
  * @property {() => number | null} [hostPid]
+ * @property {() => { code: number | null, signal: string | null, stderr: string } | null} [exitDetails]
  */
 
 /**
@@ -121,7 +123,9 @@ export function ProcessTransport(opts) {
   const spawnImpl = opts.spawnImpl || spawn;
   const platform = opts.platform || process.platform;
   const maxBufferChars = opts.maxBufferChars ?? JSONL_BUFFER_MAX_CHARS;
-  /** @typedef {{ proc: import("node:child_process").ChildProcess, pid: number | null, buffer: string, scanFrom: number, exited: boolean, exitConfirmed: boolean, retireTimer: ReturnType<typeof setTimeout> | null, retireDeadline: number, terminalPromise: Promise<void>, resolveTerminal: () => void }} ProcessRecord */
+  /** @type {{ code: number | null, signal: string | null, stderr: string } | null} */
+  let lastExit = null;
+  /** @typedef {{ proc: import("node:child_process").ChildProcess, pid: number | null, buffer: string, stderr: string, code: number | null, signal: string | null, scanFrom: number, exited: boolean, exitConfirmed: boolean, retireTimer: ReturnType<typeof setTimeout> | null, retireDeadline: number, terminalPromise: Promise<void>, resolveTerminal: () => void }} ProcessRecord */
   /** @type {ProcessRecord | null} */
   let active = null;
   /** Detached incarnations remain owned until the OS confirms their exit. */
@@ -149,6 +153,7 @@ export function ProcessTransport(opts) {
     record.buffer = "";
     record.scanFrom = 0;
     if (!shouldNotify) return;
+    lastExit = { code: record.code, signal: record.signal, stderr: record.stderr };
     for (const cb of exitHandlers) cb();
   };
 
@@ -184,6 +189,9 @@ export function ProcessTransport(opts) {
         proc,
         pid: proc.pid ?? null,
         buffer: "",
+        stderr: "",
+        code: null,
+        signal: null,
         scanFrom: 0,
         exited: false,
         exitConfirmed: false,
@@ -193,6 +201,7 @@ export function ProcessTransport(opts) {
         resolveTerminal,
       };
       active = record;
+      lastExit = null;
       // Attach terminal listeners before any optional stream setup. If setup
       // below fails synchronously, the ledger remains authoritative until the
       // child actually exits instead of losing the only orphan breadcrumb.
@@ -200,8 +209,13 @@ export function ProcessTransport(opts) {
       // proof that a successfully spawned pid is gone (kill/send can fail).
       // Notify waiters once while retaining the ledger until the OS "exit".
       proc.on("error", () => failAndKill(record));
-      proc.on("exit", () => emitExit(record, { confirmed: true }));
-      proc.on("close", () => emitExit(record, { confirmed: true }));
+      const onTerminal = (code, signal) => {
+        record.code = code ?? null;
+        record.signal = signal ?? null;
+        emitExit(record, { confirmed: true });
+      };
+      proc.on("exit", onTerminal);
+      proc.on("close", onTerminal);
       recordDaemonSpawn(record.pid, bin, { label: opts.label });
       // Don't let an idle daemon pin the event loop: unref the child and its
       // pipes so the host process can exit when its real work is done (an
@@ -253,7 +267,10 @@ export function ProcessTransport(opts) {
           failAndKill(record);
         }
       });
-      proc.stderr?.on("data", () => { /* host diagnostics; ignored */ });
+      proc.stderr?.setEncoding?.("utf8");
+      proc.stderr?.on("data", (chunk) => {
+        record.stderr = (record.stderr + chunk.toString("utf8")).slice(-STDERR_TAIL_MAX_CHARS);
+      });
       return true;
     },
     send(message) {
@@ -261,6 +278,7 @@ export function ProcessTransport(opts) {
     },
     onMessage(cb) { messageHandlers.push(cb); },
     onExit(cb) { exitHandlers.push(cb); },
+    exitDetails() { return lastExit ? { ...lastExit } : null; },
     kill() {
       const record = active;
       active = null;

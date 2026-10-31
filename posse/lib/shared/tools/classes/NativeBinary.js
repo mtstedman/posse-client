@@ -769,12 +769,17 @@ export class NativeBinary {
       // instead of replaying it in a second process.
       const replayUnsafe = opts.workerSessionId != null || (opts.idempotent === false && reason !== "overloaded");
       if (opts.workerFallback === false || replayUnsafe) {
+        const exit = response.transportExit;
+        const status = exit?.signal ? `; signal ${exit.signal}`
+          : typeof exit?.code === "number" ? `; exit code ${exit.code}` : "";
+        const diagnostic = typeof exit?.stderr === "string"
+          ? exit.stderr.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").trim() : "";
         const error = /** @type {NativeBinaryError} */ (
-          new Error(`native ${this.name} worker unavailable (${reason})`)
+          new Error(`native ${this.name} worker unavailable (${reason}${status})${diagnostic ? `\nNative stderr:\n${diagnostic}` : ""}`)
         );
         error.code = "POSSE_NATIVE_WORKER_UNAVAILABLE";
-        error.details = { reason };
-        return { ok: false, code: null, signal: null, stdout: "", stderr: error.message, error };
+        error.details = { reason, ...(exit ? { transportExit: exit } : {}) };
+        return { ok: false, code: exit?.code ?? null, signal: exit?.signal ?? null, stdout: "", stderr: error.message, error };
       }
       return this.#runPerCall(subcommand, args, requestOpts);
     }

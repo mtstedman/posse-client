@@ -31,6 +31,7 @@ export class LocalModelProgress {
       if (Number.isInteger(event.step) && event.totalSteps > 0) this.label += ` ${event.step}/${event.totalSteps}`;
       if (event.totalBytes > 0) this.label += ` ${Math.min(100, 100 * event.downloadedBytes / event.totalBytes).toFixed(1)}%`;
       if (event.file) this.label += ` ${event.file}`;
+      if (Number.isSafeInteger(event.gpuBudgetBytes) && event.gpuBudgetBytes > 0) this.label += ` (${(event.gpuBudgetBytes / 1024 ** 3).toFixed(2)} GiB GPU budget)`;
     }
     this.render();
   }
