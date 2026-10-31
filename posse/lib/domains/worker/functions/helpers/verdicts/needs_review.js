@@ -9,6 +9,7 @@ import {
 } from "../verdict-shared.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
+import { canClarifyAssessmentReview } from "../assessment-review-correction.js";
 
 function isAssessmentDispositionQuestion(question) {
   const text = String(question || "").trim().toLowerCase();
@@ -92,9 +93,10 @@ export function handle(job, verdict, ctx) {
       leaseToken: ctx.leaseToken,
       recordAssessorVerdict: ctx.recordAssessorVerdict,
       assessmentModelTier: ctx.assessmentModelTier,
+      clarifyReview: canClarifyAssessmentReview(verdict),
     })
   ) {
-    log(`${C.yellow}[assessor] NEEDS REVIEW${C.reset} WI#${job.work_item_id} job #${job.id}: retrying assessment at a stronger tier before asking the operator${reasonBrief}`);
+    log(`${C.yellow}[assessor] NEEDS REVIEW${C.reset} WI#${job.work_item_id} job #${job.id}: retrying assessment within its recovery budget before asking the operator${reasonBrief}`);
     return;
   }
 

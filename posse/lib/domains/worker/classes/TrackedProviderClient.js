@@ -94,6 +94,7 @@ import { runFinalReviewer } from "../../assessment/functions/final-review-review
 import { McpServerConfig } from "../../../shared/tools/classes/McpServerConfig.js";
 import { publishContextBudgetCheckpoint } from "../../billing/functions/context-budget.js";
 import { isProviderInfrastructureError } from "../functions/execution/provider-error.js";
+import { canCorrectMissingDevHandoff, missingHandoffCorrectionPrompt } from "../functions/execution/terminal-handoff-recovery.js";
 import { assertTeamManagedProvider } from "../../pairing/functions/team-managed-write.js";
 import {
   markUsageSegmentsIncomplete,
@@ -3135,6 +3136,35 @@ export class TrackedProviderClient {
         const killReason = this.worker?._killReasons?.get?.(job_id);
         if (killReason) activeErr._killReason = killReason;
         throw activeErr;
+      }
+      if (canCorrectMissingDevHandoff(activeErr, opts)) {
+        // One fresh, separately accounted call on the same workspace. Use the
+        // full pre-reuse contract, never a resume delta without its session.
+        // Calling _executeOneAttempt directly makes this correction bounded:
+        // another omission propagates to the existing job retry budget.
+        const {
+          _sessionRecycle: _discardHandoffSessionRecycle,
+          priorSessionHandle: _discardHandoffSessionHandle,
+          recyclingMode: _discardHandoffRecyclingMode,
+          ...correctionOpts
+        } = preReuseOpts;
+        this.emitStatus(job_id, `${C.yellow}[handoff] Required report missing; requesting one correction on the existing work${C.reset}`);
+        try {
+          return await this._executeOneAttempt(missingHandoffCorrectionPrompt(preReusePrompt), correctionOpts, {
+            provider, providerName, tier, modelName: executionModelName,
+            work_item_id, job_id, cwd,
+            observationContext: {
+              work_item_id, job_id,
+              attempt_id: attempt_id ?? ambient.attempt_id ?? null,
+              role: opts.role ?? ambient.role ?? null,
+            },
+            abortSignal: opts.abortSignal,
+          });
+        } catch (correctionError) {
+          markProviderErrorObserved(correctionError, providerName);
+          activeErr = correctionError;
+          if (isAbortError(activeErr) || activeErr?._killReason) throw activeErr;
+        }
       }
       const runtimeFallbackCandidate = opts._modelFallbackAttempted
         ? null

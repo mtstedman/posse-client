@@ -1380,6 +1380,7 @@ function _queueInternalAssessmentRetry(
     leaseToken = null,
     recordAssessorVerdict = null,
     assessmentModelTier = null,
+    clarifyReview = false,
   } = {},
 ) {
   const freshJob = getJob(job.id) || job;
@@ -1388,8 +1389,8 @@ function _queueInternalAssessmentRetry(
   if (retryCount >= maxRetries) return false;
   let payload = {};
   try {
-    payload = job?.payload_json
-      ? (typeof job.payload_json === "string" ? JSON.parse(job.payload_json) : { ...job.payload_json })
+    payload = freshJob?.payload_json
+      ? (typeof freshJob.payload_json === "string" ? JSON.parse(freshJob.payload_json) : { ...freshJob.payload_json })
       : {};
   } catch (err) {
     const message = err?.message || String(err);
@@ -1415,10 +1416,14 @@ function _queueInternalAssessmentRetry(
   // like a bogus strong -> standard "retry" and can loop old queued jobs.
   const previousTier = requestedPreviousTier === "strong" ? "standard" : requestedPreviousTier;
   const retryTier = _nextAssessmentRetryTier(previousTier);
-  if (retryTier === previousTier) return false;
+  if (clarifyReview && payload._assess_review_correction === true) return false;
+  if (retryTier === previousTier && !clarifyReview) return false;
   payload._assess_only = true;
+  if (clarifyReview) payload._assess_review_correction = true;
   payload._assess_model_tier = retryTier;
-  delete payload._assess_model_name;
+  // A corrective reread at the same tier keeps an explicit model selection.
+  // Only a tier escalation invalidates the old model override.
+  if (retryTier !== previousTier) delete payload._assess_model_name;
   const queued = runInTransaction(() => {
     const changed = updateJobStatus(
       job.id,

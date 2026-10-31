@@ -29,6 +29,7 @@ import { harnessAssessorEffort, harnessAssessorProvider } from "./assessment-sha
 import { getProviderBackoff } from "../../../providers/functions/provider.js";
 import { attachAssessmentDiffContextAsync, buildHandoffPacket, composePromptRemoteAware, handoff, renderAtlasHandoffSections } from "../../../handoff/functions/index.js";
 import { isRetryableTerminalHandoffError } from "../../../handoff/functions/agent-handoff.js";
+import { assessmentReviewCorrection } from "./assessment-review-correction.js";
 import { getAgentHandoffRecord } from "../../../handoff/functions/agent-handoff-records.js";
 import { refreshAndExtractInsights } from "./insights.js";
 import { renderBaselineSiblingRegression } from "./baseline-attribution.js";
@@ -631,6 +632,7 @@ function stripInternalAssessmentPolicyPayload(payload = {}) {
   delete stripped._assess_pass_confidence_floor;
   delete stripped._execution_policy;
   delete stripped._blocked_file_requirements;
+  delete stripped._assess_review_correction;
   return stripped;
 }
 
@@ -817,6 +819,8 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
   // Gather context: the task spec (from payload or artifact)
   let taskSpec = "";
   let parsedJobPayload = pruneBlockedFileRequirements(parseJobPayload(job)).payload;
+  const reviewCorrection = assessmentReviewCorrection(parsedJobPayload);
+  priorAssessmentFindings = [priorAssessmentFindings, reviewCorrection].filter(Boolean).join("\n\n");
   const visibleJobPayload = stripInternalAssessmentPolicyPayload(parsedJobPayload);
   const verificationCapabilityBlock = _buildVerificationCapabilityBlock(visibleJobPayload, projectDir || cwd);
   const scopeRequestEvidence = renderUnresolvedScopeRequests(visibleJobPayload);
@@ -1110,7 +1114,15 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     assessmentFileSnapshots,
     workerStatusOutput,
   });
-  const localAssessmentEvidence = localAssessmentEvidencePacket.text;
+  // Keep orchestration feedback visible even when a custom composer replaces
+  // the ordinary task prose. It grants no tools or additional file scope.
+  const localReviewCorrection = reviewCorrection ? [
+    priorAssessmentFindings,
+    promptLiteral("ASSIGNED TASK FOR THIS CORRECTION", taskSpec),
+    promptLiteral("ASSIGNED SUCCESS CRITERIA", JSON.stringify(visibleJobPayload.success_criteria || [])),
+    _buildAssessmentBoundaryBlock(job),
+  ].join("\n\n") : "";
+  const localAssessmentEvidence = [localAssessmentEvidencePacket.text, localReviewCorrection].filter(Boolean).join("\n\n");
   const prompt = [
     `Assess this completed task. Check the actual files, not just the dev's claims.`,
     `Use the deterministic scope and test receipts plus the attached primary change view and any labeled read-only upstream contract diffs. If that bounded evidence cannot resolve a material criterion, use an issued read tool rather than requesting repository contents from the human.`,
