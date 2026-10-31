@@ -7,6 +7,7 @@ import { LocalModelProgress } from "../classes/LocalModelProgress.js";
 import { LOCAL_USAGE, numericOption, parseLocalOptions } from "./local-options.js";
 import { checkLocalOutput, encodeLocalOutput, readLocalPrompt, writeLocalOutput } from "./local-output.js";
 import { requireLocalModelCapability } from "./local-capabilities.js";
+import { selectImageGpu, writeImageGpuInventory } from "./local-gpu.js";
 
 export { LOCAL_USAGE };
 const LONG_TIMEOUT_MS = 24 * 60 * 60 * 1000;
@@ -31,8 +32,10 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
     }
     return 0;
   }
-  const model = LOCAL_BRIDGE_MODELS.find(m => m.slug === args.model || m.modelId === args.model);
+  const model = args.action === "gpus" && !args.model ? LOCAL_BRIDGE_MODELS.find(m => m.kind === "image")
+    : LOCAL_BRIDGE_MODELS.find(m => m.slug === args.model || m.modelId === args.model);
   if (!model) throw new Error("Choose a model with --model <slug>. Run posse local list for available slugs.");
+  if (args.action === "gpus" && model.kind !== "image") throw new Error("GPU discovery currently applies to image models.");
   let payload, format;
   if (args.action === "generate") {
     format = args.format || model.formats[0];
@@ -61,7 +64,21 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
       runtimeRoot: path.resolve(args["runtime-root"] || defaultLocalGenerationRuntimeRoot()),
       onProgress: event => progress.update(event) };
     const caps = (await invoke(ML_CAPABILITIES_METHOD, {}, options))?.capabilities;
+    if (args.action === "gpus") {
+      progress.stop();
+      writeImageGpuInventory(caps?.imageGeneration, available.version, stdout, args.json || args.format === "json");
+      return 0;
+    }
     const capability = requireLocalModelCapability(model, caps, { version: available.version });
+    if (args.action === "generate" && (args.gpu || args["gpu-id"] !== undefined)) {
+      progress.stop();
+      const device = await selectImageGpu(capability, args, { version: available.version, stdin, stderr, askChoice: io.askChoice });
+      signal.throwIfAborted();
+      payload.gpu = true;
+      payload.gpuId = device.id;
+      if (!args.quiet) stderr.write(`Using GPU ${device.id}\n`);
+      progress.start();
+    }
     if (args.action === "install") {
       progress.stop();
       if (model.kind === "text") {
@@ -127,11 +144,12 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
 }
 
 async function generationPayload(model, args, input) {
-  const imageFlags = ["steps", "width", "height", "threads", "cfg-scale", "negative-prompt"];
+  const imageFlags = ["steps", "width", "height", "threads", "cfg-scale", "negative-prompt", "gpu", "gpu-id"];
   const textFlags = ["max-tokens", "system"];
   for (const flag of model.kind === "image" ? textFlags : imageFlags) if (args[flag] !== undefined) throw new Error(`--${flag} does not apply to ${model.kind} models.`);
   const prompt = await readLocalPrompt(args, input, model.kind === "image" ? 8192 : 262144);
   if (model.kind === "image") {
+    if (args["gpu-id"] !== undefined && !/^[A-Za-z0-9:_.-]{1,256}$/.test(args["gpu-id"])) throw new Error("--gpu-id must be an exact ID from posse local gpus.");
     const negativePrompt = args["negative-prompt"] || "";
     if (negativePrompt.includes("\0") || Buffer.byteLength(negativePrompt) > 8192) throw new Error("Negative prompt must be NUL-free and at most 8192 bytes.");
     return { modelId: model.modelId, prompt, negativePrompt,

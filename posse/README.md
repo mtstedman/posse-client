@@ -574,7 +574,7 @@ The slugs are `qwen-code` (`qwen2.5-coder-3b-instruct`) and `qwen-image`
 existing model store; the default is `~/.posse/models`.
 `--runtime-root DIR` selects the ONNX runtime cache, defaulting to
 `~/.posse/runtime/onnx-genai`. Generation never installs a model automatically.
-Listing and help work offline without a project or Posse key. Execution and
+`posse local list` and help work offline without a project or Posse key. Execution and
 installation use the existing authenticated native ML connection and require a
 configured Posse key and a compatible `posse-ml` artifact. File presence in the
 list is explicitly unverified; the native runtime checks integrity before use.
@@ -591,8 +591,22 @@ Model downloads require interactive size confirmation. To install image files
 already on disk, use `posse local install qwen-image --source /absolute/files`.
 The image installer uses the native catalog's immutable URLs and SHA-256 pins;
 callers cannot substitute download URLs or hashes. Qwen image generation is
-CPU-only on Linux x64 and Windows x64 (AVX2, FMA and F16C), and Linux ARM64 and
-macOS Apple Silicon (NEON), and can take tens of minutes.
+available on Linux x64 and Windows x64 (AVX2, FMA and F16C), and Linux ARM64 and
+macOS Apple Silicon (NEON). CPU is the default and can take tens of minutes.
+Use `posse local gpus` or `posse local gpus --json` to query available image GPUs
+through the authenticated native runtime. Linux/Windows use Vulkan and Apple
+Silicon uses Metal. Then generate with `--gpu`, or copy an ID into `--gpu-id ID`:
+
+```bash
+posse local gpus
+posse local --model qwen-image --gpu --prompt "A red robot" --format png --output robot.png
+```
+
+With multiple GPUs, `--gpu` opens an interactive selector; scripts must supply
+`--gpu-id`. Unavailable IDs fail instead of falling back to the CPU. Hardware
+IDs are preferred; IDs labelled `enumeration` should be looked up again after
+hardware, visibility, or driver changes. Selection uses one GPU, with model
+weights in system RAM; it does not combine the VRAM of multiple cards.
 Use `posse local --help` for image dimensions, steps, seed and text-token limits.
 
 Run `posse local-models` for an interactive selector, or use

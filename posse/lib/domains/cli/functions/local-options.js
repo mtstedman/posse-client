@@ -2,13 +2,14 @@ import { parseArgs } from "node:util";
 
 export const LOCAL_USAGE = `Usage:
   posse local list [--json] [--model-root DIR]
+  posse local gpus [--json] [--model qwen-image]
   posse local install <slug> [--source DIR] [--model-root DIR]
   posse local --model <slug> [--prompt TEXT | --input FILE | stdin]
               [--format text|json|png] [--output FILE|-] [--quiet]
               [--model-root DIR] [--runtime-root DIR]
 
 Image options: --steps 20 --width 384 --height 384 --seed 42 --threads 8 --cfg-scale 2.5
-               --negative-prompt TEXT
+               --negative-prompt TEXT --gpu [--gpu-id ID]
 Text options:  --max-tokens 512 --system TEXT
 
 Slugs: qwen-code (text), qwen-image (image); full model IDs also work.
@@ -17,11 +18,14 @@ Slugs: qwen-code (text), qwen-image (image); full model IDs also work.
 Output files must not already exist. Progress goes to stderr; --quiet suppresses it.
 Network model installs require interactive size confirmation. --source installs
 already-downloaded image files without a download. Generation never installs models.
+CPU is the default. --gpu-id also enables GPU execution. Run gpus to copy an ID.
+With multiple GPUs, --gpu opens a selector in a terminal; scripts need --gpu-id.
+GPU selection uses one device; weights remain in system RAM.
 Ctrl+C cancels generation and retires the native worker.`;
 
 const stringFlags = ["model", "prompt", "input", "format", "output", "model-root", "runtime-root", "source",
-  "steps", "width", "height", "seed", "threads", "cfg-scale", "negative-prompt", "max-tokens", "system"];
-const booleanFlags = ["help", "json", "quiet", "non-interactive"];
+  "steps", "width", "height", "seed", "threads", "cfg-scale", "negative-prompt", "max-tokens", "system", "gpu-id"];
+const booleanFlags = ["help", "json", "quiet", "non-interactive", "gpu"];
 export function parseLocalOptions(argv) {
   const { values, positionals } = parseArgs({ args: argv, strict: true, allowPositionals: true,
     options: Object.fromEntries([
@@ -38,12 +42,12 @@ export function parseLocalOptions(argv) {
     seen.add(key);
   }
   const action = positionals[0] || "generate";
-  if (!["generate", "list", "install"].includes(action)) throw new Error(`Unknown local action: ${action}`);
+  if (!["generate", "list", "install", "gpus"].includes(action)) throw new Error(`Unknown local action: ${action}`);
   if (positionals.length > (action === "install" ? 2 : 1)) throw new Error("Unexpected positional arguments; use --prompt TEXT.");
   const common = ["help", "quiet", "model-root", "non-interactive"];
-  const allowed = new Set([...common, ...(action === "list" ? ["json", "format"] : action === "install" ? ["model", "source", "runtime-root"] : stringFlags.filter(x => x !== "source"))]);
+  const allowed = new Set([...common, ...(action === "list" ? ["json", "format"] : action === "gpus" ? ["json", "format", "model", "runtime-root"] : action === "install" ? ["model", "source", "runtime-root"] : [...stringFlags.filter(x => x !== "source"), "gpu"])]);
   for (const key of Object.keys(values)) if (!allowed.has(key)) throw new Error(`--${key} is not valid for ${action}`);
-  if (action === "list" && values.format && values.format !== "json") throw new Error("List format must be json (or omit it for a table).");
+  if (["list", "gpus"].includes(action) && values.format && values.format !== "json") throw new Error("List format must be json (or omit it for a table).");
   if (action === "install" && positionals[1] && values.model) throw new Error("Choose either an install slug or --model.");
   return { action, ...values, model: values.model || positionals[1] };
 }
