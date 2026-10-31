@@ -44,6 +44,7 @@ const POLICY_ENTRIES = [
   { name: "atlas-v2", readOnly: true, requiresWritableArtifacts: false },
   { name: "mcp-status", readOnly: true, requiresWritableArtifacts: false },
   { name: "codex-models", readOnly: true, requiresWritableArtifacts: false },
+  { name: "local", requiresWritableArtifacts: false },
   { name: "local-models", requiresWritableArtifacts: false },
   { name: "native-binaries", requiresWritableArtifacts: false },
   { name: "windows-events", readOnly: true, requiresWritableArtifacts: false },

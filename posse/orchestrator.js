@@ -87,6 +87,19 @@ if (process.argv[2] === "tools") {
   }
 }
 
+// Local model CLI works independently of repository queues and schedulers.
+if (process.argv[2] === "local") {
+  try {
+    const { runLocalCli } = await import("./lib/domains/cli/functions/local-command.js");
+    const code = await runLocalCli(process.argv.slice(3));
+    await new Promise(resolve => process.stdout.write("", resolve));
+    process.exit(code);
+  } catch (error) {
+    process.stderr.write(`local_error: ${error?.message || error}\n`);
+    process.exit(error?.name === "AbortError" ? 130 : 1);
+  }
+}
+
 // A session join typed in any folder runs in a folder of its own. This runs
 // before the application import below, which writes Posse state (run logs,
 // the database) into the current folder.

@@ -124,12 +124,13 @@ function unwrapRemoteNativeResponse(value) {
  * @param {unknown} payload
  * @param {{
  *   manager?: import("../../../shared/tools/classes/BinaryManager.js").BinaryManager,
- *   requiredRoute?: string,
+ *   requiredRoute?: string, signal?: AbortSignal,
  *   timeoutMs?: number,
  * }} [options]
  */
 async function runRemoteNativeMethodJson(method, payload, {
   manager = nativeBinaries,
+  signal = undefined,
   requiredRoute,
   timeoutMs,
 } = {}) {
@@ -147,11 +148,13 @@ async function runRemoteNativeMethodJson(method, payload, {
       input: `${JSON.stringify(envelope)}\n`,
       json: true,
       timeoutMs,
+      signal,
       requiredRoute,
       ...(method === "request-json" ? { workerFallback: false } : {}),
     },
   );
   if (!res.ok) {
+    if (res.error?.name === "AbortError") throw res.error;
     const detail = String(res.stderr || res.error?.message || "native process failed").trim();
     /** @type {Error & { code?: string | number }} */
     const failure = new Error(`remote native method ${method} failed${detail ? `: ${detail}` : ""}`, { cause: res.error });
@@ -173,7 +176,7 @@ async function runRemoteNativeMethodJson(method, payload, {
  *
  * @param {string} method
  * @param {unknown} payload
- * @param {{ manager?: import("../../../shared/tools/classes/BinaryManager.js").BinaryManager, timeoutMs?: number }} [opts]
+ * @param {{ manager?: import("../../../shared/tools/classes/BinaryManager.js").BinaryManager, timeoutMs?: number, signal?: AbortSignal }} [opts]
  * @returns {Promise<unknown>}
  */
 export function runRemoteNativeArtifactJson(method, payload, opts = {}) {

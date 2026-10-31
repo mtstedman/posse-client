@@ -1,9 +1,9 @@
+import { defaultLocalGenerationModelRoot, defaultLocalGenerationRuntimeRoot } from "../../../../shared/native/functions/local-model-paths.js";
 import { PROVIDER_CAPABILITIES } from "../../../../catalog/provider-capabilities.js";
 import { readModelSetting } from "../shared/setting-read.js";
 // @ts-check
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { GEMMA_LOCAL_MODEL_ID, LOCAL_MODEL_IDS, LOCAL_MODEL_PROFILES, QWEN_LOCAL_MODEL_ID } from "../../../../catalog/local-model.js";
@@ -66,14 +66,7 @@ export const MODEL_TIERS = Object.freeze({
   strong: Object.freeze({ model: getProviderTierDefaults("posse-local").strong.model, thinking: false, label: "LOCAL QWEN", color: "cyan" }),
 });
 
-export function defaultLocalGenerationModelRoot(homeDir = os.homedir()) {
-  return path.join(homeDir, ".posse", "models");
-}
-
-export function defaultLocalGenerationRuntimeRoot(homeDir = os.homedir()) {
-  return path.join(homeDir, ".posse", "runtime", "onnx-genai");
-}
-
+export { defaultLocalGenerationModelRoot, defaultLocalGenerationRuntimeRoot };
 
 export function getModelTierConfig(tier = "standard") {
   const key = tier in MODEL_TIERS ? tier : "standard";

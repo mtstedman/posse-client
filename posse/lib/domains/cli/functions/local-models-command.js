@@ -11,7 +11,7 @@ import {
   fetchLocalModelArtifactCatalog,
   prepareLocalModelArtifactClient,
 } from "../../remote/functions/local-model-artifacts.js";
-import { defaultLocalGenerationModelRoot } from "../../providers/functions/posse-local/index.js";
+import { defaultLocalGenerationModelRoot } from "../../../shared/native/functions/local-model-paths.js";
 import { askSelectorChoice } from "./input-prompts.js";
 
 const CANCEL_SELECTION = "__cancel__";

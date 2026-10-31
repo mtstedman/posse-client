@@ -108,6 +108,7 @@ export async function downloadLocalModelArtifact(client, artifact, {
 }
 
 export async function downloadLocalModelPackage(client, modelId, {
+  signal = undefined,
   timeoutMs = DOWNLOAD_TIMEOUT_MS,
   expectedProfileId = null,
   expectedVersion = null,
@@ -139,7 +140,7 @@ export async function downloadLocalModelPackage(client, modelId, {
           maxRetries: 4,
           retryDelayMs: 1_000,
         },
-        { manager: client.manager, timeoutMs: nativeProcessTimeoutMs(effectiveTimeoutMs) },
+        { manager: client.manager, timeoutMs: nativeProcessTimeoutMs(effectiveTimeoutMs), signal },
       );
       return validateModelPackageDownload(value, normalizedModelId);
     } catch (error) {

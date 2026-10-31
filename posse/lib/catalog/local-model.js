@@ -31,3 +31,16 @@ export function localModelProfile(modelId = null, tier = "standard") {
     : localModelIdForTier(tier);
   return { modelId: selected, ...LOCAL_MODEL_PROFILES[selected] };
 }
+
+// Operator CLI inventory. This does not widen agent/provider model selection.
+export const QWEN_IMAGE_MODEL_ID = "qwen-image-2512";
+export const LOCAL_BRIDGE_MODELS = Object.freeze([
+  Object.freeze({ slug: "qwen-code", modelId: QWEN_LOCAL_MODEL_ID, kind: "text",
+    directory: LOCAL_MODEL_PROFILES[QWEN_LOCAL_MODEL_ID].profileId,
+    formats: Object.freeze(["text", "json"]), platforms: Object.freeze(["linux-x64", "win32-x64"]),
+    installation: "signed-package" }),
+  Object.freeze({ slug: "qwen-image", modelId: QWEN_IMAGE_MODEL_ID, kind: "image",
+    directory: QWEN_IMAGE_MODEL_ID, formats: Object.freeze(["png", "json"]),
+    platforms: Object.freeze(["linux-x64"]), installation: "pinned-files",
+    requirements: "AVX2, FMA, F16C; approximately 19 GiB RAM for the tested 384x384 profile" }),
+]);

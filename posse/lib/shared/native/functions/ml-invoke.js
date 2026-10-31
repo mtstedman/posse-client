@@ -8,6 +8,8 @@ import path from "node:path";
 
 import {
   ML_MODEL_PACKAGE_INSTALL_METHOD,
+  ML_GENERATE_IMAGE_METHOD,
+  ML_INSTALL_IMAGE_MODEL_METHOD,
   ML_NATIVE_PROTOCOL,
   ML_NATIVE_ROUTE,
   ML_PROVIDER_DISPATCH_METHOD,
@@ -73,10 +75,10 @@ export async function runMlNativeMethodAsync(method, payload, opts) {
     signal: opts.signal,
     worker: useWorker,
     ...(useWorker ? { workerArgs: ["worker", "--stdio", ...modelArgs] } : {}),
-    workerFallback: method !== ML_PROVIDER_DISPATCH_METHOD,
+    workerFallback: ![ML_PROVIDER_DISPATCH_METHOD, ML_GENERATE_IMAGE_METHOD, ML_INSTALL_IMAGE_MODEL_METHOD].includes(method),
     idempotent: opts.idempotent !== false,
     onProgress: opts.onProgress,
-    retireWorkerOnAbort: method === "ml.generate" || method === ML_PROVIDER_DISPATCH_METHOD,
+    retireWorkerOnAbort: ["ml.generate", ML_GENERATE_IMAGE_METHOD, ML_INSTALL_IMAGE_MODEL_METHOD, ML_PROVIDER_DISPATCH_METHOD].includes(method),
     requiredRoute: ML_NATIVE_ROUTE,
   };
   const res = await manager.binary("ml").run(

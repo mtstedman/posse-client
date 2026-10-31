@@ -554,7 +554,45 @@ callers handling secrets should use `posse admin set <key> --json --stdin-value`
 so the value never enters argv. JSON errors are stable envelopes; the existing
 human admin commands remain compatible.
 
-## Local Model Downloads
+## Local Models
+
+Run local text and image models directly from any directory:
+
+```bash
+posse local list
+posse local list --json
+posse local install qwen-code
+posse local install qwen-image
+posse local --model qwen-code --prompt "Explain Rust ownership" --format text
+printf 'Explain Rust ownership' | posse local --model qwen-code --format json --output answer.json
+posse local --model qwen-image --prompt 'A red robot holding a POSSE sign' --format png --output robot.png --steps 20
+```
+
+The slugs are `qwen-code` (`qwen2.5-coder-3b-instruct`) and `qwen-image`
+(`qwen-image-2512`); either slug or full ID works with `--model`.
+`--input FILE` reads a prompt from a UTF-8 file. `--model-root DIR` selects an
+existing model store; the default is `~/.posse/models`.
+`--runtime-root DIR` selects the ONNX runtime cache, defaulting to
+`~/.posse/runtime/onnx-genai`. Generation never installs a model automatically.
+Listing and help work offline without a project or Posse key. Execution and
+installation use the existing authenticated native ML connection and require a
+configured Posse key and a compatible `posse-ml` artifact. File presence in the
+list is explicitly unverified; the native runtime checks integrity before use.
+
+Progress appears on stderr: an animated cursor, elapsed time and image step
+counts in terminals, plain progress lines when redirected. `--quiet` suppresses
+this feedback. Stdout contains only the result, so it can be piped. `--format json` returns the full native response, including image base64; it does not
+instruct a text model to generate JSON. `--format png` writes binary PNG and
+requires an output file or redirected stdout. New output files are published
+only after generation and validation; existing files are never overwritten.
+Ctrl+C cancels inference and retires the native worker.
+
+Model downloads require interactive size confirmation. To install image files
+already on disk, use `posse local install qwen-image --source /absolute/files`.
+The image installer uses the native catalog's immutable URLs and SHA-256 pins;
+callers cannot substitute download URLs or hashes. Qwen image generation is
+currently Linux x64 CPU-only with AVX2, FMA and F16C, and can take tens of minutes.
+Use `posse local --help` for image dimensions, steps, seed and text-token limits.
 
 Run `posse local-models` for an interactive selector, or use
 `posse local-models list` to inspect the verified catalog without downloading.

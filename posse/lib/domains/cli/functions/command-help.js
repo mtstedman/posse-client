@@ -1,3 +1,4 @@
+import { LOCAL_USAGE } from "./local-options.js";
 import { findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { REQUEST_KIND_CHOICES, INTAKE_TERMINAL_OUTPUTS } from "../../../catalog/intake.js";
@@ -17,6 +18,7 @@ function posseAliasDiagnostic() {
 }
 
 const COMMAND_USAGE = {
+  local: () => console.log(LOCAL_USAGE),
   add: () => {
     console.log(`\n  Usage: posse add "description of what you want built"`);
     const intents = REQUEST_KIND_CHOICES.map((choice) => choice.value).join("|");
@@ -214,6 +216,8 @@ ${aliasDiagnostic}
     ${C.cyan}mcp-status${C.reset} Show repo-scoped MCP runtime state
     ${C.cyan}codex-models${C.reset} Validate/list Codex model candidates through Rust dispatch
     ${C.dim}             codex-models [validate|list] [oauth|api|auto]${C.reset}
+    ${C.cyan}local${C.reset}      Run local models: --model SLUG --format text|json|png --output FILE
+    ${C.dim}             local list [--json] | local install SLUG${C.reset}
     ${C.cyan}local-models${C.reset} List/download signed local models with size and system recommendations
     ${C.dim}             local-models [list [--json] | download [shorthand]]${C.reset}
     ${C.cyan}native-binaries${C.reset} Reconcile signed native artifacts (NDJSON progress)
