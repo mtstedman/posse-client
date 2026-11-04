@@ -68,8 +68,24 @@ export const BRIDGE_PRESENCE_FRESH_MS = 120_000;
  */
 export function isBridgePresenceFresh({ maxAgeMs = BRIDGE_PRESENCE_FRESH_MS } = {}) {
   const row = readRuntimeStatus(RUNTIME_STATUS_KEYS.BRIDGE);
+  return row?.present === true && bridgeHeartbeatIsFresh(row, maxAgeMs);
+}
+
+// A reachable resolver may hold unanswered gates even when no operator has
+// recently sent a command. Never use this as approval or interactive consent.
+export function isBridgeGateResolverAvailable({ maxAgeMs = BRIDGE_PRESENCE_FRESH_MS } = {}) {
+  const row = readRuntimeStatus(RUNTIME_STATUS_KEYS.BRIDGE);
+  return (row?.can_resolve_gates === true || row?.present === true)
+    && bridgeHeartbeatIsFresh(row, maxAgeMs);
+}
+
+// A heartbeat stamped in the future is not fresh: the bridge and the run share
+// one clock, so such a row is corrupt or forged rather than merely early.
+function bridgeHeartbeatIsFresh(row, maxAgeMs) {
   const at = Date.parse(row?.at || "");
-  return row?.present === true && Number.isFinite(at) && Date.now() - at < maxAgeMs;
+  if (!Number.isFinite(at)) return false;
+  const age = Date.now() - at;
+  return age >= 0 && age < maxAgeMs;
 }
 
 export function readRuntimeStatus(key) {

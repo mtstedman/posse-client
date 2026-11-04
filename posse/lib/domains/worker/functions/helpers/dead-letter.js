@@ -19,7 +19,7 @@ import { escalateModelTier } from "../../../providers/functions/shared/turns.js"
 import { providerRoleForJobType } from "../../../providers/functions/roles.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { isTransientCommitInfraFailure } from "./commit-infra.js";
-import { isBridgePresenceFresh } from "../../../queue/functions/runtime-status.js";
+import { isBridgeGateResolverAvailable } from "../../../queue/functions/runtime-status.js";
 import { isRetryableTerminalHandoffError } from "../../../handoff/functions/agent-handoff.js";
 
 const MAX_STALL_EXHAUSTED_RECOVERY_RETRIES = 1;
@@ -132,10 +132,11 @@ function stallRecoveryRetryCount(job) {
 
 function recoveryIsUnattended(worker) {
   if (process.env.POSSE_AB_HARNESS || process.env.POSSE_AB_CELL || process.env.POSSE_AB_ARM) return true;
-  // A no-TUI run launched by the bridge is still attended when a remote
-  // operator has recently contacted this instance. Preserve the recovery gate
-  // so that the phone/web client can answer it.
-  if (isBridgePresenceFresh()) return false;
+  // A no-TUI run launched by the bridge is still attended while a remote
+  // client can still reach it: an idle phone behind an authenticated relay
+  // returns to answer later. Preserve the recovery gate so that the phone/web
+  // client can answer it; headless recovery applies the same reachability.
+  if (isBridgeGateResolverAvailable()) return false;
   if (worker?.nonInteractive) return true;
   return !(worker?.display && typeof worker.display.askQuestions === "function");
 }

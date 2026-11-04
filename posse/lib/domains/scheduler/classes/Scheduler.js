@@ -16,7 +16,7 @@ import { releaseUnusedCompletedWorkItemLocks } from "../functions/unused-planned
 
 import crypto from "crypto";
 import { spawn } from "child_process";
-import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, workItemOperatorParking, getQueueWakeGeneration, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, jobHasLiveEnvironmentSetup, environmentSetupParking, grantEnvironmentSetupResume, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgePresenceFresh, isMergeVerificationReviewJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, isWorkItemDispositionGateJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
+import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, workItemOperatorParking, getQueueWakeGeneration, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, jobHasLiveEnvironmentSetup, environmentSetupParking, grantEnvironmentSetupResume, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgeGateResolverAvailable, isMergeVerificationReviewJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, isWorkItemDispositionGateJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
 import { WORK_ITEM_ORDER_WAIT_REASON } from "../../queue/functions/work-item-order.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { reapOrphanedDaemons } from "../../../shared/tools/classes/daemon/index.js";
@@ -1355,6 +1355,14 @@ export class Scheduler {
       message: `Scheduler started (poll=${this.pollMs}ms, repair=${this.repairPollMs}ms, lease=${this.leaseSec}s, concurrency=${this.concurrency})`,
     });
 
+    // The remote launcher must distinguish process creation from a scheduler
+    // that passed boot and owns its lock. This private child channel carries
+    // no approval and is absent during ordinary CLI runs.
+    if (process.connected && typeof process.send === "function") {
+      try { process.send({ type: EVENT_TYPES.SCHEDULER_STARTED, process_pid: process.pid }, () => {}); }
+      catch { /* the launcher may have exited; the detached run still owns its work */ }
+    }
+
     const activeWorkers = new Map(); // jobId -> { promise, job, startTime }
     const queueLockIndex = createHeldQueueLockIndex();
     // The work-item order, the lease check and lane-wait reconciliation all
@@ -1697,7 +1705,7 @@ export class Scheduler {
             eventActors: EVENT_ACTORS,
             terminalJobStatuses: TERMINAL_JOB_STATUSES,
             readHeadlessHumanTimeoutSec,
-            isRemoteOperatorPresent: isBridgePresenceFresh,
+            isRemoteOperatorPresent: isBridgeGateResolverAvailable,
             queue: {
               hasJobs,
               listJobs,
@@ -1725,7 +1733,7 @@ export class Scheduler {
             eventTypes: EVENT_TYPES,
             eventActors: EVENT_ACTORS,
             deadlockTerminalStatuses: DEADLOCK_TERMINAL_STATUSES,
-            isRemoteOperatorPresent: isBridgePresenceFresh,
+            isRemoteOperatorPresent: isBridgeGateResolverAvailable,
             queue: {
               hasJobs,
               listJobs,

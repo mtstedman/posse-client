@@ -973,6 +973,13 @@ when it is the only remaining job for the only work item. Answering the gate
 resumes work or allows the run to finish. Headless runs can still return with
 operator action required; optional push offers do not keep a run open.
 
+Remote runs keep unanswered review and recovery gates available while the bridge
+has an authenticated relay connection, including while the phone is idle. This
+does not approve a gate or override an explicit `fail_closed` policy. A stale or
+disconnected bridge no longer holds those gates open. Remote start commands
+report success only after the child scheduler confirms startup; slow startup is
+reported as still starting, and a process that exits before startup is a failure.
+
 An orphaned review with no answerable gate gets at most one assessment-only
 reconstruction when a local or remote operator is present. A human-input wait
 whose gate is missing fails after a grace period; live gate contracts, worker

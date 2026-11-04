@@ -18,6 +18,7 @@ export {
   RUNTIME_STATUS_KEYS,
   BRIDGE_PRESENCE_FRESH_MS,
   isBridgePresenceFresh,
+  isBridgeGateResolverAvailable,
   readRuntimeStatus,
   writeRuntimeStatus,
   updateSharedTrunkRuntimeStatus,

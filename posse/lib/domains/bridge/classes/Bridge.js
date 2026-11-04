@@ -96,8 +96,13 @@ export class Bridge {
 
   writeOperatorPresence() {
     try {
+      const relay = this.relayClient?.status();
       writeRuntimeStatus(RUNTIME_STATUS_KEYS.BRIDGE, {
         present: this.operatorPresent(),
+        // A sleeping phone can return to an authenticated relay to answer.
+        // Reachability preserves gates; it grants no operator authority.
+        can_resolve_gates: this.operatorPresent()
+          || (relay?.state === "online" && relay.authenticated === true),
         at: new Date().toISOString(),
         instance_id: this.config.instanceId,
       });
@@ -108,8 +113,9 @@ export class Bridge {
 
   /**
    * Heartbeat "a remote operator can reach this repo" into runtime_status.
-   * The detached run reads it (isBridgePresenceFresh) to keep human gates
-   * open for the phone instead of applying the headless timeout. Writes are
+   * The detached run reads it (isBridgePresenceFresh for operator presence,
+   * isBridgeGateResolverAvailable for reachability) to keep human gates open
+   * for the phone instead of applying the headless timeout. Writes are
    * best-effort — presence telemetry must never take the bridge down.
    */
   startPresenceHeartbeat() {
@@ -175,6 +181,7 @@ export class Bridge {
           startPosse: () => this.runLauncher.start(),
         });
         this.relayClient.on("operator_activity", () => this.noteOperatorActivity());
+        this.relayClient.on("status", () => this.writeOperatorPresence());
         this.relayClient.on("error", (err) => {
           try {
             console.warn(`[posse][bridge] relay error: ${formatRelayErrorLog(err, {
