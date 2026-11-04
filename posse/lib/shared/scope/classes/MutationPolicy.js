@@ -80,8 +80,17 @@ function normalizeRoots(values = [], cwd = process.cwd()) {
 }
 
 function shellWords(command) {
+  return shellWordsDetailed(command).tokens;
+}
+
+// `expandable[i]` records whether tokens[i] carries an unquoted pattern
+// character, i.e. whether the shell performs pathname expansion on it. An
+// escaped character (`\*`) still counts: the guess errs toward expansion.
+function shellWordsDetailed(command) {
   const tokens = [];
+  const expandable = [];
   let current = "";
+  let currentExpandable = false;
   let quote = null;
   for (let i = 0; i < command.length; i += 1) {
     const ch = command[i];
@@ -107,14 +116,63 @@ function shellWords(command) {
     if (/\s/.test(ch)) {
       if (current) {
         tokens.push(current);
+        expandable.push(currentExpandable);
         current = "";
+        currentExpandable = false;
       }
       continue;
     }
+    if (ch === "*" || ch === "?" || ch === "[") currentExpandable = true;
     current += ch;
   }
-  if (current) tokens.push(current);
-  return tokens;
+  if (current) {
+    tokens.push(current);
+    expandable.push(currentExpandable);
+  }
+  return { tokens, expandable };
+}
+
+// One path segment's shell pattern as a regular expression. A bracket
+// expression naming a POSIX class widens the rest of the segment to match
+// anything: an over-broad pattern can only refuse more, never less.
+function shellPatternRegex(segment) {
+  let source = "";
+  for (let i = 0; i < segment.length; i += 1) {
+    const ch = segment[i];
+    if (ch === "*") { source += ".*"; continue; }
+    if (ch === "?") { source += "."; continue; }
+    if (ch === "[") {
+      let start = i + 1;
+      const negated = segment[start] === "!" || segment[start] === "^";
+      if (negated) start += 1;
+      // A `]` first in the list is a member, not the close.
+      const close = segment.indexOf("]", segment[start] === "]" ? start + 1 : start);
+      if (close >= 0) {
+        const body = segment.slice(start, close);
+        if (/\[[:=.]/.test(body)) { source += ".*"; break; }
+        source += `[${negated ? "^" : ""}${body.replace(/[\\\]^]/g, "\\$&")}]`;
+        i = close;
+        continue;
+      }
+    }
+    source += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  try {
+    return new RegExp(`^${source}$`);
+  } catch {
+    return /^.*$/;
+  }
+}
+
+// Whether a pattern segment can expand to `..`. The engines disagree about
+// which: dash expands `.*`, `.?` and `.[!a]` to it, and globSync matches
+// `[.][.]` against it, while neither lets a leading `*` or `?` match a
+// leading dot. Either way the result escapes the location the lexical
+// boundary checks trusted.
+function globCanReachParent(value) {
+  return String(value || "").split("/").some((segment) => /[*?[]/.test(segment)
+    && !/^[*?]/.test(segment)
+    && shellPatternRegex(segment).test(".."));
 }
 
 function tokenFlagName(token) {
@@ -355,7 +413,7 @@ function pathIsInside(root, candidate) {
 }
 
 function readonlyBashPathReason(policy, command) {
-  const words = shellWords(command);
+  const { tokens: words, expandable } = shellWordsDetailed(command);
   const cmdName = shellCommandName(words[0]);
   const isSearch = cmdName === "grep" || cmdName === "rg";
   // grep/rg with an explicit pattern SOURCE (-e/--regexp, -f/--file, or rg
@@ -369,7 +427,8 @@ function readonlyBashPathReason(policy, command) {
   let patternSkipped = !isSearch || explicitPatternSource;
   let skipNext = false;
   let endOfOptions = false;
-  for (const token of words.slice(1)) {
+  for (const [offset, token] of words.slice(1).entries()) {
+    const shellExpands = expandable[offset + 1];
     if (skipNext) { skipNext = false; continue; }
     // `--` ends option parsing: every later word is an operand, and words like
     // `-e` after it are literal patterns, not flags.
@@ -418,8 +477,24 @@ function readonlyBashPathReason(policy, command) {
       if (privateParts.some((part) => PRIVATE_BASH_PATH_PARTS.has(part))) {
         return `private workspace path is not readable through bash: ${value}`;
       }
-      if (/[*?\[\]{}]/.test(value) && typeof fs.globSync === "function") {
-        for (const match of fs.globSync(value, { cwd: policy.cwd })) {
+      // A segment that can expand to `..` escapes the lexical location checked
+      // here: on dash, `cat .*/f` reads `../f`. Refuse it where the shell
+      // expands the word; quoted, the shell passes it literally, so leave it
+      // unexpanded rather than let globSync walk the parent.
+      const reachesParent = globCanReachParent(normalized);
+      if (reachesParent && shellExpands) {
+        return `shell glob can expand to the parent directory: ${value}; list hidden entries with \`ls -a\` or a pattern such as \`.[!.]*\``;
+      }
+      // Expand only patterns the boundary check below could admit. A pattern
+      // rooted outside the workspace (`/**/*.pem`, `../**`) is rejected there
+      // without walking the filesystem it names first. Braces stay literal:
+      // no command the shell would brace-expand is allowed (X1 refuses
+      // unquoted brace expansion; quoted braces are literal), and globSync
+      // would otherwise walk alternatives such as `{../..,.}/**` that the
+      // lexical location above never saw.
+      if (/[*?\[\]{}]/.test(value) && !reachesParent && typeof fs.globSync === "function"
+        && (pathIsInside(policy.cwd, lexical) || policy.isWithinScopeRoot(lexical))) {
+        for (const match of fs.globSync(value.replace(/[{}]/g, "[$&]"), { cwd: policy.cwd })) {
           const expanded = path.resolve(policy.cwd, match);
           if (isSensitiveEnvFileOrTargetPath(expanded)) return `shell glob resolves to a protected environment file: ${value}`;
           const expandedRelative = path.relative(policy.cwd, expanded);

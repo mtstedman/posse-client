@@ -70,12 +70,47 @@ const fallbackProject = fs.existsSync(targetComposerJson)
 // leave every document path absolute.
 const indexCwd = canonicalDirectory(fallbackProject?.dir || cwd);
 const localOutput = path.join(indexCwd, "index.scip");
+// Names the wrapper process holding the reservation. The stager kills a
+// timed-out indexer with a signal, which skips this wrapper's cleanup and
+// strands its reservation in the project root; the stamp lets the next run
+// tell that stranded reservation from an operator's own index.scip.
+const ownerStamp = `${localOutput}.posse-owner`;
 process.exitCode = runIndexer();
+
+function reservationAbandoned() {
+  let pid;
+  try {
+    pid = Number(fs.readFileSync(ownerStamp, "utf8").trim());
+  } catch {
+    return false;
+  }
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return error.code === "ESRCH";
+  }
+}
+
+function reserveOutput() {
+  try {
+    return fs.openSync(localOutput, "wx");
+  } catch (error) {
+    // Reclaim only a reservation whose stamped owner has exited; an existing
+    // file without a stamp, or with a live owner, is never ours to replace.
+    if (error.code !== "EEXIST" || !reservationAbandoned()) throw error;
+    fs.rmSync(localOutput, { force: true });
+    fs.rmSync(ownerStamp, { force: true });
+    return fs.openSync(localOutput, "wx");
+  }
+}
 
 function runIndexer() {
   const directOutput = path.join(canonicalDirectory(path.dirname(output)), path.basename(output)) === localOutput;
   let owned;
   let ownedFd;
+  let stamped = false;
   let completed = false;
   const ownedOutput = () => {
     try {
@@ -88,7 +123,9 @@ function runIndexer() {
     // Exclusive creation also prevents concurrent wrapper runs from claiming
     // the same hardcoded upstream output between a check and the PHP launch.
     if (directOutput) fs.rmSync(localOutput, { force: true });
-    ownedFd = fs.openSync(localOutput, "wx");
+    ownedFd = reserveOutput();
+    fs.writeFileSync(ownerStamp, `${process.pid}\n`);
+    stamped = true;
     // Keep the reservation open so a removed inode cannot be recycled into
     // an unrelated replacement before the ownership check below.
     owned = fs.fstatSync(ownedFd);
@@ -109,15 +146,19 @@ function runIndexer() {
     return 0;
   } catch (error) {
     console.error(error.code === "EEXIST"
-      ? `scip-php will not overwrite existing ${localOutput} while staging elsewhere; use a clean indexing directory or explicitly set --output to that file.`
+      ? `scip-php will not overwrite existing ${localOutput} while staging elsewhere; use a clean indexing directory or explicitly set --output to that file. A reservation stranded by a killed wrapper is reclaimed once the owner recorded in ${ownerStamp} has exited.`
       : error.message || String(error));
     return 1;
   } finally {
     try {
       if (!completed && ownedOutput()) fs.rmSync(localOutput, { force: true });
     } finally {
-      if (ownedFd != null) fs.closeSync(ownedFd);
-      cleanupFallbackProject(fallbackProject);
+      try {
+        if (stamped) fs.rmSync(ownerStamp, { force: true });
+      } finally {
+        if (ownedFd != null) fs.closeSync(ownedFd);
+        cleanupFallbackProject(fallbackProject);
+      }
     }
   }
 }

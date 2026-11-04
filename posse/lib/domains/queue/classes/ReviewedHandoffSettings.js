@@ -13,9 +13,13 @@ export class ReviewedHandoffSettings {
     const db = getDb();
     const projectDir = process.env.POSSE_PROJECT_DIR || normalizeProjectDir();
     if (this.db !== db || this.projectDir !== projectDir) {
+      // Resolution can fail (Git timeout or unavailable). Record the identity
+      // only with its resolved path, or later calls would skip resolution and
+      // read the default instead of the operator's repository setting.
+      const repoPath = resolveRepoSettingPath(projectDir);
       this.db = db;
       this.projectDir = projectDir;
-      this.repoPath = resolveRepoSettingPath(projectDir);
+      this.repoPath = repoPath;
     }
     const value = getAccountRepoSetting(REVIEWED_HANDOFF_SETTING, this.repoPath)
       ?? SETTINGS_DEFAULTS[REVIEWED_HANDOFF_SETTING];

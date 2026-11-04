@@ -48,15 +48,18 @@ function settingProjectDir(projectDir = null) {
 
 export function resolveRepoSettingPath(projectDir = null) {
   const cwd = settingProjectDir(projectDir);
+  // Git translates its diagnostics; the not-a-repository check below matches
+  // the untranslated message, so read it in the C locale.
+  const options = { timeoutMs: 2000, env: { ...process.env, LC_ALL: "C", LANGUAGE: "" } };
   try {
     // Settings are available before native authentication. Resolve their
     // identity through the same system Git used by administrative commands.
-    const commonDirRaw = adminGitExec(["rev-parse", "--git-common-dir"], cwd, { timeoutMs: 2000 }).trim();
+    const commonDirRaw = adminGitExec(["rev-parse", "--git-common-dir"], cwd, options).trim();
     const commonDir = path.resolve(cwd, commonDirRaw || ".git");
     if (path.basename(commonDir).toLowerCase() === ".git") {
       return path.dirname(commonDir);
     }
-    const root = adminGitExec(["rev-parse", "--show-toplevel"], cwd, { timeoutMs: 2000 }).trim();
+    const root = adminGitExec(["rev-parse", "--show-toplevel"], cwd, options).trim();
     return path.resolve(root || cwd);
   } catch (error) {
     // A non-repository project has a cwd-scoped identity. Other failures must

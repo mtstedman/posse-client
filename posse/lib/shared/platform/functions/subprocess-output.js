@@ -26,6 +26,12 @@ function boundaryOverlap(pattern, text) {
   return matched;
 }
 
+// A boundary fragment shorter than this is too ambiguous to attribute to a
+// secret: most truncated output starts or ends with a character some
+// credential also contains, and so short a fragment reveals nothing. Matches
+// the minimum literal length redactSecretValues accepts.
+const MIN_BOUNDARY_OVERLAP = 4;
+
 // Match original text so overlapping values cannot obscure one another. Keep
 // only each literal's next occurrence, then merge overlapping match intervals.
 // Truncated boundaries participate in the same union: masking a fragment also
@@ -45,8 +51,8 @@ export function redactLiteralValues(value, replacements, { truncatedStart = fals
     if (truncatedEnd) end = Math.max(end, boundaryOverlap(literal, text));
   }
   const boundaryLabel = "[REDACTED:truncated-secret]";
-  if (start) matches.push({ next: 0, length: start, label: boundaryLabel, boundary: true });
-  if (end) matches.push({ next: text.length - end, length: end, label: boundaryLabel, boundary: true });
+  if (start >= MIN_BOUNDARY_OVERLAP) matches.push({ next: 0, length: start, label: boundaryLabel, boundary: true });
+  if (end >= MIN_BOUNDARY_OVERLAP) matches.push({ next: text.length - end, length: end, label: boundaryLabel, boundary: true });
   let cursor = 0, output = "";
   while (true) {
     let first = null;

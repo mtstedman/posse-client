@@ -8,9 +8,10 @@ const DEFAULT_CONTEXT_LINES = 3;
 // Edit distances beyond this are reported as unavailable rather than computed;
 // callers fall back to describing the file as rewritten.
 const DEFAULT_MAX_EDIT_DISTANCE = 4000;
-// The edit-distance cap alone does not bound memory: each trace entry retains
-// an entire frontier sized to both files. Fall back before retaining more than
-// this budget, including the live frontier.
+// Step d of the search only touches diagonals -d..d, so each trace entry keeps
+// that window instead of a frontier sized to both files. Retained memory then
+// grows with the square of the edit distance alone, and this budget (reached
+// near distance 2000) bounds it; beyond it the file is reported as rewritten.
 const MAX_TRACE_BYTES = 16 * 1024 * 1024;
 
 function splitLines(text) {
@@ -28,16 +29,19 @@ function splitLines(text) {
 function editScript(a, b, maxEditDistance) {
   const n = a.length;
   const m = b.length;
-  const max = n + m;
-  const offset = max + 1;
-  const frontierBytes = (2 * max + 3) * Int32Array.BYTES_PER_ELEMENT;
-  if (frontierBytes > MAX_TRACE_BYTES) return null;
-  let v = new Int32Array(2 * max + 3);
+  const limit = Math.min(n + m, Math.max(0, Math.floor(maxEditDistance)));
+  // Diagonals -limit-1..limit+1 are the only ones the search can read.
+  const offset = limit + 1;
+  const v = new Int32Array(2 * limit + 3);
   const trace = [];
+  let retainedBytes = v.byteLength;
   let found = false;
-  for (let d = 0; d <= Math.min(max, maxEditDistance); d += 1) {
-    if ((trace.length + 2) * frontierBytes > MAX_TRACE_BYTES) return null;
-    trace.push(v.slice());
+  for (let d = 0; d <= limit; d += 1) {
+    // Keep diagonals -d-1..d+1: backtracking step d reads the neighbors k±1
+    // of its diagonal k in -d..d (and diagonal 1 at d = 0).
+    retainedBytes += (2 * d + 3) * Int32Array.BYTES_PER_ELEMENT;
+    if (retainedBytes > MAX_TRACE_BYTES) return null;
+    trace.push(v.slice(offset - d - 1, offset + d + 2));
     for (let k = -d; k <= d; k += 2) {
       let x = k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1])
         ? v[offset + k + 1]
@@ -55,9 +59,11 @@ function editScript(a, b, maxEditDistance) {
   let y = m;
   for (let d = trace.length - 1; d >= 0; d -= 1) {
     const vd = trace[d];
+    // trace[d] starts at diagonal -d-1.
+    const base = d + 1;
     const k = x - y;
-    const prevK = k === -d || (k !== d && vd[offset + k - 1] < vd[offset + k + 1]) ? k + 1 : k - 1;
-    const prevX = vd[offset + prevK];
+    const prevK = k === -d || (k !== d && vd[base + k - 1] < vd[base + k + 1]) ? k + 1 : k - 1;
+    const prevX = vd[base + prevK];
     const prevY = prevX - prevK;
     while (x > prevX && y > prevY) { ops.push("="); x -= 1; y -= 1; }
     if (d > 0) ops.push(x === prevX ? "+" : "-");

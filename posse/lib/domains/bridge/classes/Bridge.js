@@ -113,9 +113,9 @@ export class Bridge {
 
   /**
    * Heartbeat "a remote operator can reach this repo" into runtime_status.
-   * The detached run reads it (isBridgePresenceFresh for operator presence,
-   * isBridgeGateResolverAvailable for reachability) to keep human gates open
-   * for the phone instead of applying the headless timeout. Writes are
+   * The detached run reads its reachability (isBridgeGateResolverAvailable)
+   * to keep human and dead-letter recovery gates open for the phone instead
+   * of applying the headless timeout. Writes are
    * best-effort — presence telemetry must never take the bridge down.
    */
   startPresenceHeartbeat() {
