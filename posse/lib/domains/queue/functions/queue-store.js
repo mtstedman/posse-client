@@ -2946,7 +2946,7 @@ export function requeueOwnedJobsForForcedExit(ownerId, {
   let prevBusyMs = null;
   try {
     db = getDb();
-    prevBusyMs = Number(db.pragma("busy_timeout", { simple: true })) || 10000;
+    prevBusyMs = Number(db.pragma("busy_timeout", { simple: true }) ?? 10000);
     db.pragma(`busy_timeout = ${Math.max(0, Math.floor(Number(busyTimeoutMs) || 0))}`);
     runImmediateTransaction(db, () => {
       const owned = db.prepare(`

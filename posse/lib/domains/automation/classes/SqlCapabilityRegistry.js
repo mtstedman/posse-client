@@ -126,13 +126,14 @@ export class SqlCapabilityRegistry {
       roles: roleList, operations: ["describe", "invoke"], unattended: true });
   }
 
-  async execute(definitionOrName, input) {
+  async execute(definitionOrName, input, { signal = null } = {}) {
     const definition = typeof definitionOrName === "string" ? this.load(definitionOrName).definition : definitionOrName;
     schemaCheck(definition.input_schema, input);
     const parameters = definition.parameter_order.map(name => input[name]);
     const output = await execProjectDbQuery({ query: definition.query, parameters, maxRows: definition.max_rows }, {
       projectDir: definition.binding.folder_path,
       capability: "read",
+      signal,
     });
     demand(!String(output).startsWith("Error:"), String(output).slice(7).trim(), "sql_capability_unavailable");
     return output;

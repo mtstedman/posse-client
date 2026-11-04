@@ -556,20 +556,30 @@ human admin commands remain compatible.
 
 ## Local Models
 
-Run local text and image models directly from any directory:
+Run local text, image and video models directly from any directory:
 
 ```bash
 posse local list
 posse local list --json
+posse local --model qwen-image --help
 posse local install qwen-code
 posse local install qwen-image
 posse local --model qwen-code --prompt "Explain Rust ownership" --format text
 printf 'Explain Rust ownership' | posse local --model qwen-code --format json --output answer.json
 posse local --model qwen-image --prompt 'A red robot holding a POSSE sign' --format png --output robot.png --steps 20
+posse local --model qwen-image --prompt 'A red robot' --parameters '{"width":320,"height":320,"steps":20}' --output robot-small.png
 ```
 
 The slugs are `qwen-code` (`qwen2.5-coder-3b-instruct`), `qwen-image`
 (`qwen-image-2512`), and `minimax-h3` (video with stereo audio); either slug or full ID works with `--model`.
+`posse local --model <slug> --help` lists that profile's supported parameters,
+types, defaults, limits and input/output capabilities without loading the runtime.
+`--parameters` accepts a strict JSON object using the keys printed by help.
+Unknown keys, incorrect types and invalid values are rejected before native startup.
+Existing individual flags remain supported; supplying the same setting in JSON
+and a flag is an error. Keep the prompt in `--prompt`, `--input` or stdin.
+Dimensions follow each model's alignment: for example, use 320×320 rather than
+300×300. Silent video is not exposed by the current H3 adapter.
 `--input FILE` reads a prompt from a UTF-8 file. `--model-root DIR` selects an
 existing model store; the default is `~/.posse/models`.
 `--runtime-root DIR` selects the ONNX runtime cache, defaulting to
@@ -592,18 +602,23 @@ already on disk, use `posse local install qwen-image --source /absolute/files`.
 The image installer uses the native catalog's immutable URLs and SHA-256 pins;
 callers cannot substitute download URLs or hashes. Qwen image generation is
 available on Linux x64 and Windows x64 (AVX2, FMA and F16C), and Linux ARM64 and
-macOS Apple Silicon (NEON). CPU is the default and can take tens of minutes.
+macOS Apple Silicon (NEON). GPU mode defaults to `auto`: use a compatible GPU
+when available, otherwise CPU. CPU generation can take tens of minutes.
 Use `posse local gpus` or `posse local gpus --json` to query available image GPUs
 through the authenticated native runtime. Linux/Windows use Vulkan and Apple
-Silicon uses Metal. Then generate with `--gpu`, or copy an ID into `--gpu-id ID`:
+Silicon uses Metal. Use `--gpu on` to require a GPU, `--gpu off` to force CPU,
+or `--gpu-id ID` to select an exact device:
 
 ```bash
 posse local gpus
-posse local --model qwen-image --gpu --prompt "A red robot" --format png --output robot.png
+posse local --model qwen-image --gpu auto --prompt "A red robot" --format png --output robot.png
 ```
 
-With multiple GPUs, `--gpu` opens an interactive selector; scripts must supply
-`--gpu-id`. Unavailable IDs fail instead of falling back to the CPU. Hardware
+With multiple GPUs, `auto` selects the device with the most free VRAM, breaking
+ties by device ID. `--gpu on` opens an interactive selector; scripts must supply
+`--gpu-id`. Bare `--gpu` remains an alias for `--gpu on`. An explicit GPU ID or
+memory cap requires GPU execution and conflicts with `--gpu off`.
+Unavailable IDs fail instead of falling back to the CPU. Hardware
 IDs are preferred; IDs labelled `enumeration` should be looked up again after
 hardware, visibility, or driver changes. Operations exceeding the selected GPU’s
 tensor limits run on CPU. The engine automatically balances weights between the
@@ -614,7 +629,9 @@ weights; unsupported CPU-only weights do not consume the GPU allocation estimate
 Use `--gpu-memory-gb 4` to cap GPU use at 4 GiB; this also enables GPU execution
 and can only lower the automatic budget. Progress shows the planned budget,
 and `--format json` includes the effective budget under `runtime.memory`.
-The client requires a runtime advertising GPU memory budgeting before generation.
+GPU execution requires a runtime advertising GPU memory budgeting; `auto` falls
+back to CPU when the runtime lacks this capability or reports no devices.
+Generation failures are reported without automatically replaying the request on CPU.
 Worker failures include their exit status and recent native stderr.
 MiniMax H3 uses the same native engine and GPU controls for text-to-video with
 stereo sound. Its pinned quantized profile downloads approximately 33.02 GiB;
@@ -628,13 +645,39 @@ posse local --model minimax-h3 --gpu --prompt "A little robot waves and beeps ch
 
 H3 defaults to 384×384, 56 frames at 24 fps (about 2.33 seconds), and 20 steps.
 Dimensions must be divisible by 32; `--frames` accepts 5, 22, 39, 56, 73 or 90.
-The initial profile takes text only, with guidance fixed to 1. `--format avi`
+The profile takes text and an optional first-frame PNG, with guidance fixed to 1. `--format avi`
 (the default) writes MJPEG video and 32 kHz stereo PCM audio; `--format json`
 includes the video as base64 and generation metadata. No Python or FFmpeg
 installation is needed. AVI output is limited to 40 MiB; reduce dimensions or
 frame count if it exceeds that limit. For a small execution check, use
 `--width 64 --height 64 --frames 5 --steps 1`; this is not a quality test.
 The model uses the [MiniMax H3 community license](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE).
+
+Continue a video from its final frame and stitch the result into a new video:
+
+```bash
+posse local --model minimax-h3 --continue-from robot.avi \
+  --prompt "The robot turns and walks toward the door" --frames 56 --output longer.avi
+posse local --model minimax-h3 --parameters '{"continueFrom":"longer.avi","frames":56}' \
+  --prompt "The robot opens the door" --output even-longer.avi
+```
+
+This operation requires `ffmpeg` and `ffprobe` on PATH and an updated native ML
+runtime advertising first-frame conditioning. It accepts Posse AVI files (24 fps
+MJPEG with 32 kHz stereo PCM), including previously stitched output. Dimensions
+are inherited; explicit width/height must match. `frames` controls only the new
+segment. The repeated first frame of that segment and its audio interval are
+removed at the join, so a 56-frame continuation adds 55 frames. Audio is trimmed
+or padded to each segment's video duration and video is re-encoded as MJPEG.
+The result is bounded to 256 MiB and ten minutes. Existing files are never
+overwritten; intermediate files are cleaned up on success, error or cancellation.
+`--format json` returns the stitched video and its combined frame count/hash.
+
+To generate a clip from an image without stitching, use `--first-frame frame.png`
+(or `firstFrame` in `--parameters`). Supply an opaque PNG of at most 4 MiB with
+dimensions that meet the H3 limits. It cannot be combined with `continueFrom`.
+Frame conditioning preserves a visual starting point; motion history and audio
+are not carried into the next generation, so seamless motion or sound is not guaranteed.
 
 Use `posse local --help` for all generation controls.
 

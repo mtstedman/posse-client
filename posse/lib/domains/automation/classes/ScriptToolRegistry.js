@@ -34,7 +34,7 @@ export class ScriptToolRegistry {
     let entryPath;
     try { entryPath = fs.realpathSync(path.join(dir, ...manifest.entry.split("/"))); } catch { demand(false, `Script tool ${name}: entry ${manifest.entry} does not exist`, "script_invalid"); }
     const relative = path.relative(realDir, entryPath);
-    demand(relative && !relative.startsWith("..") && !path.isAbsolute(relative), `Script tool ${name}: entry must stay inside the tool folder`, "script_invalid");
+    demand(relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative), `Script tool ${name}: entry must stay inside the tool folder`, "script_invalid");
     const info = fs.statSync(entryPath);
     demand(info.isFile(), `Script tool ${name}: entry ${manifest.entry} must be a regular file`, "script_invalid");
     const script = readBounded(entryPath, SCRIPT_TOOL_LIMITS.MAX_ENTRY_BYTES);

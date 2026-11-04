@@ -20,7 +20,6 @@ export function normalizeObservationRow(row) {
 }
 
 export function observationSortValue(row) {
-  if (row?.id != null) return Number(row.id);
   return Date.parse(row?.created_at || "") || 0;
 }
 
@@ -44,7 +43,8 @@ export function mergeObservationRows(rows, order = "desc", limit = 100) {
     deduped.set(observationKey(row), row);
   }
   const sorted = [...deduped.values()].sort((a, b) => {
-    const delta = observationSortValue(a) - observationSortValue(b);
+    const delta = observationSortValue(a) - observationSortValue(b)
+      || Number(a.id || 0) - Number(b.id || 0);
     return order === "asc" ? delta : -delta;
   });
   const max = limit == null ? sorted.length : Math.max(0, Number(limit) || 0);

@@ -20,9 +20,8 @@ const TOOL_BATCH_MAX_CALLS = 8;
 const PROGRESS_ARGUMENT_BYTES = 4 * 1024;
 
 function digest(value) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
-function toolIdempotencyKey(sessionID, turnID, tool, input) {
-  const legacy = `${sessionID}:${turnID}:${digest(input).slice(0, 24)}`;
-  return legacy.length <= 120 ? legacy : `agent-tool:${digest([sessionID, turnID, tool, input])}`;
+function toolIdempotencyKey(sessionID, turnID, invocationID) {
+  return `agent-tool:${digest([sessionID, turnID, invocationID])}`;
 }
 function isoAfter(seconds) { return new Date(Date.now() + Math.max(60, Number(seconds) || 600) * 1000).toISOString(); }
 function canBatchToolCalls(tools, definition) {
@@ -340,18 +339,24 @@ export class AgentRuntime {
       const answer = (call, output, isError) => results.push({ role: "tool", tool_call_id: call.id, name: call.name,
         content: toolResultContent(call.name, output, { native }), is_error: isError });
       for (const { call, tool, error } of checkedCalls) {
+        state.execution?.check();
+        if (this.now() >= deadline) throw Object.assign(new Error("Agent turn exceeded its wall-time limit"), { code: "agent_budget_exceeded" });
         if (error) {
           answer(call, `Error: ${error}`, true);
           continue;
         }
         state.usage.calls += 1;
+        // A new model decision is a new invocation even when its arguments
+        // match an earlier call. Retries/confirmation of this invocation keep
+        // the same key; the owner still rejects changed inputs for that key.
+        const idempotencyKey = toolIdempotencyKey(state.session.id, state.turnID, `${state.usage.turns}:${state.usage.calls}`);
         if (tool.effect === "write" && state.definition.autonomy.write_tools === "confirm") {
           if (state.execution) throw Object.assign(new Error("Registered requests cannot enter operator confirmation"), { code: "agent_confirmation_required" });
           const argumentsDigest = digest(call.arguments);
           const proposal = {
             turn_id: state.turnID, message: state.prompt, started_at_ms: state.startedAt, tool: call.name, input: call.arguments,
             summary: `${call.name}(${JSON.stringify(call.arguments).slice(0, 240)})`, arguments_digest: argumentsDigest,
-            expires_at: isoAfter(state.definition.limits.wall_seconds), idempotency_key: toolIdempotencyKey(state.session.id, state.turnID, call.name, call.arguments),
+            expires_at: isoAfter(state.definition.limits.wall_seconds), idempotency_key: idempotencyKey,
             messages: [...state.messages, { ...request, tool_calls: request.tool_calls.filter(item => item.id === call.id), raw: call.raw }], tools: state.tools,
             system_prompt: state.systemPrompt, route: state.route, usage: state.usage, tool_calls: state.toolCalls,
             definition: state.definition,
@@ -363,7 +368,7 @@ export class AgentRuntime {
         // Arguments ride along only for callers that opted into tool summaries.
         state.progress?.({ type: "tool.started", ...progressCall, ...(state.toolSummary ? progressArguments(call.arguments) : {}) });
         try {
-          const result = await state.client.request("agent.turn.invoke", { session_id: state.session.id, token: state.token, tool: call.name, input: call.arguments });
+          const result = await state.client.request("agent.turn.invoke", { session_id: state.session.id, token: state.token, tool: call.name, input: call.arguments, idempotency_key: idempotencyKey });
           const status = tool.kind === "script" && result.output?.ok === false ? "failed" : "ok";
           state.toolCalls.push({ tool: call.name, status, duration_ms: result.duration_ms, effect: tool.effect });
           state.toolSummary?.push({ tool: call.name, status, duration_ms: result.duration_ms, effect: tool.effect,

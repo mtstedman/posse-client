@@ -11,11 +11,11 @@ export function normalizeWebCacheUrl(value) {
   try {
     const parsed = new URL(raw);
     parsed.hash = "";
-    parsed.hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
-    if (parsed.pathname !== "/") parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    // URL normalizes host case; distinct hosts and paths need separate evidence
+    // unless a fetch has actually established that they identify the same page.
     return parsed.toString();
   } catch {
-    return raw.replace(/#.*$/, "").replace(/\/+$/, "");
+    return raw.replace(/#.*$/, "");
   }
 }
 
@@ -64,12 +64,15 @@ export function getWebFetchCacheEntries(workItemId, { limit = null } = {}) {
   if (!workItemId) return [];
   const asEntry = (artifact) => {
       const json = safeJson(artifact.content_json, {});
+      const url = json.url || artifact.url || "";
       return {
         artifactId: artifact.id,
         jobId: artifact.job_id,
-        url: json.url || artifact.url || "",
-        normalizedUrl: json.normalized_url || normalizeWebCacheUrl(json.url || artifact.url || ""),
-        urlHash: json.url_hash || webCacheKey(json.url || artifact.url || ""),
+        url,
+        // Older artifacts collapsed www hosts and trailing slashes. The original
+        // URL is authoritative for both display and deduplication on read.
+        normalizedUrl: normalizeWebCacheUrl(url),
+        urlHash: webCacheKey(url),
         excerpt: artifact.content_long || json.evidence_excerpt || "",
       };
     };

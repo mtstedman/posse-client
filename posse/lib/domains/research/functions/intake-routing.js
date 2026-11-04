@@ -74,7 +74,7 @@ function isPathInsideProject(projectDir, candidate) {
   const base = path.resolve(projectDir);
   const resolved = path.resolve(base, candidate);
   const rel = path.relative(base, resolved);
-  return !!rel && rel !== "." && !path.isAbsolute(rel) && !rel.startsWith("..") && !rel.startsWith(`..${path.sep}`);
+  return !!rel && rel !== "." && !path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`);
 }
 
 function runGitLsFiles(projectDir, args = ["ls-files", "-z"]) {

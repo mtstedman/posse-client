@@ -26,8 +26,10 @@ async function copyIgnoredEnvironmentFiles(cwd, checkout) {
 // are writing in the shared worktree. Never hide, remove, or restore their
 // files to manufacture a clean source tree.
 export async function withBaselineCheckout({ cwd, commit, run }) {
+  const prefix = String(await gitExecAsync(["rev-parse", "--show-prefix"], cwd, { trim: false })).replace(/\r?\n$/, "");
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), BASELINE_CHECKOUT_PREFIX));
   const checkout = path.join(root, "candidate");
+  const executionCwd = path.join(checkout, prefix);
   let added = false;
   try {
     await gitExecAsync(["worktree", "add", "--detach", checkout, commit], cwd);
@@ -43,8 +45,8 @@ export async function withBaselineCheckout({ cwd, commit, run }) {
     }
     // Receipts compare ignored environment files as well as tracked source.
     // A detached checkout must see the same environment without importing dirt.
-    await copyIgnoredEnvironmentFiles(cwd, checkout);
-    return await run(checkout, async () => {
+    await copyIgnoredEnvironmentFiles(cwd, executionCwd);
+    return await run(executionCwd, async () => {
       await gitExecAsync(["reset", "--hard", commit], checkout);
       await gitExecAsync(["clean", "-fd"], checkout);
     });

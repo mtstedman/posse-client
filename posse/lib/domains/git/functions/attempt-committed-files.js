@@ -11,17 +11,11 @@
 import { gitExecAsync } from "./utils.js";
 import { resolveTargetBranchAsync } from "./target-branch.js";
 
-const NAME_DIFF = ["diff", "--no-renames", "--name-only", "--relative"];
-
-function nameList(raw) {
-  return String(raw || "")
-    .split("\n")
-    .map((line) => String(line || "").replace(/\\/g, "/").trim())
-    .filter(Boolean);
-}
+const NAME_DIFF = ["diff", "--no-renames", "--name-only", "--relative", "-z"];
 
 async function diffNamesAsync(cwd, revs) {
-  return nameList(await gitExecAsync([...NAME_DIFF, ...revs], cwd));
+  const raw = await gitExecAsync([...NAME_DIFF, ...revs], cwd, { trim: false });
+  return String(raw || "").split("\0").filter(Boolean);
 }
 
 async function isAncestorAsync(cwd, ancestor, descendant) {
@@ -38,9 +32,9 @@ async function isAncestorAsync(cwd, ancestor, descendant) {
 // never another work item's unmerged branch. Without a resolvable target
 // branch nothing qualifies.
 async function listTargetMergesAsync({ cwd, base, head, projectDir = null }) {
-  const merges = nameList(await gitExecAsync([
+  const merges = String(await gitExecAsync([
     "rev-list", "--first-parent", "--merges", "--parents", `${base}..${head}`,
-  ], cwd)).map((line) => line.split(/\s+/).filter(Boolean));
+  ], cwd)).split(/\r?\n/).filter(Boolean).map((line) => line.split(/\s+/).filter(Boolean));
   if (merges.length === 0) return [];
   let targetBranch = null;
   try {

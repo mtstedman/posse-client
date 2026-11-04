@@ -4,18 +4,24 @@ import path from "node:path";
 import { LOCAL_BRIDGE_MODELS } from "../../../catalog/local-model.js";
 import { ML_CAPABILITIES_METHOD, ML_GENERATE_METHOD, ML_GENERATE_IMAGE_METHOD, ML_INSTALL_IMAGE_MODEL_METHOD, ML_GENERATE_VIDEO_METHOD, ML_INSTALL_VIDEO_MODEL_METHOD } from "../../../catalog/binary.js";
 import { LocalModelProgress } from "../classes/LocalModelProgress.js";
-import { LOCAL_USAGE, numericOption, parseLocalOptions } from "./local-options.js";
+import { LOCAL_USAGE, parseLocalOptions } from "./local-options.js";
 import { checkLocalOutput, encodeLocalOutput, readLocalPrompt, writeLocalOutput } from "./local-output.js";
 import { requireLocalModelCapability } from "./local-capabilities.js";
-import { selectImageGpu, writeImageGpuInventory } from "./local-gpu.js";
+import { resolveLocalParameters, resolveLocalModel, localModelHelp } from "./local-parameters.js";
+import { selectGenerationGpu, writeImageGpuInventory } from "./local-gpu.js";
+import { requireFirstFrameCapability } from "./local-video-media.js";
+import { LocalVideoContinuation } from "../classes/LocalVideoContinuation.js";
 
 export { LOCAL_USAGE };
 const LONG_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
-  const args = parseLocalOptions(argv);
+  let args = parseLocalOptions(argv);
   const stdout = io.stdout || process.stdout, stderr = io.stderr || process.stderr, stdin = io.stdin || process.stdin;
-  if (args.help || !argv.length) { stdout.write(LOCAL_USAGE + "\n"); return 0; }
+  if (args.help || !argv.length) {
+    stdout.write((args.model ? localModelHelp(resolveLocalModel(args.model)) : LOCAL_USAGE) + "\n");
+    return 0;
+  }
   const modelRoot = path.resolve(args["model-root"] || defaultLocalGenerationModelRoot());
   if (args.action === "list") {
     const models = await Promise.all(LOCAL_BRIDGE_MODELS.map(async model => {
@@ -33,15 +39,15 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
     return 0;
   }
   const model = args.action === "gpus" && !args.model ? LOCAL_BRIDGE_MODELS.find(m => m.kind === "image")
-    : LOCAL_BRIDGE_MODELS.find(m => m.slug === args.model || m.modelId === args.model);
-  if (!model) throw new Error("Choose a model with --model <slug>. Run posse local list for available slugs.");
+    : resolveLocalModel(args.model);
   if (args.action === "gpus" && model.kind === "text") throw new Error("GPU discovery currently applies to image and video models.");
-  let payload, format;
+  let payload, format, parameters;
   if (args.action === "generate") {
+    ({ args, parameters } = resolveLocalParameters(model, args));
     format = args.format || model.formats[0];
     if (!model.formats.includes(format)) throw new Error(`${model.slug} supports --format ${model.formats.join('|')}.`);
     await checkLocalOutput(args.output, format, stdout);
-    payload = await generationPayload(model, args, stdin);
+    payload = await generationPayload(model, args, parameters, stdin);
   } else if (model.kind === "text" && args.source) {
     throw new Error("--source is only supported for image/video model files; text models use signed packages.");
   }
@@ -51,7 +57,7 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
   const signal = io.signal ? AbortSignal.any([controller.signal, io.signal]) : controller.signal;
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
-  let manager;
+  let manager, videoInput;
   progress.start();
   try {
     signal.throwIfAborted();
@@ -70,13 +76,23 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
       return 0;
     }
     const capability = requireLocalModelCapability(model, caps, { version: available.version });
-    if (args.action === "generate" && (args.gpu || args["gpu-id"] !== undefined || args["gpu-memory-gb"] !== undefined)) {
+    if (args.action === "generate" && model.kind === "video" && (parameters.firstFrame !== undefined || parameters.continueFrom !== undefined)) {
+      requireFirstFrameCapability(capability);
+      progress.update({ stage: parameters.continueFrom ? "Extracting previous video's last frame" : "Reading first frame" });
+      videoInput = await LocalVideoContinuation.prepare(parameters, args, signal);
+      payload.width = videoInput.width;
+      payload.height = videoInput.height;
+      payload.firstFrame = videoInput.firstFrame;
+    }
+    if (args.action === "generate" && model.kind !== "text") {
       progress.stop();
-      const device = await selectImageGpu(capability, args, { version: available.version, stdin, stderr, askChoice: io.askChoice });
+      const device = await selectGenerationGpu(capability, { ...args, gpu: parameters.gpu }, { version: available.version, stdin, stderr, askChoice: io.askChoice });
       signal.throwIfAborted();
-      payload.gpu = true;
-      payload.gpuId = device.id;
-      if (!args.quiet) stderr.write(`Using GPU ${device.id}\n`);
+      if (device) {
+        payload.gpu = true;
+        payload.gpuId = device.id;
+        if (!args.quiet) stderr.write(`Using GPU ${device.id}\n`);
+      }
       progress.start();
     }
     if (args.action === "install") {
@@ -130,7 +146,12 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
       throw error;
     }
     signal.throwIfAborted();
-    const bytes = encodeLocalOutput(result, model, format);
+    let bytes = encodeLocalOutput(result, model, videoInput?.source ? "avi" : format);
+    if (videoInput?.source) {
+      progress.update({ stage: "Stitching video continuation" });
+      bytes = await videoInput.stitch(result, bytes, format);
+    }
+    signal.throwIfAborted();
     progress.stop();
     await writeLocalOutput(bytes, args.output, stdout);
     if (!args.quiet) stderr.write(args.output && args.output !== "-" ? `Saved ${path.resolve(args.output)}\n` : "Generation complete.\n");
@@ -139,32 +160,20 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
     progress.stop();
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
+    await videoInput?.dispose();
     if (!io.manager) await manager?.disposeAll?.();
   }
 }
 
-async function generationPayload(model, args, input) {
-  const imageFlags = ["steps", "width", "height", "threads", "cfg-scale", "negative-prompt", "gpu", "gpu-id", "gpu-memory-gb"];
-  const textFlags = ["max-tokens", "system"];
-  const invalidFlags = model.kind === "text" ? [...imageFlags, "frames"] : model.kind === "video" ? [...textFlags, "cfg-scale", "negative-prompt"] : [...textFlags, "frames"];
-  for (const flag of invalidFlags) if (args[flag] !== undefined) throw new Error(`--${flag} does not apply to ${model.kind} models.`);
+async function generationPayload(model, args, parameters, input) {
   const prompt = await readLocalPrompt(args, input, model.kind !== "text" ? 8192 : 262144);
   if (model.kind !== "text") {
-    if (args["gpu-id"] !== undefined && !/^[A-Za-z0-9:_.-]{1,256}$/.test(args["gpu-id"])) throw new Error("--gpu-id must be an exact ID from posse local gpus.");
-    const negativePrompt = args["negative-prompt"] || "";
-    if (negativePrompt.includes("\0") || Buffer.byteLength(negativePrompt) > 8192) throw new Error("Negative prompt must be NUL-free and at most 8192 bytes.");
-    const video = model.kind === "video";
-    const frames = video ? numericOption(args, "frames", 56, 5, 90) : undefined;
-    if (video && (frames - 5) % 17) throw new Error("H3 --frames must be 5, 22, 39, 56, 73 or 90.");
-    return { modelId: model.modelId, prompt,
-      ...(video ? { frames } : { negativePrompt, cfgScale: numericOption(args, "cfg-scale", 2.5, 1, 10, 0) }),
-      ...(args["gpu-memory-gb"] !== undefined ? { gpuMemoryGiB: numericOption(args, "gpu-memory-gb", undefined, 0.25, 1024, 0) } : {}),
-      width: numericOption(args, "width", 384, 64, 1024, video ? 32 : 16), height: numericOption(args, "height", 384, 64, 1024, video ? 32 : 16),
-      steps: numericOption(args, "steps", 20, 1, 50), threads: numericOption(args, "threads", 8, 1, 32),
-      seed: numericOption(args, "seed", 42, 0, 4294967295) };
+    // GPU mode and selection belong to the CLI; native generation accepts a
+    // boolean and the exact resolved device ID, never auto/on/off.
+    const { gpu: _gpu, gpuId: _gpuId, firstFrame: _firstFrame, continueFrom: _continueFrom, ...settings } = parameters;
+    return { modelId: model.modelId, prompt, ...settings };
   }
-  if (args.seed !== undefined) throw new Error("Text generation currently uses deterministic greedy decoding; --seed applies to images.");
-  if (args.system && (Buffer.byteLength(args.system) > 262144 || args.system.includes("\0"))) throw new Error("System prompt is too large or contains NUL.");
-  return { modelId: model.modelId, messages: [...(args.system ? [{ role: "system", content: args.system }] : []), { role: "user", content: prompt }],
-    generation: { mode: "greedy", maxOutputTokens: numericOption(args, "max-tokens", 512, 1, 4096) } };
+  return { modelId: model.modelId,
+    messages: [...(parameters.system ? [{ role: "system", content: parameters.system }] : []), { role: "user", content: prompt }],
+    generation: { mode: "greedy", maxOutputTokens: parameters.maxOutputTokens } };
 }

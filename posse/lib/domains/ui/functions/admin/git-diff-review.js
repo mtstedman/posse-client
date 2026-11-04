@@ -382,7 +382,7 @@ function resolvePathUnder(root, filePath) {
   const base = path.resolve(root);
   const resolved = path.resolve(base, normalizePath(filePath));
   const rel = path.relative(base, resolved);
-  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
   return resolved;
 }
 

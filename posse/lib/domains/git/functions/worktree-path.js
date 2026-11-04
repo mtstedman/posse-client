@@ -5,6 +5,7 @@
 // native worktree root/path/findLegacy addressing entrypoints.
 
 import path from "path";
+import { isAbortError, throwIfAborted } from "../../runtime/functions/yield.js";
 import { isInsideRoot } from "../../runtime/functions/fs-safety.js";
 import { Repo, Worktree } from "../classes/index.js";
 import { gitExecAsync } from "./utils.js";
@@ -28,22 +29,34 @@ export function gitCurrentBranchAsync(cwd, options = {}) {
   return Worktree.at(cwd, cwd).currentBranchAsync(options);
 }
 
+async function readGitTopLevelAsync(cwd, options) {
+  throwIfAborted(options.signal);
+  const root = await gitExecAsync(["rev-parse", "--show-toplevel"], cwd, options);
+  throwIfAborted(options.signal);
+  return path.resolve(root);
+}
+
 export async function gitTopLevelAsync(cwd, options = {}) {
   try {
-    return path.resolve(await gitExecAsync(["rev-parse", "--show-toplevel"], cwd, options));
+    return await readGitTopLevelAsync(cwd, options);
   } catch (err) {
+    throwIfAborted(options.signal);
+    if (isAbortError(err)) throw err;
     logSuppressedGitFailure("git top-level resolution", err, { cwd });
     return path.resolve(cwd);
   }
 }
 
 export async function nestedProjectSubpathAsync(projectDir, options = {}) {
+  throwIfAborted(options.signal);
   const projectRoot = path.resolve(projectDir);
   const cacheable = options?.manager == null;
   if (cacheable && nestedProjectSubpathCache.has(projectRoot)) {
     return nestedProjectSubpathCache.get(projectRoot);
   }
-  const repoRoot = await gitTopLevelAsync(projectDir, options);
+  // Scope configuration needs an established root. A probe fallback would
+  // turn a transient lookup failure into a cached whole-repository scope.
+  const repoRoot = await readGitTopLevelAsync(projectDir, options);
   const rel = path.relative(repoRoot, projectRoot);
   const result = !rel || rel === ""
     || !isInsideRoot(projectRoot, repoRoot, { allowEqual: false, followSymlinks: false })

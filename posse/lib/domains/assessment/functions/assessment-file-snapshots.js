@@ -1,7 +1,7 @@
 import fs from "fs";
-import path from "path";
 import { buildSmartPreload } from "../../handoff/functions/index.js";
-import { mergeUniquePaths, normalizeAssessmentScopePath } from "./assessment-scope.js";
+import { buildAssessmentProviderScope, mergeUniquePaths, normalizeAssessmentScopePath } from "./assessment-scope.js";
+import { buildScopePredicates, resolveDeterministicReadableFile } from "../../../shared/tools/functions/toolkit/path-policy.js";
 
 function _formatLineNumberedFile(raw = "", startLine = 1) {
   return String(raw || "")
@@ -55,6 +55,7 @@ export function buildAssessmentFileSnapshots({ cwd = null, assessmentContext = n
         ...(Array.isArray(assessmentContext.allowed_files) ? [assessmentContext.allowed_files] : []),
       )).slice(0, 6);
   if (candidatePaths.length === 0) return "";
+  const scope = buildScopePredicates(cwd, buildAssessmentProviderScope({ cwd, assessmentContext }));
 
   const lineHints = _extractTaskLineRanges(taskSpec);
   const sections = [];
@@ -75,10 +76,14 @@ export function buildAssessmentFileSnapshots({ cwd = null, assessmentContext = n
   for (const relPath of candidatePaths) {
     const normalizedPath = normalizeAssessmentScopePath(relPath, cwd);
     if (!normalizedPath) continue;
-    const absPath = path.isAbsolute(normalizedPath) ? normalizedPath : path.resolve(cwd, normalizedPath);
+    const readable = resolveDeterministicReadableFile(cwd, normalizedPath, scope);
+    if (!readable.ok) {
+      if (!addSection(`=== ${normalizedPath} === (file unavailable under assessment read policy)`)) break;
+      continue;
+    }
     let raw = "";
     try {
-      raw = fs.readFileSync(absPath, "utf8");
+      raw = fs.readFileSync(readable.path, "utf8");
     } catch {
       if (!addSection(`=== ${normalizedPath} === (file not found or unreadable during assessment preload)`)) break;
       continue;

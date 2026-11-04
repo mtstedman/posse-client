@@ -9,6 +9,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import zlib from "node:zlib";
 import { createHash } from "node:crypto";
+import { writeAllBytes } from "../../platform/functions/write-all.js";
 
 export const NATIVE_ARTIFACT_TARBALL_FORMAT = "tar.gz";
 
@@ -83,7 +84,7 @@ async function writeEntry(reader, size, outPath) {
   try {
     await reader.stream(size, async (chunk) => {
       hash.update(chunk);
-      await handle.write(chunk);
+      await writeAllBytes(handle, chunk);
     });
     await handle.sync();
   } finally {

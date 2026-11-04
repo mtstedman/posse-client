@@ -30,6 +30,21 @@ export function writeImageGpuInventory(capability, version, stdout, json) {
   if (gpu.devices.length) stdout.write("Select: posse local --model qwen-image --gpu-id <ID> --prompt TEXT --output image.png\n");
 }
 
+export async function selectGenerationGpu(capability, args, io) {
+  if (args.gpu === "off") return null;
+  // Explicit device/budget requests must not silently fall back to CPU.
+  if (args.gpu === "on" || args["gpu-id"] !== undefined || args["gpu-memory-gb"] !== undefined) {
+    return selectImageGpu(capability, args, io);
+  }
+  const gpu = capability?.gpu;
+  if (!gpu || !Array.isArray(gpu.devices) || gpu.memoryPolicy?.mode !== "auto-fit" || gpu.memoryPolicy?.capGiB !== true) return null;
+  const devices = imageGpuInventory(capability, io.version).devices;
+  if (!devices.length) return null;
+  const sorted = [...devices].sort((a, b) => b.memoryFree - a.memoryFree || a.id.localeCompare(b.id));
+  // Reuse exact-ID validation so duplicate IDs cannot select an ambiguous GPU.
+  return selectImageGpu(capability, { ...args, "gpu-id": sorted[0].id }, io);
+}
+
 export async function selectImageGpu(capability, args, { version, stdin, stderr, askChoice }) {
   const gpu = imageGpuInventory(capability, version);
   if (gpu.memoryPolicy?.mode !== "auto-fit" || gpu.memoryPolicy?.capGiB !== true) throw new Error(`posse-ml ${version} does not provide GPU memory budgeting. Update the native runtime before GPU generation.`);

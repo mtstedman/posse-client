@@ -21,7 +21,7 @@ function readText(root, relPath) {
 
 function existingCodeFile(root, relPath) {
   const normalized = path.posix.normalize(String(relPath || "").replace(/\\/g, "/").replace(/^\.\//, ""));
-  if (!normalized || normalized.startsWith("..") || path.posix.isAbsolute(normalized)) return null;
+  if (!normalized || normalized === ".." || normalized.startsWith("../") || path.posix.isAbsolute(normalized)) return null;
   if (!CODE_FILE_RE.test(normalized)) return null;
   try {
     return fs.statSync(path.join(root, normalized)).isFile() ? normalized : null;

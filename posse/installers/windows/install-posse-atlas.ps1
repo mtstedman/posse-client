@@ -2275,8 +2275,9 @@ function Remove-DirectoryTree {
 # Earlier installs leave their own `posse` commands, checkouts, and native
 # binaries behind: the pre-July <InstallRoot>\posse layout, npm global or
 # linked copies, and launchers in other PATH folders. Retire them so only this
-# checkout answers `posse`. Old copies this installer created are deleted when
-# they hold no local changes; anything else is only unlinked and named.
+# checkout answers `posse`. Completed checkouts are only unlinked and named:
+# even a clean Git worktree may hold untracked/ignored files or local-only
+# commits. Only abandoned installer staging directories are deleted.
 function Remove-StalePosseInstalls {
   param([string]$CurrentRoot, [string]$ManagedBinDir)
   $notes = @()
@@ -2328,11 +2329,8 @@ function Remove-StalePosseInstalls {
     $abandoned = $dir.Name -match '^posse(-client)?\.(installing|removing)-[0-9a-f]+$'
     if (-not $abandoned -and ($dir.Name -notin @("posse", "posse-client") -or -not $root -or (& $isCurrent $root))) { continue }
     if (-not $abandoned) {
-      $dirty = Get-GitOutput $dir.FullName @("status", "--porcelain", "--untracked-files=no")
-      if ($null -eq $dirty -or $dirty) {
-        $notes += ("kept the old Posse copy {0}: it has local changes or is not a git checkout; delete it yourself if unused" -f $dir.FullName)
-        continue
-      }
+      $notes += ("kept the old Posse copy {0}: local files and Git history may still be needed; delete it yourself if unused" -f $dir.FullName)
+      continue
     }
     if ($DryRun) { $notes += ("would delete the old Posse copy {0}" -f $dir.FullName); continue }
     try { Remove-DirectoryTree $dir.FullName; $notes += ("deleted the old Posse copy {0}" -f $dir.FullName) }

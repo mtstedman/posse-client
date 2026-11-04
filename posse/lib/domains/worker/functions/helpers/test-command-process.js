@@ -201,6 +201,7 @@ export async function runCommand(command, {
     let timedOut = false;
     let timeoutKind = null;
     let forceTimer = null;
+    let pendingTerminationResult = null;
     let settleTimer = null;
     let idleTimer = null;
 
@@ -211,6 +212,12 @@ export async function runCommand(command, {
       timedOut = false,
     } = {}) => {
       if (settled) return;
+      // A closed parent with redirected descendants is not proof that its
+      // process group exited. Finish only after the forced termination runs.
+      if (timedOut && forceTimer) {
+        pendingTerminationResult = { code, error, signal, timedOut };
+        return;
+      }
       settled = true;
       clearTimeout(timer);
       abortSignal?.removeEventListener("abort", cancel);
@@ -231,10 +238,10 @@ export async function runCommand(command, {
         signal,
         timed_out: timedOut,
         duration_ms: Date.now() - startedAt,
-        stdout: redactExactValues(stdout, secrets),
+        stdout: redactExactValues(stdout, secrets, { truncatedStart: stdoutTruncated }),
         stderr: error
-          ? redactExactValues([stderr, error.message || String(error)].filter(Boolean).join("\n"), secrets)
-          : redactExactValues(stderr, secrets),
+          ? redactExactValues([stderr, error.message || String(error)].filter(Boolean).join("\n"), secrets, { truncatedStart: stderrTruncated })
+          : redactExactValues(stderr, secrets, { truncatedStart: stderrTruncated }),
         stdout_truncated: stdoutTruncated,
         stderr_truncated: stderrTruncated,
         timeout_kind: timedOut ? timeoutKind : null,
@@ -254,8 +261,11 @@ export async function runCommand(command, {
       timeoutKind = kind;
       if (idleTimer) clearTimeout(idleTimer);
       killProcessTree(child);
-      forceTimer = setTimeout(() => killProcessTree(child, { force: true }), TERMINATION_GRACE_MS);
-      forceTimer.unref?.();
+      forceTimer = setTimeout(() => {
+        killProcessTree(child, { force: true });
+        forceTimer = null;
+        if (pendingTerminationResult) finish(pendingTerminationResult);
+      }, TERMINATION_GRACE_MS);
       settleTimer = setTimeout(() => {
         child.stdout?.destroy();
         child.stderr?.destroy();

@@ -19,7 +19,6 @@ import { installLegacyFeatureTables } from "./legacy-feature-tables.js";
 import {
   ensureRuntimeDbDir,
   openDatabaseHandle,
-  quarantineStaleIncompleteDb,
 } from "./database-lifecycle.js";
 import { HOST_SCHEMA_VERSION, ensureHostSchemaVersion } from "./migrations.js";
 import {
@@ -92,8 +91,8 @@ export function getDb() {
   const dir = path.dirname(dbPath);
   ensureRuntimeDbDir(dir);
 
-  quarantineStaleIncompleteDb(dbPath);
-
+  // SQLite owns journal recovery. An idle initial transaction can have an old,
+  // zero-byte database and live sidecars; their age is not corruption evidence.
   _db = openDatabaseHandle(dbPath);
   _dbPath = dbPath;
   // Keep the handle provisional until every bootstrap and migration step succeeds.

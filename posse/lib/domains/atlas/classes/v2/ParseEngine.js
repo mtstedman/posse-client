@@ -3435,6 +3435,7 @@ export class ParseEngine {
 
         /** @type {ParseResult | null} */
         let parsed = null;
+        let parserFailed = false;
         try {
           await reportIndexProgress(repo_rel_path, {
             force: true,
@@ -3447,6 +3448,7 @@ export class ParseEngine {
             ? await /** @type {any} */ (this.#parser).parseBuffer({ bytes: fileBytes, repo_rel_path })
             : await this.#parser.parseFile({ absPath, repoRoot: parseRoot });
         } catch (err) {
+          parserFailed = true;
           logAtlasError(`[ParseEngine.#indexPaths] parse failed for ${repo_rel_path}:`, err);
           base.skipped.push({
             repo_rel_path,
@@ -3562,6 +3564,9 @@ export class ParseEngine {
             symbols: parsed.symbols,
             edges: parsed.edges,
             source: "treesitter",
+            // Keep a failed placeholder available for SCIP gap accounting,
+            // but do not let unchanged bytes suppress the next parser retry.
+            status: parserFailed ? "failed" : "indexed",
           });
           base.blobs_ingested++;
         } else {

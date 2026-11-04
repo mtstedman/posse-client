@@ -63,8 +63,10 @@ export function ensureBridgeLocalToken() {
   const existing = readSetting(SETTING_KEYS.BRIDGE_LOCAL_TOKEN);
   if (existing) return existing;
   const token = randomToken();
-  writeSetting(SETTING_KEYS.BRIDGE_LOCAL_TOKEN, token);
-  return token;
+  claimAccountSettingIfAbsent(SETTING_KEYS.BRIDGE_LOCAL_TOKEN, token);
+  const stored = readSetting(SETTING_KEYS.BRIDGE_LOCAL_TOKEN);
+  if (!stored) throw new Error("could not initialize bridge local token");
+  return stored;
 }
 
 export function rotateBridgeLocalToken() {

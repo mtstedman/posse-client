@@ -336,7 +336,7 @@ export function resolveUnitTestInvocation(projectDir, requestedPath, capability 
   let real;
   try { real = fs.realpathSync(absolute); } catch { return null; }
   const relativeReal = path.relative(fs.realpathSync(root), real);
-  if (!relativeReal || relativeReal.startsWith("..") || path.isAbsolute(relativeReal)) return null;
+  if (!relativeReal || relativeReal === ".." || relativeReal.startsWith(`..${path.sep}`) || path.isAbsolute(relativeReal)) return null;
   const adapter = ADAPTERS[path.extname(normalized).toLowerCase()];
   if (!adapter) return null;
   const resolved = repositoryTestRunner(root, normalized) || (["javascript", "typescript"].includes(adapter.language)

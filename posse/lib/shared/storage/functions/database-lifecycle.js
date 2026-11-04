@@ -2,8 +2,13 @@ import fs from "node:fs";
 import Database from "better-sqlite3";
 
 export function isRecoverableDbError(err) {
+  // Contention and I/O failures do not establish corruption. In particular,
+  // moving a live SQLite database on SQLITE_BUSY splits existing connections
+  // from the replacement opened at its original path.
+  const code = String(err?.code || "");
+  if (code) return /^SQLITE_(?:CORRUPT(?:_|$)|NOTADB$)/.test(code);
   const msg = err?.message || String(err || "");
-  return /disk I\/O error|database disk image is malformed|file is not a database|SQLITE_IOERR|SQLITE_CORRUPT|SQLITE_NOTADB/i.test(msg);
+  return /database disk image is malformed|file is not a database|SQLITE_CORRUPT|SQLITE_NOTADB/i.test(msg);
 }
 
 export function applyDbPragmas(db, dbPath) {
@@ -73,7 +78,8 @@ export function openDatabaseHandle(dbPath) {
       applyDbPragmas(db, dbPath);
     } catch (err) {
       try { db.close(); } catch {}
-      if (!quarantineStaleIncompleteDb(dbPath, { force: true, ignoreAge: true })) throw err;
+      if (!isRecoverableDbError(err)
+        || !quarantineStaleIncompleteDb(dbPath, { force: true, ignoreAge: true })) throw err;
       db = new Database(dbPath);
       applyDbPragmas(db, dbPath);
     }

@@ -19,6 +19,7 @@ import { spawn } from "child_process";
 import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, workItemOperatorParking, getQueueWakeGeneration, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, jobHasLiveEnvironmentSetup, environmentSetupParking, grantEnvironmentSetupResume, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgeGateResolverAvailable, isMergeVerificationReviewJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, isWorkItemDispositionGateJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
 import { WORK_ITEM_ORDER_WAIT_REASON } from "../../queue/functions/work-item-order.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
+import { getAttempts } from "../../queue/functions/attempts.js";
 import { reapOrphanedDaemons } from "../../../shared/tools/classes/daemon/index.js";
 import { C } from "../../../shared/format/functions/colors.js";
 import { primeProviderUsageAuthAsync } from "../../providers/functions/provider.js";
@@ -1865,7 +1866,7 @@ export class Scheduler {
             if (runtimeSec > runtimeLimitSec) {
               // No stronger model to escalate to: let the attempt keep its
               // context up to the backstop instead of restarting it as-is.
-              const canEscalate = runtimeKillCanEscalate(freshJob, { leasedJob: entry.job });
+              const canEscalate = runtimeKillCanEscalate(freshJob, { leasedJob: entry.job, attempts: getAttempts(jobId) });
               const backstopSec = runtimeLimitSec * RUNTIME_NO_ESCALATION_BACKSTOP_MULTIPLIER;
               if (!canEscalate && runtimeSec <= backstopSec) {
                 if (!entry.runtimeEscalationSkipLogged) {

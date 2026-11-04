@@ -43,7 +43,7 @@ export async function runScriptTool(tool, input, { secrets = {}, privateInputs =
         });
       } catch (error) { reject(Object.assign(new Error(`Could not start ${tool.manifest.name}: ${error.message}`), { code: "script_invalid" })); return; }
       const limit = tool.manifest.max_output_bytes;
-      let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), truncated = false, timedOut = false, aborted = false, settled = false;
+      let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), truncated = false, stderrTruncated = false, timedOut = false, aborted = false, settled = false;
       const terminate = () => {
         terminateSpawnedProcessTree(child, { processGroup: process.platform !== "win32" });
         setTimeout(() => terminateSpawnedProcessTree(child, { processGroup: process.platform !== "win32", force: true }), TERMINATION_GRACE_MS).unref?.();
@@ -58,7 +58,10 @@ export async function runScriptTool(tool, input, { secrets = {}, privateInputs =
       });
       child.stderr.on("data", chunk => {
         stderr = Buffer.concat([stderr, chunk]);
-        if (stderr.length > SCRIPT_TOOL_LIMITS.STDERR_TAIL_BYTES) stderr = stderr.subarray(stderr.length - SCRIPT_TOOL_LIMITS.STDERR_TAIL_BYTES);
+        if (stderr.length > SCRIPT_TOOL_LIMITS.STDERR_TAIL_BYTES) {
+          stderrTruncated = true;
+          stderr = stderr.subarray(stderr.length - SCRIPT_TOOL_LIMITS.STDERR_TAIL_BYTES);
+        }
       });
       // A script that never reads stdin closes the pipe; that is not an error.
       child.stdin.on("error", () => {});
@@ -69,7 +72,8 @@ export async function runScriptTool(tool, input, { secrets = {}, privateInputs =
         if (aborted) { reject(signal.reason ?? Object.assign(new Error("Run canceled"), { code: "canceled" })); return; }
         if (failure) { reject(Object.assign(new Error(`Could not start ${tool.manifest.name}: ${failure.message}`), { code: failure.code === "ENOENT" ? "script_unavailable" : "script_invalid" })); return; }
         const redactions = { ...secrets, ...Object.fromEntries(Object.entries(privateInputs).map(([key, value]) => [`input_${key}`, typeof value === "string" ? value : JSON.stringify(value)])) };
-        const out = redactSecretValues(stdout.toString("utf8"), redactions), err = redactSecretValues(stderr.toString("utf8"), redactions);
+        const out = redactSecretValues(stdout.toString("utf8"), redactions, { truncatedEnd: truncated });
+        const err = redactSecretValues(stderr.toString("utf8"), redactions, { truncatedStart: stderrTruncated });
         // JSON output is redacted structurally (sensitive keys, token-shaped
         // strings); pattern scrubbing raw JSON text would corrupt it.
         let output, outputJson;

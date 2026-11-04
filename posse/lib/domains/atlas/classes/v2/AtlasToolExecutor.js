@@ -928,7 +928,7 @@ export class AtlasToolExecutor {
     const dispatchKeyParts = this.#dispatchCacheKeyParts({ policy: dispatchCachePolicy });
     const dispatchCacheKey = dispatchCacheEnabledFor(request) && dispatchKeyParts
       ? this.#dispatchCache?.keyFor({
-        repoKey,
+        repoKey: dedupeRepoKey,
         action,
         args,
         selectorKeys: gatewaySelectorKeysFor(baseAction, args),

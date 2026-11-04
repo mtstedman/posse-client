@@ -45,7 +45,14 @@ function resolveRepoScopePath(projectDir, value) {
 }
 
 function isRepository(projectDir) {
-  return !!projectDir && pathEntryExists(path.join(path.resolve(projectDir), ".git"));
+  if (!projectDir) return false;
+  let directory = path.resolve(projectDir);
+  for (;;) {
+    if (pathEntryExists(path.join(directory, ".git"))) return true;
+    const parent = path.dirname(directory);
+    if (parent === directory) return false;
+    directory = parent;
+  }
 }
 
 function ignoredUntrackedPathKeys(projectDir, values) {

@@ -1,5 +1,6 @@
 import { abortError } from "../../concurrency/functions/abortable.js";
 import { abortable } from "../../concurrency/functions/abortable.js";
+import { writeAllBytes } from "../../platform/functions/write-all.js";
 // @ts-check
 
 import fs from "node:fs";
@@ -340,7 +341,7 @@ async function writeResponseToPart(response, partPath, maxBytes, signal, onChunk
             throw artifactError("POSSE_ARTIFACT_TOO_LARGE", `native artifact exceeds the ${maxBytes}-byte limit`);
           }
           hash.update(chunk);
-          await handle.write(chunk);
+          await writeAllBytes(handle, chunk, signal);
           onChunk?.(size);
         }
       } finally {
@@ -351,7 +352,7 @@ async function writeResponseToPart(response, partPath, maxBytes, signal, onChunk
       size = chunk.byteLength;
       if (size > maxBytes) throw artifactError("POSSE_ARTIFACT_TOO_LARGE", `native artifact exceeds the ${maxBytes}-byte limit`);
       hash.update(chunk);
-      await handle.write(chunk);
+      await writeAllBytes(handle, chunk, signal);
       onChunk?.(size);
     }
     await handle.sync();

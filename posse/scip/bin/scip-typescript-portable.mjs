@@ -181,7 +181,7 @@ try {
     process.exitCode = 1;
   });
   const code = await new Promise((resolve) => child.on("close", resolve));
-  process.exitCode = Number(code) || 0;
+  process.exitCode = code == null ? 1 : code;
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
 }

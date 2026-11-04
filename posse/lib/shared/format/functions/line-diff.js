@@ -8,6 +8,10 @@ const DEFAULT_CONTEXT_LINES = 3;
 // Edit distances beyond this are reported as unavailable rather than computed;
 // callers fall back to describing the file as rewritten.
 const DEFAULT_MAX_EDIT_DISTANCE = 4000;
+// The edit-distance cap alone does not bound memory: each trace entry retains
+// an entire frontier sized to both files. Fall back before retaining more than
+// this budget, including the live frontier.
+const MAX_TRACE_BYTES = 16 * 1024 * 1024;
 
 function splitLines(text) {
   const value = String(text ?? "");
@@ -26,10 +30,13 @@ function editScript(a, b, maxEditDistance) {
   const m = b.length;
   const max = n + m;
   const offset = max + 1;
+  const frontierBytes = (2 * max + 3) * Int32Array.BYTES_PER_ELEMENT;
+  if (frontierBytes > MAX_TRACE_BYTES) return null;
   let v = new Int32Array(2 * max + 3);
   const trace = [];
   let found = false;
   for (let d = 0; d <= Math.min(max, maxEditDistance); d += 1) {
+    if ((trace.length + 2) * frontierBytes > MAX_TRACE_BYTES) return null;
     trace.push(v.slice());
     for (let k = -d; k <= d; k += 2) {
       let x = k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1])

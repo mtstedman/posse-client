@@ -676,7 +676,7 @@ export function buildManifest(dir, relBase = null, opts = {}) {
 
   function isNestedRuntimeDir(fullPath) {
     const relPath = relativeManifestPath(fullPath);
-    if (!relPath || relPath.startsWith("..")) return false;
+    if (!relPath || relPath === ".." || relPath.startsWith("../")) return false;
     return relPath.split("/").filter(Boolean).includes(".posse");
   }
 
@@ -776,7 +776,7 @@ export async function buildManifestAsync(dir, relBase = null, opts = {}) {
 
   function isNestedRuntimeDir(fullPath) {
     const relPath = relativeManifestPath(fullPath);
-    if (!relPath || relPath.startsWith("..")) return false;
+    if (!relPath || relPath === ".." || relPath.startsWith("../")) return false;
     return relPath.split("/").filter(Boolean).includes(".posse");
   }
 

@@ -56,7 +56,7 @@ function defaultAssessorTier() {
  * job.model_name do not apply. The worker clears `_assess_only` once the
  * assessment starts, so pass the lease-time row as `leasedJob`.
  */
-export function runtimeKillCanEscalate(job, { resolveModel = null, leasedJob = null } = {}) {
+export function runtimeKillCanEscalate(job, { resolveModel = null, leasedJob = null, attempts = null } = {}) {
   if (!job) return true;
   const payload = jobPayload(job);
   const leasedPayload = leasedJob ? jobPayload(leasedJob) : null;
@@ -80,7 +80,15 @@ export function runtimeKillCanEscalate(job, { resolveModel = null, leasedJob = n
     // (ProviderAttemptLifecycle), so a kill reruns the same model.
     if (job.job_type === "research" && payload?._research_retry_synthesis === true) return false;
     baseTier = job.model_tier || "standard";
-    attempt = Math.max(1, Number(job.attempt_count) || 0);
+    if ((role === "dev" || role === "assessor") && baseTier === "strong") baseTier = "standard";
+    const retryGeneration = Math.max(0, Number(payload?._retry_generation) || 0);
+    // Penalty-free interruptions refund jobs.attempt_count but retain their
+    // physical rows. Match ProviderAttemptLifecycle's generation count,
+    // including the current running row and excluding assessment attempts.
+    attempt = Array.isArray(attempts)
+      ? Math.max(1, attempts.filter((entry) => ["implementation", "human"].includes(String(entry.attempt_kind || "implementation"))
+        && Number(entry.attempt_number || 0) > retryGeneration).length)
+      : Math.max(1, Number(job.attempt_count) || 0);
     resolve = resolveModel || defaultTierModelResolver(job, role);
   }
   let currentTier;
@@ -91,6 +99,10 @@ export function runtimeKillCanEscalate(job, { resolveModel = null, leasedJob = n
   } catch {
     currentTier = escalateModelTier(baseTier, attempt);
     nextTier = escalateModelTier(baseTier, attempt + 1);
+  }
+  if (assessOnly) {
+    if (currentTier === "strong") currentTier = "standard";
+    if (nextTier === "strong") nextTier = "standard";
   }
   if (currentTier === nextTier) return false;
   try {

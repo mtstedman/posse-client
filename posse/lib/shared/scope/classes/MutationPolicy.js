@@ -418,16 +418,17 @@ function readonlyBashPathReason(policy, command) {
       if (privateParts.some((part) => PRIVATE_BASH_PATH_PARTS.has(part))) {
         return `private workspace path is not readable through bash: ${value}`;
       }
-      if (!absolute && /[*?\[\]{}]/.test(value) && typeof fs.globSync === "function") {
+      if (/[*?\[\]{}]/.test(value) && typeof fs.globSync === "function") {
         for (const match of fs.globSync(value, { cwd: policy.cwd })) {
           const expanded = path.resolve(policy.cwd, match);
           if (isSensitiveEnvFileOrTargetPath(expanded)) return `shell glob resolves to a protected environment file: ${value}`;
-          const expandedParts = String(match).replace(/\\/g, "/").split("/").filter(Boolean).map((part) => part.toLowerCase());
+          const expandedRelative = path.relative(policy.cwd, expanded);
+          const expandedParts = expandedRelative.replace(/\\/g, "/").split("/").filter(Boolean).map((part) => part.toLowerCase());
           if (expandedParts.some((part) => part.startsWith("-"))) {
             return `shell glob expands to an option-like path: ${value}`;
           }
           if (expandedParts.some((part) => PRIVATE_BASH_PATH_PARTS.has(part))
-            || agentHiddenReadablePathReason(match)) {
+            || agentHiddenReadablePathReason(expandedRelative)) {
             return `shell glob resolves to a private workspace path: ${value}`;
           }
           const real = resolvedExistingPrefix(expanded);
@@ -659,7 +660,7 @@ function matchesExternalRoot(filePath, roots = []) {
   return roots.some((root) => {
     const rel = path.relative(root, abs);
     return rel === "" || (
-      !rel.startsWith("..")
+      !rel.startsWith(`..${path.sep}`)
       && rel !== ".."
       && !path.isAbsolute(rel)
     );

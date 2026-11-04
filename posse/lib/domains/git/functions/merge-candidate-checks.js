@@ -39,7 +39,7 @@ export function withTemporaryMergeCandidateCheckout({ cwd, git, dependencySource
         ...sources.flatMap((source) => installedComposerRoots(source).map((root) => path.join(root, "vendor"))),
       ]);
       for (const relative of dependencyDirs) {
-        if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+        if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
         if (path.basename(relative) === "vendor") {
           for (const source of sources) {
             if (linkComposerVendorFromCheckout(path.dirname(path.join(checkout, relative)), path.dirname(path.join(source, relative))).ok) break;

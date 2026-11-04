@@ -88,21 +88,24 @@ export async function dirtyWorktreeFingerprint(cwd, commitHash, porcelainStatus)
 
 // Ignored environment files change what a test run sees without changing Git
 // status. One digest over the catalog's files at the project root binds a
-// receipt to them; only the digest is kept, never their contents.
+// receipt to them; only the digest is kept, never their contents. Unreadable,
+// oversized or non-regular inputs cannot prove equality for receipt reuse.
 export function environmentFilesFingerprint(cwd) {
   if (!cwd) return null;
-  const hash = createHash("sha256").update("environment-files-v1");
+  const hash = createHash("sha256").update("environment-files-v2");
   for (const name of VERIFICATION_ENVIRONMENT_FILES) {
     hash.update(`\0${name}\0`);
     try {
       const stat = fs.lstatSync(path.join(cwd, name));
       if (!stat.isFile() || stat.size > DIRTY_INPUT_FINGERPRINT_LIMITS.max_bytes) {
-        hash.update(`kind:${stat.isFile() ? "oversized" : stat.mode}`);
-        continue;
+        return null;
       }
-      hash.update(fs.readFileSync(path.join(cwd, name)));
+      // Typed, fixed-length content digests cannot collide with the missing
+      // marker or inject the separator for the next environment filename.
+      hash.update(`file:${createHash("sha256").update(fs.readFileSync(path.join(cwd, name))).digest("hex")}`);
     } catch (error) {
-      hash.update(error?.code === "ENOENT" ? "missing" : "unreadable");
+      if (error?.code !== "ENOENT") return null;
+      hash.update("missing");
     }
   }
   return hash.digest("hex");

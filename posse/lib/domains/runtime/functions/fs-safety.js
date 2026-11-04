@@ -64,7 +64,7 @@ export function isInsideRoot(targetPath, rootPath, {
   const target = comparablePath(targetPath, { followSymlinks });
   const relative = path.relative(root, target);
   if (!relative) return allowEqual;
-  return !relative.startsWith("..") && !path.isAbsolute(relative);
+  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 export function isPathInside(rootPath, candidatePath, options = {}) {

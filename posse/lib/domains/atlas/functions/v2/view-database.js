@@ -10,6 +10,7 @@ import Database from "better-sqlite3";
 
 import { VIEW_DDL, VIEW_SCHEMA_VERSION } from "./contracts/index.js";
 import { ensureGraphDerivedTables } from "./graph-derived.js";
+import { isSqliteCorruptionError } from "./ledger/schema.js";
 
 const VIEW_INDEXES = Object.freeze([
   {
@@ -49,7 +50,8 @@ export function openViewDbReadWrite(dbPath) {
   let db;
   try {
     db = new Database(dbPath);
-  } catch {
+  } catch (error) {
+    if (!isSqliteCorruptionError(error)) throw error;
     removeSqliteFile(dbPath);
     db = new Database(dbPath);
     fresh = true;
@@ -58,7 +60,11 @@ export function openViewDbReadWrite(dbPath) {
     let reset = false;
     try {
       reset = viewNeedsFormatReset(db);
-    } catch {
+    } catch (error) {
+      if (!isSqliteCorruptionError(error)) {
+        try { db.close(); } catch { /* preserve the schema-read error */ }
+        throw error;
+      }
       reset = true;
     }
     if (reset) {

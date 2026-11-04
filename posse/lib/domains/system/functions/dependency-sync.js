@@ -273,7 +273,7 @@ function nodeInstallCacheDir(root, opts = {}) {
   const resolvedRoot = path.resolve(root || process.cwd());
   const projectRoot = path.resolve(opts.projectDir || resolvedRoot);
   const relToProject = path.relative(projectRoot, resolvedRoot);
-  const rootUnderProject = !relToProject || (!relToProject.startsWith("..") && !path.isAbsolute(relToProject));
+  const rootUnderProject = !relToProject || (relToProject !== ".." && !relToProject.startsWith(`..${path.sep}`) && !path.isAbsolute(relToProject));
   const baseRoot = rootUnderProject ? projectRoot : resolvedRoot;
   const key = hashText(resolvedRoot.toLowerCase()).slice(0, 12);
   return path.join(managedInstallStateRoot(baseRoot), "deps", "npm-cache", key);

@@ -3,6 +3,7 @@ import {
   SCRIPT_TOOL_RESERVED_ENV_PREFIXES, SCRIPT_TOOL_SCHEMA, SCRIPT_TOOL_TEMPLATES,
 } from "../../../catalog/custom-tools.js";
 import { assertValidSchema, demand, object } from "./policy.js";
+import { redactLiteralValues } from "../../../shared/platform/functions/subprocess-output.js";
 
 export const EMPTY_SCRIPT_PARAMS = Object.freeze({ type: "object", additionalProperties: false, properties: {} });
 const NAME_RE = /^[a-z][a-z0-9-]{0,39}(\.[a-z][a-z0-9_-]{0,39})?$/;
@@ -96,8 +97,8 @@ export function scalarParamEnv(input) {
 // Replaces every secret value, including its common encodings, before tool
 // output can reach a run record, an agent, or a terminal. Values shorter than
 // four characters are too ambiguous to match safely.
-export function redactSecretValues(text, secrets) {
-  let value = String(text ?? ""), redacted = false;
+export function redactSecretValues(text, secrets, options = {}) {
+  const value = String(text ?? "");
   const forms = [];
   for (const [name, secret] of Object.entries(secrets || {})) {
     if (typeof secret !== "string" || secret.length < 4) continue;
@@ -107,10 +108,8 @@ export function redactSecretValues(text, secrets) {
     for (const candidate of new Set(candidates)) if (candidate.length >= 4) forms.push([candidate, label]);
   }
   forms.sort((a, b) => b[0].length - a[0].length);
-  for (const [candidate, label] of forms) {
-    if (value.includes(candidate)) { value = value.split(candidate).join(label); redacted = true; }
-  }
-  return { text: value, redacted };
+  const redacted = redactLiteralValues(value, forms, options);
+  return { text: redacted, redacted: redacted !== value };
 }
 
 // `name:type[:required]` from `posse tools new --param`.

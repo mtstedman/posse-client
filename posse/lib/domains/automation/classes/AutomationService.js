@@ -236,7 +236,7 @@ export class AutomationService {
         run.calls++; output = await this.scripts.run(entry, run.input, { signal: controller.signal, privateInputs: execution?.inputs || {} });
       } else if (entry.kind === "sql") {
         demand(this.sqlCapabilities, "SQL capabilities are unavailable in this owner", "capability_unavailable");
-        run.calls++; output = await this.sqlCapabilities.execute(entry.capability, run.input);
+        run.calls++; output = await this.sqlCapabilities.execute(entry.capability, run.input, { signal: controller.signal });
       } else if (entry.definition.runtime.mode === "recipe") {
         const previous = {};
         for (const step of entry.definition.runtime.recipe) {

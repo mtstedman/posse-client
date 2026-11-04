@@ -1,7 +1,7 @@
 import { isMainThread, workerData } from "node:worker_threads";
 import path from "path";
 
-import { gitExec } from "../../git/functions/utils.js";
+import { adminGitExec } from "../../git/functions/admin-git-exec.js";
 import { normalizeProjectDir } from "../../runtime/functions/paths.js";
 import { SETTINGS_CATALOG, getCatalogEntry } from "./catalog.js";
 import { JOB_MODEL_TIERS, JOB_REASONING_EFFORTS } from "../../../catalog/job.js";
@@ -49,15 +49,20 @@ function settingProjectDir(projectDir = null) {
 export function resolveRepoSettingPath(projectDir = null) {
   const cwd = settingProjectDir(projectDir);
   try {
-    const commonDirRaw = gitExec(["rev-parse", "--git-common-dir"], cwd, { timeoutMs: 2000 }).trim();
+    // Settings are available before native authentication. Resolve their
+    // identity through the same system Git used by administrative commands.
+    const commonDirRaw = adminGitExec(["rev-parse", "--git-common-dir"], cwd, { timeoutMs: 2000 }).trim();
     const commonDir = path.resolve(cwd, commonDirRaw || ".git");
     if (path.basename(commonDir).toLowerCase() === ".git") {
       return path.dirname(commonDir);
     }
-    const root = gitExec(["rev-parse", "--show-toplevel"], cwd, { timeoutMs: 2000 }).trim();
+    const root = adminGitExec(["rev-parse", "--show-toplevel"], cwd, { timeoutMs: 2000 }).trim();
     return path.resolve(root || cwd);
-  } catch {
-    return cwd;
+  } catch (error) {
+    // A non-repository project has a cwd-scoped identity. Other failures must
+    // not silently read or write settings under a different repository key.
+    if (/not a git repository/i.test(String(error?.stderr || ""))) return cwd;
+    throw error;
   }
 }
 

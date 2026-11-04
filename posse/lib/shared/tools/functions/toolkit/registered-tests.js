@@ -59,7 +59,7 @@ function workspaceRel(root, fullPath) {
 function safeWorkspacePath(root, rel) {
   const resolved = path.resolve(root, rel);
   const relative = path.relative(root, resolved);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
   return resolved;
 }
 

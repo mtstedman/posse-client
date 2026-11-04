@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import Database from "better-sqlite3";
 import { setTimeout as sleep } from "node:timers/promises";
 import { getRuntimeDbPath, getRuntimeLogDir } from "../lib/domains/runtime/functions/base-paths.js";
 import { RunMonitor } from "../lib/domains/observability/classes/RunMonitor.js";
@@ -54,8 +55,12 @@ async function main() {
   const statePath = monitorStatePath({ runDir, workItemId: args.workItemId, name: args.state });
   fs.mkdirSync(path.dirname(statePath), { recursive: true });
   const lockPath = `${statePath}.lock`;
-  const lock = acquireCursorLock(lockPath);
-  fs.writeFileSync(lock, `${process.pid}\n`);
+  const lock = withCursorLockTransition(lockPath, () => {
+    const fd = acquireCursorLock(lockPath);
+    try { fs.writeFileSync(fd, `${process.pid}\n`); }
+    catch (error) { fs.closeSync(fd); fs.unlinkSync(lockPath); throw error; }
+    return fd;
+  });
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.on("SIGINT", stop);
@@ -81,9 +86,26 @@ async function main() {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     monitor?.dispose();
-    fs.closeSync(lock);
-    fs.unlinkSync(lockPath);
+    try {
+      withCursorLockTransition(lockPath, () => {
+        const owned = fs.fstatSync(lock);
+        let current;
+        try { current = fs.statSync(lockPath); }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+        if (current?.dev === owned.dev && current?.ino === owned.ino) fs.unlinkSync(lockPath);
+      });
+    } finally { fs.closeSync(lock); }
   }
+}
+
+// As with worktree locks, a SQLite writer lock serializes pathname changes.
+// Keep this sidecar permanently: deleting an arbiter could create two lock
+// namespaces while an older process still has its database open. No async
+// work or telemetry reads run inside this short transaction.
+function withCursorLockTransition(lockPath, fn) {
+  const arbiter = new Database(`${lockPath}.sqlite`, { timeout: 2000 });
+  try { return arbiter.transaction(fn).immediate(); }
+  finally { arbiter.close(); }
 }
 
 // The lock file records its owner's pid. A watcher that was SIGKILLed leaves

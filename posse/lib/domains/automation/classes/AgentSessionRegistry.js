@@ -173,7 +173,11 @@ export class AgentSessionRegistry {
     const started = this.now();
     const run = this.service.invoke(principal, {
       operation: "invoke", tool: capability.entry_id, grant_id: capability.grant_id, input,
-      idempotency_key: idempotency_key || toolIdempotencyKey(session_id, session.active.turn_id, tool, input),
+      // Unkeyed reads are observations, not retries: polling/read-after-write
+      // must see current state. Keep the legacy write fallback for older
+      // clients, which cannot safely distinguish a retry from another write.
+      idempotency_key: idempotency_key || (capability.effect === "read" ? randomUUID()
+        : toolIdempotencyKey(session_id, session.active.turn_id, tool, input)),
     }, null, { allowExternalWrite: capability.effect !== "write" || session.definition.autonomy.write_tools === "allow" || confirmed === true, execution });
     await this.service.active.get(run.id)?.promise;
     const complete = this.store.run(run.id);

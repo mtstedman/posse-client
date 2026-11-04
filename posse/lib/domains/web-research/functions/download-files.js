@@ -1,5 +1,6 @@
 import { removeEmptyDirectories } from "../../../shared/platform/functions/transactional-directories.js";
 import { firstMissingAncestor } from "../../../shared/platform/functions/transactional-directories.js";
+import { writeAllBytes } from "../../../shared/platform/functions/write-all.js";
 // @ts-check
 //
 // download_file: the artificer's scoped lane for external files. The harness
@@ -372,7 +373,7 @@ async function saveResponse(item, response, { finalUrl, status, signal, budget }
       bytes += buffer.length;
       hash.update(buffer);
       if (head.length < 16) head = Buffer.concat([head, buffer.subarray(0, 16 - head.length)]);
-      await handle.write(buffer);
+      await writeAllBytes(handle, buffer, signal);
     }
     if (signal.aborted) throw new ItemError("download timed out");
     await handle.close();

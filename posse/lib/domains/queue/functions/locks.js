@@ -43,7 +43,7 @@ export function renewSchedulerLock(lockName, ownerId, durationSec = 60) {
   const expiresAt = new Date(Date.now() + durationSec * 1000).toISOString();
   // Update acquired_at on each renewal so it acts as a heartbeat timestamp.
   // Stale-lock detection checks acquired_at age to determine if the holder is alive.
-  const prevBusyMs = Number(db.pragma("busy_timeout", { simple: true })) || 10000;
+  const prevBusyMs = Number(db.pragma("busy_timeout", { simple: true }) ?? 10000);
   try {
     db.pragma(`busy_timeout = ${SCHEDULER_LOCK_RENEW_BUSY_MS}`);
     const result = db.prepare(`

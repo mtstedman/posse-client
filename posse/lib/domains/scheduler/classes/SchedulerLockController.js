@@ -19,12 +19,17 @@ export class SchedulerLockController {
     let lock;
     try {
       lock = scheduler.schedulerLock.info();
+      if (lock?.owner_id === scheduler.ownerId && !(Date.parse(lock.expires_at) > Date.now())) {
+        // renewNow also returns true when a transient error schedules a retry.
+        // Only a live database row proves dispatch authority was restored.
+        if (scheduler.schedulerLock.renewNow()) lock = scheduler.schedulerLock.info();
+      }
     } catch (error) {
       if (error?.code === "SQLITE_BUSY" || error?.code === "SQLITE_LOCKED") return false;
       throw error;
     }
     if (lock?.owner_id !== scheduler.ownerId
-      || (!(Date.parse(lock.expires_at) > Date.now()) && !scheduler.schedulerLock.renewNow())) {
+      || !(Date.parse(lock.expires_at) > Date.now())) {
       this.stopForLoss("Scheduler no longer owns a live lock - stopping dispatch");
       return false;
     }

@@ -39,12 +39,14 @@ function parseCommandLine(command) {
   const tokens = [];
   let current = "";
   let quote = null;
+  let tokenStarted = false;
   for (let i = 0; i < command.length; i += 1) {
     const ch = command[i];
     // Backslash only escapes characters this grammar treats specially
     // (quotes, whitespace, backslash); otherwise it is a literal so
     // Windows paths like src\foo.js survive tokenization intact.
     if (ch === "\\" && quote !== "'") {
+      tokenStarted = true;
       const next = command[i + 1];
       const escapable = quote === '"'
         ? next === '"' || next === "\\"
@@ -63,25 +65,48 @@ function parseCommandLine(command) {
       continue;
     }
     if (ch === "'" || ch === '"') {
+      tokenStarted = true;
       quote = ch;
       continue;
     }
     if (/\s/.test(ch)) {
-      if (current) {
+      if (tokenStarted) {
         tokens.push(current);
         current = "";
+        tokenStarted = false;
       }
       continue;
     }
+    tokenStarted = true;
     current += ch;
   }
   if (quote) return null;
-  if (current) tokens.push(current);
+  if (tokenStarted) tokens.push(current);
   return tokens;
 }
 
-function canUseArgvExecution(command) {
-  return !SHELL_OPERATOR_RE.test(command);
+function canUseArgvExecution(command, platform = process.platform) {
+  if (SHELL_OPERATOR_RE.test(command)) return false;
+  // POSIX utilities expect the shell to expand unquoted pathname patterns.
+  // Keep quoted patterns literal (e.g. grep's regex), and leave Windows on
+  // its existing native/PowerShell command contract.
+  if (platform !== "win32") {
+    let quote = null;
+    for (let i = 0; i < command.length; i += 1) {
+      const ch = command[i];
+      if (quote) {
+        if (ch === "\\" && quote === '"') i += 1;
+        else if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      // Escaped glob characters also need the shell to remove their escape;
+      // the argv parser deliberately preserves ordinary Windows backslashes.
+      if (/[*?\[]/.test(ch) || (ch === "\\" && /[*?\[]/.test(command[i + 1] || ""))) return false;
+      if (ch === "\\") i += 1;
+    }
+  }
+  return true;
 }
 
 function isMissingExecutableOnWindows(platform, error) {
@@ -176,7 +201,7 @@ function grepFromTokens(tokens) {
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token === "-e" || token === "--regexp") {
-      pattern = tokens[index + 1] || null;
+      pattern = tokens[index + 1] ?? null;
       index += 1;
       continue;
     }
@@ -194,7 +219,7 @@ function grepFromTokens(tokens) {
     }
     files.push(token);
   }
-  return pattern ? { pattern, caseInsensitive, files } : null;
+  return pattern != null ? { pattern, caseInsensitive, files } : null;
 }
 
 function selectStringCommand({ pattern, caseInsensitive = false, files = [] } = {}) {
@@ -378,7 +403,7 @@ function execBashCommand(command, {
   execSyncImpl = execSync,
   execFileSyncImpl = execFileSync,
 }) {
-  if (canUseArgvExecution(command)) {
+  if (canUseArgvExecution(command, platform)) {
     const tokens = parseCommandLine(command);
     if (tokens?.length > 0) {
       const result = spawnSyncImpl(tokens[0], tokens.slice(1), {

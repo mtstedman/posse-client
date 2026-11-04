@@ -198,7 +198,7 @@ function tableSuffix(tables = []) {
  *   matter what the operator granted; write-lane jobs use the full grant.
  * @returns {Promise<string>}
  */
-export async function execProjectDbQuery(args = {}, { projectDir = null, capability = "write", observationContext = null, loadDriver = undefined } = {}) {
+export async function execProjectDbQuery(args = {}, { projectDir = null, capability = "write", observationContext = null, loadDriver = undefined, signal = null, timeoutMs = undefined } = {}) {
   const conn = readProjectDbConnection({ projectDir });
   if (!conn.enabled || !conn.dbType || conn.permissions.length === 0) {
     return "Error: Project DB access is not enabled for this repository.";
@@ -235,6 +235,8 @@ export async function execProjectDbQuery(args = {}, { projectDir = null, capabil
       readOnly,
       maxRows,
       projectDir,
+      signal,
+      timeoutMs,
     });
   } catch (err) {
     const message = redact(err?.message || String(err), conn.password);

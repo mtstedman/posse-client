@@ -10,9 +10,12 @@
 // engine read-only (defense-in-depth behind permissions.js).
 
 import path from "path";
-import Database from "better-sqlite3";
+import { fork } from "node:child_process";
+import { TEST_SUBPROCESS_ENV_KEYS } from "../../../../../catalog/process.js";
+import { filterProcessEnv } from "../../../../platform/functions/process-env.js";
 
 export const DEFAULT_MAX_ROWS = 200;
+const DEFAULT_SQLITE_TIMEOUT_MS = 30_000;
 
 function boundedRemoteReadStatement(statement, maxRows) {
   const sql = String(statement || "").trim().replace(/;\s*$/, "");
@@ -42,34 +45,43 @@ function resolveSqlitePath(database, projectDir) {
   return path.isAbsolute(raw) ? raw : path.resolve(projectDir || process.cwd(), raw);
 }
 
-async function executeSqlite({ connection, statement, parameters, isRead, readOnly, maxRows, projectDir }) {
+async function executeSqlite({ connection, statement, parameters, isRead, readOnly, maxRows, projectDir, signal, timeoutMs }) {
+  signal?.throwIfAborted();
   const file = resolveSqlitePath(connection.database, projectDir);
-  const db = new Database(file, { readonly: readOnly, fileMustExist: true });
-  try {
-    db.pragma("busy_timeout = 5000");
-    const stmt = db.prepare(statement);
-    if (isRead && stmt.reader) {
-      const rows = [];
-      let truncated = false;
-      for (const row of stmt.iterate(...parameters)) {
-        if (rows.length >= maxRows) { truncated = true; break; }
-        rows.push(row);
-      }
-      const columns = stmt.columns().map((c) => c.name);
-      return { columns, rows, rowCount: rows.length, truncated };
-    }
-    const info = stmt.run(...parameters);
-    return {
-      columns: [],
-      rows: [],
-      rowCount: 0,
-      affectedRows: info.changes,
-      lastInsertRowid: typeof info.lastInsertRowid === "bigint" ? Number(info.lastInsertRowid) : info.lastInsertRowid,
-      truncated: false,
-    };
-  } finally {
-    try { db.close(); } catch { /* best effort */ }
-  }
+  const limitMs = Math.max(1, Math.min(DEFAULT_SQLITE_TIMEOUT_MS, Number(timeoutMs) || DEFAULT_SQLITE_TIMEOUT_MS));
+  // A native sqlite3_step may never return to V8, so terminating a JS worker
+  // thread is insufficient. A one-shot process can be killed while executing
+  // native code, without blocking cancellation in the automation/MCP owner.
+  return await new Promise((resolve, reject) => {
+    const child = fork(new URL("./sqlite-query-worker.js", import.meta.url), [], {
+      env: filterProcessEnv(process.env, { allowedKeys: TEST_SUBPROCESS_ENV_KEYS }),
+      execArgv: [], serialization: "advanced", windowsHide: true,
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
+    let response = null, failure = null;
+    const stop = error => { failure ||= error; child.kill("SIGKILL"); };
+    const timer = setTimeout(() => stop(Object.assign(new Error(
+      `SQLite query exceeded its ${limitMs} ms time limit.${isRead ? "" : " The statement may have completed; verify its effects before retrying."}`,
+    ), { code: "ETIMEDOUT" })), limitMs);
+    const onAbort = () => stop(signal.reason ?? Object.assign(new Error("SQLite query canceled"), { name: "AbortError" }));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    child.once("message", message => { response = message; });
+    child.once("error", error => { failure ||= error; });
+    // Do not return on timeout/abort until the child is reaped: otherwise a
+    // background statement could retain locks or commit after its caller left.
+    child.once("close", code => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (failure) { reject(failure); return; }
+      if (response?.ok) { resolve(response.result); return; }
+      reject(Object.assign(new Error(response?.error?.message || `SQLite query worker exited without a result (${code})`),
+        { code: response?.error?.code || "SQLITE_ERROR" }));
+    });
+    if (signal?.aborted) { onAbort(); return; }
+    try {
+      child.send({ file, statement, parameters, isRead, readOnly, maxRows, timeoutMs: limitMs }, error => { if (error) stop(error); });
+    } catch (error) { stop(error); }
+  });
 }
 
 async function executePostgres({ connection, statement, parameters, isRead, readOnly, maxRows, loadDriver }) {
@@ -149,6 +161,8 @@ async function executeMysql({ connection, statement, parameters, isRead, readOnl
  *   maxRows?: number,
  *   projectDir?: string|null,
  *   loadDriver?: (moduleName: string) => Promise<any>,
+ *   signal?: AbortSignal|null,
+ *   timeoutMs?: number,
  * }} input
  */
 export async function executeProjectDbStatement({
@@ -160,9 +174,11 @@ export async function executeProjectDbStatement({
   maxRows = DEFAULT_MAX_ROWS,
   projectDir = null,
   loadDriver = loadOptionalDriver,
+  signal = null,
+  timeoutMs = DEFAULT_SQLITE_TIMEOUT_MS,
 }) {
   const dbType = connection?.dbType;
-  const args = { connection, statement, parameters, isRead, readOnly, maxRows, projectDir, loadDriver };
+  const args = { connection, statement, parameters, isRead, readOnly, maxRows, projectDir, loadDriver, signal, timeoutMs };
   switch (dbType) {
     case "sqlite": return await executeSqlite(args);
     case "postgres": return await executePostgres(args);

@@ -70,41 +70,57 @@ const fallbackProject = fs.existsSync(targetComposerJson)
 // leave every document path absolute.
 const indexCwd = canonicalDirectory(fallbackProject?.dir || cwd);
 const localOutput = path.join(indexCwd, "index.scip");
-try {
-  fs.rmSync(localOutput, { force: true });
-} catch {
-  // Best effort cleanup before upstream writes its hardcoded output.
-}
+process.exitCode = runIndexer();
 
-const args = [];
-if (parsed.memoryLimit) args.push(`--memory-limit=${parsed.memoryLimit}`);
-const run = spawnSync("php", ["-d", "error_reporting=8191", "-d", "display_errors=stderr", upstream, ...args], {
-  cwd: indexCwd,
-  stdio: "inherit",
-  windowsHide: true,
-  env: {
-    ...process.env,
-    ...(useTargetVendor ? {} : { POSSE_SCIP_TARGET_VENDOR_DIR: stagedVendorDir }),
-  },
-});
-if (run.error) {
-  console.error(run.error.message || String(run.error));
-  cleanupFallbackProject(fallbackProject);
-  process.exit(1);
+function runIndexer() {
+  const directOutput = path.join(canonicalDirectory(path.dirname(output)), path.basename(output)) === localOutput;
+  let owned;
+  let ownedFd;
+  let completed = false;
+  const ownedOutput = () => {
+    try {
+      const current = fs.lstatSync(localOutput);
+      return owned && current.dev === owned.dev && current.ino === owned.ino ? current : null;
+    } catch { return null; }
+  };
+  try {
+    // Only an explicit --output index.scip authorizes replacing this path.
+    // Exclusive creation also prevents concurrent wrapper runs from claiming
+    // the same hardcoded upstream output between a check and the PHP launch.
+    if (directOutput) fs.rmSync(localOutput, { force: true });
+    ownedFd = fs.openSync(localOutput, "wx");
+    // Keep the reservation open so a removed inode cannot be recycled into
+    // an unrelated replacement before the ownership check below.
+    owned = fs.fstatSync(ownedFd);
+    const args = [];
+    if (parsed.memoryLimit) args.push(`--memory-limit=${parsed.memoryLimit}`);
+    const run = spawnSync("php", ["-d", "error_reporting=8191", "-d", "display_errors=stderr", upstream, ...args], {
+      cwd: indexCwd, stdio: "inherit", windowsHide: true,
+      env: { ...process.env, ...(useTargetVendor ? {} : { POSSE_SCIP_TARGET_VENDOR_DIR: stagedVendorDir }) },
+    });
+    if (run.error) throw run.error;
+    if (run.status !== 0) return run.status ?? 1;
+    if (!ownedOutput()?.size) throw new Error(`scip-php completed but did not write its reserved output ${localOutput}`);
+    if (!directOutput) {
+      fs.mkdirSync(path.dirname(output), { recursive: true });
+      fs.renameSync(localOutput, output);
+    }
+    completed = true;
+    return 0;
+  } catch (error) {
+    console.error(error.code === "EEXIST"
+      ? `scip-php will not overwrite existing ${localOutput} while staging elsewhere; use a clean indexing directory or explicitly set --output to that file.`
+      : error.message || String(error));
+    return 1;
+  } finally {
+    try {
+      if (!completed && ownedOutput()) fs.rmSync(localOutput, { force: true });
+    } finally {
+      if (ownedFd != null) fs.closeSync(ownedFd);
+      cleanupFallbackProject(fallbackProject);
+    }
+  }
 }
-if (run.status !== 0) {
-  cleanupFallbackProject(fallbackProject);
-  process.exit(run.status ?? 1);
-}
-if (!fs.existsSync(localOutput)) {
-  console.error(`scip-php completed but did not write ${localOutput}`);
-  cleanupFallbackProject(fallbackProject);
-  process.exit(1);
-}
-
-fs.mkdirSync(path.dirname(output), { recursive: true });
-fs.renameSync(localOutput, output);
-cleanupFallbackProject(fallbackProject);
 
 function bootstrapComposerAutoload({ cwd, vendorDir }) {
   const composerJson = path.join(cwd, "composer.json");
