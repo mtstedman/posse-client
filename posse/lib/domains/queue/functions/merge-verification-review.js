@@ -266,48 +266,53 @@ function commandList(commands) {
   return commands.map((command) => `\`${command}\``).join(", ");
 }
 
+function passingCheckDescription(check) {
+  const paths = Array.isArray(check.unit_test_paths) ? check.unit_test_paths : [];
+  const scoped = check.scope_limited === true || paths.length > 0;
+  const count = check.test_counts?.total;
+  const details = [Number.isFinite(count) ? `${count} tests` : null,
+    check.job_id ? `job #${check.job_id}` : null].filter(Boolean).join(", ");
+  const selected = paths.slice(0, 4).map(file => `\`${file}\``).join(", ")
+    + (paths.length > 4 ? ` and ${paths.length - 4} more` : "");
+  return scoped
+    ? `Selected tests for planned \`${check.command}\`${details ? ` (${details})` : ""}: ${selected || "file selection unavailable"}. Full-suite coverage is not established by this receipt.`
+    : `\`${check.execution_command || check.command}\`${details ? ` (${details})` : ""}.`;
+}
+
 /**
  * Operator-facing note: which verification was replaced or waived, what did
  * pass on the commit being merged, and why review is needed. `passedChecks`
  * are passing post-change receipts on that commit (verification-receipts.js).
  */
-export function mergeVerificationReviewNote(requirement, { passedChecks = [], repairChecks = [] } = {}) {
-  const lines = [];
+export function mergeVerificationReviewNote(requirement, { passedChecks = [], repairChecks = [], candidateCommit = null } = {}) {
+  const reasons = (requirement.triggers || []).map(trigger => trigger.kind === "risk"
+    ? `risk ${trigger.risk} on job #${trigger.job_id} (review at ${MERGE_REVIEW_MIN_RISK}+)`
+    : `auth/session/security-sensitive scope (${trigger.terms.join(", ")})`);
+  const lines = reasons.length ? [`Review required: ${reasons.join("; ")}.`] : [];
   const byCommand = new Map();
   for (const waiver of requirement.waivers || []) {
     if (!byCommand.has(waiver.command)) byCommand.set(waiver.command, []);
     byCommand.get(waiver.command).push(waiver);
   }
   for (const [command, entries] of byCommand) {
-    const exit = entries.find((entry) => entry.exit_code != null)?.exit_code;
-    const jobs = entries.map((entry) => `#${entry.job_id} (risk ${entry.risk})`).join(", ");
-    lines.push(`Planned verification \`${command}\` already failed before any change (baseline debt${exit != null ? `, exit ${exit}` : ""}), recorded for job ${jobs}. Historical debt remains recorded independently of later repairs.`);
-  }
-  for (const check of repairChecks) {
-    lines.push(`Later verification passed: \`${check.command}\` on ${check.commit_hash} (job #${check.job_id}). This historical result does not establish coverage of the exact merge candidate.`);
+    const exit = entries.find(entry => entry.exit_code != null)?.exit_code;
+    lines.push(`Historical baseline failure: \`${command}\` (jobs ${entries.map(entry => `#${entry.job_id}`).join(", ")}${exit != null ? `; exit ${exit}` : ""}).`);
   }
   for (const replacement of requirement.replacements || []) {
     const replacedBy = replacement.jobs
-      .map((entry) => `${entry.test_command ? `\`${entry.test_command}\`` : "no test command"} (#${entry.job_id}, risk ${entry.risk})`)
-      .join(", ");
+      .map(entry => `${entry.test_command ? `\`${entry.test_command}\`` : "no test command"} (#${entry.job_id}, risk ${entry.risk})`).join(", ");
     lines.push(`Replan #${replacement.replan_job_id} replaced ${commandList(replacement.replaced_commands)} with ${replacedBy}.`);
   }
-  const reasons = (requirement.triggers || []).map((trigger) => (trigger.kind === "risk"
-    ? `risk ${trigger.risk} on job #${trigger.job_id} (review at ${MERGE_REVIEW_MIN_RISK}+)`
-    : `auth/session/security-sensitive scope (${trigger.terms.join(", ")})`));
-  if (reasons.length > 0) {
-    const passed = (passedChecks || []).filter((check) => check?.status === "passed" && check.command);
-    if (passed.length > 0) {
-      const commit = String(passed[0].commit_hash || "").slice(0, 12);
-      const rendered = passed.slice(0, 4)
-        .map((check) => `\`${check.command}\`${check.job_id ? ` (#${check.job_id})` : ""}`)
-        .join(", ");
-      lines.push(`Passed on the commit being merged${commit ? ` (${commit})` : ""}: ${rendered}. It still needs review: ${reasons.join("; ")}.`);
-    } else {
-      lines.push(`No passing check is recorded for the exact commit being merged; review is required: ${reasons.join("; ")}.`);
-    }
+  const passed = passedChecks.filter(check => check?.status === "passed" && check.command);
+  const currentCommits = new Set([candidateCommit, ...passed.map(check => check.commit_hash)].filter(Boolean));
+  for (const check of passed.slice(0, 4)) {
+    lines.push(`Passed at candidate ${String(check.commit_hash || "").slice(0, 12)}: ${passingCheckDescription(check)}`);
   }
-  return lines.join(" ");
+  if (!passed.length) lines.push("No passing check is recorded for the exact commit being merged.");
+  for (const check of repairChecks.filter(check => !currentCommits.has(check.commit_hash)).slice(0, 4)) {
+    lines.push(`Earlier pass at ${String(check.commit_hash || "").slice(0, 12)}: ${passingCheckDescription(check)} This does not verify the current candidate.`);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -425,17 +430,17 @@ export function mergeVerificationReviewGateJobSpec(workItem, requirement, { pass
   // whatever the branch points at when the answer arrives.
   const openedHead = /^[0-9a-f]{40}$/i.test(String(openedBranchHead || "")) ? String(openedBranchHead) : null;
   const repairChecks = historicalPassingChecks(workItem.id, (requirement.waivers || []).map(entry => entry.command));
-  const note = mergeVerificationReviewNote(requirement, { passedChecks, repairChecks });
+  const note = mergeVerificationReviewNote(requirement, { passedChecks, repairChecks, candidateCommit: openedHead });
   const label = `WI#${workItem.id}${workItem.title ? ` "${String(workItem.title).slice(0, 80)}"` : ""}`;
   const question = [
     `Automatic merge of ${label} stopped for review.`,
     note,
-    "Answer pass to merge it after reviewing the change, or fail with feedback to send it back: its jobs rerun on the branch with your feedback, and the reworked change is reviewed again.",
-  ].join(" ");
+    "Pass: approve this merge. Fail with feedback: return the work for fixes and another review.",
+  ].join("\n\n");
   return {
     work_item_id: workItem.id,
     job_type: "human_input",
-    title: `Review merge: WI#${workItem.id} verification waived (baseline debt)`.slice(0, 160),
+    title: `Review merge: WI#${workItem.id} historical verification risk`.slice(0, 160),
     priority: "high",
     max_attempts: 1,
     payload_json: JSON.stringify({

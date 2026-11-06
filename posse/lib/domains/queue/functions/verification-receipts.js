@@ -30,6 +30,22 @@ function parseReceipt(artifact) {
   }
 }
 
+// Preserve execution selection in the read-side projection. The planned
+// command can remain broad even when the runner executed exact files only.
+function executionSelection(receipt) {
+  const runs = [receipt, ...(Array.isArray(receipt.check_runs) ? receipt.check_runs : [])];
+  const paths = [...new Set(runs.flatMap(run => [
+    ...(Array.isArray(run.unit_test_paths) ? run.unit_test_paths : []),
+    ...(Array.isArray(run.file_results) ? run.file_results.map(file => file.path) : []),
+  ]).filter(file => typeof file === "string" && file.trim()))];
+  return {
+    execution_command: receipt.execution_command || null,
+    scope_limited: paths.length > 0 || runs.some(run => Array.isArray(run.unit_test_paths))
+      || receipt.tree_state === "reviewed_scope",
+    unit_test_paths: paths,
+  };
+}
+
 /**
  * The newest post-change receipt of each check (plan) that ran on exactly
  * `commitHash`, across every job of the work item, newest first.
@@ -63,6 +79,7 @@ export function postChangeReceiptsAtCommit(workItemId, commitHash, { limit = 256
       coverage_status: String(receipt.coverage_status || "unknown"),
       commit_hash: commit,
       test_counts: receipt.test_counts || null,
+      ...executionSelection(receipt),
     });
   }
   return receipts;
@@ -134,7 +151,8 @@ export function historicalPassingChecks(workItemId, commands = [], { limit = 256
     const commit = normalizedCommit(receipt.executed_commit_hash) || normalizedCommit(receipt.commit_hash);
     if (!commit || seen.has(receipt.command)) continue;
     seen.add(receipt.command);
-    checks.push({ command: receipt.command, commit_hash: commit, job_id: artifact.job_id, artifact_id: row.id });
+    checks.push({ command: receipt.command, commit_hash: commit, job_id: artifact.job_id, artifact_id: row.id,
+      test_counts: receipt.test_counts || null, ...executionSelection(receipt) });
   }
   return checks;
 }
