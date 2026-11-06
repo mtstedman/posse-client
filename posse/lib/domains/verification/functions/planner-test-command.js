@@ -224,7 +224,7 @@ export function validatePlannerTestCommand(command) {
       && args[1] === "--validate"
     );
   } else if (["composer", "composer.bat"].includes(executable)) {
-    ok = args[0] === "test" || (args[0] === "run" && /^(?:test|check)(?::|$)/.test(args[1] || ""));
+    ok = /^(?:test|check)(?::|$)/.test(args[0] || "") || (["run", "run-script"].includes(args[0]) && /^(?:test|check)(?::|$)/.test(args[1] || ""));
   } else if (["bundle", "bundle.bat"].includes(executable)) {
     ok = args[0] === "exec" && ["rspec", "rake"].includes(args[1]);
   } else if (/^(?:rspec|rake|make|ctest)(?:\.exe)?$/.test(executable)) {
@@ -251,7 +251,7 @@ export function validatePlannerTestCommand(command) {
     : { ok: false, reason: `unrecognized_test_runner:${executable || "missing"}` };
 }
 
-function packageManagerScriptInvocation(command) {
+function packageManagerScriptInvocation(command, { includeComposer = false } = {}) {
   const invocation = splitPlannerTestInvocation(command);
   if (invocation.invalid_directory) return null;
   let words;
@@ -261,6 +261,11 @@ function packageManagerScriptInvocation(command) {
     return null;
   }
   const executable = commandExecutable(words[0]);
+  if (includeComposer && ["composer", "composer.bat"].includes(executable)) {
+    const args = words.slice(1);
+    return { manager: "composer", cwd_relative: invocation.cwd_relative,
+      script: ["run", "run-script"].includes(args[0]) ? args[1] : args[0] };
+  }
   if (!NODE_PACKAGE_MANAGER_EXECUTABLES.includes(executable)) {
     return null;
   }
@@ -562,13 +567,23 @@ function declaredScriptValidation(definitions = []) {
       const script = pending.shift();
       if (!script || visited.has(script)) continue;
       visited.add(script);
-      for (const candidate of [`pre${script}`, script, `post${script}`]) {
-        const command = scripts[candidate];
-        if (typeof command !== "string") continue;
-        const validation = validateCommand(command);
-        if (!validation.ok) return validation;
-        for (const nested of referencedPackageScripts(command, scripts)) {
-          if (!visited.has(nested)) pending.push(nested);
+      for (const candidate of definition.manager === "composer"
+        ? [`pre-${script}`, script, `post-${script}`] : [`pre${script}`, script, `post${script}`]) {
+        const commands = Array.isArray(scripts[candidate]) ? scripts[candidate] : [scripts[candidate]];
+        for (const command of commands) {
+          if (typeof command !== "string") continue;
+          if (definition.manager === "composer" && command.startsWith("@")) {
+            const reference = command.match(/^@([^\s]+)/)?.[1];
+            if (Object.hasOwn(scripts, reference)) {
+              if (!visited.has(reference)) pending.push(reference);
+              continue;
+            }
+          }
+          const validation = validateCommand(command);
+          if (!validation.ok) return validation;
+          for (const nested of referencedPackageScripts(command, scripts)) {
+            if (!visited.has(nested)) pending.push(nested);
+          }
         }
       }
     }
@@ -632,7 +647,7 @@ export function validatePlannerTestCommandForRepository(command, cwd, { filesToC
       script_relative: path.relative(projectRoot, path.resolve(root, scripts[0])).replace(/\\/g, "/"),
     });
   }
-  const packageInvocation = packageManagerScriptInvocation(command);
+  const packageInvocation = packageManagerScriptInvocation(command, { includeComposer: true });
   if (!packageInvocation) return declaredNodeTestCommand(cwd, shape);
   if (packageInvocation.invalid) return { ok: false, reason: packageInvocation.invalid };
   if (packageInvocation.built_in) return { ...shape, repository_validated: true, built_in: true };
@@ -643,7 +658,7 @@ export function validatePlannerTestCommandForRepository(command, cwd, { filesToC
   if (root !== projectRoot && !root.startsWith(`${projectRoot}${path.sep}`)) {
     return { ok: false, reason: "test_command_contains_unsafe_working_directory" };
   }
-  const manifestPath = path.join(root, "package.json");
+  const manifestPath = path.join(root, packageInvocation.manager === "composer" ? "composer.json" : "package.json");
   if (!fs.existsSync(manifestPath)) {
     return { ok: false, reason: "test_manifest_missing" };
   }
@@ -658,11 +673,11 @@ export function validatePlannerTestCommandForRepository(command, cwd, { filesToC
     ? workspaceScriptValidation(projectRoot, manifest, packageInvocation)
     : null;
   if (workspaceValidation && !workspaceValidation.ok) return workspaceValidation;
-  if (!workspaceValidation && (!script || typeof manifest?.scripts?.[script] !== "string")) {
+  if (!workspaceValidation && (!script || !(typeof manifest?.scripts?.[script] === "string" || (packageInvocation.manager === "composer" && Array.isArray(manifest?.scripts?.[script]) && manifest.scripts[script].every(value => typeof value === "string"))))) {
     return { ok: false, reason: `test_script_missing:${script || "unknown"}` };
   }
   const scriptValidation = declaredScriptValidation(
-    workspaceValidation?.script_definitions || [{ script, scripts: manifest.scripts }],
+    workspaceValidation?.script_definitions || [{ script, scripts: manifest.scripts, manager: packageInvocation.manager }],
   );
   if (!scriptValidation.ok) return scriptValidation;
   return {

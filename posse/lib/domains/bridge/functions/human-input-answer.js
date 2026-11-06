@@ -113,6 +113,24 @@ function claimHumanInputJob(jobId, { leaseSeconds = DEFAULT_BRIDGE_LEASE_SECONDS
   return { leaseToken, job: getJob(jobId) };
 }
 
+// A timed-out clarification can be reissued while its answer is in flight.
+// Transfer only an exactly equivalent question for the same owner. Authority
+// gates (scope, review, publication) always require their own current answer.
+function equivalentClarificationReplacement(current, contract, payload) {
+  if (contract.gate_kind !== "clarification" || humanInputChoicesForPayload(payload).length
+    || !/timed out|timeout/i.test(String(contract.resolution_error || ""))) return null;
+  const stable = value => JSON.stringify(Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])));
+  const expected = stable(payload);
+  const candidates = getDb().prepare(`
+    SELECT j.* FROM jobs j JOIN human_gates hg ON hg.gate_job_id = j.id
+    WHERE j.work_item_id = ? AND j.id != ? AND hg.gate_kind = ?
+      AND hg.original_job_id IS ? AND hg.gate_state = 'open'
+      AND j.status IN ('queued', 'waiting_on_human', 'leased', 'running')
+  `).all(current.work_item_id, current.id, contract.gate_kind, contract.original_job_id ?? null)
+    .filter(row => row.parent_job_id === current.parent_job_id && stable(parseJobPayload(row)) === expected);
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
 export async function answerHumanInput(jobId, args = {}, {
   projectDir = process.cwd(),
   allowReviewGateAnswer = false,
@@ -138,6 +156,18 @@ export async function answerHumanInput(jobId, args = {}, {
     };
   }
   if (contract?.gate_state === "superseded") {
+    if (args.gate_generation != null && Number(args.gate_generation) !== Number(contract.generation || 1)) {
+      return { ok: false, reason: "stale_gate_generation" };
+    }
+    const replacement = equivalentClarificationReplacement(current, contract, payload);
+    if (replacement) {
+      const nextContract = getHumanGate(replacement.id);
+      const result = await answerHumanInput(replacement.id, {
+        ...args, gate_generation: nextContract.generation,
+        answer_metadata: { ...args.answer_metadata, superseded_gate_job_id: id },
+      }, { projectDir, allowReviewGateAnswer, allowChoiceFeedback });
+      return { ...result, redirected_from_job_id: id, replacement_job_id: replacement.id };
+    }
     return {
       ok: false,
       reason: "gate_no_longer_applicable",

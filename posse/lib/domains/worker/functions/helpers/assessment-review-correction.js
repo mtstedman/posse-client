@@ -7,7 +7,8 @@ export function canClarifyAssessmentReview(verdict) {
     && !verdict._assessment_confidence_review
     && !verdict._assessment_visual_review
     && !verdict._assessment_unsupported_claim_review
-    && !verdict._verification_blocked;
+    && !verdict._verification_blocked
+    && !["declared_verification_unavailable", "source_assessment_only"].includes(verdict.verification_status);
 }
 
 export function assessmentReviewCorrection(payload) {

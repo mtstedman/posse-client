@@ -6,3 +6,6 @@ export const PLAN_ANCHOR_MAX_FILES = 100;
 
 // Bound on each read-only Git probe that snapshots or checks a plan anchor.
 export const PLAN_ANCHOR_GIT_TIMEOUT_MS = 5_000;
+
+// Typed planner references never overlap plan-local task identifiers.
+export const PLANNER_EXISTING_JOB_PREFIX = "job:";

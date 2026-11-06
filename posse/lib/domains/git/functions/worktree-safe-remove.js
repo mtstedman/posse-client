@@ -181,7 +181,11 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
       }
       snapshotDir = preserveCorruptWorktreeContents(wtPath, projectDir, { wiId, branchName });
       corruptPreserved = !!snapshotDir;
-      if (!snapshotDir) {
+      let onlyRuntimeResidue = false;
+      try {
+        onlyRuntimeResidue = fs.readdirSync(wtPath).every(name => name === ".git" || name === ".posse");
+      } catch { /* unreadable content must stay preserved */ }
+      if (!snapshotDir && !onlyRuntimeResidue) {
         const message = "Could not completely preserve corrupt worktree contents; leaving worktree on disk";
         notifySafeRemoveFailure(onFailure, {
           wtPath,
@@ -203,7 +207,7 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
           error: err?.message || String(err),
         });
       }
-      notifySafeRemoveSnapshot(onSnapshot, {
+      if (snapshotDir) notifySafeRemoveSnapshot(onSnapshot, {
         wtPath,
         projectDir,
         reason,
@@ -212,7 +216,7 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
         snapshotDir,
         corruptMetadata: true,
       });
-      if (typeof onMsg === "function") {
+      if (snapshotDir && typeof onMsg === "function") {
         try { onMsg(`Preserved corrupt worktree contents at ${snapshotDir}`); } catch { /* best effort */ }
       }
       try {

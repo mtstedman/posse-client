@@ -64,6 +64,7 @@ export function plannedTaskDedupeKey(task, {
     model_tier: modelTier || null,
     reasoning_effort: reasoningEffort || null,
     depends_on_index: Array.isArray(task.depends_on_index) ? task.depends_on_index : [],
+    ...(Array.isArray(task.depends_on_job_ids) && task.depends_on_job_ids.length ? { depends_on_job_ids: task.depends_on_job_ids } : {}),
     payload: parsePayloadForDedupe(payloadJson),
     promote_follow_up: promoteFollowUp ? {
       title: promoteFollowUp.title || null,

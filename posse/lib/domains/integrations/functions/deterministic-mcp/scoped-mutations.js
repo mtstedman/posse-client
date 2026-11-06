@@ -5,7 +5,6 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { editScopeRequestReason } from "../../../../shared/tools/functions/edit-scope-preview.js";
-import { listIgnoredRepoPaths } from "../../../git/functions/ignored-paths.js";
 import { isSensitiveEnvFileOrTargetPath, safePath } from "../../../../shared/tools/functions/toolkit/index.js";
 import { getJob, updateJobPayload, runInTransaction, grantApprovedScopeEntries, requestJobScopeExpansion } from "../../../queue/functions/index.js";
 import { guardToolWriteLock } from "../../../queue/functions/write-lock-guard.js";
@@ -61,8 +60,6 @@ export function createScopedMutationTools(ctx) {
     let pendingResult = null;
     let lastResult = null;
     for (const entry of entries) {
-      // An untracked path the repository ignores is answered without a gate.
-      const [ignoredByRepository = null] = await listIgnoredRepoPaths(ctx.workspaceCwd, [entry.path]);
       const result = requestJobScopeExpansion({
         jobId: ctx.mcpJobId,
         workspaceCwd: ctx.workspaceCwd,
@@ -77,7 +74,6 @@ export function createScopedMutationTools(ctx) {
           ? "deterministic_mcp_scope_batch_tool"
           : "deterministic_mcp_internal_tool")),
         liveWait: true,
-        ignoredByRepository,
       });
       lastResult = result;
       if (result?.approved === true) {

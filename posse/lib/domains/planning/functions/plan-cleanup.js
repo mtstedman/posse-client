@@ -7,7 +7,7 @@ import {
 import { C } from "../../../shared/format/functions/colors.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 
-export function cancelSupersededPlanChildren(worker, planJob) {
+export function cancelSupersededPlanChildren(worker, planJob, { retainedJobIds = new Set() } = {}) {
   if (!planJob?.id || !planJob?.work_item_id || planJob.job_type !== "plan") return 0;
   // Clarification continuations extend the approved plan. Their prompt asks
   // for only the missing work, so absence from this response is not revocation.
@@ -28,7 +28,7 @@ export function cancelSupersededPlanChildren(worker, planJob) {
   let canceledCount = 0;
   let activeOlderCount = 0;
   for (const job of allJobs) {
-    if (!olderPlanIds.has(job.parent_job_id)) continue;
+    if (!olderPlanIds.has(job.parent_job_id) || retainedJobIds.has(job.id)) continue;
     if (activeStatuses.has(job.status)) {
       activeOlderCount += 1;
       continue;

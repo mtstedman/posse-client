@@ -9,7 +9,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { gitExecAsync, gitExecBufferAsync } from "../../git/functions/utils.js";
-import { listIgnoredRepoPaths } from "../../git/functions/ignored-paths.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { FINAL_REVIEW_CONTRACT_FIELDS, FINAL_REVIEW_OBSERVATIONS, FINAL_REVIEW_REVIEW_MODES } from "../../../catalog/final-review.js";
 import { finalReviewScope } from "./final-review-snapshot.js";
@@ -110,12 +109,11 @@ async function reviewedFileStates(cwd, payload, { jobId, commit, readPaths, plan
     if (match) objects.set(match[4], { mode: match[1], type: match[2], hash: match[3] });
   }
   const listed = commit ? [...objects.keys()] : String(await gitExecAsync(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd, { trim: false })).split("\0").filter(Boolean);
-  const ignored = new Set(commit ? [] : (await listIgnoredRepoPaths(cwd, [...scope.files])).map((entry) => entry.path));
   const scoped = new Set([...listed.filter((file) => !scope.declared || scope.files.has(file)
     || scope.roots.some((root) => file === root || file.startsWith(`${root}/`))),
-  ...[...scope.files].filter((file) => !ignored.has(file))]);
-  // Ignored outputs cannot be committed. Explicit read dependencies still bind
-  // their bytes, even when ignored, because they are inputs to the contract.
+  ...scope.files]);
+  // Every exact scoped file binds its bytes, regardless of discovery ignores.
+  // Explicit read dependencies also bind inputs outside the write scope.
   const files = [...new Set([...scoped, ...readPaths])].sort();
   const root = fs.realpathSync(cwd);
   const readOnly = new Set(readPaths.filter((file) => !scoped.has(file)));
@@ -171,7 +169,7 @@ export async function finalReviewedFilesCommitted(job, payload, cwd) {
   const evidence = await finalReviewIdentityEvidence(cwd, payload, { jobId: job.id });
   const paths = evidence.states.filter((state) => state[1] !== "non_file").map((state) => state[0]);
   if (paths.length === 0) return true;
-  return !String(await gitExecAsync(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--",
+  return !String(await gitExecAsync(["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored", "--",
     ...paths.map((file) => `:(literal)${file}`)], cwd, { trim: false }));
 }
 
@@ -206,7 +204,7 @@ export async function authoritativeFinalReview(job, payload, cwd) {
   // reviewer that ended without reporting, its wall): nothing to authorize or
   // gate, so the ordinary assessment verifies the change with its own
   // bounded recovery.
-  if (review.review_mode === FINAL_REVIEW_REVIEW_MODES.INFRASTRUCTURE) return null;
+  if (review.review_mode === FINAL_REVIEW_REVIEW_MODES.INFRASTRUCTURE || Object.keys(review).length === 0) return null;
   const unresolved = (reason) => ({ verdict: "needs_review", confidence: "none", reasons: [reason],
     spawn_jobs: [], human_questions: [], _disable_internal_retry: true, _assessment_infrastructure_review: true, _verification_blocked: true });
   let identity;

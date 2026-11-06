@@ -3,6 +3,8 @@ import {
   requestParkedJobResumeAfterGate, runInTransaction, setAttemptCommitHash,
   setJobResult, storeArtifact, updateJobPayload,
 } from "../../../queue/functions/index.js";
+import { finalReviewIdentity } from "../../../assessment/functions/final-review-authority.js";
+import { loadAssessmentSource } from "../execution/assessment-source.js";
 import { Scope } from "../../../../shared/scope/classes/Scope.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { activeLiveSiblingWriteLocks } from "../../../queue/functions/sibling-locks.js";
@@ -12,7 +14,7 @@ import { worktreePathAsync } from "../../../git/functions/worktree.js";
 import { DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE, DIRTY_WORKTREE_RECOVERY_KEY, humanInputChoicesForReviewType } from "../../../../catalog/human-input.js";
 import { normalizeRepoPath, parsePorcelainEntries, payloadExplicitlyClaimsPath, unfinishedSiblingDirtyLocks } from "./worktree-dirty-classification.js";
 
-export function parkDirtyWorktreeRecovery(worker, job, leaseToken, { paths, attemptId = null, output = "", phase = "commit" }) {
+export function parkDirtyWorktreeRecovery(worker, job, leaseToken, { paths, attemptId = null, output = "", phase = "commit", candidateIdentity = null, failure = null }) {
   const files = [...new Set(paths.map(normalizeRepoPath).filter(Boolean))];
   if (!files.length) return false;
   return runInTransaction(() => {
@@ -25,8 +27,9 @@ export function parkDirtyWorktreeRecovery(worker, job, leaseToken, { paths, atte
         review_type: DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE, original_job_id: job.id,
         choices: humanInputChoicesForReviewType(DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE),
         dirty_paths: files, recovery_phase: phase, source_attempt_id: attemptId,
+        candidate_identity: candidateIdentity, failure,
         questions: [`Job #${job.id} has preserved uncommitted work. Commit includes the listed files and resumes validation; send_back adds them to the task scope and resumes development with your feedback; fail stops the job. The work is preserved while you decide.`],
-        context: `Paused during ${phase}. Files to preserve or include:\n${files.map(file => `- ${file}`).join("\n")}`,
+        context: `Paused during ${phase}.${failure ? ` ${failure}` : ""} Files to preserve or include:\n${files.map(file => `- ${file}`).join("\n")}`,
       }) });
     return true;
   });
@@ -47,6 +50,10 @@ export async function applyDirtyWorktreeRecovery({ worker, job, payload, action,
   const currentBranch = String(await gitExecAsync(["branch", "--show-current"], cwd)).trim();
   if (!expectedBranch || currentBranch !== expectedBranch) throw new Error("The recovery worktree is no longer on the job's branch");
   const next = parseJobPayload(original);
+  // Bind phase recovery to the same scoped bytes and task contract. An
+  // unrelated sibling commit does not invalidate this candidate.
+  const candidateUnchanged = Boolean(payload.candidate_identity)
+    && payload.candidate_identity === await finalReviewIdentity(cwd, next, { jobId: original.id });
   const wasAssessOnly = next._assess_only;
   const priorRecovery = next[DIRTY_WORKTREE_RECOVERY_KEY];
   const continuingRecovery = priorRecovery?.gate_id === job.id;
@@ -79,7 +86,7 @@ export async function applyDirtyWorktreeRecovery({ worker, job, payload, action,
   const assessmentBase = continuingRecovery ? priorRecovery.assessment_base_hash ?? base : base;
   next[DIRTY_WORKTREE_RECOVERY_KEY] = { gate_id: job.id, paths, action, commits: priorCommits,
     requires_development: requiresDevelopment, assessment_base_hash: assessmentBase };
-  next.instructions = [next.instructions || next.task_spec || original.title,
+  if (requiresDevelopment) next.instructions = [next.instructions || next.task_spec || original.title,
     `Operator authorized recovery of these existing files: ${paths.join(", ")}.`, feedback].filter(Boolean).join("\n\n");
   // Persist the authorized scope before committing: a crash may retry the
   // answer, but cannot leave a commit whose expanded scope was never recorded.
@@ -115,6 +122,15 @@ export async function applyDirtyWorktreeRecovery({ worker, job, payload, action,
     // the completed assessment checkpoint only when neither scope nor tree
     // changed. A new candidate still needs fresh developer validation.
     if (wasAssessOnly && !requiresDevelopment && result.hash === base && base === assessmentBase) next._assess_only = wasAssessOnly;
+    const source = loadAssessmentSource(original.id);
+    if (payload.candidate_identity && !requiresDevelopment && source.ok
+      && Number(source.attempt.id) === Number(payload.source_attempt_id)) {
+      next._assess_only = true;
+      if (!candidateUnchanged || payload.candidate_identity !== await finalReviewIdentity(cwd, next, { jobId: original.id })) {
+        next._final_review_invalidated_attempt_id = Math.max(
+          Number(next._final_review_invalidated_attempt_id) || 0, Number(source.attempt.id));
+      }
+    }
   }
   if (next._assess_only) updateJobPayload(original.id, JSON.stringify(next));
   else beginJobRetryGeneration(original.id, { payload: next });

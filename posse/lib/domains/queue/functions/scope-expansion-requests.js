@@ -147,10 +147,6 @@ export function createScopeExpansionOperations({
    * live-wait callers leave its lease and provider session active while the
    * internal request_scope tool waits for a human decision.
    *
-   * `ignoredByRepository` ({ source }) marks a path the caller found untracked
-   * and excluded by the repository's ignore rules (`git check-ignore`). Git
-   * never commits such a path, so the request is answered without a gate and
-   * without widening scope.
    */
   function requestJobScopeExpansion({
     jobId,
@@ -163,7 +159,6 @@ export function createScopeExpansionOperations({
     reason = "",
     source = "internal_tool",
     liveWait = false,
-    ignoredByRepository = null,
     workspaceCwd = null,
   } = {}) {
     const normalizedJobId = Number(jobId);
@@ -234,41 +229,8 @@ export function createScopeExpansionOperations({
         };
       }
 
-      // An untracked path the repository ignores can never be committed (scoped
-      // commit staging skips it), so neither a gate nor a grant can make an edit
-      // to it part of the change. Answer here, before auto-approval or batching
-      // onto an open gate, and leave the payload scope untouched.
-      if (ignoredByRepository) {
-        const ignoreSource = String(ignoredByRepository.source || "").trim() || null;
-        logEvent({
-          work_item_id: current.work_item_id,
-          job_id: current.id,
-          attempt_id: Number(attemptId) || null,
-          event_type: EVENT_TYPES.JOB_SCOPE_REQUEST_IGNORED_PATH,
-          actor_type: EVENT_ACTORS.SYSTEM,
-          message: `Declined ${normalizedAccess} scope without a gate: ${normalizedPath} is ignored by repository policy${ignoreSource ? ` (${ignoreSource})` : ""}`,
-          event_json: JSON.stringify({
-            path: normalizedPath,
-            access: normalizedAccess,
-            operation: normalizedOperation,
-            ignore_source: ignoreSource,
-            reason: String(reason || "").trim(),
-            source: String(source || "internal_tool").slice(0, 80),
-          }),
-        });
-        return {
-          ok: false,
-          code: "scope_path_ignored",
-          paused: false,
-          approved: false,
-          path: normalizedPath,
-          access: normalizedAccess,
-          operation: normalizedOperation,
-          ignore_source: ignoreSource,
-          message: `${normalizedPath} is ignored by repository policy${ignoreSource ? ` (${ignoreSource})` : ""}: edits to it are never committed, so scope was not widened. If it is generated, the project's build or generator regenerates it from tracked sources; change those sources instead of this file.`,
-        };
-      }
-
+      // Ignore rules control discovery, not exact-path write authority. An
+      // authorized creation is persisted by the scoped commit transaction.
       // Mechanical path classes are granted without a human gate: the payload
       // scope is widened durably here, and the caller's live predicates are
       // widened by the tool handler so the retried write succeeds within the

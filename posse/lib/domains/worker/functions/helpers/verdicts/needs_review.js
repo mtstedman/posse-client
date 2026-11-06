@@ -1,6 +1,6 @@
 // lib/domains/worker/functions/helpers/verdicts/needs_review.js
 
-import { logEvent, updateJobStatus } from "../../../../queue/functions/index.js";
+import { logEvent, updateJobStatus, updateJobPayload } from "../../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../../queue/functions/payload.js";
 import { C } from "../../../../../shared/format/functions/colors.js";
 import {
@@ -8,6 +8,7 @@ import {
   queueInternalAssessmentRetry,
 } from "../verdict-shared.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
+import { ASSESSMENT_FAILURE_CLASSES } from "../../../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../../catalog/native-tools.js";
 import { canClarifyAssessmentReview } from "../assessment-review-correction.js";
 
@@ -83,8 +84,7 @@ export function handle(job, verdict, ctx) {
   const visualAcceptanceReview = verdict?._assessment_visual_review === true;
   const unsupportedClaimReview = verdict?._assessment_unsupported_claim_review === true;
   const asksForClarification = hasOperatorOnlyQuestion && priorClarifications.length === 0;
-  const asksForOperatorReview = !harnessOwnedReview
-    && (visualAcceptanceReview || unsupportedClaimReview || asksForClarification);
+  const asksForOperatorReview = harnessOwnedReview || visualAcceptanceReview || unsupportedClaimReview || asksForClarification;
   const retryReason = verdict.reasons?.[0] || "assessment could not reach a confident terminal verdict";
   const retryEligible = !asksForOperatorReview && !verdict?._disable_internal_retry;
   if (
@@ -100,11 +100,10 @@ export function handle(job, verdict, ctx) {
     return;
   }
 
-  // Continuation exhaustion also carries _verification_blocked. That
-  // diagnostic must not override the harness-owned disposition and reopen a
-  // human gate after automatic recovery has already exhausted its budget.
-  const confidenceReview = !harnessOwnedReview && (verdict?._assessment_confidence_review === true
-    || verdict?._verification_blocked === true);
+  // Exhausted harness evidence is an acceptance decision, not a code defect.
+  // Preserve the candidate and offer the existing explicit waiver/retry route.
+  const confidenceReview = harnessOwnedReview || verdict?._assessment_confidence_review === true
+    || verdict?._verification_blocked === true;
   // An evidence-free assessor fail and a repeated sibling-boundary or
   // ignored-path fail suppress automatic repair and retry, but the claim
   // itself is a defect question the operator can answer. Failing them closed
@@ -148,9 +147,17 @@ export function handle(job, verdict, ctx) {
   // An operator question that was already answered is not asked again; the
   // gate asks for the assessment disposition instead.
   const repeatsAnsweredClarification = hasOperatorOnlyQuestion && !asksForClarification;
-  const questions = explicitHumanQuestions.length > 0 && !repeatsAnsweredClarification
-    ? explicitHumanQuestions
-    : [operatorDispositionReviewQuestion(verdict)];
+  const questions = harnessOwnedReview
+    ? ["Assessment could not finish. Retry verification after resolving the recorded blocker, explicitly waive the missing verification, replan, or reject the work. A waiver preserves the failed or unavailable evidence."]
+    : explicitHumanQuestions.length > 0 && !repeatsAnsweredClarification
+      ? explicitHumanQuestions
+      : [operatorDispositionReviewQuestion(verdict)];
+  if (harnessOwnedReview) {
+    jobPayload._assess_only = true;
+    jobPayload._verification_blocked = { schema_version: 1, type: "verification_blocked",
+      failure_class: ASSESSMENT_FAILURE_CLASSES.INFRASTRUCTURE, diagnostic: retryReason };
+    updateJobPayload(job.id, JSON.stringify(jobPayload));
+  }
   const verificationEvidence = gateVerificationEvidence(ctx.reviewEvidence);
   const humanJob = spawnFromAssessor("failed", "human_input", {
     work_item_id: job.work_item_id,
@@ -165,7 +172,12 @@ export function handle(job, verdict, ctx) {
       ...(Object.keys(verificationEvidence.receipts).length > 0
         ? { verification_evidence: verificationEvidence.receipts }
         : {}),
-      ...(assessmentReview
+      ...(harnessOwnedReview ? {
+        review_type: "blocked_recovery",
+        question_kind: "blocked_recovery",
+        choices: WORK_ITEM_QUESTION_CHOICE_IDS.blocked_recovery,
+        verification_failure_class: ASSESSMENT_FAILURE_CLASSES.INFRASTRUCTURE,
+      } : assessmentReview
         ? {
             review_type: "assessment_review",
             question_kind: "assessment_review",
@@ -176,6 +188,13 @@ export function handle(job, verdict, ctx) {
     }),
   });
   spawnedJobs.push(humanJob);
+  if (harnessOwnedReview) logEvent({
+    work_item_id: job.work_item_id, job_id: job.id,
+    event_type: EVENT_TYPES.JOB_ASSESSMENT_INFRASTRUCTURE_EXHAUSTED,
+    actor_type: EVENT_ACTORS.ASSESSOR,
+    message: `Assessment unavailable; candidate preserved for explicit recovery: ${retryReason}`,
+    event_json: JSON.stringify({ operator_actionable: true, retry_reason: retryReason, gate_job_id: humanJob.id }),
+  });
   log(`${C.yellow}[assessor]${C.reset} spawned review #${humanJob.id}`);
 }
 

@@ -66,23 +66,6 @@ function assertNoSymlinkParents(cwd, absPath, relPath) {
   }
 }
 
-async function isIgnoredPath(cwd, relPath) {
-  try {
-    await gitExecAsync(
-      ["check-ignore", "-q", "--no-index", "--", relPath],
-      cwd,
-      { timeoutMs: 10_000 },
-    );
-    return true;
-  } catch (error) {
-    if (error?.status === 1) return false;
-    throw materializationError(
-      `Could not verify repository ignore policy for ${relPath}: ${error?.message || String(error)}`,
-      { path: relPath, cause: error },
-    );
-  }
-}
-
 async function isTrackedPath(cwd, relPath) {
   try {
     await gitExecAsync(
@@ -184,7 +167,7 @@ async function stageGreenfieldFiles(cwd, relPaths) {
     // An untracked empty placeholder is invisible to ordinary `git diff`.
     // Staging the empty blob gives the provider a baseline, so its subsequent
     // write appears as an unstaged diff instead of looking like "no changes".
-    await gitExecAsync(["add", "--", ...relPaths], cwd, { timeoutMs: 10_000 });
+    await gitExecAsync(["add", "--force", "--", ...relPaths], cwd, { timeoutMs: 10_000 });
   } catch (error) {
     throw materializationError(
       `Could not stage materialized greenfield files: ${error?.message || String(error)}`,
@@ -271,7 +254,7 @@ export function stripSensitiveEnvMutationScope(packet) {
  * instead of rejecting the handoff, because the distinction between "modify"
  * and "create" is a planner classification, not a safety boundary. The same
  * path rules apply: it must be inside the worktree, not a symlink parent,
- * and not ignored by repository policy.
+ * and authorized as an exact file. Ignore rules do not revoke that authority.
  */
 export async function materializeWritingScope(packet) {
   stripSensitiveEnvMutationScope(packet);
@@ -358,14 +341,6 @@ export async function materializeWritingScope(packet) {
     for (const relPath of create) {
       const absPath = assertSafeRelativePath(cwd, relPath, "files_to_create");
       assertNoSymlinkParents(cwd, absPath, relPath);
-      if (await isIgnoredPath(cwd, relPath)) {
-        const error = materializationError(
-          `${promotedToCreate.includes(relPath) ? "files_to_modify" : "files_to_create"} target is ignored by repository policy (gitignored, so it cannot be committed; use the real source path, not a generated artifact): ${relPath}`,
-          { path: relPath },
-        );
-        error.code = "HANDOFF_TARGET_IGNORED";
-        throw error;
-      }
       const provenance = existingMaterialization(packet.job_id, generation, relPath);
       if (fs.existsSync(absPath)) {
         const stat = fs.lstatSync(absPath);

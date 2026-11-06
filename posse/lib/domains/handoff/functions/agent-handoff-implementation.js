@@ -1,3 +1,5 @@
+import { existingJobDependencyId, validExistingJobDependency } from "../../planning/functions/existing-job-dependencies.js";
+import { PLANNER_EXISTING_JOB_PREFIX } from "../../../catalog/planning.js";
 import { mergeEvidenceCatalog } from "./helpers/merged-packet-evidence.js";
 import { AGENT_HANDOFF_ALIAS_POLICY, AGENT_HANDOFF_ASSESSOR_FAIL_EVIDENCE_POLICY, AGENT_HANDOFF_EVIDENCE_CLEANUP_OUTCOMES, AGENT_HANDOFF_EVIDENCE_CLEANUP_ACTIONS, AGENT_HANDOFF_LIMITS, AGENT_HANDOFF_PLANNER_CONTRACT_KEYS, AGENT_HANDOFF_PLANNER_CONTRACT_VERSION, AGENT_HANDOFF_PLANNER_DEPENDENCY_EDGE_POLICIES, AGENT_HANDOFF_PLANNER_REPORT_KEYS, AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS, AGENT_HANDOFF_PROFILE_POLICY, AGENT_HANDOFF_PROFILES, AGENT_HANDOFF_PROTOCOL, AGENT_HANDOFF_RESEARCHER_LIMIT_POLICY, AGENT_HANDOFF_RESEARCH_EVIDENCE_VALUES, AGENT_HANDOFF_RESEARCH_PROSE_FIELDS, AGENT_HANDOFF_RESEARCH_USEFULNESS_VALUES, AGENT_HANDOFF_WORK_ITEM_CONTRACT_ERROR } from "../../../catalog/handoff.js";
 import { parseAgentHandoffEvidenceSelector, normalizedLines } from "./helpers/evidence-selector.js";
@@ -1470,7 +1472,7 @@ function normalizeScope(value, label, profile) {
     ["task_mode", "files_to_modify", "files_to_create", "files_to_delete", "create_roots", "output_root", "key_files", "related_files"],
     label,
   );
-  if (![AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT].includes(profile)
+  if (![AGENT_HANDOFF_PROFILES.PLANNER_PLAN, AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT].includes(profile)
     && (source.key_files != null || source.related_files != null)) {
     fail("AGENT_HANDOFF_SCHEMA_INVALID", `${label} does not allow researcher seed fields for ${profile}`);
   }
@@ -1868,11 +1870,16 @@ function validateTarget(target, policy, profile, label) {
   return role == null ? { kind } : { kind, role };
 }
 
-function validateDependencyGraph(handoffs) {
+function validateDependencyGraph(handoffs, { profile, context } = {}) {
   const ids = new Set(handoffs.map((handoff) => handoff.id));
   if (ids.size !== handoffs.length) fail("AGENT_HANDOFF_DEPENDENCY_INVALID", "handoff ids must be unique");
   for (const handoff of handoffs) {
+    if (profile === AGENT_HANDOFF_PROFILES.PLANNER_PLAN && handoff.id.startsWith(PLANNER_EXISTING_JOB_PREFIX)) fail("AGENT_HANDOFF_DEPENDENCY_INVALID", "Plan-local IDs cannot use the reserved existing-job prefix");
     for (const dependency of handoff.depends_on) {
+      const existingId = existingJobDependencyId(dependency);
+      if (existingId != null && profile === AGENT_HANDOFF_PROFILES.PLANNER_PLAN
+        && validExistingJobDependency(existingId, { workItemId: context?.work_item_id ?? context?.workItemId,
+          planJobId: context?.job_id ?? context?.jobId, db: context?.db || getDb() })) continue;
       if (!ids.has(dependency) || dependency === handoff.id) {
         fail("AGENT_HANDOFF_DEPENDENCY_INVALID", `Invalid dependency ${handoff.id} -> ${dependency}`);
       }
@@ -1885,7 +1892,7 @@ function validateDependencyGraph(handoffs) {
     if (visiting.has(id)) fail("AGENT_HANDOFF_DEPENDENCY_INVALID", "handoff dependencies must be acyclic");
     if (visited.has(id)) return;
     visiting.add(id);
-    for (const dependency of byId.get(id)?.depends_on || []) visit(dependency);
+    for (const dependency of byId.get(id)?.depends_on || []) if (ids.has(dependency)) visit(dependency);
     visiting.delete(id);
     visited.add(id);
   }
@@ -1906,12 +1913,14 @@ function inferWritableScopeForTask(handoff, context) {
     if (!projectDir) return true;
     try { return fs.statSync(path.join(projectDir, relative)).isFile(); } catch { return false; }
   };
+  const references = new Set([...(handoff.report?.scope?.key_files || []),
+    ...(handoff.report?.scope?.related_files || [])].map(canonicalSourcePath).filter(Boolean));
   const seen = new Set();
   const inferred = [];
   const add = (candidate, source, { requireExists = true } = {}) => {
     if (inferred.length >= INFERRED_SCOPE_MAX_PATHS) return;
     const canonical = canonicalSourcePath(candidate);
-    if (!canonical || seen.has(canonical)) return;
+    if (!canonical || seen.has(canonical) || references.has(canonical)) return;
     if (requireExists && !existsAsFile(canonical)) return;
     seen.add(canonical);
     inferred.push({ path: canonical, source });
@@ -3848,7 +3857,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
     validateNarrativeEvidenceBoundary(handoff, index);
     return handoff;
   });
-  validateDependencyGraph(handoffs);
+  validateDependencyGraph(handoffs, { profile, context: materializationContext });
   const semanticPacket = { profile, outcome, handoffs };
   if (profile === AGENT_HANDOFF_PROFILES.PLANNER_PLAN && outcome === "success") {
     // The compiler strips the same redundant roots; without this the
@@ -3868,6 +3877,7 @@ function materializeAgentHandoffStrict(args, { context = {}, role = "", maxHando
   if (materializationContext.projectDir) {
     for (const repair of repairPlannerPacketFileKinds(semanticPacket, materializationContext.projectDir, {
       addDependencies: !plannerForbidsDependencyEdges(materializationContext),
+      context: materializationContext,
     })) {
       recordHandoffSoftening(`handoffs[${repair.taskIndex}].report.scope.${repair.declaredKind}`, repair.action, {
         path: repair.path,
@@ -4617,7 +4627,7 @@ export function stageAgentHandoff(args, {
     ? database.prepare("SELECT metadata_json FROM work_items WHERE id = ?").get(resolvedContext.workItemId)
     : null;
   validatePlannerPacketAgainstWorkItem(packet, workItem);
-  const fileKindIssues = validatePlannerPacketFileKinds(packet, projectDir);
+  const fileKindIssues = validatePlannerPacketFileKinds(packet, projectDir, resolvedContext);
   if (fileKindIssues.length > 0) {
     fail(
       "AGENT_HANDOFF_SCOPE_KIND_INVALID",

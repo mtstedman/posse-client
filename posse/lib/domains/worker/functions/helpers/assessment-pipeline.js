@@ -186,7 +186,6 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
   readyAt = null,
   failureClass = ASSESSMENT_FAILURE_CLASSES.INFRASTRUCTURE,
   question = null,
-  operatorActionable = false,
 } = {}) {
   // A delayed provider or runner result must not rewrite recovery state after
   // cancellation or another worker has taken ownership of this job.
@@ -200,11 +199,10 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
   if (count >= max || gateImmediately) {
     const terminalProtocolFailure = isRetryableTerminalHandoffError(error);
     const diagnostic = `Assessment infrastructure exhausted after ${count}/${max} attempts: ${message}`;
-    // Provider transport, protocol, and evidence-budget failures have no task
-    // decision for a human to answer. Only callers enforcing an explicit
-    // verification or worktree-integrity requirement may request a gate.
+    // Exhausted verification leaves a candidate the operator may explicitly
+    // accept. Never cancel its dependents merely because evidence is missing.
     const settled = runImmediateTransaction(getDb(), () => {
-      if (!worker._releaseLease(job, leaseToken, operatorActionable ? "waiting_on_human" : "failed")) return false;
+      if (!worker._releaseLease(job, leaseToken, "waiting_on_human")) return false;
       const recoveryPayload = parseJobPayload(job);
       recoveryPayload._verification_blocked = {
         schema_version: 1,
@@ -215,11 +213,11 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
         verification_outcome: error?.verification_outcome || null,
       };
       updateJobPayload(job.id, JSON.stringify(recoveryPayload));
-      setAssessmentLifecycle(job.id, operatorActionable ? ASSESSMENT_LIFECYCLE.NEEDS_HUMAN : ASSESSMENT_LIFECYCLE.FAILED, {
-        error: diagnostic, completed: !operatorActionable,
+      setAssessmentLifecycle(job.id, ASSESSMENT_LIFECYCLE.NEEDS_HUMAN, {
+        error: diagnostic, completed: false,
       });
       setJobError(job.id, diagnostic);
-      if (operatorActionable) createJob({
+      createJob({
         work_item_id: job.work_item_id,
         job_type: "human_input",
         title: `Verification blocked: ${job.title.slice(0, 80)}`,
@@ -244,20 +242,20 @@ export function routeAssessmentInfrastructureFailure(worker, job, leaseToken, er
       job_id: job.id,
       event_type: EVENT_TYPES.JOB_ASSESSMENT_INFRASTRUCTURE_EXHAUSTED,
       actor_type: EVENT_ACTORS.WORKER,
-      message: `Assessment infrastructure exhausted after ${count}/${max} attempts; ${operatorActionable ? "preserved the job for operator recovery" : "failed closed without an operator gate"}`,
+      message: `Assessment infrastructure exhausted after ${count}/${max} attempts; preserved the job for operator recovery`,
       event_json: JSON.stringify({
         attempts: count,
         max_attempts: max,
         terminal_protocol_failure: terminalProtocolFailure,
         error: message.slice(0, 2000),
-        operator_actionable: operatorActionable,
+        operator_actionable: true,
         gated_immediately: gateImmediately,
         failure_class: failureClass,
       }),
     });
-    worker.emit(job.id, `${C.yellow}[assessor] Assessment infrastructure exhausted; ${operatorActionable ? "job preserved for recovery" : "failed closed without an operator gate"}${C.reset}`);
+    worker.emit(job.id, `${C.yellow}[assessor] Assessment infrastructure exhausted; job preserved for recovery${C.reset}`);
     return {
-      gated: operatorActionable,
+      gated: true,
       infrastructureFailure: true,
       terminalProtocolFailure,
     };
@@ -990,7 +988,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       sections.push(`create_roots (free-write dirs): ${JSON.stringify(allowed_create_roots)}`);
     }
     if (ignoredScope.length > 0) {
-      sections.push(`files_ignored_by_repository (declared scope paths the repository's ignore rules exclude; git never commits them, so they are absent from files_actually_committed by design; their workspace copies are local, uncommitted state, and generated files among them are rebuilt by the project's build or typecheck): ${JSON.stringify(ignoredScope.map((entry) => `${entry.path} (${entry.source})`))}`);
+      sections.push(`files_ignored_by_repository (declared paths matched by repository ignore rules; exact authorized paths can be committed, and workspace contents alone do not establish committed evidence): ${JSON.stringify(ignoredScope.map((entry) => `${entry.path} (${entry.source})`))}`);
     }
 
     if (files_committed.length > 0) {
@@ -1039,7 +1037,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
         branch_net_diff_detected ? `- branch_net_diff_detected=true means a zero-commit attempt is being assessed against preexisting WI branch changes; verify that branch diff directly and fail destructive or out-of-scope branch state.` : null,
         verified_no_change ? `- verified_no_change=true means no commit is expected; judge whether the current scoped file snapshots already satisfy the task.` : null,
         `- If out-of-scope files were committed, verdict MUST be "fail"; file requests are follow-up scope and do not authorize the current commit.`,
-        ignoredScope.length > 0 ? `- Paths in files_ignored_by_repository cannot be committed: do not fail because they are missing from files_actually_committed, do not require editing, regenerating or committing them, and do not treat their workspace copies as evidence of committed content; judge generated outputs by the scoped checks or build that regenerate them.` : null,
+        ignoredScope.length > 0 ? `- Repository ignore rules govern discovery, not exact approved scope. Evaluate explicitly declared ignored paths against the task and commit evidence. For undeclared generated outputs, judge the scoped checks or build that regenerate them; local workspace copies alone are not proof of committed content.` : null,
         `- If files_reverted is non-empty → the dev attempted out-of-scope edits that were ALREADY REVERTED by the system. Do NOT fail for this — it is informational only. Judge the task solely on whether the in-scope committed files satisfy the success criteria.`,
       ].filter(Boolean);
       if (files_requested.length > 0) {

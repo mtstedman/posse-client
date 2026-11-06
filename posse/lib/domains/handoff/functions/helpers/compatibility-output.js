@@ -1,3 +1,4 @@
+import { existingJobDependencyId } from "../../../planning/functions/existing-job-dependencies.js";
 import { AGENT_HANDOFF_PLANNER_REPORT_METADATA_KEYS, AGENT_HANDOFF_PROFILES } from "../../../../catalog/handoff.js";
 import { researcherPacketToStructuredOutput } from "./researcher-output.js";
 import { renderReport } from "./report-rendering.js";
@@ -123,6 +124,7 @@ function renderCompletionCompatibilityOutput(packet) {
 export function plannerCompatibilityTasks(packet) {
   const indexes = new Map(packet.handoffs.map((handoff, index) => [handoff.id, index]));
   return packet.handoffs.map((handoff) => {
+    const existingDependencies = handoff.depends_on.map(existingJobDependencyId).filter(id => id != null);
     const taskSpec = plannerTaskSpec(handoff);
     const refs = evidenceRefs(handoff.report);
     const metadata = Object.fromEntries(
@@ -140,7 +142,8 @@ export function plannerCompatibilityTasks(packet) {
         title: handoff.intent,
         task_spec: taskSpec,
         success_criteria: handoff.report.success_criteria.length ? handoff.report.success_criteria : [handoff.intent],
-        depends_on_index: handoff.depends_on.map((id) => indexes.get(id)),
+        depends_on_index: handoff.depends_on.filter(id => indexes.has(id)).map(id => indexes.get(id)),
+        ...(existingDependencies.length ? { depends_on_job_ids: existingDependencies } : {}),
         task_mode: handoff.report.scope.task_mode || "code",
         files_to_modify: handoff.report.scope.files_to_modify || [],
         files_to_create: handoff.report.scope.files_to_create || [],
@@ -153,8 +156,8 @@ export function plannerCompatibilityTasks(packet) {
         dev_brief: {
           source: "hash_ref_store",
           summary: handoff.report.summary,
-          key_files: handoff.report.scope.files_to_modify || [],
-          related_files: [],
+          key_files: [...new Set([...(handoff.report.scope.key_files || []), ...(handoff.report.scope.files_to_modify || [])])],
+          related_files: handoff.report.scope.related_files || [],
           planner_file_priorities: (handoff.report.scope.files_to_modify || []).map((path, index) => ({ path, rank: index + 1 })),
           ...refs,
         },

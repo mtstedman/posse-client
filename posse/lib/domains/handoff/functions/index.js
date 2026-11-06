@@ -1,4 +1,3 @@
-import { advancedLoggingEnabled } from "../../../shared/telemetry/functions/diagnostic-logging.js";
 import { pruneTestHandoff } from "../../verification/functions/test-capability.js";
 import { pruneBlockedFileRequirements } from "../../runtime/functions/blocked-file-requirements.js";
 // Handoff context builder + deterministic context enrichment.
@@ -136,7 +135,7 @@ async function timeHandoffStep(packet, label, fn, {
     if (timer) clearTimeout(timer);
     if (graceTimer) clearTimeout(graceTimer);
     const durationMs = Date.now() - startedAt;
-    if (durationMs >= warnMs && advancedLoggingEnabled()) {
+    if (durationMs >= warnMs) {
       log.warn("handoff", "Handoff step was slow", {
         role: packet?.recipient || null,
         label,

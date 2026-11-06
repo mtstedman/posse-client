@@ -1,9 +1,9 @@
 // lib/domains/worker/functions/helpers/verdicts/blocked.js
 
-import { logEvent, updateJobStatus } from "../../../../queue/functions/index.js";
+import { updateJobStatus } from "../../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../../queue/functions/payload.js";
 import { C } from "../../../../../shared/format/functions/colors.js";
-import { EVENT_TYPES, EVENT_ACTORS } from "../../../../../catalog/event.js";
+import { handle as handleNeedsReview } from "./needs_review.js";
 import { queueInternalAssessmentRetry } from "../verdict-shared.js";
 
 export function handle(job, verdict, ctx) {
@@ -18,26 +18,10 @@ export function handle(job, verdict, ctx) {
   const asksForClarification = humanQuestions.length > 0 && priorClarifications.length === 0;
   const retryReason = verdict.reasons?.[0] || "assessment reported blocked without an operator question";
 
-  // Harness-owned evidence/access failures are not decisions an operator can
-  // answer. In particular, assessment sanitization may remove a request to
-  // paste repository files. Never replace that removed request with a generic
-  // recovery gate: doing so turns one non-actionable assessor failure into a
-  // recurring human prompt.
+  // The operator can accept an evidence gap even when they cannot repair the
+  // harness. Reuse explicit assessment recovery instead of canceling the DAG.
   if (verdict?._assessment_infrastructure_review === true) {
-    const changed = typeof ctx.updateJobStatus === "function"
-      ? ctx.updateJobStatus("failed")
-      : updateJobStatus(job.id, "failed");
-    if (!changed) return;
-    log(`${C.yellow}[assessor] BLOCKED INFRASTRUCTURE EXHAUSTED${C.reset} WI#${job.work_item_id} job #${job.id}: failed closed without an operator gate${reasonBrief}`);
-    logEvent({
-      work_item_id: job.work_item_id,
-      job_id: job.id,
-      event_type: EVENT_TYPES.JOB_ASSESSMENT_INFRASTRUCTURE_EXHAUSTED,
-      actor_type: EVENT_ACTORS.ASSESSOR,
-      message: `Blocked assessment was harness-owned and not operator-actionable; failed closed: ${verdict.reasons?.[0] || "assessment infrastructure exhausted"}`,
-      event_json: JSON.stringify({ operator_actionable: false }),
-    });
-    return;
+    return handleNeedsReview(job, verdict, ctx);
   }
 
   if (
@@ -49,29 +33,13 @@ export function handle(job, verdict, ctx) {
       assessmentModelTier: ctx.assessmentModelTier,
     })
   ) {
-    log(`${C.yellow}[assessor] BLOCKED WITHOUT NEW OPERATOR QUESTION${C.reset} WI#${job.work_item_id} job #${job.id}: retrying assessment at a stronger tier before failing closed${reasonBrief}`);
+    log(`${C.yellow}[assessor] BLOCKED WITHOUT NEW OPERATOR QUESTION${C.reset} WI#${job.work_item_id} job #${job.id}: retrying assessment at a stronger tier before operator recovery${reasonBrief}`);
     return;
   }
 
   if (!asksForClarification) {
-    const changed = typeof ctx.updateJobStatus === "function"
-      ? ctx.updateJobStatus("failed")
-      : updateJobStatus(job.id, "failed");
-    if (!changed) return;
-    log(`${C.yellow}[assessor] BLOCKED WITHOUT NEW OPERATOR QUESTION EXHAUSTED${C.reset} WI#${job.work_item_id} job #${job.id}: failed closed without inventing a human gate${reasonBrief}`);
-    logEvent({
-      work_item_id: job.work_item_id,
-      job_id: job.id,
-      event_type: EVENT_TYPES.JOB_ASSESSMENT_INFRASTRUCTURE_EXHAUSTED,
-      actor_type: EVENT_ACTORS.ASSESSOR,
-      message: `Blocked assessment supplied no new operator-actionable question after automatic recovery: ${retryReason}`,
-      event_json: JSON.stringify({
-        operator_actionable: false,
-        retry_reason: retryReason,
-        prior_clarification_count: priorClarifications.length,
-      }),
-    });
-    return;
+    return handleNeedsReview(job, { ...verdict, _disable_internal_retry: true,
+      _assessment_infrastructure_review: true, human_questions: [] }, ctx);
   }
 
   const changed = typeof ctx.updateJobStatus === "function"

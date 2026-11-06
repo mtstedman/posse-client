@@ -94,6 +94,13 @@ export async function collectScopedChange(cwd, payload = {}, { git = gitExecAsyn
   const status = await git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd, { trim: false });
   const entries = parsePorcelainZ(status).filter((entry) => !ignorePaths.has(entry.path)).filter((entry) => inScope(entry.path, scope)
     || (entry.code.includes("R") && entry.previousPath && inScope(entry.previousPath, scope)));
+  const ignored = await listIgnoredRepoPaths(cwd, [...scope.files], { git });
+  for (const entry of ignored) {
+    if (!ignorePaths.has(entry.path) && !entries.some(file => file.path === entry.path)
+      && readUntrackedFile(cwd, entry.path) != null) {
+      entries.push({ path: entry.path, code: "??", untracked: true });
+    }
+  }
   const renames = entries.filter((entry) => entry.code.includes("R") && entry.previousPath)
     .map((entry) => ({ from: entry.previousPath, to: entry.path,
       outsideScope: scope.declared && (!inScope(entry.previousPath, scope) || !inScope(entry.path, scope)) }));
@@ -123,8 +130,8 @@ export async function collectScopedChange(cwd, payload = {}, { git = gitExecAsyn
   return {
     files: files.map((file) => ({ path: file, stat: stats.get(file) || (untracked.includes(file) ? "new" : "changed") })),
     renames,
-    // Declared paths git never commits; status never lists them.
-    ignored: await listIgnoredRepoPaths(cwd, [...scope.files], { git }),
+    // Preserve discovery diagnostics without excluding authorized files.
+    ignored,
     diff,
     digest: createHash("sha256").update(diff).digest("hex"),
     scopeDeclared: scope.declared,
@@ -203,7 +210,7 @@ function tail(text, max) {
 }
 
 function renderTestRun(testRun, label = "DECLARED TESTS") {
-  if (!testRun || testRun.status === "skipped") return `${label}: none declared for this task.`;
+  if (!testRun || testRun.status === "skipped" && !testRun.command && !testRun.test_counts) return `${label}: none declared for this task.`;
   if (testRun.status === "invalid_test_plan") {
     return `${label}: \`${testRun.command || "(unknown)"}\` could not run (${testRun.reason || "invalid plan"}).`;
   }
@@ -212,11 +219,15 @@ function renderTestRun(testRun, label = "DECLARED TESTS") {
     ? `, ${testRun.test_counts.total} test(s)`
     : "";
   const exit = testRun.code ?? testRun.exit_code;
+  const executionLabel = ["passed", "failed", "timed_out"].includes(testRun.status)
+    ? "ran on the current workspace" : "verification result";
   const checks = Array.isArray(testRun.check_runs)
     ? testRun.check_runs.map((check) => `- ${check.check_id || check.command}: ${String(check.status || "unknown").toUpperCase()} [coverage: ${check.coverage_status || "unknown"}]${check.reason ? ` (${check.reason})` : ""}`).join("\n")
     : null;
   return [
-    `${label}: \`${testRun.command}\` ran on the current workspace: ${String(testRun.status || "unknown").toUpperCase()}${exit != null ? ` (exit ${exit})` : ""}${counts}${testRun.reason ? `, ${testRun.reason}` : ""}.`,
+    `${label}: \`${testRun.command || "(no runnable command)"}\` ${executionLabel}: ${String(testRun.status || "unknown").toUpperCase()}${exit != null ? ` (exit ${exit})` : ""}${counts}${testRun.reason ? `, ${testRun.reason}` : ""}.`,
+    counts || files.some(file => file.test_counts)
+      ? "Discovery evidence: counts describe reported cases only; they do not establish that every newly authored case ran or that browser behavior was exercised." : null,
     checks ? `CHECK RESULTS:\n${checks}` : null,
     ...files.map((file) => [
       `- ${file.path}: ${String(file.outcome || file.status || "unknown").toUpperCase()} (runner: ${file.runner || "unknown"}; tests: ${file.test_counts?.total ?? "unknown"}${file.reused ? "; reused runner result" : ""})`,
@@ -273,7 +284,7 @@ export function renderFinalReviewEvidence({ job, workItem, payload = {}, change,
       : `CHANGED FILES (${files.length}, complete list):\n${files.map((file) => `- ${file.path} (${file.stat})`).join("\n")}`,
     renames.length === 0 ? null : `RENAMES TOUCHING DECLARED SCOPE:\n${renames.map((entry) => `- ${entry.from} -> ${entry.to}${entry.outsideScope ? " (one path outside declared scope)" : ""}`).join("\n")}`,
     ignored.length === 0 ? null : [
-      "IGNORED BY REPOSITORY POLICY (declared in scope, but the repository's ignore rules exclude them: git never commits them, so they never appear in CHANGED FILES; their workspace copies are local, uncommitted state, and a generated file may be stale until the project's build or typecheck regenerates it. Judge the tracked sources instead, and do not report a finding whose only fix is editing, regenerating or committing one of these files):",
+      "EXACT SCOPED PATHS MATCHING IGNORE RULES (these files are authorized for scoped persistence; present files are included in this review even though ordinary Git discovery hides them):",
       ...ignored.map((entry) => `- ${entry.path} (${entry.source})`),
     ].join("\n"),
     files.length === 0 ? null : (diff.length <= FINAL_REVIEW_DIFF_INLINE_MAX_CHARS

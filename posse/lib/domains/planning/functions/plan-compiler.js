@@ -1,3 +1,5 @@
+import { PLANNER_EXISTING_JOB_PREFIX } from "../../../catalog/planning.js";
+import { retainedExistingJobDependencies, validExistingJobDependency } from "./existing-job-dependencies.js";
 import { captureRequirementContract, compileRequirementContracts, requirementContracts as inheritedContracts } from "./requirement-contract.js";
 import { serializePlanScopeOverlaps } from "./plan-scope-overlap.js";
 import { completeTaskScope, namedTaskPaths, plannerDependencyKind } from "./plan-scope-dependencies.js";
@@ -671,7 +673,10 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       };
       const researchCandidateCount = researchCandidateFiles.size;
       const underScopedBroadGateMode = parseUnderScopedBroadGateMode(getSetting(SETTING_KEYS.PLANNER_UNDER_SCOPED_BROAD_GATE));
-      cancelSupersededPlanChildren(worker, planJob);
+      const retainedJobIds = retainedExistingJobDependencies(tasks, {
+        workItemId: planJob.work_item_id, planJobId: planJob.id,
+      });
+      cancelSupersededPlanChildren(worker, planJob, { retainedJobIds });
       const droppedTaskIndexes = new Set();
       let expansionCapLogged = false;
 
@@ -732,12 +737,13 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         });
       };
       const recordPlannerDependencies = (job, task, taskIndex) => {
-        if (!Array.isArray(task?.depends_on_index) || task.depends_on_index.length === 0) return;
+        if (!task?.depends_on_index?.length && !task?.depends_on_job_ids?.length) return;
         pendingDependencyLinks.push({
           jobId: job.id,
           taskIndex,
           taskTitle: typeof task.title === "string" && task.title.trim() ? task.title.trim() : `task ${taskIndex}`,
-          dependsOnIndexes: [...task.depends_on_index],
+          dependsOnIndexes: [...(task.depends_on_index || [])],
+          dependsOnJobIds: [...(task.depends_on_job_ids || [])],
         });
       };
       const recordCompiledTaskJob = (taskIndex, jobId) => {
@@ -851,6 +857,16 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       };
       const wirePlannerDependencies = () => {
         for (const link of pendingDependencyLinks) {
+          if (!allCreatedJobIds.has(link.jobId)) continue;
+          for (const dependencyId of link.dependsOnJobIds || []) {
+            const eligible = validExistingJobDependency(dependencyId, { workItemId: planJob.work_item_id, planJobId: planJob.id });
+            if (!eligible || !addDependency(link.jobId, dependencyId, "hard")) {
+              logMissingPlannerDependency({ ...link, depIdx: `${PLANNER_EXISTING_JOB_PREFIX}${dependencyId}`,
+                reason: eligible ? "cycle_or_self_dependency" : "missing_dependency_job" });
+              cancelCompiledTaskForDroppedDependency(link.taskIndex, [`${PLANNER_EXISTING_JOB_PREFIX}${dependencyId}`]);
+              break;
+            }
+          }
           if (!allCreatedJobIds.has(link.jobId)) continue;
           for (const depIdx of link.dependsOnIndexes) {
             const missingReason = dependencyMissingReason(depIdx, link.taskIndex);
@@ -1118,7 +1134,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         // An ignored path (vendor/, a sqlite file) cannot be edited in a
         // worktree; dropping the path keeps the task, where rejecting the
         // task would also drop everything that depends on it.
-        const ignoredScopeOmissions = pruneIgnoredModifyScope(t, planReadRoot);
+        const ignoredScopeOmissions = pruneIgnoredModifyScope(t, planReadRoot, { tasks, taskIndex: i, context: { workItemId: planJob.work_item_id, planJobId: planJob.id } });
         if (ignoredScopeOmissions.length > 0) {
           worker.emit(
             planJob.id,
@@ -1150,10 +1166,6 @@ export function createJobsFromPlan(worker, planJob, tasks, {
             `${C.yellow}[plan-validate]${C.reset} WI#${planJob.work_item_id}: removed ${protectedScopeOmissions.length} protected .env scope target(s) from task "${t.title}"`,
           );
         }
-        const fileKindValidation = reconcilePlannerFileKinds(t, planReadRoot, {
-          tasks,
-          taskIndex: i,
-        });
         // Strip only the redundant dev/code create_roots shape before schema
         // validation.
         const redundantRoots = stripRedundantCodeCreateRoots(t);
@@ -1178,7 +1190,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           || (Array.isArray(t.create_roots) && t.create_roots.some(isPreValidationArtifactPath))
           || (Array.isArray(t.files_to_create) && t.files_to_create.some(isPreValidationArtifactPath));
         if (
-          preValidationWiMode !== "build"
+          (preValidationWiMode !== "build"
+            || (hasRequestedImageGenerationOutput(t, { pathOnlyIsIntent: false })
+              && declaresOnlyArtifactScopeFromModule(t, artifactDirAbs)))
           && (t.job_type === "dev" || !t.job_type)
           && (!Array.isArray(t.files_to_modify) || t.files_to_modify.length === 0)
           && (!Array.isArray(t.files_to_delete) || t.files_to_delete.length === 0)
@@ -1186,6 +1200,12 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         ) {
           t.job_type = "artificer";
         }
+        // Validate file kinds after artifact role normalization.
+        const fileKindValidation = reconcilePlannerFileKinds(t, planReadRoot, {
+          tasks,
+          taskIndex: i,
+          context: { workItemId: planJob.work_item_id, planJobId: planJob.id },
+        });
         const validationErrors = [
           ...fileKindValidation.errors,
           ...validatePlannedTaskFromModule(t, i, tasks.length),

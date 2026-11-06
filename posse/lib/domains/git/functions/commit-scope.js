@@ -213,16 +213,6 @@ function safeGitAdd(file, cwd, context, warnings = null) {
   }
 }
 
-function isGitIgnored(file, cwd, nativeParity = {}) {
-  try {
-    gitExec(["check-ignore", "-q", "--", file], cwd, { timeoutMs: GIT_COMMAND_TIMEOUT_MS, nativeParity });
-    return true;
-  } catch (err) {
-    if (err && err.status === 1) return false;
-    throw new Error(`Failed to check whether "${file}" is ignored by git: ${err?.message || String(err)}`);
-  }
-}
-
 function resolveCaseInsensitivePath(cwd, relPath) {
   if (process.platform !== "win32") return null;
   const normalized = String(relPath || "").replace(/\\/g, "/").replace(/^\.\//, "").trim();
@@ -971,30 +961,10 @@ function gitCommitAllUnlocked(message, cwd, scope = null, opts = {}) {
         continue;
       }
       const resolved = resolveScopedPath(f);
-      // git add refuses ignored untracked paths; a declared modify path the
-      // job never touched (not tracked, not dirty) can only be staged with
-      // --force, so skip it like ignored createFiles paths instead of letting
-      // the strict-context throw dead-letter a clean job.
-      if (!trackedByFold.has(norm(f)) && !actualDirtyByFold.has(norm(f)) && isGitIgnored(resolved, cwd, commitNativeParity)) {
-        skippedIgnoredModifyFiles.push(resolved);
-        log.warn("git-commit-scope", "Skipped ignored modifyFiles path during scoped commit preflight", {
-          file: resolved,
-          context: "modifyFiles",
-        });
-        continue;
-      }
       admitNativePath(resolved);
     }
     for (const f of createFilesRaw) {
       const resolved = resolveScopedPath(f);
-      if (isGitIgnored(resolved, cwd, commitNativeParity)) {
-        skippedIgnoredCreateFiles.push(resolved);
-        log.warn("git-commit-scope", "Skipped ignored createFiles path during scoped commit preflight", {
-          file: resolved,
-          context: "createFiles",
-        });
-        continue;
-      }
       admitNativePath(resolved);
     }
     for (const f of deleteFilesRaw) {

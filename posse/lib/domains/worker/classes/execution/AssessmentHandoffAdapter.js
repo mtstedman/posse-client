@@ -11,7 +11,6 @@ import {
   incrementAndCreateAssessmentAttempt,
   isLeaseValid,
   logEvent,
-  runInTransaction,
   setAssessmentLifecycle,
   updateJobPayload,
 } from "../../../queue/functions/index.js";
@@ -249,40 +248,14 @@ export class AssessmentHandoffAdapter {
     const assessmentSource = loadAssessmentSource(job.id);
     if (!assessmentSource.ok) {
       const missing = new Error(`Assessment evidence is unavailable: ${assessmentSource.reason}`);
-      const recoveryCount = Math.max(0, Number(cleanPayload?._assessment_source_recovery_count || 0));
-      if (recoveryCount < 1) {
-        const recoveryPayload = { ...cleanPayload };
-        delete recoveryPayload._assess_only;
-        delete recoveryPayload._assess_model_tier;
-        delete recoveryPayload._assess_reasoning_effort;
-        delete recoveryPayload._assess_model_name;
-        delete recoveryPayload._assess_review_correction;
-        recoveryPayload._assessment_source_recovery_count = recoveryCount + 1;
-        recoveryPayload._assessment_source_recovery_reason = missing.message.slice(0, 1000);
-        const recovered = runInTransaction(() => {
-          // Missing-source recovery runs before the assessment barrier. A
-          // stale worker must not clear the new owner's assess-only payload
-          // or replay implementation after its lease has expired.
-          if (!isLeaseValid(job.id, leaseToken)) return false;
-          const released = typeof worker._releaseWithoutAttemptPenalty === "function"
-            ? worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { readyAt: new Date().toISOString() })
-            : worker._releaseLease(job, leaseToken, "queued");
-          if (!released) return false;
-          updateJobPayload(job.id, JSON.stringify(recoveryPayload));
-          setAssessmentLifecycle(job.id, "assessment_unavailable", { error: missing.message });
-          return true;
-        });
-        if (recovered) worker.emit(job.id, `${C.yellow}[assess-only] Missing bound source; resuming implementation once to repair terminal evidence${C.reset}`);
-      } else {
-        missing.assessmentGateImmediately = true;
-        // Restoring a runner cannot recover lost evidence. Automatic repair
-        // already failed, so retain diagnostics without inventing a decision.
-        routeAssessmentInfrastructureFailure(worker, job, leaseToken, missing, {
-          pendingFileRequests,
-          failureClass: ASSESSMENT_FAILURE_CLASSES.SOURCE_MISSING,
-        });
-        worker.emit(job.id, `${C.yellow}[assess-only] Missing bound source after automatic repair; failed without an operator gate${C.reset}`);
-      }
+      // Re-running development cannot restore the missing evidence. Preserve
+      // the candidate and correction context for an explicit recovery choice.
+      missing.assessmentGateImmediately = true;
+      routeAssessmentInfrastructureFailure(worker, job, leaseToken, missing, {
+        pendingFileRequests,
+        failureClass: ASSESSMENT_FAILURE_CLASSES.SOURCE_MISSING,
+        question: `Job #${job.id} has no bound assessment source. Restore its recorded evidence and retry, replan, explicitly waive verification, or fail. Development will not restart automatically.`,
+      });
       return { handled: true };
     }
 
@@ -652,7 +625,7 @@ export class AssessmentHandoffAdapter {
       worker.emit(job.id, `${C.red}[assess-only] Assessment failed: ${diagnostic.split("\n")[0]}${C.reset}`);
       // The developer's committed output remains authoritative. Transport,
       // tool and terminal-protocol failures share the assessment retry
-      // budget; once it is spent the job fails with assess-only state retained.
+      // budget; once it is spent the candidate awaits an explicit recovery choice.
       parkAssessmentFailure(worker, job, leaseToken, assessErr, { pendingFileRequests, operatorActionable: operatorActionableFailure });
     }
     return { handled: true, currentAttemptId: assessAttempt.attempt.id };

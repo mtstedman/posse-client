@@ -93,6 +93,8 @@ export async function classifyIgnoredPathOnlyAssessmentFailure(verdict, { cwd, p
   if (verdict?.verdict !== "fail" || !cwd) return null;
   const cited = await citedAssessmentPaths(verdict, { cwd, payload, assessmentContext, git });
   if (cited.length === 0) return null;
+  const explicitScope = new Set(SCOPE_KEYS.flatMap(key => pathList(payload[key])));
+  if (cited.some(file => explicitScope.has(file))) return null;
   const ignored = new Map((await listIgnoredRepoPaths(cwd, cited, { git })).map((entry) => [entry.path, entry]));
   if (!cited.every((entry) => ignored.has(entry))) return null;
   return {

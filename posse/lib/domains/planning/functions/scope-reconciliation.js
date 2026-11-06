@@ -1,3 +1,6 @@
+import { existingJobDependencyId, validExistingJobDependency } from "./existing-job-dependencies.js";
+import { PLANNER_EXISTING_JOB_PREFIX } from "../../../catalog/planning.js";
+import { getDb } from "../../../shared/storage/functions/index.js";
 import { FUZZY_SCAN_SKIP_DIRS } from "../../../catalog/scope-discovery.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -64,9 +67,10 @@ function legacyTaskNode(task, index) {
     id: String(index),
     role: String(task?.job_type || "dev").trim().toLowerCase(),
     taskMode: String(task?.task_mode || "code").trim().toLowerCase(),
-    dependsOn: Array.isArray(task?.depends_on_index)
-      ? task.depends_on_index.filter(Number.isInteger).map(String)
-      : [],
+    dependsOn: [
+      ...(Array.isArray(task?.depends_on_index) ? task.depends_on_index.filter(Number.isInteger).map(String) : []),
+      ...(Array.isArray(task?.depends_on_job_ids) ? task.depends_on_job_ids.map(id => `${PLANNER_EXISTING_JOB_PREFIX}${id}`) : []),
+    ],
     scope: task || {},
   };
 }
@@ -97,13 +101,43 @@ function ancestorNodes(node, byId) {
   return result;
 }
 
+function createdPaths(node) {
+  const promoted = node.role === "promote" && Array.isArray(node.scope.mappings)
+    ? node.scope.mappings.map(mapping => mapping?.dest).filter(value => typeof value === "string") : [];
+  return uniqueScopePaths([...(node.scope.files_to_create || []), ...promoted]);
+}
+
 function repoCodeTask(node) {
   return ["dev", "code"].includes(node.role) && ["code", "dev"].includes(node.taskMode);
 }
 
-function validateNodes(nodes, projectDir) {
+function dependencyNodeMap(nodes, context = {}) {
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  const workItemId = context.workItemId ?? context.work_item_id;
+  if (!workItemId) return byId;
+  const db = context.db || getDb();
+  const pending = nodes.flatMap(node => node.dependsOn);
+  const seen = new Set();
+  while (pending.length) {
+    const ref = pending.pop();
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    const id = existingJobDependencyId(ref);
+    if (id == null || !validExistingJobDependency(id, { workItemId, planJobId: context.planJobId ?? context.jobId ?? context.job_id, db })) continue;
+    const job = db.prepare("SELECT payload_json, job_type FROM jobs WHERE id = ?").get(id);
+    let scope;
+    try { scope = JSON.parse(job.payload_json || "{}"); } catch { continue; }
+    const dependsOn = db.prepare("SELECT depends_on_job_id FROM job_dependencies WHERE job_id = ?").all(id)
+      .map(row => `${PLANNER_EXISTING_JOB_PREFIX}${row.depends_on_job_id}`);
+    byId.set(ref, { id: ref, role: job.job_type, scope: scope || {}, dependsOn });
+    pending.push(...dependsOn);
+  }
+  return byId;
+}
+
+function validateNodes(nodes, projectDir, context) {
   if (!isRepository(projectDir)) return [];
-  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const byId = dependencyNodeMap(nodes, context);
   const issues = [];
   const ignoredPathKeys = ignoredUntrackedPathKeys(
     projectDir,
@@ -119,7 +153,7 @@ function validateNodes(nodes, projectDir) {
     if (!repoCodeTask(node)) continue;
     const ancestors = ancestorNodes(node, byId);
     const ancestorCreates = new Set(
-      ancestors.flatMap((ancestor) => uniqueScopePaths(ancestor.scope.files_to_create)).map(scopePathKey),
+      ancestors.flatMap(createdPaths).map(scopePathKey),
     );
     const ancestorDeletes = new Set(
       ancestors.flatMap((ancestor) => uniqueScopePaths(ancestor.scope.files_to_delete)).map(scopePathKey),
@@ -141,7 +175,7 @@ function validateNodes(nodes, projectDir) {
         continue;
       }
       const resolved = resolveRepoScopePath(projectDir, filePath);
-      if (resolved && ignoredPathKeys.has(key)) {
+      if (resolved && ignoredPathKeys.has(key) && !ancestorCreates.has(key)) {
         issues.push({
           taskIndex: node.index,
           taskId: node.id,
@@ -164,15 +198,7 @@ function validateNodes(nodes, projectDir) {
       const key = scopePathKey(filePath);
       if (modifyKeys.has(key)) continue;
       const resolved = resolveRepoScopePath(projectDir, filePath);
-      if (resolved && ignoredPathKeys.has(key)) {
-        issues.push({
-          taskIndex: node.index,
-          taskId: node.id,
-          path: filePath,
-          declaredKind: "files_to_create",
-          reason: "the path is ignored by repository policy",
-        });
-      } else if (resolved && pathEntryExists(resolved) && !ancestorDeletes.has(key)) {
+      if (resolved && pathEntryExists(resolved) && !ancestorDeletes.has(key)) {
         issues.push({
           taskIndex: node.index,
           taskId: node.id,
@@ -186,15 +212,15 @@ function validateNodes(nodes, projectDir) {
   return issues;
 }
 
-export function validatePlannerTaskFileKinds(tasks, projectDir) {
+export function validatePlannerTaskFileKinds(tasks, projectDir, context = {}) {
   const nodes = Array.isArray(tasks) ? tasks.map(legacyTaskNode) : [];
-  return validateNodes(nodes, projectDir);
+  return validateNodes(nodes, projectDir, context);
 }
 
-export function validatePlannerPacketFileKinds(packet, projectDir) {
+export function validatePlannerPacketFileKinds(packet, projectDir, context = {}) {
   if (packet?.profile !== AGENT_HANDOFF_PROFILES.PLANNER_PLAN || packet?.outcome !== "success") return [];
   const nodes = Array.isArray(packet?.handoffs) ? packet.handoffs.map(handoffNode) : [];
-  return validateNodes(nodes, projectDir);
+  return validateNodes(nodes, projectDir, context);
 }
 
 const FUZZY_SCAN_MAX_ENTRIES = 40000;
@@ -283,11 +309,11 @@ function dependableSiblingCreator(handoffs, index, filePath) {
  * can request any scope it turns out to need, so a trimmed or re-pointed path
  * is the cheaper outcome. Each repair is returned for the caller to record.
  */
-export function repairPlannerPacketFileKinds(packet, projectDir, { maxPasses = 3, addDependencies = true } = {}) {
+export function repairPlannerPacketFileKinds(packet, projectDir, { maxPasses = 3, addDependencies = true, context = {} } = {}) {
   const repairs = [];
   if (packet?.profile !== AGENT_HANDOFF_PROFILES.PLANNER_PLAN || packet?.outcome !== "success") return repairs;
   for (let pass = 0; pass < maxPasses; pass += 1) {
-    const issues = validatePlannerPacketFileKinds(packet, projectDir);
+    const issues = validatePlannerPacketFileKinds(packet, projectDir, context);
     if (issues.length === 0) break;
     let changed = false;
     for (const issue of issues) {
@@ -359,24 +385,27 @@ export function repairPlannerPacketFileKinds(packet, projectDir, { maxPasses = 3
  * field. Removing the path is the repair; validation still rejects what is
  * left when it is wrong.
  */
-export function pruneIgnoredModifyScope(task, projectDir) {
+export function pruneIgnoredModifyScope(task, projectDir, { tasks = [task], taskIndex = 0, context = {} } = {}) {
   if (!task || !Array.isArray(task.files_to_modify) || task.files_to_modify.length === 0) return [];
   if (!isRepository(projectDir)) return [];
   const ignoredKeys = ignoredUntrackedPathKeys(projectDir, task.files_to_modify);
   if (ignoredKeys.size === 0) return [];
+  const nodes = tasks.map(legacyTaskNode);
+  const creates = new Set(ancestorNodes(nodes[taskIndex], dependencyNodeMap(nodes, context))
+    .flatMap(createdPaths).map(scopePathKey));
   const removed = [];
   const kept = [];
   for (const value of task.files_to_modify) {
     const key = scopePathKey(value);
-    if (key && ignoredKeys.has(key) && resolveRepoScopePath(projectDir, value)) removed.push(value);
+    if (key && ignoredKeys.has(key) && !creates.has(key) && resolveRepoScopePath(projectDir, value)) removed.push(value);
     else kept.push(value);
   }
   if (removed.length > 0) task.files_to_modify = kept;
   return removed;
 }
 
-export function reconcilePlannerFileKinds(task, projectDir, { tasks = [task], taskIndex = 0 } = {}) {
-  const allIssues = validatePlannerTaskFileKinds(tasks, projectDir);
+export function reconcilePlannerFileKinds(task, projectDir, { tasks = [task], taskIndex = 0, context = {} } = {}) {
+  const allIssues = validatePlannerTaskFileKinds(tasks, projectDir, context);
   const issues = allIssues.filter((issue) => issue.taskIndex === taskIndex);
   return {
     changed: false,

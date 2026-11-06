@@ -7,15 +7,9 @@ export function normalizeAgentHiddenRelPath(value) {
     .replace(/\/+$/, "");
 }
 
-function pathParts(normalized) {
-  return normalized.split("/").filter(Boolean);
-}
-
-export function agentHiddenReadablePathReason(value) {
-  const normalized = normalizeAgentHiddenRelPath(value).toLowerCase();
-  if (!normalized) return null;
-  const parts = pathParts(normalized);
-  if (parts.includes(".gitignore")) return ".gitignore files are hidden from agent file tools";
+// Ignore configuration is ordinary repository context. Secrets and runtime
+// internals are enforced by their dedicated path policies, not dotfile hiding.
+export function agentHiddenReadablePathReason(_value) {
   return null;
 }
 

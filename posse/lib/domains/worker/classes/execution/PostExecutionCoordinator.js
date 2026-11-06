@@ -1,5 +1,5 @@
 import { isKillAbort } from "../../../runtime/functions/yield.js";
-import { authoritativeFinalReview } from "../../../assessment/functions/final-review-authority.js";
+import { authoritativeFinalReview, finalReviewIdentity } from "../../../assessment/functions/final-review-authority.js";
 import { parsePorcelainEntries, unfinishedSiblingDirtyLocks } from "../../functions/helpers/worktree-dirty-classification.js";
 import { DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js";
 import { parkDirtyWorktreeRecovery } from "../../functions/helpers/dirty-worktree-recovery.js";
@@ -1474,6 +1474,30 @@ export async function handlePostExecutionForWorker({
                 paths: blockedPaths, attemptId: attempt.id, output, phase: "commit",
               });
               return;
+            }
+            // The developer already finished. A Git failure is a phase
+            // blocker, not permission to erase and regenerate the candidate.
+            // Empty declared outputs still take the existing PARTIAL path.
+            if (wtPath && !committedHash && unwrittenMaterializedPaths(gitErr).length === 0) {
+              const candidatePayload = this.parsePayload(getJob(job.id) || job);
+              const dirty = parsePorcelainEntries(await gitExecAsync([
+                "status", "--porcelain", "-z", "--no-renames", "--untracked-files=all",
+              ], wtPath, { trim: false })).map(entry => entry.path);
+              const siblingPaths = new Set(unfinishedSiblingDirtyLocks(job, dirty).map(lock => lock.path));
+              const paths = dirty.filter(file => !siblingPaths.has(file));
+              if (paths.length) {
+                let candidateIdentity = null;
+                try { candidateIdentity = await finalReviewIdentity(wtPath, candidatePayload, { jobId: job.id }); }
+                catch { /* Preserve the work; recovery must obtain fresh validation. */ }
+                completeAttempt(attempt.id, { status: "interrupted", duration_ms: Date.now() - startTime,
+                  error_text: gitFailureDetail });
+                await wrappedJob.setError(`Commit blocked; candidate preserved: ${gitFailureDetail}`);
+                parkDirtyWorktreeRecovery(this, job, leaseToken, {
+                  paths, attemptId: attempt.id, output, phase: "commit", candidateIdentity,
+                  failure: gitFailureSummary,
+                });
+                return;
+              }
             }
             await wrappedJob.setError(lockTimeout.timeout
               ? `Git commit blocked by worktree lock timeout: ${gitFailureDetail}`

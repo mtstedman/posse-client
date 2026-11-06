@@ -72,7 +72,6 @@ import {
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE, REPLAN_TRIGGERS } from "../../../../catalog/job.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import {
-  ASSESSMENT_FAILURE_CLASSES,
   BLOCKED_RECOVERY_RETRY_SCOPES,
   POST_MERGE_DB_TASK_REVIEW_TYPE,
   humanInputChoiceFeedback,
@@ -1091,16 +1090,11 @@ export async function runHumanInputJob(worker, job, {
         const restoredDependents = restoreGateDependentsToOriginal();
         const origPayload = worker.parsePayload(origJob);
         const retryingVerification = origPayload._verification_blocked?.type === "verification_blocked";
-        // Missing bound evidence cannot be reassessed: only the implementation
-        // can regenerate it, so that retry resumes the developer.
-        const sourceMissing = payload.verification_failure_class === ASSESSMENT_FAILURE_CLASSES.SOURCE_MISSING;
-        const retryingAssessment = retryingVerification && origPayload._assess_only === true && !sourceMissing;
+        // Retry rechecks the blocked phase, including restored source evidence.
+        // Restarting development requires the separate replan choice.
+        const retryingAssessment = retryingVerification && origPayload._assess_only === true;
         if (retryingVerification) {
           delete origPayload._verification_blocked;
-        }
-        if (sourceMissing) {
-          delete origPayload._assess_only;
-          delete origPayload._assessment_source_recovery_count;
         }
         // A bare choice ("retry") is a decision, not guidance: say so instead
         // of pasting the word into the task as if it were instructions. The

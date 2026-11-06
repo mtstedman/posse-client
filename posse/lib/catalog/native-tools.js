@@ -718,7 +718,7 @@ export const TOOL_AGENT_HANDOFF = {
           type: "object",
           properties: {
             id: { type: "string", minLength: 1, maxLength: 80, description: "Keep IDs at 40 characters or fewer when practical; 80 is the hard safety ceiling." },
-            depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 80 } },
+            depends_on: { type: "array", maxItems: 50, items: { type: "string", minLength: 1, maxLength: 80 }, description: "Plan-local task IDs, or job:<positive ID> for existing live or successful jobs in this same work item. Use existing IDs supplied in the work-item context." },
             target: {
               type: "object",
               description:
@@ -787,8 +787,8 @@ export const TOOL_AGENT_HANDOFF = {
                     files_to_delete: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
                     create_roots: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 } },
                     output_root: { type: "string", maxLength: 500, description: "Planner-only output root. Invalid for non-planner profiles." },
-                    key_files: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 }, description: "Researcher-only verified seed files. Invalid for non-researcher profiles." },
-                    related_files: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 }, description: "Researcher-only related seed files. Invalid for non-researcher profiles." },
+                    key_files: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 }, description: "Read-only reference files for planner tasks and verified seed files for researcher reports. Supplies read context only; declare writable scope separately." },
+                    related_files: { type: "array", maxItems: 100, items: { type: "string", maxLength: 500 }, description: "Read-only related files for planner tasks and researcher reports. Supplies read context only; declare writable scope separately." },
                   },
                   additionalProperties: false,
                 },
@@ -868,7 +868,7 @@ export const TOOL_AGENT_HANDOFF = {
             if: {
               properties: {
                 profile: {
-                  not: { enum: [AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT] },
+                  not: { enum: [AGENT_HANDOFF_PROFILES.PLANNER_PLAN, AGENT_HANDOFF_PROFILES.RESEARCHER_PIPELINE, AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT] },
                 },
               },
               required: ["profile"],
@@ -1028,6 +1028,8 @@ const PLANNER_SCOPE = {
       description: "Artifact-output roots for artificer tasks. Invalid for dev/code; declare each new repository file in files_to_create.",
     },
     output_root: { type: "string", maxLength: 500 },
+    key_files: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 }, description: "Read-only reference files. Supplies read context only, without write authority or writer locks." },
+    related_files: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 500 }, description: "Additional read-only context; keep files_to_modify limited to actual edits." },
   },
   anyOf: [
     {
@@ -1416,7 +1418,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER = {
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; human_input and promote are system roles. " +
-    "Every non-db dev task must name exact repository files in scope.files_to_modify, scope.files_to_create, or scope.files_to_delete; dev tasks cannot use create_roots. Artificer tasks may use bounded scope.create_roots for artifact output; promote requires an exact destination path and human_input uses scope:{}. " +
+    "Every non-db dev task must name exact repository files in scope.files_to_modify, scope.files_to_create, or scope.files_to_delete; dev tasks cannot use create_roots. Use scope.key_files and scope.related_files for read-only references, without adding them to files_to_modify. Artificer tasks may use bounded scope.create_roots for artifact output; promote requires an exact destination path and human_input uses scope:{}. " +
     "Claims use claim plus optional evidence, decoy, and summary. Claims are optional, not a plan validity requirement: prefer task-relevant claims backed by exact source already surfaced in this call for existing-code work, because Posse materializes them into the downstream developer brief and avoids repeated discovery. Omit claims for genuinely new work or when no reliable source evidence exists, and attach only grounded selectors. A file name or skeleton is not surfaced source. If an attempted selector is unavailable, Posse moves that unsupported claim into a marked task-summary note; finish the plan because evidence repair is optional. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Use an evidence_ref directly because its text is already visible to this planner call. A re-issued traversal_ref is available routing custody, not evidence: call it first to surface the content, then cite the returned evidence_ref or an exact surfaced path range. Source-backed line selectors use the source-file line numbers shown in gutters or source metadata and must stay inside one surfaced window. Cite only visibility surfaced to this planner call. " +
     "Planning always hands off executable verification: when research suggests the requested state already exists, emit a narrow dev task so downstream execution and assessment own the no-op decision. Correct example: " +
@@ -1665,7 +1667,7 @@ export const TOOL_AGENT_HANDOFF_PLANNER_V3 = {
   description:
     "Finish planning with one atomic tasks batch. Posse converts each flat task into the canonical planner packet. " +
     "Use role dev or artificer for executable work; human_input and promote are system roles. " +
-    "Every non-db dev task must name exact repository files in scope.files_to_modify, scope.files_to_create, or scope.files_to_delete; dev tasks cannot use create_roots. Artificer tasks may use bounded scope.create_roots for artifact output; promote requires an exact destination path and human_input uses scope:{}. " +
+    "Every non-db dev task must name exact repository files in scope.files_to_modify, scope.files_to_create, or scope.files_to_delete; dev tasks cannot use create_roots. Use scope.key_files and scope.related_files for read-only references, without adding them to files_to_modify. Artificer tasks may use bounded scope.create_roots for artifact output; promote requires an exact destination path and human_input uses scope:{}. " +
     "Claims use claim plus optional evidence, decoy, and summary. Claims are optional, not a plan validity requirement: prefer task-relevant claims backed by exact source already surfaced in this call for existing-code work, because Posse materializes them into the downstream developer brief and avoids repeated discovery. Omit claims for genuinely new work or when no reliable source evidence exists, and attach only grounded selectors. A file name or skeleton is not surfaced source. If an attempted selector is unavailable, Posse moves that unsupported claim into a marked task-summary note; finish the plan because evidence repair is optional. Prefer 40-line evidence slices and keep combined developer task prose near 2000 characters; complete task prose is preserved up to the 12000-character narrative safety ceiling. " +
     "Use an evidence_ref directly because its text is already visible to this planner call. A re-issued traversal_ref is available routing custody, not evidence: call it first to surface the content, then cite the returned evidence_ref or an exact surfaced path range. Source-backed line selectors use the source-file line numbers shown in gutters or source metadata and must stay inside one surfaced window. Cite only visibility surfaced to this planner call. " +
     "Planning always hands off executable verification: when research suggests the requested state already exists, emit a narrow dev task so downstream execution and assessment own the no-op decision. Correct example: " +

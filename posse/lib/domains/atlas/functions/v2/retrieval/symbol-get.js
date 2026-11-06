@@ -388,7 +388,32 @@ async function readSymbolGet({
   }
   const selector = params.symbolId || params.symbolRef?.name || "";
   if (selection.status !== "selected" && selection.status !== "ambiguous") {
-    return targetSelectionError(selection, selector, versionId);
+    const failure = targetSelectionError(selection, selector, versionId);
+    // A file-local name can be an import/destructuring alias absent from the
+    // index. Return bounded source evidence through the normal window reader;
+    // do not guess that an unrelated indexed bearer is its implementation.
+    if (selection.status === "symbol_ref_not_found" && selection.requestedFile && params.symbolRef?.name) {
+      try {
+        const name = String(params.symbolRef.name);
+        const localSource = typeof readFile === "function" ? readFile(selection.requestedFile) : null;
+        // Only recover a name actually present in the requested file. A wrong
+        // path or absent name should not spend another source-window budget.
+        if (!/^[A-Za-z_$][\w$]*$/.test(name) || localSource == null
+          || !String(localSource).split(/[^A-Za-z0-9_$]+/).includes(name)) return failure;
+        const source = await context.measure("source_recovery", () => readSymbolBody({
+          view, versionId, readFile, repoRoot, ledger, repoId, config,
+          params: { file: selection.requestedFile, reason: "Locate a file-local name or alias after exact indexed lookup failed",
+            identifiersToFind: [String(params.symbolRef.name).slice(0, 120)],
+            maxTokens: Math.min(Number(params.maxTokens) > 0 ? Number(params.maxTokens) : 512, 512),
+            expectedLines: 24 },
+        }));
+        if (source?.ok && source.data) {
+          failure.error.details = { ...failure.error.details, sourceRecovery: source.data };
+          failure.error.message = `File-local source evidence (an indexed declaration was not resolved; inspect aliases before choosing a bearer): ${JSON.stringify(source.data).slice(0, 4000)}\n${failure.error.message}`;
+        }
+      } catch { /* Keep the exact lookup error when source access is unavailable. */ }
+    }
+    return failure;
   }
 
   if (selection.status === "selected") {
