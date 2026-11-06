@@ -6,7 +6,7 @@ import { getProviderName } from "../../../providers/functions/provider.js";
 import { injectArtifactScope, isArtifactMode, buildManifestAsync, wiScopeId } from "../../../artifacts/functions/index.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
-import { yieldNow, isKillAbort } from "../../../runtime/functions/yield.js";
+import { yieldNow, killAbortReason } from "../../../runtime/functions/yield.js";
 import { recordObservation, runWithObservationContext } from "../../../observability/functions/observations.js";
 import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
@@ -461,11 +461,9 @@ export class WorkerExecutionCoordinator {
         });
       } catch (err) {
         worker._releasePendingSessionRecycleForJob(job.id);
-        const killed = isKillAbort(err, executeAbortController?.signal);
-        if (killed && !err._killReason) {
-          err._killReason = executeAbortController?.signal?.reason?._killReason
-            || worker._killReasons?.get(job.id) || "shutdown";
-        }
+        const killReason = killAbortReason(err, executeAbortController?.signal, worker._killReasons?.get(job.id));
+        const killed = killReason != null;
+        if (killed && !err._killReason) err._killReason = killReason;
         const scopePauseHandled = !killed && await handlePendingScopeApprovalPauseFromModule(worker, {
           attempt,
           job,

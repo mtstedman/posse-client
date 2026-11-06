@@ -16,6 +16,7 @@ import {
   exactHumanInputChoiceFromAnswer,
   humanInputChoiceFromAnswer,
   humanInputChoicesForPayload,
+  tryHumanGateNameForPayload,
 } from "../../../catalog/human-input.js";
 
 const DEFAULT_BRIDGE_LEASE_SECONDS = 300;
@@ -194,6 +195,17 @@ export async function answerHumanInput(jobId, args = {}, {
   }
   if (payload?.subtype === "push_offer") {
     return { ok: false, reason: "use_git_push" };
+  }
+  // A legacy row the identity migration left non-canonical has no answer
+  // contract; `posse gate answer <id> supersede` is its only resolution.
+  if (!tryHumanGateNameForPayload(payload)) {
+    return {
+      ok: false,
+      reason: "legacy_gate_requires_supersede",
+      job_id: id,
+      work_item_id: current.work_item_id,
+      message: `Gate #${id} is a legacy gate with no answer contract; clear it with: posse gate answer ${id} supersede`,
+    };
   }
   const choices = humanInputChoicesForPayload(payload);
   if (!allowReviewGateAnswer && isReviewGateJob(current, payload) && choices.length === 0) {

@@ -16,7 +16,7 @@ import { isPushOfferJob } from "../../queue/functions/common.js";
 import { activeWorkItemDispositionGates } from "../../queue/functions/work-item-dispositions.js";
 import { activeMergeFailureRecoveryGateId, mergeVerificationReviewGateState } from "../../queue/functions/merge-verification-review.js";
 import { resolveGateReviewDiffTarget } from "../../queue/functions/gate-review-target.js";
-import { CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE, MERGE_FAILURE_RECOVERY_REVIEW_TYPE, MERGE_VERIFICATION_REVIEW_TYPE, WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE, humanGateStateAllowsAnswer, humanInputChoicesForPayload } from "../../../catalog/human-input.js";
+import { CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE, MERGE_FAILURE_RECOVERY_REVIEW_TYPE, MERGE_VERIFICATION_REVIEW_TYPE, WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE, humanGateStateAllowsAnswer, humanInputChoicesForPayload, tryHumanGateNameForPayload } from "../../../catalog/human-input.js";
 import { getHumanGate, listJobs } from "../../queue/functions/index.js";
 import { closeDb } from "../../../shared/storage/functions/index.js";
 import { ThreadManager } from "../../../shared/concurrency/classes/ThreadManager.js";
@@ -103,7 +103,8 @@ export function describeOpenGatesAtExit(gates = [], {
     }
     let kind = null;
     try { kind = getHumanGateFn(gate.id)?.gate_kind || null; } catch { kind = null; }
-    const choices = humanInputChoicesForPayload(payload);
+    // A legacy row has no answer contract; its only CLI action is supersede.
+    const choices = tryHumanGateNameForPayload(payload) ? humanInputChoicesForPayload(payload) : ["supersede"];
     let reviewsCode = false;
     try { reviewsCode = Boolean(reviewDiffTargetFn(gate, { payload })); } catch { reviewsCode = false; }
     return `#${gate.id} ${kind || payload.review_type || "question"}${wi}: posse gate answer ${gate.id} ${choices.length > 0 ? choices.join("|") : "<answer>"}${reviewsCode ? ` (diff: posse gate show ${gate.id})` : ""}`;

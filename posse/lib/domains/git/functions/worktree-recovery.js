@@ -30,6 +30,7 @@ import {
   snapshotRefFromNative,
 } from "./worktree-snapshots.js";
 import { worktreeRoot } from "./worktree-path.js";
+import { MANAGED_WORKTREE_ROOT_DIR_NAME } from "../../../catalog/workspace-traversal.js";
 
 export async function worktreePorcelainAsync(wtPath, { signal = null } = {}) {
   return (await gitExecAsync(["status", "--porcelain"], wtPath, { signal })).trim();
@@ -148,7 +149,9 @@ function literalPathspec(file) {
 // a worktree that sibling jobs share, where a whole-worktree reset would also
 // erase their files. Returns the paths that could not be restored.
 export function restorePathsToTree(wtPath, paths = [], tree = "HEAD") {
-  wtPath = resolveGitWorktreeRoot(wtPath);
+  const root = resolveGitWorktreeRoot(wtPath);
+  refusePrimaryCheckoutRecovery(wtPath, root, "restore paths in");
+  wtPath = root;
   const failed = [];
   for (const file of paths) {
     try {
@@ -168,7 +171,9 @@ export function restorePathsToTree(wtPath, paths = [], tree = "HEAD") {
 }
 
 export async function restorePathsToTreeAsync(wtPath, paths = [], tree = "HEAD", { signal = null } = {}) {
-  wtPath = await resolveGitWorktreeRootAsync(wtPath, { signal });
+  const root = await resolveGitWorktreeRootAsync(wtPath, { signal });
+  refusePrimaryCheckoutRecovery(wtPath, root, "restore paths in");
+  wtPath = root;
   const failed = [];
   for (const file of paths) {
     try {
@@ -264,9 +269,13 @@ export async function stashDirtyWorktreeAsync(
   { worktreeLockWaitMs = null, stashLockWaitMs = null, shouldDefer = null, selectPaths = null, signal = null } = {},
 ) {
   if (!wtPath) return false;
+  // Locks stay keyed by the caller's path, as sibling stash and reset paths
+  // key theirs, so a nested project's stash still serializes with them.
+  const lockWtPath = wtPath;
   wtPath = await resolveGitWorktreeRootAsync(wtPath, { signal });
-  const mainCwd = projectDir || wtPath;
-  return withWorktreeLockAsync(wtPath, mainCwd, async () => {
+  refusePrimaryCheckoutRecovery(lockWtPath, wtPath, "stash");
+  const mainCwd = projectDir || lockWtPath;
+  return withWorktreeLockAsync(lockWtPath, mainCwd, async () => {
     if (typeof shouldDefer === "function") {
       let defer = false;
       try {
@@ -295,7 +304,7 @@ export async function stashDirtyWorktreeAsync(
     }
 
     // refs/stash is shared by every worktree in the repository.
-    const lockPath = await gitStashLockPathAsync(wtPath, mainCwd, { signal, nativeParity: { disabled: true } });
+    const lockPath = await gitStashLockPathAsync(lockWtPath, mainCwd, { signal, nativeParity: { disabled: true } });
     const stashLock = await acquireWorktreeLockAsync(lockPath, {
       waitMs: stashLockWaitMs ?? worktreeLockWaitMs,
       signal,
@@ -519,12 +528,20 @@ export async function assertWorktreeRootAsync(wtPath, { signal = null } = {}) {
   }
 }
 
-function refusePrimaryCheckoutRecovery(wtPath, projectDir, resolvedRoot) {
-  const managedRoot = worktreeRoot(projectDir, { disabled: true });
-  const relative = path.relative(managedRoot, wtPath);
-  const managed = relative && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
-  if (managed && canonicalPath(resolvedRoot) === canonicalPath(resolveGitWorktreeRoot(projectDir))) {
-    throw new Error(`Refusing to reset primary checkout for corrupt managed worktree: ${wtPath}`);
+// A managed worktree whose .git file vanished is no checkout of its own: Git
+// discovery climbs out of `.posse-worktrees/<name>` to the checkout holding
+// it, normally the primary one, and a reset, path restore or stash there
+// would act on the user's files. The check is lexical and read-only, so it
+// needs no project directory and no native call.
+function refusePrimaryCheckoutRecovery(wtPath, resolvedRoot, action = "reset") {
+  const fold = (part) => process.platform === "win32" ? part.toLowerCase() : part;
+  const parts = path.resolve(wtPath).split(path.sep);
+  const rootIndex = parts.map(fold).lastIndexOf(MANAGED_WORKTREE_ROOT_DIR_NAME);
+  if (rootIndex < 0 || rootIndex + 1 >= parts.length) return;
+  const managed = canonicalPath(parts.slice(0, rootIndex + 2).join(path.sep));
+  const relative = path.relative(managed, canonicalPath(resolvedRoot));
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`Refusing to ${action} primary checkout for corrupt managed worktree: ${wtPath} (Git resolved ${resolvedRoot})`);
   }
 }
 
@@ -593,7 +610,7 @@ export function snapshotAndResetDirtyWorktree(
   }
   try {
     const nativeWtPath = resolveGitWorktreeRoot(wtPath);
-    refusePrimaryCheckoutRecovery(wtPath, projectDir, nativeWtPath);
+    refusePrimaryCheckoutRecovery(wtPath, nativeWtPath);
     const nativeResult = runGitNativeMethod(
       "git.worktree.snapshotAndResetDirty",
       snapshotAndResetNativePayload(nativeWtPath, projectDir, {
@@ -663,7 +680,7 @@ export async function snapshotAndResetDirtyWorktreeAsync(
       }
     }
     const nativeWtPath = await resolveGitWorktreeRootAsync(wtPath, { signal });
-    refusePrimaryCheckoutRecovery(wtPath, projectDir, nativeWtPath);
+    refusePrimaryCheckoutRecovery(wtPath, nativeWtPath);
     const nativeResult = await runGitNativeMethodAsync(
       "git.worktree.snapshotAndResetDirty",
       snapshotAndResetNativePayload(nativeWtPath, projectDir, {

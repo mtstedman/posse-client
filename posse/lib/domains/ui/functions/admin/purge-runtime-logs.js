@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 
+import { isProcessAlive } from "../../../../shared/platform/functions/process-liveness.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { closeLog } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { closeOutputLog } from "../../../../shared/telemetry/functions/logging/output-log.js";
@@ -10,6 +11,36 @@ import { TERMINAL_WORK_ITEM_STATUSES_SQL } from "../../../queue/functions/common
 import { flushEventsNow } from "../../../queue/functions/events.js";
 import { isInsideRoot } from "../../../runtime/functions/fs-safety.js";
 import { getRuntimeLogDir, getRuntimeRoot } from "../../../runtime/functions/paths.js";
+
+// Heartbeats land every 30s; a run silent for longer than this is not live.
+const LIVE_RUN_WINDOW_MS = 120_000;
+
+function newestMtimeMs(dir) {
+  let newest = fs.statSync(dir).mtimeMs;
+  for (const name of fs.readdirSync(dir)) {
+    try { newest = Math.max(newest, fs.lstatSync(path.join(dir, name)).mtimeMs); } catch { /* raced away */ }
+  }
+  return newest;
+}
+
+// Only the clean exit hook writes ended_at, so a SIGKILL, OOM kill, reboot or
+// SIGHUP leaves it unset for good. A run is live while its owner process is
+// alive or its heartbeat is fresh. Without a readable manifest (an inherited-run
+// child, or a writer between mkdir and the manifest rename) only recent writes
+// keep it.
+function runDirIsLive(runDir, now = Date.now()) {
+  let manifest = null;
+  try { manifest = JSON.parse(fs.readFileSync(path.join(runDir, "manifest.json"), "utf8")); } catch { /* missing or unreadable */ }
+  if (manifest && typeof manifest === "object") {
+    if (now - Date.parse(manifest.last_heartbeat_at || "") < LIVE_RUN_WINDOW_MS) return true;
+    return !manifest.ended_at && isProcessAlive(manifest.pid) === true;
+  }
+  try {
+    return now - newestMtimeMs(runDir) < LIVE_RUN_WINDOW_MS;
+  } catch {
+    return false;
+  }
+}
 
 export function purgeRuntimeLogs({ projectDir = null } = {}) {
   closePromptLog();
@@ -164,9 +195,7 @@ export function purgeRuntimeLogs({ projectDir = null } = {}) {
       if (entry.name === "runs" && entry.isDirectory()) {
         for (const run of fs.readdirSync(fullPath, { withFileTypes: true })) {
           const runDir = path.join(fullPath, run.name);
-          let manifest;
-          try { manifest = JSON.parse(fs.readFileSync(path.join(runDir, "manifest.json"), "utf8")); } catch { /* unknown runs stay preserved */ }
-          if (run.isDirectory() && (!manifest?.ended_at || Date.now() - Date.parse(manifest.last_heartbeat_at || "") < 120_000)) {
+          if (run.isDirectory() && runDirIsLive(runDir)) {
             skippedLiveRuns.push(run.name);
             continue;
           }

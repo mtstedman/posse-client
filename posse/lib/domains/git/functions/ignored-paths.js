@@ -67,12 +67,27 @@ export function listIgnoredRepoPathsSync(cwd, paths) {
   const candidates = [...new Set((Array.isArray(paths) ? paths : []).map(repoRelativePath).filter(Boolean))];
   if (!cwd || !candidates.length) return [];
   const args = ["check-ignore", "-v", "-z", "--stdin"];
-  const options = { input: `${candidates.join("\0")}\0`, trim: false, timeoutMs: CHECK_IGNORE_TIMEOUT_MS };
-  let output;
-  try { output = gitExec(args, cwd, options); }
-  catch (error) {
-    if (error?.status === 1) return [];
-    try { output = adminGitExec(args, cwd, options); } catch { return []; }
+  const checkIgnore = (batch) => {
+    const options = { input: `${batch.join("\0")}\0`, trim: false, timeoutMs: CHECK_IGNORE_TIMEOUT_MS };
+    try { return gitExec(args, cwd, options); }
+    catch (error) {
+      if (error?.status === 1) return "";
+      try { return adminGitExec(args, cwd, options); }
+      catch (adminError) {
+        if (adminError?.status === 1) return "";
+        throw adminError;
+      }
+    }
+  };
+  try { return parseIgnoredPaths(checkIgnore(candidates)); }
+  catch {
+    // check-ignore dies (exit 128) on a path beyond a symlink or inside a
+    // submodule and drops every answer in the batch. Ask per path so such a
+    // path loses only its own answer.
+    if (candidates.length < 2) return [];
+    const answers = candidates.map((candidate) => {
+      try { return checkIgnore([candidate]); } catch { return ""; }
+    });
+    return parseIgnoredPaths(answers.join(""));
   }
-  return parseIgnoredPaths(output);
 }

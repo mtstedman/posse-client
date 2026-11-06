@@ -2380,6 +2380,9 @@ export async function main() {
   try {
     parseScopeMode();
     parseWorkItemIdsFlagFromArgv();
+    // Before `posse add` prompts for a description a bad value would discard.
+    parseModeFlagFromArgv();
+    parseTierFlagFromArgv();
   } catch (error) {
     console.error(error.message);
     process.exitCode = 2;

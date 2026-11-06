@@ -156,6 +156,14 @@ export class ProviderAttemptLifecycle {
 
     const { attemptCount, attempt } = result;
     onAttemptCreated?.(attempt.id);
+    // The new attempt cleared the previous review correction from the row.
+    // Keep the copy leased before it in step, so neither this attempt's
+    // assessment prompt nor a later write of this payload brings it back.
+    const leasedPayload = worker.parsePayload(job);
+    if (leasedPayload._assess_review_correction) {
+      const { _assess_review_correction: _cleared, ...current } = leasedPayload;
+      job.payload_json = JSON.stringify(current);
+    }
     // The only row added since the count above is the attempt just created,
     // so the drift check reads it instead of re-querying the table.
     const effectiveAttemptCount = priorGenerationAttempts + (countsTowardGeneration(attempt) ? 1 : 0);

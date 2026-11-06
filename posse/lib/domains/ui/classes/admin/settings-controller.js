@@ -353,7 +353,9 @@ export class AdminSettingsController {
         const rows = [];
         const providerRow = providerByRole.get(section.role);
         if (providerRow) rows.push(providerRow);
-        rows.push(...dbRows(section.keys));
+        // A key its catalog group places on another pane (a repo-scoped one)
+        // renders there only.
+        rows.push(...dbRows(section.keys.filter((key) => settingsPaneForKey(key) === "agents")));
         if (rows.length > 0) sections.push({ id: `agent_${section.role}`, title: section.label, hint: section.hint || null, rows });
       }
     } else if (paneId === "providers") {
@@ -379,6 +381,9 @@ export class AdminSettingsController {
       if (imageRows.length > 0) sections.push({ id: "images", title: "Image Generation", hint: null, rows: imageRows });
       const catalogRows = dbRows(PROVIDER_CATALOG_SETTING_KEYS);
       if (catalogRows.length > 0) sections.push({ id: "provider_catalog", title: "Model Catalog", hint: null, rows: catalogRows });
+      // Provider-pane catalog groups the sections above do not render
+      // (Final review), and any ungrouped provider-pane row.
+      pushGroups(new Set(sections.flatMap((section) => section.rows.map((row) => row.setting_key))));
       // Secrets stay env-only; show which ones are present without ever
       // rendering any part of the value.
       sections.push({

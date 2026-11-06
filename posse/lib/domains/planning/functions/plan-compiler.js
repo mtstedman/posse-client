@@ -754,12 +754,26 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       };
       const normalizeArtifactRoot = (root) => path.resolve(worker.projectDir, String(root || "")).replace(/\\/g, "/").replace(/\/+$/, "");
       const wiArtifactRoot = artifactDirAbs.replace(/\/+$/, "");
+      // Pure artifact tasks get their output root before any job is created.
+      // Repository writes and mixed tasks must finish routing/splitting first:
+      // their declared files must not be moved into managed artifact storage.
+      const outputRootScopedBeforeCompile = (t) => {
+        if (!t || ["research", "promote"].includes(t.job_type)) return false;
+        const taskMode = t.task_mode || "code";
+        return taskMode !== "code" && taskMode !== "db" && isValidTaskMode(taskMode)
+          && getCreateFileKindSummaryFromModule(t, artifactDirAbs).codeFiles.length === 0
+          && !createsRepoPathFilesFromModule(t, artifactDirAbs)
+          && !t.files_to_modify?.length && !t.files_to_delete?.length;
+      };
       const derivePriorArtifactInputRoots = (task, taskIndex) => {
         if (!Array.isArray(task?.depends_on_index) || task.depends_on_index.length === 0) return [];
         const currentOutputRoot = task.output_root ? normalizeArtifactRoot(task.output_root) : null;
         const roots = [];
         for (const depIdx of task.depends_on_index) {
-          if (!Number.isInteger(depIdx) || depIdx < 0 || depIdx >= taskIndex) continue;
+          if (!Number.isInteger(depIdx) || depIdx < 0 || depIdx === taskIndex || depIdx >= tasks.length) continue;
+          // A producer listed later compiles later; only a root the pre-pass
+          // already scoped is final while this task compiles.
+          if (depIdx > taskIndex && !outputRootScopedBeforeCompile(tasks[depIdx])) continue;
           if (droppedTaskIndexes.has(depIdx)) continue;
           const sourceTask = tasks[depIdx];
           if (!sourceTask?.output_root) continue;
@@ -1095,14 +1109,8 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       // may appear before their producer in the planner array.
       for (let i = 0; i < tasks.length; i += 1) {
         const t = tasks[i];
-        if (!t || ["research", "promote"].includes(t.job_type)) continue;
+        if (!outputRootScopedBeforeCompile(t)) continue;
         const taskMode = t.task_mode || "code";
-        const artifactTask = taskMode !== "code" && taskMode !== "db" && isValidTaskMode(taskMode);
-        // Repository writes and mixed tasks must finish routing/splitting first.
-        // Their declared files must not be moved into managed artifact storage.
-        if (!artifactTask || getCreateFileKindSummaryFromModule(t, artifactDirAbs).codeFiles.length > 0
-          || createsRepoPathFilesFromModule(t, artifactDirAbs)
-          || t.files_to_modify?.length || t.files_to_delete?.length) continue;
         const fromRoot = t.output_root ? path.resolve(worker.projectDir, t.output_root) : artifactDirAbs;
         const filesToCreate = [...(t.files_to_create || [])];
         scopeArtifactOutputRoot(t, i, taskMode);

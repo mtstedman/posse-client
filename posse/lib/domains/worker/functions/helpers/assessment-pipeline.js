@@ -2316,7 +2316,7 @@ export async function runPostExecutionAssessment(worker, {
           : null,
       });
     } catch (testError) {
-      if (handleAssessmentInterruption(worker, { job, attemptId: attempt.id, leaseToken, error: testError, startTime })) return;
+      if (handleAssessmentInterruption(worker, { job, attemptId: attempt.id, leaseToken, error: testError, startTime, pendingFileRequests })) return;
       const testInfraMsg = `Deterministic post-change test execution failed to initialize: ${testError?.message || testError}`;
       recordAssessmentInfrastructureAttempt(job, leaseToken, attempt.id, startTime, testInfraMsg);
       routeAssessmentInfrastructureFailure(worker, job, leaseToken, testError, {
@@ -2959,7 +2959,7 @@ export async function runPostExecutionAssessment(worker, {
       refreshAndExtractInsights(job.work_item_id);
       worker._cleanupWorktreeIfDone(job.work_item_id);
     } catch (assessErr) {
-      if (handleAssessmentInterruption(worker, { job, attemptId: attempt.id, leaseToken, error: assessErr, startTime })) return;
+      if (handleAssessmentInterruption(worker, { job, attemptId: attempt.id, leaseToken, error: assessErr, startTime, pendingFileRequests })) return;
       const assessErrMessage = String(assessErr?.message || "");
       const turnBudgetExhausted = /exhausted turn budget|turn budget exhausted|tool(?: use| call)?s?.{0,40}(?:exhausted|limit|max|budget)/i.test(assessErrMessage);
       const stallKilled = !!assessErr?.stallKill || /stalled.*killed|killed by stall detector/i.test(assessErrMessage);

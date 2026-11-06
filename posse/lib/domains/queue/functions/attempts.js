@@ -54,7 +54,9 @@ export function incrementAndCreateAttempt(jobId, leaseToken, workerType, modelNa
       _attemptStartHook?.(jobId);
       // Attempt counters can later be refunded; remove the old authority now
       // so a reopened implementation can never resurrect an earlier receipt.
-      db.prepare(`UPDATE jobs SET payload_json = json_remove(payload_json, ?) WHERE id = ? AND json_valid(payload_json)`)
+      // A new implementation also starts a new assessment context, whichever
+      // route later assesses it, so the previous review correction ends here.
+      db.prepare(`UPDATE jobs SET payload_json = json_remove(payload_json, ?, '$._assess_review_correction') WHERE id = ? AND json_valid(payload_json)`)
         .run(`$.${REVIEWED_COMPLETION_KEY}`, jobId);
     }
 

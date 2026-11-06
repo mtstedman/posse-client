@@ -8,6 +8,7 @@ import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import { finalReviewLogSummary } from "../../assessment/functions/final-review-log-summary.js";
 import { canonicalAtlasToolUseActionName, formatAtlasToolDisplayName } from "../../../shared/tools/functions/mcp-surface.js";
 import { stripHashRefSurfaceSuffix } from "../../../shared/tools/functions/ref-surface.js";
+import { scrubSecretText } from "../../../shared/telemetry/functions/logging/scrub-secret-text.js";
 import { getObservationContext } from "./observation-context.js";
 
 export function normalizedToolOutcome(value, { ok = null, status = "", error = "" } = {}) {
@@ -120,12 +121,14 @@ export function summarizeCatalogToolUse(tool, input = {}, cwdNorm = null, rel = 
   }
 
   if (spec.format === "command") {
-    const command = _truncate(input[spec.commandKey || "command"] || "", 140);
+    // Scrub before truncating so a cut cannot leave a partial key unmatched.
+    const scrubbed = scrubSecretText(input[spec.commandKey || "command"] || "");
+    const command = _truncate(scrubbed, 140);
     if (!command) return null;
     return {
       observation_type: spec.type,
       summary: `${spec.label}: ${command}`,
-      detail: _catalogDetail({ spec, input, cwdNorm, tool, catalogName, extra: { command: redactString(String(input[spec.commandKey || "command"] || "")) } }),
+      detail: _catalogDetail({ spec, input, cwdNorm, tool, catalogName, extra: { command: scrubbed } }),
     };
   }
 

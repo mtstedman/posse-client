@@ -13,7 +13,7 @@ import { registerAttemptStartHook } from "./attempts.js";
 
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { ATLAS_FRESHNESS_PRELEASE_FENCE_MS } from "../../../catalog/atlas.js";
-import { CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE, MERGE_FAILURE_KINDS, WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE, humanGateStateAllowsAnswer } from "../../../catalog/human-input.js";
+import { CROSS_WI_UPSTREAM_DISPOSITION_REVIEW_TYPE, MERGE_FAILURE_KINDS, WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE, humanGateStateAllowsAnswer, tryHumanGateNameForPayload } from "../../../catalog/human-input.js";
 import { MUTATING_JOB_TYPES, NON_COMPLETION_BLOCKING_JOB_TYPES, ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { isShadowFanoutJob } from "../../research/functions/fanout-payload.js";
@@ -37,7 +37,7 @@ import { jobHasLiveLeaseAt } from "./lease-state.js";
 import { __registerRequeueExpiredLeases, consumePendingHumanGateResume as _consumePendingHumanGateResume, graceCutoff as _graceCutoff, leaseNowMs as _leaseNowMs } from "./leases.js";
 import { findDeadlockedJobs, getAllDependencies } from "./dependencies.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { __registerHumanGateReconcileHook, registerGateCanceledHook, findActiveHumanGateForPayload, getHumanGate, registerHumanGate } from "./human-gates.js";
+import { __registerHumanGateReconcileHook, registerGateCanceledHook, findActiveHumanGateForPayload, getHumanGate, registerHumanGate, supersedeHumanGate } from "./human-gates.js";
 import "./scope-expansion.js";
 import { createScopeExpansionOperations } from "./scope-expansion-requests.js";
 import "../../intake/functions/hints.js";
@@ -1129,6 +1129,38 @@ export function cancelPendingReviewGatesForOriginal(originalJobId, { exceptJobId
     }
     return canceled;
   });
+}
+
+/**
+ * Operator cleanup (`posse gate answer <id> supersede`) for a gate row the
+ * identity migration could not canonicalize. It takes the same status, error
+ * and human-actor event path as any other operator cancel.
+ */
+export function supersedeLegacyHumanGate(gateJobId) {
+  const reason = "Legacy gate superseded by operator";
+  const workItemId = runInTransaction(() => {
+    const job = getJob(gateJobId);
+    if (!job || job.job_type !== "human_input" || tryHumanGateNameForPayload(parseJobPayload(job))) return null;
+    if (!["queued", "waiting_on_human", "waiting_on_review"].includes(job.status) || jobHasLiveLeaseAt(job, _graceCutoff())) return null;
+    // Superseding the contract first keeps the reason on it: the cancel only
+    // retires a contract that is still open.
+    supersedeHumanGate(gateJobId, reason);
+    if (!forceUpdateJobStatus(gateJobId, "canceled", { expectedStatuses: [job.status] })) return null;
+    setJobResult(gateJobId, { reason, actor: "human" });
+    setJobError(gateJobId, reason);
+    logEvent({
+      work_item_id: job.work_item_id,
+      job_id: gateJobId,
+      event_type: EVENT_TYPES.JOB_CANCELED_BY_USER,
+      actor_type: EVENT_ACTORS.HUMAN,
+      message: reason,
+    });
+    return job.work_item_id;
+  });
+  if (workItemId == null) return false;
+  // As the gate reconcile hook: a terminal work item is not re-derived.
+  if (!TERMINAL_WORK_ITEM_STATUS_SET.has(getWorkItem(workItemId)?.status)) refreshWorkItemStatus(workItemId);
+  return true;
 }
 
 /** Repair review rows left behind by older/racing merge finalization. */
@@ -3152,6 +3184,9 @@ export function resurfaceParkedHumanGates({ snoozeSec = 600, maxResurfaces = nul
         const resurfaceCount = Math.max(0, Number.parseInt(String(payload._human_prompt_resurface_count || 0), 10) || 0);
         return { ...job, payload, resurfaceCount };
       })
+      // A legacy row has no answer contract the worker could prompt; it stays
+      // parked for `posse gate answer <id> supersede`.
+      .filter((job) => tryHumanGateNameForPayload(job.payload))
       .filter((job) => job.resurfaceCount < effectiveMax)
       .filter((job) => {
         const updatedAtMs = Date.parse(job.updated_at || "");

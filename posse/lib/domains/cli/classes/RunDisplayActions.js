@@ -6,6 +6,7 @@ import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import {
   humanGateStateAllowsAnswer,
   humanInputChoicesForPayload,
+  tryHumanGateNameForPayload,
 } from "../../../catalog/human-input.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { NO_IMAGE_PROVIDERS_AVAILABLE, resolveImageExecutionProvider } from "../../providers/functions/execution-routing.js";
@@ -104,6 +105,10 @@ function humanGateContext(workItem, gate, payload = {}) {
 }
 
 function humanGateChoices(payload = {}) {
+  // A legacy row the identity migration left non-canonical has no answer
+  // contract: it is not prompted (and must not hide the gates that do) and
+  // stays parked for `posse gate answer <id> supersede`.
+  if (!tryHumanGateNameForPayload(payload)) return [];
   const explicit = humanInputChoicesForPayload(payload);
   if (explicit.length > 0) return explicit;
   const kind = String(payload.question_kind || payload.subtype || "");
@@ -278,6 +283,11 @@ export class RunDisplayActions {
     if (!gate || gate.job_type !== "human_input") return false;
     const contract = this.getHumanGate?.(gateId);
     if (!humanGateStateAllowsAnswer(contract?.gate_state)) return false;
+    // Requeueing a legacy row would hand the worker a gate it cannot resolve.
+    if (!tryHumanGateNameForPayload(parseJobPayload(gate))) {
+      this.display.addEvent?.(`${this.C.yellow}Gate #${gateId} is a legacy gate with no answer contract; clear it with: posse gate answer ${gateId} supersede${this.C.reset}`);
+      return true;
+    }
 
     const launched = this.surfaceActionableHumanGates([gate], {
       authoritative: false,

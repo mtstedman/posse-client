@@ -145,13 +145,21 @@ export function parseDeepthinkFlagFromArgv() {
   return process.argv.includes("--deepthink");
 }
 
+// Flags end at `--`: what follows is literal text, as unknownArgFlags and
+// getCommandPositionalArgs already read it.
+function flagArgs() {
+  const end = process.argv.indexOf("--");
+  return end === -1 ? process.argv : process.argv.slice(0, end);
+}
+
 export function parseFlagValue(flag) {
+  const args = flagArgs();
   const eqPrefix = `${flag}=`;
-  const eqArg = process.argv.find((arg) => String(arg || "").startsWith(eqPrefix));
+  const eqArg = args.find((arg) => String(arg || "").startsWith(eqPrefix));
   if (eqArg) return eqArg.slice(eqPrefix.length);
-  const idx = process.argv.indexOf(flag);
-  if (idx >= 0 && idx + 1 < process.argv.length) {
-    const value = process.argv[idx + 1];
+  const idx = args.indexOf(flag);
+  if (idx >= 0 && idx + 1 < args.length) {
+    const value = args[idx + 1];
     return String(value || "").startsWith("--") ? null : value;
   }
   return null;
@@ -159,7 +167,7 @@ export function parseFlagValue(flag) {
 
 export function hasArgFlag(flag) {
   const eqPrefix = `${flag}=`;
-  return process.argv.some((arg) => arg === flag || String(arg || "").startsWith(eqPrefix));
+  return flagArgs().some((arg) => arg === flag || String(arg || "").startsWith(eqPrefix));
 }
 
 export function parseSessionRecycleFlagFromArgv() {

@@ -37,6 +37,7 @@ import {
   computeCommandArgsHash,
   metaIsCurrent,
   readStagerMeta,
+  stagedSanitizerPolicyIsCurrent,
   writeStagerMeta,
 } from "./stager-meta.js";
 
@@ -239,14 +240,15 @@ export async function ensureScipStaged({
       onProgress,
     });
     files = await listScipFiles(dir);
+    const existingSanitized = await filesWithCurrentSanitizer(files);
     if (lookup.plans.length === 0) {
       if (files.length > 0) {
-        notifyFilesReady(onFileReady, files, { reason: "already_staged", source: "existing" });
+        notifyFilesReady(onFileReady, existingSanitized, { reason: "already_staged", source: "existing" });
         emit(onProgress, `found ${files.length} staged SCIP file${files.length === 1 ? "" : "s"}`, {
           current: files.length,
           total: files.length,
         });
-        return { enabled: true, dir, files, staged: false, reason: "already_staged", results: [], orphanStagingRemoved };
+        return { enabled: true, dir, files: await filesWithCurrentSanitizer(files, onProgress), staged: false, reason: "already_staged", results: [], orphanStagingRemoved };
       }
       emit(onProgress, `no staged SCIP files in ${dir}; ${describeScipIndexerLookup(lookup)}`);
       return { enabled: true, dir, files: [], staged: false, reason: "indexer_unavailable", results: [], orphanStagingRemoved };
@@ -301,7 +303,7 @@ export async function ensureScipStaged({
     const pendingOutputKeys = new Set(pendingPlans.map((plan) => normalizedFileKey(plan.outputPath)));
     notifyFilesReady(
       onFileReady,
-      files.filter((file) => !pendingOutputKeys.has(normalizedFileKey(file))),
+      existingSanitized.filter((file) => !pendingOutputKeys.has(normalizedFileKey(file))),
       { reason: "already_staged", source: "existing" },
     );
     if (pendingPlans.length === 0 && files.length > 0) {
@@ -310,7 +312,7 @@ export async function ensureScipStaged({
         total: files.length,
       });
       return {
-        enabled: true, dir, files, staged: false, reason: "already_staged",
+        enabled: true, dir, files: await filesWithCurrentSanitizer(files, onProgress), staged: false, reason: "already_staged",
         results: [...skippedResults, ...unavailableResults],
         ...(unavailableLanguages.length > 0 ? { failedLanguages: unavailableLanguages } : {}),
         orphanStagingRemoved,
@@ -357,7 +359,8 @@ export async function ensureScipStaged({
           onProgress,
         });
         const result = { row, plan, run };
-        if (run?.ok && await fileExists(plan.outputPath)) {
+        if (run?.ok && await fileExists(plan.outputPath)
+          && stagedSanitizerPolicyIsCurrent(await readStagerMeta(plan.outputPath))) {
           notifyFileReady(onFileReady, plan.outputPath, {
             language: plan.indexerId || null,
             indexer: plan.label || null,
@@ -410,7 +413,7 @@ export async function ensureScipStaged({
     return {
       enabled: true,
       dir,
-      files,
+      files: await filesWithCurrentSanitizer(files, onProgress),
       staged: stagedCount > 0,
       reason,
       error: failures.length > 0 ? failures.join("; ") : undefined,
@@ -421,7 +424,7 @@ export async function ensureScipStaged({
   } catch (err) {
     const message = formatAtlasError(err);
     emit(onProgress, `SCIP staging failed: ${message}`);
-    return { enabled: true, dir, files, staged: false, reason: "error", error: message, results: [], orphanStagingRemoved };
+    return { enabled: true, dir, files: await filesWithCurrentSanitizer(files, onProgress), staged: false, reason: "error", error: message, results: [], orphanStagingRemoved };
   }
 }
 
@@ -1655,6 +1658,29 @@ function notifyFileReady(onFileReady, file, info = {}) {
   }
 }
 
+/**
+ * Canonical files leave the stager only when their staged snapshot carries the
+ * current sanitizer policy. Raw residue (a pre-sanitizer meta, a recovered
+ * orphan, a failed restage over either) stays on disk but is never handed to
+ * intake.
+ *
+ * @param {string[]} files
+ * @param {((event: Record<string, any>) => void) | null} onProgress
+ * @returns {Promise<string[]>}
+ */
+async function filesWithCurrentSanitizer(files, onProgress = null) {
+  const admitted = [];
+  const withheld = [];
+  for (const file of files) {
+    if (stagedSanitizerPolicyIsCurrent(await readStagerMeta(file))) admitted.push(file);
+    else withheld.push(path.basename(file));
+  }
+  if (withheld.length > 0) {
+    emit(onProgress, `withholding ${withheld.length} staged SCIP file${withheld.length === 1 ? "" : "s"} without current sanitizer metadata: ${withheld.join(", ")}`);
+  }
+  return admitted;
+}
+
 function notifyFilesReady(onFileReady, files, info = {}) {
   const seen = new Set();
   for (const file of Array.isArray(files) ? files : []) {
@@ -2304,16 +2330,20 @@ async function cleanupOrphanStagingFiles(dir, {
   }
   const cutoff = Date.now() - Math.max(60_000, Number(graceMs) || SCIP_STAGING_ORPHAN_GRACE_MS);
   let removed = 0;
-  for (const entry of entries) {
+  // Owner stamps go last so each PHP reservation is judged by its stamp.
+  const ordered = [...entries].sort((a, b) => Number(isPhpOwnerStamp(a.name)) - Number(isPhpOwnerStamp(b.name)));
+  for (const entry of ordered) {
     if (!entry.isFile()) continue;
-    if (!/^\..+\.scip\.\d+\.\d+\.[a-z0-9]+\.staging$/iu.test(entry.name)) continue;
+    if (!SCIP_STAGING_TEMP_NAME_RE.test(entry.name)) continue;
     const filePath = path.join(dir, entry.name);
     let st;
     try { st = await fs.promises.stat(filePath); } catch { continue; }
     if (!st.isFile()) continue;
+    const wrapperAlive = await phpReservationWrapperAlive(dir, entry.name);
+    if (wrapperAlive === true) continue;
     const ownerPid = stagingOwnerPid(entry.name);
     const ownerAlive = ownerPid > 0 && processIsAlive(ownerPid);
-    if (st.mtimeMs > cutoff && ownerAlive) continue;
+    if (wrapperAlive === null && st.mtimeMs > cutoff && ownerAlive) continue;
     try {
       await fs.promises.rm(filePath, { force: true });
       removed++;
@@ -2330,8 +2360,41 @@ async function cleanupOrphanStagingFiles(dir, {
   return removed;
 }
 
+// `.<output>.<stager pid>.<ms>.<rand>.staging`, plus the scip-php wrapper's
+// reservation for it (`.php-tmp`) and that reservation's owner stamp
+// (`.php-tmp.posse-owner`). A timeout kills the wrapper's process group before
+// its own cleanup runs, so both strand beside the staging file.
+const SCIP_STAGING_TEMP_NAME_RE = /^\..+\.scip\.(\d+)\.\d+\.[a-z0-9]+\.staging(?:\.php-tmp(?:\.posse-owner)?)?$/iu;
+
+function isPhpOwnerStamp(name) {
+  return /\.staging\.php-tmp\.posse-owner$/iu.test(String(name || ""));
+}
+
+/**
+ * The scip-php wrapper holds its reservation for the whole PHP run and stamps
+ * its own pid beside it. A live stamped wrapper keeps the pair whatever its
+ * age; a dead one releases it at once, as the wrapper's own reclaim does.
+ * Returns null for other names or when no stamp is readable yet.
+ *
+ * @param {string} dir
+ * @param {string} name
+ * @returns {Promise<boolean | null>}
+ */
+async function phpReservationWrapperAlive(dir, name) {
+  const match = String(name || "").match(/^(.+\.staging\.php-tmp)(?:\.posse-owner)?$/iu);
+  if (!match) return null;
+  let pid;
+  try {
+    pid = Number((await fs.promises.readFile(path.join(dir, `${match[1]}.posse-owner`), "utf8")).trim());
+  } catch {
+    return null;
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  return processIsAlive(pid);
+}
+
 function stagingOwnerPid(name) {
-  const match = String(name || "").match(/^\..+\.scip\.(\d+)\.\d+\.[a-z0-9]+\.staging$/iu);
+  const match = String(name || "").match(SCIP_STAGING_TEMP_NAME_RE);
   const pid = match ? Number.parseInt(match[1], 10) : NaN;
   return Number.isFinite(pid) && pid > 0 ? pid : 0;
 }

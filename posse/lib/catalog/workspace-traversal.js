@@ -1,6 +1,8 @@
 // @ts-check
 import { readonlySet } from "./readonly-collections.js";
 
+/** Directory under a project that holds its managed worktrees (posse-git `git.worktree.root`). */
+export const MANAGED_WORKTREE_ROOT_DIR_NAME = ".posse-worktrees";
 
 
 export const WORKSPACE_SKIP_DIR_NAMES = Object.freeze([

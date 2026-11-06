@@ -1,4 +1,4 @@
-import { isKillAbort } from "../../../runtime/functions/yield.js";
+import { killAbortReason } from "../../../runtime/functions/yield.js";
 import { completeAttempt, getJob, storeArtifact } from "../../../queue/functions/index.js";
 import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
 import { C } from "../../../../shared/format/functions/colors.js";
@@ -46,7 +46,11 @@ export async function handlePartialWorkFailureForWorker({
   startTime,
   wtPath,
 } = {}) {
-  if (isKillAbort(err, signal)) return false;
+  // A cancel, shutdown or lost lease must not commit half-done edits. A
+  // runtime kill keeps the salvage: it charges the attempt, and on the final
+  // attempt the committed partial work is what ends the retry loop.
+  const killReason = killAbortReason(err, signal);
+  if (killReason && killReason !== "runtime_exceeded") return false;
   if (!attempt?.id || !job?.id || !wtPath || !MUTATING_JOB_TYPES.has(job.job_type)) return false;
 
   const errorDetails = getErrorDetailsFromModule(err);

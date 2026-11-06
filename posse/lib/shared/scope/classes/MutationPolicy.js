@@ -100,30 +100,60 @@ function shellWords(command) {
   return shellWordsDetailed(command).tokens;
 }
 
+// A quoted or escaped character from this set reads the same to the shell and
+// to the vetting glob (fs.globSync) outside a bracket expression. Any other
+// one does not: globSync reads `'['a]*` as the bracket `[a]`, the backslash in
+// `'\'l?nk` as a path separator, and `'@(a|b)'*` as an extglob.
+const GLOB_PLAIN_LITERAL_RE = /[A-Za-z0-9_.,:%=~@+/\s'"-]/;
+
 // `expandable[i]` records whether tokens[i] carries an unquoted pattern
 // character, i.e. whether the shell performs pathname expansion on it. An
 // escaped pattern character (`\*`) is literal, as it is in the shell.
+// `quotedPattern[i]` records whether an expandable tokens[i] also carries a
+// quoted or escaped character that globSync would vet as pattern syntax: one
+// outside GLOB_PLAIN_LITERAL_RE, or any at all once an unquoted `[` opens a
+// bracket expression (a quoted `!`, `^`, `-` or `]` is literal there to the
+// shell only).
 function shellWordsDetailed(command) {
   const tokens = [];
   const expandable = [];
+  const quotedPattern = [];
   let current = "";
   let currentExpandable = false;
+  let currentLiteral = false;
+  let currentLiteralSyntax = false;
+  let currentBracket = false;
   let quote = null;
+  const appendLiteral = (value) => {
+    current += value;
+    currentLiteral = true;
+    if (!GLOB_PLAIN_LITERAL_RE.test(value)) currentLiteralSyntax = true;
+  };
+  const pushWord = () => {
+    tokens.push(current);
+    expandable.push(currentExpandable);
+    quotedPattern.push(currentExpandable && (currentLiteralSyntax || (currentBracket && currentLiteral)));
+    current = "";
+    currentExpandable = false;
+    currentLiteral = false;
+    currentLiteralSyntax = false;
+    currentBracket = false;
+  };
   for (let i = 0; i < command.length; i += 1) {
     const ch = command[i];
     if (ch === "\\" && quote !== "'") {
       const next = command[i + 1];
       if (next === "'" || next === '"' || next === "\\" || (next !== undefined && /\s/.test(next)) || (!quote && /[*?[]/.test(next ?? ""))) {
-        current += next;
+        appendLiteral(next);
         i += 1;
       } else {
-        current += ch;
+        appendLiteral(ch);
       }
       continue;
     }
     if (quote) {
       if (ch === quote) quote = null;
-      else current += ch;
+      else appendLiteral(ch);
       continue;
     }
     if (ch === "'" || ch === '"') {
@@ -131,22 +161,15 @@ function shellWordsDetailed(command) {
       continue;
     }
     if (/\s/.test(ch)) {
-      if (current) {
-        tokens.push(current);
-        expandable.push(currentExpandable);
-        current = "";
-        currentExpandable = false;
-      }
+      if (current) pushWord();
       continue;
     }
     if (ch === "*" || ch === "?" || ch === "[") currentExpandable = true;
+    if (ch === "[") currentBracket = true;
     current += ch;
   }
-  if (current) {
-    tokens.push(current);
-    expandable.push(currentExpandable);
-  }
-  return { tokens, expandable };
+  if (current) pushWord();
+  return { tokens, expandable, quotedPattern };
 }
 
 // One path segment's shell pattern as a regular expression. A bracket
@@ -430,7 +453,21 @@ function pathIsInside(root, candidate) {
 }
 
 function readonlyBashPathReason(policy, command) {
-  const { tokens: words, expandable } = shellWordsDetailed(command);
+  const { tokens: words, expandable, quotedPattern } = shellWordsDetailed(command);
+  // POSIX only, like unsupportedShellEscape: PowerShell runs the command on
+  // win32, where a backslash is a path separator, not an escape.
+  if (process.platform !== "win32") {
+    for (const [index, token] of words.entries()) {
+      if (quotedPattern[index]) {
+        return `shell glob mixes quoted or escaped pattern characters with unquoted ones: ${token}; quote the whole word to name a literal path, or leave the whole pattern unquoted`;
+      }
+      // dash reads `[^a]` as the set {^, a}, globSync as "not a"; and the brace
+      // wrapping below would break a bracket expression that holds a brace.
+      if (expandable[index] && (token.includes("[^") || (token.includes("[") && /[{}]/.test(token)))) {
+        return `shell glob bracket expression cannot be vetted: ${token}; negate with [!...] and keep braces out of bracket expressions`;
+      }
+    }
+  }
   const cmdName = shellCommandName(words[0]);
   const isSearch = cmdName === "grep" || cmdName === "rg";
   // grep/rg with an explicit pattern SOURCE (-e/--regexp, -f/--file, or rg
@@ -472,8 +509,14 @@ function readonlyBashPathReason(policy, command) {
     if (GLOB_FILTER_FLAGS.has(flagName)) { if (equals < 0) skipNext = true; continue; }
     const values = [token];
     if (optionLike && equals >= 0 && equals < token.length - 1) values.push(token.slice(equals + 1));
-    for (const rawValue of values) {
-      const value = cleanShellPathToken(rawValue);
+    // The tokenizer already removed the quoting, so the quotes, commas and
+    // whitespace cleanShellPathToken trims are part of the word: on POSIX the
+    // program opens `,link` or ` link`, not `link`. Vet that spelling too.
+    const candidates = values.flatMap((rawValue) => {
+      const cleaned = cleanShellPathToken(rawValue);
+      return process.platform === "win32" || cleaned === rawValue ? [cleaned] : [cleaned, rawValue];
+    });
+    for (const value of candidates) {
       if (!value || value === "-" || /^\d+$/.test(value) || /^\d*>&\d+$/.test(value)) continue;
       const normalized = value.replace(/\\/g, "/");
       const parts = normalized.split("/").filter(Boolean).map((part) => part.toLowerCase());
@@ -512,8 +555,12 @@ function readonlyBashPathReason(policy, command) {
       // no command the shell would brace-expand is allowed (X1 refuses
       // unquoted brace expansion; quoted braces are literal), and globSync
       // would otherwise walk alternatives such as `{../..,.}/**` that the
-      // lexical location above never saw.
+      // lexical location above never saw. globSync reads a backslash as a path
+      // separator, so `\**` would walk `/`; on POSIX a word holding one only
+      // gets here unexpanded (the quotedPattern check refused it otherwise),
+      // so the program receives it literally and there is nothing to expand.
       if (/[*?\[\]{}]/.test(value) && !reachesParent && typeof fs.globSync === "function"
+        && !(process.platform !== "win32" && value.includes("\\"))
         && (pathIsInside(policy.cwd, lexical) || policy.isWithinScopeRoot(lexical))) {
         for (const match of fs.globSync(value.replace(/[{}]/g, "[$&]"), { cwd: policy.cwd })) {
           const expanded = path.resolve(policy.cwd, match);
@@ -1140,7 +1187,13 @@ export class MutationPolicy {
       return { ok: false, error: "Error: No command provided.", reasonClass: "empty" };
     }
     if (unsupportedShellEscape(original)) {
-      return { ok: false, error: "Error: Unsupported shell escape in read-only bash.", reasonClass: "shell_escape" };
+      return { ok: false, error: "Error: Unsupported shell escape in read-only bash. Put the argument in single quotes (for example 'a b.txt') instead of escaping characters with a backslash.", reasonClass: "shell_escape" };
+    }
+    // The shell splits words only on space, tab and newline; this classifier
+    // and the argv executor split on every \s, so `cat a<U+00A0>l?nk` would be
+    // vetted as two words the shell runs as one. Newlines are refused below.
+    if (process.platform !== "win32" && /[^\S \t\n\r]/.test(maskQuoted(original))) {
+      return { ok: false, error: "Error: Unquoted Unicode or control whitespace is not allowed in read-only bash. Separate arguments with plain spaces, or quote the argument that contains it.", reasonClass: "shell_escape" };
     }
     const repairs = [];
     // Newlines are rejected outright below, so only strip redirects otherwise.

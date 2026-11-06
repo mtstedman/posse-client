@@ -311,6 +311,19 @@ export function metaIsCurrent(meta, { head = null, filesetHash = null, previousF
   return { current: true, reason: "fresh" };
 }
 
+/**
+ * Whether the bytes at a canonical output were written under the current
+ * sanitizer policy. A failed restage leaves the previous bytes in place, so the
+ * answer comes from the staged snapshot it carries, never from the failed
+ * meta's own stamp.
+ *
+ * @param {any} meta
+ * @returns {boolean}
+ */
+export function stagedSanitizerPolicyIsCurrent(meta) {
+  return stagedSnapshotFromMeta(meta)?.sanitizer_policy_version === SCIP_SANITIZER_POLICY_VERSION;
+}
+
 function stagedSnapshotFromMeta(meta) {
   if (!meta || typeof meta !== "object") return null;
   const status = String(meta.status || "staged").trim().toLowerCase();

@@ -32,6 +32,36 @@ const MAX_DEAD_LETTER_RECOVERY_RETRIES = 2;
 // read as "retry cannot change the outcome".
 const PRE_ATTEMPT_TRANSIENT_ERROR_RE = /\bECONNREFUSED\b|\bECONNRESET\b|\bEAI_AGAIN\b|\bENETUNREACH\b|\bEHOSTUNREACH\b|\bEPIPE\b/;
 
+// An attempt row records only the message and adapter diagnostic. The stderr
+// or partial-output line that tells two failures with one generic message
+// apart ("Provider process exited unsuccessfully") is not in it, so each
+// failure's full repeat key is kept per attempt for the next comparison.
+const FAILURE_REPEAT_KEYS = "_failure_repeat_keys";
+const MAX_FAILURE_REPEAT_KEYS = 6;
+
+function failureRepeatKey(errorOrMsg, errorDetails, recordedErrorText) {
+  if (recordedErrorText == null) return errorDetails.repeatKey || errorDetails.summary || "unknown error";
+  // Same discriminating lines and the same invalid-client/partial-output rules
+  // as getErrorDetails(error), with the recorded text as the message.
+  return getErrorDetails({
+    message: String(recordedErrorText),
+    stderr: errorDetails.stderr,
+    partialOutput: errorDetails.partialOutput,
+    classification: errorOrMsg?.classification,
+    code: errorOrMsg?.code,
+  }).repeatKey;
+}
+
+function storedFailureRepeatKeys(payload) {
+  const keys = payload?.[FAILURE_REPEAT_KEYS];
+  return keys && typeof keys === "object" && !Array.isArray(keys) ? { ...keys } : {};
+}
+
+function attemptFailureRepeatKey(attempt, storedKeys) {
+  const stored = storedKeys[String(attempt?.id)];
+  return typeof stored === "string" && stored ? stored : getErrorDetails(attempt?.error_text || "").repeatKey;
+}
+
 function deadLetterRecoveryProviders(job = null) {
   // A failure before the first provider attempt cannot be repaired by changing
   // providers. Do not offer a choice whose only effect is to obscure the same
@@ -558,7 +588,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
   const freshJob = getJob(job.id);
   const errorDetails = getErrorDetails(errorOrMsg);
   const errSummary = errorDetails.summary || "unknown error";
-  const errRepeatKey = recordedErrorText == null ? errorDetails.repeatKey || errSummary : getErrorDetails(recordedErrorText).repeatKey;
+  const errRepeatKey = failureRepeatKey(errorOrMsg, errorDetails, recordedErrorText);
   const turnBudgetExhausted = isTurnBudgetExhaustedError(errorDetails);
   const deterministicPolicyConflict = isDeterministicPolicyConflict(errorDetails);
   const permanentProviderConfigError = isPermanentProviderConfigError(errorDetails) || deterministicPolicyConflict;
@@ -587,9 +617,15 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
   }
 
   const failedPayload = parseJobPayload(freshJob);
+  const repeatKeys = storedFailureRepeatKeys(failedPayload);
+  // Only a caller that recorded the attempt's text says the key belongs to it.
+  const recordsRepeatKey = Boolean(attemptId) && recordedErrorText != null;
+  if (recordsRepeatKey) repeatKeys[String(attemptId)] = errRepeatKey;
   const failedAttemptId = attemptId || getAttempts(job.id).findLast((entry) => entry.worker_type !== "assessor")?.id;
   if (failedAttemptId) {
     failedPayload._final_review_invalidated_attempt_id = failedAttemptId;
+    // Integer-like keys enumerate in ascending attempt-id order: keep the newest.
+    if (recordsRepeatKey) failedPayload[FAILURE_REPEAT_KEYS] = Object.fromEntries(Object.entries(repeatKeys).slice(-MAX_FAILURE_REPEAT_KEYS));
     freshJob.payload_json = JSON.stringify(failedPayload);
     updateJobPayload(job.id, freshJob.payload_json);
   }
@@ -612,7 +648,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
     if (failedAttempts.length >= 2) {
       const prev = failedAttempts[failedAttempts.length - 2];
       if (prev.error_text) {
-        const prevRepeatKey = getErrorDetails(prev.error_text).repeatKey;
+        const prevRepeatKey = attemptFailureRepeatKey(prev, repeatKeys);
         if (prevRepeatKey === errRepeatKey) {
           sameErrorRepeat = true;
           worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: same error on consecutive attempts — dead-lettering (escalation won't help)${C.reset}`);
@@ -621,7 +657,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
       if (!sameErrorRepeat && failedAttempts.length >= 3) {
         const recentErrors = failedAttempts
           .slice(-4)
-          .map((attempt) => getErrorDetails(attempt.error_text || "").repeatKey)
+          .map((attempt) => attemptFailureRepeatKey(attempt, repeatKeys))
           .filter(Boolean);
         recentErrors.push(errRepeatKey);
         const uniqueErrors = new Set(recentErrors.filter(Boolean));

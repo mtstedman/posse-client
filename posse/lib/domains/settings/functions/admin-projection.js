@@ -313,7 +313,9 @@ export function projectAdminDescription({
   for (const section of ADMIN_AGENT_SETTING_SECTIONS) {
     const group = `agent_${section.role}`;
     push(`provider_${section.role}`, "agents", group);
-    for (const key of section.keys) push(key, "agents", group);
+    // As the admin TUI: a key its catalog group places elsewhere (a
+    // repo-scoped one) projects only there.
+    for (const key of section.keys) if (settingsPaneForKey(key) === "agents") push(key, "agents", group);
   }
 
   for (const section of ADMIN_PROVIDER_SETTING_SECTIONS) {
@@ -332,6 +334,8 @@ export function projectAdminDescription({
     for (const key of section.settingKeys) push(key, "providers", group);
   }
   for (const key of ADMIN_PROVIDER_CATALOG_SETTING_KEYS) push(key, "providers", "provider_catalog");
+  // The provider-pane catalog groups the specialized rows leave (Final review).
+  pushCatalogPane("providers");
 
   for (const definition of ADMIN_CREDENTIAL_SETTING_DEFS) {
     const present = credentialPresence[definition.env] === true;

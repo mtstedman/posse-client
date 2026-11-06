@@ -1,4 +1,4 @@
-import { humanInputChoicesForPayload } from "../../../catalog/human-input.js";
+import { humanInputChoicesForPayload, tryHumanGateNameForPayload } from "../../../catalog/human-input.js";
 import { PARKED_JOB_STATUSES, TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
 import { createJob, getJob, listJobsByWorkItem, runInTransaction, updateJobStatus } from "../../queue/functions/index.js";
@@ -24,7 +24,8 @@ export async function runJobVerdictCommand(argv = [], { projectDir } = {}) {
       && (entry.parent_job_id === job.id || Number(parseJobPayload(entry).original_job_id) === job.id));
     if (gates.length > 0) {
       const payload = gates.length === 1 ? parseJobPayload(gates[0]) : null;
-      if (!payload || !resolveGateCliAction(action, humanInputChoicesForPayload(payload))) {
+      // A legacy row has no verdict contract: the operator supersedes it first.
+      if (!payload || !tryHumanGateNameForPayload(payload) || !resolveGateCliAction(action, humanInputChoicesForPayload(payload))) {
         return { ok: false, reason: "existing_gate", message: `Answer the existing gate first: ${gates.map((gate) => `#${gate.id}`).join(", ")}.` };
       }
       return { ok: true, gateId: gates[0].id };

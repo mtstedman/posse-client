@@ -233,15 +233,33 @@ export function listRunTelemetryManifests({ includeCurrent = true } = {}) {
   }
 }
 
+// A cached descriptor stays writable after its file is deleted, but the bytes
+// are lost. One fstat per append catches an unlinked file (log purge, rm -rf).
+// The fuller check (path identity plus the manifest) costs four syscalls, so it
+// runs at most once per interval; it catches a renamed-away file, a filesystem
+// that keeps unlinked open files linked, and a manifest deleted on its own.
+const STREAM_REVALIDATE_INTERVAL_MS = 1_000;
+
+function cachedStreamIsCurrent(existing, filePath, runId) {
+  if (existing?.filePath !== filePath || existing.fd == null) return false;
+  try {
+    if (fs.fstatSync(existing.fd).nlink < 1) return false;
+  } catch { return false; }
+  const now = Date.now();
+  if (now - existing.validatedAt < STREAM_REVALIDATE_INTERVAL_MS) return true;
+  if (runId === RUN_ID) ensureManifest(existing.runDir);
+  if (!logDescriptorMatchesPath(existing.fd, filePath)) return false;
+  existing.validatedAt = now;
+  return true;
+}
+
 function openStream(stream, runId = RUN_ID) {
   if (!_telemetryEnabled) return null;
   const runDir = getRunTelemetryDir(runId);
   const filePath = path.join(runDir, streamFileName(stream));
   const streamKey = `${runId}:${stream}`;
   const existing = _streams.get(streamKey);
-  if (runId === RUN_ID) ensureManifest(runDir);
-  if (existing?.filePath === filePath && existing.fd != null
-    && logDescriptorMatchesPath(existing.fd, filePath)) return existing;
+  if (cachedStreamIsCurrent(existing, filePath, runId)) return existing;
 
   if (existing?.fd != null) {
     try { fs.closeSync(existing.fd); } catch { /* ignore */ }
@@ -250,7 +268,7 @@ function openStream(stream, runId = RUN_ID) {
   if (runId === RUN_ID) ensureManifest(runDir);
   else fs.mkdirSync(runDir, { recursive: true });
   const fd = fs.openSync(filePath, "a");
-  const next = { fd, filePath, runDir };
+  const next = { fd, filePath, runDir, validatedAt: Date.now() };
   _streams.set(streamKey, next);
   ensureExitHook();
   return next;

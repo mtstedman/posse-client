@@ -9,8 +9,18 @@ export function isAbortError(err) {
   return err?.name === "AbortError" || err?.code === "ABORT_ERR";
 }
 
-export function isKillAbort(err, signal = null) {
-  return isAbortError(err) || Boolean(err?._killReason) || signal?.aborted === true;
+// A job kill always records why (Worker.killJob, the scheduler, a lost lease).
+// An abort without that reason is some other operation's cancellation; it is
+// not a kill and must keep the ordinary, charged failure path.
+export function killAbortReason(err, signal = null, recordedReason = null) {
+  if (err?._killReason) return err._killReason;
+  const aborted = signal?.aborted === true;
+  if (!aborted && !isAbortError(err)) return null;
+  return (aborted ? signal.reason?._killReason : null) || recordedReason || null;
+}
+
+export function isKillAbort(err, signal = null, recordedReason = null) {
+  return killAbortReason(err, signal, recordedReason) != null;
 }
 
 export function signalAbortError(signal, message = "Operation aborted") {

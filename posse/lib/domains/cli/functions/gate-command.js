@@ -1,7 +1,6 @@
-import { supersedeLegacyHumanGate } from "../../queue/functions/human-gates.js";
 import { humanInputChoicesForPayload, tryHumanGateNameForPayload } from "../../../catalog/human-input.js";
 import { answerHumanInput } from "../../bridge/functions/human-input-answer.js";
-import { getHumanGate, getJob, getLiveSchedulerBlockMessage, listJobsByWorkItem } from "../../queue/functions/index.js";
+import { getHumanGate, getJob, getLiveSchedulerBlockMessage, listJobsByWorkItem, supersedeLegacyHumanGate } from "../../queue/functions/index.js";
 import { resolveGateReviewDiffTarget } from "../../queue/functions/gate-review-target.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import {

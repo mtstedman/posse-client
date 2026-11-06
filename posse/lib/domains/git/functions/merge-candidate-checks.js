@@ -26,8 +26,11 @@ export function withTemporaryMergeCandidateCheckout({ cwd, git, dependencySource
     added = true;
     // The target checkout's install predates a candidate that changed its
     // lockfile; the work item's worktree may hold the install that matches.
+    // A work item worktree is a whole-repository checkout, so its copy of a
+    // nested project sits at the same prefix as `cwd` does in the target.
+    const workItemProjects = dependencySources.filter(Boolean).map((source) => path.resolve(source, prefix));
     const dependencyOwner = (relative) => {
-      const sources = [cwd, ...dependencySources].filter((source) => source && fs.existsSync(path.join(source, relative)));
+      const sources = [cwd, ...workItemProjects].filter((source) => source && fs.existsSync(path.join(source, relative)));
       let lockfile = null;
       try { lockfile = fs.readFileSync(path.join(projectCheckout, path.dirname(relative), path.basename(relative) === "vendor" ? "composer.lock" : "package-lock.json"), "utf8"); } catch { /* no lockfile */ }
       return (lockfile && sources.find((source) => installedDependenciesMatchLockfile(path.join(source, relative), lockfile) === true)) || sources[0] || null;
@@ -35,7 +38,7 @@ export function withTemporaryMergeCandidateCheckout({ cwd, git, dependencySource
     const reset = (revision = commit) => {
       git(["reset", "--hard", revision], checkout);
       git(["clean", "-fdx"], checkout);
-      const sources = [cwd, ...dependencySources.filter(Boolean)];
+      const sources = [cwd, ...workItemProjects];
       const dependencyDirs = new Set(["node_modules", "vendor",
         ...sources.flatMap((source) => installedNodeRoots(source).map((nodeRoot) => path.relative(source, path.join(source, nodeRoot, "node_modules")))),
         ...sources.flatMap((source) => installedComposerRoots(source).map((root) => path.join(root, "vendor"))),
