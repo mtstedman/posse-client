@@ -4,7 +4,7 @@
 // context, and execution-provider summaries.
 
 import { isPermanentProviderRuntimeBlock } from "./block-reason.js";
-import { providerTurnLimitMode, TURN_LIMIT_MODES } from "../../../../catalog/provider.js";
+import { providerTurnLimitMode, TURN_LIMIT_MODES, PERMANENT_AGENT_SETUP_ERROR_CODES } from "../../../../catalog/provider.js";
 import { providerErrorSource } from "../../../providers/functions/shared/api-resilience.js";
 
 export function buildPromptExcerpt(text = "", maxChars = 1200) {
@@ -49,6 +49,18 @@ function findInvalidClientLine(text = "") {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .find((line) => /\binvalid(?:[_\s-]+)client\b/i.test(line)) || "";
+}
+
+function providerFailureCode(error) {
+  const seen = new Set();
+  // Agent readiness wraps both deterministic setup failures and transient
+  // transport failures. Preserve the cause's code without classifying the
+  // generic preparation wrapper itself as permanent.
+  while (error?.code === "POSSE_AGENT_PREPARATION_FAILED" && error.cause && !seen.has(error)) {
+    seen.add(error);
+    error = error.cause;
+  }
+  return typeof error?.code === "string" ? error.code : null;
 }
 
 export function getErrorDetails(errOrMsg) {
@@ -96,7 +108,7 @@ export function getErrorDetails(errOrMsg) {
     partialOutput,
     partialLine,
     classification,
-    code: typeof errOrMsg?.code === "string" ? errOrMsg.code : null,
+    code: providerFailureCode(errOrMsg),
     summary: summary.slice(0, 240),
     repeatKey: repeatKey.slice(0, 320),
     toolUses: Array.isArray(errOrMsg?.toolUses) ? errOrMsg.toolUses : [],
@@ -121,6 +133,7 @@ function partialOutputMayBeProviderError(error) {
 }
 
 export function isPermanentProviderConfigError(errorDetailsOrErr = null) {
+  if (PERMANENT_AGENT_SETUP_ERROR_CODES.includes(providerFailureCode(errorDetailsOrErr))) return true;
   const errorDetails = errorDetailsOrErr && typeof errorDetailsOrErr === "object"
     && ("fullText" in errorDetailsOrErr || "summary" in errorDetailsOrErr || "stderr" in errorDetailsOrErr || "partialOutput" in errorDetailsOrErr)
     ? errorDetailsOrErr

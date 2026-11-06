@@ -1,9 +1,12 @@
 import { reserveBudget, settleBudget } from "../../../queue/functions/admission-budget.js";
 import { getObservationContext } from "../../../observability/functions/observations.js";
+import { copyProviderOptions } from "./provider-options.js";
 
 /** Auxiliary direct-provider routes also belong to the current work-item budget. */
 export async function withProviderAdmission(provider, opts, execute) {
-  const { _budgetReservationId, ...providerOpts } = opts;
+  const { _budgetReservationId } = opts;
+  const providerOpts = copyProviderOptions(opts);
+  delete providerOpts._budgetReservationId;
   if (_budgetReservationId) return execute(providerOpts); // TrackedProviderClient owns settlement
   const context = getObservationContext() || {};
   const reservation = reserveBudget({ workItemId: context.work_item_id, jobId: context.job_id,

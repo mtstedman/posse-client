@@ -5,6 +5,13 @@
 
 export const PROVIDER_OPTIONS = Object.freeze(["claude", "anthropic", "openai", "codex", "grok", "copilot", "posse-local"]);
 
+// Local setup invariants cannot recover through a delayed model retry.
+// Escalate to operator recovery without consuming another identical attempt.
+export const PERMANENT_AGENT_SETUP_ERROR_CODES = Object.freeze([
+  "POSSE_AGENT_MCP_GATE_REQUIRED",
+  "POSSE_AGENT_PROVIDER_NOT_ALLOWED",
+]);
+
 export const TURN_LIMIT_MODES = Object.freeze({ TARGET: "target", ENFORCED: "enforced", NONE: "none" });
 export const PROVIDER_TURN_LIMIT_MODE = Object.freeze({
   claude: TURN_LIMIT_MODES.TARGET,

@@ -111,6 +111,15 @@ export class BaseRole {
     };
     ctx.providerName = this.getProviderName(job, ctx);
     const modelProviderName = ctx.providerName;
+    // ProviderAttemptLifecycle validates operator recovery overrides. Carry
+    // that same pool through preparation and tracked execution; a raw job pin
+    // or payload alone must not widen the configured role providers.
+    const providerPool = Array.isArray(job?._allowedProviders) && job._allowedProviders.length
+      ? [...job._allowedProviders] : null;
+    const buildProviderOptions = (providerCtx) => ({
+      ...this.buildOpts(job, providerCtx),
+      ...(providerPool ? { allowedProviders: [...providerPool] } : {}),
+    });
 
     let preparedAgent = null;
     try {
@@ -136,7 +145,7 @@ export class BaseRole {
         if (!providerCtx) {
           throw new Error(`Fallback prompt options requested before composing the ${providerName || "unknown"} provider prompt`);
         }
-        return this.buildOpts(job, providerCtx);
+        return buildProviderOptions(providerCtx);
       };
       let prompt = null;
       const dispatcher = this.context?.agentDispatcher;
@@ -150,6 +159,7 @@ export class BaseRole {
           logicalKey: agentKey,
           role,
           providerName: ctx.providerName,
+          providerAllowlist: providerPool,
           reusable: true,
           agentHandoff: packet?.agent_coordination?.agent_handoff_v1 === true,
           agentHandoffReportOnly: role === "researcher"
@@ -174,7 +184,7 @@ export class BaseRole {
         prompt = await buildPromptForProvider(ctx.providerName);
       }
       const providerOpts = {
-        ...this.buildOpts(job, ctx),
+        ...buildProviderOptions(ctx),
         ...(preparedAgent ? { _preparedAgent: preparedAgent } : {}),
       };
       if (
