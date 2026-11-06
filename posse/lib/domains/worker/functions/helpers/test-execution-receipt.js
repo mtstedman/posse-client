@@ -430,7 +430,7 @@ function changedTestPathsCoveredByPlan(changedTestPaths, _plan, result) {
   if (result?.status !== "passed") return [];
   const proven = new Set((result.file_results || []).filter((file) => file.status === "passed"
     && file.test_counts?.total > 0 && file.test_counts.skipped === 0
-    && ["node_test", "vitest", "pytest", "phpunit"].includes(file.runner)).map((file) => file.path));
+    && ["node_test", "vitest", "jest", "pytest", "phpunit"].includes(file.runner)).map((file) => file.path));
   return changedTestPaths.filter((candidate) => proven.has(candidate));
 }
 
