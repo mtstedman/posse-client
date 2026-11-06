@@ -1,4 +1,5 @@
 import { missingDeclaredNodeDependency } from "./node-test-failure.js";
+import { babelConfigTargets, runBabelConfigCheck } from "./babel-config-check.js";
 import { JS_SOURCE_EXTENSIONS, PHP_SOURCE_EXTENSIONS, PYTHON_SOURCE_EXTENSIONS, GO_SOURCE_EXTENSIONS, RUST_SOURCE_EXTENSIONS, CPP_SOURCE_EXTENSIONS, RUBY_SOURCE_EXTENSIONS, SHELL_SOURCE_EXTENSIONS, CLANG_SOURCE_EXTENSIONS, SOURCE_EXTENSIONS, MAX_SCOPE_ROOT_FILES, MAX_FAILURES, MAX_OUTPUT_CHARS, MISSING_TOOLING_RE, ESM_SYNTAX_RE } from "../../../../catalog/scoped-verification.js";
 import fs from "fs";
 import path from "path";
@@ -862,12 +863,14 @@ function runScopedShellSyntax(cwd, targets) {
 }
 
 function runScopedLint(cwd, files, { typecheckFallback = null } = {}) {
-  const targets = lintableFiles(cwd, files);
+  const configs = babelConfigTargets(cwd, files);
+  const targets = [...new Set([...lintableFiles(cwd, files), ...configs])];
   if (targets.length === 0) {
     return { name: "lint", status: "not_applicable", reason: "no lintable scoped files", targets: [] };
   }
 
   const subchecks = [
+    runBabelConfigCheck(cwd, configs, runProcess),
     runScopedJsLint(cwd, jsLintableFiles(cwd, files), { typecheckFallback }),
     runScopedPythonLint(cwd, pythonLintableFiles(cwd, files)),
     runScopedPhpLint(cwd, phpLintableFiles(cwd, files)),

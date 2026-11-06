@@ -40,6 +40,13 @@ export const MAX_FAILURES = 60;
 
 export const MAX_OUTPUT_CHARS = 6000;
 
+export const BABEL_CONFIG_NAMES = readonlySet([
+  "babel.config.js", "babel.config.cjs", "babel.config.mjs", "babel.config.json",
+  ".babelrc", ".babelrc.json", ".babelrc.js", ".babelrc.cjs", ".babelrc.mjs",
+]);
+export const BABEL_CONFIG_CHECK = "babel-config";
+export const BABEL_CONFIG_TIMEOUT_MS = 10000;
+
 // A verifier whose runner binary is missing (no node_modules in a fresh
 // worktree, a package script whose tool is not installed) is a dependency
 // problem, not a product failure. Mirror the other runners' "unavailable"

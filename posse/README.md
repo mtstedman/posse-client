@@ -900,6 +900,13 @@ as infrastructure diagnostics; assertion failures remain product failures.
 Commands rejected during planning for missing prerequisites are revalidated at
 handoff and restored when they become available and still satisfy command policy.
 
+Scoped lint checks load changed `babel.config.*` and `.babelrc*` configuration
+files with the owning package's installed Babel loader in the test environment.
+This catches unresolved presets/plugins before tests exist. The probe runs in a
+bounded child process and does not generate output files. An absent Babel loader
+or an uninstalled declared dependency remains unavailable infrastructure; broken
+configuration references are attributed to the config file for review.
+
 Automatic scoped checks prefer a package's `typecheck` script. When none exists,
 a package with `tsconfig.json` uses its installed TypeScript compiler with
 `--noEmit`; temporary incremental metadata is removed after the check. Posse
