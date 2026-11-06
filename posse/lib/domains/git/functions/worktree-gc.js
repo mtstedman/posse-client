@@ -6,6 +6,8 @@
 // and deletes/retains branches per merge state. Work-item state predicates and
 // GC message formatters live here too.
 
+import { DIRTY_WORKTREE_RECOVERY_KEY } from "../../../catalog/human-input.js";
+import { parseJobPayload } from "../../queue/functions/payload.js";
 import fs from "fs";
 import path from "path";
 import {
@@ -641,6 +643,16 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
           try {
             if (workItemHasActiveLease(wiId)) {
               onMsg(`GC: skipped dirty check for held WI#${wiId}; a leased/running job may be writing to the worktree`);
+              continue;
+            }
+            const pendingResume = listJobsByWorkItem(wiId).some(job =>
+              jobNeedsGitWorktree(job) && HOLDING_STATUSES.has(job.status)
+              && (Number(job.attempt_count) > 0
+                || parseJobPayload(job)[DIRTY_WORKTREE_RECOVERY_KEY]?.paths?.length));
+            if (pendingResume) {
+              // Job setup owns scoped recovery and its explicit operator choice.
+              // Startup must not reset the only live copy before that can run.
+              onMsg(`GC: preserving interrupted work for held WI#${wiId}; job setup owns recovery`);
               continue;
             }
             await assertWorktreeRootAsync(wtDir, { signal });

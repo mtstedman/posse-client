@@ -627,6 +627,13 @@ export function buildRemoteCompileRequest(packet, instructions, {
   const deepthink = packet?.deepthink === true || isResearchBudgetDeep(researchBudget);
   const fallbackReads = nonNegativeInteger(packet?.budgets?.fallback_reads_remaining);
   const renderJobIdentity = role !== "researcher";
+  // Local scope validation retains exact deferred test creations for tools.
+  // Remote's dev/fix contract represents those paths as writable files; it
+  // does not require publishing an empty test into the shared checkout.
+  const deferredWritingScope = ["dev", "fix"].includes(role)
+    && Number(packet?._materialization_generation) >= 1;
+  const modifyFiles = uniqueStrings([...(packet?.files_to_modify || []),
+    ...(deferredWritingScope ? packet?.files_to_create || [] : [])]);
   const selectedSkills = Array.isArray(packet?.skills_attached)
     ? packet.skills_attached
     : (Array.isArray(packet?.skills) ? packet.skills : []);
@@ -658,8 +665,8 @@ export function buildRemoteCompileRequest(packet, instructions, {
     },
     scope: {
       cwd: packet?.cwd || null,
-      files_to_modify: uniqueStrings(packet?.files_to_modify || []),
-      files_to_create: uniqueStrings(packet?.files_to_create || []),
+      files_to_modify: modifyFiles,
+      files_to_create: deferredWritingScope ? [] : uniqueStrings(packet?.files_to_create || []),
       files_to_delete: uniqueStrings(packet?.files_to_delete || []),
       create_roots: uniqueStrings(packet?.create_roots || []),
       success_criteria: Array.isArray(packet?.success_criteria) ? packet.success_criteria.map(String) : [],

@@ -22,6 +22,16 @@ export const HARNESS_SETUP_FAULT_BACKOFF_MS = 15_000;
  * @returns {string|null}
  */
 export function harnessSetupFaultCode(err) {
+  // Agent preparation wraps Remote errors. Restrict classification to the
+  // prompt-compiler boundary and deterministic request-validation rejection.
+  const seen = new Set();
+  for (let cause = err; cause && !seen.has(cause); cause = cause.cause) {
+    seen.add(cause);
+    if (cause.code === "POSSE_REMOTE_REQUIRED" && (
+      [400, 422].includes(Number(cause.cause?.status))
+      || /(?:failed[^\n]*:\s*(?:400|422)\s*-|writing_creation_scope_forbidden:)/.test(String(cause.message || ""))
+    )) return "POSSE_REMOTE_REQUIRED";
+  }
   const code = String(err?.code || "");
   if (code === CODEX_CORE_DECLARATIONS_INVALID) return code;
   // The native dispatcher validates the start frame before dispatch.started,
@@ -54,7 +64,8 @@ function priorFaultInGeneration(job, attemptId, faultCode) {
  * @returns {"requeued"|"failed"|"lease_lost"}
  */
 export function settleHarnessSetupFault(worker, { attempt, err, faultCode, job, leaseToken, startTime }) {
-  const repeated = priorFaultInGeneration(job, attempt.id, faultCode);
+  const permanent = faultCode === "POSSE_REMOTE_REQUIRED";
+  const repeated = permanent || priorFaultInGeneration(job, attempt.id, faultCode);
   const detail = String(err?.message || faultCode).slice(0, 2000);
   completeAttempt(attempt.id, {
     status: "interrupted",
@@ -76,7 +87,7 @@ export function settleHarnessSetupFault(worker, { attempt, err, faultCode, job, 
       event_type: EVENT_TYPES.JOB_PROVIDER_ERROR,
       actor_type: EVENT_ACTORS.SYSTEM,
       message: repeated
-        ? `Harness setup fault repeated (${faultCode}); stopped automatic retries (attempt not consumed)`
+        ? `Harness setup fault ${permanent ? "is deterministic" : "repeated"} (${faultCode}); stopped automatic retries (attempt not consumed)`
         : `Harness setup fault (${faultCode}); requeuing in ${Math.round(HARNESS_SETUP_FAULT_BACKOFF_MS / 1000)}s (attempt not consumed)`,
       event_json: JSON.stringify({ harness_fault: true, harness_fault_code: faultCode, exhausted: repeated, operator_actionable: false, detail: detail.slice(0, 500) }),
     });
@@ -87,7 +98,7 @@ export function settleHarnessSetupFault(worker, { attempt, err, faultCode, job, 
     worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: harness setup fault ${faultCode} — requeuing in ${Math.round(HARNESS_SETUP_FAULT_BACKOFF_MS / 1000)}s (attempt not consumed)${C.reset}`);
     return "requeued";
   }
-  worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: harness setup fault ${faultCode} repeated — stopped automatic retries (attempt not consumed)${C.reset}`);
+  worker.emit(job.id, `${C.red}[worker] WI#${job.work_item_id} job #${job.id}: harness setup fault ${faultCode} ${permanent ? "is deterministic" : "repeated"} — stopped automatic retries (attempt not consumed)${C.reset}`);
   refreshAndExtractInsights(job.work_item_id);
   return "failed";
 }
