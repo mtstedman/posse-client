@@ -55,6 +55,15 @@ export function resolveGateReviewDiffTarget(gateJob, {
   const gateJobId = positiveId(gateJob.id);
   const workItemId = positiveId(gateJob.work_item_id);
 
+  if (policy.scope === HUMAN_INPUT_REVIEW_DIFF_SCOPES.SCOPE_REQUEST) {
+    const request = gatePayload.scope_request;
+    if (!request) return null;
+    return { scope: policy.scope, gate_job_id: gateJobId, work_item_id: workItemId,
+      job_id: positiveId(gatePayload.original_job_id),
+      entries: Array.isArray(request.batch) && request.batch.length ? request.batch : [request],
+      unavailable: null };
+  }
+
   if (policy.scope === HUMAN_INPUT_REVIEW_DIFF_SCOPES.WORK_ITEM) {
     const workItem = workItemId ? getWorkItemFn(workItemId) : null;
     const branchName = String(gatePayload.branch_name || workItem?.branch_name || "").trim() || null;

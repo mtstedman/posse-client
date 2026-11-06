@@ -1,3 +1,4 @@
+import { getAccountSetting } from "../../../settings/functions/account-settings.js";
 import { BLOCKED_RECOVERY_GATE_KINDS } from "../../../../catalog/human-input.js";
 import { refreshHumanGateContract } from "../../../queue/functions/human-gates.js";
 import { materializeScopeCreates } from "../../../queue/functions/scope-create-grant.js";
@@ -6,7 +7,7 @@ installScopeCreateMaterializer(materializeScopeCreates);
 import { PLANNER_CLARIFICATION_REVIEW_TYPE } from "../../../../catalog/tools/planner-clarification.js";
 import { ENVIRONMENT_SETUP_REVIEW_TYPE } from "../../../../catalog/tools/environment-setup.js";
 import { applyDirtyWorktreeRecovery } from "../helpers/dirty-worktree-recovery.js";
-import { APPROVAL_POLICY_FAIL_CLOSED_CODE } from "../../../../catalog/approval-policies.js";
+import { APPROVAL_POLICY_FAIL_CLOSED_CODE, approvalResolutionAuthorized } from "../../../../catalog/approval-policies.js";
 import { failClosedUnattendedGate } from "../helpers/human-input.js";
 import { DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE } from "../../../../catalog/human-input.js";
 import { processVerdict } from "../helpers/process-verdict.js";
@@ -509,7 +510,7 @@ export async function runHumanInputJob(worker, job, {
     // A valid commit answer cannot repair a rejected Git operation. Keep the
     // gate available for an explicit retry after repair or a different action,
     // instead of immediately presenting the same failing commit prompt again.
-    const reaskAfterActionFailure = liveOperator && !(selectedAction === "commit"
+    let reaskAfterActionFailure = liveOperator && !(selectedAction === "commit"
       && [DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE, "partial_work_recovery"].includes(payload.review_type));
     if (
       selectedAction === "retry_assessment"
@@ -579,6 +580,7 @@ export async function runHumanInputJob(worker, job, {
     }
 
     let finalHumanStatus = "succeeded";
+    let actionFailureMessage = null;
     let handledReviewDecision = false;
     let pendingReviewGatesAlreadyCanceled = false;
     let leaseReleased = false;
@@ -678,8 +680,8 @@ export async function runHumanInputJob(worker, job, {
       // the source job or cancel its other human questions.
       handledReviewDecision = true;
       pendingReviewGatesAlreadyCanceled = true;
-      if (outputEnvelope.unattended === true || (outputEnvelope.source && outputEnvelope.source !== "human")) {
-        throw new Error("Environment installers require explicit user approval.");
+      if (!approvalResolutionAuthorized(payload, { ...outputEnvelope, source: outputEnvelope.source || "human", action: selectedAction }, getAccountSetting)) {
+        throw new Error("Environment installers require human approval or an explicit environment-setup policy.");
       }
       worker.emit(job.id, `[human] Environment setup ${selectedAction === "approve" ? "approved" : "rejected"}; returning the decision to the waiting tool.`);
     }
@@ -697,6 +699,11 @@ export async function runHumanInputJob(worker, job, {
       });
       if (!resolved.ok) {
         finalHumanStatus = "failed";
+        actionFailureMessage = resolved.code === "scope_write_lock_blocked"
+          ? resolved.message || "Another active job owns these files. Wait for it to finish before retrying." : null;
+        // Another writer must finish or release its files. Replaying the same
+        // approval cannot resolve ownership, and must not spin gate attempts.
+        if (resolved.code === "scope_write_lock_blocked") reaskAfterActionFailure = false;
         worker.emit(job.id, `${C.yellow}[human] Scope request could not be resolved (${resolved.code || "unknown"})${C.reset}`);
       } else if (approved) {
         const batchSize = Array.isArray(resolved.request.batch) ? resolved.request.batch.length : 1;
@@ -1596,7 +1603,7 @@ export async function runHumanInputJob(worker, job, {
       cancelPendingReviewGatesForOriginal(payload.original_job_id, { exceptJobId: job.id });
     }
     if (finalHumanStatus === "failed") {
-      const failureMessage = "The selected action could not be applied.";
+      const failureMessage = actionFailureMessage || "The selected action could not be applied.";
       completeAttempt(attempt.attempt.id, {
         status: "failed",
         duration_ms: Date.now() - startTime,

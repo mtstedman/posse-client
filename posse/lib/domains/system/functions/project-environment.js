@@ -50,7 +50,7 @@ export function inspectEnvironment(args = {}, { cwd, role = null }) {
     supported_package_managers: ENVIRONMENT_PACKAGE_MANAGERS,
     sqlite_setup_available: true, database_setup_types: PROJECT_DB_TYPES, project_database: readProjectDbConfig({ projectDir: cwd }), approval_required: ["setup_environment", "install_dependencies", "setup_database"],
     local_database_provisioning: { platform: process.platform, distributions: LOCAL_DATABASE_PLATFORMS, engines: Object.keys(LOCAL_DATABASE_ENGINES), root: (process.geteuid?.() ?? process.getuid?.()) === 0, sudo_available: !!findCommandOnPath("sudo"), requires: "Ubuntu/Debian APT packages and root or non-interactive sudo; explicit local_server approval" },
-    note: "An install directory's presence does not prove dependencies are current; installed is null for managers that use a shared cache. Installers require explicit user approval. Local database system provisioning is available only through an explicit local_server request; ordinary dependency installation remains project-local.",
+    note: "An install directory's presence does not prove dependencies are current; installed is null for managers that use a shared cache. Installers follow the environment-setup approval policy, which defaults to Ask. Local database system provisioning is available only through an explicit local_server request; ordinary dependency installation remains project-local.",
   };
 }
 

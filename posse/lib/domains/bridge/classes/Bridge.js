@@ -337,7 +337,7 @@ export class Bridge {
     this.changeStream = null;
     this.localServer = null;
     this.stopPresenceHeartbeat();
-    try { relayClient?.stop(); } catch { /* already torn down */ }
+    try { await relayClient?.stop(); } catch { /* already torn down */ }
     try { await bossyLocalStream?.close(); } catch { /* already torn down */ }
     try { changeStream?.close(); } catch { /* already torn down */ }
     try { await localServer?.close(); } catch { /* already torn down */ }

@@ -1,9 +1,12 @@
+import { unfinishedTestOwners } from "./job-test-scope.js";
+import fs from "node:fs";
+import nodePath from "node:path";
 import { approvalPolicyKey } from "../../../catalog/approval-policies.js";
 import { materializeScopeCreates } from "./scope-create-materializer.js";
 import { protectedMutablePathReason, isSensitiveEnvRepoPath } from "../../runtime/functions/protected-paths.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { classifyAutoApprovableScopeRequest } from "../../../shared/policies/functions/scope-auto-approval.js";
+import { classifyAutoApprovableScopeRequest, isTestDirectoryPath, isTestCollateralPath } from "../../../shared/policies/functions/scope-auto-approval.js";
 import { acquireAdditionalJobWritePaths } from "./file-locks.js";
 import {
   dependentSiblingScopeApproval,
@@ -73,19 +76,16 @@ export function createScopeExpansionOperations({
 
   function scopeGateQuestionText(job, request) {
     const entries = scopeRequestBatchEntries(request);
-    const approvalAction = request?.live_wait === true
-      ? "continue the active agent session"
-      : "retry the job";
-    const denialAction = request?.live_wait === true
-      ? "return an out-of-scope error to the agent"
-      : "fail it with an out-of-scope error";
+    const action = request?.live_wait === true ? "continue" : "retry";
     return [
-      `Job #${job.id} (${job.title}) attempted to write outside its writable scope:`,
-      ...entries.map((entry) => `  ${entry.path} (${entry.access})${entry.reason ? ` — ${entry.reason}` : ""}`),
-      entries.length === 1
-        ? `Approve to add this exact path to ${entries[0].access === "modify" ? "files_to_modify" : "files_to_create"} and ${approvalAction}, or reject to ${denialAction}.`
-        : `Approve to add these ${entries.length} exact paths to the job's writable scope and ${approvalAction}, or reject to ${denialAction}.`,
-      `Reply with "approve" or "reject".`,
+      `Allow job #${job.id} to ${action} with this scope?`,
+      ...entries.map((entry) => {
+        // Keep the complete rationale and edit preview in scope_request for
+        // the detail view, not in the question's always-visible body.
+        const reason = String(entry.reason || "").split(/\r?\n/)[0].trim();
+        const summary = reason.length > 160 ? `${reason.slice(0, 159)}…` : reason;
+        return `${entry.access}: ${entry.path}${summary ? ` — ${summary}` : ""}`;
+      }),
     ].join("\n");
   }
 
@@ -241,7 +241,24 @@ export function createScopeExpansionOperations({
         autoApprovalEnabled = ["ask", "auto:approve"].includes(policy)
           && String(getSetting(SETTING_KEYS.SCOPE_AUTO_APPROVAL) ?? "true") !== "false";
       } catch { /* default on */ }
-      const autoClass = autoApprovalEnabled
+      // Requiring test writes already authorizes their scope. Materialize the
+      // exact path through the normal grant/ownership path; an expansion policy
+      // must not ask again for work the job explicitly requires.
+      const testPath = isTestCollateralPath(normalizedPath);
+      const foreignOwner = testPath ? unfinishedTestOwners(current, payload).get(normalizedPath) : null;
+      if (foreignOwner) return { ok: false, approved: false, paused: false, code: "scope_write_lock_blocked",
+        message: `Test belongs to unfinished job #${foreignOwner}. Continue only your own work; do not retry this path until its owner finishes.` };
+      const existingTest = normalizedAccess !== "create" || !workspaceCwd
+        || (workspaceCwd && fs.existsSync(nodePath.resolve(workspaceCwd, normalizedPath)));
+      const siblingTestClaim = testPath && listJobsByWorkItem(current.work_item_id).some((sibling) => {
+        if (sibling.id === current.id || ["canceled", "failed"].includes(sibling.status)) return false;
+        const scope = parseJobPayloadObject(sibling);
+        return [...(scope.files_to_modify || []), ...(scope.files_to_create || [])].includes(normalizedPath);
+      });
+      const plannedTestWrite = !existingTest && !siblingTestClaim && payload.write_tests === true
+        && ["dev", "fix"].includes(current.job_type) && (payload.task_mode || "code") === "code"
+        && isTestDirectoryPath(normalizedPath);
+      const autoClass = plannedTestWrite ? { reason: "planned_test_write" } : autoApprovalEnabled && !(testPath && (existingTest || siblingTestClaim))
         ? dependentSiblingScopeApproval(current, normalizedPath, normalizedAccess,
           listJobsByWorkItem(current.work_item_id), getAllDependencies()) || classifyAutoApprovableScopeRequest({
           path: normalizedPath,
@@ -418,7 +435,9 @@ export function createScopeExpansionOperations({
           review_type: SCOPE_REQUEST_REVIEW_TYPE,
           scope_request: request,
           questions: [scopeGateQuestionText(current, request)],
-          context: `The request was surfaced automatically by the internal request_scope tool after ${normalizedOperation} hit the job's scope boundary.`,
+          context: source === "deterministic_mcp_write_boundary"
+            ? "A write needs additional scope. Open details for the full reason and proposed edit."
+            : "The agent requested additional scope. Open details for the full reason and proposed edit.",
         }),
       });
       request.approval_job_id = humanJob.id;

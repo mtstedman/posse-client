@@ -400,7 +400,13 @@ export class FinalReviewRuntime {
         lineagePaths: lineagePaths.filter((file) => !placeholders.has(file)),
       });
       signal.throwIfAborted();
-      changedTestRun = changedPlan
+      // A scoped replacement for a broad suite already ran these changed
+      // files. Retain their result as changed-test evidence without running
+      // them twice or losing timeout/failure attribution at final review.
+      const sharedSelection = declaredPlan?.deferred_checks && changedPlan?.unit_test_paths?.length
+        && changedPlan.unit_test_paths.length === declaredPlan.unit_test_paths?.length
+        && changedPlan.unit_test_paths.every((file) => declaredPlan.unit_test_paths.includes(file));
+      changedTestRun = sharedSelection ? testRun : changedPlan
         ? await this.runTestPlan(changedPlan, { cwd: parent.cwd, timeoutMs: stageTimeoutMs("the changed tests"), signal })
         : null;
       signal.throwIfAborted();

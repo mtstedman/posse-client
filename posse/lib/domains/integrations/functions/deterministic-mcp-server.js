@@ -2392,7 +2392,7 @@ if (allowBash && execBash) {
 }
 if (ownerHotGateway || hasVerifiedToolContract() || roleName === "dev" || roleName === "assessor" || roleName === "planner") {
   mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
-  mcpToolRegistry.attach("run_unit_test", (args) => execRunUnitTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, { unitTestCapability, scipAvailable: atlasAvailable, agentCallId: mcpAgentCallId }));
+  mcpToolRegistry.attach("run_unit_test", (args) => execRunUnitTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, { unitTestCapability, scipAvailable: atlasAvailable, agentCallId: mcpAgentCallId, jobId: mcpJobId }));
 }
 if (allowImageHelpers) {
   mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -2620,7 +2620,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
   }
   if (ownerHotGateway || hasVerifiedToolContract() || roleName === "dev" || roleName === "assessor" || roleName === "planner") {
     mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
-    mcpToolRegistry.attach("run_unit_test", (args) => execRunUnitTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, { unitTestCapability, scipAvailable: atlasAvailable, agentCallId: mcpAgentCallId }));
+    mcpToolRegistry.attach("run_unit_test", (args) => execRunUnitTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, { unitTestCapability, scipAvailable: atlasAvailable, agentCallId: mcpAgentCallId, jobId: mcpJobId }));
   }
   if (allowImageHelpers) {
     mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));

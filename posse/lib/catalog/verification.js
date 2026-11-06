@@ -11,6 +11,7 @@ export const TEST_STRICTNESS = Object.freeze({ PERMISSIVE: "permissive", STRICT:
 export const TEST_STRICTNESS_VALUES = Object.freeze(Object.values(TEST_STRICTNESS));
 export const DEFAULT_TEST_STRICTNESS = TEST_STRICTNESS.PERMISSIVE;
 export const TEST_CAPABILITY_PRUNED_REASON = "test_harness_unavailable";
+export const JOB_TESTS_DEFERRED_TO_INTEGRATION = "job_tests_deferred_to_integration";
 export const TEST_REQUIRED_FILE_MISSING_REASON = "required_test_file_missing";
 export const TEST_RUNNER_REMOVED_REASON = "test_runner_removed";
 export const UNRUNNABLE_TEST_REASONS = Object.freeze([

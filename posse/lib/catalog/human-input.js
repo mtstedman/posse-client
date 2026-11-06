@@ -139,6 +139,7 @@ export const MERGE_RELEASING_RETRY_REVIEW_TYPES = Object.freeze([
 export const HUMAN_INPUT_REVIEW_DIFF_SCOPES = Object.freeze({
   ATTEMPT: "attempt",
   WORK_ITEM: "work_item",
+  SCOPE_REQUEST: "scope_request",
 });
 export const DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE = "dirty_worktree_recovery";
 export const DIRTY_WORKTREE_RECOVERY_ERROR = "WORKTREE_DIRTY_RECOVERY_REQUIRED";
@@ -153,6 +154,7 @@ const COMMITTED_ATTEMPT_REVIEW_DIFF = Object.freeze({
 });
 const WORK_ITEM_REVIEW_DIFF = Object.freeze({ scope: HUMAN_INPUT_REVIEW_DIFF_SCOPES.WORK_ITEM });
 const HUMAN_INPUT_REVIEW_DIFF_POLICIES = Object.freeze({
+  file_scope_approval: Object.freeze({ scope: HUMAN_INPUT_REVIEW_DIFF_SCOPES.SCOPE_REQUEST }),
   assessment_review: ATTEMPT_REVIEW_DIFF,
   assessment_evidence_missing: ATTEMPT_REVIEW_DIFF,
   assessment_transport_recovery: ATTEMPT_REVIEW_DIFF,
@@ -679,7 +681,7 @@ export function scopeModeHumanInputAnswerForPayload(payload = {}, scopeMode = SC
 // An unattended policy may select only an action offered by this gate.
 // With the default ask policy the gate remains open for the operator.
 export function nonInteractiveHumanInputAnswerForPayload(payload = {}, policy = "ask") {
-  if (payload.requires_interactive_approval === true || ["push_offer", "environment_setup"].includes(payload.subtype || payload.review_type)) return null;
+  if (payload.requires_interactive_approval === true) return null;
   const action = String(policy).startsWith("auto:") ? policy.slice(5) : null;
   return action && humanInputChoicesForPayload(payload).includes(action) ? action : null;
 }

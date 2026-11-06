@@ -1,3 +1,5 @@
+import { jobTestPermission } from "../../../../domains/queue/functions/job-test-scope.js";
+import { getObservationContext } from "../../../../domains/observability/functions/observations.js";
 import { TestFailureGuidance } from "../../classes/TestFailureGuidance.js";
 import path from "node:path";
 import { gitCurrentHashAsync, gitHasChangesAsync, gitExecAsync } from "../../../../domains/git/functions/utils.js";
@@ -37,6 +39,8 @@ export function createTestExecutionExecutors() {
         scipAvailable: options.scipAvailable !== false,
       });
       try {
+        const permission = jobTestPermission(options.jobId || getObservationContext()?.job_id, args?.path);
+        if (permission?.allowed === false) return JSON.stringify({ ok: null, status: "unavailable", reason: "test_outside_job_scope", path: args?.path, message: permission.reason });
         const executedCommitHash = await cleanExecutedCommit(cwd, args?.path);
         const result = await runUnitTestFile({ projectDir: cwd, path: args?.path, capability, declaredScope, scipAvailable: options.scipAvailable !== false });
         const guidance = failureGuidance.forResult(result, options.agentCallId);

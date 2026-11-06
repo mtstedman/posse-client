@@ -1,3 +1,4 @@
+import { isTestCollateralPath } from "../../../../shared/policies/functions/scope-auto-approval.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -337,6 +338,7 @@ export async function materializeWritingScope(packet) {
   const materialized = [];
   const greenfieldFiles = [];
   const convertedToModify = [];
+  const deferredTestCreates = [];
   try {
     for (const relPath of create) {
       const absPath = assertSafeRelativePath(cwd, relPath, "files_to_create");
@@ -374,6 +376,12 @@ export async function materializeWritingScope(packet) {
         materialized.push(relPath);
         continue;
       }
+      // A discoverable empty test is a failing suite. Keep its exact creation
+      // authority, but do not publish a placeholder into the shared checkout.
+      if (isTestCollateralPath(relPath)) {
+        deferredTestCreates.push(relPath);
+        continue;
+      }
       const greenfield = !(await isTrackedPath(cwd, relPath));
       const parents = createParentDirectories(cwd, absPath);
       createdDirs.push(...parents);
@@ -407,17 +415,16 @@ export async function materializeWritingScope(packet) {
     throw error;
   }
 
-  const editable = uniquePaths([...modify, ...create]);
+  const editable = uniquePaths([...modify, ...create.filter((file) => !deferredTestCreates.includes(file))]);
   packet.files_to_modify = editable;
-  packet.files_to_create = [];
+  packet.files_to_create = deferredTestCreates;
   packet.create_roots = [];
   packet.creatable_files = {};
   packet.materialized_files = materialized;
   packet.promoted_modify_targets = promotedToCreate;
   packet._materialization_generation = generation;
   if (packet._raw_payload && typeof packet._raw_payload === "object") {
-    packet._raw_payload = { ...packet._raw_payload, files_to_modify: editable };
-    delete packet._raw_payload.files_to_create;
+    packet._raw_payload = { ...packet._raw_payload, files_to_modify: editable, files_to_create: deferredTestCreates };
     delete packet._raw_payload.create_roots;
   }
   return { applied: true, materialized, convertedToModify, promotedToCreate };

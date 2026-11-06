@@ -1,3 +1,4 @@
+import { scopeJobTestPlan } from "./job-test-plan.js";
 import { resolveInterpreterTestCommand } from "../../../verification/functions/interpreter-test-runner.js";
 import { TEST_EXECUTION_RECEIPT_SCHEMA_VERSION as RECEIPT_SCHEMA_VERSION } from "../../../../catalog/verification.js";
 import { normPath } from "../../../../shared/scope/functions/path.js";
@@ -226,7 +227,8 @@ export function prunedTestPlan(payload = {}) {
 export function resolveFrozenTestPlan(job = {}, payload = {}, options = {}) {
   payload = { ...payload, files_to_create: (payload.files_to_create || []).map(normPath),
     ...(Array.isArray(payload.tests_to_run) ? { tests_to_run: payload.tests_to_run.map(normPath) } : {}) };
-  const plan = resolveTestPlan(job, payload, options);
+  const resolved = resolveTestPlan(job, payload, options);
+  const plan = scopeJobTestPlan(resolved, { job, payload, cwd: options.cwd, declaredPaths: declaredTestFilesForPlan(resolved, options.cwd) });
   const base = payload._test_capability_base_commit || payload.root_base_commit || payload.commit_base_hash;
   return plan ? { ...plan, files_to_create: payload.files_to_create || [], ...(base ? { capability_base_commit: base } : {}) } : plan;
 }
@@ -402,6 +404,7 @@ export function frozenTestPlanFromReceipt(receipt = {}) {
     check_id: receipt.check_id || null,
     intent: receipt.intent || "test",
     verification_plan: receipt.verification_plan || null,
+    ...(receipt.deferred_checks ? { deferred_checks: receipt.deferred_checks } : {}),
     ...(Array.isArray(receipt.execution_checks) ? { execution_checks: receipt.execution_checks } : {}),
     ...(Array.isArray(receipt.unresolved_test_paths) ? { unresolved_test_paths: receipt.unresolved_test_paths } : {}),
     ...(receipt.repository_plan_ignored ? { repository_plan_ignored: receipt.repository_plan_ignored } : {}),

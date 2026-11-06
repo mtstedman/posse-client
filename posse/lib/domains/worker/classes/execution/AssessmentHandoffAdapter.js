@@ -417,7 +417,7 @@ export class AssessmentHandoffAdapter {
           : null,
         siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
         repairDependencies: wtPath
-          ? (receipt) => repairTestDependencies(worker, job, wtPath, {
+          ? (receipt, executionCwd = wtPath) => repairTestDependencies(worker, job, executionCwd, {
               signal: assessAc?.signal || null,
               phase: "assessor",
               receipt,

@@ -12,7 +12,8 @@ import { renderUnresolvedScopeRequests } from "../../../queue/functions/scope-ex
 import { DETERMINISTIC_AUDIT_ROLE } from "../../../../catalog/worker-display.js";
 import { assessmentDisplayMessage } from "../execution/display-sync.js";
 import { diffPorcelainEntries } from "../../../git/functions/porcelain-diff.js";
-import { authoritativeFinalReview, latestFinalReview } from "../../../assessment/functions/final-review-authority.js";
+import { authoritativeFinalReview, latestFinalReview, finalReviewRepairVerdict } from "../../../assessment/functions/final-review-authority.js";
+import { finalReviewResultsForAttempt, repeatedDeterministicReview } from "../../../assessment/functions/final-review-result.js";
 import { reserveFinalReviewContinuation } from "../../../assessment/functions/final-review-continuation.js";
 // lib/domains/worker/functions/helpers/assessment-pipeline.js
 //
@@ -799,6 +800,10 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
       _assessment_infrastructure_review: true, _verification_blocked: true };
   }
   const previousFinalReview = latestFinalReview(job.id);
+  if (previousFinalReview?.outcome === "findings" && (
+    ["reserved", "reused"].includes(continuation.status)
+    || repeatedDeterministicReview(finalReviewResultsForAttempt({ jobId: job.id, attemptId: previousFinalReview.attempt_id }))
+  )) return finalReviewRepairVerdict(previousFinalReview, { cwd, verifyCurrentCandidate: true });
   const historicalFinalReview = previousFinalReview?.review_identity
     ? ["PREVIOUS FINAL REVIEW (historical evidence for an earlier candidate; inspect and verify the current change):",
       ...(["reserved", "reused"].includes(continuation.status)
@@ -2308,7 +2313,7 @@ export async function runPostExecutionAssessment(worker, {
           : null,
         siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
         repairDependencies: wtPath
-          ? (receipt) => repairTestDependencies(worker, job, wtPath, {
+          ? (receipt, executionCwd = wtPath) => repairTestDependencies(worker, job, executionCwd, {
               signal: worker._abortControllers?.get(job.id)?.signal || null,
               phase: "assessor",
               receipt,

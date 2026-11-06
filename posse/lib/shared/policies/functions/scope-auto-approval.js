@@ -52,6 +52,7 @@ const PROJECT_MANIFEST_BASENAMES = new Set([
 ]);
 const PROJECT_MANIFEST_RE = /^(?:tsconfig|jsconfig)(?:\.[^/]+)?\.json$/i;
 
+const WRITABLE_TEST_DIRECTORY_RE = /(?:^|\/)(?:tests?|__tests__|__snapshots__|specs?|testdata)\//i;
 const TEST_SEGMENT_RE = /(?:^|\/)(?:tests?|__tests__|__snapshots__|specs?|testdata|fixtures)\//i;
 const TEST_FILENAME_RE = /(?:^|\/)(?:test_[^/]+|conftest\.py|[^/]+(?:\.test|\.spec|_test|_spec|-test|-spec)\.[a-z0-9]+)$/i;
 const SNAPSHOT_RE = /\.snap$/i;
@@ -66,6 +67,13 @@ function isUnderRoot(relPath, root) {
   const normalizedRoot = normalizeScopePath(root).replace(/\/+$/, "");
   if (!normalizedRoot || normalizedRoot === "." || normalizedRoot === "/") return false;
   return relPath === normalizedRoot || relPath.startsWith(`${normalizedRoot}/`);
+}
+
+// write_tests is authority for test directories, including helpers/fixtures
+// beneath them. A test-like basename beside production code is not a folder
+// grant; it still follows the configured routine-expansion policy.
+export function isTestDirectoryPath(relPath) {
+  return WRITABLE_TEST_DIRECTORY_RE.test(normalizeScopePath(relPath));
 }
 
 export function isTestCollateralPath(relPath) {

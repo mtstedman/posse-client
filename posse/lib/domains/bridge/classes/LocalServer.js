@@ -680,15 +680,17 @@ export class LocalServer {
     // Node can finish a DNS/bind callback after close() on a not-yet-listening
     // server. Wait for startup to settle so shutdown cannot leak that listener.
     try { await this.startPromise; } catch { /* failed bind has no listener */ }
-    for (const client of this.clients) {
-      this.closeWs(client, "");
-      try { client.socket.destroy(); } catch {}
-    }
-    this.clients.clear();
-    if (!this.server) return Promise.resolve();
+    const closingClients = [...this.clients].map((client) => new Promise((resolve) => {
+      if (client.socket.destroyed) return resolve();
+      client.socket.once("close", resolve);
+      // Let the close frame flush before retiring the socket. closeWs already
+      // bounds this wait with a destroy timer if the peer never closes.
+      if (!client.closing) this.closeWs(client, "");
+    }));
+    if (!this.server) return Promise.all(closingClients);
     const server = this.server;
     this.server = null;
-    return new Promise((resolve) => {
+    const closingServer = new Promise((resolve) => {
       try {
         server.close(() => resolve());
         // Active HTTP bodies can otherwise hold shutdown open indefinitely.
@@ -699,6 +701,7 @@ export class LocalServer {
         resolve();
       }
     });
+    await Promise.all([closingServer, ...closingClients]);
   }
 }
 

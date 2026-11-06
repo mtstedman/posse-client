@@ -1,3 +1,4 @@
+import { isTestCollateralPath } from "../../../shared/policies/functions/scope-auto-approval.js";
 import fs from "node:fs";
 import path from "node:path";
 import { safePath, isSensitiveEnvFileOrTargetPath } from "../../../shared/tools/functions/toolkit/index.js";
@@ -20,7 +21,7 @@ function scopeCreateProjectDir(workspaceCwd) {
 // this outside the queue's write transaction and treat a throw as "grant stands,
 // placeholder missing" (see materializeApprovedCreates).
 export function materializeScopeCreates(workspaceCwd, entries, { jobId, gateId = null } = {}) {
-  const creates = entries.filter((entry) => entry.access === "create");
+  const creates = entries.filter((entry) => entry.access === "create" && !isTestCollateralPath(entry.path));
   if (!creates.length || !workspaceCwd) return [];
   if (!fs.existsSync(workspaceCwd)) throw new Error(`Scope create skipped: checkout no longer exists at ${workspaceCwd}`);
   const projectDir = scopeCreateProjectDir(workspaceCwd);

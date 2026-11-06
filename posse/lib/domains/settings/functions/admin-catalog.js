@@ -325,8 +325,9 @@ const group = (id, pane, label, keys, hint = null) => Object.freeze({
 });
 
 export const SETTINGS_GROUPS = Object.freeze([
-  group("gate-policies", "approvals", "Gate policies", ["plan_approval_mode", ...APPROVAL_POLICY_SETTINGS.map(({ key }) => key)]),
-  group("approval-controls", "approvals", "Merge and scope controls", ["auto_merge_completed", "scope_auto_approval", "fix_scope_handoff_guard", "file_request_low_risk_extensions", "posse_max_file_request_depth", "headless_human_timeout_sec"]),
+  group("gate-policies", "approvals", "Gate policies", ["plan_approval_mode", ...APPROVAL_POLICY_SETTINGS.map(({ key }) => key).filter((key) => key !== "approval_policy_file_scope_approval")], "Ask, choose an action automatically, or fail closed when unattended. Installer and push automation require their own saved policy."),
+  group("scope-approvals", "approvals", "Scope approvals", ["approval_policy_file_scope_approval", "scope_auto_approval", "fix_scope_handoff_guard", "file_request_low_risk_extensions", "posse_max_file_request_depth"], "Jobs that must write tests can write in test directories. For extra files, routine approval is on by default; Reject and Fail closed override it."),
+  group("approval-controls", "approvals", "Other approval controls", ["auto_merge_completed", "headless_human_timeout_sec"]),
   // ── General ──
   group("logging", "general", "Logging", ["advanced_logging"]),
   group("workflow", "general", "Workflow", [

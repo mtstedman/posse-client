@@ -1,3 +1,4 @@
+import { unfinishedTestOwners } from "../../queue/functions/job-test-scope.js";
 // Deterministic evidence final_review gathers beyond the planner's declared
 // tests: the changed-file lint/typecheck the assessment harness runs after
 // handoff, and the unit test files the change itself adds or edits. Both run
@@ -55,7 +56,7 @@ export function changedTestPlan(job, payload, change, declaredPlan, {
 } = {}) {
   if (!cwd || !["dev", "fix"].includes(String(job?.job_type || ""))
     || String(payload?.task_mode || "code") !== "code") return null;
-  const declared = new Set([
+  const declared = new Set(declaredPlan?.deferred_checks ? [] : [
     ...(Array.isArray(declaredPlan?.unit_test_paths) ? declaredPlan.unit_test_paths : []),
     ...(Array.isArray(declaredPlan?.covered_unit_test_paths) ? declaredPlan.covered_unit_test_paths : []),
   ]);
@@ -64,8 +65,9 @@ export function changedTestPlan(job, payload, change, declaredPlan, {
   const capability = discoverUnitTestCapability({ projectDir: cwd });
   if (!capability.available) return null;
   const discovered = new Set(capability.files);
+  const foreignOwners = unfinishedTestOwners(job, payload);
   const candidates = [...new Set([...existingChangedFiles(cwd, change), ...lineage])]
-    .filter((file) => discovered.has(file) && !declared.has(file));
+    .filter((file) => discovered.has(file) && !declared.has(file) && !foreignOwners.has(file));
   if (candidates.length === 0) return null;
   // The changed files run alone: the declared plan already carries the
   // repository's registered checks. The lineage base stays on the plan so a

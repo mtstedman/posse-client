@@ -1,3 +1,5 @@
+import { unfinishedTestOwners } from "../../../queue/functions/job-test-scope.js";
+import { scopeJobTestPlan } from "./job-test-plan.js";
 // Deterministic test execution owned by the worker, outside model context.
 //
 // A planner or benchmark harness identifies one explicit test command. The
@@ -5,7 +7,7 @@
 // worktree, then once per assessed commit. Full bounded output is persisted as
 // an artifact; only a compact before/after receipt is rendered for ASSESSOR.
 
-import { TEST_EXECUTION_RECEIPT_SCHEMA_VERSION as RECEIPT_SCHEMA_VERSION, REUSABLE_RECEIPT_STATUSES, SCOPE_ATTRIBUTABLE_DELTAS } from "../../../../catalog/verification.js";
+import { JOB_TESTS_DEFERRED_TO_INTEGRATION, TEST_EXECUTION_RECEIPT_SCHEMA_VERSION as RECEIPT_SCHEMA_VERSION, REUSABLE_RECEIPT_STATUSES, SCOPE_ATTRIBUTABLE_DELTAS } from "../../../../catalog/verification.js";
 import { sha256 } from "../../../../shared/format/functions/sha256.js";
 import { validatePlannerTestCommandForRepository } from "../../../verification/functions/planner-test-command.js";
 export { validatePlannerTestCommand, validatePlannerTestCommandForRepository, operationalCommandApprovalRequest } from "../../../verification/functions/planner-test-command.js";
@@ -604,6 +606,7 @@ async function executeReceipt({
     intent: plan.intent || "test",
     verification_plan_id: plan.verification_plan?.plan_id || plan.plan_id,
     verification_plan: plan.verification_plan || null,
+    ...(plan.deferred_checks ? { deferred_checks: plan.deferred_checks, blocked_test_paths: plan.blocked_test_paths || [] } : {}),
     normalized_argv: normalizedArgv,
     normalized_cwd: plan.cwd_relative || ".",
     baseline_commit_hash: phase === "baseline" ? (commitHash || actualCommit) : null,
@@ -644,7 +647,8 @@ async function executeReceipt({
       validation_error: plan.validation_error,
       commit_hash: commitHash || actualCommit,
       ...receiptIdentity,
-      status: "rejected",
+      status: plan.validation_error === JOB_TESTS_DEFERRED_TO_INTEGRATION ? "skipped" : "rejected",
+      ...(plan.validation_error === JOB_TESTS_DEFERRED_TO_INTEGRATION ? { required: false } : {}),
       ok: null,
       exit_code: null,
       duration_ms: 0,
@@ -954,6 +958,14 @@ export async function __testRetryAfterDependencyRepair(receipt, repairDependenci
 
 function pruneJobTests(job, payload, cwd) {
   payload ||= {};
+  // Mid-attempt test grants are durable; the caller's payload can predate them.
+  const durableJob = job?.id ? getDb().prepare("SELECT payload_json FROM jobs WHERE id = ?").get(job.id) : null;
+  if (durableJob) {
+    const durable = JSON.parse(durableJob.payload_json || "{}");
+    for (const field of ["files_to_modify", "files_to_create", "files_to_delete"]) {
+      payload[field] = [...new Set([...(payload[field] || []), ...(durable[field] || [])])];
+    }
+  }
   const baseline = job?.id ? findLatestFrozenTestBaseline(job.id) : null;
   const withBaseline = baseline?.status === "passed" && baseline.commit_hash
     && baseline.commit_hash !== payload._test_capability_base_commit
@@ -1076,7 +1088,7 @@ export async function ensurePreDevelopmentTestBaseline({
     : runAt(cwd, cleanupWorktree);
 }
 
-/** A path test for the task's declared scope; an undeclared scope admits every path. */
+/** Select only the task's declared paths; an empty scope owns no shared changes. */
 function declaredScopeIncludes(payload = {}) {
   const normalize = (value) => String(value || "").trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
   const files = new Set(["files_to_modify", "files_to_create", "files_to_delete"]
@@ -1084,7 +1096,7 @@ function declaredScopeIncludes(payload = {}) {
     .map(normalize)
     .filter(Boolean));
   const roots = (Array.isArray(payload?.create_roots) ? payload.create_roots : []).map(normalize).filter(Boolean);
-  if (files.size === 0 && roots.length === 0) return () => true;
+  if (files.size === 0 && roots.length === 0) return () => false;
   return (candidate) => files.has(candidate) || roots.some((root) => candidate === root || candidate.startsWith(`${root}/`));
 }
 
@@ -1136,7 +1148,8 @@ export async function lineageChangedTestPaths({
     return { ...none, base };
   }
   const inScope = declaredScopeIncludes(payload);
-  const scopePaths = changed.paths.filter((candidate) => inScope(candidate));
+  const foreignOwners = unfinishedTestOwners(job, payload);
+  const scopePaths = changed.paths.filter((candidate) => inScope(candidate) && !foreignOwners.has(candidate));
   const capability = discoverUnitTestCapability({ projectDir: cwd });
   const excluded = new Set(exclude);
   const runnable = (candidates) => candidates
@@ -1220,6 +1233,8 @@ export async function ensurePostChangeTestReceipt({
   let plan = baseline
     ? frozenTestPlanFromReceipt(baseline)
     : resolveFrozenTestPlan(job, payload, { cwd });
+  // Upgrade saved broad-suite receipts as well as newly planned jobs.
+  plan = scopeJobTestPlan(plan, { job, payload, cwd });
   // An in-flight job may already have failed receipts for the discarded
   // selection. Record its current unavailable result rather than leaving a
   // historical failure as the latest evidence for this same candidate.
@@ -1287,10 +1302,9 @@ export async function ensurePostChangeTestReceipt({
   // plan's: they ran to a pass or a fail. One that never ran to a result runs
   // again on reassessment, with the plan.
   const changedTestPaths = JSON.stringify(plan.changed_unit_test_paths || []);
-  const currentHead = await currentCommit(cwd);
-  const currentPorcelain = await porcelain(cwd);
-  const reusableTreeFingerprint = currentHead && currentPorcelain === ""
-    ? worktreeFingerprint(currentHead, currentPorcelain) : null;
+  // The detached candidate is immutable even while the shared branch moves
+  // or siblings write. Reuse its receipt by the assessed tree, not live dirt.
+  const reusableTreeFingerprint = assessedCommit ? worktreeFingerprint(assessedCommit, "") : null;
   // A pass whose coverage was never established is not reused either: a
   // reassessment, or a retry after the runner was fixed, runs it again under
   // the current parsers instead of replaying the same unverified result.
@@ -1323,35 +1337,22 @@ export async function ensurePostChangeTestReceipt({
       ...debt,
     };
   }
-  const firstPostChange = await executeReceipt({
-    job,
-    plan,
-    phase: "post_change",
-    cwd,
-    commitHash: assessedCommit,
-    attemptId,
-    policy: effectivePolicy,
-    cleanupWorktree,
-    siblingOwnedPaths,
-    baselineReceipt: baseline,
-  });
-  const postChange = await retryAfterDependencyRepair(
-    firstPostChange,
-    repairDependencies,
-    (dependencyRepair) => executeReceipt({
-      job,
-      plan,
-      phase: "post_change",
-      cwd,
-      commitHash: assessedCommit,
-      attemptId,
-      policy: effectivePolicy,
-      cleanupWorktree,
-      siblingOwnedPaths,
-      baselineReceipt: baseline,
-      dependencyRepair,
-    }),
-  );
+  const runAt = async (executionCwd, cleanup) => {
+    const execute = (dependencyRepair = null) => executeReceipt({
+      job, plan, phase: "post_change", cwd: executionCwd, commitHash: assessedCommit,
+      attemptId, policy: effectivePolicy, cleanupWorktree: cleanup,
+      siblingOwnedPaths: executionCwd === cwd ? siblingOwnedPaths : null,
+      baselineReceipt: baseline, dependencyRepair,
+    });
+    return retryAfterDependencyRepair(await execute(),
+      typeof repairDependencies === "function" ? (receipt) => repairDependencies(receipt, executionCwd) : null,
+      execute);
+  };
+  // Source and cleanup both belong to the detached candidate, never the live
+  // shared checkout. Sibling writes cannot change this receipt mid-command.
+  const postChange = assessedCommit
+    ? await withBaselineCheckout({ cwd, commit: assessedCommit, run: runAt })
+    : await runAt(cwd, cleanupWorktree);
   const debt = await debtIdentitiesFor(postChange);
   return {
     baseline,

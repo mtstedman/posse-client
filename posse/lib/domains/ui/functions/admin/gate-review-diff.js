@@ -26,6 +26,7 @@ function shortHash(hash) {
 /** One-line description of the change a gate judges. */
 export function gateReviewDiffTitle(target) {
   if (!target) return "";
+  if (target.scope === "scope_request") return `Requested scope for job #${target.job_id ?? "?"}`;
   if (target.scope === "work_item") {
     const branch = target.branch_name ? ` branch ${target.branch_name}` : "";
     return `WI#${target.work_item_id ?? "?"}${branch} against its merge base`;
@@ -68,6 +69,21 @@ export async function buildGateReviewDiff({
     return result;
   }
   if (result.unavailable) return result;
+
+  if (target.scope === "scope_request") {
+    const entries = target.entries || [];
+    result.omittedFiles = Math.max(0, entries.length - maxFiles);
+    let remaining = Math.max(0, maxLines);
+    result.files = entries.slice(0, maxFiles).map((entry) => {
+      const full = [`${entry.access}: ${entry.path}`, ...String(entry.reason || "No reason supplied.").split(/\r?\n/)];
+      const lines = full.slice(0, remaining);
+      remaining = Math.max(0, remaining - lines.length);
+      if (lines.length < full.length) lines.push("# scope detail truncated");
+      return { path: entry.path, status: entry.access === "create" ? "A" : "M",
+        additions: null, deletions: null, binary: false, lines };
+    });
+    return result;
+  }
 
   const snapshot = target.scope === "work_item"
     ? await buildAdminGitDiffSnapshot({

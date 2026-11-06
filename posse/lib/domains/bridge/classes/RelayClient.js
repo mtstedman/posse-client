@@ -13,6 +13,7 @@ const DEFAULT_RECONNECT_BASE_MS = 1000;
 const DEFAULT_RECONNECT_MAX_MS = 30000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 20000;
 const DEFAULT_MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
+const DEFAULT_CLOSE_TIMEOUT_MS = 2000;
 // The relay pings every 15s and drops peers idle past 45s, but on a half-open
 // socket (laptop sleep/resume, NAT expiry, network switch) that close never
 // reaches us — without a local deadline the bridge sits "online" forever while
@@ -98,6 +99,7 @@ export class RelayClient extends EventEmitter {
     handshakeTimeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS,
     maxBufferedBytes = DEFAULT_MAX_BUFFERED_BYTES,
     idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+    closeTimeoutMs = DEFAULT_CLOSE_TIMEOUT_MS,
   } = {}) {
     super();
     this.url = url;
@@ -117,6 +119,8 @@ export class RelayClient extends EventEmitter {
     this.handshakeTimeoutMs = Math.max(10, Number(handshakeTimeoutMs) || DEFAULT_HANDSHAKE_TIMEOUT_MS);
     this.maxBufferedBytes = Math.max(1024, Number(maxBufferedBytes) || DEFAULT_MAX_BUFFERED_BYTES);
     this.idleTimeoutMs = Math.max(50, Number(idleTimeoutMs) || DEFAULT_IDLE_TIMEOUT_MS);
+    this.closeTimeoutMs = Math.max(10, Number(closeTimeoutMs) || DEFAULT_CLOSE_TIMEOUT_MS);
+    this.stopPromise = null;
     this.socket = null;
     this.stopped = true;
     this.reconnectTimer = null;
@@ -453,10 +457,11 @@ export class RelayClient extends EventEmitter {
   }
 
   close() {
-    this.stop();
+    return this.stop();
   }
 
   stop() {
+    if (this.stopPromise) return this.stopPromise;
     this.stopped = true;
     this.clearHandshakeTimeout();
     this.clearIdleWatchdog();
@@ -467,10 +472,24 @@ export class RelayClient extends EventEmitter {
     const socket = this.socket;
     this.socket = null;
     this.connectionGeneration += 1;
-    try { socket?.close?.(); } catch {}
     this.updateStatus(this.token ? "stopped" : "disabled", {
       authenticated: false,
       connected_at: null,
     });
+    if (!socket || socket.readyState === (this.WebSocketImpl?.CLOSED ?? 3)) return Promise.resolve();
+    // The CLI exits explicitly after bridge teardown. Keep shutdown pending
+    // until the close handshake finishes, but bound the wait for a lost peer.
+    const closing = new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        socket.removeEventListener?.("close", finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, this.closeTimeoutMs);
+      socket.addEventListener("close", finish, { once: true });
+      try { socket.close(1000); } catch { finish(); }
+    });
+    this.stopPromise = closing.finally(() => { this.stopPromise = null; });
+    return this.stopPromise;
   }
 }

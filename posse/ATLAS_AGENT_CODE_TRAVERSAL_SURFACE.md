@@ -716,7 +716,7 @@ Remote roles: `dev`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Request explicit user approval to install the dependencies declared in a package directory's manifest in this job's worktree, with its package manager (npm, pnpm, yarn, bun, Composer, pip, uv, Poetry, Bundler, Cargo or Go). The manager is detected from the manifest and lockfile; pass manager when several apply. Edit the manifest first and include its lockfile in writable scope (npm and Go also need the manifest). Every invocation needs its own approval; scope auto-approval does not apply. Returns after approval and execution, rejection, or expiry.
+Request environment-setup approval (Ask by default) to install the dependencies declared in a package directory's manifest in this job's worktree, with its package manager (npm, pnpm, yarn, bun, Composer, pip, uv, Poetry, Bundler, Cargo or Go). The manager is detected from the manifest and lockfile; pass manager when several apply. Edit the manifest first and include its lockfile in writable scope (npm and Go also need the manifest). Each invocation follows the saved environment-setup policy; scope auto-approval does not apply. Returns after approval and execution, rejection, or expiry.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1147,7 +1147,7 @@ Remote roles: `dev`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Request explicit approval for SQLite/Postgres/MySQL setup with a reusable application connector. SQLite creates a new ignored worktree-local file and leaves Posse grants unchanged. Server engines use an existing server reference or explicit local_server system provisioning, write ignored environment settings and scoped portable examples, and register approved permissions. Existing data and registrations are preserved. Each invocation requires approval; existing-data migrations are managed separately.
+Request environment-setup approval (Ask by default) for SQLite/Postgres/MySQL setup with a reusable application connector. SQLite creates a new ignored worktree-local file and leaves Posse grants unchanged. Server engines use an existing server reference or explicit local_server system provisioning, write ignored environment settings and scoped portable examples, and register approved permissions. Existing data and registrations are preserved. Each invocation follows the saved environment-setup policy; existing-data migrations are managed separately.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|
@@ -1175,7 +1175,7 @@ Remote roles: `planner`.
 | Parallel calls | No |
 | System-prefetch capable | No |
 
-Before development, propose an ordered package-manager batch (npm, pnpm, yarn, bun, Composer, pip, uv, Poetry, Bundler, Cargo or Go) and optional SQLite/Postgres/MySQL database for explicit user approval. Initializes missing manifests, installs packages, creates database environment variables and portable examples, registers approved Posse database permissions, and commits setup source files including an application connector in the primary checkout. Choose an existing server reference or explicit local_server system provisioning. Live .env/database files remain ignored. Scripts/plugins default off where the manager can disable them. Wait for a successful setup commit before handing off development. No arbitrary shell commands. Installed manifests are authoritative and must not be planned as files_to_create.
+Before development, propose an ordered package-manager batch (npm, pnpm, yarn, bun, Composer, pip, uv, Poetry, Bundler, Cargo or Go) and optional SQLite/Postgres/MySQL database under the environment-setup approval policy (Ask by default). Initializes missing manifests, installs packages, creates database environment variables and portable examples, registers approved Posse database permissions, and commits setup source files including an application connector in the primary checkout. Choose an existing server reference or explicit local_server system provisioning. Live .env/database files remain ignored. Scripts/plugins default off where the manager can disable them. Wait for a successful setup commit before handing off development. No arbitrary shell commands. Installed manifests are authoritative and must not be planned as files_to_create.
 
 | Parameter | Type | Requirement | Constraints | Description |
 |---|---|---|---|---|

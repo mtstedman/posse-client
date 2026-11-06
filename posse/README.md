@@ -257,6 +257,24 @@ explicit settings become `fail_closed` and their previous values are audited.
 If two open gates would acquire the same identity, migration rolls back instead
 of discarding either decision.
 
+Admin → Approvals exposes each gate policy, including environment setup and
+push offers. These two default to Ask and require their own saved policy for
+automatic action; general auto-approve flags do not enable them. The Scope
+approvals group keeps the file-scope policy beside routine auto-approval, which
+is on by default. Saved Reject or Fail closed policies override routine approval.
+
+When a developer or fix job has `write_tests: true`, it can claim new files
+inside `test/`, `tests/`, `__tests__/`, `spec/`, `specs/`, `__snapshots__/`, and
+`testdata/` without another approval. Each claim adds an exact writable path;
+existing tests require explicit scope, and another unfinished job's tests
+cannot be claimed. `tests_to_run` grants execution permission only. Test
+creation grants do not create empty placeholder files.
+
+Per-job verification runs the job's selected or owned tests. Commands that
+discover the full suite remain integration obligations at the isolated merge
+gate. Post-change verification runs the assessed commit in a detached checkout,
+so concurrent edits and test cleanup cannot modify another agent's work.
+
 The flag applies only to that run. Omitting it, or using `--scope-mode=default`,
 preserves the existing `scope_auto_approval` policy and interactive or
 non-interactive behavior. That policy already grants developers and fixes test
@@ -1148,6 +1166,11 @@ reviewed bytes are committed, the job completes directly from that review,
 including after restart. It does not run another assessor or reapply the old
 assessment test/confidence policies. Changed code or a changed task contract
 requires fresh verification. The accepted pass is announced once.
+
+After three unsuccessful review rounds, the saved review findings initiate the
+next fix; Posse does not start another assessor for that candidate. A final edit
+after the cap preserves the findings as context to recheck, not proof that the
+new code is broken. Continuations retain their work-item limit.
 Developers report an unrecoverable blocker with `final_review({ blocker: "..." })`.
 This saves BLOCKED and stops both sessions without running another review or
 requiring a separate handoff call.
@@ -1613,13 +1636,13 @@ Local `-r`/`--requirement` and `-c`/`--constraint` includes are shown and
 fingerprinted recursively. Includes must stay inside the package directory;
 remote/dynamic includes, cycles, and graphs over 32 files or 32 KB are refused.
 Changing an included file invalidates the approval.
-This separate installer also requires explicit approval and leaves its
+This separate installer follows the environment-setup approval policy and leaves its
 lockfile for the ordinary developer commit.
 
 `setup_database` supports the same PostgreSQL/MySQL connection and local-server
 options. For SQLite it creates a **new local file** at an ignored path, optionally
 applying a SQL file containing CREATE TABLE/INDEX statements. It requires a
-separate user approval, never overwrites existing data, and never grants
+separate environment-setup approval (Ask by default), never overwrites existing data, and never grants
 `project_db_query` permission. Keep the schema and repeatable initialization in
 source control; runtime databases remain local to their worktree.
 It requires `connection_file` in the same shape. On a developer branch the

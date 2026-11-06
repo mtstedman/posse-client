@@ -1,3 +1,5 @@
+import { approvalResolutionAuthorized } from "../../../catalog/approval-policies.js";
+import { getAccountSetting } from "../../settings/functions/account-settings.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createJob, getJob, getLatestAttempt, getHumanGate, listJobsByWorkItem,
@@ -41,9 +43,9 @@ export async function requestEnvironmentSetup(tool, args, context) {
       priority: "high", model_tier: "cheap",
       payload_json: JSON.stringify({
         original_job_id: job.id, review_type: ENVIRONMENT_SETUP_REVIEW_TYPE,
-        requires_interactive_approval: true, attempt_id: context.attemptId,
+        attempt_id: context.attemptId,
         proposal, execution: null, questions: [environmentSetupQuestion(proposal)],
-        context: "An installer is waiting for your decision. This approval is separate from file-scope approval and cannot be granted automatically.",
+        context: "This installer uses the environment-setup approval policy, independently of file-scope approval.",
       }),
     });
     // Only a proposal the user can actually decide makes planning wait for
@@ -75,13 +77,13 @@ function approvedRequest(request, context) {
   return { job, data, gate };
 }
 
-function requireHumanApproval(request, context) {
+function requireSetupApproval(request, context) {
   const record = approvedRequest(request, context);
   const { job, data, gate } = record;
   const resolution = JSON.parse(gate?.resolution_payload_json || "{}");
   if (gate?.gate_state !== "resolved" || gate.resolution_action !== "approve"
-    || resolution.source !== "human" || resolution.unattended === true
-    || ["failed", "canceled"].includes(job.status)) throw new Error("Explicit user approval is missing.");
+    || !approvalResolutionAuthorized(data, resolution, getAccountSetting)
+    || ["failed", "canceled"].includes(job.status)) throw new Error("Environment setup approval is missing.");
   if (data.execution) throw new Error("This installer approval has already been used. Inspect the result before requesting a new approval.");
   return record;
 }
@@ -92,14 +94,14 @@ export async function awaitEnvironmentSetupDecision({ request, context, signal, 
     while (true) {
       if (signal?.aborted) throw new Error("Environment setup approval canceled.");
       if (Date.now() >= deadline) throw new Error("Environment setup approval expired. Request a new approval to retry.");
-      const { job, gate } = approvedRequest(request, context);
+      const { job, data, gate } = approvedRequest(request, context);
       if (gate?.gate_state === "resolved") {
         const resolution = JSON.parse(gate.resolution_payload_json || "{}");
-        const explicit = resolution.source === "human" && resolution.unattended !== true;
+        const explicit = approvalResolutionAuthorized(data, resolution, getAccountSetting);
         if (gate.resolution_action !== "approve" || !explicit) {
           return explicit
-            ? { ok: false, approved: false, status: "rejected", explicit: true, message: "The user rejected this setup; no installer ran. Plan without it, or propose a revised batch." }
-            : { ok: false, approved: false, status: "rejected", message: "No installer ran. Explicit user approval is required." };
+            ? { ok: false, approved: false, status: "rejected", explicit: true, message: "The setup was rejected; no installer ran. Plan without it, or propose a revised batch." }
+            : { ok: false, approved: false, status: "rejected", message: "No installer ran. Human approval or an explicit environment-setup policy is required." };
         }
         return { ok: true, approved: true };
       }
@@ -123,13 +125,13 @@ export async function executeApprovedEnvironmentSetup(request, context, { execut
   }, 200);
   timer.unref?.();
   const claim = () => runInTransaction(() => {
-    const { job, data } = requireHumanApproval(request, context);
+    const { job, data } = requireSetupApproval(request, context);
     // Persist BEFORE launching. A crash or retry never silently replays an
     // approved installer whose effects may already exist.
     updateJobPayload(job.id, JSON.stringify({ ...data, execution: { status: "started", at: new Date().toISOString() } }));
   });
   try {
-    const { data } = requireHumanApproval(request, context);
+    const { data } = requireSetupApproval(request, context);
     const result = await execute(data.proposal, context, { signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal, beforeExecute: claim });
     runInTransaction(() => {
       const job = getJob(request.approval_job_id);

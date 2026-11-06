@@ -1,4 +1,3 @@
-import { PINNED_APPROVAL_GATES, approvalPolicyKey } from "../../../catalog/approval-policies.js";
 import { IMAGE_PROVIDER_OPTIONS, MODEL_SETTING_DEFS, PROVIDER_LABELS, getDefaultImageModel, getDefaultImageProvider, getDefaultTierModel } from "../../providers/functions/model-catalog.js";
 import { ADMIN_AGENT_SETTING_SECTIONS, ADMIN_CREDENTIAL_SETTING_DEFS, ADMIN_IMAGE_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS, ADMIN_PROVIDER_SETTING_SECTIONS, ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS, HIDDEN_SETTING_KEYS, PROJECT_DB_SETTING_DEFS, PROVIDER_SETTING_KEYS, SETTINGS_GROUPS, SETTINGS_PANES, SKILL_SETTING_PREFIX, getAdminSettingPresentation, settingsGroupForKey, settingsPaneForKey, toDisplaySettingKey } from "./admin-catalog.js";
 import { ADMIN_MAX_OPTIONS_PER_SETTING, ADMIN_MAX_SETTINGS, ADMIN_MAX_TEXT_CHARS, ADMIN_MAX_VALUE_CHARS, ADMIN_PROTOCOL } from "../../../catalog/settings.js";
@@ -74,9 +73,6 @@ function createRow({
   unavailableReason = null,
   origin = "catalog",
 }) {
-  if (PINNED_APPROVAL_GATES.map(approvalPolicyKey).includes(key)) {
-    editable = false; unavailableReason = "interactive_required";
-  }
   let options = normalizeOptions(definition.options || []);
   const valueType = settingValueType({ ...definition, sensitive });
   if (options.length > ADMIN_MAX_OPTIONS_PER_SETTING) {

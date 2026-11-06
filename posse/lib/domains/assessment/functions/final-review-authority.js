@@ -233,22 +233,29 @@ export async function authoritativeFinalReview(job, payload, cwd) {
   if (review.outcome === "findings") {
     const correction = await finalReviewFindingCorrection(review, { job, payload, cwd });
     if (correction) return unresolved(correction);
-    const reasons = (review.findings || []).map((finding) => [finding.criterion,
-      ...(finding.paths || []), ...(finding.refs || []), finding.evidence,
-      finding.suggested_verification].filter(Boolean).join(" — "));
-    if (!reasons.length) return unresolved("Final review reported findings without their details; an operator must resolve the review.");
-    const diagnostics = [review.declared_tests, review.changed_tests].filter(Boolean)
-      .map((run) => [run.command, run.status, run.failure_summary, compactTestFailureOutput(run)].filter(Boolean).join("\n"));
-    return { verdict: "fail", confidence: "high", reasons, human_questions: [],
-      _deterministic_evidence: { execution_root: cwd,
-        diagnostic_paths: [review.declared_tests, review.changed_tests].flatMap(testReceiptDiagnosticPaths) },
-      spawn_jobs: [{ job_type: "fix", title: "Fix final review findings", payload: {
-        instructions: [...reasons, review.repair, ...diagnostics].filter(Boolean).join("\n\n"),
-      } }], _final_reviewer_agent_call_id: review.reviewer_agent_call_id };
+    return finalReviewRepairVerdict(review, { cwd });
   }
   const verdict = { verdict: "pass", confidence: "high", reasons: [review.summary || "Final review passed for the exact committed change and task contract."],
     spawn_jobs: [], human_questions: [], _final_reviewer_agent_call_id: review.reviewer_agent_call_id };
   if (reviewedCommit) verdict._final_review_commit = reviewedCommit;
   acceptedPasses.set(verdict, job.id);
   return verdict;
+}
+
+
+// The review owns its follow-up repair, even after the developer reaches the
+// review ceiling. A new assessor would discard that boundary and repeat it.
+export function finalReviewRepairVerdict(review, { cwd, verifyCurrentCandidate = false } = {}) {
+  const reasons = (review.findings || []).map((finding) => [finding.criterion,
+      ...(finding.paths || []), ...(finding.refs || []), finding.evidence,
+    finding.suggested_verification].filter(Boolean).join(" — "));
+  if (!reasons.length) return { verdict: "needs_review", confidence: "none", reasons: ["Final review reported findings without their details; an operator must resolve the review."], spawn_jobs: [], _disable_internal_retry: true, _verification_blocked: true };
+  const diagnostics = [review.declared_tests, review.changed_tests].filter(Boolean)
+    .map((run) => [run.command, run.status, run.failure_summary, compactTestFailureOutput(run)].filter(Boolean).join("\n"));
+  return { verdict: "fail", confidence: "high", reasons, human_questions: [],
+    _deterministic_evidence: { execution_root: cwd,
+      diagnostic_paths: [review.declared_tests, review.changed_tests].flatMap(testReceiptDiagnosticPaths) },
+    spawn_jobs: [{ job_type: "fix", title: "Fix final review findings", payload: {
+      instructions: [verifyCurrentCandidate ? "The candidate changed after review. Verify these recorded findings against current files; fix only remaining issues and call final_review. Preserve completed work." : null, ...reasons, review.repair, ...diagnostics].filter(Boolean).join("\n\n"),
+    } }], _final_reviewer_agent_call_id: review.reviewer_agent_call_id, _disable_internal_retry: true };
 }
