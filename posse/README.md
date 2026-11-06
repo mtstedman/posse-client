@@ -892,6 +892,14 @@ package bin under Node and reports a missing package as unavailable.
 like PHPUnit and `go test`. Scaffolding, watch, debug, and output-writing
 options remain excluded.
 
+Path-only `run_unit_test` calls also support Jest. They use the nearest owning
+package's installed runner and configuration, select the exact file, and disable
+watching, coverage output, and snapshot updates. Conflicting script configurations
+remain unavailable instead of guessing. Missing test prerequisites are recorded
+as infrastructure diagnostics; assertion failures remain product failures.
+Commands rejected during planning for missing prerequisites are revalidated at
+handoff and restored when they become available and still satisfy command policy.
+
 Automatic scoped checks prefer a package's `typecheck` script. When none exists,
 a package with `tsconfig.json` uses its installed TypeScript compiler with
 `--noEmit`; temporary incremental metadata is removed after the check. Posse

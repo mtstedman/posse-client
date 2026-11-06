@@ -106,10 +106,33 @@ export function pruneTestHandoff(payload, cwd, { jobId = null, findCommand = fin
     try { return linkDependencies(cwd) === true; } catch { return false; }
   };
   const rejected = payload._verification_plan_invalid;
-  if (rejected?.command && isUnrunnableTestReason(rejected.reason)
-    && !(payload._pruned_tests || []).some((entry) => entry.command === rejected.command && entry.reason === rejected.reason)) {
-    pruned.push({ command: rejected.command, reason: rejected.reason });
-    if (!Array.isArray(next.tests_to_run)) next.tests_to_run = [];
+  let restored = false;
+  if (rejected?.command && isUnrunnableTestReason(rejected.reason)) {
+    // Planning can precede package setup. Recheck the original command using
+    // current admission rules; a historical missing prerequisite is not a
+    // permanent opt-out from verification. Never replace a newer selection.
+    if (!payload.test_command || payload.test_command === rejected.command) {
+      const options = {
+        filesToCreate: Array.isArray(payload.files_to_create) ? payload.files_to_create : [],
+        findCommand, baselineCommit, posseRoot,
+      };
+      const evaluate = () => {
+        const validation = validatePlannerTestCommandForRepository(rejected.command, cwd, options);
+        return validation.ok ? testCommandCapability(rejected.command, cwd, options) : validation.reason;
+      };
+      let reason = evaluate();
+      if (linkedInstall(reason)) reason = evaluate();
+      if (!reason) {
+        next.test_command = rejected.command;
+        next._verification_plan_invalid = null;
+        next._pruned_tests = (payload._pruned_tests || []).filter((entry) => entry.command !== rejected.command);
+        restored = true;
+      }
+    }
+    if (!restored && !(payload._pruned_tests || []).some((entry) => entry.command === rejected.command && entry.reason === rejected.reason)) {
+      pruned.push({ command: rejected.command, reason: rejected.reason });
+      if (!Array.isArray(next.tests_to_run)) next.tests_to_run = [];
+    }
   }
   if (payload.test_command) {
     const evaluate = () => testCommandCapability(payload.test_command, cwd, {
@@ -135,8 +158,8 @@ export function pruneTestHandoff(payload, cwd, { jobId = null, findCommand = fin
       return false;
     });
   }
-  if (!pruned.length) return payload;
+  if (!pruned.length) return restored ? next : payload;
   log.warn("verification", "Pruned unavailable tests from handoff", { job_id: jobId, cwd, pruned });
-  next._pruned_tests = [...(payload._pruned_tests || []), ...pruned].slice(-48);
+  next._pruned_tests = [...(next._pruned_tests || []), ...pruned].slice(-48);
   return next;
 }

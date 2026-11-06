@@ -10,7 +10,6 @@ import { getAgentCallById } from "../../queue/functions/agent-calls.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import {
   FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
-  FINAL_REVIEW_MAX_DETERMINISTIC_ROUNDS,
   FINAL_REVIEW_MAX_FINDINGS,
   FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS,
   FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS,
@@ -192,11 +191,6 @@ export function finalReviewInfrastructureRetriesLeft(results = []) {
   return Math.max(0, FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS - finalReviewInfrastructureRounds(results));
 }
 
-export function finalReviewDeterministicRetriesLeft(results = []) {
-  return Math.max(0, FINAL_REVIEW_MAX_DETERMINISTIC_ROUNDS
-    - results.filter((result) => result.review_mode === FINAL_REVIEW_REVIEW_MODES.DETERMINISTIC).length);
-}
-
 /**
  * Bound repeated deterministic failures without charging a semantic review.
  * With `reviewIdentity` (the runtime's short-circuit), the rounds must be on
@@ -258,7 +252,6 @@ export function finalReviewHandoffHold({ jobId, attemptId, agentCallId, db = get
   if (!latest) {
     return "Call tools_final_review before a COMPLETE handoff: it runs the task's declared tests and an independent review of the change.";
   }
-  if (finalReviewDeterministicRetriesLeft(results) === 0) return null;
   if (latest.review_mode === FINAL_REVIEW_REVIEW_MODES.INFRASTRUCTURE) {
     // No reviewer verdict was obtained. Once the retries are spent, the
     // ordinary assessment verifies the change after handoff.

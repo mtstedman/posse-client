@@ -28,7 +28,6 @@ import { parseJobPayload } from "../../queue/functions/payload.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import {
   FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
-  FINAL_REVIEW_MAX_DETERMINISTIC_ROUNDS,
   FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS,
   FINAL_REVIEW_MAX_INVALID_REPORTS,
   FINAL_REVIEW_OBSERVATIONS,
@@ -62,7 +61,6 @@ import {
   mergeCheckFindings,
 } from "../functions/final-review-checks.js";
 import {
-  finalReviewDeterministicRetriesLeft,
   finalReviewInfrastructureRetriesLeft,
   finalReviewResultFromReport,
   finalReviewResultFromVerdict,
@@ -315,15 +313,6 @@ export class FinalReviewRuntime {
         reviews_remaining: 0,
       };
     }
-    if (finalReviewDeterministicRetriesLeft(prior) === 0) {
-      this.#release(parent);
-      return {
-        outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
-        findings: [],
-        reason: `This attempt's ${FINAL_REVIEW_MAX_DETERMINISTIC_ROUNDS} deterministic verification rounds are used; hand off for assessment of the current candidate. Existing failures are not approved.`,
-        reviews_remaining: finalReviewReviewsRemaining(prior),
-      };
-    }
     if (finalReviewInfrastructureRetriesLeft(prior) === 0) {
       this.#release(parent);
       return {
@@ -522,10 +511,6 @@ export class FinalReviewRuntime {
     if (verificationIdentity && verificationIdentity !== await this.verificationIdentity(parent.cwd, { payload: parseJobPayload(getJob(parent.jobId)) })) verificationIdentity = null;
     const recorded = [...prior, { review_mode: mode }];
     const reviewsRemaining = finalReviewReviewsRemaining(recorded);
-    if (mode === MODES.DETERMINISTIC && finalReviewDeterministicRetriesLeft(recorded) === 0) {
-      result = { ...result, reason: "This attempt's deterministic verification rounds are used; hand off for assessment. These findings remain unresolved." };
-      this.#release(parent);
-    }
     if (mode === MODES.INFRASTRUCTURE) {
       this.#release(parent);
       // The handoff waits for a bounded number of these rounds, then proceeds

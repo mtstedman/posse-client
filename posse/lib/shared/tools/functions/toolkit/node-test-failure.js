@@ -102,6 +102,22 @@ export function missingNodeTestDependency(output) {
   return name;
 }
 
+// Babel resolves configured presets/plugins before Jest can collect tests.
+// Require every failed suite to have this bootstrap failure and zero executed
+// tests, so a missing transformer cannot hide a separate product failure.
+export function missingJestTransformDependency(output) {
+  const text = String(output || "").replace(/\x1b\[[0-9;]*m/g, "");
+  if (!/^Tests:\s+0 total\s*$/mu.test(text)) return null;
+  const failed = /^Test Suites:\s+(\d+) failed\b/mu.exec(text);
+  const suites = text.split(/^FAIL\s+[^\n]+\n/gmu).slice(1);
+  if (!failed || suites.length !== Number(failed[1])) return null;
+  const dependencies = suites.map((suite) => {
+    if (!/[@]babel[\\/]core[\\/]lib[\\/]config[\\/]files[\\/]plugins\.js/u.test(suite)) return null;
+    return missingNodeTestDependency(suite);
+  });
+  return dependencies.length && dependencies.every(Boolean) ? dependencies[0] : null;
+}
+
 // Typecheck can run using an ancestor's tools while a newly declared package
 // is still absent. An installed package's bad subpath/types and undeclared
 // imports remain product failures; installing dependencies cannot fix them.

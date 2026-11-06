@@ -7,7 +7,7 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { runImmediateTransaction } from "../../queue/functions/common.js";
 import { getWiFailureThreshold } from "../../settings/functions/tunables.js";
 import { finalReviewIdentity, latestFinalReview } from "./final-review-authority.js";
-import { finalReviewDeterministicRetriesLeft, finalReviewResultsForAttempt, semanticFinalReviewResults } from "./final-review-result.js";
+import { finalReviewResultsForAttempt, semanticFinalReviewResults } from "./final-review-result.js";
 
 export async function reserveFinalReviewContinuation(job, payload, cwd) {
   const review = latestFinalReview(job?.id);
@@ -16,8 +16,7 @@ export async function reserveFinalReviewContinuation(job, payload, cwd) {
     return { status: "not_needed" };
   }
   const results = finalReviewResultsForAttempt({ jobId: job.id, attemptId });
-  if (semanticFinalReviewResults(results).length < FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT
-    && finalReviewDeterministicRetriesLeft(results) > 0) return { status: "not_needed" };
+  if (semanticFinalReviewResults(results).length < FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT) return { status: "not_needed" };
 
   let candidateIdentity;
   try {

@@ -49,5 +49,19 @@ export const VITEST_SELECTION_OPTIONS = Object.freeze({
   "--globals": false, "--no-globals": false, "--isolate": false, "--no-isolate": false,
 });
 
+// Exact Jest execution preserves package configuration and never watches,
+// updates snapshots, writes coverage, or starts a worker pool.
+export const JEST_RUNNER_ERROR_REASON = "jest_runner_error";
+export const JEST_SELECTION_OPTIONS = Object.freeze({
+  "--config": true, "-c": true, "--env": true, "--testEnvironment": true,
+  "--testEnvironmentOptions": true, "--preset": true, "--rootDir": true,
+});
+export const JEST_OVERRIDDEN_OPTIONS = Object.freeze([
+  "--runInBand", "-i", "--ci", "--watch", "--watchAll", "--coverage", "--collectCoverage",
+]);
+export const JEST_FILE_RUN_OPTIONS = Object.freeze([
+  "--runInBand", "--watch=false", "--watchAll=false", "--coverage=false", "--ci", "--updateSnapshot=false",
+]);
+
 // Issued once per Agent call on its first non-passing test tool response.
 export const TEST_FAILURE_GUIDANCE = "Before editing, identify the failing test and exact assertion or startup error; read the relevant test and implementation together. Distinguish a product defect from missing dependencies, services, configuration, or a timeout. Repair prerequisites or report the blocker instead of changing product code to hide an environment failure. State a specific cause and expected effect, make the smallest justified fix, then rerun the affected test. Do not repeat an unchanged run without new evidence or weaken/remove assertions merely to get green. If the same failure survives two targeted fixes, stop speculative edits, summarize the evidence, and reassess the cause or report the blocker. Once it passes, rerun only checks affected by subsequent changes.";

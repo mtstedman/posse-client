@@ -1,5 +1,5 @@
-import { SKIP_DIRS, TEST_HELPER_DIRS, MAX_OUTPUT_CHARS, MAX_SOURCE_SNIFF_BYTES, DEFAULT_TIMEOUT_MS, PHPUNIT_CONFIG_NAMES, OUTCOME_STATUS } from "../../../../catalog/unit-test-runner.js";
-import { browserLaunchFailuresExplainTestOutput, missingDeclaredNodeDependency } from "./node-test-failure.js";
+import { JEST_RUNNER_ERROR_REASON, SKIP_DIRS, TEST_HELPER_DIRS, MAX_OUTPUT_CHARS, MAX_SOURCE_SNIFF_BYTES, DEFAULT_TIMEOUT_MS, PHPUNIT_CONFIG_NAMES, OUTCOME_STATUS } from "../../../../catalog/unit-test-runner.js";
+import { browserLaunchFailuresExplainTestOutput, missingDeclaredNodeDependency, missingJestTransformDependency } from "./node-test-failure.js";
 import { javascriptTestRunner } from "./javascript-test-runner.js";
 import { fileURLToPath } from "node:url";
 import { spawn } from "child_process";
@@ -51,7 +51,7 @@ const ADAPTERS = Object.freeze({
 });
 
 function nodeBootstrapFailure(invocation, output, root, executionCounts = null) {
-  if (invocation.runner !== "node_test" && invocation.runner !== "vitest"
+  if (invocation.runner !== "node_test" && invocation.runner !== "vitest" && invocation.runner !== "jest"
     && !(invocation.runner === "repository_script" && invocation.executable === process.execPath)) return null;
   if (output.includes("Posse Vitest adapter unavailable:")) return "test_loader_resolution_mismatch";
   if (/MISSING DEPENDENCY.*Cannot find dependency/u.test(output)) return "test_dependency_unavailable";
@@ -59,6 +59,7 @@ function nodeBootstrapFailure(invocation, output, root, executionCounts = null) 
     ? nearestUpward(root, invocation.path, ["package.json"]) : null;
   const packageRoot = manifest ? path.dirname(path.resolve(root, manifest)) : invocation.cwd || root;
   if (missingDeclaredNodeDependency(output, packageRoot)) return "test_dependency_unavailable";
+  if (missingJestTransformDependency(output)) return "test_dependency_unavailable";
   // Vitest imports under node:test fail before collecting any product tests.
   // Keep that runner/bootstrap mismatch out of product-failure remediation.
   if (/Vitest failed to access its internal state/u.test(output)) return "test_loader_resolution_mismatch";
@@ -407,8 +408,15 @@ function classifyCompletedRun(invocation, { code, stdout, stderr, executionCount
   const counts = invocation.runner === "node_test" ? executionCounts : testExecutionCounts(output);
   const zeroTests = !!counts && (counts.total === 0 || counts.skipped === counts.total);
   const noTests = { outcome: "unavailable", reason: "no_tests_executed" };
-  if (invocation.runner === "vitest" && /No test files found/u.test(output)) return noTests;
+  if (["vitest", "jest"].includes(invocation.runner) && /No test(?: files|s) found/u.test(output)) return noTests;
   switch (invocation.runner) {
+    case "jest":
+      if (code !== 0 && /Validation Error:|Test environment .* cannot be found|Preset .* not found|Cannot find a root directory|Can.t find a root directory/u.test(output)) {
+        return { outcome: "infrastructure_error", reason: JEST_RUNNER_ERROR_REASON };
+      }
+      if (code !== 0) return { outcome: "product_failed", reason: "tests_failed" };
+      if (!counts || zeroTests) return noTests;
+      return counts.skipped > 0 ? { outcome: "unavailable", reason: "tests_skipped" } : { outcome: "passed", reason: null };
     case "node_test":
       if (code !== 0) return { outcome: "product_failed", reason: "tests_failed" };
       if (!counts || zeroTests) return noTests;

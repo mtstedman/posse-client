@@ -1,6 +1,6 @@
 import { missingPhpRuntimeCapabilities } from "./php-runtime-capability.js";
 import { NODE_PACKAGE_MANAGER_EXECUTABLES } from "../../../catalog/node-package-managers.js";
-import { browserLaunchFailuresExplainTestOutput, missingBrowserTestRuntime, missingDeclaredNodeDependency } from "../../../shared/tools/functions/toolkit/node-test-failure.js";
+import { browserLaunchFailuresExplainTestOutput, missingBrowserTestRuntime, missingDeclaredNodeDependency, missingJestTransformDependency } from "../../../shared/tools/functions/toolkit/node-test-failure.js";
 import fs from "fs";
 import path from "path";
 import { commandExecutable } from "./planner-test-command.js";
@@ -110,7 +110,7 @@ export function classifyNestedRunnerInfrastructureFailure(command, result, { pro
       || (composerSymbolMissing && composerLockedDependencyClassFileMissing(projectRoot, output))
     );
   const nodeDependencyMissing = (["node", "node.exe", "npx", "npx.cmd"].includes(executable) || packageManager)
-    && missingDeclaredNodeDependency(output, projectRoot);
+    && (missingDeclaredNodeDependency(output, projectRoot) || missingJestTransformDependency(output));
   if (!nestedExecutableMissing && !composerRunnerMissing && !composerClassMissing && !nodeDependencyMissing) return result;
   return {
     ...result,

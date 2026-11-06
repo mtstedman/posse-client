@@ -27,7 +27,7 @@ export function nodeRunnerCommand(command) {
 
 // Node's lookup order, read directly so an exports map cannot hide the bin
 // the package declares.
-function installedRunnerBin(root, runner) {
+export function installedRunnerBin(root, runner) {
   const require = createRequire(path.join(root, "package.json"));
   for (const name of RUNNER_PACKAGES[runner]) {
     const directory = (require.resolve.paths(name) || []).map((base) => path.join(base, name))

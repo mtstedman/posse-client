@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { jestTestRunner } from "./jest-test-runner.js";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -35,6 +36,7 @@ export function javascriptTestRunner(root, relative, source) {
     if (declared.size > 1 || (declared.size > 0 && nodeDeclared)) return { reason: "project_test_runner_ambiguous" };
     framework = [...declared][0] || "node:test";
   }
+  if (framework === "jest") return jestTestRunner(root, relative, manifest, scripts);
   if (framework === "vitest") {
     const variants = [];
     for (const script of scripts.split("\n").filter((value) => /\bvitest\b/u.test(value))) {

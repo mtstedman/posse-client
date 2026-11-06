@@ -22,9 +22,8 @@ export const FINAL_REVIEW_DEFAULT_MODE = "on";
 // existing findings without spending a review. Once spent, handoff proceeds and
 // the persisted review remains unresolved; no second assessor is dispatched.
 export const FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT = 3;
-// Even changing diagnostics or distinct failures cannot keep deterministic
-// verification in the developer session forever. Exhaustion is not approval.
-export const FINAL_REVIEW_MAX_DETERMINISTIC_ROUNDS = 3;
+// Deterministic repairs spend no review rounds. Only repeated unresolved
+// failures use this guard; changing findings return to the same developer.
 export const FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS = 2;
 export const FINAL_REVIEW_CONTINUATION_NEXT_ACTION = "verify_preserved_candidate";
 
