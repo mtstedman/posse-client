@@ -126,6 +126,9 @@ function findPostChangeReceipt(jobId, planId, commitHash, {
   policy = null, projectDir = null, treeFingerprint = null, accept = () => true,
 } = {}) {
   return storedReceipts(jobId)
+    // Artifacts arrive oldest first; a later rerun supersedes the old result
+    // in either direction without deleting the historical evidence.
+    .sort((left, right) => Number(right.artifact_id) - Number(left.artifact_id))
     .find((receipt) => (
       receipt.phase === "post_change"
       && receipt.plan_id === planId
