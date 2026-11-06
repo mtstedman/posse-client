@@ -425,34 +425,43 @@ export class RunDisplayActions {
       // renderer/input failure follows the same bounded suppression path as
       // an asynchronously rejected prompt.
       let answerSubmitted = false;
-      const prompt = Promise.resolve().then(() => this.display.askQuestions(
-        gate.id,
-        questions,
-        context,
-        gate.work_item_id,
-        {
-          choices,
-          promptIdentity: {
-            work_item_id: gate.work_item_id ?? null,
-            original_job_id: gateContract?.original_job_id
-              ?? payload.original_job_id
-              ?? payload.plan_job_id
-              ?? gate.parent_job_id
-              ?? null,
-            gate_job_id: gate.id,
-            gate_kind: gateContract?.gate_kind
-              ?? payload.question_kind
-              ?? payload.subtype
-              ?? payload.review_type
-              ?? "human_input",
-            question_generation: generation,
-            gate_generation: generation,
-            age_ms: Number.isFinite(Date.parse(gate.created_at || ""))
-              ? Math.max(0, Date.now() - Date.parse(gate.created_at))
-              : null,
+      let promptPresented = false;
+      const prompt = Promise.resolve().then(() => {
+        // A worker can enqueue its lease-owned prompt after the snapshot check
+        // above and before this microtask. Leave its answer resolver in charge.
+        if (this.display.hasQuestionsForJob?.(gate.id)) return null;
+        if (this.humanGatePrompts.get(gate.id) !== prompt) return null;
+        promptPresented = true;
+        return this.display.askQuestions(
+          gate.id,
+          questions,
+          context,
+          gate.work_item_id,
+          {
+            choices,
+            promptIdentity: {
+              work_item_id: gate.work_item_id ?? null,
+              original_job_id: gateContract?.original_job_id
+                ?? payload.original_job_id
+                ?? payload.plan_job_id
+                ?? gate.parent_job_id
+                ?? null,
+              gate_job_id: gate.id,
+              gate_kind: gateContract?.gate_kind
+                ?? payload.question_kind
+                ?? payload.subtype
+                ?? payload.review_type
+                ?? "human_input",
+              question_generation: generation,
+              gate_generation: generation,
+              age_ms: Number.isFinite(Date.parse(gate.created_at || ""))
+                ? Math.max(0, Date.now() - Date.parse(gate.created_at))
+                : null,
+            },
           },
-        },
-      )).then(async (answers) => {
+        );
+      }).then(async (answers) => {
+        if (!promptPresented) return null;
         answerSubmitted = true;
         const answer = firstPromptAnswer(answers);
         const action = choices.find((choice) => choice === answer)

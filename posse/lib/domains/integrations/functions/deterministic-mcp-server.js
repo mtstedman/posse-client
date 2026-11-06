@@ -29,7 +29,7 @@ import { CUSTOM_TOOLS_AGENT_REQUEST_TIMEOUT_MS, TOOL_CUSTOM_TOOLS } from "../../
 import { MCP_REQUEST_DEFERRED_NOTIFICATION, MCP_SESSION_RELEASED_NOTIFICATION } from "../../../catalog/mcp.js";
 import { IMAGE_GENERATION_MAX_CALLS_PER_JOB } from "../../../catalog/artifact.js";
 import { TOOL_SURFACE_ISSUED_OBSERVATION_TYPE } from "../../../catalog/observation.js";
-import { discoverUnitTestCapability } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
+import { discoverUnitTestCapability, declaredUnitTestPaths } from "../../../shared/tools/functions/toolkit/unit-test-runner.js";
 import { roleUsesCanonicalRefTraversal } from "../../../catalog/tool-surface/ref-traversal.js";
 import { assessorFallbackReadCallKey, isAssessorFallbackReadKey } from "../../assessment/functions/fallback-read-tools.js";
 import { assessorToolBudgetApplies, assessorToolCallCeilingDecision, ASSESSOR_READ_ALLOWANCE_ADVISORY_TEXT } from "../../../shared/tools/functions/assessor-tool-budget.js";
@@ -1447,6 +1447,10 @@ const TEST_TOOL_NAMES = new Set([
 let unitTestCapability = null;
 let unitTestCapabilityKey = `${workspaceCwd}\0${atlasAvailable}`;
 
+function unitTestsAvailable() {
+  return atlasAvailable && (unitTestCapability?.available === true || declaredUnitTestPaths(declaredJobScope).length > 0);
+}
+
 // Owner-hot declaration must follow the canonical registry. A hand-maintained
 // copy silently dropped request_scope (and previously get_brief and
 // web_research_handoff) even though executors and remote issuance were valid.
@@ -1486,7 +1490,7 @@ function runtimeToolAvailable(toolName) {
     const permitted = (ownerHotGateway && !mcpMessageSessionScoped)
       || bootConfig.allowTests === true
       || legacyRoleAllowsTests;
-    return toolName === "run_scoped_checks" ? permitted : permitted && unitTestCapability?.available === true;
+    return toolName === "run_scoped_checks" ? permitted : permitted && unitTestsAvailable();
   }
   if (IMAGE_HELPER_TOOL_NAMES.has(toolName)) return allowImageHelpers;
   if (OCR_TOOL_NAMES.has(toolName)) return allowImageHelpers;
@@ -1625,7 +1629,7 @@ if (allowBash) {
 if (ownerHotGateway || hasVerifiedToolContract() || roleName === "assessor") {
   addToolSchema(getToolSchemaForRole("run_scoped_checks", roleName));
 }
-if (unitTestCapability?.available && (ownerHotGateway || hasVerifiedToolContract() || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
+if (unitTestsAvailable() && (ownerHotGateway || hasVerifiedToolContract() || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
 
 function recordAtlasLiveObservation(entry = {}) {
   const observationType = String(entry.observation_type || "").trim();
@@ -2569,7 +2573,7 @@ function rebuildNativeToolSchemas() {
   if (ownerHotGateway || hasVerifiedToolContract() || roleName === "assessor") {
     addToolSchema(getToolSchemaForRole("run_scoped_checks", roleName));
   }
-  if (unitTestCapability?.available && (ownerHotGateway || hasVerifiedToolContract() || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
+  if (unitTestsAvailable() && (ownerHotGateway || hasVerifiedToolContract() || ["planner", "dev", "assessor"].includes(roleName))) addToolSchema(TOOL_RUN_UNIT_TEST);
   if (allowImageHelpers) {
     for (const schema of [TOOL_READ_IMAGE_METADATA, TOOL_VALIDATE_ARTIFACT_OUTPUT, TOOL_CLEAN_IMAGE, TOOL_EXTRACT_IMAGE_TEXT, TOOL_VIEW_IMAGE]) {
       addToolSchema(schema);

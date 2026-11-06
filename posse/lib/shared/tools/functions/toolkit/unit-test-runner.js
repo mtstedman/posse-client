@@ -13,6 +13,7 @@ import { filterProcessEnv } from "../../../platform/functions/process-env.js";
 import { testExecutionCounts } from "./test-output-counts.js";
 import { pythonExecutable, repositoryTestRunner } from "./repository-test-runner.js";
 import { gitExec } from "../../../../domains/git/functions/utils.js";
+import { protectedMutablePathReason, isSensitiveEnvRepoPath } from "../../../../domains/runtime/functions/protected-paths.js";
 import { resolvePhpUnitInvocation } from "../../../../domains/environments/functions/phpunit-runtime.js";
 
 
@@ -278,6 +279,22 @@ function walkTestFiles(root, current, inTestDirectory, output) {
   }
 }
 
+// Discovery is a snapshot; approved files can be created later in the same
+// provider session. Only exact declared files supplement that snapshot.
+export function declaredUnitTestPaths(scope = {}) {
+  return [...new Set([...(scope.modifyFiles || []), ...(scope.createFiles || [])]
+    .map((file) => String(file || "").trim().replace(/\\/g, "/").replace(/^\.\//, ""))
+    .filter((file) => {
+      if (!file || file.includes("\0") || path.posix.isAbsolute(file) || /^[A-Za-z]:/.test(file)) return false;
+      const parts = file.split("/");
+      if (parts.includes("..") || parts.includes(".") || parts.includes("")
+        || parts.some((part) => SKIP_DIRS.has(part.toLowerCase()))
+        || protectedMutablePathReason(file) || isSensitiveEnvRepoPath(file)) return false;
+      return !!ADAPTERS[path.posix.extname(file).toLowerCase()]
+        && (parts.slice(0, -1).some(isTestDirectoryName) || /\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(file));
+    }))];
+}
+
 function gitVisiblePaths(root) {
   try {
     const output = gitExec(["ls-files", "--cached", "--others", "--exclude-standard", "-z"], root, {
@@ -319,8 +336,8 @@ export function discoverUnitTestCapability({ projectDir, scipAvailable = true } 
 }
 
 /**
- * Resolve a discovered test file to the framework that runs it. Returns null
- * for a path that is invalid or not a discovered test file. A discovered file
+ * Resolve a discovered or exactly declared test file to its framework. Returns
+ * null for invalid paths or files outside both sets. An eligible file
  * with no positively identified runner resolves with `runner: null` and a
  * `reason`, so callers report it as unavailable instead of guessing.
  */
@@ -331,10 +348,21 @@ export function resolveUnitTestInvocation(projectDir, requestedPath, capability 
   const normalized = path.posix.normalize(raw).replace(/^\.\//, "");
   if (!normalized || normalized === ".." || normalized.startsWith("../")) return null;
   const discovered = capability || discoverUnitTestCapability({ projectDir: root });
-  if (!discovered.available || !discovered.files.includes(normalized)) return null;
+  if (options.scipAvailable === false || discovered.reason === "scip_unavailable") return null;
+  const explicitlyScoped = declaredUnitTestPaths(options.declaredScope).includes(normalized);
+  if (!explicitlyScoped && (!discovered.available || !discovered.files.includes(normalized))) return null;
   const absolute = path.resolve(root, normalized);
   let real;
-  try { real = fs.realpathSync(absolute); } catch { return null; }
+  try {
+    if (!fs.statSync(absolute).isFile()) return null;
+    // An explicit grant names this file, never a symlink target (even in-tree).
+    if (explicitlyScoped) {
+      for (let cursor = absolute; cursor !== root; cursor = path.dirname(cursor)) {
+        if (fs.lstatSync(cursor).isSymbolicLink()) return null;
+      }
+    }
+    real = fs.realpathSync(absolute);
+  } catch { return null; }
   const relativeReal = path.relative(fs.realpathSync(root), real);
   if (!relativeReal || relativeReal === ".." || relativeReal.startsWith(`..${path.sep}`) || path.isAbsolute(relativeReal)) return null;
   const adapter = ADAPTERS[path.extname(normalized).toLowerCase()];
@@ -448,9 +476,9 @@ function unitTestResult(outcome, fields = {}) {
   };
 }
 
-export async function runUnitTestFile({ projectDir, path: requestedPath, capability = null, timeoutMs = DEFAULT_TIMEOUT_MS, signal: abortSignal = null, posseRoot = undefined } = {}) {
+export async function runUnitTestFile({ projectDir, path: requestedPath, capability = null, timeoutMs = DEFAULT_TIMEOUT_MS, signal: abortSignal = null, posseRoot = undefined, declaredScope = {}, scipAvailable = true } = {}) {
   abortSignal?.throwIfAborted();
-  const invocation = resolveUnitTestInvocation(projectDir, requestedPath, capability, { posseRoot });
+  const invocation = resolveUnitTestInvocation(projectDir, requestedPath, capability, { posseRoot, declaredScope, scipAvailable });
   if (!invocation) {
     return unitTestResult("unavailable", { reason: "unit_test_path_unavailable", path: String(requestedPath || "") });
   }

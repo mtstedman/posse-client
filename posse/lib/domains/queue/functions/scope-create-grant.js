@@ -33,10 +33,8 @@ export function materializeScopeCreates(workspaceCwd, entries, { jobId, gateId =
       for (let cursor = target; cursor !== path.resolve(workspaceCwd); cursor = path.dirname(cursor)) {
         if (fs.existsSync(cursor) && fs.lstatSync(cursor).isSymbolicLink()) throw new Error(`Scope create refused for symlink: ${entry.path}`);
       }
-      let ignored = "";
-      try { ignored = gitExec(["check-ignore", "-v", "--", entry.path], workspaceCwd); }
-      catch (error) { if (Number(error.status ?? error.exitCode ?? error.exit_code) !== 1) throw error; }
-      if (String(ignored || "").trim() && !String(ignored).split("\t")[0].split(":").at(-1)?.startsWith("!")) throw new Error(`Scope create refused for ignored path: ${entry.path}`);
+      // An exact approved creation may intentionally live under .gitignore.
+      // The scoped commit force-adds this path without staging its neighbours.
       return { ...entry, target };
     });
     const created = [];
