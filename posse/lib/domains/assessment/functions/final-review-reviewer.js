@@ -8,7 +8,8 @@ import { SETTING_KEYS } from "../../../catalog/settings.js";
 // handoff, subject to deterministic scope, identity, and verification checks.
 
 import { getJob, getWorkItem } from "../../queue/functions/index.js";
-import { getSetting, getDefaultReasoningEffortForRole } from "../../settings/functions/repository-settings.js";
+import { resolveAssessmentExecution } from "../../settings/functions/assessment-execution.js";
+import { getSetting } from "../../settings/functions/repository-settings.js";
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { buildHandoffPacket, handoff } from "../../handoff/functions/index.js";
 import { getAgentHandoffRecord } from "../../handoff/functions/agent-handoff-records.js";
@@ -54,10 +55,9 @@ async function runFinalReviewerInContext({
   const job = getJob(jobId);
   if (!job) throw new Error(`Job #${jobId} no longer exists`);
   const payload = parseJobPayload(job);
-  const assessorPolicy = payload._execution_policy?.assessor;
   providerName = finalReviewerProvider(cwd);
-  const tier = "cheap";
-  const effort = payload._assess_reasoning_effort || assessorPolicy?.reasoning_effort || getDefaultReasoningEffortForRole("assessor");
+  const execution = resolveAssessmentExecution({ payload });
+  const { modelTier: tier, reasoningEffort: effort } = execution;
   const packet = buildHandoffPacket(job, {
     workItem: getWorkItem(workItemId),
     payload,
@@ -98,7 +98,8 @@ async function runFinalReviewerInContext({
   let reviewerCallId = null;
   const result = await call([composed, modeInstructions, evidence].filter(Boolean).join("\n\n"), {
     role: "assessor",
-    modelTier: tier === "strong" ? "standard" : tier,
+    modelTier: tier,
+    assessmentExecution: execution,
     reasoningEffort: effort,
     activity: `final review: ${job.title || `job #${jobId}`}`,
     allowWrite: false,

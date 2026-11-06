@@ -1,6 +1,6 @@
 import { APPROVAL_POLICY_SETTINGS } from "../../../catalog/approval-policies.js";
 import { ADMIN_SETTING_LABEL_OVERRIDES, ADMIN_SETTING_DESCRIPTION_OVERRIDES, ADMIN_UNSET_VALUE_LABELS, ADMIN_SETTING_UNIT_OVERRIDES, ADMIN_LABEL_WORDS, ADMIN_ROLE_PURPOSES, ADMIN_AGENT_SETTING_SECTIONS, ADMIN_PROVIDER_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS, ADMIN_IMAGE_SETTING_SECTIONS, TURN_BASE_KEY_MAP, TURN_BASE_KEY_REVERSE_MAP } from "../../../catalog/admin-settings.js";
-export { PROVIDER_SETTING_KEYS, ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS, SKILL_SETTING_PREFIX, PROJECT_DB_TYPE_OPTIONS, PROJECT_DB_PERMISSION_OPTIONS, PROJECT_DB_SETTING_DEFS, PROJECT_DB_SETTING_KEYS, ADMIN_AGENT_SETTING_SECTIONS, ADMIN_PROVIDER_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS, ADMIN_IMAGE_SETTING_SECTIONS, ADMIN_CREDENTIAL_SETTING_DEFS, TURN_BASE_KEY_MAP, TURN_BASE_KEY_REVERSE_MAP, SETTINGS_PANES, ADMIN_DEFAULT_SETTINGS_PANE } from "../../../catalog/admin-settings.js";
+export { PROVIDER_SETTING_KEYS, ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS, ADMIN_LOCAL_MODEL_INSTALL_ROW_KEY, SKILL_SETTING_PREFIX, PROJECT_DB_TYPE_OPTIONS, PROJECT_DB_PERMISSION_OPTIONS, PROJECT_DB_SETTING_DEFS, PROJECT_DB_SETTING_KEYS, ADMIN_AGENT_SETTING_SECTIONS, ADMIN_PROVIDER_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS, ADMIN_IMAGE_SETTING_SECTIONS, ADMIN_CREDENTIAL_SETTING_DEFS, TURN_BASE_KEY_MAP, TURN_BASE_KEY_REVERSE_MAP, SETTINGS_PANES, ADMIN_DEFAULT_SETTINGS_PANE } from "../../../catalog/admin-settings.js";
 import { PLANNER_DISPATCH_SETTING_KEYS, PLANNER_DISPATCH_MODES } from "../../../catalog/planner-dispatch.js";
 import { PROVIDER_ROLE_NAMES } from "../../providers/functions/roles.js";
 import { SETTINGS_CATALOG, getCatalogEntry, getCatalogNumericRule, getCatalogOptions, getCatalogRuntimeFallback, isCatalogBooleanSetting } from "./catalog.js";
@@ -326,7 +326,7 @@ const group = (id, pane, label, keys, hint = null) => Object.freeze({
 
 export const SETTINGS_GROUPS = Object.freeze([
   group("gate-policies", "approvals", "Gate policies", ["plan_approval_mode", ...APPROVAL_POLICY_SETTINGS.map(({ key }) => key)]),
-  group("approval-controls", "approvals", "Merge and scope controls", ["auto_merge_completed", "scope_auto_approval", "fix_scope_handoff_guard", "file_request_low_risk_extensions", "posse_max_file_request_depth", "db_task_pre_merge_policy", "headless_human_timeout_sec"]),
+  group("approval-controls", "approvals", "Merge and scope controls", ["auto_merge_completed", "scope_auto_approval", "fix_scope_handoff_guard", "file_request_low_risk_extensions", "posse_max_file_request_depth", "headless_human_timeout_sec"]),
   // ── General ──
   group("logging", "general", "Logging", ["advanced_logging"]),
   group("workflow", "general", "Workflow", [
@@ -368,7 +368,7 @@ export const SETTINGS_GROUPS = Object.freeze([
     `agent_${section.role}`,
     "agents",
     section.label,
-    section.keys,
+    section.keys.filter((key) => !REPO_SCOPED_DISPLAY_KEYS.has(toStorageSettingKey(key))),
     section.hint || null,
   )),
   // ── Providers (model rows are specialized; see ADMIN_PROVIDER_SETTING_SECTIONS) ──
@@ -405,6 +405,8 @@ export const SETTINGS_GROUPS = Object.freeze([
     "atlas_tree_compression_mode",
   ]),
   // ── Repository (rows persist per-repo, not as machine-global account state) ──
+  group("repo_workflow", "repo", "Workflow", ["db_task_pre_merge_policy", "research_claim_review", "agent_coordination_mode"]),
+  group("final_review_provider", "providers", "Final review", ["final_reviewer_provider"]),
   group("repo_git", "repo", "Git", [
     "target_branch",
     "git_commit_style",
@@ -418,7 +420,6 @@ export const SETTINGS_GROUPS = Object.freeze([
     "verification_dependency_network_policy",
     "pre_dev_typecheck",
     "final_review_mode",
-    "final_reviewer_provider",
   ]),
   group("bridge", "repo", "Phone Bridge", [
     "bridge_port",
@@ -452,7 +453,6 @@ export const SETTINGS_GROUPS = Object.freeze([
     "context_compaction_recent_target_tokens",
     "research_fanout",
     "research_direct_path_max_source_bytes",
-    "research_claim_review",
     "research_traversal_completion_check",
     "research_traversal_completion_max_chars",
     "research_synthesis_max_physical_calls",

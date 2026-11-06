@@ -1,7 +1,7 @@
 import { ONESHOT_SCOPE_SELECTION_SUBTYPE } from "../../../catalog/job.js";
 import {
   humanInputChoicesForPayload,
-  humanGateNameForPayload,
+  tryHumanGateNameForPayload,
   isHumanInputCoordinationPayload,
   isHumanInputReviewPayload,
 } from "../../../catalog/human-input.js";
@@ -22,8 +22,8 @@ export function bridgeGateKindForJob(job, payload = {}) {
 }
 
 export function bridgeGateAnswerContract(payload = {}) {
-  const kind = humanGateNameForPayload(payload);
-  if (["plan_approval", "push_offer"].includes(kind)) return {};
+  const kind = tryHumanGateNameForPayload(payload);
+  if (!kind || ["plan_approval", "push_offer"].includes(kind)) return {};
   const choices = humanInputChoicesForPayload(payload);
   if (choices.length > 0) {
     return {

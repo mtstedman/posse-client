@@ -32,7 +32,6 @@ import { atlasWarmWalkEntryDisposition } from "../warm-walk.js";
 import { resolveTypeScriptBatchProject, writeTypeScriptBatchProject } from "./typescript-batch-project.js";
 import {
   buildFailedStagerMeta,
-  buildRecoveredStagerMeta,
   buildStagerMeta,
   commandArgsHashMatches,
   computeCommandArgsHash,
@@ -238,9 +237,6 @@ export async function ensureScipStaged({
     orphanStagingRemoved = await cleanupOrphanStagingFiles(dir, {
       graceMs: cleanupGraceMs(config, timeoutMs),
       onProgress,
-      plans: lookup.plans,
-      currentHead,
-      repoRoot: root,
     });
     files = await listScipFiles(dir);
     if (lookup.plans.length === 0) {
@@ -2299,9 +2295,6 @@ function stageOutcomeForRun(row, run = {}) {
 async function cleanupOrphanStagingFiles(dir, {
   graceMs = SCIP_STAGING_ORPHAN_GRACE_MS,
   onProgress = null,
-  plans = [],
-  currentHead = null,
-  repoRoot = null,
 } = {}) {
   let entries;
   try {
@@ -2309,12 +2302,8 @@ async function cleanupOrphanStagingFiles(dir, {
   } catch {
     return 0;
   }
-  const planByOutput = new Map((Array.isArray(plans) ? plans : [])
-    .filter((plan) => plan?.outputPath)
-    .map((plan) => [normalizedFileKey(plan.outputPath), plan]));
   const cutoff = Date.now() - Math.max(60_000, Number(graceMs) || SCIP_STAGING_ORPHAN_GRACE_MS);
   let removed = 0;
-  let recovered = 0;
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     if (!/^\..+\.scip\.\d+\.\d+\.[a-z0-9]+\.staging$/iu.test(entry.name)) continue;
@@ -2325,44 +2314,12 @@ async function cleanupOrphanStagingFiles(dir, {
     const ownerPid = stagingOwnerPid(entry.name);
     const ownerAlive = ownerPid > 0 && processIsAlive(ownerPid);
     if (st.mtimeMs > cutoff && ownerAlive) continue;
-    const canonicalPath = canonicalOutputPathFromStagingName(dir, entry.name);
-    if (canonicalPath && await shouldRecoverOrphanStagingFile(filePath, canonicalPath, st)) {
-      try {
-        await replaceFile(filePath, canonicalPath);
-        const plan = planByOutput.get(normalizedFileKey(canonicalPath)) || null;
-        if (plan) {
-          const metaResult = await writeStagerMeta(canonicalPath, buildRecoveredStagerMeta(plan, {
-            head: currentHead,
-            commandArgsHash: computeCommandArgsHash(plan),
-          }));
-          if (!metaResult.ok) {
-            emit(onProgress, `recovered SCIP staging temp file but metadata write failed for ${path.basename(canonicalPath)}: ${metaResult.error || "unknown"}`, {
-              kind: "atlas.scip.orphan_staging_meta_failed",
-              language: plan.indexerId || null,
-              indexer: plan.label || null,
-              source_languages: sourceLanguagesForPlan(plan),
-            });
-          }
-        }
-        recovered++;
-        continue;
-      } catch {
-        // Leave the valid temp in place if recovery failed; a later pass can retry.
-        continue;
-      }
-    }
     try {
       await fs.promises.rm(filePath, { force: true });
       removed++;
     } catch {
       // Best effort; stale temp files should not block fresh staging.
     }
-  }
-  if (recovered > 0) {
-    emit(onProgress, `recovered ${recovered} stale SCIP staging temp file${recovered === 1 ? "" : "s"}`, {
-      kind: "atlas.scip.orphan_staging_recovered",
-      recovered,
-    });
   }
   if (removed > 0) {
     emit(onProgress, `removed ${removed} stale SCIP staging temp file${removed === 1 ? "" : "s"}`, {
@@ -2388,23 +2345,6 @@ function processIsAlive(pid) {
   } catch {
     return false;
   }
-}
-
-function canonicalOutputPathFromStagingName(dir, name) {
-  const match = String(name || "").match(/^\.(.+\.scip)\.\d+\.\d+\.[a-z0-9]+\.staging$/iu);
-  return match ? path.join(dir, match[1]) : "";
-}
-
-async function shouldRecoverOrphanStagingFile(stagingPath, canonicalPath, stagingStat) {
-  const documents = countScipDocumentsInFile(stagingPath);
-  if (!Number.isFinite(documents) || documents <= 0) return false;
-  try {
-    const canonicalStat = await fs.promises.stat(canonicalPath);
-    if (canonicalStat.isFile() && canonicalStat.mtimeMs >= stagingStat.mtimeMs) return false;
-  } catch {
-    // Missing canonical output is exactly the recovery case.
-  }
-  return true;
 }
 
 async function resolveCurrentHead(root) {

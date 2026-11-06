@@ -160,6 +160,23 @@ export function beginAttachedAssessmentAttempt(jobId, leaseToken) {
   `).get(jobId);
 }
 
+// Refund only this still-running attempt, without touching a replacement lease.
+export function interruptAssessmentAttempt(jobId, attemptId, leaseToken, { canceled = false, startTime = Date.now(), reason = "Assessment interrupted" } = {}) {
+  const db = getDb();
+  return runImmediateTransaction(db, () => {
+    const closed = db.prepare(`UPDATE job_attempts SET status = ?, duration_ms = ?, error_text = ?,
+      finished_at = ? WHERE id = ? AND job_id = ? AND status = 'running'`)
+      .run(canceled ? "canceled" : "interrupted", Date.now() - startTime, reason, now(), attemptId, jobId);
+    if (!closed.changes) return false;
+    db.prepare(`UPDATE jobs SET assessment_attempt_count = MAX(0, assessment_attempt_count - 1),
+      assessment_state = ?, assessment_last_error = ?, updated_at = ?, state_version = state_version + 1
+      WHERE id = ? AND (lease_token = ? OR (lease_token IS NULL AND status IN ('queued', 'canceled')
+        AND ? = (SELECT MAX(id) FROM job_attempts WHERE job_id = ?)))`)
+      .run(ASSESSMENT_LIFECYCLE.IMPLEMENTATION_COMPLETE, reason, now(), jobId, leaseToken, attemptId, jobId);
+    return true;
+  });
+}
+
 export function setAssessmentLifecycle(jobId, state, {
   error = null,
   completed = false,

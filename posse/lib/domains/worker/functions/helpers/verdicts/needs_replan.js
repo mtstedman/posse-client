@@ -1,3 +1,4 @@
+import { inheritRequirementContracts } from "../../../../planning/functions/requirement-contract.js";
 // lib/domains/worker/functions/helpers/verdicts/needs_replan.js
 
 import { roleExecutionForBudget } from "../../../../settings/functions/repository-settings.js";
@@ -194,6 +195,7 @@ export function handle(job, verdict, ctx) {
         ? { model_tier: dispatchPolicy.plannerModelTier, reasoning_effort: dispatchPolicy.plannerReasoningEffort }
         : roleExecutionForBudget("plan")),
       payload_json: JSON.stringify({
+        ...inheritRequirementContracts(originalPayload),
         _is_loopback: true,
         _assessment_replan: true,
         replan_trigger: ctx.replanTrigger || verdict._automatic_replan_reason || REPLAN_TRIGGERS.ASSESSOR,

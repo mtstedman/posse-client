@@ -1,3 +1,4 @@
+import { acceptanceMergeDeferral } from "../../queue/functions/acceptance.js";
 import { implicitTypechecks } from "../../verification/functions/implicit-typechecks.js";
 import { isNativePulseColdError } from "./native/invoke.js";
 import { recordTargetDebt, resolveTargetDebtEntries } from "./merge-target-debt-store.js";
@@ -1061,6 +1062,11 @@ export function createMergeWorkflowHelpers(context, {
     }
 
     const initialHeads = mergeHeads(branch, targetBranch, cwd);
+    const acceptanceHold = wiId == null ? null : acceptanceMergeDeferral(wiId, { candidateCommit: initialHeads.branchHead, projectDir });
+    if (acceptanceHold) {
+      log(acceptanceHold.message, { json: { reason: acceptanceHold.reason, unmet_required: acceptanceHold.acceptance.unmet_required } });
+      return acceptanceHold;
+    }
     // An operator approval binds the branch commit it reviewed. A branch that
     // moved since needs a fresh review before any refresh or test runs; the
     // auto-merge caller routes reviewStale to that review instead of a
@@ -1224,6 +1230,10 @@ export function createMergeWorkflowHelpers(context, {
 
     const closeout = runCloseoutRefresh({ wiId, branch, targetBranch, cwd, sourceDirty, log, deadlineMs: budgetEndMs, approval });
     if (closeout.park) return closeout.park;
+    if (wiId != null && closeout.refreshed) {
+      const refreshedAcceptance = acceptanceMergeDeferral(wiId, { candidateCommit: closeout.refreshedHead, projectDir });
+      if (refreshedAcceptance) return refreshedAcceptance;
+    }
     // A refresh that resolved or merged content changed what the operator
     // reviewed; one that only replayed the reviewed commits was rebound.
     if (approval && closeout.refreshed && !closeout.reviewRebind?.ok) {

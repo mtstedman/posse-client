@@ -26,17 +26,23 @@ export function implicitTypechecks(cwd, files = []) {
 //  - elsewhere, more errors than the baseline project count less the changed
 //    files' own baseline errors (the project count includes them), so fixing
 //    a touched file's errors never masks a new error in a caller.
-export async function runImplicitTypechecks(cwd, files, { baselineProjectDiagnosticCount = null, baselineByFile = null, ...options } = {}) {
+export async function runImplicitTypechecks(cwd, files, { baselineProjectDiagnosticCount = null, baselineByFile = null, baselineRoots = null, ...options } = {}) {
   const results = [];
   const normalize = file => String(file).replace(/\\/g, "/");
   const changed = new Set((files || []).map(normalize));
   const baselineFiles = baselineByFile && typeof baselineByFile === "object"
     ? new Map(Object.entries(baselineByFile).map(([file, count]) => [normalize(file), Number.isInteger(count) ? count : 0]))
     : null;
-  const changedBaseline = baselineFiles ? [...changed].reduce((sum, file) => sum + (baselineFiles.get(file) || 0), 0) : 0;
-  const baselineElsewhere = Number.isInteger(baselineProjectDiagnosticCount)
-    ? Math.max(0, baselineProjectDiagnosticCount - changedBaseline) : null;
-  for (const check of implicitTypechecks(cwd, files)) {
+  const checks = implicitTypechecks(cwd, files);
+  for (const check of checks) {
+    const baselineRoot = Array.isArray(baselineRoots) ? baselineRoots.find(root => root.root === check.root) : null;
+    const baselineCount = baselineRoots == null && checks.length === 1 && check.root === "."
+      ? baselineProjectDiagnosticCount : baselineRoot?.diagnostic_count;
+    const belongsToRoot = file => check.root === "." || file.startsWith(`${check.root}/`);
+    const changedBaseline = baselineFiles ? [...changed].filter(belongsToRoot)
+      .reduce((sum, file) => sum + (baselineFiles.get(file) || 0), 0) : 0;
+    const baselineElsewhere = Number.isInteger(baselineCount)
+      ? Math.max(0, baselineCount - changedBaseline) : null;
     const result = await runProcessAsync(check.command, check.args, check.cwd, options);
     options.signal?.throwIfAborted();
     if (result.timedOut || result.error || result.signal || [127, 9009].includes(result.exitCode)) {
@@ -63,7 +69,7 @@ export async function runImplicitTypechecks(cwd, files, { baselineProjectDiagnos
       .map(diagnostic => diagnostic.text || `${diagnostic.file}(${diagnostic.line ?? "?"}): ${diagnostic.code || ""} ${diagnostic.message || ""}`).join("\n");
     results.push({ command: check.declared_command, status: result.exitCode === 0 ? "passed" : introduced ? "failed" : "pre_existing",
       exit_code: result.exitCode, diagnostic_count: diagnostics.length, introduced_count: introducedCount,
-      baseline_project_diagnostic_count: baselineProjectDiagnosticCount,
+      baseline_project_diagnostic_count: baselineCount ?? null,
       baseline_elsewhere_diagnostic_count: baselineElsewhere,
       output: (introduced ? introducedOutput || output : output).slice(-6000) });
   }

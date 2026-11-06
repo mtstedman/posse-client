@@ -126,23 +126,19 @@ export function parseStallTimeout(argv = process.argv) {
 
 /** Parse --mode flag from argv. */
 export function parseModeFlagFromArgv() {
-  const idx = process.argv.indexOf("--mode");
-  if (idx >= 0 && idx + 1 < process.argv.length) {
-    const val = process.argv[idx + 1].toLowerCase();
-    return isValidWiMode(val) ? val : null;
-  }
-  return null;
+  if (!hasArgFlag("--mode")) return null;
+  const value = String(parseFlagValue("--mode") || "").trim().toLowerCase();
+  if (!isValidWiMode(value)) throw new Error("--mode requires a valid work-item mode");
+  return value;
 }
 
 const VALID_TIERS = new Set(WORK_ITEM_GOVERNANCE_TIERS);
 
 export function parseTierFlagFromArgv() {
-  const idx = process.argv.indexOf("--tier");
-  if (idx >= 0 && idx + 1 < process.argv.length) {
-    const val = process.argv[idx + 1].toLowerCase();
-    return VALID_TIERS.has(val) ? val : null;
-  }
-  return null;
+  if (!hasArgFlag("--tier")) return null;
+  const value = String(parseFlagValue("--tier") || "").trim().toLowerCase();
+  if (!VALID_TIERS.has(value)) throw new Error(`--tier requires ${[...VALID_TIERS].join(" or ")}`);
+  return value;
 }
 
 export function parseDeepthinkFlagFromArgv() {

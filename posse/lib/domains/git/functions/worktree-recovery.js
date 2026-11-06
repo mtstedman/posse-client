@@ -140,7 +140,7 @@ export async function worktreePorcelainZAsync(wtPath, { signal = null } = {}) {
 }
 
 function literalPathspec(file) {
-  return `:(literal)${file}`;
+  return `:(top,literal)${file}`;
 }
 
 // Put each path back to its state in `tree` (index and worktree), or remove
@@ -148,6 +148,7 @@ function literalPathspec(file) {
 // a worktree that sibling jobs share, where a whole-worktree reset would also
 // erase their files. Returns the paths that could not be restored.
 export function restorePathsToTree(wtPath, paths = [], tree = "HEAD") {
+  wtPath = resolveGitWorktreeRoot(wtPath);
   const failed = [];
   for (const file of paths) {
     try {
@@ -167,6 +168,7 @@ export function restorePathsToTree(wtPath, paths = [], tree = "HEAD") {
 }
 
 export async function restorePathsToTreeAsync(wtPath, paths = [], tree = "HEAD", { signal = null } = {}) {
+  wtPath = await resolveGitWorktreeRootAsync(wtPath, { signal });
   const failed = [];
   for (const file of paths) {
     try {
@@ -262,6 +264,7 @@ export async function stashDirtyWorktreeAsync(
   { worktreeLockWaitMs = null, stashLockWaitMs = null, shouldDefer = null, selectPaths = null, signal = null } = {},
 ) {
   if (!wtPath) return false;
+  wtPath = await resolveGitWorktreeRootAsync(wtPath, { signal });
   const mainCwd = projectDir || wtPath;
   return withWorktreeLockAsync(wtPath, mainCwd, async () => {
     if (typeof shouldDefer === "function") {
@@ -504,6 +507,27 @@ async function resolveGitWorktreeRootAsync(wtPath, { signal = null } = {}) {
   return path.resolve(resolved);
 }
 
+function canonicalPath(value) {
+  const resolved = fs.realpathSync.native(path.resolve(value));
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+export async function assertWorktreeRootAsync(wtPath, { signal = null } = {}) {
+  const root = await resolveGitWorktreeRootAsync(wtPath, { signal });
+  if (canonicalPath(root) !== canonicalPath(wtPath)) {
+    throw new Error(`Stale directory is not a worktree root: ${wtPath}`);
+  }
+}
+
+function refusePrimaryCheckoutRecovery(wtPath, projectDir, resolvedRoot) {
+  const managedRoot = worktreeRoot(projectDir, { disabled: true });
+  const relative = path.relative(managedRoot, wtPath);
+  const managed = relative && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
+  if (managed && canonicalPath(resolvedRoot) === canonicalPath(resolveGitWorktreeRoot(projectDir))) {
+    throw new Error(`Refusing to reset primary checkout for corrupt managed worktree: ${wtPath}`);
+  }
+}
+
 function markSnapshotRefusal(err) {
   if (/SNAPSHOT_REFUSED_RESET/.test(String(err?.message || err || ""))) {
     err.code = "SNAPSHOT_REFUSED_RESET";
@@ -569,6 +593,7 @@ export function snapshotAndResetDirtyWorktree(
   }
   try {
     const nativeWtPath = resolveGitWorktreeRoot(wtPath);
+    refusePrimaryCheckoutRecovery(wtPath, projectDir, nativeWtPath);
     const nativeResult = runGitNativeMethod(
       "git.worktree.snapshotAndResetDirty",
       snapshotAndResetNativePayload(nativeWtPath, projectDir, {
@@ -638,6 +663,7 @@ export async function snapshotAndResetDirtyWorktreeAsync(
       }
     }
     const nativeWtPath = await resolveGitWorktreeRootAsync(wtPath, { signal });
+    refusePrimaryCheckoutRecovery(wtPath, projectDir, nativeWtPath);
     const nativeResult = await runGitNativeMethodAsync(
       "git.worktree.snapshotAndResetDirty",
       snapshotAndResetNativePayload(nativeWtPath, projectDir, {

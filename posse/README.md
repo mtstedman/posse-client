@@ -209,6 +209,16 @@ no-research, and web-only intake retain their existing routes. A red-team
 chain's primary planner and an assessment replan may dispatch; the critique and
 synthesis planners cannot.
 
+## Review model selection
+
+Every assessment starts from the configured Assessor model tier and reasoning
+strength in Admin, including final review and assessment-only recovery. Task
+risk and retries may raise that baseline; they cannot silently lower it.
+An explicitly selected strong tier remains strong. Provider tier-to-model
+mappings still select the concrete model. Review execution observations record
+the baseline, effective model, and reasons for escalation. Settings changes
+apply to fresh reviewer calls, not an already-running reviewer session.
+
 ## Assessment replanning
 
 An assessor's `needs_replan` verdict returns directly to the planner. With
@@ -431,8 +441,9 @@ override this preference for that invocation; `--no-update-at-boot` takes priori
 - `events`, `timeline`, `cost`, `fanout`, `audit`, `calls`, `prompts`,
   `usage`, `atlas-smoke`, `shared-trunk-smoke`, `mcp-status`, `codex-models`:
   inspection and disposable smoke commands.
-- `local-models [list|download]`: inspect the signed local-model catalog or
-  select a pinned bundle for a confirmed, resumable download.
+- `local install <slug>`: download and verify a local model after a size
+  confirmation.
+- `local-models [list]`: inspect the signed local-model catalog.
 - `admin`: open stats and settings tooling.
 - `merge`: merge approved work.
 - `prune`, `purge`, `cleanup`, `clear`: maintenance and reset commands.
@@ -681,13 +692,16 @@ are not carried into the next generation, so seamless motion or sound is not gua
 
 Use `posse local --help` for all generation controls.
 
-Run `posse local-models` for an interactive selector, or use
-`posse local-models list` to inspect the verified catalog without downloading.
+Run `posse local-models list` to inspect the verified catalog without downloading.
 Every model entry shows its signed download size, minimum and recommended
 memory, recommendation summary, intended use cases, runtime profile, and
-license. `posse local-models download <shorthand>` selects a model directly.
+license.
 
-Before any bundle bytes are requested, Posse presents a second confirmation
+`posse local install <slug>` is the one download command for text, image, and
+video models. Admin's Providers > Local Models > Install a model starts the same
+install.
+
+Before any model bytes are requested, Posse presents a confirmation
 containing both the human-readable and exact byte size. The default answer is
 No, and `--yes` or non-interactive input cannot bypass the prompt. Confirmed
 downloads show percentage, transferred bytes, throughput, and ETA while the
@@ -1441,8 +1455,13 @@ The exact `.env.example` filename is an ordinary source template and is
 available to agents within their normal file scope. Other `.env` files remain
 blocked, including symlinks to them. Plan compilation removes requirements that
 explicitly name policy-blocked files, records the omissions, and applies the
-same filter when older jobs enter execution or assessment. Requirements for
-`.env.example` remain verifiable.
+same filter when older jobs enter execution or assessment. Newly compiled tasks
+also retain a versioned original requirement contract with stable content IDs.
+Fixes and replans inherit that contract; local developer and reviewer evidence
+marks omitted requirements as policy-constrained rather than completed. Agents
+may establish the requested behavior using permitted evidence, but the contract
+does not grant access to protected files. Legacy jobs retain their existing
+filtered contract until replanned. Requirements for `.env.example` remain verifiable.
 
 For a greenfield application, the planner can use `inspect_environment` and
 `setup_environment` before handing off development. The latter proposes one
@@ -1601,3 +1620,95 @@ outside this list needs a registry entry in
 workspace members, vendored Go modules, OS toolchain installation,
 and existing-database migrations require separate setup. Local PostgreSQL/MySQL
 server provisioning is the explicit system-installation capability described above.
+
+## Outcome evidence
+
+Status JSON and review reports include an additive `outcome` object separating
+execution, reviewer verdict, verification, pending decisions, and delivery.
+`checks_passed` means recorded checks ran against the recorded implementation
+commit; it does not claim complete behavioral coverage. `review_only` means
+source review without current executable evidence. Missing evidence remains
+unknown, and waived checks remain visible. The review screen's **Execution
+Check** retains the existing queue/dirty-tree check rather than presenting it
+as proof of product acceptance. Work-item deployment is verified only by an
+exact matching merge-commit receipt; repository-wide publication is shown
+separately. Phone review briefs expose only bounded states and counts.
+
+### Requirement acceptance evidence
+
+New plans retain the work-item objective and each task's original requirements.
+`posse acceptance show <wi-id>` lists stable `contract:requirement` keys, assigned
+jobs, unresolved or policy-constrained outcomes, mapped receipts and waivers.
+The review report, status JSON and bridge summary expose acceptance separately
+from execution and passing checks. Legacy work is `untracked`, not accepted.
+
+An operator can map an existing executed receipt to an outcome:
+`posse acceptance bind <wi-id> <key> <artifact-id> "why this check covers the outcome"`.
+Only passing receipts with demonstrated coverage, from the assigned job lineage
+and exact current implementation commit, qualify. This mapping is an operator
+judgment about coverage, not an automatic claim that a general test proves every
+requirement. Changed source, contracts or superseding receipts invalidate evidence.
+
+`posse acceptance require <wi-id> <key>` explicitly marks an obligation.
+In strict verification mode, unresolved required obligations defer merging before
+Git mutation; the candidate remains available. Permissive mode reports them only.
+`posse acceptance waive <wi-id> <key> "reason"` records a distinct operator waiver
+for the current commit. Waivers are visible and expire on source changes. No
+acceptance action publishes or deploys the work.
+
+### Following up on earlier delivery
+
+Use `posse add "Dragging coordinates loses changes" --follow-up 123
+--follow-up-kind regression` (or the same options with `posse inject`). The kind
+is `gap` by default; `regression` and `enhancement` distinguish broken prior
+behavior from new scope. The ID is explicit and can refer to older work outside
+the recent delivery window. Invalid IDs are rejected before a work item is created.
+
+The follow-up retains a snapshot of prior review, verification, requirement
+acceptance and waivers. Planners and reviewers receive that context locally;
+prior passes and waivers do not count as evidence or permission for the new work.
+Approved assessor suggestions keep their existing suggestion-origin lineage and
+are treated as enhancements. Similar titles alone never establish a link.
+
+### Opt-in spend and time admission thresholds
+
+Existing advisory budget settings remain advisory. To enable a work-item gate:
+
+```bash
+posse budget configure 123 20 2 60
+posse budget show 123
+```
+
+This sets a $20 spend threshold, a **$2 reservation estimate per provider dispatch**,
+and a wall-clock deadline 60 minutes from configuration. A dispatch can contain
+many model turns: choose its estimate accordingly. Use `-` for an omitted limit,
+for example `posse budget configure 123 - - 60` for time only. Configuring again
+replaces limits and restarts the deadline, preserving all charges and reservations.
+A paused budget still requires `posse budget resume 123` after adjustment.
+
+Admission is atomic across workers and includes developer, reviewer, child,
+correction, retry, fallback and image requests. It accounts for prior tracked calls
+when enabled mid-run. Outstanding reservations count against the threshold. Calls
+already in flight may complete and cost more than their estimate; this is an
+admission threshold, **not an exact dollar cap**. The deadline is checked before
+new dispatches, includes idle/paused time, and does not terminate in-flight calls.
+
+Missing or incomplete cost receipts are unknown, never zero-priced. Unknown image
+prices and auxiliary direct-provider calls without a complete accounting receipt
+currently require reconciliation when a spend threshold is active.
+A paused work item retains queued work and partial implementation; implementation
+retries are not consumed, and interrupted assessment resumes as assessment only.
+Status, review summaries and the incremental run monitor surface the pause.
+
+```bash
+posse budget pause 123
+posse budget reconcile 123 <reservation-id> 0.75 "Observed provider charge"
+posse budget resume 123
+posse budget disable 123
+```
+
+Reconciliation requires an observed nonnegative cost and a reason; active
+reservations cannot be cleared. Exited processes and ended worker attempts retain
+unknown charges until reconciled. Resolve any orphan provider execution before
+reconciling its final charge. Disabling the gate is an explicit operator action;
+it preserves the ledger. These actions do not merge, publish or deploy work.

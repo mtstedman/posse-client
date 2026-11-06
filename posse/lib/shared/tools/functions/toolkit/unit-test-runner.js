@@ -1,5 +1,5 @@
 import { SKIP_DIRS, TEST_HELPER_DIRS, MAX_OUTPUT_CHARS, MAX_SOURCE_SNIFF_BYTES, DEFAULT_TIMEOUT_MS, PHPUNIT_CONFIG_NAMES, OUTCOME_STATUS } from "../../../../catalog/unit-test-runner.js";
-import { missingBrowserTestRuntime, missingDeclaredNodeDependency } from "./node-test-failure.js";
+import { browserLaunchFailuresExplainTestOutput, missingDeclaredNodeDependency } from "./node-test-failure.js";
 import { javascriptTestRunner } from "./javascript-test-runner.js";
 import { fileURLToPath } from "node:url";
 import { spawn } from "child_process";
@@ -49,7 +49,7 @@ const ADAPTERS = Object.freeze({
   },
 });
 
-function nodeBootstrapFailure(invocation, output, root) {
+function nodeBootstrapFailure(invocation, output, root, executionCounts = null) {
   if (invocation.runner !== "node_test" && invocation.runner !== "vitest"
     && !(invocation.runner === "repository_script" && invocation.executable === process.execPath)) return null;
   if (output.includes("Posse Vitest adapter unavailable:")) return "test_loader_resolution_mismatch";
@@ -61,7 +61,7 @@ function nodeBootstrapFailure(invocation, output, root) {
   // Vitest imports under node:test fail before collecting any product tests.
   // Keep that runner/bootstrap mismatch out of product-failure remediation.
   if (/Vitest failed to access its internal state/u.test(output)) return "test_loader_resolution_mismatch";
-  if (missingBrowserTestRuntime(output)) {
+  if (browserLaunchFailuresExplainTestOutput(output, executionCounts)) {
     return "test_browser_unavailable";
   }
   if (/ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX|ERR_UNKNOWN_FILE_EXTENSION/u.test(output)) return "typescript_test_loader_unavailable";
@@ -374,7 +374,7 @@ function missingExternalPythonModule(root, output) {
 
 function classifyCompletedRun(invocation, { code, stdout, stderr, executionCounts = null }, root) {
   const output = `${stdout}\n${stderr}`;
-  const bootstrapFailure = nodeBootstrapFailure(invocation, output, root);
+  const bootstrapFailure = nodeBootstrapFailure(invocation, output, root, executionCounts);
   if (bootstrapFailure) return { outcome: "infrastructure_error", reason: bootstrapFailure };
   const counts = invocation.runner === "node_test" ? executionCounts : testExecutionCounts(output);
   const zeroTests = !!counts && (counts.total === 0 || counts.skipped === counts.total);

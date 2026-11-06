@@ -1,3 +1,5 @@
+import { readWorkItemOutcome } from "../../queue/functions/work-item-outcome.js";
+import { outcomeSummary } from "../../assessment/functions/work-item-outcome.js";
 import { statusColor, statusIcon } from "../../ui/functions/display/status-palette.js";
 import {
   computeJobProgressStats,
@@ -129,6 +131,7 @@ export function collectStatusData({ targetBranch, args = [] } = {}) {
     const summary = summarizeJobs(jobs);
     return {
       workItem: wi,
+      outcome: readWorkItemOutcome(wi.id),
       ...summary,
     };
   });
@@ -202,8 +205,9 @@ function renderJsonStatus(data) {
       shown: data.work_items.shown,
       truncated: data.work_items.truncated,
       by_status: data.work_items.by_status,
-      items: data.details.map(({ workItem, foreground, background, rawCounts, foregroundCounts, progress, backgroundCounts, backgroundProgress }) => ({
+      items: data.details.map(({ workItem, outcome, foreground, background, rawCounts, foregroundCounts, progress, backgroundCounts, backgroundProgress }) => ({
         id: workItem.id,
+        outcome,
         title: workItem.title,
         status: workItem.status,
         merge_state: workItem.merge_state || null,
@@ -339,13 +343,14 @@ function renderHumanStatus(data, { C }) {
     write(`\n  ${C.bold}Details:${C.reset}`);
     const scope = data.filter.active ? "active work items" : "newest work items";
     write(`  ${C.dim}Showing ${data.work_items.shown} of ${data.work_items.total} ${scope}.${data.work_items.truncated ? " Use --limit all to show everything." : ""}${C.reset}`);
-    for (const { workItem, foreground, background, progress, backgroundProgress: wiBackgroundProgress } of data.details) {
+    for (const { workItem, outcome, foreground, background, progress, backgroundProgress: wiBackgroundProgress } of data.details) {
       const wiIcon = statusIcon(workItem.status, { kind: "work_item", colors: C });
       const mergeTag = workItem.merge_state === "pending_review" ? ` ${C.yellow}[PENDING MERGE]${C.reset}` :
         workItem.merge_state === "merged" ? ` ${C.green}[MERGED]${C.reset}` :
           workItem.merge_state === "merge_failed" ? ` ${C.red}[MERGE FAILED]${C.reset}` : "";
       write(`\n    ${wiIcon} WI#${workItem.id}${C.reset} ${String(workItem.title || "").slice(0, 50)} ${C.dim}(${progress.succeeded}/${foreground.length} jobs${progress.recovered > 0 ? `; ${progress.recovered} recovered` : ""})${C.reset}${mergeTag}`);
 
+      write(`      ${outcomeSummary(outcome)}`);
       for (const job of foreground) {
         const displayStatus = jobDisplayStatus(job, foreground);
         const icon = statusIcon(displayStatus, { kind: "job", colors: C });

@@ -286,6 +286,7 @@ export async function answerHumanInput(jobId, args = {}, {
   }
 
   const display = {
+    hasOperatorAnswer: true,
     askQuestions: async () => answers,
     workerLine: () => {},
     addEvent: () => {},

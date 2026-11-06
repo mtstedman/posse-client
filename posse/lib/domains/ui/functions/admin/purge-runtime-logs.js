@@ -10,14 +10,12 @@ import { TERMINAL_WORK_ITEM_STATUSES_SQL } from "../../../queue/functions/common
 import { flushEventsNow } from "../../../queue/functions/events.js";
 import { isInsideRoot } from "../../../runtime/functions/fs-safety.js";
 import { getRuntimeLogDir, getRuntimeRoot } from "../../../runtime/functions/paths.js";
-import { closeRunTelemetry } from "../../../../shared/telemetry/functions/run-telemetry.js";
 
 export function purgeRuntimeLogs({ projectDir = null } = {}) {
   closePromptLog();
   closeOutputLog();
   closeObservationLog();
   closeLog();
-  closeRunTelemetry({ cleanExit: true });
 
   const resolvedLogDir = path.resolve(getRuntimeLogDir(projectDir));
   const runtimeRoot = path.resolve(getRuntimeRoot(projectDir));
@@ -28,6 +26,7 @@ export function purgeRuntimeLogs({ projectDir = null } = {}) {
     throw new Error(`Refusing to purge log directory outside runtime root: ${resolvedLogDir}`);
   }
 
+  const skippedLiveRuns = [];
   let files = 0;
   let dirs = 0;
   let bytes = 0;
@@ -156,12 +155,26 @@ export function purgeRuntimeLogs({ projectDir = null } = {}) {
   }
 
   if (!fs.existsSync(resolvedLogDir)) {
-    return { logDir: resolvedLogDir, files, dirs, bytes, atlasAgentCalls, atlasObservations, dbAgentCalls, dbObservations, dbEvents, dbAttempts, historyWorkItems };
+    return { logDir: resolvedLogDir, skippedLiveRuns, files, dirs, bytes, atlasAgentCalls, atlasObservations, dbAgentCalls, dbObservations, dbEvents, dbAttempts, historyWorkItems };
   }
 
   for (const entry of fs.readdirSync(resolvedLogDir, { withFileTypes: true })) {
     const fullPath = path.join(resolvedLogDir, entry.name);
     try {
+      if (entry.name === "runs" && entry.isDirectory()) {
+        for (const run of fs.readdirSync(fullPath, { withFileTypes: true })) {
+          const runDir = path.join(fullPath, run.name);
+          let manifest;
+          try { manifest = JSON.parse(fs.readFileSync(path.join(runDir, "manifest.json"), "utf8")); } catch { /* unknown runs stay preserved */ }
+          if (run.isDirectory() && (!manifest?.ended_at || Date.now() - Date.parse(manifest.last_heartbeat_at || "") < 120_000)) {
+            skippedLiveRuns.push(run.name);
+            continue;
+          }
+          fs.rmSync(runDir, { recursive: true, force: true });
+          dirs += 1;
+        }
+        continue;
+      }
       const stat = fs.statSync(fullPath);
       if (stat.isDirectory()) dirs += 1;
       else files += 1;
@@ -171,5 +184,5 @@ export function purgeRuntimeLogs({ projectDir = null } = {}) {
       // Best effort: keep going so one locked/stale entry does not block cleanup.
     }
   }
-  return { logDir: resolvedLogDir, files, dirs, bytes, atlasAgentCalls, atlasObservations, dbAgentCalls, dbObservations, dbEvents, dbAttempts, historyWorkItems };
+  return { logDir: resolvedLogDir, skippedLiveRuns, files, dirs, bytes, atlasAgentCalls, atlasObservations, dbAgentCalls, dbObservations, dbEvents, dbAttempts, historyWorkItems };
 }

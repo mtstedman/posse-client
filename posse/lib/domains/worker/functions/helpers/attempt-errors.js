@@ -1,3 +1,5 @@
+import { BUDGET_PAUSED } from "../../../../catalog/admission-budget.js";
+import { isBudgetPaused } from "../../../queue/functions/admission-budget.js";
 import { linkFailedAttemptSnapshot } from "./failed-attempt-recovery.js";
 // lib/domains/worker/functions/helpers/attempt-errors.js
 //
@@ -475,6 +477,14 @@ export async function handleExecuteAttemptError(worker, {
     });
     worker._releaseLease(job, leaseToken, "succeeded");
     worker.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} planner settlement recovered; existing child jobs will not be replayed${C.reset}`);
+    return;
+  }
+
+  if (err?.code === BUDGET_PAUSED || isBudgetPaused(job.work_item_id)) {
+    completeAttempt(attempt.id, { status: "interrupted", duration_ms: Date.now() - startTime, error_text: "Work-item budget paused" });
+    await stashInterruptedWork(job, wtPath, "budget-paused", worker?.projectDir);
+    worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId: attempt.id, readyAt: new Date().toISOString() });
+    worker.emit(job.id, `WI#${job.work_item_id} budget paused; partial work preserved and attempt not consumed. Use posse budget show ${job.work_item_id}.`);
     return;
   }
 
@@ -1107,7 +1117,7 @@ export async function handleExecuteAttemptError(worker, {
     });
   }
 
-  worker._retryOrFail(job, leaseToken, err, { attemptId: attempt.id });
+  worker._retryOrFail(job, leaseToken, err, { attemptId: attempt.id, recordedErrorText });
 }
 
 const SQLITE_CONTENTION_MAX_REQUEUES = 4;

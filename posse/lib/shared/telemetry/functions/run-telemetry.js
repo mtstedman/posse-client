@@ -1,3 +1,4 @@
+import { logDescriptorMatchesPath } from "./log-file-identity.js";
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
@@ -107,8 +108,10 @@ function ensureManifest(runDir) {
   // Worker threads may append their own telemetry streams, but the process
   // main thread exclusively owns run lifecycle metadata. Otherwise a worker
   // exit can mark the shared run clean while the scheduler is still alive.
-  if (!isMainThread || INHERITED_RUN_ID || _manifestDirs.has(runDir)) return;
+  if (!isMainThread || INHERITED_RUN_ID) return;
   const manifestPath = path.join(runDir, "manifest.json");
+  if (_manifestDirs.has(runDir) && fs.existsSync(manifestPath)) return;
+  _manifestDirs.delete(runDir);
   if (!fs.existsSync(manifestPath)) {
     const manifest = {
       schema_version: 1,
@@ -120,10 +123,20 @@ function ensureManifest(runDir) {
       cwd: safeProcessCwd(),
       streams: STREAM_FILES,
       clean_exit: false,
+      ...(_activeLifecycleOwnerToken ? { lifecycle_owner_token: _activeLifecycleOwnerToken } : {}),
     };
-    fs.writeFileSync(manifestPath, `${safeStringify(manifest)}\n`, "utf8");
+    writeManifestAtomically(manifestPath, manifest);
   }
   _manifestDirs.add(runDir);
+}
+
+function writeManifestAtomically(manifestPath, manifest) {
+  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+  const temporary = `${manifestPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, `${safeStringify(manifest)}\n`, "utf8");
+    fs.renameSync(temporary, manifestPath);
+  } finally { fs.rmSync(temporary, { force: true }); }
 }
 
 function readManifest(runDir) {
@@ -151,7 +164,7 @@ function updateManifest(runDir, patch = {}, { expectedLifecycleOwnerToken = unde
     return false;
   }
   try {
-    fs.writeFileSync(manifestPath, `${safeStringify({ ...manifest, ...patch })}\n`, "utf8");
+    writeManifestAtomically(manifestPath, { ...manifest, ...patch });
     return true;
   } catch {
     // Best effort only.
@@ -226,7 +239,9 @@ function openStream(stream, runId = RUN_ID) {
   const filePath = path.join(runDir, streamFileName(stream));
   const streamKey = `${runId}:${stream}`;
   const existing = _streams.get(streamKey);
-  if (existing?.filePath === filePath && existing.fd != null) return existing;
+  if (runId === RUN_ID) ensureManifest(runDir);
+  if (existing?.filePath === filePath && existing.fd != null
+    && logDescriptorMatchesPath(existing.fd, filePath)) return existing;
 
   if (existing?.fd != null) {
     try { fs.closeSync(existing.fd); } catch { /* ignore */ }

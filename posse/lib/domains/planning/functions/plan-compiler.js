@@ -1,3 +1,4 @@
+import { captureRequirementContract, compileRequirementContracts, requirementContracts as inheritedContracts } from "./requirement-contract.js";
 import { serializePlanScopeOverlaps } from "./plan-scope-overlap.js";
 import { completeTaskScope, namedTaskPaths, plannerDependencyKind } from "./plan-scope-dependencies.js";
 import { planningEnvironmentReadiness } from "../../system/functions/planning-environment-state.js";
@@ -1055,12 +1056,60 @@ export function createJobsFromPlan(worker, planJob, tasks, {
         }
       }
 
+      const scopeArtifactOutputRoot = (t, i, taskMode) => {
+        const defaultRoot = artifactDirAbs.replace(/\/+$/, "");
+        const normalizeResolvedRoot = (root) => path.resolve(worker.projectDir, String(root || "")).replace(/\\/g, "/").replace(/\/+$/, "");
+        const explicitRoot = t.output_root ? normalizeResolvedRoot(t.output_root) : "";
+        const createRoots = Array.isArray(t.create_roots) ? t.create_roots.map((r) => normalizeResolvedRoot(r)) : [];
+        const rootLooksShared = !explicitRoot || explicitRoot === defaultRoot;
+        const createRootsLookShared = createRoots.length === 0 || (createRoots.length === 1 && createRoots[0] === defaultRoot);
+        if (rootLooksShared && createRootsLookShared) {
+          const scopedRoot = artifactTaskOutputRoot(
+            planJob.work_item_id,
+            `task-${String(i + 1).padStart(2, "0")}-${artifactTaskSlug(t.title, taskMode)}`,
+            worker.projectDir,
+          ).replace(/\\/g, "/");
+          t.output_root = scopedRoot;
+          t.create_roots = [scopedRoot];
+          worker.emit(planJob.id, `${C.cyan}[plan-validate]${C.reset} WI#${planJob.work_item_id}: scoped artifact task "${t.title}" to ${scopedRoot}`);
+        }
+
+      };
+      // Scope declared artifact producers before creating jobs: dependent tasks
+      // may appear before their producer in the planner array.
+      for (let i = 0; i < tasks.length; i += 1) {
+        const t = tasks[i];
+        if (!t || ["research", "promote"].includes(t.job_type)) continue;
+        const taskMode = t.task_mode || "code";
+        const artifactTask = taskMode !== "code" && taskMode !== "db" && isValidTaskMode(taskMode);
+        // Repository writes and mixed tasks must finish routing/splitting first.
+        // Their declared files must not be moved into managed artifact storage.
+        if (!artifactTask || getCreateFileKindSummaryFromModule(t, artifactDirAbs).codeFiles.length > 0
+          || createsRepoPathFilesFromModule(t, artifactDirAbs)
+          || t.files_to_modify?.length || t.files_to_delete?.length) continue;
+        const fromRoot = t.output_root ? path.resolve(worker.projectDir, t.output_root) : artifactDirAbs;
+        const filesToCreate = [...(t.files_to_create || [])];
+        scopeArtifactOutputRoot(t, i, taskMode);
+        if (taskMode === "content") continue;
+        const replacements = movedOutputPathReplacements({ projectDir: worker.projectDir,
+          filesToCreate, fromRoot, toRoot: t.output_root || artifactDirAbs });
+        if (replacements.length === 0) continue;
+        t.files_to_create = normalizeArtifactCreateFiles(filesToCreate, t.output_root,
+          { projectDir: worker.projectDir, resourcesDir: getResourcesDir(worker.projectDir) });
+        Object.assign(t, rewriteArtifactReferences(t, replacements));
+        rewriteDownstreamArtifactReferences(tasks, i, replacements);
+      }
+
       for (let i = 0; i < tasks.length; i++) {
         let t = tasks[i];
         if (!t || !t.title) {
           droppedTaskIndexes.add(i);
           continue;
         }
+        const requirementSource = getWorkItem(planJob.work_item_id);
+        const parentRequirements = inheritedContracts(worker.parsePayload(planJob));
+        const requirementContracts = compileRequirementContracts(t, { _requirement_contracts: parentRequirements.length
+          ? parentRequirements : [captureRequirementContract({ task_spec: requirementSource?.description || requirementSource?.title || "" })] });
         const completedScope = completeTaskScope(t, planReadRoot);
         if (completedScope.length) logEvent({ work_item_id: planJob.work_item_id, job_id: planJob.id,
           event_type: EVENT_TYPES.PLAN_SCOPE_COMPLETED, actor_type: EVENT_ACTORS.SYSTEM,
@@ -1746,23 +1795,9 @@ export function createJobsFromPlan(worker, planJob, tasks, {
 
         if (shouldRunArtifactPreflight) {
           const defaultRoot = artifactDirAbs.replace(/\/+$/, "");
-          const normalizeResolvedRoot = (root) => path.resolve(worker.projectDir, String(root || "")).replace(/\\/g, "/").replace(/\/+$/, "");
-          const explicitRoot = t.output_root ? normalizeResolvedRoot(t.output_root) : "";
-          const createRoots = Array.isArray(t.create_roots) ? t.create_roots.map((r) => normalizeResolvedRoot(r)) : [];
-          const rootLooksShared = !explicitRoot || explicitRoot === defaultRoot;
-          const createRootsLookShared = createRoots.length === 0 || (createRoots.length === 1 && createRoots[0] === defaultRoot);
-          const plannedOutputRoot = explicitRoot || defaultRoot;
+          const plannedOutputRoot = t.output_root ? path.resolve(worker.projectDir, t.output_root).replace(/\\/g, "/") : defaultRoot;
           const plannedFilesToCreate = Array.isArray(t.files_to_create) ? [...t.files_to_create] : [];
-          if (rootLooksShared && createRootsLookShared) {
-            const scopedRoot = artifactTaskOutputRoot(
-              planJob.work_item_id,
-              `task-${String(i + 1).padStart(2, "0")}-${artifactTaskSlug(t.title, taskMode)}`,
-              worker.projectDir,
-            ).replace(/\\/g, "/");
-            t.output_root = scopedRoot;
-            t.create_roots = [scopedRoot];
-            worker.emit(planJob.id, `${C.cyan}[plan-validate]${C.reset} WI#${planJob.work_item_id}: scoped artifact task "${t.title}" to ${scopedRoot}`);
-          }
+          scopeArtifactOutputRoot(t, i, taskMode);
 
           const priorArtifactInputRoots = derivePriorArtifactInputRoots(t, i);
           if (priorArtifactInputRoots.length > 0) {
@@ -2153,6 +2188,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
               create_roots: t.create_roots || [],
               ...(Array.isArray(t.must_modify) && t.must_modify.length > 0 ? { must_modify: t.must_modify } : {}),
               ...(protectedScopeOmissions.length > 0 ? { protected_scope_omissions: protectedScopeOmissions } : {}),
+              _requirement_contracts: requirementContracts,
               ...(requirements.omissions.length > 0 ? { _blocked_file_requirements: requirements.omissions } : {}),
               success_criteria: Array.isArray(t.success_criteria) ? t.success_criteria : t.success_criteria ? [t.success_criteria] : [],
               test_command: compiledTestCommand,

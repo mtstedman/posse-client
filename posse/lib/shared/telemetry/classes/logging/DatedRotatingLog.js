@@ -1,3 +1,4 @@
+import { logDescriptorMatchesPath } from "../../functions/log-file-identity.js";
 import fs from "fs";
 import path from "path";
 import { getRuntimeLogDir } from "../../../../domains/runtime/functions/paths.js";
@@ -44,7 +45,8 @@ export class DatedRotatingLog {
     const logDir = path.resolve(this._resolveLogDir());
     const today = this._today();
     const openKey = `${today}\0${logDir}`;
-    if (this._fd && this._currentDate === today && this._currentDir === logDir) {
+    if (this._fd && this._currentDate === today && this._currentDir === logDir
+      && logDescriptorMatchesPath(this._fd, this._filePath(logDir, today))) {
       return { fd: this._fd, logDir };
     }
     this.close();

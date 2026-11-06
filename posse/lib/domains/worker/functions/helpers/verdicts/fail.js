@@ -1,3 +1,4 @@
+import { inheritRequirementContracts } from "../../../../planning/functions/requirement-contract.js";
 import { coordinateContractOwnerRepair } from "../../../../queue/functions/contract-owner-repair.js";
 import { repairInstructions } from "../test-failure-evidence.js";
 // lib/domains/worker/functions/helpers/verdicts/fail.js
@@ -979,7 +980,7 @@ function _spawnRecoveryJobsForVerdict({
         model_tier: job.model_tier,
         reasoning_effort: job.reasoning_effort,
         skills: job.skills || null,
-        payload_json: JSON.stringify({ ...recoveryPlan.artifactPayload, ...oneshotPayloadFields }),
+        payload_json: JSON.stringify({ ...recoveryPlan.artifactPayload, ...inheritRequirementContracts(currentPayload), ...oneshotPayloadFields }),
       });
       const promoteJob = spawnFromAssessor("failed", "promote", {
         work_item_id: job.work_item_id,
@@ -1054,7 +1055,7 @@ function _spawnRecoveryJobsForVerdict({
         model_tier: job.model_tier,
         reasoning_effort: job.reasoning_effort,
         skills: job.skills || null,
-        payload_json: JSON.stringify({ ...imagePayload, ...oneshotPayloadFields }),
+        payload_json: JSON.stringify({ ...imagePayload, ...inheritRequirementContracts(currentPayload), ...oneshotPayloadFields }),
       });
       spawnedJobs.push(imageJob);
       dependencyReplacementJobs.push({ job: imageJob, label: "image artifact repair" });
@@ -1087,7 +1088,7 @@ function _spawnRecoveryJobsForVerdict({
         model_tier: job.model_tier,
         reasoning_effort: job.reasoning_effort,
         skills: job.skills || null,
-        payload_json: JSON.stringify({ ...artifactPayload, ...oneshotPayloadFields }),
+        payload_json: JSON.stringify({ ...artifactPayload, ...inheritRequirementContracts(currentPayload), ...oneshotPayloadFields }),
       });
       spawnedJobs.push(artifactJob);
       dependencyReplacementJobs.push({ job: artifactJob, label: "artifact repair" });
@@ -1114,6 +1115,7 @@ function _spawnRecoveryJobsForVerdict({
         }
       : null;
     const fixPayload = {
+      ...inheritRequirementContracts(currentPayload),
       original_job_id: job.id,
       original_title: job.title,
       root_job_id: rootJobId,

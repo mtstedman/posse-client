@@ -50,7 +50,7 @@ const GREP_COMMAND_FLAGS = new Set(["--filter", "--filter-magic-label"]);
 const GIT_UNSAFE_READ_FLAGS = new Set(["-c", "--config-env", "--ext-diff", "--textconv", "--output"]);
 const FILE_MUTATING_FLAGS = new Set(["-c", "--compile"]);
 const FIXER_FLAGS = new Set(["--fix", "--write"]);
-const SHELL_VARIABLE_EXPANSION_RE = /(?:%[A-Za-z_][A-Za-z0-9_]*%|\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*))/;
+const SHELL_VARIABLE_EXPANSION_RE = /(?:%[A-Za-z_][A-Za-z0-9_]*%|\$[{A-Za-z0-9_@*#?$!-])/;
 const INFERRED_DELETE_FILE_EXTENSIONS = new Set([
   "bmp", "c", "cc", "cfg", "conf", "cpp", "cs", "css", "csv", "cts",
   "cxx", "env", "gif", "go", "h", "hpp", "html", "ini", "java", "jpeg",
@@ -79,13 +79,30 @@ function normalizeRoots(values = [], cwd = process.cwd()) {
   return [...new Set(roots)];
 }
 
+// Refuse POSIX rewrites the lexical classifier cannot faithfully interpret.
+function unsupportedShellEscape(command) {
+  if (process.platform === "win32") return false;
+  let quote = null;
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (ch === "\\" && quote !== "'") {
+      const next = command[++i];
+      if (next === "\n" || (quote === '"' ? /[$`'"\\\s]/.test(next ?? "") : !/[\s'"\\*?[]/.test(next ?? ""))) return true;
+      continue;
+    }
+    if (quote) { if (ch === quote) quote = null; }
+    else if (ch === "'" || ch === '"') quote = ch;
+  }
+  return false;
+}
+
 function shellWords(command) {
   return shellWordsDetailed(command).tokens;
 }
 
 // `expandable[i]` records whether tokens[i] carries an unquoted pattern
 // character, i.e. whether the shell performs pathname expansion on it. An
-// escaped character (`\*`) still counts: the guess errs toward expansion.
+// escaped pattern character (`\*`) is literal, as it is in the shell.
 function shellWordsDetailed(command) {
   const tokens = [];
   const expandable = [];
@@ -96,7 +113,7 @@ function shellWordsDetailed(command) {
     const ch = command[i];
     if (ch === "\\" && quote !== "'") {
       const next = command[i + 1];
-      if (next === "'" || next === '"' || next === "\\" || (next !== undefined && /\s/.test(next))) {
+      if (next === "'" || next === '"' || next === "\\" || (next !== undefined && /\s/.test(next)) || (!quote && /[*?[]/.test(next ?? ""))) {
         current += next;
         i += 1;
       } else {
@@ -429,7 +446,11 @@ function readonlyBashPathReason(policy, command) {
   let endOfOptions = false;
   for (const [offset, token] of words.slice(1).entries()) {
     const shellExpands = expandable[offset + 1];
-    if (skipNext) { skipNext = false; continue; }
+    if (skipNext) {
+      if (shellExpands) return "unquoted search flag value may expand into paths";
+      skipNext = false;
+      continue;
+    }
     // `--` ends option parsing: every later word is an operand, and words like
     // `-e` after it are literal patterns, not flags.
     if (token === "--" && !endOfOptions) { endOfOptions = true; continue; }
@@ -785,7 +806,7 @@ export function isSensitiveEnvCommand(command) {
   const parts = text.split(/\s+/).filter(Boolean);
   if (parts.length === 0) return false;
   return parts.some((part) => {
-    const cleaned = part.replace(/^['"]|['"]$/g, "").replace(/\\/g, "/");
+    const cleaned = part.replace(/^['"]|['"]$/g, "").replace(/\\/g, process.platform === "win32" ? "/" : "\\");
     return isSensitiveEnvRepoPath(cleaned);
   });
 }
@@ -798,7 +819,7 @@ function cleanShellPathToken(value = "") {
   return String(value || "")
     .trim()
     .replace(/^['"]|['"]$/g, "")
-    .replace(/\\/g, "/")
+    .replace(/\\/g, process.platform === "win32" ? "/" : "\\")
     .replace(/^[,]+|[,]+$/g, "");
 }
 
@@ -1117,6 +1138,9 @@ export class MutationPolicy {
     const original = String(command || "");
     if (!original || typeof command !== "string") {
       return { ok: false, error: "Error: No command provided.", reasonClass: "empty" };
+    }
+    if (unsupportedShellEscape(original)) {
+      return { ok: false, error: "Error: Unsupported shell escape in read-only bash.", reasonClass: "shell_escape" };
     }
     const repairs = [];
     // Newlines are rejected outright below, so only strip redirects otherwise.

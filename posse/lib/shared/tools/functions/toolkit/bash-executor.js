@@ -496,7 +496,14 @@ export function createBashExecutor({
       }
       const stdout = err.stdout ? err.stdout.toString().trim() : "";
       const stderr = err.stderr ? err.stderr.toString().trim() : "";
-      return `Exit code: ${err.status || 1}\n${stdout}\n${stderr}`.trim();
+      const label = err.code === "ENOBUFS"
+        ? "Error: output exceeded 1 MiB; truncated"
+        : `Exit code: ${err.status || 1}`;
+      // Preserve stderr's tail even when stdout consumed the subprocess buffer.
+      const errorTail = stderr.slice(-50000);
+      const output = `${stdout.slice(0, Math.max(0, 50000 - errorTail.length))}\n${errorTail}`.trim();
+      const truncated = stdout.length + stderr.length > 50000;
+      return `${label}\n${output}${truncated ? "\n... (output truncated at 50 KB)" : ""}`.trim();
     }
   };
 }

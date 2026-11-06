@@ -509,6 +509,11 @@ export function humanGateNameForPayload(payload = {}) {
   return name;
 }
 
+// Historical rows may deliberately remain non-canonical after migration.
+export function tryHumanGateNameForPayload(payload = {}) {
+  try { return humanGateNameForPayload(payload); } catch { return null; }
+}
+
 export function canonicalHumanGatePayload(payload = {}) {
   const gate = humanGateNameForPayload(payload);
   return { ...payload, review_type: gate, gate_kind: gate, question_kind: gate };

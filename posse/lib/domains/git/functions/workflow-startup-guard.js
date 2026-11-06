@@ -510,7 +510,7 @@ export function createStartupDirtyGuardHelpers(context) {
 
   const GITIGNORE_DIFF_ARGS = ["diff", "--no-color", "--no-ext-diff", "HEAD", "--", ".gitignore"];
   // HEAD's .gitignore; empty when HEAD has none (the file was just added).
-  const GITIGNORE_HEAD_ARGS = ["show", "HEAD:.gitignore"];
+  const GITIGNORE_HEAD_ARGS = ["show", "HEAD:./.gitignore"];
 
   function gitignoreDiffIsRuntimeOnly(cwd) {
     let diff;
@@ -552,7 +552,7 @@ export function createStartupDirtyGuardHelpers(context) {
     if (!filePath) return [];
     if (!filePath.includes(" -> ")) return [projectRelativePorcelainPath(filePath)].filter(Boolean);
     return filePath
-      .split(/\s+->\s+/)
+      .split(/\s+->\s+/).slice(-1)
       .map((part) => projectRelativePorcelainPath(part.replace(/^"|"$/g, "").replace(/\\/g, "/").trim()))
       .filter(Boolean);
   }
@@ -1068,7 +1068,10 @@ export function createStartupDirtyGuardHelpers(context) {
     }
     const dirtyLines = await startupDirtyLinesAsync({ signal });
     if (!dirtyLines.length) return { ok: true, dirty: false, policy: mode, action: "clean" };
-    if (dirtyLines.some(isUnmergedPorcelainLine) || mode !== "commit") {
+    const hasTrackedRuntimePath = dirtyLines.some((line) =>
+      isPosseRuntimePath(projectRelativePorcelainPath(porcelainPath(line)))
+    );
+    if (hasTrackedRuntimePath || dirtyLines.some(isUnmergedPorcelainLine) || mode !== "commit") {
       return dirtyTreeBlockedResult({ reason, dirtyLines, policy: mode });
     }
     return { ok: true, dirty: true, policy: mode, action: "commit_pending", dirtyCount: dirtyLines.length };

@@ -8,7 +8,7 @@ import { INFERRED_SCOPE_BARE_EXTENSIONS } from "../../../../catalog/files.js";
 import { RECEIPT_CONFIDENCE_POLICY, REPOSITORY_PLAN_UNAVAILABLE_CHECK_ID, UNESTABLISHED_COVERAGE_STATUSES, TEST_REQUIRED_FILE_MISSING_REASON } from "../../../../catalog/verification.js";
 import { inferGeneratedArtifactDeletionTargets } from "../../../../shared/scope/classes/MutationPolicy.js";
 import { TERMINAL_JOB_STATUSES } from "../../../queue/functions/common.js";
-import { countFailedJobs, getAttempts, getDependents, getEventsByWorkItem, getJob, getWorkItem, listJobsByWorkItem, logEvent, runInTransaction, updateJobPayload, updateJobStatus, updateWorkItemMetadata } from "../../../queue/functions/index.js";
+import { getAgentCalls, countFailedJobs, getAttempts, getDependents, getEventsByWorkItem, getJob, getWorkItem, listJobsByWorkItem, logEvent, runInTransaction, updateJobPayload, updateJobStatus, updateWorkItemMetadata } from "../../../queue/functions/index.js";
 import { parseJobPayload, parseJsonObject } from "../../../queue/functions/payload.js";
 import { artifactsDir, wiScopeId } from "../../../artifacts/functions/index.js";
 import { sanitizeHumanQuestions } from "./human-question-classifier.js";
@@ -26,7 +26,8 @@ import { getDb } from "../../../../shared/storage/functions/index.js";
 import { getMaxFixChainDepth, getWiFailureThreshold } from "../../../settings/functions/tunables.js";
 import { isAuthoritativeFinalReviewPass } from "../../../assessment/functions/final-review-authority.js";
 
-const ASSESSMENT_RETRY_TIER_ORDER = ["cheap", "standard"];
+import { tierModelName } from "../../../providers/functions/provider.js";
+import { resolveAssessmentExecution, nextAssessmentTier } from "../../../settings/functions/assessment-execution.js";
 const ASSESSOR_CONFIDENCE_VALUES = new Set(["low", "medium", "high"]);
 const ASSESSOR_CONFIDENCE_RANK = Object.freeze({ none: -1, low: 0, medium: 1, high: 2 });
 const OUTPUT_CONTRACT_WI_MODES = new Set(["image", "report", "question"]);
@@ -800,11 +801,7 @@ export function capVerdictForHighRiskVerificationGap(
 }
 
 function _nextAssessmentRetryTier(currentTier) {
-  const requested = String(currentTier || "standard");
-  const current = requested === "strong" ? "standard" : requested;
-  const idx = ASSESSMENT_RETRY_TIER_ORDER.indexOf(current);
-  if (idx < 0) return current;
-  return ASSESSMENT_RETRY_TIER_ORDER[Math.min(idx + 1, ASSESSMENT_RETRY_TIER_ORDER.length - 1)];
+  return nextAssessmentTier(currentTier);
 }
 
 function _logBadInput(job, verdict, classification, detail) {
@@ -1410,12 +1407,10 @@ function _queueInternalAssessmentRetry(
   }
   // Inline parse recovery and provider escalation can already have used the
   // top tier while the planned payload still says cheap.
-  const requestedPreviousTier = assessmentModelTier || payload._assess_model_tier || "cheap";
-  // Strong is a legacy/planner-only value for assessment. Normalize it before
-  // deciding whether another tier exists; otherwise the standard cap looks
-  // like a bogus strong -> standard "retry" and can loop old queued jobs.
-  const previousTier = requestedPreviousTier === "strong" ? "standard" : requestedPreviousTier;
-  const retryTier = _nextAssessmentRetryTier(previousTier);
+  const previousTier = resolveAssessmentExecution({ payload, modelTier: assessmentModelTier }).modelTier;
+  const previousCall = getAgentCalls(job.id).filter(call => ["assessor", "final_reviewer"].includes(call.role)).at(-1);
+  const retryTier = nextAssessmentTier(previousTier, { resolveModel: previousCall?.provider
+    ? tier => tierModelName(tier, { role: "assessor", providerName: previousCall.provider }) : null });
   if (clarifyReview && payload._assess_review_correction === true) return false;
   if (retryTier === previousTier && !clarifyReview) return false;
   payload._assess_only = true;

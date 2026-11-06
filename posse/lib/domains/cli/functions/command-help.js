@@ -1,3 +1,4 @@
+import { BUDGET_USAGE } from "../../../catalog/admission-budget.js";
 import { LOCAL_USAGE } from "./local-options.js";
 import { findCommandOnPath } from "../../../shared/platform/functions/command-launch.js";
 import { C } from "../../../shared/format/functions/colors.js";
@@ -18,9 +19,11 @@ function posseAliasDiagnostic() {
 }
 
 const COMMAND_USAGE = {
+  budget: () => console.log(BUDGET_USAGE),
+  acceptance: () => console.log("Usage: posse acceptance show|require|bind|waive <wi-id> [contract:requirement] [receipt-id] [reason]"),
   local: () => console.log(LOCAL_USAGE),
   add: () => {
-    console.log(`\n  Usage: posse add "description of what you want built"`);
+    console.log(`\n  Usage: posse add "description of what you want built" [--follow-up <wi-id>] [--follow-up-kind gap|regression|enhancement]`);
     const intents = REQUEST_KIND_CHOICES.map((choice) => choice.value).join("|");
     const hotkeys = REQUEST_KIND_CHOICES.map((choice) => choice.aliases[0]).join(",");
     console.log(`  ${C.dim}Optional: --mode ${WORK_ITEM_MODES.join("|")} --oneshot --intent ${intents} (hotkeys ok: ${hotkeys}) --output ${INTAKE_TERMINAL_OUTPUTS.join("|")} --files LIST --constraints LIST${C.reset}\n`);
@@ -110,9 +113,9 @@ const COMMAND_USAGE = {
     console.log(`  Members leave and restore locally; hosts gracefully drain peers and integrate the side trunk.\n`);
   },
   "local-models": () => {
-    console.log(`\n  Usage: posse local-models [list [--json] | download [shorthand]]`);
+    console.log(`\n  Usage: posse local-models [list [--json]]`);
     console.log(`  Lists signed local models with download size and recommended memory.`);
-    console.log(`  Downloads always require an interactive, size-aware confirmation.\n`);
+    console.log(`  Install one with posse local install <slug>; downloads always require a size-aware confirmation.\n`);
   },
   "native-binaries": () => {
     console.log(`\n  Usage: posse native-binaries\n  Reconcile native artifacts and emit NDJSON progress.\n`);
@@ -218,8 +221,8 @@ ${aliasDiagnostic}
     ${C.dim}             codex-models [validate|list] [oauth|api|auto]${C.reset}
     ${C.cyan}local${C.reset}      Run local models: --model SLUG --format text|json|png --output FILE
     ${C.dim}             local list [--json] | local install SLUG${C.reset}
-    ${C.cyan}local-models${C.reset} List/download signed local models with size and system recommendations
-    ${C.dim}             local-models [list [--json] | download [shorthand]]${C.reset}
+    ${C.cyan}local-models${C.reset} List signed local models with size and system recommendations
+    ${C.dim}             local-models [list [--json]]${C.reset}
     ${C.cyan}native-binaries${C.reset} Reconcile signed native artifacts (NDJSON progress)
     ${C.cyan}windows-events${C.reset} Probe Windows crash/resource events into the run dir
     ${C.dim}             windows-events [--around ISO] [--minutes N] [--json]${C.reset}

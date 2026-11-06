@@ -1,40 +1,28 @@
 // @ts-check
 
 import { C } from "../../../shared/format/functions/colors.js";
-import path from "node:path";
 
 import { LOCAL_MODEL_IDS } from "../../../catalog/local-model.js";
-import { ML_MODEL_PACKAGE_INSTALL_METHOD } from "../../../catalog/binary.js";
-import { runMlNativeMethodAsync } from "../../../shared/native/functions/ml-invoke.js";
 import {
-  downloadLocalModelPackage,
   fetchLocalModelArtifactCatalog,
   prepareLocalModelArtifactClient,
 } from "../../remote/functions/local-model-artifacts.js";
-import { defaultLocalGenerationModelRoot } from "../../../shared/native/functions/local-model-paths.js";
-import { askSelectorChoice } from "./input-prompts.js";
-
-const CANCEL_SELECTION = "__cancel__";
 
 export async function runLocalModelsCommand(argv = [], {
   colors = C,
-  input = process.stdin,
   output = process.stdout,
-  nonInteractive = false,
   prepareClient = prepareLocalModelArtifactClient,
   fetchCatalog = fetchLocalModelArtifactCatalog,
-  downloadModel = downloadLocalModelPackage,
-  installModel = runMlNativeMethodAsync,
-  modelRoot = defaultLocalGenerationModelRoot(),
-  askChoice = askSelectorChoice,
 } = {}) {
   const args = (Array.isArray(argv) ? argv : [])
     .map((value) => String(value || "").trim())
     .filter((value) => value && !value.startsWith("-"));
   const action = String(args[0] || "").toLowerCase();
-  const json = argv.includes("--json");
-  if (action && action !== "list" && action !== "download") {
-    throw new Error(`Unknown local-models action: ${args[0]}. Use list or download.`);
+  if (action === "download") {
+    throw new Error("Download local models with: posse local install <slug>");
+  }
+  if (action && action !== "list") {
+    throw new Error(`Unknown local-models action: ${args[0]}. Use list, or posse local install <slug> to download.`);
   }
 
   const client = await prepareClient();
@@ -43,118 +31,14 @@ export async function runLocalModelsCommand(argv = [], {
     ...signedCatalog,
     artifacts: signedCatalog.artifacts.filter(artifact => LOCAL_MODEL_IDS.includes(artifact.artifactId)),
   };
-  if (json) {
-    if (action === "download") {
-      throw new Error("Local model downloads require an interactive confirmation and do not support --json.");
-    }
-    writeLine(output, JSON.stringify(catalog, null, 2));
-    return { action: "list", catalog };
-  }
-
-  renderLocalModelCatalog(catalog, { output, colors });
-  if (action === "list" || (!action && (!input?.isTTY || !output?.isTTY || nonInteractive))) {
-    return { action: "list", catalog };
-  }
-  if (nonInteractive || !input?.isTTY || !output?.isTTY) {
-    throw new Error("Local model downloads always require an interactive size confirmation; --yes and --non-interactive cannot bypass it.");
-  }
-
-  let shorthand = action === "download" ? String(args[1] || "").trim() : "";
-  if (!shorthand) {
-    const choices = [
-      { value: CANCEL_SELECTION, label: "Cancel" },
-      ...catalog.artifacts.map((artifact, index) => ({
-        value: artifact.shorthand,
-        label: `${terminalText(artifact.displayName)} · ${formatArtifactBytes(artifact.bytes)} · ${formatMemoryRecommendation(artifact.recommendation)}`,
-        aliases: [String(index + 1), artifact.shorthand],
-      })),
-    ];
-    shorthand = await askChoice("Select a local model to download", choices, {
-      defaultValue: CANCEL_SELECTION,
-      input,
-      output,
-      colors,
-    });
-    if (shorthand === CANCEL_SELECTION) {
-      writeLine(output, `  ${colors.dim}Download canceled.${colors.reset}`);
-      return { action: "cancel", catalog };
-    }
-  }
-
-  const artifact = catalog.artifacts.find((candidate) => candidate.shorthand === shorthand);
-  if (!artifact) {
-    throw new Error(`Local model shorthand is not present in the signed catalog: ${terminalText(shorthand)}`);
-  }
-
-  writeLine(output, "");
-  renderLocalModelArtifact(artifact, { output, colors, index: null });
-  const size = formatArtifactBytes(artifact.bytes);
-  const exactBytes = formatInteger(artifact.bytes);
-  const confirmation = await askChoice(
-    `Download ${terminalText(artifact.displayName)} — ${size} (${exactBytes} bytes)?`,
-    [
-      { value: "no", label: "No" },
-      { value: "yes", label: "Yes, download it" },
-    ],
-    {
-      defaultValue: "no",
-      input,
-      output,
-      colors,
-    },
-  );
-  if (confirmation !== "yes") {
-    writeLine(output, `  ${colors.dim}Download canceled; no model bytes were requested.${colors.reset}`);
-    return { action: "cancel", artifact, catalog };
-  }
-
-  writeLine(output, `  ${colors.cyan}Preparing the native ML runtime...${colors.reset}`);
-  const mlAvailable = await client.manager?.ensureAvailable?.("ml", { refresh: true });
-  if (mlAvailable?.available !== true) {
-    throw new Error(`The native ML runtime is unavailable (${mlAvailable?.reason || "unknown"}).`);
-  }
-
-  writeLine(output, `  ${colors.cyan}Starting verified download to ${terminalText(client.destinationRoot)}${colors.reset}`);
-  try {
-    const result = await downloadModel(client, artifact.artifactId, {
-      expectedProfileId: `${artifact.artifactId}-int4-cpu`,
-      expectedVersion: artifact.version,
-      expectedArchiveFormat: artifact.archiveFormat,
-      expectedArchiveRoot: artifact.family,
-      expectedBytes: artifact.bytes,
-      expectedSha256: artifact.sha256,
-    });
-    assertSelectedPackage(result, artifact);
-    writeLine(output, `  ${colors.cyan}Installing verified package for local generation...${colors.reset}`);
-    const installed = await installModel(ML_MODEL_PACKAGE_INSTALL_METHOD, result, {
-      modelRoot: path.resolve(modelRoot),
-      manager: client.manager,
-      timeoutMs: 24 * 60 * 60 * 1000,
-      idempotent: false,
-    });
-    const installedResult = installed && typeof installed === "object"
-      ? /** @type {Record<string, unknown>} */ (installed)
-      : {};
-    const cached = result?.cached === true ? "already verified in cache" : "downloaded and SHA-256 verified";
-    writeLine(output, `  ${colors.green}Ready:${colors.reset} ${terminalText(installedResult.modelPath || "unknown path")}`);
-    writeLine(output, `  ${colors.dim}${size} · ${cached}${colors.reset}`);
-    return { action: "download", artifact, catalog, result, installed };
-  } catch (error) {
-    throw error;
-  }
+  if (argv.includes("--json")) writeLine(output, JSON.stringify(catalog, null, 2));
+  else renderLocalModelCatalog(catalog, { output, colors });
+  return { action: "list", catalog };
 }
 
-function assertSelectedPackage(result, artifact) {
-  const expectedProfileId = `${artifact.artifactId}-int4-cpu`;
-  if (result?.modelId !== artifact.artifactId
-    || result?.profileId !== expectedProfileId
-    || result?.version !== artifact.version
-    || result?.archiveFormat !== artifact.archiveFormat
-    || result?.archiveRoot !== artifact.family
-    || result?.bytes !== artifact.bytes
-    || result?.sha256 !== artifact.sha256) {
-    throw new Error("The downloaded model package does not match the signed selection.");
-  }
+// Both install surfaces ask the same question, with the exact byte count.
+export function downloadQuestion({ label, bytes }) {
+  return `Download ${label}: ${formatArtifactBytes(bytes)} (${formatInteger(bytes)} bytes)?`;
 }
 
 export function renderLocalModelCatalog(catalog, { output = process.stdout, colors = C } = {}) {
@@ -166,6 +50,8 @@ export function renderLocalModelCatalog(catalog, { output = process.stdout, colo
     renderLocalModelArtifact(artifact, { output, colors, index: index + 1 });
     if (index < catalog.artifacts.length - 1) writeLine(output, "");
   });
+  writeLine(output, "");
+  writeLine(output, `  ${colors.dim}Install: posse local install <slug>${colors.reset}`);
   writeLine(output, "");
 }
 
@@ -244,7 +130,7 @@ function formatInteger(value) {
   return Number.isSafeInteger(parsed) ? new Intl.NumberFormat("en-US").format(parsed) : "unknown";
 }
 
-function terminalText(value) {
+export function terminalText(value) {
   return String(value ?? "")
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
     .replace(/\s+/g, " ")

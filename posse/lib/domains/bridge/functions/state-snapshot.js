@@ -1,3 +1,4 @@
+import { tryHumanGateNameForPayload } from "../../../catalog/human-input.js";
 import { promptFromGatePayload } from "./gate-prompt.js";
 import { isReadyOneshotScopeSelection } from "./gate-readiness.js";
 import { getEvents, getEventsByWorkItem, getEventsByWorkItemSinceId, getEventsSinceId, getHeadEventId, getHumanGate, getJob, getWorkItem, listJobs, listJobsByWorkItem, listWorkItems } from "../../queue/functions/index.js";
@@ -270,7 +271,7 @@ export function normalizeGate(job) {
       work_item_id: job.work_item_id == null ? null : Number(job.work_item_id),
       original_job_id: originalJobId,
       gate_job_id: Number(job.id),
-      gate_kind: contract?.gate_kind || payload.gate_kind || payload.review_type || payload.subtype || "clarification",
+      gate_kind: tryHumanGateNameForPayload(payload) || "legacy_unstructured",
       gate_generation: Number(contract?.generation || 1),
       gate_state: contract?.gate_state || "open",
       age_ms: Number.isFinite(createdMs) ? Math.max(0, Date.now() - createdMs) : null,

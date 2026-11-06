@@ -403,6 +403,10 @@ if (fs.existsSync(parserPhp)) {
   fs.writeFileSync(parserPhp, parserText);
 }
 
+const binPhp = path.join(here, "vendor", "davidrjenni", "scip-php", "bin", "scip-php");
+fs.writeFileSync(binPhp, replaceOne(fs.readFileSync(binPhp, "utf8"), ["    'index.scip',"],
+  "    (\\getenv('POSSE_SCIP_OUTPUT') ?: 'index.scip'),", "staged output path"));
+
 function replaceOne(input, candidates, replacement, label) {
   if (input.includes(replacement)) return input;
   for (const candidate of candidates) {

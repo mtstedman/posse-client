@@ -1,3 +1,4 @@
+import { withProviderAdmission } from "../functions/shared/admission-budget.js";
 import { extractJson as defaultExtractJson } from "../../../shared/format/functions/json.js";
 import { ProviderToolRenderer } from "../../../shared/tools/classes/ProviderToolRenderer.js";
 
@@ -21,7 +22,7 @@ export class BaseProvider {
     this.call = this.call.bind(this);
     this.callProvider = this.callProvider.bind(this);
     if (typeof this.module.callAgentTurn === "function") {
-      this.callAgentTurn = this.module.callAgentTurn.bind(this.module);
+      this.callAgentTurn = (prompt, opts = {}) => withProviderAdmission(this.name, opts, options => this.module.callAgentTurn(prompt, options));
     }
     if (typeof this.module.supportsAgentTranscript === "function") {
       this.supportsAgentTranscript = this.module.supportsAgentTranscript.bind(this.module);
@@ -82,7 +83,7 @@ export class BaseProvider {
       providerName: this.name,
       requestedMaxTurns: opts?.maxTurns,
     });
-    const result = await this.module.callProvider(promptText, opts);
+    const result = await withProviderAdmission(this.name, opts, options => this.module.callProvider(promptText, options));
     return turnBudget.finalize(result);
   }
 

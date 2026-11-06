@@ -168,7 +168,7 @@ function packageDir(root, name) {
 }
 
 function detectPackageManager(root, pkg) {
-  return detectNodePackageManager(root, { packageManager: pkg?.packageManager }).manager;
+  return detectNodePackageManager(root, { packageManager: pkg?.packageManager, defaultManager: "npm" }).manager;
 }
 
 function nodeManifestFiles(root) {
@@ -224,6 +224,7 @@ function writeNodeManifestStamp(root, hash) {
   const stamp = nodeManifestStampPath(root);
   fs.mkdirSync(path.dirname(stamp), { recursive: true });
   fs.writeFileSync(stamp, `${hash}\n`, "utf8");
+  ensureGeneratedDirectoryIgnored(root, "node_modules");
 }
 
 function composerManifestFiles(root) {

@@ -4,6 +4,7 @@ import {
   HUMAN_GATE_RECONCILE_REASONS,
   WORK_ITEM_FAILURE_DISPOSITION_REVIEW_TYPE,
   humanGateContractForPayload,
+  tryHumanGateNameForPayload,
   validateHumanGateActionabilityContract,
 } from "../../../catalog/human-input.js";
 import { EVENT_TYPES } from "../../../catalog/event.js";
@@ -556,6 +557,25 @@ export function noteHumanGateAnswerNotApplied(gateJobId, reason) {
       WHERE id = ? AND json_valid(payload_json)`).run(gateJobId);
   }
   return result.changes === 1;
+}
+
+// Explicit operator cleanup for rows the identity migration could not convert.
+export function supersedeLegacyHumanGate(gateJobId) {
+  const db = getDb();
+  return executeTransaction(db, () => {
+    const job = db.prepare("SELECT * FROM jobs WHERE id = ?").get(gateJobId);
+    if (!job || job.job_type !== "human_input" || tryHumanGateNameForPayload(asPayload(job.payload_json))) return false;
+    if (!["queued", "waiting_on_human", "waiting_on_review"].includes(job.status) || jobHasLiveLeaseAt(job, graceCutoff())) return false;
+    const reason = "Legacy gate superseded by operator";
+    supersedeHumanGate(gateJobId, reason);
+    db.prepare(`UPDATE jobs SET status = 'canceled', finished_at = ?, updated_at = ?,
+      lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL,
+      result_json = ?, state_version = state_version + 1 WHERE id = ?`)
+      .run(now(), now(), JSON.stringify({ reason, actor: "human" }), gateJobId);
+    _gateCanceledHook?.(job);
+    _humanGateReconcileHook?.([job.work_item_id]);
+    return true;
+  });
 }
 
 export function supersedeHumanGate(gateJobId, reason = "superseded") {

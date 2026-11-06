@@ -469,11 +469,13 @@ export function refreshBranchForCloseout({
     return { attempted: false, refreshed: false, infrastructureFailure: true, reason: "missing_arguments" };
   }
   if (!publishBranch && !ownsWorktree) throw new Error("Unpublished replay requires a private worktree");
+  let projectPrefix;
   let mergeBase;
   let targetHead;
   let branchHead;
   let commits;
   try {
+    projectPrefix = String(exec(["rev-parse", "--show-prefix"], cwd, { trim: false })).replace(/\r?\n$/, "");
     mergeBase = exec(["merge-base", targetBranch, branch], cwd);
     targetHead = exec(["rev-parse", targetBranch], cwd);
     branchHead = exec(["rev-parse", branch], cwd);
@@ -681,7 +683,7 @@ export function refreshBranchForCloseout({
   const resolverUsed = resolvedFiles.length > 0;
   let testResult = null;
   if (resolverUsed && testCommand) {
-    testResult = runTestCommand(testCommand, { cwd: worktreePath, dependencySourceDir: cwd });
+    testResult = runTestCommand(testCommand, { cwd: path.join(worktreePath, projectPrefix), dependencySourceDir: cwd });
     if (!testResult?.ok) {
       restore();
       return {

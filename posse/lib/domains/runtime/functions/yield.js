@@ -9,6 +9,10 @@ export function isAbortError(err) {
   return err?.name === "AbortError" || err?.code === "ABORT_ERR";
 }
 
+export function isKillAbort(err, signal = null) {
+  return isAbortError(err) || Boolean(err?._killReason) || signal?.aborted === true;
+}
+
 export function signalAbortError(signal, message = "Operation aborted") {
   const reason = signal?.reason;
   if (isAbortError(reason)) return reason;

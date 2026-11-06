@@ -3598,6 +3598,7 @@ export function findRunnableJobsBatch(limit = 25, { excludeWorkItemIds = [], exc
   const conditions = [
     "j.status = 'queued'",
     "j.ready_at <= ?",
+    "NOT EXISTS (SELECT 1 FROM work_item_budgets b WHERE b.work_item_id = j.work_item_id AND b.enabled = 1 AND b.paused_reason IS NOT NULL)",
     // A canceled work item's remaining jobs never lease — except the ATLAS
     // cleanup warm that cancellation itself enqueues, which must run so the
     // WI view is disposed and the run can close out instead of reporting

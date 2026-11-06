@@ -88,7 +88,7 @@ export const FINAL_REVIEW_PROVEN_TEST_STATUSES = Object.freeze(["failed"]);
 export const FINAL_REVIEW_SHARED_TEST_RUNNERS = Object.freeze(["repository_script"]);
 
 export const FINAL_REVIEW_CONTRACT_FIELDS = Object.freeze([
-  "task_spec", "instructions", "root_task_spec", "original_task_spec", "fix_instructions",
+  "_requirement_contracts", "task_spec", "instructions", "root_task_spec", "original_task_spec", "fix_instructions",
   "success_criteria", "root_success_criteria", "constraints", "test_command", "tests_to_run", "verification_contract",
   "files_to_modify", "files_to_create", "files_to_delete", "create_roots",
 ]);

@@ -172,6 +172,13 @@ export class PairingMonitor {
         }
         return;
       }
+      // Acknowledgement proves go ran even if the shell died before recording
+      // its exit. Only an unacknowledged launch may fall back automatically.
+      if (Number.isSafeInteger(childPid) && childPid > 0) {
+        goWindowToken = null;
+        log(`  ${C.yellow}[session]${C.reset} posse go ended after starting in its window; the exit status is unavailable.`);
+        return;
+      }
       const windowGone = own?.pid
         ? pidProvablyDead(own.pid, kill)
         : goWindowHasMarker && nowMs() - goWindowOpenedAt >= GO_WINDOW_MARKER_GRACE_MS;

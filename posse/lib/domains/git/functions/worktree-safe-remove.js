@@ -18,6 +18,7 @@ import {
 } from "./worktree-internal.js";
 import {
   worktreePorcelainAsync,
+  assertWorktreeRootAsync,
   preserveCorruptWorktreeContents,
   snapshotAndResetDirtyWorktreeAsync,
 } from "./worktree-recovery.js";
@@ -154,6 +155,7 @@ export async function safeSnapshotAndRemoveWorktreeAsync(
     let corruptPreserved = false;
 
     try {
+      await assertWorktreeRootAsync(wtPath, { signal });
       preCleanupPorcelain = await worktreePorcelainAsync(wtPath, { signal });
     } catch (err) {
       if (isAbortError(err)) throw err;

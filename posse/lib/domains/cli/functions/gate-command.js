@@ -1,4 +1,5 @@
-import { humanInputChoicesForPayload } from "../../../catalog/human-input.js";
+import { supersedeLegacyHumanGate } from "../../queue/functions/human-gates.js";
+import { humanInputChoicesForPayload, tryHumanGateNameForPayload } from "../../../catalog/human-input.js";
 import { answerHumanInput } from "../../bridge/functions/human-input-answer.js";
 import { getHumanGate, getJob, getLiveSchedulerBlockMessage, listJobsByWorkItem } from "../../queue/functions/index.js";
 import { resolveGateReviewDiffTarget } from "../../queue/functions/gate-review-target.js";
@@ -127,7 +128,7 @@ async function showGate(rawId, {
   const { error, gateJobId, gateJob } = loadGateJob(rawId, getJobFn);
   if (error) return error;
   const payload = parseJobPayload(gateJob);
-  const choices = humanInputChoicesForPayload(payload);
+  const choices = tryHumanGateNameForPayload(payload) ? humanInputChoicesForPayload(payload) : ["supersede"];
   const target = resolveReviewDiffTargetFn(gateJob, { payload });
   const diff = target ? await buildReviewDiffFn({ projectDir, target }) : null;
   let gateState = null;
@@ -178,7 +179,7 @@ export async function runGateCommand(argv = [], {
   if (error) return error;
 
   const payload = parseJobPayload(gateJob);
-  const choices = humanInputChoicesForPayload(payload);
+  const choices = tryHumanGateNameForPayload(payload) ? humanInputChoicesForPayload(payload) : ["supersede"];
   const text = flagFromArgs(argv, "--text");
   if (choices.length === 0) {
     // A gate without choices (a clarification) takes free text: --text, or
@@ -208,6 +209,11 @@ export async function runGateCommand(argv = [], {
     };
   }
 
+  if (!tryHumanGateNameForPayload(payload)) {
+    const ok = supersedeLegacyHumanGate(gateJobId);
+    return { ok, action: "supersede", job_id: gateJobId, exitCode: ok ? 0 : 1,
+      ...(ok ? {} : { reason: "gate_not_supersedable" }) };
+  }
   const feedback = feedbackFromArgs(argv);
   const answer = feedback ? `${action}: ${feedback}` : action;
   // The resolved action travels beside the text so feedback that happens to

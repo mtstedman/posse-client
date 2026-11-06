@@ -23,7 +23,12 @@ const NODE_INSTALL_ENV = { COREPACK_ENABLE_DOWNLOAD_PROMPT: "0" };
 
 function ancestors(dir) {
   const list = [];
-  for (let parent = path.dirname(dir); parent !== path.dirname(parent); parent = path.dirname(parent)) list.push(parent);
+  for (let current = path.resolve(dir); !has(current, ".git");) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    list.push(parent);
+    current = parent;
+  }
   return list;
 }
 

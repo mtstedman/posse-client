@@ -1,5 +1,6 @@
 import { LOCAL_BRIDGE_MODELS } from "../../../catalog/local-model.js";
 import { LOCAL_MODEL_PARAMETERS, LOCAL_PARAMETER_FLAGS } from "../../../catalog/local-model-parameters.js";
+import { getSetting } from "../../settings/functions/repository-settings.js";
 
 export function resolveLocalModel(name) {
   const model = LOCAL_BRIDGE_MODELS.find(candidate => candidate.slug === name || candidate.modelId === name);
@@ -33,8 +34,18 @@ function validateParameter(key, value, parameter) {
   }
 }
 
+// An unreadable saved default stops the run: generation can take hours, so a
+// silent fallback would spend them on the wrong step count.
+function defaultValue(key, parameter, readSetting) {
+  if (!parameter.defaultSetting) return parameter.default;
+  let saved;
+  try { saved = readSetting(parameter.defaultSetting); }
+  catch (error) { throw new Error(`Could not read the saved default for ${key}: ${error?.message || error}. Pass --${parameter.flag} for this run.`); }
+  return saved == null || String(saved).trim() === "" ? parameter.default : Number(saved);
+}
+
 // Resolve JSON and legacy flags together, before reading stdin or loading ML.
-export function resolveLocalParameters(model, args) {
+export function resolveLocalParameters(model, args, readSetting = getSetting) {
   const schema = LOCAL_MODEL_PARAMETERS[model.modelId].parameters;
   let supplied = {};
   if (args.parameters !== undefined) {
@@ -55,7 +66,7 @@ export function resolveLocalParameters(model, args) {
   for (const [key, parameter] of Object.entries(schema)) {
     const fromJson = Object.hasOwn(supplied, key), fromFlag = args[parameter.flag] !== undefined;
     if (fromJson && fromFlag) throw new Error(`Parameter ${key} was supplied in both --parameters and --${parameter.flag}; choose one.`);
-    let value = fromJson ? supplied[key] : fromFlag ? args[parameter.flag] : parameter.default;
+    let value = fromJson ? supplied[key] : fromFlag ? args[parameter.flag] : defaultValue(key, parameter, readSetting);
     if (fromFlag && ["integer", "number"].includes(parameter.type)) {
       value = String(value).trim() === "" ? NaN : Number(value);
     }
@@ -73,7 +84,12 @@ export function resolveLocalParameters(model, args) {
   return { parameters, args: resolvedArgs };
 }
 
-export function localModelHelp(model) {
+function helpDefault(key, parameter, readSetting) {
+  try { return defaultValue(key, parameter, readSetting); }
+  catch { return parameter.default; }
+}
+
+export function localModelHelp(model, readSetting = getSetting) {
   const profile = LOCAL_MODEL_PARAMETERS[model.modelId];
   const lines = [
     `Usage: posse local --model ${model.slug} [--prompt TEXT | --input FILE | stdin]`,
@@ -84,7 +100,8 @@ export function localModelHelp(model) {
     "", "Supported parameters (JSON keys are case-sensitive):",
   ];
   for (const [key, parameter] of Object.entries(profile.parameters)) {
-    lines.push(`  ${key}: ${parameterConstraints(parameter)}${parameter.default !== undefined ? `; default: ${JSON.stringify(parameter.default)}` : "; optional"}`,
+    const fallback = helpDefault(key, parameter, readSetting);
+    lines.push(`  ${key}: ${parameterConstraints(parameter)}${fallback !== undefined ? `; default: ${JSON.stringify(fallback)}` : "; optional"}`,
       `    --${parameter.flag}${parameter.description ? ` — ${parameter.description}` : ""}`);
   }
   lines.push("", "Use strict JSON, with double-quoted keys and string values. Existing flags also work;",

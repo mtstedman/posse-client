@@ -1,3 +1,4 @@
+import { handleAssessmentInterruption } from "../../functions/helpers/assessment-interruption.js";
 import { assessmentDisplayMessage } from "../../functions/execution/display-sync.js";
 import { providerFailureDiagnosticText } from "../../functions/helpers/diagnostics.js";
 import { getDefaultModelTierForRole, getDefaultReasoningEffortForRole } from "../../../settings/functions/repository-settings.js";
@@ -255,6 +256,7 @@ export class AssessmentHandoffAdapter {
         delete recoveryPayload._assess_model_tier;
         delete recoveryPayload._assess_reasoning_effort;
         delete recoveryPayload._assess_model_name;
+        delete recoveryPayload._assess_review_correction;
         recoveryPayload._assessment_source_recovery_count = recoveryCount + 1;
         recoveryPayload._assessment_source_recovery_reason = missing.message.slice(0, 1000);
         const recovered = runInTransaction(() => {
@@ -385,7 +387,7 @@ export class AssessmentHandoffAdapter {
         assessAttemptCount,
         { resolveModel: resolveAssessModel },
       );
-      const effectiveTier = escalatedTier === "strong" ? "standard" : escalatedTier;
+      const effectiveTier = escalatedTier;
       const internalAssessRetries = countInternalAssessmentRetries(job.id);
       // Tool/transport failures requeue assessment without producing the
       // `job.assessment_internal_retry` event used by verdict escalation. Count
@@ -626,6 +628,10 @@ export class AssessmentHandoffAdapter {
       refreshAndExtractInsightsFromModule(job.work_item_id);
       worker._cleanupWorktreeIfDone(job.work_item_id);
     } catch (assessErr) {
+      if (handleAssessmentInterruption(worker, { job, attemptId: assessAttempt.attempt.id,
+        leaseToken, error: assessErr, startTime: assessStart })) {
+        return { handled: true, currentAttemptId: assessAttempt.attempt.id };
+      }
       const diagnostic = providerFailureDiagnosticText(assessErr);
       // A late failure after another owner took the lease must not rewrite
       // that owner's job; only this execution's own attempt row is closed.

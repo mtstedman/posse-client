@@ -7,6 +7,8 @@
 
 // adminGitExec, not gitExec: gate projection is an operator surface that
 // must work whether or not the native git daemon's pulse token is warm.
+import { readWorkItemOutcome } from "../../queue/functions/work-item-outcome.js";
+import { safeOutcomeBrief } from "../../assessment/functions/work-item-outcome.js";
 import { adminGitExec } from "../../git/functions/admin-git.js";
 import { resolveTargetBranchForAdmin } from "../../git/functions/target-branch.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -129,6 +131,7 @@ export function buildReviewBrief(job, { projectDir = process.cwd() } = {}) {
   const diff = branch ? branchDiffSummary(projectDir, branch) : null;
   if (!assessed && !diff) return null;
   const brief = {};
+  try { const outcome = readWorkItemOutcome(workItemId); if (outcome) brief.outcome = safeOutcomeBrief(outcome); } catch { /* partial brief remains useful */ }
   if (assessed) {
     if (ASSESSED_VERDICTS.has(assessed.assessor_verdict)) {
       brief.verdict = assessed.assessor_verdict;

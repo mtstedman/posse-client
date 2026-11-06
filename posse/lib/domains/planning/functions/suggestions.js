@@ -1,3 +1,4 @@
+import { captureRequirementContract } from "./requirement-contract.js";
 import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import {
   addDependency,
@@ -210,6 +211,7 @@ export function createApprovedSuggestionFollowUp({
   );
 
   const payload = {
+    _requirement_contracts: [captureRequirementContract({ task_spec: taskSpec || suggestionText, success_criteria: [suggestionText] })],
     original_job_id: sourceJobId ?? null,
     origin_work_item_id: sourceWorkItem.id,
     origin_artifact_id: artifactId ?? null,

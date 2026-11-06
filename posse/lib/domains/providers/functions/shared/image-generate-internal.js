@@ -1,3 +1,6 @@
+import { reserveBudget, settleBudget } from "../../../queue/functions/admission-budget.js";
+import { getObservationContext } from "../../../observability/functions/observations.js";
+import { BUDGET_PAUSED } from "../../../../catalog/admission-budget.js";
 import fs from "fs";
 import path from "path";
 import { isPathInside, realpathExistingPrefix } from "../../../runtime/functions/fs-safety.js";
@@ -445,8 +448,20 @@ async function _executeGenerateImageWithRoute({
       cwd: path.dirname(outputPath),
     };
 
-    onProviderRequest();
-    const response = await _generateImageWithTimeout(client, params, { timeoutMs: imageTimeoutMs });
+    const context = getObservationContext() || {};
+    const reservation = reserveBudget({ workItemId: context.work_item_id, jobId: context.job_id,
+      attemptId: context.attempt_id, parentCallId: context.agent_call_id, provider, model, role: "artificer" });
+    let dispatched = false;
+    let response;
+    try {
+      onProviderRequest();
+      dispatched = true;
+      response = await _generateImageWithTimeout(client, params, { timeoutMs: imageTimeoutMs });
+    } finally {
+      // Image usage currently has no complete price receipt. Keep that unknown,
+      // requiring operator reconciliation when a spend threshold is enabled.
+      settleBudget(reservation, { notDispatched: !dispatched });
+    }
     if (!Array.isArray(response?.data) || response.data.length === 0) {
       await _recordImageGenerationTelemetry({
         provider, model, args, status: "failed", startedAt, usage: response?.usage,
@@ -509,6 +524,7 @@ async function _executeGenerateImageWithRoute({
       startedAt,
       error: err?.message || String(err),
     });
+    if (err?.code === BUDGET_PAUSED) throw err;
     if (err?.imageGenerationTimeout) {
       return `Error: image generation failed: ${err.message}.`;
     }

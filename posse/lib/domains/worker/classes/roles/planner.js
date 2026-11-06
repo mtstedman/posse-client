@@ -1,3 +1,4 @@
+import { buildFollowUpEvidence } from "../../../planning/functions/follow-up-context.js";
 import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnostic-logging.js";
 import { pruneTestHandoff } from "../../../verification/functions/test-capability.js";
 import { detectNodePackageManager } from "../../../../shared/tools/functions/node-package-manager.js";
@@ -771,6 +772,7 @@ export class PlannerRole extends BaseRole {
         "",
       ].join("\n") : "";
 
+    plannerPacket._local_followup_context = buildFollowUpEvidence(workItem);
     const contextText = [
       promptLiteral("WORK ITEM", workItem.title),
       promptLiteral("DESCRIPTION", workItem.description || "(none)"),

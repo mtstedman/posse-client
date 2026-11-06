@@ -1,3 +1,4 @@
+import { isKillAbort } from "../../../runtime/functions/yield.js";
 import { authoritativeFinalReview } from "../../../assessment/functions/final-review-authority.js";
 import { parsePorcelainEntries, unfinishedSiblingDirtyLocks } from "../../functions/helpers/worktree-dirty-classification.js";
 import { DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js";
@@ -807,6 +808,7 @@ export async function handlePostExecutionForWorker({
                 });
                 break;
               } catch (commitErr) {
+                if (isKillAbort(commitErr, abortSignal)) throw commitErr;
                 if (!inferredMaterializationRepairApplied) {
                   const dropped = await dropEmptyInferredMaterializations(commitErr, jobPayload, wtPath);
                   if (dropped.length > 0) {
@@ -1400,6 +1402,7 @@ export async function handlePostExecutionForWorker({
               this.emit(job.id, `${C.dim}[system] WI#${job.work_item_id} ${branchName}: no changes to commit${C.reset}`);
             }
           } catch (gitErr) {
+            if (isKillAbort(gitErr, abortSignal)) throw gitErr;
             // Git failures must fail the attempt with the real reason,
             // not silently continue to the no-op guard for a generic retry.
             const hookOutput = String(gitErr.hookOutput || "").trim();

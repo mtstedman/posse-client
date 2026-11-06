@@ -424,6 +424,7 @@ function _sanitizePayloadForRecipient(recipient, payload = {}) {
     delete sanitized.hash_ref_packet;
   }
   delete sanitized._blocked_file_requirements;
+  delete sanitized._requirement_contracts;
   return pruneBlockedFileRequirements(sanitized).payload;
 }
 
@@ -979,6 +980,7 @@ export function buildHandoffPacket(job, opts) {
   );
 
   return {
+    _local_requirement_contracts: payload._requirement_contracts,
     // ── Identity ──
     recipient: resolvedRole,
     job_type: job.job_type,
@@ -1468,6 +1470,7 @@ export async function handoff(input, { providerName = null, reviewerChildIdentit
   // Raw handoffs and saved packets must use the same executable requirements
   // as freshly compiled plans.
   Object.assign(packet, pruneBlockedFileRequirements(packet).payload);
+  packet._local_requirement_contracts ??= packet._raw_payload?._requirement_contracts;
   packet._raw_payload = _sanitizePayloadForRecipient(packet.recipient, packet._raw_payload || {});
 
   // Normalize identity once so every phase timer and observation sees the

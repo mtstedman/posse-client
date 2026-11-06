@@ -1,3 +1,4 @@
+import { followUpMetadataFromArgs } from "./follow-up-options.js";
 import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import { commandInitializesProject, isPosseProjectInitialized, uninitializedProjectMessage } from "./project-init-state.js";
 import { sessionJoinRequest } from "../../pairing/functions/join-folder.js";
@@ -41,7 +42,7 @@ installCliWarningFilter();
 //   plan review/approve/reject <wiId>  Review a plan before execution (with --approve-plan)
 //   audit [jobId|wiId]  Show recent handoff/provider audit trail
 //   codex-models        Validate/list codex model compatibility
-//   local-models        List and download signed local model bundles
+//   local-models        List signed local model bundles
 //   windows-events      Probe Windows System/Application crash events into the run dir
 //
 // Flags:
@@ -936,12 +937,14 @@ async function cmdAdd() {
   const deepthinkBudget = resolveResearchBudgetForDeepthink(deepthink, parsedResearchBudget);
   const sessionRecycle = parseSessionRecycleFlagFromArgv();
   const iterationProfile = workflowMode ? getIterativeWorkflowProfile(workflowMode) : null;
+  const followUp = followUpMetadataFromArgs();
   const item = createWorkItem(title, description, priority, {
     mode,
     mode_source: modeSource,
     governance_tier: tier,
     session_recycle: sessionRecycle,
     metadata: researchBudgetMetadata({
+      ...followUp,
       research_budget_explicit: parsedResearchBudget.explicit,
       intake_hints: intakeHints,
       ...(requestedRedTeamPlan ? { red_team_plan: true } : {}),
@@ -1025,12 +1028,14 @@ async function cmdInject() {
     : parsedResearchBudget.budget;
   const sessionRecycle = parseSessionRecycleFlagFromArgv();
   const iterationProfile = workflowMode ? getIterativeWorkflowProfile(workflowMode) : null;
+  const followUp = followUpMetadataFromArgs();
   const item = createWorkItem(title, description, "normal", {
     source: "inject",
     mode,
     mode_source: modeSource,
     session_recycle: sessionRecycle,
     metadata: researchBudgetMetadata({
+      ...followUp,
       research_budget_explicit: parsedResearchBudget.explicit,
       intake_hints: intakeHints,
       ...(requestedRedTeamPlan ? { red_team_plan: true } : {}),
@@ -1110,10 +1115,12 @@ function cmdAsk() {
     subtasks: parseFlagValue("--subtasks"),
     constraints: parseFlagValue("--constraints"),
   }, { requestText: question, fallbackMode: "build" });
+  const followUp = followUpMetadataFromArgs();
   const item = createWorkItem(title, question, "normal", {
     source: "ask",
     mode_source: "explicit",
     metadata: researchBudgetMetadata({
+      ...followUp,
       mode: "question",
       intake_hints: intakeHints,
       research_budget_explicit: parsedResearchBudget.explicit,
@@ -2039,7 +2046,7 @@ async function cmdCodexModels() {
 
 async function cmdLocalModels() {
   const { runLocalModelsCommand } = await loadLocalModelsCommandModule();
-  return runLocalModelsCommand(process.argv.slice(3), { nonInteractive: NON_INTERACTIVE });
+  return runLocalModelsCommand(process.argv.slice(3));
 }
 
 async function cmdMcpStatus() {
@@ -2509,6 +2516,18 @@ async function dispatchResolvedCommand(command) {
     doctor: cmdDoctor,
     update: cmdUpdate,
     review: cmdReview,
+    budget: async () => {
+      const { runBudgetCommand } = await import("./budget-command.js");
+      const result = runBudgetCommand(process.argv.slice(3));
+      console.log(JSON.stringify(result, null, 2));
+      return result;
+    },
+    acceptance: async () => {
+      const { runAcceptanceCommand } = await import("./acceptance-command.js");
+      const result = runAcceptanceCommand(process.argv.slice(3));
+      console.log(JSON.stringify(result, null, 2));
+      return result;
+    },
     gate: cmdGate,
     job: cmdJobVerdict,
     inject: cmdInject,

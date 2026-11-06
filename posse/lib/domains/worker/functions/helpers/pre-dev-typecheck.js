@@ -153,6 +153,7 @@ export async function runPreDevTypecheck({
       command: result.command || null,
       reason: result.reason || null,
       scoped_files: files,
+      roots: result.roots || [],
       project_diagnostic_count: projectDiagnostics.length,
       diagnostics,
       dependency_repair: dependencyRepair
@@ -179,6 +180,7 @@ export async function runPreDevTypecheck({
         reason: summary.reason,
         scoped_file_count: files.length,
         scoped_diagnostic_count: diagnostics.length,
+        roots: summary.roots,
         project_diagnostic_count: projectDiagnostics.length,
         by_file: byFile,
         dependency_repair: summary.dependency_repair,

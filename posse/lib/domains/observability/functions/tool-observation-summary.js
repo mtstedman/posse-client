@@ -125,7 +125,7 @@ export function summarizeCatalogToolUse(tool, input = {}, cwdNorm = null, rel = 
     return {
       observation_type: spec.type,
       summary: `${spec.label}: ${command}`,
-      detail: _catalogDetail({ spec, input, cwdNorm, tool, catalogName, extra: { command: input[spec.commandKey || "command"] || "" } }),
+      detail: _catalogDetail({ spec, input, cwdNorm, tool, catalogName, extra: { command: redactString(String(input[spec.commandKey || "command"] || "")) } }),
     };
   }
 

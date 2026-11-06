@@ -114,7 +114,7 @@ export function isReady({
   if (!hasInstalledModel) {
     return {
       ready: false,
-      reason: "local Qwen model is not installed; run: posse local-models download qwen-code",
+      reason: "local Qwen model is not installed; run: posse local install qwen-code",
     };
   }
   return { ready: true, reason: null };
@@ -210,7 +210,7 @@ export async function callProvider(promptText, opts = {}) {
   const profile = LOCAL_MODEL_PROFILES[selected];
   const installedDirectory = path.join(path.resolve(modelRoot), profile.profileId);
   if (!fs.existsSync(path.join(installedDirectory, ".posse-model-package.json"))) {
-    const error = new Error(`Local model ${selected} is not installed. Run: posse local-models download ${profile.shorthand}`);
+    const error = new Error(`Local model ${selected} is not installed. Run: posse local install ${profile.shorthand}`);
     /** @type {any} */ (error).code = "POSSE_LOCAL_MODEL_NOT_INSTALLED";
     throw error;
   }

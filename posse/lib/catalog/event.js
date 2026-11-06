@@ -77,6 +77,8 @@ export const EVENT_ACTORS = Object.freeze(
 );
 
 export const EVENT_TYPES = Object.freeze({
+  WORK_ITEM_BUDGET_PAUSED: "work_item.budget_paused",
+  WORK_ITEM_BUDGET_CHANGED: "work_item.budget_changed",
   // ── artifacts ───────────────────────────────────────────────────────────
   ARTIFACTS_TRANSIENT_DIRS_CLEANED: "artifacts.transient_dirs_cleaned",
   ARTIFACT_ROUTING_DIAGNOSTIC: "artifacts.routing_diagnostic",

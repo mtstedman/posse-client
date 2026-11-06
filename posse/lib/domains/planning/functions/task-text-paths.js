@@ -89,7 +89,7 @@ export function rewriteDownstreamArtifactReferences(tasks, sourceIndex, replacem
     seen.add(index);
     return (tasks[index]?.depends_on_index || []).some((dep) => Number.isInteger(dep) && dependsOnSource(dep, seen));
   };
-  for (let index = sourceIndex + 1; index < tasks.length; index += 1) {
-    if (dependsOnSource(index)) tasks[index] = rewriteArtifactReferences(tasks[index], replacements);
+  for (let index = 0; index < tasks.length; index += 1) {
+    if (index !== sourceIndex && dependsOnSource(index)) tasks[index] = rewriteArtifactReferences(tasks[index], replacements);
   }
 }

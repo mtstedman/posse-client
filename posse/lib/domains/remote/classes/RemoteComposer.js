@@ -1,3 +1,4 @@
+import { renderRequirementContracts } from "../../planning/functions/requirement-contract.js";
 import { AutomationOwnerClient } from "../../automation/classes/AutomationOwnerClient.js";
 import { repositoryID } from "../../automation/functions/paths.js";
 import { RemotePromptClient } from "./RemotePromptClient.js";
@@ -189,7 +190,9 @@ export class RemoteComposer {
       Array.isArray(researchCoverage) && researchCoverage.length > 0
         ? `RESEARCH COMPLETION COVERAGE (claim indexes refer to rendered evidence labels):\n${JSON.stringify(researchCoverage)}` : "",
     ]) : "";
-    const basePrompt = joinPromptParts([skeleton, localPolicyOverlay, enrichment, inheritedResearch]);
+    const originalRequirements = renderRequirementContracts({ _requirement_contracts: packet?._local_requirement_contracts });
+    const followUpEvidence = packet?.recipient === "planner" ? packet?._local_followup_context : null;
+    const basePrompt = joinPromptParts([skeleton, localPolicyOverlay, enrichment, inheritedResearch, originalRequirements, followUpEvidence]);
     const evidenceBudget = Number.isFinite(promptCap) && promptCap > 0
       ? Math.max(0, Math.min(32000, promptCap - basePrompt.length - 2))
       : undefined;
@@ -206,6 +209,8 @@ export class RemoteComposer {
       localPolicyOverlay,
       enrichment,
       inheritedResearch,
+      originalRequirements,
+      followUpEvidence,
       localDevBriefEvidence.text,
     ]);
     if (Number.isFinite(promptCap) && promptCap > 0 && prompt.length > promptCap) {

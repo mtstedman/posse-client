@@ -1,3 +1,5 @@
+import { readStagerMeta } from "../../functions/v2/scip/stager-meta.js";
+import { SCIP_SANITIZER_POLICY_VERSION } from "../../functions/v2/scip/sanitizer-policy.js";
 import { streamEmbeddingSymbol, symbolsMissingFromEmbeddingIndex, embeddingIndexRow } from "../../functions/v2/embedding-symbols.js";
 import { isAbortLikeError } from "../../../../shared/concurrency/functions/abort-classification.js";
 import { orderedUniquePaths } from "../../functions/v2/ordered-paths.js";
@@ -734,6 +736,8 @@ export class ParseEngine {
     const existingFiles = await listScipFiles(this.#scipDir).catch(() => []);
     if (existingFiles.length > 0) {
       for (const [batchOrdinal, file] of existingFiles.entries()) {
+        const meta = await readStagerMeta(file);
+        if (meta?.sanitizer_policy_version !== SCIP_SANITIZER_POLICY_VERSION) continue;
         if (onBatchReady) {
           const sourceLanguages = scipBasenameSourceLanguages(file);
           const report = await onBatchReady(file, {

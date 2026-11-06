@@ -1,3 +1,4 @@
+import { isKillAbort } from "../../../runtime/functions/yield.js";
 import { completeAttempt, getJob, storeArtifact } from "../../../queue/functions/index.js";
 import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
 import { C } from "../../../../shared/format/functions/colors.js";
@@ -45,6 +46,7 @@ export async function handlePartialWorkFailureForWorker({
   startTime,
   wtPath,
 } = {}) {
+  if (isKillAbort(err, signal)) return false;
   if (!attempt?.id || !job?.id || !wtPath || !MUTATING_JOB_TYPES.has(job.job_type)) return false;
 
   const errorDetails = getErrorDetailsFromModule(err);

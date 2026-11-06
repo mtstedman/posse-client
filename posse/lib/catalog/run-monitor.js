@@ -3,6 +3,7 @@ import { EVENT_TYPES as E } from "./event.js";
 // Presentation policy only; runtime event identities remain in event.js.
 export const RUN_MONITOR_STREAMS = Object.freeze(["events", "runtime", "diagnostics", "observations"]);
 export const RUN_MONITOR_EVENTS = Object.freeze([
+  E.WORK_ITEM_BUDGET_PAUSED, E.WORK_ITEM_BUDGET_CHANGED,
   E.AGENT_QUESTION_CREATED, E.AGENT_QUESTION_ANSWERED,
   E.OPERATOR_NUDGE_CREATED, E.OPERATOR_NUDGE_APPLIED,
   E.JOB_STATUS_CHANGED, E.WORK_ITEM_STATUS_CHANGED, E.JOB_ASSESSED,

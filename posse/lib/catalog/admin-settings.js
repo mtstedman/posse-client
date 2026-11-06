@@ -66,8 +66,11 @@ export const ADMIN_PROVIDER_SETTING_SECTIONS = Object.freeze([
   Object.freeze({ provider: "openai", label: "OpenAI", settingKeys: Object.freeze(["openai_run_budget_usd", "openai_daily_budget_usd", "openai_account_limit_tokens_session", "openai_account_limit_tokens_week"]) }),
   Object.freeze({ provider: "grok", label: "Grok", settingKeys: Object.freeze(["grok_run_budget_usd", "grok_daily_budget_usd"]) }),
   Object.freeze({ provider: "copilot", label: "Copilot", settingKeys: Object.freeze([]) }),
-  Object.freeze({ provider: "posse-local", label: "Local Models", settingKeys: Object.freeze(["posse_local_generation_enabled"]) }),
+  Object.freeze({ provider: "posse-local", label: "Local Models", settingKeys: Object.freeze(["posse_local_generation_enabled", "posse_local_image_steps", "posse_local_video_steps"]) }),
 ]);
+
+// An Admin action row, not a stored setting: Enter starts `posse local install`.
+export const ADMIN_LOCAL_MODEL_INSTALL_ROW_KEY = "local_model_install";
 
 export const ADMIN_PROVIDER_CATALOG_SETTING_KEYS = Object.freeze([
   "model_catalog_enforcement",
@@ -153,6 +156,9 @@ export const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   grok_image_budget_usd: "Grok image budget ($)",
   openai_image_budget_usd: "OpenAI image budget ($)",
   posse_local_generation_enabled: "Experimental local generation",
+  local_model_install: "Install a model",
+  posse_local_image_steps: "Local image steps",
+  posse_local_video_steps: "Local video steps",
   model_catalog_enforcement: "Retired model policy",
   // ATLAS
   atlas_v2: "ATLAS code index",
@@ -368,6 +374,9 @@ export const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   grok_image_budget_usd: "Expected Grok image-generation spend, in US dollars. Shown for tracking; Posse does not stop jobs when it is reached.",
   openai_image_budget_usd: "Expected OpenAI image-generation spend, in US dollars. Shown for tracking; Posse does not stop jobs when it is reached.",
   posse_local_generation_enabled: "Allow the staged posse-local provider to appear in Admin for an operator-run test. Runtime checks still require a supported platform, the native ML worker, and an installed model package.",
+  local_model_install: "Download and verify a local model, the same as posse local install <slug>. Shows the size and asks before downloading.",
+  posse_local_image_steps: "Sampling steps for posse local image generation when --steps is not given. More steps take longer.",
+  posse_local_video_steps: "Sampling steps for posse local video generation when --steps is not given. More steps take longer.",
   model_catalog_enforcement: "What to do when a model you picked is no longer in the model catalog. Warn and fallback switches to that tier's current default; warn only keeps your model; off skips the check.",
   // ATLAS
   atlas_v2: "Master switch for ATLAS, Posse's code index. On gives agents indexed code search and context; required refuses to start jobs when ATLAS is unavailable; off falls back to plain file reads and search.",

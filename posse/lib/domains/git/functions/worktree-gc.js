@@ -40,6 +40,7 @@ import { createGcTiming } from "./worktree-internal.js";
 import { worktreeRoot } from "./worktree-path.js";
 import {
   worktreeNeedsRecoveryAsync,
+  assertWorktreeRootAsync,
   snapshotAndResetDirtyWorktreeAsync,
 } from "./worktree-recovery.js";
 import { safeSnapshotAndRemoveWorktreeAsync } from "./worktree-safe-remove.js";
@@ -642,6 +643,7 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
               onMsg(`GC: skipped dirty check for held WI#${wiId}; a leased/running job may be writing to the worktree`);
               continue;
             }
+            await assertWorktreeRootAsync(wtDir, { signal });
             if (await timing.step(`held WI#${wiId} dirty check`, () => worktreeNeedsRecoveryAsync(wtDir, { signal }), { gitCwd: wtDir })) {
               const snapshotDir = await timing.step(`held WI#${wiId} snapshot/reset`, () => snapshotAndResetDirtyWorktreeAsync(wtDir, projectDir, {
                 reason: "startup-gc-dirty-worktree",

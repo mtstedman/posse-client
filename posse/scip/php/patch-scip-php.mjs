@@ -420,6 +420,11 @@ patchFile(parserPhp, [
 
 patchFile(binPhp, [
   {
+    label: "staged output path",
+    anchor: "    'index.scip',",
+    replacement: "    (\\getenv('POSSE_SCIP_OUTPUT') ?: 'index.scip'),",
+  },
+  {
     // Upstream still reports tool_info.version 0.0.1, the same as the v0.0.2
     // release Posse used before (and still uses on PHP < 8.3). ATLAS keys
     // ingested SCIP indexes on that version, so an unchanged file indexed by

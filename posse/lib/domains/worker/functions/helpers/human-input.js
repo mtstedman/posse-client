@@ -214,7 +214,7 @@ export async function runHumanInputHandler(worker, job, abortSignal = null, { le
   const promptIdentity = buildHumanPromptIdentity(job, payload);
   promptOptions.promptIdentity = promptIdentity;
 
-  const policy = approvalPolicyForPayload(payload, { getSetting, scopeMode: worker.scopeMode,
+  const policy = worker.display?.hasOperatorAnswer ? {} : approvalPolicyForPayload(payload, { getSetting, scopeMode: worker.scopeMode,
     autoApprove: worker.autoApprove, autoApprovePlan: process.argv.includes("--auto-approve-plan") });
   if (policy.answer) {
     worker.emit(job.id, `${C.cyan}[human] ${policy.gate} resolved with "${policy.answer}" (${policy.source})${C.reset}`);
@@ -250,7 +250,7 @@ export async function runHumanInputHandler(worker, job, abortSignal = null, { le
         timeout,
         ...(aborted ? [aborted] : []),
       ]);
-      return JSON.stringify({ questions, answers, prompt_identity: promptIdentity });
+      return JSON.stringify({ questions, answers, prompt_identity: promptIdentity, unattended: false });
     } catch (err) {
       // Withdraw the queued TUI prompt: leaving it would let the user
       // "answer" a gate that was already parked, silently dropping the

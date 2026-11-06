@@ -1,8 +1,7 @@
 import { FUZZY_SCAN_SKIP_DIRS } from "../../../catalog/scope-discovery.js";
 import fs from "node:fs";
 import path from "node:path";
-import { adminGitExec } from "../../git/functions/admin-git-exec.js";
-import { gitExecBuffer } from "../../git/functions/utils.js";
+import { listIgnoredRepoPathsSync } from "../../git/functions/ignored-paths.js";
 import { AGENT_HANDOFF_PROFILES } from "../../../catalog/handoff.js";
 
 function pathEntryExists(target) {
@@ -56,37 +55,7 @@ function isRepository(projectDir) {
 }
 
 function ignoredUntrackedPathKeys(projectDir, values) {
-  const paths = uniqueScopePaths(values);
-  if (paths.length === 0) return new Set();
-  // ls-files is read-only and exact pathspecs keep the scan bounded to the
-  // planner's proposed scope. The native transport still needs a warm pulse
-  // token, which a fresh process (tests, cold boots) does not have -- fall
-  // back to direct system git so the ignored-path guard cannot silently
-  // disable itself; only when both transports fail does the probe degrade to
-  // "nothing ignored".
-  const args = [
-    "ls-files",
-    "-z",
-    "--others",
-    "--ignored",
-    "--exclude-standard",
-    "--",
-    ...paths,
-  ];
-  let output = null;
-  try {
-    output = gitExecBuffer(args, projectDir, { maxBuffer: 1024 * 1024 });
-  } catch {
-    try {
-      output = adminGitExec(args, projectDir, { encoding: "buffer", maxBuffer: 1024 * 1024 });
-    } catch {
-      return new Set();
-    }
-  }
-  return new Set(output.toString("utf8")
-    .split("\0")
-    .filter(Boolean)
-    .map(scopePathKey));
+  return new Set(listIgnoredRepoPathsSync(projectDir, uniqueScopePaths(values)).map(entry => scopePathKey(entry.path)));
 }
 
 function legacyTaskNode(task, index) {

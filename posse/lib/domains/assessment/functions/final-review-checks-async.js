@@ -28,7 +28,7 @@ function baselineFrom(summary) {
       byFile[diagnostic.file] = (byFile[diagnostic.file] || 0) + 1;
     }
   }
-  return projectDiagnosticCount === null && !byFile ? null : { projectDiagnosticCount, byFile };
+  return projectDiagnosticCount === null && !byFile ? null : { projectDiagnosticCount, byFile, roots: Array.isArray(summary.roots) ? summary.roots : null };
 }
 
 export function preDevTypecheckBaseline(change, jobId = null) {
@@ -68,7 +68,7 @@ export async function runChangedFileChecksAsync(cwd, change, { signal = null, jo
     const scoped = JSON.parse(await fs.readFile(output, "utf8"));
     const baseline = preDevTypecheckBaseline(change, jobId);
     const implicit = await runImplicitTypechecks(cwd, files, { signal, timeoutMs,
-      baselineProjectDiagnosticCount: baseline.projectDiagnosticCount, baselineByFile: baseline.byFile });
+      baselineProjectDiagnosticCount: baseline.projectDiagnosticCount, baselineByFile: baseline.byFile, baselineRoots: baseline.roots });
     if (!implicit.length) return scoped;
     return { ...(scoped || { status: "passed", files: [], introduced: [], inChanged: [], elsewhere: [] }),
       implicit_typechecks: implicit };

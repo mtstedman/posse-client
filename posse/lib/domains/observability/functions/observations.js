@@ -1,3 +1,4 @@
+import { logDescriptorMatchesPath } from "../../../shared/telemetry/functions/log-file-identity.js";
 import { readNotFoundProbe } from "./read-not-found.js";
 import { READ_NOT_FOUND_OBSERVATION } from "../../../catalog/observation.js";
 import { isDiagnosticObservation } from "../../../catalog/diagnostic-logging.js";
@@ -296,7 +297,8 @@ function _ensureStream() {
   }
   const logDir = getRuntimeLogDir();
   const today = new Date().toISOString().slice(0, 10);
-  if (_fd != null && _currentDate === today) return true;
+  if (_fd != null && _currentDate === today
+    && logDescriptorMatchesPath(_fd, path.join(logDir, `observations-${today}.log`))) return true;
   _closeStream();
   try {
     fs.mkdirSync(logDir, { recursive: true });

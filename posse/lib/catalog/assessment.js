@@ -16,3 +16,5 @@ export const UNSUCCESSFUL_VISUAL_TOOL_STATUSES = Object.freeze([
   "failed",
   "rejected",
 ]);
+
+export const ASSESSMENT_EXECUTION_OBSERVATION = "assessment.execution";

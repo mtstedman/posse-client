@@ -13,13 +13,14 @@ export function missingBrowserTestRuntime(output) {
 // passed tests, or failed more tests than it printed launch failures for, has
 // product evidence the missing browser must not hide. Playwright's summary
 // prints `N passed (4.2s)` and `N failed`, on separate lines or one line.
-export function browserLaunchFailuresExplainTestOutput(output) {
-  const text = String(output || "");
+export function browserLaunchFailuresExplainTestOutput(output, executionCounts = null) {
+  const text = String(output || "").replace(/\x1b\[[0-9;]*m/g, "");
   const launchFailures = text.split("\n").filter((line) => BROWSER_LAUNCH_FAILURE.test(line)).length;
   if (launchFailures === 0) return false;
+  if (executionCounts && executionCounts.total - executionCounts.skipped > launchFailures) return false;
   const counts = (pattern) => [...text.matchAll(pattern)].map((match) => Number(match[1]));
-  if (counts(/(?:^|[^\w.])(\d+)\s+passed\b/gmu).some((count) => count > 0)) return false;
-  const failed = counts(/(?:^|[^\w.])(\d+)\s+failed\b/gmu);
+  if ([...counts(/(?:^|[^\w.])(\d+)\s+(?:passed|passing)\b/gmu), ...counts(/^\s*(?:#|ℹ) pass\s+(\d+)\s*$/gm)].some((count) => count > 0)) return false;
+  const failed = [...counts(/(?:^|[^\w.])(\d+)\s+(?:failed|failing)\b/gmu), ...counts(/^\s*(?:#|ℹ) fail\s+(\d+)\s*$/gm)];
   return failed.length === 0 || Math.max(...failed) <= launchFailures;
 }
 

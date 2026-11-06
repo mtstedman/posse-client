@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Posse wrapper for the Composer-installed scip-php CLI.
 //
-// Upstream scip-php writes `index.scip` in the target working directory and
+// Unpatched upstream writes `index.scip` in the target working directory and
 // does not accept an output path. ATLAS expects each indexer to write to the
 // staging directory, so this wrapper adapts `scip-php index --output <path>` to
 // the upstream command shape without putting the PHP indexer runtime in the
@@ -20,7 +20,7 @@ const scipRoot = path.resolve(here, "..");
 // 8.1/8.2): run the environment the installer stamped for this host.
 // Windows production installs keep these in the per-user tool root
 // (%LOCALAPPDATA%\Posse\scip) rather than beside this wrapper.
-const managedScipRoot = path.join(managedToolRoot(), "scip");
+const managedScipRoot = path.join(managedToolRoot(path.dirname(scipRoot)), "scip");
 const runtime = resolvePhpScipRuntime({ scipRoots: [managedScipRoot, scipRoot] });
 const upstream = runtime?.upstream || path.join(scipRoot, "php", "vendor", "bin", "scip-php");
 const composerPharCandidates = [path.join(managedScipRoot, "bin", "composer.phar"), path.join(here, "composer.phar")];
@@ -49,6 +49,14 @@ if (!runtime) {
   process.exit(127);
 }
 
+// Refuse an old runtime before it can create an index in the live checkout.
+const patchedCli = path.join(runtime.envDir, "vendor", "davidrjenni", "scip-php", "bin", "scip-php");
+const cliSource = fs.readFileSync(fs.existsSync(patchedCli) ? patchedCli : upstream, "utf8");
+if (!cliSource.includes("POSSE_SCIP_OUTPUT")) {
+  console.error("Posse scip-php runtime needs the staged-output patch (run posse doctor)");
+  process.exit(127);
+}
+
 const cwd = process.cwd();
 const output = path.resolve(parsed.output);
 const stagedVendorDir = path.join(path.dirname(output), "php-vendor");
@@ -69,11 +77,10 @@ const fallbackProject = fs.existsSync(targetComposerJson)
 // 8.3 short name such as C:\Users\RUNNER~1, a junction, a symlink) would
 // leave every document path absolute.
 const indexCwd = canonicalDirectory(fallbackProject?.dir || cwd);
-const localOutput = path.join(indexCwd, "index.scip");
-// Names the wrapper process holding the reservation. The stager kills a
-// timed-out indexer with a signal, which skips this wrapper's cleanup and
-// strands its reservation in the project root; the stamp lets the next run
-// tell that stranded reservation from an operator's own index.scip.
+// Keep both the reserved inode and its ownership stamp outside the project.
+// The installed PHP patch writes only to this explicit staging path.
+const localOutput = `${output}.php-tmp`;
+fs.mkdirSync(path.dirname(localOutput), { recursive: true });
 const ownerStamp = `${localOutput}.posse-owner`;
 process.exitCode = runIndexer();
 
@@ -107,7 +114,6 @@ function reserveOutput() {
 }
 
 function runIndexer() {
-  const directOutput = path.join(canonicalDirectory(path.dirname(output)), path.basename(output)) === localOutput;
   let owned;
   let ownedFd;
   let stamped = false;
@@ -119,10 +125,7 @@ function runIndexer() {
     } catch { return null; }
   };
   try {
-    // Only an explicit --output index.scip authorizes replacing this path.
-    // Exclusive creation also prevents concurrent wrapper runs from claiming
-    // the same hardcoded upstream output between a check and the PHP launch.
-    if (directOutput) fs.rmSync(localOutput, { force: true });
+    // Exclusive staging reservations prevent concurrent writes to one output.
     ownedFd = reserveOutput();
     fs.writeFileSync(ownerStamp, `${process.pid}\n`);
     stamped = true;
@@ -133,15 +136,12 @@ function runIndexer() {
     if (parsed.memoryLimit) args.push(`--memory-limit=${parsed.memoryLimit}`);
     const run = spawnSync("php", ["-d", "error_reporting=8191", "-d", "display_errors=stderr", upstream, ...args], {
       cwd: indexCwd, stdio: "inherit", windowsHide: true,
-      env: { ...process.env, ...(useTargetVendor ? {} : { POSSE_SCIP_TARGET_VENDOR_DIR: stagedVendorDir }) },
+      env: { ...process.env, POSSE_SCIP_OUTPUT: localOutput, ...(useTargetVendor ? {} : { POSSE_SCIP_TARGET_VENDOR_DIR: stagedVendorDir }) },
     });
     if (run.error) throw run.error;
     if (run.status !== 0) return run.status ?? 1;
     if (!ownedOutput()?.size) throw new Error(`scip-php completed but did not write its reserved output ${localOutput}`);
-    if (!directOutput) {
-      fs.mkdirSync(path.dirname(output), { recursive: true });
-      fs.renameSync(localOutput, output);
-    }
+    fs.renameSync(localOutput, output);
     completed = true;
     return 0;
   } catch (error) {

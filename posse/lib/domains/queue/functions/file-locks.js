@@ -1,3 +1,4 @@
+import { isBudgetPaused } from "./admission-budget.js";
 import crypto from "crypto";
 import { usesReviewedAdmission, reviewedAdmissionRequested, reviewedHandoffAdmission, reserveReviewedHandoffs } from "./reviewed-handoff-admission.js";
 import { hasReviewedReservation, reviewedTransfers } from "./reviewed-handoff-records.js";
@@ -22,7 +23,7 @@ import {
   TERMINAL_JOB_STATUSES,
 } from "./common.js";
 import { logDurableEvent, logEvent, flushEventsNow } from "./events.js";
-import { leaseNowMs } from "./lease-clock.js";
+import { leaseNowMs, graceCutoff } from "./lease-clock.js";
 import { notifyQueueStateChanged } from "./wakeups.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
 import {
@@ -1130,7 +1131,7 @@ export function acquireAssessmentBarrier(jobId, leaseToken, { preserveStatus = f
   const id = Number(jobId);
   const result = runImmediateTransaction(db, () => {
     const fresh = db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(id);
-    const leaseCutoff = new Date(leaseNowMs()).toISOString();
+    const leaseCutoff = graceCutoff();
     if (!fresh
       || fresh.lease_token !== leaseToken
       || !LEASE_HOLDING_STATUSES.includes(fresh.status)
@@ -1595,7 +1596,7 @@ export function acquireLeaseWithWriteLocks(job, ownerId, scopeOrLeaseDurationSec
   let hasScope = hasWriteScope(scope);
   return runImmediateTransaction(db, () => {
     const fresh = db.prepare(`SELECT * FROM jobs WHERE id = ?`).get(job.id);
-    if (!fresh || fresh.status !== "queued") return null;
+    if (!fresh || fresh.status !== "queued" || isBudgetPaused(fresh.work_item_id, db)) return null;
     if (String(fresh.ready_at || "") > now() || unmetHardDependencyPredecessorJobIdsForJob(fresh, db).size > 0) return null;
     // Re-read the authoritative payload inside the lease transaction. A
     // scheduler's cached scope is not authority for newly expanded paths.

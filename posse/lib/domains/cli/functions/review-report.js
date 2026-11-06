@@ -1,3 +1,4 @@
+import { readWorkItemOutcome } from "../../queue/functions/work-item-outcome.js";
 import fs from "fs";
 import path from "path";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -342,6 +343,7 @@ export function saveReport(reportData, { projectDir = process.cwd() } = {}) {
         atlas137Telemetry: d.atlas137Telemetry || null,
         toolUsageSummary: Array.isArray(d.toolUsageSummary) ? d.toolUsageSummary : [],
         finalAssessment: d.finalAssessment || null,
+        outcome: d.outcome || null,
         memoriesSurfaced: d.memoriesSurfaced || [],
         memoriesProposed: d.memoriesProposed || [],
         filesToModify: d.filesToModify || [],
@@ -565,6 +567,7 @@ export function buildReviewReportData(reviewable, {
       reviewArtifacts,
       humanAnswers,
       finalAssessment,
+      outcome: readWorkItemOutcome(wi.id),
       memoriesSurfaced,
       memoriesProposed,
       filesToModify: [...filesToModify],

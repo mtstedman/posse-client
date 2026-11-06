@@ -256,6 +256,7 @@ export function acquireLease(jobId, ownerId, leaseDurationSec = 900) {
         lease_expires_at = ?,
         updated_at = ?
     WHERE id = ? AND status = 'queued'
+      AND NOT EXISTS (SELECT 1 FROM work_item_budgets b WHERE b.work_item_id = jobs.work_item_id AND b.enabled = 1 AND b.paused_reason IS NOT NULL)
   `).run(ownerId, leaseToken, expiresAt, now(), jobId);
 
   if (result.changes === 0) return null;

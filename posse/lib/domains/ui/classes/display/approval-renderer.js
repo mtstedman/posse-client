@@ -1,3 +1,4 @@
+import { outcomeSummary } from "../../../assessment/functions/work-item-outcome.js";
 // lib/display.js - Split-screen terminal UI with input handling
 //
 // Layout:
@@ -570,10 +571,11 @@ export class DisplayApprovalRenderer {
     const statusColor = paletteStatusColor(displayStatus, C);
     lines.push(` ${C.bold}WI#${wi.id}:${C.reset} ${wi.title}`);
     lines.push(` ${C.dim}Status:${C.reset} ${statusColor}${displayStatus.toUpperCase()}${C.reset}  ${C.dim}Priority:${C.reset} ${wi.priority}  ${C.dim}Branch:${C.reset} ${wi.branch_name || "(none)"}`);
+    if (data.outcome) lines.push(` ${outcomeSummary(data.outcome)}`);
     if (data.finalAssessment || getReviewDirtyState(data.worktreeStatus).dirty) {
       const assessment = effectiveReviewAssessment(data);
       const color = assessment.status === "PASS" ? C.green : assessment.status === "FAIL" ? C.red : C.yellow;
-      lines.push(` ${C.bold}Final Assessment:${C.reset} ${color}${assessment.status}${C.reset} ${C.dim}${String(assessment.reason || "").slice(0, inner - 28)}${C.reset}`);
+      lines.push(` ${C.bold}Execution Check:${C.reset} ${color}${assessment.status}${C.reset} ${C.dim}${String(assessment.reason || "").slice(0, inner - 28)}${C.reset}`);
     }
 
     const spinFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -1175,10 +1177,11 @@ export class DisplayApprovalRenderer {
     }
 
     // ── Final Assessment ──
+    if (data.outcome) lines.push(` ${outcomeSummary(data.outcome)}`);
     if (data.finalAssessment || getReviewDirtyState(data.worktreeStatus).dirty) {
       const assessment = effectiveReviewAssessment(data);
       const color = assessment.status === "PASS" ? C.green : assessment.status === "FAIL" ? C.red : C.yellow;
-      lines.push(` ${C.bold}Final Assessment${C.reset}`);
+      lines.push(` ${C.bold}Execution Check${C.reset}`);
       lines.push(` ${C.dim}${"─".repeat(Math.min(inner, 60))}${C.reset}`);
       lines.push(`  ${C.dim}Status:${C.reset} ${color}${assessment.status}${C.reset}`);
       lines.push(`  ${C.dim}Reason:${C.reset} ${assessment.reason || ""}`);

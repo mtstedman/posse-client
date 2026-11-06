@@ -2,24 +2,24 @@ import fs from "node:fs/promises";
 import { defaultLocalGenerationModelRoot, defaultLocalGenerationRuntimeRoot } from "../../../shared/native/functions/local-model-paths.js";
 import path from "node:path";
 import { LOCAL_BRIDGE_MODELS } from "../../../catalog/local-model.js";
-import { ML_CAPABILITIES_METHOD, ML_GENERATE_METHOD, ML_GENERATE_IMAGE_METHOD, ML_INSTALL_IMAGE_MODEL_METHOD, ML_GENERATE_VIDEO_METHOD, ML_INSTALL_VIDEO_MODEL_METHOD } from "../../../catalog/binary.js";
+import { ML_GENERATE_METHOD, ML_GENERATE_IMAGE_METHOD, ML_GENERATE_VIDEO_METHOD } from "../../../catalog/binary.js";
 import { LocalModelProgress } from "../classes/LocalModelProgress.js";
 import { LOCAL_USAGE, parseLocalOptions } from "./local-options.js";
 import { checkLocalOutput, encodeLocalOutput, readLocalPrompt, writeLocalOutput } from "./local-output.js";
 import { requireLocalModelCapability } from "./local-capabilities.js";
+import { installLocalModel, openLocalRuntime } from "./local-install.js";
 import { resolveLocalParameters, resolveLocalModel, localModelHelp } from "./local-parameters.js";
 import { selectGenerationGpu, writeImageGpuInventory } from "./local-gpu.js";
 import { requireFirstFrameCapability } from "./local-video-media.js";
 import { LocalVideoContinuation } from "../classes/LocalVideoContinuation.js";
 
 export { LOCAL_USAGE };
-const LONG_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
   let args = parseLocalOptions(argv);
   const stdout = io.stdout || process.stdout, stderr = io.stderr || process.stderr, stdin = io.stdin || process.stdin;
   if (args.help || !argv.length) {
-    stdout.write((args.model ? localModelHelp(resolveLocalModel(args.model)) : LOCAL_USAGE) + "\n");
+    stdout.write((args.model ? localModelHelp(resolveLocalModel(args.model), io.readSetting) : LOCAL_USAGE) + "\n");
     return 0;
   }
   const modelRoot = path.resolve(args["model-root"] || defaultLocalGenerationModelRoot());
@@ -43,7 +43,7 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
   if (args.action === "gpus" && model.kind === "text") throw new Error("GPU discovery currently applies to image and video models.");
   let payload, format, parameters;
   if (args.action === "generate") {
-    ({ args, parameters } = resolveLocalParameters(model, args));
+    ({ args, parameters } = resolveLocalParameters(model, args, io.readSetting));
     format = args.format || model.formats[0];
     if (!model.formats.includes(format)) throw new Error(`${model.slug} supports --format ${model.formats.join('|')}.`);
     await checkLocalOutput(args.output, format, stdout);
@@ -62,21 +62,28 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
   try {
     signal.throwIfAborted();
     manager = io.manager || (await import("../../../shared/tools/classes/BinaryManager.js")).nativeBinaries;
-    const invoke = io.invoke || (await import("../../../shared/native/functions/ml-invoke.js")).runMlNativeMethodAsync;
-    const available = await manager.ensureAvailable("ml", { refresh: true });
-    if (available?.available !== true) throw new Error(`Native ML runtime unavailable: ${available?.reason || 'unknown'}`);
-    signal.throwIfAborted();
-    const options = { manager, modelRoot, signal, timeoutMs: LONG_TIMEOUT_MS, idempotent: false,
+    const runtime = await openLocalRuntime({ manager, invoke: io.invoke, modelRoot, signal,
       runtimeRoot: path.resolve(args["runtime-root"] || defaultLocalGenerationRuntimeRoot()),
-      onProgress: event => progress.update(event) };
-    const caps = (await invoke(ML_CAPABILITIES_METHOD, {}, options))?.capabilities;
+      onProgress: event => progress.update(event) });
+    const { invoke, options, capabilities: caps, version } = runtime;
     if (args.action === "gpus") {
       progress.stop();
-      writeImageGpuInventory(model.kind === "video" ? caps?.videoGeneration : caps?.imageGeneration, available.version, stdout, args.json || args.format === "json");
+      writeImageGpuInventory(model.kind === "video" ? caps?.videoGeneration : caps?.imageGeneration, version, stdout, args.json || args.format === "json");
       return 0;
     }
-    const capability = requireLocalModelCapability(model, caps, { version: available.version });
-    if (args.action === "generate" && model.kind === "video" && (parameters.firstFrame !== undefined || parameters.continueFrom !== undefined)) {
+    if (args.action === "install") {
+      progress.stop();
+      const { installed } = await installLocalModel(model, runtime, {
+        source: args.source, artifacts: io.modelArtifacts,
+        confirm: request => confirmDownload(request, model, args, { stdin, stderr, askChoice: io.askChoice }),
+        onStage: stage => { progress.label = stage; progress.start(); },
+      });
+      progress.stop();
+      if (installed) stderr.write(`${model.slug} installed and SHA-256 verified.\n`);
+      return 0;
+    }
+    const capability = requireLocalModelCapability(model, caps, { version });
+    if (model.kind === "video" && (parameters.firstFrame !== undefined || parameters.continueFrom !== undefined)) {
       requireFirstFrameCapability(capability);
       progress.update({ stage: parameters.continueFrom ? "Extracting previous video's last frame" : "Reading first frame" });
       videoInput = await LocalVideoContinuation.prepare(parameters, args, signal);
@@ -84,9 +91,9 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
       payload.height = videoInput.height;
       payload.firstFrame = videoInput.firstFrame;
     }
-    if (args.action === "generate" && model.kind !== "text") {
+    if (model.kind !== "text") {
       progress.stop();
-      const device = await selectGenerationGpu(capability, { ...args, gpu: parameters.gpu }, { version: available.version, stdin, stderr, askChoice: io.askChoice });
+      const device = await selectGenerationGpu(capability, { ...args, gpu: parameters.gpu }, { version, stdin, stderr, askChoice: io.askChoice });
       signal.throwIfAborted();
       if (device) {
         payload.gpu = true;
@@ -94,46 +101,6 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
         if (!args.quiet) stderr.write(`Using GPU ${device.id}\n`);
       }
       progress.start();
-    }
-    if (args.action === "install") {
-      progress.stop();
-      if (model.kind === "text") {
-        const install = io.installText || (await import("./local-models-command.js")).runLocalModelsCommand;
-        await install(["download", model.slug], { input: stdin, output: stderr, nonInteractive: args["non-interactive"], modelRoot,
-          downloadModel: async (client, id, opts) => {
-            const { downloadLocalModelPackage } = await import("../../remote/functions/local-model-artifacts.js");
-            progress.label = "Downloading signed model package";
-            progress.start();
-            try { return await downloadLocalModelPackage(client, id, { ...opts, signal }); }
-            finally { progress.stop(); }
-          },
-          installModel: async (method, data, opts) => {
-            signal.throwIfAborted();
-            progress.label = "Installing verified model package";
-            progress.start();
-            try { return await invoke(method, data, { ...opts, signal, onProgress: event => progress.update(event), idempotent: false }); }
-            finally { progress.stop(); }
-          } });
-      } else {
-        let request = { modelId: model.modelId, sourceDirectory: args.source ? path.resolve(args.source) : undefined };
-        if (!args.source) {
-          if (!capability.installation?.includes("pinned-download")) throw new Error("This native runtime supports local-file installation only; update posse-ml or use --source DIR.");
-          if (args["non-interactive"] || !stdin.isTTY || !stderr.isTTY) throw new Error("Model downloads require interactive size confirmation; use --source DIR for already-downloaded files.");
-          const asset = capability.models.find(m => m.id === model.modelId);
-          if (!Number.isSafeInteger(asset.bytes) || asset.bytes <= 0) throw new Error("Native model download size is missing.");
-          const ask = io.askChoice || (await import("./input-prompts.js")).askSelectorChoice;
-          const answer = await ask(`Download ${model.slug}: ${(asset.bytes / 1024 ** 3).toFixed(2)} GiB (${asset.bytes} bytes)?`,
-            [{ value: "no", label: "No" }, { value: "yes", label: "Yes, download" }], { defaultValue: "no", input: stdin, output: stderr });
-          if (answer !== "yes") { stderr.write("Installation canceled.\n"); return 0; }
-          request = { modelId: model.modelId, download: true };
-        }
-        signal.throwIfAborted();
-        progress.start();
-        await invoke(model.kind === "video" ? ML_INSTALL_VIDEO_MODEL_METHOD : ML_INSTALL_IMAGE_MODEL_METHOD, request, options);
-        progress.stop();
-        stderr.write(`${model.slug} installed and SHA-256 verified.\n`);
-      }
-      return 0;
     }
     progress.update({ stage: `Loading ${model.slug}` });
     let result;
@@ -163,6 +130,20 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
     await videoInput?.dispose();
     if (!io.manager) await manager?.disposeAll?.();
   }
+}
+
+async function confirmDownload({ label, bytes, artifact }, model, args, { stdin, stderr, askChoice }) {
+  if (args["non-interactive"] || !stdin.isTTY || !stderr.isTTY) {
+    throw new Error(`Model downloads require interactive size confirmation.${model.kind === "text" ? "" : " Use --source DIR for already-downloaded files."}`);
+  }
+  const { downloadQuestion, renderLocalModelArtifact } = await import("./local-models-command.js");
+  if (artifact) renderLocalModelArtifact(artifact, { output: stderr });
+  const ask = askChoice || (await import("./input-prompts.js")).askSelectorChoice;
+  const answer = await ask(downloadQuestion({ label, bytes }),
+    [{ value: "no", label: "No" }, { value: "yes", label: "Yes, download" }], { defaultValue: "no", input: stdin, output: stderr });
+  if (answer === "yes") return true;
+  stderr.write("Installation canceled; no model bytes were requested.\n");
+  return false;
 }
 
 async function generationPayload(model, args, parameters, input) {

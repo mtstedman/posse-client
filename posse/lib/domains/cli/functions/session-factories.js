@@ -74,7 +74,7 @@ import {
 } from "./review-report.js";
 import { jobsNeedGitWorktree } from "../../git/functions/policy.js";
 import { inferWiMode } from "../../intake/functions/mode-inference.js";
-import { scopeModeHumanInputAnswerForPayload, SCOPE_APPROVAL_MODES } from "../../../catalog/human-input.js";
+import { tryHumanGateNameForPayload, scopeModeHumanInputAnswerForPayload, SCOPE_APPROVAL_MODES } from "../../../catalog/human-input.js";
 import { researchBudgetMetadata, researchPayload } from "../../research/functions/payload.js";
 import { roleExecutionForBudget } from "../../settings/functions/repository-settings.js";
 import {
@@ -103,6 +103,7 @@ export function prepareNonInteractiveHumanInputGates({ workItemIds = [], autoApp
     // Exact operational-command authorization is human-owned. Headless and
     // non-interactive policy may approve ordinary plans, but must leave these
     // gates parked until an operator reviews the command text.
+    if (!tryHumanGateNameForPayload(gatePayload)) continue;
     if (approvalPolicyForPayload(gatePayload, { getSetting, autoApprove, autoApprovePlan }).answer !== "approve") continue;
     const approved = approvePlan(item.id, {
       actor: "non_interactive_policy",
@@ -115,6 +116,7 @@ export function prepareNonInteractiveHumanInputGates({ workItemIds = [], autoApp
       if (!eligibleWorkItemIds.has(Number(job.work_item_id))) return false;
       let payload = {};
       try { payload = JSON.parse(job.payload_json || "{}"); } catch { return false; }
+      if (!tryHumanGateNameForPayload(payload)) return false;
       const policy = approvalPolicyForPayload(payload, { getSetting, autoApprove, autoApprovePlan });
       return policy.answer != null || policy.policy === "fail_closed";
     },

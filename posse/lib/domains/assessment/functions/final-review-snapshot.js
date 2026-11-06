@@ -1,3 +1,5 @@
+import { buildFollowUpEvidence } from "../../planning/functions/follow-up-context.js";
+import { renderRequirementContracts } from "../../planning/functions/requirement-contract.js";
 import { renderUnresolvedScopeRequests } from "../../queue/functions/scope-expansion.js";
 // The immutable snapshot a final review judges: the task contract from the job
 // row (never from the agent's arguments), the declared tests' result on the
@@ -250,6 +252,8 @@ export function renderFinalReviewEvidence({ job, workItem, payload = {}, change,
     "═══ FINAL REVIEW SNAPSHOT ═══",
     renderUnresolvedScopeRequests(payload),
     "TASK CONTRACT:",
+    renderRequirementContracts(payload),
+    buildFollowUpEvidence(workItem),
     `Work item: ${workItem?.title || "(untitled)"}`,
     workItem?.description ? `Work item description: ${workItem.description}` : null,
     `Task: ${job?.title || "(untitled)"}`,

@@ -1,3 +1,4 @@
+import { installAdmissionBudgetSchema, needsAdmissionBudgetSchema } from "./admission-budget-schema.js";
 import { migrateLegacyGateIdentities } from "./legacy-gate-identities.js";
 import * as host from "./migrations.js";
 
@@ -122,5 +123,7 @@ export function runRegisteredHostMigrations(db, {
     name: "canonical_gate_identities",
     migrate: migrateLegacyGateIdentities,
   });
+  host.runHostMigration(db, { version: 25, name: "work_item_admission_budgets",
+    needs: needsAdmissionBudgetSchema, migrate: installAdmissionBudgetSchema });
 
 }

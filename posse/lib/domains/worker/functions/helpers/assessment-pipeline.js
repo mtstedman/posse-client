@@ -1,3 +1,7 @@
+import { buildFollowUpEvidence } from "../../../planning/functions/follow-up-context.js";
+import { renderRequirementContracts } from "../../../planning/functions/requirement-contract.js";
+import { resolveAssessmentExecution, nextAssessmentTier } from "../../../settings/functions/assessment-execution.js";
+import { handleAssessmentInterruption } from "./assessment-interruption.js";
 import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnostic-logging.js";
 import { providerFailureDiagnosticText } from "./diagnostics.js";
 import { pruneBlockedFileRequirements } from "../../../runtime/functions/blocked-file-requirements.js";
@@ -26,7 +30,7 @@ import { log, jobLog } from "../../../../shared/telemetry/functions/logging/logg
 import { recordObservation } from "../../../observability/functions/observations.js";
 import { isArtifactMode, buildManifest, validateManifestAgainstContract } from "../../../artifacts/functions/index.js";
 import { harnessAssessorEffort, harnessAssessorProvider } from "./assessment-shared.js";
-import { getProviderBackoff } from "../../../providers/functions/provider.js";
+import { getProviderBackoff, tierModelName } from "../../../providers/functions/provider.js";
 import { attachAssessmentDiffContextAsync, buildHandoffPacket, composePromptRemoteAware, handoff, renderAtlasHandoffSections } from "../../../handoff/functions/index.js";
 import { isRetryableTerminalHandoffError } from "../../../handoff/functions/agent-handoff.js";
 import { assessmentReviewCorrection } from "./assessment-review-correction.js";
@@ -632,6 +636,7 @@ function stripInternalAssessmentPolicyPayload(payload = {}) {
   delete stripped._assess_pass_confidence_floor;
   delete stripped._execution_policy;
   delete stripped._blocked_file_requirements;
+  delete stripped._requirement_contracts;
   delete stripped._assess_review_correction;
   return stripped;
 }
@@ -641,7 +646,7 @@ function _buildAssessmentBoundaryBlock(job) {
   return [
     `ASSESSMENT BOUNDARY:`,
     `Judge this job against the assigned TASK SPECIFICATION and its success criteria.`,
-    `Requirements involving policy-blocked files are omitted and are not assessment criteria, even if mentioned in historical context or the original objective. The exact .env.example source template is allowed under normal file scope.`,
+    `Protected files remain inaccessible. For versioned original requirement evidence, distinguish unresolved behavior from prohibited file access. Legacy tasks without that evidence retain their filtered assessment criteria. The exact .env.example source template is allowed under normal file scope.`,
     `Use the original work-item objective to interpret and constrain the assigned task, but do not require this job to complete work assigned to other planned tasks.`,
     `Do not fail, block, or lower confidence because pending sibling or downstream jobs have not completed.`,
     `Only spawn a fix for a defect in the assigned task; missing work owned by other planned tasks is not this job's fix scope.`,
@@ -1122,7 +1127,7 @@ export async function assessResult(job, output, { silent = false, autoApprove = 
     promptLiteral("ASSIGNED SUCCESS CRITERIA", JSON.stringify(visibleJobPayload.success_criteria || [])),
     _buildAssessmentBoundaryBlock(job),
   ].join("\n\n") : "";
-  const localAssessmentEvidence = [localAssessmentEvidencePacket.text, localReviewCorrection].filter(Boolean).join("\n\n");
+  const localAssessmentEvidence = [buildFollowUpEvidence(workItem), renderRequirementContracts(parsedJobPayload), localAssessmentEvidencePacket.text, localReviewCorrection].filter(Boolean).join("\n\n");
   const prompt = [
     `Assess this completed task. Check the actual files, not just the dev's claims.`,
     `Use the deterministic scope and test receipts plus the attached primary change view and any labeled read-only upstream contract diffs. If that bounded evidence cannot resolve a material criterion, use an issued read tool rather than requesting repository contents from the human.`,
@@ -2002,6 +2007,14 @@ export async function runPostExecutionAssessment(worker, {
   syncAssessorWorkerDisplay,
   waitForAtlasWarmCompletion = waitForAtlasWarmJobCompletion,
 } = {}) {
+  // Fresh implementation starts a new assessment context. Assess-only retries
+  // retain this flag so the corrective prompt and one-retry bound both survive.
+  const freshPayload = parseJobPayload(getJob(job.id) || job);
+  if (freshPayload._assess_review_correction && isLeaseValid(job.id, leaseToken)) {
+    delete freshPayload._assess_review_correction;
+    job.payload_json = JSON.stringify(freshPayload);
+    updateJobPayload(job.id, job.payload_json);
+  }
   const hasPendingFileRequests = () => {
     if (!pendingFileRequests) return false;
     const autoCount = pendingFileRequests.autoApproved?.length || 0;
@@ -2305,6 +2318,7 @@ export async function runPostExecutionAssessment(worker, {
           : null,
       });
     } catch (testError) {
+      if (handleAssessmentInterruption(worker, { job, attemptId: attempt.id, leaseToken, error: testError, startTime })) return;
       const testInfraMsg = `Deterministic post-change test execution failed to initialize: ${testError?.message || testError}`;
       recordAssessmentInfrastructureAttempt(job, leaseToken, attempt.id, startTime, testInfraMsg);
       routeAssessmentInfrastructureFailure(worker, job, leaseToken, testError, {
@@ -2706,30 +2720,14 @@ export async function runPostExecutionAssessment(worker, {
             emit: (message) => worker.emit(job.id, message),
           })
         : rawTrackedCall;
-      const assessmentTierOrder = ["cheap", "standard"];
-      const normalizeAssessmentTier = (value, fallback = "cheap") => {
-        const raw = String(value || "").trim().toLowerCase();
-        if (raw === "strong") return "standard";
-        return assessmentTierOrder.includes(raw) ? raw : fallback;
-      };
-      const nextAssessmentTier = (value) => {
-        const current = normalizeAssessmentTier(value);
-        const index = assessmentTierOrder.indexOf(current);
-        return assessmentTierOrder[Math.min(index + 1, assessmentTierOrder.length - 1)];
-      };
-      const assessmentReasoningEffort = harnessAssessorEffort()
-        || (["low", "medium", "high"].includes(String(jobPayloadForAssess._assess_reasoning_effort || "").trim().toLowerCase())
-          ? String(jobPayloadForAssess._assess_reasoning_effort).trim().toLowerCase()
-          : "medium");
+      const execution = resolveAssessmentExecution({ payload: jobPayloadForAssess });
+      const assessmentReasoningEffort = harnessAssessorEffort() || execution.reasoningEffort;
       // A/B harnesses compare execution routes, not assessor strength. Allow
       // the harness supervisor to hold the in-job assessor tier constant even
       // when a planner independently adjusts the developer job tier.
       const harnessAssessmentTier = taskAbAssessorTier(getWorkItem(job.work_item_id))
         || (process.env.POSSE_AB_HARNESS ? process.env.POSSE_AB_ASSESSOR_TIER : null);
-      const requestedAssessmentTier = normalizeAssessmentTier(
-        harnessAssessmentTier || jobPayloadForAssess._assess_model_tier,
-        "cheap",
-      );
+      const requestedAssessmentTier = harnessAssessmentTier || execution.modelTier;
       const initialAssessmentTier = requestedAssessmentTier;
       let lastAssessmentTier = initialAssessmentTier;
       let verdict = await assessResult(job, output, {
@@ -2744,7 +2742,7 @@ export async function runPostExecutionAssessment(worker, {
       });
 
       if (verdict.verdict === "parse_error") {
-        const retryTier = nextAssessmentTier(lastAssessmentTier);
+        const retryTier = nextAssessmentTier(lastAssessmentTier, { resolveModel: tier => tierModelName(tier, { role: "assessor", providerName: assessorProvider }) });
         if (retryTier === lastAssessmentTier) {
           verdict = {
             ...verdict,
@@ -2802,7 +2800,7 @@ export async function runPostExecutionAssessment(worker, {
         }
       }
       if (verdict.verdict === "parse_error" && !verdict._disable_internal_retry) {
-        const retryTier = nextAssessmentTier(lastAssessmentTier);
+        const retryTier = nextAssessmentTier(lastAssessmentTier, { resolveModel: tier => tierModelName(tier, { role: "assessor", providerName: assessorProvider }) });
         if (retryTier === lastAssessmentTier) {
           verdict = {
             ...verdict,
@@ -2963,6 +2961,7 @@ export async function runPostExecutionAssessment(worker, {
       refreshAndExtractInsights(job.work_item_id);
       worker._cleanupWorktreeIfDone(job.work_item_id);
     } catch (assessErr) {
+      if (handleAssessmentInterruption(worker, { job, attemptId: attempt.id, leaseToken, error: assessErr, startTime })) return;
       const assessErrMessage = String(assessErr?.message || "");
       const turnBudgetExhausted = /exhausted turn budget|turn budget exhausted|tool(?: use| call)?s?.{0,40}(?:exhausted|limit|max|budget)/i.test(assessErrMessage);
       const stallKilled = !!assessErr?.stallKill || /stalled.*killed|killed by stall detector/i.test(assessErrMessage);

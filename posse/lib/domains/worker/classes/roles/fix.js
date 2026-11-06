@@ -167,9 +167,13 @@ export class FixRole extends BaseRole {
     } = this.roleDeps();
 
     const workItem = getWorkItem(job.work_item_id);
-    const payload = pruneBlockedFileRequirements(worker.parsePayload(job)).payload;
+    const requirements = pruneBlockedFileRequirements(worker.parsePayload(job));
+    const payload = requirements.payload;
+    if (requirements.omissions.length > 0) {
+      payload._blocked_file_requirements = [...(payload._blocked_file_requirements || []), ...requirements.omissions];
+    }
     const fixCwd = job._worktreePath || worker.projectDir;
-    let payloadDirty = false;
+    let payloadDirty = requirements.omissions.length > 0;
     const generatedArtifactDeletes = inferGeneratedArtifactDeletionTargets(job, payload);
     if (generatedArtifactDeletes.length > 0) {
       payload.files_to_delete = uniqueScopeFiles(payload.files_to_delete || [], generatedArtifactDeletes);

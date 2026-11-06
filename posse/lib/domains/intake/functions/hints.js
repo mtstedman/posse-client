@@ -1,3 +1,7 @@
+import { resolvePathWithin } from "../../runtime/functions/fs-safety.js";
+import { isSensitiveEnvFileOrTargetPath } from "../../runtime/functions/sensitive-paths.js";
+import { protectedMutablePathReason } from "../../runtime/functions/protected-paths.js";
+import { agentHiddenReadablePathReason } from "../../../shared/scope/functions/agent-hidden-paths.js";
 import {
   INTAKE_INTENT_TYPES,
   INTAKE_DELIVERABLE_TYPES,
@@ -70,14 +74,7 @@ function _isSafeHintPath(value) {
 }
 
 function _resolveWithinProject(projectDir, relPath) {
-  const resolved = path.resolve(projectDir, relPath);
-  const projectRoot = path.resolve(projectDir);
-  const normalizedRoot = process.platform === "win32" ? projectRoot.toLowerCase() : projectRoot;
-  const normalizedResolved = process.platform === "win32" ? resolved.toLowerCase() : resolved;
-  if (normalizedResolved === normalizedRoot || normalizedResolved.startsWith(normalizedRoot + path.sep)) {
-    return resolved;
-  }
-  return null;
+  return resolvePathWithin(projectDir, relPath);
 }
 
 function _splitList(value) {
@@ -470,7 +467,17 @@ function _hasMaterialResearchPreloadHints(hints) {
   return desiredOutputs.some((item) => !["repo", "artifact"].includes(item));
 }
 
-function _directoryTree(dir, maxDepth = 2) {
+function readableHintPath(projectDir, relPath) {
+  const fullPath = _resolveWithinProject(projectDir, relPath);
+  if (!fullPath || isSensitiveEnvFileOrTargetPath(fullPath)) return null;
+  let target = relPath;
+  try { target = path.relative(fs.realpathSync(projectDir), fs.realpathSync(fullPath)); } catch { /* missing path */ }
+  if ([relPath, target].some(file => agentHiddenReadablePathReason(file)
+    || protectedMutablePathReason(file, { allowRuntimeResources: false }))) return null;
+  return fullPath;
+}
+
+function _directoryTree(projectDir, dir, maxDepth = 2) {
   function walk(current, depth) {
     if (depth > maxDepth) return [];
     let entries = [];
@@ -483,6 +490,10 @@ function _directoryTree(dir, maxDepth = 2) {
     for (const entry of entries.slice(0, 40)) {
       if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".posse-worktrees" || entry.name === ".posse-test-suites") continue;
       const prefix = "  ".repeat(depth);
+      if (!readableHintPath(projectDir, path.relative(projectDir, path.join(current, entry.name)))) {
+        lines.push(`${prefix}${entry.name}: skipped (policy)`);
+        continue;
+      }
       lines.push(`${prefix}${entry.isDirectory() ? "[D]" : "[F]"} ${entry.name}`);
       if (entry.isDirectory()) {
         lines.push(...walk(path.join(current, entry.name), depth + 1));
@@ -494,7 +505,7 @@ function _directoryTree(dir, maxDepth = 2) {
 }
 
 function _readFilePreview(projectDir, relPath) {
-  const fullPath = _resolveWithinProject(projectDir, relPath);
+  const fullPath = readableHintPath(projectDir, relPath);
   if (!fullPath) return null;
   try {
     const stat = fs.statSync(fullPath);
@@ -532,16 +543,17 @@ export function buildResearchIntakePreload(projectDir, hints, { atlasCoveredFile
   if (!hasMaterialPreloadHints) return sections.join("\n\n");
 
   for (const dir of (safeHints.suspected_dirs || []).slice(0, 3)) {
-    const fullDir = _resolveWithinProject(projectDir, dir);
-    if (!fullDir) continue;
+    const fullDir = readableHintPath(projectDir, dir);
+    if (!fullDir) { sections.push(`HINTED DIRECTORY: ${dir}: skipped (policy)`); continue; }
     if (!fs.existsSync(fullDir) || !fs.statSync(fullDir).isDirectory()) continue;
-    const tree = _directoryTree(fullDir, 2);
+    const tree = _directoryTree(projectDir, fullDir, 2);
     if (tree) {
       sections.push(`HINTED DIRECTORY TREE: ${dir}\n${tree}`);
     }
   }
 
   for (const file of (safeHints.suspected_files || []).slice(0, 3)) {
+    if (!readableHintPath(projectDir, file)) { sections.push(`HINTED FILE: ${file}: skipped (policy)`); continue; }
     if (atlasCoveredFiles?.has?.(_normalizeHintPath(file))) {
       sections.push(`HINTED FILE (already covered by ATLAS prefetch context): ${file}`);
       continue;

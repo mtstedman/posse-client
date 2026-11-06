@@ -24,7 +24,7 @@ import { IMAGE_PROVIDER_OPTIONS, MODEL_SETTING_DEFS, PROVIDER_LABELS, PROVIDER_O
 import { PROVIDER_ROLE_NAMES } from "../../../providers/functions/roles.js";
 import { stripAnsi } from "../../../../shared/format/functions/ansi.js";
 import "../../../../shared/format/functions/units.js";
-import { ADMIN_DEFAULT_SETTINGS_PANE, ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS, ADMIN_AGENT_SETTING_SECTIONS as AGENT_SETTING_SECTIONS, ADMIN_CREDENTIAL_SETTING_DEFS, ADMIN_IMAGE_SETTING_SECTIONS as IMAGE_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS as PROVIDER_CATALOG_SETTING_KEYS, ADMIN_PROVIDER_SETTING_SECTIONS as PROVIDER_SETTING_SECTIONS, BOOLEAN_SETTING_KEYS, DEFAULT_ACCOUNT_SETTING_ROWS, ENUM_SETTING_OPTIONS, HIDDEN_SETTING_KEYS, MULTI_SETTING_KEYS, MULTI_SETTING_OPTIONS, MULTI_SETTING_VALUES, PROVIDER_SETTING_KEYS, PROJECT_DB_SETTING_KEYS, PROJECT_DB_TYPE_OPTIONS, PROJECT_DB_PERMISSION_OPTIONS, REPO_SCOPED_DISPLAY_KEYS, SETTINGS_GROUPS, SETTINGS_PANES, adminUnsetValueLabel, formatAdminSettingValue, getAdminSettingPresentation, settingsPaneForKey, SKILL_SETTING_PREFIX, toDisplaySettingKey, toStorageSettingKey } from "../../../settings/functions/admin-catalog.js";
+import { ADMIN_DEFAULT_SETTINGS_PANE, ADMIN_LOCAL_MODEL_INSTALL_ROW_KEY, ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS, ADMIN_AGENT_SETTING_SECTIONS as AGENT_SETTING_SECTIONS, ADMIN_CREDENTIAL_SETTING_DEFS, ADMIN_IMAGE_SETTING_SECTIONS as IMAGE_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS as PROVIDER_CATALOG_SETTING_KEYS, ADMIN_PROVIDER_SETTING_SECTIONS as PROVIDER_SETTING_SECTIONS, BOOLEAN_SETTING_KEYS, DEFAULT_ACCOUNT_SETTING_ROWS, ENUM_SETTING_OPTIONS, HIDDEN_SETTING_KEYS, MULTI_SETTING_KEYS, MULTI_SETTING_OPTIONS, MULTI_SETTING_VALUES, PROVIDER_SETTING_KEYS, PROJECT_DB_SETTING_KEYS, PROJECT_DB_TYPE_OPTIONS, PROJECT_DB_PERMISSION_OPTIONS, REPO_SCOPED_DISPLAY_KEYS, SETTINGS_GROUPS, SETTINGS_PANES, adminUnsetValueLabel, formatAdminSettingValue, getAdminSettingPresentation, settingsPaneForKey, SKILL_SETTING_PREFIX, toDisplaySettingKey, toStorageSettingKey } from "../../../settings/functions/admin-catalog.js";
 import { getModelChoicesForEntry, getSelectableImageProviders, isAdminProviderOption, validateAdminSettingValue } from "../../../settings/functions/admin-validation.js";
 export { validateAdminSettingValue };
 import { readProjectDbConfig, writeProjectDbConfig } from "../../../../shared/tools/functions/toolkit/project-db/config.js";
@@ -363,6 +363,9 @@ export class AdminSettingsController {
         const rows = [
           ...textModels.filter((entry) => entry.provider === section.provider),
           ...dbRows(section.settingKeys),
+          ...(section.provider === "posse-local"
+            ? [{ setting_key: ADMIN_LOCAL_MODEL_INSTALL_ROW_KEY, setting_value: "Press Enter", updated_at: null, source: "action" }]
+            : []),
         ];
         if (rows.length > 0) sections.push({ id: `provider_${section.provider}`, title: section.label, hint: null, rows });
       }
@@ -554,6 +557,20 @@ export class AdminSettingsController {
     this._editError = "";
     this._editLabel = getAdminSettingPresentation(selected.setting_key, selected).label;
     const storageKey = selected.storage_key || toStorageSettingKey(selected.setting_key);
+    if (storageKey === ADMIN_LOCAL_MODEL_INSTALL_ROW_KEY) {
+      if (this._localModelInstall.active) {
+        this._localModelInstall.requestCancel();
+        return;
+      }
+      this._editing = "editModel";
+      this._editKey = selected.setting_key;
+      this._editStorageKey = storageKey;
+      this._editModelChoices = this._localModelInstall.choices();
+      this._editModelIndex = 0;
+      process.stdout.write("\x1b[?25l");
+      this.requestRender({ force: true });
+      return;
+    }
     if (PROJECT_DB_SETTING_KEYS.has(storageKey)) {
       this._startProjectDbEdit(selected, storageKey, initialValue);
       return;
@@ -735,6 +752,10 @@ export class AdminSettingsController {
 
   _saveSettingValue(storageKey, value, { providerUsage = false } = {}) {
     try {
+      if (storageKey === ADMIN_LOCAL_MODEL_INSTALL_ROW_KEY) {
+        this._localModelInstall.start(value);
+        return true;
+      }
       if (PROJECT_DB_SETTING_KEYS.has(storageKey)) {
         this._saveProjectDbSetting(storageKey, value);
         this._settingsSavedFlash = { text: `Saved ${getAdminSettingPresentation(storageKey).label}`, at: Date.now() };
@@ -1141,6 +1162,8 @@ export class AdminSettingsController {
       ` ${C.dim}[←→] Pane  [↑↓] Select  [PgUp/PgDn] Section  [Enter] Edit${C.reset}`,
       ` ${C.dim}[Ctrl+A] ${this._settingsPane === "debug" ? "Back" : "Advanced"}  [${navLabel}] Tab  [Esc] ${this._settingsPane === "debug" ? "Back" : "Exit"}${C.reset}`,
     ];
+    const installStatus = this._localModelInstall?.statusLine;
+    if (installStatus) lines.unshift(` ${C.yellow}${fit(installStatus, Math.max(20, fullW - 2))}${C.reset}`);
     const selected = this._getSelectedEditableSetting();
     if (selected) {
       const presentation = getAdminSettingPresentation(selected.setting_key, selected);

@@ -545,6 +545,7 @@ function tuneTurnBudgetRetry(worker, freshJob, errorDetails) {
 }
 
 export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
+  recordedErrorText = null,
   attemptId = null,
   stallExhausted = false,
   suppressHumanRecovery = false,
@@ -557,7 +558,7 @@ export function retryOrFail(worker, job, leaseToken, errorOrMsg, {
   const freshJob = getJob(job.id);
   const errorDetails = getErrorDetails(errorOrMsg);
   const errSummary = errorDetails.summary || "unknown error";
-  const errRepeatKey = errorDetails.repeatKey || errSummary;
+  const errRepeatKey = recordedErrorText == null ? errorDetails.repeatKey || errSummary : getErrorDetails(recordedErrorText).repeatKey;
   const turnBudgetExhausted = isTurnBudgetExhaustedError(errorDetails);
   const deterministicPolicyConflict = isDeterministicPolicyConflict(errorDetails);
   const permanentProviderConfigError = isPermanentProviderConfigError(errorDetails) || deterministicPolicyConflict;

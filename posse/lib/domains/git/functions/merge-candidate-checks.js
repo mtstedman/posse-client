@@ -17,6 +17,8 @@ export function withTemporaryMergeCandidateCheckout({ cwd, git, dependencySource
   const checkout = path.join(root, "candidate");
   let added = false;
   try {
+    const prefix = String(git(["rev-parse", "--show-prefix"], cwd, { trim: false })).replace(/\r?\n$/, "");
+    const projectCheckout = path.join(checkout, prefix);
     const tree = git(["write-tree"], cwd);
     const head = git(["rev-parse", "HEAD"], cwd);
     const commit = git(["commit-tree", tree, "-p", head, "-m", "Temporary merge verification candidate"], cwd);
@@ -27,7 +29,7 @@ export function withTemporaryMergeCandidateCheckout({ cwd, git, dependencySource
     const dependencyOwner = (relative) => {
       const sources = [cwd, ...dependencySources].filter((source) => source && fs.existsSync(path.join(source, relative)));
       let lockfile = null;
-      try { lockfile = fs.readFileSync(path.join(checkout, path.dirname(relative), path.basename(relative) === "vendor" ? "composer.lock" : "package-lock.json"), "utf8"); } catch { /* no lockfile */ }
+      try { lockfile = fs.readFileSync(path.join(projectCheckout, path.dirname(relative), path.basename(relative) === "vendor" ? "composer.lock" : "package-lock.json"), "utf8"); } catch { /* no lockfile */ }
       return (lockfile && sources.find((source) => installedDependenciesMatchLockfile(path.join(source, relative), lockfile) === true)) || sources[0] || null;
     };
     const reset = (revision = commit) => {
@@ -42,18 +44,18 @@ export function withTemporaryMergeCandidateCheckout({ cwd, git, dependencySource
         if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
         if (path.basename(relative) === "vendor") {
           for (const source of sources) {
-            if (linkComposerVendorFromCheckout(path.dirname(path.join(checkout, relative)), path.dirname(path.join(source, relative))).ok) break;
+            if (linkComposerVendorFromCheckout(path.dirname(path.join(projectCheckout, relative)), path.dirname(path.join(source, relative))).ok) break;
           }
           continue;
         }
         const owner = dependencyOwner(relative);
-        const destination = path.join(checkout, relative);
+        const destination = path.join(projectCheckout, relative);
         if (!owner || fs.existsSync(destination) || !fs.existsSync(path.dirname(destination))) continue;
         const source = path.join(owner, relative);
         fs.symlinkSync(source, destination, process.platform === "win32" ? "junction" : "dir");
       }
     };
-    return use({ checkout, candidateCommit: commit, targetHead: head, reset });
+    return use({ checkout: projectCheckout, candidateCommit: commit, targetHead: head, reset });
   } finally {
     try {
       if (added) git(["worktree", "remove", "--force", checkout], cwd);

@@ -6,7 +6,8 @@
 // workspace copy is local, uncommitted state and not part of the change.
 // Advisory by default; strict callers propagate failures when git cannot answer.
 
-import { gitExecAsync } from "./utils.js";
+import { adminGitExec } from "./admin-git-exec.js";
+import { gitExec, gitExecAsync } from "./utils.js";
 
 const CHECK_IGNORE_TIMEOUT_MS = 10_000;
 
@@ -44,6 +45,10 @@ export async function listIgnoredRepoPaths(cwd, paths, { git = gitExecAsync, str
     // Exit 1: no path is ignored. Advisory callers also ignore probe failures.
     return [];
   }
+  return parseIgnoredPaths(output);
+}
+
+function parseIgnoredPaths(output) {
   // -v -z: "<source>\0<line>\0<pattern>\0<path>\0" per matched path.
   const fields = String(output || "").split("\0");
   const ignored = new Map();
@@ -55,4 +60,19 @@ export async function listIgnoredRepoPaths(cwd, paths, { git = gitExecAsync, str
     if (repoPath && !ignored.has(repoPath)) ignored.set(repoPath, { path: repoPath, source: `${source}:${line}` });
   }
   return [...ignored.values()].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+}
+
+// Cold planning still needs ignore answers before the native pulse is warm.
+export function listIgnoredRepoPathsSync(cwd, paths) {
+  const candidates = [...new Set((Array.isArray(paths) ? paths : []).map(repoRelativePath).filter(Boolean))];
+  if (!cwd || !candidates.length) return [];
+  const args = ["check-ignore", "-v", "-z", "--stdin"];
+  const options = { input: `${candidates.join("\0")}\0`, trim: false, timeoutMs: CHECK_IGNORE_TIMEOUT_MS };
+  let output;
+  try { output = gitExec(args, cwd, options); }
+  catch (error) {
+    if (error?.status === 1) return [];
+    try { output = adminGitExec(args, cwd, options); } catch { return []; }
+  }
+  return parseIgnoredPaths(output);
 }

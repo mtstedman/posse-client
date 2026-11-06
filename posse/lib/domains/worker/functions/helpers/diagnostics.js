@@ -73,7 +73,7 @@ export function getErrorDetails(errOrMsg) {
   const invalidClientLine = findInvalidClientLine([
     fullText,
     stderr,
-    partialOutput,
+    partialOutputMayBeProviderError(errOrMsg) ? partialOutput : "",
   ].filter(Boolean).join("\n"));
 
   if (invalidClientLine) {
@@ -115,6 +115,11 @@ export function isTurnBudgetExhaustedDetails(errorDetails = null) {
   return TURN_BUDGET_EXHAUSTED_RE.test(text) || TOOL_BUDGET_EXHAUSTED_RE.test(text);
 }
 
+function partialOutputMayBeProviderError(error) {
+  return error?.classification === "provider_failure"
+    || (!error?.classification && error?.code === "provider_failed");
+}
+
 export function isPermanentProviderConfigError(errorDetailsOrErr = null) {
   const errorDetails = errorDetailsOrErr && typeof errorDetailsOrErr === "object"
     && ("fullText" in errorDetailsOrErr || "summary" in errorDetailsOrErr || "stderr" in errorDetailsOrErr || "partialOutput" in errorDetailsOrErr)
@@ -123,7 +128,7 @@ export function isPermanentProviderConfigError(errorDetailsOrErr = null) {
   const primaryTextParts = [
     errorDetails.fullText || "",
     errorDetails.stderr || "",
-    errorDetails.partialOutput || "",
+    partialOutputMayBeProviderError(errorDetails) ? errorDetails.partialOutput || "" : "",
     errorDetails.classification || "",
   ].filter(Boolean);
   const text = (primaryTextParts.length > 0 ? primaryTextParts : [errorDetails.summary || ""]).join("\n");

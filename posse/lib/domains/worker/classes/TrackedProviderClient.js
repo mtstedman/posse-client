@@ -1,6 +1,10 @@
+import { reserveBudget, attachBudgetCall, settleBudget, isBudgetPaused, budgetPauseError } from "../../queue/functions/admission-budget.js";
+import { BUDGET_PAUSED } from "../../../catalog/admission-budget.js";
 import { selectWebResearchProvider } from "../../web-research/functions/provider-selection.js";
 import { resolveWebToolsEnabled } from "../../providers/functions/shared/tool-policy-settings.js";
 import { expireUnackedOperatorFeedbackForJob } from "../../queue/functions/agent-interactions.js";
+import { ASSESSMENT_EXECUTION_OBSERVATION } from "../../../catalog/assessment.js";
+import { resolveAssessmentExecution } from "../../settings/functions/assessment-execution.js";
 import { recordResearchDispatchAudit } from "../../planning/functions/research-dispatch-telemetry.js";
 import { providerHonorsMcpToolDeadline } from "../../../catalog/provider.js";
 import { runResearchChild } from "../../planning/functions/run-research-child.js";
@@ -1347,7 +1351,22 @@ export class TrackedProviderClient {
     };
   }
 
-  async _executeOneAttempt(prompt, opts, {
+  async _executeOneAttempt(prompt, opts, context) {
+    const reservation = reserveBudget({ workItemId: context.work_item_id, jobId: context.job_id,
+      attemptId: context.observationContext?.attempt_id, parentCallId: opts._parentAgentCallId, provider: context.providerName, model: context.modelName, role: opts.role });
+    let callCreated = false;
+    try {
+      return await this._executeBudgetedAttempt(prompt, { ...opts, _budgetReservationId: reservation?.id || null, _onAgentCallCreated: id => {
+        callCreated = true;
+        attachBudgetCall(reservation, id);
+        opts._onAgentCallCreated?.(id);
+      } }, context);
+    } finally {
+      settleBudget(reservation, { notDispatched: !callCreated });
+    }
+  }
+
+  async _executeBudgetedAttempt(prompt, opts, {
     providerName,
     provider,
     tier,
@@ -2987,6 +3006,11 @@ export class TrackedProviderClient {
       }
       return getProvider(opts.role, providerName);
     });
+    if (opts.role === "assessor") {
+      const execution = resolveAssessmentExecution({ modelTier: opts.modelTier, reasoningEffort: opts.reasoningEffort });
+      opts = { ...opts, modelTier: execution.modelTier, reasoningEffort: execution.reasoningEffort,
+        assessmentExecution: opts.assessmentExecution || execution };
+    }
     const tier = opts.modelTier || "standard";
     const tierConfig = await timeProviderSetupPhase("provider.tier_config", {
       role: opts.role,
@@ -3019,6 +3043,10 @@ export class TrackedProviderClient {
     });
 
     if (executionModelName) opts = { ...opts, modelName: executionModelName };
+    if (opts.assessmentExecution) recordObservation({ work_item_id, job_id,
+      attempt_id: attempt_id ?? ambient.attempt_id ?? null, observation_type: ASSESSMENT_EXECUTION_OBSERVATION,
+      summary: `Review: ${providerName}/${executionModelName || tier} (${opts.reasoningEffort})`,
+      detail: { ...opts.assessmentExecution, provider: providerName, effective_model: executionModelName, modelTier: tier } });
 
     if (this.worker.display && !opts.onLine) {
       opts = { ...opts, onLine: (line) => this.worker.display.workerLine(job_id, line) };
@@ -3125,12 +3153,14 @@ export class TrackedProviderClient {
       }
       return result;
     } catch (err) {
+      if (err?.code === BUDGET_PAUSED) throw err;
+      if (isBudgetPaused(work_item_id)) throw budgetPauseError("admission_paused");
       // Stamp the provider that produced the error and when it surfaced:
       // attempt handling may see it only after a runtime fallback ran, and
       // must pause this provider as of now, not the job's or a later reading.
       markProviderErrorObserved(err, providerName);
       let activeErr = err;
-      if (isAbortError(activeErr) || activeErr?._killReason) throw activeErr;
+      if (activeErr?.code === BUDGET_PAUSED || isAbortError(activeErr) || activeErr?._killReason) throw activeErr;
       if (opts.abortSignal?.aborted || this.worker?._killReasons?.has?.(job_id)) {
         activeErr.name = "AbortError";
         const killReason = this.worker?._killReasons?.get?.(job_id);
@@ -3163,7 +3193,7 @@ export class TrackedProviderClient {
         } catch (correctionError) {
           markProviderErrorObserved(correctionError, providerName);
           activeErr = correctionError;
-          if (isAbortError(activeErr) || activeErr?._killReason) throw activeErr;
+          if (activeErr?.code === BUDGET_PAUSED || isAbortError(activeErr) || activeErr?._killReason) throw activeErr;
         }
       }
       const runtimeFallbackCandidate = opts._modelFallbackAttempted
@@ -3231,13 +3261,13 @@ export class TrackedProviderClient {
           return retry;
         } catch (modelErr) {
           markProviderErrorObserved(modelErr, providerName);
-          if (isAbortError(modelErr) || modelErr?._killReason) throw modelErr;
+          if (modelErr?.code === BUDGET_PAUSED || isAbortError(modelErr) || modelErr?._killReason) throw modelErr;
           activeErr = modelErr;
           this.emitStatus(job_id, `${C.red}[model-fallback] ${providerName} fallback model also failed: ${modelErr.message?.split("\n")[0]?.slice(0, 100)}${C.reset}`);
         }
       }
 
-      if (isAbortError(activeErr) || activeErr?._killReason) throw activeErr;
+      if (activeErr?.code === BUDGET_PAUSED || isAbortError(activeErr) || activeErr?._killReason) throw activeErr;
       if (opts.abortSignal?.aborted || this.worker?._killReasons?.has?.(job_id)) {
         activeErr.name = "AbortError";
         const killReason = this.worker?._killReasons?.get?.(job_id);
@@ -3411,7 +3441,7 @@ export class TrackedProviderClient {
             // provider's earlier error and the job looks retryable instead of
             // killed.
             markProviderErrorObserved(fbErr, fallbackName);
-            if (isAbortError(fbErr) || fbErr?._killReason) throw fbErr;
+            if (fbErr?.code === BUDGET_PAUSED || isAbortError(fbErr) || fbErr?._killReason) throw fbErr;
             this.emitStatus(job_id, `${C.red}[fallback] ${fallbackName} also failed: ${fbErr.message?.split("\n")[0]?.slice(0, 100)}${C.reset}`);
             // The primary error is what propagates, so a fallback's own quota
             // must pause that provider here or the next job would retry it.

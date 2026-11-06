@@ -10,6 +10,7 @@ import { fit, fmtDate, formatProviderUsageHeader, formatProviderUsageWindow, get
 import { buildAdminGitDiffFileDetail, buildAdminGitDiffSnapshot } from "../../functions/admin/git-diff-review.js";
 import { Worker } from "worker_threads";
 import { purgeRuntimeLogs } from "../../functions/admin/purge-runtime-logs.js";
+import { LocalModelInstallController } from "./local-model-install-controller.js";
 import { sanitizeWorkerExecArgv } from "../../../runtime/functions/worker-exec-argv.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { AdminSettingsController } from "./settings-controller.js";
@@ -153,6 +154,9 @@ export class AdminTUI {
     this._origConsoleLog = null;
     this._origConsoleError = null;
     this._scipDependencyInstall = null;
+    this._localModelInstall = new LocalModelInstallController({
+      render: () => { if (this._done) this.requestRender({ force: true }); },
+    });
     this._scipDependencyWorker = null;
     this._scipDependencySpinnerTimer = null;
     this._scipDependencyDismissTimer = null;
@@ -411,6 +415,7 @@ export class AdminTUI {
     }
     this._renderScheduled = false;
     this._stopScipDependencyInstallUi();
+    this._localModelInstall.cancel();
     if (process.stdin.isTTY) {
       try { process.stdin.setRawMode(false); } catch { /* terminal may already be closing */ }
       try { process.stdin.pause(); } catch { /* terminal may already be closing */ }
@@ -422,6 +427,11 @@ export class AdminTUI {
     this._resizeHandler = null;
     this._stdinDataHandler = null;
     if (done) done();
+  }
+
+  // Esc and q land here; Ctrl+C stays an immediate exit.
+  _requestExit() {
+    if (!this._localModelInstall.holdExit()) this._exit();
   }
 
   _exitOnce() {
@@ -754,6 +764,12 @@ export class AdminTUI {
       return;
     }
 
+    if (this._localModelInstall.prompting) {
+      if (matchesHotkey(str, key, "y")) this._localModelInstall.answer(true);
+      else if (matchesHotkey(str, key, "n") || key?.name === "escape" || isEnterKey(str, key)) this._localModelInstall.answer(false);
+      return;
+    }
+
     const switchingTabsFromEdit = this._editing && key?.name === "tab";
     if (this._editing && !switchingTabsFromEdit) {
       this._onEditKeypress(str, key);
@@ -768,6 +784,7 @@ export class AdminTUI {
         try {
           const result = purgeRuntimeLogs({ projectDir: this.projectDir });
           this._purgeLogsMessage = `Purged ${result.files} file${result.files === 1 ? "" : "s"}${result.dirs ? ` and ${result.dirs} dir${result.dirs === 1 ? "" : "s"}` : ""}; cleared ${result.historyWorkItems || 0} historical WI${result.historyWorkItems === 1 ? "" : "s"}, ${result.dbAgentCalls || 0} call${result.dbAgentCalls === 1 ? "" : "s"}, ${result.dbObservations || 0} observation${result.dbObservations === 1 ? "" : "s"}, and ${result.dbEvents || 0} event${result.dbEvents === 1 ? "" : "s"}.`;
+          if (result.skippedLiveRuns?.length) this._purgeLogsMessage += ` Kept ${result.skippedLiveRuns.length} live run(s).`;
           this._wiRowsCache = null;
           this._wiCallsCache = null;
           this._selectedWi = null;
@@ -805,7 +822,7 @@ export class AdminTUI {
         this._selectedWi = null;
         this._scroll = this._tabScrolls[this._tab];
       } else {
-        this._exit();
+        this._requestExit();
       }
     } else if (tabId === "overview" && matchesHotkey(str, key, "r")) {
       this._toggleDashboardReports();
@@ -814,7 +831,7 @@ export class AdminTUI {
     } else if (matchesHotkey(str, key, "q") && tabId !== "settings") {
       // On the settings tab printable keys (including q) fall through to the
       // type-to-edit fallback below instead of quitting.
-      this._exit();
+      this._requestExit();
     } else if (isBackspaceKey(str, key) && tabId === "work_items" && this._selectedCall != null) {
       this._selectedCall = null;
       this._scroll = 0;

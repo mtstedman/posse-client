@@ -1,3 +1,4 @@
+import { explicitFollowUpOrigin } from "./follow-up-context.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { promptLiteral } from "../../../shared/format/functions/prompt-literals.js";
 
@@ -5,6 +6,8 @@ import { promptLiteral } from "../../../shared/format/functions/prompt-literals.
 // particular missing implementation. Show prior delivery records as leads;
 // never turn similar titles into an automatic no-change verdict.
 export function buildRepeatedRequestContext(workItem) {
+  const origin = explicitFollowUpOrigin(workItem);
+  if (origin) return `EXPLICIT FOLLOW-UP: WI#${origin.work_item_id}; kind: ${origin.kind}. Historical evidence is attached locally. Investigate the reported behavior; this link does not establish completion or authorize broader scope.`;
   const text = `${workItem?.title || ""}\n${workItem?.description || ""}`;
   if (!/\b(?:finally|still\s+(?:(?:isn['’]?t|is\s+not|doesn['’]?t|does\s+not|not)\s+)?(?:done|working|implemented|fixed)|(?:asking|asked|requesting|requested)\s+(?:this\s+)?again)\b/iu.test(text)) return "";
   const db = getDb();
