@@ -1167,13 +1167,34 @@ including after restart. It does not run another assessor or reapply the old
 assessment test/confidence policies. Changed code or a changed task contract
 requires fresh verification. The accepted pass is announced once.
 
-After three unsuccessful review rounds, the saved review findings initiate the
-next fix; Posse does not start another assessor for that candidate. A final edit
-after the cap preserves the findings as context to recheck, not proof that the
-new code is broken. Continuations retain their work-item limit.
+Productive review/fix revisions continue in the same reviewer session. Repeated
+submissions of rejected bytes reuse the saved findings without rerunning checks
+or review. Three consecutive reviews with the same unresolved findings initiate
+a targeted fix; new findings reset that limit. Posse does not start another
+assessor for that candidate. A final edit after the limit preserves the findings
+as context to recheck, not proof that the new code is broken. Continuations
+retain their work-item limit, and attempt/reviewer time limits still apply.
+
+Before a reviewer closes a repair flow with `needs_review`, it receives one
+classification reminder per revision: concrete regressions belong in `fail`
+findings. Confirmed reviewer blockers preserve their evidence and open the
+normal review gate, including Send back for fixes; they are not classified as
+assessment infrastructure failures.
 Developers report an unrecoverable blocker with `final_review({ blocker: "..." })`.
 This saves BLOCKED and stops both sessions without running another review or
 requiring a separate handoff call.
+
+Blocked candidates remain in their worktree while awaiting a decision. An
+explicit verification waiver commits the job's authorized files, including
+ignored declared tests, before marking it successful and releasing dependents.
+A commit failure keeps the gate open and preserves the candidate; retrying the
+answer resumes the Git phase without another developer attempt.
+
+Dirty-work recovery also finalizes work left uncommitted by older waivers under
+each original owner's scope. It can restore an older blocked snapshot when the
+scoped files still match its base. Newer dependent work stays with its current
+owner; ambiguous overlaps, changed recovery candidates, and snapshot conflicts
+are preserved for resolution rather than silently included or overwritten.
 
 `clear` prints the queue database it resets and cancels pending work before Git
 cleanup. Failed branch/worktree cleanup no longer leaves runnable jobs behind:

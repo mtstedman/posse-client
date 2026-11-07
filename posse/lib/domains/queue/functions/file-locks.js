@@ -1414,7 +1414,7 @@ export function siblingJobScopePaths(jobId, paths = []) {
 }
 
 /** Map each requested path to unfinished sibling jobs whose declared/live scope covers it. */
-export function siblingJobScopeOwners(jobId, paths = []) {
+export function siblingJobScopeOwners(jobId, paths = [], { preserveUncommittedWaivers = false } = {}) {
   const id = Number(jobId);
   const inputs = (Array.isArray(paths) ? paths : []).filter((value) => normalizeLockPath(value));
   const owners = new Map(inputs.map((input) => [input, new Set()]));
@@ -1426,7 +1426,11 @@ export function siblingJobScopeOwners(jobId, paths = []) {
   const siblings = db.prepare(`
     SELECT id, job_type, payload_json
     FROM jobs
-    WHERE work_item_id = ? AND id != ? AND status NOT IN (${placeholders})
+    WHERE work_item_id = ? AND id != ? AND (status NOT IN (${placeholders})
+      ${preserveUncommittedWaivers ? `OR (status = 'succeeded' AND assessment_state = 'assessment_waived'
+        AND EXISTS (SELECT 1 FROM job_attempts a WHERE a.job_id = jobs.id
+          AND a.worker_type != 'assessor' AND a.commit_hash IS NULL
+          AND a.id = (SELECT MAX(b.id) FROM job_attempts b WHERE b.job_id = jobs.id AND b.worker_type != 'assessor')))` : ""})
   `).all(job.work_item_id, id, ...TERMINAL_JOB_STATUSES)
     .filter((sibling) => MUTATING_JOB_TYPES.has(sibling.job_type));
   for (const sibling of siblings) {

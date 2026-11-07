@@ -27,7 +27,7 @@ import { recordObservation } from "../../observability/functions/observations.js
 import { parseJobPayload } from "../../queue/functions/payload.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import {
-  FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
+  FINAL_REVIEW_MAX_UNRESOLVED_ROUNDS,
   FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS,
   FINAL_REVIEW_MAX_INVALID_REPORTS,
   FINAL_REVIEW_OBSERVATIONS,
@@ -304,12 +304,12 @@ export class FinalReviewRuntime {
         reason: "The same deterministic failure was observed twice on unchanged work; hand off so the existing recovery path can act on it.",
         reviews_remaining: finalReviewReviewsRemaining(prior) };
     }
-    if (semanticPrior.length >= FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT) {
+    if (finalReviewReviewsRemaining(prior) === 0) {
       this.#release(parent);
       return {
         outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
         findings: [],
-        reason: `This attempt's ${FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT} final reviews are used; hand off when the change is complete.`,
+        reason: `The same unresolved findings persisted for ${FINAL_REVIEW_MAX_UNRESOLVED_ROUNDS} reviews; hand off for targeted repair.`,
         reviews_remaining: 0,
       };
     }
@@ -515,7 +515,7 @@ export class FinalReviewRuntime {
       };
     }
     if (verificationIdentity && verificationIdentity !== await this.verificationIdentity(parent.cwd, { payload: parseJobPayload(getJob(parent.jobId)) })) verificationIdentity = null;
-    const recorded = [...prior, { review_mode: mode }];
+    const recorded = [...prior, { ...result, review_mode: mode }];
     const reviewsRemaining = finalReviewReviewsRemaining(recorded);
     if (mode === MODES.INFRASTRUCTURE) {
       this.#release(parent);
@@ -554,6 +554,7 @@ export class FinalReviewRuntime {
         summary: result.summary || null,
         finding_count: result.findings?.length || 0,
         findings: result.findings || [],
+        ...(result.reviewer_blocked ? { reviewer_blocked: true } : {}),
         repair: result.repair || null,
         declared_tests: response.declared_tests,
         changed_tests: response.changed_tests,
@@ -775,6 +776,13 @@ export class FinalReviewRuntime {
       return { status: "not_waiting", error: "A review report is already being validated; wait for that call to return." };
     }
     const mapped = finalReviewResultFromReport(args);
+    // A reviewer can mistake a defect introduced by a repair for a contract
+    // question. Clarify once per revision before ending both sessions. Do not
+    // guess from prose or silently convert missing evidence into a code defect.
+    if (mapped.reviewer_blocked && session.blockedReportRevision !== session.revision) {
+      session.blockedReportRevision = session.revision;
+      return { status: "invalid_report", error: "Before closing the repair flow: a concrete regression or incorrect behavior is a fail with actionable findings, including defects introduced by the latest repair. Do not ask whether a known regression is acceptable. If an external capability, authorization, or genuinely unspecified contract decision prevents judgment, report needs_review again and name that missing prerequisite or decision. No additional source reads are needed to classify the evidence already reported." };
+    }
     let reportError = mapped.error;
     if (!reportError && mapped.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS) {
       session.validatingReport = true;

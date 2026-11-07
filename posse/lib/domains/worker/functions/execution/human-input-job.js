@@ -7,6 +7,7 @@ installScopeCreateMaterializer(materializeScopeCreates);
 import { PLANNER_CLARIFICATION_REVIEW_TYPE } from "../../../../catalog/tools/planner-clarification.js";
 import { ENVIRONMENT_SETUP_REVIEW_TYPE } from "../../../../catalog/tools/environment-setup.js";
 import { applyDirtyWorktreeRecovery } from "../helpers/dirty-worktree-recovery.js";
+import { finalizeWaivedJobWork } from "../helpers/waived-work-finalization.js";
 import { APPROVAL_POLICY_FAIL_CLOSED_CODE, approvalResolutionAuthorized } from "../../../../catalog/approval-policies.js";
 import { failClosedUnattendedGate } from "../helpers/human-input.js";
 import { DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE } from "../../../../catalog/human-input.js";
@@ -1188,6 +1189,9 @@ export async function runHumanInputJob(worker, job, {
           message: `Human skipped blocked job via recovery job #${job.id}`,
         });
       } else if (decision === "waive") {
+        // Release dependents only after the accepted candidate is durable.
+        // Any Git failure reopens this gate with the candidate intact.
+        await finalizeWaivedJobWork(worker, origJob, { gateId: job.id });
         await worker._setJobRowStatus(origJob, "succeeded");
         setAssessmentLifecycle(origJob.id, "assessment_waived", { completed: true });
         const origPayload = worker.parsePayload(origJob);

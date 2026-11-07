@@ -13,6 +13,7 @@ import { gitCurrentHashAsync, gitExecAsync } from "../../../git/functions/utils.
 import { worktreePathAsync } from "../../../git/functions/worktree.js";
 import { DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE, DIRTY_WORKTREE_RECOVERY_KEY, humanInputChoicesForReviewType } from "../../../../catalog/human-input.js";
 import { normalizeRepoPath, parsePorcelainEntries, payloadExplicitlyClaimsPath, unfinishedSiblingDirtyLocks } from "./worktree-dirty-classification.js";
+import { finalizePreviouslyWaivedWork } from "./waived-work-finalization.js";
 
 export function parkDirtyWorktreeRecovery(worker, job, leaseToken, { paths, attemptId = null, output = "", phase = "commit", candidateIdentity = null, failure = null }) {
   const files = [...new Set(paths.map(normalizeRepoPath).filter(Boolean))];
@@ -45,6 +46,7 @@ export async function applyDirtyWorktreeRecovery({ worker, job, payload, action,
     return;
   }
   if (!["commit", "send_back"].includes(action)) throw new Error("Choose commit, send_back, or fail");
+  if (action === "commit") await finalizePreviouslyWaivedWork(worker, original);
   const cwd = await worktreePathAsync(worker.projectDir, original.work_item_id);
   const expectedBranch = getWorkItem(original.work_item_id)?.branch_name;
   const currentBranch = String(await gitExecAsync(["branch", "--show-current"], cwd)).trim();
@@ -58,7 +60,14 @@ export async function applyDirtyWorktreeRecovery({ worker, job, payload, action,
   const priorRecovery = next[DIRTY_WORKTREE_RECOVERY_KEY];
   const continuingRecovery = priorRecovery?.gate_id === job.id;
   const priorCommits = priorRecovery?.commits || [];
-  const requestedPaths = (payload.dirty_paths || []).map(normalizeRepoPath).filter(Boolean);
+  const requested = (payload.dirty_paths || []).map(normalizeRepoPath).filter(Boolean);
+  const currentDirty = new Set(parsePorcelainEntries(await gitExecAsync([
+    "status", "--porcelain", "-z", "--no-renames", "--untracked-files=all",
+  ], cwd, { trim: false })).map(entry => entry.path));
+  if (requested.length) for (const file of String(await gitExecAsync([
+    "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", ...requested.map(file => `:(literal)${file}`),
+  ], cwd, { trim: false })).split("\0").filter(Boolean)) currentDirty.add(file);
+  const requestedPaths = requested.filter(file => currentDirty.has(file));
   const siblingPaths = new Set(unfinishedSiblingDirtyLocks(original, requestedPaths).map((lock) => lock.path));
   const paths = requestedPaths.filter((file) => !siblingPaths.has(file));
   const requiresDevelopment = (continuingRecovery && priorRecovery.requires_development === true)
@@ -123,10 +132,10 @@ export async function applyDirtyWorktreeRecovery({ worker, job, payload, action,
     // changed. A new candidate still needs fresh developer validation.
     if (wasAssessOnly && !requiresDevelopment && result.hash === base && base === assessmentBase) next._assess_only = wasAssessOnly;
     const source = loadAssessmentSource(original.id);
-    if (payload.candidate_identity && !requiresDevelopment && source.ok
+    if ((payload.candidate_identity || payload.recovery_phase === "commit") && !requiresDevelopment && source.ok
       && Number(source.attempt.id) === Number(payload.source_attempt_id)) {
       next._assess_only = true;
-      if (!candidateUnchanged || payload.candidate_identity !== await finalReviewIdentity(cwd, next, { jobId: original.id })) {
+      if (payload.candidate_identity && (!candidateUnchanged || payload.candidate_identity !== await finalReviewIdentity(cwd, next, { jobId: original.id }))) {
         next._final_review_invalidated_attempt_id = Math.max(
           Number(next._final_review_invalidated_attempt_id) || 0, Number(source.attempt.id));
       }

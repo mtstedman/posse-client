@@ -1,4 +1,4 @@
-import { DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js";
+import { DIRTY_WORKTREE_RECOVERY_KEY, WAIVED_WORK_FINALIZATION_KEY } from "../../../../catalog/human-input.js";
 // lib/domains/worker/functions/helpers/worktree-dirty-classification.js
 //
 // Porcelain parsing and the tolerable-dirty policy extracted from
@@ -11,7 +11,7 @@ import path from "path";
 import { siblingJobScopeOwners } from "../../../queue/functions/file-locks.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
 import { C } from "../../../../shared/format/functions/colors.js";
-import { getAttempts, logEvent } from "../../../queue/functions/index.js";
+import { getAttempts, getJob, logEvent } from "../../../queue/functions/index.js";
 import { preserveDirtyWorktreeSnapshotAsync } from "../../../git/functions/worktree.js";
 import { gitExecAsync } from "../../../git/functions/utils.js";
 import { parsePorcelainZ } from "../../../git/functions/porcelain-diff.js";
@@ -29,6 +29,7 @@ export function payloadExplicitlyClaimsPath(payload = {}, repoPath = "") {
   if (!normalized) return false;
   const claimed = [
     ...(Array.isArray(payload.files_to_modify) ? payload.files_to_modify : []),
+    ...(Array.isArray(payload.must_modify) ? payload.must_modify : []),
     ...(Array.isArray(payload.files_to_create) ? payload.files_to_create : []),
     ...(Array.isArray(payload.files_to_delete) ? payload.files_to_delete : []),
   ].map(normalizeRepoPath).filter(Boolean);
@@ -253,14 +254,19 @@ export async function snapshotAndResetSetupBlockingPathsAsync(worker, job, wi, w
 
 // A released lease is not a transfer of unfinished work. These are ownership
 // hints for preservation only, never authority to write or acquire a lease.
-export function unfinishedSiblingDirtyLocks(job, paths = []) {
+export function unfinishedSiblingDirtyLocks(job, paths = [], { includeCurrentScope = false } = {}) {
   const payload = parseJobPayload(job);
-  const candidates = paths.filter(file => !payloadExplicitlyClaimsPath(payload, file));
-  const owners = siblingJobScopeOwners(job.id, candidates);
+  const candidates = paths.filter(file => includeCurrentScope || !payloadExplicitlyClaimsPath(payload, file));
+  const owners = siblingJobScopeOwners(job.id, candidates, { preserveUncommittedWaivers: true });
   // A future task's planned scope is not evidence that it left these edits.
   // Otherwise its predecessor could wait forever for a job it blocks.
   const attempted = new Set([...owners.values()].flatMap(ids => [...ids])
-    .filter(id => getAttempts(id).some(attempt => attempt.worker_type !== "assessor")));
+    .filter(id => {
+      const owner = getJob(id);
+      const attempt = getAttempts(id).findLast(entry => entry.worker_type !== "assessor");
+      const finalized = parseJobPayload(owner)[WAIVED_WORK_FINALIZATION_KEY];
+      return attempt && !(owner.status === "succeeded" && finalized?.complete && finalized.attempt_id === attempt.id);
+    }));
   return [...owners].flatMap(([file, ids]) => [...ids].filter(id => attempted.has(id)).map(id => ({
     path: file, lock_kind: "file", job_id: id, work_item_id: job.work_item_id,
   })));

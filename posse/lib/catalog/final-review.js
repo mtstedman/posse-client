@@ -7,8 +7,8 @@
 // turn. Findings return to the developer; the reviewer waits in the tool so a
 // later review continues it with only the diff since its report. A COMPLETE handoff waits
 // for a passing review, unless the review could not run within its bounded
-// retries, the reviewer could not judge it, or the attempt's reviews are used
-// up (domains/assessment, final review).
+// retries, the reviewer could not judge it, or repeated unresolved findings
+// reach the no-progress limit (domains/assessment, final review).
 
 export const FINAL_REVIEW_TOOL_NAME = "final_review";
 
@@ -18,20 +18,21 @@ export const FINAL_REVIEW_SETTING_KEY = "final_review_mode";
 export const FINAL_REVIEW_MODES = Object.freeze(["on", "off"]);
 export const FINAL_REVIEW_DEFAULT_MODE = "on";
 
-// Reviews per implementation attempt. An unchanged resubmission reuses the
-// existing findings without spending a review. Once spent, handoff proceeds and
-// the persisted review remains unresolved; no second assessor is dispatched.
-export const FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT = 3;
+// Consecutive reviews that repeat unresolved findings without progress. New
+// defects on revised code continue the same repair flow. Exact rejected
+// candidates reuse their evidence without another review. The attempt and
+// reviewer wall limits still bound total execution.
+export const FINAL_REVIEW_MAX_UNRESOLVED_ROUNDS = 3;
 // Deterministic repairs spend no review rounds. Only repeated unresolved
 // failures use this guard; changing findings return to the same developer.
 export const FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS = 2;
 export const FINAL_REVIEW_CONTINUATION_NEXT_ACTION = "verify_preserved_candidate";
 
 // How a recorded final review reached its result. Only a reviewer's verdict
-// (fresh or revision) spends one of the attempt's reviews. Proven
+// (fresh or revision) counts toward repeated unresolved findings. Proven
 // deterministic findings, reused findings for an unchanged candidate, and a
 // review that obtained no reviewer verdict (provider error, a reviewer that
-// ended without reporting on its revision, the reviewer's wall) are free.
+// ended without reporting on its revision, the reviewer's wall) do not count.
 export const FINAL_REVIEW_REVIEW_MODES = Object.freeze({
   FRESH: "fresh",
   REVISION: "revision",

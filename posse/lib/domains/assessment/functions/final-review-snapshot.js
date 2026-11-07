@@ -310,6 +310,7 @@ export function finalReviewCoreInstructions() {
     "HARNESS BOUNDARY: the harness, not the developer or reviewer, executes the declared verification. A command in the task, README, or your findings does not grant either agent a command tool, authorization, credentials, or access to deployment infrastructure.",
     "If explicitly required build, test, browser, deployment, or other execution evidence is missing and no issued authorized tool can establish it, report blocked testing with the exact check and missing capability. Use the blocked reporting route below; do not return a code-defect finding, demand that DEV execute it, or request another implementation attempt for this evidence gap alone.",
     "Absent generated output before its generator has run is not proof of an implementation defect. A passing typecheck is not a build receipt. Judge actual source defects separately; do not require optional unissued checks or new verification artifacts that the task did not ask for.",
+    "Concrete regressions, including ones introduced by a repair, are fail findings for the developer to fix. Do not turn a known defect into a question about whether broken behavior is acceptable. Request a contract decision only when the intended behavior is genuinely unspecified; a repair needing additional scope is not evidence that the defect is acceptable.",
     "Treat a developer completion report in the snapshot as the delivery report. Check its factual claims; a report-only requirement does not require a source-file comment.",
   ].join("\n");
 }

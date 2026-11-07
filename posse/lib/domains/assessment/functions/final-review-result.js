@@ -9,7 +9,7 @@ import { normalizeFailureFingerprintText } from "../../worker/functions/helpers/
 import { getAgentCallById } from "../../queue/functions/agent-calls.js";
 import { AGENT_CALL_CHILD_KINDS } from "../../../catalog/agent-call.js";
 import {
-  FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT,
+  FINAL_REVIEW_MAX_UNRESOLVED_ROUNDS,
   FINAL_REVIEW_MAX_FINDINGS,
   FINAL_REVIEW_MAX_INFRASTRUCTURE_ROUNDS,
   FINAL_REVIEW_MAX_UNCHANGED_DETERMINISTIC_ROUNDS,
@@ -69,8 +69,9 @@ export function finalReviewResultFromReport(report = {}) {
   }
   return {
     outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
-    findings: [],
-    reason: findings[0]?.criterion || "the reviewer could not judge the task contract",
+    findings,
+    reviewer_blocked: true,
+    reason: findings.map((finding) => finding.criterion).join("\n") || "the reviewer could not judge the task contract",
   };
 }
 
@@ -112,8 +113,9 @@ export function finalReviewResultFromVerdict(verdict, { claims = [] } = {}) {
   }
   return {
     outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
-    findings: [],
-    reason: reasons[0] || `the reviewer returned ${decision || "no verdict"}`,
+    findings: reasons.map((criterion) => ({ criterion })),
+    reviewer_blocked: true,
+    reason: reasons.join("\n") || `the reviewer returned ${decision || "no verdict"}`,
   };
 }
 
@@ -177,9 +179,24 @@ export function semanticFinalReviewResults(results = []) {
   return results.filter((result) => !FINAL_REVIEW_UNCHARGED_REVIEW_MODES.includes(result.review_mode));
 }
 
-/** Reviews this attempt has left, given its results so far. */
+/** Remaining no-progress rounds, not a cap on productive revisions. */
 export function finalReviewReviewsRemaining(results = []) {
-  return Math.max(0, FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT - semanticFinalReviewResults(results).length);
+  const reviews = semanticFinalReviewResults(results);
+  const last = reviews.at(-1);
+  if (!last) return FINAL_REVIEW_MAX_UNRESOLVED_ROUNDS;
+  const signature = (review) => JSON.stringify((review.findings || []).map((finding) => ({
+    criterion: normalizeFailureFingerprintText(finding.criterion),
+    paths: [...(finding.paths || [])].sort(),
+  })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
+  const latest = signature(last);
+  let repeated = 1;
+  if (last.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS) {
+    for (let index = reviews.length - 2; index >= 0; index--) {
+      if (reviews[index].outcome !== FINAL_REVIEW_OUTCOMES.FINDINGS || signature(reviews[index]) !== latest) break;
+      repeated++;
+    }
+  }
+  return Math.max(0, FINAL_REVIEW_MAX_UNRESOLVED_ROUNDS - repeated);
 }
 
 /** Rounds that obtained no reviewer verdict, which the handoff may still wait on. */
@@ -243,7 +260,7 @@ function editedSince({ jobId, agentCallId, afterObservationId, db }) {
  * proceed: the call was not issued the tool, the latest review passed and the
  * change was not edited since, the latest review could not run and its
  * bounded retries are spent, the reviewer could not judge the work, or the
- * attempt's reviews are used up. Only the latest review decides.
+ * same unresolved findings reach the no-progress limit. Only the latest review decides.
  */
 export function finalReviewHandoffHold({ jobId, attemptId, agentCallId, db = getDb() }) {
   if (!finalReviewIssuedTo({ jobId, agentCallId, db })) return null;
@@ -260,7 +277,7 @@ export function finalReviewHandoffHold({ jobId, attemptId, agentCallId, db = get
       : null;
   }
   if (latest.outcome === FINAL_REVIEW_OUTCOMES.BLOCKED) return null;
-  if (semanticFinalReviewResults(results).length >= FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT) return null;
+  if (finalReviewReviewsRemaining(results) === 0) return null;
   if (repeatedDeterministicReview(results)) return null;
   if (latest.review_mode === FINAL_REVIEW_REVIEW_MODES.UNCHANGED) {
     return editedSince({ jobId, agentCallId, afterObservationId: latest.id, db })

@@ -2,12 +2,12 @@
 // awaiting_assessment/assess-only lifecycle is its durable execution phase;
 // this ledger reserves the separate work-item continuation budget once.
 
-import { FINAL_REVIEW_CONTINUATION_NEXT_ACTION, FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT } from "../../../catalog/final-review.js";
+import { FINAL_REVIEW_CONTINUATION_NEXT_ACTION } from "../../../catalog/final-review.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { runImmediateTransaction } from "../../queue/functions/common.js";
 import { getWiFailureThreshold } from "../../settings/functions/tunables.js";
 import { finalReviewIdentity, latestFinalReview } from "./final-review-authority.js";
-import { finalReviewResultsForAttempt, semanticFinalReviewResults } from "./final-review-result.js";
+import { finalReviewResultsForAttempt, finalReviewReviewsRemaining } from "./final-review-result.js";
 
 export async function reserveFinalReviewContinuation(job, payload, cwd) {
   const review = latestFinalReview(job?.id);
@@ -16,7 +16,7 @@ export async function reserveFinalReviewContinuation(job, payload, cwd) {
     return { status: "not_needed" };
   }
   const results = finalReviewResultsForAttempt({ jobId: job.id, attemptId });
-  if (semanticFinalReviewResults(results).length < FINAL_REVIEW_MAX_CALLS_PER_ATTEMPT) return { status: "not_needed" };
+  if (finalReviewReviewsRemaining(results) > 0) return { status: "not_needed" };
 
   let candidateIdentity;
   try {

@@ -227,6 +227,13 @@ export async function authoritativeFinalReview(job, payload, cwd) {
     } catch { return null; }
     if (identity !== review.review_identity) return null;
   }
+  if (review.outcome === "blocked" && review.reviewer_blocked && review.review_identity) {
+    const reasons = (review.findings || []).map((finding) => finding.criterion).filter(Boolean);
+    return { verdict: "needs_review", confidence: "none",
+      reasons: reasons.length ? reasons : [review.reason || "The reviewer needs an operator decision."],
+      spawn_jobs: [], human_questions: [], _disable_internal_retry: true,
+      _assessment_confidence_review: true, _verification_blocked: true };
+  }
   if (!["pass", "findings"].includes(review.outcome) || !review.review_identity) {
     return unresolved(review.reason || "Final review is missing, blocked, or has unresolved findings; no second assessor will be dispatched.");
   }

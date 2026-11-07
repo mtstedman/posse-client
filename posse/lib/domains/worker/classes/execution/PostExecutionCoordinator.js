@@ -517,45 +517,18 @@ export async function handlePostExecutionForWorker({
           const blockMsg = `${AGENT_BLOCKED_ERROR_PREFIX} ${fullBlockReason}`;
           this.emit(job.id, `${C.yellow}[worker] WI#${job.work_item_id} job #${job.id}: ${blockMsg}${C.reset}`);
 
-          if (wtPath) {
-            try {
-              if (await gitHasChangesAsync(wtPath)) {
-                const siblingLocks = activeSiblingWriteLocks(job);
-                if (siblingLocks.length > 0) {
-                  logEvent({
-                    work_item_id: job.work_item_id,
-                    job_id: job.id,
-                    attempt_id: attempt.id,
-                    event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
-                    actor_type: EVENT_ACTORS.WORKER,
-                    message: `Deferred blocked-attempt dirty cleanup; ${siblingLocks.length} same-WI job lock(s) still active`,
-                    event_json: JSON.stringify({ locks: siblingLocks.slice(0, 20) }),
-                  });
-                } else {
-                  try {
-                    await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
-                      reason: `blocked-job-${job.id}`,
-                      branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-                      wiId: job.work_item_id,
-                    });
-                  } catch (resetErr) {
-                    // Snapshot refused or failed — leave the dirt in place for
-                    // the next job's setup recovery. An unsnapshotted wipe here
-                    // is the one response the snapshot layer forbids.
-                    logEvent({
-                      work_item_id: job.work_item_id,
-                      job_id: job.id,
-                      attempt_id: attempt.id,
-                      event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
-                      actor_type: EVENT_ACTORS.WORKER,
-                      message: `Left blocked-attempt dirty state in place; snapshot/reset failed: ${resetErr?.message || String(resetErr)}`,
-                      event_json: JSON.stringify({ reason: `blocked-job-${job.id}` }),
-                    });
-                  }
-                }
-              }
-            } catch { /* dirty probe failed — leave the worktree alone; setup recovery handles pre-existing dirt */ }
-          }
+          // BLOCKED is a decision boundary, not permission to discard the
+          // candidate. A verification waiver must be able to commit these
+          // bytes, including ignored declared tests. Ownership preservation
+          // keeps disjoint jobs moving while this job awaits its answer.
+          if (wtPath) logEvent({
+            work_item_id: job.work_item_id,
+            job_id: job.id,
+            attempt_id: attempt.id,
+            event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+            actor_type: EVENT_ACTORS.WORKER,
+            message: "Preserved blocked candidate in the worktree pending recovery",
+          });
 
           const allAttempts = getAttempts(job.id);
           const blockedCount = blockedAttemptsInGeneration(allAttempts, this.parsePayload(job));
