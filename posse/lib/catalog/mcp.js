@@ -1,4 +1,5 @@
 // @ts-check
+import { ATLAS_MUTATION_PATH_FIELDS } from "./tools/filesystem-mutations.js";
 import { IMAGE_GENERATION_TIMEOUT_MS } from "./artifact.js";
 import { SUB_AGENT_LIMITS } from "./sub-agent.js";
 import { FINAL_REVIEW_TIMEOUT_MS } from "./final-review.js";
@@ -70,6 +71,8 @@ export const MCP_TOOL_DEADLINE_CLASS_BY_TOOL = Object.freeze({
   run_scoped_checks: MCP_TOOL_DEADLINE_CLASSES.COMPOSED_CHECK,
   run_unit_test: MCP_TOOL_DEADLINE_CLASSES.COMPOSED_CHECK,
   request_scope: MCP_TOOL_DEADLINE_CLASSES.LIVE_WAIT,
+  // Mutations can park on exactly the same human scope approval.
+  ...Object.fromEntries(Object.keys(ATLAS_MUTATION_PATH_FIELDS).map(name => [name, MCP_TOOL_DEADLINE_CLASSES.LIVE_WAIT])),
   sub_agent: MCP_TOOL_DEADLINE_CLASSES.CITATION_CHILD,
   dispatch_agent: MCP_TOOL_DEADLINE_CLASSES.AGENT_DISPATCH,
   generate_image: MCP_TOOL_DEADLINE_CLASSES.IMAGE_GENERATION,

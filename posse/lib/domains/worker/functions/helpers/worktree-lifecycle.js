@@ -1,8 +1,9 @@
+import { preservedResumePaths } from "./preserved-work-resume.js";
 import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnostic-logging.js";
 import { log } from "../../../../shared/telemetry/functions/logging/logger.js";
 import { parkDirtyWorktreeRecovery } from "./dirty-worktree-recovery.js";
 import { settleWorktreeLockTimeout } from "./worktree-lock-recovery.js";
-import { DIRTY_WORKTREE_RECOVERY_ERROR, DIRTY_WORKTREE_RECOVERY_KEY } from "../../../../catalog/human-input.js";
+import { DIRTY_WORKTREE_RECOVERY_ERROR, DIRTY_WORKTREE_RECOVERY_KEY, PRESERVED_WORK_RESUME_KEY } from "../../../../catalog/human-input.js";
 // lib/domains/worker/functions/helpers/worktree-lifecycle.js
 //
 // Worktree lifecycle helpers extracted from worker.js: setup/recovery,
@@ -664,7 +665,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       // unexplained destination edits as a named blocker.
       if (reviewedTransfers(getJob(job.id) || job).length) return true;
       const siblingLocks = activeLiveSiblingWriteLocks(job);
-      const dirty = await inspectIgnorableSetupDirty(candidatePath, earlyPayload, siblingLocks, { signal });
+      const dirty = await inspectIgnorableSetupDirty(candidatePath, earlyPayload, siblingLocks, { signal, preservedPaths: await preservedResumePaths(job, candidatePath) });
       const candidatePaths = [...(dirty.blockingEntries || []), ...(dirty.residualEntries || [])]
         .filter(entry => entry.status !== "!!")
         .map(entry => entry.path);
@@ -905,7 +906,7 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
       if ((dirtyState.dirtyPost || dirtyState.ignoredDirty) && !dirtyState.mergeInProgress) {
         const siblingLocks = activeLiveSiblingWriteLocks(job);
         const ignorableDirty = earlyPayload
-          ? classifyIgnorableSetupDirty(earlyPayload, dirtyState.dirtyPost, dirtyState.ignoredPost, siblingLocks)
+          ? classifyIgnorableSetupDirty(earlyPayload, dirtyState.dirtyPost, dirtyState.ignoredPost, siblingLocks, await preservedResumePaths(job, wtPath))
           : { tolerated: false, residualEntries: [], siblingEntries: [] };
         const candidatePaths = [...(ignorableDirty.blockingEntries || []), ...(ignorableDirty.residualEntries || [])]
           .filter(entry => entry.status !== "!!").map(entry => entry.path);
@@ -1232,8 +1233,9 @@ export async function setUpWorktreeForJobAsync(worker, job, leaseToken, { signal
         onError: () => { /* outbox failure must not block lease */ },
       });
     }
-    if (earlyPayload?.[DIRTY_WORKTREE_RECOVERY_KEY]) {
+    if (earlyPayload?.[DIRTY_WORKTREE_RECOVERY_KEY] || earlyPayload?.[PRESERVED_WORK_RESUME_KEY]) {
       const payload = worker.parsePayload(getJob(job.id) || job);
+      delete payload[PRESERVED_WORK_RESUME_KEY];
       const commits = payload[DIRTY_WORKTREE_RECOVERY_KEY]?.commits || [];
       if (commits.length) payload[DIRTY_WORKTREE_RECOVERY_KEY] = { commits };
       else delete payload[DIRTY_WORKTREE_RECOVERY_KEY];

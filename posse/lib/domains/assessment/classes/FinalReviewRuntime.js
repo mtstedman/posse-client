@@ -1,3 +1,4 @@
+import { isVerificationBlocker } from "../functions/final-review-blocker.js";
 import { finalReviewVerificationIdentity } from "../functions/final-review-verification.js";
 import { runChangedFileChecksAsync } from "../functions/final-review-checks-async.js";
 import { emptyMaterializedPathsForJob } from "../../handoff/functions/helpers/file-materialization.js";
@@ -199,6 +200,8 @@ export class FinalReviewRuntime {
       }
       // Own the entire round, including identity reads and durable recording.
       parent.inFlight = true;
+      let refreshVerification = false;
+      let blockerIdentity = null;
       if (Object.hasOwn(args, "blocker")) {
         try {
           signal?.throwIfAborted();
@@ -209,23 +212,35 @@ export class FinalReviewRuntime {
             throw finalReviewError("FINAL_REVIEW_INVALID_REPORT", "A developer blocker cannot include a reviewer verdict or findings.");
           }
           const blocker = args.blocker.trim();
-          const response = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, reason: blocker, findings: [], developer_blocked: true };
-          this.completePass({ agentCallId: parent.agentCallId, reviewerAgentCallId: parent.reviewer?.agentCallId,
-            cwd: parent.cwd, blocker, recordResult: () => {
-              if (this.record({ job_id: parent.jobId, work_item_id: parent.workItemId ?? null,
-                attempt_id: parent.attemptId, observation_type: FINAL_REVIEW_OBSERVATIONS.RESULT,
-                summary: `final_review BLOCKED: ${blocker}`, detail: { ...response, agent_call_id: parent.agentCallId,
-                  attempt_id: parent.attemptId, reviewer_agent_call_id: parent.reviewer?.agentCallId ?? null,
-                  review_identity: null } }) === false) {
-                throw new Error("Could not persist the blocked final-review result");
-              }
-            } });
-          parent.completed = true;
-          parent.pendingReview = null;
-          parent.reviewer?.controller.abort();
-          this.#release(parent);
-          return response;
-        } finally { parent.inFlight = false; }
+          if (isVerificationBlocker(blocker)) {
+            // Use the whole effective tree: a sibling can repair the failure
+            // without changing this developer's scoped candidate identity.
+            blockerIdentity = await this.verificationIdentity(parent.cwd);
+            refreshVerification = !parent.blockerVerification
+              || parent.blockerVerification.identity !== blockerIdentity;
+          }
+          if (!refreshVerification) {
+            const response = { outcome: FINAL_REVIEW_OUTCOMES.BLOCKED, reason: blocker, findings: [], developer_blocked: true };
+            this.completePass({ agentCallId: parent.agentCallId, reviewerAgentCallId: parent.reviewer?.agentCallId,
+              cwd: parent.cwd, blocker, recordResult: () => {
+                if (this.record({ job_id: parent.jobId, work_item_id: parent.workItemId ?? null,
+                  attempt_id: parent.attemptId, observation_type: FINAL_REVIEW_OBSERVATIONS.RESULT,
+                  summary: `final_review BLOCKED: ${blocker}`, detail: { ...response, agent_call_id: parent.agentCallId,
+                    attempt_id: parent.attemptId, reviewer_agent_call_id: parent.reviewer?.agentCallId ?? null,
+                    review_identity: null } }) === false) {
+                  throw new Error("Could not persist the blocked final-review result");
+                }
+              } });
+            parent.completed = true;
+            parent.pendingReview = null;
+            parent.reviewer?.controller.abort();
+            this.#release(parent);
+            return response;
+          }
+        } catch (error) {
+          parent.inFlight = false;
+          throw error;
+        } finally { if (!refreshVerification) parent.inFlight = false; }
       }
       const reviewSignal = AbortSignal.any([parent.controller.signal,
         AbortSignal.timeout(this.reviewTimeoutMs), ...(signal ? [signal] : [])]);
@@ -234,7 +249,14 @@ export class FinalReviewRuntime {
       try {
         if (reviewSignal.aborted) cancel();
         reviewSignal.throwIfAborted();
-        return await this.#developerReview(parent, args, reviewSignal);
+        const result = await this.#developerReview(parent, args, reviewSignal, { refreshVerification });
+        if (refreshVerification) {
+          const after = await this.verificationIdentity(parent.cwd);
+          // An unavailable identity permits only this call's bounded retry;
+          // subsequent developer calls still verify anew before reblocking.
+          parent.blockerVerification = after === blockerIdentity ? { identity: after } : null;
+        }
+        return result;
       } finally {
         reviewSignal.removeEventListener("abort", cancel);
         parent.inFlight = false;
@@ -265,7 +287,7 @@ export class FinalReviewRuntime {
     return { entry };
   }
 
-  async #developerReview(parent, args, signal) {
+  async #developerReview(parent, args, signal, { refreshVerification = false } = {}) {
     const prior = finalReviewResultsForAttempt({ jobId: parent.jobId, attemptId: parent.attemptId });
     const semanticPrior = semanticFinalReviewResults(prior);
     if (Object.hasOwn(args, "completion_report")) parent.completionReport = completionReportFromArgs(args);
@@ -291,14 +313,15 @@ export class FinalReviewRuntime {
       return this.#saveReview(parent, pending);
     }
     const unchanged = prior.at(-1);
-    if (unchanged?.review_mode === MODES.UNCHANGED && currentIdentity === unchanged.review_identity
+    if (!refreshVerification && unchanged?.review_mode === MODES.UNCHANGED && currentIdentity === unchanged.review_identity
       && sameCompletionReport(completionReport, unchanged.completion_report)) {
       this.#release(parent);
       return { outcome: FINAL_REVIEW_OUTCOMES.FINDINGS, findings: unchanged.findings || [],
         reason: unchanged.reason, reviews_remaining: finalReviewReviewsRemaining(prior) };
     }
     const repeated = repeatedDeterministicReview(prior, currentIdentity);
-    if (repeated && currentIdentity) {
+    if (!refreshVerification && repeated && currentIdentity && repeated.verification_context_identity
+      && repeated.verification_context_identity === await this.verificationIdentity(parent.cwd)) {
       this.#release(parent);
       return { outcome: FINAL_REVIEW_OUTCOMES.FINDINGS, findings: repeated.findings || [],
         reason: "The same deterministic failure was observed twice on unchanged work; hand off so the existing recovery path can act on it.",
@@ -335,6 +358,7 @@ export class FinalReviewRuntime {
       }
       return Math.min(FINAL_REVIEW_TEST_TIMEOUT_MS, remainingMs);
     };
+    let verificationContextIdentity = null;
     let result;
     let testRun = null;
     let declaredPlan = null;
@@ -374,9 +398,10 @@ export class FinalReviewRuntime {
       const rejected = reviewIdentity ? semanticPrior.findLast((review) =>
         review.outcome === FINAL_REVIEW_OUTCOMES.FINDINGS && review.review_identity === reviewIdentity
         && sameCompletionReport(completionReport, review.completion_report)) : null;
-      if (rejected) return this.#returnUnchangedReview(parent, rejected, prior);
+      if (rejected && !refreshVerification) return this.#returnUnchangedReview(parent, rejected, prior);
       const workItem = getWorkItem(job.work_item_id);
       declaredPlan = this.resolveTestPlan(job, payload, { cwd: parent.cwd });
+      verificationContextIdentity = await this.verificationIdentity(parent.cwd);
       verificationIdentity = await this.verificationIdentity(parent.cwd, { payload: parseJobPayload(getJob(parent.jobId)) });
       testRun = await this.runTestPlan(declaredPlan, {
         cwd: parent.cwd,
@@ -546,6 +571,7 @@ export class FinalReviewRuntime {
         attempt_id: parent.attemptId ?? null,
         outcome: result.outcome,
         review_identity: reviewIdentity,
+        verification_context_identity: verificationContextIdentity,
         verification_evidence: verificationIdentity ? {
           identity: verificationIdentity, declared_plan: declaredPlan, declared_tests: testRun,
           changed_plan: changedPlan, changed_tests: changedTestRun, scoped_checks: checks,

@@ -1,3 +1,4 @@
+import { IMPLICIT_TYPECHECK_DEFERRED } from "../../../catalog/verification.js";
 import { unfinishedTestOwners } from "../../queue/functions/job-test-scope.js";
 // Deterministic evidence final_review gathers beyond the planner's declared
 // tests: the changed-file lint/typecheck the assessment harness runs after
@@ -257,7 +258,9 @@ function tail(text, max) {
 /** The reviewer's view of the changed-file checks; null when none ran. */
 export function renderChangedFileChecks(checks) {
   if (!checks) return null;
-  const implicit = (checks.implicit_typechecks || []).map(check => check.status === "pre_existing"
+  const implicit = (checks.implicit_typechecks || []).map(check => check.status === IMPLICIT_TYPECHECK_DEFERRED
+    ? `Required typecheck: ${check.command}: deferred to the isolated merge gate; diagnostics are confined to unfinished sibling work (jobs ${(check.sibling_job_ids || []).join(", ")}). This is neither a pass nor a defect attributed to this job.`
+    : check.status === "pre_existing"
     ? `Required typecheck: ${check.command}: ${check.diagnostic_count} pre-existing error(s) outside the change (not introduced by it)`
     : `Required typecheck: ${check.command}: ${check.status}\n${check.output}`).join("\n");
   const head = implicit + `\nCHANGED-FILE CHECKS (${FINAL_REVIEW_CHECKS.join(", ")} on ${checks.files.length} changed file(s)): ${checks.status.toUpperCase()}${checks.summary ? `, ${checks.summary}` : ""}.`;

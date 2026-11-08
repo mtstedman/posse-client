@@ -1181,8 +1181,17 @@ findings. Confirmed reviewer blockers preserve their evidence and open the
 normal review gate, including Send back for fixes; they are not classified as
 assessment infrastructure failures.
 Developers report an unrecoverable blocker with `final_review({ blocker: "..." })`.
-This saves BLOCKED and stops both sessions without running another review or
-requiring a separate handoff call.
+Verification-related blockers first run current checks and the normal review,
+so stale failures cannot create another recovery gate. Unchanged, freshly
+verified blockers can still save BLOCKED; product-input blockers do so directly.
+Neither PASS nor saved BLOCKED requires a separate handoff call.
+
+Pauses record owned file contents, staging, branch and attempt identity. Resume
+reuses those exact bytes after scope approval or retry; unexplained changes still
+require recovery. Typecheck errors confined to dirty files owned by unfinished
+siblings are deferred to the isolated merge gate, which runs the full check.
+File mutations waiting on scope approval have the same deadline as explicit
+`request_scope` calls.
 
 Blocked candidates remain in their worktree while awaiting a decision. An
 explicit verification waiver commits the job's authorized files, including

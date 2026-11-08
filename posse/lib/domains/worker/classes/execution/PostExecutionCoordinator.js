@@ -1,3 +1,4 @@
+import { preserveWorkForResume } from "../../functions/helpers/preserved-work-resume.js";
 import { isKillAbort } from "../../../runtime/functions/yield.js";
 import { authoritativeFinalReview, finalReviewIdentity } from "../../../assessment/functions/final-review-authority.js";
 import { parsePorcelainEntries, unfinishedSiblingDirtyLocks } from "../../functions/helpers/worktree-dirty-classification.js";
@@ -403,29 +404,7 @@ export async function handlePostExecutionForWorker({
           && pendingScopeRequest
           && (!pendingScopeRequest.attempt_id || Number(pendingScopeRequest.attempt_id) === Number(attempt.id))
         ) {
-          if (wtPath) {
-            try {
-              if (await gitHasChangesAsync(wtPath)) {
-                const siblingLocks = activeSiblingWriteLocks(job);
-                if (siblingLocks.length === 0) {
-                  await snapshotAndResetDirtyWorktreeAsyncFromModule(wtPath, this.projectDir, {
-                    reason: `scope-request-job-${job.id}`,
-                    branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-                    wiId: job.work_item_id,
-                  });
-                }
-              }
-            } catch (resetErr) {
-              logEvent({
-                work_item_id: job.work_item_id,
-                job_id: job.id,
-                attempt_id: attempt.id,
-                event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
-                actor_type: EVENT_ACTORS.WORKER,
-                message: `Scope-request pause left dirty state for setup recovery: ${resetErr?.message || String(resetErr)}`,
-              });
-            }
-          }
+          if (wtPath) await preserveWorkForResume(job, attempt.id, wtPath);
           completeAttempt(attempt.id, {
             status: "interrupted",
             duration_ms: Date.now() - startTime,
@@ -521,6 +500,7 @@ export async function handlePostExecutionForWorker({
           // candidate. A verification waiver must be able to commit these
           // bytes, including ignored declared tests. Ownership preservation
           // keeps disjoint jobs moving while this job awaits its answer.
+          if (wtPath) await preserveWorkForResume(job, attempt.id, wtPath);
           if (wtPath) logEvent({
             work_item_id: job.work_item_id,
             job_id: job.id,

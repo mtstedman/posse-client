@@ -1,3 +1,4 @@
+import { IMPLICIT_TYPECHECK_DEFERRED, JOB_TESTS_DEFERRED_TO_INTEGRATION } from "../../../catalog/verification.js";
 import fs from "node:fs";
 import path from "node:path";
 import { groupVerificationFiles, packageManagerRun } from "../../../shared/tools/functions/toolkit/verification-readiness.js";
@@ -26,7 +27,7 @@ export function implicitTypechecks(cwd, files = []) {
 //  - elsewhere, more errors than the baseline project count less the changed
 //    files' own baseline errors (the project count includes them), so fixing
 //    a touched file's errors never masks a new error in a caller.
-export async function runImplicitTypechecks(cwd, files, { baselineProjectDiagnosticCount = null, baselineByFile = null, baselineRoots = null, ...options } = {}) {
+export async function runImplicitTypechecks(cwd, files, { baselineProjectDiagnosticCount = null, baselineByFile = null, baselineRoots = null, pendingSiblingPaths = async () => [], ...options } = {}) {
   const results = [];
   const normalize = file => String(file).replace(/\\/g, "/");
   const changed = new Set((files || []).map(normalize));
@@ -43,6 +44,7 @@ export async function runImplicitTypechecks(cwd, files, { baselineProjectDiagnos
       .reduce((sum, file) => sum + (baselineFiles.get(file) || 0), 0) : 0;
     const baselineElsewhere = Number.isInteger(baselineCount)
       ? Math.max(0, baselineCount - changedBaseline) : null;
+    const pendingBefore = await pendingSiblingPaths();
     const result = await runProcessAsync(check.command, check.args, check.cwd, options);
     options.signal?.throwIfAborted();
     if (result.timedOut || result.error || result.signal || [127, 9009].includes(result.exitCode)) {
@@ -65,9 +67,15 @@ export async function runImplicitTypechecks(cwd, files, { baselineProjectDiagnos
     const elsewhere = diagnostics.length - inChanged.length;
     const grew = baselineElsewhere !== null ? elsewhere > baselineElsewhere : result.exitCode !== 0 && inChanged.length === 0 && diagnostics.length === 0;
     const introduced = introducedCount > 0 || grew;
+    const pending = new Map([...pendingBefore, ...await pendingSiblingPaths()].map(lock => [normalize(lock.path), lock.job_id]));
+    // Ambiguous integration evidence is not proof against this developer.
+    // Preserve it as deferred; the isolated merge gate still runs the script.
+    const deferred = result.exitCode !== 0 && inChanged.length === 0 && diagnostics.length > 0
+      && diagnostics.every(diagnostic => pending.has(rootRelative(diagnostic.file)) || pending.has(diagnostic.file));
     const introducedOutput = inChanged
       .map(diagnostic => diagnostic.text || `${diagnostic.file}(${diagnostic.line ?? "?"}): ${diagnostic.code || ""} ${diagnostic.message || ""}`).join("\n");
-    results.push({ command: check.declared_command, status: result.exitCode === 0 ? "passed" : introduced ? "failed" : "pre_existing",
+    results.push({ command: check.declared_command, status: result.exitCode === 0 ? "passed" : deferred ? IMPLICIT_TYPECHECK_DEFERRED : introduced ? "failed" : "pre_existing",
+      ...(deferred ? { reason: JOB_TESTS_DEFERRED_TO_INTEGRATION, sibling_job_ids: [...new Set(diagnostics.map(diagnostic => pending.get(rootRelative(diagnostic.file)) ?? pending.get(diagnostic.file)))] } : {}),
       exit_code: result.exitCode, diagnostic_count: diagnostics.length, introduced_count: introducedCount,
       baseline_project_diagnostic_count: baselineCount ?? null,
       baseline_elsewhere_diagnostic_count: baselineElsewhere,

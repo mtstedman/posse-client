@@ -1,3 +1,4 @@
+import { pendingSiblingVerificationPaths } from "./sibling-verification.js";
 import { runImplicitTypechecks } from "../../verification/functions/implicit-typechecks.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import fs from "node:fs/promises";
@@ -68,6 +69,7 @@ export async function runChangedFileChecksAsync(cwd, change, { signal = null, jo
     const scoped = JSON.parse(await fs.readFile(output, "utf8"));
     const baseline = preDevTypecheckBaseline(change, jobId);
     const implicit = await runImplicitTypechecks(cwd, files, { signal, timeoutMs,
+      pendingSiblingPaths: () => pendingSiblingVerificationPaths(cwd, jobId),
       baselineProjectDiagnosticCount: baseline.projectDiagnosticCount, baselineByFile: baseline.byFile, baselineRoots: baseline.roots });
     if (!implicit.length) return scoped;
     return { ...(scoped || { status: "passed", files: [], introduced: [], inChanged: [], elsewhere: [] }),

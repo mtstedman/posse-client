@@ -144,6 +144,7 @@ export const HUMAN_INPUT_REVIEW_DIFF_SCOPES = Object.freeze({
 export const DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE = "dirty_worktree_recovery";
 export const DIRTY_WORKTREE_RECOVERY_ERROR = "WORKTREE_DIRTY_RECOVERY_REQUIRED";
 export const DIRTY_WORKTREE_RECOVERY_KEY = "_dirty_worktree_recovery";
+export const PRESERVED_WORK_RESUME_KEY = "_preserved_work_resume";
 export const WAIVED_WORK_FINALIZATION_KEY = "_waived_work_finalization";
 export const WAIVED_WORK_COMMIT_TRAILER = "Posse-Waiver-Operation";
 

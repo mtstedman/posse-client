@@ -1,3 +1,4 @@
+import { preserveWorkForResume } from "./preserved-work-resume.js";
 import { BUDGET_PAUSED } from "../../../../catalog/admission-budget.js";
 import { isBudgetPaused } from "../../../queue/functions/admission-budget.js";
 import { linkFailedAttemptSnapshot } from "./failed-attempt-recovery.js";
@@ -240,26 +241,7 @@ export async function handlePendingScopeApprovalPause(worker, {
     || (pending.attempt_id && Number(pending.attempt_id) !== Number(attempt?.id))
   ) return false;
 
-  if (wtPath) {
-    try {
-      if (await gitHasChangesAsync(wtPath) && !deferInterruptedCleanupIfSiblingLocks(job, "scope-request")) {
-        await snapshotAndResetDirtyWorktreeAsync(wtPath, worker?.projectDir || wtPath, {
-          reason: `scope-request-job-${job.id}`,
-          branchName: getWorkItem(job.work_item_id)?.branch_name || null,
-          wiId: job.work_item_id,
-        });
-      }
-    } catch (resetErr) {
-      logEvent({
-        work_item_id: job.work_item_id,
-        job_id: job.id,
-        attempt_id: attempt?.id || null,
-        event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
-        actor_type: EVENT_ACTORS.WORKER,
-        message: `Scope-request pause left dirty state for setup recovery: ${resetErr?.message || String(resetErr)}`,
-      });
-    }
-  }
+  if (wtPath && attempt?.id) await preserveWorkForResume(job, attempt.id, wtPath);
 
   if (attempt?.id) {
     completeAttempt(attempt.id, {
@@ -550,6 +532,7 @@ export async function handleExecuteAttemptError(worker, {
         updateJobPayload(job.id, JSON.stringify(cleared));
       }
       if (settled?.decision === "approved" || residual?._pending_scope_request?.decision === "approved") {
+        if (wtPath && attempt?.id) await preserveWorkForResume(job, attempt.id, wtPath);
         completeAttempt(attempt.id, {
           status: "interrupted",
           duration_ms: Date.now() - startTime,

@@ -108,7 +108,7 @@ export function dedupePorcelainEntries(entries = []) {
   });
 }
 
-export function classifyIgnorableSetupDirty(payload = {}, dirtyPorcelain = "", ignoredPorcelain = "", siblingLocks = []) {
+export function classifyIgnorableSetupDirty(payload = {}, dirtyPorcelain = "", ignoredPorcelain = "", siblingLocks = [], preservedPaths = []) {
   const ignoredEntries = parsePorcelainEntries(ignoredPorcelain).filter((entry) => entry.status === "!!");
   const entries = dedupePorcelainEntries([
     ...parsePorcelainEntries(dirtyPorcelain),
@@ -130,7 +130,7 @@ export function classifyIgnorableSetupDirty(payload = {}, dirtyPorcelain = "", i
     const claimedByCurrent = payloadExplicitlyClaimsPath(payload, entry.path);
     // Explicit recovery authorizes keeping these files through this setup.
     // The worker consumes the marker before starting the next developer turn.
-    if (claimedByCurrent && payload[DIRTY_WORKTREE_RECOVERY_KEY]?.paths?.includes(entry.path)) continue;
+    if (claimedByCurrent && (payload[DIRTY_WORKTREE_RECOVERY_KEY]?.paths?.includes(entry.path) || preservedPaths.includes(entry.path))) continue;
     const untrackedResidual = (entry.status === "??" || entry.status === "!!") && !claimedByCurrent;
     const siblingLock = !claimedByCurrent
       ? siblingLocks.find((lock) => siblingLockCoversPath(lock, entry.path))
@@ -164,13 +164,13 @@ export function isRuntimeResidualPath(repoPath = "") {
     || normalized.startsWith(".posse-test-suites/");
 }
 
-export async function inspectIgnorableSetupDirty(wtPath, payload = {}, siblingLocks = [], { signal = null } = {}) {
+export async function inspectIgnorableSetupDirty(wtPath, payload = {}, siblingLocks = [], { signal = null, preservedPaths = [] } = {}) {
   const dirtyPorcelain = await gitExecAsync(["status", "--porcelain", "-z", "--no-renames", "--untracked-files=all"], wtPath, { signal, trim: false });
   const ignoredPorcelain = await gitExecAsync(["status", "--porcelain", "-z", "--no-renames", "--ignored=matching", "--untracked-files=all"], wtPath, { signal, trim: false });
   return {
     dirtyPorcelain,
     ignoredPorcelain,
-    ...classifyIgnorableSetupDirty(payload, dirtyPorcelain, ignoredPorcelain, siblingLocks),
+    ...classifyIgnorableSetupDirty(payload, dirtyPorcelain, ignoredPorcelain, siblingLocks, preservedPaths),
   };
 }
 
