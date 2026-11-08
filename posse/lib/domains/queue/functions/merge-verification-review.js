@@ -1,4 +1,5 @@
 import { historicalPassingChecks } from "./verification-receipts.js";
+import { mergeCheckFailureSummary } from "../../git/functions/merge-failure-diagnostics.js";
 // Operator review before auto-merging work whose verification was waived.
 //
 // A planner test command that already fails before the change (baseline debt,
@@ -51,7 +52,6 @@ import {
 } from "../../../catalog/human-input.js";
 import {
   BASELINE_TEST_DEBT_PAYLOAD_KEY,
-  MERGE_GATE_PROMPT_LINE_CHARS,
   MERGE_REVIEW_REFRESH_AUDIT_LIMIT,
   MERGE_TARGET_COMPARISON_OUTCOMES,
   MERGE_TARGET_DEBT_OUTCOMES,
@@ -478,12 +478,8 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
   const detail = String(message || "Git could not merge the work-item branch").trim().slice(0, 1000);
   const choices = mergeFailureRecoveryChoices({ integrationGate, allowWaive });
   const canWaive = choices.includes("waive_tests");
-  const lineTail = (text) => {
-    const value = String(text ?? "");
-    return value.length > MERGE_GATE_PROMPT_LINE_CHARS ? `...${value.slice(-MERGE_GATE_PROMPT_LINE_CHARS)}` : value;
-  };
   const failedChecks = (integrationGate?.results || []).filter((result) => !result.ok)
-    .map((result) => `${String(result.test?.name || result.test?.id).slice(0, 300)}: ${lineTail(result.failure?.message || result.note || result.status)}`);
+    .map((result) => `${String(result.test?.name || result.test?.id || "required check").slice(0, 300)}: ${mergeCheckFailureSummary(result)}`);
   const attribution = (integrationGate?.results || []).filter((result) => !result.ok)
     .map((result) => {
       const debt = result.target_debt_classification;
@@ -499,17 +495,16 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
       return `${check}: ${debt.outcome || "unverified"}${debt.reason ? ` (${debt.reason})` : ""}.`;
     });
   const question = [
-    `${failureKind === MERGE_FAILURE_KINDS.INTEGRATION_TEST ? "Merge candidate checks for" : "Merge of"} ${label}${targetBranch ? ` into ${targetBranch}` : ""} failed: ${detail}.`,
-    "merge: merge it now (resolve the repository condition first). send_back: return the work item for rework on its branch.",
-    "commit: include current dirty work in local commits. Branch edits return for validation; target-only edits are committed before retrying merge.",
-    canWaive ? "waive_tests: accept the recorded failing checks and squash-merge this candidate; failures remain recorded. Leave this gate unanswered to keep the branch and defer." : "Leave this gate unanswered to keep the branch and defer.",
-    integrationGate ? (integrationGate.source === "job_test_command"
-      ? "These checks were declared by development or repair jobs."
-      : "These checks came from the repository test registry.") : null,
-    dirtyFiles.length ? `Uncommitted files: ${dirtyFiles.join(", ")}` : null,
-    ...failedChecks,
+    `${failureKind === MERGE_FAILURE_KINDS.INTEGRATION_TEST ? "Merge candidate checks for" : "Merge of"} ${label}${targetBranch ? ` into ${targetBranch}` : ""} failed${failedChecks.length ? ` (${failedChecks.length} ${failedChecks.length === 1 ? "check" : "checks"})` : ""}.`,
+    "merge: retry checks and merge. send_back: return for fixes. commit: save dirty work; branch edits require validation.",
+    canWaive ? "waive_tests: merge despite the recorded failing checks." : null,
+    "Leave unanswered to defer. See failure details below.",
+  ].filter(Boolean).join("\n\n");
+  const context = [
+    ...(failedChecks.length ? failedChecks : [detail]),
     ...attribution,
-  ].filter(Boolean).join(" ");
+    dirtyFiles.length ? `Uncommitted files: ${dirtyFiles.join(", ")}` : null,
+  ].filter(Boolean).join("\n\n");
   return {
     work_item_id: workItem.id,
     job_type: "human_input",
@@ -521,7 +516,7 @@ export function mergeFailureRecoveryGateJobSpec(workItem, {
       choices,
       questions: [question],
       prompt: question,
-      context: [detail, ...attribution].join(" ").slice(0, 1000),
+      context,
       attribution_summary: attribution,
       branch_name: workItem.branch_name || null,
       waived_job_ids: [],

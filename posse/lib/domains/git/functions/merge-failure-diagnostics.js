@@ -1,5 +1,18 @@
 import { MERGE_FAILURE_KINDS } from "../../../catalog/human-input.js";
-import { MERGE_GATE_STORED_OUTPUT_CHARS, MERGE_GATE_STORED_RESULTS } from "../../../catalog/verification.js";
+import { MERGE_GATE_PROMPT_LINE_CHARS, MERGE_GATE_STORED_OUTPUT_CHARS, MERGE_GATE_STORED_RESULTS } from "../../../catalog/verification.js";
+
+/** Extract diagnostics before output bounding can discard a failure's heading. */
+export function mergeCheckFailureSummary(result = {}) {
+  if (result.failure_summary) return String(result.failure_summary).slice(0, MERGE_GATE_PROMPT_LINE_CHARS);
+  const lines = [...new Set([result.stdout, result.stderr, result.failure?.message, result.note]
+    .filter(Boolean).flatMap(text => String(text).replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/))
+    .map(line => line.trim()).filter(line => line && !/^(?:PHP\s+)?(?:Deprecation Notice:|Deprecated:)/i.test(line)))];
+  const diagnostics = lines.filter(line => /\berror TS\d+:|^(?:\d+\)\s+\S|FAIL(?:\s|:)|FAILURES!|Failed asserting\b|AssertionError\b|TypeError:|ReferenceError:|(?:PHP )?Fatal error:|Error:|Expected:|Received:)|\.(?:php|[jt]sx?|py):\d+(?::\d+)?$/.test(line));
+  const selected = diagnostics.length ? diagnostics : lines.slice(-3);
+  const text = selected.join("\n") || String(result.status || "Check failed");
+  return text.length > MERGE_GATE_PROMPT_LINE_CHARS
+    ? `${text.slice(0, MERGE_GATE_PROMPT_LINE_CHARS - 1)}…` : text;
+}
 
 /** The last `limit` characters of a check's output: where failures report. */
 export function mergeGateOutputTail(value, limit = MERGE_GATE_STORED_OUTPUT_CHARS) {
@@ -20,6 +33,7 @@ function boundResult(result = {}) {
     ...Object.fromEntries(["ok", "passed", "status", "test", "failure_kind", "exit_code", "signal", "cwd_relative",
       "run_id", "timeout_ms", "target_debt_classification", "summary"]
       .filter((key) => result[key] !== undefined).map((key) => [key, result[key]])),
+    ...(result.ok !== true ? { failure_summary: mergeCheckFailureSummary(result) } : {}),
     ...(result.stdout !== undefined ? { stdout: mergeGateOutputTail(result.stdout) } : {}),
     ...(result.stderr !== undefined ? { stderr: mergeGateOutputTail(result.stderr) } : {}),
     ...(result.note !== undefined ? { note: mergeGateOutputTail(result.note) } : {}),

@@ -27,7 +27,7 @@ import { conflictFilesFromMergeError, parkedMergeGuidance } from "./merge-park-g
 import { mergeCandidateRegisteredTests, registryMergeCheckFailureKind, runRegisteredTest, runRegisteredTestsForMergeCandidate } from "../../../shared/tools/functions/toolkit/registered-tests.js";
 import { appendRequiredMergeTypechecks, declaredMergeCandidateCommands, runDeclaredMergeCandidateChecks, withTemporaryMergeCandidateCheckout } from "./merge-candidate-checks.js";
 import { classifyMergeTargetDebt, classifyUnavailableMergeCheck, mergeCheckFailureFingerprint } from "./merge-target-debt.js";
-import { boundMergeGateEvidence, mergeGateOutputTail } from "./merge-failure-diagnostics.js";
+import { boundMergeGateEvidence, mergeCheckFailureSummary, mergeGateOutputTail } from "./merge-failure-diagnostics.js";
 import { MERGE_CLOSEOUT_WORKTREE_PREFIX, MERGE_GATE_STORED_RESULTS, MERGE_GATE_TASK_RESERVE_MS, MERGE_GATE_WALL_BUDGET_MS, MERGE_TARGET_COMPARISON_OUTCOMES, MERGE_TARGET_DEBT_OUTCOMES, MERGE_TARGET_PROCEEDING_OUTCOMES } from "../../../catalog/verification.js";
 import { readMergeInProgressMarker, recoverInterruptedSquash as recoverInterruptedSquashIn, removeMergeInProgressMarker, writeMergeInProgressMarker } from "./merge-interrupted-squash.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
@@ -1650,7 +1650,7 @@ export function createMergeWorkflowHelpers(context, {
           const gateError = new Error(
             `Projected merge candidate ${firstFailure?.status === "unavailable" ? "has an unverified required check" : "failed test"} ${firstFailure?.test?.name || firstFailure?.test?.id || "unknown"} on ${targetBranch}`
             + `${debt ? ` (${debt.outcome}${debt.introducer ? `, WI#${debt.introducer.work_item_id}` : ""})` : ""}: `
-            + `${mergeGateOutputTail(firstFailure?.failure?.message || candidateTests.summary)}`,
+            + `${mergeCheckFailureSummary(firstFailure)}`,
           );
           gateError.code = "POSSE_MERGE_CANDIDATE_TEST_FAILED";
           // Classification is done: store only bounded evidence.
