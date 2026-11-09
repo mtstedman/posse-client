@@ -17,6 +17,7 @@ import { getArtifact, getArtifactMetadataForJob } from "../../queue/functions/ar
 import { DB_TASK_PRE_MERGE_POLICIES, SETTING_KEYS } from "../../../catalog/settings.js";
 import {
   artifactsDir,
+  inputsDir,
   wiScopeId,
 } from "../../artifacts/functions/index.js";
 import {
@@ -31,6 +32,20 @@ import { normalizeHashRefHandoffPacket } from "../../handoff/functions/helpers/h
 export function emit(worker, jobId, message) {
   if (typeof worker?.emit === "function") {
     worker.emit(jobId, message);
+  }
+}
+
+export async function renderPlannerInputDirectory(workItemId, projectDir) {
+  const inputRoot = inputsDir(wiScopeId(workItemId), projectDir);
+  try {
+    if (!(await fs.promises.stat(inputRoot)).isDirectory()) {
+      return "  inputs: unavailable (work-item input path is not a directory)";
+    }
+    return `  inputs: ${inputRoot.replace(/\\/g, "/")} (operator-provided files; text files here reach later jobs as refs under WORK ITEM RESEARCH REFS, not by path)`;
+  } catch (error) {
+    return error.code === "ENOENT"
+      ? "  inputs: none (no work-item input directory)"
+      : "  inputs: unavailable (could not inspect work-item input directory)";
   }
 }
 

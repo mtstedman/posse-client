@@ -58,6 +58,7 @@ import {
 } from "./research-prefetch-policy.js";
 import { isAtlasSymbolId } from "../../../atlas/functions/v2/symbol-id.js";
 import { atlasSymbolRefFromResearchSeed } from "./research-symbols.js";
+import { isBootstrapOnlyRepository } from "./bootstrap-repository.js";
 
 const ATLAS_EXACT_PREFETCH_MAX_FILES = 6;
 const ATLAS_EXACT_PREFETCH_MAX_BYTES = 96 * 1024;
@@ -2157,6 +2158,7 @@ export async function attachAtlasPlannerSlice(packet) {
     if (!_isPrefetchCwdUsable(packet.cwd)) return;
     const tools = internalAtlasTools(packet);
     if (!tools.has("tree.scope") && !tools.has("slice.build")) return;
+    if (await isBootstrapOnlyRepository(packet.cwd)) return;
 
     const atlasConfig = packet.atlas_config || getAtlasIntegrationConfig();
     const isResearcher = packet.recipient === "researcher";
