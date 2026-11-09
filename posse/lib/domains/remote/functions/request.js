@@ -695,9 +695,10 @@ export function buildRemoteCompileRequest(packet, instructions, {
     skills: selectedSkills,
     requested_skills: Array.isArray(packet?.requested_skills) ? packet.requested_skills : [],
     // The native dispatch hosts verify this Remote-signed ceiling before any
-    // tool is exposed; Node only relays it. Preflight/summary compiles issue
-    // no tools, and Remote refuses to sign an empty surface.
-    ...(!["preflight", "summary"].includes(String(role || "").trim().toLowerCase())
+    // tool is exposed; Node only relays it. Preflight, summary and the
+    // user-agent policy shell issue no tools. User agents bind their own
+    // scoped capabilities separately; Remote refuses to sign an empty surface.
+    ...(!["preflight", "summary", "agent"].includes(String(role || "").trim().toLowerCase())
       ? { native_grant: { requested: true, ttl_seconds: DEFAULT_NATIVE_TOOL_GRANT_TTL_SECONDS } }
       : {}),
     limits: {
