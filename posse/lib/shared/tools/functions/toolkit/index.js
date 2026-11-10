@@ -397,9 +397,6 @@ export function createDeterministicToolkit({
       return `Error: ${err.message}`;
     }
     const displayPath = toDisplayPath(cwd, filePath);
-    if (!fs.existsSync(filePath) && !restoreMissingMaterializedFile(filePath, cwd)) {
-      return `Error: File not found: ${displayPath}`;
-    }
     if (isSensitiveEnvFileOrTargetPath(filePath)) {
       return "Error: Editing .env files is blocked. Use documented config examples or code paths instead.";
     }
@@ -408,6 +405,11 @@ export function createDeterministicToolkit({
     }
     const lockErr = guardToolWriteLock("edit_file", args.path, cwd);
     if (lockErr) return lockErr;
+    // Recreating a vanished placeholder is itself a write. Historical
+    // materialization provenance cannot bypass today's scope or lock checks.
+    if (!fs.existsSync(filePath) && !restoreMissingMaterializedFile(filePath, cwd)) {
+      return `Error: File not found: ${displayPath}`;
+    }
     const originalContent = fs.readFileSync(filePath, "utf-8");
     let content = originalContent;
 

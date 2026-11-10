@@ -99,8 +99,11 @@ export class ResourceSandbox {
     demand(this.grants.some(item => item.id === resource && item.operations.includes("write")), "Write resource not granted", "forbidden");
     demand(typeof name === "string" && name.split("/").every(part => part && ![".", "..", ".git", ".posse"].includes(part)) && !name.includes("\\") && !name.includes("\0") && !path.isAbsolute(name), "Invalid artifact path");
     demand(this.staged.size < 128 || this.staged.has(resource + ":" + name), "Artifact count limit exceeded");
-    this.staged.set(resource + ":" + name, { resource, name, content });
-    demand([...this.staged.values()].reduce((sum, item) => sum + Buffer.byteLength(item.content), 0) <= 8 * MAX_BYTES, "Total artifact size limit exceeded");
+    const key = resource + ":" + name;
+    const stagedBytes = [...this.staged.values()].reduce((sum, item) => sum + Buffer.byteLength(item.content), 0);
+    const replacedBytes = Buffer.byteLength(this.staged.get(key)?.content || "");
+    demand(stagedBytes - replacedBytes + Buffer.byteLength(content) <= 8 * MAX_BYTES, "Total artifact size limit exceeded");
+    this.staged.set(key, { resource, name, content });
     return { artifact: `${resource}/${name}` };
   }
   processCSV(input) {

@@ -69,7 +69,7 @@ function isCommitted(projectDir, relativePath) {
     // cache is warm. Use the repository's bounded bootstrap Git adapter for
     // this read-only trust check; executable verification remains on the
     // normal native-backed worker path.
-    const result = adminGitExec(["ls-files", "--error-unmatch", "--", relativePath], projectDir, {
+    const result = adminGitExec(["ls-tree", "--name-only", "HEAD", "--", relativePath], projectDir, {
       timeoutMs: 5_000,
     });
     return String(result || "").trim().replace(/\\/g, "/") === relativePath;

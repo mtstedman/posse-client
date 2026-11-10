@@ -2,6 +2,19 @@ import fs from "node:fs";
 import path from "node:path";
 import { gitExecAsync } from "./utils.js";
 
+async function assertRecoverableIndex(cwd, files, trees) {
+  let conflicts = new Set(files);
+  for (const tree of trees.filter(Boolean)) {
+    if (!conflicts.size) return;
+    const changed = new Set(String(await gitExecAsync([
+      "diff", "--cached", "--name-only", "--no-ext-diff", "--no-renames", "-z", tree,
+      "--", ...[...conflicts].map(file => `:(literal)${file}`),
+    ], cwd, { trim: false })).split("\0"));
+    conflicts = new Set([...conflicts].filter(file => changed.has(file)));
+  }
+  if (conflicts.size) throw new Error(`Recovery snapshot conflicts with newer staged work: ${[...conflicts].join(", ")}`);
+}
+
 // Caller holds the worktree lock and has checked live writer conflicts.
 // Restore only exact, authorized paths whose current bytes still match the
 // snapshot's base (or already match its result). Never apply a whole stash.
@@ -15,6 +28,11 @@ export async function restoreScopedSnapshotAsync(cwd, snapshot, scope) {
   const untracked = parents[2] ? String(await gitExecAsync([
     "ls-tree", "-rz", "--name-only", parents[2],
   ], cwd, { trim: false })).split("\0").filter(file => file && scope.contains(file)) : [];
+  // A working copy may match the base/result while its index holds a newer
+  // edit. Validate staging before even treating an already-restored path as
+  // safe: finalization will stage these paths and would erase that edit.
+  await assertRecoverableIndex(cwd, tracked, [parents[0], parents[1], snapshot]);
+  await assertRecoverableIndex(cwd, untracked, [parents[0], parents[2]]);
   const restoreTracked = [];
   const restoreUntracked = [];
   for (const file of tracked) {
