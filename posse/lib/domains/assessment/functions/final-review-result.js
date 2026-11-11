@@ -67,10 +67,16 @@ export function finalReviewResultFromReport(report = {}) {
     if (findings.length === 0) return { error: "A fail verdict needs findings: name each defect and the criterion it misses." };
     return { outcome: FINAL_REVIEW_OUTCOMES.FINDINGS, findings };
   }
+  // A blocked verdict is the reviewer's own decision to stop the loop, so it
+  // must say what blocks the work; the operator's gate shows that text.
+  if (verdict === "blocked" && findings.length === 0) {
+    return { error: "A blocked verdict needs the blocker: name it in findings[].criterion." };
+  }
   return {
     outcome: FINAL_REVIEW_OUTCOMES.BLOCKED,
     findings,
     reviewer_blocked: true,
+    ...(verdict === "blocked" ? { reviewer_verdict: "blocked" } : {}),
     reason: findings.map((finding) => finding.criterion).join("\n") || "the reviewer could not judge the task contract",
   };
 }

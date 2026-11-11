@@ -21,6 +21,7 @@ import {
   getJob,
   getWaitingLanePreparation,
   getWorkItem,
+  hasImplementationAttempts,
   listJobsByWorkItem,
   poisonWaitingLanePreparation,
   refreshWorkItemStatus,
@@ -647,7 +648,11 @@ export async function gcWorktreesAsync(projectDir, onMsg = () => {}, {
             }
             const pendingResume = listJobsByWorkItem(wiId).some(job =>
               jobNeedsGitWorktree(job) && HOLDING_STATUSES.has(job.status)
+              // attempt_count alone misses first-attempt work: a requeue
+              // after a crash or shutdown refunds the increment back to 0,
+              // while the attempt row survives.
               && (Number(job.attempt_count) > 0
+                || hasImplementationAttempts(job.id)
                 || parseJobPayload(job)[DIRTY_WORKTREE_RECOVERY_KEY]?.paths?.length));
             if (pendingResume) {
               // Job setup owns scoped recovery and its explicit operator choice.

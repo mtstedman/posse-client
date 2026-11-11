@@ -4668,12 +4668,19 @@ export function stageAgentHandoff(args, {
     // Concurrent handoffs are rejected earlier by the owner's sibling-call
     // guard, so this only sees sequential resubmissions. Committed packets stay
     // immutable.
-    if (existing.status === "staged") {
+    // A staged report that a sibling/later tool call invalidated (or that was
+    // never effectively issued) is the same case: the row is the call's only
+    // slot, so refusing the resubmission leaves the agent unable to terminate.
+    // A report that failed its commit-time evidence recheck stays rejected.
+    const invalidated = existing.status === "rejected"
+      && /^(?:later_tool:|not_effectively_issued$)/.test(String(existing.rejection_code || ""));
+    if (existing.status === "staged" || invalidated) {
       const superseded = database.prepare(`
         UPDATE ${TABLE}
         SET profile=?, outcome=?, materialized_packet_json=?, packet_digest=?, evidence_chars=?,
+            status='staged', rejection_code=NULL,
             stage_count=stage_count+1, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        WHERE agent_call_id=? AND status='staged' AND packet_digest=?
+        WHERE agent_call_id=? AND status=? AND packet_digest=?
       `).run(
         packet.profile,
         packet.outcome,
@@ -4681,6 +4688,7 @@ export function stageAgentHandoff(args, {
         digest,
         packet.evidence_chars,
         agentCallId,
+        existing.status,
         existing.packet_digest,
       );
       if (superseded.changes === 1) {
@@ -4697,7 +4705,12 @@ export function stageAgentHandoff(args, {
         };
       }
     }
-    fail("AGENT_HANDOFF_DUPLICATE_CONFLICT", "A different agent_handoff is already committed for this agent call");
+    fail(
+      "AGENT_HANDOFF_DUPLICATE_CONFLICT",
+      existing.status === "committed"
+        ? "A different agent_handoff is already committed for this agent call"
+        : `The agent_handoff for this agent call is ${existing.status} (${existing.rejection_code || "no rejection code"}) and cannot be replaced`,
+    );
   }
   database.prepare(`
     INSERT INTO ${TABLE} (

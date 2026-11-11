@@ -56,6 +56,18 @@ export class AutomationStore {
   unfinishedRuns() { return this.db.prepare("SELECT value FROM automation_runs WHERE json_extract(value,'$.status') IN ('queued','running','committing')").all().map(row => JSON.parse(row.value)); }
   queuedRuns() { return this.db.prepare("SELECT value FROM automation_runs WHERE json_extract(value,'$.status')='queued' ORDER BY rowid").all().map(row => JSON.parse(row.value)); }
   retryRuns(now) { return this.db.prepare("SELECT value FROM automation_runs WHERE json_extract(value,'$.status')='retry_wait' AND json_extract(value,'$.next_retry_at')<=? ORDER BY json_extract(value,'$.next_retry_at'),rowid").all(now).map(row => JSON.parse(row.value)); }
+  // Finished runs older than the cutoff. An interrupted run stays: it is an
+  // unreconciled outcome that schedules still gate on. So does a run a
+  // schedule names as its last, or one with a commit journal or held outputs.
+  pruneFinishedRuns(beforeIso) {
+    return Number(this.db.prepare(`DELETE FROM automation_runs
+      WHERE json_extract(value,'$.status') IN ('succeeded','failed','canceled')
+        AND coalesce(json_extract(value,'$.completed_at'),json_extract(value,'$.created_at'))<?
+        AND id NOT IN (SELECT json_extract(value,'$.last_run_id') FROM automation_objects
+          WHERE kind='schedules' AND json_extract(value,'$.last_run_id') IS NOT NULL)
+        AND id NOT IN (SELECT id FROM automation_objects WHERE kind='commits')
+        AND id NOT IN (SELECT run_id FROM automation_output_reservations)`).run(beforeIso).changes);
+  }
   scheduleRunCount(id, statuses) {
     if (!Array.isArray(statuses) || statuses.length === 0) return 0;
     const placeholders = statuses.map(() => "?").join(",");

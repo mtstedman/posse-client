@@ -186,12 +186,13 @@ export async function snapshotAndResetSetupBlockingPathsAsync(worker, job, wi, w
   branchName = null,
   dirty = {},
   signal = null,
+  reason = `dirty-worktree-setup-wi-${wi.id}-job-${job.id}-targeted`,
+  eventMessage = null,
 } = {}) {
   const entries = dirty.blockingEntries || [];
   const paths = [...new Set(entries.map((entry) => normalizeRepoPath(entry.path)).filter(Boolean))];
   if (paths.length === 0) return null;
 
-  const reason = `dirty-worktree-setup-wi-${wi.id}-job-${job.id}-targeted`;
   const snapshotDir = await preserveDirtyWorktreeSnapshotAsync(wtPath, worker.projectDir, {
     reason,
     branchName,
@@ -242,7 +243,7 @@ export async function snapshotAndResetSetupBlockingPathsAsync(worker, job, wi, w
     job_id: job.id,
     event_type: EVENT_TYPES.WORKTREE_DIRTY_RECOVERED,
     actor_type: EVENT_ACTORS.WORKER,
-    message: `Targeted setup cleanup reset ${paths.length} blocking dirty path(s) while same-WI siblings were active`,
+    message: eventMessage || `Targeted setup cleanup reset ${paths.length} blocking dirty path(s) while same-WI siblings were active`,
     event_json: JSON.stringify({
       paths: paths.slice(0, 100),
       snapshot_dir: snapshotDir,

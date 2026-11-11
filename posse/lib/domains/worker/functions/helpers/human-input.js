@@ -1,5 +1,5 @@
 import { BLOCKED_RECOVERY_GATE_KINDS } from "../../../../catalog/human-input.js";
-import { APPROVAL_POLICY_FAIL_CLOSED_CODE, approvalPolicyForPayload } from "../../../../catalog/approval-policies.js";
+import { APPROVAL_POLICY_FAIL_CLOSED_CODE, approvalPolicyForPayload, flowGroupForGate } from "../../../../catalog/approval-policies.js";
 import { getSetting } from "../../../settings/functions/repository-settings.js";
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../../catalog/event.js";
 // lib/domains/worker/functions/helpers/human-input.js
@@ -13,10 +13,12 @@ import {
   HUMAN_INPUT_BEST_JUDGMENT_ANSWER,
   humanGateStateAllowsAnswer,
   humanInputChoicesForPayload,
+  tryHumanGateNameForPayload,
 } from "../../../../catalog/human-input.js";
 import {
   getHumanGate,
   getJob,
+  listJobsByWorkItem,
   logEvent,
   runInTransaction,
   setJobError,
@@ -207,6 +209,26 @@ function gateReviewDiffTarget(job, payload) {
   }
 }
 
+const MAX_AUTOMATIC_GATE_ANSWERS = 2;
+
+// Earlier gates of the same kind for the same original job that a standing
+// policy answered. Questions (clarifications) are not repairs and never count.
+function automaticAnswersForOriginal(job, payload, gate) {
+  const originalId = Number(payload?.original_job_id);
+  if (!Number.isSafeInteger(originalId) || originalId <= 0 || flowGroupForGate(gate) !== "failure_recovery") return 0;
+  let count = 0;
+  for (const other of listJobsByWorkItem(job.work_item_id)) {
+    if (other.id === job.id || other.job_type !== "human_input" || other.status !== "succeeded") continue;
+    let otherPayload;
+    try { otherPayload = JSON.parse(other.payload_json || "{}"); } catch { continue; }
+    if (Number(otherPayload.original_job_id) !== originalId || tryHumanGateNameForPayload(otherPayload) !== gate) continue;
+    let result;
+    try { result = JSON.parse(other.result_json || "{}"); } catch { result = {}; }
+    if (result?.unattended === true || result?.source === "approval_policy") count += 1;
+  }
+  return count;
+}
+
 export async function runHumanInputHandler(worker, job, abortSignal = null, { leaseToken = null } = {}) {
   const payload = worker.parsePayload(job);
   const { questions, context: payloadContext, promptOptions } = resolveHumanInputPrompt(job, payload);
@@ -216,6 +238,15 @@ export async function runHumanInputHandler(worker, job, abortSignal = null, { le
 
   const policy = worker.display?.hasOperatorAnswer ? {} : approvalPolicyForPayload(payload, { getSetting, scopeMode: worker.scopeMode,
     autoApprove: worker.autoApprove, autoApprovePlan: process.argv.includes("--auto-approve-plan") });
+  // An automatic repair that keeps landing on the same gate is not repairing
+  // anything: after two automatic answers for one job, the operator decides.
+  if (policy.answer && policy.source === "approval_policy" && automaticAnswersForOriginal(job, payload, policy.gate) >= MAX_AUTOMATIC_GATE_ANSWERS) {
+    worker.emit(job.id, `${C.yellow}[human] ${policy.gate} was already answered automatically ${MAX_AUTOMATIC_GATE_ANSWERS} times for this job; asking instead${C.reset}`);
+    policy.answer = null;
+  }
+  // Best judgement answers only a question that offers that escape to an
+  // operator; a security-sensitive prompt still waits for one.
+  if (policy.answer === HUMAN_INPUT_BEST_JUDGMENT_ANSWER && promptOptions.escapeAnswer !== HUMAN_INPUT_BEST_JUDGMENT_ANSWER) policy.answer = null;
   if (policy.answer) {
     worker.emit(job.id, `${C.cyan}[human] ${policy.gate} resolved with "${policy.answer}" (${policy.source})${C.reset}`);
     return JSON.stringify({ questions, answers: questions.map((question) => ({ question, answer: policy.answer })),

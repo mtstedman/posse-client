@@ -23,6 +23,9 @@ import { snapshotAndResetDirtyWorktreeAsync, stashDirtyWorktreeAsync } from "../
 import { activeSiblingWriteLocks, siblingLockSummary } from "../../../queue/functions/sibling-locks.js";
 import { siblingJobScopePaths } from "../../../queue/functions/file-locks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
+import { PLANNER_CLARIFICATION_REVIEW_TYPE } from "../../../../catalog/tools/planner-clarification.js";
+import { ENVIRONMENT_SETUP_REVIEW_TYPE } from "../../../../catalog/tools/environment-setup.js";
+import { planCompileIncompleteInAttempt } from "../../../planning/functions/plan-compiler.js";
 import { processVerdict } from "./process-verdict.js";
 import { linkSiblingDirtyRecoverySnapshot } from "./sibling-dirty-recovery.js";
 import { harnessSetupFaultCode, settleHarnessSetupFault } from "./harness-setup-fault.js";
@@ -226,6 +229,25 @@ function closeRunningAttemptAsLeaseLost(job, attempt, startTime) {
   return true;
 }
 
+// Binding the paused candidate is an optimisation for the resume. If it
+// cannot be bound (git failure, unnamed branch, a scoped path that is not a
+// workspace file), the pause must still settle: with no receipt, setup falls
+// back to the ordinary dirty-worktree recovery.
+async function preserveWorkForResumeBestEffort(job, attempt, wtPath) {
+  try {
+    await preserveWorkForResume(job, attempt.id, wtPath);
+  } catch (error) {
+    logEvent({
+      work_item_id: job.work_item_id,
+      job_id: job.id,
+      attempt_id: attempt?.id || null,
+      event_type: EVENT_TYPES.WORKTREE_DIRTY_CLEANUP_DEFERRED,
+      actor_type: EVENT_ACTORS.WORKER,
+      message: `Scope-approval pause left dirty state for setup recovery: ${error?.message || String(error)}`,
+    });
+  }
+}
+
 export async function handlePendingScopeApprovalPause(worker, {
   attempt,
   job,
@@ -241,7 +263,7 @@ export async function handlePendingScopeApprovalPause(worker, {
     || (pending.attempt_id && Number(pending.attempt_id) !== Number(attempt?.id))
   ) return false;
 
-  if (wtPath && attempt?.id) await preserveWorkForResume(job, attempt.id, wtPath);
+  if (wtPath && attempt?.id) await preserveWorkForResumeBestEffort(job, attempt, wtPath);
 
   if (attempt?.id) {
     completeAttempt(attempt.id, {
@@ -448,10 +470,22 @@ export async function handleExecuteAttemptError(worker, {
 
   // Compiled children are the planner's durable commit point. A later artifact
   // or settlement failure must not replay the plan and create another wave.
-  if (["plan", "research", "preflight"].includes(job.job_type) && attempt?.started_at && listJobsByWorkItem(job.work_item_id).some((candidate) => (
+  // Not a commit point: a batch the compiler canceled on its own fail path,
+  // and a clarification or environment-setup gate the running attempt asked
+  // (the attempt parks on it and continues; nothing was compiled).
+  // Nor is a batch whose compile threw part-way: the compiler stamps the plan
+  // job when a compile starts and when it completes, and cancels what it had
+  // created; a child it could not cancel must not turn the failure into a
+  // success. A plan job with no stamp for this attempt keeps the child rule.
+  if (["plan", "research", "preflight"].includes(job.job_type) && attempt?.started_at
+    && !(job.job_type === "plan" && planCompileIncompleteInAttempt(currentJob || job, attempt))
+    && listJobsByWorkItem(job.work_item_id).some((candidate) => (
     Number(candidate.parent_job_id) === Number(job.id)
     && ["plan", "research", "dev", "artificer", "promote", "human_input"].includes(candidate.job_type)
     && String(candidate.created_at || "") >= String(attempt.started_at)
+    && candidate.status !== "canceled"
+    && !(candidate.job_type === "human_input"
+      && [PLANNER_CLARIFICATION_REVIEW_TYPE, ENVIRONMENT_SETUP_REVIEW_TYPE].includes(parseJobPayload(candidate).review_type))
   ))) {
     completeAttempt(attempt.id, {
       status: "succeeded",
@@ -532,7 +566,7 @@ export async function handleExecuteAttemptError(worker, {
         updateJobPayload(job.id, JSON.stringify(cleared));
       }
       if (settled?.decision === "approved" || residual?._pending_scope_request?.decision === "approved") {
-        if (wtPath && attempt?.id) await preserveWorkForResume(job, attempt.id, wtPath);
+        if (wtPath && attempt?.id) await preserveWorkForResumeBestEffort(job, attempt, wtPath);
         completeAttempt(attempt.id, {
           status: "interrupted",
           duration_ms: Date.now() - startTime,

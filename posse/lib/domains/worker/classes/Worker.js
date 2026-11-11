@@ -5,7 +5,6 @@ import { emitDiagnostic } from "../../../shared/telemetry/functions/diagnostic-l
 // exponential backoff, artifact storage. Dev/fix jobs go through assessor
 // after execution.
 
-import path from "path";
 import fs from "fs";
 import { performance } from "node:perf_hooks";
 import "../../../shared/scope/functions/path.js";
@@ -811,9 +810,13 @@ export class Worker {
     return [...unique.values()];
   }
 
-  async _readActiveWorktreeSentinelAtRootAsync(wtPath) {
+  async _readActiveWorktreeSentinelAtRootAsync(wtPath, sentinelPath = null) {
     if (!wtPath) return null;
-    const sentinelPath = path.join(wtPath, ".posse", "active-job");
+    // wtPath is the project-scoped path (a subdirectory in nested projects),
+    // while the sentinel lives at the worktree's repo root — or in its Git
+    // dir when the repo tracks .posse/active-job. Read the path the writer
+    // recorded; without one, resolve it the way the writer does.
+    if (!sentinelPath) return readActiveWorktreeSentinelFromModule(wtPath);
     try {
       const raw = await fs.promises.readFile(sentinelPath, "utf-8");
       const payload = JSON.parse(raw);
@@ -936,7 +939,7 @@ export class Worker {
         continue;
       }
       try {
-        const sentinel = await this._readActiveWorktreeSentinelAtRootAsync(ctx.wtPath);
+        const sentinel = await this._readActiveWorktreeSentinelAtRootAsync(ctx.wtPath, ctx.sentinelPath);
         const sentinelLive = sentinel ? isSentinelProcessAlive(sentinel.payload) : null;
         if (sentinel && sentinelLive !== false) {
           skippedActive++;

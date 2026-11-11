@@ -232,7 +232,8 @@ export async function offerSessionJob(job, {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'offered')
         ON CONFLICT(offer_key) DO UPDATE SET
           packet_oid=excluded.packet_oid, claim_oid=excluded.claim_oid,
-          state='offered', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          state='offered', created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+          updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
       `).run(key, state.remote_session_id, instanceId, workItem.id, job.id, key, packetOid, claimOid, job.job_type, job.provider || null);
       if (!updateJobStatus(job.id, "blocked", { expectedStatuses: ["queued"] })) {
         throw new Error(`Session job #${job.id} is no longer queued`);
@@ -286,6 +287,9 @@ export function packetMatchesOffer(packet, offer, executorInstanceId) {
     && packet.eligible_instance_ids.includes(executorInstanceId);
 }
 
+// A fetched view this long may be truncated: absence from it proves nothing.
+export const SESSION_REF_FETCH_LIMIT = 256;
+
 export async function fetchNamespace(projectDir, remote, namespace, execGit = adminGitExecAsync) {
   const prefix = `refs/posse/${namespace}/`;
   await execGit([
@@ -295,7 +299,7 @@ export async function fetchNamespace(projectDir, remote, namespace, execGit = ad
     "for-each-ref", "--format=%(objectname) %(refname)", `${prefix}*`,
   ], projectDir, { timeoutMs: 10_000 });
   const result = [];
-  for (const line of String(rows || "").split("\n").filter(Boolean).slice(0, 256)) {
+  for (const line of String(rows || "").split("\n").filter(Boolean).slice(0, SESSION_REF_FETCH_LIMIT)) {
     const [oid, refName] = line.trim().split(/\s+/u);
     const key = refName?.startsWith(prefix) ? refName.slice(prefix.length) : "";
     if (!OID_RE.test(oid || "") || !REF_KEY_RE.test(key)) continue;
@@ -315,6 +319,12 @@ export async function fetchNamespace(projectDir, remote, namespace, execGit = ad
 }
 
 export function importPacket(packet, executorInstanceId, offerKey, claimOid) {
+  // One transaction: a failure part-way must not leave a work item or job
+  // without the delegation row that ties it to the claim.
+  return runImmediateTransaction(getDb(), () => importPacketRows(packet, executorInstanceId, offerKey, claimOid));
+}
+
+function importPacketRows(packet, executorInstanceId, offerKey, claimOid) {
   const existing = getDb().prepare("SELECT * FROM work_item_delegations WHERE offer_key = ?").get(offerKey);
   if (existing) return existing;
   const wi = createWorkItem(

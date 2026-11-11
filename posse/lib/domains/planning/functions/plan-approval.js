@@ -17,7 +17,7 @@ import {
   SETTING_KEYS,
 } from "../../../catalog/settings.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../catalog/native-tools.js";
-import { TERMINAL_JOB_STATUSES } from "../../queue/functions/common.js";
+import { TERMINAL_JOB_STATUSES, runImmediateTransaction } from "../../queue/functions/common.js";
 import {
   addDependency,
   createJob,
@@ -321,7 +321,9 @@ export function createPlanApprovalGate(planJob, createdJobIds, summary = null) {
   if (targets.length === 0) return null;
 
   const db = getDb();
-  return db.transaction(() => {
+  // Queue wakes raised inside are flushed on commit and dropped on rollback
+  // only by runImmediateTransaction; a raw db.transaction() strands them.
+  return runImmediateTransaction(db, () => {
     const wiId = planJob.work_item_id;
     const operationalCommands = Array.isArray(summary?.operational_commands)
       ? summary.operational_commands
@@ -393,7 +395,7 @@ export function createPlanApprovalGate(planJob, createdJobIds, summary = null) {
       event_json: JSON.stringify({ gate_job_id: gate.id, gated_job_ids: targets }),
     });
     return gate.id;
-  })();
+  });
 }
 
 /**
@@ -437,7 +439,7 @@ export function approvePlan(wiId, {
   gateGeneration = null,
 } = {}) {
   const db = getDb();
-  return db.transaction(() => {
+  return runImmediateTransaction(db, () => {
     const wi = getWorkItem(wiId);
     if (!wi) return { ok: false, reason: "no_such_wi" };
     const gate = findPendingGate(wiId);
@@ -528,7 +530,7 @@ export function approvePlan(wiId, {
         : null,
     });
     return { ok: true, gateJobId: gate.id, approvedOperationalCommandCount: approvals.length };
-  })();
+  });
 }
 
 /**
@@ -544,7 +546,7 @@ export function rejectPlan(wiId, {
   gateGeneration = null,
 } = {}) {
   const db = getDb();
-  return db.transaction(() => {
+  return runImmediateTransaction(db, () => {
     const wi = getWorkItem(wiId);
     if (!wi) return { ok: false, reason: "no_such_wi" };
     const gate = findPendingGate(wiId);
@@ -613,7 +615,7 @@ export function rejectPlan(wiId, {
       }),
     });
     return { ok: true, gateJobId: gate.id, canceledCount: canceled, rejectedArtifactIds, promoteAlreadyRanCount };
-  })();
+  });
 }
 
 /**
@@ -622,7 +624,7 @@ export function rejectPlan(wiId, {
  */
 export function respawnAfterRejection(wiId, { feedback = null, rejectedArtifactIds = [] } = {}) {
   const db = getDb();
-  return db.transaction(() => {
+  return runImmediateTransaction(db, () => {
     const wi = getWorkItem(wiId);
     if (!wi) return { ok: false, reason: "no_such_wi" };
     // The rejection remains available as planner feedback, but it is no longer
@@ -656,5 +658,5 @@ export function respawnAfterRejection(wiId, { feedback = null, rejectedArtifactI
       message: `Research job spawned for replan after rejection`,
     });
     return { ok: true, researchJobId: researchJob.id };
-  })();
+  });
 }

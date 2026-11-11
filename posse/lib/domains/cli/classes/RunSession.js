@@ -2554,8 +2554,11 @@ export class RunSession {
       console.log(`  ${C.yellow}Scheduler boot interrupted. Lock released; safe to restart.${C.reset}\n`);
     } else if (bootAbortReason) {
       console.log(`  ${C.red}Scheduler boot aborted — ${bootAbortReason}.${C.reset}\n`);
+      process.exitCode = 1;
     } else {
       console.log(`  ${C.red}Scheduler boot aborted — another instance may be running or lock is held.${C.reset}\n`);
+      // No job ran: a headless caller (cron, CI) must not read this as success.
+      process.exitCode = 1;
     }
     return;
   }

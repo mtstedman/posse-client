@@ -91,6 +91,7 @@ import {
   clearPairingPromotionJournal,
   describePairingPromotion,
   markPairingPromotion,
+  pairingCandidatePreservedLocally,
   promotePairingTrunk,
   readPairingPromotionJournal,
 } from "./promotion.js";
@@ -1601,9 +1602,33 @@ async function runStatus({
     else printActive(C, state, pending);
     return result;
   }
+  // A close claimed by a live process is an owner at work, whatever the
+  // recorded owner shows: the closer may be another terminal, and the drain
+  // wait can outlast the owner heartbeat's staleness window.
+  const ownerAlive = pairingProcessIsAlive(state)
+    || (state.role === "host" && Boolean(activeSessionCloseClaim({ stateId: state.id })));
+  if (state.role === "host" && !ownerAlive) {
+    // A host whose owner died is never unpaired or restored from a status
+    // poll: its session key, remote and row are what recovery needs to freeze
+    // the session's work, and the recovery itself belongs to a command that
+    // may change the checkout.
+    clearPairingPeerSnapshot();
+    const journal = readPairingPromotionJournal();
+    const result = { ok: true, paired: false, ended: "host_exited", integration_pending: Boolean(journal),
+      phase: journal ? journal.phase : state.phase };
+    if (json) console.log(JSON.stringify(result));
+    else if (journal) {
+      console.log(`\n  No live session. The last one (${journal.source_branch || state.shared_branch}) ended unexpectedly;`
+        + " its work waits for `posse session integrate` (or `posse session abandon-integration`).\n");
+    } else {
+      console.log(`\n  No live session. The last one (${state.shared_branch}) ended unexpectedly and is not recovered yet;`
+        + " run `posse session integrate` to recover its work. Nothing was changed.\n");
+    }
+    return result;
+  }
   if (state.phase !== "active") {
     clearPairingPeerSnapshot();
-    if (pairingProcessIsAlive(state)) {
+    if (ownerAlive) {
       const result = { ok: true, paired: false, role: state.role, phase: state.phase, owner_running: true };
       if (json) console.log(JSON.stringify(result));
       else console.log(`\n  Session ${state.phase}; its owning process is still running.\n`);
@@ -1615,20 +1640,7 @@ async function runStatus({
     else console.log(`\n  Pairing recovery ${restored.ok ? `restored ${state.original_branch}` : `is blocked: ${restored.message}`}.\n`);
     return result;
   }
-  if (!pairingProcessIsAlive(state) && state.role === "host" && readPairingPromotionJournal()) {
-    // The integration still needs this session's key and remote to finish;
-    // integrate or abandon-integration restores the checkout afterwards.
-    clearPairingPeerSnapshot();
-    const journal = readPairingPromotionJournal();
-    const result = { ok: true, paired: false, ended: "host_exited", integration_pending: true, phase: journal.phase };
-    if (json) console.log(JSON.stringify(result));
-    else {
-      console.log(`\n  No live session. The last one (${journal.source_branch || state.shared_branch}) ended unexpectedly;`
-        + " its work waits for `posse session integrate` (or `posse session abandon-integration`).\n");
-    }
-    return result;
-  }
-  if (!pairingProcessIsAlive(state)) {
+  if (!ownerAlive) {
     clearPairingPeerSnapshot();
     const recovered = await unpair(
       repositoryRoot(projectDir),
@@ -1662,7 +1674,7 @@ async function runStatus({
     clearPairingPeerSnapshot();
     // The owner must drain, fetch the final trunk and preserve its promotion
     // journal before restoring. A status poll cannot remove its credentials.
-    if (pairingProcessIsAlive(state)) {
+    if (ownerAlive) {
       const result = { ok: true, paired: false, role: state.role, phase: state.phase,
         status, owner_running: true };
       if (json) console.log(JSON.stringify(result));
@@ -1921,6 +1933,14 @@ async function runPendingIntegration({
     else if (!silent) console.log("\n  No session integration is pending.\n");
     return result;
   }
+  // A close still running elsewhere owns this journal: it has not frozen the
+  // source yet and will keep writing the journal and using the session key.
+  const closing = activeSessionCloseClaim({ stateId: getLivePairingState()?.id });
+  if (closing && Number(closing.owner_pid) !== process.pid) {
+    throw Object.assign(new Error(
+      `Another process (pid ${closing.owner_pid}) is still closing this session; let it finish, then run \`posse session ${action}\``,
+    ), { code: "session_close_in_progress" });
+  }
   if (action === "abandon-integration") {
     clearPairingPromotionJournal();
     const state = getLivePairingState();
@@ -1928,14 +1948,32 @@ async function runPendingIntegration({
     const suffix = String(journal.session_id || "recovery")
       .replace(/[^a-zA-Z0-9-]/gu, "")
       .slice(0, 64) || "recovery";
+    const cleanup = journal.temporary_repository && restored.ok && pairingCandidatePreservedLocally(root, journal)
+      ? cleanupGitHubSessionRepository(journal.temporary_repository, { cwd: root })
+      : null;
     const result = {
       ok: restored.ok,
       abandoned: true,
       candidateRef: journal.candidate_sha ? `refs/posse/pairing-promotions/${suffix}` : null,
+      // The session repository is a throwaway copy holding the host deploy
+      // key. Delete it once the candidate is held by the local ref above; if
+      // it is not, the repository may be the only copy of the work, so keep
+      // it and name it (the journal was its last pointer).
+      cleanup,
+      keptRepository: cleanup?.ok ? null : journal.temporary_repository || null,
       restored,
     };
     if (!silent && json) console.log(JSON.stringify(result));
-    else if (!silent) console.log(`\n  Session integration abandoned${result.candidateRef ? `; candidate preserved at ${result.candidateRef}` : ""}.\n`);
+    else if (!silent) {
+      console.log(`\n  Session integration abandoned${result.candidateRef ? `; candidate preserved at ${result.candidateRef}` : ""}.`);
+      if (cleanup?.ok) console.log(`  Temporary repository ${cleanup.repository} was deleted.`);
+      else if (cleanup) reportRepositoryCleanupFailure(C, cleanup);
+      else if (result.keptRepository) {
+        console.log(`  Temporary repository ${result.keptRepository} was kept; it still holds the session's work.`);
+        console.log(`  Delete the temporary repository manually: gh repo delete ${result.keptRepository} --yes`);
+      }
+      console.log("");
+    }
     return result;
   }
   let promoted = null;

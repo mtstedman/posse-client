@@ -281,9 +281,23 @@ export function applyFixScopeHandoffGuard(packet) {
     ...(Array.isArray(packet.files_to_create) ? packet.files_to_create : []),
     ...(Array.isArray(packet.files_to_delete) ? packet.files_to_delete : []),
   ].map(_normalizeFixScopePath).filter(Boolean));
+  // Files the packet itself carries as read-only references are evidence the
+  // instructions may cite next to an edit verb ("update a.js to match b.js").
+  // A mention never turns one into write scope; widening to it needs an
+  // explicit files_to_modify entry or a scope request.
+  const references = new Set([
+    packet.related_files,
+    packet.dev_brief?.key_files,
+    packet.dev_brief?.related_files,
+    rawPayload.related_files,
+    rawPayload.dev_brief?.key_files,
+    rawPayload.dev_brief?.related_files,
+  ].flatMap((list) => (Array.isArray(list) ? list : []))
+    .map((entry) => _normalizeFixScopePath(typeof entry === "string" ? entry : entry?.path))
+    .filter(Boolean));
   const inferred = [];
   for (const candidate of _extractFixInstructionEditTargets(instructionText)) {
-    if (existing.has(candidate)) continue;
+    if (existing.has(candidate) || references.has(candidate)) continue;
     const fullPath = resolvePathWithin(packet.cwd, candidate, { allowEqual: false });
     if (!fullPath) continue;
     try {

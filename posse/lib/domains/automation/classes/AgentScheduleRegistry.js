@@ -46,9 +46,13 @@ export class AgentScheduleRegistry {
   setEnabled(id, enabled) {
     const schedule = this.store.get(KIND, id); demand(schedule, "Schedule not found");
     schedule.enabled = enabled === true;
-    schedule.state = schedule.enabled ? "active" : "paused";
+    // Enablement controls future firings; keep the durable in-flight marker
+    // so a replacement owner can stop on an unknown previous outcome.
+    if (schedule.state !== "running") schedule.state = schedule.enabled ? "active" : "paused";
     delete schedule.error_code;
-    if (schedule.enabled && schedule.next_at == null) {
+    // A stale past occurrence (paused or parked for a while) is not owed:
+    // resume at the next future one instead of firing the backlog.
+    if (schedule.enabled && (schedule.next_at == null || schedule.next_at <= this.now())) {
       const next = nextOccurrence(schedule.trigger, this.now() - 1);
       demand(next, "Schedule has no future occurrence", "invalid_trigger");
       schedule.next_at = next.at; schedule.next_local_key = next.localKey;
@@ -82,7 +86,10 @@ export class AgentScheduleRegistry {
       const schedule = this.store.get(KIND, value.id);
       if (!schedule.enabled || schedule.next_at > this.now()) continue;
       const fireAt = schedule.next_at;
-      const next = nextOccurrence(schedule.trigger, fireAt, { lastLocalKey: schedule.next_local_key || null });
+      // Fire once for a due schedule and continue from now. Stepping from the
+      // stale occurrence would launch every one missed while the owner was
+      // down or the host asleep, back to back, each a full agent run.
+      const next = nextOccurrence(schedule.trigger, Math.max(fireAt, this.now()), { lastLocalKey: schedule.next_local_key || null });
       schedule.next_at = next?.at ?? null; schedule.next_local_key = next?.localKey ?? null;
       if (!next && schedule.trigger.kind === "once") schedule.enabled = false;
       this.store.put(KIND, schedule.id, schedule);

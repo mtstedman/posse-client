@@ -805,7 +805,9 @@ export class FinalReviewRuntime {
     // A reviewer can mistake a defect introduced by a repair for a contract
     // question. Clarify once per revision before ending both sessions. Do not
     // guess from prose or silently convert missing evidence into a code defect.
-    if (mapped.reviewer_blocked && session.blockedReportRevision !== session.revision) {
+    // An explicit blocked verdict with a stated blocker goes straight to the
+    // operator; only the softer needs_review is questioned once.
+    if (mapped.reviewer_blocked && mapped.reviewer_verdict !== "blocked" && session.blockedReportRevision !== session.revision) {
       session.blockedReportRevision = session.revision;
       return { status: "invalid_report", error: "Before closing the repair flow: a concrete regression or incorrect behavior is a fail with actionable findings, including defects introduced by the latest repair. Do not ask whether a known regression is acceptable. If an external capability, authorization, or genuinely unspecified contract decision prevents judgment, report needs_review again and name that missing prerequisite or decision. No additional source reads are needed to classify the evidence already reported." };
     }

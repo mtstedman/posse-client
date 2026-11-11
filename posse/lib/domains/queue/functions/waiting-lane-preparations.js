@@ -144,6 +144,16 @@ function updatePreparationCas(db, row, changes) {
   return result.changes === 1 ? selectPreparation(db, row.work_item_id) : null;
 }
 
+// A Git-only preparation (Atlas snapshot and catch-up off) rests in
+// waiting_atlas with no Atlas child. Nothing will settle it, so it is done,
+// not running: a newer desired generation makes it stale like a ready lane,
+// which is the only state the schedulers pick up again.
+function isSettledGitOnlyPreparation(row) {
+  return row?.state === "waiting_atlas"
+    && row.atlas_job_id == null
+    && /^[0-9a-f]{40,64}$/u.test(String(row.applied_git_oid || ""));
+}
+
 function generationChanges(generation, prefix = "desired") {
   return {
     [`${prefix}_git_oid`]: generation.git_oid,
@@ -469,7 +479,10 @@ export function ensureWaitingLanePreparation({
     let outcome = promoted ? "promoted" : "coalesced_queued";
     if (generationOrder > 0) {
       Object.assign(changes, generationChanges(normalizedGeneration));
-      if (existing.state === "preparing_git" || existing.state === "waiting_atlas") {
+      if (isSettledGitOnlyPreparation(existing)) {
+        changes.state = "stale";
+        outcome = "promoted";
+      } else if (existing.state === "preparing_git" || existing.state === "waiting_atlas") {
         changes.successor_needed = 1;
         outcome = "running_successor_marked";
       } else if (existing.state === "ready") {
@@ -670,7 +683,10 @@ export function advanceWaitingLaneDesiredGeneration({ generation } = {}) {
       }
       const changes = generationChanges(normalized);
       let outcome = "coalesced_queued";
-      if (row.state === "preparing_git" || row.state === "waiting_atlas") {
+      if (isSettledGitOnlyPreparation(row)) {
+        changes.state = "stale";
+        outcome = "promoted";
+      } else if (row.state === "preparing_git" || row.state === "waiting_atlas") {
         changes.successor_needed = 1;
         outcome = "running_successor_marked";
       } else if (row.state === "activating" && row.demand_reason === "planner") {

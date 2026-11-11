@@ -56,6 +56,7 @@ import { processVerdict } from "./process-verdict.js";
 import { normalizeAssessorConfidence } from "./verdict-shared.js";
 import { activeSiblingWriteLocks, siblingLockSummary } from "../../../queue/functions/sibling-locks.js";
 import { siblingJobScopeOwners, siblingOwnedWorktreePaths } from "../../../queue/functions/file-locks.js";
+import { projectRelativeSiblingOwnership } from "./pre-dev-typecheck.js";
 import { getAtlasWarmJobCompletion, waitForAtlasWarmJobCompletion } from "../../../atlas/classes/v2/PipelineHooks.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../../catalog/event.js";
 import { WORK_ITEM_QUESTION_CHOICE_IDS } from "../../../../catalog/native-tools.js";
@@ -2311,7 +2312,7 @@ export async function runPostExecutionAssessment(worker, {
               onMsg: (message) => worker.emit(job.id, `${C.dim}[audit-test] ${message}${C.reset}`),
             })
           : null,
-        siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
+        siblingOwnedPaths: wtPath ? projectRelativeSiblingOwnership(wtPath, (paths) => siblingOwnedWorktreePaths(job.id, paths)) : null,
         repairDependencies: wtPath
           ? (receipt, executionCwd = wtPath) => repairTestDependencies(worker, job, executionCwd, {
               signal: worker._abortControllers?.get(job.id)?.signal || null,

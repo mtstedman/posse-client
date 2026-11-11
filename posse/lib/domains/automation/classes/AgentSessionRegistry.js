@@ -159,6 +159,10 @@ export class AgentSessionRegistry {
     this.assertOwnership(session, execution);
     const capability = session.capabilities.find(item => item.name === tool);
     demand(capability, `Tool ${tool} is not in this agent's pinned allowlist`, "forbidden");
+    const entry = this.store.get("entries", capability.entry_id);
+    // Re-testing and re-granting a tool must not replace the contract of an
+    // existing conversation, including the effect used by its write gate.
+    demand(entry?.digest === capability.digest, "Pinned executable changed or is unavailable", "capability_unavailable");
     if (capability.effect === "write") {
       const mode = session.definition.autonomy.write_tools;
       demand(mode !== "deny", `${tool} is a write tool and this agent denies write tools`, "forbidden");

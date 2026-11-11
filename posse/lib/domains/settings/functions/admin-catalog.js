@@ -1,4 +1,4 @@
-import { APPROVAL_POLICY_SETTINGS } from "../../../catalog/approval-policies.js";
+import { APPROVAL_POLICY_GROUP_VALUE, APPROVAL_POLICY_SETTINGS, FLOW_GROUP_SETTINGS } from "../../../catalog/approval-policies.js";
 import { ADMIN_SETTING_LABEL_OVERRIDES, ADMIN_SETTING_DESCRIPTION_OVERRIDES, ADMIN_UNSET_VALUE_LABELS, ADMIN_SETTING_UNIT_OVERRIDES, ADMIN_LABEL_WORDS, ADMIN_ROLE_PURPOSES, ADMIN_AGENT_SETTING_SECTIONS, ADMIN_PROVIDER_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS, ADMIN_IMAGE_SETTING_SECTIONS, TURN_BASE_KEY_MAP, TURN_BASE_KEY_REVERSE_MAP } from "../../../catalog/admin-settings.js";
 export { PROVIDER_SETTING_KEYS, ARTIFACT_IMAGE_PROVIDER_SETTING_KEYS, ADMIN_LOCAL_MODEL_INSTALL_ROW_KEY, SKILL_SETTING_PREFIX, PROJECT_DB_TYPE_OPTIONS, PROJECT_DB_PERMISSION_OPTIONS, PROJECT_DB_SETTING_DEFS, PROJECT_DB_SETTING_KEYS, ADMIN_AGENT_SETTING_SECTIONS, ADMIN_PROVIDER_SETTING_SECTIONS, ADMIN_PROVIDER_CATALOG_SETTING_KEYS, ADMIN_IMAGE_SETTING_SECTIONS, ADMIN_CREDENTIAL_SETTING_DEFS, TURN_BASE_KEY_MAP, TURN_BASE_KEY_REVERSE_MAP, SETTINGS_PANES, ADMIN_DEFAULT_SETTINGS_PANE } from "../../../catalog/admin-settings.js";
 import { PLANNER_DISPATCH_SETTING_KEYS, PLANNER_DISPATCH_MODES } from "../../../catalog/planner-dispatch.js";
@@ -324,10 +324,16 @@ const group = (id, pane, label, keys, hint = null) => Object.freeze({
   keys: Object.freeze([...keys]),
 });
 
+// Gate policies split by whether the gate follows a flow group.
+const GROUPED_GATE_POLICY_KEYS = APPROVAL_POLICY_SETTINGS.filter((entry) => entry.default === APPROVAL_POLICY_GROUP_VALUE).map(({ key }) => key);
+const UNGROUPED_GATE_POLICY_KEYS = APPROVAL_POLICY_SETTINGS.filter((entry) => entry.default !== APPROVAL_POLICY_GROUP_VALUE).map(({ key }) => key);
+
 export const SETTINGS_GROUPS = Object.freeze([
-  group("gate-policies", "approvals", "Gate policies", ["plan_approval_mode", ...APPROVAL_POLICY_SETTINGS.map(({ key }) => key).filter((key) => key !== "approval_policy_file_scope_approval")], "Ask, choose an action automatically, or fail closed when unattended. Installer and push automation require their own saved policy."),
-  group("scope-approvals", "approvals", "Scope approvals", ["approval_policy_file_scope_approval", "scope_auto_approval", "fix_scope_handoff_guard", "file_request_low_risk_extensions", "posse_max_file_request_depth"], "Jobs that must write tests can write in test directories. For extra files, routine approval is on by default; Reject and Fail closed override it."),
-  group("approval-controls", "approvals", "Other approval controls", ["auto_merge_completed", "headless_human_timeout_sec"]),
+  group("flow-decisions", "approvals", "When to stop and ask", ["plan_approval_mode", ...FLOW_GROUP_SETTINGS.map(({ key }) => key)], "One choice per kind of interruption: Approve keeps the run going, Reject stops the gated work, Ask waits for you."),
+  group("scope-approvals", "approvals", "Scope details", ["scope_auto_approval", "fix_scope_handoff_guard", "file_request_low_risk_extensions", "posse_max_file_request_depth"], "Jobs that must write tests can write in test directories. Routine extra files are approved without a gate unless Scope extensions is set to Reject."),
+  group("merge-publish", "approvals", "Merging and publishing", ["auto_merge_completed", ...UNGROUPED_GATE_POLICY_KEYS], "These always ask unless you save a policy here. Push and merge policies are never implied by an unattended flag."),
+  group("unattended", "approvals", "Unattended runs", ["headless_human_timeout_sec"]),
+  group("gate-overrides", "approvals", "Per-gate overrides", GROUPED_GATE_POLICY_KEYS, "Each gate follows its group above. Change a row only to treat one gate differently; Fail closed stops unattended work at that gate."),
   // ── General ──
   group("logging", "general", "Logging", ["advanced_logging"]),
   group("workflow", "general", "Workflow", [

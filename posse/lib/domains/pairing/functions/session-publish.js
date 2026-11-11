@@ -411,7 +411,9 @@ export async function moveLocalTarget(projectDir, {
   }
 }
 
-const CONFLICT_MARKER_ARGS = Object.freeze(["-e", "^<<<<<<<", "-e", "^=======$", "-e", "^>>>>>>>"]);
+// The "=======" separator alone is not evidence (it is also a setext/RST
+// heading underline); a real conflict carries the opening and closing markers.
+const CONFLICT_MARKER_ARGS = Object.freeze(["-e", "^<<<<<<<", "-e", "^>>>>>>>"]);
 
 function processAlive(pid) {
   try {

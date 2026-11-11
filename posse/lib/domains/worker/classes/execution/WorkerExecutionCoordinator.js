@@ -16,7 +16,7 @@ import { runPromoteJob as runPromoteJobFromModule } from "../../functions/execut
 import { runAtlasWarmJob as runAtlasWarmJobFromModule } from "../../functions/execution/atlas-warm-job.js";
 import { runWaitingLanePreparationJob as runWaitingLanePreparationJobFromModule } from "../../functions/execution/waiting-lane-prepare-job.js";
 import { runLegacyDelegateJob as runLegacyDelegateJobFromModule } from "../../functions/execution/legacy-delegate-job.js";
-import { runPreDevTypecheck } from "../../functions/helpers/pre-dev-typecheck.js";
+import { projectRelativeSiblingOwnership, runPreDevTypecheck } from "../../functions/helpers/pre-dev-typecheck.js";
 import { siblingOwnedWorktreePaths } from "../../../queue/functions/file-locks.js";
 import { setUpWorktreeForJob as setUpWorktreeForJobFromModule, clearActiveWorktreeSentinel as clearActiveWorktreeSentinelFromModule } from "../../functions/helpers/worktree-lifecycle.js";
 import { gateDbTaskBeforeExecution } from "../../functions/helpers/db-task-merge-hold.js";
@@ -226,7 +226,7 @@ export class WorkerExecutionCoordinator {
               onMsg: (message) => worker.emit(job.id, `${C.dim}[typecheck] ${message}${C.reset}`),
             })
           : null,
-        siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
+        siblingOwnedPaths: wtPath ? projectRelativeSiblingOwnership(wtPath, (paths) => siblingOwnedWorktreePaths(job.id, paths)) : null,
       });
 
       // Freeze and execute the explicit test plan before DEV sees the task.
@@ -246,7 +246,7 @@ export class WorkerExecutionCoordinator {
               onMsg: (message) => worker.emit(job.id, `${C.dim}[test-intake] ${message}${C.reset}`),
             })
           : null,
-        siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
+        siblingOwnedPaths: wtPath ? projectRelativeSiblingOwnership(wtPath, (paths) => siblingOwnedWorktreePaths(job.id, paths)) : null,
         repairDependencies: wtPath
           ? (receipt, baselineCwd = wtPath) => repairTestDependencies(worker, job, baselineCwd, {
               signal: executeAbortController?.signal || null,

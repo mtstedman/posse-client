@@ -1,7 +1,9 @@
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { threadId } from "node:worker_threads";
 import { managedInstallStateRoot } from "../../platform/functions/managed-install-state.js";
+import { threadLifetimeRegistry } from "../classes/ThreadLifetimeRegistry.js";
 
 const LOCK_POLL_MS = 200;
 const WINDOWS_TRANSIENT_RETRY_MS = 2000;
@@ -23,6 +25,25 @@ function processIsAlive(pid) {
   } catch (err) {
     return err?.code === "EPERM";
   }
+}
+
+function lockOwner(token) {
+  return {
+    pid: process.pid,
+    thread_id: threadId,
+    thread: threadLifetimeRegistry.current(),
+    token,
+    acquired_at: new Date().toISOString(),
+  };
+}
+
+// ACTIVE_LOCK_TOKENS is per thread while the pid is shared, so a lock taken on
+// another thread of this process is not in this thread's set. It is abandoned
+// only when its owning thread is known to have exited; an owner this thread
+// cannot prove dead keeps the lock until the process ends or the lock ages out.
+function heldByAnotherLiveThread(value) {
+  if (!Number.isInteger(value?.thread_id) || value.thread_id === threadId) return false;
+  return !(value.thread && threadLifetimeRegistry.hasExited(value.thread));
 }
 
 function readLock(lockPath) {
@@ -47,7 +68,8 @@ function lockIsStale(lockPath) {
   const acquiredMs = Date.parse(lock.value?.acquired_at || "");
   const tooOld = Number.isFinite(acquiredMs) && Date.now() - acquiredMs > MAX_LOCK_AGE_MS;
   const abandonedByThisProcess = Number(lock.value?.pid) === process.pid
-    && !ACTIVE_LOCK_TOKENS.has(lock.value?.token);
+    && !ACTIVE_LOCK_TOKENS.has(lock.value?.token)
+    && !heldByAnotherLiveThread(lock.value);
   return tooOld || abandonedByThisProcess || !processIsAlive(Number(lock.value?.pid));
 }
 
@@ -76,7 +98,7 @@ async function reapStaleLock(lockPath) {
     handle = fs.openSync(reaperPath, "wx");
     created = true;
     ACTIVE_LOCK_TOKENS.add(token);
-    fs.writeFileSync(handle, `${JSON.stringify({ pid: process.pid, token, acquired_at: new Date().toISOString() })}\n`, "utf8");
+    fs.writeFileSync(handle, `${JSON.stringify(lockOwner(token))}\n`, "utf8");
     fs.closeSync(handle);
     handle = null;
   } catch (err) {
@@ -143,7 +165,7 @@ export async function withDependencyInstallLock(posseRoot, fn, {
       handle = fs.openSync(lockPath, "wx");
       created = true;
       ACTIVE_LOCK_TOKENS.add(token);
-      fs.writeFileSync(handle, `${JSON.stringify({ pid: process.pid, token, acquired_at: new Date().toISOString() })}\n`, "utf8");
+      fs.writeFileSync(handle, `${JSON.stringify(lockOwner(token))}\n`, "utf8");
       fs.closeSync(handle);
       handle = null;
       break;

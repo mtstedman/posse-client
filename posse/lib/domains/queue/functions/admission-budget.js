@@ -17,7 +17,7 @@ function ownerAlive(pid) {
 function completedCost(row, db) {
   const call = row.agent_call_id ? db.prepare("SELECT * FROM agent_calls WHERE id = ?").get(row.agent_call_id) : null;
   const cost = call?.cost_estimate_usd;
-  return call?.status !== "running" && ["exact", "aggregate_only"].includes(call?.billing_precision)
+  return call?.status !== "running" && ["exact", "recovered_exact", "aggregate_only"].includes(call?.billing_precision)
     && cost != null && Number.isFinite(cost) && cost >= 0 ? cost : null;
 }
 function snapshot(id, db) {

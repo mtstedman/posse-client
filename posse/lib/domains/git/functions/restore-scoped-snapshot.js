@@ -7,7 +7,7 @@ async function assertRecoverableIndex(cwd, files, trees) {
   for (const tree of trees.filter(Boolean)) {
     if (!conflicts.size) return;
     const changed = new Set(String(await gitExecAsync([
-      "diff", "--cached", "--name-only", "--no-ext-diff", "--no-renames", "-z", tree,
+      "diff", "--cached", "--relative", "--name-only", "--no-ext-diff", "--no-renames", "-z", tree,
       "--", ...[...conflicts].map(file => `:(literal)${file}`),
     ], cwd, { trim: false })).split("\0"));
     conflicts = new Set([...conflicts].filter(file => changed.has(file)));
@@ -18,12 +18,15 @@ async function assertRecoverableIndex(cwd, files, trees) {
 // Caller holds the worktree lock and has checked live writer conflicts.
 // Restore only exact, authorized paths whose current bytes still match the
 // snapshot's base (or already match its result). Never apply a whole stash.
+// Scope is relative to cwd, the project directory, which is a subdirectory of
+// the repository when the project is nested; --relative and `:./` keep the
+// paths Git reports and resolves in that same form.
 export async function restoreScopedSnapshotAsync(cwd, snapshot, scope) {
   const literal = file => `:(literal)${file}`;
   const parents = String(await gitExecAsync(["show", "-s", "--format=%P", snapshot], cwd)).trim().split(/\s+/);
   if (!parents[0]) throw new Error("Recovery snapshot has no base commit");
   const tracked = String(await gitExecAsync([
-    "diff", "--name-only", "--no-renames", "-z", parents[0], snapshot,
+    "diff", "--relative", "--name-only", "--no-renames", "-z", parents[0], snapshot,
   ], cwd, { trim: false })).split("\0").filter(file => file && scope.contains(file));
   const untracked = parents[2] ? String(await gitExecAsync([
     "ls-tree", "-rz", "--name-only", parents[2],
@@ -52,7 +55,7 @@ export async function restoreScopedSnapshotAsync(cwd, snapshot, scope) {
       const stat = fs.lstatSync(path.join(cwd, file));
       if (!stat.isFile()) throw new Error(`Recovery snapshot conflicts with existing path: ${file}`);
       const current = String(await gitExecAsync(["hash-object", "--no-filters", "--", file], cwd)).trim();
-      const saved = String(await gitExecAsync(["rev-parse", `${parents[2]}:${file}`], cwd)).trim();
+      const saved = String(await gitExecAsync(["rev-parse", `${parents[2]}:./${file}`], cwd)).trim();
       if (current !== saved) throw new Error(`Recovery snapshot conflicts with newer work: ${file}`);
     } else restoreUntracked.push(file);
   }

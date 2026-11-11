@@ -20,9 +20,9 @@ export class ScipIndexStore {
   #stmt;
   /** @type {import("./Interner.js").Interner} */
   #interner;
-  /** @type {(keepIds: number[], anchorSessions: string[]) => ScipReclaimResult} */
+  /** @type {import("better-sqlite3").Transaction<(keepIds: number[], anchorSessions: string[]) => ScipReclaimResult>} */
   #pruneFullTxn;
-  /** @type {(keepIds: number[], presentSessions: string[]) => ScipReclaimResult} */
+  /** @type {import("better-sqlite3").Transaction<(keepIds: number[], presentSessions: string[]) => ScipReclaimResult>} */
   #pruneIncrementalTxn;
 
   /**
@@ -446,7 +446,9 @@ export class ScipIndexStore {
    * @returns {ScipReclaimResult}
    */
   pruneSupersededScipIndexes(keepIds, { anchorSessions = [] } = {}) {
-    return this.#pruneFullTxn(
+    // Read-then-write: IMMEDIATE so a concurrent writer is waited out
+    // (busy_timeout) instead of failing the lock upgrade with SQLITE_BUSY.
+    return this.#pruneFullTxn.immediate(
       normalizeKeepIds(keepIds, "pruneSupersededScipIndexes"),
       normalizeSessionIds(anchorSessions),
     );
@@ -467,7 +469,7 @@ export class ScipIndexStore {
    * @returns {ScipReclaimResult}
    */
   pruneIncrementalScipIndexes(keepIds, { presentSessions = [] } = {}) {
-    return this.#pruneIncrementalTxn(
+    return this.#pruneIncrementalTxn.immediate(
       normalizeKeepIds(keepIds, "pruneIncrementalScipIndexes"),
       normalizeSessionIds(presentSessions),
     );

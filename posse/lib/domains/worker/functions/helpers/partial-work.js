@@ -88,11 +88,22 @@ export function collectPartialWorkState(job, wtPath) {
   } catch {
     return { hasChanges: false, paths: [], inScopePaths: [], outOfScopePaths: [], siblingPaths: [] };
   }
-  return classifyPartialWorkEntries(job, wtPath, raw);
+  let prefix = "";
+  try { prefix = String(gitExec(["rev-parse", "--show-prefix"], wtPath) || "").trim(); } catch { prefix = ""; }
+  return classifyPartialWorkEntries(job, wtPath, raw, prefix);
 }
 
-function classifyPartialWorkEntries(job, wtPath, raw) {
+// `git status` names paths from the repository root; scope, locks and the
+// later pathspecs are relative to the project dir, which may be nested in it.
+function projectStatusEntries(raw, prefix) {
   const entries = parseStatusPorcelain(raw);
+  if (!prefix) return entries;
+  return entries.filter((entry) => String(entry.file || "").startsWith(prefix))
+    .map((entry) => ({ ...entry, file: entry.file.slice(prefix.length) }));
+}
+
+function classifyPartialWorkEntries(job, wtPath, raw, prefix = "") {
+  const entries = projectStatusEntries(raw, prefix);
   if (entries.length === 0) return { hasChanges: false, paths: [], inScopePaths: [], outOfScopePaths: [], siblingPaths: [] };
 
   const payload = parseJobPayload(job);
@@ -145,7 +156,11 @@ export async function collectPartialWorkStateAsync(job, wtPath, { signal = null 
   } catch {
     return { hasChanges: false, paths: [], inScopePaths: [], outOfScopePaths: [], siblingPaths: [] };
   }
-  return classifyPartialWorkEntries(job, wtPath, raw);
+  let prefix = "";
+  try {
+    prefix = String(await gitExecAsync(["rev-parse", "--show-prefix"], wtPath, { signal, nativeParity: { disabled: true } }) || "").trim();
+  } catch { prefix = ""; }
+  return classifyPartialWorkEntries(job, wtPath, raw, prefix);
 }
 
 function nextTurnOverrideFromDetails(errorDetails = null, fallback = 36) {

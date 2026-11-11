@@ -16,6 +16,7 @@ import { releaseUnusedCompletedWorkItemLocks } from "../functions/unused-planned
 
 import crypto from "crypto";
 import { spawn } from "child_process";
+import { isBudgetPaused } from "../../queue/functions/admission-budget.js";
 import { ancestorJobIdsForJob, queuedCohortJobIdsForJob, queuedDependentJobIdsForJob, getLeaseManager, cancelDeadlockedJobsAtomic, listJobs, listJobsMinimal, listWorkItems, hasJobs, countJobsByStatus, cleanupStaleFileLocks, clearFileLaneWaitsForJob, listJobsByWorkItem, logEvent, updateJobStatus, updateJobPayload, refreshWorkItemStatus, getJob, getHumanGate, claimHeadlessHumanGateTimeout, getDependents, getWorkItem, expireStaleSessionLeases, findPeerClaimConflict, reconcileHumanGates, reconcileWorkItemDispositionGates, resurfaceParkedHumanGates, supersedeHumanGate, describeWorkItemMergeParking, loadWorkItemOrder, setCompleteWorkItemAutoMergePolicy, workItemMergeParking, workItemOperatorParking, getQueueWakeGeneration, getSchedulerLockInfo, jobNeedsAssessmentBarrier, jobNeedsWriteLocks, jobHasLivePendingScopeRequest, jobHasLiveEnvironmentSetup, environmentSetupParking, grantEnvironmentSetupResume, onQueueStateChanged, reconcileFileLaneWaits, recordFileLaneWait, recordPeerClaimDeferral, parseJobPayload, runImmediateTransaction, RUNTIME_STATUS_KEYS, clearRuntimeStatus, clearPeerClaimDeferralsForJob, isBridgeGateResolverAvailable, isMergeVerificationReviewJob, isPostMergeDbGateJob, isPostMergeDbTaskJob, isPostMergeHeldDbJob, isPushOfferJob, isWorkItemDispositionGateJob, readRuntimeStatus, requeueOwnedJobsForForcedExit, writeRuntimeStatus, waitForQueueStateChangeAfter } from "../../queue/functions/index.js";
 import { WORK_ITEM_ORDER_WAIT_REASON } from "../../queue/functions/work-item-order.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
@@ -382,9 +383,12 @@ export class Scheduler {
     for (const workItemId of workItemIds) {
       // Plan, scope, installer and clarification gates park their work too:
       // the headless sweep leaves them open, so the run ends as needs-action.
+      // A paused admission budget parks its work item as well: its queued
+      // jobs are excluded from leasing until an operator resumes the budget.
       const parking = workItemMergeParking(workItemId)
-        || workItemOperatorParking(workItemId, { awaitingOperator: true });
-      if (parking?.reason !== "operator_gate") return null;
+        || workItemOperatorParking(workItemId, { awaitingOperator: true })
+        || (isBudgetPaused(workItemId) ? { work_item_id: workItemId, reason: "budget_paused" } : null);
+      if (parking?.reason !== "operator_gate" && parking?.reason !== "budget_paused") return null;
       holders.push({ work_item_id: workItemId, status: getWorkItem(workItemId)?.status || null, parking });
     }
     if (holders.length === 0) return null;
@@ -690,9 +694,13 @@ export class Scheduler {
   _idleSleepMs() {
     const repairMs = Math.max(1, Number(this.repairPollMs || this.pollMs || DEFAULT_REPAIR_POLL_MS));
     const readyDelayMs = this._nextQueuedReadyDelayMs();
-    const sharedTrunkDelayMs = this._sharedTrunkPoller?.delayUntilDueMs?.();
+    // A pairing drain stops polling the trunk and the session job router, so
+    // their due times never advance; honouring a past-due poll that will not
+    // run would turn the drain wait into a 1 ms spin.
+    const draining = this._pairingDrainRequested === true;
+    const sharedTrunkDelayMs = draining ? null : this._sharedTrunkPoller?.delayUntilDueMs?.();
     const sessionDelayMs = this._sessionMonitor?.delayUntilDueMs?.();
-    const sessionJobDelayMs = this._sessionRoutingUnavailable ? null : this._sessionJobRouter?.delayUntilDueMs?.();
+    const sessionJobDelayMs = this._sessionRoutingUnavailable || draining ? null : this._sessionJobRouter?.delayUntilDueMs?.();
     const delays = [repairMs, readyDelayMs, sharedTrunkDelayMs, sessionDelayMs, sessionJobDelayMs]
       .filter((value) => value != null && Number.isFinite(Number(value)))
       .map((value) => Math.max(0, Number(value)));
@@ -1451,6 +1459,7 @@ export class Scheduler {
     let lastStopRequestCheck = 0;
     const STOP_REQUEST_CHECK_MS = 2_000;
     let pairingDrainRequested = false;
+    this._pairingDrainRequested = false;
     let pairingDrainStartedAt = null;
 
     this._sessionMonitor.start({
@@ -1466,6 +1475,7 @@ export class Scheduler {
         this._sessionRoutingUnavailable = sessionPoll?.unavailable === true;
         if (!pairingDrainRequested && (sessionPoll?.requestsDrain || sessionPoll?.fatal)) {
           pairingDrainRequested = true;
+          this._pairingDrainRequested = true;
           this._log(
             sessionPoll?.requestsDrain
               ? `Session ${sessionPoll.status?.status || "closed"}; draining active workers`
@@ -1586,6 +1596,7 @@ export class Scheduler {
           if (drainRequest && (!drainRequest.owner_id || drainRequest.owner_id === this.ownerId)) {
             if (!pairingDrainRequested) {
               pairingDrainRequested = true;
+              this._pairingDrainRequested = true;
               this._log("Pairing graceful close requested - draining active workers", "yellow");
               logEvent({
                 event_type: EVENT_TYPES.SCHEDULER_STOP_REQUESTED,

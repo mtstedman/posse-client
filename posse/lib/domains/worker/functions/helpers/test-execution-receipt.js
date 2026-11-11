@@ -15,7 +15,7 @@ import { classifyNestedRunnerInfrastructureFailure, classifyPackageManagerTestPl
 export { classifyNestedRunnerInfrastructureFailure } from "../../../verification/functions/test-runner-failure.js";
 import { resolveFrozenTestPlan, frozenTestPlanFromReceipt, prunedTestPlan } from "./frozen-test-plan.js";
 export { resolveFrozenTestPlan } from "./frozen-test-plan.js";
-import { currentCommit, currentHeadRef, repositoryFingerprint, worktreeFingerprint, dirtyPathDigests, dirtyFingerprintFromDigests, environmentFilesFingerprint, isAncestorCommit, porcelain, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
+import { currentCommit, currentHeadRef, repositoryFingerprint, repositoryRoot, worktreeFingerprint, dirtyPathDigests, dirtyFingerprintFromDigests, environmentFilesFingerprint, isAncestorCommit, porcelain, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
 export { dirtyWorktreeFingerprint, environmentFilesFingerprint, porcelainChangedPaths } from "../../../verification/functions/receipt-fingerprint.js";
 import { unitTestCommandResult, effectiveVerificationPolicy, runVerificationChecks, runFrozenTestPlanOnce, didInvokeTestFile, testCoverageStatus, aggregateCheckCoverageStatus } from "./frozen-test-execution.js";
 export { runFrozenTestPlanOnce, testCoverageStatus, aggregateCheckCoverageStatus } from "./frozen-test-execution.js";
@@ -274,17 +274,65 @@ function recordPostChangeReuse(job, attemptId, sourceReceipt) {
   return artifact.id;
 }
 
+// Debt attributed from other jobs' receipts is computed after the post-change
+// receipt is stored, so it is kept as a record beside the receipt (like a
+// reuse record) for the verdict to read back. The newest record for a receipt
+// stands: a later assessment may compare against different known debt.
+const POST_CHANGE_DEBT_KIND = "verification_receipt_debt_attribution";
+
+function storedPostChangeDebt(jobId, postChange) {
+  const sourceId = Number(postChange?.artifact_id);
+  if (postChange?.status !== "failed" || !Number.isSafeInteger(sourceId) || sourceId <= 0) return null;
+  return getArtifacts(jobId, "log")
+    .sort((left, right) => Number(right.id || 0) - Number(left.id || 0))
+    .map((artifact) => {
+      try {
+        return typeof artifact.content_json === "string" ? JSON.parse(artifact.content_json) : artifact.content_json;
+      } catch { return null; }
+    })
+    .find((detail) => detail?.kind === POST_CHANGE_DEBT_KIND && detail.source_artifact_id === sourceId) || null;
+}
+
+function recordPostChangeDebt(job, attemptId, postChange, debt) {
+  const sourceId = Number(postChange?.artifact_id);
+  if (postChange?.status !== "failed" || !Number.isSafeInteger(sourceId) || sourceId <= 0) return;
+  const latest = storedPostChangeDebt(job.id, postChange);
+  const debtOnly = debt?.debt_only === true;
+  const identities = Array.isArray(debt?.debt_failure_identities) ? debt.debt_failure_identities : [];
+  // No record means "not debt"; write only what changes the stored answer.
+  if ((latest?.debt_only === true) === debtOnly
+    && (!debtOnly || JSON.stringify(latest.debt_failure_identities || []) === JSON.stringify(identities))) return;
+  storeArtifact({
+    work_item_id: job.work_item_id,
+    job_id: job.id,
+    attempt_id: Number.isSafeInteger(Number(attemptId)) && Number(attemptId) > 0 ? Number(attemptId) : null,
+    artifact_type: "log",
+    content_json: {
+      kind: POST_CHANGE_DEBT_KIND,
+      schema_version: 1,
+      source_artifact_id: sourceId,
+      commit_hash: postChange.commit_hash || null,
+      debt_only: debtOnly,
+      debt_failure_identities: identities,
+      observed_at: new Date().toISOString(),
+    },
+  });
+}
+
 // Undo a test's own side effects path by path, for a shared worktree where a
 // whole-worktree reset would also erase sibling jobs' files.
 async function restorePathsToHead(cwd, paths = []) {
+  // The paths come from `git status`, which names them from the repository
+  // root; cwd is a subdirectory of it when the project is nested.
+  const root = await repositoryRoot(cwd);
   for (const relPath of paths) {
-    const inHead = await gitExecAsync(["cat-file", "-e", `HEAD:${relPath}`], cwd).then(() => true, () => false);
+    const inHead = await gitExecAsync(["cat-file", "-e", `HEAD:${relPath}`], root).then(() => true, () => false);
     if (inHead) {
-      await gitExecAsync(["restore", "--source=HEAD", "--staged", "--worktree", "--", relPath], cwd);
+      await gitExecAsync(["restore", "--source=HEAD", "--staged", "--worktree", "--", relPath], root);
       continue;
     }
-    await gitExecAsync(["rm", "--cached", "--quiet", "--ignore-unmatch", "--", relPath], cwd).catch(() => {});
-    await fs.promises.rm(path.join(cwd, relPath), { force: true, recursive: true });
+    await gitExecAsync(["rm", "--cached", "--quiet", "--ignore-unmatch", "--", relPath], root).catch(() => {});
+    await fs.promises.rm(path.join(root, relPath), { force: true, recursive: true });
   }
 }
 
@@ -339,7 +387,9 @@ async function restoreAfterTest({
         if (siblingPaths.size > 0 || allowProjectedBaseline) {
           // A whole-worktree reset would erase the sibling files too; undo
           // only what this test changed.
-          await cleanupPaths(cwd, ownChangedPaths);
+          // Without a sibling callback (a detached baseline checkout) every
+          // changed path is this run's own.
+          await cleanupPaths(cwd, ownChangedPaths ?? porcelainChangedPaths(after));
         } else {
           if (typeof cleanupWorktree !== "function") {
             throw new Error("test changed worktree files but no cleanup implementation is available");
@@ -461,7 +511,8 @@ async function attributeChangedTestFailures(fileResults, { base = null, scopePat
   const edited = [];
   for (const result of failing) {
     try {
-      await gitExecAsync(["cat-file", "-e", `${base}:${result.path}`], cwd);
+      // "./": result paths are relative to cwd, not to the repository root.
+      await gitExecAsync(["cat-file", "-e", `${base}:./${result.path}`], cwd);
       edited.push(result.path);
     } catch {
       // Absent at the base: the change created it.
@@ -1145,7 +1196,9 @@ export async function lineageChangedTestPaths({
   let changed;
   try {
     const range = head ? [`${base}..${head}`] : [base];
-    const output = await gitExecAsync(["diff", "--name-status", "-z", ...range, "--"], cwd, { trim: false });
+    // --relative: name the project's files as the declared scope does when
+    // the project is a subdirectory of its repository.
+    const output = await gitExecAsync(["diff", "--name-status", "--relative", "-z", ...range, "--"], cwd, { trim: false });
     changed = nameStatusChanges(output);
   } catch {
     return { ...none, base };
@@ -1330,6 +1383,7 @@ export async function ensurePostChangeTestReceipt({
   });
   if (existing) {
     const debt = await debtIdentitiesFor(existing);
+    recordPostChangeDebt(job, attemptId, existing, debt);
     const reuseRecordId = recordPostChangeReuse(job, attemptId, existing);
     return {
       baseline,
@@ -1357,6 +1411,7 @@ export async function ensurePostChangeTestReceipt({
     ? await withBaselineCheckout({ cwd, commit: assessedCommit, run: runAt })
     : await runAt(cwd, cleanupWorktree);
   const debt = await debtIdentitiesFor(postChange);
+  recordPostChangeDebt(job, attemptId, postChange, debt);
   return {
     baseline,
     post_change: postChange,
@@ -1409,10 +1464,13 @@ export function latestTestReceiptDelta(jobId, { commitHash = null } = {}) {
     ? testRunScopeAttribution(jobId, { baseline, post_change: postChange })
     : null;
   if (scopeAttribution && !scopeAttribution.attributable) delta = "out_of_scope_failure";
+  // The verdict caps read the same debt attribution the assessor was shown.
+  const debt = storedPostChangeDebt(jobId, postChange);
   return {
     delta,
     baseline,
     postChange,
+    ...(debt ? { debt_only: debt.debt_only === true, debt_failure_identities: debt.debt_failure_identities || [] } : {}),
     ...(scopeAttribution ? { scope_attribution: scopeAttribution } : {}),
   };
 }

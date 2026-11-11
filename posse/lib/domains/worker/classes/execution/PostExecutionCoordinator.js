@@ -1433,9 +1433,14 @@ export async function handlePostExecutionForWorker({
             // Empty declared outputs still take the existing PARTIAL path.
             if (wtPath && !committedHash && unwrittenMaterializedPaths(gitErr).length === 0) {
               const candidatePayload = this.parsePayload(getJob(job.id) || job);
+              // Git status names paths from the repository root; scope and
+              // sibling ownership are relative to wtPath, which is a
+              // subdirectory when the project is nested in its repository.
+              const projectPrefix = String(await gitExecAsync(["rev-parse", "--show-prefix"], wtPath)).trim();
               const dirty = parsePorcelainEntries(await gitExecAsync([
                 "status", "--porcelain", "-z", "--no-renames", "--untracked-files=all",
-              ], wtPath, { trim: false })).map(entry => entry.path);
+              ], wtPath, { trim: false })).map(entry => entry.path)
+                .filter(file => file.startsWith(projectPrefix)).map(file => file.slice(projectPrefix.length));
               const siblingPaths = new Set(unfinishedSiblingDirtyLocks(job, dirty).map(lock => lock.path));
               const paths = dirty.filter(file => !siblingPaths.has(file));
               if (paths.length) {

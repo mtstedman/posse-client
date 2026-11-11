@@ -40,6 +40,8 @@ function hasNearbyImageGenerationIntent(text) {
 }
 
 function taskImageText(task = {}) {
+  // Legacy plan arrays can carry a null entry; the compile loop drops it later.
+  if (!task || typeof task !== "object") return "";
   return [
     task.title || "",
     task.task_spec || "",

@@ -126,7 +126,11 @@ export class SourceStatsStore {
     const txn = this.#db.transaction((items) => {
       for (const item of items) this.recordSourceStat(item);
     });
-    txn(rows);
+    // Each row reads (path intern lookup) before it writes. A deferred
+    // transaction would start as a reader and fail its write upgrade at once
+    // with SQLITE_BUSY under another connection's writer (busy_timeout is not
+    // consulted for an upgrade); take the write lock up front instead.
+    txn.immediate(rows);
   }
 
   /**

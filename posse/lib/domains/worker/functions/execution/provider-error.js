@@ -2,6 +2,15 @@
 // Prefer structured adapter errors; message patterns cover older CLI/API errors.
 
 import { PROVIDER_WINDOW_LIMIT_REACHED_RE } from "../../../providers/functions/shared/quota-reset.js";
+import { nativeProviderNoticeText } from "../../../providers/functions/shared/api-resilience.js";
+
+// The provider-side text of a native CLI failure that is itself a quota or
+// rate-limit notice. The other patterns stay message-only.
+const NATIVE_NOTICE_QUOTA_RE = /rate.?limit|too many requests|out of.*usage|usage.*reset|usage limit|usage cap|usage exhausted|over usage|quota exceeded|credit balance is too low|session limit|(?:hit|reached) your.*limit/i;
+
+// Classes the native dispatch host assigns to provider-side infrastructure
+// failures. Their messages are fixed strings the patterns below predate.
+const NATIVE_PROVIDER_FAILURE_CLASSES = new Set(["rate_limit", "transient_provider"]);
 
 const PROVIDER_ERROR_PATTERNS = [
   /overloaded_error/i,
@@ -29,5 +38,8 @@ export function isProviderInfrastructureError(err) {
   const code = String(err?.code || "");
   if (code.startsWith("COPILOT_") && code !== "COPILOT_ABORTED") return true;
   if (code === "MCP_ATTACH_PROOF_MISSING" || code === "MCP_ATTACH_PROJECTION_MISMATCH") return true;
+  if (code === "provider_circuit_open" || NATIVE_PROVIDER_FAILURE_CLASSES.has(String(err?.classification || ""))) return true;
+  const notice = nativeProviderNoticeText(err);
+  if (notice && (NATIVE_NOTICE_QUOTA_RE.test(notice) || PROVIDER_WINDOW_LIMIT_REACHED_RE.test(notice))) return true;
   return PROVIDER_ERROR_PATTERNS.some((pattern) => pattern.test(String(err?.message || "")));
 }

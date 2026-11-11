@@ -205,12 +205,18 @@ export class RegisteredAgentBridge {
       }
     }
     for (const session of this.store.list("agent_sessions")) {
+      // Operator conversations (every scheduled agent run opens one) share the
+      // chat content retention. Only an idle one goes: a running turn or a
+      // pending confirmation is never idle.
+      if ((!session.ownership || session.ownership.kind === "operator") && session.status === "idle"
+        && Date.parse(session.updated_at) < now - CHAT_CONTENT_MS) { this.store.remove("agent_sessions", session.id); continue; }
       if (session.ownership?.kind !== "registered_chat" || session.status !== "idle"
         || (Date.parse(session.updated_at) >= now - CHAT_CONTENT_MS && !agentSessionIdleExpired(session, now))) continue;
       this.expireSession(session, now);
     }
     for (const access of this.store.list("registered_access_audit"))
       if (Date.parse(access.last_at) < now - CHAT_CONTENT_MS) this.store.remove("registered_access_audit", access.id);
+    this.store.pruneFinishedRuns(new Date(now - CHAT_CONTENT_MS).toISOString());
   }
 
   // A conversation past its content retention or its definition's idle limit

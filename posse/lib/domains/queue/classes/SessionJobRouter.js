@@ -26,6 +26,7 @@ import {
   offerSessionJob,
   packetMatchesOffer,
   resultOid,
+  SESSION_REF_FETCH_LIMIT,
   resultOutcome,
 } from "../functions/session-job-router.js";
 
@@ -74,8 +75,42 @@ export class SessionJobRouter {
     return tracked;
   }
 
+  // Delegations this instance originated in a session that is no longer the
+  // live one can never be recalled, completed or expired through the session
+  // refs: every pass below runs only for the live, routing session. Their
+  // origin jobs would stay blocked with no gate. An unclaimed offer returns
+  // to the queue; a claim fails like one whose executor disappeared.
+  _settleEndedSessionDelegations(state) {
+    const self = this._instanceId(this.projectDir);
+    const liveSessionId = state?.remote_session_id || null;
+    const rows = getDb().prepare(`
+      SELECT * FROM work_item_delegations
+      WHERE originator_instance_id = ? AND state IN ('offered','claimed')
+        AND (? IS NULL OR session_id != ?)
+    `).all(self, liveSessionId, liveSessionId);
+    for (const row of rows) {
+      if (row.state === "offered") {
+        getDb().prepare(`UPDATE work_item_delegations SET state='recalled', updated_at=? WHERE offer_key=? AND state='offered'`)
+          .run(now(), row.offer_key);
+        if (updateJobStatus(row.origin_job_id, "queued", { expectedStatuses: ["blocked"] })) {
+          updateWorkItemStatus(row.origin_work_item_id, "running");
+        }
+      } else {
+        getDb().prepare(`
+          UPDATE work_item_delegations
+          SET state='failed', completed_at=?, updated_at=?
+          WHERE offer_key=? AND state='claimed'
+        `).run(now(), now(), row.offer_key);
+        updateJobStatus(row.origin_job_id, "failed", { expectedStatuses: ["blocked"] });
+        refreshWorkItemStatus(row.origin_work_item_id);
+      }
+    }
+    return rows.length;
+  }
+
   async _pollOnce({ force }) {
     const state = this._getState();
+    this._settleEndedSessionDelegations(state);
     if (!state || state.phase !== "active" || state.compute_policy === SESSION_COMPUTE_POLICIES.EACH_MEMBER) {
       return { attempted: false, skipped: "routing_disabled" };
     }
@@ -94,6 +129,7 @@ export class SessionJobRouter {
     const packetByKey = new Map(packets.map((row) => [row.key, row]));
     let imported = 0;
     let reconciled = 0;
+    let importError = null;
     for (const ref of jobRefs) {
       const offer = ref.payload;
       if (offer?.protocol !== SESSION_JOB_PROTOCOL || offer.session_id !== state.remote_session_id) continue;
@@ -128,25 +164,43 @@ export class SessionJobRouter {
         }
         continue;
       }
-      if (offer.state !== "offered" || !offer.eligible_instance_ids?.includes(self)) continue;
+      // A claim this instance already won but never imported (the import threw
+      // or the process died between the CAS and the local write) is still
+      // importable: nobody else can take it and the originator only expires
+      // claims of absent executors.
+      const unimportedClaim = offer.state === "claimed" && offer.executor_instance_id === self
+        && !getDb().prepare("SELECT 1 FROM work_item_delegations WHERE offer_key = ?").get(ref.key);
+      if ((offer.state !== "offered" && !unimportedClaim) || !offer.eligible_instance_ids?.includes(self)) continue;
       const packetRef = packetByKey.get(ref.key);
       if (!packetRef || packetRef.oid !== offer.packet_oid || !packetMatchesOffer(packetRef.payload, offer, self)) continue;
-      const claimed = { ...offer, state: "claimed", executor_instance_id: self, claimed_at: now() };
-      const claim = await casRef({
-        projectDir: this.projectDir, remote: state.remote_name, namespace: "jobs",
-        key: ref.key, expectedOldOid: ref.oid, payload: claimed, casPush: this._casPush,
-      });
-      if (resultOutcome(claim) !== "applied") continue;
-      importPacket(packetRef.payload, self, ref.key, resultOid(claim));
-      imported += 1;
+      let claimOid = ref.oid;
+      if (!unimportedClaim) {
+        const claimed = { ...offer, state: "claimed", executor_instance_id: self, claimed_at: now() };
+        const claim = await casRef({
+          projectDir: this.projectDir, remote: state.remote_name, namespace: "jobs",
+          key: ref.key, expectedOldOid: ref.oid, payload: claimed, casPush: this._casPush,
+        });
+        if (resultOutcome(claim) !== "applied") continue;
+        claimOid = resultOid(claim);
+      }
+      try {
+        importPacket(packetRef.payload, self, ref.key, claimOid);
+        imported += 1;
+      } catch (error) {
+        // The claim stays ours and is retried next poll; the passes below
+        // still run, then the first failure surfaces to the caller.
+        importError ||= error;
+      }
     }
-    await this._publishCompletions(state, self);
+    await this._publishCompletions(state, self, jobRefs);
     await this._recallExpiredOffers(state, jobRefs);
     const expiredClaims = await this._expireOrphanedClaims(state, jobRefs, self, snapshot);
+    if (importError) throw importError;
     return { attempted: true, imported, reconciled, expiredClaims };
   }
 
-  async _publishCompletions(state, self) {
+  async _publishCompletions(state, self, refs = []) {
+    const refsByKey = new Map(refs.map((row) => [row.key, row]));
     const terminalPlaceholders = TERMINAL_JOB_STATUSES.map(() => "?").join(",");
     const rows = getDb().prepare(`
       SELECT d.*, j.status AS job_status
@@ -166,14 +220,29 @@ export class SessionJobRouter {
         executor_instance_id: self,
         completed_at: now(),
       };
-      const result = await casRef({
-        projectDir: this.projectDir, remote: state.remote_name, namespace: "jobs",
-        key: row.offer_key, expectedOldOid: row.claim_oid, payload, casPush: this._casPush,
-      });
+      let result = null;
+      try {
+        result = await casRef({
+          projectDir: this.projectDir, remote: state.remote_name, namespace: "jobs",
+          key: row.offer_key, expectedOldOid: row.claim_oid, payload, casPush: this._casPush,
+        });
+      } catch { /* decided below from the fetched refs; one row never aborts the later passes */ }
       if (resultOutcome(result) === "applied") {
         getDb().prepare(`UPDATE work_item_delegations SET state=?, claim_oid=?, completed_at=?, updated_at=? WHERE offer_key=?`)
           .run(payload.state === "succeeded" ? "running" : "failed", resultOid(result), now(), now(), row.offer_key);
+        continue;
       }
+      // Only the originator replaces a claimed ref (it expires the claim of an
+      // absent executor), so a lost CAS, or a fetched view in which the ref is
+      // gone or is not this claim, means the completion can never be
+      // published. Settle the row instead of retrying the CAS every poll.
+      const remote = refsByKey.get(row.offer_key)?.payload;
+      const claimHeld = remote?.state === "claimed" && remote.executor_instance_id === self;
+      if (resultOutcome(result) !== "lost_race" && (claimHeld || (!remote && refs.length >= SESSION_REF_FETCH_LIMIT))) continue;
+      // A completion this executor already published (local write lost) keeps its outcome.
+      const published = remote?.executor_instance_id === self && remote.state === "succeeded";
+      getDb().prepare(`UPDATE work_item_delegations SET state=?, completed_at=?, updated_at=? WHERE offer_key=? AND state='imported'`)
+        .run(published ? "running" : "failed", now(), now(), row.offer_key);
     }
   }
 

@@ -104,8 +104,12 @@ function listRows(agentCallId, db) {
     FROM ${TABLE}
     WHERE agent_call_id = ?
     ORDER BY position ASC, claim_id ASC
-  `).all(agentCallId).map((row) => ({
+  `).all(agentCallId).map((row, rank) => ({
     id: row.claim_id,
+    // One-based saved order without the gaps `position` keeps after a remove.
+    // Terminal coverage numbers a saved finding as (claims in that
+    // agent_handoff call) + index; see mergeResearchReportDraftClaims.
+    index: rank + 1,
     position: Number(row.position),
     ...JSON.parse(row.claim_json),
   }));
@@ -194,12 +198,15 @@ export function executeResearchReportClaims(args = {}, {
 export function researchReportDraftClaims(agentCallId, db = getDb()) {
   const id = positiveInt(agentCallId);
   if (!id) return [];
-  return listRows(id, ensureSchema(db)).map(({ id: _id, position: _position, ...claim }) => claim);
+  return listRows(id, ensureSchema(db)).map(({ id: _id, index: _index, position: _position, ...claim }) => claim);
 }
 
 function mergeClaims(explicitClaims, draftClaims) {
   const merged = [];
   const indexes = new Map();
+  // submitted[n] is the one-based merged index of the n-th entry of
+  // [explicit claims..., saved findings...], or 0 for an entry with no text.
+  const submitted = [];
   for (const claim of [...explicitClaims, ...draftClaims]) {
     const text = typeof claim === "string"
       ? claim
@@ -207,16 +214,42 @@ function mergeClaims(explicitClaims, draftClaims) {
         ? claim[0]
         : claim?.claim;
     const key = String(text || "").trim().replace(/\s+/g, " ").toLowerCase();
-    if (!key) continue;
+    if (!key) {
+      submitted.push(0);
+      continue;
+    }
     if (indexes.has(key)) {
       // Explicit final claims are processed first and retain authority over an
       // exact duplicate saved earlier in the call.
+      submitted.push(indexes.get(key) + 1);
       continue;
     }
     indexes.set(key, merged.length);
     merged.push(claim);
+    submitted.push(merged.length);
   }
-  return merged;
+  return { merged, submitted };
+}
+
+// The model numbers coverage claim_indexes as it can see them: the claims of
+// this call first (1..N, in order), then its saved findings in saved order
+// (N + agent_claim list `index`). Dropping duplicates shifts the merged order
+// away from that numbering, so translate each index to the merged claim it
+// names. Malformed coverage is left for the coverage validator; an index that
+// names no claim maps past the merged list so it is still reported as unknown.
+function remapCoverageClaimIndexes(coverage, { merged, submitted }) {
+  if (!Array.isArray(coverage)) return coverage;
+  return coverage.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    const claimIndexes = entry.claim_indexes;
+    if (!Array.isArray(claimIndexes)
+      || !claimIndexes.every((value) => Number.isInteger(value) && value >= 1)
+      || new Set(claimIndexes).size !== claimIndexes.length) {
+      return entry;
+    }
+    const mapped = claimIndexes.map((value) => submitted[value - 1] || merged.length + value);
+    return { ...entry, claim_indexes: [...new Set(mapped)] };
+  });
 }
 
 export function mergeResearchReportDraftClaims(args, agentCallId, db = getDb()) {
@@ -224,12 +257,18 @@ export function mergeResearchReportDraftClaims(args, agentCallId, db = getDb()) 
   if (drafts.length === 0 || !args || typeof args !== "object" || Array.isArray(args)) return args;
   const copy = JSON.parse(JSON.stringify(args));
   if (copy.profile !== AGENT_HANDOFF_PROFILES.RESEARCHER_REPORT) return copy;
+  let result;
   if (Array.isArray(copy.handoffs)) {
     const report = copy.handoffs[0]?.report;
     if (!report || typeof report !== "object") return copy;
-    report.claims = mergeClaims(Array.isArray(report.claims) ? report.claims : [], drafts);
-    return copy;
+    result = mergeClaims(Array.isArray(report.claims) ? report.claims : [], drafts);
+    report.claims = result.merged;
+  } else {
+    result = mergeClaims(Array.isArray(copy.claims) ? copy.claims : [], drafts);
+    copy.claims = result.merged;
   }
-  copy.claims = mergeClaims(Array.isArray(copy.claims) ? copy.claims : [], drafts);
+  if (Object.prototype.hasOwnProperty.call(copy, "coverage")) {
+    copy.coverage = remapCoverageClaimIndexes(copy.coverage, result);
+  }
   return copy;
 }

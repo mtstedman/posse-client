@@ -715,9 +715,9 @@ function mcpToolResultMessage(message, result) {
   };
 }
 
-function staleGatewayBindingToolResult(message) {
+function staleGatewayBindingToolResult(message, subject = "ATLAS tool") {
   return mcpToolResultMessage(message, mcpToolErrorPayload(
-    "MCP session binding changed while the ATLAS tool was running; the obsolete result was discarded",
+    `MCP session binding changed while the ${subject} was running; the obsolete result was discarded`,
   ));
 }
 
@@ -2760,16 +2760,30 @@ export class PersistentMcpOwner {
         physicalCeilingGrace: researchPhysicalCeilingGrace,
       };
       let response;
+      // A call that outlives its job (released or rebound while the gateway
+      // ran it) must not be accounted against the session's next binding.
+      const gatewayBinding = message.method === "tools/call" ? gatewayBindingSnapshot(session) : null;
       try {
         const outbound = injectSessionContext(message, session, { delegatedEvidence });
         response = MCP_CONTROL_METHODS.includes(message.method)
           ? await this._gatewaySession.requestControl(outbound, { signal: requestAbort.signal })
           : await this._gatewaySession.request(outbound, { signal: requestAbort.signal });
       } catch (error) {
-        this._refundResearchInfrastructureFailure(session, gatewayAdmission, null, {
-          code: "native_transport_error", message: String(error?.message || error),
-        });
+        if (gatewayBindingIsCurrent(session, gatewayBinding)) {
+          this._refundResearchInfrastructureFailure(session, gatewayAdmission, null, {
+            code: "native_transport_error", message: String(error?.message || error),
+          });
+        }
         throw error;
+      }
+      if (!gatewayBindingIsCurrent(session, gatewayBinding)) {
+        sendResponse(res, 200, {
+          ok: true,
+          bootId: this.bootId,
+          sessionId: id,
+          message: staleGatewayBindingToolResult(message, "gateway tool"),
+        });
+        return;
       }
       this._refundResearchInfrastructureFailure(session, gatewayAdmission, response?.result);
       if (gatewayAdmission.tracked && response?.result) {

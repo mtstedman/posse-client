@@ -407,6 +407,15 @@ export function resyncHandoffBranchOntoTarget({
   }
 }
 
+// Blob content reaches the resolvers as text decoded from UTF-8, lossily:
+// every byte sequence that is not valid UTF-8 (a Latin-1 or Windows-1252
+// source file) arrives as U+FFFD. Writing a resolution built from that text
+// would rewrite those bytes across the whole file, so such content is never
+// resolved automatically.
+export function hasLossyDecodedContent(...texts) {
+  return texts.some((text) => typeof text === "string" && text.includes("\uFFFD"));
+}
+
 export function readConflictStageBlob(exec, cwd, stage, relPath) {
   try {
     return exec(["show", `:${stage}:${relPath}`], cwd, { trim: false });
@@ -516,6 +525,7 @@ export function resolveHandoffSquashConflicts({ exec, cwd, branch }) {
       // Stage 1 is absent for both-added files; that is exactly the empty
       // base the safety rule requires.
       const base = readConflictStageBlob(exec, cwd, 1, relPath) ?? "";
+      if (hasLossyDecodedContent(ours, theirs, base)) return { resolved: false, reason: `non_utf8_content: ${relPath}` };
       const safeName = relPath.replace(/[^A-Za-z0-9._-]/g, "_");
       const oursFile = path.join(tempDir, `${safeName}.ours`);
       const baseFile = path.join(tempDir, `${safeName}.base`);

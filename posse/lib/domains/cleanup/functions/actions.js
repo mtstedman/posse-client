@@ -158,11 +158,17 @@ export function restoreSnapshot(snapshot, destDir, projectDir = snapshot?.projec
   }
 
   if (snapshot.storageType === "git-ref" && snapshot.refName) {
+    const repoDir = projectDir || process.cwd();
     const refName = assertManagedSnapshotRefName(snapshot, "snapshot restore");
+    // Same guard as apply-diff: a conflicting apply must not leave the primary
+    // checkout unmerged.
+    assertCleanForSnapshotDiff(repoDir, "restore");
+    const rollbackState = snapshotApplyRollbackState(repoDir);
     try {
-      gitExec(["stash", "apply", "--index", refName], projectDir || process.cwd());
+      gitExec(["stash", "apply", "--index", refName], repoDir);
     } catch (err) {
-      throw new Error(`git stash apply ${refName} failed: ${err.message.split("\n")[0]}`);
+      const rolledBack = rollbackSnapshotDiffApply(repoDir, rollbackState);
+      throw new Error(`git stash apply ${refName} failed: ${err.message.split("\n")[0]}${rolledBack ? "" : "; partial changes retained to protect pre-existing managed edits"}`);
     }
     logEvent({
       event_type: EVENT_TYPES.CLEANUP_SNAPSHOT_RESTORED,
@@ -208,9 +214,9 @@ function actionablePorcelainPaths(repoDir) {
       && !relPath.startsWith(".posse-test-suites/"));
 }
 
-function assertCleanForSnapshotDiff(repoDir) {
+function assertCleanForSnapshotDiff(repoDir, actionLabel = "apply-diff") {
   if (actionablePorcelainPaths(repoDir).length > 0) {
-    throw new Error("working tree is not clean; commit/stash current changes before apply-diff");
+    throw new Error(`working tree is not clean; commit/stash current changes before ${actionLabel}`);
   }
 }
 
@@ -433,6 +439,12 @@ export function discardWorktree(worktree, projectDir, { force = false } = {}) {
   if (registered) {
     gitExec(["worktree", "remove", targetPath, "--force"], projectDir, { timeoutMs: 60_000 });
   } else if (fs.existsSync(targetPath)) {
+    // Git no longer tracks this directory, so nothing can vouch that its
+    // contents are clean or preserved (a worktree that lost its .git file
+    // surveys as the enclosing checkout).
+    if (!force && fs.readdirSync(targetPath).length > 0) {
+      throw new Error(`worktree discard refused: ${targetPath} is not a registered git worktree and is not empty; inspect or copy out its contents, then pass --force to delete it`);
+    }
     fs.rmSync(targetPath, { recursive: true, force: false });
     gitExec(["worktree", "prune"], projectDir, { timeoutMs: 10_000 });
   }
@@ -489,10 +501,13 @@ export function dropStash(stash, projectDir) {
 export function restoreStash(stash, projectDir) {
   const ref = resolveCurrentStashRef(stash, projectDir, "apply");
   const target = String(stash?.objectHash || "").trim() || ref;
+  assertCleanForSnapshotDiff(projectDir, "restore");
+  const rollbackState = snapshotApplyRollbackState(projectDir);
   try {
     gitExec(["stash", "apply", target], projectDir);
   } catch (err) {
-    throw new Error(`git stash apply ${target} failed: ${err.message.split("\n")[0]}`);
+    const rolledBack = rollbackSnapshotDiffApply(projectDir, rollbackState);
+    throw new Error(`git stash apply ${target} failed: ${err.message.split("\n")[0]}${rolledBack ? "" : "; partial changes retained to protect pre-existing managed edits"}`);
   }
   logEvent({
     event_type: EVENT_TYPES.CLEANUP_STASH_APPLIED,

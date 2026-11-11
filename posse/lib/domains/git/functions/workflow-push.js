@@ -312,10 +312,11 @@ export function createPushWorkflowHelpers(context, { auditWorktreeState, askSing
         // grep.patternType=fixed in the user's config would otherwise make
         // these anchored patterns literal strings that never match.
         "--basic-regexp",
+        // The separator line alone is not evidence: "=======" is also a
+        // seven-character setext/RST heading underline, and a real conflict
+        // always carries the opening and closing markers.
         "-e",
         "^<<<<<<<",
-        "-e",
-        "^=======$",
         "-e",
         "^>>>>>>>",
         "HEAD",

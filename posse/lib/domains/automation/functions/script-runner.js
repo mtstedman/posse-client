@@ -6,12 +6,10 @@ import { performance } from "node:perf_hooks";
 import { TEST_SUBPROCESS_ENV_KEYS } from "../../../catalog/process.js";
 import { SCRIPT_TOOL_INTERPRETERS, SCRIPT_TOOL_LIMITS } from "../../../catalog/custom-tools.js";
 import { filterProcessEnv } from "../../../shared/platform/functions/process-env.js";
-import { terminateSpawnedProcessTree } from "../../../shared/platform/functions/spawned-process.js";
+import { SpawnedProcessTerminator } from "../../../shared/platform/classes/SpawnedProcessTerminator.js";
 import { scrubSecretText } from "../../../shared/telemetry/functions/logging/scrub-secret-text.js";
 import { redactBridgeValue } from "../../bridge/functions/redaction.js";
 import { redactSecretValues, scalarParamEnv } from "./script-tools.js";
-
-const TERMINATION_GRACE_MS = 250;
 
 // Builds the child environment from an allowlist; the owner's own environment
 // (which keeps the user's credentials) never passes through.
@@ -43,10 +41,14 @@ export async function runScriptTool(tool, input, { secrets = {}, privateInputs =
         });
       } catch (error) { reject(Object.assign(new Error(`Could not start ${tool.manifest.name}: ${error.message}`), { code: "script_invalid" })); return; }
       const limit = tool.manifest.max_output_bytes;
-      let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), truncated = false, stderrTruncated = false, timedOut = false, aborted = false, settled = false;
+      let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), truncated = false, stderrTruncated = false, timedOut = false, aborted = false, settled = false, terminating = false;
+      const terminator = new SpawnedProcessTerminator(child, { processGroup: process.platform !== "win32" });
       const terminate = () => {
-        terminateSpawnedProcessTree(child, { processGroup: process.platform !== "win32" });
-        setTimeout(() => terminateSpawnedProcessTree(child, { processGroup: process.platform !== "win32", force: true }), TERMINATION_GRACE_MS).unref?.();
+        if (settled || terminating) return;
+        terminating = true;
+        void terminator.terminateAndWait().then(({ confirmed }) => finish(null, confirmed ? null : Object.assign(
+          new Error(`Script tool ${tool.manifest.name} termination could not be confirmed`), { code: "external_outcome_unknown" },
+        )));
       };
       const timer = setTimeout(() => { timedOut = true; terminate(); }, tool.manifest.timeout_seconds * 1000);
       const onAbort = () => { aborted = true; terminate(); };
@@ -69,6 +71,10 @@ export async function runScriptTool(tool, input, { secrets = {}, privateInputs =
       const finish = (code, failure) => {
         if (settled) return; settled = true;
         clearTimeout(timer); signal?.removeEventListener("abort", onAbort);
+        terminator.cancel();
+        // A descendant may have escaped the process group while retaining
+        // stdio. Bound settlement without claiming its side effects stopped.
+        if (failure?.code === "external_outcome_unknown") { reject(failure); return; }
         if (aborted) { reject(signal.reason ?? Object.assign(new Error("Run canceled"), { code: "canceled" })); return; }
         if (failure) { reject(Object.assign(new Error(`Could not start ${tool.manifest.name}: ${failure.message}`), { code: failure.code === "ENOENT" ? "script_unavailable" : "script_invalid" })); return; }
         const redactions = { ...secrets, ...Object.fromEntries(Object.entries(privateInputs).map(([key, value]) => [`input_${key}`, typeof value === "string" ? value : JSON.stringify(value)])) };
@@ -89,7 +95,13 @@ export async function runScriptTool(tool, input, { secrets = {}, privateInputs =
         });
       };
       child.once("error", error => finish(null, error));
-      child.once("close", code => finish(code, null));
+      child.once("close", code => {
+        terminator.noteClose();
+        // During termination the bounded waiter owns the outcome, including
+        // close events caused by its final destruction of inherited pipes.
+        if (!terminating) finish(code, null);
+      });
+      if (signal?.aborted) onAbort();
     });
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });

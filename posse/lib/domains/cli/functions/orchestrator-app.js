@@ -70,7 +70,7 @@ import { flushEventsNow } from "../../queue/functions/events.js";
 import { spawnSync } from "child_process";
 import { editorCommandLabel, parseEditorCommand, resolveEditorCommand } from "./editor.js";
 import { initArtifactRootsAsync, ensureArtifactDirs, wiScopeId, getResolvedImageProtocol, artifactsDir, pruneEmptyArtifactDirsAsync } from "../../artifacts/functions/index.js";
-import { createWorkItem, getWorkItem, listWorkItems, updateWorkItemStatus, setMergeState, markWorkItemMergeFailed, listJobs, listJobsByWorkItem, getWorkItemJobStats, createJob, getEvents, logEvent, getDependencies, getSetting, setSetting, listSettings, getLiveSchedulerBlockMessage } from "../../queue/functions/index.js";
+import { createWorkItem, getWorkItem, listWorkItems, updateWorkItemStatus, setMergeState, markWorkItemMergeFailed, holdForCurrentMergeVerificationReview, listJobs, listJobsByWorkItem, getWorkItemJobStats, createJob, getEvents, logEvent, getDependencies, getSetting, setSetting, listSettings, getLiveSchedulerBlockMessage } from "../../queue/functions/index.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
 import { LOCK_HOLDING_JOB_STATUSES } from "../../queue/functions/common.js";
 import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/reviewable.js";
@@ -1274,6 +1274,8 @@ function cmdQueue() {
 
 function _parseWiArg(raw) {
   if (!raw) return null;
+  // Same strict form as `merge`: "12abc" or "12,13" must not act on WI 12.
+  if (!/^(?:wi[:#-]?)?\d+$/i.test(String(raw))) return null;
   const n = Number.parseInt(String(raw).replace(/^wi[:#-]?/i, ""), 10);
   return Number.isFinite(n) && n > 0 ? n : null;
 }
@@ -1884,7 +1886,13 @@ async function cmdMerge() {
       mergeLockAlreadyHeld: true,
     });
     if (result.ok) setMergeState(wi.id, "merged");
-    else if (!result.deferred) markWorkItemMergeFailed(wi.id, mergeFailureDiagnostics(result, { targetBranch }));
+    else if (result.reviewStale) {
+      // The merge review covered an earlier branch commit. Nothing failed:
+      // ask for review of the current commit, as the auto-merge pass does.
+      const reviewHold = holdForCurrentMergeVerificationReview(wi.id, result.branchHead);
+      if (reviewHold) return { ...result, reviewHold, branchName: lockedWi.branch_name };
+      markWorkItemMergeFailed(wi.id, mergeFailureDiagnostics(result, { targetBranch }));
+    } else if (!result.deferred) markWorkItemMergeFailed(wi.id, mergeFailureDiagnostics(result, { targetBranch }));
     return { ...result, branchName: lockedWi.branch_name };
   });
   if (!mergeOutcome.acquired) {
@@ -1919,9 +1927,19 @@ async function cmdMerge() {
     console.log(cleanupOk
       ? `  ${C.dim}Branch and worktree cleaned up.${C.reset}\n`
       : `  ${C.yellow}Branch cleanup failed; branch metadata was kept for retry.${C.reset}\n`);
+  } else if (result.reviewHold) {
+    console.log(`\n  ${C.yellow}! ${result.message}${C.reset}`);
+    console.log(`  ${C.dim}Nothing was merged. The merge waits for review of the current commit${result.reviewHold.gate_job_id ? ` (gate #${result.reviewHold.gate_job_id})` : ""}.${C.reset}\n`);
+    process.exitCode = 2;
   } else if (result.deferred) {
     console.log(`\n  ${C.yellow}! ${result.message}${C.reset}`);
-    console.log(`  ${C.dim}Merge the upstream work item first, then retry this merge.${C.reset}\n`);
+    // Only an upstream deferral names blockers; other reasons (acceptance,
+    // dependency install, shared trunk) carry their own next step in the message.
+    console.log(result.blockers?.length
+      ? `  ${C.dim}Merge the upstream work item first, then retry this merge.${C.reset}\n`
+      : "");
+    // Nothing merged: needs operator action, like the other refusals above.
+    process.exitCode = 2;
   } else {
     console.log(`\n  ${C.red}\u2717 ${result.message}${C.reset}`);
     // A parked conflict's message names the files and the next action.

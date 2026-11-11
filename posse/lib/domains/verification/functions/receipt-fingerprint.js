@@ -42,11 +42,23 @@ export function worktreeFingerprint(commitHash, porcelainStatus) {
   return sha256(`worktree-v1\0${commitHash}\0${porcelainStatus}`);
 }
 
+// Where `git status` paths resolve: the repository root, which is above cwd
+// when the project is nested in its repository.
+export async function repositoryRoot(cwd) {
+  try {
+    const root = String(await gitExecAsync(["rev-parse", "--show-toplevel"], cwd) || "").trim();
+    if (root) return path.resolve(root);
+  } catch {
+    // Not answerable here: resolve against cwd as before.
+  }
+  return path.resolve(cwd);
+}
+
 // Content digests of the dirty paths, or null when one escapes the root,
 // cannot be read, or the set exceeds the catalog's file or byte bound (the
 // caller records dirty_input_fingerprint_unavailable).
 export async function dirtyPathDigests(cwd, porcelainStatus) {
-  const root = path.resolve(cwd);
+  const root = await repositoryRoot(cwd);
   const entries = [];
   const relatives = porcelainChangedPaths(porcelainStatus).sort();
   if (relatives.length > DIRTY_INPUT_FINGERPRINT_LIMITS.max_files) return null;

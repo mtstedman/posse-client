@@ -1,6 +1,8 @@
 import { killAbortReason } from "../../../runtime/functions/yield.js";
 import { completeAttempt, getJob, storeArtifact } from "../../../queue/functions/index.js";
 import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
+import { BUDGET_PAUSED } from "../../../../catalog/admission-budget.js";
+import { isBudgetPaused } from "../../../queue/functions/admission-budget.js";
 import { C } from "../../../../shared/format/functions/colors.js";
 import { assessmentRetryFallbackReads as _assessmentRetryFallbackReads, isAssessorParseRetryBudgetExceeded as _isAssessorParseRetryBudgetExceeded, shouldFastPassArtifactAssessment, shouldOverrideArtifactMissingFail } from "../../functions/execution/assessment-policy.js";
 import { runPostExecutionAssessment as runPostExecutionAssessmentFromModule } from "../../functions/helpers/assessment-pipeline.js";
@@ -51,6 +53,10 @@ export async function handlePartialWorkFailureForWorker({
   // attempt the committed partial work is what ends the retry loop.
   const killReason = killAbortReason(err, signal);
   if (killReason && killReason !== "runtime_exceeded") return false;
+  // A budget pause is not a failed attempt: the attempt-error handler stashes
+  // the work and refunds the attempt. Committing half-done edits here would
+  // send them to assessment on a final attempt instead.
+  if (err?.code === BUDGET_PAUSED || isBudgetPaused(job?.work_item_id)) return false;
   if (!attempt?.id || !job?.id || !wtPath || !MUTATING_JOB_TYPES.has(job.job_type)) return false;
 
   const errorDetails = getErrorDetailsFromModule(err);

@@ -575,6 +575,42 @@ export function supersedeHumanGate(gateJobId, reason = "superseded") {
 }
 
 /**
+ * Ask a retired standalone question again. Failure recovery requeues a failed
+ * question that decides no other job (work-item-recovery.js); its contract was
+ * superseded when it failed (headless timeout, or an answer that could not be
+ * applied), and a job whose contract stays closed is canceled by the next
+ * reconcile instead of being asked. The generation advances so nothing
+ * rendered from the retired question can answer the new one, and earlier
+ * failed-resolution events are marked reopened so the failed-resolution sweep
+ * does not retire it again.
+ */
+export function reopenSupersededHumanGate(gateJobId) {
+  const db = getDb();
+  return executeTransaction(db, () => {
+    const result = db.prepare(`
+      UPDATE human_gates
+      SET gate_state = 'open',
+          generation = generation + 1,
+          resolution_action = NULL,
+          resolution_payload_json = NULL,
+          idempotency_key = NULL,
+          resolver_lease_token = NULL,
+          resolution_error = NULL,
+          resolved_at = NULL,
+          updated_at = ?
+      WHERE gate_job_id = ? AND gate_state = 'superseded' AND original_job_id IS NULL
+    `).run(now(), gateJobId);
+    if (result.changes !== 1) return false;
+    db.prepare(`
+      UPDATE events
+      SET event_json = json_set(CASE WHEN json_valid(event_json) THEN event_json ELSE '{}' END, '$.gate_reopened', 1)
+      WHERE job_id = ? AND event_type = ?
+    `).run(gateJobId, EVENT_TYPES.JOB_HUMAN_RESOLUTION_FAILED);
+    return true;
+  });
+}
+
+/**
  * Atomically claim an unanswered, unleased gate for headless timeout.
  * A resolver that acquires the job lease or changes the contract state first
  * wins; timeout recovery must never supersede an accepted/in-flight answer.

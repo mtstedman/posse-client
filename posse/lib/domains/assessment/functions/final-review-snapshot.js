@@ -92,7 +92,21 @@ function readUntrackedFile(cwd, repoPath, maxChars = MAX_UNTRACKED_FILE_CHARS) {
 export async function collectScopedChange(cwd, payload = {}, { git = gitExecAsync, ignorePaths = new Set() } = {}) {
   const scope = finalReviewScope(payload);
   const status = await git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd, { trim: false });
-  const entries = parsePorcelainZ(status).filter((entry) => !ignorePaths.has(entry.path)).filter((entry) => inScope(entry.path, scope)
+  // Porcelain paths are relative to the repository root; the declared scope
+  // and every read below are relative to cwd, which is a subdirectory when the
+  // project is nested in its repository. Keep the project's entries and make
+  // them cwd-relative. A rename source outside the project keeps its root path.
+  let prefix = "";
+  try {
+    prefix = normalizeRepoPath(await git(["rev-parse", "--show-prefix"], cwd, { trim: false }));
+  } catch {
+    // No prefix answer: treat cwd as the repository root, as before.
+  }
+  const projectPath = (repoPath) => (repoPath?.startsWith(`${prefix}/`) ? repoPath.slice(prefix.length + 1) : repoPath);
+  const projectEntries = !prefix ? parsePorcelainZ(status) : parsePorcelainZ(status)
+    .filter((entry) => entry.path.startsWith(`${prefix}/`))
+    .map((entry) => ({ ...entry, path: projectPath(entry.path), previousPath: projectPath(entry.previousPath) }));
+  const entries = projectEntries.filter((entry) => !ignorePaths.has(entry.path)).filter((entry) => inScope(entry.path, scope)
     || (entry.code.includes("R") && entry.previousPath && inScope(entry.previousPath, scope)));
   const ignored = await listIgnoredRepoPaths(cwd, [...scope.files], { git });
   for (const entry of ignored) {
@@ -111,8 +125,9 @@ export async function collectScopedChange(cwd, payload = {}, { git = gitExecAsyn
   let diff = "";
   const stats = new Map();
   if (tracked.length > 0) {
-    diff = String(await git(["diff", "HEAD", "--no-color", "--no-ext-diff", "--", ...tracked], cwd, { trim: false }) || "");
-    const numstat = String(await git(["diff", "HEAD", "--numstat", "--", ...tracked], cwd, { trim: false }) || "");
+    // --relative: diff headers and numstat paths name files as the scope does.
+    diff = String(await git(["diff", "HEAD", "--relative", "--no-color", "--no-ext-diff", "--", ...tracked], cwd, { trim: false }) || "");
+    const numstat = String(await git(["diff", "HEAD", "--relative", "--numstat", "--", ...tracked], cwd, { trim: false }) || "");
     for (const line of numstat.split("\n")) {
       const [added, removed, ...rest] = line.split("\t");
       const file = normalizeRepoPath(rest.join("\t"));
@@ -319,7 +334,7 @@ export function finalReviewCoreInstructions() {
 export function finalReviewModeInstructions({ reportAndWait = false } = {}) {
   return [
     reportAndWait
-      ? "Report by calling final_review with your verdict (pass when the change meets the contract; fail only for concrete implementation defects; needs_review when required evidence or a contract decision is unavailable). For blocked testing, use needs_review and name the unavailable check and missing capability in findings[].criterion; this is a blocker reason, not a code defect. The call then waits while the developer works."
+      ? "Report by calling final_review with your verdict (pass when the change meets the contract; fail only for concrete implementation defects; needs_review when required evidence or a contract decision is unavailable; blocked when no further developer round can resolve what stops the work, such as a contradictory or impossible requirement, a missing decision, or required verification that lacks a tool, authorization, credential or environment). For blocked, name the blocker in findings[].criterion: it is a blocker reason, not a code defect, and it ends the review at once and asks the operator. Do not fail the same unresolvable issue round after round. After a fail the call waits while the developer works."
       : "Report your verdict in the terminal assessor handoff (pass when the change meets the contract; fail only for concrete implementation defects; blocked when required verification lacks a tool, authorization, credential, or environment; needs_review for a contract decision). Name the unavailable check and missing capability without prescribing a code repair.",
     ...(reportAndWait ? ["When it returns a revision, check your findings against the diff since your report, review only what changed, and call final_review again. An accepted pass saves completion and ends both agent sessions immediately. When it returns status done without an accepted pass, end with your terminal handoff carrying your latest verdict."] : []),
   ].join("\n");

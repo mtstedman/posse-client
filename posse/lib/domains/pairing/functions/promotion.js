@@ -287,6 +287,13 @@ function preserveCandidate(projectDir, sessionId, candidate, exec = git) {
   return ref;
 }
 
+/** True when the journal's candidate commit is held by its local promotion ref. */
+export function pairingCandidatePreservedLocally(projectDir, journal, { exec = git } = {}) {
+  if (!SHA_RE.test(String(journal?.candidate_sha || ""))) return false;
+  const suffix = String(journal.session_id || "recovery").replace(/[^a-zA-Z0-9-]/gu, "").slice(0, 64) || "recovery";
+  return refSha(projectDir, `refs/posse/pairing-promotions/${suffix}`, exec) === journal.candidate_sha;
+}
+
 function promotionError(code, message) {
   return Object.assign(new Error(message), { code });
 }

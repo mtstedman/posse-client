@@ -309,6 +309,11 @@ export function createScopedMutationTools(ctx) {
     if (destinationExists && !overwrite) {
       return `Error: Destination already exists: ${args.destination} (set overwrite=true to replace).`;
     }
+    // Replacing the destination removes it first; when it is the source (the
+    // same path spelled twice, or a primary-checkout alias) that deletes the file.
+    if (destinationExists && pathsReferToSameExistingFile(sourcePath, destinationPath)) {
+      return `Error: copy_file source and destination are the same file: ${args.destination}.`;
+    }
     if (destinationExists && !ctx.effectiveScopePredicates.canEdit(destinationPath)) {
       return `Error: copy_file blocked - ${args.destination} is outside the allowed edit scope.`;
     }

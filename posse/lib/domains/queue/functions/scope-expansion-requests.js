@@ -1,7 +1,7 @@
 import { unfinishedTestOwners } from "./job-test-scope.js";
 import fs from "node:fs";
 import nodePath from "node:path";
-import { approvalPolicyKey } from "../../../catalog/approval-policies.js";
+import { effectiveGatePolicy } from "../../../catalog/approval-policies.js";
 import { materializeScopeCreates } from "./scope-create-materializer.js";
 import { protectedMutablePathReason, isSensitiveEnvRepoPath } from "../../runtime/functions/protected-paths.js";
 import { SETTING_KEYS } from "../../../catalog/settings.js";
@@ -237,7 +237,7 @@ export function createScopeExpansionOperations({
       // same attempt instead of costing a pause → gate → re-run cycle.
       let autoApprovalEnabled = true;
       try {
-        const policy = getSetting(approvalPolicyKey("file_scope_approval")) || "ask";
+        const policy = effectiveGatePolicy("file_scope_approval", getSetting);
         autoApprovalEnabled = ["ask", "auto:approve"].includes(policy)
           && String(getSetting(SETTING_KEYS.SCOPE_AUTO_APPROVAL) ?? "true") !== "false";
       } catch { /* default on */ }

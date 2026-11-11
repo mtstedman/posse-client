@@ -2804,8 +2804,8 @@ export const TOOL_FINAL_REVIEW = {
       },
       verdict: {
         type: "string",
-        enum: ["pass", "fail", "needs_review"],
-        description: "Reviewer only. pass, fail with findings, or needs_review when the contract itself cannot be judged.",
+        enum: ["pass", "fail", "needs_review", "blocked"],
+        description: "Reviewer only. pass, fail with findings, needs_review when the contract itself cannot be judged, or blocked when the work cannot be completed or verified as specified: name the blocker in findings[].criterion and the operator decides at once.",
       },
       findings: {
         type: "array",

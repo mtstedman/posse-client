@@ -13,7 +13,9 @@ function normalizePath(value) {
 
 async function existsAtCommit(cwd, commit, relPath) {
   try {
-    await gitExecAsync(["cat-file", "-e", `${commit}:${relPath}`], cwd);
+    // "./": lineage paths are relative to cwd, which is a subdirectory of the
+    // repository root when the project is nested.
+    await gitExecAsync(["cat-file", "-e", `${commit}:./${relPath}`], cwd);
     return true;
   } catch {
     return false;

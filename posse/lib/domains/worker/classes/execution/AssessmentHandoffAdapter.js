@@ -84,6 +84,7 @@ import {
   siblingLockSummary,
 } from "../../../queue/functions/sibling-locks.js";
 import { siblingJobScopeOwners, siblingOwnedWorktreePaths } from "../../../queue/functions/file-locks.js";
+import { projectRelativeSiblingOwnership } from "../../functions/helpers/pre-dev-typecheck.js";
 import { loadAssessmentSource } from "../../functions/execution/assessment-source.js";
 import { ensureAssessmentScopedCheckEvidence } from "../../../assessment/functions/scoped-check-evidence.js";
 import {
@@ -415,7 +416,7 @@ export class AssessmentHandoffAdapter {
               onMsg: (message) => worker.emit(job.id, `${C.dim}[audit-test] ${message}${C.reset}`),
             })
           : null,
-        siblingOwnedPaths: wtPath ? (paths) => siblingOwnedWorktreePaths(job.id, paths) : null,
+        siblingOwnedPaths: wtPath ? projectRelativeSiblingOwnership(wtPath, (paths) => siblingOwnedWorktreePaths(job.id, paths)) : null,
         repairDependencies: wtPath
           ? (receipt, executionCwd = wtPath) => repairTestDependencies(worker, job, executionCwd, {
               signal: assessAc?.signal || null,

@@ -2188,7 +2188,11 @@ export async function mergeToSharedTrunkAsync({
   }
   if (!coordinated || typeof coordinated !== "object") return coordinated;
   const result = { ...coordinated, sharedTrunk: true };
-  return result.ok ? result : { ...result, deferred: isTransientSharedTrunkMergeResult(result) };
+  // A deferral decided by the local merge (acceptance evidence pending, an
+  // installer holding the checkout, an upstream not merged yet, a cold native
+  // pulse) stays a deferral: those reasons are not shared-trunk transients,
+  // and reporting them as failures discards the candidate's worktree.
+  return result.ok ? result : { ...result, deferred: result.deferred === true || isTransientSharedTrunkMergeResult(result) };
 }
 
 export const __testSharedTrunkInternals = Object.freeze({

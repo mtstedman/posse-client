@@ -279,6 +279,13 @@ function isAtlasWarmGateBusy(err) {
   return err?.code === "ASYNC_GATE_BUSY" || err?.code === "ASYNC_GATE_TIMEOUT";
 }
 
+// A main-generation warm that could not take the root repository mutation
+// lock did no work either: it is deferred and bounded exactly like a busy
+// SQLite gate instead of being recorded as a succeeded no-op.
+function isAtlasWarmMainLockBusy(err) {
+  return err?.code === "ATLAS_MAIN_INTAKE_LOCK_UNAVAILABLE";
+}
+
 function isAtlasWarmSoftInfrastructureMiss(err) {
   return err?.code === "THREAD_TIMEOUT" || err?.code === "DAEMON_TIMEOUT";
 }
@@ -676,14 +683,18 @@ function atlasWarmGateBusyDeferralCount(payload = {}) {
  * @param {any} err
  */
 export function deferAtlasWarmAfterGateBusy(worker, job, attemptId, startTime, leaseToken, err) {
-  if (!isAtlasWarmGateBusy(err)) return false;
+  const lockBusy = isAtlasWarmMainLockBusy(err);
+  if (!lockBusy && !isAtlasWarmGateBusy(err)) return false;
   const payload = parseJobPayload(job) || {};
   const purpose = String(payload.purpose || "wi");
   const priorDeferrals = atlasWarmGateBusyDeferralCount(payload);
-  const gateWaitMs = atlasWarmGateWaitMs(purpose);
+  // The root-lock wait is the same bound runRealWarmer passes as lockWaitMs.
+  const gateWaitMs = lockBusy ? Math.min(atlasWarmGateWaitMs(purpose), 30_000) : atlasWarmGateWaitMs(purpose);
+  const reason = lockBusy ? "repository_mutation_lock_busy" : "sqlite_gate_busy";
+  const busyWhat = lockBusy ? "repository mutation lock" : "ledger write gate";
 
   if (priorDeferrals >= ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS) {
-    const errorText = `sqlite_gate_busy: ATLAS ledger write gate still busy after ${priorDeferrals} deferrals (${err?.message || String(err)})`;
+    const errorText = `${reason}: ATLAS ${busyWhat} still busy after ${priorDeferrals} deferrals (${err?.message || String(err)})`;
     completeAttempt(attemptId, {
       status: "failed",
       duration_ms: nowMs() - startTime,
@@ -693,7 +704,7 @@ export function deferAtlasWarmAfterGateBusy(worker, job, attemptId, startTime, l
     const released = worker._releaseLease(job, leaseToken, "failed");
     if (released && job.work_item_id) refreshWorkItemStatus(job.work_item_id);
     try {
-      worker.emit(job.id, `${C.yellow}[atlas] warm #${job.id} (${purpose}) failed — ledger write gate still busy after ${priorDeferrals} deferrals; view left STALE until the next warm${C.reset}`);
+      worker.emit(job.id, `${C.yellow}[atlas] warm #${job.id} (${purpose}) failed — ${busyWhat} still busy after ${priorDeferrals} deferrals; view left STALE until the next warm${C.reset}`);
     } catch { /* emit is best-effort */ }
     return true;
   }
@@ -705,7 +716,7 @@ export function deferAtlasWarmAfterGateBusy(worker, job, attemptId, startTime, l
   completeAttempt(attemptId, {
     status: "interrupted",
     duration_ms: nowMs() - startTime,
-    error_text: `ATLAS ledger write gate busy after ${gateWaitMs}ms — warm deferred`,
+    error_text: `ATLAS ${busyWhat} busy after ${gateWaitMs}ms — warm deferred`,
   });
   logEvent({
     work_item_id: job.work_item_id,
@@ -713,10 +724,10 @@ export function deferAtlasWarmAfterGateBusy(worker, job, attemptId, startTime, l
     attempt_id: attemptId,
     event_type: EVENT_TYPES.ATLAS_WARM_DEFERRED,
     actor_type: EVENT_ACTORS.ATLAS,
-    message: `ATLAS warm (${purpose}) deferred: ledger write gate busy after ${gateWaitMs}ms (${deferrals}/${ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS})`,
+    message: `ATLAS warm (${purpose}) deferred: ${busyWhat} busy after ${gateWaitMs}ms (${deferrals}/${ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS})`,
     event_json: JSON.stringify({
       purpose,
-      reason: "sqlite_gate_busy",
+      reason,
       gate_wait_ms: gateWaitMs,
       deferrals,
       max_deferrals: ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS,
@@ -727,7 +738,7 @@ export function deferAtlasWarmAfterGateBusy(worker, job, attemptId, startTime, l
   const released = worker._releaseWithoutAttemptPenalty(job, leaseToken, "queued", { attemptId, readyAt });
   if (released && job.work_item_id) refreshWorkItemStatus(job.work_item_id);
   try {
-    worker.emit(job.id, `${C.yellow}[atlas] warm #${job.id} (${purpose}) deferred — ledger write gate busy after ${gateWaitMs}ms; ${released ? `requeued (${deferrals}/${ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS})` : "lease already released"}; view left STALE until it runs${C.reset}`);
+    worker.emit(job.id, `${C.yellow}[atlas] warm #${job.id} (${purpose}) deferred — ${busyWhat} busy after ${gateWaitMs}ms; ${released ? `requeued (${deferrals}/${ATLAS_WARM_GATE_BUSY_MAX_DEFERRALS})` : "lease already released"}; view left STALE until it runs${C.reset}`);
   } catch { /* emit is best-effort */ }
   return true;
 }
@@ -955,6 +966,16 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
       // no-op result as succeeded.
       throw err;
     }
+    if (isAtlasWarmMainLockBusy(err)) {
+      logAtlasWarmTelemetry("atlas.warm.skipped", {
+        ...atlasWarmTelemetryContext({ jobId, purpose, branch: branch || payload?.branch || null, baselineBranch, repoRoot, paths, budgetMs: timeoutMs, timeoutMs }),
+        outcome: "repository_mutation_lock_busy",
+        error: errorSummary(err),
+      });
+      // Same contract as the busy gate above: no work was done, so the
+      // executor defers the job (deferAtlasWarmAfterGateBusy).
+      throw err;
+    }
     if (err?._killReason || err?.code === "THREAD_ABORTED" || err?.name === "AbortError"
       || err?.code === "DAEMON_ABORTED" || err?.code === "DAEMON_TRANSPORT_GONE") {
       throw err;
@@ -973,11 +994,13 @@ async function runRealWarmer({ payload, branch, paths, worker, jobId, baselineBr
       worker.emit(jobId, `${C.yellow}[atlas] warm failed: ${message}${C.reset}`);
     } catch { /* ignore */ }
     logAtlasError("[atlas-warm] runRealWarmer threw (job #" + jobId + "):", err);
-    if (isVerboseAtlasErrors()) {
+    if (isVerboseAtlasErrors() || isAtlasMainGenerationPurpose(purpose)) {
       // Re-throw so the outer executor records the full stack on the
       // attempt and marks the job failed. Operators set the env var
       // when they want hard-fail visibility; default mode preserves
-      // the legacy fall-back-to-stub behavior.
+      // the legacy fall-back-to-stub behavior. A main-generation warm
+      // always fails here: its "not bootstrapped" stub would complete as
+      // succeeded and tell waiters the merge replay / refresh landed.
       throw err;
     }
     return null;

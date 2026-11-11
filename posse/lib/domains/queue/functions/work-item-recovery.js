@@ -34,6 +34,7 @@ import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { now } from "./common.js";
 import { rewireDependency } from "./dependencies.js";
 import { flushEventsNow, logEvent } from "./events.js";
+import { reopenSupersededHumanGate } from "./human-gates.js";
 import { jobHasLiveLeaseAt } from "./lease-state.js";
 import { parseJobPayload } from "./payload.js";
 import {
@@ -219,6 +220,8 @@ function requeueForRecovery(job, { ts, gateJobId, note, key }) {
     WHERE id = ?
   `).run(ts, ts, fresh.id);
   setAssessmentLifecycle(fresh.id, "not_started");
+  // A requeued question must be answerable again: reopen its retired contract.
+  if (fresh.job_type === "human_input") reopenSupersededHumanGate(fresh.id);
   return true;
 }
 

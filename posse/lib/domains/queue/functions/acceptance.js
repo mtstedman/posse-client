@@ -19,8 +19,38 @@ export function readAcceptance(workItemId, { candidateCommit = currentCandidate(
   const workItem = getWorkItem(workItemId);
   if (!workItem) throw new Error(`Unknown work item ${workItemId}`);
   const metadata = JSON.parse(workItem.metadata_json || "{}");
-  return projectAcceptance({ jobs: listJobsByWorkItem(workItemId), receipts: postChangeReceiptsAtCommit(workItemId, candidateCommit),
-    decisions: metadata.acceptance_decisions || [], candidateCommit });
+  const decisions = metadata.acceptance_decisions || [];
+  const evidenceCommits = new Set(decisions.filter(d => d.action === "bind" && d.commit === candidateCommit && d.evidence_commit)
+    .map(d => d.evidence_commit));
+  const receipts = [...postChangeReceiptsAtCommit(workItemId, candidateCommit),
+    ...[...evidenceCommits].flatMap(commit => postChangeReceiptsAtCommit(workItemId, commit))];
+  return projectAcceptance({ jobs: listJobsByWorkItem(workItemId), receipts, decisions, candidateCommit });
+}
+
+/**
+ * A close-out refresh that only replayed the candidate's commits keeps the
+ * change the operator judged: carry each requirement's current evidence
+ * mapping or waiver from the old head to the refreshed one. A refresh that
+ * resolved or merged content must not call this.
+ */
+export function rebindAcceptanceDecisionsAfterRefresh(workItemId, { fromHead, toHead } = {}) {
+  const sha = /^[0-9a-f]{40}$/i;
+  if (!sha.test(String(fromHead || "")) || !sha.test(String(toHead || "")) || fromHead === toHead) return { ok: false, reason: "invalid_head", rebound: 0 };
+  return runImmediateTransaction(getDb(), () => {
+    const wi = getWorkItem(workItemId);
+    if (!wi) return { ok: false, reason: "unknown_work_item", rebound: 0 };
+    const metadata = JSON.parse(wi.metadata_json || "{}");
+    const decisions = metadata.acceptance_decisions || [];
+    const latest = new Map();
+    for (const decision of decisions) {
+      if (decision.action !== "require" && decision.commit === fromHead) latest.set(decision.key, decision);
+    }
+    const carried = [...latest.values()].map(decision => ({ ...decision, commit: toHead, rebound_from: fromHead,
+      rebound_at: new Date().toISOString(),
+      ...(decision.action === "bind" ? { evidence_commit: decision.evidence_commit || fromHead } : {}) }));
+    if (carried.length) updateWorkItemMetadata(workItemId, { ...metadata, acceptance_decisions: [...decisions, ...carried] });
+    return { ok: true, rebound: carried.length, from_head: fromHead, to_head: toHead };
+  });
 }
 
 /** Operator-only API; no agent tool can waive or declare acceptance. */

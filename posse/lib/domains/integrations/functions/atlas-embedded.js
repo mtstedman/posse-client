@@ -129,10 +129,13 @@ export async function invalidateAtlasEmbeddedResourceCache() {
   try { await retirePooledEmbeddingResourcesAndWait(); } catch { /* best effort */ }
 }
 
-onConductorIndexingSuccess((event) => {
+function handleAtlasIndexingSuccess(event) {
   if (event?.purpose === "wi-live" && event.viewPath) {
-    const assetKey = `atlas:${String(event.viewPath).replace(/\\/g, "/").toLowerCase()}`;
-    invalidateAtlasSharedReadCache(assetKey);
+    // Shared-read entries are keyed by the repository's ledger asset key
+    // (main and every worktree resolve to the same one), never by the
+    // worktree view path, so a view-path prefix matches nothing and the
+    // pre-edit output would survive the reindex. Void the whole small cache.
+    invalidateAtlasSharedReadCache();
     invalidateSharedAtlasToolExecutorReadCaches({ workItemId: event.workItemId });
     return;
   }
@@ -143,7 +146,9 @@ onConductorIndexingSuccess((event) => {
   // the WI context. Invalidate replay caches while preserving those paths.
   invalidateSharedAtlasToolExecutorReadCaches();
   void invalidateAtlasEmbeddedResourceCache();
-});
+}
+
+onConductorIndexingSuccess(handleAtlasIndexingSuccess);
 
 function atlasSharedReadKey({ enabled = true, action = null, assetKey = null, versionId = null, payload = null } = {}) {
   if (!enabled) return null;
@@ -376,6 +381,11 @@ export function __testAtlasSharedReadKey(opts = {}) {
 export function __testAtlasSharedReadCacheSeed(key, value) {
   assertTestContext("__testAtlasSharedReadCacheSeed");
   sharedReadCacheSet(key, value);
+}
+
+export function __testHandleAtlasIndexingSuccess(event) {
+  assertTestContext("__testHandleAtlasIndexingSuccess");
+  handleAtlasIndexingSuccess(event);
 }
 
 export function __testAtlasSharedReadCacheState() {
@@ -650,6 +660,12 @@ function acquireEmbeddedEmbeddingResources(repoRoot, config = {}) {
       } catch { /* best effort */ }
     },
   );
+  // Like the inner pool, never keep a disabled/failed open: the sliding TTL
+  // would otherwise pin "semantic off" after the cause (model not staged yet,
+  // binary mid-update) has cleared. This holder's release closes it.
+  if (lease.value?.enabled === false && ATLAS_EMBEDDED_EMBEDDING_CACHE.get(key) === lease.entry) {
+    retireCachedAtlasResource(ATLAS_EMBEDDED_EMBEDDING_CACHE, key, lease.entry);
+  }
   return { ...lease, resources: lease.value };
 }
 

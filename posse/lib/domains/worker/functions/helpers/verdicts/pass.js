@@ -32,22 +32,27 @@ export function handle(job, verdict, ctx) {
   const ownerJobIds = [...new Set((Array.isArray(siblingFailure?.owner_job_ids)
     ? siblingFailure.owner_job_ids
     : []).map(Number).filter((id) => Number.isSafeInteger(id) && id > 0 && id !== Number(job.id)))];
-  if (ownerJobIds.length > 0) {
+  // An owner that already depends on this job cannot be waited for: the edge
+  // would be a cycle and is refused, and the owner cannot start until this job
+  // settles. It is the planned follow-up for the failure it owns, so with no
+  // owner left to wait behind the pass stands instead of re-assessing an
+  // unchanged tree until the assessment budget is spent.
+  const parkedBehind = ownerJobIds.filter((ownerJobId) => addDependency(job.id, ownerJobId, "hard"));
+  if (parkedBehind.length > 0) {
     const payload = parseJobPayload(job);
     payload._assess_only = true;
     payload._sibling_owned_reassessment = {
-      owner_job_ids: ownerJobIds,
+      owner_job_ids: parkedBehind,
       identities: siblingFailure.identities || [],
       paths: siblingFailure.paths || [],
       parked_at: new Date().toISOString(),
     };
     updateJobPayload(job.id, JSON.stringify(payload));
-    for (const ownerJobId of ownerJobIds) addDependency(job.id, ownerJobId, "hard");
     const requeued = typeof ctx.updateJobStatus === "function"
       ? ctx.updateJobStatus("queued")
       : updateJobStatus(job.id, "queued");
     if (requeued) {
-      log(`${C.yellow}[assessor] DEFERRED${C.reset} WI#${job.work_item_id} job #${job.id}: project-root failure belongs to sibling ${ownerJobIds.map((id) => `#${id}`).join(", ")}; re-assessing after it settles`);
+      log(`${C.yellow}[assessor] DEFERRED${C.reset} WI#${job.work_item_id} job #${job.id}: project-root failure belongs to sibling ${parkedBehind.map((id) => `#${id}`).join(", ")}; re-assessing after it settles`);
     }
     return;
   }

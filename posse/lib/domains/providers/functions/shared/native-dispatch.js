@@ -425,6 +425,11 @@ export async function runNativeDispatch(request, {
     // and nothing set after the native cutover. Classification "timeout" is
     // shared with the wall timeout, so only the code decides.
     if (error.code === "provider_stall") error.stallKill = true;
+    // A refused resume ("session_expired") must retire the session handle.
+    // Session recycling keys on `sessionExpired`, which the CLI paths set and
+    // nothing set after the native cutover, so every retry resumed the same
+    // dead handle.
+    if (error.code === "session_expired" || error.classification === "session_expired") error.sessionExpired = true;
     error.stats = {
       ...commonStats,
       ...(details.stats || error.stats || {}),

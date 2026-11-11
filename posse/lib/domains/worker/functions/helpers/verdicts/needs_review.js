@@ -139,7 +139,9 @@ export function handle(job, verdict, ctx) {
     ? ctx.updateJobStatus("waiting_on_review")
     : updateJobStatus(job.id, "waiting_on_review");
   if (!changed) return;
-  log(`${C.yellow}[assessor] NEEDS REVIEW${C.reset} WI#${job.work_item_id} job #${job.id}: ${job.title}${reasonBrief}`);
+  // A gate the final reviewer raised is not an assessor's verdict.
+  const source = verdict?._final_review_escalation === true ? "review" : "assessor";
+  log(`${C.yellow}[${source}] NEEDS REVIEW${C.reset} WI#${job.work_item_id} job #${job.id}: ${job.title}${reasonBrief}`);
 
   // Always spawn a human_input job. Without one, waiting_on_review is a
   // permanent trap with no mechanism to unblock.
@@ -195,7 +197,7 @@ export function handle(job, verdict, ctx) {
     message: `Assessment unavailable; candidate preserved for explicit recovery: ${retryReason}`,
     event_json: JSON.stringify({ operator_actionable: true, retry_reason: retryReason, gate_job_id: humanJob.id }),
   });
-  log(`${C.yellow}[assessor]${C.reset} spawned review #${humanJob.id}`);
+  log(`${C.yellow}[${source}]${C.reset} spawned review #${humanJob.id}`);
 }
 
 export function handleParseError(job, verdict, ctx) {

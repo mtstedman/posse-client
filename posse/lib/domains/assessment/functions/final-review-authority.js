@@ -10,7 +10,8 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { gitExecAsync, gitExecBufferAsync } from "../../git/functions/utils.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
-import { FINAL_REVIEW_CONTRACT_FIELDS, FINAL_REVIEW_OBSERVATIONS, FINAL_REVIEW_REVIEW_MODES } from "../../../catalog/final-review.js";
+import { FINAL_REVIEW_CONTRACT_FIELDS, FINAL_REVIEW_MAX_UNRESOLVED_ROUNDS, FINAL_REVIEW_OBSERVATIONS, FINAL_REVIEW_REVIEW_MODES } from "../../../catalog/final-review.js";
+import { finalReviewResultsForAttempt, finalReviewReviewsRemaining } from "./final-review-result.js";
 import { finalReviewScope } from "./final-review-snapshot.js";
 import { finalReviewFindingCorrection } from "./final-review-boundaries.js";
 
@@ -197,6 +198,30 @@ export function latestFinalReview(jobId, db = getDb()) {
   return review && review.outcome !== "pass" ? review : {};
 }
 
+/**
+ * The operator gate a final review ends in: a reviewer's blocked or
+ * needs_review verdict, or findings that were still unresolved at the
+ * no-progress limit. Its reasons are the reviewer's stated blocker.
+ */
+export function finalReviewEscalation(job, review = latestFinalReview(job?.id)) {
+  if (!review || !review.review_identity) return null;
+  const gate = (reasons) => ({ verdict: "needs_review", confidence: "none", reasons,
+    spawn_jobs: [], human_questions: [], _disable_internal_retry: true,
+    _assessment_confidence_review: true, _verification_blocked: true, _final_review_escalation: true,
+    _final_reviewer_agent_call_id: review.reviewer_agent_call_id });
+  if (review.outcome === "blocked" && review.reviewer_blocked) {
+    const reasons = (review.findings || []).map((finding) => finding.criterion).filter(Boolean);
+    return gate(reasons.length ? reasons : [review.reason || "The reviewer needs an operator decision."]);
+  }
+  if (review.outcome !== "findings") return null;
+  const rounds = finalReviewResultsForAttempt({ jobId: job.id, attemptId: review.attempt_id });
+  if (finalReviewReviewsRemaining(rounds) > 0) return null;
+  const findings = (review.findings || []).map((finding) => [finding.criterion, ...(finding.paths || []), finding.evidence]
+    .filter(Boolean).join(" — ")).filter(Boolean);
+  return gate([`The reviewer's findings were still unresolved after ${FINAL_REVIEW_MAX_UNRESOLVED_ROUNDS} reviews.`,
+    ...(findings.length ? findings : [review.reason || "The reviewer reported findings without their details."])]);
+}
+
 export async function authoritativeFinalReview(job, payload, cwd) {
   const review = latestFinalReview(job.id);
   if (!review) return null; // Jobs never issued final_review retain their existing route.
@@ -207,6 +232,12 @@ export async function authoritativeFinalReview(job, payload, cwd) {
   if (review.review_mode === FINAL_REVIEW_REVIEW_MODES.INFRASTRUCTURE || Object.keys(review).length === 0) return null;
   const unresolved = (reason) => ({ verdict: "needs_review", confidence: "none", reasons: [reason],
     spawn_jobs: [], human_questions: [], _disable_internal_retry: true, _assessment_infrastructure_review: true, _verification_blocked: true });
+  // The reviewer stopped the loop, or its findings survived every round: the
+  // operator decides with the reviewer's own words. No assessor is dispatched
+  // and no further repair is spawned, whether or not the candidate changed
+  // after that review.
+  const escalation = finalReviewEscalation(job, review);
+  if (escalation) return escalation;
   let identity;
   try { identity = await finalReviewIdentity(cwd, payload, { jobId: job.id }); } catch { return unresolved("Cannot verify the final-reviewed workspace identity."); }
   // A repair after the last semantic review needs fresh verification. Let the
@@ -226,13 +257,6 @@ export async function authoritativeFinalReview(job, payload, cwd) {
       identity = await finalReviewIdentity(cwd, payload, { jobId: job.id, commit: reviewedCommit });
     } catch { return null; }
     if (identity !== review.review_identity) return null;
-  }
-  if (review.outcome === "blocked" && review.reviewer_blocked && review.review_identity) {
-    const reasons = (review.findings || []).map((finding) => finding.criterion).filter(Boolean);
-    return { verdict: "needs_review", confidence: "none",
-      reasons: reasons.length ? reasons : [review.reason || "The reviewer needs an operator decision."],
-      spawn_jobs: [], human_questions: [], _disable_internal_retry: true,
-      _assessment_confidence_review: true, _verification_blocked: true };
   }
   if (!["pass", "findings"].includes(review.outcome) || !review.review_identity) {
     return unresolved(review.reason || "Final review is missing, blocked, or has unresolved findings; no second assessor will be dispatched.");

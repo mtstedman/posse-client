@@ -9,7 +9,7 @@ import fs from "fs";
 import path from "path";
 import { isAbortError } from "../../runtime/functions/yield.js";
 import { ensurePosseGitInfoExclude } from "../../runtime/functions/ignore.js";
-import { gitExecAsync } from "./utils.js";
+import { gitExecAsync, isGitCommandFailure } from "./utils.js";
 import { Worktree } from "../classes/index.js";
 import {
   acquireWorktreeLockAsync,
@@ -133,13 +133,23 @@ export async function gitWorktreeAddAsync(wtPath, branchName, mainCwd, opts = {}
       try {
         // A missing gitfile can make Git walk into the parent checkout.
         // Verify identity before dirty recovery, branch removal, or HEAD reset.
-        const toplevel = String(await gitExecAsync(["rev-parse", "--show-toplevel"], wtPath, { signal })).trim();
+        let toplevel;
+        try {
+          toplevel = String(await gitExecAsync(["rev-parse", "--show-toplevel"], wtPath, { signal })).trim();
+        } catch (probeErr) {
+          // Only Git itself rejecting the directory says the metadata is
+          // broken; a transport, heartbeat, or timeout failure says nothing.
+          if (isGitCommandFailure(probeErr)) probeErr.worktreeIdentityFailure = true;
+          throw probeErr;
+        }
         const actualRoot = fs.realpathSync.native(path.resolve(toplevel));
         const expectedRoot = fs.realpathSync.native(path.resolve(wtPath));
         const sameRoot = process.platform === "win32"
           ? actualRoot.toLowerCase() === expectedRoot.toLowerCase() : actualRoot === expectedRoot;
         if (!toplevel || !sameRoot) {
-          throw new Error(`Stale directory is not a worktree root: ${wtPath}`);
+          const identityErr = new Error(`Stale directory is not a worktree root: ${wtPath}`);
+          identityErr.worktreeIdentityFailure = true;
+          throw identityErr;
         }
         const currentBranch = await gitCurrentBranchAsync(wtPath, { signal });
         let dirty;
@@ -244,6 +254,14 @@ export async function gitWorktreeAddAsync(wtPath, branchName, mainCwd, opts = {}
         // metadata — reclassifying it here would answer "refusing to reset"
         // with a lossy copy plus force-removal.
         if (err?.code === "SNAPSHOT_REFUSED_RESET") throw err;
+        // Everything past the identity probe ran against a verified worktree,
+        // so a failure there (branch lookup, snapshot, reset, removal) is not
+        // corrupt metadata. The copy + force-removal below is lossy and
+        // permanent; leave the worktree in place for the caller to retry.
+        if (!err?.worktreeIdentityFailure) {
+          if (err && typeof err === "object") err.deferWorktreeCleanup = true;
+          throw err;
+        }
         deferWorktreeReuseMutationIfRequested(opts, "shouldDeferCorruptRecovery", { wtPath, branchName }, "Corrupt worktree recovery deferred");
         const fileSnapshot = preserveCorruptWorktreeContents(wtPath, mainCwd, {
           wiId: opts.wiId || null,

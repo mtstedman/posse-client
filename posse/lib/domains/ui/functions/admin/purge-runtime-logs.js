@@ -7,10 +7,34 @@ import { closeLog } from "../../../../shared/telemetry/functions/logging/logger.
 import { closeOutputLog } from "../../../../shared/telemetry/functions/logging/output-log.js";
 import { closePromptLog } from "../../../../shared/telemetry/functions/logging/prompt-log.js";
 import { closeObservationLog } from "../../../observability/functions/observations.js";
-import { TERMINAL_WORK_ITEM_STATUSES_SQL } from "../../../queue/functions/common.js";
+import { TERMINAL_JOB_STATUSES_SQL, TERMINAL_WORK_ITEM_STATUSES_SQL } from "../../../queue/functions/common.js";
 import { flushEventsNow } from "../../../queue/functions/events.js";
+import { getLiveSchedulerBlockMessage } from "../../../queue/functions/locks.js";
 import { isInsideRoot } from "../../../runtime/functions/fs-safety.js";
 import { getRuntimeLogDir, getRuntimeRoot } from "../../../runtime/functions/paths.js";
+
+// History is work nothing can still act on. A terminal status alone is not
+// enough: a complete work item keeps its branch until it merges, and a failed
+// one can hold an open recovery gate. Deleting either drops the row that
+// review, merge and recovery need.
+const PURGEABLE_WORK_ITEM_IDS_SQL = `
+  SELECT p.id
+  FROM work_items p
+  WHERE p.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+    AND (
+      p.status = 'canceled'
+      OR (
+        (p.merge_state = 'merged' OR p.branch_name IS NULL OR TRIM(p.branch_name) = '')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM jobs g
+          WHERE g.work_item_id = p.id
+            AND g.job_type = 'human_input'
+            AND g.status NOT IN (${TERMINAL_JOB_STATUSES_SQL})
+        )
+      )
+    )
+`;
 
 // Heartbeats land every 30s; a run silent for longer than this is not live.
 const LIVE_RUN_WINDOW_MS = 120_000;
@@ -42,7 +66,10 @@ function runDirIsLive(runDir, now = Date.now()) {
   }
 }
 
-export function purgeRuntimeLogs({ projectDir = null } = {}) {
+export function purgeRuntimeLogs({
+  projectDir = null,
+  readRunBlock = () => getLiveSchedulerBlockMessage("main"),
+} = {}) {
   closePromptLog();
   closeOutputLog();
   closeObservationLog();
@@ -68,29 +95,32 @@ export function purgeRuntimeLogs({ projectDir = null } = {}) {
   let dbEvents = 0;
   let dbAttempts = 0;
   let historyWorkItems = 0;
+  // A live run still reads and writes these rows (wrap-up review, auto-merge),
+  // so queue history stays untouched until the scheduler lock is released.
+  const dbSkipped = readRunBlock() ? "run_active" : null;
 
   try {
     flushEventsNow();
     const db = getDb();
-    db.transaction(() => {
+    if (!dbSkipped) db.transaction(() => {
       atlasObservations = db.prepare(`
         SELECT COUNT(*) AS count
         FROM job_observations
         WHERE observation_type LIKE 'tool.atlas%'
           AND (
-            work_item_id IN (SELECT id FROM work_items WHERE status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL}))
+            work_item_id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
             OR job_id IN (
               SELECT j.id
               FROM jobs j
               JOIN work_items wi ON wi.id = j.work_item_id
-              WHERE wi.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+              WHERE wi.id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
             )
             OR attempt_id IN (
               SELECT ja.id
               FROM job_attempts ja
               JOIN jobs j ON j.id = ja.job_id
               JOIN work_items wi ON wi.id = j.work_item_id
-              WHERE wi.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+              WHERE wi.id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
             )
           )
       `).get().count || 0;
@@ -99,19 +129,19 @@ export function purgeRuntimeLogs({ projectDir = null } = {}) {
         FROM agent_calls
         WHERE (atlas_method IS NOT NULL OR atlas_prefetch_status IS NOT NULL)
           AND (
-            work_item_id IN (SELECT id FROM work_items WHERE status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL}))
+            work_item_id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
             OR job_id IN (
               SELECT j.id
               FROM jobs j
               JOIN work_items wi ON wi.id = j.work_item_id
-              WHERE wi.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+              WHERE wi.id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
             )
             OR attempt_id IN (
               SELECT ja.id
               FROM job_attempts ja
               JOIN jobs j ON j.id = ja.job_id
               JOIN work_items wi ON wi.id = j.work_item_id
-              WHERE wi.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+              WHERE wi.id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
             )
           )
       `).get().count || 0;
@@ -120,53 +150,53 @@ export function purgeRuntimeLogs({ projectDir = null } = {}) {
       // a purge cannot accidentally erase work that may still be runnable.
       dbEvents = db.prepare(`
         DELETE FROM events
-        WHERE work_item_id IN (SELECT id FROM work_items WHERE status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL}))
+        WHERE work_item_id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
            OR job_id IN (
              SELECT j.id
              FROM jobs j
              JOIN work_items wi ON wi.id = j.work_item_id
-             WHERE wi.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+             WHERE wi.id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
            )
            OR attempt_id IN (
              SELECT ja.id
              FROM job_attempts ja
              JOIN jobs j ON j.id = ja.job_id
              JOIN work_items wi ON wi.id = j.work_item_id
-             WHERE wi.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+             WHERE wi.id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
            )
       `).run().changes;
       dbObservations = db.prepare(`
         DELETE FROM job_observations
-        WHERE work_item_id IN (SELECT id FROM work_items WHERE status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL}))
+        WHERE work_item_id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
            OR job_id IN (
              SELECT j.id
              FROM jobs j
              JOIN work_items wi ON wi.id = j.work_item_id
-             WHERE wi.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+             WHERE wi.id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
            )
            OR attempt_id IN (
              SELECT ja.id
              FROM job_attempts ja
              JOIN jobs j ON j.id = ja.job_id
              JOIN work_items wi ON wi.id = j.work_item_id
-             WHERE wi.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+             WHERE wi.id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
            )
       `).run().changes;
       dbAgentCalls = db.prepare(`
         DELETE FROM agent_calls
-        WHERE work_item_id IN (SELECT id FROM work_items WHERE status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL}))
+        WHERE work_item_id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
            OR job_id IN (
              SELECT j.id
              FROM jobs j
              JOIN work_items wi ON wi.id = j.work_item_id
-             WHERE wi.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+             WHERE wi.id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
            )
            OR attempt_id IN (
              SELECT ja.id
              FROM job_attempts ja
              JOIN jobs j ON j.id = ja.job_id
              JOIN work_items wi ON wi.id = j.work_item_id
-             WHERE wi.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+             WHERE wi.id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
            )
       `).run().changes;
       dbAttempts = db.prepare(`
@@ -174,11 +204,11 @@ export function purgeRuntimeLogs({ projectDir = null } = {}) {
         FROM job_attempts ja
         JOIN jobs j ON j.id = ja.job_id
         JOIN work_items wi ON wi.id = j.work_item_id
-        WHERE wi.status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+        WHERE wi.id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
       `).get().count || 0;
       historyWorkItems = db.prepare(`
         DELETE FROM work_items
-        WHERE status IN (${TERMINAL_WORK_ITEM_STATUSES_SQL})
+        WHERE id IN (${PURGEABLE_WORK_ITEM_IDS_SQL})
       `).run().changes;
     })();
   } catch {
@@ -186,7 +216,7 @@ export function purgeRuntimeLogs({ projectDir = null } = {}) {
   }
 
   if (!fs.existsSync(resolvedLogDir)) {
-    return { logDir: resolvedLogDir, skippedLiveRuns, files, dirs, bytes, atlasAgentCalls, atlasObservations, dbAgentCalls, dbObservations, dbEvents, dbAttempts, historyWorkItems };
+    return { logDir: resolvedLogDir, skippedLiveRuns, files, dirs, bytes, atlasAgentCalls, atlasObservations, dbAgentCalls, dbObservations, dbEvents, dbAttempts, historyWorkItems, dbSkipped };
   }
 
   for (const entry of fs.readdirSync(resolvedLogDir, { withFileTypes: true })) {
@@ -213,5 +243,5 @@ export function purgeRuntimeLogs({ projectDir = null } = {}) {
       // Best effort: keep going so one locked/stale entry does not block cleanup.
     }
   }
-  return { logDir: resolvedLogDir, skippedLiveRuns, files, dirs, bytes, atlasAgentCalls, atlasObservations, dbAgentCalls, dbObservations, dbEvents, dbAttempts, historyWorkItems };
+  return { logDir: resolvedLogDir, skippedLiveRuns, files, dirs, bytes, atlasAgentCalls, atlasObservations, dbAgentCalls, dbObservations, dbEvents, dbAttempts, historyWorkItems, dbSkipped };
 }

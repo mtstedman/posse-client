@@ -110,6 +110,9 @@ export function passingReceiptCommits(command, {
   for (const row of rows) {
     const receipt = parseReceipt(getArtifact(row.id));
     if (!receipt || receipt.status !== "passed" || String(receipt.command || "").trim() !== wanted) continue;
+    // A broad plan label can survive selection of just a few test files.
+    // Such a pass cannot move the known-good baseline for the full command.
+    if (executionSelection(receipt).scope_limited) continue;
     const receiptCwd = receipt.cwd_relative ?? (receipt.normalized_cwd && receipt.normalized_cwd !== "." ? receipt.normalized_cwd : null);
     if ((receiptCwd || null) !== wantedCwd) continue;
     const commit = normalizedCommit(receipt.executed_commit_hash) || normalizedCommit(receipt.commit_hash);

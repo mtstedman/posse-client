@@ -257,7 +257,64 @@ function mergeSkillId(skillIds, skillId) {
   return [...skillIds, skillId];
 }
 
-export function createJobsFromPlan(worker, planJob, tasks, {
+// Compile state stamped on the plan job: written when a compile starts and
+// completed as its last step. A stamp for the current attempt that was never
+// completed means the compile threw part-way, so the failed-attempt guard
+// (handleExecuteAttemptError) must not take that attempt's children for the
+// plan's durable commit. A plan job with no stamp for the attempt (compiled
+// before this stamp existed, or settled on children the compiler did not
+// create) keeps the guard's child-based rule unchanged.
+const PLAN_COMPILE_STATE_KEY = "_plan_compile";
+
+function stampPlanCompile(planJob, attemptId, completed) {
+  const current = getJob(planJob.id);
+  if (!current) return;
+  const payload = parseJobPayload(current);
+  const at = new Date().toISOString();
+  updateJobPayload(planJob.id, JSON.stringify({
+    ...payload,
+    [PLAN_COMPILE_STATE_KEY]: completed
+      ? { ...payload[PLAN_COMPILE_STATE_KEY], attempt_id: attemptId, completed_at: at }
+      : { attempt_id: attemptId, started_at: at, completed_at: null },
+  }));
+}
+
+export function planCompileIncompleteInAttempt(planJob, attempt) {
+  const state = parseJobPayload(planJob)?.[PLAN_COMPILE_STATE_KEY];
+  if (!state || typeof state !== "object" || state.completed_at) return false;
+  if (state.attempt_id != null) return Number(state.attempt_id) === Number(attempt?.id);
+  // Compiles started without an attempt id (the question-answer brief) are
+  // matched by time, as the guard already matches children to the attempt.
+  return Boolean(attempt?.started_at) && String(state.started_at || "") >= String(attempt.started_at);
+}
+
+export function createJobsFromPlan(worker, planJob, tasks, options = {}) {
+  const createdJobIds = new Set();
+  const attemptId = options.planAttemptId ?? options.sourceHashRefContext?.attempt_id ?? null;
+  try {
+    stampPlanCompile(planJob, attemptId, false);
+    compileJobsFromPlan(worker, planJob, tasks, options, createdJobIds);
+    // Inside the try: a batch whose completion could not be recorded is
+    // canceled like any other failed compile, so the retry cannot duplicate it.
+    stampPlanCompile(planJob, attemptId, true);
+  } catch (err) {
+    // The compile is not one transaction. A retry of this plan job does not
+    // supersede its own earlier children (cancelSupersededPlanChildren only
+    // cancels children of older plan jobs), so a part-built batch left live
+    // would run unwired and then be duplicated by the retry. Cancel it here,
+    // before the scheduler can lease any of it, and let the attempt fail.
+    for (const jobId of createdJobIds) {
+      try {
+        const createdJob = getJob(jobId);
+        if (!createdJob || TERMINAL_JOB_STATUSES.includes(createdJob.status)) continue;
+        updateJobStatus(jobId, "canceled");
+      } catch { /* keep the compile error; the stamp stays incomplete */ }
+    }
+    throw err;
+  }
+}
+
+function compileJobsFromPlan(worker, planJob, tasks, {
   atlasDevBriefsEnabled: _atlasDevBriefsEnabled = false,
   sourceHashRefContext = null,
   planReadRoot = worker.projectDir,
@@ -271,7 +328,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
   retireWaitingLanePlanningDemand = retireWaitingLanePlanning,
   spawnFromRole = defaultSpawnFromRole,
   planAttemptId = null,
-} = {}) {
+} = {}, allCreatedJobIds = new Set()) { // every job spawned by this compilation
       const plannerRole = worker?.roleRegistry?.get?.("plan");
       const environment = planningEnvironmentReadiness(planJob);
       if (!environment.ok) {
@@ -281,6 +338,7 @@ export function createJobsFromPlan(worker, planJob, tasks, {
           payload_json: JSON.stringify({ questions: [environment.message + " How should the next plan proceed: retry setup with a revised batch, continue without it, or pause this work item?"],
             context: environment.message, allow_best_judgment: false, requires_interactive_approval: true }),
         });
+        allCreatedJobIds.add(gate.id);
         spawnPlanAfterHumanInputDeferral(worker, planJob, [gate.id], { deferralRound: 1 });
         worker.emit(planJob.id, environment.message);
         return;
@@ -303,7 +361,6 @@ export function createJobsFromPlan(worker, planJob, tasks, {
       const pendingDependencyLinks = [];
       const duplicateTaskClaims = new Map(); // semantic planner task -> first job created for it
       const humanInputGateIds = []; // planner human_input gates, in creation order
-      const allCreatedJobIds = new Set(); // every job spawned by this compilation
       const compiledTaskJobIds = new Map(); // planner task index -> spawned job ids
       const promoteDestinationClaims = new Map(); // repo file -> promote claim record
       const promoteClaimsByJobId = new Map(); // promote job id -> claim group

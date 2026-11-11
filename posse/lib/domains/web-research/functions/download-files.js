@@ -130,6 +130,7 @@ export function createPinnedHttpsFetch(lookup = defaultLookup) {
    * @param {{ signal?: AbortSignal, headers?: Record<string, string> }} init
    */
   return (url, { signal, headers } = {}) => new Promise((resolve, reject) => {
+    // https.request itself refuses any non-https URL.
     const request = https.request(url, {
       method: "GET",
       headers,

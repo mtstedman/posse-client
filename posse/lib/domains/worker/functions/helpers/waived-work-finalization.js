@@ -1,3 +1,4 @@
+import path from "node:path";
 import { MUTATING_JOB_TYPES } from "../../../../catalog/job.js";
 import { WAIVED_WORK_COMMIT_TRAILER, WAIVED_WORK_FINALIZATION_KEY } from "../../../../catalog/human-input.js";
 import { Scope } from "../../../../shared/scope/classes/Scope.js";
@@ -7,6 +8,7 @@ import { restoreScopedSnapshotAsync } from "../../../git/functions/restore-scope
 import { listSnapshotRefsAsync, SNAPSHOT_REF_PREFIX } from "../../../git/functions/worktree-snapshots.js";
 import { gitCurrentHashAsync, gitExecAsync } from "../../../git/functions/utils.js";
 import { withWorktreeLockAsync, worktreePathAsync } from "../../../git/functions/worktree.js";
+import { nestedProjectSubpathAsync } from "../../../git/functions/worktree-path.js";
 import { getAttempts, getDependencies, getJob, getWorkItem, listActiveFileLocks, listJobsByWorkItem,
   setAttemptCommitHash, setJobResult, updateJobPayload } from "../../../queue/functions/index.js";
 import { parseJobPayload } from "../../../queue/functions/payload.js";
@@ -20,12 +22,24 @@ function dependsOn(jobId, predecessorId, seen = new Set()) {
     && (edge.depends_on_job_id === predecessorId || dependsOn(edge.depends_on_job_id, predecessorId, seen)));
 }
 
+// Jobs run, lock and commit in the project directory inside the WI worktree,
+// which is a subdirectory when the project is nested in its repository. Scope
+// is relative to that directory; Git status and diff-tree still report paths
+// from the repository root, so projectPath maps them (null: outside the project).
+export async function projectWorktreeAsync(projectDir, workItemId) {
+  const root = await worktreePathAsync(projectDir, workItemId);
+  const rel = await nestedProjectSubpathAsync(projectDir);
+  if (!rel) return { cwd: root, projectPath: file => file };
+  const prefix = `${rel}/`;
+  return { cwd: path.join(root, rel), projectPath: file => (file.startsWith(prefix) ? file.slice(prefix.length) : null) };
+}
+
 export async function finalizeWaivedJobWork(worker, original, { gateId = null, commitWork = gitCommitAllAsync, preserveSuccessors = false } = {}) {
   const job = getJob(original.id) || original;
   const payload = parseJobPayload(job);
   const attempt = getAttempts(job.id).findLast(entry => entry.worker_type !== "assessor");
   if (!MUTATING_JOB_TYPES.has(job.job_type) || payload.task_mode === "db" || !attempt || attempt.commit_hash) return;
-  const cwd = await worktreePathAsync(worker.projectDir, job.work_item_id);
+  const { cwd, projectPath } = await projectWorktreeAsync(worker.projectDir, job.work_item_id);
   let scope = new Scope({ modifyFiles: [...(payload.files_to_modify || []), ...(payload.must_modify || [])],
     createFiles: payload.files_to_create || [], deleteFiles: payload.files_to_delete || [],
     createRoots: payload.create_roots || [], cwd });
@@ -41,7 +55,7 @@ export async function finalizeWaivedJobWork(worker, original, { gateId = null, c
     }
     const dirty = parsePorcelainEntries(await gitExecAsync([
       "status", "--porcelain", "-z", "--no-renames", "--untracked-files=all",
-    ], cwd, { trim: false })).map(entry => entry.path);
+    ], cwd, { trim: false })).map(entry => projectPath(entry.path)).filter(Boolean);
     // Git's ordinary status hides ignored declared tests. Include only exact
     // owned paths here, not whole ignored dependency/build directories.
     if (scope.allFiles().length) dirty.push(...String(await gitExecAsync([
@@ -102,7 +116,7 @@ export async function finalizeWaivedJobWork(worker, original, { gateId = null, c
     if (!commitHash && !scope.isEmpty()) {
       const commitDirty = parsePorcelainEntries(await gitExecAsync([
         "status", "--porcelain", "-z", "--no-renames", "--untracked-files=all",
-      ], cwd, { trim: false })).map(entry => entry.path);
+      ], cwd, { trim: false })).map(entry => projectPath(entry.path)).filter(Boolean);
       const locks = listActiveFileLocks();
       const preservationJob = { ...job, payload_json: JSON.stringify(identityPayload) };
       const result = await commitWork(message, cwd, scope.toJSON(), {
@@ -115,8 +129,8 @@ export async function finalizeWaivedJobWork(worker, original, { gateId = null, c
     if (commitHash) {
       const committedPaths = String(await gitExecAsync([
         "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", commitHash,
-      ], cwd, { trim: false })).split("\0").filter(Boolean);
-      if (committedPaths.some(file => !scope.contains(file))) throw new Error("Waiver commit contains files outside its owner's scope");
+      ], cwd, { trim: false })).split("\0").filter(Boolean).map(projectPath);
+      if (committedPaths.some(file => !file || !scope.contains(file))) throw new Error("Waiver commit contains files outside its owner's scope");
       const base = String(await gitExecAsync(["rev-parse", `${commitHash}^1`], cwd)).trim();
       setAttemptCommitHash(attempt.id, commitHash, base);
       setJobResult(job.id, { commit_hash: commitHash, waiver_gate_id: gateId });

@@ -19,7 +19,7 @@ import {
   mainViewPath,
   embeddingsRoot,
 } from "./runtime-paths.js";
-import { stagerMetaPathForOutput } from "./scip/stager-meta.js";
+import { stagedSanitizerPolicyIsCurrent, stagerMetaPathForOutput } from "./scip/stager-meta.js";
 import { semanticLanguageTags } from "./resolver/adapters/registry.js";
 import { shouldRunScipPhase } from "../../../integrations/functions/atlas-v2-mode.js";
 import { DOCUMENTATION_KEY_PREFIX } from "./embeddings/documentation-channel.js";
@@ -263,6 +263,16 @@ function inspectScipLayers(repoRoot, config) {
         status: "failed",
         coverage: 0,
         detail: `${meta?.failure_reason || "stage failed"} (attempt ${attempts})`,
+      });
+    } else if ((status === "staged" || status === "recovered") && !stagedSanitizerPolicyIsCurrent(meta)) {
+      // Intake withholds a staged file whose sanitizer stamp is missing or
+      // old (ParseEngine and the stager apply the same check), so it is not
+      // contributing; say so rather than reporting 100%.
+      layers.push({
+        layer: `scip:${language}`,
+        status: "stale",
+        coverage: 0,
+        detail: "staged output withheld from intake until restaged (sanitizer policy not current)",
       });
     } else if (status === "staged" || status === "recovered") {
       layers.push({

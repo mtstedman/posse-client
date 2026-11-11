@@ -42,7 +42,9 @@ export function createTestExecutionExecutors() {
         const permission = jobTestPermission(options.jobId || getObservationContext()?.job_id, args?.path);
         if (permission?.allowed === false) return JSON.stringify({ ok: null, status: "unavailable", reason: "test_outside_job_scope", path: args?.path, message: permission.reason });
         const executedCommitHash = await cleanExecutedCommit(cwd, args?.path);
-        const result = await runUnitTestFile({ projectDir: cwd, path: args?.path, capability, declaredScope, scipAvailable: options.scipAvailable !== false });
+        const result = await runUnitTestFile({ projectDir: cwd, path: args?.path, capability, declaredScope, scipAvailable: options.scipAvailable !== false,
+          // The gateway aborts this when the calling session is released.
+          signal: options.signal });
         const guidance = failureGuidance.forResult(result, options.agentCallId);
         return JSON.stringify({
           ...(guidance ? { failure_guidance: guidance } : {}),

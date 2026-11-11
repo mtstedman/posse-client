@@ -97,12 +97,12 @@ function normalizeTier(raw) {
   return "investigate";
 }
 
-export async function triageInventory(inventory, { role = "planner", modelTier = "cheap", silent = true } = {}) {
+export async function triageInventory(inventory, { role = "planner", modelTier = "cheap", silent = true, resolveProvider = getProvider } = {}) {
   const items = buildItemIndex(inventory);
   if (items.length === 0) return { classifications: {}, via: "empty" };
 
   let provider;
-  try { provider = getProvider(role); }
+  try { provider = resolveProvider(role); }
   catch { return { classifications: deterministicFallback(items), via: "fallback:no-provider" }; }
 
   const prompt = renderPrompt(inventory, items);
@@ -135,7 +135,9 @@ export async function triageInventory(inventory, { role = "planner", modelTier =
     };
   }
   for (const item of items) {
-    if (!indexed[item.key]) {
+    // A worktree whose status could not be read may hold unsaved work; the
+    // model's answer never makes it discardable.
+    if (!indexed[item.key] || (item.kind === "worktree" && item.payload?.statusUnknown)) {
       const fallback = deterministicFallback([item]);
       indexed[item.key] = fallback[item.key];
     }

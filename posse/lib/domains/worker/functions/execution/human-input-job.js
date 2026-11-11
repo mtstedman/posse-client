@@ -7,7 +7,7 @@ installScopeCreateMaterializer(materializeScopeCreates);
 import { PLANNER_CLARIFICATION_REVIEW_TYPE } from "../../../../catalog/tools/planner-clarification.js";
 import { ENVIRONMENT_SETUP_REVIEW_TYPE } from "../../../../catalog/tools/environment-setup.js";
 import { applyDirtyWorktreeRecovery } from "../helpers/dirty-worktree-recovery.js";
-import { finalizeWaivedJobWork } from "../helpers/waived-work-finalization.js";
+import { finalizeWaivedJobWork, projectWorktreeAsync } from "../helpers/waived-work-finalization.js";
 import { APPROVAL_POLICY_FAIL_CLOSED_CODE, approvalResolutionAuthorized } from "../../../../catalog/approval-policies.js";
 import { failClosedUnattendedGate } from "../helpers/human-input.js";
 import { DIRTY_WORKTREE_RECOVERY_REVIEW_TYPE } from "../../../../catalog/human-input.js";
@@ -54,7 +54,7 @@ import {
 } from "../../../queue/functions/index.js";
 import { getDb } from "../../../../shared/storage/functions/index.js";
 import { completeDeliveredHumanAnswerReservation } from "../../../queue/functions/interaction-contract.js";
-import { withWorktreeLockAsync, worktreePathAsync } from "../../../git/functions/worktree.js";
+import { withWorktreeLockAsync } from "../../../git/functions/worktree.js";
 import { acquireWorktreeLockAsync, gitStashLockPath } from "../../../git/functions/worktree-locks.js";
 import { dropStashByHashAsync, findStallStashEntryAsync } from "../../../git/functions/utils.js";
 import {
@@ -859,7 +859,9 @@ export async function runHumanInputJob(worker, job, {
         await worker._setJobRowStatus(origJob, "queued");
         worker.emit(job.id, `${C.cyan}[human] Partial work for job #${origJob.id} will resume with maxTurns=${extension.maxTurns}${C.reset}`);
       } else if (decision === "commit") {
-        const wtPath = await worktreePathAsync(worker.projectDir, origJob.work_item_id);
+        // The job ran, locked and scoped its work in the project directory,
+        // a subdirectory of the worktree when the project is nested.
+        const { cwd: wtPath } = await projectWorktreeAsync(worker.projectDir, origJob.work_item_id);
         const restored = await worker.applyStallStashAsync(origJob, wtPath);
         if (!restored) {
           finalHumanStatus = "failed";
@@ -909,7 +911,7 @@ export async function runHumanInputJob(worker, job, {
           }
         }
       } else if (decision === "revert") {
-        const wtPath = await worktreePathAsync(worker.projectDir, origJob.work_item_id);
+        const { cwd: wtPath } = await projectWorktreeAsync(worker.projectDir, origJob.work_item_id);
         let dropped = null;
         try {
           dropped = await dropPartialWorkStashAsync(worker, origJob, wtPath);

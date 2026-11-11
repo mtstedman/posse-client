@@ -815,6 +815,8 @@ export function describeWorkItemMergeParking(parking) {
         : "";
       return `${label} is parked on operator gate #${parking.gate_job_id}${suffix}${also}`;
     }
+    case "budget_paused":
+      return `${label} has a paused budget; inspect posse budget show ${parking.work_item_id}, then posse budget resume ${parking.work_item_id}`;
     case "merge_failed":
       return `${label} failed to merge and waits for an operator`;
     case "upstream_failed":

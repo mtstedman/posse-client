@@ -265,7 +265,10 @@ export class AutomationService {
         this.store.put("commits", run.id, sandbox.manifest());
         this.store.updateRun(run);
       });
-      check(); run.artifacts = sandbox.commit(); check(); run.status = "succeeded";
+      // No deadline check after the commit: its files are in place, and
+      // failing or retrying the run here would drop the commit journal for
+      // work that landed.
+      check(); run.artifacts = sandbox.commit(); run.status = "succeeded";
       run.completed_at = new Date(this.now()).toISOString();
       this.store.transaction(() => {
         for (const item of sandbox.checkpoints) this.store.saveCheckpoint(item.id, item.value);
@@ -354,6 +357,13 @@ export class AutomationService {
     schedule.enabled = enabled === true;
     schedule.state = schedule.enabled ? "active" : "paused";
     delete schedule.error_code;
+    // A schedule with no next occurrence has finished (a fired one-time
+    // trigger). Resuming it must find a future occurrence, never replay it.
+    if (schedule.enabled && schedule.next_at == null) {
+      const next = nextOccurrence(schedule.trigger, this.now() - 1);
+      demand(next, "Schedule has no future occurrence", "invalid_trigger");
+      schedule.next_at = next.at; schedule.next_local_key = next.localKey;
+    }
     return this.store.put("schedules", id, schedule);
   }
   removeSchedule(id) {
@@ -385,12 +395,12 @@ export class AutomationService {
     }
     this.startQueuedRuns();
     for (const value of this.store.list("schedules")) {
-      if (!value.enabled || value.next_at > this.now()) continue;
+      if (!value.enabled || value.next_at == null || value.next_at > this.now()) continue;
       const materialized = [];
       try { this.store.transaction(() => {
         this.assertOwner();
         const schedule = this.store.get("schedules", value.id);
-        if (!schedule.enabled || schedule.next_at > this.now()) return;
+        if (!schedule.enabled || schedule.next_at == null || schedule.next_at > this.now()) return;
         const due = [];
         let cursor = { at: schedule.next_at, localKey: schedule.next_local_key || null };
         for (let index = 0; cursor && cursor.at <= this.now() && index < 1000; index++) {

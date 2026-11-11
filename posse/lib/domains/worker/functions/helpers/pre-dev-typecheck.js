@@ -63,6 +63,21 @@ async function porcelain(cwd) {
   }
 }
 
+// `git status` names paths from the repository root, while sibling ownership
+// (write locks, materialized placeholders) is recorded relative to the project
+// directory, a subdirectory of the worktree when the project is nested in its
+// repository. Ask the ownership lookup in project form and answer with the
+// status paths that were given.
+export function projectRelativeSiblingOwnership(cwd, ownedPaths) {
+  return async (paths = []) => {
+    const prefix = String(await gitExecAsync(["rev-parse", "--show-prefix"], cwd) || "").trim();
+    if (!prefix) return ownedPaths(paths);
+    const inProject = paths.filter((file) => String(file).startsWith(prefix));
+    const owned = new Set(await ownedPaths(inProject.map((file) => file.slice(prefix.length))));
+    return new Set(inProject.filter((file) => owned.has(file.slice(prefix.length))));
+  };
+}
+
 // Undo what the typecheck changed. Sibling jobs of the work item share this
 // worktree, so when one owns a dirty path, only paths this run changed are
 // put back, never the sibling's (WI 154, 2026-10-01: a sibling's pre-dev
@@ -77,14 +92,18 @@ async function cleanupTypecheckSideEffects({ worker, job, wtPath, before, after,
       siblingPaths = new Set();
     }
   }
-  if (siblingPaths.size === 0) {
+  const prior = porcelainStatusEntries(before);
+  // A whole-worktree reset is only safe when nothing was dirty going in.
+  // Setup deliberately keeps this job's own dirty files on a preserved-work
+  // resume or an operator-approved dirty recovery; those are not
+  // sibling-owned, and resetting here would discard them.
+  if (siblingPaths.size === 0 && prior.size === 0) {
     if (typeof cleanupWorktree === "function") await cleanupWorktree();
     return;
   }
-  const prior = porcelainStatusEntries(before);
   const own = porcelainDeltaPaths(before, after).filter((file) => !siblingPaths.has(file) && !prior.has(file));
   if (own.length > 0) await cleanupPaths(wtPath, own);
-  worker?.emit?.(job.id, `${C.dim}[typecheck] WI#${job.work_item_id} job #${job.id}: undid ${own.length} typecheck change(s); kept ${siblingPaths.size} sibling-owned path(s)${C.reset}`);
+  worker?.emit?.(job.id, `${C.dim}[typecheck] WI#${job.work_item_id} job #${job.id}: undid ${own.length} typecheck change(s); kept ${prior.size} already-dirty and ${siblingPaths.size} sibling-owned path(s)${C.reset}`);
 }
 
 function countByFile(diagnostics) {

@@ -1255,7 +1255,10 @@ function holdForMergeVerificationReview(workItem, observedBranchHead = null) {
   const existing = mergeVerificationReviewGateState(workItem.id, { waivedJobIds: requirement.waivedJobIds });
   if (existing?.approved && (observedBranchHead == null || existing.reviewed_branch_head === observedBranchHead)) return null;
   if (existing?.holds) return existing;
-  const passedChecks = postChangeReceiptsAtCommit(workItem.id, latestImplementationCommit(workItem.id))
+  // The review binds the observed branch head, so the evidence shown must be
+  // what ran on that commit. After a content-changing refresh the newest
+  // dev/fix commit is no longer the head and its receipts do not cover it.
+  const passedChecks = postChangeReceiptsAtCommit(workItem.id, observedBranchHead || latestImplementationCommit(workItem.id))
     .filter((receipt) => receipt.status === "passed"
       && ["reported_executed", "not_applicable"].includes(receipt.coverage_status));
   const gate = createJob(mergeVerificationReviewGateJobSpec(workItem, requirement, {

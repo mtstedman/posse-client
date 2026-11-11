@@ -10,6 +10,7 @@ import dns from "node:dns";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { Readable } from "node:stream";
 
 import {
   WEB_RESEARCH_LIMITS,
@@ -25,6 +26,9 @@ import {
   surfaceHashRefForContext,
 } from "../../queue/functions/hash-refs.js";
 import { hashRefModelVisibility } from "../../../shared/tools/functions/fetch-ref-policy.js";
+// download-files.js imports this module too; the cycle is safe because both
+// sides only use the other's exports at call time.
+import { createPinnedHttpsFetch } from "./download-files.js";
 
 const SNAPSHOT_DIR = "sources";
 const BLOCKED_HOST_SUFFIXES = Object.freeze([".localhost", ".local", ".internal", ".home.arpa"]);
@@ -173,7 +177,7 @@ async function assertFetchableUrl(rawUrl, { lookup = defaultLookup, signal = nul
   } catch {
     throw rejected("not an absolute URL");
   }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw rejected("only http(s) sources can be snapshotted");
+  if (parsed.protocol !== "https:") throw rejected("only https:// sources can be snapshotted");
   if (parsed.username || parsed.password) throw rejected("credentials in source URLs are not allowed");
   const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   if (isLocalHostName(host)) {
@@ -200,6 +204,47 @@ async function assertFetchableUrl(rawUrl, { lookup = defaultLookup, signal = nul
 
 async function defaultLookup(host) {
   return await dns.promises.lookup(host, { all: true, verbatim: true });
+}
+
+// The default transport. Global fetch would resolve the host a second time,
+// so the address that passed assertFetchableUrl would not be the one it
+// connects to (DNS rebinding). The pinned transport checks the answer the
+// socket actually uses.
+function createPinnedSnapshotFetch(lookup) {
+  const pinned = createPinnedHttpsFetch(lookup);
+  /**
+   * @param {string} url
+   * @param {{ signal?: AbortSignal, headers?: Record<string, string> }} [init]
+   */
+  return async (url, { signal, headers } = {}) => {
+    let response;
+    try {
+      // The Node transport does not decode compressed bodies.
+      response = await pinned(url, { signal, headers: { ...headers, "accept-encoding": "identity" } });
+    } catch (error) {
+      throw failed(String(error?.reason || error?.message || error).slice(0, 200));
+    }
+    const encoding = String(response.headers.get("content-encoding") || "").trim().toLowerCase();
+    if (encoding && encoding !== "identity") {
+      response.body.destroy();
+      throw failed(`content-encoding ${encoding} is not accepted`);
+    }
+    return {
+      status: response.status,
+      ok: response.status >= 200 && response.status < 300,
+      headers: response.headers,
+      body: Readable.toWeb(response.body),
+    };
+  };
+}
+
+// Release the connection of a response whose body will not be read.
+function discardBody(response) {
+  try {
+    response?.body?.cancel?.()?.catch?.(() => {});
+  } catch {
+    // Discarding is best effort.
+  }
 }
 
 async function readCappedBody(response, maxBytes) {
@@ -230,16 +275,18 @@ async function readCappedBody(response, maxBytes) {
 
 /**
  * Download one source, following redirects manually so every hop is checked.
+ * Without an injected fetchImpl every hop uses the address-pinned transport.
  * @param {string} url
  * @param {{ fetchImpl?: typeof fetch, lookup?: any, signal?: AbortSignal | null, maxBytes?: number }} [deps]
  */
 export async function downloadWebSource(url, {
-  fetchImpl = globalThis.fetch,
+  fetchImpl = null,
   lookup = defaultLookup,
   signal = null,
   maxBytes = WEB_SOURCE_SNAPSHOT_LIMITS.maxBytes,
 } = {}) {
-  if (typeof fetchImpl !== "function") throw failed("fetch is unavailable");
+  if (fetchImpl != null && typeof fetchImpl !== "function") throw failed("fetch is unavailable");
+  const fetchFn = fetchImpl || createPinnedSnapshotFetch(lookup);
   const timeout = AbortSignal.timeout(WEB_SOURCE_SNAPSHOT_LIMITS.fetchTimeoutMs);
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
   let current = url;
@@ -249,7 +296,7 @@ export async function downloadWebSource(url, {
     throwIfAborted(combined);
     let response;
     try {
-      response = await fetchImpl(parsed.toString(), {
+      response = await fetchFn(parsed.toString(), {
         method: "GET",
         redirect: "manual",
         signal: combined,
@@ -260,17 +307,23 @@ export async function downloadWebSource(url, {
       });
     } catch (error) {
       if (signal?.aborted) throw signal.reason || failed("aborted");
+      if (error instanceof SnapshotError && !timeout.aborted) throw error;
       throw failed(timeout.aborted ? "download timed out" : `download failed: ${String(error?.message || error).slice(0, 160)}`);
     }
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
+      discardBody(response);
       if (!location) throw failed(`HTTP ${response.status} without a Location header`);
       current = new URL(location, parsed).toString();
       continue;
     }
-    if (!response.ok) throw failed(`HTTP ${response.status}`);
+    if (!response.ok) {
+      discardBody(response);
+      throw failed(`HTTP ${response.status}`);
+    }
     const contentType = response.headers.get("content-type") || "";
     if (!isAllowedSnapshotMediaType(contentType)) {
+      discardBody(response);
       throw rejected(`media type ${normalizeMediaType(contentType) || "(none)"} is not a text or data file`);
     }
     const bytes = await readCappedBody(response, maxBytes);
@@ -333,10 +386,10 @@ export function normalizeNominatedSources(value) {
     let normalized;
     try {
       const parsed = new URL(url);
-      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("protocol");
+      if (parsed.protocol !== "https:") throw new Error("protocol");
       normalized = parsed.toString();
     } catch {
-      dropped.push({ index, reason: "url must be an absolute HTTP(S) URL" });
+      dropped.push({ index, reason: "url must be an absolute https:// URL" });
       return;
     }
     if (normalized.length > 2_000) {
@@ -377,7 +430,7 @@ function recordSnapshotObservation(context, result) {
 export async function captureWebSources(sources, {
   context = {},
   projectDir = null,
-  fetchImpl = globalThis.fetch,
+  fetchImpl = null,
   lookup = defaultLookup,
   signal = null,
   dispatchId = null,

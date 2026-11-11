@@ -15,8 +15,11 @@ import {
 const BLOCKED_ALWAYS = /^\s*(rm\s+-rf\s+[\/~]|shutdown|reboot|mkfs|dd\s|format\s|del\s+\/[sq]|:(){ :|curl\s.*\|\s*sh|wget\s.*\|\s*sh)/i;
 const BLOCKED_MUTATING_COMMAND = new RegExp(
   [
-    /rm\b/, /mv\b/, /cp\b/, /mkdir\b/, /touch\b/, /chmod\b/, /chown\b/,
-    /sed\s+-i/, /tee\b/,
+    // Whole command words only: an unanchored /rm\b/ also matched inside
+    // ordinary names ("src/form.js", "tcp.js", "perform", a temp dir ending
+    // in "cp") and refused plain reads of them.
+    /(?<![\w./-])(?:rm|mv|cp|mkdir|touch|chmod|chown|tee)(?![\w.-])/,
+    /sed\s+-i/,
     />[^&]/, />>/,
     /git\s+(push|commit|add|reset|checkout|clean|stash|merge|rebase|branch\s+-[dDmM]|tag\s+-[da])/,
     /npm\s+(install|uninstall|publish|link|pack)/, /yarn\s+(add|remove)/,
@@ -49,6 +52,19 @@ const RIPGREP_COMMAND_FLAGS = new Set(["--pre", "--hostname-bin"]);
 const GREP_COMMAND_FLAGS = new Set(["--filter", "--filter-magic-label"]);
 const GIT_UNSAFE_READ_FLAGS = new Set(["-c", "--config-env", "--ext-diff", "--textconv", "--output"]);
 const FILE_MUTATING_FLAGS = new Set(["-c", "--compile"]);
+// Short flags of the search tools, as getopt/lexopt read a cluster: `plain`
+// take no value, `valued` take the rest of the cluster or else the next word.
+// A letter in neither list is unknown and is treated as whichever reading
+// vets more. (`-r` is recursion to grep but `--replace VALUE` to ripgrep.)
+const SEARCH_SHORT_FLAGS = {
+  grep: { plain: "abcEFGHhIiLlnoPqRrsTUVvwxZz0123456789", valued: "ABCDdefm" },
+  rg: { plain: "abcFHhIiLlNnoPpqSsUuVvwxz0.", valued: "ABCdEefgjMmrTt" },
+};
+// Long flags whose separate next word is a file the tool reads (GNU grep also
+// accepts unambiguous abbreviations).
+const SEARCH_PATH_VALUE_FLAGS = { grep: /^--exclude-f(?:r|ro|rom)?$/, rg: /^--ignore-file$/ };
+// Short flags whose attached value (`-f<path>`) is a file the tool reads.
+const ATTACHED_PATH_FLAGS = { file: "fm", grep: "f", rg: "f" };
 const FIXER_FLAGS = new Set(["--fix", "--write"]);
 const SHELL_VARIABLE_EXPANSION_RE = /(?:%[A-Za-z_][A-Za-z0-9_]*%|\$[{A-Za-z0-9_@*#?$!-])/;
 const INFERRED_DELETE_FILE_EXTENSIONS = new Set([
@@ -118,7 +134,13 @@ function shellWordsDetailed(command) {
   const tokens = [];
   const expandable = [];
   const quotedPattern = [];
+  const starts = [];
   let current = "";
+  // A word exists once any character of it is seen, so `""` is an (empty)
+  // argument here as it is to the shell and to the argv executor.
+  let started = false;
+  let currentStart = 0;
+  const begin = (index) => { if (!started) { started = true; currentStart = index; } };
   let currentExpandable = false;
   let currentLiteral = false;
   let currentLiteralSyntax = false;
@@ -131,6 +153,8 @@ function shellWordsDetailed(command) {
   };
   const pushWord = () => {
     tokens.push(current);
+    starts.push(currentStart);
+    started = false;
     expandable.push(currentExpandable);
     quotedPattern.push(currentExpandable && (currentLiteralSyntax || (currentBracket && currentLiteral)));
     current = "";
@@ -142,6 +166,7 @@ function shellWordsDetailed(command) {
   for (let i = 0; i < command.length; i += 1) {
     const ch = command[i];
     if (ch === "\\" && quote !== "'") {
+      begin(i);
       const next = command[i + 1];
       if (next === "'" || next === '"' || next === "\\" || (next !== undefined && /\s/.test(next)) || (!quote && /[*?[]/.test(next ?? ""))) {
         appendLiteral(next);
@@ -157,19 +182,21 @@ function shellWordsDetailed(command) {
       continue;
     }
     if (ch === "'" || ch === '"') {
+      begin(i);
       quote = ch;
       continue;
     }
     if (/\s/.test(ch)) {
-      if (current) pushWord();
+      if (started) pushWord();
       continue;
     }
+    begin(i);
     if (ch === "*" || ch === "?" || ch === "[") currentExpandable = true;
     if (ch === "[") currentBracket = true;
     current += ch;
   }
-  if (current) pushWord();
-  return { tokens, expandable, quotedPattern };
+  if (started) pushWord();
+  return { tokens, expandable, quotedPattern, starts };
 }
 
 // One path segment's shell pattern as a regular expression. A bracket
@@ -314,8 +341,14 @@ function blockedBashArgumentReason(command) {
   if (commandName === "git" && hasFlag(lower.slice(1), GIT_UNSAFE_READ_FLAGS)) {
     return "git external configuration or output flag";
   }
-  if (commandName === "file" && hasFlag(lower.slice(1), FILE_MUTATING_FLAGS)) {
+  // `-C` inside a cluster (`-kC`) and getopt's abbreviations of `--compile`.
+  if (commandName === "file" && (hasFlag(lower.slice(1), FILE_MUTATING_FLAGS)
+    || tokens.slice(1).some((token) => /^-[^-]*C/.test(token) || /^--co/i.test(token)))) {
     return "file magic compilation output";
+  }
+  // A follower never exits; in a pipeline the timeout kills only the shell.
+  if (commandName === "tail" && tokens.slice(1).some((token) => /^-[^-]*[fF]/.test(token) || /^--(?:fo|re)/i.test(token))) {
+    return "tail follow mode";
   }
   return null;
 }
@@ -327,7 +360,35 @@ const PRIVATE_BASH_PATH_PARTS = new Set([".git", ".claude", ".codex", ".posse", 
 // matched, so it must not itself be treated as a readable path — otherwise a
 // legitimate `--exclude-dir=.git` is flagged private and `--exclude-dir=node_modules`
 // (a symlink) is flagged as a boundary escape.
-const GLOB_FILTER_FLAGS = new Set(["--include", "--exclude", "--exclude-dir", "--glob", "--iglob", "-g"]);
+const GLOB_FILTER_FLAGS = {
+  grep: new Set(["--include", "--exclude", "--exclude-dir"]),
+  rg: new Set(["--glob", "--iglob", "-g"]),
+};
+
+// Recursion reads files no command-line word names, so the per-word checks in
+// readonlyBashPathReason never see them. These flags keep the same private
+// directories and environment files out of a recursive grep/rg; appended last
+// because in both tools the later of two contradictory filters wins.
+const PROTECTED_SEARCH_EXCLUDES = {
+  grep: [...PRIVATE_BASH_PATH_PARTS].flatMap((part) => [`--exclude-dir=${part}`, `--exclude=${part}`])
+    .concat(["--exclude=.env", "--exclude='.env.*'"]),
+  rg: [...PRIVATE_BASH_PATH_PARTS, ".env", ".env.*"].map((part) => `--iglob='!${part}'`),
+};
+
+// The command the executor runs for an authorized read-only `command`: each
+// rg, and each grep that can recurse (-r, -d recurse and every long spelling
+// carry an r or d), gets PROTECTED_SEARCH_EXCLUDES before its `--` or at its end.
+export function withProtectedSearchExcludes(command) {
+  return splitShellSubcommandsWithJoins(command).map(({ seg, join }) => {
+    const { tokens, starts } = shellWordsDetailed(seg);
+    const name = shellCommandName(tokens[0]);
+    if (!Object.hasOwn(PROTECTED_SEARCH_EXCLUDES, name)
+      || (name === "grep" && !tokens.slice(1).some((token) => /^-.*[rRd]/.test(token)))) return join + seg;
+    const dashDash = tokens.indexOf("--", 1);
+    const at = dashDash > 0 ? starts[dashDash] : seg.trimEnd().length;
+    return `${join}${seg.slice(0, at)} ${PROTECTED_SEARCH_EXCLUDES[name].join(" ")} ${seg.slice(at)}`;
+  }).join("");
+}
 
 // Return a copy of `command` with the CONTENTS of every quoted span replaced by
 // a placeholder while preserving byte offsets, so the mutating-word / redirect /
@@ -452,6 +513,35 @@ function pathIsInside(root, candidate) {
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
+// Whether a grep/rg option word is complete in itself, i.e. cannot take the
+// NEXT word as its value. A long option without `=` or a cluster ending in a
+// valued or unknown letter might: `grep x --label -e /abs` hands `-e` to
+// --label, and `rg x -r -e /abs` hands it to --replace, leaving `/abs` a file.
+function searchOptionIsSelfContained(cmdName, token) {
+  if (!token.startsWith("-") || token === "-") return true;
+  if (token.startsWith("--")) return token.includes("=");
+  const { plain, valued } = SEARCH_SHORT_FLAGS[cmdName];
+  for (let i = 1; i < token.length; i += 1) {
+    if (plain.includes(token[i])) continue;
+    return valued.includes(token[i]) && i < token.length - 1;
+  }
+  return true;
+}
+
+// grep -R/--dereference-recursive (BSD: -S) and rg -L/--follow walk through
+// symlinks found during recursion, which no command-line word names and so
+// nothing here vets. Letters after a valued flag are that flag's value.
+function searchFollowsSymlinks(cmdName, token) {
+  if (token.startsWith("--")) return cmdName === "grep" ? /^--der/.test(token) : /^--follow(?:=|$)/.test(token);
+  if (!token.startsWith("-")) return false;
+  const follow = cmdName === "grep" ? "RS" : "L";
+  for (let i = 1; i < token.length; i += 1) {
+    if (follow.includes(token[i])) return true;
+    if (SEARCH_SHORT_FLAGS[cmdName].valued.includes(token[i])) return false;
+  }
+  return false;
+}
+
 function readonlyBashPathReason(policy, command) {
   const { tokens: words, expandable, quotedPattern } = shellWordsDetailed(command);
   // POSIX only, like unsupportedShellEscape: PowerShell runs the command on
@@ -475,14 +565,23 @@ function readonlyBashPathReason(policy, command) {
   // real path to vet. Everything else treats the first non-option positional as
   // the (non-path) search pattern.
   const preDashDash = words.indexOf("--") > 0 ? words.indexOf("--") : undefined;
+  // GNU getopt also accepts unambiguous abbreviations (`--reg=`, `--fil`).
   const explicitPatternSource = isSearch && words.slice(1, preDashDash).some((token) =>
-    /^--(?:regexp|file|files)(?:=|$)/.test(token)
+    /^--(?:reg|rege|regex|regexp|fil|file|files)(?:=|$)/.test(token)
     || (/^-[A-Za-z0-9]*[ef]/.test(token) && !token.startsWith("--")));
+  if (isSearch) {
+    const follows = words.slice(1, preDashDash).find((token) => searchFollowsSymlinks(cmdName, token));
+    if (follows) return `recursive search that follows symbolic links cannot be vetted: ${follows}; use -r, which does not follow them`;
+  }
   let patternSkipped = !isSearch || explicitPatternSource;
   let skipNext = false;
+  let pathValueNext = false;
   let endOfOptions = false;
   for (const [offset, token] of words.slice(1).entries()) {
     const shellExpands = expandable[offset + 1];
+    // Skip the next word as a flag value only when the tool cannot have read
+    // THIS flag as the value of the word before it.
+    const takesNextWord = isSearch && (offset === 0 || searchOptionIsSelfContained(cmdName, words[offset]));
     if (skipNext) {
       if (shellExpands) return "unquoted search flag value may expand into paths";
       skipNext = false;
@@ -492,7 +591,11 @@ function readonlyBashPathReason(policy, command) {
     // `-e` after it are literal patterns, not flags.
     if (token === "--" && !endOfOptions) { endOfOptions = true; continue; }
     const optionLike = !endOfOptions && token.startsWith("-");
-    if (!patternSkipped && !optionLike) {
+    // `grep --exclude-from /abs/list PAT .`: the word after the flag is a file
+    // the tool reads, not the search pattern.
+    if (optionLike && isSearch && takesNextWord && SEARCH_PATH_VALUE_FLAGS[cmdName].test(token)) { pathValueNext = true; continue; }
+    if (pathValueNext) pathValueNext = false;
+    else if (!patternSkipped && !optionLike) {
       // The first positional of grep/rg is the search PATTERN, not a path — so
       // skip it. But a token carrying glob metacharacters is expanded by the
       // shell before the tool sees it and may resolve to an option-like or
@@ -500,15 +603,25 @@ function readonlyBashPathReason(policy, command) {
       patternSkipped = true;
       if (!/[*?[\]{}]/.test(token)) continue;
     }
-    if (!endOfOptions && isSearch && (token === "--regexp" || /^-[A-Za-z0-9]*e$/.test(token))) { skipNext = true; continue; }
-    if (!endOfOptions && isSearch && token.startsWith("--regexp=")) continue;
+    // `-ne PATTERN`: the letters before `e` must all be valueless, or the tool
+    // reads `e` as a value (rg `-re` is `--replace e`) and the next word as a path.
+    if (!endOfOptions && isSearch && takesNextWord && (/^--reg(?:e|ex|exp)?$/.test(token)
+      || (/^-[A-Za-z0-9.]*e$/.test(token) && [...token.slice(1, -1)].every((flag) => SEARCH_SHORT_FLAGS[cmdName].plain.includes(flag))))) { skipNext = true; continue; }
+    if (!endOfOptions && isSearch && /^--reg(?:e|ex|exp)?=/.test(token)) continue;
     const equals = token.indexOf("=");
     const flagName = optionLike ? (equals > 0 ? token.slice(0, equals) : token) : "";
     // A filename-glob filter flag: its value constrains matched filenames inside
-    // the search roots, it is not itself a path to read.
-    if (GLOB_FILTER_FLAGS.has(flagName)) { if (equals < 0) skipNext = true; continue; }
+    // the search roots, it is not itself a path to read. Only for the tool that
+    // has the flag: `-g` takes no value in ls or du, so `ls -g /abs` lists /abs.
+    if (isSearch && GLOB_FILTER_FLAGS[cmdName].has(flagName) && (equals >= 0 || takesNextWord)) { if (equals < 0) skipNext = true; continue; }
     const values = [token];
     if (optionLike && equals >= 0 && equals < token.length - 1) values.push(token.slice(equals + 1));
+    // `file -f/abs/list`, `grep -f.env`: the rest of the cluster is a path.
+    if (optionLike && !token.startsWith("--") && ATTACHED_PATH_FLAGS[cmdName]) {
+      for (let i = 1; i < token.length - 1; i += 1) {
+        if (ATTACHED_PATH_FLAGS[cmdName].includes(token[i])) values.push(token.slice(i + 1));
+      }
+    }
     // The tokenizer already removed the quoting, so the quotes, commas and
     // whitespace cleanShellPathToken trims are part of the word: on POSIX the
     // program opens `,link` or ` link`, not `link`. Vet that spelling too.
@@ -529,6 +642,11 @@ function readonlyBashPathReason(policy, command) {
       const exists = fs.existsSync(lexical);
       if (isSensitiveEnvFileOrTargetPath(lexical)) {
         return `protected environment file: ${value}`;
+      }
+      // diff reads same-named files under a directory operand (all of them
+      // with -r) and follows their symlinks; none of those are vetted words.
+      if (cmdName === "diff" && exists && fs.statSync(lexical, { throwIfNoEntry: false })?.isDirectory()) {
+        return `diff of a directory cannot be vetted: ${value}; compare two files`;
       }
       // Private path parts are checked RELATIVE to the cwd when the absolute
       // path lands inside the cwd, so the agent's own worktree segments (its
@@ -618,6 +736,9 @@ function syntaxOperandAllowed(policy, token) {
 function scopedSyntaxCommand(policy, command) {
   const tokens = shellWords(command);
   if (tokens.length === 0) return { recognized: false };
+  // Only the bare command name, resolved through PATH: `bin/sh -n a.txt`
+  // would run a workspace file under a syntax checker's name.
+  if (/[\\/]/.test(tokens[0])) return { recognized: false };
   const name = shellCommandName(tokens[0]);
   let operands = null;
   if (name === "node" && tokens[1] === "--check" && tokens.length === 3) {
@@ -1206,16 +1327,22 @@ export class MutationPolicy {
     if (/<<|<(?!\()\s*(?:$|[;|&])/.test(masked)) {
       return { ok: false, error: "Error: Input redirection needs one scoped file operand.", reasonClass: "shell_operator" };
     }
-    for (const match of masked.matchAll(/<(?!\()\s*(\S+)/g)) {
-      const blocked = readonlyBashPathReason(this, `cat ${match[1]}`);
+    // The operand is read from the unmasked command at the same offsets
+    // (maskQuoted preserves them): the mask of `<"/abs"` names no real path.
+    // It ends at the next operator, so `<link;ls` vets `link`.
+    for (const match of masked.matchAll(/<(?!\()\s*((?:\\.|[^\s;|&<>()])*)/g)) {
+      const operand = cmd.slice(match.index + match[0].length - match[1].length, match.index + match[0].length);
+      if (!operand) return { ok: false, error: "Error: Input redirection needs one scoped file operand.", reasonClass: "shell_operator" };
+      const blocked = readonlyBashPathReason(this, `cat -- ${operand}`);
       if (blocked) return { ok: false, error: `Error: Read-only bash path blocked (${blocked}). Use the issued scoped file tools.`, reasonClass: "path" };
     }
     // `$()`, backticks and `$VAR` still expand inside double quotes, so those
     // checks see through single quotes only.
     const maskedSingle = maskQuoted(cmd, { maskDouble: false });
     // A `\d*>&\d+` fd-dup (e.g. `2>&1`) is not a background operator; mask it out
-    // before the background `&` scan.
-    const bgScan = masked.replace(/\d*>&\d+/g, "__");
+    // before the background `&` scan. Only a whole word is one: bash reads
+    // `>&2file` as "stdout and stderr to the file 2file".
+    const bgScan = masked.replace(/\d*>&\d+(?=\s|$|[;|&)])/g, "__");
     if (/[\r\n]/.test(cmd) || /<\(|>\(/.test(masked) || /(^|[^&])&([^&]|$)/.test(bgScan)) {
       return { ok: false, error: "Error: Newlines, process substitution, and background shell operators are not allowed in sandboxed bash.", reasonClass: "shell_operator" };
     }
@@ -1236,8 +1363,16 @@ export class MutationPolicy {
     // through /bin/sh. On hosts where /bin/sh is bash they turn a vetted-looking
     // command into deletes or arbitrary exec (e.g. `find . {-delete,-print}`,
     // `rg . $'--pre=sh'`), so they are rejected on the quote-masked command.
-    if (/\{[^{}]*(?:,|\.\.)[^{}]*\}/.test(masked) || /\$['"]/.test(masked)) {
+    // The brace test spans one shell word and any nesting inside it, so
+    // `{x{y},-exec}` and `{{x},-delete}` are caught as well as `{a,b}`.
+    if (/\{(?:\\.|\S)*?(?:,|\.\.)(?:\\.|\S)*?\}/.test(masked) || /\$['"]/.test(masked)) {
       return { ok: false, error: `Error: Shell brace expansion and ANSI-C/locale quoting are not allowed in sandboxed bash: ${cmd.slice(0, 100)}`, reasonClass: "brace_or_ansi_c" };
+    }
+    // Tilde expansion: `~user` needs no slash, and the shell also expands a
+    // tilde after `=` or `:`. Quoted or mid-word tildes are literal.
+    const tilde = masked.match(/(?:^|[\s=:;|&<>(])(~[^\s;|&<>()]*)/);
+    if (tilde) {
+      return { ok: false, error: `Error: Read-only bash path blocked (shell home expansion is outside the workspace read boundary: ${tilde[1]}). Use the issued scoped file tools.`, reasonClass: "path" };
     }
     const subcommands = splitShellSubcommands(cmd);
     for (const sub of subcommands) {

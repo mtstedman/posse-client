@@ -71,6 +71,7 @@ function sleep(ms) {
  * @property {string | null} exactVersion
  * @property {string} os
  * @property {string} arch
+ * @property {number | null} [developmentOverrideAfterMs]
  * @property {Record<string, Record<string, unknown>>} [pulses]
  */
 
@@ -234,9 +235,8 @@ export class BinaryManager {
     return handle;
   }
 
-  _createHandle(name, binRoot, exactVersion = undefined) {
+  _createHandle(name, binRoot, exactVersion = undefined, developmentOverrideAfterMs = null) {
     let resolvedVersion = exactVersion;
-    let developmentOverrideAfterMs = null;
     if (resolvedVersion === undefined) {
       resolvedVersion = pinnedNativeVersion(name, this._opts.env);
       // Explicit roots are development/test fixtures and intentionally remain
@@ -501,6 +501,11 @@ export class BinaryManager {
         exactVersion: handle.exactVersion || null,
         os: handle.os,
         arch: handle.arch,
+        // The worker rebuilds this handle with an explicit version, which
+        // skips the selection read. Without the parent's boundary it would
+        // resolve the versioned artifact while the parent runs a newer flat
+        // development build, and reject this entry as a path mismatch.
+        developmentOverrideAfterMs: handle._developmentOverrideAfterMs ?? null,
       };
     }
     return { version: /** @type {1} */ (1), binaries };
@@ -528,7 +533,12 @@ export class BinaryManager {
       const exactVersion = exactVersionRaw == null ? null : String(exactVersionRaw).trim();
       if (!path.isAbsolute(bundleRoot) || !path.isAbsolute(declaredPath)) continue;
       if (exactVersion && !/^[a-zA-Z0-9._-]{1,64}$/.test(exactVersion)) continue;
-      const candidate = this._createHandle(name, bundleRoot, exactVersion);
+      // Absent (older capability) or malformed boundary keeps the pre-boundary resolution order.
+      const overrideAfterRaw = /** @type {any} */ (entry).developmentOverrideAfterMs;
+      const developmentOverrideAfterMs = typeof overrideAfterRaw === "number" && Number.isFinite(overrideAfterRaw)
+        ? overrideAfterRaw
+        : null;
+      const candidate = this._createHandle(name, bundleRoot, exactVersion, developmentOverrideAfterMs);
       if (String(/** @type {any} */ (entry).os || "") !== candidate.os) continue;
       if (String(/** @type {any} */ (entry).arch || "") !== candidate.arch) continue;
       const resolved = candidate.resolvePath();

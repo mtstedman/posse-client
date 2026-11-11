@@ -183,6 +183,17 @@ function surveyBranches(projectDir, targetBranch) {
   return out.sort((a, b) => (b.ageMs || 0) - (a.ageMs || 0));
 }
 
+function worktreeRootMismatch(wtPath) {
+  const top = gitStatus(["rev-parse", "--show-toplevel"], wtPath);
+  if (!top.ok || !top.stdout) return top.error || "could not resolve worktree root";
+  try {
+    if (fs.realpathSync.native(top.stdout) === fs.realpathSync.native(wtPath)) return null;
+  } catch (err) {
+    return err?.message || String(err);
+  }
+  return `directory is not a git worktree root (git resolves it to ${top.stdout})`;
+}
+
 function surveyWorktrees(projectDir) {
   const root = adminWorktreeRoot(projectDir);
   if (!fs.existsSync(root)) return [];
@@ -194,7 +205,13 @@ function surveyWorktrees(projectDir) {
     const wtPath = path.join(root, entry.name);
     const wiId = Number((entry.name.match(/^wi-(\d+)/) || [])[1]);
     const wi = Number.isFinite(wiId) ? wis.get(wiId) : null;
-    const statusResult = gitStatus(["status", "--porcelain"], wtPath);
+    let statusResult = gitStatus(["status", "--porcelain"], wtPath);
+    if (statusResult.ok) {
+      // A directory that lost its .git file resolves to the enclosing checkout,
+      // whose status says nothing about the files in this directory.
+      const ownRoot = worktreeRootMismatch(wtPath);
+      if (ownRoot) statusResult = { ok: false, stdout: "", error: ownRoot };
+    }
     const statusUnknown = !statusResult.ok;
     const hasChanges = statusUnknown ? true : Boolean(statusResult.stdout);
     let ageMs = null;

@@ -10,6 +10,7 @@ import {
   validateMutableRepoPath,
 } from "../../../runtime/functions/protected-paths.js";
 import { resolvePathWithin } from "../../../../shared/scope/functions/path.js";
+import { DIRTY_WORKTREE_RECOVERY_KEY, PRESERVED_WORK_RESUME_KEY } from "../../../../catalog/human-input.js";
 
 function uniquePaths(values = []) {
   return [...new Set((Array.isArray(values) ? values : [])
@@ -90,6 +91,24 @@ function existingMaterialization(jobId, generation, relPath) {
     FROM file_materializations
     WHERE job_id = ? AND generation = ? AND path = ?
   `).get(jobId, generation, relPath);
+}
+
+// A deferred test create leaves no placeholder and no provenance row (a row
+// would make the write-lock guard restore the empty file the deferral avoids),
+// so on a resumed attempt the job's own test looks like a foreign untracked
+// collision. It is this job's work when the job has already run an
+// implementation attempt, or a resume/recovery receipt names the path.
+function ownsDeferredTestCreate(packet, relPath) {
+  const raw = packet?._raw_payload && typeof packet._raw_payload === "object" ? packet._raw_payload : {};
+  for (const key of [PRESERVED_WORK_RESUME_KEY, DIRTY_WORKTREE_RECOVERY_KEY]) {
+    if (uniquePaths(raw[key]?.paths).includes(relPath)) return true;
+  }
+  return Boolean(getDb().prepare(`
+    SELECT 1
+    FROM job_attempts
+    WHERE job_id = ? AND worker_type <> 'assessor' AND status <> 'running'
+    LIMIT 1
+  `).get(Number(packet.job_id)));
 }
 
 export function materializedPathsForJob(jobId, generation = 1) {
@@ -359,8 +378,10 @@ export async function materializeWritingScope(packet) {
           // the planner would have scoped had it seen the branch; reclassify
           // to modify instead of failing the attempt. Untracked collisions
           // stay hard errors — they may hold unsaved content this job's
-          // scoped commit could silently swallow.
-          if (await isTrackedPath(cwd, relPath)) {
+          // scoped commit could silently swallow — except this job's own
+          // deferred test file, which a resumed attempt must keep editing.
+          if (await isTrackedPath(cwd, relPath)
+            || (isTestCollateralPath(relPath) && ownsDeferredTestCreate(packet, relPath))) {
             convertedToModify.push(relPath);
             modify.push(relPath);
             continue;
@@ -425,6 +446,9 @@ export async function materializeWritingScope(packet) {
   packet._materialization_generation = generation;
   if (packet._raw_payload && typeof packet._raw_payload === "object") {
     packet._raw_payload = { ...packet._raw_payload, files_to_modify: editable, files_to_create: deferredTestCreates };
+    // Only deferred test creates keep creation authority; with none, the key
+    // is absent exactly as in the no-creation branch above.
+    if (deferredTestCreates.length === 0) delete packet._raw_payload.files_to_create;
     delete packet._raw_payload.create_roots;
   }
   return { applied: true, materialized, convertedToModify, promotedToCreate };

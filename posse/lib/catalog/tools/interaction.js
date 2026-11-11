@@ -5,7 +5,7 @@
 export const WORK_ITEM_QUESTION_CHOICE_IDS = Object.freeze({
   clarification: Object.freeze([]),
   planner_clarification: Object.freeze([]),
-  dirty_worktree_recovery: Object.freeze(["commit", "send_back", "fail"]),
+  dirty_worktree_recovery: Object.freeze(["commit", "send_back", "revert", "fail"]),
   assessment_evidence_missing: Object.freeze(["send_back", "retry_assessment", "retry", "replan", "pass", "fail", "explicit_waiver"]),
   stall_exhausted_recovery: Object.freeze(["retry", "retry:claude", "retry:anthropic", "retry:openai", "retry:codex", "retry:grok", "skip", "fail"]),
   failure_threshold_exhausted: Object.freeze(["retry", "replan", "fail", "explicit_waiver"]),

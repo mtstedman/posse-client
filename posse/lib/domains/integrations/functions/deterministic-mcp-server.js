@@ -2392,7 +2392,7 @@ if (allowBash && execBash) {
 }
 if (ownerHotGateway || hasVerifiedToolContract() || roleName === "dev" || roleName === "assessor" || roleName === "planner") {
   mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
-  mcpToolRegistry.attach("run_unit_test", (args) => execRunUnitTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, { unitTestCapability, scipAvailable: atlasAvailable, agentCallId: mcpAgentCallId, jobId: mcpJobId }));
+  mcpToolRegistry.attach("run_unit_test", (args) => execRunUnitTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, { unitTestCapability, scipAvailable: atlasAvailable, agentCallId: mcpAgentCallId, jobId: mcpJobId, signal: activeSessionToolCall?.controller.signal }));
 }
 if (allowImageHelpers) {
   mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -2473,6 +2473,16 @@ function gateScopeKeyForBootConfig(config = bootConfig, { sessionId = null } = {
   return Number.isSafeInteger(bindingEpoch) && bindingEpoch > 0
     ? `${scopeKey}|binding:${bindingEpoch}`
     : scopeKey;
+}
+
+// The one native tool call this serial gateway is running for an owner
+// session. Its session's release aborts it out of band; a call for any other
+// session, or one whose runner takes no signal, keeps its slot untouched.
+let activeSessionToolCall = null;
+
+function abortActiveToolCallForSession(config, sessionId) {
+  if (activeSessionToolCall?.key !== runtimeSessionKey(config, sessionId)) return;
+  activeSessionToolCall.controller.abort(new Error("MCP session was released"));
 }
 
 function releaseGatewaySessionState(config, { sessionId = null } = {}) {
@@ -2620,7 +2630,7 @@ mcpToolRegistry.attach("get_brief", (args) => execGetBrief(args || {}, workspace
   }
   if (ownerHotGateway || hasVerifiedToolContract() || roleName === "dev" || roleName === "assessor" || roleName === "planner") {
     mcpToolRegistry.attach("run_scoped_checks", (args) => execRunScopedChecks(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope));
-    mcpToolRegistry.attach("run_unit_test", (args) => execRunUnitTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, { unitTestCapability, scipAvailable: atlasAvailable, agentCallId: mcpAgentCallId, jobId: mcpJobId }));
+    mcpToolRegistry.attach("run_unit_test", (args) => execRunUnitTest(args || {}, workspaceCwd, effectiveScopePredicates, declaredJobScope, { unitTestCapability, scipAvailable: atlasAvailable, agentCallId: mcpAgentCallId, jobId: mcpJobId, signal: activeSessionToolCall?.controller.signal }));
   }
   if (allowImageHelpers) {
     mcpToolRegistry.attach("read_image_metadata", (args) => execReadImageMetadata(args || {}, workspaceCwd, effectiveScopePredicates));
@@ -3753,7 +3763,16 @@ async function handleRequest(msg) {
         });
         return;
       }
-      const result = await handler(args);
+      const activeCall = session
+        ? { key: runtimeSessionKey(session.bootConfig, session.sessionId), controller: new AbortController() }
+        : null;
+      activeSessionToolCall = activeCall;
+      let result;
+      try {
+        result = await handler(args);
+      } finally {
+        if (activeSessionToolCall === activeCall) activeSessionToolCall = null;
+      }
       if (result?.[LIVE_SCOPE_WAIT] === true) {
         // The owner serializes every session through this child; a call parked
         // on a human answer must not hold other jobs' tools behind it.
@@ -4057,6 +4076,13 @@ function dispatchParsed(parsed) {
   // load time don't propagate into data events.
   const session = ownerHotProcess ? hiddenSessionFromParams(parsed?.params) : null;
   const sessionBoot = session?.bootConfig || {};
+  if (session && parsed?.method === MCP_SESSION_RELEASED_NOTIFICATION) {
+    // Cancellation cannot wait its turn behind the very call it cancels. The
+    // release itself stays queued below, so gate and research state are only
+    // dropped once that call has unwound.
+    abortLiveScopeWaitsForSession(session.sessionId);
+    abortActiveToolCallForSession(session.bootConfig, session.sessionId);
+  }
   requestQueue = requestQueue.then(() => runWithObservationContext(
     {
       work_item_id: session ? Number(sessionBoot.workItemId) || null : mcpWorkItemId,

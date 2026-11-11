@@ -1,4 +1,4 @@
-import { acceptanceMergeDeferral } from "../../queue/functions/acceptance.js";
+import { acceptanceMergeDeferral, rebindAcceptanceDecisionsAfterRefresh } from "../../queue/functions/acceptance.js";
 import { implicitTypechecks } from "../../verification/functions/implicit-typechecks.js";
 import { isNativePulseColdError } from "./native/invoke.js";
 import { recordTargetDebt, resolveTargetDebtEntries } from "./merge-target-debt-store.js";
@@ -52,6 +52,35 @@ function reservedRuntimeMergeError(paths = []) {
 }
 
 
+// A squash merge treats ignored files as expendable: it overwrites the
+// operator's own ignored copy of a path the branch adds (a local config, an
+// env file, a database) without error, `git status` never lists it, and a
+// later abort deletes it. Find those paths so the merge can refuse first.
+function ignoredLocalFilesInMergePath(exec, cwd, sourceHead) {
+  const added = String(exec([
+    "-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", "--diff-filter=A", "HEAD", sourceHead,
+  ], cwd, { trim: false }) || "").split("\0").filter(Boolean)
+    .filter((file) => {
+      try { return fs.lstatSync(path.join(cwd, file)).isFile(); } catch { return false; }
+    });
+  const ignored = [];
+  for (let index = 0; index < added.length; index += 200) {
+    ignored.push(...String(exec([
+      "-c", "core.quotePath=false", "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--",
+      ...added.slice(index, index + 200).map((file) => `:(literal)${file}`),
+    ], cwd, { trim: false }) || "").split("\0").filter(Boolean));
+  }
+  return ignored;
+}
+
+function ignoredPathCollisionMergeError(paths = []) {
+  const error = new Error(
+    `Merge would overwrite ignored local file(s) in the target checkout: ${paths.slice(0, 10).join(", ")}. Move or remove them, then retry.`,
+  );
+  error.code = "GIT_IGNORED_PATH_COLLISION";
+  error.ignoredPaths = paths;
+  return error;
+}
 
 export function createMergeWorkflowHelpers(context, {
   ensureCleanTargetBranch,
@@ -473,6 +502,11 @@ export function createMergeWorkflowHelpers(context, {
             targetHead: result.targetHead,
           })
           : { ok: false, reason: "refresh_changed_content" };
+      // Acceptance evidence and waivers are bound to the exact candidate
+      // commit; without this the refreshed head has none and can never merge.
+      const acceptanceRebind = wiId != null && contentPreserving
+        ? rebindAcceptanceDecisionsAfterRefresh(wiId, { fromHead: result.branchHead, toHead: result.refreshedHead })
+        : null;
       log(`Close-out refreshed ${branch} onto ${targetBranch}${result.resolvedFiles.length > 0 ? `; resolved ordering conflicts in ${result.resolvedFiles.join(", ")}` : ""}${restoredNote}${reviewRebind?.ok ? `; merge review gate #${approval.gate_job_id} rebound to the refreshed head` : ""}`, {
         json: {
           ...detail,
@@ -487,6 +521,7 @@ export function createMergeWorkflowHelpers(context, {
           test_command: result.testCommand,
           content_preserving: contentPreserving,
           merge_review_rebind: reviewRebind,
+          acceptance_rebind: acceptanceRebind,
         },
       });
       return {
@@ -1684,6 +1719,9 @@ export function createMergeWorkflowHelpers(context, {
         ], cwd, { trim: false }) || "").split("\0").filter(Boolean);
         const branchRuntimePaths = filterPosseRuntimePaths(branchPaths);
         if (branchRuntimePaths.length > 0) throw reservedRuntimeMergeError(branchRuntimePaths);
+        mergeStep = "ignored-path-preflight";
+        const ignoredCollisions = ignoredLocalFilesInMergePath(gitMergeExec, cwd, acceptedSourceHead);
+        if (ignoredCollisions.length > 0) throw ignoredPathCollisionMergeError(ignoredCollisions);
 
         mergeStep = "merge";
         emitMergePhase(onPhase, "merge", `${label === "merge" ? "Merging" : "Retrying merge of"} ${branch} into ${targetBranch}`, { branch, target: targetBranch });
@@ -1697,7 +1735,7 @@ export function createMergeWorkflowHelpers(context, {
         mergeMarkerWritten = true;
         gitMergeExec(["merge", "--squash", acceptedSourceHead], cwd);
         mergeStep = "diff";
-        const staged = gitMergeExec(["diff", "--cached", "--name-only"], cwd);
+        const staged = gitMergeExec(["-c", "core.quotePath=false", "diff", "--cached", "--name-only"], cwd);
         const stagedFiles = staged.split("\n").map((line) => line.trim()).filter(Boolean);
         const candidateRuntimePaths = candidateIndexRuntimePaths(cwd);
         if (candidateRuntimePaths.length > 0) throw reservedRuntimeMergeError(candidateRuntimePaths);
@@ -1810,7 +1848,7 @@ export function createMergeWorkflowHelpers(context, {
                   auto_resolved_handoff_files: resolution.files.slice(0, 50),
                 },
               });
-              const staged = gitMergeExec(["diff", "--cached", "--name-only"], cwd);
+              const staged = gitMergeExec(["-c", "core.quotePath=false", "diff", "--cached", "--name-only"], cwd);
               const stagedFiles = staged.split("\n").map((line) => line.trim()).filter(Boolean);
               const candidateRuntimePaths = candidateIndexRuntimePaths(cwd);
               if (candidateRuntimePaths.length > 0) throw reservedRuntimeMergeError(candidateRuntimePaths);
@@ -1915,6 +1953,8 @@ export function createMergeWorkflowHelpers(context, {
           timedOut,
           runtimePathBlocked: finalMergeErr?.code === "GIT_RESERVED_RUNTIME_PATH",
           runtimePaths: finalMergeErr?.runtimePaths || [],
+          ...(finalMergeErr?.code === "GIT_IGNORED_PATH_COLLISION"
+            ? { ignoredPathCollision: true, ignoredPaths: finalMergeErr.ignoredPaths || [] } : {}),
           ...(finalMergeErr?.code === "POSSE_MERGE_REVIEW_STALE"
             ? { reviewStale: true, gateJobId: finalMergeErr.gateJobId ?? null } : {}),
           integrationGateFailed: finalMergeErr?.code === "POSSE_MERGE_CANDIDATE_TEST_FAILED",

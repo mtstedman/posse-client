@@ -333,7 +333,7 @@ export const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   session_recycle_mode: "Let follow-up jobs resume an earlier compatible agent session instead of starting fresh, which saves tokens. Dev/fix reuses sessions for developer fixes only; full reuses them wherever supported; off always starts fresh.",
   web_tools_enabled: "Let researcher, assessor, and native-team agents search the web and read web pages, let developers do so as a fallback for missing external facts, and let the artificer download files into its output folder.",
   // General · Approvals & safety
-  scope_auto_approval: "On by default. Approve routine extra files: tests, manifests, lockfiles, and files under approved creation folders. The file-scope gate policy must be Ask or Auto approve; Reject and Fail closed override this switch. When write_tests is enabled, new unclaimed files in test directories are authorized automatically; existing tests still require explicit scope.",
+  scope_auto_approval: "On by default. Approve routine extra files: tests, manifests, lockfiles, and files under approved creation folders. Scope extensions must be Ask or Approve; Reject (or a Fail closed override) turns this off. When write_tests is enabled, new unclaimed files in test directories are authorized automatically; existing tests still require explicit scope.",
   fix_scope_handoff_guard: "Controls fixes that name existing files outside their approved scope. Auto/warn adds those files; enforce blocks the handoff; off ignores them.",
   file_request_low_risk_extensions: "Comma-separated file extensions (for example .md,.txt) that developers may create without asking you. Protected, package, and CI files always need approval.",
   posse_log_scrub_secrets: "Mask values that look like API keys, tokens, or passwords before prompts and model output are written to logs.",
@@ -624,7 +624,9 @@ export const ADMIN_ROLE_PURPOSES = Object.freeze({
 // a missed placement stays visible instead of disappearing.
 export const SETTINGS_PANES = Object.freeze([
   Object.freeze({ id: "general", label: "General" }),
-  Object.freeze({ id: "approvals", label: "Approvals" }),
+  // The id predates the label: this pane now holds every control over when a
+  // run stops for the operator and when it carries on by itself.
+  Object.freeze({ id: "approvals", label: "Flow control" }),
   Object.freeze({ id: "agents", label: "Agents" }),
   Object.freeze({ id: "providers", label: "Providers" }),
   Object.freeze({ id: "atlas", label: "ATLAS" }),

@@ -103,7 +103,9 @@ export const FINAL_REVIEW_DELTA_INLINE_MAX_CHARS = 30_000;
 
 // The reviewer reports with the same tool and waits in it for the developer's
 // next revision; these are what its waiting call returns.
-export const FINAL_REVIEW_VERDICTS = Object.freeze(["pass", "fail", "needs_review"]);
+// `blocked` names a blocker no further developer round can resolve: it ends
+// the review loop at once and the operator decides (replan, send back, ...).
+export const FINAL_REVIEW_VERDICTS = Object.freeze(["pass", "fail", "needs_review", "blocked"]);
 export const FINAL_REVIEW_REVIEWER_STATUS = Object.freeze({
   REVISED: "revised",
   WAITING: "waiting",

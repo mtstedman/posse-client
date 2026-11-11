@@ -7,6 +7,7 @@ import { nativeWorkerSettings } from "../../../shared/native/functions/worker-se
 // out at merge time.
 
 import fs from "fs";
+import path from "path";
 import { GIT_MUTATE_ROUTE, GIT_READ_ROUTE } from "../../../catalog/binary.js";
 
 import { gitCommitAll } from "./commit-scope.js";
@@ -134,6 +135,21 @@ function isRuntimePath(p) {
     || p.startsWith(".posse-test-suites/");
 }
 
+// Git reports status paths from the repository root, while job scope is
+// relative to the project directory. They differ when the project is nested
+// inside its repository.
+function projectGitPrefix(projectDir) {
+  if (!projectDir) return "";
+  const prefix = normalizePath(gitFile(["rev-parse", "--show-prefix"], projectDir).trim());
+  return prefix ? `${prefix}/` : "";
+}
+
+function repoPathInScope(filePath, scope, prefix) {
+  if (!prefix) return pathInScope(filePath, scope);
+  const fp = normalizePath(filePath);
+  return fp.startsWith(prefix) && pathInScope(fp.slice(prefix.length), scope);
+}
+
 function resolveWorktreeDir(projectDir, wiId) {
   if (wiId == null) return null;
   const canonical = canonicalWorktreePath(projectDir, wiId);
@@ -213,11 +229,12 @@ export function computeWorktreeStatus({ wi, jobs = [], projectDir, targetBranch 
   let wtFiles = [];
   if (wtExists) {
     const wtDiffStats = diffStatByPath(wtDir);
+    const prefix = projectGitPrefix(projectDir);
     wtFiles = porcelainLines(wtDir)
       .filter((entry) => !isRuntimePath(entry.path))
       .map((entry) => ({
         ...entry,
-        inScope: pathInScope(entry.path, scope),
+        inScope: repoPathInScope(entry.path, scope, prefix),
         diff: wtDiffStats.get(entry.path) || null,
       }));
   }
@@ -264,12 +281,13 @@ function commitScopeFromReviewScope(scope = {}) {
   };
 }
 
-function commitInScopeChangesUnlocked({ wtDir, scope, message = "review: include in-scope dirty changes" }) {
+function commitInScopeChangesUnlocked({ wtDir, projectDir = null, scope, message = "review: include in-scope dirty changes" }) {
   if (!wtDir || !fs.existsSync(wtDir)) {
     return { ok: false, message: "Worktree directory missing" };
   }
   const dirty = porcelainLines(wtDir).filter((entry) => !isRuntimePath(entry.path));
-  const inScope = dirty.filter((entry) => pathInScope(entry.path, scope));
+  const prefix = projectGitPrefix(projectDir);
+  const inScope = dirty.filter((entry) => repoPathInScope(entry.path, scope, prefix));
   if (inScope.length === 0) {
     return { ok: false, message: "No in-scope dirty files to commit" };
   }
@@ -278,11 +296,14 @@ function commitInScopeChangesUnlocked({ wtDir, scope, message = "review: include
     // The native scoped transaction uses an isolated index. Existing staged
     // entries outside the review scope remain byte-for-byte untouched.
     const headBefore = gitFile(["rev-parse", "HEAD"], wtDir).trim() || null;
-    const result = gitCommitAll(message, wtDir, commitScopeFromReviewScope(scope), {
+    // Commit from the project directory inside the worktree, as the worker
+    // does, so the scoped commit maps project-relative scope onto the repo.
+    const commitCwd = prefix ? path.join(wtDir, prefix) : wtDir;
+    const result = gitCommitAll(message, commitCwd, commitScopeFromReviewScope(scope), {
       worktreeLock: false,
       taskMode: "code",
       snapshotReason: "review-scope-enforcement",
-      beforeCommitHook: () => runHook("post_dev_verify", { cwd: wtDir }),
+      beforeCommitHook: () => runHook("post_dev_verify", { cwd: commitCwd }),
     });
     const hash = result.hash || gitFile(["rev-parse", "HEAD"], wtDir).trim() || null;
     let paths = visiblePaths;
@@ -304,10 +325,20 @@ function commitInScopeChangesUnlocked({ wtDir, scope, message = "review: include
   }
 }
 
+// Workers lock a work item's worktree by the project directory inside it,
+// which is a subdirectory when the project is nested in its repository. Key
+// the review lock the same way, or the two never exclude each other.
+function reviewLockDir(wtDir, projectDir) {
+  const prefix = projectGitPrefix(projectDir);
+  if (!prefix || !fs.existsSync(path.join(wtDir, ".git"))) return wtDir;
+  const nested = path.join(wtDir, prefix);
+  return fs.existsSync(nested) ? nested : wtDir;
+}
+
 export function commitInScopeChanges(args = {}) {
   const { wtDir, projectDir = wtDir } = args;
   if (!wtDir || !fs.existsSync(wtDir)) return { ok: false, message: "Worktree directory missing" };
-  return withWorktreeLock(wtDir, projectDir, () => commitInScopeChangesUnlocked(args));
+  return withWorktreeLock(reviewLockDir(wtDir, projectDir), projectDir, () => commitInScopeChangesUnlocked(args));
 }
 
 export function commitInScopeChangesAsync(args = {}) {
@@ -375,7 +406,7 @@ function discardWorktreeFilesUnlocked({ wtDir, paths }) {
 export function discardWorktreeFiles(args = {}) {
   const { wtDir, projectDir = wtDir } = args;
   if (!wtDir || !fs.existsSync(wtDir)) return { ok: false, message: "Worktree directory missing" };
-  return withWorktreeLock(wtDir, projectDir, () => discardWorktreeFilesUnlocked(args));
+  return withWorktreeLock(reviewLockDir(wtDir, projectDir), projectDir, () => discardWorktreeFilesUnlocked(args));
 }
 
 export function discardWorktreeFilesAsync(args = {}) {

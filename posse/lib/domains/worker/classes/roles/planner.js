@@ -1,4 +1,6 @@
 import { buildFollowUpEvidence } from "../../../planning/functions/follow-up-context.js";
+import { effectiveGatePolicy } from "../../../../catalog/approval-policies.js";
+import { getSetting } from "../../../settings/functions/repository-settings.js";
 import { emitDiagnostic } from "../../../../shared/telemetry/functions/diagnostic-logging.js";
 import { pruneTestHandoff } from "../../../verification/functions/test-capability.js";
 import { detectNodePackageManager } from "../../../../shared/tools/functions/node-package-manager.js";
@@ -712,7 +714,10 @@ export class PlannerRole extends BaseRole {
     plannerPacket.capabilities = {
       ...(plannerPacket.capabilities || {}),
       tools: { ...(plannerPacket.capabilities?.tools || {}),
-        planner_clarification_v1: !worker.dryRun && !worker.nonInteractive,
+        // Offered only when the operator wants questions (Flow control →
+        // Clarifying questions); otherwise the planner states its assumptions.
+        planner_clarification_v1: !worker.dryRun && !worker.nonInteractive
+          && effectiveGatePolicy("planner_clarification", getSetting) === "ask",
         environment_setup_batch_v1: !worker.dryRun && plannerRoleMode === "normal" && !assessmentReplan && !workItem?.branch_name,
       },
     };

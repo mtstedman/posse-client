@@ -28,11 +28,14 @@ export function projectAcceptance({ jobs = [], receipts = [], decisions = [], ca
     const required = relevant.some(d => d.action === "require");
     const decision = relevant.filter(d => d.action !== "require" && d.commit === candidateCommit).at(-1);
     const evidence = decision?.action === "bind" && !row.missing_contract
-      ? receipts.find(r => r.artifact_id === decision.artifact_id && r.commit_hash === candidateCommit
+      // A content-preserving close-out refresh carries the decision to the new
+      // head; its receipt stays at the commit where the check actually ran.
+      ? receipts.find(r => r.artifact_id === decision.artifact_id && r.commit_hash === (decision.evidence_commit || candidateCommit)
         && row.job_ids.includes(r.job_id) && r.status === "passed" && OUTCOME_VERIFIED_COVERAGE.includes(r.coverage_status)) : null;
     const waived = decision?.action === "waive" && !!decision.reason;
     return { ...row, required, state: evidence ? S.SATISFIED : waived ? S.WAIVED : row.state,
-      evidence: evidence ? { artifact_id: evidence.artifact_id, job_id: evidence.job_id, commit: candidateCommit, reason: decision.reason } : null,
+      evidence: evidence ? { artifact_id: evidence.artifact_id, job_id: evidence.job_id, commit: candidateCommit, reason: decision.reason,
+        ...(decision.evidence_commit ? { evidence_commit: decision.evidence_commit } : {}) } : null,
       waiver: waived ? { reason: decision.reason, actor: decision.actor, at: decision.at, commit: candidateCommit } : null };
   });
   const counts = Object.fromEntries(Object.values(S).map(state => [state, requirements.filter(r => r.state === state).length]));

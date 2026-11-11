@@ -3912,6 +3912,11 @@ export class ParseEngine {
       return base;
     }
     if (this.#deferEmbeddings) {
+      // The conductor host only flushes a warm whose result says it deferred;
+      // without the marker the queued slice is dropped with the engine. The
+      // flush fills this same `base` (complete/remaining) by reference.
+      base.embeddings_deferred = true;
+      base.embeddings_complete = false;
       this.#pendingEmbeddingIngests.push({
         viewPath,
         base,

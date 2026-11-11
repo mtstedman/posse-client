@@ -38,7 +38,12 @@ export function isNativeArtifactTarballResponse(headers) {
  */
 export async function extractNativeArtifactTarball({ tarballPath, outPath, filename, maxBytes, artifactError }) {
   const invalid = (message) => artifactError("POSSE_ARTIFACT_INVALID_RESPONSE", `native artifact tarball ${message}`);
-  const source = fs.createReadStream(tarballPath).pipe(zlib.createGunzip());
+  const input = fs.createReadStream(tarballPath);
+  const source = zlib.createGunzip();
+  // pipe() does not forward source errors or close its input when the
+  // destination is destroyed after an invalid header.
+  input.once("error", error => source.destroy(error));
+  input.pipe(source);
   const reader = new ExactReader(source, invalid);
   const shaName = `${filename}.sha256`;
   let binary = null;
@@ -67,6 +72,7 @@ export async function extractNativeArtifactTarball({ tarballPath, outPath, filen
       await reader.skip(padding(entry.size));
     }
   } finally {
+    input.destroy();
     source.destroy();
   }
   if (!binary) throw invalid(`is missing ${filename}`);

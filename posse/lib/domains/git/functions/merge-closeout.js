@@ -19,6 +19,7 @@ import {
   HANDOFF_SYNC_SUBJECT_RE,
   mergeConflictSummary,
   mergeFileZdiff3,
+  hasLossyDecodedContent,
   readConflictStageBlob,
   walkDiff3Conflicts,
 } from "./handoff-conflict-resolution.js";
@@ -239,7 +240,7 @@ function blobAt(exec, cwd, rev, file) {
  */
 export function handoffCopyLandedOnTarget(exec, cwd, { commit, mergeBase, targetHead }) {
   try {
-    const files = exec(["diff-tree", "--no-commit-id", "--name-only", "-r", commit], cwd)
+    const files = exec(["-c", "core.quotePath=false", "diff-tree", "--no-commit-id", "--name-only", "-r", commit], cwd)
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
@@ -260,7 +261,7 @@ export function handoffCopyLandedOnTarget(exec, cwd, { commit, mergeBase, target
 }
 
 function unmergedFiles(exec, cwd) {
-  return exec(["diff", "--name-only", "--diff-filter=U"], cwd)
+  return exec(["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=U"], cwd)
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
@@ -289,6 +290,7 @@ function resolveConflictedFiles(exec, cwd, files) {
       const theirs = readConflictStageBlob(exec, cwd, 3, relPath);
       if (ours == null || theirs == null) return { resolved: false, reason: `missing_conflict_stage: ${relPath}` };
       const base = readConflictStageBlob(exec, cwd, 1, relPath) ?? "";
+      if (hasLossyDecodedContent(ours, theirs, base)) return { resolved: false, reason: `non_utf8_content: ${relPath}` };
       const safeName = relPath.replace(/[^A-Za-z0-9._-]/g, "_");
       const files3 = {
         oursFile: path.join(tempDir, `${safeName}.ours`),
@@ -323,8 +325,10 @@ function resolveConflictedFiles(exec, cwd, files) {
   }
 }
 
+// Path listings must not be C-quoted: git quotes non-ASCII names by default
+// ("caf\303\251.txt"), and a quoted name matches no blob in any revision.
 function namesFrom(exec, cwd, args) {
-  return String(exec(args, cwd) || "").split("\n").map((line) => line.trim()).filter(Boolean);
+  return String(exec(["-c", "core.quotePath=false", ...args], cwd) || "").split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
 // A 3-way result as content: an existing blob (`oid`), merged text, or a
@@ -342,7 +346,9 @@ function mergeBlobsThreeWay(exec, cwd, tempDir, file, { ours, base, theirs }) {
     fs.writeFileSync(paths[side], oid == null ? "" : exec(["cat-file", "blob", oid], cwd, { trim: false }));
   }
   try {
-    return { clean: true, text: exec(["merge-file", "-p", paths.ours, paths.base, paths.theirs], cwd, { trim: false }) };
+    const text = exec(["merge-file", "-p", paths.ours, paths.base, paths.theirs], cwd, { trim: false });
+    if (hasLossyDecodedContent(text)) return { clean: false, reason: "non_utf8_content" };
+    return { clean: true, text };
   } catch {
     // merge-file exits with the conflict count, or fails on binary input.
     return { clean: false, reason: "conflict" };

@@ -10,7 +10,7 @@ import { getReviewDirtyState } from "../../ui/functions/display/helpers/review-d
 import { finalAssessmentFor } from "../functions/review-report.js";
 import { applyMemoryReviewAction } from "../functions/memory-feedback.js";
 import { EVENT_TYPES, EVENT_ACTORS } from "../../../catalog/event.js";
-import { hasUnresolvedSharedTrunkMergeOperation, workItemFailureRecoveryHint } from "../../queue/functions/index.js";
+import { hasUnresolvedSharedTrunkMergeOperation, holdForCurrentMergeVerificationReview, workItemFailureRecoveryHint } from "../../queue/functions/index.js";
 import { askSingleKeyChoice, createRunWrapUpTracker, createTuiWrapUpTracker } from "../functions/review-session.js";
 
 // A failed work item is recovered through its recovery gate, not merged.
@@ -268,8 +268,9 @@ export class ReviewSession {
           },
         });
         if (!result.ok) {
-          if (!result.deferred) this._markMergeFailed(wi.id, result);
-          return { ...result, branchName: lockedWi.branch_name };
+          const reviewHold = this._holdForCurrentMergeReview(wi.id, result);
+          if (!reviewHold && !result.deferred) this._markMergeFailed(wi.id, result);
+          return { ...result, reviewHold, branchName: lockedWi.branch_name };
         }
         return {
           ...result,
@@ -323,6 +324,8 @@ export class ReviewSession {
         const cleanupOk = await cleanupFn(wi);
         console.log(`     ${C.green}Approved + merged${C.reset} (${mergeHash.slice(0, 8)})${cleanupOk ? "" : ` ${C.yellow}(branch cleanup failed)${C.reset}`}\n`);
         mergedCount++;
+      } else if (result.reviewHold) {
+        console.log(`     ${C.yellow}Approval not finalized: ${result.message}. ${this._reviewHoldText(result.reviewHold)}${C.reset}\n`);
       } else if (result.deferred) {
         console.log(`     ${C.yellow}Approval not finalized: ${result.message}; retry this WI.${C.reset}\n`);
       } else {
@@ -774,8 +777,9 @@ export class ReviewSession {
             },
           });
           if (!result.ok) {
-            if (!result.deferred) this._markMergeFailed(wiId, result);
-            return { ...result, branchName: lockedWi.branch_name };
+            const reviewHold = this._holdForCurrentMergeReview(wiId, result);
+            if (!reviewHold && !result.deferred) this._markMergeFailed(wiId, result);
+            return { ...result, reviewHold, branchName: lockedWi.branch_name };
           }
           return {
             ...result,
@@ -836,6 +840,10 @@ export class ReviewSession {
             display.addEvent(`${C.green}[review]${C.reset} WI#${wiId}: merged ${mergedBranch} into ${targetBranch} at ${mergeHash.slice(0, 8)}${cleanupOk ? "; cleaned up branch/worktree" : "; branch cleanup failed"}`);
           }
           item._mergeResult = `${C.green}\u2713 ${result.message}${C.reset} (${mergeHash.slice(0, 8)})${cleanupOk ? "" : ` ${C.yellow}(branch cleanup failed)${C.reset}`}`;
+        } else if (result.reviewHold) {
+          item._decision = undefined;
+          item._mergeResult = `${C.yellow}! ${result.message}. ${this._reviewHoldText(result.reviewHold)}${C.reset}`;
+          return { keepFocused: true };
         } else if (result.deferred) {
           item._decision = undefined;
           item._mergeResult = `${C.yellow}! ${result.message}${C.reset}`;
@@ -1194,6 +1202,22 @@ export class ReviewSession {
       resolvePendingReviews: true,
     });
     return { ok: completed !== false };
+  }
+
+  // The merge review covered an earlier branch commit. Nothing failed: ask for
+  // review of the current commit, as the auto-merge pass does, instead of
+  // opening a merge-failure recovery gate. Null when no review could be held,
+  // so the caller keeps its ordinary failure handling.
+  _holdForCurrentMergeReview(wiId, result = {}) {
+    if (!result.reviewStale) return null;
+    const hold = typeof this.holdForCurrentMergeVerificationReview === "function"
+      ? this.holdForCurrentMergeVerificationReview
+      : holdForCurrentMergeVerificationReview;
+    return hold(wiId, result.branchHead) || null;
+  }
+
+  _reviewHoldText(reviewHold = {}) {
+    return `Nothing was merged; the merge waits for review of the current commit${reviewHold.gate_job_id ? ` (gate #${reviewHold.gate_job_id})` : ""}.`;
   }
 
   _markMergeFailed(wiId, result = {}) {

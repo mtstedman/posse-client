@@ -9,7 +9,7 @@
 // process is spawned.
 
 import { execFileSync, execSync, spawnSync } from "child_process";
-import { MutationPolicy } from "../../../scope/classes/MutationPolicy.js";
+import { MutationPolicy, withProtectedSearchExcludes } from "../../../scope/classes/MutationPolicy.js";
 import { environmentForNewRun } from "../../../telemetry/functions/run-env.js";
 
 const SHELL_OPERATOR_RE = /[;&|<>]/;
@@ -471,8 +471,10 @@ export function createBashExecutor({
       } catch { /* advisory telemetry must not break the tool */ }
     }
     if (!auth.ok) return auth.error;
-    // Execute the REPAIRED command (benign redirects stripped, no-op cd removed).
-    const runCommand = auth.command ?? cmd;
+    // Execute the REPAIRED command (benign redirects stripped, no-op cd removed),
+    // with recursive grep/rg kept out of private directories and .env files.
+    // Not on win32: the PowerShell fallback translates grep to Select-String.
+    const runCommand = platform === "win32" ? (auth.command ?? cmd) : withProtectedSearchExcludes(auth.command ?? cmd);
     const timeout = Math.min(args.timeout || 60000, 120000);
     const maxBuffer = 1024 * 1024;
     try {

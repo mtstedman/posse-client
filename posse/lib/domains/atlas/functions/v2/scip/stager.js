@@ -38,6 +38,7 @@ import {
   metaIsCurrent,
   readStagerMeta,
   stagedSanitizerPolicyIsCurrent,
+  stagerMetaPathForOutput,
   writeStagerMeta,
 } from "./stager-meta.js";
 
@@ -2102,15 +2103,32 @@ async function runScipIndexerAtomic(plan, {
       indexer: plan.label || null,
       source_languages: sourceLanguagesForPlan(plan),
     });
+    // The indexer may write straight onto the canonical path here, so the
+    // previous sanitized index is set aside for the run and only raw bytes that
+    // pass the sanitizer are promoted. Its meta is dropped for the same window:
+    // a stage killed mid-run must not leave raw bytes under a "staged" meta.
+    const rawPath = tempPath;
+    const previousPath = tempOutputPath(plan.outputPath);
+    const metaPath = stagerMetaPathForOutput(plan.outputPath);
+    let previousMetaText = null;
+    let hadPrevious = false;
+    let promoted = false;
     try {
+      try { previousMetaText = await fs.promises.readFile(metaPath, "utf8"); } catch { /* no meta */ }
+      await fs.promises.rm(metaPath, { force: true });
+      if (await fileExists(plan.outputPath)) {
+        await fs.promises.rename(plan.outputPath, previousPath);
+        hadPrevious = true;
+      }
       const run = await runScipIndexer(spawnPlan, { cwd, onProgress });
       if (!run.ok) return run;
       if (!(await fileExists(plan.outputPath))) {
         return { ok: false, error: `indexer completed but did not produce ${path.basename(plan.outputPath)}` };
       }
+      await fs.promises.rename(plan.outputPath, rawPath);
       const sanitizedPath = tempOutputPath(plan.outputPath);
       const sanitize = await sanitizeScipOutputOrValidationError({
-        inputPath: plan.outputPath,
+        inputPath: rawPath,
         outputPath: sanitizedPath,
         repoRoot,
         allowedPaths,
@@ -2121,11 +2139,24 @@ async function runScipIndexerAtomic(plan, {
       try {
         if (!sanitize.ok) return { ...run, ok: false, error: sanitize.error, scipDocuments: sanitize.scipDocuments, sanitizer: sanitize.metrics || null };
         await replaceFile(sanitizedPath, plan.outputPath);
+        promoted = true;
         return { ...run, scipDocuments: sanitize.scipDocuments, sanitizer: sanitize.metrics };
       } finally {
         try { await fs.promises.rm(sanitizedPath, { force: true }); } catch { /* best effort */ }
       }
     } finally {
+      if (!promoted) {
+        // Whatever the failed run left at the canonical path is raw output.
+        try { await fs.promises.rm(plan.outputPath, { force: true }); } catch { /* best effort */ }
+        if (hadPrevious) {
+          try {
+            await fs.promises.rename(previousPath, plan.outputPath);
+            if (previousMetaText !== null) await fs.promises.writeFile(metaPath, previousMetaText, "utf8");
+          } catch { /* best effort */ }
+        }
+      }
+      try { await fs.promises.rm(rawPath, { force: true }); } catch { /* best effort */ }
+      try { await fs.promises.rm(previousPath, { force: true }); } catch { /* best effort */ }
       await removeGeneratedProjectDir(generated.dir);
     }
   }

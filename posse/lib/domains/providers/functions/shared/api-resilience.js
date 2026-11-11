@@ -22,8 +22,34 @@ export function clampRetryAfterSeconds(sec, fallback = 30, max = MAX_RETRY_AFTER
   return Math.max(1, Math.min(Math.ceil(n), max));
 }
 
+// A native CLI adapter reports a provider refusal as one generic failure
+// ("Claude reported an unsuccessful result", "Codex reported a failed turn")
+// and carries the provider's own notice beside the message: the CLI's result
+// text as partial output, or the adapter's diagnostic reason. Only that
+// generic class qualifies, and only a notice-sized output: longer output is
+// model prose, which must never be classified as a provider error.
+const PROVIDER_NOTICE_MAX_CHARS = 400;
+
+export function nativeProviderNoticeText(err) {
+  const genericCliFailure = err?.classification === "provider_failure"
+    || (!err?.classification && err?.code === "provider_failed");
+  if (!genericCliFailure) return "";
+  const output = String(err?.partialOutput || err?.output || "").trim();
+  return [
+    output.length > 0 && output.length <= PROVIDER_NOTICE_MAX_CHARS ? output : "",
+    typeof err?.providerDiagnostic === "string" ? err.providerDiagnostic.trim() : "",
+  ].filter(Boolean).join("\n");
+}
+
+/** The text provider-error classifiers read: the message, plus a native CLI notice. */
+export function providerErrorClassificationText(err) {
+  const message = String(err?.message || err || "");
+  const notice = nativeProviderNoticeText(err);
+  return notice ? `${message}\n${notice}` : message;
+}
+
 function errorMessage(err) {
-  return String(err?.message || err || "");
+  return providerErrorClassificationText(err);
 }
 
 // Facts carried on a provider error from the moment it is first observed.
