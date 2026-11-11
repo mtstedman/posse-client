@@ -1,10 +1,10 @@
-import { spawn } from "node:child_process";
 import {
   SESSION_LINK_OWNERS,
-  SESSION_OWNER_CHILD_ENV,
   SESSION_SYNC_STATES,
+  defaultSessionComputeOwner,
   sessionLeaseSec,
 } from "../../../catalog/session-sync.js";
+import { describeComputeOwner } from "../functions/compute-lease.js";
 import { readRuntimeStatus, RUNTIME_STATUS_KEYS } from "../../queue/functions/runtime-status.js";
 import { syncSharedTrunkFromOrigin } from "../../git/functions/shared-trunk.js";
 import { createSharedTrunkPoller } from "../../scheduler/classes/SharedTrunkPoller.js";
@@ -20,9 +20,14 @@ import {
 import { requestSessionResume, setSessionHold } from "../functions/session-hold.js";
 import { describeSessionPublishModes, sessionClosePreflight, setSessionAutoPublish } from "../functions/session-publish-command.js";
 import { tickSessionAutoPublish } from "../functions/session-auto-publish.js";
+import { spawnPosseInForeground, waitForForegroundExit } from "../functions/foreground-command.js";
+import { clearSessionInvite, writeSessionInvite } from "../functions/session-invite.js";
 import { readSessionLink, recordSessionLinkFailure, recordSessionLinkSuccess } from "../functions/session-link.js";
 import { readSessionSync } from "../functions/session-sync.js";
 import { formatSessionLanding, sessionPrompt } from "../functions/session-landing.js";
+import { sessionPanelMode } from "../functions/session-panel.js";
+import { formatSessionRosterLines, sessionRosterPanelView } from "../functions/session-roster.js";
+import { readSessionRoster } from "../functions/session-roster-source.js";
 import { sessionSyncFeedLabel } from "../functions/sync-state.js";
 import {
   clearPairingPeerSnapshot,
@@ -41,10 +46,12 @@ import {
   sessionCloseInProgress,
 } from "../functions/monitor-ownership.js";
 import {
-  GO_WINDOW_MARKER_GRACE_MS,
+  goWindowVerdict,
   openPosseInNewWindow,
   readGoWindowMarker,
+  revokeOwnerLaunch,
   SESSION_OWNER_LAUNCH_TTL_MS,
+  terminalFullScreenLimit,
 } from "../functions/session-owner-launch.js";
 import {
   createSessionConsole,
@@ -85,16 +92,6 @@ function stripAnsi(text) {
   return String(text ?? "").replace(ANSI_PATTERN, "");
 }
 
-// The session console runs `posse add` / `posse go` in its own terminal: the
-// same entry point this process was started with, in this checkout.
-function spawnPosseInForeground(args, { cwd } = {}) {
-  return spawn(process.execPath, [...process.execArgv, process.argv[1], ...args], {
-    cwd,
-    stdio: "inherit",
-    env: { ...process.env, [SESSION_OWNER_CHILD_ENV]: String(process.pid) },
-  });
-}
-
 export class PairingMonitor {
   constructor(remoteClient, stateId, options = {}, operations) {
     this.remoteClient = remoteClient;
@@ -106,7 +103,9 @@ export class PairingMonitor {
   async run() {
     const remoteClient = this.remoteClient;
     const stateId = this.stateId;
-    const { assertPairingStatusMatches, admitPairingMember, kickPairingMember, safeError } = this.operations;
+    const {
+      assertPairingStatusMatches, admitPairingMember, kickPairingMember, setPairingMemberLease, safeError,
+    } = this.operations;
     const {
       projectDir = process.cwd(),
       C,
@@ -123,8 +122,18 @@ export class PairingMonitor {
       spawnPosse = spawnPosseInForeground,
       openPosseWindow = openPosseInNewWindow,
       platform = process.platform,
+      // Why the terminal a foreground posse go inherits cannot show the
+      // full-screen run display (null when it can).
+      fullScreenLimit = terminalFullScreenLimit,
+      // Open the session screen (`go`) by itself once the session is ready,
+      // so hosting or joining lands there; Ctrl+C then lands in this console.
+      enterSharedRun = false,
     } = this.options;
+    let sharedRunEntered = false;
     let forceRequested = false;
+    // Ctrl+C typed at this console's prompt: the operator is at the terminal,
+    // so a host close may ask about the session's work right there.
+    let interruptedAtPrompt = false;
     // A go opened in a new window boots (recovery, dependency repair) before it
     // takes the scheduler lock, possibly for minutes. Until then it still owns
     // the session: a second `go`, `close`, or Ctrl+C must not act as if no
@@ -146,13 +155,11 @@ export class PairingMonitor {
     };
     // Whether the window's shell reports on itself (see goWindowMarkerPath).
     let goWindowHasMarker = false;
-    // What became of the window once it opened. A go that acknowledged its pid
-    // or holds the scheduler lock is running. Otherwise the window's own marker
-    // decides: an exit code means go ended in a window that stayed open; a
-    // shell pid that is gone, or no marker at all past the grace, means the
-    // window closed before go could run (a Windows failure seen in the field:
-    // the window opens and closes at once), and go runs here instead so the
-    // queue is not left waiting on a window nobody can see.
+    // What became of the window once it opened (goWindowVerdict decides). A
+    // window in which posse go never got through its startup (it closed at
+    // once, never ran the launch script, or go died there without a reason:
+    // the Windows failure seen in the field) is replaced by a go in this
+    // terminal, so the queue is not left waiting on a window nobody can see.
     const settleGoWindow = () => {
       if (!goWindowToken || observing || foreground || stopping) return;
       const launch = readRuntimeStatus(RUNTIME_STATUS_KEYS.SESSION_OWNER_LAUNCH);
@@ -160,32 +167,35 @@ export class PairingMonitor {
         goWindowToken = null;
         return;
       }
-      if (schedulerLockHolderLive(kill)) return;
       const childPid = Number(launch.child_pid);
-      if (Number.isSafeInteger(childPid) && childPid > 0 && !pidProvablyDead(childPid, kill)) return;
       const marker = readGoWindowMarker(projectDir);
-      const own = marker?.token === goWindowToken ? marker : null;
-      if (own && own.exit_code !== undefined) {
-        goWindowToken = null;
-        if (own.exit_code !== 0) {
-          log(`  ${C.yellow}[session]${C.reset} posse go ended with exit code ${own.exit_code ?? "unknown"} in its window; its output is still there.`);
-        }
-        return;
-      }
-      // Acknowledgement proves go ran even if the shell died before recording
-      // its exit. Only an unacknowledged launch may fall back automatically.
-      if (Number.isSafeInteger(childPid) && childPid > 0) {
-        goWindowToken = null;
-        log(`  ${C.yellow}[session]${C.reset} posse go ended after starting in its window; the exit status is unavailable.`);
-        return;
-      }
-      const windowGone = own?.pid
-        ? pidProvablyDead(own.pid, kill)
-        : goWindowHasMarker && nowMs() - goWindowOpenedAt >= GO_WINDOW_MARKER_GRACE_MS;
-      if (!windowGone) return;
+      const verdict = goWindowVerdict({
+        marker,
+        token: goWindowToken,
+        childPid,
+        childAlive: Number.isSafeInteger(childPid) && childPid > 0 && !pidProvablyDead(childPid, kill),
+        lockLive: schedulerLockHolderLive(kill),
+        shellDead: marker?.token === goWindowToken && !!marker.pid && pidProvablyDead(marker.pid, kill),
+        hasMarker: goWindowHasMarker,
+        elapsedMs: nowMs() - goWindowOpenedAt,
+      });
+      if (!verdict.settled) return;
+      // A window that reports late must find its launch withdrawn rather than
+      // start a second run; one that reported meanwhile keeps the run.
+      if (verdict.fallback && !revokeOwnerLaunch(goWindowToken, verdict.message)) return;
       goWindowToken = null;
-      log(`  ${C.yellow}[session]${C.reset} the posse go window closed before posse go could run; running posse go here instead.`);
-      commandChain = commandChain.then(() => runForeground(["go"]));
+      if (verdict.message) log(`  ${C.yellow}[session]${C.reset} ${verdict.message}`);
+      if (verdict.fallback) commandChain = commandChain.then(() => runForeground(goArgs()));
+    };
+    // posse go's full-screen display needs a real terminal. Where this one is
+    // not (output piped or captured, TERM=dumb), go runs with its plain log
+    // output instead, and the console says so.
+    const goArgs = () => {
+      if (!sessionConsole?.interactive) return ["go"];
+      const limit = fullScreenLimit();
+      if (!limit) return ["go"];
+      log(`  ${C.cyan}[session]${C.reset} this terminal cannot show the run screen (${limit}); posse go runs here with plain log output.`);
+      return ["go", "--no-tui"];
     };
     // A posse command (`add`, `go`) this console handed the terminal to. Ctrl+C
     // then belongs to that command, never to the session.
@@ -234,6 +244,10 @@ export class PairingMonitor {
     };
     const stateAtStart = getPairingState(stateId);
     const role = stateAtStart?.role === "host" ? "host" : "member";
+    // The session screen covers this console; it shows the code from here.
+    if (role === "host" && sessionCode) {
+      writeSessionInvite({ sessionId: stateAtStart?.remote_session_id, code: sessionCode });
+    }
     const leaseSec = sessionLeaseSec(role);
     let log = (text = "") => console.log(text);
     const emit = (event, text) => {
@@ -260,12 +274,29 @@ export class PairingMonitor {
       // session screen says it (and more) instead of a feed line.
       if (first && !json && !landingShown) {
         printLanding(state);
+        enterSharedRunOnce();
         return;
       }
+      if (first) enterSharedRunOnce();
       emit(
         { event: "pairing_sync", state: sync.state, label: sync.label, reasons: sync.reasons },
         `  ${C.cyan}[sync]${C.reset} ${sessionSyncFeedLabel(sync)}`,
       );
+    };
+    // The checkout has settled for the first time: the session is ready to
+    // use. Where this terminal can show it, go straight to the session screen.
+    const enterSharedRunOnce = () => {
+      if (!enterSharedRun || sharedRunEntered || stopping) return;
+      sharedRunEntered = true;
+      if (!sessionConsole?.interactive) return;
+      const limit = fullScreenLimit();
+      if (limit) {
+        log(`  ${C.cyan}[session]${C.reset} type go to run work here (this terminal cannot show the session screen: ${limit}).`);
+        return;
+      }
+      if (observing || schedulerLockHolderLive(kill) || goWindowStarting()) return;
+      log(`  ${C.cyan}[session]${C.reset} opening the session screen (posse go). Ctrl+C there comes back to this console; the session stays open.`);
+      commandChain = commandChain.then(() => runSessionConsoleCommand({ kind: "go" }));
     };
     const peopleInSession = () => {
       const peers = readPairingPeerSnapshot()?.peers;
@@ -311,6 +342,39 @@ export class PairingMonitor {
       });
       updatePrompt();
     };
+    // The roster: everyone's role, run state, work counts and lease.
+    // While posse go owns the session its snapshot is the source, as for the
+    // session screen.
+    const readRoster = (state = getPairingState(stateId)) => {
+      let schedulerRunning = null;
+      try {
+        schedulerRunning = schedulerLockHolderLive(kill);
+      } catch { /* shown as unknown */ }
+      return readSessionRoster({
+        state,
+        status: observing ? null : latestStatus,
+        members: role === "host" ? latestMembers : null,
+        schedulerRunning,
+      });
+    };
+    const updatePanel = () => {
+      if (!sessionConsole) return;
+      try {
+        const roster = readRoster();
+        if (roster) sessionConsole.setPanel(sessionRosterPanelView(roster, { sessionCode }));
+      } catch { /* the panel is advisory */ }
+    };
+    const printRoster = () => {
+      const roster = readRoster();
+      if (!roster) return;
+      const lines = formatSessionRosterLines(roster, {
+        width: Math.max(40, (Number(output?.columns) || 100) - 2), maxRows: 100, sessionCode,
+      });
+      lines.forEach((line, index) => {
+        const color = index === 0 ? C.bold : index === 1 ? C.dim : "";
+        log(`  ${color}${line}${color ? C.reset : ""}`);
+      });
+    };
     // Run a posse command (`add`, `go`) in this terminal, then come back here.
     const runForeground = async (args) => {
       if (!sessionConsole?.interactive) {
@@ -321,10 +385,7 @@ export class PairingMonitor {
       let outcome = null;
       try {
         foreground = spawnPosse(args, { cwd: projectDir });
-        outcome = await new Promise((resolve) => {
-          foreground.once("error", (error) => resolve({ error }));
-          foreground.once("exit", (code, signal) => resolve({ code, signal }));
-        });
+        outcome = await waitForForegroundExit(foreground);
       } catch (error) {
         outcome = { error };
       } finally {
@@ -388,6 +449,8 @@ export class PairingMonitor {
           for (const line of sessionConsoleHelp(role, { observing })) log(`  ${C.dim}${line}${C.reset}`);
         } else if (parsed.kind === "status") {
           printLanding(state);
+        } else if (parsed.kind === "panel") {
+          printRoster();
         } else if (parsed.kind === "add") {
           // Word by word, as a shell would pass them, so `add --oneshot fix it`
           // reaches posse add as a flag and a task.
@@ -397,23 +460,26 @@ export class PairingMonitor {
             log(`  ${C.yellow}[session]${C.reset} posse go is already running this session in another terminal; new tasks queued here wait for its next run.`);
             return;
           }
-          // On Windows the run gets its own PowerShell window and this screen
-          // stays: the host keeps watching members, admissions, and sync, and
-          // takes the session back when that run ends. Elsewhere, and for
-          // `go here`, it runs here.
-          if (platform === "win32" && sessionConsole?.interactive && !parsed.here) {
+          // The session screen opens in this terminal on every platform: this
+          // console is suspended while the run has the terminal and resumes
+          // when it returns (Ctrl+C there). `go window` keeps the Windows
+          // option of a separate PowerShell window with this console staying.
+          if (parsed.window && platform !== "win32") {
+            log(`  ${C.yellow}[session]${C.reset} \`go window\` opens a new window on Windows only; running posse go here.`);
+          }
+          if (parsed.window && platform === "win32" && sessionConsole?.interactive) {
             try {
               const opened = await openPosseWindow(["go"], { cwd: projectDir });
               goWindowToken = opened?.token || null;
               goWindowOpenedAt = nowMs();
               goWindowHasMarker = !!opened?.markerPath;
-              log(`  ${C.cyan}[session]${C.reset} posse go opened in a new PowerShell window; this screen stays here (type \`go here\` to run it in this window instead).`);
+              log(`  ${C.cyan}[session]${C.reset} posse go opened in a new PowerShell window; this console stays here (plain \`go\` runs it in this window instead).`);
               return;
             } catch (error) {
               log(`  ${C.yellow}[session]${C.reset} could not open a new window (${safeError(error)}); running posse go here instead.`);
             }
           }
-          await runForeground(["go"]);
+          await runForeground(goArgs());
         } else if (parsed.kind === "members") {
           printHostConsoleMembers(log, latestMembers);
         } else if (parsed.kind === "merge" || parsed.kind === "deploy") {
@@ -439,9 +505,13 @@ export class PairingMonitor {
           if (resumed.ok && resumed.resumed && !observing) pollTrunk(latestStatus);
         } else if (parsed.kind === "admit") {
           log(`  ${C.cyan}[session]${C.reset} admitting ${parsed.code}...`);
-          const admitted = await admitPairingMember({ state, code: parsed.code, projectDir, remoteClient });
+          const admitted = await admitPairingMember({
+            state, code: parsed.code, computeOwner: parsed.computeOwner ?? null, projectDir, remoteClient,
+          });
           log(`  ${C.green}[session]${C.reset} admitted ${admitted.member ? `${memberLabel(admitted.member)} with ` : ""}`
             + `${admitted.countersign}; they are checking out ${state.shared_branch}`);
+          log(`  ${C.cyan}[session]${C.reset} compute: ${describeComputeOwner(admitted.compute_owner)}`
+            + (admitted.compute_lease_recorded ? "" : " (lease not recorded: their Posse or the Remote predates leases; the session policy applies)"));
           await refreshHostMembers(state);
           printLanding(state);
         } else if (parsed.kind === "kick") {
@@ -453,9 +523,25 @@ export class PairingMonitor {
           await kickPairingMember({ state, memberId: matches[0].id, projectDir, remoteClient });
           log(`  ${C.yellow}[session]${C.reset} removed ${memberLabel(matches[0])}`);
           await refreshHostMembers(state);
+        } else if (parsed.kind === "lease") {
+          const matches = latestMembers.filter((member) => String(member.id).startsWith(parsed.id));
+          if (matches.length !== 1) {
+            log(`  ${C.yellow}[session]${C.reset} ${matches.length ? "Several" : "No"} members match "${parsed.id}"; type members to see ids`);
+            return;
+          }
+          const status = await setPairingMemberLease({
+            state, memberId: matches[0].id, computeOwner: parsed.computeOwner, remoteClient,
+          });
+          const owner = parsed.computeOwner || defaultSessionComputeOwner(status?.compute_policy || state.compute_policy);
+          log(`  ${C.cyan}[session]${C.reset} ${memberLabel(matches[0])}: ${describeComputeOwner(owner)}`
+            + (parsed.computeOwner ? "" : " (session default)"));
+          await refreshHostMembers(state);
         }
       } catch (error) {
         log(`  ${C.yellow}[session]${C.reset} ${safeError(error)}`);
+      } finally {
+        // An admission, a lease change or a queued task shows at once.
+        if (!stopping) updatePanel();
       }
     };
     let commandChain = Promise.resolve();
@@ -487,8 +573,16 @@ export class PairingMonitor {
             // One command at a time; a slow admit must not interleave with a kick.
             commandChain = commandChain.then(() => runSessionConsoleCommand(parsed));
           },
-          onInterrupt: () => { forceRequested = true; },
+          onInterrupt: () => {
+            forceRequested = true;
+            interruptedAtPrompt = true;
+          },
           onHangup: () => hangup(),
+          panelMode: sessionPanelMode({ input, output, platform }),
+          panelStyle: (line, index) => {
+            const color = index === 0 ? C.bold : index === 1 ? C.dim : /\bpending\b/u.test(line) ? C.yellow : "";
+            return `${color}${line}${color ? C.reset : ""}`;
+          },
         })
       : null;
     if (sessionConsole) log = sessionConsole.print;
@@ -552,6 +646,7 @@ export class PairingMonitor {
           if (snapshot) printPeerActivityChanges(C, snapshot, seenPeerActivity, { json, log });
           await refreshHostMembers(state);
           reportSyncTransition(state);
+          updatePanel();
           await waitForNextLap(heartbeatMs);
           continue;
         }
@@ -589,6 +684,7 @@ export class PairingMonitor {
             phase: "active",
             scopeSet: nextScope,
             computePolicy: status.compute_policy,
+            computeOwner: status.compute_owner,
             integrationPolicy: status.integration_policy,
             enrollmentOpen: status.enrollment_open,
             submissionApprovalEnabled: status.submission_approval_enabled,
@@ -646,10 +742,12 @@ export class PairingMonitor {
           // Git sync does not depend on the relay; keep the checkout current.
           pollTrunk();
           reportSyncTransition(state);
+          updatePanel();
           await waitForNextLap(retryMs);
           continue;
         }
         reportSyncTransition(state);
+        updatePanel();
         if (status.status !== "active") return { reason: status.status, status };
         await waitForNextLap(heartbeatMs);
       }
@@ -663,6 +761,7 @@ export class PairingMonitor {
       }
       return {
         reason: gracefulRequested ? "graceful_close" : forceRequested ? "force_close" : "local_leave",
+        ...(forceRequested && !gracefulRequested && interruptedAtPrompt ? { interrupted: true } : {}),
       };
     } finally {
       stopping = true;
@@ -676,6 +775,8 @@ export class PairingMonitor {
       }
       // The scheduler owns the peer snapshot while it runs.
       if (!observing && !detached) clearPairingPeerSnapshot();
+      // A detached console leaves the code for the posse go that keeps the session.
+      if (role === "host" && !detached) clearSessionInvite();
       process.removeListener("SIGINT", stop);
       process.removeListener("SIGTERM", stop);
       process.removeListener("SIGHUP", hangup);

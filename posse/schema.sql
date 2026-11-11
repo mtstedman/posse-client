@@ -21,7 +21,7 @@ PRAGMA foreign_keys = ON;
 --  20 = + Team submission approval policy and publication mode state.
 -- 21 = terminal abandoned shared-trunk merge operations
 -- 22 = interrupted agent-call terminal state
-PRAGMA user_version = 25;
+PRAGMA user_version = 26;
 
 CREATE TABLE IF NOT EXISTS bridge_command_results (
   command_id TEXT PRIMARY KEY,
@@ -213,6 +213,7 @@ CREATE TABLE IF NOT EXISTS work_item_delegations (
   claim_oid TEXT,
   job_type TEXT NOT NULL,
   provider TEXT,
+  compute_owner TEXT CHECK (compute_owner IS NULL OR compute_owner IN ('host','member')),
   state TEXT NOT NULL CHECK (
     state IN ('offered','claimed','imported','running','merged','failed','recalled')
   ),
@@ -1308,6 +1309,7 @@ CREATE TABLE IF NOT EXISTS pairing_sessions (
   instance_id TEXT,
   scope_set_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(scope_set_json)),
   compute_policy TEXT NOT NULL DEFAULT 'each-member',
+  compute_owner TEXT CHECK (compute_owner IS NULL OR compute_owner IN ('host','member')),
   integration_policy TEXT NOT NULL DEFAULT 'side-trunk',
   enrollment_open INTEGER NOT NULL DEFAULT 1 CHECK (enrollment_open IN (0,1)),
   baseline_oid TEXT,

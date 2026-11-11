@@ -1295,8 +1295,120 @@ posse session pending
 posse session kick <member-id>
 posse session invite open       # or: close
 posse session policy each-member  # capability-routing | host-only
+posse session admit <COUNTERSIGN> host   # or: member (the default when omitted)
+posse session lease <member-id> host     # or: member | default
 posse session scope <member-id> '{"files":["README.md"],"roots":["lib/"]}'
 ```
+
+#### Who is in the session
+
+One roster describes the session everywhere it is shown: one row per person
+(the host and every member, including those waiting to be admitted).
+
+```text
+who                   role    go       run  queued  waiting  runs on        id
+you                   host    running    1       1        0  own
+webapp @ ana-laptop   member  running    1       0        1  host           67708284
+webapp @ raj-desktop  member  unknown    0       3        0  own (default)  4d826144
+```
+
+`run`, `queued` and `waiting` count that person's work items with a job
+executing now, not running, and waiting on a person. `runs on` is their compute
+lease: `host` means the host's computer and provider account run their work,
+`own` means they run and pay for it themselves, and `(default)` marks a lease
+the host has not issued, which follows the session policy. `go` is the
+scheduler. For your own row it is read from this clone's scheduler lock. Peers
+do not advertise their scheduler, so another person's row says `running` only
+when one of their jobs is executing and `unknown` otherwise (`away` when the
+relay has lost touch with them, `joining` before their first heartbeat,
+`pending` before admission).
+
+- `posse go` inside a live session is a **shared run**. It opens on the
+  **Session** view (`o`): the roster, each person's sync state, and everyone's
+  open work items. It does not end when its queue empties: it stays on the
+  session screen, keeps the heartbeat, sync and routing going, and picks up
+  work as it is added (`i` adds a task; a task queued with `posse add` in
+  another terminal is planned and run too). Finished work is still auto-merged
+  when automatic merge is on, and work waiting for review is announced with
+  the key (`r`) that reviews and merges it in place. The other views are a key
+  away as usual; outside a session the view does not exist and a run ends when
+  its work does, as before. A run scoped with `--wi`, an unattended run
+  (`--yes`), and a run whose input is not a terminal also end when their work
+  does.
+- **Ctrl+C in a shared run** stops the scheduler (the usual graceful stop) and
+  returns to the session console with the session still live. The session ends
+  from the console: the host types `close` (or `quit`, or Ctrl+C), which closes
+  it for everyone and asks before the session's work is published; a member
+  types `leave`. A shared run also ends when the host closes the session or
+  removes this clone, and says which.
+- `posse session host` and `posse session join` go straight to the session
+  screen once the checkout has synced for the first time, when the terminal can
+  show it. `POSSE_SESSION_CONSOLE=1` keeps them in the session console; `go`
+  there opens the screen. `go` runs in the console's own terminal on every
+  platform (the console is suspended meanwhile); `go window` keeps the Windows
+  option of a separate PowerShell window.
+- The **host's** Session view is a manager. Up and down select a person; the
+  line under the title lists what can be done to them: `a` admits a pending
+  request (it opens the session command with `admit ` typed; type the
+  4-character countersign the member reads to you, optionally followed by
+  `host` or `member`), `e` changes a member's lease (host, member or the
+  session default), `c` sets their write scope, and `z` removes them (or
+  declines a request) after a confirmation. `h` opens the session's own
+  actions: merge, deploy, auto merge and auto deploy on or off, invites open
+  or closed, policy, and close. Deploy and close ask first; merge and deploy
+  hand the terminal to `posse session merge` / `deploy` for the typed approval
+  and then return. Every action is the same command `u` takes, so the host
+  check stays in the command and the Remote. A **member's** Session view only
+  shows: it lists no actions, and the keys do nothing there.
+- In the session console (`posse session host` / `join`), `who` (or `panel`)
+  prints the roster, and it is printed again when someone joins, leaves, is
+  admitted, or has their lease changed. `POSSE_SESSION_PANEL=pinned` keeps it
+  pinned under the prompt instead (a terminal scroll region; exercised on
+  Linux terminals only), and `POSSE_SESSION_PANEL=off` silences it.
+
+#### Compute leases: serve and session are one route
+
+`posse serve` and `posse session` differ only in which end owns the work. The
+host issues every lease, and the lease names who runs and pays for the holder's
+routable work:
+
+| Lease | Who runs the holder's work | Who pays | Today's equivalent |
+|---|---|---|---|
+| `host` | the host's computer | the host's provider account | a phone paired with `posse serve`; `host-only` |
+| `member` | the holder's own computer | the holder's provider account | a clone joined with `posse session join`; `each-member` |
+
+A phone's lease is always `host`, because a phone cannot run work: what it
+queues runs on the computer it is paired to. When that computer is itself a
+session member on a `host` lease, the phone's work continues to the session
+host like any other work from that clone; `posse serve` prints where it will
+run. A clone's lease is whatever the host issued at admission (`admit <CODE>
+host|member` in the console, or `posse session admit <CODE> host|member`), and
+`posse session lease` re-issues it during the session. An admission without a
+tag issues `member`: tag someone `host` when they should work through your
+Posse on your providers. `posse session lease <member-id> default` returns a
+member to the session policy (`host-only` defaults to `host`, `each-member`
+and `capability-routing` default to `member`), which is also what a member
+whose client predates leases follows. The host always runs its own work.
+
+The issuer's lease is enforced where the money is spent. A member on a `host`
+lease offers its routable jobs only to the host. The host claims offered work
+from members whose lease the Remote reports as `host`, and caps each such
+member to one active job at a time. Under `capability-routing` the host also
+takes overflow from members paying their own way, and pays for what it runs.
+Members never claim each other's work unless the host turned on
+`capability-routing` for the session, and even then only a member paying its
+own way balances, and only for members who also pay their own way. An offer
+is only ever made to a peer that would claim it. Work a clone imported from another member always runs where it
+was imported. If the host cannot take a host-leased job (offline, no matching
+provider, or no headroom), the member still runs it on its own account and
+records a `session.job_lease_fallback` event. Each
+delegation records the lease it was offered or accepted under, alongside the
+originator and executor identifiers already kept on model-call cost rows.
+`posse session status`, `members`, `who` and the run screen's Session view
+show each lease; `(default)` marks one that follows the policy. A Remote that predates leases ignores them, and the
+session policy applies as before. A member whose Posse predates leases is never
+issued one: the admission reports the lease as not recorded and `posse session
+lease` refuses it.
 
 Scope is deny-by-default for unknown paths and is enforced both by the Node
 write barrier and the native commit/push/CAS boundary. Scope changes and kicks
@@ -1311,7 +1423,7 @@ The host and member commands remain connected, like `posse serve`. A live run
 adopts the session monitor, so the TUI remains the sole raw-input owner. Its
 Pipeline pane shows session phase, roster, invite/policy state, peer work, and
 delegated jobs; press `u` for the host session command line. It accepts `admit`,
-`kick`, `scope`, `policy`, `invite`, `drain`, `close`, `keep`, and `inject`.
+`kick`, `lease`, `scope`, `policy`, `invite`, `drain`, `close`, `keep`, and `inject`.
 
 On the standalone host monitor, press `g` for a graceful close: Posse freezes
 new jobs, lets active jobs finish, closes every member, synchronizes the side
@@ -1354,8 +1466,9 @@ remote. A failed check creates a typed repository recovery gate for accepting
 that exact tip or rejecting it for manual review.
 
 With `capability-routing`, a throttled or unavailable local provider can offer a
-bounded work packet through `refs/posse/handoff/*`; `host-only` routes member
-work to the host. The winner is selected by CAS in `refs/posse/jobs/*`.
+bounded work packet through `refs/posse/handoff/*`; a `host` lease (the
+`host-only` default) routes member work to the host. The winner is selected by
+CAS in `refs/posse/jobs/*`.
 Transient relay failures pause session routing while local dispatch continues;
 a later successful heartbeat resumes routing. Invalid authorization or session
 identity drains the scheduler. Graceful drain interrupts parked human gates and
@@ -1368,8 +1481,9 @@ shared trunk contains its `Posse-Origin-Work-Item` trailer. Model-call cost rows
 retain both originator and executor instance identifiers.
 
 During the compatibility rollout, `posse serve --pair` still pairs a
-phone/client to the durable Remote bridge. It does not bypass session admission
-or enroll another Posse clone.
+phone/client to the durable Remote bridge through its own ceremony. It does not
+bypass session admission or enroll another Posse clone. The phone's lease is
+the fixed `host` lease described above.
 
 Manual configuration remains available for existing long-lived administrator-managed
 trunks through explicit `posse admin set` commands. These legacy runtime keys are

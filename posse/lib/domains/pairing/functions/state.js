@@ -4,6 +4,7 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { SESSION_PUBLISH_MODES } from "../../../catalog/session-sync.js";
 import { runImmediateTransaction } from "../../queue/functions/common.js";
 import { readSessionLink } from "./session-link.js";
+import { normalizeComputeOwner } from "./compute-lease.js";
 
 const LIVE_PHASES_SQL = "'enrolling','pending','active','leaving','restore_blocked'";
 const PAIRING_OWNER_STALE_MS = 120_000;
@@ -111,6 +112,7 @@ export function updatePairingEnrollment(id, {
   instanceId = null,
   scopeSet = null,
   computePolicy = null,
+  computeOwner = null,
   integrationPolicy = null,
   enrollmentOpen = null,
   baselineOid = null,
@@ -136,6 +138,7 @@ export function updatePairingEnrollment(id, {
           instance_id = COALESCE(?, instance_id),
           scope_set_json = COALESCE(?, scope_set_json),
           compute_policy = COALESCE(?, compute_policy),
+          compute_owner = COALESCE(?, compute_owner),
           integration_policy = COALESCE(?, integration_policy),
           enrollment_open = COALESCE(?, enrollment_open),
           baseline_oid = COALESCE(?, baseline_oid),
@@ -155,6 +158,7 @@ export function updatePairingEnrollment(id, {
     `).run(
       remoteSessionId, relayToken, addedRemoteName, addedRemoteUrl, remoteName, remoteUrl,
       instanceId, scopeSet == null ? null : JSON.stringify(scopeSet), computePolicy,
+      normalizeComputeOwner(computeOwner),
       integrationPolicy, enrollmentOpen == null ? null : Number(Boolean(enrollmentOpen)),
       baselineOid, originRemoteName, originRemoteUrl, temporaryRepository, closeAction,
       credentialDirectory,

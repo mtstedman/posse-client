@@ -65,7 +65,7 @@ export class RunDisplaySnapshotController {
       initialValue: [],
       minIntervalMs: 750,
       load: () => snapshotWorker.run("pipeline"),
-      onUpdate: () => requestPaneRender("pipeline", "log", "monitor"),
+      onUpdate: () => requestPaneRender("pipeline", "log", "monitor", "session"),
       onError: (err) => {
         this.log?.debug?.("display", "Pipeline snapshot refresh failed", { error: String(err?.message || err) });
       },
@@ -101,7 +101,7 @@ export class RunDisplaySnapshotController {
     if (!this.caches) return;
     const display = this.getDisplay();
     void this.caches.dirty.refresh();
-    if (display?._rightMode === "pipeline" || (display?._rightMode === "monitor" && pipelineHasSession(this.caches.pipeline.get()))) {
+    if (display?._rightMode === "pipeline" || display?._rightMode === "session" || (display?._rightMode === "monitor" && pipelineHasSession(this.caches.pipeline.get()))) {
       void this.caches.pipeline.refresh();
     }
     if (display?._rightMode === "tools" || display?._rightMode === "monitor") void this.caches.tools.refresh();
@@ -111,7 +111,7 @@ export class RunDisplaySnapshotController {
   // every tick then, and every 10th tick otherwise so a session that starts
   // mid-run appears without loading the pipeline every second for nothing.
   pipelineVisible(mode, pipeline) {
-    if (mode === "log" || mode === "pipeline") return true;
+    if (mode === "log" || mode === "pipeline" || mode === "session") return true;
     if (mode !== "monitor") return false;
     this.monitorPipelineTicks = (this.monitorPipelineTicks || 0) + 1;
     return pipelineHasSession(pipeline.get()) || this.monitorPipelineTicks % 10 === 0;

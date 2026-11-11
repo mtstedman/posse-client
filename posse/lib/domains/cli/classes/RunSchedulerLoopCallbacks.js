@@ -40,6 +40,8 @@ export class RunSchedulerLoopCallbacks {
     describePendingReviewLockBlockers = () => null,
     surfaceActionableHumanGates = null,
     surfacePlanApprovalGates = () => [],
+    // A shared run's stand-in for the closeout (RunSharedSession).
+    sharedSession = null,
   } = {}) {
     this.getDisplay = getDisplay;
     this.C = C;
@@ -57,6 +59,7 @@ export class RunSchedulerLoopCallbacks {
     this.teamSubmissionRetryArmed = false;
     this.lastMergeQueueGeneration = null;
     this.lastQueueMergeAttemptAt = 0;
+    this.sharedSession = sharedSession;
   }
 
   callbacks() {
@@ -65,6 +68,7 @@ export class RunSchedulerLoopCallbacks {
       onJobEnd: (job) => this.onJobEnd(job),
       onIdle: (activeJobs, options) => this.onIdle(activeJobs, options),
       onDone: (report) => this.onDone(report),
+      onQuiet: (detail) => this.sharedSession?.onQuiet(detail),
       onBackgroundOnly: (state) => this.onBackgroundOnly(state),
       onSlotStatus: (status) => this.onSlotStatus(status),
       onKillJob: (jobId, reason) => this.worker.killJob(jobId, reason),
@@ -396,6 +400,7 @@ export class RunSchedulerLoopCallbacks {
   }
 
   onQueueStateChange({ generation }) {
+    this.sharedSession?.onQueueGeneration(generation);
     if (generation === this.lastMergeQueueGeneration || !this.idleAutoMerge) return;
     if (this.idleAutoMerge.isRunning() || Date.now() - this.lastQueueMergeAttemptAt < 5000) return;
     let mergeable = false;

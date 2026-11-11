@@ -54,6 +54,7 @@ export {
   __testRepairPairingSessionPendingPhaseSchema,
   __testInstallPairingSessionPolicySchema,
   __testInstallWorkItemDelegationSchema,
+  __testInstallSessionComputeLeaseSchema,
   __testRepairWorkItemsGovernanceTierSchema,
   getHostSchemaVersion as __testGetHostSchemaVersion,
   runHostMigration as __testRunHostMigration,

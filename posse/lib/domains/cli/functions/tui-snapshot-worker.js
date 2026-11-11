@@ -85,7 +85,47 @@ async function buildPipelineData({ projectDir = null, dbPath = null } = {}) {
     return { id: wi.id, title: wi.title, status: wi.status, jobs: enriched };
   });
   const session = pairingSessionSummary();
-  return [...(session ? [{ session_summary: true, ...session }] : []), ...localRows, ...pairingPeerPipelineRows()];
+  return [
+    ...(session
+      ? [{ session_summary: true, ...session, participants: await sessionParticipants(), ...(await sessionHostView()) }]
+      : []),
+    ...localRows,
+    ...pairingPeerPipelineRows(),
+  ];
+}
+
+// The session roster for the run screen's session dashboard: the same rows the
+// session console's control panel shows. Advisory; the dashboard renders
+// without it.
+async function sessionParticipants() {
+  try {
+    const { readSessionRoster } = await import("../../pairing/functions/session-roster-source.js");
+    const { schedulerLockHolderLive } = await import("../../pairing/functions/monitor-ownership.js");
+    return readSessionRoster({ schedulerRunning: schedulerLockHolderLive(process.kill.bind(process)) });
+  } catch {
+    return null;
+  }
+}
+
+// What only the host's session pane shows: the pairing code to hand out and
+// how merge and deploy run. Kept out of the session summary the bridge sends on.
+async function sessionHostView() {
+  try {
+    const { readSessionInviteCode } = await import("../../pairing/functions/session-invite.js");
+    const { getLivePairingState } = await import("../../pairing/functions/state.js");
+    const state = getLivePairingState();
+    if (state?.role !== "host") return {};
+    return {
+      invite_code: readSessionInviteCode(state),
+      publish: {
+        merge_mode: state.merge_mode === "auto" ? "auto" : "ask",
+        deploy_mode: state.deploy_mode === "auto" ? "auto" : "ask",
+        auto_paused_reason: state.auto_paused_reason || null,
+      },
+    };
+  } catch {
+    return {};
+  }
 }
 
 async function buildToolData({ projectDir = null, dbPath = null } = {}) {

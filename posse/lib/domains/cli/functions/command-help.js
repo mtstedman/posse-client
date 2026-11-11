@@ -85,9 +85,10 @@ const COMMAND_USAGE = {
     console.log(`\n  Usage:`);
     console.log(`    posse session host [--remote origin] [--branch posse/pair-name] [--merge-mode ask|auto] [--deploy-mode ask|auto]`);
     console.log(`    posse session join <CODE|posse://session?...> [--here]`);
-    console.log(`    posse session admit <COUNTERSIGN>`);
+    console.log(`    posse session admit <COUNTERSIGN> [host|member]   (default member)`);
     console.log(`    posse session members|pending`);
     console.log(`    posse session kick <MEMBER-ID>`);
+    console.log(`    posse session lease <MEMBER-ID> host|member|default`);
     console.log(`    posse session invite open|close`);
     console.log(`    posse session scope <MEMBER-ID> '<JSON>'`);
     console.log(`    posse session policy each-member|capability-routing|host-only`);
@@ -102,6 +103,8 @@ const COMMAND_USAGE = {
     console.log(`    posse session abandon-integration`);
     console.log(`\n  Opens or joins a shared Posse collaboration session.`);
     console.log(`  Joiners wait for the host to confirm their four-character countersign.`);
+    console.log(`  The host issues each member's lease: host runs their work on the host's computer and provider account,`);
+    console.log(`  member lets them run and pay for their own. Unset leases follow the session policy (host-only means host).`);
     console.log(`  A join runs in ~/posse-sessions/<CODE>; --here explicitly joins in this clone instead.`);
     console.log(`  hold keeps this checkout where it is (fetches continue) until resume or 30 minutes pass.`);
     console.log(`  merge squashes the team's work into your branch and deploy pushes it to origin; the session keeps running.`);

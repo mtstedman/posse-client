@@ -153,7 +153,7 @@ export class DisplayBottomInputRenderer {
     // ── Session command mode ──
     if (this._inputMode === "session") {
       lines.push("");
-      const commands = this.sessionCommandHint || "admit, kick, scope, policy, invite, drain, close, keep, inject";
+      const commands = this.sessionCommandHint || "admit, kick, lease, scope, policy, invite, merge, deploy, auto, drain, close, keep, inject";
       lines.push(` ${C.cyan}${C.bold}◇ Session Command${C.reset}  ${C.dim}${commands}:${C.reset}`);
       lines.push("");
       const cursor = this._spinIdx % 2 === 0 ? "\u2588" : "\u258c";
@@ -419,7 +419,8 @@ export class DisplayBottomInputRenderer {
     if (this.onSkipJob) control.push(hint("s", "skip task", C.yellow));
     if (this._rightMode !== "monitor" && this.onKill && this.workers.size > 0) control.push(hint("k", "kill", C.red));
     if (this.onKillWI) control.push(hint("x", "cancel WI", C.red));
-    control.push(hint("Ctrl+C", "quit", C.red));
+    // A shared run does not end the session: Ctrl+C goes back to its console.
+    control.push(hint("Ctrl+C", this.sharedRun ? "session console" : "quit", C.red));
 
     const left = [...input, ...inspect].join("  ");
     const right = control.join("  ");

@@ -5,7 +5,7 @@ import { pulseTokenManager } from "../../../shared/native/classes/PulseTokenMana
 import { readResponseTextWithLimit } from "../../remote/functions/client.js";
 import { abortable } from "../../../shared/concurrency/functions/abortable.js";
 import { TEAM_PUBLICATION_MODES } from "../../../catalog/team.js";
-import { SESSION_COMPUTE_POLICY_VALUES, SESSION_SYNC_POLICY, TRUNK_HEAD_PATTERN } from "../../../catalog/session-sync.js";
+import { SESSION_COMPUTE_LEASE_PROTOCOL, SESSION_COMPUTE_OWNER_VALUES, SESSION_COMPUTE_POLICY_VALUES, SESSION_SYNC_POLICY, TRUNK_HEAD_PATTERN } from "../../../catalog/session-sync.js";
 
 
 
@@ -20,6 +20,15 @@ import { SESSION_COMPUTE_POLICY_VALUES, SESSION_SYNC_POLICY, TRUNK_HEAD_PATTERN 
 
 
 
+
+// Lease fields arrive from Remotes that know compute leases (schema v31+).
+// Older Remotes omit them and clients fall back to the session policy.
+function optionalComputeOwner(endpoint, record, key, status) {
+  if (record[key] == null) return;
+  if (!SESSION_COMPUTE_OWNER_VALUES.includes(record[key])) {
+    throw invalidResponse(endpoint, `${key} is invalid`, status);
+  }
+}
 
 function invalidResponse(endpoint, detail, status = null) {
   const error = new Error(`Pairing relay returned an invalid ${endpoint} response: ${detail}`);
@@ -140,6 +149,11 @@ function validatePeers(endpoint, response, status) {
       && peer.last_seen_age_sec <= SESSION_SYNC_POLICY.PEER_LAST_SEEN_MAX_SEC
       ? peer.last_seen_age_sec
       : null;
+    // An unreadable lease falls back to the session default rather than
+    // failing everyone's heartbeat; executors then use that default too.
+    peer.compute_owner = SESSION_COMPUTE_OWNER_VALUES.includes(peer.compute_owner)
+      ? peer.compute_owner
+      : null;
     requiredString(endpoint, peer, "instance_id", { maxLength: 128, status });
     requiredString(endpoint, peer, "label", { maxLength: 160, status });
     if (peer.git_identities == null) peer.git_identities = [];
@@ -217,6 +231,8 @@ function validateMembers(endpoint, response, status) {
     if (!Number.isFinite(Date.parse(joinedAt))) {
       throw invalidResponse(endpoint, "member joined_at is invalid", status);
     }
+    optionalComputeOwner(endpoint, member, "compute_owner", status);
+    optionalComputeOwner(endpoint, member, "compute_lease", status);
   }
 }
 
@@ -298,6 +314,8 @@ export function validatePairingRemoteResponse(endpoint, payload, status = null) 
       && !SESSION_COMPUTE_POLICY_VALUES.includes(response.compute_policy)) {
       throw invalidResponse(endpoint, "compute_policy is invalid", status);
     }
+    optionalComputeOwner(endpoint, response, "compute_owner", status);
+    optionalComputeOwner(endpoint, response, "compute_lease", status);
   if (response.integration_policy != null
       && !["none", "side-trunk"].includes(response.integration_policy)) {
       throw invalidResponse(endpoint, "integration_policy is invalid", status);
@@ -457,6 +475,7 @@ export function createPairingRemoteClient({
           instance_id: instanceId,
           shutdown_protocol: 2,
           admission_protocol: 2,
+          compute_lease_protocol: SESSION_COMPUTE_LEASE_PROTOCOL,
           ...(sshPublicKey ? { ssh_public_key: sshPublicKey } : {}),
         },
       });
@@ -466,9 +485,11 @@ export function createPairingRemoteClient({
       return response;
     },
     pendingStatus: (token) => validatedRequest("pending", { method: "GET", token }),
-    admit: (token, countersign) => validatedRequest("admit", {
+    // The lease is sent only when the host chose one, so admitting through a
+    // Remote that predates leases keeps working with the session default.
+    admit: (token, countersign, { computeOwner = null } = {}) => validatedRequest("admit", {
       token,
-      body: { countersign },
+      body: { countersign, ...(computeOwner ? { compute_owner: computeOwner } : {}) },
       path: "members/admit",
     }),
     members: (token, { pendingOnly = false, signal = null } = {}) => validatedRequest("members", {
@@ -491,6 +512,12 @@ export function createPairingRemoteClient({
       token,
       body: { member_id: memberId, ...(role ? { role } : {}), scope_set: scopeSet },
       path: "members/scope",
+    }),
+    // Re-issue one member's lease; null returns it to the session default.
+    setLease: (token, memberId, computeOwner = null) => validatedRequest("status", {
+      token,
+      body: { member_id: memberId, compute_owner: computeOwner },
+      path: "members/lease",
     }),
     setPolicy: (token, compute) => validatedRequest("status", {
       token,

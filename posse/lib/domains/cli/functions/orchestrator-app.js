@@ -72,6 +72,8 @@ import { editorCommandLabel, parseEditorCommand, resolveEditorCommand } from "./
 import { initArtifactRootsAsync, ensureArtifactDirs, wiScopeId, getResolvedImageProtocol, artifactsDir, pruneEmptyArtifactDirsAsync } from "../../artifacts/functions/index.js";
 import { createWorkItem, getWorkItem, listWorkItems, updateWorkItemStatus, setMergeState, markWorkItemMergeFailed, holdForCurrentMergeVerificationReview, listJobs, listJobsByWorkItem, getWorkItemJobStats, createJob, getEvents, logEvent, getDependencies, getSetting, setSetting, listSettings, getLiveSchedulerBlockMessage } from "../../queue/functions/index.js";
 import { withMergeLock } from "../../queue/functions/locks.js";
+import { noteGoWindow, ownerLaunchRevoked } from "../../pairing/functions/session-owner-launch.js";
+import { pairingSessionLive, sharedRunEligible, sharedRunTerminalAttached } from "../../pairing/functions/shared-run.js";
 import { LOCK_HOLDING_JOB_STATUSES } from "../../queue/functions/common.js";
 import { shouldIncludeWorkItemInApprovalQueue } from "../../queue/functions/reviewable.js";
 import { jobIsBackgroundAtlasWarm, jobLabel, reviewVisibleJobs } from "../../ui/functions/display/helpers/job-status.js";
@@ -1513,6 +1515,18 @@ async function cmdGo() {
   // there is nothing to do.
   const activeJobs = operationalRunJobs(listJobs(["queued", ...LOCK_HOLDING_JOB_STATUSES]));
 
+  // In a live session `go` opens the session screen even with nothing queued:
+  // a shared run stays open for work added or routed later. The run does its
+  // own start-of-run merge and deploy-offer refresh.
+  if (queued.length === 0 && activeJobs.length === 0 && sharedRunEligible({
+    scoped: parseWorkItemIdsFlagFromArgv().length > 0, nonInteractive: NON_INTERACTIVE, dryRun: DRY_RUN,
+    terminal: sharedRunTerminalAttached(),
+  }) && pairingSessionLive()) {
+    if (refuseIfSchedulerLive("go")) return;
+    await cmdRun();
+    return;
+  }
+
   if (queued.length === 0 && activeJobs.length === 0) {
     const iterateResult = await processIterativeWrapUp({ reason: "go start" });
     if (iterateResult.rerun) {
@@ -1524,6 +1538,7 @@ async function cmdGo() {
     const mergeOutcome = await withMergeLock(() => helpers.autoMergeCompletedWorkItems({ reason: "go start", mergeLockAlreadyHeld: true }));
     if (!mergeOutcome.acquired) {
       console.log(`\n  ${C.red}go refused:${C.reset} another merge is already in progress; retry when it finishes.\n`);
+      noteGoWindow("reason", "go refused: another merge is already in progress", { projectDir: PROJECT_DIR });
       process.exitCode = 1;
       return;
     }
@@ -1546,6 +1561,7 @@ async function cmdGo() {
       return;
     }
     console.log(`\n  Nothing to do. Use 'add' to queue work items.\n`);
+    noteGoWindow("reason", "nothing to do: no queued work items or active jobs", { projectDir: PROJECT_DIR });
     return;
   }
 
@@ -1586,6 +1602,7 @@ async function cmdGo() {
   if (planning.blocked) {
     recordStartupDirtyTreeBlock(planning.blocked, { reason: "run start", logEvent, log });
     console.log(`\n  ${C.yellow}Run blocked: ${planning.blocked.message}${C.reset}\n`);
+    noteGoWindow("reason", `run blocked: ${planning.blocked.message}`, { projectDir: PROJECT_DIR });
     process.exitCode = planning.blocked.userExited ? 0 : 2;
     return;
   }
@@ -1789,6 +1806,7 @@ function refuseIfSchedulerLive(commandName) {
   const message = getLiveSchedulerBlockMessage("main");
   if (!message) return false;
   console.log(`\n  ${C.red}${commandName} refused:${C.reset} ${message}\n`);
+  noteGoWindow("reason", `${commandName} refused: ${message}`, { projectDir: PROJECT_DIR });
   process.exitCode = 1;
   return true;
 }
@@ -2433,7 +2451,7 @@ export async function main() {
     }
   }
   const commandPolicy = ["pair", "session"].includes(command)
-      && ["leave", "close", "status", "admit", "members", "pending", "kick", "invite", "scope", "policy", "hold", "resume", "auto"].includes(pairSubcommand)
+      && ["leave", "close", "status", "admit", "members", "pending", "kick", "lease", "invite", "scope", "policy", "hold", "resume", "auto"].includes(pairSubcommand)
     ? { ...baseCommandPolicy, requiresNativeGit: false }
     : baseCommandPolicy;
   const informationalOnly = commandPolicy.readOnly === true || helpFlagRequested();
@@ -2463,6 +2481,7 @@ export async function main() {
     // otherwise open a .posse/logs/runs telemetry directory here.
     configureRunTelemetry({ enabled: false });
     console.error(`\n${C.red}${uninitializedProjectMessage(PROJECT_DIR)}${C.reset}\n`);
+    noteGoWindow("reason", uninitializedProjectMessage(PROJECT_DIR), { projectDir: PROJECT_DIR });
     process.exitCode = 1;
     return;
   }
@@ -2483,6 +2502,15 @@ export async function main() {
     // artifact refresh, and maintenance commands never reach one at all.
     refreshNativeGit: commandPolicy.requiresNativeGit,
   });
+  // The session console gave up on the window this go runs in and started its
+  // own: stop here, with the reason on screen, rather than run a second one.
+  const launchRevoked = ownerLaunchRevoked();
+  if (launchRevoked) {
+    console.error(`\n  ${C.yellow}posse go is not starting in this window:${C.reset} ${launchRevoked}. Close this window.\n`);
+    noteGoWindow("reason", launchRevoked, { projectDir: PROJECT_DIR });
+    process.exitCode = 1;
+    return;
+  }
   // A killed pairing host cannot integrate through the credential-free relay.
   // The next invocation in the owning clone that would start new work resumes
   // its durable close/publish journal first. Reads, reports, and operator
@@ -2512,6 +2540,9 @@ export async function main() {
       }
     }
   }
+  // For a go the session console opened in its own window: startup is through,
+  // so an exit from here on is the run's own and is never rerun in the console.
+  noteGoWindow("booted", "1", { projectDir: PROJECT_DIR });
   await maybeWarnPosseUpdateAvailable(commandPolicy);
 
   if (isHelpCommand(command)) {
@@ -2603,6 +2634,7 @@ export function runOrchestratorCli() {
     .catch((err) => {
       fatal = true;
       console.error(`\n${C.red}Fatal: ${err.message}${C.reset}`);
+      noteGoWindow("reason", `Fatal: ${err.message}`, { projectDir: PROJECT_DIR });
       process.exitCode = 1;
     })
     .finally(async () => {

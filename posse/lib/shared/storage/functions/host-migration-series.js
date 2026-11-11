@@ -125,5 +125,10 @@ export function runRegisteredHostMigrations(db, {
   });
   host.runHostMigration(db, { version: 25, name: "work_item_admission_budgets",
     needs: needsAdmissionBudgetSchema, migrate: installAdmissionBudgetSchema });
-
+  host.runHostMigration(db, {
+    version: 26,
+    name: "session_compute_lease",
+    needs: host.needsSessionComputeLeaseSchema,
+    migrate: host.installSessionComputeLeaseSchema,
+  });
 }

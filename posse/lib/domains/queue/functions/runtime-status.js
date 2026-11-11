@@ -55,6 +55,9 @@ export const RUNTIME_STATUS_KEYS = Object.freeze({
   // token that window carries, so go's crash recovery recognizes the live
   // console as its owner although the window's shell is its parent.
   SESSION_OWNER_LAUNCH: "session_owner_launch",
+  // The pairing code of the session this clone hosts, so the session screen
+  // can keep showing it (pairing session-invite.js). Local only.
+  SESSION_INVITE: "session_invite",
 });
 
 /** How stale the bridge heartbeat may be and still count as "present".

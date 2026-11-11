@@ -11,7 +11,7 @@ export class DisplayFrameRenderer {
 
   render({ advanceAnimation = false } = {}) {
     if (!this._started && !this._renderOnce) return;
-    if (this._stdoutBackedUp) return;
+    if (this._stdoutBackedUp || this._terminalLent) return;
     this._renderOnce = false;
     this._lastRenderAt = Date.now();
     this._refreshViewport();
@@ -24,6 +24,8 @@ export class DisplayFrameRenderer {
       this._renderApproval();
       return;
     }
+
+    this._syncSessionRightMode?.();
 
     // ── Panel sizing ──
     // fullW = usable width inside the outer border (cols - 2 border chars)

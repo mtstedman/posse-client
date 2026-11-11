@@ -71,6 +71,35 @@ export const SESSION_COMPUTE_POLICIES = Object.freeze({
 
 export const SESSION_COMPUTE_POLICY_VALUES = Object.freeze(Object.values(SESSION_COMPUTE_POLICIES));
 
+// Whose computer and provider account run a participant's routable work
+// (rust/catalog/pairing.rs COMPUTE_OWNERS). The host issues every lease, so
+// the host decides: HOST runs the holder's work on the issuer's machine and
+// bill; MEMBER means the holder runs and pays for its own work. `posse serve`
+// and `posse session` differ only in this: a paired phone always holds a HOST
+// lease (it cannot run work), and a joined clone holds whichever the host set.
+export const SESSION_COMPUTE_OWNERS = Object.freeze({
+  HOST: "host",
+  MEMBER: "member",
+});
+
+export const SESSION_COMPUTE_OWNER_VALUES = Object.freeze(Object.values(SESSION_COMPUTE_OWNERS));
+
+// Sent with every join (rust/catalog/pairing.rs COMPUTE_LEASE_PROTOCOL): this
+// client routes by its lease. The Remote never issues a lease to a member
+// that did not declare it, so an older client keeps following the policy.
+export const SESSION_COMPUTE_LEASE_PROTOCOL = 1;
+
+// The word `posse session lease` takes to drop an explicit lease, so the
+// member inherits the session policy's default again.
+export const SESSION_COMPUTE_LEASE_DEFAULT = "default";
+
+/** The owner of a lease the host has not set: the session policy's default. */
+export function defaultSessionComputeOwner(computePolicy) {
+  return computePolicy === SESSION_COMPUTE_POLICIES.HOST_ONLY
+    ? SESSION_COMPUTE_OWNERS.HOST
+    : SESSION_COMPUTE_OWNERS.MEMBER;
+}
+
 // Authoritative Git-ref contracts for work delegated to another session peer.
 export const SESSION_JOB_PROTOCOL = "posse.session_job.v1";
 export const SESSION_PACKET_PROTOCOL = "posse.session_packet.v1";

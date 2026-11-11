@@ -12,6 +12,9 @@ import {
   setBridgeRelayIdentity,
 } from "../../../bridge/functions/auth.js";
 import { listAllowedBridgeCommands } from "../../../bridge/functions/command-dispatch.js";
+import { describeServedDeviceCompute } from "../../../pairing/functions/compute-lease.js";
+import { getLivePairingState } from "../../../pairing/functions/state.js";
+import { getRuntimeDbPath } from "../../../runtime/functions/paths.js";
 import { resolvePosseKey } from "../../../remote/functions/client.js";
 import {
   HeartbeatAuthManager,
@@ -124,6 +127,18 @@ const PAIR_CONFIRM_FRIENDLY = Object.freeze({
  * --pair-code <code> still works but is renamed to --confirmation-code
  * for clarity; the old flag is accepted as a fallback.
  */
+// A paired phone holds the same kind of lease as a session member, always on
+// the paired computer; serve says where its work will run. The session state
+// is advisory here: a repository with no runtime database has no session, and
+// printing this line must never create one or stop serve.
+function servedComputeLine() {
+  let state = null;
+  try {
+    if (fs.existsSync(getRuntimeDbPath())) state = getLivePairingState();
+  } catch { /* an unreadable journal reads as no session */ }
+  return describeServedDeviceCompute(state);
+}
+
 export async function runPairCommand(
   config,
   {
@@ -389,6 +404,7 @@ export async function runPairCommand(
     }
     console.log(`  ${C.green}Paired.${C.reset}`);
     console.log(`  ${C.dim}Instance:${C.reset} ${instanceLabel} (${instanceId})`);
+    console.log(`  ${C.dim}Compute:${C.reset} ${servedComputeLine()}`);
     console.log(`  ${C.dim}Relay identity stored for this repo.${C.reset}`);
     console.log(`  ${C.dim}Next:${C.reset} run \`posse serve\`, or enable the bridge from Bossy's Remote tab.\n`);
     return { ok: true, paired: true, instance: body.instance };
@@ -704,6 +720,7 @@ export async function runServeCommand(argv = [], {
     console.log(`  ${C.dim}Bearer token:${C.reset} hidden (use --show-token or --show-lan-token)`);
     console.log(`  ${C.dim}WebSocket:${C.reset} ${startedInfo.url}/v1/stream`);
     if (startedInfo.relayEnabled) console.log(`  ${C.dim}Relay:${C.reset} ${startedInfo.relayUrl}`);
+    console.log(`  ${C.dim}Compute:${C.reset} ${servedComputeLine()}`);
     console.log(`  ${C.dim}Commands:${C.reset} ${listAllowedBridgeCommands().join(", ")}`);
     console.log(`  ${C.dim}Press Ctrl-C to stop.${C.reset}\n`);
     return { bridge: started, info: startedInfo };

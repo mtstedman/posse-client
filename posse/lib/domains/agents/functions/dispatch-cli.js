@@ -1,5 +1,5 @@
 import { AGENT_DISPATCH_PROTOCOL, AGENT_DISPATCH_PROTOCOL_ERROR } from "../../../catalog/agent.js";
-import { buildAgentToolInstructions } from "../classes/AgentRuntime.js";
+import { buildAgentToolInstructions, TOOL_BATCH_MAX_CALLS } from "../classes/AgentRuntime.js";
 import { agentProviderUsesNativeTools, callAgentProvider, resolveAgentProvider } from "./provider-route.js";
 import { dispatchTranscript, renderConversation, toolCallId } from "./transcript.js";
 import { parseAgentToolTurn } from "./tool-turn.js";
@@ -27,15 +27,19 @@ export async function dispatchAgentTurn(request, dependencies = {}) {
       && typeof tool.description === "string" && tool.parameters?.type === "object", "Invalid or duplicate tool descriptor");
     names.add(tool.name);
   }
+  // Optional: the caller accepts several independent calls in one decision
+  // and still executes, orders and authorizes each of them itself.
+  demand(request.allow_tool_batching === undefined || typeof request.allow_tool_batching === "boolean", "allow_tool_batching must be true or false");
+  const batching = request.allow_tool_batching === true;
   const route = (dependencies.resolve || resolveAgentProvider)(request.model || "auto", request.provider || "");
   const native = (dependencies.native || agentProviderUsesNativeTools)(route.provider);
   const toolInstructions = native
-    ? "Use only the provider-issued tools. Never invent tool results or print tool-call JSON as prose. After real results arrive, answer in plain language."
-    : buildAgentToolInstructions(request.tools, { autonomy: { write_tools: "confirm" }, limits: { calls: 1 } }, { callerOwned: true });
+    ? `Use only the provider-issued tools.${batching ? ` Issue up to ${TOOL_BATCH_MAX_CALLS} independent, ready tool calls in one response when useful; wait for results before making dependent calls.` : ""} Never invent tool results or print tool-call JSON as prose. After real results arrive, answer in plain language.`
+    : buildAgentToolInstructions(request.tools, { autonomy: { write_tools: "confirm" }, limits: { calls: 1 } }, { callerOwned: true, callerBatching: batching });
   const generated = await (dependencies.call || callAgentProvider)(route.provider, renderConversation(request.messages), {
     modelName: route.modelName,
     systemPrompt: `${request.system_prompt}\n\n${toolInstructions}`,
-    tools: request.tools, allowToolBatching: false, promptCache: true,
+    tools: request.tools, allowToolBatching: batching, promptCache: true,
     cwd: dependencies.cwd || process.cwd(), signal: dependencies.signal,
     maxOutputTokens: 8192,
     ...(native ? { transcript: dispatchTranscript(request.messages) } : {}),
@@ -60,11 +64,13 @@ export async function dispatchAgentTurn(request, dependencies = {}) {
     id: toolCallId(call, request.messages.length, index), name: call.name, arguments: call.arguments,
   }));
   try {
-    demand(calls.length <= 1, "Provider returned an unsupported tool batch");
+    demand(calls.length <= (batching ? TOOL_BATCH_MAX_CALLS : 1), "Provider returned an unsupported tool batch");
     for (const call of calls) demand(names.has(call.name), `Provider requested unissued tool ${call.name}`);
   } catch (error) { throw Object.assign(error, { stats: usage }); }
   const message = { role: "assistant", content: nativeCalls || !calls.length ? content : "",
-    ...(calls.length ? { tool_calls: calls, raw: JSON.stringify({ name: calls[0].name, arguments: calls[0].arguments }) } : {}),
+    ...(calls.length ? { tool_calls: calls, raw: JSON.stringify(calls.length === 1
+      ? { name: calls[0].name, arguments: calls[0].arguments }
+      : calls.map(call => ({ name: call.name, arguments: call.arguments }))) } : {}),
     ...(generated?.providerContent ? { provider_content: generated.providerContent } : {}) };
   return { protocol: AGENT_DISPATCH_PROTOCOL, provider: route.provider, model: route.modelName,
     message, stats: usage };

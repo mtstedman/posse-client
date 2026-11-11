@@ -10,6 +10,8 @@
 
 import readline from "readline";
 import { DisplayInputController } from "./input-controller.js";
+import { DisplaySessionPaneController } from "./session-pane-controller.js";
+import { DisplayTerminalLease } from "./terminal-lease.js";
 import { DisplayApprovalRenderer } from "./approval-renderer.js";
 import { DisplayFrameRenderer } from "./frame-renderer.js";
 import { DisplayOverlayRenderer } from "./overlay-renderer.js";
@@ -68,7 +70,7 @@ const WORKER_BOOT_STALLED_MS = 45_000;
 const DEFAULT_DISPLAY_CONCURRENCY = getCatalogRuntimeFallbackInt("scheduler_concurrency", 3);
 const PROVIDER_USAGE_REFRESH_TIMEOUT_MS = Math.min(15_000, Math.max(1_000, PROVIDER_USAGE_REFRESH_MS - 1_000));
 const PROVIDER_USAGE_REFRESH_ERROR_MIN_MS = 60_000;
-const RIGHT_PANEL_MODES = new Set(["log", "pipeline", "tools", "monitor"]);
+const RIGHT_PANEL_MODES = new Set(["log", "pipeline", "tools", "monitor", "session"]);
 
 function rawInputKey(name, sequence, patch = {}) {
   return {
@@ -290,6 +292,21 @@ export class Display {
     // ── Right panel mode ──
     this._rightMode = RIGHT_PANEL_MODES.has(rightMode) ? rightMode : "log"; // "log" | "pipeline" | "tools" | "monitor"
     this._pipelineScroll = 0;
+    // Session mode exists only while the run is in a live session; it is
+    // selected when the session first shows (see _syncSessionRightMode).
+    this._sessionModeOffered = false;
+    this._rightModeBeforeSession = null;
+    this._sessionScroll = 0;
+    // The selected roster row, the pane's own open prompt (a lease choice, a
+    // confirmation, the host menu), and whether the next frame should scroll
+    // the selection into view (session-pane-controller.js).
+    this._sessionSelectedId = null;
+    this._sessionPrompt = null;
+    this._sessionFollowSelection = false;
+    // A shared run: Ctrl+C returns to the session console (hint wording).
+    this.sharedRun = false;
+    // While a foreground command has the terminal (terminal-lease.js).
+    this._terminalLent = false;
     this._toolScroll = 0;
     this._toolsTab = 0;         // 0=activity, 1=catalog, 2=roles, 3=locks
     this._toolsTabScrolls = [0, 0, 0, 0];
@@ -322,6 +339,8 @@ export class Display {
     this._blockingOverlay = null;
     this._wrapUpEarlyExitRequested = false;
     this._inputController = new DisplayInputController();
+    this._sessionPaneController = new DisplaySessionPaneController();
+    this._terminalLease = new DisplayTerminalLease();
     // DisplayInputController is intentionally used as a Display-state mixin:
     // wrapper methods below invoke controller methods with the Display as `this`.
     this._approvalRenderer = new DisplayApprovalRenderer();
@@ -353,7 +372,9 @@ export class Display {
 
     this._onResize = () => {
       this._refreshViewport();
-      if (this._started) {
+      // While a foreground command has the terminal the screen is not ours to
+      // clear; reclaimTerminal redraws at the new size.
+      if (this._started && !this._terminalLent) {
         this._lastFrame = "";
         this._lastFrameInput = "";
         this._resetBlockingOverlayBaseFrame();
@@ -492,6 +513,8 @@ export class Display {
   stop() {
     if (!this._started) return;
     this._started = false;
+    // A lent terminal is already out of the alternate buffer and raw mode.
+    this._terminalLent = false;
     if (this._interval) { clearInterval(this._interval); this._interval = null; }
     if (this._providerUsageRefreshTimer) { clearInterval(this._providerUsageRefreshTimer); this._providerUsageRefreshTimer = null; }
     this._renderScheduled = false;
@@ -1610,6 +1633,8 @@ export class Display {
 
   requestRender({ advanceAnimation = false, force = false, reason = "general" } = {}) {
     if (!this._started && !this._renderOnce) return;
+    // A foreground command has the terminal; reclaimTerminal redraws.
+    if (this._terminalLent) return;
     if (advanceAnimation) this._pendingAdvanceAnimation = true;
     if (this._stdoutBackedUp) return;
 
@@ -1736,6 +1761,30 @@ export class Display {
 
   _onKeypress(...args) {
     return this._inputController._onKeypress.call(this, ...args);
+  }
+
+  // ── Session pane ──────────────────────────────────────────────────────
+
+  _sessionPaneSession(...args) {
+    return this._sessionPaneController._sessionPaneSession.call(this, ...args);
+  }
+
+  _onSessionPaneKeypress(...args) {
+    return this._sessionPaneController._onSessionPaneKeypress.call(this, ...args);
+  }
+
+  _applySessionPanePlan(...args) {
+    return this._sessionPaneController._applySessionPanePlan.call(this, ...args);
+  }
+
+  // ── Lending the terminal to a foreground command ──────────────────────
+
+  lendTerminal(...args) {
+    return this._terminalLease.lendTerminal.call(this, ...args);
+  }
+
+  reclaimTerminal(...args) {
+    return this._terminalLease.reclaimTerminal.call(this, ...args);
   }
 
   // ── Approval Mode Keypress ────────────────────────────────────────────
@@ -1935,6 +1984,12 @@ export class Display {
   }
   _classifyEvent(...args) {
     return this._rightPanelRenderer._classifyEvent.call(this, ...args);
+  }
+  _buildSession(...args) {
+    return this._rightPanelRenderer._buildSession.call(this, ...args);
+  }
+  _syncSessionRightMode(...args) {
+    return this._rightPanelRenderer._syncSessionRightMode.call(this, ...args);
   }
   _buildPipeline(...args) {
     return this._rightPanelRenderer._buildPipeline.call(this, ...args);

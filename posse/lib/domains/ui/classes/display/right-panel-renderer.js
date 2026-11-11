@@ -5,7 +5,20 @@ import { brandRule, posseWordmark, roleBrandColor, roleBrandIcon } from "../../f
 import { jobLabel, jobDisplayStatus } from "../../functions/display/helpers/job-status.js";
 import { renderPosseMascotFrame } from "../../functions/display/helpers/mascot.js";
 import { _buildQueueProviderUsageLines, getProviderUsageSummaryCache } from "../../functions/display/helpers/provider-usage.js";
-import { sessionSyncLabel, sessionPairingDashboardLines, unpairedPipelineLines } from "../../functions/display/session-presentation.js";
+import { peerWorkSummary, sessionSyncLabel, sessionPairingDashboardLines, unpairedPipelineLines } from "../../functions/display/session-presentation.js";
+import {
+  SESSION_RIGHT_MODE,
+  resolveSessionRightMode,
+  sessionModeHintLines,
+  sessionModeTitle,
+  sessionModeView,
+  sessionSummaryRow,
+} from "../../functions/display/session-mode.js";
+import {
+  resolveSessionSelection,
+  sessionPaneRows,
+  sessionScrollForSelection,
+} from "../../functions/display/session-pane.js";
 import { monitorToolMeta, stripRedundantToolSummaryLabel } from "../../functions/display/tool-observation-presentation.js";
 
 const POSSE_HEADER_WIDTH = 25;
@@ -45,6 +58,8 @@ const RUN_VIEW_TABS = Object.freeze([
   Object.freeze({ mode: "monitor", key: "M", label: "Agents" }),
   Object.freeze({ mode: "pipeline", key: "P", label: "Pipeline" }),
   Object.freeze({ mode: "tools", key: "T", label: "Tools" }),
+  // Only while the run belongs to a live session.
+  Object.freeze({ mode: SESSION_RIGHT_MODE, key: "O", label: "Session" }),
 ]);
 
 // The full 3-row masthead: the boxy brand mark (green) beside the POSSE banner
@@ -60,8 +75,8 @@ export class DisplayRightPanelRenderer {
 
 
   _buildRightModeTabs(width) {
-    const tabs = RUN_VIEW_TABS.map((tab) => {
-      const available = tab.mode === "pipeline"
+    const tabs = RUN_VIEW_TABS.filter((tab) => tab.mode !== SESSION_RIGHT_MODE || this._sessionModeOffered).map((tab) => {
+      const available = tab.mode === "pipeline" || tab.mode === SESSION_RIGHT_MODE
         ? typeof this.getPipelineData === "function"
         : tab.mode === "tools"
           ? typeof this.getToolData === "function"
@@ -127,15 +142,10 @@ export class DisplayRightPanelRenderer {
     const showOverflow = peerRows.length > detailCapacity && maxRows >= 3;
     const visible = peerRows.slice(0, showOverflow ? detailCapacity - 1 : detailCapacity);
     for (const wi of visible) {
-      const job = (Array.isArray(wi.jobs) ? wi.jobs : [])[0];
-      const jobSummary = job
-        ? ` \u2014 ${job.job_type}/${job.status}: ${job.title}`
-        : "";
-      const summary = `${wi.peer_label} WI#${wi.peer_work_item_id} ${wi.status}: ${wi.title}${jobSummary}`;
-      lines.push(` ${C.magenta}\u2502${C.reset} ${fit(_sanitizeDisplayLine(summary), Math.max(8, width - 4))}`);
+      lines.push(` ${C.magenta}\u2502${C.reset} ${fit(_sanitizeDisplayLine(peerWorkSummary(wi)), Math.max(8, width - 4))}`);
     }
     if (showOverflow) {
-      lines.push(` ${C.magenta}\u2502${C.reset} ${C.dim}+${peerRows.length - visible.length} more paired work item(s) [p] details${C.reset}`);
+      lines.push(` ${C.magenta}\u2502${C.reset} ${C.dim}+${peerRows.length - visible.length} more paired work item(s) ${this._sessionModeOffered ? "[o] session" : "[p] details"}${C.reset}`);
     }
     if (session && peerRows.length === 0) {
       if (session.role === "host" && session.pending_count > 0) {
@@ -196,6 +206,10 @@ export class DisplayRightPanelRenderer {
 
     if (this._rightMode === "tools" && this.getToolData) {
       return this._buildTools(lines, width, maxLines);
+    }
+
+    if (this._rightMode === SESSION_RIGHT_MODE && this.getPipelineData) {
+      return this._buildSession(lines, width, maxLines);
     }
 
     // Peer work lives outside this clone's queue, so it cannot appear in the
@@ -286,6 +300,61 @@ export class DisplayRightPanelRenderer {
 
 
   // ── Pipeline View ──────────────────────────────────────────────────────
+
+  // A run inside a live session opens on Session mode; a session that ends
+  // takes the mode away again. Called once per frame, before layout.
+  _syncSessionRightMode() {
+    if (!this.getPipelineData) return;
+    let data;
+    try { data = this.getPipelineData(); } catch { return; }
+    const next = resolveSessionRightMode({
+      mode: this._rightMode,
+      live: Boolean(sessionSummaryRow(data)),
+      offered: this._sessionModeOffered,
+      previous: this._rightModeBeforeSession,
+    });
+    this._rightMode = next.mode;
+    this._sessionModeOffered = next.offered;
+    this._rightModeBeforeSession = next.previous;
+  }
+
+  // ── Session View ───────────────────────────────────────────────────────
+
+  _buildSession(headerLines, width, maxLines) {
+    const lines = [...headerLines];
+    let data;
+    try { data = this.getPipelineData(); } catch { data = []; }
+    const session = sessionSummaryRow(data);
+    const role = session?.role === "host" ? "host" : "member";
+    const rows = sessionPaneRows(session);
+    const selectedId = resolveSessionSelection(rows, this._sessionSelectedId, { role });
+    this._sessionSelectedId = selectedId;
+    // A prompt about a session that is gone, or shown to a member, is void.
+    if (this._sessionPrompt && role !== "host") this._sessionPrompt = null;
+    lines.push(sessionModeTitle(session, {
+      canInject: typeof this.onInject === "function",
+      canCommand: typeof this.onSessionCommand === "function",
+    }));
+    lines.push(...sessionModeHintLines(session, {
+      row: rows.find((row) => row.id === selectedId) || null,
+      prompt: this._sessionPrompt,
+      width,
+    }));
+    lines.push(` ${C.dim}${"\u2500".repeat(Math.min(width - 2, 50))}${C.reset}`);
+    const view = sessionModeView(data, width, { selectedId });
+    const available = Math.max(0, maxLines - lines.length);
+    // Moving the selection brings its row into view; otherwise the operator's
+    // scroll position stands.
+    this._sessionScroll = sessionScrollForSelection({
+      scroll: this._sessionScroll,
+      selectedLine: this._sessionFollowSelection ? view.selectedLine : null,
+      available,
+      total: view.lines.length,
+    });
+    this._sessionFollowSelection = false;
+    lines.push(...view.lines.slice(this._sessionScroll, this._sessionScroll + available));
+    return lines;
+  }
 
   _buildPipeline(headerLines, width, maxLines) {
     const lines = [...headerLines];

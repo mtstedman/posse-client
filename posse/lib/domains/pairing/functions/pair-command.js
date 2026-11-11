@@ -6,12 +6,18 @@ import { SETTING_KEYS } from "../../../catalog/settings.js";
 import { PAIRING_ACTION_ARITY } from "../../../catalog/pairing-command.js";
 import { ADMISSION_POLL_INTERVAL_MS, ADMISSION_MAX_CONSECUTIVE_FAILURES } from "../../../catalog/pairing-wire.js";
 import { STARTUP_UPDATE_FLAGS } from "../../../catalog/cli-flags.js";
+import { SESSION_CONSOLE_FIRST_ENV } from "../../../catalog/shared-run.js";
 import {
+  SESSION_COMPUTE_LEASE_DEFAULT,
+  SESSION_COMPUTE_OWNERS,
+  SESSION_COMPUTE_OWNER_VALUES,
   SESSION_COMPUTE_POLICY_VALUES,
   SESSION_SYNC_GLYPHS,
   SESSION_SYNC_STATES,
   TRUNK_HEAD_PATTERN,
+  defaultSessionComputeOwner,
 } from "../../../catalog/session-sync.js";
+import { describeComputeOwner, normalizeComputeOwner, ownComputeOwner } from "./compute-lease.js";
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { runSharedTrunkAccessPreflight } from "../../integrations/functions/shared-trunk-preflight.js";
 import { getLiveSchedulerBlockMessage } from "../../queue/functions/locks.js";
@@ -697,11 +703,21 @@ async function retryWhileSessionKeyPropagates(operation, {
   }
 }
 
+// Hosting or joining goes straight to the session screen once the session is
+// ready. POSSE_SESSION_CONSOLE=1 keeps the session console first.
+function enterSessionScreenFirst({ C, json, env = process.env } = {}) {
+  if (json) return false;
+  if (!["1", "true", "yes", "on"].includes(String(env?.[SESSION_CONSOLE_FIRST_ENV] || "").trim().toLowerCase())) return true;
+  console.log(`  ${C.dim}${SESSION_CONSOLE_FIRST_ENV} is set: staying in the session console. Type go to open the session screen.${C.reset}`);
+  return false;
+}
+
 function monitorPairing(remoteClient, stateId, options = {}) {
   return new PairingMonitor(remoteClient, stateId, options, {
     assertPairingStatusMatches,
     admitPairingMember,
     kickPairingMember,
+    setPairingMemberLease,
     safeError,
   }).run();
 }
@@ -714,6 +730,32 @@ function readSessionSyncBestEffort(state) {
   }
 }
 
+/** Who runs this clone's work under its lease, or the host's default for members. */
+function describeSessionCompute(state, status = null) {
+  const policy = status?.compute_policy || state.compute_policy;
+  if (state.role === "host") {
+    const memberDefault = defaultSessionComputeOwner(policy);
+    return `you run your own work; members default to ${memberDefault === "host"
+      ? "your computer and provider account"
+      : "their own computer and provider account"} (policy ${policy}). `
+      + "Change one member with `posse session lease <member-id> host|member|default`.";
+  }
+  const owner = normalizeComputeOwner(status?.compute_owner) || ownComputeOwner(state);
+  const explicit = status ? Boolean(normalizeComputeOwner(status.compute_lease)) : null;
+  return `${describeComputeOwner(owner, { holder: "self" })}`
+    + (explicit === false ? ` (session default, policy ${policy})` : "");
+}
+
+/** A lease word from the CLI or console: host, member, or default (null). */
+export function parseComputeLeaseWord(value, { allowDefault = true } = {}) {
+  const word = String(value ?? "").trim().toLowerCase();
+  if (SESSION_COMPUTE_OWNER_VALUES.includes(word)) return word;
+  if (allowDefault && word === SESSION_COMPUTE_LEASE_DEFAULT) return null;
+  throw Object.assign(new Error(allowDefault
+    ? "A compute lease must be host, member, or default"
+    : "A compute lease must be host or member"), { code: "pairing_compute_owner_invalid" });
+}
+
 function printActive(C, state, status = null, derived = null) {
   console.log(`\n  ${C.bold}Posse pairing${C.reset}`);
   console.log(`  Role: ${state.role}`);
@@ -723,6 +765,7 @@ function printActive(C, state, status = null, derived = null) {
   if (status && Number.isFinite(status.active_members)) {
     console.log(`  Connected members: ${status.active_members}`);
   }
+  console.log(`  Compute: ${describeSessionCompute(state, status)}`);
   const publishing = describeSessionPublishModes(state);
   if (publishing) console.log(`  Publishing: ${publishing}`);
   if (publishing && state.auto_paused_reason) console.log(`  ${C.yellow}Auto paused:${C.reset} ${state.auto_paused_reason}`);
@@ -1225,17 +1268,20 @@ async function runHost({
       console.log(`  Invite link: ${C.cyan}posse://session?token=${encodeURIComponent(started.code)}${C.reset}`);
       console.log(`  Shared branch: ${sharedBranch}`);
       console.log(`  Others join with: ${C.cyan}posse session join ${started.code}${C.reset}`);
-      console.log(`  Join requests appear below. Type a member's countersign and press Enter to admit them.`);
+      console.log(`  Join requests appear in the session screen (select the request, press A, type the countersign the member reads to you) and in this console (type the countersign).`);
       if (autoMerge || autoDeploy) {
         console.log(`  ${C.yellow}Trusted team:${C.reset} Posse ${[autoMerge && "merges the team's work into your branch", autoDeploy && `pushes it to ${remote || "origin"}`].filter(Boolean).join(" and ")} as it lands, without asking (\`auto merge off\` / \`auto deploy off\` to stop).`);
       }
-      console.log(`  ${C.dim}This screen stays open for the whole session and keeps this folder in sync. Queue work with add, run it with go, type help for more.${C.reset}\n`);
+      console.log(`  ${C.dim}This console stays open for the whole session and keeps this folder in sync. The session screen (go) runs your work and manages the team;${C.reset}`);
+      console.log(`  ${C.dim}Ctrl+C there comes back here, and close (or Ctrl+C) here ends the session. Type help for more.${C.reset}\n`);
     }
     const outcome = await monitorPairing(remoteClient, state.id, {
       projectDir: root, C, json, sessionCode: started.code,
+      enterSharedRun: enterSessionScreenFirst({ C, json }),
     });
     if (["graceful_close", "force_close", "draining", "closed", "expired"].includes(outcome.reason)) {
       const liveState = getPairingState(state.id);
+      const hostAtTerminal = !json && (outcome.reason === "graceful_close" || outcome.interrupted === true);
       const promotion = await finishHostShutdown(root, remoteClient, liveState, {
         graceful: ["graceful_close", "draining"].includes(outcome.reason),
         C,
@@ -1243,12 +1289,12 @@ async function runHost({
         reason: outcome.reason,
         keepBranch: liveState.close_action === "keep-branch",
         historyPreserving: liveState.close_action === "integrate-fast-forward",
-        approvalPromptFollows: outcome.reason === "graceful_close" && !json,
+        approvalPromptFollows: hostAtTerminal,
       });
-      // A typed close is the host at the terminal: ask right here. Ctrl+C, a
-      // closed terminal, or a close from elsewhere leave the candidate frozen
-      // for `posse session integrate`.
-      if (outcome.reason === "graceful_close" && !json && promotion?.pending) {
+      // A typed close, or Ctrl+C at the console's prompt, is the host at the
+      // terminal: ask right here. A closed terminal, a signal, or a close from
+      // elsewhere leave the candidate frozen for `posse session integrate`.
+      if (hostAtTerminal && promotion?.pending) {
         const journal = readPairingPromotionJournal();
         if (journal?.approval_required === true) {
           const summary = describePromotionBestEffort(root);
@@ -1503,11 +1549,12 @@ async function runJoinInCheckout({
       console.log(freshCheckout
         ? `\n  ${C.green}Paired.${C.reset} Checked out ${sharedBranch} from the session repository into ${root}.`
         : `\n  ${C.green}Paired.${C.reset} Switched to ${sharedBranch}.`);
-      console.log(`  ${C.dim}This screen stays open for the whole session and keeps this folder in sync. Queue work with add, run it with go,${C.reset}`);
-      console.log(`  ${C.dim}and type leave to disconnect (the host closing the session also ends it). Type help for more.${C.reset}\n`);
+      console.log(`  ${C.dim}This console stays open for the whole session and keeps this folder in sync. The session screen (go) runs your work;${C.reset}`);
+      console.log(`  ${C.dim}Ctrl+C there comes back here, and leave here disconnects (the host closing the session also ends it). Type help for more.${C.reset}\n`);
     }
     const outcome = await monitorPairing(remoteClient, state.id, {
       projectDir: root, C, json, sessionCode: String(code).trim().toUpperCase(),
+      enterSharedRun: enterSessionScreenFirst({ C, json }),
     });
     if (outcome.reason === "scheduler_handoff") {
       return { ok: true, role: "member", outcome: outcome.reason };
@@ -1715,20 +1762,31 @@ async function runStatus({
   return result;
 }
 
+// The lease an admission issues. The host tags a member `host` to run its
+// work here, on the host's providers; an untagged admission is `member`: the
+// member works on its own Posse and pays for its own work, whatever the
+// session policy says. `posse session lease <id> default` returns a member
+// to the policy.
+function admissionComputeLease(requested) {
+  return requested || SESSION_COMPUTE_OWNERS.MEMBER;
+}
+
 // Admit the pending member whose countersign the host typed, then grant its
 // session key write access to the throwaway repository. A member whose key
 // cannot be installed is removed again only after key absence is proven; an
 // uncertain credential remains visible in the relay roster for recovery.
-async function admitPairingMember({ state, code, projectDir, remoteClient }) {
+async function admitPairingMember({ state, code, computeOwner = null, projectDir, remoteClient }) {
   if (!code) {
-    throw Object.assign(new Error("A 4-character countersign is required: posse session admit <CODE>"), {
+    throw Object.assign(new Error("A 4-character countersign is required: posse session admit <CODE> [host|member] (default member)"), {
       code: "pairing_countersign_required",
     });
   }
+  const requested = computeOwner == null ? null : parseComputeLeaseWord(computeOwner, { allowDefault: false });
+  const lease = admissionComputeLease(requested);
   return withSessionCredentialMutation(state, "member admission", async () => {
     const admitted = validatePairingRemoteResponse(
       "admit",
-      await remoteClient.admit(state.relay_token, code),
+      await remoteClient.admit(state.relay_token, code, { computeOwner: lease }),
     );
     assertPairingStatusMatches(state, admitted);
     if (state.temporary_repository) {
@@ -1761,8 +1819,39 @@ async function admitPairingMember({ state, code, projectDir, remoteClient }) {
         throw error;
       }
     }
-    return { ok: true, admitted: true, countersign: String(code).toUpperCase(), member: admitted.admitted_member || null };
+    const member = admitted.admitted_member || null;
+    // A Remote that predates leases ignores the field and admits the member
+    // under the session default; say so instead of implying the lease held.
+    // Only a lease the host typed is reported as dropped; the default is not
+    // a promise the host made.
+    const leaseRecorded = requested == null || member?.compute_lease === requested;
+    return {
+      ok: true,
+      admitted: true,
+      countersign: String(code).toUpperCase(),
+      member,
+      compute_owner: normalizeComputeOwner(member?.compute_owner)
+        || defaultSessionComputeOwner(admitted.compute_policy || state.compute_policy),
+      compute_lease_recorded: leaseRecorded,
+    };
   });
+}
+
+// Re-issue one member's lease. The member and the host's executor learn the
+// new owner from their next heartbeat; work already delegated keeps the lease
+// it was accepted under.
+async function setPairingMemberLease({ state, memberId, computeOwner, remoteClient }) {
+  try {
+    return validatePairingRemoteResponse("status", await remoteClient.setLease(state.relay_token, memberId, computeOwner));
+  } catch (error) {
+    if (error?.status === 404 && error.code === "pairing_remote_error") {
+      throw Object.assign(new Error("This Posse Remote does not support compute leases yet; members follow the session policy"), {
+        code: "pairing_compute_lease_unsupported",
+        cause: error,
+      });
+    }
+    throw error;
+  }
 }
 
 async function kickPairingMember({ state, memberId, projectDir, remoteClient }) {
@@ -1774,18 +1863,38 @@ async function kickPairingMember({ state, memberId, projectDir, remoteClient }) 
   });
 }
 
-async function runAdmit({ projectDir, remoteClient, code, C, json }) {
+async function runAdmit({ projectDir, remoteClient, code, value = null, C, json }) {
   const state = getLivePairingState();
   if (!state || state.role !== "host" || !state.relay_token) {
     throw Object.assign(new Error("This clone is not hosting a live session"), {
       code: "pairing_host_session_required",
     });
   }
-  const admitted = await admitPairingMember({ state, code, projectDir, remoteClient });
-  const result = { ok: admitted.ok, admitted: admitted.admitted, countersign: admitted.countersign };
+  const admitted = await admitPairingMember({ state, code, computeOwner: value, projectDir, remoteClient });
+  const result = {
+    ok: admitted.ok,
+    admitted: admitted.admitted,
+    countersign: admitted.countersign,
+    compute_owner: admitted.compute_owner,
+    compute_lease_recorded: admitted.compute_lease_recorded,
+  };
   if (json) console.log(JSON.stringify(result));
-  else console.log(`\n  ${C.green}Admitted session member ${result.countersign}.${C.reset}\n`);
+  else {
+    console.log(`\n  ${C.green}Admitted session member ${result.countersign}.${C.reset}`);
+    console.log(`  Compute: ${describeComputeOwner(result.compute_owner)}.`);
+    if (!result.compute_lease_recorded) {
+      console.log(`  ${C.yellow}The lease was not recorded: this member's Posse or the Posse Remote predates compute leases, so the member follows the session policy.${C.reset}`);
+    }
+    console.log("");
+  }
   return result;
+}
+
+/** "  lease: host" for a member listing; "(default)" when it inherits the policy. */
+export function describeMemberLease(member) {
+  const owner = normalizeComputeOwner(member?.compute_owner);
+  if (!owner) return "";
+  return `  lease: ${owner}${normalizeComputeOwner(member?.compute_lease) ? "" : " (default)"}`;
 }
 
 function liveHostState() {
@@ -1807,7 +1916,7 @@ async function runSessionManagement({ projectDir, remoteClient, action, code, va
     else {
       console.log(`\n  ${C.bold}${action === "pending" ? "Pending" : "Session"} members${C.reset}`);
       for (const member of result.members) {
-        console.log(`  ${member.id}  ${member.state}/${member.role}  ${member.instance_id}`);
+        console.log(`  ${member.id}  ${member.state}/${member.role}  ${member.instance_id}${describeMemberLease(member)}`);
       }
       console.log("");
     }
@@ -1835,6 +1944,10 @@ async function runSessionManagement({ projectDir, remoteClient, action, code, va
     const role = parsed?.role == null ? null : String(parsed.role);
     const scopeSet = parsed?.write || parsed;
     status = await remoteClient.setScope(state.relay_token, code, scopeSet, role);
+  } else if (action === "lease") {
+    status = await setPairingMemberLease({
+      state, memberId: code, computeOwner: parseComputeLeaseWord(value), remoteClient,
+    });
   } else if (action === "policy") {
     if (!SESSION_COMPUTE_POLICY_VALUES.includes(code)) {
       throw Object.assign(new Error("Session compute policy must be each-member, capability-routing, or host-only"), {
@@ -1846,8 +1959,17 @@ async function runSessionManagement({ projectDir, remoteClient, action, code, va
   status = validatePairingRemoteResponse("status", status);
   assertPairingStatusMatches(state, status);
   const result = { ok: true, action, status };
+  if (action === "lease") {
+    const owner = parseComputeLeaseWord(value);
+    result.member_id = code;
+    result.compute_lease = owner;
+    result.compute_owner = owner || defaultSessionComputeOwner(status.compute_policy || state.compute_policy);
+  }
   if (json) console.log(JSON.stringify(result));
-  else console.log(`\n  ${C.green}Session ${action} updated.${C.reset}\n`);
+  else if (action === "lease") {
+    console.log(`\n  ${C.green}Lease for ${code}: ${describeComputeOwner(result.compute_owner)}`
+      + `${result.compute_lease ? "" : " (session default)"}.${C.reset}\n`);
+  } else console.log(`\n  ${C.green}Session ${action} updated.${C.reset}\n`);
   return result;
 }
 
@@ -2122,7 +2244,7 @@ export async function runPairingCommand(argv = [], {
     else console.error(`\n  ${C.red}Publication mode unchanged: ${result.reason}.${C.reset}\n`);
     return result;
   }
-  if (["members", "pending", "kick", "invite", "scope", "policy"].includes(args.action)) {
+  if (["members", "pending", "kick", "invite", "scope", "policy", "lease"].includes(args.action)) {
     return runSessionManagement({ ...args, projectDir, remoteClient: client, C });
   }
   if (args.action === "status") {
@@ -2324,4 +2446,5 @@ export const __testPairingCommandInternals = Object.freeze({
   monitorPairing, printMemberChanges, finishHostShutdown, retryWhileSessionKeyPropagates,
   retireEndedSessionQueueRows, retryWhileMergeLockBusy, runPendingIntegration, printPromotionForApproval,
   askToPublishPromotion, spawnedByLiveSessionOwner, posseWindowScript, acknowledgeOwnerLaunch,
+  admissionComputeLease,
 });

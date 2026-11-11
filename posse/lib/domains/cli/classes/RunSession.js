@@ -4,6 +4,9 @@ import { formatNativeDownloadMiB, summarizeNativeArtifactResults } from "../func
 // Keeps the CLI entry point thin while preserving the existing command behavior.
 
 import { ensureRemoteCatalogLoaded, getRemoteCatalog } from "../../providers/functions/model-catalog-store.js";
+import { noteGoWindow } from "../../pairing/functions/session-owner-launch.js";
+import { pairingSessionLive, sharedRunEligible, sharedRunTerminalAttached, workItemsSettledForSeeding } from "../../pairing/functions/shared-run.js";
+import { getLivePairingState } from "../../pairing/functions/state.js";
 import { describeModelCatalogWarning, validateConfiguredModels } from "../../providers/functions/model-catalog-validate.js";
 import { maybeRefreshModelCatalog } from "../../remote/functions/model-catalog-refresh.js";
 import { resolveScipStagePlans } from "../../atlas/functions/v2/scip/indexers.js";
@@ -31,6 +34,7 @@ import { RunDisplaySnapshotController } from "./RunDisplaySnapshotController.js"
 import { RunIdleAutoMergeController } from "./RunIdleAutoMergeController.js";
 import { RunHumanAnswerRelay } from "./RunHumanAnswerRelay.js";
 import { RunSchedulerLoopCallbacks } from "./RunSchedulerLoopCallbacks.js";
+import { RunSharedSession } from "./RunSharedSession.js";
 import { RunShutdownController } from "./RunShutdownController.js";
 import { PROVIDER_AUTH_WARMUP_TIMEOUT_MS, PROVIDER_USAGE_WARMUP_SOFT_TIMEOUT_MS, closeRuntimeStateForExit, describeOpenGatesAtExit, firstLine, handleWrapUpSignal, listOpenHumanGatesAtExit, openParkingGateForWorkItem, operationalRunJobs, summarizeRunCompletion, bootScipLangPatchFromEvent, scopeScipEventToSourceLanguage } from "../functions/run-session.js";
 import { checkPosseUpdateAvailabilityCached, formatPosseUpdateAvailableWarning } from "../functions/update-command.js";
@@ -235,6 +239,9 @@ export class RunSession {
       completeRunCohort,
       setRunWorkItemIds,
       exitProcess = process.exit,
+      // Whether this clone is in a live session (a shared run stays open).
+      sharedRunSessionLive = pairingSessionLive,
+      sharedRunHasTerminal = sharedRunTerminalAttached,
     } = this;
 
   // Display is created after boot so that boot output lands on the real terminal,
@@ -319,6 +326,31 @@ export class RunSession {
     : [];
   const scopedWorkItemIdSet = new Set(scopedWorkItemIds);
   const isScopedRun = scopedWorkItemIdSet.size > 0;
+  // `posse go` inside a live session is a shared run: it does not end when
+  // its queue empties (pairing/functions/shared-run.js).
+  const sharedRun = sharedRunEligible({
+    scoped: isScopedRun, nonInteractive, dryRun: DRY_RUN, terminal: sharedRunHasTerminal() === true,
+  }) && sharedRunSessionLive() === true;
+  let idleAutoMergeForSharedRun = null;
+  const sharedSession = new RunSharedSession({
+    enabled: sharedRun,
+    getDisplay: () => display,
+    getIdleAutoMerge: () => idleAutoMergeForSharedRun,
+    C,
+    processIterativeWrapUp,
+    mergeIterativePassToTarget,
+    autoMergeCompletedWorkItems,
+    hasAutoMergeableCompletedWorkItems,
+    refreshPushOfferGate,
+    countReviewableWorkItems: () => listWorkItems(["complete"]).filter(isReviewableWorkItem).length,
+    seedQueuedWorkItems: () => {
+      const { settled, unsettled } = workItemsSettledForSeeding(listWorkItems(["queued"]));
+      return { seeded: seedInitialJobsForBootWorkItems(settled, "run"), unsettled };
+    },
+    getRole: () => {
+      try { return getLivePairingState()?.role === "host" ? "host" : "member"; } catch { return "member"; }
+    },
+  });
   const refreshRunVisibleWorkItems = () => {
     if (typeof refreshWorkItemStatus !== "function") return;
     const items = isScopedRun
@@ -438,7 +470,7 @@ export class RunSession {
       console.log(`  ${color}Native binaries: ${summary.detail}${C.reset}`);
     }
   }
-  if (runnableOrActiveJobs.length === 0 && parkedJobs.length > 0 && !useTui) {
+  if (runnableOrActiveJobs.length === 0 && parkedJobs.length > 0 && !useTui && !sharedRun) {
     console.log(`\n  ${C.yellow}No runnable jobs. ${parkedJobs.length} parked/waiting job(s) need the TUI or operator action before work can continue.${C.reset}\n`);
     process.exitCode = summarizeRunCompletion(
       [...new Set(parkedJobs.map((job) => Number(job.work_item_id)))]
@@ -449,7 +481,13 @@ export class RunSession {
     return;
   }
 
-  if (jobs.length === 0) {
+  if (jobs.length === 0 && sharedRun) {
+    // Nothing to run yet, but a shared run still opens the session screen.
+    if ((await sharedSession.prelude()).rerun) {
+      await this.run();
+      return;
+    }
+  } else if (jobs.length === 0) {
     if (isScopedRun) {
       const scopedSummary = describeScopedWorkItems();
       const suffix = scopedSummary ? ` (${scopedSummary})` : "";
@@ -1244,10 +1282,12 @@ export class RunSession {
     autoMergeCompletedWorkItems,
     isIterativeWorkItemActive,
   });
+  idleAutoMergeForSharedRun = idleAutoMerge;
   scheduler = new Scheduler({
     dryRun: DRY_RUN,
     concurrency: CONCURRENCY,
     hasDisplay: useTui,
+    staysOpenInSession: sharedRun,
     onQueueSnapshot: handleQueueSnapshot,
     onlyWorkItemIds: scopedWorkItemIds,
     // A completed work item this run will not merge before the loop ends is
@@ -2554,9 +2594,11 @@ export class RunSession {
       console.log(`  ${C.yellow}Scheduler boot interrupted. Lock released; safe to restart.${C.reset}\n`);
     } else if (bootAbortReason) {
       console.log(`  ${C.red}Scheduler boot aborted — ${bootAbortReason}.${C.reset}\n`);
+      noteGoWindow("reason", `scheduler boot aborted: ${bootAbortReason}`, { projectDir: PROJECT_DIR });
       process.exitCode = 1;
     } else {
       console.log(`  ${C.red}Scheduler boot aborted — another instance may be running or lock is held.${C.reset}\n`);
+      noteGoWindow("reason", "scheduler boot aborted: another posse run may hold the scheduler lock", { projectDir: PROJECT_DIR });
       // No job ran: a headless caller (cron, CI) must not read this as success.
       process.exitCode = 1;
     }
@@ -2771,6 +2813,9 @@ export class RunSession {
       },
     });
     this._activeDisplay = display;
+    // Ctrl+C in a shared run returns to the session console; it does not end
+    // the session.
+    display.sharedRun = sharedRun;
     // Replay the most recent queue snapshot the scheduler has emitted so
     // the display opens with a fully populated view instead of a blank
     // frame that waits for the next state change.
@@ -2892,6 +2937,7 @@ export class RunSession {
       await this.#disposeProcessResources();
     },
     exitProcess,
+    isTerminalLent: () => displayActions?.foregroundCommandActive?.() === true,
   });
   this._activeShutdown = shutdown;
   removeBootSignalHandlers();
@@ -2917,6 +2963,7 @@ export class RunSession {
     autoMergePendingReviewBlockers,
     describePendingReviewLockBlockers,
     surfaceActionableHumanGates: (activeJobs, options) => displayActions.surfaceActionableHumanGates(activeJobs, options),
+    sharedSession,
   });
   await scheduler.runLoop(
     (job) => {
@@ -2954,6 +3001,22 @@ export class RunSession {
   // runLoop already drained this before stopping the session monitor; a merge
   // started after that (a worker that outlived the shutdown wait) is finished here.
   await schedulerCallbacks.finishPendingAutoMerge();
+
+  // A session close started from this screen stopped the scheduler and is
+  // still draining members and freezing the session's work in this process:
+  // let it finish before the run wraps up and exits. Ctrl+C stops waiting.
+  if (displayActions?.hasSessionCommandsInFlight?.() && !shutdown.inProgress) {
+    emitCloseoutStatus("Waiting for the session command to finish (Ctrl+C stops waiting).", C.cyan);
+    await flushCloseoutStatus();
+    let waiting = true;
+    await Promise.race([
+      displayActions.settleSessionCommands(),
+      (async () => {
+        while (waiting && !shutdown.inProgress) await new Promise((resolve) => setTimeout(resolve, 250));
+      })(),
+    ]);
+    waiting = false;
+  }
 
   // ── Post-scheduler: clean up worktrees if shutdown was triggered ──
   if (await shutdown.finishAfterScheduler({
@@ -3110,6 +3173,10 @@ export class RunSession {
     const color = completion.failures.length > 0 ? C.red : C.yellow;
     console.error(`\n  ${color}${label}: ${detail}.${C.reset}\n`);
   }
+  // A shared run only gets here because the session ended it: say so where
+  // the operator lands.
+  const sharedRunEnd = sharedSession.endMessage(scheduler?.sessionEnd || null);
+  if (sharedRunEnd) console.error(`\n  ${C.yellow}${sharedRunEnd}${C.reset}\n`);
   // Every other open gate this run leaves parked (push offers, gates past
   // their reminders, gates on work items outside this run): nothing asks
   // them again until the next run or the phone.

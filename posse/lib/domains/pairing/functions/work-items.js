@@ -15,6 +15,7 @@ import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
 import { getSetting } from "../../settings/functions/repository-settings.js";
 import { readSessionSync } from "./session-sync.js";
 import { getLivePairingState } from "./state.js";
+import { normalizeComputeOwner, ownComputeOwner } from "./compute-lease.js";
 import { listJobs, listWorkItems } from "../../queue/functions/index.js";
 import {
   clearRuntimeStatus,
@@ -184,6 +185,7 @@ function boundedPeer(peer) {
     instance_id: boundedText(peer?.instance_id, 160),
     label: boundedText(peer?.label, 160) || "paired user",
     role: boundedText(peer?.role, 20),
+    compute_owner: normalizeComputeOwner(peer?.compute_owner),
     updated_at: boundedText(peer?.updated_at, 40),
     work_items: workItems,
     jobs,
@@ -207,6 +209,7 @@ export function writePairingPeerSnapshot(status, { at = new Date().toISOString()
     status: boundedText(status?.status, 40),
     enrollment_open: status?.enrollment_open === true,
     compute_policy: boundedText(status?.compute_policy, 40),
+    compute_owner: normalizeComputeOwner(status?.compute_owner),
     integration_policy: boundedText(status?.integration_policy, 40),
     provenance_member_ids: (Array.isArray(status?.provenance_member_ids) ? status.provenance_member_ids : []).map((id) => boundedText(id, 160)).filter(Boolean),
     members: (Array.isArray(status?.members) ? status.members : [])
@@ -216,6 +219,8 @@ export function writePairingPeerSnapshot(status, { at = new Date().toISOString()
         instance_id: boundedText(member?.instance_id, 160),
         state: boundedText(member?.state, 40),
         role: boundedText(member?.role, 40),
+        compute_owner: normalizeComputeOwner(member?.compute_owner),
+        compute_lease: normalizeComputeOwner(member?.compute_lease),
       }))
       .filter((member) => member.id && member.instance_id),
     peers: (Array.isArray(status?.peers) ? status.peers : [])
@@ -344,7 +349,7 @@ export function pairingSessionSummary(snapshot = readPairingPeerSnapshot()) {
   try {
     delegations = getDb().prepare(`
       SELECT offer_key, originator_instance_id, executor_instance_id,
-             origin_work_item_id, local_work_item_id, job_type, state, updated_at
+             origin_work_item_id, local_work_item_id, job_type, compute_owner, state, updated_at
       FROM work_item_delegations
       WHERE state NOT IN ('merged','failed','recalled')
       ORDER BY updated_at DESC
@@ -356,6 +361,7 @@ export function pairingSessionSummary(snapshot = readPairingPeerSnapshot()) {
       origin_work_item_id: Number(row.origin_work_item_id),
       local_work_item_id: row.local_work_item_id == null ? null : Number(row.local_work_item_id),
       job_type: boundedText(row.job_type, 40),
+      compute_owner: normalizeComputeOwner(row.compute_owner),
       state: boundedText(row.state, 40),
       updated_at: boundedText(row.updated_at, 40),
     }));
@@ -371,6 +377,7 @@ export function pairingSessionSummary(snapshot = readPairingPeerSnapshot()) {
     branch: state.shared_branch,
     enrollment_open: snapshot?.enrollment_open ?? Boolean(state.enrollment_open),
     compute_policy: snapshot?.compute_policy || state.compute_policy,
+    compute_owner: ownComputeOwner(state),
     integration_policy: snapshot?.integration_policy || state.integration_policy,
     roster: members,
     pending_count: members.filter((member) => member.state === "pending").length,

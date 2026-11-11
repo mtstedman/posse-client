@@ -2,6 +2,7 @@ import { sessionFetchOwnerAlive } from "./session-sync.js";
 import { formatSyncAge } from "./sync-state.js";
 import { diffPairingPeerActivity } from "./work-items.js";
 import { sessionMemberLabel, shortId } from "./session-console.js";
+import { normalizeComputeOwner } from "./compute-lease.js";
 
 export function printPeerActivityChanges(C, status, seen, { json = false, log = console.log } = {}) {
   const changes = diffPairingPeerActivity(status?.peers, seen);
@@ -80,6 +81,8 @@ export function printHostConsoleMembers(log, members) {
     return;
   }
   for (const member of members) {
-    log(`  ${shortId(member.id)}  ${member.state}/${member.role || "member"}  ${shortId(member.instance_id)}`);
+    const owner = normalizeComputeOwner(member.compute_owner);
+    const lease = owner ? `  lease: ${owner}${normalizeComputeOwner(member.compute_lease) ? "" : " (default)"}` : "";
+    log(`  ${shortId(member.id)}  ${member.state}/${member.role || "member"}  ${shortId(member.instance_id)}${lease}`);
   }
 }

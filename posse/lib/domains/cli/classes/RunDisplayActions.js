@@ -24,6 +24,7 @@ import {
 } from "../../planning/functions/plan-approval.js";
 import { createWorkItemTransitionExecutor } from "../../bridge/functions/work-item-actions.js";
 import { buildImageInjectionPayload } from "../functions/run-session.js";
+import { spawnPosseInForeground, waitForForegroundExit } from "../../pairing/functions/foreground-command.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
 import { requestSessionResume, setSessionHold } from "../../pairing/functions/session-hold.js";
 import { readSessionSync } from "../../pairing/functions/session-sync.js";
@@ -32,11 +33,17 @@ import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
 
 const SESSION_TUI_COMMANDS = Object.freeze({
   host: Object.freeze([
-    "admit", "kick", "scope", "policy", "invite", "members", "pending",
+    "admit", "kick", "lease", "scope", "policy", "invite", "members", "pending",
+    "merge", "deploy", "auto",
     "status", "hold", "resume", "drain", "close", "keep", "inject",
   ]),
   member: Object.freeze(["status", "hold", "resume"]),
 });
+
+// These ask the host for a typed approval on the plain terminal, so they run
+// the way the session console runs them: as a foreground `posse session ...`
+// that has the terminal while the run screen steps aside.
+const SESSION_TUI_FOREGROUND_COMMANDS = Object.freeze(["merge", "deploy"]);
 
 /** The `u` prompt's command list for this clone's session role. */
 export function sessionTuiCommandHint(role = "host") {
@@ -59,6 +66,10 @@ export function parseSessionTuiCommand(command, { role = "host" } = {}) {
   if (action === "status") return { status: true };
   if (action === "inject") return { inject: input.slice(rawAction.length).trim() };
   if (keepBranch) return { argv: ["close", "--keep-branch"] };
+  if (SESSION_TUI_FOREGROUND_COMMANDS.includes(action)) {
+    if (input.split(/\s+/u).length !== 1) throw new Error(`Use: ${action}`);
+    return { foreground: ["session", action] };
+  }
   if (action === "drain") return { argv: ["close"] };
   if (action === "scope") {
     const match = input.match(/^scope\s+(\S+)\s+([\s\S]+)$/iu);
@@ -154,6 +165,9 @@ export class RunDisplayActions {
     requeueWaitingHumanInputJobs = requeueWaitingHumanInputJobsFromStore,
     answerWorkItemQuestionChoice = answerQuestionChoice,
     executeHumanGateTransition = null,
+    spawnPosse = spawnPosseInForeground,
+    // The terminal a foreground session command is handed.
+    terminal = { input: process.stdin, output: process.stdout },
   } = {}) {
     this.display = display;
     this.worker = worker;
@@ -195,6 +209,10 @@ export class RunDisplayActions {
         rejectPlan,
       });
     this.liveReviewPromise = null;
+    this.sessionCommandsInFlight = new Set();
+    this.foregroundChild = null;
+    this.spawnPosse = spawnPosse;
+    this.terminal = terminal;
     this.humanGatePrompts = new Map();
     this.humanGatePromptSignatures = new Map();
     // A broken renderer must not recursively reopen on every scheduler
@@ -226,16 +244,107 @@ export class RunDisplayActions {
     this.display.onAnswerJob = (jobId) => this.answerJob(jobId);
     const pairing = getLivePairingState();
     if (pairing) {
-      this.display.onSessionCommand = (command) => this.sessionCommand(command);
+      this.display.onSessionCommand = (command) => this.trackSessionCommand(this.sessionCommand(command));
       this.display.sessionCommandHint = sessionTuiCommandHint(pairing.role);
     }
     return this;
+  }
+
+  // A session command still running when the scheduler stops (a close that
+  // is draining members and freezing the session's work) must be allowed to
+  // finish before the run exits.
+  trackSessionCommand(promise) {
+    const tracked = Promise.resolve(promise);
+    this.sessionCommandsInFlight.add(tracked);
+    const forget = () => this.sessionCommandsInFlight.delete(tracked);
+    tracked.then(forget, forget);
+    return tracked;
+  }
+
+  hasSessionCommandsInFlight() {
+    return this.sessionCommandsInFlight.size > 0;
+  }
+
+  async settleSessionCommands() {
+    while (this.sessionCommandsInFlight.size > 0) {
+      await Promise.allSettled([...this.sessionCommandsInFlight]);
+    }
+  }
+
+  /** Whether a foreground session command has the terminal right now. */
+  foregroundCommandActive() {
+    return this.foregroundChild != null;
+  }
+
+  /**
+   * Run `posse <args>` with the terminal, as the session console does for
+   * merge and deploy: the run screen steps aside, the command prints its
+   * summary and takes the host's typed approval, and the screen comes back.
+   * The run itself keeps going underneath.
+   */
+  async runForegroundSessionCommand(args) {
+    const display = this.display;
+    const label = `posse ${args.join(" ")}`;
+    const { input, output } = this.terminal;
+    if (!input?.isTTY || !output?.isTTY || typeof display?.lendTerminal !== "function") {
+      throw new Error(`${label} needs the terminal for your approval; run it in another terminal in this folder`);
+    }
+    if (this.foregroundChild) throw new Error("Another session command has the terminal");
+    if (!display.lendTerminal()) throw new Error("The run screen cannot hand the terminal over right now");
+    let outcome = null;
+    try {
+      output.write(`\n  ${this.C.cyan}[session]${this.C.reset} ${label} (the run keeps going; Ctrl+C here cancels only this command)\n\n`);
+      this.foregroundChild = this.spawnPosse(args, { cwd: this.projectDir });
+      outcome = await waitForForegroundExit(this.foregroundChild);
+      // The command's output sits on the plain terminal, which the run screen
+      // is about to cover: let the host read it first.
+      await this.waitForEnter(`\n  ${this.C.dim}Press Enter to return to the session screen.${this.C.reset} `);
+    } catch (error) {
+      outcome = outcome || { error };
+    } finally {
+      this.foregroundChild = null;
+      display.reclaimTerminal();
+    }
+    if (outcome?.error) throw new Error(`could not run ${label}: ${outcome.error?.message || outcome.error}`);
+    if (outcome?.code !== 0) {
+      throw new Error(`${label} did not complete (${outcome?.signal ? `signal ${outcome.signal}` : `exit code ${outcome?.code}`})`);
+    }
+  }
+
+  waitForEnter(prompt) {
+    return new Promise((resolve) => {
+      const { input, output } = this.terminal;
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        input.off("data", finish);
+        input.off("end", finish);
+        input.off("error", finish);
+        try { input.pause(); } catch { /* the terminal may be gone */ }
+        resolve();
+      };
+      try {
+        output.write(prompt);
+        input.on("data", finish);
+        input.once("end", finish);
+        input.once("error", finish);
+        input.resume();
+      } catch {
+        finish();
+      }
+    });
   }
 
   async sessionCommand(command) {
     const pairing = getLivePairingState();
     if (!pairing) throw new Error("This clone is not in a live session");
     const parsed = parseSessionTuiCommand(command, { role: pairing.role });
+    if (parsed.foreground) {
+      await this.runForegroundSessionCommand(parsed.foreground);
+      this.refreshDisplaySnapshotsForQueue();
+      return;
+    }
     if (Object.hasOwn(parsed, "inject")) {
       if (!parsed.inject) throw new Error("Use: inject <work item description>");
       this.inject(parsed.inject);

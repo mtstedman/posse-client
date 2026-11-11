@@ -6,7 +6,7 @@
 import crypto from "node:crypto";
 
 import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
-import { SESSION_COMPUTE_POLICIES, SESSION_JOB_PROTOCOL, SESSION_PACKET_PROTOCOL, SESSION_JOB_OFFER_TTL_MS, SESSION_JOB_CLAIM_TTL_MS, SESSION_ROUTABLE_JOB_TYPES } from "../../../catalog/session-sync.js";
+import { SESSION_COMPUTE_OWNERS, SESSION_COMPUTE_POLICIES, SESSION_JOB_PROTOCOL, SESSION_PACKET_PROTOCOL, SESSION_JOB_OFFER_TTL_MS, SESSION_JOB_CLAIM_TTL_MS, SESSION_ROUTABLE_JOB_TYPES, defaultSessionComputeOwner } from "../../../catalog/session-sync.js";
 import { getDb } from "../../../shared/storage/functions/index.js";
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { adminGitExecAsync } from "../../git/functions/admin-git.js";
@@ -14,6 +14,7 @@ import { casPushSharedTrunkClaimNative } from "../../git/functions/shared-trunk-
 import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
 import { getSetting } from "../../settings/functions/repository-settings.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
+import { normalizeComputeOwner, offersSessionWorkTo, ownComputeOwner } from "../../pairing/functions/compute-lease.js";
 import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
 import { createJob, createWorkItem, getWorkItem, logEvent, refreshWorkItemStatus, updateJobProvider, updateJobStatus, updateWorkItemStatus } from "./queue-store.js";
 import { now, runImmediateTransaction } from "./common.js";
@@ -95,25 +96,47 @@ function localProviderCanRun(job) {
   }
 }
 
-export function shouldOfferSessionJob(state, job, peers, { localCanRun = localProviderCanRun(job) } = {}) {
-  if (!state || state.phase !== "active" || !ROUTABLE_JOB_TYPES.has(job?.job_type)) return null;
-  if (!Array.isArray(peers) || peers.length === 0) return null;
-  const eligible = peers.filter((peer) => peerCanExecuteSessionJob(peer, job));
-  if (eligible.length === 0) return null;
-  if (state.compute_policy === SESSION_COMPUTE_POLICIES.HOST_ONLY) {
-    if (state.role === "host") return null;
-    return eligible.find((peer) => peer.role === "host") || null;
-  }
-  if (state.compute_policy !== SESSION_COMPUTE_POLICIES.CAPABILITY_ROUTING || localCanRun) return null;
-  return eligible[0];
+/**
+ * The peers that may claim this job, in preference order; empty runs it here.
+ * Only peers whose own lease lets them claim from this clone are listed
+ * (compute-lease.js offersSessionWorkTo), so an offer is never parked on peers
+ * that will all refuse it: the host offers to nobody and a host-leased member
+ * is never a balancing target. The lease the host issued this clone then
+ * decides: a host lease sends every routable job to the host alone. Otherwise
+ * the clone pays its own way and only offers work it cannot run, and only
+ * when the host has turned on capability routing for the session.
+ */
+export function sessionJobExecutors(state, job, peers, { localCanRun = localProviderCanRun(job) } = {}) {
+  if (!state || state.phase !== "active" || !ROUTABLE_JOB_TYPES.has(job?.job_type)) return [];
+  // Work this clone imported runs here. Offering it again would bill a third
+  // party under this clone's lease and strand the originator's reconciliation.
+  if (parseJson(job.payload_json).session_delegation) return [];
+  if (!Array.isArray(peers) || peers.length === 0) return [];
+  const eligible = peers.filter((peer) => peerCanExecuteSessionJob(peer, job) && offersSessionWorkTo(state, peer));
+  if (eligible.length === 0) return [];
+  // On a host lease only the host accepts, so `eligible` holds the host alone.
+  if (ownComputeOwner(state) === SESSION_COMPUTE_OWNERS.HOST) return eligible.slice(0, 1);
+  if (state.compute_policy !== SESSION_COMPUTE_POLICIES.CAPABILITY_ROUTING || localCanRun) return [];
+  return eligible;
 }
 
+export function shouldOfferSessionJob(state, job, peers, options = {}) {
+  return sessionJobExecutors(state, job, peers, options)[0] || null;
+}
+
+/**
+ * The host runs work on its own bill for members whose lease names it, so it
+ * caps each such originator to `limit` active jobs. Work accepted through
+ * capability routing is not on a host lease and is not capped here.
+ */
 export function sessionOriginatorConcurrencyBlocked(state, job, activeJobs, limit = 1) {
-  if (state?.compute_policy !== SESSION_COMPUTE_POLICIES.HOST_ONLY || state.role !== "host") return false;
+  if (state?.role !== "host") return false;
   const row = getDb().prepare(`
-    SELECT originator_instance_id FROM work_item_delegations WHERE local_job_id = ?
+    SELECT originator_instance_id, compute_owner FROM work_item_delegations WHERE local_job_id = ?
   `).get(job?.id);
   if (!row?.originator_instance_id) return false;
+  const owner = row.compute_owner || defaultSessionComputeOwner(state.compute_policy);
+  if (owner !== SESSION_COMPUTE_OWNERS.HOST) return false;
   const activeIds = (Array.isArray(activeJobs) ? activeJobs : [])
     .map((entry) => Number(entry?.id ?? entry?.job?.id))
     .filter(Number.isSafeInteger);
@@ -184,13 +207,23 @@ export async function offerSessionJob(job, {
   localCanRun = localProviderCanRun(job),
 } = {}) {
   const peers = (snapshot?.peers || []).filter((peer) => peer.instance_id !== instanceId);
-  const target = shouldOfferSessionJob(state, job, peers, { localCanRun });
-  if (!target) return { delegated: false, reason: "local_execution" };
+  const executors = sessionJobExecutors(state, job, peers, { localCanRun });
+  const target = executors[0];
+  if (!target) {
+    // A host lease whose host cannot take this job right now still runs it
+    // here, on this clone's account (fail-local). Say so to the caller.
+    const leasedToHost = state?.phase === "active" && state.role !== "host"
+      && ownComputeOwner(state) === SESSION_COMPUTE_OWNERS.HOST
+      && ROUTABLE_JOB_TYPES.has(job?.job_type)
+      && !parseJson(job?.payload_json).session_delegation;
+    return { delegated: false, reason: leasedToHost ? "host_unavailable" : "local_execution" };
+  }
   const workItem = getWorkItem(job.work_item_id);
   if (!workItem) return { delegated: false, reason: "missing_work_item" };
-  const eligible = peers
-    .filter((peer) => peerCanExecuteSessionJob(peer, job))
-    .map((peer) => peer.instance_id);
+  // Only the executors this clone's lease allows may claim: a host lease
+  // never lets another member pick up (and pay for) the work.
+  const eligible = executors.map((peer) => peer.instance_id);
+  const computeOwner = ownComputeOwner(state);
   const key = sessionJobOfferKey(state.remote_session_id, instanceId, job.id);
   const packet = packetFor(state, instanceId, workItem, job, eligible);
   let packetResult;
@@ -228,13 +261,15 @@ export async function offerSessionJob(job, {
       getDb().prepare(`
         INSERT INTO work_item_delegations (
           id, session_id, originator_instance_id, origin_work_item_id, origin_job_id,
-          offer_key, packet_oid, claim_oid, job_type, provider, state
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'offered')
+          offer_key, packet_oid, claim_oid, job_type, provider, compute_owner, state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'offered')
         ON CONFLICT(offer_key) DO UPDATE SET
           packet_oid=excluded.packet_oid, claim_oid=excluded.claim_oid,
+          compute_owner=excluded.compute_owner,
           state='offered', created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
           updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
-      `).run(key, state.remote_session_id, instanceId, workItem.id, job.id, key, packetOid, claimOid, job.job_type, job.provider || null);
+      `).run(key, state.remote_session_id, instanceId, workItem.id, job.id, key, packetOid, claimOid,
+        job.job_type, job.provider || null, computeOwner);
       if (!updateJobStatus(job.id, "blocked", { expectedStatuses: ["queued"] })) {
         throw new Error(`Session job #${job.id} is no longer queued`);
       }
@@ -248,7 +283,7 @@ export async function offerSessionJob(job, {
       event_type: EVENT_TYPES.SESSION_JOB_OFFERED,
       actor_type: EVENT_ACTORS.SCHEDULER,
       message: `Offered job #${job.id} to ${eligible.length} session peer(s)`,
-      event_json: JSON.stringify({ offer_key: key, eligible_instance_ids: eligible }),
+      event_json: JSON.stringify({ offer_key: key, eligible_instance_ids: eligible, compute_owner: computeOwner }),
     });
     return { delegated: true, offerKey: key, target: target.instance_id };
   } catch (error) {
@@ -318,13 +353,13 @@ export async function fetchNamespace(projectDir, remote, namespace, execGit = ad
   return result;
 }
 
-export function importPacket(packet, executorInstanceId, offerKey, claimOid) {
+export function importPacket(packet, executorInstanceId, offerKey, claimOid, { computeOwner = null } = {}) {
   // One transaction: a failure part-way must not leave a work item or job
   // without the delegation row that ties it to the claim.
-  return runImmediateTransaction(getDb(), () => importPacketRows(packet, executorInstanceId, offerKey, claimOid));
+  return runImmediateTransaction(getDb(), () => importPacketRows(packet, executorInstanceId, offerKey, claimOid, { computeOwner }));
 }
 
-function importPacketRows(packet, executorInstanceId, offerKey, claimOid) {
+function importPacketRows(packet, executorInstanceId, offerKey, claimOid, { computeOwner = null } = {}) {
   const existing = getDb().prepare("SELECT * FROM work_item_delegations WHERE offer_key = ?").get(offerKey);
   if (existing) return existing;
   const wi = createWorkItem(
@@ -383,12 +418,13 @@ function importPacketRows(packet, executorInstanceId, offerKey, claimOid) {
     INSERT INTO work_item_delegations (
       id, session_id, originator_instance_id, origin_work_item_id, origin_job_id,
       executor_instance_id, local_work_item_id, local_job_id, offer_key,
-      packet_oid, claim_oid, job_type, provider, state
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')
+      packet_oid, claim_oid, job_type, provider, compute_owner, state
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported')
   `).run(
     offerKey, packet.session_id, packet.originator_instance_id,
     packet.origin_work_item_id, packet.origin_job_id, executorInstanceId,
     wi.id, job.id, offerKey, null, claimOid, job.job_type, job.provider || null,
+    normalizeComputeOwner(computeOwner),
   );
   return getDb().prepare("SELECT * FROM work_item_delegations WHERE offer_key = ?").get(offerKey);
 }

@@ -34,7 +34,7 @@ import {
 } from "./table-definitions.js";
 import { log } from "../../telemetry/functions/logging/logger.js";
 
-export const HOST_SCHEMA_VERSION = 25;
+export const HOST_SCHEMA_VERSION = 26;
 
 export function getHostSchemaVersion(db) {
   const version = Number(db.pragma("user_version", { simple: true }) || 0);
@@ -614,6 +614,7 @@ export function installPairingSessionSchema(db) {
       instance_id TEXT,
       scope_set_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(scope_set_json)),
       compute_policy TEXT NOT NULL DEFAULT 'each-member',
+      compute_owner TEXT CHECK (compute_owner IS NULL OR compute_owner IN ('host','member')),
       integration_policy TEXT NOT NULL DEFAULT 'side-trunk',
       enrollment_open INTEGER NOT NULL DEFAULT 1 CHECK (enrollment_open IN (0,1)),
       baseline_oid TEXT,
@@ -679,6 +680,7 @@ export function repairPairingSessionPendingPhaseSchema(db) {
         instance_id TEXT,
         scope_set_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(scope_set_json)),
         compute_policy TEXT NOT NULL DEFAULT 'each-member',
+        compute_owner TEXT CHECK (compute_owner IS NULL OR compute_owner IN ('host','member')),
         integration_policy TEXT NOT NULL DEFAULT 'side-trunk',
         enrollment_open INTEGER NOT NULL DEFAULT 1 CHECK (enrollment_open IN (0,1)),
         baseline_oid TEXT,
@@ -784,6 +786,33 @@ export function installPairingSubmissionApprovalSchema(db) {
   return true;
 }
 
+// The host-issued compute lease (catalog/session-sync.js SESSION_COMPUTE_OWNERS):
+// this clone's own lease on its session row, and on each delegation the lease
+// under which the work was offered or accepted, for attribution and limits.
+const SESSION_COMPUTE_LEASE_COLUMNS = Object.freeze([
+  ["pairing_sessions", "compute_owner", "TEXT CHECK (compute_owner IS NULL OR compute_owner IN ('host','member'))"],
+  ["work_item_delegations", "compute_owner", "TEXT CHECK (compute_owner IS NULL OR compute_owner IN ('host','member'))"],
+]);
+
+export function needsSessionComputeLeaseSchema(db) {
+  return SESSION_COMPUTE_LEASE_COLUMNS.some(([table, column]) => tableExists(db, table)
+    && !getTableColumnNames(db, table).includes(column));
+}
+
+export function installSessionComputeLeaseSchema(db) {
+  let changed = false;
+  for (const [table, column, declaration] of SESSION_COMPUTE_LEASE_COLUMNS) {
+    if (!tableExists(db, table) || getTableColumnNames(db, table).includes(column)) continue;
+    db.exec(`ALTER TABLE ${quoteIdent(table)} ADD COLUMN ${quoteIdent(column)} ${declaration}`);
+    changed = true;
+  }
+  return changed;
+}
+
+export function __testInstallSessionComputeLeaseSchema(db) {
+  return installSessionComputeLeaseSchema(db);
+}
+
 export function needsWorkItemDelegationSchema(db) {
   if (!tableExists(db, "work_item_delegations")) return true;
   const agentColumns = new Set(getTableColumnNames(db, "agent_calls"));
@@ -807,6 +836,7 @@ export function installWorkItemDelegationSchema(db) {
       claim_oid TEXT,
       job_type TEXT NOT NULL,
       provider TEXT,
+      compute_owner TEXT CHECK (compute_owner IS NULL OR compute_owner IN ('host','member')),
       state TEXT NOT NULL CHECK (
         state IN ('offered','claimed','imported','running','merged','failed','recalled')
       ),

@@ -245,6 +245,7 @@ export class SessionMonitor {
         phase: "active",
         scopeSet: nextScope,
         computePolicy: status.compute_policy,
+        computeOwner: status.compute_owner,
         integrationPolicy: status.integration_policy,
         enrollmentOpen: status.enrollment_open,
         submissionApprovalEnabled: status.submission_approval_enabled ?? null,

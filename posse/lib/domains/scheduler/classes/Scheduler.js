@@ -42,6 +42,8 @@ import { WAITING_LANE_JOB_TYPE } from "../../../catalog/waiting-lane.js";
 import { reconcileAtlasDriftIfIdleAsync } from "../../integrations/functions/atlas.js";
 import { isConductorIndexingInFlight } from "../../atlas/functions/v2/parse/conductor.js";
 import { ENVIRONMENT_SETUP_RUNTIME_CREDIT_CAP_MS } from "../../../catalog/tools/environment-setup.js";
+import { SHARED_RUN_END_REASONS } from "../../../catalog/shared-run.js";
+import { pairingSessionLive, sharedRunEndFromSessionPoll, sharedRunStaysOpen } from "../../pairing/functions/shared-run.js";
 import { DEFAULT_LEASE_SEC, DEFAULT_CONCURRENCY, DEFAULT_POLL_MS, DEFAULT_REPAIR_POLL_MS, LOCK_RENEW_SEC, MAX_RUNNABLE_SCAN_PER_TICK, PROGRESS_TIMEOUT_SEC, QUEUE_LOCK_INDEX_UNCONDITIONAL_REFRESH_MS, maxJobRuntimeSecFor, readActiveWorktreeCap, readAtlasDriftCheckIntervalMs, readHeadlessHumanTimeoutSec, readHumanGateResnoozeSec, readImplementationReservedSlots, readPositiveIntSetting, readRuntimeWriteCeilingMultiplier, readRuntimeWriteGraceSec } from "../functions/config.js";
 import { findFileConflict } from "../functions/file-scope.js";
 import { RUNTIME_NO_ESCALATION_BACKSTOP_MULTIPLIER, runtimeKillCanEscalate, runtimeWriteExtensionActive } from "../functions/runtime-escalation.js";
@@ -164,6 +166,12 @@ export class Scheduler {
     this.concurrency = this._concurrencyExplicit ? opts.concurrency : readPositiveIntSetting("scheduler_concurrency", DEFAULT_CONCURRENCY);
     this.leaseManager = opts.leaseManager || getLeaseManager({ defaultDurationSec: this.leaseSec });
     this._hasDisplay = !!opts.hasDisplay;
+    // A shared run (posse go inside a live session) stays open when its queue
+    // empties; see pairing/functions/shared-run.js.
+    this._staysOpenInSession = opts.staysOpenInSession === true;
+    this._sessionLiveProbe = typeof opts.sessionLiveProbe === "function" ? opts.sessionLiveProbe : pairingSessionLive;
+    // Why the session asked this run to drain, once it has (null otherwise).
+    this.sessionEnd = null;
     this._running = false;
     this._stopRunHeartbeat = null;
     this._stopRequested = false;
@@ -1331,7 +1339,7 @@ export class Scheduler {
    * @param {function} workerCallback - async job executor
    * @param {object} opts
    */
-  async runLoop(workerCallback, { onIdle, onDone, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob, onTeamSubmissionChange, onSessionEvent, onQueueStateChange, beforeSessionStop } = {}) {
+  async runLoop(workerCallback, { onIdle, onDone, onQuiet, onBackgroundOnly, onJobStart, onJobEnd, onSlotStatus, onKillJob, onTeamSubmissionChange, onSessionEvent, onQueueStateChange, beforeSessionStop } = {}) {
     // boot() starts renewal immediately after lock acquisition so long
     // pre-loop hooks cannot let the scheduler lock expire.
     if (!this._running) {
@@ -1460,6 +1468,7 @@ export class Scheduler {
     const STOP_REQUEST_CHECK_MS = 2_000;
     let pairingDrainRequested = false;
     this._pairingDrainRequested = false;
+    this.sessionEnd = null;
     let pairingDrainStartedAt = null;
 
     this._sessionMonitor.start({
@@ -1476,6 +1485,7 @@ export class Scheduler {
         if (!pairingDrainRequested && (sessionPoll?.requestsDrain || sessionPoll?.fatal)) {
           pairingDrainRequested = true;
           this._pairingDrainRequested = true;
+          this.sessionEnd ??= sharedRunEndFromSessionPoll(sessionPoll);
           this._log(
             sessionPoll?.requestsDrain
               ? `Session ${sessionPoll.status?.status || "closed"}; draining active workers`
@@ -1501,6 +1511,30 @@ export class Scheduler {
       const autoMergeAwaitedSince = new Map();
       let autoMergeRetried = false;
       const headlessNonHumanWaitingLogged = new Set();
+      // A shared run that would otherwise finish stays open instead. onQuiet
+      // fires once per quiet stretch; the hold then sleeps like any idle lap
+      // (a queue change, a finished worker, the next due poll, or the repair
+      // timer wakes it), so an empty session costs one lap per wake.
+      let quietAnnounced = false;
+      const staysOpen = () => sharedRunStaysOpen({
+        enabled: this._staysOpenInSession,
+        sessionLive: this._staysOpenInSession && this._sessionLiveProbe(),
+        drainRequested: pairingDrainRequested,
+        stopRequested: this._stopRequested || !this._running,
+        lockLost: this._lockLost,
+      });
+      const holdOpen = async (lapQueueGeneration, lapWakeGeneration, detail = {}) => {
+        if (!quietAnnounced) {
+          quietAnnounced = true;
+          this._invokeCallback("onQuiet", onQuiet, detail);
+        }
+        this._invokeCallback("onSlotStatus", onSlotStatus, {
+          idle: this.concurrency,
+          blockedByLock: 0,
+          blockedLockDetails: [],
+        });
+        await this._sleepUntilQueueWakeOrRepair(lapQueueGeneration, lapWakeGeneration);
+      };
 
       while (this._running) {
         try {
@@ -1597,6 +1631,7 @@ export class Scheduler {
             if (!pairingDrainRequested) {
               pairingDrainRequested = true;
               this._pairingDrainRequested = true;
+              this.sessionEnd ??= { reason: SHARED_RUN_END_REASONS.CLOSE_REQUESTED, status: null };
               this._log("Pairing graceful close requested - draining active workers", "yellow");
               logEvent({
                 event_type: EVENT_TYPES.SCHEDULER_STOP_REQUESTED,
@@ -1981,6 +2016,12 @@ export class Scheduler {
           && foregroundTrackedJobs.length === 0
           && requiredBackgroundTrackedJobs.length === 0
           && (activeBackgroundJobs.length > 0 || backgroundTrackedJobs.length > 0)
+          // This is the closeout of a run that is ending: it shows the wrap-up
+          // overlay and leaves queued background work for the next run. A
+          // shared run is not ending and has no next run, so it carries on
+          // below: background work is dispatched as usual and the run goes
+          // quiet when nothing at all is left.
+          && !staysOpen()
         ) {
           this._invokeCallback("onBackgroundOnly", onBackgroundOnly, {
             activeJobs: activeBackgroundJobs,
@@ -2472,6 +2513,8 @@ export class Scheduler {
           } // race, try next
 
           clearFileLaneWaitsForJob(job.id, "lane_acquired");
+          // A host-leased job the host could not take is now running here.
+          if (sessionRoute?.reason === "host_unavailable") this._sessionJobRouter?.recordLeaseFallback?.(job);
 
           // Track file scope AFTER successful lease — prevents polluting
           // the lock set when lease acquisition fails (race with another scheduler).
@@ -2610,6 +2653,7 @@ export class Scheduler {
           parkedStallSince = null;
           autoMergeAwaitedSince.clear();
           autoMergeRetried = false;
+          quietAnnounced = false;
         }
         if (!launched && executableActiveWorkerCount === 0) {
           // Nothing running and nothing to start. Reuse the tracked rows from
@@ -2617,6 +2661,10 @@ export class Scheduler {
           // deciding whether their own work is complete.
           const anyTracked = trackedJobsForCloseout.length > 0;
           if (!anyTracked) {
+            if (staysOpen()) {
+              await holdOpen(lapStartQueueGeneration, lapStartWakeGeneration);
+              continue;
+            }
             this._invokeCallback("onDone", onDone);
             break;
           }
@@ -2631,6 +2679,10 @@ export class Scheduler {
           const hasQueued = trackedJobsForCloseout.some((job) => job.status === "queued");
           const canProgress = runnableNow || hasActive || hasQueued || interactiveGateIds.size > 0;
           if (!canProgress) {
+            if (staysOpen()) {
+              await holdOpen(lapStartQueueGeneration, lapStartWakeGeneration, { parked: true });
+              continue;
+            }
             this._invokeCallback("onDone", onDone);
             break;
           }
@@ -2666,7 +2718,7 @@ export class Scheduler {
               // Headless runs return exit 2. Interactive runs keep the TUI and
               // bridge alive with the durable needs-action banner so the
               // operator can answer the named gate in-place.
-              if (!this._hasDisplay) {
+              if (!this._hasDisplay && !staysOpen()) {
                 this._invokeCallback("onDone", onDone, this.needsActionReport);
                 break;
               }

@@ -1,9 +1,9 @@
 // Stateful session delegation owner. Packet and Git-ref operations remain in
 // queue/functions/session-job-router.js so procedural consumers have one owner.
 
+import { EVENT_ACTORS, EVENT_TYPES } from "../../../catalog/event.js";
 import { TERMINAL_JOB_STATUSES } from "../../../catalog/job.js";
 import {
-  SESSION_COMPUTE_POLICIES,
   SESSION_JOB_PROTOCOL,
   SESSION_JOB_OFFER_TTL_MS,
   SESSION_JOB_CLAIM_TTL_MS,
@@ -12,8 +12,15 @@ import { getDb } from "../../../shared/storage/functions/index.js";
 import { ensureBridgeInstanceId } from "../../bridge/functions/auth.js";
 import { casPushSharedTrunkClaimNative } from "../../git/functions/shared-trunk-native.js";
 import { getLivePairingState } from "../../pairing/functions/state.js";
+import {
+  acceptedComputeOwner,
+  acceptsSessionOffer,
+  normalizeComputeOwner,
+  sessionRoutingActive,
+} from "../../pairing/functions/compute-lease.js";
 import { readPairingPeerSnapshot } from "../../pairing/functions/work-items.js";
 import {
+  logEvent,
   refreshWorkItemStatus,
   updateJobStatus,
   updateWorkItemStatus,
@@ -49,11 +56,38 @@ export class SessionJobRouter {
     this._nowMs = nowMs;
     this._nextDueAt = 0;
     this._inFlight = null;
+    this._leaseFallbackLogged = new Set();
+    // Claims this instance holds whose import has not landed yet. They have
+    // no delegation row, so they alone keep routing on until they import.
+    this._unimportedClaims = new Set();
+  }
+
+  /**
+   * Routing runs while any lease in the session moves work between machines,
+   * and keeps running while delegations are open so a lease that changes
+   * mid-flight still settles the work it already offered or accepted.
+   */
+  _routingActive(state) {
+    if (!state || state.phase !== "active") return false;
+    if (this._unimportedClaims.size > 0) return true;
+    if (sessionRoutingActive(state, [])) return true;
+    // Only a host needs the peer snapshot: it executes for host-leased members.
+    if (state.role === "host" && sessionRoutingActive(state, this._getSnapshot()?.peers)) return true;
+    if (!state.remote_session_id) return false;
+    try {
+      return Boolean(getDb().prepare(`
+        SELECT 1 FROM work_item_delegations
+        WHERE session_id = ? AND state IN ('offered','claimed','imported')
+        LIMIT 1
+      `).get(state.remote_session_id));
+    } catch {
+      return false;
+    }
   }
 
   delayUntilDueMs() {
     const state = this._getState();
-    return state?.phase === "active" && state.compute_policy !== SESSION_COMPUTE_POLICIES.EACH_MEMBER
+    return this._routingActive(state)
       ? Math.max(0, this._nextDueAt - this._nowMs()) : null;
   }
 
@@ -65,6 +99,33 @@ export class SessionJobRouter {
       instanceId: this._instanceId(this.projectDir),
       casPush: this._casPush,
     });
+  }
+
+  /**
+   * The lease promised the host would run this job; the scheduler calls this
+   * when it dispatches the job here instead, on this clone's provider account
+   * (`offer` answered `host_unavailable`). One event per job: an offer that is
+   * only scanned, or a job that later reaches the host, records nothing, and
+   * a job already recorded (this run or an earlier one) is not recorded again.
+   */
+  recordLeaseFallback(job) {
+    if (!job?.id || this._leaseFallbackLogged.has(job.id)) return false;
+    this._leaseFallbackLogged.add(job.id);
+    try {
+      if (getDb().prepare("SELECT 1 FROM events WHERE job_id = ? AND event_type = ? LIMIT 1")
+        .get(job.id, EVENT_TYPES.SESSION_JOB_LEASE_FALLBACK)) return false;
+      logEvent({
+        work_item_id: job.work_item_id,
+        job_id: job.id,
+        event_type: EVENT_TYPES.SESSION_JOB_LEASE_FALLBACK,
+        actor_type: EVENT_ACTORS.SCHEDULER,
+        message: `Job #${job.id} runs here: this clone's lease names the session host, `
+          + "but the host cannot take this job now (offline, no matching provider, or no headroom)",
+      });
+      return true;
+    } catch {
+      return false; // the event is advisory; dispatch continues
+    }
   }
 
   poll({ force = false } = {}) {
@@ -111,7 +172,7 @@ export class SessionJobRouter {
   async _pollOnce({ force }) {
     const state = this._getState();
     this._settleEndedSessionDelegations(state);
-    if (!state || state.phase !== "active" || state.compute_policy === SESSION_COMPUTE_POLICIES.EACH_MEMBER) {
+    if (!this._routingActive(state)) {
       return { attempted: false, skipped: "routing_disabled" };
     }
     if (!force && this._nowMs() < this._nextDueAt) return { attempted: false, skipped: "cadence" };
@@ -127,9 +188,13 @@ export class SessionJobRouter {
       return { attempted: true, unavailable: true, error };
     }
     const packetByKey = new Map(packets.map((row) => [row.key, row]));
+    const peerByInstance = new Map((snapshot?.peers || [])
+      .filter((peer) => peer?.instance_id)
+      .map((peer) => [peer.instance_id, peer]));
     let imported = 0;
     let reconciled = 0;
     let importError = null;
+    const unimportedClaims = new Set();
     for (const ref of jobRefs) {
       const offer = ref.payload;
       if (offer?.protocol !== SESSION_JOB_PROTOCOL || offer.session_id !== state.remote_session_id) continue;
@@ -171,11 +236,24 @@ export class SessionJobRouter {
       const unimportedClaim = offer.state === "claimed" && offer.executor_instance_id === self
         && !getDb().prepare("SELECT 1 FROM work_item_delegations WHERE offer_key = ?").get(ref.key);
       if ((offer.state !== "offered" && !unimportedClaim) || !offer.eligible_instance_ids?.includes(self)) continue;
+      // The issuer's lease decides who pays. Claim only work whose originator
+      // the Remote reports under a lease that names this clone's role. A claim
+      // already won was accepted under the lease of that moment: it is still
+      // imported when the lease has changed or the originator has left the
+      // snapshot, or the origin job would stay blocked behind a held claim.
+      const originator = peerByInstance.get(offer.originator_instance_id);
+      if (!unimportedClaim && !acceptsSessionOffer(state, originator)) continue;
       const packetRef = packetByKey.get(ref.key);
       if (!packetRef || packetRef.oid !== offer.packet_oid || !packetMatchesOffer(packetRef.payload, offer, self)) continue;
       let claimOid = ref.oid;
+      // The claim carries the lease it was accepted under, so a re-import
+      // records that lease. A claim written before leases has none.
+      let computeOwner = normalizeComputeOwner(offer.compute_owner) || acceptedComputeOwner(state, originator);
       if (!unimportedClaim) {
-        const claimed = { ...offer, state: "claimed", executor_instance_id: self, claimed_at: now() };
+        computeOwner = acceptedComputeOwner(state, originator);
+        const claimed = {
+          ...offer, state: "claimed", executor_instance_id: self, claimed_at: now(), compute_owner: computeOwner,
+        };
         const claim = await casRef({
           projectDir: this.projectDir, remote: state.remote_name, namespace: "jobs",
           key: ref.key, expectedOldOid: ref.oid, payload: claimed, casPush: this._casPush,
@@ -184,14 +262,16 @@ export class SessionJobRouter {
         claimOid = resultOid(claim);
       }
       try {
-        importPacket(packetRef.payload, self, ref.key, claimOid);
+        importPacket(packetRef.payload, self, ref.key, claimOid, { computeOwner });
         imported += 1;
       } catch (error) {
         // The claim stays ours and is retried next poll; the passes below
         // still run, then the first failure surfaces to the caller.
         importError ||= error;
+        unimportedClaims.add(ref.key);
       }
     }
+    this._unimportedClaims = unimportedClaims;
     await this._publishCompletions(state, self, jobRefs);
     await this._recallExpiredOffers(state, jobRefs);
     const expiredClaims = await this._expireOrphanedClaims(state, jobRefs, self, snapshot);

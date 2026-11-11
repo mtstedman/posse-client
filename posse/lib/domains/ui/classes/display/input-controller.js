@@ -656,6 +656,12 @@ export class DisplayInputController {
 
     } else {
       // Not in input mode
+      // The Session pane's own keys (row selection, host actions, and any
+      // prompt it has open) come first; it leaves every other key alone.
+      if (typeof this._onSessionPaneKeypress === "function" && this._onSessionPaneKeypress(str, key)) {
+        this.requestRender({ force: true });
+        return;
+      }
       const digit = digitInput(str, key);
       if (matchesHotkey(str, key, "l")) {
         this._rightMode = "log";
@@ -794,6 +800,11 @@ export class DisplayInputController {
       } else if (matchesHotkey(str, key, "t") && this.getToolData) {
         if (this._rightMode !== "tools") this._toolsTab = 0;
         this._rightMode = "tools";
+        this.requestRender({ force: true });
+      } else if (matchesHotkey(str, key, "o") && this._sessionModeOffered && this.getPipelineData) {
+        this._rightMode = "session";
+        this._sessionScroll = 0;
+        this._sessionFollowSelection = true;
         this.requestRender({ force: true });
       } else if (key && key.name === "up" && this._rightMode === "pipeline") {
         if (this._pipelineScroll > 0) this._pipelineScroll--;

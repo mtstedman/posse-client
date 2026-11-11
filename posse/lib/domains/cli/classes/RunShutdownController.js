@@ -26,7 +26,11 @@ export class RunShutdownController {
     processRef = process,
     threadManager = ThreadManager,
     forceExitHardMs = RunShutdownController.FORCED_EXIT_HARD_MS,
+    // True while a foreground command the run screen started has the terminal
+    // (a session merge waiting for the host's typed approval).
+    isTerminalLent = () => false,
   } = {}) {
+    this.isTerminalLent = isTerminalLent;
     this.getDisplay = getDisplay;
     this.worker = worker;
     this.threadManager = threadManager;
@@ -207,7 +211,16 @@ export class RunShutdownController {
     return this.shutdownCleanupPromise;
   }
 
-  cleanup() {
+  cleanup(signal = null) {
+    // Ctrl+C on a lent terminal reaches the whole foreground process group. It
+    // is meant for the command that has the terminal, which cancels itself;
+    // the run screen cannot send one while lent (it reads no keys), and a
+    // remote stop arrives without a signal name.
+    if (signal === "SIGINT") {
+      let lent = false;
+      try { lent = this.isTerminalLent() === true; } catch { /* treat as not lent */ }
+      if (lent) return undefined;
+    }
     this.sigintCount++;
     if (this.sigintCount >= 2) {
       return this.forceExit("Forced shutdown");

@@ -7,8 +7,9 @@ import { readonlyMap } from "./readonly-collections.js";
 // A hold reason is free text: every word after `hold` belongs to it.
 export const PAIRING_ACTION_ARITY = readonlyMap([
   ["host", [1, 1]], ["join", [2, 2]], ["leave", [1, 1]], ["close", [1, 1]],
-  ["status", [1, 1]], ["admit", [2, 2]], ["members", [1, 1]], ["pending", [1, 1]],
+  ["status", [1, 1]], ["admit", [2, 3]], ["members", [1, 1]], ["pending", [1, 1]],
   ["kick", [2, 2]], ["invite", [2, 2]], ["scope", [3, 3]], ["policy", [2, 2]],
+  ["lease", [3, 3]],
   ["publication", [2, 2]],
   ["integrate", [1, 1]], ["abandon-integration", [1, 1]],
   ["hold", [1, Number.MAX_SAFE_INTEGER]], ["resume", [1, 1]],
