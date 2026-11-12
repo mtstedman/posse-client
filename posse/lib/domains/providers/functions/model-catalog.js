@@ -11,6 +11,7 @@ export { CODEX_OAUTH_SUPPORTED_MODELS, CODEX_VALIDATION_KNOWN_MODELS } from "../
 // Text models and image models are intentionally split to prevent cross-use.
 
 import { PROVIDER_OPTIONS, PROVIDER_LABELS } from "../../../catalog/provider.js";
+import { PROVIDER_CAPABILITIES } from "../../../catalog/provider-capabilities.js";
 import { LOCAL_MODEL_IDS } from "../../../catalog/local-model.js";
 import { MODEL_TIERS } from "../../../catalog/model.js";
 import { getRemoteProviderCatalog } from "./model-catalog-store.js";
@@ -128,6 +129,9 @@ export const IMAGE_PROVIDER_OPTIONS = Object.freeze(
 function buildTextModelSettingDefs() {
   const defs = [];
   for (const provider of PROVIDER_OPTIONS) {
+    // Local models have no strength tiers: one selected model per kind of
+    // work serves every tier (Admin: Local models).
+    if (PROVIDER_CAPABILITIES[provider]?.localGeneration) continue;
     for (const tier of MODEL_TIERS) {
       defs.push(Object.freeze({
         provider,

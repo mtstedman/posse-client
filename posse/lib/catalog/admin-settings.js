@@ -4,6 +4,8 @@ import { readonlySet } from "./readonly-collections.js";
 
 import { PROJECT_DB_PERMISSIONS, PROJECT_DB_TYPES } from "./project-db.js";
 import { PROVIDER_ROLE_NAMES } from "./provider.js";
+import { LOCAL_BRIDGE_MODELS } from "./local-model.js";
+import { LOCAL_DEFAULT_MODEL_SETTINGS, LOCAL_MODEL_SETTINGS, localModelSettingKeys } from "./local-model-parameters.js";
 
 export const PROVIDER_SETTING_KEYS = readonlySet(PROVIDER_ROLE_NAMES.map((role) => `provider_${role}`));
 
@@ -66,7 +68,21 @@ export const ADMIN_PROVIDER_SETTING_SECTIONS = Object.freeze([
   Object.freeze({ provider: "openai", label: "OpenAI", settingKeys: Object.freeze(["openai_run_budget_usd", "openai_daily_budget_usd", "openai_account_limit_tokens_session", "openai_account_limit_tokens_week"]) }),
   Object.freeze({ provider: "grok", label: "Grok", settingKeys: Object.freeze(["grok_run_budget_usd", "grok_daily_budget_usd"]) }),
   Object.freeze({ provider: "copilot", label: "Copilot", settingKeys: Object.freeze([]) }),
-  Object.freeze({ provider: "posse-local", label: "Local Models", settingKeys: Object.freeze(["posse_local_generation_enabled", "posse_local_image_steps", "posse_local_video_steps"]) }),
+  // Local models have their own pane; see ADMIN_LOCAL_MODEL_SECTIONS.
+  Object.freeze({ provider: "posse-local", label: "Local Models", settingKeys: Object.freeze([]) }),
+]);
+
+// The Local models pane: the one selected model per kind of work, then each
+// model's saved defaults. The pane's first section (add a model, with what is
+// installed and what is available) is built by the Admin UI.
+export const ADMIN_LOCAL_MODEL_SECTIONS = Object.freeze([
+  Object.freeze({ id: "local_selected", label: "Selected models", keys: Object.freeze(LOCAL_DEFAULT_MODEL_SETTINGS.map(setting => setting.key)),
+    hint: "one model per kind of work; Automatic uses the best one installed" }),
+  Object.freeze({ id: "local_access", label: "Availability", keys: Object.freeze(["posse_local_generation_enabled"]), hint: null }),
+  ...LOCAL_BRIDGE_MODELS.map(model => Object.freeze({
+    id: `local_model_${model.slug}`, label: `${model.slug} defaults`, keys: Object.freeze(localModelSettingKeys(model)),
+    hint: `${model.kind} model; a flag still overrides a default for one run`,
+  })),
 ]);
 
 // An Admin action row, not a stored setting: Enter starts `posse local install`.
@@ -156,9 +172,10 @@ export const ADMIN_SETTING_LABEL_OVERRIDES = Object.freeze({
   grok_image_budget_usd: "Grok image budget ($)",
   openai_image_budget_usd: "OpenAI image budget ($)",
   posse_local_generation_enabled: "Experimental local generation",
-  local_model_install: "Install a model",
-  posse_local_image_steps: "Local image steps",
-  posse_local_video_steps: "Local video steps",
+  local_model_install: "Add a model",
+  ...Object.fromEntries(LOCAL_MODEL_SETTINGS.filter(setting => setting.label).map(setting => [setting.key, setting.label])),
+  posse_local_image_steps: "Steps",
+  posse_local_video_steps: "Steps",
   model_catalog_enforcement: "Retired model policy",
   // ATLAS
   atlas_v2: "ATLAS code index",
@@ -374,7 +391,7 @@ export const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
   grok_image_budget_usd: "Expected Grok image-generation spend, in US dollars. Shown for tracking; Posse does not stop jobs when it is reached.",
   openai_image_budget_usd: "Expected OpenAI image-generation spend, in US dollars. Shown for tracking; Posse does not stop jobs when it is reached.",
   posse_local_generation_enabled: "Allow the staged posse-local provider to appear in Admin for an operator-run test. Runtime checks still require a supported platform, the native ML worker, and an installed model package.",
-  local_model_install: "Download and verify a local model, the same as posse local install <slug>. Shows the size and asks before downloading.",
+  local_model_install: "Download and verify a local model, the same as posse local install <slug>. The list shows which models are installed and which are available; it shows the size and asks before downloading.",
   posse_local_image_steps: "Sampling steps for posse local image generation when --steps is not given. More steps take longer.",
   posse_local_video_steps: "Sampling steps for posse local video generation when --steps is not given. More steps take longer.",
   model_catalog_enforcement: "What to do when a model you picked is no longer in the model catalog. Warn and fallback switches to that tier's current default; warn only keeps your model; off skips the check.",
@@ -540,6 +557,7 @@ export const ADMIN_SETTING_DESCRIPTION_OVERRIDES = Object.freeze({
 // `runtimeFallback` values take precedence, so numeric fallbacks live in one
 // place; this table covers the non-numeric meanings.
 export const ADMIN_UNSET_VALUE_LABELS = Object.freeze({
+  ...Object.fromEntries(LOCAL_DEFAULT_MODEL_SETTINGS.map(setting => [setting.key, "Automatic"])),
   scheduler_max_active_worktrees: "no limit",
   max_job_runtime_sec: "2× stalled job timeout",
   file_request_low_risk_extensions: "none",
@@ -629,6 +647,7 @@ export const SETTINGS_PANES = Object.freeze([
   Object.freeze({ id: "approvals", label: "Flow control" }),
   Object.freeze({ id: "agents", label: "Agents" }),
   Object.freeze({ id: "providers", label: "Providers" }),
+  Object.freeze({ id: "local", label: "Local models" }),
   Object.freeze({ id: "atlas", label: "ATLAS" }),
   Object.freeze({ id: "repo", label: "Repository" }),
   Object.freeze({ id: "debug", label: "Advanced", advanced: true }),

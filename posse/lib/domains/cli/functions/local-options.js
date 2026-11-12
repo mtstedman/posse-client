@@ -5,7 +5,7 @@ export const LOCAL_USAGE = `Usage:
   posse local list [--json] [--model-root DIR]
   posse local gpus [--json] [--model qwen-image]
   posse local install <slug> [--source DIR] [--model-root DIR]
-  posse local --model <slug> [--prompt TEXT | --input FILE | stdin]
+  posse local (--model <slug> | --kind text|code|image|video) [--prompt TEXT | --input FILE | stdin]
               [--parameters JSON]
               [--format text|json|png|avi] [--output FILE|-] [--quiet]
               [--model-root DIR] [--runtime-root DIR]
@@ -18,12 +18,15 @@ Video options: --steps 20 --width 384 --height 384 --frames 56 --seed 42 --threa
                --first-frame IMAGE.png | --continue-from PREVIOUS.avi
                continueFrom generates from the last frame and stitches the clips (FFmpeg required).
 Text options:  --max-tokens 512 --system TEXT
+               Writing models also take --temperature --top-p --top-k --seed.
 
+--kind uses the default model for that kind of work, set in Admin: Local models
+(automatic: the best one installed).
 Model parameters: posse local --model <slug> --help
 Pass model-specific settings as strict JSON: --parameters '{"width":384,"height":384}'
 Existing flags also work; supplying a setting in both places is an error.
 
-Slugs: qwen-code (text), qwen-image (image), minimax-h3 (video + audio); full model IDs also work.
+Slugs: qwen-code, gemma-12b, mistral-small, gemma-31b (text), qwen-image (image), minimax-h3 (video + audio); full model IDs also work.
 --format json writes the complete native response (including media base64).
 --format png writes PNG bytes; avi writes MJPEG video with PCM stereo audio. Use --output FILE or pipe stdout.
 Output files must not already exist. Progress goes to stderr; --quiet suppresses it.
@@ -38,7 +41,7 @@ GPU selection uses one device with automatic GPU/RAM offloading and VRAM headroo
 --gpu-memory-gb caps VRAM use (GiB) and implies --gpu; it never raises the automatic budget.
 Ctrl+C cancels generation and retires the native worker.`;
 
-const stringFlags = ["model", "prompt", "input", "format", "output", "model-root", "runtime-root", "source", "parameters",
+const stringFlags = ["model", "kind", "prompt", "input", "format", "output", "model-root", "runtime-root", "source", "parameters",
   ...Object.keys(LOCAL_PARAMETER_FLAGS)];
 const booleanFlags = ["help", "json", "quiet", "non-interactive"];
 export function parseLocalOptions(argv) {

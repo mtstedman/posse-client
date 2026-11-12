@@ -351,6 +351,17 @@ export class AdminSettingsController {
         rows.push(...dbRows(section.keys.filter((key) => settingsPaneForKey(key) === "agents")));
         if (rows.length > 0) sections.push({ id: `agent_${section.role}`, title: section.label, hint: section.hint || null, rows });
       }
+    } else if (paneId === "local") {
+      // What is installed and what can be added, then the saved selections
+      // and per-model defaults from the catalog groups.
+      const marks = { installed: `${C.green}✓${C.reset}`, available: `${C.dim}+${C.reset}`, unsupported: `${C.dim}–${C.reset}` };
+      sections.push({
+        id: "local_models", title: "Models", hint: "✓ installed  + available to add",
+        rows: [{ setting_key: ADMIN_LOCAL_MODEL_INSTALL_ROW_KEY, setting_value: "Press Enter", updated_at: null, source: "action" }],
+        lines: (this._localModelInstall?.inventory() || []).map(({ slug, kind, status, detail }) =>
+          `  ${marks[status]} ${slug.padEnd(14)} ${kind.padEnd(6)} ${C.dim}${detail}${C.reset}`),
+      });
+      pushGroups();
     } else if (paneId === "providers") {
       const textModels = snapshot.modelSettings.filter((entry) => (entry.kind || "text") === "text");
       const imageModels = snapshot.modelSettings.filter((entry) => entry.kind === "image");
@@ -358,9 +369,6 @@ export class AdminSettingsController {
         const rows = [
           ...textModels.filter((entry) => entry.provider === section.provider),
           ...dbRows(section.settingKeys),
-          ...(section.provider === "posse-local"
-            ? [{ setting_key: ADMIN_LOCAL_MODEL_INSTALL_ROW_KEY, setting_value: "Press Enter", updated_at: null, source: "action" }]
-            : []),
         ];
         if (rows.length > 0) sections.push({ id: `provider_${section.provider}`, title: section.label, hint: null, rows });
       }

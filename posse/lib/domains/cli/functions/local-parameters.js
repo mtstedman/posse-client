@@ -41,7 +41,8 @@ function defaultValue(key, parameter, readSetting) {
   let saved;
   try { saved = readSetting(parameter.defaultSetting); }
   catch (error) { throw new Error(`Could not read the saved default for ${key}: ${error?.message || error}. Pass --${parameter.flag} for this run.`); }
-  return saved == null || String(saved).trim() === "" ? parameter.default : Number(saved);
+  if (saved == null || String(saved).trim() === "") return parameter.default;
+  return parameter.type === "string" ? String(saved).trim() : Number(saved);
 }
 
 // Resolve JSON and legacy flags together, before reading stdin or loading ML.

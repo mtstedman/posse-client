@@ -3,10 +3,14 @@ import { PROVIDER_CAPABILITIES } from "../../../../catalog/provider-capabilities
 import { readModelSetting } from "../shared/setting-read.js";
 // @ts-check
 
-import fs from "node:fs";
 import path from "node:path";
 
-import { GEMMA_LOCAL_MODEL_ID, LOCAL_MODEL_IDS, LOCAL_MODEL_PROFILES, QWEN_LOCAL_MODEL_ID } from "../../../../catalog/local-model.js";
+import {
+  GEMMA_LOCAL_MODEL_ID, LOCAL_BRIDGE_MODELS, LOCAL_MODEL_IDS, LOCAL_MODEL_PROFILES, QWEN_LOCAL_MODEL_ID,
+  resolveLocalModelId,
+} from "../../../../catalog/local-model.js";
+import { LOCAL_AGENT_LIMIT_SETTINGS } from "../../../../catalog/local-model-parameters.js";
+import { localBridgeModelInstalled, resolveDefaultLocalModel } from "../../../../shared/native/functions/local-model-defaults.js";
 import { SETTING_KEYS } from "../../../../catalog/settings.js";
 import { getSetting } from "../../../queue/functions/index.js";
 import { dispatchLocalProvider } from "../../../../shared/native/functions/local-provider-dispatch.js";
@@ -61,9 +65,9 @@ function bindMissingContextExampleToExactTarget(promptText, targetPath) {
 export const capabilities = PROVIDER_CAPABILITIES["posse-local"];
 
 export const MODEL_TIERS = Object.freeze({
-  cheap: Object.freeze({ model: getProviderTierDefaults("posse-local").cheap.model, thinking: false, label: "LOCAL QWEN", color: "cyan" }),
-  standard: Object.freeze({ model: getProviderTierDefaults("posse-local").standard.model, thinking: false, label: "LOCAL QWEN", color: "cyan" }),
-  strong: Object.freeze({ model: getProviderTierDefaults("posse-local").strong.model, thinking: false, label: "LOCAL QWEN", color: "cyan" }),
+  cheap: Object.freeze({ model: getProviderTierDefaults("posse-local").cheap.model, thinking: false, label: "LOCAL", color: "cyan" }),
+  standard: Object.freeze({ model: getProviderTierDefaults("posse-local").standard.model, thinking: false, label: "LOCAL", color: "cyan" }),
+  strong: Object.freeze({ model: getProviderTierDefaults("posse-local").strong.model, thinking: false, label: "LOCAL", color: "cyan" }),
 });
 
 export { defaultLocalGenerationModelRoot, defaultLocalGenerationRuntimeRoot };
@@ -71,8 +75,34 @@ export { defaultLocalGenerationModelRoot, defaultLocalGenerationRuntimeRoot };
 export function getModelTierConfig(tier = "standard") {
   const key = tier in MODEL_TIERS ? tier : "standard";
   const base = MODEL_TIERS[key];
-  const configured = readModelSetting(`posse-local_model_${key}`);
-  return { ...base, model: LOCAL_MODEL_IDS.includes(configured) ? configured : base.model };
+  // Local models have no strength tiers: every tier runs the one selected
+  // code model.
+  return { ...base, model: resolveLocalModelId(readModelSetting("posse_local_default_code_model")) || base.model };
+}
+
+/** True when the profile's files are present and it can run on this platform. */
+export function isLocalModelInstalled(modelRoot, modelId) {
+  const model = LOCAL_BRIDGE_MODELS.find(candidate => candidate.modelId === modelId && candidate.kind === "text");
+  return !!model && localBridgeModelInstalled(modelRoot, model);
+}
+
+/**
+ * The model's limits with the operator's saved limits applied. A saved value
+ * can only lower a limit; the built-in one is what the native runtime allows.
+ */
+export function localModelLimits(modelId) {
+  const profile = LOCAL_MODEL_PROFILES[modelId];
+  const saved = (limit, ceiling) => {
+    const setting = LOCAL_AGENT_LIMIT_SETTINGS.find(entry => entry.modelId === modelId && entry.limit === limit);
+    const value = Number(readModelSetting(setting.key));
+    return Number.isInteger(value) && value >= setting.numeric.min ? Math.min(value, ceiling) : ceiling;
+  };
+  return {
+    ...profile,
+    maxOutputTokens: saved("agentMaxOutputTokens", profile.maxOutputTokens),
+    maxToolTurns: saved("agentMaxToolTurns", profile.maxToolTurns),
+    maxToolResultChars: saved("agentMaxToolResultChars", profile.maxToolResultChars),
+  };
 }
 
 export function hasCredentials() {
@@ -100,21 +130,17 @@ export function isReady({
   if (!isLocalGenerationEnabled({ getSettingFn })) {
     return { ready: false, reason: "local text generation is disabled by the model catalog" };
   }
-  if (process.arch !== "x64" || !["linux", "win32"].includes(process.platform)) {
-    return { ready: false, reason: "local Qwen generation supports Linux x64 and Windows x64" };
+  const platform = `${process.platform}-${process.arch}`;
+  if (!LOCAL_MODEL_IDS.some(modelId => LOCAL_MODEL_PROFILES[modelId].platforms.includes(platform))) {
+    return { ready: false, reason: `local text generation has no model for ${platform}` };
   }
   if (!manager.shouldUse("ml")) {
     return { ready: false, reason: "native ML runtime is disabled" };
   }
-  const resolvedModelRoot = path.resolve(modelRoot);
-  const hasInstalledModel = LOCAL_MODEL_IDS.some((modelId) => {
-    const installedDirectory = path.join(resolvedModelRoot, LOCAL_MODEL_PROFILES[modelId].profileId);
-    return fs.existsSync(path.join(installedDirectory, ".posse-model-package.json"));
-  });
-  if (!hasInstalledModel) {
+  if (!LOCAL_MODEL_IDS.some(modelId => isLocalModelInstalled(modelRoot, modelId))) {
     return {
       ready: false,
-      reason: "local Qwen model is not installed; run: posse local install qwen-code",
+      reason: "a local text model is not installed; run: posse local list, then posse local install <slug>",
     };
   }
   return { ready: true, reason: null };
@@ -164,7 +190,7 @@ export async function callProvider(promptText, opts = {}) {
   } = effectiveOpts;
 
   if (requestedProjectDbWrite || requestedImageGeneration || projectDbWrite || needsImageGeneration) {
-    const error = new Error("The local Qwen provider cannot write project databases or generate images.");
+    const error = new Error("The local provider cannot write project databases or generate images.");
     /** @type {any} */ (error).code = "POSSE_LOCAL_TOOLS_UNSUPPORTED";
     throw error;
   }
@@ -192,7 +218,7 @@ export async function callProvider(promptText, opts = {}) {
     throw error;
   }
   if (priorSessionHandle) {
-    const error = new Error("The local Qwen provider does not support session resume.");
+    const error = new Error("The local provider does not support session resume.");
     /** @type {any} */ (error).code = "POSSE_LOCAL_SESSION_RESUME_UNSUPPORTED";
     throw error;
   }
@@ -207,9 +233,8 @@ export async function callProvider(promptText, opts = {}) {
     /** @type {any} */ (error).code = "POSSE_LOCAL_MODEL_UNSUPPORTED";
     throw error;
   }
-  const profile = LOCAL_MODEL_PROFILES[selected];
-  const installedDirectory = path.join(path.resolve(modelRoot), profile.profileId);
-  if (!fs.existsSync(path.join(installedDirectory, ".posse-model-package.json"))) {
+  const profile = localModelLimits(selected);
+  if (!isLocalModelInstalled(modelRoot, selected)) {
     const error = new Error(`Local model ${selected} is not installed. Run: posse local install ${profile.shorthand}`);
     /** @type {any} */ (error).code = "POSSE_LOCAL_MODEL_NOT_INSTALLED";
     throw error;
@@ -351,20 +376,27 @@ export async function callProvider(promptText, opts = {}) {
 // decision, using the same local codec and usage accounting as provider turns.
 export function supportsAgentTranscript() { return true; }
 export async function callAgentTurn(promptText, options = {}) {
-  const modelName = options.modelName || getModelTierConfig().model;
-  const profile = LOCAL_MODEL_PROFILES[modelName];
-  if (!profile) throw new Error(`Unsupported posse-local model: ${modelName}`);
   const modelRoot = options.modelRoot || defaultLocalGenerationModelRoot();
+  // An agent that names no model gets the default writing model: the saved
+  // choice, else the most capable general model installed on this machine.
+  const modelName = options.modelName
+    || resolveDefaultLocalModel("text", { modelRoot, readSetting: readModelSetting })?.modelId
+    || getModelTierConfig().model;
+  if (!LOCAL_MODEL_PROFILES[modelName]) throw new Error(`Unsupported posse-local model: ${modelName}`);
+  const profile = localModelLimits(modelName);
   const manager = options.manager || nativeBinaries;
   const readiness = isReady({ manager, modelRoot });
   if (!readiness.ready) throw new Error(readiness.reason);
-  if (!fs.existsSync(path.join(modelRoot, profile.profileId, ".posse-model-package.json"))) throw new Error(`Local model ${modelName} is not installed`);
+  if (!isLocalModelInstalled(modelRoot, modelName)) throw new Error(`Local model ${modelName} is not installed. Run: posse local install ${profile.shorthand}`);
   const tools = (options.tools || []).map(tool => ({
     name: tool.name, description: tool.description || "",
     inputSchema: tool.parameters || tool.input_schema || tool.inputSchema || { type: "object", properties: {} },
   }));
   let instructions = buildLocalPlannerToolInstructions(tools.map(tool => ({ ...tool, parameters: tool.inputSchema })), null, {
     allowFileWrites: tools.some(tool => LOCAL_FILE_WRITE_TOOLS.has(tool.name)),
+    // A registered agent's tools are whatever its operator issued, including
+    // write tools, so the planner's read-only title would mislead the model.
+    title: "LOCAL AGENT TOOL PROTOCOL",
   });
   if (options.allowToolBatching === true) {
     instructions = instructions

@@ -67,6 +67,16 @@ export const SCRIPT_TOOL_ENTRY_EFFECTS = Object.freeze({ read: "read_only", writ
 // accepted so every tool stays inside a known interpreter boundary.
 export const SCRIPT_TOOL_INTERPRETERS = Object.freeze({ bash: "bash", sh: "sh", python: "python3", node: "node" });
 export const SCRIPT_TOOL_TEMPLATES = Object.freeze(["bash", "python", "node", "http"]);
+// Media tools are the one place a custom format is produced. They have no
+// script: the owner runs the named model itself and writes one file into the
+// tool's own output folder. Agents converse and call tools in text only.
+export const SCRIPT_TOOL_MEDIA_KINDS = Object.freeze(["image", "video"]);
+// Everything `posse tools new --template` accepts: starter scripts, then media.
+export const SCRIPT_TOOL_NEW_TEMPLATES = Object.freeze([...SCRIPT_TOOL_TEMPLATES, ...SCRIPT_TOOL_MEDIA_KINDS]);
+export const SCRIPT_TOOL_MEDIA_FORMATS = Object.freeze({ image: "png", video: "avi" });
+export const SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER = "posse-local";
+// A generation can take minutes; media tools default to the longest timeout.
+export const SCRIPT_TOOL_MEDIA_TIMEOUT_SECONDS = 600;
 export const SCRIPT_TOOL_LIMITS = Object.freeze({
   DEFAULT_TIMEOUT_SECONDS: 30, MAX_TIMEOUT_SECONDS: 600,
   DEFAULT_OUTPUT_BYTES: 64 * 1024, MIN_OUTPUT_BYTES: 1024, MAX_OUTPUT_BYTES: 1024 * 1024,

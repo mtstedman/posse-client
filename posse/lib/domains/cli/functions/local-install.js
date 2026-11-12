@@ -4,6 +4,7 @@
 import path from "node:path";
 import {
   ML_CAPABILITIES_METHOD,
+  ML_INSTALL_GENERATION_MODEL_METHOD,
   ML_INSTALL_IMAGE_MODEL_METHOD,
   ML_INSTALL_VIDEO_MODEL_METHOD,
   ML_MODEL_PACKAGE_INSTALL_METHOD,
@@ -27,7 +28,7 @@ export async function openLocalRuntime({ manager, invoke, modelRoot, runtimeRoot
 // any model bytes are requested. Resolves { installed: false } when declined.
 export async function installLocalModel(model, runtime, { confirm, source, onStage = () => {}, artifacts = {} }) {
   const capability = requireLocalModelCapability(model, runtime.capabilities, { version: runtime.version });
-  return model.kind === "text"
+  return model.installation === "signed-package"
     ? installSignedPackage(model, runtime, { confirm, onStage, artifacts })
     : installPinnedFiles(model, capability, runtime, { confirm, source, onStage });
 }
@@ -45,7 +46,9 @@ async function installPinnedFiles(model, capability, runtime, { confirm, source,
   }
   runtime.options.signal?.throwIfAborted();
   onStage(source ? "Installing model files" : "Downloading model files");
-  await runtime.invoke(model.kind === "video" ? ML_INSTALL_VIDEO_MODEL_METHOD : ML_INSTALL_IMAGE_MODEL_METHOD, request, runtime.options);
+  const method = model.kind === "video" ? ML_INSTALL_VIDEO_MODEL_METHOD
+    : model.kind === "image" ? ML_INSTALL_IMAGE_MODEL_METHOD : ML_INSTALL_GENERATION_MODEL_METHOD;
+  await runtime.invoke(method, request, runtime.options);
   return { installed: true };
 }
 

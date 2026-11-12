@@ -1,14 +1,56 @@
+import os from "node:os";
+import path from "node:path";
 import {
-  SCRIPT_TOOL_EFFECTS, SCRIPT_TOOL_INTERPRETERS, SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_RESERVED_ENV,
-  SCRIPT_TOOL_RESERVED_ENV_PREFIXES, SCRIPT_TOOL_SCHEMA, SCRIPT_TOOL_TEMPLATES,
+  SCRIPT_TOOL_EFFECTS, SCRIPT_TOOL_INTERPRETERS, SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_MEDIA_FORMATS, SCRIPT_TOOL_MEDIA_KINDS,
+  SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER, SCRIPT_TOOL_MEDIA_TIMEOUT_SECONDS, SCRIPT_TOOL_NEW_TEMPLATES, SCRIPT_TOOL_RESERVED_ENV,
+  SCRIPT_TOOL_RESERVED_ENV_PREFIXES, SCRIPT_TOOL_SCHEMA,
 } from "../../../catalog/custom-tools.js";
+import { LOCAL_BRIDGE_MODELS } from "../../../catalog/local-model.js";
+import { IMAGE_MODEL_CHOICES_INTERNAL } from "../../../catalog/provider-model-defaults.js";
 import { assertValidSchema, demand, object } from "./policy.js";
 import { redactLiteralValues } from "../../../shared/platform/functions/subprocess-output.js";
 
 export const EMPTY_SCRIPT_PARAMS = Object.freeze({ type: "object", additionalProperties: false, properties: {} });
 const NAME_RE = /^[a-z][a-z0-9-]{0,39}(\.[a-z][a-z0-9_-]{0,39})?$/;
 const ENV_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
-const MANIFEST_KEYS = ["schema", "name", "description", "entry", "interpreter", "params", "inputs", "output_schema", "env", "effect", "timeout_seconds", "max_output_bytes"];
+const MANIFEST_KEYS = ["schema", "name", "description", "entry", "interpreter", "params", "inputs", "output_schema", "env", "effect", "timeout_seconds", "max_output_bytes", "generate"];
+const MEDIA_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,127}$/;
+
+// Providers that can produce each media kind: the local models of that kind,
+// plus the API providers Posse already holds image credentials for.
+export function mediaProviders(kind) {
+  return [SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER, ...(kind === "image" ? Object.keys(IMAGE_MODEL_CHOICES_INTERNAL) : [])];
+}
+
+/** The local model of this kind that a model ID or CLI slug names. */
+export function localMediaModel(kind, model) {
+  return LOCAL_BRIDGE_MODELS.find(item => item.kind === kind && (item.slug === model || item.modelId === model)) || null;
+}
+
+// The folder a media tool writes to unless its author picks another.
+export function defaultMediaFolder(name) {
+  return path.join(os.homedir(), "posse-output", name);
+}
+
+// A media tool's generation settings. The folder is required and absolute:
+// every file the tool produces lands in that one place.
+export function normalizeMediaGenerate(raw, name) {
+  const fail = message => demand(false, `Media tool ${JSON.stringify(name)}: ${message}`, "script_invalid");
+  object(raw, ["kind", "provider", "model", "folder"], ["kind", "provider", "model", "folder"]);
+  if (!SCRIPT_TOOL_MEDIA_KINDS.includes(raw.kind)) fail(`kind must be one of ${SCRIPT_TOOL_MEDIA_KINDS.join(", ")}`);
+  const provider = String(raw.provider || "").trim().toLowerCase();
+  if (!mediaProviders(raw.kind).includes(provider)) fail(`provider must be one of ${mediaProviders(raw.kind).join(", ")} for ${raw.kind} output`);
+  const model = String(raw.model || "").trim();
+  if (!MEDIA_MODEL_RE.test(model)) fail("model must be one model name");
+  if (provider === SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER && !localMediaModel(raw.kind, model)) {
+    fail(`${model} is not a local ${raw.kind} model; choose ${LOCAL_BRIDGE_MODELS.filter(item => item.kind === raw.kind).map(item => item.slug).join(", ")}`);
+  }
+  const folder = typeof raw.folder === "string" ? raw.folder.trim() : "";
+  if (!folder || folder.includes("\0") || !path.isAbsolute(folder) || path.resolve(folder) === path.parse(path.resolve(folder)).root) {
+    fail("folder is required and must be an absolute folder other than the filesystem root; generated files are written there");
+  }
+  return { kind: raw.kind, provider, model, folder: path.resolve(folder) };
+}
 
 // `lookup` or a qualified `orders.lookup`; posse.* belongs to built-in tools.
 export function validScriptToolName(name) {
@@ -23,18 +65,31 @@ export function validScriptEnvName(name) {
 // Validates a manifest's shape and fills defaults. Unknown fields are refused
 // so a typo never silently changes what runs.
 export function normalizeScriptManifest(raw) {
-  object(raw, MANIFEST_KEYS, ["schema", "name", "description", "entry", "effect"]);
+  const media = raw?.generate !== undefined;
+  object(raw, MANIFEST_KEYS, ["schema", "name", "description", ...(media ? [] : ["entry"]), "effect"]);
   const fail = message => demand(false, `Script tool ${JSON.stringify(raw.name)}: ${message}`, "script_invalid");
   if (raw.schema !== SCRIPT_TOOL_SCHEMA) fail(`schema must be ${SCRIPT_TOOL_SCHEMA}`);
   if (!validScriptToolName(raw.name)) fail("name must be lower-case like orders.lookup, outside the posse namespace");
   const description = String(raw.description || "").trim();
   if (!description || description.length > SCRIPT_TOOL_LIMITS.MAX_DESCRIPTION) fail(`description is required (at most ${SCRIPT_TOOL_LIMITS.MAX_DESCRIPTION} characters); agents read it to decide when to call the tool`);
   const entry = String(raw.entry || "").replaceAll("\\", "/");
-  if (!entry || entry.startsWith("/") || entry.includes(":") || entry.split("/").some(part => !part || part === "." || part === "..")) fail("entry must be a file inside the tool folder");
   const interpreter = raw.interpreter || "bash";
-  if (!Object.hasOwn(SCRIPT_TOOL_INTERPRETERS, interpreter)) fail(`interpreter must be one of ${Object.keys(SCRIPT_TOOL_INTERPRETERS).join(", ")}`);
+  let generate;
+  if (media) {
+    // The owner performs the generation; there is no script to run or edit.
+    if (raw.entry !== undefined || raw.interpreter !== undefined) fail("a media tool has no entry script or interpreter");
+    generate = normalizeMediaGenerate(raw.generate, raw.name);
+    if (raw.effect !== "write") fail("a media tool writes files, so its effect must be write");
+    if (raw.env?.length) fail("a media tool takes no env or secrets; Posse uses its own provider credentials");
+    if (raw.inputs !== undefined) fail("a media tool takes no operator-only inputs");
+    const prompt = raw.params?.properties?.prompt;
+    if (prompt?.type !== "string" || !Array.isArray(raw.params?.required) || !raw.params.required.includes("prompt")) fail("params must require a string prompt");
+  } else {
+    if (!entry || entry.startsWith("/") || entry.includes(":") || entry.split("/").some(part => !part || part === "." || part === "..")) fail("entry must be a file inside the tool folder");
+    if (!Object.hasOwn(SCRIPT_TOOL_INTERPRETERS, interpreter)) fail(`interpreter must be one of ${Object.keys(SCRIPT_TOOL_INTERPRETERS).join(", ")}`);
+  }
   if (!SCRIPT_TOOL_EFFECTS.includes(raw.effect)) fail("effect must be read or write");
-  const timeout = raw.timeout_seconds ?? SCRIPT_TOOL_LIMITS.DEFAULT_TIMEOUT_SECONDS;
+  const timeout = raw.timeout_seconds ?? (media ? SCRIPT_TOOL_MEDIA_TIMEOUT_SECONDS : SCRIPT_TOOL_LIMITS.DEFAULT_TIMEOUT_SECONDS);
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > SCRIPT_TOOL_LIMITS.MAX_TIMEOUT_SECONDS) fail(`timeout_seconds must be 1-${SCRIPT_TOOL_LIMITS.MAX_TIMEOUT_SECONDS}`);
   const output = raw.max_output_bytes ?? SCRIPT_TOOL_LIMITS.DEFAULT_OUTPUT_BYTES;
   if (!Number.isInteger(output) || output < SCRIPT_TOOL_LIMITS.MIN_OUTPUT_BYTES || output > SCRIPT_TOOL_LIMITS.MAX_OUTPUT_BYTES) fail(`max_output_bytes must be ${SCRIPT_TOOL_LIMITS.MIN_OUTPUT_BYTES}-${SCRIPT_TOOL_LIMITS.MAX_OUTPUT_BYTES}`);
@@ -72,7 +127,7 @@ export function normalizeScriptManifest(raw) {
       fail("output_schema must be a JSON object schema; the script must print one JSON object");
     assertValidSchema(outputSchema, `Script tool ${raw.name} output_schema`);
   }
-  return { schema: raw.schema, name: raw.name, description, entry, interpreter, params,
+  return { schema: raw.schema, name: raw.name, description, ...(media ? { generate } : { entry, interpreter }), params,
     ...(inputs === undefined ? {} : { inputs }), ...(outputSchema === undefined ? {} : { output_schema: outputSchema }),
     env: normalizedEnv, effect: raw.effect, timeout_seconds: timeout, max_output_bytes: output };
 }
@@ -125,8 +180,10 @@ export function parseParamSpec(spec) {
 
 // Renders a manifest and a commented starter script that already reads the
 // declared params and env, so the operator fills in only the work itself.
-export function renderScriptTemplate({ name, description, template = "bash", effect = "read", params = [], inputSchema = null, userInputSchema = null, outputSchema = null, env = [] }) {
-  demand(SCRIPT_TOOL_TEMPLATES.includes(template), `template must be one of ${SCRIPT_TOOL_TEMPLATES.join(", ")}`);
+export function renderScriptTemplate({ name, description, template = "bash", effect = "read", params = [], inputSchema = null, userInputSchema = null, outputSchema = null, env = [], generate = null }) {
+  demand(SCRIPT_TOOL_NEW_TEMPLATES.includes(template), `template must be one of ${SCRIPT_TOOL_NEW_TEMPLATES.join(", ")}`);
+  if (SCRIPT_TOOL_MEDIA_KINDS.includes(template)) return renderMediaTemplate({ name, description, kind: template, inputSchema, generate });
+  demand(generate == null, "Only image and video tools take generation settings", "script_invalid");
   const properties = {}, required = [];
   for (const param of params) {
     properties[param.name] = { type: param.type, description: `TODO: describe ${param.name}` };
@@ -203,4 +260,39 @@ function nodeScript(spec, env) {
   body.push("", "// TODO: do the work and print the result, e.g. console.log(JSON.stringify({ ... })).",
     `console.error(${JSON.stringify(`TODO: implement ${spec.name}`)});`, "process.exitCode = 1;");
   return `#!/usr/bin/env node\n${header("//", spec, env)}\n${body.join("\n")}\n`;
+}
+
+// The agent-facing arguments of a media tool unless its author supplies a
+// schema: the prompt, and an optional base name for the saved file.
+export function defaultMediaParams(kind) {
+  return {
+    type: "object", additionalProperties: false, required: ["prompt"],
+    properties: {
+      prompt: { type: "string", minLength: 1, maxLength: 8000, description: `What the ${kind} should show.` },
+      filename: { type: "string", minLength: 1, maxLength: 60, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]*$", description: "Optional base name for the saved file, without an extension." },
+    },
+  };
+}
+
+const MEDIA_OUTPUT_SCHEMA = Object.freeze({
+  type: "object", required: ["path", "format", "bytes"],
+  properties: { path: { type: "string" }, format: { type: "string" }, bytes: { type: "integer" }, kind: { type: "string" }, provider: { type: "string" }, model: { type: "string" } },
+});
+
+// Renders an image or video tool: a manifest and nothing else. Unset
+// generation settings fall back to the local model of that kind and to the
+// tool's own folder under ~/posse-output, both of which the author can change.
+export function renderMediaTemplate({ name, description, kind, inputSchema = null, generate = null }) {
+  const local = LOCAL_BRIDGE_MODELS.find(item => item.kind === kind);
+  const settings = {
+    kind, provider: String(generate?.provider || SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER).trim().toLowerCase(),
+    folder: generate?.folder || defaultMediaFolder(name),
+  };
+  settings.model = generate?.model || (settings.provider === SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER
+    ? local?.slug : IMAGE_MODEL_CHOICES_INTERNAL[settings.provider]?.[0]) || "";
+  const manifest = normalizeScriptManifest({
+    schema: SCRIPT_TOOL_SCHEMA, name, description, generate: settings, effect: "write",
+    params: inputSchema == null ? defaultMediaParams(kind) : structuredClone(inputSchema), output_schema: structuredClone(MEDIA_OUTPUT_SCHEMA),
+  });
+  return { manifest, entry: null, script: null, format: SCRIPT_TOOL_MEDIA_FORMATS[kind] };
 }

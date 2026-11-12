@@ -511,6 +511,23 @@ a starter that fails until you edit it.
   `write` tool only under a grant made with `--unattended`. A registered
   agent follows its own definition's `write_tools` instead.
 
+- An image or video tool has no script. `posse tools new <name> --template
+  image|video [--provider NAME] [--model NAME] [--folder DIR]` writes a
+  `tool.json` whose `generate` block names the kind, provider, model, and
+  the folder every result is saved in. The folder is required and absolute;
+  it defaults to `~/posse-output/<name>` and can be changed. Images run on
+  the local image model or an API image model Posse is configured for; video
+  runs on the local video model. The owner creates the folder, runs the
+  model (a local model through `posse local` in a child process, an API
+  model with Posse's own provider credentials), writes one uniquely named
+  file there, and returns its path. The tool's `prompt` argument is
+  required; other declared arguments pass to a local model as its settings.
+  Such a tool always has effect `write`, takes no env, secrets, or caller
+  inputs, and defaults to the 600-second timeout. Changing its provider,
+  model, or folder changes its digest, so it needs a new passing test.
+  These tools are the only place a custom format is produced: agents work
+  in text and call a tool for media.
+
 Bossy's Automation Studio Tools tab drives the same owner operations
 (`script.*`); it stores and runs nothing itself.
 

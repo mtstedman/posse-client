@@ -1,6 +1,6 @@
 import { AGENT_DISPATCH_PROTOCOL, AGENT_DISPATCH_PROTOCOL_ERROR } from "../../../catalog/agent.js";
 import { buildAgentToolInstructions, TOOL_BATCH_MAX_CALLS } from "../classes/AgentRuntime.js";
-import { agentProviderUsesNativeTools, callAgentProvider, resolveAgentProvider } from "./provider-route.js";
+import { agentProviderSuppliesToolProtocol, agentProviderUsesNativeTools, callAgentProvider, resolveAgentProvider } from "./provider-route.js";
 import { dispatchTranscript, renderConversation, toolCallId } from "./transcript.js";
 import { parseAgentToolTurn } from "./tool-turn.js";
 import { estimateCallCost } from "../../billing/functions/pricing.js";
@@ -33,12 +33,13 @@ export async function dispatchAgentTurn(request, dependencies = {}) {
   const batching = request.allow_tool_batching === true;
   const route = (dependencies.resolve || resolveAgentProvider)(request.model || "auto", request.provider || "");
   const native = (dependencies.native || agentProviderUsesNativeTools)(route.provider);
-  const toolInstructions = native
+  const toolInstructions = agentProviderSuppliesToolProtocol(route.provider) ? ""
+    : native
     ? `Use only the provider-issued tools.${batching ? ` Issue up to ${TOOL_BATCH_MAX_CALLS} independent, ready tool calls in one response when useful; wait for results before making dependent calls.` : ""} Never invent tool results or print tool-call JSON as prose. After real results arrive, answer in plain language.`
     : buildAgentToolInstructions(request.tools, { autonomy: { write_tools: "confirm" }, limits: { calls: 1 } }, { callerOwned: true, callerBatching: batching });
   const generated = await (dependencies.call || callAgentProvider)(route.provider, renderConversation(request.messages), {
     modelName: route.modelName,
-    systemPrompt: `${request.system_prompt}\n\n${toolInstructions}`,
+    systemPrompt: [request.system_prompt, toolInstructions].filter(Boolean).join("\n\n"),
     tools: request.tools, allowToolBatching: batching, promptCache: true,
     cwd: dependencies.cwd || process.cwd(), signal: dependencies.signal,
     maxOutputTokens: 8192,

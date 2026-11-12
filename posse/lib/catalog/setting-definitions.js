@@ -6,6 +6,7 @@ import { RESEARCH_CLAIM_REVIEW } from "./research-claim-review.js";
 import { DEFAULT_STARTUP_UPDATE_MODE, STARTUP_UPDATE_MODE_VALUES } from "./setting-policy.js";
 import { FINAL_REVIEW_DEFAULT_MODE, FINAL_REVIEW_MODES } from "./final-review.js";
 import { PLANNER_DISPATCH_SETTINGS } from "./planner-dispatch.js";
+import { PROVIDER_CAPABILITIES } from "./provider-capabilities.js";
 import { LOCAL_MODEL_SETTINGS } from "./local-model-parameters.js";
 import { DEFAULT_VERIFICATION_DEPENDENCY_NETWORK_POLICY, VERIFICATION_DEPENDENCY_NETWORK_POLICIES, DEFAULT_TEST_STRICTNESS, TEST_STRICTNESS_VALUES } from "./verification.js";
 import { PROVIDER_OPTIONS, PROVIDER_LABELS } from "./provider.js";
@@ -18,6 +19,8 @@ import { ATLAS_AUTO_FEEDBACK_VALUES, ATLAS_BOOT_REINDEX_POLICY_VALUES, ATLAS_EMB
 export function buildModelSelectionSettings() {
   const entries = [];
   for (const provider of PROVIDER_OPTIONS) {
+    // Local models have no strength tiers (see posse_local_default_*_model).
+    if (PROVIDER_CAPABILITIES[provider]?.localGeneration) continue;
     for (const tier of MODEL_TIER_NAMES) {
       const fallbackModel = getDefaultTierModel(provider, tier);
       entries.push({

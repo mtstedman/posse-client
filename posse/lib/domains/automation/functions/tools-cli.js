@@ -1,16 +1,20 @@
 import fs from "node:fs";
 import path from "node:path";
-import { SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_TEMPLATES } from "../../../catalog/custom-tools.js";
+import { SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_MEDIA_KINDS, SCRIPT_TOOL_TEMPLATES } from "../../../catalog/custom-tools.js";
 import { AutomationOwnerClient, ensureAutomationOwner } from "../classes/AutomationOwnerClient.js";
 
 export const SCRIPT_TOOL_TEST_PROTOCOL = "posse.script_tool_test.v1";
-const VALUE_FLAGS = new Set(["--template", "--description", "--effect", "--param", "--env", "--secret", "--input", "--input-file", "--inputs-file", "--repo", "--roles"]);
+const VALUE_FLAGS = new Set(["--template", "--description", "--effect", "--param", "--env", "--secret", "--input", "--input-file", "--inputs-file", "--repo", "--roles", "--provider", "--model", "--folder"]);
 const BOOLEAN_FLAGS = new Set(["--json", "--standalone", "--unattended", "--help"]);
 
 export const TOOLS_USAGE = `Usage:
   posse tools [list]                                   script tools, test state, secrets set
   posse tools new <name> [--template ${SCRIPT_TOOL_TEMPLATES.join("|")}] [--effect read|write]
         [--description TEXT] [--param name:type[:required]]... [--env NAME[=default]]... [--secret NAME]...
+  posse tools new <name> --template ${SCRIPT_TOOL_MEDIA_KINDS.join("|")} [--description TEXT]
+        [--provider NAME] [--model NAME] [--folder DIR]   a media tool: no script; Posse runs the model
+                                                       and saves each result in the folder
+                                                       (default ~/posse-output/<name>)
   posse tools show <name>                              params, env, secrets, test state, grants
   posse tools test <name> [--input JSON | --input-file PATH] [--inputs-file PATH] [--json]
                                                        run it; a pass publishes this exact version
@@ -78,11 +82,25 @@ export async function runToolsCli(argv = process.argv.slice(3), io = {}) {
     }
     case "new": {
       if (args.positional.length !== 1) throw Object.assign(new Error("usage: posse tools new <name> [options]"), { code: "invalid_request" });
-      const created = await request("script.create", { spec: {
-        name: args.positional[0], template: args.one("--template") || "bash", effect: args.one("--effect") || "read",
+      const template = args.one("--template") || "bash";
+      const media = SCRIPT_TOOL_MEDIA_KINDS.includes(template);
+      const settings = Object.fromEntries([["provider", "--provider"], ["model", "--model"], ["folder", "--folder"]]
+        .filter(([, flag]) => args.one(flag)).map(([key, flag]) => [key, key === "folder" ? path.resolve(args.one(flag)) : args.one(flag)]));
+      if (!media && Object.keys(settings).length) throw Object.assign(new Error("--provider, --model and --folder apply to --template image or video"), { code: "invalid_request" });
+      const created = await request("script.create", { spec: media ? {
+        name: args.positional[0], template, description: args.one("--description") || "", generate: settings,
+      } : {
+        name: args.positional[0], template, effect: args.one("--effect") || "read",
         description: args.one("--description") || "", params: args.many("--param"), env: args.many("--env"), secrets: args.many("--secret"),
       } });
       if (args.has("--json")) { print(JSON.stringify(created)); return 0; }
+      if (media) {
+        const generate = created.manifest.generate;
+        print(`created ${created.name} (${generate.kind} tool)\n  ${path.join(created.dir, "tool.json")}\n  model   ${generate.provider}:${generate.model}\n  folder  ${generate.folder}\n\nnext:`);
+        print(`  1. posse tools test ${created.name} --input '{"prompt":"..."}'   (runs the model and saves a file)`);
+        print(`  2. posse tools grant ${created.name} --repo <path> --roles dev   (so Posse agents can call it)`);
+        return 0;
+      }
       print(`created ${created.name} (${created.manifest.effect} tool)\n  ${path.join(created.dir, "tool.json")}\n  ${path.join(created.dir, created.entry)}\n\nnext:`);
       let step = 0;
       print(`  ${++step}. edit ${path.join(created.dir, created.entry)}${created.manifest.description.startsWith("TODO") ? " and the description in tool.json" : ""}`);
@@ -98,7 +116,10 @@ export async function runToolsCli(argv = process.argv.slice(3), io = {}) {
       const manifest = tool.manifest;
       print(`${manifest.name} — ${manifest.description}`);
       print(`  effect       ${manifest.effect}`);
-      print(`  runs         ${manifest.interpreter} ${manifest.entry} (timeout ${manifest.timeout_seconds}s, output ≤ ${manifest.max_output_bytes} bytes)`);
+      if (manifest.generate) {
+        print(`  generates    ${manifest.generate.kind} with ${manifest.generate.provider}:${manifest.generate.model} (timeout ${manifest.timeout_seconds}s)`);
+        print(`  saves to     ${manifest.generate.folder}`);
+      } else print(`  runs         ${manifest.interpreter} ${manifest.entry} (timeout ${manifest.timeout_seconds}s, output ≤ ${manifest.max_output_bytes} bytes)`);
       const required = new Set(manifest.params.required || []);
       const properties = Object.entries(manifest.params.properties || {});
       if (!properties.length) print("  params       none");

@@ -6,6 +6,7 @@ import { automationDataDir, repositoryID } from "../functions/paths.js";
 import { demand, digest, schemaCheck } from "../functions/policy.js";
 import { normalizeScriptManifest, parseParamSpec, renderScriptTemplate, validScriptEnvName, validScriptToolName } from "../functions/script-tools.js";
 import { runScriptTool } from "../functions/script-runner.js";
+import { runMediaTool } from "../functions/media-runner.js";
 
 const SECRET_KIND = "script_secrets";
 
@@ -16,8 +17,8 @@ const SECRET_KIND = "script_secrets";
 // write-only: they are injected into the declaring tool's process and never
 // returned by any operation.
 export class ScriptToolRegistry {
-  constructor(service, { dir = path.join(automationDataDir(), "tools"), now = () => Date.now() } = {}) {
-    this.service = service; this.store = service.store; this.dir = dir; this.now = now;
+  constructor(service, { dir = path.join(automationDataDir(), "tools"), now = () => Date.now(), mediaGenerators = undefined } = {}) {
+    this.service = service; this.store = service.store; this.dir = dir; this.now = now; this.mediaGenerators = mediaGenerators;
     service.scripts = this;
   }
   entryID(name) { return `script:${name}`; }
@@ -31,6 +32,8 @@ export class ScriptToolRegistry {
     const manifest = normalizeScriptManifest(parsed);
     demand(manifest.name === name, `Script tool ${name}: manifest name ${JSON.stringify(manifest.name)} must match its folder`, "script_invalid");
     const realDir = fs.realpathSync(dir);
+    // A media tool is its manifest: the owner generates, so no script exists.
+    if (manifest.generate) return { manifest, dir: realDir, entryPath: null, digest: digest({ manifest }) };
     let entryPath;
     try { entryPath = fs.realpathSync(path.join(dir, ...manifest.entry.split("/"))); } catch { demand(false, `Script tool ${name}: entry ${manifest.entry} does not exist`, "script_invalid"); }
     const relative = path.relative(realDir, entryPath);
@@ -69,7 +72,7 @@ export class ScriptToolRegistry {
   }
   create(spec) {
     const { name, template = "bash", description, effect = "read", params = [], input_schema = null,
-      inputs = null, output_schema = null, env = [], secrets = [] } = spec || {};
+      inputs = null, output_schema = null, env = [], secrets = [], generate = null } = spec || {};
     demand(validScriptToolName(name), "Tool name must be lower-case like orders.lookup", "script_invalid");
     const variables = [
       ...env.map(item => typeof item === "string" ? { name: item.split("=")[0], ...(item.includes("=") ? { default: item.slice(item.indexOf("=") + 1) } : {}) } : item),
@@ -79,20 +82,21 @@ export class ScriptToolRegistry {
       name, template, effect, env: variables,
       description: String(description || "").trim() || `TODO: describe what ${name} does and when to use it`,
       params: params.map(param => typeof param === "string" ? parseParamSpec(param) : param),
-      inputSchema: input_schema, userInputSchema: inputs, outputSchema: output_schema,
+      inputSchema: input_schema, userInputSchema: inputs, outputSchema: output_schema, generate,
     });
     const dir = path.join(this.dir, name);
     demand(!fs.existsSync(dir), `${dir} already exists; edit it or pick another name`, "script_invalid");
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(dir, SCRIPT_TOOL_MANIFEST_FILE), `${JSON.stringify(rendered.manifest, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    fs.writeFileSync(path.join(dir, rendered.entry), rendered.script, { mode: 0o700, flag: "wx" });
+    if (rendered.entry) fs.writeFileSync(path.join(dir, rendered.entry), rendered.script, { mode: 0o700, flag: "wx" });
     return { name, dir, entry: rendered.entry, manifest: rendered.manifest };
   }
   saveManifest(name, spec, expectedDigest) {
     const tool = this.load(name);
     demand(typeof expectedDigest === "string" && expectedDigest === tool.digest, "Tool changed since it was opened; reload before saving", "script_changed");
     const existing = tool.manifest;
-    const { description, effect = existing.effect, input_schema = null, inputs = null, output_schema = null, env = [], secrets = [] } = spec || {};
+    const { description, effect = existing.effect, input_schema = null, inputs = null, output_schema = null, env = [], secrets = [], generate = null } = spec || {};
+    demand(existing.generate || generate == null, `${name} is a script tool; only image and video tools take generation settings`, "script_invalid");
     const variables = [
       ...env.map(item => typeof item === "string" ? { name: item.split("=")[0], ...(item.includes("=") ? { default: item.slice(item.indexOf("=") + 1) } : {}) } : item),
       ...secrets.map(secret => ({ name: secret, secret: true })),
@@ -100,13 +104,18 @@ export class ScriptToolRegistry {
     // Re-render to normalize the edited schemas, then keep the tool's own
     // entry/interpreter so its existing script stays valid. The manifest is
     // part of the tool digest, so this write makes its test and grants stale.
-    const rendered = renderScriptTemplate({
+    // A media tool keeps its kind; provider, model, folder and arguments
+    // may change, and unsupplied ones stay as they are.
+    const rendered = existing.generate ? renderScriptTemplate({
+      name, template: existing.generate.kind, description: String(description || "").trim() || existing.description,
+      inputSchema: input_schema || existing.params, generate: { ...existing.generate, ...(generate || {}), kind: existing.generate.kind },
+    }) : renderScriptTemplate({
       name, template: "bash", effect,
       description: String(description || "").trim() || existing.description,
       params: [], inputSchema: input_schema, userInputSchema: inputs, outputSchema: output_schema, env: variables,
     });
     const manifest = normalizeScriptManifest({
-      ...rendered.manifest, name, entry: existing.entry, interpreter: existing.interpreter,
+      ...rendered.manifest, name, ...(existing.generate ? {} : { entry: existing.entry, interpreter: existing.interpreter }),
       timeout_seconds: existing.timeout_seconds, max_output_bytes: existing.max_output_bytes,
     });
     const manifestPath = path.join(tool.dir, SCRIPT_TOOL_MANIFEST_FILE);
@@ -119,10 +128,12 @@ export class ScriptToolRegistry {
   }
   code(name) {
     const tool = this.load(name);
+    demand(!tool.manifest.generate, `${name} is a media tool and has no script; change its provider, model or folder in its settings`, "script_invalid");
     return { name, code: new TextDecoder("utf-8", { fatal: true }).decode(readBounded(tool.entryPath, SCRIPT_TOOL_LIMITS.MAX_ENTRY_BYTES)), digest: tool.digest };
   }
   saveCode(name, code, expectedDigest) {
     const tool = this.load(name);
+    demand(!tool.manifest.generate, `${name} is a media tool and has no script; change its provider, model or folder in its settings`, "script_invalid");
     demand(typeof expectedDigest === "string" && expectedDigest === tool.digest, "Tool changed since its code was opened; reload before saving", "script_changed");
     demand(typeof code === "string" && !code.includes("\0") && Buffer.byteLength(code) <= SCRIPT_TOOL_LIMITS.MAX_ENTRY_BYTES,
       `Tool code must be UTF-8 text of at most ${SCRIPT_TOOL_LIMITS.MAX_ENTRY_BYTES} bytes`, "script_invalid");
@@ -158,7 +169,9 @@ export class ScriptToolRegistry {
     const tool = this.load(name);
     schemaCheck(tool.manifest.params, input);
     const selected = this.selectInputs(tool, privateInputs);
-    const result = await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected });
+    const result = tool.manifest.generate
+      ? await runMediaTool(tool, input, { generators: this.mediaGenerators })
+      : await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected });
     if (!result.ok) return { tool: name, digest: tool.digest, result, published: null, revoked_grants: [] };
     this.validateOutput(tool, result);
     const entry = this.entryFor(tool);
@@ -190,7 +203,9 @@ export class ScriptToolRegistry {
     demand(tool.digest === entry.digest, `Script tool ${entry.script} changed since it was tested; run \`posse tools test ${entry.script}\``, "script_changed");
     schemaCheck(tool.manifest.params, input);
     const selected = this.selectInputs(tool, privateInputs);
-    const result = await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected, signal });
+    const result = tool.manifest.generate
+      ? await runMediaTool(tool, input, { signal, generators: this.mediaGenerators })
+      : await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected, signal });
     demand(!result.timed_out, `Script tool ${entry.script} timed out after ${tool.manifest.timeout_seconds}s`, "script_timeout");
     this.validateOutput(tool, result);
     return result;

@@ -1,8 +1,13 @@
 import { getProvider, getProviderName } from "../../providers/functions/provider-selection.js";
 import { getDefaultTierModel } from "../../providers/functions/model-catalog.js";
 import { PROVIDER_OPTIONS } from "../../../catalog/provider.js";
+import { resolveLocalModelId } from "../../../catalog/local-model.js";
+import { PROVIDER_CAPABILITIES } from "../../../catalog/provider-capabilities.js";
 
 const PROVIDERS = new Set(PROVIDER_OPTIONS);
+// "local" names the on-machine provider: alone it lets the provider choose its
+// best installed model; "local:<slug or model id>" pins one.
+const LOCAL_ALIAS = "local", LOCAL_PROVIDER = "posse-local";
 const MODEL_TIERS = new Map([
   ["fable", "cheap"], ["haiku", "cheap"], ["cheap", "cheap"],
   ["sonnet", "standard"], ["standard", "standard"],
@@ -14,8 +19,16 @@ export function resolveAgentProvider(model, override = "") {
   if (explicitProvider && !PROVIDERS.has(explicitProvider)) throw Object.assign(new Error(`Unknown agent provider ${explicitProvider}`), { code: "invalid_request" });
   const value = String(model || "").trim();
   const qualified = /^([a-z][a-z0-9-]*)(?::|\/)(.+)$/i.exec(value);
-  const provider = explicitProvider || (qualified && PROVIDERS.has(qualified[1].toLowerCase()) ? qualified[1].toLowerCase() : getProviderName("dev"));
-  const requestedModel = qualified && PROVIDERS.has(qualified[1].toLowerCase()) ? qualified[2].trim() : value;
+  const prefix = qualified ? qualified[1].toLowerCase() : value.toLowerCase() === LOCAL_ALIAS ? LOCAL_ALIAS : "";
+  const named = prefix === LOCAL_ALIAS ? LOCAL_PROVIDER : PROVIDERS.has(prefix) ? prefix : "";
+  const provider = explicitProvider || named || getProviderName("dev");
+  const requestedModel = !named ? value : qualified ? qualified[2].trim() : "";
+  if (provider === LOCAL_PROVIDER && named === LOCAL_PROVIDER) {
+    // No pinned model: the local provider picks from what is installed.
+    if (!requestedModel) return { provider, modelName: null };
+    const local = resolveLocalModelId(requestedModel);
+    if (local) return { provider, modelName: local };
+  }
   const tier = MODEL_TIERS.get(requestedModel.toLowerCase());
   const modelName = tier ? getDefaultTierModel(provider, tier) : requestedModel;
   return { provider, modelName: !modelName || modelName === "auto" ? null : modelName };
@@ -23,6 +36,16 @@ export function resolveAgentProvider(model, override = "") {
 
 export function agentProviderUsesNativeTools(providerName) {
   return typeof getProvider("dev", providerName).callAgentTurn === "function";
+}
+
+/**
+ * True when the provider writes its own model-facing tool instructions for a
+ * decision turn. Its model emits tool calls as constrained JSON text, so the
+ * API-provider wording ("never print a tool-call JSON object") must not be
+ * sent alongside them.
+ */
+export function agentProviderSuppliesToolProtocol(providerName) {
+  return PROVIDER_CAPABILITIES[providerName]?.localGeneration === true;
 }
 
 export async function callAgentProvider(providerName, prompt, options = {}) {

@@ -2,10 +2,10 @@
 // It owns only what a full-screen UI needs: the size question, status text and
 // cancellation. The install itself runs async in this process, so aborting it
 // retires the native worker instead of orphaning a download.
-import fs from "node:fs";
 import path from "node:path";
 import { LOCAL_BRIDGE_MODELS } from "../../../../catalog/local-model.js";
 import { defaultLocalGenerationModelRoot, defaultLocalGenerationRuntimeRoot } from "../../../../shared/native/functions/local-model-paths.js";
+import { localBridgeModelInstalled, localModelSupportsPlatform } from "../../../../shared/native/functions/local-model-defaults.js";
 import { installLocalModel, openLocalRuntime } from "../../../cli/functions/local-install.js";
 import { downloadQuestion, formatArtifactBytes } from "../../../cli/functions/local-models-command.js";
 
@@ -46,11 +46,20 @@ export class LocalModelInstallController {
     return this._status;
   }
 
-  choices() {
+  // What is on this machine and what could be added, one entry per model.
+  inventory() {
     return LOCAL_BRIDGE_MODELS.map((model) => {
-      const present = fs.existsSync(path.join(this._modelRoot, model.directory));
-      return { value: model.slug, label: `${model.slug} (${model.kind}${present ? ", files present" : ""})` };
+      const status = localBridgeModelInstalled(this._modelRoot, model) ? "installed"
+        : localModelSupportsPlatform(model) ? "available" : "unsupported";
+      const detail = status === "installed" ? "installed"
+        : status === "available" ? `available, ${formatArtifactBytes(model.downloadBytes)} download`
+          : "not supported on this machine";
+      return { slug: model.slug, kind: model.kind, status, detail };
     });
+  }
+
+  choices() {
+    return this.inventory().map(({ slug, kind, detail }) => ({ value: slug, label: `${slug} (${kind}, ${detail})` }));
   }
 
   start(slug) {

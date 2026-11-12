@@ -101,7 +101,7 @@ export const PROVIDER_LABELS = Object.freeze({
   codex: "Codex",
   grok: "Grok",
   copilot: "Copilot",
-  "posse-local": "Local (Qwen)",
+  "posse-local": "Local",
 });
 
 export const PROVIDER_ROLE_NAMES = Object.freeze([

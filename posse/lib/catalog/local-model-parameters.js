@@ -1,6 +1,6 @@
 // CLI contracts for the shipped native profiles. Native request validation
 // remains authoritative; do not list features that the adapter cannot execute.
-import { QWEN_LOCAL_MODEL_ID, QWEN_IMAGE_MODEL_ID, MINIMAX_H3_MODEL_ID } from "./local-model.js";
+import { LOCAL_BRIDGE_MODELS, LOCAL_DEFAULT_MODELS, LOCAL_MODEL_IDS, LOCAL_MODEL_PROFILES, QWEN_LOCAL_MODEL_ID, QWEN_IMAGE_MODEL_ID, MINIMAX_H3_MODEL_ID } from "./local-model.js";
 
 const integer = (flag, defaultValue, min, max, multiple = 1) => Object.freeze({
   flag, type: "integer", default: defaultValue, min, max, multiple,
@@ -20,10 +20,7 @@ const stepSetting = (key, kind) => Object.freeze({
 const IMAGE_STEPS_SETTING = "posse_local_image_steps";
 const VIDEO_STEPS_SETTING = "posse_local_video_steps";
 
-export const LOCAL_MODEL_SETTINGS = Object.freeze([
-  stepSetting(IMAGE_STEPS_SETTING, "image"),
-  stepSetting(VIDEO_STEPS_SETTING, "video"),
-]);
+const STEP_SETTINGS = [stepSetting(IMAGE_STEPS_SETTING, "image"), stepSetting(VIDEO_STEPS_SETTING, "video")];
 
 const media = {
   seed: integer("seed", 42, 0, 4294967295),
@@ -33,7 +30,28 @@ const media = {
   gpuMemoryGiB: Object.freeze({ flag: "gpu-memory-gb", type: "number", min: 0.25, max: 1024, description: "Cap VRAM in GiB; enables GPU execution and only lowers the automatic budget." }),
 };
 
-export const LOCAL_MODEL_PARAMETERS = Object.freeze({
+const number = (flag, defaultValue, min, max, description) => Object.freeze({
+  flag, type: "number", default: defaultValue, min, max, description,
+});
+// Writing profiles sample by default, using each model's recommended settings.
+const writingProfile = modelId => {
+  const { maxOutputTokens, sampling } = LOCAL_MODEL_PROFILES[modelId];
+  return Object.freeze({
+    parameters: Object.freeze({
+      maxOutputTokens: integer("max-tokens", 1024, 1, maxOutputTokens),
+      system: Object.freeze({ flag: "system", type: "string", maxBytes: 262144, description: "Optional system prompt." }),
+      temperature: number("temperature", sampling.temperature, 0.01, 2, "Sampling temperature; lower is more literal."),
+      topP: number("top-p", sampling.topP, 0.01, 1, "Nucleus sampling cutoff."),
+      topK: integer("top-k", sampling.topK, 1, 1000),
+      seed: Object.freeze({ flag: "seed", type: "integer", min: 0, max: 4294967295, description: "Optional; repeat a sampled result." }),
+    }),
+    behavior: "Text input and output; independent requests with sampled decoding. No conversation history or media inputs.",
+  });
+};
+
+const MODEL_PARAMETER_TABLE = Object.freeze({
+  ...Object.fromEntries(LOCAL_MODEL_IDS.filter(modelId => LOCAL_MODEL_PROFILES[modelId].sampling)
+    .map(modelId => [modelId, writingProfile(modelId)])),
   [QWEN_LOCAL_MODEL_ID]: Object.freeze({
     parameters: Object.freeze({
       maxOutputTokens: integer("max-tokens", 512, 1, 4096),
@@ -65,6 +83,73 @@ export const LOCAL_MODEL_PARAMETERS = Object.freeze({
     behavior: "Text and optional first-frame PNG input to AVI with generated 32 kHz stereo audio. continueFrom uses the prior AVI's final frame and stitches the continuation. No motion-history or audio conditioning, last-frame target or silent output. Fixed: 24 fps, CFG 1, Euler sampler, flow shift 12.",
   }),
 });
+
+// Every knob with a built-in default gets a saved default the operator can
+// change in Admin (Local models). Free-text inputs and device selection stay
+// per-run. A flag still wins for one run.
+const settingName = (slug, key) => `posse_local_${slug.replace(/-/g, "_")}_${key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`)}`;
+const knobLabel = key => key.replace(/[A-Z]/g, letter => ` ${letter.toLowerCase()}`).replace(/^./, letter => letter.toUpperCase());
+const constraint = parameter => parameter.choices ? `one of ${parameter.choices.join(", ")}`
+  : `${parameter.min} to ${parameter.max}${parameter.multiple > 1 ? `, a multiple of ${parameter.multiple}` : ""}`;
+
+function knobSetting(model, key, parameter) {
+  const numeric = !parameter.choices && ["integer", "number"].includes(parameter.type);
+  return Object.freeze({
+    key: settingName(model.slug, key), default: String(parameter.default), label: knobLabel(key),
+    ...(numeric ? { numeric: Object.freeze({ integer: parameter.type === "integer", min: parameter.min, max: parameter.max }) }
+      : { options: Object.freeze(parameter.choices.map(String)) }),
+    description: `Default ${knobLabel(key).toLowerCase()} for ${model.slug} (${constraint(parameter)}); --${parameter.flag} overrides it for one run.${parameter.description ? ` ${parameter.description}` : ""}`,
+  });
+}
+
+const knobSettings = [];
+export const LOCAL_MODEL_PARAMETERS = Object.freeze(Object.fromEntries(LOCAL_BRIDGE_MODELS.map((model) => {
+  const profile = MODEL_PARAMETER_TABLE[model.modelId];
+  const parameters = Object.fromEntries(Object.entries(profile.parameters).map(([key, parameter]) => {
+    const tunable = parameter.default !== undefined && !parameter.defaultSetting
+      && (parameter.choices || ["integer", "number"].includes(parameter.type));
+    if (!tunable) return [key, parameter];
+    const setting = knobSetting(model, key, parameter);
+    knobSettings.push(setting);
+    return [key, Object.freeze({ ...parameter, defaultSetting: setting.key })];
+  }));
+  return [model.modelId, Object.freeze({ ...profile, parameters: Object.freeze(parameters) })];
+})));
+
+// Limits a text model works within when it runs as an agent or provider. The
+// built-in value is also the ceiling: the native runtime refuses more.
+const agentLimit = (model, key, label, min, max, description) => Object.freeze({
+  key: settingName(model.slug, key), default: String(max), label,
+  numeric: Object.freeze({ integer: true, min, max }),
+  description: `${description} for ${model.slug} (${min} to ${max}).`,
+  modelId: model.modelId, limit: key,
+});
+export const LOCAL_AGENT_LIMIT_SETTINGS = Object.freeze(LOCAL_BRIDGE_MODELS.filter(model => model.kind === "text").flatMap((model) => {
+  const profile = LOCAL_MODEL_PROFILES[model.modelId];
+  return [
+    agentLimit(model, "agentMaxOutputTokens", "Agent reply length (tokens)", 64, profile.maxOutputTokens, "Longest single reply or tool call an agent turn may produce"),
+    agentLimit(model, "agentMaxToolTurns", "Agent tool turns", 1, profile.maxToolTurns, "Tool turns one job dispatch may take"),
+    agentLimit(model, "agentMaxToolResultChars", "Tool result size (characters)", 1000, profile.maxToolResultChars, "Most characters of one tool result shown to the model"),
+  ];
+}));
+
+export const LOCAL_DEFAULT_MODEL_SETTINGS = Object.freeze(LOCAL_DEFAULT_MODELS.map(entry => Object.freeze({
+  key: entry.key, default: "", label: entry.label, options: Object.freeze(["", ...entry.candidates]),
+  description: `Local ${entry.kind} model to use when a request does not name one. Automatic picks the first installed of: ${entry.candidates.join(", ")}; none when nothing is installed.`,
+})));
+
+/** Saved defaults for one model, in the order Admin lists them. */
+export function localModelSettingKeys(model) {
+  const parameters = LOCAL_MODEL_PARAMETERS[model.modelId].parameters;
+  return [
+    ...Object.values(parameters).map(parameter => parameter.defaultSetting).filter(Boolean),
+    ...LOCAL_AGENT_LIMIT_SETTINGS.filter(setting => setting.modelId === model.modelId).map(setting => setting.key),
+  ];
+}
+
+export const LOCAL_MODEL_SETTINGS = Object.freeze([
+  ...STEP_SETTINGS, ...knobSettings, ...LOCAL_AGENT_LIMIT_SETTINGS, ...LOCAL_DEFAULT_MODEL_SETTINGS,
+]);
 
 export const LOCAL_PARAMETER_FLAGS = Object.freeze(Object.fromEntries(
   Object.values(LOCAL_MODEL_PARAMETERS).flatMap(profile => Object.values(profile.parameters)

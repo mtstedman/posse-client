@@ -8,6 +8,9 @@ import { LOCAL_USAGE, parseLocalOptions } from "./local-options.js";
 import { checkLocalOutput, encodeLocalOutput, readLocalPrompt, writeLocalOutput } from "./local-output.js";
 import { requireLocalModelCapability } from "./local-capabilities.js";
 import { installLocalModel, openLocalRuntime } from "./local-install.js";
+import { resolveDefaultLocalModel } from "../../../shared/native/functions/local-model-defaults.js";
+import { LOCAL_DEFAULT_MODELS } from "../../../catalog/local-model.js";
+import { getSetting } from "../../settings/functions/repository-settings.js";
 import { resolveLocalParameters, resolveLocalModel, localModelHelp } from "./local-parameters.js";
 import { selectGenerationGpu, writeImageGpuInventory } from "./local-gpu.js";
 import { requireFirstFrameCapability } from "./local-video-media.js";
@@ -38,8 +41,10 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
     }
     return 0;
   }
+  if (args.kind !== undefined && (args.model || args.action !== "generate")) throw new Error("--kind selects the default model for a generation; use it without --model.");
   const model = args.action === "gpus" && !args.model ? LOCAL_BRIDGE_MODELS.find(m => m.kind === "image")
-    : resolveLocalModel(args.model);
+    : args.kind !== undefined ? defaultModelForKind(args.kind, modelRoot, io.readSetting || getSetting)
+      : resolveLocalModel(args.model);
   if (args.action === "gpus" && model.kind === "text") throw new Error("GPU discovery currently applies to image and video models.");
   let payload, format, parameters;
   if (args.action === "generate") {
@@ -48,8 +53,8 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
     if (!model.formats.includes(format)) throw new Error(`${model.slug} supports --format ${model.formats.join('|')}.`);
     await checkLocalOutput(args.output, format, stdout);
     payload = await generationPayload(model, args, parameters, stdin);
-  } else if (model.kind === "text" && args.source) {
-    throw new Error("--source is only supported for image/video model files; text models use signed packages.");
+  } else if (model.installation === "signed-package" && args.source) {
+    throw new Error(`--source is only supported for pinned model files; ${model.slug} installs as a signed package.`);
   }
   const progress = new LocalModelProgress(stderr, { quiet: args.quiet });
   const controller = new AbortController();
@@ -132,9 +137,17 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
   }
 }
 
+function defaultModelForKind(kind, modelRoot, readSetting) {
+  const kinds = LOCAL_DEFAULT_MODELS.map(entry => entry.kind);
+  if (!kinds.includes(kind)) throw new Error(`--kind must be one of ${kinds.join(", ")}.`);
+  const model = resolveDefaultLocalModel(kind, { modelRoot, readSetting });
+  if (!model) throw new Error(`No local ${kind} model is installed. Run posse local list, then posse local install <slug>.`);
+  return model;
+}
+
 async function confirmDownload({ label, bytes, artifact }, model, args, { stdin, stderr, askChoice }) {
   if (args["non-interactive"] || !stdin.isTTY || !stderr.isTTY) {
-    throw new Error(`Model downloads require interactive size confirmation.${model.kind === "text" ? "" : " Use --source DIR for already-downloaded files."}`);
+    throw new Error(`Model downloads require interactive size confirmation.${model.installation === "signed-package" ? "" : " Use --source DIR for already-downloaded files."}`);
   }
   const { downloadQuestion, renderLocalModelArtifact } = await import("./local-models-command.js");
   if (artifact) renderLocalModelArtifact(artifact, { output: stderr });
@@ -154,7 +167,9 @@ async function generationPayload(model, args, parameters, input) {
     const { gpu: _gpu, gpuId: _gpuId, firstFrame: _firstFrame, continueFrom: _continueFrom, ...settings } = parameters;
     return { modelId: model.modelId, prompt, ...settings };
   }
+  const { temperature, topP, topK, seed } = parameters;
   return { modelId: model.modelId,
     messages: [...(parameters.system ? [{ role: "system", content: parameters.system }] : []), { role: "user", content: prompt }],
-    generation: { mode: "greedy", maxOutputTokens: parameters.maxOutputTokens } };
+    generation: temperature === undefined ? { mode: "greedy", maxOutputTokens: parameters.maxOutputTokens }
+      : { mode: "sample", maxOutputTokens: parameters.maxOutputTokens, temperature, topP, topK, ...(seed === undefined ? {} : { seed }) } };
 }

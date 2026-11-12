@@ -181,6 +181,9 @@ export const TEXT_MODEL_CHOICES_INTERNAL = Object.freeze({
   ]),
   "posse-local": Object.freeze([
     "qwen2.5-coder-3b-instruct",
+    "gemma-4-12b-it",
+    "mistral-small-3.2-24b-instruct",
+    "gemma-4-31b-it",
   ]),
 });
 
