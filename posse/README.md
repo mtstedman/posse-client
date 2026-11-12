@@ -496,6 +496,11 @@ a starter that fails until you edit it.
   tool and again on each run. Bossy can create this schema from typed output
   fields and edit the script through the automation owner; saving code changes
   the digest and requires a new passing test.
+- Registered-agent transcripts preserve structured script reports and delegated
+  agent receipts as complete JSON up to the dispatch budget of 1,000,000
+  characters. Oversized values become explicit omission records rather than
+  partial JSON. Failed scripts retain their host failure metadata alongside
+  structured reports, including incomplete execution evidence.
 - Secrets are write-only: `posse tools secret set <tool> <NAME>` reads a hidden
   prompt or piped stdin and stores the value in the owner database. Listings
   show only a fingerprint. Only the declaring tool's process receives it, and

@@ -34,6 +34,14 @@ function compactJson(value) {
   try { return JSON.stringify(value ?? null); } catch { return String(value); }
 }
 
+function boundedStructuredContent(value, description) {
+  const text = compactJson(value);
+  if (text.length <= DEFAULT_MAX_TOOL_RESULT_CHARS) return text;
+  return compactJson({ truncated: true, omitted: true, original_chars: text.length,
+    max_chars: DEFAULT_MAX_TOOL_RESULT_CHARS,
+    message: `${description} exceeds the tool-result budget; its evidence is unavailable in this response.` });
+}
+
 // Delegated receipts carry the child's reply, usage and tool evidence as one
 // structured value. Cutting through that JSON hides evidence from its parent.
 // Use the dispatch result budget and an explicit omission for oversized values.
@@ -42,11 +50,17 @@ function agentReceiptContent(output, preserveWrapper = false) {
   const receipt = run?.protocol === AGENT_TURN_PROTOCOL ? run
     : plainObject(run?.output_json)?.protocol === AGENT_TURN_PROTOCOL ? run.output_json : null;
   if (!receipt) return null;
-  const text = compactJson(preserveWrapper ? output : receipt);
-  if (text.length <= DEFAULT_MAX_TOOL_RESULT_CHARS) return text;
-  return compactJson({ truncated: true, omitted: true, original_chars: text.length,
-    max_chars: DEFAULT_MAX_TOOL_RESULT_CHARS,
-    message: "Delegated agent receipt exceeds the tool-result budget; its reply and evidence are unavailable in this response." });
+  return boundedStructuredContent(preserveWrapper ? output : receipt, "Delegated agent receipt");
+}
+
+// Script JSON has the same integrity requirement as a delegated receipt: a
+// partial object cannot be parsed or safely used as evidence. Keep the host's
+// failure metadata when the script exits unsuccessfully with a structured report.
+function scriptReportContent(output, preserveWrapper = false) {
+  const run = plainObject(output);
+  if (!run || !Object.hasOwn(run, "exit_code") || !Object.hasOwn(run, "output_json")
+    || run.output_json === undefined) return null;
+  return boundedStructuredContent(preserveWrapper || toolOutputFailed(run) ? run : run.output_json, "Structured script report");
 }
 
 /** True when a script tool's output reports failure. */
@@ -58,11 +72,14 @@ export function toolOutputFailed(output) {
  * Model-facing content for one tool result. Script output arrives wrapped in
  * its run record ({ ok, exit_code, output, output_json, stderr, ... }); a
  * native transcript carries only what the tool said: the parsed JSON when the
- * script returned JSON, otherwise its text, and on failure its stderr.
+ * script returned JSON, otherwise its text. Failed structured reports retain
+ * the run metadata; failed text reports include stderr.
  */
 export function nativeToolResultContent(output) {
   const receipt = agentReceiptContent(output);
   if (receipt !== null) return receipt;
+  const report = scriptReportContent(output);
+  if (report !== null) return report;
   if (typeof output === "string") return bounded(output);
   const run = plainObject(output);
   if (run && Object.hasOwn(run, "exit_code")) {
@@ -80,9 +97,9 @@ export function nativeToolResultContent(output) {
 /** The tool result as the transcript's chosen protocol shows it to the model. */
 export function toolResultContent(name, output, { native }) {
   if (native) return nativeToolResultContent(output);
-  const receipt = agentReceiptContent(output, true);
-  return receipt === null ? formatLocalToolResult(name, output)
-    : formatLocalToolResult(name, receipt, DEFAULT_MAX_TOOL_RESULT_CHARS);
+  const structured = agentReceiptContent(output, true) ?? scriptReportContent(output, true);
+  return structured === null ? formatLocalToolResult(name, output)
+    : formatLocalToolResult(name, structured, DEFAULT_MAX_TOOL_RESULT_CHARS);
 }
 
 /** A stable, provider-valid id for a tool request that arrived without one. */
