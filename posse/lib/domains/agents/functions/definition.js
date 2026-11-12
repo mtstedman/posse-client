@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 
 import {
+  AGENT_DEFAULTS,
   AGENT_REASONING_EFFORTS,
   AGENT_DEFINITION_FIELDS,
   AGENT_DEFINITION_SCHEMA,
@@ -134,6 +135,6 @@ export function scaffoldAgentDefinition(name) {
     tools: [],
     skills: [],
     autonomy: { write_tools: "confirm" },
-    limits: { turns: 16, calls: 32, spend_usd: 2, wall_seconds: 1800 },
+    limits: { ...AGENT_DEFAULTS.limits },
   };
 }

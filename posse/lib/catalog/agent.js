@@ -11,8 +11,8 @@ export const AGENT_SESSION_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,119}$/;
 export const AGENT_SCOPE_KINDS = Object.freeze(["sandbox", "folder", "repository", "global", "general"]);
 export const AGENT_WRITE_MODES = Object.freeze(["confirm", "allow", "deny"]);
 export const AGENT_LIMITS = Object.freeze({
-  turns: 64,
-  calls: 256,
+  turns: 1_000_000,
+  calls: 1_000_000,
   spend_usd: 100,
   wall_seconds: 3600,
 });
@@ -31,7 +31,7 @@ export const AGENT_DEFAULTS = Object.freeze({
   model: "sonnet",
   scope: Object.freeze({ kind: "sandbox" }),
   autonomy: Object.freeze({ write_tools: "confirm" }),
-  limits: Object.freeze({ turns: 16, calls: 32, spend_usd: 2, wall_seconds: 1800 }),
+  limits: Object.freeze({ turns: 20_000, calls: 10_000, spend_usd: 2, wall_seconds: 1800 }),
 });
 
 export const AGENT_REASONING_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh"]);

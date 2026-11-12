@@ -3,6 +3,7 @@ import path from "node:path";
 import { SchemaValidatorCache } from "../classes/SchemaValidatorCache.js";
 import { PROVIDER_ROLE_NAMES } from "../../../catalog/provider.js";
 import { AUTOMATION_RESOURCE_OPERATIONS } from "../../../catalog/custom-tools.js";
+import { AGENT_LIMITS } from "../../../catalog/agent.js";
 
 const ajv = new SchemaValidatorCache();
 export function demand(condition, message, code = "invalid_request") {
@@ -66,7 +67,7 @@ export function authorize(grants, entry, principal, operation, grantID) {
 }
 export function validateLimits(limits) {
   object(limits, ["wall_time_seconds", "turns", "calls", "spend_cap_usd"], ["wall_time_seconds", "turns", "calls", "spend_cap_usd"]);
-  for (const [name, maximum] of [["wall_time_seconds", 3600], ["turns", 64], ["calls", 256]]) demand(Number.isInteger(limits[name]) && limits[name] > 0 && limits[name] <= maximum, `Invalid ${name}`);
+  for (const [name, maximum] of [["wall_time_seconds", 3600], ["turns", AGENT_LIMITS.turns], ["calls", AGENT_LIMITS.calls]]) demand(Number.isInteger(limits[name]) && limits[name] > 0 && limits[name] <= maximum, `Invalid ${name}`);
   demand(Number.isFinite(limits.spend_cap_usd) && limits.spend_cap_usd > 0 && limits.spend_cap_usd <= 100, "Invalid spend cap");
 }
 export function narrowLimits(limits, narrowing = limits) {

@@ -1978,6 +1978,8 @@ it preserves the ledger. These actions do not merge, publish or deploy work.
 
 ### Agent activity and strength
 
+New agent definitions default to 10,000 calls and 20,000 turns. Agent and skill contracts accept up to 1,000,000 of each. Explicit lower limits in existing definitions and grants remain enforced; edit those definitions to increase them. Active provider/tool work uses inactivity monitoring rather than a total elapsed-time cutoff. Bossy’s Stop button or Ctrl+X cancels the parent and delegated child work.
+
 Agent definitions select a model (including `cheap`, `standard`, or `strong`) and optional `reasoning_effort` (`low`, `medium`, `high`, `xhigh`). The legacy `limits.wall_seconds` field measures provider inactivity, not total run time. Activity refreshes that allowance; tool execution does not consume it. New definitions default to 1800 seconds. Native Invoke agent tools follow their selected agent’s inactivity policy rather than imposing their script timeout on the child. Spend, call, turn, explicit script execution limits, and cancellation still apply.
 
 Caller-owned `posse agent dispatch` requests accept optional `reasoning_effort` and `idle_seconds` (1–14400; default 1800). Provider dispatch runs without a total wall cap for these agent decisions, retaining the provider’s inactivity watchdog.
