@@ -73,8 +73,9 @@ export class ScriptToolRegistry {
   }
   create(spec) {
     let { name, template = "bash", description, effect = "read", params = [], input_schema = null,
-      inputs = null, output_schema = null, env = [], secrets = [], generate = null, invoke_agent = null } = spec || {};
+      inputs = null, output_schema = null, env = [], secrets = [], generate = null, invoke_agent = null, timeout_seconds } = spec || {};
     demand(validScriptToolName(name), "Tool name must be lower-case like orders.lookup", "script_invalid");
+    demand(timeout_seconds === undefined || Number.isInteger(timeout_seconds), "timeout_seconds must be an integer", "script_invalid");
     // A media tool is only its generation settings; dropping these silently
     // would create a tool that is not what was asked for.
     demand(!SCRIPT_TOOL_MEDIA_KINDS.includes(template) || (!params.length && !env.length && !secrets.length && inputs == null),
@@ -94,18 +95,20 @@ export class ScriptToolRegistry {
       params: params.map(param => typeof param === "string" ? parseParamSpec(param) : param),
       inputSchema: input_schema, userInputSchema: inputs, outputSchema: output_schema, generate, invokeAgent: invoke_agent,
     });
+    const manifest = timeout_seconds === undefined ? rendered.manifest : normalizeScriptManifest({ ...rendered.manifest, timeout_seconds });
     const dir = path.join(this.dir, name);
     demand(!fs.existsSync(dir), `${dir} already exists; edit it or pick another name`, "script_invalid");
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(path.join(dir, SCRIPT_TOOL_MANIFEST_FILE), `${JSON.stringify(rendered.manifest, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    fs.writeFileSync(path.join(dir, SCRIPT_TOOL_MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     if (rendered.entry) fs.writeFileSync(path.join(dir, rendered.entry), rendered.script, { mode: 0o700, flag: "wx" });
-    return { name, dir, entry: rendered.entry, manifest: rendered.manifest };
+    return { name, dir, entry: rendered.entry, manifest };
   }
   saveManifest(name, spec, expectedDigest) {
     const tool = this.load(name);
     demand(typeof expectedDigest === "string" && expectedDigest === tool.digest, "Tool changed since it was opened; reload before saving", "script_changed");
     const existing = tool.manifest;
-    const { description, effect = existing.effect, input_schema = null, inputs = null, output_schema = null, env = [], secrets = [], generate = null, invoke_agent = null } = spec || {};
+    const { description, effect = existing.effect, input_schema = null, inputs = null, output_schema = null, env = [], secrets = [], generate = null, invoke_agent = null, timeout_seconds } = spec || {};
+    demand(timeout_seconds === undefined || Number.isInteger(timeout_seconds), "timeout_seconds must be an integer", "script_invalid");
     demand(existing.generate || generate == null, `${name} is a script tool; only image and video tools take generation settings`, "script_invalid");
     const variables = [
       ...env.map(item => typeof item === "string" ? { name: item.split("=")[0], ...(item.includes("=") ? { default: item.slice(item.indexOf("=") + 1) } : {}) } : item),
@@ -136,7 +139,7 @@ export class ScriptToolRegistry {
     });
     const manifest = normalizeScriptManifest({
       ...rendered.manifest, name, ...(existing.generate || existing.invoke_agent ? {} : { entry: existing.entry, interpreter: existing.interpreter }),
-      timeout_seconds: existing.timeout_seconds, max_output_bytes: existing.max_output_bytes,
+      timeout_seconds: timeout_seconds === undefined ? existing.timeout_seconds : timeout_seconds, max_output_bytes: existing.max_output_bytes,
     });
     const manifestPath = path.join(tool.dir, SCRIPT_TOOL_MANIFEST_FILE);
     const temporary = path.join(tool.dir, `.manifest-${randomUUID()}`);
