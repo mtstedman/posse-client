@@ -43,6 +43,37 @@ function missingRootTerminator(text) {
   return call ? [call] : null;
 }
 
+// A batch can contain the same redundant call terminator accepted for a
+// single request. Remove exactly one unmatched brace after a complete array
+// member, never a delimiter inside arguments. The entire repaired batch must
+// then parse strictly as tool calls; authorization remains the caller's job.
+function redundantBatchTerminator(text) {
+  if (!text.startsWith("[") || !text.endsWith("]") || !REQUEST_ENVELOPE.test(text)) return null;
+  const stack = [];
+  let quoted = false, escaped = false, removed = -1, previous = "";
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') quoted = true;
+    else if (char === "{") stack.push("}");
+    else if (char === "[") stack.push("]");
+    else if (char === "}" || char === "]") {
+      if (stack.at(-1) === char) stack.pop();
+      else if (char === "}" && stack.length === 1 && stack[0] === "]" &&
+          removed < 0 && previous === "}" && /^\s*[,\]]/.test(text.slice(index + 1))) removed = index;
+      else return null;
+    }
+    if (!/\s/.test(char)) previous = char;
+  }
+  if (quoted || stack.length || removed < 0) return null;
+  return exactToolCalls(text.slice(0, removed) + text.slice(removed + 1));
+}
+
 // A tool request preceded by commentary is still an unexecuted request, not
 // a final answer. Skip complete non-call objects so JSON artifacts containing
 // nested examples are not mistaken for requests.
@@ -69,7 +100,7 @@ function callsAfterCommentary(text) {
   const prefix = text.slice(0,index);
   if (/[\[\]{}<>`]/.test(prefix)) return null;
   const suffix = text.slice(index);
-  const exact = exactToolCalls(suffix) || missingRootTerminator(suffix);
+  const exact = exactToolCalls(suffix) || missingRootTerminator(suffix) || redundantBatchTerminator(suffix);
   if (exact) return exact;
   const trailing = leadingJsonObject(suffix);
   if (!trailing || trailing.rest && trailing.rest !== trailing.body && trailing.rest !== "}") return null;
@@ -80,7 +111,7 @@ function callsAfterCommentary(text) {
 /** Accept one or more exact tool calls, or salvage a call before fabricated results. */
 export function parseAgentToolTurn(output) {
   const text = String(output || "").trim();
-  const exact = exactToolCalls(text) || missingRootTerminator(text);
+  const exact = exactToolCalls(text) || missingRootTerminator(text) || redundantBatchTerminator(text);
   if (exact) return { calls: exact, malformed: false };
   const afterCommentary = callsAfterCommentary(text);
   if (afterCommentary) return { calls: afterCommentary, malformed: false };
