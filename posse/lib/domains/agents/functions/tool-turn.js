@@ -32,6 +32,17 @@ function exactToolCalls(text) {
   return calls.every(Boolean) ? calls : null;
 }
 
+// Recover only a missing root-object terminator. Strict JSON parsing must
+// succeed after that one byte, so argument strings and nested values must
+// already be complete. Never fill in argument values or nested delimiters.
+function missingRootTerminator(text) {
+  if (!text.startsWith("{") || !text.endsWith("}") || !REQUEST_ENVELOPE.test(text)) return null;
+  const completed = text + "}";
+  try { JSON.parse(completed); } catch { return null; }
+  const call = parseLocalToolCall(completed);
+  return call ? [call] : null;
+}
+
 // A tool request preceded by commentary is still an unexecuted request, not
 // a final answer. Skip complete non-call objects so JSON artifacts containing
 // nested examples are not mistaken for requests.
@@ -58,7 +69,7 @@ function callsAfterCommentary(text) {
   const prefix = text.slice(0,index);
   if (/[\[\]{}<>`]/.test(prefix)) return null;
   const suffix = text.slice(index);
-  const exact = exactToolCalls(suffix);
+  const exact = exactToolCalls(suffix) || missingRootTerminator(suffix);
   if (exact) return exact;
   const trailing = leadingJsonObject(suffix);
   if (!trailing || trailing.rest && trailing.rest !== trailing.body && trailing.rest !== "}") return null;
@@ -69,7 +80,7 @@ function callsAfterCommentary(text) {
 /** Accept one or more exact tool calls, or salvage a call before fabricated results. */
 export function parseAgentToolTurn(output) {
   const text = String(output || "").trim();
-  const exact = exactToolCalls(text);
+  const exact = exactToolCalls(text) || missingRootTerminator(text);
   if (exact) return { calls: exact, malformed: false };
   const afterCommentary = callsAfterCommentary(text);
   if (afterCommentary) return { calls: afterCommentary, malformed: false };
