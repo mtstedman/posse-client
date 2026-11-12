@@ -174,13 +174,13 @@ async function runChat({ unbudgeted, runtime, name, session, provider, stdin, st
       const message = (await terminal.question("> ")).trim();
       if (!message || message === "/exit") break;
       let envelope = await withInterrupt(signal => runtime.run({ unbudgeted, signal, agent: name, message, session: activeSession, provider, cwd,
-        onProgress: event => { const line = progressLine(event); if (line) stderr.write(line); } }));
+        onProgress: event => { const line = progressLine(event); if (line) stderr.write(line); } }), terminal);
       activeSession = envelope.conversation_id || activeSession;
       while (envelope.status === "needs_confirmation") {
         const pending = envelope.pending[0];
         stdout.write(`write request: ${pending.summary}\n`);
         const answer = (await terminal.question("Allow? [y/N] ")).trim().toLowerCase();
-        envelope = await withInterrupt(signal => runtime.confirm({ signal, session: activeSession, proposal: pending.proposal_id, deny: answer !== "y" && answer !== "yes", cwd }));
+        envelope = await withInterrupt(signal => runtime.confirm({ signal, session: activeSession, proposal: pending.proposal_id, deny: answer !== "y" && answer !== "yes", cwd }), terminal);
       }
       if (envelope.status === "done") stdout.write(`${envelope.reply}\n`);
       else stderr.write(`${envelope.error?.code || "agent_error"}: ${envelope.error?.message || "Agent turn failed"}\n`);
@@ -237,13 +237,13 @@ function requireCount(values, count, usage) { if (values.length !== count) throw
 function usageError(usage) { return Object.assign(new Error(`usage: ${usage}`), { code: "invalid_request" }); }
 
 // Install only while work is active. A second signal retains the host's normal exit path.
-async function withInterrupt(run) {
+async function withInterrupt(run, terminal = null) {
   const controller = new AbortController();
   const stop = () => {
-    process.off("SIGINT", stop); process.off("SIGTERM", stop);
+    process.off("SIGINT", stop); process.off("SIGTERM", stop); terminal?.off("SIGINT", stop);
     controller.abort(Object.assign(new Error("Stopped by user"), { code: "request_canceled" }));
   };
-  process.on("SIGINT", stop); process.on("SIGTERM", stop);
+  process.on("SIGINT", stop); process.on("SIGTERM", stop); terminal?.on("SIGINT", stop);
   try { return await run(controller.signal); }
-  finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
+  finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); terminal?.off("SIGINT", stop); }
 }
