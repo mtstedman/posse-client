@@ -11,6 +11,8 @@
 // blocks that must accompany a tool request); it is opaque to Node.
 
 import { formatLocalToolResult } from "../../providers/functions/posse-local/tool-protocol.js";
+import { AGENT_TURN_PROTOCOL } from "../../../catalog/agent.js";
+import { DEFAULT_MAX_TOOL_RESULT_CHARS } from "../../../catalog/tool-result.js";
 
 // Compact JSON is dense: this keeps a large read (a full scene, a long file)
 // whole while bounding what one call can add to every later model request.
@@ -32,6 +34,21 @@ function compactJson(value) {
   try { return JSON.stringify(value ?? null); } catch { return String(value); }
 }
 
+// Delegated receipts carry the child's reply, usage and tool evidence as one
+// structured value. Cutting through that JSON hides evidence from its parent.
+// Use the dispatch result budget and an explicit omission for oversized values.
+function agentReceiptContent(output, preserveWrapper = false) {
+  const run = plainObject(output);
+  const receipt = run?.protocol === AGENT_TURN_PROTOCOL ? run
+    : plainObject(run?.output_json)?.protocol === AGENT_TURN_PROTOCOL ? run.output_json : null;
+  if (!receipt) return null;
+  const text = compactJson(preserveWrapper ? output : receipt);
+  if (text.length <= DEFAULT_MAX_TOOL_RESULT_CHARS) return text;
+  return compactJson({ truncated: true, omitted: true, original_chars: text.length,
+    max_chars: DEFAULT_MAX_TOOL_RESULT_CHARS,
+    message: "Delegated agent receipt exceeds the tool-result budget; its reply and evidence are unavailable in this response." });
+}
+
 /** True when a script tool's output reports failure. */
 export function toolOutputFailed(output) {
   return Boolean(plainObject(output) && Object.hasOwn(output, "exit_code") && (output.ok === false || output.timed_out === true));
@@ -44,6 +61,8 @@ export function toolOutputFailed(output) {
  * script returned JSON, otherwise its text, and on failure its stderr.
  */
 export function nativeToolResultContent(output) {
+  const receipt = agentReceiptContent(output);
+  if (receipt !== null) return receipt;
   if (typeof output === "string") return bounded(output);
   const run = plainObject(output);
   if (run && Object.hasOwn(run, "exit_code")) {
@@ -60,7 +79,10 @@ export function nativeToolResultContent(output) {
 
 /** The tool result as the transcript's chosen protocol shows it to the model. */
 export function toolResultContent(name, output, { native }) {
-  return native ? nativeToolResultContent(output) : formatLocalToolResult(name, output);
+  if (native) return nativeToolResultContent(output);
+  const receipt = agentReceiptContent(output, true);
+  return receipt === null ? formatLocalToolResult(name, output)
+    : formatLocalToolResult(name, receipt, DEFAULT_MAX_TOOL_RESULT_CHARS);
 }
 
 /** A stable, provider-valid id for a tool request that arrived without one. */
