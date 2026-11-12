@@ -246,6 +246,7 @@ export class AutomationOwner {
       case "agent.turn.pause": return this.agents.pause(args);
       case "agent.turn.resume": return this.agents.resume(args);
       case "agent.turn.complete": return this.agents.complete(args);
+      case "agent.session.cancel": return this.agents.cancel(args.id);
       case "agent.turn.abort": return this.agents.abort(args);
       case "agent.session.get": return this.agents.get(args.id);
       case "agent.session.list": return this.agents.list(args.agent || "");

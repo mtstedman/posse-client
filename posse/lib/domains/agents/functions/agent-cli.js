@@ -6,13 +6,14 @@ import { AgentRuntime } from "../classes/AgentRuntime.js";
 import { runRegisteredAdminCli } from "./registered-agent-admin-cli.js";
 
 const VALUE_FLAGS = new Set(["--session", "--conversation", "--resume", "--message", "-m", "--provider", "--idempotency-key"]);
-const BOOLEAN_FLAGS = new Set(["--json", "--request-json", "--deny", "--help"]);
-const COMMANDS = new Set(["list", "show", "new", "create", "save", "run", "chat", "confirm", "conversations", "export", "help"]);
+const BOOLEAN_FLAGS = new Set(["--json", "--request-json", "--budgeted", "--deny", "--help"]);
+const COMMANDS = new Set(["list", "show", "new", "create", "save", "run", "chat", "confirm", "conversations", "export", "stop", "help"]);
 
 export const AGENT_USAGE = `Usage:
   posse agent <name> [--session ID] [--idempotency-key KEY] [-m MESSAGE | stdin] [--json]
   posse agent chat <name> [--session ID]
   posse agent run <name> [--session ID] [-m MESSAGE | stdin] [--json]
+  posse agent stop <session-id>
   posse agent confirm <session-id> <proposal-id> [--deny] [--json]
   posse agent list [--json]
   posse agent show <name> [--json]
@@ -23,6 +24,10 @@ export const AGENT_USAGE = `Usage:
   posse agent conversations [<name>] [--json]
   posse agent export <session-id> [--json]
   posse agent dispatch < request.json
+
+Direct run/chat commands have no automatic call, turn or spending cutoff.
+Use Ctrl+C or posse agent stop <session-id> to cancel the run and its children.
+Use --budgeted to enforce the saved definition limits. Usage remains recorded.
 
 Qualify a model as provider:model (for example codex:gpt-6.1-sol) or use
 --provider to override the account's dev provider. The familiar cheap,
@@ -41,7 +46,7 @@ function parse(argv) {
     else positional.push(arg);
   }
   return {
-    positional, json: flags["--json"] === true, requestJson: flags["--request-json"] === true, deny: flags["--deny"] === true, help: flags["--help"] === true,
+    positional, unbudgeted: flags["--budgeted"] !== true, json: flags["--json"] === true, requestJson: flags["--request-json"] === true, deny: flags["--deny"] === true, help: flags["--help"] === true,
     message: flags["--message"] ?? flags["-m"] ?? null,
     session: flags["--session"] ?? flags["--conversation"] ?? flags["--resume"] ?? "",
     provider: flags["--provider"] || "",
@@ -127,9 +132,16 @@ export async function runAgentCli(argv = process.argv.slice(3), io = {}) {
     print(args.json ? JSON.stringify(session) : JSON.stringify(session, null, 2));
     return 0;
   }
+  if (command === "stop") {
+    requireCount(args.positional, 1, "posse agent stop <session-id>");
+    const client = await runtime.owner();
+    const stopped = await client.request("agent.session.cancel", { id: args.positional[0] });
+    print(args.json ? JSON.stringify(stopped) : `Stopped ${args.positional[0]}`);
+    return 0;
+  }
   if (command === "confirm") {
     requireCount(args.positional, 2, "posse agent confirm <session-id> <proposal-id> [--deny]");
-    const envelope = await runtime.confirm({ session: args.positional[0], proposal: args.positional[1], deny: args.deny, cwd: io.cwd || process.cwd() });
+    const envelope = await withInterrupt(signal => runtime.confirm({ session: args.positional[0], proposal: args.positional[1], deny: args.deny, cwd: io.cwd || process.cwd(), signal }));
     return printEnvelope(envelope, args.json, print, stderr);
   }
 
@@ -137,23 +149,23 @@ export async function runAgentCli(argv = process.argv.slice(3), io = {}) {
   if (command === "run" || command === "chat" || command === "direct") {
     requireCount(args.positional, 1, `posse agent ${command === "direct" ? "<name>" : `${command} <name>`}`);
     const name = args.positional[0];
-    if (chat) return await runChat({ runtime, name, session: args.session, provider: args.provider, stdin, stdout, stderr, cwd: io.cwd || process.cwd() });
+    if (chat) return await runChat({ unbudgeted: args.unbudgeted, runtime, name, session: args.session, provider: args.provider, stdin, stdout, stderr, cwd: io.cwd || process.cwd() });
     let request = { message: args.message == null ? await readMessage(stdin) : args.message };
     if (args.requestJson) {
       try { request = JSON.parse(request.message); } catch (error) { throw Object.assign(new Error(`Agent request is not valid JSON: ${error.message}`), { code: "invalid_request" }); }
       if (!request || typeof request !== "object" || Array.isArray(request) || typeof request.message !== "string") throw Object.assign(new Error("Agent request JSON requires message"), { code: "invalid_request" });
     }
-    const envelope = await runtime.run({
+    const envelope = await withInterrupt(signal => runtime.run({
       agent: name, message: request.message, bootstrapMessage: request.bootstrap_message || "",
       preRunContext: request.pre_run_context || [], session: args.session, provider: args.provider,
-      idempotencyKey: args.idempotencyKey, cwd: io.cwd || process.cwd(),
-    });
+      idempotencyKey: args.idempotencyKey, cwd: io.cwd || process.cwd(), unbudgeted: args.unbudgeted, signal,
+    }));
     return printEnvelope(envelope, args.json, print, stderr);
   }
   throw usageError(AGENT_USAGE);
 }
 
-async function runChat({ runtime, name, session, provider, stdin, stdout, stderr, cwd }) {
+async function runChat({ unbudgeted, runtime, name, session, provider, stdin, stdout, stderr, cwd }) {
   const terminal = readline.createInterface({ input: stdin, output: stdout });
   let activeSession = session;
   try {
@@ -161,14 +173,14 @@ async function runChat({ runtime, name, session, provider, stdin, stdout, stderr
     while (true) {
       const message = (await terminal.question("> ")).trim();
       if (!message || message === "/exit") break;
-      let envelope = await runtime.run({ agent: name, message, session: activeSession, provider, cwd,
-        onProgress: event => { const line = progressLine(event); if (line) stderr.write(line); } });
+      let envelope = await withInterrupt(signal => runtime.run({ unbudgeted, signal, agent: name, message, session: activeSession, provider, cwd,
+        onProgress: event => { const line = progressLine(event); if (line) stderr.write(line); } }));
       activeSession = envelope.conversation_id || activeSession;
       while (envelope.status === "needs_confirmation") {
         const pending = envelope.pending[0];
         stdout.write(`write request: ${pending.summary}\n`);
         const answer = (await terminal.question("Allow? [y/N] ")).trim().toLowerCase();
-        envelope = await runtime.confirm({ session: activeSession, proposal: pending.proposal_id, deny: answer !== "y" && answer !== "yes", cwd });
+        envelope = await withInterrupt(signal => runtime.confirm({ signal, session: activeSession, proposal: pending.proposal_id, deny: answer !== "y" && answer !== "yes", cwd }));
       }
       if (envelope.status === "done") stdout.write(`${envelope.reply}\n`);
       else stderr.write(`${envelope.error?.code || "agent_error"}: ${envelope.error?.message || "Agent turn failed"}\n`);
@@ -223,3 +235,15 @@ async function readMessage(stdin) {
 
 function requireCount(values, count, usage) { if (values.length !== count) throw usageError(usage); }
 function usageError(usage) { return Object.assign(new Error(`usage: ${usage}`), { code: "invalid_request" }); }
+
+// Install only while work is active. A second signal retains the host's normal exit path.
+async function withInterrupt(run) {
+  const controller = new AbortController();
+  const stop = () => {
+    process.off("SIGINT", stop); process.off("SIGTERM", stop);
+    controller.abort(Object.assign(new Error("Stopped by user"), { code: "request_canceled" }));
+  };
+  process.on("SIGINT", stop); process.on("SIGTERM", stop);
+  try { return await run(controller.signal); }
+  finally { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
+}

@@ -30,12 +30,13 @@ export class AgentToolRuntime {
       "Agent delegation cycle or depth limit reached", "agent_delegation_limit");
     const definition = loaded.definition;
     const budget = invocation?.budget || {};
+    const unbudgeted = invocation?.unbudgeted === true;
     const limits = {
       ...definition.limits,
       wall_seconds: Math.min(definition.limits.wall_seconds, budget.wall_seconds ?? Infinity),
       spend_usd: Math.min(definition.limits.spend_usd, budget.spend_usd ?? Infinity),
     };
-    demand(limits.wall_seconds > 0 && limits.spend_usd > 0, "Parent agent budget is exhausted", "agent_budget_exceeded");
+    demand(limits.wall_seconds > 0 && (unbudgeted || limits.spend_usd > 0), "Parent agent budget is exhausted", "agent_budget_exceeded");
     const privateSchema = this.owner.agents.privateInputSchema(definition);
     schemaCheck(privateSchema, privateInputs);
     const cwd = resolveAgentWorkingDirectory(definition, definition.scope.folder_path || invocation?.cwd || process.cwd());
@@ -47,7 +48,7 @@ export class AgentToolRuntime {
     const started = Date.now();
     const state = { uncertain: false };
     const execution = {
-      kind: SCRIPT_TOOL_AGENT_EXECUTION_KIND, clientID: sessionID, agent: target.name, definition,
+      unbudgeted, kind: SCRIPT_TOOL_AGENT_EXECUTION_KIND, clientID: sessionID, agent: target.name, definition,
       inputs: Object.freeze(structuredClone(privateInputs)), inputsDigest: digest(privateInputs),
       requestID: invocation?.run_id || sessionID, state, signal: controller.signal, limits,
       ancestors: [...ancestors, target.name],

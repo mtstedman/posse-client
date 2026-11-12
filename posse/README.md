@@ -1983,3 +1983,10 @@ New agent definitions default to 10,000 calls and 20,000 turns. Agent and skill 
 Agent definitions select a model (including `cheap`, `standard`, or `strong`) and optional `reasoning_effort` (`low`, `medium`, `high`, `xhigh`). The legacy `limits.wall_seconds` field measures provider inactivity, not total run time. Activity refreshes that allowance; tool execution does not consume it. New definitions default to 1800 seconds. Native Invoke agent tools follow their selected agent’s inactivity policy rather than imposing their script timeout on the child. Spend, call, turn, explicit script execution limits, and cancellation still apply.
 
 Caller-owned `posse agent dispatch` requests accept optional `reasoning_effort` and `idle_seconds` (1–14400; default 1800). Provider dispatch runs without a total wall cap for these agent decisions, retaining the provider’s inactivity watchdog.
+
+
+### Direct-assist execution and stopping
+
+`posse agent <name>`, `posse agent run <name>` and `posse agent chat <name>` run without automatic call, model-turn or spending cutoffs. Native Invoke agent children inherit this mode through the authenticated owner. Usage and cost remain recorded. The agent's saved definition and digest do not change. Use `--budgeted` to enforce its saved usage limits; registered applications and scheduled automation retain their budgets.
+
+Press Ctrl+C to cancel a CLI run and its delegated work, or run `posse agent stop <session-id>` from another terminal. Bossy provides Stop / Ctrl+X. Cancellation revokes the active turn and cancels its child tool runs. An external stop is observed by a quiet provider on the next owner heartbeat (within 30 seconds); Ctrl+C aborts the local provider immediately. Provider inactivity detection, individual script execution timeouts, grants, scope and write approvals remain enforced. Active agent work has no total elapsed-time cutoff.

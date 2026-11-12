@@ -76,7 +76,7 @@ export class AgentSessionRegistry {
     return session;
   }
 
-  begin({ session_id = "", definition, digest, message, idempotency_key = "", prompt_tool_results = [] }, execution = null) {
+  begin({ session_id = "", definition, digest, message, idempotency_key = "", prompt_tool_results = [], unbudgeted = false }, execution = null) {
     const checked = validateAgentDefinition(definition);
     demand(checked.ok, checked.errors.join("; "), "agent_invalid");
     const exactDigest = agentDefinitionDigest(checked.definition);
@@ -124,12 +124,13 @@ export class AgentSessionRegistry {
     const token = randomUUID(), turnID = `turn_${randomUUID()}`;
     session.status = "active";
     session.active = {
+      unbudgeted: execution ? execution.unbudgeted === true : unbudgeted === true,
       token, turn_id: turnID, message: sourceMessage, source_message: sourceMessage, idempotency_key, started_at: nowIso(this.now),
       expires_at_ms: this.now() + Math.max(ACTIVE_TTL_MS, checked.definition.limits.wall_seconds * 1000 + 60_000),
     };
     session.pending = null; session.updated_at = nowIso(this.now);
     this.store.put(SESSION_KIND, id, session);
-    return { session: this.publicSession(session), definition: structuredClone(session.definition), token, turn_id: turnID, messages: session.messages, capabilities: session.capabilities.map(publicCapability), pre_run_context: preRunContext, skill_instructions: structuredClone(session.skill_instructions || []), turn_message: sourceMessage };
+    return { unbudgeted: session.active.unbudgeted, session: this.publicSession(session), definition: structuredClone(session.definition), token, turn_id: turnID, messages: session.messages, capabilities: session.capabilities.map(publicCapability), pre_run_context: preRunContext, skill_instructions: structuredClone(session.skill_instructions || []), turn_message: sourceMessage };
   }
 
   assertOwnership(session, execution) {
@@ -183,6 +184,7 @@ export class AgentSessionRegistry {
       assertRegisteredCapability(this.service, capability.entry_id, capability.digest, principal, capability.grant_id);
     }
     const invocation = {
+      unbudgeted: session.active.unbudgeted === true,
       parent_session_id: session_id, ancestors: execution?.ancestors || [session.agent],
       cwd: execution?.cwd || session.definition.scope.folder_path || process.cwd(),
       budget: {
@@ -224,7 +226,7 @@ export class AgentSessionRegistry {
     this.assertOwnership(session, null);
     demand(proposal && typeof proposal === "object", "Confirmation proposal is required", "invalid_request");
     session.status = "pending_confirmation";
-    session.pending = { ...proposal, turn_idempotency_key: session.active.idempotency_key,
+    session.pending = { ...proposal, unbudgeted: session.active.unbudgeted === true, turn_idempotency_key: session.active.idempotency_key,
       proposal_id: proposal.proposal_id || `proposal_${randomUUID()}`, created_at: nowIso(this.now) };
     session.active = null; session.updated_at = nowIso(this.now);
     this.store.put(SESSION_KIND, session_id, session);
@@ -241,6 +243,7 @@ export class AgentSessionRegistry {
     const token = randomUUID();
     session.status = "active";
     session.active = {
+      unbudgeted: pending.unbudgeted === true,
       token, turn_id: pending.turn_id, message: pending.message, source_message: pending.source_message || pending.message, started_at: pending.started_at,
       idempotency_key: pending.turn_idempotency_key || "",
       expires_at_ms: this.now() + Math.max(ACTIVE_TTL_MS, session.definition.limits.wall_seconds * 1000 + 60_000),
@@ -272,6 +275,17 @@ export class AgentSessionRegistry {
     session.status = "idle"; session.active = null; session.pending = null; session.updated_at = nowIso(this.now);
     if (error) session.last_error = String(error).slice(0, 1000);
     this.store.put(SESSION_KIND, session_id, session);
+    return this.publicSession(session);
+  }
+
+  cancel(id) {
+    const session = this.session(id);
+    this.assertOwnership(session, null);
+    if (this.active(session)) return this.abort({ session_id: id, token: session.active.token, error: "Stopped by user" });
+    if (session.status === "pending_confirmation") {
+      session.pending = null; session.status = "idle"; session.updated_at = nowIso(this.now);
+      this.store.put(SESSION_KIND, id, session);
+    }
     return this.publicSession(session);
   }
 
