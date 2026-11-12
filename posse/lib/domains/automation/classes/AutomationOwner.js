@@ -101,6 +101,10 @@ export class AutomationOwner {
   }
   accept(socket, registered = false, gateway = false) {
     let buffer = Buffer.alloc(0), done = false, framed = false;
+    const controller = new AbortController();
+    socket.once("close", () => {
+      if (!done) controller.abort(Object.assign(new Error("Operator disconnected"), { code: "request_canceled" }));
+    });
     socket.setTimeout(5000, () => socket.destroy());
     const fail = error => {
       if (done) return; done = true;
@@ -123,7 +127,7 @@ export class AutomationOwner {
       };
       try {
         const request = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
-        Promise.resolve(gateway ? this.dispatchGateway(request, progress) : registered ? this.dispatchRegistered(request, progress) : this.dispatch(request)).then(result => {
+        Promise.resolve(gateway ? this.dispatchGateway(request, progress) : registered ? this.dispatchRegistered(request, progress) : this.dispatch(request, { signal: controller.signal })).then(result => {
           const response = JSON.stringify({ ok: true, result }) + "\n";
           demand(Buffer.byteLength(response) <= AUTOMATION_MAX_RESPONSE_BYTES,
             "Automation result exceeds the response limit; narrow the tool output or inspect the run locally", "response_too_large");
@@ -133,12 +137,12 @@ export class AutomationOwner {
     });
     socket.on("error", () => {});
   }
-  dispatch(request) {
+  dispatch(request, context = {}) {
     demand(request && typeof request === "object" && !Array.isArray(request), "Invalid automation request");
     if (request.kind === "health") return this.health();
     if (request.kind === "agent") return this.dispatchAgent(request);
     demand(request.kind === "operator" && timingSafeEqual(request.token, this.operatorToken), "Operator authentication failed", "unauthorized");
-    return this.dispatchOperator(request.operation, request.args || {});
+    return this.dispatchOperator(request.operation, request.args || {}, context);
   }
   dispatchRegistered(request, onProgress = null) {
     demand(request && typeof request === "object" && !Array.isArray(request), "Invalid registered request", "invalid_request");
@@ -165,7 +169,7 @@ export class AutomationOwner {
     if (config.workItemId != null) principal.work_item_id = String(config.workItemId);
     return this.service.tool(principal, request.args || {});
   }
-  dispatchOperator(operation, args) {
+  dispatchOperator(operation, args, { signal } = {}) {
     switch (operation) {
       case "health": return this.health();
       case "tools.available": return { available: this.service.health().ready === true && this.service.discover(args.principal).length > 0 };
@@ -226,7 +230,7 @@ export class AutomationOwner {
       case "script.manifest.save": return this.scripts.saveManifest(args.name, args.spec, args.expected_digest);
       case "script.code.get": return this.scripts.code(args.name);
       case "script.code.save": return this.scripts.saveCode(args.name, args.code, args.expected_digest);
-      case "script.test": return this.scripts.test(args.name, args.input || {}, args.inputs || {});
+      case "script.test": return this.scripts.test(args.name, args.input || {}, args.inputs || {}, { signal });
       case "script.grant": return this.scripts.grant(args.name, { repoPath: args.repo_path, standalone: args.standalone === true, roles: args.roles, unattended: args.unattended === true });
       case "script.secret.set": return this.scripts.setSecret(args.tool, args.name, args.value);
       case "script.secret.unset": return this.scripts.unsetSecret(args.tool, args.name);

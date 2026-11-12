@@ -187,15 +187,16 @@ export class ScriptToolRegistry {
   }
   // Runs the tool against operator input; a pass publishes this exact digest
   // as the tool's entry and revokes grants that pinned an older version.
-  async test(name, input = {}, privateInputs = {}) {
+  async test(name, input = {}, privateInputs = {}, { signal } = {}) {
     const tool = this.load(name);
     schemaCheck(tool.manifest.params, input);
     const selected = this.selectInputs(tool, privateInputs);
     const result = tool.manifest.invoke_agent
-      ? await this.agentTools.run(tool, input, { privateInputs: selected })
+      ? await this.agentTools.run(tool, input, { privateInputs: selected, signal, invocation: { unbudgeted: true } })
       : tool.manifest.generate
       ? await runMediaTool(tool, input, { generators: this.mediaGenerators })
-      : await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected });
+      : await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected, signal });
+    signal?.throwIfAborted();
     if (!result.ok) return { tool: name, digest: tool.digest, result, published: null, revoked_grants: [] };
     this.validateOutput(tool, result);
     const entry = this.entryFor(tool);

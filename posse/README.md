@@ -526,7 +526,8 @@ a starter that fails until you edit it.
   grant the tool like other tools. It declares write effects, and the child
   still needs its own current tool grants and write permission. Changing the
   target definition requires updating the binding and testing again. Children
-  use isolated conversations, bounded time/spend, cancellation and a maximum
+  use isolated conversations, inherited usage policy, inactivity detection,
+  cancellation and a maximum
   delegation depth of four; cycles are rejected. No application dispatcher,
   shell launcher, or `posse-agent` subprocess is used.
 
@@ -1988,5 +1989,7 @@ Caller-owned `posse agent dispatch` requests accept optional `reasoning_effort` 
 ### Direct-assist execution and stopping
 
 `posse agent <name>`, `posse agent run <name>` and `posse agent chat <name>` run without automatic call, model-turn or spending cutoffs. Native Invoke agent children inherit this mode through the authenticated owner. Usage and cost remain recorded. The agent's saved definition and digest do not change. Use `--budgeted` to enforce its saved usage limits; registered applications and scheduled automation retain their budgets.
+
+Operator tests of Invoke agent tools (`posse tools test` and Bossy activation tests) also run without usage cutoffs. Disconnecting the operator request cancels that test and its delegated work; an interrupted test does not publish a passing entry.
 
 Press Ctrl+C to cancel a CLI run and its delegated work, or run `posse agent stop <session-id>` from another terminal. Bossy provides Stop / Ctrl+X. Cancellation revokes the active turn and cancels its child tool runs. An external stop is observed by a quiet provider on the next owner heartbeat (within 30 seconds); Ctrl+C aborts the local provider immediately. Provider inactivity detection, individual script execution timeouts, grants, scope and write approvals remain enforced. Active agent work has no total elapsed-time cutoff.
