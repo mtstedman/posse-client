@@ -30,7 +30,7 @@ export class AutomationOwnerClient {
     const payload = this.operator
       ? { kind: "operator", token: this.token || ensureAutomationOperatorToken(), operation, args }
       : operation === "health" ? { kind: "health" } : { kind: "agent", token: this.token, args };
-    return requestFrame(this.socketPath, payload, this.timeoutMs);
+    return requestFrame(this.socketPath, payload, ["agent.turn.invoke", "script.test"].includes(operation) ? 0 : this.timeoutMs);
   }
   health() { return this.request("health"); }
   async hasAvailableTools(principal) {
@@ -179,7 +179,7 @@ function requestFrame(socketPath, payload, timeoutMs) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath); let buffer = Buffer.alloc(0), settled = false;
     const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); socket.destroy(); error ? reject(error) : resolve(value); };
-    const timer = setTimeout(() => finish(Object.assign(new Error("Automation owner request timed out"), { code: "owner_timeout" })), timeoutMs);
+    const timer = timeoutMs > 0 ? setTimeout(() => finish(Object.assign(new Error("Automation owner request timed out"), { code: "owner_timeout" })), timeoutMs) : null;
     socket.once("connect", () => socket.write(JSON.stringify(payload) + "\n"));
     socket.on("data", chunk => {
       buffer = Buffer.concat([buffer, chunk]);

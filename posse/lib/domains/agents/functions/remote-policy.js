@@ -8,7 +8,7 @@ export async function compileAgentPolicy({ definition, message, provider, cwd = 
     cwd,
     model_name: definition.model,
     model_tier: "standard",
-    reasoning_effort: "medium",
+    reasoning_effort: definition.reasoning_effort || "medium",
     governance_tier: "production",
     attempt: { count: 1, max: 1 },
     tool_policy: { allow_read: false, allow_write: false, allow_shell: false, allow_tests: false },

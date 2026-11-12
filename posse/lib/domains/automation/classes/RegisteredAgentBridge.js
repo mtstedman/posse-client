@@ -452,6 +452,7 @@ export class RegisteredAgentBridge {
       switch (operation) {
         case "agent.session.get": return structuredClone(this.owner.agents.registeredSession(args.id, execution));
         case "agent.turn.begin": return this.owner.agents.begin(args, execution);
+        case "agent.turn.touch": return this.owner.agents.touch(args, execution);
         case "agent.turn.invoke": return this.owner.agents.invoke(args, execution);
         case "agent.turn.complete": return this.owner.agents.complete(args, execution);
         case "agent.turn.abort": return this.owner.agents.abort(args, execution);
@@ -459,7 +460,6 @@ export class RegisteredAgentBridge {
       }
     } };
     let result;
-    const timeout = setTimeout(() => controller.abort(), loaded.definition.limits.wall_seconds * 1000);
     const active = { clientID: registration.identity, controller, promise: null, resolve: null };
     active.promise = new Promise(resolve => { active.resolve = resolve; });
     this.active.set(receiptKey, active);
@@ -485,7 +485,7 @@ export class RegisteredAgentBridge {
     } catch (error) {
       result = failure(["forbidden", "idempotency_conflict", "agent_session_busy", "capability_unavailable"].includes(error.code) ? error.code : "agent_error");
       result.internalError = { code: error?.code || "agent_error", message: error?.message || String(error) };
-    } finally { clearTimeout(timeout); }
+    }
     const response = executionState.uncertain
       ? safeResult(failure("external_outcome_unknown", "External write outcome needs operator reconciliation"), receipt)
       : safeResult(result, receipt);

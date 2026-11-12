@@ -108,6 +108,6 @@ export async function callNativeApiAgentTurn(provider, promptText, options = {})
     stallTimeoutMs: resolveProviderStallTimeout(options.stallTimeout) * 1000,
     issuedToolIds: tools.map(tool => tool.name), decision: { tools, allowBatching: options.allowToolBatching === true },
   });
-  const result = await runNativeDispatch(request, { abortSignal: options.signal, silent: true });
+  const result = await runNativeDispatch(request, { abortSignal: options.signal, silent: true, onActivity: options.onActivity });
   return { ...result, toolCalls: result.stats.toolDecisions || [], providerContent: result.stats.providerContent || null };
 }

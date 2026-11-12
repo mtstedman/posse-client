@@ -429,11 +429,11 @@ export async function callAgentTurn(promptText, options = {}) {
     ...options, modelName, role: "preflight", reasoningEffort: "none", transcript,
     systemPrompt: [options.systemPrompt, instructions].filter(Boolean).join("\n\n"),
     maxTurns: 1, maxOutputTokens: Math.min(profile.maxOutputTokens, Number(options.maxOutputTokens) || profile.maxOutputTokens),
-    stallTimeoutMs: options.timeoutMs || 15 * 60 * 1000, maxToolResultChars: profile.maxToolResultChars,
+    stallTimeoutMs: options.stallTimeout ? options.stallTimeout * 1000 : options.timeoutMs || 30 * 60 * 1000, maxToolResultChars: profile.maxToolResultChars,
     issuedToolIds: tools.map(tool => tool.name), decision: { tools, allowBatching: options.allowToolBatching === true },
   });
   const result = await runNativeDispatch(request, {
-    abortSignal: options.signal, silent: true,
+    abortSignal: options.signal, silent: true, onActivity: options.onActivity,
     dispatch: options.dispatch || ((request, opts) => dispatchLocalProvider(request, {
       ...opts, manager, modelRoot, runtimeRoot: options.runtimeRoot || defaultLocalGenerationRuntimeRoot(),
     })),

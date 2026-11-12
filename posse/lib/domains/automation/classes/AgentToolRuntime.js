@@ -32,7 +32,7 @@ export class AgentToolRuntime {
     const budget = invocation?.budget || {};
     const limits = {
       ...definition.limits,
-      wall_seconds: Math.min(definition.limits.wall_seconds, tool.manifest.timeout_seconds, budget.wall_seconds ?? Infinity),
+      wall_seconds: Math.min(definition.limits.wall_seconds, budget.wall_seconds ?? Infinity),
       spend_usd: Math.min(definition.limits.spend_usd, budget.spend_usd ?? Infinity),
     };
     demand(limits.wall_seconds > 0 && limits.spend_usd > 0, "Parent agent budget is exhausted", "agent_budget_exceeded");
@@ -44,7 +44,6 @@ export class AgentToolRuntime {
     const abort = () => controller.abort(signal.reason);
     if (signal?.aborted) abort();
     else signal?.addEventListener("abort", abort, { once: true });
-    const timer = setTimeout(() => controller.abort(), limits.wall_seconds * 1000);
     const started = Date.now();
     const state = { uncertain: false };
     const execution = {
@@ -67,6 +66,7 @@ export class AgentToolRuntime {
       switch (operation) {
         case "agent.session.get": return this.owner.agents.registeredSession(args.id, execution);
         case "agent.turn.begin": return this.owner.agents.begin(args, execution);
+        case "agent.turn.touch": return this.owner.agents.touch(args, execution);
         case "agent.turn.invoke": return this.owner.agents.invoke(args, execution);
         case "agent.turn.complete": return this.owner.agents.complete(args, execution);
         case "agent.turn.abort": return this.owner.agents.abort(args, execution);
@@ -93,7 +93,6 @@ export class AgentToolRuntime {
         output_json: result, stdout: "", stderr: "", timed_out: controller.signal.aborted,
         duration_ms: Date.now() - started };
     } finally {
-      clearTimeout(timer);
       signal?.removeEventListener("abort", abort);
     }
   }

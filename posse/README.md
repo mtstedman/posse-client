@@ -1970,3 +1970,9 @@ reservations cannot be cleared. Exited processes and ended worker attempts retai
 unknown charges until reconciled. Resolve any orphan provider execution before
 reconciling its final charge. Disabling the gate is an explicit operator action;
 it preserves the ledger. These actions do not merge, publish or deploy work.
+
+### Agent activity and strength
+
+Agent definitions select a model (including `cheap`, `standard`, or `strong`) and optional `reasoning_effort` (`low`, `medium`, `high`, `xhigh`). The legacy `limits.wall_seconds` field measures provider inactivity, not total run time. Activity refreshes that allowance; tool execution does not consume it. New definitions default to 1800 seconds. Native Invoke agent tools follow their selected agent’s inactivity policy rather than imposing their script timeout on the child. Spend, call, turn, explicit script execution limits, and cancellation still apply.
+
+Caller-owned `posse agent dispatch` requests accept optional `reasoning_effort` and `idle_seconds` (1–14400; default 1800). Provider dispatch runs without a total wall cap for these agent decisions, retaining the provider’s inactivity watchdog.

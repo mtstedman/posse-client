@@ -94,6 +94,8 @@ export async function callProvider(promptText, {
   mcpCwd = null,       // optional override for MCP workspace root. Falls back to cwd.
   projectDir = null,
   abortSignal = null,
+  wallTimeoutMs = null,
+  onActivity = null,
   stallTimeout = null,
   fallbackReads = null,
   assessorMaxToolCalls = null,
@@ -290,6 +292,7 @@ export async function callProvider(promptText, {
           issuedToolIds: deterministicReadMcp.issuedToolIds || [],
           cwd: mcpWorkspaceCwd, readRoots, createRoots, scopedFiles, createFiles, deleteFiles,
           maxTurns: turnLimit, maxOutputTokens: outputTokenLimit,
+          wallTimeoutMs,
           stallTimeoutMs: resolveProviderStallTimeout(stallTimeout) * (["researcher", "planner"].includes(role) ? 2 : 1) * 1000,
           priorSessionHandle: resumeSessionHandle,
           recyclingMode: resumeSessionHandle ? "resume" : "fresh",
@@ -297,7 +300,7 @@ export async function callProvider(promptText, {
         // A terminal handoff stop lands before Codex records the usage of the
         // request that made the handoff call; give that segment a bounded wait.
         const result = await runWithTerminalUsageFlush(abortSignal, ({ signal, onUsage }) => runNativeDispatch(request, {
-          abortSignal: signal, mcpGate, projectDir: providerPaths.projectDir, silent, onLine,
+          abortSignal: signal, mcpGate, projectDir: providerPaths.projectDir, silent, onLine, onActivity,
           onAgentCommentary, onProviderToolUse, onProviderToolResult, onUsageProgress,
           onUsageSegment: (segment) => {
             onUsage();

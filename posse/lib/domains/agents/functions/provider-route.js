@@ -50,6 +50,10 @@ export function agentProviderSuppliesToolProtocol(providerName) {
 
 export async function callAgentProvider(providerName, prompt, options = {}) {
   const provider = getProvider("dev", providerName);
+  // The native host sees provider activity (including thinking/status frames)
+  // that does not become public output. Let its inactivity watchdog own this
+  // request instead of timing silence in the aggregated response above it.
+  options.onInactivityWatchdog?.();
   // An API provider whose native binary accepts transcripts takes the whole
   // conversation as native messages, with or without tools. Otherwise it
   // takes the flattened prompt, through a decision turn only when tools exist.
@@ -60,13 +64,13 @@ export async function callAgentProvider(providerName, prompt, options = {}) {
       systemPrompt: options.systemPrompt || null,
       tools: options.tools || [],
       transcript,
-      // Tool turns plan actions rather than compose prose; low effort keeps
-      // provider thinking from overrunning the turn's output cap.
       reasoningEffort: options.reasoningEffort || (options.tools?.length ? "low" : "medium"),
       promptCache: options.promptCache === true,
       allowToolBatching: options.allowToolBatching === true,
       maxOutputTokens: options.maxOutputTokens || (options.tools?.length ? 2048 : 8000),
       signal: options.signal,
+      stallTimeout: options.idleSeconds || 1800, wallTimeoutMs: 0,
+      onActivity: options.onActivity,
       cwd: options.cwd || process.cwd(),
     });
   }
@@ -77,7 +81,11 @@ export async function callAgentProvider(providerName, prompt, options = {}) {
     remoteSystemPrompt: options.systemPrompt || null,
     skipRolePrompt: true,
     silent: true,
-    onLine: () => {},
+    onActivity: options.onActivity,
+    onLine: () => options.onActivity?.(),
+    onAgentCommentary: () => options.onActivity?.(),
+    onUsageProgress: () => options.onActivity?.(),
+    stallTimeout: options.idleSeconds || 1800, wallTimeoutMs: 0,
     cwd: options.cwd || process.cwd(),
     maxTurns: 1,
     maxOutputTokens: options.maxOutputTokens || 8000,

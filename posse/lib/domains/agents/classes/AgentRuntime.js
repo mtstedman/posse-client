@@ -226,7 +226,7 @@ export class AgentRuntime {
         try {
           const result = await client.request("agent.turn.invoke", { session_id: session, token: resumed.token, tool: pending.tool, input: pending.input, confirmed: true, idempotency_key: pending.idempotency_key,
             budget: { spend_usd: Math.max(0, pending.definition.limits.spend_usd - (pending.usage?.cost_usd || 0)),
-              wall_seconds: Math.max(0, pending.definition.limits.wall_seconds - (this.now() - pending.started_at_ms) / 1000) } });
+              wall_seconds: pending.definition.limits.wall_seconds } });
           this.recordDelegatedUsage(pending.usage, result.delegated_usage);
           toolCalls.push({ tool: pending.tool, status: "ok", duration_ms: result.duration_ms, effect: "write" });
           answer(result.output, toolOutputFailed(result.output));
@@ -250,27 +250,48 @@ export class AgentRuntime {
   }
 
   async continueTurn(state) {
-    const deadline = state.startedAt + state.definition.limits.wall_seconds * 1000;
+    // Refresh authority while this process owns the turn, including quiet tools.
+    // Provider inactivity is enforced separately; this is a lease, not progress.
+    const lease = new AbortController();
+    let renewing = false;
+    const heartbeat = setInterval(async () => {
+      if (renewing) return;
+      renewing = true;
+      try { await state.client.request("agent.turn.touch", { session_id: state.session.id, token: state.token }); }
+      catch (error) { lease.abort(error); }
+      finally { renewing = false; }
+    }, 30_000);
+    heartbeat.unref?.();
+    const leaseSignal = state.execution?.signal ? AbortSignal.any([lease.signal, state.execution.signal]) : lease.signal;
+    try { return await this.runDecisions({ ...state, leaseSignal }); }
+    finally { clearInterval(heartbeat); }
+  }
+
+  async runDecisions(state) {
     // API providers take the conversation as native messages; prompt-only
     // providers take its flattened text form.
     const native = agentProviderUsesNativeTools(state.route.provider);
     while (state.usage.turns < state.definition.limits.turns) {
-      state.execution?.check();
+      state.leaseSignal?.throwIfAborted(); state.execution?.check();
       if (state.usage.cost_usd >= state.definition.limits.spend_usd) throw Object.assign(new Error("Agent turn exceeded its spend limit"), { code: "agent_budget_exceeded" });
-      if (this.now() >= deadline) throw Object.assign(new Error("Agent turn exceeded its wall-time limit"), { code: "agent_budget_exceeded" });
       const controller = new AbortController();
-      const parentSignal = state.execution?.signal;
+      const parentSignal = state.leaseSignal || state.execution?.signal;
       const abortFromParent = () => controller.abort(parentSignal.reason);
       if (parentSignal) {
         if (parentSignal.aborted) abortFromParent();
         else parentSignal.addEventListener("abort", abortFromParent, { once: true });
       }
-      const timer = setTimeout(() => controller.abort(), Math.max(0, deadline - this.now()));
+      const idleMs = state.definition.limits.wall_seconds * 1000;
+      const timer = setTimeout(() => controller.abort(Object.assign(new Error("Agent provider was inactive"), { code: "agent_idle_timeout" })), idleMs);
+      let nativeWatchdog = false;
+      const onActivity = () => { if (!nativeWatchdog) timer.refresh(); };
+      const onInactivityWatchdog = () => { nativeWatchdog = true; clearTimeout(timer); };
       state.progress?.({ type: "turn.started", turn: state.usage.turns + 1 });
       let generated;
       try {
         const providerCall = this.callProvider(state.route.provider, renderConversation(state.messages), {
           modelName: state.route.modelName, systemPrompt: state.systemPrompt, promptCache: true, cwd: state.cwd,
+          reasoningEffort: state.definition.reasoning_effort, idleSeconds: state.definition.limits.wall_seconds, onActivity, onInactivityWatchdog,
           signal: controller.signal, tools: state.tools, allowToolBatching: canBatchToolCalls(state.tools, state.definition),
           maxOutputTokens: state.maxOutputTokens || (state.tools?.length ? TOOL_TURN_MAX_OUTPUT_TOKENS : undefined),
           ...(native ? { transcript: dispatchTranscript(state.messages) } : {}),
@@ -279,7 +300,7 @@ export class AgentRuntime {
       } catch (error) {
         if (!OUTPUT_LIMIT_CODES.has(error?.code)) throw error;
         // The provider already billed the truncated response; count it.
-        state.execution?.check();
+        state.leaseSignal?.throwIfAborted(); state.execution?.check();
         const billed = { ...state.usage };
         this.recordProviderUsage(state, error.stats);
         // A response that overruns even the repair cap ends the turn with what
@@ -294,8 +315,7 @@ export class AgentRuntime {
         clearTimeout(timer);
         parentSignal?.removeEventListener("abort", abortFromParent);
       }
-      state.execution?.check();
-      if (this.now() >= deadline) throw Object.assign(new Error("Agent turn exceeded its wall-time limit"), { code: "agent_budget_exceeded" });
+      state.leaseSignal?.throwIfAborted(); state.execution?.check();
       const before = { ...state.usage };
       this.recordProviderUsage(state, generated?.stats);
       state.progress?.({ type: "turn.finished", turn: state.usage.turns, ...usageProgress(before, state.usage) });
@@ -352,8 +372,7 @@ export class AgentRuntime {
       const answer = (call, output, isError) => results.push({ role: "tool", tool_call_id: call.id, name: call.name,
         content: toolResultContent(call.name, output, { native }), is_error: isError });
       for (const { call, tool, error } of checkedCalls) {
-        state.execution?.check();
-        if (this.now() >= deadline) throw Object.assign(new Error("Agent turn exceeded its wall-time limit"), { code: "agent_budget_exceeded" });
+        state.leaseSignal?.throwIfAborted(); state.execution?.check();
         if (error) {
           answer(call, `Error: ${error}`, true);
           continue;
@@ -382,7 +401,7 @@ export class AgentRuntime {
         state.progress?.({ type: "tool.started", ...progressCall, ...(state.toolSummary ? progressArguments(call.arguments) : {}) });
         try {
           const result = await state.client.request("agent.turn.invoke", { session_id: state.session.id, token: state.token, tool: call.name, input: call.arguments, idempotency_key: idempotencyKey,
-            budget: { spend_usd: Math.max(0, state.definition.limits.spend_usd - state.usage.cost_usd), wall_seconds: Math.max(0, (deadline - this.now()) / 1000) } });
+            budget: { spend_usd: Math.max(0, state.definition.limits.spend_usd - state.usage.cost_usd), wall_seconds: state.definition.limits.wall_seconds } });
           this.recordDelegatedUsage(state.usage, result.delegated_usage);
           const status = tool.kind === "script" && result.output?.ok === false ? "failed" : "ok";
           state.toolCalls.push({ tool: call.name, status, duration_ms: result.duration_ms, effect: tool.effect });
@@ -479,9 +498,9 @@ export class AgentRuntime {
 }
 
 function abortable(promise, signal) {
-  if (signal.aborted) return Promise.reject(Object.assign(new Error("Agent turn timed out"), { code: "agent_budget_exceeded" }));
+  if (signal.aborted) return Promise.reject(signal.reason || Object.assign(new Error("Agent turn canceled"), { code: "request_canceled" }));
   return new Promise((resolve, reject) => {
-    const abort = () => reject(Object.assign(new Error("Agent turn timed out"), { code: "agent_budget_exceeded" }));
+    const abort = () => reject(signal.reason || Object.assign(new Error("Agent turn canceled"), { code: "request_canceled" }));
     signal.addEventListener("abort", abort, { once: true });
     Promise.resolve(promise).then(value => { signal.removeEventListener("abort", abort); resolve(value); }, error => { signal.removeEventListener("abort", abort); reject(error); });
   });

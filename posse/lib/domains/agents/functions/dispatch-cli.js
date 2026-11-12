@@ -1,4 +1,4 @@
-import { AGENT_DISPATCH_PROTOCOL, AGENT_DISPATCH_PROTOCOL_ERROR } from "../../../catalog/agent.js";
+import { AGENT_DISPATCH_PROTOCOL, AGENT_DISPATCH_PROTOCOL_ERROR, AGENT_REASONING_EFFORTS } from "../../../catalog/agent.js";
 import { buildAgentToolInstructions, TOOL_BATCH_MAX_CALLS } from "../classes/AgentRuntime.js";
 import { agentProviderSuppliesToolProtocol, agentProviderUsesNativeTools, callAgentProvider, resolveAgentProvider } from "./provider-route.js";
 import { dispatchTranscript, renderConversation, toolCallId } from "./transcript.js";
@@ -30,6 +30,8 @@ export async function dispatchAgentTurn(request, dependencies = {}) {
   // Optional: the caller accepts several independent calls in one decision
   // and still executes, orders and authorizes each of them itself.
   demand(request.allow_tool_batching === undefined || typeof request.allow_tool_batching === "boolean", "allow_tool_batching must be true or false");
+  demand(!request.reasoning_effort || AGENT_REASONING_EFFORTS.includes(request.reasoning_effort), "Invalid reasoning_effort");
+  demand(request.idle_seconds === undefined || Number.isInteger(request.idle_seconds) && request.idle_seconds > 0 && request.idle_seconds <= 14400, "idle_seconds must be 1 to 14400");
   const batching = request.allow_tool_batching === true;
   const route = (dependencies.resolve || resolveAgentProvider)(request.model || "auto", request.provider || "");
   const native = (dependencies.native || agentProviderUsesNativeTools)(route.provider);
@@ -38,7 +40,7 @@ export async function dispatchAgentTurn(request, dependencies = {}) {
     ? `Use only the provider-issued tools.${batching ? ` Issue up to ${TOOL_BATCH_MAX_CALLS} independent, ready tool calls in one response when useful; wait for results before making dependent calls.` : ""} Never invent tool results or print tool-call JSON as prose. After real results arrive, answer in plain language.`
     : buildAgentToolInstructions(request.tools, { autonomy: { write_tools: "confirm" }, limits: { calls: 1 } }, { callerOwned: true, callerBatching: batching });
   const generated = await (dependencies.call || callAgentProvider)(route.provider, renderConversation(request.messages), {
-    modelName: route.modelName,
+    modelName: route.modelName, reasoningEffort: request.reasoning_effort || undefined, idleSeconds: request.idle_seconds || 1800,
     systemPrompt: [request.system_prompt, toolInstructions].filter(Boolean).join("\n\n"),
     tools: request.tools, allowToolBatching: batching, promptCache: true,
     cwd: dependencies.cwd || process.cwd(), signal: dependencies.signal,

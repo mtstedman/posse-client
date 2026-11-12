@@ -24,12 +24,14 @@ export const AGENT_OPTIONAL_LIMITS = Object.freeze({
 
 export const AGENT_DEFINITION_FIELDS = Object.freeze([
   "schema", "name", "description", "prompt", "model", "scope", "tools",
-  "skills", "autonomy", "limits",
+  "skills", "autonomy", "limits", "reasoning_effort",
 ]);
 
 export const AGENT_DEFAULTS = Object.freeze({
   model: "sonnet",
   scope: Object.freeze({ kind: "sandbox" }),
   autonomy: Object.freeze({ write_tools: "confirm" }),
-  limits: Object.freeze({ turns: 16, calls: 32, spend_usd: 2, wall_seconds: 600 }),
+  limits: Object.freeze({ turns: 16, calls: 32, spend_usd: 2, wall_seconds: 1800 }),
 });
+
+export const AGENT_REASONING_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh"]);

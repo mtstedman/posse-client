@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 
 import {
+  AGENT_REASONING_EFFORTS,
   AGENT_DEFINITION_FIELDS,
   AGENT_DEFINITION_SCHEMA,
   AGENT_LIMITS,
@@ -37,7 +38,7 @@ function stringList(value, label, errors) {
 
 export function validateAgentDefinition(value, { filename = "" } = {}) {
   const errors = [];
-  const required = AGENT_DEFINITION_FIELDS.filter(field => field !== "autonomy");
+  const required = AGENT_DEFINITION_FIELDS.filter(field => !["autonomy", "reasoning_effort"].includes(field));
   const definition = exactFields(value, AGENT_DEFINITION_FIELDS, required, "agent definition", errors);
   if (!definition) return { ok: false, errors, definition: null };
   if (definition.schema !== AGENT_DEFINITION_SCHEMA) errors.push(`schema must be ${AGENT_DEFINITION_SCHEMA}`);
@@ -46,6 +47,8 @@ export function validateAgentDefinition(value, { filename = "" } = {}) {
   if (typeof definition.description !== "string" || !definition.description.trim()) errors.push("description is required");
   if (typeof definition.prompt !== "string" || !definition.prompt.trim()) errors.push("prompt is required");
   if (typeof definition.model !== "string" || !definition.model.trim()) errors.push("model is required");
+
+  if (definition.reasoning_effort !== undefined && !AGENT_REASONING_EFFORTS.includes(definition.reasoning_effort)) errors.push("reasoning_effort must be low, medium, high, or xhigh");
 
   const scope = exactFields(definition.scope, ["kind", "repo_id", "folder_path"], ["kind"], "scope", errors);
   if (scope && !AGENT_SCOPE_KINDS.includes(scope.kind)) errors.push("scope.kind must be sandbox, folder, repository, or global");
@@ -81,6 +84,7 @@ export function validateAgentDefinition(value, { filename = "" } = {}) {
       description: definition.description,
       prompt: definition.prompt,
       model: definition.model,
+      ...(definition.reasoning_effort !== undefined ? { reasoning_effort: definition.reasoning_effort } : {}),
       scope: scope.kind === "repository" ? { kind: "repository", repo_id: scope.repo_id.trim() }
         : scope.kind === "folder" ? { kind: "folder", folder_path: scope.folder_path }
           : { kind: scope.kind },
@@ -130,6 +134,6 @@ export function scaffoldAgentDefinition(name) {
     tools: [],
     skills: [],
     autonomy: { write_tools: "confirm" },
-    limits: { turns: 16, calls: 32, spend_usd: 2, wall_seconds: 600 },
+    limits: { turns: 16, calls: 32, spend_usd: 2, wall_seconds: 1800 },
   };
 }

@@ -241,6 +241,7 @@ export class AutomationOwner {
       case "prompt_tool.remove": return this.promptTools.remove(args.name);
       case "script.secret.status": return this.scripts.secretStatus(this.scripts.load(args.tool).manifest);
       case "agent.turn.begin": return this.agents.begin(args);
+      case "agent.turn.touch": return this.agents.touch(args);
       case "agent.turn.invoke": return this.agents.invoke(args);
       case "agent.turn.pause": return this.agents.pause(args);
       case "agent.turn.resume": return this.agents.resume(args);

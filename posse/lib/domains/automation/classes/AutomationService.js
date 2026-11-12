@@ -188,8 +188,9 @@ export class AutomationService {
   }
   async execute(run, entry, grant, controller, execution = null, invocation = null) {
     const limits = narrowLimits(entry.limits, grant.limits || entry.limits);
-    const deadline = performance.now() + limits.wall_time_seconds * 1000;
-    const timer = setTimeout(() => controller.abort(Object.assign(new Error("Wall time limit exceeded"), { code: "wall_time_limit" })), limits.wall_time_seconds * 1000);
+    const delegatedAgent = entry.kind === "script" && this.scripts?.load(entry.script).manifest.invoke_agent;
+    const deadline = delegatedAgent ? Infinity : performance.now() + limits.wall_time_seconds * 1000;
+    const timer = delegatedAgent ? null : setTimeout(() => controller.abort(Object.assign(new Error("Wall time limit exceeded"), { code: "wall_time_limit" })), limits.wall_time_seconds * 1000);
     const check = () => {
       controller.signal.throwIfAborted();
       execution?.check();

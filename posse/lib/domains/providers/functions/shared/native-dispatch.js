@@ -216,7 +216,7 @@ export function buildNativeDispatchRequest(provider, promptText, {
       ? readPlannerDispatchPolicy({ projectDir: resolvedCwd }).toolTimeoutSec * 1_000
       : null,
   });
-  const wallMs = positiveInteger(
+  const wallMs = wallTimeoutMs === 0 ? 0 : positiveInteger(
     wallTimeoutMs,
     Math.min(MAX_WALL_TIMEOUT_MS, Math.max(stallMs * turns, tools.length ? toolMs + stallMs : stallMs)),
     MAX_WALL_TIMEOUT_MS,
@@ -280,8 +280,8 @@ export function buildNativeDispatchRequest(provider, promptText, {
       maxTurns: turns,
       maxOutputTokens: outputTokens,
       stallTimeoutMs: stallMs,
-      wallTimeoutMs: Math.max(stallMs, wallMs),
-      toolTimeoutMs: Math.min(toolMs, Math.max(stallMs, wallMs)),
+      wallTimeoutMs: wallMs === 0 ? 0 : Math.max(stallMs, wallMs),
+      toolTimeoutMs: wallMs === 0 ? toolMs : Math.min(toolMs, Math.max(stallMs, wallMs)),
       maxToolResultChars: positiveInteger(maxToolResultChars, DEFAULT_MAX_TOOL_RESULT_CHARS, 8 * 1024 * 1024),
     },
     session: {
@@ -297,6 +297,7 @@ export async function runNativeDispatch(request, {
   projectDir = null,
   silent = false,
   onLine = null,
+  onActivity = null,
   onAgentCommentary = null,
   onProviderToolUse = null,
   onProviderToolResult = null,
@@ -345,6 +346,7 @@ export async function runNativeDispatch(request, {
       mcpGate,
       projectDir,
       onEvent: (event) => {
+        onActivity?.();
         if (event.type === "output.delta") emitOutput(String(event.text || ""));
         else if (event.type === "commentary") onAgentCommentary?.(String(event.text || ""));
         else if (event.type === "status") onLine?.(String(event.message || event.text || ""));

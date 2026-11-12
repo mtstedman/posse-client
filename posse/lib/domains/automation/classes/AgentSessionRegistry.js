@@ -154,6 +154,14 @@ export class AgentSessionRegistry {
     return session;
   }
 
+  touch({ session_id, token }, execution = null) {
+    const session = this.assertTurn(session_id, token);
+    this.assertOwnership(session, execution);
+    session.active.expires_at_ms = this.now() + Math.max(ACTIVE_TTL_MS, session.definition.limits.wall_seconds * 1000 + 60_000);
+    this.store.put(SESSION_KIND, session_id, session);
+    return { active: true };
+  }
+
   async invoke({ session_id, token, tool, input, confirmed = false, idempotency_key = "", budget = null }, execution = null) {
     const session = this.assertTurn(session_id, token);
     this.assertOwnership(session, execution);
@@ -192,7 +200,14 @@ export class AgentSessionRegistry {
       idempotency_key: idempotency_key || (capability.effect === "read" ? randomUUID()
         : toolIdempotencyKey(session_id, session.active.turn_id, tool, input)),
     }, null, { allowExternalWrite: capability.effect !== "write" || session.definition.autonomy.write_tools === "allow" || confirmed === true, execution, invocation });
-    await this.service.active.get(run.id)?.promise;
+    // The owner knows a tool is still executing, even for a resumed write
+    // whose caller has not yet returned to the provider loop.
+    const lease = setInterval(() => {
+      try { this.touch({ session_id, token }, execution); } catch { /* authority is rechecked by execution */ }
+    }, 30_000);
+    lease.unref?.();
+    try { await this.service.active.get(run.id)?.promise; }
+    finally { clearInterval(lease); }
     const complete = this.store.run(run.id);
     if (complete?.status !== "succeeded" && complete?.delegated_usage) {
       const child = complete.output?.output_json;

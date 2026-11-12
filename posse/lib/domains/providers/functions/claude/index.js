@@ -125,6 +125,8 @@ export async function callProvider(promptText, {
   mcpCwd = null,       // optional override for MCP workspace root. Falls back to cwd.
   projectDir = null,   // project root for runtime path resolution
   abortSignal = null,  // AbortSignal — cancels the Rust dispatch
+  wallTimeoutMs = null,
+  onActivity = null,
   stallTimeout = null, // Override stall timeout in seconds (default: 600)
   needsImageGeneration = false,
   jobId = null,
@@ -327,7 +329,7 @@ export async function callProvider(promptText, {
         deleteFiles,
         maxTurns: turns,
         maxOutputTokens: outputTokenLimit,
-        stallTimeoutMs,
+        stallTimeoutMs, wallTimeoutMs,
         priorSessionHandle,
         recyclingMode,
       });
@@ -336,7 +338,7 @@ export async function callProvider(promptText, {
         mcpGate,
         projectDir: providerPaths.projectDir,
         silent,
-        onLine,
+        onLine, onActivity,
         onAgentCommentary,
         onProviderToolUse,
         onProviderToolResult,
