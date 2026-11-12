@@ -5,6 +5,7 @@ import { INSTALLATION_POLICY } from "./lib/catalog/installation-policy.js";
 import { loadUserProviderEnv, userProviderEnvPath } from "./lib/shared/platform/functions/user-provider-env.js";
 import { installCliWarningFilter } from "./lib/domains/cli/functions/warnings.js";
 import { CliCrashRecorder } from "./lib/domains/cli/classes/CliCrashRecorder.js";
+import { flushCliOutput } from "./lib/domains/cli/functions/local-output.js";
 
 installCliWarningFilter();
 
@@ -67,9 +68,11 @@ if (process.argv[2] === "automation") {
   const { runAutomationCli } = await import("./lib/domains/automation/functions/automation-cli.js");
   try {
     await runAutomationCli();
+    await flushCliOutput();
     process.exit(0);
   } catch (error) {
     process.stderr.write(`${error?.code || "automation_error"}: ${error?.message || error}\n`);
+    await flushCliOutput();
     process.exit(1);
   }
 }
@@ -80,9 +83,12 @@ if (process.argv[2] === "automation") {
 if (process.argv[2] === "tools") {
   const { runToolsCli } = await import("./lib/domains/automation/functions/tools-cli.js");
   try {
-    process.exit(await runToolsCli(process.argv.slice(3)));
+    const code = await runToolsCli(process.argv.slice(3));
+    await flushCliOutput();
+    process.exit(code);
   } catch (error) {
     process.stderr.write(`${error?.code || "tools_error"}: ${error?.message || error}\n`);
+    await flushCliOutput();
     process.exit(1);
   }
 }
@@ -147,9 +153,12 @@ if (startupUpdateExitCode !== null) process.exit(startupUpdateExitCode);
 if (process.argv[2] === "agent") {
   const { runAgentCli } = await import("./lib/domains/agents/functions/agent-cli.js");
   try {
-    process.exit(await runAgentCli(process.argv.slice(3)));
+    const code = await runAgentCli(process.argv.slice(3));
+    await flushCliOutput();
+    process.exit(code);
   } catch (error) {
     process.stderr.write(`${error?.code || "agent_error"}: ${error?.message || error}\n`);
+    await flushCliOutput();
     process.exit(1);
   }
 }

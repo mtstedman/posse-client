@@ -98,3 +98,8 @@ export async function writeLocalOutput(bytes, destination, stdout) {
     await fs.link(temporary, target);
   } finally { await fs.rm(temporary, { force: true }); }
 }
+
+// Explicit CLI exits must wait for both pipe queues, including diagnostics.
+export async function flushCliOutput(stdout = process.stdout, stderr = process.stderr) {
+  await Promise.all([writeLocalOutput("", null, stdout), writeLocalOutput("", null, stderr)]);
+}
