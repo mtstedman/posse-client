@@ -1,16 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
-import { SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_MEDIA_KINDS, SCRIPT_TOOL_TEMPLATES } from "../../../catalog/custom-tools.js";
+import { SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_MEDIA_KINDS, SCRIPT_TOOL_TEMPLATES, SCRIPT_TOOL_AGENT_TEMPLATE } from "../../../catalog/custom-tools.js";
 import { AutomationOwnerClient, ensureAutomationOwner } from "../classes/AutomationOwnerClient.js";
 
 export const SCRIPT_TOOL_TEST_PROTOCOL = "posse.script_tool_test.v1";
-const VALUE_FLAGS = new Set(["--template", "--description", "--effect", "--param", "--env", "--secret", "--input", "--input-file", "--inputs-file", "--repo", "--roles", "--provider", "--model", "--folder"]);
+const VALUE_FLAGS = new Set(["--agent", "--template", "--description", "--effect", "--param", "--env", "--secret", "--input", "--input-file", "--inputs-file", "--repo", "--roles", "--provider", "--model", "--folder"]);
 const BOOLEAN_FLAGS = new Set(["--json", "--standalone", "--unattended", "--help"]);
 
 export const TOOLS_USAGE = `Usage:
   posse tools [list]                                   script tools, test state, secrets set
   posse tools new <name> [--template ${SCRIPT_TOOL_TEMPLATES.join("|")}] [--effect read|write]
         [--description TEXT] [--param name:type[:required]]... [--env NAME[=default]]... [--secret NAME]...
+  posse tools new <name> --template agent --agent <agent-name> [--description TEXT]
   posse tools new <name> --template ${SCRIPT_TOOL_MEDIA_KINDS.join("|")} [--description TEXT]
         [--provider NAME] [--model NAME] [--folder DIR]   a media tool: no script; Posse runs the model
                                                        and saves each result in the folder
@@ -84,19 +85,30 @@ export async function runToolsCli(argv = process.argv.slice(3), io = {}) {
       if (args.positional.length !== 1) throw Object.assign(new Error("usage: posse tools new <name> [options]"), { code: "invalid_request" });
       const template = args.one("--template") || "bash";
       const media = SCRIPT_TOOL_MEDIA_KINDS.includes(template);
+      const agent = template === SCRIPT_TOOL_AGENT_TEMPLATE;
+      if (agent && !args.one("--agent") || !agent && args.one("--agent")) throw Object.assign(new Error("--template agent requires --agent <name>"), { code: "invalid_request" });
+      if (agent && ["--param", "--env", "--secret", "--effect"].some(flag => args.flags[flag] !== undefined))
+        throw Object.assign(new Error("Invoke agent uses typed JSON input and has write effects; script flags do not apply"), { code: "invalid_request" });
       const settings = Object.fromEntries([["provider", "--provider"], ["model", "--model"], ["folder", "--folder"]]
         .filter(([, flag]) => args.one(flag)).map(([key, flag]) => [key, key === "folder" ? path.resolve(args.one(flag)) : args.one(flag)]));
       if (media && ["--param", "--env", "--secret", "--effect"].some(flag => args.flags[flag] !== undefined)) {
         throw Object.assign(new Error("--param, --env, --secret and --effect do not apply to --template image or video; a media tool takes a prompt and always has effect write"), { code: "invalid_request" });
       }
       if (!media && Object.keys(settings).length) throw Object.assign(new Error("--provider, --model and --folder apply to --template image or video"), { code: "invalid_request" });
-      const created = await request("script.create", { spec: media ? {
+      const created = await request("script.create", { spec: agent ? {
+        name: args.positional[0], template, description: args.one("--description") || "", invoke_agent: { name: args.one("--agent") },
+      } : media ? {
         name: args.positional[0], template, description: args.one("--description") || "", generate: settings,
       } : {
         name: args.positional[0], template, effect: args.one("--effect") || "read",
         description: args.one("--description") || "", params: args.many("--param"), env: args.many("--env"), secrets: args.many("--secret"),
       } });
       if (args.has("--json")) { print(JSON.stringify(created)); return 0; }
+      if (agent) {
+        print(`created ${created.name} (Invoke agent: ${created.manifest.invoke_agent.name})\n  ${path.join(created.dir, "tool.json")}`);
+        print(`next: posse tools test ${created.name} --input '{"message":"..."}'`);
+        return 0;
+      }
       if (media) {
         const generate = created.manifest.generate;
         print(`created ${created.name} (${generate.kind} tool)\n  ${path.join(created.dir, "tool.json")}\n  model   ${generate.provider}:${generate.model}\n  folder  ${generate.folder}\n\nnext:`);
@@ -119,7 +131,9 @@ export async function runToolsCli(argv = process.argv.slice(3), io = {}) {
       const manifest = tool.manifest;
       print(`${manifest.name} — ${manifest.description}`);
       print(`  effect       ${manifest.effect}`);
-      if (manifest.generate) {
+      if (manifest.invoke_agent) {
+        print(`  invokes      ${manifest.invoke_agent.name} (definition ${manifest.invoke_agent.digest})`);
+      } else if (manifest.generate) {
         print(`  generates    ${manifest.generate.kind} with ${manifest.generate.provider}:${manifest.generate.model} (timeout ${manifest.timeout_seconds}s)`);
         print(`  saves to     ${manifest.generate.folder}`);
       } else print(`  runs         ${manifest.interpreter} ${manifest.entry} (timeout ${manifest.timeout_seconds}s, output ≤ ${manifest.max_output_bytes} bytes)`);

@@ -2,6 +2,9 @@ import { TOOL_REFS, formatToolReference } from "../../../../catalog/tool-referen
 import { ProviderToolRenderer } from "../../../../shared/tools/classes/ProviderToolRenderer.js";
 
 export function buildCodexResearchMcpGuidance(executionContract) {
+  // Caller-owned decision turns can describe JSON actions in their prompt
+  // while deliberately attaching no native tools to the provider invocation.
+  if (!executionContract?.tools?.length) return "";
   if (["researcher", "planner", "dev", "fix", "assessor", "artificer"].includes(executionContract?.role)) return "";
   const renderer = new ProviderToolRenderer({ providerName: "codex", issuedSurface: executionContract });
   const queryAction = executionContract?.tools?.find(tool => tool.mcpName === formatToolReference(TOOL_REFS.atlas.query));

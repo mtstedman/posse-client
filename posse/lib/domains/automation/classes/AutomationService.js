@@ -149,7 +149,7 @@ export class AutomationService {
     demand(run && !run.execution_context && digest(run.principal) === digest(principal), "Run is outside this caller's scope", "forbidden");
     return run;
   }
-  invoke(principal, args, schedule = null, { allowExternalWrite = false, execution = null } = {}) {
+  invoke(principal, args, schedule = null, { allowExternalWrite = false, execution = null, invocation = null } = {}) {
     this.assertOwner();
     execution?.check();
     const { entry, grant } = this.resolve(principal, args.tool, "invoke", args.grant_id);
@@ -168,24 +168,25 @@ export class AutomationService {
       const existing = this.store.byIdempotency(idem);
       if (existing) { demand(existing.fingerprint === fingerprint, "Idempotency key reused with different input or authority", "idempotency_conflict"); return existing; }
       const created = this.newRun(principal, entry, grant, args.input, fingerprint, schedule);
+      if (invocation?.parent_session_id) created.parent_session_id = invocation.parent_session_id;
       if (execution) created.execution_context = { origin: "registered", client_id: execution.clientID, agent: execution.agent, request_id: execution.requestID };
       return this.store.insertRun(created, idem);
     });
-    if (run.status === "queued" && !this.active.has(run.id)) this.start(run, entry, grant, execution);
+    if (run.status === "queued" && !this.active.has(run.id)) this.start(run, entry, grant, execution, invocation);
     return run;
   }
   newRun(principal, entry, grant, input, fingerprint, schedule = null) {
     const measuredZero = entry.kind === "builtin" || entry.kind === "script" || entry.kind === "sql" || entry.definition?.runtime?.mode === "recipe";
     return { id: randomUUID(), tool: entry.id, skill_id: entry.definition ? `${entry.definition.name}@${entry.definition.version}` : entry.id, principal: structuredClone(principal), grant_id: grant.id, grant_revision: grant.revision, resource_revisions: grant.resources.map(item => ({ id: item.id, revision: this.store.get("resources", item.id)?.revision })), digest: entry.digest, fingerprint, input: structuredClone(input), status: "queued", created_at: new Date(this.now()).toISOString(), started_at: null, calls: 0, turns: 0, spend_usd: measuredZero ? 0 : null, schedule_id: schedule?.id || null, schedule_revision: schedule?.revision || null, owner_generation: this.lease?.generation || null, attempt: 1, retry: structuredClone(schedule?.retry || { max_attempts: 1 }) };
   }
-  start(run, entry, grant, execution = null) {
+  start(run, entry, grant, execution = null, invocation = null) {
     const controller = new AbortController();
     if (execution?.signal) execution.signal.addEventListener("abort", () => controller.abort(), { once: true });
     const state = { run, controller, promise: null };
     this.active.set(run.id, state);
-    state.promise = this.execute(run, entry, grant, controller, execution).finally(() => this.active.delete(run.id));
+    state.promise = this.execute(run, entry, grant, controller, execution, invocation).finally(() => this.active.delete(run.id));
   }
-  async execute(run, entry, grant, controller, execution = null) {
+  async execute(run, entry, grant, controller, execution = null, invocation = null) {
     const limits = narrowLimits(entry.limits, grant.limits || entry.limits);
     const deadline = performance.now() + limits.wall_time_seconds * 1000;
     const timer = setTimeout(() => controller.abort(Object.assign(new Error("Wall time limit exceeded"), { code: "wall_time_limit" })), limits.wall_time_seconds * 1000);
@@ -196,6 +197,24 @@ export class AutomationService {
       demand(performance.now() < deadline, "Wall time limit exceeded", "wall_time_limit");
       const current = this.store.get("grants", grant.id), currentEntry = this.store.get("entries", entry.id);
       demand(current?.enabled && current.revision === grant.revision && currentEntry?.enabled && currentEntry.digest === entry.digest, "Run authority changed", "grant_changed");
+    };
+    const scriptOptions = () => {
+      let previous = {};
+      return { signal: controller.signal, privateInputs: execution?.inputs || {},
+        invocation: { ...invocation, execution, run_id: run.id, budget: {
+          spend_usd: Math.min(invocation?.budget?.spend_usd ?? Infinity, limits.spend_cap_usd - run.spend_usd),
+          wall_seconds: Math.min(invocation?.budget?.wall_seconds ?? Infinity, Math.max(0, (deadline - performance.now()) / 1000)),
+        } }, check, usage: usage => {
+          if (!usage) return;
+          const totals = run.delegated_usage ||= {};
+          for (const [key, value] of Object.entries(usage)) {
+            if (typeof value === "number") totals[key] = (Number(totals[key]) || 0) + value - (Number(previous[key]) || 0);
+            else totals[key] = null;
+          }
+          previous = structuredClone(usage);
+          run.spend_usd = totals.cost_usd || 0; run.turns = totals.turns || 0;
+          this.store.updateRun(run);
+        } };
     };
     const sandbox = new ResourceSandbox(this.store.list("resources"), grant.resources, { signal: controller.signal, check, checkpoint: key => this.store.checkpoint(key), namespace: digest([entry.id, entry.digest, grant.id, grant.revision]) });
     const capability = async (id, input) => {
@@ -219,7 +238,7 @@ export class AutomationService {
         schemaCheck(issued.input_schema, input);
         demand(entry.effect !== "read_only" || issued.effect === "read_only", "Read-only skill cannot issue a write tool", "forbidden");
         if (execution) execution.checkCapability(id, issued.digest, run.principal);
-        return this.scripts.run(issued, input, { signal: controller.signal, privateInputs: execution?.inputs || {} });
+        return this.scripts.run(issued, input, scriptOptions());
       }
       demand(this.connectors, `Capability ${id} has no installed adapter`, "capability_unavailable");
       return this.connectors.call(id, input, { signal: controller.signal, effect: entry.effect, grant, check });
@@ -233,7 +252,7 @@ export class AutomationService {
         run.calls++; output = await this.connectors.call(entry.id, run.input, { signal: controller.signal, effect: entry.effect, grant, check });
       } else if (entry.kind === "script") {
         demand(this.scripts, "Script tools are unavailable in this owner", "capability_unavailable");
-        run.calls++; output = await this.scripts.run(entry, run.input, { signal: controller.signal, privateInputs: execution?.inputs || {} });
+        run.calls++; output = await this.scripts.run(entry, run.input, scriptOptions());
       } else if (entry.kind === "sql") {
         demand(this.sqlCapabilities, "SQL capabilities are unavailable in this owner", "capability_unavailable");
         run.calls++; output = await this.sqlCapabilities.execute(entry.capability, run.input, { signal: controller.signal });
@@ -257,6 +276,7 @@ export class AutomationService {
         demand(usageObserved, "Agent usage is unavailable; budget reservation requires reconciliation", "usage_unknown");
         run.spend_reserved_usd = 0;
       }
+      if (run.delegated_usage) run.output = output;
       check(); schemaCheck(entry.output_schema, output); check();
       run.output = output; run.status = "committing";
       this.store.transaction(() => {

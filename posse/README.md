@@ -511,6 +511,20 @@ a starter that fails until you edit it.
   `write` tool only under a grant made with `--unattended`. A registered
   agent follows its own definition's `write_tools` instead.
 
+- An **Invoke agent** tool also has no script. Create one with
+  `posse tools new review.dispatch --template agent --agent reviewer`.
+  Posse pins the existing agent's name and definition digest in `invoke_agent`,
+  runs it directly through the automation owner's agent runtime, and returns
+  its status, reply, conversation ID, tool receipts, usage and errors. The
+  default input is `{"message":"the task"}`; a custom object schema is passed
+  as JSON task data. Declared private inputs stay outside that task. Test and
+  grant the tool like other tools. It declares write effects, and the child
+  still needs its own current tool grants and write permission. Changing the
+  target definition requires updating the binding and testing again. Children
+  use isolated conversations, bounded time/spend, cancellation and a maximum
+  delegation depth of four; cycles are rejected. No application dispatcher,
+  shell launcher, or `posse-agent` subprocess is used.
+
 - An image or video tool has no script. `posse tools new <name> --template
   image|video [--provider NAME] [--model NAME] [--folder DIR]` writes a
   `tool.json` whose `generate` block names the kind, provider, model, and

@@ -154,7 +154,7 @@ export class AgentSessionRegistry {
     return session;
   }
 
-  async invoke({ session_id, token, tool, input, confirmed = false, idempotency_key = "" }, execution = null) {
+  async invoke({ session_id, token, tool, input, confirmed = false, idempotency_key = "", budget = null }, execution = null) {
     const session = this.assertTurn(session_id, token);
     this.assertOwnership(session, execution);
     const capability = session.capabilities.find(item => item.name === tool);
@@ -174,6 +174,15 @@ export class AgentSessionRegistry {
       demand(confirmed === false, "Applications cannot confirm writes", "forbidden");
       assertRegisteredCapability(this.service, capability.entry_id, capability.digest, principal, capability.grant_id);
     }
+    const invocation = {
+      parent_session_id: session_id, ancestors: execution?.ancestors || [session.agent],
+      cwd: execution?.cwd || session.definition.scope.folder_path || process.cwd(),
+      budget: {
+        spend_usd: Math.min(session.definition.limits.spend_usd, Number.isFinite(budget?.spend_usd) ? budget.spend_usd : session.definition.limits.spend_usd),
+        wall_seconds: Math.min(session.definition.limits.wall_seconds, Number.isFinite(budget?.wall_seconds) ? budget.wall_seconds : session.definition.limits.wall_seconds),
+      },
+      check: () => { this.assertTurn(session_id, token); execution?.check(); },
+    };
     const started = this.now();
     const run = this.service.invoke(principal, {
       operation: "invoke", tool: capability.entry_id, grant_id: capability.grant_id, input,
@@ -182,11 +191,17 @@ export class AgentSessionRegistry {
       // clients, which cannot safely distinguish a retry from another write.
       idempotency_key: idempotency_key || (capability.effect === "read" ? randomUUID()
         : toolIdempotencyKey(session_id, session.active.turn_id, tool, input)),
-    }, null, { allowExternalWrite: capability.effect !== "write" || session.definition.autonomy.write_tools === "allow" || confirmed === true, execution });
+    }, null, { allowExternalWrite: capability.effect !== "write" || session.definition.autonomy.write_tools === "allow" || confirmed === true, execution, invocation });
     await this.service.active.get(run.id)?.promise;
     const complete = this.store.run(run.id);
+    if (complete?.status !== "succeeded" && complete?.delegated_usage) {
+      const child = complete.output?.output_json;
+      return { output: { ok: false, output_json: { ...child, status: "failed", usage: complete.delegated_usage,
+        error: { code: complete.error_code || "agent_tool_failed", message: complete.error || "Child execution failed" } } },
+        run_id: complete.id, duration_ms: Math.max(0, this.now() - started), delegated_usage: complete.delegated_usage };
+    }
     demand(complete?.status === "succeeded", complete?.error || `Tool ${tool} failed`, complete?.error_code || "agent_tool_failed");
-    return { output: complete.output, run_id: complete.id, duration_ms: Math.max(0, this.now() - started), capability: publicCapability(capability) };
+    return { output: complete.output, run_id: complete.id, duration_ms: Math.max(0, this.now() - started), capability: publicCapability(capability), ...(complete.delegated_usage ? { delegated_usage: complete.delegated_usage } : {}) };
   }
 
   pause({ session_id, token, proposal }) {
@@ -238,6 +253,7 @@ export class AgentSessionRegistry {
   abort({ session_id, token, error = "" }, execution = null) {
     const session = this.assertTurn(session_id, token);
     this.assertOwnership(session, execution);
+    for (const [id, active] of this.service.active) if (active.run.parent_session_id === session_id) this.service.cancel(id);
     session.status = "idle"; session.active = null; session.pending = null; session.updated_at = nowIso(this.now);
     if (error) session.last_error = String(error).slice(0, 1000);
     this.store.put(SESSION_KIND, session_id, session);

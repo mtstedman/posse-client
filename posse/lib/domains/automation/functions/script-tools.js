@@ -1,9 +1,10 @@
+import { normalizeAgentInvocation, AGENT_TOOL_INPUT_SCHEMA, AGENT_TOOL_OUTPUT_SCHEMA } from "./agent-tool.js";
 import os from "node:os";
 import path from "node:path";
 import {
   SCRIPT_TOOL_EFFECTS, SCRIPT_TOOL_INTERPRETERS, SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_MEDIA_FORMATS, SCRIPT_TOOL_MEDIA_KINDS,
   SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER, SCRIPT_TOOL_MEDIA_TIMEOUT_SECONDS, SCRIPT_TOOL_NEW_TEMPLATES, SCRIPT_TOOL_RESERVED_ENV,
-  SCRIPT_TOOL_RESERVED_ENV_PREFIXES, SCRIPT_TOOL_SCHEMA,
+  SCRIPT_TOOL_RESERVED_ENV_PREFIXES, SCRIPT_TOOL_SCHEMA, SCRIPT_TOOL_AGENT_TEMPLATE,
 } from "../../../catalog/custom-tools.js";
 import { LOCAL_BRIDGE_MODELS } from "../../../catalog/local-model.js";
 import { IMAGE_MODEL_CHOICES_INTERNAL } from "../../../catalog/provider-model-defaults.js";
@@ -13,7 +14,7 @@ import { redactLiteralValues } from "../../../shared/platform/functions/subproce
 export const EMPTY_SCRIPT_PARAMS = Object.freeze({ type: "object", additionalProperties: false, properties: {} });
 const NAME_RE = /^[a-z][a-z0-9-]{0,39}(\.[a-z][a-z0-9_-]{0,39})?$/;
 const ENV_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
-const MANIFEST_KEYS = ["schema", "name", "description", "entry", "interpreter", "params", "inputs", "output_schema", "env", "effect", "timeout_seconds", "max_output_bytes", "generate"];
+const MANIFEST_KEYS = ["schema", "name", "description", "entry", "interpreter", "params", "inputs", "output_schema", "env", "effect", "timeout_seconds", "max_output_bytes", "generate", "invoke_agent"];
 const MEDIA_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,127}$/;
 
 // Providers that can produce each media kind: the local models of that kind,
@@ -70,7 +71,8 @@ export function validScriptEnvName(name) {
 // so a typo never silently changes what runs.
 export function normalizeScriptManifest(raw) {
   const media = raw?.generate !== undefined;
-  object(raw, MANIFEST_KEYS, ["schema", "name", "description", ...(media ? [] : ["entry"]), "effect"]);
+  const agent = raw?.invoke_agent !== undefined;
+  object(raw, MANIFEST_KEYS, ["schema", "name", "description", ...(media || agent ? [] : ["entry"]), "effect"]);
   const fail = message => demand(false, `Script tool ${JSON.stringify(raw.name)}: ${message}`, "script_invalid");
   if (raw.schema !== SCRIPT_TOOL_SCHEMA) fail(`schema must be ${SCRIPT_TOOL_SCHEMA}`);
   if (!validScriptToolName(raw.name)) fail("name must be lower-case like orders.lookup, outside the posse namespace");
@@ -78,8 +80,12 @@ export function normalizeScriptManifest(raw) {
   if (!description || description.length > SCRIPT_TOOL_LIMITS.MAX_DESCRIPTION) fail(`description is required (at most ${SCRIPT_TOOL_LIMITS.MAX_DESCRIPTION} characters); agents read it to decide when to call the tool`);
   const entry = String(raw.entry || "").replaceAll("\\", "/");
   const interpreter = raw.interpreter || "bash";
-  let generate;
-  if (media) {
+  let generate, invokeAgent;
+  if (agent) {
+    if (media || raw.entry !== undefined || raw.interpreter !== undefined || raw.env?.length) fail("an agent tool has no script, interpreter, generation settings or environment");
+    if (raw.effect !== "write") fail("an agent tool must declare write effects");
+    invokeAgent = normalizeAgentInvocation(raw.invoke_agent);
+  } else if (media) {
     // The owner performs the generation; there is no script to run or edit.
     if (raw.entry !== undefined || raw.interpreter !== undefined) fail("a media tool has no entry script or interpreter");
     generate = normalizeMediaGenerate(raw.generate, raw.name);
@@ -93,7 +99,7 @@ export function normalizeScriptManifest(raw) {
     if (!Object.hasOwn(SCRIPT_TOOL_INTERPRETERS, interpreter)) fail(`interpreter must be one of ${Object.keys(SCRIPT_TOOL_INTERPRETERS).join(", ")}`);
   }
   if (!SCRIPT_TOOL_EFFECTS.includes(raw.effect)) fail("effect must be read or write");
-  const timeout = raw.timeout_seconds ?? (media ? SCRIPT_TOOL_MEDIA_TIMEOUT_SECONDS : SCRIPT_TOOL_LIMITS.DEFAULT_TIMEOUT_SECONDS);
+  const timeout = raw.timeout_seconds ?? (media || agent ? SCRIPT_TOOL_MEDIA_TIMEOUT_SECONDS : SCRIPT_TOOL_LIMITS.DEFAULT_TIMEOUT_SECONDS);
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > SCRIPT_TOOL_LIMITS.MAX_TIMEOUT_SECONDS) fail(`timeout_seconds must be 1-${SCRIPT_TOOL_LIMITS.MAX_TIMEOUT_SECONDS}`);
   const output = raw.max_output_bytes ?? SCRIPT_TOOL_LIMITS.DEFAULT_OUTPUT_BYTES;
   if (!Number.isInteger(output) || output < SCRIPT_TOOL_LIMITS.MIN_OUTPUT_BYTES || output > SCRIPT_TOOL_LIMITS.MAX_OUTPUT_BYTES) fail(`max_output_bytes must be ${SCRIPT_TOOL_LIMITS.MIN_OUTPUT_BYTES}-${SCRIPT_TOOL_LIMITS.MAX_OUTPUT_BYTES}`);
@@ -131,7 +137,7 @@ export function normalizeScriptManifest(raw) {
       fail("output_schema must be a JSON object schema; the script must print one JSON object");
     assertValidSchema(outputSchema, `Script tool ${raw.name} output_schema`);
   }
-  return { schema: raw.schema, name: raw.name, description, ...(media ? { generate } : { entry, interpreter }), params,
+  return { schema: raw.schema, name: raw.name, description, ...(agent ? { invoke_agent: invokeAgent } : media ? { generate } : { entry, interpreter }), params,
     ...(inputs === undefined ? {} : { inputs }), ...(outputSchema === undefined ? {} : { output_schema: outputSchema }),
     env: normalizedEnv, effect: raw.effect, timeout_seconds: timeout, max_output_bytes: output };
 }
@@ -184,8 +190,15 @@ export function parseParamSpec(spec) {
 
 // Renders a manifest and a commented starter script that already reads the
 // declared params and env, so the operator fills in only the work itself.
-export function renderScriptTemplate({ name, description, template = "bash", effect = "read", params = [], inputSchema = null, userInputSchema = null, outputSchema = null, env = [], generate = null }) {
+export function renderScriptTemplate({ name, description, template = "bash", effect = "read", params = [], inputSchema = null, userInputSchema = null, outputSchema = null, env = [], generate = null, invokeAgent = null }) {
   demand(SCRIPT_TOOL_NEW_TEMPLATES.includes(template), `template must be one of ${SCRIPT_TOOL_NEW_TEMPLATES.join(", ")}`);
+  if (template === SCRIPT_TOOL_AGENT_TEMPLATE) {
+    demand(!env.length && !params.length && generate == null, "An agent tool takes no script parameters, environment or generation settings", "script_invalid");
+    const manifest = normalizeScriptManifest({ schema: SCRIPT_TOOL_SCHEMA, name, description, effect: "write",
+      invoke_agent: normalizeAgentInvocation(invokeAgent), params: inputSchema || AGENT_TOOL_INPUT_SCHEMA,
+      ...(userInputSchema == null ? {} : { inputs: userInputSchema }), output_schema: outputSchema || AGENT_TOOL_OUTPUT_SCHEMA });
+    return { manifest, entry: null, script: null };
+  }
   if (SCRIPT_TOOL_MEDIA_KINDS.includes(template)) return renderMediaTemplate({ name, description, kind: template, inputSchema, generate });
   demand(generate == null, "Only image and video tools take generation settings", "script_invalid");
   const properties = {}, required = [];

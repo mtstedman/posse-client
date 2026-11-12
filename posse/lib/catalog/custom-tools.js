@@ -72,7 +72,10 @@ export const SCRIPT_TOOL_TEMPLATES = Object.freeze(["bash", "python", "node", "h
 // tool's own output folder. Agents converse and call tools in text only.
 export const SCRIPT_TOOL_MEDIA_KINDS = Object.freeze(["image", "video"]);
 // Everything `posse tools new --template` accepts: starter scripts, then media.
-export const SCRIPT_TOOL_NEW_TEMPLATES = Object.freeze([...SCRIPT_TOOL_TEMPLATES, ...SCRIPT_TOOL_MEDIA_KINDS]);
+export const SCRIPT_TOOL_AGENT_TEMPLATE = "agent";
+export const SCRIPT_TOOL_AGENT_MAX_DEPTH = 4;
+export const SCRIPT_TOOL_AGENT_EXECUTION_KIND = "delegated_run";
+export const SCRIPT_TOOL_NEW_TEMPLATES = Object.freeze([...SCRIPT_TOOL_TEMPLATES, ...SCRIPT_TOOL_MEDIA_KINDS, SCRIPT_TOOL_AGENT_TEMPLATE]);
 export const SCRIPT_TOOL_MEDIA_FORMATS = Object.freeze({ image: "png", video: "avi" });
 export const SCRIPT_TOOL_MEDIA_LOCAL_PROVIDER = "posse-local";
 // A generation can take minutes; media tools default to the longest timeout.

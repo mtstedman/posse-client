@@ -7,6 +7,7 @@ import { AutomationService } from "./AutomationService.js";
 import { AgentSessionRegistry } from "./AgentSessionRegistry.js";
 import { AgentScheduleRegistry } from "./AgentScheduleRegistry.js";
 import { AgentDefinitionStore } from "../../agents/classes/AgentDefinitionStore.js";
+import { AgentToolRuntime } from "./AgentToolRuntime.js";
 import { AgentRuntime } from "../../agents/classes/AgentRuntime.js";
 import { SkillRegistry } from "./SkillRegistry.js";
 import { ScriptToolRegistry } from "./ScriptToolRegistry.js";
@@ -34,6 +35,7 @@ export class AutomationOwner {
     this.agents = new AgentSessionRegistry(this.service, this.registry, this.scripts, this.sqlCapabilities, this.promptTools);
     this.agentDefinitions = new AgentDefinitionStore({ store: this.store });
     this.agentRuntime = new AgentRuntime({ definitions: this.agentDefinitions, client: { request: async (operation, args) => this.dispatchOperator(operation, args) } });
+    this.scripts.agentTools = new AgentToolRuntime(this);
     this.agentSchedules = new AgentScheduleRegistry(this.store, this.agentRuntime, this.agentDefinitions);
     this.registered = new RegisteredAgentBridge(this);
     this.exposures = new AgentExposureRegistry(this);

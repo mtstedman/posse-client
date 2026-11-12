@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { SCRIPT_TOOL_ENTRY_EFFECTS, SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_MANIFEST_FILE, SCRIPT_TOOL_MEDIA_KINDS } from "../../../catalog/custom-tools.js";
+import { SCRIPT_TOOL_ENTRY_EFFECTS, SCRIPT_TOOL_LIMITS, SCRIPT_TOOL_MANIFEST_FILE, SCRIPT_TOOL_MEDIA_KINDS, SCRIPT_TOOL_AGENT_TEMPLATE } from "../../../catalog/custom-tools.js";
 import { automationDataDir, repositoryID } from "../functions/paths.js";
 import { demand, digest, schemaCheck } from "../functions/policy.js";
 import { normalizeScriptManifest, parseParamSpec, renderScriptTemplate, validScriptEnvName, validScriptToolName } from "../functions/script-tools.js";
@@ -33,7 +33,7 @@ export class ScriptToolRegistry {
     demand(manifest.name === name, `Script tool ${name}: manifest name ${JSON.stringify(manifest.name)} must match its folder`, "script_invalid");
     const realDir = fs.realpathSync(dir);
     // A media tool is its manifest: the owner generates, so no script exists.
-    if (manifest.generate) return { manifest, dir: realDir, entryPath: null, digest: digest({ manifest }) };
+    if (manifest.generate || manifest.invoke_agent) return { manifest, dir: realDir, entryPath: null, digest: digest({ manifest }) };
     let entryPath;
     try { entryPath = fs.realpathSync(path.join(dir, ...manifest.entry.split("/"))); } catch { demand(false, `Script tool ${name}: entry ${manifest.entry} does not exist`, "script_invalid"); }
     const relative = path.relative(realDir, entryPath);
@@ -55,9 +55,10 @@ export class ScriptToolRegistry {
   status(tool) {
     const entry = this.store.get("entries", this.entryID(tool.manifest.name));
     const published = entry?.enabled ? entry.digest : null;
+    const ready = published === tool.digest && (!tool.manifest.invoke_agent || this.agentTools?.available(tool.manifest.invoke_agent));
     return {
       name: tool.manifest.name, description: tool.manifest.description, effect: tool.manifest.effect, digest: tool.digest,
-      published_digest: published, tested: published === tool.digest, stale: Boolean(published) && published !== tool.digest,
+      published_digest: published, tested: Boolean(ready), stale: Boolean(published) && !ready,
       secrets: this.secretStatus(tool.manifest), dir: tool.dir,
     };
   }
@@ -71,8 +72,8 @@ export class ScriptToolRegistry {
     };
   }
   create(spec) {
-    const { name, template = "bash", description, effect = "read", params = [], input_schema = null,
-      inputs = null, output_schema = null, env = [], secrets = [], generate = null } = spec || {};
+    let { name, template = "bash", description, effect = "read", params = [], input_schema = null,
+      inputs = null, output_schema = null, env = [], secrets = [], generate = null, invoke_agent = null } = spec || {};
     demand(validScriptToolName(name), "Tool name must be lower-case like orders.lookup", "script_invalid");
     // A media tool is only its generation settings; dropping these silently
     // would create a tool that is not what was asked for.
@@ -82,11 +83,16 @@ export class ScriptToolRegistry {
       ...env.map(item => typeof item === "string" ? { name: item.split("=")[0], ...(item.includes("=") ? { default: item.slice(item.indexOf("=") + 1) } : {}) } : item),
       ...secrets.map(secret => ({ name: secret, secret: true })),
     ];
+    if (template === SCRIPT_TOOL_AGENT_TEMPLATE) {
+      demand(this.agentTools, "Agent runtime is unavailable", "capability_unavailable");
+      demand(!env.length && !secrets.length && !params.length && !generate, "An agent tool has no script, environment or generation settings", "script_invalid");
+      invoke_agent = this.agentTools.pin(invoke_agent);
+    } else demand(invoke_agent == null, "Only agent tools accept invoke_agent", "script_invalid");
     const rendered = renderScriptTemplate({
       name, template, effect, env: variables,
       description: String(description || "").trim() || `TODO: describe what ${name} does and when to use it`,
       params: params.map(param => typeof param === "string" ? parseParamSpec(param) : param),
-      inputSchema: input_schema, userInputSchema: inputs, outputSchema: output_schema, generate,
+      inputSchema: input_schema, userInputSchema: inputs, outputSchema: output_schema, generate, invokeAgent: invoke_agent,
     });
     const dir = path.join(this.dir, name);
     demand(!fs.existsSync(dir), `${dir} already exists; edit it or pick another name`, "script_invalid");
@@ -99,7 +105,7 @@ export class ScriptToolRegistry {
     const tool = this.load(name);
     demand(typeof expectedDigest === "string" && expectedDigest === tool.digest, "Tool changed since it was opened; reload before saving", "script_changed");
     const existing = tool.manifest;
-    const { description, effect = existing.effect, input_schema = null, inputs = null, output_schema = null, env = [], secrets = [], generate = null } = spec || {};
+    const { description, effect = existing.effect, input_schema = null, inputs = null, output_schema = null, env = [], secrets = [], generate = null, invoke_agent = null } = spec || {};
     demand(existing.generate || generate == null, `${name} is a script tool; only image and video tools take generation settings`, "script_invalid");
     const variables = [
       ...env.map(item => typeof item === "string" ? { name: item.split("=")[0], ...(item.includes("=") ? { default: item.slice(item.indexOf("=") + 1) } : {}) } : item),
@@ -113,7 +119,13 @@ export class ScriptToolRegistry {
     // A new provider without a model takes that provider's default model:
     // the old provider's model name means nothing to it.
     const changesProvider = generate?.provider && String(generate.provider).trim().toLowerCase() !== existing.generate?.provider;
-    const rendered = existing.generate ? renderScriptTemplate({
+    demand(existing.invoke_agent || invoke_agent == null, "Cannot change a script into an agent tool", "script_invalid");
+    const rendered = existing.invoke_agent ? renderScriptTemplate({
+      name, template: SCRIPT_TOOL_AGENT_TEMPLATE, description: String(description || "").trim() || existing.description,
+      inputSchema: input_schema || existing.params, userInputSchema: inputs || existing.inputs,
+      outputSchema: output_schema || existing.output_schema, env: variables,
+      invokeAgent: this.agentTools.pin(invoke_agent || existing.invoke_agent),
+    }) : existing.generate ? renderScriptTemplate({
       name, template: existing.generate.kind, description: String(description || "").trim() || existing.description,
       inputSchema: input_schema || existing.params,
       generate: { ...existing.generate, ...(changesProvider && !generate.model ? { model: "" } : {}), ...(generate || {}), kind: existing.generate.kind },
@@ -123,7 +135,7 @@ export class ScriptToolRegistry {
       params: [], inputSchema: input_schema, userInputSchema: inputs, outputSchema: output_schema, env: variables,
     });
     const manifest = normalizeScriptManifest({
-      ...rendered.manifest, name, ...(existing.generate ? {} : { entry: existing.entry, interpreter: existing.interpreter }),
+      ...rendered.manifest, name, ...(existing.generate || existing.invoke_agent ? {} : { entry: existing.entry, interpreter: existing.interpreter }),
       timeout_seconds: existing.timeout_seconds, max_output_bytes: existing.max_output_bytes,
     });
     const manifestPath = path.join(tool.dir, SCRIPT_TOOL_MANIFEST_FILE);
@@ -136,11 +148,13 @@ export class ScriptToolRegistry {
   }
   code(name) {
     const tool = this.load(name);
+    demand(!tool.manifest.invoke_agent, `${name} invokes an agent and has no script`, "script_invalid");
     demand(!tool.manifest.generate, `${name} is a media tool and has no script; change its provider, model or folder in its settings`, "script_invalid");
     return { name, code: new TextDecoder("utf-8", { fatal: true }).decode(readBounded(tool.entryPath, SCRIPT_TOOL_LIMITS.MAX_ENTRY_BYTES)), digest: tool.digest };
   }
   saveCode(name, code, expectedDigest) {
     const tool = this.load(name);
+    demand(!tool.manifest.invoke_agent, `${name} invokes an agent and has no script`, "script_invalid");
     demand(!tool.manifest.generate, `${name} is a media tool and has no script; change its provider, model or folder in its settings`, "script_invalid");
     demand(typeof expectedDigest === "string" && expectedDigest === tool.digest, "Tool changed since its code was opened; reload before saving", "script_changed");
     demand(typeof code === "string" && !code.includes("\0") && Buffer.byteLength(code) <= SCRIPT_TOOL_LIMITS.MAX_ENTRY_BYTES,
@@ -169,7 +183,7 @@ export class ScriptToolRegistry {
   }
   // The entry is callable only while the folder still holds the tested script.
   available(entry) {
-    try { return this.load(entry.script).digest === entry.digest; } catch { return false; }
+    try { const tool = this.load(entry.script); return tool.digest === entry.digest && (!tool.manifest.invoke_agent || this.agentTools?.available(tool.manifest.invoke_agent)); } catch { return false; }
   }
   // Runs the tool against operator input; a pass publishes this exact digest
   // as the tool's entry and revokes grants that pinned an older version.
@@ -177,7 +191,9 @@ export class ScriptToolRegistry {
     const tool = this.load(name);
     schemaCheck(tool.manifest.params, input);
     const selected = this.selectInputs(tool, privateInputs);
-    const result = tool.manifest.generate
+    const result = tool.manifest.invoke_agent
+      ? await this.agentTools.run(tool, input, { privateInputs: selected })
+      : tool.manifest.generate
       ? await runMediaTool(tool, input, { generators: this.mediaGenerators })
       : await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected });
     if (!result.ok) return { tool: name, digest: tool.digest, result, published: null, revoked_grants: [] };
@@ -194,7 +210,7 @@ export class ScriptToolRegistry {
   // re-test replaces the revoked grant instead of piling up new ones.
   grant(name, { repoPath = "", standalone = false, roles = ["dev"], unattended = false } = {}) {
     const tool = this.load(name), entry = this.store.get("entries", this.entryID(name));
-    demand(entry?.enabled && entry.digest === tool.digest, `${name} has no passing test for its current version; run \`posse tools test ${name}\` first`, "invalid_request");
+    demand(entry?.enabled && this.available(entry) && entry.digest === tool.digest, `${name} has no passing test for its current version; run \`posse tools test ${name}\` first`, "invalid_request");
     demand(standalone || (typeof repoPath === "string" && path.isAbsolute(repoPath)), "A repository grant needs an absolute repo path", "invalid_request");
     const roleList = [...new Set((Array.isArray(roles) ? roles : [roles]).map(role => String(role).trim()).filter(Boolean))].sort();
     demand(roleList.length > 0, "A grant needs at least one role", "invalid_request");
@@ -206,15 +222,17 @@ export class ScriptToolRegistry {
     });
   }
   // AutomationService execute() hook for kind "script".
-  async run(entry, input, { signal, privateInputs = {} } = {}) {
+  async run(entry, input, { signal, privateInputs = {}, invocation = null, check = undefined, usage = undefined } = {}) {
     const tool = this.load(entry.script);
     demand(tool.digest === entry.digest, `Script tool ${entry.script} changed since it was tested; run \`posse tools test ${entry.script}\``, "script_changed");
     schemaCheck(tool.manifest.params, input);
     const selected = this.selectInputs(tool, privateInputs);
-    const result = tool.manifest.generate
+    const result = tool.manifest.invoke_agent
+      ? await this.agentTools.run(tool, input, { signal, privateInputs: selected, invocation, check, usage })
+      : tool.manifest.generate
       ? await runMediaTool(tool, input, { signal, generators: this.mediaGenerators })
       : await runScriptTool(tool, { ...input, ...selected }, { secrets: this.secretValues(tool.manifest), privateInputs: selected, signal });
-    demand(!result.timed_out, `Script tool ${entry.script} timed out after ${tool.manifest.timeout_seconds}s`, "script_timeout");
+    demand(tool.manifest.invoke_agent || !result.timed_out, `Script tool ${entry.script} timed out after ${tool.manifest.timeout_seconds}s`, "script_timeout");
     this.validateOutput(tool, result);
     return result;
   }
