@@ -34,8 +34,9 @@ export async function runLocalCli(argv = process.argv.slice(3), io = {}) {
     }));
     if (args.json || args.format === "json") stdout.write(JSON.stringify({ modelRoot, models }) + "\n");
     else {
-      stdout.write("SLUG          TYPE   FILES                 PLATFORM\n");
-      for (const model of models) stdout.write(`${model.slug.padEnd(14)}${model.kind.padEnd(7)}${model.installationStatus.padEnd(22)}${model.platformSupported ? 'supported; runtime checks apply' : 'unsupported'}\n  ${model.modelId}\n`);
+      const slugWidth = Math.max(...models.map(model => model.slug.length), 4) + 2;
+      stdout.write(`${"SLUG".padEnd(slugWidth)}TYPE   FILES                 PLATFORM\n`);
+      for (const model of models) stdout.write(`${model.slug.padEnd(slugWidth)}${model.kind.padEnd(7)}${model.installationStatus.padEnd(22)}${model.platformSupported ? 'supported; runtime checks apply' : 'unsupported'}\n  ${model.modelId}\n`);
       stdout.write("\nPresent files are SHA-verified by the native runtime when used.\nInstall: posse local install <slug>\n");
     }
     return 0;
